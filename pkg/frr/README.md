@@ -2037,6 +2037,14 @@ step. Both are required — neither sees the other's case:
   shutdown) cancels in-flight process groups and reaps the retry
   goroutine; `DisableDegradedRetry()` is the one-shot (`xpfd cleanup`)
   configuration.
+- Guarded apply (#18561): `ApplyFullIfCurrent(fc, current)` is
+  `ApplyFull` for a config rendered before the caller released the lock
+  that orders renders (the daemon's HA reconcile renders under applySem and
+  reloads after releasing it). `current` is evaluated before the retry
+  pre-cancel and again under `reloadMu`, immediately before the
+  managed-section write; when it reports false nothing is written or
+  reloaded and `ErrFRRApplySuperseded` is returned (a superseded `Clear`
+  keeps the narrowing gauges).
 - Benign-reload re-check (#15203, A12-06): when the primary `--reload`
   fails (and frr-pythontools is present), `reloadLocked` re-checks with
   `frr-reload.py --test --stdout` before falling back. Removing IS-IS

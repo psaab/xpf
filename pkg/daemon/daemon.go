@@ -1816,6 +1816,12 @@ type Daemon struct {
 	localFailoverCommitDelay time.Duration
 	// frrHA coalesces RG-edge FRR reconciles (#18561); see daemon_frr_ha_coalesce.go.
 	frrHA frrHACoalescer
+	// frrApplySeq orders FRR managed-section writes (#18561). Every
+	// daemon-initiated FRR write bumps it before writing; the HA reconcile
+	// bumps it when it renders (under applySem) and applies, after
+	// releasing applySem, only while it is unchanged, so its render can
+	// never overwrite a newer one.
+	frrApplySeq atomic.Uint64
 	// failoverActuations owns the failover fence barriers (#16124): the
 	// wait map watchClusterEvents resolves once it has finished ACTUATING
 	// a demotion (VRRP resign to priority-0 / rg_active clear), the

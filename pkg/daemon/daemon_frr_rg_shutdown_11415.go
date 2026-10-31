@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/frr"
 )
 
 // frrHADemotionState is a render-time snapshot of which configured RETH RGs
@@ -855,22 +856,34 @@ func (d *Daemon) runFRRHAReconcile(reason string) {
 		return
 	}
 	ctx := d.applyCancelCtx()
-	func() {
+	// #18561: render under applySem, reload after releasing it. The render
+	// reads the active config and cluster ownership and must be ordered
+	// against config applies; frr-reload.py (300-600 ms) need not be. Holding
+	// applySem across it made a crash takeover's later RG activations wait:
+	// each runs republishConnectedRGSync under applySem before SetRGActive
+	// (#16270), and on loss the LAN RG went active 0.45 s after the WAN RG,
+	// right after the reload released the semaphore. frrApplySeq keeps the
+	// out-of-lock apply from overwriting a newer render.
+	fc, seq, ok := func() (*frr.FullConfig, uint64, bool) {
 		if err := d.applySem.Acquire(ctx, 1); err != nil {
-			return
+			return nil, 0, false
 		}
 		defer d.applySem.Release(1)
 		if d.isResetting() {
-			return
+			return nil, 0, false
 		}
 		cfg := d.store.ActiveConfig()
 		if cfg == nil {
-			return
+			return nil, 0, false
 		}
-		err := d.applyFRRConfig(d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg)))
-		if err != nil {
-			slog.Warn("HA routing reconcile did not fully converge; FRR retry remains armed",
-				"reason", reason, "err", err)
-		}
+		fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
+		return fc, d.frrApplySeq.Add(1), true
 	}()
+	if !ok {
+		return
+	}
+	if err := d.applyFRRConfigIfCurrent(fc, seq); err != nil {
+		slog.Warn("HA routing reconcile did not fully converge; FRR retry remains armed",
+			"reason", reason, "err", err)
+	}
 }

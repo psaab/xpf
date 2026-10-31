@@ -396,6 +396,8 @@ func (d *Daemon) applyFRRConfig(fc *frr.FullConfig) error {
 	if d.frr == nil {
 		return nil
 	}
+	// #18561: supersede any HA reconcile render still waiting to apply.
+	d.frrApplySeq.Add(1)
 	err := d.frr.ApplyFull(fc)
 	if err != nil {
 		if errors.Is(err, frr.ErrFRRReloadDegraded) {
@@ -411,6 +413,34 @@ func (d *Daemon) applyFRRConfig(fc *frr.FullConfig) error {
 	// reboot). Independent of the reload outcome (an idempotent procfs
 	// knob); attempted even on a degraded/hard-failed reload so it is
 	// not stranded.
+	d.reconcileFibMultipathHashPolicy(consistentHashConfigured(fc))
+	return err
+}
+
+// applyFRRConfigIfCurrent applies an HA reconcile render made under
+// applySem at sequence seq, after applySem was released (#18561). It writes
+// only while no other FRR write has started since the render and no factory
+// reset is in progress, judged inside the FRR manager's write+reload
+// critical section. A superseded render is dropped: the write that
+// superseded it rendered later, from the cluster state of its own time.
+func (d *Daemon) applyFRRConfigIfCurrent(fc *frr.FullConfig, seq uint64) error {
+	if d.frr == nil {
+		return nil
+	}
+	err := d.frr.ApplyFullIfCurrent(fc, func() bool {
+		return d.frrApplySeq.Load() == seq && !d.isResetting()
+	})
+	if errors.Is(err, frr.ErrFRRApplySuperseded) {
+		slog.Debug("HA routing reconcile render superseded by a newer FRR write; skipped")
+		return nil
+	}
+	if err != nil {
+		if errors.Is(err, frr.ErrFRRReloadDegraded) {
+			slog.Warn("FRR reload degraded: additive vtysh -f applied; stale-config removal deferred to the in-manager retry", "err", err)
+		} else {
+			slog.Warn("failed to apply FRR config", "err", err)
+		}
+	}
 	d.reconcileFibMultipathHashPolicy(consistentHashConfigured(fc))
 	return err
 }

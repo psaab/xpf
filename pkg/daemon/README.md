@@ -4668,3 +4668,18 @@ and each earlier edge's reload held it for 300-600 ms. On the loss cluster
 RG2 (LAN) became active 0.62 s after RG1. The helper FIB does not depend on
 FRR for transit forwarding, so the debounce only delays the kernel and
 routing-protocol view by 250 ms. Cells: `frr_ha_coalesce_18561_test.go`.
+
+Coalescing alone did not fix the crash case: the coalesced reload still
+held applySem for 300-600 ms, and on loss RG2 activated 0.45 s after RG1
+because its republish queued behind it. `runFRRHAReconcile` therefore
+renders under applySem (the render reads the active config and cluster
+ownership and stays ordered against config applies) and runs the reload
+AFTER releasing it. `frrApplySeq` keeps that out-of-lock apply from
+overwriting a newer config: every daemon-initiated FRR write bumps it before
+writing (`applyFRRConfig`, the bootstrap `Clear` calls), the HA render bumps
+it, and `applyFRRConfigIfCurrent` applies only while it is unchanged and no
+factory reset is in progress. The check runs inside the FRR manager's
+write+reload critical section (`frr.Manager.ApplyFullIfCurrent`, under
+`reloadMu`), so it is ordered against every other writer; a superseded
+render returns `frr.ErrFRRApplySuperseded` and writes nothing. FRR writes
+themselves stay serialized by `reloadMu`.

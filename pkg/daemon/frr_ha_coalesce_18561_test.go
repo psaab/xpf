@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -75,5 +76,96 @@ func TestScheduleFRRHAReconcileUsesCoalescer18561(t *testing.T) {
 	}
 	if len(timers.fire) != 1 {
 		t.Fatalf("three RG edges armed %d reconcile timers, want 1", len(timers.fire))
+	}
+}
+
+// blockingReload18561 holds frr-reload.py open until the cell releases it.
+type blockingReload18561 struct {
+	*frr.RecordingExecutor
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingReload18561) FrrReloadPy(ctx context.Context, conf string) error {
+	close(b.entered)
+	<-b.release
+	return b.RecordingExecutor.FrrReloadPy(ctx, conf)
+}
+
+func frrHADaemon18561(t *testing.T) *Daemon {
+	t.Helper()
+	return &Daemon{
+		applySem: semaphore.NewWeighted(1),
+		store:    fenceTestStore(t, fenceStartupClusterSet),
+		cluster:  cluster.NewManager(0, 1),
+	}
+}
+
+// #18561: the HA reconcile renders under applySem and runs frr-reload.py
+// after releasing it, so an RG activation's synchronous connected-route
+// republish (which takes applySem before SetRGActive, #16270) never waits
+// for the reload. RED on revert (applySem held across the reload).
+func TestFRRHAReconcileReleasesApplySemDuringReload18561(t *testing.T) {
+	blk := &blockingReload18561{
+		RecordingExecutor: &frr.RecordingExecutor{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	d := frrHADaemon18561(t)
+	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), blk)
+	done := make(chan struct{})
+	go func() {
+		d.runFRRHAReconcile("cluster-state")
+		close(done)
+	}()
+	select {
+	case <-blk.entered:
+	case <-time.After(5 * time.Second):
+		close(blk.release)
+		t.Fatal("premise: the reconcile never reached frr-reload.py")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err := d.applySem.Acquire(ctx, 1)
+	close(blk.release)
+	<-done
+	if err != nil {
+		t.Fatal("applySem is held across frr-reload.py: an RG activation would queue behind the reload")
+	}
+	d.applySem.Release(1)
+	if blk.ReloadCalls != 1 {
+		t.Fatalf("reload calls = %d, want 1", blk.ReloadCalls)
+	}
+}
+
+// An HA render that another FRR write overtook is dropped, so the older
+// render cannot overwrite the newer config; an un-overtaken render applies.
+// RED if the staleness predicate is dropped or applyFRRConfig stops
+// bumping the sequence.
+func TestFRRHARenderSupersededByLaterWrite18561(t *testing.T) {
+	rec := &frr.RecordingExecutor{}
+	d := frrHADaemon18561(t)
+	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), rec)
+	cfg := d.store.ActiveConfig()
+	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
+
+	seq := d.frrApplySeq.Add(1)                  // the HA render
+	if err := d.applyFRRConfig(fc); err != nil { // a later write (commit path)
+		t.Fatalf("premise: later write failed: %v", err)
+	}
+	before := rec.ReloadCalls
+	if err := d.applyFRRConfigIfCurrent(fc, seq); err != nil {
+		t.Fatalf("superseded apply returned %v, want nil", err)
+	}
+	if rec.ReloadCalls != before {
+		t.Fatal("a render overtaken by a later FRR write was applied after it")
+	}
+
+	seq = d.frrApplySeq.Add(1)
+	if err := d.applyFRRConfigIfCurrent(fc, seq); err != nil {
+		t.Fatalf("current apply: %v", err)
+	}
+	if rec.ReloadCalls != before+1 {
+		t.Fatalf("an un-overtaken render was not applied (reload calls %d -> %d)", before, rec.ReloadCalls)
 	}
 }
