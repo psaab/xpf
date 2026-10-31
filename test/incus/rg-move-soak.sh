@@ -61,5 +61,5 @@ python3 -u "${SCRIPT_DIR}/rg_move_soak.py" \
 	--target4 "$IPERF_TARGET4" --outdir "$OUT" 2>&1 | tee "$OUT/soak.log"
 rc=${PIPESTATUS[0]}
 set -e
-echo "rg-move-soak: exit $rc (0 PASS, 1 FAIL, 2 VOID); artefacts in $OUT"
+echo "rg-move-soak: exit $rc (exit codes: 0 = all PASS, 1 = a FAIL, 2 = VOID only); artefacts in $OUT"
 exit "$rc"

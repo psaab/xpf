@@ -300,3 +300,4 @@ operator's failure, are in `test/incus/rg_move_soak_test.py`
 |---|---|---|
 | 2026-10-31, loss, 0.0.26111+ge80f506bc2dc, fw1 72 s behind fw0, no NTP | 20 moves of RG2 from node0, 5 s | 10 FAIL (every move to node1: the fabric-auth clock error), 10 VOID (every move back: "already primary"). Traffic stayed on node0 throughout: 0–4 pings lost per window, longest gap 21–39 ms |
 | 2026-10-31, tcp, 0.0.26066+gb5290d13d20d, clocks within about 1 s (no NTP) | 30 moves of RG2 from node0, 5 s | 30 PASS. CLI 0.53–0.78 s, landed 0.80–1.13 s after issue, 2–8 pings lost per move, longest gap 23–46 ms, worst stream stall 0–400 ms |
+| 2026-10-31, udp, 0.0.26120+gcce3fb49443a, clocks within about 1 s (no NTP) | 40 moves of every RG (0, 1, 2; three commands per move) from node1, 2 s | 40 PASS. CLI 0.56–1.28 s per command, landed ≤ 1.72 s, 1–11 pings lost per move, longest gap 23–65 ms, worst stream stall 0–1.4 s |
