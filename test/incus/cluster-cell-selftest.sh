@@ -271,7 +271,7 @@ incus() {
 			printf 'From 10.0.0.1 icmp_seq=1 Time to live exceeded\n'
 		fi
 		;;
-	*"ping -6 -c 1 -W 2 -t 1 2607:f8b0:4005:814::200e"*)
+	*"ping -6 -c 1 -W 2 -t 1 2001:4860:4860::8888"*)
 		printf 'From 2001:db8::1 icmp_seq=1 Time exceeded: Hop limit\n'
 		;;
 	*"mtr 1.1.1.1 --report --report-cycles=1"*)
@@ -281,7 +281,7 @@ incus() {
 			printf ' 1.|-- 10.0.0.1 0.0%% 1 1.0 1.0 1.0 1.0 0.0\n 2.|-- 1.1.1.1 0.0%% 1 1.0 1.0 1.0 1.0 0.0\n'
 		fi
 		;;
-	*"mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1"*)
+	*"mtr -6 2001:4860:4860::8888 --report --report-cycles=1"*)
 		printf ' 1.|-- 2001:db8::1 0.0%% 1 1.0 1.0 1.0 1.0 0.0\n 2.|-- ??? 100.0%% 1 0.0 0.0 0.0 0.0 0.0\n'
 		;;
 	*"ip route get 172.16.80.211"*)

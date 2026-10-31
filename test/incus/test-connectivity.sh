@@ -272,14 +272,24 @@ service_check() {
 	fi
 }
 
-# check_mtr_linklocal4 <mtr-output> <target_ip>
-# Validate the IPv4 RETH path shape captured in #18168: the first
-# time-exceeded source is 169.254/16, not the routed LAN VIP. Require the
-# destination itself as the final 0%-loss row; a responding first hop with
-# an unresolved target must not pass.
-check_mtr_linklocal4() {
-	local output="$1" target="$2" line hop_field hop host loss first_hop=""
-	local last_hop=0 target_hop=0 target_loss=""
+# check_mtr_reth_vip <mtr-output> <target_ip> <reth_vip>
+# Validate a cluster MTR path through the RETH (#18174):
+#   1. hop 1 is the RETH's LAN VIP — the firewall's own TTL/hop-limit-expired
+#      error is sourced from the LAN address the host routes through. Before
+#      #18174 the IPv4 error left from the RETH's per-node 169.254.<rg>.<n>
+#      address (a shared-ifindex merge defect in the helper) and #18343/#18360
+#      bent this check to accept 169.254/16 and fe80::/10; it no longer does.
+#   2. when the target is more than one hop beyond the firewall, hop 2 — the
+#      first router past it — must be RESOLVED. Its Time Exceeded comes back
+#      addressed to the SNAT address quoting the translated probe; a `???`
+#      there means the firewall dropped the RELATED error instead of
+#      un-NATing it to the host (the #18174 blackhole, where every hop past
+#      the firewall read `???` while the target still answered).
+#   3. the destination itself is the final row, beyond hop 1, at 0% loss — a
+#      responding first hop with an unresolved target must not pass.
+check_mtr_reth_vip() {
+	local output="$1" target="$2" vip="$3" line hop_field hop host loss first_hop=""
+	local second_hop="" last_hop=0 target_hop=0 target_loss=""
 	while IFS= read -r line; do
 		[[ "$line" == *'|--'* ]] || continue
 		read -r hop_field host loss _ <<<"$line"
@@ -288,6 +298,8 @@ check_mtr_linklocal4() {
 		(( hop > last_hop )) && last_hop=$hop
 		if (( hop == 1 )); then
 			first_hop="$host"
+		elif (( hop == 2 )); then
+			second_hop="$host"
 		fi
 		if [[ "$host" == "$target" ]]; then
 			target_hop=$hop
@@ -295,8 +307,8 @@ check_mtr_linklocal4() {
 		fi
 	done <<<"$output"
 
-	if [[ ! "$first_hop" =~ ^169\.254\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$ ]]; then
-		echo "first hop '${first_hop:-<missing>}' is not an IPv4 link-local RETH address"
+	if [[ -z "$vip" || "$first_hop" != "$vip" ]]; then
+		echo "first hop '${first_hop:-<missing>}' is not the RETH VIP ${vip:-<unset>}"
 		return 1
 	fi
 	if (( target_hop == 0 || target_hop != last_hop || target_hop <= 1 )); then
@@ -307,73 +319,24 @@ check_mtr_linklocal4() {
 		echo "${target_loss:-unknown} loss at target ${target}"
 		return 1
 	fi
-	echo "via link-local ${first_hop}, destination ${target} 0.0% loss"
+	if (( target_hop > 2 )) && [[ -z "$second_hop" || "$second_hop" == '???' ]]; then
+		echo "hop 2 '${second_hop:-<missing>}' beyond the RETH is unresolved (Time Exceeded not returned through the firewall)"
+		return 1
+	fi
+	echo "via RETH VIP ${first_hop}, hop 2 ${second_hop:-<target>}, destination ${target} 0.0% loss"
 }
 
-# check_mtr_linklocal6 <mtr-output> <target_ip>
-# Validate the IPv6 RETH path shape captured in #18168/#18174 (diag
-# lan-mtr-internet6): the first hop-limit-expired source is the RETH's
-# fe80::/10 link-local address (fe80::bf:72ff:fe16:202), not the routed
-# LAN VIP 2001:559:8585:ef00::1. Require the destination itself as the
-# final 0%-loss row beyond hop 1, exactly as check_mtr_linklocal4 does
-# for IPv4: in the captured report the target row is ??? at 100% loss,
-# so this validator must reject it — a responding link-local first hop
-# proves RETH traversal but not target reachability (see #18212
-# comment 6464111623 on the intermediate-hop-as-target trap).
-check_mtr_linklocal6() {
-	local output="$1" target="$2" line hop_field hop host loss first_hop=""
-	local last_hop=0 target_hop=0 target_loss=""
-	while IFS= read -r line; do
-		[[ "$line" == *'|--'* ]] || continue
-		read -r hop_field host loss _ <<<"$line"
-		hop="${hop_field%%.*}"
-		[[ "$hop" =~ ^[0-9]+$ ]] || continue
-		(( hop > last_hop )) && last_hop=$hop
-		if (( hop == 1 )); then
-			first_hop="$host"
-		fi
-		if [[ "$host" == "$target" ]]; then
-			target_hop=$hop
-			target_loss=$loss
-		fi
-	done <<<"$output"
-
-	# fe80::/10: first hextet fe80-febf (link-local, RFC 4291).
-	if [[ ! "$first_hop" =~ ^[Ff][Ee][89AaBb][0-9A-Fa-f]: ]]; then
-		echo "first hop '${first_hop:-<missing>}' is not an IPv6 link-local (fe80::/10) RETH address"
-		return 1
-	fi
-	if (( target_hop == 0 || target_hop != last_hop || target_hop <= 1 )); then
-		echo "destination ${target} is not the final hop beyond the RETH (final hop ${last_hop})"
-		return 1
-	fi
-	if [[ "$target_loss" != "0.0%" ]]; then
-		echo "${target_loss:-unknown} loss at target ${target}"
-		return 1
-	fi
-	echo "via link-local ${first_hop}, destination ${target} 0.0% loss"
-}
-
-# mtr_test <instance> <target_ip> <expected_hop_ip|linklocal4|linklocal6> <description>
-# Runs mtr and validates 0% loss at the target. Cluster IPv4/IPv6 paths use
-# the RETH's link-local TTL/hop-limit-expired source (169.254/16, fe80::/10),
-# while the standalone path retains its literal firewall-hop check.
+# mtr_test <instance> <target_ip> <expected_hop_ip|reth:VIP> <description>
+# Runs mtr and validates 0% loss at the target. Cluster paths pass
+# `reth:<LAN VIP>` and are judged by check_mtr_reth_vip; the standalone path
+# retains its literal firewall-hop check.
 mtr_test() {
 	local inst="$1" target="$2" hop="$3" desc="$4"
 	local output last_loss verdict
 	output=$(incus exec "$inst" -- mtr --report --report-cycles 3 -n "$target" 2>&1) || true
 
-	if [[ "$hop" == "linklocal6" ]]; then
-		if verdict=$(check_mtr_linklocal6 "$output" "$target"); then
-			pass "$desc (${verdict})"
-		else
-			fail "$desc (${verdict})"
-		fi
-		return
-	fi
-
-	if [[ "$hop" == "linklocal4" ]]; then
-		if verdict=$(check_mtr_linklocal4 "$output" "$target"); then
+	if [[ "$hop" == reth:* ]]; then
+		if verdict=$(check_mtr_reth_vip "$output" "$target" "${hop#reth:}"); then
 			pass "$desc (${verdict})"
 		else
 			fail "$desc (${verdict})"
@@ -450,6 +413,14 @@ test_standalone() {
 
 test_cluster() {
 	info "Cluster HA (${FW0} + ${FW1})"
+	# #18174: the public IPv6 destination for the cluster internet cells. The
+	# previous targets, 2607:f8b0:4005:80e::200e (ping6 cell) and
+	# 2607:f8b0:4005:814::200e (Group10 TTL=1, Group11 MTR), no longer answer
+	# echo at all: measured 0/3 from both the loss and the tcp LAN host on
+	# 2026-10-30 while 2001:4860:4860::8888 answered 3/3. A dead destination made
+	# the ping6 cell red on every smoke-watch line and could never be the final
+	# row of an MTR. Google Public DNS is anycast and stable.
+	local internet_target6="2001:4860:4860::8888"
 
 	if ! instance_running "$FW0" || ! instance_running "$FW1"; then
 		skip "${FW0} or ${FW1} not running — skipping cluster tests"
@@ -517,8 +488,8 @@ test_cluster() {
 		internet_test "$CLUSTER_LAN_HOST" "cluster: LAN host → internet (1.1.1.1)"
 
 		# Internet IPv6: LAN host → Google DNS IPv6 (proves IPv6 routing through fw)
-		ping6_test "$CLUSTER_LAN_HOST" "2607:f8b0:4005:80e::200e" \
-			"cluster: LAN host → internet IPv6 (2607:f8b0:4005:80e::200e)"
+		ping6_test "$CLUSTER_LAN_HOST" "$internet_target6" \
+			"cluster: LAN host → internet IPv6 (${internet_target6})"
 
 		# IPv6 TCP: iperf3 from LAN host to WAN (proves SNAT v6 + return path)
 		if incus exec "$CLUSTER_LAN_HOST" -- which iperf3 &>/dev/null 2>&1; then
@@ -542,19 +513,19 @@ test_cluster() {
 			skip "cluster: IPv4 TCP test (iperf3 not installed on ${CLUSTER_LAN_HOST})"
 		fi
 
-		# IPv4 MTR path validation: RETH's TTL-expired link-local source
-		# The RETH gateway routes the LAN host, but MTR reports its
-		# link-local TTL-expired source (169.254/16), not the LAN VIP.
-		# Require that first hop plus the actual target as the final 0%-loss hop.
-		mtr_test "$CLUSTER_LAN_HOST" "$WAN_GW4" "linklocal4" \
-			"cluster: mtr LAN→WAN gateway (via RETH link-local)"
+		# MTR path validation (#18174): hop 1 is the RETH LAN VIP, the first
+		# router beyond the firewall answers (its Time Exceeded is un-NATed
+		# back to the host), and the target is the final 0%-loss hop.
+		mtr_test "$CLUSTER_LAN_HOST" "$WAN_GW4" "reth:${LAN_VIP4}" \
+			"cluster: mtr LAN→WAN gateway (via RETH VIP ${LAN_VIP4})"
 
-		mtr_test "$CLUSTER_LAN_HOST" "1.1.1.1" "linklocal4" \
-			"cluster: mtr LAN→internet IPv4 (via RETH link-local)"
+		mtr_test "$CLUSTER_LAN_HOST" "1.1.1.1" "reth:${LAN_VIP4}" \
+			"cluster: mtr LAN→internet IPv4 (via RETH VIP ${LAN_VIP4})"
 
-		# mtr to internet IPv6: verify RETH link-local and target path
-		mtr_test "$CLUSTER_LAN_HOST" "2607:f8b0:4005:80e::200e" "linklocal6" \
-			"cluster: mtr LAN→internet IPv6 (via RETH link-local)"
+		# #18174: a live destination (internet_target6, at the top of
+		# test_cluster) so the destination can be the MTR's final row.
+		mtr_test "$CLUSTER_LAN_HOST" "$internet_target6" "reth:${LAN_VIP6}" \
+			"cluster: mtr LAN→internet IPv6 (via RETH VIP ${LAN_VIP6})"
 
 		# #11581 Group 10: legacy TTL=1 probes require router-generated
 		# time-exceeded evidence, not merely a successful ping exit status.
@@ -576,7 +547,7 @@ test_cluster() {
 
 		local ttl6_output ttl6_rc ttl6_status ttl6_evidence
 		if ttl6_output=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
-			'LC_ALL=C ping -6 -c 1 -W 2 -t 1 2607:f8b0:4005:814::200e' 2>&1); then
+			"LC_ALL=C ping -6 -c 1 -W 2 -t 1 ${internet_target6}" 2>&1); then
 			ttl6_rc=0
 		else
 			ttl6_rc=$?
@@ -588,7 +559,7 @@ test_cluster() {
 			ttl6_status=$?
 		fi
 		assurance_verdict "$ttl6_status" \
-			"cluster: Group10 IPv6 TTL=1 (LC_ALL=C ping -6 -c 1 -W 2 -t 1 2607:f8b0:4005:814::200e; rc=${ttl6_rc}; output=${ttl6_evidence:-<empty>})"
+			"cluster: Group10 IPv6 TTL=1 (LC_ALL=C ping -6 -c 1 -W 2 -t 1 ${internet_target6}; rc=${ttl6_rc}; output=${ttl6_evidence:-<empty>})"
 
 		# #11581 Group 11: reuse the shared MTR classifier. IPv6 unresolved
 		# destination/no-hop results are warnings, not reachability proof.
@@ -609,14 +580,14 @@ test_cluster() {
 
 		local mtr6_report mtr6_result mtr6_rc
 		mtr6_report=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
-			'LC_ALL=C mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1' 2>&1) || true
+			"LC_ALL=C mtr -6 ${internet_target6} --report --report-cycles=1" 2>&1) || true
 		if mtr6_result=$(python3 "${SCRIPT_DIR}/../../scripts/mtr_report_check.py" \
 			"cluster IPv6 public path" "$mtr6_report" 1 2>&1); then
-			pass "cluster: Group11 IPv6 MTR (LC_ALL=C mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1): ${mtr6_result}"
+			pass "cluster: Group11 IPv6 MTR (LC_ALL=C mtr -6 ${internet_target6} --report --report-cycles=1): ${mtr6_result}"
 		else
 			mtr6_rc=$?
 			if (( mtr6_rc == 1 )); then
-				fail "cluster: Group11 IPv6 MTR (LC_ALL=C mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1): ${mtr6_result}"
+				fail "cluster: Group11 IPv6 MTR (LC_ALL=C mtr -6 ${internet_target6} --report --report-cycles=1): ${mtr6_result}"
 			else
 				void "cluster: Group11 IPv6 MTR classifier unavailable (status=${mtr6_rc}): ${mtr6_result}"
 			fi

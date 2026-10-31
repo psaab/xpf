@@ -8355,11 +8355,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // else-if chain would skip after conversion).
                             // Install the punt seed judged on the
                             // pre-redirect disposition.
+                            // #18174: never for a packet whose TTL / hop limit
+                            // expires here — the poll tail answers it with a
+                            // local Time Exceeded instead of redirecting it, so
+                            // a seed would only leave a session row (a punt seed
+                            // emits no HA delta) for a flow that never left this
+                            // node, the
+                            // FabricRedirect twin of the #14643 rollback the
+                            // ForwardCandidate miss path performs.
                             if should_seed_fabric_punt(
                                 seed_pre_disposition,
                                 packet_fabric_ingress,
                                 decision.nat,
-                            ) {
+                            ) && !matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                            {
                                 let seed_owner_rg = owner_rg_id;
                                 if let Some(seed_metadata) = fabric_punt_seed_metadata(
                                     worker_ctx.forwarding,
@@ -8503,7 +8512,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             decision.resolution.disposition,
                             packet_fabric_ingress,
                             decision.nat,
-                        ) {
+                        ) && !matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                        {
                             // #7770: PUNT SEED. This flow is about to cross the
                             // fabric because the peer owns its egress RG, and it
                             // is leaving here UNADJUDICATED — the session-miss
@@ -10390,6 +10400,47 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 if bindless_selector_match {
                     telemetry.dbg.policy_deny += 1;
                     telemetry.counters.record_transit_ipsec_fence_drop();
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
+                // #18174: a transit packet this node hands to the fabric peer
+                // (split RGs: the egress RG is peer-owned) is still routed by
+                // THIS node — the redirecting node is the hop. The fabric
+                // build decrements TTL / hop limit and refuses a packet that
+                // would expire (`fabric_redirect_build_failed`), and the peer
+                // skips the decrement on fabric ingress, so before this check
+                // nobody answered an expiring probe: traceroute/mtr hop 1 read
+                // `???` whenever the LAN RG and the WAN RG sat on different
+                // nodes (live on tcp, fw1 `fabric_redirect_unsendable_drops`
+                // = every TTL-1 probe). The session-hit and session-miss TE
+                // sites above only cover `ForwardCandidate`; the flow-cache
+                // hit path already covers `FabricRedirect` (#3779). Answer
+                // here, from the ingress unit this node owns, exactly as a
+                // local forward would; a suppressed reply drops the packet.
+                // A fabric arrival is never re-redirected and never decrements
+                // here, and an injected record keeps its TX-pool ownership.
+                if decision.resolution.disposition == ForwardingDisposition::FabricRedirect
+                    && !is_injected
+                    && (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0
+                    && let Some(flow) = flow.as_ref()
+                    && matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                {
+                    if let Some(request) = build_local_time_exceeded_request(
+                        packet_frame,
+                        desc,
+                        meta,
+                        &worker_ctx.ident,
+                        flow,
+                        worker_ctx.forwarding,
+                        worker_ctx.event_stream,
+                        worker_ctx.dynamic_neighbors,
+                        worker_ctx.ha_state,
+                        now_secs,
+                        telemetry.counters,
+                    ) {
+                        binding.scratch.scratch_forwards.push(request);
+                        continue;
+                    }
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
