@@ -110,7 +110,12 @@ TRANSITION_PATH_TRIGGER_PKTS="${TRANSITION_PATH_TRIGGER_PKTS:-1000}"
 MIN_TRANSITION_FABRIC_RX_DELTA="${MIN_TRANSITION_FABRIC_RX_DELTA:-32}"
 MIN_TRANSITION_WAN_TX_DELTA="${MIN_TRANSITION_WAN_TX_DELTA:-32}"
 MIN_THROUGHPUT=1.0      # Gbps — iperf3 must report at least this
-IPERF_DURATION_MIN=$(( 8 + SYNC_WAIT + SESSION_SYNC_IDLE_TIMEOUT + PRE_FAILOVER_OBSERVE + 3 + REBOOT_WAIT + 20 + SESSION_SYNC_IDLE_TIMEOUT + 3 * MANUAL_FAILOVER_DEADLINE + 10 + V6_RECHECK_DELAY + 2 * V6_PROBE_COUNT + 5 * 2 * EXTERNAL_PING_COUNT + 4 * (3 * 1 + 3) + 15 ))
+# #18614: CLOCK_FLOOR_OVERSHOOT is the most the clock precondition's 40 s
+# floor can run past the REBOOT_WAIT + 20 s settle it otherwise shares (after
+# a comeback slower than 40 s; measured 19-22 s), so the stream still outlives
+# every bounded window.
+CLOCK_FLOOR_OVERSHOOT=20
+IPERF_DURATION_MIN=$(( 8 + SYNC_WAIT + SESSION_SYNC_IDLE_TIMEOUT + PRE_FAILOVER_OBSERVE + 3 + REBOOT_WAIT + 20 + CLOCK_FLOOR_OVERSHOOT + SESSION_SYNC_IDLE_TIMEOUT + 3 * MANUAL_FAILOVER_DEADLINE + 10 + V6_RECHECK_DELAY + 2 * V6_PROBE_COUNT + 5 * 2 * EXTERNAL_PING_COUNT + 4 * (3 * 1 + 3) + 15 ))
 # #7673: the CoS output filter classifies by DESTINATION PORT, and iperf3
 # defaults to 5201 -- which cos-iperf-config.set maps to `iperf-100m`, a
 # `transmit-rate 100m exact` class. Measuring a deliberately-100Mbit-shaped
@@ -1689,8 +1694,9 @@ fi
 # still outlives every bounded window: the REBOOT_WAIT the comeback left unused
 # plus the 20 s settle below. That is about 58 s after a measured 22 s
 # comeback. The floor is 40 s, over 2x the measured 17-18 s convergence; it
-# only binds after a comeback slower than 40 s (measured 19-22 s), and then
-# overshoots the paid window by at most 20 s. An explicit
+# only binds after a comeback slower than 40 s (measured 19-22 s), and its at
+# most 20 s overshoot is paid for by CLOCK_FLOOR_OVERSHOOT in
+# IPERF_DURATION_MIN. An explicit
 # XPF_FAILOVER_CLOCK_BUDGET_S wins. A VOID (no time source, no measurement)
 # goes through void(), so the run exits 77 and the row is VOID, not FAIL.
 fw0_active_at="${fw0_active_at:-$SECONDS}"

@@ -99,7 +99,19 @@ fc_reset() {
 	FC_SET_FAIL_NODE=""
 	FC_LAT_fw0="0.60:0.02 0.25:0.25 0.02:0.65"
 	FC_LAT_fw1="0.01:0.30 0.03:0.03 0.38:0.02"
-	_FC_BASE_SYNCED="" _FC_BASE_TEXT=""
+	_FC_BASE_TEXT=""
+	FC_NTP_STANZA=present         # present | absent | error (`show configuration system ntp`)
+	FC_PROBE_ANSWER=162.159.200.1 # servers answering the host's SNTP probe; FAIL = no python3
+}
+FC_NTP_STANZA=present
+FC_PROBE_ANSWER=162.159.200.1
+# The off-path probe: python3 on the HOST. A function shadows the binary, and
+# answers as the scenario says.
+python3() {
+	[[ "${FC_UNDER_TIMEOUT:-0}" == 1 ]] || printf 'host python3\n' >>"$FC_UNTIMED"
+	echo probe >>"$TMP_DIR/probes"
+	[[ "$FC_PROBE_ANSWER" == FAIL ]] && return 127
+	printf '%s\n' "$FC_PROBE_ANSWER"
 }
 
 # Host clock. `+%s.%N` is the precondition's reading; the formatted UTC string
@@ -149,7 +161,7 @@ incus() {
 	local cmd="$*" elapsed off leap pre=0.05 post=0.05
 	printf '%s %s\n' "$node" "$cmd" >>"$FC_CALLS"
 	case "$cmd" in
-	"date +%s.%N" | "timeout 10 chronyc -n tracking" | "cat /proc/uptime")
+	"date +%s.%N" | "timeout 10 chronyc -n tracking" | "cat /proc/uptime" | "cli -c show configuration system ntp")
 		[[ "${FC_UNDER_TIMEOUT:-0}" == 1 ]] || printf '%s %s\n' "$node" "$cmd" >>"$FC_UNTIMED"
 		;;
 	esac
@@ -165,6 +177,14 @@ incus() {
 	"cat /proc/uptime")
 		[[ "$off" == down ]] && return 1
 		awk -v e="$elapsed" 'BEGIN { printf "%.2f 0.00\n", e + 40 }'
+		;;
+	"cli -c show configuration system ntp")
+		[[ "$off" == down ]] && return 1
+		case "$FC_NTP_STANZA" in
+		present) printf 'ntp {\n    server 162.159.200.1 {\n        routing-instance mgmt;\n    }\n    server 91.189.91.112 {\n        routing-instance mgmt;\n    }\n}\n' ;;
+		absent) printf 'configuration path not found: system ntp\n' ;;
+		*) printf 'error: rpc error: code = Unavailable\n' ;;
+		esac
 		;;
 	"timeout 10 chronyc -n tracking")
 		[[ "$off" == down || "$leap" == CHRONY_DOWN ]] && return 1
@@ -209,10 +229,22 @@ fc_marker_field() {
 	grep -E '^CLOCK_PRECONDITION: ' "$1" | tail -1 | tr ' ' '\n' | sed -n "s/^$2=//p"
 }
 fc_elapsed() { awk -v t="$(fc_vt)" -v b="$FC_BASE" 'BEGIN { printf "%.1f", t - b }'; }
-# fc_baseline_synced -- record a synchronised pre-crash baseline.
+# fc_baseline_synced -- record a synchronised pre-crash baseline (context).
 fc_baseline_synced() {
 	fc_node_state() { echo "0.000 Normal"; }
 	failover_clock_baseline fw0 fw1 >/dev/null
+	echo "${FC_BASE}.000000" >"$FC_VT"
+}
+# fc_baseline_one_unsynced -- the #18584 state before the crash: fw0 drifting
+# unsynchronised, fw1 (the RG owner) synchronised.
+fc_baseline_one_unsynced() {
+	fc_node_state() {
+		case "$1" in
+		fw0) echo "-0.400 Not synchronised" ;;
+		*) echo "0.000 Normal" ;;
+		esac
+	}
+	failover_clock_baseline fw0 fw1 >"$TMP_DIR/base.out"
 	echo "${FC_BASE}.000000" >"$FC_VT"
 }
 
@@ -246,8 +278,8 @@ if [[ "$(fc_marker_field "$TMP_DIR/c1.out" skew_s)" == "+0.150" ]] &&
 else
 	bad "method: skew_s=$(fc_marker_field "$TMP_DIR/c1.out" skew_s) date-calls=$(grep -c ' date +%s.%N$' "$FC_CALLS") out=$(cat "$TMP_DIR/c1.out")"
 fi
-if [[ ! -s "$FC_UNTIMED" ]]; then
-	ok "every node read (date, chronyc, uptime) runs under a host-side timeout"
+if [[ ! -s "$FC_UNTIMED" ]] && grep -q 'cli -c show configuration system ntp' "$FC_CALLS"; then
+	ok "every node read (date, chronyc, uptime, the ntp config) runs under a host-side timeout"
 else
 	bad "node reads without a host-side timeout: $(cat "$FC_UNTIMED")"
 fi
@@ -306,7 +338,7 @@ if ((rc == 1)) &&
 	awk -v e="$end" 'BEGIN { exit !(e >= 17.5 && e < 21) }' &&
 	[[ "$(fc_marker_field "$TMP_DIR/c3.out" verdict)" == FAIL &&
 		"$(fc_marker_field "$TMP_DIR/c3.out" converged)" == 0 &&
-		"$FAILOVER_CLOCK_DETAIL" == "phase3-cycle2: clock precondition: NTP did not converge after a crash reboot within 17.5 s: the peer fw1 is synchronised but the rebooted fw0 (Not synchronised) did not converge to it (lab, NTP or product"* &&
+		"$FAILOVER_CLOCK_DETAIL" == "phase3-cycle2: clock precondition: NTP did not converge after a crash reboot within 17.5 s: #18584 class: the rebooted fw0 is not synchronised (Not synchronised) while the peer fw1 is"*"(lab, NTP or product"* &&
 		"$FAILOVER_CLOCK_DETAIL" == *"node1-node0 skew +72.000 s"* &&
 		"$FAILOVER_CLOCK_DETAIL" == *"chrony fw0: Not synchronised [00000000 ()], fw1: Normal [A29FC801 (162.159.200.1)]"* &&
 		-z "$(fc_clock_writes)" ]] && ! grep -q '^CLOCK_VOID: ' "$TMP_DIR/c3.out"; then
@@ -315,64 +347,190 @@ else
 	bad "FAIL-rebooted-only: rc=$rc end=$end detail='$FAILOVER_CLOCK_DETAIL' out=$(cat "$TMP_DIR/c3.out")"
 fi
 
-# ── 4. VOID-pre: no time source before the first crash ──────────────────
-# The baseline sees chrony unsynchronised on both nodes (the tcp lab today):
-# a non-converged first reading is VOID at once, no budget spent.
+# ── 4. neither node synchronised: VOID only where the build is not in the path
+# C: no `system ntp` configured (the tcp lab today) -> VOID after one reading,
+# no budget spent. With it configured, the same state is judged against the
+# off-path probe: servers answering this host -> FAIL; none answering -> VOID
+# (a lab NTP outage); probe unavailable -> FAIL; config unreadable -> VOID.
+both_unsync() { echo "0.000 Not synchronised"; }
 fc_reset
-fc_node_state() { echo "0.000 Not synchronised"; }
+fc_node_state() { both_unsync; }
+FC_NTP_STANZA=absent
 failover_clock_baseline fw0 fw1 >"$TMP_DIR/c4-base.out"
 echo "${FC_BASE}.000000" >"$FC_VT"
-fc_node_state() {
-	case "$1" in
-	fw0) echo "-3.000 Not synchronised" ;;
-	*) echo "0.000 Not synchronised" ;;
-	esac
-}
 fc_run "$TMP_DIR/c4.out" "phase1" fw0 fw1 fw0
 rc=$?
 end=$(fc_elapsed)
 if ((rc == 2)) && awk -v e="$end" 'BEGIN { exit !(e < 5) }' &&
 	[[ "$(fc_marker_field "$TMP_DIR/c4.out" verdict)" == VOID &&
-		"$FAILOVER_CLOCK_DETAIL" == "phase1: clock precondition VOID: no time source (lab/NTP): chrony was not synchronised before the first crash"* ]] &&
+		"$FAILOVER_CLOCK_DETAIL" == "phase1: clock precondition VOID: no time source (lab): no \`system ntp\` is configured and neither node is synchronised"* &&
+		"$FAILOVER_CLOCK_DETAIL" == *"before the first crash: node1-node0 skew"* ]] &&
 	grep -q '^CLOCK_VOID: phase1: clock precondition VOID: no time source' "$TMP_DIR/c4.out" &&
-	grep -q '^clock baseline (before the first crash; up fw0 [0-9]* s, fw1 [0-9]* s): node1-node0 skew' "$TMP_DIR/c4-base.out"; then
-	ok "VOID-pre: unsynchronised before the first crash -> VOID after one reading (${end} s), CLOCK_VOID line"
+	grep -q '^clock baseline (before the first crash; up fw0 [0-9]* s, fw1 [0-9]* s): node1-node0 skew.*; system ntp: not configured$' "$TMP_DIR/c4-base.out"; then
+	ok "C (no stanza): neither node synchronised and no \`system ntp\` configured -> VOID after one reading (${end} s), baseline as context"
 else
-	bad "VOID-pre: rc=$rc end=$end detail='$FAILOVER_CLOCK_DETAIL' out=$(cat "$TMP_DIR/c4.out")"
+	bad "C (no stanza): rc=$rc end=$end detail='$FAILOVER_CLOCK_DETAIL' out=$(cat "$TMP_DIR/c4.out")"
+fi
+c4_case() { # <stanza> <probe answer> -> sets rc4 and d4
+	fc_reset
+	export XPF_FAILOVER_CLOCK_BUDGET_S=6
+	fc_node_state() { both_unsync; }
+	FC_NTP_STANZA="$1"
+	FC_PROBE_ANSWER="$2"
+	: >"$TMP_DIR/probes"
+	fc_run "$TMP_DIR/c4x.out" "phase1" fw0 fw1 fw0
+	rc4=$?
+	d4="$FAILOVER_CLOCK_DETAIL"
+	p4=$(wc -l <"$TMP_DIR/probes")
+}
+c4_ok=1
+c4_case present 162.159.200.1
+[[ $rc4 == 1 && "$d4" == *"neither node is synchronised although \`system ntp\` is configured (162.159.200.1 91.189.91.112) and its servers answer this host (162.159.200.1)"* && $p4 == 1 && ! -s "$FC_UNTIMED" ]] ||
+	{ c4_ok=0; echo "  stanza+probe answers: rc=$rc4 probes=$p4 untimed='$(cat "$FC_UNTIMED")' '$d4'" >&2; }
+c4_case present ""
+[[ $rc4 == 2 && "$d4" == *"VOID: lab NTP outage: neither node is synchronised and no configured server (162.159.200.1 91.189.91.112) answers this host either"* ]] ||
+	{ c4_ok=0; echo "  stanza+probe silent: rc=$rc4 '$d4'" >&2; }
+c4_case present FAIL
+[[ $rc4 == 1 && "$d4" == *"the off-path SNTP probe from this host was unavailable"* ]] ||
+	{ c4_ok=0; echo "  stanza+no probe: rc=$rc4 '$d4'" >&2; }
+c4_case error 162.159.200.1
+[[ $rc4 == 2 && "$d4" == *"VOID: no measurement (harness): \`show configuration system ntp\` could not be read"* ]] ||
+	{ c4_ok=0; echo "  stanza unreadable: rc=$rc4 '$d4'" >&2; }
+if ((c4_ok)); then
+	ok "C (stanza): neither synchronised with \`system ntp\` configured -> FAIL when its servers answer the host or the probe is unavailable, VOID (lab NTP outage) when none answers; an unreadable config is VOID"
+else
+	bad "C (stanza): neither-synchronised scoring is wrong"
 fi
 
-# ── 5. VOID-peer: the un-rebooted peer has no time source ───────────────
+# ── 5. one node synchronised, the other not: the #18584 class, FAIL ───────
+# A: the pre-crash baseline already had fw0 unsynchronised (the #18584 state:
+# only the RG owner reaches NTP). B: its twin with a synchronised baseline.
+# Both FAIL alike -- the baseline is context, never a VOID.
+ab_after() {
+	fc_node_state() {
+		case "$1" in
+		fw0) echo "-9.000 Not synchronised" ;;
+		*) echo "0.000 Normal" ;;
+		esac
+	}
+	export XPF_FAILOVER_CLOCK_BUDGET_S=6
+}
+fc_reset
+fc_baseline_one_unsynced
+ab_after
+fc_run "$TMP_DIR/c5a.out" "phase1" fw0 fw1 fw0
+rc_a=$?
+d_a="$FAILOVER_CLOCK_DETAIL"
 fc_reset
 fc_baseline_synced
-export XPF_FAILOVER_CLOCK_BUDGET_S=10
+ab_after
+fc_run "$TMP_DIR/c5b.out" "phase1" fw0 fw1 fw0
+rc_b=$?
+d_b="$FAILOVER_CLOCK_DETAIL"
+if ((rc_a == 1 && rc_b == 1)) &&
+	[[ "$d_a" == *"#18584 class: the rebooted fw0 is not synchronised (Not synchronised) while the peer fw1 is"* &&
+		"$d_a" == *"before the first crash: node1-node0 skew +0.400 s"*"fw0: Not synchronised"* &&
+		"$d_b" == *"#18584 class: the rebooted fw0 is not synchronised"* ]]; then
+	ok "A/B: one node synchronised is FAIL (#18584 class) whether or not the baseline already showed it; the baseline rides as context"
+else
+	bad "A/B: rc=$rc_a/$rc_b A='$d_a' B='$d_b'"
+fi
+# The un-rebooted peer unsynchronised (or its chronyc silent) is the same class,
+# and so is a one-node state with no stanza at all.
+peer_ok=1
+for case_ in "Not synchronised present" "CHRONY_DOWN present" "Not synchronised absent"; do
+	read -r pl1 pl2 st <<<"$case_"
+	[[ "$pl1" == Not ]] && pleap="Not synchronised" || pleap="$pl1"
+	[[ "$pl1" == Not ]] || st="$pl2"
+	fc_reset
+	fc_baseline_synced
+	export XPF_FAILOVER_CLOCK_BUDGET_S=6
+	FC_NTP_STANZA="$st"
+	FC_PEER_LEAP="$pleap"
+	fc_node_state() {
+		case "$1" in
+		fw1) echo "0.000 ${FC_PEER_LEAP}" ;;
+		*) echo "0.000 Normal" ;;
+		esac
+	}
+	fc_run "$TMP_DIR/c5c.out" "phase1" fw0 fw1 fw0
+	got=$?
+	want_leap="$pleap"
+	[[ "$pleap" == CHRONY_DOWN ]] && want_leap=unreadable
+	if ((got != 1)) || [[ "$FAILOVER_CLOCK_DETAIL" != *"#18584 class: the un-rebooted peer fw1 is not synchronised (${want_leap}) while the rebooted fw0 is"* ]]; then
+		peer_ok=0
+		echo "  peer ${pleap}, stanza ${st}: rc=$got '$FAILOVER_CLOCK_DETAIL'" >&2
+	fi
+done
+if ((peer_ok)); then
+	ok "peer unsynchronised or its chronyc silent, with or without a stanza: FAIL (#18584 class), never a lab VOID"
+else
+	bad "peer-unsynchronised scoring is wrong"
+fi
+
+# ── 5b. AC's probe: a blip at the baseline instant must not decide anything ─
+# fw1 was unsynchronised only at the baseline; at the check it is synchronised
+# and fw0 converges 8 s in. The CURRENT reading drives the verdict: PASS.
+fc_reset
 fc_node_state() {
 	case "$1" in
 	fw1) echo "0.000 Not synchronised" ;;
 	*) echo "0.000 Normal" ;;
 	esac
 }
-fc_run "$TMP_DIR/c5.out" "phase1" fw0 fw1 fw0
-rc5=$?
-detail5="$FAILOVER_CLOCK_DETAIL"
-# And a peer whose chronyc does not answer is not a synchronised peer either.
+failover_clock_baseline fw0 fw1 >/dev/null
+echo "${FC_BASE}.000000" >"$FC_VT"
+fc_node_state() {
+	if [[ "$1" == fw0 ]] && awk -v e="$2" 'BEGIN { exit !(e < 8) }'; then
+		echo "-3.000 Not synchronised"
+	else
+		echo "0.000 Normal"
+	fi
+}
+fc_run "$TMP_DIR/c5d.out" "phase1" fw0 fw1 fw0
+rc=$?
+conv=$(fc_marker_field "$TMP_DIR/c5d.out" converge_s)
+if ((rc == 0)) && awk -v c="$conv" 'BEGIN { exit !(c >= 8 && c < 16) }'; then
+	ok "baseline blip: unsynchronised at the baseline only, converging 8 s in -> PASS after ${conv} s (no early VOID)"
+else
+	bad "baseline blip: rc=$rc conv='$conv' detail='$FAILOVER_CLOCK_DETAIL'"
+fi
+
+# ── 5c. D: chrony lost on both nodes mid-run, stanza configured ──────────
 fc_reset
 fc_baseline_synced
-export XPF_FAILOVER_CLOCK_BUDGET_S=10
+export XPF_FAILOVER_CLOCK_BUDGET_S=6
+fc_node_state() { both_unsync; }
+fc_run "$TMP_DIR/c5e.out" "phase3-cycle1" fw0 fw1 fw0
+rc_d1=$?
+d_d1="$FAILOVER_CLOCK_DETAIL"
+fc_reset
+fc_baseline_synced
+export XPF_FAILOVER_CLOCK_BUDGET_S=6
+FC_PROBE_ANSWER=""
+fc_node_state() { both_unsync; }
+fc_run "$TMP_DIR/c5f.out" "phase3-cycle1" fw0 fw1 fw0
+rc_d2=$?
+d_d2="$FAILOVER_CLOCK_DETAIL"
+# And with the stanza configured, both nodes unsynchronised is WAITED out, not
+# decided at the first reading: chrony back on both 8 s in -> PASS.
+fc_reset
+fc_baseline_synced
 fc_node_state() {
-	case "$1" in
-	fw1) echo "0.000 CHRONY_DOWN" ;;
-	*) echo "0.000 Normal" ;;
-	esac
+	if awk -v e="$2" 'BEGIN { exit !(e < 8) }'; then
+		echo "0.000 Not synchronised"
+	else
+		echo "0.000 Normal"
+	fi
 }
-fc_run "$TMP_DIR/c5b.out" "phase1" fw0 fw1 fw0
-rc5b=$?
-if ((rc5 == 2 && rc5b == 2)) &&
-	[[ "$detail5" == *"no time source (lab/NTP): the un-rebooted peer fw1 is not synchronised (Not synchronised)"* &&
-		"$FAILOVER_CLOCK_DETAIL" == *"the un-rebooted peer fw1 is not synchronised (unreadable)"* &&
-		"$(fc_marker_field "$TMP_DIR/c5.out" verdict)" == VOID ]]; then
-	ok "VOID-peer: an unsynchronised or unreadable un-rebooted peer is VOID (lab/NTP), not FAIL"
+fc_run "$TMP_DIR/c5g.out" "phase3-cycle1" fw0 fw1 fw0
+rc_d3=$?
+if ((rc_d1 == 1 && rc_d2 == 2 && rc_d3 == 0)) && [[ "$d_d1" == *"its servers answer this host"* &&
+	"$d_d1" == *"before the first crash: node1-node0 skew"*"fw0: Normal"* &&
+	"$d_d2" == *"lab NTP outage"* ]]; then
+	ok "D: chrony lost on both nodes after a synchronised baseline -> FAIL while the servers answer the host, VOID only when the host cannot reach them either; back on both 8 s in -> PASS (waited, not decided early)"
 else
-	bad "VOID-peer: rc=$rc5/$rc5b detail='$detail5' / '$FAILOVER_CLOCK_DETAIL'"
+	bad "D: rc=$rc_d1/$rc_d2/$rc_d3 '$d_d1' / '$d_d2' / '$FAILOVER_CLOCK_DETAIL'"
 fi
 
 # ── 6. each condition alone is not enough ───────────────────────────────
@@ -400,8 +558,8 @@ fc_run "$TMP_DIR/c6b.out" "unsync" fw0 fw1 fw1
 rc_b=$?
 detail_b="$FAILOVER_CLOCK_DETAIL"
 if ((rc_a == 1 && rc_b == 1)) && grep -q 'skew -8.000 s' "$TMP_DIR/c6a.out" &&
-	[[ "$detail_b" == *"the peer fw0 is synchronised but the rebooted fw1 (Not synchronised)"* ]]; then
-	ok "synchronised-but-8s-apart FAILs, and in-bound-but-rebooted-node-unsynchronised FAILs (either node as the rebooted one)"
+	[[ "$detail_b" == *"#18584 class: the rebooted fw1 is not synchronised (Not synchronised) while the peer fw0 is"* ]]; then
+	ok "synchronised-but-8s-apart FAILs (both synchronised, out of bound), and in-bound-but-rebooted-node-unsynchronised FAILs (either node as the rebooted one)"
 else
 	bad "each condition: slew rc=$rc_a unsync rc=$rc_b detail='$detail_b'"
 fi
@@ -572,10 +730,11 @@ fi
 cells=""
 pass() { cells+="P:$1|"; }
 fail() { cells+="F:$1|"; }
-cell_case() { # <mode> <node-state> [void]
+cell_case() { # <mode> <node-state> [stanza]
 	cells=""
 	fc_reset
 	fc_baseline_synced
+	FC_NTP_STANZA="${3:-present}"
 	export XPF_FAILOVER_CLOCK_BUDGET_S=4
 	eval "fc_node_state() { $2; }"
 	failover_clock_cell "$1" "c" fw0 fw1 fw0 >"$TMP_DIR/c13.out" 2>&1
@@ -591,11 +750,11 @@ c_rs="$cells"
 unset XPF_FAILOVER_CLOCK_RESYNC
 cell_case fail-only '[[ $1 == fw0 ]] && echo "-9.000 Normal" || echo "0.000 Normal"'
 c_fl="$cells"
-cell_case fail-only '[[ $1 == fw1 ]] && echo "0.000 Not synchronised" || echo "0.000 Normal"'
+cell_case fail-only 'echo "0.000 Not synchronised"' absent
 c_vd="$cells"
 vline=$(grep -c '^  VOID  c: clock precondition VOID' "$TMP_DIR/c13.out")
 void() { cells+="V:$1|"; }
-cell_case fail-only '[[ $1 == fw1 ]] && echo "0.000 Not synchronised" || echo "0.000 Normal"'
+cell_case fail-only 'echo "0.000 Not synchronised"' absent
 c_vf="$cells"
 unset -f void
 if [[ "$c_pf" == "P:c: clock precondition: NTP converged"* && -z "$c_fo" &&
@@ -691,13 +850,18 @@ fi
 # A line is normalised first (quotes, commas, brackets, parentheses -> space),
 # so one pattern sees the shell spellings (`date "-s"`, `date -s"..."`) and the
 # Python list form (`["date", "-s", now]`).
-FC_SETTER_RE='(^|[^[:alnum:]_-])date([[:space:]]+-[[:alnum:]-]+)*[[:space:]]+(-s|-us|-su|--set)([[:space:]=@]|$)'
+# date: a set flag anywhere in its arguments (`-u -d X -s T`), its value
+# attached or not (`-s@N`, `-s2026-...`), or the positional MMDDhhmm form.
+FC_SETTER_RE='(^|[^[:alnum:]_-])date[[:space:]]([^|;&]*[[:space:]])?(-s|-us|-su|--set)([[:space:]=@0-9]|$)'
+FC_SETTER_RE+='|(^|[^[:alnum:]_-])date([[:space:]]+-[[:alnum:]]+)*[[:space:]]+[0-9]{8}([0-9]{2}){0,2}([.][0-9]{2})?([[:space:]]|$)'
 FC_SETTER_RE+='|(^|[^[:alnum:]_-])timedatectl[[:space:]]+set-time'
 FC_SETTER_RE+='|(^|[^[:alnum:]_-])hwclock[[:space:]].*(--hctosys|--systohc|(^|[[:space:]])-[sw]([[:space:]]|$))'
 FC_SETTER_RE+='|(^|[^[:alnum:]_-])chronyc[[:space:]].*(makestep|settime)'
 FC_SETTER_RE+='|(^|[^[:alnum:]_-])chronyd[[:space:]]([^|;&]*[[:space:]])?-q([[:space:]]|$)'
 FC_SETTER_RE+='|(^|[^[:alnum:]_-])ntpd[[:space:]]([^|;&]*[[:space:]])?-[[:alnum:]]*q'
-FC_SETTER_RE+='|(^|[^[:alnum:]_-])(ntpdate|adjtimex)([[:space:]]|$)'
+FC_SETTER_RE+='|(^|[^[:alnum:]_-])(ntpdate|adjtimex|phc_ctl)([[:space:]]|$)'
+FC_SETTER_RE+='|(^|[^[:alnum:]_-])sntp[[:space:]]([^|;&]*[[:space:]])?-[[:alnum:]]*[sS]([[:space:]]|$)'
+FC_SETTER_RE+='|(^|[^[:alnum:]_-])rdate[[:space:]]([^|;&]*[[:space:]])?-[[:alnum:]]*s([[:space:]]|$)'
 FC_SETTER_RE+='|clock_settime|settimeofday|clock_adjtime'
 FC_DIRECT_RE='(^|[^[:alnum:]_])failover_resync_node_clocks([^[:alnum:]_]|$)'
 fc_normalise() { tr "\"',()[]" '       '; }
@@ -710,7 +874,10 @@ for l in 'incus exec "$n" -- date -u -s "$now"' 'incus exec fw1 -- date -s "2026
 	'incus exec fw0 -- chronyc makestep' "incus exec fw0 -- chronyd -q 'server 162.159.200.1 iburst'" \
 	'incus exec fw0 -- ntpd -gq' 'ntpdate pool.ntp.org' 'incus exec fw0 -- adjtimex -o 100' \
 	'time.clock_settime(time.CLOCK_REALTIME, t)' 'subprocess.run(["incus", "exec", n, "--", "date", "-s", now])' \
-	'subprocess.run(["incus", "exec", n, "--", "chronyc", "makestep"])'; do
+	'subprocess.run(["incus", "exec", n, "--", "chronyc", "makestep"])' \
+	'incus exec fw0 -- date -s2026-10-31T10:00:00' 'incus exec fw0 -- date -u -d "2026-10-31" -s "10:00"' \
+	'incus exec fw0 -- date 103110002026' 'incus exec fw0 -- date -u 10311000' 'incus exec fw0 -- sntp -S 162.159.200.1' \
+	'incus exec fw0 -- rdate -s time.example' 'incus exec fw0 -- phc_ctl /dev/ptp0 set'; do
 	fc_sets_clock "$l" || {
 		matcher_ok=0
 		echo "  matcher MISSED: $l" >&2
@@ -719,14 +886,16 @@ done
 for l in 'incus exec "$node" -- date +%s.%N' 'date -u +%T.%N' 'date -u "+%Y-%m-%d %H:%M:%S"' \
 	'timeout 10 incus exec "$1" -- timeout 10 chronyc -n tracking' 'date -d @1793440000 +%s' 'date -Iseconds' \
 	"incus exec fw0 -- chronyd -Q 'server 162.159.200.1 iburst'" 'time.clock_gettime(time.CLOCK_REALTIME)' \
-	'self._exec(ref, ["date", "+%s.%N"], timeout=10)' 'incus exec fw0 -- timedatectl show' 'chronyc -n sources'; do
+	'self._exec(ref, ["date", "+%s.%N"], timeout=10)' 'incus exec fw0 -- timedatectl show' 'chronyc -n sources' \
+	'date +%s -d "2026-10-31"' 'sntp 162.159.200.1' 'rdate -p time.example' \
+	"timeout 20 incus exec \"\$n\" -- cli -c 'show configuration system ntp'"; do
 	if fc_sets_clock "$l"; then
 		matcher_ok=0
 		echo "  matcher FALSE POSITIVE: $l" >&2
 	fi
 done
 if ((matcher_ok)); then
-	ok "census matcher: sees all 16 setter shapes (date -s/-s@/-s\"\"/\"-s\"/--set, timedatectl, hwclock, chronyc makestep, chronyd -q, ntpd -gq, ntpdate, adjtimex, clock_settime, Python list form) and none of 11 reads"
+	ok "census matcher: sees all 23 setter shapes (date -s/-s@/-s2026/-s\"\"/\"-s\"/--set/-d X -s T/MMDDhhmm, timedatectl, hwclock, chronyc makestep, chronyd -q, ntpd -gq, ntpdate, adjtimex, sntp -S, rdate -s, phc_ctl, clock_settime, Python list form) and none of 15 reads"
 else
 	bad "census matcher: missed a setter or flagged a read"
 fi
@@ -750,9 +919,12 @@ fc_census_scan() {
 		[[ -n "$hits" ]] && printf '%s: sets a clock: %s\n' "$f" "$(head -1 <<<"$hits")"
 		hits=$(grep -E "$FC_DIRECT_RE" <<<"$code" || true)
 		[[ -n "$hits" ]] && printf '%s: calls failover_resync_node_clocks directly: %s\n' "$f" "$(head -1 <<<"$hits")"
-		if ((lib == 0)) && grep -qE '^[[:space:]]*(source|\.)[[:space:]]+.*failover-clock-lib\.sh' <<<"$code" &&
-			! grep -qE '(^|[^[:alnum:]_])failover_clock_(cell|precondition)[[:space:]]' <<<"$code"; then
-			printf '%s: sources failover-clock-lib.sh but never runs the clock check\n' "$f"
+		if ((lib == 0)) && grep -qE '^[[:space:]]*(source|\.)[[:space:]]+.*failover-clock-lib\.sh' <<<"$code"; then
+			grep -qE '(^|[^[:alnum:]_])failover_clock_(cell|precondition)[[:space:]]' <<<"$code" ||
+				printf '%s: sources failover-clock-lib.sh but never runs the clock check\n' "$f"
+			# A clock VOID must reach the exit code of a direct run too.
+			grep -qE '^void\(\)' <<<"$code" ||
+				printf '%s: runs the clock check but defines no void(), so a clock VOID exits 0 when run directly\n' "$f"
 		fi
 	done
 }
@@ -761,7 +933,8 @@ fc_census_scan() {
 # evasion in a planted file, and must not flag a sanctioned escape body.
 FX="$TMP_DIR/fixtures"
 mkdir -p "$FX/lib"
-printf '#!/bin/bash\n. ./failover-clock-lib.sh\nfailover_clock_cell fail-only x "$A" "$B" "$A"\nfailover_resync_node_clocks "$A" "$B"\n' >"$FX/dot-source.sh"
+printf '#!/bin/bash\n. ./failover-clock-lib.sh\nvoid() { :; }\nfailover_clock_cell fail-only x "$A" "$B" "$A"\nfailover_resync_node_clocks "$A" "$B"\n' >"$FX/dot-source.sh"
+printf '#!/bin/bash\nsource ./failover-clock-lib.sh\nfailover_clock_cell fail-only x "$A" "$B" "$A"\n' >"$FX/no-void.sh"
 printf '#!/bin/bash\nsource ./other-lib.sh\nfailover_resync_node_clocks "$A" "$B"\n' >"$FX/indirect.sh"
 printf '#!/bin/bash\nsource ./failover-clock-lib.sh\n# failover_clock_cell is mentioned only in a comment\n' >"$FX/no-check.sh"
 printf '#!/bin/bash\n. "$DIR/failover-clock-lib.sh"\necho no check here\n' >"$FX/dot-no-check.sh"
@@ -774,7 +947,8 @@ fx_out=$(fc_census_scan "$FX"/*.sh "$FX"/*.py "$FX/lib/failover-clock-lib.sh")
 fx_ok=1
 for want in "dot-source.sh: calls failover_resync_node_clocks directly" "indirect.sh: calls failover_resync_node_clocks directly" \
 	"no-check.sh: sources failover-clock-lib.sh but never runs the clock check" \
-	"dot-no-check.sh: sources failover-clock-lib.sh but never runs the clock check" "py-settime.py: sets a clock" \
+	"dot-no-check.sh: sources failover-clock-lib.sh but never runs the clock check" "no-void.sh: runs the clock check but defines no void()" \
+	"py-settime.py: sets a clock" \
 	"py-list.py: sets a clock" "quoted.sh: sets a clock" "lib/failover-clock-lib.sh: sets a clock:" "hwclock --hctosys"; do
 	[[ "$fx_out" == *"$want"* ]] || {
 		fx_ok=0
@@ -822,6 +996,20 @@ elif [[ -n "$census_out" ]]; then
 	bad "census: a harness sets a node clock or bypasses the escape:"$'\n'"$census_out"
 else
 	ok "census: ${#census_files[@]} harness files (${n_py} Python, ${n_scripts} under scripts/), ${sourcing} run the clock check, none sets a clock or calls the resync outside the escape"
+fi
+
+# ── 17. test-failover's iperf window pays for the clock floor's overshoot ──
+# The clock wait shares REBOOT_WAIT's unused time plus the 20 s settle, floored
+# at N s; past a slow comeback the floor runs up to N - 20 s beyond that, and
+# IPERF_DURATION_MIN must carry it, or the stream ends before the failback.
+TF="${SCRIPT_DIR}/test-failover.sh"
+floor=$(sed -nE 's/^\(\( clock_budget >= ([0-9]+) \)\) \|\| clock_budget=[0-9]+$/\1/p' "$TF")
+over=$(sed -nE 's/^CLOCK_FLOOR_OVERSHOOT=([0-9]+)$/\1/p' "$TF")
+if [[ -n "$floor" && -n "$over" ]] && ((floor - 20 <= over)) &&
+	grep -qE '^IPERF_DURATION_MIN=\$\(\(.*\+ CLOCK_FLOOR_OVERSHOOT \+' "$TF"; then
+	ok "test-failover: the ${floor} s clock floor's overshoot (${floor} - 20 s) is paid by CLOCK_FLOOR_OVERSHOOT=${over} in IPERF_DURATION_MIN"
+else
+	bad "test-failover: clock floor '${floor}' s, CLOCK_FLOOR_OVERSHOOT '${over}', or its IPERF_DURATION_MIN term is missing or too small"
 fi
 
 echo "----------------------------------------"

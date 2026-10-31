@@ -9,17 +9,27 @@
 # it took, and score the cell from WHO did not converge. They never set a
 # clock.
 #
-# Scoring (failover_clock_precondition's return code):
+# Scoring (failover_clock_precondition's return code), always from the
+# CURRENT reading; the pre-crash baseline is context in the reason only:
 #   0 PASS  both nodes synchronised and the skew, error included, in bound.
-#   2 VOID  no time source to converge to, or no measurement: chrony was not
-#           synchronised before the first crash (failover_clock_baseline), the
-#           un-rebooted peer is not synchronised, a clock could not be read,
-#           the reading was too noisy, or the call was misconfigured. A lab or
-#           NTP state (or a harness fault), never attributable to the build.
-#   1 FAIL  the peer IS synchronised and the rebooted node did not converge to
-#           it: attributable to the lab, NTP or the product, because xpfd owns
-#           chrony's vrf-mgmt binding and its restart (#18584/#18589,
-#           pkg/daemon/daemon_system.go).
+#   2 VOID  only where the build cannot be in the path:
+#           - neither node synchronised AND no `system ntp` is configured (a
+#             config fact the build cannot influence: a lab that never had
+#             the #18584 stanza committed);
+#           - neither node synchronised, `system ntp` configured, and none of
+#             its servers answers an SNTP query from THIS host either (the
+#             off-path control: a lab NTP outage);
+#           - no measurement: a clock unreadable, a reading too noisy, the
+#             ntp config unreadable, or a misconfigured call (harness/lab).
+#   1 FAIL  everything else -- lab, NTP or product, because xpfd owns chrony's
+#           vrf-mgmt binding and its restart (#18584/#18589,
+#           pkg/daemon/daemon_system.go):
+#           - ONE node synchronised and the other not (the #18584 class: only
+#             the RG owner reaching NTP is how fw1 drifted 60-90 s behind in
+#             the operator's loop), whichever node it is;
+#           - neither synchronised although `system ntp` is configured and its
+#             servers answer this host;
+#           - both synchronised but further apart than the bound.
 #
 # History. #11872 added `failover_resync_node_clocks` (`date -u -s` on both
 # nodes from one host reading) because the loss lab had no NTP: a crash reboot
@@ -75,11 +85,10 @@
 #     exec costs at most 10-15 s per command instead of hanging the smoke.
 
 # failover_clock_baseline <node0> <node1>
-#   One reading BEFORE the first crash. If chrony is not synchronised on both
-#   nodes there, the lab has no time source to converge to, and every later
-#   precondition that does not converge on its first reading is VOID at once
-#   (no budget is spent waiting for NTP that was never there). Logged, never a
-#   cell. Without a baseline the precondition still classifies by the peer.
+#   One reading BEFORE the first crash, logged and recorded as CONTEXT for any
+#   later verdict's reason, never as a decision: a single instant can catch a
+#   chrony blip, and a one-node-synchronised baseline is the #18584 state the
+#   gate exists to catch, not a lab excuse. Also logs the `system ntp` config.
 failover_clock_baseline() {
 	if (($# != 2)); then
 		echo "failover_clock_baseline: usage: failover_clock_baseline <node0> <node1>" >&2
@@ -87,13 +96,9 @@ failover_clock_baseline() {
 	fi
 	_failover_clock_knobs_lenient
 	_failover_clock_measure "$1" "$2" "$_FC_SAMPLES"
-	if _failover_clock_synced "$_FC_LEAP0" && _failover_clock_synced "$_FC_LEAP1"; then
-		_FC_BASE_SYNCED=1
-	else
-		_FC_BASE_SYNCED=0
-	fi
 	_FC_BASE_TEXT="$(_failover_clock_state_text "$1" "$2")"
-	echo "clock baseline (before the first crash; $(_failover_clock_uptimes "$1" "$2")): ${_FC_BASE_TEXT}"
+	_failover_clock_ntp_config "$1" "$2"
+	echo "clock baseline (before the first crash; $(_failover_clock_uptimes "$1" "$2")): ${_FC_BASE_TEXT}; $(_failover_clock_ntp_text)"
 	return 0
 }
 
@@ -125,6 +130,7 @@ failover_clock_precondition() {
 	FAILOVER_CLOCK_RESYNCED=0
 	# No reading may leak from an earlier call into this one's lines.
 	_FC_SKEW="" _FC_UNC="" _FC_DOWN="" _FC_LEAP0="" _FC_LEAP1="" _FC_REF0="" _FC_REF1=""
+	_FC_NTP_STATE=unknown _FC_NTP_SERVERS="" _FC_OFFPATH=""
 	if (($# != 4)); then
 		FAILOVER_CLOCK_DETAIL="clock precondition: usage: failover_clock_precondition <label> <node0> <node1> <rebooted-node>"
 		echo "$FAILOVER_CLOCK_DETAIL" >&2
@@ -198,7 +204,11 @@ failover_clock_cell() {
 #   The measured path. It reads clocks and chrony state, and nothing else.
 _failover_clock_wait() {
 	local label="$1" n0="$2" n1="$3" rebooted="$4" samples="$5" bound="$6" budget="$7" poll="$8"
-	local start now elapsed state="" prev="" first=1
+	local start now elapsed state="" prev="" first=1 peer="$n1"
+	[[ "$rebooted" == "$n1" ]] && peer="$n0"
+	# The config is read from the un-rebooted peer first; it is a fact the
+	# build under test cannot change.
+	_failover_clock_ntp_config "$peer" "$rebooted"
 	start=$(date +%s.%N)
 	while :; do
 		_failover_clock_measure "$n0" "$n1" "$samples"
@@ -210,8 +220,10 @@ _failover_clock_wait() {
 			FAILOVER_CLOCK_DETAIL="${label}: clock precondition: NTP converged in ${elapsed} s (node1-node0 skew ${_FC_SKEW} s +/-${_FC_UNC} s, bound ${bound} s; chrony synchronised on both: ${_FC_LEAP0} / ${_FC_LEAP1})"
 			return 0
 		fi
-		# No time source before the first crash: waiting cannot help.
-		if [[ "${_FC_BASE_SYNCED:-}" == 0 ]] ||
+		# Neither node synchronised and nothing configured to synchronise
+		# them: waiting cannot help, so do not spend the budget.
+		if { [[ "$_FC_NTP_STATE" == absent ]] &&
+			! _failover_clock_synced "$_FC_LEAP0" && ! _failover_clock_synced "$_FC_LEAP1"; } ||
 			awk -v e="$elapsed" -v b="$budget" 'BEGIN { exit !(e >= b) }'; then
 			_failover_clock_verdict "$label" "$n0" "$n1" "$rebooted" "$bound" "$budget" "$elapsed"
 			return
@@ -231,37 +243,118 @@ _failover_clock_wait() {
 }
 
 # _failover_clock_verdict <label> <n0> <n1> <rebooted> <bound> <budget> <elapsed>
-#   Not converged: VOID when there is nothing the build could have converged
-#   to (or nothing measured), FAIL only when the un-rebooted peer is
-#   synchronised and the rebooted node is not with it.
+#   Not converged: scored from the CURRENT reading (see the top of the file).
 _failover_clock_verdict() {
 	local label="$1" n0="$2" n1="$3" rebooted="$4" bound="$5" budget="$6" elapsed="$7"
-	local peer peer_leap reb_leap why="" state
+	local peer peer_leap reb_leap why="" state ctx what
 	if [[ "$rebooted" == "$n0" ]]; then
 		peer="$n1" peer_leap="$_FC_LEAP1" reb_leap="$_FC_LEAP0"
 	else
 		peer="$n0" peer_leap="$_FC_LEAP0" reb_leap="$_FC_LEAP1"
 	fi
-	state="$(_failover_clock_state_text "$n0" "$n1")"
+	state="$(_failover_clock_state_text "$n0" "$n1"); $(_failover_clock_ntp_text)"
+	ctx="${_FC_BASE_TEXT:+ (before the first crash: ${_FC_BASE_TEXT})}"
 	echo "clock precondition [${label}]: NOT converged after ${elapsed} s (budget ${budget} s; $(_failover_clock_uptimes "$n0" "$n1")): ${state}"
-	if [[ "${_FC_BASE_SYNCED:-}" == 0 ]]; then
-		why="no time source (lab/NTP): chrony was not synchronised before the first crash (${_FC_BASE_TEXT})"
-	elif [[ -z "$_FC_SKEW" ]]; then
+	if [[ -z "$_FC_SKEW" ]]; then
 		why="no measurement (harness/lab): clock unreadable on ${_FC_DOWN}"
 	elif _failover_clock_noisy; then
 		why="no measurement (harness/lab): the reading's error +/-${_FC_UNC} s is over the ${_FC_MAXUNC} s cap"
-	elif ! _failover_clock_synced "$peer_leap"; then
-		why="no time source (lab/NTP): the un-rebooted peer ${peer} is not synchronised (${peer_leap})"
+	elif ! _failover_clock_synced "$peer_leap" && ! _failover_clock_synced "$reb_leap"; then
+		case "$_FC_NTP_STATE" in
+		absent) why="no time source (lab): no \`system ntp\` is configured and neither node is synchronised" ;;
+		present)
+			local -a srvs
+			read -r -a srvs <<<"$_FC_NTP_SERVERS"
+			_failover_clock_offpath "${srvs[@]}"
+			[[ "$_FC_OFFPATH" == none ]] &&
+				why="lab NTP outage: neither node is synchronised and no configured server (${_FC_NTP_SERVERS}) answers this host either"
+			;;
+		*) why="no measurement (harness): \`show configuration system ntp\` could not be read and neither node is synchronised" ;;
+		esac
 	fi
 	if [[ -n "$why" ]]; then
 		_failover_clock_marker "$label" 0 0 VOID "-" "$bound" "$budget"
-		FAILOVER_CLOCK_DETAIL="${label}: clock precondition VOID: ${why}; after ${elapsed} s: ${state}. No clock was set"
+		FAILOVER_CLOCK_DETAIL="${label}: clock precondition VOID: ${why}; after ${elapsed} s: ${state}${ctx}. No clock was set"
 		echo "CLOCK_VOID: ${FAILOVER_CLOCK_DETAIL}"
 		return 2
 	fi
+	if ! _failover_clock_synced "$peer_leap" && ! _failover_clock_synced "$reb_leap"; then
+		case "$_FC_OFFPATH" in
+		unavailable) what="the off-path SNTP probe from this host was unavailable" ;;
+		*) what="its servers answer this host (${_FC_OFFPATH#answered: })" ;;
+		esac
+		what="neither node is synchronised although \`system ntp\` is configured (${_FC_NTP_SERVERS}) and ${what}"
+	elif ! _failover_clock_synced "$reb_leap"; then
+		what="#18584 class: the rebooted ${rebooted} is not synchronised (${reb_leap}) while the peer ${peer} is -- one node reaching NTP and not the other"
+	elif ! _failover_clock_synced "$peer_leap"; then
+		what="#18584 class: the un-rebooted peer ${peer} is not synchronised (${peer_leap}) while the rebooted ${rebooted} is -- one node reaching NTP and not the other"
+	else
+		what="both nodes are synchronised but further apart than |skew| + error <= ${bound} s"
+	fi
 	_failover_clock_marker "$label" 0 0 FAIL "-" "$bound" "$budget"
-	FAILOVER_CLOCK_DETAIL="${label}: clock precondition: NTP did not converge after a crash reboot within ${budget} s: the peer ${peer} is synchronised but the rebooted ${rebooted} (${reb_leap}) did not converge to it (lab, NTP or product: xpfd owns chrony's vrf-mgmt binding and restart): ${state}; needs |skew| + error <= ${bound} s and a synchronised Leap status (Normal, Insert second or Delete second) on both nodes. No clock was set (XPF_FAILOVER_CLOCK_RESYNC=1 is the no-NTP escape)"
+	FAILOVER_CLOCK_DETAIL="${label}: clock precondition: NTP did not converge after a crash reboot within ${budget} s: ${what} (lab, NTP or product: xpfd owns chrony's vrf-mgmt binding and restart): ${state}${ctx}; needs |skew| + error <= ${bound} s and a synchronised Leap status (Normal, Insert second or Delete second) on both nodes. No clock was set (XPF_FAILOVER_CLOCK_RESYNC=1 is the no-NTP escape)"
 	return 1
+}
+
+# _failover_clock_ntp_config <node>... -- `show configuration system ntp` from
+# the first node whose CLI answers: _FC_NTP_STATE present (with
+# _FC_NTP_SERVERS), absent, or unknown when no node's CLI answered.
+_failover_clock_ntp_config() {
+	local n out
+	_FC_NTP_STATE=unknown _FC_NTP_SERVERS=""
+	for n in "$@"; do
+		out=$(timeout 20 incus exec "$n" -- cli -c 'show configuration system ntp' 2>&1) || continue
+		_FC_NTP_SERVERS=$(sed -nE 's/^[[:space:]]*server[[:space:]]+([^[:space:]{;]+).*/\1/p' <<<"$out" | tr '\n' ' ')
+		_FC_NTP_SERVERS="${_FC_NTP_SERVERS% }"
+		if [[ -n "$_FC_NTP_SERVERS" ]]; then
+			_FC_NTP_STATE=present
+			return 0
+		fi
+		if grep -qE 'configuration path not found|^[[:space:]]*ntp[[:space:]]*\{' <<<"$out"; then
+			_FC_NTP_STATE=absent
+			return 0
+		fi
+	done
+	return 0
+}
+
+_failover_clock_ntp_text() {
+	case "${_FC_NTP_STATE:-unknown}" in
+	present) printf 'system ntp: %s' "$_FC_NTP_SERVERS" ;;
+	absent) printf 'system ntp: not configured' ;;
+	*) printf 'system ntp: unreadable' ;;
+	esac
+}
+
+# The off-path control: an SNTP query from THIS host to each server, with the
+# product out of the path. Prints the servers that answered in sync.
+_FC_SNTP_PY='import socket, sys
+ok = []
+for srv in sys.argv[1:]:
+    try:
+        s = socket.socket(socket.AF_INET6 if ":" in srv else socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(2)
+        s.sendto(b"\x1b" + 47 * b"\0", (srv, 123))
+        d, _ = s.recvfrom(512)
+        if len(d) >= 48 and (d[0] & 7) == 4 and d[1] != 0:
+            ok.append(srv)
+    except Exception:
+        pass
+print(" ".join(ok))'
+
+# _failover_clock_offpath <server>... -- _FC_OFFPATH = "answered: <servers>",
+# "none", or "unavailable" (no python3, or the probe did not finish).
+_failover_clock_offpath() {
+	local out
+	if (($# == 0)) || ! out=$(timeout 20 python3 -I -c "$_FC_SNTP_PY" "$@" 2>/dev/null); then
+		_FC_OFFPATH=unavailable
+		return 0
+	fi
+	if [[ -n "${out// /}" ]]; then
+		_FC_OFFPATH="answered: ${out}"
+	else
+		_FC_OFFPATH=none
+	fi
 }
 
 # _failover_clock_escape <label> <n0> <n1> <samples> <bound> <budget>

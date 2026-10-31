@@ -139,11 +139,14 @@ node1-node0 skew, plus the reading's own error, within 5 s, and a
 synchronised Leap status on both, within 120 s. It runs this after the rejoin
 checks and before the failback, and after any node the final health check
 starts; a measure-only reading right after each restart keeps the post-crash
-state in the log. It never sets a clock. Not converging is VOID when there
-was no time source (unsynchronised before the crash, or the un-rebooted peer
-unsynchronised) or no measurement, and FAIL only when the peer is
-synchronised and the rebooted node is not (lab, NTP or product; #18614,
-`test/incus/failover-clock-lib.sh`, `docs/ha-rg-move-correctness.md`).
+state in the log. It never sets a clock. Not converging is judged from the
+current reading. It is VOID only when neither node is synchronised and no
+`system ntp` stanza is configured, when the stanza's servers fail an SNTP
+probe from the orchestrator too (a lab NTP outage), or when nothing could be
+measured. It is FAIL otherwise (lab, NTP or product), including one node
+synchronised and the other not, the #18584 class (#18614,
+`test/incus/failover-clock-lib.sh`, `docs/ha-rg-move-correctness.md`). A
+direct run exits 2 on a VOID cell.
 `XPF_FAILOVER_CLOCK_RESYNC=1` restores the #11872 resync for a lab with no
 NTP. It prints a banner, and the would-be PASS row is recorded VOID with
 `clock_resync=1`. `test-failover` and `test-double-failover` run the same

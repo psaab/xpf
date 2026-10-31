@@ -71,6 +71,10 @@ DAEMON_RESTART_WAIT=30                      # max seconds for xpfd to restart
 
 PASS=0
 FAIL=0
+# #18614: a cell that could not be judged (the clock precondition's VOID). It
+# is neither a pass nor a fail, and a run with one exits 2, so a direct run is
+# as honest as the harness-result.sh row.
+VOID=0
 ERRORS=()
 LOG="/tmp/iperf3-ha-crash.log"
 # #9692: how long to let the established streams settle after a takeover, and
@@ -81,6 +85,7 @@ RECOVERY_MIN_GBPS="${RECOVERY_MIN_GBPS:-0.5}"
 info()  { echo "==> $*"; }
 pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
+void()  { echo "  VOID  $*"; VOID=$((VOID + 1)); }
 die()   { echo "FATAL: $*" >&2; exit 2; }
 
 # established_streams_recovered <phase> — #9692. The iperf3 client started
@@ -746,4 +751,9 @@ if [[ $FAIL -gt 0 ]]; then
 		echo "  - $err"
 	done
 	exit 1
+fi
+if [[ $VOID -gt 0 ]]; then
+	echo
+	echo "  ${VOID} cell(s) VOID: the run is not a pass (see the VOID lines above)"
+	exit 2
 fi

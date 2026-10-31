@@ -84,11 +84,16 @@ trap 'failover_stop_main_iperf "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_
 
 PASS=0
 FAIL=0
+# #18614: a cell that could not be judged (the clock precondition's VOID). It
+# is neither a pass nor a fail, and a run with one exits 2, so a direct run is
+# as honest as the harness-result.sh row.
+VOID=0
 ERRORS=()
 
 info()  { echo "==> $*"; }
 pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
+void()  { echo "  VOID  $*"; VOID=$((VOID + 1)); }
 
 die() { echo "FATAL: $*" >&2; exit 2; }
 
@@ -422,4 +427,9 @@ if [[ $FAIL -gt 0 ]]; then
 		echo "  - $err"
 	done
 	exit 1
+fi
+if [[ $VOID -gt 0 ]]; then
+	echo
+	echo "  ${VOID} cell(s) VOID: the run is not a pass (see the VOID lines above)"
+	exit 2
 fi

@@ -504,12 +504,6 @@ and DOES gate merges). Never cite a green watch as a passed gate:
   while every hop past the firewall was `???`, #18174); its ping half
   is a dead target, a "Known environment rows" cell until the harness is
   retargeted (#18556).
-- Known environment row, tcp clocks (#18614): until tcp is deployed past
-  #18589 with the NTP stanza committed, tcp's H1–H3 clock cell VOIDs (no
-  time source before the first crash) and its rows are VOID. That is not a
-  regression and not a pass; gate HA PRs whose H1–H3 must count on loss or
-  udp. Expiry: the stanza is committed on tcp and both nodes report
-  `Leap status: Normal` (the row in `docs/regression-test-matrix.md`).
   Deviations from the baseline are the signal; the baseline itself is
   not.
 - Perf mistakes ride the same loop: when a perf-relevant merge lands,
