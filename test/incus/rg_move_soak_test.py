@@ -155,7 +155,7 @@ def rgres(rg=2, target=1, pre=0, cli=soak.CLI_OK, landed=0.8, dual=False, helper
 
 
 GOOD_TRAFFIC = {"ping_lost": 3, "ping_max_gap_ms": 40.0, "ping_tail_replies": 95, "worst_stall_ms": 200.0,
-                "worst_stall_stream": 5, "died_streams": [], "agg_zero_ms": 0.0, "tail_gbps": 20.0,
+                "worst_stall_stream": 5, "died_streams": [], "stalled_streams": [], "agg_zero_ms": 0.0, "tail_gbps": 20.0,
                 "ping_covered": True, "iperf_covered": True}
 
 
@@ -271,8 +271,10 @@ class MoveVerdict(unittest.TestCase):
         v, why = self.verdict(rec([r]))
         self.assertEqual(v, soak.FAIL)
         self.assertIn("neighbour entry", why[0])
-        r.neigh_node = {"v4": 1, "v6": None}  # v6 unresolved is not evidence either way
-        self.assertEqual(self.verdict(rec([r]))[0], soak.PASS)
+        r.neigh_node = {"v4": 1, "v6": None}  # unresolved mid-run: unmeasured, not a pass
+        v, why = self.verdict(rec([r]))
+        self.assertEqual(v, soak.FAIL)
+        self.assertIn("unmeasured", why[0])
         r.neigh_node = {"v4": 1, "v6": 0}
         v, why = self.verdict(rec([r]))
         self.assertEqual(v, soak.FAIL)
@@ -292,17 +294,35 @@ class MoveVerdict(unittest.TestCase):
         self.assertEqual(v, soak.FAIL)
         self.assertIn("aggregate outage", why[0])
 
+    def test_several_streams_stalling_is_not_a_cost(self):
+        # Seat AF probe6: 7 of 8 streams stall 3 s with ping clean and one
+        # stream alive. That is not one stream backing off.
+        def window(dead):
+            ivs = []
+            for i in range(60):
+                st = {sid: (0.0 if sid in dead and 1.0 <= i * 0.1 < 4.0 else 1.4e9)
+                      for sid in (5, 7, 9, 11, 13, 15, 17, 19)}
+                ivs.append((i * 0.1, (i + 1) * 0.1, st, sum(st.values())))
+            replies = [(i * 0.01, i + 1) for i in range(600)]
+            stalls, agg = soak.stream_stalls(ivs, 1e6)
+            return soak.traffic_for_window(0.0, 6.0, soak.ping_gaps(replies), replies, stalls, agg, ivs, soak.Budget())
+        self.assertEqual(self.verdict(rec([rgres()], window({5})))[0], soak.COST)
+        for dead in ({5, 7}, {5, 7, 9, 11, 13, 15, 17}):
+            v, why = self.verdict(rec([rgres()], window(dead)))
+            self.assertEqual(v, soak.FAIL, dead)
+            self.assertIn(f"{len(dead)} streams", why[0])
+
     def test_recovered_single_stream_stall_is_a_cost(self):
-        t = dict(GOOD_TRAFFIC, worst_stall_ms=2500.0)
+        t = dict(GOOD_TRAFFIC, worst_stall_ms=2500.0, stalled_streams=[5])
         v, why = self.verdict(rec([rgres()], t))
         self.assertEqual(v, soak.COST)
         self.assertIn("recovered", why[0])
 
     def test_stall_past_the_cost_cap_fails(self):
-        v, why = self.verdict(rec([rgres()], dict(GOOD_TRAFFIC, worst_stall_ms=10500.0)))
+        v, why = self.verdict(rec([rgres()], dict(GOOD_TRAFFIC, worst_stall_ms=10500.0, stalled_streams=[5])))
         self.assertEqual(v, soak.FAIL)
         self.assertIn("COST cap", why[0])
-        self.assertEqual(self.verdict(rec([rgres()], dict(GOOD_TRAFFIC, worst_stall_ms=9900.0)))[0], soak.COST)
+        self.assertEqual(self.verdict(rec([rgres()], dict(GOOD_TRAFFIC, worst_stall_ms=9900.0, stalled_streams=[5])))[0], soak.COST)
 
     def test_stream_that_never_recovers_fails(self):
         t = dict(GOOD_TRAFFIC, worst_stall_ms=9000.0, died_streams=[7])
@@ -311,7 +331,7 @@ class MoveVerdict(unittest.TestCase):
         self.assertIn("never recovered", why[0])
 
     def test_cost_does_not_hide_a_fail(self):
-        t = dict(GOOD_TRAFFIC, worst_stall_ms=2500.0)
+        t = dict(GOOD_TRAFFIC, worst_stall_ms=2500.0, stalled_streams=[5])
         v, why = self.verdict(rec([rgres(dual=True)], t))
         self.assertEqual(v, soak.FAIL)
         self.assertTrue(any("stalled" in w for w in why))

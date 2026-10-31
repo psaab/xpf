@@ -469,6 +469,9 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
     win_stalls = [s for s in stalls if t0 <= s.start < t1]
     worst = max(win_stalls, key=lambda s: s.seconds, default=None)
     died = sorted({s.stream for s in win_stalls if s.to_end})
+    # Every stream whose stall in this window exceeds the per-stream budget:
+    # COST is ONE stream backing off, never several (seat AF).
+    over = sorted({s.stream for s in win_stalls if s.seconds * 1000.0 > budget.max_stall_ms})
     win_agg = [s for s in agg if t0 <= s.start < t1]
     agg_zero = sum(s.seconds for s in win_agg)
     agg_worst = max((s.seconds for s in win_agg), default=0.0)
@@ -483,6 +486,7 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
         "worst_stall_ms": 0.0 if worst is None else round(worst.seconds * 1000.0, 1),
         "worst_stall_stream": None if worst is None else worst.stream,
         "died_streams": died,
+        "stalled_streams": over,
         "agg_zero_ms": round(agg_zero * 1000.0, 1),
         "agg_worst_ms": round(agg_worst * 1000.0, 1),
         "tail_gbps": None if tail_bps is None else round(tail_bps / 1e9, 2),
@@ -505,7 +509,12 @@ def follow_reasons(r: RGMoveResult, budget: Budget) -> List[str]:
             out.append(f"RG{r.rg} traffic did not follow to node{r.target}: RETH-member packets after landing "
                        f"node{r.target}={tgt} node{other}={oth}")
     for fam, node in (r.neigh_node or {}).items():
-        if node is not None and node != r.target:
+        if node is None:
+            # The preflight proved the entry resolvable; losing it mid-run
+            # means the follow check could not read this move (seat AF).
+            out.append(f"RG{r.rg} traffic-follow unmeasured: the LAN host's {fam} neighbour entry "
+                       "resolves to no RETH MAC this move")
+        elif node != r.target:
             out.append(f"RG{r.rg} traffic did not follow to node{r.target}: the LAN host's {fam} neighbour entry "
                        f"for the LAN VIP still resolves to node{node}'s MAC")
     return out
@@ -577,7 +586,11 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
             if agg_worst > budget.max_gap_ms:
                 reasons.append(f"{fam} aggregate outage: every stream under {budget.low_bps / 1e6:g} Mbit/s for {agg_worst:g} ms > {budget.max_gap_ms:g} ms")
             stall = t.get("worst_stall_ms") or 0.0
-            if stall > budget.max_cost_stall_ms and not t.get("died_streams"):
+            over = t.get("stalled_streams") or []
+            if len(over) > 1 and not t.get("died_streams"):
+                reasons.append(f"{fam} {len(over)} streams {over} stalled over {budget.max_stall_ms:g} ms in this window "
+                               "(COST is one stream backing off, not several)")
+            elif stall > budget.max_cost_stall_ms and not t.get("died_streams"):
                 reasons.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_cost_stall_ms:g} ms (past the COST cap)")
             elif stall > budget.max_stall_ms and not t.get("died_streams"):
                 costs.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_stall_ms:g} ms (recovered; ping and aggregate within budget)")
@@ -1251,8 +1264,10 @@ class Soak:
         # exit status (2) makes the row VOID.
         c = summary["counts"]
         # "<n> passed, <m> failed, <k> cost": the smoke-cells adapter scores
-        # the pair and records the cost as cells_cost, so the master-relative
-        # COST rule (row H11) is mechanical. Strict mode counts COST as failed.
+        # the pair and records the cost as cells_cost; ledger_compare compares
+        # only the headline, so the master-relative COST rule (row H11) is
+        # judged by hand from the recorded rows. Strict mode counts COST as
+        # failed.
         cost_failed = c[COST] if cfg.strict_cost else 0
         self.log(f"rg-move-soak: {c[PASS] + c[COST] - cost_failed} passed, {c[FAIL] + cost_failed} failed, "
                  f"{c[COST]} cost ({c[VOID]} void)")

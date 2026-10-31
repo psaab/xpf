@@ -79,7 +79,7 @@ is right and this table needs an edit in the same change.
 
 ### Runnable shell (58 harnesses + the envelope)
 
-Reached by a Makefile recipe today (33, per `harness-census.sh`,
+Reached by a Makefile recipe today (35, per `harness-census.sh`,
 which also counts the 5 `scripts/userspace-*.sh`): `cc-rollback-functional.sh`,
 `cluster-build-identity.sh`, `cluster-setup.sh`, `dhcp-lease-failover.sh`,
 `harness-result.sh`, `ipsec-9506-fixture.sh`,

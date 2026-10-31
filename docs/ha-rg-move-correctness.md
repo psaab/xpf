@@ -300,8 +300,9 @@ Knobs:
 `--require-helper-attestation`), so a run writes a ledger row with build
 attestation; the soak's last line, `rg-move-soak: <n> passed, <m> failed,
 <k> cost`, is what the adapter scores (a correct move — PASS or COST —
-passed) and the ledger records `cells_cost=<k>`, so the master-relative COST
-rule is mechanical. Under `SOAK_STRICT_COST=1` the COST moves are counted in
+passed) and the ledger records `cells_cost=<k>`. `ledger_compare.py` compares
+only the headline (`cells_passed`), so the master-relative COST rule is
+judged by hand from the recorded rows. Under `SOAK_STRICT_COST=1` the COST moves are counted in
 `failed` and the row is a FAIL. At the
 end the soak puts node0 back as primary for every RG it moved (a local pull
 on node0, reported as `restore:`; never folded into the moves' verdicts).
@@ -317,7 +318,7 @@ two seconds after landing is caught.
 One verdict per move:
 
 - **PASS**: every condition in "What a correct move is" held.
-- **COST**: the move was correct, but one stream stalled over
+- **COST**: the move was correct, but exactly ONE stream stalled over
   `SOAK_MAX_STALL_MS` and recovered within `SOAK_MAX_COST_STALL_MS`, while
   ping and the aggregate stayed within `SOAK_MAX_GAP_MS` (#18559). Counted,
   not failed; judged master-relative (row H11). `SOAK_STRICT_COST=1` makes it
@@ -336,8 +337,12 @@ One verdict per move:
     window's tail (either family);
   - a ping gap over `SOAK_MAX_GAP_MS`, or every stream at once under
     1 Mbit/s for longer than that (an aggregate outage), in either family;
-  - a stream stall past `SOAK_MAX_COST_STALL_MS`, or one that never
+  - a stream stall past `SOAK_MAX_COST_STALL_MS`, more than one stream
+    stalling over `SOAK_MAX_STALL_MS` in the window, or a stream that never
     recovered;
+  - a LAN neighbour entry (IPv4 VIP or IPv6 RA router) that resolves to no
+    RETH MAC on a move, after the preflight proved it resolvable
+    ("traffic-follow unmeasured");
   - ping or iperf3 stopped covering the window.
 - **VOID**: the precondition failed. Before a move to node *t*, the RG was not
   cleanly owned by the other node at the end of the previous window. A failed
