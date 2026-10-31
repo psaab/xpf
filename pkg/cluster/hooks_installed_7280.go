@@ -45,6 +45,8 @@ const (
 	HookPreManualFailover       = "PreManualFailoverHook"
 	HookLocalTransferCommitRdy  = "LocalTransferCommitReadyHook"
 	HookTransferReadiness       = "TransferReadinessFunc"
+	HookTransferPreActivate     = "TransferPreActivateHook"
+	HookTransferPreRelease      = "TransferPreReleaseHook"
 	HookHeartbeatRestartNotify  = "HeartbeatRestartNotifyFunc"
 	HookPeerFence               = "PeerFenceFunc"
 	HookPeerFenceConfirm        = "PeerFenceConfirmFunc"
@@ -74,6 +76,8 @@ func (m *Manager) InstalledHooks() map[string]bool {
 		HookPreManualFailover:       m.preManualFailoverFn != nil,
 		HookLocalTransferCommitRdy:  m.localTransferCommitReadyFn != nil,
 		HookTransferReadiness:       m.transferReadinessFn != nil,
+		HookTransferPreActivate:     m.transferPreActivateFn != nil,
+		HookTransferPreRelease:      m.transferPreReleaseFn != nil,
 		HookHeartbeatRestartNotify:  m.hbRestartNotifyFn != nil,
 		HookPeerFence:               m.peerFenceFn != nil,
 		HookPeerFenceConfirm:        m.peerFenceConfirmFn != nil,

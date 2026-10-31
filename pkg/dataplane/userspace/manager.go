@@ -396,6 +396,12 @@ type Manager struct {
 	// a feed change so the duplicate-publish gate lets the refresh through.
 	feedOverlay map[string][]string
 	haGroups    map[int]HAGroupStatus
+	// transferPreActive (#18559) holds the data RGs whose helper forwarding
+	// is opened ahead of the cluster promotion while this node requests a
+	// transfer, each with its backstop deadline. It is an overlay on the
+	// helper-facing view only: haGroups and the rg_active BPF map keep the
+	// cluster truth. See manager_ha_preactivate.go. Guarded by m.mu.
+	transferPreActive map[int]time.Time
 	// rgPrimaryProvider reports local RG primacy for the route builder
 	// (#15742). Nil means no provider wired yet (boot window before
 	// applyDataplaneAndHACore, standalone, or tests): the builder then
@@ -936,7 +942,8 @@ func (m *Manager) rgPrimaryNowLocked() RGPrimaryProvider {
 	if m == nil {
 		return nil
 	}
-	return m.rgPrimaryProvider
+	// #18559: route builders see a transfer pre-activation as local primacy.
+	return m.routeRGPrimaryLocked()
 }
 
 const rstSuppressionRetryBackoff = 5 * time.Second
