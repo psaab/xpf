@@ -45,3 +45,23 @@ func TestCrossNodeFailoverFailsFastOnPeerClockSkew18585(t *testing.T) {
 		calls = 0
 	}
 }
+
+// #18585 review seat AE: the refusal's recommended workaround — run the move
+// on the target node, a local pull — must NOT be refused on the same skew.
+func TestLocalTargetFailoverProceedsOnPeerClockSkew18585(t *testing.T) {
+	mgr := cluster.NewManager(0, 22)
+	mgr.NotePeerWallClockForTesting(-72 * time.Second)
+	s := &Server{
+		cluster: mgr,
+		peerSystemActionFn: func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+			t.Fatalf("a local-target move must not proxy to the peer")
+			return nil, nil
+		},
+	}
+	for _, action := range []string{"cluster-failover:2:node0", "cluster-failover-data:node0"} {
+		_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: action})
+		if err != nil && strings.Contains(err.Error(), "cross-node request not sent") {
+			t.Fatalf("%s: the local pull was refused on the peer's clock: %v", action, err)
+		}
+	}
+}

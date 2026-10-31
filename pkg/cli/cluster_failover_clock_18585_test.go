@@ -36,3 +36,24 @@ func TestCLICrossNodeFailoverFailsFastOnPeerClockSkew18585(t *testing.T) {
 		}
 	}
 }
+
+// #18585 review seat AE: the workaround the refusal names — the local-target
+// form — proceeds on the same skew (it pulls over session sync, no fabric).
+func TestCLILocalTargetFailoverProceedsOnPeerClockSkew18585(t *testing.T) {
+	for _, args := range [][]string{
+		{"redundancy-group", "2", "node", "0"},
+		{"data", "node", "0"},
+	} {
+		c := failoverCLI15081(t)
+		c.peerSystemActionFn = func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
+			t.Fatalf("%v: a local-target move must not proxy to the peer", args)
+			return "", nil
+		}
+		c.cluster.NotePeerWallClockForTesting(-72 * time.Second)
+		var err error
+		captureStdout(t, func() { err = c.handleRequestChassisClusterFailover(args) })
+		if err != nil && strings.Contains(err.Error(), "cross-node request not sent") {
+			t.Fatalf("%v: the local pull was refused on the peer's clock: %v", args, err)
+		}
+	}
+}

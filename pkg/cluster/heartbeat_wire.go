@@ -149,9 +149,11 @@ type HeartbeatPacket struct {
 	PeerHeartbeatSession  uint64
 	PeerHeartbeatSequence uint64
 	// WallClockUnixNano is the sender's wall clock when it built the frame
-	// (#18585). 0 means absent: an older sender, or a frame with no room.
-	// It is a measurement input only — nothing authenticates, elects or
-	// signs with it.
+	// (#18585). 0 means absent (an older sender). Like the echo section it is
+	// reserved AHEAD of the best-effort monitor section, so at the frame cap
+	// it displaces one or two monitor entries (measured 166->164, 111->110,
+	// 83->82 monitors) rather than being dropped itself. It is a measurement
+	// input only — nothing authenticates, elects or signs with it.
 	WallClockUnixNano int64
 }
 

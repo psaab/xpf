@@ -209,13 +209,14 @@ func TestCrossNodeFabricClockError18585(t *testing.T) {
 	if err := m.CrossNodeFabricClockError(1); err != nil {
 		t.Fatalf("no reading: must attempt the RPC, got %v", err)
 	}
-	for _, off := range []time.Duration{-59 * time.Second, 30 * time.Second, 0} {
+	for _, off := range []time.Duration{-59 * time.Second, 30 * time.Second, 0, 59900 * time.Millisecond} {
 		noteAt18585(m, off)
 		if err := m.CrossNodeFabricClockError(1); err != nil {
 			t.Fatalf("offset %v is below the break: must attempt, got %v", off, err)
 		}
 	}
-	for _, off := range []time.Duration{-72 * time.Second, 61 * time.Second} {
+	// Exactly 60 s refuses: two full windows always differ (AuthBreakSkewSecs).
+	for _, off := range []time.Duration{-72 * time.Second, 61 * time.Second, 60 * time.Second, -60 * time.Second} {
 		noteAt18585(m, off)
 		err := m.CrossNodeFabricClockError(1)
 		if err == nil {
