@@ -213,3 +213,16 @@ func (m *Manager) ResolveIngressFoldForTesting(fold uint32) (uint32, uint16, boo
 	defer m.mu.Unlock()
 	return m.resolveIngressFoldLocked(fold)
 }
+
+// ReleaseHeldRGsForTesting fires the wired #18620 release hook for rgIDs
+// under Manager.mu, exactly as adoptHelperInventoryLocked does when an
+// acknowledged inventory drops them from the connected-row hold. It lets
+// daemon-level cells prove the hook is wired and republishes, without a
+// helper round trip. A Manager with no hook wired does nothing.
+func (m *Manager) ReleaseHeldRGsForTesting(rgIDs []int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.heldRGReleaseFn != nil {
+		m.heldRGReleaseFn(rgIDs)
+	}
+}

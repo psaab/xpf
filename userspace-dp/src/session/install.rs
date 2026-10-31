@@ -976,8 +976,9 @@ impl SessionTable {
             other => other,
         };
         // Reject peer data that would clobber a locally-owned session
-        // unless explicitly allowed (e.g. during HA activation).
-        if matches!(self.entry_by_key(&key), Some(existing) if !existing.origin.is_peer_synced())
+        // unless explicitly allowed (e.g. during HA activation). #18620: a
+        // punt seed is not locally owned (`yields_to_peer`).
+        if matches!(self.entry_by_key(&key), Some(existing) if !existing.origin.yields_to_peer())
             && !allow_replace_local
         {
             return false;

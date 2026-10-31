@@ -1672,6 +1672,69 @@ and the work-counted O(1) bounds) and
 `worker_loop_wires_its_table_to_the_node_punt_seed_directory_18562` (the real
 worker construction).
 
+## A punt seed is not authority (#18620)
+
+A #7770 `FabricPuntSeed` records a flow whose egress RG the PEER owned when
+its first packet arrived. It is NAT-free and fabric-redirects, and the peer
+adjudicated and translated the flow. Two rules follow, and both are keyed on
+the seed's own origin:
+
+- **Retired once this node forwards its egress.**
+  `retire_fabric_punt_seed_if_owner_active` (afxdp/session_glue/resolve.rs)
+  runs when a slow-path lookup hits this worker's forward seed. That is gated
+  on the origin the lookup already returns, so no other packet pays anything.
+  - The seed is retired when a fresh FIB resolution of the flow names a real
+    local egress (ForwardCandidate, or MissingNeighbor while its neighbor
+    resolves) whose RG is forwarding-active here. The seed's stamp is not
+    consulted: the already-redirected arm stamps none, and a stamp says where
+    the flow went, not where it goes now. A FIB that still withholds the egress
+    (cluster-terminal) or cannot route the flow (#10507's NoRoute retention)
+    keeps the seed.
+  - It removes the steering row and the conntrack mirror as for any removed
+    session. Removal goes through `delete`, the Terminal sink, which also
+    retires the #18562 directory row and emits no delta.
+  - The row removed is the hit's CANONICAL key. A seed that an HA-transition
+    refresh gave a translation can be hit through its forward-wire alias, and
+    deleting the packet's (alias) key there would leave the seed and drop
+    another tuple's steering row.
+  - The caller then looks again. The packet resolves against the node's synced
+    session, if the shared maps hold one, or takes the ordinary miss path,
+    which adjudicates policy and NAT afresh as the owner.
+  - The seed's recorded permit goes with it. #10507 Cell 7a now proves its
+    property through that miss path: the post-activation ACK is a SYN-first
+    drop, and the next SYN is denied by live policy.
+  - Why: a seed that survives to that point shadows the flow. Every forward
+    packet hits it first and leaves NAT-free toward a peer that no longer
+    forwards the RG, and that traffic keeps the seed from ever idling out. On
+    loss this was the persistent half of #18620, with ping and iperf outages
+    of 18-515 s until the RG moved away again.
+- **It yields to the peer.** `SessionOrigin::yields_to_peer` is
+  `is_peer_synced() || FabricPuntSeed`. A peer import or a peer delete of the
+  key replaces the seed even where the egress RG is locally active: the
+  worker install guard in `upsert_synced_with_origin`, and the #9048/#9714
+  delete guard in `handle_delete_synced`.
+  - Authored rows (ForwardFlow, LocalMiss, SharedPromote, ...) and the
+    owner-minted `MissingNeighborSeed` keep `peer_delete_refused_local_owned`.
+    On the owner they ARE the authority.
+  - The coordinator-side guards read shared-map rows. A seed is never in the
+    shared maps, so they are unchanged.
+
+A seed whose egress RG is still the peer's (the split it was minted for) is
+untouched by both rules. Cells: `afxdp/tests_punt_seed_shadow_18620.rs`.
+
+Residual (review of #18638): retirement is LAZY. It happens at the flow's next
+forward hit, not at the RG activation.
+- In between, an embedded ICMP error quoting the punted flow can still match
+  the seed: through the worker's table, or, for a fabric-ingress error,
+  through its #18562 directory row, which expires at most
+  `PUNT_SEED_ROW_TTL_NS` (2 s) after the seed was minted.
+- Such an error is delivered toward the LAN host as it would have been
+  mid-split. No data packet is admitted this way. The error belongs to a flow
+  this node ingressed and its own policy permitted.
+- Reply-direction data packets are not covered by this residual: the #10507
+  fence still revokes them on activation (seat V probe:
+  `session_hit=1 revoked=1 tx=0`).
+
 ## Corruption contract (#1855)
 
 A `key_to_handle` mapping that points at a vacant or reused slab slot is

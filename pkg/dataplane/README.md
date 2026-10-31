@@ -255,6 +255,40 @@ transfer. The mark is an overlay on what the HELPER is told. It never changes
   enter the helper FIB before its forwarding opens, the #16270 order the
   promotion path keeps. Proxy-NDP responders keep the raw provider: a
   pre-active node must not answer for addresses its peer still owns.
+- The same provider also reports an RG as locally primary while the CURRENT
+  helper last acknowledged it active (`helperActiveRGsLocked`, read from
+  `haWatchdogHelperInventory`), #18620. That is the demotion twin of #16270:
+  an RG's connected prefixes leave the helper FIB only after
+  `UpdateRGActive(false)` has been acknowledged.
+  - Every route build and that acknowledgement run under `m.mu`, so the
+    order holds by construction for every publisher: the cluster-state
+    republish, the route listener, ip-monitoring, a commit, and the
+    apply-time rebuild.
+  - Before #18620, a snapshot published between the cluster verdict flipping
+    and the acknowledgement withdrew the rows under live forwarding. On loss
+    that window was 50-80 ms, and a snapshot landed in it on about one
+    demotion in ten. The first FIB-stale hit of each live SNAT session was
+    then revoked as stale source NAT.
+  - The hold reads the acknowledged inventory, not `haGroups`. A failed
+    `UpdateRGActive(false)` has already written `haGroups`, but the helper may
+    still forward the RG.
+  - Every full-inventory ack (`syncHAStateLocked`, the `UpdateRGActive`
+    publish) goes through `adoptHelperInventoryLocked`. When an ack DROPS an RG
+    from the hold, it calls the daemon's `SetHeldRGReleaseFunc` hook, which
+    schedules the connected-RG republish. So the withdrawal follows whichever
+    path delivered the ack, including the reconcile retry of a failed demotion
+    write, which is not an ownership edge and schedules no republish of its
+    own. The hook runs under `m.mu` and only schedules.
+  - Residual: `armPendingHAStateReplayLocked` (a replay-debt reset after a
+    snapshot publish) clears the acknowledged inventory directly, so the hold
+    drops without firing the hook. If that reset lands while an RG is still
+    held (a failed demotion ack in flight), the rows already published stay
+    until the next publish of any kind, because the later replay ack starts
+    from an empty inventory and releases nothing. Firing the hook from the
+    reset instead would withdraw the rows while the helper may still forward
+    the RG, which is the window this hold exists to close. The reset path is
+    narrow (generation debt plus a failed demotion ack); a follow-up can carry
+    the held set across the reset.
 - A real promotion or a real demotion of the RG in `UpdateRGActive`
   (`supersedeTransferPreActiveLocked`) removes the mark. Without the
   demotion arm, a mark still inside its deadline would keep the helper

@@ -4990,3 +4990,47 @@ changes it holds applySem across an FRR reload and a snapshot publish (the
 (0.0.26110) it started between RG1's and RG2's crash activations and RG2
 went active 0.52 s after peer loss; after the debounce, one run reads the
 gate predicate once the burst of activations has finished.
+
+## Demotion edge withdraws routes only after rg_active=false (#18620)
+
+`handleClusterEvent` schedules the three route-withdrawing reconciles of a
+cluster demotion edge only AFTER the `SetRGActive(false)` write:
+`scheduleFRRHAReconcile`, `scheduleConnectedRGRepublish` and
+`scheduleIPMonGating`. This is the demotion twin of #16270, which publishes
+the connected rows BEFORE `SetRGActive(true)` on promotion.
+
+Why: they used to be scheduled at the top of the handler. The connected-RG
+republish is an async goroutine on applySem, and it raced `UpdateRGActive`
+for the userspace manager's lock. On loss it won on about one demotion in
+ten. The helper then held a FIB without the RG's connected rows while it
+still forwarded the RG, for the 50-80 ms until the HA update landed.
+
+In that window, live SNAT sessions were revoked on their first FIB-stale hit
+(the #16215 StaleSourceNat path, +12 to +16 sessions per window). The next
+packet minted a #7770 punt seed that shadowed the flow when the RG returned:
+the 3-500 s ping and iperf outages of #18620.
+
+The schedules stay asynchronous; a demotion does not wait on applySem. The
+FRR and ip-monitoring reconciles are debounced 250 ms, so they reordered only
+when `SetRGActive` itself was delayed past that. Scheduling them after the
+write orders them by construction. `injectBlackholeRoutes`, which still runs
+before the write, is a no-op on the userspace dataplane and cannot move the
+helper FIB.
+
+The manager-side hold in pkg/dataplane (`helperActiveRGsLocked`) is the
+second half: no publisher can withdraw an RG's connected rows before the
+helper's acknowledgement. This ordering is what guarantees a withdrawal
+publish happens once that acknowledgement has landed.
+
+The schedules run even when the write FAILS. The reconcile retry that later
+lands it schedules none of them. The rows themselves stay held until the
+helper acknowledges, so scheduling here cannot withdraw them early. When the
+retry's ack does land, the manager's release hook
+(`wireUserspaceRGRouteHooks` -> `onHelperReleasedRGs`) schedules the
+withdrawal.
+
+Cells, in `demotion_route_order_18620_test.go`:
+- the ordering cell. The SetRGActive fake holds for 150 ms, and on revert the
+  publish lands inside the hold;
+- the failed-write cell;
+- `helper_release_republish_18620_test.go`, for the hook wiring.

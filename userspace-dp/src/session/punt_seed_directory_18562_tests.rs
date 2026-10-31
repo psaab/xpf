@@ -358,7 +358,7 @@ fn stuck_front_queue_is_capped_and_refuses_18562() {
 /// cap, at a full shard of live rows, and in steady state at the cap. Run with
 /// `--ignored --nocapture`.
 #[test]
-#[ignore = "timing harness for #18562 review; run explicitly"]
+#[ignore = "MEASUREMENT: timing harness for the #18562 review (ns per punt-seed directory publish); gates nothing, run explicitly"]
 fn punt_seed_directory_publish_cost_bench_18562() {
     let reps = 20_000usize;
     let cap = PuntSeedDirectory::row_cap_for_test();

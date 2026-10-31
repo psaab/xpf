@@ -29,26 +29,26 @@
 use super::tests_support::*;
 use super::*;
 
-const TCP_ACK: u8 = crate::tcp_flags::TCP_ACK;
-const LAN_HOST: Ipv4Addr = Ipv4Addr::new(10, 0, 61, 102);
-const WAN_HOST: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 200);
-const SNAT_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 8);
-const SPORT: u16 = 36552;
+pub(super) const TCP_ACK: u8 = crate::tcp_flags::TCP_ACK;
+pub(super) const LAN_HOST: Ipv4Addr = Ipv4Addr::new(10, 0, 61, 102);
+pub(super) const WAN_HOST: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 200);
+pub(super) const SNAT_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 8);
+pub(super) const SPORT: u16 = 36552;
 /// A port-translated (PAT) source port, distinct from SPORT.
 const PAT_PORT: u16 = 40123;
-const DPORT: u16 = 5211;
+pub(super) const DPORT: u16 = 5211;
 /// Captured fw1 snapshot ifindexes: reth1.0 (LAN) = 5, reth0 (WAN parent)
 /// = 6, reth0.80 = 14, fabric parent ge-7-0-0 = 4.
-const LAN_IFINDEX: i32 = 5;
-const WAN_PARENT_IFINDEX: i32 = 6;
-const WAN_UNIT_IFINDEX: i32 = 14;
-const FABRIC_IFINDEX: i32 = 4;
+pub(super) const LAN_IFINDEX: i32 = 5;
+pub(super) const WAN_PARENT_IFINDEX: i32 = 6;
+pub(super) const WAN_UNIT_IFINDEX: i32 = 14;
+pub(super) const FABRIC_IFINDEX: i32 = 4;
 /// Binding positions in `bindings()`.
-const WAN: usize = 0;
-const FABRIC: usize = 1;
-const LAN: usize = 2;
+pub(super) const WAN: usize = 0;
+pub(super) const FABRIC: usize = 1;
+pub(super) const LAN: usize = 2;
 
-fn rg(active: bool, now_secs: u64) -> HAGroupRuntime {
+pub(super) fn rg(active: bool, now_secs: u64) -> HAGroupRuntime {
     HAGroupRuntime {
         active,
         watchdog_timestamp: now_secs,
@@ -61,7 +61,7 @@ fn rg(active: bool, now_secs: u64) -> HAGroupRuntime {
 }
 
 /// fw1 owning both RGs (post crash takeover).
-fn owner_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
+pub(super) fn owner_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
     BTreeMap::from([
         (0, rg(true, now_secs)),
         (1, rg(true, now_secs)),
@@ -70,7 +70,7 @@ fn owner_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
 }
 
 /// fw1 after the RG1 failback: WAN peer-owned, LAN still local.
-fn split_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
+pub(super) fn split_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
     BTreeMap::from([
         (0, rg(true, now_secs)),
         (1, rg(false, now_secs)),
@@ -82,7 +82,12 @@ fn split_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
 /// reth0 units are no longer peer-owned and the WAN connected/default routes
 /// replace the cluster-terminal default (what fw1's FIB held while it owned
 /// RG1, and still holds in the window before FRR reloads).
-fn fw1_owner_forwarding() -> ForwardingState {
+pub(super) fn fw1_owner_forwarding() -> ForwardingState {
+    build_forwarding_state(&fw1_owner_snapshot())
+}
+
+/// The snapshot behind `fw1_owner_forwarding`, for cells that add to it.
+pub(super) fn fw1_owner_snapshot() -> crate::ConfigSnapshot {
     let raw = include_str!("testdata_15742h/snap-split-fw1.json");
     let mut v: serde_json::Value = serde_json::from_str(raw).expect("json");
     let snap = v.get_mut("snapshot").expect("snapshot");
@@ -106,12 +111,10 @@ fn fw1_owner_forwarding() -> ForwardingState {
             "preference": if next_hop.is_some() { 5 } else { 0 },
         }));
     }
-    let snapshot: crate::ConfigSnapshot =
-        serde_json::from_value(snap.clone()).expect("decode fw1 owner snapshot");
-    build_forwarding_state(&snapshot)
+    serde_json::from_value(snap.clone()).expect("decode fw1 owner snapshot")
 }
 
-fn forward_key() -> crate::session::SessionKey {
+pub(super) fn forward_key() -> crate::session::SessionKey {
     crate::session::SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
@@ -126,7 +129,7 @@ fn forward_key() -> crate::session::SessionKey {
 
 /// The forward row as fw1 (owner of both RGs) exports it: owner RG1 out
 /// reth0.80 with interface SNAT to `rewrite_src`, Established.
-fn imported_pair_entry(
+pub(super) fn imported_pair_entry(
     forwarding: &ForwardingState,
     key: crate::session::SessionKey,
     rewrite_src: IpAddr,
@@ -244,7 +247,7 @@ fn imported_pair(forwarding: &ForwardingState, now_ns: u64, rewrite_src: Ipv4Add
 /// Fresh bindings per packet: a fresh flow cache stands in for the RG-epoch
 /// invalidation that sends the first post-transition packet down the slow
 /// path in production.
-fn bindings() -> Vec<BindingWorker> {
+pub(super) fn bindings() -> Vec<BindingWorker> {
     let mut wan = BindingWorker::new_for_mirror_test(0, 0, WAN_PARENT_IFINDEX, 0);
     wan.interface = Arc::<str>::from("ge-7-0-2");
     let mut fabric = BindingWorker::new_for_mirror_test(1, 0, FABRIC_IFINDEX, 0);
@@ -427,7 +430,7 @@ fn demote_rg1(sessions: &mut SessionTable, forwarding: &ForwardingState, now_ns:
 
 /// Apply worker commands (peer delete, HA import) through the production
 /// dispatcher.
-fn apply_commands(
+pub(super) fn apply_commands(
     sessions: &mut SessionTable,
     forwarding: &ForwardingState,
     ha: &BTreeMap<i32, HAGroupRuntime>,

@@ -298,6 +298,18 @@ later):
    covering connected prefix beats a selected non-cluster terminal
    only while a cluster-terminal row proves republication is owed;
    settled-FIB operator discards are bit-identical).
+   The demotion side was still unordered until #18620. The cluster-state
+   republish that WITHDRAWS the RG's connected rows ran async ahead of
+   `SetRGActive(false)`, and on loss its snapshot reached the helper first
+   on about one demotion in ten. The window was 50-80 ms with the helper
+   still forwarding the RG. Live SNAT sessions were revoked as stale source
+   NAT, and the punt seed that replaced them blackholed the flow when the RG
+   returned (18-515 s ping/iperf outages). Fix:
+   - the demotion edge schedules its withdrawing reconciles after the write;
+   - the route builders hold an RG's connected rows while the helper last
+     acknowledged it active;
+   - a punt seed is retired once its egress RG is local, and it yields to the
+     peer's import or delete.
 3. **Supersession (#16270 cache leg, #16222).** Cache revalidation
    had supersession arms for `FabricRedirect` and `DiscardRoute`
    but none for a locally-egressing `ForwardCandidate` whose egress

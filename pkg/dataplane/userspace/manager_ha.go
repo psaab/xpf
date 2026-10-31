@@ -72,8 +72,7 @@ func (m *Manager) syncHAStateLocked() error {
 	// smaller configured set while the helper still owns this inventory; the
 	// lock-free watchdog snapshot must retain that membership until a new full
 	// publish lands.
-	m.helperHAStatePublished = true
-	m.haWatchdogHelperInventory = append(m.haWatchdogHelperInventory[:0], groups...)
+	m.adoptHelperInventoryLocked(groups)
 	m.publishHAWatchdogSnapshotLocked()
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		return err
@@ -1346,8 +1345,7 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	// inventory and holds ctrl one extra tick during takeover. Safe: the Active
 	// bits just written to rg_active are the ones the helper acknowledged.
 	m.pendingHAStateReplay = false
-	m.helperHAStatePublished = true
-	m.haWatchdogHelperInventory = append(m.haWatchdogHelperInventory[:0], groups...)
+	m.adoptHelperInventoryLocked(groups)
 	m.publishHAWatchdogSnapshotLocked()
 	if active {
 		// The helper has already acknowledged the RG activation update.
