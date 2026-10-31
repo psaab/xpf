@@ -2650,7 +2650,10 @@ on the wall clock. `... node B`, the peer, is proxied over fabric gRPC to B
 token-authenticated and fails past the skew bound above.
 
 So with the clocks apart, a loop issued from one node fails every move to the
-peer with the #6708 "window Ns ahead/behind ours" error. Every move back then
+peer: with the #6708 "window Ns ahead/behind ours" error, or — with #18585 and
+a fresh heartbeat reading of 60 s or more — with the up-front
+"cross-node request not sent: ..." refusal (30–60 s still reaches the
+fabric and fails or passes on window alignment). Every move back then
 prints "already primary": the handler reads that from `IsLocalPrimary` and
 never contacts the peer. On loss on 2026-10-31 (fw1 72 s behind) that was 10
 FAIL and 10 VOID in 20 moves, and traffic never left node0.
