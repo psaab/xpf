@@ -2828,7 +2828,16 @@ learns its (rank, width) in the bring-up's worker set at launch
 slab). The node therefore charges each peer session once, spread across
 workers the way RSS spreads local sessions; #3122 still holds because the
 copies still count. A lone table (width 1, standalone tests) charges every
-copy, as before. `SharedMaterialize` / `SharedPromote` rows are the serving
+copy, as before.
+
+Residual: the designation spreads a source's synced charges evenly across the
+workers, while the primary charged each local session on the worker RSS
+delivered it to. If RSS concentrated a source on one worker (L3-only UDP
+hashing, for example), the primary capped it near one worker's limit. After
+failover the standby's worker for that source holds only its share of the
+charges, so it can admit more new flows than the primary would have. That is
+still bounded by the `limit × N` node-wide figure that per-worker enforcement
+allows for an evenly spread source. `SharedMaterialize` / `SharedPromote` rows are the serving
 worker's own copy and count there.
 
 **The predicate is one function.** `SessionTable::session_limit_counted(key,

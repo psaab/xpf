@@ -300,3 +300,28 @@ fn shard_change_rebuilds_counts_18640() {
         "no phantom zero entries (#2128)"
     );
 }
+
+/// #3122 still holds across the fan-out: a source whose synced sessions
+/// exceed the per-worker limit on every worker's share stays capped on every
+/// worker after failover. The charges are spread, not dropped.
+#[test]
+fn synced_copies_still_enforce_the_cap_after_failover_18640() {
+    let mut tables = node_tables();
+    let limit = 2u32;
+    let s = 64u16; // 16 per worker on average, far above the limit
+    for p in 0..s {
+        let k = fwd_key(44000 + p);
+        for t in tables.iter_mut() {
+            assert!(
+                t.upsert_synced_with_origin(install(&k, SessionOrigin::SyncImport, false), false)
+            );
+        }
+    }
+    for (i, c) in per_worker(&tables).iter().enumerate() {
+        assert!(
+            *c >= limit,
+            "worker {i} charges {c} synced sessions; the over-limit predicate must still fire on every worker: {:?}",
+            per_worker(&tables)
+        );
+    }
+}
