@@ -683,7 +683,11 @@ validation, and every existing validator default (`MIN_GBPS_V4`, TTL/mtr v4
 cells). **Recommendation: full dual-stack mirror** with stack-distinct v4
 RETH addresses continuing the `.7`(legacy)/`.8`(userspace) sequence:
 TCP RETH `172.16.50.10`/`172.16.80.10`, UDP `172.16.50.11`/`172.16.80.11`
-(both pairs free per grep; `.1` gw, `.6` stale VIP in env — §6-R4). Generator
+(both pairs free per grep; `.1` gw, `.6` stale VIP in env — §6-R4).
+**Superseded on VLAN 50 (#18558):** a grep of this repo cannot see hosts that
+have no config here. A live ARP probe showed `.10` and `.11` held by non-xpf
+lab devices, so the v4 RETHs moved to `.42` / `.43`. The VLAN 80 pair is
+unaffected. See §3.3. Generator
 v4: `10.0.62.102`/`10.0.63.102`, gw `.1`. Targets v4 as above. v4 LAN is
 **not** part of the `/56` delegation story (no v4 delegation given); if a v4
 delegated block is wanted it is Q7's second half.
@@ -982,7 +986,7 @@ below is a VF on the named PF; no row is a PF passthrough.
 | | eth1→em0 (`bpu-tcp-hb0`) | `10.99.14.1/30` | link-local only | HA control (heartbeat 200 ms×5) |
 | | eth2 (`fab-vf`, `name=enp7s0`)→ge-0/0/0→fab0 (**F0**: VF on `ix0` `0000:03:00.0`, VLAN **FAB-VLAN tcp=3990**‡, MTU 9000) | `10.99.15.1/30` | link-local only | fabric: session/config sync (child `ge-0/0/0`) |
 | | wan-vf→ge-0/0/2 (**W0**: VF on `mlx0` `0000:02:00.0`, trunk) | — (parent) | `fe80::bf72:16:1` (RETH LL, shared) | AF_XDP WAN parent |
-| | ↳ reth0.50 (VLAN 50, RG1) | `172.16.50.10/24` `[NEW]` | **`2001:559:8585:50::a/64`** | WAN primary |
+| | ↳ reth0.50 (VLAN 50, RG1) | `172.16.50.42/24` (was `.10`; foreign-held, #18558, §3.3) | **`2001:559:8585:50::a/64`** | WAN primary |
 | | ↳ reth0.80 (VLAN 80, RG1) | `172.16.80.10/24` `[NEW]` | **`2001:559:8585:80::a/64`** | WAN target VLAN |
 | | lan-vf→ge-0/0/1 (**L0**: VF on `mlx1` `0000:02:00.1`, VLAN **T-LAN**=TBD Q4) ↳ reth1.0 (RG2) | `10.0.62.1/24` (VIP) | `2001:559:8585:aa00::1/64` (VIP) | LAN gw + RA + DHCPv4 srv |
 | xpf-tcp-fw1 `[NEW]` | eth0→fxp0 | DHCP | — | mirror |
@@ -1016,7 +1020,7 @@ fabric `10.99.17.1/.2/30`, LAN VLAN **U-LAN** (TBD, ≠ T-LAN), LAN
 `10.0.63.1/24` VIP, host `cluster-udp-host` `10.0.63.102` +
 `2001:559:8585:ba00::102/64`, reth1 `2001:559:8585:ba00::1/64` (RA
 `ba00::/64`), RETH v6 **`2001:559:8585:50::b`** / **`2001:559:8585:80::b`**,
-RETH v4 `172.16.50.11` / `172.16.80.11`, target `xpf-udp-target`
+RETH v4 `172.16.50.43` (was `.11`; foreign-held, #18558, §3.3) / `172.16.80.11`, target `xpf-udp-target`
 `172.16.80.211` / `2001:559:8585:80::211`, upstream route
 `ba00::/56 via …50::b`. **VF layout is identical** (§2.8.2): W0/W1/T on
 `mlx0` (`0000:02:00.0`), L0/L1/G on `mlx1` (`0000:02:00.1`), F0/F1 on
@@ -1027,7 +1031,7 @@ VLAN and the FAB-VLAN change (U-LAN / 3991 for T-LAN / 3990).
 
 | Block | Owner today | New clusters must |
 |---|---|---|
-| `2001:559:8585:50::/64`, `172.16.50.0/24` | loss legacy RETH `.7/::7`, userspace `.8/::8`, gw `.1/::1`, standalone VM `xpf-fw` (`test/incus/xpf-test.conf`, pushed by `test/incus/setup.sh`) iface `.5/::5` + NAT64 pool `.14` + SNAT pool `.15` (both proxy-ARPed, #16473), legacy local cluster (`docs/ha-cluster.conf`, `xpf-cluster-fw{0,1}.conf`) RETH `.6/::6` + its fw0 NAT64 pool `.9` + SNAT pool / proxy-ARP `.12` (both proxy-ARPed, #16473) | add `.10/::a` (tcp), `.11/::b` (udp) — v4 `.10/.11`, v6 suffixes distinct namespaces, no clash. **Every address on this segment has exactly one stack owner (#16473): `.14`/`.15` are the standalone's alone and `.9`/`.12` the legacy local cluster's alone — never allocate them (or `.5`/`.6`) to another stack, and never move a pool back onto another stack's RETH (`.6`/`.7`/`.11`)** |
+| `2001:559:8585:50::/64`, `172.16.50.0/24` | loss legacy RETH `.7/::7`, userspace `.8/::8`, gw `.1/::1`, standalone VM `xpf-fw` (`test/incus/xpf-test.conf`, pushed by `test/incus/setup.sh`) iface `.5/::5` + NAT64 pool `.14` + SNAT pool `.15` (both proxy-ARPed, #16473), legacy local cluster (`docs/ha-cluster.conf`, `xpf-cluster-fw{0,1}.conf`) RETH `.6/::6` + its fw0 NAT64 pool `.9` + SNAT pool / proxy-ARP `.12` (both proxy-ARPed, #16473) | add `.42/::a` (tcp), `.43/::b` (udp). They were `.10/.11` until #18558: a live ARP probe showed both v4 addresses held by **non-xpf** lab devices (see the note below this table), so v4 moved while v6 kept `::a/::b`. **Every address on this segment has exactly one stack owner (#16473): `.14`/`.15` are the standalone's alone and `.9`/`.12` the legacy local cluster's alone — never allocate them (or `.5`/`.6`) to another stack, and never move a pool back onto another stack's RETH (`.6`/`.7`/`.8`/`.42`/`.43`), or onto a foreign-held address (note below)** |
 | `2001:559:8585:80::/64`, `172.16.80.0/24` | RETH `.7/.8`, targets `.200/.201` (+`::200/::201`), pool-SNAT `172.16.80.7` (userspace proxy-arp; also legacy-loss RETH `.7` — the documented, accepted overlap: the loss pair's RETH and its own SNAT pool are the same stack, and no second stack claims `.7` on VLAN 80) | add `.210/::210`, `.211/::211`; ⚠ do **not** reuse `172.16.80.7` pool — if pool-SNAT exercise is copied, allocate per stack (candidates `.12` tcp / `.13` udp — Q7) |
 | `2001:559:8585:ef00::/64` + `10.0.61.0/24` | loss userspace LAN | untouched |
 | `2001:559:8585:df01::/64` + `10.0.89.0/24` | loss legacy LAN | untouched |
@@ -1035,6 +1039,70 @@ VLAN and the FAB-VLAN change (U-LAN / 3991 for T-LAN / 3990).
 | VLAN 3666/3667 on `mlx1` (loss LAN) | loss clusters | new LAN VLANs TBD (Q4); **FAB-VLANs 3990/3991 are PF-private to each host's `ix0`** (§2.8.4) — no switch allocation, but must be confirmed *not* trunk-allowed on `ix0` uplinks (Q11) |
 | `10.136.126.0/24` (`incusbr0` on loss) | mgmt for all loss VMs | new mgmt bridges on tcp/udp need their own subnets (suggest `10.136.127.0/24` tcp, `10.136.128.0/24` udp — free on those hosts; they are host-local NAT bridges so reuse would also work, but distinct aids log reading) |
 | `2001:559:8585:100::/64`, `…fff1::/64`, `172.16.15.0/20`, `172.16.100.0/22` | host mgmt / tenant nets on tcp/udp/loss hosts | do not place any test addressing here |
+
+**This segment is not xpf-only (#18558).** VLAN 50 is a shared lab network
+with dozens of non-xpf hosts, mostly Ubiquiti gear in `.2`-`.36` and across
+the rest of the /24. None of them has a config in this repo, so neither the
+table above nor the #16473 config census can see them. Before giving any
+stack an address here, probe it with RFC 5227 ARP (sender 0.0.0.0) from a
+node on the segment and require **no** reply. Ask the lab owner to reserve
+it as well: the segment's DHCP/IPAM is not under this repo's control.
+
+The 2026-10-31 sweep (tcp fw1, 3 rounds over each /24) found these foreign
+holders of addresses the shipped configs used:
+
+| address | used by | foreign holder |
+|---|---|---|
+| `172.16.50.10` | tcp WAN RETH (moved to `.42`) | `18:e8:29:2c:13:7a` |
+| `172.16.50.11` | udp WAN RETH (moved to `.43`) | `d8:b3:70:8c:f8:44` |
+| `172.16.50.9`, `.12` | legacy local NAT64 / SNAT pools (#18574) | `2a:dd:35:a2:96:97`, `ac:8b:a9:df:fd:f3` |
+| `172.16.50.14`, `.15` | standalone NAT64 / SNAT pools (#18574) | `f4:e2:c6:ea:d7:80`, `9c:05:d6:e1:f2:0f` |
+| `172.16.80.200` | loss iperf target (not a stack claim) | answered by **both** `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4`) and the external v6 target box (`f6:f0:06:10:77:d5`) (#18576) |
+
+The full measured list is `foreignClaimed18558` in
+`pkg/configstore/shared_segment_foreign_claim_18558_test.go`. That test fails
+on any shipped claim of an address in the list. A duplicate makes the
+upstream gateway's ARP entry flip between the two holders, which shows up as
+periodic IPv4-only loss on the stack (20-50% on tcp, up to 80% on udp), with IPv6 clean.
+
+**Renumbering a stack on the shared segment (#18558).** Deb deploys preserve
+the live config, so changing an address in the repo changes nothing on the
+running cluster until these steps run. Run them inside one lock cell
+(`test/incus/with-cluster.sh`, with that cluster's lock tuple):
+
+1. **Pick the address.** It must be unanswered: send RFC 5227 probes (sender
+   0.0.0.0) for it from a node on the segment, and require that only the
+   gateway's control probe is answered. `ha_wan_claim_probe` in
+   `test/incus/ha-assurance-lib.sh` shows the frame. Then land the repo
+   change, and register the address in the table above.
+2. **Commit.** On the RG0 primary (config authority):
+   `delete interfaces reth0 unit 50 family inet address <old>/24`,
+   `set interfaces reth0 unit 50 family inet address <new>/24`, `commit`.
+   Check for `commit complete`.
+3. **Remove the old address.** On the RG1 owner, run
+   `ip addr del <old>/24 dev <member>.50`, where `<member>` is
+   `ge-0-0-2` on node0 and `ge-7-0-2` on node1. This step is needed because
+   the commit never removes the old VIP (#18573). If you skip it, the owner
+   keeps answering ARP for an address it no longer owns.
+4. **Refresh the helper snapshot.** Use any further commit, or an RG1
+   failover and failback. The commit's snapshot captured the stale old
+   address, and interface-mode SNAT keeps using it (#18573). Then confirm
+   that `show security flow session destination-prefix 1.1.1.1/32` shows
+   `--> <new>/...`.
+5. **Verify.** In `make test-connectivity`, the cell "WAN IPv4 <new> answered
+   for only by this cluster" must PASS.
+
+**Coexistence window.** Between the repo change merging and step 4 on a
+cluster, master's env names `<new>` while the cluster still holds `<old>`:
+- `test-private-rg` FAILs with "WAN VIP <new> missing".
+- `wire-zone-matrix` routes the DMZ prober via the unheld `<new>`.
+- The claim check and test-connectivity's claim cell report that no node
+  holds `<new>` (VOID). So an external IPv4 FAIL stands, and is judged by the
+  3-smoke rule in `docs/regression-test-matrix.md`.
+
+Branches cut from the old master have the opposite mismatch once the live
+renumber is done. Renumber immediately after the merge, and read those cells
+as unattributable in between.
 
 ### 3.4 HA sync / fabric summary (per cluster)
 

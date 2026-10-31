@@ -448,7 +448,7 @@ ha_external_ping_capture() {
 }
 
 ha_external_sweep() {
-	local label="$1" v4_rc v4_output v6_rc v6_output
+	local label="$1" v4_rc v4_output v6_rc v6_output v4_status
 	if ! main_iperf_running; then
 		void "${label}: external reachability window lacked the main iperf load (IPv4)"
 		void "${label}: external reachability window lacked the main iperf load (IPv6)"
@@ -470,8 +470,23 @@ ha_external_sweep() {
 		void "${label}: external reachability window lost the main iperf load (IPv6)"
 		return
 	fi
+	# #18558: only a FAILING IPv4 sweep pays for the claim probe (about 3 s,
+	# after both pings so it never delays them), and only a foreign claimant
+	# converts that FAIL to VOID; see ha_external_ping_claim_verdict.
+	HA_WAN_CLAIM_STATUS=""
+	HA_WAN_CLAIM_REASON=""
+	if ha_external_ping_verdict "$v4_rc" "$v4_output" >/dev/null 2>&1; then
+		v4_status=0
+	else
+		v4_status=$?
+	fi
+	if (( v4_status == 1 )); then
+		ha_wan_claim_check "${CLUSTER_CONF:-}" "$WAN_VIP4" "$WAN_GW4" "$FW0" "$FW1"
+		info "#18558 WAN address claim check (${WAN_VIP4}): status ${HA_WAN_CLAIM_STATUS}${HA_WAN_CLAIM_REASON:+: ${HA_WAN_CLAIM_REASON}}"
+	fi
 	ha_emit_verdict "${label}: external IPv4 ${EXTERNAL_V4_TARGET}" \
-		ha_external_ping_verdict "$v4_rc" "$v4_output"
+		ha_external_ping_claim_verdict "$v4_rc" "$v4_output" \
+		"$HA_WAN_CLAIM_STATUS" "$HA_WAN_CLAIM_REASON"
 	ha_emit_verdict "${label}: external IPv6 ${EXTERNAL_V6_TARGET}" \
 		ha_external_ping_verdict "$v6_rc" "$v6_output"
 }
