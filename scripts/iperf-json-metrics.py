@@ -86,6 +86,120 @@ def end_throughput_summary(end):
     return {}
 
 
+def merge_windows(windows):
+    """Union of [lo, hi] windows, so an interval inside two overlapping
+    anchors' windows (a request and a landing 1-2 s apart) is inside."""
+    merged = []
+    for lo, hi in sorted(windows):
+        if merged and lo <= merged[-1][1] + 1e-9:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def parse_planned_move(spec, width):
+    """LABEL=T1[,T2...]: one move anchored at every instant given (the
+    request and the observed landing), each with a [T, T+width] window."""
+    label, sep, anchors = spec.partition("=")
+    if not sep or not label or not anchors:
+        raise SystemExit(f"--planned-move {spec!r}: expected LABEL=T1[,T2...]")
+    try:
+        times = [float(t) for t in anchors.split(",") if t != ""]
+    except ValueError:
+        raise SystemExit(f"--planned-move {spec!r}: anchors must be numbers")
+    if not times:
+        raise SystemExit(f"--planned-move {spec!r}: no anchors")
+    return {
+        "label": label,
+        "anchors": times,
+        "windows": merge_windows((t, t + width) for t in times),
+    }
+
+
+def score_planned_move(move, rows, args, inside):
+    """Score one planned move by H11's rules at iperf3's 1 s resolution.
+
+    Sessions are on both nodes before a planned move, so a zero interval in
+    its window is a transition cost, not an excused outage (H10: a planned
+    single-RG move loses at most 3 pings, and any stall of 300 ms or more
+    fails; one 1 s zero interval is already over that).
+    - PASS: no stream had a zero interval in the window.
+    - COST: exactly ONE stream stalled, its stall (the whole consecutive zero
+      run that touches the window, inside or past it) lasted at most
+      --planned-max-stall-sec, and it carried data again afterwards.
+    - FAIL: every stream zero in one interval (an aggregate outage over H11's
+      1 s), more than one stream stalled, a stall longer than the bound, or a
+      stream that never carried data again (it died).
+    """
+    in_window = [i for i, (lo, hi, _, _, _) in enumerate(rows) if inside(move["windows"], lo, hi)]
+    # rows[i][3]: stalled (under --planned-stall-gbps, H11's 1 Mbit/s);
+    # rows[i][4]: "zero" by the run's --zero-gbps (0.05 Gbit/s). A stream at a
+    # few tens of Mbit/s is starved of the split-RG fabric's share, not
+    # stalled: it is reported as low-share, and judged by H9's aggregate row.
+    stalled = sorted({sid for i in in_window for sid, z in rows[i][3].items() if z})
+    zero_count = sum(1 for i in in_window for z in rows[i][3].values() if z)
+    low_share = sorted({sid for i in in_window for sid, z in rows[i][4].items() if z} - set(stalled))
+    aggregate_zero = sum(1 for i in in_window if rows[i][3] and all(rows[i][3].values()))
+    stalls = {}
+    died = []
+    for sid in stalled:
+        best = 0.0
+        recovered_all = True
+        for i in in_window:
+            if not rows[i][3].get(sid):
+                continue
+            lo_i = i
+            while lo_i > 0 and rows[lo_i - 1][3].get(sid):
+                lo_i -= 1
+            hi_i = i
+            while hi_i + 1 < len(rows) and rows[hi_i + 1][3].get(sid):
+                hi_i += 1
+            best = max(best, rows[hi_i][1] - rows[lo_i][0])
+            if not any(rows[j][3].get(sid) is False for j in range(hi_i + 1, len(rows))):
+                recovered_all = False
+        stalls[sid] = round(best, 3)
+        if not recovered_all:
+            died.append(sid)
+    reasons = []
+    if aggregate_zero:
+        reasons.append(f"every stream at or below {args.zero_gbps} Gbit/s in {aggregate_zero} interval(s): an aggregate outage over 1 s")
+    if len(stalled) > 1:
+        reasons.append(f"{len(stalled)} streams stalled ({', '.join(stalled)})")
+    over = [sid for sid, sec in stalls.items() if sec > args.planned_max_stall_sec + 1e-9]
+    if over:
+        reasons.append(
+            "stall over the %g s bound: %s" % (args.planned_max_stall_sec, ", ".join(f"stream {s} {stalls[s]:g} s" for s in over))
+        )
+    if died:
+        reasons.append(f"stream(s) {', '.join(died)} never carried data again")
+    anchors = ", ".join(f"{t:g}" for t in move["anchors"])
+    share_note = (
+        f"; {len(low_share)} more stream(s) at or below {args.zero_gbps:g} Gbit/s but not stalled ({', '.join(low_share)})"
+        if low_share else ""
+    )
+    if not stalled and not aggregate_zero:
+        verdict, text = "PASS", f"no stream stalled within [T, T+{args.event_window_sec:g}] of {anchors} s"
+    elif reasons:
+        verdict, text = "FAIL", "; ".join(reasons)
+    else:
+        sid = stalled[0]
+        verdict, text = "COST", f"stream {sid} stalled {stalls[sid]:g} s at the move and recovered"
+    text += share_note
+    return {
+        "label": move["label"],
+        "anchors": move["anchors"],
+        "low_share_streams": low_share,
+        "windows": [list(w) for w in move["windows"]],
+        "stalled_streams": stalled,
+        "stall_sec": stalls,
+        "aggregate_zero_intervals": aggregate_zero,
+        "zero_stream_intervals": zero_count,
+        "verdict": verdict,
+        "text": text,
+    }
+
+
 def summarize(path, args):
     summary = {
         "path": str(path),
@@ -111,6 +225,10 @@ def summarize(path, args):
         "stream_zero_intervals_outside_events_total": 0,
         "zero_streams_outside_events_total": 0,
         "zero_streams_total": 0,
+        "planned_moves": [],
+        "planned_move_cost_total": 0,
+        "planned_move_fail_total": 0,
+        "planned_move_zero_intervals_total": 0,
         "zero_intervals_after_peak": 0,
         "stalled_intervals_after_peak": 0,
         "collapse_detected": False,
@@ -191,39 +309,71 @@ def summarize(path, args):
         summary["post_duration_intervals_excluded"] = len(intervals) - len(kept)
         intervals = [parsed for parsed, _ in kept]
         normalized_intervals = [raw for _, raw in kept]
-    exclude_windows = [
+    # EXCUSED windows (--event-sec): transitions whose outage is by design,
+    # i.e. the crash, where peer-loss detection alone takes 1.0-2.2 s. Their
+    # zero intervals are not counted anywhere.
+    exclude_windows = merge_windows(
         (float(event_sec), float(event_sec) + args.event_window_sec)
         for event_sec in args.event_sec
-    ]
+    )
+    # PLANNED moves (--planned-move): moves the harness itself makes, with
+    # sessions already on both nodes, so every lost packet is a transition
+    # cost (#18617 review, matrix H10/H11). Their zero intervals are NOT
+    # excused: each move is scored PASS/COST/FAIL below, and they are kept out
+    # of the "outside" counter only so they are not counted twice.
+    planned = [parse_planned_move(spec, args.event_window_sec) for spec in args.planned_move]
 
-    def fully_excluded(start, end_s):
-        # Only a full-length interval lying wholly inside one event window
-        # is excluded. Partial/straddling intervals stay counted: the
+    def is_full(start, end_s):
+        return end_s - start >= args.min_full_interval_sec - 1e-9
+
+    def inside(windows, start, end_s):
+        # Only a full-length interval lying wholly inside one window counts
+        # as inside. Partial/straddling intervals stay counted outside: the
         # calibration issue requires "count only full intervals" outside
         # [T, T+3], so an interval that is not fully inside the window is
         # not fully explained by the transition.
-        if end_s - start < args.min_full_interval_sec - 1e-9:
+        if not is_full(start, end_s):
             return False
-        return any(start >= lo - 1e-9 and end_s <= hi + 1e-9 for lo, hi in exclude_windows)
+        return any(start >= lo - 1e-9 and end_s <= hi + 1e-9 for lo, hi in windows)
+
+    def fully_excluded(start, end_s):
+        return inside(exclude_windows, start, end_s) or any(
+            inside(move["windows"], start, end_s) for move in planned
+        )
 
     stream_zero_total = 0
     stream_zero_outside_total = 0
     zero_stream_ids = set()
     zero_stream_ids_outside = set()
+    # Per-interval rows for the planned-move scoring: bounds, aggregate rate,
+    # and each stream's zero flag.
+    rows = []
     for interval in normalized_intervals:
         streams = interval.get("streams", [])
         # Interval bounds from the interval sum when present, else the
         # first/last stream bounds (mirrors interval_bps).
-        _, interval_start, interval_end = interval_bps(interval)
+        interval_total, interval_start, interval_end = interval_bps(interval)
         excluded = fully_excluded(interval_start, interval_end)
+        zero_by_stream = {}
+        stall_by_stream = {}
         for stream in streams:
-            if float(stream.get("bits_per_second") or 0.0) <= args.zero_gbps * 1e9:
-                stream_id = str(stream.get("socket") or stream.get("id") or "?")
+            stream_id = str(stream.get("socket") or stream.get("id") or "?")
+            bps = float(stream.get("bits_per_second") or 0.0)
+            is_zero = bps <= args.zero_gbps * 1e9
+            zero_by_stream[stream_id] = is_zero
+            stall_by_stream[stream_id] = bps < args.planned_stall_gbps * 1e9
+            if is_zero:
                 stream_zero_total += 1
                 zero_stream_ids.add(stream_id)
                 if not excluded:
                     stream_zero_outside_total += 1
                     zero_stream_ids_outside.add(stream_id)
+        rows.append((interval_start, interval_end, interval_total, stall_by_stream, zero_by_stream))
+    moves_out = [score_planned_move(move, rows, args, inside) for move in planned]
+    summary["planned_moves"] = moves_out
+    summary["planned_move_cost_total"] = sum(1 for m in moves_out if m["verdict"] == "COST")
+    summary["planned_move_fail_total"] = sum(1 for m in moves_out if m["verdict"] == "FAIL")
+    summary["planned_move_zero_intervals_total"] = sum(m["zero_stream_intervals"] for m in moves_out)
     for bps, start, end_s in intervals:
         observed_end = max(observed_end, end_s)
         duration = end_s - start
@@ -319,6 +469,30 @@ def main():
         help="transition instant (seconds from iperf start); may repeat. "
         "Full per-stream intervals wholly inside [T, T+--event-window-sec] "
         "are excluded from stream_zero_intervals_outside_events_total.",
+    )
+    parser.add_argument(
+        "--planned-move",
+        action="append",
+        default=[],
+        metavar="LABEL=T1[,T2...]",
+        help="a move the harness itself makes, anchored at each instant given "
+        "(the request and the observed landing); may repeat. Its zero intervals "
+        "are scored PASS/COST/FAIL in planned_moves, never excused.",
+    )
+    parser.add_argument(
+        "--planned-stall-gbps",
+        type=float,
+        default=0.001,
+        help="a stream under this rate in a planned move's interval is STALLED "
+        "(H11's 1 Mbit/s stall threshold); --zero-gbps (0.05) stays the "
+        "zero-interval definition of the other counters",
+    )
+    parser.add_argument(
+        "--planned-max-stall-sec",
+        type=float,
+        default=10.0,
+        help="longest single-stream stall a planned move may cost before it "
+        "FAILs (H11's SOAK_MAX_COST_STALL_MS, 10 s)",
     )
     parser.add_argument(
         "--event-window-sec",

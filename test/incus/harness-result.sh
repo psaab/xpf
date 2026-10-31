@@ -274,6 +274,27 @@ _ha_smoke_clock_gate() {
 		printf 'VOID\t#18614 clock_resync=1: XPF_FAILOVER_CLOCK_RESYNC=1 set the node clocks from the host during the run, so its passed cells are not operator-faithful and cannot satisfy H1-H3'
 	fi
 }
+# #18617: a smoke can record a scalar for master-relative comparison without a
+# new adapter: one `HARNESS_METRIC: <key>=<number>` line per value (the LAST
+# per key wins). Keys the adapter computes itself (cells_*, throughput_gbps,
+# clock_*) are refused, so a smoke cannot overwrite its own verdict inputs.
+_ha_smoke_harness_metrics() {
+	local line key val k
+	local -A got=()
+	while IFS= read -r line; do
+		line=${line#HARNESS_METRIC: }
+		key=${line%%=*}
+		val=${line#*=}
+		[[ "$key" =~ ^[a-z][a-z0-9_]{0,63}$ && "$val" =~ ^-?[0-9]+([.][0-9]+)?$ ]] || continue
+		case "$key" in
+		cells_* | throughput_gbps | clock_*) continue ;;
+		esac
+		got[$key]=$val
+	done < <(grep -E '^HARNESS_METRIC: ' "$1" || true)
+	for k in $(printf '%s\n' "${!got[@]}" | sort); do
+		printf ' %s=%s' "$k" "${got[$k]}"
+	done
+}
 harness_adapt_ha_smoke() {
 	local rc="$1" log="$2"
 	local summary p f skipped="" cost=""
@@ -302,7 +323,9 @@ harness_adapt_ha_smoke() {
 	local metrics="cells_passed=$p cells_failed=$f"
 	[[ -n "$skipped" ]] && metrics="$metrics cells_skipped=$skipped"
 	[[ -n "$gbps" ]] && metrics="$metrics throughput_gbps=$gbps"
+	[[ -n "$cost" ]] && metrics="$metrics cells_cost=$cost"
 	metrics="$metrics$(_ha_smoke_clock_metrics "$log")"
+	metrics="$metrics$(_ha_smoke_harness_metrics "$log")"
 	if ((f > 0)); then
 		# FAIL headlines are diagnostic-only: FAIL rows never enter bands,
 		# so the FAIL shape keeps throughput-when-present, cells otherwise.
@@ -353,6 +376,7 @@ harness_adapt_smoke_cells() {
 	[[ -n "$skipped" ]] && metrics="$metrics cells_skipped=$skipped"
 	[[ -n "$cost" ]] && metrics="$metrics cells_cost=$cost"
 	metrics="$metrics$(_ha_smoke_clock_metrics "$log")"
+	metrics="$metrics$(_ha_smoke_harness_metrics "$log")"
 	if ((f > 0)); then
 		printf 'FAIL\t\tcells_passed\thigher-better\t%s\n' "$metrics"
 		return 0
