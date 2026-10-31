@@ -155,7 +155,9 @@ pub(crate) struct BindingWorker {
     /// #18560: descriptors an earlier pass parked because they were stamped
     /// with a forwarding view this worker has left (`PrevViews`). The next
     /// poll of this binding runs a held pass over them under that view.
-    /// Pre-sized to one RX batch so parking never allocates on the hot path.
+    /// Pre-sized to two RX batches: a held pass appends re-parked packets
+    /// before it drains the prefix it consumed, so the length can reach
+    /// 2 * RX_BATCH_SIZE - 1 and parking never allocates on the hot path.
     pub(in crate::afxdp) view_held: Vec<(XdpDesc, UserspaceDpMeta)>,
     /// #8274 step 3: per-worker WireGuard decap output buffer.
     ///
@@ -612,7 +614,7 @@ impl BindingWorker {
                 cos_prepared_batch_scratch: VecDeque::new(),
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
-            view_held: Vec::with_capacity(RX_BATCH_SIZE as usize),
+            view_held: Vec::with_capacity(2 * RX_BATCH_SIZE as usize),
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             // GEMINI-NEXT.md Section 3 cold start: lazy allocation. The
@@ -774,7 +776,7 @@ impl BindingWorker {
                 cos_prepared_batch_scratch: VecDeque::new(),
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
-            view_held: Vec::with_capacity(RX_BATCH_SIZE as usize),
+            view_held: Vec::with_capacity(2 * RX_BATCH_SIZE as usize),
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             pending_neigh: super::types::FastMap::default(),
@@ -902,7 +904,7 @@ impl BindingWorker {
                 cos_prepared_batch_scratch: VecDeque::new(),
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
-            view_held: Vec::with_capacity(RX_BATCH_SIZE as usize),
+            view_held: Vec::with_capacity(2 * RX_BATCH_SIZE as usize),
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             pending_neigh: super::types::FastMap::default(),

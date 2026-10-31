@@ -309,7 +309,11 @@ fn stamp_ahead_or_expired_view_is_dropped_18560() {
     assert_eq!(fx.binding.view_held.len(), 1);
     let mut expired = views.clone();
     expired.expire(NOW_NS + MATCHED_VIEW_GRACE_NS);
-    run_pass(&mut fx, &fwd, NEWER, PassView { prev_views: None, held_pass: true, view: None }, false);
+    assert!(expired.is_empty(), "premise: the view expired");
+    let (view, held_fwd, held_validation) =
+        super::worker::held_pass_view(&fx.binding.view_held, &expired, NOW_NS, &fwd, NEWER);
+    assert_eq!(view, None, "an expired view selects nothing");
+    run_pass(&mut fx, held_fwd, held_validation, PassView { prev_views: Some(&expired), held_pass: true, view }, false);
     assert!(fx.binding.view_held.is_empty());
     assert_eq!(fx.binding.live.config_gen_mismatches.load(Ordering::Relaxed), 1, "an expired view's packet is dropped as before");
     assert_eq!(fx.binding.scratch.scratch_recycle.len(), 1, "and its descriptor is recycled");
@@ -410,4 +414,54 @@ fn held_pass_creates_no_session_18560() {
     assert_eq!(fx.sessions.len(), 0);
     assert_eq!(fx.binding.live.config_gen_mismatches.load(Ordering::Relaxed), 1, "dropped as the generation mismatch it is");
     assert_eq!(fx.binding.scratch.scratch_recycle.len(), 1, "and recycled");
+}
+
+/// poll_binding's batch shape (seat V): a held batch reads no RX (current
+/// stamps would be judged against the left view and dropped) and takes no
+/// injected packet, and it does not end the poll's batch loop.
+#[test]
+fn held_batch_shape_18560() {
+    let held = BatchShape::for_binding(1, 64);
+    assert_eq!(held, BatchShape { held_pass: true, available: 0, take_injected: false });
+    assert!(held.loop_continues(), "a held pass must not end the poll's batch loop");
+    let normal = BatchShape::for_binding(0, 64);
+    assert_eq!(normal, BatchShape { held_pass: false, available: 64, take_injected: true });
+    assert!(normal.loop_continues());
+    assert!(!BatchShape::for_binding(0, 0).loop_continues(), "an empty ring ends the loop");
+}
+
+/// The worker loop's per-tick view step and its CoS-change clear.
+#[test]
+fn worker_loop_view_steps_18560() {
+    let fwd = Arc::new(ForwardingState::default());
+    let mut views = PrevViews::default();
+    views.on_tick(STAMPED, &fwd, NEWER, NOW_NS);
+    assert_eq!(views.find(7, 9, NOW_NS), Some(0), "an adoption must retain the view being left");
+    views.on_tick(NEWER, &fwd, NEWER, NOW_NS);
+    assert!(!views.is_empty(), "a tick without adoption keeps live views");
+    views.on_tick(NEWER, &fwd, NEWER, NOW_NS + MATCHED_VIEW_GRACE_NS);
+    assert!(views.is_empty(), "a tick past the deadline must release the view");
+    views.on_tick(STAMPED, &fwd, NEWER, NOW_NS);
+    views.on_forwarding_swap(false);
+    assert!(!views.is_empty());
+    views.on_forwarding_swap(true);
+    assert!(views.is_empty(), "a CoS change must clear the retained views");
+}
+
+/// The production loops must call the helpers the two cells above pin.
+#[test]
+fn held_pass_wiring_is_present_18560() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp/worker");
+    let loop_body = std::fs::read_to_string(root.join("loop_body/mod.rs")).expect("read loop body");
+    assert_eq!(loop_body.matches("prev_views.on_tick(").count(), 1, "worker loop must step the retained views every tick");
+    assert_eq!(loop_body.matches("prev_views.on_forwarding_swap(cos_changed)").count(), 1, "worker loop must clear views on a CoS change");
+    let lifecycle = std::fs::read_to_string(root.join("lifecycle.rs")).expect("read lifecycle");
+    for needle in [
+        "BatchShape::for_binding(binding.view_held.len(), available)",
+        "let available = shape.available;",
+        "if shape.take_injected { injected_packet.take() } else { None }",
+        "if !shape.loop_continues() {",
+    ] {
+        assert_eq!(lifecycle.matches(needle).count(), 1, "poll_binding must use `{needle}`");
+    }
 }

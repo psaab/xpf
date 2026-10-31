@@ -2220,9 +2220,19 @@ stamped with one of them under THAT view:
   mismatch branch. Per RX batch the poll adds one `view_held.is_empty()` test
   and a three-slot `PrevViews::is_empty()` test. Per worker tick it adds one
   three-slot expiry check while views are retained. Parking never allocates,
-  because `view_held` is pre-sized to `RX_BATCH_SIZE` and the held pass
-  drains its consumed prefix in place. Retaining a view keeps its
+  because `view_held` is pre-sized to `2 * RX_BATCH_SIZE` (a held pass
+  appends re-parked packets before it drains its consumed prefix in place).
+  A held batch does not end the poll's batch loop (`BatchShape`), so a
+  parking poll still reads up to `MAX_RX_BATCHES_PER_POLL` batches. Retaining a view keeps its
   `ForwardingState` alive for up to 1 s.
+- **What runs under the current view.** Only the descriptor pass (flow-cache
+  lookup and replay, filters, zones) uses the left view's tables. The TX
+  enqueue that follows the pass, its CoS queue selection and fences, and the
+  zone/flood counter flush run under the current `forwarding`. That is safe
+  because a held packet's egress was decided by its flow-cache entry, and a
+  publish that changes the CoS runtime config clears the retained views; a
+  publish that renumbers zones can attribute one window of held packets'
+  zone counters to the new slot map (counters only).
 - **Ordering.** Inside the one RX batch that straddles the stamp switch,
   parked (older) packets are transmitted after the batch's current-stamped
   ones. That is at most one batch per publish per binding.

@@ -163,8 +163,9 @@ pub(super) fn poll_binding(
         // #18560: packets an earlier batch parked (stamped with a forwarding
         // view this worker has left) run first, in a held pass under that
         // view's tables and validation. No RX is read in that batch.
-        let held_pass = !binding.view_held.is_empty();
-        let available = if held_pass { 0 } else { available };
+        let shape = crate::afxdp::BatchShape::for_binding(binding.view_held.len(), available);
+        let held_pass = shape.held_pass;
+        let available = shape.available;
         if cfg!(feature = "debug-log") {
             if raw_avail > 0 {
                 binding.telemetry.dbg_rx_avail_nonzero += 1;
@@ -274,7 +275,7 @@ pub(super) fn poll_binding(
             right,
             &area,
             available,
-            if held_pass { None } else { injected_packet.take() },
+            if shape.take_injected { injected_packet.take() } else { None },
             sessions,
             screen,
             pass_validation,
@@ -390,11 +391,14 @@ pub(super) fn poll_binding(
                 .extend(binding.scratch.scratch_recycle.drain(..));
         }
         let _ = drain_pending_fill(binding, now_ns);
-        counters.rx_batches += 1;
+        if !held_pass {
+            counters.rx_batches += 1;
+        }
         did_work |= available > 0
+            || held_pass
             || had_injected_packet
             || binding.pending_pmech_reverse.len() < pending_pmech_before;
-        if available == 0 {
+        if !shape.loop_continues() {
             break;
         }
     }

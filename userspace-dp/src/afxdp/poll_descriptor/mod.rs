@@ -1078,7 +1078,10 @@ pub(super) fn poll_binding_process_descriptor_in_view(
         }
         let mut recycle_now = true;
         if let Some(meta) = injected_meta.or_else(|| try_parse_metadata(area.area(), desc)) {
-            telemetry.counters.metadata_packets += 1;
+            // #18560: a held pass's packets were counted when first read.
+            if !pass.held_pass {
+                telemetry.counters.metadata_packets += 1;
+            }
             let disposition = classify_metadata(meta, validation);
             if disposition == PacketDisposition::Valid {
                 telemetry.counters.validated_packets += 1;

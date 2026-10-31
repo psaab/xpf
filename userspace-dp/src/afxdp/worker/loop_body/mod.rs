@@ -883,25 +883,21 @@ pub(crate) fn worker_loop(
             );
             last_route_change_alarm_ns = loop_now_ns;
         }
+        // #18560: keep the view being left (its tables are the current
+        // `forwarding` Arc until the swap below) for the packets still stamped
+        // with it; otherwise drop expired views.
+        prev_views.on_tick(validation, &forwarding, live_validation, loop_now_ns);
         if live_validation != validation {
-            // #18560: keep the view being left (its tables are the current
-            // `forwarding` Arc until the swap below) for the packets still
-            // stamped with it.
-            prev_views.retain(validation, &forwarding, live_validation, loop_now_ns);
             validation = live_validation;
-        } else if !prev_views.is_empty() {
-            prev_views.expire(loop_now_ns);
         }
         if let Some(new_forwarding) = new_forwarding_opt {
             // Compare BEFORE assignment — needs both old and new.
             let cos_changed =
                 cos_runtime_config_changed(forwarding.as_ref(), new_forwarding.as_ref());
-            if cos_changed {
-                // #18560: the binding's CoS queues are rebuilt for the new
-                // tables; a held pass under the old ones could select a queue
-                // that no longer exists. Keep the strict fence for this edge.
-                prev_views.clear();
-            }
+            // #18560: the binding's CoS queues are rebuilt for the new
+            // tables; a held pass under the old ones could select a queue that
+            // no longer exists. Keep the strict fence for this edge.
+            prev_views.on_forwarding_swap(cos_changed);
             let (mut purge_input_filter_v4, mut purge_input_filter_v6) =
                 crate::filter::input_dscp_filter_ifindexes_changed(
                     &forwarding.filter_state,

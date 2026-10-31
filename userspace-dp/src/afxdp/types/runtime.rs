@@ -709,6 +709,62 @@ impl PrevViews {
     pub(in crate::afxdp) fn clear(&mut self) {
         self.slots = Default::default();
     }
+
+    /// The worker loop's per-tick step (#18560): on an adoption keep the
+    /// view being left (`current`, whose tables are `current_forwarding`
+    /// until the swap), otherwise drop expired views.
+    pub(in crate::afxdp) fn on_tick(
+        &mut self,
+        current: ValidationState,
+        current_forwarding: &Arc<ForwardingState>,
+        live: ValidationState,
+        now_ns: u64,
+    ) {
+        if live != current {
+            self.retain(current, current_forwarding, live, now_ns);
+        } else if !self.is_empty() {
+            self.expire(now_ns);
+        }
+    }
+
+    /// The worker loop's forwarding swap (#18560): a publish that changes the
+    /// CoS runtime config clears every retained view, because the binding's
+    /// queues are rebuilt for the new tables.
+    pub(in crate::afxdp) fn on_forwarding_swap(&mut self, cos_changed: bool) {
+        if cos_changed {
+            self.clear();
+        }
+    }
+}
+
+/// #18560: the shape of one RX batch of `poll_binding`. A binding with parked
+/// packets runs a held pass: it reads no RX descriptor (those carry current
+/// stamps and would be judged against the left view's validation) and takes
+/// no injected packet (stamped with the current validation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) struct BatchShape {
+    pub(in crate::afxdp) held_pass: bool,
+    pub(in crate::afxdp) available: u32,
+    pub(in crate::afxdp) take_injected: bool,
+}
+
+impl BatchShape {
+    pub(in crate::afxdp) fn for_binding(view_held_len: usize, ring_available: u32) -> Self {
+        let held_pass = view_held_len > 0;
+        Self {
+            held_pass,
+            available: if held_pass { 0 } else { ring_available },
+            take_injected: !held_pass,
+        }
+    }
+
+    /// Whether the batch loop polls another batch after this one. A held
+    /// pass reads no RX but must not end the poll: the ring still holds the
+    /// batch the next iteration reads (seat V: a parking poll used to read
+    /// at most one batch, turning mismatch drops into RX-ring overflow).
+    pub(in crate::afxdp) fn loop_continues(&self) -> bool {
+        self.held_pass || self.available > 0
+    }
 }
 
 /// #18560: what a descriptor pass runs under. `current()` is the ordinary
