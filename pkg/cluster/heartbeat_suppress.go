@@ -126,6 +126,12 @@ func (m *Manager) resetPeerSyncSuppression() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.resetSyncSuppressionLocked()
+	// #18561 (seat U): a connection that just completed TCP and the PSK
+	// handshake is itself the liveness answer. Clearing the latch here made
+	// the next timeout tick re-probe a peer that had just proved itself and
+	// give it one interval; on master that case was deferred. The next
+	// admitted heartbeat clears the latch (notePeerHeartbeatRecoveredLocked).
+	m.hbLivenessProven = true
 }
 
 // clearPeerReconnectBinding removes the OnPeerReconnected binding mgr
@@ -158,6 +164,7 @@ func (m *Manager) SyncSourceInstalled() bool {
 func (m *Manager) resetSyncSuppressionLocked() {
 	m.hbSuppressStart = 0
 	m.hbLivenessProbeMono = 0
+	m.hbLivenessProbeAnswerBy = 0
 	m.hbLivenessProven = false
 }
 
@@ -177,12 +184,24 @@ type peerLivenessProber interface {
 	RequestLivenessProbe()
 }
 
-// minLivenessProbeAnswer is how long an unanswered probe is given before
-// its silence counts as evidence. The probe is normally sent at the first
-// missed heartbeat (prearmPeerLivenessProbe), so a live peer has until the
-// timeout tick, about (threshold - 1.5) x interval, to answer; this floor only
-// matters when the probe went out on the timeout tick itself.
+// minLivenessProbeAnswer is the least time an unanswered probe is given
+// before its silence counts as evidence. The probe is normally sent at the
+// first missed heartbeat (prearmPeerLivenessProbe), so a live peer has until
+// the timeout tick, about (threshold - 1.5) x interval, to answer.
 const minLivenessProbeAnswer = 50 * time.Millisecond
+
+// livenessProbeAnswerWindowLocked is the answer window for a probe that could
+// not be pre-armed and went out on the timeout tick itself (a receiver
+// leaving a restart or boot grace with the peer already late, for instance):
+// the same (threshold - 1.5) x interval a pre-armed probe gets, so a live peer
+// is never judged on one interval (seat U). Caller must hold m.mu.
+func (m *Manager) livenessProbeAnswerWindowLocked() time.Duration {
+	w := time.Duration(2*m.hbThreshold-3) * m.hbInterval / 2
+	if w < minLivenessProbeAnswer {
+		return minLivenessProbeAnswer
+	}
+	return w
+}
 
 // livenessProberLocked returns the published source as a prober, and whether
 // the peer has proved it answers sync-level heartbeats. Caller must hold
@@ -215,6 +234,7 @@ func (m *Manager) prearmPeerLivenessProbe(nowMono int64) {
 		return
 	}
 	m.hbLivenessProbeMono = nowMono
+	m.hbLivenessProbeAnswerBy = nowMono + int64(minLivenessProbeAnswer)
 	m.livenessProbesSent++
 	p.RequestLivenessProbe()
 }
@@ -242,9 +262,11 @@ func (m *Manager) peerAnsweredLivenessProbeLocked(p peerLivenessProber, nowMono 
 	}
 	sent := m.hbLivenessProbeMono
 	if sent == 0 {
-		// The pre-arm tick was skipped (phase); probe now and give the
-		// answer floor.
+		// No probe was pre-armed (the late-heartbeat tick fell inside a
+		// restart or boot grace, or the tick phase skipped it): probe now and
+		// give it the full window a pre-armed probe would have had.
 		m.hbLivenessProbeMono = nowMono
+		m.hbLivenessProbeAnswerBy = nowMono + int64(m.livenessProbeAnswerWindowLocked())
 		m.livenessProbesSent++
 		p.RequestLivenessProbe()
 		return true
@@ -253,7 +275,7 @@ func (m *Manager) peerAnsweredLivenessProbeLocked(p peerLivenessProber, nowMono 
 		m.hbLivenessProven = true
 		return true
 	}
-	if time.Duration(nowMono-sent) < minLivenessProbeAnswer {
+	if nowMono < m.hbLivenessProbeAnswerBy {
 		return true
 	}
 	m.livenessProbeTimeouts++

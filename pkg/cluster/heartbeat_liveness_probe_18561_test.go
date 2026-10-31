@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -75,6 +76,7 @@ func (g *probeRig18561) elapse(d time.Duration) {
 	g.m.mu.Lock()
 	if g.m.hbLivenessProbeMono != 0 {
 		g.m.hbLivenessProbeMono -= n
+		g.m.hbLivenessProbeAnswerBy -= n
 	}
 	g.m.mu.Unlock()
 	g.r.lastSeen.Store(g.r.lastSeen.Load() - n)
@@ -181,9 +183,10 @@ func TestNewWindowIgnoresEarlierProbe18561(t *testing.T) {
 	}
 }
 
-// A probe sent on the timeout tick itself (no pre-arm) gets
-// minLivenessProbeAnswer before its silence counts; the 5s cap still ends
-// an answered window.
+// A probe sent on the timeout tick itself (no pre-arm) gets the full
+// (threshold - 1.5) x interval window a pre-armed probe has, never a single
+// interval (seat U); the 5s cap still ends an answered window. RED if the
+// timeout-tick branch goes back to the 50 ms floor.
 func TestProbeAnswerFloorAndCap18561(t *testing.T) {
 	src := &fakeLivenessProber18561{ackSupported: true}
 	src.lastRxMono = MonotonicNanos() - time.Second.Nanoseconds()
@@ -195,11 +198,18 @@ func TestProbeAnswerFloorAndCap18561(t *testing.T) {
 	if ok, _ := m.syncSuppressesPeerTimeoutLocked(now); !ok || src.probes != 1 {
 		t.Fatalf("first suppressed tick: suppress=%v probes=%d, want true and one probe", ok, src.probes)
 	}
-	if ok, _ := m.syncSuppressesPeerTimeoutLocked(now + (minLivenessProbeAnswer / 2).Nanoseconds()); !ok {
-		t.Fatal("probe younger than the answer floor already judged unanswered")
+	window := time.Duration(2*DefaultHeartbeatThreshold-3) * DefaultHeartbeatInterval / 2
+	if window <= 2*DefaultHeartbeatInterval {
+		t.Fatalf("premise: the window (%s) must exceed one tick plus the old floor", window)
 	}
-	if ok, _ := m.syncSuppressesPeerTimeoutLocked(now + minLivenessProbeAnswer.Nanoseconds()); ok {
-		t.Fatal("unanswered probe past the answer floor still suppressed")
+	if ok, _ := m.syncSuppressesPeerTimeoutLocked(now + (DefaultHeartbeatInterval + minLivenessProbeAnswer).Nanoseconds()); !ok {
+		t.Fatal("a live peer was judged one tick after a timeout-tick probe (the old 50 ms floor)")
+	}
+	if ok, _ := m.syncSuppressesPeerTimeoutLocked(now + (window - time.Millisecond).Nanoseconds()); !ok {
+		t.Fatal("probe inside its answer window already judged unanswered")
+	}
+	if ok, _ := m.syncSuppressesPeerTimeoutLocked(now + window.Nanoseconds()); ok {
+		t.Fatal("unanswered probe past its answer window still suppressed")
 	}
 
 	m.resetSyncSuppressionLocked()
@@ -207,6 +217,73 @@ func TestProbeAnswerFloorAndCap18561(t *testing.T) {
 	m.hbSuppressStart = now - (maxSyncSuppressDuration + time.Second).Nanoseconds()
 	if ok, _ := m.syncSuppressesPeerTimeoutLocked(now); ok {
 		t.Fatal("the 5s continuous-suppression cap no longer ends the window")
+	}
+}
+
+// Seat U: a receiver leaving its restart grace with the peer's heartbeats
+// already late has no pre-armed probe (checkTimeout returns inside the grace
+// before the pre-arm). The first post-grace tick is the timeout tick; the
+// probe it sends must get the full window, so a live peer that answers within
+// it survives. RED if the timeout-tick branch keeps the 50 ms floor.
+func TestRestartGraceExitWithLatePeerGetsFullWindow18561(t *testing.T) {
+	g := newProbeRig18561(t, true, DefaultHeartbeatThreshold*DefaultHeartbeatInterval+20*time.Millisecond)
+	// A restart grace that has just ended.
+	g.r.seenGrace = heartbeatRestartGrace
+	g.r.startedAt = time.Now().Add(-heartbeatRestartGrace - time.Millisecond)
+	g.r.checkTimeout()
+	if !g.m.PeerAlive() || g.src.probes != 1 {
+		t.Fatalf("grace-exit tick: alive=%v probes=%d, want alive and one probe", g.m.PeerAlive(), g.src.probes)
+	}
+	g.elapse(DefaultHeartbeatInterval)
+	g.r.checkTimeout()
+	if !g.m.PeerAlive() {
+		t.Fatal("live peer declared lost one interval after the grace-exit probe")
+	}
+	g.src.lastRxMono = MonotonicNanos() // the answer
+	g.elapse(DefaultHeartbeatInterval)
+	g.r.checkTimeout()
+	if !g.m.PeerAlive() {
+		t.Fatal("a peer that answered the grace-exit probe was declared lost")
+	}
+}
+
+// Seat U: a sync connection installed while heartbeats are late is the
+// liveness answer. The reconnect reset used to clear the probe AND the
+// proven latch, so the next timeout tick re-probed a peer that had just
+// completed TCP and the PSK handshake and judged it on one interval. RED if
+// resetPeerSyncSuppression stops latching the proof.
+func TestSyncReconnectCountsAsLivenessAnswer18561(t *testing.T) {
+	g := newProbeRig18561(t, true, firstMiss18561)
+	g.r.checkTimeout() // first miss: probe 1
+	g.elapse(toStale18561 - 50*time.Millisecond)
+	g.m.resetPeerSyncSuppression() // the connection is replaced late in the gap
+	g.src.lastRxMono = MonotonicNanos() - DefaultHeartbeatInterval.Nanoseconds()
+	g.elapse(50 * time.Millisecond)
+	g.r.checkTimeout() // timeout tick
+	if !g.m.PeerAlive() {
+		t.Fatal("peer declared lost right after a completed reconnect")
+	}
+	if g.src.probes != 1 {
+		t.Fatalf("probes = %d, want 1: the reconnect itself answers the window", g.src.probes)
+	}
+	// The next admitted heartbeat ends the window and the latch with it.
+	g.m.mu.Lock()
+	g.m.notePeerHeartbeatRecoveredLocked()
+	proven := g.m.hbLivenessProven
+	g.m.mu.Unlock()
+	if proven {
+		t.Fatal("an admitted heartbeat must clear the reconnect's liveness latch")
+	}
+}
+
+// The probe counters reach `show chassis cluster information` (seat U: the
+// stats had no consumer).
+func TestInformationShowsLivenessProbes18561(t *testing.T) {
+	g := newProbeRig18561(t, true, firstMiss18561)
+	g.r.checkTimeout()
+	out := g.m.FormatInformation()
+	if !strings.Contains(out, "Liveness probes sent:       1 (unanswered at timeout: 0, peer acks probes: yes)") {
+		t.Fatalf("information output lacks the liveness probe line:\n%s", out)
 	}
 }
 

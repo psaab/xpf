@@ -4276,9 +4276,17 @@ because no peer is asked anything.
   peer whose sync socket is half-open is declared on the timeout tick
   (threshold plus up to one tick of phase: 1.0-1.2 s in the lab, 0.5-0.6 s at
   defaults), provided the ack latch had armed and no frame the peer queued
-  before it died arrives after the probe. A peer without ack support keeps
+  before it died arrives after the probe. When no probe could be pre-armed
+  (the late-heartbeat ticks fell inside a restart or boot grace), the probe
+  goes out on the timeout tick and gets the same (threshold - 1.5) intervals
+  before its silence counts. A sync connection installed while heartbeats are
+  late is itself the answer (`resetPeerSyncSuppression` latches the proof
+  until the next admitted heartbeat), so a peer that has just redialled is not
+  re-probed and judged on one interval. A peer without ack support keeps
   the recency-only rule (up to max(threshold, remaining 2s window) plus one
-  tick). `LivenessProbeStats` reports the latch and the probe counts. A process
+  tick). `LivenessProbeStats` reports the latch and the probe counts, and
+  `show chassis cluster information` prints them ("Liveness probes sent"). A
+  process
   crash that closes sync, or an idle sync connection already >2s, falls back
   to the raw heartbeat threshold. Startup/restart grace can also defer
   handling. These are detection times, not end-to-end restoration SLAs

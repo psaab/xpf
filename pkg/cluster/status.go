@@ -482,6 +482,14 @@ func (m *Manager) FormatInformation() string {
 	fmt.Fprintf(&b, "  Epoch out-of-band rejected: %d\n", hbStats.EpochOutOfBandRejected)
 	fmt.Fprintf(&b, "  Epoch raises declined:      %d%s\n",
 		hbStats.EpochRaiseDeclinedAheadOfClock, epochRaiseDeclineNote(hbStats))
+	// #18561: the heartbeat-timeout liveness probe over session sync.
+	ackSupported, probesSent, probesUnanswered := m.LivenessProbeStats()
+	peerAcks := "no"
+	if ackSupported {
+		peerAcks = "yes"
+	}
+	fmt.Fprintf(&b, "  Liveness probes sent:       %d (unanswered at timeout: %d, peer acks probes: %s)\n",
+		probesSent, probesUnanswered, peerAcks)
 	fmt.Fprintln(&b)
 
 	// Sync link statistics.

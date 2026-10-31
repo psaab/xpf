@@ -672,6 +672,10 @@ type Manager struct {
 	// late or suppressed (#18561); 0 = none. Under m.mu, cleared with
 	// hbSuppressStart.
 	hbLivenessProbeMono int64
+	// hbLivenessProbeAnswerBy is when the outstanding probe's silence starts
+	// to count: minLivenessProbeAnswer after a pre-armed probe, the full
+	// (threshold - 1.5) x interval after one sent on the timeout tick.
+	hbLivenessProbeAnswerBy int64
 	// hbLivenessProven latches, for the current suppression window, that the
 	// peer answered the probe (#18561): the window then falls back to the
 	// recency rule and the 5s cap, with no further probes.
