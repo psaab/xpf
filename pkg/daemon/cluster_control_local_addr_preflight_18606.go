@@ -26,11 +26,23 @@ import (
 // it the commit succeeded and the cluster partitioned silently. This gate makes
 // it loud on purpose, BEFORE promotion, with #8965's procedure.
 //
-// THE PREDICATE is "the address the RUNNING heartbeat is bound to is no longer
-// a configured static address of the candidate's control-link unit". Keyed on
-// membership, not on equality with one selected address: an interface carrying
-// two addresses could resolve them in a different order from the kernel, and a
-// gate that compared one selected address would refuse an unrelated commit.
+// THE PREDICATE is "this commit removes the address the running heartbeat is
+// bound to": the bound address (Manager.HeartbeatLocalAddr) is a configured
+// static address of the RUNNING config's control-link unit, and the
+// candidate's unit no longer carries it. Both halves matter:
+//   - membership in the candidate, not equality with one selected address: an
+//     interface carrying two addresses can resolve them in a different order
+//     from the kernel, so a gate that compared one selected address would
+//     refuse an unrelated commit;
+//   - membership in the RUNNING config: if the heartbeat is bound to an address
+//     config never named — a DHCP lease (networkd renders no static IPv4 for a
+//     DHCPv4 row, so a unit with dhcp and a static address binds the lease), or
+//     a foreign address listed ahead of the configured one — no commit is
+//     removing it, and comparing against the candidate alone would refuse EVERY
+//     commit on that node (review seats AG and AH).
+//
+// A candidate that removes every static address (static -> DHCP) and so strands
+// the bound one is refused like any renumber.
 //
 // It abstains (returns nil), so boot, the first cluster commit and node-id
 // changes cannot trip it:
@@ -40,9 +52,8 @@ import (
 //     refused live by #6192 and land through the boot path;
 //   - the candidate has no control link (control-interface or peer-address
 //     unset): #8965 / the topology gate own those;
-//   - the candidate's control unit carries NO static address (DHCP, or the
-//     unit/interface not declared): there is nothing to compare, and refusing
-//     would block every commit of a DHCP-addressed control link.
+//   - the running bind is not a configured static address of the running
+//     config (above).
 //
 // PEER-SYNC. Wired on the synced path too, like #8965, and for its reason: in
 // every shipped cluster config the control address sits inside
@@ -52,8 +63,9 @@ import (
 // is refused here: applying it would move this node to an address the peer
 // does not target, while refusing keeps the pair connected on the old one. As
 // on #8965's synced path, SyncApply has already promoted the text, so a restart
-// applies it — which is the documented procedure.
-func clusterControlLocalAddressCommitPreflight(running *cluster.Manager, newCfg *config.Config) error {
+// applies it — which is the documented procedure. The synced call site passes
+// the config captured BEFORE SyncApply as oldCfg.
+func clusterControlLocalAddressCommitPreflight(running *cluster.Manager, oldCfg, newCfg *config.Config) error {
 	if running == nil || !clusterTopologyConfigured(newCfg) {
 		return nil
 	}
@@ -61,42 +73,54 @@ func clusterControlLocalAddressCommitPreflight(running *cluster.Manager, newCfg 
 	if cc.ControlInterface == "" || cc.PeerAddress == "" {
 		return nil
 	}
-	return controlLocalAddressDecision18606(running.HeartbeatLocalAddr(),
+	var running18606 []string
+	if oldCfg != nil && oldCfg.Chassis.Cluster != nil && oldCfg.Chassis.Cluster.ControlInterface != "" {
+		running18606 = controlLinkStaticAddrs18606(oldCfg, oldCfg.Chassis.Cluster.ControlInterface)
+	}
+	return controlLocalAddressDecision18606(running.HeartbeatLocalAddr(), running18606,
 		controlLinkStaticAddrs18606(newCfg, cc.ControlInterface), cc.PeerAddress)
 }
 
 // controlLocalAddressDecision18606 is the DECISION, split from the accessors so
 // every arm is unit testable without a running heartbeat. have is the running
-// heartbeat's bound address, candidate the candidate's configured static
-// addresses on the control-link unit (CIDR strings), peer the candidate's
-// peer address (only used to name the new address in the refusal).
-func controlLocalAddressDecision18606(have string, candidate []string, peer string) error {
+// heartbeat's bound address; runningCfg and candidate are the running and the
+// candidate configs' static addresses on the control-link unit (CIDR strings);
+// peer is the candidate's peer address (only used to name the new address in
+// the refusal).
+func controlLocalAddressDecision18606(have string, runningCfg, candidate []string, peer string) error {
 	haveIP := net.ParseIP(have)
-	if haveIP == nil || len(candidate) == 0 {
+	if haveIP == nil || !cidrListHasIP18606(runningCfg, haveIP) {
+		return nil
+	}
+	if cidrListHasIP18606(candidate, haveIP) {
 		return nil
 	}
 	var nets []net.Addr
 	for _, c := range candidate {
-		ip, ipNet, err := net.ParseCIDR(c)
-		if err != nil {
-			if ip = net.ParseIP(c); ip == nil {
-				continue
-			}
-			ipNet = &net.IPNet{IP: ip, Mask: net.CIDRMask(len(ip)*8, len(ip)*8)}
+		if ip, ipNet, err := net.ParseCIDR(c); err == nil {
+			nets = append(nets, &net.IPNet{IP: ip, Mask: ipNet.Mask})
 		}
-		if ip.Equal(haveIP) {
-			return nil
-		}
-		nets = append(nets, &net.IPNet{IP: ip, Mask: ipNet.Mask})
-	}
-	if len(nets) == 0 {
-		return nil
 	}
 	want := selectClusterBindAddr(nets, peer, "")
 	if want == "" {
-		want = strings.Join(candidate, ", ")
+		want = "no static address"
 	}
 	return controlLocalAddressMoveRefusal18606(have, want)
+}
+
+// cidrListHasIP18606 reports whether ip is the address of one of the CIDR
+// strings (a bare address is accepted as well).
+func cidrListHasIP18606(list []string, ip net.IP) bool {
+	for _, c := range list {
+		a, _, err := net.ParseCIDR(c)
+		if err != nil {
+			a = net.ParseIP(c)
+		}
+		if a != nil && a.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // controlLinkStaticAddrs18606 returns the configured static addresses of the

@@ -23,38 +23,48 @@ import (
 // red; make it refuse when nothing is running and the first-commit cell reds.
 
 func TestControlLocalAddressDecision18606(t *testing.T) {
+	running := []string{"10.99.14.1/30"}
 	for _, tc := range []struct {
-		name      string
-		have      string
-		candidate []string
-		refuse    bool
+		name       string
+		have       string
+		runningCfg []string
+		candidate  []string
+		refuse     bool
 	}{
-		{"renumber is refused", "10.99.14.1", []string{"10.99.14.5/30"}, true},
-		{"unchanged passes", "10.99.14.1", []string{"10.99.14.1/30"}, false},
-		{"a mask change alone passes", "10.99.14.1", []string{"10.99.14.1/29"}, false},
-		{"still configured beside a new address passes", "10.99.14.1", []string{"192.0.2.9/24", "10.99.14.1/30"}, false},
-		{"removing the bound address but keeping another is refused", "10.99.14.1", []string{"192.0.2.9/24"}, true},
-		{"no running heartbeat abstains (boot, first commit)", "", []string{"10.99.14.5/30"}, false},
-		{"no static address abstains (DHCP control link)", "10.99.14.1", nil, false},
-		{"IPv6 renumber is refused", "2001:db8:14::1", []string{"2001:db8:14::5/64"}, true},
-		{"IPv6 unchanged passes", "2001:db8:14::1", []string{"2001:db8:14::1/64"}, false},
+		{"renumber is refused", "10.99.14.1", running, []string{"10.99.14.5/30"}, true},
+		{"unchanged passes", "10.99.14.1", running, []string{"10.99.14.1/30"}, false},
+		{"a mask change alone passes", "10.99.14.1", running, []string{"10.99.14.1/29"}, false},
+		{"still configured beside a new address passes", "10.99.14.1", running, []string{"192.0.2.9/24", "10.99.14.1/30"}, false},
+		{"removing the bound address but keeping another is refused", "10.99.14.1", []string{"10.99.14.1/30", "192.0.2.9/24"}, []string{"192.0.2.9/24"}, true},
+		{"static -> DHCP strands the bound address and is refused", "10.99.14.1", running, nil, true},
+		{"no running heartbeat abstains (boot, first commit)", "", running, []string{"10.99.14.5/30"}, false},
+		{"a DHCP-only control link abstains", "10.99.14.77", nil, nil, false},
+		// Review seats AG/AH: a unit with dhcp AND a static address binds the
+		// lease (networkd renders no static IPv4 for a DHCPv4 row), and a
+		// foreign address listed first can win the bind. Neither bind is a
+		// configured address, so no commit is removing it; comparing against the
+		// candidate alone refused every commit on such a node.
+		{"bound to a DHCP lease beside a static address abstains", "10.99.14.77", running, []string{"10.99.14.1/30"}, false},
+		{"bound to a foreign address abstains", "192.0.2.50", running, []string{"10.99.14.5/30"}, false},
+		{"IPv6 renumber is refused", "2001:db8:14::1", []string{"2001:db8:14::1/64"}, []string{"2001:db8:14::5/64"}, true},
+		{"IPv6 unchanged passes", "2001:db8:14::1", []string{"2001:db8:14::1/64"}, []string{"2001:db8:14::1/64"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := controlLocalAddressDecision18606(tc.have, tc.candidate, "10.99.14.2")
+			err := controlLocalAddressDecision18606(tc.have, tc.runningCfg, tc.candidate, "10.99.14.2")
 			if tc.refuse && err == nil {
-				t.Errorf("have=%q candidate=%v must be REFUSED: the running heartbeat's address "+
-					"would no longer exist on the control link", tc.have, tc.candidate)
+				t.Errorf("have=%q running=%v candidate=%v must be REFUSED: the commit removes the address "+
+					"the running heartbeat is bound to", tc.have, tc.runningCfg, tc.candidate)
 			}
 			if !tc.refuse && err != nil {
-				t.Errorf("have=%q candidate=%v is not a live renumber and must pass: %v",
-					tc.have, tc.candidate, err)
+				t.Errorf("have=%q running=%v candidate=%v is not a live renumber and must pass: %v",
+					tc.have, tc.runningCfg, tc.candidate, err)
 			}
 		})
 	}
 }
 
 func TestControlLocalAddressRefusalNamesTheProcedure18606(t *testing.T) {
-	err := controlLocalAddressDecision18606("10.99.14.1", []string{"10.99.14.5/30"}, "10.99.14.2")
+	err := controlLocalAddressDecision18606("10.99.14.1", []string{"10.99.14.1/30"}, []string{"10.99.14.5/30"}, "10.99.14.2")
 	if err == nil {
 		t.Fatal("a live control-address renumber must be refused")
 	}
@@ -96,17 +106,23 @@ func TestControlLocalAddressPreflightReadsTheRunningBind18606(t *testing.T) {
 	unchanged := compiledCfg18606(t, localAddrCfgLines18606("10.99.14.1/30"))
 
 	// First commit / boot: the manager exists, the heartbeat never started.
-	if err := clusterControlLocalAddressCommitPreflight(running, renumbered); err != nil {
+	if err := clusterControlLocalAddressCommitPreflight(running, unchanged, renumbered); err != nil {
 		t.Fatalf("with no running heartbeat (boot, first cluster commit) the gate must abstain: %v", err)
 	}
 	running.SetHeartbeatEndpointForTesting("10.99.14.1", "10.99.14.2", "em0")
-	if err := clusterControlLocalAddressCommitPreflight(running, unchanged); err != nil {
+	if err := clusterControlLocalAddressCommitPreflight(running, unchanged, unchanged); err != nil {
 		t.Fatalf("an unchanged control address must pass: %v", err)
 	}
-	if err := clusterControlLocalAddressCommitPreflight(running, renumbered); err == nil {
+	if err := clusterControlLocalAddressCommitPreflight(running, unchanged, renumbered); err == nil {
 		t.Fatal("renumbering the control link under a heartbeat bound to 10.99.14.1 must be refused")
 	}
-	if err := clusterControlLocalAddressCommitPreflight(nil, renumbered); err != nil {
+	// The RUNNING config is what proves the bind is a configured address: with
+	// a running config that never named 10.99.14.1 (the bind came from a lease
+	// or a foreign address) the same candidate is not a renumber.
+	if err := clusterControlLocalAddressCommitPreflight(running, renumbered, renumbered); err != nil {
+		t.Fatalf("a heartbeat bound to an address the running config never named must not refuse: %v", err)
+	}
+	if err := clusterControlLocalAddressCommitPreflight(nil, unchanged, renumbered); err != nil {
 		t.Fatalf("no running cluster manager must abstain: %v", err)
 	}
 }
@@ -207,7 +223,7 @@ func TestPeerSyncedSameAddressDoesNotTrip18606(t *testing.T) {
 	if got := controlLinkStaticAddrs18606(synced, "em0"); len(got) != 1 || got[0] != "10.99.14.1/30" {
 		t.Fatalf("precondition: the per-node group compiled em0 to %v, want [10.99.14.1/30] for node 0", got)
 	}
-	if err := clusterControlLocalAddressCommitPreflight(running, synced); err != nil {
+	if err := clusterControlLocalAddressCommitPreflight(running, synced, synced); err != nil {
 		t.Fatalf("a steady-state synced text (per-node address unchanged) was refused: %v", err)
 	}
 }

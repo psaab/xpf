@@ -248,16 +248,21 @@ ends of a point-to-point control link atomically from one end of it.**
   applied. The gate refuses it before promotion, with #8965's procedure:
   set the new address on BOTH nodes and restart xpfd on both.
 
-  The predicate is membership: refuse when the address the running
-  heartbeat is bound to (`Manager.HeartbeatLocalAddr()`) is no longer a
-  configured static address of the candidate's control-link unit. Not
-  equality with one selected address, because a unit with two addresses can
-  be resolved in a different order from the kernel. It abstains when no
-  heartbeat is running (boot applies run before comms start, a first
-  cluster commit has none, a fabric-transport epoch never starts one, and
-  node-id changes are #6192's and land through the boot path), when the
-  candidate has no control link, and when the unit carries no static
-  address (a DHCP control link would otherwise be refused on every commit).
+  The predicate is "this commit removes the address the running heartbeat
+  is bound to": the bound address (`Manager.HeartbeatLocalAddr()`) is a
+  configured static address of the RUNNING config's control-link unit and
+  the candidate's unit no longer carries it. Membership, not equality with
+  one selected address (a unit with two addresses can resolve them in a
+  different order). The running-config half matters: a unit with `dhcp` and
+  a static address binds the lease (networkd renders no static IPv4 for a
+  DHCPv4 row), and a foreign address listed first can win the bind; neither
+  is removed by any commit, and a gate that compared the candidate alone
+  would refuse every commit on such a node. A static -> DHCP change, which
+  strands the bound address, is refused. It abstains when no heartbeat is
+  running (boot applies run before comms start, a first cluster commit has
+  none, a fabric-transport epoch never starts one, and node-id changes are
+  #6192's and land through the boot path) and when the candidate has no
+  control link.
   On the peer-synced path it is safe for #8965's reason — every shipped
   cluster config keeps the control address inside `groups node0`/`node1`,
   so a synced text compiles to this node's own address — and a synced text

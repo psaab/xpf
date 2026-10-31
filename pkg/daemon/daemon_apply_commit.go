@@ -362,7 +362,7 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 			}
 			// #18606: and the LOCAL end of the control link — this node's own
 			// address, which #8965 (the peer address) cannot see.
-			if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, cand); lerr != nil {
+			if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, d.store.ActiveConfig(), cand); lerr != nil {
 				return lerr
 			}
 			// #9121: and the CONFIG-SYNC endpoint, which is the field set the
@@ -778,7 +778,7 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	// text that changes this node's address is refused: applying it would move
 	// this node off the address the peer targets, while refusing keeps the
 	// pair connected (see clusterControlLocalAddressCommitPreflight).
-	if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, compiled); lerr != nil {
+	if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, oldActive, compiled); lerr != nil {
 		slog.Error("cluster: refusing to apply a peer-synced change of this node's "+
 			"control-link address live; applying it would move this node's cluster "+
 			"comms to an address the peer does not target and durably partition the "+
@@ -1044,7 +1044,7 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			}
 			// #18606: and the LOCAL end of the control link — this node's own
 			// address, which #8965 (the peer address) cannot see.
-			if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, cand); lerr != nil {
+			if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, d.store.ActiveConfig(), cand); lerr != nil {
 				return lerr
 			}
 			// #9121: and the CONFIG-SYNC endpoint, which is the field set the
