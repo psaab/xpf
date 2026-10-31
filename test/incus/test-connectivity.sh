@@ -57,6 +57,12 @@ assurance_verdict() {
 	*) void "$description (unrecognized helper status=${status})" ;;
 	esac
 }
+# iperf_target_claim_cell: #18576 measurement-target uniqueness preflight.
+iperf_target_claim_cell() {
+	ha_target_claim_check "$WAN_GW80_4" "$IPERF_TARGET4" "$FW0" "$FW1"
+	assurance_verdict "$HA_TARGET_CLAIM_STATUS" \
+		"cluster: iperf target ${IPERF_TARGET4} answered for by exactly one host (RFC 5227 ARP probe from ${WAN_GW80_4}): ${HA_TARGET_CLAIM_REASON}"
+}
 # #11581 M3.1/M3.2 precedence contract (documentation only; no probe behavior change).
 #
 # Ordinary capture VOID means a specific cell's evidence is blind: missing,
@@ -715,6 +721,14 @@ test_cluster() {
 
 	# Internet from firewall directly
 	internet_test "$FW0" "cluster: fw0 → internet (1.1.1.1)"
+
+	# #18576: the iperf3 target must be ONE host. loss's 172.16.80.200 is
+	# answered by both xpf-mouse-target and the external v6 target box, so the
+	# firewall's neighbor entry, and with it every iperf3 measurement, can move
+	# between two different servers. Probed from the node holding WAN_GW80_4,
+	# the cluster's own address on the target's VLAN. FAIL names every holder;
+	# VOID means nobody answered.
+	iperf_target_claim_cell
 
 	# F-158 END probe: a lane that grabbed the lock mid-window leaves the
 	# samples above suspect (see the TOCTOU note on the probe helper).

@@ -1389,7 +1389,10 @@ address — same expectation.
   explicitly (§1.3.1, §1.6, S2); the approver should confirm those
   resolutions rather than re-derive them at build time.
 - **R5 — The `.200` target ambiguity.** `xpf-mouse-target` on loss currently
-  *also* answers `.200/::200`. If the new clusters' tests ever point at
+  *also* answers `.200/::200`. **Measured 2026-10-31 (#18576):** v4 `.200` is
+  answered by BOTH `xpf-mouse-target` (`10:66:6a:8b:91:a4`) and the external
+  box (`f6:f0:06:10:77:d5`, which also holds `::200`). The loss smoke's v4
+  target is therefore dual-held, not just ambiguous by name. If the new clusters' tests ever point at
   `.200` "because loss does", they may be measuring an SR-IOV container on
   loss, not the external box. The plan's dedicated `.210/.211` targets
   eliminate this for the new stacks; do not "reuse the existing target to

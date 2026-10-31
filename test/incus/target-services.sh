@@ -33,7 +33,10 @@
 # #16213 UPDATE — THE FIRST TARGET IS THE SAME HOST. On the standing loss
 # cluster, 172.16.80.200 (what IPERF_TARGET4 and $TARGET_V4 point at) is
 # NOT external hardware: it is a second address on xpf-mouse-target
-# itself. It arrived by hand (`ip addr add`, undocumented), so any
+# itself. #18576 CORRECTION: it is not ONLY that. The external v6 box
+# (f6:f0:06:10:77:d5, the ::200 holder) ALSO answers ARP for v4 .200, so
+# the loss firewall's neighbor entry decides which of two servers a v4
+# measurement reaches. test-connectivity's target-claim cell FAILs on it. It arrived by hand (`ip addr add`, undocumented), so any
 # recreate or reboot silently dropped it (observed UP->gone) while every
 # harness kept measuring `.200`. TARGET_ALIAS_V4 names it (cluster-env.sh
 # derives it from IPERF_TARGET4; loss .200, tcp .210, udp .211) and

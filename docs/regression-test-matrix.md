@@ -170,6 +170,27 @@ failure.
   marks `eno1v*`/`eno2v*` unmanaged. Without it a force-stopped VM cannot
   restart: "All virtual functions on parent device mlx1 are already in use".
 
+- **loss iperf target 172.16.80.200 is answered by two hosts: #18576.**
+  - The two holders:
+    - `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4`): its v4 alias is pinned
+      by `mouse-addr.service`.
+    - The external v6 target box (`f6:f0:06:10:77:d5`): loss fw0 and fw1
+      resolve `2001:559:8585:80::200` to it.
+  - The external box is not an incus instance or host netdev on loss, tcp,
+    udp or the orchestrator. It has no SSH handle, so it is not ours to change.
+  - Both loss nodes currently resolve v4 `.200` to the container. That can
+    change on any ARP from the other holder, or on a re-resolution, and every
+    v4 iperf3 measurement would then move to a different server.
+  - Nothing has observed a switch yet: a 4-min VLAN 80 capture
+    (2026-10-31) saw no frame with sender `.200` from either holder.
+  - test-connectivity's cell "iperf target ... answered for by exactly one
+    host" FAILs on loss until one holder drops v4 `.200`.
+  - When a loss iperf3 run stops or slows, read
+    `ip -s neigh show 172.16.80.200` on the RG1 owner, and if possible a
+    concurrent `ip monitor neigh`. A MAC other than `10:66:6a:8b:91:a4` means
+    the target moved: environment, not the product. tcp `.210` and udp
+    `.211` are unique.
+
 ## Reading results
 
 - **FAIL** is attributable: the binary was confirmed to be the build under

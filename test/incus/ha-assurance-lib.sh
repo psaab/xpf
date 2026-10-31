@@ -1302,3 +1302,112 @@ PY
 	fi
 	return 2
 }
+
+# ha_target_claim_probe <local-address> <target> <node>...
+#
+# #18576: which hosts answer ARP for a measurement TARGET (an iperf3 server)
+# on the segment the cluster reaches it on? On the first <node> holding
+# <local-address> (the cluster's own address on the target's subnet, e.g.
+# WAN_GW80_4), send three RFC 5227 probes (sender 0.0.0.0, so no cache learns
+# from them) for <target> from that interface. Prints "iface <name> <mac>",
+# then one "reply <ip> <mac>" line per ARP reply for <target>. Status 2 if no
+# listed node holds <local-address>.
+ha_target_claim_probe() {
+	local local_addr="$1" target="$2" node
+	shift 2
+	for node in "$@"; do
+		if incus exec "$node" -- python3 - "$local_addr" "$target" <<'PY'
+import select, socket, struct, subprocess, sys, time
+local_addr, target = sys.argv[1], sys.argv[2]
+ifname = None
+for line in subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True).stdout.splitlines():
+    f = line.split()
+    if len(f) >= 4 and f[2] == "inet" and f[3].split("/")[0] == local_addr:
+        ifname = f[1].split("@")[0]
+        break
+if ifname is None:
+    raise SystemExit(3)
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806))
+s.bind((ifname, 0x0806))
+mac = bytes.fromhex(open(f"/sys/class/net/{ifname}/address").read().strip().replace(":", ""))
+print("iface", ifname, mac.hex(":"))
+tip = socket.inet_aton(target)
+for _ in range(3):
+    arp = struct.pack("!HHBBH6s4s6s4s", 1, 0x0800, 6, 4, 1, mac, bytes(4), bytes(6), tip)
+    s.send(b"\xff" * 6 + mac + b"\x08\x06" + arp + bytes(18))
+    end = time.time() + 1.0
+    while (left := end - time.time()) > 0:
+        if not select.select([s], [], [], left)[0]:
+            break
+        f = s.recv(2048)
+        if len(f) >= 42 and f[12:14] == b"\x08\x06" and f[20:22] == b"\x00\x02" and f[28:32] == tip:
+            print("reply", target, f[22:28].hex(":"), flush=True)
+PY
+		then
+			return 0
+		fi
+	done
+	return 2
+}
+
+# ha_target_claim_verdict <target> <probe-output>
+#
+# #18576: a measurement target must be ONE host. loss's iperf3 target
+# 172.16.80.200 is answered by both xpf-mouse-target (10:66:6a:8b:91:a4) and
+# the external v6 target box (f6:f0:06:10:77:d5). The firewall's neighbor
+# entry for it can therefore move between two different iperf3 servers
+# (Linux overrides an entry with any ARP from the address once the 1 s
+# locktime has passed, and a broadcast re-resolution keeps the first reply),
+# and a measurement silently changes host mid-run.
+# Status 0: exactly one MAC answered (that reply is the positive control).
+# Status 1: two or more MACs answered; stderr names all of them.
+# Status 2: VOID; nobody answered, so the probe proves nothing (target down,
+#           not on-link, or the probe could not hear).
+ha_target_claim_verdict() {
+	if [[ $# -ne 2 ]]; then
+		printf 'target claim: expected <target> <probe-output>\n' >&2
+		return 2
+	fi
+	local target="$1" output="$2" line kind ip mac rest macs=""
+	if [[ -z "$target" ]]; then
+		printf 'target claim: empty target\n' >&2
+		return 2
+	fi
+	while IFS= read -r line; do
+		read -r kind ip mac rest <<<"$line"
+		[[ "$kind" == reply && "$ip" == "$target" ]] || continue
+		mac="${mac,,}"
+		[[ "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || continue
+		[[ " $macs " == *" $mac "* ]] || macs="${macs:+$macs }$mac"
+	done <<<"$output"
+	if [[ -z "$macs" ]]; then
+		printf 'target claim: nobody answered ARP for %s, so uniqueness is not measured\n' "$target" >&2
+		return 2
+	fi
+	if [[ "$macs" == *" "* ]]; then
+		printf 'target claim: %s is answered for by more than one host (%s)\n' "$target" "$macs" >&2
+		return 1
+	fi
+	printf 'target claim: %s answered for only by %s\n' "$target" "$macs"
+	return 0
+}
+
+# ha_target_claim_check <local-address> <target> <node>...
+# Probe and judge. Sets HA_TARGET_CLAIM_STATUS (verdict status, or 2 when the
+# probe could not run) and HA_TARGET_CLAIM_REASON. Always returns 0.
+ha_target_claim_check() {
+	local local_addr="$1" target="$2" output
+	shift 2
+	HA_TARGET_CLAIM_STATUS=2
+	HA_TARGET_CLAIM_REASON="target claim: not measured"
+	if ! output=$(ha_target_claim_probe "$local_addr" "$target" "$@" 2>&1); then
+		HA_TARGET_CLAIM_REASON="target claim: no node of $* holds ${local_addr}, or the probe could not run"
+		return 0
+	fi
+	if HA_TARGET_CLAIM_REASON=$(ha_target_claim_verdict "$target" "$output" 2>&1); then
+		HA_TARGET_CLAIM_STATUS=0
+	else
+		HA_TARGET_CLAIM_STATUS=$?
+	fi
+	return 0
+}
