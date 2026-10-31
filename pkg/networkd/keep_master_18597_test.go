@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -402,5 +403,40 @@ func TestNetworkctlListQueryDisablesColour18597(t *testing.T) {
 	if last != "SYSTEMD_COLORS=0" {
 		t.Fatalf("the effective SYSTEMD_COLORS in the query's environment is %q, want SYSTEMD_COLORS=0 "+
 			"(the last assignment wins, and the daemon's own environment asked for colour)", last)
+	}
+}
+
+// The query networkdFailedLinks ACTUALLY executes carries SYSTEMD_COLORS=0: run
+// the production function against the exec seam and read the command it hands
+// over. TestNetworkctlListQueryDisablesColour18597 tests the builder; this one
+// fails if the query bypasses it (a raw exec.CommandContext has no Env).
+func TestFailedLinkQueryExecutesWithColourDisabled18597(t *testing.T) {
+	t.Setenv("SYSTEMD_COLORS", "1")
+	var got *exec.Cmd
+	orig := runNetworkctlList
+	runNetworkctlList = func(cmd *exec.Cmd) ([]byte, error) {
+		got = cmd
+		return []byte("  1 lo loopback carrier unmanaged\n 14 fab0 ether off failed\n"), nil
+	}
+	t.Cleanup(func() { runNetworkctlList = orig })
+	failed, err := prodNetworkdFailedLinks()
+	if err != nil || !failed["fab0"] {
+		t.Fatalf("production query = %v, %v; want {fab0} with no error", failed, err)
+	}
+	if got == nil {
+		t.Fatal("networkdFailedLinks did not execute through runNetworkctlList")
+	}
+	if want := []string{"networkctl", "list", "--no-legend", "--no-pager"}; !slices.Equal(got.Args, want) {
+		t.Fatalf("executed argv = %v, want %v", got.Args, want)
+	}
+	last := ""
+	for _, kv := range got.Env {
+		if strings.HasPrefix(kv, "SYSTEMD_COLORS=") {
+			last = kv
+		}
+	}
+	if last != "SYSTEMD_COLORS=0" {
+		t.Fatalf("the executed query's effective SYSTEMD_COLORS is %q, want SYSTEMD_COLORS=0 "+
+			"(a bypassed builder runs with the daemon's environment, which asked for colour)", last)
 	}
 }

@@ -59,12 +59,18 @@ var runNetworkctl = func(args ...string) error {
 var networkdFailedLinks = func() (map[string]bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
 	defer cancel()
-	out, err := networkctlListCmd(ctx).Output()
+	out, err := runNetworkctlList(networkctlListCmd(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("networkctl list: %w", err)
 	}
 	return parseNetworkdFailedLinks(out)
 }
+
+// runNetworkctlList executes the built link-state query. A package var so a
+// test can observe the exact command — argv AND environment — that
+// networkdFailedLinks runs, which proves the query goes through
+// networkctlListCmd and so carries SYSTEMD_COLORS=0.
+var runNetworkctlList = func(cmd *exec.Cmd) ([]byte, error) { return cmd.Output() }
 
 // networkctlListCmd builds the link-state query. SYSTEMD_COLORS=0 because
 // networkctl colours the SETUP cell when it decides its output is a terminal
