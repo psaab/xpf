@@ -84,7 +84,7 @@ runs on the giving node or the taking node.
 | `redundancy-group g node B` (target is the peer) | `proxyClusterFailover`: A proxies the request over fabric gRPC to B, and B then runs `RequestPeerFailover(g)` locally | fabric gRPC (PSK token, 30 s window), then session sync | **yes**: the fabric token |
 | `redundancy-group g` (no `node`) | `ManualFailover(g)`: A yields *g* (A goes to `secondary-hold`, the peer takes over). Run on the non-owner it moves nothing | local, then heartbeat/election | no |
 | `data node N` | every data RG (ID > 0) not already on N, in one batch. To the local node it uses `RequestPeerFailoverBatch`; to the peer it is proxied like `node B` | as above | as above |
-| `reset redundancy-group g` | `ResetFailover(g)`: clears the manual flag and hold on *this* node | local | no |
+| `reset redundancy-group g` | `ResetFailover(g)`: clears *this* node's manual-failover state for *g* and resumes normal election for it (not the node-wide kernel-upgrade hold) | local | no |
 
 Things that follow from this table:
 
