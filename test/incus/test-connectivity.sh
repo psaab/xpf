@@ -213,6 +213,19 @@ ping_test() {
 	fi
 }
 
+# wan_claim_cell: #18558 duplicate-WAN-address preflight (ha_wan_claim_check).
+wan_claim_cell() {
+	local desc="cluster: WAN IPv4 ${WAN_VIP4} answered for only by this cluster (RFC 5227 ARP probe)"
+	ha_wan_claim_check "${CLUSTER_CONF:-}" "$WAN_VIP4" "$WAN_GW4" "$FW0" "$FW1"
+	# 1 = non-xpf duplicate (lab), 3 = another xpf cluster claims it (an xpf
+	# defect, e.g. a stale VIP, #18573): both FAIL, the reason says which.
+	case "$HA_WAN_CLAIM_STATUS" in
+	0) pass "$desc" ;;
+	1 | 3) fail "$desc: ${HA_WAN_CLAIM_REASON}" ;;
+	*) void "$desc: ${HA_WAN_CLAIM_REASON}" ;;
+	esac
+}
+
 # ping6_test <instance> <target_ip> <description>
 ping6_test() {
 	local inst="$1" ip="$2" desc="$3"
@@ -453,6 +466,13 @@ test_cluster() {
 
 	# WAN gateway
 	ping_test "$FW0" "$WAN_GW4" "cluster: fw0 → WAN gateway (${WAN_GW4})"
+
+	# #18558: the WAN IPv4 address must be answered for by this cluster alone.
+	# VLAN 50 is a shared lab segment; tcp's .10 and udp's .11 were also held by
+	# non-xpf devices, the gateway's ARP entry flipped between the two holders,
+	# and every IPv4 cell below lost 20-80% while IPv6 stayed clean. FAIL names
+	# the foreign MAC; VOID means the probe heard nothing, not even the gateway.
+	wan_claim_cell
 
 	# LAN host connectivity
 	if instance_running "$CLUSTER_LAN_HOST"; then
