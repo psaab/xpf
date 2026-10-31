@@ -855,7 +855,12 @@ heartbeat traffic.
   `ip link set … vf …` on the host PF: that host-PF state is cleared
   on host reboot/PF reset and caused the 2026-07-01 LAN de-isolation
   outage; `nictype=sriov` re-applies it durably (machinery comment in
-  `cluster-setup.sh`, WAN/LAN device creation).
+  `cluster-setup.sh`, WAN/LAN device creation). **Exception, WAN trunk
+  VFs:** a `wan-vf` device sets no `vlan`, so incus re-applies nothing and
+  restores the VF's previous VLAN on stop. A reassigned VF can keep a
+  stale port VLAN (udp fw0, 2026-10-30, VLAN 80). Until #18582 makes this
+  durable, the out-of-band clear in `docs/regression-test-matrix.md`'s
+  SR-IOV row is the sanctioned emergency repair.
 - **Fabric VLAN is PF-private — terminology and the real condition.**
   FAB-VLAN is a VF access VLAN local to the `ix0` VEB (`hwmode VEB`,
   `local_forwarding: enabled`, §1.4.1): F0↔F1 frames are switched
@@ -1081,17 +1086,21 @@ running cluster until these steps run. Run them inside one lock cell
    Check for `commit complete`.
 3. **Remove the old address.** On the RG1 owner, run
    `ip addr del <old>/24 dev <member>.50`, where `<member>` is
-   `ge-0-0-2` on node0 and `ge-7-0-2` on node1. This step is needed because
-   the commit never removes the old VIP (#18573). If you skip it, the owner
-   keeps answering ARP for an address it no longer owns.
-4. **Refresh the helper snapshot.** Use a further commit; a no-op
-   description set/delete pair is enough. An RG1 failover and failback did
-   **not** refresh it on udp's pre-#18579 build (2026-10-31: SNAT stayed on
-   the deleted `.11` until a commit). On a build with #18579, step 3 and
-   this step happen inside the renumber commit itself. The commit's snapshot captured the stale old
-   address, and interface-mode SNAT keeps using it (#18573). Then confirm
-   that `show security flow session destination-prefix 1.1.1.1/32` shows
-   `--> <new>/...`.
+   `ge-0-0-2` on node0 and `ge-7-0-2` on node1. This step is needed on a
+   build without #18579, whose commit never removes the old VIP (#18573).
+   If you skip it, the owner keeps answering ARP for an address it no
+   longer owns. Check first with `ip -4 addr show dev <member>.50`: a build
+   with #18579 has already removed a stamped old address.
+4. **Refresh the helper snapshot.** On a build without #18579, the
+   renumber commit's snapshot captured the stale old address, and
+   interface-mode SNAT keeps using it (#18573). Make a further commit on
+   the RG0 primary: set a `reth0 unit 50 description`, `commit`, delete
+   it, `commit`. An RG1 failover and failback did **not** refresh the
+   snapshot on udp's pre-#18579 build (2026-10-31: SNAT stayed on the
+   deleted `.11` until the commit pair). #18579 builds the snapshot without
+   the stale address, but whatever the build, **always confirm** that
+   `show security flow session destination-prefix 1.1.1.1/32` shows
+   `--> <new>/...` after a fresh LAN-host ping.
 5. **Verify.** In `make test-connectivity`, the cell "WAN IPv4 <new> answered
    for only by this cluster" must PASS.
 
@@ -1100,8 +1109,8 @@ cluster, master's env names `<new>` while the cluster still holds `<old>`:
 - `test-private-rg` FAILs with "WAN VIP <new> missing".
 - `wire-zone-matrix` routes the DMZ prober via the unheld `<new>`.
 - The claim check and test-connectivity's claim cell report that no node
-  holds `<new>` (VOID). So an external IPv4 FAIL stands, and is judged by the
-  3-smoke rule in `docs/regression-test-matrix.md`.
+  holds `<new>` (VOID). So an external IPv4 FAIL stands; read it as
+  unattributable until the renumber is done.
 
 Branches cut from the old master have the opposite mismatch once the live
 renumber is done. Renumber immediately after the merge, and read those cells

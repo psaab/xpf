@@ -138,8 +138,9 @@ to be red, until their issue closes; any other red cell is a new failure.
 - **Fabric/control host pings: #18212.** Pings fw0↔fw1 on 10.99.x fail on
   loss, tcp and udp. Host ICMP to the WAN gateway (`172.16.50.1`) failed
   on tcp (integ9, integ10) and on udp, and passed on loss (integ8–10). That
-  WAN-gateway leg is #18558, not #18212: tcp's and udp's WAN addresses were
-  duplicates on the lab segment, and loss's `.8` is not (see the
+  WAN-gateway leg was #18558, not #18212: tcp's and udp's WAN addresses were
+  duplicates on the lab segment, and loss's `.8` is not. Since the live
+  renumber of 2026-10-31 it is expected green on all three clusters (see the
   environment row below). The 10.99.x fabric/control pings remain #18212.
 
 ## Known environment rows (re-verify before excusing)
@@ -158,42 +159,63 @@ failure.
   in #18556 at `cce3fb4944`). Re-run the off-path control before excusing it
   again; once #18556 merges this row should be deleted.
 
-- **Duplicate WAN address on the shared VLAN 50 (#18558).** Resolved on
+- **Duplicate WAN address on the shared VLAN 50 (#18558).** Resolved
   2026-10-31: tcp and udp were renumbered live to `172.16.50.42` and `.43`
-  (#18575; plan §3.3). Their old `.10`/`.11` are held by non-xpf lab devices,
-  and loss's `.8` is unique. No cell is excused by this row any more. It
-  stays as the rule for a recurrence: an external IPv4 FAIL on tcp, udp or
-  loss is environment only while `ha_wan_claim_check` returns status 1 (a
-  non-xpf claimant) for that cluster's WAN address in the same run. A ping
-  from the orchestrator cannot stand in for it, because it does not leave
-  from the duplicated address. Status 3 (another xpf cluster's RETH MAC) is
-  a product failure. If the check fires, re-probe and renumber with the
-  §3.3 procedure. The evidence and the guards
-  (`TestSharedSegmentForeignClaims18558`, test-failover's claim-gated VOID,
-  test-connectivity's "WAN IPv4 ... answered for only by this cluster"
-  cell) are recorded in `docs/log/18558.md`.
+  (#18575; `docs/incus-tcp-udp-plan.md` §3.3). Their old `.10`/`.11` are
+  held by non-xpf lab devices; loss's `.8` is unique. No cell is excused by
+  this row today. It is kept as a recurrence rule instead of being deleted,
+  so the excuse for a repeat comes with its control.
+  - **In scope:** the external IPv4 cells (1.1.1.1, 8.8.8.8) and the
+    firewall's own WAN-gateway ping, on tcp, udp or loss.
+  - **When the FAIL is environment:** only while `ha_wan_claim_check`
+    returns status 1 (a non-xpf claimant) for that cluster's WAN address in
+    the same run. A ping from the orchestrator cannot stand in, because it
+    does not leave from the duplicated address.
+  - **Other statuses:** status 3 (another xpf cluster's RETH MAC) is a
+    product failure. Status 2 (not measured) leaves the FAIL standing.
+  - **If the check fires:** re-probe and renumber, following the plan's
+    §3.3 procedure.
+  - **References:** the guards (`TestSharedSegmentForeignClaims18558`,
+    test-failover's claim-gated VOID, and test-connectivity's "WAN IPv4 ...
+    answered for only by this cluster" cell) and the evidence are in
+    `docs/log/18558.md`.
 - **tcp and udp host SR-IOV VFs.** Two host faults have each left a
-  force-stopped firewall VM unable to forward.
+  force-stopped firewall VM unable to restart or forward. This is
+  environment only while the host check below shows the fault in the same
+  run. A firewall cell that fails with a clean host check is a product
+  failure.
   - **VFs claimed by the host network.** The host's dracut default network
-    must not manage the VF netdevs:
-    `/etc/systemd/network/05-xpf-sriov-vf-unmanaged.network` marks
-    `eno1v*`/`eno2v*` unmanaged. Without it a force-stopped VM cannot
+    must not manage the VF netdevs. Without that, a force-stopped VM cannot
     restart: "All virtual functions on parent device mlx1 are already in
-    use". tcp's host was fixed 2026-10-29 and udp's 2026-10-30
-    (`/var/tmp/fz/udp-vf-repair.sh`).
-  - **A stale host port VLAN on a reassigned VF.** incus records a VF's
-    state before attaching it (`volatile.<dev>.last_state.vf.vlan`) and
-    restores that state on stop. A `wan-vf` device that sets no `vlan`
-    leaves whatever VLAN the VF last carried. On 2026-10-30 udp fw0's WAN
-    VF (`mlx0 vf 0`) came back with port VLAN 80. fw0's tagged
-    `reth0.50`/`.80` frames then died, and its neighbour entries went
-    FAILED in both families after every restart.
-    - **Check:** `ssh <host> 'ip link show mlx0; ip link show mlx1'` must
-      show no `vlan` on a firewall WAN VF.
-    - **Fix:** while the VM runs, `sudo ip link set mlx0 vf <n> vlan 0`,
-      and also
-      `incus config set <vm> volatile.wan-vf.last_state.vf.vlan=0`, so that
-      the restore on stop writes 0. A VM restart survived the fix.
+    use".
+    - **Check:** `ssh tcp` / `ssh udp` (the host aliases `docs/incus-tcp-udp-plan.md` uses), then
+      `ip -br link | grep -E '^eno[12]v' | grep -c UP` must be 0 for free
+      VFs.
+    - **Fix:** write
+      `/etc/systemd/network/05-xpf-sriov-vf-unmanaged.network` containing
+      `[Match]` `Name=eno1v* eno2v*` and `[Link]` `Unmanaged=yes`, run
+      `networkctl reload`, then `ip link set <vf> down` for each free VF
+      that is UP.
+    - **Applied:** tcp's host 2026-10-29, udp's 2026-10-30.
+  - **A stale host port VLAN on a reassigned WAN VF.** incus records a VF's
+    state before attaching it (`volatile.wan-vf.last_state.vf.vlan`) and
+    restores it on stop. A `wan-vf` device sets no `vlan`, so the VF keeps
+    whatever VLAN it last carried. On 2026-10-30 udp fw0's WAN VF
+    (`mlx0 vf 0`) came back on port VLAN 80. Its tagged `reth0.50`/`.80`
+    frames died, and neighbour entries went FAILED in both families after
+    every restart.
+    - **Check:** find the VF with
+      `incus config get udp:xpf-udp-fw0 volatile.wan-vf.last_state.vf.id`
+      (WAN VFs are all on `mlx0`), then `ssh udp 'ip link show mlx0'`. That
+      VF must show no `vlan`. The target VF on `mlx0` carries access
+      `vlan 80` by design.
+    - **Repair:** run `sudo ip link set mlx0 vf <id> vlan 0` on the host,
+      plus `incus config set <remote>:<vm> volatile.wan-vf.last_state.vf.vlan=0`
+      so that the restore on stop writes 0.
+    - **Not durable:** VF allocation is not pinned, so a different VF can
+      bring the fault back. This out-of-band repair is the sanctioned
+      exception to the plan's "never set VF VLAN by hand" rule until #18582
+      makes WAN VFs clear their VLAN on start.
 
 ## Reading results
 
