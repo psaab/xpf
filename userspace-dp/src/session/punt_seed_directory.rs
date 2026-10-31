@@ -101,7 +101,9 @@ impl PuntSeedDirectory {
         self.rows.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Resident rows (tests and the idle gate).
+    /// Resident rows (test observability; production reads the `live` idle
+    /// gate directly).
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.live.load(Ordering::Relaxed)
     }
