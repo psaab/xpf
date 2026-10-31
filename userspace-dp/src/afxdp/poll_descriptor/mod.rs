@@ -943,28 +943,40 @@ pub(super) fn poll_binding_process_descriptor_in_view(
     // SAME `ValidationState` its admitting filter verdict was computed against,
     // and the established-hit revalidation compares against that same value. One
     // u64 store per binding per tick.
-    sessions.set_filter_revalidation_gen(validation.config_generation);
-    // #11373: a session's cached route decision is valid only within the
-    // current config/FIB pair. Publish the same validation read used by this
-    // pass's metadata classifier before processing any descriptors.
-    sessions.set_forwarding_revalidation_gen_with_neighbor(
-        validation.config_generation,
-        validation.fib_generation,
-        validation.neighbor_generation,
-    );
-    // #8356: the zone-policy verdict's generation, published from the SAME
-    // `ValidationState` in the SAME statement pair, so the two stamps can never
-    // be compared against generations from different publishes. They stay
-    // SEPARATE stamps — sharing one would let a filter ACCEPT re-stamp suppress
-    // a pending policy re-derivation, and vice versa.
-    sessions.set_policy_revalidation_phase(
-        validation.config_generation,
-        worker_ctx
-            .forwarding
-            .policy
-            .scheduler_rules_expired_at(now_ns),
-    );
-    sessions.set_app_id_catalog_epoch(worker_ctx.forwarding.app_catalog.epoch());
+    // #18560: a held pass (packets stamped with a view this worker has left)
+    // must NOT move the session table's revalidation stamps back to that
+    // view. The table is single-versioned: stamping it with the old view made
+    // every session (re-derived under the current one) stale for the pass, so
+    // each held packet re-derived its route, filter and zone policy under the
+    // OLD tables but the CURRENT HA state. On the node demoting an RG that
+    // combination failed closed and the packets fell to the session-miss path
+    // (loss test-failover: +12.2k session misses / strict-syn drops on the
+    // former owner). Sessions keep the stamps of the last ordinary pass, so a
+    // held packet is forwarded by its session's current decision.
+    if !pass.held_pass {
+        sessions.set_filter_revalidation_gen(validation.config_generation);
+        // #11373: a session's cached route decision is valid only within the
+        // current config/FIB pair. Publish the same validation read used by this
+        // pass's metadata classifier before processing any descriptors.
+        sessions.set_forwarding_revalidation_gen_with_neighbor(
+            validation.config_generation,
+            validation.fib_generation,
+            validation.neighbor_generation,
+        );
+        // #8356: the zone-policy verdict's generation, published from the SAME
+        // `ValidationState` in the SAME statement pair, so the two stamps can never
+        // be compared against generations from different publishes. They stay
+        // SEPARATE stamps — sharing one would let a filter ACCEPT re-stamp suppress
+        // a pending policy re-derivation, and vice versa.
+        sessions.set_policy_revalidation_phase(
+            validation.config_generation,
+            worker_ctx
+                .forwarding
+                .policy
+                .scheduler_rules_expired_at(now_ns),
+        );
+        sessions.set_app_id_catalog_epoch(worker_ctx.forwarding.app_catalog.epoch());
+    }
     // Load the immutable SA payload once for this RX batch. Stage 11 performs
     // only plain map lookups against this guard, never another ArcSwap load.
     let ipsec_sa_snapshot = worker_ctx.forwarding.ipsec_sa.load_snapshot();
@@ -4443,6 +4455,26 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         // established candidate admitted above; it cannot fall
                         // through to MAIN policy or PBR on a second miss.
                         if absent_fabric_ingress_suspect {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        // #18560: a held pass creates no session. A new flow
+                        // admitted under a left view's tables would be stored
+                        // with the current view's stamps (see the prologue)
+                        // and never re-judged. Drop it as the generation
+                        // mismatch it is, as before the grace; the sender's
+                        // retransmit lands on the current view.
+                        if pass.held_pass {
+                            record_disposition(
+                                &worker_ctx.ident,
+                                &binding.live,
+                                DispositionCounters::Hot(telemetry.counters),
+                                PacketDisposition::ConfigGenerationMismatch,
+                                desc.len as u32,
+                                Some(meta),
+                                worker_ctx.recent_exceptions,
+                                worker_ctx.forwarding,
+                            );
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }

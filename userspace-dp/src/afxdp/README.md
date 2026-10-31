@@ -2196,16 +2196,28 @@ stamped with one of them under THAT view:
 - **Held pass** (`worker/lifecycle.rs`, `poll_binding`). A binding with
   parked descriptors runs its next RX batch as a held pass: no RX read, no
   injected packet, no PMech replays. The `WorkerContext` and validation are
-  built from the retained view that matches the first parked stamp. The
-  pass prologue then stamps the session table's revalidation generations
-  from that view, so sessions and flow-cache entries touched in the pass
-  carry the old generations and are re-resolved by the next current-view
-  packet. A parked packet of yet another retained view is re-parked. If the
-  view expired, the pass runs under the current view, which drops the packet
-  as a mismatch, exactly as before.
-- **#6592 in both directions.** No packet is processed under tables older or
-  newer than its stamp. A stamp AHEAD of the worker matches no retained view
-  and is still dropped.
+  built from the retained view that matches the first parked stamp
+  (`held_pass_view`). A parked packet of yet another retained view is
+  re-parked. If the view expired, the pass runs under the current view,
+  which drops the packet as a mismatch, exactly as before.
+- **The session table stays on the current view.** The table is
+  single-versioned, so a held pass does NOT re-stamp its revalidation
+  generations (filter, forwarding, zone policy, app catalog) to the left
+  view: that made every session stale for the pass, and held packets
+  re-derived route and policy under the old tables with the CURRENT HA
+  state. On a node demoting an RG that fails closed, and the packets fell to
+  the session-miss path (loss test-failover, 0.0.26111: +12.2k session
+  misses / strict-syn drops on the former owner). A held packet is therefore
+  forwarded by its session's current decision, and a held pass creates no
+  session: a session-miss packet is dropped as the generation mismatch it is,
+  because a flow admitted under the old tables would be stored with the
+  current stamps and never re-judged.
+- **#6592.** A stamp AHEAD of the worker matches no retained view and is
+  still dropped, so no packet is processed under tables older than its stamp.
+  A held packet's per-packet lookups (classification, flow cache, filters,
+  zones, FIB) use the left view's tables; its forwarding decision is its
+  session's, which stays on the current view (above), and it can never
+  create a session.
 - **Cost.** A matched stamp pays nothing: the park check sits in the
   mismatch branch. Per RX batch the poll adds one `view_held.is_empty()` test
   and a three-slot `PrevViews::is_empty()` test. Per worker tick it adds one

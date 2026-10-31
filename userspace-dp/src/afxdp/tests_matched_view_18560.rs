@@ -305,3 +305,74 @@ fn held_pass_runs_under_the_retained_tables_18560() {
     assert_eq!((view, validation), (None, NEWER), "an expired view falls back to the current pair");
     assert!(std::ptr::eq(fwd, &current));
 }
+
+/// A held pass must not move the session table's revalidation stamps back to
+/// the left view: the table is single-versioned, and an old stamp made every
+/// session stale for the pass, so held packets re-derived routes/policy under
+/// the old tables with the current HA state and fell to the session-miss path
+/// on a demoting node (loss test-failover: +12.2k session misses). RED on
+/// revert of the prologue guard.
+#[test]
+fn held_pass_keeps_session_stamps_current_18560() {
+    let mut fx = gre_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let views = views_with(STAMPED, &fwd, NEWER);
+    run_pass(&mut fx, &fwd, NEWER, PassView { prev_views: Some(&views), held_pass: false, view: None }, true);
+    assert_eq!(fx.sessions.filter_revalidation_gen(), NEWER.config_generation);
+    let prev = views.get(0).expect("retained view");
+    run_pass(&mut fx, &prev.forwarding, prev.validation, PassView { prev_views: Some(&views), held_pass: true, view: Some(0) }, false);
+    assert_eq!(
+        fx.sessions.filter_revalidation_gen(),
+        NEWER.config_generation,
+        "a held pass must leave the session table on the current view's stamps"
+    );
+}
+
+fn transit_syn_fixture() -> GreFixture {
+    let forwarding = Arc::new(build_forwarding_state(&nat_snapshot_with_fabric()));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let source = Ipv4Addr::new(10, 0, 61, 102);
+    let destination = Ipv4Addr::new(172, 16, 80, 200);
+    let frame = build_txn_tcp_syn_frame_v4(source, destination, 35790, 5211, TCP_FLAG_SYN, TEST_LAN_MAC);
+    let mut meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    meta.flow_src_addr[..4].copy_from_slice(&source.octets());
+    meta.flow_dst_addr[..4].copy_from_slice(&destination.octets());
+    meta.flow_src_port = 35790;
+    meta.flow_dst_port = 5211;
+    let (_tx, rx) = mpsc::sync_channel(1);
+    GreFixture {
+        binding,
+        sessions: SessionTable::new(),
+        forwarding,
+        rx,
+        deliveries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
+        frame,
+        meta,
+    }
+}
+
+/// A held pass creates no session: a new flow admitted under a left view's
+/// tables would carry the current stamps and never be re-judged. It is
+/// dropped as a generation mismatch, as before the grace. The positive
+/// control shows the same SYN installs a session under its own (current)
+/// view. RED on revert of the held-pass miss guard.
+#[test]
+fn held_pass_creates_no_session_18560() {
+    let mut control = transit_syn_fixture();
+    let fwd = Arc::clone(&control.forwarding);
+    let batch = run_pass(&mut control, &fwd, STAMPED, PassView::current(), true);
+    assert_eq!(batch.session_creates, 1, "premise: the SYN installs a session under its own view");
+
+    let mut fx = transit_syn_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let views = views_with(STAMPED, &fwd, NEWER);
+    run_pass(&mut fx, &fwd, NEWER, PassView { prev_views: Some(&views), held_pass: false, view: None }, true);
+    assert_eq!(fx.binding.view_held.len(), 1, "premise: the SYN is parked");
+    let prev = views.get(0).expect("retained view");
+    let batch = run_pass(&mut fx, &prev.forwarding, prev.validation, PassView { prev_views: Some(&views), held_pass: true, view: Some(0) }, false);
+    assert_eq!(batch.session_creates, 0, "a held pass must not install a session");
+    assert_eq!(fx.sessions.len(), 0);
+    assert_eq!(fx.binding.live.config_gen_mismatches.load(Ordering::Relaxed), 1, "dropped as the generation mismatch it is");
+    assert_eq!(fx.binding.scratch.scratch_recycle.len(), 1, "and recycled");
+}
