@@ -34,14 +34,17 @@ Traffic flows THROUGH the firewall (from LAN host to WAN) to exercise the full X
 Detect which environment is available. Prefer the loss cluster (Mellanox native XDP, 25G) over the local cluster (virtio generic XDP, 10G) over standalone VM.
 
 ```bash
-# Check loss cluster first (remote Incus host)
-if incus info loss:bpfrx-fw0 2>/dev/null | grep -q RUNNING; then
+# Check the loss userspace cluster first (remote Incus host). Its refs and
+# targets come from test/incus/loss-userspace-cluster.env through
+# cluster-env.sh: v4 172.16.80.202 (#18576: .200 is also answered by the
+# external v6 box), v6 2001:559:8585:80::200, on the reth0.80 fast path.
+# Never 172.16.100.x: that is a different uplink capped at ~9-10 Gb/s (#1578).
+if incus info loss:xpf-userspace-fw0 2>/dev/null | grep -q RUNNING; then
+    source test/incus/cluster-env.sh
     ENV="loss-cluster"
-    FW0="loss:bpfrx-fw0"
-    FW1="loss:bpfrx-fw1"
-    LAN_HOST="loss:cluster-lan-host"
-    IPV4_TARGET="172.16.100.200"
-    IPV6_TARGET="2001:559:8585:100::200"
+    LAN_HOST="$CLUSTER_LAN_HOST"
+    IPV4_TARGET="$IPERF_TARGET4"
+    IPV6_TARGET="$IPERF_TARGET6"
 # Check local cluster
 elif incus info bpfrx-fw0 2>/dev/null | grep -q RUNNING; then
     ENV="local-cluster"
@@ -211,4 +214,4 @@ For `/perf-test all`, run in this order:
 - Profile percentages are more stable than absolute throughput numbers
 - DNS may not resolve on cluster nodes — always use IP addresses directly
 - `casper.sf.saab.org` = `66.220.2.74`
-- For loss cluster: prefix instance names with `loss:` (e.g., `loss:bpfrx-fw0`)
+- For loss cluster: prefix instance names with `loss:` (e.g., `loss:xpf-userspace-fw0`); `cluster-env.sh` already does this for `$FW0`/`$FW1`/`$CLUSTER_LAN_HOST`

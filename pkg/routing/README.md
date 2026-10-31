@@ -32,7 +32,7 @@ which makes each domain unit-testable with a fake (see `rules_test.go`'s
 | File | Domain | Owns |
 |------|--------|------|
 | `routing.go` | `Manager` façade | sole `*netlink.Handle`, domain refs |
-| `vrf.go` | `vrfManager` | VRF lifecycle + `BindInterfaceToVRF`; own `mu` + tracked set |
+| `vrf.go` | `vrfManager` | VRF lifecycle + `BindInterfaceToVRF`; own `mu` + tracked set. `VRFMasterMoveSeq(name)` (#18597) counts, per link, the IFLA_MASTER changes this manager actually made (a successful `LinkSetMaster` or `LinkSetNoMaster`); an idempotent bind of a link already in its VRF and a failed bind do not count. pkg/daemon restarts the cluster heartbeat only when the control link's count moved |
 | `vrf_miss_terminator_9819.go` + `rule_l3mdev_linux.go` | (part of `vrfManager`) | the #9819 VRF miss terminator (`l3mdev unreachable`, pref 2000), installed before any VRF device exists; the raw FRA_L3MDEV request |
 | `routes.go` | `routeReader` | incremental and buffered kernel routing-table reads (`routeLister`) |
 | `routeformat.go` | free fns | Junos `show route` formatters |

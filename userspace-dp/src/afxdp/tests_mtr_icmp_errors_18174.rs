@@ -179,9 +179,20 @@ fn ethertype(f: Family) -> u16 {
     if f == Family::V4 { 0x0800 } else { 0x86dd }
 }
 
-fn meta_for(f: Family, ingress: i32, l3: usize, protocol: u8, len: usize) -> UserspaceDpMeta {
+/// #18562 (review seat L, M1): stamp the flow tuple the way the XDP shim does
+/// (`userspace-xdp` `parse_l4`): addresses (v4 in the first four bytes, v6 in
+/// all sixteen), TCP/UDP ports from L4 bytes 0..4, and for ICMP/ICMPv6 L4
+/// bytes 4..6 (the echo identifier; the unused word of an error) as the source
+/// port with a zero destination port. The flowless fallback builds its L3
+/// context from these (`l3_enforcement_flow_from_meta`); left zero, an
+/// UNMATCHED error routed 0.0.0.0 / :: and died HAInactive or martian here
+/// instead of meeting the live `wan -> lan` POLICY_DENY. The ports matter too:
+/// stamping addresses alone made the echo probe's meta flow key its session
+/// with identifier 0, so no quote could match it.
+fn meta_for(f: Family, ingress: i32, l3: usize, protocol: u8, frame: &[u8]) -> UserspaceDpMeta {
+    let len = frame.len();
     let l4 = l3 + if f == Family::V4 { 20 } else { 40 };
-    UserspaceDpMeta {
+    let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
@@ -197,7 +208,33 @@ fn meta_for(f: Family, ingress: i32, l3: usize, protocol: u8, len: usize) -> Use
         config_generation: 7,
         fib_generation: 9,
         ..UserspaceDpMeta::default()
+    };
+    with_shim_flow_addrs(f, meta, frame)
+}
+
+/// The shim's flow-tuple stamping, applied to an existing meta.
+fn with_shim_flow_addrs(f: Family, mut meta: UserspaceDpMeta, frame: &[u8]) -> UserspaceDpMeta {
+    let l3 = meta.l3_offset as usize;
+    let l4 = meta.l4_offset as usize;
+    let be16 = |at: usize| u16::from_be_bytes([frame[at], frame[at + 1]]);
+    (meta.flow_src_port, meta.flow_dst_port) = match meta.protocol {
+        PROTO_TCP | PROTO_UDP => (be16(l4), be16(l4 + 2)),
+        PROTO_ICMP | PROTO_ICMPV6 => (be16(l4 + 4), 0),
+        _ => (0, 0),
+    };
+    meta.flow_src_addr = [0u8; 16];
+    meta.flow_dst_addr = [0u8; 16];
+    match f {
+        Family::V4 => {
+            meta.flow_src_addr[..4].copy_from_slice(&frame[l3 + 12..l3 + 16]);
+            meta.flow_dst_addr[..4].copy_from_slice(&frame[l3 + 16..l3 + 20]);
+        }
+        Family::V6 => {
+            meta.flow_src_addr.copy_from_slice(&frame[l3 + 8..l3 + 24]);
+            meta.flow_dst_addr.copy_from_slice(&frame[l3 + 24..l3 + 40]);
+        }
     }
+    meta
 }
 
 /// The LAN host's probe as it enters reth1.0.
@@ -207,7 +244,7 @@ fn probe_frame(f: Family, probe: Probe, ttl: u8) -> (Vec<u8>, UserspaceDpMeta) {
     finish_l4_checksum(f, probe, client(f), server(f), &mut l4);
     let mut frame = eth(TEST_LAN_MAC, CLIENT_MAC, None, ethertype(f));
     frame.extend_from_slice(&ip_packet(client(f), server(f), ttl, proto(f, probe), &l4));
-    let meta = meta_for(f, LAN_IF, 14, proto(f, probe), frame.len());
+    let meta = meta_for(f, LAN_IF, 14, proto(f, probe), &frame);
     (frame, meta)
 }
 
@@ -253,7 +290,7 @@ fn error_frame(
     icmp[2..4].copy_from_slice(&csum.to_be_bytes());
     let mut frame = eth(TEST_WAN_MAC, UPSTREAM_MAC, Some(WAN_VID), ethertype(f));
     frame.extend_from_slice(&ip_packet(sender, quoted_src, 250, outer_proto, &icmp));
-    let meta = meta_for(f, WAN_IF, 18, outer_proto, frame.len());
+    let meta = meta_for(f, WAN_IF, 18, outer_proto, &frame);
     (frame, meta)
 }
 
@@ -598,7 +635,7 @@ fn fabric_probe_frame(f: Family, probe: Probe) -> (Vec<u8>, UserspaceDpMeta) {
     frame[0..6].copy_from_slice(&TEST_FABRIC_MAC);
     let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
-    let meta = meta_for(f, FABRIC_IF, 14, proto(f, probe), frame.len());
+    let meta = meta_for(f, FABRIC_IF, 14, proto(f, probe), &frame);
     (frame, meta)
 }
 
@@ -656,7 +693,7 @@ fn lan_owner_delivers(
         FABRIC_IF,
         14,
         if f == Family::V4 { PROTO_ICMP } else { PROTO_ICMPV6 },
-        fabric_frame.len(),
+        fabric_frame,
     );
     let mut fab = binding_on(FABRIC_IF);
     let before = sessions.len();
@@ -1102,10 +1139,11 @@ fn run_on_worker(
 /// error of every new session (every UDP probe) default-denied `wan -> lan` on
 /// node1 before HA sync landed. Proven here: worker A holds the #7770
 /// `FabricPuntSeed` locally, the node's shared maps stay empty by design
-/// (`SessionOrigin::is_transient_local_seed`), and worker B's matcher returns
-/// NoMatch. Tracked by #18562; this cell is the acceptance test for it.
+/// (`SessionOrigin::is_transient_local_seed`), and worker B's matcher returned
+/// NoMatch. #18562: worker B now finds the seed in the node's read-only
+/// punt-seed directory (`punt_seed_forward_quote_match`). RED when that
+/// consult is disabled (V4 Echo, `delivered ... left: 0`).
 #[test]
-#[ignore = "#18562: the #7770 punt seed is worker-local, so the first error on another worker returns NoMatch; un-ignore with the fix"]
 fn split_rg_first_error_on_another_worker_reaches_lan_host_18174() {
     for (f, probe) in SPLIT_CASES {
         let label = format!("cross-worker split {f:?} {probe:?}");
@@ -1114,6 +1152,7 @@ fn split_rg_first_error_on_another_worker_reaches_lan_host_18174() {
         let n1_neighbors = neighbors_with_client(&n1_fwd, f);
         let n1_shared = NodeShared::new();
         let mut n1_worker_a = SessionTable::new();
+        n1_worker_a.set_punt_seed_directory(Arc::clone(&n1_shared.owner_idx.punt_seeds));
         let (frame, meta) = probe_frame(f, probe, 5);
         let mut lan = binding_on(LAN_IF);
         run_on_worker(&mut lan, &mut n1_worker_a, &n1_fwd, &ha(false, true), &frame, meta, &n1_neighbors, &n1_shared);
@@ -1136,18 +1175,81 @@ fn split_rg_first_error_on_another_worker_reaches_lan_host_18174() {
         let fabric_frame = wan_owner_error_leg(&mut n0_sessions, &n0_fwd, &n0_neighbors, f, probe, xlate, &label);
 
         // node1, worker B: the reversed error, own table empty.
+        // Premise (the #18562 shape): worker A holds the seed, the node's
+        // shared maps hold NOTHING for the flow (seeds are transient-local and
+        // never published), and only the read-only directory mirrors it.
+        assert_eq!(n1_worker_a.len(), 1, "{label}: premise: worker A holds the punt seed");
+        assert_eq!(n1_shared.sessions.lock().unwrap().len(), 0, "{label}: premise: shared map empty");
+        assert_eq!(n1_shared.nat.lock().unwrap().len(), 0, "{label}: premise: shared NAT map empty");
+        assert_eq!(n1_shared.owner_idx.punt_seeds.len(), 1, "{label}: premise: the seed is in the node directory");
         let mut n1_worker_b = SessionTable::new();
-        let emeta = meta_for(f, FABRIC_IF, 14, if f == Family::V4 { PROTO_ICMP } else { PROTO_ICMPV6 }, fabric_frame.len());
+        n1_worker_b.set_punt_seed_directory(Arc::clone(&n1_shared.owner_idx.punt_seeds));
+        let emeta = meta_for(f, FABRIC_IF, 14, if f == Family::V4 { PROTO_ICMP } else { PROTO_ICMPV6 }, &fabric_frame);
         let mut fab1 = binding_on(FABRIC_IF);
         let (batch, dbg) =
             run_on_worker(&mut fab1, &mut n1_worker_b, &n1_fwd, &ha(false, true), &fabric_frame, emeta, &n1_neighbors, &n1_shared);
         assert_eq!(batch.invalid_fabric_stamp_drops, 0, "{label}: stamp accepted");
+        // L2 + review M1 (#18562): with `meta_for` now carrying the flow
+        // addresses the shim fills, the broken path (directory consult
+        // disabled) reproduces the LIVE signature: NoMatch, flowless
+        // `wan -> lan`, `policy_deny=1`. So `policy_deny == 0` is now a real
+        // discriminator (it was 0 either way while the zero-address meta sent
+        // the unmatched error to HAInactive), alongside delivery.
         assert_eq!(dbg.policy_deny, 0, "{label}: the first error must not be default-denied on another worker");
         assert_eq!(fab1.scratch.scratch_forwards.len(), 1, "{label}: delivered to the LAN host from worker B");
         assert_delivered_to_lan_host(&fab1.scratch.scratch_forwards[0], f, probe, ErrKind::TimeExceeded, hop(f), &label);
     }
 }
 
+
+/// #18562 negative twin of the cross-worker cell: the punt-seed directory
+/// answers only a FABRIC-ingress error. The same reversed bytes (outer dst =
+/// client, quote = the pre-NAT probe) arriving on node1's own WAN — with the
+/// seed in the node's directory and node1 owning both RGs, so the error
+/// would route to the LAN as a ForwardCandidate — are not something the WAN
+/// owner produced, and must take the ordinary unmatched-error path like any
+/// unsolicited error. RED when the fabric-ingress gate in
+/// `punt_seed_forward_quote_match` is dropped: the directory row matches and
+/// the RELATED rule queues it to the LAN host.
+#[test]
+fn cross_worker_punt_seed_never_matches_off_fabric_18562() {
+    for f in [Family::V4, Family::V6] {
+        let label = format!("off-fabric cross-worker {f:?}");
+        let n1_fwd = build_forwarding_state(&peer_snapshot());
+        let n1_neighbors = neighbors_with_client(&n1_fwd, f);
+        let n1_shared = NodeShared::new();
+        let mut n1_worker_a = SessionTable::new();
+        n1_worker_a.set_punt_seed_directory(Arc::clone(&n1_shared.owner_idx.punt_seeds));
+        let (frame, meta) = probe_frame(f, Probe::Echo, 5);
+        let mut lan = binding_on(LAN_IF);
+        run_on_worker(&mut lan, &mut n1_worker_a, &n1_fwd, &ha(false, true), &frame, meta, &n1_neighbors, &n1_shared);
+        assert_eq!(
+            lan.scratch.scratch_forwards[0].decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "{label}: premise: node1 punts the probe"
+        );
+        assert_eq!(n1_shared.owner_idx.punt_seeds.len(), 1, "{label}: premise: the seed is in the node directory");
+
+        let mut n1_worker_b = SessionTable::new();
+        n1_worker_b.set_punt_seed_directory(Arc::clone(&n1_shared.owner_idx.punt_seeds));
+        let (eframe, emeta) =
+            error_frame(f, Probe::Echo, ErrKind::TimeExceeded, hop(f), client(f), PROBE_ECHO_ID);
+        let mut wan = binding_on(WAN_IF);
+        let (_batch, dbg) =
+            run_on_worker(&mut wan, &mut n1_worker_b, &n1_fwd, &ha(true, true), &eframe, emeta, &n1_neighbors, &n1_shared);
+        // The matcher returns NoMatch and the error takes the flowless path,
+        // where (with the shim's flow addresses in the meta, review M1) it
+        // meets the same `wan -> lan` default deny as any unsolicited error —
+        // never the RELATED queue the directory row would have opened.
+        assert!(
+            wan.scratch.scratch_forwards.is_empty(),
+            "{label}: an off-fabric error must not be matched by a punt seed"
+        );
+        assert_eq!(wan.scratch.scratch_recycle.len(), 1, "{label}: the refused descriptor is recycled");
+        assert_eq!(dbg.policy_deny, 1, "{label}: refused by `wan -> lan` policy, as live");
+        assert_eq!(dbg.ha_inactive, 0, "{label}: the refusal is not an HA verdict (both RGs are active)");
+    }
+}
 
 /// Defect 3 also moves interface source NAT: the SNAT matcher
 /// (`forwarding/nat.rs`) translates an interface-mode rule to

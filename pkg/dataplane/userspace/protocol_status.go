@@ -581,6 +581,16 @@ type ProcessStatus struct {
 	// refused as ambiguous on a shared egress.
 	// Surfaced as xpf_userspace_nat_reverse_ambiguous_total.
 	NATReverseAmbiguousTotal uint64 `json:"nat_reverse_ambiguous_total,omitempty"`
+	// #18562: the helper's punt-seed directory (live #7770 seeds mirrored
+	// node-wide for the cross-worker embedded-ICMP fallback). Rows is a gauge,
+	// non-zero only during an RG split, and includes expired rows not yet
+	// reclaimed (they no longer match); the two totals count publishes the
+	// directory refused at a full shard or skipped on a contended shard lock —
+	// each a punted flow whose cross-worker first error keeps the pre-#18562
+	// verdict.
+	PuntSeedDirectoryRows           uint64 `json:"punt_seed_directory_rows,omitempty"`
+	PuntSeedDirectoryFullTotal      uint64 `json:"punt_seed_directory_full_total,omitempty"`
+	PuntSeedDirectoryContendedTotal uint64 `json:"punt_seed_directory_contended_total,omitempty"`
 	// InterfaceSNATIdentityExhaustionTotal is #6751 PR 2/3: interface-mode
 	// SNAT admissions that failed CLOSED because no free translated
 	// identity existed for their (egress address, remote endpoint) — every

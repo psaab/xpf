@@ -122,6 +122,67 @@ func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
 	return c.RethVIPsByRG()[rgID]
 }
 
+// AddressIdentitiesByNetdev returns, per kernel netdev, the identity set
+// (PrefixIdentity) of every address the config assigns to that netdev
+// (#18573): every RETH VIP of every redundancy group, under the SAME
+// netdev naming RethVIPsByRG installs them with, plus every unit address
+// of every enabled non-RETH interface, resolved through the
+// ResolveKernelIfName rule the interface address reconcile and the
+// userspace snapshot agree on (#8994). Disabled interfaces and units
+// contribute nothing (they own no address, #14575/#16590). Unparseable
+// addresses are skipped.
+//
+// It is the "configured ownership" set: an xpf-stamped direct-mode VIP
+// whose (netdev, identity) is absent here is a leftover that no
+// redundancy group and no plain interface wants, so the direct-VIP
+// reconcile deletes it and the userspace snapshot never publishes it.
+// The predicate is config-only — it does not depend on which node owns
+// which group — so a non-owner and an owner reach the same verdict.
+func (c *Config) AddressIdentitiesByNetdev() map[string]map[string]bool {
+	if c == nil {
+		return nil
+	}
+	out := make(map[string]map[string]bool)
+	add := func(netdev, addr string) {
+		p, ok := ParseVRRPVIP(addr)
+		if !ok || netdev == "" {
+			return
+		}
+		if out[netdev] == nil {
+			out[netdev] = make(map[string]bool)
+		}
+		out[netdev][PrefixIdentity(p)] = true
+	}
+	for _, perNetdev := range c.RethVIPsByRG() {
+		for netdev, vips := range perNetdev {
+			for _, vip := range vips {
+				add(netdev, vip)
+			}
+		}
+	}
+	owners := c.RethRGOwners()
+	tunMap := tunnelNameMapFn(c)
+	for _, name := range sortedRethIfNames(c) {
+		ifc := c.Interfaces.Interfaces[name]
+		if ifc == nil || ifc.Disable {
+			continue
+		}
+		if _, isReth := owners[name]; isReth {
+			continue // RethVIPsByRG above is the RETH derivation
+		}
+		for unitNum, unit := range ifc.Units {
+			if unit == nil || unit.Disable || len(unit.Addresses) == 0 {
+				continue
+			}
+			netdev := c.resolveKernelIfNameWith(fmt.Sprintf("%s.%d", name, unitNum), tunMap)
+			for _, addr := range unit.Addresses {
+				add(netdev, addr)
+			}
+		}
+	}
+	return out
+}
+
 // sortedRethIfNames returns sorted interface names for deterministic iteration.
 func sortedRethIfNames(c *Config) []string {
 	names := make([]string, 0, len(c.Interfaces.Interfaces))

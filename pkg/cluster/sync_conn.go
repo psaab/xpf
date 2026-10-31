@@ -108,9 +108,11 @@ func (s *SessionSync) getActiveConn() net.Conn {
 // A conn that is not (or is no longer) installed in a fabric slot cannot speak
 // for the current incarnation, so its ack is ignored. That also covers the
 // pre-install handshake-pending frame in handleNewConnection: an ack can never
-// legitimately be a peer's FIRST frame (we only send syncMsgHeartbeat after a
-// read deadline elapses on an established connection), so an unsolicited ack
-// arriving before the connection is wired in must not arm an enforcement path.
+// legitimately be a peer's FIRST frame (we send syncMsgHeartbeat only on an
+// installed connection: once at install, #18561's sendInstallHeartbeat after
+// the receive loop is started, then after a read deadline elapses or as a
+// liveness probe), so an unsolicited ack arriving before the connection is
+// wired in must not arm an enforcement path.
 //
 // #5718 fold F1b: being installed is NOT sufficient — the slot's incarnation
 // stamp must also be current. `s.conn0 == conn || s.conn1 == conn` asks only
@@ -904,6 +906,12 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 		s.receiveLoop(ctx, conn)
 	}()
 	s.sendClockSync(conn)
+	// #18561: one sync-level heartbeat per installed connection, so the peer's
+	// HeartbeatAck latches peerHeartbeatAckEver early. Otherwise a node that
+	// keeps receiving frames never sends one (the read deadline never fires),
+	// the latch stays false, and the heartbeat-timeout liveness probe never
+	// engages for a hard-killed peer.
+	s.sendInstallHeartbeat(conn)
 	// #6650: advertise our config-snapshot protocol version on every installed
 	// connection, so the peer's commit path can refuse to push a config this
 	// node cannot represent. Beside the clock sync because it has the same

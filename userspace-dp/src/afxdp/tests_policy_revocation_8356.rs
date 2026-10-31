@@ -7640,13 +7640,26 @@ fn unrelated_activation_keeps_owned_permits_stable_10507() {
 /// FabricPuntSeed earns a recorded Permit through poll (standby,
 /// FabricRedirect, recorded lan -> wan, punts — never locally forwards).
 /// Activation Refresh lands (no generation publish) and the next packet —
-/// now locally forwarding via DMZ — must be revoked by live lan -> dmz
-/// Deny. The seed's recorded transport authorization never becomes a
+/// now locally forwarding via DMZ — must not be forwarded under that
+/// permit. The seed's recorded transport authorization never becomes a
 /// local forwarding authorization. Same DMZ divergence as Cell 1, seed
 /// origin instead of SyncImport.
 ///
-/// RED-on-revert: without the fence phase 3 coasts Fresh and forwards
-/// via DMZ (tx 1, revoked 0).
+/// #18620 changed HOW the property holds, not whether. The flow's egress
+/// (DMZ, RG1) is now forwarded by this node, so the phase-3 hit retires the
+/// seed before it can serve (`retire_fabric_punt_seed_if_owner_active`): a
+/// seed whose egress is local shadows the flow instead of standing in for
+/// the peer. The recorded permit is discarded with it. The packet then takes
+/// the miss path, which forwards nothing that current policy has not just
+/// admitted:
+///   - the phase-3 ACK is a SYN-first drop (no session, no forward);
+///   - a phase-4 SYN for the same tuple is judged by live `lan -> dmz` and
+///     DENIED (no session, no forward).
+/// Before #18620 the same outcome came from the #10507 fence revoking the
+/// hit (revoked 1); the fence itself is pinned by the SyncImport cells.
+///
+/// RED-on-revert of either mechanism: phase 3 or phase 4 forwards via DMZ
+/// (tx 1).
 #[test]
 fn seed_recorded_permit_revoked_after_activation_10507() {
     let forwarding = forwarding_with_fabric_dmz_10507();
@@ -7730,17 +7743,53 @@ fn seed_recorded_permit_revoked_after_activation_10507() {
         meta3,
         true,
     );
-    assert_eq!(dbg3.session_hit, 1, "phase 3 must HIT");
     assert_eq!(
-        dbg3.policy_revoked_sessions, 1,
+        dbg3.session_hit, 0,
+        "#18620: the seed whose egress is now local must be retired, not serve the hit"
+    );
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 0,
+        "nothing is revoked: the seed and its recorded permit are already gone"
+    );
+    assert_eq!(
+        dbg3.tx, 0,
         "seed transport Permit must not authorize local forwarding (#10507)"
     );
-    assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
     assert_eq!(
         session_count(&sessions),
         0,
-        "revocation must tear down the session"
+        "the retired seed must not be replaced by a session the ACK created"
     );
+
+    // Phase 4: the flow's next SYN must be judged by CURRENT policy, which
+    // denies lan -> dmz. This is the #10507 property through the miss path.
+    let mut binding4 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding4.interface = Arc::<str>::from("reth1.0");
+    let frame4 = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        crate::tcp_flags::TCP_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta4 = txn_meta_v4(LAN_IFINDEX as u32, crate::tcp_flags::TCP_SYN, frame4.len() as u16);
+    let (_batch4, dbg4) = txn_run_descriptor_checked(
+        &mut binding4,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame4,
+        meta4,
+        true,
+    );
+    assert!(
+        dbg4.policy_deny >= 1,
+        "the post-activation SYN must be judged by live lan -> dmz and denied (got {})",
+        dbg4.policy_deny
+    );
+    assert_eq!(dbg4.tx, 0, "the denied SYN must not forward");
+    assert_eq!(session_count(&sessions), 0, "a denied SYN installs no session");
 }
 
 /// #10507 shared helper: the NoRoute snapshot — same generation 7, but

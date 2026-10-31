@@ -255,6 +255,40 @@ transfer. The mark is an overlay on what the HELPER is told. It never changes
   enter the helper FIB before its forwarding opens, the #16270 order the
   promotion path keeps. Proxy-NDP responders keep the raw provider: a
   pre-active node must not answer for addresses its peer still owns.
+- The same provider also reports an RG as locally primary while the CURRENT
+  helper last acknowledged it active (`helperActiveRGsLocked`, read from
+  `haWatchdogHelperInventory`), #18620. That is the demotion twin of #16270:
+  an RG's connected prefixes leave the helper FIB only after
+  `UpdateRGActive(false)` has been acknowledged.
+  - Every route build and that acknowledgement run under `m.mu`, so the
+    order holds by construction for every publisher: the cluster-state
+    republish, the route listener, ip-monitoring, a commit, and the
+    apply-time rebuild.
+  - Before #18620, a snapshot published between the cluster verdict flipping
+    and the acknowledgement withdrew the rows under live forwarding. On loss
+    that window was 50-80 ms, and a snapshot landed in it on about one
+    demotion in ten. The first FIB-stale hit of each live SNAT session was
+    then revoked as stale source NAT.
+  - The hold reads the acknowledged inventory, not `haGroups`. A failed
+    `UpdateRGActive(false)` has already written `haGroups`, but the helper may
+    still forward the RG.
+  - Every full-inventory ack (`syncHAStateLocked`, the `UpdateRGActive`
+    publish) goes through `adoptHelperInventoryLocked`. When an ack DROPS an RG
+    from the hold, it calls the daemon's `SetHeldRGReleaseFunc` hook, which
+    schedules the connected-RG republish. So the withdrawal follows whichever
+    path delivered the ack, including the reconcile retry of a failed demotion
+    write, which is not an ownership edge and schedules no republish of its
+    own. The hook runs under `m.mu` and only schedules.
+  - Residual: `armPendingHAStateReplayLocked` (a replay-debt reset after a
+    snapshot publish) clears the acknowledged inventory directly, so the hold
+    drops without firing the hook. If that reset lands while an RG is still
+    held (a failed demotion ack in flight), the rows already published stay
+    until the next publish of any kind, because the later replay ack starts
+    from an empty inventory and releases nothing. Firing the hook from the
+    reset instead would withdraw the rows while the helper may still forward
+    the RG, which is the window this hold exists to close. The reset path is
+    narrow (generation debt plus a failed demotion ack); a follow-up can carry
+    the held set across the reset.
 - A real promotion or a real demotion of the RG in `UpdateRGActive`
   (`supersedeTransferPreActiveLocked`) removes the mark. Without the
   demotion arm, a mark still inside its deadline would keep the helper
@@ -269,6 +303,46 @@ transfer. The mark is an overlay on what the HELPER is told. It never changes
   a request that failed after the 5 s deadline must still withdraw them.
 - An expired mark no longer counts. The status poll's signature comparison
   then republishes the effective view (5 s throttle).
+
+## Interface rows never publish a direct-VIP leftover (#18573)
+
+`buildInterfaceSnapshotsFrom` (`userspace/interfaces.go`) builds each row's
+addresses from the kernel listing (`buildLinkSnapshot`), merged with the
+configured ones. A RETH address that a commit renumbered away stays on the
+kernel until the daemon's direct-VIP reconcile deletes it, and the commit's
+snapshot is built before that reconcile runs. Measured on udp (#18573): after
+`.11` -> `.43` the row listed `.11/24` before `.43/24` (string sort), and the
+helper's order-based interface-SNAT pick (`pick_interface_v4`: the designated
+`primary`, else the first non-link-local in row order) SNATed every new LAN
+flow to the deleted `.11`. LAN to 1.1.1.1 was 0/30 until the next snapshot.
+
+Each build now takes one `vipstamp.Dump` and drops from the **live** listing
+every `vipstamp.Leftover`: an address xpf's direct-VIP path stamped
+(`IFA_PROTO`) that `config.AddressIdentitiesByNetdev` no longer assigns to
+that netdev (`userspace/direct_vip_leftover_18573.go`). It applies to both
+the base row and the unit row; an untagged unit shares its member's ifindex,
+and the helper's shared-ifindex merge keeps the first row's pick. The
+configured merge runs after the filter, so a configured address is never
+dropped. An unstamped address (DHCP lease, kernel link-local, standalone VRRP
+VIP, a pre-#18573 VIP) is never dropped either. In the kernel it also
+survives the daemon's leftover delete under `promote_secondaries=0`: see
+`guardIPv4PrimaryCascade` in `pkg/daemon/README.md`. A failed dump filters
+nothing. The interface-SNAT source after a renumber is therefore the new
+address with no manual step. Removal outside a commit republishes through
+the daemon's interface-link refresher (see `pkg/daemon/README.md`
+"Direct-mode VIP failover").
+
+Not changed: `userspace_local_v4/v6` still mirrors every kernel address
+(`buildDesiredLocalAddressSets`), so a leftover stays "local" to the XDP shim
+only while it is still on the kernel, which is at most one reconcile tick
+(2 s). An `ip addr del` by an operator on a non-stamped address still
+publishes nothing until the next commit or RG move. There is no RTNL address
+subscription.
+
+Cells: `userspace/direct_vip_leftover_18573_test.go` (the SNAT-source cell
+and its unstamped twin) and the pkg/daemon kernel cell
+`TestDirectVIPRenumberOnKernel18573`, which builds the commit's snapshot on a
+real netns listing.
 
 ## Shim artifact: pinned toolchain + verifier gates (#1864)
 

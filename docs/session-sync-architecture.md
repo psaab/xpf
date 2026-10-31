@@ -1278,6 +1278,32 @@ so a stable connection with a persistent apply failure would otherwise never
 re-enter this edge" — and answered it with a health alarm rather than
 convergence.
 
+#18610 narrows the dual-active half of that contract. The re-push heals a
+refusal only when the refusing node later DEMOTES: the new primary's push then
+applies on it. When the refusing node wins the dual-active and STAYS primary,
+the peer is secondary and never pushes again, so no re-push arrives and none is
+needed — this node's config is the one the peer converges to. Its received mark
+nevertheless stayed above its applied mark, which read as `standby config
+stale` and blocked a rolling upgrade started on it. The refusal is now its own
+outcome (`ErrConfigSyncRejectedAuthority`): it still nacks and pins, but it does
+not arm the #6387 alarm, counts `ConfigsRejectedAsAuthority` instead of
+`ConfigsApplyFailed`, and is exempt from the staleness gate while the node stays
+the authority (`docs/sync-protocol.md`, manual-failover config-staleness gate).
+
+The losing node needs the mirror image. The authority's own push to it is
+deduplicated per (connection epoch x generation) and was claimed by the push
+before the split; the #18521 overdue re-push fires only for an unacknowledged
+send and resends the SAME generation, which the loser's duplicate path re-ACKs
+without running a handler, so it neither converges a commit the loser made
+during the split nor supersedes the loser's own unacknowledged send debt
+(#9569). The loser therefore kept refusing the handovers it started. Refusing a
+push as authority now clears the push marker and re-runs the ordinary reconcile,
+which pushes under a NEW wire generation: the loser applies it (or takes the
+"already matches" path), ACKs, supersedes its debt, and reports a discarded
+unshared commit through #9530. The re-push is paced at `configAckOverdueAfter`;
+a loser still in its dual-active view refuses it and nacks, and #7328 retries
+at the reconcile cadence.
+
 The signal has to come from the receiver. The sender cannot infer the outcome:
 `QueueConfig` is fire-and-forget with no ack, the cluster heartbeat carries no
 config state (`HeartbeatPacket` is node/cluster id, per-RG group state,
@@ -1463,8 +1489,24 @@ authority namespace it names. Until a current-authority config is applied, or
 while the sender is behind, after a failed apply, or during reconnect reset, it
 stamps 0.
 
-On receipt, an authority strips the tag and compares against its own
-`configGenCounter` only after learning that the peer supports the encoding. A
+On receipt, an authority strips the tag only after learning that the peer
+supports the encoding. It compares against `authorityConfigEpochThreshold`
+(#18636), which is the newest config generation actually written to the
+current peer incarnation (`peerIncarnationState.lastSentConfigGen`).
+
+- Before the first write to that incarnation, the threshold is
+  `configGenCounter`. That keeps the original comparison, which fails
+  closed.
+- The counter alone cannot be the threshold. It is a reservation counter, and
+  the 30 s config-sync reconcile reserves a generation before it finds the
+  config already pushed. So it runs past anything the peer was ever sent, and
+  a converged peer's every install read as stale.
+- A BulkStart boot-id switch seeds the new incarnation's mark from the config
+  written on the priming connection (the #18521 ordering: the peer-connect
+  push precedes the new boot's BulkStart). The switch's capability callback
+  also re-arms a push to the new incarnation.
+
+A
 non-authority accepts only untagged epochs and compares against
 `max(applyingConfigGen, lastAppliedConfigGen)`. A tag/role mismatch means the
 peers have not observed the same RG0 handover, so the generations are
@@ -2106,9 +2148,14 @@ the slow side stays ESTABLISHED until it has consumed the whole backlog
   EOF at once, fully disconnects, and declares peer loss at the heartbeat
   threshold, as before. One that is behind keeps sync installed while it
   drains, so after the last counted frame the 2s recency window still runs:
-  detection is up to max(threshold, ~3s) plus one heartbeat tick, about 3.1s at
-  defaults and 3.2s in the lab — beyond the 0.5–2.1s band quoted for a silent
-  death, and short of the 5s cap a FIN backlog had before round 3.
+  detection is up to max(threshold, ~3s) plus a quarter interval (the
+  receiver's check cadence since #18639), about 3.0 s at defaults and 3.05 s in
+  the lab. That is beyond the threshold declaration a hard crash now gets
+  (#18570: a peer that acks sync-level heartbeats and does not answer the
+  liveness probe is declared about 0.5–0.525 s after its last heartbeat at
+  defaults, 1.0–1.05 s in the lab), and short of the 5s cap a FIN backlog had
+  before round 3. The probe does not shorten this case: backlog frames handled
+  after the probe answer it.
 - **Every teardown names itself.** `fabric N disconnected` carries `reason`,
   `err` and a per-connection summary (`conn_age`, `frames_read`, `bytes_read`,
   `handler_time`, `handler_max`, `handler_max_type`, `slow_calls`, and

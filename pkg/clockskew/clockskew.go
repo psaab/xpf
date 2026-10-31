@@ -34,6 +34,9 @@ const (
 	// remains active while a recovered reference is between this value and the
 	// raise threshold, preventing log/render flapping around 15 seconds.
 	ClearAtSecs float64 = 10
+	// PeerRaiseAtSecs is the inter-node (peer heartbeat) alarm bound, owned by
+	// pkg/cluster (PeerClockSkewRaise) and mirrored here for the summary text.
+	PeerRaiseAtSecs float64 = 10
 	// DefaultTickInterval bounds how long a newly crossed threshold waits for
 	// the next sample. The monitor is diagnostic and intentionally slower than
 	// the fabric heartbeat, but five seconds leaves useful margin below the
@@ -60,6 +63,11 @@ const (
 	KindNoSource Kind = iota + 1
 	KindUnsynced
 	KindOffset
+	// KindPeerOffset is the #18585 inter-node alarm: the PEER's wall clock,
+	// measured over authenticated heartbeats, is far from this node's. It is
+	// raised by pkg/cluster (not by Monitor, which samples the local reference
+	// only) and merged into the same read surfaces.
+	KindPeerOffset
 )
 
 // Sample is one daemon-side reference-clock sample. Unknown fields are
@@ -102,6 +110,15 @@ func (a ActiveAlarm) Summary() string {
 		}
 		return fmt.Sprintf("node clock is %gs %s its NTP reference (alarm at %gs; fabric RPC fails past %d-%ds of inter-node skew) — check NTP",
 			mag, dir, RaiseAtSecs, AuthWindowSecs, AuthBreakSkewSecs)
+	case KindPeerOffset:
+		dir := "ahead of"
+		mag := a.OffsetSecs
+		if mag < 0 {
+			dir = "behind"
+			mag = -mag
+		}
+		return fmt.Sprintf("peer node wall clock is %.1fs %s this node, measured over authenticated heartbeats (alarm at %gs; cross-node fabric RPC fails past %d-%ds) — check NTP on both nodes",
+			mag, dir, PeerRaiseAtSecs, AuthWindowSecs, AuthBreakSkewSecs)
 	default:
 		return "cluster clock synchronization alarm"
 	}
@@ -121,6 +138,8 @@ func (a ActiveAlarm) detail() string {
 			mag = -mag
 		}
 		return fmt.Sprintf("%gs %s NTP reference", mag, dir)
+	case KindPeerOffset:
+		return fmt.Sprintf("peer wall clock %+.1fs from this node", a.OffsetSecs)
 	default:
 		return "unknown clock synchronization condition"
 	}
@@ -377,9 +396,25 @@ func causeFor(k Kind) string {
 		return "unsynchronized"
 	case KindOffset:
 		return "offset"
+	case KindPeerOffset:
+		return "peer-offset"
 	default:
 		return "unknown"
 	}
+}
+
+// PeerOffsetSyslogLine formats the #18585 inter-node alarm transition in the
+// same RT_SYSTEM CLOCK_SKEW_ALARM_* shape the local reference monitor emits,
+// so one syslog filter sees both. pkg/cluster raises the peer alarm; the
+// daemon forwards its transitions through the same emitter.
+func PeerOffsetSyslogLine(raised bool, offsetSecs float64) (int, string) {
+	detail := ActiveAlarm{Kind: KindPeerOffset, OffsetSecs: offsetSecs}.detail()
+	if raised {
+		return SeverityRaise, fmt.Sprintf("RT_SYSTEM - CLOCK_SKEW_ALARM_RAISED cause=%q detail=%q",
+			causeFor(KindPeerOffset), detail)
+	}
+	return SeverityClear, fmt.Sprintf("RT_SYSTEM - CLOCK_SKEW_ALARM_CLEARED reason=%q detail=%q",
+		"peer offset recovered", detail)
 }
 
 func (m *Monitor) emitLine(severity int, msg string) {

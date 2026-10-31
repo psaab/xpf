@@ -24,13 +24,17 @@ func compile8357(t *testing.T, cmds []string, compile func(*ConfigTree) (*Config
 	return cfg
 }
 
+// hasNTPAdvisory8357 matches the #8357 "no time source at all" advisory by its
+// own constant. #18584 added a second cluster NTP advisory (servers reached
+// through the default instance) that also names `system ntp server` and fabric
+// RPC; a substring predicate would credit either advisory to this cell.
 func hasNTPAdvisory8357(cfg *Config) bool {
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "system ntp server") && strings.Contains(w, "fabric RPC") {
+		if w == clusterNTPAdvisory {
 			return true
 		}
 	}
-	return false
+	return strings.Contains(strings.Join(cfg.Warnings, "\n"), "`system ntp server` is empty")
 }
 
 var clusterCmds8357 = []string{

@@ -253,11 +253,12 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 		mgmtSet = mgmtIfaces
 		for ifName := range mgmtIfaces {
 			// #5700: this PRE-networkd bind is best-effort (WARN, not surfaced).
-			// applyNetworkdConfig's `networkctl reconfigure` strips the VRF master
-			// binding right after this phase, so the AUTHORITATIVE management-VRF
-			// bind is the post-networkd rebindManagementVRFIfaces (whose failure IS
-			// surfaced into commit truth). Surfacing this pre-strip bind would report
-			// a failure for a binding networkd is about to remove and re-establish.
+			// The AUTHORITATIVE management-VRF bind is the post-networkd
+			// rebindManagementVRFIfaces (whose failure IS surfaced into commit
+			// truth). Before #18597 networkd's reconfigure stripped the binding
+			// right after this phase; it now renders KeepMaster=yes and leaves
+			// it alone, but the post-networkd pass stays authoritative (a
+			// tagged unit or fabric link can be created after this phase).
 			if err := d.routing.BindInterfaceToVRF(ifName, mgmtVRFName); err != nil {
 				slog.Warn("failed to bind interface to management VRF",
 					"interface", ifName, "err", err)
@@ -265,6 +266,24 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 		}
 	}
 	d.publishMgmtVRFIfaces(mgmtSet)
+
+	// #18597: if this pass moved the control link (vrf-mgmt was recreated by
+	// ReconcileVRFs above, or the link had drifted out), the heartbeat
+	// sockets bound through it are stale. Restart them now, right after the
+	// move, rather than at the end of the apply: RestartHeartbeat's peer
+	// keepalive and restart grace then cover the gap from its start. An
+	// unmoved control link keeps its sockets.
+	//
+	// A failure here is NOT joined into commit truth. It leaves the restart
+	// owed (#9751), and the post-networkd pass of this same apply retries the
+	// debt and reports ITS outcome into networkdErr. Joining it here too
+	// failed a commit whose heartbeat the 2.7 retry had already restored.
+	if mgmtSet != nil {
+		if err := d.restartHeartbeatIfControlLinkMoved(cfg, false); err != nil {
+			slog.Warn("cluster: heartbeat restart after the pre-networkd management-VRF bind failed; "+
+				"the post-networkd pass retries it", "err", err)
+		}
+	}
 
 	// #5867: the DHCP management-VRF route program+reconcile (formerly step 0.6
 	// here) now runs in applyConfigLocked immediately after this reconcile
@@ -313,9 +332,13 @@ func chassisClusterFabricInterfaces(cfg *config.Config) map[string]bool {
 }
 
 // rebindManagementVRFIfaces re-binds the published management-VRF interface set
-// to vrf-mgmt after applyNetworkdConfig's `networkctl reconfigure` strips the
-// VRF master binding (it treats the daemon-created vrf-mgmt device as
-// unmanaged). This is the AUTHORITATIVE, load-bearing management-VRF bind:
+// to vrf-mgmt after applyNetworkdConfig. Before #18597 networkd's `networkctl
+// reconfigure` stripped the VRF master binding (`VRF=` names a daemon-created
+// device networkd cannot resolve); the .network now renders KeepMaster=yes,
+// so for a link that stayed bound this is an idempotent no-op that moves
+// nothing. It still binds a link that is not yet a member (a fabric or VLAN
+// unit created by this apply, or one that drifted out). This is the
+// AUTHORITATIVE, load-bearing management-VRF bind:
 // #5700 aggregates and RETURNS the per-interface bind failures so the caller can
 // join them into commit truth (via networkdErr) instead of swallowing at WARN.
 // Management base devices must exist by this phase. A configured tagged VLAN
@@ -566,7 +589,7 @@ func (d *Daemon) applyInterfaceReconcile(cfg *config.Config) error {
 // from the apply path so the class rule has a callable, testable entry point.
 //
 // #7515 / #10308: the class comes from config.IsManagementIfName, the SSOT
-// shared with the networkd `VRF=` emitter and the ip-monitoring next-hop
+// shared with the networkd `KeepMaster=yes` emitter (#18597) and the ip-monitoring next-hop
 // validator. Zone names are deliberately irrelevant: a data NIC in a zone
 // named `mgmt`/`control` is not vrf-mgmt-isolated, while fxp*/fab*/em*
 // lifelines remain isolated wherever they are zoned.

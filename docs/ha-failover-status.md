@@ -298,6 +298,18 @@ later):
    covering connected prefix beats a selected non-cluster terminal
    only while a cluster-terminal row proves republication is owed;
    settled-FIB operator discards are bit-identical).
+   The demotion side was still unordered until #18620. The cluster-state
+   republish that WITHDRAWS the RG's connected rows ran async ahead of
+   `SetRGActive(false)`, and on loss its snapshot reached the helper first
+   on about one demotion in ten. The window was 50-80 ms with the helper
+   still forwarding the RG. Live SNAT sessions were revoked as stale source
+   NAT, and the punt seed that replaced them blackholed the flow when the RG
+   returned (18-515 s ping/iperf outages). Fix:
+   - the demotion edge schedules its withdrawing reconciles after the write;
+   - the route builders hold an RG's connected rows while the helper last
+     acknowledged it active;
+   - a punt seed is retired once its egress RG is local, and it yields to the
+     peer's import or delete.
 3. **Supersession (#16270 cache leg, #16222).** Cache revalidation
    had supersession arms for `FabricRedirect` and `DiscardRoute`
    but none for a locally-egressing `ForwardCandidate` whose egress
@@ -982,6 +994,45 @@ Root cause was barrier/bulk ack delivery stuck behind bulk data (P0). With
 priority ack channel, acks should deliver promptly. Needs live validation
 on split-RG cluster.
 
+### Crash takeover: dead peer no longer held by the sync-recency window (#18561, #18570)
+
+A force-stopped peer (`incus stop --force`, no FIN) leaves the survivor's sync
+socket half-open, so `syncSuppressesPeerTimeoutLocked`'s 2 s recency window
+kept the dead peer alive for up to 2 s past the heartbeat threshold (loss:
+peer loss declared 0.7-1.58 s after the kill at 200 ms x 5). For a peer that
+answers sync-level heartbeats, a suppressed timeout tick now needs a sync frame
+handled after a liveness probe sent at the first missed heartbeat, once the last
+heartbeat is 1.5 intervals old (`prearmPeerLivenessProbe`,
+`peerAnsweredLivenessProbeLocked`). On loss
+(0.0.26111) declaration came about 1.0 s after the last delivered ping, i.e. at
+the threshold. The crash ping outage went from 2.20 s (baseline) to 1.37 s
+together with #18565, which takes the RG-edge FRR and ip-monitoring reconciles
+off the activation path (RG0/1/2 active +57/+126/+261 ms after peer loss).
+H10's 1.4 s crash bound was met in that single run.
+
+### Crash detection phase: four staleness checks per interval (#18561)
+
+With the #18570 probe, a crashed peer is declared on the first staleness check
+after its last heartbeat crosses interval x threshold. The receiver checked once
+per interval, so detection was the threshold plus 0-1 interval of phase. It now
+checks four times per interval (`timeoutCheckInterval`, floored at 10 ms), so the
+phase is at most a quarter interval. The staleness rule is unchanged.
+
+Measured on tcp (200 ms x 5) with session churn so that sync is dense at death,
+crash detection from the last heartbeat on the wire to `marking peer lost`:
+
+| build | n | median | p90 | max |
+|---|---|---|---|---|
+| master 7c45627f9d | 10 | 2.157 s | 2.250 s | 2.258 s |
+| + #18570 | 10 | 1.074 s | 1.135 s | 1.198 s |
+| + #18570 + four checks per interval | 9 | 1.025 s | 1.046 s | 1.048 s |
+
+Activation is unchanged by both: about 0.34-0.38 s from peer-lost to the first
+ping reply. The cluster event loop activates RGs one at a time, and each
+`SetRGActive` waits for the helper to republish that RG's sessions. Detection
+plus activation therefore still lands near TCP's 1.4 s retransmit, and 2 of the
+9 trials had a stream resume after 3 s.
+
 ### Daemon restart blackhole: orderly stop now resigns (#18540) — NEEDS LIVE GATE
 
 `make test-restart-connectivity` lost 1/7/33 pings per cycle on loss (tcp: 8).
@@ -1039,6 +1090,43 @@ independent reasons:
 
 Both are covered by hermetic cells; neither has been through `make
 test-ha-crash` on a cluster yet.
+
+### A RETH address removed by commit stayed on the RG owner (#18573) — FIXED IN SOURCE
+
+In direct-VIP mode (private-RG election, the compiler default) the add and
+remove passes both derived their set from the active config at call time. A
+commit that renumbered `reth0.50` (`.10` -> `.42` on tcp, `.11` -> `.43` on
+udp) left the old address on the owner indefinitely. The owner answered ARP for
+it, and a demotion left it behind too. Because the userspace snapshot is built
+from the kernel listing, interface SNAT kept translating new LAN flows to the
+removed address (udp: LAN to 1.1.1.1 0/30) until the next snapshot.
+
+Now every direct-mode VIP is stamped in the kernel (`IFA_PROTO`,
+`pkg/vipstamp`), and every reconcile pass deletes a stamped address the config
+no longer assigns to its netdev, on the owner and the non-owner alike. The
+snapshot builder never publishes such a leftover, and a reconcile-path change
+queues an interface-link snapshot refresh. See `pkg/daemon/README.md`
+"Direct-mode VIP failover" and `pkg/dataplane/README.md` "Interface rows
+never publish a direct-VIP leftover (#18573)".
+
+**Limit:** a pre-#18573 VIP that the config had already dropped before the
+upgrade carries no stamp and must be deleted by hand once (or cleared by a
+reboot). The same goes for a renumber committed while the owner still runs the
+old binary. Until then it can still be the interface-SNAT source. See
+`docs/in-place-upgrade.md` "Honest limits".
+
+**Status:** unit, real-kernel (netns) and mutation-checked (9/9). Live on
+tcp, deb `0.0.26066+gb5290d13d20d`, 2026-10-31 02:19 UTC:
+
+- A renumber `.10` -> `.42` and `::a` -> `::42` dropped the old pair from
+  fw0 within 1 s of `commit complete`. fw1 (non-owner) held neither pair.
+  The commit's snapshot listed only `.42`/`::42`. LAN to 1.1.1.1 was 10/10,
+  SNATed to `.42`.
+- An RG1+RG2 move to node1 and back left the new owner with only `.42`/`::42`
+  and the former owner with nothing. Nothing resurrected `.10`. SNAT stayed
+  on `.42`, 10/10.
+- The reverse renumber (`.42` -> `.10`, restoring the found state) behaved
+  the same.
 
 ## What Still Needs Work
 
@@ -1174,6 +1262,13 @@ dataplane before the owner closes its own:
 5. requester: election -> primary, rg_active=true (already open), VIPs, GARP/NA
 6. requester: commit-ready, commit -> owner; release the pre-activation
 ```
+
+Step 2 waits at most 500 ms for applySem (`transferPreActivateLockWait`,
+#18569), and the overlay's 5 s TTL starts once the lock is held. If a
+commit holds the semaphore longer, the pre-activation is skipped with a
+`transfer pre-activation skipped, apply semaphore busy` warning and the
+transfer runs break-before-make; the request itself is never held behind
+an apply.
 
 Before #18559, step 2 did not exist. Everything the owner redirected between
 step 4 and step 5 was dropped at the requester's fabric-ingress HA-inactive

@@ -621,6 +621,11 @@ mod tests_noroute_unresolved_16021;
 #[cfg(test)]
 #[path = "tests_split_rg_gateway_18517.rs"]
 mod tests_split_rg_gateway_18517;
+// #18566: a cached FabricRedirect is superseded once its destination RG is
+// activated on this node.
+#[cfg(test)]
+#[path = "tests_fabric_redirect_activation_18566.rs"]
+mod tests_fabric_redirect_activation_18566;
 // #9522 Phase 0: selected lookup-semantic coverage for the route FIB (parity
 // corpus for a future LPM cutover; test-only, no production change).
 #[cfg(test)]

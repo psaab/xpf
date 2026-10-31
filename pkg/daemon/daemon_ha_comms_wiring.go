@@ -675,6 +675,9 @@ func (d *Daemon) wireClusterPeerFailoverHooks(ss *cluster.SessionSync) {
 	// #9569: the untargeted failover and ForceSecondary refuse a peer that did
 	// not apply the newest config this node sent.
 	d.cluster.SetPeerConfigStaleFunc(d.peerConfigStale)
+	// Review of #18625: the last neighbor warm-up pass in
+	// `show chassis cluster information`.
+	d.cluster.SetInformationExtraFunc(d.neighborWarmInformation)
 	// #17056: publish the one sync reference the Manager's suppression and
 	// never-seen policies read. This replaces the former timeout-guard,
 	// heartbeat-recovered and never-seen-fresh hooks: the policy, its 5s

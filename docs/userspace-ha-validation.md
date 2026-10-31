@@ -197,6 +197,236 @@ This matters because a split-RG fabric-path bug can kill streams before the
 first failover. That must fail as a fabric regression, not be misclassified as
 a failover-survivability regression.
 
+### Session-sync idle precondition
+
+Both `make test-failover` (`ha_wait_for_session_sync_idle`, before traffic,
+before the fw0 crash and before the RG1 failback) and this validator
+(`wait_for_session_sync_idle`) wait for session sync to be idle before they
+move an RG. They share one sample predicate, `ha_session_sync_idle_sample` in
+`test/incus/ha-assurance-lib.sh`.
+
+**The property.** Idle = N samples at an unchanged floor, the latest of them
+included, with no create outstanding beyond that floor and nothing pending at
+those reads. N is `SESSION_SYNC_IDLE_STABLE_SAMPLES` (3).
+
+- "Pending" covers both the target's helper delta queue
+  (`Session delta pending`) and the source's helper delta buffer.
+- The source must also have dropped no delta since the wait began.
+
+A sample reads D = the source's `Session create` Sent minus the target's
+`Session create` Received (`show chassis cluster data-plane statistics`).
+The floor is the lowest D the wait has seen. "Outstanding beyond the floor" is
+D minus the floor.
+
+The N samples need not be consecutive:
+- A sample above the floor, or with something pending, neither counts nor
+  resets the count.
+- A new floor or a counter rewind restarts it. A source drop does not: that
+  sample is not idle, and because the drop baseline is kept, no later sample
+  can count either, so the wait FAILs.
+- The wait PASSes only on a sample at the floor.
+
+Each counted sample is an exact reading: nothing was outstanding beyond the
+floor at that read. Requiring consecutive samples false-FAILed a healthy pair
+on `loss` (#18632 live run 2, build 0.0.26680). During the "before fw0 crash"
+wait, the mirror sweep sent about 4 creates per second. One landed between
+the two reads in pairs about every 4 samples, so readings at the floor came in
+pairs and never 3 in a row.
+
+**What a timeout costs.** The wait gives up after `SESSION_SYNC_IDLE_TIMEOUT`
+(30) **attempts**, not seconds. Each attempt is two CLI captures and a 1 s
+sleep, about 1.7 to 2.1 s on `loss` (measured), so a full wait takes about a
+minute. The FAIL message reports the attempts, the measured seconds and how
+many samples it counted at the floor.
+
+The limit leaves a wide margin for the count:
+- **Measured.** In run 2, 15 of the 29 samples after the baseline read the
+  floor, and the count reached 3 at sample 8. Treating the samples as
+  independent, the chance of fewer than 3 floor samples in 29 is below 1 in a
+  million. Floor readings came in pairs, though. Taking the 14 or so pairs as
+  the independent units, it is about 6 × 10⁻⁴, roughly 1 in 1,700.
+- **Pessimistic.** If creates arrived as a Poisson stream at 4 per second,
+  with about 0.5 s between the two reads, about 14 % of samples would read the
+  floor. The chance of a timeout would then be about 23 %. That figure depends
+  on the read gap: about 5 % at 0.4 s and about 36 % at 0.55 s.
+- **Reading a timeout.** A timeout means fewer than N samples proved idle.
+  The D sequence in the log tells the causes apart. With dense, varying
+  creates, D fluctuates and rarely returns to its minimum. With a backlog or a lost
+  create, D stays above the floor at every sample and is flat or rising.
+
+ A timeout is a FAIL cell. Before the RG1
+failback it also sets the RG1 slice's `sync_ok=false`, and
+`ha_rg1_mark_groups_void` then VOIDs RG1 Groups 1 to 8 for that run
+(`test-failover.sh`, `ha_run_rg1_failback_slice`). It is a precondition
+result, not a takeover verdict.
+
+How the predicate gets there:
+
+- **Floor, not equality.** The two counters do not share an epoch. Bulk-sync
+  frames are counted by the receiver only, and a restart zeroes one side. On
+  `loss`, Sent was 22047 against Received 129487 while caught up (#16289).
+- **Target first, then source.** A create the target has counted was
+  enqueued on the source before the target's read, and the source counts it
+  as sent right after the enqueue (`queueMessage`: the channel send, then
+  `sentCounter.Add`). So a source read taken after the target read includes
+  it, and D reads high (a create in flight or one sent between the reads),
+  not low. The one exception: if the source stalls between the send and the
+  count for longer than the gap between the reads (about 0.4 s), D reads one
+  low. That sets a floor below the real one and FAILs the wait; it can never
+  PASS one falsely.
+  - With the source read first, a create sent between the two reads and
+    delivered before the target read counted as received but not as sent.
+    A baseline taken on that sample sat one below the floor, and every later
+    quiet sample read as one create outstanding for the whole wait.
+  - On the #18627 `loss` run, Sent − Received was −107440 at the baseline of
+    both waits and −107439 on all 49 later samples. Pending was 0 throughout,
+    so nothing was backed up (#18632).
+  - The first sample of a wait often catches a burst of creates, because the
+    waits start right after an RG reset or an iperf3 start.
+- **The floor only moves down.** What a baseline can absorb is its D minus
+  the true floor, i.e. the creates in flight at it. Moving to a lower D
+  shrinks that amount and never grows it. It also discards an inflated first
+  sample. This verdict ("new floor") resets the streak, so a backlog that is
+  still draining never reads idle. The floor never moves up, so a create lost
+  **after** the wait has seen a sample at the true floor (nothing in flight)
+  keeps D above it, and the wait FAILs.
+- **No `sent == received` escape.** The old #16500 escape only helped when both
+  counters shared an epoch, which is why the #18632 failure recurred. With the
+  target read first it could only mask a create that really is outstanding.
+- **Source-side deltas.** A session delta the source's helper still holds, or
+  has dropped, never becomes a "sent" create. So neither D nor the target's
+  pending count can see it. The predicate therefore also reads the source's
+  `Session delta pending` (must be 0 at an idle sample) and
+  `Session delta dropped` (any increase since the wait's first sample keeps
+  every later sample not idle, so the wait FAILs).
+- **Unknown verdicts.** An unknown helper verdict VOIDs the wait in both
+  loops.
+
+**What it cannot see.** Counters alone have these blind spots. The
+pre-#18632 predicate has them too, and closing them needs a per-create epoch
+or sequence number, not counts.
+
+- **Drain plus loss.** Creates in flight at every sample so far can mask a
+  create lost before they land. Example: two creates are in flight at the
+  first sample, and a third is sent and never received. When the two land, D
+  falls to one above the true floor. That becomes the new floor, and the wait
+  PASSes. A selftest cell pins this, so any change to it is deliberate.
+- **Constant lag.** If at least one create is in flight at every sample, the
+  lag is the floor and the wait PASSes. A *growing* lag is caught.
+- **Varying background creates.** A create in *every* read window at a
+  steady rate is a constant offset that the floor absorbs, so the wait PASSes.
+  A healthy pair FAILs only when the number of creates per window varies and
+  the minimum is rarely seen again. On `loss` the mirror sweep left about half
+  the samples at the floor (run 2).
+- **Stale stability evidence.** Samples above the floor neither count nor
+  reset the count. A lag that clears for one sample can therefore PASS on
+  earlier counted samples as old as the wait itself, up to about 28
+  attempts. The PASS sample is still an exact reading, so this is not a lost
+  create.
+- **A rewind wipes a drop.** A counter rewind (a daemon or helper restart)
+  re-baselines everything, including the source's dropped count, so a drop
+  seen before it is forgotten.
+- **After the last sample.** A create sent after the last idle sample is not
+  covered.
+- **The event-stream delta path.** The source checks read the helper's
+  per-binding RPC-fallback delta buffer. In event-stream mode, session deltas
+  reach the daemon over the event stream instead. A loss there latches an
+  owner-RG resync. The CLI's `Event stream producer: dropped=` counter mixes
+  rate-limited log events with HA deltas, so it cannot be gated without false
+  FAILs. #18635 tracks exposing an HA-delta loss counter.
+
+`test/incus/ha-assurance-selftest.sh` covers this with fixed counter pairs and
+with timeline cells. In a timeline cell the counters depend on when each
+capture reads them:
+
+- a create sent between the first two reads must still PASS;
+- a lost create must FAIL, including one lost after the streak began and one
+  lost after the true floor was seen;
+- the drain-plus-loss case is pinned as a PASS (the known limit above).
+
+### `make test-failover` zero-interval cells: windows and definitions
+
+`scripts/iperf-json-metrics.py` scores the whole-run iperf3 stream. A
+per-stream interval counts as "zero" at or below `--zero-gbps` (default
+0.05 Gbit/s), not only at 0 bytes. At iperf3's 1 s resolution one zero
+interval means a stream carried almost nothing for about a second.
+
+**Registered windows.** Each is `[T, T+3]` around an anchor `T`, in seconds
+since the iperf launch on the harness's integer `SECONDS` clock. That clock
+can be up to about 1 s off iperf's own clock.
+
+| Event | Anchors | Kind | How its zero intervals are scored |
+|---|---|---|---|
+| the crash (`failover_at_seconds`) | the crash instant | **excused** (`--event-sec`) | not counted: peer-loss detection is by design (in the lab about 1.0–1.05 s after the last heartbeat, 0.8–1.05 s after the crash, when the #18570 probe goes unanswered; about 1.2 s more under the sync-recency rule for a peer without ack support, whose last sync frame is about one interval younger than its last heartbeat) |
+| the RG1 move that starts the split slice (RG1 on node0, RG0/RG2 on node1) | the instant before the request, and the poll-observed landing | **planned** (`--planned-move rg1-split=...`) | scored as a move, below |
+| the RG0/RG2 failback that ends the split | the instant before each of the two requests, and each RG's poll-observed landing | **planned** (`--planned-move rg0-rg2-failback=...`) | scored as a move, below |
+
+A planned move is anchored at the request AND the landing, because a landing
+takes 1.3–3 s. With the request alone, a stall at the landing falls outside
+the window. A move that did not land is not registered; its own cells have
+already failed.
+
+**Planned moves are scored, not excused** (#18617). Sessions are on both nodes
+before a planned move, so every lost packet is a transition cost (matrix H10).
+Each move is one cell, judged by H11's rules at 1 s resolution. A stream is
+**stalled** in an interval when it carried under 1 Mbit/s (H11's stall,
+`--planned-stall-gbps 0.001`). A stream between that and the 0.05 Gbit/s
+zero threshold is **low-share**: a transition dip, not a stall. It does not
+change the move's verdict. On the live run on 2026-10-31 the aggregate fell
+from about 9 to 1.2 Gbit/s at the RG1 move, below H9's 2.0–3.5 Gbit/s split
+ceiling on loss. Two streams ran at 12 Mbit/s and one stopped. That dip is a
+transition cost (H10), so each planned move records it on the ledger as
+`HARNESS_METRIC` lines, judged master-relative like `cells_cost`:
+
+- `planned_<move>_low_share_streams`: the number of low-share streams;
+- `planned_<move>_min_stream_gbps`: the lowest per-stream rate in the
+  move's windows;
+- `planned_<move>_window_aggregate_gbps`: the mean aggregate rate over the
+  move's windows.
+
+`<move>` is `rg1_split` or `rg0_rg2_failback`. The low-share streams are also
+named in the cell's text.
+
+- **PASS:** no stream stalled in the move's windows.
+- **COST:** exactly one stream stalled. Its stall is the whole run of
+  consecutive zero intervals that touches the window, inside it or past it.
+  The stall lasted at most 10 s (H11's `SOAK_MAX_COST_STALL_MS`), and the
+  stream carried data again afterwards. A COST counts as passed and is
+  recorded as `cells_cost` (the summary's `, <k> cost`), judged
+  master-relative as H11 judges its COST.
+- **FAIL:** any of:
+  - every stream stalled (under 1 Mbit/s) in one interval: an aggregate
+    outage over H11's 1 s;
+  - more than one stream stalled;
+  - a stall was longer than 10 s;
+  - a stream never carried data again.
+
+**The cells.**
+
+- **Outside the windows:** `stream_zero_intervals_outside_events_total`, the
+  "per-stream zero intervals outside the crash and planned-move windows" cell
+  (`MAX_STREAM_ZERO_INTERVALS`, default 0). It counts every zero interval that
+  is not wholly inside a registered window. Planned-move zeros are scored by
+  their move cell instead, so they are never counted twice. A stall that
+  outlasts its window counts here too.
+- **Whole run:** `zero_intervals_total` is aggregate zero intervals PLUS
+  per-stream zero intervals, with no window excluded. The crash alone zeroes
+  every stream for 1–3 intervals (8 streams give 8–24), so a fixed limit of 2
+  was red on every crash run. Its fate is decided: it is **recorded**, not
+  gated, as `whole_run_zero_intervals` on the ledger row (a `HARNESS_METRIC:`
+  line), and judged master-relative. `MAX_ZERO_INTERVALS=<n>` gates it
+  absolutely again for a one-off run.
+- **Who reads these.** `whole_run_zero_intervals`, the `planned_<move>_*`
+  metrics and `cells_cost` are ledger metrics that a person reads against
+  master's rows. Nothing compares them automatically: `ledger_compare` bands
+  only the headline (`throughput_gbps`).
+- **What this cannot see.** test-failover has no 10 ms ping, so a stall
+  shorter than one 1 s interval goes unscored here. H11's ping-gap bound lives
+  only in `test-rg-move-soak`.
+- **Counting.** Count a run by the same definition before comparing numbers:
+  an exact-zero count of the #18598 gate's master arm gives 35, while the
+  harness definition gives 3 + 58 = 61.
+
 ## Target And Interpretation
 
 Validation target for the active userspace forwarding path:

@@ -67,6 +67,8 @@ var syncStatFields = []syncStatField{
 	{name: "BulkRecvCapped", label: "Bulk receive keys capped", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.BulkRecvCapped })},
 	{name: "BulkRecvAborted", label: "Bulk receive windows aborted", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.BulkRecvAborted })},
 	{name: "ConfigsApplyFailed", label: "Configs apply-failed", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigsApplyFailed })},
+	{name: "ConfigsRejectedAsAuthority", label: "Configs refused as RG0 authority", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigsRejectedAsAuthority })},
+	{name: "ConfigRejectedAsAuthorityLastGen", label: "Last config generation refused as RG0 authority", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigRejectedAsAuthorityLastGen })},
 	{name: "ImportsRefusedByHelper", label: "Imports refused by helper", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ImportsRefusedByHelper })},
 	{name: "ImportsRejectedByHelper", label: "Imports rejected by helper", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ImportsRejectedByHelper })},
 	{name: "ConfigsQueueFullDropped", label: "Configs queue-full-dropped", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigsQueueFullDropped })},
@@ -215,6 +217,10 @@ func loadSyncStat(s *SessionSync, name string) uint64 {
 		return s.stats.BulkRecvAborted.Load()
 	case "ConfigsApplyFailed":
 		return s.stats.ConfigsApplyFailed.Load()
+	case "ConfigsRejectedAsAuthority":
+		return s.stats.ConfigsRejectedAsAuthority.Load()
+	case "ConfigRejectedAsAuthorityLastGen":
+		return s.stats.ConfigRejectedAsAuthorityLastGen.Load()
 	case "ImportsRefusedByHelper":
 		return s.stats.ImportsRefusedByHelper.Load()
 	case "ImportsRejectedByHelper":
@@ -395,6 +401,10 @@ func setSyncStatUint(snap *SyncStatsSnapshot, name string, v uint64) {
 		snap.BulkRecvAborted = v
 	case "ConfigsApplyFailed":
 		snap.ConfigsApplyFailed = v
+	case "ConfigsRejectedAsAuthority":
+		snap.ConfigsRejectedAsAuthority = v
+	case "ConfigRejectedAsAuthorityLastGen":
+		snap.ConfigRejectedAsAuthorityLastGen = v
 	case "ImportsRefusedByHelper":
 		snap.ImportsRefusedByHelper = v
 	case "ImportsRejectedByHelper":

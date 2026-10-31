@@ -425,16 +425,42 @@ func (m *Manager) heartbeatTimingDivergedLocked() bool {
 	return liveInterval != m.hbInterval || liveThreshold != m.hbThreshold
 }
 
-// heartbeatRestartRetryDelay is the pause between RestartHeartbeat bind
+// heartbeatRestartRetryDelay caps the pause between RestartHeartbeat bind
 // attempts. A variable only so the #9751 cells can exhaust the retries without
 // sleeping 5s; production never writes it.
 var heartbeatRestartRetryDelay = time.Second
 
+// heartbeatRestartRetrySchedule is the pause after each failed RestartHeartbeat
+// bind attempt, capped by heartbeatRestartRetryDelay (#18597). The restart
+// follows a move of the control link into or out of a VRF, and the kernel VRF
+// driver cycles a link on every such move: networkd drops the link's static
+// address on the carrier loss and re-adds it on the carrier gain, typically
+// 5-30 ms later (measured on the tcp cluster, docs/log/18597.md). A flat 1 s
+// retry turned that into a 1 s+ heartbeat gap at the peer, above the lab's
+// 200 ms x 5 threshold, after a restart whose first bind lost that race. The
+// short early retries catch the re-added address; the 1 s tail keeps the
+// total window at 5 s, the window heartbeatRestartGrace is sized to.
+var heartbeatRestartRetrySchedule = []time.Duration{
+	50 * time.Millisecond, 200 * time.Millisecond, 750 * time.Millisecond,
+	time.Second, time.Second, time.Second, time.Second,
+}
+
+// heartbeatRestartRetryPause is the pause after failed attempt i.
+func heartbeatRestartRetryPause(i int) time.Duration {
+	d := heartbeatRestartRetrySchedule[i]
+	if d > heartbeatRestartRetryDelay {
+		d = heartbeatRestartRetryDelay
+	}
+	return d
+}
+
 // RestartHeartbeat stops and restarts the heartbeat with the same parameters.
 // This is needed when the control interface's VRF binding changes (e.g. during
 // DHCP-triggered recompile) which invalidates the existing UDP sockets.
-// Retries up to 5 times with 1s delay if the bind fails (address may briefly
-// disappear during VRF rebind). Returns false if heartbeat was not running.
+// Retries on a bind failure (the address briefly disappears during a VRF
+// rebind) with short early pauses, then 1s ones, about 5s in all
+// (heartbeatRestartRetrySchedule, #18597). Returns false if heartbeat was not
+// running.
 //
 // The restart window (worst case ~5s of bind retries) is longer than the
 // peer's default timeout (5 x 100ms), so two protections wrap it (#1792):
@@ -523,7 +549,7 @@ func (m *Manager) RestartHeartbeat() bool {
 	}
 
 	m.stopHeartbeat()
-	for i := range 5 {
+	for i := range len(heartbeatRestartRetrySchedule) {
 		attemptVRFDevice := vrfDevice
 		if vrfDeviceFn != nil {
 			attemptVRFDevice = vrfDeviceFn(controlIface)
@@ -532,11 +558,13 @@ func (m *Manager) RestartHeartbeat() bool {
 			slog.Warn("cluster: heartbeat restart bind failed, retrying",
 				"err", err, "attempt", i+1)
 			// Keep the peer's suppression guard fed (2s recency window)
-			// through each 1s retry interval.
+			// through each retry interval. Since #18561 the peer also
+			// probes us at its first missed heartbeat; our sync receive loop
+			// answers that independently of this restart.
 			if notify != nil {
 				notify()
 			}
-			time.Sleep(heartbeatRestartRetryDelay)
+			time.Sleep(heartbeatRestartRetryPause(i))
 			continue
 		}
 		return true
@@ -582,6 +610,8 @@ func (m *Manager) buildHeartbeat() *HeartbeatPacket {
 		HAProtocolVersion: m.localHAProtocolVersion,
 		HeartbeatSession:  session,
 		HeartbeatSequence: sequence,
+		// #18585: the peer measures its offset from this node's wall clock.
+		WallClockUnixNano: time.Now().UnixNano(),
 	}
 	// #14163: echo the most recent peer heartbeat FRAME's identity, held
 	// at Manager level. Ranging peerGroups and taking the first nonzero

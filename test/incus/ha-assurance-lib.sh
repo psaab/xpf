@@ -233,38 +233,103 @@ PY
 	return 2
 }
 
-# One sample of the legacy 3-consecutive-idle rule. Endpoint names and both
+# One sample of the N-samples-at-the-floor rule. Endpoint names and both
 # files are explicit; callers must not derive direction from ambient globals.
 #
-# Idle is baseline-relative (#16289): the caller passes the (sent, received)
-# pair captured on the first sample of a wait (empty before that sample) and
-# this helper is idle when every session created since the baseline has been
-# received (sent - baseline_sent <= received - baseline_received) with
-# pending == 0. Absolute sent == received is unsatisfiable whenever the two
-# daemons did not start counting from the same epoch (e.g. the target
-# received creates before the source last restarted and zeroed its sent
-# counter), which made the gate time out forever on a fully caught-up pair.
-# The inequality (#16500), not equality, is required: the first sample's
-# gap can include creates in flight that are later delivered (sent -
-# received shrinks as received catches up), so equality would never read
-# idle on a pair that has caught up. Counters meeting in absolute terms
-# (sent == received) is likewise idle: it covers creates recorded only
-# on the target at the baseline because the two CLI captures are
-# non-atomic (received ahead at the baseline, sent then reaching that
-# already-received count). A gap that instead grows since the baseline
-# (sent outruns received, counters unequal) stays not idle. Verdicts:
-# 0 idle, 1 ordinary not-idle (baseline kept; an outstanding
-# unreceived delta must persist until received, never be absorbed into
-# a new baseline), 2 VOID (blind/malformed evidence, malformed
-# baseline), 3 counter rewind (a daemon restarted and reset the epoch;
-# not idle, and the ONLY verdict on which the caller re-baselines).
-# Drained is required and parseable,
-# informational only. Every evidence field is parsed before any baseline
-# branch, so blind evidence is VOID even on the baseline-establishing
-# sample and even on a rewound sample.
+# THE PROPERTY (#18632): idle = N samples at an unchanged floor, the
+# latest of them included, with no create outstanding beyond that floor
+# and nothing pending at those reads (the target's helper delta queue and
+# the source's helper delta buffer), and no source delta dropped since the
+# wait began. Per sample, with D = source "Session create" sent - target
+# "Session create" received: outstanding beyond the floor is D - D_floor,
+# where D_floor is the lowest D the wait has observed (the baseline pair
+# the caller passes). The N samples need not be consecutive: a sample
+# above the floor neither counts nor resets the count. On loss under a
+# steady mirror sweep (~4 creates/s), a create landed between the two
+# reads in pairs every ~4 samples, so floor readings never came 3 in a row
+# and the consecutive rule FAILed a healthy pair (#18632 live run 2). Each
+# counted sample is still an exact reading at the floor; a new floor or a
+# rewind restarts the count. A source drop does not restart it: that sample
+# is not idle, and because the caller keeps the drop baseline no later
+# sample can count either, so the wait FAILs.
+#
+# Why a floor, not absolute equality (#16289): the two daemons do not
+# count from the same epoch. Bulk-sync frames are counted by the receiver
+# only, and a restart zeroes one side, so sent == received is not the
+# caught-up state (loss: sent 22047 vs received 129487 while caught up).
+#
+# Why the caller captures the TARGET before the SOURCE (#18632): a create
+# the target has counted was enqueued on the source before the target's
+# read, and the source counts it as sent right after the enqueue
+# (queueMessage: the channel send, then sentCounter.Add). So a source read
+# taken after the target read includes it, unless the source stalled
+# between those two statements for longer than the gap between the reads
+# (about 0.4 s). That stall would read D one LOW, set a floor below the
+# real one and FAIL the wait; it cannot PASS one falsely. Otherwise D can
+# only read high (a create enqueued between the reads, or one in flight).
+# Source-first capture let a create enqueued between the reads and
+# delivered before the target read be counted as received but not as
+# sent: a baseline taken on that sample sat one below the floor, and every
+# later quiet sample read as one create outstanding for the whole wait
+# (both waits of the #18627 loss run: sent-received -107440 at the
+# baseline, then -107439 on all 49 later samples). The old
+# (sent == received) escape (#16500) only rescued that when both counters
+# shared an epoch; it is gone, because under target-first capture it could
+# only mask creates that really are outstanding.
+#
+# Why the floor moves only DOWN: what a baseline can absorb is its D minus
+# the true floor (creates in flight at it). Moving to a lower D shrinks
+# that and never grows it, and removes an inflated first sample (a burst
+# at the start of the wait). The floor never moves UP, so a create lost
+# AFTER the wait has seen a sample at the true floor (nothing in flight)
+# keeps D above it forever and the wait FAILs. A new floor resets the
+# streak, so a backlog that is still draining (D falling every sample)
+# never reads idle; the old fixed baseline passed it.
+#
+# Known blind spots (counters alone; the pre-#18632 predicate shares
+# them; closing them needs a per-create epoch or sequence, not counts):
+# - Drain plus loss: creates in flight at every sample so far mask a
+#   create lost before they land. Two in flight at the first sample, a
+#   third sent and never received: when the two land, D falls to one
+#   above the true floor, that becomes the new floor, and the wait PASSes.
+#   Pinned by a selftest cell so a change to it is deliberate.
+# - Constant lag: if at least one create is in flight at every sample,
+#   the lag is the floor and the wait PASSes. A GROWING lag is caught.
+# - Varying background creates: a create in EVERY read window at a steady
+#   rate is a constant offset the floor absorbs, so the wait PASSes. A
+#   healthy pair FAILs only when the per-window count varies and the
+#   minimum is rarely seen again. On loss the mirror sweep left about half
+#   the samples at the floor (#18632 run 2).
+# - Stale stability evidence: samples above the floor neither count nor
+#   reset, so a lag that clears for one sample can PASS on earlier counted
+#   samples as old as the wait itself (up to ~28 attempts). The PASS sample
+#   is still exact, so this is not a lost create.
+# - A rewind (daemon or helper restart) re-baselines everything, including
+#   the source dropped count, so a drop seen before it is forgotten.
+# - A create sent after the last idle sample.
+# - Source-side loss on the event-stream path. The source checks below
+#   read the helper's per-binding RPC-fallback delta buffer ("Session
+#   delta pending/dropped"). In event-stream mode, session deltas reach
+#   the daemon over the event stream instead; its loss latches an owner-RG
+#   resync, and the CLI's "Event stream producer: dropped=" mixes rate-
+#   limited log events with HA deltas, so it is not gated here (#18635
+#   tracks exposing an HA-delta loss counter).
+#
+# Verdicts: 0 idle at the floor (D == D_floor, both pendings 0, no new
+# source drop); 1 not idle (D above the floor, a pending delta, or the
+# source dropped a delta since the baseline; baseline kept, so a drop
+# keeps every later sample not idle); 4 new floor (D < D_floor; the caller
+# re-baselines to this sample and resets the streak); 3 counter rewind (a
+# daemon or helper restarted; the caller re-baselines); 2 VOID
+# (blind/malformed evidence or a malformed baseline). The first sample of
+# a wait (all three baselines empty) only establishes the floor and
+# returns 1. Target "drained" is required and parseable, informational
+# only. Every evidence field is parsed before any baseline branch, so
+# blind evidence is VOID even on the baseline-establishing sample and even
+# on a rewound sample.
 ha_session_sync_idle_sample() {
-	if [[ $# -ne 6 ]]; then
-		printf 'session sync sample: expected <source-node> <target-node> <source-stats> <target-stats> <baseline-sent> <baseline-received>\n' >&2
+	if [[ $# -ne 7 ]]; then
+		printf 'session sync sample: expected <source-node> <target-node> <source-stats> <target-stats> <baseline-sent> <baseline-received> <baseline-source-dropped>\n' >&2
 		return 2
 	fi
 	local source_node="$1"
@@ -273,7 +338,8 @@ ha_session_sync_idle_sample() {
 	local target_path="$4"
 	local baseline_sent="$5"
 	local baseline_received="$6"
-	local sent received pending drained parse_status=0
+	local baseline_dropped="$7"
+	local sent received pending drained source_pending source_dropped parse_status=0
 	# Parse every evidence field before any baseline branch, so blind or
 	# malformed evidence is VOID (2) even on the baseline-establishing
 	# sample and even when the counters have rewound.
@@ -282,19 +348,21 @@ ha_session_sync_idle_sample() {
 	received="$(ha_sync_stats_value "$target_path" "Session create" received)" || parse_status=2
 	pending="$(ha_status_summary_value "$target_path" "Session delta pending")" || parse_status=2
 	drained="$(ha_status_summary_value "$target_path" "Session delta drained")" || parse_status=2
+	source_pending="$(ha_status_summary_value "$source_path" "Session delta pending")" || parse_status=2
+	source_dropped="$(ha_status_summary_value "$source_path" "Session delta dropped")" || parse_status=2
 	: "$drained" # Required and parseable, informational only.
 	if (( parse_status == 2 )); then return 2; fi
-	if [[ -z "$baseline_sent" && -z "$baseline_received" ]]; then
+	if [[ -z "$baseline_sent" && -z "$baseline_received" && -z "$baseline_dropped" ]]; then
 		# First sample of a wait: it only establishes the baseline. It is
-		# never idle by itself, so the 3-consecutive rule still requires
+		# never idle by itself, so the N-samples rule still requires
 		# later samples to prove nothing sent since is unreceived.
 		printf 'session sync %s->%s baseline: source sent=%s, target received=%s, pending=%s\n' \
 			"$source_node" "$target_node" "$sent" "$received" "$pending" >&2
 		return 1
 	fi
-	if [[ ! "$baseline_sent" =~ ^[0-9]+$ || ! "$baseline_received" =~ ^[0-9]+$ ]]; then
-		printf 'session sync %s->%s malformed baseline: sent=%s received=%s\n' \
-			"$source_node" "$target_node" "$baseline_sent" "$baseline_received" >&2
+	if [[ ! "$baseline_sent" =~ ^[0-9]+$ || ! "$baseline_received" =~ ^[0-9]+$ || ! "$baseline_dropped" =~ ^[0-9]+$ ]]; then
+		printf 'session sync %s->%s malformed baseline: sent=%s received=%s source dropped=%s\n' \
+			"$source_node" "$target_node" "$baseline_sent" "$baseline_received" "$baseline_dropped" >&2
 		return 2
 	fi
 	if (( sent < baseline_sent || received < baseline_received )); then
@@ -302,11 +370,32 @@ ha_session_sync_idle_sample() {
 			"$source_node" "$target_node" "$sent" "$baseline_sent" "$received" "$baseline_received" "$pending" >&2
 		return 3
 	fi
-	if { (( sent - baseline_sent <= received - baseline_received )) || (( sent == received )); } && [[ "$pending" == "0" ]]; then
-		return 0
+	if (( source_dropped < baseline_dropped )); then
+		printf 'session sync %s->%s not idle: source session delta dropped counter rewound (dropped=%s baseline=%s; the helper restarted); re-baseline required\n' \
+			"$source_node" "$target_node" "$source_dropped" "$baseline_dropped" >&2
+		return 3
 	fi
-	printf 'session sync %s->%s not idle: source sent=%s (baseline %s), target received=%s (baseline %s), pending=%s\n' \
-		"$source_node" "$target_node" "$sent" "$baseline_sent" "$received" "$baseline_received" "$pending" >&2
+	if (( source_dropped > baseline_dropped )); then
+		printf 'session sync %s->%s not idle: the source dropped %s session delta(s) since the baseline (dropped=%s baseline=%s); a dropped delta never becomes a sent create\n' \
+			"$source_node" "$target_node" "$(( source_dropped - baseline_dropped ))" "$source_dropped" "$baseline_dropped" >&2
+		return 1
+	fi
+	local outstanding=$(( (sent - received) - (baseline_sent - baseline_received) ))
+	if (( outstanding < 0 )); then
+		printf 'session sync %s->%s new floor: source sent=%s, target received=%s is %s below the baseline (sent=%s received=%s), pending=%s; re-baseline\n' \
+			"$source_node" "$target_node" "$sent" "$received" "$(( -outstanding ))" "$baseline_sent" "$baseline_received" "$pending" >&2
+		return 4
+	fi
+	if (( outstanding == 0 )) && [[ "$pending" == "0" ]]; then
+		if [[ "$source_pending" == "0" ]]; then
+			return 0
+		fi
+		printf 'session sync %s->%s not idle: at the floor, but the source holds %s undrained session delta(s)\n' \
+			"$source_node" "$target_node" "$source_pending" >&2
+		return 1
+	fi
+	printf 'session sync %s->%s not idle: source sent=%s (baseline %s), target received=%s (baseline %s), outstanding beyond floor=%s, pending=%s\n' \
+		"$source_node" "$target_node" "$sent" "$baseline_sent" "$received" "$baseline_received" "$outstanding" "$pending" >&2
 	return 1
 }
 
@@ -1008,7 +1097,7 @@ ha_wan_claim_verdict() {
 		return 2
 	fi
 	local conf_own="${1,,}" addr="$2" gw="$3" output="$4"
-	local line kind ip mac flag rest own="" live="" foreign="" xpf_other="" xpf_ids="" gw_seen=0
+	local line kind ip mac flag rest own="" live="" iface_mac="" foreign="" xpf_other="" xpf_ids="" gw_seen=0
 	local -A own_macs=()
 	if [[ -n "$conf_own" && ! "$conf_own" =~ ^02:bf:72:[0-9a-f]{2}:$ ]]; then
 		printf 'wan claim: conf own MAC prefix %q is not 02:bf:72:<cluster-id>:\n' "$1" >&2
@@ -1023,6 +1112,7 @@ ha_wan_claim_verdict() {
 		case "$kind" in
 		iface)
 			mac="${mac,,}"
+			[[ "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] && iface_mac="$mac"
 			[[ "$mac" =~ ^(02:bf:72:[0-9a-f]{2}:) ]] && live="${BASH_REMATCH[1]}"
 			;;
 		own)
@@ -1046,6 +1136,29 @@ ha_wan_claim_verdict() {
 		[[ "$kind" == reply ]] || continue
 		mac="${mac,,}"
 		[[ "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || continue
+		# #18580: no host answers with OUR MAC. A reply naming the probing
+		# interface's own MAC means the probe read the target-MAC field
+		# instead of the sender's, and every reading is worthless (it would
+		# turn every claimant into "own").
+		# This is sound only because ha_wan_claim_probe binds its socket to
+		# ETH_P_ARP. Outgoing frames reach only ETH_P_ALL packet sockets, so
+		# this socket never sees our own kernel's ARP replies for the address,
+		# which do carry our MAC as sender. Measured in a netns: an ETH_P_ARP
+		# socket saw 0 of 3 own-kernel replies, an ETH_P_ALL one saw all 3
+		# (docs/log/18580.md). Rebinding to ETH_P_ALL would make this guard
+		# VOID every run in which anyone ARPs for us.
+		# The guard needs the probe's iface line, which the real probe prints
+		# before it sends anything: a reply without one is not its output.
+		if [[ -z "$iface_mac" ]]; then
+			printf 'wan claim: a reply for %s arrived without the probe interface line (not the probe output)\n' \
+				"$ip" >&2
+			return 2
+		fi
+		if [[ "$mac" == "$iface_mac" ]]; then
+			printf 'wan claim: a reply for %s names the probing interface MAC %s: the probe read the wrong field\n' \
+				"$ip" "$mac" >&2
+			return 2
+		fi
 		if [[ "$ip" == "$gw" ]]; then
 			[[ "$flag" == probe ]] && gw_seen=1
 			continue
@@ -1567,20 +1680,29 @@ PY
 # per ARP reply ("probe" = addressed to us with target IP 0.0.0.0).
 # Status 3 if <target> is not on-link from the vantage (and not held by it);
 # any other non-zero status means the probe could not run.
+# [ifname] (optional, #18576): probe from that interface instead of the one
+# holding <target> or routing to it. mouse-target-setup.sh `up` uses it to
+# probe an address BEFORE it is assigned, when no on-link route may exist
+# yet; an RFC 5227 probe needs no address on the interface.
 ha_target_claim_probe() {
-	local vantage="$1" target="$2" control="$3"
-	incus exec "$vantage" -- python3 - "$target" "$control" <<'PY'
+	local vantage="$1" target="$2" control="$3" ifname="${4:-}"
+	incus exec "$vantage" -- python3 - "$target" "$control" "$ifname" <<'PY'
 import select, socket, struct, subprocess, sys, time
 target, control = sys.argv[1], sys.argv[2]
-# The vantage may hold <target> (loss's container holds .200): probe from
-# that interface. Otherwise use the on-link route; a local lookup says
+forced = sys.argv[3] if len(sys.argv) > 3 else ""
+# The vantage may hold <target> (loss's container holds its target): probe
+# from that interface. Otherwise use the on-link route; a local lookup says
 # "dev lo" and a "via" route is not on-link.
 ifname, held = None, False
 for line in subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True).stdout.splitlines():
     f = line.split()
     if len(f) >= 4 and f[2] == "inet" and f[3].split("/")[0] == target and f[1] != "lo":
+        if forced and f[1].split("@")[0] != forced:
+            continue
         ifname, held = f[1].split("@")[0], True
         break
+if ifname is None and forced:
+    ifname = forced
 if ifname is None:
     route = subprocess.run(["ip", "-o", "-4", "route", "get", target], capture_output=True, text=True).stdout.split()
     if "dev" not in route or "via" in route or route[0] == "local":
@@ -1632,12 +1754,15 @@ ha_target_fw_neigh() {
 # ha_target_claim_verdict <target> <control> <known-holders> <probe-output>
 #
 # #18576: a measurement target must be ONE host, the intended one. loss's
-# iperf3 target 172.16.80.200 is answered by both xpf-mouse-target
+# old iperf3 target 172.16.80.200 is answered by both xpf-mouse-target
 # (10:66:6a:8b:91:a4) and the external v6 target box (f6:f0:06:10:77:d5).
 # Linux overrides a neighbor entry with any ARP from the address once the 1 s
 # locktime has passed, and a broadcast re-resolution keeps the first reply,
-# so the firewall's choice of server, and every v4 measurement with it, can
-# move.
+# so the firewall's choice of server, and every v4 measurement with it, could
+# move (it did: a 2026-10-31 rg-move soak lost every v4 stream to the
+# external box). loss now targets .202, held by the container alone, and no
+# env configures <known-holders>; the excuse path below is kept for a future
+# documented duplicate, which must carry its own expiry.
 #
 # Holders = "self" (the vantage container, the intended holder in every env)
 # plus every "reply" MAC for <target>. Of the "fw" lines (before/after the
@@ -1810,4 +1935,31 @@ ha_target_claim_check() {
 		HA_TARGET_CLAIM_STATUS=$?
 	fi
 	return 0
+}
+
+# ha_rg_owner_node <control> <node>...
+# #18586: print the ONE node that holds <control> (the cluster's own address
+# on a WAN VLAN, e.g. WAN_GW80_4), i.e. the RG owner whose neighbor entries
+# carry that VLAN's traffic. Read-only (`ip -o -4 addr show`). Status 2 when
+# no node or more than one node holds it.
+ha_rg_owner_node() {
+	local control="$1" node addrs owners=()
+	shift
+	[[ -n "$control" ]] || return 2
+	for node in "$@"; do
+		# An unreadable node is not "does not hold": it is unknown.
+		if ! addrs=$(incus exec "$node" -- ip -o -4 addr show 2>/dev/null); then
+			printf 'rg owner: could not read the addresses of %s\n' "$node" >&2
+			return 2
+		fi
+		# Exact address match (field 4 is addr/len): .8 never matches .80.
+		if awk -v c="$control" '{split($4, a, "/"); if (a[1] == c) f = 1} END {exit !f}' <<<"$addrs"; then
+			owners+=("$node")
+		fi
+	done
+	if (( ${#owners[@]} != 1 )); then
+		printf 'rg owner: %d nodes hold %s (%s)\n' "${#owners[@]}" "$control" "${owners[*]:-none}" >&2
+		return 2
+	fi
+	printf '%s\n' "${owners[0]}"
 }

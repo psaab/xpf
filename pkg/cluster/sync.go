@@ -404,13 +404,28 @@ type SyncStats struct {
 	// ConfigsApplyFailed counts config-sync messages that were admitted by the
 	// #3931 ordering guard but whose apply did NOT take effect on this node —
 	// a compile/promote failure (a mixed-build ISSU syntax error, a store
-	// rejection) or a transient RG0-primary rejection. On such a failure the
-	// config high-water mark (lastAppliedConfigGen) is deliberately NOT
-	// advanced, so the primary's re-push of the SAME generation is re-admitted
-	// and the standby re-converges instead of being silently stranded on the
-	// prior config (M-2/#4151). A persistently-nonzero value means a standby is
+	// rejection). On such a failure the config high-water mark
+	// (lastAppliedConfigGen) is deliberately NOT advanced, so the primary's
+	// re-push of the SAME generation is re-admitted and the standby
+	// re-converges instead of being silently stranded on the prior config
+	// (M-2/#4151). A persistently-nonzero value means a standby is
 	// repeatedly failing to apply the peer's config — investigate divergence.
+	// #18610: a refusal because THIS node is the RG0 config authority is not
+	// counted here; it counts ConfigsRejectedAsAuthority.
 	ConfigsApplyFailed atomic.Uint64
+	// ConfigsRejectedAsAuthority counts config-sync messages this node refused
+	// because it was the RG0 config authority when they arrived (#18610): the
+	// peer pushed while it believed itself primary, typically in a dual-active
+	// window. The high-water stays pinned and the generation is nacked, as for
+	// an apply failure, but it does not arm the #6387 CF signal. A nonzero
+	// value means a peer pushed a config this node discarded; if the peer had
+	// a commit of its own in that window, it was not applied here.
+	ConfigsRejectedAsAuthority atomic.Uint64
+	// ConfigRejectedAsAuthorityLastGen is the generation of the most recent
+	// such refusal (#18610), so the operator can compare it with the
+	// peer's sent generation. It is a statistic, not a readiness input:
+	// resetRecvGen does not clear it.
+	ConfigRejectedAsAuthorityLastGen atomic.Uint64
 	// ImportsRefusedByHelper counts synced-session installs the LOCAL userspace
 	// helper refused on semantic grounds (#6785) — a stale install generation, the
 	// aggregate synced-import ceiling, or a translated-tuple reservation refusal.
@@ -733,10 +748,14 @@ type SyncStatsSnapshot struct {
 	// through a new Manager accessor because the Manager holds only the
 	// SyncStatsProvider interface, and this is the same transport every other
 	// field in the status render already uses.
-	PeerBootIncarnation     string
-	ConfigsApplyFailed      uint64
-	ImportsRefusedByHelper  uint64
-	ImportsRejectedByHelper uint64
+	PeerBootIncarnation string
+	ConfigsApplyFailed  uint64
+	// #18610: refusals as the RG0 config authority, and the last refused
+	// generation.
+	ConfigsRejectedAsAuthority       uint64
+	ConfigRejectedAsAuthorityLastGen uint64
+	ImportsRefusedByHelper           uint64
+	ImportsRejectedByHelper          uint64
 	// #6778 receive-edge loss, and #7328's nack counter alongside it: the
 	// queue-full drop is recovered BY a nack, so a drop that is climbing while
 	// nacks are not tells the operator the recovery path itself is broken (a
@@ -822,6 +841,11 @@ type TransferReadinessSnapshot struct {
 	BulkReceiveSessions   int
 	PeerConfigGen         uint64
 	AppliedConfigGen      uint64
+	// RejectedAsAuthorityConfigGen and LocalConfigAuthority (#18610): the
+	// highest received generation refused because this node was the RG0
+	// config authority, and whether it still is at snapshot time.
+	RejectedAsAuthorityConfigGen uint64
+	LocalConfigAuthority         bool
 }
 
 // ConfigStale reports whether this node has received a newer config generation
@@ -830,8 +854,20 @@ type TransferReadinessSnapshot struct {
 // received nor applied any generation) reports both generations as 0, which is
 // NOT stale, so the gate stays scoped to the genuine behind-the-primary case
 // and never blanket-blocks (#5563).
+//
+// #18610: received generations this node refused because it was the RG0 config
+// authority (RejectedAsAuthorityConfigGen) do not count while it still is
+// (LocalConfigAuthority). Its own config is the one the peer converges to, so
+// it is not behind anyone. Once it demotes they count again, so it cannot be
+// promoted back before the new primary's push applies here.
 func (s TransferReadinessSnapshot) ConfigStale() bool {
-	return s.PeerConfigGen > s.AppliedConfigGen
+	if s.PeerConfigGen <= s.AppliedConfigGen {
+		return false
+	}
+	if s.LocalConfigAuthority && s.PeerConfigGen <= s.RejectedAsAuthorityConfigGen {
+		return false
+	}
+	return true
 }
 
 // ReadyForManualFailover reports whether the sync path is settled enough to
@@ -1567,8 +1603,11 @@ type SessionSync struct {
 	deleteJournal       boundedFrameJournal
 	scopedDeleteJournal boundedFrameJournal
 	lastPeerRxMono      atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
-	readDeadline        time.Duration
-	peerSilenceLimit    time.Duration
+	// livenessProbeInFlight bounds RequestLivenessProbe to one pending
+	// write (#18561).
+	livenessProbeInFlight atomic.Bool
+	readDeadline          time.Duration
+	peerSilenceLimit      time.Duration
 	// bulkStartMu serializes queued incremental writes with the
 	// table-truth snapshot -> BulkStart boundary (#10283). A bulk holds it
 	// while reading BulkSnapshotSource and until BulkStart is written under
@@ -1868,6 +1907,13 @@ type SessionSync struct {
 	// applied<=received invariant holds after a reboot restarts the sender's
 	// monotonic counter lower.
 	lastRecvConfigGen atomic.Uint64
+	// rejectedAsAuthorityConfigGen is the highest received generation this
+	// node refused because it was the RG0 config authority at the time
+	// (ErrConfigSyncRejectedAuthority, #18610). TransferReadinessSnapshot
+	// does not count received generations up to it as staleness while this
+	// node is still the authority. Guarded like the other marks by
+	// configGenMu; cleared with them by resetRecvGen.
+	rejectedAsAuthorityConfigGen atomic.Uint64
 
 	// configEpochRoleMu tracks the config authority role when reverse stamps
 	// are produced. After becoming a non-authority, a retained applied mark is
@@ -2106,6 +2152,12 @@ type configApplyItem struct {
 	// incarnation is the peer boot the payload arrived under (#5084). Zero
 	// means un-incarnated and is never dropped on incarnation grounds.
 	incarnation bootIncarnation
+	// authorityAtReceive records whether this node was already the RG0 config
+	// authority when the payload arrived (#18610 review T1). A refusal counts
+	// as an authority refusal only then. A payload received as SECONDARY and
+	// refused because a promotion landed before the apply loop reached it is
+	// the previous primary's last config, lost: it keeps CF and staleness.
+	authorityAtReceive bool
 }
 type failoverAck struct {
 	status uint8
@@ -2300,6 +2352,7 @@ func (s *SessionSync) initGenState() {
 	s.configGenCounter.Store(seed)
 	s.lastAppliedConfigGen.Store(0)
 	s.lastRecvConfigGen.Store(0)
+	s.rejectedAsAuthorityConfigGen.Store(0)
 	s.configApplyCh = make(chan configApplyItem, 64)
 	// #5706: the full-set (IPsec/DHCP) ordering incarnation is this process's
 	// construction seed — constant for the process lifetime and, within a boot,
@@ -2617,6 +2670,37 @@ func (s *SessionSync) LastPeerReceiveAge() (time.Duration, bool) {
 	}
 	return age, true
 }
+
+// LastPeerReceiveMono is the CLOCK_MONOTONIC nanos stamp of the last
+// accepted inbound sync frame (#18561 liveness probe); ok is false when no
+// frame was received. Lock-free.
+func (s *SessionSync) LastPeerReceiveMono() (int64, bool) {
+	last := s.lastPeerRxMono.Load()
+	return last, last != 0
+}
+
+// PeerHeartbeatAckSupported reports whether the peer has answered a
+// sync-level heartbeat with a heartbeat ack on this incarnation (#18561).
+// Lock-free.
+func (s *SessionSync) PeerHeartbeatAckSupported() bool {
+	return s.peerIncarnationState().peerHeartbeatAckEver.Load()
+}
+
+// RequestLivenessProbe sends one sync-level heartbeat from a goroutine so
+// the caller (the heartbeat-timeout policy, under Manager.mu) never blocks
+// on writeMu or a full socket (#18561). At most one probe write is in
+// flight; a request while one is pending is dropped, and the policy then
+// judges the peer on the frames that do or do not arrive.
+func (s *SessionSync) RequestLivenessProbe() {
+	if !s.livenessProbeInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer s.livenessProbeInFlight.Store(false)
+		s.SendLivenessKeepalive()
+	}()
+}
+
 func (s *SessionSync) readDeadlineDuration() time.Duration {
 	if s.readDeadline > 0 {
 		return s.readDeadline
