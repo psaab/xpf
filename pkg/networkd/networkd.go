@@ -745,8 +745,6 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 		if len(reconf) > 0 {
 			slog.Info("networkd reconfiguring interfaces",
 				"interfaces", reconf, "all", reconfigureAll)
-		}
-		if len(reconf) > 0 {
 			// `--` ENDS OPTION PARSING (#9885). Interface names occupy argv
 			// slots here, and a name beginning with `-` would be read by
 			// networkctl as an OPTION rather than as a link. The damage is not
