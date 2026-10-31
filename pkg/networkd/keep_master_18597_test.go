@@ -270,22 +270,29 @@ func TestFailedLinkQueryErrorFallsBackToFullPass18597(t *testing.T) {
 	}
 }
 
-// The parser reads the systemd 259 document shape (trimmed from tcp fw0) and
-// refuses a document it cannot rely on.
+// The parser reads the systemd 259 table (from tcp fw0) and refuses output it
+// cannot rely on, so the tail falls back to the full pass.
 func TestParseNetworkdFailedLinks18597(t *testing.T) {
-	doc := `{"Interfaces":[` +
-		`{"Index":1,"Name":"lo","AdministrativeState":"unmanaged","OperationalState":"carrier"},` +
-		`{"Index":3,"Name":"em0","AdministrativeState":"configured","OperationalState":"routable"},` +
-		`{"Index":9,"Name":"fab0","AdministrativeState":"failed","OperationalState":"off"}],` +
-		`"NextHops":[],"Routes":[]}`
-	got, err := parseNetworkdFailedLinks([]byte(doc))
+	table := `  1 lo          loopback carrier  unmanaged
+  2 fxp0        ether    routable configured
+  3 em0         ether    routable configured
+ 14 fab0        ether    off      failed
+ 10 ge-0-0-2.50 vlan     routable configured
+`
+	got, err := parseNetworkdFailedLinks([]byte(table))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if len(got) != 1 || !got["fab0"] {
 		t.Fatalf("failed links = %v, want {fab0}", got)
 	}
-	for _, bad := range []string{`not json`, `{}`, `{"Routes":[]}`} {
+	for _, bad := range []string{
+		"",                                    // nothing listed (there is always lo)
+		"IDX LINK TYPE OPERATIONAL SETUP\n",   // a header: --no-legend not honoured
+		"  1 lo loopback carrier\n",           // a column missing
+		"  x lo loopback carrier unmanaged\n", // not a table row
+		`{"Interfaces":[]}`,                   // the JSON form
+	} {
 		if _, err := parseNetworkdFailedLinks([]byte(bad)); err == nil {
 			t.Errorf("parse(%q) = nil error, want an error so the tail falls back to the full pass", bad)
 		}

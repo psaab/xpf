@@ -589,21 +589,21 @@ func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwe
 	}
 	fab1Only := active
 	fab1Only.Fab1Debt = false
-	fab1DebtShape := newTransport == fab1Only && active.Fab1Debt
+	fab1DebtShape := sameClusterTransport(fab1Only, newTransport) && active.Fab1Debt
 	fab1Ready := fab1DebtShape && fab1UpgradeReady(cfg)
 	if fab1DebtShape && !fab1Ready && !restartOwed {
 		// #16842: fab1-debt epoch, fab1 still unaddressed, nothing owed —
 		// keep the working single-fabric epoch; do not churn it.
 		return
 	}
-	if newTransport == active && !restartOwed {
+	if sameClusterTransport(active, newTransport) && !restartOwed {
 		return
 	}
 	fab1Upgrade := fab1DebtShape && fab1Ready
 	if fab1Upgrade {
 		slog.Info("cluster: fab1 address now available, restarting comms to upgrade to dual fabric (#16842)",
 			transportChangeLogArgs(active, newTransport)...)
-	} else if newTransport != active && !fab1DebtShape {
+	} else if !sameClusterTransport(active, newTransport) && !fab1DebtShape {
 		slog.Info("cluster: transport config changed, restarting comms",
 			transportChangeLogArgs(active, newTransport)...)
 	} else {

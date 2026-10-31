@@ -145,8 +145,10 @@ Triggers `networkctl reload` only when files actually changed.
   debt, an unfinished tail (`activationPending`), or an external reload that
   skipped the tail (#6912) — cannot know which files changed back then, so it
   still reconfigures every managed interface (`reconfigureAll`). A link
-  networkd reports as `failed` (`AdministrativeState` in `networkctl list
-  --json=short`, queried after the reload) is reconfigured too, so the
+  networkd reports as `failed` (the SETUP column of `networkctl list
+  --no-legend --no-pager`, queried after the reload; not `--json=short`, which
+  carries every link's routes and scales with a full BGP table) is
+  reconfigured too, so the
   narrowing does not lose the old tail's incidental retry of a failed link; a
   query that errors or cannot be parsed falls back to the full pass. The Info
   line `networkd reconfiguring interfaces` names the set and whether it was the

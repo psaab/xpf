@@ -5,7 +5,6 @@ package networkd
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -43,46 +42,56 @@ var runNetworkctl = func(args ...string) error {
 	return exec.CommandContext(ctx, "networkctl", args...).Run()
 }
 
-// networkdFailedLinks returns the links whose networkd setup state
-// (`AdministrativeState` in `networkctl list --json=short`, the SETUP column of
-// `networkctl list`) is "failed" (#18597). The activation tail used to
-// reconfigure EVERY managed link whenever any file changed, which incidentally
-// retried a link networkd had given up on; the narrowed tail adds these links
-// back so that precision does not remove that coverage. A package var so tests
-// stub it (the unit sandbox has no systemd-networkd). Field name verified on
-// systemd 259 (tcp fw0): each Interfaces[] entry carries Name and
-// AdministrativeState ("configured", "unmanaged", "failed", ...).
+// networkdFailedLinks returns the links whose networkd setup state (the SETUP
+// column of `networkctl list`) is "failed" (#18597). The activation tail used
+// to reconfigure EVERY managed link whenever any file changed, which
+// incidentally retried a link networkd had given up on; the narrowed tail adds
+// these links back so that precision does not remove that coverage. A package
+// var so tests stub it (the unit sandbox has no systemd-networkd).
+//
+// The plain table, not `--json=short`: the JSON form carries every link's
+// routes (about 350 B per route, ManageForeignRoutes defaults to yes), so on a
+// router holding a full BGP table it is hundreds of MB per commit and can hit
+// the varlink message cap, which would turn every commit into a silent full
+// pass. The table is one short line per link (536 B on tcp fw0 against 32.9 KB
+// of JSON with a handful of routes). Format verified on systemd 259 (tcp fw0):
+// `IDX LINK TYPE OPERATIONAL SETUP`, whitespace separated.
 var networkdFailedLinks = func() (map[string]bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "networkctl", "list", "--json=short").Output()
+	out, err := exec.CommandContext(ctx, "networkctl", "list", "--no-legend", "--no-pager").Output()
 	if err != nil {
-		return nil, fmt.Errorf("networkctl list --json=short: %w", err)
+		return nil, fmt.Errorf("networkctl list: %w", err)
 	}
 	return parseNetworkdFailedLinks(out)
 }
 
-// parseNetworkdFailedLinks parses `networkctl list --json=short`. A document
-// without an Interfaces array is an error, not "nothing failed": the caller
-// then falls back to the full reconfigure pass.
+// parseNetworkdFailedLinks parses `networkctl list --no-legend --no-pager`.
+// Every non-empty line must be `IDX LINK TYPE OPERATIONAL SETUP` with a numeric
+// IDX; anything else, or no lines at all (there is always at least lo), is an
+// error rather than "nothing failed", so the caller falls back to the full
+// reconfigure pass.
 func parseNetworkdFailedLinks(out []byte) (map[string]bool, error) {
-	var doc struct {
-		Interfaces []struct {
-			Name                string `json:"Name"`
-			AdministrativeState string `json:"AdministrativeState"`
-		} `json:"Interfaces"`
-	}
-	if err := json.Unmarshal(out, &doc); err != nil {
-		return nil, fmt.Errorf("parse networkctl list --json=short: %w", err)
-	}
-	if doc.Interfaces == nil {
-		return nil, errors.New("networkctl list --json=short: no Interfaces array")
-	}
 	failed := make(map[string]bool)
-	for _, ifc := range doc.Interfaces {
-		if ifc.AdministrativeState == "failed" {
-			failed[ifc.Name] = true
+	rows := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
 		}
+		if len(fields) != 5 {
+			return nil, fmt.Errorf("networkctl list: unexpected row %q", line)
+		}
+		if _, err := strconv.Atoi(fields[0]); err != nil {
+			return nil, fmt.Errorf("networkctl list: non-numeric IDX in row %q", line)
+		}
+		rows++
+		if fields[4] == "failed" {
+			failed[fields[1]] = true
+		}
+	}
+	if rows == 0 {
+		return nil, errors.New("networkctl list: no links listed")
 	}
 	return failed, nil
 }
