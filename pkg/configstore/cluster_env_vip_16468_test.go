@@ -15,7 +15,8 @@ import (
 // failed by construction; loss-cluster.env set none of the three, so
 // cluster-env.sh's defaults (172.16.50.6, 10.0.60.1, cf01::1) applied
 // against ha-cluster-loss.conf (.7, 10.0.89.1, df01::1) and failed the
-// same way. Positive controls tcp (.10) / udp (.11) already matched.
+// same way. Positive controls tcp / udp already matched (then .10/.11;
+// renumbered to .42/.43 in #18558 because .10/.11 are foreign-held).
 //
 // The assertion is on the COMPILED config (CheckText), not the conf
 // text, so an address hidden in a comment or an inert stanza cannot

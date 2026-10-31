@@ -159,15 +159,25 @@ failure.
   again; once #18556 merges this row should be deleted.
 
 - **tcp/udp external IPv4 (1.1.1.1, 8.8.8.8): a duplicate WAN address,
-  #18558.** Resolved by renumbering, and kept here because the cause is the
-  lab segment, not the product. VLAN 50 (172.16.50.0/24) is shared with
-  non-xpf devices. tcp's 172.16.50.10 was also held by `18:e8:29:2c:13:7a`
-  and udp's 172.16.50.11 by `d8:b3:70:8c:f8:44`: both answered every RFC 5227
-  ARP probe for the address, alongside the RG owner (512/512 probes for .10,
-  2026-10-31). The upstream gateway's ARP entry flipped between the device
-  and the owner. Recovery always followed the owner's own ARP to the gateway
+  #18558.** The cause is the lab segment, not the product. The fix is a
+  renumber (#18575), but **until a cluster has been renumbered live, judge
+  these cells on it exactly as before**: over 3 smokes per build, a PR blocks
+  only if it fails them in at least 2 more of its 3 runs than master did. The
+  row's same-run off-path control is `ha_wan_claim_check` returning status 1
+  for the cluster's WAN address (test-connectivity's "WAN IPv4 ... answered
+  for only by this cluster" FAIL, or test-failover's VOID reason). A ping from
+  the orchestrator or the incus host cannot stand in for it: it does not leave
+  from the duplicated address, so it passes either way.
+
+  VLAN 50 (172.16.50.0/24) is shared with non-xpf devices. tcp's
+  172.16.50.10 was also held by `18:e8:29:2c:13:7a` and udp's 172.16.50.11
+  by `d8:b3:70:8c:f8:44`. Each answered every RFC 5227 ARP probe for its
+  address, alongside the RG owner (512/512 probes for .10, 2026-10-31). The
+  upstream gateway's ARP entry flipped between the device and the owner.
+  Recovery always followed the owner's own ARP to the gateway
   within 1-2 s (8/8), and each outage began about 30 s later, when the
-  device refreshed. IPv4 loss was therefore 20-50% on tcp, and up to 80% on udp, whose device refreshes more often, while IPv6 stayed clean.
+  device refreshed. IPv4 loss was therefore 20-50% on tcp, and up to 80% on
+  udp, whose device refreshes more often, while IPv6 stayed clean.
   The "replies miss the session" reading was the device's own return traffic
   reaching the owner while the entry pointed at it. Earlier this row blamed
   "30-55 s after an RG move", but the loss is periodic with no move at all;
@@ -195,20 +205,22 @@ failure.
     172.16.80.11 61/61. IPv6 was 61/61. Only loss's `.8` is unique, and
     loss passes these cells.
 
-  The tcp and udp WAN addresses moved to `.42` and `.43`. Three checks keep
-  this from recurring:
+  The tcp and udp WAN addresses moved to `.42` and `.43` in the repo. Three
+  checks keep this from recurring:
   - `TestSharedSegmentForeignClaims18558` (`pkg/configstore`) refuses a
     shipped claim on any address in the measured foreign list.
   - `test-failover` runs `ha_wan_claim_check` whenever an external IPv4 cell
     fails, and turns that FAIL into a VOID naming the foreign MAC. A PASS is
     never converted, and a blind probe leaves the FAIL standing.
-
   - `test-connectivity` runs a preflight cell, "WAN IPv4 ... answered for
     only by this cluster", which FAILs naming the foreign MAC.
 
-  If either of these fires, re-probe and renumber. Never excuse an external
-  IPv4 cell without that evidence. Once the fix PR is merged and both clusters
-  are renumbered live, delete this row.
+  If any of the three fires, re-probe and renumber. Never excuse an external
+  IPv4 cell without that evidence. The live renumber has a coexistence window
+  and a manual step (#18573). Follow the procedure in
+  `docs/incus-tcp-udp-plan.md` §3.3, "Renumbering a stack on the shared
+  segment". Delete this row once #18575 is merged and both clusters are
+  renumbered live.
 - **tcp host SR-IOV VFs.** The host's dracut default network must not manage
   the VF netdevs. `/etc/systemd/network/05-xpf-sriov-vf-unmanaged.network`
   marks `eno1v*`/`eno2v*` unmanaged. Without it a force-stopped VM cannot
