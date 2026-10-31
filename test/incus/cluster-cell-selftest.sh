@@ -125,31 +125,104 @@ for known in "${KNOWN_DESTRUCTIVE[@]}"; do
 done
 ok "static: detector matched ${#DESTRUCTIVE[@]} destructive test-*.sh scripts (covers all ${#KNOWN_DESTRUCTIVE[@]} known ones)"
 
-for s in "${DESTRUCTIVE[@]}"; do
-	p="${SCRIPT_DIR}/${s}"
-	[[ -f "$p" ]] || fail "static: missing destructive smoke script $s"
-	# The wiring must sit in the preamble (first 60 lines), BEFORE any
-	# incus mutation — assert both the source and the call are present
-	# and appear before the first destructive incus/systemctl op.
-	head_n="$(head -n 60 "$p")"
+# xpf_cell_wiring_check <script>: print "<lock-call-line>" and return 0 when
+# the #1875/#4020 wiring is in the preamble, else print the reason and return
+# 1. The wiring is: source cluster-cell.sh, then call
+# xpf_enter_destructive_cluster_cell, both BEFORE the first destructive
+# incus/systemctl op. Comment lines never count.
+# #18591: this used to require the source "within the first 60 lines", an
+# arbitrary proxy that a long documentation header tripped falsely
+# (test-v6-na-recovery-12495.sh sources at line 69). Because fail() exits,
+# that false red aborted every later cell of this selftest. The ordering IS
+# the property, so the ordering is what is asserted.
+xpf_cell_wiring_check() {
+	local p="$1" s src_line call_line mut_line
+	s="$(basename "$p")"
 	# Literal match of the source line — the ${...} must NOT expand.
 	# shellcheck disable=SC2016
-	grep -q 'source "\${_CELL_DIR}/cluster-cell.sh"' <<<"$head_n" \
-		|| fail "static: $s does not source cluster-cell.sh in its preamble (#4020 lock dropped?)"
-	call_line=$(grep -n 'xpf_enter_destructive_cluster_cell' "$p" | head -1 | cut -d: -f1)
-	[[ -n "$call_line" ]] \
-		|| fail "static: $s never calls xpf_enter_destructive_cluster_cell (#4020 lock dropped?)"
+	src_line=$(grep -n 'source "\${_CELL_DIR}/cluster-cell.sh"' "$p" \
+		| grep -v '^[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1)
+	if [[ -z "$src_line" ]]; then
+		printf '%s does not source cluster-cell.sh in its preamble (#4020 lock dropped?)\n' "$s"
+		return 1
+	fi
+	call_line=$(grep -n 'xpf_enter_destructive_cluster_cell' "$p" \
+		| grep -v '^[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1)
+	if [[ -z "$call_line" ]]; then
+		printf '%s never calls xpf_enter_destructive_cluster_cell (#4020 lock dropped?)\n' "$s"
+		return 1
+	fi
+	if (( src_line >= call_line )); then
+		printf '%s calls xpf_enter_destructive_cluster_cell (line %s) before sourcing cluster-cell.sh (line %s)\n' \
+			"$s" "$call_line" "$src_line"
+		return 1
+	fi
 	# First line that reboots / force-stops / fails over / restarts a
 	# node. The lock call must precede it so we never mutate the shared
 	# cluster before acquiring the lock. Skip comment lines so a "Phase
 	# 1: incus stop --force" doc line is not mistaken for a real op.
-	mut_line=$(xpf_first_mutation_line "$p") \
-		|| fail "static: the destructive-script detector could not read $s"
-	[[ "$mut_line" == NONE ]] && mut_line=""
-	if [[ -n "$mut_line" ]]; then
-		(( call_line < mut_line )) \
-			|| fail "static: $s mutates the cluster (line $mut_line) before taking the lock (line $call_line)"
+	if ! mut_line=$(xpf_first_mutation_line "$p"); then
+		printf 'the destructive-script detector could not read %s\n' "$s"
+		return 1
 	fi
+	if [[ "$mut_line" != NONE ]]; then
+		if (( src_line >= mut_line )); then
+			printf '%s mutates the cluster (line %s) before sourcing cluster-cell.sh (line %s)\n' \
+				"$s" "$mut_line" "$src_line"
+			return 1
+		fi
+		if (( call_line >= mut_line )); then
+			printf '%s mutates the cluster (line %s) before taking the lock (line %s)\n' \
+				"$s" "$mut_line" "$call_line"
+			return 1
+		fi
+	fi
+	printf '%s\n' "$call_line"
+}
+
+# #18591 fixtures: the check must accept a long header and refuse every
+# misordering, so it can neither false-red a correct script nor pass a
+# broken one.
+_wiring_fx="$(mktemp -d "${TMPDIR:-/tmp}/xpf-cell-wiring.XXXXXX")"
+trap 'rm -rf "$_wiring_fx"' EXIT
+_wiring_src='source "${_CELL_DIR}/cluster-cell.sh"'
+_wiring_call='xpf_enter_destructive_cluster_cell "fx" "$0" "$@"'
+_wiring_mut='incus stop --force "$FW0"'
+_wiring_fixture() { # <name> <line>...
+	local name="$1"
+	shift
+	printf '%s\n' '#!/usr/bin/env bash' "$@" >"${_wiring_fx}/${name}"
+}
+_wiring_header=()
+for _i in $(seq 1 70); do _wiring_header+=("# header line ${_i}: incus stop --force is only documentation here"); done
+_wiring_fixture long-header.sh "${_wiring_header[@]}" 'set -euo pipefail' "$_wiring_src" "$_wiring_call" "$_wiring_mut"
+_wiring_fixture no-source.sh "$_wiring_call" "$_wiring_mut"
+_wiring_fixture commented-source.sh "# ${_wiring_src}" "$_wiring_call" "$_wiring_mut"
+_wiring_fixture source-after-call.sh "$_wiring_call" "$_wiring_src" "$_wiring_mut"
+_wiring_fixture source-after-mutation.sh "$_wiring_mut" "$_wiring_src" "$_wiring_call"
+_wiring_fixture call-after-mutation.sh "$_wiring_src" "$_wiring_mut" "$_wiring_call"
+_wiring_fixture no-call.sh "$_wiring_src" "$_wiring_mut"
+if ! _out=$(xpf_cell_wiring_check "${_wiring_fx}/long-header.sh"); then
+	fail "static: the wiring check false-reds a correct script with a 70-line header: ${_out}"
+fi
+[[ "$_out" == 74 ]] || fail "static: the wiring check reported lock line ${_out} for the long-header fixture, want 74"
+ok "static: the wiring check accepts a correct script whose header is longer than 60 lines (#18591)"
+for _fx in no-source:'does not source' commented-source:'does not source' \
+	source-after-call:'before sourcing' source-after-mutation:'before sourcing' \
+	call-after-mutation:'before taking the lock' no-call:'never calls'; do
+	_name="${_fx%%:*}" _want="${_fx#*:}"
+	if _out=$(xpf_cell_wiring_check "${_wiring_fx}/${_name}.sh"); then
+		fail "static: the wiring check accepted the ${_name} fixture (lock line ${_out})"
+	fi
+	[[ "$_out" == *"$_want"* ]] || fail "static: the ${_name} fixture was refused for the wrong reason: ${_out}"
+done
+rm -rf "$_wiring_fx"
+ok "static: the wiring check refuses no source, a commented source, and every misordering (#18591)"
+
+for s in "${DESTRUCTIVE[@]}"; do
+	p="${SCRIPT_DIR}/${s}"
+	[[ -f "$p" ]] || fail "static: missing destructive smoke script $s"
+	call_line=$(xpf_cell_wiring_check "$p") || fail "static: ${call_line}"
 	ok "static: $s takes the #1875 lock (line $call_line) before any node mutation"
 done
 
