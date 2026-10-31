@@ -263,12 +263,11 @@ fn steady_state_at_cap_costs_constant_amortized_work_18562() {
     assert!(dir.len() <= cap);
 }
 
-/// Retired rows leave their queue slots behind (O(1) retire); the queue is
-/// compacted in one pass when it reaches twice the shard cap, which pays for
-/// itself — total work stays linear in publishes, and the queue never grows
-/// past the compaction point.
+/// Retired rows leave their queue slots behind (O(1) retire); a stale slot at
+/// the front is popped by the next publish, so one-flow-at-a-time churn keeps
+/// the queue short and total work linear in publishes.
 #[test]
-fn retire_churn_compacts_the_queue_in_amortized_constant_work_18562() {
+fn retire_churn_keeps_the_queue_short_in_amortized_constant_work_18562() {
     let dir = PuntSeedDirectory::new();
     let cap = PuntSeedDirectory::shard_cap_for_test();
     let rounds = 8;
@@ -280,11 +279,79 @@ fn retire_churn_compacts_the_queue_in_amortized_constant_work_18562() {
         assert!(dir.publish(key, row_at(T0 + 3_600_000_000_000, i as u64), T0), "churned rows never fill the shard");
         publishes += 1;
         dir.retire(key, 1, i as u64);
-        assert!(dir.queue_len_for_test(shard) <= 2 * cap, "the queue is bounded by compaction");
+        assert!(dir.queue_len_for_test(shard) <= 2, "stale front slots are popped by the next publish");
     }
     let work = dir.work_for_test() - work_before;
     assert!(work <= 4 * publishes, "{work} units of work for {publishes} publish+retire pairs");
     assert_eq!(dir.len(), 0);
+}
+
+/// Seat L's adversarial shape (r2): a live front, 1023 lazily retired slots
+/// behind it, and 1023 more live rows, ALL expiring at the same instant. The
+/// pre-fold design popped every slot in ONE publish (2047 pops, 252-279 us
+/// under the shard lock that `retire`/`probe` wait on). A single call is now
+/// capped at `MAINTAIN_BUDGET` pops; the rest drain over the following calls.
+/// RED on an unbounded `maintain`.
+#[test]
+fn one_publish_does_bounded_work_however_much_expires_at_once_18562() {
+    let dir = PuntSeedDirectory::new();
+    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let budget = PuntSeedDirectory::maintain_budget_for_test() as u64;
+    let keys = keys_in_one_shard(&dir, 2 * cap + 1);
+    let shard = dir.shard_of_for_test(&keys[0]);
+    // Live front.
+    assert!(dir.publish(&keys[0], row_at(T0 + 1, 0), T0));
+    // 1023 lazily retired slots behind it (the live front keeps them queued).
+    for (n, key) in keys[1..cap].iter().enumerate() {
+        let id = (n + 1) as u64;
+        assert!(dir.publish(key, row_at(T0 + 1, id), T0));
+        dir.retire(key, 1, id);
+    }
+    // 1023 more live rows, same deadline.
+    for (n, key) in keys[cap..2 * cap - 1].iter().enumerate() {
+        assert!(dir.publish(key, row_at(T0 + 1, (cap + n) as u64), T0));
+    }
+    assert_eq!(dir.queue_len_for_test(shard), 2 * cap - 1, "premise: the adversarial queue");
+    let before = dir.work_for_test();
+    let _ = dir.publish(&keys[2 * cap], row_at(T0 + 10, 9_999_999), T0 + 2);
+    let single = dir.work_for_test() - before;
+    assert!(single <= budget, "one publish did {single} units of work (budget {budget})");
+    // The rest drains over the following calls, and nothing expired matches.
+    for (n, key) in keys[..cap].iter().enumerate() {
+        let _ = dir.publish(key, row_at(T0 + 10, 20_000_000 + n as u64), T0 + 2);
+    }
+    assert!(keys[cap..2 * cap - 1].iter().all(|k| dir.probe(k, T0 + 2).is_none()), "expired rows never match");
+}
+
+/// A live front with churn behind it cannot be drained from the front, so the
+/// queue is HARD-capped: past `QUEUE_CAP` a publish is refused (fail closed,
+/// counted) instead of the queue growing or being compacted in one pass. RED
+/// without the queue-cap refusal.
+#[test]
+fn stuck_front_queue_is_capped_and_refuses_18562() {
+    let dir = PuntSeedDirectory::new();
+    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let qcap = PuntSeedDirectory::queue_cap_for_test();
+    let keys = keys_in_one_shard(&dir, qcap + 500);
+    let shard = dir.shard_of_for_test(&keys[0]);
+    assert!(dir.publish(&keys[0], row_at(T0 + 3_600_000_000_000, 0), T0));
+    let refused_before = PUNT_SEED_DIRECTORY_FULL_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let mut refused = 0;
+    for (n, key) in keys[1..].iter().enumerate() {
+        let id = (n + 1) as u64;
+        if dir.publish(key, row_at(T0 + 3_600_000_000_000, id), T0) {
+            dir.retire(key, 1, id);
+        } else {
+            refused += 1;
+        }
+        assert!(dir.queue_len_for_test(shard) <= qcap, "the queue never exceeds its cap");
+    }
+    assert!(refused > 0, "past the queue cap publishes are refused");
+    assert!(
+        PUNT_SEED_DIRECTORY_FULL_TOTAL.load(std::sync::atomic::Ordering::Relaxed) - refused_before >= refused,
+        "and counted"
+    );
+    let _ = cap;
 }
 
 /// Measurement harness for the review (not a gate): ns per publish below the
@@ -341,8 +408,26 @@ fn punt_seed_directory_publish_cost_bench_18562() {
         let _ = grow.publish(key, row_at(u64::MAX, n as u64), T0);
         grow_max_ns = grow_max_ns.max(t.elapsed().as_nanos());
     }
+    // Review seat L (r2): the adversarial single publish — a live front, 1023
+    // lazily retired slots, 1023 more live rows, all expiring together.
+    let adv = PuntSeedDirectory::new();
+    let keys = keys_in_one_shard(&adv, 2 * cap + 1);
+    adv.publish(&keys[0], row_at(T0 + 1, 0), T0);
+    for (n, key) in keys[1..cap].iter().enumerate() {
+        adv.publish(key, row_at(T0 + 1, (n + 1) as u64), T0);
+        adv.retire(key, 1, (n + 1) as u64);
+    }
+    for (n, key) in keys[cap..2 * cap - 1].iter().enumerate() {
+        adv.publish(key, row_at(T0 + 1, (cap + n) as u64), T0);
+    }
+    let mut adv_max_ns = 0u128;
+    for (n, key) in keys[..cap].iter().enumerate() {
+        let t = std::time::Instant::now();
+        let _ = adv.publish(key, row_at(T0 + 10, 50_000_000 + n as u64), T0 + 2);
+        adv_max_ns = adv_max_ns.max(t.elapsed().as_nanos());
+    }
     eprintln!(
-        "R18562BENCH publish ns: below-cap(publish+retire)={below_ns:.0} at-cap-refused={refused_ns:.0} steady-at-cap={steady_ns:.0} worst-growth-publish={grow_max_ns}"
+        "R18562BENCH publish ns: below-cap(publish+retire)={below_ns:.0} at-cap-refused={refused_ns:.0} steady-at-cap={steady_ns:.0} worst-growth-publish={grow_max_ns} worst-adversarial-publish={adv_max_ns}"
     );
 }
 
@@ -432,9 +517,9 @@ fn publish_skips_a_held_shard_instead_of_waiting_18562() {
 
 /// Review seat L (LOW): growing a shard rehashed it under its lock (a 97 us
 /// worst single publish while one shard filled). The first publish into an
-/// empty shard reserves its whole cap, and filling to the cap never resizes it
-/// again; a fully drained shard frees the reservation. RED without the
-/// first-publish reservation (capacity starts small and grows).
+/// empty shard reserves its whole cap, and filling to the cap never resizes
+/// it. RED without the first-publish reservation (capacity starts small and
+/// grows).
 #[test]
 fn shard_reserves_its_cap_once_and_never_resizes_while_populated_18562() {
     let dir = PuntSeedDirectory::new();
@@ -449,9 +534,11 @@ fn shard_reserves_its_cap_once_and_never_resizes_while_populated_18562() {
         assert!(dir.publish(key, row_at(T0 + 10, n as u64), T0));
         assert_eq!(dir.rows_capacity_for_test(shard), reserved, "no resize while filling (row {n})");
     }
-    // Everything expires; the next publish into another shard leaves this one
-    // alone, so drive this shard's maintenance with a publish that lands here.
+    // Everything expires: a publish into this full shard reclaims (at most a
+    // budget of) expired rows and fits, and no expired row matches.
     let late = keys_in_one_shard(&dir, cap + 1)[cap].clone();
-    assert!(dir.publish(&late, row_at(T0 + 20, 99_999), T0 + 11));
-    assert_eq!(dir.len(), 1, "the expired rows were reclaimed");
+    // (No capacity check here: removals can leave hashbrown tombstones, which
+    // shift `capacity()` without any reallocation — review seat K's point.)
+    assert!(dir.publish(&late, row_at(T0 + 20, 99_999), T0 + 11), "expired rows make room");
+    assert!(keys.iter().all(|k| dir.probe(k, T0 + 11).is_none()), "expired rows never match");
 }

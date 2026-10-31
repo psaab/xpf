@@ -1630,27 +1630,32 @@ choke points rather than at call sites:
 
 (`update_reverse_route_on_filter_hit` writes reverse entries only; a row is
 never a reverse entry.) A row stops matching at the EARLIER of the seed's idle
-deadline as installed and `PUNT_SEED_ROW_TTL_NS` (10 s) after install: it only
+deadline as installed and `PUNT_SEED_ROW_TTL_NS` (2 s) after install: it only
 bridges the gap until the WAN owner's HA import lands in the shared maps, and a
 seed kept alive by traffic outlives its row, never the reverse.
 
-Cost (#18562 review): publish runs on a worker's punted new-flow path, so every
-operation under a lock is O(1) amortized. The directory is 32 shards by seeded
-key hash; expiry is a per-shard FIFO of `(deadline, key, incarnation)` popped
-only while expired; a retire removes the row and leaves its queue slot to be
-dropped lazily, with a one-pass compaction when the queue reaches twice the
-shard cap (paid for by the slots it frees); a full shard refuses with no scan;
-and publish takes its shard with `try_lock`, so a worker never waits on the
-directory. `PUNT_SEED_DIRECTORY_CAP` is 32768 rows (1024 per shard). A shard
-reserves its full cap on its first publish, so a populated map never grows or
-rehashes under its lock: ~0.8 MiB of address space per active shard (2048
-hashbrown buckets of a 52 B key + 256 B `PuntSeedRow`, plus a 2048-slot expiry
-queue), ~25 MiB if all 32 are active, resident only as rows land, and freed
-when the shard fully drains. A refused or skipped publish only means that seed's
-cross-worker errors keep the pre-#18562 verdict; both are counted and exposed in
-helper status (`punt_seed_directory_full_total`,
-`punt_seed_directory_contended_total`, beside the `punt_seed_directory_rows`
-gauge). Nothing materializes, promotes, exports, sweeps or replicates from the
+Cost (#18562 review): publish runs on a worker's punted new-flow path, so the
+work under a shard lock is bounded PER CALL. The directory is 32 shards by
+seeded key hash. Expiry is a per-shard FIFO of `(deadline, key, incarnation)`.
+One call pops at most `MAINTAIN_BUDGET` (32) slots, expired or stale; a retire
+removes the row and leaves its slot to be dropped when it reaches the front.
+A queue at `QUEUE_CAP` (2x the shard cap) refuses further publishes instead of
+being compacted in one pass. A full shard refuses with no scan, and publish
+takes its shard with `try_lock`, so a worker never waits on the directory
+(`retire` and `probe` do wait, behind at most one bounded call).
+`PUNT_SEED_DIRECTORY_CAP` is 32768 rows (1024 per shard); with the 2 s bridge
+TTL that sustains ~16k new punted flows/s before a shard refuses. A shard
+reserves its full cap on its first publish, so it needs no growth below the cap
+(hashbrown may still rehash in place to purge tombstones, bounded by the
+shard's 1024 rows): ~0.8 MiB of address space per used shard (2048 hashbrown
+buckets of a 52 B key + 256 B `PuntSeedRow`, plus a 2048-slot queue), ~25 MiB
+if all 32 are used, close to fully resident once a shard holds a few hundred
+randomly placed rows, and kept for the life of the helper process. A refused
+or skipped publish only means that seed's cross-worker errors keep the
+pre-#18562 verdict; both are counted and exposed in helper status
+(`punt_seed_directory_full_total`, `punt_seed_directory_contended_total`, beside
+the `punt_seed_directory_rows` gauge, which includes expired rows not yet
+reclaimed). Nothing materializes, promotes, exports, sweeps or replicates from the
 directory, and no data packet reads it. Cells:
 `punt_seed_directory_18562_tests.rs` (lifecycle per writer, fence, deadline,
 and the work-counted O(1) bounds) and

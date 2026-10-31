@@ -1196,7 +1196,6 @@ fn split_rg_first_error_on_another_worker_reaches_lan_host_18174() {
         // discriminator (it was 0 either way while the zero-address meta sent
         // the unmatched error to HAInactive), alongside delivery.
         assert_eq!(dbg.policy_deny, 0, "{label}: the first error must not be default-denied on another worker");
-        let _ = &batch;
         assert_eq!(fab1.scratch.scratch_forwards.len(), 1, "{label}: delivered to the LAN host from worker B");
         assert_delivered_to_lan_host(&fab1.scratch.scratch_forwards[0], f, probe, ErrKind::TimeExceeded, hop(f), &label);
     }

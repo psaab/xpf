@@ -1729,10 +1729,13 @@ crosses the fabric twice, and three rules keep it working:
   maintained only at the session table's own choke points (published by
   `insert_record`; retired by `remove_entry`, the table's sole removal sink,
   by every in-place rewrite of the seed, and by dropping the table) and stops
-  matching at the earlier of the seed's install-time idle deadline and a 10 s
-  bridge TTL, so it never outlives the seed it mirrors. Every directory
-  operation is O(1) amortized and a worker never waits on it (sharded,
-  FIFO expiry, `try_lock` publish); refusals are counted in helper status. It is not session state: nothing materializes, promotes, exports,
+  matching at the earlier of the seed's install-time idle deadline and a 2 s
+  bridge TTL (the first error arrives one hop RTT after the probe; later ones
+  are answered by the HA import), so it never outlives the seed it mirrors.
+  Every directory operation does bounded work per call and a worker never
+  waits on it (sharded, FIFO expiry with a per-call pop budget, `try_lock`
+  publish); it sustains ~16k new punted flows/s, and refusals past that are
+  counted in helper status. It is not session state: nothing materializes, promotes, exports,
   sweeps, replicates or demotes from it, no data packet reads it, and an
   admitted error still passes the F-077 per-session budget, the #14665
   outer-destination gate, the path-error type scope and the zone-validated

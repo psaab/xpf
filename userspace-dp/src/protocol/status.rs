@@ -215,7 +215,9 @@ pub(crate) struct ProcessStatus {
     #[serde(rename = "nat_reverse_ambiguous_total", default)]
     pub nat_reverse_ambiguous_total: u64,
     /// #18562: rows resident in the node's punt-seed directory (non-zero only
-    /// during an RG split). Additive + `default`ed (#1961).
+    /// during an RG split). Includes rows past their deadline that have not
+    /// been reclaimed yet (they no longer match). Additive + `default`ed
+    /// (#1961).
     #[serde(rename = "punt_seed_directory_rows", default)]
     pub punt_seed_directory_rows: u64,
     /// #18562: punt-seed directory publishes refused at a full shard — punted

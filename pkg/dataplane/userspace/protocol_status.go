@@ -583,7 +583,8 @@ type ProcessStatus struct {
 	NATReverseAmbiguousTotal uint64 `json:"nat_reverse_ambiguous_total,omitempty"`
 	// #18562: the helper's punt-seed directory (live #7770 seeds mirrored
 	// node-wide for the cross-worker embedded-ICMP fallback). Rows is a gauge,
-	// non-zero only during an RG split; the two totals count publishes the
+	// non-zero only during an RG split, and includes expired rows not yet
+	// reclaimed (they no longer match); the two totals count publishes the
 	// directory refused at a full shard or skipped on a contended shard lock —
 	// each a punted flow whose cross-worker first error keeps the pre-#18562
 	// verdict.

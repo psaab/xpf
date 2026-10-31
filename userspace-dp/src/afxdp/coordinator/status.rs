@@ -693,9 +693,10 @@ impl super::Coordinator {
         crate::session::EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL.load(Ordering::Relaxed)
     }
 
-    /// #18562: rows resident in the node's punt-seed directory (live #7770
-    /// seeds mirrored for the cross-worker embedded-ICMP fallback). Non-zero
-    /// only during an RG split.
+    /// #18562: rows resident in the node's punt-seed directory (#7770 seeds
+    /// mirrored for the cross-worker embedded-ICMP fallback). Non-zero only
+    /// during an RG split; includes expired rows not yet reclaimed (they no
+    /// longer match).
     pub fn punt_seed_directory_rows(&self) -> u64 {
         self.sessions.owner_rg_indexes.punt_seeds.len() as u64
     }
