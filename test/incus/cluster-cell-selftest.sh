@@ -127,27 +127,28 @@ ok "static: detector matched ${#DESTRUCTIVE[@]} destructive test-*.sh scripts (c
 
 # xpf_cell_wiring_check <script>: print "<lock-call-line>" and return 0 when
 # the #1875/#4020 wiring is in the preamble, else print the reason and return
-# 1. The wiring is: source cluster-cell.sh, then call
-# xpf_enter_destructive_cluster_cell, both BEFORE the first destructive
-# incus/systemctl op. Comment lines never count.
+# 1. The wiring is: a column-0 `source "${_CELL_DIR}/cluster-cell.sh"`, then a
+# column-0 `xpf_enter_destructive_cluster_cell` call, both on lines BEFORE the
+# first destructive incus/systemctl op.
+# This is a TEXT-order check, not an execution-order proof. Anchoring both at
+# column 0 rejects the shapes that would not run unconditionally at the top
+# level: inside a function, in `if false`, after `:` or `echo`, behind `||`,
+# or commented out. All destructive scripts write both at column 0.
 # #18591: this used to require the source "within the first 60 lines", an
 # arbitrary proxy that a long documentation header tripped falsely
 # (test-v6-na-recovery-12495.sh sources at line 69). Because fail() exits,
-# that false red aborted every later cell of this selftest. The ordering IS
-# the property, so the ordering is what is asserted.
+# that false red aborted every later cell of this selftest.
 xpf_cell_wiring_check() {
 	local p="$1" s src_line call_line mut_line
 	s="$(basename "$p")"
 	# Literal match of the source line — the ${...} must NOT expand.
 	# shellcheck disable=SC2016
-	src_line=$(grep -n 'source "\${_CELL_DIR}/cluster-cell.sh"' "$p" \
-		| grep -v '^[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1)
+	src_line=$(grep -n '^source "\${_CELL_DIR}/cluster-cell.sh"' "$p" | head -1 | cut -d: -f1)
 	if [[ -z "$src_line" ]]; then
 		printf '%s does not source cluster-cell.sh in its preamble (#4020 lock dropped?)\n' "$s"
 		return 1
 	fi
-	call_line=$(grep -n 'xpf_enter_destructive_cluster_cell' "$p" \
-		| grep -v '^[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1)
+	call_line=$(grep -n '^xpf_enter_destructive_cluster_cell' "$p" | head -1 | cut -d: -f1)
 	if [[ -z "$call_line" ]]; then
 		printf '%s never calls xpf_enter_destructive_cluster_cell (#4020 lock dropped?)\n' "$s"
 		return 1
@@ -202,6 +203,14 @@ _wiring_fixture source-after-call.sh "$_wiring_call" "$_wiring_src" "$_wiring_mu
 _wiring_fixture source-after-mutation.sh "$_wiring_mut" "$_wiring_src" "$_wiring_call"
 _wiring_fixture call-after-mutation.sh "$_wiring_src" "$_wiring_mut" "$_wiring_call"
 _wiring_fixture no-call.sh "$_wiring_src" "$_wiring_mut"
+_wiring_fixture commented-call.sh "$_wiring_src" "# ${_wiring_call}" "$_wiring_mut"
+# Shapes that are present as text but do not run unconditionally at the top
+# level: the column-0 anchor must refuse each.
+_wiring_fixture fn-wrapped.sh 'lock() {' "	${_wiring_src}" "	${_wiring_call}" '}' "$_wiring_mut"
+_wiring_fixture if-false.sh 'if false; then' "	${_wiring_src}" "	${_wiring_call}" 'fi' "$_wiring_mut"
+_wiring_fixture colon-src.sh ": ${_wiring_src}" "$_wiring_call" "$_wiring_mut"
+_wiring_fixture echo-call.sh "$_wiring_src" "echo ${_wiring_call}" "$_wiring_mut"
+_wiring_fixture or-call.sh "$_wiring_src" "true || ${_wiring_call}" "$_wiring_mut"
 if ! _out=$(xpf_cell_wiring_check "${_wiring_fx}/long-header.sh"); then
 	fail "static: the wiring check false-reds a correct script with a 70-line header: ${_out}"
 fi
@@ -209,15 +218,23 @@ fi
 ok "static: the wiring check accepts a correct script whose header is longer than 60 lines (#18591)"
 for _fx in no-source:'does not source' commented-source:'does not source' \
 	source-after-call:'before sourcing' source-after-mutation:'before sourcing' \
-	call-after-mutation:'before taking the lock' no-call:'never calls'; do
+	call-after-mutation:'before taking the lock' no-call:'never calls' \
+	commented-call:'never calls' fn-wrapped:'does not source' if-false:'does not source' \
+	colon-src:'does not source' echo-call:'never calls' or-call:'never calls'; do
 	_name="${_fx%%:*}" _want="${_fx#*:}"
 	if _out=$(xpf_cell_wiring_check "${_wiring_fx}/${_name}.sh"); then
 		fail "static: the wiring check accepted the ${_name} fixture (lock line ${_out})"
 	fi
 	[[ "$_out" == *"$_want"* ]] || fail "static: the ${_name} fixture was refused for the wrong reason: ${_out}"
 done
+# The detector-failure branch: a script the mutation detector cannot read is
+# never waved through as non-destructive.
+if _out=$(xpf_first_mutation_line() { return 1; }; xpf_cell_wiring_check "${_wiring_fx}/long-header.sh"); then
+	fail "static: the wiring check accepted a script the mutation detector could not read (lock line ${_out})"
+fi
+[[ "$_out" == *"could not read"* ]] || fail "static: the detector-failure branch gave the wrong reason: ${_out}"
 rm -rf "$_wiring_fx"
-ok "static: the wiring check refuses no source, a commented source, and every misordering (#18591)"
+ok "static: the wiring check refuses no source or call, commented or non-top-level shapes, every misordering, and an unreadable script (#18591)"
 
 for s in "${DESTRUCTIVE[@]}"; do
 	p="${SCRIPT_DIR}/${s}"
