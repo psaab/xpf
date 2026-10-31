@@ -485,6 +485,8 @@ the mechanics, so this section is sequencing only.
    | `make harness-census` | adding or moving anything under `test/incus/` or `scripts/userspace-*.sh` |
    | `make ignored-cell-census` | adding or changing a Rust `#[ignore]` |
    | `make go-skip-census` | adding or changing a Go `t.Skip` |
+   | `make instructions-census` | adding, changing or retiring a temporary instruction (its expiry marker, #18645) |
+   | `make mirror-census` | editing text inside a `<!-- mirror:<id> -->` block: change every copy (#18645) |
    | `sudo make test-root` | touching the XDP shim — its behavioural cells SKIP unprivileged, and the #1864 verifier gate does not substitute (two distinct WRONG fixes pass it) |
    | `make test-failover` | cluster, VRRP, session-sync or failover code — **mandatory**, self-locked, shared cluster |
 

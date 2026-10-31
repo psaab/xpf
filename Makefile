@@ -875,6 +875,43 @@ harness-census:
 test-harness-census-lib:
 	bash ./test/incus/harness-census-selftest.sh
 
+# #18645: the instruction census. A temporary instruction carries an expiry
+# marker (an `Expires-when:` line naming `#NNNN closed`, or a free-text
+# condition plus a `Review-by:` date; grammar in scripts/instructions-census.py
+# and the campaign skill). The hermetic leg validates every marker under
+# docs/, .claude/skills/, test/incus/, scripts/, this Makefile and CLAUDE.md
+# (read, never written), and fails a past Review-by date; it runs in CI and in
+# `make selftest`. The ONLINE leg also asks GitHub and fails a marker whose
+# issue has closed; the campaign keeper runs it hourly. It exits 77 (SKIP)
+# without `gh`, which make reports as a failure: a skipped check is not a pass.
+.PHONY: instructions-census instructions-census-online test-instructions-census-lib
+instructions-census:
+	python3 scripts/instructions-census.py
+
+instructions-census-online:
+	python3 scripts/instructions-census.py --online
+
+test-instructions-census-lib:
+	bash ./test/incus/instructions-census-selftest.sh
+
+# #18645: the mirror census. Text deliberately copied into several Markdown
+# files sits between `<!-- mirror:<id> -->` and `<!-- /mirror:<id> -->`; the
+# census fails when same-id blocks differ after whitespace normalisation, or a
+# block has no partner. Hermetic; runs in CI and in `make selftest`.
+.PHONY: mirror-census test-mirror-census-lib
+mirror-census:
+	python3 scripts/mirror-census.py
+
+test-mirror-census-lib:
+	bash ./test/incus/mirror-census-selftest.sh
+
+# #18645: self-test the shared deb version allocator (scripts/next-deb-version.sh,
+# see the DEB_VERSION comment below). Hermetic: a private counter, never the
+# shared one.
+.PHONY: test-next-deb-version-lib
+test-next-deb-version-lib:
+	bash ./scripts/next-deb-version-selftest.sh
+
 # Bake the distributable appliance image (#1879 Path C): one
 # offline-built bootable root disk (REVIEWED-PIN Ubuntu server cloudimg
 # base — PINNED_BASE_RELEASE + PINNED_BASE_SHA256 in bake.py, not
@@ -1949,6 +1986,17 @@ loss-cluster-restart:
 # project's git tags are non-numeric (e.g. userspace-forwarding-ok-*),
 # so synthesize 0.0.<commit-count>+g<short-sha>[.dirty] — monotonic in
 # commit count, carries the exact source sha, and is policy-valid.
+#
+# An EXPLICIT version for a cluster deploy (`make deb DEB_VERSION=...`) comes
+# from scripts/next-deb-version.sh (#18645), never from a hand-picked number:
+#   make deb DEB_VERSION="$(scripts/next-deb-version.sh --git .)+g$(git rev-parse --short=12 HEAD)"
+# It allocates from the shared counter /var/worktrees/.cache/deb-version-counter
+# under flock, above every 0.0.N deb under /var/worktrees and above the commit
+# counts of HEAD and origin/master. Hand-picked numbers collided across lanes,
+# and a number below the one a node runs is an apt downgrade the deploy
+# refuses. Once a node runs an allocated version, a stock build of an older
+# commit count is a downgrade there too, so deploys to that node allocate as
+# well. The stock default below is unchanged.
 # The shared probe compares tracked files with HEAD, scans untracked package/
 # image inputs, and asks Go for the compiled inputs of `build`/`build-ctl` so
 # ignored sources consumed by the compiler are included. Unattestable GOFLAGS

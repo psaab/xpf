@@ -40,13 +40,26 @@ driveable work remains.
   engineer, reviewer, or scout, whatever its agent type — counts
   as one live campaign agent until it completes. The keeper board
   summary line and the parent's appended lane table both carry the
-  live count vs cap (`agents=<n>/<2*nproc-6>`) so a breach is
+  live count vs cap (`agents=<n>/<cap>`) so a breach is
   visible at the next keeper tick instead of only in hindsight.
+- **Spend cap — the binding limit (2026-10-31)**: the box ceiling
+  above was never what stopped a campaign; the spend limit was. On
+  2026-10-31 it stopped every agent at once, mid-lane, and the
+  salvage cost more than the parallelism had bought. Run at about
+  **3 implementor lanes plus about 2 review seats** live at once, and
+  use that number as `cap` in every rule below; `2*nproc - 6` is an
+  upper bound, not a target, and only the user raises the spend cap.
+  A due gate runner (item 9 below) takes the next implementor slot,
+  so a merge wave can be 3 gate runners + 2 review seats with no new
+  implementor until the gates return. **Resume before you spawn**: a
+  fold confirmation, a narrow re-review, or a follow-up question goes
+  to the EXISTING seat via `SendMessage` with a narrow delta (Step 3
+  item 6), never to a fresh agent that re-reads the whole PR.
 - **Keep lanes full, parallelism high (measurable, enforced)**:
   never let engineer or reviewer lanes idle while driveable work
   exists. The invariant is a NUMBER, checked at every parent action
   and every keeper tick: `live campaign agents == min(cap,
-  driveable work)` where cap is `2*nproc - 6` above. If
+  driveable work)` where cap is the spend cap above. If
   live < that number while either queue has unassigned driveable
   work, the campaign is UNDER-FILLED — a campaign failure on the
   same level as an unactioned verdict, recorded in one
@@ -126,10 +139,13 @@ driveable work remains.
      at the then-current master. A gate slot is never converted
      to engineer work while its cluster's baseline is older than
      the validity window.
-  triple reviewers for every PR at a reviewable head, (2) gate
-  issues in band order. Reserve capacity is not idle capacity:
-  the 6 reserved slots are the reserve; inside the cap, all
-  lanes work. Reap idle/dead agents (liveness = commit-time +
+  10. **Mix at full fill, PR work first**: (1) stamped triple
+     reviewers for every PR at a reviewable head, (2) gate runners
+     for gated PRs (see the three-cluster cadence below), (3)
+     engineers/researchers on the lowest-numbered driveable
+     issues in band order. Reserve capacity is not idle capacity:
+     the 6 reserved slots are the reserve; inside the cap, all
+     lanes work. Reap idle/dead agents (liveness = commit-time +
   live procs, never output-mtime) and refill from the
   lowest-number queue in the same turn. Parent does folds/small
   fixes inline when faster than dispatching. A dedicated
@@ -353,9 +369,12 @@ driveable work remains.
   of `loss`/`tcp`/`udp`.** The clusters are NOT interchangeable
   baselines: `tcp`/`udp` run a bridge-fabric fallback (see their env
   files), so every throughput comparison is against `origin/master`
-  measured on the SAME cluster — never quote a loss number (~23 Gbit/s)
-  for `tcp`/`udp`. The trust/untrust directional matrix does NOT live
-  on these HA clusters; policy-directional PRs additionally run
+  measured on the SAME cluster — never quote a loss number for
+  `tcp`/`udp`, and never a remembered number for any cluster (the
+  measured per-cluster bands are tier 2 of
+  `docs/regression-test-matrix.md`). The trust/untrust directional
+  matrix does NOT live on these HA clusters; policy-directional PRs
+  additionally run
   `/security-matrix` directional cases on their proper topology.
   **Do not regress max throughput**: the decidable rule is Step 3
   item 4 (run 5x per head per family; block if the PR median is >10%
@@ -395,7 +414,7 @@ of GB/hour are consumed; prune the history with the board
 rotation), AND
 prints exactly one summary line per tick to stdout (`keeper:
 prs=<n> issues=<total> oldest-verdict-age=<dur> stale-lanes=<n>
-agents=<n>/<2*nproc-6>` — the parent supplies the live-agent count
+agents=<n>/<cap>` — the parent supplies the live-agent count
 from its task registry; the keeper prints it verbatim)
 — Monitor wakes the parent on stdout lines; a silent file rewrite
 alerts nobody. The keeper has exactly ONE power: observe and alert.
@@ -460,6 +479,17 @@ Every tick the keeper:
    work first, then the lowest-numbered issue in band; if PRs drain,
    convert closers to engineers/researchers, and vice-versa if
    research floods in.
+4. Runs the ONLINE instruction census once an hour and at keeper
+   start: `make instructions-census-online` from a clean checkout at
+   `origin/master`. It asks `gh` for the state of every issue an
+   expiry marker names (see "Expiry markers" under Standing rules). The
+   hermetic half runs in CI and `make selftest`; only the keeper sees
+   an issue CLOSE, which is the event that expires those markers. Each
+   problem prints one stdout line, `keeper: STALE-INSTRUCTION <tag>
+   <file:line>`, so Monitor wakes the parent; the parent retires the
+   instruction in the normal queue (a docs PR). A hit in CLAUDE.md is
+   reported to the user as an owner action, never edited by a lane.
+   Exit 77 (no `gh`) is a SKIP the keeper prints, never a pass.
 
 ## Arguments
 
@@ -483,8 +513,13 @@ the per-PR gate (Step 3 item 4, which runs on the assigned cluster
 and DOES gate merges). Never cite a green watch as a passed gate:
 
 - A background service loops every ~15 min against the current master
-  tip: (1) `test-connectivity.sh cluster`, (2) LIVE node CLI probes on
-  the operator's firewall (`incus exec loss:xpf-userspace-fw0 -- cli -c
+  tip. "Current" is measured, not assumed: before each run the watch
+  fetches and resets its OWN clean checkout to `origin/master` and its
+  log line carries `master=<sha>`; a line whose SHA is not the tip is
+  a stale watch, not a datapoint (on 2026-10-31 a watcher had run a
+  four-day-stale checkout). Each run: (1) `test-connectivity.sh
+  cluster`, (2) LIVE node CLI probes on the operator's firewall
+  (`incus exec loss:xpf-userspace-fw0 -- cli -c
   "show chassis forwarding"` + flow statistics; FWDD state and
   created==closed session balance are the tripwires). Appends one line
   per run to `/var/worktrees/.cache/smoke-watch/smoke-watch.log`.
@@ -502,8 +537,8 @@ and DOES gate merges). Never cite a green watch as a passed gate:
   "LAN host -> internet IPv6" as environment without a control. Its
   traceroute half was a product defect (ping to a live host worked
   while every hop past the firewall was `???`, #18174); its ping half
-  is a dead target, a "Known environment rows" cell until the harness is
-  retargeted (#18556).
+  was a dead target, and #18556 retargeted the harness to
+  `2001:4860:4860::8888`.
   Deviations from the baseline are the signal; the baseline itself is
   not.
 - Perf mistakes ride the same loop: when a perf-relevant merge lands,
@@ -695,8 +730,8 @@ CODE is already shipped.
 Fan out wide. For each disjoint issue, dispatch a `general-purpose`
 engineer agent (or `/research` first if the design needs human judgement).
 Run as many concurrently as the box allows, subject to the agent
-concurrency cap in the standing orders (`2*nproc - 6` live campaign
-agents; queue beyond it).
+concurrency caps in the standing orders (the spend cap, bounded by
+`2*nproc - 6` live campaign agents; queue beyond it).
 
 - **Unique `CARGO_TARGET_DIR=/var/worktrees/.cache/cargo-<issue>` per Rust
   agent** (scratch rule above — never `/dev/shm` or `/tmp`) — 8 concurrent
@@ -718,7 +753,7 @@ agents; queue beyond it).
   commit or amend, lane's choice), never the parent. A PR classified
   `docs/test-only` still carries the log unless the diff IS the log
   file itself.
-- **Commit-message standard (lanes, enforced)** — state verbatim in every dispatch/fold brief (including: the PR TITLE MUST use the same `<area>: <summary> (#NNNN)` subject format — it becomes the merge-commit message); parent bounces non-conforming branches before review (`git log` shape check at PR…
+- **Commit-message standard (lanes, enforced)** — state verbatim in every dispatch/fold brief (including: the PR TITLE MUST use the same `<area>: <summary> (#NNNN)` subject format — it becomes the merge-commit message); parent bounces non-conforming branches before review (`git log` shape check at PR intake, Step 3 item 1).
   - Subject: `<area>: <imperative summary> (#NNNN)`, ≤72 cols. Area vocabulary: `docs:`, `test:`, `assurance:`, `forwarding:`, `config:`, `daemon:`, `cluster:`, `sessions:`, `audit:`, `show:`, `telemetry:`, `nftables:`, `ha:`, `frr:`, `process:`, `userspace-dp:`, `afxdp:`, `policy:`, `nat:`, `firewall:`, `grpcapi:`, `snmp:`, `ipsec:`, `xdp:`, `shim:`, `ci:`, `build:`, `metrics:` (new areas allowed when none fits, never bare). Summary names the BEHAVIOR change in imperative mood (`gate`, `drop`, `reject`, `refund`, `sync`, `bound`, `fence`), not the file (`update foo.rs`). Parent process commits without an issue cite the ruling (`(user-directive 2026-09-22)`).
   - Body (required, via `git commit -F -` heredoc, wrapped ~72 cols) has four sections:
     1. `Why:` the defect mechanism + consequence — what breaks, who/what is affected, under what config/traffic. 2–5 lines. Cite the path (`poll → session → TX`), not just "fixes bug".
@@ -838,7 +873,10 @@ For each PR an agent opens:
    finding from any one blocks (fail-closed veto, not majority vote).
    Parent verifies every cited finding against the actual code before
    folding — stale/disproven findings are recorded as such, never
-   folded. **Fold-loop cap:** at most 3 review/fold cycles per PR
+   folded. Reviewer findings are claims, not facts (CLAUDE.md,
+   "Working Style"): read the cited line at the REVIEWED SHA, not at
+   today's head, because a fold or rebase can move or remove it.
+   **Fold-loop cap:** at most 3 review/fold cycles per PR
    (cycles count across rebases/folds for the same PR number; record
    the count on the PR). On the 3rd unresolved cycle, stop folding
    and escalate: parent chooses split-into-smaller-PRs or
@@ -847,6 +885,13 @@ For each PR an agent opens:
    split/escalation count on the tracking task, so a pathological
    issue is visible as such at termination — exhaustion alone never
    closes a PR; "superseded" requires naming the superseding PR.
+   **Same root cause two rounds running = remove the mechanism.**
+   Do not wait for the cap when two consecutive rounds' findings
+   share one root cause: the fold is patching symptoms of a mechanism
+   that should not exist. Remove it and close the hole another way.
+   #18601's fold for #18606 produced a new HA defect two rounds
+   running; removing that mechanism and closing the hole with a
+   separate commit-time refusal (#18616) ended the loop.
 4. **Gate on forwarding + throughput (three clusters in parallel).**
    The rows a PR must pass, by area, are in
    `docs/regression-test-matrix.md` (tier 0 before any cluster time; HA
@@ -854,6 +899,40 @@ For each PR an agent opens:
    (`make test-rg-move-soak`, #18583): the operator's alternating
    `node 0`/`node 1` loop from ONE node with no clock resync, scored per
    move (`docs/ha-rg-move-correctness.md`). The mechanics below still apply.
+   **Test the way the operator does.** The reference is the user's
+   own loop: `request chassis cluster failover redundancy-group <N>
+   node <0|1>`, alternating, every 5 s, issued from ONE node, with
+   nothing between moves; `make test-rg-move-soak` (#18587) is its
+   harness. A gate that does what the operator cannot is measuring
+   the harness: no clock resync, no silent restore or config reset
+   between moves, no retry that hides a refused move. Every
+   precondition (NTP sync, target claim, server idle, build identity)
+   is MEASURED and scored PASS / VOID / FAIL in the record, never
+   silently repaired. The crash gates' clock fix-up (`date -s`,
+   removed in #18614) hid the state the operator's loop ran in: on
+   2026-10-31 loss's fw1 was 72 s behind, and every operator move to
+   node 1 failed fabric-RPC auth (`docs/ha-rg-move-correctness.md`,
+   "Measured").
+   **Pre-gate environment checklist** (inside the lock cell, before
+   the first measured cell; each line goes in the gate record):
+   - the iperf target is claim-probed with one holder, the
+     `ha_target_claim_check` cell in `make test-connectivity`
+     (#18576, #18619); a second holder or a silent control is VOID,
+     and no throughput number from that run counts;
+   - `chronyc tracking` shows `Leap status: Normal` on BOTH nodes,
+     and `show configuration system ntp` shows the `server ...
+     routing-instance mgmt` stanza (#18584);
+   - the target's iperf3 servers are idle: count ESTABLISHED sockets
+     on their ports (`ss -tn state established '( sport = :5211 )'`
+     on the target container); if any, restart them, wait for
+     LISTEN, and record the count you cleared (#18631). A restart
+     the record does not show is a silent repair;
+   - each node's build by GIT HASH (`/usr/local/sbin/xpfd version`
+     prints `commit <sha>`), never by deb version number: lanes'
+     hand-picked versions collided, so a version does not name a
+     build;
+   - `loadavg` of the orchestrator beside EVERY throughput number
+     (the workstation's build load moves loss numbers).
    Skipped only for parent-classified `docs/test-only` PRs (Step 3
    item 3). Otherwise: dataplane/forwarding/throughput PRs MUST gate
    on `loss`; every other gated PR uses the least-busy cluster `<C>`
@@ -885,11 +964,17 @@ For each PR an agent opens:
        ;;
      *) echo "unknown cluster: $C" >&2; exit 2 ;;
    esac
-   # Ask this worktree's Makefile for its exact build version, then
-   # build that version outside the cluster lock.
-   BUILD_DEB_VERSION=$(make -s -C "$WT" \
-     --eval='campaign-print-deb-version:;@printf "%s\n" "$(DEB_VERSION)"' \
-     campaign-print-deb-version)
+   # Allocate a box-unique, monotonic version, then build it outside
+   # the cluster lock. Never hand-pick 0.0.NNNNN: lanes collided, and a
+   # number below the deployed one is an apt downgrade that refuses
+   # (#18645). The allocator holds a flock on a shared counter and
+   # starts above every 0.0.N it can see (debs under /var/worktrees,
+   # the PR's and master's commit counts). master's copy runs for a PR
+   # based before the script existed.
+   DEB_N=$(git -C "$WT" show origin/master:scripts/next-deb-version.sh |
+     sh -s -- --git "$WT")
+   case "$DEB_N" in 0.0.[0-9]*) ;; *) echo "no deb version" >&2; exit 1 ;; esac
+   BUILD_DEB_VERSION="$DEB_N+g$(git -C "$WT" rev-parse --short=12 HEAD)"
    make -C "$WT" deb DEB_VERSION="$BUILD_DEB_VERSION"
    PR_HEAD=$(git -C "$WT" rev-parse HEAD)         # record == PR head
    # Select by explicit Debian version and exact package metadata, never
@@ -1002,7 +1087,8 @@ For each PR an agent opens:
      false-blocking on a degraded-lab day; the 10% median tolerance
      avoids blocking on a single outlier while rejecting sustained
      median regressions. "Line rate" = the same-cluster master median
-     just measured (loss ≈23 Gbit/s historically; `tcp`/`udp`
+     just measured, never a remembered figure (the recorded per-cluster
+     bands are tier 2 of `docs/regression-test-matrix.md`; `tcp`/`udp`
      baselines are whatever their master medians are — never import
      loss numbers).
    - CoS per-class cells (when applicable): PASS iff every unshaped
@@ -1010,12 +1096,25 @@ For each PR an agent opens:
      their shaped rate with no buffer drops beyond master.
    - Forwarding/connectivity failure on any cell that passes on
      master = BLOCK, unconditionally.
-   Record on the PR: cluster, PR head SHA, master SHA, every cell's
-   numbers (including all multi-stream runs), directional result or
+   Record on the PR: cluster, PR head SHA (the GATED SHA, which Step 4
+   item 0 compares with the head being merged), master SHA, every cell's
+   numbers (including all multi-stream runs) each with its `loadavg`,
+   each node's build git hash, every line of the pre-gate environment
+   checklist above with its PASS / VOID / FAIL, directional result or
    `N/A (not a policy PR)` / `INCONCLUSIVE (env)`, and the verdict.
    "Smoke passed" without numbers is not a gate. Any
    behavior-changing fold re-runs BOTH this gate and the triple
    review at the new head (counts toward the fold-loop cap).
+   **A gate's ledger rows are part of the record: never delete them.**
+   Every gate run through `test/incus/harness-result.sh` appends one
+   row to the TRACKED `test/results/ledger.d/` (`docs/engineering-style.md`,
+   "Every gate in this table now leaves a ledger row", #8302), and
+   `harness-compare` reads those rows. Lanes deleted the rows their
+   runs wrote "by name, uncommitted"; deleting a FAIL row destroys
+   the verdict `harness-compare` would have shown. Commit every row
+   the gate wrote on the PR branch, as its own ledger-only commit. A
+   VOID row (for example, no deploy manifest in that worktree) is
+   committed too, with the reason it is VOID in `docs/log/<issue>.md`.
 5. **Parent firsthand verification on the final head** as a SEPARATE
    step before merge (supplement to, never a substitute for, the
    triple review): spot-check at least one load-bearing claim
@@ -1027,7 +1126,14 @@ For each PR an agent opens:
 6. **Fold review findings** by resuming the engineer agent
    (`SendMessage({to: "<agentId>", ...})` — resumes a COMPLETED agent with
    its context intact) OR inline if the agent's worktree is at a stale
-   pre-rebase head that would overwrite your rebase.
+   pre-rebase head that would overwrite your rebase. **Seat
+   confirmation of a fold** resumes the SAME reviewer seat with a
+   narrow brief, "confirm delta `<X>..<Y>` at head `<Z>`": X..Y is the
+   fold (X the head that seat last reviewed), Z the head to be merged
+   (Y itself, or a merge of master on top of it). The seat answers
+   about that delta only, and its record is headed at Z like any other.
+   A fresh seat re-reads the whole PR and costs a full review (see the
+   spend cap).
 
 Every gate must clear: all three hostile verdicts at the final
 head, the cluster gate (or docs/test-only classification), and the
@@ -1050,6 +1156,17 @@ Per PR, in order:
    Action / File(s) / Validation / Risk content.
    If any item is missing or recorded at a different SHA, do NOT
    merge — return to Step 3.
+   **The merge record names the gated SHA and classifies the delta.**
+   The merge body states the GATED SHA (the head the cluster gate ran
+   at) and the class of `git diff --stat <gated>..<head>`:
+   `docs-only`, `comments-only` (comment lines in code files, checked
+   by reading the diff, not by the file list) or `code`. A `code`
+   delta needs a re-gate at the head, or a seat confirmation of that
+   exact delta (Step 3 item 6) with the reason a re-gate is not needed
+   written in the record. An empty delta says so. Without this line a
+   later reader cannot tell a gated merge from a merge of something
+   nobody measured. The gate's ledger rows (Step 3 item 4) are in the
+   head's diff, or the record says why the gate wrote none.
 1. Re-poll `mergeable` THROUGH `UNKNOWN` (GitHub recomputes after every
    push) until `MERGEABLE`/`CLEAN` or `CONFLICTING`.
 2. If `CONFLICTING`: in a FRESH worktree off the PR branch,
@@ -1154,6 +1271,41 @@ is clean:
 - **Base every PR on CURRENT master** (three-dot diff; a fork-behind
   branch shows false mass-deletions on two-dot — use three-dot to see true
   change + two-dot only as a mass-deletion tripwire).
+- **Expiry markers: a temporary instruction says when it stops being
+  true (#18645).** Temporary instructions outlived their premise all
+  through the 2026-10-31 campaign: a "the loss lab has no NTP" note long
+  after the lab had NTP (#18618), and a retired iperf target still named
+  as the smoke target. The ones retired on time carried an explicit
+  expiry. So an instruction that is true only until something happens
+  carries ONE marker line next to the text it expires:
+
+  ```
+  <!-- Expires-when: #18576 closed -->      Markdown, also inside a table row
+  # Expires-when: #18576 closed             shell, Python, env, Makefile
+  # Expires-when: loss's v4 and v6 iperf targets are one host; Review-by: 2026-11-30
+  ```
+
+  The issue form is exactly `#NNNN closed` (an issue or a PR number).
+  Any other condition is free text and MUST carry a `Review-by:` date,
+  because no tool can check prose: the date is the trigger. Never mark a
+  permanent rule. `make instructions-census` (hermetic; CI and
+  `make selftest`) fails a malformed or near-miss marker, a free-text
+  marker without a date, and a date before today (UTC).
+  `make instructions-census-online` (the keeper, above) also fails a
+  marker whose issue has CLOSED. On a red, retire the instruction
+  (delete it, or restate it as permanent), then the marker; moving a
+  date needs a reason in the commit. Examples in fenced or inline code
+  are not markers.
+  Grammar and scope: `scripts/instructions-census.py`.
+- **Mirrored text is wrapped, and compared (#18645).** Text deliberately
+  copied into several docs (the private-RG peer-loss detection paragraph
+  is in six) sits between `<!-- mirror:<id> -->` and
+  `<!-- /mirror:<id> -->` markers. `make mirror-census` fails when two
+  blocks with one id differ after whitespace normalisation, or a block
+  has no partner. Change every copy in the same commit, and let the
+  census, not a reviewer, confirm identity. CLAUDE.md is the user's:
+  when its copy should join a mirror set, propose the wrapped text in
+  the PR body.
 
 ## Hard-won operational lessons (from live runs)
 

@@ -161,7 +161,7 @@ Switching to macvtap, routed, or tc-redirect could eliminate this entirely.
 The `ae1a717` VRRP measurements below describe the legacy VRRP-backed RETH
 path, not the compiler-default private-RG election mode. The latter uses
 heartbeat detection. Runtime heartbeat defaults are 100ms × 5 = 500ms; the
-deployed lab config is 200ms × 5 = 1s. The receiver checks staleness every
+deployed lab config is 200ms × 5 = 1s. <!-- mirror:private-rg-peer-loss-detection -->The receiver checks staleness every
 quarter heartbeat interval (interval / 4, floored at 10 ms; #18639), so a peer
 is declared within that check period of its last admitted heartbeat turning
 interval × threshold old. While session sync looks connected, a peer that has
@@ -194,7 +194,7 @@ chassis cluster information` prints "Liveness probes sent: N (unanswered at
 timeout: M, peer acks probes: yes|no)", which tells an operator which case
 applies. These are detection times, not traffic restoration: activation adds
 about 0.34–0.44 s from peer-lost to the first ping reply on the lab clusters
-(#18561), so a lab crash outage lands near 1.4 s. (`compileChassis` in
+(#18561), so a lab crash outage lands near 1.4 s.<!-- /mirror:private-rg-peer-loss-detection --> (`compileChassis` in
 `pkg/config/compiler_chassis.go`;
 `DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` in
 `pkg/cluster/heartbeat.go`; `timeoutCheckInterval` and

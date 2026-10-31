@@ -248,7 +248,7 @@ See the deploy backing table in
   1s in the deployed lab config. These are `set chassis cluster
   heartbeat-interval <ms>` and `heartbeat-threshold <n>`
   (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` in
-  `pkg/cluster/heartbeat.go`; `docs/ha-cluster-userspace.conf:71-72`).
+  `pkg/cluster/heartbeat.go`; `docs/ha-cluster-userspace.conf:71-72`). <!-- mirror:private-rg-peer-loss-detection -->
   The receiver checks staleness every quarter heartbeat interval (interval /
   4, floored at 10 ms; #18639), so a peer is declared within that check period
   of its last admitted heartbeat turning interval × threshold old. While
@@ -283,7 +283,7 @@ See the deploy backing table in
   tells an operator which case applies. These are detection times, not traffic
   restoration: activation adds about 0.34–0.44 s from peer-lost to the first
   ping reply on the lab clusters (#18561), so a lab crash outage lands near
-  1.4 s. (`timeoutCheckInterval` and `heartbeatReceiver.checkTimeout` in
+  1.4 s.<!-- /mirror:private-rg-peer-loss-detection --> (`timeoutCheckInterval` and `heartbeatReceiver.checkTimeout` in
   `pkg/cluster/heartbeat.go`; `prearmPeerLivenessProbe`,
   `peerAnsweredLivenessProbeLocked` and `syncSuppressesPeerTimeoutLocked` in
   `pkg/cluster/heartbeat_suppress.go`; `notePeerLiveness` in
