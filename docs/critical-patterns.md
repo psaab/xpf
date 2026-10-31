@@ -247,18 +247,31 @@ See the deploy backing table in
   interval × threshold: 100ms × 5 = 500ms at runtime defaults, or 200ms × 5 =
   1s in the deployed lab config. These are `set chassis cluster
   heartbeat-interval <ms>` and `heartbeat-threshold <n>`
-  (`pkg/cluster/heartbeat.go:61-65,1916-1960`;
-  `docs/ha-cluster-userspace.conf:71-72`). The threshold is not always the
-  declaration time: while sync is connected and last peer traffic is ≤2s old,
-  `shouldSuppressPeerHeartbeatTimeout` defers loss; continuous suppression is
-  capped at 5s. A silent death/partition with ESTABLISHED sync can therefore
-  take max(threshold, remaining sync-recency window) plus up to one heartbeat
-  tick: 0.5–2.1s from peer death at defaults or 1.0–2.2s in the lab.
-  Process exit that closes sync or sync idle >2s falls through at the heartbeat
-  threshold when the receiving standby is caught up, subject to startup/restart
-  grace; a standby still draining a backlog when the peer's FIN/RST arrives keeps sync installed while it drains, and its frames refresh peer recency for up to one 1s watchdog tick, so there detection is up to max(threshold, ~3s) plus one heartbeat tick — about 3.1s at defaults, 3.2s in the lab, under the 5s cap (#18521)
-  (`pkg/daemon/daemon_ha_sync.go:170-206`;
-  `pkg/cluster/heartbeat_manager.go:790-832`).
+  (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` in
+  `pkg/cluster/heartbeat.go`; `docs/ha-cluster-userspace.conf:71-72`).
+  The receiver checks staleness four times per heartbeat interval (#18639),
+  so a peer is declared within a quarter interval of its last admitted
+  heartbeat turning interval × threshold old. While session sync looks
+  connected, a peer that has acked a sync-level heartbeat on this incarnation
+  (#18570) must answer a liveness probe sent at its first missed heartbeat
+  (once its last heartbeat is 1.5 intervals old); any sync frame newer than
+  the probe counts. A hard-crashed peer cannot answer, so it is declared at
+  the threshold: about 0.5–0.525 s after its last heartbeat at defaults and
+  1.0–1.05 s in the lab. If no probe could be pre-armed because the late
+  heartbeats fell inside a boot or restart grace, the probe goes out at the
+  first check after the grace (the threshold, if the grace had already ended)
+  and gets (threshold − 1.5) more intervals: at most about 0.875 s at defaults
+  and 1.75 s in the lab when the grace ended by the threshold. A peer without
+  ack support keeps the #17056 recency rule: max(threshold, remaining 2 s sync
+  window) plus a quarter interval, with a 5 s cap on continuous suppression.
+  A process crash that sends FIN, or sync idle for more than 2 s, falls back
+  to the plain threshold when the receiving standby is caught up, subject to
+  startup/restart grace; a standby still draining a backlog when the peer's FIN/RST arrives keeps sync installed while it drains, and its frames refresh peer recency for up to one 1s watchdog tick, so there detection is up to max(threshold, ~3s) plus a quarter interval — about 3.0 s at defaults and 3.05 s in the lab, under the 5s cap (#18521; the probe does not shorten it, because backlog frames read after the probe answer it)
+  (`timeoutCheckInterval`, `heartbeatReceiver.checkTimeout` in
+  `pkg/cluster/heartbeat.go`; `syncSuppressesPeerTimeoutLocked`,
+  `prearmPeerLivenessProbe`, `peerAnsweredLivenessProbeLocked` in
+  `pkg/cluster/heartbeat_suppress.go`; `handlePeerTimeout` in
+  `pkg/cluster/heartbeat_manager.go`).
 - **Separate interface/IP monitor detection**: polls run each second; 3
   consecutive failed polls mark a monitor down, followed by a 5s hold-down
   before another state transition. IP sweeps use up to 16 concurrent probes

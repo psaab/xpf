@@ -2792,13 +2792,28 @@ The userspace dataplane participates in the chassis cluster HA:
 
 - The compiler-default private-RG mode detects peer loss using heartbeat
   staleness (100ms × 5 = 500ms at runtime defaults, 200ms × 5 = 1s in the
-  deployed lab config). With connected sync and peer traffic ≤2s old, detection
-  is max(threshold, remaining sync-recency window) plus up to one heartbeat
-  tick: about 0.5–2.1s / 1.0–2.2s respectively, phase-dependent. These are
-  detection times, not end-to-end restoration SLAs
-  (`pkg/config/compiler_system.go:3132-3137`;
-  `pkg/cluster/heartbeat.go:61-65,1916-1960`;
-  `pkg/daemon/daemon_ha_sync.go:170-206`;
+  deployed lab config). The receiver checks staleness four times per heartbeat
+  interval (#18639), so a peer is declared within a quarter interval of its
+  last admitted heartbeat turning interval × threshold old. While session sync
+  looks connected, a peer that has acked a sync-level heartbeat on this
+  incarnation (#18570) must answer a liveness probe sent at its first missed
+  heartbeat (once its last heartbeat is 1.5 intervals old); any sync frame
+  newer than the probe counts. A hard-crashed peer cannot answer, so it is
+  declared at the threshold: about 0.5–0.525 s after its last heartbeat at
+  defaults and 1.0–1.05 s in the lab. If no probe could be pre-armed because
+  the late heartbeats fell inside a boot or restart grace, the probe goes out
+  at the first check after the grace (the threshold, if the grace had already
+  ended) and gets (threshold − 1.5) more intervals: at most about 0.875 s at
+  defaults and 1.75 s in the lab when the grace ended by the threshold. A peer
+  without ack support keeps the #17056 recency rule: max(threshold, remaining
+  2 s sync window) plus a quarter interval, with a 5 s cap on continuous
+  suppression. A process crash that sends FIN, or sync idle for more than
+  2 s, falls back to the plain threshold. These are detection times, not
+  end-to-end restoration SLAs (`compileChassis` in
+  `pkg/config/compiler_chassis.go`; `timeoutCheckInterval` and
+  `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
+  `syncSuppressesPeerTimeoutLocked`, `prearmPeerLivenessProbe` and
+  `peerAnsweredLivenessProbeLocked` in `pkg/cluster/heartbeat_suppress.go`;
   `docs/ha-cluster-userspace.conf:71-72`).
 - Only legacy VRRP-backed RETH mode (`no-private-rg-election`, unless
   `no-reth-vrrp`) uses the 30ms advertisement default; its steady-state

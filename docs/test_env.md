@@ -411,17 +411,19 @@ sg incus-admin -c 'incus exec xpf-fw1 -- ip addr show ge-7-0-1.50' | grep '172.1
 
 The checked-in cluster config uses the compiler-default private-RG mode (no
 `no-private-rg-election`), so RETH VRRP is suppressed. Its heartbeat staleness
-is 200ms × 5 = 1s. While connected sync has peer traffic ≤2s old, the guard
-suppresses heartbeat timeout, capped at 5s; silent node death can take roughly
-1.0–2.2s from phase timing, while a process crash that closes sync falls
-through at the raw threshold. The old ~60ms/30ms-VRRP failover text describes a
-legacy test path, not this default. The prior ~150ms recovery expectation is
-removed; no source-backed end-to-end recovery bound exists
-(`pkg/config/compiler_system.go:3132-3137`;
-`pkg/cluster/heartbeat.go:61-65,1916-1960`;
-`pkg/cluster/heartbeat_manager.go:790-832`;
-`pkg/daemon/daemon_ha_sync.go:170-206`;
-`docs/ha-cluster.conf:70-72`).
+is 200ms × 5 = 1s, checked four times per interval (#18639). A hard-crashed
+peer that has acked a sync-level heartbeat does not answer the #18570
+liveness probe and is declared at the threshold, about 1.0–1.05 s after its
+last heartbeat; a peer without ack support keeps the sync-recency rule
+(max(threshold, remaining 2 s sync window) plus a quarter interval, capped at
+5 s); a process crash that sends FIN falls through at the plain threshold.
+The old ~60ms/30ms-VRRP failover text describes a legacy test path, not this
+default. The prior ~150ms recovery expectation is removed; no source-backed
+end-to-end recovery bound exists (`compileChassis` in
+`pkg/config/compiler_chassis.go`; `heartbeatReceiver.checkTimeout` in
+`pkg/cluster/heartbeat.go`; `syncSuppressesPeerTimeoutLocked` in
+`pkg/cluster/heartbeat_suppress.go`; `handlePeerTimeout` in
+`pkg/cluster/heartbeat_manager.go`; `docs/ha-cluster.conf:70-72`).
 
 ```bash
 # 15s rapid ping probe spans the failover guard window and restart recovery.

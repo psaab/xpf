@@ -459,16 +459,28 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
 - Heartbeat staleness threshold: runtime defaults 100ms × 5 = 500ms; deployed
   lab config 200ms × 5 = 1s. Name the knobs
   `set chassis cluster heartbeat-interval <ms>` and
-  `set chassis cluster heartbeat-threshold <n>`. These are not always peer-loss
-  declaration times: connected session sync with peer traffic within 2s
-  suppresses the timeout (5s continuous-suppression cap), so silent node death
-  with an established sync socket can take roughly 0.5–2.1s at defaults or
-  1.0–2.2s with the lab interval; a process exit that closes sync or an already
-  idle sync path falls through at the heartbeat threshold, subject to startup
-  and restart grace (`pkg/cluster/heartbeat.go:61-98,1916-1960`;
-  `pkg/daemon/daemon_ha_sync.go:170-206`;
-  `pkg/cluster/heartbeat_manager.go:790-832`;
-  `docs/ha-cluster-userspace.conf:71-72`).
+  `set chassis cluster heartbeat-threshold <n>`. The receiver checks staleness
+  four times per heartbeat interval (#18639), so a peer is declared within a
+  quarter interval of its last admitted heartbeat turning interval × threshold
+  old. While session sync looks connected, a peer that has acked a sync-level
+  heartbeat on this incarnation (#18570) must answer a liveness probe sent at
+  its first missed heartbeat (once its last heartbeat is 1.5 intervals old);
+  any sync frame newer than the probe counts. A hard-crashed peer cannot
+  answer, so it is declared at the threshold: about 0.5–0.525 s after its last
+  heartbeat at defaults and 1.0–1.05 s in the lab. If no probe could be
+  pre-armed because the late heartbeats fell inside a boot or restart grace,
+  the probe goes out at the first check after the grace (the threshold, if the
+  grace had already ended) and gets (threshold − 1.5) more intervals: at most
+  about 0.875 s at defaults and 1.75 s in the lab when the grace ended by the
+  threshold. A peer without ack support keeps the #17056 recency rule:
+  max(threshold, remaining 2 s sync window) plus a quarter interval, with a 5 s
+  cap on continuous suppression. A process exit that sends FIN, or sync idle
+  for more than 2 s, falls back to the plain threshold, subject to startup and
+  restart grace (`timeoutCheckInterval` and `heartbeatReceiver.checkTimeout`
+  in `pkg/cluster/heartbeat.go`; `syncSuppressesPeerTimeoutLocked`,
+  `prearmPeerLivenessProbe` and `peerAnsweredLivenessProbeLocked` in
+  `pkg/cluster/heartbeat_suppress.go`; `handlePeerTimeout` in
+  `pkg/cluster/heartbeat_manager.go`; `docs/ha-cluster-userspace.conf:71-72`).
 - Async GARP: first pair <1 ms; remaining sent at 50 ms intervals in a
   background goroutine. Critical path stays addVIPs → sendAdvert →
   emitEvent (sync), then `go sendGARP(false)` (async).

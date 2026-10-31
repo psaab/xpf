@@ -83,13 +83,23 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 - **Timing**: compiler-default private-RG election uses heartbeat staleness
   (`set chassis cluster heartbeat-interval <ms>` ×
   `set chassis cluster heartbeat-threshold <n>`): 100ms × 5 = 500ms at
-  runtime defaults, 200ms × 5 = 1s in the deployed lab. If sync remains
-  connected with peer traffic ≤2s old, the guard suppresses heartbeat timeout
-  (5s continuous-suppression cap). Silent node death takes
-  max(threshold, remaining sync-recency window) plus up to one tick:
-  0.5–2.1s at defaults and 1.0–2.2s in the lab, phase-dependent. Process exit
-  that closes sync or idle sync falls through at the raw threshold when the
-  receiving standby is caught up, subject to startup/restart grace; a standby still draining a backlog when the peer's FIN/RST arrives keeps sync installed while it drains, and its frames refresh peer recency for up to one 1s watchdog tick, so there detection is up to max(threshold, ~3s) plus one heartbeat tick — about 3.1s at defaults, 3.2s in the lab, under the 5s cap (#18521). Legacy VRRP-backed RETH uses a 30ms default advert
+  runtime defaults, 200ms × 5 = 1s in the deployed lab. The receiver checks staleness four times per heartbeat interval
+  (#18639), so a peer is declared within a quarter interval of its last
+  admitted heartbeat turning interval × threshold old. While session sync
+  looks connected, a peer that has acked a sync-level heartbeat on this
+  incarnation (#18570) must answer a liveness probe sent at its first missed
+  heartbeat (once its last heartbeat is 1.5 intervals old); any sync frame
+  newer than the probe counts. A hard-crashed peer cannot answer, so it is
+  declared at the threshold: about 0.5–0.525 s after its last heartbeat at
+  defaults and 1.0–1.05 s in the lab. If no probe could be pre-armed because
+  the late heartbeats fell inside a boot or restart grace, the probe goes out
+  at the first check after the grace (the threshold, if the grace had already
+  ended) and gets (threshold − 1.5) more intervals: at most about 0.875 s at
+  defaults and 1.75 s in the lab when the grace ended by the threshold. A peer
+  without ack support keeps the #17056 recency rule: max(threshold, remaining
+  2 s sync window) plus a quarter interval, with a 5 s cap on continuous
+  suppression. A process crash that sends FIN, or sync idle for more than
+  2 s, falls back to the plain threshold when the receiving standby is caught up, subject to startup/restart grace; a standby still draining a backlog when the peer's FIN/RST arrives keeps sync installed while it drains, and its frames refresh peer recency for up to one 1s watchdog tick, so there detection is up to max(threshold, ~3s) plus a quarter interval — about 3.0 s at defaults and 3.05 s in the lab, under the 5s cap (#18521; the probe does not shorten it, because backlog frames read after the probe answer it). Legacy VRRP-backed RETH uses a 30ms default advert
   and >90ms/<120ms steady-state master-down timer; only a non-preempting
   BACKUP arms a 3s deafness shield. Planned legacy VRRP shutdown emits three
   priority-0 adverts and arms a 1ms backup timer (test constraint <50ms, not
