@@ -940,7 +940,12 @@ func (d *Daemon) resendPushedConfig(ss *cluster.SessionSync, debtGen uint64) boo
 // applied, so the caller (configApplyLoop) must NOT advance the config
 // high-water mark — the transient dual-active window must heal via the peer's
 // re-push once this node settles into secondary (M-2/#4151).
-var errConfigSyncRejectedPrimary = errors.New("config sync rejected: this node is RG0 primary")
+//
+// #18610: it IS cluster.ErrConfigSyncRejectedAuthority, so configApplyLoop can
+// tell this refusal from a failed apply: it does not arm CF, and the refused
+// generation does not make this node read config-stale while it stays the
+// authority.
+var errConfigSyncRejectedPrimary = cluster.ErrConfigSyncRejectedAuthority
 
 // handleConfigSync keeps the legacy callback shape for tests and old peers.
 func (d *Daemon) handleConfigSync(configText string) error {

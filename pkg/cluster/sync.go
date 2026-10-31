@@ -822,6 +822,11 @@ type TransferReadinessSnapshot struct {
 	BulkReceiveSessions   int
 	PeerConfigGen         uint64
 	AppliedConfigGen      uint64
+	// RejectedAsAuthorityConfigGen and LocalConfigAuthority (#18610): the
+	// highest received generation refused because this node was the RG0
+	// config authority, and whether it still is at snapshot time.
+	RejectedAsAuthorityConfigGen uint64
+	LocalConfigAuthority         bool
 }
 
 // ConfigStale reports whether this node has received a newer config generation
@@ -830,8 +835,20 @@ type TransferReadinessSnapshot struct {
 // received nor applied any generation) reports both generations as 0, which is
 // NOT stale, so the gate stays scoped to the genuine behind-the-primary case
 // and never blanket-blocks (#5563).
+//
+// #18610: received generations this node refused because it was the RG0 config
+// authority (RejectedAsAuthorityConfigGen) do not count while it still is
+// (LocalConfigAuthority). Its own config is the one the peer converges to, so
+// it is not behind anyone. Once it demotes they count again, so it cannot be
+// promoted back before the new primary's push applies here.
 func (s TransferReadinessSnapshot) ConfigStale() bool {
-	return s.PeerConfigGen > s.AppliedConfigGen
+	if s.PeerConfigGen <= s.AppliedConfigGen {
+		return false
+	}
+	if s.LocalConfigAuthority && s.PeerConfigGen <= s.RejectedAsAuthorityConfigGen {
+		return false
+	}
+	return true
 }
 
 // ReadyForManualFailover reports whether the sync path is settled enough to
@@ -1868,6 +1885,13 @@ type SessionSync struct {
 	// applied<=received invariant holds after a reboot restarts the sender's
 	// monotonic counter lower.
 	lastRecvConfigGen atomic.Uint64
+	// rejectedAsAuthorityConfigGen is the highest received generation this
+	// node refused because it was the RG0 config authority at the time
+	// (ErrConfigSyncRejectedAuthority, #18610). TransferReadinessSnapshot
+	// does not count received generations up to it as staleness while this
+	// node is still the authority. Guarded like the other marks by
+	// configGenMu; cleared with them by resetRecvGen.
+	rejectedAsAuthorityConfigGen atomic.Uint64
 
 	// configEpochRoleMu tracks the config authority role when reverse stamps
 	// are produced. After becoming a non-authority, a retained applied mark is
@@ -2300,6 +2324,7 @@ func (s *SessionSync) initGenState() {
 	s.configGenCounter.Store(seed)
 	s.lastAppliedConfigGen.Store(0)
 	s.lastRecvConfigGen.Store(0)
+	s.rejectedAsAuthorityConfigGen.Store(0)
 	s.configApplyCh = make(chan configApplyItem, 64)
 	// #5706: the full-set (IPsec/DHCP) ordering incarnation is this process's
 	// construction seed — constant for the process lifetime and, within a boot,

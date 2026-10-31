@@ -664,6 +664,33 @@ func (s *SessionSync) recordAppliedConfigGen(gen uint64) {
 	}
 }
 
+// ErrConfigSyncRejectedAuthority is the error a config-received callback
+// returns when it refuses the peer's config because THIS node is the RG0
+// config authority (the daemon's handleConfigSync). It is not an apply
+// failure: the config this node runs is the one the peer converges to.
+// configApplyLoop still keeps the applied high-water pinned (M-2/#4151) and
+// still nacks (#7328), so the generation stays eligible if this node later
+// demotes, but it does not arm the #6387 CF health signal and it records the
+// generation in rejectedAsAuthorityConfigGen, which keeps
+// TransferReadinessSnapshot.ConfigStale false while this node remains the
+// authority (#18610).
+var ErrConfigSyncRejectedAuthority = errors.New("config sync rejected: this node is RG0 primary")
+
+// recordConfigRejectedAsAuthority raises the rejected-as-authority high-water
+// (#18610) under configGenMu, the lock every config-generation mark takes
+// (#5084), so resetRecvGen's clear cannot be lost to it. Called only from
+// configApplyLoop.
+func (s *SessionSync) recordConfigRejectedAsAuthority(gen uint64) {
+	if gen == 0 {
+		return
+	}
+	s.configGenMu.Lock()
+	defer s.configGenMu.Unlock()
+	if gen > s.rejectedAsAuthorityConfigGen.Load() {
+		s.rejectedAsAuthorityConfigGen.Store(gen)
+	}
+}
+
 // recordRecvConfigGen advances the RECEIVED config high-water (#5563) under
 // configGenMu, for the same reason recordAppliedConfigGen does (#5084): the
 // raise is a load/compare/store and resetRecvGen clears the mark from another
@@ -871,7 +898,20 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 				// persistent apply failure thus surfaces as a CF monitor-failure /
 				// degraded health instead of only the terse `Transfer ready: no`
 				// string.
-				s.noteConfigApplyFailure(applyErr)
+				//
+				// #18610: a refusal because THIS node is the RG0 config
+				// authority is not a stranded standby. Arming CF for it put a
+				// monitor failure on the primary, and its received generation
+				// kept ConfigStale true for as long as this node stayed primary
+				// (the peer, now secondary, never pushes again), which blocked
+				// a rolling upgrade started on the primary. Record the
+				// generation instead; ConfigStale ignores it while this node is
+				// still the authority, and counts it again once it demotes.
+				if errors.Is(applyErr, ErrConfigSyncRejectedAuthority) {
+					s.recordConfigRejectedAsAuthority(item.gen)
+				} else {
+					s.noteConfigApplyFailure(applyErr)
+				}
 				// #7328: tell the SENDER this generation did not take effect.
 				// #4151 leaves this node eligible for a re-push of the SAME
 				// generation, but the sender's #5863 (epoch x generation) marker

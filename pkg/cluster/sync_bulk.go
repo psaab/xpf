@@ -868,6 +868,10 @@ func (s *SessionSync) TransferReadiness() TransferReadinessSnapshot {
 	// (PeerConfigGen > AppliedConfigGen) is refused promotion.
 	snap.PeerConfigGen = s.lastRecvConfigGen.Load()
 	snap.AppliedConfigGen = s.lastAppliedConfigGen.Load()
+	// #18610: refusals made as the RG0 config authority, and whether this node
+	// still is that authority.
+	snap.RejectedAsAuthorityConfigGen = s.rejectedAsAuthorityConfigGen.Load()
+	snap.LocalConfigAuthority = s.IsPrimaryFn != nil && s.IsPrimaryFn()
 	return snap
 }
 
