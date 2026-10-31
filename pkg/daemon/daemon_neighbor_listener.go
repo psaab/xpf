@@ -30,6 +30,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -487,9 +488,24 @@ func (d *Daemon) collectMonitoredNeighbors(cfg *config.Config) []probeTarget {
 			ForEachSnapshotNeighbor(fn func(ifindex int, ip net.IP))
 		}
 		if e, ok := rt.(indexEnumerator); ok && isProvider {
+			// #18617: never force-probe a cluster-owned address. The kernel
+			// can hold a neighbour entry for the source-NAT pool / proxy-ARP
+			// address (an earlier probe resolved it to whichever node
+			// answers ARP for it); an ICMP probe to it re-enters that node's
+			// dataplane as transit sourced from the cluster's own address and
+			// is default-denied there. The owned set is built once per pass.
+			plan := d.neighborWarmPlan(cfg)
+			ownedSkipped := 0
 			e.ForEachSnapshotNeighbor(func(ifindex int, ip net.IP) {
+				if a, ok := netip.AddrFromSlice(ip); ok && plan.owns(a.Unmap()) {
+					ownedSkipped++
+					return
+				}
 				addTarget(ip, ifindex, criticalityNormal)
 			})
+			if ownedSkipped > 0 {
+				slog.Debug("force-probe: skipped cluster-owned neighbour entries", "count", ownedSkipped)
+			}
 		}
 	}
 
