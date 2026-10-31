@@ -1008,7 +1008,7 @@ ha_wan_claim_verdict() {
 		return 2
 	fi
 	local conf_own="${1,,}" addr="$2" gw="$3" output="$4"
-	local line kind ip mac flag rest own="" live="" foreign="" xpf_other="" xpf_ids="" gw_seen=0
+	local line kind ip mac flag rest own="" live="" iface_mac="" foreign="" xpf_other="" xpf_ids="" gw_seen=0
 	local -A own_macs=()
 	if [[ -n "$conf_own" && ! "$conf_own" =~ ^02:bf:72:[0-9a-f]{2}:$ ]]; then
 		printf 'wan claim: conf own MAC prefix %q is not 02:bf:72:<cluster-id>:\n' "$1" >&2
@@ -1023,6 +1023,7 @@ ha_wan_claim_verdict() {
 		case "$kind" in
 		iface)
 			mac="${mac,,}"
+			[[ "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] && iface_mac="$mac"
 			[[ "$mac" =~ ^(02:bf:72:[0-9a-f]{2}:) ]] && live="${BASH_REMATCH[1]}"
 			;;
 		own)
@@ -1046,6 +1047,29 @@ ha_wan_claim_verdict() {
 		[[ "$kind" == reply ]] || continue
 		mac="${mac,,}"
 		[[ "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || continue
+		# #18580: no host answers with OUR MAC. A reply naming the probing
+		# interface's own MAC means the probe read the target-MAC field
+		# instead of the sender's, and every reading is worthless (it would
+		# turn every claimant into "own").
+		# This is sound only because ha_wan_claim_probe binds its socket to
+		# ETH_P_ARP. Outgoing frames reach only ETH_P_ALL packet sockets, so
+		# this socket never sees our own kernel's ARP replies for the address,
+		# which do carry our MAC as sender. Measured in a netns: an ETH_P_ARP
+		# socket saw 0 of 3 own-kernel replies, an ETH_P_ALL one saw all 3
+		# (docs/log/18580.md). Rebinding to ETH_P_ALL would make this guard
+		# VOID every run in which anyone ARPs for us.
+		# The guard needs the probe's iface line, which the real probe prints
+		# before it sends anything: a reply without one is not its output.
+		if [[ -z "$iface_mac" ]]; then
+			printf 'wan claim: a reply for %s arrived without the probe interface line (not the probe output)\n' \
+				"$ip" >&2
+			return 2
+		fi
+		if [[ "$mac" == "$iface_mac" ]]; then
+			printf 'wan claim: a reply for %s names the probing interface MAC %s: the probe read the wrong field\n' \
+				"$ip" "$mac" >&2
+			return 2
+		fi
 		if [[ "$ip" == "$gw" ]]; then
 			[[ "$flag" == probe ]] && gw_seen=1
 			continue

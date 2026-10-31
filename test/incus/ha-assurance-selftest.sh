@@ -1044,6 +1044,132 @@ claim_check_case 3 'cluster-id 24' "${TMP_DIR}/claim-23.conf" "$CLAIM_OTHER_CLUS
 eval "$ha_wan_claim_probe_real"
 eval "$ha_wan_node_macs_real"
 
+# #18580: a reply naming the probing interface's own MAC is the wrong-field
+# shape (target MAC printed instead of sender). It must VOID, never PASS.
+CLAIM_WRONGFIELD=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 02:bf:72:17:01:00 probe\nreply 172.16.50.1 02:bf:72:17:01:00 probe'
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_WRONGFIELD"
+assert_contains "$(<"${ERR}")" 'probe read the wrong field' 'a wrong-field WAN probe is VOID, never a PASS'
+# Our own MAC is VOID whatever the reply's target fields say: an ETH_P_ARP
+# socket never sees our own transmitted replies, so the flag cannot excuse it.
+CLAIM_SELF_OTHER=$'iface ge-0-0-2.50 02:bf:72:17:01:00\n'"$GWP"$'\nreply 172.16.50.10 02:bf:72:17:01:00 other'
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_SELF_OTHER"
+assert_contains "$(<"${ERR}")" 'probe read the wrong field' 'our own MAC in a reply is VOID even when it is not flagged as our probe'
+# Replies without the probe's iface line: the guard above cannot run, so VOID.
+CLAIM_NOIFACE="$GWP"$'\nreply 172.16.50.10 18:e8:29:2c:13:7a probe'
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_NOIFACE"
+assert_contains "$(<"${ERR}")" 'without the probe interface line' 'replies without the probe iface line are VOID, never judged'
+
+# #18580: the REAL ha_wan_claim_probe, run hermetically in three
+# unprivileged netns on one bridge: "fw" holds the WAN address with a RETH
+# MAC, "x" is a foreign host also holding it, "gw" is the gateway. The probe
+# must report three rounds from each, flag them as answers to OUR probe,
+# never report fw's own MAC, and refuse when no node holds the address. A
+# second run has the gateway answer only with UNSOLICITED broadcast replies,
+# which must be flagged "other" and cannot satisfy the control. SKIP where
+# user namespaces are unavailable.
+WAN_NETNS_OUT="${TMP_DIR}/wan-netns.out"
+if unshare -rnm true 2>/dev/null; then
+	declare -f ha_wan_claim_probe >"${TMP_DIR}/wan-probe-fn.sh"
+	unshare -rnm bash -c '
+		set -u
+		export PATH=/usr/sbin:/sbin:$PATH
+		mount -t tmpfs none /run && mkdir -p /run/netns
+		ip link add name br0 type bridge && ip link set br0 up
+		mk() {
+			ip netns add "$1"
+			ip link add name "$1-br" type veth peer name "$1-in"
+			ip link set "$1-in" netns "$1"
+			ip link set "$1-br" master br0 up
+			ip netns exec "$1" ip link set lo up
+			ip netns exec "$1" ip link set "$1-in" address "$2" up
+			ip netns exec "$1" ip addr add "$3" dev "$1-in"
+		}
+		mk peer 02:bf:72:17:01:01 169.254.1.2/32
+		mk fw 02:bf:72:17:01:00 172.16.50.10/24
+		mk x 18:e8:29:2c:13:7a 172.16.50.10/24
+		mk gw 00:10:db:ff:10:01 172.16.50.1/24
+		sleep 1
+		# tcp:fw0 is the peer (does not hold the address), tcp:fw1 the owner:
+		# the probe must try past the first node.
+		incus() {
+			local node="$2"
+			shift 3
+			case "$node" in
+			tcp:fw0) ip netns exec peer "$@" ;;
+			*) ip netns exec fw "$@" ;;
+			esac
+		}
+		source "$1"
+		ha_wan_claim_probe 172.16.50.10 172.16.50.1 tcp:fw0 tcp:fw1
+		echo "PROBE_RC $?"
+		ha_wan_claim_probe 172.16.50.99 172.16.50.1 tcp:fw0 tcp:fw1 >/dev/null
+		echo "UNHELD_RC $?"
+		ip netns exec x ip addr del 172.16.50.10/24 dev x-in
+		ip netns exec gw ip addr del 172.16.50.1/24 dev gw-in
+		ip netns exec gw python3 -c "
+import socket, struct, time
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW); s.bind((\"gw-in\", 0))
+m = bytes.fromhex(\"0010dbff1001\")
+f = b\"\xff\" * 6 + m + b\"\x08\x06\" + struct.pack(\"!HHBBH6s4s6s4s\", 1, 0x800, 6, 4, 2, m, socket.inet_aton(\"172.16.50.1\"), b\"\xff\" * 6, socket.inet_aton(\"172.16.50.1\")) + bytes(18)
+end = time.time() + 4.5
+while time.time() < end:
+    s.send(f); time.sleep(0.2)
+" &
+		sleep 0.3
+		ha_wan_claim_probe 172.16.50.10 172.16.50.1 tcp:fw0 tcp:fw1 | sed "s/^/UNSOL /"
+		wait
+		# ASKED: the gateway asks who-has the WAN address while the probe
+		# runs, so fw'"'"'s own kernel sends ARP replies carrying fw'"'"'s MAC.
+		# The probe must never hear them (its socket is ETH_P_ARP-bound);
+		# the gateway counts them as the positive control.
+		ip netns exec gw python3 -c "
+import select, socket, struct, time
+tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW); tx.bind((\"gw-in\", 0))
+rx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806)); rx.bind((\"gw-in\", 0x0806))
+m = bytes.fromhex(\"0010dbff1001\")
+f = b\"\xff\" * 6 + m + b\"\x08\x06\" + struct.pack(\"!HHBBH6s4s6s4s\", 1, 0x800, 6, 4, 1, m, socket.inet_aton(\"172.16.50.1\"), bytes(6), socket.inet_aton(\"172.16.50.10\")) + bytes(18)
+n = 0
+end = time.time() + 4.5
+while time.time() < end:
+    tx.send(f)
+    stop = time.time() + 0.2
+    while (left := stop - time.time()) > 0 and select.select([rx], [], [], left)[0]:
+        r = rx.recv(2048)
+        if r[20:22] == b\"\x00\x02\" and r[22:28] == bytes.fromhex(\"02bf72170100\") and r[28:32] == socket.inet_aton(\"172.16.50.10\"):
+            n += 1
+print(\"ASKED_CONTROL\", n, flush=True)
+" &
+		sleep 0.3
+		ha_wan_claim_probe 172.16.50.10 172.16.50.1 tcp:fw0 tcp:fw1 | sed "s/^/ASKED /"
+		wait
+	' _ "${TMP_DIR}/wan-probe-fn.sh" >"$WAN_NETNS_OUT" 2>&1 || true
+	assert_contains "$(<"$WAN_NETNS_OUT")" 'PROBE_RC 0' 'wan netns: the real probe runs'
+	assert_contains "$(<"$WAN_NETNS_OUT")" 'iface fw-in 02:bf:72:17:01:00' 'wan netns: the probe reports its own interface'
+	assert_eq "$(grep -c '^reply 172.16.50.10 18:e8:29:2c:13:7a probe$' "$WAN_NETNS_OUT")" 3 \
+		'wan netns: the foreign holder answers each of three rounds, sender MAC parsed, flagged as our probe'
+	assert_eq "$(grep -c '^reply 172.16.50.1 00:10:db:ff:10:01 probe$' "$WAN_NETNS_OUT")" 3 \
+		'wan netns: the gateway control answers each of three rounds'
+	assert_eq "$(grep -c '^reply .* 02:bf:72:17:01:00 ' "$WAN_NETNS_OUT")" 0 'wan netns: no reply ever names the prober itself'
+	assert_contains "$(<"$WAN_NETNS_OUT")" 'UNHELD_RC 2' 'wan netns: a probe on nodes that do not hold the address refuses (status 2)'
+	assert_eq "$(grep -c '^UNSOL reply 172.16.50.1 00:10:db:ff:10:01 probe$' "$WAN_NETNS_OUT")" 0 \
+		'wan netns: an unsolicited broadcast gateway reply is never flagged as an answer to our probe'
+	_unsol_other=$(grep -c '^UNSOL reply 172.16.50.1 00:10:db:ff:10:01 other$' "$WAN_NETNS_OUT" || true)
+	(( _unsol_other >= 1 )) || fail_test 'wan netns: the unsolicited gateway replies were not heard at all (the flag cell measured nothing)'
+	# The ASKED phase: fw's kernel answered (control), and the probe never
+	# heard those replies, so the self-MAC guard's ETH_P_ARP premise holds.
+	_asked=$(sed -n 's/^ASKED_CONTROL //p' "$WAN_NETNS_OUT")
+	[[ "${_asked:-0}" =~ ^[0-9]+$ ]] && (( _asked >= 1 )) \
+		|| fail_test "wan netns: fw's kernel never answered the gateway's who-has (the ASKED cell measured nothing): ${_asked:-<none>}"
+	assert_eq "$(grep -c '^ASKED reply 172.16.50.10 02:bf:72:17:01:00 ' "$WAN_NETNS_OUT")" 0 \
+		"wan netns: the probe never hears fw's own kernel replies for the WAN address (ETH_P_ARP-bound)"
+	assert_helper_status 1 wcv "$OWN" 172.16.50.10 172.16.50.1 "$(grep -v '^UNSOL\|^ASKED\|_RC' "$WAN_NETNS_OUT")"
+	assert_contains "$(<"${ERR}")" 'also answered for by 18:e8:29:2c:13:7a' 'wan netns: the real probe output convicts the foreign holder'
+	assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$(sed -n 's/^UNSOL //p' "$WAN_NETNS_OUT")"
+	printf 'netns WAN claim probe cell ran\n'
+else
+	printf 'SKIP netns WAN claim probe cell: unprivileged user/net namespaces unavailable\n'
+fi
+
 # The external IPv4 verdict: a FAIL becomes VOID only beside a NON-xpf claim.
 PING_LOST='4 packets transmitted, 0 received, 100% packet loss'
 PING_OK='64 bytes from 1.1.1.1: icmp_seq=1 ttl=56'
@@ -1083,9 +1209,11 @@ for text, name in ((tf, "ha_emit_verdict"), (tf, "ha_external_sweep"), (tc, "wan
 match = re.search(r"^test_cluster\(\) \{\n.*?^\}\n", tc, re.M | re.S)
 if not match:
     raise SystemExit("cannot extract test_cluster for #18558 wiring coverage")
-calls = sum(1 for line in match.group(0).splitlines() if line.split("#", 1)[0].strip() == "wan_claim_cell")
-blocks.append(f"WAN_CLAIM_CELL_CALLS={calls}\n")
 pathlib.Path(sys.argv[3]).write_text("".join(blocks), encoding="utf-8")
+# #18580: test_cluster goes to its own file and is RUN for the reachability
+# count below; counting call text let a call in a dead branch or after an
+# early return survive.
+pathlib.Path(sys.argv[3] + ".test_cluster").write_text(match.group(0), encoding="utf-8")
 PY
 claim_wiring_run() { # <v4-rc> <v4-out> <v6-rc> <v6-out> <claim-status> -> "V4=.. V6=.. CALLED=.."
 	(
@@ -1143,8 +1271,38 @@ assert_eq "$(claim_cell_run 0)" PASS 'test-connectivity claim cell: unique addre
 assert_eq "$(claim_cell_run 1)" FAIL 'test-connectivity claim cell: a non-xpf claimant FAILs'
 assert_eq "$(claim_cell_run 3)" FAIL 'test-connectivity claim cell: another xpf cluster FAILs'
 assert_eq "$(claim_cell_run 2)" VOID 'test-connectivity claim cell: an unmeasured probe is VOID'
-assert_eq "$(bash -c "source '$CLAIM_WIRING'; echo \$WAN_CLAIM_CELL_CALLS")" 1 \
-	'test-connectivity test_cluster calls wan_claim_cell exactly once (code, not a comment)'
+# #18580: reachability, not text. Run the extracted test_cluster with every
+# helper it calls failing as an unknown command does (command_not_found_handle
+# returns 127, as bash itself would), incus refused and the firewall nodes
+# "running", and count real invocations of the cell. Run it with the LAN host
+# running and with it stopped: the cell must be reached once in each, so a
+# call moved into either branch of the LAN-host check, into a dead branch or
+# after an early return is caught.
+reach_count() { # <wiring-file> <cell> <lan-running|lan-stopped>
+	(
+		set +eu
+		CALLS="${TMP_DIR}/reach-calls-${2}-${3}"
+		: >"$CALLS"
+		# shellcheck disable=SC1090
+		source "$1"
+		command_not_found_handle() { return 127; }
+		incus() { return 1; }
+		LAN_STATE="$3"
+		instance_running() {
+			[[ "$1" == "$FW0" || "$1" == "$FW1" ]] && return 0
+			[[ "$1" == "$CLUSTER_LAN_HOST" && "$LAN_STATE" == lan-running ]]
+		}
+		wan_claim_cell() { printf 'wan_claim_cell\n' >>"$CALLS"; }
+		iperf_target_claim_cell() { printf 'iperf_target_claim_cell\n' >>"$CALLS"; }
+		FW0=loss:fw0 FW1=loss:fw1 CLUSTER_LAN_HOST=loss:lan CLUSTER_CONF=/nonexistent PROJECT_ROOT="$ROOT"
+		test_cluster >/dev/null 2>&1
+		grep -cxF "$2" "$CALLS"
+	)
+}
+for lan_state in lan-running lan-stopped; do
+	assert_eq "$(reach_count "${CLAIM_WIRING}.test_cluster" wan_claim_cell "$lan_state")" 1 \
+		"test-connectivity test_cluster reaches wan_claim_cell exactly once (${lan_state})"
+done
 RECENT_JSON="${TMP_DIR}/recent-metrics.jsonl"
 cat >"$RECENT_JSON" <<'JSON'
 {"event":"interval","data":{"sum":{"start":0,"end":1,"bits_per_second":0},"streams":[{"socket":1,"bits_per_second":0},{"socket":2,"bits_per_second":100}]}}
@@ -1937,27 +2095,12 @@ assert_eq "$(tgt_cell_run 2)" VOID 'iperf target cell: an uncertifiable or unmea
 assert_eq "$(tgt_cell_run 4)" SKIP 'iperf target cell: the excused known duplicate (status 4) is a SKIP, never VOID or PASS'
 assert_eq "$(<"${TMP_DIR}/tgt-cell-args")" 'loss:xpf-mouse-target 172.16.80.200 172.16.80.8 10:66:6a:8b:91:a4 f6:f0:06:10:77:d5 loss:fw0 loss:fw1' \
 	'iperf target cell probes IPERF_TARGET4 from the off-firewall target container, WAN_GW80_4 as control, both nodes'
-# Reachability, not text: run the extracted test_cluster with every helper it
-# calls answered by a no-op (command_not_found_handle), incus refused, the
-# firewall nodes "running" and the LAN host not, and count real invocations
-# of the cell. A call left in a dead branch or after an early return is 0.
-tgt_reach_count() {
-	(
-		set +eu
-		CALLS="${TMP_DIR}/tgt-reach-calls"
-		: >"$CALLS"
-		# shellcheck disable=SC1090
-		source "$TGT_WIRING"
-		command_not_found_handle() { return 0; }
-		incus() { return 1; }
-		instance_running() { [[ "$1" == "$FW0" || "$1" == "$FW1" ]]; }
-		iperf_target_claim_cell() { printf 'called\n' >>"$CALLS"; }
-		FW0=loss:fw0 FW1=loss:fw1 CLUSTER_LAN_HOST=loss:lan CLUSTER_CONF=/nonexistent PROJECT_ROOT="$ROOT"
-		test_cluster >/dev/null 2>&1
-		grep -c called "$CALLS"
-	)
-}
-assert_eq "$(tgt_reach_count)" 1 'test-connectivity test_cluster reaches iperf_target_claim_cell exactly once'
+# Reachability, not text (#18580's reach_count above): the cell must be
+# reached once with the LAN host running and once with it stopped.
+for lan_state in lan-running lan-stopped; do
+	assert_eq "$(reach_count "$TGT_WIRING" iperf_target_claim_cell "$lan_state")" 1 \
+		"test-connectivity test_cluster reaches iperf_target_claim_cell exactly once (${lan_state})"
+done
 
 printf 'PASS ha-assurance-selftest: M2.4, RG1 Groups 1-8, N6/N12 pins, sticky FAIL, blind markers, gate dominance, set-e VOID guard\n'
 
