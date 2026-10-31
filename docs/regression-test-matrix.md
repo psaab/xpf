@@ -196,11 +196,13 @@ failure.
       `[Match]` `Name=eno1v* eno2v*` and `[Link]` `Unmanaged=yes`, run
       `networkctl reload`, then `ip link set <vf> down` for each free VF
       that is UP.
-    - **Applied:** tcp's host 2026-10-29, udp's 2026-10-30.
+    - **Applied:** tcp's host 2026-10-29, udp's 2026-10-31 (UTC).
   - **A stale host port VLAN on a reassigned WAN VF.** incus records a VF's
     state before attaching it (`volatile.wan-vf.last_state.vf.vlan`) and
-    restores it on stop. A `wan-vf` device sets no `vlan`, so the VF keeps
-    whatever VLAN it last carried. On 2026-10-30 udp fw0's WAN VF
+    restores it on stop. On incus 7.0.1 (the tcp and udp hosts), a
+    `wan-vf` device that sets no `vlan` leaves the VF with whatever VLAN it
+    last carried. Incus 7.6.0 and later clear it on start (upstream
+    473c98eb2cc9). On 2026-10-31 00:39 UTC udp fw0's WAN VF
     (`mlx0 vf 0`) came back on port VLAN 80. Its tagged `reth0.50`/`.80`
     frames died, and neighbour entries went FAILED in both families after
     every restart.
@@ -215,7 +217,9 @@ failure.
     - **Not durable:** VF allocation is not pinned, so a different VF can
       bring the fault back. This out-of-band repair is the sanctioned
       exception to the plan's "never set VF VLAN by hand" rule until #18582
-      makes WAN VFs clear their VLAN on start.
+      makes WAN VFs clear their VLAN on start. Two durable options are
+      `vlan: "0"` on the device, which 7.0.1 accepts, or upgrading incus to
+      7.6.0 or later.
 
 ## Reading results
 

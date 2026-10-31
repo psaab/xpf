@@ -858,7 +858,8 @@ heartbeat traffic.
   `cluster-setup.sh`, WAN/LAN device creation). **Exception, WAN trunk
   VFs:** a `wan-vf` device sets no `vlan`, so incus re-applies nothing and
   restores the VF's previous VLAN on stop. A reassigned VF can keep a
-  stale port VLAN (udp fw0, 2026-10-30, VLAN 80). Until #18582 makes this
+  stale port VLAN on incus 7.0.1 (udp fw0, 2026-10-31 UTC, VLAN 80;
+  incus 7.6.0 and later clear it on start). Until #18582 makes this
   durable, the out-of-band clear in `docs/regression-test-matrix.md`'s
   SR-IOV row is the sanctioned emergency repair.
 - **Fabric VLAN is PF-private — terminology and the real condition.**
