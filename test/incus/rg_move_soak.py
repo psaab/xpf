@@ -707,6 +707,13 @@ class Soak:
             skew = offs["node1"][0] - offs["node0"][0]
             info["node1_minus_node0_s"] = round(skew, 2)
         info["chrony"] = {n: self.c.chrony(n) for n in (0, 1)}
+        # #18585 builds print the heartbeat-measured peer offset; record it
+        # beside the harness's own measurement (absent on older builds).
+        info["peer_clock_line"] = {}
+        for n in (0, 1):
+            m = re.search(r"^Peer clock offset: .*$", self.c.status(n) or "", re.M)
+            if m:
+                info["peer_clock_line"][n] = m.group(0)
         self._owners = {rg: o for rg, o in owners.items()}
         return None, info
 

@@ -417,6 +417,7 @@ class Orchestration(unittest.TestCase):
         voids = [m for m in res["moves"] if m["verdict"] == "VOID"]
         self.assertTrue(all(m["rgs"][0]["cli_class"] == "already" for m in voids))
         self.assertAlmostEqual(res["preflight"]["node1_minus_node0_s"], -71.0, delta=0.5)
+        self.assertEqual(res["preflight"]["peer_clock_line"], {})  # fake status has none
         self.assertTrue(any("WARNING" in line for line in logs))
 
     def test_moving_from_the_target_node_avoids_the_fabric(self):
@@ -439,6 +440,14 @@ class Orchestration(unittest.TestCase):
         rc, res, _ = run_fake(c, clock, moves=1, sleep_s=2.0)
         self.assertEqual(rc, 1)
         self.assertIn("did not land", res["moves"][0]["reasons"][0])
+
+    def test_preflight_records_peer_clock_line(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        plain = c.status
+        c.status = lambda node: "Peer clock offset: -72.0s (peer behind this node; measured 0.2s ago)\n" + plain(node)
+        rc, res, _ = run_fake(c, clock, moves=1)
+        self.assertEqual(res["preflight"]["peer_clock_line"]["0"][:24], "Peer clock offset: -72.0")
 
     def test_all_rgs(self):
         clock = FakeClock()
