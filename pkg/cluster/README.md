@@ -656,8 +656,14 @@ floor into its retry. Cells:
 
 ### A failed heartbeat restart is owed, not latched (#9751)
 
-`RestartHeartbeat` retries the bind five times, a second apart. If all five
-fail, it returns false with the sender and receiver both torn down. Before
+`RestartHeartbeat` retries the bind on `heartbeatRestartRetrySchedule`: 50ms,
+200ms and 750ms pauses, then 1s ones, about 5s in all (#18597; it was five
+attempts a second apart). The restart follows a control-link VRF move, and the
+enslave cycle makes networkd drop and re-add the link's static address
+5-30ms later, so a first bind that loses that race used to cost a 1s+
+heartbeat gap at the peer (1.6s measured on tcp) and now costs about 50ms. If
+every attempt fails, it returns false with the sender and receiver both torn
+down. Before
 #9751, every later `RestartHeartbeat` saw "not running" and returned at once,
 and the apply discarded the result. The heartbeat stayed dead across later
 applies until comms restarted. This node sent no heartbeats, so the peer
