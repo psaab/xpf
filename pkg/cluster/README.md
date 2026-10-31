@@ -1348,6 +1348,26 @@ construction**.
   indices differ by at least two and fabric RPC authentication always fails.
   Keep the accept band unchanged: it is also the replay horizon.
 
+### Operator RG moves and the clock (#18583)
+
+Half of the operator's usual move loop crosses the fabric. On node A,
+`request chassis cluster failover redundancy-group <g> node A` is a local pull
+(`RequestPeerFailover` over the session-sync connection) and does not depend
+on the wall clock. `... node B`, the peer, is proxied over fabric gRPC to B
+(`proxyClusterFailover`), and B then runs the local pull. That leg is
+token-authenticated and fails past the skew bound above.
+
+So with the clocks apart, a loop issued from one node fails every move to the
+peer with the #6708 "window Ns ahead/behind ours" error. Every move back then
+prints "already primary": the handler reads that from `IsLocalPrimary` and
+never contacts the peer. On loss on 2026-10-31 (fw1 72 s behind) that was 10
+FAIL and 10 VOID in 20 moves, and traffic never left node0.
+
+`make test-rg-move-soak` (matrix row H11) runs that loop and scores every move
+against both nodes' views, `rg-active`, the helper's `ha_groups` and the
+traffic. It never resyncs clocks. The definition of a correct move, the command
+paths and how to read each failure are in `docs/ha-rg-move-correctness.md`.
+
 The accept band is deliberately NOT widened to tolerate skew: the band
 **is** the replay horizon, and the allowlisted fabric RPCs include
 `ClearSessions` and cross-node redundancy-group failover. #7487 explored
