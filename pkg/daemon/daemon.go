@@ -1479,6 +1479,14 @@ type Daemon struct {
 	// publish — readers treat that as "no mgmt VRF interfaces yet".
 	mgmtVRFInterfaces atomic.Pointer[map[string]bool]
 
+	// hbControlLinkMoves is the control link's routing VRF master-move count
+	// (routing.Manager.VRFMasterMoveSeq) at the last heartbeat-restart
+	// decision (#18597). The heartbeat is restarted after a management-VRF
+	// rebind only when the count moved since then, so a commit that leaves
+	// em0 in vrf-mgmt keeps its heartbeat sockets. Read and written only by
+	// the apply path under applySem; see controlLinkMovedSinceLastCheck.
+	hbControlLinkMoves controlLinkMoveMark
+
 	// rgStates tracks the unified cluster + VRRP state for each
 	// redundancy group. Both watchClusterEvents and watchVRRPEvents
 	// funnel transitions through rgStateMachine, which determines the

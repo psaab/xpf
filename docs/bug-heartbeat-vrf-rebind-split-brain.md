@@ -129,6 +129,28 @@ all failed used to leave the heartbeat stopped for good: later restarts saw
 
 See "A failed heartbeat restart is owed, not latched" in the same README.
 
+### Addendum (#18597, 2026-10): the strip itself is gone; restart only on a real move
+
+The root cause above, `networkd.Apply()` stripping em0 from vrf-mgmt, was
+never fixed, only repaired after the fact on every apply. `VRF=vrf-mgmt`
+(commit `73400d4c9f`) could not preserve the binding: networkd resolves
+`VRF=` only against its own `.netdev` devices, logs `vrf-mgmt NetDev could
+not be found, ignoring assignment`, and then treats the link as having no
+master, so every reconfigure set `IFLA_MASTER=0`. And `Apply` reconfigured
+every managed interface whenever any file changed. So every commit, on both
+nodes, cycled em0 twice (networkd's release, then the step-2.7 rebind), removed
+its address, and restarted the heartbeat while the address was mid-move. A
+20-commit soak on master ended in both nodes declaring the other lost and a
+full RG takeover.
+
+- `.network` rows for daemon-owned VRF members render `KeepMaster=yes`
+  instead of `VRF=` (`pkg/networkd/README.md`).
+- `Apply` reconfigures only the interfaces whose files changed.
+- The heartbeat restart runs only when a bind actually moved the control link
+  (`routing.VRFMasterMoveSeq`), right after the bind pass that moved it.
+
+Evidence and soak numbers: `docs/log/18597.md`.
+
 ### Addendum (#4033, 2026-07): heartbeat goroutine-leak / double-fire on comms restart
 
 Two coupled defects survived along the comms-restart path (transport

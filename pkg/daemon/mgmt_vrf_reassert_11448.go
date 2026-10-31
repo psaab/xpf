@@ -100,6 +100,16 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 			cfg = d.store.ActiveConfig()
 		}
 		if cfg != nil && cfg.Chassis.Cluster != nil && !d.inBootstrap() {
+			// #18597: a drifted control link this tick moved back leaves the
+			// heartbeat sockets bound through it stale. Restart them now, the
+			// same gate the apply uses, instead of leaving them until the next
+			// commit. An unmoved control link (only fxp0 or fab0 drifted)
+			// restarts nothing. A failed restart is owed; the next apply's
+			// post-networkd pass retries it.
+			if err := d.restartHeartbeatIfControlLinkMoved(cfg, false); err != nil {
+				slog.Warn("cluster: heartbeat restart after management-VRF reassert failed; the next apply retries it",
+					"err", err)
+			}
 			d.reconcileClusterTransportBinding(cfg, false)
 		}
 	}

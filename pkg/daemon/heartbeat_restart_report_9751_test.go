@@ -64,8 +64,11 @@ func TestVRFRebindApplyJoinsTheHeartbeatRestartError_9751(t *testing.T) {
 			if !ok {
 				return true
 			}
+			// #18597: the apply step now goes through the move gate, which
+			// returns the epoch-fenced wrapper's error unchanged
+			// (heartbeat_rebind_gate_18597.go).
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "restartHeartbeatAfterRebindForCurrentCommsEpoch" {
+			if !ok || sel.Sel.Name != "restartHeartbeatIfControlLinkMoved" {
 				return true
 			}
 			for _, st := range s.Body.List {

@@ -581,9 +581,15 @@ frame. Cells: `heartbeat_echo_mixed_snapshot_14163_test.go`.
 
 ### A heartbeat RESTART is not a cold boot (#9722)
 
-`RestartHeartbeat` replaces the receiver on every config apply that rebinds the
-management VRF. On an HA node with a management interface that means every
-operator commit and every peer-synced apply. The replacement used to arm the
+`RestartHeartbeat` replaces the receiver when an apply moves the control link
+into or out of the management VRF. Before #18597 that was every config apply:
+networkd detached em0 from `vrf-mgmt` on every reconfigure and the rebind moved
+it back, so on an HA node every operator commit and every peer-synced apply
+restarted the heartbeat. networkd now renders `KeepMaster=yes` and the daemon
+gates the restart on the control link's VRF master actually having changed
+(`restartHeartbeatIfControlLinkMoved`, `pkg/daemon/README.md`), so an
+unrelated commit no longer restarts it; a restart still happens when the link
+really moved (for example after `vrf-mgmt` was recreated). The replacement used to arm the
 same 30s cold-boot floor. The seen-then-lost arm returns inside that floor
 before it checks staleness, so a peer that died within 30s after a commit was
 declared lost up to 30s late. In the default private-RG mode, that delay is the

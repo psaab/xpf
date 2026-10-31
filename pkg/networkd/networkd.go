@@ -116,9 +116,18 @@ type InterfaceConfig struct {
 	LACPRate        string // LACP transmit rate: "fast" or "slow" (default)
 	MinLinks        int    // minimum active member links (0 = no minimum)
 	KeepAddresses   bool   // true = KeepConfiguration=static (preserve external addresses across reload)
-	VRFName         string // VRF device name (e.g. "vrf-mgmt") — emits [Network] VRF= so networkctl reconfigure preserves binding
-	BridgeMaster    string // bridge device name to join (e.g. "br-bd0")
-	IsBridge        bool   // true = this is a bridge device (needs .netdev file)
+	// VRFName names the daemon-owned VRF master of this link (e.g.
+	// "vrf-mgmt"). pkg/routing creates that VRF over netlink, not as a
+	// networkd NetDev, so a `VRF=` line can never resolve: networkd logs
+	// "NetDev could not be found, ignoring assignment", treats the link as
+	// having NO master, and DETACHES it from the VRF on every reload or
+	// reconfigure that touches it (a link DOWN/UP cycle plus address
+	// removal, #18597). A non-empty VRFName therefore renders
+	// `KeepMaster=yes`, which leaves IFLA_MASTER alone; the daemon's
+	// BindInterfaceToVRF owns the binding. See README "VRF membership".
+	VRFName      string
+	BridgeMaster string // bridge device name to join (e.g. "br-bd0")
+	IsBridge     bool   // true = this is a bridge device (needs .netdev file)
 
 	// VLANParentAddresses are addresses a VLAN parent carries ITSELF. Addresses
 	// is ignored for a VLAN parent, so a sub-interface's addresses cannot leak
@@ -554,7 +563,12 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 	// aggregated (#2987): we still attempt every generated file so a single
 	// blocked path does not silently skip the rest, then fail the Apply at
 	// the end so the commit cannot succeed against stale kernel state.
-	write := func(path, content string) {
+	// changedIfaces records WHICH interfaces had a generated file rewritten in
+	// this call (#18597): the activation tail below reconfigures only those,
+	// so a commit that changes one interface no longer reconfigures every
+	// other managed link.
+	changedIfaces := make(map[string]bool)
+	write := func(name, path, content string) {
 		ch, err := writeIfChanged(path, content)
 		if err != nil {
 			writeErrs = append(writeErrs, err)
@@ -562,6 +576,7 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 		}
 		if ch {
 			changed = true
+			changedIfaces[name] = true
 		}
 	}
 	for _, ifc := range interfaces {
@@ -578,11 +593,11 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 		// .netdev file: for bond/LAG devices and bridge devices
 		if ifc.IsBond {
 			netdevPath := filepath.Join(m.networkDir, filePrefix+ifc.Name+".netdev")
-			write(netdevPath, m.generateNetdev(ifc))
+			write(ifc.Name, netdevPath, m.generateNetdev(ifc))
 		}
 		if ifc.IsBridge {
 			netdevPath := filepath.Join(m.networkDir, filePrefix+ifc.Name+".netdev")
-			write(netdevPath, m.generateBridgeNetdev(ifc))
+			write(ifc.Name, netdevPath, m.generateBridgeNetdev(ifc))
 		}
 
 		// .link file: only for managed physical interfaces with a MAC address.
@@ -591,12 +606,12 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 		// override the FPC-aware naming (e.g. ge-7-0-X on node1).
 		if ifc.MACAddress != "" && !ifc.Unmanaged {
 			linkPath := filepath.Join(m.networkDir, filePrefix+ifc.Name+".link")
-			write(linkPath, m.generateLink(ifc))
+			write(ifc.Name, linkPath, m.generateLink(ifc))
 		}
 
 		// .network file: for all interfaces
 		networkPath := filepath.Join(m.networkDir, filePrefix+ifc.Name+".network")
-		write(networkPath, m.generateNetwork(ifc))
+		write(ifc.Name, networkPath, m.generateNetwork(ifc))
 	}
 
 	if len(writeErrs) > 0 || len(removeErrs) > 0 {
@@ -658,8 +673,21 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 	debtOwed := reloadDebtOutstanding()
 	m.mu.Lock()
 	reconfDebt := len(m.reconfigurePending) > 0
+	reconfDebtNames := make(map[string]bool, len(m.reconfigurePending))
+	for name := range m.reconfigurePending {
+		reconfDebtNames[name] = true
+	}
 	activationOwed := m.activationPending
 	m.mu.Unlock()
+	externalTailOwed := externalTailOutstanding()
+	// #18597: the per-interface reconfigure below is scoped to the interfaces
+	// whose generated files changed in THIS call, plus names still owed from a
+	// failed reconfigure. A pass that inherits an obligation from an earlier
+	// call — a failed reload (debtOwed), an unfinished tail (activationOwed),
+	// or an external reload that skipped the tail (#6912) — cannot know which
+	// files changed back then, so it reconfigures every managed interface as
+	// before.
+	reconfigureAll := debtOwed || activationOwed || externalTailOwed
 
 	needReload := changed || debtOwed
 	// #5718 fold r4 BLOCKER 2: activationOwed keeps this Manager's own tail —
@@ -672,7 +700,7 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 	// files. changed is false, the reload debt was correctly discharged, no
 	// reconfigure failed and this Manager never started a pass, so every other
 	// term is false while the tail has still never run.
-	if needReload || reconfDebt || activationOwed || externalTailOutstanding() {
+	if needReload || reconfDebt || activationOwed || externalTailOwed {
 		// Mark the pass in flight BEFORE the reload can fail out, so an early
 		// return leaves the obligation recorded.
 		m.mu.Lock()
@@ -693,15 +721,30 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 			noteReloadSucceeded(epoch)
 		}
 		// Dynamically created interfaces (bonds, VLANs) may not get their
-		// addresses applied by reload alone. Reconfigure all managed
-		// interfaces to ensure addresses are applied.
+		// addresses applied by reload alone, so the interfaces whose files
+		// changed are reconfigured explicitly.
 		// Skip bond member interfaces — reconfigure can eject them from
 		// their bond. Their Bond= directive is picked up by reload.
+		//
+		// #18597: NOT every managed interface any more. Reconfiguring a link
+		// whose files did not change is not free: before KeepMaster=yes it
+		// detached every vrf-mgmt member (em0, the cluster control link,
+		// included) on every commit, cycling the link and removing its
+		// addresses, and it still re-runs networkd's whole configuration
+		// machine for a link nothing asked to change. reload already applies
+		// a changed .network to its link; an unchanged link is left alone.
 		var reconf []string
 		for _, ifc := range interfaces {
-			if !ifc.Unmanaged && !ifc.Disable && ifc.BondMaster == "" {
+			if ifc.Unmanaged || ifc.Disable || ifc.BondMaster != "" {
+				continue
+			}
+			if reconfigureAll || changedIfaces[ifc.Name] || reconfDebtNames[ifc.Name] {
 				reconf = append(reconf, ifc.Name)
 			}
+		}
+		if len(reconf) > 0 {
+			slog.Info("networkd reconfiguring interfaces",
+				"interfaces", reconf, "all", reconfigureAll)
 		}
 		if len(reconf) > 0 {
 			// `--` ENDS OPTION PARSING (#9885). Interface names occupy argv
@@ -1867,9 +1910,14 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 
 	b.WriteString("LinkLocalAddressing=ipv6\n")
 
-	// VRF membership — ensures networkctl reconfigure preserves the binding
-	if ifc.VRFName != "" {
-		fmt.Fprintf(&b, "VRF=%s\n", ifc.VRFName)
+	// VRF membership (#18597). The VRF is a daemon-created netlink device, so
+	// `VRF=` cannot resolve and networkd would detach the link on every
+	// reconfigure. KeepMaster=yes tells networkd not to touch IFLA_MASTER;
+	// pkg/routing owns the binding. KeepMaster also makes networkd ignore
+	// Bond=/Bridge=, so a row that names a networkd-owned bond or bridge
+	// master keeps that directive instead: networkd must enslave it.
+	if ifc.VRFName != "" && ifc.BondMaster == "" && ifc.BridgeMaster == "" {
+		b.WriteString("KeepMaster=yes\n")
 	}
 
 	// Bond member: bind to bond master

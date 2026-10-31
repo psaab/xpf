@@ -4172,7 +4172,9 @@ never lock an operator out of a remote box it manages.
   abort; `vrfErr` is the deferred VRF-device-setup failure, captured by
   `applyConfigLocked` and threaded into the tail `errors.Join(..., mgmtRouteErr,
   vrfErr)`. The AUTHORITATIVE post-networkd management-VRF re-bind (which
-  `networkctl reconfigure` necessitates by stripping the master binding) is
+  `networkctl reconfigure` used to necessitate by stripping the master
+  binding; since #18597 networkd renders `KeepMaster=yes` and the rebind is a
+  no-op for a link that stayed bound) is
   extracted into `rebindManagementVRFIfaces`, which aggregates and RETURNS its
   bind failures; `applyDataplaneAndHACore` joins them into `networkdErr` (like the
   #1956 device-map-teardown joins), so a genuine management-VRF bind failure also
@@ -4185,11 +4187,34 @@ never lock an operator out of a remote box it manages.
   its bind retries into `networkdErr`. That restart leaves the heartbeat stopped,
   owing a retry the next apply performs. The old call discarded
   `RestartHeartbeat`'s result. `HeartbeatRestartOwed` separates that case from a
-  heartbeat that was never running, which is not an error. Deliberately LEFT best-effort (WARN, not surfaced): the
+  heartbeat that was never running, which is not an error.
+
+  **The heartbeat restart is gated on a real control-link move (#18597).**
+  The restart used to run after EVERY apply with a management VRF, because
+  networkd's reconfigure detached em0 from `vrf-mgmt` on every commit and the
+  rebind moved it back. Measured on the loss cluster (master 0.0.26151, 20
+  commits that changed only `fxp0`'s description): every commit cycled em0
+  twice on both nodes and removed its address, the restart's first bind failed
+  (`bind: cannot assign requested address`), and once both nodes declared the
+  other lost and fw1 took every RG. networkd now renders `KeepMaster=yes`, and
+  `restartHeartbeatIfControlLinkMoved` (`heartbeat_rebind_gate_18597.go`)
+  restarts only when `routing.VRFMasterMoveSeq` for the configured control
+  link moved since the previous decision, or (post-networkd pass only) a
+  failed restart is still owed. It runs right after BOTH bind passes: after
+  step 0b in `applyVRFReconcile`, so a move there (vrf-mgmt recreated, or a
+  drifted em0) is followed by the restart at once rather than after the whole
+  networkd and dataplane apply, after the step-2.7 rebind, and in
+  `reassertMgmtVRFOnce` when the background loop moves a drifted control link
+  back (it used to rebind em0 and leave the sockets stale until the next
+  commit). A move of another management link (fxp0, fab0) does not restart the
+  heartbeat. Cells:
+  `heartbeat_rebind_gate_18597_test.go`.
+
+  Deliberately LEFT best-effort (WARN, not surfaced): the
   routing-instance member binds (they run BEFORE `applyInterfaceReconcile` creates
   tunnel/xfrmi members, so a not-yet-created member is an EXPECTED transient
-  absence, not a permanent failure) and the pre-networkd management bind (stripped
-  and re-established by the authoritative rebind above) — surfacing either would
+  absence, not a permanent failure) and the pre-networkd management bind (the
+  authoritative rebind above re-attempts it) — surfacing either would
   reject configs that commit fine today. Tests:
   `vrf_setup_bind_commit_truth_5700_test.go` (direct `applyVRFReconcile`
   surfaces-setup / tolerates-success / ctx-cancel-is-not-a-VRF-error via a
