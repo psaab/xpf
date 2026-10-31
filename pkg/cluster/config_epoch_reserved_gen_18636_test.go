@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"net"
 	"sync/atomic"
 	"testing"
 
@@ -178,5 +179,119 @@ func TestPeerConfigGenSentIsAHighWater18636(t *testing.T) {
 	s.recordLastSentConfigGen(29)
 	if got := s.peerIncarnationState().lastSentConfigGen.Load(); got != 30 {
 		t.Fatalf("recordLastSentConfigGen lowered the sent mark to %d, want 30", got)
+	}
+}
+
+// drainPipe18636 returns a connection whose peer end discards everything the
+// authority writes, so config writes complete.
+func drainPipe18636(t *testing.T) net.Conn {
+	t.Helper()
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			if _, err := b.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	return a
+}
+
+// Seat AE (#18646 review): the authority's peer-connect push is written to a
+// rebooted standby's NEW connection before that connection's BulkStart reports
+// the new boot id (#18521 ordering). The BulkStart boot-id switch then retires
+// the incarnation. The retirement must seed the sent mark from the priming
+// connection that carried the push; otherwise the threshold reverts to the
+// reservation counter and, after one no-op reconcile tick, every install the
+// rebooted peer stamps with the pushed generation is refused until a re-push
+// lands.
+func TestBootSwitchKeepsConfigWrittenOnPrimingConn18636(t *testing.T) {
+	authority, _ := newAuthority18636(t, 7999)
+	conn := drainPipe18636(t)
+	var prior, next [bootIncarnationLen]byte
+	prior[0], next[0] = 1, 2
+	var pushed uint64
+	authority.PrimePeerSnapshotIncarnationForTesting(conn, 1, prior, next, func() {
+		pushed = authority.ReserveConfigGen()
+		if !authority.queueConfig("system { host-name fw0; }", nil, pushed) {
+			t.Fatal("peer-connect push was not written on the priming connection")
+		}
+	})
+	setConfigEpochPeerTagCapability11055(authority, true) // the new boot advertises the tag
+	if got := authority.peerIncarnationState().lastSentConfigGen.Load(); got != pushed {
+		t.Fatalf("after the BulkStart boot switch the sent mark = %d, want the generation written on the priming connection (%d)", got, pushed)
+	}
+	authority.ReserveConfigGen() // one no-op reconcile tick
+	peer := newConvergedPeer18636(t, pushed)
+	key, val := stampedV4FromPeer18636(t, peer, 61850, pushed)
+	if !authority.installClusterSyncedV4(key, val) {
+		t.Fatalf("authority refused the rebooted peer's install stamped with the generation pushed to it (threshold %d)", authority.authorityConfigEpochThreshold())
+	}
+}
+
+// The same, for the guarded write production pushes use
+// (QueueConfigWithPeerSnapshotProtocolAtGeneration).
+func TestBootSwitchKeepsGuardedConfigWrittenOnPrimingConn18636(t *testing.T) {
+	authority, _ := newAuthority18636(t, 7999)
+	conn := drainPipe18636(t)
+	var prior, next [bootIncarnationLen]byte
+	prior[0], next[0] = 1, 2
+	var pushed uint64
+	authority.PrimePeerSnapshotIncarnationForTesting(conn, 1, prior, next, func() {
+		pushed = authority.ReserveConfigGen()
+		if !authority.QueueConfigWithPeerSnapshotProtocolAtGeneration(
+			"system { host-name fw0; }", nil, pushed, authority.SnapshotPeerSnapshotProtocol(), 1, 0, nil) {
+			t.Fatal("guarded peer-connect push was not written on the priming connection")
+		}
+	})
+	if got := authority.peerIncarnationState().lastSentConfigGen.Load(); got != pushed {
+		t.Fatalf("after the BulkStart boot switch the sent mark = %d, want the guarded write's generation %d", got, pushed)
+	}
+}
+
+// The seed is per connection: a generation recorded without a write on the
+// priming connection (sent to the retired incarnation) is NOT carried into the
+// new one, which stays fail-closed until something is written to it.
+func TestBootSwitchDoesNotCarryConfigSentElsewhere18636(t *testing.T) {
+	authority, _ := newAuthority18636(t, 7999)
+	authority.recordLastSentConfigGen(authority.ReserveConfigGen()) // to the old boot
+	conn := drainPipe18636(t)
+	var prior, next [bootIncarnationLen]byte
+	prior[0], next[0] = 1, 2
+	authority.PrimePeerSnapshotIncarnationForTesting(conn, 1, prior, next, nil)
+	if got := authority.peerIncarnationState().lastSentConfigGen.Load(); got != 0 {
+		t.Fatalf("the new incarnation inherited sent mark %d that was never written to it", got)
+	}
+}
+
+// Seat AH (#18646 review): production pushes go through the guarded write
+// (writeConfigWithPeerSnapshotGuard, via
+// QueueConfigWithPeerSnapshotProtocolAtGeneration). That path must record the
+// sent mark too; the twin of the unguarded cell above.
+func TestAuthorityAcceptsPeerAfterGuardedPush18636(t *testing.T) {
+	authority, _ := newAuthority18636(t, 4999)
+	conn := drainPipe18636(t)
+	var boot [bootIncarnationLen]byte
+	boot[0] = 3
+	authority.PrimePeerSnapshotIncarnationForTesting(conn, 1, boot, boot, nil) // no boot switch
+	setConfigEpochPeerTagCapability11055(authority, true)
+	expected := authority.SnapshotPeerSnapshotProtocol()
+	if !expected.Connected {
+		t.Fatal("fixture peer is not connected")
+	}
+	pushed := authority.ReserveConfigGen()
+	if !authority.QueueConfigWithPeerSnapshotProtocolAtGeneration(
+		"system { host-name fw0; }", nil, pushed, expected, 1, 0, nil) {
+		t.Fatal("guarded config push was not written")
+	}
+	authority.ReserveConfigGen()
+	authority.ReserveConfigGen()
+	peer := newConvergedPeer18636(t, pushed)
+	key, val := stampedV4FromPeer18636(t, peer, 61851, pushed)
+	if !authority.installClusterSyncedV4(key, val) {
+		t.Fatalf("authority refused a session stamped with the generation its guarded push wrote (threshold %d, counter %d)",
+			authority.authorityConfigEpochThreshold(), authority.configGenCounter.Load())
 	}
 }

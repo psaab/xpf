@@ -198,6 +198,12 @@ func (s *SessionSync) retirePeerIncarnationLocked(seed net.Conn) {
 		fresh.peerCapabilityFlags.Store(uint32(ac.peerCapabilityFlags))
 		fresh.peerCapabilityFlags2.Store(uint32(ac.peerCapabilityFlags2))
 		fresh.peerSessionSyncWire.Store(uint32(ac.peerSessionSyncWire))
+		// #18636: a config written on the priming connection went to the
+		// incarnation this switch adopts, so the authority's config-epoch
+		// threshold keeps it rather than reverting to the reservation
+		// counter until a re-push lands. Same attribution model as the
+		// capability set above and the #18521 apply ACK.
+		fresh.lastSentConfigGen.Store(ac.lastSentConfigGen.Load())
 	}
 	s.peerSnaps.peerSnapshotProtocol.Store(snapshotProtocol)
 	s.peerSnaps.peerSnapshotProtocolGeneration++

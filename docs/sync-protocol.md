@@ -1678,7 +1678,7 @@ All counters are `atomic.Uint64` / `atomic.Bool`, lock-free:
 | SessionsSent | Sessions queued to sendCh |
 | SessionsReceived | Session messages received from peer |
 | SessionsInstalled | Sessions successfully written to BPF map |
-| SessionsStaleConfigIgnored | Session installs refused by the #5274 config-epoch guard: the peer stamped a config epoch (#3931 `configGenCounter`) strictly older than this node's `lastAppliedConfigGen`, so a newer config that may deny the session is already applied here (a stale permit across the HA boundary) |
+| SessionsStaleConfigIgnored | Session installs refused by the #5274 config-epoch guard (a stale permit across the HA boundary). On a non-authority: the peer's untagged epoch (its #3931 `configGenCounter`) is strictly older than `max(applyingConfigGen, lastAppliedConfigGen)`, so a newer config that may deny the session is already applied here. On the RG0 authority (#11055): the peer's reverse-tagged applied generation is strictly older than the newest config generation actually written to the current peer incarnation (`lastSentConfigGen`; `configGenCounter` before the first write), so the peer has not applied a config this node sent (#18636) |
 | DeletesSent | Delete messages queued |
 | DeletesReceived | Delete messages received |
 | BulkSyncs | Completed bulk sync operations |

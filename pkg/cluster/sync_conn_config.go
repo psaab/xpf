@@ -343,6 +343,7 @@ func (s *SessionSync) writeConfigWithPeerSnapshotGuard(
 		return false, nil
 	}
 	s.recordLastSentConfigGen(gen)
+	noteConfigGenWrittenOnConn(conn, gen)
 	s.writeMu.Lock()
 	err := writeMsg(conn, msgType, payload)
 	s.writeMu.Unlock()
@@ -476,6 +477,7 @@ func (s *SessionSync) queueConfigOnConn(
 		s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
 		s.writeMu.Lock()
 		s.recordLastSentConfigGen(gen)
+		noteConfigGenWrittenOnConn(conn, gen)
 		err = writeMsg(conn, msgType, payload)
 		s.writeMu.Unlock()
 		s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
@@ -542,6 +544,16 @@ func notePeerConfigGenSent(mark *atomic.Uint64, gen uint64) {
 		if gen <= cur || mark.CompareAndSwap(cur, gen) {
 			return
 		}
+	}
+}
+
+// noteConfigGenWrittenOnConn raises the per-connection written-config mark
+// (#18636) that a boot-id switch on this connection seeds into the new
+// incarnation (retirePeerIncarnationLocked). Connections that are not an
+// authConn (bare test fixtures) carry no mark.
+func noteConfigGenWrittenOnConn(conn net.Conn, gen uint64) {
+	if ac, ok := conn.(*authConn); ok {
+		notePeerConfigGenSent(&ac.lastSentConfigGen, gen)
 	}
 }
 

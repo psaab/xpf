@@ -5082,7 +5082,16 @@ it.
   written to that incarnation: `lastSentConfigGen`, raised as a max in
   `recordLastSentConfigGen` just before the socket write and held in
   `peerIncarnationState`, so a new peer incarnation is never compared against
-  a generation sent to its predecessor. Before that first write it is
+  a generation sent to its predecessor. One exception is a standby OS reboot.
+  The authority's peer-connect push lands on the rebooted peer's new
+  connection BEFORE that connection's BulkStart reports the new boot id (the
+  #18521 ordering), and the boot-id switch then retires the incarnation.
+  `retirePeerIncarnationLocked` therefore seeds the fresh mark from the
+  priming connection's own written-config mark (`authConn.lastSentConfigGen`).
+  That is the same attribution model as the capability set and the #18521
+  apply ACK. The switch's `OnPeerCapabilitiesChanged` also makes the daemon
+  clear its "already pushed" marker and reconcile, so the new incarnation
+  receives a push in any case. Before that first write it is
   `configGenCounter`, the original comparison, which refuses (fail-closed) a
   tagged generation the peer took from an earlier authority process (an older
   boot, or a config edited while this node was down), until the reconnect
