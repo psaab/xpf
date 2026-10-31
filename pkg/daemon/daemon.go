@@ -1816,6 +1816,10 @@ type Daemon struct {
 	localFailoverCommitDelay time.Duration
 	// frrHA coalesces RG-edge FRR reconciles (#18561); see daemon_frr_ha_coalesce.go.
 	frrHA frrHACoalescer
+	// ipmonGateHA coalesces RG-edge ip-monitoring gating reconciles behind
+	// the same debounce (#18561): the reconcile holds applySem across an FRR
+	// reload and a snapshot publish.
+	ipmonGateHA frrHACoalescer
 	// frrApplySeq orders FRR managed-section writes (#18561). Every
 	// daemon-initiated FRR write bumps it before writing; the HA reconcile
 	// bumps it when it renders (under applySem) and applies, after

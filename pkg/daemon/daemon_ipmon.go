@@ -750,7 +750,14 @@ func (d *Daemon) scheduleIPMonGating(reason string) {
 		return
 	}
 	ctx := d.applyCancelCtx()
-	go func() {
+	// #18561: coalesce behind the RG-edge debounce. When the gate changes,
+	// the reconcile holds applySem across an FRR reload and a snapshot
+	// publish (300-600 ms). On a crash takeover it started between RG1's and
+	// RG2's activations and RG2's synchronous connected-route republish
+	// (#16270) waited for it: RG2 went active 0.52 s after peer loss on loss
+	// (0.0.26110). One reconcile after the burst reads the gate predicate at
+	// run time, so it covers every joined edge.
+	d.ipmonGateHA.schedule(frrHAReconcileDebounce, func() {
 		if err := d.applySem.Acquire(ctx, 1); err != nil {
 			return
 		}
@@ -760,5 +767,5 @@ func (d *Daemon) scheduleIPMonGating(reason string) {
 		}
 		d.reconcileIPMonGating()
 		_ = reason
-	}()
+	})
 }

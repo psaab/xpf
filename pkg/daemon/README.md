@@ -4683,3 +4683,11 @@ write+reload critical section (`frr.Manager.ApplyFullIfCurrent`, under
 `reloadMu`), so it is ordered against every other writer; a superseded
 render returns `frr.ErrFRRApplySuperseded` and writes nothing. FRR writes
 themselves stay serialized by `reloadMu`.
+
+The RG-edge ip-monitoring gating reconcile (`scheduleIPMonGating`, #16690)
+is coalesced behind the same debounce (`ipmonGateHA`). When the gate
+changes it holds applySem across an FRR reload and a snapshot publish (the
+#3757 FRR-before-snapshot order needs both under one hold). On loss
+(0.0.26110) it started between RG1's and RG2's crash activations and RG2
+went active 0.52 s after peer loss; after the debounce, one run reads the
+gate predicate once the burst of activations has finished.

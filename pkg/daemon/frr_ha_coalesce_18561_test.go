@@ -169,3 +169,22 @@ func TestFRRHARenderSupersededByLaterWrite18561(t *testing.T) {
 		t.Fatalf("an un-overtaken render was not applied (reload calls %d -> %d)", before, rec.ReloadCalls)
 	}
 }
+
+// The ip-monitoring gating reconcile holds applySem across an FRR reload
+// when the gate changes; an election's edges must arm ONE run after the
+// burst, not one per edge racing the later RGs' activations.
+func TestScheduleIPMonGatingUsesCoalescer18561(t *testing.T) {
+	timers := &manualTimers18561{}
+	d := &Daemon{
+		applySem: semaphore.NewWeighted(1),
+		store:    fenceTestStore(t, fenceStartupClusterSet),
+		cluster:  cluster.NewManager(0, 1),
+	}
+	d.ipmonGateHA.afterFunc = timers.after
+	for range 3 {
+		d.scheduleIPMonGating("cluster-state")
+	}
+	if len(timers.fire) != 1 {
+		t.Fatalf("three RG edges armed %d ip-monitoring gating runs, want 1", len(timers.fire))
+	}
+}
