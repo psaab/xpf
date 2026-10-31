@@ -427,20 +427,17 @@ pub(in crate::afxdp) fn retire_fabric_punt_seed_if_owner_active(
     now_secs: u64,
 ) -> bool {
     let key = &flow.forward_key;
-    let Some((decision, metadata, origin)) = sessions.entry_with_origin(key) else {
+    let Some((decision, stamped_rg)) = sessions.forward_punt_seed(key) else {
         return false;
     };
-    if origin != SessionOrigin::FabricPuntSeed || metadata.is_reverse {
-        return false;
-    }
     // The seed's egress RG. The HA-inactive arm stamps it from the
     // pre-redirect resolution. The already-redirected arm only has the fabric
     // parent, so it stamps 0; for that seed, ask the FIB where the flow egresses
     // NOW. This runs only when the row is a seed, never for an ordinary hit. A
     // FIB that still withholds the egress (cluster-terminal: the peer owns it)
     // names no local RG and keeps the seed.
-    let egress_rg = if metadata.owner_rg_id > 0 {
-        metadata.owner_rg_id
+    let egress_rg = if stamped_rg > 0 {
+        stamped_rg
     } else {
         let fresh = lookup_forwarding_resolution_for_session_without_cache(
             forwarding,
@@ -461,6 +458,9 @@ pub(in crate::afxdp) fn retire_fabric_punt_seed_if_owner_active(
     if !owner_rg_is_locally_active(ha_state, egress_rg, now_secs) {
         return false;
     }
+    let Some((_, metadata, origin)) = sessions.entry_with_origin(key) else {
+        return false;
+    };
     let session_id = sessions.session_id_for(key);
     // A seed carries no NAT state, so there is nothing to release. The
     // steering row and the conntrack mirror go as for any removed session.

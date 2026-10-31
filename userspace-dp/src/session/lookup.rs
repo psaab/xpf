@@ -2180,6 +2180,16 @@ impl SessionTable {
             .unwrap_or(false)
     }
 
+    /// #18620: the forward `FabricPuntSeed` this table holds at `key`, as its
+    /// decision and stamped owner RG, or None for any other row. The slow
+    /// path asks on every flow-cache miss, so this clones nothing unless the
+    /// row is a seed.
+    pub(crate) fn forward_punt_seed(&self, key: &SessionKey) -> Option<(SessionDecision, i32)> {
+        let entry = self.entry_by_key(key)?;
+        (entry.origin == SessionOrigin::FabricPuntSeed && !entry.metadata.is_reverse)
+            .then_some((entry.decision, entry.metadata.owner_rg_id))
+    }
+
     pub fn entry_with_origin(
         &self,
         key: &SessionKey,
