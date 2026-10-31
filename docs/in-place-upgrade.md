@@ -1263,6 +1263,26 @@ reconcile above (extend it only for maps whose loss is truly safe).
   staged node restarts, it waits for sync to re-establish before resetting
   failover and rejoining. This is not an unplanned-failover timing promise
   (`pkg/upgrade/rolling.go:92-108,366-375`).
+- **Direct-VIP leftovers from a pre-#18573 xpf.** From #18573, xpf prunes
+  only the RETH VIPs it can prove it installed, meaning addresses that carry
+  `IFA_PROTO 0xbf` (`pkg/vipstamp`). An address a pre-#18573 binary left
+  behind after a renumber carries no stamp, so the upgraded daemon never
+  removes it. The same is true of an address a renumber leaves behind when
+  it is committed while the RG owner still runs the old binary, for example
+  mid rolling upgrade: the old owner keeps the old address unstamped, and its
+  drain removes only the configured set. Such an address:
+  - stays on the netdev, so the owner keeps answering ARP for it;
+  - can still be the interface-SNAT source, because the userspace snapshot
+    filter also skips unstamped addresses. This is the udp LAN-to-1.1.1.1
+    0/30 blackhole measured in #18573.
+
+  To find one, run `ip -d addr show dev <reth netdev>` (for example
+  `ge-0-0-2.50`). Look for an address with no `proto 0xbf` that
+  `show configuration interfaces <reth> unit <n>` no longer lists. Remove it
+  with `ip addr del` on the node that holds it, or reboot that node: RETH
+  VIPs are not persisted, so a reboot clears it. A configured VIP that an
+  older xpf installed needs nothing; the first owner pass after the upgrade
+  stamps it with `NLM_F_REPLACE`.
 - Kernel/OS upgrades are #1930; a signed/hosted apt repo is #1924.
 
 ### APT package-selection boundary (#10848)

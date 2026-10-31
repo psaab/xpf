@@ -51,9 +51,9 @@ var (
 	directVIPAddrAddFn     = vipstamp.Add
 	directVIPAddrDelFn     = vipstamp.Del
 	directVIPLinkByIndexFn = netlink.LinkByIndex
-	// queueInterfaceLinkSnapshotRefreshFn is the seam over the refresher
-	// wake, so a cell can observe which netdevs a reconcile republishes.
-	queueInterfaceLinkSnapshotRefreshFn = (*Daemon).queueInterfaceLinkSnapshotRefresh
+	// wakeInterfaceLinkSnapshotFn is the seam over the refresher wake, so a
+	// cell can observe which netdevs a reconcile republishes.
+	wakeInterfaceLinkSnapshotFn = wakeInterfaceLinkSnapshot
 )
 
 // directVIPAddrOp is one configured VIP on one netdev.
@@ -185,7 +185,10 @@ func planDirectVIPAddrs(in directVIPPlanInput) directVIPPlan {
 
 // reconcileDirectVIPAddrs converges the kernel to the direct-mode VIP set for
 // rgID (see the file comment). added counts addresses created; removed counts
-// addresses deleted, leftovers included.
+// this RG's configured VIPs deleted by a not-owner pass. A leftover delete is
+// NOT counted: it belongs to no RG, and applyDirectVIPOwnership feeds removed
+// into the RG's service edge (`prev || removed > 0` -> clearRethServicesForRG),
+// which a leftover found by, say, the RG0 pass must not drive.
 //
 // If the ownership dump fails the call degrades to the pre-#18573 behaviour
 // (add every configured VIP, or delete every configured VIP), stamping what it
@@ -256,12 +259,14 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 
 	leftoverGone := make(map[string]bool)
 	for _, op := range plan.Invalid {
-		slog.Warn("directAddVIPs: bad address", "rg", rgID, "iface", op.Netdev, "addr", op.CIDR)
+		if d.directVIPLogFirst("bad|" + op.Netdev + "|" + op.CIDR) {
+			slog.Warn("directAddVIPs: bad address", "rg", rgID, "iface", op.Netdev, "addr", op.CIDR)
+		}
 	}
 	deleted := 0
 	for _, del := range plan.Del {
 		if err := directVIPAddrDelFn(del.Row); err != nil {
-			if !vipstamp.GoneErr(err) {
+			if !vipstamp.GoneErr(err) && d.directVIPLogFirst("del|"+del.Netdev+"|"+del.Row.Prefix.String()) {
 				slog.Warn("direct VIP reconcile: failed to remove VIP",
 					"rg", rgID, "iface", del.Netdev, "addr", del.Row.Prefix.String(),
 					"reason", del.Reason, "err", err)
@@ -269,9 +274,10 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 			continue
 		}
 		deleted++
-		removed++
 		if del.Reason == directVIPDelLeftover {
 			leftoverGone[del.Netdev] = true
+		} else {
+			removed++
 		}
 		slog.Info("direct VIP reconcile: removed VIP",
 			"rg", rgID, "iface", del.Netdev, "addr", del.Row.Prefix.String(),
@@ -297,7 +303,7 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 				continue
 			}
 			if err := directVIPAddrAddFn(idx, op.Prefix, false); err != nil {
-				if !errors.Is(err, syscall.EEXIST) {
+				if !errors.Is(err, syscall.EEXIST) && d.directVIPLogFirst("add|"+op.Netdev+"|"+op.CIDR) {
 					slog.Warn("directAddVIPs: failed to add", "rg", rgID, "iface", op.Netdev, "addr", op.CIDR, "err", err)
 				}
 				continue
@@ -311,13 +317,20 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 			if !ok || created[op] {
 				continue
 			}
+			// Both lines are latched per (netdev, VIP) until the next commit:
+			// a REPLACE that keeps failing, or a kernel that accepts it
+			// without recording IFA_PROTO, would otherwise log every tick.
 			if err := directVIPAddrAddFn(idx, op.Prefix, true); err != nil {
-				slog.Warn("direct VIP reconcile: failed to stamp pre-existing VIP",
-					"rg", rgID, "iface", op.Netdev, "addr", op.CIDR, "err", err)
+				if d.directVIPLogFirst("adopt-fail|" + op.Netdev + "|" + op.CIDR) {
+					slog.Warn("direct VIP reconcile: failed to stamp pre-existing VIP",
+						"rg", rgID, "iface", op.Netdev, "addr", op.CIDR, "err", err)
+				}
 				continue
 			}
-			slog.Info("direct VIP reconcile: stamped pre-existing VIP as xpf-owned",
-				"rg", rgID, "iface", op.Netdev, "addr", op.CIDR)
+			if d.directVIPLogFirst("adopt|" + op.Netdev + "|" + op.CIDR) {
+				slog.Info("direct VIP reconcile: stamped pre-existing VIP as xpf-owned",
+					"rg", rgID, "iface", op.Netdev, "addr", op.CIDR)
+			}
 		}
 	}
 	d.queueDirectVIPSnapshotRefresh(leftoverGone)
@@ -326,7 +339,10 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 
 // queueDirectVIPSnapshotRefresh wakes the debounced interface-link snapshot
 // refresher (daemon_interface_link_refresh.go) for every netdev on which the
-// reconcile deleted a LEFTOVER. The refresher rebuilds rows from the desired
+// reconcile deleted a LEFTOVER. It runs under directVIPMu (via
+// applyDirectVIPOwnership), so it uses the lock-free wakeInterfaceLinkSnapshot
+// and leaves the relevance check to the refresher goroutine instead of taking
+// the userspace manager's m.mu here. The refresher rebuilds rows from the desired
 // config, publishes only a differing snapshot, and bumps the FIB generation,
 // so a removal outside a commit reaches the helper — in particular when the
 // commit's own build could not filter the leftover (its ownership dump
@@ -349,8 +365,27 @@ func (d *Daemon) queueDirectVIPSnapshotRefresh(changed map[string]bool) {
 	}
 	sort.Strings(netdevs)
 	for _, netdev := range netdevs {
-		queueInterfaceLinkSnapshotRefreshFn(d, *wake, netdev)
+		wakeInterfaceLinkSnapshotFn(*wake, netdev)
 	}
+}
+
+// directVIPLogFirst reports whether the latched direct-VIP log line keyed by
+// key has not been emitted since the last commit, and records it. The
+// reconcile runs every 2 s per RG; a per-(netdev, VIP) failure or adoption
+// must log once, not per tick (logging rules: no Warn/Info per poll tick).
+// resetVIPWarnings clears the latch on every commit, so a new config gets
+// fresh diagnostics.
+func (d *Daemon) directVIPLogFirst(key string) bool {
+	d.vipWarnedMu.Lock()
+	defer d.vipWarnedMu.Unlock()
+	if d.directVIPLogged == nil {
+		d.directVIPLogged = make(map[string]bool)
+	}
+	if d.directVIPLogged[key] {
+		return false
+	}
+	d.directVIPLogged[key] = true
+	return true
 }
 
 // directVIPBlindReconcile is the no-readback floor: exactly the pre-#18573
@@ -376,7 +411,9 @@ func (d *Daemon) directVIPBlindReconcile(in directVIPPlanInput, linkByName func(
 		for _, cidr := range in.Desired[netdev] {
 			p, ok := config.ParseVRRPVIP(cidr)
 			if !ok {
-				slog.Warn("directAddVIPs: bad address", "addr", cidr)
+				if d.directVIPLogFirst("bad|" + netdev + "|" + cidr) {
+					slog.Warn("directAddVIPs: bad address", "addr", cidr)
+				}
 				continue
 			}
 			if in.Want {

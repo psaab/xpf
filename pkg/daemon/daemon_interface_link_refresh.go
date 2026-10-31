@@ -45,6 +45,19 @@ func (d *Daemon) queueInterfaceLinkSnapshotRefresh(wake chan string, linuxName s
 	if manager == nil || !manager.InterfaceLinkNameRelevant(linuxName) {
 		return
 	}
+	wakeInterfaceLinkSnapshot(wake, linuxName)
+}
+
+// wakeInterfaceLinkSnapshot is the lock-free coalescing send: it replaces a
+// pending name with linuxName and never blocks. It takes no lock, so a caller
+// holding its own mutex (the #18573 direct-VIP reconcile runs under
+// directVIPMu) can wake the refresher without nesting the userspace manager's
+// m.mu inside it; the refresher's RefreshInterfaceRowsForLink does the
+// relevance check on its own goroutine (an irrelevant name publishes nothing).
+func wakeInterfaceLinkSnapshot(wake chan string, linuxName string) {
+	if wake == nil || linuxName == "" {
+		return
+	}
 	select {
 	case wake <- linuxName:
 		return

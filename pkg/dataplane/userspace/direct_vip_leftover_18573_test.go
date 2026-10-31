@@ -30,7 +30,10 @@ func renumberCfg18573(t *testing.T, v4 string) *config.Config {
 		"set interfaces reth0 vlan-tagging",
 		"set interfaces reth0 unit 50 vlan-id 50",
 		"set interfaces reth0 unit 50 family inet address " + v4,
-		"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		// RG2, not RG1: the base/unit rows of a SECOND group must keep its
+		// stamped VIP (a configured set that only knew one group would
+		// filter it as a leftover — review Z2 on #18579).
+		"set interfaces reth1 redundant-ether-options redundancy-group 2",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24",
 		"set interfaces ge-0/0/2 gigether-options redundant-parent reth0",
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",

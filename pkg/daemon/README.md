@@ -2066,17 +2066,38 @@ new set, and `reconcileInterfaceAddresses` skips RETH netdevs. Now:
   readback it does not have, and it never does less than the old code.
   The warning fires once per failure streak (`directVIPDumpFailing`).
 - Every netdev on which a pass deletes a leftover is queued to the
-  interface-link snapshot refresher (`interfaceLinkRefreshWake`,
-  `queueInterfaceLinkSnapshotRefresh`), so a reconcile-path removal
-  republishes the userspace interface rows without a commit. Adds and
-  not-owner removals do not queue, because a configured address is merged
-  into its row whether or not the kernel holds it. The commit's own snapshot never carries the leftover:
+  interface-link snapshot refresher (`interfaceLinkRefreshWake`), so a
+  reconcile-path removal republishes the userspace interface rows without a
+  commit. Adds and not-owner removals do not queue, because a configured
+  address is merged into its row whether or not the kernel holds it. The
+  queue runs under `directVIPMu`, so it uses the lock-free
+  `wakeInterfaceLinkSnapshot`. The relevance check (`InterfaceLinkNameRelevant`,
+  which takes the userspace manager's `m.mu`) happens in the refresher
+  goroutine, not under `directVIPMu`.
+- The leftover sweep is global: every RG's pass, RG0's included, judges every
+  stamped address on every netdev. That is why the configured set must span
+  every group (`TestDirectVIPOtherRGsStampedVIPsSurviveEveryPass18573`). A
+  set that knew only the passing RG would delete and re-add another group's
+  VIPs every 2 s. The `removed` count that `applyDirectVIPOwnership` feeds
+  into the RG's service edge (`prev || removed > 0`) counts only this RG's
+  not-owner deletions, never a leftover.
+- Per-(netdev, VIP) diagnostics are latched in `directVIPLogged` and cleared
+  by `resetVIPWarnings` on every commit. These are: bad address, failed
+  add/remove/stamp, and adoption. Each logs once per commit, not once per
+  tick.
+- Cost: one `RTM_GETADDR` dump per RG per 2 s pass. A shared per-tick dump
+  was considered and rejected. A cached dump read by a later RG's pass would
+  miss a concurrent link-cycle flush, the very removal it must see, and the
+  per-RG dump still makes fewer netlink calls than the pre-#18573 blind
+  `AddrAdd` per VIP per tick. The commit's own snapshot never carries the leftover:
   see `pkg/dataplane/README.md` "Interface rows never publish a direct-VIP
   leftover (#18573)".
 
 **Limit:** a VIP that a pre-#18573 xpf installed and that the config had
-already dropped before the upgrade carries no stamp and is not removed. It
-must be deleted by hand once. Cells: `direct_vip_reconcile_18573_test.go`
+already dropped before the upgrade carries no stamp and is not removed. The
+same applies to a renumber committed while the owner still runs the old
+binary. It must be deleted by hand once, or cleared by a reboot. See
+`docs/in-place-upgrade.md` "Honest limits". Cells: `direct_vip_reconcile_18573_test.go`
 (fake table, real config) and `direct_vip_kernel_18573_test.go` (private
 netns, forced by `test/daemon/selftest-daemon-kernel_15241.sh`).
 

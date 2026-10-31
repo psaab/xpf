@@ -685,6 +685,7 @@ func (d *Daemon) resetVIPWarnings() {
 	d.vipWarnedMu.Lock()
 	defer d.vipWarnedMu.Unlock()
 	d.vipWarnedIfaces = nil
+	d.directVIPLogged = nil // #18573 per-(netdev, VIP) latches
 }
 
 // shouldWarnVIPIface reports whether this interface's "interface not found"

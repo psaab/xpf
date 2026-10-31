@@ -1059,7 +1059,10 @@ queues an interface-link snapshot refresh. See `pkg/daemon/README.md`
 never publish a direct-VIP leftover (#18573)".
 
 **Limit:** a pre-#18573 VIP that the config had already dropped before the
-upgrade carries no stamp and must be deleted by hand once.
+upgrade carries no stamp and must be deleted by hand once (or cleared by a
+reboot). The same goes for a renumber committed while the owner still runs the
+old binary. Until then it can still be the interface-SNAT source. See
+`docs/in-place-upgrade.md` "Honest limits".
 
 **Status:** unit, real-kernel (netns) and mutation-checked (9/9). Live on
 tcp, deb `0.0.26066+gb5290d13d20d`, 2026-10-31 02:19 UTC:

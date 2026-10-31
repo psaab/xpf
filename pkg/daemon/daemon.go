@@ -1842,6 +1842,11 @@ type Daemon struct {
 	// its warning fires once per failure streak, not per 2s reconcile tick
 	// (#18573).
 	directVIPDumpFailing atomic.Bool
+	// directVIPLogged latches the per-(netdev, VIP) direct-VIP reconcile
+	// diagnostics (bad address, failed add/remove/stamp, adoption) so each
+	// logs once per commit, not per 2s tick (#18573). Guarded by
+	// vipWarnedMu and cleared by resetVIPWarnings with vipWarnedIfaces.
+	directVIPLogged map[string]bool
 	// interfaceLinkRefreshWake is the debounced interface-link snapshot
 	// refresher's wake channel, published by startTransitGateLinkWatch so
 	// the direct-VIP reconcile can republish the userspace interface rows

@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"sort"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -218,8 +220,10 @@ func TestDirectVIPNonOwnerAndRGMoveAfterRenumber18573(t *testing.T) {
 	n1.install(t, d1)
 	n1.put("ge-0-0-2.50", "172.16.50.10/24", vipstamp.Proto)
 	n1.put("ge-0-0-2.50", "172.16.50.42/24", 0)
-	if removed := d1.directRemoveVIPs(1); removed != 2 {
-		t.Fatalf("non-owner removed %d, want 2 (dels %v)", removed, n1.dels)
+	// removed counts the RG's configured VIP only: the leftover belongs to
+	// no RG and must not drive the RG's service edge (prev || removed > 0).
+	if removed := d1.directRemoveVIPs(1); removed != 1 || len(n1.dels) != 2 {
+		t.Fatalf("non-owner removed %d (want 1) with dels %v (want 2)", removed, n1.dels)
 	}
 	if len(n1.adds) != 0 {
 		t.Fatalf("non-owner installed addresses: %v", n1.adds)
@@ -349,9 +353,9 @@ func TestDirectVIPChangeQueuesSnapshotRefresh18573(t *testing.T) {
 	k.put("ge-0-0-2.50", "172.16.50.42/24", vipstamp.Proto)
 	k.put("ge-0-0-2.50", "2001:db8:50::42/64", vipstamp.Proto)
 	var queued []string
-	orig := queueInterfaceLinkSnapshotRefreshFn
-	t.Cleanup(func() { queueInterfaceLinkSnapshotRefreshFn = orig })
-	queueInterfaceLinkSnapshotRefreshFn = func(_ *Daemon, _ chan string, netdev string) {
+	orig := wakeInterfaceLinkSnapshotFn
+	t.Cleanup(func() { wakeInterfaceLinkSnapshotFn = orig })
+	wakeInterfaceLinkSnapshotFn = func(_ chan string, netdev string) {
 		queued = append(queued, netdev)
 	}
 	wake := make(chan string, 1)
@@ -422,5 +426,120 @@ func TestPlanDirectVIPAddrsVerdicts18573(t *testing.T) {
 	want = []string{"10.0.0.1/24 " + directVIPDelNotOwner, "10.0.0.3/24 " + directVIPDelLeftover, "10.0.0.1/25 " + directVIPDelLeftover}
 	if fmt.Sprint(dels) != fmt.Sprint(want) || len(plan.Add)+len(plan.Adopt) != 0 {
 		t.Fatalf("non-owner deletes %v (add %v adopt %v), want %v", dels, plan.Add, plan.Adopt, want)
+	}
+}
+
+// rethStore2RG18573 is a two-RG direct-mode cluster: reth0 (RG1) unit 50 on
+// VLAN 50 of ge-0/0/2, reth1 (RG2) untagged on ge-0/0/1.
+func rethStore2RG18573(t *testing.T) *configstore.Store {
+	t.Helper()
+	return testStoreWithSetConfig(t, []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster authentication-key test-cluster-psk-18573",
+		"set chassis cluster node 0",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 2 node 0 priority 200",
+		"set interfaces reth0 redundant-ether-options redundancy-group 1",
+		"set interfaces reth0 vlan-tagging",
+		"set interfaces reth0 unit 50 vlan-id 50",
+		"set interfaces reth0 unit 50 family inet address 172.16.50.42/24",
+		"set interfaces reth0 unit 50 family inet6 address 2001:db8:50::42/64",
+		"set interfaces reth1 redundant-ether-options redundancy-group 2",
+		"set interfaces reth1 unit 0 family inet address 10.0.62.1/24",
+		"set interfaces reth1 unit 0 family inet6 address 2001:db8:62::1/64",
+		"set interfaces ge-0/0/2 gigether-options redundant-parent reth0",
+		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
+	})
+}
+
+// Review (Z2) on #18579: the leftover sweep is global — every RG's pass,
+// RG0's included, judges every stamped address on every netdev — so the
+// configured set must span EVERY group. A set that only knew the passing RG
+// would make the RG0 and RG1 passes delete RG2's live VIPs, and RG2's pass
+// would re-add them: a delete/re-add (and GARP) every 2 s on any two-RG
+// cluster. FAIL-ON-REVERT: restrict AddressIdentitiesByNetdev to one RG and
+// RG2's stamped VIPs vanish here. The RG2 leftover is the control: it IS
+// deleted by a foreign RG's pass, so the cell cannot pass by deleting nothing.
+func TestDirectVIPOtherRGsStampedVIPsSurviveEveryPass18573(t *testing.T) {
+	type pass struct {
+		rg   int
+		want bool
+	}
+	for _, p := range []pass{{0, true}, {0, false}, {1, true}, {1, false}} {
+		t.Run(fmt.Sprintf("rg%d-want=%v", p.rg, p.want), func(t *testing.T) {
+			k := newFakeKernel18573(t)
+			d := &Daemon{store: rethStore2RG18573(t)}
+			k.install(t, d)
+			k.put("ge-0-0-1", "10.0.62.1/24", vipstamp.Proto)
+			k.put("ge-0-0-1", "2001:db8:62::1/64", vipstamp.Proto)
+			k.put("ge-0-0-1", "10.0.62.9/24", vipstamp.Proto) // RG2 leftover
+			if p.want {
+				d.directAddVIPs(p.rg)
+			} else {
+				d.directRemoveVIPs(p.rg)
+			}
+			mustHave18573(t, k, "ge-0-0-1", "10.0.62.1/24", true, true)
+			mustHave18573(t, k, "ge-0-0-1", "2001:db8:62::1/64", true, true)
+			mustHave18573(t, k, "ge-0-0-1", "10.0.62.9/24", false, false)
+			for _, del := range k.dels {
+				if del == "ge-0-0-1 10.0.62.1/24" || del == "ge-0-0-1 2001:db8:62::1/64" {
+					t.Fatalf("RG%d pass deleted RG2's configured VIP: %v", p.rg, k.dels)
+				}
+			}
+		})
+	}
+}
+
+// Review (Z2) on #18579: per-(netdev, VIP) diagnostics are latched, not
+// per-tick. A kernel that accepts REPLACE without recording IFA_PROTO would
+// re-adopt (and log) on every 2 s pass; a REPLACE that keeps failing would
+// Warn every pass. Each logs once until the next commit (resetVIPWarnings).
+func TestDirectVIPAdoptDiagnosticsAreLatched18573(t *testing.T) {
+	var buf strings.Builder
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	k := newFakeKernel18573(t)
+	d := &Daemon{store: rethStore18573(t, "172.16.50.42/24", "2001:db8:50::42/64")}
+	k.install(t, d)
+	k.put("ge-0-0-2.50", "172.16.50.42/24", 0)
+	k.put("ge-0-0-2.50", "2001:db8:50::42/64", vipstamp.Proto)
+	addFn := directVIPAddrAddFn
+	replaceErr := error(nil)
+	directVIPAddrAddFn = func(idx int, p netip.Prefix, replace bool) error {
+		if replace {
+			k.adds = append(k.adds, "replace "+p.String())
+			return replaceErr // accepted (or refused) without recording the stamp
+		}
+		return addFn(idx, p, replace)
+	}
+	count := func(msg string) int { return strings.Count(buf.String(), msg) }
+
+	for i := 0; i < 3; i++ {
+		d.directAddVIPs(1)
+	}
+	if n := count("stamped pre-existing VIP"); n != 1 {
+		t.Fatalf("adoption Info logged %d times over 3 ticks, want 1:\n%s", n, buf.String())
+	}
+	if n := strings.Count(fmt.Sprint(k.adds), "replace 172.16.50.42/24"); n != 3 {
+		t.Fatalf("adoption must still be retried every tick (got %d REPLACEs)", n)
+	}
+
+	replaceErr = syscall.EPERM
+	for i := 0; i < 3; i++ {
+		d.directAddVIPs(1)
+	}
+	if n := count("failed to stamp pre-existing VIP"); n != 1 {
+		t.Fatalf("adopt-failure Warn logged %d times over 3 ticks, want 1:\n%s", n, buf.String())
+	}
+	// A commit re-arms the diagnostics.
+	d.resetVIPWarnings()
+	d.directAddVIPs(1)
+	if n := count("failed to stamp pre-existing VIP"); n != 2 {
+		t.Fatalf("after a commit the Warn must fire again once, got %d total", n)
 	}
 }
