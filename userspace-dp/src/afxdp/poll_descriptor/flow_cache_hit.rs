@@ -391,10 +391,12 @@ pub(super) fn stage_flow_cache_hit(
                     Some(crate::afxdp::forwarding::CachedDecisionInvalid::EnforceChanged) => {
                         crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitEnforceChanged
                     }
-                    Some(crate::afxdp::forwarding::CachedDecisionInvalid::OwnerActiveRedirect)
-                    | Some(
+                    Some(crate::afxdp::forwarding::CachedDecisionInvalid::OwnerActiveRedirect) => {
+                        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitOwnerActiveRedirect
+                    }
+                    Some(
                         crate::afxdp::forwarding::CachedDecisionInvalid::FabricRedirectDestinationNowLocal,
-                    ) => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitOwnerActiveRedirect,
+                    ) => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricRedirectDestinationNowLocal,
                     Some(crate::afxdp::forwarding::CachedDecisionInvalid::FabricLocalWins) => {
                         crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricLocalWins
                     }

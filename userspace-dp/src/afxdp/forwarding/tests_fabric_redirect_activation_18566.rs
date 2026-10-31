@@ -95,12 +95,16 @@ fn cached_redirect_superseded_once_destination_rg_is_local_18566() {
         Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal),
         "a direct-ingress redirect whose destination RG is now local must re-resolve"
     );
-    // The stamp owner does not matter: the RG-epoch fence covers the
-    // RG2-stamped entry, this arm covers every other stamp.
-    for stamp_owner in [0, 2, 7] {
+    // Any stamp owner the re-homed entry can keep fires: an unknown (0) one,
+    // and a locally active one (the RG-epoch fence also covers RG2's own
+    // stamp). A known owner that is NOT active here (7: no such group) does
+    // not: `forward_candidate_owner_departed` would evict the re-homed
+    // ForwardCandidate on its next hit (seat W, #16222 option B).
+    for (stamp_owner, fires) in [(0, true), (2, true), (7, false)] {
         assert_eq!(
-            judge(&state, &ha_both, now_secs, stamp_owner, false, LAN_CLIENT, redirect),
-            Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal),
+            judge(&state, &ha_both, now_secs, stamp_owner, false, LAN_CLIENT, redirect)
+                == Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal),
+            fires,
             "stamp owner {stamp_owner}"
         );
     }
@@ -170,6 +174,31 @@ fn arm_scope_guards_18566() {
         Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal),
         "fabric arrival through the validator"
     );
+    // A destination that is one of this node's own (non-NAT) addresses: the
+    // session path answers LocalDelivery, which the arm never accepts (a
+    // self-targeting reverse to such an address is redirected again by the
+    // slow path). RED if the agreement check accepts LocalDelivery.
+    let own = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1));
+    assert!(
+        interface_nat_local_resolution(&state, own, None).is_none(),
+        "premise: 10.0.61.1 is not an interface-NAT address"
+    );
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    assert_eq!(
+        lookup_forwarding_resolution_with_dynamic(&state, &neighbors, own).resolution.disposition,
+        ForwardingDisposition::LocalDelivery,
+        "premise: the FIB answers the node's own LAN address as LocalDelivery"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(&state, own, None),
+        2,
+        "premise: its connected owner is the now-local RG2"
+    );
+    assert_ne!(
+        judge(&state, &ha_both, now_secs, 1, false, own, redirect),
+        Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal),
+        "own address"
+    );
     // Only a FabricRedirect qualifies; a local candidate is judged by the
     // ForwardCandidate arms.
     let mut candidate = redirect;
@@ -184,13 +213,19 @@ fn arm_scope_guards_18566() {
 /// Seat V (M1): while the FIB still carries the LAN connected row as
 /// peer-owned (built before RG2 was activated here), the slow path keeps the
 /// redirect. The cache arm must then keep it too, or each hit evicts an entry
-/// the slow path re-seeds identically. Agreement is pinned on both shapes:
-/// withheld row -> neither re-homes; local row -> both re-home.
+/// the slow path re-seeds identically. Agreement is pinned on three shapes:
+/// withheld row -> neither re-homes; local row -> both re-home; withheld row
+/// with RG1 inactive (seat V, delta) -> the FIB answers via the WAN, HA
+/// enforcement turns that into HAInactive, and the slow path still keeps the
+/// redirect, so the arm must not accept an HAInactive answer. The third
+/// shape judges with stamp owner RG2 (active), so the stamp-owner guard
+/// cannot mask a candidate-disposition defect.
 #[test]
 fn arm_agrees_with_slow_path_rehome_18566() {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha_both = BTreeMap::from([(1, active(now_secs)), (2, active(now_secs))]);
-    for withheld in [true, false] {
+    let ha_rg1_down = BTreeMap::from([(1, inactive(now_secs)), (2, active(now_secs))]);
+    for (withheld, ha, stamp_owner) in [(true, &ha_both, 1), (false, &ha_both, 1), (true, &ha_rg1_down, 2)] {
         let mut snapshot = nat_snapshot_with_fabric();
         if withheld {
             for iface in &mut snapshot.interfaces {
@@ -233,7 +268,7 @@ fn arm_agrees_with_slow_path_rehome_18566() {
         };
         let slow = crate::afxdp::session_glue::reresolve_stored_session(
             &state,
-            &ha_both,
+            ha,
             &neighbors,
             now_secs,
             &stored,
@@ -251,14 +286,105 @@ fn arm_agrees_with_slow_path_rehome_18566() {
             },
         );
         let slow_keeps_redirect = slow.disposition == ForwardingDisposition::FabricRedirect;
-        let arm_evicts = judge(&state, &ha_both, now_secs, 1, false, LAN_CLIENT, redirect)
+        let arm_evicts = judge(&state, ha, now_secs, stamp_owner, false, LAN_CLIENT, redirect)
             == Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal);
         assert_eq!(
             arm_evicts, !slow_keeps_redirect,
-            "withheld={withheld}: the cache arm (evict={arm_evicts}) must agree with the slow path (keeps redirect={slow_keeps_redirect}, {slow:?})"
+            "withheld={withheld} rg1_active={}: the cache arm (evict={arm_evicts}) must agree with the slow path (keeps redirect={slow_keeps_redirect}, {slow:?})",
+            ha.get(&1).is_some_and(|g| g.active)
         );
         if withheld {
             assert!(slow_keeps_redirect, "premise: with the row withheld the slow path keeps the redirect");
         }
+        if std::ptr::eq(ha, &ha_rg1_down) {
+            let looked_up = enforce_ha_resolution_snapshot(&state, ha, now_secs, looked_up);
+            assert_eq!(
+                looked_up.disposition,
+                ForwardingDisposition::HAInactive,
+                "premise: with RG1 down the fresh answer is HAInactive ({looked_up:?})"
+            );
+        }
     }
+}
+
+/// Seat W (#16222 option B, connected destination). On the node that holds
+/// only the WAN RG, a direct-ingress `lan -> wan` flow owned by the LAN RG
+/// (the peer's) keeps its redirect to the owner. The #16222 cells judge a
+/// routed destination (8.8.8.8), where this arm cannot fire; the live target
+/// 172.16.80.200 is CONNECTED on the now-local RG1. Without the stamp-owner
+/// guard the arm fires there, the slow path re-homes onto reth0.80, and
+/// `forward_candidate_owner_departed` evicts that candidate on the next hit
+/// (stamp owner RG2 inactive): the flow takes the slow path on every packet.
+/// RED on removal of the stamp-owner guard in `fabric_redirect_rehome_agrees`.
+#[test]
+fn option_b_redirect_to_connected_destination_is_kept_18566() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    let server = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    snapshot.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: server.to_string(),
+        mac: "00:11:22:33:44:55".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let redirect = resolve_fabric_redirect(&state).expect("premise: fabric redirect resolves");
+    let split = BTreeMap::from([(1, active(now_secs)), (2, inactive(now_secs))]);
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(&state, server, None),
+        1,
+        "premise: the server is connected on the local WAN RG"
+    );
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: LAN_CLIENT,
+        dst_ip: server,
+        src_port: 52490,
+        dst_port: 5211,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    // Premise: the fresh answer IS a ForwardCandidate via the connected
+    // interface, so only the stamp-owner guard keeps the arm quiet, and that
+    // candidate is one the owner-departed arm evicts under stamp owner RG2.
+    let looked_up =
+        lookup_forwarding_resolution_with_dynamic_for_flow(&state, &neighbors, server, &key).resolution;
+    let candidate = enforce_ha_resolution_snapshot(&state, &split, now_secs, looked_up);
+    assert_eq!(candidate.disposition, ForwardingDisposition::ForwardCandidate, "premise: {candidate:?}");
+    assert_eq!(
+        candidate.egress_ifindex,
+        crate::afxdp::session_glue::connected_ifindex_for_target_in_table(&state, server, None),
+        "premise: the candidate egresses via the server's connected interface"
+    );
+    assert!(
+        forward_candidate_owner_departed(&split, now_secs, 2, candidate),
+        "premise: a re-homed candidate stamped RG2 would be evicted on its next hit"
+    );
+    let neighbors_for_judge = Arc::new(ShardedNeighborMap::new());
+    let verdict = cached_flow_decision_invalid_reason_for_cached_flow(
+        &state,
+        &split,
+        &neighbors_for_judge,
+        now_secs,
+        2,
+        false,
+        false,
+        Some(&key),
+        server,
+        None,
+        redirect,
+        || crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(&state, server, None),
+    );
+    assert_ne!(
+        verdict,
+        Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal),
+        "an option-B redirect owned by the peer's RG must be served, not re-homed into a churn loop"
+    );
 }

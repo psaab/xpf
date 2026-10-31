@@ -2109,7 +2109,8 @@ Round 2 (#18534), against the integ6 loss -P8 profile
   DIRECT ingress whose destination's connected owner RG is known and now
   forwarding-active on this node is superseded
   (`CachedDecisionInvalid::FabricRedirectDestinationNowLocal`, counted
-  under `post_hit_owner_active_redirect`), and the slow path re-homes the
+  under its own `post_hit_fabric_redirect_destination_now_local` arm so a
+  re-home that does not stick is visible), and the slow path re-homes the
   flow to the local egress (`reresolve_stored_session`). No other fence
   caught it: the RG-epoch fence re-checks the entry's STAMP owner, which for
   a `wan -> lan` reverse flow is the session's WAN RG, not the LAN RG being
@@ -2119,11 +2120,21 @@ Round 2 (#18534), against the integ6 loss -P8 profile
   them as `ha_inactive`, for over 20 s. Fabric arrivals (owned by the #10314
   and owner-active arms), unknown destination owners and standalone nodes
   are unchanged; a FabricRedirect hit pays one HA-map lookup. The arm fires
-  only where the slow path would re-home the flow
-  (`fabric_redirect_rehome_agrees`): while the FIB still carries the
-  connected row as peer-owned (built before the activation), the slow path
-  keeps the redirect, and evicting would re-seed it on every packet, so the
-  arm waits for the republish. That check costs one FIB lookup per
+  only where the slow path re-homes the flow into an entry the cache then
+  keeps (`fabric_redirect_rehome_agrees`); anywhere else evicting re-seeds
+  the redirect, or re-homes into a candidate the next hit evicts, once per
+  packet. Concretely: the entry's stamp owner must be unknown or active here
+  (a peer-owned stamp is the #16222 option-B redirect, and a re-homed
+  ForwardCandidate under it would be evicted by
+  `forward_candidate_owner_departed` on every hit), and the fresh
+  HA-enforced answer must be a ForwardCandidate or MissingNeighbor via the
+  target's connected interface and not the fabric. That keeps the redirect
+  while the FIB still carries the connected row as peer-owned (built before
+  the activation; the arm waits for the republish) and for a self-targeting
+  alias reverse, whose fresh answer is LocalDelivery and which the slow path
+  always redirects again (#18531). The check applies the session path's
+  interface-NAT local answer before its FIB lookup: the bare FIB calls a
+  local SNAT address MissingNeighbor on its connected /24. The check costs one FIB lookup per
   FabricRedirect hit whose destination RG is local, a state that lasts until
   the entry is re-homed. Routed destinations (no connected owner) are not
   covered yet (#18588).

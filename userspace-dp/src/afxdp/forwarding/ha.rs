@@ -672,6 +672,7 @@ fn cached_flow_decision_invalid_reason_inner(
             ha_state,
             dynamic_neighbors,
             now_secs,
+            cached_owner_rg_id,
             flow_key,
             target_ip,
             install_table,
@@ -995,16 +996,35 @@ pub(in crate::afxdp) fn fabric_redirect_destination_now_local(
             .is_some_and(|group| group.is_forwarding_active(now_secs))
 }
 
-/// #18566 (review seat V, M1): the slow path keeps a stored FabricRedirect
-/// when the fresh HA-enforced FIB candidate for the target is itself a
-/// redirect / HA-inactive, or a ForwardCandidate that does not egress via the
-/// target's connected interface (or egresses via the fabric); it replaces the
-/// redirect otherwise (`rehome_or_retain_fabric_redirect`).
-/// The cache arm must apply the same test, or it evicts an entry the slow
-/// path then re-seeds as the same redirect, once per packet. That happens
-/// while the FIB still carries the connected row as peer-owned (built before
-/// the activation): the arm waits for the republish that makes the row
-/// local, and the slow path re-homes on the next hit after it.
+/// #18566 (review seats V M1 and W): fire only when the slow path will
+/// replace the redirect with an answer the cache then KEEPS. Otherwise the arm
+/// evicts an entry the slow path re-seeds as the same redirect, or re-homes
+/// into a ForwardCandidate the next hit evicts again, and the flow takes the
+/// slow path on every packet (the #16222 churn class).
+///
+/// Two conditions, both mirrors of an existing decision:
+///
+/// - **The re-homed entry survives its next hit.** A ForwardCandidate whose
+///   seed-stamp owner is known and not locally active is evicted by
+///   `forward_candidate_owner_departed` on every hit. That is the #16222
+///   option-B posture: a direct-ingress flow owned by the peer's RG keeps its
+///   redirect to the owner even when its destination is connected on a local
+///   RG. So a known, inactive stamp owner never fires. In the #18566 shape the
+///   stamp owner is the RG this node already held, which is active.
+/// - **The slow path re-homes.** `rehome_or_retain_fabric_redirect` replaces a
+///   stored redirect for a connected destination whose owner is active only
+///   with a ForwardCandidate via the target's connected interface that is not
+///   the fabric. It keeps the redirect for a fresh redirect or HA-inactive
+///   answer, for a candidate via another interface (FIB lag after the
+///   activation), and for a self-targeting alias reverse, whose fresh answer is
+///   LocalDelivery and which `alias_reverse_return_resolution` always redirects
+///   again (#18531). So the arm accepts only a ForwardCandidate, or a
+///   MissingNeighbor (the same egress before its neighbor resolves), via the
+///   connected interface and not the fabric. LocalDelivery never fires, and
+///   the lookup applies the session path's interface-NAT local answer first,
+///   so a local SNAT address is LocalDelivery here too, not the
+///   MissingNeighbor the bare FIB gives it.
+///
 /// Evaluated only for a FabricRedirect hit whose destination RG is local.
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn fabric_redirect_rehome_agrees(
@@ -1012,10 +1032,31 @@ fn fabric_redirect_rehome_agrees(
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     now_secs: u64,
+    cached_owner_rg_id: i32,
     flow_key: Option<&crate::session::SessionKey>,
     target_ip: IpAddr,
     install_table: Option<&str>,
 ) -> bool {
+    if cached_owner_rg_id > 0
+        && !ha_state
+            .get(&cached_owner_rg_id)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+    {
+        return false;
+    }
+    // The session path answers an interface-NAT local address before any FIB
+    // lookup (`lookup_forwarding_resolution_for_session_with_cache`: the
+    // table-scoped answer, or the wildcard one when the install table is
+    // unresolvable), and the
+    // FIB alone would call that address MissingNeighbor on its connected /24
+    // (seat W). That answer is LocalDelivery, which this arm never accepts:
+    // for the self-targeting alias reverse the slow path redirects again.
+    if super::interface_nat_local_resolution(forwarding, target_ip, install_table).is_some()
+        || crate::afxdp::session_glue::local_resolution_without_install_table(forwarding, target_ip)
+            .is_some()
+    {
+        return false;
+    }
     let lookup = match (install_table, flow_key) {
         (Some(table), Some(key)) => super::lookup_forwarding_resolution_with_dynamic_for_flow_in_table(
             forwarding,
@@ -1044,18 +1085,12 @@ fn fabric_redirect_rehome_agrees(
         target_ip,
         install_table,
     );
-    match candidate.disposition {
-        // The slow path converts these to (or keeps) the redirect.
-        ForwardingDisposition::FabricRedirect | ForwardingDisposition::HAInactive => false,
-        // Re-homed only via the connected interface, never via the fabric.
-        ForwardingDisposition::ForwardCandidate => {
-            connected > 0
-                && candidate.egress_ifindex == connected
-                && !ingress_is_fabric(forwarding, candidate.egress_ifindex)
-        }
-        // Any other candidate (e.g. MissingNeighbor) replaces the redirect.
-        _ => true,
-    }
+    matches!(
+        candidate.disposition,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+    ) && connected > 0
+        && candidate.egress_ifindex == connected
+        && !ingress_is_fabric(forwarding, candidate.egress_ifindex)
 }
 
 /// #16217 (Wire18, B2): re-validate a fabric-established (adopted) mark

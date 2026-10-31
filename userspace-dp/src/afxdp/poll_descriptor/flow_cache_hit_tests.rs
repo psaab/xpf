@@ -4251,10 +4251,12 @@ fn direct_member_ingress_serves_cached_redirect_owner_mismatch_16222() {
 
 /// #18566 stage wiring: a direct-ingress hit on a cached FabricRedirect whose
 /// destination's connected owner (RG2) is now active here falls through to
-/// the slow path, attributed to the owner-active-redirect arm, instead of
-/// being served back over the fabric to a peer that no longer owns RG2. The
-/// stamp owner is RG1, so no lookup fence touches the entry. RED on revert
-/// of the FabricRedirect branch in the validator (outcome Consumed, arm 0).
+/// the slow path, attributed to its own eviction arm, instead of being served
+/// back over the fabric to a peer that no longer owns RG2. The stamp owner is
+/// RG1 (also active here, so the re-homed entry would be kept), and no lookup
+/// fence touches the entry. RED on revert of the FabricRedirect branch in the
+/// validator (outcome Consumed, arm 0) and on folding the arm back into the
+/// owner-active-redirect counter.
 #[test]
 fn direct_ingress_redirect_to_now_local_destination_falls_through_18566() {
     const LAN_UNIT_IFINDEX: i32 = 41;
@@ -4265,6 +4267,16 @@ fn direct_ingress_redirect_to_now_local_destination_falls_through_18566() {
             "172.16.50.0/24".parse().expect("destination prefix"),
         )],
     );
+    // The FIB's connected row too, so the slow path's fresh answer is the
+    // LAN unit (MissingNeighbor before the neighbor resolves) and the arm's
+    // agreement check sees a re-home.
+    fixture.forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net("172.16.50.0/24".parse().expect("destination prefix")),
+        host: std::net::Ipv4Addr::new(172, 16, 50, 1),
+        ifindex: LAN_UNIT_IFINDEX,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
     fixture.forwarding.egress.insert(
         LAN_UNIT_IFINDEX,
         EgressInterface {
@@ -4279,14 +4291,16 @@ fn direct_ingress_redirect_to_now_local_destination_falls_through_18566() {
         },
     );
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    fixture.ha_state.insert(
-        2,
-        HAGroupRuntime {
-            active: true,
-            watchdog_timestamp: now_secs,
-            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
-        },
-    );
+    for rg in [1, 2] {
+        fixture.ha_state.insert(
+            rg,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs,
+                lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+            },
+        );
+    }
     assert_eq!(
         crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
             &fixture.forwarding,
@@ -4316,10 +4330,17 @@ fn direct_ingress_redirect_to_now_local_destination_falls_through_18566() {
             ..StageSeed::default()
         },
     );
-    let arm = crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitOwnerActiveRedirect as usize;
+    let arm =
+        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricRedirectDestinationNowLocal as usize;
     assert_eq!(
         run.flow_cache_evictions_by_arm[arm], 1,
-        "the stale redirect must be evicted under the owner-active-redirect arm"
+        "the stale redirect must be evicted under its own #18566 arm"
+    );
+    let owner_active =
+        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitOwnerActiveRedirect as usize;
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[owner_active], 0,
+        "and not hidden under the owner-active-redirect arm"
     );
     assert!(
         matches!(run.outcome, FlowCacheOutcome::FallThrough),
