@@ -61,10 +61,13 @@ import (
 // THIS node's own address and the gate no-ops in steady state. A synced text
 // that DOES change this node's address (an operator edited node0's em0 on node1)
 // is refused here: applying it would move this node to an address the peer
-// does not target, while refusing keeps the pair connected on the old one. As
-// on #8965's synced path, SyncApply has already promoted the text, so a restart
-// applies it — which is the documented procedure. The synced call site passes
-// the config captured BEFORE SyncApply as oldCfg.
+// does not target, while refusing keeps the pair connected on the old one. The
+// synced call site runs this gate INSIDE Store.SyncApplyGated, on the compiled
+// peer text and BEFORE anything is promoted (review seat AH): a refusal after
+// promotion left the renumber active, so the re-push after the nack, any later
+// push, a later local commit (whose running-config arm then abstains) and
+// every background applier would have applied it. It passes the config
+// captured before SyncApply as oldCfg.
 func clusterControlLocalAddressCommitPreflight(running *cluster.Manager, oldCfg, newCfg *config.Config) error {
 	if running == nil || !clusterTopologyConfigured(newCfg) {
 		return nil
@@ -123,10 +126,16 @@ func cidrListHasIP18606(list []string, ip net.IP) bool {
 	return false
 }
 
-// controlLinkStaticAddrs18606 returns the configured static addresses of the
-// unit a control-interface ref names: the last dot followed by a number names
-// the unit, anything else is unit 0 — the split the cluster monitor and the
-// #16425 gate use. nil when the interface or unit is not declared.
+// controlLinkStaticAddrs18606 returns the static addresses networkd actually
+// RENDERS for the unit a control-interface ref names: the last dot followed by
+// a number names the unit, anything else is unit 0 (the split the cluster
+// monitor and the #16425 gate use). It applies networkd's per-family rule
+// (pkg/networkd generateNetwork, #2986): a family whose DHCP client is on
+// renders none of its static addresses — IPv4 statics under `dhcp`, IPv6
+// statics under `dhcpv6` (the compiler's unitHasDHCPv6) — so adding `dhcp` to a
+// unit while keeping its static address H removes H from the kernel and is a
+// renumber like any other (review seat AE). nil when the interface or unit is
+// not declared.
 func controlLinkStaticAddrs18606(cfg *config.Config, ref string) []string {
 	if cfg == nil {
 		return nil
@@ -145,7 +154,19 @@ func controlLinkStaticAddrs18606(cfg *config.Config, ref string) []string {
 	if u == nil {
 		return nil
 	}
-	return u.Addresses
+	dhcpv6 := u.DHCPv6 || u.DHCPv6Client != nil
+	var out []string
+	for _, a := range u.Addresses {
+		ip, _, err := net.ParseCIDR(a)
+		if err != nil {
+			continue
+		}
+		if ip.To4() != nil && u.DHCP || ip.To4() == nil && dhcpv6 {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // controlLocalAddressMoveRefusal18606 is the operator-facing text. It names the
@@ -157,7 +178,9 @@ func controlLocalAddressMoveRefusal18606(have, want string) error {
 		"the peer does not target, and the peer's matching peer-address change "+
 		"cannot be applied live either, so the two nodes are durably partitioned.\n"+
 		"To renumber the control link: set the new address on BOTH nodes and "+
-		"restart xpfd on both, or take the cluster down before the move. Do NOT "+
+		"restart xpfd on both, offline — stop xpfd on both nodes, put the new "+
+		"address in each node's boot configuration, and start both; a boot apply "+
+		"runs no preflight and the heartbeat starts fresh on the new address. Do NOT "+
 		"commit the change on each node separately while both are running — that "+
 		"produces the same partition by hand", have, want)
 }

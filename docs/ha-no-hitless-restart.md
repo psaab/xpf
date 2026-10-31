@@ -266,8 +266,29 @@ ends of a point-to-point control link atomically from one end of it.**
   On the peer-synced path it is safe for #8965's reason — every shipped
   cluster config keeps the control address inside `groups node0`/`node1`,
   so a synced text compiles to this node's own address — and a synced text
-  that does change it is refused, which keeps the pair connected on the old
-  address; the promoted text applies at the restart.
+  that does change it is refused **before it is promoted**: the gate runs
+  inside `Store.SyncApplyGated` on the compiled peer text, so the standby
+  keeps its config, nacks, and the primary's re-push is refused the same
+  way (the standby reads config-sync stale until the operator fixes the
+  primary). Refusing after promotion — where the #8965/#8987/#9121 synced
+  checks still sit — leaves the refused text active, and every background
+  applier (DHCP callback, feeds, config poll, apply-debt retry) applies the
+  active config with no preflight.
+
+  **To renumber the control link**, do it offline: stop `xpfd` on both
+  nodes, put the new address in each node's boot configuration (the daemon
+  starts from `/etc/xpf/.configdb`; with `active.json` removed it
+  bootstraps from `/etc/xpf/xpf.conf`, see `docs/ha-cluster-test-plan.md`),
+  and start both. A boot apply runs no preflight, and the heartbeat starts
+  fresh on the new address.
+
+  The address set compared is the one networkd RENDERS: a family whose DHCP
+  client is on renders none of its static addresses, so adding `dhcp` to the
+  control unit while keeping the bound static address is refused like any
+  renumber. Residuals: removing `dhcp` from a dhcp+static unit while the
+  heartbeat is on the lease (the lease is in no config, so the gate
+  abstains), and a reboot-recovered pending `commit confirmed` whose
+  rollback runs no cluster gates (as for #8965).
 
 **#9178 — the address gate passed the DELETION case.** #8965's decision
 returned nil whenever *either* side was empty, on the reasoning that

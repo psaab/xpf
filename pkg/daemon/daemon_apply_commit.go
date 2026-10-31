@@ -674,8 +674,29 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	d.pendingRenameMu.Lock()
 	oldActive := d.store.ActiveConfig()
 	var syncErr error
-	compiled, syncErr = d.store.SyncApply(configText, chassisPreserve)
+	// #18606: the local control-address gate runs INSIDE SyncApply, on the
+	// compiled peer text and BEFORE anything is promoted. Refusing after
+	// promotion (where the #8965-family synced checks below still sit) leaves
+	// the refused text active: the identical re-push after the nack, any later
+	// push, a later local commit (whose running-config arm then abstains) and
+	// every background applier (DHCP callback, feeds, config poll, apply-debt
+	// retry) would apply it with no preflight, and the partition arrives
+	// silently within one reconcile cadence. Refused here, the standby keeps
+	// its config, nacks, and every re-push is refused the same way.
+	var localAddrRefused error
+	compiled, syncErr = d.store.SyncApplyGated(configText, chassisPreserve, func(c *config.Config) error {
+		localAddrRefused = clusterControlLocalAddressCommitPreflight(d.cluster, oldActive, c)
+		return localAddrRefused
+	})
 	d.pendingRenameMu.Unlock()
+	if localAddrRefused != nil {
+		slog.Error("cluster: refusing a peer-synced change of this node's control-link address; "+
+			"nothing was promoted and this node keeps its running config. The pair cannot be "+
+			"renumbered live: change the address on BOTH nodes offline (stop xpfd on both, or take "+
+			"the cluster down) and start them on the new config",
+			"err", localAddrRefused)
+		return nil, localAddrRefused
+	}
 	if syncErr != nil {
 		return nil, syncErr
 	}
@@ -769,23 +790,6 @@ func (d *Daemon) syncAndApplyWithAncestry(
 			"err", ferr)
 		d.reconcileManagementAfterPromotion(compiled, "peer-synced control-interface move refused")
 		return nil, ferr
-	}
-
-	// #18606: the LOCAL end of the control link, on the peer-sync path. Safe
-	// for #8965's reason: the control address sits inside `groups node0` /
-	// `node1` in every shipped cluster config, so a synced text compiles to
-	// this node's own address and the gate no-ops in steady state. A synced
-	// text that changes this node's address is refused: applying it would move
-	// this node off the address the peer targets, while refusing keeps the
-	// pair connected (see clusterControlLocalAddressCommitPreflight).
-	if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, oldActive, compiled); lerr != nil {
-		slog.Error("cluster: refusing to apply a peer-synced change of this node's "+
-			"control-link address live; applying it would move this node's cluster "+
-			"comms to an address the peer does not target and durably partition the "+
-			"pair — configure the new address on BOTH nodes and restart xpfd on both",
-			"err", lerr)
-		d.reconcileManagementAfterPromotion(compiled, "peer-synced control-address change refused")
-		return nil, lerr
 	}
 
 	// #9121: the CONFIG-SYNC endpoint half, on the peer-sync path.

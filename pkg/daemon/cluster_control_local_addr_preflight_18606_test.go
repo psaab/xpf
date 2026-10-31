@@ -189,20 +189,102 @@ func TestControlAddressRenumberRefusedByCommitConfirmed18606(t *testing.T) {
 	}
 }
 
-// The peer-synced path: a synced text that renumbers THIS node is refused
-// before the live apply. SyncApply has already promoted it (as on #8965's
-// synced path); the refusal keeps the running comms on the address the peer
-// targets, and a restart applies the promoted text.
+// renumberSyncText18606 is a peer-pushed config that renumbers THIS node's
+// (node 0) control address to 10.99.14.5; extra is appended inside the text so
+// a "later push" can differ from the first while carrying the same renumber.
+func renumberSyncText18606(extra string) string {
+	return `chassis { cluster { cluster-id 1; node 0; authentication-key test-cluster-psk-18606;
+	control-interface em0; peer-address 10.99.14.2; } }
+interfaces { em0 { unit 0 { family inet { address 10.99.14.5/30; } } } }
+` + extra
+}
+
+// The peer-synced path refuses a renumber BEFORE SyncApply promotes it (review
+// seat AH): the refused text never becomes active, so (a) the identical
+// re-push after the nack, (b) a later push carrying the renumber and (c) a
+// later local commit are all still refused, and (d) every background applier
+// — they apply the ACTIVE config with no preflight — keeps applying the
+// unchanged text. With the gate after promotion, the first refusal left the
+// renumber active, the running-config arm then abstained, and all four
+// passed it through.
 func TestControlAddressRenumberRefusedBySyncedApply18606(t *testing.T) {
 	store := committedLocalAddrStore18606(t)
 	store.ExitConfigure()
 	d := runningLocalAddrDaemon18606(store)
-	text := `chassis { cluster { cluster-id 1; node 0; authentication-key test-cluster-psk-18606;
-	control-interface em0; peer-address 10.99.14.2; } }
-interfaces { em0 { unit 0 { family inet { address 10.99.14.5/30; } } } }
-`
-	_, err := d.syncAndApplyWithAncestry(context.Background(), text, nil, nil)
+	before := store.ActiveTree().Format()
+
+	_, err := d.syncAndApplyWithAncestry(context.Background(), renumberSyncText18606(""), nil, nil)
 	requireLocalAddrRefusal18606(t, "syncAndApplyWithAncestry", err)
+	requireActiveUnchanged18606(t, store, before, "the first refused push")
+
+	// (a) the primary clears its marker after the nack and re-pushes the same text.
+	_, err = d.syncAndApplyWithAncestry(context.Background(), renumberSyncText18606(""), nil, nil)
+	requireLocalAddrRefusal18606(t, "the identical re-push", err)
+	requireActiveUnchanged18606(t, store, before, "the identical re-push")
+
+	// (b) a later push that also changes something else, carrying the same renumber.
+	_, err = d.syncAndApplyWithAncestry(context.Background(), renumberSyncText18606("system { host-name later-push; }\n"), nil, nil)
+	requireLocalAddrRefusal18606(t, "a later push carrying the renumber", err)
+	requireActiveUnchanged18606(t, store, before, "a later push")
+}
+
+// (c) after a refused push, a local commit of the renumber is still refused:
+// the running config still names the bound address.
+func TestLocalCommitAfterRefusedPushStillRefuses18606(t *testing.T) {
+	store := committedLocalAddrStore18606(t)
+	store.ExitConfigure()
+	d := runningLocalAddrDaemon18606(store)
+	if _, err := d.syncAndApplyWithAncestry(context.Background(), renumberSyncText18606(""), nil, nil); err == nil {
+		t.Fatal("precondition: the synced renumber was not refused")
+	}
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteFromInput("interfaces em0 unit 0 family inet address 10.99.14.1/30"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetFromInput("interfaces em0 unit 0 family inet address 10.99.14.5/30"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "renumber after a refused push", peerSyncNever)
+	requireLocalAddrRefusal18606(t, "a local commit after a refused push", err)
+}
+
+// (d) a background applier after the refusal applies the UNCHANGED text. The
+// background appliers (boot, DHCP callback, feeds, config poll, DNS refresh,
+// the #9811 retry) apply the ACTIVE config with no preflight, which is why the
+// refusal must happen before promotion (review seats AH and AE). Drive the real
+// #9811 retry operation and capture what reaches applyConfigLocked.
+func TestBackgroundApplyAfterRefusedPushSeesUnchangedConfig18606(t *testing.T) {
+	store := committedLocalAddrStore18606(t)
+	store.ExitConfigure()
+	d := runningLocalAddrDaemon18606(store)
+	before := store.ActiveTree().Format()
+	if _, err := d.syncAndApplyWithAncestry(context.Background(), renumberSyncText18606(""), nil, nil); err == nil {
+		t.Fatal("precondition: the synced renumber was not refused")
+	}
+	requireActiveUnchanged18606(t, store, before, "the refused push")
+
+	var applied *config.Config
+	d.applyBodyForTest = func(cfg *config.Config) { applied = cfg }
+	if err := configApplyReassertFn(d); err != nil {
+		t.Fatalf("the #9811 retry apply: %v", err)
+	}
+	if applied == nil {
+		t.Fatal("precondition: the #9811 retry did not reach applyConfigLocked")
+	}
+	if got := controlLinkStaticAddrs18606(applied, "em0"); len(got) != 1 || got[0] != "10.99.14.1/30" {
+		t.Fatalf("after the refused push, the #9811 background retry applied em0 = %v, want the unchanged "+
+			"[10.99.14.1/30]: the refused renumber reached the dataplane with no preflight", got)
+	}
+}
+
+func requireActiveUnchanged18606(t *testing.T, store *configstore.Store, before, what string) {
+	t.Helper()
+	if after := store.ActiveTree().Format(); after != before {
+		t.Fatalf("%s changed the ACTIVE config; a refusal must promote nothing:\n--- before\n%s\n--- after\n%s",
+			what, before, after)
+	}
 }
 
 // The steady-state peer sync carries THIS node's unchanged address (the
@@ -270,5 +352,54 @@ func TestControlLocalAddressGateIsWiredAtEveryApplyPath18606(t *testing.T) {
 		if sibling[path] == 0 {
 			t.Errorf("%s runs the #18606 gate without its #8965 sibling", path)
 		}
+	}
+}
+
+// The gate compares the address set networkd RENDERS, not the configured one
+// (review seat AE): adding `dhcp` to the control unit while keeping its static
+// address suppresses that address (networkd renders no static IPv4 for a
+// DHCPv4 row), which strands a heartbeat bound to it and is refused.
+func TestAddingDHCPToTheControlUnitIsARenumber18606(t *testing.T) {
+	running := cluster.NewManager(0, 1)
+	running.SetHeartbeatEndpointForTesting("10.99.14.1", "10.99.14.2", "em0")
+	static := compiledCfg18606(t, localAddrCfgLines18606("10.99.14.1/30"))
+	withDHCP := compiledCfg18606(t, append(localAddrCfgLines18606("10.99.14.1/30"), "interfaces em0 unit 0 family inet dhcp"))
+	if got := controlLinkStaticAddrs18606(withDHCP, "em0"); len(got) != 0 {
+		t.Fatalf("precondition: a dhcp unit rendered static IPv4 %v, want none (networkd suppresses them)", got)
+	}
+	if err := clusterControlLocalAddressCommitPreflight(running, static, withDHCP); err == nil {
+		t.Fatal("adding dhcp while keeping the bound static address strands the heartbeat and must be refused")
+	}
+	// The reverse — removing dhcp while the heartbeat is on the LEASE — is a
+	// documented residual: the lease is in no config, so the running-config
+	// arm abstains.
+	running.SetHeartbeatEndpointForTesting("10.99.14.77", "10.99.14.2", "em0")
+	if err := clusterControlLocalAddressCommitPreflight(running, withDHCP, static); err != nil {
+		t.Fatalf("removing dhcp under a lease-bound heartbeat is the documented abstain, got %v", err)
+	}
+}
+
+// The IPv6 twin: `family inet6 dhcpv6` suppresses the unit's static IPv6
+// addresses the same way, and it must not suppress the IPv4 ones (the rule is
+// per family).
+func TestAddingDHCPv6ToTheControlUnitIsARenumber18606(t *testing.T) {
+	running := cluster.NewManager(0, 1)
+	running.SetHeartbeatEndpointForTesting("fd18:606::1", "fd18:606::2", "em0")
+	lines := []string{
+		"chassis cluster cluster-id 1",
+		"chassis cluster node 0",
+		"chassis cluster authentication-key test-cluster-psk-18606",
+		"chassis cluster control-interface em0",
+		"chassis cluster peer-address fd18:606::2",
+		"interfaces em0 unit 0 family inet6 address fd18:606::1/64",
+		"interfaces em0 unit 0 family inet address 10.99.14.1/30",
+	}
+	static := compiledCfg18606(t, lines)
+	withDHCPv6 := compiledCfg18606(t, append(append([]string{}, lines...), "interfaces em0 unit 0 family inet6 dhcpv6"))
+	if got := controlLinkStaticAddrs18606(withDHCPv6, "em0"); len(got) != 1 || got[0] != "10.99.14.1/30" {
+		t.Fatalf("a dhcpv6 unit rendered %v, want only its IPv4 static (the suppression is per family)", got)
+	}
+	if err := clusterControlLocalAddressCommitPreflight(running, static, withDHCPv6); err == nil {
+		t.Fatal("adding dhcpv6 while keeping the bound static IPv6 address strands the heartbeat and must be refused")
 	}
 }
