@@ -350,7 +350,18 @@ do_status() {
     if [[ -n "$skips" ]]; then
         while IFS= read -r line; do echo "claim:    ${line#\# }"; done <<<"$skips"
     else
-        echo "claim:    every pinned v4 address was claim-probed (no skip recorded)"
+        # Say only what was checked: `up` probes NEW addresses only, so an
+        # address held when `up` ran (and the deprecated alias) was never
+        # probed by it.
+        echo "claim:    no claim-probe skip recorded (addresses already held when \`up\` ran are not probed; test-connectivity's claim cell checks IPERF_TARGET4 every run)"
+    fi
+    # #18576: the deprecated alias, reported as `up` reports it.
+    if [[ -n "$TARGET_ALIAS_V4_DEPRECATED" && "$TARGET_ALIAS_V4_DEPRECATED" != "$MOUSE_TARGET_V4" \
+          && "$TARGET_ALIAS_V4_DEPRECATED" != "$TARGET_ALIAS_V4" && "$MOUSE_TARGET_VLAN" == "80" ]]; then
+        local dep_held=no dep_pinned=no
+        inc exec "$ref" -- ip -4 addr show eth0 2>/dev/null | grep -q "inet ${TARGET_ALIAS_V4_DEPRECATED}/" && dep_held=yes
+        inc exec "$ref" -- sh -c "grep -q 'addr replace ${TARGET_ALIAS_V4_DEPRECATED}/' /etc/systemd/system/mouse-addr.service" 2>/dev/null && dep_pinned=yes
+        echo "deprecated: ${TARGET_ALIAS_V4_DEPRECATED} held=${dep_held} pinned=${dep_pinned}; kept only while held, never claimed anew, never to be measured (dual-held); EXPIRY in the env file: delete once the hard-coded follow-ups are retargeted and no open branch predates #18619 (#18576)"
     fi
     echo
     echo "Point a harness at it with:  MOUSE_TARGET_V4=${MOUSE_TARGET_V4}"

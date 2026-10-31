@@ -277,6 +277,17 @@ everywhere = set.intersection(*names.values())
 for f, ns in sorted(names.items()):
     for n in sorted(ns - everywhere - guard):
         print(f"FAIL {f} assigns {n}, which is neither in cluster-env.sh's guard list nor assigned by every *cluster.env")
+# The every-env exemption holds only for an UNCONDITIONAL assignment: a
+# `${NAME:-...}` default would keep the previous env's value.
+for f in files:
+    for n, val in re.findall(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$", f.read_text(), re.M):
+        if n in everywhere - guard and re.match(r'"?\$\{' + n + r':?[-=]', val):
+            print(f"FAIL {f.name} assigns exempt {n} conditionally ({val.strip()}); guard it or assign it unconditionally")
+# Every name cluster-env.sh exports must be guarded, except the env selector
+# itself and the guard's own record.
+exported = set(" ".join(re.findall(r"^export\s+(.*)$", src, re.M)).split())
+for n in sorted(exported - guard - {"PROJECT_ROOT", "BPFRX_CLUSTER_ENV", "_XPF_CLUSTER_ENV_FILE", "_XPF_CLUSTER_ENV_STATE"}):
+    print(f"FAIL cluster-env.sh exports {n}, which is not in the guard list")
 print(f"OK {len(files)} files, {len(set.union(*names.values()))} names, {len(guard)} guarded")
 PY
 )"

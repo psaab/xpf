@@ -234,9 +234,22 @@ st="$(run_status STUB_PREV_MARKER="$OLD_MARK")"
     || fail "#18576: status does not show the recorded skip:
 ${st}"
 st="$(run_status)"
-[[ "$st" == *"claim:    every pinned v4 address was claim-probed (no skip recorded)"* ]] \
-    && pass "status says so when no skip is recorded" \
-    || fail "#18576: status has no claim line without a skip:
+# It must claim only what was checked: held addresses are never probed by `up`.
+[[ "$st" == *"claim:    no claim-probe skip recorded (addresses already held when \`up\` ran are not probed; test-connectivity's claim cell checks IPERF_TARGET4 every run)"* \
+   && "$st" != *"was claim-probed"* ]] \
+    && pass "status says no skip is recorded, without claiming every address was probed" \
+    || fail "#18576: status has no claim line without a skip, or overclaims:
+${st}"
+# The deprecated alias is reported by status, with its expiry, as up reports it.
+st="$(run_status BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_HELD="172.16.80.201 172.16.80.202 172.16.80.200")"
+[[ "$st" == *"deprecated: 172.16.80.200 held=yes pinned=yes; kept only while held"*"EXPIRY"* ]] \
+    && pass "status reports the held deprecated .200 pin with its expiry" \
+    || fail "#18576: status does not report the held deprecated pin:
+${st}"
+st="$(run_status BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env)"
+[[ "$st" == *"deprecated: 172.16.80.200 held=no"* ]] \
+    && pass "status reports a deprecated alias that is not held" \
+    || fail "#18576: status does not report an unheld deprecated alias:
 ${st}"
 # A held address is not re-probed: the loss shape (.201 + .202 held) with a
 # foreign reply staged for .202 still pins, since .202 is not new.
