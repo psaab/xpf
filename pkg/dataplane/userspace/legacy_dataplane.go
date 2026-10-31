@@ -445,6 +445,31 @@ func (a *LegacyDataPlaneAdapter) SetFeedSnapshots(overlay map[string][]string) {
 	m.SetFeedSnapshots(overlay)
 }
 
+// BeginTransferPreActivation forwards the #18559 make-before-break mark.
+func (a *LegacyDataPlaneAdapter) BeginTransferPreActivation(rgIDs []int, until time.Time) {
+	if m, err := a.managerOrErr(); err == nil {
+		m.BeginTransferPreActivation(rgIDs, until)
+	}
+}
+
+// PublishTransferPreActivation forwards the #18559 helper publish.
+func (a *LegacyDataPlaneAdapter) PublishTransferPreActivation() error {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return err
+	}
+	return m.PublishTransferPreActivation()
+}
+
+// EndTransferPreActivation forwards the #18559 release.
+func (a *LegacyDataPlaneAdapter) EndTransferPreActivation(rgIDs []int) (bool, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false, err
+	}
+	return m.EndTransferPreActivation(rgIDs)
+}
+
 // PublishRouteOverlaySnapshot forwards the routes-only partial republish
 // (#1827) with the normal scheduler disposition. Returns whether a snapshot was
 // published (duplicate-skips and helperless caching return false).

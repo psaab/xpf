@@ -489,14 +489,23 @@ and DOES gate merges). Never cite a green watch as a passed gate:
   created==closed session balance are the tripwires). Appends one line
   per run to `/var/worktrees/.cache/smoke-watch/smoke-watch.log`.
 - The parent reads the latest lines at every landing-queue check. A NEW
-  failure (not the known external Internet-IPv6 one) or a tip regression
+  failure (one not listed under "Known product failures (tracked)" in
+  `docs/regression-test-matrix.md`, and not a "Known environment rows"
+  cell whose off-path control still fails) or a tip regression
   vs the previous line = a correctness feedback signal: file an issue
   immediately and forward-fix it in the normal queue — do NOT stop or
   slow the landing queue for it, and never hold a PR for the watch.
-- Known-good baseline (2026-10-13): 25 passed / 1 failed, the single
-  failure being LAN host -> internet IPv6 via an external address
-  (environment, not a product regression). Deviations from that
-  baseline are the signal; the baseline itself is not.
+- The baseline is the deployed master's own latest line. The cells
+  expected red, each with its issue, are listed under "Known product
+  failures (tracked)" in `docs/regression-test-matrix.md`, each with
+  its owner. The 2026-10-13 baseline excused
+  "LAN host -> internet IPv6" as environment without a control. Its
+  traceroute half was a product defect (ping to a live host worked
+  while every hop past the firewall was `???`, #18174); its ping half
+  is a dead target, a "Known environment rows" cell until the harness is
+  retargeted (#18556).
+  Deviations from the baseline are the signal; the baseline itself is
+  not.
 - Perf mistakes ride the same loop: when a perf-relevant merge lands,
   note the tip in the log; a connectivity or throughput datapoint that
   regresses against the prior tip gets an issue + forward-fix, in band.
@@ -556,8 +565,9 @@ what else catches its defect.
   trigger for the parent, not a report:** a parent response that
   reads a STALE baseline and does not dispatch that cluster's
   gate slot in the same response is the same campaign failure as
-  an unactioned verdict. A NEW failure (not the known external
-  Internet-IPv6 one) on any cluster files an issue immediately
+  an unactioned verdict. A NEW failure (one not tracked in the
+  matrix's "Known product failures", and not an environment row whose
+  off-path control still fails) on any cluster files an issue immediately
   and enters the normal queue — it never holds the landing queue.
   Downstream skills (`security-matrix`, `failover-test`,
   `perf-test`, `userspace-ha-validation`) run their own topology
@@ -840,7 +850,7 @@ For each PR an agent opens:
 4. **Gate on forwarding + throughput (three clusters in parallel).**
    The rows a PR must pass, by area, are in
    `docs/regression-test-matrix.md` (tier 0 before any cluster time; HA
-   and session PRs add tier-3 H1–H7). The mechanics below still apply.
+   and session PRs add tier-3 H1–H10). The mechanics below still apply.
    Skipped only for parent-classified `docs/test-only` PRs (Step 3
    item 3). Otherwise: dataplane/forwarding/throughput PRs MUST gate
    on `loss`; every other gated PR uses the least-busy cluster `<C>`

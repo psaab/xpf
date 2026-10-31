@@ -1155,6 +1155,54 @@ Steps 1-6 above are now the actual flow. Remaining differences from target:
 - Neighbor warmup still runs async after activation (harmless — ARP/NDP
   for next-hops, not blocking the forwarding path)
 
+### Requested transfer is make-before-break (#18559)
+
+The flow above is the VRRP-era picture. In the default private-RG mode, a
+requested transfer (`request chassis cluster failover redundancy-group N node
+<peer>`, or `data node <peer>`) is run by the REQUESTER, and it now opens its
+dataplane before the owner closes its own:
+
+```
+1. requester: readiness + transfer-readiness checks
+2. requester: pre-activate — republish connected-RG routes, then open helper
+   forwarding for the data RGs (cluster state still secondary)
+3. requester -> owner: failover request
+4. owner: session-sync barrier, secondary-hold, rg_active=false, VIPs removed
+   (#5640 fence), applied-ack
+   - traffic still reaching the owner is fabric-redirected to a requester
+     that already forwards it
+5. requester: election -> primary, rg_active=true (already open), VIPs, GARP/NA
+6. requester: commit-ready, commit -> owner; release the pre-activation
+```
+
+Before #18559, step 2 did not exist. Everything the owner redirected between
+step 4 and step 5 was dropped at the requester's fabric-ingress HA-inactive
+gate: 100-137 ms per RG for per-RG moves and about 200 ms per RG for the
+batch, measured on the loss cluster. Design and invariants:
+`pkg/cluster/README.md` ("Make-before-break transfer pre-activation") and
+`pkg/dataplane/README.md` ("Transfer pre-activation overlay").
+
+Measured on the loss cluster (iperf3 `-P8 -i0.1` to 172.16.80.200:5211 plus
+`ping -i 0.01`; RG0/1/2 moved to node1 and back; `docs/log/18559.md`):
+
+| build | moves | ping lost (failover / failback) | worst stream gap | HA-inactive drops |
+|---|---|---|---|---|
+| master + #18556 | per-RG | 23 / 26 | 700 / 1000 ms | +19.2k on the new owner per move |
+| + #18559 | per-RG | 4 / 11 | 500 / 900 ms | 0 |
+| master + #18556 | `data` batch | 20 / 21 | 800 / 1300 ms | (same shape) |
+| + #18559 | `data` batch | 13 / 5 | 1300 / 500 ms | 0 |
+
+Every packet still lost after #18559 is a `config_generation_mismatch` /
+`fib_generation_mismatch` drop. Each helper publish (the pre-activation's own
+route republish, and the FRR-driven republish and FIB bump after every
+ownership edge) drops in-flight packets until Go rewrites the shim's
+generation stamp. That is #18560.
+
+The untargeted form (`request chassis cluster failover redundancy-group N`
+on the owner) still demotes locally and lets the peer promote on the next
+heartbeat. Prefer the node-targeted form, and the `data node <peer>` batch
+when moving every data RG: the batch has no split window between RGs.
+
 ### Watchdog heartbeat: map write every tick vs IPC on change/backstop (#2549)
 
 The daemon runs a per-RG watchdog timestamp refresh (`pkg/daemon/daemon_ha_sync.go`)

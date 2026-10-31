@@ -659,6 +659,9 @@ func (d *Daemon) wireClusterPeerFailoverHooks(ss *cluster.SessionSync) {
 	d.cluster.SetPeerFailoverAbortBatchFunc(ss.SendFailoverAbortBatch)
 	d.cluster.SetPreManualFailoverHook(d.prepareUserspaceManualFailover)
 	d.cluster.SetLocalTransferCommitReadyHook(d.waitLocalFailoverCommitReady)
+	// #18559: make-before-break — open local forwarding for the RGs this
+	// node requests before the owner is asked to demote.
+	d.cluster.SetTransferPreActivateHooks(d.beginTransferPreActivation, d.endTransferPreActivation)
 	// #5079: size the owner-side transfer-out lease above the requester's
 	// worst-case post-ACK commit latency — the local commit-ready settle
 	// window (localFailoverCommitTimeout) plus the commit round-trip — so
