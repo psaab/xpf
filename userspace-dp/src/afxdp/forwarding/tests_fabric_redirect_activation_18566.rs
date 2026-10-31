@@ -133,8 +133,9 @@ fn cached_redirect_kept_while_destination_rg_is_peer_owned_18566() {
 
 /// Scope guards. A routed destination (no connected owner) and a standalone
 /// node never fire, and a fabric arrival stays with the arms that already own
-/// it. RED if the `dest_rg > 0`, `ha_state.is_empty()` or `fabric_ingress`
-/// guard is removed.
+/// it. RED if the `dest_rg > 0` or `fabric_ingress` guard is removed (the
+/// standalone assertion documents the shape; with an empty HA map the
+/// destination RG can never be active, so it is not a separate guard cell).
 #[test]
 fn arm_scope_guards_18566() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
@@ -178,4 +179,86 @@ fn arm_scope_guards_18566() {
         false,
         "ForwardCandidate"
     );
+}
+
+/// Seat V (M1): while the FIB still carries the LAN connected row as
+/// peer-owned (built before RG2 was activated here), the slow path keeps the
+/// redirect. The cache arm must then keep it too, or each hit evicts an entry
+/// the slow path re-seeds identically. Agreement is pinned on both shapes:
+/// withheld row -> neither re-homes; local row -> both re-home.
+#[test]
+fn arm_agrees_with_slow_path_rehome_18566() {
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_both = BTreeMap::from([(1, active(now_secs)), (2, active(now_secs))]);
+    for withheld in [true, false] {
+        let mut snapshot = nat_snapshot_with_fabric();
+        if withheld {
+            for iface in &mut snapshot.interfaces {
+                if iface.name == "reth1.0" {
+                    iface.connected_rg_peer_owned = true;
+                }
+            }
+        }
+        let state = build_forwarding_state(&snapshot);
+        let redirect = resolve_fabric_redirect(&state).expect("premise: fabric redirect resolves");
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        let key = reverse_ack_key();
+        let looked_up =
+            lookup_forwarding_resolution_with_dynamic_for_flow(&state, &neighbors, LAN_CLIENT, &key).resolution;
+        let stored = crate::session::SessionDecision {
+            resolution: redirect,
+            nat: crate::nat::NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let metadata = crate::session::SessionMetadata {
+            ingress_zone: state.egress_zone_id(12),
+            egress_zone: state.egress_zone_id(24),
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 12,
+            ingress_vlan_id: 80,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: true,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        };
+        let slow = crate::afxdp::session_glue::reresolve_stored_session(
+            &state,
+            &ha_both,
+            &neighbors,
+            now_secs,
+            &stored,
+            &metadata,
+            &key,
+            LAN_CLIENT,
+            looked_up,
+            crate::afxdp::session_glue::FabricArrival::Packet {
+                fabric_ingress: false,
+                fabric_link_ingress: false,
+                ingress_ifindex: 12,
+                ha_startup_grace_until_secs: 0,
+                fabric_adopted: false,
+                adopted_recovery: None,
+            },
+        );
+        let slow_keeps_redirect = slow.disposition == ForwardingDisposition::FabricRedirect;
+        let arm_evicts = judge(&state, &ha_both, now_secs, 1, false, LAN_CLIENT, redirect)
+            == Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal);
+        assert_eq!(
+            arm_evicts, !slow_keeps_redirect,
+            "withheld={withheld}: the cache arm (evict={arm_evicts}) must agree with the slow path (keeps redirect={slow_keeps_redirect}, {slow:?})"
+        );
+        if withheld {
+            assert!(slow_keeps_redirect, "premise: with the row withheld the slow path keeps the redirect");
+        }
+    }
 }

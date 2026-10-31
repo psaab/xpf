@@ -667,6 +667,14 @@ fn cached_flow_decision_invalid_reason_inner(
             fabric_ingress,
             resolution,
             destination_owner_rg,
+        ) && fabric_redirect_rehome_agrees(
+            forwarding,
+            ha_state,
+            dynamic_neighbors,
+            now_secs,
+            flow_key,
+            target_ip,
+            install_table,
         ) {
             return Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal);
         }
@@ -985,6 +993,69 @@ pub(in crate::afxdp) fn fabric_redirect_destination_now_local(
         && ha_state
             .get(&dest_rg)
             .is_some_and(|group| group.is_forwarding_active(now_secs))
+}
+
+/// #18566 (review seat V, M1): the slow path keeps a stored FabricRedirect
+/// when the fresh HA-enforced FIB candidate for the target is itself a
+/// redirect / HA-inactive, or a ForwardCandidate that does not egress via the
+/// target's connected interface (or egresses via the fabric); it replaces the
+/// redirect otherwise (`rehome_or_retain_fabric_redirect`).
+/// The cache arm must apply the same test, or it evicts an entry the slow
+/// path then re-seeds as the same redirect, once per packet. That happens
+/// while the FIB still carries the connected row as peer-owned (built before
+/// the activation): the arm waits for the republish that makes the row
+/// local, and the slow path re-homes on the next hit after it.
+/// Evaluated only for a FabricRedirect hit whose destination RG is local.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+fn fabric_redirect_rehome_agrees(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    flow_key: Option<&crate::session::SessionKey>,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+) -> bool {
+    let lookup = match (install_table, flow_key) {
+        (Some(table), Some(key)) => super::lookup_forwarding_resolution_with_dynamic_for_flow_in_table(
+            forwarding,
+            dynamic_neighbors,
+            target_ip,
+            key,
+            table,
+        ),
+        (Some(table), None) => super::lookup_forwarding_resolution_in_table_with_dynamic(
+            forwarding,
+            dynamic_neighbors,
+            target_ip,
+            Some(table),
+        ),
+        (None, Some(key)) => super::lookup_forwarding_resolution_with_dynamic_for_flow(
+            forwarding,
+            dynamic_neighbors,
+            target_ip,
+            key,
+        ),
+        (None, None) => lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip),
+    };
+    let candidate = enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, lookup.resolution);
+    let connected = crate::afxdp::session_glue::connected_ifindex_for_target_in_table(
+        forwarding,
+        target_ip,
+        install_table,
+    );
+    match candidate.disposition {
+        // The slow path converts these to (or keeps) the redirect.
+        ForwardingDisposition::FabricRedirect | ForwardingDisposition::HAInactive => false,
+        // Re-homed only via the connected interface, never via the fabric.
+        ForwardingDisposition::ForwardCandidate => {
+            connected > 0
+                && candidate.egress_ifindex == connected
+                && !ingress_is_fabric(forwarding, candidate.egress_ifindex)
+        }
+        // Any other candidate (e.g. MissingNeighbor) replaces the redirect.
+        _ => true,
+    }
 }
 
 /// #16217 (Wire18, B2): re-validate a fabric-established (adopted) mark

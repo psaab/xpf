@@ -2118,7 +2118,15 @@ Round 2 (#18534), against the integ6 loss -P8 profile
   per-RG move left fw1 fabric-redirecting RG2's ACKs to fw0, which dropped
   them as `ha_inactive`, for over 20 s. Fabric arrivals (owned by the #10314
   and owner-active arms), unknown destination owners and standalone nodes
-  are unchanged; a FabricRedirect hit pays one HA-map lookup.
+  are unchanged; a FabricRedirect hit pays one HA-map lookup. The arm fires
+  only where the slow path would re-home the flow
+  (`fabric_redirect_rehome_agrees`): while the FIB still carries the
+  connected row as peer-owned (built before the activation), the slow path
+  keeps the redirect, and evicting would re-seed it on every packet, so the
+  arm waits for the republish. That check costs one FIB lookup per
+  FabricRedirect hit whose destination RG is local, a state that lasts until
+  the entry is re-homed. Routed destinations (no connected owner) are not
+  covered yet (#18588).
 - **Post-admission neighbor learn.** Every admitted hit re-ran the on-link
   scan, the owned-IP probes and the VLAN-alias resolve before the learn's
   dedup leg coalesced the duplicate. `LearnedNeighborDedup` now records the
