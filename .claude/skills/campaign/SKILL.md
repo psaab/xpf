@@ -1136,7 +1136,10 @@ For each PR an agent opens:
    triple review): spot-check at least one load-bearing claim
    firsthand (re-run the RED/GREEN pair or a focused test, or
    re-derive the cited invariant), for salvage lanes verify build +
-   full affected suite, and record the result on the PR. Reviews use
+   full affected suite, and record the result on the PR. A
+   `ledger-only` delta (Step 4 item 0) needs no fresh parent check:
+   the shards are the gate's own output, not code. Any other delta
+   re-runs the check at the head being merged. Reviews use
    only the declared model pool — Copilot is not requested, waited
    for, or evaluated (user directive 2026-10-26).
 6. **Fold review findings** by resuming the engineer agent
@@ -1300,6 +1303,14 @@ is clean:
 
 ## Standing rules (apply throughout)
 
+- **Head-scoped means "this head, or covered by the delta rule".** A
+  head-scoped review or gate requirement anywhere in this skill means at
+  the head being merged, or at an earlier SHA covered by Step 4 item 0's
+  delta rule. That includes "at the FINAL head", "PRESENT at the head
+  being merged", and "a verdict at a different SHA does not count". It
+  holds whether or not a given sentence repeats the hedge: a
+  `ledger-only` commit never sends the parent to collect fresh
+  verdicts.
 - **Re-verify the FINAL head** before review and before merge — heads move.
 - **Liveness = commit-time + active procs**, not output-mtime. Don't
   premature-kill a flake-checking agent. Orphaned test procs from a
