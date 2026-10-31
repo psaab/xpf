@@ -150,3 +150,31 @@
   - The ledger row is VOID (exe_check=UNAVAILABLE, no deploy manifest) and
     is not committed.
 - **File(s)**: none (validation)
+- **Timestamp**: 2026-10-31 18:13 UTC
+- **Action**: Seat Y (MINOR at `46ef418a96`): low-share is not covered by
+  H9, which is a hand-read row with no cell. The live dip, aggregate 9 to
+  1.2 Gbit/s at the move, is below H9's split ceiling, so it is a transition
+  cost. The PASS/COST/FAIL boundary is unchanged.
+  - Each planned move now records `planned_<move>_low_share_streams`,
+    `_min_stream_gbps` and `_window_aggregate_gbps` as `HARNESS_METRIC`
+    lines, judged master-relative like `cells_cost`. A selftest cell pins
+    their emission.
+  - Removed the "split's fabric share" / "judged by H9" attribution from the
+    producer comment, the doc, the matrix row and the fixture comment.
+  - The doc now says test-failover has no 10 ms ping, so a sub-interval
+    stall goes unscored; H11's ping-gap bound lives only in
+    `test-rg-move-soak`.
+  - Seat X's nits: the aggregate-outage message now says "every stream
+    stalled (under 1 Mbit/s)", matching the stall flags it is computed from.
+    The doc and matrix say plainly that `whole_run_zero_intervals`,
+    `cells_cost` and `planned_<move>_*` are person-read ledger metrics,
+    not automated bands.
+  - Correction to `46ef418a96`'s message: "the split's fabric share, which
+    H9 judges" is withdrawn. Low-share is a recorded transition dip.
+  - Rescoring live run #2's data (`iperf3-failover.2002147`) gives
+    `rg1-split` low_share=2, min_stream=0.000, window_aggregate=2.773 Gbit/s,
+    and `rg0-rg2-failback` low_share=0, min_stream=0.112, window_aggregate
+    10.131 Gbit/s.
+- **File(s)**: `scripts/iperf-json-metrics.py`, `test/incus/test-failover.sh`,
+  `test/incus/iperf-throughput-selftest.sh`, `docs/userspace-ha-validation.md`,
+  `docs/regression-test-matrix.md`

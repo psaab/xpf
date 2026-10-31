@@ -132,15 +132,22 @@ def score_planned_move(move, rows, args, inside):
       1 s), more than one stream stalled, a stall longer than the bound, or a
       stream that never carried data again (it died).
     """
-    in_window = [i for i, (lo, hi, _, _, _) in enumerate(rows) if inside(move["windows"], lo, hi)]
+    in_window = [i for i, (lo, hi, _, _, _, _) in enumerate(rows) if inside(move["windows"], lo, hi)]
     # rows[i][3]: stalled (under --planned-stall-gbps, H11's 1 Mbit/s);
-    # rows[i][4]: "zero" by the run's --zero-gbps (0.05 Gbit/s). A stream at a
-    # few tens of Mbit/s is starved of the split-RG fabric's share, not
-    # stalled: it is reported as low-share, and judged by H9's aggregate row.
+    # rows[i][4]: "zero" by the run's --zero-gbps (0.05 Gbit/s). A stream
+    # between the two is a transition DIP (low-share), not a stall: it does
+    # not change the verdict, and is recorded per move (count, minimum
+    # per-stream rate, in-window aggregate rate) for the master-relative
+    # comparison.
     stalled = sorted({sid for i in in_window for sid, z in rows[i][3].items() if z})
     zero_count = sum(1 for i in in_window for z in rows[i][3].values() if z)
     low_share = sorted({sid for i in in_window for sid, z in rows[i][4].items() if z} - set(stalled))
     aggregate_zero = sum(1 for i in in_window if rows[i][3] and all(rows[i][3].values()))
+    rates = [bps for i in in_window for bps in rows[i][5].values()]
+    min_stream_gbps = round(min(rates) / 1e9, 6) if rates else None
+    window_aggregate_gbps = (
+        round(sum(rows[i][2] for i in in_window) / len(in_window) / 1e9, 6) if in_window else None
+    )
     stalls = {}
     died = []
     for sid in stalled:
@@ -163,7 +170,10 @@ def score_planned_move(move, rows, args, inside):
             died.append(sid)
     reasons = []
     if aggregate_zero:
-        reasons.append(f"every stream at or below {args.zero_gbps} Gbit/s in {aggregate_zero} interval(s): an aggregate outage over 1 s")
+        reasons.append(
+            f"every stream stalled (under {args.planned_stall_gbps * 1000:g} Mbit/s) in {aggregate_zero} interval(s): "
+            "an aggregate outage over 1 s"
+        )
     if len(stalled) > 1:
         reasons.append(f"{len(stalled)} streams stalled ({', '.join(stalled)})")
     over = [sid for sid, sec in stalls.items() if sec > args.planned_max_stall_sec + 1e-9]
@@ -190,6 +200,8 @@ def score_planned_move(move, rows, args, inside):
         "label": move["label"],
         "anchors": move["anchors"],
         "low_share_streams": low_share,
+        "min_stream_gbps": min_stream_gbps,
+        "window_aggregate_gbps": window_aggregate_gbps,
         "windows": [list(w) for w in move["windows"]],
         "stalled_streams": stalled,
         "stall_sec": stalls,
@@ -356,19 +368,21 @@ def summarize(path, args):
         excluded = fully_excluded(interval_start, interval_end)
         zero_by_stream = {}
         stall_by_stream = {}
+        rate_by_stream = {}
         for stream in streams:
             stream_id = str(stream.get("socket") or stream.get("id") or "?")
             bps = float(stream.get("bits_per_second") or 0.0)
             is_zero = bps <= args.zero_gbps * 1e9
             zero_by_stream[stream_id] = is_zero
             stall_by_stream[stream_id] = bps < args.planned_stall_gbps * 1e9
+            rate_by_stream[stream_id] = bps
             if is_zero:
                 stream_zero_total += 1
                 zero_stream_ids.add(stream_id)
                 if not excluded:
                     stream_zero_outside_total += 1
                     zero_stream_ids_outside.add(stream_id)
-        rows.append((interval_start, interval_end, interval_total, stall_by_stream, zero_by_stream))
+        rows.append((interval_start, interval_end, interval_total, stall_by_stream, zero_by_stream, rate_by_stream))
     moves_out = [score_planned_move(move, rows, args, inside) for move in planned]
     summary["planned_moves"] = moves_out
     summary["planned_move_cost_total"] = sum(1 for m in moves_out if m["verdict"] == "COST")

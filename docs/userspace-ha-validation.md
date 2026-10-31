@@ -224,11 +224,21 @@ before a planned move, so every lost packet is a transition cost (matrix H10).
 Each move is one cell, judged by H11's rules at 1 s resolution. A stream is
 **stalled** in an interval when it carried under 1 Mbit/s (H11's stall,
 `--planned-stall-gbps 0.001`). A stream between that and the 0.05 Gbit/s
-zero threshold is **low-share**, not stalled. The RG1 move puts every flow on
-the copy-mode fabric, whose ceiling the 8 streams share unevenly. On the live
-run on 2026-10-31 the aggregate fell from about 9 to 1.2 Gbit/s, and two
-streams ran at 12 Mbit/s while one stopped. A low-share stream is named in
-the cell's text, and the split's aggregate is H9's row.
+zero threshold is **low-share**: a transition dip, not a stall. It does not
+change the move's verdict. On the live run on 2026-10-31 the aggregate fell
+from about 9 to 1.2 Gbit/s at the RG1 move, below H9's 2.0–3.5 Gbit/s split
+ceiling on loss. Two streams ran at 12 Mbit/s and one stopped. That dip is a
+transition cost (H10), so each planned move records it on the ledger as
+`HARNESS_METRIC` lines, judged master-relative like `cells_cost`:
+
+- `planned_<move>_low_share_streams`: the number of low-share streams;
+- `planned_<move>_min_stream_gbps`: the lowest per-stream rate in the
+  move's windows;
+- `planned_<move>_window_aggregate_gbps`: the mean aggregate rate over the
+  move's windows.
+
+`<move>` is `rg1_split` or `rg0_rg2_failback`. The low-share streams are also
+named in the cell's text.
 
 - **PASS:** no stream stalled in the move's windows.
 - **COST:** exactly one stream stalled. Its stall is the whole run of
@@ -238,8 +248,8 @@ the cell's text, and the split's aggregate is H9's row.
   recorded as `cells_cost` (the summary's `, <k> cost`), judged
   master-relative as H11 judges its COST.
 - **FAIL:** any of:
-  - every stream was zero in one interval (an aggregate outage over H11's
-    1 s);
+  - every stream stalled (under 1 Mbit/s) in one interval: an aggregate
+    outage over H11's 1 s;
   - more than one stream stalled;
   - a stall was longer than 10 s;
   - a stream never carried data again.
@@ -259,6 +269,13 @@ the cell's text, and the split's aggregate is H9's row.
   gated, as `whole_run_zero_intervals` on the ledger row (a `HARNESS_METRIC:`
   line), and judged master-relative. `MAX_ZERO_INTERVALS=<n>` gates it
   absolutely again for a one-off run.
+- **Who reads these.** `whole_run_zero_intervals`, the `planned_<move>_*`
+  metrics and `cells_cost` are ledger metrics that a person reads against
+  master's rows. Nothing compares them automatically: `ledger_compare` bands
+  only the headline (`throughput_gbps`).
+- **What this cannot see.** test-failover has no 10 ms ping, so a stall
+  shorter than one 1 s interval goes unscored here. H11's ping-gap bound lives
+  only in `test-rg-move-soak`.
 - **Counting.** Count a run by the same definition before comparing numbers:
   an exact-zero count of the #18598 gate's master arm gives 35, while the
   harness definition gives 3 + 58 = 61.

@@ -1011,9 +1011,9 @@ fixture("long", {(2, t) for t in range(11, 24)})
 fixture("died", {(2, t) for t in range(11, 40)})
 fixture("crash", {(s, 5) for s in range(1, 5)} | {(2, 11)})
 fixture("landing", {(2, 13)})
-# The live #18627 run's RG1 move: one stream truly stalled, two starved to
-# 12 Mbit/s by the split-RG fabric's share. Starved is not stalled (H11's
-# stall is under 1 Mbit/s), so this is a COST, not "3 streams stalled".
+# The live #18627 run's RG1 move: one stream truly stalled, two dipped to
+# 12 Mbit/s. A dip is not a stall (H11's stall is under 1 Mbit/s), so this is
+# a COST, not "3 streams stalled"; the dip itself is recorded per move.
 fixture("share", {(2, 11)}, rates={(3, 11): 12_000_000, (4, 11): 12_000_000})
 PY
 planned_metrics() { # <fixture> [producer args...]
@@ -1037,10 +1037,11 @@ PY
 check_planned clean 'moves["rg1-split"]["verdict"] == "PASS" and moves["rg0-rg2-failback"]["verdict"] == "PASS" and m["planned_move_cost_total"] == 0' "no stall at either move PASSes"
 check_planned cost 'moves["rg1-split"]["verdict"] == "COST" and moves["rg1-split"]["stall_sec"] == {"2": 1.0} and m["planned_move_cost_total"] == 1 and m["stream_zero_intervals_outside_events_total"] == 0 and m["planned_move_zero_intervals_total"] == 1' "one stream 1 s at the move is a COST (not excused, not counted outside twice)"
 check_planned two 'moves["rg1-split"]["verdict"] == "FAIL" and "2 streams stalled" in moves["rg1-split"]["text"]' "two stalled streams FAIL"
-check_planned aggregate 'moves["rg1-split"]["verdict"] == "FAIL" and "aggregate outage" in moves["rg1-split"]["text"]' "an all-stream zero interval FAILs (aggregate outage over 1 s)"
+check_planned aggregate 'moves["rg1-split"]["verdict"] == "FAIL" and "every stream stalled (under 1 Mbit/s) in 1 interval(s): an aggregate outage over 1 s" in moves["rg1-split"]["text"]' "an all-stream stalled interval FAILs (aggregate outage over 1 s), and the reason names the stall threshold it was decided by"
 check_planned long 'moves["rg1-split"]["verdict"] == "FAIL" and "stall over the 10 s bound: stream 2 13 s" in moves["rg1-split"]["text"] and m["stream_zero_intervals_outside_events_total"] > 0' "a 13 s stall FAILs (H11's 10 s bound), and its tail past the window still counts outside"
 check_planned died 'moves["rg1-split"]["verdict"] == "FAIL" and "never carried data again" in moves["rg1-split"]["text"]' "a stream that never recovers FAILs"
-check_planned share 'moves["rg1-split"]["verdict"] == "COST" and moves["rg1-split"]["stalled_streams"] == ["2"] and moves["rg1-split"]["low_share_streams"] == ["3", "4"] and "2 more stream(s) at or below 0.05 Gbit/s but not stalled" in moves["rg1-split"]["text"]' "streams starved to 12 Mbit/s are reported low-share, not stalled (H11's 1 Mbit/s stall)"
+check_planned share 'moves["rg1-split"]["verdict"] == "COST" and moves["rg1-split"]["stalled_streams"] == ["2"] and moves["rg1-split"]["low_share_streams"] == ["3", "4"] and "2 more stream(s) at or below 0.05 Gbit/s but not stalled" in moves["rg1-split"]["text"]' "streams dipped to 12 Mbit/s are low-share, not stalled (H11's 1 Mbit/s stall): the verdict is unchanged"
+check_planned share 'moves["rg1-split"]["min_stream_gbps"] == 0.0 and abs(moves["rg1-split"]["window_aggregate_gbps"] - 6.506) < 1e-6 and moves["rg0-rg2-failback"]["min_stream_gbps"] == 2.0 and moves["rg0-rg2-failback"]["window_aggregate_gbps"] == 8.0' "each move records its minimum per-stream rate and in-window aggregate rate (the transition dip)"
 check_planned crash 'm["stream_zero_intervals_outside_events_total"] == 0 and moves["rg1-split"]["verdict"] == "COST" and m["zero_intervals_total"] == 1 + 4 + 1' "the crash window stays excused while the planned move is still scored"
 # The landing anchor: a zero 2-3 s after the request but inside [land, land+3]
 # is the move's; with the request alone it would read as an unexplained outage.
@@ -1197,6 +1198,15 @@ run_cells() { # <fixture> <registered> -> recorded cells
 		ha_planned_move_cells "${fixture_dir}/cells-metrics.json" "$2"
 	)
 }
+share_cells="$(run_cells share 2)"
+for want in "HARNESS_METRIC: planned_rg1_split_low_share_streams=2" "HARNESS_METRIC: planned_rg1_split_min_stream_gbps=0.000" \
+	"HARNESS_METRIC: planned_rg1_split_window_aggregate_gbps=6.506" "HARNESS_METRIC: planned_rg0_rg2_failback_low_share_streams=0" \
+	"HARNESS_METRIC: planned_rg0_rg2_failback_min_stream_gbps=2.000" "HARNESS_METRIC: planned_rg0_rg2_failback_window_aggregate_gbps=8.000"; do
+	grep -qxF "$want" <<<"$share_cells" || bad "planned-move dip metrics: '$want' not emitted for the ledger: $share_cells"
+done
+[[ "$(grep -c '^C:' <<<"$share_cells")" == 1 && "$(grep -c '^V:' <<<"$share_cells")" == 0 ]] \
+	|| bad "planned-move dip metrics must not change the cells (one COST, no VOID): $share_cells"
+ok "planned-move dip metrics (behavioural): low-share count, minimum stream rate and window aggregate per move ride the ledger as HARNESS_METRIC"
 cells="$(run_cells cost 2)"
 [[ "$(grep -c '^C:iperf3 planned move rg1-split: stream 2 stalled 1 s' <<<"$cells")" == 1 \
 	&& "$(grep -c '^P:iperf3 planned move rg0-rg2-failback' <<<"$cells")" == 1 && "$(grep -c '^[FV]:' <<<"$cells")" == 0 ]] \

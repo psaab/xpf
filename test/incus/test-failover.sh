@@ -1869,7 +1869,10 @@ ha_build_planned_move_args() {
 # stream stalled at most 10 s and recovered: H11's COST, judged
 # master-relative through cells_cost), FAIL (an aggregate outage, more than one
 # stream stalled, a longer stall, or a stream that never recovered). A count
-# that does not match what was registered is VOID: a move went unscored.
+# that does not match what was registered is VOID: a move went unscored. Each
+# move also records its transition dip as HARNESS_METRIC lines: the low-share
+# stream count, the minimum per-stream rate and the in-window aggregate rate
+# (planned_<move>_*), read against master's rows like cells_cost.
 ha_planned_move_cells() {
 	local metrics="$1" registered="$2" lines verdict label text scored=0
 	if ! lines=$(python3 - "$metrics" <<'PY'
@@ -1880,6 +1883,13 @@ if not isinstance(moves, list):
 for m in moves:
     anchors = ", ".join(f"{a:g}" for a in m["anchors"])
     print(f"{m['verdict']}\t{m['label']}\t{m['text']} (anchors {anchors} s)")
+    # Per-move transition-dip metrics for the ledger (person-read against
+    # master's rows, like cells_cost; not an automated band).
+    key = "planned_" + "".join(c if c.isalnum() else "_" for c in m["label"].lower())
+    print(f"METRIC\t{key}_low_share_streams={len(m.get('low_share_streams') or [])}")
+    for field in ("min_stream_gbps", "window_aggregate_gbps"):
+        if isinstance(m.get(field), (int, float)):
+            print(f"METRIC\t{key}_{field}={m[field]:.3f}")
 PY
 	); then
 		void "iperf3 planned-move scoring absent from the metrics"
@@ -1887,6 +1897,10 @@ PY
 	fi
 	while IFS=$'\t' read -r verdict label text; do
 		[[ -n "$verdict" ]] || continue
+		if [[ "$verdict" == METRIC ]]; then
+			echo "HARNESS_METRIC: ${label}"
+			continue
+		fi
 		scored=$((scored + 1))
 		case "$verdict" in
 		PASS) pass "iperf3 planned move ${label}: ${text}" ;;
