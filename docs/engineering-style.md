@@ -311,7 +311,7 @@ the mechanics, so this section is sequencing only.
    | What changed | Deploy | Validation | Pass criteria |
    |---|---|---|---|
    | Any change | `make test-deploy` (standalone) | ping between zones | 0% loss |
-   | Any change | `make cluster-deploy` (loss userspace cluster) + re-apply CoS (`./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0` — raw deploy wipes CoS; re-apply stays required after any deploy until the deb path proves otherwise) | `iperf3 -P 16 -t 30 -p 5211` → 172.16.80.200 | ≥ 23 Gbit/s, no regression vs previous run |
+   | Any change | `make cluster-deploy` (loss userspace cluster) + re-apply CoS (`./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0` — raw deploy wipes CoS; re-apply stays required after any deploy until the deb path proves otherwise) | `iperf3 -P 16 -t 30 -p 5211` → `$IPERF_TARGET4` (loss 172.16.80.202, #18576), or `make perf-matrix` | within the cluster's own Tier 2 band in [`regression-test-matrix.md`](regression-test-matrix.md) (loss today: v4 `-P8` 14.1–19.1 / 16.7–21.1, `-P12` 18.2–21.7 / 15.7–20.8 Gbit/s push / reverse), and no regression against master measured on the same cluster in the same session. The old "≥ 23 Gbit/s" was a historical `-P16`/`-P12` reverse figure, not a current band |
    | Admission / DSCP / scheduler / queueing | above + re-apply CoS (`./test/incus/apply-cos-config.sh <target>`) | `show class-of-service interface` | targeted counter (`flow_share`, `buffer`, `ecn_marked`) moves in the predicted direction — see [`cos-validation-notes.md`](cos-validation-notes.md) |
    | NAT / screens / filter / VLAN / IPsec | above | exercise that feature end-to-end from a test host | session / hit counters advance; negative case drops |
    | HA / VRRP / session sync / fabric | `make cluster-deploy` | `make test-failover` + `make test-ha-crash` | 0 / very low packet loss across failover/failback, both nodes converge |
@@ -380,7 +380,7 @@ the mechanics, so this section is sequencing only.
    anecdote, not a measurement. Measured on a healthy fw0 with CoS applied,
    minutes apart, on the SAME port 5211: **`-P 16 -t 30` → 23.1 Gbit/s,
    single-stream → 5.23 Gbit/s.** So a lane that improvises
-   `iperf3 -c 172.16.80.200 -p 5211` reads 5.23 against a ≥ 23 bar and owns a
+   `iperf3 -c 172.16.80.200 -p 5211` reads 5.23 against the row's then ≥ 23 bar and owns a
    4.4x "regression" created entirely by its own invocation. #7480 did exactly
    that, then spent a lock cell and two hypotheses on the gap — auditing
    `cos-iperf-config.set`, `scheduler-uncapped` and `afxdp/cos/admission.rs`,
@@ -393,7 +393,7 @@ the mechanics, so this section is sequencing only.
 
    Omitting `-p` entirely is worse than substituting a port. iperf3's default is
    **5201 → `iperf-100m` → `transmit-rate 100m exact`**, so a bare
-   `iperf3 -c 172.16.80.200` silently measures a 100 Mbit shaper (~96 Mbit/s
+   `iperf3 -c 172.16.80.202` silently measures a 100 Mbit shaper (~96 Mbit/s
    observed) instead of the dataplane.
 
    When a validation lane can't be run in the test env, say so
@@ -1974,6 +1974,7 @@ they repeatedly bite:
   | Destructive HA smoke (`test-failover`, `test-ha-crash`, `test-double-failover`, `test-stress-failover`, `test-chained-crash`, `test-active-active`, `test-restart-connectivity`, `test-private-rg`) | self-locks the same way via the `cluster-cell.sh` preamble (#4020) — a reboot / force-stop / failover QUEUES behind a held lock instead of colliding with a concurrent deploy/smoke. Read-only `test-connectivity.sh` stays lock-free |
   | Multi-command measurement cells (deploy → apply-cos → measure) | wrap the WHOLE cell: `./test/incus/with-cluster.sh "purpose" -- cmd...` |
   | `wg-interop.sh` | self-locks per command standalone; runs lock-free inside a cell (marker-aware) |
+  | `mouse-target-setup.sh up`/`destroy`, and through it `target-services.sh up` and `make mouse-target-up`/`mouse-target-destroy` | locks itself; nests inside a cell (`cluster-cell.sh` preamble, #18576). It rewrites and restarts the address unit on the target every gate measures. `status` stays lock-free |
   | Ad-hoc one-liners around commands that do NOT self-lock | `flock /var/worktrees/.cache/tmpdir/xpf-cluster.lock sg incus-admin -c "..."` is valid for loss; for tcp/udp use that cluster's canonical lock path |
   Rules that keep the mutex sound:
   - **Never wrap a self-locking script in a raw outer
@@ -2078,7 +2079,13 @@ they repeatedly bite:
   and pinned by its own `afpacket_cloexec_test.go`).
 - **Always `source ~/.sshrc` before `git push`.** The user's SSH agent
   config lives there.
-- **172.16.80.200 is the iperf3 test endpoint.** Not 172.16.50.x.
+- **172.16.80.202 is the loss v4 iperf3 test endpoint** (`IPERF_TARGET4`;
+  v6 is `2001:559:8585:80::200`). Not 172.16.50.x, and no longer
+  172.16.80.200: that address is also answered by the external v6 box
+  (`f6:f0:06:10:77:d5`), so a firewall node can resolve it to the wrong
+  host. In a 2026-10-31 rg-move soak, every v4 stream died that way while
+  ping kept answering (#18576). Read the target from the env file, and
+  never hard-code it in a new harness.
 - **Use `cli`, not `xpfctl`.** The remote CLI binary is `cli`.
 - **Primary is fw0 on RG0 in the loss userspace cluster.** Apply config
   changes to the primary; sync takes care of the secondary.

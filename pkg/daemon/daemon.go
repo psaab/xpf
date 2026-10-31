@@ -925,6 +925,10 @@ type Daemon struct {
 	// configAckRepushAtMono rate-limits the #18521 overdue-ACK re-push
 	// (cluster.MonotonicNanos of the last one; 0 = never).
 	configAckRepushAtMono atomic.Int64
+	// configAuthorityRepushAtMono paces the re-push that follows refusing a
+	// peer's config as RG0 authority (#18610 review T2), at the same
+	// configAckOverdueAfter spacing as the overdue-ACK re-push.
+	configAuthorityRepushAtMono atomic.Int64
 	// #15212: configSyncPushedDigest is the digest of the text carried by
 	// configSyncPushedWireGen, so a late ACK can be matched to the exact
 	// marked content it applied. configSyncAppliedGen is the highest wire
@@ -1478,6 +1482,14 @@ type Daemon struct {
 	// lock-free (see mgmtVRFIfaceSet). Load may return nil before the first
 	// publish — readers treat that as "no mgmt VRF interfaces yet".
 	mgmtVRFInterfaces atomic.Pointer[map[string]bool]
+
+	// hbControlLinkMoves is the control link's routing VRF master-move count
+	// (routing.Manager.VRFMasterMoveSeq) at the last heartbeat-restart
+	// decision (#18597). The heartbeat is restarted after a management-VRF
+	// rebind only when the count moved since then, so a commit that leaves
+	// em0 in vrf-mgmt keeps its heartbeat sockets. Read and written only by
+	// the apply path under applySem; see controlLinkMovedSinceLastCheck.
+	hbControlLinkMoves controlLinkMoveMark
 
 	// rgStates tracks the unified cluster + VRRP state for each
 	// redundancy group. Both watchClusterEvents and watchVRRPEvents

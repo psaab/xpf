@@ -154,7 +154,14 @@ harness_adapt() {
 # reason, which is the one thing it must never be confused with.
 
 _ha_smoke_abort_suffix() {
-	local abort_line
+	local abort_line clock_void
+	# #18614: a clock VOID says why the run's state is unattributable; it
+	# rides ahead of the abort cause.
+	clock_void=$(grep -m1 -E '^CLOCK_VOID: ' "$1")
+	if [[ -n "$clock_void" ]]; then
+		clock_void=${clock_void//$'\t'/ }
+		printf '; %s' "${clock_void:0:300}"
+	fi
 	abort_line=$(grep -E '^ABORT_CAUSE=' "$1" | tail -1)
 	abort_line=${abort_line//$'\t'/ }
 	abort_line=${abort_line//$'\n'/ }
@@ -211,6 +218,62 @@ _ha_smoke_summary() {
 	# "-" holds an empty slot so `read` does not shift the later field.
 	printf '%s %s %s %s' "$p" "$f" "${skipped:--}" "${cost:--}"
 }
+# #18614: the crash smokes' clock precondition (failover-clock-lib.sh) prints
+# one `CLOCK_PRECONDITION: resync=<0|1> converged=<0|1|-> verdict=<PASS|FAIL|
+# VOID> ...` line per call, plus a `CLOCK_VOID: <reason>` line on VOID. They
+# become numeric metrics on the row, so `ledger_compare --all` can tell a clock
+# FAIL (clock_converged=0 clock_void=0) from a dataplane FAIL:
+#   clock_resync=1    ANY call took the XPF_FAILOVER_CLOCK_RESYNC=1 escape
+#                     (node clocks SET from the host); 0 when none did. ANY,
+#                     not LAST: one resync repairs the state every later cell
+#                     measures.
+#   clock_converged   1 when every measured call converged, 0 when one did not
+#                     (absent when every call resynced).
+#   clock_void=1      ANY call was VOID: no time source, no measurement, or a
+#                     refused call.
+# All absent when the smoke never ran the precondition.
+_ha_smoke_clock_metrics() {
+	local lines measured
+	lines=$(grep -E '^CLOCK_PRECONDITION: ' "$1" || true)
+	[[ -n "$lines" ]] || return 0
+	if grep -qE '^CLOCK_PRECONDITION: resync=1( |$)' <<<"$lines"; then
+		printf ' clock_resync=1'
+	else
+		printf ' clock_resync=0'
+	fi
+	measured=$(grep -E '^CLOCK_PRECONDITION: resync=0( |$)' <<<"$lines" || true)
+	if [[ -n "$measured" ]]; then
+		if grep -qE ' converged=1( |$)' <<<"$measured" && ! grep -qE ' converged=0( |$)' <<<"$measured"; then
+			printf ' clock_converged=1'
+		else
+			printf ' clock_converged=0'
+		fi
+	fi
+	if grep -qE ' verdict=VOID( |$)' <<<"$lines"; then
+		printf ' clock_void=1'
+	else
+		printf ' clock_void=0'
+	fi
+}
+# _ha_smoke_clock_gate <metrics> <log> -- the verdict a would-be PASS row
+# takes from its clock record. A clock VOID (nothing to converge to, nothing
+# measured) makes the row VOID with that reason: the cells ran in a clock
+# state nobody can attribute. A resync makes it VOID as non-evidence: the run
+# repaired the clock state it was meant to observe, so it can never satisfy
+# H1-H3 (#18614). Prints "VOID<TAB>reason" or nothing (the PASS stands).
+_ha_smoke_clock_gate() {
+	local metrics=" $1 " log="$2" reason
+	if [[ "$metrics" == *" clock_void=1 "* ]]; then
+		reason=$(grep -m1 -E '^CLOCK_VOID: ' "$log")
+		reason=${reason#CLOCK_VOID: }
+		reason=${reason//$'\t'/ }
+		printf 'VOID\t#18614 clock precondition VOID: %s' "${reason:0:300}"
+		return 0
+	fi
+	if [[ "$metrics" == *" clock_resync=1 "* ]]; then
+		printf 'VOID\t#18614 clock_resync=1: XPF_FAILOVER_CLOCK_RESYNC=1 set the node clocks from the host during the run, so its passed cells are not operator-faithful and cannot satisfy H1-H3'
+	fi
+}
 harness_adapt_ha_smoke() {
 	local rc="$1" log="$2"
 	local summary p f skipped="" cost=""
@@ -239,6 +302,7 @@ harness_adapt_ha_smoke() {
 	local metrics="cells_passed=$p cells_failed=$f"
 	[[ -n "$skipped" ]] && metrics="$metrics cells_skipped=$skipped"
 	[[ -n "$gbps" ]] && metrics="$metrics throughput_gbps=$gbps"
+	metrics="$metrics$(_ha_smoke_clock_metrics "$log")"
 	if ((f > 0)); then
 		# FAIL headlines are diagnostic-only: FAIL rows never enter bands,
 		# so the FAIL shape keeps throughput-when-present, cells otherwise.
@@ -265,6 +329,12 @@ harness_adapt_ha_smoke() {
 		printf 'VOID\tPASS summary but no anchored "PASS|FAIL iperf3 throughput" cell line carrying "<n> Gbps" — the iperf measurement is missing\t\t\t\n'
 		return 0
 	fi
+	local clock_gate
+	clock_gate=$(_ha_smoke_clock_gate "$metrics" "$log")
+	if [[ -n "$clock_gate" ]]; then
+		printf '%s\t\t\t%s\n' "$clock_gate" "$metrics"
+		return 0
+	fi
 	printf 'PASS\t\tthroughput_gbps\thigher-better\t%s\n' "$metrics"
 }
 harness_adapt_smoke_cells() {
@@ -282,6 +352,7 @@ harness_adapt_smoke_cells() {
 	local metrics="cells_passed=$p cells_failed=$f"
 	[[ -n "$skipped" ]] && metrics="$metrics cells_skipped=$skipped"
 	[[ -n "$cost" ]] && metrics="$metrics cells_cost=$cost"
+	metrics="$metrics$(_ha_smoke_clock_metrics "$log")"
 	if ((f > 0)); then
 		printf 'FAIL\t\tcells_passed\thigher-better\t%s\n' "$metrics"
 		return 0
@@ -290,6 +361,12 @@ harness_adapt_smoke_cells() {
 		local fatal_suffix
 		fatal_suffix="$(_ha_smoke_abort_suffix "$log")"
 		printf 'VOID\tsummary reports 0 failed but the smoke exited rc=%s — the summary and the exit status disagree%s\t\t\t\n' "$rc" "$fatal_suffix"
+		return 0
+	fi
+	local clock_gate
+	clock_gate=$(_ha_smoke_clock_gate "$metrics" "$log")
+	if [[ -n "$clock_gate" ]]; then
+		printf '%s\t\t\t%s\n' "$clock_gate" "$metrics"
 		return 0
 	fi
 	printf 'PASS\t\tcells_passed\thigher-better\t%s\n' "$metrics"

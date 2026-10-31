@@ -977,7 +977,8 @@ test-deploy: build build-ctl
 test-deploy-lib:
 	bash ./test/incus/deploy-lib-selftest.sh
 
-# Hermetically test failover clock resync after a crash reboot (#11872).
+# Hermetically test the crash smokes' NTP-convergence precondition and its
+# recorded XPF_FAILOVER_CLOCK_RESYNC=1 escape (#18614; was the #11872 resync).
 test-failover-clock-lib:
 	bash ./test/incus/failover-clock-selftest.sh
 
@@ -1539,10 +1540,13 @@ test-v6-na-recovery-lib:
 # tagged into VLAN 80, running target-services.sh's own grid (iperf3 5200-5211,
 # echo 6200-6211, port 7).
 #
-# Idempotent, and touches NO existing instance: it creates and reconciles one
-# container. It does not need the cluster lock for that reason, and does not
-# take it — a `mouse-target-up` running beside somebody's smoke changes nothing
-# the smoke reads.
+# Idempotent: it creates and reconciles one container. That container is the
+# v4 iperf target every loss gate measures, and `up` rewrites and restarts its
+# address unit, so `up` and `destroy` take the cluster lock themselves
+# (cluster-cell.sh, like a deploy; #18576). Before it pins a NEW v4 address,
+# `up` claim-probes it and refuses if another MAC answers. `status` stays
+# lock-free. They nest inside a with-cluster.sh cell; never wrap them in a raw
+# `flock` on the lock path, which hangs (the inner acquire cannot see it).
 mouse-target-up:
 	bash ./test/incus/mouse-target-setup.sh up
 

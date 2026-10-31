@@ -84,11 +84,16 @@ trap 'failover_stop_main_iperf "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_
 
 PASS=0
 FAIL=0
+# #18614: a cell that could not be judged (the clock precondition's VOID). It
+# is neither a pass nor a fail, and a run with one exits 2, so a direct run is
+# as honest as the harness-result.sh row.
+VOID=0
 ERRORS=()
 
 info()  { echo "==> $*"; }
 pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
+void()  { echo "  VOID  $*"; VOID=$((VOID + 1)); }
 
 die() { echo "FATAL: $*" >&2; exit 2; }
 
@@ -142,6 +147,11 @@ fi
 # smoke's evidence and must not be killed or allowed to satisfy its liveness.
 failover_stop_main_iperf "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 sleep 1
+
+# #18614: one clock reading BEFORE the first crash. If chrony is not
+# synchronised here, there is no time source for a crash-rebooted node to
+# converge to, and the clock cell after the crash is VOID (lab/NTP), not FAIL.
+failover_clock_baseline "$FW0" "$FW1"
 
 # ── Phase 1: Start iperf3 ───────────────────────────────────────────
 
@@ -255,9 +265,12 @@ fi
 info "Waiting for fw0 to reboot and rejoin as secondary (max ${REBOOT_WAIT}s)"
 
 fw0_back=false
+fw0_active_at=""
+reboot_wait_start=$SECONDS
 for i in $(seq 1 "$REBOOT_WAIT"); do
 	if wait_for_instance "$FW0" 1; then
 		fw0_back=true
+		fw0_active_at=$SECONDS
 		info "fw0 xpfd active after ${i}s"
 		break
 	fi
@@ -269,18 +282,30 @@ else
 	fail "fw0 xpfd did not come back within ${REBOOT_WAIT}s"
 fi
 
-# #11872: fw0's crash reboot can leave its clock minutes behind in the no-NTP
-# loss lab. Resync BOTH nodes from one host UTC reading before verifying
-# rejoin/takeover readiness and crashing fw1 for the return failover.
-if failover_resync_node_clocks "$FW0" "$FW1"; then
-	pass "both firewall clocks resynced from host UTC after crash reboot"
-else
-	fail "could not resync both firewall clocks from host UTC after crash reboot"
-fi
+# #18614 (was the #11872 resync): fw0's crash reboot brings it back on its
+# RTC. Before verifying rejoin/takeover readiness and crashing fw1 for the
+# return failover, wait for NTP to converge on both nodes and record the skew
+# and the time it took; fail the cell when it does not converge. No clock is
+# set unless XPF_FAILOVER_CLOCK_RESYNC=1 (the recorded no-NTP escape).
+#
+# The wait spends only time this timeline already allowed (IPERF_DURATION has
+# to outlive the second crash): the REBOOT_WAIT the comeback left unused plus
+# the 20 s settle below (about 88 s after a 22 s comeback), floored at 40 s,
+# over 2x the measured 17-18 s convergence. An explicit
+# XPF_FAILOVER_CLOCK_BUDGET_S wins. The second crash (fw1, below) ends the run
+# while fw1 is still rebooting, so it has no clock cell.
+fw0_active_at="${fw0_active_at:-$SECONDS}"
+clock_budget=$(( reboot_wait_start + REBOOT_WAIT + 20 - SECONDS ))
+(( clock_budget >= 40 )) || clock_budget=40
+XPF_FAILOVER_CLOCK_BUDGET_S="${XPF_FAILOVER_CLOCK_BUDGET_S:-$clock_budget}" \
+	failover_clock_cell pass-fail "fw0 crash reboot" "$FW0" "$FW1" "$FW0" || true
 
 
-# Wait for cluster to stabilize (gRPC takes ~15s after systemctl active)
-sleep 20
+# Wait for cluster to stabilize (gRPC takes ~15s after systemctl active): 20 s
+# after xpfd came back, part of which the clock wait above may already have
+# spent, so a run that converges takes no longer than the old resync did.
+settle=$(( fw0_active_at + 20 - SECONDS ))
+(( settle <= 0 )) || sleep "$settle"
 
 # Verify fw0 is secondary (no auto-preempt)
 fw0_status_after=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
@@ -402,4 +427,9 @@ if [[ $FAIL -gt 0 ]]; then
 		echo "  - $err"
 	done
 	exit 1
+fi
+if [[ $VOID -gt 0 ]]; then
+	echo
+	echo "  ${VOID} cell(s) VOID: the run is not a pass (see the VOID lines above)"
+	exit 2
 fi

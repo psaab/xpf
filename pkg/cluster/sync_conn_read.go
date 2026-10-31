@@ -414,6 +414,8 @@ func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte, clearte
 		gen: gen, text: configText, ancestry: ancestry,
 		incarnation: s.connBootIncarnation(conn), authenticated: authenticated,
 		conn: conn,
+		// #18610 review T1: the role at RECEIVE, not at apply.
+		authorityAtReceive: s.localConfigAuthority(),
 	}
 	if s.configItemIncarnationStale(item) {
 		s.stats.ConfigsDeadIncarnationDropped.Add(1)

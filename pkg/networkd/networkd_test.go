@@ -445,8 +445,9 @@ func TestFabricBondNetworkAddresses(t *testing.T) {
 	if !strings.Contains(got, "Address=10.99.1.1/30\n") {
 		t.Errorf("missing fabric address in bond .network:\n%s", got)
 	}
-	if !strings.Contains(got, "VRF=vrf-mgmt\n") {
-		t.Errorf("missing VRF=vrf-mgmt in bond .network:\n%s", got)
+	// #18597: the daemon owns the vrf-mgmt binding; networkd must keep it.
+	if !strings.Contains(got, "KeepMaster=yes\n") || strings.Contains(got, "VRF=") {
+		t.Errorf("bond .network must carry KeepMaster=yes and no VRF=:\n%s", got)
 	}
 }
 

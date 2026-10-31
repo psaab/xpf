@@ -389,6 +389,44 @@ if [[ "$(adapt_field smoke-cells 1 1)" == "FAIL" ]]; then
 else
 	bad "#18583: strict-mode soak line scored $(adapt_field smoke-cells 1 1), want FAIL"
 fi
+# #18614: the crash smokes' clock record. A run whose ANY clock call took the
+# XPF_FAILOVER_CLOCK_RESYNC=1 escape SET the node clocks: a would-be PASS is a
+# VOID (not H1-H3 evidence) carrying clock_resync=1, even when a later call
+# only measured. A clock VOID (no time source) turns a would-be PASS into a
+# VOID with the CLOCK_VOID reason. A clock FAIL stays FAIL, with
+# clock_converged=0 clock_void=0 telling it from a dataplane FAIL. A smoke
+# without the precondition carries no clock field. The producer side (the
+# library's real lines) is failover-clock-selftest.sh's.
+clock_rows_ok=1
+M_RESYNC='CLOCK_PRECONDITION: resync=1 converged=- verdict=PASS skew_s=+72.000 converge_s=- bound_s=5 budget_s=120 label=phase1'
+M_OK='CLOCK_PRECONDITION: resync=0 converged=1 verdict=PASS skew_s=+0.100 converge_s=7.4 bound_s=5 budget_s=120 label=final'
+M_FAIL='CLOCK_PRECONDITION: resync=0 converged=0 verdict=FAIL skew_s=+72.000 converge_s=- bound_s=5 budget_s=120 label=phase1'
+M_VOID='CLOCK_PRECONDITION: resync=0 converged=0 verdict=VOID skew_s=+0.000 converge_s=- bound_s=5 budget_s=120 label=phase1'
+V_LINE='CLOCK_VOID: phase1: clock precondition VOID: no time source (lab/NTP): the un-rebooted peer fw1 is not synchronised (Not synchronised)'
+for adapter in smoke-cells ha-smoke; do
+	printf '%s\n' "$M_RESYNC" "$M_OK" '  PASS  iperf3 throughput 9.0 Gbps' 'HA crash test: 7 passed, 0 failed' >"$LOG"
+	[[ "$(adapt_field "$adapter" 0 1)" == VOID && "$(adapt_field "$adapter" 0 2)" == *"clock_resync=1"*"cannot satisfy H1-H3"* &&
+		" $(adapt_field "$adapter" 0 5) " == *" clock_resync=1 "* ]] || { clock_rows_ok=0; echo "  $adapter resync: $(harness_adapt "$adapter" 0 "$LOG")"; }
+	printf '%s\n' "$M_OK" '  PASS  iperf3 throughput 9.0 Gbps' 'HA crash test: 7 passed, 0 failed' >"$LOG"
+	[[ "$(adapt_field "$adapter" 0 1)" == PASS && " $(adapt_field "$adapter" 0 5) " == *" clock_resync=0 clock_converged=1 clock_void=0 "* ]] ||
+		{ clock_rows_ok=0; echo "  $adapter measured: $(harness_adapt "$adapter" 0 "$LOG")"; }
+	printf '%s\n' "$M_OK" "$M_FAIL" '  FAIL  iperf3 throughput 9.0 Gbps' 'HA crash test: 6 passed, 1 failed' >"$LOG"
+	[[ "$(adapt_field "$adapter" 1 1)" == FAIL && " $(adapt_field "$adapter" 1 5) " == *" clock_converged=0 clock_void=0 "* ]] ||
+		{ clock_rows_ok=0; echo "  $adapter clock fail: $(harness_adapt "$adapter" 1 "$LOG")"; }
+	printf '%s\n' "$M_VOID" "$V_LINE" '  PASS  iperf3 throughput 9.0 Gbps' 'HA crash test: 7 passed, 0 failed' >"$LOG"
+	[[ "$(adapt_field "$adapter" 0 1)" == VOID && "$(adapt_field "$adapter" 0 2)" == *"clock precondition VOID: phase1: clock precondition VOID: no time source"* &&
+		" $(adapt_field "$adapter" 0 5) " == *" clock_void=1 "* ]] || { clock_rows_ok=0; echo "  $adapter clock void: $(harness_adapt "$adapter" 0 "$LOG")"; }
+	printf '%s\n' "$M_VOID" "$V_LINE" >"$LOG"
+	[[ "$(adapt_field "$adapter" 77 1)" == VOID && "$(adapt_field "$adapter" 77 2)" == *"CLOCK_VOID: phase1: clock precondition VOID"* ]] ||
+		{ clock_rows_ok=0; echo "  $adapter clock void, no summary: $(harness_adapt "$adapter" 77 "$LOG")"; }
+	printf '%s\n' '  PASS  iperf3 throughput 9.0 Gbps' 'HA crash test: 7 passed, 0 failed' >"$LOG"
+	[[ "$(adapt_field "$adapter" 0 1)" == PASS && "$(adapt_field "$adapter" 0 5)" != *clock_* ]] || clock_rows_ok=0
+done
+if ((clock_rows_ok)); then
+	ok "#18614: ha-smoke and smoke-cells: a resynced or clock-VOID would-be PASS is VOID with its reason; clock_resync/clock_converged/clock_void ride the row; none without the precondition"
+else
+	bad "#18614: the clock record is wrong on an HA smoke row"
+fi
 printf 'Results: 7 passed, 0 failed, 2 skipped\n' >"$LOG"
 if [[ "$(adapt_field smoke-cells 0 5)" == *"cells_skipped=2"* && "$(adapt_field smoke-cells 0 5)" != *"cells_cost"* ]]; then
 	ok "#18583: the skipped slot still parses with no cost field (no shift)"

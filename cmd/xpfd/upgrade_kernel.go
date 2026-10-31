@@ -284,7 +284,7 @@ func newKernelConfig(journalPath string, strictWatchdog bool, beaconDeadline tim
 		//
 		// #7157: config.IsManagementIfName is the beacon's management-interface
 		// classifier — the #7515 SSOT already shared by the vrf-mgmt binder, the
-		// networkd `VRF=` emitter and the ip-monitoring next-hop validator, so
+		// networkd `KeepMaster=yes` emitter and the ip-monitoring next-hop validator, so
 		// this is a fourth CONSUMER of one rule rather than a fourth copy of it.
 		Sys: upgrade.NewKernelSystemWithHelperStatus(
 			func(ctx context.Context) (bool, error) {

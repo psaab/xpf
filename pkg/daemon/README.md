@@ -1295,6 +1295,29 @@ Detected by the presence of `/etc/xpf/node-id` (contents `0` or `1`).
 Absent → standalone. Cluster mode triggers the bondless-RETH naming
 convention (`fxp0`, `em0`, `ge-{0,7}-0-X`).
 
+### Live control-link changes are refused at commit (#8965, #8987, #9121, #18606)
+
+The cluster-endpoint commit preflights in `cluster_topology_preflight.go`
+and `cluster_control_local_addr_preflight_18606.go` run at all three apply
+paths (`commitAndApply`, `syncAndApply`, `commitConfirmedAndApply`): the peer
+address (#8965), the control interface (#8987), the config-sync endpoint
+(#9121) and, since #18606, this node's OWN control-link address (refused when
+the commit removes the address the running heartbeat is bound to; the address
+set compared is the one networkd renders, so adding `dhcp` / `dhcpv6` to the
+control unit while keeping the bound static address is a renumber too). On the
+local commit paths they run before promotion. On the synced path only the
+#18606 gate does — it runs inside `Store.SyncApplyGated`, on the compiled peer
+text, so a refused push promotes nothing; the #8965/#8987/#9121 synced checks
+still run after `SyncApply` has promoted (#18622). Each refusal
+names the procedure: set the change on BOTH nodes and restart xpfd on both,
+offline. The design, the per-path safety arguments and the
+abstain cases are in `docs/ha-no-hitless-restart.md`. Cells:
+`cluster_control_local_addr_preflight_18606_test.go` (decision table, the
+running-bind read, each apply path refusing a renumber, the synced re-push /
+later push / later local commit / background apply after a refusal, a
+steady-state synced text passing, and the wiring census against the #8965
+sibling) and `pkg/configstore/sync_apply_gated_18606_test.go`.
+
 ### Cluster-comms epoch lifecycle (`startClusterComms` / `stopClusterComms`, #4958)
 
 `startClusterComms` (`daemon_ha_sync.go`) launches an **asynchronous
@@ -4193,7 +4216,9 @@ never lock an operator out of a remote box it manages.
   abort; `vrfErr` is the deferred VRF-device-setup failure, captured by
   `applyConfigLocked` and threaded into the tail `errors.Join(..., mgmtRouteErr,
   vrfErr)`. The AUTHORITATIVE post-networkd management-VRF re-bind (which
-  `networkctl reconfigure` necessitates by stripping the master binding) is
+  `networkctl reconfigure` used to necessitate by stripping the master
+  binding; since #18597 networkd renders `KeepMaster=yes` and the rebind is a
+  no-op for a link that stayed bound) is
   extracted into `rebindManagementVRFIfaces`, which aggregates and RETURNS its
   bind failures; `applyDataplaneAndHACore` joins them into `networkdErr` (like the
   #1956 device-map-teardown joins), so a genuine management-VRF bind failure also
@@ -4206,11 +4231,47 @@ never lock an operator out of a remote box it manages.
   its bind retries into `networkdErr`. That restart leaves the heartbeat stopped,
   owing a retry the next apply performs. The old call discarded
   `RestartHeartbeat`'s result. `HeartbeatRestartOwed` separates that case from a
-  heartbeat that was never running, which is not an error. Deliberately LEFT best-effort (WARN, not surfaced): the
+  heartbeat that was never running, which is not an error.
+
+  **The heartbeat restart is gated on a real control-link move (#18597).**
+  The restart used to run after EVERY apply with a management VRF, because
+  networkd's reconfigure detached em0 from `vrf-mgmt` on every commit and the
+  rebind moved it back. Measured on the loss cluster (master 0.0.26151, 20
+  commits that changed only `fxp0`'s description): every commit cycled em0
+  twice on both nodes and removed its address, the restart's first bind failed
+  (`bind: cannot assign requested address`), and once both nodes declared the
+  other lost and fw1 took every RG. networkd now renders `KeepMaster=yes`, and
+  `restartHeartbeatIfControlLinkMoved` (`heartbeat_rebind_gate_18597.go`)
+  restarts only when `routing.VRFMasterMoveSeq` for the configured control
+  link moved since the previous decision, or (post-networkd pass and reassert
+  tick only) a failed restart is still owed. It runs right after BOTH bind passes: after
+  step 0b in `applyVRFReconcile`, so a move there (vrf-mgmt recreated, or a
+  drifted em0) is followed by the restart at once rather than after the whole
+  networkd and dataplane apply, after the step-2.7 rebind, and in
+  `reassertMgmtVRFOnce` when the background loop moves a drifted control link
+  back (it used to rebind em0 and leave the sockets stale until the next
+  commit). A move of another management link (fxp0, fab0) does not restart the
+  heartbeat. A failure of the step-0b restart is NOT joined into commit truth:
+  it leaves the restart owed (#9751), and the post-networkd pass of the same
+  apply retries and reports it, so a 0b failure that 2.7 repairs does not fail
+  the commit (worst case, every bind failing, two ~5s restart windows under
+  applySem in one apply). The reassert tick also passes when only an owed
+  restart is outstanding and retries it (one restart per 30s tick), so a
+  restart that failed there does not leave the heartbeat stopped until the next
+  apply. A live renumber of this node's control-link address is refused at
+  commit by the #18606 preflight (separate PR, landing before or with this
+  one): the gate no longer restarts the heartbeat on every commit, so that
+  refusal, not an accidental per-commit restart failure, is what keeps a
+  renumber from silently stranding the heartbeat on the old address. An
+  in-PR runtime re-bind (a `LocalAddress` transport-key field) was tried and
+  removed after two review rounds each found a new HA defect in it. Cells:
+  `heartbeat_rebind_gate_18597_test.go`.
+
+  Deliberately LEFT best-effort (WARN, not surfaced): the
   routing-instance member binds (they run BEFORE `applyInterfaceReconcile` creates
   tunnel/xfrmi members, so a not-yet-created member is an EXPECTED transient
-  absence, not a permanent failure) and the pre-networkd management bind (stripped
-  and re-established by the authoritative rebind above) — surfacing either would
+  absence, not a permanent failure) and the pre-networkd management bind (the
+  authoritative rebind above re-attempts it) — surfacing either would
   reject configs that commit fine today. Tests:
   `vrf_setup_bind_commit_truth_5700_test.go` (direct `applyVRFReconcile`
   surfaces-setup / tolerates-success / ctx-cancel-is-not-a-VRF-error via a

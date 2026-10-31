@@ -36,7 +36,9 @@ Every HA gate before H11 missed this, for two reasons. The gates and the
 measurement scripts set both node clocks from the orchestrator before they run
 (`failover_resync_node_clocks`, #11872, and the hitless experiment scripts).
 And they do a few moves and then restore, instead of one node issuing
-alternating moves indefinitely.
+alternating moves indefinitely. Since #18614 the crash gates no longer set a
+clock: they wait for NTP and fail when it does not converge (see "Crash gates:
+NTP convergence is a measured precondition" below).
 
 ## What a correct move is
 
@@ -183,6 +185,206 @@ incus exec <node> -- chronyc -n tracking | grep -E 'Reference|Leap|System time'
 incus exec <node> -- chronyc -n sources
 incus exec <node> -- cli -c 'show chassis cluster status' | grep -A3 Warning
 ```
+
+### Crash gates: NTP convergence is a measured precondition (#18614)
+
+A crash-rebooted node starts from its RTC and stays at that offset until
+chrony steps or slews it. An operator's cluster lives in that state, so
+`test-failover`, `test-ha-crash` and `test-double-failover` (rows H1–H3) no
+longer repair it. They use `test/incus/failover-clock-lib.sh`:
+
+- `failover_clock_baseline`: one reading before the first crash, plus the
+  `system ntp` config. It is recorded as context for a later verdict's reason,
+  never as a decision. A single instant can catch a chrony blip, and a
+  one-node-synchronised baseline is the #18584 state the gate exists to catch.
+- `failover_clock_reading`: a measure-only reading right after a
+  crash-rebooted node is back (in `test-ha-crash`, before its 10 s settle),
+  so a later rejoin FAIL has the post-crash clock state in its log.
+- `failover_clock_cell` (around `failover_clock_precondition`): after each
+  crash reboot the harness waits out, before the failback or the next crash.
+
+The precondition reads both nodes from the orchestrator until two things
+hold:
+
+- `|skew| + error <= 5 s`. Each node's offset against this host is the
+  midpoint of the minimum-RTT sample of three `incus exec date` samples (the
+  soak preflight's method), so the host clock cancels. The error is half the
+  two chosen samples' RTTs, about 0.2 s on loss. A reading whose error alone
+  is over 1 s (`XPF_FAILOVER_CLOCK_MAX_UNC_S`) is too noisy to count.
+- `chronyc -n tracking` shows a synchronised Leap status on **both** nodes:
+  `Normal`, or `Insert second` / `Delete second` around a leap second.
+
+It reads again every 2 s, up to the budget. It logs the first reading (the
+post-crash state), each change, and the result with the time it took and
+both nodes' uptimes:
+
+```
+clock precondition [phase1]: 1.8 s: waiting: node1-node0 skew -1.063 s (+/-0.199 s); chrony loss:xpf-userspace-fw0: Not synchronised [00000000 ()], loss:xpf-userspace-fw1: Normal [A29FC801 (162.159.200.1)] (bound 5 s, budget 120 s)
+clock precondition [phase1]: converged 5.6 s after the check began (up loss:xpf-userspace-fw0 29 s, loss:xpf-userspace-fw1 18523 s): node1-node0 skew -1.110 s (+/-0.203 s); chrony loss:xpf-userspace-fw0: Normal [A29FC87B (162.159.200.123)], loss:xpf-userspace-fw1: Normal [A29FC801 (162.159.200.1)] (bound 5 s)
+CLOCK_PRECONDITION: resync=0 converged=1 verdict=PASS skew_s=-1.110 converge_s=5.6 bound_s=5 budget_s=120 label=phase1
+```
+
+If it does not converge, the cell is scored from the **current** reading. The
+precondition reads `cli -c 'show configuration system ntp'` from the
+un-rebooted peer; whether the stanza exists is a config fact the build cannot
+influence.
+
+| State at the end | Verdict | Reads as |
+|---|---|---|
+| neither node synchronised, no `system ntp` stanza (decided after one reading; no budget spent) | VOID | no time source (lab) |
+| neither node synchronised, stanza configured, and none of its servers answers an SNTP query from the orchestrator either | VOID | lab NTP outage (the off-path control) |
+| a clock unreadable, the reading too noisy, or the ntp config unreadable | VOID | no measurement (harness/lab) |
+| ONE node synchronised and the other not (either node, with or without a stanza) | FAIL | #18584 class: only one node reaching NTP is how fw1 drifted 60–90 s behind in the operator's loop |
+| neither node synchronised, stanza configured, and its servers answer the orchestrator (or the probe is unavailable) | FAIL | lab, NTP or product |
+| both synchronised, further apart than the bound | FAIL | lab, NTP or product |
+
+Every FAIL is attributable because xpfd owns chrony's `vrf-mgmt` binding and
+its restart (`pkg/daemon/daemon_system.go`, #18584/#18589): a build that breaks
+them fails here, and the reason names the skew, both chrony states, the
+stanza, the probe result and the pre-crash baseline. A VOID prints a
+`CLOCK_VOID:` line; `harness-result.sh` turns a would-be PASS row VOID with
+that reason, and a direct run of any of the three smokes exits 2. Every row
+with a precondition carries `clock_converged`, `clock_void` and
+`clock_resync`, so `ledger_compare --all` tells a clock FAIL
+(`clock_converged=0 clock_void=0`) from a dataplane FAIL.
+
+Where each harness runs it, and its budget:
+
+- `test-ha-crash` runs it after the rejoin and dual-active checks, just before
+  the failback, in phase 1 and every phase 3 cycle, and after any node the
+  final health check had to start. Those checks keep their 10 s settle and see
+  the cluster in its real post-crash clock state; only the failback waits. The
+  budget is 120 s. The cell is FAIL-only (a resync still gets a PASS line
+  naming it, and a VOID a VOID line), so a converged run has the same cell
+  count as before (44).
+- `test-failover` and `test-double-failover` run it right after xpfd is back.
+  Their 20 s settle counts from xpfd coming back, so the post-crash checks
+  start no later than before when NTP converges inside it. Their budget is the time those timelines
+  already pay for: the part of `REBOOT_WAIT` the comeback did not use, plus
+  the 20 s settle. That is about 58 s in `test-failover` and 88 s in
+  `test-double-failover` after a 22 s comeback. The floor is 40 s, over twice
+  the measured 17–18 s convergence. It only binds after a comeback slower than
+  40 s (measured 19–22 s). Its at most 20 s overshoot is paid for:
+  `test-failover`'s `IPERF_DURATION_MIN` carries a `CLOCK_FLOOR_OVERSHOOT`
+  term (20 s), which makes its whole iperf run 20 s longer. The
+  double-failover's fixed 300 s run already outlasts its
+  worst case with the floor included (about 220 s summed from its own
+  waits). The double-failover's second crash (fw1) ends that
+  run while fw1 is still rebooting, so it has no clock cell.
+
+Why these numbers:
+
+- **Bound, 5 s.** It is the #18585 alarm's clear threshold
+  (`PeerClockSkewClear`, `pkg/cluster/peer_clock_skew_18585.go`), so a
+  converged gate never runs while that alarm is raised. Every wall-clock
+  comparison in `pkg/cluster` and `pkg/grpcapi` tolerates 5 s, and fabric
+  tokens authenticate under 30 s in any window alignment. The bound must also
+  not trip on a converged cluster. On loss with both nodes `Normal`, this
+  method read up to 0.23 s while the heartbeat read 0.0 s (RTT 0.18–0.21 s).
+  On the #18614 live runs, six crash reboots gave these converged readings:
+  −1.07, +0.07, +0.49 and +0.04 s on run 1; −1.11 s on run 2; −1.49 s on
+  run 3. The three near −1 s were all phase-1 readings, taken within seconds
+  of fw0 turning `Normal`. One of them had both nodes on the same server, so
+  the servers' disagreement does not explain them. A 2 s bound would have
+  left 0.5 s of margin. With this check's final code, the passing live
+  `test-ha-crash` converged at +0.69, +0.01, +0.80 and +0.01 s, with an error
+  of +/-0.18 to 0.19 s, and `test-failover` at +0.09 s.
+- **Budget, 120 s** (`test-ha-crash`'s default). On run 1 (loss,
+  0.0.26315+g960e6397a4e0, four `incus stop --force` reboots of fw0), xpfd was
+  active 19–20 s after `incus start`. chrony on fw0 reached `Normal`
+  17.2–18.1 s after that. The first readings, about 2 s after xpfd came back,
+  were +0.21 to +1.63 s with fw0 `Not synchronised`. Runs 2 and 3, and the
+  final passing run (0.0.26620+g960e6397a4e0), check after the rejoin checks.
+  There fw0 was `Normal` by uptime 28–31 s. The measure-only readings at
+  uptime 14–15 s read +0.78 to +1.45 s, with fw0 still `Not synchronised`. The
+  journals of five earlier crash reboots (0.0.26314) show the sequence:
+  chronyd started about 8 s after kernel boot, logged `Can't synchronise: no
+  selectable sources` at 22–25 s, and selected a source at 26–29 s. None
+  logged a step: the RTC came back within chrony's 1 s `makestep` threshold,
+  so only the Leap status was outstanding. 120 s is over 6× the measured
+  time, and still covers one full 64 s default poll interval if the first
+  iburst round runs before vrf-mgmt can route.
+- **Overrun.** The budget is checked after each reading, and the last sleep is
+  cut to the time left. So a verdict lands at most one reading past the budget,
+  about 1.5–2 s on loss (three samples per node plus two `chronyc`). Every node
+  command runs under a host-side `timeout`, so a wedged `incus exec` costs at
+  most 10–15 s per command.
+
+Knobs: `XPF_FAILOVER_CLOCK_SKEW_BOUND_S`, `XPF_FAILOVER_CLOCK_BUDGET_S` (an
+explicit value overrides every harness's own budget),
+`XPF_FAILOVER_CLOCK_POLL_S`, `XPF_FAILOVER_CLOCK_SAMPLES` and
+`XPF_FAILOVER_CLOCK_MAX_UNC_S`. A malformed knob is refused, and the cell is
+VOID.
+
+`XPF_FAILOVER_CLOCK_RESYNC=1` is the escape for a lab with no NTP. It
+measures and logs the state and prints a banner saying the run is not
+operator-faithful. Then it runs the #11872 `date -u -s` from one host
+reading, and the cell gets an explicit PASS line naming the resync.
+`harness-result.sh` records the would-be PASS row as **VOID** with
+`clock_resync=1`, so a resynced run cannot satisfy H1–H3. Any other value of
+the variable is refused (VOID), and no clock is touched.
+
+The NTP state of each cluster on 2026-10-31:
+
+- loss, tcp and udp all carry the three-server `system ntp ... routing-instance
+  mgmt` stanza, and all six nodes report `Leap status: Normal`. tcp's and udp's
+  stanzas were committed that day; earlier that day tcp had none
+  (`configuration path not found: system ntp`, both nodes
+  `Not synchronised`), which is the state the no-stanza VOID is for. #18584 is
+  closed.
+- From 09:35 to 10:16 UTC both loss nodes lost every source (`no selectable
+  sources (3 unreachable sources)`). With the stanza configured, a crash gate
+  in such a window FAILs, unless the servers fail the orchestrator's SNTP
+  probe too, in which case it is a lab NTP outage (VOID).
+- Outside a crash gate nothing checks this yet: `test-connectivity` has no
+  NTP cell, so a cluster that loses chrony (or reaches NTP from one node only)
+  shows up only when a crash smoke runs. #18629 tracks the cell.
+
+`make test-failover-clock-lib` (also in `make selftest`) covers this
+hermetically, with mocked `incus`, `timeout`, `date` and `sleep` over a
+virtual clock. Each node's exec latency is asymmetric and varies per sample,
+so only the minimum-RTT midpoint reads the planted skew exactly: max-RTT,
+one sample, and no midpoint all read it wrong. Its cells:
+
+- converged; converges within the budget; the log lines;
+- neither node synchronised: VOID without a stanza; with a stanza, FAIL when
+  its servers answer the host or the probe is unavailable, VOID when none
+  answers, VOID when the config is unreadable;
+- one node synchronised (the #18584 class): FAIL with the rebooted node
+  unsynchronised, whether or not the baseline already showed it (AD's A/B);
+  FAIL with the peer unsynchronised or its chronyc silent, with or without
+  a stanza;
+- a chrony blip at the baseline instant does not decide anything (AC's
+  probe: PASS after about 12 s); chrony lost on both nodes after a
+  synchronised baseline (AD's D);
+- each condition alone; the bound's edges with the error included (4.5 s
+  PASS, 4.9 s and 5.5 s FAIL); too noisy; leap-second states; an unreadable
+  clock;
+- the escape (one host reading, banner, flag); an invalid escape value; the
+  refusals; the measure-only reading;
+- the cell helper; the host-side timeouts;
+- the ledger contract with the real adapter;
+- a spliced-in silent `date -s` on the measured path, and a runaway guard.
+
+A static census scans every `.sh` and `.py` harness under `test/incus/` and
+`scripts/` (self-tests excluded). It strips comment lines and folds quotes,
+commas, brackets and parentheses to spaces. It then flags:
+
+- `date` with a set flag anywhere in its arguments (`-s`, `-s@N`,
+  `-s2026-…`, `-s"…"`, `"-s"`, `--set`, `-u -d X -s T`) or in the positional
+  `MMDDhhmm[[CC]YY][.ss]` form; `timedatectl set-time`;
+  `hwclock --hctosys|--systohc|-s|-w`; `chronyc makestep|settime`;
+  `chronyd -q`; `ntpd -…q`; `ntpdate`; `adjtimex`; `sntp -s|-S`;
+  `rdate -s`; `phc_ctl`; and Python `clock_settime`/`settimeofday`/
+  `clock_adjtime` (including the `["date", "-s", …]` list form);
+- any `failover_resync_node_clocks` call outside the library's escape;
+- a file that sources the library (`source` or `.`) and never runs the check.
+
+Each shape has a positive control. The file-level scan is first run on planted
+fixtures: a dot-sourced direct call, an indirect one, Python forms, a quoted
+flag, a comment and a sanctioned escape body. It reads text, so a command
+assembled at run time (`eval`, a variable holding `date`) is outside its reach
+and is left to review.
 
 ## What traffic must do
 

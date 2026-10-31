@@ -47,7 +47,7 @@ It complements, and does not replace:
 
 Record `/proc/loadavg` next to every throughput number: the orchestrator's and the firewall VMs' and LAN host's (`make perf-matrix` records all four). The VMs run on the cluster's incus remote, not on the orchestrator. Judge each cluster only
 against its own band below, never against another cluster's. Use each env's
-`IPERF_TARGET4/6` (loss `172.16.80.200`, tcp `172.16.80.210`, udp
+`IPERF_TARGET4/6` (loss `172.16.80.202`, tcp `172.16.80.210`, udp
 `172.16.80.211`), never `172.16.100.x`.
 
 **Baseline bands** (Gbit/s, 20 s runs). `make perf-matrix` uses port 5211,
@@ -86,8 +86,8 @@ re-run, not yet a regression; two are a regression.
 
 ## Tier 3: HA (loss and tcp; destructive targets self-lock)
 
-Clocks: the lab cluster configs carry NTP through `vrf-mgmt` since #18584 (public servers; the incus bridge gateways serve none). A deb deploy preserves node config, so a cluster picks the stanza up only when it is committed on it (see `pkg/cluster/README.md`, "Prerequisite: a cluster needs a time source"). On a cluster that has not had it committed — or runs a build older than #18584, which does not bind (unless a newer build left `/etc/chrony/conf.d/xpf-acquisition.conf` behind, as on loss after the downgrade to `g388eaad128`) — chrony has no reachable source: check `chronyc tracking` and resync node clocks after any crash reboot (`failover_resync_node_clocks`, #11872). Once both nodes show `Leap status: Normal` in `chronyc tracking`, the resync is a workaround to drop, not a step to keep.
-H11 is the exception and must never resync: it reports the skew instead, because the operator's own loop gets no clock help (`docs/ha-rg-move-correctness.md`).
+Clocks: the lab cluster configs carry NTP through `vrf-mgmt` since #18584 (public servers; the incus bridge gateways serve none). A deb deploy preserves node config, so a cluster picks the stanza up only when it is committed on it (see `pkg/cluster/README.md`, "Prerequisite: a cluster needs a time source"). Since #18614 no HA gate sets a node clock. H1, H2 and H3 (`test-failover`, `test-ha-crash`, `test-double-failover`) take one clock reading before the first crash and then, after each crash reboot they wait out (the double-failover's second crash, of fw1, ends that run with fw1 still rebooting, so it has none), run a measured precondition (`failover_clock_cell`, `test/incus/failover-clock-lib.sh`). It waits for the node1−node0 skew, read from this host, plus the reading's own error, to be within 5 s, and for `chronyc tracking` to show a synchronised Leap status (`Normal`, `Insert second` or `Delete second`) on both nodes. It logs the skew, the error and the time it took. The budget is 120 s in `test-ha-crash`. In the other two it is what their iperf timelines already pay for, about 58 s and 88 s after a 22 s comeback, with a 40 s floor. If it does not converge, the cell is scored from the **current** reading (the pre-crash baseline is context in the reason, never a shortcut). **VOID** only where the build cannot be in the path: neither node synchronised and no `system ntp` stanza configured (`cli -c 'show configuration system ntp'`; VOID after one reading), neither synchronised with a stanza whose servers do not answer an SNTP probe from the orchestrator either (a lab NTP outage), or no measurement. **FAIL** otherwise (lab, NTP or product: xpfd owns chrony's `vrf-mgmt` binding and its restart, #18584/#18589): one node synchronised and the other not (the #18584 class: only the RG owner reaching NTP is how fw1 drifted 60–90 s behind in the operator's loop), neither synchronised though the stanza's servers answer the orchestrator, or both synchronised but too far apart. The ledger row carries `clock_converged`, `clock_void` and `clock_resync`, so `ledger_compare --all` tells a clock FAIL (`clock_converged=0 clock_void=0`) from a dataplane FAIL, and a clock VOID turns a would-be PASS row VOID with its reason; a direct run exits 2 on a VOID cell. Since 2026-10-31 all three gate clusters (loss, tcp, udp) carry the stanza and report `Leap status: Normal` on both nodes (tcp's and udp's were committed that day; #18584 closed); the no-stanza VOID now protects only a lab that lacks it. `XPF_FAILOVER_CLOCK_RESYNC=1` is the only way to run these rows on a lab without NTP. It brings back the #11872 `date -u -s` resync and prints a banner, and `harness-result.sh` records the would-be PASS as **VOID** with `clock_resync=1`, so a resynced run can never satisfy H1–H3.
+H11 goes further: it has no escape at all. It only reports the skew, because the operator's own loop gets no clock help (`docs/ha-rg-move-correctness.md`).
 Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ran 66.8 s behind fw0 on loss); a cross-node timeline without that offset produced a wrong diagnosis once.
 
 | ID | Run | Pass | Catches |
@@ -184,7 +184,7 @@ failure.
     answered for only by this cluster" cell) and the evidence are in
     `docs/log/18558.md`.
 - **loss's v4/v6 iperf targets are different hosts (#18576, #18586).**
-  loss's `172.16.80.200` is the xpf-mouse-target container
+  loss's v4 `172.16.80.202` is the xpf-mouse-target container
   (`10:66:6a:8b:91:a4`) and `2001:559:8585:80::200` is the external v6 box
   (`f6:f0:06:10:77:d5`), so the Group12 neighbor identity cannot require one
   MAC there. `test/incus/loss-userspace-cluster.env` sets
@@ -238,87 +238,6 @@ failure.
       `vlan: "0"` on the device, which 7.0.1 accepts, or upgrading incus to
       7.6.0 or later.
 
-- **loss iperf target 172.16.80.200 is answered by two hosts: #18576.**
-  - The two holders:
-    - `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4` today). The env names
-      it `self`, so the cell takes its MAC from the probe itself and an
-      incus recreate needs no edit.
-    - The external v6 target box (`f6:f0:06:10:77:d5`). loss fw0 and fw1
-      resolve `2001:559:8585:80::200` to it.
-  - The external box is in no incus instance and no host netdev on loss,
-    tcp, udp or the orchestrator, and it has no SSH handle. It is not ours
-    to change.
-  - **Off-path control and when this cell is excused.** test-connectivity's
-    "iperf target ... answered for by exactly one host" IS the control. It
-    probes from the target container (`MOUSE_TARGET_REF`), never from a
-    firewall node; probing from the RG owner re-ran the race on it (seat X
-    reproduced a flip in 6/6 netns runs). It only reads both nodes'
-    neighbor entries, before and after the probe. The cluster's own
-    `WAN_GW80_4` answering the same probe is the positive control, and a
-    target that is not on-link from the container is VOID by name.
-    - **Excused = SKIP**, granted only when all three hold:
-      - the holders are exactly the container plus `f6:f0:06:10:77:d5`
-        (`IPERF_TARGET4_KNOWN_HOLDERS="self f6:f0:06:10:77:d5"` in
-        `test/incus/loss-userspace-cluster.env`);
-      - the container's own `self` line shows it holds the target;
-      - exactly one node holds `WAN_GW80_4` (the RG owner), the same node in
-        both snapshots, and it resolves `.200` to the container both before
-        and after the probe. This is the same-run control.
-
-      The cell then SKIPs with "EXCUSED #18576 … expires when one holder
-      drops it". A SKIP leaves `test-connectivity`'s exit status alone and
-      shows in the ledger's `cells_skipped`, so this excused cell can never
-      VOID a loss run or stop `deploy_gate_wave` before the iperf cells.
-    - **VOID means this run's v4 target is not certifiable.** That covers:
-      - the RG owner resolving `.200` to `f6:f0:06:10:77:d5`. This run's v4
-        iperf numbers measured the external box, so VOID them and rerun.
-        It is also the first observed flip, the evidence #18576 lacks, so
-        record the VOID reason and the time on #18576;
-      - the owner having no entry, or an entry (even STALE) naming any MAC
-        other than the container;
-      - no single stable RG owner: two nodes holding `WAN_GW80_4`, or
-        ownership moving between the two snapshots;
-      - only the external box answering, because the container lost its
-        alias.
-    - **FAIL is a product failure.** That covers:
-      - any other holder set, such as a third MAC;
-      - an xpf RETH MAC `02:bf:72:*` holder (status 3, mirroring #18575);
-      - on the RG owner only, an entry that is FAILED, a REACHABLE, DELAY,
-        PROBE or PERMANENT entry naming a MAC nobody claims, or an entry that
-        changes between two present snapshots.
-
-      The peer node's entry is not judged.
-    - Measured from an off-firewall vantage on the same VLAN
-      (`tcp:xpf-tcp-target`, 2026-10-31 02:34 UTC, with tcp's `.80.10` as
-      control and loss's firewalls only read). With the known set it was
-      VOID, because that vantage does not hold the target, so the excuse
-      cannot be granted there. With no known set it FAILed. loss fw0, the
-      RG owner, resolved `.200` to the container, which is the SKIP
-      condition for the real cell probed from the container.
-  - Both loss nodes have resolved v4 `.200` to the container whenever we
-    read them. A 4-min VLAN 80 capture saw no frame with sender `.200` from
-    either holder, so the hazard is latent.
-  - **When a loss iperf3 run stops or slows**, diagnose it on the rerun:
-    start `ip monitor neigh` on both nodes before the rerun:
-    - node0 on `ge-0-0-2.80`;
-    - node1 on `ge-7-0-2.80`.
-
-    Then read `ip -s neigh show 172.16.80.200 dev <that interface>` after it.
-    Only a move to `f6:f0:06:10:77:d5` is this environment row. A third MAC,
-    or a FAILED entry, is a product neighbor fault.
-  - tcp `.210` and udp `.211` are unique: PASS.
-  - **Delete this row**, and `IPERF_TARGET4_KNOWN_HOLDERS`, when either of
-    these happens:
-    - Option A: the lab owner drops v4 `.200` from the external box.
-    - Option B: loss's v4 target moves to a unique address.
-
-    When only the container answers but the env line is still set, the cell
-    PASSes with "configured but not observed: delete
-    IPERF_TARGET4_KNOWN_HOLDERS (#18576)" in its reason. That means delete
-    the line. A PASS rather than a VOID, because the excuse is owner-gated: a
-    stale line can only re-excuse the identical benign state, while a VOID
-    would block every loss gate until a doc edit lands.
-
 ## Reading results
 
 - **FAIL** is attributable: the binary was confirmed to be the build under
@@ -326,6 +245,54 @@ failure.
 - **VOID** means the measurement cannot be attributed (`exe_check` mismatch,
   a precondition, a harness fault). Fix the cause and rerun; a VOID is never a
   pass and never a regression.
+- **F1's "iperf target ... answered for by exactly one host" cell
+  (#18578, #18576)** checks that the v4 iperf target is held by one host.
+  It probes from the cluster's target container (`MOUSE_TARGET_REF`),
+  never from a firewall node: probing from the RG owner re-ran the
+  neighbor race on it. It sends three RFC 5227 rounds (sender 0.0.0.0, so
+  no cache learns from them) for `IPERF_TARGET4`, with the cluster's own
+  `WAN_GW80_4` as the positive control. On the firewalls it only reads
+  both nodes' neighbor entries, before and after the probe.
+  - **PASS:** the container alone holds the target, and the RG owner's
+    entry is absent or names the container.
+  - **FAIL:** any second holder (no env has an excuse set since
+    `IPERF_TARGET4_KNOWN_HOLDERS` was deleted), or an xpf RETH MAC
+    holder. On the RG owner only, it is also a FAIL when the entry is
+    FAILED, names a MAC nobody claims, or changes between the snapshots.
+  - **VOID:** the control did not answer; nobody, or only another host,
+    holds the target; the owner's entry (even STALE) names another MAC;
+    there is no single stable RG owner.
+  - **Why it exists.** Until 2026-10-31 loss targeted `172.16.80.200`.
+    The external v6 box (`f6:f0:06:10:77:d5`), which is in no incus
+    instance and has no SSH handle, also answers ARP for it. In a loss
+    `test-rg-move-soak` that day, fw1 resolved `.200` to that box: all 8
+    v4 iperf streams died while v4 ping kept answering from the wrong
+    host, and all 20 moves FAILed on environment. loss now targets
+    `172.16.80.202`. `mouse-addr.service` pins it on the container
+    (`TARGET_ALIAS_V4`, derived from the env), and it was claim-probed
+    unique before use. It is not `.201`, the separate #8259 mouse
+    address, and not `.174`, the container's DHCPv4 lease, which nothing
+    pins. Whether `.202` lies outside the lab DHCP server's pool is not
+    shown; this cell bounds that risk in every run. Harnesses that still
+    hard-code `.200` are listed in `docs/log/18576.md`.
+  - **The deprecated `.200`.** `.200` stays pinned on the container as a
+    DEPRECATED alias (`TARGET_ALIAS_V4_DEPRECATED` in the loss env), so
+    a container restart does not strand those harnesses and older
+    checkouts. `mouse-target-setup.sh` keeps it only while it is held,
+    and never claims it anew. It is still dual-held, so nothing may
+    measure it, and this cell never probes it. **Expiry** (tracked on
+    #18576): once the hard-coded follow-ups are retargeted and no open
+    branch predates #18619, delete the env line, then run
+    `ip addr del 172.16.80.200/24 dev eth0` on the container.
+  - **`mouse-target-setup.sh up`** probes each NEW v4 address from the
+    container before it writes the unit, and refuses if another MAC
+    answers or the control is silent. It runs under the cluster lock.
+  - **When a loss iperf3 run stops or slows**, start `ip monitor neigh`
+    on both nodes before the rerun (node0 on `ge-0-0-2.80`, node1 on
+    `ge-7-0-2.80`). After it, read
+    `ip -s neigh show "$IPERF_TARGET4" dev <that interface>`. A move to
+    another MAC is environment only if this cell shows a second holder
+    in the same run. Otherwise it is a product neighbor fault.
 - **F1's "Group12 read-only neighbor identity" cell (#18586)** reads the RG
   owner's neighbor entries for the WAN iperf targets: the one node holding
   `WAN_GW80_4` (exact address match), on the device its route to each target
@@ -359,9 +326,9 @@ failure.
     proof.
 - **SKIP** is either a cell that did not run, or an environment row's
   excused state. The ledger's `cells_skipped` counts both. The excused kind
-  carries its marker in the cell text, today only "EXCUSED #18576", and it is
-  neither a pass nor a failure. A SKIP without a marker means the cell did
-  not run.
+  carries its marker in the cell text (no env emits one today: "EXCUSED
+  #18576" ended when loss's v4 target moved to `.202`), and it is neither a
+  pass nor a failure. A SKIP without a marker means the cell did not run.
 - **COST** (row H11) is a correct move whose transition cost was over budget
   (#18559). It is neither a FAIL nor a clean pass: count it and compare
   against master, like H10's numbers.

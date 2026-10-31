@@ -1164,6 +1164,28 @@ within the deadline, the rolling driver fails back and ABORTS WITHOUT
 cutting. A peer that cannot take over therefore never leads to a cut — at
 worst the drain times out and the local node is restored to forwarding.
 
+**An RG0 primary that refused a peer push (#18610).** After a dual-active
+window the RG0 primary may have refused the peer's config push as the
+authority. Before #18610 that refusal left the primary reading `Transfer
+ready: no (standby config stale ...)` on every RG and carrying `CF` for as
+long as it stayed primary, so `xpfd upgrade --rolling` started there aborted
+with "peer is NOT takeover-ready". A build with #18610 does not count that
+refusal against itself while it is the authority. If the stuck primary still
+runs an older build (a mixed-version roll from a release without the fix),
+demote it first: `request chassis cluster failover redundancy-group 0 node
+<peer>`. The new primary pushes its config, the old primary applies it, reads
+`Transfer ready: yes`, and the roll can start. That push REPLACES the old
+primary's config with the peer's, so first check `show chassis cluster
+information` (`Last config generation refused as RG0 authority`) and the
+journal Warn, which says whether the refused config differed from the active
+one; if it did, re-apply any change you need after the failover.
+The losing node had the mirror symptom: its own refused push left a #9569 send
+debt, so a roll started THERE refused with the stale-config gate. A primary with
+#18610 re-pushes its config after refusing (at most once per 10 s), which the
+loser applies, clearing the debt. Against an older primary, a new commit on the
+primary clears it: it is pushed under a new generation, which the loser
+applies.
+
 ## Session-sync wire version on the in-place path (#7990)
 
 The LANE-1 in-place rolling path had **no session-sync version check at all**
@@ -1394,7 +1416,7 @@ OFF-BOX address reachable over a dataplane interface** — the far end of a
 transit link, or the HA peer's dataplane address.
 
 The management classifier is `config.IsManagementIfName`, the #7515 SSOT already
-shared by the daemon's `vrf-mgmt` binder, the networkd `VRF=` emitter and the
+shared by the daemon's `vrf-mgmt` binder, the networkd `KeepMaster=yes` emitter and the
 ip-monitoring next-hop validator. It is injected by the caller for the same
 reason `HelperStatus` is, and a `nil` classifier is "no information" rather than
 "ineligible" — but both production constructors wire it, and tests bind that

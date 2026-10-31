@@ -622,9 +622,15 @@ nodes send the section.
 
 ### A heartbeat RESTART is not a cold boot (#9722)
 
-`RestartHeartbeat` replaces the receiver on every config apply that rebinds the
-management VRF. On an HA node with a management interface that means every
-operator commit and every peer-synced apply. The replacement used to arm the
+`RestartHeartbeat` replaces the receiver when an apply moves the control link
+into or out of the management VRF. Before #18597 that was every config apply:
+networkd detached em0 from `vrf-mgmt` on every reconfigure and the rebind moved
+it back, so on an HA node every operator commit and every peer-synced apply
+restarted the heartbeat. networkd now renders `KeepMaster=yes` and the daemon
+gates the restart on the control link's VRF master actually having changed
+(`restartHeartbeatIfControlLinkMoved`, `pkg/daemon/README.md`), so an
+unrelated commit no longer restarts it; a restart still happens when the link
+really moved (for example after `vrf-mgmt` was recreated). The replacement used to arm the
 same 30s cold-boot floor. The seen-then-lost arm returns inside that floor
 before it checks staleness, so a peer that died within 30s after a commit was
 declared lost up to 30s late. In the default private-RG mode, that delay is the
@@ -691,8 +697,14 @@ floor into its retry. Cells:
 
 ### A failed heartbeat restart is owed, not latched (#9751)
 
-`RestartHeartbeat` retries the bind five times, a second apart. If all five
-fail, it returns false with the sender and receiver both torn down. Before
+`RestartHeartbeat` retries the bind on `heartbeatRestartRetrySchedule`: 50ms,
+200ms and 750ms pauses, then 1s ones, about 5s in all (#18597; it was five
+attempts a second apart). The restart follows a control-link VRF move, and the
+enslave cycle makes networkd drop and re-add the link's static address
+5-30ms later, so a first bind that loses that race used to cost a 1s+
+heartbeat gap at the peer (1.6s measured on tcp) and now costs about 50ms. If
+every attempt fails, it returns false with the sender and receiver both torn
+down. Before
 #9751, every later `RestartHeartbeat` saw "not running" and returned at once,
 and the apply discarded the result. The heartbeat stayed dead across later
 applies until comms restarted. This node sent no heartbeats, so the peer
@@ -4422,6 +4434,45 @@ because no peer is asked anything.
 - `Ready` and `TransferReady` are different gates. `Ready` allows VRRP to
   participate in election; `TransferReady` is the stricter gate for
   explicit operator-initiated `request chassis cluster failover`.
+- **The RG0 authority is never config-stale against a push it refused as
+  primary (#18610).** During a dual-active window the peer can push its config
+  while this node is still RG0 primary; `handleConfigSync` refuses it
+  (`cluster.ErrConfigSyncRejectedAuthority`). The receive edge has already
+  raised `lastRecvConfigGen` (#5563), and M-2/#4151 keeps the applied mark
+  pinned so the generation stays admissible if this node demotes. If this
+  node instead STAYS primary, the peer (now secondary) never pushes again, so
+  the received mark stayed above the applied mark indefinitely: every local RG
+  read `Transfer ready: no (standby config stale ...)`, the refusal had armed
+  the #6387 CF monitor failure, and a rolling upgrade started on the primary
+  aborted with "peer is NOT takeover-ready". `configApplyLoop` now records such
+  a refusal in `rejectedAsAuthorityConfigGen` instead of arming CF, and
+  `TransferReadinessSnapshot.ConfigStale` ignores received generations up to
+  that mark while this node is still the authority (`IsPrimaryFn`). Once it
+  demotes they count again, so it is not promoted back before the new
+  primary's push applies. The NACK (#7328) is still sent. An ordinary apply
+  failure, on a primary or not, is unchanged. `resetRecvGen` clears the mark
+  with the other generation marks. The refusal counts
+  `ConfigsRejectedAsAuthority` (not `ConfigsApplyFailed`) and records
+  `ConfigRejectedAsAuthorityLastGen`; the daemon's Warn names the generation
+  and says whether the refused config differs from the active one, in which
+  case the peer's version (including a commit made on the peer while it
+  believed itself primary) is discarded here. Mixed-version escape: a primary
+  still on a build without this fix stays stuck until it demotes, so demote
+  it (`request chassis cluster failover redundancy-group 0 node <peer>`) and
+  let the new primary's push apply before a rolling upgrade
+  (`docs/in-place-upgrade.md`).
+  Two edges (review of #18612): (1) the authority classification uses the
+  role at RECEIVE (`configApplyItem.authorityAtReceive`), not at apply. A
+  config received while this node was secondary and refused because a
+  promotion landed before the apply loop reached it is the previous primary's
+  last config, lost: it stays an apply failure (CF, stale, `ConfigsApplyFailed`)
+  with its own Warn naming the generation. (2) The losing node is converged:
+  the daemon's refusal clears the authority's (epoch x generation) push marker
+  and re-runs the reconcile, paced at `configAckOverdueAfter`, so the loser
+  receives the authority's config under a new wire generation, applies it,
+  ACKs, and its own #9569 send debt is superseded. Without it the marker,
+  claimed by the pre-split push, kept the loser divergent and its gate
+  refusing the handovers it starts.
 - **Every handover that promotes the peer refuses a config-stale peer
   (#9569).** The #5563 config-stale gate lives in `TransferReady`, which only
   the node that becomes primary evaluates, through `RequestPeerFailover`. The
