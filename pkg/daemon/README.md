@@ -4691,10 +4691,14 @@ after raising its reset flag, so no HA write can follow the wipe's
 managed-section strip.
 
 The 250 ms debounce applies to demotion edges as well as promotions. For a
-demotion it only delays the kernel/routing-protocol withdrawal of the RG's
-routes; the helper FIB is republished on the edge itself, and an HA render
-taken before the demotion edge is superseded by it, so the delay cannot
-re-advertise the demoted RG.
+demotion it delays the kernel/routing-protocol withdrawal of the RG's
+routes; the helper FIB is republished on the edge itself. An HA render taken
+before the demotion edge is superseded by it unless it has already passed
+its last check (under `reloadMu`) when the edge lands. A render past that
+check still writes and reloads FRR with the RG's routes, and they stay
+advertised until the edge's own reconcile, at least 250 ms later, withdraws
+them. The predicate narrows that window to one write-and-reload; it does
+not close it.
 
 The RG-edge ip-monitoring gating reconcile (`scheduleIPMonGating`, #16690)
 is coalesced behind the same debounce (`ipmonGateHA`). When the gate

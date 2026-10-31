@@ -111,8 +111,11 @@ func TestConcurrentAppliesSerializeBuilds18561(t *testing.T) {
 }
 
 // The predicate is judged again under reloadMu, immediately before the
-// write: a render overtaken while it was being built is still skipped.
-// RED if only the pre-build check remains.
+// write: a render overtaken while it was being built is still skipped. It is
+// evaluated three times on this path (before the build, before the retry
+// pre-cancel, under reloadMu) and turns false only on the third, so RED if
+// the check under reloadMu is removed (seat U: flipping on the second call
+// let the pre-cancel check mask that removal).
 func TestPredicateRecheckedBeforeWrite18561(t *testing.T) {
 	rec := &RecordingExecutor{}
 	conf := filepath.Join(t.TempDir(), "frr.conf")
@@ -120,8 +123,11 @@ func TestPredicateRecheckedBeforeWrite18561(t *testing.T) {
 	calls := 0
 	err := m.ApplyFullIfCurrent(&FullConfig{ClusterMode: true}, func() bool {
 		calls++
-		return calls == 1 // current before the build, overtaken during it
+		return calls < 3 // current until the check under reloadMu
 	})
+	if calls != 3 {
+		t.Fatalf("predicate evaluated %d times, want 3 (before build, before pre-cancel, under reloadMu)", calls)
+	}
 	if !errors.Is(err, ErrFRRApplySuperseded) {
 		t.Fatalf("overtaken apply returned %v, want ErrFRRApplySuperseded", err)
 	}
