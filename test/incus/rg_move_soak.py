@@ -27,7 +27,8 @@ What this harness does, per move:
   * keeps sampling both views for the rest of the window, recording any
     sample where both nodes claim the RG (dual-active) or the RG leaves the
     target after landing;
-  * reads each helper's own `ha_groups[].active` once the views converged;
+  * reads each helper's own `ha_groups[].forwarding_active` (active AND an
+    unexpired lease) once the views converged;
   * proves the TRAFFIC moved: the target node's RETH members (from the
     helper's per-binding RX+TX counters) carry the packets between landing
     and the window's end and the other node's do not, and the LAN host's
@@ -545,7 +546,7 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
             bad = [f"node{n}={'unreadable' if r.helper.get(n) is None else r.helper.get(n)}"
                    for n in (0, 1) if r.helper.get(n) is not want[n]]
             if bad:
-                reasons.append(f"RG{r.rg} helper ha_groups[].active disagrees with status (want node{r.target}=True): {' '.join(bad)}")
+                reasons.append(f"RG{r.rg} helper ha_groups[].forwarding_active disagrees with status (want node{r.target}=True): {' '.join(bad)}")
         if traffic_enabled:
             reasons.extend(follow_reasons(r, budget))
     if traffic_enabled:
@@ -669,7 +670,9 @@ for b in st.get("bindings", []):
     n = b.get("interface") or b.get("ifname")
     if n:
         ifs[n] = ifs.get(n, 0) + int(b.get("rx_packets") or 0) + int(b.get("tx_packets") or 0)
-print(json.dumps({"ha": {str(g.get("rg_id")): bool(g.get("active")) for g in st.get("ha_groups", [])}, "if": ifs}))
+# forwarding_active, not active: the helper forwards on active AND an
+# unexpired lease (userspace-dp runtime.rs), exported as forwarding_active.
+print(json.dumps({"ha": {str(g.get("rg_id")): bool(g.get("forwarding_active", g.get("active"))) for g in st.get("ha_groups", [])}, "if": ifs}))
 """
 
 _SET_MEMBER = re.compile(r"^set (?:groups \S+ )?interfaces (\S+) gigether-options redundant-parent (reth\d+)\s*$")

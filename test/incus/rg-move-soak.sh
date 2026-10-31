@@ -7,7 +7,7 @@
 # iperf3 (-P8 IPv4, -P2 IPv6) and ping -D -i 0.01 (IPv4 + IPv6) running from
 # the LAN host, and score every move: the CLI text, ownership in BOTH nodes'
 # own status within the bound and for the rest of the window, each node's
-# `Forwarding: rg-active=` line, each helper's own ha_groups[].active, no
+# `Forwarding: rg-active=` line, each helper's own ha_groups[].forwarding_active, no
 # dual-active, that the traffic itself moved (the target node's RETH members
 # carry the packets, the LAN host's neighbour entry for the LAN VIP resolves
 # to the target node), and the loss/stall in that move's window on the LAN

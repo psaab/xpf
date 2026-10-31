@@ -57,7 +57,9 @@ A move of RG *g* to node *t* is correct when all of these hold:
    daemon's *applied* RG state, #7367/#8326). The owner reads `active`, the
    other node `inactive`, and neither line carries a ` -- DIVERGENCE` suffix.
 4. **The helper agrees.** Each node's userspace-dp helper reports
-   `ha_groups[].active` true on *t* and false on the other node.
+   `ha_groups[].forwarding_active` true on *t* and false on the other node.
+   That is what the helper forwards on (`active` AND an unexpired lease), so
+   an RG marked active with an expired lease does not pass.
 5. **No dual-active sample**, at any point during the move.
 6. **Traffic follows.** Sessions are already on both nodes (session sync), so
    established flows keep running through the new owner:
@@ -82,7 +84,7 @@ runs on the giving node or the taking node.
 |---|---|---|---|
 | `redundancy-group g node A` (target is the local node) | `RequestPeerFailover(g)`: A asks the current owner to transfer *g* out, and A takes it | session-sync connection | no |
 | `redundancy-group g node B` (target is the peer) | `proxyClusterFailover`: A proxies the request over fabric gRPC to B, and B then runs `RequestPeerFailover(g)` locally | fabric gRPC (PSK token, 30 s window), then session sync | **yes**: the fabric token |
-| `redundancy-group g` (no `node`) | `ManualFailover(g)`: A yields *g* (A goes to `secondary-hold`, the peer takes over). Run on the non-owner it moves nothing | local, then heartbeat/election | no |
+| `redundancy-group g` (no `node`) | `ManualFailover(g)`: A yields *g* (A goes to `secondary-hold` with the manual flag set, the peer takes over). Run on the non-owner it moves nothing, but it still parks that node in `secondary-hold` with the manual flag until `failover reset redundancy-group g` | local, then heartbeat/election | no |
 | `data node N` | every data RG (ID > 0) not already on N, in one batch. To the local node it uses `RequestPeerFailoverBatch`; to the peer it is proxied like `node B` | as above | as above |
 | `reset redundancy-group g` | `ResetFailover(g)`: clears *this* node's manual-failover state for *g* and resumes normal election for it (not the node-wide kernel-upgrade hold) | local | no |
 
@@ -116,8 +118,11 @@ The accept band is the replay horizon for captured tokens, which include
 (#6708, #7487). The fix for skew is time synchronisation, not a wider band.
 
 Heartbeats, election, session sync and the local-target move do not depend on
-the wall clock. That is why a skewed cluster looks healthy in
-`show chassis cluster status` while every cross-node RPC fails.
+the wall clock at these skews. (The keyed heartbeat's boot epoch is a
+wall-clock value with a one-hour plausibility bound, `bootEpochMaxSkew`, so a
+skew past an hour does reach heartbeat admission —
+`pkg/cluster/heartbeat_epoch_admit.go`.) That is why a skewed cluster looks
+healthy in `show chassis cluster status` while every cross-node RPC fails.
 
 ### Why the lab drifted
 
@@ -356,7 +361,7 @@ a late dual-active sample and a revert), are in
 | `did not land on nodeT within Ns` | The CLI returned, but the views never agreed in time. `last:` shows the final joint view | Check whether the RG landed later or not at all. Look for `secondary-hold` or `lost` |
 | `left nodeT after landing, inside the window` | The views agreed, then the RG moved again before the operator's next command (a preempt, an auto-failback, a racing request) | Pull both journals around the window; measure clock skew before pairing them |
 | `dual-active sample during the move window` | Both nodes claimed the RG, or both forwarded it, at one sample | Treat as severe: duplicate VIPs. Pull both journals. Measure clock skew before pairing them |
-| `helper ha_groups[].active disagrees` | The daemon's views agree, but the dataplane does not | Check the helper's status and the daemon's RG apply path |
+| `helper ha_groups[].forwarding_active disagrees` | The daemon's views agree, but the dataplane does not forward for the group (inactive, or active with an expired lease) | Check the helper's status and the daemon's RG apply path |
 | `ping gap ... > budget` / `stream N stalled ...` | The move landed, but the transition cost more than the budget | Compare with H10's master baseline. A single bad window repeated across moves is a regression |
 | `traffic did not follow to nodeT: RETH-member packets after landing node0=… node1=…` | Status and helper flipped, but the packets are still on the old node's RETH members | A forwarding/ownership divergence: check GARP/NA after the move, the helper's RG activation, fabric redirect |
 | `traffic did not follow to nodeT: the LAN host's v4 neighbour entry ... still resolves to nodeN's MAC` | The LAN host still sends to the old owner's per-node RETH MAC | The new owner's GARP did not reach or was not accepted; check `garpEpoch` and the old owner's VIP removal |
