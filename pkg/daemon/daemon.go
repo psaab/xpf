@@ -1838,6 +1838,16 @@ type Daemon struct {
 	// vrrpMgr.ResignRG directly; unit tests inject a barrier they control so
 	// the deferred fence verdict is drivable without real VRRP instances.
 	resignRethRGFn func(rgID int) vipReleaseBarrier
+	// directVIPDumpFailing latches the direct-VIP ownership dump failure so
+	// its warning fires once per failure streak, not per 2s reconcile tick
+	// (#18573).
+	directVIPDumpFailing atomic.Bool
+	// interfaceLinkRefreshWake is the debounced interface-link snapshot
+	// refresher's wake channel, published by startTransitGateLinkWatch so
+	// the direct-VIP reconcile can republish the userspace interface rows
+	// after it changes a RETH address outside a commit (#18573). nil until
+	// the refresher starts.
+	interfaceLinkRefreshWake atomic.Pointer[chan string]
 	// Test hooks for direct-mode VIP ownership reconciliation.
 	directAddVIPsFn        func(int) int
 	directRemoveVIPsFn     func(int) int

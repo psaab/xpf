@@ -238,6 +238,10 @@ cat > "$d/canned.txt" <<'EOF'
 --- PASS: TestRIMemberIsReBoundInTheKernel_9813 (0.01s)
 === RUN   TestRethRIMemberBindsLocalPhysicalInKernel12059
 --- PASS: TestRethRIMemberBindsLocalPhysicalInKernel12059 (0.01s)
+=== RUN   TestDirectVIPRenumberOnKernel18573
+--- PASS: TestDirectVIPRenumberOnKernel18573 (0.01s)
+=== RUN   TestDirectVIPStampRoundTripsThroughTheKernel18573
+--- PASS: TestDirectVIPStampRoundTripsThroughTheKernel18573 (0.01s)
 EOF
 cat > "$d/go" <<'EOF'
 #!/bin/sh
@@ -251,7 +255,7 @@ EOF
 chmod +x "$d/go"
 : > "$d/argv.log"
 out=$(CANNED_GO_OUTPUT="$d/canned.txt" GO_ARGV_LOG="$d/argv.log" GOFLAGS=-json PATH="$d" sh "$LEG" 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "all 27 daemon kernel cells ran and passed" && grep -q "go json=false argv: <test> <-json=false>" "$d/argv.log"; then
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "all 29 daemon kernel cells ran and passed" && grep -q "go json=false argv: <test> <-json=false>" "$d/argv.log"; then
 	ok "-json=false pinned: fake go argv carries <-json=false> and the run passes the by-name guard"
 else
 	bad "-json=false pin: rc=$rc (want argv line with <test> <-json=false> and leg PASS): out=$out argv=$(cat "$d/argv.log" 2>/dev/null)"
@@ -315,10 +319,14 @@ cat > "$d/canned.txt" <<'EOF'
 --- PASS: TestRIMemberIsReBoundInTheKernel_9813 (0.01s)
 === RUN   TestRethRIMemberBindsLocalPhysicalInKernel12059
 --- PASS: TestRethRIMemberBindsLocalPhysicalInKernel12059 (0.01s)
+=== RUN   TestDirectVIPRenumberOnKernel18573
+--- PASS: TestDirectVIPRenumberOnKernel18573 (0.01s)
+=== RUN   TestDirectVIPStampRoundTripsThroughTheKernel18573
+--- PASS: TestDirectVIPStampRoundTripsThroughTheKernel18573 (0.01s)
 EOF
 write_fake_go "$d/go" "$d/canned.txt"
 out=$(PATH="$d" sh "$LEG" 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "all 27 daemon kernel cells ran and passed"; then
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "all 29 daemon kernel cells ran and passed"; then
 	ok "positive control: good run passes"
 else
 	bad "positive control: rc=$rc: $out"
@@ -328,7 +336,7 @@ fi
 # TestMgmtStaticRouteResolvedGatewayAliasesInstallInKernel_12084 and
 # TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174 report
 # PASS while every subtest skips; the canned run below is a complete
-# 27-cell PASS except for one indented SKIP under the first parent.
+# 29-cell PASS except for one indented SKIP under the first parent.
 d=$(mkfix subskip); rm -f "$d/unshare" "$d/go"
 write_fake_unshare "$d/unshare"
 # Build the canned file from cell 10's shape: reuse a full PASS list
@@ -390,6 +398,10 @@ cat > "$d/canned.txt" <<'CANNED_EOF'
 --- PASS: TestRIMemberIsReBoundInTheKernel_9813 (0.01s)
 === RUN   TestRethRIMemberBindsLocalPhysicalInKernel12059
 --- PASS: TestRethRIMemberBindsLocalPhysicalInKernel12059 (0.01s)
+=== RUN   TestDirectVIPRenumberOnKernel18573
+--- PASS: TestDirectVIPRenumberOnKernel18573 (0.01s)
+=== RUN   TestDirectVIPStampRoundTripsThroughTheKernel18573
+--- PASS: TestDirectVIPStampRoundTripsThroughTheKernel18573 (0.01s)
 CANNED_EOF
 write_fake_go "$d/go" "$d/canned.txt"
 out=$(PATH="$d" sh "$LEG" 2>&1); rc=$?
@@ -457,6 +469,10 @@ cat > "$d/canned.txt" <<'CANNED_EOF'
 --- PASS: TestRIMemberIsReBoundInTheKernel_9813 (0.01s)
 === RUN   TestRethRIMemberBindsLocalPhysicalInKernel12059
 --- PASS: TestRethRIMemberBindsLocalPhysicalInKernel12059 (0.01s)
+=== RUN   TestDirectVIPRenumberOnKernel18573
+--- PASS: TestDirectVIPRenumberOnKernel18573 (0.01s)
+=== RUN   TestDirectVIPStampRoundTripsThroughTheKernel18573
+--- PASS: TestDirectVIPStampRoundTripsThroughTheKernel18573 (0.01s)
 CANNED_EOF
 write_fake_go "$d/go" "$d/canned.txt"
 out=$(PATH="$d" sh "$LEG" 2>&1); rc=$?
@@ -545,6 +561,10 @@ cat > "$d/canned.txt" <<'CANNED_EOF'
 --- PASS: TestRIMemberIsReBoundInTheKernel_9813 (0.01s)
 === RUN   TestRethRIMemberBindsLocalPhysicalInKernel12059
 --- PASS: TestRethRIMemberBindsLocalPhysicalInKernel12059 (0.01s)
+=== RUN   TestDirectVIPRenumberOnKernel18573
+--- PASS: TestDirectVIPRenumberOnKernel18573 (0.01s)
+=== RUN   TestDirectVIPStampRoundTripsThroughTheKernel18573
+--- PASS: TestDirectVIPStampRoundTripsThroughTheKernel18573 (0.01s)
 CANNED_EOF
 write_fake_go "$d/go" "$d/canned.txt"
 out=$(PATH="$d" sh "$LEG" 2>&1); rc=$?
@@ -555,7 +575,7 @@ else
 fi
 
 # ── 15. (#16507) a nonzero go exit over a full PASS list must FAIL ──
-# The fake go prints the complete 27-cell RUN/PASS list (so every
+# The fake go prints the complete 29-cell RUN/PASS list (so every
 # by-name, SKIP and subtest guard passes) but exits 1. Only the
 # leg's `go test exited $rc` check can red this run; without it
 # the leg prints PASS over a failing kernel cell.
@@ -616,6 +636,10 @@ cat > "$d/canned.txt" <<'CANNED_EOF'
 --- PASS: TestRIMemberIsReBoundInTheKernel_9813 (0.01s)
 === RUN   TestRethRIMemberBindsLocalPhysicalInKernel12059
 --- PASS: TestRethRIMemberBindsLocalPhysicalInKernel12059 (0.01s)
+=== RUN   TestDirectVIPRenumberOnKernel18573
+--- PASS: TestDirectVIPRenumberOnKernel18573 (0.01s)
+=== RUN   TestDirectVIPStampRoundTripsThroughTheKernel18573
+--- PASS: TestDirectVIPStampRoundTripsThroughTheKernel18573 (0.01s)
 CANNED_EOF
 printf '#!/bin/sh\ncat "%s"\nexit 1\n' "$d/canned.txt" > "$d/go"
 chmod +x "$d/go"

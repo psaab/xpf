@@ -1040,6 +1040,30 @@ independent reasons:
 Both are covered by hermetic cells; neither has been through `make
 test-ha-crash` on a cluster yet.
 
+### A RETH address removed by commit stayed on the RG owner (#18573) — FIXED IN SOURCE
+
+In direct-VIP mode (private-RG election, the compiler default) the add and
+remove passes both derived their set from the active config at call time. A
+commit that renumbered `reth0.50` (`.10` -> `.42` on tcp, `.11` -> `.43` on
+udp) left the old address on the owner indefinitely. The owner answered ARP for
+it, and a demotion left it behind too. Because the userspace snapshot is built
+from the kernel listing, interface SNAT kept translating new LAN flows to the
+removed address (udp: LAN to 1.1.1.1 0/30) until the next snapshot.
+
+Now every direct-mode VIP is stamped in the kernel (`IFA_PROTO`,
+`pkg/vipstamp`), and every reconcile pass deletes a stamped address the config
+no longer assigns to its netdev, on the owner and the non-owner alike. The
+snapshot builder never publishes such a leftover, and a reconcile-path change
+queues an interface-link snapshot refresh. See `pkg/daemon/README.md`
+"Direct-mode VIP failover" and `pkg/dataplane/README.md` "Interface rows
+never publish a direct-VIP leftover (#18573)".
+
+**Limit:** a pre-#18573 VIP that the config had already dropped before the
+upgrade carries no stamp and must be deleted by hand once.
+
+**Status:** unit, real-kernel (netns) and mutation-checked; live renumber +
+RG move on tcp pending.
+
 ## What Still Needs Work
 
 ### Cycle-3 post-takeover loss in `test-restart-connectivity` (#18540, OPEN)

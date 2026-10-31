@@ -270,6 +270,44 @@ transfer. The mark is an overlay on what the HELPER is told. It never changes
 - An expired mark no longer counts. The status poll's signature comparison
   then republishes the effective view (5 s throttle).
 
+## Interface rows never publish a direct-VIP leftover (#18573)
+
+`buildInterfaceSnapshotsFrom` (`userspace/interfaces.go`) builds each row's
+addresses from the kernel listing (`buildLinkSnapshot`), merged with the
+configured ones. A RETH address that a commit renumbered away stays on the
+kernel until the daemon's direct-VIP reconcile deletes it, and the commit's
+snapshot is built before that reconcile runs. Measured on udp (#18573): after
+`.11` -> `.43` the row listed `.11/24` before `.43/24` (string sort), and the
+helper's order-based interface-SNAT pick (`pick_interface_v4`: the designated
+`primary`, else the first non-link-local in row order) SNATed every new LAN
+flow to the deleted `.11`. LAN to 1.1.1.1 was 0/30 until the next snapshot.
+
+Each build now takes one `vipstamp.Dump` and drops from the **live** listing
+every `vipstamp.Leftover`: an address xpf's direct-VIP path stamped
+(`IFA_PROTO`) that `config.AddressIdentitiesByNetdev` no longer assigns to
+that netdev (`userspace/direct_vip_leftover_18573.go`). It applies to both
+the base row and the unit row; an untagged unit shares its member's ifindex,
+and the helper's shared-ifindex merge keeps the first row's pick. The
+configured merge runs after the filter, so a configured address is never
+dropped. An unstamped address (DHCP lease, kernel link-local, standalone VRRP
+VIP, a pre-#18573 VIP) is never dropped either. A failed dump filters
+nothing. The interface-SNAT source after a renumber is therefore the new
+address with no manual step. Removal outside a commit republishes through
+the daemon's interface-link refresher (see `pkg/daemon/README.md`
+"Direct-mode VIP failover").
+
+Not changed: `userspace_local_v4/v6` still mirrors every kernel address
+(`buildDesiredLocalAddressSets`), so a leftover stays "local" to the XDP shim
+only while it is still on the kernel, which is at most one reconcile tick
+(2 s). An `ip addr del` by an operator on a non-stamped address still
+publishes nothing until the next commit or RG move. There is no RTNL address
+subscription.
+
+Cells: `userspace/direct_vip_leftover_18573_test.go` (the SNAT-source cell
+and its unstamped twin) and the pkg/daemon kernel cell
+`TestDirectVIPRenumberOnKernel18573`, which builds the commit's snapshot on a
+real netns listing.
+
 ## Shim artifact: pinned toolchain + verifier gates (#1864)
 
 `userspace_xdp_bpfel.o` (the retained Rust AF_XDP shim, built from
