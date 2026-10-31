@@ -1505,8 +1505,17 @@ func (r *heartbeatReceiver) checkTimeout() {
 	// time.Unix(0, lastNano) round-trip produced a Time with no monotonic
 	// reading, making time.Since pure wall-clock — a forward step > timeout
 	// fired a false peer-lost on a healthy cluster (#1792).
-	if heartbeatStale(lastNano, MonotonicNanos(), timeout) {
+	nowMono := MonotonicNanos()
+	if heartbeatStale(lastNano, nowMono, timeout) {
 		r.mgr.handlePeerTimeout()
+		return
+	}
+	// #18561: at the first missed heartbeat (older than 1.5 intervals: one
+	// expected heartbeat plus jitter), probe the peer once over the sync
+	// channel, so the timeout tick can judge the sync-recency suppression on
+	// evidence from after the heartbeats went late (heartbeat_suppress.go).
+	if r.threshold >= 2 && heartbeatStale(lastNano, nowMono, r.interval*3/2) {
+		r.mgr.prearmPeerLivenessProbe(nowMono)
 	}
 }
 
