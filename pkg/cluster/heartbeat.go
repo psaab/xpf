@@ -1434,16 +1434,52 @@ func (r *heartbeatReceiver) admitFrame(frame []byte, pkt *HeartbeatPacket) bool 
 	return true
 }
 
+// timeoutChecksPerInterval is how many times per heartbeat interval the
+// receiver evaluates peer staleness (#18561). The staleness rule itself is
+// unchanged (the last admitted heartbeat older than interval x threshold);
+// only the phase between the peer's death crossing that threshold and the
+// next evaluation shrinks. With one check per interval a dead peer was
+// declared anywhere in threshold + [0, 1) intervals: 1.0-1.2 s in the lab's
+// 200 ms x 5, which measured 1.054-1.109 s with the #18570 probe on tcp.
+// Four checks per interval bound the phase at a quarter interval: 1.0-1.05 s
+// in the lab, 0.5-0.525 s at the 100 ms x 5 default.
+const timeoutChecksPerInterval = 4
+
+// minTimeoutCheckInterval floors the check cadence for very short heartbeat
+// intervals so the timeout goroutine never spins.
+const minTimeoutCheckInterval = 10 * time.Millisecond
+
+// timeoutCheckInterval is the receiver's staleness check cadence for a
+// heartbeat interval: interval / timeoutChecksPerInterval, floored at
+// minTimeoutCheckInterval and never longer than the interval itself.
+func timeoutCheckInterval(interval time.Duration) time.Duration {
+	c := interval / timeoutChecksPerInterval
+	if c < minTimeoutCheckInterval {
+		c = minTimeoutCheckInterval
+	}
+	if interval > 0 && c > interval {
+		c = interval
+	}
+	return c
+}
+
+// newTimeoutTicker is the timeout loop's ticker constructor, a seam so a cell
+// can observe the cadence the loop actually runs at (#18561).
+var newTimeoutTicker = func(d time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(d)
+	return t.C, t.Stop
+}
+
 func (r *heartbeatReceiver) timeoutLoop() {
 	defer r.wg.Done()
-	ticker := time.NewTicker(r.interval)
-	defer ticker.Stop()
+	tick, stop := newTimeoutTicker(timeoutCheckInterval(r.interval))
+	defer stop()
 
 	for {
 		select {
 		case <-r.stopCh:
 			return
-		case <-ticker.C:
+		case <-tick:
 			r.checkTimeout()
 		}
 	}
@@ -1505,8 +1541,17 @@ func (r *heartbeatReceiver) checkTimeout() {
 	// time.Unix(0, lastNano) round-trip produced a Time with no monotonic
 	// reading, making time.Since pure wall-clock — a forward step > timeout
 	// fired a false peer-lost on a healthy cluster (#1792).
-	if heartbeatStale(lastNano, MonotonicNanos(), timeout) {
+	nowMono := MonotonicNanos()
+	if heartbeatStale(lastNano, nowMono, timeout) {
 		r.mgr.handlePeerTimeout()
+		return
+	}
+	// #18561: at the first missed heartbeat (older than 1.5 intervals: one
+	// expected heartbeat plus jitter), probe the peer once over the sync
+	// channel, so the timeout tick can judge the sync-recency suppression on
+	// evidence from after the heartbeats went late (heartbeat_suppress.go).
+	if r.threshold >= 2 && heartbeatStale(lastNano, nowMono, r.interval*3/2) {
+		r.mgr.prearmPeerLivenessProbe(nowMono)
 	}
 }
 

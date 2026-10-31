@@ -1603,8 +1603,11 @@ type SessionSync struct {
 	deleteJournal       boundedFrameJournal
 	scopedDeleteJournal boundedFrameJournal
 	lastPeerRxMono      atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
-	readDeadline        time.Duration
-	peerSilenceLimit    time.Duration
+	// livenessProbeInFlight bounds RequestLivenessProbe to one pending
+	// write (#18561).
+	livenessProbeInFlight atomic.Bool
+	readDeadline          time.Duration
+	peerSilenceLimit      time.Duration
 	// bulkStartMu serializes queued incremental writes with the
 	// table-truth snapshot -> BulkStart boundary (#10283). A bulk holds it
 	// while reading BulkSnapshotSource and until BulkStart is written under
@@ -2667,6 +2670,37 @@ func (s *SessionSync) LastPeerReceiveAge() (time.Duration, bool) {
 	}
 	return age, true
 }
+
+// LastPeerReceiveMono is the CLOCK_MONOTONIC nanos stamp of the last
+// accepted inbound sync frame (#18561 liveness probe); ok is false when no
+// frame was received. Lock-free.
+func (s *SessionSync) LastPeerReceiveMono() (int64, bool) {
+	last := s.lastPeerRxMono.Load()
+	return last, last != 0
+}
+
+// PeerHeartbeatAckSupported reports whether the peer has answered a
+// sync-level heartbeat with a heartbeat ack on this incarnation (#18561).
+// Lock-free.
+func (s *SessionSync) PeerHeartbeatAckSupported() bool {
+	return s.peerIncarnationState().peerHeartbeatAckEver.Load()
+}
+
+// RequestLivenessProbe sends one sync-level heartbeat from a goroutine so
+// the caller (the heartbeat-timeout policy, under Manager.mu) never blocks
+// on writeMu or a full socket (#18561). At most one probe write is in
+// flight; a request while one is pending is dropped, and the policy then
+// judges the peer on the frames that do or do not arrive.
+func (s *SessionSync) RequestLivenessProbe() {
+	if !s.livenessProbeInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer s.livenessProbeInFlight.Store(false)
+		s.SendLivenessKeepalive()
+	}()
+}
+
 func (s *SessionSync) readDeadlineDuration() time.Duration {
 	if s.readDeadline > 0 {
 		return s.readDeadline

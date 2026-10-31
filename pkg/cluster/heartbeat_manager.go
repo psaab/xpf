@@ -558,7 +558,9 @@ func (m *Manager) RestartHeartbeat() bool {
 			slog.Warn("cluster: heartbeat restart bind failed, retrying",
 				"err", err, "attempt", i+1)
 			// Keep the peer's suppression guard fed (2s recency window)
-			// through each retry interval.
+			// through each retry interval. Since #18561 the peer also
+			// probes us at its first missed heartbeat; our sync receive loop
+			// answers that independently of this restart.
 			if notify != nil {
 				notify()
 			}

@@ -982,6 +982,45 @@ Root cause was barrier/bulk ack delivery stuck behind bulk data (P0). With
 priority ack channel, acks should deliver promptly. Needs live validation
 on split-RG cluster.
 
+### Crash takeover: dead peer no longer held by the sync-recency window (#18561, #18570)
+
+A force-stopped peer (`incus stop --force`, no FIN) leaves the survivor's sync
+socket half-open, so `syncSuppressesPeerTimeoutLocked`'s 2 s recency window
+kept the dead peer alive for up to 2 s past the heartbeat threshold (loss:
+peer loss declared 0.7-1.58 s after the kill at 200 ms x 5). For a peer that
+answers sync-level heartbeats, a suppressed timeout tick now needs a sync frame
+handled after a liveness probe sent at the first missed heartbeat, once the last
+heartbeat is 1.5 intervals old (`prearmPeerLivenessProbe`,
+`peerAnsweredLivenessProbeLocked`). On loss
+(0.0.26111) declaration came about 1.0 s after the last delivered ping, i.e. at
+the threshold. The crash ping outage went from 2.20 s (baseline) to 1.37 s
+together with #18565, which takes the RG-edge FRR and ip-monitoring reconciles
+off the activation path (RG0/1/2 active +57/+126/+261 ms after peer loss).
+H10's 1.4 s crash bound was met in that single run.
+
+### Crash detection phase: four staleness checks per interval (#18561)
+
+With the #18570 probe, a crashed peer is declared on the first staleness check
+after its last heartbeat crosses interval x threshold. The receiver checked once
+per interval, so detection was the threshold plus 0-1 interval of phase. It now
+checks four times per interval (`timeoutCheckInterval`, floored at 10 ms), so the
+phase is at most a quarter interval. The staleness rule is unchanged.
+
+Measured on tcp (200 ms x 5) with session churn so that sync is dense at death,
+crash detection from the last heartbeat on the wire to `marking peer lost`:
+
+| build | n | median | p90 | max |
+|---|---|---|---|---|
+| master 7c45627f9d | 10 | 2.157 s | 2.250 s | 2.258 s |
+| + #18570 | 10 | 1.074 s | 1.135 s | 1.198 s |
+| + #18570 + four checks per interval | 9 | 1.025 s | 1.046 s | 1.048 s |
+
+Activation is unchanged by both: about 0.34-0.38 s from peer-lost to the first
+ping reply. The cluster event loop activates RGs one at a time, and each
+`SetRGActive` waits for the helper to republish that RG's sessions. Detection
+plus activation therefore still lands near TCP's 1.4 s retransmit, and 2 of the
+9 trials had a stream resume after 3 s.
+
 ### Daemon restart blackhole: orderly stop now resigns (#18540) — NEEDS LIVE GATE
 
 `make test-restart-connectivity` lost 1/7/33 pings per cycle on loss (tcp: 8).
