@@ -1319,8 +1319,47 @@ renders `/etc/chrony/sources.d/xpf.sources` from `set system ntp server`.
 So a cluster with no `system ntp server` has **no time source by
 construction**.
 
-- **Configure it:** `set system ntp server <address>`, the SAME reachable
-  source on both nodes.
+- **Configure it:** `set system ntp server <address> routing-instance mgmt`,
+  the SAME reachable source on both nodes. The management VRF is the only
+  off-box route BOTH nodes are guaranteed to have: the default instance's
+  default route leaves through a RETH, which only the node that owns that
+  redundancy group has (the other node's default is a blackhole), so a
+  default-instance source syncs at most one node and a failover moves which
+  one (#18584). With `routing-instance mgmt` on every server, xpfd renders
+  chrony `bindacqdevice vrf-mgmt` (`/etc/chrony/conf.d/xpf-acquisition.conf`)
+  and restarts chrony when the binding is added, changed or removed, and on
+  a daemon start unless chrony is synchronised and started after the binding
+  was written. A
+  cluster whose servers use the default instance gets a commit advisory
+  naming this. The distro `makestep 1 3` steps a clock that booted from a
+  lagging RTC within the first three updates. `mgmt` is honoured only when
+  a management-class interface (fxp*, em*, fab*) is configured, because that
+  is when the daemon creates `vrf-mgmt`; otherwise the commit warns and
+  nothing is bound.
+  - **Rollout on an existing cluster:** a deb deploy preserves node config
+    (`cluster-setup.sh deploy` prints this), so commit the stanza on the
+    RG0 primary (it config-syncs to the peer) and check both nodes reach
+    `Leap status: Normal` in `chronyc tracking`. On loss (2026-10-31) both
+    did 10 s after the commit, and fw1 logged `System clock was stepped by
+    75.716867 seconds`. Ubuntu-image nodes also carry the distro
+    `/etc/chrony/sources.d/ubuntu-ntp-pools.sources` and an NTS
+    `conf.d/ubuntu-nts.conf`; those pools are hostnames that chrony
+    resolves in the default instance, and before the binding they showed
+    reach 0. They are not xpf's and are left alone.
+  - **Hostnames and trust:** `bindacqdevice` binds chrony's NTP sockets,
+    not its resolver, so use IP-address servers where the default instance
+    has no route (a hostname is resolved outside the binding). The lab
+    points at public servers over unauthenticated NTP; an on-path attacker
+    who can move a node's clock can push the pair past the fabric token's
+    wall-clock window (which has no nonce — #7487), denying cross-node RPC
+    but not forging it. Production clusters should prefer internal or NTS
+    sources.
+  - **Downgrade:** a build older than #18584 does not know
+    `/etc/chrony/conf.d/xpf-acquisition.conf` and leaves it in place, so
+    chrony stays bound to `vrf-mgmt` (which still works: the VRF exists on
+    every build). To return to default-instance NTP after a downgrade,
+    `rm /etc/chrony/conf.d/xpf-acquisition.conf && systemctl restart chrony`
+    on each node.
 - **Commit-time advisory (#8357):** committing a `chassis cluster` with
   no `system ntp server` now emits a warning that names fabric RPC as
   what will fail. It is a WARNING, never an error — configuring a cluster

@@ -165,8 +165,9 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"/etc/rsyslog.d drop-ins are on disk but rsyslog has not re-read "+
 			"them, so records may still be flowing to a destination the "+
 			"operator REMOVED; `chrony-sources` and `chrony-threshold` mean "+
-			"chrony is still running the previous server set or "+
-			"logchange/maxchange. The daemon re-drives the owed reload "+
+			"chrony is still running the previous server set or the "+
+			"previous conf.d (logchange/maxchange, or the #18584 "+
+			"bindacqdevice routing-instance binding). The daemon re-drives the owed reload "+
 			"autonomously every 30s; 0 once it succeeds.",
 		[]string{"service"}, nil,
 	)

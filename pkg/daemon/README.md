@@ -3995,8 +3995,29 @@ never lock an operator out of a remote box it manages.
   Seams: `rsyslogRestartFn` / `chronyReloadFn` (both owners go through one
   entry point, which is what makes the re-drive assertable), `chronyRunCmd`
   (per-leg outcomes without a real chronyc), and `rsyslogConfDir` /
-  `chronySourcesPath` / `chronyThresholdPath` as vars so the reconcile runs
-  against a temp dir. Tests: `service_reload_debt_6800_test.go` (latch +
+  `chronySourcesPath` / `chronyThresholdPath` / `chronyAcquisitionPath` as
+  vars so the reconcile runs against a temp dir. #18584 added a third
+  managed chrony file, `/etc/chrony/conf.d/xpf-acquisition.conf`
+  (`bindacqdevice vrf-<instance>`, rendered when every `system ntp server`
+  names the same VRF-backed routing-instance — `config.NTPAcquisitionInstance`
+  decides). It rides the threshold leg's conf.d restart, because chronyd reads
+  conf.d only at start, and its debt is reported under `chrony-threshold`.
+  While a binding is on disk, or was just added or removed
+  (`chronyAcqRestartOwed`), that leg RESTARTS chrony outright instead of
+  trying `systemctl reload` first: a unit with an ExecReload would report
+  the reload done while chronyd kept its old sockets. On the first apply of
+  each daemon process that renders an UNCHANGED binding, `applySystemNTP`
+  restarts chrony unless `chronyc -n tracking` reports `Leap status: Normal`
+  AND chrony.service's `ExecMainStartTimestamp` is later than the binding
+  file's mtime (`chronySyncedFn`, `chronyLoadedBindingFn`,
+  `chronyAcqStartRestarted`) — synchronised alone is not proof the running
+  chronyd read the file (an xpfd that wrote it and died before restarting
+  chrony leaves an old chronyd that may still sync via the default instance):
+  chrony.service does not order after xpfd, so a chronyd started before
+  `vrf-mgmt` existed is restarted once the VRF does (re-opening its
+  `makestep` window), while a synchronised one is left alone — a gratuitous
+  restart leaves it unsynchronised ~10 s, which the clock monitor raises.
+  Cells: `ntp_acquisition_18584_test.go`. Tests: `service_reload_debt_6800_test.go` (latch +
   discharge pairs for both services; the steady-state retry with an explicit
   "the files really are converged" premise guard and its debt-free negative;
   per-leg outcome pairs; the two SYMMETRIC "owed leg survives an apply that
