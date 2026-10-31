@@ -38,7 +38,7 @@ import (
 // not have compiled.
 // #7157: config.IsManagementIfName is passed as the beacon's management-interface
 // classifier. It is the #7515 SSOT for exactly this question — the same function
-// the vrf-mgmt binder (managementVRFIfaceSet), the networkd `VRF=` emitter and
+// the vrf-mgmt binder (managementVRFIfaceSet), the networkd `KeepMaster=yes` emitter and
 // the ip-monitoring next-hop validator use — so this becomes a fourth consumer of
 // one rule rather than a fourth copy of three prefixes. #7515 records that a
 // divergence between those consumers is always a bug.

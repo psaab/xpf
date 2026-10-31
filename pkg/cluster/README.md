@@ -622,9 +622,15 @@ nodes send the section.
 
 ### A heartbeat RESTART is not a cold boot (#9722)
 
-`RestartHeartbeat` replaces the receiver on every config apply that rebinds the
-management VRF. On an HA node with a management interface that means every
-operator commit and every peer-synced apply. The replacement used to arm the
+`RestartHeartbeat` replaces the receiver when an apply moves the control link
+into or out of the management VRF. Before #18597 that was every config apply:
+networkd detached em0 from `vrf-mgmt` on every reconfigure and the rebind moved
+it back, so on an HA node every operator commit and every peer-synced apply
+restarted the heartbeat. networkd now renders `KeepMaster=yes` and the daemon
+gates the restart on the control link's VRF master actually having changed
+(`restartHeartbeatIfControlLinkMoved`, `pkg/daemon/README.md`), so an
+unrelated commit no longer restarts it; a restart still happens when the link
+really moved (for example after `vrf-mgmt` was recreated). The replacement used to arm the
 same 30s cold-boot floor. The seen-then-lost arm returns inside that floor
 before it checks staleness, so a peer that died within 30s after a commit was
 declared lost up to 30s late. In the default private-RG mode, that delay is the
@@ -691,8 +697,14 @@ floor into its retry. Cells:
 
 ### A failed heartbeat restart is owed, not latched (#9751)
 
-`RestartHeartbeat` retries the bind five times, a second apart. If all five
-fail, it returns false with the sender and receiver both torn down. Before
+`RestartHeartbeat` retries the bind on `heartbeatRestartRetrySchedule`: 50ms,
+200ms and 750ms pauses, then 1s ones, about 5s in all (#18597; it was five
+attempts a second apart). The restart follows a control-link VRF move, and the
+enslave cycle makes networkd drop and re-add the link's static address
+5-30ms later, so a first bind that loses that race used to cost a 1s+
+heartbeat gap at the peer (1.6s measured on tcp) and now costs about 50ms. If
+every attempt fails, it returns false with the sender and receiver both torn
+down. Before
 #9751, every later `RestartHeartbeat` saw "not running" and returned at once,
 and the apply discarded the result. The heartbeat stayed dead across later
 applies until comms restarted. This node sent no heartbeats, so the peer

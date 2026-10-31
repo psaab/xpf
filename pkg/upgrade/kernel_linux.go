@@ -74,7 +74,7 @@ type realKernelSystem struct {
 	// (out-of-band) rather than dataplane, for ForwardBeacon's #7157 target
 	// eligibility check. Injected for the same reason HelperStatus is: the
 	// answer belongs to config.IsManagementIfName — the #7515 SSOT already
-	// shared by the daemon's vrf-mgmt binder, the networkd `VRF=` emitter and
+	// shared by the daemon's vrf-mgmt binder, the networkd `KeepMaster=yes` emitter and
 	// the ip-monitoring next-hop validator — and pkg/upgrade deliberately does
 	// not import pkg/config. Passing the SSOT rather than copying its three
 	// prefixes is the point: #7515 records that a divergence between the

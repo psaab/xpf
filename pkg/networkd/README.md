@@ -12,7 +12,8 @@ Triggers `networkctl reload` only when files actually changed.
 
 - `Manager` — `networkd.go`.
 - `InterfaceConfig` — `networkd.go`. MAC, addresses, bonding, VLAN
-  parent, VRF binding, description.
+  parent, VRF binding (`VRFName` renders `KeepMaster=yes`, #18597),
+  description.
 - `New()` — `networkd.go`.
 - `NewInDir(dir)` — `networkd.go`. Test/offline renderer constructor that
   writes xpf-managed files under a caller-provided directory instead of
@@ -109,10 +110,72 @@ Triggers `networkctl reload` only when files actually changed.
   Routing that address through `Addresses` instead would drop it silently.
 - VRF and tunnel interfaces created elsewhere are excluded from the
   unmanaged-interface scan via the `daemonOwned` map.
+- **VRF membership renders `KeepMaster=yes`, never `VRF=` (#18597).** Every
+  VRF xpf uses (`vrf-mgmt` and the routing-instance `vrf-*`) is created by
+  `pkg/routing` over netlink, not as a networkd `.netdev`. Only `vrf-mgmt`
+  members carry `VRFName` today. A `VRF=vrf-mgmt` line never resolved: networkd logged `vrf-mgmt NetDev could not be
+  found, ignoring assignment` on every reload, treated the link as having NO
+  master, and on every reconfigure set `IFLA_MASTER=0`. The kernel VRF driver
+  cycles a link on every enslave and release, so each commit took em0 (the
+  cluster control link) and fxp0/fab0 down and up and removed their
+  addresses; the daemon's post-networkd rebind then cycled them a second
+  time. Measured on systemd 259 against a netlink VRF and a dummy link
+  (`docs/log/18597.md`): with `VRF=` a forced `networkctl reconfigure`
+  detached the link, cycled it and deleted its IPv4 address; with
+  `KeepMaster=yes` master, carrier and address were untouched, and a changed
+  file plus `networkctl reload` added the new address without a cycle. A row
+  with a non-empty `VRFName` renders `KeepMaster=yes` unless it also names a
+  networkd-owned `Bond=` or `Bridge=` master, which `KeepMaster` would make
+  networkd ignore. The daemon's `BindInterfaceToVRF` owns the binding. Cells:
+  `keep_master_18597_test.go`. Residuals: a routing-instance member row carries
+  no master directive, so networkd still releases it from its `vrf-*` when
+  that row's OWN files change (the daemon's #6805 late pass rebinds it; the
+  narrowed tail below means an unrelated commit no longer touches it; #18605),
+  and a DISABLED management-class row takes the always-down early return
+  without `KeepMaster=yes` (#18607).
+- **The activation tail reconfigures only interfaces whose files changed
+  (#18597).** `Apply` records which interfaces had a `.link`, `.netdev` or
+  `.network` file rewritten in this call (`changedIfaces`) and reconfigures
+  those, plus any name still owed from a failed reconfigure (#4954). It used
+  to reconfigure EVERY managed interface whenever any file changed, so
+  `set interfaces fxp0 description X` reconfigured em0. `networkctl reload`
+  already applies a changed `.network` to its link, and networkd configures a
+  link that appears after its file was loaded, so an unchanged link needs
+  nothing. A pass that inherits an obligation from an EARLIER call — reload
+  debt, an unfinished tail (`activationPending`), or an external reload that
+  skipped the tail (#6912) — cannot know which files changed back then, so it
+  still reconfigures every managed interface (`reconfigureAll`). A link
+  networkd reports as `failed` (the SETUP column of `networkctl list
+  --no-legend --no-pager`, queried after the reload; not `--json=short`, which
+  carries every link's routes and scales with a full BGP table) is
+  reconfigured too, so the
+  narrowing does not lose the old tail's incidental retry of a failed link; a
+  query that errors or cannot be parsed falls back to the full pass. The Info
+  line `networkd reconfiguring interfaces` names the set and whether it was the
+  full one. The query runs with `SYSTEMD_COLORS=0` and the parser refuses a
+  row carrying an escape, so a coloured `failed` cell cannot read as "not
+  failed". Residual: a link stuck in `configuring` is not retried (#18615);
+  `configuring` is deliberately not in the set, because a DHCP link waiting
+  for a lease reads `configuring` and would churn. Cells: `keep_master_18597_test.go` (unrelated commit, failed link,
+  query error, each of the three inherited-obligation terms).
+- **`KeepMaster=yes` needs the explicit `LinkLocalAddressing=ipv6` beside it
+  (#18597).** systemd.network(5): with `KeepMaster=` enabled, the
+  `LinkLocalAddressing=` default becomes `no`. Every non-disabled row already
+  renders `LinkLocalAddressing=ipv6`; dropping that line would silently remove
+  IPv6 link-local from em0/fxp0/fab*. `TestKeepMasterRowsKeepExplicitLinkLocal18597`
+  pins the pair.
+- **Upgrade / downgrade across #18597.** The first apply of the new binary
+  rewrites each management row (`VRF=` → `KeepMaster=yes`); networkd reloads
+  and reconfigures those links with the NEW file, so it keeps the master. A
+  downgraded binary's first apply rewrites them back to `VRF=`, and networkd
+  then releases each management link from vrf-mgmt once (the old per-commit
+  bounce, once) before the old daemon's rebind; see `docs/log/18597.md` for the
+  measurement.
 - **The activation tail's `networkctl reconfigure` argv is asserted in
   full, and the fixture must VARY every axis it claims to cover
   (#6914).** The tail selects `!Unmanaged && !Disable && BondMaster == ""`
-  and accumulates names in slice order. An argv assertion can only catch a
+  (and, since #18597, only changed or owed names unless a full pass is owed;
+  see above) and accumulates names in slice order. An argv assertion can only catch a
   regression along an axis the fixture varies: with a single eligible
   interface, `[reconfigure trust0]` is also what a hardcoded literal, a
   deleted `Unmanaged` predicate, a deleted `Disable` predicate and a
