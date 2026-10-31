@@ -255,6 +255,23 @@ transfer. The mark is an overlay on what the HELPER is told. It never changes
   enter the helper FIB before its forwarding opens, the #16270 order the
   promotion path keeps. Proxy-NDP responders keep the raw provider: a
   pre-active node must not answer for addresses its peer still owns.
+- The same provider also reports an RG as locally primary while the CURRENT
+  helper last acknowledged it active (`helperActiveRGsLocked`, read from
+  `haWatchdogHelperInventory`), #18620. That is the demotion twin of #16270:
+  an RG's connected prefixes leave the helper FIB only after
+  `UpdateRGActive(false)` has been acknowledged.
+  - Every route build and that acknowledgement run under `m.mu`, so the
+    order holds by construction for every publisher: the cluster-state
+    republish, the route listener, ip-monitoring, a commit, and the
+    apply-time rebuild.
+  - Before #18620, a snapshot published between the cluster verdict flipping
+    and the acknowledgement withdrew the rows under live forwarding. On loss
+    that window was 50-80 ms, and a snapshot landed in it on about one
+    demotion in ten. The first FIB-stale hit of each live SNAT session was
+    then revoked as stale source NAT.
+  - The hold reads the acknowledged inventory, not `haGroups`. A failed
+    `UpdateRGActive(false)` has already written `haGroups`, but the helper may
+    still forward the RG.
 - A real promotion or a real demotion of the RG in `UpdateRGActive`
   (`supersedeTransferPreActiveLocked`) removes the mark. Without the
   demotion arm, a mark still inside its deadline would keep the helper

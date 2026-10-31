@@ -713,13 +713,6 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 	tr := mergeSyncHoldTransition(s.SetCluster(isPrimary), mirror)
 	clusterOwnershipEdge := ev.OldState != ev.NewState &&
 		(ev.OldState == cluster.StatePrimary || ev.NewState == cluster.StatePrimary)
-	if clusterOwnershipEdge && !isPrimary {
-		d.scheduleFRRHAReconcile("cluster-state")
-		d.scheduleConnectedRGRepublish("cluster-state")
-		// #16690: the event already consumed the rg-state edge, so the
-		// reconcile safety net will see Changed=false and skip gating.
-		d.scheduleIPMonGating("cluster-state")
-	}
 	if isPrimary {
 		// #16270 (option a): republish the connected RG prefixes
 		// SYNCHRONOUSLY, before SetRGActive reports the RG
@@ -862,6 +855,35 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 			} else {
 				recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
 			}
+		}
+		// #18620: the demotion twin of #16270. The schedules that WITHDRAW this
+		// RG's routes run only after the rg_active=false write above has been
+		// attempted. That write's UpdateRGActive acknowledges the helper under
+		// m.mu, so it is the point after which the helper no longer forwards
+		// the RG. Before #18620 these three were scheduled at the top of the
+		// handler, ahead of SetRGActive. The connected-RG republish then raced
+		// UpdateRGActive for m.mu, and on loss it won on about one demotion in
+		// ten: the helper applied a FIB without the RG's connected rows while
+		// it still forwarded the RG.
+		//
+		// The connected-row verdict is now also held at the manager
+		// (routeRGPrimaryLocked keeps an RG the helper last acknowledged as
+		// active). This ordering is what makes a withdrawal publish happen at
+		// all once the ack has landed, instead of being duplicate-skipped
+		// against a racing build that kept the rows.
+		//
+		// These stay asynchronous; the demotion is not blocked on applySem.
+		// The FRR and ip-monitoring reconciles are debounced 250 ms, but a
+		// SetRGActive delayed past that (m.mu held by a long apply) used to
+		// let them run first. Scheduling them here orders them by
+		// construction. injectBlackholeRoutes above is a no-op on the
+		// userspace dataplane, so it cannot move the helper FIB first.
+		if clusterOwnershipEdge {
+			d.scheduleFRRHAReconcile("cluster-state")
+			d.scheduleConnectedRGRepublish("cluster-state")
+			// #16690: the event already consumed the rg-state edge, so the
+			// reconcile safety net will see Changed=false and skip gating.
+			d.scheduleIPMonGating("cluster-state")
 		}
 
 		// no-reth-vrrp direct mode: always reconcile actual VIP

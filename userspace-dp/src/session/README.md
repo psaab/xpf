@@ -1672,6 +1672,49 @@ and the work-counted O(1) bounds) and
 `worker_loop_wires_its_table_to_the_node_punt_seed_directory_18562` (the real
 worker construction).
 
+## A punt seed is not authority (#18620)
+
+A #7770 `FabricPuntSeed` records a flow whose egress RG the PEER owned when
+its first packet arrived. It is NAT-free and fabric-redirects, and the peer
+adjudicated and translated the flow. Two rules follow, and both are keyed on
+the seed's own origin:
+
+- **Retired when its egress RG is local.**
+  `retire_fabric_punt_seed_if_owner_active` (afxdp/session_glue/resolve.rs)
+  runs before the session lookup of every slow-path packet. It deletes this
+  worker's forward seed for the packet's key once the seed's egress RG is
+  forwarding-active here. The egress RG comes from the seed's `owner_rg_id`
+  when the HA-inactive arm stamped it. The already-redirected arm stamps the
+  fabric parent's RG (0), so for that seed it comes from a fresh FIB
+  resolution of the flow, read only when the row is a seed. A FIB that still
+  withholds the egress (cluster-terminal) names no local RG and keeps the
+  seed.
+  - It removes the steering row and the conntrack mirror as for any removed
+    session. Removal goes through `delete`, the Terminal sink, which also
+    retires the #18562 directory row and emits no delta.
+  - The packet then resolves against the node's synced session, if the shared
+    maps hold one, or takes the ordinary miss path, which adjudicates policy
+    and NAT afresh as the owner.
+  - Counted in `FABRIC_PUNT_SEEDS_RETIRED_OWNER_ACTIVE`.
+  - Why: a seed that survives to that point shadows the flow. Every forward
+    packet hits it first and leaves NAT-free toward a peer that no longer
+    forwards the RG, and that traffic keeps the seed from ever idling out. On
+    loss this was the persistent half of #18620, with ping and iperf outages
+    of 18-515 s until the RG moved away again.
+- **It yields to the peer.** `SessionOrigin::yields_to_peer` is
+  `is_peer_synced() || FabricPuntSeed`. A peer import or a peer delete of the
+  key replaces the seed even where the egress RG is locally active: the
+  worker install guard in `upsert_synced_with_origin`, and the #9048/#9714
+  delete guard in `handle_delete_synced`.
+  - Authored rows (ForwardFlow, LocalMiss, SharedPromote, ...) and the
+    owner-minted `MissingNeighborSeed` keep `peer_delete_refused_local_owned`.
+    On the owner they ARE the authority.
+  - The coordinator-side guards read shared-map rows. A seed is never in the
+    shared maps, so they are unchanged.
+
+A seed whose egress RG is still the peer's (the split it was minted for) is
+untouched by both rules. Cells: `afxdp/tests_punt_seed_shadow_18620.rs`.
+
 ## Corruption contract (#1855)
 
 A `key_to_handle` mapping that points at a vacant or reused slab slot is

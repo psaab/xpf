@@ -384,6 +384,110 @@ pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
 }
 
 
+/// #18620: punt seeds that have outlived their reason.
+pub(crate) static FABRIC_PUNT_SEEDS_RETIRED_OWNER_ACTIVE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// #18620: retire this worker's `FabricPuntSeed` for `key` once the seed's
+/// egress RG is forwarding-active HERE. Returns whether a seed was retired.
+///
+/// A punt seed (#7770) is the punting node's record of a flow whose egress RG
+/// the PEER owned when its first packet arrived. It is NAT-free and it
+/// fabric-redirects. Its only job is to admit the peer's fabric-returned reply
+/// until the peer's HA import lands. It is not authority: the peer adjudicated
+/// and translated the flow, and the seed is never exported, replicated or
+/// demoted.
+///
+/// That premise ends when this node owns the egress RG. A seed that survives
+/// to that point SHADOWS the flow. Every forward packet hits it first and
+/// leaves NAT-free toward a fabric peer that no longer forwards the RG. It
+/// never idles out, because the shadowed traffic refreshes it. On loss this
+/// was the persistent half of #18620:
+///   - a demotion-window revocation removed the synced rows on the old owner;
+///   - the next packet minted a seed;
+///   - when the RG came back, the flow stayed silent (18 s, and 455-515 s in
+///     one run) until the trap moved the RG away again.
+///
+/// Retiring it before the session lookup lets the packet resolve against the
+/// node's synced session, if the shared maps hold one, and otherwise take the
+/// ordinary miss path. The miss path adjudicates policy and NAT afresh as the
+/// owner. Nothing is admitted that a fresh first packet would not be. A seed
+/// whose egress RG is still the peer's (the split it was minted for) is
+/// untouched, and so is every other origin, MissingNeighborSeed included: that
+/// seed is minted by the egress owner itself and is its own authority.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(in crate::afxdp) fn retire_fabric_punt_seed_if_owner_active(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    conntrack: ConntrackFds,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    now_secs: u64,
+) -> bool {
+    let key = &flow.forward_key;
+    let Some((decision, metadata, origin)) = sessions.entry_with_origin(key) else {
+        return false;
+    };
+    if origin != SessionOrigin::FabricPuntSeed || metadata.is_reverse {
+        return false;
+    }
+    // The seed's egress RG. The HA-inactive arm stamps it from the
+    // pre-redirect resolution. The already-redirected arm only has the fabric
+    // parent, so it stamps 0; for that seed, ask the FIB where the flow egresses
+    // NOW. This runs only when the row is a seed, never for an ordinary hit. A
+    // FIB that still withholds the egress (cluster-terminal: the peer owns it)
+    // names no local RG and keeps the seed.
+    let egress_rg = if metadata.owner_rg_id > 0 {
+        metadata.owner_rg_id
+    } else {
+        let fresh = lookup_forwarding_resolution_for_session_without_cache(
+            forwarding,
+            dynamic_neighbors,
+            flow,
+            decision,
+        )
+        .resolution;
+        if matches!(
+            fresh.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        ) {
+            owner_rg_for_resolution(forwarding, fresh)
+        } else {
+            0
+        }
+    };
+    if !owner_rg_is_locally_active(ha_state, egress_rg, now_secs) {
+        return false;
+    }
+    let session_id = sessions.session_id_for(key);
+    // A seed carries no NAT state, so there is nothing to release. The
+    // steering row and the conntrack mirror go as for any removed session.
+    let delete_result = delete_session_map_entry_for_removed_session_with_origin_and_id(
+        session_map,
+        key,
+        decision,
+        &metadata,
+        origin,
+        conntrack.v4,
+        conntrack.v6,
+        session_id,
+    );
+    if delete_result == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy {
+        sessions.defer_conntrack_delete(crate::session::DeferredConntrackDelete {
+            key: key.clone(),
+            session_id,
+        });
+    }
+    // `delete` is the table's Terminal removal: it retires the #18562 punt
+    // seed directory row and emits no delta. A seed emits none by design, and
+    // the peer owns the flow's close.
+    sessions.delete(key);
+    FABRIC_PUNT_SEEDS_RETIRED_OWNER_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    true
+}
+
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn resolve_flow_session_decision_with_conntrack_inner(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
@@ -413,6 +517,19 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
     }
     let now_ns = shared.tick.ns;
     let now_secs = shared.tick.secs;
+    // #18620: a punt seed whose egress RG this node now forwards has lost its
+    // premise. Retire it before the lookup, so the flow resolves against the
+    // synced session or a fresh adjudication instead of the seed.
+    retire_fabric_punt_seed_if_owner_active(
+        sessions,
+        session_map,
+        shared.conntrack,
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        flow,
+        now_secs,
+    );
     if let Some(hit) = lookup_session_across_scopes_with_shared_and_payload(
         sessions,
         shared.sessions,

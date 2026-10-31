@@ -412,8 +412,9 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
     // forward session through the ingress-zone fallback, so this was not a
     // corner. The coordinator's #9714 guard carried the identical fail-open and
     // moved in the same change: install and delete now ask one question.
+    // #18620: a punt seed yields to the peer's delete like a replica does.
     let refuse = origin.enforces_peer_owner()
-        && matches!(existing_origin, Some(origin) if !origin.is_peer_synced())
+        && matches!(existing_origin, Some(origin) if !origin.yields_to_peer())
         && delete_alias.as_ref().is_some_and(|lookup| {
             !synced_entry_allows_local_replace(ha_state, lookup.metadata.owner_rg_id, now_secs)
         });

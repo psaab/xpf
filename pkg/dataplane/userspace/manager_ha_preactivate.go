@@ -177,29 +177,80 @@ func (m *Manager) effectiveHAGroupMapLocked() map[int]HAGroupStatus {
 }
 
 // routeRGPrimaryLocked wraps the cluster RG-primary provider for the route
-// builders: a pre-active RG is reported locally primary, so its connected
-// prefixes enter the helper FIB before its forwarding opens (#16270 order).
+// builders. Two kinds of RG are reported locally primary on top of the cluster
+// verdict:
+//
+//   - a pre-active RG, so its connected prefixes enter the helper FIB before
+//     its forwarding opens (#16270 order, #18559);
+//   - an RG the current helper last ACKNOWLEDGED as active (#18620), so its
+//     connected prefixes leave the helper FIB only after the helper has been
+//     told the RG is inactive.
+//
+// The second arm is the demotion twin of #16270. The cluster verdict flips at
+// the start of a demotion; the helper learns it only when UpdateRGActive(false)
+// lands, tens of ms later. Any snapshot published in between used to withdraw
+// the RG's connected rows while the helper still forwarded the RG. The first
+// FIB-stale hit of a live session then re-resolved off the RG's interface and
+// was revoked as stale source NAT. The next packet installed a transient local
+// seed that shadowed the flow when the RG came back. On loss this happened on
+// 11 of 13 such windows on the #18598 arm.
+//
+// Every route build runs under m.mu, and so does the UpdateRGActive publish
+// that refreshes haWatchdogHelperInventory after the helper's ack. So this
+// orders the withdrawal after the ack by construction, whichever publisher
+// builds the snapshot: the cluster-state republish, the route listener, the
+// ip-monitoring overlay, a commit, or the apply-time rebuild.
+// The inventory is the helper's ACKNOWLEDGED state, not haGroups: a failed
+// UpdateRGActive(false) has already written haGroups, but the helper may still
+// forward the RG, and its rows must stay.
+//
 // Proxy-NDP responders deliberately keep the raw provider: a pre-active node
 // must not answer for addresses its peer still owns.
 func (m *Manager) routeRGPrimaryLocked() RGPrimaryProvider {
 	provider := m.rgPrimaryProvider
-	if provider == nil || len(m.transferPreActive) == 0 {
+	if provider == nil {
 		return provider
 	}
-	now := time.Now()
-	pre := make(map[int]bool, len(m.transferPreActive))
-	for rgID := range m.transferPreActive {
-		if m.transferPreActiveLocked(rgID, now) {
-			pre[rgID] = true
+	held := m.helperActiveRGsLocked()
+	if len(m.transferPreActive) > 0 {
+		now := time.Now()
+		for rgID := range m.transferPreActive {
+			if m.transferPreActiveLocked(rgID, now) {
+				if held == nil {
+					held = make(map[int]bool, len(m.transferPreActive))
+				}
+				held[rgID] = true
+			}
 		}
 	}
-	if len(pre) == 0 {
+	if len(held) == 0 {
 		return provider
 	}
 	return func(rgID int) (bool, bool) {
-		if pre[rgID] {
+		if held[rgID] {
 			return true, true
 		}
 		return provider(rgID)
 	}
+}
+
+// helperActiveRGsLocked returns the data RGs that the current helper last
+// acknowledged as active (#18620), or nil. A helper that has not acknowledged
+// an inventory (helperHAStatePublished false: none yet, or reset after the
+// helper went away) holds nothing, so the cluster verdict alone decides.
+func (m *Manager) helperActiveRGsLocked() map[int]bool {
+	if !m.helperHAStatePublished || len(m.haWatchdogHelperInventory) == 0 {
+		return nil
+	}
+	var held map[int]bool
+	for _, group := range m.haWatchdogHelperInventory {
+		if group.RGID <= 0 || !group.Active {
+			continue
+		}
+		if held == nil {
+			held = make(map[int]bool, len(m.haWatchdogHelperInventory))
+		}
+		held[group.RGID] = true
+	}
+	return held
 }
