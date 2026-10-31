@@ -122,6 +122,53 @@ pub(in crate::afxdp::icmp_embed) struct NatMatchCtx<'a> {
     pub ingress_zone_override: Option<u32>,
 }
 
+/// #18562: the session-fallback arm's last probe — this NODE's live #7770
+/// punt seed for the quoted FORWARD packet, when the error landed on a worker
+/// other than the one whose LAN queue minted the seed.
+///
+/// Reached only after the local table and the node's shared maps BOTH missed
+/// the quote in either direction, and only for:
+///  * a FABRIC-ingress frame — a punted flow leaves this node over the fabric
+///    and its far side is the peer's, so the peer (WAN owner) is the only
+///    place an error about its forward packets can come back from; the same
+///    quote arriving anywhere else stays unmatched;
+///  * the as-is FORWARD key (the quote is the client's packet, already
+///    reversed to pre-NAT form by the peer — seeds are NAT-free, #7770), so
+///    the match is a forward quote whose RELATED arrival zone is the seed's
+///    adjudicated egress zone, exactly as for a same-worker local hit.
+///
+/// The row is a snapshot of a seed THIS node's own policy permitted for a
+/// packet that ingressed on THIS node's non-fabric interface
+/// (`should_seed_fabric_punt` / `fabric_punt_seed_metadata`), retired with
+/// that seed (`session/punt_seed_directory.rs`). Nothing here creates,
+/// refreshes or exports session state; the caller's F-077 budget, #14665
+/// outer-destination gate, type scope and zone-validated RELATED rule apply
+/// unchanged.
+pub(in crate::afxdp::icmp_embed) fn punt_seed_forward_quote_match(
+    ctx: &NatMatchCtx<'_>,
+    meta: &UserspaceDpMeta,
+    forward_key: &SessionKey,
+    now_ns: u64,
+) -> Option<ResolvedSessionLookup> {
+    if (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0 {
+        return None;
+    }
+    let row = ctx.sessions.punt_seed_directory().probe(forward_key, now_ns)?;
+    Some(ResolvedSessionLookup::local_query(
+        SessionLookup {
+            decision: row.decision,
+            metadata: row.metadata,
+            forwarding_generation: crate::session::ForwardingGenerationStamp::default(),
+            aux: crate::session::SessionLookupAux {
+                session_id: row.session_id,
+                source_nat_static: None,
+                leak_incarnation: 0,
+            },
+        },
+        SessionOrigin::FabricPuntSeed,
+    ))
+}
+
 /// Outcome of an embedded-ICMP match attempt. THREE states, not two: a
 /// session that MATCHED but is over its F-077 per-session error budget MUST
 /// be distinguishable from a miss. Collapsing the denial to `None` would

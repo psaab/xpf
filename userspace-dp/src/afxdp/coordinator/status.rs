@@ -693,6 +693,27 @@ impl super::Coordinator {
         crate::session::EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL.load(Ordering::Relaxed)
     }
 
+    /// #18562: rows resident in the node's punt-seed directory (#7770 seeds
+    /// mirrored for the cross-worker embedded-ICMP fallback). Non-zero only
+    /// during an RG split; includes expired rows not yet reclaimed (they no
+    /// longer match).
+    pub fn punt_seed_directory_rows(&self) -> u64 {
+        self.sessions.owner_rg_indexes.punt_seeds.len() as u64
+    }
+
+    /// #18562: punt-seed directory publishes refused because the row's shard
+    /// was full of live rows. Each is one punted flow whose cross-worker first
+    /// error keeps the pre-#18562 verdict.
+    pub fn punt_seed_directory_full_total(&self) -> u64 {
+        crate::session::PUNT_SEED_DIRECTORY_FULL_TOTAL.load(Ordering::Relaxed)
+    }
+
+    /// #18562: punt-seed directory publishes skipped because the shard lock
+    /// was held (the worker never waits on the directory).
+    pub fn punt_seed_directory_contended_total(&self) -> u64 {
+        crate::session::PUNT_SEED_DIRECTORY_CONTENDED_TOTAL.load(Ordering::Relaxed)
+    }
+
     /// #14374 (DR4-H2): reverse-NAT matches refused as ambiguous.
     /// Surfaced as `xpf_userspace_nat_reverse_ambiguous_total`.
     pub fn nat_reverse_ambiguous_total(&self) -> u64 {

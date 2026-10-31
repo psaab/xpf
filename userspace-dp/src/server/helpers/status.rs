@@ -222,6 +222,11 @@ pub(crate) fn project_status(state: &mut ServerState) {
     state.status.embedded_error_per_session_suppressed_total =
         state.afxdp.embedded_error_per_session_suppressed_total();
     state.status.nat_reverse_ambiguous_total = state.afxdp.nat_reverse_ambiguous_total();
+    // #18562: punt-seed directory residency and refusals.
+    state.status.punt_seed_directory_rows = state.afxdp.punt_seed_directory_rows();
+    state.status.punt_seed_directory_full_total = state.afxdp.punt_seed_directory_full_total();
+    state.status.punt_seed_directory_contended_total =
+        state.afxdp.punt_seed_directory_contended_total();
     state.status.interface_snat_identity_exhaustion_total =
         state.afxdp.interface_snat_identity_exhaustion_total();
     state

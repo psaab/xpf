@@ -1707,6 +1707,41 @@ crosses the fabric twice, and three rules keep it working:
   only when `FABRIC_INGRESS_FLAG` is set. The same bytes arriving on the WAN
   stay unmatched (`pre_nat_quote_off_fabric_is_not_related_18174`).
 
-Open: the #7770 punt seed is worker-local, so the first error of a new split
-flow that lands on a different worker of the LAN owner before the WAN owner's
-HA delta is imported returns NoMatch (#18562).
+- **The LAN owner matches the FIRST error on any of its workers (#18562).**
+  The only record the LAN owner holds for a NEW punted flow is its #7770 punt
+  seed, and that seed is worker-local: it lives in the session table of the
+  worker whose LAN queue saw the probe, and the shared maps never carry it.
+  The fabric NIC RSS-hashes the returning error independently, so it usually
+  lands on another worker, which found nothing in its own table or in the
+  shared maps (the WAN owner's HA import arrives ~hundreds of ms later) and
+  default-denied it `wan -> lan` — every `mtr -u` / UDP traceroute probe is a
+  new flow, so hop 2 read `???` for the whole split. Each worker's table now
+  mirrors its forward punt seeds into the node's one read-only
+  `PuntSeedDirectory` (`session/punt_seed_directory.rs`, held in
+  `SharedSessionOwnerRgIndexes::punt_seeds`), and the session-fallback arm of
+  `nat_match_v4.rs` / `nat_match_v6.rs` consults it last — after the local
+  table and the shared maps both missed — for a FABRIC-ingress error whose
+  quote is the punted FORWARD packet (`punt_seed_forward_quote_match`).
+
+  Why this keeps #7770's guarantees. The row is a snapshot of a seed that THIS
+  node's own policy permitted for a packet that ingressed on THIS node's
+  non-fabric interface; nothing arriving on the fabric can create one. It is
+  maintained only at the session table's own choke points (published by
+  `insert_record`; retired by `remove_entry`, the table's sole removal sink,
+  by every in-place rewrite of the seed, and by dropping the table) and stops
+  matching at the earlier of the seed's install-time idle deadline and a 2 s
+  bridge TTL (the first error arrives one hop RTT after the probe; later ones
+  are answered by the HA import), so it never outlives the seed it mirrors.
+  Every directory operation does bounded work per call and a worker never
+  waits on it (sharded, FIFO expiry with a per-call pop budget, `try_lock`
+  publish); it sustains ~16k new punted flows/s, and refusals past that are
+  counted in helper status. It is not session state: nothing materializes, promotes, exports,
+  sweeps, replicates or demotes from it, no data packet reads it, and an
+  admitted error still passes the F-077 per-session budget, the #14665
+  outer-destination gate, the path-error type scope and the zone-validated
+  RELATED check (expected zone: the seed's adjudicated egress zone, against
+  the authenticated fabric stamp). The admission it grants is the one the
+  same frame already gets once the WAN owner's HA import lands in the shared
+  maps; it only closes the window before that. The same bytes arriving off
+  the fabric stay unmatched
+  (`cross_worker_punt_seed_never_matches_off_fabric_18562`).
