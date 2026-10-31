@@ -442,3 +442,13 @@ func (s *SessionSync) AckConfigApplyForTesting(gen uint64) {
 	binary.LittleEndian.PutUint64(p[:], gen)
 	s.handleConfigApplyAck(nil, p[:])
 }
+
+// SetHeartbeatRestartRetryDelayForTesting caps every RestartHeartbeat retry
+// pause at d and returns the restore function. #18597: pkg/daemon's cells
+// drive a restart that fails every bind attempt (an owed restart, #9751)
+// without sleeping through the ~5s production schedule.
+func SetHeartbeatRestartRetryDelayForTesting(d time.Duration) func() {
+	old := heartbeatRestartRetryDelay
+	heartbeatRestartRetryDelay = d
+	return func() { heartbeatRestartRetryDelay = old }
+}

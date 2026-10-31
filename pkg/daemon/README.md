@@ -4199,15 +4199,23 @@ never lock an operator out of a remote box it manages.
   other lost and fw1 took every RG. networkd now renders `KeepMaster=yes`, and
   `restartHeartbeatIfControlLinkMoved` (`heartbeat_rebind_gate_18597.go`)
   restarts only when `routing.VRFMasterMoveSeq` for the configured control
-  link moved since the previous decision, or (post-networkd pass only) a
-  failed restart is still owed. It runs right after BOTH bind passes: after
+  link moved since the previous decision, or (post-networkd pass and reassert
+  tick only) a failed restart is still owed. It runs right after BOTH bind passes: after
   step 0b in `applyVRFReconcile`, so a move there (vrf-mgmt recreated, or a
   drifted em0) is followed by the restart at once rather than after the whole
   networkd and dataplane apply, after the step-2.7 rebind, and in
   `reassertMgmtVRFOnce` when the background loop moves a drifted control link
   back (it used to rebind em0 and leave the sockets stale until the next
   commit). A move of another management link (fxp0, fab0) does not restart the
-  heartbeat. Cells:
+  heartbeat. A failure of the step-0b restart is NOT joined into commit truth:
+  it leaves the restart owed (#9751), and the post-networkd pass of the same
+  apply retries and reports it, so a 0b failure that 2.7 repairs does not fail
+  the commit (worst case, every bind failing, two ~5s restart windows under
+  applySem in one apply). The reassert tick also passes when only an owed
+  restart is outstanding and retries it (one restart per 30s tick), so a
+  restart that failed there does not leave the heartbeat stopped until the next
+  apply. Residual: a control-link address renumber keeps the old local address
+  (#18606). Cells:
   `heartbeat_rebind_gate_18597_test.go`.
 
   Deliberately LEFT best-effort (WARN, not surfaced): the

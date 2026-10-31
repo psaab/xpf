@@ -17,7 +17,15 @@ import (
 func TestMain(m *testing.M) {
 	prodLinkExists := linkExists
 	linkExists = func(string) (bool, error) { return true, nil }
+	// #18597: the tail queries networkd for failed links; the sandbox has no
+	// networkd, and a failed query falls back to the full pass. Default to
+	// "nothing failed" so tail tests exercise the narrowed set they assert;
+	// keep_master_18597_test.go covers both the failed-link and the
+	// query-error arms explicitly.
+	prodFailedLinks := networkdFailedLinks
+	networkdFailedLinks = func() (map[string]bool, error) { return map[string]bool{}, nil }
 	code := m.Run()
+	networkdFailedLinks = prodFailedLinks
 	linkExists = prodLinkExists
 	os.Exit(code)
 }

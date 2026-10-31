@@ -71,6 +71,16 @@ func TestVRFRebindApplyJoinsTheHeartbeatRestartError_9751(t *testing.T) {
 			if !ok || sel.Sel.Name != "restartHeartbeatIfControlLinkMoved" {
 				return true
 			}
+			// The post-networkd pass is the apply's owner of the #9751 retry:
+			// retryOwed must be true here, or an owed restart is retried by
+			// no apply at all (heartbeat_rebind_gate_18597_test.go pins the
+			// per-site values).
+			if len(call.Args) != 2 {
+				return true
+			}
+			if id, ok := call.Args[1].(*ast.Ident); !ok || id.Name != "true" {
+				return true
+			}
 			for _, st := range s.Body.List {
 				as, ok := st.(*ast.AssignStmt)
 				if !ok || len(as.Lhs) != 1 {

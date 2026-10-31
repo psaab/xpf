@@ -5,6 +5,7 @@ package networkd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,6 +41,50 @@ var runNetworkctl = func(args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
 	defer cancel()
 	return exec.CommandContext(ctx, "networkctl", args...).Run()
+}
+
+// networkdFailedLinks returns the links whose networkd setup state
+// (`AdministrativeState` in `networkctl list --json=short`, the SETUP column of
+// `networkctl list`) is "failed" (#18597). The activation tail used to
+// reconfigure EVERY managed link whenever any file changed, which incidentally
+// retried a link networkd had given up on; the narrowed tail adds these links
+// back so that precision does not remove that coverage. A package var so tests
+// stub it (the unit sandbox has no systemd-networkd). Field name verified on
+// systemd 259 (tcp fw0): each Interfaces[] entry carries Name and
+// AdministrativeState ("configured", "unmanaged", "failed", ...).
+var networkdFailedLinks = func() (map[string]bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "networkctl", "list", "--json=short").Output()
+	if err != nil {
+		return nil, fmt.Errorf("networkctl list --json=short: %w", err)
+	}
+	return parseNetworkdFailedLinks(out)
+}
+
+// parseNetworkdFailedLinks parses `networkctl list --json=short`. A document
+// without an Interfaces array is an error, not "nothing failed": the caller
+// then falls back to the full reconfigure pass.
+func parseNetworkdFailedLinks(out []byte) (map[string]bool, error) {
+	var doc struct {
+		Interfaces []struct {
+			Name                string `json:"Name"`
+			AdministrativeState string `json:"AdministrativeState"`
+		} `json:"Interfaces"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		return nil, fmt.Errorf("parse networkctl list --json=short: %w", err)
+	}
+	if doc.Interfaces == nil {
+		return nil, errors.New("networkctl list --json=short: no Interfaces array")
+	}
+	failed := make(map[string]bool)
+	for _, ifc := range doc.Interfaces {
+		if ifc.AdministrativeState == "failed" {
+			failed[ifc.Name] = true
+		}
+	}
+	return failed, nil
 }
 
 // linkExists reports whether name resolves to a live kernel link. It is a
@@ -590,7 +635,10 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 			writeErrs = append(writeErrs, err)
 			continue
 		}
-		// .netdev file: for bond/LAG devices and bridge devices
+		// .netdev file: for bond/LAG devices and bridge devices. A .netdev
+		// change also marks the interface changed (#18597), although networkd
+		// does not apply .netdev changes to an existing device; the reconfigure
+		// is harmless and keeps the old tail's behaviour for that row.
 		if ifc.IsBond {
 			netdevPath := filepath.Join(m.networkDir, filePrefix+ifc.Name+".netdev")
 			write(ifc.Name, netdevPath, m.generateNetdev(ifc))
@@ -733,12 +781,29 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 		// addresses, and it still re-runs networkd's whole configuration
 		// machine for a link nothing asked to change. reload already applies
 		// a changed .network to its link; an unchanged link is left alone.
+		//
+		// A link networkd has marked "failed" is reconfigured too, even with
+		// unchanged files: the old every-link tail retried it on any changed
+		// commit, and the narrowed tail must not lose that. Queried after the
+		// reload, which can itself re-run a changed link's setup. A query that
+		// fails or cannot be parsed falls back to the full pass rather than
+		// assume nothing failed.
+		failedLinks := map[string]bool{}
+		if !reconfigureAll {
+			if f, err := networkdFailedLinks(); err != nil {
+				slog.Warn("networkd link-state query failed; reconfiguring every managed interface",
+					"err", err)
+				reconfigureAll = true
+			} else {
+				failedLinks = f
+			}
+		}
 		var reconf []string
 		for _, ifc := range interfaces {
 			if ifc.Unmanaged || ifc.Disable || ifc.BondMaster != "" {
 				continue
 			}
-			if reconfigureAll || changedIfaces[ifc.Name] || reconfDebtNames[ifc.Name] {
+			if reconfigureAll || changedIfaces[ifc.Name] || reconfDebtNames[ifc.Name] || failedLinks[ifc.Name] {
 				reconf = append(reconf, ifc.Name)
 			}
 		}

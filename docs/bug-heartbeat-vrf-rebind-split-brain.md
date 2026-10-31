@@ -143,7 +143,7 @@ its address, and restarted the heartbeat while the address was mid-move. A
 20-commit soak on master ended in both nodes declaring the other lost and a
 full RG takeover.
 
-- `.network` rows for daemon-owned VRF members render `KeepMaster=yes`
+- `.network` rows for management-class (vrf-mgmt) members render `KeepMaster=yes`
   instead of `VRF=` (`pkg/networkd/README.md`).
 - `Apply` reconfigures only the interfaces whose files changed.
 - The heartbeat restart runs only when a bind actually moved the control link

@@ -272,11 +272,16 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 	// sockets bound through it are stale. Restart them now, right after the
 	// move, rather than at the end of the apply: RestartHeartbeat's peer
 	// keepalive and restart grace then cover the gap from its start. An
-	// unmoved control link keeps its sockets. A failed restart is owed and
-	// joined into commit truth exactly like the post-networkd one (#9751).
+	// unmoved control link keeps its sockets.
+	//
+	// A failure here is NOT joined into commit truth. It leaves the restart
+	// owed (#9751), and the post-networkd pass of this same apply retries the
+	// debt and reports ITS outcome into networkdErr. Joining it here too
+	// failed a commit whose heartbeat the 2.7 retry had already restored.
 	if mgmtSet != nil {
 		if err := d.restartHeartbeatIfControlLinkMoved(cfg, false); err != nil {
-			vrfErr = errors.Join(vrfErr, err)
+			slog.Warn("cluster: heartbeat restart after the pre-networkd management-VRF bind failed; "+
+				"the post-networkd pass retries it", "err", err)
 		}
 	}
 
@@ -584,7 +589,7 @@ func (d *Daemon) applyInterfaceReconcile(cfg *config.Config) error {
 // from the apply path so the class rule has a callable, testable entry point.
 //
 // #7515 / #10308: the class comes from config.IsManagementIfName, the SSOT
-// shared with the networkd `VRF=` emitter and the ip-monitoring next-hop
+// shared with the networkd `KeepMaster=yes` emitter (#18597) and the ip-monitoring next-hop
 // validator. Zone names are deliberately irrelevant: a data NIC in a zone
 // named `mgmt`/`control` is not vrf-mgmt-isolated, while fxp*/fab*/em*
 // lifelines remain isolated wherever they are zoned.

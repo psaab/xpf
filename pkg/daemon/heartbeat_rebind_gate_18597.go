@@ -66,8 +66,14 @@ func (d *Daemon) controlLinkMovedSinceLastCheck(cfg *config.Config) bool {
 //
 // Callers run it right after each management bind pass, so the restart
 // follows the move instead of waiting for the end of the apply. retryOwed is
-// set only by the post-networkd pass, so one apply retries an owed restart
-// (and its up-to-5s bind retries) once, as before, not twice.
+// set by the post-networkd pass and the background reassert tick, the two
+// owners that RETRY an owed restart (#9751). The pre-networkd pass passes
+// false and does not report a failure into commit truth: a restart it starts
+// that fails is owed, and the post-networkd pass of the same apply retries it
+// and reports the outcome (a 0b failure that 2.7 then repairs is not a failed
+// commit). Worst case, when every bind keeps failing, one apply spends two
+// restart windows (~5s each) under applySem: the 0b restart that moved and
+// failed, then the 2.7 retry of the debt it left.
 func (d *Daemon) restartHeartbeatIfControlLinkMoved(cfg *config.Config, retryOwed bool) error {
 	if d.cluster == nil {
 		return nil
@@ -79,4 +85,10 @@ func (d *Daemon) restartHeartbeatIfControlLinkMoved(cfg *config.Config, retryOwe
 		return nil
 	}
 	return d.restartHeartbeatAfterRebindForCurrentCommsEpoch()
+}
+
+// heartbeatRestartOwed reports whether a failed heartbeat restart left the
+// heartbeat stopped and owes a retry (#9751). Safe without applySem.
+func (d *Daemon) heartbeatRestartOwed() bool {
+	return d.cluster != nil && d.cluster.HeartbeatRestartOwed()
 }

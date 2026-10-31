@@ -132,9 +132,10 @@ func IsLoopbackIngress(name string) bool {
 //   - `pkg/daemon/daemon_apply_interfaces.go` builds the management-VRF
 //     interface set, which decides which leases `collectDHCPRoutes` EXCLUDES
 //     from FRR (their routes go into table 999 by netlink instead);
-//   - `pkg/dataplane/compiler_iface.go` emits `VRF=vrf-mgmt` into the
-//     interface's `.network` file so `networkctl reconfigure` preserves that
-//     binding;
+//   - `pkg/dataplane/compiler_iface.go` sets the networkd row's VRFName, which
+//     renders `KeepMaster=yes` so networkd never releases the daemon's
+//     vrf-mgmt binding (#18597; the earlier `VRF=vrf-mgmt` could not resolve a
+//     netlink VRF and did NOT preserve it);
 //   - `pkg/config/compiler_services.go` refuses such an interface as an
 //     ip-monitoring preferred-route next-hop, precisely BECAUSE its lease is
 //     excluded from FRR.

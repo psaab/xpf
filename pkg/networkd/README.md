@@ -127,10 +127,12 @@ Triggers `networkctl reload` only when files actually changed.
   with a non-empty `VRFName` renders `KeepMaster=yes` unless it also names a
   networkd-owned `Bond=` or `Bridge=` master, which `KeepMaster` would make
   networkd ignore. The daemon's `BindInterfaceToVRF` owns the binding. Cells:
-  `keep_master_18597_test.go`. Residual: a routing-instance member row carries
+  `keep_master_18597_test.go`. Residuals: a routing-instance member row carries
   no master directive, so networkd still releases it from its `vrf-*` when
-  that row's OWN files change (the daemon's #6805 late pass rebinds it). The
-  narrowed tail below means an unrelated commit no longer touches it.
+  that row's OWN files change (the daemon's #6805 late pass rebinds it; the
+  narrowed tail below means an unrelated commit no longer touches it; #18605),
+  and a DISABLED management-class row takes the always-down early return
+  without `KeepMaster=yes` (#18607).
 - **The activation tail reconfigures only interfaces whose files changed
   (#18597).** `Apply` records which interfaces had a `.link`, `.netdev` or
   `.network` file rewritten in this call (`changedIfaces`) and reconfigures
@@ -142,9 +144,27 @@ Triggers `networkctl reload` only when files actually changed.
   nothing. A pass that inherits an obligation from an EARLIER call — reload
   debt, an unfinished tail (`activationPending`), or an external reload that
   skipped the tail (#6912) — cannot know which files changed back then, so it
-  still reconfigures every managed interface (`reconfigureAll`). The Info line
-  `networkd reconfiguring interfaces` names the set and whether it was the
-  full one.
+  still reconfigures every managed interface (`reconfigureAll`). A link
+  networkd reports as `failed` (`AdministrativeState` in `networkctl list
+  --json=short`, queried after the reload) is reconfigured too, so the
+  narrowing does not lose the old tail's incidental retry of a failed link; a
+  query that errors or cannot be parsed falls back to the full pass. The Info
+  line `networkd reconfiguring interfaces` names the set and whether it was the
+  full one. Cells: `keep_master_18597_test.go` (unrelated commit, failed link,
+  query error, each of the three inherited-obligation terms).
+- **`KeepMaster=yes` needs the explicit `LinkLocalAddressing=ipv6` beside it
+  (#18597).** systemd.network(5): with `KeepMaster=` enabled, the
+  `LinkLocalAddressing=` default becomes `no`. Every non-disabled row already
+  renders `LinkLocalAddressing=ipv6`; dropping that line would silently remove
+  IPv6 link-local from em0/fxp0/fab*. `TestKeepMasterRowsKeepExplicitLinkLocal18597`
+  pins the pair.
+- **Upgrade / downgrade across #18597.** The first apply of the new binary
+  rewrites each management row (`VRF=` → `KeepMaster=yes`); networkd reloads
+  and reconfigures those links with the NEW file, so it keeps the master. A
+  downgraded binary's first apply rewrites them back to `VRF=`, and networkd
+  then releases each management link from vrf-mgmt once (the old per-commit
+  bounce, once) before the old daemon's rebind; see `docs/log/18597.md` for the
+  measurement.
 - **The activation tail's `networkctl reconfigure` argv is asserted in
   full, and the fixture must VARY every axis it claims to cover
   (#6914).** The tail selects `!Unmanaged && !Disable && BondMaster == ""`

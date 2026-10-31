@@ -1394,7 +1394,7 @@ OFF-BOX address reachable over a dataplane interface** — the far end of a
 transit link, or the HA peer's dataplane address.
 
 The management classifier is `config.IsManagementIfName`, the #7515 SSOT already
-shared by the daemon's `vrf-mgmt` binder, the networkd `VRF=` emitter and the
+shared by the daemon's `vrf-mgmt` binder, the networkd `KeepMaster=yes` emitter and the
 ip-monitoring next-hop validator. It is injected by the caller for the same
 reason `HelperStatus` is, and a `nil` classifier is "no information" rather than
 "ineligible" — but both production constructors wire it, and tests bind that
