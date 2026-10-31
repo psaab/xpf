@@ -1693,6 +1693,10 @@ the seed's own origin:
   - It removes the steering row and the conntrack mirror as for any removed
     session. Removal goes through `delete`, the Terminal sink, which also
     retires the #18562 directory row and emits no delta.
+  - The row removed is the hit's CANONICAL key. A seed that an HA-transition
+    refresh gave a translation can be hit through its forward-wire alias, and
+    deleting the packet's (alias) key there would leave the seed and drop
+    another tuple's steering row.
   - The caller then looks again. The packet resolves against the node's synced
     session, if the shared maps hold one, or takes the ordinary miss path,
     which adjudicates policy and NAT afresh as the owner.
@@ -1717,6 +1721,19 @@ the seed's own origin:
 
 A seed whose egress RG is still the peer's (the split it was minted for) is
 untouched by both rules. Cells: `afxdp/tests_punt_seed_shadow_18620.rs`.
+
+Residual (review of #18638): retirement is LAZY. It happens at the flow's next
+forward hit, not at the RG activation.
+- In between, an embedded ICMP error quoting the punted flow can still match
+  the seed: through the worker's table, or, for a fabric-ingress error,
+  through its #18562 directory row, which expires at most
+  `PUNT_SEED_ROW_TTL_NS` (2 s) after the seed was minted.
+- Such an error is delivered toward the LAN host as it would have been
+  mid-split. No data packet is admitted this way. The error belongs to a flow
+  this node ingressed and its own policy permitted.
+- Reply-direction data packets are not covered by this residual: the #10507
+  fence still revokes them on activation (seat V probe:
+  `session_hit=1 revoked=1 tx=0`).
 
 ## Corruption contract (#1855)
 

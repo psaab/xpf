@@ -44,8 +44,36 @@ fn lan_segment_to(
     dst: Ipv4Addr,
     tcp_flags: u8,
 ) -> ([u64; 3], Option<Vec<u8>>) {
+    lan_segment_between(sessions, forwarding, ha, shared, LAN_HOST, dst, tcp_flags)
+}
+
+/// As `lan_segment`, from `src` toward `dst`, still on the LAN binding.
+fn lan_segment_between(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha: &BTreeMap<i32, HAGroupRuntime>,
+    shared: &Arc<Mutex<FastMap<crate::session::SessionKey, SyncedSessionEntry>>>,
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    tcp_flags: u8,
+) -> ([u64; 3], Option<Vec<u8>>) {
+    let (tx, egress, _) =
+        lan_segment_counted(sessions, forwarding, ha, shared, src, dst, tcp_flags);
+    (tx, egress)
+}
+
+/// As `lan_segment_between`, also returning the pass's debug counters.
+fn lan_segment_counted(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha: &BTreeMap<i32, HAGroupRuntime>,
+    shared: &Arc<Mutex<FastMap<crate::session::SessionKey, SyncedSessionEntry>>>,
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    tcp_flags: u8,
+) -> ([u64; 3], Option<Vec<u8>>, DebugPollCounters) {
     let frame = build_txn_tcp_syn_frame_v4(
-        LAN_HOST,
+        src,
         dst,
         SPORT,
         DPORT,
@@ -53,7 +81,7 @@ fn lan_segment_to(
         [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03],
     );
     let mut meta = txn_meta_v4(LAN_IFINDEX as u32, tcp_flags, frame.len() as u16);
-    meta.flow_src_addr[..4].copy_from_slice(&LAN_HOST.octets());
+    meta.flow_src_addr[..4].copy_from_slice(&src.octets());
     meta.flow_dst_addr[..4].copy_from_slice(&dst.octets());
     meta.flow_src_port = SPORT;
     meta.flow_dst_port = DPORT;
@@ -83,6 +111,7 @@ fn lan_segment_to(
             tx(&bindings[LAN]),
         ],
         egress,
+        dbg,
     )
 }
 
@@ -334,6 +363,57 @@ fn stamped_punt_seed_kept_mid_split_retired_on_return_18620() {
     );
 }
 
+/// Review of #18638 (seat V, Q4): a seed can be hit through its forward-wire
+/// ALIAS, the translated tuple, once an HA-transition refresh has given it a
+/// translation (#10507 Cell 7a's shape). The retirement must delete the row it
+/// hit, at its canonical key. Deleting the packet's (alias) key instead would
+/// leave the seed shadowing the flow and drop another tuple's steering row.
+#[test]
+fn punt_seed_hit_through_its_alias_retires_the_seed_row_18620() {
+    let forwarding = fw1_owner_forwarding();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let mut landing = seeded_worker(&forwarding, now_secs);
+    let translated = imported_pair_entry(&forwarding, forward_key(), IpAddr::V4(SNAT_IP));
+    let (_, metadata, _) = landing
+        .entry_with_origin(&forward_key())
+        .expect("fixture: seed present");
+    assert!(
+        landing.refresh_for_ha_transition(
+            &forward_key(),
+            translated.decision,
+            metadata,
+            monotonic_nanos()
+        ),
+        "fixture: give the seed the WAN egress with SNAT in place"
+    );
+    assert_eq!(origin_of(&landing), Some(SessionOrigin::FabricPuntSeed));
+
+    // A segment on the alias (SNAT_IP:SPORT -> WAN_HOST:DPORT) with the WAN
+    // RG back on this node.
+    let empty = Arc::new(Mutex::new(FastMap::default()));
+    let (_, _, dbg) = lan_segment_counted(
+        &mut landing,
+        &forwarding,
+        &owner_ha(now_secs),
+        &empty,
+        SNAT_IP,
+        WAN_HOST,
+        TCP_ACK,
+    );
+    assert_ne!(
+        origin_of(&landing),
+        Some(SessionOrigin::FabricPuntSeed),
+        "an alias hit must retire the seed row at its canonical key"
+    );
+    // RETIRED, not revoked: deleting the alias key instead would leave the seed
+    // serving the hit, and the #10507 fence would then revoke it.
+    assert_eq!(
+        (dbg.policy_revoked_sessions, dbg.snat_revoked_sessions),
+        (0, 0),
+        "the seed must be retired by the alias hit, not revoked by the fence"
+    );
+}
+
 /// The retirement is scoped to `FabricPuntSeed`. A MissingNeighborSeed is
 /// minted by the egress owner itself while its next hop resolves. Its egress is
 /// local by construction, and it is its own authority. Once its neighbor
@@ -497,7 +577,7 @@ fn peer_delete_removes_punt_seed_but_not_authored_row_18620() {
 /// Run: cargo test --release --bin xpf-userspace-dp -- --ignored --exact
 ///      afxdp::tests_punt_seed_shadow_18620::bench_resolve_non_seed_hit_18620 --nocapture
 #[test]
-#[ignore]
+#[ignore = "MEASUREMENT: exploratory timing of the slow-path resolve of a non-seed hit (#18620 review); gates nothing, read the printed ns/op"]
 fn bench_resolve_non_seed_hit_18620() {
     let forwarding = fw1_owner_forwarding();
     let now_ns = monotonic_nanos();

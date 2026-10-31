@@ -386,8 +386,11 @@ pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
 
 /// #18620: retire this worker's `FabricPuntSeed` for the flow once this node
 /// forwards the flow's egress. Returns whether the seed was retired. The
-/// caller passes the seed's decision and metadata from its own lookup hit, so
-/// nothing is probed or cloned here for a packet that did not hit a seed.
+/// caller passes the seed's canonical `key`, decision and metadata from its own
+/// lookup hit, so nothing is probed or cloned here for a packet that did not
+/// hit a seed. `key` is the row's canonical key, not the packet's: the two
+/// differ for a hit through the forward-wire alias, and deleting the packet's
+/// key there would leave the seed and drop the steering row of another tuple.
 ///
 /// A punt seed (#7770) is the punting node's record of a flow whose egress RG
 /// the PEER owned when its first packet arrived. It is NAT-free and it
@@ -433,6 +436,7 @@ pub(in crate::afxdp) fn retire_fabric_punt_seed_if_owner_active(
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     flow: &SessionFlow,
+    key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
     now_secs: u64,
@@ -455,7 +459,6 @@ pub(in crate::afxdp) fn retire_fabric_punt_seed_if_owner_active(
     if !owner_rg_is_locally_active(ha_state, egress_rg, now_secs) {
         return false;
     }
-    let key = &flow.forward_key;
     let session_id = sessions.session_id_for(key);
     // A seed carries no NAT state, so there is nothing to release. The
     // steering row and the conntrack mirror go as for any removed session.
@@ -529,11 +532,13 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
     // its premise. Retire it and look again, so the flow resolves against the
     // synced session or a fresh adjudication instead of the seed. Gated on the
     // origin the lookup already carries: no other hit pays anything.
+    // The row retired is the hit's CANONICAL key, which differs from the
+    // packet's key when the seed was found through its forward-wire alias
+    // (a seed whose HA-transition refresh gave it a translation).
     if let Some(hit) = found.as_ref()
         && hit.origin == SessionOrigin::FabricPuntSeed
         && hit.shared_entry.is_none()
         && !hit.lookup.metadata.is_reverse
-        && hit.key.as_ref(&flow.forward_key) == &flow.forward_key
         && retire_fabric_punt_seed_if_owner_active(
             sessions,
             session_map,
@@ -542,6 +547,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
             ha_state,
             dynamic_neighbors,
             flow,
+            hit.key.as_ref(&flow.forward_key),
             hit.lookup.decision,
             &hit.lookup.metadata,
             now_secs,

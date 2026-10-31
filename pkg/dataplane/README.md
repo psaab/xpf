@@ -279,6 +279,16 @@ transfer. The mark is an overlay on what the HELPER is told. It never changes
     path delivered the ack, including the reconcile retry of a failed demotion
     write, which is not an ownership edge and schedules no republish of its
     own. The hook runs under `m.mu` and only schedules.
+  - Residual: `armPendingHAStateReplayLocked` (a replay-debt reset after a
+    snapshot publish) clears the acknowledged inventory directly, so the hold
+    drops without firing the hook. If that reset lands while an RG is still
+    held (a failed demotion ack in flight), the rows already published stay
+    until the next publish of any kind, because the later replay ack starts
+    from an empty inventory and releases nothing. Firing the hook from the
+    reset instead would withdraw the rows while the helper may still forward
+    the RG, which is the window this hold exists to close. The reset path is
+    narrow (generation debt plus a failed demotion ack); a follow-up can carry
+    the held set across the reset.
 - A real promotion or a real demotion of the RG in `UpdateRGActive`
   (`supersedeTransferPreActiveLocked`) removes the mark. Without the
   demotion arm, a mark still inside its deadline would keep the helper
