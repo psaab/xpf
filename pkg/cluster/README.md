@@ -598,7 +598,10 @@ starts (`armRestart`):
 After that, the ordinary `threshold*interval` staleness applies. A live peer
 whose heartbeats are briefly lost past the restart grace is still covered by the
 sync-recency guard that `handlePeerTimeout` consults
-(`syncSuppressesPeerTimeoutLocked`, #1792/#17056).
+(`syncSuppressesPeerTimeoutLocked`, #1792/#17056). Since #18561 that guard
+also needs, for a peer that answers sync-level heartbeats, one sync frame newer
+than the liveness probe sent at the first missed heartbeat; the restarting
+node's sync channel stays up through its bind retries and answers it.
 
 Two receivers are never armed and keep the cold-boot floor on both arms:
 - a replacement for a receiver that had NEVER seen the peer;
@@ -4260,20 +4263,26 @@ because no peer is asked anything.
   connected: `syncSuppressesPeerTimeoutLocked` suppresses a timeout when
   last peer sync traffic is ≤2s old, capped at 5s continuous suppression.
   Since #18561 recency alone is not enough for a peer that has proved it
-  answers a sync-level heartbeat (`PeerHeartbeatAckSupported`): one tick
-  before the heartbeat timeout `checkTimeout` sends a sync liveness probe
-  (`prearmPeerLivenessProbe`), and a timeout tick is suppressed only if a
-  sync frame arrived after the outstanding probe (each answered tick sends
-  the next probe; an unanswered probe gets `minLivenessProbeAnswer`, 50ms,
-  before its silence counts). A hard-killed peer, whose half-open sync
-  socket still reads connected, is therefore declared on the timeout tick:
-  threshold plus up to one heartbeat tick of phase, 0.5–0.6s at defaults and
-  1.0–1.2s in the lab. A peer without ack support keeps the recency-only
-  rule (up to max(threshold, remaining 2s window) plus one tick). A process
+  answers a sync-level heartbeat (`PeerHeartbeatAckSupported`; every
+  installed sync connection sends one heartbeat so the latch arms even on a
+  busy link). At the first missed heartbeat (older than 1.5 intervals)
+  `checkTimeout` sends ONE sync liveness probe for the window
+  (`prearmPeerLivenessProbe`). On the timeout tick, if no sync frame newer
+  than the probe has arrived, the timeout fires
+  (`peerAnsweredLivenessProbeLocked`); if one has, the peer is alive and the
+  window keeps the recency rule and the 5s cap with no further probes. A
+  live peer thus has (threshold - 1.5) intervals for one round trip (700 ms
+  in the lab's 200 ms x 5, 350 ms at the 100 ms x 5 default). A hard-killed
+  peer whose sync socket is half-open is declared on the timeout tick
+  (threshold plus up to one tick of phase: 1.0-1.2 s in the lab, 0.5-0.6 s at
+  defaults), provided the ack latch had armed and no frame the peer queued
+  before it died arrives after the probe. A peer without ack support keeps
+  the recency-only rule (up to max(threshold, remaining 2s window) plus one
+  tick). `LivenessProbeStats` reports the latch and the probe counts. A process
   crash that closes sync, or an idle sync connection already >2s, falls back
   to the raw heartbeat threshold. Startup/restart grace can also defer
   handling. These are detection times, not end-to-end restoration SLAs
-  (`pkg/cluster/heartbeat.go:61-65,1916-1960`;
+  (`pkg/cluster/heartbeat.go` `checkTimeout`, lines 1451-1516;
   `pkg/cluster/heartbeat_manager.go:790-832`;
   `pkg/cluster/heartbeat_suppress.go`;
   `docs/ha-cluster-userspace.conf:71-72`).

@@ -904,6 +904,16 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 		s.receiveLoop(ctx, conn)
 	}()
 	s.sendClockSync(conn)
+	// #18561: one sync-level heartbeat per installed connection, so the peer's
+	// HeartbeatAck latches peerHeartbeatAckEver early. Otherwise a node that
+	// keeps receiving frames never sends one (the read deadline never fires),
+	// the latch stays false, and the heartbeat-timeout liveness probe never
+	// engages for a hard-killed peer.
+	s.writeMu.Lock()
+	if err := writeMsg(conn, syncMsgHeartbeat, nil); err != nil {
+		slog.Debug("cluster sync: initial liveness heartbeat send error", "err", err)
+	}
+	s.writeMu.Unlock()
 	// #6650: advertise our config-snapshot protocol version on every installed
 	// connection, so the peer's commit path can refuse to push a config this
 	// node cannot represent. Beside the clock sync because it has the same

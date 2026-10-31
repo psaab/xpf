@@ -1506,10 +1506,11 @@ func (r *heartbeatReceiver) checkTimeout() {
 		r.mgr.handlePeerTimeout()
 		return
 	}
-	// #18561: one tick before the timeout, probe the peer over the sync
-	// channel so the timeout tick can judge the sync-recency suppression on
+	// #18561: at the first missed heartbeat (older than 1.5 intervals: one
+	// expected heartbeat plus jitter), probe the peer once over the sync
+	// channel, so the timeout tick can judge the sync-recency suppression on
 	// evidence from after the heartbeats went late (heartbeat_suppress.go).
-	if r.threshold >= 2 && heartbeatStale(lastNano, nowMono, timeout-r.interval) {
+	if r.threshold >= 2 && heartbeatStale(lastNano, nowMono, r.interval*3/2) {
 		r.mgr.prearmPeerLivenessProbe(nowMono)
 	}
 }

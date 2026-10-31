@@ -672,6 +672,14 @@ type Manager struct {
 	// late or suppressed (#18561); 0 = none. Under m.mu, cleared with
 	// hbSuppressStart.
 	hbLivenessProbeMono int64
+	// hbLivenessProven latches, for the current suppression window, that the
+	// peer answered the probe (#18561): the window then falls back to the
+	// recency rule and the 5s cap, with no further probes.
+	hbLivenessProven bool
+	// livenessProbesSent / livenessProbeTimeouts count the #18561 probes and
+	// the unanswered ones a timeout tick acted on (LivenessProbeStats).
+	livenessProbesSent    uint64
+	livenessProbeTimeouts uint64
 
 	// peerHeartbeatFreshFn reports whether a peer heartbeat is currently
 	// within the timeout window (i.e. NOT stale). handlePeerTimeout consults

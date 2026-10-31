@@ -31,11 +31,14 @@ import (
 //     per-connection binding above is installed by that publish, inside
 //     pkg/cluster; it is not a fourth daemon hook.
 //
-// Timing contract (unchanged from #1792): suppress only while inbound peer
-// sync traffic is at most maxPeerSyncSilence (2s) old, and never for more
-// than maxSyncSuppressDuration (5s) of continuous suppression. Both the
-// recency age and the cap stamp are CLOCK_MONOTONIC (#1792), so wall-clock
-// steps neither extend nor cut the window.
+// Timing contract (#1792): suppress only while inbound peer sync traffic is
+// at most maxPeerSyncSilence (2s) old, and never for more than
+// maxSyncSuppressDuration (5s) of continuous suppression. Both the recency
+// age and the cap stamp are CLOCK_MONOTONIC (#1792), so wall-clock steps
+// neither extend nor cut the window. #18561 adds, for a peer that answers
+// sync-level heartbeats, the liveness probe: one probe at the first missed
+// heartbeat, and no suppression on the timeout tick unless a sync frame
+// newer than it has arrived (peerAnsweredLivenessProbeLocked).
 
 // maxPeerSyncSilence is the recency window: inbound peer sync traffic older
 // than this no longer proves the peer alive for heartbeat-timeout
@@ -155,6 +158,7 @@ func (m *Manager) SyncSourceInstalled() bool {
 func (m *Manager) resetSyncSuppressionLocked() {
 	m.hbSuppressStart = 0
 	m.hbLivenessProbeMono = 0
+	m.hbLivenessProven = false
 }
 
 // peerLivenessProber is the optional sync-source surface behind the #18561
@@ -174,76 +178,104 @@ type peerLivenessProber interface {
 }
 
 // minLivenessProbeAnswer is how long an unanswered probe is given before
-// its silence counts as evidence. The probe is normally sent one heartbeat
-// tick before the timeout tick (prearmPeerLivenessProbe), so a live peer
-// has a full heartbeat interval to answer over the control link; this floor
-// only matters when the probe went out on the timeout tick itself.
+// its silence counts as evidence. The probe is normally sent at the first
+// missed heartbeat (prearmPeerLivenessProbe), so a live peer has until the
+// timeout tick, about (threshold - 1.5) x interval, to answer; this floor only
+// matters when the probe went out on the timeout tick itself.
 const minLivenessProbeAnswer = 50 * time.Millisecond
 
-// livenessProberLocked returns the published source as a prober when the
-// peer can answer one. Caller must hold m.mu.
-func (m *Manager) livenessProberLocked() (peerLivenessProber, bool) {
+// livenessProberLocked returns the published source as a prober, and whether
+// the peer has proved it answers sync-level heartbeats. Caller must hold
+// m.mu.
+func (m *Manager) livenessProberLocked() (peerLivenessProber, bool, bool) {
 	ss := m.peerSync
 	if ss == nil || !ss.IsConnected() {
-		return nil, false
+		return nil, false, false
 	}
 	p, ok := ss.(peerLivenessProber)
-	if !ok || !p.PeerHeartbeatAckSupported() {
-		return nil, false
+	if !ok {
+		return nil, false, false
 	}
-	return p, true
+	return p, true, p.PeerHeartbeatAckSupported()
 }
 
-// prearmPeerLivenessProbe sends the liveness probe one heartbeat tick
-// before the heartbeat timeout fires (#18561), so the timeout tick can
-// already tell a dead peer from a live one whose heartbeats stalled.
-// heartbeatReceiver.checkTimeout calls it while the last heartbeat is late
-// but not yet stale. A probe already outstanding is not repeated.
+// prearmPeerLivenessProbe sends ONE liveness probe per suppression window at
+// the first missed heartbeat (#18561). heartbeatReceiver.checkTimeout calls
+// it while the last heartbeat is late (older than 1.5 intervals) but not yet
+// stale. The probe goes out whether or not the peer has proved ack support:
+// its answer is what latches that support.
 func (m *Manager) prearmPeerLivenessProbe(nowMono int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.peerAlive || m.hbLivenessProbeMono != 0 {
+	if !m.peerAlive || m.hbLivenessProbeMono != 0 || m.hbLivenessProven {
 		return
 	}
-	p, ok := m.livenessProberLocked()
+	p, ok, _ := m.livenessProberLocked()
 	if !ok {
 		return
 	}
 	m.hbLivenessProbeMono = nowMono
+	m.livenessProbesSent++
 	p.RequestLivenessProbe()
 }
 
 // peerAnsweredLivenessProbeLocked is the #18561 liveness proof behind a
-// sync-recency suppression. Recent sync traffic alone does not prove the
-// peer alive: a hard-killed peer leaves a half-open sync socket that still
-// reads "connected", and its last frame is only about one heartbeat
-// interval younger than its last heartbeat, so the 2s recency window kept
-// a dead peer alive for up to 2s past the heartbeat threshold (measured on
-// loss: peer loss declared 0.7-1.58 s after the kill at a 1.0 s
-// threshold). The proof required here is an inbound sync frame that
-// arrived AFTER a probe sent while the heartbeats were already late. A
-// suppressed tick whose probe was answered sends the next probe, so each
-// tick of a suppression window is judged on fresh evidence.
+// sync-recency suppression, for a peer that answers sync-level heartbeats.
 //
-// Returns false (do not suppress) only when a probe has been outstanding
-// for at least minLivenessProbeAnswer with no inbound frame since it was
-// sent. Caller must hold m.mu.
+// Recent sync traffic alone does not prove the peer alive: a hard-killed peer
+// leaves a half-open sync socket that still reads "connected", and its last
+// frame is only about one heartbeat interval younger than its last heartbeat,
+// so the 2s recency window kept a dead peer alive for up to 2s past the
+// threshold (loss: declared 0.7-1.58 s after the kill at 1.0 s). One probe is
+// sent at the first missed heartbeat. If any sync frame newer than it has
+// arrived by the timeout tick, the peer is alive: the window keeps the
+// recency rule and the 5s cap and is not probed again. If none has, the
+// timeout fires. So a live peer has (threshold - 1.5) intervals for one round
+// trip (700 ms in the lab's 200 ms x 5, 350 ms at the 100 ms x 5 default)
+// rather than one per tick.
+//
+// Returns false (do not suppress) only for an unanswered probe at least
+// minLivenessProbeAnswer old. Caller must hold m.mu.
 func (m *Manager) peerAnsweredLivenessProbeLocked(p peerLivenessProber, nowMono int64) bool {
-	if sent := m.hbLivenessProbeMono; sent != 0 {
-		last, ok := p.LastPeerReceiveMono()
-		if !ok || last <= sent {
-			// Nothing since the probe. Too young to judge: keep waiting.
-			return time.Duration(nowMono-sent) < minLivenessProbeAnswer
-		}
+	if m.hbLivenessProven {
+		return true
 	}
-	m.hbLivenessProbeMono = nowMono
-	p.RequestLivenessProbe()
-	return true
+	sent := m.hbLivenessProbeMono
+	if sent == 0 {
+		// The pre-arm tick was skipped (phase); probe now and give the
+		// answer floor.
+		m.hbLivenessProbeMono = nowMono
+		m.livenessProbesSent++
+		p.RequestLivenessProbe()
+		return true
+	}
+	if last, ok := p.LastPeerReceiveMono(); ok && last > sent {
+		m.hbLivenessProven = true
+		return true
+	}
+	if time.Duration(nowMono-sent) < minLivenessProbeAnswer {
+		return true
+	}
+	m.livenessProbeTimeouts++
+	slog.Warn("cluster: peer sent nothing over session sync since the liveness probe; heartbeat timeout not deferred",
+		"probe_age", time.Duration(nowMono-sent).Truncate(time.Millisecond))
+	return false
+}
+
+// LivenessProbeStats reports the #18561 heartbeat-timeout liveness probe:
+// whether the published peer has proved it answers sync-level heartbeats
+// (when false, the recency-only rule is in force), and how many probes were
+// sent and found unanswered at a timeout tick.
+func (m *Manager) LivenessProbeStats() (ackSupported bool, sent, unanswered uint64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok, ack := m.livenessProberLocked()
+	return ok && ack, m.livenessProbesSent, m.livenessProbeTimeouts
 }
 
 // notePeerHeartbeatRecoveredLocked is the heartbeat-admission reset: an
-// admitted peer heartbeat ends the current continuous-suppression window
-// in the same critical section that marks the peer alive (#12165).
+// admitted peer heartbeat ends the current continuous-suppression window in
+// the same critical section that marks the peer alive (#12165).
 // Caller must hold m.mu.
 func (m *Manager) notePeerHeartbeatRecoveredLocked() {
 	m.resetSyncSuppressionLocked()
@@ -272,7 +304,7 @@ func (m *Manager) syncSuppressesPeerTimeoutLocked(nowMono int64) (bool, string) 
 	// #18561: a peer that can answer a sync-level probe must have answered
 	// one sent after its heartbeats went late. A peer that never proved ack
 	// support keeps the recency-only rule above.
-	if p, ok := m.livenessProberLocked(); ok && !m.peerAnsweredLivenessProbeLocked(p, nowMono) {
+	if p, ok, ack := m.livenessProberLocked(); ok && ack && !m.peerAnsweredLivenessProbeLocked(p, nowMono) {
 		return false, ""
 	}
 	return true, fmt.Sprintf("session sync connected with recent peer traffic age=%s", age.Truncate(10*time.Millisecond))
