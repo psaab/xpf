@@ -248,7 +248,7 @@ See the deploy backing table in
   1s in the deployed lab config. These are `set chassis cluster
   heartbeat-interval <ms>` and `heartbeat-threshold <n>`
   (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` in
-  `pkg/cluster/heartbeat.go`; `docs/ha-cluster-userspace.conf:71-72`). <!-- mirror:private-rg-peer-loss-detection -->
+  `pkg/cluster/heartbeat.go`; `docs/ha-cluster-userspace.conf:71-72`). <!-- mirror:private-rg-peer-loss-detection n=6 -->
   The receiver checks staleness every quarter heartbeat interval (interval /
   4, floored at 10 ms; #18639), so a peer is declared within that check period
   of its last admitted heartbeat turning interval × threshold old. While

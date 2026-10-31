@@ -877,27 +877,33 @@ test-harness-census-lib:
 
 # #18645: the instruction census. A temporary instruction carries an expiry
 # marker (an `Expires-when:` line naming `#NNNN closed`, or a free-text
-# condition plus a `Review-by:` date; grammar in scripts/instructions-census.py
-# and the campaign skill). The hermetic leg validates every marker under
-# docs/, .claude/skills/, test/incus/, scripts/, this Makefile and CLAUDE.md
-# (read, never written), and fails a past Review-by date; it runs in CI and in
-# `make selftest`. The ONLINE leg also asks GitHub and fails a marker whose
-# issue has closed; the campaign keeper runs it hourly. It exits 77 (SKIP)
-# without `gh`, which make reports as a failure: a skipped check is not a pass.
+# condition plus a `Review-by:` date at most 180 days ahead; grammar in
+# scripts/instructions-census.py and the campaign skill). Scope: docs/,
+# .claude/skills/, test/incus/, scripts/, this Makefile, CLAUDE.md (read, never
+# written), README.md, AGENTS.md and pkg/**/README.md.
+# - `instructions-census` (also CI, against the PR's base, and `make selftest`)
+#   fails bad marker syntax everywhere, and a past Review-by date ONLY in files
+#   the change touches (merge-base with origin/master, plus uncommitted and
+#   untracked files), so a calendar day cannot red every open PR at once.
+# - `instructions-census-online` is the campaign keeper's hourly SWEEP
+#   (--online --all): every marker, expired dates and CLOSED issues, plus a
+#   14-day lead-time warning. It exits 77 (SKIP) without `gh`, which make
+#   reports as a failure: a skipped check is not a pass.
 .PHONY: instructions-census instructions-census-online test-instructions-census-lib
 instructions-census:
-	python3 scripts/instructions-census.py
+	python3 scripts/instructions-census.py --base origin/master
 
 instructions-census-online:
-	python3 scripts/instructions-census.py --online
+	python3 scripts/instructions-census.py --online --all
 
 test-instructions-census-lib:
 	bash ./test/incus/instructions-census-selftest.sh
 
 # #18645: the mirror census. Text deliberately copied into several Markdown
-# files sits between `<!-- mirror:<id> -->` and `<!-- /mirror:<id> -->`; the
-# census fails when same-id blocks differ after whitespace normalisation, or a
-# block has no partner. Hermetic; runs in CI and in `make selftest`.
+# files sits between `<!-- mirror:<id> n=<copies> -->` and
+# `<!-- /mirror:<id> -->`; the census fails when same-id blocks differ after
+# whitespace normalisation, when the block count is not the declared n, or when
+# a block has no partner. Hermetic; runs in CI and in `make selftest`.
 .PHONY: mirror-census test-mirror-census-lib
 mirror-census:
 	python3 scripts/mirror-census.py

@@ -161,7 +161,7 @@ Switching to macvtap, routed, or tc-redirect could eliminate this entirely.
 The `ae1a717` VRRP measurements below describe the legacy VRRP-backed RETH
 path, not the compiler-default private-RG election mode. The latter uses
 heartbeat detection. Runtime heartbeat defaults are 100ms × 5 = 500ms; the
-deployed lab config is 200ms × 5 = 1s. <!-- mirror:private-rg-peer-loss-detection -->The receiver checks staleness every
+deployed lab config is 200ms × 5 = 1s. <!-- mirror:private-rg-peer-loss-detection n=6 -->The receiver checks staleness every
 quarter heartbeat interval (interval / 4, floored at 10 ms; #18639), so a peer
 is declared within that check period of its last admitted heartbeat turning
 interval × threshold old. While session sync looks connected, a peer that has

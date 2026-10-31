@@ -628,13 +628,14 @@ run_shell scripts/harness-census.sh
 
 # -- instruction + mirror censuses (#18645) --
 #
-# A temporary instruction carries an expiry marker; the hermetic instruction
-# census fails a malformed marker, a free-text marker without a Review-by
-# date, and a date before today (UTC). Its online half (a closed issue) needs
-# gh and is the campaign keeper's job, not this runner's. The mirror census
-# fails when copies of one mirrored block differ. Both are pure file scans
-# exiting 0/1, so run_py scores them directly (they print no unittest
-# summary, so its skip parsing never fires).
+# A temporary instruction carries an expiry marker. The instruction census
+# fails bad marker syntax everywhere, and a Review-by date before today (UTC)
+# only in files this checkout's change touches (merge-base with origin/master,
+# plus uncommitted and untracked files). The --online --all sweep (closed
+# issues, every expired date) needs gh and is the campaign keeper's job, not
+# this runner's. The mirror census fails when copies of one mirrored block
+# differ or one goes missing. Both exit 0/1, so run_py scores them directly
+# (they print no unittest summary, so its skip parsing never fires).
 hdr "instruction and mirror censuses"
 if command -v python3 >/dev/null 2>&1; then
 	run_py scripts/instructions-census.py

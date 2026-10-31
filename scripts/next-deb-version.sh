@@ -66,8 +66,13 @@
 #     hand-picked number is accepted only above both, and it is then written
 #     into the counter so no allocation can reissue it.
 #   * A counter file that exists but does not hold one decimal number (junk,
-#     or EMPTY after a crash or a full disk). It is never reset: a reset
-#     would hand the numbers out again.
+#     a leading zero, or EMPTY after a crash or a full disk). It is never
+#     reset: a reset would hand the numbers out again. A leading zero is
+#     refused in every number (--floor, --seen, --claim, the env floor):
+#     dash's $(( )) reads it as octal.
+#   * --claim while any node is unreadable, unless an explicit floor is
+#     given: the unreadable node may run the claimed number.
+#   * An allocation that would not be above the counter (a backstop).
 #   * No flock(1), or the lock not acquired within 30 s.
 #
 #   A node running a version outside the 0.0.N space (for example a
@@ -115,7 +120,16 @@ die() { echo "next-deb-version: $*" >&2; exit 1; }
 warn() { echo "next-deb-version: $*" >&2; }
 usage() { echo "usage: next-deb-version.sh [--counter FILE] [--git DIR] [--floor N]... [--seen VERSION]... [--claim VERSION] [--force-jump] [--no-probe]" >&2; exit 2; }
 
-is_num() { case "$1" in '' | *[!0-9]*) return 1 ;; esac; return 0; }
+# is_num: a plain DECIMAL number. A leading zero is refused, because dash's
+# $(( )) reads 027000 as OCTAL (11776) while `[ -gt ]` compares it as decimal:
+# max_of would pick 027000 and the arithmetic would hand out 0.0.11777, and
+# 0026900 makes dash die mid-run ("Illegal number"). "0" alone is fine.
+is_num() {
+	case "$1" in
+	'' | *[!0-9]* | 0?*) return 1 ;; # census-guard: leading-zero
+	esac
+	return 0
+}
 
 # n_of_version <version> -> N for `0.0.<N>` or `0.0.<N><non-digit>...`
 n_of_version() {
@@ -136,7 +150,7 @@ max_of() {
 }
 
 for v in ${XPF_DEB_VERSION_FLOOR:-}; do
-	is_num "$v" || die "XPF_DEB_VERSION_FLOOR='$v' is not a number"
+	is_num "$v" || die "XPF_DEB_VERSION_FLOOR='$v' is not a plain decimal number (no leading zero)"
 	EXPLICIT="$EXPLICIT $v"
 done
 
@@ -144,16 +158,16 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--counter) [ $# -ge 2 ] || usage; COUNTER=$2; shift 2 ;;
 	--git) [ $# -ge 2 ] || usage; GIT_DIRS="$GIT_DIRS $2"; shift 2 ;;
-	--floor) [ $# -ge 2 ] || usage; is_num "$2" || die "--floor '$2' is not a number"; EXPLICIT="$EXPLICIT $2"; shift 2 ;;
+	--floor) [ $# -ge 2 ] || usage; is_num "$2" || die "--floor '$2' is not a plain decimal number (no leading zero)"; EXPLICIT="$EXPLICIT $2"; shift 2 ;;
 	--seen)
 		[ $# -ge 2 ] || usage
-		n=$(n_of_version "$2") || die "--seen '$2' is not a 0.0.N version"
+		n=$(n_of_version "$2") || die "--seen '$2' is not a 0.0.N version (decimal N, no leading zero)"
 		SEEN="$SEEN $n"
 		shift 2
 		;;
 	--claim)
 		[ $# -ge 2 ] || usage
-		CLAIM=$(n_of_version "$2") || die "--claim '$2' is not a 0.0.N version"
+		CLAIM=$(n_of_version "$2") || die "--claim '$2' is not a 0.0.N version (decimal N, no leading zero)"
 		shift 2
 		;;
 	--force-jump) FORCE_JUMP=1; shift ;;
@@ -163,7 +177,7 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-for x in $MARGIN $MAX_JUMP; do is_num "$x" || die "margin/max-jump '$x' is not a number"; done
+for x in $MARGIN $MAX_JUMP; do is_num "$x" || die "margin/max-jump '$x' is not a plain decimal number (no leading zero)"; done
 command -v flock >/dev/null 2>&1 || die "flock(1) not found (util-linux); refusing to allocate without a lock"
 
 for d in $GIT_DIRS; do
@@ -221,7 +235,7 @@ if [ -e "$COUNTER" ]; then
 	have_counter=1
 	cur=$(tr -d ' \t\r\n' <"$COUNTER") || die "cannot read $COUNTER"
 	if ! is_num "$cur"; then # census-guard: malformed-counter
-		die "counter $COUNTER holds '$cur', not a number; refusing (a reset would reissue versions). Fix it by hand to at least the highest version in use."
+		die "counter $COUNTER holds '$cur', not a plain decimal number (no leading zero); refusing (a reset would reissue versions). Fix it by hand to at least the highest version in use."
 	fi
 fi
 
@@ -232,7 +246,7 @@ if [ -n "$dep_max" ]; then
 	dep_floor=$dep_max
 	# The margin applies only when the counter is created; after that the
 	# counter itself is ahead of the hand-picked builds it was clearing.
-	if [ "$have_counter" -eq 0 ]; then dep_floor=$((dep_max + MARGIN)); fi
+	if [ "$have_counter" -eq 0 ]; then dep_floor=$((dep_max + MARGIN)); fi # census-guard: margin-once
 fi
 
 # Creating the counter needs a TRUSTED floor: every probed node answered, or
@@ -249,6 +263,11 @@ ref=$(max_of "$dep_floor $exp_max")
 
 base=$(max_of "$cur $dep_floor $exp_max $SEEN")
 if [ -n "$CLAIM" ]; then
+	# A claim is checked against what is deployed, so it needs every node:
+	# an unreadable node may run exactly the number being claimed.
+	if [ -z "$exp_max" ] && { [ "$PROBE" -eq 0 ] || [ -n "$UNKNOWN" ]; }; then # census-guard: claim-needs-nodes
+		die "--claim refused: the deployed version was not read on every node (${UNKNOWN:-probe disabled}); one of them may run 0.0.$CLAIM. Pass --floor N (at least the highest version any node runs) to claim anyway."
+	fi
 	if [ "$CLAIM" -le "$base" ]; then # census-guard: claim
 		die "--claim 0.0.$CLAIM refused: it is at or below the counter/deployed floor ($base). A hand-picked number must be above every allocation and every deployed version; rebuild with an allocated version."
 	fi
@@ -263,6 +282,13 @@ fi
 
 if [ -n "${XPF_NEXT_DEB_VERSION_HOLD_S:-}" ]; then
 	sleep "$XPF_NEXT_DEB_VERSION_HOLD_S"
+fi
+
+# Backstop: whatever the floors did, the counter only moves UP. Shell
+# arithmetic surprises (an octal read, an overflow) end here, not in a
+# version two lanes share.
+if [ "$next" -le "$cur" ]; then # census-guard: monotonic
+	die "internal: would allocate 0.0.$next, not above the counter $cur; refusing"
 fi
 
 tmp="$COUNTER.tmp.$$"

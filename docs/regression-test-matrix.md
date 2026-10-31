@@ -32,7 +32,7 @@ It complements, and does not replace:
 | B2 | `cd userspace-dp && cargo build --release --bin xpf-userspace-dp` | builds | **`cargo test` does not see release-only lints**: a test-only re-export failed `make deb` with `unused_imports` (#18520) |
 | B3 | `make lint-rust-baseline` | no NEW diagnostics | a dead getter that turns the CI ratchet red (#18520 review) |
 | B4 | `make harness-census`, `make test-*-lib` for any touched harness library | green | an unregistered or broken harness |
-| B4a | `make instructions-census` and `make mirror-census` when the diff touches a doc, skill, harness or env file | green | a temporary instruction that outlived its premise (a past `Review-by` date, a malformed marker) and a mirrored paragraph that drifted from its copies (#18645) |
+| B4a | `make instructions-census` and `make mirror-census` when the diff touches a doc, skill, harness or env file | green | a temporary instruction that outlived its premise (a past `Review-by` date in a touched file, a malformed or misplaced marker) and a mirrored paragraph that drifted from its copies or lost a copy (#18645) |
 | B5 | Mutation-check every new cell: revert the fix in place (file copy, never `git stash`) and confirm the cell goes red | each new cell fails on revert | a cell that cannot detect its own defect (several PRs on 2026-10-29) |
 
 ## Tier 1: deploy and identity
@@ -136,10 +136,11 @@ to be red, until their issue closes; any other red cell is a new failure.
   cell in `test-connectivity`: "mtr LAN→WAN gateway (via RETH link-local)",
   "mtr LAN→internet IPv4 (via RETH link-local)", "mtr LAN→internet IPv6
   (via RETH link-local)", and Group11 IPv4/IPv6 MTR. Two of them were excused
-  here as an upstream issue. On a build that carries the hop-1 fix, master's
-  validators also reject the now-correct VIP first hop ("first hop
-  '10.0.6x.1' is not an IPv4 link-local RETH address") until #18556's
-  validator lands. Ping to a live destination
+  here as an upstream issue. #18556 (merged 2026-10-31) landed the hop-1
+  fix together with its validator, which now expects the RETH VIP as hop
+  1 ("first hop ... is not the RETH VIP"); the validators before it
+  rejected the correct VIP first hop as "not an IPv4 link-local RETH
+  address". Ping to a live destination
   (`1.1.1.1`, `2001:4860:4860::8888`) works in both families while every
   hop past the firewall is `???`. They are row F7.
   <!-- Expires-when: #18174 closed -->

@@ -83,7 +83,7 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 - **Timing**: compiler-default private-RG election uses heartbeat staleness
   (`set chassis cluster heartbeat-interval <ms>` ×
   `set chassis cluster heartbeat-threshold <n>`): 100ms × 5 = 500ms at
-  runtime defaults, 200ms × 5 = 1s in the deployed lab. <!-- mirror:private-rg-peer-loss-detection -->The receiver checks
+  runtime defaults, 200ms × 5 = 1s in the deployed lab. <!-- mirror:private-rg-peer-loss-detection n=6 -->The receiver checks
   staleness every quarter heartbeat interval (interval / 4, floored at 10 ms;
   #18639), so a peer is declared within that check period of its last admitted
   heartbeat turning interval × threshold old. While session sync looks

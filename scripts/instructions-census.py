@@ -14,30 +14,55 @@ WHAT IT ASSERTS
     Expires-when: <free-text condition>; Review-by: YYYY-MM-DD
         Any other condition. A free-text condition cannot be checked by a
         tool, so it MUST carry a Review-by date, and the date is the trigger.
+        The date may be at most HORIZON days (180) ahead, so a far-future
+        date cannot become a permanent pass.
 
-  A marker sits on ONE line, in one of two positions:
+  A marker sits on ONE line, in one of these positions:
 
-    * at the start of a line, after optional whitespace and an optional
-      comment leader (`#`, `//`, `;`, `--`, `*`, `/*`), e.g. a shell, Python,
-      env or Makefile comment, or a bare trailing line in Markdown;
-    * as the first word of an HTML comment, anywhere on the line:
-      `<!-- Expires-when: #NNNN closed -->`. This is the Markdown form that
-      also works inside a table row.
+    * code files (shell, Python, env, Makefile, conf, ...): at the start of
+      a line, after optional whitespace and a comment leader (`#`, `//`,
+      `;`, `--`, `*`, `/*`);
+    * Markdown: a bare line (no leader: `- `, `> `, `1. `, `**` and `#` all
+      mean something else there);
+    * any file: the first word of an HTML comment, anywhere on the line,
+      `<!-- Expires-when: #NNNN closed -->` (also inside a table row).
 
-  A mention anywhere else (mid-sentence prose, a Markdown inline code span,
-  a Markdown fenced code block) is NOT a marker. That is how a document can
-  describe the convention without being read as a marker itself.
+  Anything else that LOOKS like a key is reported, not ignored: a loose
+  spelling of either key anywhere else on a line (a list bullet, a
+  blockquote, bold, a table cell outside a comment, mid-sentence prose, a
+  mid-comment `# NOTE: Expires-when:`) is MALFORMED ("misplaced"). Prose that
+  means to talk about the convention puts the key in a code span
+  (backticks), which is removed before the scan, or in a Markdown fenced
+  code block.
 
-  Two modes:
+MODES -- the failure scope
 
-    hermetic (default)  validate every marker's syntax; a free-text marker
-                        must carry Review-by; a Review-by date BEFORE today
-                        (UTC) FAILs. This is the expiry trigger that needs no
-                        network, and it is what CI and `make selftest` run.
-    --online            also ask GitHub for the state of every #NNNN; a
-                        CLOSED issue whose marker is still present FAILs.
-                        `make instructions-census-online`; the campaign keeper
-                        runs this mode.
+  The syntax checks (malformed, misplaced, no Review-by, beyond the horizon,
+  an unclosed Markdown fence) apply to EVERY marker in the scope, always.
+
+  The expiry checks (a Review-by date before today; with --online, a CLOSED
+  issue) depend on the mode:
+
+    default (PR mode)  only markers in files the change TOUCHES: the diff
+                       against the merge-base with --base REV (default
+                       origin/master), plus uncommitted and untracked files.
+                       A date that passes on a calendar day therefore reds
+                       the PRs that touch that instruction, not every open
+                       PR at once (a landing guard that fails every lane on
+                       the same day live-locks the queue and invites
+                       date-bumping). Expired markers elsewhere are counted
+                       in a NOTE. If the diff cannot be computed, every
+                       file is treated as touched (fail closed).
+    --all              every marker. The campaign keeper's hourly sweep:
+                       `make instructions-census-online` runs --online --all
+                       and reports expired dates and closed issues for the
+                       whole tree.
+
+  In the failure scope, a Review-by within SOON days (14) prints a WARN
+  line (lead time), which is not a failure.
+
+  CI runs the default mode against the PR's base. `make instructions-census`
+  runs it against origin/master.
 
 WHY IT EXISTS
 
@@ -49,48 +74,43 @@ WHY IT EXISTS
 
 FALSIFIABILITY -- what this reports when the property is FALSE
 
-  * A marker that names no issue and no condition, a condition starting with
-    `#` that is not exactly `#NNNN closed`, an unparseable or impossible
-    Review-by date, a `Review-by:` not separated from the condition by `;`,
-    or a near-miss spelling of either key (`Expires When:`, `expires-when:`,
-    `Review-By:`) is printed under MALFORMED by file:line. A near-miss is a
-    FAIL, not an ignored line: a typo would otherwise hide the marker.
-  * A free-text marker without Review-by is printed under NO-REVIEW-BY.
-  * A Review-by date before today (UTC) is printed under EXPIRED.
-  * (--online) An issue that is not OPEN is printed under CLOSED with every
-    marker that names it; an issue whose state cannot be read is UNREADABLE.
-    With no `gh` and no override the online check exits 77 (SKIP): "we could
-    not ask" is not "it is open".
-  * If the scan reads ZERO files, or finds ZERO markers, the census FAILs
-    (EMPTY-SCAN, EMPTY). A census over an empty set is the shape a broken walk or a
-    broken matcher produces. If the tree genuinely has no live markers, this
-    census has nothing to protect and should be retired deliberately.
-  * Each defence above is a fixture AND a mutation cell in
-    test/incus/instructions-census-selftest.sh; the mutation edits the line
-    tagged `census-guard: <name>` below and the cell must flip.
+  MALFORMED (a bad key, a misplaced key, a bad or missing condition, a bad
+  date, a Markdown fence that never closes with a marker-shaped line after
+  it), NO-REVIEW-BY, HORIZON, EXPIRED, CLOSED,
+  UNREADABLE (a state that cannot be read; with no `gh` the online check
+  exits 77, SKIP, because "we could not ask" is not "it is open"), and the
+  empty sweeps EMPTY-SCAN (zero files) and EMPTY (zero markers). Each is a
+  fixture AND a mutation cell in test/incus/instructions-census-selftest.sh;
+  the mutation edits the line tagged `census-guard: <name>` below and the
+  cell must flip.
 
 SCOPE
 
-  docs/, .claude/skills/, test/incus/, scripts/, Makefile and CLAUDE.md, by
-  file type (see TEXT_SUFFIXES). CLAUDE.md is owned by the user: the census
-  READS it like any other file and never writes it (no file is written by
-  this script); a failure there is reported as an owner action. The census's
-  own source and self-test are excluded by NAME because they quote markers
-  as fixtures; each excluded path must exist, so the exclusion cannot rot.
+  docs/, .claude/skills/, test/incus/, scripts/, the Makefile, CLAUDE.md,
+  README.md, AGENTS.md and every pkg/**/README.md, by file type (see
+  TEXT_SUFFIXES). docs/issues/ is excluded: it is generated from GitHub
+  (issue and PR bodies), not instructions. CLAUDE.md is owned by the user:
+  the census READS it and never writes it (no file is written by this
+  script); a failure there is reported as an owner action. The census's own
+  source and self-test are excluded by NAME because they quote markers as
+  fixtures; each excluded path must exist, so the exclusion cannot rot.
 
 USAGE
-  python3 scripts/instructions-census.py            # hermetic
-  python3 scripts/instructions-census.py --online   # also ask GitHub
+  python3 scripts/instructions-census.py [--base REV]   # PR mode
+  python3 scripts/instructions-census.py --all          # sweep
+  python3 scripts/instructions-census.py --online --all # the keeper
   Env overrides (used by the self-test): INSTR_CENSUS_ROOT,
-  INSTR_CENSUS_SCOPE (space-separated), INSTR_CENSUS_EXCLUDE
-  (space-separated), INSTR_CENSUS_TODAY (YYYY-MM-DD),
-  INSTR_CENSUS_GH_STATE (a command; it is run with the issue number as its
-  last argument and must print the state, e.g. OPEN or CLOSED).
+  INSTR_CENSUS_SCOPE and INSTR_CENSUS_EXCLUDE (space-separated),
+  INSTR_CENSUS_TODAY (YYYY-MM-DD), INSTR_CENSUS_BASE, INSTR_CENSUS_TOUCHED
+  (the touched files, space-separated, instead of asking git),
+  INSTR_CENSUS_GH_STATE (a command, run with the issue number as its last
+  argument, that prints the state), INSTR_CENSUS_VERBOSE=1.
   Exit: 0 clean, 1 FAIL, 77 SKIP (--online without gh), 2 usage.
 """
 
 import bisect
 import datetime
+import fnmatch
 import itertools
 import os
 import re
@@ -99,40 +119,47 @@ import shutil
 import subprocess
 import sys
 
-DEFAULT_SCOPE = "docs .claude/skills test/incus scripts Makefile CLAUDE.md"
-DEFAULT_EXCLUDE = (
-    "scripts/instructions-census.py test/incus/instructions-census-selftest.sh"
-)
+DEFAULT_SCOPE = ("docs .claude/skills test/incus scripts Makefile CLAUDE.md "
+                 "README.md AGENTS.md pkg/**/README.md")
+DEFAULT_EXCLUDE = ("scripts/instructions-census.py "
+                   "test/incus/instructions-census-selftest.sh docs/issues")
 # Read-only files: reported, never written. (Nothing here writes any file;
 # this list only changes the remedy text.)
 READ_ONLY = {"CLAUDE.md"}
+HORIZON_DAYS = 180
+SOON_DAYS = 14
 
 TEXT_SUFFIXES = (
     ".md", ".sh", ".bash", ".py", ".env", ".mk", ".conf", ".set",
-    ".toml", ".yml", ".yaml", ".unreached", ".floors",
+    ".toml", ".yml", ".yaml", ".unreached", ".floors", ".service",
 )
 TEXT_NAMES = {"Makefile", "CLAUDE.md"}
 
 CANON_EXPIRES = "Expires-when:"
 CANON_REVIEW = "Review-by:"
 
-# Loose spellings, so a typo is reported instead of silently not matching.
-EXPIRES_LOOSE = r"[Ee][Xx][Pp][Ii][Rr][Ee][Ss][-_ ]?[Ww][Hh][Ee][Nn]\s*:"  # census-guard: near-miss
-REVIEW_LOOSE = r"[Rr][Ee][Vv][Ii][Ee][Ww][-_ ]?[Bb][Yy]\s*:"
-LEADER = r"(?:#+|//|;+|--|/\*|\*)?"
+# Loose spellings, so a typo is reported instead of silently not matching:
+# any case, any dash (including U+2010..U+2015 and a no-break space) or
+# none, and the "Expires: when" shape.
+SEP = "[-_  ‐-―]?"
+EXPIRES_LOOSE = (r"[Ee][Xx][Pp][Ii][Rr][Ee][Ss]"
+                 r"(?:" + SEP + r"[Ww][Hh][Ee][Nn]\s*:|\s*:\s*[Ww][Hh][Ee][Nn]\b)")  # census-guard: near-miss
+REVIEW_LOOSE = r"[Rr][Ee][Vv][Ii][Ee][Ww]" + SEP + r"[Bb][Yy]\s*:"
+KEY = "(" + EXPIRES_LOOSE + "|" + REVIEW_LOOSE + ")"
+KEY_RE = re.compile(KEY)
+LEADER = r"(?:#+|//|;+|--|/\*|\*)"  # census-guard: leader
 
-# Position 1: line start (after whitespace and an optional comment leader).
-LINE_START_RE = re.compile(
-    r"^\s*" + LEADER + r"\s*(" + EXPIRES_LOOSE + r"|" + REVIEW_LOOSE + r")(.*)$"  # census-guard: position
-)
-# Position 2: the first word of an HTML comment, anywhere on the line.
-HTML_RE = re.compile(
-    r"<!--\s*(" + EXPIRES_LOOSE + r"|" + REVIEW_LOOSE + r")(.*?)(?:-->|$)"
-)
+# Position 1 (code files): line start, after whitespace and a comment leader.
+LINE_START_RE = re.compile(r"^\s*" + LEADER + r"?\s*" + KEY + r"(.*)$")  # census-guard: position
+# Position 1 (Markdown): a bare line.
+MD_START_RE = re.compile(r"^\s*" + KEY + r"(.*)$")
+# Position 2 (any file): the first word of an HTML comment.
+HTML_RE = re.compile(r"<!--\s*" + KEY + r"(.*?)(?:-->|$)")
 # A cheap literal prefilter (a superset of both loose keys): the regex scan is
 # ~30x slower and would cost seconds over docs/.
-PREFILTER = (b"expires", b"review-by", b"review_by", b"reviewby", b"review by")
+PREFILTER = (b"expires", b"review")
 INLINE_CODE_RE = re.compile(r"(`+).*?\1")
+FENCE_OPEN_RE = re.compile(rb"^[ \t]*(`{3,}|~{3,})(.*)$")
 ISSUE_RE = re.compile(r"^#(\d+) closed$")
 DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 REVIEW_TAIL_RE = re.compile(r";\s*(" + REVIEW_LOOSE + r")\s*(.*)$")
@@ -152,8 +179,10 @@ class Marker:
 
 
 def strip_tail(payload):
-    payload = payload.strip()
-    for tail in ("-->", "*/"):
+    # .strip() also removes a CRLF file's trailing CR, which is how CRLF
+    # markers parse (the self-test pins it with two CRLF fixtures).
+    payload = payload.strip()  # census-guard: crlf
+    for tail in ("-->", "*/"):  # census-guard: strip-tail
         if payload.endswith(tail):
             payload = payload[: -len(tail)].rstrip()
     return payload
@@ -211,18 +240,64 @@ def classify(key, payload, path, lineno):
     return Marker(path, lineno, "FREE", cond, review=review)
 
 
-def scan_line(text, is_md):
-    """Yield (key, payload) for every marker position on one line."""
-    if is_md:
-        text = INLINE_CODE_RE.sub("", text)  # census-guard: inline-code
-    found = []
-    m = LINE_START_RE.match(text)  # census-guard: line-start
+def scan_line(text, is_md, path, lineno):
+    """Markers (and misplaced keys) on one line."""
+    text = INLINE_CODE_RE.sub(lambda m: " " * len(m.group(0)), text)  # census-guard: inline-code
+    out = []
+    spans = []
+    m = (MD_START_RE if is_md else LINE_START_RE).match(text)  # census-guard: line-start
     if m:
-        found.append((m.group(1), m.group(2)))
+        out.append(classify(m.group(1), m.group(2), path, lineno))
+        spans.append((m.start(1), len(text)))
     else:
         for h in HTML_RE.finditer(text):  # census-guard: html-comment
-            found.append((h.group(1), h.group(2)))
-    return found
+            out.append(classify(h.group(1), h.group(2), path, lineno))
+            spans.append((h.start(1), h.end()))
+    for k in KEY_RE.finditer(text):
+        inside = any(a <= k.start() < b for a, b in spans)
+        if not inside:  # census-guard: misplaced
+            out.append(Marker(path, lineno, "MALFORMED",
+                              "misplaced key %r: a marker is a bare line in Markdown, a "
+                              "comment-leader line in code, or the first word of an HTML "
+                              "comment; prose about the convention puts the key in "
+                              "backticks" % k.group(0).strip()))
+    return out
+
+
+def fence_spans(raw, starts, lines):
+    """Markdown fenced blocks as (open, close) line indices, CommonMark-style.
+
+    A fence closes only on a line of the SAME character, at least as long as
+    the opening run, with nothing else on it. A backtick opener whose info
+    string holds a backtick is not a fence. Returns (spans, unclosed_open_idx).
+    """
+    cand = set()
+    for lit in (b"```", b"~~~"):  # census-guard: tilde
+        i = raw.find(lit)
+        while i != -1:
+            n = bisect.bisect_right(starts, i) - 1
+            if lines[n].lstrip(b" \t").startswith(lit):
+                cand.add(n)
+            i = raw.find(lit, starts[n] + len(lines[n]) + 1)
+    spans = []
+    open_ = None
+    for i in sorted(cand):
+        m = FENCE_OPEN_RE.match(lines[i].rstrip(b"\r"))
+        if not m:
+            continue
+        run, rest = m.group(1), m.group(2)
+        if open_ is None:
+            if run[:1] == b"`" and b"`" in rest:
+                continue
+            open_ = (i, run[:1], len(run))
+        elif run[:1] == open_[1] and len(run) >= open_[2] and not rest.strip():  # census-guard: fence-match
+            spans.append((open_[0], i))
+            open_ = None
+    unclosed = None
+    if open_ is not None:
+        unclosed = open_[0]
+        spans.append((open_[0], len(lines) - 1))
+    return spans, unclosed
 
 
 def scan_file(path, rel):
@@ -241,39 +316,37 @@ def scan_file(path, rel):
     # the whole of docs/ as str costs seconds.
     lines = raw.split(b"\n")
     starts = list(itertools.accumulate((len(ln) + 1 for ln in lines[:-1]), initial=0))
-    # Candidate lines: those holding a prefilter literal. Only these pay for
-    # the regexes.
     cand = set()
     for lit in PREFILTER:
         i = low.find(lit)
         while i != -1:
             cand.add(bisect.bisect_right(starts, i) - 1)
             i = low.find(lit, i + 1)
-    # Markdown fenced code blocks hold EXAMPLES, not markers. A line is inside
-    # a fence when an odd number of fence lines precede it.
-    fence_idx = fence_lines(raw, starts, lines) if is_md else []  # census-guard: fence
-    fence_set = set(fence_idx)
     markers = []
+    spans = []
+    unclosed = None
+    if is_md:
+        spans, unclosed = fence_spans(raw, starts, lines)  # census-guard: fence
+    opens = [a for a, _ in spans]
+    dropped = None
     for idx in sorted(cand):
-        if idx in fence_set or bisect.bisect_left(fence_idx, idx) % 2 == 1:
+        line = lines[idx].decode("utf-8", errors="replace")
+        j = bisect.bisect_right(opens, idx) - 1
+        if j >= 0 and spans[j][0] <= idx <= spans[j][1]:
+            # Inside a fence: an example. Unless the fence never closes and
+            # the line is marker-shaped, in which case the census would be
+            # silently dropping it.
+            if (unclosed is not None and spans[j][0] == unclosed and dropped is None
+                    and KEY_RE.search(INLINE_CODE_RE.sub(" ", line))):
+                dropped = idx
             continue
-        line = lines[idx].decode("utf-8", errors="replace").rstrip("\r")
-        for key, payload in scan_line(line, is_md):
-            markers.append(classify(key, payload, rel, idx + 1))
+        markers.extend(scan_line(line, is_md, rel, idx + 1))
+    if dropped is not None:  # census-guard: unclosed-fence
+        markers.append(Marker(rel, unclosed + 1, "MALFORMED",
+                              "code fence opened here is never closed, so the marker-shaped "
+                              "line %d after it is invisible to this census; close the fence"
+                              % (dropped + 1)))
     return markers, None
-
-
-def fence_lines(raw, starts, lines):
-    """Indices of Markdown fence lines (``` or ~~~ after optional blanks)."""
-    idx = set()
-    for lit in (b"```", b"~~~"):
-        i = raw.find(lit)
-        while i != -1:
-            n = bisect.bisect_right(starts, i) - 1
-            if lines[n].lstrip(b" \t").startswith(lit):
-                idx.add(n)
-            i = raw.find(lit, starts[n] + len(lines[n]) + 1)
-    return sorted(idx)
 
 
 def wanted(name):
@@ -288,10 +361,25 @@ def has_shebang(path):
         return False
 
 
+def excluded(rel, exclude):
+    return any(rel == x or rel.startswith(x.rstrip("/") + "/") for x in exclude)
+
+
 def walk(root, scope, exclude):
     files = []
     problems = []
     for entry in scope:
+        if "**" in entry:
+            base, _, pat = entry.partition("/**/")
+            if not os.path.isdir(os.path.join(root, base)):
+                problems.append("scope entry does not exist: %s" % entry)
+                continue
+            for d, dirs, names in os.walk(os.path.join(root, base)):
+                dirs[:] = sorted(x for x in dirs if x not in (".git", "target", "node_modules"))
+                for n in sorted(names):
+                    if fnmatch.fnmatch(n, pat):
+                        files.append(os.path.relpath(os.path.join(d, n), root))
+            continue
         p = os.path.join(root, entry)
         if os.path.isfile(p):
             files.append(entry)
@@ -307,8 +395,25 @@ def walk(root, scope, exclude):
     for x in exclude:
         if not os.path.exists(os.path.join(root, x)):  # census-guard: stale-exclude
             problems.append("excluded path does not exist: %s (stale exclusion -- delete it)" % x)
-    files = [f for f in files if f not in exclude]
+    files = sorted({f for f in files if not excluded(f, exclude)})
     return files, problems
+
+
+def git_touched(root, base):
+    """Files the change touches: the diff against merge-base(base, HEAD),
+    uncommitted changes, and untracked files. None if git cannot say."""
+    def git(*args):
+        r = subprocess.run(["git", "-C", root] + list(args), capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip() or "git %s failed" % args[0])
+        return r.stdout
+    try:
+        mb = git("merge-base", base, "HEAD").strip()
+        out = git("diff", "--name-only", "--no-renames", mb)
+        out += git("ls-files", "--others", "--exclude-standard")
+    except (OSError, RuntimeError) as e:
+        return None, str(e)
+    return {x for x in out.split("\n") if x}, None
 
 
 def default_state(issue):
@@ -321,14 +426,22 @@ def default_state(issue):
 
 def main(argv):
     online = False
-    for a in argv:
+    sweep = False
+    base = os.environ.get("INSTR_CENSUS_BASE", "origin/master")
+    args = list(argv)
+    while args:
+        a = args.pop(0)
         if a == "--online":
             online = True
+        elif a == "--all":
+            sweep = True
+        elif a == "--base" and args:
+            base = args.pop(0)
         elif a in ("-h", "--help"):
             print(__doc__)
             return 0
         else:
-            print("usage: instructions-census.py [--online]", file=sys.stderr)
+            print("usage: instructions-census.py [--online] [--all | --base REV]", file=sys.stderr)
             return 2
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -345,6 +458,7 @@ def main(argv):
         today = datetime.datetime.now(datetime.timezone.utc).date()
 
     fails = []
+    notes = []
 
     def fail(tag, msg):
         fails.append("%s: %s" % (tag, msg))
@@ -368,9 +482,28 @@ def main(argv):
              "reads exactly like this. If the tree truly has none, retire this census "
              "deliberately." % len(files))
 
+    # The failure scope for the EXPIRY checks.
+    if sweep:
+        mode = "--all (every marker)"
+        in_scope = lambda m: True  # noqa: E731
+    else:
+        if "INSTR_CENSUS_TOUCHED" in os.environ:
+            touched, why = set(os.environ["INSTR_CENSUS_TOUCHED"].split()), None
+        else:
+            touched, why = git_touched(root, base)
+        if touched is None:  # census-guard: diff-fail-closed
+            notes.append("could not compute the diff against %s (%s): every marker is in "
+                         "the expiry scope" % (base, why))
+            mode = "diff vs %s UNAVAILABLE, so every marker" % base
+            in_scope = lambda m: True  # noqa: E731
+        else:
+            mode = "diff vs %s (%d touched file(s))" % (base, len(touched))
+            in_scope = lambda m: m.path in touched  # noqa: E731  # census-guard: touched
+
     def owner(m):
         return " (CLAUDE.md is read-only for agents: owner action)" if m.path in READ_ONLY else ""
 
+    out_expired = 0
     for m in markers:
         if m.kind == "MALFORMED":  # census-guard: malformed
             fail("MALFORMED", "%s: %s%s" % (m.where(), m.detail, owner(m)))
@@ -378,18 +511,35 @@ def main(argv):
         if m.kind == "FREE" and m.review is None:  # census-guard: free-needs-review
             fail("NO-REVIEW-BY", "%s: free-text condition %r carries no Review-by date; a tool "
                  "cannot check the condition, so the date is the trigger%s" % (m.where(), m.detail, owner(m)))
-        if m.review is not None and m.review < today:  # census-guard: past-date
-            fail("EXPIRED", "%s: Review-by %s is before today (%s UTC): re-check %r, then delete "
-                 "the instruction or move the date with a reason%s"
-                 % (m.where(), m.review.isoformat(), today.isoformat(), m.detail, owner(m)))
+        if m.review is None:
+            continue
+        if (m.review - today).days > HORIZON_DAYS:  # census-guard: horizon
+            fail("HORIZON", "%s: Review-by %s is more than %d days ahead (today %s UTC); a "
+                 "far-future date is a permanent pass. Pick a date you will re-check by%s"
+                 % (m.where(), m.review.isoformat(), HORIZON_DAYS, today.isoformat(), owner(m)))
+        if m.review < today:  # census-guard: past-date
+            if in_scope(m):
+                fail("EXPIRED", "%s: Review-by %s is before today (%s UTC): re-check %r, then "
+                     "delete the instruction or move the date with a reason%s"
+                     % (m.where(), m.review.isoformat(), today.isoformat(), m.detail, owner(m)))
+            else:
+                out_expired += 1
+        elif in_scope(m) and (m.review - today).days <= SOON_DAYS:  # census-guard: soon
+            print("  WARN: SOON: %s: Review-by %s is %d day(s) away: %r"
+                  % (m.where(), m.review.isoformat(), (m.review - today).days, m.detail))
+    if out_expired:
+        notes.append("%d marker(s) outside this change are past their Review-by date; the "
+                     "keeper's --all sweep reports and files them" % out_expired)
 
     skipped = False
+    n_checked = 0
     if online:
         cmd = os.environ.get("INSTR_CENSUS_GH_STATE", "")
         if not cmd and shutil.which("gh") is None:
             skipped = True
         else:
-            issues = sorted({m.issue for m in markers if m.kind == "ISSUE"})
+            issues = sorted({m.issue for m in markers if m.kind == "ISSUE" and in_scope(m)})
+            n_checked = len(issues)
             for n in issues:
                 if cmd:
                     r = subprocess.run(shlex.split(cmd) + [str(n)], capture_output=True, text=True)
@@ -397,7 +547,7 @@ def main(argv):
                 else:
                     state = default_state(n)
                 state = state.lower()
-                where = ", ".join(m.where() + owner(m) for m in markers if m.issue == n)
+                where = ", ".join(m.where() + owner(m) for m in markers if m.issue == n and in_scope(m))
                 if not state:  # census-guard: unreadable
                     fail("UNREADABLE", "could not read the state of #%d (named at %s)" % (n, where))
                     continue
@@ -412,12 +562,14 @@ def main(argv):
         for m in markers:
             print("  %-9s %s %s%s" % (m.kind, m.where(), m.detail,
                                       " review-by=" + m.review.isoformat() if m.review else ""))
+    for n in notes:
+        print("  NOTE: " + n)
     for f in fails:
         print("  FAIL: " + f, file=sys.stderr)
-    print("instructions census: %d marker(s) in %d file(s) -- %d issue-linked, %d free-text%s"
-          % (len(markers), len(files), n_issue, n_free,
-             "; online: checked %d issue(s)" % len({m.issue for m in markers if m.issue})
-             if online and not skipped else ""))
+    print("instructions census: %d marker(s) in %d file(s) -- %d issue-linked, %d free-text; "
+          "expiry scope: %s%s"
+          % (len(markers), len(files), n_issue, n_free, mode,
+             "; online: checked %d issue(s)" % n_checked if online and not skipped else ""))
     if fails:
         print("instructions census: FAILED (%d problem(s))" % len(fails), file=sys.stderr)
         return 1

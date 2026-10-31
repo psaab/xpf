@@ -2792,7 +2792,7 @@ The userspace dataplane participates in the chassis cluster HA:
 
 - The compiler-default private-RG mode detects peer loss using heartbeat
   staleness (100ms × 5 = 500ms at runtime defaults, 200ms × 5 = 1s in the
-  deployed lab config). <!-- mirror:private-rg-peer-loss-detection -->The receiver checks staleness every quarter heartbeat
+  deployed lab config). <!-- mirror:private-rg-peer-loss-detection n=6 -->The receiver checks staleness every quarter heartbeat
   interval (interval / 4, floored at 10 ms; #18639), so a peer is declared
   within that check period of its last admitted heartbeat turning interval ×
   threshold old. While session sync looks connected, a peer that has acked a

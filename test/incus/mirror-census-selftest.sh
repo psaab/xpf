@@ -46,7 +46,8 @@ new_fixture() {
 }
 
 run_census() { # run_census <fx> <script>
-	OUT=$(MIRROR_CENSUS_ROOT="$1" MIRROR_CENSUS_SCOPE="CLAUDE.md docs pkg" "$PY" "$2" 2>&1)
+	OUT=$(MIRROR_CENSUS_ROOT="$1" MIRROR_CENSUS_SCOPE="CLAUDE.md docs pkg" MIRROR_CENSUS_EXCLUDE="${FX_EXCLUDE:-}" \
+		"$PY" "$2" 2>&1)
 	RC=$?
 }
 
@@ -111,19 +112,19 @@ assert_not_clean() { # <fx> <blocks> <label> <mutant>
 # A valid pair used as ballast in the FAIL fixtures, so a mutant that stops
 # seeing the defect yields a clean pass rather than an EMPTY failure.
 add_pair() { # add_pair <fx> <id>
-	printf '%s\n' "x <!-- mirror:$2 -->same words<!-- /mirror:$2 --> y" >"$1/docs/pair-$2-a.md"
-	printf '%s\n' "<!-- mirror:$2 -->" "same" "words" "<!-- /mirror:$2 -->" >"$1/docs/pair-$2-b.md"
+	printf '%s\n' "x <!-- mirror:$2 n=2 -->same words<!-- /mirror:$2 --> y" >"$1/docs/pair-$2-a.md"
+	printf '%s\n' "<!-- mirror:$2 n=2 -->" "same" "words" "<!-- /mirror:$2 -->" >"$1/docs/pair-$2-b.md"
 }
 
 # ── positive control P: copies that differ only in wrapping and indentation ─
 FX_P="$(new_fixture positive)"
 cat >"$FX_P/docs/a.md" <<'MD'
-- **Timing**: the threshold is interval × threshold. <!-- mirror:detect -->The receiver
+- **Timing**: the threshold is interval × threshold. <!-- mirror:detect n=2 -->The receiver
   checks staleness every quarter interval, so a peer is declared within that
   check period.<!-- /mirror:detect --> Legacy VRRP is separate.
 MD
 cat >"$FX_P/pkg/x/README.md" <<'MD'
-Heartbeat: 100ms × 5. <!-- mirror:detect -->The receiver checks staleness every
+Heartbeat: 100ms × 5. <!-- mirror:detect n=2 -->The receiver checks staleness every
 quarter interval, so a peer is declared within that check
 period.<!-- /mirror:detect -->
 MD
@@ -131,10 +132,10 @@ assert_clean "$FX_P" 2 "positive control: two copies that differ only in wrappin
 M_RAW="$(mutant raw-compare '/census-guard: normalise$/s/return " ".join(text.split())/return text/')"
 assert_not_clean "$FX_P" 2 "positive control mutation: a census comparing raw text fails the re-wrapped copies" "$M_RAW"
 
-# ── cell D: one word different ────────────────────────────────────────────
+# ── cell D: one word different, and a CASE-only difference ────────────────
 FX_D="$(new_fixture differ)"
-printf '%s\n' '<!-- mirror:m -->a peer is declared at 0.5 s<!-- /mirror:m -->' >"$FX_D/docs/a.md"
-printf '%s\n' '<!-- mirror:m -->a peer is declared at 0.6 s<!-- /mirror:m -->' >"$FX_D/docs/b.md"
+printf '%s\n' '<!-- mirror:m n=2 -->a peer is declared at 0.5 s<!-- /mirror:m -->' >"$FX_D/docs/a.md"
+printf '%s\n' '<!-- mirror:m n=2 -->a peer is declared at 0.6 s<!-- /mirror:m -->' >"$FX_D/docs/b.md"
 assert_fails "$FX_D" DIFFER "differ: two same-id blocks one word apart red"
 run_census "$FX_D" "$CENSUS"
 if [[ "$OUT" == *"'0.5' vs '0.6'"* ]]; then
@@ -145,19 +146,57 @@ else
 fi
 M_DIFF="$(mutant differ "$(guard_off differ)")"
 assert_flips "$FX_D" DIFFER "differ mutation: with the comparison off the cell flips" "$M_DIFF"
+FX_DC="$(new_fixture differ-case)"
+printf '%s\n' '<!-- mirror:m n=2 -->the Peer is declared<!-- /mirror:m -->' >"$FX_DC/docs/a.md"
+printf '%s\n' '<!-- mirror:m n=2 -->the peer is declared<!-- /mirror:m -->' >"$FX_DC/docs/b.md"
+assert_fails "$FX_DC" DIFFER "differ (case only): 'Peer' vs 'peer' reds; whitespace is the only thing normalised"
+M_LOWER="$(mutant case-blind '/census-guard: normalise$/s/return " ".join(text.split())/return " ".join(text.lower().split())/')"
+assert_flips "$FX_DC" DIFFER "differ (case only) mutation: a case-folding normaliser flips the cell" "$M_LOWER"
+
+# ── cell C: membership is PINNED by a declared count ──────────────────────
+# With the count, a copy that loses its wrapper is a FAIL at once, not a
+# silent drop that ORPHAN only notices when the last partner goes.
+FX_C="$(new_fixture members)"
+add_pair "$FX_C" ballast
+printf '%s\n' '<!-- mirror:three n=3 -->same three<!-- /mirror:three -->' >"$FX_C/docs/a.md"
+printf '%s\n' '<!-- mirror:three n=3 -->same three<!-- /mirror:three -->' >"$FX_C/docs/b.md"
+printf '%s\n' 'same three (this copy lost its wrapper)' >"$FX_C/docs/c.md"
+assert_fails "$FX_C" MEMBERS "members: n=3 declared, 2 blocks found (a copy lost its wrapper) reds"
+M_COUNT="$(mutant count "$(guard_off count)")"
+assert_flips "$FX_C" MEMBERS "members mutation: with the count check off the dropped copy goes unseen" "$M_COUNT"
+FX_C2="$(new_fixture members-inconsistent)"
+printf '%s\n' '<!-- mirror:m n=2 -->x<!-- /mirror:m -->' >"$FX_C2/docs/a.md"
+printf '%s\n' '<!-- mirror:m n=3 -->x<!-- /mirror:m -->' >"$FX_C2/docs/b.md"
+assert_fails "$FX_C2" MEMBERS "members: copies declaring different counts red"
+M_CONS="$(mutant count-consistent "$(guard_off count-consistent)" "$(guard_off count)")"
+assert_flips "$FX_C2" MEMBERS "members mutation: with the consistency check off the cell flips" "$M_CONS"
+FX_C3="$(new_fixture members-undeclared)"
+add_pair "$FX_C3" ballast
+printf '%s\n' '<!-- mirror:m -->x<!-- /mirror:m -->' >"$FX_C3/docs/a.md"
+printf '%s\n' '<!-- mirror:m -->x<!-- /mirror:m -->' >"$FX_C3/docs/b.md"
+assert_fails "$FX_C3" MALFORMED "members: an opening marker with no n= reds"
+M_NEEDS="$(mutant needs-count "$(guard_off needs-count)")"
+assert_flips "$FX_C3" MALFORMED "members mutation: with n= optional the undeclared pair passes" "$M_NEEDS"
+FX_C4="$(new_fixture members-on-close)"
+add_pair "$FX_C4" ballast
+printf '%s\n' '<!-- mirror:m n=2 -->x<!-- /mirror:m n=2 -->' >"$FX_C4/docs/a.md"
+printf '%s\n' '<!-- mirror:m n=2 -->x<!-- /mirror:m -->' >"$FX_C4/docs/b.md"
+assert_fails "$FX_C4" MALFORMED "members: n= on a closing marker reds"
+M_ONCLOSE="$(mutant count-on-close "$(guard_off count-on-close)")"
+assert_flips "$FX_C4" MALFORMED "members mutation: with that check off the cell flips" "$M_ONCLOSE"
 
 # ── cell O: a block with no partner ───────────────────────────────────────
 FX_O="$(new_fixture orphan)"
 add_pair "$FX_O" ballast
-printf '%s\n' '<!-- mirror:lonely -->only copy<!-- /mirror:lonely -->' >"$FX_O/docs/a.md"
-assert_fails "$FX_O" ORPHAN "orphan: a block whose id appears nowhere else reds"
+printf '%s\n' '<!-- mirror:lonely n=1 -->only copy<!-- /mirror:lonely -->' >"$FX_O/docs/a.md"
+assert_fails "$FX_O" ORPHAN "orphan: a block whose id appears nowhere else reds (even when it declares n=1)"
 M_ORPH="$(mutant orphan "$(guard_off orphan)")"
 assert_flips "$FX_O" ORPHAN "orphan mutation: with the partner check off the cell flips" "$M_ORPH"
 
 # ── cells U1..U3: unbalanced markers ──────────────────────────────────────
 FX_U1="$(new_fixture unclosed)"
 add_pair "$FX_U1" ballast
-printf '%s\n' '<!-- mirror:open -->never closed' >"$FX_U1/docs/a.md"
+printf '%s\n' '<!-- mirror:open n=2 -->never closed' >"$FX_U1/docs/a.md"
 assert_fails "$FX_U1" UNCLOSED "unclosed: an opening marker with no close reds"
 M_UNC="$(mutant unclosed "$(guard_off unclosed)")"
 assert_flips "$FX_U1" UNCLOSED "unclosed mutation: with the check off the cell flips" "$M_UNC"
@@ -171,8 +210,8 @@ assert_flips "$FX_U2" STRAY-CLOSE "stray close mutation: with the check off the 
 
 FX_U3="$(new_fixture nested)"
 add_pair "$FX_U3" inner
-printf '%s\n' '<!-- mirror:outer -->a <!-- mirror:inner -->same words<!-- /mirror:inner --> b<!-- /mirror:outer -->' >"$FX_U3/docs/a.md"
-printf '%s\n' '<!-- mirror:outer -->a b<!-- /mirror:outer -->' >"$FX_U3/docs/b.md"
+printf '%s\n' '<!-- mirror:outer n=2 -->a <!-- mirror:inner n=2 -->same words<!-- /mirror:inner --> b<!-- /mirror:outer -->' >"$FX_U3/docs/a.md"
+printf '%s\n' '<!-- mirror:outer n=2 -->a b<!-- /mirror:outer -->' >"$FX_U3/docs/b.md"
 assert_fails "$FX_U3" NESTED "nested: a block opened inside another block reds"
 M_NEST="$(mutant nesting "$(guard_off nesting)")"
 assert_flips "$FX_U3" NESTED "nested mutation: with the check off the cell flips" "$M_NEST"
@@ -180,7 +219,7 @@ assert_flips "$FX_U3" NESTED "nested mutation: with the check off the cell flips
 # ── cell M: near-miss markers ─────────────────────────────────────────────
 FX_M="$(new_fixture near-miss)"
 add_pair "$FX_M" ballast
-printf '%s\n' 'a <!-- Mirror:x --> b' 'c <!-- mirror:Bad_Id --> d' 'e <!--mirror x--> f' >"$FX_M/docs/a.md"
+printf '%s\n' 'a <!-- Mirror:x n=2 --> b' 'c <!-- mirror:Bad_Id n=2 --> d' 'e <!--mirror x--> f' >"$FX_M/docs/a.md"
 assert_fails "$FX_M" MALFORMED "near-miss: a wrong-case key, a bad id and a missing colon red instead of being ignored"
 run_census "$FX_M" "$CENSUS"
 n=$(printf '%s\n' "$OUT" | grep -c 'FAIL: MALFORMED:' || true)
@@ -194,8 +233,8 @@ assert_flips "$FX_M" MALFORMED "near-miss mutation: with the check off the cell 
 
 # ── cell E: empty blocks would "agree" ────────────────────────────────────
 FX_E="$(new_fixture empty-block)"
-printf '%s\n' 'a <!-- mirror:e --><!-- /mirror:e --> b' >"$FX_E/docs/a.md"
-printf '%s\n' '<!-- mirror:e -->' '' '<!-- /mirror:e -->' >"$FX_E/docs/b.md"
+printf '%s\n' 'a <!-- mirror:e n=2 --><!-- /mirror:e --> b' >"$FX_E/docs/a.md"
+printf '%s\n' '<!-- mirror:e n=2 -->' '' '<!-- /mirror:e -->' >"$FX_E/docs/b.md"
 assert_fails "$FX_E" EMPTY-BLOCK "empty block: two empty blocks red instead of agreeing"
 M_EMPB="$(mutant empty-block "$(guard_off empty-block)")"
 assert_flips "$FX_E" EMPTY-BLOCK "empty block mutation: with the check off the cell flips" "$M_EMPB"
@@ -211,26 +250,55 @@ assert_flips "$FX_Z" EMPTY "empty sweep mutation: with the check off the cell fl
 FX_N="$(new_fixture not-blocks)"
 add_pair "$FX_N" real
 cat >"$FX_N/docs/convention.md" <<'MD'
-Wrap a copy in `<!-- mirror:<id> -->` and `<!-- /mirror:<id> -->`, for
-example `<!-- mirror:doc -->`.
+Wrap a copy in `<!-- mirror:<id> n=<copies> -->` and `<!-- /mirror:<id> -->`,
+for example `<!-- mirror:doc n=2 -->`.
 
 ~~~
-<!-- mirror:doc -->
+<!-- mirror:doc n=2 -->
 text
 ~~~
 MD
 # A ~~~ fence on purpose: a ``` fence is ALSO a code span to the inline-code
 # blanking, so the fence-skip mutation below could not be attributed.
 assert_clean "$FX_N" 2 "not blocks: inline code and fenced examples are skipped; the real pair is read"
-M_FENCE="$(mutant fence '/census-guard: fence$/s/if s.startswith("```") or s.startswith("~~~"):/if False:/')"
+M_FENCE="$(mutant fence "$(guard_off fence)")"
 assert_not_clean "$FX_N" 2 "not blocks mutation: without the fence skip the fenced example is read" "$M_FENCE"
-M_INLINE="$(mutant inline-code '/census-guard: inline-code$/s/return INLINE_CODE_RE.sub(.*)  #/return blanked  #/')"
+M_INLINE="$(mutant inline-code '/census-guard: inline-code$/s/return INLINE_CODE_RE.sub(.*), unclosed  #/return blanked, unclosed  #/')"
 assert_not_clean "$FX_N" 2 "not blocks mutation: without the inline-code blanking the code span is read" "$M_INLINE"
+
+# ── cell F: fences follow CommonMark; an unclosed fence that hides a ──────
+# marker is reported.
+FX_F="$(new_fixture fence-parity)"
+printf '%s\n' '~~~' '```' '~~~' '<!-- mirror:p n=2 -->par<!-- /mirror:p -->' >"$FX_F/docs/a.md"
+printf '%s\n' '<!-- mirror:p n=2 -->par<!-- /mirror:p -->' >"$FX_F/docs/b.md"
+assert_clean "$FX_F" 2 "fence parity: a \`\`\` inside a ~~~ block does not close it, so the block after it is read"
+M_TOGGLE="$(mutant fence-any-closes '/census-guard: fence-match$/s/if m and m.group(1)\[0\] == open_\[1\] and len(m.group(1)) >= open_\[2\] and not m.group(2).strip():/if m:/')"
+assert_not_clean "$FX_F" 2 "fence parity mutation: closing on ANY fence line (the old toggle) hides the block" "$M_TOGGLE"
+FX_F2="$(new_fixture unclosed-fence)"
+add_pair "$FX_F2" ballast
+printf '%s\n' '```' 'example' '<!-- mirror:ballast n=2 -->same words<!-- /mirror:ballast -->' >"$FX_F2/docs/c.md"
+assert_fails "$FX_F2" UNCLOSED-FENCE "unclosed fence: a fence that never closes, with a mirror marker after it, reds"
+M_UF="$(mutant unclosed-fence "$(guard_off unclosed-fence)")"
+assert_flips "$FX_F2" UNCLOSED-FENCE "unclosed fence mutation: with the report off the hidden copy goes unseen" "$M_UF"
+
+# ── cell X: the generated docs/issues/ is excluded by default ─────────────
+FX_X="$(new_fixture exclude)"
+add_pair "$FX_X" ballast
+mkdir -p "$FX_X/docs/issues"
+printf '%s\n' 'Quoted from GitHub: <!-- mirror:quoted n=9 -->' >"$FX_X/docs/issues/issue-history.md"
+OUT=$(MIRROR_CENSUS_ROOT="$FX_X" MIRROR_CENSUS_SCOPE="CLAUDE.md docs pkg" "$PY" "$CENSUS" 2>&1)
+RC=$?
+if [[ $RC -eq 0 && "$OUT" == *"mirror census: 2 block(s)"* ]]; then
+	ok "exclusion: docs/issues/ (generated from GitHub) is not read by default"
+else
+	bad "exclusion: expected docs/issues/ excluded (rc=$RC)"
+	printf '%s\n' "$OUT" | sed 's/^/         /' >&2
+fi
 
 # ── cell R: the census never writes (CLAUDE.md is the owner's) ────────────
 FX_R="$(new_fixture read-only)"
 add_pair "$FX_R" ballast
-printf '%s\n' '# Rules' 'x <!-- mirror:ballast -->other words<!-- /mirror:ballast -->' >"$FX_R/CLAUDE.md"
+printf '%s\n' '# Rules' 'x <!-- mirror:ballast n=2 -->other words<!-- /mirror:ballast -->' >"$FX_R/CLAUDE.md"
 before=$(cd "$FX_R" && find . -type f -exec sha256sum {} + | sort)
 run_census "$FX_R" "$CENSUS"
 after=$(cd "$FX_R" && find . -type f -exec sha256sum {} + | sort)

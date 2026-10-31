@@ -7,9 +7,11 @@ WHAT IT ASSERTS
   A copy is wrapped in a pair of HTML comments, which Markdown renders as
   nothing:
 
-    <!-- mirror:<id> -->  ...the mirrored text...  <!-- /mirror:<id> -->
+    <!-- mirror:<id> n=<copies> -->  ...the mirrored text...  <!-- /mirror:<id> -->
 
-  <id> is lower-case letters, digits and `-`. Every block with the same id,
+  <id> is lower-case letters, digits and `-`. Every opening marker declares
+  how many copies of the block exist (n=, the same on every copy), so a copy
+  that loses its wrapper is a FAIL by count rather than a silent drop. Every block with the same id,
   in any scanned file, must have the same text after whitespace
   normalisation (every run of whitespace, including line breaks and list
   indentation, becomes one space; leading and trailing space is dropped).
@@ -36,7 +38,12 @@ FALSIFIABILITY -- what this reports when the property is FALSE
   * An opening marker with no close (UNCLOSED), a close with no opening
     (STRAY-CLOSE), or a block opened inside another block (NESTED).
   * A near-miss marker (`<!-- Mirror:x -->`, `<!-- mirror:Bad_Id -->`,
-    `<!--mirror x-->`): MALFORMED, never an ignored line.
+    `<!--mirror x-->`), an opening marker with no n=, or n= on a closing
+    marker: MALFORMED, never an ignored line.
+  * Copies that declare different n=, or an n= that differs from the
+    number of blocks found: MEMBERS.
+  * A code fence that never closes, with a mirror marker after it:
+    UNCLOSED-FENCE (the marker would otherwise be invisible).
   * A block with no text: EMPTY-BLOCK (two empty blocks would "agree").
   * ZERO blocks in the scanned tree: EMPTY. A broken walk or a broken
     matcher produces exactly that board.
@@ -44,20 +51,24 @@ FALSIFIABILITY -- what this reports when the property is FALSE
     test/incus/mirror-census-selftest.sh; the mutation edits the line tagged
     `census-guard: <name>` and the cell must flip.
 
-  Markers inside a Markdown fenced code block or an inline code span are
-  documentation of the convention, not markers, and are skipped.
+  Markers inside a Markdown fenced code block (tracked as CommonMark does:
+  the closing fence matches the opening character and length) or an inline
+  code span are documentation of the convention, not markers, and are
+  skipped.
 
 SCOPE
 
   Every *.md file under the repo root's CLAUDE.md, AGENTS.md, README.md,
-  docs/, pkg/, .claude/, test/ and scripts/. CLAUDE.md is owned by the
+  docs/, pkg/, .claude/, test/ and scripts/, except the generated
+  docs/issues/ (MIRROR_CENSUS_EXCLUDE). CLAUDE.md is owned by the
   user: it is READ, never written (this script writes nothing). Until the
   owner wraps CLAUDE.md's copy, CLAUDE.md is simply not a member of the set.
 
 USAGE
   python3 scripts/mirror-census.py
   Env overrides (used by the self-test): MIRROR_CENSUS_ROOT,
-  MIRROR_CENSUS_SCOPE (space-separated), MIRROR_CENSUS_VERBOSE=1.
+  MIRROR_CENSUS_SCOPE and MIRROR_CENSUS_EXCLUDE (space-separated),
+  MIRROR_CENSUS_VERBOSE=1.
   Exit: 0 clean, 1 FAIL.
 """
 
@@ -66,9 +77,12 @@ import re
 import sys
 
 DEFAULT_SCOPE = "CLAUDE.md AGENTS.md README.md docs pkg .claude test scripts"
+# docs/issues/ is generated from GitHub (issue and PR bodies), not docs.
+DEFAULT_EXCLUDE = "docs/issues"
 READ_ONLY = {"CLAUDE.md"}
 
-MARK_RE = re.compile(r"<!--\s*(/?)mirror:([a-z0-9][a-z0-9-]*)\s*-->")
+# Opening: <!-- mirror:<id> n=<copies> -->   closing: <!-- /mirror:<id> -->
+MARK_RE = re.compile(r"<!--\s*(/?)mirror:([a-z0-9][a-z0-9-]*)(?:\s+n=([0-9]+))?\s*-->")
 NEAR_RE = re.compile(r"<!--\s*/?\s*mirror\b", re.IGNORECASE)
 # A code span may wrap lines but never crosses a blank line (a paragraph end),
 # so a stray backtick cannot blank the rest of the file.
@@ -79,19 +93,35 @@ def normalise(text):
     return " ".join(text.split())  # census-guard: normalise
 
 
+FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+
+
 def blank_code(text):
-    """Blank fenced code blocks and inline code spans, keeping offsets."""
+    """Blank fenced code blocks and inline code spans, keeping offsets.
+
+    Fences follow CommonMark: a fence closes only on a line of the SAME
+    character, at least as long as the opening run, with nothing else on
+    it; a backtick opener whose info string holds a backtick is not a
+    fence. Returns (blanked_text, unclosed_fence_line_or_None)."""
     out = []
-    in_fence = False
-    for line in text.split("\n"):
-        s = line.lstrip(" \t")
-        if s.startswith("```") or s.startswith("~~~"):  # census-guard: fence
-            in_fence = not in_fence
+    open_ = None
+    unclosed = None
+    for n, line in enumerate(text.split("\n")):
+        m = FENCE_RE.match(line.rstrip("\r"))
+        if m and open_ is None and not (m.group(1)[0] == "`" and "`" in m.group(2)):  # census-guard: fence
+            open_ = (n, m.group(1)[0], len(m.group(1)))
             out.append(" " * len(line))
             continue
-        out.append(" " * len(line) if in_fence else line)
+        if open_ is not None:
+            if m and m.group(1)[0] == open_[1] and len(m.group(1)) >= open_[2] and not m.group(2).strip():  # census-guard: fence-match
+                open_ = None
+            out.append(" " * len(line))
+            continue
+        out.append(line)
+    if open_ is not None:
+        unclosed = open_[0] + 1
     blanked = "\n".join(out)
-    return INLINE_CODE_RE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), blanked)  # census-guard: inline-code
+    return INLINE_CODE_RE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), blanked), unclosed  # census-guard: inline-code
 
 
 def lineno_of(text, offset):
@@ -119,9 +149,13 @@ def scan(root, rel, fails):
         return []
     if "<!--" not in text or not NEAR_RE.search(text):
         return []  # no marker of any spelling: skip the expensive pass
-    code = blank_code(text)
+    code, unclosed = blank_code(text)
+    fence_at = sum(len(x) + 1 for x in text.split("\n")[:unclosed - 1]) if unclosed else 0
+    if unclosed is not None and NEAR_RE.search(text, fence_at):  # census-guard: unclosed-fence
+        fails.append(("UNCLOSED-FENCE", "%s:%d: this code fence never closes, and a mirror marker after "
+                      "it is invisible to this census; close the fence" % (rel, unclosed)))
     blocks = []
-    open_id, open_at, open_end = None, 0, 0
+    open_id, open_at, open_end, open_n = None, 0, 0, None
     marks = list(MARK_RE.finditer(code))
     canon = {m.start() for m in marks}
     for n in NEAR_RE.finditer(code):
@@ -132,20 +166,25 @@ def scan(root, rel, fails):
                           "`<!-- /mirror:<id> -->` (id: a-z, 0-9, -)"
                           % (rel, lineno_of(text, n.start()), frag.strip())))
     for m in marks:
-        closing, mid = m.group(1) == "/", m.group(2)
+        closing, mid, decl = m.group(1) == "/", m.group(2), m.group(3)
         where = "%s:%d" % (rel, lineno_of(text, m.start()))
+        if closing and decl is not None:  # census-guard: count-on-close
+            fails.append(("MALFORMED", "%s: n= belongs on the opening marker, not /mirror:%s" % (where, mid)))
+        if not closing and decl is None:  # census-guard: needs-count
+            fails.append(("MALFORMED", "%s: mirror:%s declares no member count; write "
+                          "`<!-- mirror:%s n=<copies> -->` on every copy" % (where, mid, mid)))
         if not closing:
             if open_id is not None:  # census-guard: nesting
                 fails.append(("NESTED", "%s: mirror:%s opens inside mirror:%s (opened at line %d); "
                               "blocks do not nest" % (where, mid, open_id, lineno_of(text, open_at))))
-            open_id, open_at, open_end = mid, m.start(), m.end()
+            open_id, open_at, open_end, open_n = mid, m.start(), m.end(), decl
             continue
         if open_id != mid:  # census-guard: unbalanced-close
             fails.append(("STRAY-CLOSE", "%s: /mirror:%s closes a block that is not open%s"
                           % (where, mid, " (mirror:%s is)" % open_id if open_id else "")))
             continue
         body = normalise(text[open_end:m.start()])
-        blocks.append((mid, body, "%s:%d" % (rel, lineno_of(text, open_at))))
+        blocks.append((mid, body, "%s:%d" % (rel, lineno_of(text, open_at)), open_n))
         open_id = None
     if open_id is not None:  # census-guard: unclosed
         fails.append(("UNCLOSED", "%s:%d: mirror:%s is never closed"
@@ -153,7 +192,7 @@ def scan(root, rel, fails):
     return blocks
 
 
-def walk(root, scope, fails):
+def walk(root, scope, exclude, fails):
     files = []
     for entry in scope:
         p = os.path.join(root, entry)
@@ -171,7 +210,11 @@ def walk(root, scope, fails):
             continue  # optional root files (absent in a fixture tree)
         else:
             fails.append(("SCOPE", "scope entry does not exist: %s" % entry))
-    return files
+    for x in exclude:
+        if not os.path.exists(os.path.join(root, x)):
+            fails.append(("SCOPE", "excluded path does not exist: %s (stale exclusion)" % x))
+    return [f for f in files
+            if not any(f == x or f.startswith(x.rstrip("/") + "/") for x in exclude)]
 
 
 def main(argv):
@@ -184,18 +227,35 @@ def main(argv):
     here = os.path.dirname(os.path.abspath(__file__))
     root = os.environ.get("MIRROR_CENSUS_ROOT") or os.path.dirname(here)
     scope = os.environ.get("MIRROR_CENSUS_SCOPE", DEFAULT_SCOPE).split()
+    exclude = os.environ.get("MIRROR_CENSUS_EXCLUDE", DEFAULT_EXCLUDE).split()
     fails = []
-    files = walk(root, scope, fails)
+    files = walk(root, scope, exclude, fails)
     blocks = []
     for rel in files:
         blocks.extend(scan(root, rel, fails))
 
     by_id = {}
-    for mid, body, where in blocks:
+    decls = {}
+    for mid, body, where, decl in blocks:
         by_id.setdefault(mid, []).append((body, where))
+        if decl is not None:
+            decls.setdefault(mid, {}).setdefault(int(decl), []).append(where)
 
     for mid in sorted(by_id):
         members = by_id[mid]
+        # Membership is PINNED: every copy declares how many copies exist, so
+        # a copy that loses its wrapper (or its file) is a FAIL by count, not
+        # a silent drop that ORPHAN only notices at the last partner.
+        d = decls.get(mid, {})
+        if len(d) > 1:  # census-guard: count-consistent
+            fails.append(("MEMBERS", "mirror:%s copies declare different counts: %s"
+                          % (mid, "; ".join("n=%d at %s" % (k, ", ".join(v)) for k, v in sorted(d.items())))))
+        elif len(d) == 1:
+            n = next(iter(d))
+            if n != len(members):  # census-guard: count
+                fails.append(("MEMBERS", "mirror:%s declares n=%d but %d block(s) exist (%s): a copy "
+                              "lost its wrapper, or the count was not updated"
+                              % (mid, n, len(members), ", ".join(w for _, w in members))))
         for body, where in members:
             if not body:  # census-guard: empty-block
                 fails.append(("EMPTY-BLOCK", "%s: mirror:%s has no text" % (where, mid)))

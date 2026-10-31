@@ -128,24 +128,27 @@ driveable work remains.
      dispatch to cap, and only then any inline fold. If a response
      contains zero dispatches while `live < cap` and driveable
      work exists, it is non-compliant by construction.
-  9. **Gate slots are standing lanes, not a remembered duty
-     (2026-10-27).** Three of the cap's lanes are RESERVED
-     gate-runner slots, one per cluster (`loss`, `tcp`, `udp`),
-     filled exactly like engineer lanes: at every refill, a free
-     gate slot is dispatched BEFORE the next engineer. Each gate
-     lane's standing job: deploy current `origin/master` to its
-     cluster and run the full measurement (merge-wave gate
-     below), append the baseline record, then immediately re-run
-     at the then-current master. A gate slot is never converted
-     to engineer work while its cluster's baseline is older than
-     the validity window.
+  9. **Gate slots are dispatched by the counter, not a remembered
+     duty (2026-10-27; amended for the spend cap 2026-10-31).**
+     Each cluster (`loss`, `tcp`, `udp`) has a gate slot that is
+     DUE when the merge-wave counter says so (5 merges or 60 min
+     since that cluster's last completed gate, or a gated PR
+     waiting on it; see "Three-cluster regular testing"). At every
+     refill, a due gate slot is dispatched BEFORE the next
+     engineer and takes an implementor slot under the spend cap; a
+     slot that is not due is not held open, because three standing
+     gate lanes would take every implementor slot. A due gate
+     lane's job: deploy current `origin/master` to its cluster,
+     run the full measurement (merge-wave gate below), append the
+     baseline record, and finish. It is never converted to
+     engineer work while its cluster's baseline is older than the
+     validity window.
   10. **Mix at full fill, PR work first**: (1) stamped triple
      reviewers for every PR at a reviewable head, (2) gate runners
      for gated PRs (see the three-cluster cadence below), (3)
      engineers/researchers on the lowest-numbered driveable
-     issues in band order. Reserve capacity is not idle capacity:
-     the 6 reserved slots are the reserve; inside the cap, all
-     lanes work. Reap idle/dead agents (liveness = commit-time +
+     issues in band order. Inside the cap, all lanes work. Reap
+     idle/dead agents (liveness = commit-time +
   live procs, never output-mtime) and refill from the
   lowest-number queue in the same turn. Parent does folds/small
   fixes inline when faster than dispatching. A dedicated
@@ -479,17 +482,21 @@ Every tick the keeper:
    work first, then the lowest-numbered issue in band; if PRs drain,
    convert closers to engineers/researchers, and vice-versa if
    research floods in.
-4. Runs the ONLINE instruction census once an hour and at keeper
-   start: `make instructions-census-online` from a clean checkout at
-   `origin/master`. It asks `gh` for the state of every issue an
-   expiry marker names (see "Expiry markers" under Standing rules). The
-   hermetic half runs in CI and `make selftest`; only the keeper sees
-   an issue CLOSE, which is the event that expires those markers. Each
-   problem prints one stdout line, `keeper: STALE-INSTRUCTION <tag>
-   <file:line>`, so Monitor wakes the parent; the parent retires the
-   instruction in the normal queue (a docs PR). A hit in CLAUDE.md is
-   reported to the user as an owner action, never edited by a lane.
-   Exit 77 (no `gh`) is a SKIP the keeper prints, never a pass.
+4. Runs the instruction SWEEP once an hour and at keeper start:
+   `make instructions-census-online` (`--online --all`) from a clean
+   checkout at `origin/master`. CI and `make instructions-census` check
+   marker syntax everywhere but expiry only in the files a change
+   touches (so a date that passes reds the PRs that touch it, not
+   every PR on the same day); the sweep is the ONLY run that sees
+   every expired date and every CLOSED issue in the tree. Each FAIL
+   prints one stdout line, `keeper: STALE-INSTRUCTION <tag>
+   <file:line>`, and each lead-time WARN (a Review-by within 14 days)
+   one `keeper: EXPIRING-INSTRUCTION <file:line> <date>` line, so
+   Monitor wakes the parent. The parent files an issue for each stale
+   instruction (or retires it in the normal queue with a docs PR) in
+   the same tick. A hit in CLAUDE.md is reported to the user as an
+   owner action, never edited by a lane. Exit 77 (no `gh`) is a SKIP
+   the keeper prints, never a pass.
 
 ## Arguments
 
@@ -909,7 +916,7 @@ For each PR an agent opens:
    precondition (NTP sync, target claim, server idle, build identity)
    is MEASURED and scored PASS / VOID / FAIL in the record, never
    silently repaired. The crash gates' clock fix-up (`date -s`,
-   removed in #18614) hid the state the operator's loop ran in: on
+   removed for #18614 by PR #18618) hid the state the operator's loop ran in: on
    2026-10-31 loss's fw1 was 72 s behind, and every operator move to
    node 1 failed fabric-RPC auth (`docs/ha-rg-move-correctness.md`,
    "Measured").
@@ -923,8 +930,10 @@ For each PR an agent opens:
      and `show configuration system ntp` shows the `server ...
      routing-instance mgmt` stanza (#18584);
    - the target's iperf3 servers are idle: count ESTABLISHED sockets
-     on their ports (`ss -tn state established '( sport = :5211 )'`
-     on the target container); if any, restart them, wait for
+     on the two ports #18631 names, 5210 and 5211, on the target
+     container:
+     `ss -tn state established '( sport = :5210 or sport = :5211 )'`.
+     If any, restart them, wait for
      LISTEN, and record the count you cleared (#18631). A restart
      the record does not show is a silent repair;
    - each node's build by GIT HASH (`/usr/local/sbin/xpfd version`
@@ -1117,9 +1126,11 @@ For each PR an agent opens:
    `harness-compare` reads those rows. Lanes deleted the rows their
    runs wrote "by name, uncommitted"; deleting a FAIL row destroys
    the verdict `harness-compare` would have shown. Commit every row
-   the gate wrote on the PR branch, as its own ledger-only commit. A
-   VOID row (for example, no deploy manifest in that worktree) is
-   committed too, with the reason it is VOID in `docs/log/<issue>.md`.
+   the gate wrote on the PR branch, as its own ledger-only commit
+   (the `ledger-only` delta class in Step 4 item 0: it needs no
+   re-gate and no re-review). A VOID row (for example, no deploy
+   manifest in that worktree) is committed too, with the reason it is
+   VOID in `docs/log/<issue>.md`.
 5. **Parent firsthand verification on the final head** as a SEPARATE
    step before merge (supplement to, never a substitute for, the
    triple review): spot-check at least one load-bearing claim
@@ -1148,30 +1159,49 @@ parent firsthand verification.
 
 Per PR, in order:
 
-0. **Gate checklist (hard stop):** confirm on the PR, all at the head
-   you are about to merge — three reviewer records with full
-   findings text (Step 3 item 3) all MERGE-READY at this SHA
-   (records headed at older SHAs are history and never count
-   toward the three),
-   cluster-gate record with numbers (Step 3 item 4) or the parent's
-   recorded `docs/test-only` classification with diff stat, the
-   parent firsthand verification (Step 3 item 5),
-   and the Step 3 item 1 log check: `docs/log/<issue>.md` (or
-   `docs/log/<pr>.md`) present in the head's diff with Timestamp /
-   Action / File(s) / Validation / Risk content.
-   If any item is missing or recorded at a different SHA, do NOT
-   merge — return to Step 3.
+0. **Gate checklist (hard stop):** confirm on the PR, for the head
+   you are about to merge:
+   - three reviewer records with full findings text (Step 3 item 3),
+     all MERGE-READY at this SHA, or at an earlier SHA whose delta to
+     this head is covered by the delta rule below (records at older
+     SHAs are otherwise history and never count toward the three);
+   - the cluster-gate record with numbers (Step 3 item 4) at the
+     GATED SHA, with the delta from the gated SHA to this head
+     classified by the rule below (the gated SHA is never this head
+     once the gate's ledger rows are committed), or the parent's
+     recorded `docs/test-only` classification with diff stat;
+   - the parent firsthand verification (Step 3 item 5);
+   - the Step 3 item 1 log check: `docs/log/<issue>.md` (or
+     `docs/log/<pr>.md`) present in the head's diff with Timestamp /
+     Action / File(s) / Validation / Risk content;
+   - the instruction census in PR mode, online, from the PR worktree:
+     `python3 scripts/instructions-census.py --online --base origin/master`.
+     CI runs the hermetic half; only this run sees a CLOSED issue
+     named by a marker the PR touches.
+   If any item is missing, or recorded at a SHA the delta rule does
+   not cover, do NOT merge — return to Step 3.
    **The merge record names the gated SHA and classifies the delta.**
    The merge body states the GATED SHA (the head the cluster gate ran
-   at) and the class of `git diff --stat <gated>..<head>`:
-   `docs-only`, `comments-only` (comment lines in code files, checked
-   by reading the diff, not by the file list) or `code`. A `code`
-   delta needs a re-gate at the head, or a seat confirmation of that
-   exact delta (Step 3 item 6) with the reason a re-gate is not needed
-   written in the record. An empty delta says so. Without this line a
-   later reader cannot tell a gated merge from a merge of something
-   nobody measured. The gate's ledger rows (Step 3 item 4) are in the
-   head's diff, or the record says why the gate wrote none.
+   at) and the class of `git diff --stat <gated>..<head>`. The classes
+   and what each needs:
+   - `ledger-only`: only `test/results/ledger.d/*.json` shards written
+     by that gate at the gated SHA. Needs nothing more: no re-gate, no
+     re-review. This is the delta the ledger rule (Step 3 item 4)
+     always produces.
+   - `docs-only` or `comments-only` (comment lines in code files,
+     checked by reading the diff, not by the file list): a seat
+     confirmation of that delta (Step 3 item 6); no re-gate.
+   - `code`, NON-behavioural (tests, comments mixed with code-file
+     edits, logging levels): a seat confirmation of that exact delta,
+     with the reason it changes no behaviour written in the record.
+   - `code`, behaviour-changing (anything else): ALWAYS a re-gate and
+     a re-review at the new head (Step 3 item 4: "any
+     behavior-changing fold re-runs BOTH"). A seat confirmation never
+     substitutes for it.
+   An empty delta says so. Without this line a later reader cannot
+   tell a gated merge from a merge of something nobody measured. The
+   gate's ledger rows (Step 3 item 4) are in the head's diff, or the
+   record says why the gate wrote none.
 1. Re-poll `mergeable` THROUGH `UNKNOWN` (GitHub recomputes after every
    push) until `MERGEABLE`/`CLEAN` or `CONFLICTING`.
 2. If `CONFLICTING`: in a FRESH worktree off the PR branch,
@@ -1292,25 +1322,39 @@ is clean:
 
   The issue form is exactly `#NNNN closed` (an issue or a PR number).
   Any other condition is free text and MUST carry a `Review-by:` date,
-  because no tool can check prose: the date is the trigger. Never mark a
-  permanent rule. `make instructions-census` (hermetic; CI and
-  `make selftest`) fails a malformed or near-miss marker, a free-text
-  marker without a date, and a date before today (UTC).
-  `make instructions-census-online` (the keeper, above) also fails a
-  marker whose issue has CLOSED. On a red, retire the instruction
-  (delete it, or restate it as permanent), then the marker; moving a
-  date needs a reason in the commit. Examples in fenced or inline code
-  are not markers.
-  Grammar and scope: `scripts/instructions-census.py`.
-- **Mirrored text is wrapped, and compared (#18645).** Text deliberately
-  copied into several docs (the private-RG peer-loss detection paragraph
-  is in six) sits between `<!-- mirror:<id> -->` and
-  `<!-- /mirror:<id> -->` markers. `make mirror-census` fails when two
-  blocks with one id differ after whitespace normalisation, or a block
-  has no partner. Change every copy in the same commit, and let the
-  census, not a reviewer, confirm identity. CLAUDE.md is the user's:
-  when its copy should join a mirror set, propose the wrapped text in
-  the PR body.
+  at most 180 days ahead, because no tool can check prose: the date is
+  the trigger, and a far-future date would be a permanent pass. Never
+  mark a permanent rule. In Markdown the marker is an HTML comment or a
+  bare line; a key anywhere else (a `- ` bullet, `> `, `**bold**`, a
+  table cell outside a comment, mid-sentence) is reported as misplaced,
+  so prose ABOUT the convention puts the key in backticks. Examples in
+  fenced or inline code are not markers.
+  Two runs, two jobs:
+  - `make instructions-census` (CI against the PR's base, and
+    `make selftest`) fails bad syntax everywhere, and an EXPIRED date
+    only in files the change touches. A date that passes on a calendar
+    day reds the PRs that touch that instruction, never every open PR
+    at once (a same-day red on every lane is a landing-guard live-lock,
+    and it invites date-bumping).
+  - `make instructions-census-online` (`--online --all`, the keeper,
+    above) sweeps EVERY marker: expired dates, CLOSED issues, and a
+    lead-time warning 14 days ahead. The keeper's report is what files
+    the issue.
+  On a red, retire the instruction (delete it, or restate it as
+  permanent), then the marker; moving a date needs a reason in the
+  commit. Grammar and scope: `scripts/instructions-census.py`.
+- **Mirrored text is wrapped, counted and compared (#18645).** Text
+  deliberately copied into several docs (the private-RG peer-loss
+  detection paragraph is in six) sits between
+  `<!-- mirror:<id> n=<copies> -->` and `<!-- /mirror:<id> -->`. Every
+  copy declares the same n. `make mirror-census` fails when two blocks
+  with one id differ after whitespace normalisation (case and
+  punctuation count), when the number of blocks is not n (a copy that
+  lost its wrapper), or when a block has no partner. Change every copy,
+  and n when a copy is added or removed, in the same commit, and let
+  the census, not a reviewer, confirm identity. CLAUDE.md is the
+  user's: when its copy should join a mirror set, propose the wrapped
+  text, and the n bump for the other copies, in the PR body.
 
 ## Hard-won operational lessons (from live runs)
 

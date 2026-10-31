@@ -255,8 +255,17 @@ fi
 M_CLAIM="$(mutant no-claim-guard '/census-guard: claim$/s/if \[ "$CLAIM" -le "$base" \]; then/if false; then/')"
 echo 26911 >"$WORK/c-claim-m"
 alloc "$M_CLAIM" "$WORK/c-claim-m" --claim 0.0.26850
+if [[ $RC -ne 0 && "$ERR" == *"not above the counter"* ]]; then
+	ok "claim backstop: with the claim guard off, the next-above-counter check still refuses 0.0.26850"
+else
+	bad "claim backstop: expected the monotonic backstop to refuse; got '$OUT' rc=$RC / $ERR"
+fi
+M_CLAIM2="$(mutant claim-unguarded '/census-guard: claim$/s/if \[ "$CLAIM" -le "$base" \]; then/if false; then/' \
+	'/census-guard: monotonic$/s/if \[ "$next" -le "$cur" \]; then/if false; then/')"
+echo 26911 >"$WORK/c-claim-m2"
+alloc "$M_CLAIM2" "$WORK/c-claim-m2" --claim 0.0.26850
 if [[ $RC -eq 0 ]]; then
-	ok "claim mutation: without the guard the at-or-below number is accepted, so the cell has power"
+	ok "claim mutation: with both guards off the at-or-below number is accepted, so the cells have power"
 else
 	bad "claim mutation ESCAPED: still refused"
 fi
@@ -310,6 +319,105 @@ if [[ $RC -eq 0 ]]; then
 	ok "malformed counter mutation: without the check an empty counter silently restarts at $OUT, so the cell has power"
 else
 	bad "malformed counter mutation ESCAPED: the mutant still refuses an empty counter"
+fi
+
+# ── cell O: a leading zero is refused everywhere (dash reads it as octal) ─
+# dash's $(( )) reads 027000 as octal (11776) while `[ -gt ]` compares it as
+# decimal, so a counter of 027000 used to hand out 0.0.11777, --seen
+# 0.0.027100 handed out 0.0.11841, and 0026900 made dash die mid-run.
+deployed "loss:fw0 0.0.26810+gx"
+for c in 027000 0026900; do
+	echo "$c" >"$WORK/c-oct"
+	alloc "$ALLOC" "$WORK/c-oct"
+	if [[ $RC -eq 1 && "$ERR" == *"no leading zero"* && "$(cat "$WORK/c-oct")" == "$c" ]]; then
+		ok "octal: a counter of $c is refused (rc 1, not a shell crash) and left unchanged"
+	else
+		bad "octal: counter $c: expected rc 1 and an unchanged file; got '$OUT' rc=$RC / $ERR"
+	fi
+done
+echo 26900 >"$WORK/c-oct2"
+for a in "--seen 0.0.027100" "--floor 027000" "--claim 0.0.027100"; do
+	# shellcheck disable=SC2086
+	alloc "$ALLOC" "$WORK/c-oct2" $a
+	if [[ $RC -eq 1 && "$ERR" == *"no leading zero"* && "$(cat "$WORK/c-oct2")" == 26900 ]]; then
+		ok "octal: $a is refused"
+	else
+		bad "octal: $a: expected a refusal; got '$OUT' rc=$RC"
+	fi
+done
+OUT=$(XPF_DEB_VERSION_FLOOR=027000 sh "$ALLOC" --counter "$WORK/c-oct2" 2>"$WORK/err")
+RC=$?
+if [[ $RC -eq 1 ]] && grep -q 'no leading zero' "$WORK/err"; then
+	ok "octal: XPF_DEB_VERSION_FLOOR=027000 is refused"
+else
+	bad "octal: the env floor 027000 was accepted ('$OUT')"
+fi
+deployed "loss:fw0 0.0.026810+gx" "loss:fw1 0.0.26810+gx"
+alloc "$ALLOC" "$WORK/c-oct2"
+if [[ $RC -eq 0 && "$OUT" == "0.0.26901" && "$ERR" == *"loss:fw0 runs xpf 0.0.026810+gx, outside the 0.0.N space"* ]]; then
+	ok "octal: a node reporting 0.0.026810 is never a floor; it is reported, and the allocation stays 0.0.26901"
+else
+	bad "octal: expected 0.0.26901 and a report on loss:fw0; got '$OUT' rc=$RC / $ERR"
+fi
+deployed "loss:fw0 0.0.26810+gx"
+M_OCT="$(mutant accept-leading-zero '/census-guard: leading-zero$/s/'"'"''"'"' | \*\[!0-9\]\* | 0?\*)/'"'"''"'"' | *[!0-9]*)/')"
+echo 027000 >"$WORK/c-oct-m"
+alloc "$M_OCT" "$WORK/c-oct-m"
+if [[ $RC -ne 0 && "$ERR" == *"not above the counter"* ]]; then
+	ok "octal backstop: with leading zeros accepted again, the next-above-counter check still refuses ($ERR)"
+else
+	bad "octal backstop: expected the monotonic backstop to refuse; got '$OUT' rc=$RC / $ERR"
+fi
+M_OCT2="$(mutant octal-unguarded '/census-guard: leading-zero$/s/'"'"''"'"' | \*\[!0-9\]\* | 0?\*)/'"'"''"'"' | *[!0-9]*)/' \
+	'/census-guard: monotonic$/s/if \[ "$next" -le "$cur" \]; then/if false; then/')"
+echo 027000 >"$WORK/c-oct-m2"
+alloc "$M_OCT2" "$WORK/c-oct-m2"
+if [[ $RC -eq 0 && "$OUT" == "0.0.11777" ]]; then
+	ok "octal mutation: with both guards off the counter 027000 hands out 0.0.11777 (the reported defect), so the cells have power"
+else
+	bad "octal mutation: expected the reported 0.0.11777; got '$OUT' rc=$RC"
+fi
+
+# ── cell P: the margin applies only when the counter is CREATED ───────────
+deployed "loss:fw0 0.0.26810+gx"
+echo 26800 >"$WORK/c-margin"
+alloc "$ALLOC" "$WORK/c-margin"
+if [[ $RC -eq 0 && "$OUT" == "0.0.26811" ]]; then
+	ok "margin: an existing counter below the deployed max moves to deployed + 1 (0.0.26811), with no margin"
+else
+	bad "margin: expected 0.0.26811, got '$OUT' rc=$RC"
+fi
+M_MARGIN="$(mutant margin-always '/census-guard: margin-once$/s/if \[ "$have_counter" -eq 0 \]; then dep_floor/if true; then dep_floor/')"
+echo 26800 >"$WORK/c-margin-m"
+alloc "$M_MARGIN" "$WORK/c-margin-m"
+if [[ "$OUT" != "0.0.26811" ]]; then
+	ok "margin mutation: applying the margin on every call allocates $OUT, so the cell has power"
+else
+	bad "margin mutation ESCAPED"
+fi
+
+# ── cell Q: --claim needs every node read (or an explicit floor) ──────────
+deployed "loss:fw0 0.0.26810+gx" "udp:fw1 unknown"
+echo 26911 >"$WORK/c-claimq"
+alloc "$ALLOC" "$WORK/c-claimq" --claim 0.0.27100
+if [[ $RC -ne 0 && "$ERR" == *"--claim refused"*"udp:fw1"* && "$(cat "$WORK/c-claimq")" == 26911 ]]; then
+	ok "claim: refused while udp:fw1 is unreadable (it may run the claimed number)"
+else
+	bad "claim: expected a refusal naming udp:fw1; got '$OUT' rc=$RC / $ERR"
+fi
+alloc "$ALLOC" "$WORK/c-claimq" --claim 0.0.27100 --floor 27000
+if [[ $RC -eq 0 && "$OUT" == "0.0.27100" ]]; then
+	ok "claim: an explicit --floor lets the claim through (0.0.27100)"
+else
+	bad "claim: expected 0.0.27100 with --floor, got '$OUT' rc=$RC"
+fi
+M_CLAIMQ="$(mutant claim-blind '/census-guard: claim-needs-nodes$/s/if \[ -z "$exp_max" \] && /if false \&\& /')"
+echo 26911 >"$WORK/c-claimq-m"
+alloc "$M_CLAIMQ" "$WORK/c-claimq-m" --claim 0.0.27100
+if [[ $RC -eq 0 ]]; then
+	ok "claim mutation: without the guard the claim passes with a node unread, so the cell has power"
+else
+	bad "claim mutation ESCAPED"
 fi
 
 # ── cell L: the default node list is the three cluster env files' nodes ───
