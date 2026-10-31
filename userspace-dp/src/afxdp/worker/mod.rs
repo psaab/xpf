@@ -14,6 +14,8 @@ pub(crate) use lifecycle::REVOCATION_FLOW_CACHE_WINDOW_DESCRIPTORS;
 /// reconcile uses; the split-borrow sibling stays private to `poll_binding`.
 pub(in crate::afxdp) use lifecycle::invalidate_flow_cache_slots_for_keys;
 use lifecycle::poll_binding;
+#[cfg(test)]
+pub(in crate::afxdp) use lifecycle::held_pass_view;
 
 // #959 Phase 1: per-worker debug counters live in worker/telemetry.rs.
 mod telemetry;

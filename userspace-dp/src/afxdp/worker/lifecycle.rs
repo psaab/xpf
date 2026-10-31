@@ -15,6 +15,25 @@ use crate::afxdp::poll_descriptor::poll_binding_process_descriptor_in_view;
 // must run at least once. Cheap compile-time guard.
 const _: () = assert!(MAX_RX_BATCHES_PER_POLL >= 1);
 
+/// #18560: the view a batch runs under. With parked packets it is the
+/// retained view matching the first parked stamp (its tables and its
+/// validation); with none, or when that view has expired, the current pair.
+pub(in crate::afxdp) fn held_pass_view<'a>(
+    view_held: &[(XdpDesc, UserspaceDpMeta)],
+    prev_views: &'a crate::afxdp::PrevViews,
+    now_ns: u64,
+    forwarding: &'a ForwardingState,
+    validation: ValidationState,
+) -> (Option<usize>, &'a ForwardingState, ValidationState) {
+    let held_view = view_held.first().and_then(|(_, meta)| {
+        prev_views.find(meta.config_generation, meta.fib_generation, now_ns)
+    });
+    match held_view.and_then(|index| prev_views.get(index)) {
+        Some(view) => (held_view, view.forwarding.as_ref(), view.validation),
+        None => (None, forwarding, validation),
+    }
+}
+
 pub(super) fn poll_binding(
     binding_index: usize,
     bindings: &mut [BindingWorker],
@@ -209,17 +228,8 @@ pub(super) fn poll_binding(
         // #18560: the held pass's view. An expired view (or a parked packet
         // whose view is gone) falls back to the current one, which then drops
         // the packet as a generation mismatch, as before.
-        let held_view = if held_pass {
-            let (_, meta) = binding.view_held[0];
-            prev_views.find(meta.config_generation, meta.fib_generation, now_ns)
-        } else {
-            None
-        };
-        let (pass_forwarding, pass_validation) =
-            match held_view.and_then(|index| prev_views.get(index)) {
-                Some(view) => (view.forwarding.as_ref(), view.validation),
-                None => (forwarding, validation),
-            };
+        let (held_view, pass_forwarding, pass_validation) =
+            held_pass_view(&binding.view_held, prev_views, now_ns, forwarding, validation);
         let pass = crate::afxdp::PassView {
             prev_views: (!prev_views.is_empty()).then_some(prev_views),
             held_pass,

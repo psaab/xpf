@@ -280,3 +280,28 @@ fn stamp_ahead_or_expired_view_is_dropped_18560() {
     assert_eq!(fx.binding.scratch.scratch_recycle.len(), 1, "and its descriptor is recycled");
     assert!(fx.rx.try_recv().is_err());
 }
+
+/// The batch view `poll_binding` builds its WorkerContext from: the retained
+/// view of the first parked stamp (its own tables, not the current ones),
+/// else the current pair. RED if a held pass runs under the current view.
+#[test]
+fn held_pass_runs_under_the_retained_tables_18560() {
+    let left = Arc::new(ForwardingState::default());
+    let current = ForwardingState::default();
+    let views = views_with(STAMPED, &left, NEWER);
+    let parked = [(XdpDesc::default(), meta_stamped(7, 9))];
+    let (view, fwd, validation) =
+        super::worker::held_pass_view(&parked, &views, NOW_NS, &current, NEWER);
+    assert_eq!(view, Some(0));
+    assert!(std::ptr::eq(fwd, left.as_ref()), "a held pass must use the left view's tables");
+    assert_eq!(validation, STAMPED, "and its validation");
+
+    let (view, fwd, validation) = super::worker::held_pass_view(&[], &views, NOW_NS, &current, NEWER);
+    assert_eq!((view, validation), (None, NEWER));
+    assert!(std::ptr::eq(fwd, &current), "an ordinary batch uses the current tables");
+
+    let late = NOW_NS + MATCHED_VIEW_GRACE_NS;
+    let (view, fwd, validation) = super::worker::held_pass_view(&parked, &views, late, &current, NEWER);
+    assert_eq!((view, validation), (None, NEWER), "an expired view falls back to the current pair");
+    assert!(std::ptr::eq(fwd, &current));
+}
