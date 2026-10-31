@@ -110,7 +110,12 @@ TRANSITION_PATH_TRIGGER_PKTS="${TRANSITION_PATH_TRIGGER_PKTS:-1000}"
 MIN_TRANSITION_FABRIC_RX_DELTA="${MIN_TRANSITION_FABRIC_RX_DELTA:-32}"
 MIN_TRANSITION_WAN_TX_DELTA="${MIN_TRANSITION_WAN_TX_DELTA:-32}"
 MIN_THROUGHPUT=1.0      # Gbps — iperf3 must report at least this
-IPERF_DURATION_MIN=$(( 8 + SYNC_WAIT + SESSION_SYNC_IDLE_TIMEOUT + PRE_FAILOVER_OBSERVE + 3 + REBOOT_WAIT + 20 + SESSION_SYNC_IDLE_TIMEOUT + 3 * MANUAL_FAILOVER_DEADLINE + 10 + V6_RECHECK_DELAY + 2 * V6_PROBE_COUNT + 5 * 2 * EXTERNAL_PING_COUNT + 4 * (3 * 1 + 3) + 15 ))
+# #18614: CLOCK_FLOOR_OVERSHOOT is the most the clock precondition's 40 s
+# floor can run past the REBOOT_WAIT + 20 s settle it otherwise shares (after
+# a comeback slower than 40 s; measured 19-22 s), so the stream still outlives
+# every bounded window.
+CLOCK_FLOOR_OVERSHOOT=20
+IPERF_DURATION_MIN=$(( 8 + SYNC_WAIT + SESSION_SYNC_IDLE_TIMEOUT + PRE_FAILOVER_OBSERVE + 3 + REBOOT_WAIT + 20 + CLOCK_FLOOR_OVERSHOOT + SESSION_SYNC_IDLE_TIMEOUT + 3 * MANUAL_FAILOVER_DEADLINE + 10 + V6_RECHECK_DELAY + 2 * V6_PROBE_COUNT + 5 * 2 * EXTERNAL_PING_COUNT + 4 * (3 * 1 + 3) + 15 ))
 # #7673: the CoS output filter classifies by DESTINATION PORT, and iperf3
 # defaults to 5201 -- which cos-iperf-config.set maps to `iperf-100m`, a
 # `transmit-rate 100m exact` class. Measuring a deliberately-100Mbit-shaped
@@ -1410,6 +1415,12 @@ fi
 failover_stop_main_iperf /tmp/iperf3-failover.pid "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 sleep 1
 
+# #18614: one clock reading BEFORE the first crash. If chrony is not
+# synchronised here, there is no time source for a crash-rebooted node to
+# converge to, and the clock cell after the crash is VOID (lab/NTP), not FAIL.
+# Taken before iperf3 starts, so it adds nothing to the timed window.
+failover_clock_baseline "$FW0" "$FW1"
+
 # ── Phase 1: Start iperf3 ───────────────────────────────────────────
 
 info "Starting iperf3 --json-stream -P${IPERF_STREAMS} -t${IPERF_DURATION} -p${IPERF_PORT} → ${IPERF_TARGET}"
@@ -1641,6 +1652,7 @@ info "Waiting for fw0 to reboot and rejoin as secondary (max ${REBOOT_WAIT}s)"
 # under-reported by ~23%. Measured comebacks on the loss userspace
 # cluster: ~22s clean (sysrq), so 60s wall keeps ~2.7x headroom.
 fw0_back=false
+fw0_active_at=""
 wait_start=$SECONDS
 crash_post_external_done=false
 while (( SECONDS - wait_start < REBOOT_WAIT )); do
@@ -1651,6 +1663,7 @@ while (( SECONDS - wait_start < REBOOT_WAIT )); do
 	fi
 	if wait_for_instance "$FW0" 1; then
 		fw0_back=true
+		fw0_active_at=$SECONDS
 		info "fw0 xpfd active after $((SECONDS - wait_start))s"
 		break
 	fi
@@ -1670,19 +1683,34 @@ else
 	fail "fw0 xpfd did not come back within ${REBOOT_WAIT}s"
 fi
 
-# #11872: no NTP runs in the loss lab. A crash reboot can leave fw0 minutes
-# behind, making fabric-auth and heartbeat freshness fail and blocking the
-# pending-bulk peer barrier. Set BOTH clocks from one host UTC reading before
-# the rejoin/failback checks.
-if failover_resync_node_clocks "$FW0" "$FW1"; then
-	pass "both firewall clocks resynced from host UTC after crash reboot"
-else
-	fail "could not resync both firewall clocks from host UTC after crash reboot"
-fi
+# #18614 (was the #11872 resync): a crash reboot brings fw0 back on its RTC,
+# and a skew past the fabric-auth window breaks the failback below. An
+# operator's cluster gets no clock help, so neither does this smoke: wait for
+# NTP to converge on both nodes, record the skew and the time it took, and fail
+# the cell when it does not converge. XPF_FAILOVER_CLOCK_RESYNC=1 is the
+# recorded no-NTP escape (test/incus/failover-clock-lib.sh).
+#
+# The wait spends time IPERF_DURATION_MIN already pays for, so the main stream
+# still outlives every bounded window: the REBOOT_WAIT the comeback left unused
+# plus the 20 s settle below. That is about 58 s after a measured 22 s
+# comeback. The floor is 40 s, over 2x the measured 17-18 s convergence; it
+# only binds after a comeback slower than 40 s (measured 19-22 s), and its at
+# most 20 s overshoot is paid for by CLOCK_FLOOR_OVERSHOOT in
+# IPERF_DURATION_MIN. An explicit
+# XPF_FAILOVER_CLOCK_BUDGET_S wins. A VOID (no time source, no measurement)
+# goes through void(), so the run exits 77 and the row is VOID, not FAIL.
+fw0_active_at="${fw0_active_at:-$SECONDS}"
+clock_budget=$(( wait_start + REBOOT_WAIT + 20 - SECONDS ))
+(( clock_budget >= 40 )) || clock_budget=40
+XPF_FAILOVER_CLOCK_BUDGET_S="${XPF_FAILOVER_CLOCK_BUDGET_S:-$clock_budget}" \
+	failover_clock_cell pass-fail "fw0 crash reboot" "$FW0" "$FW1" "$FW0" || true
 
 
-# Wait for cluster to stabilize (gRPC takes ~15s after systemctl active)
-sleep 20
+# Wait for cluster to stabilize (gRPC takes ~15s after systemctl active): 20 s
+# after xpfd came back, part of which the clock wait above may already have
+# spent.
+settle=$(( fw0_active_at + 20 - SECONDS ))
+(( settle <= 0 )) || sleep "$settle"
 
 # Verify fw0 is secondary for EVERY redundancy group (NOT primary — no auto-preempt)
 #

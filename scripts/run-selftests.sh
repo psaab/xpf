@@ -488,7 +488,8 @@ run_bash test/incus/stress-failover-selftest.sh
 run_bash test/incus/ha-assurance-selftest.sh
 # #11581: same-load failover client JSON-stream lifecycle; hermetic fixtures.
 run_bash test/incus/failover-client-selftest.sh
-# #11872: host-clock resync after crash reboot; mocked incus/date, no cluster.
+# #18614: NTP-convergence precondition after a crash reboot (the #11872
+# resync survives only as a recorded escape); mocked incus/date/sleep.
 run_bash test/incus/failover-clock-selftest.sh
 run_bash test/incus/screen-probe-selftest.sh
 run_bash test/incus/v6-na-recovery-12495-selftest.sh
