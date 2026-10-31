@@ -3812,6 +3812,12 @@ impl SessionTable {
         self.rebuild_session_limit_counts();
     }
 
+    /// #18640: this table's (index, width) slot, for the worker-setup cell.
+    #[cfg(test)]
+    pub(crate) fn session_limit_shard(&self) -> (u32, u32) {
+        (self.session_limit_shard_index, self.session_limit_shard_width)
+    }
+
     /// #18640: whether THIS worker charges a fanned-out HA copy of the session
     /// keyed `key`. Exactly one worker of the node's fan-out does.
     #[inline]
