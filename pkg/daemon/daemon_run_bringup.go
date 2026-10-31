@@ -37,6 +37,10 @@ func (d *Daemon) constructClusterManager(cfg *config.Config) bool {
 	}
 	cc := cfg.Chassis.Cluster
 	d.cluster = cluster.NewManager(cc.NodeID, cc.ClusterID)
+	// #18585: the heartbeat-measured peer clock alarm reaches syslog in the
+	// local reference alarm's RT_SYSTEM CLOCK_SKEW_ALARM_* shape. Wired at
+	// construction, before any heartbeat can be admitted.
+	d.cluster.SetPeerClockAlarmHook(d.peerClockAlarmSyslog)
 	return true
 }
 
@@ -230,9 +234,6 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		// Wire event-drop callback: on dropped cluster events, trigger
 		// immediate reconciliation so the safety net doesn't wait 2s.
 		d.cluster.SetOnEventDrop(d.triggerReconcile)
-		// #18585: the heartbeat-measured peer clock alarm reaches syslog in
-		// the local reference alarm's RT_SYSTEM CLOCK_SKEW_ALARM_* shape.
-		d.cluster.SetPeerClockAlarmHook(d.peerClockAlarmSyslog)
 		// Wire dual-active reaffirm-drop callback (#4867): if the
 		// "winner stays" event is dropped on a full channel, the generic
 		// reconcile above does NOT re-announce for a steady VIP owner, so
