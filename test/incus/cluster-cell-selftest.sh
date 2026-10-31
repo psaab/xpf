@@ -214,10 +214,13 @@ import re
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-match = re.search(r"^test_cluster\(\) \{\n.*?^\}\n", source, re.M | re.S)
-if not match:
-    raise SystemExit("cannot extract test_cluster for Group 10–12 behavior tests")
-pathlib.Path(sys.argv[2]).write_text(match.group(0), encoding="utf-8")
+blocks = []
+for name in ("test_cluster", "target_neighbor_identity_cell"):
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.M | re.S)
+    if not match:
+        raise SystemExit(f"cannot extract {name} for Group 10–12 behavior tests")
+    blocks.append(match.group(0))
+pathlib.Path(sys.argv[2]).write_text("".join(blocks), encoding="utf-8")
 PY
 CONNECTIVITY_RUNNER="${T}/connectivity-group-runner.sh"
 cat >"$CONNECTIVITY_RUNNER" <<'RUNNER'
@@ -231,7 +234,15 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$2/../.." && pwd)}"
 export PROJECT_ROOT
 WAN_GW4=10.0.0.1 LAN_HOST_IP=172.16.80.10 LAN_VIP4=172.16.80.1
 LAN_VIP6=2001:559:8585:80::1 IPERF_TARGET4=172.16.80.211
-IPERF_TARGET6=2001:559:8585:80::211
+IPERF_TARGET6=2001:559:8585:80::211 WAN_GW80_4=172.16.80.10
+case "$TEST_MODE" in
+split-*) IPERF_TARGET_V4_V6_SAME_HOST=no IPERF_TARGET6_SPLIT_HOLDER=00:11:22:33:44:66 ;;
+flag-bad) IPERF_TARGET_V4_V6_SAME_HOST=maybe ;;
+esac
+[[ "$TEST_MODE" == split-no-holder ]] && IPERF_TARGET6_SPLIT_HOLDER=""
+# The RG owner per mode: fw0 normally, fw1 in owner-fw1, fw0 then fw1 in
+# owner-moves (the second ownership read sees the move).
+case "$TEST_MODE" in owner-fw1) STUB_OWNER=fw1 ;; *) STUB_OWNER=fw0 ;; esac
 PASS=0 FAIL=0 VOID=0
 info() { :; }
 pass() { printf '  PASS  %s\n' "$*"; PASS=$((PASS + 1)); }
@@ -261,6 +272,54 @@ incus() {
 	printf '%s\n' "$command" >>"$INCUS_TRACE"
 	case "$command" in
 	*"which iperf3"*) return 1 ;;
+	# #18586: the RG owner (the node holding WAN_GW80_4) is where the WAN
+	# targets are on-link; the Group12 neighbor identity is read there.
+	"exec fw0 -- ip -o -4 addr show" | "exec fw1 -- ip -o -4 addr show")
+		local n="${command#exec }" calls
+		n="${n%% *}"
+		calls=$(( $(cat "${INCUS_TRACE}.${n}.owner" 2>/dev/null || echo 0) + 1 ))
+		printf '%s' "$calls" >"${INCUS_TRACE}.${n}.owner"
+		[[ "$TEST_MODE" == owner-unreadable && "$n" == fw1 ]] && return 1
+		local holder="$STUB_OWNER"
+		[[ "$TEST_MODE" == owner-moves && "$calls" -ge 2 ]] && holder=fw1
+		[[ "$TEST_MODE" == owner-none ]] && holder=none
+		if [[ "$n" == "$holder" || ( "$TEST_MODE" == owner-dual && "$n" == fw1 ) ]]; then
+			printf '7: ge-x-0-2.80    inet 172.16.80.10/24 brd 172.16.80.255 scope global ge-x-0-2.80\n'
+		elif [[ "$TEST_MODE" == prefix && "$n" == fw1 ]]; then
+			# 172.16.80.100 shares WAN_GW80_4's text prefix; it is NOT a hold.
+			printf '7: ge-7-0-2.80    inet 172.16.80.100/24 brd 172.16.80.255 scope global ge-7-0-2.80\n'
+		fi
+		;;
+	"exec ${STUB_OWNER} -- ip route get 172.16.80.211")
+		if [[ "$TEST_MODE" == via-route ]]; then
+			printf '172.16.80.211 via 172.16.80.1 dev ge-0-0-2.80 src 172.16.80.10 uid 0\n    cache\n'
+		else
+			printf '172.16.80.211 dev ge-0-0-2.80 src 172.16.80.10 uid 0\n    cache\n'
+		fi
+		;;
+	"exec ${STUB_OWNER} -- ip -6 route get 2001:559:8585:80::211")
+		if [[ "$TEST_MODE" == owner-no-route6 ]]; then
+			printf 'RTNETLINK answers: Network is unreachable\n'
+			return 2
+		fi
+		printf '2001:559:8585:80::211 from :: dev ge-0-0-2.80 proto kernel src 2001:559:8585:80::a metric 256 pref medium\n'
+		;;
+	"exec ${STUB_OWNER} -- ip neigh show 172.16.80.211 dev ge-0-0-2.80")
+		case "$TEST_MODE" in
+		owner-failed | split-failed) printf '172.16.80.211 FAILED\n' ;;
+		owner-entry-missing) ;;
+		split-v4-on-v6) printf '172.16.80.211 lladdr 00:11:22:33:44:66 REACHABLE\n' ;;
+		*) printf '172.16.80.211 lladdr 00:11:22:33:44:55 REACHABLE\n' ;;
+		esac
+		;;
+	"exec ${STUB_OWNER} -- ip -6 neigh show 2001:559:8585:80::211 dev ge-0-0-2.80")
+		case "$TEST_MODE" in
+		split-v6-failed) printf '2001:559:8585:80::211 FAILED\n' ;;
+		split-stale) printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:77 STALE\n' ;;
+		neighbor-fail | split-*) printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:66 STALE\n' ;;
+		*) printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:55 STALE\n' ;;
+		esac
+		;;
 	*"ping -c 1 -W 2 -t 1 1.1.1.1"*)
 		if [[ "$TEST_MODE" == ttl-void ]]; then
 			printf 'ping: command not found\n'
@@ -307,15 +366,10 @@ incus() {
 	*"ping -6 -c 2 -W 1 2001:559:8585:80::211"*)
 		printf '2 packets transmitted, 2 received, 0%% packet loss\n'
 		;;
-	*"ip neigh show 172.16.80.211 dev "*)
-		printf '172.16.80.211 lladdr 00:11:22:33:44:55 REACHABLE\n'
-		;;
-	*"ip -6 neigh show 2001:559:8585:80::211 dev "*)
-		if [[ "$TEST_MODE" == neighbor-fail ]]; then
-			printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:66 STALE\n'
-		else
-			printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:55 STALE\n'
-		fi
+	# The LAN host reaches the off-subnet WAN target through its gateway, so
+	# it never holds a neighbor entry for it: empty, as on every live run.
+	"exec lan -- ip neigh show 172.16.80.211"* | "exec lan -- ip -6 neigh show 2001:559:8585:80::211"*)
+		return 0
 		;;
 	*)
 		printf 'unexpected incus command: %s\n' "$command" >&2
@@ -333,7 +387,7 @@ chmod +x "$CONNECTIVITY_RUNNER"
 # Otherwise the next new cell added to test_cluster breaks every Group 10-12
 # case with "command not found" (#18575 did exactly that with wan_claim_cell).
 if ! missing_stubs="$(python3 - "${SCRIPT_DIR}/test-connectivity.sh" "$CONNECTIVITY_RUNNER" \
-	"${SCRIPT_DIR}/ha-assurance-lib.sh" <<'PY'
+	"${SCRIPT_DIR}/ha-assurance-lib.sh" "$CONNECTIVITY_FUNCTION" <<'PY'
 import pathlib
 import re
 import sys
@@ -341,13 +395,17 @@ import sys
 tc = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 runner = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 lib = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+# Functions extracted verbatim from test-connectivity.sh and sourced by the
+# runner (test_cluster, target_neighbor_identity_cell) are defined too.
+extracted = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
 fn_re = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\(\) \{", re.M)
 match = re.search(r"^test_cluster\(\) \{\n(.*?)^\}\n", tc, re.M | re.S)
 if not match:
     raise SystemExit("cannot extract test_cluster")
 body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
 # Functions test_cluster defines for itself (peer_of) are defined at runtime.
-defined = set(fn_re.findall(runner)) | set(fn_re.findall(lib)) | set(fn_re.findall(match.group(1)))
+defined = (set(fn_re.findall(runner)) | set(fn_re.findall(lib)) | set(fn_re.findall(extracted))
+           | set(fn_re.findall(match.group(1))))
 called = {name for name in fn_re.findall(tc)
           if name != "test_cluster" and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", body)}
 missing = sorted(called - defined)
@@ -370,13 +428,28 @@ run_connectivity_case() {
 		|| fail "Group 10–12 ${mode}: expected COUNTS ${counts}; got ${output}"
 	[[ "$output" != *"unexpected incus command"* ]] \
 		|| fail "Group 10–12 ${mode}: unexpected or mutating incus command"
-	neighbor_count="$(grep -c 'neigh show' "$trace" || true)"
-	if [[ "$mode" == route-void || "$mode" == route-local-fail ]]; then
+	# #18586: neighbor reads go to the RG owner only, never to the LAN host
+	# (which cannot hold an entry for the off-subnet target). Reverting to
+	# the LAN host fails here and turns the happy neighbor PASS into a VOID.
+	local stub_owner=fw0
+	[[ "$mode" == owner-fw1 ]] && stub_owner=fw1
+	neighbor_count="$(grep -c "^exec ${stub_owner} -- ip .*neigh show" "$trace" || true)"
+	if grep -q '^exec lan -- ip .*neigh show' "$trace"; then
+		fail "Group 10–12 ${mode}: a neighbor read went to the LAN host instead of the RG owner (#18586)"
+	fi
+	if grep -v "^exec ${stub_owner} " "$trace" | grep -q 'neigh show'; then
+		fail "Group 10–12 ${mode}: a neighbor read went to a node other than the RG owner ${stub_owner} (#18586)"
+	fi
+	if [[ "$mode" == owner-none || "$mode" == owner-dual || "$mode" == owner-unreadable || "$mode" == flag-bad ]]; then
+		[[ "$neighbor_count" == 0 ]] \
+			|| fail "Group 10–12 ${mode}: expected no neighbor read without a single RG owner, got ${neighbor_count}"
+	elif [[ "$mode" == owner-no-route6 ]]; then
+		# No v6 route device: the v6 neighbor read has no device to name.
 		[[ "$neighbor_count" == 1 ]] \
-			|| fail "Group 10–12 ${mode}: expected one route-scoped neighbor read, got ${neighbor_count}"
+			|| fail "Group 10–12 ${mode}: expected only the v4 RG-owner neighbor read, got ${neighbor_count}"
 	else
 		[[ "$neighbor_count" == 2 ]] \
-			|| fail "Group 10–12 ${mode}: expected two route-scoped neighbor reads, got ${neighbor_count}"
+			|| fail "Group 10–12 ${mode}: expected two RG-owner neighbor reads, got ${neighbor_count}"
 	fi
 	trace_contents="$(<"$trace")"
 	[[ "$trace_contents" != *"ip neigh replace"* && "$trace_contents" != *"ip neigh add"* \
@@ -386,6 +459,8 @@ run_connectivity_case() {
 	happy)
 		[[ "$output" == *"PASS  cluster: Group11 IPv6 MTR"*"warning destination unresolved"* ]] \
 			|| fail "Group 11 IPv6 no-hop warning was not emitted as a PASS cell"
+		[[ "$output" == *"PASS  cluster: Group12 read-only neighbor identity on the RG owner fw0"* ]] \
+			|| fail "the RG-owner neighbor identity was not a PASS on the happy path (#18586)"
 		;;
 	ttl-fail) [[ "$output" == *"FAIL  cluster: Group10 IPv4 TTL=1"* ]] || fail "TTL echo-only output was not a measured FAIL" ;;
 	ttl-void) [[ "$output" == *"VOID  cluster: Group10 IPv4 TTL=1"* ]] || fail "missing TTL output was not VOID" ;;
@@ -394,9 +469,26 @@ run_connectivity_case() {
 	neighbor-fail) [[ "$output" == *"FAIL  cluster: Group12 read-only neighbor identity"* ]] || fail "neighbor MAC mismatch was not a measured FAIL" ;;
 	route-void)
 		[[ "$output" == *"VOID  cluster: Group12 IPv4 route"* \
-			&& "$output" == *"VOID  cluster: Group12 read-only neighbor identity"* ]] \
-			|| fail "unreadable route evidence did not VOID route and neighbor checks"
+			&& "$output" == *"PASS  cluster: Group12 read-only neighbor identity on the RG owner fw0"* ]] \
+			|| fail "unreadable LAN-host route evidence VOIDed the route check but must not touch the RG-owner neighbor check"
 		;;
+	owner-none) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner (no single node"* ]] || fail "no RG owner was not a VOID" ;;
+	owner-dual) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner (no single node"* ]] || fail "two RG owners were not a VOID" ;;
+	owner-failed) [[ "$output" == *"FAIL  cluster: Group12 read-only neighbor identity on the RG owner fw0"* ]] || fail "a FAILED RG-owner entry was not a FAIL" ;;
+	split-host) [[ "$output" == *"PASS  cluster: Group12 read-only neighbor identity on the RG owner fw0"*"same host: no"* ]] || fail "a declared v4/v6 split with usable entries was not a PASS" ;;
+	split-failed) [[ "$output" == *"FAIL  cluster: Group12 read-only neighbor identity on the RG owner fw0"*"same host: no"* ]] || fail "a declared v4/v6 split with a FAILED v4 entry was not a FAIL" ;;
+	split-v6-failed) [[ "$output" == *"FAIL  cluster: Group12 read-only neighbor identity on the RG owner fw0"*"same host: no"* ]] || fail "a declared split with a FAILED v6 entry was not a FAIL" ;;
+	split-v4-on-v6) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"v4 names the v6 host"* ]] || fail "v4 resolving to the v6 host in split mode was not a VOID naming it" ;;
+	split-stale) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"split waiver is stale"* ]] || fail "a v6 holder other than the declared one was not a stale-waiver VOID" ;;
+	split-no-holder) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"needs IPERF_TARGET6_SPLIT_HOLDER"* ]] || fail "split mode without its control was not a VOID" ;;
+	flag-bad) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner (IPERF_TARGET_V4_V6_SAME_HOST=maybe"* ]] || fail "an unknown same-host flag was not a VOID" ;;
+	owner-fw1) [[ "$output" == *"PASS  cluster: Group12 read-only neighbor identity on the RG owner fw1"* ]] || fail "fw1 as the RG owner was not read" ;;
+	owner-moves) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"RG owner changed during the reads"* ]] || fail "an owner move mid-read was not a VOID" ;;
+	owner-unreadable) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner (no single node"*"could not read"* ]] || fail "an unreadable node was not a VOID naming it" ;;
+	owner-entry-missing) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner fw0"* ]] || fail "a missing owner entry was not a VOID" ;;
+	owner-no-route6) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner fw0"*"no route device for a target"* ]] || fail "an owner without a v6 route device was not a VOID naming it" ;;
+	via-route) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"not on-link"* ]] || fail "a via route to the target was not a not-on-link VOID" ;;
+	prefix) [[ "$output" == *"PASS  cluster: Group12 read-only neighbor identity on the RG owner fw0"* ]] || fail "a text-prefix address on fw1 was counted as holding WAN_GW80_4" ;;
 	route-local-fail) [[ "$output" == *"FAIL  cluster: Group12 IPv4 route"* ]] || fail "local route was not a measured FAIL" ;;
 	esac
 	ok "test_cluster Groups 10–12 behavior: ${mode}"
@@ -407,8 +499,25 @@ run_connectivity_case ttl-void "PASS=8 FAIL=0 VOID=1"
 run_connectivity_case mtr4-fail "PASS=8 FAIL=1 VOID=0"
 run_connectivity_case ping-fail "PASS=8 FAIL=1 VOID=0"
 run_connectivity_case neighbor-fail "PASS=8 FAIL=1 VOID=0"
-run_connectivity_case route-void "PASS=7 FAIL=0 VOID=2"
-run_connectivity_case route-local-fail "PASS=7 FAIL=1 VOID=1"
+run_connectivity_case route-void "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case route-local-fail "PASS=8 FAIL=1 VOID=0"
+run_connectivity_case owner-none "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-dual "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-failed "PASS=8 FAIL=1 VOID=0"
+run_connectivity_case split-host "PASS=9 FAIL=0 VOID=0"
+run_connectivity_case split-failed "PASS=8 FAIL=1 VOID=0"
+run_connectivity_case split-v6-failed "PASS=8 FAIL=1 VOID=0"
+run_connectivity_case split-v4-on-v6 "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case split-stale "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case split-no-holder "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case flag-bad "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-fw1 "PASS=9 FAIL=0 VOID=0"
+run_connectivity_case owner-moves "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-unreadable "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-entry-missing "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-no-route6 "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case via-route "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case prefix "PASS=9 FAIL=0 VOID=0"
 ok "Groups 10–12 issue read-only route-scoped neighbor queries only"
 
 # Fixture: a stand-in destructive script. Enters the cell, then (with

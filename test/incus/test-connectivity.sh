@@ -251,6 +251,81 @@ wan_claim_cell() {
 	esac
 }
 
+# target_neighbor_identity_cell: #18586 Group12 read-only neighbor identity,
+# read on the RG owner (the one node holding WAN_GW80_4, the same node before
+# and after the reads), where the WAN targets must be ON-LINK (a `via` route
+# is VOID). Every read is `ip -o -4 addr show`, `ip route get` or
+# `ip neigh show`. IPERF_TARGET_V4_V6_SAME_HOST must be "yes" or "no";
+# anything else is VOID, never a silent default.
+# - yes (tcp, udp): both entries usable and naming the same MAC on the same
+#   device (ha_neighbor_identity_verdict).
+# - no (loss): its v4 .200 is the container and its v6 ::200 the external box
+#   (#16213, #18576). Each entry must be usable, and the SPLIT has a same-run
+#   control: v6 must name IPERF_TARGET6_SPLIT_HOLDER (the external box), and
+#   v4 must name a DIFFERENT MAC. v4 on the v6 host is the #18576 hazard
+#   materialising: VOID, this run's v4 numbers measured the wrong host. A v6
+#   holder other than the declared one is VOID: the waiver is stale.
+target_neighbor_identity_cell() {
+	local owner owner_after r4="" r6="" d4="" d6="" n4="" n6="" s4 s6 status desc m4 m6
+	local same="${IPERF_TARGET_V4_V6_SAME_HOST:-yes}"
+	local split6="${IPERF_TARGET6_SPLIT_HOLDER:-}"
+	desc="cluster: Group12 read-only neighbor identity on the RG owner"
+	if [[ "$same" != yes && "$same" != no ]]; then
+		void "${desc} (IPERF_TARGET_V4_V6_SAME_HOST=${same} is neither yes nor no)"
+		return 0
+	fi
+	if ! owner=$(ha_rg_owner_node "$WAN_GW80_4" "$FW0" "$FW1" 2>&1); then
+		void "${desc} (no single node of ${FW0} ${FW1} holds WAN_GW80_4=${WAN_GW80_4}: ${owner})"
+		return 0
+	fi
+	r4=$(incus exec "$owner" -- ip route get "$IPERF_TARGET4" 2>&1) || r4=""
+	r6=$(incus exec "$owner" -- ip -6 route get "$IPERF_TARGET6" 2>&1) || r6=""
+	d4=$(ha_route_device "$r4" 2>/dev/null) || d4=""
+	d6=$(ha_route_device "$r6" 2>/dev/null) || d6=""
+	[[ -n "$d4" ]] && { n4=$(incus exec "$owner" -- ip neigh show "$IPERF_TARGET4" dev "$d4" 2>&1) || n4=""; }
+	[[ -n "$d6" ]] && { n6=$(incus exec "$owner" -- ip -6 neigh show "$IPERF_TARGET6" dev "$d6" 2>&1) || n6=""; }
+	owner_after=$(ha_rg_owner_node "$WAN_GW80_4" "$FW0" "$FW1" 2>&1) || owner_after="<none: ${owner_after}>"
+	desc+=" ${owner} (v4 ip neigh show ${IPERF_TARGET4} dev ${d4:-<no-route-device>} output=${n4:-<empty>}; v6 ip -6 neigh show ${IPERF_TARGET6} dev ${d6:-<no-route-device>} output=${n6:-<empty>}; same host: ${same})"
+	desc="${desc//$'\n'/'; '}"
+	if [[ "$owner_after" != "$owner" ]]; then
+		void "${desc}: the RG owner changed during the reads (after: ${owner_after})"
+		return 0
+	fi
+	if [[ -z "$d4" || -z "$d6" ]]; then
+		void "${desc}: the owner has no route device for a target"
+		return 0
+	fi
+	if [[ " ${r4//$'\n'/ } " == *" via "* || " ${r6//$'\n'/ } " == *" via "* ]]; then
+		void "${desc}: a target is not on-link from the owner (routed via a gateway)"
+		return 0
+	fi
+	if ha_neighbor_identity_verdict "$d4" "$n4" "$d4" "$n4" 2>/dev/null; then s4=0; else s4=$?; fi
+	if ha_neighbor_identity_verdict "$d6" "$n6" "$d6" "$n6" 2>/dev/null; then s6=0; else s6=$?; fi
+	if (( s4 == 1 || s6 == 1 )); then
+		status=1
+	elif (( s4 == 2 || s6 == 2 )); then
+		status=2
+	elif [[ "$same" == yes ]]; then
+		if ha_neighbor_identity_verdict "$d4" "$n4" "$d6" "$n6" 2>/dev/null; then status=0; else status=$?; fi
+	else
+		m4=$(awk '{for (i = 1; i < NF; i++) if ($i == "lladdr") print tolower($(i + 1))}' <<<"$n4")
+		m6=$(awk '{for (i = 1; i < NF; i++) if ($i == "lladdr") print tolower($(i + 1))}' <<<"$n6")
+		if [[ -z "$split6" ]]; then
+			void "${desc}: split mode needs IPERF_TARGET6_SPLIT_HOLDER as its same-run control"
+			return 0
+		elif [[ "$m6" != "${split6,,}" ]]; then
+			void "${desc}: v6 names ${m6}, not the declared split holder ${split6}; the split waiver is stale"
+			return 0
+		elif [[ "$m4" == "$m6" ]]; then
+			void "${desc}: v4 names the v6 host ${m4}; this run's v4 iperf numbers measured the wrong host (#18576, record it there)"
+			return 0
+		fi
+		desc+=": identity not asserted (declared split, v6 ${m6} is the declared holder, v4 ${m4} differs)"
+		status=0
+	fi
+	assurance_verdict "$status" "$desc"
+}
+
 # ping6_test <instance> <target_ip> <description>
 ping6_test() {
 	local inst="$1" ip="$2" desc="$3"
@@ -624,7 +699,7 @@ test_cluster() {
 
 		# #11581 Group 12: route evidence precedes the controlled reachability
 		# pings; the same route devices scope the read-only neighbor queries.
-		local route4_output route4_rc route4_status route4_device route4_evidence
+		local route4_output route4_rc route4_status route4_evidence
 		if route4_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
 			ip route get "$IPERF_TARGET4" 2>&1); then
 			route4_rc=0
@@ -639,12 +714,8 @@ test_cluster() {
 		fi
 		assurance_verdict "$route4_status" \
 			"cluster: Group12 IPv4 route (ip route get ${IPERF_TARGET4}; rc=${route4_rc}; output=${route4_evidence:-<empty>})"
-		route4_device=""
-		if (( route4_status == 0 )); then
-			route4_device=$(ha_route_device "$route4_output") || route4_device=""
-		fi
 
-		local route6_output route6_rc route6_status route6_device route6_evidence
+		local route6_output route6_rc route6_status route6_evidence
 		if route6_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
 			ip -6 route get "$IPERF_TARGET6" 2>&1); then
 			route6_rc=0
@@ -659,10 +730,6 @@ test_cluster() {
 		fi
 		assurance_verdict "$route6_status" \
 			"cluster: Group12 IPv6 route (ip -6 route get ${IPERF_TARGET6}; rc=${route6_rc}; output=${route6_evidence:-<empty>})"
-		route6_device=""
-		if (( route6_status == 0 )); then
-			route6_device=$(ha_route_device "$route6_output") || route6_device=""
-		fi
 
 		local reach4_output reach4_rc reach4_status reach4_evidence
 		if reach4_output=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
@@ -696,58 +763,12 @@ test_cluster() {
 		assurance_verdict "$reach6_status" \
 			"cluster: Group12 IPv6 controlled reachability (LC_ALL=C ping -6 -c 2 -W 1 ${IPERF_TARGET6}; rc=${reach6_rc}; output=${reach6_evidence:-<empty>})"
 
-		local neigh4_output="" neigh4_rc=not_run neigh4_input=""
-		if [[ -n "$route4_device" ]]; then
-			if neigh4_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
-				ip neigh show "$IPERF_TARGET4" dev "$route4_device" 2>&1); then
-				neigh4_rc=0
-				neigh4_input="$neigh4_output"
-			else
-				neigh4_rc=$?
-			fi
-		fi
-		local neigh6_output="" neigh6_rc=not_run neigh6_input=""
-		if [[ -n "$route6_device" ]]; then
-			if neigh6_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
-				ip -6 neigh show "$IPERF_TARGET6" dev "$route6_device" 2>&1); then
-				neigh6_rc=0
-				neigh6_input="$neigh6_output"
-			else
-				neigh6_rc=$?
-			fi
-		fi
-		local neighbor_status neigh4_status neigh6_status neigh4_evidence neigh6_evidence
-		neigh4_evidence=${neigh4_output//$'\n'/'; '}
-		neigh6_evidence=${neigh6_output//$'\n'/'; '}
-		if [[ "$neigh4_rc" != 0 || "$neigh6_rc" != 0 ]] \
-			|| [[ -z "${neigh4_input//[[:space:]]/}" || -z "${neigh6_input//[[:space:]]/}" ]]; then
-			neighbor_status=2
-		else
-			if ha_neighbor_identity_verdict "$route4_device" "$neigh4_input" \
-				"$route4_device" "$neigh4_input"; then
-				neigh4_status=0
-			else
-				neigh4_status=$?
-			fi
-			if ha_neighbor_identity_verdict "$route6_device" "$neigh6_input" \
-				"$route6_device" "$neigh6_input"; then
-				neigh6_status=0
-			else
-				neigh6_status=$?
-			fi
-			if (( neigh4_status == 1 || neigh6_status == 1 )); then
-				neighbor_status=1
-			elif (( neigh4_status == 2 || neigh6_status == 2 )); then
-				neighbor_status=2
-			elif ha_neighbor_identity_verdict "$route4_device" "$neigh4_input" \
-				"$route6_device" "$neigh6_input"; then
-				neighbor_status=0
-			else
-				neighbor_status=$?
-			fi
-		fi
-		assurance_verdict "$neighbor_status" \
-			"cluster: Group12 read-only neighbor identity (v4 ip neigh show ${IPERF_TARGET4} dev ${route4_device:-<no-route-device>} rc=${neigh4_rc} output=${neigh4_evidence:-<empty>}; v6 ip -6 neigh show ${IPERF_TARGET6} dev ${route6_device:-<no-route-device>} rc=${neigh6_rc} output=${neigh6_evidence:-<empty>})"
+		# #18586: the neighbor identity is read on the RG OWNER (the node
+		# holding WAN_GW80_4), where the WAN targets are on-link. It used to
+		# be read on the LAN host, which reaches the off-subnet target through
+		# its gateway and never holds a neighbor entry for it, so the cell was
+		# VOID on every run and made every test-connectivity run VOID.
+		target_neighbor_identity_cell
 	else
 		skip "cluster: LAN host tests (${CLUSTER_LAN_HOST} not running)"
 		void "cluster: Group10 IPv4 TTL=1 (LAN host ${CLUSTER_LAN_HOST} unavailable)"

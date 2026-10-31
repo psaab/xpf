@@ -1811,3 +1811,30 @@ ha_target_claim_check() {
 	fi
 	return 0
 }
+
+# ha_rg_owner_node <control> <node>...
+# #18586: print the ONE node that holds <control> (the cluster's own address
+# on a WAN VLAN, e.g. WAN_GW80_4), i.e. the RG owner whose neighbor entries
+# carry that VLAN's traffic. Read-only (`ip -o -4 addr show`). Status 2 when
+# no node or more than one node holds it.
+ha_rg_owner_node() {
+	local control="$1" node addrs owners=()
+	shift
+	[[ -n "$control" ]] || return 2
+	for node in "$@"; do
+		# An unreadable node is not "does not hold": it is unknown.
+		if ! addrs=$(incus exec "$node" -- ip -o -4 addr show 2>/dev/null); then
+			printf 'rg owner: could not read the addresses of %s\n' "$node" >&2
+			return 2
+		fi
+		# Exact address match (field 4 is addr/len): .8 never matches .80.
+		if awk -v c="$control" '{split($4, a, "/"); if (a[1] == c) f = 1} END {exit !f}' <<<"$addrs"; then
+			owners+=("$node")
+		fi
+	done
+	if (( ${#owners[@]} != 1 )); then
+		printf 'rg owner: %d nodes hold %s (%s)\n' "${#owners[@]}" "$control" "${owners[*]:-none}" >&2
+		return 2
+	fi
+	printf '%s\n' "${owners[0]}"
+}
