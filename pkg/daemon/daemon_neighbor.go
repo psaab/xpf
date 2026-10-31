@@ -362,7 +362,10 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 	})
 
 	if resolved > 0 {
-		slog.Info("proactive neighbor resolution", "resolving", resolved, "total_targets", len(targets))
+		// #18617: Debug, not Info. scheduleStandbyNeighborRefresh runs this on
+		// every synced-session install (at most once a second), so an Info
+		// line here was a per-second log under steady HA load.
+		slog.Debug("proactive neighbor resolution", "resolving", resolved, "total_targets", len(targets))
 		if waitForReplies {
 			// Brief pause to allow ARP responses
 			time.Sleep(500 * time.Millisecond)
