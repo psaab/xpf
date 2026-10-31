@@ -336,13 +336,13 @@ fn stamped_punt_seed_kept_mid_split_retired_on_return_18620() {
 
 /// The retirement is scoped to `FabricPuntSeed`. A MissingNeighborSeed is
 /// minted by the egress owner itself while its next hop resolves. Its egress is
-/// local by construction, and it is its own authority, so it must survive its
-/// own flow's next packet.
+/// local by construction, and it is its own authority. Once its neighbor
+/// resolves it SERVES the flow, and it must keep doing so: retiring it on that
+/// hit would send the flow's non-SYN segments to the SYN-first drop.
 #[test]
 fn missing_neighbor_seed_is_not_retired_18620() {
-    let forwarding = fw1_owner_forwarding();
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    // An on-link WAN address with no neighbor entry.
+    // An on-link WAN address with no neighbor entry yet.
     let unresolved = Ipv4Addr::new(172, 16, 80, 77);
     let key = crate::session::SessionKey {
         dst_ip: IpAddr::V4(unresolved),
@@ -353,34 +353,51 @@ fn missing_neighbor_seed_is_not_retired_18620() {
     let empty = Arc::new(Mutex::new(FastMap::default()));
     let _ = lan_segment_to(
         &mut owner,
-        &forwarding,
+        &fw1_owner_forwarding(),
         &owner_ha(now_secs),
         &empty,
         unresolved,
         TCP_SYN,
     );
-    let origin = owner.entry_with_origin(&key).map(|(_, _, origin)| origin);
     assert_eq!(
-        origin,
+        owner.entry_with_origin(&key).map(|(_, _, origin)| origin),
         Some(SessionOrigin::MissingNeighborSeed),
         "fixture: a SYN to an unresolved on-link address must mint a missing-neighbor seed"
     );
-    // An ACK: it can only hit the pending seed or, if the seed were retired,
-    // miss and be dropped by the SYN-first guard, leaving no row. (The
-    // pending-neighbor path re-mints the seed's incarnation on its own, so the
-    // row's ORIGIN is the observable here, not its session id.)
-    let _ = lan_segment_to(
+
+    // The neighbor resolves. The flow's next segment, an ACK, must be served
+    // by the seed. An ACK cannot open a flow, so if the seed were retired the
+    // segment would be a SYN-first drop and leave no row.
+    let mut snapshot = fw1_owner_snapshot();
+    snapshot.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-7-0-2.80".to_string(),
+        ifindex: WAN_UNIT_IFINDEX,
+        family: "inet".to_string(),
+        ip: unresolved.to_string(),
+        mac: "10:66:6a:8b:91:77".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    let resolved = build_forwarding_state(&snapshot);
+    let (tx, _) = lan_segment_to(
         &mut owner,
-        &forwarding,
+        &resolved,
         &owner_ha(now_secs),
         &empty,
         unresolved,
         TCP_ACK,
     );
     assert_eq!(
+        tx,
+        [1, 0, 0],
+        "the seed must serve its flow out the WAN once the neighbor resolves"
+    );
+    assert_eq!(
         owner.entry_with_origin(&key).map(|(_, _, origin)| origin),
         Some(SessionOrigin::MissingNeighborSeed),
-        "the missing-neighbor seed must survive its flow's next packet"
+        "the missing-neighbor seed must survive serving its flow"
     );
 }
 

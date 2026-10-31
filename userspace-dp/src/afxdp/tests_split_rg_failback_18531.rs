@@ -83,6 +83,11 @@ pub(super) fn split_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
 /// replace the cluster-terminal default (what fw1's FIB held while it owned
 /// RG1, and still holds in the window before FRR reloads).
 pub(super) fn fw1_owner_forwarding() -> ForwardingState {
+    build_forwarding_state(&fw1_owner_snapshot())
+}
+
+/// The snapshot behind `fw1_owner_forwarding`, for cells that add to it.
+pub(super) fn fw1_owner_snapshot() -> crate::ConfigSnapshot {
     let raw = include_str!("testdata_15742h/snap-split-fw1.json");
     let mut v: serde_json::Value = serde_json::from_str(raw).expect("json");
     let snap = v.get_mut("snapshot").expect("snapshot");
@@ -106,9 +111,7 @@ pub(super) fn fw1_owner_forwarding() -> ForwardingState {
             "preference": if next_hop.is_some() { 5 } else { 0 },
         }));
     }
-    let snapshot: crate::ConfigSnapshot =
-        serde_json::from_value(snap.clone()).expect("decode fw1 owner snapshot");
-    build_forwarding_state(&snapshot)
+    serde_json::from_value(snap.clone()).expect("decode fw1 owner snapshot")
 }
 
 pub(super) fn forward_key() -> crate::session::SessionKey {
