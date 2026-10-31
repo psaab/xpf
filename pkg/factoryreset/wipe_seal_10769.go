@@ -57,6 +57,7 @@ var (
 		"/etc/ssh/sshd_config.d/xpf.conf",
 		"/etc/chrony/sources.d/xpf.sources",
 		"/etc/chrony/conf.d/xpf-threshold.conf",
+		"/etc/chrony/conf.d/xpf-acquisition.conf",
 		"/etc/systemd/resolved.conf.d/xpf.conf",
 		"/etc/systemd/resolved.conf.d/bpfrx.conf",
 	}

@@ -179,6 +179,9 @@ func isolateRecoveryApplyHost(t *testing.T) *recoveryHostSeams {
 		}
 	}
 	chronySourcesPath, chronyThresholdPath = s.chronySources, s.chronyThreshold
+	origCA := chronyAcquisitionPath
+	chronyAcquisitionPath = filepath.Join(dir, "xpf-acquisition.conf")
+	t.Cleanup(func() { chronyAcquisitionPath = origCA })
 	origChReload := chronyReloadFn
 	reloaded := false
 	chronyReloadFn = func(sourcesChanged, thresholdChanged bool) chronyReloadOutcome {
