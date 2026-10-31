@@ -141,7 +141,7 @@ a new one with no registration fails `scripts/selftest-census.sh` by name.
 
 ### Python modules vs tests
 
-Modules/helpers (31): `cluster_status_parse.py`,
+Modules/helpers (32): `cluster_status_parse.py`,
 `cos_be_contention_validate.py`, `cos_fixture_spec.py`, `fairness_cov.py`,
 `fairness_equal_flow_capture.py`, `fairness_multi_sample.py`,
 `fairness_surplus_giveback_validate.py`, `host_inbound_probe.py`,

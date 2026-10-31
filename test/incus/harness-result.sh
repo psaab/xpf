@@ -202,16 +202,25 @@ _ha_smoke_summary() {
 	fi
 	skipped=$(grep -oE '[0-9]+ passed, [0-9]+ failed, [0-9]+ skipped' "$log" | tail -1 |
 		sed -E 's/.*, ([0-9]+) skipped/\1/')
-	printf '%s %s %s' "$p" "$f" "$skipped"
+	# #18583: the RG-move soak appends ", <k> cost" (moves that were correct
+	# but over the #18559 transition budget), judged master-relative, so it
+	# rides the ledger as cells_cost instead of being dropped.
+	local cost
+	cost=$(grep -oE '[0-9]+ passed, [0-9]+ failed, [0-9]+ cost' "$log" | tail -1 |
+		sed -E 's/.*, ([0-9]+) cost/\1/')
+	# "-" holds an empty slot so `read` does not shift the later field.
+	printf '%s %s %s %s' "$p" "$f" "${skipped:--}" "${cost:--}"
 }
 harness_adapt_ha_smoke() {
 	local rc="$1" log="$2"
-	local summary p f skipped=""
+	local summary p f skipped="" cost=""
 	if ! summary=$(_ha_smoke_summary "$log" "$rc"); then
 		printf '%s\n' "$summary"
 		return 0
 	fi
-	read -r p f skipped <<<"$summary"
+	read -r p f skipped cost <<<"$summary"
+	[[ "$skipped" == "-" ]] && skipped=""
+	[[ "$cost" == "-" ]] && cost=""
 	# ANCHORED iperf extraction: Gbps comes ONLY from a pass()/fail() cell
 	# line -- `^[[:space:]]*(PASS|FAIL)[[:space:]]+iperf3 throughput` --
 	# LAST match; the figure is the FIRST `<n> Gbps` on it. Floor prose
@@ -260,16 +269,19 @@ harness_adapt_ha_smoke() {
 }
 harness_adapt_smoke_cells() {
 	local rc="$1" log="$2"
-	local summary p f skipped=""
+	local summary p f skipped="" cost=""
 	if ! summary=$(_ha_smoke_summary "$log" "$rc"); then
 		printf '%s\n' "$summary"
 		return 0
 	fi
-	read -r p f skipped <<<"$summary"
+	read -r p f skipped cost <<<"$summary"
+	[[ "$skipped" == "-" ]] && skipped=""
+	[[ "$cost" == "-" ]] && cost=""
 	# NO iperf extraction by design: these smokes emit no throughput cell,
 	# so the headline is FIXED and iperf-looking prose is ignored.
 	local metrics="cells_passed=$p cells_failed=$f"
 	[[ -n "$skipped" ]] && metrics="$metrics cells_skipped=$skipped"
+	[[ -n "$cost" ]] && metrics="$metrics cells_cost=$cost"
 	if ((f > 0)); then
 		printf 'FAIL\t\tcells_passed\thigher-better\t%s\n' "$metrics"
 		return 0

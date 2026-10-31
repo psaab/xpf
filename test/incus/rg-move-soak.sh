@@ -27,8 +27,10 @@
 #                    views                                  (default SOAK_SLEEP)
 #   SOAK_MAX_GAP_MS  longest ping gap allowed per move     (default 1000)
 #   SOAK_MAX_STALL_MS worst iperf3 stream stall per move   (default 2000)
-#                    Over-budget gaps/stalls that recover are COST (#18559),
-#                    not FAIL; SOAK_STRICT_COST=1 scores them as FAIL.
+#                    A single-stream stall over it that recovers (ping and
+#                    aggregate within SOAK_MAX_GAP_MS) is COST (#18559), not
+#                    FAIL; SOAK_STRICT_COST=1 scores it as FAIL.
+#   SOAK_MAX_COST_STALL_MS COST cap: a longer recovered stall FAILs (10000)
 #   SOAK_FOLLOW_MIN_PKTS RETH-member packets the target must carry between
 #                    landing and the window's end (default 500)
 #   SOAK_TRAFFIC=0   skip traffic (control-plane only; the run exits 2)
@@ -41,8 +43,9 @@
 #
 # Exit: 0 every move PASS or COST; 1 any FAIL; 2 no FAIL but VOID (a void
 # move, a void run — preflight, busy traffic target, harness error, SIGTERM —
-# or a disabled check). The last line, "rg-move-soak: N passed, M failed",
-# is what the smoke-cells ledger adapter scores (make test-rg-move-soak).
+# or a disabled check). The last line, "rg-move-soak: N passed, M failed,
+# K cost", is what the smoke-cells ledger adapter scores and records
+# (cells_cost) under make test-rg-move-soak.
 #
 # Usage:
 #   ./test/incus/rg-move-soak.sh                     # loss, 20 moves, RG2
@@ -72,7 +75,7 @@ set +e
 python3 -u "${SCRIPT_DIR}/rg_move_soak.py" \
 	--fw0 "$FW0" --fw1 "$FW1" --lan "$CLUSTER_LAN_HOST" \
 	--target4 "$IPERF_TARGET4" --target6 "${IPERF_TARGET6:-}" \
-	--lan-vip4 "${LAN_VIP4:-}" --lan-vip6 "${LAN_VIP6:-}" \
+	--lan-vip4 "${LAN_VIP4:-}" \
 	--outdir "$OUT" 2>&1 | tee "$OUT/soak.log"
 rc=${PIPESTATUS[0]}
 set -e

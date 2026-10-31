@@ -191,12 +191,15 @@ review). After landing it takes each helper's per-binding RX+TX packet
 counters and again at the end of the window: the target node's members of the
 RG's RETHs (from `show configuration | display set`) must carry at least
 `SOAK_FOLLOW_MIN_PKTS` (500) packets in between and the other node's at most
-10 % of that. For the LAN RG it also reads the LAN host's `ip neigh show
-<LAN VIP>`: the entry must resolve to the target node's per-node RETH MAC
+10 % of that. For the LAN RG it also reads the LAN host's `ip -4 neigh show
+<LAN VIP>` and, for IPv6, the neighbour entry of its RA default router (the
+RETH link-local, e.g. `fe80::bf72:16:2` on loss — the global LAN VIP is not
+what IPv6 traffic uses): each must resolve to the target node's per-node RETH MAC
 (fw0 `02:bf:72:CC:RR:..` even, fw1 odd; the soak maps MACs to nodes from each
 node's `ip -o link`). A move whose views and helpers flipped while the
 packets stayed on the old node is a FAIL ("traffic did not follow"). RG0
-(no RETH) has nothing to measure.
+(no RETH) has nothing to measure; a data RG that maps to no RETH members
+voids the run rather than switching the check off.
 
 Sessions are on both nodes before every planned move, so any lost packet is a
 transition cost. The soak attributes every ping gap and iperf3 stall to the
@@ -229,13 +232,18 @@ to the moment the next one is issued, on the LAN host's clock.
   - Use `SOAK_RG=all` to move the RGs together.
 
 The hitless targets (at most 3 pings and no 200 ms stall per single-RG move)
-are row H10's, tracked by #18559. H11 judges correctness. A gap over
-`SOAK_MAX_GAP_MS` or a stall over `SOAK_MAX_STALL_MS` that the stream
-recovers from is **COST**, not FAIL: the move was correct and the cost is
-#18559's, judged master-relative like H10. On loss on 2026-10-31 that was 5 of
-200 moves at 5 s and 1 of 60 at 2 s (single streams stalled 2.2–6.6 s);
-scoring them FAIL would make a 40-move per-PR leg red most of the time on
-master. `SOAK_STRICT_COST=1` restores FAIL for a hitless-target run.
+are row H10's, tracked by #18559. H11 judges correctness, and **COST** is
+deliberately narrow: ONE stream's stall over `SOAK_MAX_STALL_MS` (2 s) from
+which it recovered, while ping stayed within `SOAK_MAX_GAP_MS` (1 s) and the
+aggregate never went to zero for longer than that — TCP backoff after a short
+loss, #18559's cost, judged master-relative like H10. On loss on 2026-10-31
+that was 5 of 200 moves at 5 s and 1 of 60 at 2 s (single streams stalled
+2.2–6.6 s, ping gaps never over 115 ms); scoring them FAIL would make a
+40-move per-PR leg red most of the time on master. Everything wider is a
+FAIL: a ping gap over 1 s, an aggregate (all-stream) outage over 1 s, a stall
+past `SOAK_MAX_COST_STALL_MS` (10 s), a stream that never recovers. So "the
+traffic stopped for a few seconds and came back" is never a pass.
+`SOAK_STRICT_COST=1` scores COST as FAIL for a hitless-target run.
 
 ## Running the soak
 
@@ -279,9 +287,10 @@ Knobs:
 | `SOAK_MAX_STALL_MS` | 2000 | worst iperf3 stream stall allowed in a move's window |
 | `SOAK_FOLLOW_MIN_PKTS` | 500 | RETH-member packets the target must carry between landing and the window's end |
 | `SOAK_STRICT_COST` | 0 | `1`: a COST (over-budget but recovered) scores FAIL |
+| `SOAK_MAX_COST_STALL_MS` | 10000 | a recovered single-stream stall longer than this is a FAIL, not COST |
 | `SOAK_TRAFFIC` | 1 | `0`: control plane only (the run exits 2) |
 | `SOAK_HELPER_CHECK` | 1 | `0`: skip the helper reads (the run exits 2) |
-| `SOAK_IPV6` | 1 | `0`: IPv4 only |
+| `SOAK_IPV6` | 1 | `0`: IPv4 only. IPv6 traffic-follow reads the LAN host's RA default router (a RETH link-local), which is what its IPv6 traffic uses; no default route, or an unmappable router MAC, voids the run |
 | `SOAK_RESTORE` | 1 | `0`: do not put node0 back as primary at the end (matrix row D3) |
 | `SOAK_IPERF_PORT` | 5211 | the unshaped CoS class on the loss path |
 | `SOAK_IPERF6_PORT` | 5210 | IPv6 iperf3 server port |
@@ -289,8 +298,11 @@ Knobs:
 
 `make test-rg-move-soak` runs it through `harness-result.sh` (`smoke-cells`,
 `--require-helper-attestation`), so a run writes a ledger row with build
-attestation; the soak's last line, `rg-move-soak: <n> passed, <m> failed`,
-is what the adapter scores (a correct move — PASS or COST — passed). At the
+attestation; the soak's last line, `rg-move-soak: <n> passed, <m> failed,
+<k> cost`, is what the adapter scores (a correct move — PASS or COST —
+passed) and the ledger records `cells_cost=<k>`, so the master-relative COST
+rule is mechanical. Under `SOAK_STRICT_COST=1` the COST moves are counted in
+`failed` and the row is a FAIL. At the
 end the soak puts node0 back as primary for every RG it moved (a local pull
 on node0, reported as `restore:`; never folded into the moves' verdicts).
 
@@ -305,10 +317,11 @@ two seconds after landing is caught.
 One verdict per move:
 
 - **PASS**: every condition in "What a correct move is" held.
-- **COST**: the move was correct, but its transition cost was over budget —
-  a ping gap over `SOAK_MAX_GAP_MS` or a stream stall over
-  `SOAK_MAX_STALL_MS` that recovered (#18559). Counted, not failed; judged
-  master-relative (row H11). `SOAK_STRICT_COST=1` makes it a FAIL.
+- **COST**: the move was correct, but one stream stalled over
+  `SOAK_MAX_STALL_MS` and recovered within `SOAK_MAX_COST_STALL_MS`, while
+  ping and the aggregate stayed within `SOAK_MAX_GAP_MS` (#18559). Counted,
+  not failed; judged master-relative (row H11). `SOAK_STRICT_COST=1` makes it
+  a FAIL.
 - **FAIL**, for any of:
   - the CLI printed an error (including #18585's `cross-node request not
     sent` refusal);
@@ -321,7 +334,10 @@ One verdict per move:
   - the traffic did not follow: the RETH-member counters or the LAN host's
     neighbour entry stayed on the old node, or nothing flowed in the
     window's tail (either family);
-  - a stream that stalled in the window and never recovered;
+  - a ping gap over `SOAK_MAX_GAP_MS`, or every stream at once under
+    1 Mbit/s for longer than that (an aggregate outage), in either family;
+  - a stream stall past `SOAK_MAX_COST_STALL_MS`, or one that never
+    recovered;
   - ping or iperf3 stopped covering the window.
 - **VOID**: the precondition failed. Before a move to node *t*, the RG was not
   cleanly owned by the other node at the end of the previous window. A failed
@@ -367,7 +383,8 @@ a late dual-active sample and a revert), are in
 | `traffic did not follow to nodeT: the LAN host's v4 neighbour entry ... still resolves to nodeN's MAC` | The LAN host still sends to the old owner's per-node RETH MAC | The new owner's GARP did not reach or was not accepted; check `garpEpoch` and the old owner's VIP removal |
 | `traffic did not follow: no v4/v6 ping replies ...` / `... iperf3 aggregate under 1 Mbit/s ...` | The views moved, but nothing forwards in the window's tail | A forwarding or ownership divergence: check VIPs, neighbours and fabric redirect |
 | `v4/v6 stream(s) [...] stalled in this window and never recovered` | A stream died at this move | The move killed sessions: check session sync for that flow, and #18531/#18535-class revocations |
-| COST: `v4 stream N stalled ... (recovered)` / `v4 ping gap ...` | The move was correct; its transition cost exceeded the budget | Compare the run's COST count and stall distribution with master's (row H11, #18559) |
+| `v4 ping gap N ms > 1000 ms` / `v4 aggregate outage: every stream under 1 Mbit/s for N ms` | The traffic stopped, not one TCP stream backing off | Treat as a transition failure: compare with H10's numbers and pull the journals for the window |
+| COST: `v4 stream N stalled ... (recovered; ping and aggregate within budget)` | The move was correct; its transition cost exceeded the budget | Compare the run's COST count and stall distribution with master's (row H11, #18559) |
 | `FATAL: preflight VOID: RGg has no single clean owner ...` / `cannot read the LAN host clock` | The cluster was not in a state a move can be judged from | Restore node0 primary (`SOAK_RESTORE`, row D3) and rerun |
 | `FATAL: traffic preflight: v4 iperf3 to ... failed before any move: ... the server is busy running a test` / `not streaming` / `ping ... is not answering` | The traffic target is busy (another lane's iperf3) or unreachable | Check the target and the lock; rerun |
 | `FATAL: harness error: ...` / `harness terminated by signal` | The harness itself failed; the generators were stopped | Fix the harness; the run measured nothing |

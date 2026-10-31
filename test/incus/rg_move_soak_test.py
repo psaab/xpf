@@ -252,6 +252,19 @@ class MoveVerdict(unittest.TestCase):
         r.member_delta = {0: None, 1: 90000}
         self.assertIn("unmeasured", self.verdict(rec([r]))[1][0])
 
+    def test_member_counter_bounds_are_pinned(self):
+        # The other node may carry at most 10 % of the target's packets (on
+        # the WAN RG this is the only guard against a split path), and the
+        # target at least follow_min_pkts (500).
+        r = rgres()
+        r.follow_expected = True
+        for delta, want in (({0: 1500, 1: 10000}, soak.FAIL),   # 15 % on the old node
+                            ({0: 900, 1: 10000}, soak.PASS),    # 9 %
+                            ({0: 0, 1: 499}, soak.FAIL),        # under the minimum
+                            ({0: 0, 1: 500}, soak.PASS)):
+            r.member_delta = delta
+            self.assertEqual(self.verdict(rec([r]))[0], want, delta)
+
     def test_lan_neighbour_on_the_old_node_fails(self):
         r = rgres()
         r.neigh_node = {"v4": 0}
@@ -260,18 +273,36 @@ class MoveVerdict(unittest.TestCase):
         self.assertIn("neighbour entry", why[0])
         r.neigh_node = {"v4": 1, "v6": None}  # v6 unresolved is not evidence either way
         self.assertEqual(self.verdict(rec([r]))[0], soak.PASS)
+        r.neigh_node = {"v4": 1, "v6": 0}
+        v, why = self.verdict(rec([r]))
+        self.assertEqual(v, soak.FAIL)
+        self.assertIn("v6 neighbour entry", why[0])
 
-    def test_ping_gap_over_budget_is_a_cost_not_a_fail(self):
+    def test_ping_gap_over_budget_fails(self):
+        # Seat AF: COST must not absorb "the traffic stopped". A ping gap over
+        # budget is a FAIL however the move landed.
         t = dict(GOOD_TRAFFIC, ping_max_gap_ms=1500.0, ping_lost=149)
         v, why = self.verdict(rec([rgres()], t))
-        self.assertEqual(v, soak.COST)
+        self.assertEqual(v, soak.FAIL)
         self.assertIn("ping gap", why[0])
 
-    def test_recovered_stream_stall_over_budget_is_a_cost(self):
+    def test_aggregate_outage_over_budget_fails(self):
+        t = dict(GOOD_TRAFFIC, agg_worst_ms=1200.0)
+        v, why = self.verdict(rec([rgres()], t))
+        self.assertEqual(v, soak.FAIL)
+        self.assertIn("aggregate outage", why[0])
+
+    def test_recovered_single_stream_stall_is_a_cost(self):
         t = dict(GOOD_TRAFFIC, worst_stall_ms=2500.0)
         v, why = self.verdict(rec([rgres()], t))
         self.assertEqual(v, soak.COST)
         self.assertIn("recovered", why[0])
+
+    def test_stall_past_the_cost_cap_fails(self):
+        v, why = self.verdict(rec([rgres()], dict(GOOD_TRAFFIC, worst_stall_ms=10500.0)))
+        self.assertEqual(v, soak.FAIL)
+        self.assertIn("COST cap", why[0])
+        self.assertEqual(self.verdict(rec([rgres()], dict(GOOD_TRAFFIC, worst_stall_ms=9900.0)))[0], soak.COST)
 
     def test_stream_that_never_recovers_fails(self):
         t = dict(GOOD_TRAFFIC, worst_stall_ms=9000.0, died_streams=[7])
@@ -280,10 +311,10 @@ class MoveVerdict(unittest.TestCase):
         self.assertIn("never recovered", why[0])
 
     def test_cost_does_not_hide_a_fail(self):
-        t = dict(GOOD_TRAFFIC, ping_max_gap_ms=1500.0)
+        t = dict(GOOD_TRAFFIC, worst_stall_ms=2500.0)
         v, why = self.verdict(rec([rgres(dual=True)], t))
         self.assertEqual(v, soak.FAIL)
-        self.assertTrue(any("ping gap" in w for w in why))
+        self.assertTrue(any("stalled" in w for w in why))
 
     def test_traffic_not_following_fails(self):
         # The RG moved in both views but nothing answers afterwards.
@@ -309,6 +340,32 @@ class MoveVerdict(unittest.TestCase):
     def test_multi_rg_any_failure_fails(self):
         v, _ = self.verdict(rec([rgres(rg=1), rgres(rg=2, landed=None)]))
         self.assertEqual(v, soak.FAIL)
+
+
+REAL_HELPER_STATUS = '{"status": {"ha_groups": [{"rg_id": 0, "active": false, "watchdog_timestamp": 45382, "forwarding_active": false, "lease_state": "inactive"}, {"rg_id": 1, "active": false, "watchdog_timestamp": 45382, "forwarding_active": false, "lease_state": "inactive"}, {"rg_id": 2, "active": false, "watchdog_timestamp": 45381, "forwarding_active": false, "lease_state": "inactive"}], "bindings": [{"interface": "ge-7-0-2", "queue_id": 0, "ifindex": 6, "rx_packets": 265995, "tx_packets": 70289003, "bound": true}, {"interface": "ge-7-0-1", "queue_id": 0, "ifindex": 5, "rx_packets": 78561686, "tx_packets": 562721, "bound": true}, {"interface": "ge-7-0-0", "queue_id": 0, "ifindex": 4, "rx_packets": 299380, "tx_packets": 8272509, "bound": true}, {"interface": "ge-7-0-2", "queue_id": 1, "ifindex": 6, "rx_packets": 2983317, "tx_packets": 12, "bound": true}, {"interface": "ge-7-0-1", "queue_id": 1, "ifindex": 5, "rx_packets": 14482103, "tx_packets": 3431739, "bound": true}, {"interface": "ge-7-0-0", "queue_id": 1, "ifindex": 4, "rx_packets": 451028, "tx_packets": 14482066, "bound": true}]}}'
+
+
+class HelperSummary(unittest.TestCase):
+    """HELPER_SNIPPET's parsing, against a real helper `status` reply
+    (tcp fw1, 2026-10-31, trimmed). The `interface`/`ifname` key bug was
+    found live only; this is the hermetic cell it lacked."""
+
+    def test_real_status_reply(self):
+        got = soak.helper_summary(json.loads(REAL_HELPER_STATUS))
+        self.assertEqual(got["ha"], {"0": False, "1": False, "2": False})
+        self.assertEqual(got["if"]["ge-7-0-1"], 78561686 + 562721 + 14482103 + 3431739)
+        self.assertEqual(set(got["if"]), {"ge-7-0-0", "ge-7-0-1", "ge-7-0-2"})
+
+    def test_forwarding_active_wins_over_active(self):
+        r = {"status": {"ha_groups": [{"rg_id": 2, "active": True, "forwarding_active": False}],
+                        "bindings": []}}
+        self.assertEqual(soak.helper_summary(r)["ha"], {"2": False})
+        r = {"status": {"ha_groups": [{"rg_id": 2, "active": True}], "bindings": []}}
+        self.assertEqual(soak.helper_summary(r)["ha"], {"2": True})  # older helper
+
+    def test_snippet_ships_the_same_parser(self):
+        self.assertIn("def helper_summary(r):", soak.HELPER_SNIPPET)
+        compile(soak.HELPER_SNIPPET, "<helper-snippet>", "exec")
 
 
 class Summary(unittest.TestCase):
@@ -541,6 +598,8 @@ class FakeCluster:
             self.events.append((lan_now + 0.3, lan_now + 1.8, "gap"))
         elif fault == "stall":
             self.events.append((lan_now + 0.3, lan_now + 2.8, "stall"))
+        elif fault == "outage":
+            self.events.append((lan_now + 0.3, lan_now + 3.8, "gap"))
         elif fault == "die":
             self.events.append((lan_now + 0.3, float("inf"), "stall"))
         self.clock_.sleep(0.6)
@@ -580,10 +639,11 @@ class FakeCluster:
                 out.append(f"{rg + 3}: {MEMBERS[rg][n]}: <BROADCAST> mtu 9000\\    link/ether {mac} brd ff:ff:ff:ff:ff:ff")
         return "\n".join(out)
 
-    def neigh(self, vip):
-        if ":" in vip:
-            return ""
-        return f"{vip} dev eth0 lladdr {MACS[(self.forwarder(2), 2)]} REACHABLE"
+    def neigh(self, addr, dev=""):
+        return f"{addr} dev eth0 lladdr {MACS[(self.forwarder(2), 2)]} REACHABLE"
+
+    def lan_v6_router(self):
+        return ("fe80::bf72:16:2", "eth0")
 
     def clock(self, ref):
         if ref == self.lan:
@@ -654,13 +714,13 @@ class FakeCluster:
 
 
 def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0, traffic=True, helper_check=True,
-             v6=False, restore=True, files=None):
+             v6=False, restore=True, files=None, strict_cost=False):
     with tempfile.TemporaryDirectory() as d:
         cfg = soak.Config(moves=moves, sleep_s=sleep_s, rgs=rgs, issuer=issuer, traffic=traffic,
-                          helper_check=helper_check, restore=restore,
+                          helper_check=helper_check, restore=restore, strict_cost=strict_cost,
                           budget=soak.Budget(converge_s=sleep_s), outdir=d, run_id="t",
                           target4="172.16.80.200", target6="2001:db8::200" if v6 else "",
-                          lan_vip4="10.0.61.1", lan_vip6="2001:db8:1::1" if v6 else "")
+                          lan_vip4="10.0.61.1")
         logs = []
         rc = soak.Soak(cfg, cluster, now_fn=clock.now, sleep_fn=clock.sleep, log=logs.append).run()
         with open(os.path.join(d, "result.json")) as f:
@@ -710,9 +770,9 @@ class Orchestration(unittest.TestCase):
         clock = FakeClock()
         c = FakeCluster(clock, {2: 0}, faults={3: "gap"})
         rc, res, _ = run_fake(c, clock, moves=5)
-        self.assertEqual(verdicts(res), ["PASS", "PASS", "COST", "PASS", "PASS"], res["moves"][2]["reasons"])
-        self.assertIn("ping gap", res["moves"][2]["reasons"][0])
-        self.assertEqual(rc, 0)
+        self.assertEqual(verdicts(res), ["PASS", "PASS", "FAIL", "PASS", "PASS"], res["moves"][2]["reasons"])
+        self.assertIn("ping gap", " ".join(res["moves"][2]["reasons"]))
+        self.assertEqual(rc, 1)
 
     def test_recovered_stall_is_cost_and_dead_stream_fails(self):
         clock = FakeClock()
@@ -856,7 +916,7 @@ class Orchestration(unittest.TestCase):
         c.config_set = lambda node: "set interfaces reth1 redundant-ether-options redundancy-group 2"
         rc, res, _ = run_fake(c, clock, moves=2)
         self.assertEqual(rc, 2)
-        self.assertIn("no member interfaces", res["void"])
+        self.assertIn("a RETH with no members", res["void"])
 
     def test_unmappable_lan_neighbour_voids_the_run(self):
         clock = FakeClock()
@@ -865,6 +925,94 @@ class Orchestration(unittest.TestCase):
         rc, res, _ = run_fake(c, clock, moves=2)
         self.assertEqual(rc, 2)
         self.assertIn("neighbour entry", res["void"])
+
+    def test_long_total_outage_is_never_a_pass(self):
+        # Seat AF probe4: every move blackholes ALL traffic for 3.5 s, then
+        # recovers. That is "the iperfs stop"; it must FAIL, and the ledger
+        # line must say so.
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, faults={i: "outage" for i in range(1, 5)})
+        rc, res, logs = run_fake(c, clock, moves=4)
+        self.assertEqual(rc, 1)
+        self.assertEqual(verdicts(res), ["FAIL"] * 4)
+        self.assertIn("rg-move-soak: 0 passed, 4 failed, 0 cost", "\n".join(logs))
+
+    def test_summary_line_carries_cost_and_strict_mode_fails_it(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, faults={2: "stall"})
+        rc, res, logs = run_fake(c, clock, moves=3)
+        self.assertEqual(rc, 0)
+        self.assertIn("rg-move-soak: 3 passed, 0 failed, 1 cost", "\n".join(logs))
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, faults={2: "stall"})
+        rc, res, logs = run_fake(c, clock, moves=3, strict_cost=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("rg-move-soak: 2 passed, 1 failed, 1 cost", "\n".join(logs))
+
+    def test_split_path_on_the_wan_rg_fails(self):
+        # Seat AF probe3: after the move the target carries the RG's packets,
+        # but the old owner's members keep carrying them too.
+        class SplitPath(FakeCluster):
+            def _tick(self, t):
+                super()._tick(t)
+                for rg, by_node in MEMBERS.items():
+                    if rg in self.owner and self.owner[rg] != self.initial[rg]:
+                        old = self.initial[rg]
+                        self.counters[old][by_node[old]] = self.counters[old].get(by_node[old], 0) + 500
+        clock = FakeClock()
+        c = SplitPath(clock, {1: 0, 2: 0})
+        rc, res, _ = run_fake(c, clock, moves=4, rgs="1")
+        self.assertEqual(rc, 1)
+        self.assertIn("did not follow to node1", " ".join(res["moves"][0]["reasons"]))
+
+    def test_unparsed_rg_voids_instead_of_switching_the_check_off(self):
+        # Seat AF probe3: RG1's RETH->RG line missing => no members => the
+        # counter check would silently turn off while traffic is stuck.
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, stuck_traffic=True)
+        c.config_set = lambda node: "\n".join(line for line in Membership.CONFIG.splitlines()
+                                              if "redundancy-group 1" not in line)
+        rc, res, _ = run_fake(c, clock, moves=4, rgs="1")
+        self.assertEqual(rc, 2)
+        self.assertIn("RG1 maps to no RETH member", res["void"])
+
+    def test_ipv6_follows_the_ra_router_not_the_global_vip(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        rc, res, _ = run_fake(c, clock, moves=2, v6=True)
+        self.assertEqual(rc, 0, res["summary"])
+        self.assertEqual(res["preflight"]["lan_v6_router"], ["fe80::bf72:16:2", "eth0"])
+        self.assertEqual(res["moves"][0]["rgs"][0]["neigh_node"]["v6"], 1)
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        c.lan_v6_router = lambda: None
+        rc, res, _ = run_fake(c, clock, moves=2, v6=True)
+        self.assertEqual(rc, 2)
+        self.assertIn("no IPv6 default route", res["void"])
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        plain = c.neigh
+        c.neigh = lambda addr, dev="": "" if addr.startswith("fe80") else plain(addr, dev)
+        rc, res, _ = run_fake(c, clock, moves=2, v6=True)
+        self.assertEqual(rc, 2)
+        self.assertIn("IPv6 default router", res["void"])
+
+    def test_sigterm_skips_the_restore(self):
+        # Seat AF probe5: no RG move may run after a SIGTERM (the lock
+        # wrapper may have died from the same signal).
+        class TermAfterMove1(FakeCluster):
+            def cli(self, node, cmd):
+                out = super().cli(node, cmd)
+                if len(self.commands) == 2:
+                    self.term_at = len(self.commands)
+                    raise SystemExit(143)
+                return out
+        clock = FakeClock()
+        c = TermAfterMove1(clock, {2: 0})
+        with self.assertRaises(SystemExit):
+            run_fake(c, clock, moves=6)
+        self.assertEqual(c.commands[c.term_at:], [])
+        self.assertIsNone(c.gen_start, "the LAN-host generators must be stopped")
 
     def test_no_clean_owner_voids_the_run(self):
         clock = FakeClock()

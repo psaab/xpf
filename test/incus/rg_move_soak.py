@@ -77,6 +77,7 @@ import concurrent.futures
 import json
 import os
 import re
+import inspect
 import shlex
 import signal
 import statistics
@@ -415,6 +416,9 @@ class Budget:
     # node's at most follow_max_other_ratio of that.
     follow_min_pkts: int = 500
     follow_max_other_ratio: float = 0.10
+    # A recovered single-stream stall is COST only up to this; beyond it the
+    # move FAILs however it recovered (seat AF: COST needs an upper bound).
+    max_cost_stall_ms: float = 10000.0
 
 
 @dataclass
@@ -465,7 +469,9 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
     win_stalls = [s for s in stalls if t0 <= s.start < t1]
     worst = max(win_stalls, key=lambda s: s.seconds, default=None)
     died = sorted({s.stream for s in win_stalls if s.to_end})
-    agg_zero = sum(s.seconds for s in agg if t0 <= s.start < t1)
+    win_agg = [s for s in agg if t0 <= s.start < t1]
+    agg_zero = sum(s.seconds for s in win_agg)
+    agg_worst = max((s.seconds for s in win_agg), default=0.0)
     tail_iv = [iv for iv in intervals if iv[0] >= tail0 and iv[1] <= t1 + 1e-6]
     tail_bps = statistics.mean(iv[3] for iv in tail_iv) if tail_iv else None
     covered_ping = bool(replies) and replies[0][0] <= t0 and replies[-1][0] >= tail0
@@ -478,6 +484,7 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
         "worst_stall_stream": None if worst is None else worst.stream,
         "died_streams": died,
         "agg_zero_ms": round(agg_zero * 1000.0, 1),
+        "agg_worst_ms": round(agg_worst * 1000.0, 1),
         "tail_gbps": None if tail_bps is None else round(tail_bps / 1e9, 2),
         "ping_covered": covered_ping,
         "iperf_covered": covered_iperf,
@@ -507,11 +514,13 @@ def follow_reasons(r: RGMoveResult, budget: Budget) -> List[str]:
 def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tuple[str, List[str]]:
     """Score one move.
 
-    VOID (precondition) dominates. Then every correctness FAIL reason. A move
-    with no FAIL but a transition cost over budget — a ping gap or a stream
-    stall that recovered — is COST: the move was correct and the cost is
-    #18559's, judged master-relative like row H10. A stream that never
-    recovers is a FAIL, not a cost.
+    VOID (precondition) dominates. Then every correctness FAIL reason. COST is
+    narrow (seat AF): ONE stream's stall over budget, from which it
+    recovered, while ping and the aggregate stayed within budget — #18559's
+    TCP-backoff cost, judged master-relative like row H10. A ping gap or an
+    aggregate (all-stream) outage over budget is a FAIL: that is the traffic
+    stopping, not a cost. So is a stall past max_cost_stall_ms, or a stream
+    that never recovers.
 
     The precondition is the state observed at the end of the previous move's
     window (or the preflight), so it costs no extra reads and is the same
@@ -563,10 +572,15 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
                 reasons.append(f"traffic did not follow: {fam} iperf3 aggregate under {budget.low_bps / 1e6:g} Mbit/s in the window tail")
             gap = t.get("ping_max_gap_ms")
             if gap is not None and gap > budget.max_gap_ms:
-                costs.append(f"{fam} ping gap {gap:g} ms > {budget.max_gap_ms:g} ms ({t.get('ping_lost')} lost)")
+                reasons.append(f"{fam} ping gap {gap:g} ms > {budget.max_gap_ms:g} ms ({t.get('ping_lost')} lost)")
+            agg_worst = t.get("agg_worst_ms") or 0.0
+            if agg_worst > budget.max_gap_ms:
+                reasons.append(f"{fam} aggregate outage: every stream under {budget.low_bps / 1e6:g} Mbit/s for {agg_worst:g} ms > {budget.max_gap_ms:g} ms")
             stall = t.get("worst_stall_ms") or 0.0
-            if stall > budget.max_stall_ms and not t.get("died_streams"):
-                costs.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_stall_ms:g} ms (recovered)")
+            if stall > budget.max_cost_stall_ms and not t.get("died_streams"):
+                reasons.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_cost_stall_ms:g} ms (past the COST cap)")
+            elif stall > budget.max_stall_ms and not t.get("died_streams"):
+                costs.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_stall_ms:g} ms (recovered; ping and aggregate within budget)")
     if reasons:
         return FAIL, reasons + costs
     if costs:
@@ -649,8 +663,26 @@ def format_table(moves: List[MoveRecord], traffic_enabled: bool) -> str:
 # Live cluster access
 # ---------------------------------------------------------------------------
 
-HELPER_SNIPPET = r"""
-import json, socket
+def helper_summary(r):
+    """Reduce the helper's `status` reply to what the soak scores. Runs ON the
+    firewall (shipped as HELPER_SNIPPET) and hermetically in the cells.
+
+    `ha`: forwarding_active per RG, not active — the helper forwards on
+    active AND an unexpired lease (userspace-dp runtime.rs), exported as
+    forwarding_active; an older helper without it falls back to active.
+    `if`: RX+TX packets per interface summed over queues; the binding key is
+    `interface` (an `ifname` fallback is kept for other builds)."""
+    st = r.get("status", r)
+    ifs = {}
+    for b in st.get("bindings", []):
+        n = b.get("interface") or b.get("ifname")
+        if n:
+            ifs[n] = ifs.get(n, 0) + int(b.get("rx_packets") or 0) + int(b.get("tx_packets") or 0)
+    return {"ha": {str(g.get("rg_id")): bool(g.get("forwarding_active", g.get("active")))
+                   for g in st.get("ha_groups", [])}, "if": ifs}
+
+
+HELPER_SNIPPET = "import json, socket\n" + inspect.getsource(helper_summary) + r"""
 s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect("/run/xpf/userspace-dp.sock")
 s.sendall(json.dumps({"type": "status"}).encode() + b"\n")
 buf = b""
@@ -664,15 +696,7 @@ while True:
         break
     except ValueError:
         pass
-st = r.get("status", r)
-ifs = {}
-for b in st.get("bindings", []):
-    n = b.get("interface") or b.get("ifname")
-    if n:
-        ifs[n] = ifs.get(n, 0) + int(b.get("rx_packets") or 0) + int(b.get("tx_packets") or 0)
-# forwarding_active, not active: the helper forwards on active AND an
-# unexpired lease (userspace-dp runtime.rs), exported as forwarding_active.
-print(json.dumps({"ha": {str(g.get("rg_id")): bool(g.get("forwarding_active", g.get("active"))) for g in st.get("ha_groups", [])}, "if": ifs}))
+print(json.dumps(helper_summary(r)))
 """
 
 _SET_MEMBER = re.compile(r"^set (?:groups \S+ )?interfaces (\S+) gigether-options redundant-parent (reth\d+)\s*$")
@@ -709,6 +733,14 @@ def link_macs(ip_o_link: str) -> Dict[str, str]:
         if m and m.group(2) != "00:00:00:00:00:00":
             out.setdefault(m.group(2), m.group(1))
     return out
+
+
+_DEFAULT_VIA = re.compile(r"^default (?:nhid \d+ )?via (\S+) dev (\S+)", re.M)
+
+
+def parse_default_route(text: str) -> Optional[Tuple[str, str]]:
+    m = _DEFAULT_VIA.search(text or "")
+    return (m.group(1), m.group(2)) if m else None
 
 
 def neigh_mac(text: str) -> Optional[str]:
@@ -758,9 +790,14 @@ class IncusCluster:
         except (ValueError, IndexError, AttributeError):
             return None
 
-    def neigh(self, vip: str) -> str:
-        fam = "-6" if ":" in vip else "-4"
-        return self._exec(self.lan, ["ip", fam, "neigh", "show", vip], timeout=10)[1]
+    def neigh(self, addr: str, dev: str = "") -> str:
+        fam = "-6" if ":" in addr else "-4"
+        return self._exec(self.lan, ["ip", fam, "neigh", "show", addr] + (["dev", dev] if dev else []), timeout=10)[1]
+
+    def lan_v6_router(self) -> Optional[Tuple[str, str]]:
+        """The LAN host's IPv6 default router (the RA link-local), which is
+        what its IPv6 traffic actually uses — not the global LAN VIP."""
+        return parse_default_route(self._exec(self.lan, ["ip", "-6", "route", "show", "default"], timeout=10)[1])
 
     def clock(self, ref: str) -> Optional[float]:
         rc, out = self._exec(ref, ["date", "+%s.%N"], timeout=10)
@@ -822,7 +859,6 @@ class Config:
     target4: str = ""
     target6: str = ""
     lan_vip4: str = ""
-    lan_vip6: str = ""
     iperf_port: int = 5211
     iperf6_port: int = 5210
     iperf_streams: int = 8
@@ -844,6 +880,8 @@ class Soak:
         self.members: Dict[int, List[str]] = {}
         self.macs: Dict[str, Tuple[int, str]] = {}
         self.traffic_started = False
+        self.terminated = False
+        self.v6_router: Optional[Tuple[str, str]] = None
 
     # -- helpers --------------------------------------------------------
 
@@ -918,8 +956,11 @@ class Soak:
         info["rg_members"] = {rg: self.members.get(rg) for rg in rgs}
         if self.cfg.traffic and self.cfg.helper_check:
             for rg in rgs:
-                if rg in self.members and not self.members[rg]:
-                    return (f"RG{rg} has a RETH but no member interfaces were found in the configuration, "
+                # RG0 is the control-plane group (no RETH). Every data RG must
+                # map to members, or the counter check would switch itself off.
+                if rg > 0 and not self.members.get(rg):
+                    return (f"RG{rg} maps to no RETH member interfaces in the configuration "
+                            f"({'a RETH with no members' if rg in self.members else 'no RETH bound to it was parsed'}), "
                             "so the traffic-follow check cannot measure it"), info
         for n in (0, 1):
             for mac, ifname in link_macs(self.c.links(n)).items():
@@ -1037,11 +1078,12 @@ class Soak:
 
     def neigh_nodes(self) -> Dict[str, Optional[int]]:
         out: Dict[str, Optional[int]] = {}
-        for fam, vip in (("v4", self.cfg.lan_vip4), ("v6", self.cfg.lan_vip6)):
-            if not vip:
-                continue
-            mac = neigh_mac(self.c.neigh(vip))
-            out[fam] = self.macs.get(mac, (None, ""))[0] if mac else None
+        if self.cfg.lan_vip4:
+            mac = neigh_mac(self.c.neigh(self.cfg.lan_vip4))
+            out["v4"] = self.macs.get(mac, (None, ""))[0] if mac else None
+        if self.v6_router:
+            mac = neigh_mac(self.c.neigh(*self.v6_router))
+            out["v6"] = self.macs.get(mac, (None, ""))[0] if mac else None
         return out
 
     def restore_node0(self, rgs: List[int]) -> str:
@@ -1087,9 +1129,22 @@ class Soak:
                     if node_if[1] in mem:
                         self._lan_rg = rg
         info["lan_rg"] = self._lan_rg
+        why = None
         if cfg.traffic and cfg.lan_vip4 and self._lan_rg is None:
             why = (f"the LAN host's neighbour entry for {cfg.lan_vip4} does not resolve to a RETH member MAC "
                    "of either node, so the traffic-follow check cannot read it")
+        if cfg.traffic and cfg.target6 and not why:
+            # IPv6 leaves the LAN host via its RA default router (a RETH
+            # link-local), not the global LAN VIP: check THAT neighbour.
+            self.v6_router = self.c.lan_v6_router()
+            info["lan_v6_router"] = self.v6_router
+            mac = neigh_mac(self.c.neigh(*self.v6_router)) if self.v6_router else None
+            if not self.v6_router:
+                why = "the LAN host has no IPv6 default route, so the IPv6 traffic-follow check cannot read it"
+            elif mac not in self.macs:
+                why = (f"the LAN host's IPv6 default router {self.v6_router[0]} resolves to {mac or 'no MAC'}, "
+                       "which is no RETH member MAC of either node")
+        if why:
             self.log(f"FATAL: preflight VOID: {why}")
             self._write({"preflight": info, "void": why, "moves": []})
             return 2
@@ -1154,11 +1209,17 @@ class Soak:
             self.log(f"FATAL: {e}")
             self._write({"preflight": info, "void": str(e), "moves": [asdict(m) for m in moves]})
             return 2
+        except (SystemExit, KeyboardInterrupt):
+            # Terminated: the lock wrapper may have died from the same signal,
+            # so no further RG move (the node0 restore) may run unlocked.
+            self.terminated = True
+            raise
         finally:
             if cfg.traffic:
-                self.sleep(1.0)
+                if not self.terminated:
+                    self.sleep(1.0)
                 self.stop_traffic()
-            if cfg.restore:
+            if cfg.restore and not self.terminated:
                 info["restore"] = self.restore_node0(rgs)
                 self.log(f"restore: {info['restore']}")
         end_offs = {n: measure_offset(self.c.clock, self.c.fw[n], self.now) for n in (0, 1)}
@@ -1189,8 +1250,12 @@ class Soak:
         # (PASS or COST) passed; a FAIL failed. VOID moves are neither, and the
         # exit status (2) makes the row VOID.
         c = summary["counts"]
-        self.log(f"rg-move-soak: {c[PASS] + c[COST]} passed, {c[FAIL]} failed "
-                 f"({c[COST]} with a #18559 transition cost over budget, {c[VOID]} void)")
+        # "<n> passed, <m> failed, <k> cost": the smoke-cells adapter scores
+        # the pair and records the cost as cells_cost, so the master-relative
+        # COST rule (row H11) is mechanical. Strict mode counts COST as failed.
+        cost_failed = c[COST] if cfg.strict_cost else 0
+        self.log(f"rg-move-soak: {c[PASS] + c[COST] - cost_failed} passed, {c[FAIL] + cost_failed} failed, "
+                 f"{c[COST]} cost ({c[VOID]} void)")
         self._write({"preflight": info, "config": asdict(cfg), "summary": summary,
                      "moves": [asdict(m) for m in moves]})
         return summary["exit"]
@@ -1214,7 +1279,7 @@ def main(argv=None) -> int:
     ap.add_argument("--target4", required=True)
     ap.add_argument("--target6", default="")
     ap.add_argument("--lan-vip4", default="")
-    ap.add_argument("--lan-vip6", default="")
+    ap.add_argument("--lan-vip6", default="", help="ignored: IPv6 follows the LAN host's RA default router")
     ap.add_argument("--outdir", required=True)
     a = ap.parse_args(argv)
     sleep_s = _env_float("SOAK_SLEEP", 5.0)
@@ -1224,6 +1289,7 @@ def main(argv=None) -> int:
         max_stall_ms=_env_float("SOAK_MAX_STALL_MS", 2000.0),
         tail_s=_env_float("SOAK_TAIL_S", 1.0),
         follow_min_pkts=int(_env_float("SOAK_FOLLOW_MIN_PKTS", 500)),
+        max_cost_stall_ms=_env_float("SOAK_MAX_COST_STALL_MS", 10000.0),
     )
     v6 = os.environ.get("SOAK_IPV6", "1") != "0"
     cfg = Config(
@@ -1239,7 +1305,6 @@ def main(argv=None) -> int:
         target4=a.target4,
         target6=a.target6 if v6 else "",
         lan_vip4=a.lan_vip4,
-        lan_vip6=a.lan_vip6 if v6 else "",
         iperf_port=int(os.environ.get("SOAK_IPERF_PORT", "5211")),
         iperf6_port=int(os.environ.get("SOAK_IPERF6_PORT", "5210")),
         iperf_streams=int(os.environ.get("SOAK_STREAMS", "8")),
@@ -1256,7 +1321,9 @@ def main(argv=None) -> int:
     soak = Soak(cfg, IncusCluster({0: a.fw0, 1: a.fw1}, a.lan))
 
     def on_term(signum, frame):
-        # Unwind through run()'s finally: stops the LAN-host generators.
+        # Unwind through run()'s finally: stops the LAN-host generators and
+        # skips the node0 restore (no RG move may run after a SIGTERM).
+        soak.terminated = True
         raise SystemExit(143)
     signal.signal(signal.SIGTERM, on_term)
     try:

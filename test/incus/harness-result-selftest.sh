@@ -374,6 +374,27 @@ score_gate() {
 		fi
 	fi
 }
+# #18583: the RG-move soak's summary carries ", <k> cost"; smoke-cells records
+# it as cells_cost (master-relative judging needs the number), and a COST
+# never turns a 0-failed row into a FAIL. Strict mode prints COST as failed.
+printf 'rg-move-soak: 4 passed, 0 failed, 2 cost (0 void)\n' >"$LOG"
+if [[ "$(adapt_field smoke-cells 0 1)" == "PASS" && "$(adapt_field smoke-cells 0 5)" == *"cells_cost=2"* ]]; then
+	ok "#18583: smoke-cells records the soak's cost count (cells_cost=2) on a PASS row"
+else
+	bad "#18583: smoke-cells did not record cost: verdict=$(adapt_field smoke-cells 0 1) metrics=$(adapt_field smoke-cells 0 5)"
+fi
+printf 'rg-move-soak: 2 passed, 2 failed, 2 cost (0 void)\n' >"$LOG"
+if [[ "$(adapt_field smoke-cells 1 1)" == "FAIL" ]]; then
+	ok "#18583: a strict-mode soak line with failures scores FAIL"
+else
+	bad "#18583: strict-mode soak line scored $(adapt_field smoke-cells 1 1), want FAIL"
+fi
+printf 'Results: 7 passed, 0 failed, 2 skipped\n' >"$LOG"
+if [[ "$(adapt_field smoke-cells 0 5)" == *"cells_skipped=2"* && "$(adapt_field smoke-cells 0 5)" != *"cells_cost"* ]]; then
+	ok "#18583: the skipped slot still parses with no cost field (no shift)"
+else
+	bad "#18583: skipped/cost slots shifted: $(adapt_field smoke-cells 0 5)"
+fi
 for g in "${DECLARED_IPERF_SMOKES[@]}"; do score_gate "$g" ha-smoke; done
 for g in "${DECLARED_CELLS_SMOKES[@]}"; do score_gate "$g" smoke-cells; done
 if ((census_covered == census_total)); then
