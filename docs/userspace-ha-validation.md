@@ -197,6 +197,153 @@ This matters because a split-RG fabric-path bug can kill streams before the
 first failover. That must fail as a fabric regression, not be misclassified as
 a failover-survivability regression.
 
+### Session-sync idle precondition
+
+Both `make test-failover` (`ha_wait_for_session_sync_idle`, before traffic,
+before the fw0 crash and before the RG1 failback) and this validator
+(`wait_for_session_sync_idle`) wait for session sync to be idle before they
+move an RG. They share one sample predicate, `ha_session_sync_idle_sample` in
+`test/incus/ha-assurance-lib.sh`.
+
+**The property.** Idle = N samples at an unchanged floor, the latest of them
+included, with no create outstanding beyond that floor and nothing pending at
+those reads. N is `SESSION_SYNC_IDLE_STABLE_SAMPLES` (3).
+
+- "Pending" covers both the target's helper delta queue
+  (`Session delta pending`) and the source's helper delta buffer.
+- The source must also have dropped no delta since the wait began.
+
+A sample reads D = the source's `Session create` Sent minus the target's
+`Session create` Received (`show chassis cluster data-plane statistics`).
+The floor is the lowest D the wait has seen. "Outstanding beyond the floor" is
+D minus the floor.
+
+The N samples need not be consecutive:
+- A sample above the floor, or with something pending, neither counts nor
+  resets the count.
+- A new floor or a counter rewind restarts it. A source drop does not: that
+  sample is not idle, and because the drop baseline is kept, no later sample
+  can count either, so the wait FAILs.
+- The wait PASSes only on a sample at the floor.
+
+Each counted sample is an exact reading: nothing was outstanding beyond the
+floor at that read. Requiring consecutive samples false-FAILed a healthy pair
+on `loss` (#18632 live run 2, build 0.0.26680). During the "before fw0 crash"
+wait, the mirror sweep sent about 4 creates per second. One landed between
+the two reads in pairs about every 4 samples, so readings at the floor came in
+pairs and never 3 in a row.
+
+**What a timeout costs.** The wait gives up after `SESSION_SYNC_IDLE_TIMEOUT`
+(30) **attempts**, not seconds. Each attempt is two CLI captures and a 1 s
+sleep, about 1.7 to 2.1 s on `loss` (measured), so a full wait takes about a
+minute. The FAIL message reports the attempts, the measured seconds and how
+many samples it counted at the floor.
+
+The limit leaves a wide margin for the count:
+- **Measured.** In run 2, 15 of the 29 samples after the baseline read the
+  floor, and the count reached 3 at sample 8. Treating the samples as
+  independent, the chance of fewer than 3 floor samples in 29 is below 1 in a
+  million. Floor readings came in pairs, though. Taking the 14 or so pairs as
+  the independent units, it is about 6 × 10⁻⁴, roughly 1 in 1,700.
+- **Pessimistic.** If creates arrived as a Poisson stream at 4 per second,
+  with about 0.5 s between the two reads, about 14 % of samples would read the
+  floor. The chance of a timeout would then be about 23 %. That figure depends
+  on the read gap: about 5 % at 0.4 s and about 36 % at 0.55 s.
+- **Reading a timeout.** A timeout means fewer than N samples proved idle.
+  The D sequence in the log tells the causes apart. With dense, varying
+  creates, D fluctuates and rarely returns to its minimum. With a backlog or a lost
+  create, D stays above the floor at every sample and is flat or rising.
+
+ A timeout is a FAIL cell. Before the RG1
+failback it also sets the RG1 slice's `sync_ok=false`, and
+`ha_rg1_mark_groups_void` then VOIDs RG1 Groups 1 to 8 for that run
+(`test-failover.sh`, `ha_run_rg1_failback_slice`). It is a precondition
+result, not a takeover verdict.
+
+How the predicate gets there:
+
+- **Floor, not equality.** The two counters do not share an epoch. Bulk-sync
+  frames are counted by the receiver only, and a restart zeroes one side. On
+  `loss`, Sent was 22047 against Received 129487 while caught up (#16289).
+- **Target first, then source.** A create the target has counted was
+  enqueued on the source before the target's read, and the source counts it
+  as sent right after the enqueue (`queueMessage`: the channel send, then
+  `sentCounter.Add`). So a source read taken after the target read includes
+  it, and D reads high (a create in flight or one sent between the reads),
+  not low. The one exception: if the source stalls between the send and the
+  count for longer than the gap between the reads (about 0.4 s), D reads one
+  low. That sets a floor below the real one and FAILs the wait; it can never
+  PASS one falsely.
+  - With the source read first, a create sent between the two reads and
+    delivered before the target read counted as received but not as sent.
+    A baseline taken on that sample sat one below the floor, and every later
+    quiet sample read as one create outstanding for the whole wait.
+  - On the #18627 `loss` run, Sent − Received was −107440 at the baseline of
+    both waits and −107439 on all 49 later samples. Pending was 0 throughout,
+    so nothing was backed up (#18632).
+  - The first sample of a wait often catches a burst of creates, because the
+    waits start right after an RG reset or an iperf3 start.
+- **The floor only moves down.** What a baseline can absorb is its D minus
+  the true floor, i.e. the creates in flight at it. Moving to a lower D
+  shrinks that amount and never grows it. It also discards an inflated first
+  sample. This verdict ("new floor") resets the streak, so a backlog that is
+  still draining never reads idle. The floor never moves up, so a create lost
+  **after** the wait has seen a sample at the true floor (nothing in flight)
+  keeps D above it, and the wait FAILs.
+- **No `sent == received` escape.** The old #16500 escape only helped when both
+  counters shared an epoch, which is why the #18632 failure recurred. With the
+  target read first it could only mask a create that really is outstanding.
+- **Source-side deltas.** A session delta the source's helper still holds, or
+  has dropped, never becomes a "sent" create. So neither D nor the target's
+  pending count can see it. The predicate therefore also reads the source's
+  `Session delta pending` (must be 0 at an idle sample) and
+  `Session delta dropped` (any increase since the wait's first sample keeps
+  every later sample not idle, so the wait FAILs).
+- **Unknown verdicts.** An unknown helper verdict VOIDs the wait in both
+  loops.
+
+**What it cannot see.** Counters alone have these blind spots. The
+pre-#18632 predicate has them too, and closing them needs a per-create epoch
+or sequence number, not counts.
+
+- **Drain plus loss.** Creates in flight at every sample so far can mask a
+  create lost before they land. Example: two creates are in flight at the
+  first sample, and a third is sent and never received. When the two land, D
+  falls to one above the true floor. That becomes the new floor, and the wait
+  PASSes. A selftest cell pins this, so any change to it is deliberate.
+- **Constant lag.** If at least one create is in flight at every sample, the
+  lag is the floor and the wait PASSes. A *growing* lag is caught.
+- **Varying background creates.** A create in *every* read window at a
+  steady rate is a constant offset that the floor absorbs, so the wait PASSes.
+  A healthy pair FAILs only when the number of creates per window varies and
+  the minimum is rarely seen again. On `loss` the mirror sweep left about half
+  the samples at the floor (run 2).
+- **Stale stability evidence.** Samples above the floor neither count nor
+  reset the count. A lag that clears for one sample can therefore PASS on
+  earlier counted samples as old as the wait itself, up to about 28
+  attempts. The PASS sample is still an exact reading, so this is not a lost
+  create.
+- **A rewind wipes a drop.** A counter rewind (a daemon or helper restart)
+  re-baselines everything, including the source's dropped count, so a drop
+  seen before it is forgotten.
+- **After the last sample.** A create sent after the last idle sample is not
+  covered.
+- **The event-stream delta path.** The source checks read the helper's
+  per-binding RPC-fallback delta buffer. In event-stream mode, session deltas
+  reach the daemon over the event stream instead. A loss there latches an
+  owner-RG resync. The CLI's `Event stream producer: dropped=` counter mixes
+  rate-limited log events with HA deltas, so it cannot be gated without false
+  FAILs. #18635 tracks exposing an HA-delta loss counter.
+
+`test/incus/ha-assurance-selftest.sh` covers this with fixed counter pairs and
+with timeline cells. In a timeline cell the counters depend on when each
+capture reads them:
+
+- a create sent between the first two reads must still PASS;
+- a lost create must FAIL, including one lost after the streak began and one
+  lost after the true floor was seen;
+- the drain-plus-loss case is pinned as a PASS (the known limit above).
+
 ### `make test-failover` zero-interval cells: windows and definitions
 
 `scripts/iperf-json-metrics.py` scores the whole-run iperf3 stream. A
