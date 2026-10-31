@@ -49,6 +49,10 @@ case "$1" in
           echo "    inet ${a}/24 scope global eth0"
         done
         exit 0 ;;
+      *"grep '^# claim-probe: SKIPPED'"*)
+        # The installed unit's skip markers (#18576), staged per case.
+        [[ -n "${STUB_PREV_MARKER:-}" ]] && printf '%s\n' "$STUB_PREV_MARKER"
+        exit 0 ;;
       "python3 - "*)
         # ha_target_claim_probe <target> <control> <ifname>: a clean probe
         # hears only the control. STUB_FOREIGN=<addr> adds another MAC for
@@ -82,7 +86,7 @@ run_up() { # run_up [ENV=VAL ...] -> prints the recorded unit payload; rc in ${T
     echo "$rc" > "${TMP}/rc"
     # The unit payload crosses as ONE multi-line argv (heredoc in sh -c);
     # the stub log holds it whole — extract from its header to the UNIT end.
-    awk '/mouse-addr\.service/{f=1} f{print} f&&/^UNIT/{exit}' "$elog"
+    awk '/cat > \/etc\/systemd\/system\/mouse-addr\.service/{f=1} f{print} f&&/^UNIT/{exit}' "$elog"
 }
 
 # --- 1. loss shape: pinned .201 + declarative .202 alias, no ::200 -------
@@ -199,6 +203,41 @@ NEW=(TARGET_ALIAS_V4=172.16.80.203 MOUSE_TARGET_V4=172.16.80.201 MOUSE_TARGET_V6
 probe_case "a new address with no other holder is probed from eth0, then pinned" pin "${NEW[@]}"
 probe_case "a new address another MAC answers for is refused before the unit is written" refuse "${NEW[@]}" STUB_FOREIGN=172.16.80.203
 probe_case "a deaf probe (control silent) is refused: no other holder is not evidence" refuse "${NEW[@]}" STUB_PROBE_DEAF=1
+# --- 6. MOUSE_TARGET_CLAIM_PROBE=skip is recorded, not just warned (#18576) -
+# The skip must outlive the run's log: wire-zone-matrix deletes its setup log
+# on success. So the unit carries a marker, `status` prints it, and a later
+# `up` keeps the marker while it still pins that address.
+unit="$(run_up "${NEW[@]}" STUB_FOREIGN=172.16.80.203 MOUSE_TARGET_CLAIM_PROBE=skip)"
+if [[ "$(<"${TMP}/rc")" == 0 && "$unit" == *"addr replace 172.16.80.203/24"* \
+      && "$unit" == *"# claim-probe: SKIPPED for 172.16.80.203 by MOUSE_TARGET_CLAIM_PROBE=skip at "* ]] \
+   && grep -q 'WARNING: claim probe for new 172.16.80.203 skipped' "${TMP}/up.out"; then
+    pass "a skipped claim probe warns AND writes its marker into mouse-addr.service"
+else
+    fail "#18576: MOUSE_TARGET_CLAIM_PROBE=skip must warn and write the unit marker (rc=$(<"${TMP}/rc")); unit:
+${unit}
+output: $(<"${TMP}/up.out")"
+fi
+OLD_MARK="# claim-probe: SKIPPED for 172.16.80.202 by MOUSE_TARGET_CLAIM_PROBE=skip at 2026-10-31T00:00:00Z"
+GONE_MARK="# claim-probe: SKIPPED for 172.16.80.209 by MOUSE_TARGET_CLAIM_PROBE=skip at 2026-10-31T00:00:00Z"
+unit="$(run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_PREV_MARKER="${OLD_MARK}"$'\n'"${GONE_MARK}")"
+[[ "$unit" == *"$OLD_MARK"* && "$unit" != *"172.16.80.209"* ]] \
+    && pass "a later up keeps the skip marker of a still-pinned address and drops one no longer pinned" \
+    || fail "#18576: skip markers not carried forward (or a stale one kept); unit:
+${unit}"
+run_status() { # run_status [ENV=VAL ...] -> status output
+    env PATH="${TMP}/bin:${PATH}" STUB_INCUS_LOG="${TMP}/incus.log" STUB_EXEC_LOG="${TMP}/exec.log" \
+        BPFRX_CLUSTER_ENV= "$@" bash "$SUBJECT" status 2>&1
+}
+st="$(run_status STUB_PREV_MARKER="$OLD_MARK")"
+[[ "$st" == *"claim:    claim-probe: SKIPPED for 172.16.80.202 by MOUSE_TARGET_CLAIM_PROBE=skip"* ]] \
+    && pass "status prints a recorded claim-probe skip" \
+    || fail "#18576: status does not show the recorded skip:
+${st}"
+st="$(run_status)"
+[[ "$st" == *"claim:    every pinned v4 address was claim-probed (no skip recorded)"* ]] \
+    && pass "status says so when no skip is recorded" \
+    || fail "#18576: status has no claim line without a skip:
+${st}"
 # A held address is not re-probed: the loss shape (.201 + .202 held) with a
 # foreign reply staged for .202 still pins, since .202 is not new.
 unit="$(run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_FOREIGN=172.16.80.202)"

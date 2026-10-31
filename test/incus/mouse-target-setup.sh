@@ -111,7 +111,8 @@ Environment: MOUSE_TARGET_NAME MOUSE_TARGET_V4 MOUSE_TARGET_V6
              TARGET_ALIAS_V4 (default 172.16.80.202; empty disables)
              TARGET_ALIAS_V4_DEPRECATED (kept only while held; default none)
              MOUSE_TARGET_CLAIM_PROBE=skip (skip the #18576 claim probe;
-             use only when no control address can answer, and say why)
+             use only when no control address can answer, and say why;
+             recorded in mouse-addr.service and shown by \`status\`)
 
 \`up\` and \`destroy\` take the cluster lock (cluster-cell.sh); \`status\` does not.
 USAGE
@@ -137,7 +138,11 @@ claim_probe_new_v4() {
     for addr in "$@"; do
         grep -qxF -- "$addr" <<<"$held" && continue
         if [[ "${MOUSE_TARGET_CLAIM_PROBE:-}" == skip ]]; then
-            echo "WARNING: claim probe for new ${addr} skipped (MOUSE_TARGET_CLAIM_PROBE=skip)" >&2
+            echo "WARNING: claim probe for new ${addr} skipped (MOUSE_TARGET_CLAIM_PROBE=skip); recorded in mouse-addr.service" >&2
+            # The unit carries this marker for as long as it pins the
+            # address, and `status` prints it, so a skip outlives the run's
+            # log (wire-zone-matrix deletes its setup log on success).
+            CLAIM_SKIP_MARKERS+="# claim-probe: SKIPPED for ${addr} by MOUSE_TARGET_CLAIM_PROBE=skip at $(date -u +%FT%TZ)"$'\n'
             continue
         fi
         if [[ -z "$control" ]]; then
@@ -168,6 +173,13 @@ claim_probe_new_v4() {
 }
 
 instance_exists() { inc info "$ref" >/dev/null 2>&1; }
+
+# claim_skip_markers: the "# claim-probe: SKIPPED ..." lines of the
+# installed mouse-addr.service, if any (#18576).
+claim_skip_markers() {
+    inc exec "$ref" -- sh -c \
+        "grep '^# claim-probe: SKIPPED' /etc/systemd/system/mouse-addr.service 2>/dev/null || true" 2>/dev/null
+}
 
 do_up() {
     if ! instance_exists; then
@@ -227,10 +239,22 @@ do_up() {
             echo "deprecated alias ${TARGET_ALIAS_V4_DEPRECATED}: not held, not claimed (#18576)"
         fi
     fi
+    # Carry forward skip markers for addresses the new unit still pins: a
+    # held address is never re-probed, so its skip stays the only record.
+    local prev_marker pinned
+    CLAIM_SKIP_MARKERS=""
+    while IFS= read -r prev_marker; do
+        [[ "$prev_marker" == "# claim-probe: SKIPPED for "* ]] || continue
+        for pinned in "${pins[@]}"; do
+            if [[ "$prev_marker" == "# claim-probe: SKIPPED for ${pinned} "* ]]; then
+                CLAIM_SKIP_MARKERS+="${prev_marker}"$'\n'
+            fi
+        done
+    done < <(claim_skip_markers)
     claim_probe_new_v4 "$held" "${pins[@]}" || return 1
     inc exec "$ref" -- sh -c "cat > /etc/systemd/system/mouse-addr.service <<'UNIT'
 [Unit]
-Description=#8259 pin the mouse target's VLAN-80 address
+${CLAIM_SKIP_MARKERS}Description=#8259 pin the mouse target's VLAN-80 address
 After=network.target
 
 [Service]
@@ -320,6 +344,14 @@ do_status() {
     active="$(inc exec "$ref" -- systemctl list-units 'mouse-iperf3@*' --state=active --no-legend 2>/dev/null | wc -l)"
     echo "iperf3:   ${active} / ${#IPERF_PORTS[@]} per-class servers active"
     echo "echo:     $(inc exec "$ref" -- systemctl is-active mouse-echo 2>/dev/null)"
+    # #18576: a claim probe skipped for a pinned address stays visible.
+    local skips
+    skips="$(claim_skip_markers)"
+    if [[ -n "$skips" ]]; then
+        while IFS= read -r line; do echo "claim:    ${line#\# }"; done <<<"$skips"
+    else
+        echo "claim:    every pinned v4 address was claim-probed (no skip recorded)"
+    fi
     echo
     echo "Point a harness at it with:  MOUSE_TARGET_V4=${MOUSE_TARGET_V4}"
     echo "The #8467 attributability check passes as soon as it differs from"

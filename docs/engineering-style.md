@@ -1974,6 +1974,7 @@ they repeatedly bite:
   | Destructive HA smoke (`test-failover`, `test-ha-crash`, `test-double-failover`, `test-stress-failover`, `test-chained-crash`, `test-active-active`, `test-restart-connectivity`, `test-private-rg`) | self-locks the same way via the `cluster-cell.sh` preamble (#4020) — a reboot / force-stop / failover QUEUES behind a held lock instead of colliding with a concurrent deploy/smoke. Read-only `test-connectivity.sh` stays lock-free |
   | Multi-command measurement cells (deploy → apply-cos → measure) | wrap the WHOLE cell: `./test/incus/with-cluster.sh "purpose" -- cmd...` |
   | `wg-interop.sh` | self-locks per command standalone; runs lock-free inside a cell (marker-aware) |
+  | `mouse-target-setup.sh up`/`destroy`, and through it `target-services.sh up` and `make mouse-target-up`/`mouse-target-destroy` | locks itself; nests inside a cell (`cluster-cell.sh` preamble, #18576). It rewrites and restarts the address unit on the target every gate measures. `status` stays lock-free |
   | Ad-hoc one-liners around commands that do NOT self-lock | `flock /var/worktrees/.cache/tmpdir/xpf-cluster.lock sg incus-admin -c "..."` is valid for loss; for tcp/udp use that cluster's canonical lock path |
   Rules that keep the mutex sound:
   - **Never wrap a self-locking script in a raw outer

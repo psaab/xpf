@@ -201,12 +201,13 @@ trap 'rm -rf "$SEQ_TMP"' EXIT
 cat >"${SEQ_TMP}/seq.sh" <<'SEQ'
 # seq.sh <mode> <var> <first-env> <second-env> [override]
 # mode shell: both loads in one shell; mode child: the second load runs in a
-# child that inherits the first load's exports. [override] is NAME=VALUE,
-# set between the two loads (a real caller override).
+# child that inherits the first load's exports. [override] is shell code
+# run between the two loads (a real caller override), e.g.
+# "export NAME=VALUE" or "NAME=(a b)".
 mode="$1" var="$2" first="$3" second="$4" override="${5:-}"
 BPFRX_CLUSTER_ENV="$first"
 source "$PROJECT_ROOT/test/incus/cluster-env.sh" >/dev/null 2>&1
-[[ -n "$override" ]] && export "$override"
+[[ -n "$override" ]] && eval "$override"
 if [[ "$mode" == child ]]; then
 	BPFRX_CLUSTER_ENV="$second" VAR="$var" bash -c \
 		'source "$PROJECT_ROOT/test/incus/cluster-env.sh" >/dev/null 2>&1; printf "%s" "${!VAR-}"'
@@ -231,13 +232,57 @@ for mode in shell child; do
 	eq "loss then tcp (${mode}) MOUSE_TARGET_REF" "$(seq_resolve "$mode" MOUSE_TARGET_REF "$LOSS_ENV" "$TCP_ENV")" "tcp:xpf-tcp-target"
 done
 eq "loss then tcp TARGET_ALIAS_V4_DEPRECATED" "$(seq_resolve shell TARGET_ALIAS_V4_DEPRECATED "$LOSS_ENV" "$TCP_ENV")" ""
+# loss-only names (and arrays) must not stay set when tcp is loaded next:
+# Group12 would judge tcp in split mode against loss's external box.
+eq "loss then tcp IPERF_TARGET_V4_V6_SAME_HOST" "$(seq_resolve shell IPERF_TARGET_V4_V6_SAME_HOST "$LOSS_ENV" "$TCP_ENV")" ""
+eq "loss then tcp IPERF_TARGET6_SPLIT_HOLDER"   "$(seq_resolve shell IPERF_TARGET6_SPLIT_HOLDER "$LOSS_ENV" "$TCP_ENV")" ""
+eq "loss then tcp VF_WAN_PCI (array)"           "$(seq_resolve shell VF_WAN_PCI "$LOSS_ENV" "$TCP_ENV")" ""
+eq "loss then tcp VF_LAN_PCI (array)"           "$(seq_resolve shell VF_LAN_PCI "$LOSS_ENV" "$TCP_ENV")" ""
 # A caller override set AFTER the first load is not a leak, and survives.
 eq "tcp, override, loss: override wins" \
-	"$(seq_resolve shell MOUSE_TARGET_V4 "$TCP_ENV" "$LOSS_ENV" MOUSE_TARGET_V4=172.16.80.99)" "172.16.80.99"
+	"$(seq_resolve shell MOUSE_TARGET_V4 "$TCP_ENV" "$LOSS_ENV" "export MOUSE_TARGET_V4=172.16.80.99")" "172.16.80.99"
 eq "tcp, override, loss (child): override wins" \
-	"$(seq_resolve child MOUSE_TARGET_V4 "$TCP_ENV" "$LOSS_ENV" MOUSE_TARGET_V4=172.16.80.99)" "172.16.80.99"
+	"$(seq_resolve child MOUSE_TARGET_V4 "$TCP_ENV" "$LOSS_ENV" "export MOUSE_TARGET_V4=172.16.80.99")" "172.16.80.99"
+# An array is compared WHOLE: changing only a later element is an override.
+eq "loss, VF_WAN_PCI[1] override, tcp: array kept" \
+	"$(seq_resolve shell 'VF_WAN_PCI[*]' "$LOSS_ENV" "$TCP_ENV" "VF_WAN_PCI=(0000:65:00.4 0000:65:00.9)")" "0000:65:00.4 0000:65:00.9"
 # Re-loading the SAME env keeps every value (nothing is reset).
 eq "loss, override, loss: override kept" \
-	"$(seq_resolve shell MOUSE_TARGET_V4 "$LOSS_ENV" "$LOSS_ENV" MOUSE_TARGET_V4=172.16.80.99)" "172.16.80.99"
+	"$(seq_resolve shell MOUSE_TARGET_V4 "$LOSS_ENV" "$LOSS_ENV" "export MOUSE_TARGET_V4=172.16.80.99")" "172.16.80.99"
+
+# ── Case H: census of env-file names vs the leak guard (#18576) ─────
+# Every name an env file assigns must be either in cluster-env.sh's guard
+# list (_xpf_cluster_env_names) or assigned by EVERY env file. Otherwise a
+# load of another env leaves it set (the gap that let loss's split-mode
+# names reach tcp). A new env variable cannot slip past this.
+census_out="$(python3 - "$PROJECT_ROOT" <<'PY'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+src = (root / "test/incus/cluster-env.sh").read_text()
+m = re.search(r"^_xpf_cluster_env_names=\((.*?)^\)", src, re.S | re.M)
+if not m:
+    print("FAIL cannot find _xpf_cluster_env_names in cluster-env.sh"); sys.exit()
+guard = set(m.group(1).split())
+assign = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)(?:\[[^]]*\])?(?:\+)?=", re.M)
+files = sorted((root / "test/incus").glob("*cluster.env"))
+names = {f.name: set(assign.findall(f.read_text())) for f in files}
+# Positive controls: the parser must see the files and known names in them.
+if len(files) < 4:
+    print(f"FAIL census found {len(files)} *cluster.env files, want at least 4"); sys.exit()
+for need, f in (("IPERF_TARGET4", "loss-userspace-cluster.env"), ("VF_WAN_PCI", "loss-userspace-cluster.env"),
+                ("MOUSE_TARGET_NAME", "tcp-userspace-cluster.env")):
+    if need not in names.get(f, set()):
+        print(f"FAIL census parser did not see {need} in {f}"); sys.exit()
+everywhere = set.intersection(*names.values())
+for f, ns in sorted(names.items()):
+    for n in sorted(ns - everywhere - guard):
+        print(f"FAIL {f} assigns {n}, which is neither in cluster-env.sh's guard list nor assigned by every *cluster.env")
+print(f"OK {len(files)} files, {len(set.union(*names.values()))} names, {len(guard)} guarded")
+PY
+)"
+if grep -q '^FAIL' <<<"$census_out"; then
+	fail "env-name census (#18576): $(grep '^FAIL' <<<"$census_out" | tr '\n' ' ')"
+fi
+ok "env-name census: ${census_out#OK }"
 
 echo "ALL ${PASS} CASES PASS"

@@ -1544,7 +1544,8 @@ test-v6-na-recovery-lib:
 # address unit, so `up` and `destroy` take the cluster lock themselves
 # (cluster-cell.sh, like a deploy; #18576). Before it pins a NEW v4 address,
 # `up` claim-probes it and refuses if another MAC answers. `status` stays
-# lock-free.
+# lock-free. They nest inside a with-cluster.sh cell; never wrap them in a raw
+# `flock` on the lock path, which hangs (the inner acquire cannot see it).
 mouse-target-up:
 	bash ./test/incus/mouse-target-setup.sh up
 

@@ -22,20 +22,29 @@ if [[ -n "$_xpf_cluster_env" ]]; then
 	esac
 fi
 
-# #18576 cross-env leak guard. Every per-cluster name below is resolved as
-# `${NAME:-default}` (here or in the env file), so a value left over from
-# ANOTHER cluster's env reads as a caller override and wins. That happens
-# when one shell sources tcp and then loss, or when a child inherits a
-# parent's exports (cluster-env.sh exports them). Loss then resolved
+# #18576 cross-env leak guard. Most per-cluster names are resolved as
+# `${NAME:-default}` (here or in the env file), and some are assigned by one
+# env only. So a value left over from ANOTHER cluster's env either reads as
+# a caller override and wins, or simply stays set. That happens when one
+# shell sources tcp and then loss, or when a child inherits a parent's
+# exports (cluster-env.sh exports them). Loss then resolved
 # MOUSE_TARGET_V4/TARGET_ALIAS_V4=.210 and MOUSE_TARGET_REF=tcp:xpf-tcp-target,
 # which is the shape that rewrote loss's mouse-addr.service to tcp's .210 on
-# 2026-10-24. So every load records which env it used and the value it
-# resolved for each name (_XPF_CLUSTER_ENV_FILE / _XPF_CLUSTER_ENV_STATE,
-# exported). A load of a DIFFERENT env first unsets each name that still
-# holds the value the previous env gave it. A name that differs was set by
-# the caller after that load, so it is a real override and is kept. With no
-# record (first load, or an env -i child) nothing changes. A value containing
-# a space is not recorded faithfully, so it stays, as before this guard.
+# 2026-10-24. The other way round, loss's IPERF_TARGET_V4_V6_SAME_HOST=no and
+# IPERF_TARGET6_SPLIT_HOLDER stayed set for tcp.
+# So every load records which env it used and the value it resolved for
+# each name (_XPF_CLUSTER_ENV_FILE / _XPF_CLUSTER_ENV_STATE, exported).
+# Arrays (VF_*_PCI) are recorded with their elements joined by commas. A
+# load of a DIFFERENT env first unsets each name that still holds the value
+# the previous env gave it. A name that differs was set by the caller after
+# that load, so it is a real override and is kept.
+#   Deliberate edge: an explicit override EQUAL to the previous env's
+#   resolved value is dropped on a switch too. It cannot be told apart from
+#   the leak, so it is treated as the same class.
+# With no record (first load, or an env -i child) nothing changes. A value
+# containing a space is not recorded faithfully, so it stays, as before this
+# guard. cluster-env-selftest's census fails when an env file assigns a
+# name that is neither listed here nor assigned by every env file.
 _xpf_cluster_env_names=(
 	INCUS_REMOTE CLUSTER_CONF VM0 VM1 LAN_HOST LAN_ADDR LAN_GW
 	FW0 FW1 CLUSTER_LAN_HOST FW0_NAME FW1_NAME CLUSTER_LAN_HOST_NAME
@@ -44,14 +53,27 @@ _xpf_cluster_env_names=(
 	DMZ_TARGET_VLAN DMZ_TARGET_NAME DMZ_TARGET_REF MOUSE_TARGET_NAME
 	MOUSE_TARGET_REF MOUSE_TARGET_V4 MOUSE_TARGET_V6 MOUSE_TARGET_PF DMZ_GW4
 	WAN_GW80_4 TARGET_ALIAS_V4 TARGET_ALIAS_V4_DEPRECATED
+	IPERF_TARGET_V4_V6_SAME_HOST IPERF_TARGET6_SPLIT_HOLDER
+	POOL_SRC POOL_NAT_ADDR SRIOV_PARENT VF_WAN_PCI VF_LAN_PCI
 )
+# _xpf_cluster_env_val <name>: the recorded form of a name's value. A scalar
+# is printed as is; an array's elements are joined with commas.
+_xpf_cluster_env_val() {
+	if [[ "$(declare -p "$1" 2>/dev/null)" == "declare -a"* ]]; then
+		local -n _xpf_arr="$1"
+		local IFS=,
+		printf '%s' "${_xpf_arr[*]}"
+	else
+		printf '%s' "${!1}"
+	fi
+}
 if [[ -v _XPF_CLUSTER_ENV_FILE && "$_XPF_CLUSTER_ENV_FILE" != "$_xpf_cluster_env" ]]; then
 	read -r -a _xpf_cluster_env_prev <<<"${_XPF_CLUSTER_ENV_STATE:-}"
 	for _xpf_kv in "${_xpf_cluster_env_prev[@]}"; do
 		[[ "$_xpf_kv" == *=* ]] || continue
 		_xpf_k="${_xpf_kv%%=*}"
 		[[ " ${_xpf_cluster_env_names[*]} " == *" ${_xpf_k} "* ]] || continue
-		[[ -v "$_xpf_k" && "${!_xpf_k}" == "${_xpf_kv#*=}" ]] && unset "$_xpf_k"
+		[[ -v "$_xpf_k" && "$(_xpf_cluster_env_val "$_xpf_k")" == "${_xpf_kv#*=}" ]] && unset "$_xpf_k"
 	done
 	unset _xpf_cluster_env_prev _xpf_kv _xpf_k
 fi
@@ -176,7 +198,8 @@ export TARGET_ALIAS_V4
 _XPF_CLUSTER_ENV_FILE="$_xpf_cluster_env"
 _XPF_CLUSTER_ENV_STATE=""
 for _xpf_k in "${_xpf_cluster_env_names[@]}"; do
-	[[ -v "$_xpf_k" ]] && _XPF_CLUSTER_ENV_STATE+="${_xpf_k}=${!_xpf_k} "
+	[[ -v "$_xpf_k" ]] && _XPF_CLUSTER_ENV_STATE+="${_xpf_k}=$(_xpf_cluster_env_val "$_xpf_k") "
 done
 export _XPF_CLUSTER_ENV_FILE _XPF_CLUSTER_ENV_STATE
 unset _xpf_k _xpf_cluster_env_names
+unset -f _xpf_cluster_env_val
