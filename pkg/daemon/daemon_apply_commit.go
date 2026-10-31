@@ -360,6 +360,11 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 			if ierr := clusterControlInterfaceCommitPreflight(d.cluster, cand); ierr != nil {
 				return ierr
 			}
+			// #18606: and the LOCAL end of the control link — this node's own
+			// address, which #8965 (the peer address) cannot see.
+			if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, cand); lerr != nil {
+				return lerr
+			}
 			// #9121: and the CONFIG-SYNC endpoint, which is the field set the
 			// two gates above should have been keyed on. They read the
 			// HEARTBEAT pair, an exact proxy in control-link mode and no proxy
@@ -766,6 +771,23 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		return nil, ferr
 	}
 
+	// #18606: the LOCAL end of the control link, on the peer-sync path. Safe
+	// for #8965's reason: the control address sits inside `groups node0` /
+	// `node1` in every shipped cluster config, so a synced text compiles to
+	// this node's own address and the gate no-ops in steady state. A synced
+	// text that changes this node's address is refused: applying it would move
+	// this node off the address the peer targets, while refusing keeps the
+	// pair connected (see clusterControlLocalAddressCommitPreflight).
+	if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, compiled); lerr != nil {
+		slog.Error("cluster: refusing to apply a peer-synced change of this node's "+
+			"control-link address live; applying it would move this node's cluster "+
+			"comms to an address the peer does not target and durably partition the "+
+			"pair — configure the new address on BOTH nodes and restart xpfd on both",
+			"err", lerr)
+		d.reconcileManagementAfterPromotion(compiled, "peer-synced control-address change refused")
+		return nil, lerr
+	}
+
 	// #9121: the CONFIG-SYNC endpoint half, on the peer-sync path.
 	//
 	// Safe here for a MEASURED reason, as its siblings' comments are. The
@@ -1019,6 +1041,11 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// remaining half is silent.
 			if ierr := clusterControlInterfaceCommitPreflight(d.cluster, cand); ierr != nil {
 				return ierr
+			}
+			// #18606: and the LOCAL end of the control link — this node's own
+			// address, which #8965 (the peer address) cannot see.
+			if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, cand); lerr != nil {
+				return lerr
 			}
 			// #9121: and the CONFIG-SYNC endpoint, which is the field set the
 			// two gates above should have been keyed on. They read the

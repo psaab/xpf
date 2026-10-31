@@ -1295,6 +1295,22 @@ Detected by the presence of `/etc/xpf/node-id` (contents `0` or `1`).
 Absent → standalone. Cluster mode triggers the bondless-RETH naming
 convention (`fxp0`, `em0`, `ge-{0,7}-0-X`).
 
+### Live control-link changes are refused at commit (#8965, #8987, #9121, #18606)
+
+The cluster-endpoint commit preflights in `cluster_topology_preflight.go`
+and `cluster_control_local_addr_preflight_18606.go` run at all three apply
+paths (`commitAndApply`, `syncAndApply`, `commitConfirmedAndApply`) before
+anything is promoted or applied: the peer address (#8965), the control
+interface (#8987), the config-sync endpoint (#9121) and, since #18606, this
+node's OWN control-link address (refused when the running heartbeat's bound
+address is no longer a configured static address of the candidate's control
+unit). Each refusal names the procedure: set the change on BOTH nodes and
+restart xpfd on both. The design, the per-path safety arguments and the
+abstain cases are in `docs/ha-no-hitless-restart.md`. Cells:
+`cluster_control_local_addr_preflight_18606_test.go` (decision table, the
+running-bind read, each apply path refusing a renumber, a steady-state synced
+text passing, and the wiring census against the #8965 sibling).
+
 ### Cluster-comms epoch lifecycle (`startClusterComms` / `stopClusterComms`, #4958)
 
 `startClusterComms` (`daemon_ha_sync.go`) launches an **asynchronous

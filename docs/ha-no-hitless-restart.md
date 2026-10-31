@@ -194,7 +194,7 @@ An **intra-identity** edit (same node-id **and** cluster-id — a
 redundancy-group / interface / policy change) passes untouched and
 reconciles live.
 
-### Live control-link moves are refused (#8965 address, #8987 interface)
+### Live control-link moves are refused (#8965 address, #8987 interface, #18606 local address)
 
 Changing either half of the cluster control tuple on a **running** pair
 partitions it, and the two halves fail identically.
@@ -236,6 +236,33 @@ ends of a point-to-point control link atomically from one end of it.**
   against itself. Nor is `hbLocalAddr` a proxy — an operator who moves
   the control link to another interface and carries the same address
   across leaves it unchanged.
+- `clusterControlLocalAddressCommitPreflight` — **this node's own**
+  control-link address (#18606), the local end #8965 cannot see. #8965
+  gates what this node dials; renumbering this node's address with the
+  same interface and peer passed every gate, applied, and partitioned the
+  pair (the peer's matching `peer-address` change is refused by #8965 on
+  whichever node it is local to, so the coherent version of the change
+  cannot be applied live either). Before #18597 the per-commit heartbeat
+  restart made it loud by accident — the restart could not bind the stale
+  address and the commit failed through #9751, *after* it had been
+  applied. The gate refuses it before promotion, with #8965's procedure:
+  set the new address on BOTH nodes and restart xpfd on both.
+
+  The predicate is membership: refuse when the address the running
+  heartbeat is bound to (`Manager.HeartbeatLocalAddr()`) is no longer a
+  configured static address of the candidate's control-link unit. Not
+  equality with one selected address, because a unit with two addresses can
+  be resolved in a different order from the kernel. It abstains when no
+  heartbeat is running (boot applies run before comms start, a first
+  cluster commit has none, a fabric-transport epoch never starts one, and
+  node-id changes are #6192's and land through the boot path), when the
+  candidate has no control link, and when the unit carries no static
+  address (a DHCP control link would otherwise be refused on every commit).
+  On the peer-synced path it is safe for #8965's reason — every shipped
+  cluster config keeps the control address inside `groups node0`/`node1`,
+  so a synced text compiles to this node's own address — and a synced text
+  that does change it is refused, which keeps the pair connected on the old
+  address; the promoted text applies at the restart.
 
 **#9178 — the address gate passed the DELETION case.** #8965's decision
 returned nil whenever *either* side was empty, on the reasoning that
