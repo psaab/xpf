@@ -1649,7 +1649,10 @@ ha_target_fw_neigh() {
 #   second holder's reply is positive evidence, so this needs no control;
 # - otherwise the <control> (the cluster's own address on the VLAN) must
 #   have answered OUR probe, or the probe proves nothing: VOID (2). With it,
-#   exactly one holder: PASS (0); none: VOID (2).
+#   exactly one holder: PASS (0); none: VOID (2). One holder while
+#   <known-holders> is configured is VOID (2) "configured and not observed:
+#   delete it", so the expiry fires instead of re-excusing a recurrence.
+# <known-holders> may say "self" for the vantage's own MAC (the "self" line).
 ha_target_claim_verdict() {
 	if [[ $# -ne 4 ]]; then
 		printf 'target claim: expected <target> <control> <known-holders> <probe-output>\n' >&2
@@ -1666,14 +1669,14 @@ def out(msg, code):
     raise SystemExit(code)
 if not target or not control or target == control:
     out(f"need distinct target and control (got {target!r} and {control!r})", 2)
-known = {m.lower() for m in known_raw.split() if mac_re.match(m.lower())}
-iface_mac, holders, control_seen, fw = None, [], False, {}
+iface_mac, holders, self_mac, control_seen, fw = None, [], None, False, {}
 for line in output.splitlines():
     f = line.split()
     if len(f) >= 3 and f[0] == "iface" and mac_re.match(f[2].lower()):
         iface_mac = f[2].lower()
     elif len(f) >= 2 and f[0] == "self" and mac_re.match(f[1].lower()):
-        holders.append(f[1].lower())
+        self_mac = f[1].lower()
+        holders.append(self_mac)
     elif len(f) >= 3 and f[0] == "reply" and mac_re.match(f[2].lower()):
         if iface_mac and f[2].lower() == iface_mac:
             out(f"a reply for {f[1]} names the prober's own MAC {iface_mac}: the probe read the wrong field", 2)
@@ -1684,6 +1687,16 @@ for line in output.splitlines():
     elif len(f) >= 5 and f[0] == "fw" and f[2] in ("before", "after"):
         fw.setdefault(f[1], {})[f[2]] = (f[3].lower(), f[4].upper())
 holders = sorted(set(holders))
+# <known-holders> may name the vantage as "self": the container half of the
+# set then follows the probe's own "self <mac>" line, so an incus recreate
+# (new volatile hwaddr) cannot strand a literal MAC.
+known = set()
+for m in known_raw.split():
+    m = m.lower()
+    if m == "self":
+        known.add(self_mac or "self(absent)")
+    elif mac_re.match(m):
+        known.add(m)
 xpf = [m for m in holders if m.startswith("02:bf:72:")]
 if xpf:
     out(f"{target} is answered for by an xpf RETH MAC ({' '.join(xpf)}): the product claims a measurement target", 3)
@@ -1709,6 +1722,12 @@ if not control_seen:
     out(f"control {control} did not answer the same probe, so {target}'s holder count is not evidence", 2)
 if not holders:
     out(f"nobody answered ARP for {target} although control {control} did", 2)
+if known:
+    # The expiry fires: a configured known set that no longer answers must be
+    # deleted, or it would silently re-excuse a recurrence.
+    out(f"{target} answered for only by {holders[0]} but the known dual holder set "
+        f"({' '.join(sorted(known))}) is configured and not observed: delete "
+        f"IPERF_TARGET4_KNOWN_HOLDERS (#18576) ({fwview})", 2)
 out(f"{target} answered for only by {holders[0]} ({fwview})", 0)
 PY
 }

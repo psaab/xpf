@@ -236,10 +236,11 @@ failure.
 
 - **loss iperf target 172.16.80.200 is answered by two hosts: #18576.**
   - The two holders:
-    - `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4`). This is its incus
-      volatile hwaddr; re-derive it with
+    - `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4` today; its incus
+      volatile hwaddr, re-derived with
       `incus config get loss:xpf-mouse-target volatile.eth0.hwaddr` after
-      any recreate.
+      any recreate). The env names it `self`, so the cell takes it from the
+      probe itself.
     - The external v6 target box (`f6:f0:06:10:77:d5`). loss fw0 and fw1
       resolve `2001:559:8585:80::200` to it.
   - The external box is in no incus instance and no host netdev on loss,
@@ -254,8 +255,14 @@ failure.
     `WAN_GW80_4` answering the same probe is the positive control, and a
     target that is not on-link from the container is VOID by name.
     - The cell is VOID, and this row excuses it, **only while** the probe
-      shows exactly `{10:66:6a:8b:91:a4, f6:f0:06:10:77:d5}`, that is,
-      `IPERF_TARGET4_KNOWN_HOLDERS` in `test/incus/loss-userspace-cluster.env`.
+      shows exactly the container plus `f6:f0:06:10:77:d5`, that is,
+      `IPERF_TARGET4_KNOWN_HOLDERS="self f6:f0:06:10:77:d5"` in
+      `test/incus/loss-userspace-cluster.env`.
+    - This cell's VOID is its excused state. F1 is judged per cell, and the
+      run-level VOID it can cause is not a VOID F1 row.
+    - **Read the VOID reason.** It names each node's resolution. If the RG1
+      owner resolves `.200` to `f6:f0:06:10:77:d5`, that run's v4 iperf
+      numbers measured the external box: VOID them and rerun.
     - Any other holder set FAILs and is a product failure: a third MAC, an
       xpf RETH MAC `02:bf:72:*`, a firewall entry that is FAILED or names a
       MAC nobody claims, or an entry that changes during the probe. A RETH
@@ -267,8 +274,8 @@ failure.
   - Both loss nodes have resolved v4 `.200` to the container whenever we
     read them. A 4-min VLAN 80 capture saw no frame with sender `.200` from
     either holder, so the hazard is latent.
-  - **When a loss iperf3 run stops or slows**, start
-    `ip monitor neigh` on both nodes before the run:
+  - **When a loss iperf3 run stops or slows**, diagnose it on the rerun:
+    start `ip monitor neigh` on both nodes before the rerun:
     - node0 on `ge-0-0-2.80`;
     - node1 on `ge-7-0-2.80`.
 
@@ -276,6 +283,13 @@ failure.
     Only a move to `f6:f0:06:10:77:d5` is this environment row. A third MAC,
     or a FAILED entry, is a product neighbor fault.
   - tcp `.210` and udp `.211` are unique: PASS.
+  - **Delete this row**, and `IPERF_TARGET4_KNOWN_HOLDERS`, when either of
+    these happens:
+    - Option A: the lab owner drops v4 `.200` from the external box.
+    - Option B: loss's v4 target moves to a unique address.
+
+    When only one holder answers, the cell VOIDs with "configured and not
+    observed: delete it" until the env line is removed. Then it must PASS.
 
 ## Reading results
 

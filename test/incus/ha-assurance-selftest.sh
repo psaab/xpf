@@ -1681,9 +1681,22 @@ assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_THIRD"
 assert_helper_status 3 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_RETH"
 assert_contains "$(<"${ERR}")" 'xpf RETH MAC (02:bf:72:16:01:00)' 'an xpf RETH holder is a product failure'
 assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 'f6:f0:06:10:77:d5' "$TGT_DUP"
-# Once one holder drops the address (Option A), the same env PASSes: a stale
-# known set never VOIDs a unique target. A lone holder still needs the control.
-assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" $'iface eth0 10:66:6a:8b:91:a4\nself 10:66:6a:8b:91:a4\n'"$CTL"
+# Once one holder drops the address (Option A) the expiry FIRES: a configured
+# known set that is not observed is VOID "delete it", never a silent PASS
+# that would re-excuse a recurrence. With no known set the same probe PASSes.
+TGT_SELF_ONLY=$'iface eth0 10:66:6a:8b:91:a4\nself 10:66:6a:8b:91:a4\n'"$CTL"
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_SELF_ONLY"
+assert_contains "$(<"${ERR}")" 'configured and not observed: delete IPERF_TARGET4_KNOWN_HOLDERS (#18576)' \
+	'a stale known set tells the operator to delete it'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 'self f6:f0:06:10:77:d5' "$TGT_SELF_ONLY"
+assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 '' "$TGT_SELF_ONLY"
+# "self" in the known set is the probe's own vantage MAC, so a recreated
+# container (new volatile hwaddr) still matches; a non-holding vantage has no
+# self, so "self" cannot be satisfied there.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 'self f6:f0:06:10:77:d5' "$TGT_SELFDUP"
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 'SELF F6:F0:06:10:77:D5' \
+	"${TGT_SELFDUP//10:66:6a:8b:91:a4/10:66:6a:00:00:01}"
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 'self f6:f0:06:10:77:d5' "$TGT_DUP"
 assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_SELF_NOCTL"
 assert_contains "$(<"${ERR}")" 'control 172.16.80.8 did not answer' 'a lone holder without the control is VOID, not PASS'
 assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_SELF_CTL_OTHER"
@@ -1785,6 +1798,7 @@ if unshare -rnm true 2>/dev/null; then
 		"netns: probing from the target's holder leaves the firewall's entry where it was"
 	assert_contains "$(<"$TGT_NETNS_OUT")" 'OFFLINK_RC 3' 'netns: an off-link (via-gateway) target is refused, status 3'
 	assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$(<"$TGT_NETNS_OUT")"
+	assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 'self f6:f0:06:10:77:d5' "$(<"$TGT_NETNS_OUT")"
 	assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' "$(<"$TGT_NETNS_OUT")"
 	printf 'netns target-claim probe cell ran\n'
 else
