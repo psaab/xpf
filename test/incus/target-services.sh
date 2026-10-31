@@ -37,8 +37,10 @@
 # (f6:f0:06:10:77:d5, the ::200 holder) ALSO answers ARP for v4 .200, so
 # the loss firewall's neighbor entry decides which of two servers a v4
 # measurement reaches. test-connectivity's iperf-target cell measures it
-# from the container (VOID while exactly that known pair answers, FAIL
-# otherwise; IPERF_TARGET4_KNOWN_HOLDERS). It arrived by hand (`ip addr
+# from the container. It SKIPs as excused while exactly that known pair
+# answers and the RG owner resolves to the container, VOIDs when the owner's
+# resolution is elsewhere, and FAILs otherwise (IPERF_TARGET4_KNOWN_HOLDERS).
+# It arrived by hand (`ip addr
 # add`, undocumented), so any
 # recreate or reboot silently dropped it (observed UP->gone) while every
 # harness kept measuring `.200`. TARGET_ALIAS_V4 names it (cluster-env.sh

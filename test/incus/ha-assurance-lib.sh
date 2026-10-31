@@ -1649,7 +1649,9 @@ ha_target_fw_neigh() {
 #   on a MAC no holder claims, or lladdr changed between two present
 #   snapshots: FAIL (1), a product neighbor fault. A STALE entry on an old
 #   MAC (e.g. after a container recreate) or an entry that merely appears
-#   mid-window is not a fault: the kernel re-validates it on use;
+#   mid-window is not a FAIL, because the kernel re-validates it on use, but
+#   an owner entry naming another MAC still makes a lone-holder PASS
+#   uncertifiable (see below);
 # - two or more holders equal to <known-holders> (may say "self"):
 #     owner resolves <target> to the self MAC before AND after: 4, the known
 #       environment duplicate, excused (the cell SKIPs, #18576);
@@ -1660,9 +1662,12 @@ ha_target_fw_neigh() {
 # - otherwise the <control> must have answered OUR probe, else VOID (2);
 # - no holder: VOID (2); exactly one holder that is not "self" (the intended
 #   container lost the address): VOID (2), the v4 target is misplaced;
-# - exactly self while <known-holders> is configured: VOID (2) "configured
-#   and not observed: delete it", so the expiry fires;
-# - exactly self: PASS (0).
+# - exactly self but the owner's entry names another MAC (even STALE): VOID
+#   (2), not certifiable;
+# - exactly self: PASS (0). If <known-holders> is still configured the reason
+#   says "configured but not observed: delete IPERF_TARGET4_KNOWN_HOLDERS".
+# Whenever "fw" lines are given, the RG owner must be exactly one node, the
+# same in both snapshots; otherwise VOID (2).
 ha_target_claim_verdict() {
 	if [[ $# -ne 4 ]]; then
 		printf 'target claim: expected <target> <control> <known-holders> <probe-output>\n' >&2
@@ -1695,9 +1700,7 @@ for line in output.splitlines():
         elif f[1] == control and len(f) >= 4 and f[3] == "probe":
             control_seen = True
     elif len(f) >= 6 and f[0] == "fw" and f[2] in ("before", "after"):
-        fw.setdefault(f[1], {"role": f[5]})[f[2]] = (f[3].lower(), f[4].upper())
-        if f[5] == "owner":
-            fw[f[1]]["role"] = "owner"
+        fw.setdefault(f[1], {})[f[2]] = (f[3].lower(), f[4].upper(), f[5])
 holders = sorted(set(holders))
 known = set()
 for m in known_raw.split():
@@ -1709,9 +1712,18 @@ for m in known_raw.split():
 xpf = [m for m in holders if m.startswith("02:bf:72:")]
 if xpf:
     out(f"{target} is answered for by an xpf RETH MAC ({' '.join(xpf)}): the product claims a measurement target", 3)
-owners = [n for n in sorted(fw) if fw[n].get("role") == "owner"]
-owner = owners[0] if owners else None
-own = fw.get(owner, {}) if owner else {}
+# The RG owner must be ONE node, the same in both snapshots. Two owners (a
+# dual-active pair) or ownership moving mid-probe leaves no single entry
+# that carries the iperf traffic, so nothing about it is certifiable.
+owner, own = None, {}
+if fw:
+    before_owners = sorted(n for n in fw if fw[n].get("before", ("", "", ""))[2] == "owner")
+    after_owners = sorted(n for n in fw if fw[n].get("after", ("", "", ""))[2] == "owner")
+    if len(before_owners) != 1 or before_owners != after_owners:
+        out(f"the RG owner of {control} is not one stable node (before {before_owners or 'none'}, "
+            f"after {after_owners or 'none'}): {target}'s resolution is not certifiable", 2)
+    owner = before_owners[0]
+    own = {ph: v[:2] for ph, v in fw[owner].items()}
 if owner:
     for phase in ("before", "after"):
         if phase not in own:
@@ -1749,11 +1761,20 @@ if not holders:
 if not self_mac:
     out(f"{target} is answered for only by {holders[0]}, not by the intended holder (the vantage): "
         f"the v4 target is misplaced and v4 iperf numbers would measure that host ({fwview})", 2)
-if known:
-    out(f"{target} answered for only by {holders[0]} but the known dual holder set "
-        f"({' '.join(sorted(known))}) is configured and not observed: delete "
-        f"IPERF_TARGET4_KNOWN_HOLDERS (#18576) ({fwview})", 2)
-out(f"{target} answered for only by {holders[0]} ({fwview})", 0)
+# A lone holder PASSes only if the RG owner's entry is absent or names that
+# holder in both snapshots; an owner still pointing elsewhere (even STALE)
+# would send the next v4 packet to another host.
+stale = sorted({v[0] for v in own.values() if v[0] not in ("-", self_mac)})
+if stale:
+    out(f"{target} answered for only by {self_mac} but {fwview} (entries {', '.join(stale)}): "
+        f"the RG owner's entry names another MAC, so this run's v4 target is not certifiable", 2)
+# Expiry: the excuse is owner-gated, so a stale known set can only ever
+# re-excuse the identical benign state. VOIDing a certifiable run would
+# block every loss gate after the fix until the env line is edited, so the
+# run PASSes and the reason tells the operator to delete the line.
+note = (f"; known dual holder set ({' '.join(sorted(known))}) is configured but not observed: "
+        f"delete IPERF_TARGET4_KNOWN_HOLDERS (#18576)") if known else ""
+out(f"{target} answered for only by {holders[0]} ({fwview}){note}", 0)
 PY
 }
 

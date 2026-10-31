@@ -1713,12 +1713,18 @@ assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 'f6:f0:06:10:77:d5' "$TGT_S
 assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 '' "$TGT_X_ONLY"
 assert_contains "$(<"${ERR}")" 'not by the intended holder' 'E2: a holder that is not the vantage is misplaced'
 assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_X_ONLY"
-# The expiry fires: one holder (the container) while the known set is still
-# configured is VOID "delete it", never a silent PASS.
-assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_SELF_ONLY"$'\n'"$OWNER_SELF"
-assert_contains "$(<"${ERR}")" 'configured and not observed: delete IPERF_TARGET4_KNOWN_HOLDERS (#18576)' \
+# The expiry: one holder (the container) while the known set is still
+# configured is a certifiable run, so it PASSes, and the reason tells the
+# operator to delete the stale line. The excuse is owner-gated, so a stale set
+# can only ever re-excuse the identical benign state.
+assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_SELF_ONLY"$'\n'"$OWNER_SELF"
+assert_contains "$(<"${OUT}")" 'configured but not observed: delete IPERF_TARGET4_KNOWN_HOLDERS (#18576)' \
 	'a stale known set tells the operator to delete it'
-assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 'self f6:f0:06:10:77:d5' "$TGT_SELF_ONLY"
+assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 'self f6:f0:06:10:77:d5' "$TGT_SELF_ONLY"
+assert_contains "$(<"${OUT}")" 'delete IPERF_TARGET4_KNOWN_HOLDERS' 'the delete note survives the self token'
+assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 '' "$TGT_SELF_ONLY"
+assert_not_contains_delete=$(grep -c 'delete IPERF_TARGET4_KNOWN_HOLDERS' "${OUT}" || true)
+assert_eq "$assert_not_contains_delete" 0 'no delete note without a configured set'
 assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 '' "$TGT_SELF_ONLY"$'\n'"$OWNER_SELF"
 # A lone holder needs the control, answered to OUR probe.
 assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 '' "$TGT_SELF_NOCTL"
@@ -1729,9 +1735,13 @@ assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_WRONGFIEL
 assert_contains "$(<"${ERR}")" "names the prober's own MAC" 'a wrong-field probe is VOID, never a PASS'
 # The RG OWNER's entry: FAILED, a REACHABLE entry on an unclaimed MAC, or a
 # change between two present snapshots is a product neighbor fault.
-assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' "$TGT_SELF_ONLY"$'\nfw loss:fw0 before - FAILED owner'
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' \
+	"$TGT_SELF_ONLY"$'\nfw loss:fw0 before - FAILED owner\nfw loss:fw0 after - FAILED owner'
 assert_contains "$(<"${ERR}")" 'FAILED (before)' 'a FAILED owner entry is a product neighbor fault'
-assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' "$TGT_SELF_ONLY"$'\nfw loss:fw0 after 11:22:33:44:55:66 REACHABLE owner'
+for st in REACHABLE DELAY PROBE PERMANENT; do
+	assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' \
+		"$TGT_SELF_ONLY"$'\nfw loss:fw0 before - NONE owner\nfw loss:fw0 after 11:22:33:44:55:66 '"$st"$' owner'
+done
 assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
 	"$TGT_SELFDUP"$'\nfw loss:fw0 before '"$CMAC"$' REACHABLE owner\nfw loss:fw0 after '"$XMAC"$' STALE owner'
 assert_contains "$(<"${ERR}")" "changed from $CMAC to $XMAC" 'an owner flip during the probe is reported'
@@ -1742,8 +1752,36 @@ assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 '' \
 	"$TGT_SELF_ONLY"$'\nfw loss:fw0 before - NONE owner\nfw loss:fw0 after '"$CMAC"$' REACHABLE owner'
 assert_helper_status 4 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
 	"$TGT_SELFDUP"$'\n'"$OWNER_SELF"$'\nfw loss:fw1 before - FAILED peer\nfw loss:fw1 after 11:22:33:44:55:66 REACHABLE peer'
-assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 '' \
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 '' \
 	"$TGT_SELF_ONLY"$'\nfw loss:fw0 before 10:66:6a:00:00:09 STALE owner\nfw loss:fw0 after 10:66:6a:00:00:09 STALE owner'
+assert_contains "$(<"${ERR}")" "names another MAC" 'E5: a STALE owner entry on an old MAC is not a FAIL, but not a PASS either'
+# Seat X's false PASS: only self answers, no known set, and the owner is
+# still STALE on the external box. Its next v4 packet goes there: VOID.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 '' \
+	"$TGT_SELF_ONLY"$'\nfw loss:fw0 before '"$XMAC"$' STALE owner\nfw loss:fw0 after '"$XMAC"$' STALE owner'
+assert_contains "$(<"${ERR}")" "entries $XMAC" 'a lone holder with the owner on another MAC is not certifiable'
+# The owner gate: exactly one owner, the same node in both snapshots.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\n'"$OWNER_SELF"$'\nfw loss:fw1 before '"$XMAC"$' REACHABLE owner\nfw loss:fw1 after '"$XMAC"$' REACHABLE owner'
+assert_contains "$(<"${ERR}")" 'not one stable node' 'a dual-active owner pair is never excused'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before '"$CMAC"$' REACHABLE owner\nfw loss:fw0 after '"$CMAC"$' REACHABLE peer\nfw loss:fw1 before - NONE peer\nfw loss:fw1 after '"$XMAC"$' REACHABLE owner'
+assert_contains "$(<"${ERR}")" 'not one stable node' 'ownership moving mid-probe is never excused'
+# Q02: the owner TAG decides which node is judged, not node order. fw0 is a
+# peer on the container, fw1 owns and resolves to the external box: E1.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before '"$CMAC"$' REACHABLE peer\nfw loss:fw0 after '"$CMAC"$' REACHABLE peer\nfw loss:fw1 before '"$XMAC"$' REACHABLE owner\nfw loss:fw1 after '"$XMAC"$' REACHABLE owner'
+assert_contains "$(<"${ERR}")" 'RG owner loss:fw1' 'Q02: the tagged owner, not the first node, is judged'
+assert_contains "$(<"${ERR}")" "measured the wrong host" 'Q02: the owner on the external box invalidates the run'
+# Q01: an excuse needs BOTH snapshots; a missing after-snapshot is VOID.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before '"$CMAC"$' REACHABLE owner'
+assert_contains "$(<"${ERR}")" 'not one stable node' 'Q01: a missing after-snapshot is never excused'
+# The excuse needs the owner on the container AFTER the probe too: an entry
+# that vanished during the probe (owner unchanged) is not certifiable.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before '"$CMAC"$' REACHABLE owner\nfw loss:fw0 after - NONE owner'
+assert_contains "$(<"${ERR}")" 'not certifiable' 'an owner entry vanishing mid-probe is never excused'
 assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
 	"$TGT_SELFDUP"$'\nfw loss:fw0 before 10:66:6a:00:00:09 STALE owner\nfw loss:fw0 after 10:66:6a:00:00:09 STALE owner'
 assert_contains "$(<"${ERR}")" 'not certifiable' 'a stale owner entry on an old MAC is not certifiable, not a FAIL'

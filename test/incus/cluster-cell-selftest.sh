@@ -252,6 +252,10 @@ ping_test() { :; }
 ping6_test() { :; }
 mtr_test() { :; }
 internet_test() { :; }
+# test_cluster's own probe cells (#18558 / #18576) are covered by
+# ha-assurance-selftest; here they are no-ops like the other helpers.
+wan_claim_cell() { :; }
+iperf_target_claim_cell() { :; }
 incus() {
 	local command="$*"
 	printf '%s\n' "$command" >>"$INCUS_TRACE"
@@ -323,6 +327,37 @@ test_cluster
 printf 'COUNTS PASS=%s FAIL=%s VOID=%s\n' "$PASS" "$FAIL" "$VOID"
 RUNNER
 chmod +x "$CONNECTIVITY_RUNNER"
+
+# Every test-connectivity function that test_cluster calls must be defined or
+# stubbed by the runner (or come from the sourced ha-assurance-lib.sh).
+# Otherwise the next new cell added to test_cluster breaks every Group 10-12
+# case with "command not found" (#18575 did exactly that with wan_claim_cell).
+if ! missing_stubs="$(python3 - "${SCRIPT_DIR}/test-connectivity.sh" "$CONNECTIVITY_RUNNER" \
+	"${SCRIPT_DIR}/ha-assurance-lib.sh" <<'PY'
+import pathlib
+import re
+import sys
+
+tc = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+runner = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+lib = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+fn_re = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\(\) \{", re.M)
+match = re.search(r"^test_cluster\(\) \{\n(.*?)^\}\n", tc, re.M | re.S)
+if not match:
+    raise SystemExit("cannot extract test_cluster")
+body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
+# Functions test_cluster defines for itself (peer_of) are defined at runtime.
+defined = set(fn_re.findall(runner)) | set(fn_re.findall(lib)) | set(fn_re.findall(match.group(1)))
+called = {name for name in fn_re.findall(tc)
+          if name != "test_cluster" and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", body)}
+missing = sorted(called - defined)
+print(" ".join(missing))
+raise SystemExit(1 if missing else 0)
+PY
+)"; then
+	fail "static: test_cluster calls test-connectivity functions the Group 10-12 runner neither defines nor stubs: ${missing_stubs}"
+fi
+ok "static: every test-connectivity function test_cluster calls is defined or stubbed for the Group 10-12 runner"
 
 run_connectivity_case() {
 	local mode="$1" counts="$2" output trace neighbor_count trace_contents
