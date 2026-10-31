@@ -95,11 +95,17 @@ MAX_FAILOVER_SESSION_MISS_DELTA="${MAX_FAILOVER_SESSION_MISS_DELTA:-64}"
 MAX_FAILOVER_NEIGHBOR_MISS_DELTA="${MAX_FAILOVER_NEIGHBOR_MISS_DELTA:-60}"
 MAX_FAILOVER_ROUTE_MISS_DELTA="${MAX_FAILOVER_ROUTE_MISS_DELTA:-32}"
 MAX_FAILOVER_POLICY_DENIED_DELTA="${MAX_FAILOVER_POLICY_DENIED_DELTA:-0}"
-MAX_ZERO_INTERVALS="${MAX_ZERO_INTERVALS:-2}"
+# #18617 review: the whole-run zero-interval count (aggregate + every stream,
+# no window excluded) is RECORDED and judged master-relative, not gated: the
+# crash alone, whose 1.0-2.2 s detection is by design, puts every stream at
+# zero for 1-3 intervals, so a fixed limit of 2 was red on every crash run.
+# Set MAX_ZERO_INTERVALS to gate it absolutely anyway.
+MAX_ZERO_INTERVALS="${MAX_ZERO_INTERVALS:-}"
 MAX_STREAM_ZERO_INTERVALS="${MAX_STREAM_ZERO_INTERVALS:-0}"
-# #12618: whole-run per-stream budget applies only outside each
-# [T, T+3] transition window (full intervals only); see producer
-# --event-sec/--event-window-sec and the outside-events counters.
+# #12618: the whole-run per-stream budget applies only outside the transition
+# windows (full intervals only); see the producer's --event-sec (the crash:
+# EXCUSED) and --planned-move (the harness's own moves: scored PASS/COST/FAIL,
+# #18617) and the outside-events counters.
 MAX_PREFLIGHT_ZERO_INTERVALS="${MAX_PREFLIGHT_ZERO_INTERVALS:-0}"
 MAX_PREFLIGHT_STREAM_ZERO_INTERVALS="${MAX_PREFLIGHT_STREAM_ZERO_INTERVALS:-0}"
 MAX_RETRANSMITS="${MAX_RETRANSMITS:-}"
@@ -134,12 +140,16 @@ IPERF_DURATION_MIN=$(( 8 + SYNC_WAIT + SESSION_SYNC_IDLE_TIMEOUT + PRE_FAILOVER_
 IPERF_PORT="${IPERF_PORT:-5211}"
 
 PASS=0
+COST=0
 FAIL=0
 VOID=0
 ERRORS=()
 
 info()  { echo "==> $*"; }
 pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
+# #18617: a correct planned move whose transition cost exceeded H10's budget
+# (H11's COST): counted as passed, recorded as cells_cost, judged master-relative.
+cost()  { echo "  COST  $*"; PASS=$((PASS + 1)); COST=$((COST + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 
 die() { echo "FATAL: $*" >&2; exit 2; }
@@ -962,6 +972,13 @@ ha_run_rg1_failback_slice() {
 			failure_reason="${failure_reason:+${failure_reason}; }phase-pre RG1 owner was not proven as fw1/node1"
 		fi
 	fi
+	# The RG1 move is a planned move of its own: it starts the split (RG1 on
+	# node0, RG0/RG2 on node1) that the RG0/RG2 failback ends 20+ s later.
+	# Sessions are on both nodes, so any stall at it is a transition cost: the
+	# move is scored PASS/COST/FAIL (#18617), anchored at the request AND at
+	# the observed landing, because T is integer SECONDS since the iperf
+	# launch (up to ~1 s off iperf's clock) and a landing takes 1.3-3 s.
+	local rg1_request_at=$((SECONDS - iperf_start_seconds))
 	if request_output=$(incus exec "$FW1" -- cli -c \
 		'request chassis cluster failover redundancy-group 1' 2>&1); then
 		request_rc=0
@@ -971,6 +988,9 @@ ha_run_rg1_failback_slice() {
 	info "RG1 failover request returned status ${request_rc}; request text is not ownership proof${request_output:+: ${request_output}}"
 	if ha_wait_rg1_owner node0 "$MANUAL_FAILOVER_DEADLINE"; then
 		owner_moved=true
+		rg1_move_at_seconds=$rg1_request_at
+		rg1_move_landed_at_seconds=$((SECONDS - iperf_start_seconds))
+		info "Recorded planned RG1 move at ${rg1_move_at_seconds}s (request) and ${rg1_move_landed_at_seconds}s (landed) after iperf start (split begins)"
 	else
 		local owner_rc=$?
 		if (( owner_rc == 1 )); then
@@ -1766,73 +1786,162 @@ else
 	fail "iperf3 DIED during fw0 rejoin"
 fi
 
+# ha_run_rg02_failback -- after the measured RG1 slice, move RG0 and RG2 to
+# fw0 (each RG must be explicitly failed over; per-RG election is
+# independent). Sets all_primary, slowest, failback_at_seconds (the last RG's
+# poll-observed landing, for the stream oracle) and, for the planned-move
+# scoring (#18617), failback_request_at_seconds (each request's instant, taken
+# BEFORE it is sent) and failback_landed_at_seconds (each poll-observed
+# landing), both "a b" lists against the iperf start clock.
+ha_run_rg02_failback() {
+	local rg fo_start fo_elapsed moved
+	failback_at_seconds=0
+	failback_request_at_seconds=""
+	failback_landed_at_seconds=""
+	info "Manual failover: requesting fw1 to failover RG0 and RG2 to fw0"
+	for rg in 0 2; do
+		failback_request_at_seconds="${failback_request_at_seconds:+$failback_request_at_seconds }$((SECONDS - iperf_start_seconds))"
+		# stderr is CAPTURED, not discarded. `2>/dev/null` here hid every refusal
+		# this command can return, so a run that printed "Manual failover triggered"
+		# and a run that printed nothing at all were the same transcript (#9452).
+		incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 |
+			sed 's/^/    /' || true
+	done
+
+	# Verify fw0 is now primary for RG0 and RG2. RG1 was checked from both node
+	# status queries at phase-mid and phase-post above.
+	#
+	# A BOUNDED POLL, not a fixed `sleep 5`. The fixed sleep could not tell "the
+	# transfer was refused" from "the transfer is still in flight", and #9452 was
+	# the second: an RG moved 19-30s later, when the rejoining node's bounded
+	# #7162 startup promotion hold expired. So the cell was reading a real outage —
+	# fw1 had already demoted, leaving the RG owned by NEITHER node — and reporting
+	# it as a refusal, while simply lengthening the sleep would report a 30s
+	# blackhole as a pass.
+	#
+	# Polling gives the cell the ELAPSED time, which separates the two; the bound
+	# stays tight enough that the blackhole #9452 fixed still reds. Each RG is
+	# polled in turn, so later RGs are not charged the earlier ones' wait.
+	all_primary=true
+	if [[ "$RG1_FAILBACK_SETTLED" != true ]]; then
+		all_primary=false
+	fi
+	slowest="$RG1_FAILBACK_ELAPSED"
+	for rg in 0 2; do
+		fo_start=$(date +%s)
+		moved=0
+		while :; do
+			if incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null |
+				grep -A1 "Redundancy group: $rg" | grep -q "node0.*primary"; then
+				moved=1
+				break
+			fi
+			if (($(date +%s) - fo_start >= MANUAL_FAILOVER_DEADLINE)); then
+				break
+			fi
+			sleep 1
+		done
+		fo_elapsed=$(($(date +%s) - fo_start))
+		if ((moved)); then
+			failback_at_seconds=$((SECONDS - iperf_start_seconds))
+			failback_landed_at_seconds="${failback_landed_at_seconds:+$failback_landed_at_seconds }${failback_at_seconds}"
+			if ((fo_elapsed > slowest)); then
+				slowest=$fo_elapsed
+			fi
+			info "RG$rg moved to fw0 in ${fo_elapsed}s"
+		else
+			all_primary=false
+			fail "fw0 is not primary for RG$rg ${MANUAL_FAILOVER_DEADLINE}s after manual failover. fw1 has ALREADY demoted, so for this whole window RG$rg is owned by NEITHER node: transit is blackholed and nothing answers proxy-ARP for the pool-NAT address. That is an outage, not a declined request — read the elapsed time and the readiness reasons below rather than assuming a refusal (#9452)
+$(rg_ownership_diagnosis "$rg")"
+		fi
+	done
+}
+
+# ha_build_planned_move_args -- planned_move_args (the producer's
+# --planned-move list) and planned_moves_registered, from the instants the RG1
+# slice and the RG0/RG2 failback recorded. Each move is anchored at its
+# request(s) AND its observed landing(s): T is integer SECONDS since the iperf
+# launch, up to ~1 s off iperf's own clock, and a landing takes 1.3-3 s, so
+# one anchor would leave part of the move outside its window. A move that did
+# not land is not registered; its cells already failed.
+ha_build_planned_move_args() {
+	local anchors
+	planned_move_args=()
+	planned_moves_registered=0
+	if [[ -n "${rg1_move_at_seconds:-}" && -n "${rg1_move_landed_at_seconds:-}" ]]; then
+		planned_move_args+=(--planned-move "rg1-split=${rg1_move_at_seconds},${rg1_move_landed_at_seconds}")
+		planned_moves_registered=$((planned_moves_registered + 1))
+	fi
+	if [[ -n "${failback_request_at_seconds:-}" && -n "${failback_landed_at_seconds:-}" ]]; then
+		anchors="${failback_request_at_seconds} ${failback_landed_at_seconds}"
+		planned_move_args+=(--planned-move "rg0-rg2-failback=${anchors// /,}")
+		planned_moves_registered=$((planned_moves_registered + 1))
+	fi
+}
+
+# ha_planned_move_cells <metrics.json> <registered> -- one cell per planned
+# move the producer scored (#18617): PASS (no stream stalled), COST (one
+# stream stalled at most 10 s and recovered: H11's COST, judged
+# master-relative through cells_cost), FAIL (an aggregate outage, more than one
+# stream stalled, a longer stall, or a stream that never recovered). A count
+# that does not match what was registered is VOID: a move went unscored. Each
+# move also records its transition dip as HARNESS_METRIC lines: the low-share
+# stream count, the minimum per-stream rate and the in-window aggregate rate
+# (planned_<move>_*), read against master's rows like cells_cost.
+ha_planned_move_cells() {
+	local metrics="$1" registered="$2" lines verdict label text scored=0
+	if ! lines=$(python3 - "$metrics" <<'PY'
+import json, sys
+moves = json.load(open(sys.argv[1], encoding="utf-8")).get("planned_moves")
+if not isinstance(moves, list):
+    raise SystemExit(2)
+for m in moves:
+    anchors = ", ".join(f"{a:g}" for a in m["anchors"])
+    print(f"{m['verdict']}\t{m['label']}\t{m['text']} (anchors {anchors} s)")
+    # Per-move transition-dip metrics for the ledger (person-read against
+    # master's rows, like cells_cost; not an automated band).
+    key = "planned_" + "".join(c if c.isalnum() else "_" for c in m["label"].lower())
+    print(f"METRIC\t{key}_low_share_streams={len(m.get('low_share_streams') or [])}")
+    for field in ("min_stream_gbps", "window_aggregate_gbps"):
+        if isinstance(m.get(field), (int, float)):
+            print(f"METRIC\t{key}_{field}={m[field]:.3f}")
+PY
+	); then
+		void "iperf3 planned-move scoring absent from the metrics"
+		return 0
+	fi
+	while IFS=$'\t' read -r verdict label text; do
+		[[ -n "$verdict" ]] || continue
+		if [[ "$verdict" == METRIC ]]; then
+			echo "HARNESS_METRIC: ${label}"
+			continue
+		fi
+		scored=$((scored + 1))
+		case "$verdict" in
+		PASS) pass "iperf3 planned move ${label}: ${text}" ;;
+		COST) cost "iperf3 planned move ${label}: ${text} (H11 COST, judged master-relative)" ;;
+		FAIL) fail "iperf3 planned move ${label}: ${text}" ;;
+		*) void "iperf3 planned move ${label}: unrecognised verdict ${verdict}" ;;
+		esac
+	done <<<"$lines"
+	if ((scored != registered)); then
+		void "iperf3 planned moves: ${registered} registered, ${scored} scored"
+	fi
+}
+
 # ── Phase 4b: Manual failover — fw0 becomes primary again ───────────
 
 info "Manual failback: measuring isolated RG1 from fw1/node1 to fw0/node0"
+# M1 planned-move call-site fixture begin
+rg1_move_at_seconds=""
+rg1_move_landed_at_seconds=""
 ha_run_rg1_failback_slice
-failback_at_seconds=0
-
-# After the measured RG1 slice, preserve the existing unmeasured RG0/RG2 moves.
-# Each RG must be explicitly failed over — per-RG election is independent.
-info "Manual failover: requesting fw1 to failover RG0 and RG2 to fw0"
-for rg in 0 2; do
-	# stderr is CAPTURED, not discarded. `2>/dev/null` here hid every refusal
-	# this command can return, so a run that printed "Manual failover triggered"
-	# and a run that printed nothing at all were the same transcript (#9452).
-	incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 |
-		sed 's/^/    /' || true
-done
-
-# Verify fw0 is now primary for RG0 and RG2. RG1 was checked from both node
-# status queries at phase-mid and phase-post above.
-#
-# A BOUNDED POLL, not a fixed `sleep 5`. The fixed sleep could not tell "the
-# transfer was refused" from "the transfer is still in flight", and #9452 was
-# the second: an RG moved 19-30s later, when the rejoining node's bounded
-# #7162 startup promotion hold expired. So the cell was reading a real outage —
-# fw1 had already demoted, leaving the RG owned by NEITHER node — and reporting
-# it as a refusal, while simply lengthening the sleep would report a 30s
-# blackhole as a pass.
-#
-# Polling gives the cell the ELAPSED time, which separates the two; the bound
-# stays tight enough that the blackhole #9452 fixed still reds. Each RG is
-# polled in turn, so later RGs are not charged the earlier ones' wait.
-all_primary=true
-if [[ "$RG1_FAILBACK_SETTLED" != true ]]; then
-	all_primary=false
-fi
-slowest="$RG1_FAILBACK_ELAPSED"
-for rg in 0 2; do
-	fo_start=$(date +%s)
-	moved=0
-	while :; do
-		if incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null |
-			grep -A1 "Redundancy group: $rg" | grep -q "node0.*primary"; then
-			moved=1
-			break
-		fi
-		if (($(date +%s) - fo_start >= MANUAL_FAILOVER_DEADLINE)); then
-			break
-		fi
-		sleep 1
-	done
-	fo_elapsed=$(($(date +%s) - fo_start))
-	if ((moved)); then
-		failback_at_seconds=$((SECONDS - iperf_start_seconds))
-		if ((fo_elapsed > slowest)); then
-			slowest=$fo_elapsed
-		fi
-		info "RG$rg moved to fw0 in ${fo_elapsed}s"
-	else
-		all_primary=false
-		fail "fw0 is not primary for RG$rg ${MANUAL_FAILOVER_DEADLINE}s after manual failover. fw1 has ALREADY demoted, so for this whole window RG$rg is owned by NEITHER node: transit is blackholed and nothing answers proxy-ARP for the pool-NAT address. That is an outage, not a declined request — read the elapsed time and the readiness reasons below rather than assuming a refusal (#9452)
-$(rg_ownership_diagnosis "$rg")"
-	fi
-done
+ha_run_rg02_failback
+# M1 planned-move call-site fixture end
 if $all_primary; then
 	pass "fw0 became primary for all RGs after manual failback (slowest ${slowest}s of ${MANUAL_FAILOVER_DEADLINE}s budget)"
 fi
-info "Recorded per-stream failback event at ${failback_at_seconds}s after iperf start (last RG moved)"
+info "Recorded planned failback at ${failback_request_at_seconds:-none} s (requests) and ${failback_landed_at_seconds:-none} s (landed) after iperf start; last RG moved at ${failback_at_seconds}s"
 
 # Verify iperf3 survived manual failover
 if main_iperf_running; then
@@ -1957,6 +2066,10 @@ info "Waiting for iperf3 final result (up to ${IPERF_DURATION}s)"
 
 failover_wait_main_iperf_result /tmp/iperf3-failover.log "$IPERF_DURATION" || true
 
+# #18617: the crash is the one EXCUSED window (--event-sec; detection of
+# 1.0-2.2 s is by design). The harness's own moves are PLANNED (--planned-move).
+ha_build_planned_move_args
+
 # Derive the throughput headline only from gate-validated JSON-stream metrics.
 # Missing, malformed, or incomplete metrics are VOID evidence, never a
 # zero-valued throughput FAIL; valid averages go through the anchored cell.
@@ -1973,7 +2086,7 @@ if ! incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log \
 	printf '{"ok":false,"error":"metrics_capture_failed"}\n' >"$LOCAL_IPERF_METRICS"
 elif ! python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" \
 	"$LOCAL_IPERF_LOG" --event-sec "$failover_at_seconds" \
-	--event-sec "$failback_at_seconds" --event-window-sec 3 \
+	"${planned_move_args[@]}" --event-window-sec 3 \
 	>"$LOCAL_IPERF_METRICS" 2>"$LOCAL_IPERF_PRODUCER_ERR"; then
 	printf '{"ok":false,"error":"metrics_parse_failed"}\n' >"$LOCAL_IPERF_METRICS"
 fi
@@ -1988,11 +2101,19 @@ fi
 # M1 JSON capture/gate fixture end
 
 if [[ "$iperf_gate_ok" == true ]]; then
-	ha_emit_verdict "iperf3 whole-run zero-throughput intervals (${zero_intervals_total}, limit ${MAX_ZERO_INTERVALS})" \
-		ha_counter_at_most_verdict "$zero_intervals_total" "$MAX_ZERO_INTERVALS" "whole-run zero intervals"
-	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside transition windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)" \
-		ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals outside [T, T+3] windows (MAX_STREAM_ZERO_INTERVALS)"
-	info "iperf3 whole-run zero-throughput streams: ${zero_streams_total} (${zero_streams_outside_events_total} outside transition windows)"
+	# Recorded for the master-relative comparison (the ledger's
+	# whole_run_zero_intervals), gated only when MAX_ZERO_INTERVALS is set.
+	echo "HARNESS_METRIC: whole_run_zero_intervals=${zero_intervals_total}"
+	if [[ -n "$MAX_ZERO_INTERVALS" ]]; then
+		ha_emit_verdict "iperf3 whole-run zero-throughput intervals (${zero_intervals_total}, limit ${MAX_ZERO_INTERVALS})" \
+			ha_counter_at_most_verdict "$zero_intervals_total" "$MAX_ZERO_INTERVALS" "whole-run zero intervals"
+	else
+		info "iperf3 whole-run zero-throughput intervals: ${zero_intervals_total} (recorded as whole_run_zero_intervals and judged master-relative, not gated: the crash's by-design 1.0-2.2 s detection alone zeroes every stream)"
+	fi
+	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside the crash and planned-move windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)" \
+		ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals outside the [T, T+3] windows (MAX_STREAM_ZERO_INTERVALS)"
+	info "iperf3 whole-run zero-throughput streams: ${zero_streams_total} (${zero_streams_outside_events_total} outside the crash and planned-move windows)"
+	ha_planned_move_cells "$LOCAL_IPERF_METRICS" "$planned_moves_registered"
 	pass "iperf3 sender retransmits ${retransmits}"
 	if [[ -n "$MAX_RETRANSMITS" ]]; then
 		ha_emit_verdict "iperf3 retransmits ${retransmits} (limit ${MAX_RETRANSMITS})" \
@@ -2089,9 +2210,11 @@ if (( FAIL == 0 && VOID > 0 )); then
 	exit 77
 fi
 
-# The summary is the one line the harness ledger parses. Keep its grammar
-# unchanged; measured FAIL outranks ordinary capture VOID.
-echo "  Failover test: $PASS passed, $FAIL failed"
+# The summary is the one line the harness ledger parses. Its grammar is the
+# pair plus ", <k> cost" (#18617: the planned-move COST count, recorded as
+# cells_cost, as test-rg-move-soak's is); measured FAIL outranks ordinary
+# capture VOID.
+echo "  Failover test: $PASS passed, $FAIL failed, ${COST:-0} cost"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [[ $FAIL -gt 0 ]]; then
