@@ -2066,15 +2066,19 @@ new set, and `reconcileInterfaceAddresses` skips RETH netdevs. Now:
   not rely on systemd's `50-default.conf` setting that sysctl to 1. Before
   the first IPv4 delete on a netdev, `guardIPv4PrimaryCascade` sets
   `net.ipv4.conf.<netdev>.promote_secondaries=1`. If the write fails, the
-  pass skips any IPv4 delete whose subnet holds an address that is neither
-  being deleted nor a configured VIP of this RG, and warns once
+  pass skips any IPv4 **leftover** delete whose subnet holds an address that
+  is neither being deleted nor a configured VIP of this RG, and warns once.
+  A not-owner delete is never skipped: the demoting node must drop the VIP
+  the peer now owns, or both nodes hold it
   (`TestDirectVIPRenumberOnKernel18573` runs with the sysctl pinned to 1 and
   to 0, plus a control that proves the 0 case cascades).
 - A kernel that ignores `IFA_PROTO` accepts a stamped add and records 0
   (before 6.3 the kernel's netlink parser drops type 11; the appliance floor
-  is 6.18). A pass that wrote a stamp reads it back once. If the stamp reads
-  back as 0, the pass latches `directVIPStampUnsupported` for the process
-  lifetime, warns once, and stops adopting. Without the latch every tick
+  is 6.18). The first pass that writes a stamp reads it back once. If the stamp
+  reads back as 0, the pass latches `directVIPStampUnsupported` for the
+  process lifetime, warns once, and stops adopting. If it reads back intact,
+  `directVIPStampVerified` latches, and no later pass (including every
+  promotion, on the GARP path) pays the extra dump. Without the latch every tick
   would REPLACE every VIP. On such a node, leftover removal cannot work and
   the warning says so.
 - `reconcileAfterRethLinkCycle` (`daemon_apply_dataplane.go`) re-adds VIPs
@@ -2093,9 +2097,15 @@ new set, and `reconcileInterfaceAddresses` skips RETH netdevs. Now:
   commit. Adds and not-owner removals do not queue, because a configured
   address is merged into its row whether or not the kernel holds it. The
   queue runs under `directVIPMu`, so it uses the lock-free
-  `wakeInterfaceLinkSnapshot`. The relevance check (`InterfaceLinkNameRelevant`,
-  which takes the userspace manager's `m.mu`) happens in the refresher
-  goroutine, not under `directVIPMu`.
+  `wakeInterfaceLinkSnapshot` and never takes the userspace manager's `m.mu`.
+  Before waking, it checks relevance with the pure
+  `dpuserspace.ConfiguredInterfaceLinkName`, against the reconcile's own
+  config. The refresher keeps only the newest pending name, and a name with
+  no configured row publishes nothing. Waking it for a leftover on a unit the
+  commit removed would therefore displace a pending relevant refresh (for
+  example a recreated netdev's new ifindex, #15263) and clear its retry debt
+  with nothing published. That is why the check happens before the wake
+  (review Z2 on #18579).
 - The leftover sweep is global: every RG's pass, RG0's included, judges every
   stamped address on every netdev. That is why the configured set must span
   every group (`TestDirectVIPOtherRGsStampedVIPsSurviveEveryPass18573`). A
@@ -2103,10 +2113,12 @@ new set, and `reconcileInterfaceAddresses` skips RETH netdevs. Now:
   VIPs every 2 s. The `removed` count that `applyDirectVIPOwnership` feeds
   into the RG's service edge (`prev || removed > 0`) counts only this RG's
   not-owner deletions, never a leftover.
-- Per-(netdev, VIP) diagnostics are latched in `directVIPLogged` and cleared
-  by `resetVIPWarnings` on every commit. These are: bad address, failed
-  add/remove/stamp, and adoption. Each logs once per commit, not once per
-  tick.
+- Per-(netdev, VIP) diagnostics are latched in `directVIPLogged`: bad
+  address, failed add/remove/stamp, and adoption. Each logs once, not once
+  per tick. A commit clears them all (`resetVIPWarnings`). A failure latch
+  also re-arms when its operation next succeeds (`directVIPLogClear`, the
+  #7532 pattern), so a failure on a later failover with no commit in between
+  warns again.
 - Cost: one `RTM_GETADDR` dump per RG per 2 s pass. A shared per-tick dump
   was considered and rejected. A cached dump read by a later RG's pass would
   miss a concurrent link-cycle flush, the very removal it must see, and the

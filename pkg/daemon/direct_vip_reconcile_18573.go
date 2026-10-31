@@ -12,6 +12,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/vipstamp"
 )
 
@@ -301,6 +302,7 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 			continue
 		}
 		deleted++
+		d.directVIPLogClear("del|" + del.Netdev + "|" + del.Row.Prefix.String())
 		if del.Reason == directVIPDelLeftover {
 			leftoverGone[del.Netdev] = true
 		} else {
@@ -337,6 +339,7 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 			}
 			created[op] = true
 			added++
+			d.directVIPLogClear("add|" + op.Netdev + "|" + op.CIDR)
 			slog.Info("directAddVIPs: added VIP", "rg", rgID, "iface", op.Netdev, "addr", op.CIDR)
 		}
 		var written []directVIPAddrOp
@@ -353,9 +356,11 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 				// REPLACE every tick for every VIP and never record it.
 				break
 			}
-			// Both lines are latched per (netdev, VIP) until the next commit:
-			// a REPLACE that keeps failing, or a kernel that accepts it
-			// without recording IFA_PROTO, would otherwise log every tick.
+			// Both lines are latched per (netdev, VIP): a REPLACE that keeps
+			// failing would otherwise log every tick. The failure latch
+			// re-arms on the next success or commit; a kernel that accepts
+			// REPLACE without recording IFA_PROTO is caught by
+			// verifyDirectVIPStamps instead.
 			if err := directVIPAddrAddFn(idx, op.Prefix, true); err != nil {
 				if d.directVIPLogFirst("adopt-fail|" + op.Netdev + "|" + op.CIDR) {
 					slog.Warn("direct VIP reconcile: failed to stamp pre-existing VIP",
@@ -364,6 +369,7 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 				continue
 			}
 			written = append(written, op)
+			d.directVIPLogClear("adopt-fail|" + op.Netdev + "|" + op.CIDR)
 			if d.directVIPLogFirst("adopt|" + op.Netdev + "|" + op.CIDR) {
 				slog.Info("direct VIP reconcile: stamped pre-existing VIP as xpf-owned",
 					"rg", rgID, "iface", op.Netdev, "addr", op.CIDR)
@@ -371,7 +377,7 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 		}
 		d.verifyDirectVIPStamps(rgID, written, ifindex)
 	}
-	d.queueDirectVIPSnapshotRefresh(leftoverGone)
+	d.queueDirectVIPSnapshotRefresh(cfg, leftoverGone)
 	return added, removed
 }
 
@@ -379,8 +385,9 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 // refresher (daemon_interface_link_refresh.go) for every netdev on which the
 // reconcile deleted a LEFTOVER. It runs under directVIPMu (via
 // applyDirectVIPOwnership), so it uses the lock-free wakeInterfaceLinkSnapshot
-// and leaves the relevance check to the refresher goroutine instead of taking
-// the userspace manager's m.mu here. The refresher rebuilds rows from the desired
+// and checks relevance with the pure dpuserspace.ConfiguredInterfaceLinkName
+// against cfg (this reconcile's own config) instead of taking the userspace
+// manager's m.mu. The refresher rebuilds rows from the desired
 // config, publishes only a differing snapshot, and bumps the FIB generation,
 // so a removal outside a commit reaches the helper — in particular when the
 // commit's own build could not filter the leftover (its ownership dump
@@ -389,7 +396,7 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 // change the published rows, and a demotion must not buy a snapshot rebuild
 // under applySem. Non-blocking; a nil wake (refresher not started, tests) is
 // a no-op.
-func (d *Daemon) queueDirectVIPSnapshotRefresh(changed map[string]bool) {
+func (d *Daemon) queueDirectVIPSnapshotRefresh(cfg *config.Config, changed map[string]bool) {
 	if len(changed) == 0 {
 		return
 	}
@@ -403,8 +410,27 @@ func (d *Daemon) queueDirectVIPSnapshotRefresh(changed map[string]bool) {
 	}
 	sort.Strings(netdevs)
 	for _, netdev := range netdevs {
+		// Review Z2 on #18579: the refresher keeps only the newest name and a
+		// name with no configured row publishes nothing, so waking it for one
+		// (a leftover on a unit the commit removed) would displace a pending
+		// relevant refresh and clear its retry debt unpublished. The check is
+		// the pure config predicate, against this reconcile's own config, so
+		// no manager lock is taken under directVIPMu.
+		if !dpuserspace.ConfiguredInterfaceLinkName(cfg, netdev) {
+			continue
+		}
 		wakeInterfaceLinkSnapshotFn(*wake, netdev)
 	}
+}
+
+// directVIPLogClear re-arms one latched diagnostic after its operation
+// succeeds (review Z2 on #18579), the #7532 clearVIPWarning pattern: a VIP add
+// or remove that fails again on a later failover, with no commit in between,
+// must warn again rather than stay silent.
+func (d *Daemon) directVIPLogClear(key string) {
+	d.vipWarnedMu.Lock()
+	defer d.vipWarnedMu.Unlock()
+	delete(d.directVIPLogged, key)
 }
 
 // directVIPLogFirst reports whether the latched direct-VIP log line keyed by
@@ -472,6 +498,7 @@ func (d *Daemon) directVIPBlindReconcile(in directVIPPlanInput, linkByName func(
 				continue
 			}
 			removed++
+			d.directVIPLogClear("del|" + netdev + "|" + p.String())
 			slog.Info("directRemoveVIPs: removed VIP", "iface", netdev, "addr", cidr)
 		}
 	}
@@ -513,7 +540,11 @@ func (d *Daemon) guardIPv4PrimaryCascade(rgID int, dels []directVIPDel, rows []r
 					"rg", rgID, "iface", del.Netdev, "err", err)
 			}
 		}
-		if ok || !foreignSubnetPeer(del, rows, deleting[del.Netdev], desired[del.Netdev]) {
+		// Review Z2: only a leftover delete may be skipped. A not-owner delete
+		// keeps the pre-#18573 contract (the demoting node must drop the VIP
+		// the peer now owns, or both nodes hold it); the sysctl write above
+		// was still attempted for it.
+		if ok || del.Reason != directVIPDelLeftover || !foreignSubnetPeer(del, rows, deleting[del.Netdev], desired[del.Netdev]) {
 			out = append(out, del)
 			continue
 		}
@@ -553,14 +584,17 @@ func foreignSubnetPeer(del directVIPDel, rows []resolvedAddrRow, deleting map[ne
 
 // verifyDirectVIPStamps reads back the addresses this pass just stamped
 // (created or adopted) and latches directVIPStampUnsupported when one reads
-// back unstamped (review Z1 on #18579): a kernel that drops IFA_PROTO
+// back with proto 0 (review Z1 on #18579): a kernel that drops IFA_PROTO
 // (pre-6.3 parses it as an unknown attribute) accepts the add and records 0,
 // so the leftover removal of #18573 would be a silent no-op and every tick
-// would REPLACE every VIP to adopt it. Warned once; adoption then stops. Runs
-// one extra dump, only on a pass that wrote. An address missing from the
-// readback (removed in between) proves nothing and is ignored.
+// would REPLACE every VIP to adopt it. Warned once; adoption then stops. The
+// first stamp that reads back intact latches directVIPStampVerified instead
+// (review Z2), so the extra dump is paid once per process, not on every
+// promotion's GARP path. An address missing from the readback (removed in
+// between), or carrying some other non-zero proto (another writer), proves
+// nothing about the kernel and is ignored.
 func (d *Daemon) verifyDirectVIPStamps(rgID int, written []directVIPAddrOp, ifindex map[string]int) {
-	if len(written) == 0 || d.directVIPStampUnsupported.Load() {
+	if len(written) == 0 || d.directVIPStampUnsupported.Load() || d.directVIPStampVerified.Load() {
 		return
 	}
 	rows, err := directVIPAddrDumpFn()
@@ -573,11 +607,22 @@ func (d *Daemon) verifyDirectVIPStamps(rgID int, written []directVIPAddrOp, ifin
 			if row.LinkIndex != idx || row.Prefix != op.Prefix {
 				continue
 			}
-			if !row.Stamped() && d.directVIPStampUnsupported.CompareAndSwap(false, true) {
-				slog.Warn("direct VIP reconcile: the kernel does not record IFA_PROTO; stale RETH VIPs left by a renumber will NOT be removed on this node and adoption is disabled (see docs/in-place-upgrade.md \"Honest limits\")",
-					"rg", rgID, "iface", op.Netdev, "addr", op.CIDR, "read_back_proto", row.Proto)
+			switch {
+			case row.Stamped():
+				// Review Z2: one verified read-back settles the kernel's
+				// capability for the process; later writing passes (every
+				// promotion) skip the extra dump on the GARP path.
+				d.directVIPStampVerified.Store(true)
+			case row.Proto == 0 && d.directVIPStampUnsupported.CompareAndSwap(false, true):
+				slog.Warn("direct VIP reconcile: a VIP stamped with IFA_PROTO read back with proto 0; this kernel does not record the ownership stamp, so leftover-VIP removal after a renumber cannot work on this node and adoption is disabled (see docs/in-place-upgrade.md \"Honest limits\")",
+					"rg", rgID, "iface", op.Netdev, "addr", op.CIDR)
 			}
+			// A different non-zero proto means another writer replaced the
+			// address in between: inconclusive about the kernel, ignored.
 			break
+		}
+		if d.directVIPStampVerified.Load() {
+			return
 		}
 		if d.directVIPStampUnsupported.Load() {
 			return

@@ -52,8 +52,11 @@ func (d *Daemon) queueInterfaceLinkSnapshotRefresh(wake chan string, linuxName s
 // pending name with linuxName and never blocks. It takes no lock, so a caller
 // holding its own mutex (the #18573 direct-VIP reconcile runs under
 // directVIPMu) can wake the refresher without nesting the userspace manager's
-// m.mu inside it; the refresher's RefreshInterfaceRowsForLink does the
-// relevance check on its own goroutine (an irrelevant name publishes nothing).
+// m.mu inside it. It does NOT check relevance, and the caller must: the
+// refresher keeps only the newest name, and an irrelevant one publishes
+// nothing yet clears the retry debt, displacing a pending relevant refresh.
+// Lock-free callers use dpuserspace.ConfiguredInterfaceLinkName on their own
+// config snapshot.
 func wakeInterfaceLinkSnapshot(wake chan string, linuxName string) {
 	if wake == nil || linuxName == "" {
 		return

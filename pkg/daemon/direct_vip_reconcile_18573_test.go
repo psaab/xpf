@@ -294,9 +294,22 @@ func TestDirectVIPRemovesLeftoverOnUnattributedNetdev18573(t *testing.T) {
 	k.install(t, d)
 	k.put("ge-0-0-2.60", "172.16.60.42/24", vipstamp.Proto)
 	k.put("ge-0-0-2.60", "172.16.60.7/24", 0)
+	var woken []string
+	orig := wakeInterfaceLinkSnapshotFn
+	t.Cleanup(func() { wakeInterfaceLinkSnapshotFn = orig })
+	wakeInterfaceLinkSnapshotFn = func(_ chan string, netdev string) { woken = append(woken, netdev) }
+	wake := make(chan string, 1)
+	d.interfaceLinkRefreshWake.Store(&wake)
 	d.directAddVIPs(1)
 	mustHave18573(t, k, "ge-0-0-2.60", "172.16.60.42/24", false, false)
 	mustHave18573(t, k, "ge-0-0-2.60", "172.16.60.7/24", true, false)
+	// Review Z2 on #18579: ge-0-0-2.60 backs no configured row any more, so
+	// waking the refresher for it would displace a pending relevant refresh
+	// (the refresher keeps only the newest name) and clear its retry debt
+	// with nothing published. FAIL-ON-REVERT: drop the relevance check.
+	if len(woken) != 0 {
+		t.Fatalf("leftover on an unconfigured netdev woke the refresher for %v", woken)
+	}
 }
 
 // Without a readback the reconcile must not delete on a guess, and must not do
@@ -517,10 +530,13 @@ func TestDirectVIPAdoptDiagnosticsAreLatched18573(t *testing.T) {
 	k.put("ge-0-0-2.50", "172.16.50.42/24", 0)
 	k.put("ge-0-0-2.50", "2001:db8:50::42/64", vipstamp.Proto)
 	addFn := directVIPAddrAddFn
+	replaceFails := true
 	directVIPAddrAddFn = func(idx int, p netip.Prefix, replace bool) error {
 		if replace {
 			k.adds = append(k.adds, "replace "+p.String())
-			return syscall.EPERM
+			if replaceFails {
+				return syscall.EPERM
+			}
 		}
 		return addFn(idx, p, replace)
 	}
@@ -543,6 +559,18 @@ func TestDirectVIPAdoptDiagnosticsAreLatched18573(t *testing.T) {
 	d.directAddVIPs(1)
 	if n := count("failed to stamp pre-existing VIP"); n != 2 {
 		t.Fatalf("after a commit the Warn must fire again once, got %d total", n)
+	}
+	// Review Z2: a success re-arms it without a commit. Adopt succeeds, the
+	// address is later re-installed unstamped (e.g. by an older binary on a
+	// failback), and the next failing REPLACE must warn again.
+	replaceFails = false
+	d.directAddVIPs(1)
+	mustHave18573(t, k, "ge-0-0-2.50", "172.16.50.42/24", true, true)
+	k.rows[k.find(k.links["ge-0-0-2.50"], netip.MustParsePrefix("172.16.50.42/24"))].Proto = 0
+	replaceFails = true
+	d.directAddVIPs(1)
+	if n := count("failed to stamp pre-existing VIP"); n != 3 {
+		t.Fatalf("after a successful adoption the Warn must re-arm, got %d total", n)
 	}
 }
 
@@ -580,6 +608,14 @@ func TestDirectVIPCascadeGuardWhenPromoteSecondariesUnsettable18573(t *testing.T
 			mustHave18573(t, k, "ge-0-0-2.50", "10.9.9.9/24", false, false)
 			mustHave18573(t, k, "ge-0-0-2.50", "2001:db8:50::10/64", false, false)
 			mustHave18573(t, k, "ge-0-0-2.50", "172.16.50.42/24", true, true)
+
+			// Review Z2: only a LEFTOVER delete may be skipped. A demoting
+			// node must still drop the configured VIP even beside a foreign
+			// secondary, or both nodes hold the address the peer now owns.
+			// FAIL-ON-REVERT: let the guard skip not-owner deletes too.
+			d.directRemoveVIPs(1)
+			mustHave18573(t, k, "ge-0-0-2.50", "172.16.50.42/24", false, false)
+			mustHave18573(t, k, "ge-0-0-2.50", "2001:db8:50::42/64", false, false)
 		})
 	}
 }
@@ -615,10 +651,91 @@ func TestDirectVIPStampUnsupportedKernelIsDetectedOnce18573(t *testing.T) {
 	if !d.directVIPStampUnsupported.Load() {
 		t.Fatal("a stamp that reads back 0 must latch directVIPStampUnsupported")
 	}
-	if n := strings.Count(buf.String(), "does not record IFA_PROTO"); n != 1 {
+	if n := strings.Count(buf.String(), "read back with proto 0"); n != 1 {
 		t.Fatalf("capability Warn logged %d times, want 1:\n%s", n, buf.String())
 	}
 	if n := strings.Count(fmt.Sprint(k.adds), "replace "); n > 1 {
 		t.Fatalf("adoption kept REPLACing after detection: %v", k.adds)
+	}
+}
+
+// Review Z2 on #18579: a latched failure re-arms when its operation succeeds
+// (the #7532 clearVIPWarning pattern). A VIP add that fails, then succeeds,
+// then fails again on a later failover with no commit in between must warn
+// twice, not once; same for a remove.
+func TestDirectVIPFailureLatchesReArmOnSuccess18573(t *testing.T) {
+	var buf strings.Builder
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	k := newFakeKernel18573(t)
+	d := &Daemon{store: rethStore18573(t, "172.16.50.42/24", "2001:db8:50::42/64")}
+	k.install(t, d)
+	addFn, delFn := directVIPAddrAddFn, directVIPAddrDelFn
+	failAdd, failDel := true, false
+	directVIPAddrAddFn = func(idx int, p netip.Prefix, replace bool) error {
+		if failAdd && p == netip.MustParsePrefix("172.16.50.42/24") {
+			return syscall.ENOBUFS
+		}
+		return addFn(idx, p, replace)
+	}
+	directVIPAddrDelFn = func(r vipstamp.Row) error {
+		if failDel {
+			return syscall.ENOBUFS
+		}
+		return delFn(r)
+	}
+	count := func(msg string) int { return strings.Count(buf.String(), msg) }
+
+	d.directAddVIPs(1) // fails: Warn
+	d.directAddVIPs(1) // fails: latched
+	failAdd = false
+	d.directAddVIPs(1) // succeeds: re-arm
+	failAdd = true
+	d.directRemoveVIPs(1) // failover away (removes succeed)
+	d.directAddVIPs(1)    // failover back: fails again -> must Warn again
+	if n := count("directAddVIPs: failed to add"); n != 2 {
+		t.Fatalf("add-failure Warn fired %d times, want 2 (fail, success, fail):\n%s", n, buf.String())
+	}
+
+	failAdd = false
+	d.directAddVIPs(1)
+	failDel = true
+	d.directRemoveVIPs(1) // fails: Warn (x2 VIPs)
+	d.directRemoveVIPs(1) // latched
+	failDel = false
+	d.directRemoveVIPs(1) // succeeds: re-arm
+	d.directAddVIPs(1)
+	failDel = true
+	d.directRemoveVIPs(1) // fails again -> Warn again
+	if n := count("failed to remove VIP"); n != 4 {
+		t.Fatalf("remove-failure Warn fired %d times, want 4 (2 VIPs x fail, success, fail):\n%s", n, buf.String())
+	}
+}
+
+// Review Z2 on #18579: the capability read-back costs one dump per process.
+// After the first stamp reads back intact, a later writing pass (every
+// promotion, on the GARP path) does exactly its own dump.
+func TestDirectVIPStampVerifiedOnceThenNoExtraDump18573(t *testing.T) {
+	k := newFakeKernel18573(t)
+	d := &Daemon{store: rethStore18573(t, "172.16.50.42/24", "2001:db8:50::42/64")}
+	k.install(t, d)
+	dumps := 0
+	dumpFn := directVIPAddrDumpFn
+	directVIPAddrDumpFn = func() ([]vipstamp.Row, error) { dumps++; return dumpFn() }
+
+	d.directAddVIPs(1) // writes: own dump + one verify dump
+	if dumps != 2 || !d.directVIPStampVerified.Load() {
+		t.Fatalf("first writing pass: dumps=%d verified=%v, want 2/true", dumps, d.directVIPStampVerified.Load())
+	}
+	d.directRemoveVIPs(1)
+	dumps = 0
+	d.directAddVIPs(1) // writes again: no verify dump
+	if dumps != 1 {
+		t.Fatalf("writing pass after verification did %d dumps, want 1", dumps)
+	}
+	if d.directVIPStampUnsupported.Load() {
+		t.Fatal("an intact read-back must not latch unsupported")
 	}
 }
