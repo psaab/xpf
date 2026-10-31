@@ -135,14 +135,38 @@ var knownForeignCollisions18558 = map[string]string{
 }
 
 func TestSharedSegmentForeignClaims18558(t *testing.T) {
+	// Every stack's claims are collected BEFORE any subtest runs, and the
+	// exemption audit below reads that collection. Running a single subtest
+	// (`-run TestSharedSegmentForeignClaims18558/tcp`) therefore cannot make
+	// an exemption look unused.
+	type stackClaims struct {
+		name   string
+		rel    string
+		claims map[string][]claim16473
+	}
+	var all []stackClaims
 	used := map[string]bool{}
+	for _, st := range labStacks16473 {
+		for _, rel := range st.files {
+			claims := claimsForFile16473(t, rel)
+			all = append(all, stackClaims{st.name, rel, claims})
+			for addr := range claims {
+				if knownForeignCollisions18558[addr] == st.name {
+					used[addr] = true
+				}
+			}
+		}
+	}
+	byStack := map[string][]stackClaims{}
+	for _, sc := range all {
+		byStack[sc.name] = append(byStack[sc.name], sc)
+	}
 	for _, st := range labStacks16473 {
 		st := st
 		t.Run(st.name, func(t *testing.T) {
-			for _, rel := range st.files {
-				claims := claimsForFile16473(t, rel)
-				addrs := make([]string, 0, len(claims))
-				for a := range claims {
+			for _, sc := range byStack[st.name] {
+				addrs := make([]string, 0, len(sc.claims))
+				for a := range sc.claims {
 					addrs = append(addrs, a)
 				}
 				sort.Strings(addrs)
@@ -152,19 +176,18 @@ func TestSharedSegmentForeignClaims18558(t *testing.T) {
 						continue
 					}
 					if knownForeignCollisions18558[addr] == st.name {
-						used[addr] = true
-						t.Logf("KNOWN %s (%s) is held by non-xpf %s; tracked by #18574", addr, rel, macs)
+						t.Logf("KNOWN %s (%s) is held by non-xpf %s; tracked by #18574", addr, sc.rel, macs)
 						continue
 					}
-					kinds := make([]string, 0, len(claims[addr]))
-					for _, c := range claims[addr] {
+					kinds := make([]string, 0, len(sc.claims[addr]))
+					for _, c := range sc.claims[addr] {
 						kinds = append(kinds, c.kind)
 					}
 					t.Errorf("FOREIGN-HELD %s: %s claims it (%s) but non-xpf host %s answered ARP for it "+
 						"on the shared segment (2026-10-31 sweep); the gateway's ARP entry will flip "+
 						"between them. Move the claim to an address a same-day ARP probe shows unanswered, "+
 						"and register it in docs/incus-tcp-udp-plan.md section 3.3 (#18558)",
-						addr, rel, strings.Join(kinds, ", "), macs)
+						addr, sc.rel, strings.Join(kinds, ", "), macs)
 				}
 			}
 		})

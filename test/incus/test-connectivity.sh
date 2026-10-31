@@ -217,9 +217,11 @@ ping_test() {
 wan_claim_cell() {
 	local desc="cluster: WAN IPv4 ${WAN_VIP4} answered for only by this cluster (RFC 5227 ARP probe)"
 	ha_wan_claim_check "${CLUSTER_CONF:-}" "$WAN_VIP4" "$WAN_GW4" "$FW0" "$FW1"
+	# 1 = non-xpf duplicate (lab), 3 = another xpf cluster claims it (an xpf
+	# defect, e.g. a stale VIP, #18573): both FAIL, the reason says which.
 	case "$HA_WAN_CLAIM_STATUS" in
 	0) pass "$desc" ;;
-	1) fail "$desc: ${HA_WAN_CLAIM_REASON}" ;;
+	1 | 3) fail "$desc: ${HA_WAN_CLAIM_REASON}" ;;
 	*) void "$desc: ${HA_WAN_CLAIM_REASON}" ;;
 	esac
 }

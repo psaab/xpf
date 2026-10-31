@@ -946,35 +946,66 @@ assert_helper_status 2 ha_external_ping_verdict 2 'ping exited with status 2'
 assert_helper_status 2 ha_external_ping_verdict 1 ''
 
 # #18558: the WAN-address duplicate check. The probe lines below are the
-# shape ha_wan_claim_probe prints; the foreign MAC is the lab device that
-# answered for tcp's 172.16.50.10 on every one of 512 probes (2026-10-31).
+# shape ha_wan_claim_probe prints. The foreign MAC is the lab device that
+# answered for tcp's 172.16.50.10 on every one of 512 probes, and the
+# "probe" flag reflects the measured fact that the lab gateway and that device
+# both answer an RFC 5227 probe addressed to us with target IP 0.0.0.0
+# (2026-10-31).
 OWN=02:bf:72:17:
-CLAIM_CLEAN=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.1 00:10:db:ff:10:01\nreply 172.16.50.1 00:10:db:ff:10:01'
-CLAIM_DUP=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 18:e8:29:2c:13:7a\nreply 172.16.50.1 00:10:db:ff:10:01\nreply 172.16.50.10 18:E8:29:2C:13:7A'
-CLAIM_PEER=$'iface ge-7-0-2.50 02:bf:72:17:01:01\nreply 172.16.50.10 02:bf:72:17:01:00\nreply 172.16.50.1 00:10:db:ff:10:01'
-CLAIM_OTHER_CLUSTER=$'reply 172.16.50.10 02:bf:72:18:01:00\nreply 172.16.50.1 00:10:db:ff:10:01'
+GWP=$'reply 172.16.50.1 00:10:db:ff:10:01 probe'
+CLAIM_CLEAN=$'iface ge-0-0-2.50 02:bf:72:17:01:00\n'"$GWP"$'\n'"$GWP"
+CLAIM_DUP=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 18:e8:29:2c:13:7a probe\n'"$GWP"$'\nreply 172.16.50.10 18:E8:29:2C:13:7A probe'
+CLAIM_PEER=$'iface ge-7-0-2.50 02:bf:72:17:01:01\nreply 172.16.50.10 02:bf:72:17:01:00 probe\n'"$GWP"
+CLAIM_OTHER_CLUSTER=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 02:bf:72:18:01:00 probe\n'"$GWP"
+CLAIM_OTHER_AND_FOREIGN=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 18:e8:29:2c:13:7a probe\nreply 172.16.50.10 02:bf:72:16:01:00 probe\n'"$GWP"
+CLAIM_PHYS=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 10:66:6a:f6:c3:d2 probe\n'"$GWP"
+CLAIM_GW_OTHER=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.1 00:10:db:ff:10:01 other'
+CLAIM_DRIFT=$'iface ge-0-0-2.50 02:bf:72:18:01:00\n'"$GWP"
+CLAIM_NORETH=$'iface ge-0-0-2.50 10:66:6a:f6:c3:d2\n'"$GWP"
 CLAIM_BLIND=$'iface ge-0-0-2.50 02:bf:72:17:01:00'
-CLAIM_DUP_BLIND=$'reply 172.16.50.10 18:e8:29:2c:13:7a'
-# Only the gateway answered, and our own RETH MAC: unique.
-assert_helper_status 0 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_CLEAN"
-assert_helper_status 0 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_PEER"
-# A foreign MAC answers for the address: duplicate, named once (case-folded).
-assert_helper_status 1 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_DUP"
+CLAIM_DUP_BLIND=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 18:e8:29:2c:13:7a probe'
+wcv() { ha_wan_claim_verdict "$@"; }
+# Only the gateway answered, or our own RETH MAC (either node): unique.
+assert_helper_status 0 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_CLEAN"
+assert_helper_status 0 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_PEER"
+# A non-xpf MAC answers for the address: duplicate. Upper and lower case are
+# one MAC, so it is named exactly once in ANY case.
+assert_helper_status 1 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_DUP"
 assert_contains "$(<"${ERR}")" '172.16.50.10 is also answered for by 18:e8:29:2c:13:7a, a duplicate' \
 	'duplicate WAN claim names the foreign MAC'
-assert_eq "$(grep -o '18:e8:29:2c:13:7a' "${ERR}" | wc -l)" 1 'duplicate WAN claim names each MAC once'
-# Another xpf cluster's RETH MAC (cluster 0x18) is foreign to cluster 0x17.
-assert_helper_status 1 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_OTHER_CLUSTER"
+assert_eq "$(grep -io '18:e8:29:2c:13:7a' "${ERR}" | wc -l)" 1 'duplicate WAN claim names the MAC once, case-insensitively'
+# Another xpf cluster's RETH MAC is an XPF defect (status 3), never the
+# excusable status 1, and it wins over a co-present foreign claimant.
+assert_helper_status 3 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_OTHER_CLUSTER"
+assert_contains "$(<"${ERR}")" 'another xpf cluster (cluster-id 24, 02:bf:72:18:01:00)' \
+	'other-cluster claim names the other cluster id'
+assert_helper_status 3 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_OTHER_AND_FOREIGN"
+assert_contains "$(<"${ERR}")" 'cluster-id 22' 'xpf claim wins over the foreign one and names cluster 22'
+# A physical (non-RETH) MAC of one of OUR nodes is own once listed; unlisted
+# it would be foreign.
+assert_helper_status 0 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_PHYS"$'\nown 10:66:6a:f6:c3:d2'
+assert_helper_status 0 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_PHYS"$'\nown 10:66:6A:F6:C3:D2'
+assert_helper_status 1 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_PHYS"
+# The gateway control counts only an answer to OUR probe.
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_GW_OTHER"
 # A foreign claim is positive evidence even when the gateway was silent.
-assert_helper_status 1 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_DUP_BLIND"
-# No gateway reply and no claimant: the probe heard nothing, so VOID, not clean.
-assert_helper_status 2 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_BLIND"
-assert_helper_status 2 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 ''
-assert_helper_status 2 ha_wan_claim_verdict 02:bf:72:17 172.16.50.10 172.16.50.1 "$CLAIM_CLEAN"
-assert_helper_status 2 ha_wan_claim_verdict "$OWN" 172.16.50.1 172.16.50.1 "$CLAIM_CLEAN"
-assert_helper_status 2 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1
+assert_helper_status 1 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_DUP_BLIND"
+# Identity: conf vs live RETH MAC disagree -> VOID; no conf -> the live
+# RETH MAC decides; neither -> VOID.
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_DRIFT"
+assert_contains "$(<"${ERR}")" 'live RETH MAC says 02:bf:72:18:' 'conf/live cluster-id drift is named'
+assert_helper_status 0 wcv '' 172.16.50.10 172.16.50.1 "$CLAIM_CLEAN"
+assert_helper_status 1 wcv '' 172.16.50.10 172.16.50.1 "$CLAIM_DUP"
+assert_helper_status 0 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_NORETH"
+assert_helper_status 2 wcv '' 172.16.50.10 172.16.50.1 "$CLAIM_NORETH"
+# No gateway answer and no claimant: the probe heard nothing, so VOID.
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_BLIND"
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 ''
+assert_helper_status 2 wcv 02:bf:72:17 172.16.50.10 172.16.50.1 "$CLAIM_CLEAN"
+assert_helper_status 2 wcv "$OWN" 172.16.50.1 172.16.50.1 "$CLAIM_CLEAN"
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1
 
-# The own-MAC prefix comes from the conf's cluster-id (tcp is 23 = 0x17).
+# The conf's cluster-id gives the prefix (tcp is 23 = 0x17).
 printf 'chassis {\n    cluster {\n        cluster-id 23;\n    }\n}\n' >"${TMP_DIR}/claim-23.conf"
 printf 'chassis {\n    cluster {\n        cluster-id 300;\n    }\n}\n' >"${TMP_DIR}/claim-300.conf"
 printf 'chassis { }\n' >"${TMP_DIR}/claim-none.conf"
@@ -983,16 +1014,17 @@ assert_helper_status 2 ha_wan_own_mac_prefix "${TMP_DIR}/claim-300.conf"
 assert_helper_status 2 ha_wan_own_mac_prefix "${TMP_DIR}/claim-none.conf"
 assert_helper_status 2 ha_wan_own_mac_prefix "${TMP_DIR}/claim-missing.conf"
 
-# ha_wan_claim_check drives the probe and the verdict; the probe is stubbed
-# with the shapes the live probe printed (2026-10-31), and the node list must
-# reach it unchanged.
+# ha_wan_claim_check drives the probe, the node-MAC collection and the
+# verdict. Both helpers are stubbed; they run inside command substitutions, so
+# they record their argv in files.
 ha_wan_claim_probe_real="$(declare -f ha_wan_claim_probe)"
-CLAIM_STUB_OUT="" CLAIM_STUB_RC=0
-# The probe runs inside a command substitution, so it records its argv in a file.
+ha_wan_node_macs_real="$(declare -f ha_wan_node_macs)"
+CLAIM_STUB_OUT="" CLAIM_STUB_RC=0 CLAIM_STUB_OWN=""
 ha_wan_claim_probe() { printf '%s' "$*" >"${TMP_DIR}/claim-stub-args"; printf '%s\n' "$CLAIM_STUB_OUT"; return "$CLAIM_STUB_RC"; }
-claim_check_case() { # <expected-status> <reason-substring> <conf> <stub-out> <stub-rc>
-	CLAIM_STUB_OUT="$4" CLAIM_STUB_RC="$5"
-	rm -f "${TMP_DIR}/claim-stub-args"
+ha_wan_node_macs() { printf '%s\n' "$1" >>"${TMP_DIR}/claim-stub-nodes"; [[ -n "$CLAIM_STUB_OWN" ]] && printf 'own %s\n' "$CLAIM_STUB_OWN"; return 0; }
+claim_check_case() { # <expected-status> <reason-substring> <conf> <stub-out> <stub-rc> [own-mac]
+	CLAIM_STUB_OUT="$4" CLAIM_STUB_RC="$5" CLAIM_STUB_OWN="${6:-}"
+	rm -f "${TMP_DIR}/claim-stub-args" "${TMP_DIR}/claim-stub-nodes"
 	if ! ha_wan_claim_check "$3" 172.16.50.10 172.16.50.1 tcp:fw0 tcp:fw1; then
 		fail_test "ha_wan_claim_check returned nonzero (it must always return 0)"
 	fi
@@ -1001,29 +1033,118 @@ claim_check_case() { # <expected-status> <reason-substring> <conf> <stub-out> <s
 }
 claim_check_case 1 'also answered for by 18:e8:29:2c:13:7a' "${TMP_DIR}/claim-23.conf" "$CLAIM_DUP" 0
 assert_eq "$(<"${TMP_DIR}/claim-stub-args")" '172.16.50.10 172.16.50.1 tcp:fw0 tcp:fw1' 'claim check passes address, gateway and nodes to the probe'
+assert_eq "$(tr '\n' ' ' <"${TMP_DIR}/claim-stub-nodes")" 'tcp:fw0 tcp:fw1 ' 'claim check collects own MACs from BOTH nodes'
 claim_check_case 0 '' "${TMP_DIR}/claim-23.conf" "$CLAIM_CLEAN" 0
+claim_check_case 0 '' "${TMP_DIR}/claim-23.conf" "$CLAIM_PHYS" 0 10:66:6a:f6:c3:d2
 claim_check_case 2 'did not answer the same probe' "${TMP_DIR}/claim-23.conf" "$CLAIM_BLIND" 0
 claim_check_case 2 'holds 172.16.50.10' "${TMP_DIR}/claim-23.conf" '' 2
-claim_check_case 2 'no cluster-id' "${TMP_DIR}/claim-none.conf" "$CLAIM_DUP" 0
-# Cluster 0x18's RETH MAC is foreign to a cluster-23 conf, through the full check.
-claim_check_case 1 '02:bf:72:18:01:00' "${TMP_DIR}/claim-23.conf" "$CLAIM_OTHER_CLUSTER" 0
+claim_check_case 2 'no cluster identity' "${TMP_DIR}/claim-none.conf" "$CLAIM_NORETH" 0
+claim_check_case 2 'live RETH MAC says' "${TMP_DIR}/claim-23.conf" "$CLAIM_DRIFT" 0
+claim_check_case 3 'cluster-id 24' "${TMP_DIR}/claim-23.conf" "$CLAIM_OTHER_CLUSTER" 0
 eval "$ha_wan_claim_probe_real"
+eval "$ha_wan_node_macs_real"
 
-# The external IPv4 verdict: a FAIL becomes VOID only beside a foreign claim.
+# The external IPv4 verdict: a FAIL becomes VOID only beside a NON-xpf claim.
 PING_LOST='4 packets transmitted, 0 received, 100% packet loss'
 PING_OK='64 bytes from 1.1.1.1: icmp_seq=1 ttl=56'
 DUP_REASON='wan claim: 172.16.50.10 is also answered for by 18:e8:29:2c:13:7a'
+XPF_REASON='wan claim: 172.16.50.10 is also answered for by another xpf cluster (cluster-id 24, 02:bf:72:18:01:00)'
 assert_helper_status 2 ha_external_ping_claim_verdict 1 "$PING_LOST" 1 "$DUP_REASON"
 assert_contains "$(<"${ERR}")" 'not attributable to the firewall: wan claim: 172.16.50.10' \
 	'claim-voided external ping keeps the claimant in its reason'
 assert_contains "$(<"${ERR}")" 'valid capture contains no bytes' \
 	'claim-voided external ping keeps the ping reason'
+assert_helper_status 1 ha_external_ping_claim_verdict 1 "$PING_LOST" 3 "$XPF_REASON"
+assert_contains "$(<"${ERR}")" 'another xpf cluster (cluster-id 24' 'an xpf claim keeps the FAIL and says why'
 assert_helper_status 1 ha_external_ping_claim_verdict 1 "$PING_LOST" 0 ''
 assert_helper_status 1 ha_external_ping_claim_verdict 1 "$PING_LOST" 2 'wan claim: gateway silent'
 assert_helper_status 1 ha_external_ping_claim_verdict 1 "$PING_LOST" '' ''
 assert_helper_status 0 ha_external_ping_claim_verdict 0 "$PING_OK" 1 "$DUP_REASON"
 assert_helper_status 2 ha_external_ping_claim_verdict 2 'ping exited with status 2' 1 "$DUP_REASON"
 assert_helper_status 2 ha_external_ping_claim_verdict 1 "$PING_LOST" 1
+
+# Wiring: the REAL ha_external_sweep / ha_emit_verdict (test-failover.sh) and
+# wan_claim_cell (test-connectivity.sh), extracted by name and run against
+# stubs, so a call that is dropped, reordered or re-routed fails a cell.
+CLAIM_WIRING="${TMP_DIR}/claim-wiring.sh"
+python3 - "${ROOT}/test/incus/test-failover.sh" "${ROOT}/test/incus/test-connectivity.sh" "$CLAIM_WIRING" <<'PY'
+import pathlib
+import re
+import sys
+
+tf = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+tc = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+blocks = []
+for text, name in ((tf, "ha_emit_verdict"), (tf, "ha_external_sweep"), (tc, "wan_claim_cell")):
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", text, re.M | re.S)
+    if not match:
+        raise SystemExit(f"cannot extract {name} for #18558 wiring coverage")
+    blocks.append(match.group(0))
+match = re.search(r"^test_cluster\(\) \{\n.*?^\}\n", tc, re.M | re.S)
+if not match:
+    raise SystemExit("cannot extract test_cluster for #18558 wiring coverage")
+calls = sum(1 for line in match.group(0).splitlines() if line.split("#", 1)[0].strip() == "wan_claim_cell")
+blocks.append(f"WAN_CLAIM_CELL_CALLS={calls}\n")
+pathlib.Path(sys.argv[3]).write_text("".join(blocks), encoding="utf-8")
+PY
+claim_wiring_run() { # <v4-rc> <v4-out> <v6-rc> <v6-out> <claim-status> -> "V4=.. V6=.. CALLED=.."
+	(
+		S_V4_RC="$1" S_V4_OUT="$2" S_V6_RC="$3" S_V6_OUT="$4" S_CLAIM="$5"
+		W_LOG="" CALLED=0
+		pass() { W_LOG+="PASS|$*"$'\n'; }
+		fail() { W_LOG+="FAIL|$*"$'\n'; }
+		void() { W_LOG+="VOID|$*"$'\n'; }
+		info() { :; }
+		main_iperf_running() { return 0; }
+		ha_external_ping_capture() {
+			if [[ "$1" == 6 ]]; then
+				HA_EXTERNAL_RC="$S_V6_RC" HA_EXTERNAL_OUTPUT="$S_V6_OUT"
+			else
+				HA_EXTERNAL_RC="$S_V4_RC" HA_EXTERNAL_OUTPUT="$S_V4_OUT"
+			fi
+		}
+		ha_wan_claim_check() { CALLED=1; HA_WAN_CLAIM_STATUS="$S_CLAIM"; HA_WAN_CLAIM_REASON="wan claim: stub status ${S_CLAIM}"; }
+		# shellcheck disable=SC1090
+		source "$CLAIM_WIRING"
+		EXTERNAL_V4_TARGET=1.1.1.1 EXTERNAL_V6_TARGET=2606:4700:4700::1111
+		CLUSTER_CONF=/nonexistent WAN_VIP4=172.16.50.10 WAN_GW4=172.16.50.1 FW0=tcp:fw0 FW1=tcp:fw1
+		ha_external_sweep wiring
+		v4=$(grep 'external IPv4' <<<"$W_LOG" | cut -d'|' -f1)
+		v6=$(grep 'external IPv6' <<<"$W_LOG" | cut -d'|' -f1)
+		printf 'V4=%s V6=%s CALLED=%s\n' "$v4" "$v6" "$CALLED"
+	)
+}
+assert_eq "$(claim_wiring_run 1 "$PING_LOST" 0 "$PING_OK" 1)" 'V4=VOID V6=PASS CALLED=1' \
+	'sweep: failing IPv4 runs the claim check, and a foreign claim VOIDs it'
+assert_eq "$(claim_wiring_run 1 "$PING_LOST" 1 "$PING_LOST" 1)" 'V4=VOID V6=FAIL CALLED=1' \
+	'sweep: IPv6 is never converted by the IPv4 address claim'
+assert_eq "$(claim_wiring_run 0 "$PING_OK" 0 "$PING_OK" 1)" 'V4=PASS V6=PASS CALLED=0' \
+	'sweep: a passing IPv4 sweep does not pay for the claim probe'
+assert_eq "$(claim_wiring_run 1 "$PING_LOST" 0 "$PING_OK" 0)" 'V4=FAIL V6=PASS CALLED=1' \
+	'sweep: a unique address leaves the IPv4 FAIL standing'
+assert_eq "$(claim_wiring_run 1 "$PING_LOST" 0 "$PING_OK" 3)" 'V4=FAIL V6=PASS CALLED=1' \
+	'sweep: another xpf cluster claiming the address leaves the FAIL standing'
+claim_cell_run() { # <claim-status> -> PASS|FAIL|VOID
+	(
+		W_LOG=""
+		pass() { W_LOG+="PASS|$*"$'\n'; }
+		fail() { W_LOG+="FAIL|$*"$'\n'; }
+		void() { W_LOG+="VOID|$*"$'\n'; }
+		S_CLAIM="$1"
+		# shellcheck disable=SC1090
+		source "$CLAIM_WIRING"
+		ha_wan_claim_check() { HA_WAN_CLAIM_STATUS="$S_CLAIM"; HA_WAN_CLAIM_REASON="wan claim: stub"; }
+		CLUSTER_CONF=/nonexistent WAN_VIP4=172.16.50.10 WAN_GW4=172.16.50.1 FW0=tcp:fw0 FW1=tcp:fw1
+		wan_claim_cell
+		printf '%s\n' "${W_LOG%%|*}"
+	)
+}
+assert_eq "$(claim_cell_run 0)" PASS 'test-connectivity claim cell: unique address PASSes'
+assert_eq "$(claim_cell_run 1)" FAIL 'test-connectivity claim cell: a non-xpf claimant FAILs'
+assert_eq "$(claim_cell_run 3)" FAIL 'test-connectivity claim cell: another xpf cluster FAILs'
+assert_eq "$(claim_cell_run 2)" VOID 'test-connectivity claim cell: an unmeasured probe is VOID'
+assert_eq "$(bash -c "source '$CLAIM_WIRING'; echo \$WAN_CLAIM_CELL_CALLS")" 1 \
+	'test-connectivity test_cluster calls wan_claim_cell exactly once (code, not a comment)'
 RECENT_JSON="${TMP_DIR}/recent-metrics.jsonl"
 cat >"$RECENT_JSON" <<'JSON'
 {"event":"interval","data":{"sum":{"start":0,"end":1,"bits_per_second":0},"streams":[{"socket":1,"bits_per_second":0},{"socket":2,"bits_per_second":100}]}}

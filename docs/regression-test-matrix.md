@@ -210,10 +210,18 @@ failure.
   - `TestSharedSegmentForeignClaims18558` (`pkg/configstore`) refuses a
     shipped claim on any address in the measured foreign list.
   - `test-failover` runs `ha_wan_claim_check` whenever an external IPv4 cell
-    fails, and turns that FAIL into a VOID naming the foreign MAC. A PASS is
-    never converted, and a blind probe leaves the FAIL standing.
+    fails, and turns that FAIL into a VOID naming the foreign MAC.
+    - Only a **non-xpf** claimant does that.
+    - A claim by another xpf cluster's RETH MAC (`02:bf:72:<other id>:`) is
+      an xpf defect, such as a stale VIP (#18573), so the FAIL stands with
+      the other cluster id named.
+    - This cluster's own RETH and physical MACs, from both nodes, are own.
+    - The cluster id is cross-checked against the live RETH MAC; drift is
+      VOID.
+    - A PASS is never converted, and a blind probe leaves the FAIL standing.
   - `test-connectivity` runs a preflight cell, "WAN IPv4 ... answered for
-    only by this cluster", which FAILs naming the foreign MAC.
+    only by this cluster", which FAILs on either kind of claimant, naming
+    it.
 
   If any of the three fires, re-probe and renumber. Never excuse an external
   IPv4 cell without that evidence. The live renumber has a coexistence window
