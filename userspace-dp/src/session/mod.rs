@@ -247,6 +247,9 @@ type SeededBareTupleIndex = HashMap<BareSessionTuple, BareTupleHandleBucket, Hot
 mod discriminator;
 mod key;
 mod pmech_directory;
+// #18562: node-wide read-only view of live #7770 punt seeds (embedded-ICMP
+// matcher only); maintained at this table's insert/remove choke points.
+mod punt_seed_directory;
 pub(crate) mod pptp;
 pub(crate) mod pptp_control;
 // #7188: `WireDiscriminator` is exported alongside the class enum because the
@@ -259,6 +262,12 @@ pub(crate) use discriminator::{TunnelDiscriminator, WireDiscriminator};
 mod routing_domain_wire;
 pub(crate) use key::*;
 pub(crate) use pmech_directory::*;
+pub(crate) use punt_seed_directory::{
+    PuntSeedDirectory, PuntSeedRow, PUNT_SEED_DIRECTORY_CONTENDED_TOTAL,
+    PUNT_SEED_DIRECTORY_FULL_TOTAL,
+};
+#[cfg(test)]
+pub(crate) use punt_seed_directory::PUNT_SEED_ROW_TTL_NS;
 pub(crate) use routing_domain_wire::{
     AMBIGUOUS_FABRIC_DOMAIN_BASE, QUARANTINED_ROUTING_DOMAIN,
     // #9546: named at the crate level so the conntrack mirror states absence
@@ -2011,6 +2020,14 @@ struct ProbeCostProbes {
     undo_records: AtomicU64,
 }
 
+/// #18562: a dropped table's seeds are gone, so are their directory rows (a
+/// worker's table outlives no worker; the node directory outlives them all).
+impl Drop for SessionTable {
+    fn drop(&mut self) {
+        self.punt_seeds.retire_table(self.punt_seed_table_token);
+    }
+}
+
 pub(crate) struct SessionTable {
     /// #18550: reader for this worker's RG activation epochs (the same
     /// `rg_epochs` the wheel's SELF-HEAL gate reads through `ExpireHaContext`).
@@ -2020,6 +2037,13 @@ pub(crate) struct SessionTable {
     /// (a table built outside a worker) leaves `seen_rg_epoch` untouched.
     /// Wired once in `worker_loop_setup`.
     rg_epoch_reader: Option<std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>>,
+    /// #18562: the node's punt-seed directory. `new()` gives a table a
+    /// private one; `worker_loop` wires every worker of the node to the ONE
+    /// in `SharedSessionOwnerRgIndexes::punt_seeds`. Written only by
+    /// `insert_record` / `remove_entry` / `refresh_in_place` / `Drop` below.
+    punt_seeds: std::sync::Arc<PuntSeedDirectory>,
+    /// #18562: this table's identity in `punt_seeds` (retire fence).
+    punt_seed_table_token: u64,
     /// #7699: the PPTP call associations THIS worker can resolve.
     ///
     /// Per-worker, and deliberately not shared behind a lock: `resolve` runs on
@@ -2527,6 +2551,8 @@ impl SessionTable {
         let state = HotPathSeededState::new(seed);
         Self {
             rg_epoch_reader: None,
+            punt_seeds: std::sync::Arc::new(PuntSeedDirectory::new()),
+            punt_seed_table_token: punt_seed_directory::next_punt_seed_table_token(),
             pptp: crate::session::pptp::PptpAssociations::default(),
             // Start with an empty slab and let it grow on demand.
             // `Slab::with_capacity(DEFAULT_MAX_SESSIONS)` would eagerly
@@ -2719,6 +2745,43 @@ impl SessionTable {
         reader: std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>,
     ) {
         self.rg_epoch_reader = Some(reader);
+    }
+
+    /// #18562: share the node's punt-seed directory with this table. Called
+    /// once from `worker_loop`, on an empty table (any row this table had
+    /// published to its previous directory is retired first).
+    pub(crate) fn set_punt_seed_directory(&mut self, directory: std::sync::Arc<PuntSeedDirectory>) {
+        self.punt_seeds.retire_table(self.punt_seed_table_token);
+        self.punt_seeds = directory;
+    }
+
+    /// #18562: the node's live punt seeds, for the embedded-ICMP matcher's
+    /// cross-worker fallback (`icmp_embed/nat_match_v4.rs` / `_v6.rs`).
+    pub(crate) fn punt_seed_directory(&self) -> &PuntSeedDirectory {
+        &self.punt_seeds
+    }
+
+    /// #18562: a directory row is a snapshot taken at insert. Every in-place
+    /// writer of a FORWARD entry's decision or metadata calls this first, so
+    /// a seed it rewrites (resolution, owner RG, zone pair) loses its row
+    /// instead of leaving a stale snapshot behind — fail closed: the row only
+    /// ever answers an error the shared maps could not. The writers:
+    /// `refresh_in_place`, `revalidate_forwarding_resolution_with_egress_zone`,
+    /// `rebind_forward_egress_zone`, `rebind_policy_pair`, `rebind_zones_pair`
+    /// (`update_reverse_route_on_filter_hit` writes reverse entries only, and a
+    /// row is never a reverse entry).
+    fn retire_punt_seed_row_before_rewrite(&self, key: &SessionKey) {
+        if self.punt_seeds.len() == 0 {
+            return;
+        }
+        if let Some(&handle) = self.key_to_handle.get(key)
+            && let Some(record) = self.entries.get(handle as usize)
+            && record.key == *key
+            && record.entry.origin == SessionOrigin::FabricPuntSeed
+        {
+            self.punt_seeds
+                .retire(key, self.punt_seed_table_token, record.entry.session_id);
+        }
     }
 
     /// #18550: the current activation epoch for `owner_rg_id`, if a reader is
@@ -2926,6 +2989,9 @@ impl SessionTable {
         let hit_is_reverse = record.entry.metadata.is_reverse;
         let hit_nat = record.entry.decision.nat;
         let old_owner_rg_id = record.entry.metadata.owner_rg_id;
+        // #18562: this rewrites the hit's resolution / owner RG (and maybe the
+        // pair's egress zone, below) in place.
+        self.retire_punt_seed_row_before_rewrite(&canonical_key);
         if let Some(new_owner_rg_id) = owner_rg_id
             && new_owner_rg_id != old_owner_rg_id
         {
@@ -2959,6 +3025,7 @@ impl SessionTable {
                 )
             };
             if forward_key != reverse_key {
+                self.retire_punt_seed_row_before_rewrite(&forward_key);
                 if let Some(fwd) = self.entry_by_key_mut(&forward_key)
                     && !fwd.metadata.is_reverse
                     && fwd.metadata.egress_zone != new_zone
@@ -3021,6 +3088,8 @@ impl SessionTable {
         if fwd.metadata.is_reverse {
             return false;
         }
+        // #18562: the forward leg's egress zone is rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(&forward_key);
         if forward_key != reverse_key {
             if let Some(fwd) = self.entry_by_key_mut(&forward_key)
                 && fwd.metadata.egress_zone != new_egress_zone
@@ -3894,6 +3963,24 @@ impl SessionTable {
             Self::is_pressure_shed_unreplied(&record.key, &record.entry, false)
                 .then(|| record.key.clone());
         let bare_tuple = record.key.bare_tuple();
+        // #18562: the slab insert choke point publishes a forward punt seed to
+        // the node's directory; `remove_entry` is its retire twin.
+        if record.entry.origin == SessionOrigin::FabricPuntSeed && !record.entry.metadata.is_reverse {
+            let _ = self.punt_seeds.publish(
+                &record.key,
+                PuntSeedRow {
+                    decision: record.entry.decision,
+                    metadata: record.entry.metadata.clone(),
+                    session_id: record.entry.session_id,
+                    table_token: self.punt_seed_table_token,
+                    expires_at_ns: PuntSeedRow::deadline(
+                        record.entry.created_ns,
+                        record.entry.expires_after_ns,
+                    ),
+                },
+                record.entry.created_ns,
+            );
+        }
         let raw = self.entries.insert(record);
         let handle: u32 = raw.try_into().expect("slab handle exceeds u32");
         if let Some(key) = opening_key {
@@ -6198,6 +6285,15 @@ impl SessionTable {
         }
         // Snapshot the OLD index-relevant + collision-relevant state (all Copy).
         let old_origin = record.entry.origin;
+        // #18562: a directory row is a snapshot taken at insert; an in-place
+        // rewrite of the seed (HA transition, promotion) retires it rather than
+        // leave a stale zone pair or decision behind. Fail-closed: the row only
+        // ever answers an error the shared maps could not.
+        if old_origin == SessionOrigin::FabricPuntSeed {
+            let session_id = record.entry.session_id;
+            self.punt_seeds
+                .retire(key, self.punt_seed_table_token, session_id);
+        }
         let old_nat = record.entry.decision.nat;
         let old_source_nat_static = record.entry.source_nat_static;
         let old_is_reverse = record.entry.metadata.is_reverse;
@@ -6660,6 +6756,8 @@ impl SessionTable {
         egress_zone: u32,
         egress_zone_check: u32,
     ) -> bool {
+        // #18562: the forward entry's policy and zone pair are rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(key);
         let Some(forward) = self.entry_by_key(key) else {
             return false;
         };
@@ -6728,6 +6826,8 @@ impl SessionTable {
         egress_zone: u32,
         egress_zone_check: u32,
     ) -> bool {
+        // #18562: the forward entry's zone pair is rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(key);
         let Some(forward) = self.entry_by_key(key) else {
             return false;
         };
@@ -7141,6 +7241,7 @@ impl SessionTable {
         // zone/IP decrement cannot be forgotten by a future delete site.
         let removed_origin = record.entry.origin;
         let removed_is_reverse = metadata.is_reverse;
+        let removed_session_id = record.entry.session_id;
         // Borrow on `record` ends here; subsequent calls take
         // &mut self (cleanup helpers) without conflict.
         let _ = record;
@@ -7158,6 +7259,12 @@ impl SessionTable {
             "remove_entry leaked handle {} in a secondary index",
             handle
         );
+        // #18562: every removal (expire, delete, replace, take_synced_local)
+        // retires this incarnation's punt-seed directory row.
+        if removed_origin == SessionOrigin::FabricPuntSeed {
+            self.punt_seeds
+                .retire(key, self.punt_seed_table_token, removed_session_id);
+        }
         // Only AFTER all indices are clean, return slot to slab.
         let record = self.entries.remove(handle as usize);
         // #2134/#3122/#10310/#10985: decrement the matching zone/IP count
@@ -7793,6 +7900,11 @@ mod close_refresh_gate_10885_tests;
 #[cfg(test)]
 #[path = "tcp_seq_15753_tests.rs"]
 mod tcp_seq_15753_tests;
+// #18562: the punt-seed directory's publish / retire / fence / deadline /
+// cap contract, driven through the table's own install and removal paths.
+#[cfg(test)]
+#[path = "punt_seed_directory_18562_tests.rs"]
+mod punt_seed_directory_18562_tests;
 
 // #13939 (H09-02): an Owner hit that promotes a peer-synced pair, then
 // applies the deferred FIN/RST close, must close BOTH halves. The promotion
