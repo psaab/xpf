@@ -1328,7 +1328,8 @@ construction**.
   one (#18584). With `routing-instance mgmt` on every server, xpfd renders
   chrony `bindacqdevice vrf-mgmt` (`/etc/chrony/conf.d/xpf-acquisition.conf`)
   and restarts chrony when the binding is added, changed or removed, and on
-  a daemon start only if chrony is not already synchronised. A
+  a daemon start unless chrony is synchronised and started after the binding
+  was written. A
   cluster whose servers use the default instance gets a commit advisory
   naming this. The distro `makestep 1 3` steps a clock that booted from a
   lagging RTC within the first three updates. `mgmt` is honoured only when

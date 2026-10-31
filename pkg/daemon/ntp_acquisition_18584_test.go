@@ -4,8 +4,10 @@ import (
 	"context"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -59,9 +61,17 @@ func TestRenderChronyAcquisition18584(t *testing.T) {
 // unchanged apply restarts nothing.
 func stubChronySynced18584(t *testing.T, synced bool) {
 	t.Helper()
-	orig := chronySyncedFn
+	stubChronyState18584(t, synced, synced)
+}
+
+// stubChronyState18584 drives both halves of the restart skip: chrony
+// synchronised, and the running chronyd started after the binding file.
+func stubChronyState18584(t *testing.T, synced, loaded bool) {
+	t.Helper()
+	origS, origL := chronySyncedFn, chronyLoadedBindingFn
 	chronySyncedFn = func() bool { return synced }
-	t.Cleanup(func() { chronySyncedFn = orig })
+	chronyLoadedBindingFn = func() bool { return loaded }
+	t.Cleanup(func() { chronySyncedFn, chronyLoadedBindingFn = origS, origL })
 }
 
 func TestApplySystemNTPAcquisitionBinding18584(t *testing.T) {
@@ -132,12 +142,23 @@ func TestAcquisitionStartRestartSkippedWhenSynced18584(t *testing.T) {
 	if got := len(calls()); got != 1 {
 		t.Fatalf("the skip must be remembered for the process; requests=%v", calls())
 	}
+	// Seat AE residual: synchronised is not proof the running chronyd loaded
+	// the binding — an xpfd that wrote the file and died before restarting
+	// chrony leaves an old chronyd syncing via the default instance. If the
+	// running chronyd predates the file, restart.
+	stubChronyState18584(t, true, false)
+	d4 := &Daemon{}
+	d4.applySystemNTP(cfg)
+	if got := calls(); len(got) != 2 || !got[1][1] {
+		t.Fatalf("a chronyd older than the binding file must be restarted even when synced; requests=%v", got)
+	}
+	stubChronyState18584(t, true, true)
 	// A changed binding restarts even though chrony is synced.
 	blue := ntpRICfg18584("blue")
 	blue.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue", InstanceType: "virtual-router"}}
 	d3 := &Daemon{}
 	d3.applySystemNTP(blue)
-	if got := calls(); len(got) != 2 || !got[1][1] {
+	if got := calls(); len(got) != 3 || !got[2][1] {
 		t.Fatalf("a changed binding must take the restart leg; requests=%v", got)
 	}
 }
@@ -198,6 +219,54 @@ func TestChronyRestartsOutrightWhenTheBindingIsRemoved18584(t *testing.T) {
 	}
 	if chronyAcqRestartOwed.Load() {
 		t.Fatal("a successful restart must discharge the owed restart")
+	}
+}
+
+// The production chronyLoadedBindingFn compares chrony.service's
+// ExecMainStartTimestamp with the binding file's mtime.
+func TestChronyLoadedBindingComparesStartWithTheFile18584(t *testing.T) {
+	dir := t.TempDir()
+	orig, origRun := chronyAcquisitionPath, chronyRunCmd
+	chronyAcquisitionPath = dir + "/xpf-acquisition.conf"
+	t.Cleanup(func() { chronyAcquisitionPath, chronyRunCmd = orig, origRun })
+	start := time.Now().Add(-time.Hour)
+	var gotArgs []string
+	chronyRunCmd = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		gotArgs = append([]string{name}, args...)
+		return []byte("@" + strconv.FormatInt(start.Unix(), 10) + "\n"), nil
+	}
+	if chronyLoadedBindingFn() {
+		t.Fatal("no binding file: must answer false")
+	}
+	if err := os.WriteFile(chronyAcquisitionPath, []byte("bindacqdevice vrf-mgmt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Written now, chronyd started an hour ago: it never read the binding.
+	if chronyLoadedBindingFn() {
+		t.Fatal("a binding written after chronyd started must read as not loaded")
+	}
+	if strings.Join(gotArgs, " ") != "systemctl show --timestamp=unix -p ExecMainStartTimestamp --value chrony" {
+		t.Fatalf("unexpected start-time query %q", gotArgs)
+	}
+	old := start.Add(-time.Hour)
+	if err := os.Chtimes(chronyAcquisitionPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if !chronyLoadedBindingFn() {
+		t.Fatal("a binding written before chronyd started must read as loaded")
+	}
+	// Same second is ambiguous: restart.
+	if err := os.Chtimes(chronyAcquisitionPath, start, start); err != nil {
+		t.Fatal(err)
+	}
+	if chronyLoadedBindingFn() {
+		t.Fatal("a start in the same second as the write must read as not loaded")
+	}
+	for _, out := range []string{"\n", "@0\n", "n/a\n"} {
+		chronyRunCmd = func(ctx context.Context, name string, args ...string) ([]byte, error) { return []byte(out), nil }
+		if chronyLoadedBindingFn() {
+			t.Fatalf("unit start %q must read as not loaded", out)
+		}
 	}
 }
 

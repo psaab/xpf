@@ -3902,8 +3902,12 @@ never lock an operator out of a remote box it manages.
   trying `systemctl reload` first: a unit with an ExecReload would report
   the reload done while chronyd kept its old sockets. On the first apply of
   each daemon process that renders an UNCHANGED binding, `applySystemNTP`
-  restarts chrony only if `chronyc -n tracking` does not already report
-  `Leap status: Normal` (`chronySyncedFn`, `chronyAcqStartRestarted`):
+  restarts chrony unless `chronyc -n tracking` reports `Leap status: Normal`
+  AND chrony.service's `ExecMainStartTimestamp` is later than the binding
+  file's mtime (`chronySyncedFn`, `chronyLoadedBindingFn`,
+  `chronyAcqStartRestarted`) — synchronised alone is not proof the running
+  chronyd read the file (an xpfd that wrote it and died before restarting
+  chrony leaves an old chronyd that may still sync via the default instance):
   chrony.service does not order after xpfd, so a chronyd started before
   `vrf-mgmt` existed is restarted once the VRF does (re-opening its
   `makestep` window), while a synchronised one is left alone — a gratuitous

@@ -1355,6 +1355,41 @@ var chronySyncedFn = func() bool {
 	return err == nil && chronyTrackingSynced(string(out))
 }
 
+// chronyLoadedBindingFn reports whether the RUNNING chronyd started after the
+// acquisition file was last written, i.e. it read the binding (chrony reads
+// conf.d only at start). The start is systemd's ExecMainStartTimestamp for
+// chrony.service, read as unix seconds. Review seat AE: "synchronised" alone is not proof —
+// an xpfd that wrote the file and died before restarting chrony leaves an old
+// chronyd that may still sync through the default instance on the WAN owner.
+// A var so the cells can drive it; any read failure answers false (restart).
+var chronyLoadedBindingFn = func() bool {
+	st, err := os.Stat(chronyAcquisitionPath)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := chronyRunCmd(ctx, "systemctl", "show", "--timestamp=unix", "-p", "ExecMainStartTimestamp", "--value", "chrony")
+	if err != nil {
+		return false
+	}
+	started, ok := parseSystemdUnixTimestamp(string(out))
+	// Strictly later, at second resolution: a start in the same second as
+	// the write is ambiguous, and the safe answer is "restart".
+	return ok && started.Unix() > st.ModTime().Unix()
+}
+
+// parseSystemdUnixTimestamp parses `systemctl show --timestamp=unix` output
+// ("@1793416386"). An empty value (the unit never started) is not ok.
+func parseSystemdUnixTimestamp(out string) (time.Time, bool) {
+	v := strings.TrimPrefix(strings.TrimSpace(out), "@")
+	sec, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || sec <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, 0), true
+}
+
 func chronyTrackingSynced(out string) bool {
 	for _, line := range strings.Split(out, "\n") {
 		k, v, ok := strings.Cut(line, ":")
@@ -1649,12 +1684,13 @@ func (d *Daemon) applySystemNTP(cfg *config.Config) {
 	// is stepped as soon as the bound source answers.
 	//
 	// Review seat AE: skip it when chrony already reports a synchronised
-	// reference — its bound sockets evidently work, and a gratuitous restart
+	// reference AND the running chronyd started after the binding file was
+	// written (so it loaded it) — its bound sockets work, and a gratuitous restart
 	// leaves it "Not synchronised" for ~10 s, which the local clock monitor
 	// raises as a CRITICAL alarm and a pending `commit confirmed` recovery
 	// reads as a clock fault, and re-opens the makestep window for nothing.
 	if acq != "" && !d.chronyAcqStartRestarted {
-		if !acqChanged && chronySyncedFn() {
+		if !acqChanged && chronySyncedFn() && chronyLoadedBindingFn() {
 			d.chronyAcqStartRestarted = true
 		} else {
 			acqChanged = true
