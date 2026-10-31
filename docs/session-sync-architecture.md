@@ -2138,7 +2138,7 @@ the slow side stays ESTABLISHED until it has consumed the whole backlog
   (#18570: a peer that acks sync-level heartbeats and does not answer the
   liveness probe is declared about 0.5–0.525 s after its last heartbeat at
   defaults, 1.0–1.05 s in the lab), and short of the 5s cap a FIN backlog had
-  before round 3. The probe does not shorten this case: backlog frames read
+  before round 3. The probe does not shorten this case: backlog frames handled
   after the probe answer it.
 - **Every teardown names itself.** `fabric N disconnected` carries `reason`,
   `err` and a per-connection summary (`conn_age`, `frames_read`, `bytes_read`,

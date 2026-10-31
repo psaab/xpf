@@ -97,7 +97,9 @@ MAX_FAILOVER_ROUTE_MISS_DELTA="${MAX_FAILOVER_ROUTE_MISS_DELTA:-32}"
 MAX_FAILOVER_POLICY_DENIED_DELTA="${MAX_FAILOVER_POLICY_DENIED_DELTA:-0}"
 # #18617 review: the whole-run zero-interval count (aggregate + every stream,
 # no window excluded) is RECORDED and judged master-relative, not gated: the
-# crash alone, whose 1.0-2.2 s detection is by design, puts every stream at
+# crash alone, whose detection and activation are by design (in the lab about
+# 0.8-1.05 s from the crash when the #18570 probe goes unanswered, about 1.2 s
+# more without ack support, then 0.34-0.44 s to activate), puts every stream at
 # zero for 1-3 intervals, so a fixed limit of 2 was red on every crash run.
 # Set MAX_ZERO_INTERVALS to gate it absolutely anyway.
 MAX_ZERO_INTERVALS="${MAX_ZERO_INTERVALS:-}"
@@ -2089,8 +2091,10 @@ info "Waiting for iperf3 final result (up to ${IPERF_DURATION}s)"
 
 failover_wait_main_iperf_result /tmp/iperf3-failover.log "$IPERF_DURATION" || true
 
-# #18617: the crash is the one EXCUSED window (--event-sec; detection of
-# 1.0-2.2 s is by design). The harness's own moves are PLANNED (--planned-move).
+# #18617: the crash is the one EXCUSED window (--event-sec; its detection and
+# activation are by design: in the lab about 0.8-1.05 s from the crash when the
+# #18570 probe goes unanswered, about 1.2 s more without ack support, then
+# 0.34-0.44 s to activate). The harness's own moves are PLANNED (--planned-move).
 ha_build_planned_move_args
 
 # Derive the throughput headline only from gate-validated JSON-stream metrics.
@@ -2131,7 +2135,7 @@ if [[ "$iperf_gate_ok" == true ]]; then
 		ha_emit_verdict "iperf3 whole-run zero-throughput intervals (${zero_intervals_total}, limit ${MAX_ZERO_INTERVALS})" \
 			ha_counter_at_most_verdict "$zero_intervals_total" "$MAX_ZERO_INTERVALS" "whole-run zero intervals"
 	else
-		info "iperf3 whole-run zero-throughput intervals: ${zero_intervals_total} (recorded as whole_run_zero_intervals and judged master-relative, not gated: the crash's by-design 1.0-2.2 s detection alone zeroes every stream)"
+		info "iperf3 whole-run zero-throughput intervals: ${zero_intervals_total} (recorded as whole_run_zero_intervals and judged master-relative, not gated: the crash's by-design detection and activation, about 1.1-1.5 s in the lab, alone zero every stream)"
 	fi
 	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside the crash and planned-move windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)" \
 		ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals outside the [T, T+3] windows (MAX_STREAM_ZERO_INTERVALS)"

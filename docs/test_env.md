@@ -411,12 +411,16 @@ sg incus-admin -c 'incus exec xpf-fw1 -- ip addr show ge-7-0-1.50' | grep '172.1
 
 The checked-in cluster config uses the compiler-default private-RG mode (no
 `no-private-rg-election`), so RETH VRRP is suppressed. Its heartbeat staleness
-is 200ms × 5 = 1s, checked four times per interval (#18639). A hard-crashed
-peer that has acked a sync-level heartbeat does not answer the #18570
-liveness probe and is declared at the threshold, about 1.0–1.05 s after its
-last heartbeat; a peer without ack support keeps the sync-recency rule
-(max(threshold, remaining 2 s sync window) plus a quarter interval, capped at
-5 s); a process crash that sends FIN falls through at the plain threshold.
+is 200ms × 5 = 1s, checked every quarter interval (50 ms, #18639). A
+hard-crashed peer that has acked a sync-level heartbeat does not answer the
+#18570 liveness probe and is declared at the threshold, about 1.0–1.05 s after
+its last heartbeat (0.8–1.05 s after the crash), provided no frame it queued
+before it died is handled after the probe; a peer without ack support keeps
+the sync-recency rule (max(threshold, remaining 2 s sync window) plus a check
+period, capped at 5 s); a process crash that sends FIN falls through at the
+plain threshold. `show chassis cluster information` ("Liveness probes sent:
+... peer acks probes: yes|no") shows which case applies. Activation adds about
+0.34–0.44 s before traffic resumes.
 The old ~60ms/30ms-VRRP failover text describes a legacy test path, not this
 default. The prior ~150ms recovery expectation is removed; no source-backed
 end-to-end recovery bound exists (`compileChassis` in

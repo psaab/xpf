@@ -4194,8 +4194,10 @@ idempotent, and a no-op in two cases:
   lone node keeps ownership through its stop, as before.
 
   Residual: "no live peer" is `peerAlive`, and a peer that died inside the
-  loss-detection window (about 0.5-2.1 s at defaults, up to the 5 s
-  sync-suppression cap) still reads as alive. A stop inside that window
+  loss-detection window still reads as alive. That window is about
+  0.4-0.525 s after a hard crash at defaults when the #18570 probe goes
+  unanswered, longer for a peer without ack support or with pre-crash frames
+  handled after the probe, and up to the 5 s sync-suppression cap. A stop inside that window
   still resigns, the watcher still sees the RG0 demotion, and a pending
   commit-confirmed is still confirmed. Nothing here closes that window.
 

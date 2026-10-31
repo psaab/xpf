@@ -161,31 +161,49 @@ Switching to macvtap, routed, or tc-redirect could eliminate this entirely.
 The `ae1a717` VRRP measurements below describe the legacy VRRP-backed RETH
 path, not the compiler-default private-RG election mode. The latter uses
 heartbeat detection. Runtime heartbeat defaults are 100ms × 5 = 500ms; the
-deployed lab config is 200ms × 5 = 1s. The receiver checks staleness four
-times per heartbeat interval (#18639), so a peer is declared within a quarter
-interval of its last admitted heartbeat turning interval × threshold old.
-While session sync looks connected, a peer that has acked a sync-level
-heartbeat on this incarnation (#18570) must answer a liveness probe sent at
-its first missed heartbeat (once its last heartbeat is 1.5 intervals old);
-any sync frame newer than the probe counts. A hard-crashed peer cannot
-answer, so it is declared at the threshold: about 0.5–0.525 s after its last
-heartbeat at defaults and 1.0–1.05 s in the lab. If no probe could be
-pre-armed because the late heartbeats fell inside a boot or restart grace,
-the probe goes out at the first check after the grace (the threshold, if the
-grace had already ended) and gets (threshold − 1.5) more intervals: at most
-about 0.875 s at defaults and 1.75 s in the lab when the grace ended by the
-threshold. A peer without ack support keeps the #17056 recency rule:
-max(threshold, remaining 2 s sync window) plus a quarter interval, with a 5 s
-cap on continuous suppression. A process crash that sends FIN, or sync idle
-for more than 2 s, falls back to the plain threshold when the receiving standby is caught up; a standby still draining a backlog when the peer's FIN/RST arrives keeps sync installed while it drains, and its frames refresh peer recency for up to one 1s watchdog tick, so there detection is up to max(threshold, ~3s) plus a quarter interval — about 3.0 s at defaults and 3.05 s in the lab, under the 5s cap (#18521; the probe does not shorten it, because backlog frames read after the probe answer it). These are detection estimates, not end-to-end
-forwarding-restoration SLAs
-(`compileChassis` in `pkg/config/compiler_chassis.go`;
-`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold`,
-`timeoutCheckInterval` and `heartbeatReceiver.checkTimeout` in
-`pkg/cluster/heartbeat.go`; `syncSuppressesPeerTimeoutLocked`,
-`prearmPeerLivenessProbe` and `peerAnsweredLivenessProbeLocked` in
-`pkg/cluster/heartbeat_suppress.go`; `handlePeerTimeout` in
-`pkg/cluster/heartbeat_manager.go`; `docs/ha-cluster-userspace.conf:71-72`).
+deployed lab config is 200ms × 5 = 1s. The receiver checks staleness every
+quarter heartbeat interval (interval / 4, floored at 10 ms; #18639), so a peer
+is declared within that check period of its last admitted heartbeat turning
+interval × threshold old. While session sync looks connected, a peer that has
+acked a sync-level heartbeat on this incarnation (#18570) must answer a
+liveness probe sent at its first missed heartbeat (once its last heartbeat is
+1.5 intervals old); any sync frame handled after the probe counts as the
+answer. A hard-crashed peer is then declared at the threshold, provided the
+ack latch had armed and no frame the peer queued before it died is handled
+after the probe: about 0.5–0.525 s after its last heartbeat (0.4–0.525 s after
+the crash) at defaults and 1.0–1.05 s (0.8–1.05 s) in the lab. A frame is
+stamped when it is handled, not when it arrived (`notePeerLiveness`), so a
+pre-crash backlog handled after the probe answers it; on the half-open socket
+a hard crash leaves, no FIN watchdog bounds that backlog, and the recency rule
+below runs from the last such frame. If no probe could be pre-armed because
+the late heartbeats fell inside the 5 s restart grace or the boot floor, the
+crash is declared counting from the grace's end: at the first check after it
+if sync is then disconnected or more than 2 s stale; otherwise an ack-capable
+peer is probed then and gets (threshold − 1.5) intervals (350 ms at defaults,
+700 ms in the lab) plus a check period, and a peer without ack support follows the rule below. A peer without ack support keeps the #17056 recency rule:
+max(threshold, remaining 2 s sync window) plus a check period, with a 5 s cap
+on continuous suppression. A process crash that sends FIN, or sync idle for
+more than 2 s, falls back to the plain threshold when the receiving standby is
+caught up, subject to startup/restart grace; a standby still draining a
+backlog when the peer's FIN/RST arrives keeps sync installed while it drains,
+and its frames refresh peer recency for up to one 1 s watchdog tick, so there
+detection is up to max(threshold, ~3 s) plus a check period — about 3.0 s at
+defaults and 3.05 s in the lab, under the 5 s cap (#18521; the probe does not
+shorten it, because backlog frames handled after the probe answer it). `show
+chassis cluster information` prints "Liveness probes sent: N (unanswered at
+timeout: M, peer acks probes: yes|no)", which tells an operator which case
+applies. These are detection times, not traffic restoration: activation adds
+about 0.34–0.44 s from peer-lost to the first ping reply on the lab clusters
+(#18561), so a lab crash outage lands near 1.4 s. (`compileChassis` in
+`pkg/config/compiler_chassis.go`;
+`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` in
+`pkg/cluster/heartbeat.go`; `timeoutCheckInterval` and
+`heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
+`prearmPeerLivenessProbe`, `peerAnsweredLivenessProbeLocked` and
+`syncSuppressesPeerTimeoutLocked` in `pkg/cluster/heartbeat_suppress.go`;
+`notePeerLiveness` in `pkg/cluster/sync_payload_caps_16041.go`;
+`handlePeerTimeout` in `pkg/cluster/heartbeat_manager.go`;
+`docs/ha-cluster-userspace.conf:71-72`).
 
 ### Legacy VRRP-backed RETH mode (`no-private-rg-election`)
 - The 30ms advertisement default is configurable with
