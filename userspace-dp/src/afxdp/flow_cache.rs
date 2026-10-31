@@ -1074,9 +1074,15 @@ pub(super) enum FlowCacheEvictionArm {
     /// stale after its RG left the node, evicted for re-resolve
     /// (slow path fabric-redirects it to the new owner).
     PostHitForwardCandidateEgressDeparted = 18,
+    /// #18566: direct-ingress cached FabricRedirect whose destination's
+    /// connected-owner RG is now locally active, evicted so the slow path
+    /// re-homes it onto the local egress. Its own arm so a re-home that does
+    /// not stick (the slow path re-seeding the redirect each packet) shows up
+    /// here instead of hiding under the owner-active arm.
+    PostHitFabricRedirectDestinationNowLocal = 19,
 }
 
-pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 19;
+pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 20;
 
 impl FlowCacheEvictionArm {
     pub(super) const ALL: [Self; FLOW_CACHE_EVICTION_ARM_COUNT] = [
@@ -1099,6 +1105,7 @@ impl FlowCacheEvictionArm {
         Self::PostHitFabricLocalWinsSameOwner,
         Self::PostHitFabricIngressDiscardNowLocal,
         Self::PostHitForwardCandidateEgressDeparted,
+        Self::PostHitFabricRedirectDestinationNowLocal,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -1127,6 +1134,9 @@ impl FlowCacheEvictionArm {
             }
             Self::PostHitForwardCandidateEgressDeparted => {
                 "post_hit_forward_candidate_egress_departed"
+            }
+            Self::PostHitFabricRedirectDestinationNowLocal => {
+                "post_hit_fabric_redirect_destination_now_local"
             }
         }
     }
