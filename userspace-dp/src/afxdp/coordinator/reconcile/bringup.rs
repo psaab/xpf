@@ -870,7 +870,11 @@ fn spawn_workers(
     let mut planned_slots_by_worker: BTreeMap<u32, std::collections::BTreeSet<u32>> =
         BTreeMap::new();
     let mut spawned_worker_ids: Vec<u32> = Vec::new();
-    for (worker_id, binding_plans) in workers {
+    // #18640: HA session sync fans every peer session out to every worker of
+    // this set, so each worker's quota charges a copy only when its rank in
+    // the set designates it.
+    let session_limit_width = workers.len() as u32;
+    for (session_limit_rank, (worker_id, binding_plans)) in workers.into_iter().enumerate() {
         let plan_count = binding_plans.len();
         // #5143: the slot set this worker is REQUIRED to bind. Captured before
         // `binding_plans` is moved into the worker body so the barrier can
@@ -992,7 +996,8 @@ fn spawn_workers(
         // `coord` HERE and are then MOVED into the worker body, which
         // never touches `coord` (it must be 'static for the spawn).
         let launch_plan =
-            WorkerLaunchPlan::new(worker_id, node_id, binding_plans, worker_poll_mode);
+            WorkerLaunchPlan::new(worker_id, node_id, binding_plans, worker_poll_mode)
+                .with_session_limit_shard(session_limit_rank as u32, session_limit_width);
         let shared_dataplane = WorkerSharedDataplane::from_coord(coord);
         let control_channels = WorkerControlChannels::new(
             commands_clone,

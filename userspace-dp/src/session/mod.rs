@@ -2381,6 +2381,21 @@ pub(crate) struct SessionTable {
     /// Set by `set_session_limit_active`, driven from the worker's applied
     /// forwarding/screen-profile snapshot.
     session_limit_active: bool,
+    /// #18640: this table's slot in the node's HA fan-out, as (index, width).
+    /// HA session sync installs every peer session on EVERY worker as a
+    /// `SyncImport` copy, and demotion re-tags every worker's replica the same
+    /// way. One logical session must charge the per-source quota once per
+    /// node, as #10310 requires for local replicas, so only the worker this
+    /// slot designates charges a fanned-out copy
+    /// (`session_limit_charges_fanout_copy`). The default (0, 1) charges every
+    /// copy: a single table, as in standalone tests, is the whole node.
+    session_limit_shard_index: u32,
+    session_limit_shard_width: u32,
+    /// #18640: the process-wide keyed hash that picks the charged worker. Every
+    /// worker table is built from the same per-process seed, so they agree on
+    /// the designation; the seed keeps an outsider from aiming flows at one
+    /// worker's quota.
+    session_limit_shard_hash: HotPathSeededState,
     /// #2134/#3122/#10310/#10985/#11057: per-source-IP count of present
     /// forward-direction logical sessions, keyed by ingress zone and source
     /// IP. Always maintained, including when no screen profile configures a
@@ -2622,6 +2637,9 @@ impl SessionTable {
             last_pop_stats: WheelPopStats::default(),
             cumulative_pop_stats: WheelPopStats::default(),
             session_limit_active: false,
+            session_limit_shard_index: 0,
+            session_limit_shard_width: 1,
+            session_limit_shard_hash: state.clone(),
             // #2364/#10985: these counters key attacker-chosen IPs plus an
             // ingress-zone ID, so use the seeded hasher.
             session_limit_src_counts: HashMap::with_hasher(state.clone()),
@@ -3753,9 +3771,11 @@ impl SessionTable {
             for (key, handle) in &self.key_to_handle {
                 if let Some(record) = self.entries.get(*handle as usize) {
                     let ingress_zone = record.entry.metadata.ingress_zone;
-                    if !record.entry.metadata.is_reverse
-                        && install::session_limit_origin_counted(record.entry.origin)
-                    {
+                    if self.session_limit_counted(
+                        key,
+                        record.entry.origin,
+                        record.entry.metadata.is_reverse,
+                    ) {
                         let c = self
                             .session_limit_dst_counts
                             .entry((ingress_zone, key.dst_ip))
@@ -3776,6 +3796,87 @@ impl SessionTable {
         }
         self.session_limit_active = active;
     }
+    /// #18640: set this table's slot in the node's HA fan-out (see
+    /// `session_limit_shard_index`). Called once at worker launch with the
+    /// worker's rank in the bring-up's worker set and that set's size. The
+    /// counts are rebuilt from the slab under the new designation, so a later
+    /// decrement always matches the increment the same predicate made.
+    pub(crate) fn set_session_limit_shard(&mut self, index: u32, width: u32) {
+        let width = width.max(1);
+        let index = index.min(width - 1);
+        if index == self.session_limit_shard_index && width == self.session_limit_shard_width {
+            return;
+        }
+        self.session_limit_shard_index = index;
+        self.session_limit_shard_width = width;
+        self.rebuild_session_limit_counts();
+    }
+
+    /// #18640: whether THIS worker charges a fanned-out HA copy of the session
+    /// keyed `key`. Exactly one worker of the node's fan-out does.
+    #[inline]
+    fn session_limit_charges_fanout_copy(&self, key: &SessionKey) -> bool {
+        use std::hash::BuildHasher;
+        let width = self.session_limit_shard_width;
+        width <= 1
+            || (self.session_limit_shard_hash.hash_one(key) % u64::from(width))
+                == u64::from(self.session_limit_shard_index)
+    }
+
+    /// #2134/#3122/#10310/#18640: the counted-class predicate, the single
+    /// definition every increment, decrement and transition site uses.
+    ///
+    /// A row counts toward the per-source quota iff it is the forward half of
+    /// a logical session this worker is charged for:
+    /// - reverse rows never count (one charge per logical session);
+    /// - `WorkerLocalImport` replicas of a session another worker authored do
+    ///   not count (#10310);
+    /// - a fanned-out HA copy (`SyncImport`, and `SyncLiveness`, which is
+    ///   stored as `SyncImport`) counts on exactly ONE worker of the node
+    ///   (#18640), so a standby's quota sees each peer session once, spread
+    ///   across workers the way RSS spreads local sessions. #3122 holds: the
+    ///   copies still count, so failover cannot hand a client a fresh quota;
+    /// - every other origin (local flows, transient seeds, the serving worker's
+    ///   `SharedMaterialize` / `SharedPromote` row) counts on its own worker.
+    #[inline]
+    pub(crate) fn session_limit_counted(
+        &self,
+        key: &SessionKey,
+        origin: SessionOrigin,
+        is_reverse: bool,
+    ) -> bool {
+        if is_reverse || !install::session_limit_origin_counted(origin) {
+            return false;
+        }
+        if matches!(origin, SessionOrigin::SyncImport | SessionOrigin::SyncLiveness) {
+            return self.session_limit_charges_fanout_copy(key);
+        }
+        true
+    }
+
+    /// #18640: recompute the source (and, when enabled, destination) counts
+    /// from the live slab with the current predicate. Reservation counts are
+    /// local and unaffected.
+    fn rebuild_session_limit_counts(&mut self) {
+        let mut src: Vec<(u32, IpAddr, IpAddr)> = Vec::new();
+        for (key, handle) in &self.key_to_handle {
+            if let Some(record) = self.entries.get(*handle as usize)
+                && self.session_limit_counted(
+                    key,
+                    record.entry.origin,
+                    record.entry.metadata.is_reverse,
+                )
+            {
+                src.push((record.entry.metadata.ingress_zone, key.src_ip, key.dst_ip));
+            }
+        }
+        self.session_limit_src_counts.clear();
+        self.session_limit_dst_counts.clear();
+        for (zone, sip, dip) in src {
+            self.session_limit_inc(zone, sip, dip);
+        }
+    }
+
     /// #2134/#10985: non-mutating read of the live count for one source IP
     /// within an ingress zone. Used by the new-flow check before a session
     /// is created so the (limit+1)-th new flow is dropped only against its
@@ -3812,7 +3913,7 @@ impl SessionTable {
     /// #2134/#3122/#10310/#10985/#11057: increment the always-on source count
     /// and, when enabled, the optional destination count for a freshly
     /// counted session. Caller MUST have evaluated the shared counted-class
-    /// predicate (`!is_reverse && install::session_limit_origin_counted(origin)`).
+    /// predicate (`session_limit_counted`).
     #[inline]
     fn session_limit_inc(&mut self, ingress_zone: u32, src_ip: IpAddr, dst_ip: IpAddr) {
         let c = self
@@ -6301,7 +6402,7 @@ impl SessionTable {
         let old_ingress_zone = record.entry.metadata.ingress_zone;
         // #10310: a WorkerLocalImport replica is not counted, but a promote
         // to a local origin becomes one logical limit-session unit.
-        let old_counted = !old_is_reverse && install::session_limit_origin_counted(old_origin);
+        let old_counted = self.session_limit_counted(key, old_origin, old_is_reverse);
         let was_peer_synced = old_origin.is_peer_synced();
         if let RefreshPolicy::Update {
             collision_rules: true,
@@ -6584,8 +6685,7 @@ impl SessionTable {
                     RefreshTail {
                         old_counted,
                         old_ingress_zone,
-                        new_counted: !metadata.is_reverse
-                            && install::session_limit_origin_counted(origin),
+                        new_counted: self.session_limit_counted(key, origin, metadata.is_reverse),
                         new_ingress_zone: metadata.ingress_zone,
                     },
                     (was_peer_synced && !origin.is_peer_synced() && !metadata.is_reverse)
@@ -6612,8 +6712,7 @@ impl SessionTable {
                     RefreshTail {
                         old_counted,
                         old_ingress_zone,
-                        new_counted: !metadata.is_reverse
-                            && install::session_limit_origin_counted(old_origin),
+                        new_counted: self.session_limit_counted(key, old_origin, metadata.is_reverse),
                         new_ingress_zone: metadata.ingress_zone,
                     },
                     None,
@@ -6765,7 +6864,7 @@ impl SessionTable {
             return false;
         }
         let old_ingress_zone = forward.metadata.ingress_zone;
-        let forward_counted = install::session_limit_origin_counted(forward.origin);
+        let forward_counted = self.session_limit_counted(key, forward.origin, false);
         let single_local_delivery = forward.decision.resolution.disposition
             == crate::afxdp::ForwardingDisposition::LocalDelivery;
         let companion_key = reverse_session_key(key, forward.decision.nat);
@@ -6835,7 +6934,7 @@ impl SessionTable {
             return false;
         }
         let old_ingress_zone = forward.metadata.ingress_zone;
-        let forward_counted = install::session_limit_origin_counted(forward.origin);
+        let forward_counted = self.session_limit_counted(key, forward.origin, false);
         let single_local_delivery = forward.decision.resolution.disposition
             == crate::afxdp::ForwardingDisposition::LocalDelivery;
         let companion_key = reverse_session_key(key, forward.decision.nat);
@@ -7273,7 +7372,7 @@ impl SessionTable {
         // shared counted-class predicate charges true HA peer imports, but
         // not a WorkerLocalImport replica, balancing the matching create or
         // promotion transition exactly.
-        if !removed_is_reverse && install::session_limit_origin_counted(removed_origin) {
+        if self.session_limit_counted(key, removed_origin, removed_is_reverse) {
             self.session_limit_dec(metadata.ingress_zone, key.src_ip, key.dst_ip);
         }
         // #9856: harvest an export tombstone for genuine terminal
@@ -7905,6 +8004,11 @@ mod tcp_seq_15753_tests;
 #[cfg(test)]
 #[path = "punt_seed_directory_18562_tests.rs"]
 mod punt_seed_directory_18562_tests;
+// #18640: per-source session-cap accounting across the HA fan-out to every
+// worker.
+#[cfg(test)]
+#[path = "session_limit_fanout_18640_tests.rs"]
+mod session_limit_fanout_18640_tests;
 
 // #13939 (H09-02): an Owner hit that promotes a peer-synced pair, then
 // applies the deferred FIN/RST close, must close BOTH halves. The promotion

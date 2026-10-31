@@ -2786,7 +2786,7 @@ live-session-create publish site, and `cli_show_flow.go` renders `val.SessionID`
 fallback ONLY when `val.SessionID == 0` (an absent/legacy id). Additive and
 node-local-safe.
 
-## Per-zone, per-IP session-limit lifecycle (#2134; #3122 peer-synced fix; #2128 leak-fix; #10985 zone isolation; #11057 default quota)
+## Per-zone, per-IP session-limit lifecycle (#2134; #3122 peer-synced fix; #2128 leak-fix; #10985 zone isolation; #11057 default quota; #18640 one charge per node)
 
 Junos `set security screen ids-option <name> limit-session
 source-ip-based <n>` overrides the default per-source quota when `<n>` is
@@ -2810,6 +2810,31 @@ by `demote_owner_rg`, after which it is a true HA peer origin and must count.
 True HA peer origins (`SyncImport` / `SharedMaterialize`) remain counted so a
 standby cannot bypass the cap after failover — the #3122 limit-bypass fix is
 preserved.
+
+**One charge per node for fanned-out HA copies (#18640).** HA session sync
+installs every peer session on EVERY worker as a `SyncImport` copy (the
+`UpsertSynced` fan-out in `afxdp/ha/session_import.rs`), and `demote_owner_rg`
+re-tags every worker's replica the same way. Charging each copy made a
+standby's per-worker count the source's whole session total, N times the
+logical sessions: a source the primary held under its per-worker cap (up to
+`4096 × N`) was over the cap on every worker after failover, and every new flow
+from it was dropped until the copies expired. A fanned-out copy
+(`SyncImport`, and `SyncLiveness`, stored as `SyncImport`) now counts only on
+the ONE worker that a process-keyed hash of its forward key, modulo the
+fan-out width, designates (`session_limit_charges_fanout_copy`). Each worker
+learns its (rank, width) in the bring-up's worker set at launch
+(`WorkerLaunchPlan::session_limit_shard` →
+`SessionTable::set_session_limit_shard`, which rebuilds the counts from the
+slab). The node therefore charges each peer session once, spread across
+workers the way RSS spreads local sessions; #3122 still holds because the
+copies still count. A lone table (width 1, standalone tests) charges every
+copy, as before. `SharedMaterialize` / `SharedPromote` rows are the serving
+worker's own copy and count there.
+
+**The predicate is one function.** `SessionTable::session_limit_counted(key,
+origin, is_reverse)` is the only counted-class test. Every increment, the sole
+decrement in `remove_entry`, and every transition below evaluate it, so an
+increment and its decrement always agree on a row.
 
 **Count vs. HA Open delta are now SEPARATE conditions (#3122 / #12179).**
 The fresh-install path increments the count for any counted-class session,
@@ -2836,7 +2861,8 @@ in-place ingress-zone change moves a counted session between zone/IP pairs.
 | worker-local replica (#10310) | `upsert_synced_with_origin` (after the insert) | **none** until a promote or demote transition |
 | any removal (expire / clear / RST / fabric-cancel / take_synced_local) | `remove_entry` success path (the sole removal sink) | decrement when counted |
 | in-place HA promote synced→local | `update_session` promote branch (`mod.rs`) | transition-only (WLI→local increments; counted import→local none) |
-| in-place HA demote local→synced | `demote_owner_rg` | transition-only (WLI→SyncImport increments; counted local→SyncImport none) |
+| in-place HA demote local→synced | `demote_owner_rg` | transition-only, by the keyed predicate: a row that becomes a charged `SyncImport` copy increments, a counted local row that becomes an uncharged copy decrements (#18640) |
+| worker launch | `set_session_limit_shard` | rebuild the counts from the slab under the new (rank, width) |
 
 Removals are structurally exhaustive through `remove_entry`, so a future
 delete site cannot forget the decrement; `remove_entry`'s decrement uses the
@@ -2890,7 +2916,9 @@ independently per worker and ingress zone. The unconfigured default is
 `source-ip-based <n>` replaces 4096 with `<n>` on each worker. With RSS
 spreading flows across N workers, the effective admitted cap is approximately
 `per_worker_limit × N`. A `WorkerLocalImport` replica of one logical flow
-does not add another slot on every sibling.
+does not add another slot on every sibling, and neither does a fanned-out HA
+`SyncImport` copy (#18640), so the same bound holds on a standby after
+failover.
 
 For example, on a 6-worker loss-userspace cluster, the default allows at most
 approximately 24,576 sessions from one source IP in one ingress zone if RSS
