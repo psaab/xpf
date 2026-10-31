@@ -272,8 +272,21 @@ failure.
     (`TARGET_ALIAS_V4`, derived from the env), and it was claim-probed
     unique before use. It is not `.201`, the separate #8259 mouse
     address, and not `.174`, the container's DHCPv4 lease, which nothing
-    pins. Harnesses that still hard-code `.200` are listed in
-    `docs/log/18576.md`.
+    pins. Whether `.202` lies outside the lab DHCP server's pool is not
+    shown; this cell bounds that risk in every run. Harnesses that still
+    hard-code `.200` are listed in `docs/log/18576.md`.
+  - **The deprecated `.200`.** `.200` stays pinned on the container as a
+    DEPRECATED alias (`TARGET_ALIAS_V4_DEPRECATED` in the loss env), so
+    a container restart does not strand those harnesses and older
+    checkouts. `mouse-target-setup.sh` keeps it only while it is held,
+    and never claims it anew. It is still dual-held, so nothing may
+    measure it, and this cell never probes it. **Expiry** (tracked on
+    #18576): once the hard-coded follow-ups are retargeted and no open
+    branch predates #18619, delete the env line, then run
+    `ip addr del 172.16.80.200/24 dev eth0` on the container.
+  - **`mouse-target-setup.sh up`** probes each NEW v4 address from the
+    container before it writes the unit, and refuses if another MAC
+    answers or the control is silent. It runs under the cluster lock.
   - **When a loss iperf3 run stops or slows**, start `ip monitor neigh`
     on both nodes before the rerun (node0 on `ge-0-0-2.80`, node1 on
     `ge-7-0-2.80`). After it, read

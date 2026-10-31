@@ -311,7 +311,7 @@ the mechanics, so this section is sequencing only.
    | What changed | Deploy | Validation | Pass criteria |
    |---|---|---|---|
    | Any change | `make test-deploy` (standalone) | ping between zones | 0% loss |
-   | Any change | `make cluster-deploy` (loss userspace cluster) + re-apply CoS (`./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0` — raw deploy wipes CoS; re-apply stays required after any deploy until the deb path proves otherwise) | `iperf3 -P 16 -t 30 -p 5211` → `$IPERF_TARGET4` (loss 172.16.80.202, #18576) | ≥ 23 Gbit/s, no regression vs previous run |
+   | Any change | `make cluster-deploy` (loss userspace cluster) + re-apply CoS (`./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0` — raw deploy wipes CoS; re-apply stays required after any deploy until the deb path proves otherwise) | `iperf3 -P 16 -t 30 -p 5211` → `$IPERF_TARGET4` (loss 172.16.80.202, #18576), or `make perf-matrix` | within the cluster's own Tier 2 band in [`regression-test-matrix.md`](regression-test-matrix.md) (loss today: v4 `-P8` 14.1–19.1 / 16.7–21.1, `-P12` 18.2–21.7 / 15.7–20.8 Gbit/s push / reverse), and no regression against master measured on the same cluster in the same session. The old "≥ 23 Gbit/s" was a historical `-P16`/`-P12` reverse figure, not a current band |
    | Admission / DSCP / scheduler / queueing | above + re-apply CoS (`./test/incus/apply-cos-config.sh <target>`) | `show class-of-service interface` | targeted counter (`flow_share`, `buffer`, `ecn_marked`) moves in the predicted direction — see [`cos-validation-notes.md`](cos-validation-notes.md) |
    | NAT / screens / filter / VLAN / IPsec | above | exercise that feature end-to-end from a test host | session / hit counters advance; negative case drops |
    | HA / VRRP / session sync / fabric | `make cluster-deploy` | `make test-failover` + `make test-ha-crash` | 0 / very low packet loss across failover/failback, both nodes converge |
@@ -380,7 +380,7 @@ the mechanics, so this section is sequencing only.
    anecdote, not a measurement. Measured on a healthy fw0 with CoS applied,
    minutes apart, on the SAME port 5211: **`-P 16 -t 30` → 23.1 Gbit/s,
    single-stream → 5.23 Gbit/s.** So a lane that improvises
-   `iperf3 -c 172.16.80.200 -p 5211` reads 5.23 against a ≥ 23 bar and owns a
+   `iperf3 -c 172.16.80.200 -p 5211` reads 5.23 against the row's then ≥ 23 bar and owns a
    4.4x "regression" created entirely by its own invocation. #7480 did exactly
    that, then spent a lock cell and two hypotheses on the gap — auditing
    `cos-iperf-config.set`, `scheduler-uncapped` and `afxdp/cos/admission.rs`,

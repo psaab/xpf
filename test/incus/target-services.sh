@@ -81,7 +81,7 @@ TARGET_V4="${TARGET_V4:-${IPERF_TARGET4:-172.16.80.202}}"
 # the literal keeps a bare invocation consistent with TARGET_V4 above.
 # When TARGET_V4 == TARGET_ALIAS_V4, the alias's owner is the instance
 # holding MOUSE_TARGET_V4 (the mouse host), and `up`/`status` say so.
-TARGET_ALIAS_V4="${TARGET_ALIAS_V4:-172.16.80.202}"
+TARGET_ALIAS_V4="${TARGET_ALIAS_V4-172.16.80.202}"
 MOUSE_TARGET_V4="${MOUSE_TARGET_V4:-172.16.80.201}"
 # The probe runs from the container the harnesses actually SEND from, not
 # from the workstation and not from a firewall node.

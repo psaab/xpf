@@ -20,6 +20,43 @@ if [[ -n "$_xpf_cluster_env" ]]; then
 		/*) ;;
 		*) _xpf_cluster_env="${PROJECT_ROOT}/${_xpf_cluster_env}" ;;
 	esac
+fi
+
+# #18576 cross-env leak guard. Every per-cluster name below is resolved as
+# `${NAME:-default}` (here or in the env file), so a value left over from
+# ANOTHER cluster's env reads as a caller override and wins. That happens
+# when one shell sources tcp and then loss, or when a child inherits a
+# parent's exports (cluster-env.sh exports them). Loss then resolved
+# MOUSE_TARGET_V4/TARGET_ALIAS_V4=.210 and MOUSE_TARGET_REF=tcp:xpf-tcp-target,
+# which is the shape that rewrote loss's mouse-addr.service to tcp's .210 on
+# 2026-10-24. So every load records which env it used and the value it
+# resolved for each name (_XPF_CLUSTER_ENV_FILE / _XPF_CLUSTER_ENV_STATE,
+# exported). A load of a DIFFERENT env first unsets each name that still
+# holds the value the previous env gave it. A name that differs was set by
+# the caller after that load, so it is a real override and is kept. With no
+# record (first load, or an env -i child) nothing changes. A value containing
+# a space is not recorded faithfully, so it stays, as before this guard.
+_xpf_cluster_env_names=(
+	INCUS_REMOTE CLUSTER_CONF VM0 VM1 LAN_HOST LAN_ADDR LAN_GW
+	FW0 FW1 CLUSTER_LAN_HOST FW0_NAME FW1_NAME CLUSTER_LAN_HOST_NAME
+	LAN_HOST_IP LAN_VIP4 LAN_VIP6 WAN_GW4 WAN_VIP4 IPERF_TARGET4 IPERF_TARGET6
+	WAN_PREFIX4 DMZ_PREFIX4 LAN_PREFIX4 DMZ_ADDR DMZ_TARGET_V6 DMZ_TARGET_PF
+	DMZ_TARGET_VLAN DMZ_TARGET_NAME DMZ_TARGET_REF MOUSE_TARGET_NAME
+	MOUSE_TARGET_REF MOUSE_TARGET_V4 MOUSE_TARGET_V6 MOUSE_TARGET_PF DMZ_GW4
+	WAN_GW80_4 TARGET_ALIAS_V4 TARGET_ALIAS_V4_DEPRECATED
+)
+if [[ -v _XPF_CLUSTER_ENV_FILE && "$_XPF_CLUSTER_ENV_FILE" != "$_xpf_cluster_env" ]]; then
+	read -r -a _xpf_cluster_env_prev <<<"${_XPF_CLUSTER_ENV_STATE:-}"
+	for _xpf_kv in "${_xpf_cluster_env_prev[@]}"; do
+		[[ "$_xpf_kv" == *=* ]] || continue
+		_xpf_k="${_xpf_kv%%=*}"
+		[[ " ${_xpf_cluster_env_names[*]} " == *" ${_xpf_k} "* ]] || continue
+		[[ -v "$_xpf_k" && "${!_xpf_k}" == "${_xpf_kv#*=}" ]] && unset "$_xpf_k"
+	done
+	unset _xpf_cluster_env_prev _xpf_kv _xpf_k
+fi
+
+if [[ -n "$_xpf_cluster_env" ]]; then
 	if [[ ! -f "$_xpf_cluster_env" ]]; then
 		echo "ERROR: BPFRX_CLUSTER_ENV does not exist: $_xpf_cluster_env" >&2
 		return 1
@@ -120,7 +157,9 @@ MOUSE_TARGET_REF="${MOUSE_TARGET_REF:-$(_xpf_cluster_ref "$MOUSE_TARGET_NAME")}"
 # loss .202 (.200 until #18576), tcp .210, udp .211 (== each env's
 # MOUSE_TARGET_V4 there, so no second address is emitted) — derived,
 # never a second literal.
-TARGET_ALIAS_V4="${TARGET_ALIAS_V4:-$IPERF_TARGET4}"
+# `-`, not `:-` (#18576): an EMPTY TARGET_ALIAS_V4 is a request for no alias
+# (mouse-target-setup.sh "empty disables"), so only an UNSET one is derived.
+TARGET_ALIAS_V4="${TARGET_ALIAS_V4-$IPERF_TARGET4}"
 unset _xpf_iperf_host
 
 export PROJECT_ROOT BPFRX_CLUSTER_ENV CLUSTER_CONF INCUS_REMOTE
@@ -133,3 +172,11 @@ export DMZ_TARGET_PF DMZ_TARGET_VLAN DMZ_TARGET_NAME DMZ_TARGET_REF
 export MOUSE_TARGET_NAME MOUSE_TARGET_REF
 export MOUSE_TARGET_V4 MOUSE_TARGET_V6 MOUSE_TARGET_PF DMZ_GW4 WAN_GW80_4
 export TARGET_ALIAS_V4
+# #18576 cross-env leak guard: record this load (see the guard above).
+_XPF_CLUSTER_ENV_FILE="$_xpf_cluster_env"
+_XPF_CLUSTER_ENV_STATE=""
+for _xpf_k in "${_xpf_cluster_env_names[@]}"; do
+	[[ -v "$_xpf_k" ]] && _XPF_CLUSTER_ENV_STATE+="${_xpf_k}=${!_xpf_k} "
+done
+export _XPF_CLUSTER_ENV_FILE _XPF_CLUSTER_ENV_STATE
+unset _xpf_k _xpf_cluster_env_names

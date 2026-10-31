@@ -1591,20 +1591,29 @@ PY
 # per ARP reply ("probe" = addressed to us with target IP 0.0.0.0).
 # Status 3 if <target> is not on-link from the vantage (and not held by it);
 # any other non-zero status means the probe could not run.
+# [ifname] (optional, #18576): probe from that interface instead of the one
+# holding <target> or routing to it. mouse-target-setup.sh `up` uses it to
+# probe an address BEFORE it is assigned, when no on-link route may exist
+# yet; an RFC 5227 probe needs no address on the interface.
 ha_target_claim_probe() {
-	local vantage="$1" target="$2" control="$3"
-	incus exec "$vantage" -- python3 - "$target" "$control" <<'PY'
+	local vantage="$1" target="$2" control="$3" ifname="${4:-}"
+	incus exec "$vantage" -- python3 - "$target" "$control" "$ifname" <<'PY'
 import select, socket, struct, subprocess, sys, time
 target, control = sys.argv[1], sys.argv[2]
-# The vantage may hold <target> (loss's container holds .200): probe from
-# that interface. Otherwise use the on-link route; a local lookup says
+forced = sys.argv[3] if len(sys.argv) > 3 else ""
+# The vantage may hold <target> (loss's container holds its target): probe
+# from that interface. Otherwise use the on-link route; a local lookup says
 # "dev lo" and a "via" route is not on-link.
 ifname, held = None, False
 for line in subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True).stdout.splitlines():
     f = line.split()
     if len(f) >= 4 and f[2] == "inet" and f[3].split("/")[0] == target and f[1] != "lo":
+        if forced and f[1].split("@")[0] != forced:
+            continue
         ifname, held = f[1].split("@")[0], True
         break
+if ifname is None and forced:
+    ifname = forced
 if ifname is None:
     route = subprocess.run(["ip", "-o", "-4", "route", "get", target], capture_output=True, text=True).stdout.split()
     if "dev" not in route or "via" in route or route[0] == "local":

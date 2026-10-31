@@ -127,6 +127,9 @@ ok "loss IPERF_TARGET4 differs from MOUSE_TARGET_V4"
 eq "loss TARGET_ALIAS_V4" "$(resolve TARGET_ALIAS_V4)" "172.16.80.202"
 eq "tcp TARGET_ALIAS_V4"  "$(resolve TARGET_ALIAS_V4 BPFRX_CLUSTER_ENV=test/incus/tcp-userspace-cluster.env)" "172.16.80.210"
 eq "udp TARGET_ALIAS_V4"  "$(resolve TARGET_ALIAS_V4 BPFRX_CLUSTER_ENV=test/incus/udp-userspace-cluster.env)" "172.16.80.211"
+# #18576: an EMPTY alias means "no alias" (mouse-target-setup.sh), so it
+# must stay empty rather than be re-derived from IPERF_TARGET4.
+eq "loss empty TARGET_ALIAS_V4 stays empty" "$(resolve TARGET_ALIAS_V4 TARGET_ALIAS_V4=)" ""
 # Legacy (no remote): names stay bare, refs unqualified (#16328).
 eq "legacy MOUSE_TARGET_REF" "$(resolve MOUSE_TARGET_REF BPFRX_CLUSTER_ENV=)" "xpf-mouse-target"
 eq "legacy DMZ_TARGET_REF"   "$(resolve DMZ_TARGET_REF BPFRX_CLUSTER_ENV=)"   "xpf-zone-matrix-dmz"
@@ -172,5 +175,69 @@ eq "loss + qualified LAN override" \
 eq "legacy + bare LAN override" \
 	"$(resolve CLUSTER_LAN_HOST BPFRX_CLUSTER_ENV= CLUSTER_LAN_HOST=myhost)" \
 	"myhost"
+
+# ── Case F: no cluster env re-arms the #18576 excuse ─────────────────
+# test-connectivity's iperf target claim cell FAILs any second ARP holder
+# unless the env names IPERF_TARGET4_KNOWN_HOLDERS (then it SKIPs). loss's
+# dual-held .200 was excused that way until #18576 moved the target. A
+# re-added line would quietly turn a dual holder back into a SKIP, so no
+# cluster env may set it (see test-connectivity.sh iperf_target_claim_cell).
+for envf in "${PROJECT_ROOT}"/test/incus/*cluster.env; do
+	rel="test/incus/${envf##*/}"
+	got="$(resolve IPERF_TARGET4_KNOWN_HOLDERS BPFRX_CLUSTER_ENV="$rel")"
+	[[ -z "$got" ]] \
+		|| fail "${rel} sets IPERF_TARGET4_KNOWN_HOLDERS='${got}': a dual iperf-target holder would SKIP instead of FAIL (#18576)"
+	ok "${rel} sets no IPERF_TARGET4_KNOWN_HOLDERS"
+done
+
+# ── Case G: a value left by ANOTHER cluster's env does not leak (#18576) ─
+# Every per-cluster name resolves as ${NAME:-default}, so tcp's values,
+# still set in the shell (or inherited as exports), used to read as caller
+# overrides on a later loss load. That is how loss resolved
+# MOUSE_TARGET_V4=.210 and MOUSE_TARGET_REF=tcp:xpf-tcp-target, the
+# 2026-10-24 drift of loss's mouse-addr.service.
+SEQ_TMP="$(mktemp -d)"
+trap 'rm -rf "$SEQ_TMP"' EXIT
+cat >"${SEQ_TMP}/seq.sh" <<'SEQ'
+# seq.sh <mode> <var> <first-env> <second-env> [override]
+# mode shell: both loads in one shell; mode child: the second load runs in a
+# child that inherits the first load's exports. [override] is NAME=VALUE,
+# set between the two loads (a real caller override).
+mode="$1" var="$2" first="$3" second="$4" override="${5:-}"
+BPFRX_CLUSTER_ENV="$first"
+source "$PROJECT_ROOT/test/incus/cluster-env.sh" >/dev/null 2>&1
+[[ -n "$override" ]] && export "$override"
+if [[ "$mode" == child ]]; then
+	BPFRX_CLUSTER_ENV="$second" VAR="$var" bash -c \
+		'source "$PROJECT_ROOT/test/incus/cluster-env.sh" >/dev/null 2>&1; printf "%s" "${!VAR-}"'
+else
+	BPFRX_CLUSTER_ENV="$second"
+	source "$PROJECT_ROOT/test/incus/cluster-env.sh" >/dev/null 2>&1
+	printf "%s" "${!var-}"
+fi
+SEQ
+seq_resolve() { # <mode> <var> <first-env> <second-env> [override]
+	env -i PATH="$PATH" PROJECT_ROOT="$PROJECT_ROOT" bash "${SEQ_TMP}/seq.sh" "$@"
+}
+TCP_ENV=test/incus/tcp-userspace-cluster.env
+LOSS_ENV=test/incus/loss-userspace-cluster.env
+for mode in shell child; do
+	eq "tcp then loss (${mode}) MOUSE_TARGET_V4"  "$(seq_resolve "$mode" MOUSE_TARGET_V4 "$TCP_ENV" "$LOSS_ENV")"  "172.16.80.201"
+	eq "tcp then loss (${mode}) TARGET_ALIAS_V4"  "$(seq_resolve "$mode" TARGET_ALIAS_V4 "$TCP_ENV" "$LOSS_ENV")"  "172.16.80.202"
+	eq "tcp then loss (${mode}) DMZ_ADDR"         "$(seq_resolve "$mode" DMZ_ADDR "$TCP_ENV" "$LOSS_ENV")"         "172.16.50.201"
+	eq "tcp then loss (${mode}) MOUSE_TARGET_REF" "$(seq_resolve "$mode" MOUSE_TARGET_REF "$TCP_ENV" "$LOSS_ENV")" "loss:xpf-mouse-target"
+	eq "tcp then loss (${mode}) FW0"              "$(seq_resolve "$mode" FW0 "$TCP_ENV" "$LOSS_ENV")"              "loss:xpf-userspace-fw0"
+	eq "loss then tcp (${mode}) MOUSE_TARGET_V4"  "$(seq_resolve "$mode" MOUSE_TARGET_V4 "$LOSS_ENV" "$TCP_ENV")"  "172.16.80.210"
+	eq "loss then tcp (${mode}) MOUSE_TARGET_REF" "$(seq_resolve "$mode" MOUSE_TARGET_REF "$LOSS_ENV" "$TCP_ENV")" "tcp:xpf-tcp-target"
+done
+eq "loss then tcp TARGET_ALIAS_V4_DEPRECATED" "$(seq_resolve shell TARGET_ALIAS_V4_DEPRECATED "$LOSS_ENV" "$TCP_ENV")" ""
+# A caller override set AFTER the first load is not a leak, and survives.
+eq "tcp, override, loss: override wins" \
+	"$(seq_resolve shell MOUSE_TARGET_V4 "$TCP_ENV" "$LOSS_ENV" MOUSE_TARGET_V4=172.16.80.99)" "172.16.80.99"
+eq "tcp, override, loss (child): override wins" \
+	"$(seq_resolve child MOUSE_TARGET_V4 "$TCP_ENV" "$LOSS_ENV" MOUSE_TARGET_V4=172.16.80.99)" "172.16.80.99"
+# Re-loading the SAME env keeps every value (nothing is reset).
+eq "loss, override, loss: override kept" \
+	"$(seq_resolve shell MOUSE_TARGET_V4 "$LOSS_ENV" "$LOSS_ENV" MOUSE_TARGET_V4=172.16.80.99)" "172.16.80.99"
 
 echo "ALL ${PASS} CASES PASS"

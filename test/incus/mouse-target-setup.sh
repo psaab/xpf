@@ -65,6 +65,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 [[ -f "${SCRIPT_DIR}/cluster-env.sh" ]] && source "${SCRIPT_DIR}/cluster-env.sh" 2>/dev/null || true
+# shellcheck source=ha-assurance-lib.sh
+source "${SCRIPT_DIR}/ha-assurance-lib.sh"   # ha_target_claim_probe (#18576)
 
 INCUS_REMOTE="${INCUS_REMOTE:-loss}"
 MOUSE_TARGET_NAME="${MOUSE_TARGET_NAME:-xpf-mouse-target}"
@@ -80,9 +82,16 @@ MOUSE_TARGET_IMAGE="${MOUSE_TARGET_IMAGE:-images:debian/trixie}"
 # when it differs from MOUSE_TARGET_V4 (the loss-cluster case: .202 beside
 # .201, #18576; cluster-env.sh derives it from IPERF_TARGET4). Owned here so
 # `up` (the unit), `status`, and `target-services.sh` agree on whether
-# .200 is an alias this host must carry. Explicit override wins; empty
-# disables the alias everywhere.
-TARGET_ALIAS_V4="${TARGET_ALIAS_V4:-172.16.80.202}"
+# the alias is one this host must carry. An explicit override wins. EMPTY
+# disables the alias everywhere, so the default uses `-`, not `:-`
+# (cluster-env.sh does the same, #18576).
+TARGET_ALIAS_V4="${TARGET_ALIAS_V4-172.16.80.202}"
+# #18576: a DEPRECATED alias (loss: .200, which the external v6 box also
+# answers ARP for). `up` keeps its pin only while this host ALREADY holds it,
+# so a container restart does not strand consumers that still name it, and
+# never claims it anew. Empty (the default) means none. The expiry is in the
+# loss env.
+TARGET_ALIAS_V4_DEPRECATED="${TARGET_ALIAS_V4_DEPRECATED-}"
 
 IPERF_PORTS=(5200 5201 5202 5203 5204 5205 5206 5207 5208 5209 5210 5211)
 
@@ -100,7 +109,62 @@ ${0##*/} — provision the #8259 second VLAN-80 target
 Environment: MOUSE_TARGET_NAME MOUSE_TARGET_V4 MOUSE_TARGET_V6
              MOUSE_TARGET_PF MOUSE_TARGET_VLAN MOUSE_TARGET_IMAGE INCUS_REMOTE
              TARGET_ALIAS_V4 (default 172.16.80.202; empty disables)
+             TARGET_ALIAS_V4_DEPRECATED (kept only while held; default none)
+             MOUSE_TARGET_CLAIM_PROBE=skip (skip the #18576 claim probe;
+             use only when no control address can answer, and say why)
+
+\`up\` and \`destroy\` take the cluster lock (cluster-cell.sh); \`status\` does not.
 USAGE
+}
+
+# claim_probe_new_v4 <held-addresses> <address>...
+# #18576: before `up` pins a v4 address this host does not hold yet, probe
+# it from this host's eth0 (RFC 5227, ha_target_claim_probe) and REFUSE if
+# any other MAC answers. On 2026-10-24 a run with another cluster's values
+# rewrote this unit to tcp's .210, and `up` now restarts the unit, so a
+# conflicting address would be claimed at once. The cluster's own address
+# on the VLAN (WAN_GW80_4 on 80, DMZ_GW4 on 50) is the positive control.
+# If it does not answer, "nobody else answered" is not evidence, and `up`
+# refuses too.
+claim_probe_new_v4() {
+    local held="$1" addr out mac others control
+    shift
+    case "$MOUSE_TARGET_VLAN" in
+        80) control="${WAN_GW80_4:-}" ;;
+        50) control="${DMZ_GW4:-}" ;;
+        *) control="" ;;
+    esac
+    for addr in "$@"; do
+        grep -qxF -- "$addr" <<<"$held" && continue
+        if [[ "${MOUSE_TARGET_CLAIM_PROBE:-}" == skip ]]; then
+            echo "WARNING: claim probe for new ${addr} skipped (MOUSE_TARGET_CLAIM_PROBE=skip)" >&2
+            continue
+        fi
+        if [[ -z "$control" ]]; then
+            echo "REFUSE: no control address for VLAN ${MOUSE_TARGET_VLAN}, so new ${addr} cannot be claim-probed (#18576)" >&2
+            return 1
+        fi
+        inc exec "$ref" -- ip link set eth0 up >/dev/null 2>&1 || true
+        if ! out="$(ha_target_claim_probe "$ref" "$addr" "$control" eth0 2>&1)"; then
+            echo "REFUSE: the claim probe for new ${addr} could not run on ${ref}: ${out}" >&2
+            return 1
+        fi
+        mac="$(awk '$1 == "iface" { print tolower($3); exit }' <<<"$out")"
+        others="$(awk -v a="$addr" -v m="$mac" '$1 == "reply" && $2 == a && tolower($3) != m { print tolower($3) }' <<<"$out" | sort -u | tr '\n' ' ')"
+        if [[ -z "$mac" ]]; then
+            echo "REFUSE: the claim probe for new ${addr} printed no iface line: ${out}" >&2
+            return 1
+        fi
+        if [[ -n "$others" ]]; then
+            echo "REFUSE: ${addr} is already answered for by ${others}on VLAN ${MOUSE_TARGET_VLAN}; not pinning it on ${ref} (#18576)" >&2
+            return 1
+        fi
+        if ! awk -v c="$control" '$1 == "reply" && $2 == c && $4 == "probe" { f = 1 } END { exit !f }' <<<"$out"; then
+            echo "REFUSE: control ${control} did not answer the claim probe for new ${addr}, so no other holder is not evidence (#18576)" >&2
+            return 1
+        fi
+        echo "claim probe: new ${addr} has no other holder (control ${control} answered)"
+    done
 }
 
 instance_exists() { inc info "$ref" >/dev/null 2>&1; }
@@ -144,11 +208,26 @@ do_up() {
     # duplicate, and non-VLAN-80 hosts (the VLAN-50 DMZ prober reusing
     # this script) never claim a VLAN-80 address. The v6 ::200 is
     # external (DAD duplicate) and is never emitted (see header).
-    local alias_line=""
+    local alias_line="" dep_line="" held pins=("$MOUSE_TARGET_V4")
     if [[ -n "$TARGET_ALIAS_V4" && "$TARGET_ALIAS_V4" != "$MOUSE_TARGET_V4" \
           && "$MOUSE_TARGET_VLAN" == "80" ]]; then
         alias_line="ExecStart=/sbin/ip addr replace ${TARGET_ALIAS_V4}/24 dev eth0"
+        pins+=("$TARGET_ALIAS_V4")
     fi
+    held="$(inc exec "$ref" -- ip -4 addr show dev eth0 2>/dev/null \
+        | awk '$1 == "inet" { split($2, a, "/"); print a[1] }')"
+    # #18576: the deprecated alias is kept (pinned) only while held, and is
+    # never probed or claimed anew: it is dual-held by design until it expires.
+    if [[ -n "$TARGET_ALIAS_V4_DEPRECATED" && "$TARGET_ALIAS_V4_DEPRECATED" != "$MOUSE_TARGET_V4" \
+          && "$TARGET_ALIAS_V4_DEPRECATED" != "$TARGET_ALIAS_V4" && "$MOUSE_TARGET_VLAN" == "80" ]]; then
+        if grep -qxF -- "$TARGET_ALIAS_V4_DEPRECATED" <<<"$held"; then
+            dep_line="ExecStart=/sbin/ip addr replace ${TARGET_ALIAS_V4_DEPRECATED}/24 dev eth0"
+            echo "deprecated alias ${TARGET_ALIAS_V4_DEPRECATED}: held, pin kept until its expiry (#18576)"
+        else
+            echo "deprecated alias ${TARGET_ALIAS_V4_DEPRECATED}: not held, not claimed (#18576)"
+        fi
+    fi
+    claim_probe_new_v4 "$held" "${pins[@]}" || return 1
     inc exec "$ref" -- sh -c "cat > /etc/systemd/system/mouse-addr.service <<'UNIT'
 [Unit]
 Description=#8259 pin the mouse target's VLAN-80 address
@@ -159,6 +238,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/sbin/ip addr replace ${MOUSE_TARGET_V4}/24 dev eth0
 ${alias_line:+${alias_line}
+}${dep_line:+${dep_line}
 }ExecStart=/sbin/ip -6 addr replace ${MOUSE_TARGET_V6}/64 dev eth0
 ExecStart=/sbin/ip link set eth0 up
 
@@ -253,9 +333,16 @@ do_destroy() {
 }
 
 case "${1:-status}" in
-    up) do_up ;;
+    up|destroy)
+        # #18576: `up` rewrites and restarts the address unit on a target
+        # that every gate measures, and `destroy` deletes it. Both serialize
+        # under the cluster lock, the way deploys do (re-entrant inside a
+        # held cell, e.g. wire-zone-matrix's DMZ provisioning).
+        # shellcheck source=cluster-cell.sh
+        source "${SCRIPT_DIR}/cluster-cell.sh"
+        xpf_enter_destructive_cluster_cell "mouse-target-setup $1 ${ref}" "$0" "$@"
+        if [[ "$1" == up ]]; then do_up; else do_destroy; fi ;;
     status) do_status ;;
-    destroy) do_destroy ;;
     -h|--help|help) usage ;;
     *) usage; exit 2 ;;
 esac
