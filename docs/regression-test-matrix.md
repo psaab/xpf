@@ -179,6 +179,19 @@ failure.
     test-failover's claim-gated VOID, and test-connectivity's "WAN IPv4 ...
     answered for only by this cluster" cell) and the evidence are in
     `docs/log/18558.md`.
+- **loss's v4/v6 iperf targets are different hosts (#18576, #18586).**
+  loss's `172.16.80.200` is the xpf-mouse-target container
+  (`10:66:6a:8b:91:a4`) and `2001:559:8585:80::200` is the external v6 box
+  (`f6:f0:06:10:77:d5`), so the Group12 neighbor identity cannot require one
+  MAC there. `test/incus/loss-userspace-cluster.env` sets
+  `IPERF_TARGET_V4_V6_SAME_HOST=no` with
+  `IPERF_TARGET6_SPLIT_HOLDER=f6:f0:06:10:77:d5`.
+  - **Control (same run):** the cell's own read on the RG owner. The waiver
+    holds only while v6 names the declared holder and v4 names a different
+    MAC. Either check failing is a VOID, never a PASS.
+  - **Delete when:** loss's v4 and v6 targets are one host (or the v6 box
+    is renumbered). Remove both env lines; the same-host identity check then
+    applies.
 - **tcp and udp host SR-IOV VFs.** Two host faults have each left a
   force-stopped firewall VM unable to restart or forward. This is
   environment only while the host check below shows the fault in the same
@@ -309,6 +322,37 @@ failure.
 - **VOID** means the measurement cannot be attributed (`exe_check` mismatch,
   a precondition, a harness fault). Fix the cause and rerun; a VOID is never a
   pass and never a regression.
+- **F1's "Group12 read-only neighbor identity" cell (#18586)** reads the RG
+  owner's neighbor entries for the WAN iperf targets: the one node holding
+  `WAN_GW80_4` (exact address match), on the device its route to each target
+  names. It used to read the LAN host, which never holds an entry for an
+  off-subnet target, so it was VOID on every run, and with it the whole
+  `test-connectivity` run. The owner is read before and after the neighbor
+  reads; the cell is read-only (`ip route get`, `ip neigh show`).
+  - **Usable entry:** one line, on the route's device, with an `lladdr` and
+    one of the NUD states REACHABLE, STALE, DELAY, PROBE or PERMANENT.
+  - **FAIL:** either family's entry is FAILED, INCOMPLETE, NOARP or NONE,
+    or names a device other than its route's. Where the v4 and v6 targets
+    are one host (`IPERF_TARGET_V4_V6_SAME_HOST=yes`, the default; tcp,
+    udp), it is also a FAIL when the two routes or the two entries name
+    different devices, or the two entries name different MACs.
+  - **VOID:**
+    - `IPERF_TARGET_V4_V6_SAME_HOST` is neither `yes` nor `no`;
+    - no single node holds `WAN_GW80_4`, or a node's addresses cannot be
+      read;
+    - the owner changed between the reads;
+    - the owner has no route device for a target, or the route goes `via`
+      a gateway (not on-link);
+    - an entry is missing, has more than one line, or has no single NUD
+      state or no MAC;
+    - in split mode (`no`), `IPERF_TARGET6_SPLIT_HOLDER` is unset, the v6
+      entry names another MAC (the waiver is stale), or the v4 entry names
+      the v6 holder (that run's v4 iperf numbers measured the wrong host;
+      record it on #18576).
+  - **Split-mode PASS** says "identity not asserted": each family is
+    usable, v6 is the declared holder and v4 is a different host. It is
+    loss's waiver row under "Known environment rows", not an identity
+    proof.
 - **SKIP** is either a cell that did not run, or an environment row's
   excused state. The ledger's `cells_skipped` counts both. The excused kind
   carries its marker in the cell text, today only "EXCUSED #18576", and it is
