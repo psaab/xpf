@@ -102,6 +102,16 @@ func VRRPVIPIdentity(vip string) string {
 	if !ok {
 		return vip
 	}
+	return PrefixIdentity(p)
+}
+
+// PrefixIdentity is the prefix-preserving identity VRRPVIPIdentity
+// produces for a parsed address: "<canonical host>/<prefix bits>". It
+// is exported so a kernel address (netlink reports address + prefix
+// length) keys into the SAME space as a configured one (#18573): the
+// direct-VIP reconcile and the userspace snapshot compare kernel rows
+// against AddressIdentitiesByNetdev with it.
+func PrefixIdentity(p netip.Prefix) string {
 	return p.Addr().String() + "/" + strconv.Itoa(p.Bits())
 }
 

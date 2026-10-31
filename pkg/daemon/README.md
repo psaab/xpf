@@ -2030,6 +2030,111 @@ failover blackhole until the stale entry aged out. #2377 fixed the identical
 forced-.1 in `vrrp.sendGARP` but missed this direct-mode site; #3922 routes
 both through the shared `vrrp.GatewayProbeTarget` helper.
 
+**VIP ownership is stamped in the kernel (#18573).** `directAddVIPs` /
+`directRemoveVIPs` both run `reconcileDirectVIPAddrs`
+(`direct_vip_reconcile_18573.go`). Before #18573 both derived their address
+set from the active config at call time and recorded nothing. A commit that
+renumbered a RETH unit (`.10` -> `.42`) therefore left `.10` on the RG owner
+indefinitely: the owner pass only added the new set, demotion only removed the
+new set, and `reconcileInterfaceAddresses` skips RETH netdevs. Now:
+
+- Every direct-mode VIP is installed with `IFA_PROTO = vipstamp.Proto`
+  (`0xbf`, `pkg/vipstamp`; raw netlink because netlink v1.3.1 cannot encode or
+  decode it). The stamp lives on the kernel address object, so it is not a
+  shadow registry: every removal path (commit, demotion, link-cycle flush,
+  operator `ip addr del`, netdev deletion) removes the record with the
+  address, and a later foreign install of the same address carries its own
+  proto, never xpf's.
+- Every pass deletes each stamped **leftover** (`vipstamp.Leftover`: stamped,
+  and `config.AddressIdentitiesByNetdev` assigns no such address to that
+  netdev). The predicate is config-only, so the owner and the non-owner reach
+  the same verdict. It covers a renumber, a removed unit or RETH, a moved
+  VLAN id and a unit disabled by commit, in both families.
+- The owner (`want=true`) adds absent configured VIPs and stamps one that is
+  present but unstamped (installed by a pre-#18573 xpf) with an
+  `NLM_F_REPLACE`, so a later renumber of it is caught too. After any delete
+  it re-asserts every configured VIP, because deleting an IPv4 primary
+  without `promote_secondaries` takes its subnet's secondaries with it.
+- The non-owner (`want=false`) still deletes every configured VIP of the RG,
+  stamped or not (the pre-#18573 contract), so it never holds the address.
+  After an RG move the new owner installs only its own active config's set.
+- Never deleted: an unstamped address the config does not name for this RG
+  (DHCP lease, kernel or stable link-local, another daemon's address), and a
+  stamped address the config still assigns to its netdev. With
+  `promote_secondaries=0`, deleting an IPv4 primary makes the kernel delete
+  every secondary in its subnet, foreign ones included. The guarantee does
+  not rely on systemd's `50-default.conf` setting that sysctl to 1. Before
+  the first IPv4 delete on a netdev, `guardIPv4PrimaryCascade` sets
+  `net.ipv4.conf.<netdev>.promote_secondaries=1`. If the write fails, the
+  pass skips any IPv4 **leftover** delete whose subnet holds an address that
+  is neither being deleted nor a configured VIP of this RG, and warns once.
+  A not-owner delete is never skipped: the demoting node must drop the VIP
+  the peer now owns, or both nodes hold it
+  (`TestDirectVIPRenumberOnKernel18573` runs with the sysctl pinned to 1 and
+  to 0, plus a control that proves the 0 case cascades).
+- A kernel that ignores `IFA_PROTO` accepts a stamped add and records 0
+  (before 6.3 the kernel's netlink parser drops type 11; the appliance floor
+  is 6.18). The first pass that writes a stamp reads it back once. If the stamp
+  reads back as 0, the pass latches `directVIPStampUnsupported` for the
+  process lifetime, warns once, and stops adopting. If it reads back intact,
+  `directVIPStampVerified` latches, and no later pass (including every
+  promotion, on the GARP path) pays the extra dump. Without the latch every tick
+  would REPLACE every VIP. On such a node, leftover removal cannot work and
+  the warning says so.
+- `reconcileAfterRethLinkCycle` (`daemon_apply_dataplane.go`) re-adds VIPs
+  after a link cycle through `directAddVIPs`, which can now delete. It takes
+  `directVIPMu` and re-checks ownership under it, like every other
+  direct-VIP actuation, so a demotion racing the apply cannot have its
+  removal undone. Lock order is `applySem` -> `directVIPMu`; nothing under
+  `directVIPMu` waits for `applySem`.
+- If the ownership dump fails, the pass degrades to the pre-#18573
+  add-all / remove-all over the configured set. It does not delete on a
+  readback it does not have, and it never does less than the old code.
+  The warning fires once per failure streak (`directVIPDumpFailing`).
+- Every netdev on which a pass deletes a leftover is queued to the
+  interface-link snapshot refresher (`interfaceLinkRefreshWake`), so a
+  reconcile-path removal republishes the userspace interface rows without a
+  commit. Adds and not-owner removals do not queue, because a configured
+  address is merged into its row whether or not the kernel holds it. The
+  queue runs under `directVIPMu`, so it uses the lock-free
+  `wakeInterfaceLinkSnapshot` and never takes the userspace manager's `m.mu`.
+  Before waking, it checks relevance with the pure
+  `dpuserspace.ConfiguredInterfaceLinkName`, against the reconcile's own
+  config. The refresher keeps only the newest pending name, and a name with
+  no configured row publishes nothing. Waking it for a leftover on a unit the
+  commit removed would therefore displace a pending relevant refresh (for
+  example a recreated netdev's new ifindex, #15263) and clear its retry debt
+  with nothing published. That is why the check happens before the wake
+  (review Z2 on #18579).
+- The leftover sweep is global: every RG's pass, RG0's included, judges every
+  stamped address on every netdev. That is why the configured set must span
+  every group (`TestDirectVIPOtherRGsStampedVIPsSurviveEveryPass18573`). A
+  set that knew only the passing RG would delete and re-add another group's
+  VIPs every 2 s. The `removed` count that `applyDirectVIPOwnership` feeds
+  into the RG's service edge (`prev || removed > 0`) counts only this RG's
+  not-owner deletions, never a leftover.
+- Per-(netdev, VIP) diagnostics are latched in `directVIPLogged`: bad
+  address, failed add/remove/stamp, and adoption. Each logs once, not once
+  per tick. A commit clears them all (`resetVIPWarnings`). A failure latch
+  also re-arms when its operation next succeeds (`directVIPLogClear`, the
+  #7532 pattern), so a failure on a later failover with no commit in between
+  warns again.
+- Cost: one `RTM_GETADDR` dump per RG per 2 s pass. A shared per-tick dump
+  was considered and rejected. A cached dump read by a later RG's pass would
+  miss a concurrent link-cycle flush, the very removal it must see, and the
+  per-RG dump still makes fewer netlink calls than the pre-#18573 blind
+  `AddrAdd` per VIP per tick. The commit's own snapshot never carries the leftover:
+  see `pkg/dataplane/README.md` "Interface rows never publish a direct-VIP
+  leftover (#18573)".
+
+**Limit:** a VIP that a pre-#18573 xpf installed and that the config had
+already dropped before the upgrade carries no stamp and is not removed. The
+same applies to a renumber committed while the owner still runs the old
+binary. It must be deleted by hand once, or cleared by a reboot. See
+`docs/in-place-upgrade.md` "Honest limits". Cells: `direct_vip_reconcile_18573_test.go`
+(fake table, real config) and `direct_vip_kernel_18573_test.go` (private
+netns, forced by `test/daemon/selftest-daemon-kernel_15241.sh`).
+
 ## Interface management
 
 `enumerateAndRenameInterfaces()` runs at startup (in `linksetup.go`) and
