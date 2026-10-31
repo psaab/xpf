@@ -1186,20 +1186,27 @@ Per PR, in order:
    and what each needs:
    - `ledger-only`: only `test/results/ledger.d/*.json` shards written
      by that gate at the gated SHA. Needs nothing more: no re-gate, no
-     re-review. This is the delta the ledger rule (Step 3 item 4)
-     always produces.
+     re-review, no seat. This is the delta the ledger rule (Step 3 item
+     4) always produces.
    - `docs-only` or `comments-only` (comment lines in code files,
-     checked by reading the diff, not by the file list): a seat
-     confirmation of that delta (Step 3 item 6); no re-gate.
+     checked by reading the diff, not by the file list): ONE seat that
+     reviewed the PR confirms that delta (Step 3 item 6); no re-gate.
    - `code`, NON-behavioural (tests, comments mixed with code-file
-     edits, logging levels): a seat confirmation of that exact delta,
+     edits, logging levels): all three seats confirm that exact delta,
      with the reason it changes no behaviour written in the record.
+     Code can hide behaviour, and a resumed seat's delta read is cheap.
    - `code`, behaviour-changing (anything else): ALWAYS a re-gate and
      a re-review at the new head (Step 3 item 4: "any
      behavior-changing fold re-runs BOTH"). A seat confirmation never
      substitutes for it.
-   An empty delta says so. Without this line a later reader cannot
-   tell a gated merge from a merge of something nobody measured. The
+   **A master merge in the delta.** After `git merge origin/master`
+   (item 2), master's own changes are NOT the PR's delta for review:
+   they were reviewed when they landed, so the seats confirm only the
+   PR's own delta plus the conflict resolution at the new head Z. They
+   DO count for the gate: the build changed, so a gated PR re-gates at
+   Z (a `docs/test-only` PR does not). An empty delta says so. Without
+   this line a later reader cannot tell a gated merge from a merge of
+   something nobody measured. The
    gate's ledger rows (Step 3 item 4) are in the head's diff, or the
    record says why the gate wrote none.
 1. Re-poll `mergeable` THROUGH `UNKNOWN` (GitHub recomputes after every
@@ -1212,6 +1219,9 @@ Per PR, in order:
    migration, so drop the branch's `_Log.md` change, never union it),
    build-check if a behavior-relevant file conflicted, push the
    rebased branch via `git -C`. NEVER resolve in the main checkout.
+   The push is a NEW head: go back to item 0 and re-classify it (the
+   master-merge rule there) before item 3. Never merge on the
+   classification of the head before the merge.
 3. Set the PR title + body first: `gh pr edit <n> --title "<area>: <summary> (#NNNN)" --body-file /var/worktrees/.cache/pr<n>_body.md` (body with Why/What/Validation + gate evidence). Then merge with an explicit pair: `gh pr merge <n> --merge -t "<area>: <summary> (#NNNN)" -F - <<<"<same body>" --delete-branch`. Both flags REQUIRED together: `-t` alone yields a title-only merge whose body echoes the subject, and bare merge yields GitHub's `Merge pull request #N` template — both are log pollution (ruled 2026-09-22). `git fetch origin` first if the ref may be stale, then verify with `git log --format=%B -1 origin/master` after merging.
 4. Verify the issue auto-closed (`Closes #<n>` in the body). If not,
    `gh issue close <n>` with a comment citing the merge SHA + smoke result.
@@ -1354,7 +1364,10 @@ is clean:
   and n when a copy is added or removed, in the same commit, and let
   the census, not a reviewer, confirm identity. CLAUDE.md is the
   user's: when its copy should join a mirror set, propose the wrapped
-  text, and the n bump for the other copies, in the PR body.
+  text and the n bump for the other copies in the PR body, for the
+  owner to land as ONE commit with every copy. The census is
+  tree-wide, so a partial commit (CLAUDE.md alone, or the n bump
+  alone) reds every open PR.
 
 ## Hard-won operational lessons (from live runs)
 

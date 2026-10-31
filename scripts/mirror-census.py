@@ -248,8 +248,22 @@ def main(argv):
         # a silent drop that ORPHAN only notices at the last partner.
         d = decls.get(mid, {})
         if len(d) > 1:  # census-guard: count-consistent
-            fails.append(("MEMBERS", "mirror:%s copies declare different counts: %s"
-                          % (mid, "; ".join("n=%d at %s" % (k, ", ".join(v)) for k, v in sorted(d.items())))))
+            right = [k for k in d if k == len(members)]
+            if len(right) == 1:  # census-guard: stale-copies
+                # One declared n matches the blocks found, so it is right and
+                # the others are stale: name only the copies to fix (a correct
+                # CLAUDE.md copy must not turn a lane's n bump into an owner
+                # escalation).
+                stale = sorted((k, w) for k, v in d.items() if k != right[0] for w in v)
+                nr = len(d[right[0]])
+                fails.append(("MEMBERS", "mirror:%s has %d blocks, matching the n=%d that %d %s; "
+                              "the other copies were not updated: %s (bump them to n=%d)"
+                              % (mid, len(members), right[0], nr,
+                                 "copy declares" if nr == 1 else "copies declare",
+                                 ", ".join("n=%d at %s" % (k, w) for k, w in stale), right[0])))
+            else:
+                fails.append(("MEMBERS", "mirror:%s copies declare different counts: %s"
+                              % (mid, "; ".join("n=%d at %s" % (k, ", ".join(v)) for k, v in sorted(d.items())))))
         elif len(d) == 1:
             n = next(iter(d))
             if n != len(members):  # census-guard: count

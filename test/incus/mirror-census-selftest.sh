@@ -185,6 +185,28 @@ assert_fails "$FX_C4" MALFORMED "members: n= on a closing marker reds"
 M_ONCLOSE="$(mutant count-on-close "$(guard_off count-on-close)")"
 assert_flips "$FX_C4" MALFORMED "members mutation: with that check off the cell flips" "$M_ONCLOSE"
 
+# The owner-proposal case: CLAUDE.md joins at n=7 while the docs still say
+# n=6. Seven blocks exist, so CLAUDE.md's n is RIGHT: the message must name
+# the stale docs (a lane's fix), not escalate to the owner.
+FX_C5="$(new_fixture members-stale)"
+printf '%s\n' '<!-- mirror:m n=2 -->x<!-- /mirror:m -->' >"$FX_C5/docs/a.md"
+printf '%s\n' '<!-- mirror:m n=2 -->x<!-- /mirror:m -->' >"$FX_C5/docs/b.md"
+printf '%s\n' '# Rules' '<!-- mirror:m n=3 -->x<!-- /mirror:m -->' >"$FX_C5/CLAUDE.md"
+run_census "$FX_C5" "$CENSUS"
+if [[ $RC -eq 1 && "$OUT" == *"FAIL: MEMBERS: mirror:m has 3 blocks, matching the n=3 that 1 copy declares; the other copies were not updated: n=2 at docs/a.md:1, n=2 at docs/b.md:1 (bump them to n=3)"* && "$OUT" != *"owner action"* ]]; then
+	ok "members: when one copy's n matches the blocks found, the message names the stale copies, with no owner escalation"
+else
+	bad "members: expected the stale docs named and no owner action (rc=$RC)"
+	printf '%s\n' "$OUT" | sed 's/^/         /' >&2
+fi
+M_STALE="$(mutant stale-copies "$(guard_off stale-copies)")"
+run_census "$FX_C5" "$M_STALE"
+if [[ "$OUT" != *"the other copies were not updated"* && "$OUT" == *"owner action"* ]]; then
+	ok "members mutation: without the stale-copy branch the message lists CLAUDE.md and escalates to the owner, so the cell has power"
+else
+	bad "members mutation ESCAPED"
+fi
+
 # ── cell O: a block with no partner ───────────────────────────────────────
 FX_O="$(new_fixture orphan)"
 add_pair "$FX_O" ballast
