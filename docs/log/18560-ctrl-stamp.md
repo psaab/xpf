@@ -54,3 +54,27 @@ source fix, as decided by the lane coordinator.
   bump_fib_generation today), not on the verb string, so the #9520
   single-send-site census keeps the "apply_snapshot" literal in one place.
   The helper honours it only in those two handlers.
+- **Timestamp**: 2026-10-31 02:40 PDT
+- **Action**: Folded review seats V and W on #18598 (MINOR from both).
+  - W1, the ownership rule rests on timing: the residual (a write that
+    completes after the grant can replace a row Go wrote meanwhile) is now
+    stated in the module doc and `docs/afxdp-packet-processing.md` instead of
+    "never touched", detected as `CtrlStampOutcome::LateWrite` (counted under
+    errors, logged), and the structural fix is filed as #18603.
+  - W2: cell `ctrl_row_is_written_after_the_view_is_published_18560` (a fake
+    row whose update reads the workers' view channel).
+  - V3: `CtrlRowFd`, built only by `open_ctrl_row` after the shape check, is
+    the only fd `lookup_ctrl_row` / `update_ctrl_row` accept.
+  - Nits: a 0 clock never opens a grant; the pin path comes from the
+    snapshot's `map_pins.ctrl` (the stored snapshot for a route-only bump),
+    no hardcoded path; the grant is a guard object revoked on drop or unwind
+    (`CtrlStampGrantGuard`); the rewrite-only cell comment no longer claims to
+    see an equivalent mutant; the teardown 0/0 publish is documented.
+  - V4 (production-path cell): `ctrl_row_root_18560` creates and pins a real
+    array map and drives `PinnedCtrlMap` through open (shape check), lookup
+    and a `BPF_EXIST` update, plus a wrong-shape refusal. It needs CAP_BPF and
+    bpffs, so it is `#[ignore]` and runs under `make test-root`.
+- **Mutants before the fold (8 planned, 6 run)**: S1 advance never called
+  (4 cells), S2 enabled check, S3 foreign-stamp check, S4 second deadline
+  check, S5 apply-arm revoke, S6 bump-arm grant: all KILLED. S7/S8 were not
+  reached before the fold; re-run on the folded head.

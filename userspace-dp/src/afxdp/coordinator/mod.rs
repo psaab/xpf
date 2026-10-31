@@ -4,7 +4,10 @@ mod cos_leases;
 mod cos_state;
 mod ctrl_stamp;
 #[cfg(test)]
-pub(crate) use ctrl_stamp::{UserspaceCtrlValue, EXPECTED_CTRL_METADATA_VERSION};
+pub(crate) use ctrl_stamp::{
+    advance_ctrl_stamp, CtrlStamp, CtrlStampOutcome, PinnedCtrlMap, UserspaceCtrlValue,
+    EXPECTED_CTRL_METADATA_VERSION,
+};
 mod fib_dump;
 mod ha_state;
 mod idle_lease_sync_8121;

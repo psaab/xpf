@@ -363,7 +363,16 @@ Two writers advance the stamp:
   (`ctrl_stamp_deadline_mono_ns`, 250 ms, CLOCK_MONOTONIC), only on an
   enabled row with the expected metadata version, and only when the row's
   stamp is exactly the generation the workers just left. Every other field
-  is written back as read, and a disabled row is never touched.
+  is written back as read, and a disabled row is not written. One residual
+  is stated, not closed: nothing bounds when the map write completes after
+  the helper's last deadline check, so a helper descheduled there for longer
+  than Go's slack (about 300 ms on a shutdown cut, about 2.75 s otherwise)
+  can overwrite a row Go wrote in the meantime. The helper reports such a
+  write as `LateWrite` (counted in `ctrl_stamp_errors_total`); Go's next
+  ctrl write (at least once a second) or the shim's 1.5 s heartbeat
+  staleness bounds it. The structural fix, a stamp row only the helper
+  writes, is #18603. The teardown publish runs outside any grant and never
+  writes the row.
 * **Go, from the status reply** (`applyHelperStatusLocked`), as before. After
   a helper advance this rewrite is a no-op. When the helper declined (grant
   expired, row disabled or not at the leaving generation) it is the only

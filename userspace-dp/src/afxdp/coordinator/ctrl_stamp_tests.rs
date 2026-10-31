@@ -56,8 +56,9 @@ fn advance_on(row: &SharedCtrlRow, deadline: u64, now: u64) -> CtrlStampOutcome 
 }
 
 /// The advance writes exactly the two stamp fields and leaves every field Go
-/// owns byte-for-byte as read. RED if the write rebuilds the row or touches
-/// any other field.
+/// owns byte-for-byte as read. RED if the write changes any field other than
+/// the stamp (a rebuild that happens to reproduce the same bytes is an
+/// equivalent mutant this cell cannot see).
 #[test]
 fn advance_rewrites_only_the_stamp_18560() {
     let row = SharedCtrlRow::default();
@@ -242,9 +243,9 @@ fn view_store_advances_the_stamp_only_inside_a_grant_18560() {
         config_generation: 11,
         fib_generation: 5,
     });
-    coord.grant_ctrl_stamp(DEADLINE);
+    let grant = coord.open_ctrl_stamp_grant(DEADLINE, "test-pin");
     assert!(bump_to(&mut coord, 6));
-    coord.revoke_ctrl_stamp_grant();
+    drop(grant);
     assert_eq!(row.update_count(), 1);
     assert_eq!(row.get().fib_generation, 6, "the row carries the generation just published");
     assert_eq!(row.get().config_generation, 11);
@@ -252,9 +253,9 @@ fn view_store_advances_the_stamp_only_inside_a_grant_18560() {
 
     // A republish that does not change the stamp (neighbor push, fabric
     // refresh) writes nothing even inside a grant.
-    coord.grant_ctrl_stamp(DEADLINE);
+    let grant = coord.open_ctrl_stamp_grant(DEADLINE, "test-pin");
     coord.republish_runtime_validation();
-    coord.revoke_ctrl_stamp_grant();
+    drop(grant);
     assert_eq!(row.update_count(), 1);
 }
 
@@ -269,9 +270,107 @@ fn view_store_declines_a_row_go_has_not_caught_up_18560() {
     });
     let row = coord.install_ctrl_stamp_test_row(stale);
     coord.ctrl_stamp.test_now_ns = Some(NOW);
-    coord.grant_ctrl_stamp(DEADLINE);
+    let grant = coord.open_ctrl_stamp_grant(DEADLINE, "test-pin");
     assert!(bump_to(&mut coord, 5));
-    coord.revoke_ctrl_stamp_grant();
+    drop(grant);
     assert_eq!(row.get(), stale);
     assert_eq!(coord.ctrl_stamp_counters(), (0, 1, 0));
+}
+
+/// A failed clock read (`monotonic_nanos` returns 0) never opens a grant.
+#[test]
+fn zero_clock_never_opens_a_grant_18560() {
+    assert!(!ctrl_stamp_grant_open(0, DEADLINE));
+    let row = SharedCtrlRow::default();
+    *row.value.lock().expect("row") = steady_row(LEAVING);
+    assert_eq!(advance_on(&row, DEADLINE, 0), CtrlStampOutcome::DeclinedDeadline);
+    assert_eq!(row.update_count(), 0);
+}
+
+/// A write that completes after the deadline is reported as late (the stated
+/// residual), not as an advance. RED if the post-write check is dropped.
+#[test]
+fn write_completing_after_the_deadline_is_reported_late_18560() {
+    let row = SharedCtrlRow::default();
+    *row.value.lock().expect("row") = steady_row(LEAVING);
+    let mut io = row.clone();
+    let mut calls = 0u32;
+    let mut clock = || {
+        calls += 1;
+        if calls <= 2 { NOW } else { DEADLINE }
+    };
+    assert_eq!(
+        advance_ctrl_stamp(&mut io, LEAVING, ENTERING, DEADLINE, &mut clock),
+        CtrlStampOutcome::LateWrite
+    );
+    let mut state = CtrlStampState::default();
+    state.record(CtrlStampOutcome::LateWrite, LEAVING, ENTERING);
+    assert_eq!((state.advances, state.declines, state.errors), (0, 0, 1));
+}
+
+/// The grant guard revokes the grant when dropped, including by unwinding.
+#[test]
+fn grant_guard_revokes_on_unwind_18560() {
+    let coord = coordinator_with_published(LEAVING);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _grant = coord.open_ctrl_stamp_grant(DEADLINE, "test-pin");
+        assert!(coord.ctrl_stamp_grant_for_test().is_some());
+        panic!("handler unwinds");
+    }));
+    assert!(result.is_err());
+    assert_eq!(coord.ctrl_stamp_grant_for_test(), None, "an unwinding handler left the grant open");
+    // A zero deadline from Go opens nothing.
+    let _none = coord.open_ctrl_stamp_grant(0, "test-pin");
+    assert_eq!(coord.ctrl_stamp_grant_for_test(), None);
+}
+
+/// A row whose write records the view the workers can see at that moment.
+struct ViewCheckingRow {
+    reader: crate::afxdp::types::RuntimeViewReader,
+    row: SharedCtrlRow,
+    seen: std::sync::Arc<std::sync::Mutex<Option<CtrlStamp>>>,
+}
+
+impl CtrlMapIo for ViewCheckingRow {
+    fn lookup(&mut self) -> std::io::Result<UserspaceCtrlValue> {
+        self.row.lookup()
+    }
+    fn update(&mut self, value: &UserspaceCtrlValue) -> std::io::Result<()> {
+        let v = self.reader.load().validation();
+        *self.seen.lock().expect("seen") = Some(CtrlStamp {
+            config_generation: v.config_generation,
+            fib_generation: v.fib_generation,
+        });
+        self.row.update(value)
+    }
+}
+
+/// Seat W: the advance runs AFTER the view store. When the row is written the
+/// workers' channel already carries the entering generation, so the shim is
+/// never told about a generation no worker can hold. RED if the advance moves
+/// before `publish` (the write would see the leaving view).
+#[test]
+fn ctrl_row_is_written_after_the_view_is_published_18560() {
+    let mut coord = coordinator_with_published(LEAVING);
+    let row = SharedCtrlRow::default();
+    *row.value.lock().expect("row") = steady_row(LEAVING);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    coord.ctrl_stamp.test_io = Some(Box::new(ViewCheckingRow {
+        reader: coord.ha.runtime.reader(),
+        row: row.clone(),
+        seen: std::sync::Arc::clone(&seen),
+    }));
+    coord.ctrl_stamp.test_now_ns = Some(NOW);
+    let grant = coord.open_ctrl_stamp_grant(DEADLINE, "test-pin");
+    assert!(bump_to(&mut coord, 5));
+    drop(grant);
+    assert_eq!(row.update_count(), 1, "premise: the granted bump wrote the row");
+    assert_eq!(
+        *seen.lock().expect("seen"),
+        Some(CtrlStamp {
+            config_generation: LEAVING.config_generation,
+            fib_generation: 5,
+        }),
+        "the row was written before the workers could see the generation it stamps"
+    );
 }

@@ -214,10 +214,18 @@ test-xfrm-lifecycle:
 		--bins --tests -- --test-threads=1
 
 .PHONY: test-root
-test-root: test-shim-run test-memlock-guards test-xfrm-lifecycle
+test-root: test-shim-run test-memlock-guards test-xfrm-lifecycle test-ctrl-row-root
 	@echo "make test-root: the privilege-gated legs ran."
 	@echo "  NOTE: some cells skip BECAUSE you are root (10 at last census)."
 	@echo "  No single run examines every cell; see 'make go-skip-census'."
+
+# #18560: the helper-side ctrl stamp against a real pinned BPF array (open
+# with the shape check, lookup, BPF_EXIST update, wrong-shape refusal). The
+# cell is #[ignore] because it needs CAP_BPF and bpffs; this leg runs it.
+.PHONY: test-ctrl-row-root
+test-ctrl-row-root:
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
+		--bin xpf-userspace-dp -- --ignored --exact afxdp::bpf_map::ctrl_row::ctrl_row_root_tests::ctrl_row_root_18560
 
 # #9337: the leg the 42 memlock-gated guards defer to.
 #

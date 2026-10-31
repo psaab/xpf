@@ -11400,6 +11400,10 @@ fn bump_fib_generation_grant_advances_ctrl_stamp_18560() {
             generation: 1,
             fib_generation: 1,
             generated_at: chrono::Utc::now(),
+            map_pins: crate::protocol::MapPins {
+                ctrl: "/test/pins/userspace_ctrl".to_string(),
+                ..Default::default()
+            },
             ..ConfigSnapshot::default()
         });
         let response = run_request(state.clone(), request);
@@ -11430,11 +11434,15 @@ fn bump_fib_generation_grant_advances_ctrl_stamp_18560() {
     assert_eq!(row.update_count(), 1);
     let status = response.status.expect("status payload");
     assert_eq!(status.ctrl_stamp_advances_total, 1);
-    assert_eq!(
-        state.lock().expect("state").afxdp.ctrl_stamp_grant_deadline_for_test(),
-        0,
-        "the grant must not outlive its request"
-    );
+    {
+        let guard = state.lock().expect("state");
+        assert_eq!(guard.afxdp.ctrl_stamp_grant_for_test(), None, "the grant must not outlive its request");
+        assert_eq!(
+            guard.afxdp.ctrl_stamp.test_last_grant.as_ref().map(|g| g.pin_path.as_str()),
+            Some("/test/pins/userspace_ctrl"),
+            "a route-only bump takes the ctrl pin from the stored snapshot"
+        );
+    }
     // An ungranted bump leaves the row to Go.
     let mut request = req("bump_fib_generation");
     request.snapshot = Some(ConfigSnapshot {
@@ -11463,6 +11471,10 @@ fn apply_snapshot_grant_advances_ctrl_stamp_18560() {
             generation,
             fib_generation: 1,
             generated_at: chrono::Utc::now(),
+            map_pins: crate::protocol::MapPins {
+                ctrl: "/test/pins/userspace_ctrl".to_string(),
+                ..Default::default()
+            },
             ..ConfigSnapshot::default()
         });
         request.ctrl_stamp_deadline_mono_ns = grant;
@@ -11486,5 +11498,13 @@ fn apply_snapshot_grant_advances_ctrl_stamp_18560() {
     let published = state.lock().expect("state").afxdp.published_ctrl_stamp();
     assert_eq!(published.config_generation, 2, "premise: the apply published generation 2");
     assert_eq!(row.get().config_generation, 2, "the granted apply must advance the ctrl stamp");
-    assert_eq!(state.lock().expect("state").afxdp.ctrl_stamp_grant_deadline_for_test(), 0);
+    {
+        let guard = state.lock().expect("state");
+        assert_eq!(guard.afxdp.ctrl_stamp_grant_for_test(), None);
+        assert_eq!(
+            guard.afxdp.ctrl_stamp.test_last_grant.as_ref().map(|g| g.pin_path.as_str()),
+            Some("/test/pins/userspace_ctrl"),
+            "the apply takes the ctrl pin from its own snapshot"
+        );
+    }
 }

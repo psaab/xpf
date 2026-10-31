@@ -489,16 +489,21 @@ pub(crate) fn handle_stream(
             },
             "apply_snapshot" => {
                 // #18560: the Go grant lets the coordinator advance the
-                // userspace_ctrl stamp at its view store; it is revoked as
-                // soon as the request is handled, whatever the outcome.
-                guard.afxdp.grant_ctrl_stamp(request.ctrl_stamp_deadline_mono_ns);
+                // userspace_ctrl stamp at its view store. The guard revokes
+                // it when this arm ends, including by unwinding.
+                let pin = request
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.map_pins.ctrl.clone())
+                    .unwrap_or_default();
+                let _ctrl_stamp_grant =
+                    guard.afxdp.open_ctrl_stamp_grant(request.ctrl_stamp_deadline_mono_ns, &pin);
                 snapshot::apply(
                     &mut guard,
                     request.snapshot,
                     &mut response,
                     &mut persist_state,
                 );
-                guard.afxdp.revoke_ctrl_stamp_grant();
             }
             "set_forwarding_state" => forwarding::set(
                 &mut guard,
@@ -572,15 +577,22 @@ pub(crate) fn handle_stream(
                 &mut persist_state,
             ),
             "bump_fib_generation" => {
-                // #18560: same grant as apply_snapshot above.
-                guard.afxdp.grant_ctrl_stamp(request.ctrl_stamp_deadline_mono_ns);
+                // #18560: same grant as apply_snapshot above; a route-only
+                // bump carries no map pins, so the ctrl pin comes from the
+                // stored snapshot.
+                let pin = guard
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.map_pins.ctrl.clone())
+                    .unwrap_or_default();
+                let _ctrl_stamp_grant =
+                    guard.afxdp.open_ctrl_stamp_grant(request.ctrl_stamp_deadline_mono_ns, &pin);
                 snapshot::bump_fib(
                     &mut guard,
                     request.snapshot.as_ref(),
                     &mut response,
                     &mut persist_state,
                 );
-                guard.afxdp.revoke_ctrl_stamp_grant();
             }
             "clear_policy_counters" => {
                 guard.afxdp.clear_policy_counters();

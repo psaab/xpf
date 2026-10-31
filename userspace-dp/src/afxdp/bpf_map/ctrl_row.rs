@@ -28,9 +28,15 @@ const _: () = assert!(std::mem::size_of::<UserspaceCtrlValue>() == 56);
 const _: () = assert!(std::mem::offset_of!(UserspaceCtrlValue, config_generation) == 40);
 const _: () = assert!(std::mem::offset_of!(UserspaceCtrlValue, fib_generation) == 48);
 
+/// An fd known to be the shim's `userspace_ctrl` map: a one-entry array of
+/// [`UserspaceCtrlValue`]-sized values. Only [`open_ctrl_row`] constructs it,
+/// after checking that shape, which is what makes the raw lookup and update
+/// below sound; they accept nothing else.
+pub(in crate::afxdp) struct CtrlRowFd(OwnedFd);
+
 /// Open the pinned ctrl map and refuse one whose shape is not the shim ABI
 /// this helper was built against (a one-entry array of 56-byte values).
-pub(in crate::afxdp) fn open_ctrl_row(path: &str) -> io::Result<OwnedFd> {
+pub(in crate::afxdp) fn open_ctrl_row(path: &str) -> io::Result<CtrlRowFd> {
     let fd = OwnedFd::open_bpf_map(path)?;
     let mut info = libbpf_sys::bpf_map_info::default();
     let mut len = std::mem::size_of::<libbpf_sys::bpf_map_info>() as u32;
@@ -59,17 +65,18 @@ pub(in crate::afxdp) fn open_ctrl_row(path: &str) -> io::Result<OwnedFd> {
             ),
         ));
     }
-    Ok(fd)
+    Ok(CtrlRowFd(fd))
 }
 
-pub(in crate::afxdp) fn lookup_ctrl_row(fd: &OwnedFd) -> io::Result<UserspaceCtrlValue> {
+pub(in crate::afxdp) fn lookup_ctrl_row(fd: &CtrlRowFd) -> io::Result<UserspaceCtrlValue> {
     let key = 0u32;
     let mut value = UserspaceCtrlValue::default();
     // SAFETY: key and value point at live locals of the map's key and value
-    // sizes (checked by open_ctrl_row).
+    // sizes, which `CtrlRowFd` guarantees (only open_ctrl_row builds one,
+    // after checking them).
     let rc = unsafe {
         libbpf_sys::bpf_map_lookup_elem(
-            fd.fd,
+            fd.0.fd,
             (&key as *const u32).cast::<c_void>(),
             (&mut value as *mut UserspaceCtrlValue).cast::<c_void>(),
         )
@@ -80,12 +87,12 @@ pub(in crate::afxdp) fn lookup_ctrl_row(fd: &OwnedFd) -> io::Result<UserspaceCtr
     Ok(value)
 }
 
-pub(in crate::afxdp) fn update_ctrl_row(fd: &OwnedFd, value: &UserspaceCtrlValue) -> io::Result<()> {
+pub(in crate::afxdp) fn update_ctrl_row(fd: &CtrlRowFd, value: &UserspaceCtrlValue) -> io::Result<()> {
     let key = 0u32;
     // SAFETY: as lookup_ctrl_row; BPF_EXIST never creates an entry.
     let rc = unsafe {
         libbpf_sys::bpf_map_update_elem(
-            fd.fd,
+            fd.0.fd,
             (&key as *const u32).cast::<c_void>(),
             (value as *const UserspaceCtrlValue).cast::<c_void>(),
             libbpf_sys::BPF_EXIST as u64,
@@ -96,3 +103,7 @@ pub(in crate::afxdp) fn update_ctrl_row(fd: &OwnedFd, value: &UserspaceCtrlValue
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "ctrl_row_root_tests.rs"]
+mod ctrl_row_root_tests;

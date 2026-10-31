@@ -29,46 +29,59 @@
 //!
 //! The ctrl row is one 56-byte array value, so a helper write replaces every
 //! field Go owns (enabled, flags, workers, WG ports, heartbeat timeout). Two
-//! rules keep that from ever overriding Go:
+//! rules keep that from overriding Go, with one stated residual:
 //!
 //! 1. **The helper writes only inside a Go round trip that granted it.** Go
-//!    stamps `ctrl_stamp_deadline_mono_ns` on `apply_snapshot` and
-//!    `bump_fib_generation` requests (an absolute CLOCK_MONOTONIC deadline,
-//!    `ctrlStampGrant` after the request is built). The helper writes only
-//!    while that deadline has not passed. Go holds `m.mu` across both round
+//!    stamps `ctrl_stamp_deadline_mono_ns` (an absolute CLOCK_MONOTONIC
+//!    deadline, `ctrlStampGrant` = 250 ms after the request is built) on the
+//!    requests that carry a snapshot, `apply_snapshot` and
+//!    `bump_fib_generation`, and the helper's handlers for exactly those two
+//!    verbs open the grant ([`CtrlStampGrantGuard`], dropped when the handler
+//!    returns or unwinds). The helper checks the deadline before its read and
+//!    again immediately before its write, and refuses within
+//!    `CTRL_STAMP_DEADLINE_MARGIN_NS` of it. Go holds `m.mu` across both round
 //!    trips and every Go ctrl write runs under `m.mu`, so Go cannot write ctrl
-//!    until the round trip returns. The round trip cannot return before the
-//!    grant expires unless the helper has already replied: the full deadline
-//!    is at least 3 s, and a shutdown cut (`cutInFlightControlIO`) still
-//!    allows 500 ms from the cut, which is never earlier than the grant
-//!    (`ctrlStampGrant` is compile-time bounded below
-//!    `controlShutdownCutover`). A request that arrives after its grant
-//!    expired, or a helper that took too long, simply declines and Go writes
-//!    the stamp after the reply exactly as before.
+//!    until the round trip returns, and the round trip cannot return before
+//!    the grant expires unless the helper has replied: the connection deadline
+//!    is at least 3 s, and a shutdown cut (`cutInFlightControlIO`) still allows
+//!    500 ms from the cut (`ctrlStampGrant` is compile-time bounded below
+//!    both).
 //! 2. **The helper only advances a stamp Go already set.** The write happens
 //!    only when the row is enabled, carries the metadata version this helper
 //!    validates, and its current stamp is exactly the generation the workers
 //!    just left. Every other field is written back byte-for-byte as read. A
 //!    disabled row (bootstrap, binding-plan change, fail-closed, link cycle,
-//!    teardown) is never touched, so the helper can never enable ctrl or
-//!    resurrect a row Go disabled.
+//!    teardown) is not written.
+//!
+//! **Residual (review seat W).** Nothing bounds how long the `update` syscall
+//! takes to complete after the last deadline check. If the helper is
+//! descheduled between that check and the write for longer than the slack Go
+//! leaves after the deadline (about 300 ms when a shutdown cuts the round
+//! trip, about 2.75 s otherwise), Go can return, write the row (for example
+//! disable it), and the helper's late write then restores the row it read:
+//! `enabled=1` with the fields as they were. The helper detects that its write
+//! completed past the deadline (`CtrlStampOutcome::LateWrite`, counted under
+//! `ctrl_stamp_errors_total` and logged), but cannot undo it. The effect is
+//! bounded by Go's next ctrl write (every status reply, at least once a
+//! second) or, if the helper is stopping, by the shim's heartbeat staleness
+//! (`heartbeat_timeout_ms`, 1.5 s). Removing the residual needs the stamp in
+//! a row only the helper writes, which is a shim ABI change (#18603).
+//!
+//! The teardown publish (`stop_inner` stores a default 0/0 view) runs outside
+//! any grant, so it never writes the row; Go disables ctrl before teardown.
 //!
 //! Go keeps writing the stamp from the status reply as before; that write is
 //! now normally a no-op rewrite of the same generation.
 //!
 //! The map is reopened by pin path on every advance (generation changes are
 //! a few per RG move, not per packet), so a shim reload that re-pins the map
-//! is followed automatically, and the value size is checked against the shim
-//! ABI before any write.
+//! is followed automatically. The path is the snapshot's `map_pins.ctrl`, the
+//! same one Go programs; its shape is checked against the shim ABI before any
+//! write (`bpf_map::ctrl_row`).
 
 use std::io;
 
-use crate::afxdp::bpf_map::OwnedFd;
 pub(crate) use crate::afxdp::bpf_map::ctrl_row::UserspaceCtrlValue;
-
-/// Pin path of the shim's `userspace_ctrl` map. Go creates it
-/// (`dataplane.bpfPinPath` + `userspace_ctrl`, pkg/dataplane/dataplane.go).
-pub(crate) const USERSPACE_CTRL_PIN_PATH: &str = "/sys/fs/bpf/xpf/userspace_ctrl";
 
 /// The shim's `ctrl.metadata_version` this helper's metadata validation
 /// accepts. Go programs the same value (`userspaceMetadataVersion`).
@@ -108,13 +121,20 @@ pub(crate) enum CtrlStampOutcome {
     /// The row's stamp is not the generation the workers just left, so Go
     /// is not in the steady state this module may advance from.
     DeclinedForeignStamp,
-    /// The map could not be opened, read or written.
+    /// The map could not be opened, read or written, or no pin path is known.
     Error,
+    /// The write completed after the grant deadline: Go may already have
+    /// written the row, and this write may have replaced it (the stated
+    /// residual in the module doc). Counted as an error and logged.
+    LateWrite,
 }
 
 /// Whether a write issued at `now_ns` is inside the grant.
+/// A clock reading of 0 (`monotonic_nanos` failed) never opens a grant.
 pub(crate) fn ctrl_stamp_grant_open(now_ns: u64, deadline_ns: u64) -> bool {
-    deadline_ns != 0 && now_ns.saturating_add(CTRL_STAMP_DEADLINE_MARGIN_NS) < deadline_ns
+    now_ns != 0
+        && deadline_ns != 0
+        && now_ns.saturating_add(CTRL_STAMP_DEADLINE_MARGIN_NS) < deadline_ns
 }
 
 /// Advance the ctrl row from `leaving` to `entering`, or decline. The
@@ -153,6 +173,7 @@ pub(crate) fn advance_ctrl_stamp(
         return CtrlStampOutcome::DeclinedDeadline;
     }
     match io.update(&value) {
+        Ok(()) if now_ns() >= deadline_ns => CtrlStampOutcome::LateWrite,
         Ok(()) => CtrlStampOutcome::Advanced,
         Err(_) => CtrlStampOutcome::Error,
     }
@@ -162,7 +183,7 @@ pub(crate) fn advance_ctrl_stamp(
 /// live in `bpf_map::ctrl_row` (the #16187 ratchet keeps map syscalls
 /// there); this is the safe adapter.
 pub(crate) struct PinnedCtrlMap {
-    fd: OwnedFd,
+    fd: crate::afxdp::bpf_map::CtrlRowFd,
 }
 
 impl PinnedCtrlMap {
@@ -183,12 +204,34 @@ impl CtrlMapIo for PinnedCtrlMap {
     }
 }
 
+/// The Go grant for the request being handled: its absolute CLOCK_MONOTONIC
+/// deadline and the ctrl map pin path from the snapshot.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CtrlStampGrant {
+    pub(crate) deadline_ns: u64,
+    pub(crate) pin_path: String,
+}
+
+/// Revokes the grant when dropped, so a handler that returns early or unwinds
+/// never leaves one open (review seat V).
+pub(crate) struct CtrlStampGrantGuard {
+    slot: std::sync::Arc<std::sync::Mutex<Option<CtrlStampGrant>>>,
+}
+
+impl Drop for CtrlStampGrantGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.slot.lock() {
+            *slot = None;
+        }
+    }
+}
+
 /// Coordinator-held grant and diagnostics.
 #[derive(Default)]
 pub(crate) struct CtrlStampState {
-    /// Absolute CLOCK_MONOTONIC deadline of the Go grant for the request
-    /// being handled; 0 outside a granting request.
-    pub(crate) grant_deadline_ns: u64,
+    /// The open grant, if a granting request is being handled. Shared with
+    /// the [`CtrlStampGrantGuard`] that revokes it.
+    grant: std::sync::Arc<std::sync::Mutex<Option<CtrlStampGrant>>>,
     pub(crate) advances: u64,
     pub(crate) declines: u64,
     pub(crate) errors: u64,
@@ -199,6 +242,9 @@ pub(crate) struct CtrlStampState {
     pub(crate) test_io: Option<Box<dyn CtrlMapIo + Send + Sync>>,
     #[cfg(test)]
     pub(crate) test_now_ns: Option<u64>,
+    /// The grant the last test-io advance ran under.
+    #[cfg(test)]
+    pub(crate) test_last_grant: Option<CtrlStampGrant>,
 }
 
 impl CtrlStampState {
@@ -209,7 +255,9 @@ impl CtrlStampState {
                 self.last_decline = None;
                 return;
             }
-            CtrlStampOutcome::Error => self.errors = self.errors.saturating_add(1),
+            CtrlStampOutcome::Error | CtrlStampOutcome::LateWrite => {
+                self.errors = self.errors.saturating_add(1)
+            }
             _ => self.declines = self.declines.saturating_add(1),
         }
         if self.last_decline != Some(outcome) {
@@ -226,14 +274,23 @@ impl CtrlStampState {
 }
 
 impl super::Coordinator {
-    /// Open a ctrl-stamp grant for the Go request being handled.
-    pub(crate) fn grant_ctrl_stamp(&mut self, deadline_mono_ns: u64) {
-        self.ctrl_stamp.grant_deadline_ns = deadline_mono_ns;
+    /// Open a ctrl-stamp grant for the Go request being handled; it stays
+    /// open until the returned guard is dropped. A zero deadline (no grant
+    /// from Go) opens nothing.
+    pub(crate) fn open_ctrl_stamp_grant(&self, deadline_mono_ns: u64, pin_path: &str) -> CtrlStampGrantGuard {
+        if let Ok(mut slot) = self.ctrl_stamp.grant.lock() {
+            *slot = (deadline_mono_ns != 0).then(|| CtrlStampGrant {
+                deadline_ns: deadline_mono_ns,
+                pin_path: pin_path.to_string(),
+            });
+        }
+        CtrlStampGrantGuard {
+            slot: std::sync::Arc::clone(&self.ctrl_stamp.grant),
+        }
     }
 
-    /// Close the grant once the granting request has been handled.
-    pub(crate) fn revoke_ctrl_stamp_grant(&mut self) {
-        self.ctrl_stamp.grant_deadline_ns = 0;
+    fn current_ctrl_stamp_grant(&self) -> Option<CtrlStampGrant> {
+        self.ctrl_stamp.grant.lock().ok().and_then(|slot| slot.clone())
     }
 
     /// (advances, declines, errors) for the status projection.
@@ -245,10 +302,10 @@ impl super::Coordinator {
     /// workers are leaving. Acts only inside a grant and only when the stamp
     /// the shim copies actually changed.
     pub(super) fn advance_ctrl_stamp_after_publish(&mut self, previous: CtrlStamp) {
-        let deadline = self.ctrl_stamp.grant_deadline_ns;
-        if deadline == 0 {
+        let Some(grant) = self.current_ctrl_stamp_grant() else {
             return;
-        }
+        };
+        let deadline = grant.deadline_ns;
         let entering = CtrlStamp {
             config_generation: self.validation.config_generation,
             fib_generation: self.validation.fib_generation,
@@ -258,6 +315,7 @@ impl super::Coordinator {
         }
         #[cfg(test)]
         if let Some(mut io) = self.ctrl_stamp.test_io.take() {
+            self.ctrl_stamp.test_last_grant = Some(grant.clone());
             let fixed = self.ctrl_stamp.test_now_ns;
             let mut now = || fixed.unwrap_or_else(crate::afxdp::monotonic_nanos);
             let outcome = advance_ctrl_stamp(&mut *io, previous, entering, deadline, &mut now);
@@ -266,9 +324,13 @@ impl super::Coordinator {
             return;
         }
         let mut now = crate::afxdp::monotonic_nanos;
-        let outcome = match PinnedCtrlMap::open(USERSPACE_CTRL_PIN_PATH) {
-            Ok(mut io) => advance_ctrl_stamp(&mut io, previous, entering, deadline, &mut now),
-            Err(_) => CtrlStampOutcome::Error,
+        let outcome = if grant.pin_path.is_empty() {
+            CtrlStampOutcome::Error
+        } else {
+            match PinnedCtrlMap::open(&grant.pin_path) {
+                Ok(mut io) => advance_ctrl_stamp(&mut io, previous, entering, deadline, &mut now),
+                Err(_) => CtrlStampOutcome::Error,
+            }
         };
         self.ctrl_stamp.record(outcome, previous, entering);
     }
@@ -325,8 +387,8 @@ impl super::Coordinator {
         }
     }
 
-    pub(crate) fn ctrl_stamp_grant_deadline_for_test(&self) -> u64 {
-        self.ctrl_stamp.grant_deadline_ns
+    pub(crate) fn ctrl_stamp_grant_for_test(&self) -> Option<CtrlStampGrant> {
+        self.current_ctrl_stamp_grant()
     }
 }
 
