@@ -1991,12 +1991,14 @@ loss-cluster-restart:
 # from scripts/next-deb-version.sh (#18645), never from a hand-picked number:
 #   make deb DEB_VERSION="$(scripts/next-deb-version.sh --git .)+g$(git rev-parse --short=12 HEAD)"
 # It allocates from the shared counter /var/worktrees/.cache/deb-version-counter
-# under flock, above every 0.0.N deb under /var/worktrees and above the commit
-# counts of HEAD and origin/master. Hand-picked numbers collided across lanes,
-# and a number below the one a node runs is an apt downgrade the deploy
-# refuses. Once a node runs an allocated version, a stock build of an older
-# commit count is a downgrade there too, so deploys to that node allocate as
-# well. The stock default below is unchanged.
+# under flock. The floor is what the six lab nodes RUN (read-only
+# `dpkg-query -W xpf`, plus a margin of 100 when the counter is created), an
+# explicit --floor / XPF_DEB_VERSION_FLOOR, and the --git commit counts. A
+# stray deb on disk is only a warning, never a floor, and a jump of more than
+# 1000 above the floor needs --force-jump. Hand-picked numbers collided across
+# lanes, and a number below the one a node runs is an apt downgrade the deploy
+# refuses; `--claim <version>` registers a hand-picked build and refuses one at
+# or below the counter. The stock default below is unchanged.
 # The shared probe compares tracked files with HEAD, scans untracked package/
 # image inputs, and asks Go for the compiled inputs of `build`/`build-ctl` so
 # ignored sources consumed by the compiler are included. Unattestable GOFLAGS

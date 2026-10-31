@@ -967,10 +967,15 @@ For each PR an agent opens:
    # Allocate a box-unique, monotonic version, then build it outside
    # the cluster lock. Never hand-pick 0.0.NNNNN: lanes collided, and a
    # number below the deployed one is an apt downgrade that refuses
-   # (#18645). The allocator holds a flock on a shared counter and
-   # starts above every 0.0.N it can see (debs under /var/worktrees,
-   # the PR's and master's commit counts). master's copy runs for a PR
-   # based before the script existed.
+   # (#18645). The allocator holds a flock on a shared counter whose
+   # floor is what the six lab nodes RUN (a read-only dpkg-query; a
+   # stray deb on disk is only a warning), refuses a jump of more than
+   # 1000 above that without --force-jump, and refuses to create the
+   # counter unless it read every node or got --floor. master's copy
+   # runs for a PR based before the script existed. Migration: a build
+   # hand-picked before the allocator landed is registered with
+   # `--claim <version>`, which refuses it at or below the counter (then
+   # rebuild with an allocated version).
    DEB_N=$(git -C "$WT" show origin/master:scripts/next-deb-version.sh |
      sh -s -- --git "$WT")
    case "$DEB_N" in 0.0.[0-9]*) ;; *) echo "no deb version" >&2; exit 1 ;; esac
