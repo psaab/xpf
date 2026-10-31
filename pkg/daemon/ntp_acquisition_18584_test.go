@@ -149,6 +149,7 @@ func TestChronyRestartsOutrightWithABinding18584(t *testing.T) {
 	dir := t.TempDir()
 	orig, origRun := chronyAcquisitionPath, chronyRunCmd
 	chronyAcquisitionPath = dir + "/xpf-acquisition.conf"
+	chronyAcqRestartOwed.Store(false)
 	var ran [][]string
 	chronyRunCmd = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		ran = append(ran, append([]string{name}, args...))
@@ -166,6 +167,37 @@ func TestChronyRestartsOutrightWithABinding18584(t *testing.T) {
 	reloadChronyRuntime(false, true)
 	if len(ran) != 1 || strings.Join(ran[0], " ") != "systemctl restart chrony" {
 		t.Fatalf("with a binding the leg must restart, not reload; ran=%v", ran)
+	}
+}
+
+// #18584 review seat AF: REMOVING the binding also needs a restart (chronyd
+// keeps the bound sockets until it restarts), so the leg must not try a
+// reload first just because the file is gone.
+func TestChronyRestartsOutrightWhenTheBindingIsRemoved18584(t *testing.T) {
+	d, _, _ := chronyDaemon6800(t)
+	stubChronySynced18584(t, false)
+	origRun, origFn := chronyRunCmd, chronyReloadFn
+	var ran [][]string
+	chronyRunCmd = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		ran = append(ran, append([]string{name}, args...))
+		return nil, nil
+	}
+	chronyReloadFn = reloadChronyRuntime // drive the real leg
+	t.Cleanup(func() { chronyRunCmd, chronyReloadFn = origRun, origFn; chronyAcqRestartOwed.Store(false) })
+	d.applySystemNTP(ntpRICfg18584("mgmt")) // binding written
+	ran = nil
+	d.applySystemNTP(ntpRICfg18584("")) // binding removed
+	var thr []string
+	for _, c := range ran {
+		if c[0] == "systemctl" {
+			thr = append(thr, strings.Join(c, " "))
+		}
+	}
+	if len(thr) != 1 || thr[0] != "systemctl restart chrony" {
+		t.Fatalf("removing the binding must restart chrony, not reload it; systemctl commands=%v", thr)
+	}
+	if chronyAcqRestartOwed.Load() {
+		t.Fatal("a successful restart must discharge the owed restart")
 	}
 }
 

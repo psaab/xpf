@@ -114,6 +114,9 @@ func chronyDaemon6800(t *testing.T) (d *Daemon, calls func() [][2]bool, setOutco
 	chronyThresholdPath = filepath.Join(dir, "xpf-threshold.conf")
 	chronyAcquisitionPath = filepath.Join(dir, "xpf-acquisition.conf")
 	t.Cleanup(func() { chronySourcesPath, chronyThresholdPath, chronyAcquisitionPath = origSrc, origThr, origAcq })
+	// #18584: the owed-restart flag is process-wide, like chronyRunCmd.
+	chronyAcqRestartOwed.Store(false)
+	t.Cleanup(func() { chronyAcqRestartOwed.Store(false) })
 
 	var mu sync.Mutex
 	var got [][2]bool

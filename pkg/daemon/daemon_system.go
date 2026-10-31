@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1310,6 +1311,13 @@ var (
 	chronyAcquisitionPath = "/etc/chrony/conf.d/xpf-acquisition.conf"
 )
 
+// chronyAcqRestartOwed: the acquisition binding was just added, changed or
+// removed and no chrony restart has succeeded since. While set (or while a
+// binding is on disk) the conf.d leg restarts instead of reloading; cleared
+// by a successful restart, so the #6800 retry owner replays a restart, not a
+// reload.
+var chronyAcqRestartOwed atomic.Bool
+
 // renderChronyAcquisition renders the `bindacqdevice` directive that puts
 // chrony's NTP client sockets in the routing instance every configured server
 // names (#18584). "" leaves chrony in the default instance.
@@ -1560,11 +1568,14 @@ func reloadChronyRuntime(sourcesChanged, thresholdChanged bool) chronyReloadOutc
 	// Ubuntu's chrony.service has no ExecReload and they fail through to a
 	// restart; a unit that gained one would report the reload done while
 	// chronyd kept its unbound sockets. With a binding on disk, restart.
-	if chronyAcquisitionBindingPresent() {
+	if chronyAcquisitionBindingPresent() || chronyAcqRestartOwed.Load() {
 		commands = commands[2:]
 	}
 	for _, cmd := range commands {
 		if cmdOut, err := chronyRunCmd(ctx, cmd[0], cmd[1:]...); err == nil {
+			if cmd[1] == "restart" {
+				chronyAcqRestartOwed.Store(false)
+			}
 			return out
 		} else {
 			slog.Debug("chrony config reload attempt failed", "cmd", strings.Join(cmd, " "), "err", err, "output", string(cmdOut))
@@ -1597,6 +1608,9 @@ func (d *Daemon) applySystemNTP(cfg *config.Config) {
 		if err != nil {
 			slog.Warn("failed to remove chrony acquisition-device config", "err", err)
 		}
+		if acqChanged {
+			chronyAcqRestartOwed.Store(true)
+		}
 		thresholdChanged = thresholdChanged || acqChanged
 		sourcesChanged = sourcesChanged || sourcesOwed
 		thresholdChanged = thresholdChanged || thresholdOwed
@@ -1622,6 +1636,9 @@ func (d *Daemon) applySystemNTP(cfg *config.Config) {
 	if err != nil {
 		slog.Warn("failed to reconcile chrony acquisition-device config", "err", err)
 		return
+	}
+	if acqChanged {
+		chronyAcqRestartOwed.Store(true)
 	}
 	// #18584: the bound device is the VRF this daemon creates, so a chronyd
 	// that started before it existed (every boot: chrony.service does not

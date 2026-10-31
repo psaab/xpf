@@ -86,7 +86,7 @@ re-run, not yet a regression; two are a regression.
 
 ## Tier 3: HA (loss and tcp; destructive targets self-lock)
 
-Clocks: the lab cluster configs carry NTP through `vrf-mgmt` since #18584 (public servers; the incus bridge gateways serve none). A deb deploy preserves node config, so a cluster picks the stanza up only when it is committed on it (see `pkg/cluster/README.md`, "Prerequisite: a cluster needs a time source"). On a cluster that has not had it committed — or runs a build older than #18584 — there is no working NTP: resync node clocks after any crash reboot (`failover_resync_node_clocks`, #11872). Once both nodes show `Leap status: Normal` in `chronyc tracking`, the resync is a workaround to drop, not a step to keep.
+Clocks: the lab cluster configs carry NTP through `vrf-mgmt` since #18584 (public servers; the incus bridge gateways serve none). A deb deploy preserves node config, so a cluster picks the stanza up only when it is committed on it (see `pkg/cluster/README.md`, "Prerequisite: a cluster needs a time source"). On a cluster that has not had it committed — or runs a build older than #18584, which does not bind (unless a newer build left `/etc/chrony/conf.d/xpf-acquisition.conf` behind, as on loss after the downgrade to `g388eaad128`) — chrony has no reachable source: check `chronyc tracking` and resync node clocks after any crash reboot (`failover_resync_node_clocks`, #11872). Once both nodes show `Leap status: Normal` in `chronyc tracking`, the resync is a workaround to drop, not a step to keep.
 Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ran 66.8 s behind fw0 on loss); a cross-node timeline without that offset produced a wrong diagnosis once.
 
 | ID | Run | Pass | Catches |

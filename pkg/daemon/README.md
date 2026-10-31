@@ -3897,11 +3897,18 @@ never lock an operator out of a remote box it manages.
   names the same VRF-backed routing-instance — `config.NTPAcquisitionInstance`
   decides). It rides the threshold leg's conf.d restart, because chronyd reads
   conf.d only at start, and its debt is reported under `chrony-threshold`.
-  `applySystemNTP` also forces that leg once per daemon process
-  (`chronyAcqStartRestarted`) after the first apply that renders a binding:
+  While a binding is on disk, or was just added or removed
+  (`chronyAcqRestartOwed`), that leg RESTARTS chrony outright instead of
+  trying `systemctl reload` first: a unit with an ExecReload would report
+  the reload done while chronyd kept its old sockets. On the first apply of
+  each daemon process that renders an UNCHANGED binding, `applySystemNTP`
+  restarts chrony only if `chronyc -n tracking` does not already report
+  `Leap status: Normal` (`chronySyncedFn`, `chronyAcqStartRestarted`):
   chrony.service does not order after xpfd, so a chronyd started before
-  `vrf-mgmt` existed is restarted once the VRF does, which also re-opens its
-  `makestep` window. Cells: `ntp_acquisition_18584_test.go`. Tests: `service_reload_debt_6800_test.go` (latch +
+  `vrf-mgmt` existed is restarted once the VRF does (re-opening its
+  `makestep` window), while a synchronised one is left alone — a gratuitous
+  restart leaves it unsynchronised ~10 s, which the clock monitor raises.
+  Cells: `ntp_acquisition_18584_test.go`. Tests: `service_reload_debt_6800_test.go` (latch +
   discharge pairs for both services; the steady-state retry with an explicit
   "the files really are converged" premise guard and its debt-free negative;
   per-leg outcome pairs; the two SYMMETRIC "owed leg survives an apply that
