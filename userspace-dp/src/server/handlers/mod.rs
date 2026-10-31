@@ -487,12 +487,24 @@ pub(crate) fn handle_stream(
                     response.error = error;
                 }
             },
-            "apply_snapshot" => snapshot::apply(
-                &mut guard,
-                request.snapshot,
-                &mut response,
-                &mut persist_state,
-            ),
+            "apply_snapshot" => {
+                // #18560: the Go grant lets the coordinator advance the
+                // userspace_ctrl stamp at its view store. The guard revokes
+                // it when this arm ends, including by unwinding.
+                let pin = request
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.map_pins.ctrl.clone())
+                    .unwrap_or_default();
+                let _ctrl_stamp_grant =
+                    guard.afxdp.open_ctrl_stamp_grant(request.ctrl_stamp_deadline_mono_ns, &pin);
+                snapshot::apply(
+                    &mut guard,
+                    request.snapshot,
+                    &mut response,
+                    &mut persist_state,
+                );
+            }
             "set_forwarding_state" => forwarding::set(
                 &mut guard,
                 request.forwarding,
@@ -564,12 +576,24 @@ pub(crate) fn handle_stream(
                 neighbor_replace,
                 &mut persist_state,
             ),
-            "bump_fib_generation" => snapshot::bump_fib(
-                &mut guard,
-                request.snapshot.as_ref(),
-                &mut response,
-                &mut persist_state,
-            ),
+            "bump_fib_generation" => {
+                // #18560: same grant as apply_snapshot above; a route-only
+                // bump carries no map pins, so the ctrl pin comes from the
+                // stored snapshot.
+                let pin = guard
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.map_pins.ctrl.clone())
+                    .unwrap_or_default();
+                let _ctrl_stamp_grant =
+                    guard.afxdp.open_ctrl_stamp_grant(request.ctrl_stamp_deadline_mono_ns, &pin);
+                snapshot::bump_fib(
+                    &mut guard,
+                    request.snapshot.as_ref(),
+                    &mut response,
+                    &mut persist_state,
+                );
+            }
             "clear_policy_counters" => {
                 guard.afxdp.clear_policy_counters();
                 project_status(&mut guard);

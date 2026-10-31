@@ -875,6 +875,8 @@ pub(crate) mod worker_queue;
 #[path = "worker_runtime.rs"]
 mod worker_runtime;
 pub use self::coordinator::Coordinator;
+#[cfg(test)]
+pub(crate) use self::coordinator::{UserspaceCtrlValue, EXPECTED_CTRL_METADATA_VERSION};
 // #3789: re-export the full-reconcile abort outcome into afxdp scope so
 // the control-plane server (`server/helpers.rs` + `handlers/snapshot.rs`)
 // can name `afxdp::ReconcileError` on `reconcile_status_bindings`.

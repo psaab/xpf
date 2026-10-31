@@ -182,6 +182,15 @@ func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket stri
 	if controlSocket == "" {
 		return ControlResponse{}, &knownUnsentError{msg: errControlSocketNotConfigured.Error(), cause: errControlSocketNotConfigured}
 	}
+	// #18560: grant the helper the userspace_ctrl stamp advance for this
+	// round trip. Stamped here, before the marshal and before armControlIO,
+	// so the grant always ends before the connection deadline can fire
+	// (ctrl_stamp_grant_18560.go). Every other verb carries 0.
+	if ctrlStampGrantFor(&req) {
+		req.CtrlStampDeadlineMonoNS = ctrlStampGrantDeadline()
+	} else {
+		req.CtrlStampDeadlineMonoNS = 0
+	}
 	// Pre-flight size check (#2744). Serialize the request once and reject
 	// it here if it would exceed the receiver's cap, so the operator sees
 	// an actionable config error at apply time rather than a silent

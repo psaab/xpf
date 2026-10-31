@@ -1033,6 +1033,13 @@ type ProcessStatus struct {
 	// #11061: current count of zones whose fabric stamps cannot select one
 	// routing domain in the helper's published forwarding snapshot.
 	AmbiguousFabricZoneCount uint64 `json:"ambiguous_fabric_zone_count,omitempty"`
+	// #18560: the helper's own userspace_ctrl stamp advances at the
+	// worker-visible publish (inside the CtrlStampDeadlineMonoNS grant), the
+	// generation changes it left for Go to stamp, and map errors. Diagnostic
+	// only; Go still writes the stamp from every status reply.
+	CtrlStampAdvancesTotal uint64 `json:"ctrl_stamp_advances_total,omitempty"`
+	CtrlStampDeclinesTotal uint64 `json:"ctrl_stamp_declines_total,omitempty"`
+	CtrlStampErrorsTotal   uint64 `json:"ctrl_stamp_errors_total,omitempty"`
 	// #9654: whether the learned-route import is capped in the forwarding state
 	// the helper's live workers serve NOW. A pointer because absence must read
 	// as UNKNOWN. The helper omits the key when no worker is live. A helper that
