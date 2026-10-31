@@ -197,6 +197,89 @@ This matters because a split-RG fabric-path bug can kill streams before the
 first failover. That must fail as a fabric regression, not be misclassified as
 a failover-survivability regression.
 
+### `make test-failover` zero-interval cells: windows and definitions
+
+`scripts/iperf-json-metrics.py` scores the whole-run iperf3 stream. A
+per-stream interval counts as "zero" at or below `--zero-gbps` (default
+0.05 Gbit/s), not only at 0 bytes. At iperf3's 1 s resolution one zero
+interval means a stream carried almost nothing for about a second.
+
+**Registered windows.** Each is `[T, T+3]` around an anchor `T`, in seconds
+since the iperf launch on the harness's integer `SECONDS` clock. That clock
+can be up to about 1 s off iperf's own clock.
+
+| Event | Anchors | Kind | How its zero intervals are scored |
+|---|---|---|---|
+| the crash (`failover_at_seconds`) | the crash instant | **excused** (`--event-sec`) | not counted: peer-loss detection of 1.0–2.2 s is by design |
+| the RG1 move that starts the split slice (RG1 on node0, RG0/RG2 on node1) | the instant before the request, and the poll-observed landing | **planned** (`--planned-move rg1-split=...`) | scored as a move, below |
+| the RG0/RG2 failback that ends the split | the instant before each of the two requests, and each RG's poll-observed landing | **planned** (`--planned-move rg0-rg2-failback=...`) | scored as a move, below |
+
+A planned move is anchored at the request AND the landing, because a landing
+takes 1.3–3 s. With the request alone, a stall at the landing falls outside
+the window. A move that did not land is not registered; its own cells have
+already failed.
+
+**Planned moves are scored, not excused** (#18617). Sessions are on both nodes
+before a planned move, so every lost packet is a transition cost (matrix H10).
+Each move is one cell, judged by H11's rules at 1 s resolution. A stream is
+**stalled** in an interval when it carried under 1 Mbit/s (H11's stall,
+`--planned-stall-gbps 0.001`). A stream between that and the 0.05 Gbit/s
+zero threshold is **low-share**: a transition dip, not a stall. It does not
+change the move's verdict. On the live run on 2026-10-31 the aggregate fell
+from about 9 to 1.2 Gbit/s at the RG1 move, below H9's 2.0–3.5 Gbit/s split
+ceiling on loss. Two streams ran at 12 Mbit/s and one stopped. That dip is a
+transition cost (H10), so each planned move records it on the ledger as
+`HARNESS_METRIC` lines, judged master-relative like `cells_cost`:
+
+- `planned_<move>_low_share_streams`: the number of low-share streams;
+- `planned_<move>_min_stream_gbps`: the lowest per-stream rate in the
+  move's windows;
+- `planned_<move>_window_aggregate_gbps`: the mean aggregate rate over the
+  move's windows.
+
+`<move>` is `rg1_split` or `rg0_rg2_failback`. The low-share streams are also
+named in the cell's text.
+
+- **PASS:** no stream stalled in the move's windows.
+- **COST:** exactly one stream stalled. Its stall is the whole run of
+  consecutive zero intervals that touches the window, inside it or past it.
+  The stall lasted at most 10 s (H11's `SOAK_MAX_COST_STALL_MS`), and the
+  stream carried data again afterwards. A COST counts as passed and is
+  recorded as `cells_cost` (the summary's `, <k> cost`), judged
+  master-relative as H11 judges its COST.
+- **FAIL:** any of:
+  - every stream stalled (under 1 Mbit/s) in one interval: an aggregate
+    outage over H11's 1 s;
+  - more than one stream stalled;
+  - a stall was longer than 10 s;
+  - a stream never carried data again.
+
+**The cells.**
+
+- **Outside the windows:** `stream_zero_intervals_outside_events_total`, the
+  "per-stream zero intervals outside the crash and planned-move windows" cell
+  (`MAX_STREAM_ZERO_INTERVALS`, default 0). It counts every zero interval that
+  is not wholly inside a registered window. Planned-move zeros are scored by
+  their move cell instead, so they are never counted twice. A stall that
+  outlasts its window counts here too.
+- **Whole run:** `zero_intervals_total` is aggregate zero intervals PLUS
+  per-stream zero intervals, with no window excluded. The crash alone zeroes
+  every stream for 1–3 intervals (8 streams give 8–24), so a fixed limit of 2
+  was red on every crash run. Its fate is decided: it is **recorded**, not
+  gated, as `whole_run_zero_intervals` on the ledger row (a `HARNESS_METRIC:`
+  line), and judged master-relative. `MAX_ZERO_INTERVALS=<n>` gates it
+  absolutely again for a one-off run.
+- **Who reads these.** `whole_run_zero_intervals`, the `planned_<move>_*`
+  metrics and `cells_cost` are ledger metrics that a person reads against
+  master's rows. Nothing compares them automatically: `ledger_compare` bands
+  only the headline (`throughput_gbps`).
+- **What this cannot see.** test-failover has no 10 ms ping, so a stall
+  shorter than one 1 s interval goes unscored here. H11's ping-gap bound lives
+  only in `test-rg-move-soak`.
+- **Counting.** Count a run by the same definition before comparing numbers:
+  an exact-zero count of the #18598 gate's master arm gives 35, while the
+  harness definition gives 3 + 58 = 61.
+
 ## Target And Interpretation
 
 Validation target for the active userspace forwarding path:
