@@ -691,8 +691,9 @@ pub(super) fn rebind_policy_sessions_from_snapshot(
 /// - `(new validation, old forwarding)` — the mirror. While the shim is still
 ///   stamping the OLD generation this pair only drops
 ///   (`ConfigGenerationMismatch`, or `FibGenerationMismatch` when only the FIB
-///   generation moved). But once the coordinator's reply reaches Go and Go
-///   writes the new generation to `userspace_ctrl`, the shim stamps NEW; those
+///   generation moved). But once the new generation reaches `userspace_ctrl`
+///   (written by the coordinator right after the view store since #18560, or
+///   by Go from the reply), the shim stamps NEW; those
 ///   packets match the worker's new validation, classify `Valid`, and are
 ///   forwarded under the STALE tables — a withdrawn route still resolves, a
 ///   newly added deny is not applied. Nothing orders the Go control-map update

@@ -2,6 +2,9 @@ use super::*;
 mod bpf_maps;
 mod cos_leases;
 mod cos_state;
+mod ctrl_stamp;
+#[cfg(test)]
+pub(crate) use ctrl_stamp::{UserspaceCtrlValue, EXPECTED_CTRL_METADATA_VERSION};
 mod fib_dump;
 mod ha_state;
 mod idle_lease_sync_8121;
@@ -477,6 +480,10 @@ pub struct Coordinator {
     pub(crate) ipsec_snapshot_generation: u64,
     pub(crate) pmech_inventory: Arc<PMechInventory>,
     pub(crate) runtime_view_publication_generation: u64,
+    /// #18560: the Go grant under which the helper advances the
+    /// `userspace_ctrl` generation stamp at the view store, plus its
+    /// diagnostics (`ctrl_stamp.rs`).
+    pub(crate) ctrl_stamp: ctrl_stamp::CtrlStampState,
     /// PPTP enable-epoch publisher state: last published enabled bit and
     /// the epoch to stamp on the next publish when it flips.
     pub(crate) pptp_last_enabled: Option<bool>,
@@ -741,6 +748,7 @@ impl Coordinator {
             ipsec_snapshot_generation: 0,
             pmech_inventory: Arc::new(PMechInventory::default()),
             runtime_view_publication_generation: 0,
+            ctrl_stamp: ctrl_stamp::CtrlStampState::default(),
             pptp_last_enabled: None,
             pptp_epoch_counter: 0,
             forwarding_publish_epoch_counter: 0,
@@ -2292,10 +2300,14 @@ impl Coordinator {
     }
 
     fn store_runtime_view(&mut self, forwarding: Arc<ForwardingState>) {
-        #[cfg(test)]
         let previous = self.ha.runtime.load_full();
-        #[cfg(not(test))]
-        let _ = self.ha.runtime.load_full();
+        // #18560: the stamp the shim is copying while workers still hold the
+        // previous view; the ctrl-stamp advance below moves it only from here.
+        let leaving_validation = previous.validation();
+        let leaving = ctrl_stamp::CtrlStamp {
+            config_generation: leaving_validation.config_generation,
+            fib_generation: leaving_validation.fib_generation,
+        };
         self.runtime_view_publication_generation =
             self.runtime_view_publication_generation.saturating_add(1);
         let view = Arc::new(RuntimeView::new_with_ipsec_authority(
@@ -2328,6 +2340,12 @@ impl Coordinator {
             });
         }
         self.ha.runtime.publish(view);
+        // #18560: AFTER the store, never before. Advancing the stamp first
+        // would let the shim stamp a generation no worker can hold yet; after
+        // it, the only packets that can mismatch are those already in the
+        // rings or reaching a worker before its next refresh, and both stay
+        // fail-closed drops (#6592).
+        self.advance_ctrl_stamp_after_publish(leaving);
     }
 
     /// #6592: publish the current `self.forwarding` paired with the current

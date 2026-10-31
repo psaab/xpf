@@ -506,6 +506,13 @@ pub(crate) struct ControlRequest {
     pub version: u64,
     #[serde(rename = "suppress_status", default)]
     pub suppress_status: bool,
+    /// #18560: absolute CLOCK_MONOTONIC deadline (ns) of Go's grant to let
+    /// the helper advance the `userspace_ctrl` generation stamp itself while
+    /// handling this `apply_snapshot` / `bump_fib_generation`. 0 (absent, an
+    /// older control plane, or any other verb) grants nothing. Additive: an
+    /// older helper ignores it and Go still writes the stamp after the reply.
+    #[serde(rename = "ctrl_stamp_deadline_mono_ns", default)]
+    pub ctrl_stamp_deadline_mono_ns: u64,
     #[serde(default)]
     pub snapshot: Option<ConfigSnapshot>,
     #[serde(default)]

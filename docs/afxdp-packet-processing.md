@@ -343,6 +343,40 @@ deliberate and measured, not an oversight:
   it with `R1 bitwise operator &= on pointer prohibited`, so a BPF program
   cannot observe a packet pointer's alignment at all.
 
+### Generation stamp: who writes it (#18560)
+
+The shim copies `ctrl.config_generation` and `ctrl.fib_generation` into every
+redirected packet's metadata, and a worker drops a packet whose stamp differs
+from its published validation (`config_generation_mismatch` /
+`fib_generation_mismatch` in the binding counters). Both orientations of a
+mismatch are fail-closed drops: the #6592 `RuntimeView` publishes validation
+and tables as one unit, so a packet stamped N+1 can never be forwarded under
+N's tables.
+
+Two writers advance the stamp:
+
+* **The helper, at the view store.** `Coordinator::store_runtime_view`
+  rewrites the two stamp fields right after it publishes a view whose stamp
+  changed (`coordinator/ctrl_stamp.rs`), so the shim moves to the new
+  generation within microseconds of the workers. It does so only inside the
+  grant Go stamps on `apply_snapshot` and `bump_fib_generation`
+  (`ctrl_stamp_deadline_mono_ns`, 250 ms, CLOCK_MONOTONIC), only on an
+  enabled row with the expected metadata version, and only when the row's
+  stamp is exactly the generation the workers just left. Every other field
+  is written back as read, and a disabled row is never touched.
+* **Go, from the status reply** (`applyHelperStatusLocked`), as before. After
+  a helper advance this rewrite is a no-op. When the helper declined (grant
+  expired, row disabled or not at the leaving generation) it is the only
+  write, and the stamp lags as it did before #18560.
+
+Before the helper wrote it, the stamp lagged every generation change by the
+rest of the apply, the reply, and Go's post-reply steps: about 1 ms of line
+rate dropped per change, 3.5k-13k packets per RG-move run on the loss
+cluster. What remains is the packets already in the RX rings and those
+reaching a worker before its next view refresh. The helper reports
+`ctrl_stamp_advances_total` / `ctrl_stamp_declines_total` /
+`ctrl_stamp_errors_total` in its status.
+
 ### Per-binding UMEM and rings
 
 Each AF_XDP binding gets its own `WorkerUmem` with independent fill,

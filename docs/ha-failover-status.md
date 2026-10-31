@@ -1198,6 +1198,15 @@ route republish, and the FRR-driven republish and FIB bump after every
 ownership edge) drops in-flight packets until Go rewrites the shim's
 generation stamp. That is #18560.
 
+Since #18560 the helper advances that stamp itself, right after the view
+store, inside a 250 ms grant Go stamps on each `apply_snapshot` and
+`bump_fib_generation` round trip; Go's own write from the reply remains as
+the fallback. The window shrinks from the rest of the apply plus the round
+trip (about 1 ms of line rate per generation change) to the packets already
+queued in the RX rings. Mechanism, ownership rules and counters:
+`docs/afxdp-packet-processing.md` ("Generation stamp: who writes it").
+Loss-cluster numbers are in `docs/log/18560-ctrl-stamp.md`.
+
 The untargeted form (`request chassis cluster failover redundancy-group N`
 on the owner) still demotes locally and lets the peer promote on the next
 heartbeat. Prefer the node-targeted form, and the `data node <peer>` batch

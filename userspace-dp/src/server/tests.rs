@@ -11382,3 +11382,109 @@ fn refresh_status_projects_reinject_handler_panics_17123() {
         "reinject handler panics must reach their own status field (#17123)"
     );
 }
+
+/// #18560: the Go grant on a `bump_fib_generation` request reaches the
+/// coordinator's view store, which advances the userspace_ctrl stamp from the
+/// generation the workers left; the grant is revoked once the request is
+/// handled and the advance is counted in the status reply. RED if the handler
+/// stops passing the grant (the row keeps the old stamp) or stops revoking it.
+#[test]
+fn bump_fib_generation_grant_advances_ctrl_stamp_18560() {
+    use crate::afxdp::{UserspaceCtrlValue, EXPECTED_CTRL_METADATA_VERSION};
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let state = new_state(ProcessStatus::default());
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 1,
+            fib_generation: 1,
+            generated_at: chrono::Utc::now(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(response.ok, "seed apply_snapshot: {}", response.error);
+    }
+    let row = {
+        let mut guard = state.lock().expect("state");
+        let leaving = guard.afxdp.published_ctrl_stamp();
+        guard.afxdp.install_ctrl_stamp_test_row(UserspaceCtrlValue {
+            enabled: 1,
+            metadata_version: EXPECTED_CTRL_METADATA_VERSION,
+            config_generation: leaving.config_generation,
+            fib_generation: leaving.fib_generation,
+            ..UserspaceCtrlValue::default()
+        })
+    };
+    let mut request = req("bump_fib_generation");
+    request.snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        fib_generation: 7,
+        generated_at: chrono::Utc::now(),
+        ..ConfigSnapshot::default()
+    });
+    request.ctrl_stamp_deadline_mono_ns = crate::afxdp::monotonic_nanos() + 10_000_000_000;
+    let response = run_request(state.clone(), request);
+    assert!(response.ok, "bump: {}", response.error);
+    assert_eq!(row.get().fib_generation, 7, "the granted bump must advance the ctrl stamp");
+    assert_eq!(row.update_count(), 1);
+    let status = response.status.expect("status payload");
+    assert_eq!(status.ctrl_stamp_advances_total, 1);
+    assert_eq!(
+        state.lock().expect("state").afxdp.ctrl_stamp_grant_deadline_for_test(),
+        0,
+        "the grant must not outlive its request"
+    );
+    // An ungranted bump leaves the row to Go.
+    let mut request = req("bump_fib_generation");
+    request.snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        fib_generation: 8,
+        generated_at: chrono::Utc::now(),
+        ..ConfigSnapshot::default()
+    });
+    let response = run_request(state, request);
+    assert!(response.ok, "second bump: {}", response.error);
+    assert_eq!(row.get().fib_generation, 7, "an ungranted bump wrote the ctrl row");
+}
+
+/// #18560: the same grant on `apply_snapshot`. A same-plan apply that moves
+/// the config generation advances the ctrl row's config stamp at the view
+/// store. RED if the apply arm stops passing the grant.
+#[test]
+fn apply_snapshot_grant_advances_ctrl_stamp_18560() {
+    use crate::afxdp::{UserspaceCtrlValue, EXPECTED_CTRL_METADATA_VERSION};
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let state = new_state(ProcessStatus::default());
+    let apply = |generation: u64, grant: u64| {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation,
+            fib_generation: 1,
+            generated_at: chrono::Utc::now(),
+            ..ConfigSnapshot::default()
+        });
+        request.ctrl_stamp_deadline_mono_ns = grant;
+        run_request(state.clone(), request)
+    };
+    let response = apply(1, 0);
+    assert!(response.ok, "seed apply_snapshot: {}", response.error);
+    let row = {
+        let mut guard = state.lock().expect("state");
+        let leaving = guard.afxdp.published_ctrl_stamp();
+        guard.afxdp.install_ctrl_stamp_test_row(UserspaceCtrlValue {
+            enabled: 1,
+            metadata_version: EXPECTED_CTRL_METADATA_VERSION,
+            config_generation: leaving.config_generation,
+            fib_generation: leaving.fib_generation,
+            ..UserspaceCtrlValue::default()
+        })
+    };
+    let response = apply(2, crate::afxdp::monotonic_nanos() + 10_000_000_000);
+    assert!(response.ok, "granted apply_snapshot: {}", response.error);
+    let published = state.lock().expect("state").afxdp.published_ctrl_stamp();
+    assert_eq!(published.config_generation, 2, "premise: the apply published generation 2");
+    assert_eq!(row.get().config_generation, 2, "the granted apply must advance the ctrl stamp");
+    assert_eq!(state.lock().expect("state").afxdp.ctrl_stamp_grant_deadline_for_test(), 0);
+}

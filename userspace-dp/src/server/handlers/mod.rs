@@ -487,12 +487,19 @@ pub(crate) fn handle_stream(
                     response.error = error;
                 }
             },
-            "apply_snapshot" => snapshot::apply(
-                &mut guard,
-                request.snapshot,
-                &mut response,
-                &mut persist_state,
-            ),
+            "apply_snapshot" => {
+                // #18560: the Go grant lets the coordinator advance the
+                // userspace_ctrl stamp at its view store; it is revoked as
+                // soon as the request is handled, whatever the outcome.
+                guard.afxdp.grant_ctrl_stamp(request.ctrl_stamp_deadline_mono_ns);
+                snapshot::apply(
+                    &mut guard,
+                    request.snapshot,
+                    &mut response,
+                    &mut persist_state,
+                );
+                guard.afxdp.revoke_ctrl_stamp_grant();
+            }
             "set_forwarding_state" => forwarding::set(
                 &mut guard,
                 request.forwarding,
@@ -564,12 +571,17 @@ pub(crate) fn handle_stream(
                 neighbor_replace,
                 &mut persist_state,
             ),
-            "bump_fib_generation" => snapshot::bump_fib(
-                &mut guard,
-                request.snapshot.as_ref(),
-                &mut response,
-                &mut persist_state,
-            ),
+            "bump_fib_generation" => {
+                // #18560: same grant as apply_snapshot above.
+                guard.afxdp.grant_ctrl_stamp(request.ctrl_stamp_deadline_mono_ns);
+                snapshot::bump_fib(
+                    &mut guard,
+                    request.snapshot.as_ref(),
+                    &mut response,
+                    &mut persist_state,
+                );
+                guard.afxdp.revoke_ctrl_stamp_grant();
+            }
             "clear_policy_counters" => {
                 guard.afxdp.clear_policy_counters();
                 project_status(&mut guard);

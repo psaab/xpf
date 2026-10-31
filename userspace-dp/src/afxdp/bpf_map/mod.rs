@@ -2804,11 +2804,13 @@ mod publish_conntrack;
 // the relocated `bpf_map_tests.rs` (`use super::*`) resolve them by bare
 // name exactly as before. Mirrors the `publish_conntrack.rs` precedent
 // (#1356).
+pub(crate) mod ctrl_row;
 mod ha;
 mod metrics;
 mod pin;
 mod steering_owners;
 
+pub(in crate::afxdp) use ctrl_row::*;
 pub(in crate::afxdp) use ha::*;
 pub(in crate::afxdp) use metrics::*;
 pub(in crate::afxdp) use pin::*;
