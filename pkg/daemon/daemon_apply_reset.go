@@ -453,6 +453,14 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	}
 	defer d.applySem.Release(1)
 	d.enterResetGeneration()
+	// #18561: the HA FRR reconcile writes frr.conf after releasing applySem.
+	// It re-checks the reset flag under the FRR manager's build lock, so once
+	// this barrier returns no HA write that predates the flag can still be
+	// running, and none can start: the wipe's managed-section strip below is
+	// final.
+	if d.frr != nil {
+		d.frr.BuildBarrier()
+	}
 	// Feed refresh callbacks bypass applySem. Fence and drain their durable
 	// high-water writes before the wipe erases FeedShrinkHistoryPath; otherwise
 	// a completion from a still-running producer could recreate prior-tenant

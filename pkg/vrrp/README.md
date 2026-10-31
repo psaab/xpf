@@ -9,6 +9,13 @@ the timer values below apply only to the VRRP-backed mode
 This package drives VRRP-backed RETH and standalone VRRP; it is not the
 default RETH ownership/failover path.
 
+A VIP-set change on a running VRRP-backed instance is applied in place
+(`updateVIPs`, #10780), and the removed delta is deleted. The default direct
+mode used to have no delta at all, so a renumbered RETH address stayed on
+the owner. It now stamps and prunes its VIPs in pkg/daemon
+(`reconcileDirectVIPAddrs`, `pkg/vipstamp`, #18573). Its leftover sweep
+never deletes an address this package installs, because those carry no stamp.
+
 ## Entry points
 
 - `Manager` — `manager.go`. Owns every `Instance` goroutine, the event

@@ -2235,14 +2235,16 @@ pub(super) fn populate_egress(
             }
             // Merge: designated wins over undesignated; otherwise the
             // first available family address is kept and a row without
-            // a family cannot erase it.
+            // a family cannot erase it — EXCEPT that a non-link-local
+            // pick replaces a link-local incumbent (#18174).
             match (designated_v4, primary_v4) {
                 (Some(d), _) => {
                     existing.primary_v4 = Some(d);
                     state.egress_primary_v4_designated.insert(iface.ifindex);
                 }
                 (None, Some(p)) if !incumbent_v4_designated => {
-                    existing.primary_v4 = existing.primary_v4.or(Some(p));
+                    existing.primary_v4 =
+                        merge_undesignated_primary(existing.primary_v4, p, |ip| ip.is_link_local());
                 }
                 _ => {}
             }
@@ -2252,7 +2254,11 @@ pub(super) fn populate_egress(
                     state.egress_primary_v6_designated.insert(iface.ifindex);
                 }
                 (None, Some(p)) if !incumbent_v6_designated => {
-                    existing.primary_v6 = existing.primary_v6.or(Some(p));
+                    existing.primary_v6 = merge_undesignated_primary(
+                        existing.primary_v6,
+                        p,
+                        |ip| ip.is_unicast_link_local(),
+                    );
                 }
                 _ => {}
             }
@@ -2686,6 +2692,30 @@ fn pick_interface_generic<A: Copy>(
         }
     }
     first_non_link_local.or(fallback)
+}
+
+/// #18174: the shared-ifindex merge of two UNDESIGNATED per-row picks
+/// must keep the per-row rule `pick_interface_generic` applies — first
+/// non-link-local, else first. Plain first-row-wins broke it on a RETH:
+/// Go emits the base row (`reth1`, carrying only the per-node
+/// `169.254.<rg>.<node+1>/32` RETH address, compiler_iface.go) BEFORE
+/// the unit row (`reth1.0`, carrying 10.0.61.1/24) on the SAME ifindex,
+/// so the base row's link-local FALLBACK pick won and every
+/// locally-generated ICMP error on the LAN (traceroute hop 1 Time
+/// Exceeded, reject unreachable, PTB) was sourced from 169.254.2.1
+/// instead of the LAN address. A non-link-local pick now replaces a
+/// link-local incumbent; between two non-link-local (or two link-local)
+/// picks the first row still wins, so every other shape is unchanged.
+fn merge_undesignated_primary<A: Copy>(
+    incumbent: Option<A>,
+    candidate: A,
+    is_link_local: fn(A) -> bool,
+) -> Option<A> {
+    match incumbent {
+        Some(current) if is_link_local(current) && !is_link_local(candidate) => Some(candidate),
+        Some(current) => Some(current),
+        None => Some(candidate),
+    }
 }
 
 pub(in crate::afxdp) fn pick_interface_v4(iface: &InterfaceSnapshot) -> Option<Ipv4Addr> {

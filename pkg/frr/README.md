@@ -2037,6 +2037,26 @@ step. Both are required — neither sees the other's case:
   shutdown) cancels in-flight process groups and reaps the retry
   goroutine; `DisableDegradedRetry()` is the one-shot (`xpfd cleanup`)
   configuration.
+- Guarded apply (#18561): `ApplyFullIfCurrent(fc, current)` is
+  `ApplyFull` for a config rendered before the caller released the lock
+  that orders renders (the daemon's HA reconcile renders under applySem and
+  reloads after releasing it). `current` is evaluated before the retry
+  pre-cancel and again under `reloadMu`, immediately before the
+  managed-section write; when it reports false nothing is written or
+  reloaded and `ErrFRRApplySuperseded` is returned (a superseded `Clear`
+  keeps the narrowing gauges). `buildMu` serializes every `ApplyFull` /
+  `ApplyFullIfCurrent` / `Clear` across build AND commit: the build mutates
+  manager-wide state (quarantine set, #16625 RIP group index, narrowed
+  chains), and before #18561 only the daemon's applySem kept two builds
+  apart. `ApplyFullIfCurrent` judges its predicate under `buildMu` before
+  building, so a superseded render never touches the gauges.
+  `WriteGeneration()` (lock-free) moves only on a managed-section write that
+  happened; `UnconditionalWriteGeneration()` moves only on such a write made
+  without a predicate (`ApplyFull`, `Clear`), which is what a caller that
+  orders its own conditional renders compares, so its own older render's
+  write never drops its newer one; `BuildBarrier()` waits out any apply in flight (the daemon's
+  factory reset calls it after raising its flag). Lock order: buildMu ->
+  reloadMu -> retryMu.
 - Benign-reload re-check (#15203, A12-06): when the primary `--reload`
   fails (and frr-pythontools is present), `reloadLocked` re-checks with
   `frr-reload.py --test --stdout` before falling back. Removing IS-IS

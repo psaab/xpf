@@ -60,6 +60,9 @@ func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
 	case clusterfailover.KindDataFailover:
 		targetNode := op.Node
 		if targetNode != c.cluster.NodeID() {
+			if err := c.cluster.CrossNodeFabricClockError(targetNode); err != nil { // #18585
+				return err
+			}
 			message, err := c.requestPeerSystemAction(context.Background(), op.Action())
 			if err != nil {
 				return err
@@ -104,6 +107,9 @@ func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
 			}
 			fmt.Printf("Manual failover completed for redundancy group %d (transfer committed)\n", op.RG)
 			return nil
+		}
+		if err := c.cluster.CrossNodeFabricClockError(op.Node); err != nil { // #18585
+			return err
 		}
 		message, err := c.requestPeerSystemAction(context.Background(), op.Action())
 		if err != nil {

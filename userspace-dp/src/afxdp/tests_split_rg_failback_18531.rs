@@ -2480,3 +2480,49 @@ fn pool_alias_reverse_is_handed_to_peer_at_synthesis_18531() {
         }
     }
 }
+
+/// #18566 (seat W, alias-reverse twin). On the RG-taking node (RG1/WAN
+/// active, RG2/LAN the peer's) an alias-only reverse hands every WAN reply to
+/// the peer: its target is the SNAT address, connected on the now-ACTIVE RG1,
+/// and the slow path redirects it again however it is re-resolved
+/// (`alias_reverse_return_resolution`). The #18566 cache arm must not evict
+/// that redirect, or every reply takes the slow path. Three replies through
+/// the same bindings, v4 and v6: the first seeds the cache, the next three
+/// hit it, and the #18566 arm never fires (seats V and W). RED if the arm
+/// accepts a LocalDelivery answer (hits stay 0, the arm counts 1, 2, 3);
+/// delivery is the same either way.
+#[test]
+fn alias_reverse_reply_keeps_its_cached_redirect_18566() {
+    let window_fwd = rg_taking_node_forwarding();
+    let owner_fwd = fw1_owner_forwarding();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let activated = BTreeMap::from([
+        (0, rg(true, now_secs)),
+        (1, rg(true, now_secs)),
+        (2, rg(false, now_secs)),
+    ]);
+    let arm = crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricRedirectDestinationNowLocal;
+    for family in [Family::V4, Family::V6] {
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(7, 9);
+        let canonical = exported_forward(&window_fwd, family);
+        import_alias_only_of(&mut sessions, &window_fwd, &window_ha(now_secs), &canonical);
+        let alias = alias_of(&canonical);
+        // ONE set of bindings for every reply, so the flow cache persists
+        // (the #18531 harness builds fresh bindings per packet).
+        let mut bindings = bindings();
+        let shared = Arc::new(Mutex::new(FastMap::default()));
+        for i in 0..4u64 {
+            let (frame, mut meta) = wan_reply_frame_to(family, alias.key.src_port);
+            meta.config_generation = 7;
+            txn_run_multi_binding_at_generations(
+                &mut bindings, WAN, &mut sessions, &owner_fwd, &activated, &frame, meta, &shared, 7, 2,
+            );
+            let fabric_tx = bindings[FABRIC].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(fabric_tx, i + 1, "{family:?} reply {i} is handed to the peer over the fabric");
+        }
+        let fc = &bindings[WAN].flow.flow_cache;
+        assert_eq!(fc.evictions_for(arm), 0, "{family:?}: the #18566 arm must not evict the alias redirect");
+        assert_eq!(fc.hits, 3, "{family:?}: replies 2-4 are served from the cache");
+    }
+}

@@ -1278,6 +1278,32 @@ so a stable connection with a persistent apply failure would otherwise never
 re-enter this edge" — and answered it with a health alarm rather than
 convergence.
 
+#18610 narrows the dual-active half of that contract. The re-push heals a
+refusal only when the refusing node later DEMOTES: the new primary's push then
+applies on it. When the refusing node wins the dual-active and STAYS primary,
+the peer is secondary and never pushes again, so no re-push arrives and none is
+needed — this node's config is the one the peer converges to. Its received mark
+nevertheless stayed above its applied mark, which read as `standby config
+stale` and blocked a rolling upgrade started on it. The refusal is now its own
+outcome (`ErrConfigSyncRejectedAuthority`): it still nacks and pins, but it does
+not arm the #6387 alarm, counts `ConfigsRejectedAsAuthority` instead of
+`ConfigsApplyFailed`, and is exempt from the staleness gate while the node stays
+the authority (`docs/sync-protocol.md`, manual-failover config-staleness gate).
+
+The losing node needs the mirror image. The authority's own push to it is
+deduplicated per (connection epoch x generation) and was claimed by the push
+before the split; the #18521 overdue re-push fires only for an unacknowledged
+send and resends the SAME generation, which the loser's duplicate path re-ACKs
+without running a handler, so it neither converges a commit the loser made
+during the split nor supersedes the loser's own unacknowledged send debt
+(#9569). The loser therefore kept refusing the handovers it started. Refusing a
+push as authority now clears the push marker and re-runs the ordinary reconcile,
+which pushes under a NEW wire generation: the loser applies it (or takes the
+"already matches" path), ACKs, supersedes its debt, and reports a discarded
+unshared commit through #9530. The re-push is paced at `configAckOverdueAfter`;
+a loser still in its dual-active view refuses it and nacks, and #7328 retries
+at the reconcile cadence.
+
 The signal has to come from the receiver. The sender cannot infer the outcome:
 `QueueConfig` is fire-and-forget with no ack, the cluster heartbeat carries no
 config state (`HeartbeatPacket` is node/cluster id, per-RG group state,

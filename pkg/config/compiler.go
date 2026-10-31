@@ -899,6 +899,8 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	cfg.Warnings = append(cfg.Warnings, loginPackedWarnings...)
 	cfg.Warnings = append(cfg.Warnings, schedulerWindowWarnings11358...)
 	appendClusterNTPAdvisoryLocked(cfg, opts)
+	appendClusterNTPInstanceAdvisoryLocked(cfg, opts)
+	appendNTPRoutingInstanceAdvisoryLocked(cfg)
 	appendContestedTrunkZoneAdvisoryLocked(cfg, opts)
 	appendDPDThresholdIKEv2AdvisoryLocked(cfg, opts)
 	appendGreUnitFilterShadowAdvisoryLocked(cfg, opts)

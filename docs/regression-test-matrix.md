@@ -47,7 +47,7 @@ It complements, and does not replace:
 
 Record `/proc/loadavg` next to every throughput number: the orchestrator's and the firewall VMs' and LAN host's (`make perf-matrix` records all four). The VMs run on the cluster's incus remote, not on the orchestrator. Judge each cluster only
 against its own band below, never against another cluster's. Use each env's
-`IPERF_TARGET4/6` (loss `172.16.80.200`, tcp `172.16.80.210`, udp
+`IPERF_TARGET4/6` (loss `172.16.80.202`, tcp `172.16.80.210`, udp
 `172.16.80.211`), never `172.16.100.x`.
 
 **Baseline bands** (Gbit/s, 20 s runs). `make perf-matrix` uses port 5211,
@@ -86,8 +86,8 @@ re-run, not yet a regression; two are a regression.
 
 ## Tier 3: HA (loss and tcp; destructive targets self-lock)
 
-Resync node clocks after any crash reboot: the loss lab has no NTP
-(`failover_resync_node_clocks`, #11872).
+Clocks: the lab cluster configs carry NTP through `vrf-mgmt` since #18584 (public servers; the incus bridge gateways serve none). A deb deploy preserves node config, so a cluster picks the stanza up only when it is committed on it (see `pkg/cluster/README.md`, "Prerequisite: a cluster needs a time source"). On a cluster that has not had it committed — or runs a build older than #18584, which does not bind (unless a newer build left `/etc/chrony/conf.d/xpf-acquisition.conf` behind, as on loss after the downgrade to `g388eaad128`) — chrony has no reachable source: check `chronyc tracking` and resync node clocks after any crash reboot (`failover_resync_node_clocks`, #11872). Once both nodes show `Leap status: Normal` in `chronyc tracking`, the resync is a workaround to drop, not a step to keep.
+H11 is the exception and must never resync: it reports the skew instead, because the operator's own loop gets no clock help (`docs/ha-rg-move-correctness.md`).
 Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ran 66.8 s behind fw0 on loss); a cross-node timeline without that offset produced a wrong diagnosis once.
 
 | ID | Run | Pass | Catches |
@@ -103,6 +103,7 @@ Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ra
 | H8 | **Revocation symmetry.** After H1, compare `show security flow session` on both nodes for the iperf flows | no session row survives on one node whose twin the other node closed | a Close emitted for an alias-only owner keyed on the translated tuple, which left the LAN node's original-tuple row alive and still translating (#18531 review) |
 | H9 | **Split-window streams.** In H1's per-stream data, the window where `test-failover` holds RG1 apart from RG0/RG2 (the #11581 isolated-failback slice, 63–73 s) | no stream dies in or after the window; aggregate at or above the split-RG fabric ceiling (`docs/fabric-performance-optimizations.md`: about 2.0–3.5 Gbit/s on loss; about 6 Gbit/s on tcp in an RG1-only control), judged separately from the whole-run average | streams killed at the split-RG moves (#18531/#18535) read as "slow" because every flow crosses the copy-mode fabric for the whole window; a killed iperf3 scored as 0.0 Gbit/s plus a collapse (#18543). The fabric ceiling itself is #12655 |
 | H10 | **Hitless failover** (#18559; generation drops #18560, crash takeover #18561). In one lock cell (`with-cluster.sh`), from `$CLUSTER_LAN_HOST`: `iperf3 -c $IPERF_TARGET4 -p 5211 -P8 -t 120 -i 0.1 -J` and `ping -D -i 0.01 $IPERF_TARGET4`. **Planned:** for each RG in turn, `cli -c "request chassis cluster failover redundancy-group <N> node <taker>"` (an explicit transfer to `<taker>`; without `node` the command demotes the node it runs on, so run on the taker it moves nothing). Confirm with `show chassis cluster status` that the RG moved; a move that did not happen makes the cell VOID. Wait 10 s, then move it back the same way, and finish with `request chassis cluster failover reset redundancy-group <N>` on both nodes. **Crash:** `incus stop --force` the node that owns the data RGs, then restore it. A VM force-stop leaves the survivor's sync socket half-open, so the sync-recency guard is in play; a process kill closes it and is the easier case. Read every timing on the LAN host's clock only (no cross-node pairing) | **Per PR (HA PRs, master-relative):** run each build 3 times on the same cluster. For each number (per-move lost pings, worst stream stall, crash ping gap), the PR's median is at most master's median plus master's own spread (max − min over its 3 runs, and at least 1 ping or 100 ms), and no stream dies. Master's 3 runs are recorded once per merge wave per cluster, by the first HA PR gated there, and reused until the next wave. Single runs spread too far to compare: the same build's worst stall was 1.0 s in one planned run and 1.9 s in another, and crash declaration varies by design between the 1.0 s threshold and the 2 s sync window. **Target (#18559; tracked until met):** per single-RG move at most 3 pings lost (30 ms), and no stream has two or more consecutive 100 ms intervals under 1 Mbit/s. A stall of 300 ms or more always fails; one of 200–300 ms fails depending on how it aligns with the intervals, so a single minimum TCP retransmit timeout (about 200–230 ms) usually passes. `-i 0.1` is iperf3's finest interval, so this is the resolution the row has. Crash: the LAN host's longest ping gap is at most 1.4 s (the 1.0 s staleness threshold of the lab's 200 ms × 5 heartbeat, plus one 200 ms tick, plus 200 ms to activate), and no stream dies. That bound assumes #18561 stops the sync-recency guard (`maxPeerSyncSilence`, 2 s) from deferring declaration on a half-open socket; on master the guard alone can push it past 2 s | baseline on loss, 2026-10-30, master `2cf76b8d92` plus #18556 (build `848d475531`): three sequential single-RG moves (RG0, RG1, RG2) lost 23 pings in all (failback 26), with the largest single gap 9 pings; a batch move of all RGs lost 20–21; and the worst single-stream stall per run was 1.0, 1.3 and 1.9 s (TCP backoff after short losses). A crash of the owner left a 2.2 s ping gap (one run). Sessions are already on both nodes, so every lost packet is a transition defect: the demote/activate gap, drops on the old owner, generation-stamp drops at each helper publish, the split window between per-RG moves. Scripted versions of both procedures land with #18559 |
+| H11 | **One-node RG-move soak** (#18583): `make test-rg-move-soak` (ledger-wrapped, smoke-cells). Issues `request chassis cluster failover redundancy-group <rg> node 0|1` from ONE node, alternating, `SOAK_SLEEP` s after each CLI return, under IPv4+IPv6 `iperf3` and `ping -D -i 0.01` from `$CLUSTER_LAN_HOST`, and NEVER fixes clocks (the preflight reports node1−node0 skew). Per HA PR: `SOAK_MOVES=40 SOAK_SLEEP=5` from node0, then `SOAK_MOVES=40 SOAK_SLEEP=2 SOAK_FROM=1`, PR and master in the same window on the same cluster. Per merge wave on loss: `SOAK_MOVES=200` at `SOAK_SLEEP=5` and at `SOAK_SLEEP=2` | **Correctness (absolute):** no FAIL and no VOID move, and not a void run. A move is correct when the CLI says `transfer committed`; both nodes' own views show the target primary and the other node `secondary`/`secondary-hold` within `SOAK_CONVERGE_S` of the CLI returning and for the rest of the window (no dual-active sample, no revert); each node's `Forwarding: rg-active=` line and each helper's `ha_groups[].forwarding_active` (active and an unexpired lease) agree; the traffic followed (the target's RETH-member counters carry the packets and the LAN host's neighbour entry resolves to the target's MAC); traffic flows in the window's tail; and no stream dies. **Transition cost (master-relative, as H10):** a single-stream stall over 2000 ms that recovers within 10 s, with ping gaps ≤ 1000 ms and no all-stream outage over 1000 ms, scores COST, not FAIL (#18559); more than one stream stalling, or a wider gap or outage, is a FAIL. The ledger row carries `cells_cost` (recorded; `ledger_compare` compares only the headline, so this comparison is made by hand). Per PR, the PR's COST count and median/p95 worst-stall are at most master's plus master's own spread over the same number of runs, and no new FAIL class appears | the operator's pattern, which no other row runs: on 2026-10-31 loss had fw1 72 s behind with no NTP, and every move to node1 failed fabric auth (`window 60s/90s ahead of ours`) while every move back printed `already primary`. That was 10 FAIL and 10 VOID in 20 moves, and traffic never left node0. The NTP fix is #18584 and peer-skew visibility #18585. With both, on loss (0.0.26140): 200 moves at 5 s all landed, with 5 single-stream stalls of 2.2–6.6 s (COST under today's rule); 200 at 2 s all clean. tcp (30) and udp (40, every RG from node1 at 2 s) all landed. Split-RG moves of RG2 alone run every flow over the fabric while RG2 is away (loss tail about 2.7 against 11.5 Gbit/s), which is expected |
 
 ## Tier 4: soak and cadence
 
@@ -122,19 +123,12 @@ sub-criterion (a)–(c), and H10 by its numbers, so a PR cannot make a red
 cell worse unnoticed. After a merge wave, these are the only cells expected
 to be red, until their issue closes; any other red cell is a new failure.
 
+- **H11 transition cost: #18559.** H11's COST verdict (a recovered gap or
+  stall over its budget) is this issue's transition cost; H11 judges it
+  master-relative, and correctness (FAIL/VOID) absolutely.
 - **H10 hitless targets: #18559** (with #18560 and #18561). The row's
   baseline (master plus #18556) misses the targets, so HA PRs are gated on H10's
   master-relative numbers until #18559 closes.
-- **tcp external IPv4 (1.1.1.1, 8.8.8.8): #18558.** This was once excused
-  here as an upstream that does not forward for the tcp cluster's source. In
-  fact IPv4 internet loss starts 30–55 s after an RG move: most WAN replies
-  never arrive (rx 8 against tx 30), and those that do are denied as
-  host-inbound because they match no session (live on tcp, 2026-10-30). It is
-  intermittent: of the integ8–10 master smokes, integ9 failed the cells and
-  integ8 and integ10 passed them. Judge it over 3 smokes per build: the PR
-  blocks only if it fails these cells in at least 2 more of its 3 runs than
-  master did. A difference of 1 happens about a third of the time between two
-  identical builds at this failure rate.
 - **MTR / traceroute cells: #18174, fixed by #18556.** Every cluster MTR
   cell in `test-connectivity`: "mtr LAN→WAN gateway (via RETH link-local)",
   "mtr LAN→internet IPv4 (via RETH link-local)", "mtr LAN→internet IPv6
@@ -147,7 +141,11 @@ to be red, until their issue closes; any other red cell is a new failure.
   hop past the firewall is `???`. They are row F7.
 - **Fabric/control host pings: #18212.** Pings fw0↔fw1 on 10.99.x fail on
   loss, tcp and udp. Host ICMP to the WAN gateway (`172.16.50.1`) failed
-  on tcp (integ9, integ10) and on udp, and passed on loss (integ8–10).
+  on tcp (integ9, integ10) and on udp, and passed on loss (integ8–10). That
+  WAN-gateway leg was #18558, not #18212: tcp's and udp's WAN addresses were
+  duplicates on the lab segment, and loss's `.8` is not. Since the live
+  renumber of 2026-10-31 it is expected green on all three clusters (see the
+  environment row below). The 10.99.x fabric/control pings remain #18212.
 
 ## Known environment rows (re-verify before excusing)
 
@@ -165,10 +163,80 @@ failure.
   in #18556 at `cce3fb4944`). Re-run the off-path control before excusing it
   again; once #18556 merges this row should be deleted.
 
-- **tcp host SR-IOV VFs.** The host's dracut default network must not manage
-  the VF netdevs. `/etc/systemd/network/05-xpf-sriov-vf-unmanaged.network`
-  marks `eno1v*`/`eno2v*` unmanaged. Without it a force-stopped VM cannot
-  restart: "All virtual functions on parent device mlx1 are already in use".
+- **Duplicate WAN address on the shared VLAN 50 (#18558).** Resolved
+  2026-10-31: tcp and udp were renumbered live to `172.16.50.42` and `.43`
+  (#18575; `docs/incus-tcp-udp-plan.md` §3.3). Their old `.10`/`.11` are
+  held by non-xpf lab devices; loss's `.8` is unique. No cell is excused by
+  this row today. It is kept as a recurrence rule instead of being deleted,
+  so the excuse for a repeat comes with its control.
+  - **In scope:** the external IPv4 cells (1.1.1.1, 8.8.8.8) and the
+    firewall's own WAN-gateway ping, on tcp, udp or loss.
+  - **When the FAIL is environment:** only while `ha_wan_claim_check`
+    returns status 1 (a non-xpf claimant) for that cluster's WAN address in
+    the same run. A ping from the orchestrator cannot stand in, because it
+    does not leave from the duplicated address.
+  - **Other statuses:** status 3 (another xpf cluster's RETH MAC) is a
+    product failure. Status 2 (not measured) leaves the FAIL standing.
+  - **If the check fires:** re-probe and renumber, following the plan's
+    §3.3 procedure.
+  - **References:** the guards (`TestSharedSegmentForeignClaims18558`,
+    test-failover's claim-gated VOID, and test-connectivity's "WAN IPv4 ...
+    answered for only by this cluster" cell) and the evidence are in
+    `docs/log/18558.md`.
+- **loss's v4/v6 iperf targets are different hosts (#18576, #18586).**
+  loss's v4 `172.16.80.202` is the xpf-mouse-target container
+  (`10:66:6a:8b:91:a4`) and `2001:559:8585:80::200` is the external v6 box
+  (`f6:f0:06:10:77:d5`), so the Group12 neighbor identity cannot require one
+  MAC there. `test/incus/loss-userspace-cluster.env` sets
+  `IPERF_TARGET_V4_V6_SAME_HOST=no` with
+  `IPERF_TARGET6_SPLIT_HOLDER=f6:f0:06:10:77:d5`.
+  - **Control (same run):** the cell's own read on the RG owner. The waiver
+    holds only while v6 names the declared holder and v4 names a different
+    MAC. Either check failing is a VOID, never a PASS.
+  - **Delete when:** loss's v4 and v6 targets are one host (or the v6 box
+    is renumbered). Remove both env lines; the same-host identity check then
+    applies.
+- **tcp and udp host SR-IOV VFs.** Two host faults have each left a
+  force-stopped firewall VM unable to restart or forward. This is
+  environment only while the host check below shows the fault in the same
+  run. A firewall cell that fails with a clean host check is a product
+  failure.
+  - **VFs claimed by the host network.** The host's dracut default network
+    must not manage the VF netdevs. Without that, a force-stopped VM cannot
+    restart: "All virtual functions on parent device mlx1 are already in
+    use".
+    - **Check:** `ssh tcp` / `ssh udp` (the host aliases `docs/incus-tcp-udp-plan.md` uses), then
+      `ip -br link | grep -E '^eno[12]v' | grep -c UP` must be 0 for free
+      VFs.
+    - **Fix:** write
+      `/etc/systemd/network/05-xpf-sriov-vf-unmanaged.network` containing
+      `[Match]` `Name=eno1v* eno2v*` and `[Link]` `Unmanaged=yes`, run
+      `networkctl reload`, then `ip link set <vf> down` for each free VF
+      that is UP.
+    - **Applied:** tcp's host 2026-10-29, udp's 2026-10-31 (UTC).
+  - **A stale host port VLAN on a reassigned WAN VF.** incus records a VF's
+    state before attaching it (`volatile.wan-vf.last_state.vf.vlan`) and
+    restores it on stop. On incus 7.0.1 (the tcp and udp hosts), a
+    `wan-vf` device that sets no `vlan` leaves the VF with whatever VLAN it
+    last carried. Incus 7.6.0 and later clear it on start (upstream
+    473c98eb2cc9). On 2026-10-31 00:39 UTC udp fw0's WAN VF
+    (`mlx0 vf 0`) came back on port VLAN 80. Its tagged `reth0.50`/`.80`
+    frames died, and neighbour entries went FAILED in both families after
+    every restart.
+    - **Check:** find the VF with
+      `incus config get udp:xpf-udp-fw0 volatile.wan-vf.last_state.vf.id`
+      (WAN VFs are all on `mlx0`), then `ssh udp 'ip link show mlx0'`. That
+      VF must show no `vlan`. The target VF on `mlx0` carries access
+      `vlan 80` by design.
+    - **Repair:** run `sudo ip link set mlx0 vf <id> vlan 0` on the host,
+      plus `incus config set <remote>:<vm> volatile.wan-vf.last_state.vf.vlan=0`
+      so that the restore on stop writes 0.
+    - **Not durable:** VF allocation is not pinned, so a different VF can
+      bring the fault back. This out-of-band repair is the sanctioned
+      exception to the plan's "never set VF VLAN by hand" rule until #18582
+      makes WAN VFs clear their VLAN on start. Two durable options are
+      `vlan: "0"` on the device, which 7.0.1 accepts, or upgrading incus to
+      7.6.0 or later.
 
 ## Reading results
 
@@ -177,6 +245,93 @@ failure.
 - **VOID** means the measurement cannot be attributed (`exe_check` mismatch,
   a precondition, a harness fault). Fix the cause and rerun; a VOID is never a
   pass and never a regression.
+- **F1's "iperf target ... answered for by exactly one host" cell
+  (#18578, #18576)** checks that the v4 iperf target is held by one host.
+  It probes from the cluster's target container (`MOUSE_TARGET_REF`),
+  never from a firewall node: probing from the RG owner re-ran the
+  neighbor race on it. It sends three RFC 5227 rounds (sender 0.0.0.0, so
+  no cache learns from them) for `IPERF_TARGET4`, with the cluster's own
+  `WAN_GW80_4` as the positive control. On the firewalls it only reads
+  both nodes' neighbor entries, before and after the probe.
+  - **PASS:** the container alone holds the target, and the RG owner's
+    entry is absent or names the container.
+  - **FAIL:** any second holder (no env has an excuse set since
+    `IPERF_TARGET4_KNOWN_HOLDERS` was deleted), or an xpf RETH MAC
+    holder. On the RG owner only, it is also a FAIL when the entry is
+    FAILED, names a MAC nobody claims, or changes between the snapshots.
+  - **VOID:** the control did not answer; nobody, or only another host,
+    holds the target; the owner's entry (even STALE) names another MAC;
+    there is no single stable RG owner.
+  - **Why it exists.** Until 2026-10-31 loss targeted `172.16.80.200`.
+    The external v6 box (`f6:f0:06:10:77:d5`), which is in no incus
+    instance and has no SSH handle, also answers ARP for it. In a loss
+    `test-rg-move-soak` that day, fw1 resolved `.200` to that box: all 8
+    v4 iperf streams died while v4 ping kept answering from the wrong
+    host, and all 20 moves FAILed on environment. loss now targets
+    `172.16.80.202`. `mouse-addr.service` pins it on the container
+    (`TARGET_ALIAS_V4`, derived from the env), and it was claim-probed
+    unique before use. It is not `.201`, the separate #8259 mouse
+    address, and not `.174`, the container's DHCPv4 lease, which nothing
+    pins. Whether `.202` lies outside the lab DHCP server's pool is not
+    shown; this cell bounds that risk in every run. Harnesses that still
+    hard-code `.200` are listed in `docs/log/18576.md`.
+  - **The deprecated `.200`.** `.200` stays pinned on the container as a
+    DEPRECATED alias (`TARGET_ALIAS_V4_DEPRECATED` in the loss env), so
+    a container restart does not strand those harnesses and older
+    checkouts. `mouse-target-setup.sh` keeps it only while it is held,
+    and never claims it anew. It is still dual-held, so nothing may
+    measure it, and this cell never probes it. **Expiry** (tracked on
+    #18576): once the hard-coded follow-ups are retargeted and no open
+    branch predates #18619, delete the env line, then run
+    `ip addr del 172.16.80.200/24 dev eth0` on the container.
+  - **`mouse-target-setup.sh up`** probes each NEW v4 address from the
+    container before it writes the unit, and refuses if another MAC
+    answers or the control is silent. It runs under the cluster lock.
+  - **When a loss iperf3 run stops or slows**, start `ip monitor neigh`
+    on both nodes before the rerun (node0 on `ge-0-0-2.80`, node1 on
+    `ge-7-0-2.80`). After it, read
+    `ip -s neigh show "$IPERF_TARGET4" dev <that interface>`. A move to
+    another MAC is environment only if this cell shows a second holder
+    in the same run. Otherwise it is a product neighbor fault.
+- **F1's "Group12 read-only neighbor identity" cell (#18586)** reads the RG
+  owner's neighbor entries for the WAN iperf targets: the one node holding
+  `WAN_GW80_4` (exact address match), on the device its route to each target
+  names. It used to read the LAN host, which never holds an entry for an
+  off-subnet target, so it was VOID on every run, and with it the whole
+  `test-connectivity` run. The owner is read before and after the neighbor
+  reads; the cell is read-only (`ip route get`, `ip neigh show`).
+  - **Usable entry:** one line, on the route's device, with an `lladdr` and
+    one of the NUD states REACHABLE, STALE, DELAY, PROBE or PERMANENT.
+  - **FAIL:** either family's entry is FAILED, INCOMPLETE, NOARP or NONE,
+    or names a device other than its route's. Where the v4 and v6 targets
+    are one host (`IPERF_TARGET_V4_V6_SAME_HOST=yes`, the default; tcp,
+    udp), it is also a FAIL when the two routes or the two entries name
+    different devices, or the two entries name different MACs.
+  - **VOID:**
+    - `IPERF_TARGET_V4_V6_SAME_HOST` is neither `yes` nor `no`;
+    - no single node holds `WAN_GW80_4`, or a node's addresses cannot be
+      read;
+    - the owner changed between the reads;
+    - the owner has no route device for a target, or the route goes `via`
+      a gateway (not on-link);
+    - an entry is missing, has more than one line, or has no single NUD
+      state or no MAC;
+    - in split mode (`no`), `IPERF_TARGET6_SPLIT_HOLDER` is unset, the v6
+      entry names another MAC (the waiver is stale), or the v4 entry names
+      the v6 holder (that run's v4 iperf numbers measured the wrong host;
+      record it on #18576).
+  - **Split-mode PASS** says "identity not asserted": each family is
+    usable, v6 is the declared holder and v4 is a different host. It is
+    loss's waiver row under "Known environment rows", not an identity
+    proof.
+- **SKIP** is either a cell that did not run, or an environment row's
+  excused state. The ledger's `cells_skipped` counts both. The excused kind
+  carries its marker in the cell text (no env emits one today: "EXCUSED
+  #18576" ended when loss's v4 target moved to `.202`), and it is neither a
+  pass nor a failure. A SKIP without a marker means the cell did not run.
+- **COST** (row H11) is a correct move whose transition cost was over budget
+  (#18559). It is neither a FAIL nor a clean pass: count it and compare
+  against master, like H10's numbers.
 - A stream that survives the takeover but dies later is still a death. Check
   the per-stream last-good second. Many streams stopping in the same second
   points at an event (a delete, a reap or a role change), not at load.

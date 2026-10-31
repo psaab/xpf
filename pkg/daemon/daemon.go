@@ -925,6 +925,10 @@ type Daemon struct {
 	// configAckRepushAtMono rate-limits the #18521 overdue-ACK re-push
 	// (cluster.MonotonicNanos of the last one; 0 = never).
 	configAckRepushAtMono atomic.Int64
+	// configAuthorityRepushAtMono paces the re-push that follows refusing a
+	// peer's config as RG0 authority (#18610 review T2), at the same
+	// configAckOverdueAfter spacing as the overdue-ACK re-push.
+	configAuthorityRepushAtMono atomic.Int64
 	// #15212: configSyncPushedDigest is the digest of the text carried by
 	// configSyncPushedWireGen, so a late ACK can be matched to the exact
 	// marked content it applied. configSyncAppliedGen is the highest wire
@@ -1479,6 +1483,14 @@ type Daemon struct {
 	// publish — readers treat that as "no mgmt VRF interfaces yet".
 	mgmtVRFInterfaces atomic.Pointer[map[string]bool]
 
+	// hbControlLinkMoves is the control link's routing VRF master-move count
+	// (routing.Manager.VRFMasterMoveSeq) at the last heartbeat-restart
+	// decision (#18597). The heartbeat is restarted after a management-VRF
+	// rebind only when the count moved since then, so a commit that leaves
+	// em0 in vrf-mgmt keeps its heartbeat sockets. Read and written only by
+	// the apply path under applySem; see controlLinkMovedSinceLastCheck.
+	hbControlLinkMoves controlLinkMoveMark
+
 	// rgStates tracks the unified cluster + VRRP state for each
 	// redundancy group. Both watchClusterEvents and watchVRRPEvents
 	// funnel transitions through rgStateMachine, which determines the
@@ -1758,6 +1770,11 @@ type Daemon struct {
 	// bouncing rsyslog/chrony — but it also meant a FAILED reload was erased by
 	// the very convergence that preceded it. See daemon_service_reload_debt.go.
 	svcReloadDebt serviceReloadDebt
+	// chronyAcqStartRestarted: chrony has been restarted by this process
+	// since it first rendered a `bindacqdevice` (#18584). Read and written
+	// only by applySystemNTP, which runs under applySem. See there for why
+	// the first binding apply of every process restarts chrony.
+	chronyAcqStartRestarted bool
 	// routingDebt is the #9693 routing reconcile debt (routing_reconcile_debt_9693.go).
 	routingDebt routingReconcileDebt
 	// #11497: a day-2 real+gap nft failure leaves the newcomer without a
@@ -1814,6 +1831,21 @@ type Daemon struct {
 	// readiness bit flips so the VRRP/direct-ownership side effects that set
 	// the bit have a chance to propagate before the peer finalizes demotion.
 	localFailoverCommitDelay time.Duration
+	// frrHA coalesces RG-edge FRR reconciles (#18561); see daemon_frr_ha_coalesce.go.
+	frrHA frrHACoalescer
+	// ipmonGateHA coalesces RG-edge ip-monitoring gating reconciles behind
+	// the same debounce (#18561): the reconcile holds applySem across an FRR
+	// reload and a snapshot publish.
+	ipmonGateHA frrHACoalescer
+	// frrApplySeq orders HA FRR renders (#18561): every HA render (under
+	// applySem) and every RG ownership edge bumps it, and an HA render is
+	// applied, after applySem is released, only while it is unchanged and
+	// the FRR manager's WriteGeneration has not moved (see
+	// applyFRRConfigIfCurrent), so it can never overwrite a newer config.
+	frrApplySeq atomic.Uint64
+	// fibHashMu serializes reconcileFibMultipathHashPolicy, which the HA
+	// reconcile now reaches outside applySem (#18561).
+	fibHashMu sync.Mutex
 	// failoverActuations owns the failover fence barriers (#16124): the
 	// wait map watchClusterEvents resolves once it has finished ACTUATING
 	// a demotion (VRRP resign to priority-0 / rg_active clear), the
@@ -1838,6 +1870,29 @@ type Daemon struct {
 	// vrrpMgr.ResignRG directly; unit tests inject a barrier they control so
 	// the deferred fence verdict is drivable without real VRRP instances.
 	resignRethRGFn func(rgID int) vipReleaseBarrier
+	// directVIPDumpFailing latches the direct-VIP ownership dump failure so
+	// its warning fires once per failure streak, not per 2s reconcile tick
+	// (#18573).
+	directVIPDumpFailing atomic.Bool
+	// directVIPStampUnsupported latches, for the process lifetime, a kernel
+	// that accepted a stamped VIP but read it back with IFA_PROTO 0 (review
+	// Z1 on #18579). Set once by verifyDirectVIPStamps; adoption stops.
+	directVIPStampUnsupported atomic.Bool
+	// directVIPStampVerified latches the first stamp that read back with
+	// vipstamp.Proto, so the capability read-back costs one dump per
+	// process, not one per writing pass (review Z2 on #18579).
+	directVIPStampVerified atomic.Bool
+	// directVIPLogged latches the per-(netdev, VIP) direct-VIP reconcile
+	// diagnostics (bad address, failed add/remove/stamp, adoption) so each
+	// logs once per commit, not per 2s tick (#18573). Guarded by
+	// vipWarnedMu and cleared by resetVIPWarnings with vipWarnedIfaces.
+	directVIPLogged map[string]bool
+	// interfaceLinkRefreshWake is the debounced interface-link snapshot
+	// refresher's wake channel, published by startTransitGateLinkWatch so
+	// the direct-VIP reconcile can republish the userspace interface rows
+	// after it changes a RETH address outside a commit (#18573). nil until
+	// the refresher starts.
+	interfaceLinkRefreshWake atomic.Pointer[chan string]
 	// Test hooks for direct-mode VIP ownership reconciliation.
 	directAddVIPsFn        func(int) int
 	directRemoveVIPsFn     func(int) int

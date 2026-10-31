@@ -188,6 +188,11 @@ func (d *Daemon) runShutdownSequence(shutdownApplyCtx context.Context, wg *sync.
 		// atomic nft loads + local credential reconciles, no FRR/netlink reload),
 		// so this cannot hang on unbounded work; bound it defensively anyway so a
 		// wedged apply cannot keep shutdown blocked beyond its shared deadline.
+		// #18561: the HA FRR reconcile renders under applySem but runs its
+		// frr-reload.py AFTER releasing it, so this drain does not wait for that
+		// reload. It needs no wait: the FRR manager serializes it (buildMu,
+		// reloadMu), and frr.Stop below kills an in-flight reload's process
+		// group.
 		if d.applySem != nil {
 			if acquired, err := d.acquireApplySemForShutdownContext(shutdownApplyCtx); acquired {
 				d.applySem.Release(1)
@@ -473,7 +478,8 @@ func (d *Daemon) runShutdownSequence(shutdownApplyCtx context.Context, wg *sync.
 
 	// Stop the FRR manager (after ipmon, whose actuator is an FRR
 	// writer): cancels the degraded-retry goroutine and kills any
-	// in-flight frr-reload.py process group (#1880).
+	// in-flight frr-reload.py process group (#1880), including an HA
+	// reconcile's reload that runs outside applySem (#18561).
 	if d.frr != nil {
 		d.frr.Stop()
 	}

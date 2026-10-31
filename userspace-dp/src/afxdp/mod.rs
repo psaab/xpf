@@ -681,6 +681,10 @@ mod tests_icmp_te;
 #[cfg(test)]
 #[path = "tests_icmp_zero_hop_15707.rs"]
 mod tests_icmp_zero_hop_15707;
+// #18174: traceroute/mtr through SNAT + RETH, end to end on the poll path.
+#[cfg(test)]
+#[path = "tests_mtr_icmp_errors_18174.rs"]
+mod tests_mtr_icmp_errors_18174;
 
 #[cfg(test)]
 #[path = "tests_neighbor_learn_fresh_18533.rs"]

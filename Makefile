@@ -1174,7 +1174,7 @@ test-daemon-kernel:
 			echo "test-daemon-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the forcing prerequisites are unavailable."; \
 			exit 1; \
 		fi; \
-		echo "make test: NOT-EXAMINED — daemon-kernel (27 cells: #9637 ingress, #11409 unzoned-ingress, #9637 reinject, #12034 shared-VRF, #12229 lifeline, #12087 secure-tunnel, plus the 21 #16470 mgmt-VRF/RI-VRF/DHCP/#9506 cells)."; \
+		echo "make test: NOT-EXAMINED — daemon-kernel (30 cells: #9637 ingress, #11409 unzoned-ingress, #9637 reinject, #12034 shared-VRF, #12229 lifeline, #12087 secure-tunnel, the 21 #16470 mgmt-VRF/RI-VRF/DHCP/#9506 cells, plus the 3 #18573 direct-VIP stamp cells)."; \
 		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
 		echo "  Run where unprivileged user namespaces are available, or set XPF_REQUIRE_NETNS=1 to fail instead."; \
 		exit 0; \
@@ -1539,10 +1539,13 @@ test-v6-na-recovery-lib:
 # tagged into VLAN 80, running target-services.sh's own grid (iperf3 5200-5211,
 # echo 6200-6211, port 7).
 #
-# Idempotent, and touches NO existing instance: it creates and reconciles one
-# container. It does not need the cluster lock for that reason, and does not
-# take it — a `mouse-target-up` running beside somebody's smoke changes nothing
-# the smoke reads.
+# Idempotent: it creates and reconciles one container. That container is the
+# v4 iperf target every loss gate measures, and `up` rewrites and restarts its
+# address unit, so `up` and `destroy` take the cluster lock themselves
+# (cluster-cell.sh, like a deploy; #18576). Before it pins a NEW v4 address,
+# `up` claim-probes it and refuses if another MAC answers. `status` stays
+# lock-free. They nest inside a with-cluster.sh cell; never wrap them in a raw
+# `flock` on the lock path, which hangs (the inner acquire cannot see it).
 mouse-target-up:
 	bash ./test/incus/mouse-target-setup.sh up
 
@@ -1672,6 +1675,26 @@ test-active-active:
 		--gate test-active-active --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
 		--require-helper-attestation \
 		-- ./test/incus/test-active-active.sh
+
+# #18583 (matrix row H11): the operator's RG-move loop, scored per move. Issues
+# `request chassis cluster failover redundancy-group <rg> node 0|1` from ONE
+# node, alternating, every SOAK_SLEEP s for SOAK_MOVES moves, under iperf3 -P8
+# and ping -i 0.01 from the LAN host, and never fixes clocks (the preflight
+# reports inter-node skew instead). Knobs: SOAK_MOVES SOAK_SLEEP SOAK_RG
+# SOAK_FROM, see the script header and docs/ha-rg-move-correctness.md.
+# Self-locks the cluster. Wrapped like the other HA gates so a run writes a
+# ledger row with build attestation (smoke-cells: the soak's last line is
+# "rg-move-soak: <n> passed, <m> failed"; a void run exits 2 with a FATAL).
+.PHONY: test-rg-move-soak test-rg-move-soak-lib
+test-rg-move-soak:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate test-rg-move-soak --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
+		-- ./test/incus/rg-move-soak.sh
+
+# Hermetic verdict + orchestration cells for the soak (fake cluster, no incus).
+test-rg-move-soak-lib:
+	cd test/incus && python3 -m unittest rg_move_soak_test
 
 # Rapid failover stress test (repeated failover cycles — requires cluster + iperf3 server)
 test-stress-failover:

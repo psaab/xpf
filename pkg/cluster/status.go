@@ -97,6 +97,11 @@ func (m *Manager) FormatStatus() string {
 		} else {
 			fmt.Fprintf(&b, "Peer session-sync wire version: %d\n", pw)
 		}
+		// #18585: the measured peer wall-clock offset; absent until an
+		// admitted heartbeat carried the peer's clock.
+		if line := m.formatPeerClockLine(); line != "" {
+			fmt.Fprintln(&b, line)
+		}
 	}
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "%-6s %-8s %-14s %-8s %-8s %s\n",
@@ -367,6 +372,9 @@ func (m *Manager) FormatInformation() string {
 		}
 		fmt.Fprintf(&b, "  Peer software version: %s\n", peerVersion)
 		fmt.Fprintf(&b, "  Peer HA protocol version: %d\n", peerProtocol)
+		if line := m.formatPeerClockLine(); line != "" {
+			fmt.Fprintf(&b, "  %s\n", line)
+		}
 	}
 	fmt.Fprintf(&b, "  Sync transport: %s\n", m.SyncTransport())
 	fmt.Fprintln(&b)

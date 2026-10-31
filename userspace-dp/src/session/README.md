@@ -73,6 +73,11 @@ are covered by the last bullet):
   claims plus normalized plain-reply aliases, sharded by seeded key hash
   so packet probes take at most one shard read lock (and none at all
   when `active_claim_count` is 0).
+- `punt_seed_directory.rs` — #18562: the node-wide, READ-ONLY view of
+  this node's live #7770 `FabricPuntSeed` rows, consulted only by the
+  embedded-ICMP matcher's last-resort fallback for a FABRIC-ingress
+  forward quote. Written only by `SessionTable` itself; see "Punt-seed
+  directory (#18562)" below.
 - `pptp.rs` — RFC 2637 PPTP call associations (#7699 stage 1):
   `PptpCall`, the canonically-ordered learned `(call-id A, call-id B)`
   pair from which both directions derive the same
@@ -1600,6 +1605,72 @@ closed** — it excludes peer-synced / promoted reaps, matching
 deliberate semantics tightening, not a regression: the two counters are
 now consistently local-only, so their difference (the "Current sessions"
 gauge) is a coherent local-forwarding metric on every node.
+
+## Punt-seed directory (#18562)
+
+A #7770 punt seed is worker-local: it is never published to the shared
+maps, never HA-exported and emits no deltas. During an RG split the first
+ICMP error for a NEW punted flow comes back over the fabric and RSS lands it
+on any worker, usually not the seed's; before the WAN owner's HA import
+arrives, that worker's matcher found nothing and the error was default-denied
+`wan -> lan`. Every worker's table therefore mirrors its forward
+`FabricPuntSeed` rows into the node's ONE `PuntSeedDirectory`
+(`SharedSessionOwnerRgIndexes::punt_seeds`, wired in `worker_loop`), and the
+matcher reads it.
+
+The row is a snapshot, so its contract is lifecycle, held at the table's own
+choke points rather than at call sites:
+
+| event | site | effect |
+|---|---|---|
+| a forward `FabricPuntSeed` record enters the slab | `insert_record` | publish `(key -> decision, metadata, session_id, table token, deadline)` |
+| any removal (expire / delete / replace / take_synced_local) | `remove_entry` (the sole removal sink) | retire iff the row is still this table's incarnation |
+| an in-place rewrite of the seed's decision or metadata | `refresh_in_place`, `revalidate_forwarding_resolution_with_egress_zone`, `rebind_forward_egress_zone`, `rebind_policy_pair`, `rebind_zones_pair` (via `retire_punt_seed_row_before_rewrite`) | retire (fail closed; never re-published) |
+| the table is moved to another directory or dropped | `set_punt_seed_directory` / `Drop` | retire every row of this table |
+
+(`update_reverse_route_on_filter_hit` writes reverse entries only; a row is
+never a reverse entry.) A row stops matching at the EARLIER of the seed's idle
+deadline as installed and `PUNT_SEED_ROW_TTL_NS` (2 s) after install: it only
+bridges the gap until the WAN owner's HA import lands in the shared maps, and a
+seed kept alive by traffic outlives its row, never the reverse.
+
+Cost (#18562 review): publish runs on a worker's punted new-flow path, so the
+work under a shard lock is bounded PER CALL. The directory is 32 shards by
+seeded key hash. Expiry is a per-shard FIFO of `(deadline, key, incarnation)`.
+One call pops at most `MAINTAIN_BUDGET` (32) slots, expired or stale; a retire
+removes the row and leaves its slot to be dropped when it reaches the front.
+A queue at `QUEUE_CAP` (2x the shard cap) refuses further publishes instead of
+being compacted in one pass. A full shard refuses with no scan, and publish
+takes its shard with `try_lock`, so a worker never waits on the directory
+(`retire` and `probe` do wait, behind at most one bounded call).
+A shard reserves its table on its first publish for TWICE its 1024-row live
+cap, and never admits more live rows than half that table's item capacity
+(derived from `capacity()` at reservation). Above half, churn that leaves
+tombstones makes hashbrown RESIZE the table under the lock (review seat L r3:
+339-383 us once per shard); at or below half it can only rehash in place, and
+at ~29% load it practically never does (bench: 0 rehashes in 100k churn
+publishes; the 1024-reserve / 896-live alternative kept a recurring ~50 us
+in-place rehash and ~28.7k rows). So 32768 live rows node-wide, which with
+the 2 s bridge TTL sustains ~16k new punted flows/s before a shard refuses.
+Memory: ~1.43 MiB of address space per used shard (4096 hashbrown buckets of
+a 52 B key + 256 B `PuntSeedRow`, plus a 2048-slot queue), ~46 MiB if all 32
+are used, close to
+fully resident once a shard holds a few hundred randomly placed rows, and kept
+for the life of the helper process. A bounded residual: slots are reclaimed
+only from the queue front, so more than 2048 publishes into ONE shard within a
+TTL with nearly all retired behind a long-lived live front (~32k/s node-wide)
+fill that shard's queue and further publishes there are refused until the
+front expires (at most 2 s). A refused
+or skipped publish only means that seed's cross-worker errors keep the
+pre-#18562 verdict; both are counted and exposed in helper status
+(`punt_seed_directory_full_total`, `punt_seed_directory_contended_total`, beside
+the `punt_seed_directory_rows` gauge, which includes expired rows not yet
+reclaimed). Nothing materializes, promotes, exports, sweeps or replicates from the
+directory, and no data packet reads it. Cells:
+`punt_seed_directory_18562_tests.rs` (lifecycle per writer, fence, deadline,
+and the work-counted O(1) bounds) and
+`worker_loop_wires_its_table_to_the_node_punt_seed_directory_18562` (the real
+worker construction).
 
 ## Corruption contract (#1855)
 

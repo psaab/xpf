@@ -189,6 +189,10 @@ type abortedPeerTransferFence struct {
 
 // Manager manages cluster redundancy group states.
 type Manager struct {
+	// peerClock is the #18585 peer wall-clock offset measured from admitted
+	// heartbeats (peer_clock_skew_18585.go). Its own mutex; never under mu.
+	peerClock peerClockState
+
 	nodeID         int
 	clusterID      int
 	groups         map[int]*RedundancyGroupState
@@ -1019,6 +1023,16 @@ func (m *Manager) HeartbeatPeerAddr() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.hbPeerAddr
+}
+
+// HeartbeatLocalAddr returns the local address supplied to the last
+// successfully published heartbeat start: the address RestartHeartbeat will
+// reuse (#18597). pkg/daemon's cells read it to prove a control-link renumber
+// moved the heartbeat to the new address.
+func (m *Manager) HeartbeatLocalAddr() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.hbLocalAddr
 }
 
 // HeartbeatControlInterface returns the control-link INTERFACE the RUNNING

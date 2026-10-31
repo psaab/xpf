@@ -850,7 +850,10 @@ For each PR an agent opens:
 4. **Gate on forwarding + throughput (three clusters in parallel).**
    The rows a PR must pass, by area, are in
    `docs/regression-test-matrix.md` (tier 0 before any cluster time; HA
-   and session PRs add tier-3 H1–H10). The mechanics below still apply.
+   and session PRs add tier-3 H1–H11). H11 is the one-node RG-move soak
+   (`make test-rg-move-soak`, #18583): the operator's alternating
+   `node 0`/`node 1` loop from ONE node with no clock resync, scored per
+   move (`docs/ha-rg-move-correctness.md`). The mechanics below still apply.
    Skipped only for parent-classified `docs/test-only` PRs (Step 3
    item 3). Otherwise: dataplane/forwarding/throughput PRs MUST gate
    on `loss`; every other gated PR uses the least-busy cluster `<C>`

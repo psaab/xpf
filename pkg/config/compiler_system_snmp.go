@@ -1056,12 +1056,11 @@ func systemInertKnobWarnings(sysNode *Node, system *SystemConfig) []string {
 		for _, id := range system.NTPServerKeyIDs {
 			add(fmt.Sprintf("system ntp server key %d: NTP authentication accepted but NOT enforced (key %d stripped; no chrony keyfile is written, so the source is polled without authentication)", id, id))
 		}
-		for _, option := range system.NTPServerOptions {
-			if option.RoutingInstance != "" {
-				add("system ntp server routing-instance: accepted but NOT enforced (NTP sources assigned to a routing-instance are queried through the default instance)")
-				break
-			}
-		}
+		// `system ntp server ... routing-instance` is honoured since #18584
+		// (chrony `bindacqdevice`) when every server names one VRF-backed
+		// instance. The residual "NOT enforced" advisory needs the compiled
+		// routing instances, which this per-system pass runs before, so it
+		// lives in appendNTPRoutingInstanceAdvisoryLocked.
 		for _, option := range system.NTPServerOptions {
 			if option.SourceAddress != "" {
 				add("system ntp server source-address: accepted but NOT bound (chrony sources are not bound to a per-source source address) (#15709)")

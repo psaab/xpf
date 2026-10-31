@@ -17,6 +17,7 @@ each harness.
 | Private RG | `./test/incus/test-private-rg.sh` | varies; three raw deploys for `full` | Private RG election changes |
 | Restart | `make test-restart-connectivity` | ~30s | Shutdown/startup changes |
 | Throughput and stall matrix | `make perf-matrix` (`make perf-matrix-lib` hermetic) | ~10 min | Dataplane/forwarding changes; every merge wave (regression matrix F2/F6) |
+| One-node RG-move soak | `make test-rg-move-soak` (`make test-rg-move-soak-lib` hermetic) | ~4 min per 40 moves at 5 s | HA/failover/clock changes; every merge wave at 200 moves (regression matrix H11) |
 
 ## Test Categories
 
@@ -219,6 +220,17 @@ HA mode does not do hitless restart.
 Between cycles it restores fw0 as the owner of every RG with the same
 verdict and the same `RESTORE_FW0_WAIT` / `RESTORE_FW0_BUDGET` knobs as the
 hard crash test (see "Restoring fw0 between phases" above).
+
+### 6a. One-node RG-move soak (`make test-rg-move-soak`)
+
+The operator's own loop: from ONE node, `request chassis cluster failover
+redundancy-group <rg> node 0|1`, alternating, `SOAK_SLEEP` seconds after each
+CLI return, under IPv4/IPv6 iperf3 and ping from the LAN host. It never fixes
+clocks. Each move is scored PASS / COST / FAIL / VOID against both nodes'
+views, `rg-active`, the helpers, whether the traffic itself followed (RETH
+counters and the LAN neighbour entry) and the move window's loss and stalls.
+Knobs, verdicts and how to read each failure: `docs/ha-rg-move-correctness.md`;
+pass rule: regression matrix row H11.
 
 ### 7. Active/Active Split Test (`make test-active-active`)
 

@@ -962,6 +962,277 @@ ha_external_ping_verdict() {
 	printf 'external ping: valid capture contains no bytes from %s\n' "${output%%$'\n'*}" >&2
 	return 1
 }
+
+# ha_wan_claim_verdict <conf-own-mac-prefix> <address> <gateway> <probe-output>
+#
+# #18558: is the cluster's WAN IPv4 address claimed on its segment by a host
+# OUTSIDE xpf? A duplicate address makes every external IPv4 cell
+# unattributable: the upstream gateway's ARP entry for the address flips
+# between the RG owner and the other host, so replies go to whichever of the
+# two ARPed the gateway last. tcp's 172.16.50.10 was held by a lab device
+# (18:e8:29:2c:13:7a) for exactly this reason.
+#
+# <probe-output> is what ha_wan_claim_check assembled:
+#   iface <name> <mac>             the probing interface (ha_wan_claim_probe)
+#   reply <ip> <mac> probe|other   one per ARP reply; "probe" = addressed to
+#                                  our MAC with target IP 0.0.0.0, i.e. an
+#                                  answer to OUR RFC 5227 probe (measured: the
+#                                  lab gateway and the lab device both answer
+#                                  that way)
+#   own <mac>                      a MAC of either node of this cluster
+#                                  (current and permanent addresses)
+# Other lines are ignored.
+#
+# Own-cluster identity: <conf-own-mac-prefix> is 02:bf:72:<cluster-id>: from
+# CLUSTER_CONF (may be empty). The probing interface's own MAC, when it is a
+# RETH virtual MAC (02:bf:72:<cid>:<rg>:<n>, pkg/config/reth_virtual_mac_8340.go),
+# gives the LIVE cluster id. A conf/live mismatch is VOID: the docs conf has
+# drifted from the running cluster and "own" cannot be decided.
+#
+# Claimant classes for <address>: this cluster's RETH prefix or an "own" MAC
+# = own; any other 02:bf:72: MAC = ANOTHER xpf cluster's RETH; anything else
+# = foreign (non-xpf).
+#
+# Status 0: the gateway answered our probe (the probe can hear) and every
+#           claimant is own.
+# Status 1: a non-xpf MAC claims <address>: a duplicate address the product
+#           did not cause. stderr names the MAC(s).
+# Status 3: another xpf cluster's RETH MAC claims <address>. That is an xpf
+#           defect (for example a stale VIP, #18573), never an excuse;
+#           stderr names the other cluster id(s). Wins over status 1.
+# Status 2: VOID: no claimant outside own AND no gateway answer to our probe,
+#           or own-cluster identity could not be decided.
+ha_wan_claim_verdict() {
+	if [[ $# -ne 4 ]]; then
+		printf 'wan claim: expected <conf-own-mac-prefix> <address> <gateway> <probe-output>\n' >&2
+		return 2
+	fi
+	local conf_own="${1,,}" addr="$2" gw="$3" output="$4"
+	local line kind ip mac flag rest own="" live="" iface_mac="" foreign="" xpf_other="" xpf_ids="" gw_seen=0
+	local -A own_macs=()
+	if [[ -n "$conf_own" && ! "$conf_own" =~ ^02:bf:72:[0-9a-f]{2}:$ ]]; then
+		printf 'wan claim: conf own MAC prefix %q is not 02:bf:72:<cluster-id>:\n' "$1" >&2
+		return 2
+	fi
+	if [[ -z "$addr" || -z "$gw" || "$addr" == "$gw" ]]; then
+		printf 'wan claim: need distinct address and gateway (got %q and %q)\n' "$addr" "$gw" >&2
+		return 2
+	fi
+	while IFS= read -r line; do
+		read -r kind ip mac rest <<<"$line"
+		case "$kind" in
+		iface)
+			mac="${mac,,}"
+			[[ "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] && iface_mac="$mac"
+			[[ "$mac" =~ ^(02:bf:72:[0-9a-f]{2}:) ]] && live="${BASH_REMATCH[1]}"
+			;;
+		own)
+			ip="${ip,,}"
+			[[ "$ip" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] && own_macs[$ip]=1
+			;;
+		esac
+	done <<<"$output"
+	if [[ -n "$conf_own" && -n "$live" && "$conf_own" != "$live" ]]; then
+		printf 'wan claim: CLUSTER_CONF says cluster prefix %s but the live RETH MAC says %s; own identity undecided\n' \
+			"$conf_own" "$live" >&2
+		return 2
+	fi
+	own="${live:-$conf_own}"
+	if [[ -z "$own" ]]; then
+		printf 'wan claim: no cluster identity (no cluster-id in the conf and the probing interface has no RETH MAC)\n' >&2
+		return 2
+	fi
+	while IFS= read -r line; do
+		read -r kind ip mac flag rest <<<"$line"
+		[[ "$kind" == reply ]] || continue
+		mac="${mac,,}"
+		[[ "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || continue
+		# #18580: no host answers with OUR MAC. A reply naming the probing
+		# interface's own MAC means the probe read the target-MAC field
+		# instead of the sender's, and every reading is worthless (it would
+		# turn every claimant into "own").
+		# This is sound only because ha_wan_claim_probe binds its socket to
+		# ETH_P_ARP. Outgoing frames reach only ETH_P_ALL packet sockets, so
+		# this socket never sees our own kernel's ARP replies for the address,
+		# which do carry our MAC as sender. Measured in a netns: an ETH_P_ARP
+		# socket saw 0 of 3 own-kernel replies, an ETH_P_ALL one saw all 3
+		# (docs/log/18580.md). Rebinding to ETH_P_ALL would make this guard
+		# VOID every run in which anyone ARPs for us.
+		# The guard needs the probe's iface line, which the real probe prints
+		# before it sends anything: a reply without one is not its output.
+		if [[ -z "$iface_mac" ]]; then
+			printf 'wan claim: a reply for %s arrived without the probe interface line (not the probe output)\n' \
+				"$ip" >&2
+			return 2
+		fi
+		if [[ "$mac" == "$iface_mac" ]]; then
+			printf 'wan claim: a reply for %s names the probing interface MAC %s: the probe read the wrong field\n' \
+				"$ip" "$mac" >&2
+			return 2
+		fi
+		if [[ "$ip" == "$gw" ]]; then
+			[[ "$flag" == probe ]] && gw_seen=1
+			continue
+		fi
+		[[ "$ip" == "$addr" ]] || continue
+		if [[ "$mac" == "$own"* || -n "${own_macs[$mac]:-}" ]]; then
+			continue
+		fi
+		if [[ "$mac" == 02:bf:72:* ]]; then
+			[[ " $xpf_other " == *" $mac "* ]] || xpf_other="${xpf_other:+$xpf_other }$mac"
+			local cid=$((16#${mac:9:2}))
+			[[ " $xpf_ids " == *" $cid "* ]] || xpf_ids="${xpf_ids:+$xpf_ids }$cid"
+			continue
+		fi
+		[[ " $foreign " == *" $mac "* ]] || foreign="${foreign:+$foreign }$mac"
+	done <<<"$output"
+	if [[ -n "$xpf_other" ]]; then
+		printf 'wan claim: %s is also answered for by another xpf cluster (cluster-id %s, %s): an xpf defect, not the lab%s\n' \
+			"$addr" "$xpf_ids" "$xpf_other" "${foreign:+; also by non-xpf $foreign}" >&2
+		return 3
+	fi
+	if [[ -n "$foreign" ]]; then
+		printf 'wan claim: %s is also answered for by %s, a duplicate IPv4 address on the segment\n' \
+			"$addr" "$foreign" >&2
+		return 1
+	fi
+	if (( gw_seen )); then return 0; fi
+	printf 'wan claim: gateway %s did not answer the same probe, so no foreign reply for %s is not evidence\n' \
+		"$gw" "$addr" >&2
+	return 2
+}
+
+# ha_wan_own_mac_prefix <cluster-conf>
+# #18558: print this cluster's RETH virtual-MAC prefix, 02:bf:72:<cluster-id>:,
+# from the conf's `cluster-id N;`. Status 2 if the conf is unreadable or has
+# no usable cluster-id. ha_wan_claim_verdict cross-checks it against the live
+# RETH MAC, so a drifted conf cannot misclassify.
+ha_wan_own_mac_prefix() {
+	local conf="${1:-}" id
+	[[ -n "$conf" && -r "$conf" ]] || return 2
+	id="$(awk '$1 == "cluster-id" { v=$2; sub(/;.*/, "", v); print v; exit }' "$conf")"
+	[[ "$id" =~ ^[0-9]+$ ]] && (( id <= 255 )) || return 2
+	printf '02:bf:72:%02x:\n' "$id"
+}
+
+# ha_wan_claim_probe <address> <gateway> <node>...
+# #18558: on the first <node> that holds <address>, send three RFC 5227 ARP
+# probes (sender 0.0.0.0, so no cache on the segment learns from them) for
+# <address> and for <gateway> from the interface carrying <address>. Prints
+# "iface <name> <mac>", then "reply <ip> <mac> probe|other" per ARP reply for
+# either address ("probe": addressed to us with target IP 0.0.0.0). Status 2
+# if no listed node holds <address>.
+ha_wan_claim_probe() {
+	local addr="$1" gw="$2" node
+	shift 2
+	for node in "$@"; do
+		if incus exec "$node" -- python3 - "$addr" "$gw" <<'PY'
+import select, socket, struct, subprocess, sys, time
+addr, gw = sys.argv[1], sys.argv[2]
+ifname = None
+for line in subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True).stdout.splitlines():
+    f = line.split()
+    if len(f) >= 4 and f[2] == "inet" and f[3].split("/")[0] == addr:
+        ifname = f[1].split("@")[0]
+        break
+if ifname is None:
+    raise SystemExit(3)
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806))
+s.bind((ifname, 0x0806))
+mac = bytes.fromhex(open(f"/sys/class/net/{ifname}/address").read().strip().replace(":", ""))
+print("iface", ifname, mac.hex(":"))
+targets = [socket.inet_aton(addr), socket.inet_aton(gw)]
+for _ in range(3):
+    for tip in targets:
+        arp = struct.pack("!HHBBH6s4s6s4s", 1, 0x0800, 6, 4, 1, mac, bytes(4), bytes(6), tip)
+        s.send(b"\xff" * 6 + mac + b"\x08\x06" + arp + bytes(18))
+    end = time.time() + 1.0
+    while (left := end - time.time()) > 0:
+        if not select.select([s], [], [], left)[0]:
+            break
+        f = s.recv(2048)
+        if len(f) >= 42 and f[12:14] == b"\x08\x06" and f[20:22] == b"\x00\x02" and f[28:32] in targets:
+            flag = "probe" if f[32:38] == mac and f[38:42] == bytes(4) else "other"
+            print("reply", socket.inet_ntoa(f[28:32]), f[22:28].hex(":"), flag, flush=True)
+PY
+		then
+			return 0
+		fi
+	done
+	return 2
+}
+
+# ha_wan_node_macs <node>
+# #18558: print "own <mac>" for every current and permanent link-layer
+# address on <node>, so a reply from one of this cluster's physical (non-RETH)
+# MACs is classified as own, not foreign.
+ha_wan_node_macs() {
+	incus exec "$1" -- sh -c \
+		'cat /sys/class/net/*/address 2>/dev/null; ip -o link 2>/dev/null | grep -o "permaddr [0-9a-f:]*" | cut -d" " -f2' \
+		2>/dev/null | awk 'NF == 1 && $1 != "00:00:00:00:00:00" { print "own", $1 }'
+}
+
+# ha_wan_claim_check <cluster-conf> <address> <gateway> <node>...
+# #18558: probe, collect both nodes' own MACs, judge. Sets
+# HA_WAN_CLAIM_STATUS (the ha_wan_claim_verdict status: 0 unique, 1 non-xpf
+# claimant, 3 another xpf cluster, 2 not measured) and HA_WAN_CLAIM_REASON.
+# Always returns 0 so a `set -e` caller reads the variables instead of exiting.
+ha_wan_claim_check() {
+	local conf="$1" addr="$2" gw="$3" own="" output node
+	shift 3
+	HA_WAN_CLAIM_STATUS=2
+	HA_WAN_CLAIM_REASON="wan claim: not measured"
+	own=$(ha_wan_own_mac_prefix "$conf") || own=""
+	if ! output=$(ha_wan_claim_probe "$addr" "$gw" "$@" 2>&1); then
+		HA_WAN_CLAIM_REASON="wan claim: no node of $* holds ${addr}, or the probe could not run"
+		return 0
+	fi
+	for node in "$@"; do
+		output+=$'\n'"$(ha_wan_node_macs "$node")"
+	done
+	if HA_WAN_CLAIM_REASON=$(ha_wan_claim_verdict "$own" "$addr" "$gw" "$output" 2>&1); then
+		HA_WAN_CLAIM_STATUS=0
+	else
+		HA_WAN_CLAIM_STATUS=$?
+	fi
+	return 0
+}
+
+# ha_external_ping_claim_verdict <ping-status> <ping-output> <claim-status> <claim-reason>
+#
+# #18558: ha_external_ping_verdict, except that an IPv4 FAIL becomes VOID when
+# the claim check that test-failover runs right after that sweep's pings (a
+# few seconds later, not the same instant) found a non-xpf claimant (status 1)
+# for the WAN address. Only a FAIL is converted, and only by status 1:
+# - a PASS stays a PASS (the product did forward);
+# - status 3 (another xpf cluster claims the address) is an xpf defect, so the
+#   FAIL stands with the claim appended to its reason;
+# - with no claim, or a claim probe that was blind or did not run, the plain
+#   verdict stands.
+# So the check can never remove a FAIL it cannot explain.
+ha_external_ping_claim_verdict() {
+	if [[ $# -ne 4 ]]; then
+		printf 'external ping: expected <ping-status> <ping-output> <claim-status> <claim-reason>\n' >&2
+		return 2
+	fi
+	local ping_status="$1" output="$2" claim_status="$3" claim_reason="$4" status reason
+	if reason=$(ha_external_ping_verdict "$ping_status" "$output" 2>&1); then
+		return 0
+	else
+		status=$?
+	fi
+	if (( status == 1 )) && [[ "$claim_status" == 1 ]]; then
+		printf '%s; not attributable to the firewall: %s\n' "$reason" "${claim_reason:-foreign ARP claimant}" >&2
+		return 2
+	fi
+	if (( status == 1 )) && [[ "$claim_status" == 3 ]]; then
+		printf '%s; and %s\n' "$reason" "${claim_reason:-another xpf cluster claims the WAN address}" >&2
+		return 1
+	fi
+	printf '%s\n' "$reason" >&2
+	return "$status"
+}
+
 ha_target_reachability_verdict() {
 	if [[ $# -ne 4 ]]; then
 		printf 'target reachability: expected <ping-status> <ping-output> <tcp-status> <tcp-output>\n' >&2
@@ -1301,4 +1572,305 @@ PY
 		return 0
 	fi
 	return 2
+}
+
+# ha_target_claim_probe <vantage> <target> <control>
+#
+# #18576: which hosts answer ARP for a measurement TARGET (an iperf3 server)?
+# The probe runs on an OFF-FIREWALL <vantage> on the target's VLAN (the
+# cluster's MOUSE_TARGET_REF container, which normally holds <target>), never
+# on a firewall node. A second holder's reply (sender = the target) is then
+# delivered to the vantage, which holds that address itself, so no
+# neighbor entry that carries iperf traffic can move. (Probing from the
+# firewall did move it: seat X reproduced a flip in 6/6 netns runs.)
+# <control> is the cluster's own address on that VLAN (WAN_GW80_4): its
+# reply proves the probe can hear. Three RFC 5227 rounds (sender 0.0.0.0, so
+# no cache learns from them) for <target> and <control>.
+# Prints "iface <name> <mac>"; "self <mac>" when the vantage holds <target>
+# (a kernel never answers its own probe); then "reply <ip> <mac> probe|other"
+# per ARP reply ("probe" = addressed to us with target IP 0.0.0.0).
+# Status 3 if <target> is not on-link from the vantage (and not held by it);
+# any other non-zero status means the probe could not run.
+# [ifname] (optional, #18576): probe from that interface instead of the one
+# holding <target> or routing to it. mouse-target-setup.sh `up` uses it to
+# probe an address BEFORE it is assigned, when no on-link route may exist
+# yet; an RFC 5227 probe needs no address on the interface.
+ha_target_claim_probe() {
+	local vantage="$1" target="$2" control="$3" ifname="${4:-}"
+	incus exec "$vantage" -- python3 - "$target" "$control" "$ifname" <<'PY'
+import select, socket, struct, subprocess, sys, time
+target, control = sys.argv[1], sys.argv[2]
+forced = sys.argv[3] if len(sys.argv) > 3 else ""
+# The vantage may hold <target> (loss's container holds its target): probe
+# from that interface. Otherwise use the on-link route; a local lookup says
+# "dev lo" and a "via" route is not on-link.
+ifname, held = None, False
+for line in subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True).stdout.splitlines():
+    f = line.split()
+    if len(f) >= 4 and f[2] == "inet" and f[3].split("/")[0] == target and f[1] != "lo":
+        if forced and f[1].split("@")[0] != forced:
+            continue
+        ifname, held = f[1].split("@")[0], True
+        break
+if ifname is None and forced:
+    ifname = forced
+if ifname is None:
+    route = subprocess.run(["ip", "-o", "-4", "route", "get", target], capture_output=True, text=True).stdout.split()
+    if "dev" not in route or "via" in route or route[0] == "local":
+        raise SystemExit(3)
+    ifname = route[route.index("dev") + 1]
+mac = bytes.fromhex(open(f"/sys/class/net/{ifname}/address").read().strip().replace(":", ""))
+print("iface", ifname, mac.hex(":"))
+if held:
+    print("self", mac.hex(":"))
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806))
+s.bind((ifname, 0x0806))
+tips = [socket.inet_aton(target), socket.inet_aton(control)]
+for _ in range(3):
+    for tip in tips:
+        arp = struct.pack("!HHBBH6s4s6s4s", 1, 0x0800, 6, 4, 1, mac, bytes(4), bytes(6), tip)
+        s.send(b"\xff" * 6 + mac + b"\x08\x06" + arp + bytes(18))
+    end = time.time() + 1.0
+    while (left := end - time.time()) > 0:
+        if not select.select([s], [], [], left)[0]:
+            break
+        f = s.recv(2048)
+        if len(f) >= 42 and f[12:14] == b"\x08\x06" and f[20:22] == b"\x00\x02" and f[28:32] in tips:
+            flag = "probe" if f[32:38] == mac and f[38:42] == bytes(4) else "other"
+            print("reply", socket.inet_ntoa(f[28:32]), f[22:28].hex(":"), flag, flush=True)
+PY
+}
+
+# ha_target_fw_neigh <phase> <target> <control> <node>...
+# #18576: READ-ONLY snapshot of each firewall node's neighbor entry for
+# <target>. Prints "fw <node> <phase> <lladdr|-> <state|NONE> owner|peer"
+# per node; "owner" = the node holding <control> (WAN_GW80_4), i.e. the RG
+# owner whose entry carries the iperf traffic.
+ha_target_fw_neigh() {
+	local phase="$1" target="$2" control="$3" node line lladdr state role
+	shift 3
+	for node in "$@"; do
+		line=$(incus exec "$node" -- ip neigh show "$target" 2>/dev/null | head -1) || line=""
+		lladdr=$(awk '{for (i = 1; i < NF; i++) if ($i == "lladdr") print $(i + 1)}' <<<"$line")
+		state=$(awk '{print $NF}' <<<"$line")
+		role=peer
+		if incus exec "$node" -- ip -o -4 addr show 2>/dev/null |
+			awk -v c="$control" '{split($4, a, "/"); if (a[1] == c) f = 1} END {exit !f}'; then
+			role=owner
+		fi
+		printf 'fw %s %s %s %s %s\n' "$node" "$phase" "${lladdr:--}" "${state:-NONE}" "$role"
+	done
+}
+
+# ha_target_claim_verdict <target> <control> <known-holders> <probe-output>
+#
+# #18576: a measurement target must be ONE host, the intended one. loss's
+# old iperf3 target 172.16.80.200 is answered by both xpf-mouse-target
+# (10:66:6a:8b:91:a4) and the external v6 target box (f6:f0:06:10:77:d5).
+# Linux overrides a neighbor entry with any ARP from the address once the 1 s
+# locktime has passed, and a broadcast re-resolution keeps the first reply,
+# so the firewall's choice of server, and every v4 measurement with it, could
+# move (it did: a 2026-10-31 rg-move soak lost every v4 stream to the
+# external box). loss now targets .202, held by the container alone, and no
+# env configures <known-holders>; the excuse path below is kept for a future
+# documented duplicate, which must carry its own expiry.
+#
+# Holders = "self" (the vantage container, the intended holder in every env)
+# plus every "reply" MAC for <target>. Of the "fw" lines (before/after the
+# probe) only the OWNER's (the node holding <control>) carries the iperf
+# traffic; a peer's entry is not judged. Rules, in order:
+# - a reply naming the prober's own interface MAC: VOID (2), wrong field;
+# - an xpf RETH holder (02:bf:72:*): 3, a product defect (mirrors #18575);
+# - the owner's entry: FAILED/INCOMPLETE, or REACHABLE/DELAY/PROBE/PERMANENT
+#   on a MAC no holder claims, or lladdr changed between two present
+#   snapshots: FAIL (1), a product neighbor fault. A STALE entry on an old
+#   MAC (e.g. after a container recreate) or an entry that merely appears
+#   mid-window is not a FAIL, because the kernel re-validates it on use, but
+#   an owner entry naming another MAC still makes a lone-holder PASS
+#   uncertifiable (see below);
+# - two or more holders equal to <known-holders> (may say "self"):
+#     owner resolves <target> to the self MAC before AND after: 4, the known
+#       environment duplicate, excused (the cell SKIPs, #18576);
+#     owner resolves it to another holder: VOID (2), this run's v4 iperf
+#       numbers measured the wrong host;
+#     owner has no entry, or no self line: VOID (2), not certifiable;
+# - two or more holders, any other set: FAIL (1), naming every holder;
+# - otherwise the <control> must have answered OUR probe, else VOID (2);
+# - no holder: VOID (2); exactly one holder that is not "self" (the intended
+#   container lost the address): VOID (2), the v4 target is misplaced;
+# - exactly self but the owner's entry names another MAC (even STALE): VOID
+#   (2), not certifiable;
+# - exactly self: PASS (0). If <known-holders> is still configured the reason
+#   says "configured but not observed: delete IPERF_TARGET4_KNOWN_HOLDERS".
+# Whenever "fw" lines are given, the RG owner must be exactly one node, the
+# same in both snapshots; otherwise VOID (2).
+ha_target_claim_verdict() {
+	if [[ $# -ne 4 ]]; then
+		printf 'target claim: expected <target> <control> <known-holders> <probe-output>\n' >&2
+		return 2
+	fi
+	python3 - "$@" <<'PY'
+import re
+import sys
+
+target, control, known_raw, output = sys.argv[1:5]
+mac_re = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
+def out(msg, code):
+    print(f"target claim: {msg}", file=sys.stderr if code else sys.stdout)
+    raise SystemExit(code)
+if not target or not control or target == control:
+    out(f"need distinct target and control (got {target!r} and {control!r})", 2)
+iface_mac, holders, self_mac, control_seen, fw = None, [], None, False, {}
+for line in output.splitlines():
+    f = line.split()
+    if len(f) >= 3 and f[0] == "iface" and mac_re.match(f[2].lower()):
+        iface_mac = f[2].lower()
+    elif len(f) >= 2 and f[0] == "self" and mac_re.match(f[1].lower()):
+        self_mac = f[1].lower()
+        holders.append(self_mac)
+    elif len(f) >= 3 and f[0] == "reply" and mac_re.match(f[2].lower()):
+        if iface_mac and f[2].lower() == iface_mac:
+            out(f"a reply for {f[1]} names the prober's own MAC {iface_mac}: the probe read the wrong field", 2)
+        if f[1] == target:
+            holders.append(f[2].lower())
+        elif f[1] == control and len(f) >= 4 and f[3] == "probe":
+            control_seen = True
+    elif len(f) >= 6 and f[0] == "fw" and f[2] in ("before", "after"):
+        fw.setdefault(f[1], {})[f[2]] = (f[3].lower(), f[4].upper(), f[5])
+holders = sorted(set(holders))
+known = set()
+for m in known_raw.split():
+    m = m.lower()
+    if m == "self":
+        known.add(self_mac or "self(absent)")
+    elif mac_re.match(m):
+        known.add(m)
+xpf = [m for m in holders if m.startswith("02:bf:72:")]
+if xpf:
+    out(f"{target} is answered for by an xpf RETH MAC ({' '.join(xpf)}): the product claims a measurement target", 3)
+# The RG owner must be ONE node, the same in both snapshots. Two owners (a
+# dual-active pair) or ownership moving mid-probe leaves no single entry
+# that carries the iperf traffic, so nothing about it is certifiable.
+owner, own = None, {}
+if fw:
+    before_owners = sorted(n for n in fw if fw[n].get("before", ("", "", ""))[2] == "owner")
+    after_owners = sorted(n for n in fw if fw[n].get("after", ("", "", ""))[2] == "owner")
+    if len(before_owners) != 1 or before_owners != after_owners:
+        out(f"the RG owner of {control} is not one stable node (before {before_owners or 'none'}, "
+            f"after {after_owners or 'none'}): {target}'s resolution is not certifiable", 2)
+    owner = before_owners[0]
+    own = {ph: v[:2] for ph, v in fw[owner].items()}
+if owner:
+    for phase in ("before", "after"):
+        if phase not in own:
+            continue
+        lladdr, state = own[phase]
+        if state in ("FAILED", "INCOMPLETE"):
+            out(f"RG owner {owner}'s neighbor entry for {target} is {state} ({phase}) while {' '.join(holders) or 'nobody'} answer: product neighbor fault", 1)
+        if lladdr != "-" and lladdr not in holders and state in ("REACHABLE", "DELAY", "PROBE", "PERMANENT"):
+            out(f"RG owner {owner} resolves {target} to {lladdr} ({state}, {phase}), which no host claims: product neighbor fault", 1)
+    b = own.get("before", ("-", "NONE"))[0]
+    a = own.get("after", ("-", "NONE"))[0]
+    if b != "-" and a != "-" and b != a:
+        out(f"RG owner {owner}'s neighbor for {target} changed from {b} to {a} during the probe", 1)
+owner_mac = own.get("after", own.get("before", ("-", "NONE")))[0] if owner else "-"
+fwview = f"RG owner {owner} -> {owner_mac}" if owner else "no RG owner identified"
+if len(holders) >= 2:
+    if known and set(holders) == known:
+        if not self_mac:
+            out(f"{target} is answered for by the known set but the vantage does not hold it ({fwview}): not certifiable", 2)
+        b = own.get("before", ("-", "NONE"))[0]
+        a = own.get("after", ("-", "NONE"))[0]
+        if owner and b == self_mac and a == self_mac:
+            out(f"EXCUSED #18576: {target} is answered for by the known dual holder set ({' '.join(holders)}) "
+                f"and {fwview} (the intended holder) before and after; expires when one holder drops it", 4)
+        if owner_mac in holders and owner_mac != self_mac:
+            out(f"{target} is answered for by the known dual holder set and {fwview}, the OTHER holder: "
+                f"this run's v4 iperf numbers measured the wrong host; invalid, rerun", 2)
+        out(f"{target} is answered for by the known dual holder set but {fwview}: the RG owner's choice of "
+            f"server is not established, so this run's v4 target is not certifiable", 2)
+    out(f"{target} is answered for by more than one host ({' '.join(holders)}) ({fwview})", 1)
+if not control_seen:
+    out(f"control {control} did not answer the same probe, so {target}'s holder count is not evidence", 2)
+if not holders:
+    out(f"nobody answered ARP for {target} although control {control} did", 2)
+if not self_mac:
+    out(f"{target} is answered for only by {holders[0]}, not by the intended holder (the vantage): "
+        f"the v4 target is misplaced and v4 iperf numbers would measure that host ({fwview})", 2)
+# A lone holder PASSes only if the RG owner's entry is absent or names that
+# holder in both snapshots; an owner still pointing elsewhere (even STALE)
+# would send the next v4 packet to another host.
+stale = sorted({v[0] for v in own.values() if v[0] not in ("-", self_mac)})
+if stale:
+    out(f"{target} answered for only by {self_mac} but {fwview} (entries {', '.join(stale)}): "
+        f"the RG owner's entry names another MAC, so this run's v4 target is not certifiable", 2)
+# Expiry: the excuse is owner-gated, so a stale known set can only ever
+# re-excuse the identical benign state. VOIDing a certifiable run would
+# block every loss gate after the fix until the env line is edited, so the
+# run PASSes and the reason tells the operator to delete the line.
+note = (f"; known dual holder set ({' '.join(sorted(known))}) is configured but not observed: "
+        f"delete IPERF_TARGET4_KNOWN_HOLDERS (#18576)") if known else ""
+out(f"{target} answered for only by {holders[0]} ({fwview}){note}", 0)
+PY
+}
+
+# ha_target_claim_check <vantage> <target> <control> <known-holders> <node>...
+# Snapshot each firewall node's neighbor entry, probe from the off-firewall
+# <vantage>, snapshot again, judge. Sets HA_TARGET_CLAIM_STATUS (verdict
+# status: 0 PASS, 1 FAIL, 3 xpf RETH holder, 4 excused known duplicate,
+# 2 VOID, including a probe that could not run or an off-link target) and
+# HA_TARGET_CLAIM_REASON. Always returns 0.
+ha_target_claim_check() {
+	local vantage="$1" target="$2" control="$3" known="$4" output before after rc
+	shift 4
+	HA_TARGET_CLAIM_STATUS=2
+	HA_TARGET_CLAIM_REASON="target claim: not measured"
+	before=$(ha_target_fw_neigh before "$target" "$control" "$@")
+	if output=$(ha_target_claim_probe "$vantage" "$target" "$control" 2>&1); then
+		rc=0
+	else
+		rc=$?
+	fi
+	if (( rc == 3 )); then
+		HA_TARGET_CLAIM_REASON="target claim: ${target} is not on-link from ${vantage}, so its holders cannot be probed there"
+		return 0
+	elif (( rc != 0 )); then
+		HA_TARGET_CLAIM_REASON="target claim: probe from ${vantage} could not run (status ${rc})"
+		return 0
+	fi
+	after=$(ha_target_fw_neigh after "$target" "$control" "$@")
+	if HA_TARGET_CLAIM_REASON=$(ha_target_claim_verdict "$target" "$control" "$known" \
+		"${output}"$'\n'"${before}"$'\n'"${after}" 2>&1); then
+		HA_TARGET_CLAIM_STATUS=0
+	else
+		HA_TARGET_CLAIM_STATUS=$?
+	fi
+	return 0
+}
+
+# ha_rg_owner_node <control> <node>...
+# #18586: print the ONE node that holds <control> (the cluster's own address
+# on a WAN VLAN, e.g. WAN_GW80_4), i.e. the RG owner whose neighbor entries
+# carry that VLAN's traffic. Read-only (`ip -o -4 addr show`). Status 2 when
+# no node or more than one node holds it.
+ha_rg_owner_node() {
+	local control="$1" node addrs owners=()
+	shift
+	[[ -n "$control" ]] || return 2
+	for node in "$@"; do
+		# An unreadable node is not "does not hold": it is unknown.
+		if ! addrs=$(incus exec "$node" -- ip -o -4 addr show 2>/dev/null); then
+			printf 'rg owner: could not read the addresses of %s\n' "$node" >&2
+			return 2
+		fi
+		# Exact address match (field 4 is addr/len): .8 never matches .80.
+		if awk -v c="$control" '{split($4, a, "/"); if (a[1] == c) f = 1} END {exit !f}' <<<"$addrs"; then
+			owners+=("$node")
+		fi
+	done
+	if (( ${#owners[@]} != 1 )); then
+		printf 'rg owner: %d nodes hold %s (%s)\n' "${#owners[@]}" "$control" "${owners[*]:-none}" >&2
+		return 2
+	fi
+	printf '%s\n' "${owners[0]}"
 }

@@ -579,11 +579,58 @@ per-RG entry from that mixed map echoed a stale sequence the peer's
 strict freshness check refused, so its lease went unrenewed for that
 frame. Cells: `heartbeat_echo_mixed_snapshot_14163_test.go`.
 
+### Peer wall-clock offset (#18585)
+
+Each heartbeat also carries the sender's wall clock, as an optional `XPFT`
+section (magic + int64 unix nanoseconds) appended to the body after the `XPFE`
+echo (or after the HA protocol version when there is no echo). It sits inside
+the MAC-covered body and BEFORE the fixed-tail epoch and auth trailers, which
+deployed readers index by a fixed offset from the end of the frame
+(`heartbeatFrameEpoch`, `heartbeatAuthTrailer`). #7487 records why a new
+section must never take those slots: an old node would read "no epoch", reject
+every frame, and go dual-primary mid-upgrade. Older readers stop after the echo
+and never see the section. A frame without it is byte-identical to the
+pre-#18585 encoding (the golden vectors pin that), and the HA protocol version
+is not bumped.
+
+The receiver takes peer-minus-local at the moment it ADMITS a frame
+(`admitFrame`, after the MAC and anti-replay checks), so a replayed archived
+frame cannot move the reading. A declared clock outside 2020–2100 is
+discarded: an older keyed sender's epoch marker matches the magic with
+probability 2^-32 per key. The reading drives:
+
+- a `Peer clock offset: ±N.Ns (peer behind/ahead of this node; measured Xs ago)`
+  line in `show chassis cluster status` and `information`;
+- an alarm at 10 s, cleared below 5 s. It is merged into the clock alarm
+  surfaces (`show system alarms`, `show security alarms detail`,
+  `show chassis cluster status`). The raise and the clear each log once and
+  reach syslog as `RT_SYSTEM - CLOCK_SKEW_ALARM_RAISED cause="peer-offset"` /
+  `..._CLEARED`, the local reference alarm's shape (`SetPeerClockAlarmHook`);
+- an early refusal of `request chassis cluster failover ... node <peer>` and
+  `data node <peer>` when a fresh reading is at or past 60 s (the guaranteed
+  fabric-auth break). The refusal names the number and both remedies: fix NTP
+  through `routing-instance mgmt`, or run the command on the target node,
+  where it is a local pull. Below 60 s, or without a fresh reading, the
+  request is proxied exactly as before.
+
+It is **visibility only**. The fabric verifier's accept band
+(`pkg/grpcapi/fabric_auth.go`) and the time a client signs at are unchanged,
+so the replay horizon is unchanged. Signing at `now + offset` would make
+cross-node RPC skew-tolerant. That is a different trade-off, and #7487 closed
+it as not worth the risk. A mixed-version pair shows no offset until both
+nodes send the section.
+
 ### A heartbeat RESTART is not a cold boot (#9722)
 
-`RestartHeartbeat` replaces the receiver on every config apply that rebinds the
-management VRF. On an HA node with a management interface that means every
-operator commit and every peer-synced apply. The replacement used to arm the
+`RestartHeartbeat` replaces the receiver when an apply moves the control link
+into or out of the management VRF. Before #18597 that was every config apply:
+networkd detached em0 from `vrf-mgmt` on every reconfigure and the rebind moved
+it back, so on an HA node every operator commit and every peer-synced apply
+restarted the heartbeat. networkd now renders `KeepMaster=yes` and the daemon
+gates the restart on the control link's VRF master actually having changed
+(`restartHeartbeatIfControlLinkMoved`, `pkg/daemon/README.md`), so an
+unrelated commit no longer restarts it; a restart still happens when the link
+really moved (for example after `vrf-mgmt` was recreated). The replacement used to arm the
 same 30s cold-boot floor. The seen-then-lost arm returns inside that floor
 before it checks staleness, so a peer that died within 30s after a commit was
 declared lost up to 30s late. In the default private-RG mode, that delay is the
@@ -653,8 +700,14 @@ floor into its retry. Cells:
 
 ### A failed heartbeat restart is owed, not latched (#9751)
 
-`RestartHeartbeat` retries the bind five times, a second apart. If all five
-fail, it returns false with the sender and receiver both torn down. Before
+`RestartHeartbeat` retries the bind on `heartbeatRestartRetrySchedule`: 50ms,
+200ms and 750ms pauses, then 1s ones, about 5s in all (#18597; it was five
+attempts a second apart). The restart follows a control-link VRF move, and the
+enslave cycle makes networkd drop and re-add the link's static address
+5-30ms later, so a first bind that loses that race used to cost a 1s+
+heartbeat gap at the peer (1.6s measured on tcp) and now costs about 50ms. If
+every attempt fails, it returns false with the sender and receiver both torn
+down. Before
 #9751, every later `RestartHeartbeat` saw "not running" and returned at once,
 and the apply discarded the result. The heartbeat stayed dead across later
 applies until comms restarted. This node sent no heartbeats, so the peer
@@ -1322,8 +1375,47 @@ renders `/etc/chrony/sources.d/xpf.sources` from `set system ntp server`.
 So a cluster with no `system ntp server` has **no time source by
 construction**.
 
-- **Configure it:** `set system ntp server <address>`, the SAME reachable
-  source on both nodes.
+- **Configure it:** `set system ntp server <address> routing-instance mgmt`,
+  the SAME reachable source on both nodes. The management VRF is the only
+  off-box route BOTH nodes are guaranteed to have: the default instance's
+  default route leaves through a RETH, which only the node that owns that
+  redundancy group has (the other node's default is a blackhole), so a
+  default-instance source syncs at most one node and a failover moves which
+  one (#18584). With `routing-instance mgmt` on every server, xpfd renders
+  chrony `bindacqdevice vrf-mgmt` (`/etc/chrony/conf.d/xpf-acquisition.conf`)
+  and restarts chrony when the binding is added, changed or removed, and on
+  a daemon start unless chrony is synchronised and started after the binding
+  was written. A
+  cluster whose servers use the default instance gets a commit advisory
+  naming this. The distro `makestep 1 3` steps a clock that booted from a
+  lagging RTC within the first three updates. `mgmt` is honoured only when
+  a management-class interface (fxp*, em*, fab*) is configured, because that
+  is when the daemon creates `vrf-mgmt`; otherwise the commit warns and
+  nothing is bound.
+  - **Rollout on an existing cluster:** a deb deploy preserves node config
+    (`cluster-setup.sh deploy` prints this), so commit the stanza on the
+    RG0 primary (it config-syncs to the peer) and check both nodes reach
+    `Leap status: Normal` in `chronyc tracking`. On loss (2026-10-31) both
+    did 10 s after the commit, and fw1 logged `System clock was stepped by
+    75.716867 seconds`. Ubuntu-image nodes also carry the distro
+    `/etc/chrony/sources.d/ubuntu-ntp-pools.sources` and an NTS
+    `conf.d/ubuntu-nts.conf`; those pools are hostnames that chrony
+    resolves in the default instance, and before the binding they showed
+    reach 0. They are not xpf's and are left alone.
+  - **Hostnames and trust:** `bindacqdevice` binds chrony's NTP sockets,
+    not its resolver, so use IP-address servers where the default instance
+    has no route (a hostname is resolved outside the binding). The lab
+    points at public servers over unauthenticated NTP; an on-path attacker
+    who can move a node's clock can push the pair past the fabric token's
+    wall-clock window (which has no nonce — #7487), denying cross-node RPC
+    but not forging it. Production clusters should prefer internal or NTS
+    sources.
+  - **Downgrade:** a build older than #18584 does not know
+    `/etc/chrony/conf.d/xpf-acquisition.conf` and leaves it in place, so
+    chrony stays bound to `vrf-mgmt` (which still works: the VRF exists on
+    every build). To return to default-instance NTP after a downgrade,
+    `rm /etc/chrony/conf.d/xpf-acquisition.conf && systemctl restart chrony`
+    on each node.
 - **Commit-time advisory (#8357):** committing a `chassis cluster` with
   no `system ntp server` now emits a warning that names fabric RPC as
   what will fail. It is a WARNING, never an error — configuring a cluster
@@ -2642,6 +2734,29 @@ connection is authenticated, then seals every subsequent frame.
   bulk sent for that debt, #9626) so the surviving accept **inherits** the
   outstanding obligation and re-drives the bulk. See `docs/session-sync-architecture.md` → "Atomic Install +
   Cold-Prime Decision (#4962)".
+
+## Operator RG moves and the clock (#18583)
+
+Half of the operator's usual move loop crosses the fabric. On node A,
+`request chassis cluster failover redundancy-group <g> node A` is a local pull
+(`RequestPeerFailover` over the session-sync connection) and does not depend
+on the wall clock. `... node B`, the peer, is proxied over fabric gRPC to B
+(`proxyClusterFailover`), and B then runs the local pull. That leg is
+token-authenticated and fails past the skew bound above.
+
+So with the clocks apart, a loop issued from one node fails every move to the
+peer: with the #6708 "window Ns ahead/behind ours" error, or — with #18585 and
+a fresh heartbeat reading of 60 s or more — with the up-front
+"cross-node request not sent: ..." refusal (30–60 s still reaches the
+fabric and fails or passes on window alignment). Every move back then
+prints "already primary": the handler reads that from `IsLocalPrimary` and
+never contacts the peer. On loss on 2026-10-31 (fw1 72 s behind) that was 10
+FAIL and 10 VOID in 20 moves, and traffic never left node0.
+
+`make test-rg-move-soak` (matrix row H11) runs that loop and scores every move
+against both nodes' views, `rg-active`, the helper's `ha_groups` and the
+traffic. It never resyncs clocks. The definition of a correct move, the command
+paths and how to read each failure are in `docs/ha-rg-move-correctness.md`.
 
 ## Operating the control-link PSK (#6611)
 
@@ -4344,6 +4459,45 @@ because no peer is asked anything.
 - `Ready` and `TransferReady` are different gates. `Ready` allows VRRP to
   participate in election; `TransferReady` is the stricter gate for
   explicit operator-initiated `request chassis cluster failover`.
+- **The RG0 authority is never config-stale against a push it refused as
+  primary (#18610).** During a dual-active window the peer can push its config
+  while this node is still RG0 primary; `handleConfigSync` refuses it
+  (`cluster.ErrConfigSyncRejectedAuthority`). The receive edge has already
+  raised `lastRecvConfigGen` (#5563), and M-2/#4151 keeps the applied mark
+  pinned so the generation stays admissible if this node demotes. If this
+  node instead STAYS primary, the peer (now secondary) never pushes again, so
+  the received mark stayed above the applied mark indefinitely: every local RG
+  read `Transfer ready: no (standby config stale ...)`, the refusal had armed
+  the #6387 CF monitor failure, and a rolling upgrade started on the primary
+  aborted with "peer is NOT takeover-ready". `configApplyLoop` now records such
+  a refusal in `rejectedAsAuthorityConfigGen` instead of arming CF, and
+  `TransferReadinessSnapshot.ConfigStale` ignores received generations up to
+  that mark while this node is still the authority (`IsPrimaryFn`). Once it
+  demotes they count again, so it is not promoted back before the new
+  primary's push applies. The NACK (#7328) is still sent. An ordinary apply
+  failure, on a primary or not, is unchanged. `resetRecvGen` clears the mark
+  with the other generation marks. The refusal counts
+  `ConfigsRejectedAsAuthority` (not `ConfigsApplyFailed`) and records
+  `ConfigRejectedAsAuthorityLastGen`; the daemon's Warn names the generation
+  and says whether the refused config differs from the active one, in which
+  case the peer's version (including a commit made on the peer while it
+  believed itself primary) is discarded here. Mixed-version escape: a primary
+  still on a build without this fix stays stuck until it demotes, so demote
+  it (`request chassis cluster failover redundancy-group 0 node <peer>`) and
+  let the new primary's push apply before a rolling upgrade
+  (`docs/in-place-upgrade.md`).
+  Two edges (review of #18612): (1) the authority classification uses the
+  role at RECEIVE (`configApplyItem.authorityAtReceive`), not at apply. A
+  config received while this node was secondary and refused because a
+  promotion landed before the apply loop reached it is the previous primary's
+  last config, lost: it stays an apply failure (CF, stale, `ConfigsApplyFailed`)
+  with its own Warn naming the generation. (2) The losing node is converged:
+  the daemon's refusal clears the authority's (epoch x generation) push marker
+  and re-runs the reconcile, paced at `configAckOverdueAfter`, so the loser
+  receives the authority's config under a new wire generation, applies it,
+  ACKs, and its own #9569 send debt is superseded. Without it the marker,
+  claimed by the pre-split push, kept the loser divergent and its gate
+  refusing the handovers it starts.
 - **Every handover that promotes the peer refuses a config-stale peer
   (#9569).** The #5563 config-stale gate lives in `TransferReady`, which only
   the node that becomes primary evaluates, through `RequestPeerFailover`. The

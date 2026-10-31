@@ -177,7 +177,13 @@ editing cmdtree.
   authenticated measurement, since only a key holder can produce one — so the
   rejection names the clock and the remedy, and `show chassis cluster status`
   carries the skew. A forged token or a genuine PSK mismatch reports no skew,
-  so an authentication fault is never mislabelled as a clock fault. Dual-accept
+  so an authentication fault is never mislabelled as a clock fault. Before the
+  break, each node also MEASURES the peer's wall clock over the authenticated
+  heartbeat (#18585: an `XPFT` body section, read only from admitted frames):
+  `show chassis cluster status` prints the offset, an alarm raises at 10 s,
+  and `request chassis cluster failover ... node <peer>` refuses up front at
+  60 s with the number and the remedy. That is visibility only — the accept
+  band and the signing time are unchanged. Dual-accept
   on a keyed fabric listener is deliberately tiered (#11487): during rollout,
   tokenless grace applies only to read-only calls (`GetStatus`, session views,
   safe `ShowText` and `MonitorInterface`). `ClearSessions` and the admitted

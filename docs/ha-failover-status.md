@@ -1055,6 +1055,43 @@ independent reasons:
 Both are covered by hermetic cells; neither has been through `make
 test-ha-crash` on a cluster yet.
 
+### A RETH address removed by commit stayed on the RG owner (#18573) — FIXED IN SOURCE
+
+In direct-VIP mode (private-RG election, the compiler default) the add and
+remove passes both derived their set from the active config at call time. A
+commit that renumbered `reth0.50` (`.10` -> `.42` on tcp, `.11` -> `.43` on
+udp) left the old address on the owner indefinitely. The owner answered ARP for
+it, and a demotion left it behind too. Because the userspace snapshot is built
+from the kernel listing, interface SNAT kept translating new LAN flows to the
+removed address (udp: LAN to 1.1.1.1 0/30) until the next snapshot.
+
+Now every direct-mode VIP is stamped in the kernel (`IFA_PROTO`,
+`pkg/vipstamp`), and every reconcile pass deletes a stamped address the config
+no longer assigns to its netdev, on the owner and the non-owner alike. The
+snapshot builder never publishes such a leftover, and a reconcile-path change
+queues an interface-link snapshot refresh. See `pkg/daemon/README.md`
+"Direct-mode VIP failover" and `pkg/dataplane/README.md` "Interface rows
+never publish a direct-VIP leftover (#18573)".
+
+**Limit:** a pre-#18573 VIP that the config had already dropped before the
+upgrade carries no stamp and must be deleted by hand once (or cleared by a
+reboot). The same goes for a renumber committed while the owner still runs the
+old binary. Until then it can still be the interface-SNAT source. See
+`docs/in-place-upgrade.md` "Honest limits".
+
+**Status:** unit, real-kernel (netns) and mutation-checked (9/9). Live on
+tcp, deb `0.0.26066+gb5290d13d20d`, 2026-10-31 02:19 UTC:
+
+- A renumber `.10` -> `.42` and `::a` -> `::42` dropped the old pair from
+  fw0 within 1 s of `commit complete`. fw1 (non-owner) held neither pair.
+  The commit's snapshot listed only `.42`/`::42`. LAN to 1.1.1.1 was 10/10,
+  SNATed to `.42`.
+- An RG1+RG2 move to node1 and back left the new owner with only `.42`/`::42`
+  and the former owner with nothing. Nothing resurrected `.10`. SNAT stayed
+  on `.42`, 10/10.
+- The reverse renumber (`.42` -> `.10`, restoring the found state) behaved
+  the same.
+
 ## What Still Needs Work
 
 ### Cycle-3 post-takeover loss in `test-restart-connectivity` (#18540, OPEN)
@@ -1189,6 +1226,13 @@ dataplane before the owner closes its own:
 5. requester: election -> primary, rg_active=true (already open), VIPs, GARP/NA
 6. requester: commit-ready, commit -> owner; release the pre-activation
 ```
+
+Step 2 waits at most 500 ms for applySem (`transferPreActivateLockWait`,
+#18569), and the overlay's 5 s TTL starts once the lock is held. If a
+commit holds the semaphore longer, the pre-activation is skipped with a
+`transfer pre-activation skipped, apply semaphore busy` warning and the
+transfer runs break-before-make; the request itself is never held behind
+an apply.
 
 Before #18559, step 2 did not exist. Everything the owner redirected between
 step 4 and step 5 was dropped at the requester's fabric-ingress HA-inactive

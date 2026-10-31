@@ -69,6 +69,16 @@ const (
 	// heartbeatEchoTrailerSize is magic(4) plus sender and echoed peer
 	// session/sequence pairs (four uint64 values).
 	heartbeatEchoTrailerSize = 4 + 8*4
+	// heartbeatClockMagic marks the optional #18585 sender wall-clock section:
+	// magic(4) + int64 unix nanoseconds (little-endian). It follows the echo
+	// section (or the HA protocol version when there is no echo) INSIDE the
+	// body, so it is MAC-covered and sits before the fixed-tail epoch and auth
+	// trailers, which deployed readers locate by a fixed offset from the END
+	// of the frame (heartbeatFrameEpoch, heartbeatAuthTrailer) — #7487 records
+	// why a section must never take those slots. Older readers stop after the
+	// echo section and never see it.
+	heartbeatClockMagic       = "XPFT"
+	heartbeatClockTrailerSize = 4 + 8
 	// heartbeatAuthMagic marks the optional #4107 PSK/HMAC auth trailer.
 	// Distinct from heartbeatMagic ("BPFX") so a reader can unambiguously
 	// detect a trailer at the tail of a frame. The trailer is appended AFTER
@@ -114,6 +124,8 @@ const (
 //	    [..] uint16 little-endian HAProtocolVersion
 //	  Optional "XPFE" echo trailer: sender session/sequence and the last
 //	  peer session/sequence received by the sender.
+//	  Optional "XPFT" clock section (#18585): the sender's wall clock as
+//	  int64 unix nanoseconds, used only to MEASURE peer clock offset.
 //
 // The echo trailer is additive and appears before optional fixed-tail
 // authentication/epoch trailers. Older readers ignore it after the version
@@ -136,6 +148,13 @@ type HeartbeatPacket struct {
 	HeartbeatSequence     uint64
 	PeerHeartbeatSession  uint64
 	PeerHeartbeatSequence uint64
+	// WallClockUnixNano is the sender's wall clock when it built the frame
+	// (#18585). 0 means absent (an older sender). Like the echo section it is
+	// reserved AHEAD of the best-effort monitor section, so at the frame cap
+	// it displaces one or two monitor entries (measured 166->164, 111->110,
+	// 83->82 monitors) rather than being dropped itself. It is a measurement
+	// input only — nothing authenticates, elects or signs with it.
+	WallClockUnixNano int64
 }
 
 // HeartbeatGroup is a per-RG entry in the heartbeat.
@@ -317,14 +336,18 @@ func marshalHeartbeatBody(pkt *HeartbeatPacket, tailReserve int) []byte {
 		pkt.HeartbeatSession != 0 && pkt.HeartbeatSequence != 0 {
 		echoTrailerSize = heartbeatEchoTrailerSize
 	}
-	versionReserve := heartbeatVersionTrailerSize + echoTrailerSize
+	clockTrailerSize := 0
+	if pkt.WallClockUnixNano != 0 {
+		clockTrailerSize = heartbeatClockTrailerSize
+	}
+	versionReserve := heartbeatVersionTrailerSize + echoTrailerSize + clockTrailerSize
 	if pkt.SoftwareVersion != "" {
 		version = []byte(pkt.SoftwareVersion)
 		if len(version) > maxHeartbeatSoftwareVersionSize {
 			version = version[:maxHeartbeatSoftwareVersionSize]
 		}
-		if off+heartbeatVersionTrailerSize+len(version)+echoTrailerSize <= maxHeartbeatSize-tailReserve {
-			versionReserve = heartbeatVersionTrailerSize + len(version) + echoTrailerSize
+		if off+heartbeatVersionTrailerSize+len(version)+echoTrailerSize+clockTrailerSize <= maxHeartbeatSize-tailReserve {
+			versionReserve = heartbeatVersionTrailerSize + len(version) + echoTrailerSize + clockTrailerSize
 		} else {
 			version = nil
 		}
@@ -389,6 +412,12 @@ func marshalHeartbeatBody(pkt *HeartbeatPacket, tailReserve int) []byte {
 			binary.LittleEndian.PutUint64(buf[off:off+8], pkt.PeerHeartbeatSession)
 			off += 8
 			binary.LittleEndian.PutUint64(buf[off:off+8], pkt.PeerHeartbeatSequence)
+			off += 8
+		}
+		if clockTrailerSize != 0 {
+			copy(buf[off:off+len(heartbeatClockMagic)], heartbeatClockMagic)
+			off += len(heartbeatClockMagic)
+			binary.LittleEndian.PutUint64(buf[off:off+8], uint64(pkt.WallClockUnixNano))
 			off += 8
 		}
 	}
@@ -490,6 +519,17 @@ func UnmarshalHeartbeat(data []byte) (*HeartbeatPacket, error) {
 			pkt.PeerHeartbeatSession = binary.LittleEndian.Uint64(data[off : off+8])
 			off += 8
 			pkt.PeerHeartbeatSequence = binary.LittleEndian.Uint64(data[off : off+8])
+			off += 8
+		}
+		// #18585: the optional clock section, right after the echo (or the
+		// HA version when there is no echo). Identified by its magic like the
+		// echo; on a keyed frame from an older sender the bytes here are the
+		// epoch marker, which matches the magic with probability 2^-32 per
+		// key — the consumer's plausibility band discards such a reading.
+		if off+heartbeatClockTrailerSize <= len(data) &&
+			string(data[off:off+len(heartbeatClockMagic)]) == heartbeatClockMagic {
+			off += len(heartbeatClockMagic)
+			pkt.WallClockUnixNano = int64(binary.LittleEndian.Uint64(data[off : off+8]))
 		}
 	}
 
