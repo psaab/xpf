@@ -608,6 +608,8 @@ func (m *Manager) buildHeartbeat() *HeartbeatPacket {
 		HAProtocolVersion: m.localHAProtocolVersion,
 		HeartbeatSession:  session,
 		HeartbeatSequence: sequence,
+		// #18585: the peer measures its offset from this node's wall clock.
+		WallClockUnixNano: time.Now().UnixNano(),
 	}
 	// #14163: echo the most recent peer heartbeat FRAME's identity, held
 	// at Manager level. Ranging peerGroups and taking the first nonzero

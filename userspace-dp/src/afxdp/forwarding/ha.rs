@@ -430,6 +430,14 @@ pub(in crate::afxdp) enum CachedDecisionInvalid {
     /// and not active; a locally-active egress (and an unknown /
     /// standalone egress) is never invalidated by this arm.
     ForwardCandidateEgressDeparted,
+    /// #18566: a cached FabricRedirect on DIRECT ingress whose
+    /// destination's connected owner RG is known (>0) and is now
+    /// forwarding-active on this node. The redirect was seeded while the
+    /// peer owned that RG; the RG has since been activated here, so the
+    /// peer no longer forwards it and drops the redirected packet at its
+    /// fabric-ingress HA gate. The slow path re-resolves the flow to the
+    /// local egress. Counted under the owner-active-redirect eviction arm.
+    FabricRedirectDestinationNowLocal,
 }
 
 pub(in crate::afxdp) fn cached_flow_decision_valid(
@@ -649,7 +657,29 @@ fn cached_flow_decision_invalid_reason_inner(
     // unknown owner (gateway/default-routed, dest_rg==0) never
     // fire. Live fw0 stamp=2 rows (aggregate 5,777 at d28) are
     // exactly this shape.
-    if forward_candidate_destination_owner_departed(
+    // #18566: the destination-owner twin for a cached FabricRedirect. The
+    // two arms read the same per-snapshot memo and are disjoint by
+    // disposition, so each branch consumes the closure at most once.
+    if resolution.disposition == ForwardingDisposition::FabricRedirect {
+        if fabric_redirect_destination_now_local(
+            ha_state,
+            now_secs,
+            fabric_ingress,
+            resolution,
+            destination_owner_rg,
+        ) && fabric_redirect_rehome_agrees(
+            forwarding,
+            ha_state,
+            dynamic_neighbors,
+            now_secs,
+            cached_owner_rg_id,
+            flow_key,
+            target_ip,
+            install_table,
+        ) {
+            return Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal);
+        }
+    } else if forward_candidate_destination_owner_departed(
         ha_state,
         now_secs,
         resolution,
@@ -923,6 +953,144 @@ pub(in crate::afxdp) fn forward_candidate_destination_owner_departed(
         && !ha_state
             .get(&dest_rg)
             .is_some_and(|group| group.is_forwarding_active(now_secs))
+}
+
+/// #18566: a cached `FabricRedirect` is stale once the RG that owns its
+/// destination is forwarding-active HERE. The redirect hands the packet to
+/// the peer because the peer owned that RG when the entry was seeded. After
+/// the RG is activated on this node the peer has demoted it (or is about to,
+/// under #18563's make-before-break), and its fabric-ingress HA gate drops
+/// what we hand it.
+///
+/// No other fence catches this entry. The RG-epoch fence re-checks the
+/// entry's stamp owner, which for a reverse flow is the session's owner (the
+/// WAN RG of a `lan -> wan` flow), not the RG that is now local. The
+/// generation fence fires only if a snapshot publish lands after the
+/// activation, and the route republish that accompanies an activation runs
+/// BEFORE `rg_active` (#16270). Live (loss, per-RG move): fw1 kept
+/// fabric-redirecting `172.16.80.200:5211 -> 10.0.61.102` ACKs for >20 s
+/// after activating RG2, fw0 dropped them as `ha_inactive`, and fw1's
+/// rg_epoch and owner_active_redirect eviction arms both read 0.
+///
+/// Guards: a fabric arrival is out of scope (the #10314 and owner-active
+/// arms own it, and a fabric arrival is never redirected back); an unknown
+/// destination owner (rg 0, a routed destination) and a standalone node
+/// never fire; a peer-owned destination keeps its redirect.
+pub(in crate::afxdp) fn fabric_redirect_destination_now_local(
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    fabric_ingress: bool,
+    resolution: ForwardingResolution,
+    destination_owner_rg: impl FnOnce() -> i32,
+) -> bool {
+    if fabric_ingress
+        || resolution.disposition != ForwardingDisposition::FabricRedirect
+        || ha_state.is_empty()
+    {
+        return false;
+    }
+    let dest_rg = destination_owner_rg();
+    dest_rg > 0
+        && ha_state
+            .get(&dest_rg)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+}
+
+/// #18566 (review seats V M1 and W): fire only when the slow path will
+/// replace the redirect with an answer the cache then KEEPS. Otherwise the arm
+/// evicts an entry the slow path re-seeds as the same redirect, or re-homes
+/// into a ForwardCandidate the next hit evicts again, and the flow takes the
+/// slow path on every packet (the #16222 churn class).
+///
+/// Two conditions, both mirrors of an existing decision:
+///
+/// - **The re-homed entry survives its next hit.** A ForwardCandidate whose
+///   seed-stamp owner is known and not locally active is evicted by
+///   `forward_candidate_owner_departed` on every hit. That is the #16222
+///   option-B posture: a direct-ingress flow owned by the peer's RG keeps its
+///   redirect to the owner even when its destination is connected on a local
+///   RG. So a known, inactive stamp owner never fires. In the #18566 shape the
+///   stamp owner is the RG this node already held, which is active.
+/// - **The slow path re-homes.** `rehome_or_retain_fabric_redirect` replaces a
+///   stored redirect for a connected destination whose owner is active only
+///   with a ForwardCandidate via the target's connected interface that is not
+///   the fabric. It keeps the redirect for a fresh redirect or HA-inactive
+///   answer, for a candidate via another interface (FIB lag after the
+///   activation), and for a self-targeting alias reverse, whose fresh answer is
+///   LocalDelivery and which `alias_reverse_return_resolution` always redirects
+///   again (#18531). So the arm accepts only a ForwardCandidate, or a
+///   MissingNeighbor (the same egress before its neighbor resolves), via the
+///   connected interface and not the fabric. LocalDelivery never fires, and
+///   the lookup applies the session path's interface-NAT local answer first,
+///   so a local SNAT address is LocalDelivery here too, not the
+///   MissingNeighbor the bare FIB gives it.
+///
+/// Evaluated only for a FabricRedirect hit whose destination RG is local.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+fn fabric_redirect_rehome_agrees(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    cached_owner_rg_id: i32,
+    flow_key: Option<&crate::session::SessionKey>,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+) -> bool {
+    if cached_owner_rg_id > 0
+        && !ha_state
+            .get(&cached_owner_rg_id)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+    {
+        return false;
+    }
+    // The session path answers an interface-NAT local address before any FIB
+    // lookup (`lookup_forwarding_resolution_for_session_with_cache`: the
+    // table-scoped answer, or the wildcard one when the install table is
+    // unresolvable), and the
+    // FIB alone would call that address MissingNeighbor on its connected /24
+    // (seat W). That answer is LocalDelivery, which this arm never accepts:
+    // for the self-targeting alias reverse the slow path redirects again.
+    if super::interface_nat_local_resolution(forwarding, target_ip, install_table).is_some()
+        || crate::afxdp::session_glue::local_resolution_without_install_table(forwarding, target_ip)
+            .is_some()
+    {
+        return false;
+    }
+    let lookup = match (install_table, flow_key) {
+        (Some(table), Some(key)) => super::lookup_forwarding_resolution_with_dynamic_for_flow_in_table(
+            forwarding,
+            dynamic_neighbors,
+            target_ip,
+            key,
+            table,
+        ),
+        (Some(table), None) => super::lookup_forwarding_resolution_in_table_with_dynamic(
+            forwarding,
+            dynamic_neighbors,
+            target_ip,
+            Some(table),
+        ),
+        (None, Some(key)) => super::lookup_forwarding_resolution_with_dynamic_for_flow(
+            forwarding,
+            dynamic_neighbors,
+            target_ip,
+            key,
+        ),
+        (None, None) => lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip),
+    };
+    let candidate = enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, lookup.resolution);
+    let connected = crate::afxdp::session_glue::connected_ifindex_for_target_in_table(
+        forwarding,
+        target_ip,
+        install_table,
+    );
+    matches!(
+        candidate.disposition,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+    ) && connected > 0
+        && candidate.egress_ifindex == connected
+        && !ingress_is_fabric(forwarding, candidate.egress_ifindex)
 }
 
 /// #16217 (Wire18, B2): re-validate a fabric-established (adopted) mark
