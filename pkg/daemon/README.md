@@ -4214,8 +4214,23 @@ never lock an operator out of a remote box it manages.
   applySem in one apply). The reassert tick also passes when only an owed
   restart is outstanding and retries it (one restart per 30s tick), so a
   restart that failed there does not leave the heartbeat stopped until the next
-  apply. Residual: a control-link address renumber keeps the old local address
-  (#18606). Cells:
+  apply.
+
+  **A control-link renumber restarts comms (#18597, folded from #18606).** The
+  gate removed an accidental signal. Before it, every apply restarted the
+  heartbeat on its stale `hbLocalAddr`, so a commit that renumbered em0 (same
+  interface, same peer) failed loudly through #9751. After it, nothing moved.
+  `clusterTransportKey` now carries `LocalAddress`: the address the heartbeat
+  and session sync bind, resolved by `clusterTransportLocalAddress` with the
+  same resolver and the same (interface, peer) pair. So step 20 restarts comms
+  on the new address. An epoch whose key opened with the address unresolved
+  learns the address its sockets bound (`noteClusterTransportLocalAddress`);
+  an off-key bind marks it sticky-changed like an off-key VRF bind. This
+  re-binds the LOCAL node correctly. It does not make a live renumber work: the
+  peer's matching `peer-address` change is refused by the #8965 preflight on its
+  synced apply, which is why the supported procedure stays "set the new address
+  on both nodes and restart xpfd on both". Cells:
+  `cluster_local_addr_key_18597_test.go`. Gate cells:
   `heartbeat_rebind_gate_18597_test.go`.
 
   Deliberately LEFT best-effort (WARN, not surfaced): the

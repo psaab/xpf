@@ -1532,6 +1532,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 				return
 			}
 
+			d.noteClusterTransportLocalAddress(commsGen, syncIP)
 			syncLocal := net.JoinHostPort(syncIP, "4785")
 			syncPeer := net.JoinHostPort(syncPeerAddr, "4785")
 			slog.Info("cluster: session sync transport", "mode", syncTransport,
@@ -1959,6 +1960,7 @@ func (d *Daemon) startHeartbeatWithRetryForEpoch(ctx context.Context, controlIfa
 		}
 		vrfDevice := d.resolveClusterVRFDevice(controlIface)
 		d.noteClusterTransportBinding(commsGen, vrfDevice)
+		d.noteClusterTransportLocalAddress(commsGen, localIP)
 		if err := d.startHeartbeatForCommsEpoch(ctx, commsGen, localIP, peerAddr, vrfDevice, controlIface); err != nil {
 			// #7257: a start the teardown superseded is terminal, not a bind
 			// failure. Retrying would race the same teardown again and, on
@@ -2199,6 +2201,17 @@ type clusterTransportKey struct {
 	Fabric1Interface   string `log:"fabric1"`
 	Fabric1PeerAddress string `log:"fabric1_peer"`
 	VRFDevice          string `log:"vrf"`
+	// LocalAddress is the local address the heartbeat and the session-sync
+	// listener bind: clusterSyncTransport's interface (the control link, or
+	// the fabric when no control link is configured) resolved against its
+	// peer (#18597 fold of #18606). Before it was in the key, a commit that
+	// renumbered em0 while keeping the interface and peer left both transports
+	// on an address em0 no longer had; the per-apply heartbeat restart used to
+	// expose that as a failed commit (#9751), and the #18597 gate removed that
+	// accidental signal. Now step 20 sees the change and restarts comms on the
+	// new address. "" means unresolved; an epoch that opened unresolved learns
+	// the address its sockets actually bound (noteClusterTransportLocalAddress).
+	LocalAddress string `log:"local"`
 	// BindingChanged remains true for this epoch once a retry resolves a
 	// different device than VRFDevice; only a new epoch may clear it.
 	BindingChanged bool `log:"binding_changed"`
@@ -2273,7 +2286,48 @@ func (d *Daemon) clusterTransportForConfig(cfg *config.Config) clusterTransportK
 		return key
 	}
 	key.VRFDevice = d.resolveClusterSyncVRFDevice(cfg.Chassis.Cluster)
+	key.LocalAddress = clusterTransportLocalAddress(cfg)
 	return key
+}
+
+// clusterTransportLocalAddress resolves the local address the heartbeat and
+// session sync bind, with the same resolver and the same (interface, peer)
+// pair they use: clusterSyncTransport's selection, which is the control link
+// whenever the heartbeat runs at all (it needs control-interface AND
+// peer-address). "" when the pair is incomplete or nothing is resolvable yet.
+func clusterTransportLocalAddress(cfg *config.Config) string {
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return ""
+	}
+	iface, peer, _ := clusterSyncTransport(cfg.Chassis.Cluster)
+	if iface == "" || peer == "" {
+		return ""
+	}
+	return resolveClusterInterfaceAddr(cfg, iface, peer, "")
+}
+
+// noteClusterTransportLocalAddress records the local address a transport of
+// the current epoch actually bound (#18597). An epoch whose key opened with
+// the address unresolved learns it, so the next step-20 comparison is against
+// the real binding instead of restarting comms over a "" that only meant "not
+// yet". A bind on an address the key does not name (a renumber that raced the
+// epoch's start) marks the epoch sticky-changed, like an off-key VRF bind.
+func (d *Daemon) noteClusterTransportLocalAddress(gen uint64, addr string) {
+	if gen == 0 || addr == "" {
+		return
+	}
+	d.clusterCommsMu.Lock()
+	defer d.clusterCommsMu.Unlock()
+	if gen != d.clusterCommsGen {
+		return
+	}
+	switch d.activeClusterTransport.LocalAddress {
+	case addr:
+	case "":
+		d.activeClusterTransport.LocalAddress = addr
+	default:
+		d.activeClusterTransport.BindingChanged = true
+	}
 }
 
 // setActiveTransportIfCurrent publishes the transport key of the comms epoch
