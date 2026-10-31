@@ -1212,6 +1212,13 @@ dataplane before the owner closes its own:
 6. requester: commit-ready, commit -> owner; release the pre-activation
 ```
 
+Step 2 waits at most 500 ms for applySem (`transferPreActivateLockWait`,
+#18569), and the overlay's 5 s TTL starts once the lock is held. If a
+commit holds the semaphore longer, the pre-activation is skipped with a
+`transfer pre-activation skipped, apply semaphore busy` warning and the
+transfer runs break-before-make; the request itself is never held behind
+an apply.
+
 Before #18559, step 2 did not exist. Everything the owner redirected between
 step 4 and step 5 was dropped at the requester's fabric-ingress HA-inactive
 gate: 100-137 ms per RG for per-RG moves and about 200 ms per RG for the

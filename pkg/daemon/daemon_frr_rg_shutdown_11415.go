@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/frr"
 )
 
 // frrHADemotionState is a render-time snapshot of which configured RETH RGs
@@ -843,23 +844,54 @@ func (d *Daemon) scheduleFRRHAReconcile(reason string) {
 	if d == nil || d.cluster == nil || d.frr == nil || d.store == nil || d.applySem == nil || d.isResetting() {
 		return
 	}
+	// #18561: coalesce a burst of ownership edges into one reload that runs
+	// after the burst, so an RG activation's synchronous connected-route
+	// republish never queues on applySem behind frr-reload.py.
+	// An edge supersedes any HA render taken before it: a render that
+	// predates a demotion must not publish the demoted RG's routes after
+	// it. The run this edge joins or arms renders afresh.
+	d.frrApplySeq.Add(1)
+	d.frrHA.schedule(frrHAReconcileDebounce, func() { d.runFRRHAReconcile(reason) })
+}
+
+// runFRRHAReconcile is the reconcile body scheduleFRRHAReconcile coalesces.
+func (d *Daemon) runFRRHAReconcile(reason string) {
+	if d == nil || d.cluster == nil || d.frr == nil || d.store == nil || d.applySem == nil || d.isResetting() {
+		return
+	}
 	ctx := d.applyCancelCtx()
-	go func() {
+	// #18561: render under applySem, reload after releasing it. The render
+	// reads the active config and cluster ownership and must be ordered
+	// against config applies; frr-reload.py (300-600 ms) need not be. Holding
+	// applySem across it made a crash takeover's later RG activations wait:
+	// each runs republishConnectedRGSync under applySem before SetRGActive
+	// (#16270), and on loss the LAN RG went active 0.45 s after the WAN RG,
+	// right after the reload released the semaphore. frrApplySeq keeps the
+	// out-of-lock apply from overwriting a newer render.
+	fc, seq, writeGen, ok := func() (*frr.FullConfig, uint64, uint64, bool) {
 		if err := d.applySem.Acquire(ctx, 1); err != nil {
-			return
+			return nil, 0, 0, false
 		}
 		defer d.applySem.Release(1)
 		if d.isResetting() {
-			return
+			return nil, 0, 0, false
 		}
 		cfg := d.store.ActiveConfig()
 		if cfg == nil {
-			return
+			return nil, 0, 0, false
 		}
-		err := d.applyFRRConfig(d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg)))
-		if err != nil {
-			slog.Warn("HA routing reconcile did not fully converge; FRR retry remains armed",
-				"reason", reason, "err", err)
-		}
+		// Only predicate-free writes (commit path, clears) supersede this
+		// render by generation; a newer HA render supersedes it by sequence,
+		// and an OLDER HA render still writing must not drop it (seat T).
+		writeGen := d.frr.UnconditionalWriteGeneration()
+		fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
+		return fc, d.frrApplySeq.Add(1), writeGen, true
 	}()
+	if !ok {
+		return
+	}
+	if err := d.applyFRRConfigIfCurrent(fc, seq, writeGen); err != nil {
+		slog.Warn("HA routing reconcile did not fully converge; FRR retry remains armed",
+			"reason", reason, "err", err)
+	}
 }

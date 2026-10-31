@@ -1819,6 +1819,21 @@ type Daemon struct {
 	// readiness bit flips so the VRRP/direct-ownership side effects that set
 	// the bit have a chance to propagate before the peer finalizes demotion.
 	localFailoverCommitDelay time.Duration
+	// frrHA coalesces RG-edge FRR reconciles (#18561); see daemon_frr_ha_coalesce.go.
+	frrHA frrHACoalescer
+	// ipmonGateHA coalesces RG-edge ip-monitoring gating reconciles behind
+	// the same debounce (#18561): the reconcile holds applySem across an FRR
+	// reload and a snapshot publish.
+	ipmonGateHA frrHACoalescer
+	// frrApplySeq orders HA FRR renders (#18561): every HA render (under
+	// applySem) and every RG ownership edge bumps it, and an HA render is
+	// applied, after applySem is released, only while it is unchanged and
+	// the FRR manager's WriteGeneration has not moved (see
+	// applyFRRConfigIfCurrent), so it can never overwrite a newer config.
+	frrApplySeq atomic.Uint64
+	// fibHashMu serializes reconcileFibMultipathHashPolicy, which the HA
+	// reconcile now reaches outside applySem (#18561).
+	fibHashMu sync.Mutex
 	// failoverActuations owns the failover fence barriers (#16124): the
 	// wait map watchClusterEvents resolves once it has finished ACTUATING
 	// a demotion (VRRP resign to priority-0 / rg_active clear), the

@@ -415,6 +415,41 @@ func (d *Daemon) applyFRRConfig(fc *frr.FullConfig) error {
 	return err
 }
 
+// applyFRRConfigIfCurrent applies an HA reconcile render made under
+// applySem, after applySem was released (#18561). seq is the HA render
+// sequence and writeGen the FRR manager's UNCONDITIONAL write generation, both
+// captured at render time. The render is written only while (a) no later HA
+// render or ownership edge has bumped the sequence, (b) no predicate-free FRR
+// write (the commit path's ApplyFull, a Clear) has actually happened since (a
+// refused render does not move it, and neither does an older HA render that
+// is still writing, which would otherwise drop this newer one), and (c) no
+// factory reset is in progress. The FRR manager judges this under its
+// build lock before building and again under reloadMu before the write, and
+// factoryReset passes frr.Manager.BuildBarrier after raising its flag, so the
+// wipe's strip cannot be followed by this write. A superseded render is
+// dropped: whatever superseded it renders, or has written, the newer state.
+func (d *Daemon) applyFRRConfigIfCurrent(fc *frr.FullConfig, seq, writeGen uint64) error {
+	if d.frr == nil {
+		return nil
+	}
+	err := d.frr.ApplyFullIfCurrent(fc, func() bool {
+		return d.frrApplySeq.Load() == seq && d.frr.UnconditionalWriteGeneration() == writeGen && !d.isResetting()
+	})
+	if errors.Is(err, frr.ErrFRRApplySuperseded) {
+		slog.Debug("HA routing reconcile render superseded by a newer FRR write; skipped")
+		return nil
+	}
+	if err != nil {
+		if errors.Is(err, frr.ErrFRRReloadDegraded) {
+			slog.Warn("FRR reload degraded: additive vtysh -f applied; stale-config removal deferred to the in-manager retry", "err", err)
+		} else {
+			slog.Warn("failed to apply FRR config", "err", err)
+		}
+	}
+	d.reconcileFibMultipathHashPolicy(consistentHashConfigured(fc))
+	return err
+}
+
 // consistentHashConfigured reports whether fc's forwarding-table export
 // policy selects load-balance consistent-hash. resolveECMP only runs
 // inside buildManagedSection, which ApplyFull skips when the config has
@@ -465,6 +500,10 @@ var fibMultipathHashPolicyPath = "/proc/sys/net/ipv4/fib_multipath_hash_policy"
 // knob to the asserted value themselves before first starting xpfd — the
 // documented sysctl.d route for such a baseline.
 func (d *Daemon) reconcileFibMultipathHashPolicy(enabled bool) {
+	// #18561: the HA reconcile calls this outside applySem; serialize the
+	// knob owner's assert/release against the commit path.
+	d.fibHashMu.Lock()
+	defer d.fibHashMu.Unlock()
 	if enabled {
 		prior := fibPriorOnFirstAssert17068(d)
 		if prior != "" {
@@ -720,7 +759,14 @@ func (d *Daemon) scheduleIPMonGating(reason string) {
 		return
 	}
 	ctx := d.applyCancelCtx()
-	go func() {
+	// #18561: coalesce behind the RG-edge debounce. When the gate changes,
+	// the reconcile holds applySem across an FRR reload and a snapshot
+	// publish (300-600 ms). On a crash takeover it started between RG1's and
+	// RG2's activations and RG2's synchronous connected-route republish
+	// (#16270) waited for it: RG2 went active 0.52 s after peer loss on loss
+	// (0.0.26110). One reconcile after the burst reads the gate predicate at
+	// run time, so it covers every joined edge.
+	d.ipmonGateHA.schedule(frrHAReconcileDebounce, func() {
 		if err := d.applySem.Acquire(ctx, 1); err != nil {
 			return
 		}
@@ -730,5 +776,5 @@ func (d *Daemon) scheduleIPMonGating(reason string) {
 		}
 		d.reconcileIPMonGating()
 		_ = reason
-	}()
+	})
 }
