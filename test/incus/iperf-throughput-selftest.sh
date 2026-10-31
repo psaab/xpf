@@ -981,8 +981,8 @@ done
 
 
 # --- #18617: planned moves are SCORED, not excused (seat Y) -----------------
-# The crash keeps its excused [T, T+3] window (--event-sec; detection of
-# 1.0-2.2 s is by design). A move the harness makes itself (--planned-move) is
+# The crash keeps its excused [T, T+3] window (--event-sec; its detection and
+# activation, about 1.1-1.5 s in the lab, are by design). A move the harness makes itself (--planned-move) is
 # scored like H11 at iperf3's 1 s resolution: no stall PASS; one stream
 # stalled at most 10 s and recovered COST; an all-stream zero interval, two
 # stalled streams, a longer stall, or a stream that never recovers FAIL. Its

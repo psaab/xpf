@@ -322,7 +322,9 @@ def summarize(path, args):
         intervals = [parsed for parsed, _ in kept]
         normalized_intervals = [raw for _, raw in kept]
     # EXCUSED windows (--event-sec): transitions whose outage is by design,
-    # i.e. the crash, where peer-loss detection alone takes 1.0-2.2 s. Their
+    # i.e. the crash: in the lab peer-loss detection takes about 0.8-1.05 s
+    # from the crash when the #18570 probe goes unanswered (about 1.2 s more
+    # for a peer without ack support), then activation 0.34-0.44 s. Their
     # zero intervals are not counted anywhere.
     exclude_windows = merge_windows(
         (float(event_sec), float(event_sec) + args.event_window_sec)

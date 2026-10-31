@@ -989,8 +989,9 @@ socket half-open, so `syncSuppressesPeerTimeoutLocked`'s 2 s recency window
 kept the dead peer alive for up to 2 s past the heartbeat threshold (loss:
 peer loss declared 0.7-1.58 s after the kill at 200 ms x 5). For a peer that
 answers sync-level heartbeats, a suppressed timeout tick now needs a sync frame
-newer than a liveness probe sent one tick before the timeout
-(`prearmPeerLivenessProbe`, `peerAnsweredLivenessProbeLocked`). On loss
+handled after a liveness probe sent at the first missed heartbeat, once the last
+heartbeat is 1.5 intervals old (`prearmPeerLivenessProbe`,
+`peerAnsweredLivenessProbeLocked`). On loss
 (0.0.26111) declaration came about 1.0 s after the last delivered ping, i.e. at
 the threshold. The crash ping outage went from 2.20 s (baseline) to 1.37 s
 together with #18565, which takes the RG-edge FRR and ip-monitoring reconciles

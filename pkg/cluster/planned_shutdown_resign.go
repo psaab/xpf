@@ -73,7 +73,9 @@ const PlannedShutdownMonitorCost = maxRedundancyGroupWeight
 //
 // RESIDUAL, stated rather than implied: "no live peer" means peerAlive, and a
 // peer that died within the loss-detection window still reads as alive —
-// roughly 0.5-2.1 s at defaults, up to the 5 s sync-suppression cap
+// about 0.4-0.525 s after a hard crash at defaults when the #18570 probe goes
+// unanswered, longer for a peer without ack support or with pre-crash frames
+// handled after the probe, up to the 5 s sync-suppression cap
 // (heartbeat_suppress.go). A stop inside that window still resigns, the
 // still-live watcher sees the RG0 demotion, and a pending commit-confirmed is
 // confirmed exactly as above. Closing it would need a fresher liveness proof

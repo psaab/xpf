@@ -357,7 +357,7 @@ can be up to about 1 s off iperf's own clock.
 
 | Event | Anchors | Kind | How its zero intervals are scored |
 |---|---|---|---|
-| the crash (`failover_at_seconds`) | the crash instant | **excused** (`--event-sec`) | not counted: peer-loss detection of 1.0–2.2 s is by design |
+| the crash (`failover_at_seconds`) | the crash instant | **excused** (`--event-sec`) | not counted: peer-loss detection is by design (in the lab about 1.0–1.05 s after the last heartbeat, 0.8–1.05 s after the crash, when the #18570 probe goes unanswered; about 1.2 s more under the sync-recency rule for a peer without ack support, whose last sync frame is about one interval younger than its last heartbeat) |
 | the RG1 move that starts the split slice (RG1 on node0, RG0/RG2 on node1) | the instant before the request, and the poll-observed landing | **planned** (`--planned-move rg1-split=...`) | scored as a move, below |
 | the RG0/RG2 failback that ends the split | the instant before each of the two requests, and each RG's poll-observed landing | **planned** (`--planned-move rg0-rg2-failback=...`) | scored as a move, below |
 
