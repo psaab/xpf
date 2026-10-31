@@ -1344,6 +1344,14 @@ construction**.
     `conf.d/ubuntu-nts.conf`; those pools are hostnames that chrony
     resolves in the default instance, and before the binding they showed
     reach 0. They are not xpf's and are left alone.
+  - **Hostnames and trust:** `bindacqdevice` binds chrony's NTP sockets,
+    not its resolver, so use IP-address servers where the default instance
+    has no route (a hostname is resolved outside the binding). The lab
+    points at public servers over unauthenticated NTP; an on-path attacker
+    who can move a node's clock can push the pair past the fabric token's
+    wall-clock window (which has no nonce — #7487), denying cross-node RPC
+    but not forging it. Production clusters should prefer internal or NTS
+    sources.
   - **Downgrade:** a build older than #18584 does not know
     `/etc/chrony/conf.d/xpf-acquisition.conf` and leaves it in place, so
     chrony stays bound to `vrf-mgmt` (which still works: the VRF exists on

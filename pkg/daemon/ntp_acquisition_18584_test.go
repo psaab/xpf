@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"reflect"
 	"strings"
@@ -56,8 +57,16 @@ func TestRenderChronyAcquisition18584(t *testing.T) {
 // chrony even when the file is already on disk — chronyd may have started
 // before the VRF it binds to existed. Once that restart succeeded, an
 // unchanged apply restarts nothing.
+func stubChronySynced18584(t *testing.T, synced bool) {
+	t.Helper()
+	orig := chronySyncedFn
+	chronySyncedFn = func() bool { return synced }
+	t.Cleanup(func() { chronySyncedFn = orig })
+}
+
 func TestApplySystemNTPAcquisitionBinding18584(t *testing.T) {
 	d, calls, setOutcome := chronyDaemon6800(t)
+	stubChronySynced18584(t, false)
 	cfg := ntpRICfg18584("mgmt")
 
 	d.applySystemNTP(cfg)
@@ -103,6 +112,72 @@ func TestApplySystemNTPAcquisitionBinding18584(t *testing.T) {
 	}
 }
 
+// #18584 review seat AE: the once-per-process restart is skipped when chrony
+// already reports a synchronised reference over an unchanged binding — a
+// gratuitous restart leaves it unsynchronised for ~10 s, which the clock
+// monitor raises and a pending `commit confirmed` recovery reads as a fault.
+// A CHANGED binding file still restarts, synced or not.
+func TestAcquisitionStartRestartSkippedWhenSynced18584(t *testing.T) {
+	d, calls, _ := chronyDaemon6800(t)
+	stubChronySynced18584(t, false)
+	cfg := ntpRICfg18584("mgmt")
+	d.applySystemNTP(cfg) // writes the file, restarts
+	stubChronySynced18584(t, true)
+	d2 := &Daemon{}
+	d2.applySystemNTP(cfg)
+	if got := len(calls()); got != 1 {
+		t.Fatalf("a new process over an unchanged binding with chrony synced must not restart; requests=%v", calls())
+	}
+	d2.applySystemNTP(cfg)
+	if got := len(calls()); got != 1 {
+		t.Fatalf("the skip must be remembered for the process; requests=%v", calls())
+	}
+	// A changed binding restarts even though chrony is synced.
+	blue := ntpRICfg18584("blue")
+	blue.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue", InstanceType: "virtual-router"}}
+	d3 := &Daemon{}
+	d3.applySystemNTP(blue)
+	if got := calls(); len(got) != 2 || !got[1][1] {
+		t.Fatalf("a changed binding must take the restart leg; requests=%v", got)
+	}
+}
+
+// #18584 review seat AE: with a binding on disk the conf.d leg RESTARTS
+// chrony outright. A reload that "succeeds" (a unit with an ExecReload)
+// would leave chronyd on its unbound sockets.
+func TestChronyRestartsOutrightWithABinding18584(t *testing.T) {
+	dir := t.TempDir()
+	orig, origRun := chronyAcquisitionPath, chronyRunCmd
+	chronyAcquisitionPath = dir + "/xpf-acquisition.conf"
+	var ran [][]string
+	chronyRunCmd = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		ran = append(ran, append([]string{name}, args...))
+		return nil, nil // every command "succeeds", reload included
+	}
+	t.Cleanup(func() { chronyAcquisitionPath, chronyRunCmd = orig, origRun })
+	reloadChronyRuntime(false, true)
+	if len(ran) != 1 || strings.Join(ran[0], " ") != "systemctl reload chrony" {
+		t.Fatalf("without a binding the leg tries a reload first; ran=%v", ran)
+	}
+	if err := os.WriteFile(chronyAcquisitionPath, []byte("bindacqdevice vrf-mgmt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ran = nil
+	reloadChronyRuntime(false, true)
+	if len(ran) != 1 || strings.Join(ran[0], " ") != "systemctl restart chrony" {
+		t.Fatalf("with a binding the leg must restart, not reload; ran=%v", ran)
+	}
+}
+
+func TestChronyTrackingSynced18584(t *testing.T) {
+	if !chronyTrackingSynced("Reference ID    : A29FC801 (162.159.200.1)\nLeap status     : Normal\n") {
+		t.Fatal("Normal must read as synced")
+	}
+	if chronyTrackingSynced("Reference ID    : 00000000 ()\nLeap status     : Not synchronised\n") || chronyTrackingSynced("") {
+		t.Fatal("Not synchronised / empty must not read as synced")
+	}
+}
+
 // #18584 over-reach guard: a default-instance NTP config never writes the
 // acquisition file and never takes the restart leg for it.
 func TestApplySystemNTPDefaultInstanceWritesNoBinding18584(t *testing.T) {
@@ -120,6 +195,7 @@ func TestApplySystemNTPDefaultInstanceWritesNoBinding18584(t *testing.T) {
 // including the binding, and takes the conf.d restart leg for it.
 func TestApplySystemNTPDisabledRemovesBinding18584(t *testing.T) {
 	d, calls, _ := chronyDaemon6800(t)
+	stubChronySynced18584(t, false)
 	d.applySystemNTP(ntpRICfg18584("mgmt"))
 	if _, err := os.Stat(chronyAcquisitionPath); err != nil {
 		t.Fatalf("precondition: binding written: %v", err)

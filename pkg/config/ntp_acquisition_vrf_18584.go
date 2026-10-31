@@ -89,10 +89,12 @@ func ntpInstanceLabel(ri string) string {
 // (#18584). The secondary has no default-instance egress, so chrony there has
 // no reachable source; the remedy names the management VRF.
 const clusterNTPDefaultInstanceAdvisory = "chassis cluster NTP servers are reached through the default " +
-	"routing instance: only the node that owns the WAN redundancy group has a default-instance route " +
-	"off the box, so the other node never syncs and its clock drifts until cross-node fabric RPC " +
-	"(30-second token window) fails. Reach them through the management VRF: " +
-	"`set system ntp server <address> routing-instance " + ManagementVRFInstanceName + "` (#18584)."
+	"routing instance: when the default instance's off-box route is a RETH (the usual cluster shape), only " +
+	"the node that owns that redundancy group can reach them, so the other node does not sync and its clock " +
+	"drifts until cross-node fabric RPC (30-second token window) fails. Unless each node has its own uplink " +
+	"in the default instance, reach them through the management VRF: " +
+	"`set system ntp server <ip-address> routing-instance " + ManagementVRFInstanceName + "` (#18584; " +
+	"a hostname server is still resolved outside the binding, so prefer IP addresses)."
 
 // appendClusterNTPInstanceAdvisoryLocked adds the #18584 advisory. It shares
 // the #8357 advisory's suppression on the tolerant (boot / peer-sync) compile

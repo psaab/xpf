@@ -1330,6 +1330,33 @@ func renderChronyAcquisition(cfg *config.Config) string {
 	return fmt.Sprintf("# Managed by xpfd: NTP servers are reached through routing-instance %s (#18584)\nbindacqdevice %s\n", ri, dev)
 }
 
+// chronyAcquisitionBindingPresent reports whether the managed acquisition
+// file currently carries a binding.
+func chronyAcquisitionBindingPresent() bool {
+	b, err := os.ReadFile(chronyAcquisitionPath)
+	return err == nil && strings.Contains(string(b), "bindacqdevice ")
+}
+
+// chronySyncedFn reports whether chronyd currently reports a synchronised
+// reference (`Leap status : Normal`). A var so the once-per-process restart's
+// skip can be driven without a real chronyd.
+var chronySyncedFn = func() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := chronyRunCmd(ctx, "chronyc", "-n", "tracking")
+	return err == nil && chronyTrackingSynced(string(out))
+}
+
+func chronyTrackingSynced(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if ok && strings.TrimSpace(k) == "Leap status" {
+			return strings.TrimSpace(v) == "Normal"
+		}
+	}
+	return false
+}
+
 // chronyAcquisitionDevice returns the honoured routing instance and its VRF
 // device, or ("", "") when chrony stays in the default instance.
 func chronyAcquisitionDevice(cfg *config.Config) (string, string) {
@@ -1366,7 +1393,10 @@ func renderChronySources(servers []string, opts map[string]config.NTPServerOptio
 		// address list as if they were extra servers, so `prefer` reached this
 		// function AS A SERVER NAME and was rendered as its own source line.
 		// `version` takes chrony's own spelling. `routing-instance` has no
-		// chrony equivalent; the compiler retains it in typed config and emits
+		// PER-SOURCE chrony equivalent: when every server names the same
+		// VRF-backed instance it becomes the global `bindacqdevice`
+		// (renderChronyAcquisition, #18584); otherwise the compiler retains it
+		// in typed config and emits
 		// a commit advisory rather than silently applying it here.
 		//
 		// #14596: `key` is NEVER rendered. xpf writes no chrony keyfile, so
@@ -1525,6 +1555,14 @@ func reloadChronyRuntime(sourcesChanged, thresholdChanged bool) chronyReloadOutc
 		{"systemctl", "restart", "chrony"},
 		{"systemctl", "restart", "chronyd"},
 	}
+	// #18584: `bindacqdevice` (and the makestep window) take effect only at
+	// chronyd start. The reload attempts above "work" today only because
+	// Ubuntu's chrony.service has no ExecReload and they fail through to a
+	// restart; a unit that gained one would report the reload done while
+	// chronyd kept its unbound sockets. With a binding on disk, restart.
+	if chronyAcquisitionBindingPresent() {
+		commands = commands[2:]
+	}
 	for _, cmd := range commands {
 		if cmdOut, err := chronyRunCmd(ctx, cmd[0], cmd[1:]...); err == nil {
 			return out
@@ -1592,8 +1630,18 @@ func (d *Daemon) applySystemNTP(cfg *config.Config) {
 	// binding — this tail runs after the VRFs are applied. It also re-opens
 	// chrony's `makestep` window, so a node that booted from a lagging RTC
 	// is stepped as soon as the bound source answers.
+	//
+	// Review seat AE: skip it when chrony already reports a synchronised
+	// reference — its bound sockets evidently work, and a gratuitous restart
+	// leaves it "Not synchronised" for ~10 s, which the local clock monitor
+	// raises as a CRITICAL alarm and a pending `commit confirmed` recovery
+	// reads as a clock fault, and re-opens the makestep window for nothing.
 	if acq != "" && !d.chronyAcqStartRestarted {
-		acqChanged = true
+		if !acqChanged && chronySyncedFn() {
+			d.chronyAcqStartRestarted = true
+		} else {
+			acqChanged = true
+		}
 	}
 	thresholdChanged = thresholdChanged || acqChanged
 	sourcesChanged = sourcesChanged || sourcesOwed
