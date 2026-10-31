@@ -179,9 +179,20 @@ fn ethertype(f: Family) -> u16 {
     if f == Family::V4 { 0x0800 } else { 0x86dd }
 }
 
-fn meta_for(f: Family, ingress: i32, l3: usize, protocol: u8, len: usize) -> UserspaceDpMeta {
+/// #18562 (review seat L, M1): stamp the flow tuple the way the XDP shim does
+/// (`userspace-xdp` `parse_l4`): addresses (v4 in the first four bytes, v6 in
+/// all sixteen), TCP/UDP ports from L4 bytes 0..4, and for ICMP/ICMPv6 L4
+/// bytes 4..6 (the echo identifier; the unused word of an error) as the source
+/// port with a zero destination port. The flowless fallback builds its L3
+/// context from these (`l3_enforcement_flow_from_meta`); left zero, an
+/// UNMATCHED error routed 0.0.0.0 / :: and died HAInactive or martian here
+/// instead of meeting the live `wan -> lan` POLICY_DENY. The ports matter too:
+/// stamping addresses alone made the echo probe's meta flow key its session
+/// with identifier 0, so no quote could match it.
+fn meta_for(f: Family, ingress: i32, l3: usize, protocol: u8, frame: &[u8]) -> UserspaceDpMeta {
+    let len = frame.len();
     let l4 = l3 + if f == Family::V4 { 20 } else { 40 };
-    UserspaceDpMeta {
+    let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
@@ -197,7 +208,33 @@ fn meta_for(f: Family, ingress: i32, l3: usize, protocol: u8, len: usize) -> Use
         config_generation: 7,
         fib_generation: 9,
         ..UserspaceDpMeta::default()
+    };
+    with_shim_flow_addrs(f, meta, frame)
+}
+
+/// The shim's flow-tuple stamping, applied to an existing meta.
+fn with_shim_flow_addrs(f: Family, mut meta: UserspaceDpMeta, frame: &[u8]) -> UserspaceDpMeta {
+    let l3 = meta.l3_offset as usize;
+    let l4 = meta.l4_offset as usize;
+    let be16 = |at: usize| u16::from_be_bytes([frame[at], frame[at + 1]]);
+    (meta.flow_src_port, meta.flow_dst_port) = match meta.protocol {
+        PROTO_TCP | PROTO_UDP => (be16(l4), be16(l4 + 2)),
+        PROTO_ICMP | PROTO_ICMPV6 => (be16(l4 + 4), 0),
+        _ => (0, 0),
+    };
+    meta.flow_src_addr = [0u8; 16];
+    meta.flow_dst_addr = [0u8; 16];
+    match f {
+        Family::V4 => {
+            meta.flow_src_addr[..4].copy_from_slice(&frame[l3 + 12..l3 + 16]);
+            meta.flow_dst_addr[..4].copy_from_slice(&frame[l3 + 16..l3 + 20]);
+        }
+        Family::V6 => {
+            meta.flow_src_addr.copy_from_slice(&frame[l3 + 8..l3 + 24]);
+            meta.flow_dst_addr.copy_from_slice(&frame[l3 + 24..l3 + 40]);
+        }
     }
+    meta
 }
 
 /// The LAN host's probe as it enters reth1.0.
@@ -207,7 +244,7 @@ fn probe_frame(f: Family, probe: Probe, ttl: u8) -> (Vec<u8>, UserspaceDpMeta) {
     finish_l4_checksum(f, probe, client(f), server(f), &mut l4);
     let mut frame = eth(TEST_LAN_MAC, CLIENT_MAC, None, ethertype(f));
     frame.extend_from_slice(&ip_packet(client(f), server(f), ttl, proto(f, probe), &l4));
-    let meta = meta_for(f, LAN_IF, 14, proto(f, probe), frame.len());
+    let meta = meta_for(f, LAN_IF, 14, proto(f, probe), &frame);
     (frame, meta)
 }
 
@@ -253,7 +290,7 @@ fn error_frame(
     icmp[2..4].copy_from_slice(&csum.to_be_bytes());
     let mut frame = eth(TEST_WAN_MAC, UPSTREAM_MAC, Some(WAN_VID), ethertype(f));
     frame.extend_from_slice(&ip_packet(sender, quoted_src, 250, outer_proto, &icmp));
-    let meta = meta_for(f, WAN_IF, 18, outer_proto, frame.len());
+    let meta = meta_for(f, WAN_IF, 18, outer_proto, &frame);
     (frame, meta)
 }
 
@@ -598,7 +635,7 @@ fn fabric_probe_frame(f: Family, probe: Probe) -> (Vec<u8>, UserspaceDpMeta) {
     frame[0..6].copy_from_slice(&TEST_FABRIC_MAC);
     let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
-    let meta = meta_for(f, FABRIC_IF, 14, proto(f, probe), frame.len());
+    let meta = meta_for(f, FABRIC_IF, 14, proto(f, probe), &frame);
     (frame, meta)
 }
 
@@ -656,7 +693,7 @@ fn lan_owner_delivers(
         FABRIC_IF,
         14,
         if f == Family::V4 { PROTO_ICMP } else { PROTO_ICMPV6 },
-        fabric_frame.len(),
+        fabric_frame,
     );
     let mut fab = binding_on(FABRIC_IF);
     let before = sessions.len();
@@ -1147,22 +1184,19 @@ fn split_rg_first_error_on_another_worker_reaches_lan_host_18174() {
         assert_eq!(n1_shared.owner_idx.punt_seeds.len(), 1, "{label}: premise: the seed is in the node directory");
         let mut n1_worker_b = SessionTable::new();
         n1_worker_b.set_punt_seed_directory(Arc::clone(&n1_shared.owner_idx.punt_seeds));
-        let emeta = meta_for(f, FABRIC_IF, 14, if f == Family::V4 { PROTO_ICMP } else { PROTO_ICMPV6 }, fabric_frame.len());
+        let emeta = meta_for(f, FABRIC_IF, 14, if f == Family::V4 { PROTO_ICMP } else { PROTO_ICMPV6 }, &fabric_frame);
         let mut fab1 = binding_on(FABRIC_IF);
         let (batch, dbg) =
             run_on_worker(&mut fab1, &mut n1_worker_b, &n1_fwd, &ha(false, true), &fabric_frame, emeta, &n1_neighbors, &n1_shared);
         assert_eq!(batch.invalid_fabric_stamp_drops, 0, "{label}: stamp accepted");
-        // L2 (#18562): `policy_deny` alone cannot tell broken from fixed here.
-        // Measured on the broken path (the directory consult disabled): the
-        // unmatched error falls to flowless enforcement and this harness ends
-        // it as `ha_inactive=1` / `exception_packets=1`, with `policy_deny=0`
-        // (live, the same NoMatch was logged POLICY_DENY wan -> lan). Pin the
-        // drop the harness actually produces, keep `policy_deny` for the
-        // matched-but-refused class (#18174's restamp defect bumps it through
-        // `record_queued_embedded_icmp_refusal`), and require delivery.
-        assert_eq!(dbg.ha_inactive, 0, "{label}: the first error must not fall through to the flowless drop");
-        assert_eq!(batch.exception_packets, 0, "{label}: no exception drop on worker B");
-        assert_eq!(dbg.policy_deny, 0, "{label}: the first error must not be policy-refused on another worker");
+        // L2 + review M1 (#18562): with `meta_for` now carrying the flow
+        // addresses the shim fills, the broken path (directory consult
+        // disabled) reproduces the LIVE signature: NoMatch, flowless
+        // `wan -> lan`, `policy_deny=1`. So `policy_deny == 0` is now a real
+        // discriminator (it was 0 either way while the zero-address meta sent
+        // the unmatched error to HAInactive), alongside delivery.
+        assert_eq!(dbg.policy_deny, 0, "{label}: the first error must not be default-denied on another worker");
+        let _ = &batch;
         assert_eq!(fab1.scratch.scratch_forwards.len(), 1, "{label}: delivered to the LAN host from worker B");
         assert_delivered_to_lan_host(&fab1.scratch.scratch_forwards[0], f, probe, ErrKind::TimeExceeded, hop(f), &label);
     }
@@ -1205,14 +1239,15 @@ fn cross_worker_punt_seed_never_matches_off_fabric_18562() {
         let (_batch, dbg) =
             run_on_worker(&mut wan, &mut n1_worker_b, &n1_fwd, &ha(true, true), &eframe, emeta, &n1_neighbors, &n1_shared);
         // The matcher returns NoMatch and the error takes the flowless path,
-        // which refuses it here (measured: the destination-class drop,
-        // `martian_dropped=1`) — never the RELATED queue the directory row
-        // would have opened.
+        // where (with the shim's flow addresses in the meta, review M1) it
+        // meets the same `wan -> lan` default deny as any unsolicited error —
+        // never the RELATED queue the directory row would have opened.
         assert!(
             wan.scratch.scratch_forwards.is_empty(),
             "{label}: an off-fabric error must not be matched by a punt seed"
         );
         assert_eq!(wan.scratch.scratch_recycle.len(), 1, "{label}: the refused descriptor is recycled");
+        assert_eq!(dbg.policy_deny, 1, "{label}: refused by `wan -> lan` policy, as live");
         assert_eq!(dbg.ha_inactive, 0, "{label}: the refusal is not an HA verdict (both RGs are active)");
     }
 }

@@ -162,8 +162,8 @@ fn retire_is_fenced_by_table_and_incarnation_18562() {
     assert!(dir.probe(&key, T0 + 2).is_none());
 }
 
-/// The row stops matching at the seed's idle deadline AS INSTALLED; it is
-/// never extended, so a seed kept alive by traffic outlives its row (fail
+/// The row stops matching at the seed's idle deadline AS INSTALLED, capped at
+/// the bridge TTL; it is never extended, so a seed kept alive by traffic outlives its row (fail
 /// closed) rather than the reverse.
 #[test]
 fn row_stops_matching_at_the_install_deadline_18562() {
@@ -173,39 +173,285 @@ fn row_stops_matching_at_the_install_deadline_18562() {
     install(&mut table, &key, SessionOrigin::FabricPuntSeed, T0);
     let deadline = dir.probe(&key, T0).expect("published").expires_at_ns;
     assert!(deadline > T0, "premise: a positive idle window");
+    assert!(
+        deadline <= T0 + PUNT_SEED_ROW_TTL_NS,
+        "a row bridges at most the TTL, however long the seed's idle window"
+    );
     assert!(dir.probe(&key, deadline - 1).is_some());
     assert!(dir.probe(&key, deadline).is_none(), "the row must not outlive the installed deadline");
 }
 
-/// At the cap the directory first prunes rows past their deadline, then
-/// refuses (and counts) rather than evicting a live row.
-#[test]
-fn full_directory_prunes_expired_rows_then_refuses_18562() {
-    let dir = PuntSeedDirectory::new();
-    let row = |expires_at_ns| PuntSeedRow {
+fn row_at(expires_at_ns: u64, session_id: u64) -> PuntSeedRow {
+    PuntSeedRow {
         decision: decision(),
         metadata: metadata(),
-        session_id: 1,
+        session_id,
         table_token: 1,
         expires_at_ns,
-    };
-    let key_n = |n: usize| SessionKey {
-        src_port: (n & 0xffff) as u16,
-        dst_port: (n >> 16) as u16,
-        ..udp_key()
-    };
-    for n in 0..PUNT_SEED_DIRECTORY_CAP {
-        assert!(dir.publish(&key_n(n), row(T0), T0 - 1));
     }
-    assert_eq!(dir.len(), PUNT_SEED_DIRECTORY_CAP);
-    let extra = key_n(PUNT_SEED_DIRECTORY_CAP);
-    assert!(dir.publish(&extra, row(T0 + 10), T0), "expired rows are pruned to make room");
-    assert_eq!(dir.len(), 1, "every expired row was pruned");
-    for n in 1..PUNT_SEED_DIRECTORY_CAP {
-        assert!(dir.publish(&key_n(n), row(T0 + 10), T0));
+}
+
+/// `n` distinct keys that all hash to `dir`'s shard 0, so a cell can drive one
+/// shard to its cap deterministically.
+fn keys_in_one_shard(dir: &PuntSeedDirectory, n: usize) -> Vec<SessionKey> {
+    let target = dir.shard_of_for_test(&udp_key());
+    let mut out = Vec::with_capacity(n);
+    let mut i: u32 = 0;
+    while out.len() < n {
+        let key = SessionKey {
+            src_port: (i & 0xffff) as u16,
+            dst_port: (i >> 16) as u16,
+            ..udp_key()
+        };
+        if dir.shard_of_for_test(&key) == target {
+            out.push(key);
+        }
+        i += 1;
     }
-    let before = PUNT_SEED_DIRECTORY_FULL_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(!dir.publish(&key_n(0), row(T0 + 10), T0), "a full directory of live rows refuses");
-    assert!(PUNT_SEED_DIRECTORY_FULL_TOTAL.load(std::sync::atomic::Ordering::Relaxed) > before);
-    assert!(dir.probe(&extra, T0).is_some(), "no live row was evicted");
+    out
+}
+
+/// Review seat L/K (#18562): at the cap a publish must cost O(1) amortized —
+/// the pre-review design scanned the whole map under a node mutex on EVERY
+/// publish at the cap (139-284 us each). Pinned by work (queue entries and rows
+/// touched), not time: a full shard of LIVE rows refuses without touching
+/// anything, and nothing live is evicted. RED on the old full-map `retain`
+/// (CAP touches per refused publish).
+#[test]
+fn full_shard_of_live_rows_refuses_in_constant_work_18562() {
+    let dir = PuntSeedDirectory::new();
+    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let keys = keys_in_one_shard(&dir, cap + 1000);
+    for (n, key) in keys[..cap].iter().enumerate() {
+        assert!(dir.publish(key, row_at(T0 + 1_000_000_000, n as u64), T0));
+    }
+    let work_before = dir.work_for_test();
+    let refused_before = PUNT_SEED_DIRECTORY_FULL_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    for (n, key) in keys[cap..].iter().enumerate() {
+        assert!(!dir.publish(key, row_at(T0 + 1_000_000_000, (cap + n) as u64), T0), "a full shard refuses");
+    }
+    assert_eq!(dir.work_for_test() - work_before, 0, "a refusal at the cap must touch nothing");
+    assert!(
+        PUNT_SEED_DIRECTORY_FULL_TOTAL.load(std::sync::atomic::Ordering::Relaxed) - refused_before >= 1000,
+        "each refusal is counted"
+    );
+    assert!(keys[..cap].iter().all(|k| dir.probe(k, T0).is_some()), "no live row was evicted");
+}
+
+/// Steady state at the cap: rows keep expiring while new flows keep arriving.
+/// Each publish pops only what has expired, so total work stays within a
+/// constant factor of the publish count. RED on any per-publish scan.
+#[test]
+fn steady_state_at_cap_costs_constant_amortized_work_18562() {
+    let dir = PuntSeedDirectory::new();
+    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let n = 4 * cap;
+    let keys = keys_in_one_shard(&dir, cap + n);
+    for (i, key) in keys[..cap].iter().enumerate() {
+        assert!(dir.publish(key, row_at(T0 + 1 + i as u64, i as u64), T0));
+    }
+    let work_before = dir.work_for_test();
+    for (j, key) in keys[cap..].iter().enumerate() {
+        let now = T0 + 1 + j as u64;
+        assert!(
+            dir.publish(key, row_at(now + cap as u64, (cap + j) as u64), now),
+            "a row expired, so the publish fits"
+        );
+    }
+    let work = dir.work_for_test() - work_before;
+    assert!(work <= 3 * n as u64, "{work} units of work for {n} publishes at the cap");
+    assert!(dir.len() <= cap);
+}
+
+/// Retired rows leave their queue slots behind (O(1) retire); the queue is
+/// compacted in one pass when it reaches twice the shard cap, which pays for
+/// itself — total work stays linear in publishes, and the queue never grows
+/// past the compaction point.
+#[test]
+fn retire_churn_compacts_the_queue_in_amortized_constant_work_18562() {
+    let dir = PuntSeedDirectory::new();
+    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let rounds = 8;
+    let keys = keys_in_one_shard(&dir, cap * rounds);
+    let shard = dir.shard_of_for_test(&keys[0]);
+    let work_before = dir.work_for_test();
+    let mut publishes = 0u64;
+    for (i, key) in keys.iter().enumerate() {
+        assert!(dir.publish(key, row_at(T0 + 3_600_000_000_000, i as u64), T0), "churned rows never fill the shard");
+        publishes += 1;
+        dir.retire(key, 1, i as u64);
+        assert!(dir.queue_len_for_test(shard) <= 2 * cap, "the queue is bounded by compaction");
+    }
+    let work = dir.work_for_test() - work_before;
+    assert!(work <= 4 * publishes, "{work} units of work for {publishes} publish+retire pairs");
+    assert_eq!(dir.len(), 0);
+}
+
+/// Measurement harness for the review (not a gate): ns per publish below the
+/// cap, at a full shard of live rows, and in steady state at the cap. Run with
+/// `--ignored --nocapture`.
+#[test]
+#[ignore = "timing harness for #18562 review; run explicitly"]
+fn punt_seed_directory_publish_cost_bench_18562() {
+    let reps = 20_000usize;
+    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let time = |f: &mut dyn FnMut()| {
+        let t = std::time::Instant::now();
+        f();
+        t.elapsed().as_nanos() as f64 / reps as f64
+    };
+    let dir = PuntSeedDirectory::new();
+    let below = keys_in_one_shard(&dir, reps);
+    let mut i = 0u64;
+    let below_ns = time(&mut || {
+        for key in &below {
+            i += 1;
+            let _ = dir.publish(key, row_at(T0 + i, i), T0);
+            dir.retire(key, 1, i);
+        }
+    });
+    let full = PuntSeedDirectory::new();
+    let keys = keys_in_one_shard(&full, cap + reps);
+    for (n, key) in keys[..cap].iter().enumerate() {
+        full.publish(key, row_at(u64::MAX, n as u64), T0);
+    }
+    let refused_ns = time(&mut || {
+        for (n, key) in keys[cap..].iter().enumerate() {
+            let _ = full.publish(key, row_at(u64::MAX, n as u64), T0);
+        }
+    });
+    let steady = PuntSeedDirectory::new();
+    let keys = keys_in_one_shard(&steady, cap + reps);
+    for (n, key) in keys[..cap].iter().enumerate() {
+        steady.publish(key, row_at(T0 + 1 + n as u64, n as u64), T0);
+    }
+    let steady_ns = time(&mut || {
+        for (j, key) in keys[cap..].iter().enumerate() {
+            let now = T0 + 1 + j as u64;
+            let _ = steady.publish(key, row_at(now + cap as u64, (cap + j) as u64), now);
+        }
+    });
+    // Review LOW: growing a shard rehashes it under its lock. Worst single
+    // publish while one shard fills from empty to its cap (<= 1024 rows).
+    let grow = PuntSeedDirectory::new();
+    let keys = keys_in_one_shard(&grow, cap);
+    let mut grow_max_ns = 0u128;
+    for (n, key) in keys.iter().enumerate() {
+        let t = std::time::Instant::now();
+        let _ = grow.publish(key, row_at(u64::MAX, n as u64), T0);
+        grow_max_ns = grow_max_ns.max(t.elapsed().as_nanos());
+    }
+    eprintln!(
+        "R18562BENCH publish ns: below-cap(publish+retire)={below_ns:.0} at-cap-refused={refused_ns:.0} steady-at-cap={steady_ns:.0} worst-growth-publish={grow_max_ns}"
+    );
+}
+
+/// Every in-place writer of a forward entry's decision or metadata retires a
+/// seed's row before it rewrites it (review seat K: `revalidate_forwarding_
+/// resolution_with_egress_zone` rewrote resolution, owner RG and egress zone in
+/// place without retiring). One cell per writer.
+#[test]
+fn seed_resolution_revalidation_retires_its_row_18562() {
+    assert_removal_path_retires("revalidate resolution + egress zone", |t, k| {
+        assert!(t.as_mut().unwrap().revalidate_forwarding_resolution_with_egress_zone(
+            k,
+            decision().resolution,
+            Some(7),
+            Some(metadata().egress_zone + 1),
+        ));
+    });
+}
+
+#[test]
+fn seed_forward_egress_rebind_retires_its_row_18562() {
+    assert_removal_path_retires("rebind forward egress zone", |t, k| {
+        assert!(t.as_mut().unwrap().rebind_forward_egress_zone(k, metadata().egress_zone + 1));
+    });
+}
+
+#[test]
+fn seed_zone_pair_rebind_retires_its_row_18562() {
+    assert_removal_path_retires("rebind zones pair", |t, k| {
+        let m = metadata();
+        let _ = t.as_mut().unwrap().rebind_zones_pair(k, m.ingress_zone + 1, 0, m.egress_zone, 0);
+    });
+}
+
+#[test]
+fn seed_policy_pair_rebind_retires_its_row_18562() {
+    assert_removal_path_retires("rebind policy pair", |t, k| {
+        let m = metadata();
+        let _ = t.as_mut().unwrap().rebind_policy_pair(
+            k,
+            9,
+            1,
+            Arc::new(crate::policy::PolicyRuleCounter::default()),
+            m.ingress_zone,
+            0,
+            m.egress_zone,
+            0,
+        );
+    });
+}
+
+/// Publish never waits on the directory (review seat L: a worker blocked on the
+/// directory mutex stalls its whole RX loop). With the row's shard held by
+/// another thread for 300 ms, the publish returns `false` at once and is
+/// counted as contended. RED with a blocking `lock()` (the publish then waits
+/// out the holder and succeeds) — bounded, never a hang.
+#[test]
+fn publish_skips_a_held_shard_instead_of_waiting_18562() {
+    let dir = Arc::new(PuntSeedDirectory::new());
+    let key = udp_key();
+    let shard = dir.shard_of_for_test(&key);
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let holder = {
+        let dir = Arc::clone(&dir);
+        std::thread::spawn(move || {
+            dir.with_shard_held_for_test(shard, || {
+                held_tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            });
+        })
+    };
+    held_rx.recv().unwrap();
+    let contended_before =
+        PUNT_SEED_DIRECTORY_CONTENDED_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    let published = dir.publish(&key, row_at(T0 + 1_000_000_000, 1), T0);
+    let waited = started.elapsed();
+    holder.join().unwrap();
+    assert!(!published, "a held shard is skipped, not waited on");
+    assert!(waited < std::time::Duration::from_millis(100), "publish waited {waited:?}");
+    assert!(
+        PUNT_SEED_DIRECTORY_CONTENDED_TOTAL.load(std::sync::atomic::Ordering::Relaxed) > contended_before,
+        "the skip is counted"
+    );
+    assert!(dir.probe(&key, T0).is_none());
+}
+
+/// Review seat L (LOW): growing a shard rehashed it under its lock (a 97 us
+/// worst single publish while one shard filled). The first publish into an
+/// empty shard reserves its whole cap, and filling to the cap never resizes it
+/// again; a fully drained shard frees the reservation. RED without the
+/// first-publish reservation (capacity starts small and grows).
+#[test]
+fn shard_reserves_its_cap_once_and_never_resizes_while_populated_18562() {
+    let dir = PuntSeedDirectory::new();
+    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let keys = keys_in_one_shard(&dir, cap);
+    let shard = dir.shard_of_for_test(&keys[0]);
+    assert_eq!(dir.rows_capacity_for_test(shard), 0, "an unused shard holds nothing");
+    assert!(dir.publish(&keys[0], row_at(T0 + 10, 0), T0));
+    let reserved = dir.rows_capacity_for_test(shard);
+    assert!(reserved >= cap, "the first publish reserves the shard cap ({reserved} < {cap})");
+    for (n, key) in keys.iter().enumerate().skip(1) {
+        assert!(dir.publish(key, row_at(T0 + 10, n as u64), T0));
+        assert_eq!(dir.rows_capacity_for_test(shard), reserved, "no resize while filling (row {n})");
+    }
+    // Everything expires; the next publish into another shard leaves this one
+    // alone, so drive this shard's maintenance with a publish that lands here.
+    let late = keys_in_one_shard(&dir, cap + 1)[cap].clone();
+    assert!(dir.publish(&late, row_at(T0 + 20, 99_999), T0 + 11));
+    assert_eq!(dir.len(), 1, "the expired rows were reclaimed");
 }

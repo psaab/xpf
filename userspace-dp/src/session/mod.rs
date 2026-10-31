@@ -262,9 +262,12 @@ pub(crate) use discriminator::{TunnelDiscriminator, WireDiscriminator};
 mod routing_domain_wire;
 pub(crate) use key::*;
 pub(crate) use pmech_directory::*;
-pub(crate) use punt_seed_directory::{PuntSeedDirectory, PuntSeedRow};
+pub(crate) use punt_seed_directory::{
+    PuntSeedDirectory, PuntSeedRow, PUNT_SEED_DIRECTORY_CONTENDED_TOTAL,
+    PUNT_SEED_DIRECTORY_FULL_TOTAL,
+};
 #[cfg(test)]
-pub(crate) use punt_seed_directory::{PUNT_SEED_DIRECTORY_CAP, PUNT_SEED_DIRECTORY_FULL_TOTAL};
+pub(crate) use punt_seed_directory::PUNT_SEED_ROW_TTL_NS;
 pub(crate) use routing_domain_wire::{
     AMBIGUOUS_FABRIC_DOMAIN_BASE, QUARANTINED_ROUTING_DOMAIN,
     // #9546: named at the crate level so the conntrack mirror states absence
@@ -2758,6 +2761,29 @@ impl SessionTable {
         &self.punt_seeds
     }
 
+    /// #18562: a directory row is a snapshot taken at insert. Every in-place
+    /// writer of a FORWARD entry's decision or metadata calls this first, so
+    /// a seed it rewrites (resolution, owner RG, zone pair) loses its row
+    /// instead of leaving a stale snapshot behind — fail closed: the row only
+    /// ever answers an error the shared maps could not. The writers:
+    /// `refresh_in_place`, `revalidate_forwarding_resolution_with_egress_zone`,
+    /// `rebind_forward_egress_zone`, `rebind_policy_pair`, `rebind_zones_pair`
+    /// (`update_reverse_route_on_filter_hit` writes reverse entries only, and a
+    /// row is never a reverse entry).
+    fn retire_punt_seed_row_before_rewrite(&self, key: &SessionKey) {
+        if self.punt_seeds.len() == 0 {
+            return;
+        }
+        if let Some(&handle) = self.key_to_handle.get(key)
+            && let Some(record) = self.entries.get(handle as usize)
+            && record.key == *key
+            && record.entry.origin == SessionOrigin::FabricPuntSeed
+        {
+            self.punt_seeds
+                .retire(key, self.punt_seed_table_token, record.entry.session_id);
+        }
+    }
+
     /// #18550: the current activation epoch for `owner_rg_id`, if a reader is
     /// installed. Same index mapping as the wheel's `epoch_of`.
     pub(crate) fn current_rg_epoch(&self, owner_rg_id: i32) -> Option<u32> {
@@ -2963,6 +2989,9 @@ impl SessionTable {
         let hit_is_reverse = record.entry.metadata.is_reverse;
         let hit_nat = record.entry.decision.nat;
         let old_owner_rg_id = record.entry.metadata.owner_rg_id;
+        // #18562: this rewrites the hit's resolution / owner RG (and maybe the
+        // pair's egress zone, below) in place.
+        self.retire_punt_seed_row_before_rewrite(&canonical_key);
         if let Some(new_owner_rg_id) = owner_rg_id
             && new_owner_rg_id != old_owner_rg_id
         {
@@ -2996,6 +3025,7 @@ impl SessionTable {
                 )
             };
             if forward_key != reverse_key {
+                self.retire_punt_seed_row_before_rewrite(&forward_key);
                 if let Some(fwd) = self.entry_by_key_mut(&forward_key)
                     && !fwd.metadata.is_reverse
                     && fwd.metadata.egress_zone != new_zone
@@ -3058,6 +3088,8 @@ impl SessionTable {
         if fwd.metadata.is_reverse {
             return false;
         }
+        // #18562: the forward leg's egress zone is rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(&forward_key);
         if forward_key != reverse_key {
             if let Some(fwd) = self.entry_by_key_mut(&forward_key)
                 && fwd.metadata.egress_zone != new_egress_zone
@@ -3941,10 +3973,10 @@ impl SessionTable {
                     metadata: record.entry.metadata.clone(),
                     session_id: record.entry.session_id,
                     table_token: self.punt_seed_table_token,
-                    expires_at_ns: record
-                        .entry
-                        .created_ns
-                        .saturating_add(record.entry.expires_after_ns),
+                    expires_at_ns: PuntSeedRow::deadline(
+                        record.entry.created_ns,
+                        record.entry.expires_after_ns,
+                    ),
                 },
                 record.entry.created_ns,
             );
@@ -6724,6 +6756,8 @@ impl SessionTable {
         egress_zone: u32,
         egress_zone_check: u32,
     ) -> bool {
+        // #18562: the forward entry's policy and zone pair are rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(key);
         let Some(forward) = self.entry_by_key(key) else {
             return false;
         };
@@ -6792,6 +6826,8 @@ impl SessionTable {
         egress_zone: u32,
         egress_zone_check: u32,
     ) -> bool {
+        // #18562: the forward entry's zone pair is rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(key);
         let Some(forward) = self.entry_by_key(key) else {
             return false;
         };

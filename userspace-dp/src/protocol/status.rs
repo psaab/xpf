@@ -214,6 +214,19 @@ pub(crate) struct ProcessStatus {
     /// Additive + `default`ed (#1961).
     #[serde(rename = "nat_reverse_ambiguous_total", default)]
     pub nat_reverse_ambiguous_total: u64,
+    /// #18562: rows resident in the node's punt-seed directory (non-zero only
+    /// during an RG split). Additive + `default`ed (#1961).
+    #[serde(rename = "punt_seed_directory_rows", default)]
+    pub punt_seed_directory_rows: u64,
+    /// #18562: punt-seed directory publishes refused at a full shard — punted
+    /// flows whose cross-worker first error keeps the pre-#18562 verdict.
+    /// Additive + `default`ed (#1961).
+    #[serde(rename = "punt_seed_directory_full_total", default)]
+    pub punt_seed_directory_full_total: u64,
+    /// #18562: punt-seed directory publishes skipped on a contended shard
+    /// lock. Additive + `default`ed (#1961).
+    #[serde(rename = "punt_seed_directory_contended_total", default)]
+    pub punt_seed_directory_contended_total: u64,
     /// #6751 PR 2/3: interface-mode SNAT admissions that failed CLOSED with no
     /// free translated identity — a completed full-cycle PAT probe, a port-less
     /// protocol whose single identity is owned, or a peer-synced import whose

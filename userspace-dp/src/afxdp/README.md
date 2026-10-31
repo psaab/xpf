@@ -1044,8 +1044,8 @@ sync.
     returned NoMatch and was default-denied `wan -> lan`. Each worker now
     mirrors its forward punt seeds into the node's read-only
     `PuntSeedDirectory` (`session/punt_seed_directory.rs`, maintained at the
-    table's `insert_record` / `remove_entry` / `refresh_in_place` / `Drop`
-    choke points), and the session-fallback arm consults it last, only for a
+    table's `insert_record` / `remove_entry` / in-place-rewrite / `Drop`
+    choke points; sharded, O(1) amortized, never blocks a worker), and the session-fallback arm consults it last, only for a
     fabric-ingress FORWARD quote (`icmp_embed::punt_seed_forward_quote_match`);
     every RELATED gate applies unchanged. Cells:
     `split_rg_first_error_on_another_worker_reaches_lan_host_18174`

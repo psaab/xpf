@@ -1728,9 +1728,11 @@ crosses the fabric twice, and three rules keep it working:
   non-fabric interface; nothing arriving on the fabric can create one. It is
   maintained only at the session table's own choke points (published by
   `insert_record`; retired by `remove_entry`, the table's sole removal sink,
-  by an in-place refresh, and by dropping the table) and stops matching at
-  the seed's install-time idle deadline, so it never outlives the seed it
-  mirrors. It is not session state: nothing materializes, promotes, exports,
+  by every in-place rewrite of the seed, and by dropping the table) and stops
+  matching at the earlier of the seed's install-time idle deadline and a 10 s
+  bridge TTL, so it never outlives the seed it mirrors. Every directory
+  operation is O(1) amortized and a worker never waits on it (sharded,
+  FIFO expiry, `try_lock` publish); refusals are counted in helper status. It is not session state: nothing materializes, promotes, exports,
   sweeps, replicates or demotes from it, no data packet reads it, and an
   admitted error still passes the F-077 per-session budget, the #14665
   outer-destination gate, the path-error type scope and the zone-validated
