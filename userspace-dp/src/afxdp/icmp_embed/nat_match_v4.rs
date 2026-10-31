@@ -247,6 +247,14 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             now_ns,
         )
         .map(|resolved| (resolved, true))
+    })
+    // #18562: the error for a NEW split-RG flow can land on a worker other
+    // than the one holding its worker-local punt seed, before the WAN owner's
+    // HA import reaches the shared maps. Last resort, fabric ingress, forward
+    // quote only — see `punt_seed_forward_quote_match`.
+    .or_else(|| {
+        super::punt_seed_forward_quote_match(ctx, &meta, &embedded_key, now_ns)
+            .map(|resolved| (resolved, false))
     });
     let Some((resolved, via_reply_key)) = found else {
         return EmbeddedMatchOutcome::NoMatch;

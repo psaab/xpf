@@ -940,7 +940,71 @@ func (d *Daemon) resendPushedConfig(ss *cluster.SessionSync, debtGen uint64) boo
 // applied, so the caller (configApplyLoop) must NOT advance the config
 // high-water mark — the transient dual-active window must heal via the peer's
 // re-push once this node settles into secondary (M-2/#4151).
-var errConfigSyncRejectedPrimary = errors.New("config sync rejected: this node is RG0 primary")
+//
+// #18610: it IS cluster.ErrConfigSyncRejectedAuthority, so configApplyLoop can
+// tell this refusal from a failed apply: it does not arm CF, it counts
+// ConfigsRejectedAsAuthority rather than ConfigsApplyFailed, and the refused
+// generation does not make this node read config-stale while it stays the
+// authority. If this node stays primary, no re-push follows and none is needed.
+var errConfigSyncRejectedPrimary = cluster.ErrConfigSyncRejectedAuthority
+
+// logConfigSyncRefusedAsAuthority is the one Warn for a peer push refused
+// because this node is the RG0 config authority (#18610). The peer pushes only
+// while it believes itself primary, so a refusal means both nodes claimed RG0
+// at once. When the refused text differs from this node's active config, the
+// peer's version is discarded here, including any commit made on the peer in
+// that window; the operator has to re-apply it on the primary, or demote this
+// node so the peer's push applies.
+func (d *Daemon) logConfigSyncRefusedAsAuthority(configText string) {
+	var gen uint64
+	if ss := d.getSessionSync(); ss != nil {
+		gen = ss.ApplyingConfigGen()
+	}
+	differs := false
+	if d.store != nil {
+		differs = strings.TrimSpace(d.store.ShowActive()) != strings.TrimSpace(configText)
+	}
+	if differs {
+		slog.Warn("cluster: rejecting config sync (this node is RG0 primary); the peer's config differs from the active config and is discarded here — re-apply any change committed on the peer, or demote this node so its push applies",
+			"gen", gen, "size", len(configText), "differs_from_active", true)
+		return
+	}
+	slog.Warn("cluster: rejecting config sync (this node is RG0 primary)",
+		"gen", gen, "size", len(configText), "differs_from_active", false)
+}
+
+// repushAfterAuthorityRefusal re-pushes this node's config to a peer whose
+// push it just refused as RG0 authority (#18610 review T2). The peer pushed
+// because it believed itself primary. This node's own push to it is
+// deduplicated per (connection epoch x generation), and the overdue re-push
+// fires only for an unacknowledged send, so on a connection where the peer had
+// already ACKed this node's config nothing would ever send it again. The peer
+// would keep any commit it made during the split, stay divergent, and keep its
+// own #9569 send debt (it never receives an ACK, and never applies a pushed
+// config that would supersede it), so its gate keeps refusing the handovers it
+// starts. Clearing the marker lets the ordinary reconcile push the active
+// config under a NEW wire generation, which the peer applies (or takes the
+// "already matches" path for), ACKs, and supersedes its debt with; a discarded
+// unshared commit on the peer is then reported there (#9530).
+//
+// Paced like the overdue re-push: at most once per configAckOverdueAfter. A
+// peer still in its dual-active view refuses the re-push and nacks it, and
+// #7328 then retries at the reconcile cadence, so repeated refusals cannot
+// turn into a push loop. Async: this runs inside the config apply callback.
+// Reports whether it scheduled a re-push.
+func (d *Daemon) repushAfterAuthorityRefusal() bool {
+	now := cluster.MonotonicNanos()
+	last := d.configAuthorityRepushAtMono.Load()
+	if last != 0 && time.Duration(now-last) < configAckOverdueAfter {
+		return false
+	}
+	if !d.configAuthorityRepushAtMono.CompareAndSwap(last, now) {
+		return false
+	}
+	d.invalidateConfigSyncPushed()
+	go d.reconcileConfigSyncToPeer("peer config refused as RG0 authority")
+	return true
+}
 
 // handleConfigSync keeps the legacy callback shape for tests and old peers.
 func (d *Daemon) handleConfigSync(configText string) error {
@@ -952,7 +1016,8 @@ func (d *Daemon) handleConfigSyncWithAncestry(
 	ancestry []configstore.RenameDescriptor,
 ) error {
 	if d.cluster != nil && d.cluster.IsLocalPrimary(0) {
-		slog.Warn("cluster: rejecting config sync (this node is RG0 primary)")
+		d.logConfigSyncRefusedAsAuthority(configText)
+		d.repushAfterAuthorityRefusal()
 		return errConfigSyncRejectedPrimary
 	}
 	if d.store != nil {

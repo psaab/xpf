@@ -614,6 +614,11 @@ pub(in crate::afxdp) struct SharedSessionOwnerRgIndexes {
     // can fail closed instead of resolving to the last-published session.
     pub(in crate::afxdp) wire_ambiguities: Arc<Mutex<SharedNatAmbiguityIndex>>,
     pub(in crate::afxdp) bare_tuple_sessions: Arc<Mutex<SharedSessionBareTupleIndex>>,
+    /// #18562: the node's ONE punt-seed directory, handed to every worker's
+    /// `SessionTable` in `worker_loop` (`set_punt_seed_directory`). It
+    /// mirrors live worker TABLES, not the shared maps, so `clear` below
+    /// leaves it alone: each table retires its own rows (remove/refresh/drop).
+    pub(in crate::afxdp) punt_seeds: Arc<crate::session::PuntSeedDirectory>,
 }
 
 impl Default for SharedSessionOwnerRgIndexes {
@@ -626,6 +631,7 @@ impl Default for SharedSessionOwnerRgIndexes {
             nat_ambiguities: Arc::new(Mutex::new(SharedNatAmbiguityIndex::default())),
             wire_ambiguities: Arc::new(Mutex::new(SharedNatAmbiguityIndex::default())),
             bare_tuple_sessions: Arc::new(Mutex::new(SharedSessionBareTupleIndex::default())),
+            punt_seeds: Arc::new(crate::session::PuntSeedDirectory::new()),
         }
     }
 }

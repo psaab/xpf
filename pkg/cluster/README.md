@@ -4422,6 +4422,45 @@ because no peer is asked anything.
 - `Ready` and `TransferReady` are different gates. `Ready` allows VRRP to
   participate in election; `TransferReady` is the stricter gate for
   explicit operator-initiated `request chassis cluster failover`.
+- **The RG0 authority is never config-stale against a push it refused as
+  primary (#18610).** During a dual-active window the peer can push its config
+  while this node is still RG0 primary; `handleConfigSync` refuses it
+  (`cluster.ErrConfigSyncRejectedAuthority`). The receive edge has already
+  raised `lastRecvConfigGen` (#5563), and M-2/#4151 keeps the applied mark
+  pinned so the generation stays admissible if this node demotes. If this
+  node instead STAYS primary, the peer (now secondary) never pushes again, so
+  the received mark stayed above the applied mark indefinitely: every local RG
+  read `Transfer ready: no (standby config stale ...)`, the refusal had armed
+  the #6387 CF monitor failure, and a rolling upgrade started on the primary
+  aborted with "peer is NOT takeover-ready". `configApplyLoop` now records such
+  a refusal in `rejectedAsAuthorityConfigGen` instead of arming CF, and
+  `TransferReadinessSnapshot.ConfigStale` ignores received generations up to
+  that mark while this node is still the authority (`IsPrimaryFn`). Once it
+  demotes they count again, so it is not promoted back before the new
+  primary's push applies. The NACK (#7328) is still sent. An ordinary apply
+  failure, on a primary or not, is unchanged. `resetRecvGen` clears the mark
+  with the other generation marks. The refusal counts
+  `ConfigsRejectedAsAuthority` (not `ConfigsApplyFailed`) and records
+  `ConfigRejectedAsAuthorityLastGen`; the daemon's Warn names the generation
+  and says whether the refused config differs from the active one, in which
+  case the peer's version (including a commit made on the peer while it
+  believed itself primary) is discarded here. Mixed-version escape: a primary
+  still on a build without this fix stays stuck until it demotes, so demote
+  it (`request chassis cluster failover redundancy-group 0 node <peer>`) and
+  let the new primary's push apply before a rolling upgrade
+  (`docs/in-place-upgrade.md`).
+  Two edges (review of #18612): (1) the authority classification uses the
+  role at RECEIVE (`configApplyItem.authorityAtReceive`), not at apply. A
+  config received while this node was secondary and refused because a
+  promotion landed before the apply loop reached it is the previous primary's
+  last config, lost: it stays an apply failure (CF, stale, `ConfigsApplyFailed`)
+  with its own Warn naming the generation. (2) The losing node is converged:
+  the daemon's refusal clears the authority's (epoch x generation) push marker
+  and re-runs the reconcile, paced at `configAckOverdueAfter`, so the loser
+  receives the authority's config under a new wire generation, applies it,
+  ACKs, and its own #9569 send debt is superseded. Without it the marker,
+  claimed by the pre-split push, kept the loser divergent and its gate
+  refusing the handovers it starts.
 - **Every handover that promotes the peer refuses a config-stale peer
   (#9569).** The #5563 config-stale gate lives in `TransferReady`, which only
   the node that becomes primary evaluates, through `RequestPeerFailover`. The
