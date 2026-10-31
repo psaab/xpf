@@ -4214,28 +4214,13 @@ never lock an operator out of a remote box it manages.
   applySem in one apply). The reassert tick also passes when only an owed
   restart is outstanding and retries it (one restart per 30s tick), so a
   restart that failed there does not leave the heartbeat stopped until the next
-  apply.
-
-  **A control-link renumber restarts comms (#18597, folded from #18606).** The
-  gate removed an accidental signal. Before it, every apply restarted the
-  heartbeat on its stale `hbLocalAddr`, so a commit that renumbered em0 (same
-  interface, same peer) failed loudly through #9751. After it, nothing moved.
-  `clusterTransportKey` now carries `LocalAddress`: the CONFIGURED address the
-  heartbeat and session sync pair with their peer (the control unit's static
-  addresses, paired by the same `selectClusterBindAddr` rule the binds use;
-  `clusterTransportLocalAddress`), so step 20 restarts comms on a config
-  renumber. Derived from config, not the live interface: networkd drops a
-  static address on carrier loss (a direct-cabled control link loses carrier
-  when the peer reboots), and resolving the kernel tore the survivor's comms
-  down on its next apply; two IPv4 addresses can also be listed in a different
-  kernel order between lookups. `""` (no static address) is unknown on either
-  side (`sameClusterTransport`). A bind on an address config does not give the
-  unit marks `BindingChanged` (`noteClusterTransportLocalAddress`, membership
-  not equality). This re-binds the LOCAL node correctly. It does not make a live
-  renumber work: the peer's matching `peer-address` change is refused by the
-  #8965 preflight on its synced apply, which is why the supported procedure
-  stays "set the new address on both nodes and restart xpfd on both". Cells:
-  `cluster_local_addr_key_18597_test.go`. Gate cells:
+  apply. A live renumber of this node's control-link address is refused at
+  commit by the #18606 preflight (separate PR, landing before or with this
+  one): the gate no longer restarts the heartbeat on every commit, so that
+  refusal, not an accidental per-commit restart failure, is what keeps a
+  renumber from silently stranding the heartbeat on the old address. An
+  in-PR runtime re-bind (a `LocalAddress` transport-key field) was tried and
+  removed after two review rounds each found a new HA defect in it. Cells:
   `heartbeat_rebind_gate_18597_test.go`.
 
   Deliberately LEFT best-effort (WARN, not surfaced): the

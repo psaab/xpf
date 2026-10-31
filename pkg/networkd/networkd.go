@@ -59,11 +59,23 @@ var runNetworkctl = func(args ...string) error {
 var networkdFailedLinks = func() (map[string]bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), networkctlTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "networkctl", "list", "--no-legend", "--no-pager").Output()
+	out, err := networkctlListCmd(ctx).Output()
 	if err != nil {
 		return nil, fmt.Errorf("networkctl list: %w", err)
 	}
 	return parseNetworkdFailedLinks(out)
+}
+
+// networkctlListCmd builds the link-state query. SYSTEMD_COLORS=0 because
+// networkctl colours the SETUP cell when it decides its output is a terminal
+// (or when SYSTEMD_COLORS is set in the daemon's environment), and a coloured
+// "failed" is not the string "failed": it would read as not failed. The parser
+// also refuses a cell carrying an escape, so a coloured table fails safe to the
+// full pass either way.
+func networkctlListCmd(ctx context.Context) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "networkctl", "list", "--no-legend", "--no-pager")
+	cmd.Env = append(os.Environ(), "SYSTEMD_COLORS=0")
+	return cmd
 }
 
 // parseNetworkdFailedLinks parses `networkctl list --no-legend --no-pager`.
@@ -75,6 +87,9 @@ func parseNetworkdFailedLinks(out []byte) (map[string]bool, error) {
 	failed := make(map[string]bool)
 	rows := 0
 	for _, line := range strings.Split(string(out), "\n") {
+		if strings.ContainsRune(line, 0x1b) {
+			return nil, fmt.Errorf("networkctl list: escape sequence in row %q (coloured output)", line)
+		}
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue

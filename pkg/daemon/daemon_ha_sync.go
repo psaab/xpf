@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"reflect"
-	"strconv"
 	"strings"
 	"time"
 
@@ -1533,7 +1532,6 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 				return
 			}
 
-			d.noteClusterTransportLocalAddress(commsGen, cfg, syncIP)
 			syncLocal := net.JoinHostPort(syncIP, "4785")
 			syncPeer := net.JoinHostPort(syncPeerAddr, "4785")
 			slog.Info("cluster: session sync transport", "mode", syncTransport,
@@ -1961,7 +1959,6 @@ func (d *Daemon) startHeartbeatWithRetryForEpoch(ctx context.Context, controlIfa
 		}
 		vrfDevice := d.resolveClusterVRFDevice(controlIface)
 		d.noteClusterTransportBinding(commsGen, vrfDevice)
-		d.noteClusterTransportLocalAddress(commsGen, activeCfg, localIP)
 		if err := d.startHeartbeatForCommsEpoch(ctx, commsGen, localIP, peerAddr, vrfDevice, controlIface); err != nil {
 			// #7257: a start the teardown superseded is terminal, not a bind
 			// failure. Retrying would race the same teardown again and, on
@@ -2202,20 +2199,6 @@ type clusterTransportKey struct {
 	Fabric1Interface   string `log:"fabric1"`
 	Fabric1PeerAddress string `log:"fabric1_peer"`
 	VRFDevice          string `log:"vrf"`
-	// LocalAddress is the CONFIGURED local address the heartbeat and the
-	// session-sync listener pair with their peer: clusterSyncTransport's unit
-	// (the control link, or the fabric when no control link is configured)
-	// (#18597 fold of #18606; clusterTransportLocalAddress). Before it was in
-	// the key, a commit that renumbered em0 while keeping the interface and peer
-	// left both transports on an address em0 no longer had; the per-apply
-	// heartbeat restart used to expose that as a failed commit (#9751), and the
-	// #18597 gate removed that accidental signal. Now step 20 sees the change
-	// and restarts comms on the new address. Derived from config so carrier
-	// loss and kernel address order cannot move it. "" (no static address) is
-	// unknown and never counts as a change (sameClusterTransport); a bind on an
-	// address config does not name marks BindingChanged instead
-	// (noteClusterTransportLocalAddress).
-	LocalAddress string `log:"local"`
 	// BindingChanged remains true for this epoch once a retry resolves a
 	// different device than VRFDevice; only a new epoch may clear it.
 	BindingChanged bool `log:"binding_changed"`
@@ -2290,110 +2273,7 @@ func (d *Daemon) clusterTransportForConfig(cfg *config.Config) clusterTransportK
 		return key
 	}
 	key.VRFDevice = d.resolveClusterSyncVRFDevice(cfg.Chassis.Cluster)
-	key.LocalAddress = clusterTransportLocalAddress(cfg)
 	return key
-}
-
-// sameClusterTransport reports whether next describes the transport the active
-// epoch runs on. Every field must match, except that an empty LocalAddress on
-// EITHER side is unknown rather than a change (#18597 review): "" means config
-// names no static address for the unit, and a commit that moves between "no
-// static address" and one is not evidence of a renumber the key can act on.
-// Only A -> B with both non-empty is a renumber. The keys themselves are not
-// modified, so step 20's log still prints both values.
-func sameClusterTransport(active, next clusterTransportKey) bool {
-	if active.LocalAddress == "" || next.LocalAddress == "" {
-		next.LocalAddress = active.LocalAddress
-	}
-	return next == active
-}
-
-// clusterTransportLocalAddress is the CONFIGURED local address the heartbeat
-// and session sync pair with their peer: clusterSyncTransport's unit (the
-// control link whenever the heartbeat runs at all), its static addresses taken
-// from config, paired with the peer by the same selectClusterBindAddr rule the
-// binds apply to the kernel's list (#18597 review, seat AG's shape).
-//
-// It is derived from CONFIG, not from the live interface, deliberately. A
-// renumber is a config change, so the key depends only on config. Resolving
-// the kernel instead reopened two edges the reviewers found: networkd drops a
-// static address on carrier loss (a direct-cabled control link loses carrier
-// when the peer reboots), so the survivor's next apply saw "" and tore comms
-// down onto an unaddressed link; and with two IPv4 addresses on the unit the
-// kernel's order can differ between the lookups, which read as a renumber.
-// "" when the pair is incomplete or the unit carries no static address (DHCP,
-// or not declared); the comparison treats "" as unknown (sameClusterTransport).
-func clusterTransportLocalAddress(cfg *config.Config) string {
-	addrs := clusterTransportConfiguredAddrs(cfg)
-	if len(addrs) == 0 {
-		return ""
-	}
-	_, peer, _ := clusterSyncTransport(cfg.Chassis.Cluster)
-	return selectClusterBindAddr(addrs, peer, "")
-}
-
-// clusterTransportConfiguredAddrs returns the static addresses config gives the
-// unit clusterSyncTransport selects. The unit split matches the cluster
-// monitor's: a last dot followed by a number names the unit, anything else is
-// unit 0. nil when the transport pair is incomplete or the unit is not declared.
-func clusterTransportConfiguredAddrs(cfg *config.Config) []net.Addr {
-	if cfg == nil || cfg.Chassis.Cluster == nil {
-		return nil
-	}
-	iface, peer, _ := clusterSyncTransport(cfg.Chassis.Cluster)
-	if iface == "" || peer == "" {
-		return nil
-	}
-	base, unit := iface, 0
-	if i := strings.LastIndex(iface, "."); i >= 0 {
-		if n, err := strconv.Atoi(iface[i+1:]); err == nil {
-			base, unit = iface[:i], n
-		}
-	}
-	ifc := cfg.Interfaces.Interfaces[base]
-	if ifc == nil || ifc.Units[unit] == nil {
-		return nil
-	}
-	var out []net.Addr
-	for _, a := range ifc.Units[unit].Addresses {
-		ip, ipNet, err := net.ParseCIDR(a)
-		if err != nil {
-			continue
-		}
-		out = append(out, &net.IPNet{IP: ip, Mask: ipNet.Mask})
-	}
-	return out
-}
-
-// noteClusterTransportLocalAddress checks the local address a transport of the
-// current epoch actually bound against the config the key was derived from
-// (#18597). A bind on an address config does not give the unit (for example
-// the old address, bound before networkd applied a renumber) marks the epoch
-// sticky-changed, like an off-key VRF bind, so the next apply or reassert
-// rebuilds it. Membership, not equality with the key's one selected address:
-// with two configured addresses the kernel may list them in another order, and
-// a bind on the other configured one is not a change. A key with no configured
-// address ("" , DHCP) has nothing to check.
-func (d *Daemon) noteClusterTransportLocalAddress(gen uint64, cfg *config.Config, addr string) {
-	if gen == 0 || addr == "" {
-		return
-	}
-	bound := net.ParseIP(addr)
-	configured := clusterTransportConfiguredAddrs(cfg)
-	if bound == nil || len(configured) == 0 {
-		return
-	}
-	for _, a := range configured {
-		if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.Equal(bound) {
-			return
-		}
-	}
-	d.clusterCommsMu.Lock()
-	defer d.clusterCommsMu.Unlock()
-	if gen != d.clusterCommsGen {
-		return
-	}
-	d.activeClusterTransport.BindingChanged = true
 }
 
 // setActiveTransportIfCurrent publishes the transport key of the comms epoch

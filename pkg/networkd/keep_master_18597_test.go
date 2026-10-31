@@ -1,6 +1,7 @@
 package networkd
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -292,6 +293,7 @@ func TestParseNetworkdFailedLinks18597(t *testing.T) {
 		"  1 lo loopback carrier\n",           // a column missing
 		"  x lo loopback carrier unmanaged\n", // not a table row
 		`{"Interfaces":[]}`,                   // the JSON form
+		"  14 fab0 ether off \x1b[0;1;31mfailed\x1b[0m\n", // coloured SETUP cell
 	} {
 		if _, err := parseNetworkdFailedLinks([]byte(bad)); err == nil {
 			t.Errorf("parse(%q) = nil error, want an error so the tail falls back to the full pass", bad)
@@ -379,5 +381,26 @@ func TestExternalReloadSuccessForcesFullPass18597(t *testing.T) {
 	if want := []string{"fxp0", "em0", "ge-0-0-1"}; !slices.Equal(rec.reconfigure, want) {
 		t.Fatalf("after an external reload the identical Apply reconfigured %v, want the full pass %v "+
 			"(externalTailOwed)", rec.reconfigure, want)
+	}
+}
+
+// The query runs with SYSTEMD_COLORS=0: networkctl colours the SETUP cell when
+// it believes its output is a terminal or SYSTEMD_COLORS asks it to, and a
+// coloured "failed" would otherwise read as not failed.
+func TestNetworkctlListQueryDisablesColour18597(t *testing.T) {
+	t.Setenv("SYSTEMD_COLORS", "1")
+	cmd := networkctlListCmd(context.Background())
+	if want := []string{"networkctl", "list", "--no-legend", "--no-pager"}; !slices.Equal(cmd.Args, want) {
+		t.Fatalf("argv = %v, want %v", cmd.Args, want)
+	}
+	last := ""
+	for _, kv := range cmd.Env {
+		if strings.HasPrefix(kv, "SYSTEMD_COLORS=") {
+			last = kv
+		}
+	}
+	if last != "SYSTEMD_COLORS=0" {
+		t.Fatalf("the effective SYSTEMD_COLORS in the query's environment is %q, want SYSTEMD_COLORS=0 "+
+			"(the last assignment wins, and the daemon's own environment asked for colour)", last)
 	}
 }

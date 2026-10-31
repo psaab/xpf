@@ -152,7 +152,11 @@ Triggers `networkctl reload` only when files actually changed.
   narrowing does not lose the old tail's incidental retry of a failed link; a
   query that errors or cannot be parsed falls back to the full pass. The Info
   line `networkd reconfiguring interfaces` names the set and whether it was the
-  full one. Cells: `keep_master_18597_test.go` (unrelated commit, failed link,
+  full one. The query runs with `SYSTEMD_COLORS=0` and the parser refuses a
+  row carrying an escape, so a coloured `failed` cell cannot read as "not
+  failed". Residual: a link stuck in `configuring` is not retried (#18615);
+  `configuring` is deliberately not in the set, because a DHCP link waiting
+  for a lease reads `configuring` and would churn. Cells: `keep_master_18597_test.go` (unrelated commit, failed link,
   query error, each of the three inherited-obligation terms).
 - **`KeepMaster=yes` needs the explicit `LinkLocalAddressing=ipv6` beside it
   (#18597).** systemd.network(5): with `KeepMaster=` enabled, the
