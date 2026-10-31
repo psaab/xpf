@@ -427,6 +427,25 @@ if ((clock_rows_ok)); then
 else
 	bad "#18614: the clock record is wrong on an HA smoke row"
 fi
+# #18617: HARNESS_METRIC lines ride the row (the LAST value per key); keys the
+# adapter computes itself and malformed values are refused; ha-smoke records
+# the ", <k> cost" count as cells_cost too (test-failover's planned moves).
+hm_ok=1
+for adapter in smoke-cells ha-smoke; do
+	printf '%s\n' 'HARNESS_METRIC: whole_run_zero_intervals=9' 'HARNESS_METRIC: whole_run_zero_intervals=12' \
+		'HARNESS_METRIC: cells_passed=999' 'HARNESS_METRIC: clock_void=1' 'HARNESS_METRIC: Bad-Key=3' \
+		'HARNESS_METRIC: worst_stall_s=abc' '  PASS  iperf3 throughput 9.0 Gbps' \
+		'  Failover test: 7 passed, 0 failed, 2 cost' >"$LOG"
+	m=" $(adapt_field "$adapter" 0 5) "
+	[[ "$m" == *" whole_run_zero_intervals=12 "* && "$m" == *" cells_passed=7 "* && "$m" == *" cells_cost=2 "* &&
+		"$m" != *"999"* && "$m" != *"clock_void"* && "$m" != *"Bad-Key"* && "$m" != *"worst_stall_s"* ]] ||
+		{ hm_ok=0; echo "  $adapter: $m"; }
+done
+if ((hm_ok)); then
+	ok "#18617: HARNESS_METRIC values ride the row (last wins), reserved keys and malformed values are refused, ha-smoke records cells_cost"
+else
+	bad "#18617: HARNESS_METRIC recording or ha-smoke cells_cost is wrong"
+fi
 printf 'Results: 7 passed, 0 failed, 2 skipped\n' >"$LOG"
 if [[ "$(adapt_field smoke-cells 0 5)" == *"cells_skipped=2"* && "$(adapt_field smoke-cells 0 5)" != *"cells_cost"* ]]; then
 	ok "#18583: the skipped slot still parses with no cost field (no shift)"
