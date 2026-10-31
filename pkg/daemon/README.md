@@ -2011,6 +2011,92 @@ digest-gated. Pinned by `ra_pd_renew_standalone_16773_test.go`, including
 fail-first and unavailable-store recovery without a second DHCP nudge, plus
 a no-retry-after-success control.
 
+### Session-derived neighbour warm-up probes only held on-link endpoints (#18617)
+
+`warmNeighborCache` (`daemon_ha.go`) sends one 1-byte UDP datagram to port 1
+of each unique session endpoint, so the kernel resolves a neighbour, which then
+reaches the helper's neighbour snapshot. In cluster mode it runs on the 15 s
+resolve tick and on every synced-session install
+(`OnForwardSessionInstalled` → `scheduleStandbyNeighborRefresh`, at most once
+a second).
+
+Before #18617 it probed every global endpoint through the default route. On a
+node holding RG1 (WAN) but not RG2 (LAN), as in test-failover's manual RG1
+failback slice, the probe to a LAN host's global address went out the WAN,
+came back from the upstream router to the cluster's own WAN address, and was
+default-denied as transit on this node. That happened about once a second for
+the whole split, and it is the RG1 Group 4 "policy denied" failure on every
+run. Probes to the source-NAT pool / proxy-ARP address looped the same way
+through whichever node answers ARP for it. Every routed peer, internet hosts
+included, received a junk datagram, and its ICMP port-unreachable reply showed
+up as a host-inbound deny.
+
+The per-pass plan (`neighbor_warm_plan_18617.go`) is built from the active
+config, not from the kernel route table:
+
+- **owned** (never probed): every configured unit address, including RETH
+  VIPs this node does not hold right now; VRRP virtual addresses; source-NAT
+  pool addresses and prefixes; proxy-ARP addresses; and any address the kernel
+  holds on a configured interface (a DHCP lease).
+- **probed**: an endpoint inside a configured unit prefix that this node holds
+  now. Holding means the unit is non-RETH or this node is primary for the
+  RETH's RG, AND the kernel holds an address inside the prefix on that
+  interface. A DHCP unit contributes the prefix of its held lease. The longest
+  configured prefix decides. The probe socket is bound to that unit's
+  interface (`SO_BINDTODEVICE`), so it cannot follow a default route.
+- **skipped** (counted at Debug): routed endpoints, whose gateway is warmed
+  by the configured-target pass (`resolveNeighbors`) and by the force-probe
+  re-validation of existing kernel entries; and endpoints on a RETH prefix
+  this node does not hold.
+
+`collectMonitoredNeighbors` (force-probe) drops owned addresses from the
+kernel neighbour entries it re-validates. Sockets are bounded at two per
+probed interface (#5451's bound, now per interface). The two per-second lines
+(`neighbor cache warmup complete`, `proactive neighbor resolution`) and
+force-probe's per-tick `force-probe neighbors` log at Debug. None is a state
+transition, so no Info line remains in this subsystem.
+
+**Seeing that it works (review of #18625).** A pass that probes nothing reads
+exactly like a fixed one: Group 4 is 0 either way, and the standby gap below
+keeps Group 2 flat. So the last pass is shown in `show chassis cluster
+information` (through `Manager.SetInformationExtraFunc`):
+
+```
+Neighbor warm-up (last pass 2s ago):
+  Probed: 12 IPv4, 4 IPv6
+  Skipped: 2 cluster-owned, 3 not held, 40 routed, 0 not unicast
+  Socket bind failures: 0
+  Primary prefixes not held: 0
+```
+
+Before the first pass it reads `Neighbor warm-up: no pass yet`. The two
+silent no-op causes Warn once on their rising edge
+(`neighbor_warm_health_18617.go`):
+
+- a RETH prefix of an RG this node is primary for, where the kernel holds no
+  address in the prefix on that interface, once it has persisted 5 s (a VIP
+  normally lands within milliseconds of activation);
+- a probe socket that cannot be opened and bound.
+
+Force-probe's `neighbor probe truncated` Warn is edge-triggered as well.
+
+**Coverage.**
+
+- On the RG owner, an on-link endpoint is probed as before, through the
+  interface its connected route uses. Inside a VRF the bound socket now
+  resolves where the old unbound probe got `Network is unreachable`.
+- A routed endpoint is no longer probed. Its gateway is warmed only by the
+  configured-target pass (`resolveNeighbors`: static next hops, DHCP gateways,
+  backup router, NAT and address-book host targets). A dynamic-routing next
+  hop (BGP/OSPF) is covered only by force-probe, and only once it is already
+  in the kernel neighbour table.
+- On a node that does not own an RG, the old probe to an endpoint on that
+  RG's prefix followed whatever other route existed (usually the WAN default
+  route), so it never resolved a neighbour on the RETH member. A standby holds
+  no address there, so neither the kernel nor the helper can resolve
+  neighbours on it. That standby pre-warm gap predates #18617 and is tracked
+  in #18621.
+
 ### Direct-mode VIP failover (private-rg-election / no-reth-vrrp)
 
 When `no-reth-vrrp` or `private-rg-election` is configured, the daemon owns

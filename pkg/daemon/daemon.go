@@ -879,6 +879,17 @@ type Daemon struct {
 	// sockets and capture probed destinations without touching the network
 	// (#5451).
 	neighborWarmDialer neighborWarmDialer
+	// neighborWarmPlanInputs replaces the runtime inputs of the #18617 warm
+	// plan (RG ownership, per-interface kernel addresses) in tests; zero
+	// value = production (cluster state + netlink).
+	neighborWarmPlanInputs neighborWarmPlanInputs
+	// lastNeighborWarmCounts is the most recent warmNeighborCache pass's
+	// per-verdict counts (#18617), for tests and diagnostics.
+	lastNeighborWarmCounts atomic.Pointer[neighborWarmCounts]
+	// neighborWarmHealth is the edge state behind the warm-up's Warns
+	// (primary prefix not held, probe-socket bind failure, force-probe
+	// truncation), review of #18625.
+	neighborWarmHealth neighborWarmHealth
 	syncPrimeRetryGen  atomic.Uint64
 	// syncPrimeRetryBeforeSleepForTest blocks the retry loop at the
 	// sleep boundary for the 10387 drain-window cell. Nil in production.
