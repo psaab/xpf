@@ -89,19 +89,46 @@ func TestHeartbeatClockSectionKeepsFixedTailTrailers18585(t *testing.T) {
 
 // #18585: a maximal frame still fits and stays signed — the section is
 // reserved before best-effort monitors are truncated.
+//
+// Swept over monitor-name lengths so the slack left after the last whole
+// monitor takes every value: with one fixed length the slack can happen to
+// exceed the section and hide an unreserved write.
 func TestHeartbeatClockSectionReservedBeforeMonitors18585(t *testing.T) {
-	p := clockPkt18585(clock18585.UnixNano(), true)
-	for i := 0; i < 200; i++ {
-		p.Monitors = append(p.Monitors, HeartbeatMonitor{RGID: 1, Weight: 1, Up: true, Interface: "ge-0-0-1-very-long-interface-name"})
-	}
 	key := []byte("0123456789abcdef0123456789abcdef")
-	frame := marshalHeartbeatAuthEpoch(p, key, 1, 1, 1793410000)
-	if len(frame) > maxHeartbeatSize {
-		t.Fatalf("frame %d bytes > cap %d", len(frame), maxHeartbeatSize)
-	}
-	pkt, err := UnmarshalHeartbeat(frame)
-	if err != nil || pkt.WallClockUnixNano != p.WallClockUnixNano || !verifyHeartbeatMAC(frame, key) {
-		t.Fatalf("maximal frame lost the clock or its MAC: %v", err)
+	for n := 0; n < 96; n++ {
+		nameLen := n%48 + 1
+		p := clockPkt18585(clock18585.UnixNano(), true)
+		if n >= 48 {
+			p.SoftwareVersion = "" // the reserve has a separate branch for no version
+		}
+		for i := 0; i < 250; i++ {
+			p.Monitors = append(p.Monitors, HeartbeatMonitor{RGID: 1, Weight: 1, Up: true, Interface: strings.Repeat("x", nameLen)})
+		}
+		for _, keyed := range []bool{true, false} {
+			var frame []byte
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("nameLen=%d keyed=%v: marshal panicked: %v", nameLen, keyed, r)
+					}
+				}()
+				if keyed {
+					frame = marshalHeartbeatAuthEpoch(p, key, 1, 1, 1793410000)
+				} else {
+					frame = MarshalHeartbeat(p)
+				}
+			}()
+			if len(frame) > maxHeartbeatSize {
+				t.Fatalf("nameLen=%d keyed=%v: frame %d bytes > cap %d", nameLen, keyed, len(frame), maxHeartbeatSize)
+			}
+			pkt, err := UnmarshalHeartbeat(frame)
+			if err != nil || pkt.WallClockUnixNano != p.WallClockUnixNano {
+				t.Fatalf("nameLen=%d keyed=%v: maximal frame lost the clock: %v", nameLen, keyed, err)
+			}
+			if keyed && !verifyHeartbeatMAC(frame, key) {
+				t.Fatalf("nameLen=%d: maximal keyed frame lost its MAC", nameLen)
+			}
+		}
 	}
 }
 
