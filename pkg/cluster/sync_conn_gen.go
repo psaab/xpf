@@ -1601,6 +1601,8 @@ func (s *SessionSync) resetRecvGen() {
 	// across the reset window. The reconnect re-push then re-establishes both
 	// (received on receive, applied on successful apply).
 	s.lastRecvConfigGen.Store(0)
+	// #18610: the rejected-as-authority mark belongs to the same namespace.
+	s.rejectedAsAuthorityConfigGen.Store(0)
 	s.configGenMu.Unlock()
 	s.resetConfigEpochReverseFloor()
 	// #5706: reset the full-set (IPsec/DHCP) ordering high-water marks for the
