@@ -112,6 +112,15 @@ func (s *Server) failoverProxyTimeoutOutcome(op clusterfailover.Op, err error) (
 // codes.Unknown with the verify text (#16432), so a status-checking
 // client can distinguish the two without parsing the message.
 func (s *Server) proxyClusterFailover(ctx context.Context, req *pb.SystemActionRequest, op clusterfailover.Op) (*pb.SystemActionResponse, error) {
+	// #18585: refuse up front, with the measured skew and the remedy, when
+	// the peer's clock is past the point where the fabric token can ever
+	// verify. Below that bound (or with no fresh measurement) the request is
+	// proxied exactly as before.
+	if s.cluster != nil {
+		if err := s.cluster.CrossNodeFabricClockError(op.Node); err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+	}
 	resp, err := s.proxyPeerSystemAction(ctx, req)
 	if err != nil {
 		if outcome, oerr, ok := s.failoverProxyTimeoutOutcome(op, err); ok {

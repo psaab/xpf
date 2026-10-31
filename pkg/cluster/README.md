@@ -579,6 +579,47 @@ per-RG entry from that mixed map echoed a stale sequence the peer's
 strict freshness check refused, so its lease went unrenewed for that
 frame. Cells: `heartbeat_echo_mixed_snapshot_14163_test.go`.
 
+### Peer wall-clock offset (#18585)
+
+Each heartbeat also carries the sender's wall clock, as an optional `XPFT`
+section (magic + int64 unix nanoseconds) appended to the body after the `XPFE`
+echo (or after the HA protocol version when there is no echo). It sits inside
+the MAC-covered body and BEFORE the fixed-tail epoch and auth trailers, which
+deployed readers index by a fixed offset from the end of the frame
+(`heartbeatFrameEpoch`, `heartbeatAuthTrailer`). #7487 records why a new
+section must never take those slots: an old node would read "no epoch", reject
+every frame, and go dual-primary mid-upgrade. Older readers stop after the echo
+and never see the section. A frame without it is byte-identical to the
+pre-#18585 encoding (the golden vectors pin that), and the HA protocol version
+is not bumped.
+
+The receiver takes peer-minus-local at the moment it ADMITS a frame
+(`admitFrame`, after the MAC and anti-replay checks), so a replayed archived
+frame cannot move the reading. A declared clock outside 2020–2100 is
+discarded: an older keyed sender's epoch marker matches the magic with
+probability 2^-32 per key. The reading drives:
+
+- a `Peer clock offset: ±N.Ns (peer behind/ahead of this node; measured Xs ago)`
+  line in `show chassis cluster status` and `information`;
+- an alarm at 10 s, cleared below 5 s. It is merged into the clock alarm
+  surfaces (`show system alarms`, `show security alarms detail`,
+  `show chassis cluster status`). The raise and the clear each log once and
+  reach syslog as `RT_SYSTEM - CLOCK_SKEW_ALARM_RAISED cause="peer-offset"` /
+  `..._CLEARED`, the local reference alarm's shape (`SetPeerClockAlarmHook`);
+- an early refusal of `request chassis cluster failover ... node <peer>` and
+  `data node <peer>` when a fresh reading is at or past 60 s (the guaranteed
+  fabric-auth break). The refusal names the number and both remedies: fix NTP
+  through `routing-instance mgmt`, or run the command on the target node,
+  where it is a local pull. Below 60 s, or without a fresh reading, the
+  request is proxied exactly as before.
+
+It is **visibility only**. The fabric verifier's accept band
+(`pkg/grpcapi/fabric_auth.go`) and the time a client signs at are unchanged,
+so the replay horizon is unchanged. Signing at `now + offset` would make
+cross-node RPC skew-tolerant. That is a different trade-off, and #7487 closed
+it as not worth the risk. A mixed-version pair shows no offset until both
+nodes send the section.
+
 ### A heartbeat RESTART is not a cold boot (#9722)
 
 `RestartHeartbeat` replaces the receiver on every config apply that rebinds the

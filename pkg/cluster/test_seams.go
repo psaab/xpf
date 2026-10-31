@@ -442,3 +442,11 @@ func (s *SessionSync) AckConfigApplyForTesting(gen uint64) {
 	binary.LittleEndian.PutUint64(p[:], gen)
 	s.handleConfigApplyAck(nil, p[:])
 }
+
+// NotePeerWallClockForTesting records a peer clock sample peerMinusLocal away
+// from this node's clock, as an admitted heartbeat would (#18585). For tests
+// in other packages (grpcapi, cli, daemon) that drive the read surfaces.
+func (m *Manager) NotePeerWallClockForTesting(peerMinusLocal time.Duration) {
+	now := time.Now()
+	m.notePeerWallClock(now.Add(peerMinusLocal).UnixNano(), now)
+}
