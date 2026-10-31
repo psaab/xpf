@@ -1426,6 +1426,10 @@ func (r *heartbeatReceiver) admitFrame(frame []byte, pkt *HeartbeatPacket) bool 
 	// Store CLOCK_MONOTONIC, not wall clock: the timeout comparison
 	// must be immune to wall-clock steps (#1792).
 	r.lastSeen.Store(MonotonicNanos())
+	// #18585: only an ADMITTED frame (MAC + replay checks passed on a keyed
+	// cluster) may update the measured peer clock offset, so a replayed
+	// archived frame cannot steer it (#7487's admitted-path rule).
+	r.mgr.notePeerWallClock(pkt.WallClockUnixNano, time.Now())
 	r.mgr.handlePeerHeartbeat(pkt)
 	return true
 }
