@@ -175,3 +175,25 @@ func TestBuildBarrierWaitsForInFlightApply18561(t *testing.T) {
 		t.Fatal("BuildBarrier never returned after the apply finished")
 	}
 }
+
+// UnconditionalWriteGeneration moves for ApplyFull and Clear writes and not
+// for a conditional ApplyFullIfCurrent write (#18565, seat T), while
+// WriteGeneration counts all three.
+func TestUnconditionalWriteGenerationCountsOnlyPredicateFreeWrites18561(t *testing.T) {
+	m := NewForTest(filepath.Join(t.TempDir(), "frr.conf"), &RecordingExecutor{})
+	if err := m.ApplyFullIfCurrent(&FullConfig{ClusterMode: true}, func() bool { return true }); err != nil {
+		t.Fatalf("conditional apply: %v", err)
+	}
+	if m.WriteGeneration() != 1 || m.UnconditionalWriteGeneration() != 0 {
+		t.Fatalf("after a conditional write: write=%d unconditional=%d, want 1/0", m.WriteGeneration(), m.UnconditionalWriteGeneration())
+	}
+	if err := m.ApplyFull(&FullConfig{ClusterMode: true}); err != nil {
+		t.Fatalf("ApplyFull: %v", err)
+	}
+	if err := m.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if m.WriteGeneration() != 3 || m.UnconditionalWriteGeneration() != 2 {
+		t.Fatalf("after ApplyFull and Clear: write=%d unconditional=%d, want 3/2", m.WriteGeneration(), m.UnconditionalWriteGeneration())
+	}
+}

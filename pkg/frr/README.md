@@ -2051,7 +2051,10 @@ step. Both are required — neither sees the other's case:
   apart. `ApplyFullIfCurrent` judges its predicate under `buildMu` before
   building, so a superseded render never touches the gauges.
   `WriteGeneration()` (lock-free) moves only on a managed-section write that
-  happened; `BuildBarrier()` waits out any apply in flight (the daemon's
+  happened; `UnconditionalWriteGeneration()` moves only on such a write made
+  without a predicate (`ApplyFull`, `Clear`), which is what a caller that
+  orders its own conditional renders compares, so its own older render's
+  write never drops its newer one; `BuildBarrier()` waits out any apply in flight (the daemon's
   factory reset calls it after raising its flag). Lock order: buildMu ->
   reloadMu -> retryMu.
 - Benign-reload re-check (#15203, A12-06): when the primary `--reload`

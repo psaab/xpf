@@ -151,7 +151,7 @@ func TestFRRHARenderSupersededByLaterWrite18561(t *testing.T) {
 	cfg := d.store.ActiveConfig()
 	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
 
-	wg := d.frr.WriteGeneration()
+	wg := d.frr.UnconditionalWriteGeneration()
 	seq := d.frrApplySeq.Add(1)                  // the HA render
 	if err := d.applyFRRConfig(fc); err != nil { // a later write (commit path)
 		t.Fatalf("premise: later write failed: %v", err)
@@ -164,7 +164,7 @@ func TestFRRHARenderSupersededByLaterWrite18561(t *testing.T) {
 		t.Fatal("a render overtaken by a later FRR write was applied after it")
 	}
 
-	wg = d.frr.WriteGeneration()
+	wg = d.frr.UnconditionalWriteGeneration()
 	seq = d.frrApplySeq.Add(1)
 	if err := d.applyFRRConfigIfCurrent(fc, seq, wg); err != nil {
 		t.Fatalf("current apply: %v", err)
@@ -204,7 +204,7 @@ func TestRGEdgeSupersedesEarlierHARender18561(t *testing.T) {
 	d.frrHA.afterFunc = timers.after
 	cfg := d.store.ActiveConfig()
 	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
-	wg := d.frr.WriteGeneration()
+	wg := d.frr.UnconditionalWriteGeneration()
 	seq := d.frrApplySeq.Add(1) // a render taken before the edge
 	d.scheduleFRRHAReconcile("cluster-state")
 	if err := d.applyFRRConfigIfCurrent(fc, seq, wg); err != nil {
@@ -223,7 +223,7 @@ func TestHARenderSkippedDuringReset18561(t *testing.T) {
 	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), rec)
 	cfg := d.store.ActiveConfig()
 	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
-	wg := d.frr.WriteGeneration()
+	wg := d.frr.UnconditionalWriteGeneration()
 	seq := d.frrApplySeq.Add(1)
 	d.resetting.Store(true)
 	if err := d.applyFRRConfigIfCurrent(fc, seq, wg); err != nil {
@@ -243,7 +243,7 @@ func TestFailClosedBootClearSupersedesHARender18561(t *testing.T) {
 	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), rec)
 	cfg := d.store.ActiveConfig()
 	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
-	wg := d.frr.WriteGeneration()
+	wg := d.frr.UnconditionalWriteGeneration()
 	seq := d.frrApplySeq.Add(1)
 	d.clearFRRForFailClosedBoot(true)
 	if rec.ReloadCalls == 0 {
@@ -269,7 +269,7 @@ func TestRefusedFRRWriteDoesNotSupersedeHARender18561(t *testing.T) {
 	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), rec)
 	cfg := d.store.ActiveConfig()
 	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
-	wg := d.frr.WriteGeneration()
+	wg := d.frr.UnconditionalWriteGeneration()
 	seq := d.frrApplySeq.Add(1)
 	refused := &frr.FullConfig{BGP: &config.BGPConfig{
 		LocalAS: 65001, RouterID: "1.1.1.1",
@@ -308,7 +308,7 @@ func TestFactoryResetWaitsForInFlightHAWrite18561(t *testing.T) {
 	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), blk)
 	haDone := make(chan struct{})
 	go func() {
-		_ = d.applyFRRConfigIfCurrent(&frr.FullConfig{ClusterMode: true}, d.frrApplySeq.Load(), d.frr.WriteGeneration())
+		_ = d.applyFRRConfigIfCurrent(&frr.FullConfig{ClusterMode: true}, d.frrApplySeq.Load(), d.frr.UnconditionalWriteGeneration())
 		close(haDone)
 	}()
 	<-blk.entered
@@ -331,5 +331,38 @@ func TestFactoryResetWaitsForInFlightHAWrite18561(t *testing.T) {
 	<-resetDone
 	if !<-wiped {
 		t.Fatal("factoryReset wiped while an HA FRR write was still in flight; the write could land after the strip")
+	}
+}
+
+// Seat T (#18565): an OLDER HA render that is still writing when a newer HA
+// render is taken must not drop the newer one. The older render had passed
+// its last check before the edge bumped the sequence; its write then moved
+// the FRR write generation after the newer render captured it, and the newer
+// render (the only one carrying the post-edge state) was skipped as
+// superseded. HA renders now order among themselves by sequence alone and
+// compare only the predicate-free write generation. RED if the HA path goes
+// back to WriteGeneration.
+func TestOlderHAWriteDoesNotDropNewerHARender18561(t *testing.T) {
+	rec := &frr.RecordingExecutor{}
+	d := frrHADaemon18561(t)
+	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), rec)
+	cfg := d.store.ActiveConfig()
+	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
+	// R1, the newer render, captures its sequence and generation.
+	wg := d.frr.UnconditionalWriteGeneration()
+	seq := d.frrApplySeq.Add(1)
+	// R0, older and already past its checks, finishes its write now.
+	if err := d.frr.ApplyFullIfCurrent(&frr.FullConfig{ClusterMode: true}, func() bool { return true }); err != nil {
+		t.Fatalf("premise: the older HA write failed: %v", err)
+	}
+	if d.frr.WriteGeneration() == 0 {
+		t.Fatal("premise: the older HA render wrote nothing")
+	}
+	before := rec.ReloadCalls
+	if err := d.applyFRRConfigIfCurrent(fc, seq, wg); err != nil {
+		t.Fatalf("newer HA apply: %v", err)
+	}
+	if rec.ReloadCalls != before+1 {
+		t.Fatal("an older HA render's write dropped the newer HA render; the post-edge state was never written")
 	}
 }

@@ -119,7 +119,7 @@ type Manager struct {
 	// another build. Before #18561 every ApplyFull ran under the daemon's
 	// applySem, which provided this; the HA reconcile now applies after
 	// releasing applySem. Order: buildMu -> reloadMu (never the reverse).
-	buildMu sync.Mutex
+	buildMu  sync.Mutex
 	reloadMu sync.Mutex
 	confGen  uint64
 	// writeGen mirrors confGen for lock-free readers (#18561): a caller
@@ -127,6 +127,12 @@ type Manager struct {
 	// ApplyFullIfCurrent, so only a write that actually happened (not a
 	// refused render) supersedes the render.
 	writeGen atomic.Uint64
+	// unconditionalWriteGen counts only the writes made WITHOUT a staleness
+	// predicate: ApplyFull (the commit path) and Clear. A conditional
+	// ApplyFullIfCurrent caller (the daemon's HA reconcile) orders its own
+	// renders by its own sequence, so an older HA render that is still
+	// writing must not supersede a newer one (seat T, #18565). Lock-free.
+	unconditionalWriteGen atomic.Uint64
 	// Desired QNH metric actions and the exact previously emitted QNH
 	// sequences to clear are protected by reloadMu. frr.conf stays
 	// metric-free; overlays are replayed after each integrated reload.
@@ -614,6 +620,13 @@ func (m *Manager) ApplyFullIfCurrent(fc *FullConfig, current func() bool) error 
 // render that was refused or superseded.
 func (m *Manager) WriteGeneration() uint64 { return m.writeGen.Load() }
 
+// UnconditionalWriteGeneration is the number of managed-section writes made
+// without a staleness predicate (ApplyFull, Clear) so far (#18565). A caller
+// that sequences its own conditional renders compares this, not
+// WriteGeneration, so its own older render's write does not drop its newer
+// one. Lock-free; moves only when such a write actually happens.
+func (m *Manager) UnconditionalWriteGeneration() uint64 { return m.unconditionalWriteGen.Load() }
+
 // BuildBarrier waits for any in-flight apply or clear to finish (#18561).
 // A caller that has already set the state its ApplyFullIfCurrent predicates
 // read (the daemon's factory-reset flag) then knows no apply that could still
@@ -1091,6 +1104,9 @@ func (m *Manager) commitManagedSectionIf(section string, overlays map[string]str
 	m.qnhMetricOverlays = cloneQNHMetricOverlays11447(overlays)
 	m.confGen++
 	m.writeGen.Store(m.confGen)
+	if current == nil {
+		m.unconditionalWriteGen.Add(1)
+	}
 	slog.Info("FRR config written", "path", m.frrConf, "generation", m.confGen)
 
 	err = m.reloadLocked()

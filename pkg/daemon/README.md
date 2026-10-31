@@ -4678,15 +4678,25 @@ AFTER releasing it. `frrApplySeq` keeps that out-of-lock apply from
 overwriting a newer config. An HA render captures two values under
 applySem: `frrApplySeq` (bumped by every HA render and by every RG ownership
 edge, so a render that predates an edge, including a demotion, is never
-applied) and the FRR manager's `WriteGeneration` (moved only by a
-managed-section write that actually happened, so a commit-path render that
-`ApplyFull` refuses before writing does not cancel the HA reload).
+applied) and the FRR manager's `UnconditionalWriteGeneration` (moved only
+by a predicate-free managed-section write that actually happened: the commit
+path's `ApplyFull` or a `Clear`, such as the fail-closed boot clear). A
+commit-path render that `ApplyFull` refuses before writing therefore does not
+cancel the HA reload, and neither does an older HA render that is still
+writing when a newer one is taken: HA renders order among themselves by the
+sequence alone (seat T found the older write dropping the newer render when
+`WriteGeneration`, which counts every write, was compared).
 `applyFRRConfigIfCurrent` applies only while both are unchanged and no
 factory reset is in progress. The FRR manager judges that predicate under
 its build lock (`buildMu`, which also serializes the managed-section build
 and its gauges) before building, and again under `reloadMu` immediately
 before the write; a superseded render returns `frr.ErrFRRApplySuperseded`
-and writes nothing. `factoryReset` calls `frr.Manager.BuildBarrier` right
+and writes nothing. With `buildMu` and the reset barrier in place the
+recheck under `reloadMu` and the HA render's own sequence bump are
+defence-in-depth (a render overtaken while it waited on `buildMu` skips a
+write that the overtaking render would replace anyway); both are pinned by
+cells (`TestPredicateRecheckedBeforeWrite18561`,
+`TestFRRHARenderSupersededByLaterWrite18561`). `factoryReset` calls `frr.Manager.BuildBarrier` right
 after raising its reset flag, so no HA write can follow the wipe's
 managed-section strip.
 

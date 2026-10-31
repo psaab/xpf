@@ -880,7 +880,10 @@ func (d *Daemon) runFRRHAReconcile(reason string) {
 		if cfg == nil {
 			return nil, 0, 0, false
 		}
-		writeGen := d.frr.WriteGeneration()
+		// Only predicate-free writes (commit path, clears) supersede this
+		// render by generation; a newer HA render supersedes it by sequence,
+		// and an OLDER HA render still writing must not drop it (seat T).
+		writeGen := d.frr.UnconditionalWriteGeneration()
 		fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
 		return fc, d.frrApplySeq.Add(1), writeGen, true
 	}()
