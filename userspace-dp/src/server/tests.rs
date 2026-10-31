@@ -11411,6 +11411,7 @@ fn bump_fib_generation_grant_advances_ctrl_stamp_18560() {
     }
     let row = {
         let mut guard = state.lock().expect("state");
+        guard.afxdp.mark_snapshot_installed_for_test();
         let leaving = guard.afxdp.published_ctrl_stamp();
         guard.afxdp.install_ctrl_stamp_test_row(UserspaceCtrlValue {
             enabled: 1,
@@ -11484,6 +11485,7 @@ fn apply_snapshot_grant_advances_ctrl_stamp_18560() {
     assert!(response.ok, "seed apply_snapshot: {}", response.error);
     let row = {
         let mut guard = state.lock().expect("state");
+        guard.afxdp.mark_snapshot_installed_for_test();
         let leaving = guard.afxdp.published_ctrl_stamp();
         guard.afxdp.install_ctrl_stamp_test_row(UserspaceCtrlValue {
             enabled: 1,

@@ -221,11 +221,13 @@ test-root: test-shim-run test-memlock-guards test-xfrm-lifecycle test-ctrl-row-r
 
 # #18560: the helper-side ctrl stamp against a real pinned BPF array (open
 # with the shape check, lookup, BPF_EXIST update, wrong-shape refusal). The
-# cell is #[ignore] because it needs CAP_BPF and bpffs; this leg runs it.
+# cell needs CAP_BPF and bpffs; unprivileged it SKIPs (like the #10868 XFRM
+# lifecycle cells), and this leg sets XPF_REQUIRE_CTRL_ROW_ROOT=1 so a missing
+# privilege fails it instead.
 .PHONY: test-ctrl-row-root
 test-ctrl-row-root:
-	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
-		--bin xpf-userspace-dp -- --ignored --exact afxdp::bpf_map::ctrl_row::ctrl_row_root_tests::ctrl_row_root_18560
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp XPF_REQUIRE_CTRL_ROW_ROOT=1 $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
+		--bin xpf-userspace-dp -- --exact afxdp::bpf_map::ctrl_row::ctrl_row_root_tests::ctrl_row_root_18560
 
 # #9337: the leg the 42 memlock-gated guards defer to.
 #

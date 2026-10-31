@@ -1,7 +1,9 @@
 //! #18560 (review seat V): the production path of the helper-side ctrl stamp
-//! against a real BPF map. Needs CAP_BPF and a bpffs at /sys/fs/bpf, so the
-//! cell is `#[ignore]` and `make test-ctrl-row-root` (part of `make
-//! test-root`) runs it with `--ignored`.
+//! against a real BPF map. It needs CAP_BPF and a bpffs at /sys/fs/bpf. Like
+//! the XFRM lifecycle cells (`require_xfrm_monitor_for_lifecycle_test`), it is
+//! gated at RUNTIME, not `#[ignore]`d: without the privilege it prints SKIP and
+//! passes, and with `XPF_REQUIRE_CTRL_ROW_ROOT` set (`make test-ctrl-row-root`,
+//! part of `make test-root`) a missing privilege fails it instead.
 
 use super::*;
 use crate::afxdp::coordinator::{CtrlStamp, CtrlStampOutcome, PinnedCtrlMap};
@@ -32,9 +34,80 @@ impl Drop for Unpin {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CtrlRowRootAction {
+    Continue,
+    Skip,
+    Fail,
+}
+
+fn ctrl_row_root_action(capable: bool, must_run: bool) -> CtrlRowRootAction {
+    match (capable, must_run) {
+        (true, _) => CtrlRowRootAction::Continue,
+        (false, false) => CtrlRowRootAction::Skip,
+        (false, true) => CtrlRowRootAction::Fail,
+    }
+}
+
+/// Can this process create and pin a BPF array map? Probed the same way the
+/// cell uses the kernel, then cleaned up.
+fn ctrl_row_root_capable() -> Result<(), String> {
+    let name = std::ffi::CString::new("xpf_t18560_probe").expect("name");
+    // SAFETY: a plain map create with a NUL-terminated name and no opts.
+    let fd = unsafe {
+        libbpf_sys::bpf_map_create(libbpf_sys::BPF_MAP_TYPE_ARRAY, name.as_ptr(), 4, 8, 1, std::ptr::null())
+    };
+    if fd < 0 {
+        return Err(format!("bpf_map_create: {}", io::Error::last_os_error()));
+    }
+    let path = format!("/sys/fs/bpf/xpf_t18560_probe_{}", std::process::id());
+    let c = std::ffi::CString::new(path.clone()).expect("path");
+    // SAFETY: fd is a live map fd; path is NUL-terminated.
+    let rc = unsafe { libbpf_sys::bpf_obj_pin(fd, c.as_ptr()) };
+    let pin_err = io::Error::last_os_error();
+    let _ = std::fs::remove_file(&path);
+    // SAFETY: closing the probe fd.
+    let _ = unsafe { libc::close(fd) };
+    if rc != 0 {
+        return Err(format!("bpf_obj_pin {path}: {pin_err}"));
+    }
+    Ok(())
+}
+
+/// True when the cell should run; prints SKIP or panics otherwise.
+fn require_ctrl_row_root() -> bool {
+    let must_run = std::env::var_os("XPF_REQUIRE_CTRL_ROW_ROOT").is_some();
+    let probe = ctrl_row_root_capable();
+    match ctrl_row_root_action(probe.is_ok(), must_run) {
+        CtrlRowRootAction::Continue => true,
+        CtrlRowRootAction::Skip => {
+            eprintln!(
+                "SKIP: ctrl_row_root_18560 needs CAP_BPF and a bpffs ({}); make test-ctrl-row-root runs it",
+                probe.err().unwrap_or_default()
+            );
+            false
+        }
+        CtrlRowRootAction::Fail => panic!(
+            "XPF_REQUIRE_CTRL_ROW_ROOT is set, but this process cannot create and pin a BPF map ({}); \
+             this cell must run in the privileged gate",
+            probe.err().unwrap_or_default()
+        ),
+    }
+}
+
 #[test]
-#[ignore = "needs CAP_BPF and a bpffs at /sys/fs/bpf; run by make test-ctrl-row-root"]
+fn ctrl_row_root_gate_skips_unprivileged_and_fails_when_required_18560() {
+    assert_eq!(ctrl_row_root_action(true, false), CtrlRowRootAction::Continue);
+    assert_eq!(ctrl_row_root_action(true, true), CtrlRowRootAction::Continue);
+    assert_eq!(ctrl_row_root_action(false, false), CtrlRowRootAction::Skip);
+    assert_eq!(ctrl_row_root_action(false, true), CtrlRowRootAction::Fail);
+}
+
+#[test]
 fn ctrl_row_root_18560() {
+    if !require_ctrl_row_root() {
+        return;
+    }
     let pid = std::process::id();
     // The real shape: a one-entry array of 56-byte values.
     let path = format!("/sys/fs/bpf/xpf_t18560_ctrl_{pid}");

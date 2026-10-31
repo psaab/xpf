@@ -67,8 +67,10 @@
 //! (`heartbeat_timeout_ms`, 1.5 s). Removing the residual needs the stamp in
 //! a row only the helper writes, which is a shim ABI change (#18603).
 //!
-//! The teardown publish (`stop_inner` stores a default 0/0 view) runs outside
-//! any grant, so it never writes the row; Go disables ctrl before teardown.
+//! The teardown publish (`stop_inner` stores a default 0/0 view with no
+//! snapshot installed) never writes the row: the advance skips any view whose
+//! validation has `snapshot_installed == false`. It can run inside an open
+//! grant, because a full reconcile under `apply_snapshot` tears down first.
 //!
 //! Go keeps writing the stamp from the status reply as before; that write is
 //! now normally a no-op rewrite of the same generation.
@@ -125,7 +127,10 @@ pub(crate) enum CtrlStampOutcome {
     Error,
     /// The write completed after the grant deadline: Go may already have
     /// written the row, and this write may have replaced it (the stated
-    /// residual in the module doc). Counted as an error and logged.
+    /// residual in the module doc). Counted as an error and logged. It fires
+    /// on `now >= deadline`, which over-reports (Go's slack after the deadline
+    /// is about 300 ms at least), deliberately: a false alarm is cheaper than a
+    /// missed one.
     LateWrite,
 }
 
@@ -220,9 +225,9 @@ pub(crate) struct CtrlStampGrantGuard {
 
 impl Drop for CtrlStampGrantGuard {
     fn drop(&mut self) {
-        if let Ok(mut slot) = self.slot.lock() {
-            *slot = None;
-        }
+        // lock_tolerant: a poisoned grant mutex (a handler panicked while
+        // holding it) is exactly the case this guard exists for (seat V).
+        *crate::sync_util::lock_tolerant(&self.slot) = None;
     }
 }
 
@@ -278,19 +283,17 @@ impl super::Coordinator {
     /// open until the returned guard is dropped. A zero deadline (no grant
     /// from Go) opens nothing.
     pub(crate) fn open_ctrl_stamp_grant(&self, deadline_mono_ns: u64, pin_path: &str) -> CtrlStampGrantGuard {
-        if let Ok(mut slot) = self.ctrl_stamp.grant.lock() {
-            *slot = (deadline_mono_ns != 0).then(|| CtrlStampGrant {
-                deadline_ns: deadline_mono_ns,
-                pin_path: pin_path.to_string(),
-            });
-        }
+        *crate::sync_util::lock_tolerant(&self.ctrl_stamp.grant) = (deadline_mono_ns != 0).then(|| CtrlStampGrant {
+            deadline_ns: deadline_mono_ns,
+            pin_path: pin_path.to_string(),
+        });
         CtrlStampGrantGuard {
             slot: std::sync::Arc::clone(&self.ctrl_stamp.grant),
         }
     }
 
     fn current_ctrl_stamp_grant(&self) -> Option<CtrlStampGrant> {
-        self.ctrl_stamp.grant.lock().ok().and_then(|slot| slot.clone())
+        crate::sync_util::lock_tolerant(&self.ctrl_stamp.grant).clone()
     }
 
     /// (advances, declines, errors) for the status projection.
@@ -306,6 +309,13 @@ impl super::Coordinator {
             return;
         };
         let deadline = grant.deadline_ns;
+        // Seat W: a view with no snapshot installed is the teardown publish
+        // (`stop_inner` defaults validation to 0/0). It can run inside an open
+        // grant (a full reconcile under `apply_snapshot` tears down first) and
+        // must never be stamped into the shim.
+        if !self.validation.snapshot_installed {
+            return;
+        }
         let entering = CtrlStamp {
             config_generation: self.validation.config_generation,
             fib_generation: self.validation.fib_generation,
@@ -348,7 +358,7 @@ pub(crate) struct SharedCtrlRow {
 #[cfg(test)]
 impl SharedCtrlRow {
     pub(crate) fn get(&self) -> UserspaceCtrlValue {
-        *self.value.lock().expect("ctrl row")
+        *crate::sync_util::lock_tolerant(&self.value)
     }
     pub(crate) fn update_count(&self) -> u64 {
         self.updates.load(std::sync::atomic::Ordering::Relaxed)
@@ -361,7 +371,7 @@ impl CtrlMapIo for SharedCtrlRow {
         Ok(self.get())
     }
     fn update(&mut self, value: &UserspaceCtrlValue) -> io::Result<()> {
-        *self.value.lock().expect("ctrl row") = *value;
+        *crate::sync_util::lock_tolerant(&self.value) = *value;
         self.updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
@@ -372,7 +382,7 @@ impl super::Coordinator {
     /// Install a shared fake ctrl row holding `value`; returns a handle to it.
     pub(crate) fn install_ctrl_stamp_test_row(&mut self, value: UserspaceCtrlValue) -> SharedCtrlRow {
         let row = SharedCtrlRow::default();
-        *row.value.lock().expect("ctrl row") = value;
+        *crate::sync_util::lock_tolerant(&row.value) = value;
         self.ctrl_stamp.test_io = Some(Box::new(row.clone()));
         row
     }
@@ -385,6 +395,15 @@ impl super::Coordinator {
             config_generation: v.config_generation,
             fib_generation: v.fib_generation,
         }
+    }
+
+    /// Server cells run without armed workers, so their seed apply never
+    /// installs a snapshot (a real apply's refresh or reconcile does). Mark
+    /// the published view installed, as that apply would, so the advance
+    /// (which skips uninstalled views) is exercised.
+    pub(crate) fn mark_snapshot_installed_for_test(&mut self) {
+        self.validation.snapshot_installed = true;
+        self.republish_runtime_validation();
     }
 
     pub(crate) fn ctrl_stamp_grant_for_test(&self) -> Option<CtrlStampGrant> {

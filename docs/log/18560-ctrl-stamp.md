@@ -78,3 +78,32 @@ source fix, as decided by the lane coordinator.
   (4 cells), S2 enabled check, S3 foreign-stamp check, S4 second deadline
   check, S5 apply-arm revoke, S6 bump-arm grant: all KILLED. S7/S8 were not
   reached before the fold; re-run on the folded head.
+- **Timestamp**: 2026-10-31 05:30 PDT
+- **Action**: Folded seat V's two gate failures at 9babd8c8a7 (BLOCKING) and
+  the nit.
+  - `no_banned_lock_poison_shapes_in_production_17201`: the grant guard's
+    `Drop`, `open_ctrl_stamp_grant` and `current_ctrl_stamp_grant` used
+    `if let Ok(..) = lock()` / `.lock().ok()`. With a poisoned mutex the guard
+    left the grant open, which is the case the guard exists for. All three
+    (and the test row) now use `sync_util::lock_tolerant`. Cell
+    `grant_guard_revokes_through_a_poisoned_mutex_18560` poisons the mutex
+    from a panicking thread and asserts the guard still revokes.
+  - `scripts/ignored-cell-census.sh`: the privileged cell was `#[ignore]`d with
+    a reason that declared neither `MEASUREMENT:` nor `#N:`. Chose the existing
+    precedent, the #10868 XFRM lifecycle gate: `ctrl_row_root_18560` is no
+    longer ignored; it probes for CAP_BPF and bpffs at runtime, prints SKIP
+    and passes without them, and fails when `XPF_REQUIRE_CTRL_ROW_ROOT` is set,
+    which `make test-ctrl-row-root` now sets. The decision table is pinned by
+    `ctrl_row_root_gate_skips_unprivileged_and_fails_when_required_18560`.
+    Census: OK (16 ignored cells, 0 undeclared).
+  - Nit: the margin cell's comment no longer claims a red cell for
+    `deadline_ns != 0`, which is an equivalent mutant there; the zero grant is
+    refused earlier by `open_ctrl_stamp_grant`.
+  - Seat W (W4, MINOR): the teardown publish (`stop_inner`, 0/0 with no
+    snapshot installed) can run inside an open grant, because a full
+    reconcile under `apply_snapshot` tears down first, so "it never writes
+    the row" was false. Fixed in code: the advance skips any view whose
+    validation has `snapshot_installed == false`. Cell
+    `teardown_publish_inside_a_grant_never_writes_the_row_18560`. The
+    `LateWrite` comment now says it over-reports (fires at `now >= deadline`)
+    on purpose.

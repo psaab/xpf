@@ -371,8 +371,9 @@ Two writers advance the stamp:
   write as `LateWrite` (counted in `ctrl_stamp_errors_total`); Go's next
   ctrl write (at least once a second) or the shim's 1.5 s heartbeat
   staleness bounds it. The structural fix, a stamp row only the helper
-  writes, is #18603. The teardown publish runs outside any grant and never
-  writes the row.
+  writes, is #18603. The teardown publish (a 0/0 view with no snapshot
+  installed) never writes the row, even inside an open grant: the advance skips
+  any view without an installed snapshot.
 * **Go, from the status reply** (`applyHelperStatusLocked`), as before. After
   a helper advance this rewrite is a no-op. When the helper declined (grant
   expired, row disabled or not at the leaving generation) it is the only

@@ -98,7 +98,11 @@ fn declines_never_write_18560() {
 }
 
 /// No grant, an expired grant, and a grant inside the margin all decline
-/// before the read. RED if the margin or the zero-grant guard is dropped.
+/// before the read. RED if the margin is dropped. The `deadline_ns != 0` term
+/// in `ctrl_stamp_grant_open` is an equivalent mutant here (a zero deadline
+/// already fails `now + margin < deadline`); a zero grant from Go is refused
+/// earlier, by `open_ctrl_stamp_grant`, which `grant_guard_revokes_on_unwind`
+/// pins.
 #[test]
 fn grant_deadline_and_margin_are_enforced_18560() {
     for (deadline, now) in [
@@ -373,4 +377,43 @@ fn ctrl_row_is_written_after_the_view_is_published_18560() {
         }),
         "the row was written before the workers could see the generation it stamps"
     );
+}
+
+/// Seat V: a handler that panics while holding the grant mutex poisons it; the
+/// guard must still revoke the grant. RED if the guard's Drop goes back to
+/// `if let Ok(..) = lock()` (the grant would stay open).
+#[test]
+fn grant_guard_revokes_through_a_poisoned_mutex_18560() {
+    let coord = coordinator_with_published(LEAVING);
+    let grant = coord.open_ctrl_stamp_grant(DEADLINE, "test-pin");
+    let slot = std::sync::Arc::clone(&coord.ctrl_stamp.grant);
+    let poisoner = std::thread::spawn(move || {
+        let _held = slot.lock().expect("grant mutex");
+        panic!("handler panics holding the grant mutex");
+    });
+    assert!(poisoner.join().is_err(), "premise: the poisoning thread panicked");
+    assert!(coord.ctrl_stamp.grant.is_poisoned(), "premise: the grant mutex is poisoned");
+    drop(grant);
+    assert_eq!(
+        coord.ctrl_stamp_grant_for_test(),
+        None,
+        "the grant guard left the grant open behind a poisoned mutex"
+    );
+}
+
+/// Seat W (W4): the teardown publish (`stop_inner`, a 0/0 view with no
+/// snapshot installed) can run inside an open grant, during a full reconcile
+/// under `apply_snapshot`. It must not stamp 0/0 into an enabled row. RED if the
+/// `snapshot_installed` guard is removed (the row is rewritten to 0/0).
+#[test]
+fn teardown_publish_inside_a_grant_never_writes_the_row_18560() {
+    let mut coord = coordinator_with_published(LEAVING);
+    let row = coord.install_ctrl_stamp_test_row(steady_row(LEAVING));
+    coord.ctrl_stamp.test_now_ns = Some(NOW);
+    let grant = coord.open_ctrl_stamp_grant(DEADLINE, "test-pin");
+    coord.stop_inner(false);
+    drop(grant);
+    assert_eq!(coord.published_ctrl_stamp(), CtrlStamp::default(), "premise: teardown published 0/0");
+    assert_eq!(row.update_count(), 0, "the teardown publish wrote the ctrl row");
+    assert_eq!(row.get(), steady_row(LEAVING));
 }
