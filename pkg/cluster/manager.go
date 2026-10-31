@@ -1007,6 +1007,16 @@ func (m *Manager) HeartbeatPeerAddr() string {
 	return m.hbPeerAddr
 }
 
+// HeartbeatLocalAddr returns the local address supplied to the last
+// successfully published heartbeat start: the address RestartHeartbeat will
+// reuse (#18597). pkg/daemon's cells read it to prove a control-link renumber
+// moved the heartbeat to the new address.
+func (m *Manager) HeartbeatLocalAddr() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.hbLocalAddr
+}
+
 // HeartbeatControlInterface returns the control-link INTERFACE the RUNNING
 // heartbeat was started on -- the value last handed to StartHeartbeat, as
 // distinct from whatever the candidate config, or the last UpdateConfig, says.
