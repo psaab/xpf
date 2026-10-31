@@ -1061,8 +1061,18 @@ never publish a direct-VIP leftover (#18573)".
 **Limit:** a pre-#18573 VIP that the config had already dropped before the
 upgrade carries no stamp and must be deleted by hand once.
 
-**Status:** unit, real-kernel (netns) and mutation-checked; live renumber +
-RG move on tcp pending.
+**Status:** unit, real-kernel (netns) and mutation-checked (9/9). Live on
+tcp, deb `0.0.26066+gb5290d13d20d`, 2026-10-31 02:19 UTC:
+
+- A renumber `.10` -> `.42` and `::a` -> `::42` dropped the old pair from
+  fw0 within 1 s of `commit complete`. fw1 (non-owner) held neither pair.
+  The commit's snapshot listed only `.42`/`::42`. LAN to 1.1.1.1 was 10/10,
+  SNATed to `.42`.
+- An RG1+RG2 move to node1 and back left the new owner with only `.42`/`::42`
+  and the former owner with nothing. Nothing resurrected `.10`. SNAT stayed
+  on `.42`, 10/10.
+- The reverse renumber (`.42` -> `.10`, restoring the found state) behaved
+  the same.
 
 ## What Still Needs Work
 
