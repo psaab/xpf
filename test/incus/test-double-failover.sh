@@ -255,9 +255,12 @@ fi
 info "Waiting for fw0 to reboot and rejoin as secondary (max ${REBOOT_WAIT}s)"
 
 fw0_back=false
+fw0_active_at=""
+reboot_wait_start=$SECONDS
 for i in $(seq 1 "$REBOOT_WAIT"); do
 	if wait_for_instance "$FW0" 1; then
 		fw0_back=true
+		fw0_active_at=$SECONDS
 		info "fw0 xpfd active after ${i}s"
 		break
 	fi
@@ -269,18 +272,32 @@ else
 	fail "fw0 xpfd did not come back within ${REBOOT_WAIT}s"
 fi
 
-# #11872: fw0's crash reboot can leave its clock minutes behind in the no-NTP
-# loss lab. Resync BOTH nodes from one host UTC reading before verifying
-# rejoin/takeover readiness and crashing fw1 for the return failover.
-if failover_resync_node_clocks "$FW0" "$FW1"; then
-	pass "both firewall clocks resynced from host UTC after crash reboot"
+# #18614 (was the #11872 resync): fw0's crash reboot brings it back on its
+# RTC. Before verifying rejoin/takeover readiness and crashing fw1 for the
+# return failover, wait for NTP to converge on both nodes and record the skew
+# and the time it took; fail the cell when it does not converge. No clock is
+# set unless XPF_FAILOVER_CLOCK_RESYNC=1 (the recorded no-NTP escape).
+#
+# The wait spends only time this timeline already allowed (IPERF_DURATION has
+# to outlive the second crash): the REBOOT_WAIT the comeback left unused plus
+# the 20 s settle below, and never under 20 s. An explicit
+# XPF_FAILOVER_CLOCK_BUDGET_S wins.
+fw0_active_at="${fw0_active_at:-$SECONDS}"
+clock_budget=$(( reboot_wait_start + REBOOT_WAIT + 20 - SECONDS ))
+(( clock_budget >= 20 )) || clock_budget=20
+if XPF_FAILOVER_CLOCK_BUDGET_S="${XPF_FAILOVER_CLOCK_BUDGET_S:-$clock_budget}" \
+	failover_clock_precondition "fw0 crash reboot" "$FW0" "$FW1"; then
+	pass "$FAILOVER_CLOCK_DETAIL"
 else
-	fail "could not resync both firewall clocks from host UTC after crash reboot"
+	fail "$FAILOVER_CLOCK_DETAIL"
 fi
 
 
-# Wait for cluster to stabilize (gRPC takes ~15s after systemctl active)
-sleep 20
+# Wait for cluster to stabilize (gRPC takes ~15s after systemctl active): 20 s
+# after xpfd came back, part of which the clock wait above may already have
+# spent, so a run that converges takes no longer than the old resync did.
+settle=$(( fw0_active_at + 20 - SECONDS ))
+(( settle <= 0 )) || sleep "$settle"
 
 # Verify fw0 is secondary (no auto-preempt)
 fw0_status_after=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)

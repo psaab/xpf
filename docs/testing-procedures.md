@@ -133,8 +133,17 @@ Scenarios:
 
 A failed `incus start` after a force-stop is a FAIL that names the `incus`
 error. The harness then skips the 90 s xpfd wait, so one cause records one
-FAIL. Every node the harness starts, including in the final health check,
-has its clock resynced from host UTC (#11872).
+FAIL. After every crash reboot, the harness waits for NTP to converge on
+both nodes: the node1-node0 skew within 5 s and `Leap status: Normal` on
+both, within 120 s. It does this after the rejoin checks and before the
+failback, and after any node the final health check starts. It logs the skew
+and the time that took, and it never sets a clock. A run where NTP does not converge
+gets a FAIL cell that names the skew and both chrony states (#18614,
+`test/incus/failover-clock-lib.sh`). `XPF_FAILOVER_CLOCK_RESYNC=1` restores
+the #11872 resync for a lab with no NTP. It prints a banner and records
+`clock_resync=1` on the ledger row, and such a run is not operator-faithful.
+`test-failover` and `test-double-failover` run the same precondition after
+their crash reboot.
 
 #### Restoring fw0 between phases
 

@@ -36,7 +36,9 @@ Every HA gate before H11 missed this, for two reasons. The gates and the
 measurement scripts set both node clocks from the orchestrator before they run
 (`failover_resync_node_clocks`, #11872, and the hitless experiment scripts).
 And they do a few moves and then restore, instead of one node issuing
-alternating moves indefinitely.
+alternating moves indefinitely. Since #18614 the crash gates no longer set a
+clock: they wait for NTP and fail when it does not converge (see "Crash gates:
+NTP convergence is a measured precondition" below).
 
 ## What a correct move is
 
@@ -183,6 +185,115 @@ incus exec <node> -- chronyc -n tracking | grep -E 'Reference|Leap|System time'
 incus exec <node> -- chronyc -n sources
 incus exec <node> -- cli -c 'show chassis cluster status' | grep -A3 Warning
 ```
+
+### Crash gates: NTP convergence is a measured precondition (#18614)
+
+A crash-rebooted node starts from its RTC and stays at that offset until
+chrony steps or slews it. An operator's cluster lives in that state, so
+`test-failover`, `test-ha-crash` and `test-double-failover` (rows H1–H3) no
+longer repair it. After each crash reboot, they call
+`failover_clock_precondition` (`test/incus/failover-clock-lib.sh`) before the
+failback or the next crash. It reads both nodes from the orchestrator until
+two things hold:
+
+- the node1−node0 skew is within 5 s. Each node's offset against this host
+  comes from the minimum-RTT `incus exec date` of three samples, the same
+  method as the soak's preflight, so the host clock cancels;
+- `chronyc -n tracking` shows `Leap status: Normal` on **both** nodes.
+
+It checks again every 2 s, up to a budget. It logs the first reading (the
+post-crash state), each change, and the result. The result line gives the
+time it took and both nodes' uptimes, so the number can be placed on the
+rebooted node's boot timeline:
+
+```
+clock precondition [phase1]: 1.8 s: waiting: node1-node0 skew -1.063 s (+/-0.199 s); chrony loss:xpf-userspace-fw0: Not synchronised [00000000 ()], loss:xpf-userspace-fw1: Normal [A29FC801 (162.159.200.1)] (bound 5 s, budget 120 s)
+clock precondition [phase1]: converged 5.6 s after the check began (up loss:xpf-userspace-fw0 29 s, loss:xpf-userspace-fw1 18523 s): node1-node0 skew -1.110 s (+/-0.203 s); chrony loss:xpf-userspace-fw0: Normal [A29FC87B (162.159.200.123)], loss:xpf-userspace-fw1: Normal [A29FC801 (162.159.200.1)] (bound 5 s)
+CLOCK_PRECONDITION: resync=0 converged=1 skew_s=-1.110 converge_s=5.6 bound_s=5 budget_s=120 label=phase1
+```
+
+If both conditions do not hold within the budget, the cell FAILS with
+`NTP did not converge after a crash reboot within <budget> s: node1-node0
+skew <s>; chrony <fw0>: <leap> [<ref>], <fw1>: <leap> [<ref>]`. That is a lab
+or NTP state, not a dataplane failure; configure NTP as above. Each condition
+alone is not enough. `Normal` alone passes a node that is still seconds off.
+A small skew alone passes two free-running clocks that merely agree today.
+
+Where each harness runs it, and its budget:
+
+- `test-ha-crash` runs it after the rejoin and dual-active checks and before
+  the failback, in phase 1 and in every phase 3 cycle, and after any node the
+  final health check had to start. So those checks keep their 10 s settle and
+  see the cluster in its real post-crash clock state; only the failback waits.
+  The budget is 120 s. Like the old resync, it is a FAIL-only cell, so a
+  converged run has the same cell count as before (44).
+- `test-failover` and `test-double-failover` run it right after xpfd is back,
+  where the old resync ran. Their 20 s settle now counts from xpfd coming
+  back, so a run that converges takes no longer than before. Their budget is
+  the time those timelines already pay for: the part of `REBOOT_WAIT` the
+  comeback did not use, plus the 20 s settle, and never under 20 s. After a
+  22 s comeback that is about 58 s in `test-failover` and 88 s in
+  `test-double-failover`. So `IPERF_DURATION_MIN`, and the double-failover
+  300 s run, still outlive every bounded window. Either one is a PASS/FAIL
+  cell, in place of the old resync cell.
+
+Why these numbers:
+
+- **Bound, 5 s.** Any skew under 30 s authenticates in every window
+  alignment, and #18585 alarms at 10 s; 5 s is half that alarm. The bound must
+  not trip on a converged cluster. On loss with both nodes `Normal`, this
+  method read up to 0.23 s while the heartbeat read 0.0 s (RTT 0.18–0.21 s).
+  On the #18614 live runs, six crash reboots gave these converged readings:
+  −1.07, +0.07, +0.49 and +0.04 s on run 1; −1.11 s on run 2; −1.49 s on
+  run 3. The three near −1 s were all phase-1 readings, taken within seconds
+  of fw0 turning `Normal`. One of them had both nodes on the same server, so
+  the servers' disagreement does not explain them. A 2 s bound would have
+  left 0.5 s of margin.
+- **Budget, 120 s** (`test-ha-crash`'s default). On that run (loss,
+  0.0.26315+g960e6397a4e0, four `incus stop --force` reboots of fw0), xpfd was
+  active 19–20 s after `incus start`. chrony on fw0 reached `Normal`
+  17.2–18.1 s after that. The first readings, about 2 s after xpfd came back,
+  were +0.21 to +1.63 s with fw0 `Not synchronised`. Runs 2 and 3 check
+  after the rejoin checks, and there fw0 was `Normal` by uptime 29 s and
+  31 s. The journals of five
+  earlier crash reboots (0.0.26314) show the sequence: chronyd started about
+  8 s after kernel boot, logged
+  `Can't synchronise: no selectable sources` at 22–25 s, and selected a source
+  at 26–29 s. None logged a step: the RTC came back within chrony's 1 s
+  `makestep` threshold, so only the Leap status was outstanding. 120 s is over
+  6× the measured time, and still covers one full 64 s default poll interval
+  if the first iburst round runs before vrf-mgmt can route.
+
+Knobs: `XPF_FAILOVER_CLOCK_SKEW_BOUND_S`, `XPF_FAILOVER_CLOCK_BUDGET_S` (an
+explicit value overrides every harness's own budget),
+`XPF_FAILOVER_CLOCK_POLL_S` and `XPF_FAILOVER_CLOCK_SAMPLES`.
+
+`XPF_FAILOVER_CLOCK_RESYNC=1` is the escape for a lab with no NTP. It
+measures and logs the state, prints a banner saying the run is not
+operator-faithful, and then runs the #11872 `date -u -s` from one host
+reading. Its marker line says `resync=1`, which `harness-result.sh` records as
+`clock_resync=1` on the ledger row. A row whose every call only measured gets
+`clock_resync=0`. A run with any `clock_resync=1` is not H1–H3 evidence for
+an HA PR. Any other value of the variable is refused, and no clock is touched.
+
+Two NTP states seen on 2026-10-31 make the precondition fail. Both are real:
+
+- tcp and udp had no NTP stanza committed (`Leap status: Not synchronised`).
+  Every crash gate there FAILS until it is committed.
+- From 09:35 to 10:16 UTC both loss nodes lost every source (`no selectable
+  sources (3 unreachable sources)`). A crash gate in that window FAILS on the
+  chrony state, even with the skew still sub-second.
+
+`make test-failover-clock-lib` (also in `make selftest`) covers the
+precondition hermetically, with mocked `incus`, `date` and `sleep` over a
+virtual clock. The cells are: converged; converges within the budget; never
+converges; each condition alone is not enough; an unreadable node; the escape
+(one host reading, a banner, the flag); an invalid escape value; and the
+ledger contract with the real adapter. A spliced-in silent `date -s` on the
+measured path is caught, and a wait that never ends fails instead of hanging.
+A static census also checks that no harness under `test/incus/` sets a clock
+outside the escape, and that none calls `failover_resync_node_clocks`
+directly.
 
 ## What traffic must do
 

@@ -977,7 +977,8 @@ test-deploy: build build-ctl
 test-deploy-lib:
 	bash ./test/incus/deploy-lib-selftest.sh
 
-# Hermetically test failover clock resync after a crash reboot (#11872).
+# Hermetically test the crash smokes' NTP-convergence precondition and its
+# recorded XPF_FAILOVER_CLOCK_RESYNC=1 escape (#18614; was the #11872 resync).
 test-failover-clock-lib:
 	bash ./test/incus/failover-clock-selftest.sh
 

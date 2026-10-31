@@ -1641,6 +1641,7 @@ info "Waiting for fw0 to reboot and rejoin as secondary (max ${REBOOT_WAIT}s)"
 # under-reported by ~23%. Measured comebacks on the loss userspace
 # cluster: ~22s clean (sysrq), so 60s wall keeps ~2.7x headroom.
 fw0_back=false
+fw0_active_at=""
 wait_start=$SECONDS
 crash_post_external_done=false
 while (( SECONDS - wait_start < REBOOT_WAIT )); do
@@ -1651,6 +1652,7 @@ while (( SECONDS - wait_start < REBOOT_WAIT )); do
 	fi
 	if wait_for_instance "$FW0" 1; then
 		fw0_back=true
+		fw0_active_at=$SECONDS
 		info "fw0 xpfd active after $((SECONDS - wait_start))s"
 		break
 	fi
@@ -1670,19 +1672,33 @@ else
 	fail "fw0 xpfd did not come back within ${REBOOT_WAIT}s"
 fi
 
-# #11872: no NTP runs in the loss lab. A crash reboot can leave fw0 minutes
-# behind, making fabric-auth and heartbeat freshness fail and blocking the
-# pending-bulk peer barrier. Set BOTH clocks from one host UTC reading before
-# the rejoin/failback checks.
-if failover_resync_node_clocks "$FW0" "$FW1"; then
-	pass "both firewall clocks resynced from host UTC after crash reboot"
+# #18614 (was the #11872 resync): a crash reboot brings fw0 back on its RTC,
+# and a skew past the fabric-auth window breaks the failback below. An
+# operator's cluster gets no clock help, so neither does this smoke: wait for
+# NTP to converge on both nodes, record the skew and the time it took, and fail
+# the cell when it does not converge. XPF_FAILOVER_CLOCK_RESYNC=1 is the
+# recorded no-NTP escape (test/incus/failover-clock-lib.sh).
+#
+# The wait spends time IPERF_DURATION_MIN already pays for, so the main stream
+# still outlives every bounded window: the REBOOT_WAIT the comeback left unused
+# plus the 20 s settle below. That is about 58 s after a measured 22 s
+# comeback, and never under 20 s. An explicit XPF_FAILOVER_CLOCK_BUDGET_S wins.
+fw0_active_at="${fw0_active_at:-$SECONDS}"
+clock_budget=$(( wait_start + REBOOT_WAIT + 20 - SECONDS ))
+(( clock_budget >= 20 )) || clock_budget=20
+if XPF_FAILOVER_CLOCK_BUDGET_S="${XPF_FAILOVER_CLOCK_BUDGET_S:-$clock_budget}" \
+	failover_clock_precondition "fw0 crash reboot" "$FW0" "$FW1"; then
+	pass "$FAILOVER_CLOCK_DETAIL"
 else
-	fail "could not resync both firewall clocks from host UTC after crash reboot"
+	fail "$FAILOVER_CLOCK_DETAIL"
 fi
 
 
-# Wait for cluster to stabilize (gRPC takes ~15s after systemctl active)
-sleep 20
+# Wait for cluster to stabilize (gRPC takes ~15s after systemctl active): 20 s
+# after xpfd came back, part of which the clock wait above may already have
+# spent.
+settle=$(( fw0_active_at + 20 - SECONDS ))
+(( settle <= 0 )) || sleep "$settle"
 
 # Verify fw0 is secondary for EVERY redundancy group (NOT primary — no auto-preempt)
 #

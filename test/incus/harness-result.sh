@@ -211,6 +211,22 @@ _ha_smoke_summary() {
 	# "-" holds an empty slot so `read` does not shift the later field.
 	printf '%s %s %s %s' "$p" "$f" "${skipped:--}" "${cost:--}"
 }
+# #18614: the crash smokes' clock precondition (failover-clock-lib.sh) prints
+# one `CLOCK_PRECONDITION: resync=<0|1> ...` line per call. clock_resync=1 when
+# ANY call took the XPF_FAILOVER_CLOCK_RESYNC=1 escape (node clocks SET from
+# the host: the run is not operator-faithful), 0 when every call only measured,
+# and absent when the smoke never ran the precondition. ANY, not LAST: one
+# resync anywhere in the run repairs the state every later cell measures.
+_ha_smoke_clock_metric() {
+	local lines
+	lines=$(grep -E '^CLOCK_PRECONDITION: ' "$1" || true)
+	[[ -n "$lines" ]] || return 0
+	if grep -qE '^CLOCK_PRECONDITION: resync=1( |$)' <<<"$lines"; then
+		printf ' clock_resync=1'
+	else
+		printf ' clock_resync=0'
+	fi
+}
 harness_adapt_ha_smoke() {
 	local rc="$1" log="$2"
 	local summary p f skipped="" cost=""
@@ -239,6 +255,7 @@ harness_adapt_ha_smoke() {
 	local metrics="cells_passed=$p cells_failed=$f"
 	[[ -n "$skipped" ]] && metrics="$metrics cells_skipped=$skipped"
 	[[ -n "$gbps" ]] && metrics="$metrics throughput_gbps=$gbps"
+	metrics="$metrics$(_ha_smoke_clock_metric "$log")"
 	if ((f > 0)); then
 		# FAIL headlines are diagnostic-only: FAIL rows never enter bands,
 		# so the FAIL shape keeps throughput-when-present, cells otherwise.
@@ -282,6 +299,7 @@ harness_adapt_smoke_cells() {
 	local metrics="cells_passed=$p cells_failed=$f"
 	[[ -n "$skipped" ]] && metrics="$metrics cells_skipped=$skipped"
 	[[ -n "$cost" ]] && metrics="$metrics cells_cost=$cost"
+	metrics="$metrics$(_ha_smoke_clock_metric "$log")"
 	if ((f > 0)); then
 		printf 'FAIL\t\tcells_passed\thigher-better\t%s\n' "$metrics"
 		return 0

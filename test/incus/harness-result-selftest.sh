@@ -389,6 +389,28 @@ if [[ "$(adapt_field smoke-cells 1 1)" == "FAIL" ]]; then
 else
 	bad "#18583: strict-mode soak line scored $(adapt_field smoke-cells 1 1), want FAIL"
 fi
+# #18614: a crash smoke that took the XPF_FAILOVER_CLOCK_RESYNC=1 escape SET
+# the node clocks, so its row must say so (clock_resync=1) on either adapter,
+# even when a later call only measured; one that only measured says 0; a smoke
+# without the precondition carries no clock field. The producer side of this
+# contract (the library's real marker lines) is failover-clock-selftest.sh's.
+clock_rows_ok=1
+for adapter in smoke-cells ha-smoke; do
+	printf '%s\n' 'CLOCK_PRECONDITION: resync=1 converged=- skew_s=+72.000 converge_s=- bound_s=5 budget_s=120 label=phase1' \
+		'CLOCK_PRECONDITION: resync=0 converged=1 skew_s=+0.100 converge_s=7.4 bound_s=5 budget_s=120 label=final' \
+		'  PASS  iperf3 throughput 9.0 Gbps' 'HA crash test: 7 passed, 0 failed' >"$LOG"
+	[[ " $(adapt_field "$adapter" 0 5) " == *" clock_resync=1 "* ]] || clock_rows_ok=0
+	printf '%s\n' 'CLOCK_PRECONDITION: resync=0 converged=1 skew_s=+0.100 converge_s=7.4 bound_s=5 budget_s=120 label=final' \
+		'  PASS  iperf3 throughput 9.0 Gbps' 'HA crash test: 7 passed, 0 failed' >"$LOG"
+	[[ " $(adapt_field "$adapter" 0 5) " == *" clock_resync=0 "* ]] || clock_rows_ok=0
+	printf '%s\n' '  PASS  iperf3 throughput 9.0 Gbps' 'HA crash test: 7 passed, 0 failed' >"$LOG"
+	[[ "$(adapt_field "$adapter" 0 5)" != *clock_resync* ]] || clock_rows_ok=0
+done
+if ((clock_rows_ok)); then
+	ok "#18614: ha-smoke and smoke-cells record clock_resync=1 when ANY clock precondition resynced, 0 when all measured, nothing when absent"
+else
+	bad "#18614: the clock_resync metric is wrong on an HA smoke row"
+fi
 printf 'Results: 7 passed, 0 failed, 2 skipped\n' >"$LOG"
 if [[ "$(adapt_field smoke-cells 0 5)" == *"cells_skipped=2"* && "$(adapt_field smoke-cells 0 5)" != *"cells_cost"* ]]; then
 	ok "#18583: the skipped slot still parses with no cost field (no shift)"
