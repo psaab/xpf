@@ -1849,8 +1849,11 @@ if [[ "$POOL_NAT_SMOKE" == 1 && -n "$POOL_LAN_IF" ]]; then
 		busy)
 			void "a pool-mode TCP flow was NOT MEASURED after the role change: the iperf3 server on ${IPERF_TARGET}:${POOL_POST_PORT} answered busy (another client holds that port; #18567). The busy reply crossed the firewall, but no test ran. Pool probe log tail: ${pool_log}"
 			;;
-		*)
+		fail)
 			fail "a pool-mode TCP flow did not complete after the role change; the #8341 TCP-specific data-path defect may have returned. Pool probe log tail: ${pool_log}"
+			;;
+		*)
+			fail "the pool probe verdict helper returned an unrecognised verdict; the pool-mode data path was not judged. Pool probe log tail: ${pool_log}"
 			;;
 		esac
 	else
