@@ -185,26 +185,49 @@ assert_fails "$FX_C4" MALFORMED "members: n= on a closing marker reds"
 M_ONCLOSE="$(mutant count-on-close "$(guard_off count-on-close)")"
 assert_flips "$FX_C4" MALFORMED "members mutation: with that check off the cell flips" "$M_ONCLOSE"
 
-# The owner-proposal case: CLAUDE.md joins at n=7 while the docs still say
-# n=6. Seven blocks exist, so CLAUDE.md's n is RIGHT: the message must name
-# the stale docs (a lane's fix), not escalate to the owner.
+# The owner-proposal case: CLAUDE.md joins at n=3 while the docs still say
+# n=2. Three blocks exist, so CLAUDE.md's n matches. The message names the
+# docs as the suspects and does not escalate to the owner.
 FX_C5="$(new_fixture members-stale)"
 printf '%s\n' '<!-- mirror:m n=2 -->x<!-- /mirror:m -->' >"$FX_C5/docs/a.md"
 printf '%s\n' '<!-- mirror:m n=2 -->x<!-- /mirror:m -->' >"$FX_C5/docs/b.md"
 printf '%s\n' '# Rules' '<!-- mirror:m n=3 -->x<!-- /mirror:m -->' >"$FX_C5/CLAUDE.md"
 run_census "$FX_C5" "$CENSUS"
-if [[ $RC -eq 1 && "$OUT" == *"FAIL: MEMBERS: mirror:m has 3 blocks, matching the n=3 that 1 copy declares; the other copies were not updated: n=2 at docs/a.md:1, n=2 at docs/b.md:1 (bump them to n=3)"* && "$OUT" != *"owner action"* ]]; then
-	ok "members: when one copy's n matches the blocks found, the message names the stale copies, with no owner escalation"
+if [[ $RC -eq 1 && "$OUT" == *"FAIL: MEMBERS: mirror:m: n=3 (declared by 1 copy) matches the 3 blocks found, and n=2 at docs/a.md:1, n=2 at docs/b.md:1 disagree"* && "$OUT" != *"owner action"* ]]; then
+	ok "members: when one copy's n matches the blocks found, the message names the other copies, with no owner escalation"
 else
-	bad "members: expected the stale docs named and no owner action (rc=$RC)"
+	bad "members: expected the docs named and no owner action (rc=$RC)"
 	printf '%s\n' "$OUT" | sed 's/^/         /' >&2
 fi
 M_STALE="$(mutant stale-copies "$(guard_off stale-copies)")"
 run_census "$FX_C5" "$M_STALE"
-if [[ "$OUT" != *"the other copies were not updated"* && "$OUT" == *"owner action"* ]]; then
-	ok "members mutation: without the stale-copy branch the message lists CLAUDE.md and escalates to the owner, so the cell has power"
+if [[ "$OUT" != *"matches the 3 blocks found"* && "$OUT" == *"owner action"* ]]; then
+	ok "members mutation: without the matching-n branch the message lists CLAUDE.md and escalates to the owner, so the cell has power"
 else
 	bad "members mutation ESCAPED"
+fi
+# AC's compound case (#18650 round 3): 7 real copies, one LOST ITS WRAPPER
+# and drifted, 2 still say n=6, 4 were correctly bumped to n=7. The lower n
+# matches the 6 blocks found, so a directive to "bump the n=7 copies to
+# n=6" would turn the census green and hide the unwrapped copy. The
+# message must be a hedge naming BOTH readings, never a directive.
+FX_C6="$(new_fixture members-compound)"
+for f in 1 2; do printf '%s\n' '<!-- mirror:m n=6 -->x<!-- /mirror:m -->' >"$FX_C6/docs/f$f.md"; done
+for f in 3 4 5 6; do printf '%s\n' '<!-- mirror:m n=7 -->x<!-- /mirror:m -->' >"$FX_C6/docs/f$f.md"; done
+printf '%s\n' 'x, drifted (this copy lost its wrapper)' >"$FX_C6/docs/f7.md"
+run_census "$FX_C6" "$CENSUS"
+if [[ $RC -eq 1 && "$OUT" == *"either those copies are stale, or a copy lost its wrapper (restore it, then fix the n=6 copies)"* && "$OUT" != *"bump them"* ]]; then
+	ok "members (compound): an unwrapped copy plus split counts gets a HEDGE naming both readings, not a directive that would hide it"
+else
+	bad "members (compound): expected the hedged wording and no directive (rc=$RC)"
+	printf '%s\n' "$OUT" | sed 's/^/         /' >&2
+fi
+M_DIRECT="$(mutant directive '/census-guard: hedged$/s/either those copies are stale, or a copy "/bump them to that n (a copy "/')"
+run_census "$FX_C6" "$M_DIRECT"
+if [[ "$OUT" != *"either those copies are stale, or a copy lost its wrapper"* ]]; then
+	ok "members (compound) mutation: rewording the hedge into a directive flips the cell, so it cannot silently revert"
+else
+	bad "members (compound) mutation ESCAPED"
 fi
 
 # ── cell O: a block with no partner ───────────────────────────────────────

@@ -160,7 +160,7 @@ driveable work remains.
   NEVER external CLI model tools (codex/agy/claude CLIs) to run other models.
 - **Full engineer + triple hostile reviews**: every PR that changes
   shipped code or behaviour gets **three independent hostile
-  domain-expert reviews at the FINAL head** (findings folded, re-review
+  domain-expert reviews at the FINAL head** (or covered by Step 4 item 0's delta rule) (findings folded, re-review
   after any fold that changes behavior). Docs/test-only PRs with no
   code or behaviour change still get three reviewers, but in short
   form (scope/accuracy verdict, no cluster gate). Reviewer pool — pick
@@ -620,14 +620,14 @@ what else catches its defect.
 **You (the PARENT) own review and merge.** Reviewer dispatch capacity
 is whatever the internal task runner provides — the three reviewers
 may run concurrently or queue; the gate requires three verdicts at
-the same final head, NOT simultaneity. Spawned engineer agents
+the same final head (or covered by Step 4 item 0's delta rule), NOT simultaneity. Spawned engineer agents
 CANNOT dispatch their own sub-reviewers. Therefore:
 
 - **PARENT dispatches THREE independent hostile reviewers for EVERY
   PR** — three distinct models from the pool (Muse Wonder, Opus 5.5,
   Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro), each read-only,
   worktree-scoped, primed as a hostile domain expert, ending with a
-  verdict at the FINAL head. All three must clear before merge; any
+  verdict at the FINAL head (or covered by Step 4 item 0's delta rule). All three must clear before merge; any
   real finding from any one blocks. See `/review-pr` for the
   hostile-review shape. Only the declared model pool reviews —
   Copilot is not part of any gate (user directive 2026-10-26).
@@ -876,7 +876,7 @@ For each PR an agent opens:
      triple review + cluster gate below (failover PRs add
      `test-failover`; dataplane PRs add iperf throughput)
    - upgrade / correctness / security → triple review, maximal depth
-   All three must reach MERGE-READY at the same final head; any real
+   All three must reach MERGE-READY at the same final head (or covered by Step 4 item 0's delta rule); any real
    finding from any one blocks (fail-closed veto, not majority vote).
    Parent verifies every cited finding against the actual code before
    folding — stale/disproven findings are recorded as such, never
@@ -1152,7 +1152,7 @@ For each PR an agent opens:
    spend cap).
 
 Every gate must clear: all three hostile verdicts at the final
-head, the cluster gate (or docs/test-only classification), and the
+head (or covered by Step 4 item 0's delta rule), the cluster gate (or docs/test-only classification), and the
 parent firsthand verification.
 
 ## Step 4: Merge (PARENT)
