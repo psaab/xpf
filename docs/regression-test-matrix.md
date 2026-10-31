@@ -158,81 +158,42 @@ failure.
   in #18556 at `cce3fb4944`). Re-run the off-path control before excusing it
   again; once #18556 merges this row should be deleted.
 
-- **tcp/udp external IPv4 (1.1.1.1, 8.8.8.8): a duplicate WAN address,
-  #18558.** The cause is the lab segment, not the product. The fix is a
-  renumber (#18575), but **until a cluster has been renumbered live, judge
-  these cells on it exactly as before**: over 3 smokes per build, a PR blocks
-  only if it fails them in at least 2 more of its 3 runs than master did. The
-  row's same-run off-path control is `ha_wan_claim_check` returning status 1
-  for the cluster's WAN address (test-connectivity's "WAN IPv4 ... answered
-  for only by this cluster" FAIL, or test-failover's VOID reason). A ping from
-  the orchestrator or the incus host cannot stand in for it: it does not leave
-  from the duplicated address, so it passes either way.
-
-  VLAN 50 (172.16.50.0/24) is shared with non-xpf devices. tcp's
-  172.16.50.10 was also held by `18:e8:29:2c:13:7a` and udp's 172.16.50.11
-  by `d8:b3:70:8c:f8:44`. Each answered every RFC 5227 ARP probe for its
-  address, alongside the RG owner (512/512 probes for .10, 2026-10-31). The
-  upstream gateway's ARP entry flipped between the device and the owner.
-  Recovery always followed the owner's own ARP to the gateway
-  within 1-2 s (8/8), and each outage began about 30 s later, when the
-  device refreshed. IPv4 loss was therefore 20-50% on tcp, and up to 80% on
-  udp, whose device refreshes more often, while IPv6 stayed clean.
-  The "replies miss the session" reading was the device's own return traffic
-  reaching the owner while the entry pointed at it. Earlier this row blamed
-  "30-55 s after an RG move", but the loss is periodic with no move at all;
-  the move's GARP burst only reset the cycle.
-
-  Same-run proof on tcp, with the deployed build unchanged:
-  - 2026-10-31 00:21-00:36, reth0.50 v4 `.10` -> `.42` -> `.10`, sampling
-    the LAN host's 1.1.1.1 and 8.8.8.8 pings and fw0's own pings to the
-    gateway.
-    - With `.10`: 101/125 host 1.1.1.1 (19% loss), and fw0's gateway ping
-      from `.10` 99/125.
-    - With `.42`: fw0's gateway ping from `.42` 190/190 and from 172.16.80.10
-      190/190. Over the same seconds, the LAN host SNATed to the stale `.10`
-      reached 1.1.1.1 only 130/190 times, so `.42` against `.10` is a
-      same-moment twin.
-  - With `.42` as the only v4 address, sessions showed SNAT to `.42`, and
-    every probe was 284/284 for 6 min, 1.1.1.1 and 8.8.8.8 included. The
-    stale `.10` that #18573 leaves behind had been removed by hand. Back on
-    `.10`, the same probes lost 16% again.
-  - It is not a cross-cluster ARP conflict: in a simultaneous capture on all
-    six loss/tcp/udp WAN members, no xpf MAC ever claimed another cluster's
-    address. udp's foreign device broadcast its claim about every 6 s
-    (tcp's, about once a minute). udp IPv4 from the LAN host was 11/61,
-    with fw0's own ping to the gateway from `.11` 12/61, and from
-    172.16.80.11 61/61. IPv6 was 61/61. Only loss's `.8` is unique, and
-    loss passes these cells.
-
-  The tcp and udp WAN addresses moved to `.42` and `.43` in the repo. Three
-  checks keep this from recurring:
-  - `TestSharedSegmentForeignClaims18558` (`pkg/configstore`) refuses a
-    shipped claim on any address in the measured foreign list.
-  - `test-failover` runs `ha_wan_claim_check` whenever an external IPv4 cell
-    fails, and turns that FAIL into a VOID naming the foreign MAC.
-    - Only a **non-xpf** claimant does that.
-    - A claim by another xpf cluster's RETH MAC (`02:bf:72:<other id>:`) is
-      an xpf defect, such as a stale VIP (#18573), so the FAIL stands with
-      the other cluster id named.
-    - This cluster's own RETH and physical MACs, from both nodes, are own.
-    - The cluster id is cross-checked against the live RETH MAC; drift is
-      VOID.
-    - A PASS is never converted, and a blind probe leaves the FAIL standing.
-  - `test-connectivity` runs a preflight cell, "WAN IPv4 ... answered for
-    only by this cluster", which FAILs on either kind of claimant, naming
-    it.
-
-  If any of the three fires, re-probe and renumber. Never excuse an external
-  IPv4 cell without that evidence. The live renumber has a coexistence window
-  and a manual step (#18573). Follow the procedure in
-  `docs/incus-tcp-udp-plan.md` §3.3, "Renumbering a stack on the shared
-  segment". Delete this row once #18575 is merged and both clusters are
-  renumbered live.
-- **tcp host SR-IOV VFs.** The host's dracut default network must not manage
-  the VF netdevs. `/etc/systemd/network/05-xpf-sriov-vf-unmanaged.network`
-  marks `eno1v*`/`eno2v*` unmanaged. Without it a force-stopped VM cannot
-  restart: "All virtual functions on parent device mlx1 are already in use".
+- **Duplicate WAN address on the shared VLAN 50 (#18558).** Resolved on
+  2026-10-31: tcp and udp were renumbered live to `172.16.50.42` and `.43`
+  (#18575; plan §3.3). Their old `.10`/`.11` are held by non-xpf lab devices,
+  and loss's `.8` is unique. No cell is excused by this row any more. It
+  stays as the rule for a recurrence: an external IPv4 FAIL on tcp, udp or
+  loss is environment only while `ha_wan_claim_check` returns status 1 (a
+  non-xpf claimant) for that cluster's WAN address in the same run. A ping
+  from the orchestrator cannot stand in for it, because it does not leave
+  from the duplicated address. Status 3 (another xpf cluster's RETH MAC) is
+  a product failure. If the check fires, re-probe and renumber with the
+  §3.3 procedure. The evidence and the guards
+  (`TestSharedSegmentForeignClaims18558`, test-failover's claim-gated VOID,
+  test-connectivity's "WAN IPv4 ... answered for only by this cluster"
+  cell) are recorded in `docs/log/18558.md`.
+- **tcp and udp host SR-IOV VFs.** Two host faults have each left a
+  force-stopped firewall VM unable to forward.
+  - **VFs claimed by the host network.** The host's dracut default network
+    must not manage the VF netdevs:
+    `/etc/systemd/network/05-xpf-sriov-vf-unmanaged.network` marks
+    `eno1v*`/`eno2v*` unmanaged. Without it a force-stopped VM cannot
+    restart: "All virtual functions on parent device mlx1 are already in
+    use". tcp's host was fixed 2026-10-29 and udp's 2026-10-30
+    (`/var/tmp/fz/udp-vf-repair.sh`).
+  - **A stale host port VLAN on a reassigned VF.** incus records a VF's
+    state before attaching it (`volatile.<dev>.last_state.vf.vlan`) and
+    restores that state on stop. A `wan-vf` device that sets no `vlan`
+    leaves whatever VLAN the VF last carried. On 2026-10-30 udp fw0's WAN
+    VF (`mlx0 vf 0`) came back with port VLAN 80. fw0's tagged
+    `reth0.50`/`.80` frames then died, and its neighbour entries went
+    FAILED in both families after every restart.
+    - **Check:** `ssh <host> 'ip link show mlx0; ip link show mlx1'` must
+      show no `vlan` on a firewall WAN VF.
+    - **Fix:** while the VM runs, `sudo ip link set mlx0 vf <n> vlan 0`,
+      and also
+      `incus config set <vm> volatile.wan-vf.last_state.vf.vlan=0`, so that
+      the restore on stop writes 0. A VM restart survived the fix.
 
 ## Reading results
 

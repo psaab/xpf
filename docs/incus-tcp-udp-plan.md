@@ -1084,8 +1084,11 @@ running cluster until these steps run. Run them inside one lock cell
    `ge-0-0-2` on node0 and `ge-7-0-2` on node1. This step is needed because
    the commit never removes the old VIP (#18573). If you skip it, the owner
    keeps answering ARP for an address it no longer owns.
-4. **Refresh the helper snapshot.** Use any further commit, or an RG1
-   failover and failback. The commit's snapshot captured the stale old
+4. **Refresh the helper snapshot.** Use a further commit; a no-op
+   description set/delete pair is enough. An RG1 failover and failback did
+   **not** refresh it on udp's pre-#18579 build (2026-10-31: SNAT stayed on
+   the deleted `.11` until a commit). On a build with #18579, step 3 and
+   this step happen inside the renumber commit itself. The commit's snapshot captured the stale old
    address, and interface-mode SNAT keeps using it (#18573). Then confirm
    that `show security flow session destination-prefix 1.1.1.1/32` shows
    `--> <new>/...`.
