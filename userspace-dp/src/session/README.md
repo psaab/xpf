@@ -73,6 +73,11 @@ are covered by the last bullet):
   claims plus normalized plain-reply aliases, sharded by seeded key hash
   so packet probes take at most one shard read lock (and none at all
   when `active_claim_count` is 0).
+- `punt_seed_directory.rs` — #18562: the node-wide, READ-ONLY view of
+  this node's live #7770 `FabricPuntSeed` rows, consulted only by the
+  embedded-ICMP matcher's last-resort fallback for a FABRIC-ingress
+  forward quote. Written only by `SessionTable` itself; see "Punt-seed
+  directory (#18562)" below.
 - `pptp.rs` — RFC 2637 PPTP call associations (#7699 stage 1):
   `PptpCall`, the canonically-ordered learned `(call-id A, call-id B)`
   pair from which both directions derive the same
@@ -1600,6 +1605,36 @@ closed** — it excludes peer-synced / promoted reaps, matching
 deliberate semantics tightening, not a regression: the two counters are
 now consistently local-only, so their difference (the "Current sessions"
 gauge) is a coherent local-forwarding metric on every node.
+
+## Punt-seed directory (#18562)
+
+A #7770 punt seed is worker-local: it is never published to the shared
+maps, never HA-exported and emits no deltas. During an RG split the first
+ICMP error for a NEW punted flow comes back over the fabric and RSS lands it
+on any worker, usually not the seed's; before the WAN owner's HA import
+arrives, that worker's matcher found nothing and the error was default-denied
+`wan -> lan`. Every worker's table therefore mirrors its forward
+`FabricPuntSeed` rows into the node's ONE `PuntSeedDirectory`
+(`SharedSessionOwnerRgIndexes::punt_seeds`, wired in `worker_loop`), and the
+matcher reads it.
+
+The row is a snapshot, so its contract is lifecycle, held at the table's own
+choke points rather than at call sites:
+
+| event | site | effect |
+|---|---|---|
+| a forward `FabricPuntSeed` record enters the slab | `insert_record` | publish `(key -> decision, metadata, session_id, table token, created + idle window)` |
+| any removal (expire / delete / replace / take_synced_local) | `remove_entry` (the sole removal sink) | retire iff the row is still this table's incarnation |
+| an in-place rewrite of the seed (HA transition, promotion) | `refresh_in_place` | retire (fail closed; never re-published) |
+| the table is moved to another directory or dropped | `set_punt_seed_directory` / `Drop` | retire every row of this table |
+
+A row also stops matching at the seed's idle deadline AS INSTALLED; a seed
+kept alive by traffic outlives its row, never the reverse. The directory is
+bounded (`PUNT_SEED_DIRECTORY_CAP`, prune-expired-then-refuse, counted by
+`PUNT_SEED_DIRECTORY_FULL_TOTAL`); a refused publish only means that seed's
+cross-worker errors keep the pre-#18562 verdict. Nothing materializes,
+promotes, exports, sweeps or replicates from the directory, and no data
+packet reads it. Cells: `punt_seed_directory_18562_tests.rs`.
 
 ## Corruption contract (#1855)
 

@@ -1102,10 +1102,11 @@ fn run_on_worker(
 /// error of every new session (every UDP probe) default-denied `wan -> lan` on
 /// node1 before HA sync landed. Proven here: worker A holds the #7770
 /// `FabricPuntSeed` locally, the node's shared maps stay empty by design
-/// (`SessionOrigin::is_transient_local_seed`), and worker B's matcher returns
-/// NoMatch. Tracked by #18562; this cell is the acceptance test for it.
+/// (`SessionOrigin::is_transient_local_seed`), and worker B's matcher returned
+/// NoMatch. #18562: worker B now finds the seed in the node's read-only
+/// punt-seed directory (`punt_seed_forward_quote_match`). RED when that
+/// consult is disabled (V4 Echo, `delivered ... left: 0`).
 #[test]
-#[ignore = "#18562: the #7770 punt seed is worker-local, so the first error on another worker returns NoMatch; un-ignore with the fix"]
 fn split_rg_first_error_on_another_worker_reaches_lan_host_18174() {
     for (f, probe) in SPLIT_CASES {
         let label = format!("cross-worker split {f:?} {probe:?}");
@@ -1114,6 +1115,7 @@ fn split_rg_first_error_on_another_worker_reaches_lan_host_18174() {
         let n1_neighbors = neighbors_with_client(&n1_fwd, f);
         let n1_shared = NodeShared::new();
         let mut n1_worker_a = SessionTable::new();
+        n1_worker_a.set_punt_seed_directory(Arc::clone(&n1_shared.owner_idx.punt_seeds));
         let (frame, meta) = probe_frame(f, probe, 5);
         let mut lan = binding_on(LAN_IF);
         run_on_worker(&mut lan, &mut n1_worker_a, &n1_fwd, &ha(false, true), &frame, meta, &n1_neighbors, &n1_shared);
@@ -1136,18 +1138,84 @@ fn split_rg_first_error_on_another_worker_reaches_lan_host_18174() {
         let fabric_frame = wan_owner_error_leg(&mut n0_sessions, &n0_fwd, &n0_neighbors, f, probe, xlate, &label);
 
         // node1, worker B: the reversed error, own table empty.
+        // Premise (the #18562 shape): worker A holds the seed, the node's
+        // shared maps hold NOTHING for the flow (seeds are transient-local and
+        // never published), and only the read-only directory mirrors it.
+        assert_eq!(n1_worker_a.len(), 1, "{label}: premise: worker A holds the punt seed");
+        assert_eq!(n1_shared.sessions.lock().unwrap().len(), 0, "{label}: premise: shared map empty");
+        assert_eq!(n1_shared.nat.lock().unwrap().len(), 0, "{label}: premise: shared NAT map empty");
+        assert_eq!(n1_shared.owner_idx.punt_seeds.len(), 1, "{label}: premise: the seed is in the node directory");
         let mut n1_worker_b = SessionTable::new();
+        n1_worker_b.set_punt_seed_directory(Arc::clone(&n1_shared.owner_idx.punt_seeds));
         let emeta = meta_for(f, FABRIC_IF, 14, if f == Family::V4 { PROTO_ICMP } else { PROTO_ICMPV6 }, fabric_frame.len());
         let mut fab1 = binding_on(FABRIC_IF);
         let (batch, dbg) =
             run_on_worker(&mut fab1, &mut n1_worker_b, &n1_fwd, &ha(false, true), &fabric_frame, emeta, &n1_neighbors, &n1_shared);
         assert_eq!(batch.invalid_fabric_stamp_drops, 0, "{label}: stamp accepted");
-        assert_eq!(dbg.policy_deny, 0, "{label}: the first error must not be default-denied on another worker");
+        // L2 (#18562): `policy_deny` alone cannot tell broken from fixed here.
+        // Measured on the broken path (the directory consult disabled): the
+        // unmatched error falls to flowless enforcement and this harness ends
+        // it as `ha_inactive=1` / `exception_packets=1`, with `policy_deny=0`
+        // (live, the same NoMatch was logged POLICY_DENY wan -> lan). Pin the
+        // drop the harness actually produces, keep `policy_deny` for the
+        // matched-but-refused class (#18174's restamp defect bumps it through
+        // `record_queued_embedded_icmp_refusal`), and require delivery.
+        assert_eq!(dbg.ha_inactive, 0, "{label}: the first error must not fall through to the flowless drop");
+        assert_eq!(batch.exception_packets, 0, "{label}: no exception drop on worker B");
+        assert_eq!(dbg.policy_deny, 0, "{label}: the first error must not be policy-refused on another worker");
         assert_eq!(fab1.scratch.scratch_forwards.len(), 1, "{label}: delivered to the LAN host from worker B");
         assert_delivered_to_lan_host(&fab1.scratch.scratch_forwards[0], f, probe, ErrKind::TimeExceeded, hop(f), &label);
     }
 }
 
+
+/// #18562 negative twin of the cross-worker cell: the punt-seed directory
+/// answers only a FABRIC-ingress error. The same reversed bytes (outer dst =
+/// client, quote = the pre-NAT probe) arriving on node1's own WAN — with the
+/// seed in the node's directory and node1 owning both RGs, so the error
+/// would route to the LAN as a ForwardCandidate — are not something the WAN
+/// owner produced, and must take the ordinary unmatched-error path like any
+/// unsolicited error. RED when the fabric-ingress gate in
+/// `punt_seed_forward_quote_match` is dropped: the directory row matches and
+/// the RELATED rule queues it to the LAN host.
+#[test]
+fn cross_worker_punt_seed_never_matches_off_fabric_18562() {
+    for f in [Family::V4, Family::V6] {
+        let label = format!("off-fabric cross-worker {f:?}");
+        let n1_fwd = build_forwarding_state(&peer_snapshot());
+        let n1_neighbors = neighbors_with_client(&n1_fwd, f);
+        let n1_shared = NodeShared::new();
+        let mut n1_worker_a = SessionTable::new();
+        n1_worker_a.set_punt_seed_directory(Arc::clone(&n1_shared.owner_idx.punt_seeds));
+        let (frame, meta) = probe_frame(f, Probe::Echo, 5);
+        let mut lan = binding_on(LAN_IF);
+        run_on_worker(&mut lan, &mut n1_worker_a, &n1_fwd, &ha(false, true), &frame, meta, &n1_neighbors, &n1_shared);
+        assert_eq!(
+            lan.scratch.scratch_forwards[0].decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "{label}: premise: node1 punts the probe"
+        );
+        assert_eq!(n1_shared.owner_idx.punt_seeds.len(), 1, "{label}: premise: the seed is in the node directory");
+
+        let mut n1_worker_b = SessionTable::new();
+        n1_worker_b.set_punt_seed_directory(Arc::clone(&n1_shared.owner_idx.punt_seeds));
+        let (eframe, emeta) =
+            error_frame(f, Probe::Echo, ErrKind::TimeExceeded, hop(f), client(f), PROBE_ECHO_ID);
+        let mut wan = binding_on(WAN_IF);
+        let (_batch, dbg) =
+            run_on_worker(&mut wan, &mut n1_worker_b, &n1_fwd, &ha(true, true), &eframe, emeta, &n1_neighbors, &n1_shared);
+        // The matcher returns NoMatch and the error takes the flowless path,
+        // which refuses it here (measured: the destination-class drop,
+        // `martian_dropped=1`) — never the RELATED queue the directory row
+        // would have opened.
+        assert!(
+            wan.scratch.scratch_forwards.is_empty(),
+            "{label}: an off-fabric error must not be matched by a punt seed"
+        );
+        assert_eq!(wan.scratch.scratch_recycle.len(), 1, "{label}: the refused descriptor is recycled");
+        assert_eq!(dbg.ha_inactive, 0, "{label}: the refusal is not an HA verdict (both RGs are active)");
+    }
+}
 
 /// Defect 3 also moves interface source NAT: the SNAT matcher
 /// (`forwarding/nat.rs`) translates an interface-mode rule to

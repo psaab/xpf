@@ -1036,12 +1036,22 @@ sync.
     path already did, #3779), and both #7770 punt-seed sites skip the seed
     for such a packet so it leaves no session row behind (a punt seed emits
     no HA delta; the
-    FabricRedirect twin of the #14643 ForwardCandidate rollback). Residual,
-    tracked by #18562: the punt seed is worker-local by design, so the FIRST
-    error of a new split flow that lands on another worker of the LAN owner
-    (before the WAN owner's HA delta is imported) still returns NoMatch and
-    is default-denied (`split_rg_first_error_on_another_worker_..._18174`,
-    ignored until #18562). Cells:
+    FabricRedirect twin of the #14643 ForwardCandidate rollback). #18562:
+    the punt seed is worker-local, so the FIRST error of a new split flow
+    usually lands on ANOTHER worker of the LAN owner (the fabric NIC hashes it
+    independently of the LAN probe) before the WAN owner's HA delta is
+    imported; that worker's table and the shared maps were empty, so it
+    returned NoMatch and was default-denied `wan -> lan`. Each worker now
+    mirrors its forward punt seeds into the node's read-only
+    `PuntSeedDirectory` (`session/punt_seed_directory.rs`, maintained at the
+    table's `insert_record` / `remove_entry` / `refresh_in_place` / `Drop`
+    choke points), and the session-fallback arm consults it last, only for a
+    fabric-ingress FORWARD quote (`icmp_embed::punt_seed_forward_quote_match`);
+    every RELATED gate applies unchanged. Cells:
+    `split_rg_first_error_on_another_worker_reaches_lan_host_18174`
+    (un-ignored), `cross_worker_punt_seed_never_matches_off_fabric_18562`,
+    and the lifecycle cells in `session/punt_seed_directory_18562_tests.rs`.
+    The #18174 cells:
     `split_rg_live_shape_time_exceeded_reaches_lan_host_18174` (node1's own
     LAN-created row, node0's fabric-ingress row, both via the poll path),
     `split_rg_after_establishment_synced_import_reaches_lan_host_18174`
