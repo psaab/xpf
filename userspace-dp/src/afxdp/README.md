@@ -158,6 +158,36 @@ sync.
         the Time Exceeded / Packet-Too-Big builders, which resolve the same
         logical unit (#6102 — before that fix they wrongly keyed the physical
         index).
+      - **#18174 — the SOURCE of a generated ICMP error on a RETH:** every
+        builder above sources the reply from `forwarding.egress[unit]
+        .primary_v4/v6`. For an untagged RETH unit Go emits TWO rows on one
+        ifindex: the base row (`reth1`, kernel-observed, carrying only the
+        per-node `169.254.<rg>.<node+1>/32` RETH address and the kernel
+        fe80 address) BEFORE the unit row (`reth1.0`, carrying the LAN
+        address). Each row picks first non-link-local, else first, but the
+        shared-ifindex merge in `forwarding_build/interfaces.rs` was
+        first-row-wins, so the base row's link-local FALLBACK shadowed the
+        unit's address and the firewall's own Time Exceeded answered as
+        169.254.2.1 (traceroute/mtr hop 1). `merge_undesignated_primary` now
+        lets a non-link-local pick replace a link-local incumbent; between
+        two non-link-local (or two link-local) undesignated picks the first
+        row still wins, and a designated primary (#16513) still beats both.
+        `primary_v4/v6` is not only the generated-error source: on an
+        untagged RETH unit every consumer below flips from the per-node
+        `169.254.<rg>.<node+1>` / fe80 address to the unit address — interface
+        source NAT toward that unit (`forwarding/nat.rs`), the WireGuard outer
+        source (`frame/wg.rs`), ingress-interface local delivery
+        (`forwarding/local_delivery.rs`), the fabric owner-RG gate for local
+        addresses (`forwarding/fabric.rs::owner_rg_for_local_address`) and the
+        peer-import translated-address check (`ha/session_import.rs`). Each was
+        reading an unroutable, per-node address there (interface SNAT handed
+        it out as a translation), so this is the intended identity; the
+        169.254 address is still delivered locally through the FIB local route.
+        Cell: `interface_snat_toward_reth_unit_uses_unit_address_18174`.
+        Cells: `shared_ifindex_reth_base_link_local_does_not_shadow_unit_address_18174`
+        (`forwarding_build/primary_address_15155.rs`) and
+        `hop_one_time_exceeded_is_sourced_from_lan_address_not_reth_link_local_18174`
+        (`tests_mtr_icmp_errors_18174.rs`, through the poll path).
       - **#3609 — per-interface host-inbound override:** the local-delivery
         host-inbound gate (`poll_descriptor/filter.rs::host_inbound_gated_lo0_action`
         → `forwarding::host_inbound_admits_iface_for_destination`) looks up
@@ -948,11 +978,81 @@ sync.
     the translation boundary. The queued policy gate skips reverse-zone
     policy only for that validated PMTUD disposition and only when resolution
     is `ForwardCandidate`; route, HA, and fabric dispositions remain
-    authoritative. Matching NAT'd Time-Exceeded and other non-PMTUD errors
-    still use the #9948 policy gate, and a wrong-zone PTB still follows zone
-    policy. The untranslated #10286 path is type-scoped by #10684: v4 types
-    4/5 retain arrival-to-egress policy; the path-error and v6 RELATED coverage
-    is unchanged.
+    authoritative. A wrong-zone error still follows zone policy (#9948). The
+    #10286 path is type-scoped by #10684: v4 types 4/5 retain
+    arrival-to-egress policy.
+  - **#18174 — NAT'd Time Exceeded / Destination Unreachable are RELATED
+    too (same-family):** #10666 admitted only NAT'd PMTUD, so every NAT'd
+    Time Exceeded (each traceroute/mtr hop past an SNAT firewall) and every
+    NAT'd Destination Unreachable (a UDP traceroute's final port
+    unreachable) was matched, reversed and then default-denied on the
+    reverse `wan -> lan` pair — live on loss and tcp as `POLICY_DENY
+    src=<hop> dst=<LAN host>` for every hop, mtr showing `???` past hop 1.
+    The same-family arm now applies ONE type set to translated and
+    untranslated matches alike (`outer_is_related_path_error`: v4 3/11/12,
+    v6 1-4) with the same direction-derived zone check. The builders are
+    the same code for PMTUD and Time Exceeded, so the narrower NAT'd scope
+    bought no safety; the per-session F-077 budget and the arrival-zone
+    check bound both. The widening applies to FORWARD quotes only (the new
+    `EmbeddedIcmpMatch::quoted_is_reply == false`: errors the session's far
+    side sends back about the client's packets). A NAT'd REPLY-quote error
+    keeps #10666's PMTUD-only scope: the outbound SNAT error (#6474 — the
+    internal host originates it and the builder re-NATs it to the public
+    identity) and its already-re-NAT'd fabric hand-off at the peer (#13772,
+    where `outbound_snat` is deliberately false) remain a `lan -> wan`
+    policy decision on the internal sender (#13649). A wrong-zone forgery (the retargeted
+    `poll_descriptor_embedded_icmp_reversal_zone_policy_denies_9948`), a
+    NAT'd Redirect, HAInactive and every non-ForwardCandidate disposition
+    stay gated. A FabricRedirect is still adjudicated on the peer — and
+    the peer could not match it at all: the redirecting node had already
+    reversed the frame (outer dst = client, quote in pre-NAT form), the
+    quote hit the forward session's CANONICAL reply alias in the
+    forward-NAT arm (`reply_matches_forward_session`), and the #14665
+    outer-destination gate expected `rewrite_src` (the SNAT address), so
+    every split-RG SNAT error — traceroute AND PMTUD — declined to
+    `NoMatch` at the LAN-RG owner. At FABRIC ingress only, a quote whose
+    source equals the forward key's pre-NAT source now expects that source
+    as the outer destination (`nat_match_v4.rs`/`nat_match_v6.rs`); the
+    match is then a forward quote whose expected zone (the forward egress
+    zone) equals the authenticated WAN stamp, and the RELATED rule admits
+    it.
+    **Split RGs, live (tcp, RG2 on node1):** two more defects the harness
+    shape above could not see. (a) The WAN-RG owner's session for the probe
+    is its own FABRIC-INGRESS row, whose reverse half production synthesis
+    stores as a "fabric return" FabricRedirect stamped with the FORWARD
+    ingress zone (`lan`); the embedded arm reused that cached redirect, so
+    the LAN owner saw a `lan` arrival, failed the RELATED check and
+    default-denied every hop `lan -> lan` (live: `POLICY_DENY src=<hop>
+    dst=10.0.62.102 ingress_zone=lan egress_zone=lan` on fw1).
+    `restamp_embedded_fabric_redirect` now re-stamps an embedded error's
+    FabricRedirect with the zone it ACTUALLY arrived in (never on a fabric
+    arrival). (b) Hop 1: the LAN owner hands transit to the WAN owner over
+    the fabric, so it is the router, but the session-hit and session-miss
+    Time Exceeded sites only covered `ForwardCandidate`; the fabric build
+    refused the expiring probe (`fabric_redirect_build_failed`) and the peer
+    skips the decrement on fabric ingress, so nobody answered. The poll
+    tail now answers a non-fabric, non-injected FabricRedirect whose TTL /
+    hop limit would expire with a local Time Exceeded (the flow-cache hit
+    path already did, #3779), and both #7770 punt-seed sites skip the seed
+    for such a packet so it leaves no session row behind (a punt seed emits
+    no HA delta; the
+    FabricRedirect twin of the #14643 ForwardCandidate rollback). Residual,
+    tracked by #18562: the punt seed is worker-local by design, so the FIRST
+    error of a new split flow that lands on another worker of the LAN owner
+    (before the WAN owner's HA delta is imported) still returns NoMatch and
+    is default-denied (`split_rg_first_error_on_another_worker_..._18174`,
+    ignored until #18562). Cells:
+    `split_rg_live_shape_time_exceeded_reaches_lan_host_18174` (node1's own
+    LAN-created row, node0's fabric-ingress row, both via the poll path),
+    `split_rg_after_establishment_synced_import_reaches_lan_host_18174`
+    (node1 holds the row only as an HA import through
+    `synthesized_synced_reverse_entry` + `WorkerCommand::UpsertSynced`), and
+    `split_rg_hop_one_time_exceeded_is_answered_by_lan_owner_18174`. NAT64
+    (cross-family) RELATED admission is unchanged — still PMTUD only.
+    Cells: `tests_mtr_icmp_errors_18174.rs` (real ICMP-echo and UDP probes
+    through the poll path, v4+v6, SNAT and non-NAT, single node and the
+    split-RG fabric chain across both nodes) and
+    `poll_descriptor_snat_time_exceeded_admitted_as_related_18174`.
   - **#9528 — both ICMP-error arms run AFTER the interface input filter and
     the PBR verdict:** each arm `continue`s with the descriptor consumed, and
     each used to run ahead of a gate below it. The #6472 arm ran before the

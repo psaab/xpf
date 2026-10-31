@@ -144,8 +144,9 @@ to be red, until their issue closes; any other red cell is a new failure.
 - **Fabric/control host pings: #18212.** Pings fw0↔fw1 on 10.99.x fail on
   loss, tcp and udp. Host ICMP to the WAN gateway (`172.16.50.1`) failed
   on tcp (integ9, integ10) and on udp, and passed on loss (integ8–10). That
-  WAN-gateway leg is #18558, not #18212: tcp's and udp's WAN addresses were
-  duplicates on the lab segment, and loss's `.8` is not (see the
+  WAN-gateway leg was #18558, not #18212: tcp's and udp's WAN addresses were
+  duplicates on the lab segment, and loss's `.8` is not. Since the live
+  renumber of 2026-10-31 it is expected green on all three clusters (see the
   environment row below). The 10.99.x fabric/control pings remain #18212.
 
 ## Known environment rows (re-verify before excusing)
@@ -164,81 +165,161 @@ failure.
   in #18556 at `cce3fb4944`). Re-run the off-path control before excusing it
   again; once #18556 merges this row should be deleted.
 
-- **tcp/udp external IPv4 (1.1.1.1, 8.8.8.8): a duplicate WAN address,
-  #18558.** The cause is the lab segment, not the product. The fix is a
-  renumber (#18575), but **until a cluster has been renumbered live, judge
-  these cells on it exactly as before**: over 3 smokes per build, a PR blocks
-  only if it fails them in at least 2 more of its 3 runs than master did. The
-  row's same-run off-path control is `ha_wan_claim_check` returning status 1
-  for the cluster's WAN address (test-connectivity's "WAN IPv4 ... answered
-  for only by this cluster" FAIL, or test-failover's VOID reason). A ping from
-  the orchestrator or the incus host cannot stand in for it: it does not leave
-  from the duplicated address, so it passes either way.
+- **Duplicate WAN address on the shared VLAN 50 (#18558).** Resolved
+  2026-10-31: tcp and udp were renumbered live to `172.16.50.42` and `.43`
+  (#18575; `docs/incus-tcp-udp-plan.md` §3.3). Their old `.10`/`.11` are
+  held by non-xpf lab devices; loss's `.8` is unique. No cell is excused by
+  this row today. It is kept as a recurrence rule instead of being deleted,
+  so the excuse for a repeat comes with its control.
+  - **In scope:** the external IPv4 cells (1.1.1.1, 8.8.8.8) and the
+    firewall's own WAN-gateway ping, on tcp, udp or loss.
+  - **When the FAIL is environment:** only while `ha_wan_claim_check`
+    returns status 1 (a non-xpf claimant) for that cluster's WAN address in
+    the same run. A ping from the orchestrator cannot stand in, because it
+    does not leave from the duplicated address.
+  - **Other statuses:** status 3 (another xpf cluster's RETH MAC) is a
+    product failure. Status 2 (not measured) leaves the FAIL standing.
+  - **If the check fires:** re-probe and renumber, following the plan's
+    §3.3 procedure.
+  - **References:** the guards (`TestSharedSegmentForeignClaims18558`,
+    test-failover's claim-gated VOID, and test-connectivity's "WAN IPv4 ...
+    answered for only by this cluster" cell) and the evidence are in
+    `docs/log/18558.md`.
+- **loss's v4/v6 iperf targets are different hosts (#18576, #18586).**
+  loss's `172.16.80.200` is the xpf-mouse-target container
+  (`10:66:6a:8b:91:a4`) and `2001:559:8585:80::200` is the external v6 box
+  (`f6:f0:06:10:77:d5`), so the Group12 neighbor identity cannot require one
+  MAC there. `test/incus/loss-userspace-cluster.env` sets
+  `IPERF_TARGET_V4_V6_SAME_HOST=no` with
+  `IPERF_TARGET6_SPLIT_HOLDER=f6:f0:06:10:77:d5`.
+  - **Control (same run):** the cell's own read on the RG owner. The waiver
+    holds only while v6 names the declared holder and v4 names a different
+    MAC. Either check failing is a VOID, never a PASS.
+  - **Delete when:** loss's v4 and v6 targets are one host (or the v6 box
+    is renumbered). Remove both env lines; the same-host identity check then
+    applies.
+- **tcp and udp host SR-IOV VFs.** Two host faults have each left a
+  force-stopped firewall VM unable to restart or forward. This is
+  environment only while the host check below shows the fault in the same
+  run. A firewall cell that fails with a clean host check is a product
+  failure.
+  - **VFs claimed by the host network.** The host's dracut default network
+    must not manage the VF netdevs. Without that, a force-stopped VM cannot
+    restart: "All virtual functions on parent device mlx1 are already in
+    use".
+    - **Check:** `ssh tcp` / `ssh udp` (the host aliases `docs/incus-tcp-udp-plan.md` uses), then
+      `ip -br link | grep -E '^eno[12]v' | grep -c UP` must be 0 for free
+      VFs.
+    - **Fix:** write
+      `/etc/systemd/network/05-xpf-sriov-vf-unmanaged.network` containing
+      `[Match]` `Name=eno1v* eno2v*` and `[Link]` `Unmanaged=yes`, run
+      `networkctl reload`, then `ip link set <vf> down` for each free VF
+      that is UP.
+    - **Applied:** tcp's host 2026-10-29, udp's 2026-10-31 (UTC).
+  - **A stale host port VLAN on a reassigned WAN VF.** incus records a VF's
+    state before attaching it (`volatile.wan-vf.last_state.vf.vlan`) and
+    restores it on stop. On incus 7.0.1 (the tcp and udp hosts), a
+    `wan-vf` device that sets no `vlan` leaves the VF with whatever VLAN it
+    last carried. Incus 7.6.0 and later clear it on start (upstream
+    473c98eb2cc9). On 2026-10-31 00:39 UTC udp fw0's WAN VF
+    (`mlx0 vf 0`) came back on port VLAN 80. Its tagged `reth0.50`/`.80`
+    frames died, and neighbour entries went FAILED in both families after
+    every restart.
+    - **Check:** find the VF with
+      `incus config get udp:xpf-udp-fw0 volatile.wan-vf.last_state.vf.id`
+      (WAN VFs are all on `mlx0`), then `ssh udp 'ip link show mlx0'`. That
+      VF must show no `vlan`. The target VF on `mlx0` carries access
+      `vlan 80` by design.
+    - **Repair:** run `sudo ip link set mlx0 vf <id> vlan 0` on the host,
+      plus `incus config set <remote>:<vm> volatile.wan-vf.last_state.vf.vlan=0`
+      so that the restore on stop writes 0.
+    - **Not durable:** VF allocation is not pinned, so a different VF can
+      bring the fault back. This out-of-band repair is the sanctioned
+      exception to the plan's "never set VF VLAN by hand" rule until #18582
+      makes WAN VFs clear their VLAN on start. Two durable options are
+      `vlan: "0"` on the device, which 7.0.1 accepts, or upgrading incus to
+      7.6.0 or later.
 
-  VLAN 50 (172.16.50.0/24) is shared with non-xpf devices. tcp's
-  172.16.50.10 was also held by `18:e8:29:2c:13:7a` and udp's 172.16.50.11
-  by `d8:b3:70:8c:f8:44`. Each answered every RFC 5227 ARP probe for its
-  address, alongside the RG owner (512/512 probes for .10, 2026-10-31). The
-  upstream gateway's ARP entry flipped between the device and the owner.
-  Recovery always followed the owner's own ARP to the gateway
-  within 1-2 s (8/8), and each outage began about 30 s later, when the
-  device refreshed. IPv4 loss was therefore 20-50% on tcp, and up to 80% on
-  udp, whose device refreshes more often, while IPv6 stayed clean.
-  The "replies miss the session" reading was the device's own return traffic
-  reaching the owner while the entry pointed at it. Earlier this row blamed
-  "30-55 s after an RG move", but the loss is periodic with no move at all;
-  the move's GARP burst only reset the cycle.
+- **loss iperf target 172.16.80.200 is answered by two hosts: #18576.**
+  - The two holders:
+    - `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4` today). The env names
+      it `self`, so the cell takes its MAC from the probe itself and an
+      incus recreate needs no edit.
+    - The external v6 target box (`f6:f0:06:10:77:d5`). loss fw0 and fw1
+      resolve `2001:559:8585:80::200` to it.
+  - The external box is in no incus instance and no host netdev on loss,
+    tcp, udp or the orchestrator, and it has no SSH handle. It is not ours
+    to change.
+  - **Off-path control and when this cell is excused.** test-connectivity's
+    "iperf target ... answered for by exactly one host" IS the control. It
+    probes from the target container (`MOUSE_TARGET_REF`), never from a
+    firewall node; probing from the RG owner re-ran the race on it (seat X
+    reproduced a flip in 6/6 netns runs). It only reads both nodes'
+    neighbor entries, before and after the probe. The cluster's own
+    `WAN_GW80_4` answering the same probe is the positive control, and a
+    target that is not on-link from the container is VOID by name.
+    - **Excused = SKIP**, granted only when all three hold:
+      - the holders are exactly the container plus `f6:f0:06:10:77:d5`
+        (`IPERF_TARGET4_KNOWN_HOLDERS="self f6:f0:06:10:77:d5"` in
+        `test/incus/loss-userspace-cluster.env`);
+      - the container's own `self` line shows it holds the target;
+      - exactly one node holds `WAN_GW80_4` (the RG owner), the same node in
+        both snapshots, and it resolves `.200` to the container both before
+        and after the probe. This is the same-run control.
 
-  Same-run proof on tcp, with the deployed build unchanged:
-  - 2026-10-31 00:21-00:36, reth0.50 v4 `.10` -> `.42` -> `.10`, sampling
-    the LAN host's 1.1.1.1 and 8.8.8.8 pings and fw0's own pings to the
-    gateway.
-    - With `.10`: 101/125 host 1.1.1.1 (19% loss), and fw0's gateway ping
-      from `.10` 99/125.
-    - With `.42`: fw0's gateway ping from `.42` 190/190 and from 172.16.80.10
-      190/190. Over the same seconds, the LAN host SNATed to the stale `.10`
-      reached 1.1.1.1 only 130/190 times, so `.42` against `.10` is a
-      same-moment twin.
-  - With `.42` as the only v4 address, sessions showed SNAT to `.42`, and
-    every probe was 284/284 for 6 min, 1.1.1.1 and 8.8.8.8 included. The
-    stale `.10` that #18573 leaves behind had been removed by hand. Back on
-    `.10`, the same probes lost 16% again.
-  - It is not a cross-cluster ARP conflict: in a simultaneous capture on all
-    six loss/tcp/udp WAN members, no xpf MAC ever claimed another cluster's
-    address. udp's foreign device broadcast its claim about every 6 s
-    (tcp's, about once a minute). udp IPv4 from the LAN host was 11/61,
-    with fw0's own ping to the gateway from `.11` 12/61, and from
-    172.16.80.11 61/61. IPv6 was 61/61. Only loss's `.8` is unique, and
-    loss passes these cells.
+      The cell then SKIPs with "EXCUSED #18576 … expires when one holder
+      drops it". A SKIP leaves `test-connectivity`'s exit status alone and
+      shows in the ledger's `cells_skipped`, so this excused cell can never
+      VOID a loss run or stop `deploy_gate_wave` before the iperf cells.
+    - **VOID means this run's v4 target is not certifiable.** That covers:
+      - the RG owner resolving `.200` to `f6:f0:06:10:77:d5`. This run's v4
+        iperf numbers measured the external box, so VOID them and rerun.
+        It is also the first observed flip, the evidence #18576 lacks, so
+        record the VOID reason and the time on #18576;
+      - the owner having no entry, or an entry (even STALE) naming any MAC
+        other than the container;
+      - no single stable RG owner: two nodes holding `WAN_GW80_4`, or
+        ownership moving between the two snapshots;
+      - only the external box answering, because the container lost its
+        alias.
+    - **FAIL is a product failure.** That covers:
+      - any other holder set, such as a third MAC;
+      - an xpf RETH MAC `02:bf:72:*` holder (status 3, mirroring #18575);
+      - on the RG owner only, an entry that is FAILED, a REACHABLE, DELAY,
+        PROBE or PERMANENT entry naming a MAC nobody claims, or an entry that
+        changes between two present snapshots.
 
-  The tcp and udp WAN addresses moved to `.42` and `.43` in the repo. Three
-  checks keep this from recurring:
-  - `TestSharedSegmentForeignClaims18558` (`pkg/configstore`) refuses a
-    shipped claim on any address in the measured foreign list.
-  - `test-failover` runs `ha_wan_claim_check` whenever an external IPv4 cell
-    fails, and turns that FAIL into a VOID naming the foreign MAC.
-    - Only a **non-xpf** claimant does that.
-    - A claim by another xpf cluster's RETH MAC (`02:bf:72:<other id>:`) is
-      an xpf defect, such as a stale VIP (#18573), so the FAIL stands with
-      the other cluster id named.
-    - This cluster's own RETH and physical MACs, from both nodes, are own.
-    - The cluster id is cross-checked against the live RETH MAC; drift is
-      VOID.
-    - A PASS is never converted, and a blind probe leaves the FAIL standing.
-  - `test-connectivity` runs a preflight cell, "WAN IPv4 ... answered for
-    only by this cluster", which FAILs on either kind of claimant, naming
-    it.
+      The peer node's entry is not judged.
+    - Measured from an off-firewall vantage on the same VLAN
+      (`tcp:xpf-tcp-target`, 2026-10-31 02:34 UTC, with tcp's `.80.10` as
+      control and loss's firewalls only read). With the known set it was
+      VOID, because that vantage does not hold the target, so the excuse
+      cannot be granted there. With no known set it FAILed. loss fw0, the
+      RG owner, resolved `.200` to the container, which is the SKIP
+      condition for the real cell probed from the container.
+  - Both loss nodes have resolved v4 `.200` to the container whenever we
+    read them. A 4-min VLAN 80 capture saw no frame with sender `.200` from
+    either holder, so the hazard is latent.
+  - **When a loss iperf3 run stops or slows**, diagnose it on the rerun:
+    start `ip monitor neigh` on both nodes before the rerun:
+    - node0 on `ge-0-0-2.80`;
+    - node1 on `ge-7-0-2.80`.
 
-  If any of the three fires, re-probe and renumber. Never excuse an external
-  IPv4 cell without that evidence. The live renumber has a coexistence window
-  and a manual step (#18573). Follow the procedure in
-  `docs/incus-tcp-udp-plan.md` §3.3, "Renumbering a stack on the shared
-  segment". Delete this row once #18575 is merged and both clusters are
-  renumbered live.
-- **tcp host SR-IOV VFs.** The host's dracut default network must not manage
-  the VF netdevs. `/etc/systemd/network/05-xpf-sriov-vf-unmanaged.network`
-  marks `eno1v*`/`eno2v*` unmanaged. Without it a force-stopped VM cannot
-  restart: "All virtual functions on parent device mlx1 are already in use".
+    Then read `ip -s neigh show 172.16.80.200 dev <that interface>` after it.
+    Only a move to `f6:f0:06:10:77:d5` is this environment row. A third MAC,
+    or a FAILED entry, is a product neighbor fault.
+  - tcp `.210` and udp `.211` are unique: PASS.
+  - **Delete this row**, and `IPERF_TARGET4_KNOWN_HOLDERS`, when either of
+    these happens:
+    - Option A: the lab owner drops v4 `.200` from the external box.
+    - Option B: loss's v4 target moves to a unique address.
+
+    When only the container answers but the env line is still set, the cell
+    PASSes with "configured but not observed: delete
+    IPERF_TARGET4_KNOWN_HOLDERS (#18576)" in its reason. That means delete
+    the line. A PASS rather than a VOID, because the excuse is owner-gated: a
+    stale line can only re-excuse the identical benign state, while a VOID
+    would block every loss gate until a doc edit lands.
 
 ## Reading results
 
@@ -247,6 +328,42 @@ failure.
 - **VOID** means the measurement cannot be attributed (`exe_check` mismatch,
   a precondition, a harness fault). Fix the cause and rerun; a VOID is never a
   pass and never a regression.
+- **F1's "Group12 read-only neighbor identity" cell (#18586)** reads the RG
+  owner's neighbor entries for the WAN iperf targets: the one node holding
+  `WAN_GW80_4` (exact address match), on the device its route to each target
+  names. It used to read the LAN host, which never holds an entry for an
+  off-subnet target, so it was VOID on every run, and with it the whole
+  `test-connectivity` run. The owner is read before and after the neighbor
+  reads; the cell is read-only (`ip route get`, `ip neigh show`).
+  - **Usable entry:** one line, on the route's device, with an `lladdr` and
+    one of the NUD states REACHABLE, STALE, DELAY, PROBE or PERMANENT.
+  - **FAIL:** either family's entry is FAILED, INCOMPLETE, NOARP or NONE,
+    or names a device other than its route's. Where the v4 and v6 targets
+    are one host (`IPERF_TARGET_V4_V6_SAME_HOST=yes`, the default; tcp,
+    udp), it is also a FAIL when the two routes or the two entries name
+    different devices, or the two entries name different MACs.
+  - **VOID:**
+    - `IPERF_TARGET_V4_V6_SAME_HOST` is neither `yes` nor `no`;
+    - no single node holds `WAN_GW80_4`, or a node's addresses cannot be
+      read;
+    - the owner changed between the reads;
+    - the owner has no route device for a target, or the route goes `via`
+      a gateway (not on-link);
+    - an entry is missing, has more than one line, or has no single NUD
+      state or no MAC;
+    - in split mode (`no`), `IPERF_TARGET6_SPLIT_HOLDER` is unset, the v6
+      entry names another MAC (the waiver is stale), or the v4 entry names
+      the v6 holder (that run's v4 iperf numbers measured the wrong host;
+      record it on #18576).
+  - **Split-mode PASS** says "identity not asserted": each family is
+    usable, v6 is the declared holder and v4 is a different host. It is
+    loss's waiver row under "Known environment rows", not an identity
+    proof.
+- **SKIP** is either a cell that did not run, or an environment row's
+  excused state. The ledger's `cells_skipped` counts both. The excused kind
+  carries its marker in the cell text, today only "EXCUSED #18576", and it is
+  neither a pass nor a failure. A SKIP without a marker means the cell did
+  not run.
 - **COST** (row H11) is a correct move whose transition cost was over budget
   (#18559). It is neither a FAIL nor a clean pass: count it and compare
   against master, like H10's numbers.

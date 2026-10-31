@@ -345,6 +345,8 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 	// rows take the sentinel session domain (never default 0).
 	quarantinedKeys := quarantinedInterfaceKeys(cfg)
 	usedSyntheticIfindexes := make(map[int]struct{})
+	// #18573: one ownership dump per build; leftovers never reach a row.
+	leftovers := sampleDirectVIPLeftovers(cfg)
 	// Build RETH RG lookup: physical member → RETH's RedundancyGroup.
 	// Physical members have RedundantParent set but RedundancyGroup=0;
 	// the RG is on the RETH. Without this, flow cache HA checks on
@@ -449,6 +451,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 		}
 		linuxName := snapshotLinuxName(cfg, name, iface, nil)
 		ifindex, mtu, hardwareAddr, addresses := buildLinkSnapshot(linuxName)
+		addresses = leftovers.filterLive(ifindex, linuxName, addresses)
 		// #14575: a unit-disabled unit 0 collapses onto this base netdev, so
 		// its disable suppresses the base row's addresses too (interface-level
 		// Disable already does). Other units keep their own rows below.
@@ -600,6 +603,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			parentRXQueues := userspaceRXQueueCount(parentLinux)
 			linuxUnit := snapshotLinuxName(cfg, name, iface, unit)
 			ifindex, mtu, hardwareAddr, addresses := buildLinkSnapshot(linuxUnit)
+			addresses = leftovers.filterLive(ifindex, linuxUnit, addresses)
 			rxQueues := userspaceRXQueueCount(linuxUnit)
 			logicalOnly := false
 			// Bondless RETH VLAN units can transmit through the parent

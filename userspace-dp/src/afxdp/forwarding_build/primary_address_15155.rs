@@ -297,3 +297,92 @@ fn shared_ifindex_tunnel_designations_still_accepted_16513() {
         "tunnel units with different primaries must stay accepted, got {result:?}"
     );
 }
+
+/// #18174: the live loss-cluster RETH shape. Go emits the base row
+/// (`reth1`, kernel-observed, carrying only the per-node
+/// `169.254.<rg>.<node+1>/32` RETH address — scope link) BEFORE the unit
+/// row (`reth1.0`, carrying the LAN address) on the SAME ifindex. The
+/// base row's per-row pick is its link-local FALLBACK; first-row-wins let
+/// it shadow the unit row's real address, so every locally generated ICMP
+/// error toward the LAN (traceroute hop 1, reject, PTB) left with source
+/// 169.254.2.1. The v6 twin is the same shape with a kernel fe80 RETH
+/// address on the base row (observed as mtr hop 1 `fe80::bf:72ff:fe16:202`
+/// in the #18168 diag). Both row orders must yield the routable address.
+///
+/// FAIL-ON-REVERT: restore `existing.primary_v4.or(Some(p))` (and the v6
+/// twin) in the shared-ifindex merge and the base-first order yields
+/// 169.254.2.1 / fe80::bf72:16:2 again.
+#[test]
+fn shared_ifindex_reth_base_link_local_does_not_shadow_unit_address_18174() {
+    let base_addrs = || {
+        vec![
+            InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: "169.254.2.1/32".into(),
+                scope: 253,
+                primary: false,
+            },
+            InterfaceAddressSnapshot {
+                family: "inet6".into(),
+                address: "fe80::bf72:16:2/128".into(),
+                scope: 253,
+                primary: false,
+            },
+        ]
+    };
+    let unit_addrs = || {
+        vec![
+            addr("inet", "10.0.61.1/24", false),
+            InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: "169.254.2.1/32".into(),
+                scope: 253,
+                primary: false,
+            },
+            addr("inet6", "2001:559:8585:ef00::1/64", false),
+        ]
+    };
+    for base_first in [true, false] {
+        let base = shared_row_16513("reth1", "trust", "trust", false, base_addrs());
+        let unit = shared_row_16513("reth1.0", "trust", "trust", false, unit_addrs());
+        let interfaces = if base_first {
+            vec![base, unit]
+        } else {
+            vec![unit, base]
+        };
+        let state = build_forwarding_state(&snapshot_16513(interfaces));
+        let egress = state.egress.get(&42).expect("egress row for ifindex 42");
+        assert_eq!(
+            egress.primary_v4,
+            Some(Ipv4Addr::new(10, 0, 61, 1)),
+            "base_first={base_first}: a link-local base-row pick must not shadow the unit's LAN v4"
+        );
+        assert_eq!(
+            egress.primary_v6,
+            Some(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0xef00, 0, 0, 0, 1)),
+            "base_first={base_first}: a link-local base-row pick must not shadow the unit's global v6"
+        );
+    }
+
+    // Control: when EVERY row offers only link-local, the merged primary
+    // stays the first row's fallback (the per-row last-resort rule).
+    let state = build_forwarding_state(&snapshot_16513(vec![
+        shared_row_16513("reth1", "trust", "trust", false, base_addrs()),
+        shared_row_16513(
+            "reth1.0",
+            "trust",
+            "trust",
+            false,
+            vec![
+                addr("inet", "169.254.9.9/32", false),
+                addr("inet6", "fe80::9/64", false),
+            ],
+        ),
+    ]));
+    let egress = state.egress.get(&42).expect("egress row for ifindex 42");
+    assert_eq!(egress.primary_v4, Some(Ipv4Addr::new(169, 254, 2, 1)));
+    assert_eq!(
+        egress.primary_v6,
+        Some(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0xbf72, 0x16, 2))
+    );
+}

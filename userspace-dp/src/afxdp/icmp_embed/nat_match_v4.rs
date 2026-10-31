@@ -109,6 +109,20 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             .and_then(|b| <[u8; 4]>::try_from(b).ok())
             .map(Ipv4Addr::from);
         let expected_outer_dst = match fwd.decision.nat.rewrite_src {
+            // #18174: at FABRIC ingress the redirecting peer has ALREADY
+            // reversed the error (embedded arm FabricRedirect: outer dst =
+            // client, quote in pre-NAT form), so the quote matched via the
+            // forward session's CANONICAL reply alias
+            // (`reply_matches_forward_session`) and its genuine outer
+            // destination is the quoted pre-NAT source itself. Expecting
+            // `rewrite_src` here declined every split-RG SNAT error at the
+            // LAN-RG owner — traceroute and PMTUD alike — to NoMatch.
+            Some(_)
+                if (meta.meta_flags & FABRIC_INGRESS_FLAG) != 0
+                    && IpAddr::V4(hdr.src) == fwd.key.src_ip =>
+            {
+                Some(hdr.src)
+            }
             Some(IpAddr::V4(v4)) => Some(v4),
             Some(_) => None,
             None => Some(hdr.src),
@@ -159,6 +173,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             related_expected_zone: fwd_egress_zone,
             metadata: fwd.metadata,
             outbound_snat: false,
+            quoted_is_reply: false,
             budget_key: fwd.key.clone(),
         });
     }
@@ -378,6 +393,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         resolution,
         metadata: sl.metadata,
         outbound_snat,
+        quoted_is_reply,
         budget_key,
         related_expected_zone,
     })

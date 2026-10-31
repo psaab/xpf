@@ -125,31 +125,121 @@ for known in "${KNOWN_DESTRUCTIVE[@]}"; do
 done
 ok "static: detector matched ${#DESTRUCTIVE[@]} destructive test-*.sh scripts (covers all ${#KNOWN_DESTRUCTIVE[@]} known ones)"
 
-for s in "${DESTRUCTIVE[@]}"; do
-	p="${SCRIPT_DIR}/${s}"
-	[[ -f "$p" ]] || fail "static: missing destructive smoke script $s"
-	# The wiring must sit in the preamble (first 60 lines), BEFORE any
-	# incus mutation — assert both the source and the call are present
-	# and appear before the first destructive incus/systemctl op.
-	head_n="$(head -n 60 "$p")"
+# xpf_cell_wiring_check <script>: print "<lock-call-line>" and return 0 when
+# the #1875/#4020 wiring is in the preamble, else print the reason and return
+# 1. The wiring is: a column-0 `source "${_CELL_DIR}/cluster-cell.sh"`, then a
+# column-0 `xpf_enter_destructive_cluster_cell` call, both on lines BEFORE the
+# first destructive incus/systemctl op.
+# This is a TEXT-order check, not an execution-order proof. Anchoring both at
+# column 0 rejects the shapes that would not run unconditionally at the top
+# level: inside a function, in `if false`, after `:` or `echo`, behind `||`,
+# or commented out. All destructive scripts write both at column 0.
+# #18591: this used to require the source "within the first 60 lines", an
+# arbitrary proxy that a long documentation header tripped falsely
+# (test-v6-na-recovery-12495.sh sources at line 69). Because fail() exits,
+# that false red aborted every later cell of this selftest.
+xpf_cell_wiring_check() {
+	local p="$1" s src_line call_line mut_line
+	s="$(basename "$p")"
 	# Literal match of the source line — the ${...} must NOT expand.
 	# shellcheck disable=SC2016
-	grep -q 'source "\${_CELL_DIR}/cluster-cell.sh"' <<<"$head_n" \
-		|| fail "static: $s does not source cluster-cell.sh in its preamble (#4020 lock dropped?)"
-	call_line=$(grep -n 'xpf_enter_destructive_cluster_cell' "$p" | head -1 | cut -d: -f1)
-	[[ -n "$call_line" ]] \
-		|| fail "static: $s never calls xpf_enter_destructive_cluster_cell (#4020 lock dropped?)"
+	src_line=$(grep -n '^source "\${_CELL_DIR}/cluster-cell.sh"' "$p" | head -1 | cut -d: -f1)
+	if [[ -z "$src_line" ]]; then
+		printf '%s does not source cluster-cell.sh in its preamble (#4020 lock dropped?)\n' "$s"
+		return 1
+	fi
+	call_line=$(grep -n '^xpf_enter_destructive_cluster_cell' "$p" | head -1 | cut -d: -f1)
+	if [[ -z "$call_line" ]]; then
+		printf '%s never calls xpf_enter_destructive_cluster_cell (#4020 lock dropped?)\n' "$s"
+		return 1
+	fi
+	if (( src_line >= call_line )); then
+		printf '%s calls xpf_enter_destructive_cluster_cell (line %s) before sourcing cluster-cell.sh (line %s)\n' \
+			"$s" "$call_line" "$src_line"
+		return 1
+	fi
 	# First line that reboots / force-stops / fails over / restarts a
 	# node. The lock call must precede it so we never mutate the shared
 	# cluster before acquiring the lock. Skip comment lines so a "Phase
 	# 1: incus stop --force" doc line is not mistaken for a real op.
-	mut_line=$(xpf_first_mutation_line "$p") \
-		|| fail "static: the destructive-script detector could not read $s"
-	[[ "$mut_line" == NONE ]] && mut_line=""
-	if [[ -n "$mut_line" ]]; then
-		(( call_line < mut_line )) \
-			|| fail "static: $s mutates the cluster (line $mut_line) before taking the lock (line $call_line)"
+	if ! mut_line=$(xpf_first_mutation_line "$p"); then
+		printf 'the destructive-script detector could not read %s\n' "$s"
+		return 1
 	fi
+	if [[ "$mut_line" != NONE ]]; then
+		if (( src_line >= mut_line )); then
+			printf '%s mutates the cluster (line %s) before sourcing cluster-cell.sh (line %s)\n' \
+				"$s" "$mut_line" "$src_line"
+			return 1
+		fi
+		if (( call_line >= mut_line )); then
+			printf '%s mutates the cluster (line %s) before taking the lock (line %s)\n' \
+				"$s" "$mut_line" "$call_line"
+			return 1
+		fi
+	fi
+	printf '%s\n' "$call_line"
+}
+
+# #18591 fixtures: the check must accept a long header and refuse every
+# misordering, so it can neither false-red a correct script nor pass a
+# broken one.
+_wiring_fx="$(mktemp -d "${TMPDIR:-/tmp}/xpf-cell-wiring.XXXXXX")"
+trap 'rm -rf "$_wiring_fx"' EXIT
+_wiring_src='source "${_CELL_DIR}/cluster-cell.sh"'
+_wiring_call='xpf_enter_destructive_cluster_cell "fx" "$0" "$@"'
+_wiring_mut='incus stop --force "$FW0"'
+_wiring_fixture() { # <name> <line>...
+	local name="$1"
+	shift
+	printf '%s\n' '#!/usr/bin/env bash' "$@" >"${_wiring_fx}/${name}"
+}
+_wiring_header=()
+for _i in $(seq 1 70); do _wiring_header+=("# header line ${_i}: incus stop --force is only documentation here"); done
+_wiring_fixture long-header.sh "${_wiring_header[@]}" 'set -euo pipefail' "$_wiring_src" "$_wiring_call" "$_wiring_mut"
+_wiring_fixture no-source.sh "$_wiring_call" "$_wiring_mut"
+_wiring_fixture commented-source.sh "# ${_wiring_src}" "$_wiring_call" "$_wiring_mut"
+_wiring_fixture source-after-call.sh "$_wiring_call" "$_wiring_src" "$_wiring_mut"
+_wiring_fixture source-after-mutation.sh "$_wiring_mut" "$_wiring_src" "$_wiring_call"
+_wiring_fixture call-after-mutation.sh "$_wiring_src" "$_wiring_mut" "$_wiring_call"
+_wiring_fixture no-call.sh "$_wiring_src" "$_wiring_mut"
+_wiring_fixture commented-call.sh "$_wiring_src" "# ${_wiring_call}" "$_wiring_mut"
+# Shapes that are present as text but do not run unconditionally at the top
+# level: the column-0 anchor must refuse each.
+_wiring_fixture fn-wrapped.sh 'lock() {' "	${_wiring_src}" "	${_wiring_call}" '}' "$_wiring_mut"
+_wiring_fixture if-false.sh 'if false; then' "	${_wiring_src}" "	${_wiring_call}" 'fi' "$_wiring_mut"
+_wiring_fixture colon-src.sh ": ${_wiring_src}" "$_wiring_call" "$_wiring_mut"
+_wiring_fixture echo-call.sh "$_wiring_src" "echo ${_wiring_call}" "$_wiring_mut"
+_wiring_fixture or-call.sh "$_wiring_src" "true || ${_wiring_call}" "$_wiring_mut"
+if ! _out=$(xpf_cell_wiring_check "${_wiring_fx}/long-header.sh"); then
+	fail "static: the wiring check false-reds a correct script with a 70-line header: ${_out}"
+fi
+[[ "$_out" == 74 ]] || fail "static: the wiring check reported lock line ${_out} for the long-header fixture, want 74"
+ok "static: the wiring check accepts a correct script whose header is longer than 60 lines (#18591)"
+for _fx in no-source:'does not source' commented-source:'does not source' \
+	source-after-call:'before sourcing' source-after-mutation:'before sourcing' \
+	call-after-mutation:'before taking the lock' no-call:'never calls' \
+	commented-call:'never calls' fn-wrapped:'does not source' if-false:'does not source' \
+	colon-src:'does not source' echo-call:'never calls' or-call:'never calls'; do
+	_name="${_fx%%:*}" _want="${_fx#*:}"
+	if _out=$(xpf_cell_wiring_check "${_wiring_fx}/${_name}.sh"); then
+		fail "static: the wiring check accepted the ${_name} fixture (lock line ${_out})"
+	fi
+	[[ "$_out" == *"$_want"* ]] || fail "static: the ${_name} fixture was refused for the wrong reason: ${_out}"
+done
+# The detector-failure branch: a script the mutation detector cannot read is
+# never waved through as non-destructive.
+if _out=$(xpf_first_mutation_line() { return 1; }; xpf_cell_wiring_check "${_wiring_fx}/long-header.sh"); then
+	fail "static: the wiring check accepted a script the mutation detector could not read (lock line ${_out})"
+fi
+[[ "$_out" == *"could not read"* ]] || fail "static: the detector-failure branch gave the wrong reason: ${_out}"
+rm -rf "$_wiring_fx"
+ok "static: the wiring check refuses no source or call, commented or non-top-level shapes, every misordering, and an unreadable script (#18591)"
+
+for s in "${DESTRUCTIVE[@]}"; do
+	p="${SCRIPT_DIR}/${s}"
+	[[ -f "$p" ]] || fail "static: missing destructive smoke script $s"
+	call_line=$(xpf_cell_wiring_check "$p") || fail "static: ${call_line}"
 	ok "static: $s takes the #1875 lock (line $call_line) before any node mutation"
 done
 
@@ -214,10 +304,13 @@ import re
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-match = re.search(r"^test_cluster\(\) \{\n.*?^\}\n", source, re.M | re.S)
-if not match:
-    raise SystemExit("cannot extract test_cluster for Group 10–12 behavior tests")
-pathlib.Path(sys.argv[2]).write_text(match.group(0), encoding="utf-8")
+blocks = []
+for name in ("test_cluster", "target_neighbor_identity_cell"):
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.M | re.S)
+    if not match:
+        raise SystemExit(f"cannot extract {name} for Group 10–12 behavior tests")
+    blocks.append(match.group(0))
+pathlib.Path(sys.argv[2]).write_text("".join(blocks), encoding="utf-8")
 PY
 CONNECTIVITY_RUNNER="${T}/connectivity-group-runner.sh"
 cat >"$CONNECTIVITY_RUNNER" <<'RUNNER'
@@ -231,7 +324,15 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$2/../.." && pwd)}"
 export PROJECT_ROOT
 WAN_GW4=10.0.0.1 LAN_HOST_IP=172.16.80.10 LAN_VIP4=172.16.80.1
 LAN_VIP6=2001:559:8585:80::1 IPERF_TARGET4=172.16.80.211
-IPERF_TARGET6=2001:559:8585:80::211
+IPERF_TARGET6=2001:559:8585:80::211 WAN_GW80_4=172.16.80.10
+case "$TEST_MODE" in
+split-*) IPERF_TARGET_V4_V6_SAME_HOST=no IPERF_TARGET6_SPLIT_HOLDER=00:11:22:33:44:66 ;;
+flag-bad) IPERF_TARGET_V4_V6_SAME_HOST=maybe ;;
+esac
+[[ "$TEST_MODE" == split-no-holder ]] && IPERF_TARGET6_SPLIT_HOLDER=""
+# The RG owner per mode: fw0 normally, fw1 in owner-fw1, fw0 then fw1 in
+# owner-moves (the second ownership read sees the move).
+case "$TEST_MODE" in owner-fw1) STUB_OWNER=fw1 ;; *) STUB_OWNER=fw0 ;; esac
 PASS=0 FAIL=0 VOID=0
 info() { :; }
 pass() { printf '  PASS  %s\n' "$*"; PASS=$((PASS + 1)); }
@@ -252,11 +353,63 @@ ping_test() { :; }
 ping6_test() { :; }
 mtr_test() { :; }
 internet_test() { :; }
+# test_cluster's own probe cells (#18558 / #18576) are covered by
+# ha-assurance-selftest; here they are no-ops like the other helpers.
+wan_claim_cell() { :; }
+iperf_target_claim_cell() { :; }
 incus() {
 	local command="$*"
 	printf '%s\n' "$command" >>"$INCUS_TRACE"
 	case "$command" in
 	*"which iperf3"*) return 1 ;;
+	# #18586: the RG owner (the node holding WAN_GW80_4) is where the WAN
+	# targets are on-link; the Group12 neighbor identity is read there.
+	"exec fw0 -- ip -o -4 addr show" | "exec fw1 -- ip -o -4 addr show")
+		local n="${command#exec }" calls
+		n="${n%% *}"
+		calls=$(( $(cat "${INCUS_TRACE}.${n}.owner" 2>/dev/null || echo 0) + 1 ))
+		printf '%s' "$calls" >"${INCUS_TRACE}.${n}.owner"
+		[[ "$TEST_MODE" == owner-unreadable && "$n" == fw1 ]] && return 1
+		local holder="$STUB_OWNER"
+		[[ "$TEST_MODE" == owner-moves && "$calls" -ge 2 ]] && holder=fw1
+		[[ "$TEST_MODE" == owner-none ]] && holder=none
+		if [[ "$n" == "$holder" || ( "$TEST_MODE" == owner-dual && "$n" == fw1 ) ]]; then
+			printf '7: ge-x-0-2.80    inet 172.16.80.10/24 brd 172.16.80.255 scope global ge-x-0-2.80\n'
+		elif [[ "$TEST_MODE" == prefix && "$n" == fw1 ]]; then
+			# 172.16.80.100 shares WAN_GW80_4's text prefix; it is NOT a hold.
+			printf '7: ge-7-0-2.80    inet 172.16.80.100/24 brd 172.16.80.255 scope global ge-7-0-2.80\n'
+		fi
+		;;
+	"exec ${STUB_OWNER} -- ip route get 172.16.80.211")
+		if [[ "$TEST_MODE" == via-route ]]; then
+			printf '172.16.80.211 via 172.16.80.1 dev ge-0-0-2.80 src 172.16.80.10 uid 0\n    cache\n'
+		else
+			printf '172.16.80.211 dev ge-0-0-2.80 src 172.16.80.10 uid 0\n    cache\n'
+		fi
+		;;
+	"exec ${STUB_OWNER} -- ip -6 route get 2001:559:8585:80::211")
+		if [[ "$TEST_MODE" == owner-no-route6 ]]; then
+			printf 'RTNETLINK answers: Network is unreachable\n'
+			return 2
+		fi
+		printf '2001:559:8585:80::211 from :: dev ge-0-0-2.80 proto kernel src 2001:559:8585:80::a metric 256 pref medium\n'
+		;;
+	"exec ${STUB_OWNER} -- ip neigh show 172.16.80.211 dev ge-0-0-2.80")
+		case "$TEST_MODE" in
+		owner-failed | split-failed) printf '172.16.80.211 FAILED\n' ;;
+		owner-entry-missing) ;;
+		split-v4-on-v6) printf '172.16.80.211 lladdr 00:11:22:33:44:66 REACHABLE\n' ;;
+		*) printf '172.16.80.211 lladdr 00:11:22:33:44:55 REACHABLE\n' ;;
+		esac
+		;;
+	"exec ${STUB_OWNER} -- ip -6 neigh show 2001:559:8585:80::211 dev ge-0-0-2.80")
+		case "$TEST_MODE" in
+		split-v6-failed) printf '2001:559:8585:80::211 FAILED\n' ;;
+		split-stale) printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:77 STALE\n' ;;
+		neighbor-fail | split-*) printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:66 STALE\n' ;;
+		*) printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:55 STALE\n' ;;
+		esac
+		;;
 	*"ping -c 1 -W 2 -t 1 1.1.1.1"*)
 		if [[ "$TEST_MODE" == ttl-void ]]; then
 			printf 'ping: command not found\n'
@@ -267,7 +420,7 @@ incus() {
 			printf 'From 10.0.0.1 icmp_seq=1 Time to live exceeded\n'
 		fi
 		;;
-	*"ping -6 -c 1 -W 2 -t 1 2607:f8b0:4005:814::200e"*)
+	*"ping -6 -c 1 -W 2 -t 1 2001:4860:4860::8888"*)
 		printf 'From 2001:db8::1 icmp_seq=1 Time exceeded: Hop limit\n'
 		;;
 	*"mtr 1.1.1.1 --report --report-cycles=1"*)
@@ -277,7 +430,7 @@ incus() {
 			printf ' 1.|-- 10.0.0.1 0.0%% 1 1.0 1.0 1.0 1.0 0.0\n 2.|-- 1.1.1.1 0.0%% 1 1.0 1.0 1.0 1.0 0.0\n'
 		fi
 		;;
-	*"mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1"*)
+	*"mtr -6 2001:4860:4860::8888 --report --report-cycles=1"*)
 		printf ' 1.|-- 2001:db8::1 0.0%% 1 1.0 1.0 1.0 1.0 0.0\n 2.|-- ??? 100.0%% 1 0.0 0.0 0.0 0.0 0.0\n'
 		;;
 	*"ip route get 172.16.80.211"*)
@@ -303,15 +456,10 @@ incus() {
 	*"ping -6 -c 2 -W 1 2001:559:8585:80::211"*)
 		printf '2 packets transmitted, 2 received, 0%% packet loss\n'
 		;;
-	*"ip neigh show 172.16.80.211 dev "*)
-		printf '172.16.80.211 lladdr 00:11:22:33:44:55 REACHABLE\n'
-		;;
-	*"ip -6 neigh show 2001:559:8585:80::211 dev "*)
-		if [[ "$TEST_MODE" == neighbor-fail ]]; then
-			printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:66 STALE\n'
-		else
-			printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:55 STALE\n'
-		fi
+	# The LAN host reaches the off-subnet WAN target through its gateway, so
+	# it never holds a neighbor entry for it: empty, as on every live run.
+	"exec lan -- ip neigh show 172.16.80.211"* | "exec lan -- ip -6 neigh show 2001:559:8585:80::211"*)
+		return 0
 		;;
 	*)
 		printf 'unexpected incus command: %s\n' "$command" >&2
@@ -324,6 +472,41 @@ printf 'COUNTS PASS=%s FAIL=%s VOID=%s\n' "$PASS" "$FAIL" "$VOID"
 RUNNER
 chmod +x "$CONNECTIVITY_RUNNER"
 
+# Every test-connectivity function that test_cluster calls must be defined or
+# stubbed by the runner (or come from the sourced ha-assurance-lib.sh).
+# Otherwise the next new cell added to test_cluster breaks every Group 10-12
+# case with "command not found" (#18575 did exactly that with wan_claim_cell).
+if ! missing_stubs="$(python3 - "${SCRIPT_DIR}/test-connectivity.sh" "$CONNECTIVITY_RUNNER" \
+	"${SCRIPT_DIR}/ha-assurance-lib.sh" "$CONNECTIVITY_FUNCTION" <<'PY'
+import pathlib
+import re
+import sys
+
+tc = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+runner = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+lib = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+# Functions extracted verbatim from test-connectivity.sh and sourced by the
+# runner (test_cluster, target_neighbor_identity_cell) are defined too.
+extracted = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
+fn_re = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\(\) \{", re.M)
+match = re.search(r"^test_cluster\(\) \{\n(.*?)^\}\n", tc, re.M | re.S)
+if not match:
+    raise SystemExit("cannot extract test_cluster")
+body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
+# Functions test_cluster defines for itself (peer_of) are defined at runtime.
+defined = (set(fn_re.findall(runner)) | set(fn_re.findall(lib)) | set(fn_re.findall(extracted))
+           | set(fn_re.findall(match.group(1))))
+called = {name for name in fn_re.findall(tc)
+          if name != "test_cluster" and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", body)}
+missing = sorted(called - defined)
+print(" ".join(missing))
+raise SystemExit(1 if missing else 0)
+PY
+)"; then
+	fail "static: test_cluster calls test-connectivity functions the Group 10-12 runner neither defines nor stubs: ${missing_stubs}"
+fi
+ok "static: every test-connectivity function test_cluster calls is defined or stubbed for the Group 10-12 runner"
+
 run_connectivity_case() {
 	local mode="$1" counts="$2" output trace neighbor_count trace_contents
 	trace="${T}/connectivity-${mode}.trace"
@@ -335,13 +518,28 @@ run_connectivity_case() {
 		|| fail "Group 10–12 ${mode}: expected COUNTS ${counts}; got ${output}"
 	[[ "$output" != *"unexpected incus command"* ]] \
 		|| fail "Group 10–12 ${mode}: unexpected or mutating incus command"
-	neighbor_count="$(grep -c 'neigh show' "$trace" || true)"
-	if [[ "$mode" == route-void || "$mode" == route-local-fail ]]; then
+	# #18586: neighbor reads go to the RG owner only, never to the LAN host
+	# (which cannot hold an entry for the off-subnet target). Reverting to
+	# the LAN host fails here and turns the happy neighbor PASS into a VOID.
+	local stub_owner=fw0
+	[[ "$mode" == owner-fw1 ]] && stub_owner=fw1
+	neighbor_count="$(grep -c "^exec ${stub_owner} -- ip .*neigh show" "$trace" || true)"
+	if grep -q '^exec lan -- ip .*neigh show' "$trace"; then
+		fail "Group 10–12 ${mode}: a neighbor read went to the LAN host instead of the RG owner (#18586)"
+	fi
+	if grep -v "^exec ${stub_owner} " "$trace" | grep -q 'neigh show'; then
+		fail "Group 10–12 ${mode}: a neighbor read went to a node other than the RG owner ${stub_owner} (#18586)"
+	fi
+	if [[ "$mode" == owner-none || "$mode" == owner-dual || "$mode" == owner-unreadable || "$mode" == flag-bad ]]; then
+		[[ "$neighbor_count" == 0 ]] \
+			|| fail "Group 10–12 ${mode}: expected no neighbor read without a single RG owner, got ${neighbor_count}"
+	elif [[ "$mode" == owner-no-route6 ]]; then
+		# No v6 route device: the v6 neighbor read has no device to name.
 		[[ "$neighbor_count" == 1 ]] \
-			|| fail "Group 10–12 ${mode}: expected one route-scoped neighbor read, got ${neighbor_count}"
+			|| fail "Group 10–12 ${mode}: expected only the v4 RG-owner neighbor read, got ${neighbor_count}"
 	else
 		[[ "$neighbor_count" == 2 ]] \
-			|| fail "Group 10–12 ${mode}: expected two route-scoped neighbor reads, got ${neighbor_count}"
+			|| fail "Group 10–12 ${mode}: expected two RG-owner neighbor reads, got ${neighbor_count}"
 	fi
 	trace_contents="$(<"$trace")"
 	[[ "$trace_contents" != *"ip neigh replace"* && "$trace_contents" != *"ip neigh add"* \
@@ -351,6 +549,8 @@ run_connectivity_case() {
 	happy)
 		[[ "$output" == *"PASS  cluster: Group11 IPv6 MTR"*"warning destination unresolved"* ]] \
 			|| fail "Group 11 IPv6 no-hop warning was not emitted as a PASS cell"
+		[[ "$output" == *"PASS  cluster: Group12 read-only neighbor identity on the RG owner fw0"* ]] \
+			|| fail "the RG-owner neighbor identity was not a PASS on the happy path (#18586)"
 		;;
 	ttl-fail) [[ "$output" == *"FAIL  cluster: Group10 IPv4 TTL=1"* ]] || fail "TTL echo-only output was not a measured FAIL" ;;
 	ttl-void) [[ "$output" == *"VOID  cluster: Group10 IPv4 TTL=1"* ]] || fail "missing TTL output was not VOID" ;;
@@ -359,9 +559,26 @@ run_connectivity_case() {
 	neighbor-fail) [[ "$output" == *"FAIL  cluster: Group12 read-only neighbor identity"* ]] || fail "neighbor MAC mismatch was not a measured FAIL" ;;
 	route-void)
 		[[ "$output" == *"VOID  cluster: Group12 IPv4 route"* \
-			&& "$output" == *"VOID  cluster: Group12 read-only neighbor identity"* ]] \
-			|| fail "unreadable route evidence did not VOID route and neighbor checks"
+			&& "$output" == *"PASS  cluster: Group12 read-only neighbor identity on the RG owner fw0"* ]] \
+			|| fail "unreadable LAN-host route evidence VOIDed the route check but must not touch the RG-owner neighbor check"
 		;;
+	owner-none) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner (no single node"* ]] || fail "no RG owner was not a VOID" ;;
+	owner-dual) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner (no single node"* ]] || fail "two RG owners were not a VOID" ;;
+	owner-failed) [[ "$output" == *"FAIL  cluster: Group12 read-only neighbor identity on the RG owner fw0"* ]] || fail "a FAILED RG-owner entry was not a FAIL" ;;
+	split-host) [[ "$output" == *"PASS  cluster: Group12 read-only neighbor identity on the RG owner fw0"*"same host: no"* ]] || fail "a declared v4/v6 split with usable entries was not a PASS" ;;
+	split-failed) [[ "$output" == *"FAIL  cluster: Group12 read-only neighbor identity on the RG owner fw0"*"same host: no"* ]] || fail "a declared v4/v6 split with a FAILED v4 entry was not a FAIL" ;;
+	split-v6-failed) [[ "$output" == *"FAIL  cluster: Group12 read-only neighbor identity on the RG owner fw0"*"same host: no"* ]] || fail "a declared split with a FAILED v6 entry was not a FAIL" ;;
+	split-v4-on-v6) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"v4 names the v6 host"* ]] || fail "v4 resolving to the v6 host in split mode was not a VOID naming it" ;;
+	split-stale) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"split waiver is stale"* ]] || fail "a v6 holder other than the declared one was not a stale-waiver VOID" ;;
+	split-no-holder) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"needs IPERF_TARGET6_SPLIT_HOLDER"* ]] || fail "split mode without its control was not a VOID" ;;
+	flag-bad) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner (IPERF_TARGET_V4_V6_SAME_HOST=maybe"* ]] || fail "an unknown same-host flag was not a VOID" ;;
+	owner-fw1) [[ "$output" == *"PASS  cluster: Group12 read-only neighbor identity on the RG owner fw1"* ]] || fail "fw1 as the RG owner was not read" ;;
+	owner-moves) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"RG owner changed during the reads"* ]] || fail "an owner move mid-read was not a VOID" ;;
+	owner-unreadable) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner (no single node"*"could not read"* ]] || fail "an unreadable node was not a VOID naming it" ;;
+	owner-entry-missing) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner fw0"* ]] || fail "a missing owner entry was not a VOID" ;;
+	owner-no-route6) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner fw0"*"no route device for a target"* ]] || fail "an owner without a v6 route device was not a VOID naming it" ;;
+	via-route) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"not on-link"* ]] || fail "a via route to the target was not a not-on-link VOID" ;;
+	prefix) [[ "$output" == *"PASS  cluster: Group12 read-only neighbor identity on the RG owner fw0"* ]] || fail "a text-prefix address on fw1 was counted as holding WAN_GW80_4" ;;
 	route-local-fail) [[ "$output" == *"FAIL  cluster: Group12 IPv4 route"* ]] || fail "local route was not a measured FAIL" ;;
 	esac
 	ok "test_cluster Groups 10–12 behavior: ${mode}"
@@ -372,8 +589,25 @@ run_connectivity_case ttl-void "PASS=8 FAIL=0 VOID=1"
 run_connectivity_case mtr4-fail "PASS=8 FAIL=1 VOID=0"
 run_connectivity_case ping-fail "PASS=8 FAIL=1 VOID=0"
 run_connectivity_case neighbor-fail "PASS=8 FAIL=1 VOID=0"
-run_connectivity_case route-void "PASS=7 FAIL=0 VOID=2"
-run_connectivity_case route-local-fail "PASS=7 FAIL=1 VOID=1"
+run_connectivity_case route-void "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case route-local-fail "PASS=8 FAIL=1 VOID=0"
+run_connectivity_case owner-none "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-dual "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-failed "PASS=8 FAIL=1 VOID=0"
+run_connectivity_case split-host "PASS=9 FAIL=0 VOID=0"
+run_connectivity_case split-failed "PASS=8 FAIL=1 VOID=0"
+run_connectivity_case split-v6-failed "PASS=8 FAIL=1 VOID=0"
+run_connectivity_case split-v4-on-v6 "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case split-stale "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case split-no-holder "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case flag-bad "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-fw1 "PASS=9 FAIL=0 VOID=0"
+run_connectivity_case owner-moves "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-unreadable "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-entry-missing "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-no-route6 "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case via-route "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case prefix "PASS=9 FAIL=0 VOID=0"
 ok "Groups 10–12 issue read-only route-scoped neighbor queries only"
 
 # Fixture: a stand-in destructive script. Enters the cell, then (with

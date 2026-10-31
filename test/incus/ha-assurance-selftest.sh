@@ -1044,6 +1044,132 @@ claim_check_case 3 'cluster-id 24' "${TMP_DIR}/claim-23.conf" "$CLAIM_OTHER_CLUS
 eval "$ha_wan_claim_probe_real"
 eval "$ha_wan_node_macs_real"
 
+# #18580: a reply naming the probing interface's own MAC is the wrong-field
+# shape (target MAC printed instead of sender). It must VOID, never PASS.
+CLAIM_WRONGFIELD=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 02:bf:72:17:01:00 probe\nreply 172.16.50.1 02:bf:72:17:01:00 probe'
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_WRONGFIELD"
+assert_contains "$(<"${ERR}")" 'probe read the wrong field' 'a wrong-field WAN probe is VOID, never a PASS'
+# Our own MAC is VOID whatever the reply's target fields say: an ETH_P_ARP
+# socket never sees our own transmitted replies, so the flag cannot excuse it.
+CLAIM_SELF_OTHER=$'iface ge-0-0-2.50 02:bf:72:17:01:00\n'"$GWP"$'\nreply 172.16.50.10 02:bf:72:17:01:00 other'
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_SELF_OTHER"
+assert_contains "$(<"${ERR}")" 'probe read the wrong field' 'our own MAC in a reply is VOID even when it is not flagged as our probe'
+# Replies without the probe's iface line: the guard above cannot run, so VOID.
+CLAIM_NOIFACE="$GWP"$'\nreply 172.16.50.10 18:e8:29:2c:13:7a probe'
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_NOIFACE"
+assert_contains "$(<"${ERR}")" 'without the probe interface line' 'replies without the probe iface line are VOID, never judged'
+
+# #18580: the REAL ha_wan_claim_probe, run hermetically in three
+# unprivileged netns on one bridge: "fw" holds the WAN address with a RETH
+# MAC, "x" is a foreign host also holding it, "gw" is the gateway. The probe
+# must report three rounds from each, flag them as answers to OUR probe,
+# never report fw's own MAC, and refuse when no node holds the address. A
+# second run has the gateway answer only with UNSOLICITED broadcast replies,
+# which must be flagged "other" and cannot satisfy the control. SKIP where
+# user namespaces are unavailable.
+WAN_NETNS_OUT="${TMP_DIR}/wan-netns.out"
+if unshare -rnm true 2>/dev/null; then
+	declare -f ha_wan_claim_probe >"${TMP_DIR}/wan-probe-fn.sh"
+	unshare -rnm bash -c '
+		set -u
+		export PATH=/usr/sbin:/sbin:$PATH
+		mount -t tmpfs none /run && mkdir -p /run/netns
+		ip link add name br0 type bridge && ip link set br0 up
+		mk() {
+			ip netns add "$1"
+			ip link add name "$1-br" type veth peer name "$1-in"
+			ip link set "$1-in" netns "$1"
+			ip link set "$1-br" master br0 up
+			ip netns exec "$1" ip link set lo up
+			ip netns exec "$1" ip link set "$1-in" address "$2" up
+			ip netns exec "$1" ip addr add "$3" dev "$1-in"
+		}
+		mk peer 02:bf:72:17:01:01 169.254.1.2/32
+		mk fw 02:bf:72:17:01:00 172.16.50.10/24
+		mk x 18:e8:29:2c:13:7a 172.16.50.10/24
+		mk gw 00:10:db:ff:10:01 172.16.50.1/24
+		sleep 1
+		# tcp:fw0 is the peer (does not hold the address), tcp:fw1 the owner:
+		# the probe must try past the first node.
+		incus() {
+			local node="$2"
+			shift 3
+			case "$node" in
+			tcp:fw0) ip netns exec peer "$@" ;;
+			*) ip netns exec fw "$@" ;;
+			esac
+		}
+		source "$1"
+		ha_wan_claim_probe 172.16.50.10 172.16.50.1 tcp:fw0 tcp:fw1
+		echo "PROBE_RC $?"
+		ha_wan_claim_probe 172.16.50.99 172.16.50.1 tcp:fw0 tcp:fw1 >/dev/null
+		echo "UNHELD_RC $?"
+		ip netns exec x ip addr del 172.16.50.10/24 dev x-in
+		ip netns exec gw ip addr del 172.16.50.1/24 dev gw-in
+		ip netns exec gw python3 -c "
+import socket, struct, time
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW); s.bind((\"gw-in\", 0))
+m = bytes.fromhex(\"0010dbff1001\")
+f = b\"\xff\" * 6 + m + b\"\x08\x06\" + struct.pack(\"!HHBBH6s4s6s4s\", 1, 0x800, 6, 4, 2, m, socket.inet_aton(\"172.16.50.1\"), b\"\xff\" * 6, socket.inet_aton(\"172.16.50.1\")) + bytes(18)
+end = time.time() + 4.5
+while time.time() < end:
+    s.send(f); time.sleep(0.2)
+" &
+		sleep 0.3
+		ha_wan_claim_probe 172.16.50.10 172.16.50.1 tcp:fw0 tcp:fw1 | sed "s/^/UNSOL /"
+		wait
+		# ASKED: the gateway asks who-has the WAN address while the probe
+		# runs, so fw'"'"'s own kernel sends ARP replies carrying fw'"'"'s MAC.
+		# The probe must never hear them (its socket is ETH_P_ARP-bound);
+		# the gateway counts them as the positive control.
+		ip netns exec gw python3 -c "
+import select, socket, struct, time
+tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW); tx.bind((\"gw-in\", 0))
+rx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806)); rx.bind((\"gw-in\", 0x0806))
+m = bytes.fromhex(\"0010dbff1001\")
+f = b\"\xff\" * 6 + m + b\"\x08\x06\" + struct.pack(\"!HHBBH6s4s6s4s\", 1, 0x800, 6, 4, 1, m, socket.inet_aton(\"172.16.50.1\"), bytes(6), socket.inet_aton(\"172.16.50.10\")) + bytes(18)
+n = 0
+end = time.time() + 4.5
+while time.time() < end:
+    tx.send(f)
+    stop = time.time() + 0.2
+    while (left := stop - time.time()) > 0 and select.select([rx], [], [], left)[0]:
+        r = rx.recv(2048)
+        if r[20:22] == b\"\x00\x02\" and r[22:28] == bytes.fromhex(\"02bf72170100\") and r[28:32] == socket.inet_aton(\"172.16.50.10\"):
+            n += 1
+print(\"ASKED_CONTROL\", n, flush=True)
+" &
+		sleep 0.3
+		ha_wan_claim_probe 172.16.50.10 172.16.50.1 tcp:fw0 tcp:fw1 | sed "s/^/ASKED /"
+		wait
+	' _ "${TMP_DIR}/wan-probe-fn.sh" >"$WAN_NETNS_OUT" 2>&1 || true
+	assert_contains "$(<"$WAN_NETNS_OUT")" 'PROBE_RC 0' 'wan netns: the real probe runs'
+	assert_contains "$(<"$WAN_NETNS_OUT")" 'iface fw-in 02:bf:72:17:01:00' 'wan netns: the probe reports its own interface'
+	assert_eq "$(grep -c '^reply 172.16.50.10 18:e8:29:2c:13:7a probe$' "$WAN_NETNS_OUT")" 3 \
+		'wan netns: the foreign holder answers each of three rounds, sender MAC parsed, flagged as our probe'
+	assert_eq "$(grep -c '^reply 172.16.50.1 00:10:db:ff:10:01 probe$' "$WAN_NETNS_OUT")" 3 \
+		'wan netns: the gateway control answers each of three rounds'
+	assert_eq "$(grep -c '^reply .* 02:bf:72:17:01:00 ' "$WAN_NETNS_OUT")" 0 'wan netns: no reply ever names the prober itself'
+	assert_contains "$(<"$WAN_NETNS_OUT")" 'UNHELD_RC 2' 'wan netns: a probe on nodes that do not hold the address refuses (status 2)'
+	assert_eq "$(grep -c '^UNSOL reply 172.16.50.1 00:10:db:ff:10:01 probe$' "$WAN_NETNS_OUT")" 0 \
+		'wan netns: an unsolicited broadcast gateway reply is never flagged as an answer to our probe'
+	_unsol_other=$(grep -c '^UNSOL reply 172.16.50.1 00:10:db:ff:10:01 other$' "$WAN_NETNS_OUT" || true)
+	(( _unsol_other >= 1 )) || fail_test 'wan netns: the unsolicited gateway replies were not heard at all (the flag cell measured nothing)'
+	# The ASKED phase: fw's kernel answered (control), and the probe never
+	# heard those replies, so the self-MAC guard's ETH_P_ARP premise holds.
+	_asked=$(sed -n 's/^ASKED_CONTROL //p' "$WAN_NETNS_OUT")
+	[[ "${_asked:-0}" =~ ^[0-9]+$ ]] && (( _asked >= 1 )) \
+		|| fail_test "wan netns: fw's kernel never answered the gateway's who-has (the ASKED cell measured nothing): ${_asked:-<none>}"
+	assert_eq "$(grep -c '^ASKED reply 172.16.50.10 02:bf:72:17:01:00 ' "$WAN_NETNS_OUT")" 0 \
+		"wan netns: the probe never hears fw's own kernel replies for the WAN address (ETH_P_ARP-bound)"
+	assert_helper_status 1 wcv "$OWN" 172.16.50.10 172.16.50.1 "$(grep -v '^UNSOL\|^ASKED\|_RC' "$WAN_NETNS_OUT")"
+	assert_contains "$(<"${ERR}")" 'also answered for by 18:e8:29:2c:13:7a' 'wan netns: the real probe output convicts the foreign holder'
+	assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$(sed -n 's/^UNSOL //p' "$WAN_NETNS_OUT")"
+	printf 'netns WAN claim probe cell ran\n'
+else
+	printf 'SKIP netns WAN claim probe cell: unprivileged user/net namespaces unavailable\n'
+fi
+
 # The external IPv4 verdict: a FAIL becomes VOID only beside a NON-xpf claim.
 PING_LOST='4 packets transmitted, 0 received, 100% packet loss'
 PING_OK='64 bytes from 1.1.1.1: icmp_seq=1 ttl=56'
@@ -1083,9 +1209,11 @@ for text, name in ((tf, "ha_emit_verdict"), (tf, "ha_external_sweep"), (tc, "wan
 match = re.search(r"^test_cluster\(\) \{\n.*?^\}\n", tc, re.M | re.S)
 if not match:
     raise SystemExit("cannot extract test_cluster for #18558 wiring coverage")
-calls = sum(1 for line in match.group(0).splitlines() if line.split("#", 1)[0].strip() == "wan_claim_cell")
-blocks.append(f"WAN_CLAIM_CELL_CALLS={calls}\n")
 pathlib.Path(sys.argv[3]).write_text("".join(blocks), encoding="utf-8")
+# #18580: test_cluster goes to its own file and is RUN for the reachability
+# count below; counting call text let a call in a dead branch or after an
+# early return survive.
+pathlib.Path(sys.argv[3] + ".test_cluster").write_text(match.group(0), encoding="utf-8")
 PY
 claim_wiring_run() { # <v4-rc> <v4-out> <v6-rc> <v6-out> <claim-status> -> "V4=.. V6=.. CALLED=.."
 	(
@@ -1143,8 +1271,38 @@ assert_eq "$(claim_cell_run 0)" PASS 'test-connectivity claim cell: unique addre
 assert_eq "$(claim_cell_run 1)" FAIL 'test-connectivity claim cell: a non-xpf claimant FAILs'
 assert_eq "$(claim_cell_run 3)" FAIL 'test-connectivity claim cell: another xpf cluster FAILs'
 assert_eq "$(claim_cell_run 2)" VOID 'test-connectivity claim cell: an unmeasured probe is VOID'
-assert_eq "$(bash -c "source '$CLAIM_WIRING'; echo \$WAN_CLAIM_CELL_CALLS")" 1 \
-	'test-connectivity test_cluster calls wan_claim_cell exactly once (code, not a comment)'
+# #18580: reachability, not text. Run the extracted test_cluster with every
+# helper it calls failing as an unknown command does (command_not_found_handle
+# returns 127, as bash itself would), incus refused and the firewall nodes
+# "running", and count real invocations of the cell. Run it with the LAN host
+# running and with it stopped: the cell must be reached once in each, so a
+# call moved into either branch of the LAN-host check, into a dead branch or
+# after an early return is caught.
+reach_count() { # <wiring-file> <cell> <lan-running|lan-stopped>
+	(
+		set +eu
+		CALLS="${TMP_DIR}/reach-calls-${2}-${3}"
+		: >"$CALLS"
+		# shellcheck disable=SC1090
+		source "$1"
+		command_not_found_handle() { return 127; }
+		incus() { return 1; }
+		LAN_STATE="$3"
+		instance_running() {
+			[[ "$1" == "$FW0" || "$1" == "$FW1" ]] && return 0
+			[[ "$1" == "$CLUSTER_LAN_HOST" && "$LAN_STATE" == lan-running ]]
+		}
+		wan_claim_cell() { printf 'wan_claim_cell\n' >>"$CALLS"; }
+		iperf_target_claim_cell() { printf 'iperf_target_claim_cell\n' >>"$CALLS"; }
+		FW0=loss:fw0 FW1=loss:fw1 CLUSTER_LAN_HOST=loss:lan CLUSTER_CONF=/nonexistent PROJECT_ROOT="$ROOT"
+		test_cluster >/dev/null 2>&1
+		grep -cxF "$2" "$CALLS"
+	)
+}
+for lan_state in lan-running lan-stopped; do
+	assert_eq "$(reach_count "${CLAIM_WIRING}.test_cluster" wan_claim_cell "$lan_state")" 1 \
+		"test-connectivity test_cluster reaches wan_claim_cell exactly once (${lan_state})"
+done
 RECENT_JSON="${TMP_DIR}/recent-metrics.jsonl"
 cat >"$RECENT_JSON" <<'JSON'
 {"event":"interval","data":{"sum":{"start":0,"end":1,"bits_per_second":0},"streams":[{"socket":1,"bits_per_second":0},{"socket":2,"bits_per_second":100}]}}
@@ -1648,6 +1806,301 @@ assert_eq "$OWNER_OUT" 'RC=1 PASS=0 FAIL=1 VOID=0' 'RG1 owner wrapper measured F
 OWNER_OUT="$(OWNER_STATUS=2 bash -euo pipefail -c "$OWNER_RUNNER" _ "$OWNER_CELL")"
 assert_eq "$OWNER_OUT" 'RC=2 PASS=0 FAIL=0 VOID=1' 'RG1 owner wrapper VOID status'
 printf 'RG1 owner cell wrapper preserves PASS/FAIL/VOID status under set -e\n'
+
+# #18576: an iperf target answered for by two hosts. The shapes are what the
+# off-firewall probe prints. The DUP set is what an off-firewall vantage
+# (tcp:xpf-tcp-target) heard for loss's 172.16.80.200 (2026-10-31); "probe"
+# marks a reply addressed to us with target IP 0.0.0.0. "fw" lines carry the
+# node's role: owner = holds the control (WAN_GW80_4), peer = does not.
+KNOWN200='10:66:6a:8b:91:a4 f6:f0:06:10:77:d5'
+CMAC=10:66:6a:8b:91:a4
+XMAC=f6:f0:06:10:77:d5
+CTL=$'reply 172.16.80.8 02:bf:72:16:01:00 probe'
+OWNER_SELF=$'fw loss:fw0 before '"$CMAC"$' REACHABLE owner\nfw loss:fw0 after '"$CMAC"$' REACHABLE owner'
+TGT_ONE=$'iface eth0 10:66:6a:5c:f2:b8\nself 10:66:6a:5c:f2:b8\n'"$CTL"$'\nfw tcp:fw0 before 10:66:6a:5c:f2:b8 REACHABLE owner\nfw tcp:fw0 after 10:66:6a:5c:f2:b8 REACHABLE owner'
+TGT_DUP=$'iface eth0 10:66:6a:5c:f2:b8\nreply 172.16.80.200 '"$CMAC"$' probe\nreply 172.16.80.200 '"$XMAC"$' probe\nreply 172.16.80.200 F6:F0:06:10:77:D5 probe\n'"$CTL"
+TGT_SELFDUP=$'iface eth0 '"$CMAC"$'\nself '"$CMAC"$'\nreply 172.16.80.200 '"$XMAC"$' probe\n'"$CTL"
+TGT_THIRD="$TGT_SELFDUP"$'\nreply 172.16.80.200 aa:bb:cc:dd:ee:ff probe'
+TGT_RETH=$'iface eth0 '"$CMAC"$'\nself '"$CMAC"$'\nreply 172.16.80.200 02:bf:72:16:01:00 probe\n'"$CTL"
+TGT_OTHER=$'iface eth0 '"$CMAC"$'\nreply 172.16.80.201 10:66:6a:8b:91:a5 probe\n'"$CTL"
+TGT_SELF_NOCTL=$'iface eth0 '"$CMAC"$'\nself '"$CMAC"
+TGT_SELF_CTL_OTHER=$'iface eth0 '"$CMAC"$'\nself '"$CMAC"$'\nreply 172.16.80.8 02:bf:72:16:01:00 other'
+TGT_WRONGFIELD=$'iface eth0 '"$CMAC"$'\nself '"$CMAC"$'\nreply 172.16.80.200 '"$CMAC"$' probe\nreply 172.16.80.8 '"$CMAC"$' probe'
+TGT_SELF_ONLY=$'iface eth0 '"$CMAC"$'\nself '"$CMAC"$'\n'"$CTL"
+TGT_X_ONLY=$'iface eth0 '"$CMAC"$'\nreply 172.16.80.200 '"$XMAC"$' probe\n'"$CTL"
+tcv() { ha_target_claim_verdict "$@"; }
+assert_helper_status 0 tcv 172.16.80.210 172.16.80.8 '' "$TGT_ONE"
+assert_contains "$(<"${OUT}")" 'answered for only by 10:66:6a:5c:f2:b8' 'unique target names its one holder'
+# Status 4: exactly the known set, the vantage holds the target, and the RG
+# owner resolves it to that vantage before AND after (the same-run control).
+assert_helper_status 4 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_SELFDUP"$'\n'"$OWNER_SELF"
+assert_contains "$(<"${ERR}")" 'EXCUSED #18576' 'the excused state is labelled with its issue'
+assert_contains "$(<"${ERR}")" 'expires when one holder drops it' 'the excused state names its expiry'
+assert_helper_status 4 tcv 172.16.80.200 172.16.80.8 'self f6:f0:06:10:77:d5' "$TGT_SELFDUP"$'\n'"$OWNER_SELF"
+# A recreated container (new volatile hwaddr) still matches through "self".
+RECREATED="${TGT_SELFDUP//$CMAC/10:66:6a:00:00:01}"$'\n'"${OWNER_SELF//$CMAC/10:66:6a:00:00:01}"
+assert_helper_status 4 tcv 172.16.80.200 172.16.80.8 'SELF F6:F0:06:10:77:D5' "$RECREATED"
+# E1: the known set answers but the RG owner already resolves to the OTHER
+# holder: never excused; this run's v4 iperf numbers are invalid.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before '"$XMAC"$' REACHABLE owner\nfw loss:fw0 after '"$XMAC"$' REACHABLE owner'
+assert_contains "$(<"${ERR}")" "v4 iperf numbers measured the wrong host" 'E1: owner on the other holder invalidates the run'
+# Known set but the owner's choice is not established (no entry, or it only
+# appears mid-window): VOID, not excused and not a FAIL.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_SELFDUP"
+assert_contains "$(<"${ERR}")" 'not certifiable' 'no owner view is not certifiable'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before - NONE owner\nfw loss:fw0 after '"$CMAC"$' REACHABLE owner'
+# Known set heard from a vantage that does not hold the target: no self, so
+# the excuse cannot be granted.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_DUP"$'\n'"$OWNER_SELF"
+assert_contains "$(<"${ERR}")" 'the vantage does not hold it' 'the excuse requires the self line'
+# Two holders and no documented set: FAIL naming both, each once in any case.
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' "$TGT_SELFDUP"
+assert_contains "$(<"${ERR}")" 'more than one host (10:66:6a:8b:91:a4 f6:f0:06:10:77:d5)' \
+	'dual-held target names both holders'
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' "$TGT_DUP"
+assert_eq "$(grep -io 'f6:f0:06:10:77:d5' "${ERR}" | wc -l)" 1 'dual-held target names each holder once, case-insensitively'
+# Any other set FAILs: a third MAC (1), or an xpf RETH MAC (3, product).
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_THIRD"$'\n'"$OWNER_SELF"
+assert_helper_status 3 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_RETH"$'\n'"$OWNER_SELF"
+assert_contains "$(<"${ERR}")" 'xpf RETH MAC (02:bf:72:16:01:00)' 'an xpf RETH holder is a product failure'
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 'f6:f0:06:10:77:d5' "$TGT_SELFDUP"
+# E2: only the external box answers (the container lost its alias): never a
+# PASS; the v4 target is misplaced.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 '' "$TGT_X_ONLY"
+assert_contains "$(<"${ERR}")" 'not by the intended holder' 'E2: a holder that is not the vantage is misplaced'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_X_ONLY"
+# The expiry: one holder (the container) while the known set is still
+# configured is a certifiable run, so it PASSes, and the reason tells the
+# operator to delete the stale line. The excuse is owner-gated, so a stale set
+# can only ever re-excuse the identical benign state.
+assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_SELF_ONLY"$'\n'"$OWNER_SELF"
+assert_contains "$(<"${OUT}")" 'configured but not observed: delete IPERF_TARGET4_KNOWN_HOLDERS (#18576)' \
+	'a stale known set tells the operator to delete it'
+assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 'self f6:f0:06:10:77:d5' "$TGT_SELF_ONLY"
+assert_contains "$(<"${OUT}")" 'delete IPERF_TARGET4_KNOWN_HOLDERS' 'the delete note survives the self token'
+assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 '' "$TGT_SELF_ONLY"
+assert_not_contains_delete=$(grep -c 'delete IPERF_TARGET4_KNOWN_HOLDERS' "${OUT}" || true)
+assert_eq "$assert_not_contains_delete" 0 'no delete note without a configured set'
+assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 '' "$TGT_SELF_ONLY"$'\n'"$OWNER_SELF"
+# A lone holder needs the control, answered to OUR probe.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 '' "$TGT_SELF_NOCTL"
+assert_contains "$(<"${ERR}")" 'control 172.16.80.8 did not answer' 'a lone holder without the control is VOID, not PASS'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 '' "$TGT_SELF_CTL_OTHER"
+# A reply naming the prober's own MAC means the probe read the wrong field.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_WRONGFIELD"
+assert_contains "$(<"${ERR}")" "names the prober's own MAC" 'a wrong-field probe is VOID, never a PASS'
+# The RG OWNER's entry: FAILED, a REACHABLE entry on an unclaimed MAC, or a
+# change between two present snapshots is a product neighbor fault.
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' \
+	"$TGT_SELF_ONLY"$'\nfw loss:fw0 before - FAILED owner\nfw loss:fw0 after - FAILED owner'
+assert_contains "$(<"${ERR}")" 'FAILED (before)' 'a FAILED owner entry is a product neighbor fault'
+for st in REACHABLE DELAY PROBE PERMANENT; do
+	assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' \
+		"$TGT_SELF_ONLY"$'\nfw loss:fw0 before - NONE owner\nfw loss:fw0 after 11:22:33:44:55:66 '"$st"$' owner'
+done
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before '"$CMAC"$' REACHABLE owner\nfw loss:fw0 after '"$XMAC"$' STALE owner'
+assert_contains "$(<"${ERR}")" "changed from $CMAC to $XMAC" 'an owner flip during the probe is reported'
+# E3-E5: none of these is a product fault. An entry appearing mid-window, a
+# FAILED entry on the PEER, and a STALE owner entry on an old MAC (container
+# recreate) are judged only by the owner rules, which re-validate on use.
+assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 '' \
+	"$TGT_SELF_ONLY"$'\nfw loss:fw0 before - NONE owner\nfw loss:fw0 after '"$CMAC"$' REACHABLE owner'
+assert_helper_status 4 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\n'"$OWNER_SELF"$'\nfw loss:fw1 before - FAILED peer\nfw loss:fw1 after 11:22:33:44:55:66 REACHABLE peer'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 '' \
+	"$TGT_SELF_ONLY"$'\nfw loss:fw0 before 10:66:6a:00:00:09 STALE owner\nfw loss:fw0 after 10:66:6a:00:00:09 STALE owner'
+assert_contains "$(<"${ERR}")" "names another MAC" 'E5: a STALE owner entry on an old MAC is not a FAIL, but not a PASS either'
+# Seat X's false PASS: only self answers, no known set, and the owner is
+# still STALE on the external box. Its next v4 packet goes there: VOID.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 '' \
+	"$TGT_SELF_ONLY"$'\nfw loss:fw0 before '"$XMAC"$' STALE owner\nfw loss:fw0 after '"$XMAC"$' STALE owner'
+assert_contains "$(<"${ERR}")" "entries $XMAC" 'a lone holder with the owner on another MAC is not certifiable'
+# The owner gate: exactly one owner, the same node in both snapshots.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\n'"$OWNER_SELF"$'\nfw loss:fw1 before '"$XMAC"$' REACHABLE owner\nfw loss:fw1 after '"$XMAC"$' REACHABLE owner'
+assert_contains "$(<"${ERR}")" 'not one stable node' 'a dual-active owner pair is never excused'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before '"$CMAC"$' REACHABLE owner\nfw loss:fw0 after '"$CMAC"$' REACHABLE peer\nfw loss:fw1 before - NONE peer\nfw loss:fw1 after '"$XMAC"$' REACHABLE owner'
+assert_contains "$(<"${ERR}")" 'not one stable node' 'ownership moving mid-probe is never excused'
+# Q02: the owner TAG decides which node is judged, not node order. fw0 is a
+# peer on the container, fw1 owns and resolves to the external box: E1.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before '"$CMAC"$' REACHABLE peer\nfw loss:fw0 after '"$CMAC"$' REACHABLE peer\nfw loss:fw1 before '"$XMAC"$' REACHABLE owner\nfw loss:fw1 after '"$XMAC"$' REACHABLE owner'
+assert_contains "$(<"${ERR}")" 'RG owner loss:fw1' 'Q02: the tagged owner, not the first node, is judged'
+assert_contains "$(<"${ERR}")" "measured the wrong host" 'Q02: the owner on the external box invalidates the run'
+# Q01: an excuse needs BOTH snapshots; a missing after-snapshot is VOID.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before '"$CMAC"$' REACHABLE owner'
+assert_contains "$(<"${ERR}")" 'not one stable node' 'Q01: a missing after-snapshot is never excused'
+# The excuse needs the owner on the container AFTER the probe too: an entry
+# that vanished during the probe (owner unchanged) is not certifiable.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before '"$CMAC"$' REACHABLE owner\nfw loss:fw0 after - NONE owner'
+assert_contains "$(<"${ERR}")" 'not certifiable' 'an owner entry vanishing mid-probe is never excused'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_SELFDUP"$'\nfw loss:fw0 before 10:66:6a:00:00:09 STALE owner\nfw loss:fw0 after 10:66:6a:00:00:09 STALE owner'
+assert_contains "$(<"${ERR}")" 'not certifiable' 'a stale owner entry on an old MAC is not certifiable, not a FAIL'
+# Replies for OTHER addresses are not claims on the target; nobody = VOID.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_OTHER"
+assert_contains "$(<"${ERR}")" 'nobody answered ARP for 172.16.80.200 although control' 'an unheld target with a live control is VOID'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 '' ''
+assert_helper_status 2 tcv '' 172.16.80.8 '' "$TGT_DUP"
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.200 '' "$TGT_DUP"
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 ''
+# ha_target_claim_check: probe and firewall snapshots stubbed; argv must reach
+# them unchanged and the snapshots must bracket the probe.
+ha_target_claim_probe_real="$(declare -f ha_target_claim_probe)"
+ha_target_fw_neigh_real="$(declare -f ha_target_fw_neigh)"
+TGT_STUB_OUT="" TGT_STUB_RC=0
+ha_target_claim_probe() { printf 'probe %s\n' "$*" >>"${TMP_DIR}/tgt-stub-calls"; printf '%s\n' "$TGT_STUB_OUT"; return "$TGT_STUB_RC"; }
+ha_target_fw_neigh() { printf 'neigh %s\n' "$*" >>"${TMP_DIR}/tgt-stub-calls"; local p="$1" n r=owner; shift 3; for n in "$@"; do printf 'fw %s %s 10:66:6a:8b:91:a4 REACHABLE %s\n' "$n" "$p" "$r"; r=peer; done; }
+tgt_check_case() { # <expected-status> <reason-substring> <stub-out> <stub-rc> [known]
+	TGT_STUB_OUT="$3" TGT_STUB_RC="$4"
+	rm -f "${TMP_DIR}/tgt-stub-calls"
+	if ! ha_target_claim_check loss:mouse 172.16.80.200 172.16.80.8 "${5:-}" loss:fw0 loss:fw1; then
+		fail_test "ha_target_claim_check returned nonzero (it must always return 0)"
+	fi
+	assert_eq "$HA_TARGET_CLAIM_STATUS" "$1" "ha_target_claim_check status for ${2}"
+	assert_contains "$HA_TARGET_CLAIM_REASON" "$2" "ha_target_claim_check reason for ${2}"
+}
+tgt_check_case 4 'EXCUSED #18576' "$TGT_SELFDUP" 0 "$KNOWN200"
+assert_eq "$(tr '\n' '|' <"${TMP_DIR}/tgt-stub-calls")" \
+	'neigh before 172.16.80.200 172.16.80.8 loss:fw0 loss:fw1|probe loss:mouse 172.16.80.200 172.16.80.8|neigh after 172.16.80.200 172.16.80.8 loss:fw0 loss:fw1|' \
+	'target claim check snapshots both firewalls before and after an off-firewall probe'
+tgt_check_case 1 'more than one host' "$TGT_SELFDUP" 0
+tgt_check_case 0 'answered for only by' "$TGT_SELF_ONLY" 0
+tgt_check_case 3 'xpf RETH MAC' "$TGT_RETH" 0 "$KNOWN200"
+tgt_check_case 2 'not on-link' '' 3
+tgt_check_case 2 'could not run (status 1)' '' 1
+eval "$ha_target_claim_probe_real"
+eval "$ha_target_fw_neigh_real"
+
+# The REAL probe, run hermetically: three unprivileged netns on one bridge.
+# "c" is the vantage and holds the target (loss's container), "x" is a
+# second holder, and "fw" holds the control address and carries a cached
+# neighbor entry for the target. The probe must report both holders and the
+# control, three rounds each, and must not move fw's entry. SKIP where user
+# namespaces are unavailable.
+TGT_NETNS_OUT="${TMP_DIR}/tgt-netns.out"
+if unshare -rnm true 2>/dev/null; then
+	declare -f ha_target_claim_probe >"${TMP_DIR}/tgt-probe-fn.sh"
+	unshare -rnm bash -c '
+		set -u
+		export PATH=/usr/sbin:/sbin:$PATH
+		mount -t tmpfs none /run && mkdir -p /run/netns
+		ip link add name br0 type bridge && ip link set br0 up
+		mk() {
+			ip netns add "$1"
+			ip link add name "$1-br" type veth peer name "$1-in"
+			ip link set "$1-in" netns "$1"
+			ip link set "$1-br" master br0 up
+			ip netns exec "$1" ip link set lo up
+			ip netns exec "$1" ip link set "$1-in" address "$2" up
+			ip netns exec "$1" ip addr add "$3" dev "$1-in"
+		}
+		mk fw 02:bf:72:16:01:00 172.16.80.8/24
+		mk c 10:66:6a:8b:91:a4 172.16.80.200/24
+		mk x f6:f0:06:10:77:d5 172.16.80.200/24
+		sleep 1
+		ip netns exec fw ip neigh replace 172.16.80.200 lladdr 10:66:6a:8b:91:a4 dev fw-in nud stale
+		incus() { shift 3; ip netns exec c "$@"; }
+		source "$1"
+		echo "FW_BEFORE $(ip netns exec fw ip neigh show 172.16.80.200 | awk "{print \$5}")"
+		ha_target_claim_probe xpf-mouse-target 172.16.80.200 172.16.80.8
+		echo "PROBE_RC $?"
+		echo "FW_AFTER $(ip netns exec fw ip neigh show 172.16.80.200 | awk "{print \$5}")"
+		# A control heard only as UNSOLICITED broadcast replies (fw no longer
+		# holds .8 but announces it) must be flagged "other", never "probe".
+		ip netns exec fw ip addr del 172.16.80.8/24 dev fw-in
+		ip netns exec fw python3 -c "
+import socket, struct, time
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW); s.bind((\"fw-in\", 0))
+m = bytes.fromhex(\"02bf72160100\")
+f = b\"\xff\" * 6 + m + b\"\x08\x06\" + struct.pack(\"!HHBBH6s4s6s4s\", 1, 0x800, 6, 4, 2, m, socket.inet_aton(\"172.16.80.8\"), b\"\xff\" * 6, socket.inet_aton(\"172.16.80.8\")) + bytes(18)
+end = time.time() + 4.5
+while time.time() < end:
+    s.send(f); time.sleep(0.2)
+" &
+		sleep 0.3
+		ha_target_claim_probe xpf-mouse-target 172.16.80.200 172.16.80.8 | sed "s/^/UNSOL /"
+		wait
+		# A target reached only via a gateway is not on-link: status 3, no probe.
+		ip netns exec c ip route add default via 172.16.80.8
+		ha_target_claim_probe xpf-mouse-target 10.9.9.9 172.16.80.8 >/dev/null
+		echo "OFFLINK_RC $?"
+	' _ "${TMP_DIR}/tgt-probe-fn.sh" >"$TGT_NETNS_OUT" 2>&1 || true
+	assert_contains "$(<"$TGT_NETNS_OUT")" 'PROBE_RC 0' 'netns: the real probe runs'
+	assert_contains "$(<"$TGT_NETNS_OUT")" 'self 10:66:6a:8b:91:a4' 'netns: a vantage holding the target reports itself'
+	assert_eq "$(grep -c '^reply 172.16.80.200 f6:f0:06:10:77:d5 probe$' "$TGT_NETNS_OUT")" 3 \
+		'netns: the second holder answers each of three rounds, sender MAC parsed, flagged as our probe'
+	assert_eq "$(grep -c '^reply 172.16.80.8 02:bf:72:16:01:00 probe$' "$TGT_NETNS_OUT")" 3 \
+		'netns: the control answers each of three rounds'
+	assert_eq "$(grep -c '10:66:6a:8b:91:a4 probe$' "$TGT_NETNS_OUT")" 0 'netns: no reply ever names the prober itself'
+	assert_contains "$(<"$TGT_NETNS_OUT")" 'FW_AFTER 10:66:6a:8b:91:a4' \
+		"netns: probing from the target's holder leaves the firewall's entry where it was"
+	assert_contains "$(<"$TGT_NETNS_OUT")" 'OFFLINK_RC 3' 'netns: an off-link (via-gateway) target is refused, status 3'
+	assert_eq "$(grep -c '^UNSOL reply 172.16.80.8 02:bf:72:16:01:00 probe$' "$TGT_NETNS_OUT")" 0 \
+		'netns: an unsolicited broadcast reply for the control is never flagged as an answer to our probe'
+	assert_ne_zero_unsol=$(grep -c '^UNSOL reply 172.16.80.8 02:bf:72:16:01:00 other$' "$TGT_NETNS_OUT" || true)
+	if (( assert_ne_zero_unsol < 1 )); then
+		fail_test 'netns: the unsolicited control replies were not heard at all (the flag cell measured nothing)'
+	fi
+	assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$(<"$TGT_NETNS_OUT")"
+	assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 'self f6:f0:06:10:77:d5' "$(<"$TGT_NETNS_OUT")"
+	assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' "$(<"$TGT_NETNS_OUT")"
+	printf 'netns target-claim probe cell ran\n'
+else
+	printf 'SKIP netns target-claim probe cell: unprivileged user/net namespaces unavailable\n'
+fi
+# Wiring: the REAL iperf_target_claim_cell and test_cluster
+# (test-connectivity.sh), extracted by name and run against stubs.
+TGT_WIRING="${TMP_DIR}/target-claim-wiring.sh"
+python3 - "${ROOT}/test/incus/test-connectivity.sh" "$TGT_WIRING" <<'PY'
+import pathlib
+import re
+import sys
+
+tc = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+blocks = []
+for name in ("assurance_verdict", "iperf_target_claim_cell", "test_cluster"):
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", tc, re.M | re.S)
+    if not match:
+        raise SystemExit(f"cannot extract {name} for #18576 wiring coverage")
+    blocks.append(match.group(0))
+pathlib.Path(sys.argv[2]).write_text("".join(blocks), encoding="utf-8")
+PY
+tgt_cell_run() { # <check-status> -> PASS|FAIL|VOID|SKIP
+	(
+		W_LOG="" S_TGT="$1"
+		skip() { W_LOG+="SKIP|$*"$'\n'; }
+		pass() { W_LOG+="PASS|$*"$'\n'; }
+		fail() { W_LOG+="FAIL|$*"$'\n'; }
+		void() { W_LOG+="VOID|$*"$'\n'; }
+		# shellcheck disable=SC1090
+		source "$TGT_WIRING"
+		ha_target_claim_check() { printf '%s' "$*" >"${TMP_DIR}/tgt-cell-args"; HA_TARGET_CLAIM_STATUS="$S_TGT"; HA_TARGET_CLAIM_REASON="target claim: stub"; }
+		MOUSE_TARGET_REF=loss:xpf-mouse-target IPERF_TARGET4=172.16.80.200 WAN_GW80_4=172.16.80.8 FW0=loss:fw0 FW1=loss:fw1
+		IPERF_TARGET4_KNOWN_HOLDERS="10:66:6a:8b:91:a4 f6:f0:06:10:77:d5"
+		iperf_target_claim_cell
+		printf '%s\n' "${W_LOG%%|*}"
+	)
+}
+assert_eq "$(tgt_cell_run 0)" PASS 'iperf target cell: one holder PASSes'
+assert_eq "$(tgt_cell_run 1)" FAIL 'iperf target cell: two holders FAIL'
+assert_eq "$(tgt_cell_run 3)" FAIL 'iperf target cell: an xpf RETH holder (status 3) FAILs'
+assert_eq "$(tgt_cell_run 2)" VOID 'iperf target cell: an uncertifiable or unmeasured probe is VOID'
+assert_eq "$(tgt_cell_run 4)" SKIP 'iperf target cell: the excused known duplicate (status 4) is a SKIP, never VOID or PASS'
+assert_eq "$(<"${TMP_DIR}/tgt-cell-args")" 'loss:xpf-mouse-target 172.16.80.200 172.16.80.8 10:66:6a:8b:91:a4 f6:f0:06:10:77:d5 loss:fw0 loss:fw1' \
+	'iperf target cell probes IPERF_TARGET4 from the off-firewall target container, WAN_GW80_4 as control, both nodes'
+# Reachability, not text (#18580's reach_count above): the cell must be
+# reached once with the LAN host running and once with it stopped.
+for lan_state in lan-running lan-stopped; do
+	assert_eq "$(reach_count "$TGT_WIRING" iperf_target_claim_cell "$lan_state")" 1 \
+		"test-connectivity test_cluster reaches iperf_target_claim_cell exactly once (${lan_state})"
+done
 
 printf 'PASS ha-assurance-selftest: M2.4, RG1 Groups 1-8, N6/N12 pins, sticky FAIL, blind markers, gate dominance, set-e VOID guard\n'
 

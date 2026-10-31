@@ -35,6 +35,11 @@ var daemonKernelCells16470 = []string{
 	"TestBareCrossSpelledMemberEnslavesVLANChildrenInKernel10174",
 	"TestBareRIMemberEnslavesItsVLANChildren9754",
 	"TestDashMemberEnslavesVLANChildInKernel9815",
+	// #18573: the direct-VIP IFA_PROTO stamp round trip, the renumber +
+	// snapshot SNAT-source cell, and the prefix-only renumber cell.
+	"TestDirectVIPPrefixOnlyRenumberOnKernel18573",
+	"TestDirectVIPRenumberOnKernel18573",
+	"TestDirectVIPStampRoundTripsThroughTheKernel18573",
 	"TestHostInboundDHCPManagementVRFColdBootProductionFence12127",
 	"TestHostInboundDHCPManagementVRFDelivery12127",
 	"TestHostInboundDHCPManagementVRFGapDelivery12127",

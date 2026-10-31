@@ -1838,6 +1838,29 @@ type Daemon struct {
 	// vrrpMgr.ResignRG directly; unit tests inject a barrier they control so
 	// the deferred fence verdict is drivable without real VRRP instances.
 	resignRethRGFn func(rgID int) vipReleaseBarrier
+	// directVIPDumpFailing latches the direct-VIP ownership dump failure so
+	// its warning fires once per failure streak, not per 2s reconcile tick
+	// (#18573).
+	directVIPDumpFailing atomic.Bool
+	// directVIPStampUnsupported latches, for the process lifetime, a kernel
+	// that accepted a stamped VIP but read it back with IFA_PROTO 0 (review
+	// Z1 on #18579). Set once by verifyDirectVIPStamps; adoption stops.
+	directVIPStampUnsupported atomic.Bool
+	// directVIPStampVerified latches the first stamp that read back with
+	// vipstamp.Proto, so the capability read-back costs one dump per
+	// process, not one per writing pass (review Z2 on #18579).
+	directVIPStampVerified atomic.Bool
+	// directVIPLogged latches the per-(netdev, VIP) direct-VIP reconcile
+	// diagnostics (bad address, failed add/remove/stamp, adoption) so each
+	// logs once per commit, not per 2s tick (#18573). Guarded by
+	// vipWarnedMu and cleared by resetVIPWarnings with vipWarnedIfaces.
+	directVIPLogged map[string]bool
+	// interfaceLinkRefreshWake is the debounced interface-link snapshot
+	// refresher's wake channel, published by startTransitGateLinkWatch so
+	// the direct-VIP reconcile can republish the userspace interface rows
+	// after it changes a RETH address outside a commit (#18573). nil until
+	// the refresher starts.
+	interfaceLinkRefreshWake atomic.Pointer[chan string]
 	// Test hooks for direct-mode VIP ownership reconciliation.
 	directAddVIPsFn        func(int) int
 	directRemoveVIPsFn     func(int) int

@@ -855,7 +855,13 @@ heartbeat traffic.
   `ip link set … vf …` on the host PF: that host-PF state is cleared
   on host reboot/PF reset and caused the 2026-07-01 LAN de-isolation
   outage; `nictype=sriov` re-applies it durably (machinery comment in
-  `cluster-setup.sh`, WAN/LAN device creation).
+  `cluster-setup.sh`, WAN/LAN device creation). **Exception, WAN trunk
+  VFs:** a `wan-vf` device sets no `vlan`, so incus re-applies nothing and
+  restores the VF's previous VLAN on stop. A reassigned VF can keep a
+  stale port VLAN on incus 7.0.1 (udp fw0, 2026-10-31 UTC, VLAN 80;
+  incus 7.6.0 and later clear it on start). Until #18582 makes this
+  durable, the out-of-band clear in `docs/regression-test-matrix.md`'s
+  SR-IOV row is the sanctioned emergency repair.
 - **Fabric VLAN is PF-private — terminology and the real condition.**
   FAB-VLAN is a VF access VLAN local to the `ix0` VEB (`hwmode VEB`,
   `local_forwarding: enabled`, §1.4.1): F0↔F1 frames are switched
@@ -1081,14 +1087,21 @@ running cluster until these steps run. Run them inside one lock cell
    Check for `commit complete`.
 3. **Remove the old address.** On the RG1 owner, run
    `ip addr del <old>/24 dev <member>.50`, where `<member>` is
-   `ge-0-0-2` on node0 and `ge-7-0-2` on node1. This step is needed because
-   the commit never removes the old VIP (#18573). If you skip it, the owner
-   keeps answering ARP for an address it no longer owns.
-4. **Refresh the helper snapshot.** Use any further commit, or an RG1
-   failover and failback. The commit's snapshot captured the stale old
-   address, and interface-mode SNAT keeps using it (#18573). Then confirm
-   that `show security flow session destination-prefix 1.1.1.1/32` shows
-   `--> <new>/...`.
+   `ge-0-0-2` on node0 and `ge-7-0-2` on node1. This step is needed on a
+   build without #18579, whose commit never removes the old VIP (#18573).
+   If you skip it, the owner keeps answering ARP for an address it no
+   longer owns. Check first with `ip -4 addr show dev <member>.50`: a build
+   with #18579 has already removed a stamped old address.
+4. **Refresh the helper snapshot.** On a build without #18579, the
+   renumber commit's snapshot captured the stale old address, and
+   interface-mode SNAT keeps using it (#18573). Make a further commit on
+   the RG0 primary: set a `reth0 unit 50 description`, `commit`, delete
+   it, `commit`. An RG1 failover and failback did **not** refresh the
+   snapshot on udp's pre-#18579 build (2026-10-31: SNAT stayed on the
+   deleted `.11` until the commit pair). #18579 builds the snapshot without
+   the stale address, but whatever the build, **always confirm** that
+   `show security flow session destination-prefix 1.1.1.1/32` shows
+   `--> <new>/...` after a fresh LAN-host ping.
 5. **Verify.** In `make test-connectivity`, the cell "WAN IPv4 <new> answered
    for only by this cluster" must PASS.
 
@@ -1097,8 +1110,8 @@ cluster, master's env names `<new>` while the cluster still holds `<old>`:
 - `test-private-rg` FAILs with "WAN VIP <new> missing".
 - `wire-zone-matrix` routes the DMZ prober via the unheld `<new>`.
 - The claim check and test-connectivity's claim cell report that no node
-  holds `<new>` (VOID). So an external IPv4 FAIL stands, and is judged by the
-  3-smoke rule in `docs/regression-test-matrix.md`.
+  holds `<new>` (VOID). So an external IPv4 FAIL stands; read it as
+  unattributable until the renumber is done.
 
 Branches cut from the old master have the opposite mismatch once the live
 renumber is done. Renumber immediately after the merge, and read those cells
@@ -1456,8 +1469,15 @@ address — same expectation.
   place where "copy what loss does" is ambiguous. This plan resolves each
   explicitly (§1.3.1, §1.6, S2); the approver should confirm those
   resolutions rather than re-derive them at build time.
-- **R5 — The `.200` target ambiguity.** `xpf-mouse-target` on loss currently
-  *also* answers `.200/::200`. If the new clusters' tests ever point at
+- **R5 — The `.200` target ambiguity.** `xpf-mouse-target` on loss holds v4
+  `.200` (pinned by `mouse-addr.service`). It does not hold `::200`. That
+  address is configured on the container but `dadfailed tentative`, checked
+  read-only on 2026-10-31 (`ip -6 addr show dev eth0`); #16213 first found
+  it. It belongs to the external box (`target-services.sh`).
+  **Measured 2026-10-31 (#18576):** v4 `.200` is ALSO answered by that
+  external box (`f6:f0:06:10:77:d5`). So the loss smoke's v4 target is
+  dual-held, not just ambiguous by name. Its v6 target is a different host
+  from its v4 target. If the new clusters' tests ever point at
   `.200` "because loss does", they may be measuring an SR-IOV container on
   loss, not the external box. The plan's dedicated `.210/.211` targets
   eliminate this for the new stacks; do not "reuse the existing target to
