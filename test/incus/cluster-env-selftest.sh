@@ -60,7 +60,9 @@ eq "loss FW0"              "$(resolve FW0)"              "loss:xpf-userspace-fw0
 eq "loss FW1"              "$(resolve FW1)"              "loss:xpf-userspace-fw1"
 eq "loss CLUSTER_LAN_HOST" "$(resolve CLUSTER_LAN_HOST)" "loss:cluster-userspace-host"
 eq "loss LAN_HOST_IP"      "$(resolve LAN_HOST_IP)"      "10.0.61.102"
-eq "loss IPERF_TARGET4"    "$(resolve IPERF_TARGET4)"    "172.16.80.200"
+# #18576: loss's v4 target is .202, which only xpf-mouse-target holds
+# (.200 is also answered by the external v6 box). v6 stays ::200.
+eq "loss IPERF_TARGET4"    "$(resolve IPERF_TARGET4)"    "172.16.80.202"
 eq "loss IPERF_TARGET6"    "$(resolve IPERF_TARGET6)"    "2001:559:8585:80::200"
 
 # ── Case A2: tcp/udp envs derive their own wire addressing (#16305/#16306) ─
@@ -92,7 +94,9 @@ for spec in "tcp 10.0.62 210 xpf-tcp-target 42" "udp 10.0.63 211 xpf-udp-target 
 	eq "${cname} WAN_GW80_4"    "$(resolve WAN_GW80_4 "$envfile")"    "172.16.80.$((octet - 200))"
 	eq "${cname} IPERF_TARGET6" "$(resolve IPERF_TARGET6 "$envfile")" "2001:559:8585:80::${octet}"
 done
-# Loss derivation must reproduce the historical literals exactly.
+# Loss derivation must reproduce the historical literals exactly. The DMZ
+# prober stays at .201 although the iperf target is .202 (#18576): the loss
+# env pins it rather than taking the iperf octet + 1, which would be .203.
 eq "loss LAN_PREFIX4"     "$(resolve LAN_PREFIX4)"     "10.0.61.0/24"
 eq "loss DMZ_ADDR"        "$(resolve DMZ_ADDR)"        "172.16.50.201"
 eq "loss DMZ_TARGET_V6"   "$(resolve DMZ_TARGET_V6)"   "2001:559:8585:50::201"
@@ -106,10 +110,21 @@ eq "loss DMZ_GW4"         "$(resolve DMZ_GW4)"         "172.16.50.8"
 eq "loss WAN_GW80_4"      "$(resolve WAN_GW80_4)"      "172.16.80.8"
 eq "loss WAN_VIP4" "$(resolve WAN_VIP4)" "172.16.50.8"
 eq "loss DMZ_TARGET_VLAN" "$(resolve DMZ_TARGET_VLAN)" "50"
+# The loss env pins its DMZ prober with ${VAR:-...}, so a caller override
+# still wins, as it does for every derived name.
+eq "loss + DMZ_ADDR override" "$(resolve DMZ_ADDR DMZ_ADDR=172.16.50.99)" "172.16.50.99"
+eq "loss + DMZ_TARGET_V6 override" "$(resolve DMZ_TARGET_V6 DMZ_TARGET_V6=2001:559:8585:50::99)" "2001:559:8585:50::99"
+# #8259/#18576: the elephant (iperf) and mouse targets stay distinct
+# addresses on loss.
+loss_t4="$(resolve IPERF_TARGET4)"
+[[ "$loss_t4" != "$(resolve MOUSE_TARGET_V4)" ]] \
+	|| fail "loss IPERF_TARGET4 ${loss_t4} collapsed onto MOUSE_TARGET_V4 (#8259 needs two addresses)"
+ok "loss IPERF_TARGET4 differs from MOUSE_TARGET_V4"
 # #16213: the declarative primary alias derives from the cluster's iperf
-# target — loss .200 (alias of the .201 mouse host); tcp/udp equal their
-# pinned mouse address, so no second address is ever emitted there.
-eq "loss TARGET_ALIAS_V4" "$(resolve TARGET_ALIAS_V4)" "172.16.80.200"
+# target — loss .202 (alias of the .201 mouse host, .200 until #18576);
+# tcp/udp equal their pinned mouse address, so no second address is ever
+# emitted there.
+eq "loss TARGET_ALIAS_V4" "$(resolve TARGET_ALIAS_V4)" "172.16.80.202"
 eq "tcp TARGET_ALIAS_V4"  "$(resolve TARGET_ALIAS_V4 BPFRX_CLUSTER_ENV=test/incus/tcp-userspace-cluster.env)" "172.16.80.210"
 eq "udp TARGET_ALIAS_V4"  "$(resolve TARGET_ALIAS_V4 BPFRX_CLUSTER_ENV=test/incus/udp-userspace-cluster.env)" "172.16.80.211"
 # Legacy (no remote): names stay bare, refs unqualified (#16328).

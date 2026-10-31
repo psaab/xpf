@@ -80,8 +80,9 @@ IPERF_TARGET6="${IPERF_TARGET6:-2001:559:8585:100::200}"
 # The DMZ (VLAN-50) prober reuses the mouse target's host octet (iperf
 # target octet + 1) on its own subnet so each cluster's probers stay
 # distinct (loss .201, tcp .211, udp .212). Explicit caller overrides
-# (DMZ_ADDR, MOUSE_TARGET_*, ...) win; on the loss env every derived
-# value equals the historical literal it replaces.
+# (DMZ_ADDR, MOUSE_TARGET_*, ...) win. The loss env pins DMZ_ADDR and
+# DMZ_TARGET_V6 (.201) itself: its iperf target moved to .202 in #18576,
+# so this derivation no longer gives loss's prober address.
 #
 # Per-VLAN firewall gateways for the wire gates' reverse routes. The
 # VLAN-80 (untrust/mouse) endpoint and the VLAN-50 (DMZ) endpoint sit on
@@ -116,8 +117,9 @@ MOUSE_TARGET_REF="${MOUSE_TARGET_REF:-$(_xpf_cluster_ref "$MOUSE_TARGET_NAME")}"
 # VLAN-80 mouse host (mouse-target-setup.sh pins it in mouse-addr.service
 # beside the mouse address; it used to be a hand `ip addr add` that a
 # recreate/reboot silently dropped). It is the cluster's iperf target —
-# loss .200, tcp .210, udp .211 (== each env's MOUSE_TARGET_V4 there, so
-# no second address is emitted) — derived, never a second literal.
+# loss .202 (.200 until #18576), tcp .210, udp .211 (== each env's
+# MOUSE_TARGET_V4 there, so no second address is emitted) — derived,
+# never a second literal.
 TARGET_ALIAS_V4="${TARGET_ALIAS_V4:-$IPERF_TARGET4}"
 unset _xpf_iperf_host
 

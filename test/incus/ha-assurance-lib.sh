@@ -1656,12 +1656,15 @@ ha_target_fw_neigh() {
 # ha_target_claim_verdict <target> <control> <known-holders> <probe-output>
 #
 # #18576: a measurement target must be ONE host, the intended one. loss's
-# iperf3 target 172.16.80.200 is answered by both xpf-mouse-target
+# old iperf3 target 172.16.80.200 is answered by both xpf-mouse-target
 # (10:66:6a:8b:91:a4) and the external v6 target box (f6:f0:06:10:77:d5).
 # Linux overrides a neighbor entry with any ARP from the address once the 1 s
 # locktime has passed, and a broadcast re-resolution keeps the first reply,
-# so the firewall's choice of server, and every v4 measurement with it, can
-# move.
+# so the firewall's choice of server, and every v4 measurement with it, could
+# move (it did: a 2026-10-31 rg-move soak lost every v4 stream to the
+# external box). loss now targets .202, held by the container alone, and no
+# env configures <known-holders>; the excuse path below is kept for a future
+# documented duplicate, which must carry its own expiry.
 #
 # Holders = "self" (the vantage container, the intended holder in every env)
 # plus every "reply" MAC for <target>. Of the "fw" lines (before/after the

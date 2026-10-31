@@ -311,7 +311,7 @@ the mechanics, so this section is sequencing only.
    | What changed | Deploy | Validation | Pass criteria |
    |---|---|---|---|
    | Any change | `make test-deploy` (standalone) | ping between zones | 0% loss |
-   | Any change | `make cluster-deploy` (loss userspace cluster) + re-apply CoS (`./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0` — raw deploy wipes CoS; re-apply stays required after any deploy until the deb path proves otherwise) | `iperf3 -P 16 -t 30 -p 5211` → 172.16.80.200 | ≥ 23 Gbit/s, no regression vs previous run |
+   | Any change | `make cluster-deploy` (loss userspace cluster) + re-apply CoS (`./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0` — raw deploy wipes CoS; re-apply stays required after any deploy until the deb path proves otherwise) | `iperf3 -P 16 -t 30 -p 5211` → `$IPERF_TARGET4` (loss 172.16.80.202, #18576) | ≥ 23 Gbit/s, no regression vs previous run |
    | Admission / DSCP / scheduler / queueing | above + re-apply CoS (`./test/incus/apply-cos-config.sh <target>`) | `show class-of-service interface` | targeted counter (`flow_share`, `buffer`, `ecn_marked`) moves in the predicted direction — see [`cos-validation-notes.md`](cos-validation-notes.md) |
    | NAT / screens / filter / VLAN / IPsec | above | exercise that feature end-to-end from a test host | session / hit counters advance; negative case drops |
    | HA / VRRP / session sync / fabric | `make cluster-deploy` | `make test-failover` + `make test-ha-crash` | 0 / very low packet loss across failover/failback, both nodes converge |
@@ -393,7 +393,7 @@ the mechanics, so this section is sequencing only.
 
    Omitting `-p` entirely is worse than substituting a port. iperf3's default is
    **5201 → `iperf-100m` → `transmit-rate 100m exact`**, so a bare
-   `iperf3 -c 172.16.80.200` silently measures a 100 Mbit shaper (~96 Mbit/s
+   `iperf3 -c 172.16.80.202` silently measures a 100 Mbit shaper (~96 Mbit/s
    observed) instead of the dataplane.
 
    When a validation lane can't be run in the test env, say so
@@ -2078,7 +2078,13 @@ they repeatedly bite:
   and pinned by its own `afpacket_cloexec_test.go`).
 - **Always `source ~/.sshrc` before `git push`.** The user's SSH agent
   config lives there.
-- **172.16.80.200 is the iperf3 test endpoint.** Not 172.16.50.x.
+- **172.16.80.202 is the loss v4 iperf3 test endpoint** (`IPERF_TARGET4`;
+  v6 is `2001:559:8585:80::200`). Not 172.16.50.x, and no longer
+  172.16.80.200: that address is also answered by the external v6 box
+  (`f6:f0:06:10:77:d5`), so a firewall node can resolve it to the wrong
+  host. In a 2026-10-31 rg-move soak, every v4 stream died that way while
+  ping kept answering (#18576). Read the target from the env file, and
+  never hard-code it in a new harness.
 - **Use `cli`, not `xpfctl`.** The remote CLI binary is `cli`.
 - **Primary is fw0 on RG0 in the loss userspace cluster.** Apply config
   changes to the primary; sync takes care of the secondary.

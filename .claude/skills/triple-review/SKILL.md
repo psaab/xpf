@@ -63,7 +63,8 @@ reach = hard FAIL). Verify a lane's claimed runs obey this;
   pool reviewer 2 says PLAN-NEEDS-MAJOR, iterate. If both say PLAN-KILL,
   stop and report — do NOT push through.
 - **Smoke v4 AND v6.** Every test cycle hits both
-  172.16.80.200 and 2001:559:8585:80::200. v4-only smoke masks
+  172.16.80.202 and 2001:559:8585:80::200 (loss's `IPERF_TARGET4/6`;
+  v4 moved off the dual-held .200 in #18576). v4-only smoke masks
   dual-stack regressions.
 - **Smoke push AND reverse.** Every iperf3 invocation runs
   twice: once default (push, client→server) and once with `-R`
@@ -365,7 +366,7 @@ echo "=== Pass A — CoS disabled, v4+v6 × push+reverse ==="
 # fixed-string grep so the dots in interval/timestamp tokens are
 # matched literally rather than as regex wildcards.
 declare -A TARGETS=(
-  [v4]="172.16.80.200"
+  [v4]="172.16.80.202"   # loss IPERF_TARGET4 (#18576: .200 is dual-held)
   [v6]="2001:559:8585:80::200"
 )
 # Filter strategy: don't pin the interval string ("0.00-5.00") — iperf3
@@ -385,7 +386,7 @@ done
 # regression. Pick the last `[SUM] ... sender` line so the Retr column
 # stays visible without the brittle interval-string match.
 echo "=== Pass A — 12-stream reverse reproducer (CoS disabled) ==="
-sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 12 -t 10 -p 5201 -R"       2>&1 | grep -F -- "[SUM]" | grep -F -- "sender" | tail -1 || { echo "NO SUM SENDER LINE — iperf3 failed"; exit 1; }
+sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.202 -P 12 -t 10 -p 5201 -R"       2>&1 | grep -F -- "[SUM]" | grep -F -- "sender" | tail -1 || { echo "NO SUM SENDER LINE — iperf3 failed"; exit 1; }
 sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 2001:559:8585:80::200 -P 12 -t 10 -p 5201 -R" 2>&1 | grep -F -- "[SUM]" | grep -F -- "sender" | tail -1 || { echo "NO SUM SENDER LINE — iperf3 failed"; exit 1; }
 
 # === Pass B: CoS ENABLED ===
@@ -462,7 +463,7 @@ Plan doc: docs/pr/<ISSUE>-<SLUG>/plan.md
 - [x] Go suite: 30 packages pass
 - [x] Deploy on loss userspace cluster
 - [x] **Pass A — CoS disabled** (best-effort fast path)
-  - [x] v4 push: <Mbps>, <retrans> retrans against 172.16.80.200
+  - [x] v4 push: <Mbps>, <retrans> retrans against 172.16.80.202
   - [x] v4 reverse (`-R`): <Mbps>, <retrans> retrans
   - [x] v6 push: <Mbps>, <retrans> retrans against 2001:559:8585:80::200
   - [x] v6 reverse (`-R`): <Mbps>, <retrans> retrans

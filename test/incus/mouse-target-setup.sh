@@ -27,15 +27,17 @@
 # any harness can point either of its two knobs at it.
 #
 # THE PRIMARY TARGET'S ADDRESS IS DECLARED HERE (#16213). On the
-# standing loss cluster, 172.16.80.200 — the elephant / iperf target
-# that `IPERF_TARGET4` (loss-userspace-cluster.env) and
-# `target-services.sh`'s $TARGET_V4 point at — lives on THIS host
+# standing loss cluster, the elephant / iperf target that
+# `IPERF_TARGET4` (loss-userspace-cluster.env) and
+# `target-services.sh`'s $TARGET_V4 point at lives on THIS host
 # (xpf-mouse-target) as a second address beside the pinned
-# 172.16.80.201, but nothing in the tree owned it: it was a hand
-# `ip addr add`, so any recreate or reboot silently dropped it while
-# harnesses kept measuring `.200` (the observed UP->gone flap). It is
-# declarative now: TARGET_ALIAS_V4 (default 172.16.80.200) names it,
-# and when it differs from this host's pinned v4 on VLAN 80,
+# 172.16.80.201. It was 172.16.80.200, and nothing in the tree owned
+# it: it was a hand `ip addr add`, so any recreate or reboot silently
+# dropped it while harnesses kept measuring `.200` (the observed
+# UP->gone flap). #18576: the external v6 box also answers ARP for v4
+# .200, so loss now targets 172.16.80.202, which only this host holds.
+# The alias is declarative: TARGET_ALIAS_V4 (default 172.16.80.202)
+# names it, and when it differs from this host's pinned v4 on VLAN 80,
 # mouse-addr.service pins BOTH in one oneshot. A host whose pinned v4
 # already IS the primary emits no duplicate line, and hosts on other
 # VLANs (the VLAN-50 DMZ prober reusing this script) never claim it.
@@ -75,11 +77,12 @@ MOUSE_TARGET_PF="${MOUSE_TARGET_PF:-mlx0}"
 MOUSE_TARGET_VLAN="${MOUSE_TARGET_VLAN:-80}"
 MOUSE_TARGET_IMAGE="${MOUSE_TARGET_IMAGE:-images:debian/trixie}"
 # #16213: the primary elephant target's v4, declarative alias of this host
-# when it equals MOUSE_TARGET_V4 (the loss-cluster case). Owned here so
+# when it differs from MOUSE_TARGET_V4 (the loss-cluster case: .202 beside
+# .201, #18576; cluster-env.sh derives it from IPERF_TARGET4). Owned here so
 # `up` (the unit), `status`, and `target-services.sh` agree on whether
 # .200 is an alias this host must carry. Explicit override wins; empty
 # disables the alias everywhere.
-TARGET_ALIAS_V4="${TARGET_ALIAS_V4:-172.16.80.200}"
+TARGET_ALIAS_V4="${TARGET_ALIAS_V4:-172.16.80.202}"
 
 IPERF_PORTS=(5200 5201 5202 5203 5204 5205 5206 5207 5208 5209 5210 5211)
 
@@ -96,7 +99,7 @@ ${0##*/} — provision the #8259 second VLAN-80 target
 
 Environment: MOUSE_TARGET_NAME MOUSE_TARGET_V4 MOUSE_TARGET_V6
              MOUSE_TARGET_PF MOUSE_TARGET_VLAN MOUSE_TARGET_IMAGE INCUS_REMOTE
-             TARGET_ALIAS_V4 (default 172.16.80.200; empty disables)
+             TARGET_ALIAS_V4 (default 172.16.80.202; empty disables)
 USAGE
 }
 
@@ -131,10 +134,10 @@ do_up() {
     inc exec "$ref" -- sh -c 'command -v tcpdump && command -v iperf3 && command -v python3' >/dev/null || return 1
 
     echo "installing the address unit"
-    # #16213: TARGET_ALIAS_V4 (the primary elephant target, 172.16.80.200
-    # on loss) used to be a hand `ip addr add` on this host with no
-    # owner — a recreate or reboot dropped it while harnesses kept
-    # measuring `.200`. Declare it in the same oneshot: on VLAN 80, when
+    # #16213: TARGET_ALIAS_V4 (the primary elephant target, 172.16.80.202
+    # on loss since #18576, .200 before) used to be a hand `ip addr add` on
+    # this host with no owner — a recreate or reboot dropped it while
+    # harnesses kept measuring `.200`. Declare it in the same oneshot: on VLAN 80, when
     # the alias differs from the pinned v4, pin BOTH. A host whose
     # pinned v4 already IS the primary (tcp/udp wire targets, whose env
     # sets MOUSE_TARGET_V4 to their cluster's iperf target) emits no
@@ -197,6 +200,14 @@ UNIT"
 
     inc exec "$ref" -- systemctl daemon-reload
     inc exec "$ref" -- systemctl enable --now mouse-addr.service mouse-echo.service >/dev/null 2>&1
+    # #18576: re-run the address unit so a CHANGED address set applies now.
+    # mouse-addr is a RemainAfterExit oneshot, so `enable --now` on a host
+    # where it already ran is a no-op: a new alias would wait for the next
+    # reboot (`status` below reported the new .202 alias MISSING right after
+    # `up`). Every line is `ip addr replace` / `link set up`, which is
+    # idempotent and never removes an address, so the restart is safe on a
+    # live target.
+    inc exec "$ref" -- systemctl restart mouse-addr.service >/dev/null 2>&1 || return 1
     for p in "${IPERF_PORTS[@]}"; do
         inc exec "$ref" -- systemctl enable --now "mouse-iperf3@${p}" >/dev/null 2>&1
     done
@@ -232,7 +243,7 @@ do_status() {
     echo
     echo "Point a harness at it with:  MOUSE_TARGET_V4=${MOUSE_TARGET_V4}"
     echo "The #8467 attributability check passes as soon as it differs from"
-    echo "ELEPHANT_TARGET_V4 (default ${IPERF_TARGET4:-172.16.80.200})."
+    echo "ELEPHANT_TARGET_V4 (default ${IPERF_TARGET4:-172.16.80.202})."
 }
 
 do_destroy() {

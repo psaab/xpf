@@ -107,8 +107,11 @@ trust   zone: ge-0-0-0 10.0.1.10   — trust-host   10.0.1.102
 untrust zone: ge-0-0-1 10.0.2.10   — untrust-host 10.0.2.102
 dmz     zone: ge-0-0-2 10.0.30.10  — dmz-host     10.0.30.101
 ```
-Loss cluster max-throughput target: **172.16.80.200 / 2001:559:8585:80::200**
-(reth0.80 WAN AF_XDP fast path). NEVER use 172.16.100.x — that is a different
+Loss cluster max-throughput target: **172.16.80.202 / 2001:559:8585:80::200**
+(reth0.80 WAN AF_XDP fast path; `IPERF_TARGET4/6` in
+`test/incus/loss-userspace-cluster.env`). v4 is NOT .200: the external v6 box
+also answers ARP for it, so a run can measure the wrong host (#18576). NEVER
+use 172.16.100.x — that is a different
 `loss:` uplink capped at ~9-10 Gb/s (the misdiagnosed "ceiling" of #1578).
 
 ## Procedure
@@ -130,7 +133,7 @@ Run detached (script file + no-pipe RC). After deploy + wait-for-up:
 ```bash
 H=loss:cluster-userspace-host
 for fam in v4 v6; do
-  tgt=$([ $fam = v4 ] && echo 172.16.80.200 || echo 2001:559:8585:80::200)
+  tgt=$([ $fam = v4 ] && echo 172.16.80.202 || echo 2001:559:8585:80::200)
   incus exec "$H" -- iperf3 -c "$tgt" -t 10 -P 12 -p 5201       # push
   incus exec "$H" -- iperf3 -c "$tgt" -t 10 -P 12 -p 5201 -R    # reverse
 done

@@ -61,11 +61,14 @@ assurance_verdict() {
 # Probes from the OFF-FIREWALL target container (MOUSE_TARGET_REF), so the
 # holders' replies never reach a firewall node, and reads (only) both nodes'
 # neighbor entries before and after; WAN_GW80_4 (the cluster's own address on
-# the VLAN) answering is the positive control. The documented dual holder set
-# (IPERF_TARGET4_KNOWN_HOLDERS, loss env) is SKIPped as excused only while the
-# RG owner resolves the target to the container before and after; otherwise
-# it is VOID (the run's v4 numbers are not certifiable). Any other set FAILs,
-# an xpf RETH holder included.
+# the VLAN) answering is the positive control. Every env must PASS: exactly
+# one holder, the container. No env sets IPERF_TARGET4_KNOWN_HOLDERS since
+# #18576 moved loss's v4 target from the dual-held .200 to .202. If an env
+# sets one again (a documented duplicate, with an expiry), that set is
+# SKIPped as excused only while the RG owner resolves the target to the
+# container before and after; otherwise it is VOID (the run's v4 numbers are
+# not certifiable). Any other set of two or more holders FAILs, an xpf RETH
+# holder included.
 iperf_target_claim_cell() {
 	ha_target_claim_check "$MOUSE_TARGET_REF" "$IPERF_TARGET4" "$WAN_GW80_4" \
 		"${IPERF_TARGET4_KNOWN_HOLDERS:-}" "$FW0" "$FW1"
@@ -753,10 +756,11 @@ test_cluster() {
 	# Internet from firewall directly
 	internet_test "$FW0" "cluster: fw0 → internet (1.1.1.1)"
 
-	# #18576: the iperf3 target must be ONE host. loss's 172.16.80.200 is
+	# #18576: the iperf3 target must be ONE host. loss's old target .200 was
 	# answered by both xpf-mouse-target and the external v6 target box, so the
-	# firewall's neighbor entry, and with it every iperf3 measurement, can move
-	# between two different servers. See iperf_target_claim_cell.
+	# firewall's neighbor entry, and with it every iperf3 measurement, could
+	# move between two different servers. loss now targets .202, which only
+	# the container holds. See iperf_target_claim_cell.
 	iperf_target_claim_cell
 
 	# F-158 END probe: a lane that grabbed the lock mid-window leaves the

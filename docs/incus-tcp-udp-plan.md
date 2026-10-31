@@ -129,7 +129,7 @@ NET_MGMT="incusbr0"  NET_HEARTBEAT="bpu-hb0"  NET_FABRIC="bpu-fab0"  NET_CLAN=""
 CLUSTER_CONF="docs/ha-cluster-userspace.conf"
 LAN_ADDR="10.0.61.102/24"  LAN_GW/LAN_VIP4="10.0.61.1"  LAN_VIP6="2001:559:8585:ef00::1"
 WAN_GW4="172.16.50.1"  WAN_VIP4="172.16.50.8"   # fixed #16468: was .6, stale vs conf (.8)
-IPERF_TARGET4="172.16.80.200"  IPERF_TARGET6="2001:559:8585:80::200"
+IPERF_TARGET4="172.16.80.202"  IPERF_TARGET6="2001:559:8585:80::200"   # v4 was .200 until #18576 (dual-held)
 MOUSE_TARGET_V4="172.16.80.201"  MOUSE_TARGET_V6="2001:559:8585:80::201"
 ```
 
@@ -1063,7 +1063,7 @@ holders of addresses the shipped configs used:
 | `172.16.50.11` | udp WAN RETH (moved to `.43`) | `d8:b3:70:8c:f8:44` |
 | `172.16.50.9`, `.12` | legacy local NAT64 / SNAT pools (#18574) | `2a:dd:35:a2:96:97`, `ac:8b:a9:df:fd:f3` |
 | `172.16.50.14`, `.15` | standalone NAT64 / SNAT pools (#18574) | `f4:e2:c6:ea:d7:80`, `9c:05:d6:e1:f2:0f` |
-| `172.16.80.200` | loss iperf target (not a stack claim) | answered by **both** `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4`) and the external v6 target box (`f6:f0:06:10:77:d5`) (#18576) |
+| `172.16.80.200` | loss's v4 iperf target until #18576 moved it to `.202` (not a stack claim) | answered by **both** `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4`) and the external v6 target box (`f6:f0:06:10:77:d5`) (#18576) |
 
 The full measured list is `foreignClaimed18558` in
 `pkg/configstore/shared_segment_foreign_claim_18558_test.go`. That test fails
@@ -1482,6 +1482,11 @@ address — same expectation.
   loss, not the external box. The plan's dedicated `.210/.211` targets
   eliminate this for the new stacks; do not "reuse the existing target to
   save time" without deciding which `.200` you mean.
+  **Resolved for loss (#18576):** loss's v4 target is now `.202`, a static
+  alias only the container holds (claim-probed 2026-10-31), so loss
+  measures the container in v4 and the external box in v6, each through an
+  address with one holder. `.200` remains dual-held; nothing should target
+  it.
 - **R6 — UDP load realism.** `iperf3 -u` at high rates is host-bound and its
   loss numbers conflate generator/target CPU with dataplane loss. The V4
   knee-finding + fw counter reconciliation is the guard; dedicated UDP
