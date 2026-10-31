@@ -396,9 +396,25 @@ func causeFor(k Kind) string {
 		return "unsynchronized"
 	case KindOffset:
 		return "offset"
+	case KindPeerOffset:
+		return "peer-offset"
 	default:
 		return "unknown"
 	}
+}
+
+// PeerOffsetSyslogLine formats the #18585 inter-node alarm transition in the
+// same RT_SYSTEM CLOCK_SKEW_ALARM_* shape the local reference monitor emits,
+// so one syslog filter sees both. pkg/cluster raises the peer alarm; the
+// daemon forwards its transitions through the same emitter.
+func PeerOffsetSyslogLine(raised bool, offsetSecs float64) (int, string) {
+	detail := ActiveAlarm{Kind: KindPeerOffset, OffsetSecs: offsetSecs}.detail()
+	if raised {
+		return SeverityRaise, fmt.Sprintf("RT_SYSTEM - CLOCK_SKEW_ALARM_RAISED cause=%q detail=%q",
+			causeFor(KindPeerOffset), detail)
+	}
+	return SeverityClear, fmt.Sprintf("RT_SYSTEM - CLOCK_SKEW_ALARM_CLEARED reason=%q detail=%q",
+		"peer offset recovered", detail)
 }
 
 func (m *Monitor) emitLine(severity int, msg string) {

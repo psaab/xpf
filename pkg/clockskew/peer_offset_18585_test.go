@@ -18,3 +18,16 @@ func TestPeerOffsetAlarmSummary18585(t *testing.T) {
 		t.Fatalf("detail %q", d)
 	}
 }
+
+// #18585: the peer alarm's syslog lines share the local alarm's RT_SYSTEM
+// CLOCK_SKEW_ALARM_* shape and severities, so one filter sees both.
+func TestPeerOffsetSyslogLine18585(t *testing.T) {
+	sev, msg := PeerOffsetSyslogLine(true, -74.9)
+	if sev != SeverityRaise || msg != `RT_SYSTEM - CLOCK_SKEW_ALARM_RAISED cause="peer-offset" detail="peer wall clock -74.9s from this node"` {
+		t.Fatalf("raise = (%d, %q)", sev, msg)
+	}
+	sev, msg = PeerOffsetSyslogLine(false, 0.3)
+	if sev != SeverityClear || !strings.HasPrefix(msg, `RT_SYSTEM - CLOCK_SKEW_ALARM_CLEARED reason="peer offset recovered"`) {
+		t.Fatalf("clear = (%d, %q)", sev, msg)
+	}
+}

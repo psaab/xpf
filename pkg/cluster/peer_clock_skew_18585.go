@@ -52,12 +52,15 @@ var (
 )
 
 type peerClockState struct {
-	mu       sync.Mutex
-	have     bool
-	offset   time.Duration // peer wall clock minus local wall clock
-	at       time.Time     // local receive time (carries monotonic reading)
-	raised   bool
-	raisedAt time.Time
+	mu sync.Mutex
+	// alarmHook receives raise/clear transitions (the daemon forwards them to
+	// syslog as RT_SYSTEM CLOCK_SKEW_ALARM_* like the local reference alarm).
+	alarmHook func(raised bool, offset time.Duration)
+	have      bool
+	offset    time.Duration // peer wall clock minus local wall clock
+	at        time.Time     // local receive time (carries monotonic reading)
+	raised    bool
+	raisedAt  time.Time
 }
 
 // notePeerWallClock records one admitted heartbeat's clock sample. It runs on
@@ -83,7 +86,11 @@ func (m *Manager) notePeerWallClock(peerUnixNano int64, now time.Time) {
 		pc.raised = false
 		transition = "clear"
 	}
+	hook := pc.alarmHook
 	pc.mu.Unlock()
+	if hook != nil && transition != "" {
+		hook(transition == "raise", offset)
+	}
 	switch transition {
 	case "raise":
 		slog.Warn("cluster: peer wall clock skew alarm raised",
@@ -94,6 +101,18 @@ func (m *Manager) notePeerWallClock(peerUnixNano int64, now time.Time) {
 		slog.Info("cluster: peer wall clock skew alarm cleared",
 			"peer_minus_local", offset.Round(10*time.Millisecond).String())
 	}
+}
+
+// SetPeerClockAlarmHook installs the raise/clear transition callback. It is
+// called outside every Manager lock, once per transition (never per
+// heartbeat), so it may do I/O.
+func (m *Manager) SetPeerClockAlarmHook(fn func(raised bool, offset time.Duration)) {
+	if m == nil {
+		return
+	}
+	m.peerClock.mu.Lock()
+	m.peerClock.alarmHook = fn
+	m.peerClock.mu.Unlock()
 }
 
 // PeerClockOffset returns the last measured peer-minus-local wall-clock
@@ -170,7 +189,7 @@ func (m *Manager) formatPeerClockLine() string {
 	if age > peerClockFreshFor {
 		line += " [stale]"
 	} else if _, _, raised := m.PeerClockSkewAlarm(); raised {
-		line += fmt.Sprintf(" [ALARM at %s: fabric RPC fails past %s-%s]", PeerClockSkewRaise, 30*time.Second, PeerClockFabricBreak)
+		line += fmt.Sprintf(" [ALARM at %gs: fabric RPC fails past 30-%gs]", PeerClockSkewRaise.Seconds(), PeerClockFabricBreak.Seconds())
 	}
 	return line
 }

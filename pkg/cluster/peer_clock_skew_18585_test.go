@@ -251,7 +251,7 @@ func TestPeerClockStatusLine18585(t *testing.T) {
 	}
 	noteAt18585(m, -72*time.Second)
 	st := m.FormatStatus()
-	if !strings.Contains(st, "Peer clock offset: -72.0s (peer behind this node") || !strings.Contains(st, "ALARM") {
+	if !strings.Contains(st, "Peer clock offset: -72.0s (peer behind this node") || !strings.Contains(st, "[ALARM at 10s: fabric RPC fails past 30-60s]") {
 		t.Fatalf("status must show the offset and the alarm:\n%s", st)
 	}
 	if !strings.Contains(m.FormatInformation(), "Peer clock offset: -72.0s") {
@@ -260,6 +260,24 @@ func TestPeerClockStatusLine18585(t *testing.T) {
 	noteAt18585(m, 300*time.Millisecond)
 	if st := m.FormatStatus(); !strings.Contains(st, "Peer clock offset: +0.3s (peer ahead of this node") || strings.Contains(st, "ALARM") {
 		t.Fatalf("a small offset is shown without an alarm:\n%s", st)
+	}
+}
+
+// #18585: the alarm hook fires once per transition — never per heartbeat —
+// with the direction and the offset that caused it.
+func TestPeerClockAlarmHookTransitionsOnly18585(t *testing.T) {
+	m := NewManager(0, 1)
+	type ev struct {
+		raised bool
+		off    time.Duration
+	}
+	var got []ev
+	m.SetPeerClockAlarmHook(func(raised bool, off time.Duration) { got = append(got, ev{raised, off}) })
+	for _, off := range []time.Duration{time.Second, -12 * time.Second, -13 * time.Second, -11 * time.Second, 2 * time.Second, time.Second} {
+		noteAt18585(m, off)
+	}
+	if len(got) != 2 || !got[0].raised || got[1].raised || got[0].off > -11*time.Second || got[1].off < time.Second {
+		t.Fatalf("hook events = %+v, want exactly [raise at about -12s, clear at about +2s]", got)
 	}
 }
 

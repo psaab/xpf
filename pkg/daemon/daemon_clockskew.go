@@ -141,6 +141,13 @@ func (d *Daemon) clockSkewAlarms() []clockskew.ActiveAlarm {
 	return out
 }
 
+// peerClockAlarmSyslog forwards one #18585 peer-offset alarm transition to the
+// same syslog streams as the local reference alarm.
+func (d *Daemon) peerClockAlarmSyslog(raised bool, offset time.Duration) {
+	severity, msg := clockskew.PeerOffsetSyslogLine(raised, offset.Seconds())
+	d.clockSkewAlarmEmitter()(severity, msg)
+}
+
 // clockSkewAlarmEmitter forwards one raise/clear transition to configured
 // syslog streams. A monitor can still start in NoDataplane mode; the nil guard
 // keeps alarm state available to the read surfaces even when no event reader is
