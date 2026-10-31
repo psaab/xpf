@@ -227,6 +227,7 @@ scripts/ci-tooling-check-selftest.sh
 scripts/git-hooks/commit-msg
 scripts/git-hooks/install.sh
 test/incus/ha-smoke-iperf-lib.sh
+test/incus/rg-move-soak.sh
 "
 for s in $SH_SCRIPTS; do
 	[ -f "$s" ] || continue
