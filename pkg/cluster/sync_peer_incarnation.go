@@ -149,6 +149,19 @@ type peerIncarnationState struct {
 	// cold-prime re-arm; the authoritative bulk then heals every
 	// withheld session at once.
 	ipsecDiscriminatorSuppressDebt atomic.Bool
+	// lastSentConfigGen is the newest config generation this node actually
+	// WROTE to this peer incarnation (#18636), raised as a max by
+	// recordLastSentConfigGen just before the socket write. As the RG0
+	// authority, configEpochStale compares a peer's reverse-tagged applied
+	// generation against it, NOT against configGenCounter: the counter is a
+	// reservation counter, and the 30 s config-sync reconcile tick reserves
+	// one generation per tick before it finds the config already pushed and
+	// no-ops, so the counter runs past anything the peer was ever sent and
+	// a converged peer's every install read as stale. Incarnation-scoped so
+	// a new peer incarnation is never compared against a generation sent to
+	// its predecessor; until the first write to it, configEpochStale keeps
+	// the reservation-counter comparison (fail-closed).
+	lastSentConfigGen atomic.Uint64
 }
 
 // retirePeerIncarnationLocked installs a fresh peerIncarnationState for the

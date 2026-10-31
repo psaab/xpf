@@ -1683,7 +1683,7 @@ func (s *SessionSync) configEpochStale(epoch uint64) bool {
 				return false
 			}
 			epoch &= configEpochGenMask
-			return epoch < s.configGenCounter.Load()
+			return epoch < s.authorityConfigEpochThreshold()
 		}
 		if epoch&configEpochReverseTag != 0 {
 			return false
@@ -1694,6 +1694,26 @@ func (s *SessionSync) configEpochStale(epoch uint64) bool {
 		barrier = applied
 	}
 	return epoch < barrier
+}
+
+// authorityConfigEpochThreshold is the generation a reverse-tagged peer epoch
+// must reach for the RG0 authority to accept the install (#18636). From the
+// first config write to the current peer incarnation it is the newest
+// generation actually written to that incarnation (lastSentConfigGen): a peer
+// that has applied it holds every config this authority ever told it about.
+// configGenCounter cannot serve: it reserves a generation on every reconcile
+// tick, including the ones that find the config already pushed and send
+// nothing, so it runs one draw per 30 s past anything the peer can hold.
+// Before any write to this incarnation, the peer's tagged generation came
+// from its view of an earlier authority process, which may be an older boot
+// or a config edited while this node was down; that keeps the original
+// reservation-counter comparison, which refuses it (fail-closed) until the
+// reconnect push lands, normally within seconds.
+func (s *SessionSync) authorityConfigEpochThreshold() uint64 {
+	if sent := s.peerIncarnationState().lastSentConfigGen.Load(); sent != 0 {
+		return sent
+	}
+	return s.configGenCounter.Load()
 }
 
 // rollBackStaleConfigInstallV4 removes a synced session whose config epoch went

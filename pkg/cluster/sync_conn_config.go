@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/configstore"
@@ -501,6 +502,11 @@ func (s *SessionSync) queueConfigOnConn(
 	return true
 }
 func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
+	// #18636: raise the per-peer-incarnation sent high-water the RG0
+	// authority's config-epoch guard compares against. Before the ACK-debt
+	// early return below, which skips non-newer generations for its own
+	// bookkeeping only.
+	notePeerConfigGenSent(&s.peerIncarnationState().lastSentConfigGen, gen)
 	// #17816: publish the generation and the receiving incarnation's
 	// ACK capability as one mutex-protected snapshot. The gate takes the
 	// same lock for its read, so it cannot pair a new generation with the
@@ -525,6 +531,18 @@ func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
 		hook()
 	}
 	s.configApplyDebtMu.Unlock()
+}
+
+// notePeerConfigGenSent raises a sent-generation high-water to gen (#18636).
+// Concurrent writers (the two fabric connections) race through the CAS loop;
+// a lower generation never overwrites a higher one.
+func notePeerConfigGenSent(mark *atomic.Uint64, gen uint64) {
+	for {
+		cur := mark.Load()
+		if gen <= cur || mark.CompareAndSwap(cur, gen) {
+			return
+		}
+	}
 }
 
 // errConfigApplyQueueFull is the health-debt reason recorded when a config
