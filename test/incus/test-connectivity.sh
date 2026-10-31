@@ -57,6 +57,31 @@ assurance_verdict() {
 	*) void "$description (unrecognized helper status=${status})" ;;
 	esac
 }
+# iperf_target_claim_cell: #18576 measurement-target uniqueness preflight.
+# Probes from the OFF-FIREWALL target container (MOUSE_TARGET_REF), so the
+# holders' replies never reach a firewall node, and reads (only) both nodes'
+# neighbor entries before and after; WAN_GW80_4 (the cluster's own address on
+# the VLAN) answering is the positive control. The documented dual holder set
+# (IPERF_TARGET4_KNOWN_HOLDERS, loss env) is SKIPped as excused only while the
+# RG owner resolves the target to the container before and after; otherwise
+# it is VOID (the run's v4 numbers are not certifiable). Any other set FAILs,
+# an xpf RETH holder included.
+iperf_target_claim_cell() {
+	ha_target_claim_check "$MOUSE_TARGET_REF" "$IPERF_TARGET4" "$WAN_GW80_4" \
+		"${IPERF_TARGET4_KNOWN_HOLDERS:-}" "$FW0" "$FW1"
+	# 3 = an xpf RETH MAC answers for the target: a product defect, FAIL.
+	# 4 = the known environment duplicate, excused only while the RG owner
+	# resolves the target to the intended holder: SKIP, which leaves the exit
+	# status alone and is counted in the ledger's cells_skipped.
+	local status="$HA_TARGET_CLAIM_STATUS"
+	local desc="cluster: iperf target ${IPERF_TARGET4} answered for by exactly one host (RFC 5227 ARP probe from ${MOUSE_TARGET_REF})"
+	if [[ "$status" == 4 ]]; then
+		skip "${desc}: ${HA_TARGET_CLAIM_REASON}"
+		return 0
+	fi
+	[[ "$status" == 3 ]] && status=1
+	assurance_verdict "$status" "${desc}: ${HA_TARGET_CLAIM_REASON}"
+}
 # #11581 M3.1/M3.2 precedence contract (documentation only; no probe behavior change).
 #
 # Ordinary capture VOID means a specific cell's evidence is blind: missing,
@@ -735,6 +760,12 @@ test_cluster() {
 
 	# Internet from firewall directly
 	internet_test "$FW0" "cluster: fw0 → internet (1.1.1.1)"
+
+	# #18576: the iperf3 target must be ONE host. loss's 172.16.80.200 is
+	# answered by both xpf-mouse-target and the external v6 target box, so the
+	# firewall's neighbor entry, and with it every iperf3 measurement, can move
+	# between two different servers. See iperf_target_claim_cell.
+	iperf_target_claim_cell
 
 	# F-158 END probe: a lane that grabbed the lock mid-window leaves the
 	# samples above suspect (see the TOCTOU note on the probe helper).

@@ -221,6 +221,87 @@ failure.
       `vlan: "0"` on the device, which 7.0.1 accepts, or upgrading incus to
       7.6.0 or later.
 
+- **loss iperf target 172.16.80.200 is answered by two hosts: #18576.**
+  - The two holders:
+    - `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4` today). The env names
+      it `self`, so the cell takes its MAC from the probe itself and an
+      incus recreate needs no edit.
+    - The external v6 target box (`f6:f0:06:10:77:d5`). loss fw0 and fw1
+      resolve `2001:559:8585:80::200` to it.
+  - The external box is in no incus instance and no host netdev on loss,
+    tcp, udp or the orchestrator, and it has no SSH handle. It is not ours
+    to change.
+  - **Off-path control and when this cell is excused.** test-connectivity's
+    "iperf target ... answered for by exactly one host" IS the control. It
+    probes from the target container (`MOUSE_TARGET_REF`), never from a
+    firewall node; probing from the RG owner re-ran the race on it (seat X
+    reproduced a flip in 6/6 netns runs). It only reads both nodes'
+    neighbor entries, before and after the probe. The cluster's own
+    `WAN_GW80_4` answering the same probe is the positive control, and a
+    target that is not on-link from the container is VOID by name.
+    - **Excused = SKIP**, granted only when all three hold:
+      - the holders are exactly the container plus `f6:f0:06:10:77:d5`
+        (`IPERF_TARGET4_KNOWN_HOLDERS="self f6:f0:06:10:77:d5"` in
+        `test/incus/loss-userspace-cluster.env`);
+      - the container's own `self` line shows it holds the target;
+      - exactly one node holds `WAN_GW80_4` (the RG owner), the same node in
+        both snapshots, and it resolves `.200` to the container both before
+        and after the probe. This is the same-run control.
+
+      The cell then SKIPs with "EXCUSED #18576 … expires when one holder
+      drops it". A SKIP leaves `test-connectivity`'s exit status alone and
+      shows in the ledger's `cells_skipped`, so this excused cell can never
+      VOID a loss run or stop `deploy_gate_wave` before the iperf cells.
+    - **VOID means this run's v4 target is not certifiable.** That covers:
+      - the RG owner resolving `.200` to `f6:f0:06:10:77:d5`. This run's v4
+        iperf numbers measured the external box, so VOID them and rerun.
+        It is also the first observed flip, the evidence #18576 lacks, so
+        record the VOID reason and the time on #18576;
+      - the owner having no entry, or an entry (even STALE) naming any MAC
+        other than the container;
+      - no single stable RG owner: two nodes holding `WAN_GW80_4`, or
+        ownership moving between the two snapshots;
+      - only the external box answering, because the container lost its
+        alias.
+    - **FAIL is a product failure.** That covers:
+      - any other holder set, such as a third MAC;
+      - an xpf RETH MAC `02:bf:72:*` holder (status 3, mirroring #18575);
+      - on the RG owner only, an entry that is FAILED, a REACHABLE, DELAY,
+        PROBE or PERMANENT entry naming a MAC nobody claims, or an entry that
+        changes between two present snapshots.
+
+      The peer node's entry is not judged.
+    - Measured from an off-firewall vantage on the same VLAN
+      (`tcp:xpf-tcp-target`, 2026-10-31 02:34 UTC, with tcp's `.80.10` as
+      control and loss's firewalls only read). With the known set it was
+      VOID, because that vantage does not hold the target, so the excuse
+      cannot be granted there. With no known set it FAILed. loss fw0, the
+      RG owner, resolved `.200` to the container, which is the SKIP
+      condition for the real cell probed from the container.
+  - Both loss nodes have resolved v4 `.200` to the container whenever we
+    read them. A 4-min VLAN 80 capture saw no frame with sender `.200` from
+    either holder, so the hazard is latent.
+  - **When a loss iperf3 run stops or slows**, diagnose it on the rerun:
+    start `ip monitor neigh` on both nodes before the rerun:
+    - node0 on `ge-0-0-2.80`;
+    - node1 on `ge-7-0-2.80`.
+
+    Then read `ip -s neigh show 172.16.80.200 dev <that interface>` after it.
+    Only a move to `f6:f0:06:10:77:d5` is this environment row. A third MAC,
+    or a FAILED entry, is a product neighbor fault.
+  - tcp `.210` and udp `.211` are unique: PASS.
+  - **Delete this row**, and `IPERF_TARGET4_KNOWN_HOLDERS`, when either of
+    these happens:
+    - Option A: the lab owner drops v4 `.200` from the external box.
+    - Option B: loss's v4 target moves to a unique address.
+
+    When only the container answers but the env line is still set, the cell
+    PASSes with "configured but not observed: delete
+    IPERF_TARGET4_KNOWN_HOLDERS (#18576)" in its reason. That means delete
+    the line. A PASS rather than a VOID, because the excuse is owner-gated: a
+    stale line can only re-excuse the identical benign state, while a VOID
+    would block every loss gate until a doc edit lands.
+
 ## Reading results
 
 - **FAIL** is attributable: the binary was confirmed to be the build under
@@ -228,6 +309,11 @@ failure.
 - **VOID** means the measurement cannot be attributed (`exe_check` mismatch,
   a precondition, a harness fault). Fix the cause and rerun; a VOID is never a
   pass and never a regression.
+- **SKIP** is either a cell that did not run, or an environment row's
+  excused state. The ledger's `cells_skipped` counts both. The excused kind
+  carries its marker in the cell text, today only "EXCUSED #18576", and it is
+  neither a pass nor a failure. A SKIP without a marker means the cell did
+  not run.
 - A stream that survives the takeover but dies later is still a death. Check
   the per-stream last-good second. Many streams stopping in the same second
   points at an event (a delete, a reap or a role change), not at load.
