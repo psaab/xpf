@@ -1819,8 +1819,10 @@ fi
 # formerly known-gap #8341 data-path check to a real assertion.
 if [[ "$POOL_NAT_SMOKE" == 1 && -n "$POOL_LAN_IF" ]]; then
 	incus exec "$FW0" -- cli -c "clear security flow session source-prefix ${POOL_SRC}" &>/dev/null || true
+	# rm first: if the start below fails, a previous run's log must not be
+	# scored as this run's probe (#18567 review).
 	incus exec "$CLUSTER_LAN_HOST" -- bash -c \
-		"timeout 6 iperf3 --connect-timeout 3000 -B ${POOL_SRC} -t 2 -c ${IPERF_TARGET} -p ${POOL_POST_PORT} > /tmp/iperf3-pool-8280-post.log 2>&1 &" || true
+		"rm -f /tmp/iperf3-pool-8280-post.log; timeout 6 iperf3 --connect-timeout 3000 -B ${POOL_SRC} -t 2 -c ${IPERF_TARGET} -p ${POOL_POST_PORT} > /tmp/iperf3-pool-8280-post.log 2>&1 &" || true
 	sleep 5
 	post_pool=$(pool_session_count "$FW0")
 	if [[ "$post_pool" == VOID ]]; then
