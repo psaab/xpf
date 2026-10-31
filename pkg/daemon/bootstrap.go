@@ -1598,7 +1598,6 @@ func (d *Daemon) runBootstrapTeardownSteps(restoreLifeline bool) []bootstrapTear
 
 	// (3) Clear the FRR managed section.
 	if d.frr != nil {
-		d.frrApplySeq.Add(1) // #18561: supersede an in-flight HA render
 		if err := d.frr.Clear(); err != nil {
 			steps = append(steps, bootstrapTeardownStep{name: "clear FRR managed section", err: err})
 		}
@@ -1681,7 +1680,6 @@ func (d *Daemon) clearFRRForFailClosedBoot(failClosedLoad bool) {
 	if !d.failClosedBootShouldClearFRR() {
 		return
 	}
-	d.frrApplySeq.Add(1) // #18561: supersede an in-flight HA render
 	if err := d.frr.Clear(); err != nil {
 		// Includes ErrFRRReloadDegraded — log, do not abort boot.
 		slog.Warn("fail-closed boot: failed to clear FRR managed section; node may still "+

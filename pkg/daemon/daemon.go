@@ -1820,12 +1820,15 @@ type Daemon struct {
 	// the same debounce (#18561): the reconcile holds applySem across an FRR
 	// reload and a snapshot publish.
 	ipmonGateHA frrHACoalescer
-	// frrApplySeq orders FRR managed-section writes (#18561). Every
-	// daemon-initiated FRR write bumps it before writing; the HA reconcile
-	// bumps it when it renders (under applySem) and applies, after
-	// releasing applySem, only while it is unchanged, so its render can
-	// never overwrite a newer one.
+	// frrApplySeq orders HA FRR renders (#18561): every HA render (under
+	// applySem) and every RG ownership edge bumps it, and an HA render is
+	// applied, after applySem is released, only while it is unchanged and
+	// the FRR manager's WriteGeneration has not moved (see
+	// applyFRRConfigIfCurrent), so it can never overwrite a newer config.
 	frrApplySeq atomic.Uint64
+	// fibHashMu serializes reconcileFibMultipathHashPolicy, which the HA
+	// reconcile now reaches outside applySem (#18561).
+	fibHashMu sync.Mutex
 	// failoverActuations owns the failover fence barriers (#16124): the
 	// wait map watchClusterEvents resolves once it has finished ACTUATING
 	// a demotion (VRRP resign to priority-0 / rg_active clear), the

@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/frr"
 	"golang.org/x/sync/semaphore"
 )
@@ -149,20 +151,22 @@ func TestFRRHARenderSupersededByLaterWrite18561(t *testing.T) {
 	cfg := d.store.ActiveConfig()
 	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
 
+	wg := d.frr.WriteGeneration()
 	seq := d.frrApplySeq.Add(1)                  // the HA render
 	if err := d.applyFRRConfig(fc); err != nil { // a later write (commit path)
 		t.Fatalf("premise: later write failed: %v", err)
 	}
 	before := rec.ReloadCalls
-	if err := d.applyFRRConfigIfCurrent(fc, seq); err != nil {
+	if err := d.applyFRRConfigIfCurrent(fc, seq, wg); err != nil {
 		t.Fatalf("superseded apply returned %v, want nil", err)
 	}
 	if rec.ReloadCalls != before {
 		t.Fatal("a render overtaken by a later FRR write was applied after it")
 	}
 
+	wg = d.frr.WriteGeneration()
 	seq = d.frrApplySeq.Add(1)
-	if err := d.applyFRRConfigIfCurrent(fc, seq); err != nil {
+	if err := d.applyFRRConfigIfCurrent(fc, seq, wg); err != nil {
 		t.Fatalf("current apply: %v", err)
 	}
 	if rec.ReloadCalls != before+1 {
@@ -186,5 +190,146 @@ func TestScheduleIPMonGatingUsesCoalescer18561(t *testing.T) {
 	}
 	if len(timers.fire) != 1 {
 		t.Fatalf("three RG edges armed %d ip-monitoring gating runs, want 1", len(timers.fire))
+	}
+}
+
+// An ownership edge supersedes an HA render taken before it, so a render
+// that predates a demotion cannot publish the demoted RG's routes. RED if
+// scheduleFRRHAReconcile stops bumping the sequence.
+func TestRGEdgeSupersedesEarlierHARender18561(t *testing.T) {
+	rec := &frr.RecordingExecutor{}
+	d := frrHADaemon18561(t)
+	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), rec)
+	timers := &manualTimers18561{}
+	d.frrHA.afterFunc = timers.after
+	cfg := d.store.ActiveConfig()
+	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
+	wg := d.frr.WriteGeneration()
+	seq := d.frrApplySeq.Add(1) // a render taken before the edge
+	d.scheduleFRRHAReconcile("cluster-state")
+	if err := d.applyFRRConfigIfCurrent(fc, seq, wg); err != nil {
+		t.Fatalf("superseded apply: %v", err)
+	}
+	if rec.ReloadCalls != 0 {
+		t.Fatal("an HA render taken before an ownership edge was applied after it")
+	}
+}
+
+// The predicate also refuses a render while a factory reset is in progress
+// (the reset wipes frr.conf under applySem, which this apply no longer holds).
+func TestHARenderSkippedDuringReset18561(t *testing.T) {
+	rec := &frr.RecordingExecutor{}
+	d := frrHADaemon18561(t)
+	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), rec)
+	cfg := d.store.ActiveConfig()
+	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
+	wg := d.frr.WriteGeneration()
+	seq := d.frrApplySeq.Add(1)
+	d.resetting.Store(true)
+	if err := d.applyFRRConfigIfCurrent(fc, seq, wg); err != nil {
+		t.Fatalf("apply during reset: %v", err)
+	}
+	if rec.ReloadCalls != 0 {
+		t.Fatal("an HA render was applied while a factory reset was in progress")
+	}
+}
+
+// The fail-closed boot's FRR clear supersedes an in-flight HA render, so
+// the render cannot re-add the managed section the clear removed. The clear
+// is a write, so it moves the FRR manager's write generation.
+func TestFailClosedBootClearSupersedesHARender18561(t *testing.T) {
+	rec := &frr.RecordingExecutor{}
+	d := frrHADaemon18561(t)
+	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), rec)
+	cfg := d.store.ActiveConfig()
+	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
+	wg := d.frr.WriteGeneration()
+	seq := d.frrApplySeq.Add(1)
+	d.clearFRRForFailClosedBoot(true)
+	if rec.ReloadCalls == 0 {
+		t.Skip("premise: the fail-closed clear did not run on this host (pinned XDP links present)")
+	}
+	cleared := rec.ReloadCalls
+	if err := d.applyFRRConfigIfCurrent(fc, seq, wg); err != nil {
+		t.Fatalf("superseded apply: %v", err)
+	}
+	if rec.ReloadCalls != cleared {
+		t.Fatal("an HA render taken before the fail-closed boot's clear re-wrote the section after it")
+	}
+}
+
+// A commit-path FRR apply that is REFUSED before writing (here: a BGP
+// neighbor duplicated across groups, #11399) must not supersede an HA render:
+// nothing was written, so the HA render is still the newest config. Before
+// the write generation, applyFRRConfig bumped the sequence up front and the
+// HA reload was lost with nothing re-armed.
+func TestRefusedFRRWriteDoesNotSupersedeHARender18561(t *testing.T) {
+	rec := &frr.RecordingExecutor{}
+	d := frrHADaemon18561(t)
+	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), rec)
+	cfg := d.store.ActiveConfig()
+	fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
+	wg := d.frr.WriteGeneration()
+	seq := d.frrApplySeq.Add(1)
+	refused := &frr.FullConfig{BGP: &config.BGPConfig{
+		LocalAS: 65001, RouterID: "1.1.1.1",
+		Neighbors: []*config.BGPNeighbor{
+			{Address: "10.0.2.1", PeerAS: 65002, GroupName: "a"},
+			{Address: "10.0.2.1", PeerAS: 65003, GroupName: "b"},
+		},
+	}}
+	if err := d.applyFRRConfig(refused); err == nil {
+		t.Fatal("premise: a cross-group duplicate BGP neighbor must be refused before the write")
+	}
+	if rec.ReloadCalls != 0 {
+		t.Fatal("premise: the refused apply reloaded FRR")
+	}
+	if err := d.applyFRRConfigIfCurrent(fc, seq, wg); err != nil {
+		t.Fatalf("HA apply after a refused write: %v", err)
+	}
+	if rec.ReloadCalls != 1 {
+		t.Fatal("a refused commit-path render superseded the HA render; its reload was lost")
+	}
+}
+
+// factoryReset must not run its wipe (which strips frr.conf without the FRR
+// manager's locks) while an HA FRR write that predates the reset flag is
+// still in flight. RED if factoryReset skips frr.Manager.BuildBarrier.
+func TestFactoryResetWaitsForInFlightHAWrite18561(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
+	blk := &blockingReload18561{
+		RecordingExecutor: &frr.RecordingExecutor{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), blk)
+	haDone := make(chan struct{})
+	go func() {
+		_ = d.applyFRRConfigIfCurrent(&frr.FullConfig{ClusterMode: true}, d.frrApplySeq.Load(), d.frr.WriteGeneration())
+		close(haDone)
+	}()
+	<-blk.entered
+	wiped := make(chan bool, 1)
+	resetDone := make(chan struct{})
+	go func() {
+		_ = d.factoryReset(context.Background(), func() error {
+			select {
+			case <-haDone:
+				wiped <- true
+			default:
+				wiped <- false
+			}
+			return errors.New("stop after the wipe probe")
+		})
+		close(resetDone)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(blk.release)
+	<-resetDone
+	if !<-wiped {
+		t.Fatal("factoryReset wiped while an HA FRR write was still in flight; the write could land after the strip")
 	}
 }

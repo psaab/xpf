@@ -113,8 +113,20 @@ type Manager struct {
 	// changed (a structural impossibility while the exec stays under
 	// reloadMu — kept as a fail-safe invariant against refactors that
 	// move the exec outside the lock).
+	// buildMu serializes whole applies (#18561): the managed-section build
+	// mutates manager-wide render state (the quarantine set, the #16625 RIP
+	// group index, the narrowed-chain set) and must not interleave with
+	// another build. Before #18561 every ApplyFull ran under the daemon's
+	// applySem, which provided this; the HA reconcile now applies after
+	// releasing applySem. Order: buildMu -> reloadMu (never the reverse).
+	buildMu sync.Mutex
 	reloadMu sync.Mutex
 	confGen  uint64
+	// writeGen mirrors confGen for lock-free readers (#18561): a caller
+	// rendering under its own lock captures it and passes a predicate to
+	// ApplyFullIfCurrent, so only a write that actually happened (not a
+	// refused render) supersedes the render.
+	writeGen atomic.Uint64
 	// Desired QNH metric actions and the exact previously emitted QNH
 	// sequences to clear are protected by reloadMu. frr.conf stays
 	// metric-free; overlays are replayed after each integrated reload.
@@ -560,6 +572,8 @@ type FullConfig struct {
 //  10. global dynamic protocols (OSPF/OSPFv3/BGP/RIP/ISIS)
 //  11. per-VRF dynamic protocols
 func (m *Manager) ApplyFull(fc *FullConfig) error {
+	m.buildMu.Lock()
+	defer m.buildMu.Unlock()
 	return m.applyFull(fc, nil)
 }
 
@@ -581,9 +595,37 @@ func (m *Manager) ApplyFullIfCurrent(fc *FullConfig, current func() bool) error 
 	if current == nil {
 		return errors.New("frr: ApplyFullIfCurrent needs a staleness predicate")
 	}
+	m.buildMu.Lock()
+	defer m.buildMu.Unlock()
+	// Judge staleness BEFORE the build, so a superseded render never touches
+	// the build state or the gauges it publishes (quarantined route-maps,
+	// narrowed chains). The predicate is re-checked under reloadMu right
+	// before the write; a render overtaken while it was building is then
+	// skipped, and the writer that overtook it rebuilds after us (it waits on
+	// buildMu), so the gauges end on its render.
+	if !current() {
+		return ErrFRRApplySuperseded
+	}
 	return m.applyFull(fc, current)
 }
 
+// WriteGeneration is the number of managed-section writes so far (#18561).
+// Lock-free; it moves only when a write actually happens, never for a
+// render that was refused or superseded.
+func (m *Manager) WriteGeneration() uint64 { return m.writeGen.Load() }
+
+// BuildBarrier waits for any in-flight apply or clear to finish (#18561).
+// A caller that has already set the state its ApplyFullIfCurrent predicates
+// read (the daemon's factory-reset flag) then knows no apply that could still
+// write is running: a later one judges the predicate under buildMu and sees
+// the new state. The factory-reset wipe strips frr.conf without this
+// manager's locks, so it calls BuildBarrier first.
+func (m *Manager) BuildBarrier() {
+	m.buildMu.Lock()
+	m.buildMu.Unlock()
+}
+
+// applyFull is ApplyFull's body. Caller must hold buildMu.
 func (m *Manager) applyFull(fc *FullConfig, current func() bool) error {
 	if fc == nil {
 		return m.clearIf(current)
@@ -1048,6 +1090,7 @@ func (m *Manager) commitManagedSectionIf(section string, overlays map[string]str
 	m.qnhMetricOverlayBroadcastCleanup = broadcast
 	m.qnhMetricOverlays = cloneQNHMetricOverlays11447(overlays)
 	m.confGen++
+	m.writeGen.Store(m.confGen)
 	slog.Info("FRR config written", "path", m.frrConf, "generation", m.confGen)
 
 	err = m.reloadLocked()
@@ -1338,9 +1381,12 @@ func (m *Manager) applyQNHMetricOverlaysLocked(ctx context.Context) error {
 // (including ErrFRRReloadDegraded) instead of discarding it — `xpfd
 // cleanup` logs it loudly while still exiting 0 (#1880).
 func (m *Manager) Clear() error {
+	m.buildMu.Lock()
+	defer m.buildMu.Unlock()
 	return m.clearIf(nil)
 }
 
+// clearIf is Clear's body. Caller must hold buildMu.
 func (m *Manager) clearIf(current func() bool) error {
 	err := m.commitManagedSectionIf("", nil, current)
 	if errors.Is(err, ErrFRRApplySuperseded) {

@@ -847,6 +847,10 @@ func (d *Daemon) scheduleFRRHAReconcile(reason string) {
 	// #18561: coalesce a burst of ownership edges into one reload that runs
 	// after the burst, so an RG activation's synchronous connected-route
 	// republish never queues on applySem behind frr-reload.py.
+	// An edge supersedes any HA render taken before it: a render that
+	// predates a demotion must not publish the demoted RG's routes after
+	// it. The run this edge joins or arms renders afresh.
+	d.frrApplySeq.Add(1)
 	d.frrHA.schedule(frrHAReconcileDebounce, func() { d.runFRRHAReconcile(reason) })
 }
 
@@ -864,25 +868,26 @@ func (d *Daemon) runFRRHAReconcile(reason string) {
 	// (#16270), and on loss the LAN RG went active 0.45 s after the WAN RG,
 	// right after the reload released the semaphore. frrApplySeq keeps the
 	// out-of-lock apply from overwriting a newer render.
-	fc, seq, ok := func() (*frr.FullConfig, uint64, bool) {
+	fc, seq, writeGen, ok := func() (*frr.FullConfig, uint64, uint64, bool) {
 		if err := d.applySem.Acquire(ctx, 1); err != nil {
-			return nil, 0, false
+			return nil, 0, 0, false
 		}
 		defer d.applySem.Release(1)
 		if d.isResetting() {
-			return nil, 0, false
+			return nil, 0, 0, false
 		}
 		cfg := d.store.ActiveConfig()
 		if cfg == nil {
-			return nil, 0, false
+			return nil, 0, 0, false
 		}
+		writeGen := d.frr.WriteGeneration()
 		fc := d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg))
-		return fc, d.frrApplySeq.Add(1), true
+		return fc, d.frrApplySeq.Add(1), writeGen, true
 	}()
 	if !ok {
 		return
 	}
-	if err := d.applyFRRConfigIfCurrent(fc, seq); err != nil {
+	if err := d.applyFRRConfigIfCurrent(fc, seq, writeGen); err != nil {
 		slog.Warn("HA routing reconcile did not fully converge; FRR retry remains armed",
 			"reason", reason, "err", err)
 	}

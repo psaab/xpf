@@ -396,8 +396,6 @@ func (d *Daemon) applyFRRConfig(fc *frr.FullConfig) error {
 	if d.frr == nil {
 		return nil
 	}
-	// #18561: supersede any HA reconcile render still waiting to apply.
-	d.frrApplySeq.Add(1)
 	err := d.frr.ApplyFull(fc)
 	if err != nil {
 		if errors.Is(err, frr.ErrFRRReloadDegraded) {
@@ -418,17 +416,22 @@ func (d *Daemon) applyFRRConfig(fc *frr.FullConfig) error {
 }
 
 // applyFRRConfigIfCurrent applies an HA reconcile render made under
-// applySem at sequence seq, after applySem was released (#18561). It writes
-// only while no other FRR write has started since the render and no factory
-// reset is in progress, judged inside the FRR manager's write+reload
-// critical section. A superseded render is dropped: the write that
-// superseded it rendered later, from the cluster state of its own time.
-func (d *Daemon) applyFRRConfigIfCurrent(fc *frr.FullConfig, seq uint64) error {
+// applySem, after applySem was released (#18561). seq is the HA render
+// sequence and writeGen the FRR manager's write generation, both captured at
+// render time. The render is written only while (a) no later HA render or
+// ownership edge has bumped the sequence, (b) no FRR write has actually
+// happened since (a refused or superseded render does not move writeGen), and
+// (c) no factory reset is in progress. The FRR manager judges this under its
+// build lock before building and again under reloadMu before the write, and
+// factoryReset passes frr.Manager.BuildBarrier after raising its flag, so the
+// wipe's strip cannot be followed by this write. A superseded render is
+// dropped: whatever superseded it renders, or has written, the newer state.
+func (d *Daemon) applyFRRConfigIfCurrent(fc *frr.FullConfig, seq, writeGen uint64) error {
 	if d.frr == nil {
 		return nil
 	}
 	err := d.frr.ApplyFullIfCurrent(fc, func() bool {
-		return d.frrApplySeq.Load() == seq && !d.isResetting()
+		return d.frrApplySeq.Load() == seq && d.frr.WriteGeneration() == writeGen && !d.isResetting()
 	})
 	if errors.Is(err, frr.ErrFRRApplySuperseded) {
 		slog.Debug("HA routing reconcile render superseded by a newer FRR write; skipped")
@@ -495,6 +498,10 @@ var fibMultipathHashPolicyPath = "/proc/sys/net/ipv4/fib_multipath_hash_policy"
 // knob to the asserted value themselves before first starting xpfd — the
 // documented sysctl.d route for such a baseline.
 func (d *Daemon) reconcileFibMultipathHashPolicy(enabled bool) {
+	// #18561: the HA reconcile calls this outside applySem; serialize the
+	// knob owner's assert/release against the commit path.
+	d.fibHashMu.Lock()
+	defer d.fibHashMu.Unlock()
 	if enabled {
 		prior := fibPriorOnFirstAssert17068(d)
 		if prior != "" {

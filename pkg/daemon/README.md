@@ -4675,14 +4675,26 @@ because its republish queued behind it. `runFRRHAReconcile` therefore
 renders under applySem (the render reads the active config and cluster
 ownership and stays ordered against config applies) and runs the reload
 AFTER releasing it. `frrApplySeq` keeps that out-of-lock apply from
-overwriting a newer config: every daemon-initiated FRR write bumps it before
-writing (`applyFRRConfig`, the bootstrap `Clear` calls), the HA render bumps
-it, and `applyFRRConfigIfCurrent` applies only while it is unchanged and no
-factory reset is in progress. The check runs inside the FRR manager's
-write+reload critical section (`frr.Manager.ApplyFullIfCurrent`, under
-`reloadMu`), so it is ordered against every other writer; a superseded
-render returns `frr.ErrFRRApplySuperseded` and writes nothing. FRR writes
-themselves stay serialized by `reloadMu`.
+overwriting a newer config. An HA render captures two values under
+applySem: `frrApplySeq` (bumped by every HA render and by every RG ownership
+edge, so a render that predates an edge, including a demotion, is never
+applied) and the FRR manager's `WriteGeneration` (moved only by a
+managed-section write that actually happened, so a commit-path render that
+`ApplyFull` refuses before writing does not cancel the HA reload).
+`applyFRRConfigIfCurrent` applies only while both are unchanged and no
+factory reset is in progress. The FRR manager judges that predicate under
+its build lock (`buildMu`, which also serializes the managed-section build
+and its gauges) before building, and again under `reloadMu` immediately
+before the write; a superseded render returns `frr.ErrFRRApplySuperseded`
+and writes nothing. `factoryReset` calls `frr.Manager.BuildBarrier` right
+after raising its reset flag, so no HA write can follow the wipe's
+managed-section strip.
+
+The 250 ms debounce applies to demotion edges as well as promotions. For a
+demotion it only delays the kernel/routing-protocol withdrawal of the RG's
+routes; the helper FIB is republished on the edge itself, and an HA render
+taken before the demotion edge is superseded by it, so the delay cannot
+re-advertise the demoted RG.
 
 The RG-edge ip-monitoring gating reconcile (`scheduleIPMonGating`, #16690)
 is coalesced behind the same debounce (`ipmonGateHA`). When the gate

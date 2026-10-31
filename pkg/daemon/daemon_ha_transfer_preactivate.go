@@ -71,7 +71,11 @@ func (d *Daemon) beginTransferPreActivation(rgIDs []int) error {
 	// failover request behind a stuck apply, and a wait longer than the TTL
 	// published an overlay that had already expired (make-before-break lost
 	// with no log line).
-	if d.applySem != nil {
+	if err := func() error {
+		if d.applySem == nil {
+			pre.BeginTransferPreActivation(ids, time.Now().Add(transferPreActivateTTL))
+			return nil
+		}
 		ctx, cancel := context.WithTimeout(d.applyCancelCtx(), transferPreActivateLockWait)
 		err := d.applySem.Acquire(ctx, 1)
 		cancel()
@@ -80,15 +84,16 @@ func (d *Daemon) beginTransferPreActivation(rgIDs []int) error {
 				"rgs", ids, "wait", transferPreActivateLockWait, "err", err)
 			return errTransferPreActivationLockBusy
 		}
-	}
-	pre.BeginTransferPreActivation(ids, time.Now().Add(transferPreActivateTTL))
-	// Routes first: the connected prefixes of the RG must be in the helper
-	// FIB before its forwarding opens, or the first redirected packet
-	// resolves to the cluster terminal (#16270). republishConnectedRG reads
-	// the overlay just marked.
-	if d.applySem != nil {
+		defer d.applySem.Release(1)
+		pre.BeginTransferPreActivation(ids, time.Now().Add(transferPreActivateTTL))
+		// Routes first: the connected prefixes of the RG must be in the
+		// helper FIB before its forwarding opens, or the first redirected
+		// packet resolves to the cluster terminal (#16270).
+		// republishConnectedRG reads the overlay just marked.
 		d.republishConnectedRG("transfer-preactivate")
-		d.applySem.Release(1)
+		return nil
+	}(); err != nil {
+		return err
 	}
 	if err := pre.PublishTransferPreActivation(); err != nil {
 		return err

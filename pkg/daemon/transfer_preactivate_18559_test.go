@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #18559: the daemon half of the make-before-break transfer. The route
@@ -126,6 +129,8 @@ func TestBeginTransferPreActivationUnsupportedDataplane18559(t *testing.T) {
 // revert (the wait was unbounded under the daemon-lifetime context).
 func TestBeginTransferPreActivationBoundsApplySemWait18569(t *testing.T) {
 	d, dp := newPreActivateDaemon18559(t)
+	logs, restore := captureSlog(t)
+	defer restore()
 	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +155,33 @@ func TestBeginTransferPreActivationBoundsApplySemWait18569(t *testing.T) {
 	if got := dp.callsSnapshot(); len(got) != 0 {
 		t.Fatalf("calls = %v after a busy-semaphore fallback, want none", got)
 	}
+	if !strings.Contains(logs.String(), "transfer pre-activation skipped, apply semaphore busy") {
+		t.Fatalf("the break-before-make fallback was not logged:\n%s", logs.String())
+	}
+}
+
+// panickingOverlayDP18569 panics inside the route republish that runs while
+// the pre-activation holds applySem.
+type panickingOverlayDP18569 struct{ *fakePreActivateDP }
+
+func (p *panickingOverlayDP18569) PublishRouteOverlaySnapshotWithLatch(*config.Config, []config.RouteOverlayEntry, map[string]bool, bool) (bool, error) {
+	panic("route publisher failed")
+}
+
+// The pre-activation's applySem hold is released on every exit, including
+// a panic in the republish: otherwise every later apply deadlocks. RED if
+// the release is not deferred.
+func TestPreActivationReleasesApplySemOnPanic18569(t *testing.T) {
+	d, dp := newPreActivateDaemon18559(t)
+	d.setDataplane(&panickingOverlayDP18569{dp})
+	func() {
+		defer func() { _ = recover() }()
+		_ = d.beginTransferPreActivation([]int{1})
+	}()
+	if !d.applySem.TryAcquire(1) {
+		t.Fatal("applySem leaked after a panic inside the pre-activation's republish")
+	}
+	d.applySem.Release(1)
 }
 
 // The TTL starts once applySem is held, so a wait that eats into it cannot
