@@ -87,9 +87,15 @@ func (k *fakeKernel18573) put(netdev, addr string, proto uint8) {
 func (k *fakeKernel18573) install(t *testing.T, d *Daemon) {
 	t.Helper()
 	origDump, origAdd, origDel, origIdx := directVIPAddrDumpFn, directVIPAddrAddFn, directVIPAddrDelFn, directVIPLinkByIndexFn
+	origPromote := ensurePromoteSecondariesFn
 	t.Cleanup(func() {
 		directVIPAddrDumpFn, directVIPAddrAddFn, directVIPAddrDelFn, directVIPLinkByIndexFn = origDump, origAdd, origDel, origIdx
+		ensurePromoteSecondariesFn = origPromote
 	})
+	// The fake table models a kernel with promote_secondaries=1 (no
+	// cascade); the real sysctl write would target a host netdev that does
+	// not exist. The guard's own cells override this.
+	ensurePromoteSecondariesFn = func(string) error { return nil }
 	directVIPAddrDumpFn = func() ([]vipstamp.Row, error) {
 		if k.dumpErr != nil {
 			return nil, k.dumpErr
@@ -494,9 +500,11 @@ func TestDirectVIPOtherRGsStampedVIPsSurviveEveryPass18573(t *testing.T) {
 }
 
 // Review (Z2) on #18579: per-(netdev, VIP) diagnostics are latched, not
-// per-tick. A kernel that accepts REPLACE without recording IFA_PROTO would
-// re-adopt (and log) on every 2 s pass; a REPLACE that keeps failing would
-// Warn every pass. Each logs once until the next commit (resetVIPWarnings).
+// per-tick. A REPLACE that keeps failing is retried every pass (the adoption
+// is still owed) but Warns once until the next commit (resetVIPWarnings). The
+// proto-blind-kernel case, where REPLACE "succeeds" without recording the
+// stamp, is detected and stops adoption instead
+// (TestDirectVIPStampUnsupportedKernelIsDetectedOnce18573).
 func TestDirectVIPAdoptDiagnosticsAreLatched18573(t *testing.T) {
 	var buf strings.Builder
 	orig := slog.Default()
@@ -509,11 +517,10 @@ func TestDirectVIPAdoptDiagnosticsAreLatched18573(t *testing.T) {
 	k.put("ge-0-0-2.50", "172.16.50.42/24", 0)
 	k.put("ge-0-0-2.50", "2001:db8:50::42/64", vipstamp.Proto)
 	addFn := directVIPAddrAddFn
-	replaceErr := error(nil)
 	directVIPAddrAddFn = func(idx int, p netip.Prefix, replace bool) error {
 		if replace {
 			k.adds = append(k.adds, "replace "+p.String())
-			return replaceErr // accepted (or refused) without recording the stamp
+			return syscall.EPERM
 		}
 		return addFn(idx, p, replace)
 	}
@@ -522,24 +529,96 @@ func TestDirectVIPAdoptDiagnosticsAreLatched18573(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		d.directAddVIPs(1)
 	}
-	if n := count("stamped pre-existing VIP"); n != 1 {
-		t.Fatalf("adoption Info logged %d times over 3 ticks, want 1:\n%s", n, buf.String())
-	}
 	if n := strings.Count(fmt.Sprint(k.adds), "replace 172.16.50.42/24"); n != 3 {
-		t.Fatalf("adoption must still be retried every tick (got %d REPLACEs)", n)
-	}
-
-	replaceErr = syscall.EPERM
-	for i := 0; i < 3; i++ {
-		d.directAddVIPs(1)
+		t.Fatalf("a failed adoption must be retried every tick (got %d REPLACEs)", n)
 	}
 	if n := count("failed to stamp pre-existing VIP"); n != 1 {
 		t.Fatalf("adopt-failure Warn logged %d times over 3 ticks, want 1:\n%s", n, buf.String())
+	}
+	if d.directVIPStampUnsupported.Load() {
+		t.Fatal("a REPLACE error is not evidence that the kernel ignores IFA_PROTO")
 	}
 	// A commit re-arms the diagnostics.
 	d.resetVIPWarnings()
 	d.directAddVIPs(1)
 	if n := count("failed to stamp pre-existing VIP"); n != 2 {
 		t.Fatalf("after a commit the Warn must fire again once, got %d total", n)
+	}
+}
+
+// Review Z1 on #18579: "an unstamped address is never deleted" must not rest
+// on promote_secondaries=1. When the sysctl cannot be set, an IPv4 delete
+// whose subnet holds a foreign address is skipped (deleting a primary there
+// would cascade onto it); the twin with the sysctl settable deletes it. The
+// real-kernel half (sysctl 0 and 1) is TestDirectVIPRenumberOnKernel18573.
+func TestDirectVIPCascadeGuardWhenPromoteSecondariesUnsettable18573(t *testing.T) {
+	for _, settable := range []bool{true, false} {
+		t.Run(fmt.Sprintf("settable=%v", settable), func(t *testing.T) {
+			k := newFakeKernel18573(t)
+			d := &Daemon{store: rethStore18573(t, "172.16.50.42/24", "2001:db8:50::42/64")}
+			k.install(t, d)
+			var asked []string
+			ensurePromoteSecondariesFn = func(netdev string) error {
+				asked = append(asked, netdev)
+				if settable {
+					return nil
+				}
+				return syscall.EROFS
+			}
+			k.put("ge-0-0-2.50", "172.16.50.10/24", vipstamp.Proto) // leftover primary
+			k.put("ge-0-0-2.50", "172.16.50.99/24", 0)              // foreign secondary
+			k.put("ge-0-0-2.50", "10.9.9.9/24", vipstamp.Proto)     // leftover, other subnet
+			k.put("ge-0-0-2.50", "2001:db8:50::10/64", vipstamp.Proto)
+			d.directAddVIPs(1)
+			if len(asked) != 1 || asked[0] != "ge-0-0-2.50" {
+				t.Fatalf("promote_secondaries ensured for %v, want once for ge-0-0-2.50", asked)
+			}
+			mustHave18573(t, k, "ge-0-0-2.50", "172.16.50.99/24", true, false)
+			mustHave18573(t, k, "ge-0-0-2.50", "172.16.50.10/24", !settable, true)
+			// No foreign peer in its subnet: deleted either way. IPv6 has no
+			// cascade: deleted either way.
+			mustHave18573(t, k, "ge-0-0-2.50", "10.9.9.9/24", false, false)
+			mustHave18573(t, k, "ge-0-0-2.50", "2001:db8:50::10/64", false, false)
+			mustHave18573(t, k, "ge-0-0-2.50", "172.16.50.42/24", true, true)
+		})
+	}
+}
+
+// Review Z1 on #18579: a kernel that ignores IFA_PROTO (pre-6.3) accepts the
+// stamped add and records 0. Detected by reading back what the pass wrote;
+// warned once; adoption stops, so ticks do not REPLACE every VIP forever.
+func TestDirectVIPStampUnsupportedKernelIsDetectedOnce18573(t *testing.T) {
+	var buf strings.Builder
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	k := newFakeKernel18573(t)
+	d := &Daemon{store: rethStore18573(t, "172.16.50.42/24", "2001:db8:50::42/64")}
+	k.install(t, d)
+	k.put("ge-0-0-2.50", "172.16.50.42/24", 0) // unstamped: adoption owed
+	addFn := directVIPAddrAddFn
+	directVIPAddrAddFn = func(idx int, p netip.Prefix, replace bool) error {
+		if replace {
+			k.adds = append(k.adds, "replace "+p.String())
+			return nil // accepted, proto never recorded
+		}
+		err := addFn(idx, p, replace)
+		if i := k.find(idx, p); i >= 0 {
+			k.rows[i].Proto = 0 // the kernel dropped IFA_PROTO
+		}
+		return err
+	}
+	for i := 0; i < 4; i++ {
+		d.directAddVIPs(1)
+	}
+	if !d.directVIPStampUnsupported.Load() {
+		t.Fatal("a stamp that reads back 0 must latch directVIPStampUnsupported")
+	}
+	if n := strings.Count(buf.String(), "does not record IFA_PROTO"); n != 1 {
+		t.Fatalf("capability Warn logged %d times, want 1:\n%s", n, buf.String())
+	}
+	if n := strings.Count(fmt.Sprint(k.adds), "replace "); n > 1 {
+		t.Fatalf("adoption kept REPLACing after detection: %v", k.adds)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/vishvananda/netlink"
@@ -138,8 +139,55 @@ func TestDirectVIPStampRoundTripsThroughTheKernel18573(t *testing.T) {
 // snapshot (built while the old address is still on the netdev) must offer
 // only .42 as the interface-SNAT source; the owner's reconcile then deletes
 // the old pair and leaves the foreign address; demotion removes the new pair.
+//
+// Review Z1 on #18579: the foreign 172.16.50.99/24 is a SECONDARY behind the
+// leftover primary .10, so "foreign addresses are never touched" depends on
+// promote_secondaries. The sysctl is pinned per subtest instead of inherited:
+// promote=1, and the promote=0 twin, in which xpf must set it before deleting
+// .10. The control subtest proves the =0 setup really cascades when nobody
+// sets it, so the twin cannot pass vacuously.
 func TestDirectVIPRenumberOnKernel18573(t *testing.T) {
+	t.Run("control-kernel-cascades-with-promote=0", func(t *testing.T) {
+		link := kernelLink18573(t, "ge-0-0-2.50")
+		setPromoteSecondaries18573(t, "ge-0-0-2.50", "0")
+		addForeign18573(t, link, "172.16.50.10/24")
+		addForeign18573(t, link, "172.16.50.99/24")
+		rows := kernelRows18573(t, link.Attrs().Index)
+		if err := vipstamp.Del(rows[netip.MustParsePrefix("172.16.50.10/24")]); err != nil {
+			t.Fatalf("delete primary: %v", err)
+		}
+		if _, ok := kernelRows18573(t, link.Attrs().Index)[netip.MustParsePrefix("172.16.50.99/24")]; ok {
+			t.Fatal("control: with promote_secondaries=0 the kernel kept the secondary; the =0 twin would prove nothing")
+		}
+	})
+	for _, promote := range []string{"1", "0"} {
+		t.Run("promote_secondaries="+promote, func(t *testing.T) {
+			renumberOnKernel18573(t, promote)
+		})
+	}
+}
+
+// setPromoteSecondaries18573 pins net.ipv4.conf.<netdev>.promote_secondaries
+// in the cell's private netns.
+func setPromoteSecondaries18573(t *testing.T, netdev, v string) {
+	t.Helper()
+	if err := os.WriteFile("/proc/sys/net/ipv4/conf/"+netdev+"/promote_secondaries", []byte(v), 0); err != nil {
+		t.Fatalf("set %s promote_secondaries=%s: %v", netdev, v, err)
+	}
+}
+
+func promoteSecondaries18573(t *testing.T, netdev string) string {
+	t.Helper()
+	b, err := os.ReadFile("/proc/sys/net/ipv4/conf/" + netdev + "/promote_secondaries")
+	if err != nil {
+		t.Fatalf("read %s promote_secondaries: %v", netdev, err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func renumberOnKernel18573(t *testing.T, promote string) {
 	link := kernelLink18573(t, "ge-0-0-2.50")
+	setPromoteSecondaries18573(t, "ge-0-0-2.50", promote)
 	idx := link.Attrs().Index
 	d := &Daemon{store: rethStore18573(t, "172.16.50.10/24", "2001:db8:50::10/64")}
 	if added := d.directAddVIPs(1); added != 2 {
@@ -206,5 +254,42 @@ func TestDirectVIPRenumberOnKernel18573(t *testing.T) {
 	}
 	if _, ok := rows[netip.MustParsePrefix("172.16.50.99/24")]; !ok {
 		t.Fatal("demotion removed the foreign address")
+	}
+	if got := promoteSecondaries18573(t, "ge-0-0-2.50"); got != "1" {
+		t.Fatalf("promote_secondaries after the IPv4 deletes = %s, want 1", got)
+	}
+}
+
+// Review Z1 on #18579: a prefix-only renumber (.10/24 -> .10/25,
+// ::10/64 -> ::10/56) keeps the host and changes the identity. IPv6 refuses a
+// second copy of the same address under another prefix, so the leftover must
+// be deleted BEFORE the new one is added; the fake table cannot see that (it
+// accepts ::10/56 beside ::10/64), the kernel does.
+func TestDirectVIPPrefixOnlyRenumberOnKernel18573(t *testing.T) {
+	link := kernelLink18573(t, "ge-0-0-2.50")
+	setPromoteSecondaries18573(t, "ge-0-0-2.50", "0")
+	idx := link.Attrs().Index
+	d := &Daemon{store: rethStore18573(t, "172.16.50.10/24", "2001:db8:50::10/64")}
+	if added := d.directAddVIPs(1); added != 2 {
+		t.Fatalf("first owner pass added %d, want 2", added)
+	}
+	d.store = rethStore18573(t, "172.16.50.10/25", "2001:db8:50::10/56")
+	if added := d.directAddVIPs(1); added != 2 {
+		t.Fatalf("prefix-only renumber added %d, want 2 (rows %v)", added, kernelRows18573(t, idx))
+	}
+	rows := kernelRows18573(t, idx)
+	for _, s := range []string{"172.16.50.10/24", "2001:db8:50::10/64"} {
+		if _, ok := rows[netip.MustParsePrefix(s)]; ok {
+			t.Fatalf("old prefix %s survived: %v", s, rows)
+		}
+	}
+	for _, s := range []string{"172.16.50.10/25", "2001:db8:50::10/56"} {
+		if r, ok := rows[netip.MustParsePrefix(s)]; !ok || !r.Stamped() {
+			t.Fatalf("%s: %+v ok=%v, want installed and stamped (rows %v)", s, r, ok, rows)
+		}
+	}
+	// Converged: the next tick changes nothing.
+	if added := d.directAddVIPs(1); added != 0 {
+		t.Fatalf("steady-state tick after the prefix renumber added %d", added)
 	}
 }

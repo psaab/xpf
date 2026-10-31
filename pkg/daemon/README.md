@@ -2060,7 +2060,29 @@ new set, and `reconcileInterfaceAddresses` skips RETH netdevs. Now:
   After an RG move the new owner installs only its own active config's set.
 - Never deleted: an unstamped address the config does not name for this RG
   (DHCP lease, kernel or stable link-local, another daemon's address), and a
-  stamped address the config still assigns to its netdev.
+  stamped address the config still assigns to its netdev. With
+  `promote_secondaries=0`, deleting an IPv4 primary makes the kernel delete
+  every secondary in its subnet, foreign ones included. The guarantee does
+  not rely on systemd's `50-default.conf` setting that sysctl to 1. Before
+  the first IPv4 delete on a netdev, `guardIPv4PrimaryCascade` sets
+  `net.ipv4.conf.<netdev>.promote_secondaries=1`. If the write fails, the
+  pass skips any IPv4 delete whose subnet holds an address that is neither
+  being deleted nor a configured VIP of this RG, and warns once
+  (`TestDirectVIPRenumberOnKernel18573` runs with the sysctl pinned to 1 and
+  to 0, plus a control that proves the 0 case cascades).
+- A kernel that ignores `IFA_PROTO` accepts a stamped add and records 0
+  (before 6.3 the kernel's netlink parser drops type 11; the appliance floor
+  is 6.18). A pass that wrote a stamp reads it back once. If the stamp reads
+  back as 0, the pass latches `directVIPStampUnsupported` for the process
+  lifetime, warns once, and stops adopting. Without the latch every tick
+  would REPLACE every VIP. On such a node, leftover removal cannot work and
+  the warning says so.
+- `reconcileAfterRethLinkCycle` (`daemon_apply_dataplane.go`) re-adds VIPs
+  after a link cycle through `directAddVIPs`, which can now delete. It takes
+  `directVIPMu` and re-checks ownership under it, like every other
+  direct-VIP actuation, so a demotion racing the apply cannot have its
+  removal undone. Lock order is `applySem` -> `directVIPMu`; nothing under
+  `directVIPMu` waits for `applySem`.
 - If the ownership dump fails, the pass degrades to the pre-#18573
   add-all / remove-all over the configured set. It does not delete on a
   readback it does not have, and it never does less than the old code.

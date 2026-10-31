@@ -1147,8 +1147,17 @@ func (d *Daemon) reconcileAfterRethLinkCycle(cfg *config.Config, needLinkCycleRe
 					continue
 				}
 				if needLinkCycleRecovery {
-					d.directAddVIPs(rg.ID)
-					d.addStableRethLinkLocal(rg.ID)
+					// #18579 review Z1: directAddVIPs now also DELETES
+					// leftovers, so it runs under directVIPMu like every other
+					// direct-VIP actuation, and re-checks ownership under the
+					// lock so a demotion that raced this apply cannot have its
+					// removal undone by a stale IsLocalPrimary read.
+					d.directVIPMu.Lock()
+					if d.shouldOwnDirectVIPs(rg.ID) {
+						d.directAddVIPs(rg.ID)
+						d.addStableRethLinkLocal(rg.ID)
+					}
+					d.directVIPMu.Unlock()
 				}
 				if needLinkCycleRecovery {
 					d.scheduleDirectAnnounce(rg.ID, "link-cycle-recovery")

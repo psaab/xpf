@@ -44,7 +44,11 @@ import (
 // The prune deletes ONLY stamped addresses. An unstamped address is
 // foreign — a DHCP lease, a kernel link-local (IFAPROT_KERNEL_LL), the
 // stable RETH link-local (managed by its own add/remove pair), another
-// daemon's address — and is never touched, with one pre-existing
+// daemon's address — and is never touched. The pkg/daemon caller keeps
+// that true for IPv4 under promote_secondaries=0 too, where the kernel
+// would cascade a primary's delete onto its subnet's secondaries: it sets
+// the sysctl to 1 first, or skips a delete that could cascade. One
+// pre-existing
 // exception kept unchanged: the non-owner still removes every address
 // the CONFIG names as a VIP of the RG, stamped or not, because the
 // config names it as the RG's (and a VIP installed by a pre-#18573 xpf

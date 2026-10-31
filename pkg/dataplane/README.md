@@ -290,7 +290,9 @@ the base row and the unit row; an untagged unit shares its member's ifindex,
 and the helper's shared-ifindex merge keeps the first row's pick. The
 configured merge runs after the filter, so a configured address is never
 dropped. An unstamped address (DHCP lease, kernel link-local, standalone VRRP
-VIP, a pre-#18573 VIP) is never dropped either. A failed dump filters
+VIP, a pre-#18573 VIP) is never dropped either. In the kernel it also
+survives the daemon's leftover delete under `promote_secondaries=0`: see
+`guardIPv4PrimaryCascade` in `pkg/daemon/README.md`. A failed dump filters
 nothing. The interface-SNAT source after a renumber is therefore the new
 address with no manual step. Removal outside a commit republishes through
 the daemon's interface-link refresher (see `pkg/daemon/README.md`

@@ -4,7 +4,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/netip"
+	"os"
 	"sort"
+	"strings"
 	"syscall"
 
 	"github.com/vishvananda/netlink"
@@ -54,7 +56,31 @@ var (
 	// wakeInterfaceLinkSnapshotFn is the seam over the refresher wake, so a
 	// cell can observe which netdevs a reconcile republishes.
 	wakeInterfaceLinkSnapshotFn = wakeInterfaceLinkSnapshot
+	// ensurePromoteSecondariesFn is the seam over the per-netdev
+	// promote_secondaries sysctl write (review Z1 on #18579).
+	ensurePromoteSecondariesFn = ensurePromoteSecondaries
 )
+
+// ensurePromoteSecondaries sets net.ipv4.conf.<netdev>.promote_secondaries=1
+// unless it already is (review Z1 on #18579). With 0, deleting an IPv4
+// PRIMARY makes the kernel delete every secondary of the same subnet —
+// including a foreign, unstamped one this reconcile promised never to touch.
+// With 1 the kernel promotes the next secondary instead. The appliance
+// already gets 1 from systemd's 50-default.conf for interfaces created after
+// boot-time sysctl, but xpf never set it and a netdev that predates it (or a
+// host without that drop-in) can carry 0. Only called on a netdev where the
+// reconcile is about to delete an IPv4 address. The path is per-netns (the
+// calling thread's), so it is the netdev the delete targets.
+func ensurePromoteSecondaries(netdev string) error {
+	if netdev == "" || strings.ContainsAny(netdev, "/\x00") {
+		return errors.New("invalid netdev name")
+	}
+	path := "/proc/sys/net/ipv4/conf/" + netdev + "/promote_secondaries"
+	if b, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(b)) == "1" {
+		return nil
+	}
+	return os.WriteFile(path, []byte("1"), 0)
+}
 
 // directVIPAddrOp is one configured VIP on one netdev.
 type directVIPAddrOp struct {
@@ -256,6 +282,7 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 	}
 	in.Rows = resolved
 	plan := planDirectVIPAddrs(in)
+	plan.Del = d.guardIPv4PrimaryCascade(rgID, plan.Del, resolved, in.Desired)
 
 	leftoverGone := make(map[string]bool)
 	for _, op := range plan.Invalid {
@@ -312,10 +339,19 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 			added++
 			slog.Info("directAddVIPs: added VIP", "rg", rgID, "iface", op.Netdev, "addr", op.CIDR)
 		}
+		var written []directVIPAddrOp
+		for op := range created {
+			written = append(written, op)
+		}
 		for _, op := range plan.Adopt {
 			idx, ok := ifindex[op.Netdev]
 			if !ok || created[op] {
 				continue
+			}
+			if d.directVIPStampUnsupported.Load() {
+				// Review Z1: a kernel that ignores IFA_PROTO would take a
+				// REPLACE every tick for every VIP and never record it.
+				break
 			}
 			// Both lines are latched per (netdev, VIP) until the next commit:
 			// a REPLACE that keeps failing, or a kernel that accepts it
@@ -327,11 +363,13 @@ func (d *Daemon) reconcileDirectVIPAddrs(rgID int, want bool) (added, removed in
 				}
 				continue
 			}
+			written = append(written, op)
 			if d.directVIPLogFirst("adopt|" + op.Netdev + "|" + op.CIDR) {
 				slog.Info("direct VIP reconcile: stamped pre-existing VIP as xpf-owned",
 					"rg", rgID, "iface", op.Netdev, "addr", op.CIDR)
 			}
 		}
+		d.verifyDirectVIPStamps(rgID, written, ifindex)
 	}
 	d.queueDirectVIPSnapshotRefresh(leftoverGone)
 	return added, removed
@@ -438,4 +476,111 @@ func (d *Daemon) directVIPBlindReconcile(in directVIPPlanInput, linkByName func(
 		}
 	}
 	return added, removed
+}
+
+// guardIPv4PrimaryCascade makes "an unstamped address is never deleted" hold
+// whatever promote_secondaries the netdev carries (review Z1 on #18579).
+// Before the first IPv4 delete on a netdev it ensures promote_secondaries=1.
+// If that fails, an IPv4 delete is dropped from this pass when its subnet
+// holds an address that is neither being deleted nor one of this RG's
+// configured VIPs (those are re-asserted after any delete): deleting a primary
+// there could cascade onto a foreign secondary. Warned once per netdev and VIP.
+func (d *Daemon) guardIPv4PrimaryCascade(rgID int, dels []directVIPDel, rows []resolvedAddrRow, desired map[string][]string) []directVIPDel {
+	if len(dels) == 0 {
+		return dels
+	}
+	deleting := make(map[string]map[netip.Prefix]bool)
+	for _, del := range dels {
+		if deleting[del.Netdev] == nil {
+			deleting[del.Netdev] = make(map[netip.Prefix]bool)
+		}
+		deleting[del.Netdev][del.Row.Prefix] = true
+	}
+	ensured := make(map[string]bool)
+	out := dels[:0:0]
+	for _, del := range dels {
+		if !del.Row.Prefix.Addr().Is4() {
+			out = append(out, del)
+			continue
+		}
+		ok, seen := ensured[del.Netdev]
+		if !seen {
+			err := ensurePromoteSecondariesFn(del.Netdev)
+			ok = err == nil
+			ensured[del.Netdev] = ok
+			if err != nil && d.directVIPLogFirst("promote|"+del.Netdev) {
+				slog.Warn("direct VIP reconcile: cannot set promote_secondaries=1; IPv4 VIP deletes that could cascade onto a foreign secondary are skipped",
+					"rg", rgID, "iface", del.Netdev, "err", err)
+			}
+		}
+		if ok || !foreignSubnetPeer(del, rows, deleting[del.Netdev], desired[del.Netdev]) {
+			out = append(out, del)
+			continue
+		}
+		if d.directVIPLogFirst("cascade|" + del.Netdev + "|" + del.Row.Prefix.String()) {
+			slog.Warn("direct VIP reconcile: not removing IPv4 VIP: promote_secondaries is 0 and its subnet holds an address xpf does not own",
+				"rg", rgID, "iface", del.Netdev, "addr", del.Row.Prefix.String(), "reason", del.Reason)
+		}
+	}
+	return out
+}
+
+// foreignSubnetPeer reports whether del's netdev holds another IPv4 address
+// in the same subnet (same mask and network: the kernel's cascade set) that
+// is neither being deleted nor one of this RG's configured VIPs.
+func foreignSubnetPeer(del directVIPDel, rows []resolvedAddrRow, deleting map[netip.Prefix]bool, desired []string) bool {
+	want := make(map[string]bool, len(desired))
+	for _, vip := range desired {
+		if p, ok := config.ParseVRRPVIP(vip); ok {
+			want[config.PrefixIdentity(p)] = true
+		}
+	}
+	target := del.Row.Prefix.Masked()
+	for _, row := range rows {
+		if row.Netdev != del.Netdev || row.LinkIndex != del.Row.LinkIndex || !row.Prefix.Addr().Is4() {
+			continue
+		}
+		if row.Prefix.Bits() != target.Bits() || row.Prefix.Masked() != target {
+			continue
+		}
+		if deleting[row.Prefix] || want[row.Identity()] {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// verifyDirectVIPStamps reads back the addresses this pass just stamped
+// (created or adopted) and latches directVIPStampUnsupported when one reads
+// back unstamped (review Z1 on #18579): a kernel that drops IFA_PROTO
+// (pre-6.3 parses it as an unknown attribute) accepts the add and records 0,
+// so the leftover removal of #18573 would be a silent no-op and every tick
+// would REPLACE every VIP to adopt it. Warned once; adoption then stops. Runs
+// one extra dump, only on a pass that wrote. An address missing from the
+// readback (removed in between) proves nothing and is ignored.
+func (d *Daemon) verifyDirectVIPStamps(rgID int, written []directVIPAddrOp, ifindex map[string]int) {
+	if len(written) == 0 || d.directVIPStampUnsupported.Load() {
+		return
+	}
+	rows, err := directVIPAddrDumpFn()
+	if err != nil {
+		return
+	}
+	for _, op := range written {
+		idx := ifindex[op.Netdev]
+		for _, row := range rows {
+			if row.LinkIndex != idx || row.Prefix != op.Prefix {
+				continue
+			}
+			if !row.Stamped() && d.directVIPStampUnsupported.CompareAndSwap(false, true) {
+				slog.Warn("direct VIP reconcile: the kernel does not record IFA_PROTO; stale RETH VIPs left by a renumber will NOT be removed on this node and adoption is disabled (see docs/in-place-upgrade.md \"Honest limits\")",
+					"rg", rgID, "iface", op.Netdev, "addr", op.CIDR, "read_back_proto", row.Proto)
+			}
+			break
+		}
+		if d.directVIPStampUnsupported.Load() {
+			return
+		}
+	}
 }
