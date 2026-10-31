@@ -223,14 +223,23 @@ fn run_pass(fx: &mut GreFixture, forwarding: &ForwardingState, validation: Valid
     batch
 }
 
-/// The defect cell. The worker has moved to 8/9; the shim still stamps 7/9.
-/// The ordinary pass must park the packet (not drop it as a config
-/// generation mismatch, not recycle it), and the held pass must process it
-/// under the 7/9 view: exactly one delivery. RED on revert of the park.
+/// The defect cell. A flow's flow-cache entry was seeded under 7/9; the
+/// worker then moves to 8/9 while the shim still stamps 7/9. The ordinary
+/// pass must park the flow's next packet (not drop it as a config generation
+/// mismatch, not recycle it), and the held pass must serve it from the flow
+/// cache under the 7/9 view. RED on revert of the park.
 #[test]
 fn packet_stamped_with_left_view_is_processed_under_it_18560() {
-    let mut fx = gre_fixture();
+    let mut fx = transit_syn_fixture();
     let fwd = Arc::clone(&fx.forwarding);
+    let batch = run_pass(&mut fx, &fwd, STAMPED, PassView::current(), true);
+    assert_eq!(batch.session_creates, 1, "premise: the SYN establishes the flow under 7/9");
+    let source = Ipv4Addr::new(10, 0, 61, 102);
+    let destination = Ipv4Addr::new(172, 16, 80, 200);
+    fx.frame = build_txn_tcp_syn_frame_v4(source, destination, 35790, 5211, crate::tcp_flags::TCP_ACK, TEST_LAN_MAC);
+    fx.meta.tcp_flags = crate::tcp_flags::TCP_ACK;
+    run_pass(&mut fx, &fwd, STAMPED, PassView::current(), true);
+    assert!(txn_flow_cache_entries(&fx.binding) > 0, "premise: the flow's next packet seeds the flow cache under 7/9");
     let views = views_with(STAMPED, &fwd, NEWER);
 
     let normal = PassView { prev_views: Some(&views), held_pass: false, view: None };
@@ -238,16 +247,42 @@ fn packet_stamped_with_left_view_is_processed_under_it_18560() {
     assert_eq!(fx.binding.live.config_gen_mismatches.load(Ordering::Relaxed), 0, "the left-view packet was dropped as a generation mismatch");
     assert_eq!(fx.binding.view_held.len(), 1, "the left-view packet must be parked for a held pass");
     assert!(fx.binding.scratch.scratch_recycle.is_empty(), "a parked descriptor must not be recycled");
-    assert!(fx.rx.try_recv().is_err(), "nothing may be processed under the newer view");
 
+    let hits_before = fx.binding.flow.flow_cache.hits;
     let view = views.find(7, 9, NOW_NS);
     let held = PassView { prev_views: Some(&views), held_pass: true, view };
     let prev = views.get(view.expect("retained")).expect("retained view");
-    run_pass(&mut fx, &prev.forwarding, prev.validation, held, false);
+    let batch = run_pass(&mut fx, &prev.forwarding, prev.validation, held, false);
     assert!(fx.binding.view_held.is_empty(), "the held pass must consume what it ran");
-    assert!(fx.rx.try_recv().is_ok(), "the parked packet must be processed under the view it was stamped with");
-    assert!(fx.rx.try_recv().is_err(), "exactly one delivery");
+    assert_eq!(fx.binding.flow.flow_cache.hits, hits_before + 1, "the parked packet must be served from the 7/9 flow cache");
+    assert_eq!(batch.session_misses, 0);
     assert_eq!(fx.binding.live.config_gen_mismatches.load(Ordering::Relaxed), 0);
+}
+
+/// A held packet that misses the flow cache is dropped as a generation
+/// mismatch: the held pass never reaches the session slow path, whose
+/// side effects (re-resolution, synced-session purge/promotion) left
+/// established flows without a session on a demoting node.
+#[test]
+fn held_pass_serves_only_flow_cache_hits_18560() {
+    let mut fx = transit_syn_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    run_pass(&mut fx, &fwd, STAMPED, PassView::current(), true);
+    let source = Ipv4Addr::new(10, 0, 61, 102);
+    let destination = Ipv4Addr::new(172, 16, 80, 200);
+    fx.frame = build_txn_tcp_syn_frame_v4(source, destination, 35790, 5211, crate::tcp_flags::TCP_ACK, TEST_LAN_MAC);
+    fx.meta.tcp_flags = crate::tcp_flags::TCP_ACK;
+    // No 7/9 flow-cache entry exists for this packet: the session exists,
+    // but the cache was never seeded.
+    let views = views_with(STAMPED, &fwd, NEWER);
+    run_pass(&mut fx, &fwd, NEWER, PassView { prev_views: Some(&views), held_pass: false, view: None }, true);
+    assert_eq!(fx.binding.view_held.len(), 1, "premise: parked");
+    let sessions_before = fx.sessions.len();
+    let prev = views.get(0).expect("retained view");
+    let batch = run_pass(&mut fx, &prev.forwarding, prev.validation, PassView { prev_views: Some(&views), held_pass: true, view: Some(0) }, false);
+    assert_eq!(batch.session_hits + batch.session_misses, 0, "a held packet must not reach the session slow path");
+    assert_eq!(fx.sessions.len(), sessions_before, "the held pass must not touch the session table");
+    assert_eq!(fx.binding.live.config_gen_mismatches.load(Ordering::Relaxed), 1, "dropped as the generation mismatch it is");
 }
 
 /// #6592 orientation and the expiry path: a stamp AHEAD of the worker, or a

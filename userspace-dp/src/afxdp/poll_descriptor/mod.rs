@@ -2518,6 +2518,29 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         FlowCacheOutcome::FallThrough => {}
                     }
                 }
+                // #18560: a held pass serves only flow-cache hits. Anything
+                // that falls to the slow path (session lookup, re-resolution,
+                // synced-session purge/promotion/adoption, new flows) is
+                // dropped as the generation mismatch it is, exactly as before
+                // the grace. Letting held packets reach the slow path on a node
+                // demoting an RG left established flows with no session there
+                // afterwards: loss test-failover 0.0.26111/0.0.26114, +1-3.4k
+                // session misses and strict-syn drops on the demoting node per
+                // move (none without the grace).
+                if pass.held_pass {
+                    record_disposition(
+                        &worker_ctx.ident,
+                        &binding.live,
+                        DispositionCounters::Hot(telemetry.counters),
+                        PacketDisposition::ConfigGenerationMismatch,
+                        desc.len as u32,
+                        Some(meta),
+                        worker_ctx.recent_exceptions,
+                        worker_ctx.forwarding,
+                    );
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
                 // Re-bind packet_frame for slow-path code below
                 // (original L477 binding's NLL lifetime ended before
                 // the helper call above).
@@ -4455,26 +4478,6 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         // established candidate admitted above; it cannot fall
                         // through to MAIN policy or PBR on a second miss.
                         if absent_fabric_ingress_suspect {
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
-                        }
-                        // #18560: a held pass creates no session. A new flow
-                        // admitted under a left view's tables would be stored
-                        // with the current view's stamps (see the prologue)
-                        // and never re-judged. Drop it as the generation
-                        // mismatch it is, as before the grace; the sender's
-                        // retransmit lands on the current view.
-                        if pass.held_pass {
-                            record_disposition(
-                                &worker_ctx.ident,
-                                &binding.live,
-                                DispositionCounters::Hot(telemetry.counters),
-                                PacketDisposition::ConfigGenerationMismatch,
-                                desc.len as u32,
-                                Some(meta),
-                                worker_ctx.recent_exceptions,
-                                worker_ctx.forwarding,
-                            );
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
