@@ -58,10 +58,20 @@ assurance_verdict() {
 	esac
 }
 # iperf_target_claim_cell: #18576 measurement-target uniqueness preflight.
+# Probes from the OFF-FIREWALL target container (MOUSE_TARGET_REF), so the
+# holders' replies never reach a firewall node, and reads (only) both nodes'
+# neighbor entries before and after; WAN_GW80_4 (the cluster's own address on
+# the VLAN) answering is the positive control. A documented dual holder set
+# (IPERF_TARGET4_KNOWN_HOLDERS, loss env) is VOID; anything else that is not
+# exactly one holder FAILs, an xpf RETH holder included.
 iperf_target_claim_cell() {
-	ha_target_claim_check "$WAN_GW80_4" "$IPERF_TARGET4" "$FW0" "$FW1"
-	assurance_verdict "$HA_TARGET_CLAIM_STATUS" \
-		"cluster: iperf target ${IPERF_TARGET4} answered for by exactly one host (RFC 5227 ARP probe from ${WAN_GW80_4}): ${HA_TARGET_CLAIM_REASON}"
+	ha_target_claim_check "$MOUSE_TARGET_REF" "$IPERF_TARGET4" "$WAN_GW80_4" \
+		"${IPERF_TARGET4_KNOWN_HOLDERS:-}" "$FW0" "$FW1"
+	# 3 = an xpf RETH MAC answers for the target: a product defect, FAIL.
+	local status="$HA_TARGET_CLAIM_STATUS"
+	[[ "$status" == 3 ]] && status=1
+	assurance_verdict "$status" \
+		"cluster: iperf target ${IPERF_TARGET4} answered for by exactly one host (RFC 5227 ARP probe from ${MOUSE_TARGET_REF}): ${HA_TARGET_CLAIM_REASON}"
 }
 # #11581 M3.1/M3.2 precedence contract (documentation only; no probe behavior change).
 #
@@ -725,9 +735,7 @@ test_cluster() {
 	# #18576: the iperf3 target must be ONE host. loss's 172.16.80.200 is
 	# answered by both xpf-mouse-target and the external v6 target box, so the
 	# firewall's neighbor entry, and with it every iperf3 measurement, can move
-	# between two different servers. Probed from the node holding WAN_GW80_4,
-	# the cluster's own address on the target's VLAN. FAIL names every holder;
-	# VOID means nobody answered.
+	# between two different servers. See iperf_target_claim_cell.
 	iperf_target_claim_cell
 
 	# F-158 END probe: a lane that grabbed the lock mid-window leaves the

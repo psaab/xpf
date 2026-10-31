@@ -1388,11 +1388,14 @@ address — same expectation.
   place where "copy what loss does" is ambiguous. This plan resolves each
   explicitly (§1.3.1, §1.6, S2); the approver should confirm those
   resolutions rather than re-derive them at build time.
-- **R5 — The `.200` target ambiguity.** `xpf-mouse-target` on loss currently
-  *also* answers `.200/::200`. **Measured 2026-10-31 (#18576):** v4 `.200` is
-  answered by BOTH `xpf-mouse-target` (`10:66:6a:8b:91:a4`) and the external
-  box (`f6:f0:06:10:77:d5`, which also holds `::200`). The loss smoke's v4
-  target is therefore dual-held, not just ambiguous by name. If the new clusters' tests ever point at
+- **R5 — The `.200` target ambiguity.** `xpf-mouse-target` on loss holds v4
+  `.200` (pinned by `mouse-addr.service`). It does not hold `::200`: that
+  address DAD-failed on the container and belongs to the external box
+  (`target-services.sh`).
+  **Measured 2026-10-31 (#18576):** v4 `.200` is ALSO answered by that
+  external box (`f6:f0:06:10:77:d5`). So the loss smoke's v4 target is
+  dual-held, not just ambiguous by name. Its v6 target is a different host
+  from its v4 target. If the new clusters' tests ever point at
   `.200` "because loss does", they may be measuring an SR-IOV container on
   loss, not the external box. The plan's dedicated `.210/.211` targets
   eliminate this for the new stacks; do not "reuse the existing target to

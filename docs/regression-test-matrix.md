@@ -172,24 +172,46 @@ failure.
 
 - **loss iperf target 172.16.80.200 is answered by two hosts: #18576.**
   - The two holders:
-    - `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4`): its v4 alias is pinned
-      by `mouse-addr.service`.
-    - The external v6 target box (`f6:f0:06:10:77:d5`): loss fw0 and fw1
+    - `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4`). This is its incus
+      volatile hwaddr; re-derive it with
+      `incus config get loss:xpf-mouse-target volatile.eth0.hwaddr` after
+      any recreate.
+    - The external v6 target box (`f6:f0:06:10:77:d5`). loss fw0 and fw1
       resolve `2001:559:8585:80::200` to it.
-  - The external box is not an incus instance or host netdev on loss, tcp,
-    udp or the orchestrator. It has no SSH handle, so it is not ours to change.
-  - Both loss nodes currently resolve v4 `.200` to the container. That can
-    change on any ARP from the other holder, or on a re-resolution, and every
-    v4 iperf3 measurement would then move to a different server.
-  - Nothing has observed a switch yet: a 4-min VLAN 80 capture
-    (2026-10-31) saw no frame with sender `.200` from either holder.
-  - test-connectivity's cell "iperf target ... answered for by exactly one
-    host" FAILs on loss until one holder drops v4 `.200`.
-  - When a loss iperf3 run stops or slows, read
-    `ip -s neigh show 172.16.80.200` on the RG1 owner, and if possible a
-    concurrent `ip monitor neigh`. A MAC other than `10:66:6a:8b:91:a4` means
-    the target moved: environment, not the product. tcp `.210` and udp
-    `.211` are unique.
+  - The external box is in no incus instance and no host netdev on loss,
+    tcp, udp or the orchestrator, and it has no SSH handle. It is not ours
+    to change.
+  - **Off-path control and when this cell is excused.** test-connectivity's
+    "iperf target ... answered for by exactly one host" IS the control. It
+    probes from the target container (`MOUSE_TARGET_REF`), never from a
+    firewall node; probing from the RG owner re-ran the race on it (seat X
+    reproduced a flip in 6/6 netns runs). It only reads both nodes'
+    neighbor entries, before and after the probe. The cluster's own
+    `WAN_GW80_4` answering the same probe is the positive control, and a
+    target that is not on-link from the container is VOID by name.
+    - The cell is VOID, and this row excuses it, **only while** the probe
+      shows exactly `{10:66:6a:8b:91:a4, f6:f0:06:10:77:d5}`, that is,
+      `IPERF_TARGET4_KNOWN_HOLDERS` in `test/incus/loss-userspace-cluster.env`.
+    - Any other holder set FAILs and is a product failure: a third MAC, an
+      xpf RETH MAC `02:bf:72:*`, a firewall entry that is FAILED or names a
+      MAC nobody claims, or an entry that changes during the probe. A RETH
+      holder is reported as status 3, mirroring #18575; the cell FAILs on it.
+    - Measured from an off-firewall vantage on the same VLAN
+      (`tcp:xpf-tcp-target`, 2026-10-31 02:34 UTC, with tcp's `.80.10` as
+      control and loss's firewalls only read): VOID with the known set;
+      FAIL with no known set.
+  - Both loss nodes have resolved v4 `.200` to the container whenever we
+    read them. A 4-min VLAN 80 capture saw no frame with sender `.200` from
+    either holder, so the hazard is latent.
+  - **When a loss iperf3 run stops or slows**, start
+    `ip monitor neigh` on both nodes before the run:
+    - node0 on `ge-0-0-2.80`;
+    - node1 on `ge-7-0-2.80`.
+
+    Then read `ip -s neigh show 172.16.80.200 dev <that interface>` after it.
+    Only a move to `f6:f0:06:10:77:d5` is this environment row. A third MAC,
+    or a FAILED entry, is a product neighbor fault.
+  - tcp `.210` and udp `.211` are unique: PASS.
 
 ## Reading results
 

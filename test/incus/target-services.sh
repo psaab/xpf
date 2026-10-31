@@ -36,7 +36,10 @@
 # itself. #18576 CORRECTION: it is not ONLY that. The external v6 box
 # (f6:f0:06:10:77:d5, the ::200 holder) ALSO answers ARP for v4 .200, so
 # the loss firewall's neighbor entry decides which of two servers a v4
-# measurement reaches. test-connectivity's target-claim cell FAILs on it. It arrived by hand (`ip addr add`, undocumented), so any
+# measurement reaches. test-connectivity's iperf-target cell measures it
+# from the container (VOID while exactly that known pair answers, FAIL
+# otherwise; IPERF_TARGET4_KNOWN_HOLDERS). It arrived by hand (`ip addr
+# add`, undocumented), so any
 # recreate or reboot silently dropped it (observed UP->gone) while every
 # harness kept measuring `.200`. TARGET_ALIAS_V4 names it (cluster-env.sh
 # derives it from IPERF_TARGET4; loss .200, tcp .210, udp .211) and
@@ -44,14 +47,17 @@
 # beside the mouse address — on the tcp/udp wire targets the alias IS
 # the pinned address, so nothing extra is emitted there. The v6 ::200
 # address IS external: it DAD-failed as a duplicate when tried on the
-# container, so dual-stack smokes reach v4 on this host and v6 on that
-# hardware — two different hosts. That split is a fact to design around
+# container, so dual-stack smokes reach v6 on that hardware and v4 on this
+# host, as long as the loss firewall resolves v4 .200 to the container (it
+# can also resolve to the hardware, #18576). Two different hosts. That
+# split is a fact to design around
 # (a v6 failure is not a v4 failure), not a premise to keep stating
 # wrongly for both families.
 #
 # WHY `up` CAN FAIL WITH A DESCRIPTION RATHER THAN A FIX. The target is
 # addressed by IP. When the IP is held by an incus instance (the loss
-# case today: xpf-mouse-target holds both .200 and .201), `up` delegates
+# case today: xpf-mouse-target holds both .200 and .201, and v4 .200 is
+# also answered by the external box, #18576), `up` delegates
 # to mouse-target-setup.sh, which pins every service under systemd
 # (mouse-iperf3@<port>, mouse-echo) so a listener survives reboot and a
 # failed unit is VISIBLE in `systemctl` instead of serving by accident

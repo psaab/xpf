@@ -1448,43 +1448,149 @@ OWNER_OUT="$(OWNER_STATUS=2 bash -euo pipefail -c "$OWNER_RUNNER" _ "$OWNER_CELL
 assert_eq "$OWNER_OUT" 'RC=2 PASS=0 FAIL=0 VOID=1' 'RG1 owner wrapper VOID status'
 printf 'RG1 owner cell wrapper preserves PASS/FAIL/VOID status under set -e\n'
 
-# #18576: an iperf target answered for by two hosts. The DUP shape is what
-# tcp fw0 heard for loss's 172.16.80.200 (2026-10-31).
-TGT_ONE=$'iface ge-0-0-2.80 02:bf:72:17:01:00\nreply 172.16.80.210 10:66:6a:5c:f2:b8\nreply 172.16.80.210 10:66:6a:5c:f2:b8'
-TGT_DUP=$'iface ge-0-0-2.80 02:bf:72:17:01:00\nreply 172.16.80.200 10:66:6a:8b:91:a4\nreply 172.16.80.200 f6:f0:06:10:77:d5\nreply 172.16.80.200 F6:F0:06:10:77:D5'
-TGT_OTHER=$'reply 172.16.80.201 10:66:6a:8b:91:a4\nreply 172.16.80.12 02:bf:72:17:01:00'
-assert_helper_status 0 ha_target_claim_verdict 172.16.80.210 "$TGT_ONE"
+# #18576: an iperf target answered for by two hosts. The shapes are what the
+# off-firewall probe prints. The DUP set is what an off-firewall vantage
+# (tcp:xpf-tcp-target) heard for loss's 172.16.80.200 (2026-10-31); "probe"
+# marks a reply addressed to us with target IP 0.0.0.0.
+KNOWN200='10:66:6a:8b:91:a4 f6:f0:06:10:77:d5'
+CTL=$'reply 172.16.80.8 02:bf:72:16:01:00 probe'
+TGT_ONE=$'iface eth0 10:66:6a:5c:f2:b8\nself 10:66:6a:5c:f2:b8\n'"$CTL"$'\nfw tcp:fw0 before 10:66:6a:5c:f2:b8 REACHABLE\nfw tcp:fw0 after 10:66:6a:5c:f2:b8 REACHABLE'
+TGT_DUP=$'iface eth0 10:66:6a:5c:f2:b8\nreply 172.16.80.200 10:66:6a:8b:91:a4 probe\nreply 172.16.80.200 f6:f0:06:10:77:d5 probe\nreply 172.16.80.200 F6:F0:06:10:77:D5 probe\n'"$CTL"
+TGT_SELFDUP=$'iface eth0 10:66:6a:8b:91:a4\nself 10:66:6a:8b:91:a4\nreply 172.16.80.200 f6:f0:06:10:77:d5 probe\n'"$CTL"
+TGT_THIRD="$TGT_DUP"$'\nreply 172.16.80.200 aa:bb:cc:dd:ee:ff probe'
+TGT_RETH=$'iface eth0 10:66:6a:5c:f2:b8\nreply 172.16.80.200 10:66:6a:8b:91:a4 probe\nreply 172.16.80.200 02:bf:72:16:01:00 probe\n'"$CTL"
+TGT_OTHER=$'iface eth0 10:66:6a:5c:f2:b8\nreply 172.16.80.201 10:66:6a:8b:91:a4 probe\n'"$CTL"
+TGT_SELF_NOCTL=$'iface eth0 10:66:6a:8b:91:a4\nself 10:66:6a:8b:91:a4'
+TGT_SELF_CTL_OTHER=$'iface eth0 10:66:6a:8b:91:a4\nself 10:66:6a:8b:91:a4\nreply 172.16.80.8 02:bf:72:16:01:00 other'
+TGT_WRONGFIELD=$'iface eth0 10:66:6a:8b:91:a4\nself 10:66:6a:8b:91:a4\nreply 172.16.80.200 10:66:6a:8b:91:a4 probe\nreply 172.16.80.8 10:66:6a:8b:91:a4 probe'
+tcv() { ha_target_claim_verdict "$@"; }
+assert_helper_status 0 tcv 172.16.80.210 172.16.80.8 '' "$TGT_ONE"
 assert_contains "$(<"${OUT}")" 'answered for only by 10:66:6a:5c:f2:b8' 'unique target names its one holder'
-assert_helper_status 1 ha_target_claim_verdict 172.16.80.200 "$TGT_DUP"
+# Two holders and no documented set: FAIL naming both, each once in any case.
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' "$TGT_DUP"
 assert_contains "$(<"${ERR}")" 'more than one host (10:66:6a:8b:91:a4 f6:f0:06:10:77:d5)' \
-	'dual-held target names both holders, each once'
-# Replies for OTHER addresses are not claims on the target.
-assert_helper_status 2 ha_target_claim_verdict 172.16.80.200 "$TGT_OTHER"
-assert_helper_status 2 ha_target_claim_verdict 172.16.80.200 ''
-assert_helper_status 2 ha_target_claim_verdict '' "$TGT_DUP"
-assert_helper_status 2 ha_target_claim_verdict 172.16.80.200
-# ha_target_claim_check: stubbed probe; argv must reach it unchanged.
+	'dual-held target names both holders'
+assert_eq "$(grep -io 'f6:f0:06:10:77:d5' "${ERR}" | wc -l)" 1 'dual-held target names each holder once, case-insensitively'
+# Exactly the documented set: VOID (environment), from either vantage.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_DUP"
+assert_contains "$(<"${ERR}")" 'KNOWN dual holder set' 'the known set is named as environment'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_SELFDUP"
+# Any other set FAILs: a third MAC (1), or an xpf RETH MAC (3, product).
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_THIRD"
+assert_helper_status 3 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_RETH"
+assert_contains "$(<"${ERR}")" 'xpf RETH MAC (02:bf:72:16:01:00)' 'an xpf RETH holder is a product failure'
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 'f6:f0:06:10:77:d5' "$TGT_DUP"
+# Once one holder drops the address (Option A), the same env PASSes: a stale
+# known set never VOIDs a unique target. A lone holder still needs the control.
+assert_helper_status 0 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" $'iface eth0 10:66:6a:8b:91:a4\nself 10:66:6a:8b:91:a4\n'"$CTL"
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_SELF_NOCTL"
+assert_contains "$(<"${ERR}")" 'control 172.16.80.8 did not answer' 'a lone holder without the control is VOID, not PASS'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_SELF_CTL_OTHER"
+# A reply naming the prober's own MAC means the probe read the wrong field.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_WRONGFIELD"
+assert_contains "$(<"${ERR}")" "names the prober's own MAC" 'a wrong-field probe is VOID, never a PASS'
+# The firewall's own view: FAILED, an unclaimed MAC, or a change is a fault.
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_DUP"$'\nfw loss:fw0 before - FAILED'
+assert_contains "$(<"${ERR}")" 'FAILED (before)' 'a FAILED firewall entry is a product neighbor fault'
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_DUP"$'\nfw loss:fw0 after 11:22:33:44:55:66 REACHABLE'
+assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_DUP"$'\nfw loss:fw0 before 10:66:6a:8b:91:a4 REACHABLE\nfw loss:fw0 after f6:f0:06:10:77:d5 STALE'
+assert_contains "$(<"${ERR}")" 'changed from 10:66:6a:8b:91:a4 to f6:f0:06:10:77:d5' 'a firewall flip during the probe is reported'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" \
+	"$TGT_DUP"$'\nfw loss:fw0 before 10:66:6a:8b:91:a4 REACHABLE\nfw loss:fw0 after 10:66:6a:8b:91:a4 REACHABLE\nfw loss:fw1 before - NONE\nfw loss:fw1 after - NONE'
+assert_contains "$(<"${ERR}")" 'loss:fw0 -> 10:66:6a:8b:91:a4' 'the excused VOID still reports the firewall view'
+# Replies for OTHER addresses are not claims on the target; nobody = VOID.
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$TGT_OTHER"
+assert_contains "$(<"${ERR}")" 'nobody answered ARP for 172.16.80.200 although control' 'an unheld target with a live control is VOID'
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 '' ''
+assert_helper_status 2 tcv '' 172.16.80.8 '' "$TGT_DUP"
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.200 '' "$TGT_DUP"
+assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 ''
+# ha_target_claim_check: probe and firewall snapshots stubbed; argv must reach
+# them unchanged and the snapshots must bracket the probe.
 ha_target_claim_probe_real="$(declare -f ha_target_claim_probe)"
+ha_target_fw_neigh_real="$(declare -f ha_target_fw_neigh)"
 TGT_STUB_OUT="" TGT_STUB_RC=0
-ha_target_claim_probe() { printf '%s' "$*" >"${TMP_DIR}/tgt-stub-args"; printf '%s\n' "$TGT_STUB_OUT"; return "$TGT_STUB_RC"; }
-tgt_check_case() { # <expected-status> <reason-substring> <stub-out> <stub-rc>
+ha_target_claim_probe() { printf 'probe %s\n' "$*" >>"${TMP_DIR}/tgt-stub-calls"; printf '%s\n' "$TGT_STUB_OUT"; return "$TGT_STUB_RC"; }
+ha_target_fw_neigh() { printf 'neigh %s\n' "$*" >>"${TMP_DIR}/tgt-stub-calls"; local p="$1" n; shift 2; for n in "$@"; do printf 'fw %s %s 10:66:6a:8b:91:a4 REACHABLE\n' "$n" "$p"; done; }
+tgt_check_case() { # <expected-status> <reason-substring> <stub-out> <stub-rc> [known]
 	TGT_STUB_OUT="$3" TGT_STUB_RC="$4"
-	rm -f "${TMP_DIR}/tgt-stub-args"
-	if ! ha_target_claim_check 172.16.80.8 172.16.80.200 loss:fw0 loss:fw1; then
+	rm -f "${TMP_DIR}/tgt-stub-calls"
+	if ! ha_target_claim_check loss:mouse 172.16.80.200 172.16.80.8 "${5:-}" loss:fw0 loss:fw1; then
 		fail_test "ha_target_claim_check returned nonzero (it must always return 0)"
 	fi
 	assert_eq "$HA_TARGET_CLAIM_STATUS" "$1" "ha_target_claim_check status for ${2}"
 	assert_contains "$HA_TARGET_CLAIM_REASON" "$2" "ha_target_claim_check reason for ${2}"
 }
+tgt_check_case 2 'KNOWN dual holder set' "$TGT_DUP" 0 "$KNOWN200"
+assert_eq "$(tr '\n' '|' <"${TMP_DIR}/tgt-stub-calls")" \
+	'neigh before 172.16.80.200 loss:fw0 loss:fw1|probe loss:mouse 172.16.80.200 172.16.80.8|neigh after 172.16.80.200 loss:fw0 loss:fw1|' \
+	'target claim check snapshots both firewalls before and after an off-firewall probe'
 tgt_check_case 1 'more than one host' "$TGT_DUP" 0
-assert_eq "$(<"${TMP_DIR}/tgt-stub-args")" '172.16.80.8 172.16.80.200 loss:fw0 loss:fw1' \
-	'target claim check passes local address, target and nodes to the probe'
-tgt_check_case 0 'answered for only by' $'reply 172.16.80.200 10:66:6a:8b:91:a4' 0
-tgt_check_case 2 'nobody answered' "$TGT_OTHER" 0
-tgt_check_case 2 'holds 172.16.80.8' '' 2
+tgt_check_case 0 'answered for only by' $'iface eth0 10:66:6a:8b:91:a4\nself 10:66:6a:8b:91:a4\n'"$CTL" 0
+tgt_check_case 3 'xpf RETH MAC' "$TGT_RETH" 0 "$KNOWN200"
+tgt_check_case 2 'not on-link' '' 3
+tgt_check_case 2 'could not run (status 1)' '' 1
 eval "$ha_target_claim_probe_real"
-# Wiring: the REAL iperf_target_claim_cell and its call in test_cluster
-# (test-connectivity.sh), extracted by name and run against a stubbed check.
+eval "$ha_target_fw_neigh_real"
+
+# The REAL probe, run hermetically: three unprivileged netns on one bridge.
+# "c" is the vantage and holds the target (loss's container), "x" is a
+# second holder, and "fw" holds the control address and carries a cached
+# neighbor entry for the target. The probe must report both holders and the
+# control, three rounds each, and must not move fw's entry. SKIP where user
+# namespaces are unavailable.
+TGT_NETNS_OUT="${TMP_DIR}/tgt-netns.out"
+if unshare -rnm true 2>/dev/null; then
+	declare -f ha_target_claim_probe >"${TMP_DIR}/tgt-probe-fn.sh"
+	unshare -rnm bash -c '
+		set -u
+		export PATH=/usr/sbin:/sbin:$PATH
+		mount -t tmpfs none /run && mkdir -p /run/netns
+		ip link add name br0 type bridge && ip link set br0 up
+		mk() {
+			ip netns add "$1"
+			ip link add name "$1-br" type veth peer name "$1-in"
+			ip link set "$1-in" netns "$1"
+			ip link set "$1-br" master br0 up
+			ip netns exec "$1" ip link set lo up
+			ip netns exec "$1" ip link set "$1-in" address "$2" up
+			ip netns exec "$1" ip addr add "$3" dev "$1-in"
+		}
+		mk fw 02:bf:72:16:01:00 172.16.80.8/24
+		mk c 10:66:6a:8b:91:a4 172.16.80.200/24
+		mk x f6:f0:06:10:77:d5 172.16.80.200/24
+		sleep 1
+		ip netns exec fw ip neigh replace 172.16.80.200 lladdr 10:66:6a:8b:91:a4 dev fw-in nud stale
+		incus() { shift 3; ip netns exec c "$@"; }
+		source "$1"
+		echo "FW_BEFORE $(ip netns exec fw ip neigh show 172.16.80.200 | awk "{print \$5}")"
+		ha_target_claim_probe xpf-mouse-target 172.16.80.200 172.16.80.8
+		echo "PROBE_RC $?"
+		echo "FW_AFTER $(ip netns exec fw ip neigh show 172.16.80.200 | awk "{print \$5}")"
+		# A target reached only via a gateway is not on-link: status 3, no probe.
+		ip netns exec c ip route add default via 172.16.80.8
+		ha_target_claim_probe xpf-mouse-target 10.9.9.9 172.16.80.8 >/dev/null
+		echo "OFFLINK_RC $?"
+	' _ "${TMP_DIR}/tgt-probe-fn.sh" >"$TGT_NETNS_OUT" 2>&1 || true
+	assert_contains "$(<"$TGT_NETNS_OUT")" 'PROBE_RC 0' 'netns: the real probe runs'
+	assert_contains "$(<"$TGT_NETNS_OUT")" 'self 10:66:6a:8b:91:a4' 'netns: a vantage holding the target reports itself'
+	assert_eq "$(grep -c '^reply 172.16.80.200 f6:f0:06:10:77:d5 probe$' "$TGT_NETNS_OUT")" 3 \
+		'netns: the second holder answers each of three rounds, sender MAC parsed, flagged as our probe'
+	assert_eq "$(grep -c '^reply 172.16.80.8 02:bf:72:16:01:00 probe$' "$TGT_NETNS_OUT")" 3 \
+		'netns: the control answers each of three rounds'
+	assert_eq "$(grep -c '10:66:6a:8b:91:a4 probe$' "$TGT_NETNS_OUT")" 0 'netns: no reply ever names the prober itself'
+	assert_contains "$(<"$TGT_NETNS_OUT")" 'FW_AFTER 10:66:6a:8b:91:a4' \
+		"netns: probing from the target's holder leaves the firewall's entry where it was"
+	assert_contains "$(<"$TGT_NETNS_OUT")" 'OFFLINK_RC 3' 'netns: an off-link (via-gateway) target is refused, status 3'
+	assert_helper_status 2 tcv 172.16.80.200 172.16.80.8 "$KNOWN200" "$(<"$TGT_NETNS_OUT")"
+	assert_helper_status 1 tcv 172.16.80.200 172.16.80.8 '' "$(<"$TGT_NETNS_OUT")"
+	printf 'netns target-claim probe cell ran\n'
+else
+	printf 'SKIP netns target-claim probe cell: unprivileged user/net namespaces unavailable\n'
+fi
+# Wiring: the REAL iperf_target_claim_cell and test_cluster
+# (test-connectivity.sh), extracted by name and run against stubs.
 TGT_WIRING="${TMP_DIR}/target-claim-wiring.sh"
 python3 - "${ROOT}/test/incus/test-connectivity.sh" "$TGT_WIRING" <<'PY'
 import pathlib
@@ -1493,16 +1599,11 @@ import sys
 
 tc = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 blocks = []
-for name in ("assurance_verdict", "iperf_target_claim_cell"):
+for name in ("assurance_verdict", "iperf_target_claim_cell", "test_cluster"):
     match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", tc, re.M | re.S)
     if not match:
         raise SystemExit(f"cannot extract {name} for #18576 wiring coverage")
     blocks.append(match.group(0))
-match = re.search(r"^test_cluster\(\) \{\n.*?^\}\n", tc, re.M | re.S)
-if not match:
-    raise SystemExit("cannot extract test_cluster for #18576 wiring coverage")
-calls = sum(1 for line in match.group(0).splitlines() if line.split("#", 1)[0].strip() == "iperf_target_claim_cell")
-blocks.append(f"TARGET_CLAIM_CELL_CALLS={calls}\n")
 pathlib.Path(sys.argv[2]).write_text("".join(blocks), encoding="utf-8")
 PY
 tgt_cell_run() { # <check-status> -> PASS|FAIL|VOID
@@ -1514,18 +1615,39 @@ tgt_cell_run() { # <check-status> -> PASS|FAIL|VOID
 		# shellcheck disable=SC1090
 		source "$TGT_WIRING"
 		ha_target_claim_check() { printf '%s' "$*" >"${TMP_DIR}/tgt-cell-args"; HA_TARGET_CLAIM_STATUS="$S_TGT"; HA_TARGET_CLAIM_REASON="target claim: stub"; }
-		WAN_GW80_4=172.16.80.8 IPERF_TARGET4=172.16.80.200 FW0=loss:fw0 FW1=loss:fw1
+		MOUSE_TARGET_REF=loss:xpf-mouse-target IPERF_TARGET4=172.16.80.200 WAN_GW80_4=172.16.80.8 FW0=loss:fw0 FW1=loss:fw1
+		IPERF_TARGET4_KNOWN_HOLDERS="10:66:6a:8b:91:a4 f6:f0:06:10:77:d5"
 		iperf_target_claim_cell
 		printf '%s\n' "${W_LOG%%|*}"
 	)
 }
 assert_eq "$(tgt_cell_run 0)" PASS 'iperf target cell: one holder PASSes'
 assert_eq "$(tgt_cell_run 1)" FAIL 'iperf target cell: two holders FAIL'
-assert_eq "$(tgt_cell_run 2)" VOID 'iperf target cell: nobody answering is VOID'
-assert_eq "$(<"${TMP_DIR}/tgt-cell-args")" '172.16.80.8 172.16.80.200 loss:fw0 loss:fw1' \
-	'iperf target cell probes IPERF_TARGET4 from WAN_GW80_4 on both nodes'
-assert_eq "$(bash -c "source '$TGT_WIRING'; echo \$TARGET_CLAIM_CELL_CALLS")" 1 \
-	'test-connectivity test_cluster calls iperf_target_claim_cell exactly once (code, not a comment)'
+assert_eq "$(tgt_cell_run 3)" FAIL 'iperf target cell: an xpf RETH holder (status 3) FAILs'
+assert_eq "$(tgt_cell_run 2)" VOID 'iperf target cell: the known set or nobody answering is VOID'
+assert_eq "$(<"${TMP_DIR}/tgt-cell-args")" 'loss:xpf-mouse-target 172.16.80.200 172.16.80.8 10:66:6a:8b:91:a4 f6:f0:06:10:77:d5 loss:fw0 loss:fw1' \
+	'iperf target cell probes IPERF_TARGET4 from the off-firewall target container, WAN_GW80_4 as control, both nodes'
+# Reachability, not text: run the extracted test_cluster with every helper it
+# calls answered by a no-op (command_not_found_handle), incus refused, the
+# firewall nodes "running" and the LAN host not, and count real invocations
+# of the cell. A call left in a dead branch or after an early return is 0.
+tgt_reach_count() {
+	(
+		set +eu
+		CALLS="${TMP_DIR}/tgt-reach-calls"
+		: >"$CALLS"
+		# shellcheck disable=SC1090
+		source "$TGT_WIRING"
+		command_not_found_handle() { return 0; }
+		incus() { return 1; }
+		instance_running() { [[ "$1" == "$FW0" || "$1" == "$FW1" ]]; }
+		iperf_target_claim_cell() { printf 'called\n' >>"$CALLS"; }
+		FW0=loss:fw0 FW1=loss:fw1 CLUSTER_LAN_HOST=loss:lan CLUSTER_CONF=/nonexistent PROJECT_ROOT="$ROOT"
+		test_cluster >/dev/null 2>&1
+		grep -c called "$CALLS"
+	)
+}
+assert_eq "$(tgt_reach_count)" 1 'test-connectivity test_cluster reaches iperf_target_claim_cell exactly once'
 
 printf 'PASS ha-assurance-selftest: M2.4, RG1 Groups 1-8, N6/N12 pins, sticky FAIL, blind markers, gate dominance, set-e VOID guard\n'
 
