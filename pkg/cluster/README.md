@@ -1319,8 +1319,18 @@ renders `/etc/chrony/sources.d/xpf.sources` from `set system ntp server`.
 So a cluster with no `system ntp server` has **no time source by
 construction**.
 
-- **Configure it:** `set system ntp server <address>`, the SAME reachable
-  source on both nodes.
+- **Configure it:** `set system ntp server <address> routing-instance mgmt`,
+  the SAME reachable source on both nodes. The management VRF is the only
+  off-box route BOTH nodes are guaranteed to have: the default instance's
+  default route leaves through a RETH, which only the node that owns that
+  redundancy group has (the other node's default is a blackhole), so a
+  default-instance source syncs at most one node and a failover moves which
+  one (#18584). With `routing-instance mgmt` on every server, xpfd renders
+  chrony `bindacqdevice vrf-mgmt` (`/etc/chrony/conf.d/xpf-acquisition.conf`)
+  and restarts chrony once per daemon process after the VRF exists. A
+  cluster whose servers use the default instance gets a commit advisory
+  naming this. The distro `makestep 1 3` steps a clock that booted from a
+  lagging RTC within the first three updates.
 - **Commit-time advisory (#8357):** committing a `chassis cluster` with
   no `system ntp server` now emits a warning that names fabric RPC as
   what will fail. It is a WARNING, never an error — configuring a cluster

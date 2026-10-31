@@ -1758,6 +1758,11 @@ type Daemon struct {
 	// bouncing rsyslog/chrony — but it also meant a FAILED reload was erased by
 	// the very convergence that preceded it. See daemon_service_reload_debt.go.
 	svcReloadDebt serviceReloadDebt
+	// chronyAcqStartRestarted: chrony has been restarted by this process
+	// since it first rendered a `bindacqdevice` (#18584). Read and written
+	// only by applySystemNTP, which runs under applySem. See there for why
+	// the first binding apply of every process restarts chrony.
+	chronyAcqStartRestarted bool
 	// routingDebt is the #9693 routing reconcile debt (routing_reconcile_debt_9693.go).
 	routingDebt routingReconcileDebt
 	// #11497: a day-2 real+gap nft failure leaves the newcomer without a

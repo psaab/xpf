@@ -22,6 +22,7 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/logging"
+	"github.com/psaab/xpf/pkg/routing"
 	"github.com/vishvananda/netlink"
 )
 
@@ -1303,7 +1304,44 @@ func isProcessDisabled(cfg *config.Config, name string) bool {
 var (
 	chronySourcesPath   = "/etc/chrony/sources.d/xpf.sources"
 	chronyThresholdPath = "/etc/chrony/conf.d/xpf-threshold.conf"
+	// #18584: the acquisition-device file. It shares the threshold file's
+	// conf.d reload leg: chronyd reads conf.d only at start, so both need
+	// the restart that leg falls back to.
+	chronyAcquisitionPath = "/etc/chrony/conf.d/xpf-acquisition.conf"
 )
+
+// renderChronyAcquisition renders the `bindacqdevice` directive that puts
+// chrony's NTP client sockets in the routing instance every configured server
+// names (#18584). "" leaves chrony in the default instance.
+//
+// On a chassis cluster this is what makes NTP work on BOTH nodes: the default
+// instance's off-box route leaves through a RETH that only the WAN owner has,
+// while the management VRF (fxp0) is present on each node. Measured on loss:
+// a query to a public server from the secondary times out in the default
+// instance and succeeds with `bindacqdevice vrf-mgmt`.
+//
+// config.NTPAcquisitionInstance owns the decision (one device for every
+// server, or none); the device name is the single routing.VRFDeviceName.
+func renderChronyAcquisition(cfg *config.Config) string {
+	ri, dev := chronyAcquisitionDevice(cfg)
+	if dev == "" {
+		return ""
+	}
+	return fmt.Sprintf("# Managed by xpfd: NTP servers are reached through routing-instance %s (#18584)\nbindacqdevice %s\n", ri, dev)
+}
+
+// chronyAcquisitionDevice returns the honoured routing instance and its VRF
+// device, or ("", "") when chrony stays in the default instance.
+func chronyAcquisitionDevice(cfg *config.Config) (string, string) {
+	if cfg == nil {
+		return "", ""
+	}
+	ri, ok, _ := config.NTPAcquisitionInstance(&cfg.System, cfg.RoutingInstances)
+	if !ok || ri == "" {
+		return "", ""
+	}
+	return ri, routing.VRFDeviceName(ri)
+}
 
 // renderChronySources renders the chrony source lines. opts carries the #7132
 // per-server modifiers keyed by address; a nil map renders exactly as before.
@@ -1517,6 +1555,11 @@ func (d *Daemon) applySystemNTP(cfg *config.Config) {
 		if err != nil {
 			slog.Warn("failed to remove chrony threshold config", "err", err)
 		}
+		acqChanged, err := reconcileManagedFile(chronyAcquisitionPath, "")
+		if err != nil {
+			slog.Warn("failed to remove chrony acquisition-device config", "err", err)
+		}
+		thresholdChanged = thresholdChanged || acqChanged
 		sourcesChanged = sourcesChanged || sourcesOwed
 		thresholdChanged = thresholdChanged || thresholdOwed
 		if sourcesChanged || thresholdChanged {
@@ -1536,6 +1579,23 @@ func (d *Daemon) applySystemNTP(cfg *config.Config) {
 		slog.Warn("failed to reconcile chrony threshold config", "err", err)
 		return
 	}
+	acq := renderChronyAcquisition(cfg)
+	acqChanged, err := reconcileManagedFile(chronyAcquisitionPath, acq)
+	if err != nil {
+		slog.Warn("failed to reconcile chrony acquisition-device config", "err", err)
+		return
+	}
+	// #18584: the bound device is the VRF this daemon creates, so a chronyd
+	// that started before it existed (every boot: chrony.service does not
+	// order after xpfd) may hold client sockets it could not bind. Restart
+	// chrony once per daemon process after the first apply that renders a
+	// binding — this tail runs after the VRFs are applied. It also re-opens
+	// chrony's `makestep` window, so a node that booted from a lagging RTC
+	// is stepped as soon as the bound source answers.
+	if acq != "" && !d.chronyAcqStartRestarted {
+		acqChanged = true
+	}
+	thresholdChanged = thresholdChanged || acqChanged
 	sourcesChanged = sourcesChanged || sourcesOwed
 	thresholdChanged = thresholdChanged || thresholdOwed
 	if !sourcesChanged && !thresholdChanged {
@@ -1543,8 +1603,14 @@ func (d *Daemon) applySystemNTP(cfg *config.Config) {
 	}
 
 	d.noteChronyReloadResult(chronyReloadFn(sourcesChanged, thresholdChanged))
+	// Requested is enough: a failed restart latches the conf.d reload debt,
+	// and the #6800 retry owner replays it until it succeeds.
+	if acq != "" && thresholdChanged {
+		d.chronyAcqStartRestarted = true
+	}
 	slog.Info("NTP config applied via chrony",
 		"servers", cfg.System.NTPServers,
+		"acquisition_device", func() string { _, dev := chronyAcquisitionDevice(cfg); return dev }(),
 		"threshold", cfg.System.NTPThreshold,
 		"action", cfg.System.NTPThresholdAction)
 }

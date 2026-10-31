@@ -109,10 +109,11 @@ func chronyDaemon6800(t *testing.T) (d *Daemon, calls func() [][2]bool, setOutco
 	t.Helper()
 
 	dir := t.TempDir()
-	origSrc, origThr := chronySourcesPath, chronyThresholdPath
+	origSrc, origThr, origAcq := chronySourcesPath, chronyThresholdPath, chronyAcquisitionPath
 	chronySourcesPath = filepath.Join(dir, "xpf.sources")
 	chronyThresholdPath = filepath.Join(dir, "xpf-threshold.conf")
-	t.Cleanup(func() { chronySourcesPath, chronyThresholdPath = origSrc, origThr })
+	chronyAcquisitionPath = filepath.Join(dir, "xpf-acquisition.conf")
+	t.Cleanup(func() { chronySourcesPath, chronyThresholdPath, chronyAcquisitionPath = origSrc, origThr, origAcq })
 
 	var mu sync.Mutex
 	var got [][2]bool

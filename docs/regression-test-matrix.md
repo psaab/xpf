@@ -89,6 +89,7 @@ re-run, not yet a regression; two are a regression.
 Resync node clocks after any crash reboot: the loss lab has no NTP
 (`failover_resync_node_clocks`, #11872).
 Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ran 66.8 s behind fw0 on loss); a cross-node timeline without that offset produced a wrong diagnosis once.
+The lab cluster configs carry NTP through `vrf-mgmt` since #18584 (public servers; the incus bridge gateways serve none). Once a cluster runs a config with it, both nodes show `Leap status: Normal` in `chronyc tracking`, and a clock resync is a workaround to drop, not a step to keep.
 
 | ID | Run | Pass | Catches |
 |---|---|---|---|
