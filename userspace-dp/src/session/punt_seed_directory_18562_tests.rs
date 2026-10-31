@@ -220,7 +220,7 @@ fn keys_in_one_shard(dir: &PuntSeedDirectory, n: usize) -> Vec<SessionKey> {
 #[test]
 fn full_shard_of_live_rows_refuses_in_constant_work_18562() {
     let dir = PuntSeedDirectory::new();
-    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let cap = PuntSeedDirectory::row_cap_for_test();
     let keys = keys_in_one_shard(&dir, cap + 1000);
     for (n, key) in keys[..cap].iter().enumerate() {
         assert!(dir.publish(key, row_at(T0 + 1_000_000_000, n as u64), T0));
@@ -244,7 +244,7 @@ fn full_shard_of_live_rows_refuses_in_constant_work_18562() {
 #[test]
 fn steady_state_at_cap_costs_constant_amortized_work_18562() {
     let dir = PuntSeedDirectory::new();
-    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let cap = PuntSeedDirectory::row_cap_for_test();
     let n = 4 * cap;
     let keys = keys_in_one_shard(&dir, cap + n);
     for (i, key) in keys[..cap].iter().enumerate() {
@@ -269,7 +269,7 @@ fn steady_state_at_cap_costs_constant_amortized_work_18562() {
 #[test]
 fn retire_churn_keeps_the_queue_short_in_amortized_constant_work_18562() {
     let dir = PuntSeedDirectory::new();
-    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let cap = PuntSeedDirectory::row_cap_for_test();
     let rounds = 8;
     let keys = keys_in_one_shard(&dir, cap * rounds);
     let shard = dir.shard_of_for_test(&keys[0]);
@@ -295,7 +295,7 @@ fn retire_churn_keeps_the_queue_short_in_amortized_constant_work_18562() {
 #[test]
 fn one_publish_does_bounded_work_however_much_expires_at_once_18562() {
     let dir = PuntSeedDirectory::new();
-    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let cap = PuntSeedDirectory::row_cap_for_test();
     let budget = PuntSeedDirectory::maintain_budget_for_test() as u64;
     let keys = keys_in_one_shard(&dir, 2 * cap + 1);
     let shard = dir.shard_of_for_test(&keys[0]);
@@ -330,7 +330,7 @@ fn one_publish_does_bounded_work_however_much_expires_at_once_18562() {
 #[test]
 fn stuck_front_queue_is_capped_and_refuses_18562() {
     let dir = PuntSeedDirectory::new();
-    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let cap = PuntSeedDirectory::row_cap_for_test();
     let qcap = PuntSeedDirectory::queue_cap_for_test();
     let keys = keys_in_one_shard(&dir, qcap + 500);
     let shard = dir.shard_of_for_test(&keys[0]);
@@ -361,7 +361,7 @@ fn stuck_front_queue_is_capped_and_refuses_18562() {
 #[ignore = "timing harness for #18562 review; run explicitly"]
 fn punt_seed_directory_publish_cost_bench_18562() {
     let reps = 20_000usize;
-    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let cap = PuntSeedDirectory::row_cap_for_test();
     let time = |f: &mut dyn FnMut()| {
         let t = std::time::Instant::now();
         f();
@@ -426,9 +426,81 @@ fn punt_seed_directory_publish_cost_bench_18562() {
         let _ = adv.publish(key, row_at(T0 + 10, 50_000_000 + n as u64), T0 + 2);
         adv_max_ns = adv_max_ns.max(t.elapsed().as_nanos());
     }
+    // Review seat L (r3): worst single publish under 100k-step churn at the
+    // live-row cap (retire one, publish one).
+    let churn = PuntSeedDirectory::new();
+    let steps = 100_000usize;
+    let keys = keys_in_one_shard(&churn, cap + steps);
+    for (n, key) in keys[..cap].iter().enumerate() {
+        churn.publish(key, row_at(u64::MAX, n as u64), T0);
+    }
+    let mut churn_ns: Vec<u128> = Vec::with_capacity(steps);
+    for step in 0..steps {
+        churn.retire(&keys[step], 1, step as u64);
+        let t = std::time::Instant::now();
+        let _ = churn.publish(&keys[cap + step], row_at(u64::MAX, (cap + step) as u64), T0);
+        churn_ns.push(t.elapsed().as_nanos());
+    }
+    // A single max over 100k samples catches host preemption as easily as
+    // real lock work, so report the tail shape too.
+    let tail = |v: &mut Vec<u128>| -> String {
+        v.sort_unstable();
+        let at = |q: f64| v[((v.len() as f64 * q) as usize).min(v.len() - 1)];
+        format!(
+            "p50={} p99.9={} max={} over30us={}",
+            at(0.5),
+            at(0.999),
+            v[v.len() - 1],
+            v.iter().filter(|&&n| n > 30_000).count()
+        )
+    };
+    let churn_tail = tail(&mut churn_ns);
+    // The two candidate fixes, measured on the raw table the shard uses:
+    // (A, chosen) reserve 1024, keep <= half its capacity live; (B) reserve
+    // 2048, keep 1024 live. (bug) reserve 1024, keep 1016 live.
+    // Per variant: rehash events (an insert after which `capacity()` jumped
+    // back up = tombstones purged), the worst insert that DID rehash, the
+    // worst that did not (noise floor), and whether the table grew.
+    let raw = |reserve: usize, live: usize| -> String {
+        let mut m: std::collections::HashMap<SessionKey, PuntSeedRow, crate::hot_hash_seed::HotPathSeededState> =
+            std::collections::HashMap::with_hasher(crate::hot_hash_seed::HotPathSeededState::new(7));
+        m.reserve(reserve);
+        let start_cap = m.capacity();
+        let key = |i: usize| SessionKey { src_port: (i & 0xffff) as u16, dst_port: (i >> 16) as u16, ..udp_key() };
+        for i in 0..live {
+            m.insert(key(i), row_at(u64::MAX, i as u64));
+        }
+        let (mut events, mut worst_rehash, mut worst_plain, mut max_cap) = (0u32, 0u128, 0u128, start_cap);
+        let mut all: Vec<u128> = Vec::with_capacity(steps);
+        for step in 0..steps {
+            m.remove(&key(step));
+            let before = m.capacity();
+            let t = std::time::Instant::now();
+            m.insert(key(live + step), row_at(u64::MAX, step as u64));
+            let ns = t.elapsed().as_nanos();
+            all.push(ns);
+            let after = m.capacity();
+            max_cap = max_cap.max(after);
+            // A tombstone reuse raises `capacity()` by exactly 1; a rehash
+            // restores many slots at once.
+            if after > before + 1 {
+                events += 1;
+                worst_rehash = worst_rehash.max(ns);
+            } else {
+                worst_plain = worst_plain.max(ns);
+            }
+        }
+        format!("cap {start_cap}->max {max_cap} rehash-events={events} worst-rehash-insert={worst_rehash}ns worst-plain-insert={worst_plain}ns insert {}", tail(&mut all))
+    };
+    let a = raw(1024, 896);
+    let b = raw(2048, cap);
+    let x = raw(1024, 1016);
     eprintln!(
-        "R18562BENCH publish ns: below-cap(publish+retire)={below_ns:.0} at-cap-refused={refused_ns:.0} steady-at-cap={steady_ns:.0} worst-growth-publish={grow_max_ns} worst-adversarial-publish={adv_max_ns}"
+        "R18562BENCH publish ns: below-cap(publish+retire)={below_ns:.0} at-cap-refused={refused_ns:.0} steady-at-cap={steady_ns:.0} worst-growth-publish={grow_max_ns} worst-adversarial-publish={adv_max_ns} churn-at-cap-publish[{churn_tail}]"
     );
+    eprintln!("R18562BENCH raw churn 100k A reserve1024/live896: {a}");
+    eprintln!("R18562BENCH raw churn 100k B (chosen) reserve2048/live{cap}: {b}");
+    eprintln!("R18562BENCH raw churn 100k bug reserve1024/live1016: {x}");
 }
 
 /// Every in-place writer of a forward entry's decision or metadata retires a
@@ -523,13 +595,15 @@ fn publish_skips_a_held_shard_instead_of_waiting_18562() {
 #[test]
 fn shard_reserves_its_cap_once_and_never_resizes_while_populated_18562() {
     let dir = PuntSeedDirectory::new();
-    let cap = PuntSeedDirectory::shard_cap_for_test();
+    let shard_cap = PuntSeedDirectory::shard_cap_for_test();
+    let cap = PuntSeedDirectory::row_cap_for_test();
     let keys = keys_in_one_shard(&dir, cap);
     let shard = dir.shard_of_for_test(&keys[0]);
     assert_eq!(dir.rows_capacity_for_test(shard), 0, "an unused shard holds nothing");
     assert!(dir.publish(&keys[0], row_at(T0 + 10, 0), T0));
     let reserved = dir.rows_capacity_for_test(shard);
-    assert!(reserved >= cap, "the first publish reserves the shard cap ({reserved} < {cap})");
+    assert!(reserved >= shard_cap, "the first publish reserves the shard cap ({reserved} < {shard_cap})");
+    assert!(cap <= reserved / 2, "live rows are capped at half the reserved capacity ({cap} > {reserved}/2)");
     for (n, key) in keys.iter().enumerate().skip(1) {
         assert!(dir.publish(key, row_at(T0 + 10, n as u64), T0));
         assert_eq!(dir.rows_capacity_for_test(shard), reserved, "no resize while filling (row {n})");
@@ -541,4 +615,42 @@ fn shard_reserves_its_cap_once_and_never_resizes_while_populated_18562() {
     // shift `capacity()` without any reallocation — review seat K's point.)
     assert!(dir.publish(&late, row_at(T0 + 20, 99_999), T0 + 11), "expired rows make room");
     assert!(keys.iter().all(|k| dir.probe(k, T0 + 11).is_none()), "expired rows never match");
+}
+
+/// Review seat L (r3): churn at the live-row cap (one retire plus one publish
+/// per step) leaves hashbrown tombstones. With more than half the table's
+/// capacity live, the tombstone purge RESIZED the table under the shard lock
+/// (1792 -> 3584, 339-383 us once per shard) instead of rehashing in place.
+/// With live rows capped at half the reserved capacity the table never grows
+/// across 100k churn publishes, and every single call stays within the pop
+/// budget. RED with the old full `SHARD_CAP` live-row cap (capacity jumps).
+#[test]
+fn churn_at_the_cap_never_resizes_the_shard_18562() {
+    let dir = PuntSeedDirectory::new();
+    let cap = PuntSeedDirectory::row_cap_for_test();
+    let budget = PuntSeedDirectory::maintain_budget_for_test() as u64;
+    let steps = 100_000usize;
+    let keys = keys_in_one_shard(&dir, cap + steps);
+    let shard = dir.shard_of_for_test(&keys[0]);
+    for (n, key) in keys[..cap].iter().enumerate() {
+        assert!(dir.publish(key, row_at(T0 + 3_600_000_000_000, n as u64), T0), "premise: fill to the cap");
+    }
+    let reserved = dir.rows_capacity_for_test(shard);
+    let mut worst_call = 0u64;
+    for step in 0..steps {
+        dir.retire(&keys[step], 1, step as u64);
+        let before = dir.work_for_test();
+        let id = (cap + step) as u64;
+        assert!(dir.publish(&keys[cap + step], row_at(T0 + 3_600_000_000_000, id), T0), "churn at the cap fits (step {step})");
+        worst_call = worst_call.max(dir.work_for_test() - before);
+        // `capacity()` dips as tombstones accumulate and is restored by the
+        // in-place rehash; a RESIZE would push it past the reservation.
+        assert!(
+            dir.rows_capacity_for_test(shard) <= reserved,
+            "the shard table grew at step {step}: {} > {reserved}",
+            dir.rows_capacity_for_test(shard)
+        );
+    }
+    assert!(worst_call <= budget, "a single churn publish did {worst_call} units of work");
+    assert_eq!(dir.len(), cap);
 }

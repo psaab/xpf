@@ -1643,14 +1643,24 @@ A queue at `QUEUE_CAP` (2x the shard cap) refuses further publishes instead of
 being compacted in one pass. A full shard refuses with no scan, and publish
 takes its shard with `try_lock`, so a worker never waits on the directory
 (`retire` and `probe` do wait, behind at most one bounded call).
-`PUNT_SEED_DIRECTORY_CAP` is 32768 rows (1024 per shard); with the 2 s bridge
-TTL that sustains ~16k new punted flows/s before a shard refuses. A shard
-reserves its full cap on its first publish, so it needs no growth below the cap
-(hashbrown may still rehash in place to purge tombstones, bounded by the
-shard's 1024 rows): ~0.8 MiB of address space per used shard (2048 hashbrown
-buckets of a 52 B key + 256 B `PuntSeedRow`, plus a 2048-slot queue), ~25 MiB
-if all 32 are used, close to fully resident once a shard holds a few hundred
-randomly placed rows, and kept for the life of the helper process. A refused
+A shard reserves its table on its first publish for TWICE its 1024-row live
+cap, and never admits more live rows than half that table's item capacity
+(derived from `capacity()` at reservation). Above half, churn that leaves
+tombstones makes hashbrown RESIZE the table under the lock (review seat L r3:
+339-383 us once per shard); at or below half it can only rehash in place, and
+at ~29% load it practically never does (bench: 0 rehashes in 100k churn
+publishes; the 1024-reserve / 896-live alternative kept a recurring ~50 us
+in-place rehash and ~28.7k rows). So 32768 live rows node-wide, which with
+the 2 s bridge TTL sustains ~16k new punted flows/s before a shard refuses.
+Memory: ~1.43 MiB of address space per used shard (4096 hashbrown buckets of
+a 52 B key + 256 B `PuntSeedRow`, plus a 2048-slot queue), ~46 MiB if all 32
+are used, close to
+fully resident once a shard holds a few hundred randomly placed rows, and kept
+for the life of the helper process. A bounded residual: slots are reclaimed
+only from the queue front, so more than 2048 publishes into ONE shard within a
+TTL with nearly all retired behind a long-lived live front (~32k/s node-wide)
+fill that shard's queue and further publishes there are refused until the
+front expires (at most 2 s). A refused
 or skipped publish only means that seed's cross-worker errors keep the
 pre-#18562 verdict; both are counted and exposed in helper status
 (`punt_seed_directory_full_total`, `punt_seed_directory_contended_total`, beside

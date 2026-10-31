@@ -51,10 +51,22 @@
 //    no single publish holds its shard for long (`retire` and `probe` wait on
 //    the same lock); each publish pushes one slot, so the queue still drains,
 //    and a queue at `QUEUE_CAP` refuses further publishes rather than being
-//    compacted in one pass;
-//  * a shard reserves its full cap on first use, so it needs no growth below
-//    the cap (hashbrown may still rehash in place to purge tombstones, bounded
-//    by the shard's 1024 rows);
+//    compacted in one pass. Known bounded residual (review seat L r3): a slot
+//    is reclaimed only from the front, so a long-lived live row at the front
+//    with heavy churn behind it — more than `QUEUE_CAP` (2048) publishes into
+//    ONE shard within a TTL, nearly all retired (~32k/s node-wide) — can fill
+//    a nearly empty shard's queue; further publishes there are refused (fail
+//    closed, counted) until the front expires, at most one TTL (2 s);
+//  * a shard reserves its table once, on first use, for TWICE its 1024-row
+//    live cap (`ROWS_RESERVE`; hashbrown gives 3584 item capacity), and admits
+//    at most half of that capacity as live rows (`Shard::row_cap`, derived
+//    from `capacity()` right after the reservation). Review seat L (r3): with
+//    more than half the capacity live, churn that leaves hashbrown tombstones
+//    makes `reserve_rehash` RESIZE (an allocation plus a full rehash under the
+//    lock: measured 339-383 us once per shard) instead of rehashing in place.
+//    At or below half it can only rehash in place, and at ~29% load deletes
+//    rarely leave tombstones, so it practically never does (bench: 0 rehashes
+//    in 100k churn publishes) — a populated shard never grows;
 //  * a full shard REFUSES in O(1) (no scan), and publish takes its shard with
 //    `try_lock`, so a worker never waits on the directory: a contended or full
 //    shard simply leaves that seed unmirrored (counted), i.e. the
@@ -63,10 +75,10 @@
 // every publish at the cap (measured 139-284 us per publish).
 //
 // Memory (measured sizes: `SessionKey` 52 B, `PuntSeedRow` 256 B). A shard's
-// first publish reserves its full cap: hashbrown rounds 1024 rows up to 2048
-// buckets of ~310 B (~620 KiB) plus a 2048-slot expiry queue of ~80 B
-// (~160 KiB) — ~0.8 MiB of address space per active shard, ~25 MiB if all 32
-// are active. Pages are touched as rows land, and rows land at random bucket
+// first publish reserves a 2048-row table, which hashbrown rounds up to 4096
+// buckets of ~310 B (~1.27 MiB), plus a 2048-slot expiry queue of ~80 B
+// (~160 KiB) — ~1.43 MiB of address space per used shard, ~46 MiB if all 32
+// are used — and that table never resizes (live rows <= half its capacity). Pages are touched as rows land, and rows land at random bucket
 // positions, so a shard holding a few hundred rows is already close to fully
 // resident (review seat L). Once a shard has been used its reservation is KEPT
 // for the life of the directory (the helper process): freeing it on drain
@@ -85,13 +97,22 @@ use std::sync::Mutex;
 const SHARDS: usize = 32;
 const _: () = assert!(SHARDS.is_power_of_two());
 
-/// Upper bound on resident rows, node-wide (`SHARDS` x `SHARD_CAP`). With the
-/// 2 s bridge TTL below this holds ~16k new punted flows/s sustained before a
-/// shard starts refusing (fail closed, counted in
-/// `PUNT_SEED_DIRECTORY_FULL_TOTAL`).
+/// Live rows node-wide (`SHARDS` x `SHARD_CAP`, 1024 per shard; each shard's
+/// table is reserved for twice that, `ROWS_RESERVE`). With the 2 s bridge TTL
+/// this sustains ~16k new punted flows/s before a shard starts refusing (fail
+/// closed, counted in `PUNT_SEED_DIRECTORY_FULL_TOTAL`).
 pub(crate) const PUNT_SEED_DIRECTORY_CAP: usize = 32_768;
 const SHARD_CAP: usize = PUNT_SEED_DIRECTORY_CAP / SHARDS;
 const _: () = assert!(SHARD_CAP * SHARDS == PUNT_SEED_DIRECTORY_CAP);
+/// Rows a shard's table is reserved for: twice the live-row cap (review seat L
+/// r3, measured). Live rows stay at or below HALF the reserved table's item
+/// capacity (`Shard::row_cap`), so hashbrown can only rehash in place, never
+/// resize; and at the resulting ~29% load, deletes rarely leave tombstones, so
+/// even the in-place rehash practically never runs. Reserving exactly the cap
+/// and keeping half live (896 rows) removed the resize too, but kept a
+/// recurring ~50 us in-place rehash of ~900 rows under the lock (bench), and
+/// cut capacity to ~28.7k rows; this costs ~0.6 MiB more per used shard.
+const ROWS_RESERVE: usize = 2 * SHARD_CAP;
 /// Hard bound on a shard's expiry queue (live slots plus lazily retired
 /// ones). A publish that would exceed it is refused (counted as full): the
 /// queue is never compacted in one pass under the lock.
@@ -113,12 +134,15 @@ const MAINTAIN_BUDGET: usize = 32;
 /// later error for the same flow is answered by the WAN owner's HA import,
 /// which reaches the shared maps on the incremental sync path within a few
 /// hundred ms (#18562 issue: "~200 ms"). Two seconds covers both with margin
-/// and, with the cap below, sustains ~16k new punted flows/s before a shard
-/// refuses. Past it — HA sync down, or a seed whose import never lands — the
+/// and, with the 32768 live-row cap, sustains ~16k new punted flows/s before
+/// a shard refuses. Past it — HA sync down, or a seed whose import never lands — the
 /// row stops answering and the pre-#18562 verdict applies (fail closed).
 pub(crate) const PUNT_SEED_ROW_TTL_NS: u64 = 2_000_000_000;
 
-/// #18562: publishes refused because the row's shard was full of live rows.
+/// #18562: publishes refused at a full shard — its live rows at `row_cap`, or
+/// its expiry queue at `QUEUE_CAP` (live rows plus lazily retired slots; see
+/// the bounded residual in the module doc). Either way the seed is left
+/// unmirrored and its cross-worker errors keep the pre-#18562 verdict.
 pub(crate) static PUNT_SEED_DIRECTORY_FULL_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// #18562: publishes skipped because the row's shard lock was held (the
 /// worker never waits on the directory).
@@ -164,6 +188,11 @@ struct ExpirySlot {
 struct Shard {
     rows: HashMap<SessionKey, PuntSeedRow, HotPathSeededState>,
     expiry: VecDeque<ExpirySlot>,
+    /// Live-row cap: `SHARD_CAP`, but never more than half the reserved
+    /// table's item capacity; set by `reserve_on_first_publish` (0 until the
+    /// shard is first used). Items at or below half mean hashbrown can only
+    /// purge tombstones by an in-place rehash, never resize under the lock.
+    row_cap: usize,
 }
 
 pub(crate) struct PuntSeedDirectory {
@@ -202,6 +231,7 @@ impl PuntSeedDirectory {
                 Mutex::new(Shard {
                     rows: HashMap::with_hasher(state),
                     expiry: VecDeque::new(),
+                    row_cap: 0,
                 })
             }),
             hasher: state,
@@ -264,18 +294,24 @@ impl PuntSeedDirectory {
         self.note_work(popped);
     }
 
-    /// Review seat L (LOW): growing a hash map rehashes it under the lock
-    /// (measured: a 97 us worst single publish while one shard filled). A
-    /// shard therefore reserves its full cap once, on its first publish into an
-    /// empty map, so no growth is needed below `SHARD_CAP` (enforced before
-    /// every insert). Not "never rehashes" (review seat K): hashbrown may
-    /// still rehash in place to purge tombstones after heavy insert/remove
-    /// churn — bounded by the shard's 1024 rows; see the bench's worst single
-    /// publish. The queue's reservation is never exceeded (`QUEUE_CAP`), and
-    /// the reservation is kept once made (see the memory note).
+    /// Review seat L: growing a hash map rehashes it under the lock (r1: a
+    /// 97 us worst publish while a shard filled; r3: a 339-383 us RESIZE once
+    /// per shard under churn at the old 1024-row cap, because tombstones forced
+    /// `reserve_rehash` with more than half the capacity live). A shard
+    /// therefore reserves its table once, on its first publish into an empty
+    /// map, for `ROWS_RESERVE` (twice the live cap), and admits at most half
+    /// of that table's item capacity as live rows (`row_cap`). At or below half
+    /// hashbrown can only rehash in place (bounded by `row_cap` rows, no
+    /// reallocation), never resize, and at the resulting ~29% load it
+    /// practically never needs to; the queue's reservation is never exceeded
+    /// (`QUEUE_CAP`). The reservation is kept once made (see the memory note).
     fn reserve_on_first_publish(shard: &mut Shard) {
         if shard.rows.capacity() == 0 {
-            shard.rows.reserve(SHARD_CAP);
+            shard.rows.reserve(ROWS_RESERVE);
+            // Right after reserving into an EMPTY map, `capacity()` is the
+            // table's full item capacity (no tombstones yet). Derived, not
+            // hardcoded: hashbrown's rounding is its own business.
+            shard.row_cap = SHARD_CAP.min(shard.rows.capacity() / 2);
         }
         if shard.expiry.capacity() == 0 {
             shard.expiry.reserve(QUEUE_CAP);
@@ -298,7 +334,7 @@ impl PuntSeedDirectory {
         self.maintain(&mut shard, now_ns);
         Self::reserve_on_first_publish(&mut shard);
         let replacing = shard.rows.contains_key(key);
-        if (!replacing && shard.rows.len() >= SHARD_CAP) || shard.expiry.len() >= QUEUE_CAP {
+        if (!replacing && shard.rows.len() >= shard.row_cap) || shard.expiry.len() >= QUEUE_CAP {
             PUNT_SEED_DIRECTORY_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -377,6 +413,16 @@ impl PuntSeedDirectory {
     #[cfg(test)]
     pub(crate) fn shard_cap_for_test() -> usize {
         SHARD_CAP
+    }
+
+    /// The live-row cap a shard derives at its first publish (half the
+    /// reserved table's item capacity), computed the same way.
+    #[cfg(test)]
+    pub(crate) fn row_cap_for_test() -> usize {
+        let mut m: HashMap<SessionKey, PuntSeedRow, HotPathSeededState> =
+            HashMap::with_hasher(HotPathSeededState::new(1));
+        m.reserve(ROWS_RESERVE);
+        SHARD_CAP.min(m.capacity() / 2)
     }
 
     #[cfg(test)]
