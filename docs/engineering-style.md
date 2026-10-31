@@ -2010,9 +2010,11 @@ they repeatedly bite:
     not an execution-order one: the `cluster-cell.sh` source, then
     `xpf_enter_destructive_cluster_cell`, then the first node mutation,
     with comment lines ignored. The source line and the call line must
-    both start at column 0; a source or call indented inside a block is
-    refused, with the message "does not source cluster-cell.sh in its
-    preamble". It has no line window, so a long documentation header is
+    both start at column 0. An indented source is refused with "does not
+    source cluster-cell.sh in its preamble"; an indented call (for
+    example one wrapped in a function) is refused with "never calls
+    xpf_enter_destructive_cluster_cell". It has no line window, so a long
+    documentation header is
     fine (#18591). No cluster needed — private lock path, mocked incus.
   - **A worktree with a QUEUED or RUNNING cluster cell is off-limits.** The
     cell verifies the TREE it finds when the lock is granted, not the branch
