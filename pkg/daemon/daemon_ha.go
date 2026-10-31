@@ -2773,9 +2773,16 @@ func (d *Daemon) warmDialer() neighborWarmDialer {
 
 // neighborWarmCounts is what one warmNeighborCache pass did, by #18617 verdict.
 type neighborWarmCounts struct {
+	at                               time.Time
 	probedV4, probedV6               int
 	skippedOwned, skippedNotHeld     int
 	skippedRouted, skippedNotUnicast int
+	// bindFailures: probe sockets that could not be opened and bound; that
+	// interface's endpoints were not probed this pass.
+	bindFailures int
+	// primaryNotHeld: RETH prefixes of an RG this node is primary for whose
+	// interface holds no address in them (nothing there is probed).
+	primaryNotHeld int
 }
 
 // warmNeighborCache walks synced sessions and probes each unique endpoint that
@@ -2837,8 +2844,10 @@ func (d *Daemon) warmNeighborCacheFor(cfg *config.Config) {
 	}
 
 	plan := d.neighborWarmPlan(cfg)
+	now := time.Now()
+	d.neighborWarmHealth.notePrimaryNotHeld(plan.primaryNotHeld, now)
 
-	var counts neighborWarmCounts
+	counts := neighborWarmCounts{at: now, primaryNotHeld: len(plan.primaryNotHeld)}
 	byIfV4 := make(map[string][]netip.Addr)
 	byIfV6 := make(map[string][]netip.Addr)
 	classify := func(addr netip.Addr, byIf map[string][]netip.Addr) {
@@ -2870,9 +2879,11 @@ func (d *Daemon) warmNeighborCacheFor(cfg *config.Config) {
 		n := 0
 		for ifname, addrs := range byIf {
 			conn, err := dialer.open(network, ifname)
+			// Review of #18625: a bind failure used to be a Debug line and a
+			// silent skip. Count it, and Warn on its rising edge.
+			d.neighborWarmHealth.noteBind(network, ifname, err)
 			if err != nil {
-				slog.Debug("cluster: neighbor warmup socket failed",
-					"network", network, "iface", ifname, "err", err)
+				counts.bindFailures++
 				continue
 			}
 			for _, addr := range addrs {

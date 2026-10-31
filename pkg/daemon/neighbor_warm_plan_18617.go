@@ -72,6 +72,11 @@ type neighborWarmPlan struct {
 	ownedHosts    map[netip.Addr]struct{}
 	ownedPrefixes []netip.Prefix
 	prefixes      []neighborWarmPrefix // longest prefix first
+	// primaryNotHeld names each configured RETH prefix whose RG this node is
+	// primary for while the kernel holds no address inside it on the unit's
+	// interface ("rg<N> <ifname> <prefix>"). Nothing on that prefix is
+	// probed, which is the warm-up's silent no-op case (review of #18625).
+	primaryNotHeld []string
 }
 
 // neighborWarmPlanInputs are the two runtime facts the plan needs besides the
@@ -105,8 +110,10 @@ func netipPrefixFromIPNet(n *net.IPNet) (netip.Prefix, bool) {
 	return netip.PrefixFrom(a.Unmap(), ones), true
 }
 
-// unitLinuxName is the kernel name of a configured unit, the same mapping
-// resolveConfigSubnetLinuxName uses (RETH resolved to the local member).
+// unitLinuxName is the kernel name of a configured unit: the RETH resolved to
+// its local member, then the VLAN id when the unit is tagged, else the unit
+// number when it is not 0. resolveConfigSubnetLinuxName uses it too, so the
+// warm-up and the DHCP relay cannot disagree about a unit's netdev.
 func unitLinuxName(cfg *config.Config, ifcName string, unitNum int, unit *config.InterfaceUnit) string {
 	name := resolveJunosIfName(cfg, ifcName)
 	if unit.VlanID > 0 {
@@ -176,6 +183,10 @@ func buildNeighborWarmPlan(cfg *config.Config, in neighborWarmPlanInputs) *neigh
 						}
 					}
 				}
+				if isReth && rgHeld && !holds {
+					p.primaryNotHeld = append(p.primaryNotHeld,
+						fmt.Sprintf("rg%d %s %s", rg, ifname, masked))
+				}
 				p.prefixes = append(p.prefixes, neighborWarmPrefix{prefix: masked, ifname: ifname, held: holds})
 			}
 			for _, s := range unit.Addresses {
@@ -234,6 +245,7 @@ func buildNeighborWarmPlan(cfg *config.Config, in neighborWarmPlanInputs) *neigh
 			}
 		}
 	}
+	sort.Strings(p.primaryNotHeld)
 	sort.SliceStable(p.prefixes, func(i, j int) bool {
 		return p.prefixes[i].prefix.Bits() > p.prefixes[j].prefix.Bits()
 	})

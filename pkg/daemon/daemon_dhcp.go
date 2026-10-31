@@ -2,7 +2,6 @@
 package daemon
 
 import (
-	"fmt"
 	"log/slog"
 	"net"
 	"strconv"
@@ -523,13 +522,7 @@ func resolveConfigSubnetLinuxName(cfg *config.Config, ip net.IP) (string, string
 				if !ipNet.Contains(ip) {
 					continue
 				}
-				ifName := resolveJunosIfName(cfg, ifc.Name)
-				if unit.VlanID > 0 {
-					ifName = fmt.Sprintf("%s.%d", ifName, unit.VlanID)
-				} else if unitNum != 0 {
-					ifName = fmt.Sprintf("%s.%d", ifName, unitNum)
-				}
-				return ifName, addrStr, true
+				return unitLinuxName(cfg, ifc.Name, unitNum, unit), addrStr, true
 			}
 		}
 	}

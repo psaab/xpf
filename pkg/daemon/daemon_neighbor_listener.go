@@ -375,12 +375,10 @@ func (d *Daemon) forceProbeNeighbors(cfg *config.Config) {
 	}
 	cap := getNeighborProbeMaxTargets()
 	start, count := d.forceProbeWindow(len(targets), cap)
-	if count < len(targets) {
-		slog.Warn("neighbor probe truncated",
-			"total", len(targets),
-			"cap", cap)
-	}
-	slog.Info("force-probe neighbors", "count", count)
+	// Review of #18625: both lines fired on every 15 s tick on every node.
+	// The truncation Warn is now edge-triggered, and the count logs at Debug.
+	d.neighborWarmHealth.noteProbeTruncation(count < len(targets), len(targets), cap)
+	slog.Debug("force-probe neighbors", "count", count)
 	for i := range count {
 		index := start + i
 		if index >= len(targets) {

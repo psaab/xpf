@@ -223,7 +223,9 @@ running heartbeat onto the defaults just as a changed value does.
   information` on both surfaces — the local CLI
   (`pkg/cli/cli_show_cluster.go`) and the gRPC remote CLI
   (`pkg/grpcapi/server_show_cluster_text.go`) both call it — so a section
-  added there reaches both. Its "Peer fencing:" block (#72) renders
+  added there reaches both. State the Manager does not own is appended
+  through `SetInformationExtraFunc` (called without `m.mu` held); the daemon
+  uses it for the neighbor warm-up pass (#18625). Its "Peer fencing:" block (#72) renders
   `FenceStatus()`: the CURRENTLY configured action (`disabled` when the
   `peer-fencing` leaf is absent, which can differ from the action past
   events were recorded under) plus every `EventFence` attempt and its

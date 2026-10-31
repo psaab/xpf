@@ -2029,16 +2029,50 @@ config, not from the kernel route table:
 `collectMonitoredNeighbors` (force-probe) drops owned addresses from the
 kernel neighbour entries it re-validates. Sockets are bounded at two per
 probed interface (#5451's bound, now per interface). The two per-second lines
-(`neighbor cache warmup complete`, `proactive neighbor resolution`) log at
-Debug. Neither is a state transition, so no Info line remains.
+(`neighbor cache warmup complete`, `proactive neighbor resolution`) and
+force-probe's per-tick `force-probe neighbors` log at Debug. None is a state
+transition, so no Info line remains in this subsystem.
 
-**Coverage is unchanged.** On the RG owner, an on-link endpoint is probed
-exactly as before, through the same interface the connected route chose. On a
-node that does not own an RG, the old probe to an endpoint on that RG's prefix
-followed whatever other route existed (usually the WAN default route), so it
-never resolved a neighbour on the RETH member. A standby holds no address
-there, so neither the kernel nor the helper can resolve neighbours on it. That
-standby pre-warm gap predates #18617 and is tracked in #18621.
+**Seeing that it works (review of #18625).** A pass that probes nothing reads
+exactly like a fixed one: Group 4 is 0 either way, and the standby gap below
+keeps Group 2 flat. So the last pass is shown in `show chassis cluster
+information` (through `Manager.SetInformationExtraFunc`):
+
+```
+Neighbor warm-up (last pass 2s ago):
+  Probed: 12 IPv4, 4 IPv6
+  Skipped: 2 cluster-owned, 3 not held, 40 routed, 0 not unicast
+  Socket bind failures: 0
+  Primary prefixes not held: 0
+```
+
+Before the first pass it reads `Neighbor warm-up: no pass yet`. The two
+silent no-op causes Warn once on their rising edge
+(`neighbor_warm_health_18617.go`):
+
+- a RETH prefix of an RG this node is primary for, where the kernel holds no
+  address in the prefix on that interface, once it has persisted 5 s (a VIP
+  normally lands within milliseconds of activation);
+- a probe socket that cannot be opened and bound.
+
+Force-probe's `neighbor probe truncated` Warn is edge-triggered as well.
+
+**Coverage.**
+
+- On the RG owner, an on-link endpoint is probed as before, through the
+  interface its connected route uses. Inside a VRF the bound socket now
+  resolves where the old unbound probe got `Network is unreachable`.
+- A routed endpoint is no longer probed. Its gateway is warmed only by the
+  configured-target pass (`resolveNeighbors`: static next hops, DHCP gateways,
+  backup router, NAT and address-book host targets). A dynamic-routing next
+  hop (BGP/OSPF) is covered only by force-probe, and only once it is already
+  in the kernel neighbour table.
+- On a node that does not own an RG, the old probe to an endpoint on that
+  RG's prefix followed whatever other route existed (usually the WAN default
+  route), so it never resolved a neighbour on the RETH member. A standby holds
+  no address there, so neither the kernel nor the helper can resolve
+  neighbours on it. That standby pre-warm gap predates #18617 and is tracked
+  in #18621.
 
 ### Direct-mode VIP failover (private-rg-election / no-reth-vrrp)
 

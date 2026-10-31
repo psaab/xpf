@@ -697,6 +697,9 @@ type Manager struct {
 	// applying the newest config generation this node sent (#9569). Evaluated
 	// outside mu.
 	peerConfigStaleFn func() (bool, string)
+	// informationExtraFn renders daemon-owned lines appended to
+	// FormatInformation (#18625). Set once; called without m.mu held.
+	informationExtraFn func() string
 
 	// rgForwardingFn reports the DATAPLANE-side view of a redundancy group —
 	// applied rg_active and VRRP mastership. Supplied by the daemon, which owns

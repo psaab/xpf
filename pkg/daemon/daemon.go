@@ -886,7 +886,11 @@ type Daemon struct {
 	// lastNeighborWarmCounts is the most recent warmNeighborCache pass's
 	// per-verdict counts (#18617), for tests and diagnostics.
 	lastNeighborWarmCounts atomic.Pointer[neighborWarmCounts]
-	syncPrimeRetryGen      atomic.Uint64
+	// neighborWarmHealth is the edge state behind the warm-up's Warns
+	// (primary prefix not held, probe-socket bind failure, force-probe
+	// truncation), review of #18625.
+	neighborWarmHealth neighborWarmHealth
+	syncPrimeRetryGen  atomic.Uint64
 	// syncPrimeRetryBeforeSleepForTest blocks the retry loop at the
 	// sleep boundary for the 10387 drain-window cell. Nil in production.
 	syncPrimeRetryBeforeSleepForTest func()
