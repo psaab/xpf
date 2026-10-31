@@ -942,6 +942,21 @@ func (s *SessionSync) sendClockSync(conn net.Conn) {
 	}
 }
 
+// sendInstallHeartbeat sends the one sync-level heartbeat each installed
+// connection carries (#18561), so the peer's HeartbeatAck latches
+// peerHeartbeatAckEver early. A failed or partial write leaves the stream
+// in an unknown state, so it tears the connection down exactly like a
+// failed clock sync (seat U).
+func (s *SessionSync) sendInstallHeartbeat(conn net.Conn) {
+	s.writeMu.Lock()
+	err := writeMsg(conn, syncMsgHeartbeat, nil)
+	s.writeMu.Unlock()
+	if err != nil {
+		s.disconnectConn(conn, "install heartbeat write failed", err)
+		slog.Warn("cluster sync: failed to send install heartbeat", "err", err)
+	}
+}
+
 // sendCapabilities advertises this node's config-snapshot protocol version to
 // the peer (#6650). Called once per installed connection.
 //
