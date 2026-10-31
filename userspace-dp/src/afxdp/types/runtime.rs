@@ -605,6 +605,201 @@ pub(in crate::afxdp) struct ValidationState {
     pub(in crate::afxdp) neighbor_generation: u64,
 }
 
+/// #18560: how long a worker keeps a forwarding view it has left, so packets
+/// the shim still stamps with that view's generations are processed under it.
+/// The shim's stamp trails the worker by the helper reply plus Go's
+/// `userspace_ctrl` write (tens of ms measured); the bound only caps how long
+/// a ctrl write that never lands keeps an old table set alive.
+pub(in crate::afxdp) const MATCHED_VIEW_GRACE_NS: u64 = 1_000_000_000;
+
+/// #18560: how many left views a worker keeps. An ownership edge publishes a
+/// burst (route snapshot, FIB bump, a second snapshot and bump after the FRR
+/// reload) inside one ctrl-write round trip, so the shim can lag by more than
+/// one view.
+pub(in crate::afxdp) const MATCHED_VIEW_SLOTS: usize = 3;
+
+/// #18560: one forwarding view (tables plus the generation pair they were
+/// published with) a worker has moved past.
+#[derive(Clone)]
+pub(in crate::afxdp) struct RetainedView {
+    pub(in crate::afxdp) validation: ValidationState,
+    pub(in crate::afxdp) forwarding: Arc<ForwardingState>,
+    pub(in crate::afxdp) until_ns: u64,
+}
+
+/// #18560: the matched-view grace. The shim stamps every packet with the
+/// generations in `userspace_ctrl`, which Go rewrites from the helper's reply,
+/// i.e. after the worker has adopted the new view. A packet stamped with a view
+/// the worker has left used to be dropped (`config_generation_mismatch` /
+/// `fib_generation_mismatch`): 10-11k packets per node per planned RG move.
+///
+/// Such a packet is now processed under the view it was stamped with: the
+/// worker keeps the views it leaves (newest first) and the poll loop runs a
+/// held packet in a pass built from that view's tables AND validation. So
+/// #6592 holds in both directions: no packet is processed under tables older
+/// or newer than its stamp. A stamp AHEAD of the worker matches no retained
+/// view and stays a drop.
+#[derive(Clone, Default)]
+pub(in crate::afxdp) struct PrevViews {
+    slots: [Option<RetainedView>; MATCHED_VIEW_SLOTS],
+}
+
+impl PrevViews {
+    /// Record the view a worker is leaving for `next`. Only a forward move
+    /// with both views installed earns a slot: a first install has no stamp to
+    /// match, a generation that went DOWN (a reset) keeps the strict fence,
+    /// and a neighbor-only republish changes neither stamp.
+    pub(in crate::afxdp) fn retain(
+        &mut self,
+        prev: ValidationState,
+        prev_forwarding: &Arc<ForwardingState>,
+        next: ValidationState,
+        now_ns: u64,
+    ) {
+        let forward = next.config_generation >= prev.config_generation
+            && next.fib_generation >= prev.fib_generation
+            && (next.config_generation, next.fib_generation)
+                != (prev.config_generation, prev.fib_generation);
+        if !prev.snapshot_installed || !next.snapshot_installed || !forward {
+            if next.config_generation < prev.config_generation
+                || next.fib_generation < prev.fib_generation
+            {
+                self.clear();
+            }
+            return;
+        }
+        self.slots.rotate_right(1);
+        self.slots[0] = Some(RetainedView {
+            validation: prev,
+            forwarding: Arc::clone(prev_forwarding),
+            until_ns: now_ns.saturating_add(MATCHED_VIEW_GRACE_NS),
+        });
+    }
+
+    /// The retained view a packet stamped `(config, fib)` belongs to: an
+    /// exact pair match, inside its deadline.
+    #[inline]
+    pub(in crate::afxdp) fn find(&self, config: u64, fib: u32, now_ns: u64) -> Option<usize> {
+        self.slots.iter().position(|slot| {
+            slot.as_ref().is_some_and(|view| {
+                now_ns < view.until_ns
+                    && view.validation.config_generation == config
+                    && view.validation.fib_generation == fib
+            })
+        })
+    }
+
+    pub(in crate::afxdp) fn get(&self, index: usize) -> Option<&RetainedView> {
+        self.slots.get(index).and_then(Option::as_ref)
+    }
+
+    pub(in crate::afxdp) fn is_empty(&self) -> bool {
+        self.slots.iter().all(Option::is_none)
+    }
+
+    /// Release expired views (their tables are dropped with the Arc).
+    pub(in crate::afxdp) fn expire(&mut self, now_ns: u64) {
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|view| now_ns >= view.until_ns) {
+                *slot = None;
+            }
+        }
+    }
+
+    pub(in crate::afxdp) fn clear(&mut self) {
+        self.slots = Default::default();
+    }
+
+    /// The worker loop's per-tick step (#18560): on an adoption keep the
+    /// view being left (`current`, whose tables are `current_forwarding`
+    /// until the swap), otherwise drop expired views.
+    pub(in crate::afxdp) fn on_tick(
+        &mut self,
+        current: ValidationState,
+        current_forwarding: &Arc<ForwardingState>,
+        live: ValidationState,
+        now_ns: u64,
+    ) {
+        if live != current {
+            self.retain(current, current_forwarding, live, now_ns);
+        } else if !self.is_empty() {
+            self.expire(now_ns);
+        }
+    }
+
+    /// The worker loop's forwarding swap (#18560): a publish that changes the
+    /// CoS runtime config clears every retained view, because the binding's
+    /// queues are rebuilt for the new tables.
+    pub(in crate::afxdp) fn on_forwarding_swap(&mut self, cos_changed: bool) {
+        if cos_changed {
+            self.clear();
+        }
+    }
+}
+
+/// #18560: the shape of one RX batch of `poll_binding`. A binding with parked
+/// packets runs a held pass: it reads no RX descriptor (those carry current
+/// stamps and would be judged against the left view's validation) and takes
+/// no injected packet (stamped with the current validation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) struct BatchShape {
+    pub(in crate::afxdp) held_pass: bool,
+    pub(in crate::afxdp) available: u32,
+    pub(in crate::afxdp) take_injected: bool,
+}
+
+impl BatchShape {
+    pub(in crate::afxdp) fn for_binding(view_held_len: usize, ring_available: u32) -> Self {
+        let held_pass = view_held_len > 0;
+        Self {
+            held_pass,
+            available: if held_pass { 0 } else { ring_available },
+            take_injected: !held_pass,
+        }
+    }
+
+    /// Whether the batch loop polls another batch after this one. A held
+    /// pass reads no RX but must not end the poll: the ring still holds the
+    /// batch the next iteration reads (seat V: a parking poll used to read
+    /// at most one batch, turning mismatch drops into RX-ring overflow).
+    pub(in crate::afxdp) fn loop_continues(&self) -> bool {
+        self.held_pass || self.available > 0
+    }
+}
+
+/// #18560: what a descriptor pass runs under. `current()` is the ordinary
+/// pass. A held pass processes only the packets an earlier pass parked on
+/// `BindingWorker::view_held`, under retained view `view` (None when that
+/// view has expired: the packets are then judged, and dropped, against the
+/// current one).
+#[derive(Clone, Copy, Default)]
+pub(in crate::afxdp) struct PassView<'a> {
+    pub(in crate::afxdp) prev_views: Option<&'a PrevViews>,
+    pub(in crate::afxdp) held_pass: bool,
+    pub(in crate::afxdp) view: Option<usize>,
+}
+
+impl PassView<'_> {
+    #[cfg_attr(not(test), expect(dead_code, reason = "#18560: used by the test-harness wrapper only"))]
+    pub(in crate::afxdp) fn current() -> Self {
+        Self::default()
+    }
+
+    /// Whether a packet the classifier rejected belongs to a retained view
+    /// other than this pass's own, i.e. must be parked for a held pass.
+    #[inline]
+    pub(in crate::afxdp) fn parks(&self, meta: &UserspaceDpMeta, disposition: PacketDisposition, now_ns: u64) -> bool {
+        matches!(
+            disposition,
+            PacketDisposition::ConfigGenerationMismatch | PacketDisposition::FibGenerationMismatch
+        ) && self.prev_views.is_some_and(|views| {
+            views
+                .find(meta.config_generation, meta.fib_generation, now_ns)
+                .is_some_and(|index| Some(index) != self.view)
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(in crate::afxdp) enum HAForwardingLease {
     #[default]

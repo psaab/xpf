@@ -850,6 +850,7 @@ fn note_admission_to_zone(slot: &mut u32, to_zone_id: u32) {
     *slot = to_zone_id;
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "#18560: production polls through poll_binding_process_descriptor_in_view; this wrapper keeps the test harnesses on the current view"))]
 pub(super) fn poll_binding_process_descriptor_with_injection(
     binding: &mut BindingWorker,
     binding_index: usize,
@@ -880,33 +881,102 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     worker_ctx: &WorkerContext,
     telemetry: &mut TelemetryContext,
 ) {
+    poll_binding_process_descriptor_in_view(
+        binding,
+        binding_index,
+        left,
+        right,
+        area,
+        available,
+        injected_packet,
+        sessions,
+        screen,
+        validation,
+        now_ns,
+        now_secs,
+        ha_startup_grace_until_secs,
+        worker_id,
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+        worker_ctx,
+        telemetry,
+        PassView::current(),
+    );
+}
+
+/// #18560: the descriptor pass under an explicit forwarding view (`PassView`).
+/// `worker_ctx.forwarding` and `validation` must be that view's pair.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(super) fn poll_binding_process_descriptor_in_view(
+    binding: &mut BindingWorker,
+    binding_index: usize,
+    left: &mut [BindingWorker],
+    right: &mut [BindingWorker],
+    area: &UmemAreaHandle,
+    available: u32,
+    injected_packet: Option<(Vec<u8>, UserspaceDpMeta)>,
+    sessions: &mut SessionTable,
+    screen: &mut ScreenState,
+    validation: ValidationState,
+    now_ns: u64,
+    now_secs: u64,
+    ha_startup_grace_until_secs: u64,
+    // #6211 F2: no longer inert. The packet-path rollbacks and the synced-hit
+    // purge below release allocator reservations that a peer-synced session
+    // holds on EVERY worker, so each must drop only THIS worker's holder bit.
+    //
+    // #6522: it is also the holder RECORDED when this worker's packet path
+    // ALLOCATES a pool source-NAT / NAT64 translation. The resulting session is
+    // replicated to every sibling worker, each of which reserves against the
+    // same allocator record, so an allocation that does not name its own owner
+    // ends up with a holder mask covering every worker EXCEPT the one
+    // forwarding.
+    worker_id: u32,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    worker_ctx: &WorkerContext,
+    telemetry: &mut TelemetryContext,
+    pass: PassView<'_>,
+) {
     // #7212: publish the generation this pass forwards under BEFORE any packet
     // is processed, so a session installed during the pass is stamped with the
     // SAME `ValidationState` its admitting filter verdict was computed against,
     // and the established-hit revalidation compares against that same value. One
     // u64 store per binding per tick.
-    sessions.set_filter_revalidation_gen(validation.config_generation);
-    // #11373: a session's cached route decision is valid only within the
-    // current config/FIB pair. Publish the same validation read used by this
-    // pass's metadata classifier before processing any descriptors.
-    sessions.set_forwarding_revalidation_gen_with_neighbor(
-        validation.config_generation,
-        validation.fib_generation,
-        validation.neighbor_generation,
-    );
-    // #8356: the zone-policy verdict's generation, published from the SAME
-    // `ValidationState` in the SAME statement pair, so the two stamps can never
-    // be compared against generations from different publishes. They stay
-    // SEPARATE stamps — sharing one would let a filter ACCEPT re-stamp suppress
-    // a pending policy re-derivation, and vice versa.
-    sessions.set_policy_revalidation_phase(
-        validation.config_generation,
-        worker_ctx
-            .forwarding
-            .policy
-            .scheduler_rules_expired_at(now_ns),
-    );
-    sessions.set_app_id_catalog_epoch(worker_ctx.forwarding.app_catalog.epoch());
+    // #18560: a held pass (packets stamped with a view this worker has left)
+    // must NOT move the session table's revalidation stamps back to that
+    // view. The table is single-versioned: stamping it with the old view made
+    // every session (re-derived under the current one) stale for the pass, so
+    // each held packet re-derived its route, filter and zone policy under the
+    // OLD tables but the CURRENT HA state. On the node demoting an RG that
+    // combination failed closed and the packets fell to the session-miss path
+    // (loss test-failover: +12.2k session misses / strict-syn drops on the
+    // former owner). Sessions keep the stamps of the last ordinary pass, so a
+    // held packet is forwarded by its session's current decision.
+    if !pass.held_pass {
+        sessions.set_filter_revalidation_gen(validation.config_generation);
+        // #11373: a session's cached route decision is valid only within the
+        // current config/FIB pair. Publish the same validation read used by this
+        // pass's metadata classifier before processing any descriptors.
+        sessions.set_forwarding_revalidation_gen_with_neighbor(
+            validation.config_generation,
+            validation.fib_generation,
+            validation.neighbor_generation,
+        );
+        // #8356: the zone-policy verdict's generation, published from the SAME
+        // `ValidationState` in the SAME statement pair, so the two stamps can never
+        // be compared against generations from different publishes. They stay
+        // SEPARATE stamps — sharing one would let a filter ACCEPT re-stamp suppress
+        // a pending policy re-derivation, and vice versa.
+        sessions.set_policy_revalidation_phase(
+            validation.config_generation,
+            worker_ctx
+                .forwarding
+                .policy
+                .scheduler_rules_expired_at(now_ns),
+        );
+        sessions.set_app_id_catalog_epoch(worker_ctx.forwarding.app_catalog.epoch());
+    }
     // Load the immutable SA payload once for this RX batch. Stage 11 performs
     // only plain map lookups against this guard, never another ArcSwap load.
     let ipsec_sa_snapshot = worker_ctx.forwarding.ipsec_sa.load_snapshot();
@@ -947,16 +1017,30 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     binding.scratch.scratch_rst_teardowns.clear();
     binding.scratch.scratch_rst_trigger_keeps.clear();
     let injected_addr = injected_desc.as_ref().map(|(desc, _)| desc.addr);
-    binding.pending_pmech_replay.clear();
     binding.scratch.pmech_injected_replay_addrs.clear();
     let pmech_directory = crate::session::PMechSessionDirectory::global();
-    pmech_replay::drain_pending_pmech_replays(
-        &pmech_directory,
-        &mut binding.pending_pmech_reverse,
-        &mut binding.pending_pmech_replay,
-        &mut binding.scratch.scratch_recycle,
-        &mut binding.tx_pipeline.free_tx_frames,
-    );
+    // #18560: a held pass runs only the parked packets, under the view they
+    // were stamped with. PMech replays wait for the next ordinary pass, which
+    // judges them against the current view as before.
+    if !pass.held_pass {
+        binding.pending_pmech_replay.clear();
+        pmech_replay::drain_pending_pmech_replays(
+            &pmech_directory,
+            &mut binding.pending_pmech_reverse,
+            &mut binding.pending_pmech_replay,
+            &mut binding.scratch.scratch_recycle,
+            &mut binding.tx_pipeline.free_tx_frames,
+        );
+    }
+    // Packets this pass re-parks (stamped with yet another left view) are
+    // appended behind the ones it consumes; the consumed prefix is drained
+    // after the loop, so the pre-sized buffer is never reallocated.
+    let held_len = if pass.held_pass {
+        binding.view_held.len()
+    } else {
+        0
+    };
+    let mut held_next = 0usize;
     loop {
         let mut deferred_syn_cookie_challenge: Option<crate::screen::SynCookieChallenge> = None;
         // #15243 (A60-01): a held packet that carries an owned inner frame
@@ -964,8 +1048,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
         // the ordinary `recycle_now` epilogue below (fail-closed if the
         // frame cannot be sliced into scratch).
         let mut replay_owned_frame: Option<Vec<u8>> = None;
-        let (desc, injected_meta, is_injected, was_replay) =
-            if let Some(held) = binding.pending_pmech_replay.pop_front() {
+        let (desc, injected_meta, is_injected, was_replay) = if held_next < held_len {
+            // #18560: a parked native descriptor. Its RX telemetry was
+            // recorded when it was first read.
+            let (desc, meta) = binding.view_held[held_next];
+            held_next += 1;
+            (desc, Some(meta), false, true)
+        } else if let Some(held) = (!pass.held_pass)
+            .then(|| binding.pending_pmech_replay.pop_front())
+            .flatten()
+        {
                 if held.is_injected {
                     binding
                         .scratch
@@ -986,7 +1078,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
         }
         let mut recycle_now = true;
         if let Some(meta) = injected_meta.or_else(|| try_parse_metadata(area.area(), desc)) {
-            telemetry.counters.metadata_packets += 1;
+            // #18560: a held pass's packets were counted when first read.
+            if !pass.held_pass {
+                telemetry.counters.metadata_packets += 1;
+            }
             let disposition = classify_metadata(meta, validation);
             if disposition == PacketDisposition::Valid {
                 telemetry.counters.validated_packets += 1;
@@ -2425,6 +2520,29 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         FlowCacheOutcome::Consumed => continue,
                         FlowCacheOutcome::FallThrough => {}
                     }
+                }
+                // #18560: a held pass serves only flow-cache hits. Anything
+                // that falls to the slow path (session lookup, re-resolution,
+                // synced-session purge/promotion/adoption, new flows) is
+                // dropped as the generation mismatch it is, exactly as before
+                // the grace. Letting held packets reach the slow path on a node
+                // demoting an RG left established flows with no session there
+                // afterwards: loss test-failover 0.0.26111/0.0.26114, +1-3.4k
+                // session misses and strict-syn drops on the demoting node per
+                // move (none without the grace).
+                if pass.held_pass {
+                    record_disposition(
+                        &worker_ctx.ident,
+                        &binding.live,
+                        DispositionCounters::Hot(telemetry.counters),
+                        PacketDisposition::ConfigGenerationMismatch,
+                        desc.len as u32,
+                        Some(meta),
+                        worker_ctx.recent_exceptions,
+                        worker_ctx.forwarding,
+                    );
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
                 }
                 // Re-bind packet_frame for slow-path code below
                 // (original L477 binding's NLL lifetime ended before
@@ -13444,6 +13562,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         }
                     }
                 }
+            } else if !is_injected
+                && (!was_replay || pass.held_pass)
+                && pass.parks(&meta, disposition, now_ns)
+            {
+                // #18560: stamped with a forwarding view this worker has left.
+                // Park it; the next poll of this binding processes it under
+                // that view's tables and validation. Not recycled here.
+                binding.view_held.push((desc, meta));
+                recycle_now = false;
             } else {
                 record_disposition(
                     &worker_ctx.ident,
@@ -13501,6 +13628,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     }
     received.release();
     drop(received);
+    if held_len > 0 {
+        binding.view_held.drain(..held_len);
+    }
 }
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn poll_binding_process_descriptor(
