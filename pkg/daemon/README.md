@@ -5022,5 +5022,15 @@ second half: no publisher can withdraw an RG's connected rows before the
 helper's acknowledgement. This ordering is what guarantees a withdrawal
 publish happens once that acknowledgement has landed.
 
-Cell: `demotion_route_order_18620_test.go`. The SetRGActive fake holds for
-150 ms, and on revert the publish lands inside the hold.
+The schedules run even when the write FAILS. The reconcile retry that later
+lands it schedules none of them. The rows themselves stay held until the
+helper acknowledges, so scheduling here cannot withdraw them early. When the
+retry's ack does land, the manager's release hook
+(`wireUserspaceRGRouteHooks` -> `onHelperReleasedRGs`) schedules the
+withdrawal.
+
+Cells, in `demotion_route_order_18620_test.go`:
+- the ordering cell. The SetRGActive fake holds for 150 ms, and on revert the
+  publish lands inside the hold;
+- the failed-write cell;
+- `helper_release_republish_18620_test.go`, for the hook wiring.

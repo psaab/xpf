@@ -1679,23 +1679,26 @@ its first packet arrived. It is NAT-free and fabric-redirects, and the peer
 adjudicated and translated the flow. Two rules follow, and both are keyed on
 the seed's own origin:
 
-- **Retired when its egress RG is local.**
+- **Retired once this node forwards its egress.**
   `retire_fabric_punt_seed_if_owner_active` (afxdp/session_glue/resolve.rs)
-  runs before the session lookup of every slow-path packet. It deletes this
-  worker's forward seed for the packet's key once the seed's egress RG is
-  forwarding-active here. The egress RG comes from the seed's `owner_rg_id`
-  when the HA-inactive arm stamped it. The already-redirected arm stamps the
-  fabric parent's RG (0), so for that seed it comes from a fresh FIB
-  resolution of the flow, read only when the row is a seed. A FIB that still
-  withholds the egress (cluster-terminal) names no local RG and keeps the
-  seed.
+  runs when a slow-path lookup hits this worker's forward seed. That is gated
+  on the origin the lookup already returns, so no other packet pays anything.
+  - The seed is retired when a fresh FIB resolution of the flow names a real
+    local egress (ForwardCandidate, or MissingNeighbor while its neighbor
+    resolves) whose RG is forwarding-active here. The seed's stamp is not
+    consulted: the already-redirected arm stamps none, and a stamp says where
+    the flow went, not where it goes now. A FIB that still withholds the egress
+    (cluster-terminal) or cannot route the flow (#10507's NoRoute retention)
+    keeps the seed.
   - It removes the steering row and the conntrack mirror as for any removed
     session. Removal goes through `delete`, the Terminal sink, which also
     retires the #18562 directory row and emits no delta.
-  - The packet then resolves against the node's synced session, if the shared
-    maps hold one, or takes the ordinary miss path, which adjudicates policy
-    and NAT afresh as the owner.
-  - Counted in `FABRIC_PUNT_SEEDS_RETIRED_OWNER_ACTIVE`.
+  - The caller then looks again. The packet resolves against the node's synced
+    session, if the shared maps hold one, or takes the ordinary miss path,
+    which adjudicates policy and NAT afresh as the owner.
+  - The seed's recorded permit goes with it. #10507 Cell 7a now proves its
+    property through that miss path: the post-activation ACK is a SYN-first
+    drop, and the next SYN is denied by live policy.
   - Why: a seed that survives to that point shadows the flow. Every forward
     packet hits it first and leaves NAT-free toward a peer that no longer
     forwards the RG, and that traffic keeps the seed from ever idling out. On

@@ -236,8 +236,11 @@ func (m *Manager) routeRGPrimaryLocked() RGPrimaryProvider {
 
 // helperActiveRGsLocked returns the data RGs that the current helper last
 // acknowledged as active (#18620), or nil. A helper that has not acknowledged
-// an inventory (helperHAStatePublished false: none yet, or reset after the
-// helper went away) holds nothing, so the cluster verdict alone decides.
+// an inventory holds nothing, so the cluster verdict alone decides.
+//
+// The helperHAStatePublished check is redundant today: every reset clears the
+// flag and the inventory together. It is kept as defence, so that a future
+// reset that cleared only the flag still drops the hold.
 func (m *Manager) helperActiveRGsLocked() map[int]bool {
 	if !m.helperHAStatePublished || len(m.haWatchdogHelperInventory) == 0 {
 		return nil
@@ -253,4 +256,36 @@ func (m *Manager) helperActiveRGsLocked() map[int]bool {
 		held[group.RGID] = true
 	}
 	return held
+}
+
+// adoptHelperInventoryLocked records groups as the inventory the current
+// helper just acknowledged. Every full-inventory ack (syncHAStateLocked and
+// the UpdateRGActive publish) goes through here.
+//
+// #18620: an RG that leaves the hold must also leave the helper FIB. While it
+// was held, a routes-only publish kept its connected rows. Without a publish
+// after the ack, they would stay until something unrelated republished. That
+// is reachable: a demotion whose rg_active write failed keeps the hold, and
+// its cluster-state republish keeps the rows. The reconcile retry that later
+// lands the write is not an ownership edge, so it schedules no republish.
+// heldRGReleaseFn closes that, whichever path delivered the ack.
+func (m *Manager) adoptHelperInventoryLocked(groups []HAGroupStatus) {
+	before := m.helperActiveRGsLocked()
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = append(m.haWatchdogHelperInventory[:0], groups...)
+	if len(before) == 0 || m.heldRGReleaseFn == nil {
+		return
+	}
+	after := m.helperActiveRGsLocked()
+	var released []int
+	for rgID := range before {
+		if !after[rgID] {
+			released = append(released, rgID)
+		}
+	}
+	if len(released) == 0 {
+		return
+	}
+	sort.Ints(released)
+	m.heldRGReleaseFn(released)
 }

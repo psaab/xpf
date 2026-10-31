@@ -272,6 +272,13 @@ transfer. The mark is an overlay on what the HELPER is told. It never changes
   - The hold reads the acknowledged inventory, not `haGroups`. A failed
     `UpdateRGActive(false)` has already written `haGroups`, but the helper may
     still forward the RG.
+  - Every full-inventory ack (`syncHAStateLocked`, the `UpdateRGActive`
+    publish) goes through `adoptHelperInventoryLocked`. When an ack DROPS an RG
+    from the hold, it calls the daemon's `SetHeldRGReleaseFunc` hook, which
+    schedules the connected-RG republish. So the withdrawal follows whichever
+    path delivered the ack, including the reconcile retry of a failed demotion
+    write, which is not an ownership edge and schedules no republish of its
+    own. The hook runs under `m.mu` and only schedules.
 - A real promotion or a real demotion of the RG in `UpdateRGActive`
   (`supersedeTransferPreActiveLocked`) removes the mark. Without the
   demotion arm, a mark still inside its deadline would keep the helper

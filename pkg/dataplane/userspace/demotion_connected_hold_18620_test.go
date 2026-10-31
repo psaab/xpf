@@ -159,3 +159,73 @@ func TestPromotionPublishesBeforeHelperAck18620(t *testing.T) {
 		t.Fatalf("route provider(2) = (%v, %v) for a cluster-primary RG the helper has not been told about", primary, known)
 	}
 }
+
+// releaseRecorder18620 records every call of the #18620 release hook.
+type releaseRecorder18620 struct{ calls [][]int }
+
+func (r *releaseRecorder18620) hook(rgIDs []int) {
+	r.calls = append(r.calls, append([]int(nil), rgIDs...))
+}
+
+// Review of #18638 (seat T): a demotion whose rg_active write FAILED keeps
+// the hold, and its cluster-state republish keeps the rows. The reconcile
+// retry that later lands the write is not an ownership edge, so it schedules
+// no republish. Without the release hook the connected rows then stay in the
+// helper FIB after the helper went inactive, until some unrelated publish.
+// The ack that drops the RG must itself ask for the withdrawal.
+func TestFailedThenRetriedDemotionReleasesHold18620(t *testing.T) {
+	h := newDemotionHold18620(t)
+	rec := &releaseRecorder18620{}
+	h.m.SetHeldRGReleaseFunc(rec.hook)
+	h.clusterPrimary[1] = false
+
+	prior := h.m.controlRequestHook
+	h.m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type == "update_ha_state" {
+			return errors.New("helper control socket closed")
+		}
+		return prior(req, status)
+	}
+	_ = h.m.UpdateRGActive(1, false)
+	if len(rec.calls) != 0 {
+		t.Fatalf("release hook fired %v for an UNACKNOWLEDGED demotion; the helper may still forward RG1", rec.calls)
+	}
+	if !h.wanRowsPublished(t) {
+		t.Fatal("setup: the failed demotion must keep RG1's rows")
+	}
+
+	// The reconcile retry lands the write.
+	h.m.controlRequestHook = prior
+	_ = h.m.UpdateRGActive(1, false)
+	if len(rec.calls) != 1 || len(rec.calls[0]) != 1 || rec.calls[0][0] != 1 {
+		t.Fatalf("release hook calls = %v, want exactly [[1]]: the retried ack must ask for "+
+			"RG1's rows to be withdrawn (the retry schedules no republish of its own)", rec.calls)
+	}
+	if h.wanRowsPublished(t) {
+		t.Fatal("RG1's rows survive the acknowledged retry")
+	}
+}
+
+// The same release through the other full-inventory ack, the periodic
+// syncHAStateLocked replay. An RG that stays active (RG2) is never released.
+func TestInventoryReplayReleasesOnlyDroppedRG18620(t *testing.T) {
+	h := newDemotionHold18620(t)
+	rec := &releaseRecorder18620{}
+	h.m.SetHeldRGReleaseFunc(rec.hook)
+	h.m.mu.Lock()
+	group := h.m.haGroups[1]
+	group.Active = false
+	h.m.haGroups[1] = group
+	_ = h.m.syncHAStateLocked()
+	h.m.mu.Unlock()
+	if len(rec.calls) != 1 || len(rec.calls[0]) != 1 || rec.calls[0][0] != 1 {
+		t.Fatalf("release hook calls = %v, want exactly [[1]] (RG2 stays active and held)", rec.calls)
+	}
+	// A repeat of the same inventory releases nothing more.
+	h.m.mu.Lock()
+	_ = h.m.syncHAStateLocked()
+	h.m.mu.Unlock()
+	if len(rec.calls) != 1 {
+		t.Fatalf("release hook calls = %v after an identical replay, want no further call", rec.calls)
+	}
+}

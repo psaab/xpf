@@ -60,13 +60,14 @@ func (l *demotionOrderLog18620) snapshot() []string {
 type demotionOrderHA18620 struct {
 	log  *demotionOrderLog18620
 	hold time.Duration
+	err  error // returned by the rg_active=false write
 }
 
 func (h *demotionOrderHA18620) SetRGActive(_ context.Context, _ int, active bool) error {
 	if !active {
 		time.Sleep(h.hold)
 		h.log.add("rg_active=false")
-		return nil
+		return h.err
 	}
 	h.log.add("rg_active=true")
 	return nil
@@ -140,6 +141,36 @@ func TestDemotionWithdrawsRoutesOnlyAfterRGActiveClear18620(t *testing.T) {
 			t.Fatalf("%s at %d preceded rg_active=false at %d; events = %v. "+
 				"A routes-only snapshot published before the helper learns the RG is inactive "+
 				"withdraws its connected rows under live forwarding (#18620)", ev, at, clear, events)
+		}
+	}
+}
+
+// A demotion whose rg_active=false write FAILS still schedules all three
+// reconciles (review of #18638, seat T). The reconcile retry that later
+// lands the write schedules none of them, so skipping them on error would
+// leave FRR, ip-monitoring and the connected rows on the pre-demotion view.
+// The rows themselves stay held until the helper acknowledges
+// (helperActiveRGsLocked), so scheduling them here cannot withdraw anything
+// early.
+func TestDemotionSchedulesOnFailedRGActiveWrite18620(t *testing.T) {
+	log := &demotionOrderLog18620{pub: make(chan struct{}, 1)}
+	d := newDemotionOrderDaemon18620(t, log)
+	d.setDataplane(&demotionOrderDP18620{
+		ha:  &demotionOrderHA18620{log: log, hold: 0, err: errRGActiveRejected},
+		log: log,
+	})
+	primeRG1Primary(t, d)
+	demoteRG1(t, d)
+
+	select {
+	case <-log.pub:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("a failed demotion write must still schedule the connected-RG republish; events = %v", log.snapshot())
+	}
+	events := log.snapshot()
+	for _, ev := range []string{"rg_active=false", "publish", "frr-armed", "ipmon-armed"} {
+		if !slices.Contains(events, ev) {
+			t.Fatalf("%s missing after a failed rg_active write; events = %v", ev, events)
 		}
 	}
 }
