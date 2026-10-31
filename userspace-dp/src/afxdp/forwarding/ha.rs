@@ -430,6 +430,14 @@ pub(in crate::afxdp) enum CachedDecisionInvalid {
     /// and not active; a locally-active egress (and an unknown /
     /// standalone egress) is never invalidated by this arm.
     ForwardCandidateEgressDeparted,
+    /// #18566: a cached FabricRedirect on DIRECT ingress whose
+    /// destination's connected owner RG is known (>0) and is now
+    /// forwarding-active on this node. The redirect was seeded while the
+    /// peer owned that RG; the RG has since been activated here, so the
+    /// peer no longer forwards it and drops the redirected packet at its
+    /// fabric-ingress HA gate. The slow path re-resolves the flow to the
+    /// local egress. Counted under the owner-active-redirect eviction arm.
+    FabricRedirectDestinationNowLocal,
 }
 
 pub(in crate::afxdp) fn cached_flow_decision_valid(
@@ -649,7 +657,20 @@ fn cached_flow_decision_invalid_reason_inner(
     // unknown owner (gateway/default-routed, dest_rg==0) never
     // fire. Live fw0 stamp=2 rows (aggregate 5,777 at d28) are
     // exactly this shape.
-    if forward_candidate_destination_owner_departed(
+    // #18566: the destination-owner twin for a cached FabricRedirect. The
+    // two arms read the same per-snapshot memo and are disjoint by
+    // disposition, so each branch consumes the closure at most once.
+    if resolution.disposition == ForwardingDisposition::FabricRedirect {
+        if fabric_redirect_destination_now_local(
+            ha_state,
+            now_secs,
+            fabric_ingress,
+            resolution,
+            destination_owner_rg,
+        ) {
+            return Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal);
+        }
+    } else if forward_candidate_destination_owner_departed(
         ha_state,
         now_secs,
         resolution,
@@ -921,6 +942,47 @@ pub(in crate::afxdp) fn forward_candidate_destination_owner_departed(
     let dest_rg = destination_owner_rg();
     dest_rg > 0
         && !ha_state
+            .get(&dest_rg)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+}
+
+/// #18566: a cached `FabricRedirect` is stale once the RG that owns its
+/// destination is forwarding-active HERE. The redirect hands the packet to
+/// the peer because the peer owned that RG when the entry was seeded. After
+/// the RG is activated on this node the peer has demoted it (or is about to,
+/// under #18563's make-before-break), and its fabric-ingress HA gate drops
+/// what we hand it.
+///
+/// No other fence catches this entry. The RG-epoch fence re-checks the
+/// entry's stamp owner, which for a reverse flow is the session's owner (the
+/// WAN RG of a `lan -> wan` flow), not the RG that is now local. The
+/// generation fence fires only if a snapshot publish lands after the
+/// activation, and the route republish that accompanies an activation runs
+/// BEFORE `rg_active` (#16270). Live (loss, per-RG move): fw1 kept
+/// fabric-redirecting `172.16.80.200:5211 -> 10.0.61.102` ACKs for >20 s
+/// after activating RG2, fw0 dropped them as `ha_inactive`, and fw1's
+/// rg_epoch and owner_active_redirect eviction arms both read 0.
+///
+/// Guards: a fabric arrival is out of scope (the #10314 and owner-active
+/// arms own it, and a fabric arrival is never redirected back); an unknown
+/// destination owner (rg 0, a routed destination) and a standalone node
+/// never fire; a peer-owned destination keeps its redirect.
+pub(in crate::afxdp) fn fabric_redirect_destination_now_local(
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    fabric_ingress: bool,
+    resolution: ForwardingResolution,
+    destination_owner_rg: impl FnOnce() -> i32,
+) -> bool {
+    if fabric_ingress
+        || resolution.disposition != ForwardingDisposition::FabricRedirect
+        || ha_state.is_empty()
+    {
+        return false;
+    }
+    let dest_rg = destination_owner_rg();
+    dest_rg > 0
+        && ha_state
             .get(&dest_rg)
             .is_some_and(|group| group.is_forwarding_active(now_secs))
 }

@@ -4249,6 +4249,88 @@ fn direct_member_ingress_serves_cached_redirect_owner_mismatch_16222() {
     );
 }
 
+/// #18566 stage wiring: a direct-ingress hit on a cached FabricRedirect whose
+/// destination's connected owner (RG2) is now active here falls through to
+/// the slow path, attributed to the owner-active-redirect arm, instead of
+/// being served back over the fabric to a peer that no longer owns RG2. The
+/// stamp owner is RG1, so no lookup fence touches the entry. RED on revert
+/// of the FabricRedirect branch in the validator (outcome Consumed, arm 0).
+#[test]
+fn direct_ingress_redirect_to_now_local_destination_falls_through_18566() {
+    const LAN_UNIT_IFINDEX: i32 = 41;
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    fixture.forwarding.connected_v4_by_ifindex.insert(
+        LAN_UNIT_IFINDEX,
+        vec![crate::prefix::PrefixV4::from_net(
+            "172.16.50.0/24".parse().expect("destination prefix"),
+        )],
+    );
+    fixture.forwarding.egress.insert(
+        LAN_UNIT_IFINDEX,
+        EgressInterface {
+            bind_ifindex: LAN_UNIT_IFINDEX,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x02, 0x00, 0x01],
+            zone_id: TEST_UNTRUST_ZONE_ID,
+            redundancy_group: 2,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    fixture.ha_state.insert(
+        2,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: now_secs,
+            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+        },
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+            &fixture.forwarding,
+            test_key().dst_ip,
+            None,
+        ),
+        2,
+        "premise: the cached flow's destination is connected on the RG2 unit"
+    );
+    let frame = vlan_tagged_tcp_v4_frame(0);
+    let meta = test_meta(&frame);
+    let mut entry = cached_entry();
+    entry.descriptor.fabric_redirect = true;
+    entry.decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    entry.decision.resolution.egress_ifindex = EGRESS_IFINDEX;
+    entry.stamp.owner_rg_id = 1;
+    entry.metadata.owner_rg_id = 1;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            packet_fabric_ingress: false,
+            fabric_link_ingress: false,
+            ..StageSeed::default()
+        },
+    );
+    let arm = crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitOwnerActiveRedirect as usize;
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[arm], 1,
+        "the stale redirect must be evicted under the owner-active-redirect arm"
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "the stale redirect must not be served"
+    );
+    assert!(
+        run.scratch.scratch_forwards.is_empty(),
+        "nothing may be queued toward the fabric"
+    );
+}
+
 #[test]
 fn cached_martian_source_is_dropped_before_forward_side_effects_10689() {
     let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);

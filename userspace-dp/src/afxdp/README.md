@@ -2103,6 +2103,22 @@ Round 2 (#18534), against the integ6 loss -P8 profile
   is still judged against the live HA state per packet, so an RG departure
   (which does not publish a new forwarding snapshot) is seen on the next
   packet.
+- **A cached FabricRedirect yields to its now-local destination RG
+  (#18566).** The same memo serves the FabricRedirect twin of that arm,
+  `fabric_redirect_destination_now_local`: a cached FabricRedirect hit on
+  DIRECT ingress whose destination's connected owner RG is known and now
+  forwarding-active on this node is superseded
+  (`CachedDecisionInvalid::FabricRedirectDestinationNowLocal`, counted
+  under `post_hit_owner_active_redirect`), and the slow path re-homes the
+  flow to the local egress (`reresolve_stored_session`). No other fence
+  caught it: the RG-epoch fence re-checks the entry's STAMP owner, which for
+  a `wan -> lan` reverse flow is the session's WAN RG, not the LAN RG being
+  activated; and the activation's route republish runs before `rg_active`
+  (#16270), so the generation fence can predate the activation. On loss a
+  per-RG move left fw1 fabric-redirecting RG2's ACKs to fw0, which dropped
+  them as `ha_inactive`, for over 20 s. Fabric arrivals (owned by the #10314
+  and owner-active arms), unknown destination owners and standalone nodes
+  are unchanged; a FabricRedirect hit pays one HA-map lookup.
 - **Post-admission neighbor learn.** Every admitted hit re-ran the on-link
   scan, the owned-IP probes and the VLAN-alias resolve before the learn's
   dedup leg coalesced the duplicate. `LearnedNeighborDedup` now records the
