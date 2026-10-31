@@ -942,6 +942,12 @@ ha_run_rg1_failback_slice() {
 			failure_reason="${failure_reason:+${failure_reason}; }phase-pre RG1 owner was not proven as fw1/node1"
 		fi
 	fi
+	# The RG1 move is a transition of its own: it starts the split
+	# (RG1 on node0, RG0/RG2 on node1) that the last-RG-moved failback event
+	# ends 20+ s later. Record its instant so the per-stream budget excludes
+	# [T, T+3] around it too; before this, a stall at a legitimate split move
+	# was counted "outside transition windows".
+	local rg1_request_at=$((SECONDS - iperf_start_seconds))
 	if request_output=$(incus exec "$FW1" -- cli -c \
 		'request chassis cluster failover redundancy-group 1' 2>&1); then
 		request_rc=0
@@ -951,6 +957,8 @@ ha_run_rg1_failback_slice() {
 	info "RG1 failover request returned status ${request_rc}; request text is not ownership proof${request_output:+: ${request_output}}"
 	if ha_wait_rg1_owner node0 "$MANUAL_FAILOVER_DEADLINE"; then
 		owner_moved=true
+		rg1_move_at_seconds=$rg1_request_at
+		info "Recorded per-stream RG1 move event at ${rg1_move_at_seconds}s after iperf start (split begins)"
 	else
 		local owner_rc=$?
 		if (( owner_rc == 1 )); then
@@ -1726,6 +1734,7 @@ fi
 # ── Phase 4b: Manual failover — fw0 becomes primary again ───────────
 
 info "Manual failback: measuring isolated RG1 from fw1/node1 to fw0/node0"
+rg1_move_at_seconds=""
 ha_run_rg1_failback_slice
 failback_at_seconds=0
 
@@ -1930,6 +1939,7 @@ if ! incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log \
 	printf '{"ok":false,"error":"metrics_capture_failed"}\n' >"$LOCAL_IPERF_METRICS"
 elif ! python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" \
 	"$LOCAL_IPERF_LOG" --event-sec "$failover_at_seconds" \
+	${rg1_move_at_seconds:+--event-sec "$rg1_move_at_seconds"} \
 	--event-sec "$failback_at_seconds" --event-window-sec 3 \
 	>"$LOCAL_IPERF_METRICS" 2>"$LOCAL_IPERF_PRODUCER_ERR"; then
 	printf '{"ok":false,"error":"metrics_parse_failed"}\n' >"$LOCAL_IPERF_METRICS"

@@ -147,6 +147,12 @@ grep -q -- '--event-sec "$failover_at_seconds"' "$FAILOVER" \
 	|| bad "test-failover.sh does not pass its crash instant to the window-excluded producer"
 grep -q -- '--event-sec "$failback_at_seconds"' "$FAILOVER" \
 	|| bad "test-failover.sh does not pass its failback instant to the window-excluded producer"
+grep -qF -- '${rg1_move_at_seconds:+--event-sec "$rg1_move_at_seconds"}' "$FAILOVER" \
+	|| bad "test-failover.sh does not pass the RG1 split-move instant to the window-excluded producer"
+grep -qF 'rg1_move_at_seconds=$rg1_request_at' "$FAILOVER" \
+	|| bad "test-failover.sh does not record the RG1 move instant when RG1 lands on node0"
+grep -qF 'local rg1_request_at=$((SECONDS - iperf_start_seconds))' "$FAILOVER" \
+	|| bad "test-failover.sh does not take the RG1 move instant at the request"
 grep -q -- '--event-window-sec 3' "$FAILOVER" \
 	|| bad "test-failover.sh does not pin the [T, T+3] window width"
 grep -q 'stream_zero_intervals_outside_events_total' "$FAILOVER" \

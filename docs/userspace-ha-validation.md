@@ -197,6 +197,31 @@ This matters because a split-RG fabric-path bug can kill streams before the
 first failover. That must fail as a fabric regression, not be misclassified as
 a failover-survivability regression.
 
+### `make test-failover` zero-interval cells: windows and definitions
+
+`scripts/iperf-json-metrics.py` scores the whole-run iperf3 stream.
+
+- **Thresholds.** A per-stream interval counts as "zero" at or below
+  `--zero-gbps` (default 0.05 Gbit/s), not only at 0 bytes.
+  `zero_intervals_total` (the "whole-run zero-throughput intervals" cell,
+  limit 2) is aggregate zero intervals PLUS per-stream zero intervals. It is
+  not window-excluded, so one 3 s crash outage across 8 streams already reads
+  as 24+ there. Count a run by the same definition before comparing numbers:
+  an exact-zero count of the #18598 gate's master arm gives 35, the harness
+  definition gives 3 + 58 = 61.
+- **Transition windows.** Only `stream_zero_intervals_outside_events_total`
+  (the per-stream "outside transition windows" cell, `MAX_STREAM_ZERO_INTERVALS`)
+  excludes full intervals inside `[T, T+3]` around each registered event.
+  The registered events are:
+  - the crash instant (`failover_at_seconds`);
+  - the manual RG1 move that starts the split slice, with RG1 on node0 and
+    RG0/RG2 on node1 (`rg1_move_at_seconds`, taken at the request, #18617
+    follow-up);
+  - the last RG of the manual failback (`failback_at_seconds`).
+
+  Before the RG1 move was registered, a stall at that legitimate split move
+  was counted as "outside transition windows".
+
 ## Target And Interpretation
 
 Validation target for the active userspace forwarding path:
