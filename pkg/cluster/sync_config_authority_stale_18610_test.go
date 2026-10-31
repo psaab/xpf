@@ -27,6 +27,14 @@ const (
 // (failure) frame is on the wire.
 func runOneConfigItem18610(t *testing.T, s *SessionSync, conn *captureConn, gen uint64, want byte) {
 	t.Helper()
+	// As the receive edge does: the role is sampled at enqueue.
+	runConfigItem18610(t, s, conn, configApplyItem{gen: gen, text: "set system host-name peer", conn: conn,
+		authorityAtReceive: s.localConfigAuthority()}, want)
+}
+
+func runConfigItem18610(t *testing.T, s *SessionSync, conn *captureConn, item configApplyItem, want byte) {
+	t.Helper()
+	gen := item.gen
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -37,7 +45,7 @@ func runOneConfigItem18610(t *testing.T, s *SessionSync, conn *captureConn, gen 
 		cancel()
 		<-done
 	}()
-	s.configApplyCh <- configApplyItem{gen: gen, text: "set system host-name peer", conn: conn}
+	s.configApplyCh <- item
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, frame := range conn.frames() {
@@ -104,6 +112,17 @@ func TestAuthorityRejectionDoesNotLeaveThePrimaryConfigStale18610(t *testing.T) 
 	if !s.shouldApplyConfigGen(peerPushedGen18610) {
 		t.Fatal("the refused generation must stay admissible for a re-push after demotion (#4151)")
 	}
+	// Seat U: the refusal has its own counter and last-generation row, and
+	// is not counted as an apply failure. Read through Stats() so the
+	// descriptor wiring is covered too.
+	st := s.Stats()
+	if st.ConfigsRejectedAsAuthority != 1 || st.ConfigRejectedAsAuthorityLastGen != peerPushedGen18610 {
+		t.Fatalf("authority refusal counters: rejected=%d last_gen=%d, want 1 and %d",
+			st.ConfigsRejectedAsAuthority, st.ConfigRejectedAsAuthorityLastGen, peerPushedGen18610)
+	}
+	if st.ConfigsApplyFailed != 0 {
+		t.Fatalf("an authority refusal was counted as an apply failure (ConfigsApplyFailed=%d)", st.ConfigsApplyFailed)
+	}
 
 	// Once this node is no longer the authority the refused generation counts
 	// again: it must not be promoted back before the new primary's push applies.
@@ -130,6 +149,10 @@ func TestOrdinaryApplyFailureStillArmsCFAndStaleness18610(t *testing.T) {
 		s.configApplyMu.Unlock()
 		if streak == 0 {
 			t.Fatalf("primary=%v: a failed apply must arm the #6387 CF streak", isPrimary)
+		}
+		if st := s.Stats(); st.ConfigsApplyFailed != 1 || st.ConfigsRejectedAsAuthority != 0 || st.ConfigRejectedAsAuthorityLastGen != 0 {
+			t.Fatalf("primary=%v: a failed apply must count ConfigsApplyFailed only: failed=%d rejected=%d last_gen=%d",
+				isPrimary, st.ConfigsApplyFailed, st.ConfigsRejectedAsAuthority, st.ConfigRejectedAsAuthorityLastGen)
 		}
 	}
 }
@@ -166,5 +189,129 @@ func TestResetRecvGenClearsRejectedAsAuthority18610(t *testing.T) {
 	s.resetRecvGen()
 	if got := s.rejectedAsAuthorityConfigGen.Load(); got != 0 {
 		t.Fatalf("resetRecvGen left rejectedAsAuthorityConfigGen=%d", got)
+	}
+}
+
+// The config-received callback can name the generation it was handed: the
+// daemon's refusal Warn reads it through ApplyingConfigGen. RED if the
+// accessor reads anything but the in-flight apply fence.
+func TestApplyingConfigGenNamesTheGenerationInsideTheCallback18610(t *testing.T) {
+	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	conn := &captureConn{}
+	s.mu.Lock()
+	s.conn0 = conn
+	s.mu.Unlock()
+	var seen atomic.Uint64
+	s.OnConfigReceived = func(string) error {
+		seen.Store(s.ApplyingConfigGen())
+		return nil
+	}
+	s.recordRecvConfigGen(peerPushedGen18610)
+	runOneConfigItem18610(t, s, conn, peerPushedGen18610, syncMsgConfigApplyAck)
+	if got := seen.Load(); got != peerPushedGen18610 {
+		t.Fatalf("ApplyingConfigGen inside the callback = %d, want %d", got, peerPushedGen18610)
+	}
+	if got := s.ApplyingConfigGen(); got != 0 {
+		t.Fatalf("ApplyingConfigGen after the apply = %d, want 0", got)
+	}
+}
+
+// Review T1: a generation received while this node was SECONDARY and refused
+// because a promotion landed before the apply loop reached it is the previous
+// primary's last config, lost. It must keep the staleness and the CF streak,
+// exactly like the same generation failing for another reason. RED if the
+// authority classification is made from the role at apply time.
+func TestReceivedAsStandbyRefusedAfterPromotionStaysStale18610(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"refused-after-promotion", ErrConfigSyncRejectedAuthority},
+		{"failed-then-promoted", errors.New("compile failed")},
+	} {
+		primary := &atomic.Bool{} // secondary at receive
+		s, conn, _ := newAuthoritySync18610(t, primary, tc.err)
+		item := configApplyItem{gen: peerPushedGen18610, text: "set system host-name peer", conn: conn,
+			authorityAtReceive: s.localConfigAuthority()}
+		primary.Store(true) // promoted before the queued item is applied
+		runConfigItem18610(t, s, conn, item, syncMsgConfigApplyNack)
+		if snap := s.TransferReadiness(); !snap.ConfigStale() {
+			t.Fatalf("%s: the previous primary's lost config must leave this node config-stale: %+v", tc.name, snap)
+		}
+		s.configApplyMu.Lock()
+		streak := s.firstUnappliedFailNano
+		s.configApplyMu.Unlock()
+		if streak == 0 {
+			t.Fatalf("%s: the previous primary's lost config must arm the #6387 CF streak", tc.name)
+		}
+		if st := s.Stats(); st.ConfigsRejectedAsAuthority != 0 || st.ConfigsApplyFailed != 1 {
+			t.Fatalf("%s: counted rejected=%d failed=%d, want 0 and 1", tc.name, st.ConfigsRejectedAsAuthority, st.ConfigsApplyFailed)
+		}
+	}
+}
+
+// Review T1: the role is sampled by the RECEIVE edge onto the item. RED if
+// handleConfigPayload stops recording it (every refusal would then read as
+// received-as-standby) or records something other than the live role.
+func TestReceiveEdgeRecordsAuthorityOnTheItem18610(t *testing.T) {
+	for _, isPrimary := range []bool{true, false} {
+		primary := &atomic.Bool{}
+		primary.Store(isPrimary)
+		s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+		s.IsPrimaryFn = primary.Load
+		if !s.handleMessage(nil, syncMsgConfig, encodeConfigPayload("set system host-name peer", peerPushedGen18610)) {
+			t.Fatalf("primary=%v: config frame refused at the receive edge", isPrimary)
+		}
+		select {
+		case item := <-s.configApplyCh:
+			if item.authorityAtReceive != isPrimary {
+				t.Fatalf("primary=%v: item.authorityAtReceive=%v", isPrimary, item.authorityAtReceive)
+			}
+		default:
+			t.Fatalf("primary=%v: the config frame was not queued for apply", isPrimary)
+		}
+	}
+}
+
+// Review T2, the losing node's half. The loser applied the authority's push
+// (G1) before the split, then pushed its own config (debt X) while it believed
+// itself primary; the authority refused and nacked it, so the loser's #9569
+// gate refuses the handovers it starts. The authority's re-push after the
+// refusal goes through the ordinary reconcile, under a NEW wire generation G2:
+// the loser applies it, ACKs, and the debt is superseded. The twin is the
+// same-generation resend the #18521 overdue path would send: a duplicate of G1
+// runs no handler and leaves the debt standing, which is why the re-push must
+// not reuse it. RED if applying the authority's new generation stops retiring
+// the loser's debt.
+func TestLoserAppliesTheAuthorityRepushAndRetiresItsDebt18610(t *testing.T) {
+	const preSplitGen = uint64(5358110549851) // the authority's push, applied
+	const repushGen = uint64(5358110549860)   // the re-push, a new generation
+	const loserDebtGen = uint64(7716000000123)
+	for _, tc := range []struct {
+		name      string
+		gen       uint64
+		wantStale bool
+	}{
+		{"re-push under a new generation retires the debt", repushGen, false},
+		{"a same-generation resend leaves the debt standing", preSplitGen, true},
+	} {
+		s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+		conn := &captureConn{}
+		s.mu.Lock()
+		s.conn0 = conn
+		s.mu.Unlock()
+		s.IsPrimaryFn = func() bool { return false } // the loser, secondary again
+		s.OnConfigReceived = func(string) error { return nil }
+		s.recordRecvConfigGen(preSplitGen)
+		s.recordAppliedConfigGen(preSplitGen)
+		s.SetOverdueConfigApplyDebtForTesting(loserDebtGen, 2*time.Minute)
+		if stale, _ := s.PeerConfigStale(); !stale {
+			t.Fatalf("%s: fixture: the loser's refused push must leave its #9569 gate stale", tc.name)
+		}
+		s.recordRecvConfigGen(tc.gen)
+		runOneConfigItem18610(t, s, conn, tc.gen, syncMsgConfigApplyAck)
+		if stale, reason := s.PeerConfigStale(); stale != tc.wantStale {
+			t.Fatalf("%s: PeerConfigStale=%v (%s), want %v", tc.name, stale, reason, tc.wantStale)
+		}
 	}
 }

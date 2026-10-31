@@ -871,7 +871,7 @@ func (s *SessionSync) TransferReadiness() TransferReadinessSnapshot {
 	// #18610: refusals made as the RG0 config authority, and whether this node
 	// still is that authority.
 	snap.RejectedAsAuthorityConfigGen = s.rejectedAsAuthorityConfigGen.Load()
-	snap.LocalConfigAuthority = s.IsPrimaryFn != nil && s.IsPrimaryFn()
+	snap.LocalConfigAuthority = s.localConfigAuthority()
 	return snap
 }
 

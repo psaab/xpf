@@ -676,6 +676,13 @@ func (s *SessionSync) recordAppliedConfigGen(gen uint64) {
 // authority (#18610).
 var ErrConfigSyncRejectedAuthority = errors.New("config sync rejected: this node is RG0 primary")
 
+// localConfigAuthority reports whether this node is the RG0 config authority
+// now (IsPrimaryFn; false when unwired). Sampled at config receive onto the
+// apply item and at readiness snapshot (#18610).
+func (s *SessionSync) localConfigAuthority() bool {
+	return s.IsPrimaryFn != nil && s.IsPrimaryFn()
+}
+
 // recordConfigRejectedAsAuthority raises the rejected-as-authority high-water
 // (#18610) under configGenMu, the lock every config-generation mark takes
 // (#5084), so resetRecvGen's clear cannot be lost to it. Called only from
@@ -746,6 +753,15 @@ func (s *SessionSync) endConfigApply() {
 	s.configGenMu.Lock()
 	defer s.configGenMu.Unlock()
 	s.applyingConfigGen.Store(0)
+}
+
+// ApplyingConfigGen returns the generation configApplyLoop is applying right
+// now, or 0 outside an apply. The config-received callback runs inside the
+// beginConfigApply/endConfigApply window, so it reads the generation of the
+// payload it was handed; the daemon uses it to name the generation in its
+// RG0-authority refusal log (#18610).
+func (s *SessionSync) ApplyingConfigGen() uint64 {
+	return s.applyingConfigGen.Load()
 }
 
 // configApplyLoop is the single ordered consumer of config-sync messages
@@ -872,11 +888,31 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 				continue
 			}
 			if applyErr != nil {
-				// transient RG0-primary rejection). Do NOT advance the
-				// high-water: leaving it at the last-applied generation keeps
-				// the standby eligible for the primary's re-push so it
-				// re-converges instead of being silently stranded (M-2/#4151).
-				s.stats.ConfigsApplyFailed.Add(1)
+				// The apply did not take effect (a compile/promote failure, or
+				// this node refusing the push as the RG0 config authority,
+				// #18610). Do NOT advance the high-water: leaving it at the
+				// last-applied generation keeps the standby eligible for the
+				// primary's re-push so it re-converges instead of being
+				// silently stranded (M-2/#4151).
+				//
+				// #18610 review T1: only a payload that arrived while this
+				// node was ALREADY the authority is an authority refusal (a
+				// dual-active push). One received as secondary and refused
+				// because a promotion landed before this loop reached it is the
+				// previous primary's last config, and it is lost: it stays an
+				// apply failure, so CF and staleness keep signalling it.
+				refusedByRole := errors.Is(applyErr, ErrConfigSyncRejectedAuthority)
+				rejectedAsAuthority := refusedByRole && item.authorityAtReceive
+				if rejectedAsAuthority {
+					s.stats.ConfigsRejectedAsAuthority.Add(1)
+					s.stats.ConfigRejectedAsAuthorityLastGen.Store(item.gen)
+				} else {
+					s.stats.ConfigsApplyFailed.Add(1)
+				}
+				if refusedByRole && !item.authorityAtReceive {
+					slog.Warn("cluster sync: discarded the previous RG0 primary's config: it arrived while this node was secondary and this node was promoted before applying it, so any commit it carried is not in effect here",
+						"incoming_gen", item.gen, "last_applied_gen", s.lastAppliedConfigGen.Load(), "size", len(item.text))
+				}
 				// Debug, not Warn: handleConfigSync (the callback) already logs
 				// the authoritative one-time reason WHY the apply failed
 				// (RG0-primary rejection at Warn, compile/promote failure at
@@ -884,7 +920,8 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 				// M-2/#4151 high-water retention, and the same generation may be
 				// re-pushed on every reconnect while the condition persists — a
 				// Warn here would spam (CLAUDE.md logging rule). The
-				// rate-independent observable is the ConfigsApplyFailed counter
+				// rate-independent observable is the ConfigsApplyFailed (or,
+				// for an authority refusal, ConfigsRejectedAsAuthority) counter
 				// above (surfaced in cluster status), not this log.
 				slog.Debug("cluster sync: config apply failed — retaining prior high-water so the peer re-push re-converges",
 					"incoming_gen", item.gen, "last_applied_gen", s.lastAppliedConfigGen.Load(), "size", len(item.text), "err", applyErr)
@@ -907,7 +944,7 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 				// a rolling upgrade started on the primary. Record the
 				// generation instead; ConfigStale ignores it while this node is
 				// still the authority, and counts it again once it demotes.
-				if errors.Is(applyErr, ErrConfigSyncRejectedAuthority) {
+				if rejectedAsAuthority {
 					s.recordConfigRejectedAsAuthority(item.gen)
 				} else {
 					s.noteConfigApplyFailure(applyErr)
