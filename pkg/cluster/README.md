@@ -4259,12 +4259,20 @@ because no peer is asked anything.
   do not describe silent-node-death detection while session sync stays
   connected: `syncSuppressesPeerTimeoutLocked` suppresses a timeout when
   last peer sync traffic is ≤2s old, capped at 5s continuous suppression.
-  Silent death with an established sync connection is approximately
-  max(threshold, remaining sync-recency window) plus up to one heartbeat tick:
-  0.5–2.1s from peer death at defaults and 1.0–2.2s in the lab, phase-dependent.
-  A process crash that closes sync, or an idle sync connection already >2s,
-  falls back to the raw heartbeat threshold. Startup/restart grace can also
-  defer handling. These are detection times, not end-to-end restoration SLAs
+  Since #18561 recency alone is not enough for a peer that has proved it
+  answers a sync-level heartbeat (`PeerHeartbeatAckSupported`): one tick
+  before the heartbeat timeout `checkTimeout` sends a sync liveness probe
+  (`prearmPeerLivenessProbe`), and a timeout tick is suppressed only if a
+  sync frame arrived after the outstanding probe (each answered tick sends
+  the next probe; an unanswered probe gets `minLivenessProbeAnswer`, 50ms,
+  before its silence counts). A hard-killed peer, whose half-open sync
+  socket still reads connected, is therefore declared on the timeout tick:
+  threshold plus up to one heartbeat tick of phase, 0.5–0.6s at defaults and
+  1.0–1.2s in the lab. A peer without ack support keeps the recency-only
+  rule (up to max(threshold, remaining 2s window) plus one tick). A process
+  crash that closes sync, or an idle sync connection already >2s, falls back
+  to the raw heartbeat threshold. Startup/restart grace can also defer
+  handling. These are detection times, not end-to-end restoration SLAs
   (`pkg/cluster/heartbeat.go:61-65,1916-1960`;
   `pkg/cluster/heartbeat_manager.go:790-832`;
   `pkg/cluster/heartbeat_suppress.go`;

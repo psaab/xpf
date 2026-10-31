@@ -667,6 +667,12 @@ type Manager struct {
 	// the same critical section (#12165, #17056).
 	hbSuppressStart int64
 
+	// hbLivenessProbeMono is the CLOCK_MONOTONIC nanos stamp of the
+	// outstanding sync-channel liveness probe sent while peer heartbeats are
+	// late or suppressed (#18561); 0 = none. Under m.mu, cleared with
+	// hbSuppressStart.
+	hbLivenessProbeMono int64
+
 	// peerHeartbeatFreshFn reports whether a peer heartbeat is currently
 	// within the timeout window (i.e. NOT stale). handlePeerTimeout consults
 	// it under m.mu before the suppression decision so a fresh heartbeat
