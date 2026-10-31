@@ -323,11 +323,16 @@ ha_wait_for_session_sync_idle() {
 	local attempt stable=0 source_path target_path rc
 	local baseline_sent="" baseline_received="" baseline_next_sent baseline_next_received
 	for ((attempt = 1; attempt <= SESSION_SYNC_IDLE_TIMEOUT; attempt++)); do
-		if ! source_path="$(ha_capture_sync_stats "${label}-${attempt}" "$source_id" "$source_node")"; then
+		# #18632: TARGET first, then source. Everything the target has
+		# counted as received was counted as sent before this read, so
+		# sent - received can only read high (never below the floor);
+		# source-first let a create landing between the two reads set
+		# a baseline one below the floor for the whole wait.
+		if ! target_path="$(ha_capture_sync_stats "${label}-${attempt}" "$target_id" "$target_node")"; then
 			void "${label}: session sync CLI capture unavailable (${source_id}->${target_id})"
 			return 2
 		fi
-		if ! target_path="$(ha_capture_sync_stats "${label}-${attempt}" "$target_id" "$target_node")"; then
+		if ! source_path="$(ha_capture_sync_stats "${label}-${attempt}" "$source_id" "$source_node")"; then
 			void "${label}: session sync CLI capture unavailable (${source_id}->${target_id})"
 			return 2
 		fi
@@ -359,9 +364,19 @@ ha_wait_for_session_sync_idle() {
 					baseline_received="$baseline_next_received"
 				fi
 				;;
+			4)
+				# #18632: new floor. Fewer creates are outstanding
+				# than at the baseline, so moving the baseline DOWN
+				# to this sample absorbs nothing. The streak restarts:
+				# a backlog still draining never reads idle.
+				stable=0
+				baseline_sent="$baseline_next_sent"
+				baseline_received="$baseline_next_received"
+				;;
 			3)
 				# #16289: counter rewind (daemon restart / epoch
-				# reset) is the ONLY re-baseline trigger.
+				# reset). With a new floor (4) these are the ONLY
+				# re-baseline triggers.
 				stable=0
 				baseline_sent="$baseline_next_sent"
 				baseline_received="$baseline_next_received"

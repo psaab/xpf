@@ -197,6 +197,60 @@ This matters because a split-RG fabric-path bug can kill streams before the
 first failover. That must fail as a fabric regression, not be misclassified as
 a failover-survivability regression.
 
+### Session-sync idle precondition
+
+Both `make test-failover` (`ha_wait_for_session_sync_idle`, before traffic,
+before the fw0 crash and before the RG1 failback) and this validator
+(`wait_for_session_sync_idle`) wait for session sync to be idle before they
+move an RG. They share one sample predicate, `ha_session_sync_idle_sample` in
+`test/incus/ha-assurance-lib.sh`.
+
+**The property.** Session sync is idle when, for
+`SESSION_SYNC_IDLE_STABLE_SAMPLES` (3) consecutive samples, no session create
+is outstanding beyond the established floor and the target's helper reports
+`Session delta pending: 0`. A sample reads D = the source's `Session create`
+Sent minus the target's `Session create` Received
+(`show chassis cluster data-plane statistics`). The floor is the lowest D the
+wait has seen. "Outstanding beyond the floor" is D minus the floor. The wait
+gives up after `SESSION_SYNC_IDLE_TIMEOUT` (30) samples.
+
+How the predicate gets there:
+
+- **Floor, not equality.** The two counters do not share an epoch. Bulk-sync
+  frames are counted by the receiver only, and a restart zeroes one side. On
+  `loss`, Sent was 22047 against Received 129487 while caught up (#16289).
+- **Target first, then source.** A create the target has counted was already
+  counted as sent before the target's read, so D can only read high, never
+  below the floor. With the source read first, a create sent between the two
+  reads and delivered before the target read counted as received but not as
+  sent. A baseline taken on that sample sat one below the floor, and every
+  later quiet sample read as one create outstanding for the whole wait. On the
+  #18627 `loss` run, Sent − Received was −107440 at the baseline of both waits
+  and −107439 on all 49 later samples. Pending was 0 throughout, so nothing
+  was backed up (#18632). The first sample of a wait often catches a burst of
+  creates, because the waits start right after an RG reset or an iperf3 start.
+- **The floor only moves down.** A sample with lower D has fewer creates
+  outstanding than the baseline, so re-baselining to it cannot absorb an
+  unreceived create. This verdict ("new floor") resets the streak, so a backlog
+  that is still draining never reads idle. The floor never moves up. A create
+  that is sent and never received keeps D one above the floor, and the wait
+  FAILs.
+- **No `sent == received` escape.** The old #16500 escape only helped when both
+  counters shared an epoch, which is why the #18632 failure recurred. With the
+  target read first it could only mask a create that really is outstanding.
+
+**What it cannot see.** A create that was outstanding at every sample from the
+first one onwards is part of the floor. Counters alone cannot tell it from a
+caught-up pair, so the target's pending count is the only extra evidence. A
+create sent after the last idle sample is not covered either.
+
+`test/incus/ha-assurance-selftest.sh` covers this with fixed counter pairs and
+with timeline cells. In a timeline cell the counters depend on when each
+capture reads them:
+
+- a create sent between the first two reads must still PASS;
+- a lost create must FAIL, including one lost after the streak began.
+
 ## Target And Interpretation
 
 Validation target for the active userspace forwarding path:

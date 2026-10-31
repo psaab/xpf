@@ -233,35 +233,55 @@ PY
 	return 2
 }
 
-# One sample of the legacy 3-consecutive-idle rule. Endpoint names and both
+# One sample of the N-consecutive-idle rule. Endpoint names and both
 # files are explicit; callers must not derive direction from ambient globals.
 #
-# Idle is baseline-relative (#16289): the caller passes the (sent, received)
-# pair captured on the first sample of a wait (empty before that sample) and
-# this helper is idle when every session created since the baseline has been
-# received (sent - baseline_sent <= received - baseline_received) with
-# pending == 0. Absolute sent == received is unsatisfiable whenever the two
-# daemons did not start counting from the same epoch (e.g. the target
-# received creates before the source last restarted and zeroed its sent
-# counter), which made the gate time out forever on a fully caught-up pair.
-# The inequality (#16500), not equality, is required: the first sample's
-# gap can include creates in flight that are later delivered (sent -
-# received shrinks as received catches up), so equality would never read
-# idle on a pair that has caught up. Counters meeting in absolute terms
-# (sent == received) is likewise idle: it covers creates recorded only
-# on the target at the baseline because the two CLI captures are
-# non-atomic (received ahead at the baseline, sent then reaching that
-# already-received count). A gap that instead grows since the baseline
-# (sent outruns received, counters unequal) stays not idle. Verdicts:
-# 0 idle, 1 ordinary not-idle (baseline kept; an outstanding
-# unreceived delta must persist until received, never be absorbed into
-# a new baseline), 2 VOID (blind/malformed evidence, malformed
-# baseline), 3 counter rewind (a daemon restarted and reset the epoch;
-# not idle, and the ONLY verdict on which the caller re-baselines).
-# Drained is required and parseable,
-# informational only. Every evidence field is parsed before any baseline
-# branch, so blind evidence is VOID even on the baseline-establishing
-# sample and even on a rewound sample.
+# THE PROPERTY (#18632): session sync is idle when, for N consecutive
+# samples, no session create is outstanding beyond the ESTABLISHED FLOOR
+# and the target's helper has no session delta pending. Per sample, with
+# D = source "Session create" sent - target "Session create" received:
+# outstanding beyond the floor is D - D_floor, where D_floor is the
+# lowest D the wait has observed (the baseline pair the caller passes).
+#
+# Why a floor, not absolute equality (#16289): the two daemons do not
+# count from the same epoch. Bulk-sync frames are counted by the receiver
+# only, and a restart zeroes one side, so sent == received is not the
+# caught-up state (loss: sent 22047 vs received 129487 while caught up).
+#
+# Why the caller captures the TARGET before the SOURCE (#18632): a create
+# the target has counted was enqueued, and counted, on the source before
+# the target's read, so a source read taken AFTER the target read
+# includes it. D can then only read HIGH (a create enqueued between the
+# reads, or one in flight), never below the true floor. Source-first
+# capture let a create enqueued between the reads and delivered before
+# the target read be counted as received but not as sent: a baseline
+# taken on that sample sat one below the floor, and every later quiet
+# sample read as one create outstanding for the whole wait (both waits
+# of the #18627 loss run: sent-received -107440 at the baseline, then
+# -107439 on all 49 later samples). The old (sent == received) escape
+# (#16500) only rescued that when both counters shared an epoch; it is
+# gone, because under target-first capture it could only mask creates
+# that really are outstanding.
+#
+# Why the floor moves only DOWN: a lower D has strictly fewer creates
+# outstanding than the current baseline, so re-baselining to it can never
+# absorb an unreceived create (#16289's invariant); it only removes an
+# inflated first sample (a burst at the start of the wait). The floor
+# never moves UP: a create sent after the floor and never received keeps
+# D one above it forever, and the wait FAILs. A new floor resets the
+# streak, so a backlog that is still draining (D falling every sample)
+# never reads idle; the old fixed baseline passed it.
+#
+# Verdicts: 0 idle at the floor (D == D_floor, pending == 0); 1 not idle
+# (D above the floor, or pending > 0; baseline kept); 4 new floor
+# (D < D_floor; the caller re-baselines to this sample and resets the
+# streak); 3 counter rewind (a daemon restarted; the caller re-baselines);
+# 2 VOID (blind/malformed evidence or a malformed baseline). The first
+# sample of a wait (empty baseline) only establishes the floor and
+# returns 1. Drained is required and parseable, informational only.
+# Every evidence field is parsed before any baseline branch, so blind
+# evidence is VOID even on the baseline-establishing sample and even on
+# a rewound sample.
 ha_session_sync_idle_sample() {
 	if [[ $# -ne 6 ]]; then
 		printf 'session sync sample: expected <source-node> <target-node> <source-stats> <target-stats> <baseline-sent> <baseline-received>\n' >&2
@@ -302,11 +322,17 @@ ha_session_sync_idle_sample() {
 			"$source_node" "$target_node" "$sent" "$baseline_sent" "$received" "$baseline_received" "$pending" >&2
 		return 3
 	fi
-	if { (( sent - baseline_sent <= received - baseline_received )) || (( sent == received )); } && [[ "$pending" == "0" ]]; then
+	local outstanding=$(( (sent - received) - (baseline_sent - baseline_received) ))
+	if (( outstanding < 0 )); then
+		printf 'session sync %s->%s new floor: source sent=%s, target received=%s is %s below the baseline (sent=%s received=%s), pending=%s; re-baseline\n' \
+			"$source_node" "$target_node" "$sent" "$received" "$(( -outstanding ))" "$baseline_sent" "$baseline_received" "$pending" >&2
+		return 4
+	fi
+	if (( outstanding == 0 )) && [[ "$pending" == "0" ]]; then
 		return 0
 	fi
-	printf 'session sync %s->%s not idle: source sent=%s (baseline %s), target received=%s (baseline %s), pending=%s\n' \
-		"$source_node" "$target_node" "$sent" "$baseline_sent" "$received" "$baseline_received" "$pending" >&2
+	printf 'session sync %s->%s not idle: source sent=%s (baseline %s), target received=%s (baseline %s), outstanding beyond floor=%s, pending=%s\n' \
+		"$source_node" "$target_node" "$sent" "$baseline_sent" "$received" "$baseline_received" "$outstanding" "$pending" >&2
 	return 1
 }
 

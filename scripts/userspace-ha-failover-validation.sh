@@ -429,8 +429,10 @@ wait_for_session_sync_idle() {
 	local prev_source_sent="" prev_target_recv="" prev_target_pending="" prev_target_drained=""
 	local baseline_sent="" baseline_received=""
 	while (( tries > 0 )); do
-		capture_sync_snapshot "$SOURCE_VM" "${label}-source"
+		# #18632: TARGET first, then source (see ha_session_sync_idle_sample):
+		# sent - received then never reads below the floor.
 		capture_sync_snapshot "$TARGET_VM" "${label}-target"
+		capture_sync_snapshot "$SOURCE_VM" "${label}-source"
 		local source_path target_path
 		source_path="$(sync_snapshot_path "${label}-source" "$SOURCE_VM")"
 		target_path="$(sync_snapshot_path "${label}-target" "$TARGET_VM")"
@@ -458,9 +460,11 @@ wait_for_session_sync_idle() {
 				pass "${label}: session sync idle (source_sent=${source_sent} target_recv=${target_recv} target_delta_pending=${target_pending} target_delta_drained=${target_drained})"
 				return 0
 			fi
-		elif (( sample_status == 3 )); then
-			# #16289: counter rewind (daemon restart / epoch reset) is
-			# the ONLY re-baseline trigger.
+		elif (( sample_status == 3 || sample_status == 4 )); then
+			# #16289: counter rewind (daemon restart / epoch reset), or
+			# #18632: a new floor (fewer creates outstanding than at the
+			# baseline, so moving DOWN absorbs nothing). These are the
+			# ONLY re-baseline triggers; both restart the streak.
 			stable=0
 			baseline_sent="$source_sent"
 			baseline_received="$target_recv"
