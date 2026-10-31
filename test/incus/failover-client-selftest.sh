@@ -267,6 +267,16 @@ if grep -Pzq 'pass\)\n\s*pass "a pool-mode TCP flow connects' <<<"$tf_case" &&
 else
 	bad "test-failover must route pool probe verdicts: pass->pass, busy->void, fail->fail, other->fail(unrecognised)"
 fi
+# A probe whose launch failed must be a VOID, never scored from a previous
+# run's log: both launch steps record failure and the first branch checks it.
+# shellcheck disable=SC2016 # the patterns match the script's literal text
+if grep -q -- '-- rm -f /tmp/iperf3-pool-8280-post.log || pool_probe_started=0$' "$TF" &&
+   grep -q -- '/tmp/iperf3-pool-8280-post.log 2>&1 &" || pool_probe_started=0$' "$TF" &&
+   grep -Pzq 'if \[\[ "\$pool_probe_started" != 1 \]\]; then\n\s*void "#8280/#8341: the post-failback pool probe could not be started' "$TF"; then
+	ok "a pool probe that failed to launch is a VOID, not scored from a stale log"
+else
+	bad "a pool probe that failed to launch must be a VOID, not scored from a stale log"
+fi
 
 echo "----------------------------------------"
 echo "failover client selftest: $PASS passed, $FAIL failed"

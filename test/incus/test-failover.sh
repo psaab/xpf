@@ -1819,13 +1819,23 @@ fi
 # formerly known-gap #8341 data-path check to a real assertion.
 if [[ "$POOL_NAT_SMOKE" == 1 && -n "$POOL_LAN_IF" ]]; then
 	incus exec "$FW0" -- cli -c "clear security flow session source-prefix ${POOL_SRC}" &>/dev/null || true
-	# rm first: if the start below fails, a previous run's log must not be
-	# scored as this run's probe (#18567 review).
-	incus exec "$CLUSTER_LAN_HOST" -- bash -c \
-		"rm -f /tmp/iperf3-pool-8280-post.log; timeout 6 iperf3 --connect-timeout 3000 -B ${POOL_SRC} -t 2 -c ${IPERF_TARGET} -p ${POOL_POST_PORT} > /tmp/iperf3-pool-8280-post.log 2>&1 &" || true
-	sleep 5
-	post_pool=$(pool_session_count "$FW0")
-	if [[ "$post_pool" == VOID ]]; then
+	# A probe that never started measured nothing, and a previous run's log
+	# would otherwise be scored as this run's (#18567 review). Remove the old
+	# log in its own exec and track whether the launch happened.
+	pool_probe_started=1
+	incus exec "$CLUSTER_LAN_HOST" -- rm -f /tmp/iperf3-pool-8280-post.log || pool_probe_started=0
+	if [[ "$pool_probe_started" == 1 ]]; then
+		incus exec "$CLUSTER_LAN_HOST" -- bash -c \
+			"timeout 6 iperf3 --connect-timeout 3000 -B ${POOL_SRC} -t 2 -c ${IPERF_TARGET} -p ${POOL_POST_PORT} > /tmp/iperf3-pool-8280-post.log 2>&1 &" || pool_probe_started=0
+	fi
+	post_pool=""
+	if [[ "$pool_probe_started" == 1 ]]; then
+		sleep 5
+		post_pool=$(pool_session_count "$FW0")
+	fi
+	if [[ "$pool_probe_started" != 1 ]]; then
+		void "#8280/#8341: the post-failback pool probe could not be started on ${CLUSTER_LAN_HOST}, so neither the allocator nor the pool-mode data path was measured after the role change (#18567)"
+	elif [[ "$post_pool" == VOID ]]; then
 		fail "#8280: the post-failback session query returned no listing, so the allocator's state after the role change was NOT MEASURED — see the admission note above. A VOID here is NOT evidence the allocator is healthy. Query stderr: ${POOL_QUERY_ERR:-<none>}"
 	elif [[ "$post_pool" -ge 1 ]]; then
 		pass "the pool allocator still hands out a translation after a full primary->secondary->primary cycle"
