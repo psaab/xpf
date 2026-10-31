@@ -288,6 +288,11 @@ impl crate::afxdp::Coordinator {
         // materialize heals the window. Extending debt to per-entry payloads
         // is out of scope — the named members are the three transition
         // commands only.
+        // #18641: time each activation phase; the republish is on the
+        // forwarding path of every interface-SNAT reply (a USERSPACE_SESSIONS
+        // miss on the SNAT address is passed to the kernel), so its duration
+        // is part of the crash-takeover outage.
+        let prewarm_started = std::time::Instant::now();
         prewarm_reverse_synced_sessions_for_owner_rgs(
             &self.sessions.synced,
             &self.sessions.nat,
@@ -301,7 +306,9 @@ impl crate::afxdp::Coordinator {
             activated_rgs,
             now_secs,
         );
+        let prewarm_elapsed = prewarm_started.elapsed();
         if session_map.fd >= 0 {
+            let republish_started = std::time::Instant::now();
             let republished = republish_bpf_session_entries_for_owner_rgs(
                 &self.sessions.synced,
                 &self.sessions.owner_rg_indexes,
@@ -311,8 +318,11 @@ impl crate::afxdp::Coordinator {
             );
             if republished > 0 {
                 eprintln!(
-                    "xpf-ha: republished {} USERSPACE_SESSIONS entries for activated RGs {:?}",
-                    republished, activated_rgs
+                    "xpf-ha: republished {} USERSPACE_SESSIONS entries for activated RGs {:?} in {} us (reverse prewarm {} us)",
+                    republished,
+                    activated_rgs,
+                    republish_started.elapsed().as_micros(),
+                    prewarm_elapsed.as_micros()
                 );
             }
         }
