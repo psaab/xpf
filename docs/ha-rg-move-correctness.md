@@ -149,9 +149,9 @@ healthy in `show chassis cluster status` while every cross-node RPC fails.
 ### What makes it correct
 
 - Configure NTP on both nodes, reached through the management VRF:
-  `set system ntp server <address> routing-instance mgmt`. With #18584 (an
-  open PR when this was written; on a build without it the routing-instance
-  is advisory only and chrony stays in the default instance), xpf renders
+  `set system ntp server <address> routing-instance mgmt`. Since #18584
+  (merged as 4546218cc3; on a build without it the routing-instance is
+  advisory only and chrony stays in the default instance), xpf renders
   this as chrony `bindacqdevice vrf-mgmt`
   (`/etc/chrony/conf.d/xpf-acquisition.conf`), for `mgmt` only when a
   management interface exists. chrony has one acquisition device, so every
