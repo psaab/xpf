@@ -221,7 +221,9 @@ D minus the floor.
 The N samples need not be consecutive:
 - A sample above the floor, or with something pending, neither counts nor
   resets the count.
-- A new floor, a counter rewind or a source drop restarts it.
+- A new floor or a counter rewind restarts it. A source drop does not: that
+  sample is not idle, and because the drop baseline is kept, no later sample
+  can count either, so the wait FAILs.
 - The wait PASSes only on a sample at the floor.
 
 Each counted sample is an exact reading: nothing was outstanding beyond the
@@ -239,14 +241,17 @@ many samples it counted at the floor.
 
 The limit leaves a wide margin for the count:
 - **Measured.** In run 2, 15 of the 29 samples after the baseline read the
-  floor, and the count reached 3 at sample 8. At that rate, the chance of
-  fewer than 3 floor samples in 29 is below 1 in a million.
+  floor, and the count reached 3 at sample 8. Treating the samples as
+  independent, the chance of fewer than 3 floor samples in 29 is below 1 in a
+  million. Floor readings came in pairs, though. Taking the 14 or so pairs as
+  the independent units, it is about 6 × 10⁻⁴, roughly 1 in 1,700.
 - **Pessimistic.** If creates arrived as a Poisson stream at 4 per second,
   with about 0.5 s between the two reads, about 14 % of samples would read the
-  floor. The chance of a timeout would then be about 23 %.
+  floor. The chance of a timeout would then be about 23 %. That figure depends
+  on the read gap: about 5 % at 0.4 s and about 36 % at 0.55 s.
 - **Reading a timeout.** A timeout means fewer than N samples proved idle.
-  The D sequence in the log tells the causes apart. With dense creates, D
-  fluctuates and touches the floor rarely or never. With a backlog or a lost
+  The D sequence in the log tells the causes apart. With dense, varying
+  creates, D fluctuates and rarely returns to its minimum. With a backlog or a lost
   create, D stays above the floor at every sample and is flat or rising.
 
  A timeout is a FAIL cell. Before the RG1
@@ -308,10 +313,19 @@ or sequence number, not counts.
   PASSes. A selftest cell pins this, so any change to it is deliberate.
 - **Constant lag.** If at least one create is in flight at every sample, the
   lag is the floor and the wait PASSes. A *growing* lag is caught.
-- **Dense background creates.** If a create landed between the two reads at
-  *every* sample, no sample would read the floor, and a healthy pair would
-  FAIL. On `loss` the mirror sweep left about half the samples at the floor
-  (run 2), so the count passes.
+- **Varying background creates.** A create in *every* read window at a
+  steady rate is a constant offset that the floor absorbs, so the wait PASSes.
+  A healthy pair FAILs only when the number of creates per window varies and
+  the minimum is rarely seen again. On `loss` the mirror sweep left about half
+  the samples at the floor (run 2).
+- **Stale stability evidence.** Samples above the floor neither count nor
+  reset the count. A lag that clears for one sample can therefore PASS on
+  earlier counted samples as old as the wait itself, up to about 28
+  attempts. The PASS sample is still an exact reading, so this is not a lost
+  create.
+- **A rewind wipes a drop.** A counter rewind (a daemon or helper restart)
+  re-baselines everything, including the source's dropped count, so a drop
+  seen before it is forgotten.
 - **After the last sample.** A create sent after the last idle sample is not
   covered.
 - **The event-stream delta path.** The source checks read the helper's

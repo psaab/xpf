@@ -248,8 +248,10 @@ PY
 # steady mirror sweep (~4 creates/s), a create landed between the two
 # reads in pairs every ~4 samples, so floor readings never came 3 in a row
 # and the consecutive rule FAILed a healthy pair (#18632 live run 2). Each
-# counted sample is still an exact reading at the floor; a new floor, a
-# rewind or a source drop restarts the count.
+# counted sample is still an exact reading at the floor; a new floor or a
+# rewind restarts the count. A source drop does not restart it: that sample
+# is not idle, and because the caller keeps the drop baseline no later
+# sample can count either, so the wait FAILs.
 #
 # Why a floor, not absolute equality (#16289): the two daemons do not
 # count from the same epoch. Bulk-sync frames are counted by the receiver
@@ -293,11 +295,17 @@ PY
 #   Pinned by a selftest cell so a change to it is deliberate.
 # - Constant lag: if at least one create is in flight at every sample,
 #   the lag is the floor and the wait PASSes. A GROWING lag is caught.
-# - Steady background creates: a create landing between the two reads at
-#   EVERY sample would keep every sample above the floor and FAIL a
-#   healthy pair. On loss the mirror sweep left about half the samples
-#   clean (#18632 run 2), so the non-consecutive count passes; a denser
-#   stream would need a quieter window.
+# - Varying background creates: a create in EVERY read window at a steady
+#   rate is a constant offset the floor absorbs, so the wait PASSes. A
+#   healthy pair FAILs only when the per-window count varies and the
+#   minimum is rarely seen again. On loss the mirror sweep left about half
+#   the samples at the floor (#18632 run 2).
+# - Stale stability evidence: samples above the floor neither count nor
+#   reset, so a lag that clears for one sample can PASS on earlier counted
+#   samples as old as the wait itself (up to ~28 attempts). The PASS sample
+#   is still exact, so this is not a lost create.
+# - A rewind (daemon or helper restart) re-baselines everything, including
+#   the source dropped count, so a drop seen before it is forgotten.
 # - A create sent after the last idle sample.
 # - Source-side loss on the event-stream path. The source checks below
 #   read the helper's per-binding RPC-fallback delta buffer ("Session
