@@ -218,6 +218,31 @@ else
 fi
 
 
+# #18567: the post-failback pool probe verdict and its port.
+for cell in \
+	"pass|[  5]   0.00-2.00   sec  1.2 GBytes  5.1 Gbits/sec  receiver
+iperf Done." \
+	"busy|iperf3: error - the server is busy running a test. try again later" \
+	"fail|iperf3: error - unable to connect to server - server may have stopped running or not be running: Connection timed out" \
+	"fail|" ; do
+	want=${cell%%|*}
+	got=$(failover_pool_probe_verdict "${cell#*|}")
+	if [[ "$got" == "$want" ]]; then
+		ok "pool probe verdict: ${want} for '${cell#*|}'"
+	else
+		bad "pool probe verdict: want ${want}, got ${got} for '${cell#*|}'"
+	fi
+done
+pool_port=$(sed -n 's/^POOL_PORT="${POOL_PORT:-\([0-9]*\)}"$/\1/p' "${SCRIPT_DIR}/test-failover.sh")
+post_port=$(sed -n 's/^POOL_POST_PORT="${POOL_POST_PORT:-\([0-9]*\)}"$/\1/p' "${SCRIPT_DIR}/test-failover.sh")
+# shellcheck disable=SC2016 # the literal ${POOL_POST_PORT} is what the script must contain
+if [[ -n "$pool_port" && -n "$post_port" && "$pool_port" != "$post_port" ]] &&
+   grep -q -- '-p ${POOL_POST_PORT} > /tmp/iperf3-pool-8280-post.log' "${SCRIPT_DIR}/test-failover.sh"; then
+	ok "the post-failback pool probe uses its own port (${post_port}, Phase 1b holds ${pool_port})"
+else
+	bad "the post-failback pool probe must not share Phase 1b's port (POOL_PORT=${pool_port:-?} POOL_POST_PORT=${post_port:-?})"
+fi
+
 echo "----------------------------------------"
 echo "failover client selftest: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

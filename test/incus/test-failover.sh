@@ -1289,6 +1289,10 @@ check_v6_transit "at baseline (before any failover)"
 # cell in pkg/configstore can pin this exact extraction.
 POOL_NAT_SMOKE="${POOL_NAT_SMOKE:-1}"
 POOL_PORT="${POOL_PORT:-5210}"
+# The post-failback probe needs its own port: Phase 1b keeps a pool-mode
+# client on POOL_PORT for the whole run, and an iperf3 server serves one test
+# per port, so a probe on POOL_PORT is answered "server is busy" (#18567).
+POOL_POST_PORT="${POOL_POST_PORT:-5209}"
 POOL_CONF_SRC=""
 POOL_CONF_ADDR=""
 POOL_CONF_COVER=""
@@ -1816,7 +1820,7 @@ fi
 if [[ "$POOL_NAT_SMOKE" == 1 && -n "$POOL_LAN_IF" ]]; then
 	incus exec "$FW0" -- cli -c "clear security flow session source-prefix ${POOL_SRC}" &>/dev/null || true
 	incus exec "$CLUSTER_LAN_HOST" -- bash -c \
-		"timeout 6 iperf3 --connect-timeout 3000 -B ${POOL_SRC} -t 2 -c ${IPERF_TARGET} -p ${POOL_PORT} > /tmp/iperf3-pool-8280-post.log 2>&1 &" || true
+		"timeout 6 iperf3 --connect-timeout 3000 -B ${POOL_SRC} -t 2 -c ${IPERF_TARGET} -p ${POOL_POST_PORT} > /tmp/iperf3-pool-8280-post.log 2>&1 &" || true
 	sleep 5
 	post_pool=$(pool_session_count "$FW0")
 	if [[ "$post_pool" == VOID ]]; then
@@ -1832,12 +1836,21 @@ if [[ "$POOL_NAT_SMOKE" == 1 && -n "$POOL_LAN_IF" ]]; then
 		# assertion. A successful iperf3 run emits `iperf Done.`; matching
 		# that positive result avoids treating an arbitrary error message as
 		# proof that the pool-mode TCP flow connected.
-		if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-pool-8280-post.log 2>/dev/null; then
+		# #18567: a "server is busy" reply is a probe collision on the iperf3
+		# server, not the #8341 defect (the reply itself crossed the firewall),
+		# so it is a VOID with that reason.
+		pool_log=$(incus exec "$CLUSTER_LAN_HOST" -- tail -5 /tmp/iperf3-pool-8280-post.log 2>&1 || echo "(pool probe log unreadable)")
+		case "$(failover_pool_probe_verdict "$pool_log")" in
+		pass)
 			pass "a pool-mode TCP flow connects after the role change (data path, not just allocation)"
-		else
-			pool_log=$(incus exec "$CLUSTER_LAN_HOST" -- tail -5 /tmp/iperf3-pool-8280-post.log 2>&1 || echo "(pool probe log unreadable)")
+			;;
+		busy)
+			void "a pool-mode TCP flow was NOT MEASURED after the role change: the iperf3 server on ${IPERF_TARGET}:${POOL_POST_PORT} answered busy (another client holds that port; #18567). The busy reply crossed the firewall, but no test ran. Pool probe log tail: ${pool_log}"
+			;;
+		*)
 			fail "a pool-mode TCP flow did not complete after the role change; the #8341 TCP-specific data-path defect may have returned. Pool probe log tail: ${pool_log}"
-		fi
+			;;
+		esac
 	else
 		fail "after the crash failover AND the manual failback, a FRESH flow from ${POOL_SRC} got NO pool translation. The ports fw1 imported as reservations while it was standby are the ones a reserve/recycle lifecycle bug strands, and this is the only assertion in this suite that enters that state (#8280 / #7174 M13)"
 	fi
