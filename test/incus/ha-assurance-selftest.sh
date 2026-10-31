@@ -944,6 +944,86 @@ assert_helper_status 0 ha_external_ping_verdict 0 '64 bytes from 1.1.1.1: icmp_s
 assert_helper_status 1 ha_external_ping_verdict 1 '4 packets transmitted, 0 received, 100% packet loss'
 assert_helper_status 2 ha_external_ping_verdict 2 'ping exited with status 2'
 assert_helper_status 2 ha_external_ping_verdict 1 ''
+
+# #18558: the WAN-address duplicate check. The probe lines below are the
+# shape ha_wan_claim_probe prints; the foreign MAC is the lab device that
+# answered for tcp's 172.16.50.10 on every one of 512 probes (2026-10-31).
+OWN=02:bf:72:17:
+CLAIM_CLEAN=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.1 00:10:db:ff:10:01\nreply 172.16.50.1 00:10:db:ff:10:01'
+CLAIM_DUP=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 18:e8:29:2c:13:7a\nreply 172.16.50.1 00:10:db:ff:10:01\nreply 172.16.50.10 18:E8:29:2C:13:7A'
+CLAIM_PEER=$'iface ge-7-0-2.50 02:bf:72:17:01:01\nreply 172.16.50.10 02:bf:72:17:01:00\nreply 172.16.50.1 00:10:db:ff:10:01'
+CLAIM_OTHER_CLUSTER=$'reply 172.16.50.10 02:bf:72:18:01:00\nreply 172.16.50.1 00:10:db:ff:10:01'
+CLAIM_BLIND=$'iface ge-0-0-2.50 02:bf:72:17:01:00'
+CLAIM_DUP_BLIND=$'reply 172.16.50.10 18:e8:29:2c:13:7a'
+# Only the gateway answered, and our own RETH MAC: unique.
+assert_helper_status 0 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_CLEAN"
+assert_helper_status 0 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_PEER"
+# A foreign MAC answers for the address: duplicate, named once (case-folded).
+assert_helper_status 1 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_DUP"
+assert_contains "$(<"${ERR}")" '172.16.50.10 is also answered for by 18:e8:29:2c:13:7a, a duplicate' \
+	'duplicate WAN claim names the foreign MAC'
+assert_eq "$(grep -o '18:e8:29:2c:13:7a' "${ERR}" | wc -l)" 1 'duplicate WAN claim names each MAC once'
+# Another xpf cluster's RETH MAC (cluster 0x18) is foreign to cluster 0x17.
+assert_helper_status 1 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_OTHER_CLUSTER"
+# A foreign claim is positive evidence even when the gateway was silent.
+assert_helper_status 1 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_DUP_BLIND"
+# No gateway reply and no claimant: the probe heard nothing, so VOID, not clean.
+assert_helper_status 2 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_BLIND"
+assert_helper_status 2 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1 ''
+assert_helper_status 2 ha_wan_claim_verdict 02:bf:72:17 172.16.50.10 172.16.50.1 "$CLAIM_CLEAN"
+assert_helper_status 2 ha_wan_claim_verdict "$OWN" 172.16.50.1 172.16.50.1 "$CLAIM_CLEAN"
+assert_helper_status 2 ha_wan_claim_verdict "$OWN" 172.16.50.10 172.16.50.1
+
+# The own-MAC prefix comes from the conf's cluster-id (tcp is 23 = 0x17).
+printf 'chassis {\n    cluster {\n        cluster-id 23;\n    }\n}\n' >"${TMP_DIR}/claim-23.conf"
+printf 'chassis {\n    cluster {\n        cluster-id 300;\n    }\n}\n' >"${TMP_DIR}/claim-300.conf"
+printf 'chassis { }\n' >"${TMP_DIR}/claim-none.conf"
+assert_helper_value '02:bf:72:17:' ha_wan_own_mac_prefix "${TMP_DIR}/claim-23.conf"
+assert_helper_status 2 ha_wan_own_mac_prefix "${TMP_DIR}/claim-300.conf"
+assert_helper_status 2 ha_wan_own_mac_prefix "${TMP_DIR}/claim-none.conf"
+assert_helper_status 2 ha_wan_own_mac_prefix "${TMP_DIR}/claim-missing.conf"
+
+# ha_wan_claim_check drives the probe and the verdict; the probe is stubbed
+# with the shapes the live probe printed (2026-10-31), and the node list must
+# reach it unchanged.
+ha_wan_claim_probe_real="$(declare -f ha_wan_claim_probe)"
+CLAIM_STUB_OUT="" CLAIM_STUB_RC=0
+# The probe runs inside a command substitution, so it records its argv in a file.
+ha_wan_claim_probe() { printf '%s' "$*" >"${TMP_DIR}/claim-stub-args"; printf '%s\n' "$CLAIM_STUB_OUT"; return "$CLAIM_STUB_RC"; }
+claim_check_case() { # <expected-status> <reason-substring> <conf> <stub-out> <stub-rc>
+	CLAIM_STUB_OUT="$4" CLAIM_STUB_RC="$5"
+	rm -f "${TMP_DIR}/claim-stub-args"
+	if ! ha_wan_claim_check "$3" 172.16.50.10 172.16.50.1 tcp:fw0 tcp:fw1; then
+		fail_test "ha_wan_claim_check returned nonzero (it must always return 0)"
+	fi
+	assert_eq "$HA_WAN_CLAIM_STATUS" "$1" "ha_wan_claim_check status for ${2}"
+	assert_contains "$HA_WAN_CLAIM_REASON" "$2" "ha_wan_claim_check reason for ${2}"
+}
+claim_check_case 1 'also answered for by 18:e8:29:2c:13:7a' "${TMP_DIR}/claim-23.conf" "$CLAIM_DUP" 0
+assert_eq "$(<"${TMP_DIR}/claim-stub-args")" '172.16.50.10 172.16.50.1 tcp:fw0 tcp:fw1' 'claim check passes address, gateway and nodes to the probe'
+claim_check_case 0 '' "${TMP_DIR}/claim-23.conf" "$CLAIM_CLEAN" 0
+claim_check_case 2 'did not answer the same probe' "${TMP_DIR}/claim-23.conf" "$CLAIM_BLIND" 0
+claim_check_case 2 'holds 172.16.50.10' "${TMP_DIR}/claim-23.conf" '' 2
+claim_check_case 2 'no cluster-id' "${TMP_DIR}/claim-none.conf" "$CLAIM_DUP" 0
+# Cluster 0x18's RETH MAC is foreign to a cluster-23 conf, through the full check.
+claim_check_case 1 '02:bf:72:18:01:00' "${TMP_DIR}/claim-23.conf" "$CLAIM_OTHER_CLUSTER" 0
+eval "$ha_wan_claim_probe_real"
+
+# The external IPv4 verdict: a FAIL becomes VOID only beside a foreign claim.
+PING_LOST='4 packets transmitted, 0 received, 100% packet loss'
+PING_OK='64 bytes from 1.1.1.1: icmp_seq=1 ttl=56'
+DUP_REASON='wan claim: 172.16.50.10 is also answered for by 18:e8:29:2c:13:7a'
+assert_helper_status 2 ha_external_ping_claim_verdict 1 "$PING_LOST" 1 "$DUP_REASON"
+assert_contains "$(<"${ERR}")" 'not attributable to the firewall: wan claim: 172.16.50.10' \
+	'claim-voided external ping keeps the claimant in its reason'
+assert_contains "$(<"${ERR}")" 'valid capture contains no bytes' \
+	'claim-voided external ping keeps the ping reason'
+assert_helper_status 1 ha_external_ping_claim_verdict 1 "$PING_LOST" 0 ''
+assert_helper_status 1 ha_external_ping_claim_verdict 1 "$PING_LOST" 2 'wan claim: gateway silent'
+assert_helper_status 1 ha_external_ping_claim_verdict 1 "$PING_LOST" '' ''
+assert_helper_status 0 ha_external_ping_claim_verdict 0 "$PING_OK" 1 "$DUP_REASON"
+assert_helper_status 2 ha_external_ping_claim_verdict 2 'ping exited with status 2' 1 "$DUP_REASON"
+assert_helper_status 2 ha_external_ping_claim_verdict 1 "$PING_LOST" 1
 RECENT_JSON="${TMP_DIR}/recent-metrics.jsonl"
 cat >"$RECENT_JSON" <<'JSON'
 {"event":"interval","data":{"sum":{"start":0,"end":1,"bits_per_second":0},"streams":[{"socket":1,"bits_per_second":0},{"socket":2,"bits_per_second":100}]}}

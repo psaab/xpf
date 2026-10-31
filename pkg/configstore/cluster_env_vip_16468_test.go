@@ -39,8 +39,8 @@ type clusterEnvVIPCase struct {
 var clusterEnvVIPCases = []clusterEnvVIPCase{
 	{"loss-userspace-cluster.env", "172.16.50.8", "10.0.61.1", "2001:559:8585:ef00::1", "ha-cluster-userspace.conf"},
 	{"loss-cluster.env", "172.16.50.7", "10.0.89.1", "2001:559:8585:df01::1", "ha-cluster-loss.conf"},
-	{"tcp-userspace-cluster.env", "172.16.50.10", "10.0.62.1", "2001:559:8585:aa00::1", "ha-cluster-tcp.conf"},
-	{"udp-userspace-cluster.env", "172.16.50.11", "10.0.63.1", "2001:559:8585:ba00::1", "ha-cluster-udp.conf"},
+	{"tcp-userspace-cluster.env", "172.16.50.42", "10.0.62.1", "2001:559:8585:aa00::1", "ha-cluster-tcp.conf"},
+	{"udp-userspace-cluster.env", "172.16.50.43", "10.0.63.1", "2001:559:8585:ba00::1", "ha-cluster-udp.conf"},
 }
 
 // envVIPs parses the three VIP pins from an env file. An absent pin

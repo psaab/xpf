@@ -962,6 +962,183 @@ ha_external_ping_verdict() {
 	printf 'external ping: valid capture contains no bytes from %s\n' "${output%%$'\n'*}" >&2
 	return 1
 }
+
+# ha_wan_claim_verdict <own-mac-prefix> <address> <gateway> <probe-output>
+#
+# #18558: is the cluster's WAN IPv4 address claimed on its segment by a host
+# OUTSIDE the cluster? A duplicate address makes every external IPv4 cell
+# unattributable: the upstream gateway's ARP entry for the address flips
+# between the RG owner and the other host, so replies go to whichever of the
+# two ARPed the gateway last. The tcp cluster's 172.16.50.10 was claimed by a
+# lab device (18:e8:29:2c:13:7a) for exactly this reason, and the resulting
+# IPv4 loss was booked first as "environment" and then as a session defect.
+#
+# <probe-output> is what ha_wan_claim_probe printed: one "reply <ip> <mac>"
+# line per ARP reply the probing interface received to an RFC 5227 probe
+# (sender 0.0.0.0) for <address> or for <gateway>. Other lines are ignored.
+# <own-mac-prefix> is this cluster's RETH virtual-MAC prefix
+# (02:bf:72:<cluster-id>:, pkg/config/reth_virtual_mac_8340.go), written
+# with its trailing colon so 02:bf:72:1 cannot match cluster 0x17.
+#
+# Status 0: the gateway answered, so the probe could see replies on the
+#           segment, and every claimant of <address> is this cluster.
+# Status 1: a MAC outside <own-mac-prefix> answered for <address>: a
+#           duplicate IPv4 address. stderr names every foreign MAC. A foreign
+#           claim is positive evidence, so it wins even if the gateway did
+#           not answer.
+# Status 2: VOID. No foreign claimant AND no gateway reply: silence from a
+#           probe that cannot be shown to hear anything is not evidence that
+#           the address is unique.
+ha_wan_claim_verdict() {
+	if [[ $# -ne 4 ]]; then
+		printf 'wan claim: expected <own-mac-prefix> <address> <gateway> <probe-output>\n' >&2
+		return 2
+	fi
+	local own="${1,,}" addr="$2" gw="$3" output="$4"
+	local line kind ip mac rest foreign="" gw_seen=0
+	if [[ ! "$own" =~ ^([0-9a-f]{2}:){1,5}$ ]]; then
+		printf 'wan claim: own MAC prefix %q is not colon-terminated hex octets\n' "$1" >&2
+		return 2
+	fi
+	if [[ -z "$addr" || -z "$gw" || "$addr" == "$gw" ]]; then
+		printf 'wan claim: need distinct address and gateway (got %q and %q)\n' "$addr" "$gw" >&2
+		return 2
+	fi
+	while IFS= read -r line; do
+		read -r kind ip mac rest <<<"$line"
+		[[ "$kind" == reply ]] || continue
+		mac="${mac,,}"
+		[[ "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || continue
+		if [[ "$ip" == "$gw" ]]; then
+			gw_seen=1
+			continue
+		fi
+		[[ "$ip" == "$addr" ]] || continue
+		[[ "$mac" == "$own"* ]] && continue
+		[[ " $foreign " == *" $mac "* ]] || foreign="${foreign:+$foreign }$mac"
+	done <<<"$output"
+	if [[ -n "$foreign" ]]; then
+		printf 'wan claim: %s is also answered for by %s, a duplicate IPv4 address on the segment\n' \
+			"$addr" "$foreign" >&2
+		return 1
+	fi
+	if (( gw_seen )); then return 0; fi
+	printf 'wan claim: gateway %s did not answer the same probe, so no foreign reply for %s is not evidence\n' \
+		"$gw" "$addr" >&2
+	return 2
+}
+
+# ha_wan_own_mac_prefix <cluster-conf>
+# #18558: print this cluster's RETH virtual-MAC prefix, 02:bf:72:<cluster-id>:
+# (pkg/config/reth_virtual_mac_8340.go), from the conf's `cluster-id N;`.
+# Status 2 if the conf is unreadable or carries no usable cluster-id.
+ha_wan_own_mac_prefix() {
+	local conf="${1:-}" id
+	[[ -n "$conf" && -r "$conf" ]] || return 2
+	id="$(awk '$1 == "cluster-id" { v=$2; sub(/;.*/, "", v); print v; exit }' "$conf")"
+	[[ "$id" =~ ^[0-9]+$ ]] && (( id <= 255 )) || return 2
+	printf '02:bf:72:%02x:\n' "$id"
+}
+
+# ha_wan_claim_probe <address> <gateway> <node>...
+# #18558: on the first <node> that holds <address>, send three RFC 5227 ARP
+# probes (sender 0.0.0.0, so no cache on the segment learns from them) for
+# <address> and for <gateway> from the interface carrying <address>. Prints
+# "iface <name> <mac>", then one "reply <ip> <mac>" line per ARP reply. The
+# gateway's reply is the positive control that ha_wan_claim_verdict requires.
+# Status 2 if no listed node holds <address>.
+ha_wan_claim_probe() {
+	local addr="$1" gw="$2" node
+	shift 2
+	for node in "$@"; do
+		if incus exec "$node" -- python3 - "$addr" "$gw" <<'PY'
+import select, socket, struct, subprocess, sys, time
+addr, gw = sys.argv[1], sys.argv[2]
+ifname = None
+for line in subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True).stdout.splitlines():
+    f = line.split()
+    if len(f) >= 4 and f[2] == "inet" and f[3].split("/")[0] == addr:
+        ifname = f[1].split("@")[0]
+        break
+if ifname is None:
+    raise SystemExit(3)
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806))
+s.bind((ifname, 0x0806))
+mac = bytes.fromhex(open(f"/sys/class/net/{ifname}/address").read().strip().replace(":", ""))
+print("iface", ifname, mac.hex(":"))
+targets = [socket.inet_aton(addr), socket.inet_aton(gw)]
+for _ in range(3):
+    for tip in targets:
+        arp = struct.pack("!HHBBH6s4s6s4s", 1, 0x0800, 6, 4, 1, mac, bytes(4), bytes(6), tip)
+        s.send(b"\xff" * 6 + mac + b"\x08\x06" + arp + bytes(18))
+    end = time.time() + 1.0
+    while (left := end - time.time()) > 0:
+        if not select.select([s], [], [], left)[0]:
+            break
+        f = s.recv(2048)
+        if len(f) >= 42 and f[12:14] == b"\x08\x06" and f[20:22] == b"\x00\x02" and f[28:32] in targets:
+            print("reply", socket.inet_ntoa(f[28:32]), f[22:28].hex(":"), flush=True)
+PY
+		then
+			return 0
+		fi
+	done
+	return 2
+}
+
+# ha_wan_claim_check <cluster-conf> <address> <gateway> <node>...
+# #18558: probe and judge in one call. Sets HA_WAN_CLAIM_STATUS (the
+# ha_wan_claim_verdict status: 0 unique, 1 foreign claimant, 2 not measured)
+# and HA_WAN_CLAIM_REASON. Always returns 0 so a `set -e` caller reads the
+# variables instead of exiting.
+ha_wan_claim_check() {
+	local conf="$1" addr="$2" gw="$3" own output
+	shift 3
+	HA_WAN_CLAIM_STATUS=2
+	HA_WAN_CLAIM_REASON="wan claim: not measured"
+	if ! own=$(ha_wan_own_mac_prefix "$conf"); then
+		HA_WAN_CLAIM_REASON="wan claim: no cluster-id in CLUSTER_CONF=${conf:-<unset>}"
+		return 0
+	fi
+	if ! output=$(ha_wan_claim_probe "$addr" "$gw" "$@" 2>&1); then
+		HA_WAN_CLAIM_REASON="wan claim: no node of $* holds ${addr}, or the probe could not run"
+		return 0
+	fi
+	if HA_WAN_CLAIM_REASON=$(ha_wan_claim_verdict "$own" "$addr" "$gw" "$output" 2>&1); then
+		HA_WAN_CLAIM_STATUS=0
+	else
+		HA_WAN_CLAIM_STATUS=$?
+	fi
+	return 0
+}
+
+# ha_external_ping_claim_verdict <ping-status> <ping-output> <claim-status> <claim-reason>
+#
+# #18558: ha_external_ping_verdict, except that an IPv4 FAIL becomes VOID when
+# the same window's ha_wan_claim_verdict found a foreign claimant (status 1)
+# for the WAN address. Only a FAIL is converted: a PASS stays a PASS (the
+# product did forward), and with no foreign claim, or a claim probe that was
+# blind or did not run, the plain verdict stands, so the check can never
+# remove a FAIL it cannot explain.
+ha_external_ping_claim_verdict() {
+	if [[ $# -ne 4 ]]; then
+		printf 'external ping: expected <ping-status> <ping-output> <claim-status> <claim-reason>\n' >&2
+		return 2
+	fi
+	local ping_status="$1" output="$2" claim_status="$3" claim_reason="$4" status reason
+	if reason=$(ha_external_ping_verdict "$ping_status" "$output" 2>&1); then
+		return 0
+	else
+		status=$?
+	fi
+	if (( status == 1 )) && [[ "$claim_status" == 1 ]]; then
+		printf '%s; not attributable to the firewall: %s\n' "$reason" "${claim_reason:-foreign ARP claimant}" >&2
+		return 2
+	fi
+	printf '%s\n' "$reason" >&2
+	return "$status"
+}
+
 ha_target_reachability_verdict() {
 	if [[ $# -ne 4 ]]; then
 		printf 'target reachability: expected <ping-status> <ping-output> <tcp-status> <tcp-output>\n' >&2

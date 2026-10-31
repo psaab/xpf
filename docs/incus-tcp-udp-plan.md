@@ -1027,7 +1027,7 @@ VLAN and the FAB-VLAN change (U-LAN / 3991 for T-LAN / 3990).
 
 | Block | Owner today | New clusters must |
 |---|---|---|
-| `2001:559:8585:50::/64`, `172.16.50.0/24` | loss legacy RETH `.7/::7`, userspace `.8/::8`, gw `.1/::1`, standalone VM `xpf-fw` (`test/incus/xpf-test.conf`, pushed by `test/incus/setup.sh`) iface `.5/::5` + NAT64 pool `.14` + SNAT pool `.15` (both proxy-ARPed, #16473), legacy local cluster (`docs/ha-cluster.conf`, `xpf-cluster-fw{0,1}.conf`) RETH `.6/::6` + its fw0 NAT64 pool `.9` + SNAT pool / proxy-ARP `.12` (both proxy-ARPed, #16473) | add `.10/::a` (tcp), `.11/::b` (udp) — v4 `.10/.11`, v6 suffixes distinct namespaces, no clash. **Every address on this segment has exactly one stack owner (#16473): `.14`/`.15` are the standalone's alone and `.9`/`.12` the legacy local cluster's alone — never allocate them (or `.5`/`.6`) to another stack, and never move a pool back onto another stack's RETH (`.6`/`.7`/`.11`)** |
+| `2001:559:8585:50::/64`, `172.16.50.0/24` | loss legacy RETH `.7/::7`, userspace `.8/::8`, gw `.1/::1`, standalone VM `xpf-fw` (`test/incus/xpf-test.conf`, pushed by `test/incus/setup.sh`) iface `.5/::5` + NAT64 pool `.14` + SNAT pool `.15` (both proxy-ARPed, #16473), legacy local cluster (`docs/ha-cluster.conf`, `xpf-cluster-fw{0,1}.conf`) RETH `.6/::6` + its fw0 NAT64 pool `.9` + SNAT pool / proxy-ARP `.12` (both proxy-ARPed, #16473) | add `.42/::a` (tcp), `.43/::b` (udp). They were `.10/.11` until #18558: a live ARP probe showed both v4 addresses held by **non-xpf** lab devices (see the note below this table), so v4 moved while v6 kept `::a/::b`. **Every address on this segment has exactly one stack owner (#16473): `.14`/`.15` are the standalone's alone and `.9`/`.12` the legacy local cluster's alone — never allocate them (or `.5`/`.6`) to another stack, and never move a pool back onto another stack's RETH (`.6`/`.7`/`.8`/`.42`/`.43`), or onto a foreign-held address (note below)** |
 | `2001:559:8585:80::/64`, `172.16.80.0/24` | RETH `.7/.8`, targets `.200/.201` (+`::200/::201`), pool-SNAT `172.16.80.7` (userspace proxy-arp; also legacy-loss RETH `.7` — the documented, accepted overlap: the loss pair's RETH and its own SNAT pool are the same stack, and no second stack claims `.7` on VLAN 80) | add `.210/::210`, `.211/::211`; ⚠ do **not** reuse `172.16.80.7` pool — if pool-SNAT exercise is copied, allocate per stack (candidates `.12` tcp / `.13` udp — Q7) |
 | `2001:559:8585:ef00::/64` + `10.0.61.0/24` | loss userspace LAN | untouched |
 | `2001:559:8585:df01::/64` + `10.0.89.0/24` | loss legacy LAN | untouched |
@@ -1035,6 +1035,30 @@ VLAN and the FAB-VLAN change (U-LAN / 3991 for T-LAN / 3990).
 | VLAN 3666/3667 on `mlx1` (loss LAN) | loss clusters | new LAN VLANs TBD (Q4); **FAB-VLANs 3990/3991 are PF-private to each host's `ix0`** (§2.8.4) — no switch allocation, but must be confirmed *not* trunk-allowed on `ix0` uplinks (Q11) |
 | `10.136.126.0/24` (`incusbr0` on loss) | mgmt for all loss VMs | new mgmt bridges on tcp/udp need their own subnets (suggest `10.136.127.0/24` tcp, `10.136.128.0/24` udp — free on those hosts; they are host-local NAT bridges so reuse would also work, but distinct aids log reading) |
 | `2001:559:8585:100::/64`, `…fff1::/64`, `172.16.15.0/20`, `172.16.100.0/22` | host mgmt / tenant nets on tcp/udp/loss hosts | do not place any test addressing here |
+
+**This segment is not xpf-only (#18558).** VLAN 50 is a shared lab network
+with dozens of non-xpf hosts, mostly Ubiquiti gear in `.2`-`.36` and across
+the rest of the /24. None of them has a config in this repo, so neither the
+table above nor the #16473 config census can see them. Before giving any
+stack an address here, probe it with RFC 5227 ARP (sender 0.0.0.0) from a
+node on the segment and require **no** reply. Ask the lab owner to reserve
+it as well: the segment's DHCP/IPAM is not under this repo's control.
+
+The 2026-10-31 sweep (tcp fw1, 3 rounds over each /24) found these foreign
+holders of addresses the shipped configs used:
+
+| address | used by | foreign holder |
+|---|---|---|
+| `172.16.50.10` | tcp WAN RETH (moved to `.42`) | `18:e8:29:2c:13:7a` |
+| `172.16.50.11` | udp WAN RETH (moved to `.43`) | `d8:b3:70:8c:f8:44` |
+| `172.16.50.9`, `.12` | legacy local NAT64 / SNAT pools (#18574) | `2a:dd:35:a2:96:97`, `ac:8b:a9:df:fd:f3` |
+| `172.16.50.14`, `.15` | standalone NAT64 / SNAT pools (#18574) | `f4:e2:c6:ea:d7:80`, `9c:05:d6:e1:f2:0f` |
+
+The full measured list is `foreignClaimed18558` in
+`pkg/configstore/shared_segment_foreign_claim_18558_test.go`. That test fails
+on any shipped claim of an address in the list. A duplicate makes the
+upstream gateway's ARP entry flip between the two holders, which shows up as
+periodic IPv4-only loss on the stack (20-50% on tcp, up to 80% on udp), with IPv6 clean.
 
 ### 3.4 HA sync / fabric summary (per cluster)
 
