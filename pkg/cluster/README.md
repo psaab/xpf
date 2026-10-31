@@ -5077,8 +5077,33 @@ it.
   (`sync_protocol.go`). `configEpochStale` interprets that value by the
   receiver's current RG0 role: a non-authority compares an untagged authority
   generation against `max(applyingConfigGen, lastAppliedConfigGen)`, while an
-  authority compares a tagged reverse epoch against its own `configGenCounter`
-  only after the peer advertises the reverse-tag capability (#11055). A
+  authority compares a tagged reverse epoch only after the peer advertises the
+  reverse-tag capability (#11055). The authority's threshold is
+  `authorityConfigEpochThreshold` (#18636). From its first config write to the
+  current peer incarnation, the threshold is the newest generation actually
+  written to that incarnation: `lastSentConfigGen`, raised as a max in
+  `recordLastSentConfigGen` just before the socket write and held in
+  `peerIncarnationState`, so a new peer incarnation is never compared against
+  a generation sent to its predecessor. One exception is a standby OS reboot.
+  The authority's peer-connect push lands on the rebooted peer's new
+  connection BEFORE that connection's BulkStart reports the new boot id (the
+  #18521 ordering), and the boot-id switch then retires the incarnation.
+  `retirePeerIncarnationLocked` therefore seeds the fresh mark from the
+  priming connection's own written-config mark (`authConn.lastSentConfigGen`).
+  That is the same attribution model as the capability set and the #18521
+  apply ACK. The switch's `OnPeerCapabilitiesChanged` also makes the daemon
+  clear its "already pushed" marker and reconcile, so the new incarnation
+  receives a push in any case. Before that first write it is
+  `configGenCounter`, the original comparison, which refuses (fail-closed) a
+  tagged generation the peer took from an earlier authority process (an older
+  boot, or a config edited while this node was down), until the reconnect
+  push lands. `configGenCounter` alone cannot be the threshold: it is a
+  reservation counter, and the 30 s config-sync reconcile tick reserves a
+  generation before it finds the config already pushed and no-ops. So it runs
+  one draw per tick past anything the peer was ever sent. On `loss` (#18636)
+  that refused every install from a converged peer, `Sessions
+  stale-config-ignored` climbed at 55-160/s on the RG0 primary, and the
+  primary never imported a session its peer created. A
   non-authority stamps `tag | lastAppliedConfigGen` only when the peer is known
   capable, received and applied marks agree and are nonzero, and the applied
   mark is newer than the floor captured on entry to the current non-authority

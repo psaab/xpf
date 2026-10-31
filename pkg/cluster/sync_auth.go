@@ -328,6 +328,13 @@ type authConn struct {
 	peerCapabilityFlags  uint8
 	peerSessionSyncWire  uint16
 	peerCapabilityFlags2 uint8
+	// lastSentConfigGen is the newest config generation written on THIS
+	// connection (#18636), raised as a max at each config write. A boot-id
+	// switch on this priming stream seeds the fresh incarnation's sent mark
+	// from it: the authority's peer-connect push is written to a rebooted
+	// peer's new connection BEFORE that connection's BulkStart reports the
+	// new boot id (the #18521 ordering), and the new boot did receive it.
+	lastSentConfigGen atomic.Uint64
 	// peerCapabilitiesSeen records that this connection delivered the
 	// capabilities frame, including a legacy/short frame. Retirement defers
 	// eviction while this is false because the other fabric's frame may arrive

@@ -1489,8 +1489,24 @@ authority namespace it names. Until a current-authority config is applied, or
 while the sender is behind, after a failed apply, or during reconnect reset, it
 stamps 0.
 
-On receipt, an authority strips the tag and compares against its own
-`configGenCounter` only after learning that the peer supports the encoding. A
+On receipt, an authority strips the tag only after learning that the peer
+supports the encoding. It compares against `authorityConfigEpochThreshold`
+(#18636), which is the newest config generation actually written to the
+current peer incarnation (`peerIncarnationState.lastSentConfigGen`).
+
+- Before the first write to that incarnation, the threshold is
+  `configGenCounter`. That keeps the original comparison, which fails
+  closed.
+- The counter alone cannot be the threshold. It is a reservation counter, and
+  the 30 s config-sync reconcile reserves a generation before it finds the
+  config already pushed. So it runs past anything the peer was ever sent, and
+  a converged peer's every install read as stale.
+- A BulkStart boot-id switch seeds the new incarnation's mark from the config
+  written on the priming connection (the #18521 ordering: the peer-connect
+  push precedes the new boot's BulkStart). The switch's capability callback
+  also re-arms a push to the new incarnation.
+
+A
 non-authority accepts only untagged epochs and compares against
 `max(applyingConfigGen, lastAppliedConfigGen)`. A tag/role mismatch means the
 peers have not observed the same RG0 handover, so the generations are
