@@ -331,7 +331,8 @@ func parseUpgradeArgs(args []string) (upgradeFlags, error) {
 		"HA rolling only: bound on EACH post-cut wait (session-sync re-establish, then the held-secondary "+
 			"rejoin including the inbound bulk prime), so the worst case is twice this; 0 or omitted means "+
 			"the default; minimum "+upgrade.MinRejoinDeadline.String()+". On timeout the node is left held "+
-			"secondary: inspect it, then run `request chassis cluster failover reset`")
+			"secondary: inspect it, then run `xpfd upgrade kernel rejoin` once it is primed (or "+
+			"`request chassis cluster failover reset redundancy-group <N>` per RG)")
 	if err := fs.Parse(args); err != nil {
 		return upgradeFlags{}, err
 	}

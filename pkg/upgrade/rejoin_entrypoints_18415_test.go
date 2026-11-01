@@ -253,7 +253,7 @@ func TestRollingPostCutWaitsLogProgress18415(t *testing.T) {
 		}
 		first := p[0]
 		for _, want := range []string{"upgraded node re-establishing session sync", "of 3s deadline",
-			"sync-established=false", "last error: none", "Ctrl-C is deferred"} {
+			"sync-established=false", "last error seen: none", "Ctrl-C is deferred"} {
 			if !strings.Contains(first, want) {
 				t.Errorf("first step-6 progress line lacks %q: %s", want, first)
 			}
@@ -271,7 +271,7 @@ func TestRollingPostCutWaitsLogProgress18415(t *testing.T) {
 		for _, want := range []string{"rejoin, held secondary until the inbound bulk prime completes",
 			"peer-alive=true", "sync-established=true", "bulk-primed=false",
 			"local-rejoined=not-queried-before-reset",
-			"last error: session-sync inbound bulk prime not complete"} {
+			"last error seen: session-sync inbound bulk prime not complete"} {
 			if !strings.Contains(first, want) {
 				t.Errorf("first step-7 progress line lacks %q: %s", want, first)
 			}

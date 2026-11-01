@@ -907,7 +907,7 @@ get that far.
 against the deadline, the predicates and the last observed error, for example:
 
 ```
-rolling: still waiting: rejoin, held secondary until the inbound bulk prime completes: 15s elapsed of 3m10s deadline (peer-alive=true sync-established=true bulk-primed=false local-rejoined=not-queried-before-reset; last error: session-sync inbound bulk prime not complete); Ctrl-C is deferred until the run finishes
+rolling: still waiting: rejoin, held secondary until the inbound bulk prime completes: 15s elapsed of 3m10s deadline (peer-alive=true sync-established=true bulk-primed=false local-rejoined=not-queried-before-reset; last error seen: session-sync inbound bulk prime not complete); Ctrl-C is deferred until the run finishes
 ```
 
 The first line of each wait notes that Ctrl-C is deferred: after STOP the

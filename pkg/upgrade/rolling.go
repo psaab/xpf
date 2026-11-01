@@ -200,11 +200,14 @@ const rejoinTransferGrace = 5 * time.Second
 
 // DefaultRejoinDeadline bounds each post-cut wait (session-sync re-establish,
 // then the held-secondary rejoin including the inbound bulk prime) when the
-// operator does not override it. Derivation: the peer's last prime attempt is
-// at +PeerBulkPrimeRetryWindow (150s). If its ack is withheld, the peer's sweep
-// waits cluster.BulkAckPendingRetryAfter (35s) before re-driving the owed cold
-// prime, which lands at about +185s; rejoinTransferGrace (5s) covers that
-// bulk's transfer and ack. Total: 190s.
+// operator does not override it. It is a conservative margin, not the latest
+// possible prime: the peer's retry loop ends at +PeerBulkPrimeRetryWindow
+// (150s), although its last real send can be earlier, because a send is
+// deferred while an ack has been pending under cluster.BulkAckPendingRetryAfter
+// (35s). The sweep also keeps re-driving an owed cold prime after the loop
+// whenever the pending ack is that old, so there is no single "last" re-push.
+// The default allows the loop's end, one more re-drive (35s) and
+// rejoinTransferGrace (5s) for that bulk's transfer and ack. Total: 190s.
 //
 // The pre-#18415 60s default aborted rolls whose prime completed a few seconds
 // later. That observed cause, the first inbound bulk being discarded on a
@@ -332,7 +335,7 @@ func (p *waitProgress) observe(state string, lastErr error) {
 	if p.lines == 1 {
 		note = "; Ctrl-C is deferred until the run finishes"
 	}
-	p.logf("rolling: still waiting: %s: %s elapsed of %s deadline (%s; last error: %s)%s",
+	p.logf("rolling: still waiting: %s: %s elapsed of %s deadline (%s; last error seen: %s)%s",
 		p.phase, now.Sub(p.start).Round(time.Second), p.deadline, state, errText, note)
 }
 
@@ -755,8 +758,8 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 			"sync-established", rc.RejoinDeadline, rc.ProgressInterval),
 	}, true, cl.SyncEstablished); err != nil {
 		return fmt.Errorf("rolling: upgraded node did not re-establish session sync "+
-			"within %s — leaving it secondary; operator should verify before "+
-			"failing back: %w", rc.RejoinDeadline, err)
+			"within %s — leaving it secondary; operator should verify, then recover "+
+			"with `xpfd upgrade kernel rejoin` once it is primed: %w", rc.RejoinDeadline, err)
 	}
 	logf("rolling: upgraded node re-synced")
 
@@ -787,7 +790,8 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 		return fmt.Errorf("rolling: local node did not rejoin election after the cut "+
 			"within %s — leaving it secondary; the driver MUST NOT advance to the peer "+
 			"(draining it would leave a redundancy group with no primary on either "+
-			"node): %w", rc.RejoinDeadline, err)
+			"node); recover with `xpfd upgrade kernel rejoin` once it is primed: %w",
+			rc.RejoinDeadline, err)
 	}
 	rejoinConfirmed = true
 	logf("rolling: local node rejoined election, confirmed for every configured RG; " +
