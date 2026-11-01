@@ -197,6 +197,38 @@ This matters because a split-RG fabric-path bug can kill streams before the
 first failover. That must fail as a fabric regression, not be misclassified as
 a failover-survivability regression.
 
+### RG1 Group 7: former-owner readiness (#18686)
+
+Group 7 judges the former RG1 owner (node1) at `phase=mid`, after the RG has
+moved off it. It must be ready to take the RG back: helper `Enabled: true`,
+`Forwarding armed: true`, `rg1 active=false`, and `Ready bindings` above
+zero. Any one of these false is FAIL. A missing, duplicated or malformed
+field is VOID.
+
+These fields come from the userspace status summary in the
+`show chassis cluster data-plane statistics` capture (`RG1_STATS`). The
+`show chassis cluster status` capture (`RG1_STATUS`) has none of them. The RG's
+flag is not a line of its own: the summary joins every group on one line,
+`HA groups: rg0 active=true watchdog=N; rg1 active=false watchdog=N; ...`
+(`pkg/dataplane/userspace/format/status_sections.go`).
+`ha_standby_status_verdict` therefore takes the `rg<N>` entry out of that line.
+It needs exactly one `HA groups:` line and exactly one entry whose id is that
+whole token, so `rg10` is not `rg1`.
+
+Until #18686, Group 7 was handed `RG1_STATUS`. The parser also expected
+`rg1 active=` on its own line, and the selftest fixtures (hand-written in the
+parser's shape) agreed with it. So Group 7 was VOID on every live run, and an
+offline replay confirmed it: VOID on 117 of 117 preserved runs. It is now
+handed `RG1_STATS`. The verdict judges all 117 captures PASS. With the RG1
+slice's owner preconditions applied, the harness would score 116 PASS, and
+1 VOID by precondition (in that run node0 owned RG1 at phase-pre, so
+`can_measure` is false). The selftest rows are
+the real captured file
+(`test/fixtures/ha-assurance/rg1-failback-mid-node1-18686.stats`), each row
+changing one line of it, plus the production renderer golden. A pin checks
+that the call site passes `RG1_STATS[mid:node1]` and that `RG1_STATS` is the
+data-plane statistics capture.
+
 ### Session-sync idle precondition
 
 Both `make test-failover` (`ha_wait_for_session_sync_idle`, before traffic,

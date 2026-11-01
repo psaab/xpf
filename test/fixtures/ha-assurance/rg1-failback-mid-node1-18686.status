@@ -1,0 +1,40 @@
+HA capture identity: slice=manual-rg1-failback phase=mid node=node1 rg=1
+Monitor Failure codes:
+    CS  Cold Sync monitoring        FL  Fabric Connection monitoring
+    IF  Interface monitoring        IP  IP monitoring
+    CF  Config Sync monitoring
+
+Cluster ID: 23
+Node name: node1
+
+Software version: userspace-forwarding-ok-20260402-bfb00432-24934-gd340b1bf46
+HA protocol version: 1
+Session-sync wire version: 3
+Peer software version: userspace-forwarding-ok-20260402-bfb00432-24934-gd340b1bf46
+Peer HA protocol version: 1
+Peer session-sync wire version: 3
+Peer clock offset: -0.0s (peer behind this node; measured 0s ago)
+
+Node   Priority Status         Preempt  Manual   Monitor-failures
+
+Redundancy group: 0 , Failover count: 2
+node1  100      primary        no       no       None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=active vrrp-master=none
+node0  200      secondary      no       no       None
+
+Redundancy group: 1 , Failover count: 3
+node1  100      secondary-hold no       yes      None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=inactive vrrp-master=none
+node0  200      primary        no       no       None
+
+Redundancy group: 2 , Failover count: 2
+node1  100      primary        no       no       None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=active vrrp-master=none
+node0  200      secondary      no       no       None
+

@@ -1009,21 +1009,44 @@ except (OSError, UnicodeError) as exc:
     print(f"standby status {path}: unreadable ({exc})", file=sys.stderr)
     raise SystemExit(2)
 
-patterns = {
-    "Enabled": re.compile(r"^\s*Enabled:\s*(true|false)\s*$"),
-    "Forwarding armed": re.compile(r"^\s*Forwarding armed:\s*(true|false)\s*$"),
-    f"rg{rg} active": re.compile(rf"^\s*rg{re.escape(rg)} active=(true|false)\s*$"),
-    "Ready bindings": re.compile(r"^\s*Ready bindings:\s*(\d+)/(\d+)\s*$"),
-}
-values = {}
-for key, pattern in patterns.items():
-    matches = [pattern.match(line) for line in lines]
-    matches = [match for match in matches if match]
+# The input is a `show chassis cluster data-plane statistics` capture. The
+# readiness fields are the userspace status summary's
+# (pkg/dataplane/userspace/format/status_sections.go). #18686: the RG's
+# active flag is NOT a line of its own: the summary joins every group on
+# ONE line, `HA groups: rg0 active=true watchdog=N; rg1 active=false
+# watchdog=N; ...`, so it is parsed out of that line.
+def void(key, reason):
+    hint = ""
+    if reason == "missing" and any(re.match(r"^Redundancy group:", line) for line in lines):
+        hint = (" (this looks like a `show chassis cluster status` capture; the readiness"
+                " fields are in `show chassis cluster data-plane statistics`)")
+    print(f"standby status {path}: {key} field {reason}{hint}", file=sys.stderr)
+    raise SystemExit(2)
+
+def one(key, pattern):
+    matches = [match for line in lines if (match := pattern.match(line))]
     if len(matches) != 1:
-        reason = "missing" if not matches else "ambiguous"
-        print(f"standby status {path}: {key} field {reason}", file=sys.stderr)
-        raise SystemExit(2)
-    values[key] = matches[0].groups()
+        void(key, "missing" if not matches else "ambiguous")
+    return matches[0]
+
+# One assignment per field, not a dict literal: a `}` in column 0 would end
+# this function early for the selftest's lib_fn_mutant extractor.
+values = {}
+values["Enabled"] = one("Enabled", re.compile(r"^\s*Enabled:\s*(true|false)\s*$")).groups()
+values["Forwarding armed"] = one("Forwarding armed",
+                                 re.compile(r"^\s*Forwarding armed:\s*(true|false)\s*$")).groups()
+values["Ready bindings"] = one("Ready bindings",
+                               re.compile(r"^\s*Ready bindings:\s*(\d+)/(\d+)\s*$")).groups()
+groups = one("HA groups", re.compile(r"^\s*HA groups:\s*(.*?)\s*$")).group(1)
+entries = [entry.strip() for entry in groups.split(";")]
+# rg1 must not match rg10: the RG id is a whole token.
+mine = [entry for entry in entries if re.match(rf"^rg{rg}(?:\s|$)", entry)]
+if len(mine) != 1:
+    void(f"rg{rg} active", "missing" if not mine else "ambiguous")
+active = re.fullmatch(r"rg\d+ active=(true|false)(?: \S+)*", mine[0])
+if not active:
+    void(f"rg{rg} active", "malformed")
+values[f"rg{rg} active"] = active.groups()
 
 ready, total = (int(value) for value in values["Ready bindings"])
 if int(total) <= 0 or int(ready) > int(total):
