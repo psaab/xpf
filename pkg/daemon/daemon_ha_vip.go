@@ -149,12 +149,24 @@ func (d *Daemon) removeDirectStableLinkLocal(rgID int) {
 	d.removeStableRethLinkLocal(rgID)
 }
 
+// reconcileDirectVIPOwnership converges rgID's direct VIPs to the node's
+// CURRENT ownership. Ownership is read under directVIPMu (#18715 review): read
+// before the lock, a promotion that added the VIPs in between could have them
+// removed by a stale "not owner" verdict until the next 2 s pass. The lock
+// order directVIPMu -> cluster read lock is the one the #18579 link-cycle
+// recovery already uses; nothing takes them in the inverse order (the GARP/NA
+// burst validity callbacks that take directVIPMu run with no cluster lock).
 func (d *Daemon) reconcileDirectVIPOwnership(rgID int, reason string) {
-	d.applyDirectVIPOwnership(rgID, d.shouldOwnDirectVIPs(rgID), reason)
+	d.applyDirectVIPOwnershipWith(rgID, d.shouldOwnDirectVIPs, reason)
 }
 
 func (d *Daemon) applyDirectVIPOwnership(rgID int, want bool, reason string) {
+	d.applyDirectVIPOwnershipWith(rgID, func(int) bool { return want }, reason)
+}
+
+func (d *Daemon) applyDirectVIPOwnershipWith(rgID int, wantFn func(int) bool, reason string) {
 	d.directVIPMu.Lock()
+	want := wantFn(rgID)
 	if d.directVIPOwned == nil {
 		d.directVIPOwned = make(map[int]bool)
 	}
@@ -580,7 +592,11 @@ func (d *Daemon) claimLegacyNonVIPAnnounce(rgID int, generation uint64) bool {
 // CurrentDesired's epoch: epoch bumps on every reconcileLocked input
 // (every 2s reconcile pass), which would re-send the full burst forever.
 func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
-	if d.isNoRethVRRP() {
+	// #18769: no store, or a store with no active config yet, means no
+	// targets to derive. Return before claiming the activation so a later
+	// pass (with an active config) still owns the announce, matching
+	// daemon_ha.go's `d.store == nil || d.store.ActiveConfig() == nil`.
+	if d.store == nil || d.store.ActiveConfig() == nil || d.isNoRethVRRP() {
 		return
 	}
 	d.rgStatesMu.RLock()
@@ -645,7 +661,7 @@ func (d *Daemon) nonVIPAnnounceClaimCurrent(rgID int, generation uint64) bool {
 // generation still claimed, before the first frame and (via stillValid)
 // before every follow-up/pool frame.
 func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int, generation uint64) cluster.AnnounceResult {
-	if d.isNoRethVRRP() {
+	if d.store == nil || d.isNoRethVRRP() { // #18769
 		return cluster.AnnounceResult{}
 	}
 	cfg := d.store.ActiveConfig()
