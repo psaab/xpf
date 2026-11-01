@@ -355,6 +355,28 @@ def summarize(path, args):
             inside(move["windows"], start, end_s) for move in planned
         )
 
+    # #18692 RESUME windows (--resume-event-sec): the crash's stream cell FAILs
+    # a stream only when it has not resumed within the window, and scores a
+    # later resume as a COST. A resuming straggler's zero seconds inside the
+    # window are that COST, not an "outside" outage; a stream that never
+    # carries data again keeps them (its own cells FAIL it as well).
+    resume_windows = merge_windows(
+        (float(event_sec), float(event_sec) + args.resume_window_sec)
+        for event_sec in args.resume_event_sec
+    )
+    last_data_start = {}
+    for interval in normalized_intervals:
+        _, interval_start, _ = interval_bps(interval)
+        for stream in interval.get("streams", []):
+            stream_id = str(stream.get("socket") or stream.get("id") or "?")
+            if float(stream.get("bits_per_second") or 0.0) > args.zero_gbps * 1e9:
+                last_data_start[stream_id] = max(last_data_start.get(stream_id, interval_start), interval_start)
+
+    def resume_excused(stream_id, start, end_s):
+        return inside(resume_windows, start, end_s) and last_data_start.get(stream_id, -1.0) >= end_s - 1e-9
+
+    stream_zero_resume_excused = 0
+
     stream_zero_total = 0
     stream_zero_outside_total = 0
     zero_stream_ids = set()
@@ -381,7 +403,9 @@ def summarize(path, args):
             if is_zero:
                 stream_zero_total += 1
                 zero_stream_ids.add(stream_id)
-                if not excluded:
+                if not excluded and resume_excused(stream_id, interval_start, interval_end):
+                    stream_zero_resume_excused += 1
+                elif not excluded:
                     stream_zero_outside_total += 1
                     zero_stream_ids_outside.add(stream_id)
         rows.append((interval_start, interval_end, interval_total, stall_by_stream, zero_by_stream, rate_by_stream))
@@ -416,6 +440,7 @@ def summarize(path, args):
     summary["observed_end_sec"] = observed_end
     summary["stream_zero_intervals_total"] = stream_zero_total
     summary["stream_zero_intervals_outside_events_total"] = stream_zero_outside_total
+    summary["stream_zero_intervals_resume_excused_total"] = stream_zero_resume_excused
     summary["zero_streams_outside_events_total"] = len(zero_stream_ids_outside)
     summary["zero_streams_total"] = len(zero_stream_ids)
     summary["zero_intervals_total"] = (
@@ -515,6 +540,24 @@ def main():
         type=float,
         default=3.0,
         help="width of each transition exclusion window (default 3s; #12618)",
+    )
+    parser.add_argument(
+        "--resume-event-sec",
+        type=float,
+        action="append",
+        default=[],
+        help="#18692: a crash instant whose per-stream cell scores a late resume as "
+        "a COST; may repeat. A stream's full zero intervals wholly inside "
+        "[T, T+--resume-window-sec] are excluded from "
+        "stream_zero_intervals_outside_events_total when that stream carries data "
+        "again later; a stream that never does keeps them.",
+    )
+    parser.add_argument(
+        "--resume-window-sec",
+        type=float,
+        default=10.0,
+        help="the stream cell's FAIL line, the width of each --resume-event-sec "
+        "window (default 10 s)",
     )
     args = parser.parse_args()
 

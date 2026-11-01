@@ -2198,6 +2198,27 @@ ha_build_planned_move_args
 # Missing, malformed, or incomplete metrics are VOID evidence, never a
 # zero-valued throughput FAIL; valid averages go through the anchored cell.
 # M1 JSON capture/gate fixture begin
+# ha_crash_resume_at <log> -- the crash instant the per-stream crash cell
+# uses (#18692; the same clock window, then the aggregate's stop within +/-1 s
+# of the integer anchor), printed as seconds on iperf3's clock, else the
+# integer anchor. The producer excuses a RESUMING stream's zero seconds up to
+# the cell's 10 s FAIL line from there, so a straggler is one COST, not a COST
+# plus an "outside" zero-interval FAIL.
+ha_crash_resume_at() {
+	local anchor_args=() line
+	if [[ "${failover_client_clock:-}" =~ ^-?[0-9.]+\ [0-9.]+$ ]]; then
+		anchor_args=(--client-clock-offset "${failover_client_clock% *}"
+			--client-clock-rtt "${failover_client_clock#* }"
+			--crash-epoch "${failover_epoch:-}" --crash-epoch-after "${failover_epoch_after:-}")
+	fi
+	if line=$(python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" --print-crash-anchor \
+		--crash-at "$failover_at_seconds" "${anchor_args[@]}" <"$1" 2>/dev/null) &&
+		[[ "$line" =~ ^-?[0-9.]+\  ]]; then
+		printf '%s\n' "${line%% *}"
+	else
+		printf '%s\n' "$failover_at_seconds"
+	fi
+}
 LOCAL_IPERF_LOG="${TMPDIR:-/var/worktrees/.cache/tmpdir}/iperf3-failover.$$.json-stream.log"
 LOCAL_IPERF_METRICS="${TMPDIR:-/var/worktrees/.cache/tmpdir}/iperf3-failover.$$.metrics.json"
 LOCAL_IPERF_GATE_ERR="${LOCAL_IPERF_METRICS}.gate.err"
@@ -2211,6 +2232,7 @@ if ! incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log \
 elif ! python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" \
 	"$LOCAL_IPERF_LOG" --event-sec "$failover_at_seconds" \
 	"${planned_move_args[@]}" --event-window-sec 3 \
+	--resume-event-sec "$(ha_crash_resume_at "$LOCAL_IPERF_LOG")" \
 	>"$LOCAL_IPERF_METRICS" 2>"$LOCAL_IPERF_PRODUCER_ERR"; then
 	printf '{"ok":false,"error":"metrics_parse_failed"}\n' >"$LOCAL_IPERF_METRICS"
 fi
@@ -2237,6 +2259,13 @@ if [[ "$iperf_gate_ok" == true ]]; then
 	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside the crash and planned-move windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)" \
 		ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals outside the [T, T+3] windows (MAX_STREAM_ZERO_INTERVALS)"
 	info "iperf3 whole-run zero-throughput streams: ${zero_streams_total} (${zero_streams_outside_events_total} outside the crash and planned-move windows)"
+	# #18692: zero seconds of streams that resumed before the crash cell's
+	# 10 s FAIL line are that cell's COST, not "outside" zeros; the count is
+	# recorded so the excusal itself stays visible.
+	resume_excused=$(python3 -c 'import json, sys; print(int(json.load(open(sys.argv[1])).get("stream_zero_intervals_resume_excused_total", 0)))' \
+		"$LOCAL_IPERF_METRICS" 2>/dev/null) || resume_excused=0
+	echo "HARNESS_METRIC: crash_resume_excused_zero_intervals=${resume_excused}"
+	info "iperf3 per-stream zero intervals of streams that resumed within the crash cell's 10 s line (not counted outside): ${resume_excused}"
 	ha_planned_move_cells "$LOCAL_IPERF_METRICS" "$planned_moves_registered"
 	pass "iperf3 sender retransmits ${retransmits}"
 	if [[ -n "$MAX_RETRANSMITS" ]]; then

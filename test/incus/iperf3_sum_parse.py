@@ -298,11 +298,14 @@ def failover_stream_verdict(
 #      about a quarter of crash runs, master's included, by which side of a
 #      retransmission a stream landed on.
 #
-# With no usable precise anchor the cell falls back to the integer verdict
-# evaluated at the integer anchor and one second either side of it; it keeps
-# that verdict when all three agree and is VOID when they do not. Callers
-# without ``--straggler-cost`` (ha-smoke-iperf-lib.sh) get the integer
-# verdict exactly as before.
+# Without a clock window that holds the crash, the cell first looks for the
+# aggregate's stop within ±1 s of the integer anchor (iperf3's own clock, no
+# clock reading needed). Without one it falls back to the integer verdict
+# evaluated at the integer anchor and one second either side of it, never
+# counting an interval that starts before anchor+1 as resume evidence; it
+# keeps that verdict when all three agree and is VOID when they do not.
+# Callers without ``--straggler-cost`` (ha-smoke-iperf-lib.sh) get the
+# integer verdict exactly as before.
 
 RESUME_COST_SECONDS = 3.0
 RESUME_FAIL_SECONDS = 10.0
@@ -453,6 +456,57 @@ def data_stop_anchor(text: str, lo: float, hi: float) -> Optional[EventAnchor]:
                 f"aggregate stop on iperf3's own interval clock, inside [{lo:.3f}, {hi:.3f}]s",
             )
         return None
+    return _streams_stop_anchor(rows, lo, hi)
+
+
+def _streams_stop_anchor(rows, lo: float, hi: float) -> Optional[EventAnchor]:
+    """The crash read from the streams that stopped together, in [lo, hi].
+
+    A fast takeover can resume some streams inside the interval after the
+    crash, so the AGGREGATE never empties (a live loss run on 0.0.29546 kept
+    8 % of its rate there). The streams that stayed down for that whole
+    interval still carry the crash: each one's bytes in the interval holding
+    it are its own pre-crash rate times the part of the interval before the
+    crash. At least a quarter of the streams (and at least three) must stop
+    in the same interval, which is the crash's signature rather than one
+    stream's stall; their median fraction is the stop.
+
+    Those streams sent bytes in interval ``k`` and none in ``k+1``, so the
+    crash lies inside ``k`` and ``k+1`` is wholly after it, whatever the
+    fraction's error: the anchor cannot make a pre-crash byte count as a
+    resume.
+    """
+    streams = _stream_intervals(rows)
+    if not streams:
+        return None
+    need = max(3, (len(streams) + 3) // 4)
+    starts = sorted({start for intervals in streams.values() for start, _, _ in intervals})
+    for k_start in starts:
+        if k_start > hi or k_start < lo - 1.5:
+            continue
+        fractions = []
+        for intervals in streams.values():
+            index = next((i for i, row in enumerate(intervals) if abs(row[0] - k_start) < 0.05), None)
+            if index is None or index + 1 >= len(intervals):
+                continue
+            start, end, bps = intervals[index]
+            following = intervals[index + 1][2]
+            pre = [b for a, _, b in intervals if start - 5 <= a < start]
+            if len(pre) < 3 or following != 0 or bps <= 0:
+                continue
+            rate = statistics.mean(pre)
+            if rate > 0:
+                fractions.append((end - start) * min(1.0, bps / rate))
+        if len(fractions) >= need:
+            stop = k_start + statistics.median(fractions)
+            if lo <= stop <= hi:
+                return EventAnchor(
+                    stop,
+                    _STOP_UNCERTAINTY,
+                    f"stop of {len(fractions)} streams together on iperf3's own interval clock "
+                    f"(the aggregate never emptied), inside [{lo:.3f}, {hi:.3f}]s",
+                )
+            return None
     return None
 
 
@@ -725,7 +779,65 @@ def precise_stream_cell(
     )
 
 
-def integer_stream_cell(
+def _integer_cell_at(rows, at, candidate, expected_streams, event_label):
+    """One candidate of the integer fallback: (status, message).
+
+    The old rule (resume evidence from per-stream intervals starting in
+    ``[candidate+1, candidate+deadline]``) under the COST/FAIL policy, with
+    one change: no interval starting before ``at + 1`` is resume evidence, for
+    any candidate. With ``candidate = at - 1`` the old window would start at
+    ``at``, and when the true event lies in ``[at, at+1)`` the interval holding
+    it starts just after ``at``: its PRE-event bytes would read as a resume for
+    every stream, a dead one included (#18703 review).
+    """
+    intervals = [
+        row for row in rows
+        if row[0] is not None and 0.5 <= row[2] - row[1] <= 1.5
+    ]
+    lower = max(candidate + 1, at + 1)
+    last_end = max((row[2] for row in intervals), default=None)
+    if event_label == "failback" and not any(start >= lower for _, start, _, _ in intervals):
+        return "VOID", (
+            f"client telemetry has no per-stream interval starting at or after "
+            f"{lower:g}s: failback recovery window is uncovered"
+        )
+    if event_label != "failback" and (last_end is None or last_end < lower):
+        return "FAIL", (
+            f"client telemetry ends at {last_end if last_end is not None else 0:.2f}s, before "
+            f"the {event_label} event at {candidate:g}s: no {event_label} stream evidence"
+        )
+    before = _pre_event_streams(rows, candidate)
+    if len(before) != expected_streams:
+        return "FAIL", (
+            f"expected {expected_streams} active streams before {event_label}, observed "
+            f"{len(before)} ({', '.join(map(str, sorted(before))) or 'none'})"
+        )
+
+    def resumed(deadline):
+        return {
+            stream for stream, start, _, bps in intervals
+            if lower <= start <= candidate + deadline and bps > 0
+        }
+
+    dead = sorted(before - resumed(RESUME_FAIL_SECONDS))
+    if dead:
+        return "FAIL", (
+            f"streams {', '.join(map(str, dead))} carried data before {event_label} "
+            f"but did not resume within {RESUME_FAIL_SECONDS:g}s"
+        )
+    late = sorted(before - resumed(RESUME_COST_SECONDS))
+    if late:
+        return "COST", (
+            f"streams {', '.join(map(str, late))} resumed after {event_label} but later than "
+            f"{RESUME_COST_SECONDS:g}s: stragglers, judged master-relative"
+        )
+    return "PASS", (
+        f"all {len(before)} pre-{event_label} streams ({', '.join(map(str, sorted(before)))}) "
+        f"resumed data within {RESUME_COST_SECONDS:g}s"
+    )
+
+
+def integer_three_anchor_cell(
     text: str,
     event_seconds: float,
     expected_streams: int,
@@ -733,37 +845,23 @@ def integer_stream_cell(
     json_stream: bool,
     event_label: str = "failover",
 ) -> Tuple[str, str]:
-    """The fallback cell when no precise anchor exists.
-
-    The integer verdict, with the COST/FAIL policy, at the integer anchor and
-    one second either side of it (the integer anchor's own error). All three
-    agreeing keeps the verdict; any disagreement is VOID, because the integer
-    clock cannot say which side of a line a stream fell on.
-    """
-    def one(at):
-        fail_ok, fail_text = failover_stream_verdict(
-            text, at, expected_streams, recovery_deadline_seconds=RESUME_FAIL_SECONDS,
-            json_stream=json_stream, event_label=event_label,
-        )
-        if fail_ok is None:
-            return "VOID", fail_text
-        if not fail_ok:
-            return "FAIL", fail_text
-        cost_ok, cost_text = failover_stream_verdict(
-            text, at, expected_streams, recovery_deadline_seconds=RESUME_COST_SECONDS,
-            json_stream=json_stream, event_label=event_label,
-        )
-        if cost_ok:
-            return "PASS", cost_text
-        return "COST", cost_text.replace(
-            "did not resume within", "resumed only after"
-        ) + f" (within {RESUME_FAIL_SECONDS:g}s): stragglers, judged master-relative"
-
-    cells = {at: one(at) for at in (event_seconds - 1, event_seconds, event_seconds + 1)}
-    statuses = {at: cell[0] for at, cell in cells.items()}
+    """The integer verdict at the integer anchor and one second either side
+    of it (its own error). All three agreeing keeps the verdict; any
+    disagreement is VOID, because the integer clock cannot say which side of
+    a line a stream fell on."""
+    try:
+        rows, _ = _oracle_interval_rows(text, json_stream)
+    except ValueError as exc:
+        return "FAIL", f"invalid JSON-stream interval telemetry: {exc}"
+    cells = {
+        candidate: _integer_cell_at(rows, event_seconds, candidate, expected_streams, event_label)
+        for candidate in (event_seconds - 1, event_seconds, event_seconds + 1)
+    }
+    statuses = {candidate: cell[0] for candidate, cell in cells.items()}
     status, message = cells[event_seconds]
     note = (
-        f" [integer anchor {event_seconds:g}s (harness SECONDS) and ±1 s: "
+        f" [integer anchor {event_seconds:g}s (harness SECONDS) and ±1 s, resume evidence "
+        f"from {event_seconds + 1:g}s on: "
         + ", ".join(f"{at:g}s {statuses[at]}" for at in sorted(cells)) + "]"
     )
     if len(set(statuses.values())) == 1:
@@ -774,7 +872,102 @@ def integer_stream_cell(
     )
 
 
+def resolve_anchor(
+    text: str,
+    at: float,
+    *,
+    before: Optional[float],
+    after: Optional[float],
+    offset: Optional[float],
+    rtt: Optional[float],
+    crash: bool,
+) -> Optional[EventAnchor]:
+    """The precise anchor for one event, or None for the integer fallback.
+
+    1. The orchestrator's clock window (``event_anchor``): for the crash, the
+       aggregate's stop inside it; for the failback, the landing poll's stamp.
+    2. For the crash only, with no clock reading or no stop in its window:
+       the aggregate's stop within ``[at-1, at+1]`` of the integer anchor. It
+       is on iperf3's own clock and needs no clock reading (#18703 review;
+       the offline re-judge anchored 24 of 29 runs this way).
+    """
+    anchor = event_anchor(
+        text, before=before, after=after, offset=offset, rtt=rtt,
+        label="crash" if crash else "failback landed", data_stop=crash,
+    )
+    if anchor is not None or not crash:
+        return anchor
+    try:
+        stop = data_stop_anchor(text, at - 1, at + 1)
+    except ValueError:
+        return None
+    window = clock_window(text, before, after, offset, rtt)
+    if stop is not None and window is not None and stop.seconds < window[0]:
+        return None  # a stop before the crash command was even sent is not the crash
+    if stop is not None:
+        stop.source = f"crash: {stop.source}, the integer anchor {at:g}s ±1 s (no clock window held it)"
+    return stop
+
+
+def integer_stream_cell(
+    text: str,
+    event_seconds: float,
+    expected_streams: int,
+    *,
+    json_stream: bool,
+    event_label: str = "failover",
+) -> Tuple[str, str]:
+    """The fallback cell when no clock window gives a precise anchor.
+
+    For the crash, the aggregate's stop within ±1 s of the integer anchor
+    first (``resolve_anchor``); without one, ``integer_three_anchor_cell``.
+    """
+    if json_stream and event_label != "failback":
+        stop = resolve_anchor(
+            text, event_seconds, before=None, after=None, offset=None, rtt=None, crash=True
+        )
+        if stop is not None:
+            return precise_stream_cell(
+                text, stop, expected_streams, json_stream=True, event_label=event_label
+            )
+    return integer_three_anchor_cell(
+        text, event_seconds, expected_streams, json_stream=json_stream, event_label=event_label
+    )
+
+
+def print_crash_anchor(argv) -> int:
+    """``--print-crash-anchor``: the crash instant the stream cell will use.
+
+    Prints ``<seconds> <uncertainty> precise`` or ``<integer-at> 1 integer``,
+    so test-failover can hand the zero-interval producer the same anchor
+    before the cells run.
+    """
+    parser = argparse.ArgumentParser(description="Print the #18692 crash anchor.")
+    parser.add_argument("--print-crash-anchor", action="store_true", required=True)
+    parser.add_argument("--crash-at", type=float, required=True)
+    parser.add_argument("--crash-epoch", type=float, default=None)
+    parser.add_argument("--crash-epoch-after", type=float, default=None)
+    parser.add_argument("--client-clock-offset", type=float, default=None)
+    parser.add_argument("--client-clock-rtt", type=float, default=None)
+    args = parser.parse_args(argv)
+    text = sys.stdin.read()
+    try:
+        anchor = resolve_anchor(
+            text, args.crash_at, before=args.crash_epoch, after=args.crash_epoch_after,
+            offset=args.client_clock_offset, rtt=args.client_clock_rtt, crash=True,
+        )
+    except ValueError:
+        anchor = None
+    if anchor is None:
+        print(f"{args.crash_at:g} 1 integer")
+    else:
+        print(f"{anchor.seconds:.3f} {anchor.uncertainty:.3f} precise")
+    return 0
+
+
 def main() -> int:
+    if "--print-crash-anchor" in sys.argv[1:]:
+        return print_crash_anchor(sys.argv[1:])
     parser = argparse.ArgumentParser(
         description="Check failover iperf3 interval and stream telemetry."
     )
@@ -858,20 +1051,19 @@ def main() -> int:
             text, at, args.streams, json_stream=args.json_stream, event_label=label
         )
 
-    def cell(at, before, after, label, data_stop):
+    def cell(at, before, after, label, crash):
         anchor = None
         if args.json_stream:
-            anchor = event_anchor(
-                text, before=before, after=after, offset=args.client_clock_offset,
-                rtt=args.client_clock_rtt, label="crash" if data_stop else "failback landed",
-                data_stop=data_stop,
+            anchor = resolve_anchor(
+                text, at, before=before, after=after, offset=args.client_clock_offset,
+                rtt=args.client_clock_rtt, crash=crash,
             )
         if anchor is not None:
             status, message = precise_stream_cell(
                 text, anchor, args.streams, json_stream=True, event_label=label
             )
         else:
-            status, message = integer_stream_cell(
+            status, message = integer_three_anchor_cell(
                 text, at, args.streams, json_stream=args.json_stream, event_label=label
             )
         return status, message, anchor
