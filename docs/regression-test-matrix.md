@@ -32,6 +32,7 @@ It complements, and does not replace:
 | B2 | `cd userspace-dp && cargo build --release --bin xpf-userspace-dp` | builds | **`cargo test` does not see release-only lints**: a test-only re-export failed `make deb` with `unused_imports` (#18520) |
 | B3 | `make lint-rust-baseline` | no NEW diagnostics | a dead getter that turns the CI ratchet red (#18520 review) |
 | B4 | `make harness-census`, `make test-*-lib` for any touched harness library | green | an unregistered or broken harness |
+| B4a | `make instructions-census` and `make mirror-census` when the diff touches a doc, skill, harness or env file | green | a temporary instruction that outlived its premise (a past `Review-by` date in a touched file, a malformed or misplaced marker) and a mirrored paragraph that drifted from its copies or lost a copy (#18645) |
 | B5 | Mutation-check every new cell: revert the fix in place (file copy, never `git stash`) and confirm the cell goes red | each new cell fails on revert | a cell that cannot detect its own defect (several PRs on 2026-10-29) |
 
 ## Tier 1: deploy and identity
@@ -78,7 +79,7 @@ re-run, not yet a regression; two are a regression.
 |---|---|---|---|
 | F1 | `make test-connectivity` | no failures, except that a cell listed under "Known product failures (tracked)" (below) is judged against the cluster's recorded master baseline, and a "Known environment rows" cell is excused only when its off-path control, re-run in the same run, also fails | basic forwarding |
 | F2 | `make perf-matrix` (v4/v6 × push/reverse × `-P1`/`-P8`/`-P12`, 2 reps; tcp/udp need the lock tuple exported) on the PR build **and** on the master build it is compared with, on the same cluster in the same session | for every cell, the PR build's best repetition is at least 90% of master's best repetition, **and every repetition** stays inside the cell's band once master has reached that band (a regression that shows only in some repetitions, such as an RSS placement that strands flows on one worker, is caught by the per-repetition floor, not by best-of-reps; for loss `-P8`, one repetition below the floor is re-run first, see the note under the bands). Best-of-reps is used because single runs of the same build spread wider than 10% (loss v6 `-P8`: 9.8–20.2 Gbit/s in one session); run 3 reps (`PERF_MATRIX_REPS=3`) whenever a cell's two reps differ by more than 20% on either build (seen on loss v6 `-P8` at 0.65–0.72 and tcp reverse `-P1` at 0.78–0.79), and judge that cell on the 3-rep best. The harness records throughput; this comparison is read from the two summaries | throughput regressions. Loss `-P8` measured 11.6–14.4 Gbit/s on master while cross-worker handshakes never completed (#18520); integ6 lifted it to 18.8, and tcp from ~23.5 to ~40 |
-| F3 | **Session-state health.** During a 20 s `-P8` run, check that the serving worker's rows are Established. Today: profile the hot worker (`perf record --call-graph lbr`); `cache_hit_handshake_progress`, `node_served_evidence` and `probe_record_with_origin` must be **absent**, and `SessionKey` hashing should stay well below 10% of cycles | evidence-scan symbols absent | **cross-worker handshakes never completing** (#18520). Flows sat on the 20 s opening window, and every packet paid an evidence scan worth about 40% of worker cycles. The CLI `Timeout` column reads the shared view, which lags the worker tables (#18530), so it is not this row's oracle until #18530 is fixed |
+| F3 | **Session-state health.** During a 20 s `-P8` run, check that the serving worker's rows are Established. Today: profile the hot worker (`perf record --call-graph lbr`); `cache_hit_handshake_progress`, `node_served_evidence` and `probe_record_with_origin` must be **absent**, and `SessionKey` hashing should stay well below 10% of cycles | evidence-scan symbols absent | **cross-worker handshakes never completing** (#18520). Flows sat on the 20 s opening window, and every packet paid an evidence scan worth about 40% of worker cycles. The CLI `Timeout` column reads the shared view, which lags the worker tables (#18530), so it is not this row's oracle until #18530 is fixed <!-- Expires-when: #18530 closed --> |
 | F4 | Profile the hot worker under `-P8` (`perf record --call-graph lbr -p <helper pid>`) and keep the top 25 symbols with the run | no new top-10 symbol without an explanation | per-packet cost creep. Loss `SessionKey::hash` was 3.3% on 2026-10-19, 16.9% on 2026-10-29, 9.8% after #18520 |
 | F5 | New flows during a split (WAN RG on one node, LAN RG on the other), v4 and v6, to the WAN target **and** via a non-default static | 0% loss | split nodes dropping new WAN flows (#18517), stamped fabric punts dropping as Invalid (#18518), a non-default static ending in NoRoute (#18517 review) |
 | F6 | **Stalls.** The same `make perf-matrix` run | `RESULT: PASS`: no run errors, no 1 s interval under 25% of the run's peak (healthy runs never dip below 74%), no stream under 1 Mbit/s in any interval | **"the iperfs stop"**: a single stream dying while the others absorb its share keeps the aggregate healthy, so only a per-stream, per-interval check sees it. `make perf-matrix-lib` pins the verdict on fixtures |
@@ -126,19 +127,23 @@ to be red, until their issue closes; any other red cell is a new failure.
 - **H11 transition cost: #18559.** H11's COST verdict (a recovered gap or
   stall over its budget) is this issue's transition cost; H11 judges it
   master-relative, and correctness (FAIL/VOID) absolutely.
+  <!-- Expires-when: #18559 closed -->
 - **H10 hitless targets: #18559** (with #18560 and #18561). The row's
   baseline (master plus #18556) misses the targets, so HA PRs are gated on H10's
   master-relative numbers until #18559 closes.
+  <!-- Expires-when: #18559 closed -->
 - **MTR / traceroute cells: #18174, fixed by #18556.** Every cluster MTR
   cell in `test-connectivity`: "mtr LAN→WAN gateway (via RETH link-local)",
   "mtr LAN→internet IPv4 (via RETH link-local)", "mtr LAN→internet IPv6
   (via RETH link-local)", and Group11 IPv4/IPv6 MTR. Two of them were excused
-  here as an upstream issue. On a build that carries the hop-1 fix, master's
-  validators also reject the now-correct VIP first hop ("first hop
-  '10.0.6x.1' is not an IPv4 link-local RETH address") until #18556's
-  validator lands. Ping to a live destination
+  here as an upstream issue. #18556 (merged 2026-10-31) landed the hop-1
+  fix together with its validator, which now expects the RETH VIP as hop
+  1 ("first hop ... is not the RETH VIP"); the validators before it
+  rejected the correct VIP first hop as "not an IPv4 link-local RETH
+  address". Ping to a live destination
   (`1.1.1.1`, `2001:4860:4860::8888`) works in both families while every
   hop past the firewall is `???`. They are row F7.
+  <!-- Expires-when: #18174 closed -->
 - **Fabric/control host pings: #18212.** Pings fw0↔fw1 on 10.99.x fail on
   loss, tcp and udp. Host ICMP to the WAN gateway (`172.16.50.1`) failed
   on tcp (integ9, integ10) and on udp, and passed on loss (integ8–10). That
@@ -146,6 +151,7 @@ to be red, until their issue closes; any other red cell is a new failure.
   duplicates on the lab segment, and loss's `.8` is not. Since the live
   renumber of 2026-10-31 it is expected green on all three clusters (see the
   environment row below). The 10.99.x fabric/control pings remain #18212.
+  <!-- Expires-when: #18212 closed -->
 
 ## Known environment rows (re-verify before excusing)
 
@@ -153,15 +159,6 @@ Before excusing a cell here, run a control in the same run that takes the
 product out of the path, for example the same destination from the incus
 host or the orchestrator. If the control passes, the cell is a product
 failure.
-
-- **LAN host → internet IPv6 ping (`2607:f8b0:4005:80e::200e`)**, the
-  `test-connectivity` cell of that name. The target is dead: from the
-  orchestrator, with no firewall in the path, it and `2607:f8b0:4005:814::200e`
-  answered 0/2 echo, while `2001:4860:4860::8888` answered 2/2 (2026-10-30;
-  the loss LAN host saw the same through the cluster, #18556). The fix is in
-  the harness: retarget the cell to `2001:4860:4860::8888` (#18174, done
-  in #18556 at `cce3fb4944`). Re-run the off-path control before excusing it
-  again; once #18556 merges this row should be deleted.
 
 - **Duplicate WAN address on the shared VLAN 50 (#18558).** Resolved
   2026-10-31: tcp and udp were renumbered live to `172.16.50.42` and `.43`
@@ -196,6 +193,7 @@ failure.
   - **Delete when:** loss's v4 and v6 targets are one host (or the v6 box
     is renumbered). Remove both env lines; the same-host identity check then
     applies.
+    <!-- Expires-when: loss's v4 and v6 iperf targets are one host; Review-by: 2026-11-30 -->
 - **tcp and udp host SR-IOV VFs.** Two host faults have each left a
   force-stopped firewall VM unable to restart or forward. This is
   environment only while the host check below shows the fault in the same
@@ -237,6 +235,7 @@ failure.
       makes WAN VFs clear their VLAN on start. Two durable options are
       `vlan: "0"` on the device, which 7.0.1 accepts, or upgrading incus to
       7.6.0 or later.
+      <!-- Expires-when: #18582 closed -->
 
 ## Reading results
 
@@ -284,6 +283,7 @@ failure.
     #18576): once the hard-coded follow-ups are retargeted and no open
     branch predates #18619, delete the env line, then run
     `ip addr del 172.16.80.200/24 dev eth0` on the container.
+    <!-- Expires-when: #18576 closed -->
   - **`mouse-target-setup.sh up`** probes each NEW v4 address from the
     container before it writes the unit, and refuses if another MAC
     answers or the control is silent. It runs under the cluster lock.
