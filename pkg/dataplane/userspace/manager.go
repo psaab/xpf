@@ -611,6 +611,10 @@ type Manager struct {
 	// this Manager is rebuilt and the cluster session inventory is replayed.
 	sessionRepairOverflowErr string
 
+	// napiBoundBootstrapGen is the helper generation whose all-bindings-bound
+	// NAPI bootstrap has fired (#18707, ensureXSKBoundNAPIBootstrapLocked).
+	napiBoundBootstrapGen uint64
+
 	// syncedImportRefusals counts HA synced-session imports the helper REFUSED
 	// on semantic grounds (#6785) — a stale install generation, the aggregate
 	// import ceiling, or a translated-tuple reservation refusal. Each one rolls

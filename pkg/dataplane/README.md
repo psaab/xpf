@@ -826,10 +826,24 @@ would blackhole every flow handed to it.
   `resetAfterHelperGoneLocked` — shared with `stopLocked` precisely so
   the crash path and the stop path cannot drift about which state a
   departed helper invalidates. `TakeoverReady()` goes false.
-- **Bounded restart.** Exponential backoff from
-  `helperRestartBackoffBase` to `helperRestartBackoffMax`, re-armed on
-  each failure so a helper that cannot start retries forever at a fixed
-  low rate instead of fork-storming. The restart calls the ORDINARY
+- **Bounded restart.** The first unexpected exit of a crash episode is
+  retried immediately (#18707); every further exit in the same episode
+  backs off exponentially from `helperRestartBackoffBase` to
+  `helperRestartBackoffMax` (0, 1s, 2s, ... 60s), re-armed on each
+  failure so a helper that cannot start retries forever at a fixed low
+  rate instead of fork-storming. The first retry used to wait the 1s base
+  as well, and that second was pure outage: the child is already reaped
+  and the shim already disarmed when the retry is scheduled, and the
+  bring-up readiness gates still run before forwarding is re-armed. The
+  immediate retry adds one attempt, not one earlier verdict: the
+  cumulative wait before the cap is still 63s (0+1+...+32 instead of
+  1+2+...+32). A Compile bring-up failure that re-arms a pending attempt-1
+  retry (`rearmHelperRestartLocked`) therefore re-arms it immediately too;
+  if that retry fails, it is charged as attempt 2 and waits the base.
+  The restart's status loop runs its first reconcile pass at once rather
+  than one `statusLoopInterval` later (`ensureStatusLoopFirstPassNowLocked`),
+  because that pass is what republishes the snapshot the replacement's
+  workers bind from. The restart calls the ORDINARY
   `ensureProcessLocked` against the CURRENT `m.cfg`, not the dead
   generation's argv, so a config replacement that landed while the
   helper was down is what starts, and the binding / XSK-liveness /
@@ -841,7 +855,8 @@ would blackhole every flow handed to it.
   read as "this helper is not coming back". It is **backoff at the cap** within
   one crash episode, not a lifetime restart count: a quiet interval longer than
   twice the maximum backoff resets the consecutive-attempt count. With the
-  shipped 1s base and 60s cap it trips at seven consecutive attempts and clears
+  shipped 1s base and 60s cap it trips at eight consecutive attempts (seven
+  before #18707's immediate first retry; the same 63s of cumulative backoff) and clears
   after more than 120s without another unexpected exit. `HelperSupervisorState`
   treats it as election debt only while the helper is down and the retry is
   still fenced to the current generation; an intentional stop does not resign.

@@ -403,9 +403,11 @@ func TestSustainedPostReadyCrashLoopIncrementsCounter12159(t *testing.T) {
 	helperRestartBackoffBase, helperRestartBackoffMax = 10*time.Millisecond, 10*time.Second
 	t.Cleanup(func() { helperRestartBackoffBase, helperRestartBackoffMax = oldBase, oldMax })
 
+	// 10ms base, 10s cap: attempt 1 is the immediate retry (#18707), then
+	// 10ms*2^(n-2) first reaches 10s at n-2 = 10, i.e. attempt 12.
 	capAttempt := helperCrashLoopAttempt()
-	if capAttempt != 11 {
-		t.Fatalf("backoff cap reached at attempt %d, want attempt 11", capAttempt)
+	if capAttempt != 12 {
+		t.Fatalf("backoff cap reached at attempt %d, want attempt 12", capAttempt)
 	}
 	cycles := capAttempt + 3
 	retry := &nmManualRetry12159{}

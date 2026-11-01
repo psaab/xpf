@@ -390,6 +390,24 @@ func (m *Manager) notifyPolicySnapshotCommitterLocked(generation uint64) {
 }
 
 func (m *Manager) ensureStatusLoopLocked() {
+	m.startStatusLoopLocked(false)
+}
+
+// ensureStatusLoopFirstPassNowLocked is ensureStatusLoopLocked for a loop whose
+// first reconcile pass must run NOW instead of one statusLoopInterval later
+// (#18707). The supervisor's crash restart uses it: resetAfterHelperGoneLocked
+// cleared the published snapshot, and nothing republishes it — so no worker
+// binds and ctrl cannot re-enable — until the loop's first pass. A plain
+// ticker made that pass wait a full second after the replacement helper was
+// already proven ready, every one of it transit outage on the node that
+// crashed. The pass is the ordinary tick body (same fences, same order); it
+// only moves earlier, and later passes keep the 1s cadence the control-socket
+// budget is written against.
+func (m *Manager) ensureStatusLoopFirstPassNowLocked() {
+	m.startStatusLoopLocked(true)
+}
+
+func (m *Manager) startStatusLoopLocked(firstPassNow bool) {
 	if m.syncCancel != nil {
 		return
 	}
@@ -403,7 +421,7 @@ func (m *Manager) ensureStatusLoopLocked() {
 	// (goroutine context, like the pre-existing bare go statement).
 	go func() {
 		defer close(done)
-		m.statusLoop(ctx)
+		m.statusLoop(ctx, firstPassNow)
 	}()
 }
 
@@ -460,16 +478,25 @@ func (m *Manager) prepareDeferredPolicySnapshotLocked() bool {
 	return ready
 }
 
-func (m *Manager) statusLoop(ctx context.Context) {
+func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 	ticker := time.NewTicker(statusLoopInterval)
 	defer ticker.Stop()
 	startTime := time.Now()
+	// #18707: firstPassNow runs the first pass immediately, then hands the
+	// cadence back to the ticker (see ensureStatusLoopFirstPassNowLocked).
+	tick := ticker.C
+	if firstPassNow {
+		now := make(chan time.Time, 1)
+		now <- startTime
+		tick = now
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-tick:
+			tick = ticker.C
 			m.mu.Lock()
 			if m.proc == nil {
 				m.mu.Unlock()
