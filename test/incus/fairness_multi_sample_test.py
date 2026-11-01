@@ -1575,6 +1575,13 @@ class FairnessMultiSampleTest(unittest.TestCase):
         )
         return result, stub_log
 
+    # L on #18738: without COS_IFINDEX a mixed run exits 2 on the missing
+    # interface right after the gate. A fail-open precheck then still reds the
+    # mixed cells, but on `2 != 1`, and never reaches iperf3, so the traffic
+    # assertion could not see it. With COS_IFINDEX set, a fail-open gate runs
+    # on to traffic, and the traffic assertion (checked first) names it.
+    _MIXED_PAST_THE_GATE_ENV = {"COS_IFINDEX": "14"}
+
     def _assert_no_traffic(self) -> None:
         calls = self.iperf3_log.read_text(encoding="utf-8") if self.iperf3_log.exists() else ""
         self.assertEqual(calls, "", f"the precheck gate let the harness launch iperf3: {calls!r}")
@@ -1586,14 +1593,16 @@ class FairnessMultiSampleTest(unittest.TestCase):
         # MIXED_PORT listener was discovered only after the full run window.
         with tempfile.TemporaryDirectory() as tmp:
             result, stub_log = self._run_harness_precheck_with_stub(
-                Path(tmp), ["--mixed-cos", "127.0.0.1", "5202", "1", "1"]
+                Path(tmp),
+                ["--mixed-cos", "127.0.0.1", "5202", "1", "1"],
+                extra_env=self._MIXED_PAST_THE_GATE_ENV,
             )
+            self._assert_no_traffic()
             self.assertEqual(result.returncode, 1)
             self.assertEqual(
                 stub_log.read_text(encoding="utf-8").splitlines(),
                 ["check", "5202", "5205"],
             )
-            self._assert_no_traffic()
 
     def test_fairness_harness_precheck_honors_mixed_port_override(self) -> None:
         # The probe must see the MIXED_PORT the run will actually use, not
@@ -1602,14 +1611,14 @@ class FairnessMultiSampleTest(unittest.TestCase):
             result, stub_log = self._run_harness_precheck_with_stub(
                 Path(tmp),
                 ["--mixed-cos", "127.0.0.1", "5202", "1", "1"],
-                extra_env={"MIXED_PORT": "6205"},
+                extra_env={**self._MIXED_PAST_THE_GATE_ENV, "MIXED_PORT": "6205"},
             )
+            self._assert_no_traffic()
             self.assertEqual(result.returncode, 1)
             self.assertEqual(
                 stub_log.read_text(encoding="utf-8").splitlines(),
                 ["check", "5202", "6205"],
             )
-            self._assert_no_traffic()
 
     def test_fairness_harness_single_class_precheck_checks_only_primary_port(self) -> None:
         # The mixed gate must not over-reject: a single-class run sends to
@@ -1619,12 +1628,12 @@ class FairnessMultiSampleTest(unittest.TestCase):
             result, stub_log = self._run_harness_precheck_with_stub(
                 Path(tmp), ["127.0.0.1", "5210", "1", "1"]
             )
+            self._assert_no_traffic()
             self.assertEqual(result.returncode, 1)
             self.assertEqual(
                 stub_log.read_text(encoding="utf-8").splitlines(),
                 ["check", "5210"],
             )
-            self._assert_no_traffic()
 
     def _kill_group_if_alive(self, pgid: int) -> None:
         # Keep a RED run of the #13068 abort tests from leaking the fake

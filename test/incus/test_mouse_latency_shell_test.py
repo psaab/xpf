@@ -304,8 +304,17 @@ class AbortIsDistinguishableTests(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertIn(code, MATRIX)
 
+    # L on #18738: an assignment can carry a builtin prefix (`export`,
+    # `readonly`, `declare -x`, `local`, `typeset`). A pattern anchored on a
+    # bare `LOCK_FILE=` did not see `export LOCK_FILE="$TMPDIR/..."`, so a
+    # reassignment written that way passed both cells below.
+    _LOCK_ASSIGNMENT = re.compile(
+        r"^\s*(?:export\s+|readonly\s+|declare(?:\s+-\w+)*\s+|local\s+|typeset\s+)?LOCK_FILE=(.*)$",
+        re.MULTILINE,
+    )
+
     def _lock_assignments(self):
-        return re.findall(r"^\s*LOCK_FILE=(.*)$", MATRIX, re.MULTILINE)
+        return self._LOCK_ASSIGNMENT.findall(MATRIX)
 
     def test_the_lock_path_is_assigned_exactly_once(self):
         """Copilot D.1: one per-host mutex, so ONE assignment of LOCK_FILE.
@@ -337,10 +346,28 @@ class AbortIsDistinguishableTests(unittest.TestCase):
         lock. An `exec 9>` onto any other path, a TMPDIR-derived one say,
         would bypass the fixed path above.
         """
-        opens = re.findall(r"^\s*exec\s+[0-9]+\s*>\s*(\S+)", MATRIX, re.MULTILINE)
+        # L on #18738: bash also opens a named fd (`exec {fd}>path`), which a
+        # digits-only pattern did not see, so a second lock on a TMPDIR path
+        # opened that way passed.
+        opens = re.findall(r"^\s*exec\s+(?:\{\w+\}|\d+)\s*>\s*(\S+)", MATRIX, re.MULTILINE)
         self.assertEqual(
             opens, ['"$LOCK_FILE"'],
             f"the only exec-opened fd must be the mutex on \"$LOCK_FILE\", found {opens!r}",
+        )
+
+    def test_the_only_flock_taken_is_on_the_mutex_fd(self):
+        """The fd opened on $LOCK_FILE is 9, and the one flock call must take
+        fd 9 and fail fast (-n). A flock on any other fd or path locks
+        something other than the fixed mutex, and a blocking flock queues a
+        second matrix instead of refusing it.
+        """
+        calls = [
+            c.strip()
+            for c in re.findall(r"^[^#\n]*\bflock\b([^|;&\n]*)", MATRIX, re.MULTILINE)
+        ]
+        self.assertEqual(
+            calls, ["-n 9"],
+            f"the only flock call must be `flock -n 9` on the mutex fd, found {calls!r}",
         )
 
     def test_out_root_is_resolved_before_the_mutex(self):
@@ -350,7 +377,7 @@ class AbortIsDistinguishableTests(unittest.TestCase):
         the least evidence.
         """
         out_root = MATRIX.find('OUT_ROOT="$1"')
-        lock = re.search(r"^\s*LOCK_FILE=", MATRIX, re.MULTILINE)
+        lock = self._LOCK_ASSIGNMENT.search(MATRIX)
         self.assertNotEqual(out_root, -1, 'OUT_ROOT="$1" is not assigned')
         self.assertIsNotNone(lock, "LOCK_FILE is not assigned")
         self.assertLess(out_root, lock.start(), "OUT_ROOT must be resolved before the mutex is taken")
