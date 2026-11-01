@@ -243,41 +243,122 @@ func (m *Manager) drainAndClearSteeringRowsLocked(reason string) {
 	}
 }
 
-const startupNAPIBootstrapDelay = 3 * time.Second
-
-// scheduleStartupNAPIBootstrapLocked arms the delayed startup NAPI bootstrap
-// for the helper generation that was just spawned. The callback captures both
-// the process-generation fence and the helper identities while m.mu is held;
-// after the delay it re-checks them under the same lock before submitting any
-// probes. A callback from a stopped or crashed generation therefore becomes a
-// no-op even when a replacement helper is already running (#10436).
-func (m *Manager) scheduleStartupNAPIBootstrapLocked() {
-	m.scheduleStartupNAPIBootstrapAfterLocked(startupNAPIBootstrapDelay)
+// ensureXSKBoundNAPIBootstrapLocked runs the load-bearing NAPI fill-ring
+// bootstrap (bootstrapNAPIQueuesLocked, see process_napi.go) for the current
+// helper generation the first time that generation's status reports every
+// registered binding bound (#18707). The status path calls it; it fires at
+// most once per generation, so a new spawn re-arms it simply by allocating a
+// new procGen.
+//
+// It replaces a timer that fired a fixed 3s after spawn. The probes exist to
+// give each bound queue one hardware RX event, so NAPI consumes the fill ring
+// the helper primed BEFORE bind and posts its zero-copy WQEs (mlx5). A probe
+// that lands before its queue is bound is wasted, and one that lands long
+// after it buys nothing but outage. "Every binding bound" is the earliest
+// moment at which all of them are useful, which a fixed delay could only
+// approximate: on a crash restart the 3s timer expired well after the
+// sockets were bound, and on a slow bind it could fire before them.
+//
+// Not rate-limited, unlike bootstrapNAPIQueuesAsyncLocked: the 2s debounce
+// there could swallow this one when the ctrl-enable prewarm fired a moment
+// earlier, while some bindings were still unbound — leaving exactly the
+// late-bound queues unprobed. The prewarm skips its own bootstrap in a pass
+// that triggers this one, so the two do not double up.
+//
+// Arming it retires this generation's partial-bind floor
+// (ensurePartialBindNAPIBootstrapFloorLocked): once every binding is bound
+// there is nothing left for the floor to cover.
+//
+// The returned channel closes when the callback finishes; production ignores
+// it.
+func (m *Manager) ensureXSKBoundNAPIBootstrapLocked() <-chan struct{} {
+	m.napiFloorBootstrapGen = m.procGen
+	return m.armNAPIBootstrapOnceLocked(&m.napiBoundBootstrapGen, "xsk-bound")
 }
 
-// scheduleStartupNAPIBootstrapAfterLocked is the same generation-fenced
-// callback with an injected delay for deterministic lifecycle tests.
-func (m *Manager) scheduleStartupNAPIBootstrapAfterLocked(delay time.Duration) <-chan struct{} {
-	procGen := m.procGen
-	proc := m.proc
-	procSup := m.procSup
+// napiPartialBindFloor is how long a generation that has bound SOME of its
+// bindings waits for the rest before its bound queues get their probe anyway.
+const napiPartialBindFloor = 2 * time.Second
+
+// ensurePartialBindNAPIBootstrapFloorLocked restores the floor the old 3s
+// spawn timer gave (#18707 review): a post-bind probe for every generation
+// that binds anything, even one that never binds EVERY binding. Without it a
+// binding stuck registered-but-unbound (an EBUSY fail-closed shared-owner
+// group, a queue that never binds) means the all-bound bootstrap never fires;
+// the one-shot ctrl-enable prewarm usually lands before the healthy queues
+// bind; and ctrl still enables, because it gates on registered+armed, not
+// bound. A bound queue whose fill ring NAPI never consumed is then a silent
+// per-queue black hole that the box-wide RX liveness check cannot see among
+// live queues.
+//
+// The status path calls it on every pass in which some but not all bindings
+// are bound. The first such pass of a generation stamps napiFirstBoundAt; the
+// first pass at least napiPartialBindFloor later arms the probe, once per
+// generation. That is no later than the old timer for the bound queues (spawn
+// + 3s; the first bind lands within a second of spawn), and the healthy path
+// never reaches it: all-bound arms its own bootstrap and retires this one. If
+// the stuck binding binds later, the all-bound bootstrap still fires for it.
+//
+// Probing per interface as each interface finishes binding would let a stuck
+// binding never delay the healthy interfaces' probe at all, but the probe
+// path selects configured interface names (RETH and VLAN units) that it does
+// not map to a binding's physical ifindex; the floor keeps the guarantee
+// without adding that mapping.
+func (m *Manager) ensurePartialBindNAPIBootstrapFloorLocked(anyBound bool, now time.Time) <-chan struct{} {
+	if !anyBound || m.proc == nil || m.procGen == 0 {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	if m.napiFirstBoundGen != m.procGen {
+		m.napiFirstBoundGen = m.procGen
+		m.napiFirstBoundAt = now
+	}
+	if now.Sub(m.napiFirstBoundAt) < napiPartialBindFloor {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return m.armNAPIBootstrapOnceLocked(&m.napiFloorBootstrapGen, "partial-bind-floor")
+}
+
+// armNAPIBootstrapOnceLocked arms one generation-fenced NAPI bootstrap and
+// records it in *firedGen, so each caller's bootstrap fires at most once per
+// generation.
+//
+// The callback captures the generation fence (procGen + proc/procSup
+// identity) while m.mu is held and re-checks it under the same lock before
+// submitting any probe, so a callback for a generation that exited in between
+// is a no-op even when a replacement helper already owns m.proc (#10436).
+// procGen 0 is the never-spawned value (startHelperSupervisorLocked allocates
+// >= 1 for every spawn), so there is no generation to bind it to. The returned
+// channel closes when the callback finishes.
+func (m *Manager) armNAPIBootstrapOnceLocked(firedGen *uint64, reason string) <-chan struct{} {
 	done := make(chan struct{})
+	if m.proc == nil || m.procGen == 0 || *firedGen == m.procGen {
+		close(done)
+		return done
+	}
+	*firedGen = m.procGen
+	procGen, proc, procSup := m.procGen, m.proc, m.procSup
 	go func() {
 		defer close(done)
-		time.Sleep(delay)
 		m.mu.Lock()
-		if !m.startupNAPIBootstrapGenerationCurrentLocked(procGen, proc, procSup) {
-			m.mu.Unlock()
+		defer m.mu.Unlock()
+		if !m.napiBootstrapGenerationCurrentLocked(procGen, proc, procSup) {
 			return
 		}
-		innerDone := m.bootstrapNAPIQueuesAsyncForGenerationLocked("startup", procGen, proc, procSup)
-		m.mu.Unlock()
-		<-innerDone
+		m.lastNAPIBootstrap = time.Now()
+		if m.lastSnapshot == nil || m.lastSnapshot.Config == nil {
+			return
+		}
+		slog.Info("userspace: bootstrapping NAPI queues", "reason", reason)
+		m.bootstrapNAPIQueuesLocked()
 	}()
 	return done
 }
 
-func (m *Manager) startupNAPIBootstrapGenerationCurrentLocked(
+func (m *Manager) napiBootstrapGenerationCurrentLocked(
 	procGen uint64,
 	proc *exec.Cmd,
 	procSup *helperGeneration,
@@ -286,44 +367,6 @@ func (m *Manager) startupNAPIBootstrapGenerationCurrentLocked(
 		m.procGen == procGen &&
 		m.proc == proc &&
 		m.procSup == procSup
-}
-
-// bootstrapNAPIQueuesAsyncForGenerationLocked is the generation-fenced
-// startup variant of bootstrapNAPIQueuesAsyncLocked. The second callback
-// acquires m.mu independently, so it must repeat the same identity check:
-// generation G1 can stop after the delayed callback starts but before this
-// inner callback runs, at which point G2 may already own m.proc (#10436).
-func (m *Manager) bootstrapNAPIQueuesAsyncForGenerationLocked(
-	reason string,
-	procGen uint64,
-	proc *exec.Cmd,
-	procSup *helperGeneration,
-) <-chan struct{} {
-	done := make(chan struct{})
-	now := time.Now()
-	if !m.lastNAPIBootstrap.IsZero() && now.Sub(m.lastNAPIBootstrap) < 2*time.Second {
-		close(done)
-		return done
-	}
-	go func() {
-		defer close(done)
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if !m.startupNAPIBootstrapGenerationCurrentLocked(procGen, proc, procSup) {
-			return
-		}
-		now := time.Now()
-		if !m.lastNAPIBootstrap.IsZero() && now.Sub(m.lastNAPIBootstrap) < 2*time.Second {
-			return
-		}
-		m.lastNAPIBootstrap = now
-		if m.lastSnapshot == nil || m.lastSnapshot.Config == nil {
-			return
-		}
-		slog.Info("userspace: bootstrapping NAPI queues", "reason", reason)
-		m.bootstrapNAPIQueuesLocked()
-	}()
-	return done
 }
 
 func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error) {
@@ -486,13 +529,11 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 	// never noticed, and left every `m.proc == nil` liveness test reading TRUE.
 	m.startHelperSupervisorLocked(cmd)
 	m.publishHAWatchdogSnapshotLocked()
-	// Bootstrap XSK fill ring on all queues: send broadcast pings
-	// 3 seconds after helper start. During this window, ctrl is disabled;
-	// the shim only passes proven local/control traffic and drops transit.
-	// The broadcast pings generate hardware RX events on multiple queues,
-	// triggering NAPI which consumes fill ring entries and posts WQEs for
-	// zero-copy.
-	m.scheduleStartupNAPIBootstrapLocked()
+	// The XSK fill-ring NAPI bootstrap for this generation is NOT armed here:
+	// the status path fires it once every binding reports bound
+	// (ensureXSKBoundNAPIBootstrapLocked, #18707). Until then ctrl is
+	// disabled; the shim only passes proven local/control traffic and drops
+	// transit.
 	m.bringUpGen = m.procGen
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {

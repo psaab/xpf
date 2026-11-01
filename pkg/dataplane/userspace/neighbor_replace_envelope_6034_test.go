@@ -276,7 +276,7 @@ func TestNeighborReplaceGenerationSeedsFromFirstStatus(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	loopDone := make(chan struct{})
 	go func() {
-		m.statusLoop(ctx)
+		m.statusLoop(ctx, false)
 		close(loopDone)
 	}()
 	select {
