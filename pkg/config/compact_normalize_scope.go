@@ -1668,6 +1668,14 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"system syslog",
 		"security alg",
 		"security flow",
+		// #18787: `web-management api-auth metrics-require-auth;` beside a
+		// braced web-management block committed clean and dropped the whole
+		// compiled api-auth (credentials, metrics-require-auth) and HTTPS.
+		// Measured empty+silent per #8690. With the pair admitted the spelling
+		// is folded into a second web-management block, which is REFUSED
+		// loudly exactly like two duplicate braced web-management blocks.
+		"web-management api-auth",
+
 		// issue 8875: the TOP-LEVEL security containers. `security` itself had
 		// no admitted children at all, while the children's own pairs
 		// (`policies from-zone`, `policies global`, `zones security-zone`) were
@@ -1834,6 +1842,18 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"tuesday start-time",
 		"tuesday stop-time",
 		"udp-session timeout",
+		// #18787: two-level packed IPsec spellings (`vpn <v> ike ipsec-policy
+		// <p>;`, `vpn <v> vpn-monitor optimized;`, `policy <p>
+		// perfect-forward-secrecy keys <g>;`) committed clean and compiled to
+		// NOTHING for the packed level: the VPN lost its named ipsec-policy,
+		// VPN monitoring was disabled, and PFS compiled to group 0 -- a
+		// silent crypto downgrade. Measured empty+silent per #8690 (strict
+		// accepts; the dropped value equals the empty stanza); collision
+		// check: `vpn`, and `policy` under `perfect-forward-secrecy`, have
+		// these children only under security ipsec.
+		"vpn ike",
+		"vpn vpn-monitor",
+		"policy perfect-forward-secrecy",
 		"vpn bind-interface",
 		"vpn df-bit",
 		"vpn establish-tunnels",

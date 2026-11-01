@@ -138,6 +138,15 @@ var knownBlindScopePairs8852 = map[string]string{
 	// site for it, so its fold rests on TestTCPSessionEveryLeafEverySpelling18762
 	// (two-level rows) and the #2419 two-level census arm.
 	"tcp-session time-wait-state": "plain-container",
+	// #18787: the two-level security pairs. Each head is a plain container
+	// that arm 2 emits no site for, so their fold rests on
+	// TestTwoLevelSecuritySpellingsCompileLikeBraced18787 /
+	// TestTwoLevelAPIAuthNeverCommitsWeaker18787 (strict compile) and
+	// pkg/ipsec TestTwoLevelIPsecSpellingsRenderLikeBraced18787 (render).
+	"vpn ike":                        "plain-container",
+	"vpn vpn-monitor":                "plain-container",
+	"policy perfect-forward-secrecy": "plain-container",
+	"web-management api-auth":        "plain-container",
 	// #10078: tcp-mss is now a declared kind container so the arm can reject
 	// misspelled kinds while its value tail stays opaque. The compact census
 	// therefore sees a plain container again and emits no site for this pair.
