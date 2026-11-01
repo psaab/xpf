@@ -745,7 +745,38 @@ func (s *Store) SetNodeID(id int) {
 // (#1319 PR 2 boot safety). cfg is nil at this point because we haven't
 // compiled yet; the typed-leaf validators shipped so far don't need it.
 func (s *Store) compileTree(tree *config.ConfigTree) (*config.Config, error) {
-	return compileTreeStrictWithCurrent(tree, s.nodeID, s.compiled)
+	return s.compileTreeAs(tree, false)
+}
+
+// compileTreeAs is compileTree for a commit whose committer is known.
+// bootstrapImport is true only for the daemon's bootstrap import (an internal
+// authority named BootstrapPrincipal); see placeholderJudgedLocked.
+func (s *Store) compileTreeAs(tree *config.ConfigTree, bootstrapImport bool) (*config.Config, error) {
+	return compileTreeStrictJudged(tree, s.nodeID, s.compiled, s.placeholderJudgedLocked(bootstrapImport))
+}
+
+// placeholderJudgedLocked decides whether a strict compile judges the #18744
+// published-placeholder gate. Caller holds s.mu (read or write).
+//
+//   - A store that has committed judges against its compiled active config,
+//     whoever commits. If that config no longer compiles (#1960, compiled
+//     nil while everCommitted), its accepted set is unknown, so a repair
+//     commit is not judged. That is the documented residual.
+//   - A store that has never committed (fresh, or a #1922 Item 1b store
+//     whose first commit was confirmed-rolled-back) judges every committer
+//     except the bootstrap import, against an empty accepted set. So an
+//     interactive first commit refuses any placeholder, and the unattended
+//     first-boot import only warns. It also covers a reimaged node's day-0
+//     conf, which must still yield an active config.
+//
+// The decision is keyed on the store's commit history, not on s.compiled:
+// an Item 1b store compiles the empty tree without ever having committed
+// (#7291 documents that pointer as an unreliable "first commit" stand-in).
+func (s *Store) placeholderJudgedLocked(bootstrapImport bool) bool {
+	if s.everCommitted {
+		return s.compiled != nil
+	}
+	return !bootstrapImport
 }
 
 // compileTreeStrictWithCurrent is compileTreeStrict with the compiled
@@ -757,16 +788,23 @@ func compileTreeStrict(tree *config.ConfigTree, nodeID int) (*config.Config, err
 	return compileTreeStrictWithCurrent(tree, nodeID, nil)
 }
 
+// compileTreeStrictWithCurrent judges the #18744 placeholder gate iff
+// current is non-nil, the config package's default. Store commit paths use
+// compileTreeStrictJudged with the store's own decision.
 func compileTreeStrictWithCurrent(tree *config.ConfigTree, nodeID int, current *config.Config) (*config.Config, error) {
+	return compileTreeStrictJudged(tree, nodeID, current, current != nil)
+}
+
+func compileTreeStrictJudged(tree *config.ConfigTree, nodeID int, current *config.Config, judgePlaceholders bool) (*config.Config, error) {
 	if err := schemaValidateExpandedTreeForNode(tree, nodeID); err != nil {
 		return nil, err
 	}
 	var compiled *config.Config
 	var err error
 	if nodeID >= 0 {
-		compiled, err = config.CompileConfigForNodeWithCurrentClusterPrimary(tree, nodeID, current)
+		compiled, err = config.CompileConfigForNodeJudgingPlaceholders(tree, nodeID, current, judgePlaceholders)
 	} else {
-		compiled, err = config.CompileConfigWithCurrentClusterPrimary(tree, current)
+		compiled, err = config.CompileConfigJudgingPlaceholders(tree, current, judgePlaceholders)
 	}
 	if err != nil {
 		return nil, err
@@ -835,7 +873,7 @@ func compileTreeStrictWithCurrent(tree *config.ConfigTree, nodeID int, current *
 	// judged against the peer's own persisted primary derived from that
 	// active config, not left nil (which rejected every clustered staged
 	// migration at the peer gate even when the local gate admitted it).
-	if err := validatePeerStrictPipelineWithCurrent(peerTree, nodeID, current); err != nil {
+	if err := validatePeerStrictPipelineJudged(peerTree, nodeID, current, judgePlaceholders); err != nil {
 		return nil, err
 	}
 	return compiled, nil

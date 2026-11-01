@@ -195,10 +195,10 @@ type HelperCrashRecord struct {
 //
 // Restarts advances for consecutive failed retry attempts. A quiet interval
 // longer than twice the maximum backoff resets that count, so isolated crashes
-// do not accumulate into a false loop. The backoff doubles from
-// helperRestartBackoffBase and saturates at helperRestartBackoffMax; reaching
-// the cap means the supervisor exhausted its escalation and is retrying at its
-// slowest rate.
+// do not accumulate into a false loop. The first retry is immediate; after it
+// the backoff doubles from helperRestartBackoffBase and saturates at
+// helperRestartBackoffMax (#18707); reaching the cap means the supervisor
+// exhausted its escalation and is retrying at its slowest rate.
 //
 // Derived, never stored, for the same reason RestartPending is: a stored
 // judgement about the present is the thing that goes stale.
@@ -206,10 +206,24 @@ func (r HelperCrashRecord) CrashLooping() bool {
 	return r.LastExitWasCrash && helperRestartDelay(r.Restarts) >= helperRestartBackoffMax
 }
 
-// Helper restart backoff. Bounded exponential from base to max, so a helper
-// that cannot start (a corrupt binary, a NIC that will not bind) retries
-// forever at a fixed low rate instead of fork-storming, and a one-off crash
-// recovers in about a second.
+// Helper restart backoff. The FIRST unexpected exit of a crash episode is
+// retried immediately; every further exit in the same episode backs off
+// exponentially from base to max, so a helper that cannot start (a corrupt
+// binary, a NIC that will not bind) retries forever at a fixed low rate
+// instead of fork-storming.
+//
+// #18707: the first retry used to wait helperRestartBackoffBase (1s) too.
+// That second bought nothing an isolated crash needs: the dead child is
+// already reaped when the supervisor schedules the retry, the shim was
+// disarmed fail-closed before it, and bring-up's own readiness gates (ready
+// ping, event stream, binding / XSK liveness) still run before forwarding is
+// re-armed. It was pure outage on the node that crashed. An immediate first
+// retry adds exactly ONE fast attempt to an episode: the schedule becomes
+// 0, base, 2*base, ... instead of base, 2*base, ..., so a helper that dies
+// on every start still reaches the cap after the same cumulative wait
+// (0+1+2+4+8+16+32 = 63s, the same as 1+2+4+8+16+32 before) and the
+// CrashLooping verdict is not reached any sooner in wall-clock terms — it
+// just takes one more attempt to get there (helperCrashLoopAttempt).
 //
 // They are vars rather than consts purely so a test can drive many real
 // restarts without spending wall-clock seconds; production never reassigns
@@ -228,13 +242,15 @@ func helperCrashLoopAttempt() int {
 	}
 }
 
-// helperRestartDelay is the backoff for attempt n (1-based).
+// helperRestartDelay is the backoff for attempt n (1-based): zero for the
+// first attempt of an episode (#18707), then helperRestartBackoffBase doubling
+// per attempt up to helperRestartBackoffMax.
 func helperRestartDelay(attempt int) time.Duration {
-	if attempt < 1 {
-		attempt = 1
+	if attempt <= 1 {
+		return 0
 	}
 	d := helperRestartBackoffBase
-	for i := 1; i < attempt; i++ {
+	for i := 2; i < attempt; i++ {
 		d *= 2
 		if d >= helperRestartBackoffMax {
 			return helperRestartBackoffMax
@@ -494,8 +510,10 @@ func (m *Manager) restartHelperAfterCrash(gen uint64) {
 	m.helperCrash.RecoveredAt = time.Now()
 	m.notifyHelperSupervisorLocked()
 	// The crash tore the 1 Hz reconcile loop down with the generation it was
-	// polling; the replacement needs its own.
-	m.ensureStatusLoopLocked()
+	// polling; the replacement needs its own, and its first pass — the one
+	// that republishes the snapshot the workers bind from — runs now rather
+	// than a tick from now (#18707).
+	m.ensureStatusLoopFirstPassNowLocked()
 }
 
 // HelperCrashState returns the last unexpected-exit record, for status

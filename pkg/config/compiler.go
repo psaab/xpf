@@ -144,14 +144,35 @@ func CompileConfig(tree *ConfigTree) (*Config, error) {
 // exception (fold 2). current is the *Config active immediately before
 // the candidate (configstore passes its compiled active config), or nil
 // for a fresh candidate. Only the cluster-auth gate reads it.
+//
+// The #18744 placeholder gate judges iff current is non-nil. Callers that
+// know more about the commit (configstore: whether the store has ever
+// committed, and whether this is the bootstrap import) use
+// CompileConfigJudgingPlaceholders instead.
 func CompileConfigWithCurrentClusterPrimary(tree *ConfigTree, current *Config) (*Config, error) {
-	opts := currentClusterOpts(current)
-	return compileTree(tree, opts, nil)
+	return CompileConfigJudgingPlaceholders(tree, current, current != nil)
 }
 
 // CompileConfigForNodeWithCurrentClusterPrimary is the node-aware form.
 func CompileConfigForNodeWithCurrentClusterPrimary(tree *ConfigTree, nodeID int, current *Config) (*Config, error) {
+	return CompileConfigForNodeJudgingPlaceholders(tree, nodeID, current, current != nil)
+}
+
+// CompileConfigJudgingPlaceholders is CompileConfigWithCurrentClusterPrimary
+// with the #18744 decision made by the caller. judge true refuses a published
+// placeholder that is not in current's accepted set; with current nil, that
+// set is empty, so any placeholder is refused. judge false leaves the
+// placeholder warning-only.
+func CompileConfigJudgingPlaceholders(tree *ConfigTree, current *Config, judge bool) (*Config, error) {
 	opts := currentClusterOpts(current)
+	opts.judgePlaceholders18744 = judge
+	return compileTree(tree, opts, nil)
+}
+
+// CompileConfigForNodeJudgingPlaceholders is the node-aware form.
+func CompileConfigForNodeJudgingPlaceholders(tree *ConfigTree, nodeID int, current *Config, judge bool) (*Config, error) {
+	opts := currentClusterOpts(current)
+	opts.judgePlaceholders18744 = judge
 	return compileTree(tree, opts, &nodeID)
 }
 

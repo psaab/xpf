@@ -1252,6 +1252,14 @@ type Daemon struct {
 	// never be reinstalled. Serialized under applySem with the handoff sites
 	// (plus the single-threaded bootstrap path, which runs before applies).
 	earlyInputHandoffDone atomic.Bool
+	// earlyInputHandoffRetryOwed18746 records that a first handoff was
+	// refused (removeEarlyInputBarrierAtHandoff) and the barrier stayed up.
+	// Its owner is reassertHostInboundGapOnce, which re-applies the active
+	// config every hostInboundGapReassertInterval until the handoff
+	// completes. Without it a boot-time refusal waited for the next commit or
+	// lease, with the box closed (#18746, AG on #18759). setEarlyInputHandoffDone
+	// discharges it.
+	earlyInputHandoffRetryOwed18746 atomic.Bool
 
 	// earlyInputBarrierStateMu guards the pre-handoff retained-hold state
 	// below (#17854): the writers run under applySem, but the
@@ -1348,6 +1356,11 @@ type Daemon struct {
 	// low-rate kernel-truth recheck first finds an established table
 	// missing, cleared when a later pass observes no drift.
 	hostDriftNoticed15264 atomic.Bool
+	// hostKernelTruthUnreadable18746 counts consecutive recheck passes whose
+	// kernel reads failed (#18746, AD on #18759). An unreadable pass proves
+	// nothing and stays Current, so a probe that is stuck unreadable would
+	// otherwise be blind with no trace. See noteKernelTruthUnreadable18746.
+	hostKernelTruthUnreadable18746 atomic.Int32
 
 	// hostInboundConntrackDebt is the #6802 retry debt: a conntrack revocation
 	// that FAILED, so stale kernel entries for now-denied host services may
@@ -1905,8 +1918,21 @@ type Daemon struct {
 	// the refresher starts.
 	interfaceLinkRefreshWake atomic.Pointer[chan string]
 	// Test hooks for direct-mode VIP ownership reconciliation.
-	directAddVIPsFn        func(int) int
-	directRemoveVIPsFn     func(int) int
+	directAddVIPsFn    func(int) int
+	directRemoveVIPsFn func(int) int
+	// tryPrepareDemotionFn replaces tryPrepareUserspaceRGDemotion in tests (#18701).
+	tryPrepareDemotionFn func(int)
+	// directVIPsConfirmAbsentFn replaces directVIPsConfirmedAbsent in tests
+	// (#18715).
+	directVIPsConfirmAbsentFn func(int) error
+	// raSendersFn replaces the RA manager's Status in tests (#18715).
+	raSendersFn func() []ra.SenderInfo
+	// rgActiveWrites is the single-flight set of helper-down rg_active writes,
+	// one per RG (#18715); rgActiveLateFail latches the late-failure log per
+	// RG. Both under rgActiveWriteMu.
+	rgActiveWriteMu        sync.Mutex
+	rgActiveWrites         map[int]*inflightRGActiveWrite
+	rgActiveLateFail       map[int]bool
 	directAddStableLLFn    func(int)
 	directRemoveStableLLFn func(int)
 

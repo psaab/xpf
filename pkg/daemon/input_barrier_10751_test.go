@@ -2682,7 +2682,15 @@ func TestUnleasedOraclePlacement10751(t *testing.T) {
 		// must sit before the first destination drop. (The #10752
 		// stale-reply guards also carry daddr but precede it by design.)
 		lastAdmit := strings.LastIndex(payload, wantAdmitV6)
+		// #18746: the #16841 zero-hop DROP (`ip6 hoplimit 0 fib daddr type
+		// { local, anycast } drop`, 2fa9d69062) heads every chain by design
+		// and is not a destination drop, but its `fib daddr` matched this
+		// line filter. It is excluded by its EXACT text, not by "first drop".
+		zeroHop := strings.TrimSpace(zeroHopLimitLocalDropText(false))
 		for _, line := range strings.Split(payload, "\n") {
+			if strings.TrimSpace(line) == zeroHop {
+				continue
+			}
 			if !strings.Contains(line, "daddr") || !strings.Contains(line, "drop") || strings.Contains(line, "ct direction reply") {
 				continue
 			}

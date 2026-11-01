@@ -178,6 +178,8 @@ func server11581(t *testing.T) *Server {
 	}
 	if _, err := store.LoadSet(strings.Join([]string{
 		"set chassis cluster cluster-id 1",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-11581",
 		"set chassis cluster reth-count 2",

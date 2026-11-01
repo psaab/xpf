@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -99,6 +101,7 @@ func (d *Daemon) recheckHostKernelTruth15264(now time.Time) {
 	}
 	defer d.applySem.Release(1)
 	drift := false
+	var unreadable []error
 
 	// Host-inbound: only an established surface can drift. The probe gate
 	// is hostInboundEstablished15264, NOT hostInboundEnforced: on drift the
@@ -111,7 +114,8 @@ func (d *Daemon) recheckHostKernelTruth15264(now time.Time) {
 		drops, err := nftInstaller.TableDropsInput(xnft.HostInboundTableName)
 		switch {
 		case err != nil:
-			// Unreadable proves nothing; stay Current.
+			// Unreadable proves nothing; stay Current (counted below).
+			unreadable = append(unreadable, fmt.Errorf("%s drops: %w", xnft.HostInboundTableName, err))
 		case drops:
 			// Table stands with DROP enforcement.
 		default:
@@ -120,6 +124,9 @@ func (d *Daemon) recheckHostKernelTruth15264(now time.Time) {
 			// DROPs live in subchains (legitimate). TableEnforcing
 			// separates them: a program-only table still has rules.
 			enforcing, enErr := nftInstaller.TableEnforcing(xnft.HostInboundTableName)
+			if enErr != nil {
+				unreadable = append(unreadable, fmt.Errorf("%s enforcing: %w", xnft.HostInboundTableName, enErr))
+			}
 			if enErr == nil && !enforcing {
 				d.noteHostInboundApplyFailed(now)
 				// #16823 (R3-F09-02): the kernel-false premise must also
@@ -166,6 +173,9 @@ func (d *Daemon) recheckHostKernelTruth15264(now time.Time) {
 	// reported as not-a-real-filter.
 	if d.lo0Enforced.Load() {
 		enforcing, err := nftInstaller.TableEnforcing(xnft.Lo0TableName)
+		if err != nil {
+			unreadable = append(unreadable, fmt.Errorf("%s enforcing: %w", xnft.Lo0TableName, err))
+		}
 		if err == nil && !enforcing {
 			d.lo0Enforced.Store(false)
 			d.lo0LastFailed.Store(true)
@@ -173,9 +183,11 @@ func (d *Daemon) recheckHostKernelTruth15264(now time.Time) {
 		}
 	}
 
+	d.noteKernelTruthUnreadable18746(unreadable)
+
 	if drift {
 		if !d.hostDriftNoticed15264.Swap(true) {
-			slog.Warn("host nftables table missing from kernel while applied state claimed current; marking applied state stale — re-apply to converge (#15264)",
+			slog.Warn("host nftables table missing or not enforcing (empty or zero-hop-only) while applied state claimed current; marking applied state stale — re-apply to converge (#15264)",
 				"issue", "#15264",
 				"host_inbound_current", d.HostInboundApplied().Current(),
 				"lo0_enforced", d.lo0Enforced.Load())
@@ -208,5 +220,29 @@ func (d *Daemon) hostKernelTruthLoop15264(ctx context.Context) {
 		case now := <-t.C:
 			d.recheckHostKernelTruth15264(now)
 		}
+	}
+}
+
+// kernelTruthUnreadableWarnAfter18746 is how many consecutive unreadable
+// recheck passes (30 s apart by default) make the stuck-blind probe a Warn.
+const kernelTruthUnreadableWarnAfter18746 = 3
+
+// noteKernelTruthUnreadable18746 makes an unreadable kernel-truth pass visible
+// (#18746, AD on #18759). Every unreadable pass logs at Debug. A probe that
+// stays unreadable for kernelTruthUnreadableWarnAfter18746 consecutive passes
+// is blind to drift, so that is one Warn per episode. A readable pass resets
+// the count. The generation-bracketed reads (inputRulesBeyondZeroHop) return
+// an error when a commit lands mid-read, and that clears on the next pass.
+func (d *Daemon) noteKernelTruthUnreadable18746(errs []error) {
+	if len(errs) == 0 {
+		d.hostKernelTruthUnreadable18746.Store(0)
+		return
+	}
+	n := d.hostKernelTruthUnreadable18746.Add(1)
+	slog.Debug("host kernel-truth recheck could not read the kernel; staying current this pass",
+		"consecutive", n, "err", errors.Join(errs...))
+	if n == kernelTruthUnreadableWarnAfter18746 {
+		slog.Warn("host kernel-truth recheck has been unable to read the kernel for several passes; drift detection is blind until it reads again (#15264/#18746)",
+			"consecutive", n, "err", errors.Join(errs...))
 	}
 }
