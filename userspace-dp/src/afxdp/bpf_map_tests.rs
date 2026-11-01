@@ -2304,3 +2304,179 @@ fn conntrack_rmw_app_id_succeeds_without_lease_13668() {
         999
     );
 }
+
+// #18696: `delete_all_map_keys` (the conntrack-map clear) reads the next key
+// before deleting the current one. `HtabModel` models the kernel hash map's
+// iteration: get_next_key on a PRESENT key continues from its bucket; on a
+// MISSING key it falls back to a scan from bucket 0. `bucket_checks` counts
+// that scanning, the kernel's work. Counts, never time (engineering-style
+// "Time in tests").
+struct HtabModel {
+    buckets: Vec<Vec<Vec<u8>>>,
+    bucket_checks: usize,
+    next_key_calls: usize,
+}
+
+impl HtabModel {
+    fn with_rows(buckets: usize, rows: u64) -> Self {
+        let mut model = HtabModel {
+            buckets: vec![Vec::new(); buckets],
+            bucket_checks: 0,
+            next_key_calls: 0,
+        };
+        for row in 1..=rows {
+            let key = row.to_be_bytes().to_vec();
+            let bucket = Self::bucket_of(&key, buckets);
+            model.buckets[bucket].push(key);
+        }
+        model
+    }
+
+    fn bucket_of(key: &[u8], buckets: usize) -> usize {
+        // FNV-1a: any fixed spread works; the cost under test is the restart.
+        let mut hash: u32 = 0x811c_9dc5;
+        for byte in key {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+        hash as usize % buckets
+    }
+
+    fn rows(&self) -> usize {
+        self.buckets.iter().map(Vec::len).sum()
+    }
+}
+
+impl MapKeyWalk for HtabModel {
+    fn next_key(&mut self, current: Option<&[u8]>, next: &mut [u8]) -> Result<bool, ()> {
+        self.next_key_calls += 1;
+        let mut start = 0;
+        if let Some(key) = current {
+            let bucket = Self::bucket_of(key, self.buckets.len());
+            if let Some(index) = self.buckets[bucket].iter().position(|k| k == key) {
+                if let Some(following) = self.buckets[bucket].get(index + 1) {
+                    next.copy_from_slice(following);
+                    return Ok(true);
+                }
+                start = bucket + 1;
+            }
+            // A missing key falls back to find_first_elem, from bucket 0.
+        }
+        for bucket in start..self.buckets.len() {
+            self.bucket_checks += 1;
+            if let Some(first) = self.buckets[bucket].first() {
+                next.copy_from_slice(first);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn delete(&mut self, key: &[u8]) -> bool {
+        let bucket = Self::bucket_of(key, self.buckets.len());
+        let before = self.buckets[bucket].len();
+        self.buckets[bucket].retain(|k| k != key);
+        self.buckets[bucket].len() != before
+    }
+}
+
+/// The pre-#18696 loop shape: delete, then ask for the key after the deleted
+/// one. Kept as the control proving the model reproduces the kernel restart.
+fn delete_then_next_key(map: &mut HtabModel, key_size: usize) -> usize {
+    let mut key = vec![0u8; key_size];
+    let mut next = vec![0u8; key_size];
+    let mut current: Option<Vec<u8>> = None;
+    let mut deleted = 0;
+    while map.next_key(current.as_deref(), &mut next) == Ok(true) {
+        assert!(map.delete(&next));
+        deleted += 1;
+        key.copy_from_slice(&next);
+        current = Some(key.clone());
+    }
+    deleted
+}
+
+#[test]
+fn delete_all_map_keys_walk_is_linear_18696() {
+    const BUCKETS: usize = 1 << 15;
+    const ROWS: u64 = 2048;
+
+    // Control: on this model the replaced shape does quadratic work, so a
+    // model that never restarts cannot hide a quadratic walk below.
+    let mut old = HtabModel::with_rows(BUCKETS, ROWS);
+    assert_eq!(delete_then_next_key(&mut old, 8), ROWS as usize);
+    assert!(
+        old.bucket_checks >= ROWS as usize * BUCKETS / 8,
+        "the model does not reproduce the kernel restart: {} bucket checks",
+        old.bucket_checks
+    );
+
+    let mut model = HtabModel::with_rows(BUCKETS, ROWS);
+    assert_eq!(delete_all_map_keys(&mut model, 8), Ok(ROWS as usize));
+    assert_eq!(model.rows(), 0, "rows left after the clear");
+    assert!(
+        model.bucket_checks <= BUCKETS + ROWS as usize,
+        "delete_all_map_keys took {} bucket checks for {} rows in {} buckets (the replaced loop \
+         took {}): is it deleting before reading the next key?",
+        model.bucket_checks,
+        ROWS,
+        BUCKETS,
+        old.bucket_checks
+    );
+    assert_eq!(model.next_key_calls, ROWS as usize + 1);
+}
+
+#[test]
+fn delete_all_map_keys_reports_scan_and_delete_failures_18696() {
+    /// `keys` distinct keys, then a clean end of map. `scan_fails_at` makes
+    /// that next_key call fail; `delete_fails` makes every delete fail.
+    struct Scripted {
+        keys: usize,
+        scan_fails_at: Option<usize>,
+        delete_fails: bool,
+        scans: usize,
+        deletes: usize,
+    }
+    impl MapKeyWalk for Scripted {
+        fn next_key(&mut self, _: Option<&[u8]>, next: &mut [u8]) -> Result<bool, ()> {
+            self.scans += 1;
+            if Some(self.scans) == self.scan_fails_at {
+                return Err(());
+            }
+            if self.scans > self.keys {
+                return Ok(false);
+            }
+            next.fill(self.scans as u8);
+            Ok(true)
+        }
+        fn delete(&mut self, _: &[u8]) -> bool {
+            self.deletes += 1;
+            !self.delete_fails
+        }
+    }
+    let scripted = |scan_fails_at, delete_fails| Scripted {
+        keys: 5,
+        scan_fails_at,
+        delete_fails,
+        scans: 0,
+        deletes: 0,
+    };
+
+    // Control: the same script with no failure clears all five keys.
+    let mut clean = scripted(None, false);
+    assert_eq!(delete_all_map_keys(&mut clean, 4), Ok(5));
+
+    // A scan failure is reported, before the key it was read for is deleted.
+    let mut scan = scripted(Some(3), false);
+    assert_eq!(delete_all_map_keys(&mut scan, 4), Err(()));
+    assert_eq!(scan.deletes, 1, "deleted past a failed scan");
+
+    // A delete failure is reported at once. The scan would end cleanly, so a
+    // walk that ignored the failure would return Ok(5) here.
+    let mut delete = scripted(None, true);
+    assert_eq!(delete_all_map_keys(&mut delete, 4), Err(()));
+    assert_eq!(delete.deletes, 1, "kept walking after a failed delete");
+
+    // A negative fd is not a map: nothing to clear, no syscall.
+    assert_eq!(clear_bpf_conntrack_maps(-1, -1), Ok((0, 0)));
+}
