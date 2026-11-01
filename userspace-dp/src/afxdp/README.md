@@ -2389,12 +2389,22 @@ own view's flow-cache entry:
     packet with the CURRENT stamp since the adoption and holds no parked
     packet. In native mode each ring has one producer (the queue's XDP
     execution stamps and enqueues together, and generations only go up), so
-    nothing older can follow. In generic mode fed from several CPUs (veth or
-    ipvlan, such as the fabric's xdpgeneric parent) each CPU reads the stamp
-    before taking the socket RX lock, so for a few us an older-stamped packet
-    can land behind a current one. If the views were already released it is
-    dropped as a mismatch, exactly as before this change, and never processed
-    under the wrong view. With traffic on every binding a view lives for the
+    nothing older can follow. A generic-mode ring can have several producer
+    CPUs only under one of two conditions: RPS is on for its queue, or it
+    belongs to a software device whose receive runs on the sender's CPU.
+    With per-queue NAPI and RPS off, a generic-mode queue is fed from one
+    CPU.
+    - The fabric's xdpgeneric parent `ge-x-0-0` is the virtio NIC (`enp7s0`)
+      that the `fab0` ipvlan sits on, not a software device.
+    - On the loss cluster RPS is on for all six of its RX queues on both
+      nodes (`rps_cpus` = `3f`, read 2026-11-01). The several-producer case
+      therefore applies to the fabric there.
+
+    When either condition holds, each CPU reads the stamp before taking the
+    socket RX lock. For a few us an older-stamped packet can then land
+    behind a current one. If the views were already released it is dropped
+    as a mismatch, exactly as before this change, and never processed under
+    the wrong view. With traffic on every binding a view lives for the
     ring's drain time (milliseconds); only a worker with an idle binding keeps
     it for the full 200 ms.
   - **Memory.** A retained view pins the publisher's deep-cloned
@@ -2447,6 +2457,15 @@ own view's flow-cache entry:
     have written: same session, same per-flow order (the ring is FIFO and the
     queued packets precede every new one).
   - The cached translation is replayed, so nothing is allocated.
+  - "No install" is literal for this worker's session table and flow
+    cache, but not for the node's shared alias rows. A held hit whose packet
+    completes a TCP handshake (`take_probe_stage_transition_forward`) runs
+    the same #16217 shared restamps an ordinary hit runs, in
+    `poll_descriptor/flow_cache_hit.rs`.
+    `restamp_shared_forward_wire_established` among them can INSERT a
+    forward-wire alias row when none exists. That row is cloned from the
+    CURRENT shared canonical row (`shared_ops/lookup.rs`), as an ordinary
+    pass would do, never from the held view's tables.
   - The hit path judges the entry against the LIVE state: the RG epochs, the
     HA lease in the batch's live HA snapshot, and the session's presence in
     THIS worker's session table. A session the current state has demoted or

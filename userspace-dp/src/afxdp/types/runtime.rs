@@ -749,10 +749,11 @@ impl PrevViews {
     /// since the adoption and holds no parked packet. In native mode a
     /// binding's RX ring has one producer, so no packet stamped with a left
     /// view can still arrive on it; keeping the views would only pin their
-    /// table copies until the grace. In generic mode fed from several CPUs a
-    /// few-us reorder window can deliver an older-stamped straggler after a
-    /// current one; released views drop it as a mismatch, exactly as before
-    /// the grace (seat AE).
+    /// table copies until the grace. A generic-mode ring has several producer
+    /// CPUs only with RPS on, or on a software device whose receive runs on
+    /// the sender's CPU. Then a few-us reorder window can deliver an
+    /// older-stamped straggler after a current one. Released views drop it
+    /// as a mismatch, exactly as before the grace (seat AE).
     /// This bounds the pinning to the drain time (milliseconds) whenever
     /// every binding carries traffic. An idle binding never proves its ring
     /// drained, so its worker falls back to the grace.
