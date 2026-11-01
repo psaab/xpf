@@ -55,9 +55,12 @@ non-fabric egress is judged like a `ForwardCandidate`.
 - An unknown owner, a fabric egress and a zero egress keep the candidate
   verbatim.
 
-The packet-path
-backstop `reverse_hit_departed_destination_redirect` (`resolve.rs`) converts
-`MissingNeighbor` on the same terms. Mechanism and live evidence:
+The packet-path backstop `reverse_hit_departed_destination_redirect`
+(`resolve.rs`) is narrower than the refresh path. It converts a
+`MissingNeighbor` only for a known owner that is not active here (#18659),
+and #18672 did not change it. An owner-active row that missed the refresh
+retain is healed by the next FIB bump, as for a `ForwardCandidate`.
+Mechanism and live evidence:
 `docs/fabric-cross-chassis-fwd.md` (#18659), `docs/log/18659.md`.
 
 ## Command ingest is budgeted (`apply_worker_commands`, #7201)

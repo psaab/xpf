@@ -1678,28 +1678,36 @@ RSS-hashed to it did not re-resolve. It took the MissingNeighbor arm, whose
 until the neighbor generation advanced (test-failover "RG1 Group 4", about
 50 ms per failback).
 
-Since #18659, both the activation refresh and the reverse-hit conversion
-(`reverse_hit_departed_destination_redirect`) keep or produce the fabric
-redirect for a local, non-fabric `MissingNeighbor` in exactly one case: the
-reply destination's connected owner RG is known and is not forwarding-active
-on this node. For that peer-owned case a `MissingNeighbor` is treated like a
-`ForwardCandidate`. A locally active owner keeps its local `MissingNeighbor`
-(resolve, then transmit here), and an unknown owner (an internet destination
-behind the gateway) does too. #18659 never sends either case over the fabric
+On its own, #18659 made both the activation refresh and the reverse-hit
+conversion (`reverse_hit_departed_destination_redirect`) keep or produce the
+fabric redirect for a local, non-fabric `MissingNeighbor` in exactly one
+case: the reply destination's connected owner RG was known and was not
+forwarding-active on this node. A locally active owner kept its local
+`MissingNeighbor`, and an unknown owner (an internet destination behind the
+gateway) did too. #18659 never sent either case over the fabric
 (`rehome_or_retain_missing_neighbor_table_18659`,
-`reverse_departed_destination_converts_missing_neighbor_18659`).
+`reverse_departed_destination_converts_missing_neighbor_18659`). For the
+activation-refresh path (`rehome_or_retain_fabric_redirect`), #18672
+supersedes the locally-active half of that, as described next.
 
-#18672 extended the same treatment to a locally active owner. That case
-needs the LAN RG's activation refresh to run before the LAN connected row is
-republished, which #16270 and #18563 order against, and the next FIB bump
-heals the row. Before #18672, a `ForwardCandidate` whose egress missed the
-destination's connected interface kept the stored redirect (the
-transient-FIB-lag retain), while a `MissingNeighbor` on the same egress was
-returned as-is, the #18659 row shape. A `MissingNeighbor` now takes the
-`ForwardCandidate` keep tests. It is kept when it names the destination's
-connected egress, or when the owner is unknown (#16524). Otherwise it
-retains the redirect (`rehome_or_retain_owner_active_missing_neighbor_18672`).
-A fabric or zero egress is still returned verbatim. The #1913
+#18672 extended the stored-redirect retain in `rehome_or_retain_fabric_redirect`,
+the activation-refresh and stored-session path, to a locally active owner.
+That case needs the LAN RG's activation refresh to run before the LAN
+connected row is republished; #16270 and #18563 order against that. Before
+#18672, a `ForwardCandidate` whose egress missed the destination's connected
+interface kept the stored redirect (the transient-FIB-lag retain), while a
+`MissingNeighbor` on the same egress was returned as-is, the #18659 row
+shape. A `MissingNeighbor` now takes the `ForwardCandidate` keep tests. It is
+kept when it names the destination's connected egress, or when the owner is
+unknown (#16524). Otherwise it retains the redirect
+(`rehome_or_retain_owner_active_missing_neighbor_18672`). A fabric or zero
+egress is still returned verbatim.
+
+The packet-path backstop `reverse_hit_departed_destination_redirect` is
+unchanged by #18672. It still converts only rows whose owner is the peer
+(known, not active here). An owner-active `MissingNeighbor` row that missed
+the refresh retain is healed by the next FIB bump, which makes it stale and
+re-resolves it, exactly as for a `ForwardCandidate`. The #1913
 gate is unchanged. It still judges every `MissingNeighbor` disposition that
 reaches it. What changed is that an established reverse row whose owner is
 the peer no longer reaches it.

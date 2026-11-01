@@ -6969,11 +6969,21 @@ fn rehome_or_retain_owner_active_missing_neighbor_18672() {
         kept, on_link,
         "owner-active MissingNeighbor on the connected egress is kept"
     );
-    // Unknown owner: never redirected (#16524 mirror).
+    // Unknown owner: never redirected (#16524 mirror), v4 and v6.
     let unknown = rehome(wan_mn, DestinationOwner::Unknown, internet);
     assert_eq!(
         unknown, wan_mn,
         "an unknown owner keeps its MissingNeighbor"
+    );
+    let wan_mn_v6 = ForwardingResolution {
+        next_hop: Some(IpAddr::V6("2001:559:8585:50::1".parse().expect("gw v6"))),
+        ..wan_mn
+    };
+    let internet_v6 = IpAddr::V6("2606:4700:4700::1111".parse().expect("internet v6"));
+    let unknown_v6 = rehome(wan_mn_v6, DestinationOwner::Unknown, internet_v6);
+    assert_eq!(
+        unknown_v6, wan_mn_v6,
+        "an unknown v6 owner keeps its MissingNeighbor"
     );
     // Fabric and zero egress stay verbatim under an active owner too.
     let fabric_mn = ForwardingResolution {
