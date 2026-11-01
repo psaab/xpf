@@ -395,6 +395,23 @@ pub(super) struct FlowCacheEntry {
     /// session-hit path. Never set by an ordinary slow-path resolve —
     /// non-adopted flows stay fail-closed.
     pub(super) fabric_established: bool,
+    /// #18534: this flow's destination connected-owner RG, memoised against
+    /// the forwarding snapshot and target it was computed for. See
+    /// [`FlowCacheEntry::destination_owner_rg`].
+    pub(super) dest_owner_memo: DestOwnerMemo,
+}
+
+/// #18534: `(ForwardingState::publish_epoch, target, owner RG)` for the
+/// last destination-owner resolution on this entry; epoch 0 = empty. A
+/// `Cell` because the hit path holds the entry by shared reference after
+/// the lookup.
+#[derive(Clone)]
+pub(super) struct DestOwnerMemo(std::cell::Cell<(u64, std::net::IpAddr, i32)>);
+
+impl Default for DestOwnerMemo {
+    fn default() -> Self {
+        Self(std::cell::Cell::new((0, std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)))
+    }
 }
 
 /// #5147: sentinel `neighbor_shard` for a cached flow with no resolved
@@ -404,6 +421,42 @@ pub(super) struct FlowCacheEntry {
 pub(super) const NEIGHBOR_SHARD_NONE: u16 = u16::MAX;
 
 impl FlowCacheEntry {
+    /// #18534: the destination connected-owner RG the HA validator's
+    /// destination-owner arm judges for this cached flow
+    /// (`connected_owner_rg_for_target_in_table(forwarding, target, table)`).
+    /// That is a pure function of the forwarding snapshot, the target and the
+    /// installing table, and the table is itself fixed by the snapshot, the
+    /// entry's decision and the target's family — so the answer is memoised
+    /// per `(publish_epoch, target)` and the connected-owner index walk (up
+    /// to 33 + 33 v4 / 129 + 129 v6 probes, plus the index-freshness sum
+    /// over every interface's prefix list) runs once per flow per published
+    /// snapshot instead of once per packet. An unpublished snapshot
+    /// (`publish_epoch == 0`: fixtures, which mutate their state in place)
+    /// is never memoised. Which RG is ACTIVE is not memoised: the caller
+    /// still judges that against the live HA state per packet.
+    #[inline]
+    pub(super) fn destination_owner_rg(
+        &self,
+        forwarding: &ForwardingState,
+        target: std::net::IpAddr,
+        table: Option<&str>,
+    ) -> i32 {
+        let epoch = forwarding.publish_epoch;
+        if epoch != 0 {
+            let (memo_epoch, memo_target, rg) = self.dest_owner_memo.0.get();
+            if memo_epoch == epoch && memo_target == target {
+                return rg;
+            }
+        }
+        let rg = crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+            forwarding, target, table,
+        );
+        if epoch != 0 {
+            self.dest_owner_memo.0.set((epoch, target, rg));
+        }
+        rg
+    }
+
     /// #3048/#5147: true when the neighbor table has changed THIS flow's
     /// next-hop mapping since the descriptor was cached, so its captured
     /// `dst_mac` or liveness may be stale. Reads the live epoch of only the
@@ -835,6 +888,7 @@ impl FlowCacheEntry {
             neighbor_mac_epoch,
             neighbor_shard,
             fabric_established: false,
+            dest_owner_memo: DestOwnerMemo::default(),
         })
     }
     #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
@@ -971,6 +1025,7 @@ impl FlowCacheEntry {
             neighbor_mac_epoch: 0,
             neighbor_shard: NEIGHBOR_SHARD_NONE,
             fabric_established: false,
+            dest_owner_memo: DestOwnerMemo::default(),
         })
     }
 }
@@ -1019,9 +1074,15 @@ pub(super) enum FlowCacheEvictionArm {
     /// stale after its RG left the node, evicted for re-resolve
     /// (slow path fabric-redirects it to the new owner).
     PostHitForwardCandidateEgressDeparted = 18,
+    /// #18566: direct-ingress cached FabricRedirect whose destination's
+    /// connected-owner RG is now locally active, evicted so the slow path
+    /// re-homes it onto the local egress. Its own arm so a re-home that does
+    /// not stick (the slow path re-seeding the redirect each packet) shows up
+    /// here instead of hiding under the owner-active arm.
+    PostHitFabricRedirectDestinationNowLocal = 19,
 }
 
-pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 19;
+pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 20;
 
 impl FlowCacheEvictionArm {
     pub(super) const ALL: [Self; FLOW_CACHE_EVICTION_ARM_COUNT] = [
@@ -1044,6 +1105,7 @@ impl FlowCacheEvictionArm {
         Self::PostHitFabricLocalWinsSameOwner,
         Self::PostHitFabricIngressDiscardNowLocal,
         Self::PostHitForwardCandidateEgressDeparted,
+        Self::PostHitFabricRedirectDestinationNowLocal,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -1072,6 +1134,9 @@ impl FlowCacheEvictionArm {
             }
             Self::PostHitForwardCandidateEgressDeparted => {
                 "post_hit_forward_candidate_egress_departed"
+            }
+            Self::PostHitFabricRedirectDestinationNowLocal => {
+                "post_hit_fabric_redirect_destination_now_local"
             }
         }
     }
@@ -1708,41 +1773,6 @@ impl FlowCache {
             }
         }
         self.misses += 1;
-        None
-    }
-
-    /// #16217 (Wire18, B2): side-effect-free read of the entry the hit
-    /// stage would consult, for the fabric-established revalidation the
-    /// hit stage runs BEFORE the mutating lookup. No tallies, no LRU or
-    /// lease re-stamp, no eviction: the caller only needs the cached
-    /// decision (egress RG) and the adoption mark so it can re-derive
-    /// whether the adoption proof still holds under CURRENT RG ownership
-    /// (`revalidate_fabric_established`). Identity matches the lookup's:
-    /// same key, same physical ingress (binding-substituted), same
-    /// logical (VLAN) ingress. Generation/fence validity is deliberately
-    /// NOT judged here — a fenced entry simply yields no revalidated
-    /// mark, which is fail-closed for the exemption.
-    pub(super) fn peek_entry(
-        &self,
-        key: &crate::session::SessionKey,
-        lookup: FlowCacheLookup,
-    ) -> Option<&FlowCacheEntry> {
-        let ingress_ifindex = if self.binding_ifindex != 0 {
-            self.binding_ifindex
-        } else {
-            lookup.ingress_ifindex
-        };
-        let set = Self::set_index(key, ingress_ifindex);
-        let base = set * FLOW_CACHE_WAYS;
-        for way in 0..FLOW_CACHE_WAYS {
-            if let Some(entry) = &self.entries[base + way]
-                && entry.key == *key
-                && entry.ingress_ifindex == ingress_ifindex
-                && entry.logical_ingress_ifindex == lookup.logical_ingress_ifindex
-            {
-                return Some(entry);
-            }
-        }
         None
     }
 

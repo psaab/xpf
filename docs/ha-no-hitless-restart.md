@@ -194,7 +194,7 @@ An **intra-identity** edit (same node-id **and** cluster-id — a
 redundancy-group / interface / policy change) passes untouched and
 reconciles live.
 
-### Live control-link moves are refused (#8965 address, #8987 interface)
+### Live control-link moves are refused (#8965 address, #8987 interface, #18606 local address)
 
 Changing either half of the cluster control tuple on a **running** pair
 partitions it, and the two halves fail identically.
@@ -236,6 +236,59 @@ ends of a point-to-point control link atomically from one end of it.**
   against itself. Nor is `hbLocalAddr` a proxy — an operator who moves
   the control link to another interface and carries the same address
   across leaves it unchanged.
+- `clusterControlLocalAddressCommitPreflight` — **this node's own**
+  control-link address (#18606), the local end #8965 cannot see. #8965
+  gates what this node dials; renumbering this node's address with the
+  same interface and peer passed every gate, applied, and partitioned the
+  pair (the peer's matching `peer-address` change is refused by #8965 on
+  whichever node it is local to, so the coherent version of the change
+  cannot be applied live either). Before #18597 the per-commit heartbeat
+  restart made it loud by accident — the restart could not bind the stale
+  address and the commit failed through #9751, *after* it had been
+  applied. The gate refuses it before promotion, with #8965's procedure:
+  set the new address on BOTH nodes and restart xpfd on both.
+
+  The predicate is "this commit removes the address the running heartbeat
+  is bound to": the bound address (`Manager.HeartbeatLocalAddr()`) is a
+  configured static address of the RUNNING config's control-link unit and
+  the candidate's unit no longer carries it. Membership, not equality with
+  one selected address (a unit with two addresses can resolve them in a
+  different order). The running-config half matters: a unit with `dhcp` and
+  a static address binds the lease (networkd renders no static IPv4 for a
+  DHCPv4 row), and a foreign address listed first can win the bind; neither
+  is removed by any commit, and a gate that compared the candidate alone
+  would refuse every commit on such a node. A static -> DHCP change, which
+  strands the bound address, is refused. It abstains when no heartbeat is
+  running (boot applies run before comms start, a first cluster commit has
+  none, a fabric-transport epoch never starts one, and node-id changes are
+  #6192's and land through the boot path) and when the candidate has no
+  control link.
+  On the peer-synced path it is safe for #8965's reason — every shipped
+  cluster config keeps the control address inside `groups node0`/`node1`,
+  so a synced text compiles to this node's own address — and a synced text
+  that does change it is refused **before it is promoted**: the gate runs
+  inside `Store.SyncApplyGated` on the compiled peer text, so the standby
+  keeps its config, nacks, and the primary's re-push is refused the same
+  way (the standby reads config-sync stale until the operator fixes the
+  primary). Refusing after promotion — where the #8965/#8987/#9121 synced
+  checks still sit — leaves the refused text active, and every background
+  applier (DHCP callback, feeds, config poll, apply-debt retry) applies the
+  active config with no preflight.
+
+  **To renumber the control link**, do it offline: stop `xpfd` on both
+  nodes, put the new address in each node's boot configuration (the daemon
+  starts from `/etc/xpf/.configdb`; with `active.json` removed it
+  bootstraps from `/etc/xpf/xpf.conf`, see `docs/ha-cluster-test-plan.md`),
+  and start both. A boot apply runs no preflight, and the heartbeat starts
+  fresh on the new address.
+
+  The address set compared is the one networkd RENDERS: a family whose DHCP
+  client is on renders none of its static addresses, so adding `dhcp` to the
+  control unit while keeping the bound static address is refused like any
+  renumber. Residuals: removing `dhcp` from a dhcp+static unit while the
+  heartbeat is on the lease (the lease is in no config, so the gate
+  abstains), and a reboot-recovered pending `commit confirmed` whose
+  rollback runs no cluster gates (as for #8965).
 
 **#9178 — the address gate passed the DELETION case.** #8965's decision
 returned nil whenever *either* side was empty, on the reasoning that

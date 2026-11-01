@@ -800,8 +800,8 @@ routing, and only on double fault).
   configured name, `<ifd>.<unit>`; v4 destinations only; management
   interfaces rejected). "Management interface" is
   `config.IsManagementIfName` (#7515) — the SAME predicate the daemon uses
-  to build the `vrf-mgmt` interface set and the networkd `VRF=` emitter
-  uses to write the stanza. That agreement is the whole basis of the
+  to build the `vrf-mgmt` interface set and the networkd emitter uses to
+  write the `KeepMaster=yes` stanza (#18597; it was `VRF=vrf-mgmt`). That agreement is the whole basis of the
   refusal: the lease is excluded from FRR by `collectDHCPRoutes` precisely
   BECAUSE the interface is in that set, so a next-hop through it could
   never resolve. The rule was previously restated verbatim at all three

@@ -379,6 +379,9 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 	// stability crossing re-pushes via the promotion hook / reconcile
 	// loop, instead of leaving the peer indefinitely divergent.
 	ss.OnPeerConnected = func() {
+		if d.peerCallbackSuperseded(ss, "OnPeerConnected", false) {
+			return
+		}
 		d.cluster.RecordEvent(cluster.EventFabric, -1, "Peer connected")
 		d.onSessionSyncPeerConnected()
 		// #2239 Q7: a peer that just (re)connected (e.g. a restarted
@@ -468,9 +471,41 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 	ss.BulkSnapshotSource = d.userspaceBulkSnapshot
 
 	ss.OnPeerDisconnected = func() {
+		if d.peerCallbackSuperseded(ss, "OnPeerDisconnected", true) {
+			return
+		}
 		d.cluster.RecordEvent(cluster.EventFabric, -1, "Peer disconnected (all fabrics)")
 		d.onSessionSyncPeerDisconnected()
 	}
+}
+
+// peerCallbackSuperseded reports whether a peer connect/disconnect callback
+// comes from a SessionSync that is no longer the published one (#18521
+// review round 4). The callbacks are ordered per instance (dispatchPeerEvent),
+// but the state they write — syncPeerConnected, the prime-retry generation,
+// the sync-ready timer, SetSyncReady — is daemon-wide and belongs to whichever
+// instance is published. An old instance's disconnect can queue behind its own
+// slow connect and run after the successor's connect; applied, it marked a
+// live successor's peer disconnected until the next reconnect.
+//
+// A CONNECT from any unpublished instance is dropped, including while nothing
+// is published (mid-teardown): the instance is being retired, and applied it
+// would mark the peer connected and arm a sync-ready timer the teardown has
+// already stopped (review at 5af11e4593). A DISCONNECT from an unpublished
+// instance still runs while nothing is published; it is redundant with the
+// retirement's own record (noteSessionSyncRetired) and harmless. Dropping a
+// stale disconnect is safe because the retirement records it: a successor
+// always starts from "disconnected" and re-derives the state from its own
+// callbacks. A new instance is published before it is started, so its own
+// callbacks are never dropped. Same rule as OnSessionInventoryBulkReceived.
+func (d *Daemon) peerCallbackSuperseded(ss *cluster.SessionSync, which string, runWhenUnpublished bool) bool {
+	cur := d.getSessionSync()
+	if cur == ss || (cur == nil && runWhenUnpublished) {
+		return false
+	}
+	slog.Info("cluster: ignoring a peer callback from a replaced session-sync instance (#18521)",
+		"callback", which)
+	return true
 }
 
 // wireSessionSyncFailoverCallbacks wires the peer-driven remote-failover
@@ -602,6 +637,8 @@ func (d *Daemon) wireSessionSyncFailoverCallbacks(ss *cluster.SessionSync) {
 	// sent before this node had resigned.
 	ss.WaitFailoverApplied = d.waitFailoverActuated
 	ss.WaitFailoverAppliedBatch = d.waitFailoverActuatedBatch
+	// #18521 review round 3: "applied" only while the hold still stands.
+	ss.TransferOutStillHeld = d.cluster.RemoteTransferOutStillHeld
 }
 
 // wireClusterPeerFailoverHooks points the cluster Manager at the sync
@@ -622,6 +659,9 @@ func (d *Daemon) wireClusterPeerFailoverHooks(ss *cluster.SessionSync) {
 	d.cluster.SetPeerFailoverAbortBatchFunc(ss.SendFailoverAbortBatch)
 	d.cluster.SetPreManualFailoverHook(d.prepareUserspaceManualFailover)
 	d.cluster.SetLocalTransferCommitReadyHook(d.waitLocalFailoverCommitReady)
+	// #18559: make-before-break — open local forwarding for the RGs this
+	// node requests before the owner is asked to demote.
+	d.cluster.SetTransferPreActivateHooks(d.beginTransferPreActivation, d.endTransferPreActivation)
 	// #5079: size the owner-side transfer-out lease above the requester's
 	// worst-case post-ACK commit latency — the local commit-ready settle
 	// window (localFailoverCommitTimeout) plus the commit round-trip — so
@@ -635,6 +675,9 @@ func (d *Daemon) wireClusterPeerFailoverHooks(ss *cluster.SessionSync) {
 	// #9569: the untargeted failover and ForceSecondary refuse a peer that did
 	// not apply the newest config this node sent.
 	d.cluster.SetPeerConfigStaleFunc(d.peerConfigStale)
+	// Review of #18625: the last neighbor warm-up pass in
+	// `show chassis cluster information`.
+	d.cluster.SetInformationExtraFunc(d.neighborWarmInformation)
 	// #17056: publish the one sync reference the Manager's suppression and
 	// never-seen policies read. This replaces the former timeout-guard,
 	// heartbeat-recovered and never-seen-fresh hooks: the policy, its 5s

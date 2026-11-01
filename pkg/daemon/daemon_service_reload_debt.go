@@ -74,8 +74,9 @@ type serviceReloadDebt struct {
 	// chronySources: /etc/chrony/sources.d/xpf.sources is on disk but
 	// `chronyc reload sources` has not succeeded since it was written.
 	chronySources bool
-	// chronyThreshold: /etc/chrony/conf.d/xpf-threshold.conf is on disk but no
-	// chrony reload/restart has succeeded since it was written.
+	// chronyThreshold: an xpf conf.d file (/etc/chrony/conf.d/xpf-threshold.conf,
+	// or the #18584 xpf-acquisition.conf bindacqdevice binding) is on disk but
+	// no chrony reload/restart has succeeded since it was written.
 	chronyThreshold bool
 	// sshdReload: the xpf sshd drop-in has been removed (or rewritten) but
 	// `systemctl reload sshd` has not succeeded since, so the running sshd is

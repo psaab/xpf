@@ -54,7 +54,7 @@ stamp_clean() {
 	echo '#!/bin/sh' >"$fix/test/debian/preinst-migrate-test.sh"
 	echo '#!/bin/sh' >"$fix/test/debian/preinst-safe-segment-test.sh"
 	echo '#!/bin/sh' >"$fix/test/incus/harness-result-selftest.sh"
-	for w in wire-policy-deny wire-appmatch-twins wire-zone-matrix wire-hostinbound-deny wire-conntrack-lifecycle wire-routing-separation wire-nat-frag-needed t12-g2-9506; do
+	for w in wire-policy-deny wire-appmatch-twins wire-zone-matrix wire-hostinbound-deny wire-conntrack-lifecycle wire-routing-separation wire-nat-frag-needed t12-g2-9506 iperf-matrix; do
 		# Build the arm via concatenation: this file must not itself carry
 		# the literal arm text, or the real-tree §2b scan would flag it.
 		arm='--self''test)'
@@ -93,6 +93,7 @@ run_bash test/incus/wire-conntrack-lifecycle.sh --selftest
 run_bash test/incus/wire-routing-separation.sh --selftest
 run_bash test/incus/wire-nat-frag-needed.sh --selftest
 run_bash test/incus/t12-g2-9506.sh --selftest
+run_bash test/incus/iperf-matrix.sh --selftest
 # -- harness reachability census (#8302) --
 RUNNER
 }
@@ -226,7 +227,7 @@ else
 	esac
 fi
 
-# ── 5. an eleventh odd name fails (exact-set, extra direction) ──
+# ── 5. a twelfth odd name fails (exact-set, extra direction) ──
 n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
 printf 'run_bash scripts/odd-new-thing.sh\n' >>"$fix/runner.sh"
 # The append lands after the §4 end marker; move it inside (a registration
@@ -234,7 +235,7 @@ printf 'run_bash scripts/odd-new-thing.sh\n' >>"$fix/runner.sh"
 sed -i '/odd-new-thing/d' "$fix/runner.sh"
 sed -i 's|# -- harness reachability census|run_bash scripts/odd-new-thing.sh\n# -- harness reachability census|' "$fix/runner.sh"
 if out=$(run_census "$fix"); then
-	bad "undeclared eleventh odd name passed the census"
+	bad "undeclared twelfth odd name passed the census"
 else
 	case "$out" in
 	*"scripts/odd-new-thing.sh"*) ok "undeclared odd name fails, naming the file" ;;

@@ -336,6 +336,15 @@ Legend:
 - `SD`: FabricPuntSeed-specific redirect survival; it preserves the peer return
   only while the flow remains non-local and never authorizes a changed local
   egress.
+  - #18620 amendment: once the FIB resolves the flow to a local egress whose
+    RG is forwarding-active here, the seed is RETIRED at its hit
+    (`retire_fabric_punt_seed_if_owner_active`) instead of being judged. Its
+    recorded permit goes with it, and the packet takes the miss path, where
+    only current policy can admit it.
+  - Cell 7a pins this: the post-activation ACK is a SYN-first drop, and the
+    next SYN is denied by live `lan -> dmz`.
+  - The NoRoute retention (Cell 7b) is unchanged: an unroutable flow names no
+    local egress, so the seed is kept.
 - `TD`: existing TunOrigin/self-origin decline/host semantics; no transit
   recorded-egress authority.
 - `FC`: fail closed (revoke/drop) when an otherwise-local packet has no valid

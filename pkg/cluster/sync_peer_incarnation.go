@@ -149,6 +149,19 @@ type peerIncarnationState struct {
 	// cold-prime re-arm; the authoritative bulk then heals every
 	// withheld session at once.
 	ipsecDiscriminatorSuppressDebt atomic.Bool
+	// lastSentConfigGen is the newest config generation this node actually
+	// WROTE to this peer incarnation (#18636), raised as a max by
+	// recordLastSentConfigGen just before the socket write. As the RG0
+	// authority, configEpochStale compares a peer's reverse-tagged applied
+	// generation against it, NOT against configGenCounter: the counter is a
+	// reservation counter, and the 30 s config-sync reconcile tick reserves
+	// one generation per tick before it finds the config already pushed and
+	// no-ops, so the counter runs past anything the peer was ever sent and
+	// a converged peer's every install read as stale. Incarnation-scoped so
+	// a new peer incarnation is never compared against a generation sent to
+	// its predecessor; until the first write to it, configEpochStale keeps
+	// the reservation-counter comparison (fail-closed).
+	lastSentConfigGen atomic.Uint64
 }
 
 // retirePeerIncarnationLocked installs a fresh peerIncarnationState for the
@@ -185,6 +198,12 @@ func (s *SessionSync) retirePeerIncarnationLocked(seed net.Conn) {
 		fresh.peerCapabilityFlags.Store(uint32(ac.peerCapabilityFlags))
 		fresh.peerCapabilityFlags2.Store(uint32(ac.peerCapabilityFlags2))
 		fresh.peerSessionSyncWire.Store(uint32(ac.peerSessionSyncWire))
+		// #18636: a config written on the priming connection went to the
+		// incarnation this switch adopts, so the authority's config-epoch
+		// threshold keeps it rather than reverting to the reservation
+		// counter until a re-push lands. Same attribution model as the
+		// capability set above and the #18521 apply ACK.
+		fresh.lastSentConfigGen.Store(ac.lastSentConfigGen.Load())
 	}
 	s.peerSnaps.peerSnapshotProtocol.Store(snapshotProtocol)
 	s.peerSnaps.peerSnapshotProtocolGeneration++

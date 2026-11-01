@@ -191,3 +191,21 @@ failover_wait_main_iperf_result() {
 		python3 -c "$checker" "$log" >/dev/null 2>&1
 	' _ "$log" "$FAILOVER_JSON_STREAM_COMPLETION_CHECK" "$wait_seconds" &>/dev/null
 }
+
+# failover_pool_probe_verdict <probe-log-text>
+#   Scores the #8280 post-failback pool-mode iperf3 probe (#18567). Prints
+#   `pass` when the client finished (`iperf Done`), `busy` when the server
+#   answered "the server is busy", and `fail` otherwise. A busy reply crossed
+#   the firewall on the probe's own TCP control connection, so the pool-NAT
+#   handshake worked, but the probe measured nothing: the caller reports it
+#   as VOID, never as the #8341 data-path FAIL and never as a PASS.
+failover_pool_probe_verdict() {
+	local log="$1"
+	if grep -q 'iperf Done' <<<"$log"; then
+		echo pass
+	elif grep -q 'the server is busy' <<<"$log"; then
+		echo busy
+	else
+		echo fail
+	fi
+}

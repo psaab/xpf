@@ -141,7 +141,9 @@ no leg passes `-v`. So:
 | `make ignored-cell-census` | every Rust `#[ignore]`, including the third crate outside both workspaces |
 | `make test-cold-path-flooder` | 44 `#[test]`s in `test/incus/cold-path-flooder`, which was reached by nothing |
 | `make harness-census` | every runnable shell harness under `test/incus/` |
-| `make selftest` | all self-tests, including image/distribution legs requiring libguestfs (~13 min), plus the censuses (go-skip, harness, ignored-cell, go-buildtag, miri, interpreter, selftest) and the ledger legs |
+| `make instructions-census` | every expiry marker on a temporary instruction (#18645): bad syntax anywhere (malformed, misplaced, free text without a `Review-by` date, a date more than 180 days out), and a date before today in the files your change touches. `make instructions-census-online` is the keeper's sweep: every marker, expired dates and CLOSED issues |
+| `make mirror-census` | every `<!-- mirror:<id> n=<copies> -->` block: same-id copies must match after whitespace normalisation, their number must equal the declared n, and none may lack a partner (#18645) |
+| `make selftest` | all self-tests, including image/distribution legs requiring libguestfs (~13 min), plus the censuses (go-skip, harness, ignored-cell, go-buildtag, miri, interpreter, selftest, instruction, mirror) and the ledger legs |
 
 ### The go-skip census, and the thing it found
 

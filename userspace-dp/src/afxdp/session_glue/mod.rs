@@ -128,12 +128,20 @@ mod steering_row_owners_9560_tests;
 #[cfg(test)]
 #[path = "upsert_synced_14669_tests.rs"]
 mod upsert_synced_14669_tests;
+// #18550: a late peer re-import revives an idle-lapsed replica on the owner.
+#[cfg(test)]
+#[path = "lapsed_replica_reimport_18550_tests.rs"]
+mod lapsed_replica_reimport_18550_tests;
 #[cfg(test)]
 #[path = "shared_replica_hold_17683_tests.rs"]
 mod shared_replica_hold_17683_tests;
 #[cfg(test)]
 #[path = "probe_policy_17058_tests.rs"]
 mod probe_policy_17058_tests;
+// #18520: SYN on worker A + SYN-ACK on worker B must establish both tables.
+#[cfg(test)]
+#[path = "cross_worker_handshake_18520_tests.rs"]
+mod cross_worker_handshake_18520_tests;
 
 // #6600: the coordinator's pre-publish NAT reservation resolves the synced zone
 // pair through the SAME helper the worker-side upsert uses, so the two cannot

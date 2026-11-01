@@ -222,6 +222,93 @@ not hold. Once the RG is no longer locally active, the next sync of the flow
 imports normally. An active node with no local session for the flow still
 reserves before it publishes.
 
+**Late imports on an active owner (#18550) — published by the worker, not
+skipped.** A new owner keeps draining the peer's in-flight backlog after it
+activates the RG, so imports arrive for an RG this node already forwards. For
+such an import the coordinator does NOT write USERSPACE_SESSIONS itself: the
+`synced_entry_allows_local_replace` gate in `upsert_synced_session` is false
+when this node is forwarding-active for the owner RG, or when the owner RG is
+0 and any RG is forwarding-active here. The activation republish
+(`handle_activated_rgs`) has also already run. The session is still made
+visible:
+
+- the shared publish (`synced`, `nat`, `forward_wire`) of the forward entry and
+  its synthesized reverse is unconditional and synchronous. On a worker-table
+  miss the packet path falls back to `synced` and then the `forward_wire`
+  alias (`lookup_session_across_scopes_with_shared_and_payload`; it does not
+  read `nat`). That fallback runs only when the worker row is ABSENT;
+- the `UpsertSynced` fan-out always runs (a refused push is positional repair
+  debt replayed from the shared row), and `handle_upsert_synced` publishes the
+  entry's steering rows — its key plus, for a forward entry, the wire,
+  reverse-wire and reverse-canonical rows — once `upsert_synced_with_origin`
+  installs it.
+
+Two windows remain.
+
+1. **Worker queue drain.** Until the worker drains its queue, the steering row
+   is absent but the shared row is present. A shim miss for transit traffic,
+   or for a reply to an interface-SNAT address, is XSK-redirected to the
+   helper and never passed to the kernel.
+2. **A worker row that is present but past its idle deadline.** The lookup
+   fails closed: `IdleCrossed`/`Stale` return no hit and do NOT consult the
+   shared row (the `SessionExpiryProbe::IdleCrossed` contract: a stale local
+   record must not be resurrected by its replica). Before #18550, a late
+   same-incarnation import landing on such a row kept the crossed anchor
+   (#16043). The row therefore stayed fail-closed until `RefreshOwnerRGS` or
+   the wheel's SELF-HEAL re-stamped it, and for a row coming out of HOLD that
+   can be up to `HELD_RECHECK_HORIZON_NS` (255 s) away. Now, on the node that
+   forwards the RG, `handle_upsert_synced` re-stamps a peer-synced row that is
+   ALREADY crossed (`SessionTable::restamp_lapsed_peer_synced`, the same edit
+   as SELF-HEAL). It records the current activation epoch, so a revived row
+   the flow has abandoned ages after one window rather than being self-healed
+   again. The same import onto a reaped row installs a fresh anchor anyway, so
+   this removes a dependence on wheel timing. Unchanged:
+   - a still-live row keeps its anchor (#16043);
+   - the standby keeps HOLD semantics (#16880);
+   - a LOCAL row is never re-stamped.
+
+   A crossed row that receives no import still waits for `RefreshOwnerRGS` or
+   SELF-HEAL.
+
+**What a missed reply does.** A reply to an interface-SNAT address that misses
+in the helper (absent or lapsed row) takes the session-miss resolution: either
+`ingress_interface_local_resolution_on_session_miss` or
+`interface_nat_local_resolution_on_session_miss`, both in `poll_descriptor`.
+That gives LocalDelivery. The strict-SYN gate exempts LocalDelivery, so the
+packet reaches the host-inbound gate:
+
+- If the ingress zone does not admit the service, it is a silent drop. The
+  loss WAN zone admits only `ping; gre`, so there a lapsed row is a stall, not
+  an RST.
+- If the zone admits the service, the packet is delivered to the local stack,
+  where any kernel RST is subject to `xpf_dp_rst`.
+
+Measured in the #18550 review with the poll harness:
+
+| Case | session_hit | session_miss | host_inbound_deny | local |
+|---|---|---|---|---|
+| fresh row | 1 | | | |
+| lapsed row, `ping; gre` | | 1 | 1 | 1 (counted, not delivered) |
+| lapsed row, `any-service` | | 1 | 0 | 1 (delivered) |
+
+**Promotion vs late import.** When the worker has promoted the row locally but
+the shared map still shows the older peer row, the #9678 gate cannot see the
+local owner and the import proceeds.
+
+- The worker's own guard keeps the local forward row and never steers the late
+  forward translation.
+- The shared map is overwritten with the older peer row.
+- If the late row names a different translation, its synthesized reverse
+  companion is installed and its reply tuple is steered.
+
+This race, including a possible SNAT reservation free, is tracked in #18552.
+Pinned by:
+
+- `afxdp/tests_late_synced_publish_18550.rs`: v4 and v6; the late-publish,
+  shared-local and worker-local shapes;
+- `afxdp/session_glue/lapsed_replica_reimport_18550_tests.rs`: v4 and v6;
+  the lapsed-row revive cell, plus standby, live-anchor and local-row controls.
+
 **#7209 — an admitted import with no kernel session map is now visible.** After
 the reservation, `upsert_synced_session` publishes the row to the kernel session
 map. That publish sat behind one conjunction:
@@ -230,8 +317,13 @@ map. That publish sat behind one conjunction:
 if synced_entry_allows_local_replace(..) && let Some(fd) = ..session_map_fd
 ```
 
-whose two operands mean opposite things. The FIRST failing is correct: the peer
-owns the redundancy group, so this node must not take the redirect. The SECOND
+whose two operands mean opposite things. The FIRST failing is correct: THIS node
+is forwarding-active for the entry's owner RG (or the owner RG is 0 and any RG
+is forwarding-active here), so the coordinator leaves the
+steering publish to the workers, which publish only after their own
+local-replace guard admits the entry (see "Late imports on an active owner"
+below; this sentence previously read "the peer owns the redundancy group", the
+inverse of what `synced_entry_allows_local_replace` tests). The SECOND
 failing is a gap — the entry is recorded in the shared `synced` map and answered
 to Go as installed, while no kernel row exists, and `SyncedImportOutcome::Applied`
 is returned with no refusal reason. `bpf_maps.session_map_fd` is `None` before
@@ -306,7 +398,34 @@ Locally-created forward sessions take a parallel path: `SetSessionV4()` /
 `SetSessionV6()` install into the kernel/BPF maps, then mirror the forward entry
 — and ONLY the forward entry — to the local Rust helper over the session control
 socket. The request resolves egress/zone/tunnel-endpoint metadata from
-`m.lastSnapshot` and the compile result.
+`m.lastSnapshot`.
+
+**#18515: the zone ID is recovered, not widened.** Zone IDs are the full u32
+`StableZoneID` since #16557, but the session value (`dataplane.SessionValue`,
+which is also what crosses the cluster sync wire) and the helper's binary
+event-stream session frames carry only its low 16 bits.
+`fillSessionSyncValue` resolves that u16 against the zones published to the
+helper (`m.lastSnapshot.Zones`, the post-#3719-quarantine set;
+`resolveTruncatedZone`): the unique zone whose full ID has those low bits
+supplies both `ingress_zone_id`/`egress_zone_id` and the zone name. Two zones
+with different full IDs that share low 16 bits are ambiguous: the request
+carries an ID with the same low bits that no published zone has
+(`unattributedZoneID`), so it binds no local zone and is never merged into
+another zone. Zone 0 would not do: an arrival on an interface in no zone
+has arrival zone 0 and would be judged the session's owner. A one-shot warning
+names the value, because established flows in those zones will not survive a
+failover until one zone is renamed. A zone whose ID has low 16 bits 0 cannot be
+carried at all (0 is the session value's "no zone"). The match consults only
+the receiver's zones: a zone that exists only on the sender (node-scoped, or
+during config-sync skew) and shares low 16 bits with a local zone is attributed
+to that local zone and its owner RG (1/65536 per such pair; the odds that
+some pair in a configuration collides grow with the zone count, about 7% at
+100 zones). The residual — the u16 fields themselves — goes
+away only by widening the session value and the HA wire. Zero-extending the u16 instead — the pre-#18515
+behaviour — sent an ID no zone has, which the helper prefers over the name;
+every peer-synced session then judged every hit FOREIGN
+(`session_hit_authority`), reply traffic was default-denied as its own
+wan->lan flow, and every established flow died on HA failover.
 
 **#8015: one upsert, not two.** Until #8015 the mirror also sent an explicitly
 built `is_reverse=1` companion, added under #310 so the helper would hold the
@@ -901,7 +1020,10 @@ permanently blocks manual failover, because the readiness gate waits on an
 outbound bulk ack that already arrived. Recording first (mirroring the
 #2170/#2198 gen-guard record-then-send discipline) guarantees an early ack can
 only ever observe the pending epoch already in place, so it clears it
-regardless of arrival timing. On a `BulkEnd` write failure the epoch is reset
+regardless of arrival timing. Its age (`pendingBulkAckSince`, read by every
+`BulkAckPendingRetryAfter` decision) is stamped from the MONOTONIC clock since
+#18521; a wall-clock stamp let a backward clock step read as a younger ack and
+suppress retries and fence re-primes for the size of the step. On a `BulkEnd` write failure the epoch is reset
 to 0 (and `handleDisconnect` also clears it), so a failed send cannot leave the
 pending state falsely armed. The same ordering applies to the empty-marker
 `sendBulkMarkers` path used after event-stream export.
@@ -923,12 +1045,70 @@ For each received session it:
 5. installs the forward entry through `SetClusterSyncedSession*`
 6. creates and installs the reverse entry locally
 
+Steps 5 and 6 are two synchronous helper round trips, each a fresh dial of the
+helper's session socket (`requestSessionSyncResponseLocked`). Install
+throughput is therefore set by the helper's accept loop, not by the wire: until
+#18541 that loop slept a fixed 10 ms whenever it found nothing to accept, and
+every dial arrived just after it went idle, so each session cost ~20 ms — loss
+fw0 installed a 522-session cold-prime bulk at ~51 sessions/s (~10 s), which is
+how long the sender's barrier fence refused manual failover. The loop now
+waits on the listener's readiness (`wait_for_pending_connection`,
+`userspace-dp/src/server/accept_loop.rs`), so a request is accepted as soon as
+it is dialed; the per-request protocol, fail-closed outcomes and `BulkAck`
+meaning are unchanged.
+
+An install holds `Manager.sessionMu`, not `Manager.mu`, across its round trip,
+and the session socket is served by its own helper thread, apart from the
+control socket that carries the authoritative `update_ha_state` (RG
+activation and demotion), FIB and neighbor publishes. The HA watchdog's
+lease-only `update_ha_state` refresh (#9629) does ride the session socket,
+taking `sessionMu` per request like an install, so it too waits for at most
+the one request in flight. An RG activation (`UpdateRGActive`) shares only its
+brief `mu -> sessionMu` fence with the install path, so after a peer loss it
+waits for at most the ONE install in flight, never for a backlog of the dead
+peer's queued frames
+(`TestRGActivationWaitsForAtMostOneInFlightInstall18541`; on loss fw1 at the
+2026-10-30 06:32:40 takeover the helper logged all three activations within
+0.35 s). What a backlog DOES delay is the sync receive loop itself, which
+installs frames in arrival order; #18541 cuts each of those from ~20 ms to the
+round-trip cost.
+
 On `BulkEnd` the receiver:
 
 1. verifies the epoch
 2. reconciles stale sessions using the frozen ownership snapshot
 3. sends `BulkAck(epoch)`
 4. fires `OnBulkSyncReceived`
+
+When the receiver withholds steps 3 and 4 — the ack certifies a reconciled
+table — it now asks for the replacement itself (#18521). Every withholding
+outcome of a completed window qualifies: the reconcile was skipped (the
+zone-ownership map changed mid-bulk, #9655; no zone snapshot; no dataplane) or
+failed, the window was aborted (cap or deadline, #16039), or rows hit transient
+helper-install failures (expected right after a restart). An ignored BulkEnd
+does not: it closes no window, and its bulk is still streaming or superseded.
+The receiver queues one `BulkRequest` after an exponential backoff (1s doubling
+per consecutive withheld bulk, capped at 30s, reset by the next reconciled
+bulk) and once the zone map has been stable for 1s (capped at 30s of churn).
+Each request makes the sender walk its whole table, so the wait is never
+shorter than the withheld bulk's own receive duration, and for transient
+helper-install failures (expected while the helper comes up after a restart,
+and quick to fail) the backoff starts at 10s instead of 1s: 10s, 20s, 30s
+rather than 1s, 2s, 4s, 8s, 16s — five full bulks in the first 31s against one
+per 35s before #18521 (review of #18525 round 2). A bulk withheld while an
+earlier bulk's request is still waiting takes that request over: it is judged
+on the newest withheld bulk's own cause, floor and receive duration, so a
+transient-failure bulk behind a reconcile-skip request still waits out its
+10s floor, and the request's log line names its cause (round 3).
+The request is single-flighted, tracks the newest withheld bulk so
+back-to-back withholds still produce exactly one request, and is dropped when
+a newer bulk was accepted meanwhile (that bulk is the replacement; asking again
+would only replace its pending epoch on the sender). Before this, the only
+retry was the sender's 35s `BulkAckPendingRetryAfter` bound, and a barrier fence
+waiting on the ack refused every manual failover (5s admission window) in
+between. A peer that predates `BulkRequest` ignores the frame and keeps the 35s
+retry (`pkg/cluster/sync_bulk_rerequest_18521.go`, counter
+`Bulk re-requests sent`).
 
 ### Stale Session Reconciliation
 
@@ -938,6 +1118,26 @@ says are peer-owned.
 
 Important detail: zones missing from the frozen snapshot are conservatively kept
 instead of deleted.
+
+The reconcile is skipped — `BulkAck` withheld, the bulk discarded — when the
+ownership generation (`zoneRGMapGen`) moved between `BulkStart` and `BulkEnd`
+(#9655). Since #18374 the generation moves only when something the snapshot
+captures changed: the zone map, the fold->RG map, or the ingress fold resolver.
+The daemon installs all three through `InstallZoneOwnership` with a digest of
+what the resolver closes over (the store's canonical config-text digest and the
+ifindex->name table); a content-equal re-install — every config apply and every
+link-state refresh re-installs — keeps the generation. Before #18374 every
+install advanced it (twice per apply, counting the NAT-scope folder, which no
+snapshot reads), so an apply or an em0 link refresh landing inside the receive
+window discarded the whole bulk; the issue's journal census counted 113 such
+aborts on loss fw0. A config with DNS address-book names is applied as a
+private DNS-refresh clone; its install uses its recorded base's digest when
+that base is the store's compiled active config (DNS answers are not read by
+the fold). A genuine change, an unknown digest (a config the store cannot
+identify, such as a candidate or a DNS clone of a non-active config), or a
+legacy setter still advances it and still voids the reconcile. RG mastership is
+not part of the generation, before or after #18374: the snapshot judges by the
+primary answers captured at `BulkStart` (see #18548).
 
 ### Config-Epoch Guard (#5274)
 
@@ -1078,6 +1278,32 @@ so a stable connection with a persistent apply failure would otherwise never
 re-enter this edge" — and answered it with a health alarm rather than
 convergence.
 
+#18610 narrows the dual-active half of that contract. The re-push heals a
+refusal only when the refusing node later DEMOTES: the new primary's push then
+applies on it. When the refusing node wins the dual-active and STAYS primary,
+the peer is secondary and never pushes again, so no re-push arrives and none is
+needed — this node's config is the one the peer converges to. Its received mark
+nevertheless stayed above its applied mark, which read as `standby config
+stale` and blocked a rolling upgrade started on it. The refusal is now its own
+outcome (`ErrConfigSyncRejectedAuthority`): it still nacks and pins, but it does
+not arm the #6387 alarm, counts `ConfigsRejectedAsAuthority` instead of
+`ConfigsApplyFailed`, and is exempt from the staleness gate while the node stays
+the authority (`docs/sync-protocol.md`, manual-failover config-staleness gate).
+
+The losing node needs the mirror image. The authority's own push to it is
+deduplicated per (connection epoch x generation) and was claimed by the push
+before the split; the #18521 overdue re-push fires only for an unacknowledged
+send and resends the SAME generation, which the loser's duplicate path re-ACKs
+without running a handler, so it neither converges a commit the loser made
+during the split nor supersedes the loser's own unacknowledged send debt
+(#9569). The loser therefore kept refusing the handovers it started. Refusing a
+push as authority now clears the push marker and re-runs the ordinary reconcile,
+which pushes under a NEW wire generation: the loser applies it (or takes the
+"already matches" path), ACKs, supersedes its debt, and reports a discarded
+unshared commit through #9530. The re-push is paced at `configAckOverdueAfter`;
+a loser still in its dual-active view refuses it and nacks, and #7328 retries
+at the reconcile cadence.
+
 The signal has to come from the receiver. The sender cannot infer the outcome:
 `QueueConfig` is fire-and-forget with no ack, the cluster heartbeat carries no
 config state (`HeartbeatPacket` is node/cluster id, per-RG group state,
@@ -1096,6 +1322,47 @@ write, so a capability advertisement cannot split the recorded state from the
 write. If a successor proves ACK capability after a legacy send, its current
 capability overrides the legacy fallback and that outstanding generation still
 needs a positive ACK.
+
+#18521: the positive-ACK mark (`peerAppliedConfigGen`) is attributed to the
+peer boot that delivered it, read from the delivering connection's #9818
+capability identity. A BulkStart announcing a different boot zeroes the mark
+only when a different boot (or an unattributed legacy peer) delivered it. Before
+this it zeroed unconditionally, and that BulkStart is not ordered against the
+NEW boot's ACK on the same connection: a VM-restarted standby applied and ACKed
+the peer-connect push, its cold-prime bulk started seconds later, and the ACK
+was discarded. With the config already in sync nothing re-pushed, so manual
+failover onto the standby was refused until the next commit.
+
+Independently of why an ACK goes uncredited (skipped on the standby because its
+delivering connection was replaced, lost with a torn-down connection, refused on
+receipt, or discarded as above), the authority now recovers it: when a
+connected ACK-capable peer has left the newest send unacknowledged for 10s,
+`repushIfConfigAckOverdue` (`pkg/daemon/daemon_ha_sync.go`) re-sends the last
+pushed config UNCHANGED — same text, same wire generation — when that is still
+the generation owed, the push belongs to the current peer connection and the
+active config has not moved on. It runs on the 30s reconcile tick and when the
+stale-config gate refuses a failover, at most once per 10s, RG0 authority only.
+A node that is NOT the authority cannot re-push, but its own old debt no longer
+gates anything once it APPLIES a config the peer pushed: both nodes then hold
+the peer's config, and the debt is marked superseded
+(`supersedeSentConfigDebtByPeer`). Before that, a former authority that lost
+RG0 with an uncredited debt by a path its gate does not guard (a
+monitor-driven weight change) refused every later data-RG handover (review of
+#18525 round 2). A later send by this node records a fresh debt. A duplicate
+of an already-applied generation does NOT supersede (round 3): that branch
+runs no apply handler, so it never passes the handler's refusal of a push
+while this node believes it is the RG0 primary, and it says nothing about this
+node's current config — a queued duplicate crossing an RG0 move would retire
+the new authority's own debt. The new authority's push carries a new
+generation, so the apply branch is the one that runs.
+The standby's duplicate path re-ACKs a generation equal to its applied
+high-water without applying again (logged as "re-acknowledging an
+already-applied config generation"), and applies a not-yet-applied one once. A
+new generation would make the standby re-apply and move its config-epoch
+barrier, and the epoch guard then refuses synced session installs stamped with
+the older epoch; the same-generation re-send moves nothing. The
+`Config apply-acks sent/unsent/credited/ignored` counters show where a future
+ACK went.
 
 #6778 added a SECOND sender of that frame: `handleConfigPayload`'s queue-full
 drop. When `configApplyCh` is full the non-blocking enqueue discards the
@@ -1222,8 +1489,24 @@ authority namespace it names. Until a current-authority config is applied, or
 while the sender is behind, after a failed apply, or during reconnect reset, it
 stamps 0.
 
-On receipt, an authority strips the tag and compares against its own
-`configGenCounter` only after learning that the peer supports the encoding. A
+On receipt, an authority strips the tag only after learning that the peer
+supports the encoding. It compares against `authorityConfigEpochThreshold`
+(#18636), which is the newest config generation actually written to the
+current peer incarnation (`peerIncarnationState.lastSentConfigGen`).
+
+- Before the first write to that incarnation, the threshold is
+  `configGenCounter`. That keeps the original comparison, which fails
+  closed.
+- The counter alone cannot be the threshold. It is a reservation counter, and
+  the 30 s config-sync reconcile reserves a generation before it finds the
+  config already pushed. So it runs past anything the peer was ever sent, and
+  a converged peer's every install read as stale.
+- A BulkStart boot-id switch seeds the new incarnation's mark from the config
+  written on the priming connection (the #18521 ordering: the peer-connect
+  push precedes the new boot's BulkStart). The switch's capability callback
+  also re-arms a push to the new incarnation.
+
+A
 non-authority accepts only untagged epochs and compares against
 `max(applyingConfigGen, lastAppliedConfigGen)`. A tag/role mismatch means the
 peers have not observed the same RG0 handover, so the generations are
@@ -1727,6 +2010,168 @@ On disconnect:
 - cluster sync readiness is forced false
 - the readiness timeout is invalidated with a generation guard so a stale timer
   callback cannot flip readiness back to true after disconnect
+
+### Connection teardown and the half-open window (#18521)
+
+A sync connection is torn down by whichever path first sees it fail: a writer
+whose 2s `syncWriteDeadline` expires (`sendLoop`, the bulk writer, every ack
+writer), the receive loop (read error, heartbeat-ack timeout, protocol
+refusal), supersession or incarnation eviction, or the per-connection
+watchdog. The accept side never dials (`shouldInitiateFabricDial`), so after a
+teardown the pair heals only when the DIAL side notices and its
+`fabricConnectLoop` finds the slot empty.
+
+The 56s outage this section exists for: the receive loop reads the next frame
+only after `handleMessage` returns, and session installs run synchronously
+through the userspace helper (the Manager's global mutex plus a control-socket
+round trip). A receive loop slower than its peer's writer stops draining the
+socket; once the 256 KiB buffers fill, the peer's next write misses its 2s
+deadline and the peer closes. A graceful close queues the FIN behind the
+unsent bytes, and with the slow side's window closed it is not transmitted, so
+the slow side stays ESTABLISHED until it has consumed the whole backlog
+(~1 MB measured on loopback). Rules since #18521
+(`pkg/cluster/sync_conn_teardown_18521.go`):
+
+- **A teardown of a connection judged dead is abortive** (`SO_LINGER 0`): a
+  write that timed out, an eviction, a supersede, a protocol refusal. The RST
+  is not gated by the window, so the peer's kernel moves the socket to
+  `TCP_CLOSE` at once. This includes `handleDisconnect`'s stale branch, which
+  used to return with its socket open.
+- **`Stop()` is a bounded graceful flush, not an abort** (review of #18525
+  round 2). A stop is not a judgment that the stream is dead: the bytes already
+  written are addressed to a live peer, and when the primary stops for good (or
+  a comms-transport change replaces the instance, #6387) nothing reconnects to
+  re-send them — they are the stopping node's newest session deltas. Each
+  connection waits until the peer's kernel has acknowledged everything written
+  (`SIOCOUTQ == 0`) and then closes normally; the wait is bounded by
+  `syncStopFlushTimeout` (1s, half the peer's write deadline — a compile-time
+  guard keeps it below that). `Stop()` is then at most that flush plus its own
+  5s goroutine wait, 6s against `TimeoutStopSec=20`. A peer that has not taken
+  the bytes by then is not taking them at line rate, and gets an RST, so it is
+  not left ESTABLISHED behind the unsent tail (the half-open shape the first
+  review round closed with an unconditional abort). Measured on loopback, the
+  abortive stop discarded 32 of 63 16 KiB frames written to a peer that
+  resumed reading 100ms later.
+
+  **The bound does not cover a slow reader** (review of #18525 round 3). A
+  peer draining below line rate — the #18521 slow-install state, ~50
+  sessions/s — still loses the stopping node's unsent tail: up to the send
+  queue, measured on loopback at ~520 KB unflushed of ~1 MB in flight
+  (`TestStopFlushAbortsAPeerBelowLineRate18525`, a reader at ~200 KiB/s),
+  i.e. ~2,000 session frames. What the peer already received (~470 KB) is
+  kept by its own drain (next bullet). A longer bound would not save it: the
+  flush has to stay below the peer's 2s write deadline, which this stopping
+  node, no longer reading, could otherwise trip.
+- **A per-connection watchdog** (1s tick) notices the kernel's report that the
+  peer closed the connection — an RST (`TCP_CLOSE`) or a FIN
+  (`TCP_CLOSE_WAIT`) — while the receive loop is behind (unread bytes queued,
+  or a handler in flight). What is in the receive queue then is what the peer
+  sent before it closed: its newest session state, and possibly a failover
+  commit/abort, config-apply ACK or fence that no cold-prime bulk re-sends.
+  So:
+  - if the loop is still making progress, the connection is marked
+    `peerClosed` and the loop drains it to the kernel's `ECONNRESET` or EOF.
+    While it drains, writers skip it (`getActiveConn` picks the other fabric
+    or none), a writer's failed write does not tear it down (the reader owns
+    the teardown), the dial side may redial its slot, and its frames earn no
+    peer liveness;
+  - if the peer RESET it and the loop makes no progress — one handler call
+    running for `syncWriteDeadline`, the bound the peer's writer judges this
+    loop by — the connection is torn down at once, as before, so a stuck call
+    cannot hold the dial side's slot. A FIN never tears down: the peer closed
+    gracefully, and the mark already makes the slot redialable.
+
+  **The drain helps only a peer that does not come back before the drain
+  completes** (review of #18525 rounds 3-4): one stopped for good, or a crash
+  whose restart is slower than the drain. A crashed xpfd is restarted by
+  systemd after 1s (`Restart=on-failure`, `RestartSec=1`), and once its sync
+  listener is up it redials or accepts our dial, retiring the drain exactly
+  as a live peer does — and in the #18521 slow-install shape the drain is
+  ~0.5 MB at ~50 sessions/s, about 40s. A live peer — in the #18521 shape it
+  reset the connection because its own writer timed out against this slow
+  loop — redials within a second or two (or this node's dial loop does), long
+  before a slow loop gets through ~0.5 MB of backlog, and the redial retires
+  the drained connection; whatever was still queued, including a
+  `failover_abort` or config ACK, is discarded exactly as the first round's
+  teardown discarded it (`TestRedialEndsThePeerCloseDrain18525`). The
+  recovery then is, on a single fabric, the cold-prime bulk for sessions (the
+  retirement is a full disconnect); on a dual fabric the retirement is a
+  partial disconnect on both sides, so no bulk re-sends the discarded
+  deltas unless an outbound bulk is still unacked or a cold prime is owed —
+  the same loss as any partial fabric drop, and as the first round. Then the
+  hold binding's
+  fallback to the 2s rescue for a lost commit/abort (`pkg/cluster/README.md`,
+  "An in-flight peer-requested transfer owns the owner's hold"), and the
+  overdue-ACK re-push for a config ACK. Keeping the drain alive across the
+  redial would interleave the old connection's frames with the new one's,
+  reordering reqID-bound commits and aborts.
+
+  **The redial retires the drained connection through `handleDisconnect`**
+  (`retirePeerClosedSlot`, round 3), so it installs into an EMPTY slot. A
+  plain supersession of a current-incarnation connection is `installConn`'s
+  evidence of a new peer process — it advances the incarnation, runs the
+  #17097 retirement reset and evicts the same-process connection in the other
+  slot — and on a dual-fabric pair that evicted the healthy fabric-1
+  connection every writer had just moved to
+  (`TestRedialAfterPeerResetKeepsTheOtherFabric18525`; the lab clusters run
+  one fabric pair, so only that cell gates it). A real restart behind the
+  redial is still caught by its raised boot epoch and the #9818 identity
+  check. On a single fabric the retirement is a full disconnect immediately
+  followed by the redial's connect, so the peer connect/disconnect callbacks
+  now run in dispatch order (`dispatchPeerEvent`): as bare goroutines the
+  connect could run first and leave the daemon believing the peer was gone
+  (`TestRedialCallbacksRunInOrderThroughCallSites18525` drives that order
+  through `handleNewConnection` and `handleDisconnect`;
+  `TestBootIDAnnounceRunsInDispatchOrder18525` pins the third site, the
+  BulkStart switch's boot-id announce). The order is per `SessionSync`, while
+  the state those callbacks write (`syncPeerConnected`, the prime-retry
+  generation, the sync-ready timer) is daemon-wide, so the daemon drops a
+  callback from an instance that is no longer the published one
+  (`peerCallbackSuperseded`, round 4): on a comms restart the old instance's
+  disconnect could queue behind its own slow connect and land after the
+  successor's connect. A connect from an unpublished instance is dropped even
+  while nothing is published (mid-teardown it would mark the peer connected
+  and arm a sync-ready timer the teardown already stopped). A dropped
+  disconnect loses nothing: retiring the published instance
+  (`stopClusterComms`, `retirePredecessorSessionSync`) records the disconnect
+  itself (`noteSessionSyncRetired`), because `onSessionSyncPeerDisconnected`
+  is the only writer of `syncPeerConnected=false`. A successor therefore always
+  starts from "disconnected" and re-derives the state from its own callbacks
+  (review at 5af11e4593).
+
+  **Liveness, precisely.** Frames read after the watchdog's mark earn no peer
+  liveness, so a stopped primary's flushed backlog cannot hold the standby's
+  heartbeat-timeout decision open for the 5s suppression cap (it did for a FIN
+  until round 3). Frames read between the RST or FIN arriving and the next
+  watchdog tick still count — at most one `syncConnWatchInterval` (1s) of
+  extra recency. A standby that is caught up when the FIN/RST arrives reads
+  EOF at once, fully disconnects, and declares peer loss at the heartbeat
+  threshold, as before. One that is behind keeps sync installed while it
+  drains, so after the last counted frame the 2s recency window still runs:
+  detection is up to max(threshold, ~3s) plus a quarter interval (the
+  receiver's check cadence since #18639), about 3.0 s at defaults and 3.05 s in
+  the lab. That is beyond the threshold declaration a hard crash now gets
+  (#18570: a peer that acks sync-level heartbeats and does not answer the
+  liveness probe is declared about 0.5–0.525 s after its last heartbeat at
+  defaults, 1.0–1.05 s in the lab), and short of the 5s cap a FIN backlog had
+  before round 3. The probe does not shorten this case: backlog frames handled
+  after the probe answer it.
+- **Every teardown names itself.** `fabric N disconnected` carries `reason`,
+  `err` and a per-connection summary (`conn_age`, `frames_read`, `bytes_read`,
+  `handler_time`, `handler_max`, `handler_max_type`, `slow_calls`, and
+  `drained_after_peer_close` / `writes_deferred` after a drain); the receive
+  loop logs `receive loop exited` once per connection with its reason (Warn
+  when the loop itself detected the failure, Info when another path closed the
+  socket first). A handler that keeps the loop off the socket for 1s (half the
+  peer's write deadline) is reported with its message type while still blocked
+  (watchdog) and when it returns, each kind at most once per 10s per
+  connection; the next report carries `suppressed=N` and `suppressed_max` for
+  the calls in between, and `slow_calls` in the exit summary counts them all.
+  Nothing logs per message, including when every message is slow.
+
+Not changed, and the next things to look at if the diagnostics implicate them:
+the synchronous install path in the receive loop, and the 2s write deadline
+that turns backpressure from a slow-but-alive peer into a teardown.
 
 ### What cluster sync readiness does NOT do (#7102)
 
@@ -3212,6 +3657,17 @@ Current sequence (`prepareUserspaceRGDemotionWithTimeout()`):
      re-prime; every refused barrier re-kicks it. This cannot be left to the
      daemon, whose prime-retry loop restarts after a failed barrier only while
      the peer is still unprimed.
+   - At most ONE discharge-capable re-prime is outstanding (#18521). The
+     single-flight flag covers only WRITING the bulk, and the fence is
+     discharged by the BulkAck, which comes after the peer has installed the
+     whole table. A refused barrier therefore does not re-kick while a pending
+     bulk that captured the current epoch is younger than
+     `BulkAckPendingRetryAfter` (`fenceDischargeAwaited`). Before this, manual
+     failover admission (one barrier every 0.5s) started a new full bulk each
+     time the previous one finished writing; each new bulk replaced
+     `pendingBulkAckEpoch`, so the peer's ack for the earlier one was dropped
+     by the exact-match rule and the fence could never discharge, while every
+     extra bulk deepened the receiver's backlog.
    - Only the ack of a bulk that captured the current epoch BEFORE reading its
      session source discharges the fence. A snapshot read after the move holds
      every delta written before it, on either connection. `doBulkSync` captures

@@ -175,8 +175,15 @@ func TestReconfigureFailureIsolatedToItsOwnName16791(t *testing.T) {
 
 // TestReconfigureAbsentRowAppearingLaterIsReconfigured16791: skipping an
 // absent name must not blacklist it. When the link later appears (the unit
-// gets zoned and its VLAN child is created), the next Apply that runs the
-// tail reconfigures it like any other managed link.
+// gets zoned and its VLAN child is created), the next Apply that changes its
+// files reconfigures it like any other managed link.
+//
+// #18597 narrowed the tail to the interfaces whose files changed in that
+// call. Before, this test changed only wan0 and still expected all three
+// names, because every managed link was reconfigured on every changed Apply.
+// networkd itself configures a link that appears after its file was loaded,
+// so the appeared row is owed a reconfigure only when its own row changes —
+// and an unchanged neighbour (dmz0) is not touched at all.
 func TestReconfigureAbsentRowAppearingLaterIsReconfigured16791(t *testing.T) {
 	resetReloadDebtForTest(t)
 	rpFilterFixture(t)
@@ -204,19 +211,20 @@ func TestReconfigureAbsentRowAppearingLaterIsReconfigured16791(t *testing.T) {
 		}
 	}
 
-	// The link appears; a changed Apply (a new address on wan0) re-runs the
-	// tail, and now the previously-absent name is included.
+	// The link appears; an Apply that changes wan0 and the appeared row
+	// re-runs the tail, and now the previously-absent name is included. dmz0's
+	// files did not change, so it is not reconfigured (#18597).
 	present["ge-0-0-1.60"] = true
 	reconfigureArgs = nil
 	changed := absentRowIfaces16791()
 	changed[0].Addresses = []string{"10.0.0.11/24"}
+	changed[1].Addresses = []string{"10.0.60.11/24"}
 	if err := m.Apply(changed); err != nil {
 		t.Fatalf("Apply after the link appeared: %v", err)
 	}
 	want := [][]string{
 		{"reconfigure", "--", "wan0"},
 		{"reconfigure", "--", "ge-0-0-1.60"},
-		{"reconfigure", "--", "dmz0"},
 	}
 	if !slices.EqualFunc(reconfigureArgs, want, func(a, b []string) bool { return slices.Equal(a, b) }) {
 		t.Fatalf("reconfigure argv after link appeared = %v, want %v", reconfigureArgs, want)

@@ -227,6 +227,11 @@ scripts/ci-tooling-check-selftest.sh
 scripts/git-hooks/commit-msg
 scripts/git-hooks/install.sh
 test/incus/ha-smoke-iperf-lib.sh
+test/incus/rg-move-soak.sh
+test/incus/instructions-census-selftest.sh
+test/incus/mirror-census-selftest.sh
+scripts/next-deb-version.sh
+scripts/next-deb-version-selftest.sh
 "
 for s in $SH_SCRIPTS; do
 	[ -f "$s" ] || continue
@@ -477,6 +482,8 @@ run_bash test/incus/cluster-env-selftest.sh
 run_bash test/incus/cos-apply-lib-selftest.sh
 run_bash test/incus/host-inbound-selftest.sh
 run_bash test/incus/iperf-throughput-selftest.sh
+# docs/regression-test-matrix.md F2/F6: the perf-matrix stall verdict.
+run_bash test/incus/iperf-matrix.sh --selftest
 # #12199: RG1 movement must settle in both node views; real-output
 # secondary-hold, split-view, final-owner, and unchanged-owner controls are
 # covered with fixture-only mocks.
@@ -485,7 +492,8 @@ run_bash test/incus/stress-failover-selftest.sh
 run_bash test/incus/ha-assurance-selftest.sh
 # #11581: same-load failover client JSON-stream lifecycle; hermetic fixtures.
 run_bash test/incus/failover-client-selftest.sh
-# #11872: host-clock resync after crash reboot; mocked incus/date, no cluster.
+# #18614: NTP-convergence precondition after a crash reboot (the #11872
+# resync survives only as a recorded escape); mocked incus/date/sleep.
 run_bash test/incus/failover-clock-selftest.sh
 run_bash test/incus/screen-probe-selftest.sh
 run_bash test/incus/v6-na-recovery-12495-selftest.sh
@@ -540,6 +548,16 @@ run_bash test/incus/mouse-elephant-selftest.sh
 # NOT flip is an ESCAPE and fails -- a census with a broken matcher reports a
 # clean board, and nothing but a mutation can tell it from a healthy one.
 run_bash test/incus/harness-census-selftest.sh
+# #18645: the instruction and mirror censuses' own self-tests, same shape:
+# every verdict is a fixture AND a mutation of the census line tagged
+# `census-guard: <name>` that must flip it; a non-flipping mutation is an
+# ESCAPE. Hermetic (mktemp fixtures, a stub for gh, a fixed today). Needs bash.
+run_bash test/incus/instructions-census-selftest.sh
+run_bash test/incus/mirror-census-selftest.sh
+# #18645: the shared deb version allocator. Holds the lock open so concurrent
+# callers must overlap, and a flock-less mutant must hand out duplicates under
+# the same load. Private counter only; never the shared one. Needs bash+flock.
+run_bash scripts/next-deb-version-selftest.sh
 # #8302: the harness result ledger. Hermetic -- fixtures only, no cluster.
 #
 # harness-result-selftest.sh drives the whole adapter table, whose reason for
@@ -607,6 +625,25 @@ run_bash test/incus/selftest-census-selftest.sh
 # POSIX (the #8153 interpreter census checks this).
 hdr "harness reachability census"
 run_shell scripts/harness-census.sh
+
+# -- instruction + mirror censuses (#18645) --
+#
+# A temporary instruction carries an expiry marker. The instruction census
+# fails bad marker syntax everywhere, and a Review-by date before today (UTC)
+# only in files this checkout's change touches (merge-base with origin/master,
+# plus uncommitted and untracked files). The --online --all sweep (closed
+# issues, every expired date) needs gh and is the campaign keeper's job, not
+# this runner's. The mirror census fails when copies of one mirrored block
+# differ or one goes missing. Both exit 0/1, so run_py scores them directly
+# (they print no unittest summary, so its skip parsing never fires).
+hdr "instruction and mirror censuses"
+if command -v python3 >/dev/null 2>&1; then
+	run_py scripts/instructions-census.py
+	run_py scripts/mirror-census.py
+else
+	skipl "scripts/instructions-census.py (python3 not installed)"
+	skipl "scripts/mirror-census.py (python3 not installed)"
+fi
 
 # -- ignored-cell census (#8352) --
 #

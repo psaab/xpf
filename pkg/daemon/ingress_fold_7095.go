@@ -140,11 +140,15 @@ func buildIngressFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) fu
 	if cfg == nil {
 		return nil
 	}
-	nameByIndex := make(map[uint32]string, len(ifaces))
-	for _, ifc := range ifaces {
-		if ifc.Index > 0 {
-			nameByIndex[uint32(ifc.Index)] = ifc.Name
-		}
+	return ingressFoldFromNames(cfg, ingressFoldNameTable(ifaces))
+}
+
+// ingressFoldFromNames is the fold closure over one ifindex->name table. The
+// #18374 ownership digest hashes that same table (ingressFoldDigest), so this
+// closure must capture nothing else but cfg.
+func ingressFoldFromNames(cfg *config.Config, nameByIndex map[uint32]string) func(ifindex uint32, vlan uint16) uint32 {
+	if cfg == nil {
+		return nil
 	}
 	// Pre-fold the names this config can produce so the send path does no
 	// hashing per session — a bulk sync walks the whole table.
@@ -160,7 +164,7 @@ func buildIngressFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) fu
 	}
 }
 
-// buildNatScopeFoldFn folds a #15176 NAT-scope ifindex the way the
+// buildNatScopeFoldFnWithIfaces folds a #15176 NAT-scope ifindex the way the
 // ingress fold folds a packet identity: as (parent physical, VLAN)
 // (#16826). NatScopeIfindex names the LOGICAL unit — a kernel VLAN child
 // (`ge-0-0-2.80`), or, for a bondless RETH unit with no child netdev, the
@@ -179,18 +183,8 @@ func buildIngressFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) fu
 // derivation names folds to 0 — the unknown sentinel — so the peer keeps
 // the #15176 no-scope keep rather than judging against a guessed parent
 // scope. Captured once per apply (and rebuilt on the link refresh),
-// matching buildIngressFoldFn's snapshot discipline.
-func buildNatScopeFoldFn(cfg *config.Config) func(ifindex int32) uint32 {
-	if cfg == nil {
-		return nil
-	}
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return nil
-	}
-	return buildNatScopeFoldFnWithIfaces(cfg, ifaces)
-}
-
+// matching buildIngressFoldFn's snapshot discipline; since #18374 both are
+// built from the SAME interface table read (zoneOwnershipFromIfaces).
 func buildNatScopeFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) func(ifindex int32) uint32 {
 	if cfg == nil {
 		return nil
@@ -291,7 +285,7 @@ func buildNatScopeFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) f
 
 // snapshotHasRethVlanUnit reports whether the config declares a tagged
 // RETH unit — the only shape whose logical unit can differ from its
-// parent. buildNatScopeFoldFn engages (returns non-nil) only then, so a
+// parent. buildNatScopeFoldFnWithIfaces engages (returns non-nil) only then, so a
 // config with no such unit keeps the legacy vlan-0 fold bit-identically
 // instead of newly resolving (or dropping) scopes it folded before.
 func snapshotHasRethVlanUnit(cfg *config.Config) bool {

@@ -231,6 +231,30 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
         install_table_domain: 0,
         install_table_check: 0,
     };
+    // #18531 (third failback teardown): built from a forward-wire ALIAS, the
+    // reply target above is the SNAT address itself (the alias key's source),
+    // so on the node owning the egress RG it resolved to LocalDelivery. The
+    // reply belongs to the peer holding the canonical row.
+    // Keyed on the forward row's own wire reverse key, so only an alias
+    // forward matches: its reply target is the SNAT address, never a real
+    // client, so no target answer is kept.
+    let decision = if reverse_un_nat_targets_itself(
+        &reverse_session_key(&forward_match.key, forward_match.decision.nat),
+        decision.nat,
+        &metadata,
+    ) {
+        SessionDecision {
+            resolution: alias_reverse_return_resolution(
+                forwarding,
+                &metadata,
+                metadata.fabric_ingress,
+                decision.resolution,
+            ),
+            ..decision
+        }
+    } else {
+        decision
+    };
     SessionLookup {
         aux: SessionLookupAux {
             source_nat_static: forward_match.aux.source_nat_static,

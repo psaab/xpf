@@ -823,9 +823,115 @@ func (d *Daemon) configSyncReconcileLoop(ctx context.Context) {
 			t.Stop()
 			return
 		case <-t.C:
-			d.reconcileConfigSyncToPeer("reconcile-loop")
+			d.configSyncReconcileTick()
 		}
 	}
+}
+
+// configSyncReconcileTick is one reconcile-loop wake. An ACK-capable peer
+// that has not acknowledged the newest send for configAckOverdueAfter gets a
+// re-push (#18521); otherwise the ordinary level-triggered reconcile runs.
+func (d *Daemon) configSyncReconcileTick() {
+	if d.repushIfConfigAckOverdue("reconcile-loop") {
+		return
+	}
+	d.reconcileConfigSyncToPeer("reconcile-loop")
+}
+
+// configAckOverdueAfter is how long an ACK-capable peer may leave the newest
+// config send unacknowledged before the authority re-pushes it (#18521). A
+// standby holding the config answers a duplicate push in milliseconds; the
+// bound is generous so a deferred publication still in flight is not crowded,
+// and it is also the minimum spacing between re-pushes.
+const configAckOverdueAfter = 10 * time.Second
+
+// repushIfConfigAckOverdue re-sends the last pushed config when the peer has
+// not positively acknowledged it (#18521). Before this, the stale-config gate
+// could only be satisfied by that one ACK, and nothing re-pushed an in-sync
+// config except a NACK, a reconnect or a new commit — so an ACK that was never
+// credited (skipped on the standby because its delivering connection was
+// replaced, lost with a torn-down connection, or discarded by a reboot reset)
+// refused every failover onto an in-sync standby until the next commit.
+//
+// The re-send carries the SAME text at the SAME wire generation. That is what
+// the standby's duplicate path exists for: a payload whose generation equals
+// its applied high-water is not applied again, it is re-ACKed (configApplyLoop);
+// one not yet applied is applied once and ACKed. A NEW generation (the first
+// cut of this fix) made the standby apply again and moved its config-epoch
+// barrier on every re-push, and the epoch guard then refuses synced session
+// installs stamped with the older epoch — churn that can leave the standby
+// without sessions at a crash takeover. If the config moved on since the push,
+// or the push was not recorded, nothing is re-sent here: the ordinary
+// reconcile owns a changed config.
+//
+// Bounded: only for a connected ACK-capable peer, only once the send is
+// configAckOverdueAfter old, at most once per configAckOverdueAfter, and only
+// as RG0 authority. Reports whether it re-sent.
+func (d *Daemon) repushIfConfigAckOverdue(trigger string) bool {
+	ss := d.getSessionSync()
+	if ss == nil {
+		return false
+	}
+	gen, age, overdue := ss.PeerConfigAckOverdue(configAckOverdueAfter)
+	if !overdue {
+		return false
+	}
+	if !rg0ConfigSyncAuthority(d.cluster) {
+		return false
+	}
+	now := cluster.MonotonicNanos()
+	last := d.configAckRepushAtMono.Load()
+	if last != 0 && time.Duration(now-last) < configAckOverdueAfter {
+		return false
+	}
+	if !d.configAckRepushAtMono.CompareAndSwap(last, now) {
+		return false
+	}
+	resent := d.resendPushedConfig(ss, gen)
+	if resent {
+		slog.Warn("cluster: peer has not acknowledged applying the newest config generation; re-sent it unchanged so it can ACK (#18521)",
+			"gen", gen, "unacked_for", age.Round(time.Second).String(), "trigger", trigger)
+		return true
+	}
+	// Review of #18525 round 2: this line used to say "re-sending" here too.
+	// Nothing was sent: the recorded push no longer matches the owed
+	// generation, the connection or the active config, and the ordinary
+	// reconcile owns a changed config.
+	slog.Info("cluster: peer has not acknowledged applying the newest config generation, but the recorded push no longer matches it; not re-sent (#18521)",
+		"gen", gen, "unacked_for", age.Round(time.Second).String(), "trigger", trigger)
+	return false
+}
+
+// resendPushedConfig re-queues the last pushed config text at its own wire
+// generation, when that is still the generation the peer owes an ACK for, the
+// push belongs to the current peer connection, and the active config has not
+// moved on. Reports whether it queued.
+func (d *Daemon) resendPushedConfig(ss *cluster.SessionSync, debtGen uint64) bool {
+	d.configSyncMu.Lock()
+	text, wireGen, epoch := d.configSyncPushedDigest, d.configSyncPushedWireGen, d.configSyncPushedEpoch
+	d.configSyncMu.Unlock()
+	if text == "" || wireGen == 0 || wireGen != debtGen ||
+		epoch != d.syncPeerConnEpoch.Load() || !d.syncPeerConnected.Load() {
+		return false
+	}
+	cfg, activeText, ancestry := d.activeConfigSnapshotForPeer()
+	if cfg == nil || activeText != text {
+		return false
+	}
+	if d.configResendForTest != nil {
+		d.configResendForTest(text, wireGen)
+		return true
+	}
+	auth, err := d.peerSnapshotProtocolAuthorizationForConfig(cfg)
+	if err != nil {
+		return false
+	}
+	if auth != nil {
+		return ss.QueueConfigWithPeerSnapshotProtocolAtGeneration(
+			text, ancestry, wireGen, auth.state, auth.minProtocol, auth.peerConnEpoch,
+			func() uint64 { return d.syncPeerConnEpoch.Load() })
+	}
+	return ss.QueueConfigWithAncestryAtGeneration(text, ancestry, wireGen)
 }
 
 // errConfigSyncRejectedPrimary is returned by handleConfigSync when this node
@@ -834,7 +940,71 @@ func (d *Daemon) configSyncReconcileLoop(ctx context.Context) {
 // applied, so the caller (configApplyLoop) must NOT advance the config
 // high-water mark — the transient dual-active window must heal via the peer's
 // re-push once this node settles into secondary (M-2/#4151).
-var errConfigSyncRejectedPrimary = errors.New("config sync rejected: this node is RG0 primary")
+//
+// #18610: it IS cluster.ErrConfigSyncRejectedAuthority, so configApplyLoop can
+// tell this refusal from a failed apply: it does not arm CF, it counts
+// ConfigsRejectedAsAuthority rather than ConfigsApplyFailed, and the refused
+// generation does not make this node read config-stale while it stays the
+// authority. If this node stays primary, no re-push follows and none is needed.
+var errConfigSyncRejectedPrimary = cluster.ErrConfigSyncRejectedAuthority
+
+// logConfigSyncRefusedAsAuthority is the one Warn for a peer push refused
+// because this node is the RG0 config authority (#18610). The peer pushes only
+// while it believes itself primary, so a refusal means both nodes claimed RG0
+// at once. When the refused text differs from this node's active config, the
+// peer's version is discarded here, including any commit made on the peer in
+// that window; the operator has to re-apply it on the primary, or demote this
+// node so the peer's push applies.
+func (d *Daemon) logConfigSyncRefusedAsAuthority(configText string) {
+	var gen uint64
+	if ss := d.getSessionSync(); ss != nil {
+		gen = ss.ApplyingConfigGen()
+	}
+	differs := false
+	if d.store != nil {
+		differs = strings.TrimSpace(d.store.ShowActive()) != strings.TrimSpace(configText)
+	}
+	if differs {
+		slog.Warn("cluster: rejecting config sync (this node is RG0 primary); the peer's config differs from the active config and is discarded here — re-apply any change committed on the peer, or demote this node so its push applies",
+			"gen", gen, "size", len(configText), "differs_from_active", true)
+		return
+	}
+	slog.Warn("cluster: rejecting config sync (this node is RG0 primary)",
+		"gen", gen, "size", len(configText), "differs_from_active", false)
+}
+
+// repushAfterAuthorityRefusal re-pushes this node's config to a peer whose
+// push it just refused as RG0 authority (#18610 review T2). The peer pushed
+// because it believed itself primary. This node's own push to it is
+// deduplicated per (connection epoch x generation), and the overdue re-push
+// fires only for an unacknowledged send, so on a connection where the peer had
+// already ACKed this node's config nothing would ever send it again. The peer
+// would keep any commit it made during the split, stay divergent, and keep its
+// own #9569 send debt (it never receives an ACK, and never applies a pushed
+// config that would supersede it), so its gate keeps refusing the handovers it
+// starts. Clearing the marker lets the ordinary reconcile push the active
+// config under a NEW wire generation, which the peer applies (or takes the
+// "already matches" path for), ACKs, and supersedes its debt with; a discarded
+// unshared commit on the peer is then reported there (#9530).
+//
+// Paced like the overdue re-push: at most once per configAckOverdueAfter. A
+// peer still in its dual-active view refuses the re-push and nacks it, and
+// #7328 then retries at the reconcile cadence, so repeated refusals cannot
+// turn into a push loop. Async: this runs inside the config apply callback.
+// Reports whether it scheduled a re-push.
+func (d *Daemon) repushAfterAuthorityRefusal() bool {
+	now := cluster.MonotonicNanos()
+	last := d.configAuthorityRepushAtMono.Load()
+	if last != 0 && time.Duration(now-last) < configAckOverdueAfter {
+		return false
+	}
+	if !d.configAuthorityRepushAtMono.CompareAndSwap(last, now) {
+		return false
+	}
+	d.invalidateConfigSyncPushed()
+	go d.reconcileConfigSyncToPeer("peer config refused as RG0 authority")
+	return true
+}
 
 // handleConfigSync keeps the legacy callback shape for tests and old peers.
 func (d *Daemon) handleConfigSync(configText string) error {
@@ -846,7 +1016,8 @@ func (d *Daemon) handleConfigSyncWithAncestry(
 	ancestry []configstore.RenameDescriptor,
 ) error {
 	if d.cluster != nil && d.cluster.IsLocalPrimary(0) {
-		slog.Warn("cluster: rejecting config sync (this node is RG0 primary)")
+		d.logConfigSyncRefusedAsAuthority(configText)
+		d.repushAfterAuthorityRefusal()
 		return errConfigSyncRejectedPrimary
 	}
 	if d.store != nil {
@@ -2026,11 +2197,28 @@ func (d *Daemon) stopClusterComms() {
 	if ss != nil {
 		d.stopSyncReadyTimer()
 		ss.Stop()
+		d.noteSessionSyncRetired()
 	}
 	if d.cluster != nil && ss != nil {
 		d.cluster.ClearPeerSyncSourceIfCurrent(ss)
 	}
 	d.clusterCommsLifecycleMu.Unlock()
+}
+
+// noteSessionSyncRetired records the peer as disconnected when the published
+// SessionSync is retired (#18521, review at 5af11e4593). The instance's own
+// OnPeerDisconnected may arrive late — queued behind its own slow connect — and
+// is dropped once a successor is published (peerCallbackSuperseded), and
+// onSessionSyncPeerDisconnected is the only writer of syncPeerConnected=false.
+// Recording it here, at the moment the instance stops being the daemon's sync
+// object, means a successor always starts from "disconnected" whatever the
+// old instance's callbacks do, and re-derives the state from its own. Runs
+// with nothing published, so the disconnect bookkeeping sees no instance (as
+// the old callback would have during a teardown).
+func (d *Daemon) noteSessionSyncRetired() {
+	if d.syncPeerConnected.Load() {
+		d.onSessionSyncPeerDisconnected()
+	}
 }
 
 // retirePredecessorSessionSync detaches and stops a captured session without
@@ -2051,6 +2239,9 @@ func (d *Daemon) retirePredecessorSessionSync(ss *cluster.SessionSync) {
 		d.stopSyncReadyTimer()
 	}
 	ss.Stop()
+	if removed {
+		d.noteSessionSyncRetired()
+	}
 	if d.cluster != nil {
 		d.cluster.ClearPeerSyncSourceIfCurrent(ss)
 	}

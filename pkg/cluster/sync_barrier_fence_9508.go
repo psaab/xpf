@@ -91,14 +91,36 @@ func (s *SessionSync) onStreamMoved(scheduleReprime bool) {
 // and a primed peer is the normal case, so without this the fence would refuse
 // every later demotion.
 func (s *SessionSync) scheduleBarrierFenceReprime(reason string) {
-	if !s.barrierFenced() || !s.fence.reprimeInFlight.CompareAndSwap(false, true) {
+	if !s.barrierFenced() {
+		return
+	}
+	// #18521 (C): at most ONE discharge-capable re-prime outstanding. The
+	// in-flight flag below only covers WRITING the bulk; the fence is
+	// discharged by the peer's BulkAck, which arrives after the peer has
+	// INSTALLED the whole table — seconds later at helper-install speed. A
+	// manual-failover admission retries its barrier every 0.5s, so each
+	// refusal used to start a fresh full bulk the moment the previous one
+	// finished writing. Every new bulk overwrote pendingBulkAckEpoch, so the
+	// ack the peer eventually sent was for an epoch no longer pending and was
+	// dropped (#9177 V053's exact-match rule): the fence could never
+	// discharge, and each bulk added a full table to a receiver that was
+	// already behind (the backlog that ends in the half-open teardown above).
+	// A pending bulk that captured the CURRENT epoch will discharge it when
+	// acked; until BulkAckPendingRetryAfter says that ack is lost, wait for it.
+	if s.fenceDischargeAwaited() {
+		slog.Debug("cluster sync: barrier fence re-prime already awaiting the peer's ack",
+			"reason", reason, "fence_epoch", s.fence.epoch.Load(),
+			"pending_epoch", s.pendingBulkAckEpoch.Load())
+		return
+	}
+	if !s.fence.reprimeInFlight.CompareAndSwap(false, true) {
 		return
 	}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		defer s.fence.reprimeInFlight.Store(false)
-		if !s.barrierFenced() || !s.stats.Connected.Load() {
+		if !s.barrierFenced() || !s.stats.Connected.Load() || s.fenceDischargeAwaited() {
 			return
 		}
 		slog.Info("cluster sync: re-priming the peer to discharge the barrier fence",
@@ -107,6 +129,21 @@ func (s *SessionSync) scheduleBarrierFenceReprime(reason string) {
 			slog.Warn("cluster sync: barrier-fence re-prime failed; the next refused barrier retries it", "err", err)
 		}
 	}()
+}
+
+// fenceDischargeAwaited reports whether an outbound bulk that can discharge the
+// CURRENT fence epoch is still awaiting its BulkAck inside
+// BulkAckPendingRetryAfter (#18521). The capture is loaded before the pending
+// epoch, mirroring handleBulkAck's order (see barrierFence.pendingBulk), so a
+// newer bulk stored in between can only make this report a bulk pending, never
+// pair an old capture with a cleared epoch.
+func (s *SessionSync) fenceDischargeAwaited() bool {
+	capture := s.fence.pendingBulk.Load()
+	if capture == 0 || capture-1 < s.fence.epoch.Load() {
+		return false
+	}
+	_, age, ok := s.PendingBulkAck()
+	return ok && age < BulkAckPendingRetryAfter
 }
 
 // captureBarrierFenceForBulk notes the connection a bulk is about to use and

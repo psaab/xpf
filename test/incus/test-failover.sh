@@ -95,11 +95,19 @@ MAX_FAILOVER_SESSION_MISS_DELTA="${MAX_FAILOVER_SESSION_MISS_DELTA:-64}"
 MAX_FAILOVER_NEIGHBOR_MISS_DELTA="${MAX_FAILOVER_NEIGHBOR_MISS_DELTA:-60}"
 MAX_FAILOVER_ROUTE_MISS_DELTA="${MAX_FAILOVER_ROUTE_MISS_DELTA:-32}"
 MAX_FAILOVER_POLICY_DENIED_DELTA="${MAX_FAILOVER_POLICY_DENIED_DELTA:-0}"
-MAX_ZERO_INTERVALS="${MAX_ZERO_INTERVALS:-2}"
+# #18617 review: the whole-run zero-interval count (aggregate + every stream,
+# no window excluded) is RECORDED and judged master-relative, not gated: the
+# crash alone, whose detection and activation are by design (in the lab about
+# 0.8-1.05 s from the crash when the #18570 probe goes unanswered, about 1.2 s
+# more without ack support, then 0.34-0.44 s to activate), puts every stream at
+# zero for 1-3 intervals, so a fixed limit of 2 was red on every crash run.
+# Set MAX_ZERO_INTERVALS to gate it absolutely anyway.
+MAX_ZERO_INTERVALS="${MAX_ZERO_INTERVALS:-}"
 MAX_STREAM_ZERO_INTERVALS="${MAX_STREAM_ZERO_INTERVALS:-0}"
-# #12618: whole-run per-stream budget applies only outside each
-# [T, T+3] transition window (full intervals only); see producer
-# --event-sec/--event-window-sec and the outside-events counters.
+# #12618: the whole-run per-stream budget applies only outside the transition
+# windows (full intervals only); see the producer's --event-sec (the crash:
+# EXCUSED) and --planned-move (the harness's own moves: scored PASS/COST/FAIL,
+# #18617) and the outside-events counters.
 MAX_PREFLIGHT_ZERO_INTERVALS="${MAX_PREFLIGHT_ZERO_INTERVALS:-0}"
 MAX_PREFLIGHT_STREAM_ZERO_INTERVALS="${MAX_PREFLIGHT_STREAM_ZERO_INTERVALS:-0}"
 MAX_RETRANSMITS="${MAX_RETRANSMITS:-}"
@@ -110,7 +118,12 @@ TRANSITION_PATH_TRIGGER_PKTS="${TRANSITION_PATH_TRIGGER_PKTS:-1000}"
 MIN_TRANSITION_FABRIC_RX_DELTA="${MIN_TRANSITION_FABRIC_RX_DELTA:-32}"
 MIN_TRANSITION_WAN_TX_DELTA="${MIN_TRANSITION_WAN_TX_DELTA:-32}"
 MIN_THROUGHPUT=1.0      # Gbps — iperf3 must report at least this
-IPERF_DURATION_MIN=$(( 8 + SYNC_WAIT + SESSION_SYNC_IDLE_TIMEOUT + PRE_FAILOVER_OBSERVE + 3 + REBOOT_WAIT + 20 + SESSION_SYNC_IDLE_TIMEOUT + 3 * MANUAL_FAILOVER_DEADLINE + 10 + V6_RECHECK_DELAY + 2 * V6_PROBE_COUNT + 5 * 2 * EXTERNAL_PING_COUNT + 4 * (3 * 1 + 3) + 15 ))
+# #18614: CLOCK_FLOOR_OVERSHOOT is the most the clock precondition's 40 s
+# floor can run past the REBOOT_WAIT + 20 s settle it otherwise shares (after
+# a comeback slower than 40 s; measured 19-22 s), so the stream still outlives
+# every bounded window.
+CLOCK_FLOOR_OVERSHOOT=20
+IPERF_DURATION_MIN=$(( 8 + SYNC_WAIT + SESSION_SYNC_IDLE_TIMEOUT + PRE_FAILOVER_OBSERVE + 3 + REBOOT_WAIT + 20 + CLOCK_FLOOR_OVERSHOOT + SESSION_SYNC_IDLE_TIMEOUT + 3 * MANUAL_FAILOVER_DEADLINE + 10 + V6_RECHECK_DELAY + 2 * V6_PROBE_COUNT + 5 * 2 * EXTERNAL_PING_COUNT + 4 * (3 * 1 + 3) + 15 ))
 # #7673: the CoS output filter classifies by DESTINATION PORT, and iperf3
 # defaults to 5201 -- which cos-iperf-config.set maps to `iperf-100m`, a
 # `transmit-rate 100m exact` class. Measuring a deliberately-100Mbit-shaped
@@ -129,12 +142,16 @@ IPERF_DURATION_MIN=$(( 8 + SYNC_WAIT + SESSION_SYNC_IDLE_TIMEOUT + PRE_FAILOVER_
 IPERF_PORT="${IPERF_PORT:-5211}"
 
 PASS=0
+COST=0
 FAIL=0
 VOID=0
 ERRORS=()
 
 info()  { echo "==> $*"; }
 pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
+# #18617: a correct planned move whose transition cost exceeded H10's budget
+# (H11's COST): counted as passed, recorded as cells_cost, judged master-relative.
+cost()  { echo "  COST  $*"; PASS=$((PASS + 1)); COST=$((COST + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 
 die() { echo "FATAL: $*" >&2; exit 2; }
@@ -313,16 +330,30 @@ ha_sync_idle_timeout_verdict() {
 	return 1
 }
 
+# #18632: idle = N samples at an unchanged floor, the latest of them
+# included, with no create outstanding beyond that floor and nothing
+# pending at those reads (see ha_session_sync_idle_sample). N is
+# SESSION_SYNC_IDLE_STABLE_SAMPLES; the limit is SESSION_SYNC_IDLE_TIMEOUT
+# attempts.
 ha_wait_for_session_sync_idle() {
 	local label="$1" source_id="$2" source_node="$3" target_id="$4" target_node="$5"
-	local attempt stable=0 source_path target_path rc
-	local baseline_sent="" baseline_received="" baseline_next_sent baseline_next_received
+	local attempt stable=0 source_path target_path rc wait_started="$SECONDS"
+	local baseline_sent="" baseline_received="" baseline_dropped=""
+	local baseline_next_sent baseline_next_received baseline_next_dropped
 	for ((attempt = 1; attempt <= SESSION_SYNC_IDLE_TIMEOUT; attempt++)); do
-		if ! source_path="$(ha_capture_sync_stats "${label}-${attempt}" "$source_id" "$source_node")"; then
+		# #18632: TARGET first, then source. A create the target counted
+		# as received is counted as sent right after its enqueue, so this
+		# later source read includes it and sent - received reads high,
+		# not low (only a source stall between the enqueue and the count
+		# longer than the gap between the reads could read it low, which
+		# FAILs the wait, never PASSes it). Source-first let a create
+		# landing between the two reads set a baseline one below the
+		# floor for the whole wait.
+		if ! target_path="$(ha_capture_sync_stats "${label}-${attempt}" "$target_id" "$target_node")"; then
 			void "${label}: session sync CLI capture unavailable (${source_id}->${target_id})"
 			return 2
 		fi
-		if ! target_path="$(ha_capture_sync_stats "${label}-${attempt}" "$target_id" "$target_node")"; then
+		if ! source_path="$(ha_capture_sync_stats "${label}-${attempt}" "$source_id" "$source_node")"; then
 			void "${label}: session sync CLI capture unavailable (${source_id}->${target_id})"
 			return 2
 		fi
@@ -330,50 +361,74 @@ ha_wait_for_session_sync_idle() {
 		# Capture the baseline values up front; a parse failure is VOID
 		# exactly as before (the helper returns 2 on blind evidence).
 		if ! baseline_next_sent="$(ha_sync_stats_value "$source_path" "Session create" sent)" ||
-			! baseline_next_received="$(ha_sync_stats_value "$target_path" "Session create" received)"; then
+			! baseline_next_received="$(ha_sync_stats_value "$target_path" "Session create" received)" ||
+			! baseline_next_dropped="$(ha_status_summary_value "$source_path" "Session delta dropped")"; then
 			void "${label}: session sync statistics malformed (${source_id}->${target_id})"
 			return 2
 		fi
-		if ha_session_sync_idle_sample "$source_id" "$target_id" "$source_path" "$target_path" "$baseline_sent" "$baseline_received"; then
+		if ha_session_sync_idle_sample "$source_id" "$target_id" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" "$baseline_dropped"; then
 			stable=$((stable + 1))
 			if (( stable >= SESSION_SYNC_IDLE_STABLE_SAMPLES )); then
-				pass "${label}: session sync idle (${source_id}->${target_id}, ${stable} consecutive samples)"
+				pass "${label}: session sync idle (${source_id}->${target_id}, ${stable} samples at the floor)"
 				return 0
 			fi
 		else
 			rc=$?
 			case "$rc" in
 			1)
-				stable=0
-				# Ordinary not-idle. Establish the baseline only when
-				# none exists yet (first sample); otherwise keep it —
-				# an outstanding unreceived delta must persist until
-				# received, never be absorbed into a new baseline.
+				# Ordinary not-idle: above the floor, or something
+				# pending. It neither counts nor resets the count
+				# (#18632: under a steady mirror sweep a create lands
+				# between the reads every few samples, so requiring
+				# CONSECUTIVE floor samples false-FAILed on loss). Each
+				# counted sample is still an exact reading at the
+				# floor. Establish the baseline only when none exists
+				# yet (first sample); otherwise keep it — an
+				# outstanding unreceived delta, or a source drop, must
+				# persist, never be absorbed into a new baseline.
 				if [[ -z "$baseline_sent" ]]; then
 					baseline_sent="$baseline_next_sent"
 					baseline_received="$baseline_next_received"
+					baseline_dropped="$baseline_next_dropped"
 				fi
 				;;
-			3)
-				# #16289: counter rewind (daemon restart / epoch
-				# reset) is the ONLY re-baseline trigger.
+			4)
+				# #18632: new floor. Moving the baseline DOWN shrinks
+				# what it can absorb (creates in flight at it) and never
+				# grows it; a create lost after the wait has seen the
+				# true floor is never absorbed. The streak restarts: a
+				# backlog still draining never reads idle.
 				stable=0
 				baseline_sent="$baseline_next_sent"
 				baseline_received="$baseline_next_received"
+				baseline_dropped="$baseline_next_dropped"
+				;;
+			3)
+				# #16289: counter rewind (daemon or helper restart).
+				# With a new floor (4) these are the ONLY re-baseline
+				# triggers.
+				stable=0
+				baseline_sent="$baseline_next_sent"
+				baseline_received="$baseline_next_received"
+				baseline_dropped="$baseline_next_dropped"
 				;;
 			2)
 				void "${label}: session sync statistics malformed (${source_id}->${target_id})"
 				return 2
 				;;
 			*)
-				void "${label}: session sync statistics malformed (${source_id}->${target_id})"
+				# An unknown verdict is VOID, as in the userspace
+				# validator (#18632).
+				void "${label}: session sync sample verdict ${rc} unknown (${source_id}->${target_id})"
 				return 2
 				;;
 			esac
 		fi
 		sleep 1
 	done
-	fail "${label}: session sync did not become idle within ${SESSION_SYNC_IDLE_TIMEOUT}s (${source_id}->${target_id})"
+	# #18632: the limit is attempts (each two CLI captures and a 1 s
+	# sleep), not seconds; report both.
+	fail "${label}: session sync did not become idle within ${SESSION_SYNC_IDLE_TIMEOUT} attempts ($((SECONDS - wait_started))s; ${stable} of ${SESSION_SYNC_IDLE_STABLE_SAMPLES} samples at the floor) (${source_id}->${target_id})"
 	return 1
 }
 
@@ -448,7 +503,7 @@ ha_external_ping_capture() {
 }
 
 ha_external_sweep() {
-	local label="$1" v4_rc v4_output v6_rc v6_output
+	local label="$1" v4_rc v4_output v6_rc v6_output v4_status
 	if ! main_iperf_running; then
 		void "${label}: external reachability window lacked the main iperf load (IPv4)"
 		void "${label}: external reachability window lacked the main iperf load (IPv6)"
@@ -470,8 +525,23 @@ ha_external_sweep() {
 		void "${label}: external reachability window lost the main iperf load (IPv6)"
 		return
 	fi
+	# #18558: only a FAILING IPv4 sweep pays for the claim probe (about 3 s,
+	# after both pings so it never delays them), and only a foreign claimant
+	# converts that FAIL to VOID; see ha_external_ping_claim_verdict.
+	HA_WAN_CLAIM_STATUS=""
+	HA_WAN_CLAIM_REASON=""
+	if ha_external_ping_verdict "$v4_rc" "$v4_output" >/dev/null 2>&1; then
+		v4_status=0
+	else
+		v4_status=$?
+	fi
+	if (( v4_status == 1 )); then
+		ha_wan_claim_check "${CLUSTER_CONF:-}" "$WAN_VIP4" "$WAN_GW4" "$FW0" "$FW1"
+		info "#18558 WAN address claim check (${WAN_VIP4}): status ${HA_WAN_CLAIM_STATUS}${HA_WAN_CLAIM_REASON:+: ${HA_WAN_CLAIM_REASON}}"
+	fi
 	ha_emit_verdict "${label}: external IPv4 ${EXTERNAL_V4_TARGET}" \
-		ha_external_ping_verdict "$v4_rc" "$v4_output"
+		ha_external_ping_claim_verdict "$v4_rc" "$v4_output" \
+		"$HA_WAN_CLAIM_STATUS" "$HA_WAN_CLAIM_REASON"
 	ha_emit_verdict "${label}: external IPv6 ${EXTERNAL_V6_TARGET}" \
 		ha_external_ping_verdict "$v6_rc" "$v6_output"
 }
@@ -927,6 +997,13 @@ ha_run_rg1_failback_slice() {
 			failure_reason="${failure_reason:+${failure_reason}; }phase-pre RG1 owner was not proven as fw1/node1"
 		fi
 	fi
+	# The RG1 move is a planned move of its own: it starts the split (RG1 on
+	# node0, RG0/RG2 on node1) that the RG0/RG2 failback ends 20+ s later.
+	# Sessions are on both nodes, so any stall at it is a transition cost: the
+	# move is scored PASS/COST/FAIL (#18617), anchored at the request AND at
+	# the observed landing, because T is integer SECONDS since the iperf
+	# launch (up to ~1 s off iperf's clock) and a landing takes 1.3-3 s.
+	local rg1_request_at=$((SECONDS - iperf_start_seconds))
 	if request_output=$(incus exec "$FW1" -- cli -c \
 		'request chassis cluster failover redundancy-group 1' 2>&1); then
 		request_rc=0
@@ -936,6 +1013,9 @@ ha_run_rg1_failback_slice() {
 	info "RG1 failover request returned status ${request_rc}; request text is not ownership proof${request_output:+: ${request_output}}"
 	if ha_wait_rg1_owner node0 "$MANUAL_FAILOVER_DEADLINE"; then
 		owner_moved=true
+		rg1_move_at_seconds=$rg1_request_at
+		rg1_move_landed_at_seconds=$((SECONDS - iperf_start_seconds))
+		info "Recorded planned RG1 move at ${rg1_move_at_seconds}s (request) and ${rg1_move_landed_at_seconds}s (landed) after iperf start (split begins)"
 	else
 		local owner_rc=$?
 		if (( owner_rc == 1 )); then
@@ -1289,6 +1369,10 @@ check_v6_transit "at baseline (before any failover)"
 # cell in pkg/configstore can pin this exact extraction.
 POOL_NAT_SMOKE="${POOL_NAT_SMOKE:-1}"
 POOL_PORT="${POOL_PORT:-5210}"
+# The post-failback probe needs its own port: Phase 1b keeps a pool-mode
+# client on POOL_PORT for the whole run, and an iperf3 server serves one test
+# per port, so a probe on POOL_PORT is answered "server is busy" (#18567).
+POOL_POST_PORT="${POOL_POST_PORT:-5209}"
 POOL_CONF_SRC=""
 POOL_CONF_ADDR=""
 POOL_CONF_COVER=""
@@ -1390,6 +1474,12 @@ fi
 # Stop a previously tracked main client from an interrupted prior run.
 failover_stop_main_iperf /tmp/iperf3-failover.pid "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 sleep 1
+
+# #18614: one clock reading BEFORE the first crash. If chrony is not
+# synchronised here, there is no time source for a crash-rebooted node to
+# converge to, and the clock cell after the crash is VOID (lab/NTP), not FAIL.
+# Taken before iperf3 starts, so it adds nothing to the timed window.
+failover_clock_baseline "$FW0" "$FW1"
 
 # ── Phase 1: Start iperf3 ───────────────────────────────────────────
 
@@ -1622,6 +1712,7 @@ info "Waiting for fw0 to reboot and rejoin as secondary (max ${REBOOT_WAIT}s)"
 # under-reported by ~23%. Measured comebacks on the loss userspace
 # cluster: ~22s clean (sysrq), so 60s wall keeps ~2.7x headroom.
 fw0_back=false
+fw0_active_at=""
 wait_start=$SECONDS
 crash_post_external_done=false
 while (( SECONDS - wait_start < REBOOT_WAIT )); do
@@ -1632,6 +1723,7 @@ while (( SECONDS - wait_start < REBOOT_WAIT )); do
 	fi
 	if wait_for_instance "$FW0" 1; then
 		fw0_back=true
+		fw0_active_at=$SECONDS
 		info "fw0 xpfd active after $((SECONDS - wait_start))s"
 		break
 	fi
@@ -1651,19 +1743,34 @@ else
 	fail "fw0 xpfd did not come back within ${REBOOT_WAIT}s"
 fi
 
-# #11872: no NTP runs in the loss lab. A crash reboot can leave fw0 minutes
-# behind, making fabric-auth and heartbeat freshness fail and blocking the
-# pending-bulk peer barrier. Set BOTH clocks from one host UTC reading before
-# the rejoin/failback checks.
-if failover_resync_node_clocks "$FW0" "$FW1"; then
-	pass "both firewall clocks resynced from host UTC after crash reboot"
-else
-	fail "could not resync both firewall clocks from host UTC after crash reboot"
-fi
+# #18614 (was the #11872 resync): a crash reboot brings fw0 back on its RTC,
+# and a skew past the fabric-auth window breaks the failback below. An
+# operator's cluster gets no clock help, so neither does this smoke: wait for
+# NTP to converge on both nodes, record the skew and the time it took, and fail
+# the cell when it does not converge. XPF_FAILOVER_CLOCK_RESYNC=1 is the
+# recorded no-NTP escape (test/incus/failover-clock-lib.sh).
+#
+# The wait spends time IPERF_DURATION_MIN already pays for, so the main stream
+# still outlives every bounded window: the REBOOT_WAIT the comeback left unused
+# plus the 20 s settle below. That is about 58 s after a measured 22 s
+# comeback. The floor is 40 s, over 2x the measured 17-18 s convergence; it
+# only binds after a comeback slower than 40 s (measured 19-22 s), and its at
+# most 20 s overshoot is paid for by CLOCK_FLOOR_OVERSHOOT in
+# IPERF_DURATION_MIN. An explicit
+# XPF_FAILOVER_CLOCK_BUDGET_S wins. A VOID (no time source, no measurement)
+# goes through void(), so the run exits 77 and the row is VOID, not FAIL.
+fw0_active_at="${fw0_active_at:-$SECONDS}"
+clock_budget=$(( wait_start + REBOOT_WAIT + 20 - SECONDS ))
+(( clock_budget >= 40 )) || clock_budget=40
+XPF_FAILOVER_CLOCK_BUDGET_S="${XPF_FAILOVER_CLOCK_BUDGET_S:-$clock_budget}" \
+	failover_clock_cell pass-fail "fw0 crash reboot" "$FW0" "$FW1" "$FW0" || true
 
 
-# Wait for cluster to stabilize (gRPC takes ~15s after systemctl active)
-sleep 20
+# Wait for cluster to stabilize (gRPC takes ~15s after systemctl active): 20 s
+# after xpfd came back, part of which the clock wait above may already have
+# spent.
+settle=$(( fw0_active_at + 20 - SECONDS ))
+(( settle <= 0 )) || sleep "$settle"
 
 # Verify fw0 is secondary for EVERY redundancy group (NOT primary — no auto-preempt)
 #
@@ -1704,73 +1811,162 @@ else
 	fail "iperf3 DIED during fw0 rejoin"
 fi
 
+# ha_run_rg02_failback -- after the measured RG1 slice, move RG0 and RG2 to
+# fw0 (each RG must be explicitly failed over; per-RG election is
+# independent). Sets all_primary, slowest, failback_at_seconds (the last RG's
+# poll-observed landing, for the stream oracle) and, for the planned-move
+# scoring (#18617), failback_request_at_seconds (each request's instant, taken
+# BEFORE it is sent) and failback_landed_at_seconds (each poll-observed
+# landing), both "a b" lists against the iperf start clock.
+ha_run_rg02_failback() {
+	local rg fo_start fo_elapsed moved
+	failback_at_seconds=0
+	failback_request_at_seconds=""
+	failback_landed_at_seconds=""
+	info "Manual failover: requesting fw1 to failover RG0 and RG2 to fw0"
+	for rg in 0 2; do
+		failback_request_at_seconds="${failback_request_at_seconds:+$failback_request_at_seconds }$((SECONDS - iperf_start_seconds))"
+		# stderr is CAPTURED, not discarded. `2>/dev/null` here hid every refusal
+		# this command can return, so a run that printed "Manual failover triggered"
+		# and a run that printed nothing at all were the same transcript (#9452).
+		incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 |
+			sed 's/^/    /' || true
+	done
+
+	# Verify fw0 is now primary for RG0 and RG2. RG1 was checked from both node
+	# status queries at phase-mid and phase-post above.
+	#
+	# A BOUNDED POLL, not a fixed `sleep 5`. The fixed sleep could not tell "the
+	# transfer was refused" from "the transfer is still in flight", and #9452 was
+	# the second: an RG moved 19-30s later, when the rejoining node's bounded
+	# #7162 startup promotion hold expired. So the cell was reading a real outage —
+	# fw1 had already demoted, leaving the RG owned by NEITHER node — and reporting
+	# it as a refusal, while simply lengthening the sleep would report a 30s
+	# blackhole as a pass.
+	#
+	# Polling gives the cell the ELAPSED time, which separates the two; the bound
+	# stays tight enough that the blackhole #9452 fixed still reds. Each RG is
+	# polled in turn, so later RGs are not charged the earlier ones' wait.
+	all_primary=true
+	if [[ "$RG1_FAILBACK_SETTLED" != true ]]; then
+		all_primary=false
+	fi
+	slowest="$RG1_FAILBACK_ELAPSED"
+	for rg in 0 2; do
+		fo_start=$(date +%s)
+		moved=0
+		while :; do
+			if incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null |
+				grep -A1 "Redundancy group: $rg" | grep -q "node0.*primary"; then
+				moved=1
+				break
+			fi
+			if (($(date +%s) - fo_start >= MANUAL_FAILOVER_DEADLINE)); then
+				break
+			fi
+			sleep 1
+		done
+		fo_elapsed=$(($(date +%s) - fo_start))
+		if ((moved)); then
+			failback_at_seconds=$((SECONDS - iperf_start_seconds))
+			failback_landed_at_seconds="${failback_landed_at_seconds:+$failback_landed_at_seconds }${failback_at_seconds}"
+			if ((fo_elapsed > slowest)); then
+				slowest=$fo_elapsed
+			fi
+			info "RG$rg moved to fw0 in ${fo_elapsed}s"
+		else
+			all_primary=false
+			fail "fw0 is not primary for RG$rg ${MANUAL_FAILOVER_DEADLINE}s after manual failover. fw1 has ALREADY demoted, so for this whole window RG$rg is owned by NEITHER node: transit is blackholed and nothing answers proxy-ARP for the pool-NAT address. That is an outage, not a declined request — read the elapsed time and the readiness reasons below rather than assuming a refusal (#9452)
+$(rg_ownership_diagnosis "$rg")"
+		fi
+	done
+}
+
+# ha_build_planned_move_args -- planned_move_args (the producer's
+# --planned-move list) and planned_moves_registered, from the instants the RG1
+# slice and the RG0/RG2 failback recorded. Each move is anchored at its
+# request(s) AND its observed landing(s): T is integer SECONDS since the iperf
+# launch, up to ~1 s off iperf's own clock, and a landing takes 1.3-3 s, so
+# one anchor would leave part of the move outside its window. A move that did
+# not land is not registered; its cells already failed.
+ha_build_planned_move_args() {
+	local anchors
+	planned_move_args=()
+	planned_moves_registered=0
+	if [[ -n "${rg1_move_at_seconds:-}" && -n "${rg1_move_landed_at_seconds:-}" ]]; then
+		planned_move_args+=(--planned-move "rg1-split=${rg1_move_at_seconds},${rg1_move_landed_at_seconds}")
+		planned_moves_registered=$((planned_moves_registered + 1))
+	fi
+	if [[ -n "${failback_request_at_seconds:-}" && -n "${failback_landed_at_seconds:-}" ]]; then
+		anchors="${failback_request_at_seconds} ${failback_landed_at_seconds}"
+		planned_move_args+=(--planned-move "rg0-rg2-failback=${anchors// /,}")
+		planned_moves_registered=$((planned_moves_registered + 1))
+	fi
+}
+
+# ha_planned_move_cells <metrics.json> <registered> -- one cell per planned
+# move the producer scored (#18617): PASS (no stream stalled), COST (one
+# stream stalled at most 10 s and recovered: H11's COST, judged
+# master-relative through cells_cost), FAIL (an aggregate outage, more than one
+# stream stalled, a longer stall, or a stream that never recovered). A count
+# that does not match what was registered is VOID: a move went unscored. Each
+# move also records its transition dip as HARNESS_METRIC lines: the low-share
+# stream count, the minimum per-stream rate and the in-window aggregate rate
+# (planned_<move>_*), read against master's rows like cells_cost.
+ha_planned_move_cells() {
+	local metrics="$1" registered="$2" lines verdict label text scored=0
+	if ! lines=$(python3 - "$metrics" <<'PY'
+import json, sys
+moves = json.load(open(sys.argv[1], encoding="utf-8")).get("planned_moves")
+if not isinstance(moves, list):
+    raise SystemExit(2)
+for m in moves:
+    anchors = ", ".join(f"{a:g}" for a in m["anchors"])
+    print(f"{m['verdict']}\t{m['label']}\t{m['text']} (anchors {anchors} s)")
+    # Per-move transition-dip metrics for the ledger (person-read against
+    # master's rows, like cells_cost; not an automated band).
+    key = "planned_" + "".join(c if c.isalnum() else "_" for c in m["label"].lower())
+    print(f"METRIC\t{key}_low_share_streams={len(m.get('low_share_streams') or [])}")
+    for field in ("min_stream_gbps", "window_aggregate_gbps"):
+        if isinstance(m.get(field), (int, float)):
+            print(f"METRIC\t{key}_{field}={m[field]:.3f}")
+PY
+	); then
+		void "iperf3 planned-move scoring absent from the metrics"
+		return 0
+	fi
+	while IFS=$'\t' read -r verdict label text; do
+		[[ -n "$verdict" ]] || continue
+		if [[ "$verdict" == METRIC ]]; then
+			echo "HARNESS_METRIC: ${label}"
+			continue
+		fi
+		scored=$((scored + 1))
+		case "$verdict" in
+		PASS) pass "iperf3 planned move ${label}: ${text}" ;;
+		COST) cost "iperf3 planned move ${label}: ${text} (H11 COST, judged master-relative)" ;;
+		FAIL) fail "iperf3 planned move ${label}: ${text}" ;;
+		*) void "iperf3 planned move ${label}: unrecognised verdict ${verdict}" ;;
+		esac
+	done <<<"$lines"
+	if ((scored != registered)); then
+		void "iperf3 planned moves: ${registered} registered, ${scored} scored"
+	fi
+}
+
 # ── Phase 4b: Manual failover — fw0 becomes primary again ───────────
 
 info "Manual failback: measuring isolated RG1 from fw1/node1 to fw0/node0"
+# M1 planned-move call-site fixture begin
+rg1_move_at_seconds=""
+rg1_move_landed_at_seconds=""
 ha_run_rg1_failback_slice
-failback_at_seconds=0
-
-# After the measured RG1 slice, preserve the existing unmeasured RG0/RG2 moves.
-# Each RG must be explicitly failed over — per-RG election is independent.
-info "Manual failover: requesting fw1 to failover RG0 and RG2 to fw0"
-for rg in 0 2; do
-	# stderr is CAPTURED, not discarded. `2>/dev/null` here hid every refusal
-	# this command can return, so a run that printed "Manual failover triggered"
-	# and a run that printed nothing at all were the same transcript (#9452).
-	incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 |
-		sed 's/^/    /' || true
-done
-
-# Verify fw0 is now primary for RG0 and RG2. RG1 was checked from both node
-# status queries at phase-mid and phase-post above.
-#
-# A BOUNDED POLL, not a fixed `sleep 5`. The fixed sleep could not tell "the
-# transfer was refused" from "the transfer is still in flight", and #9452 was
-# the second: an RG moved 19-30s later, when the rejoining node's bounded
-# #7162 startup promotion hold expired. So the cell was reading a real outage —
-# fw1 had already demoted, leaving the RG owned by NEITHER node — and reporting
-# it as a refusal, while simply lengthening the sleep would report a 30s
-# blackhole as a pass.
-#
-# Polling gives the cell the ELAPSED time, which separates the two; the bound
-# stays tight enough that the blackhole #9452 fixed still reds. Each RG is
-# polled in turn, so later RGs are not charged the earlier ones' wait.
-all_primary=true
-if [[ "$RG1_FAILBACK_SETTLED" != true ]]; then
-	all_primary=false
-fi
-slowest="$RG1_FAILBACK_ELAPSED"
-for rg in 0 2; do
-	fo_start=$(date +%s)
-	moved=0
-	while :; do
-		if incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null |
-			grep -A1 "Redundancy group: $rg" | grep -q "node0.*primary"; then
-			moved=1
-			break
-		fi
-		if (($(date +%s) - fo_start >= MANUAL_FAILOVER_DEADLINE)); then
-			break
-		fi
-		sleep 1
-	done
-	fo_elapsed=$(($(date +%s) - fo_start))
-	if ((moved)); then
-		failback_at_seconds=$((SECONDS - iperf_start_seconds))
-		if ((fo_elapsed > slowest)); then
-			slowest=$fo_elapsed
-		fi
-		info "RG$rg moved to fw0 in ${fo_elapsed}s"
-	else
-		all_primary=false
-		fail "fw0 is not primary for RG$rg ${MANUAL_FAILOVER_DEADLINE}s after manual failover. fw1 has ALREADY demoted, so for this whole window RG$rg is owned by NEITHER node: transit is blackholed and nothing answers proxy-ARP for the pool-NAT address. That is an outage, not a declined request — read the elapsed time and the readiness reasons below rather than assuming a refusal (#9452)
-$(rg_ownership_diagnosis "$rg")"
-	fi
-done
+ha_run_rg02_failback
+# M1 planned-move call-site fixture end
 if $all_primary; then
 	pass "fw0 became primary for all RGs after manual failback (slowest ${slowest}s of ${MANUAL_FAILOVER_DEADLINE}s budget)"
 fi
-info "Recorded per-stream failback event at ${failback_at_seconds}s after iperf start (last RG moved)"
+info "Recorded planned failback at ${failback_request_at_seconds:-none} s (requests) and ${failback_landed_at_seconds:-none} s (landed) after iperf start; last RG moved at ${failback_at_seconds}s"
 
 # Verify iperf3 survived manual failover
 if main_iperf_running; then
@@ -1815,11 +2011,23 @@ fi
 # formerly known-gap #8341 data-path check to a real assertion.
 if [[ "$POOL_NAT_SMOKE" == 1 && -n "$POOL_LAN_IF" ]]; then
 	incus exec "$FW0" -- cli -c "clear security flow session source-prefix ${POOL_SRC}" &>/dev/null || true
-	incus exec "$CLUSTER_LAN_HOST" -- bash -c \
-		"timeout 6 iperf3 --connect-timeout 3000 -B ${POOL_SRC} -t 2 -c ${IPERF_TARGET} -p ${POOL_PORT} > /tmp/iperf3-pool-8280-post.log 2>&1 &" || true
-	sleep 5
-	post_pool=$(pool_session_count "$FW0")
-	if [[ "$post_pool" == VOID ]]; then
+	# A probe that never started measured nothing, and a previous run's log
+	# would otherwise be scored as this run's (#18567 review). Remove the old
+	# log in its own exec and track whether the launch happened.
+	pool_probe_started=1
+	incus exec "$CLUSTER_LAN_HOST" -- rm -f /tmp/iperf3-pool-8280-post.log || pool_probe_started=0
+	if [[ "$pool_probe_started" == 1 ]]; then
+		incus exec "$CLUSTER_LAN_HOST" -- bash -c \
+			"timeout 6 iperf3 --connect-timeout 3000 -B ${POOL_SRC} -t 2 -c ${IPERF_TARGET} -p ${POOL_POST_PORT} > /tmp/iperf3-pool-8280-post.log 2>&1 &" || pool_probe_started=0
+	fi
+	post_pool=""
+	if [[ "$pool_probe_started" == 1 ]]; then
+		sleep 5
+		post_pool=$(pool_session_count "$FW0")
+	fi
+	if [[ "$pool_probe_started" != 1 ]]; then
+		void "#8280/#8341: the post-failback pool probe could not be started on ${CLUSTER_LAN_HOST}, so neither the allocator nor the pool-mode data path was measured after the role change (#18567)"
+	elif [[ "$post_pool" == VOID ]]; then
 		fail "#8280: the post-failback session query returned no listing, so the allocator's state after the role change was NOT MEASURED — see the admission note above. A VOID here is NOT evidence the allocator is healthy. Query stderr: ${POOL_QUERY_ERR:-<none>}"
 	elif [[ "$post_pool" -ge 1 ]]; then
 		pass "the pool allocator still hands out a translation after a full primary->secondary->primary cycle"
@@ -1832,12 +2040,24 @@ if [[ "$POOL_NAT_SMOKE" == 1 && -n "$POOL_LAN_IF" ]]; then
 		# assertion. A successful iperf3 run emits `iperf Done.`; matching
 		# that positive result avoids treating an arbitrary error message as
 		# proof that the pool-mode TCP flow connected.
-		if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-pool-8280-post.log 2>/dev/null; then
+		# #18567: a "server is busy" reply is a probe collision on the iperf3
+		# server, not the #8341 defect (the reply itself crossed the firewall),
+		# so it is a VOID with that reason.
+		pool_log=$(incus exec "$CLUSTER_LAN_HOST" -- tail -5 /tmp/iperf3-pool-8280-post.log 2>&1 || echo "(pool probe log unreadable)")
+		case "$(failover_pool_probe_verdict "$pool_log")" in
+		pass)
 			pass "a pool-mode TCP flow connects after the role change (data path, not just allocation)"
-		else
-			pool_log=$(incus exec "$CLUSTER_LAN_HOST" -- tail -5 /tmp/iperf3-pool-8280-post.log 2>&1 || echo "(pool probe log unreadable)")
+			;;
+		busy)
+			void "a pool-mode TCP flow was NOT MEASURED after the role change: the iperf3 server on ${IPERF_TARGET}:${POOL_POST_PORT} answered busy (another client holds that port; #18567). The busy reply crossed the firewall, but no test ran. Pool probe log tail: ${pool_log}"
+			;;
+		fail)
 			fail "a pool-mode TCP flow did not complete after the role change; the #8341 TCP-specific data-path defect may have returned. Pool probe log tail: ${pool_log}"
-		fi
+			;;
+		*)
+			fail "the pool probe verdict helper returned an unrecognised verdict; the pool-mode data path was not judged. Pool probe log tail: ${pool_log}"
+			;;
+		esac
 	else
 		fail "after the crash failover AND the manual failback, a FRESH flow from ${POOL_SRC} got NO pool translation. The ports fw1 imported as reservations while it was standby are the ones a reserve/recycle lifecycle bug strands, and this is the only assertion in this suite that enters that state (#8280 / #7174 M13)"
 	fi
@@ -1871,6 +2091,12 @@ info "Waiting for iperf3 final result (up to ${IPERF_DURATION}s)"
 
 failover_wait_main_iperf_result /tmp/iperf3-failover.log "$IPERF_DURATION" || true
 
+# #18617: the crash is the one EXCUSED window (--event-sec; its detection and
+# activation are by design: in the lab about 0.8-1.05 s from the crash when the
+# #18570 probe goes unanswered, about 1.2 s more without ack support, then
+# 0.34-0.44 s to activate). The harness's own moves are PLANNED (--planned-move).
+ha_build_planned_move_args
+
 # Derive the throughput headline only from gate-validated JSON-stream metrics.
 # Missing, malformed, or incomplete metrics are VOID evidence, never a
 # zero-valued throughput FAIL; valid averages go through the anchored cell.
@@ -1887,7 +2113,7 @@ if ! incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log \
 	printf '{"ok":false,"error":"metrics_capture_failed"}\n' >"$LOCAL_IPERF_METRICS"
 elif ! python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" \
 	"$LOCAL_IPERF_LOG" --event-sec "$failover_at_seconds" \
-	--event-sec "$failback_at_seconds" --event-window-sec 3 \
+	"${planned_move_args[@]}" --event-window-sec 3 \
 	>"$LOCAL_IPERF_METRICS" 2>"$LOCAL_IPERF_PRODUCER_ERR"; then
 	printf '{"ok":false,"error":"metrics_parse_failed"}\n' >"$LOCAL_IPERF_METRICS"
 fi
@@ -1902,11 +2128,19 @@ fi
 # M1 JSON capture/gate fixture end
 
 if [[ "$iperf_gate_ok" == true ]]; then
-	ha_emit_verdict "iperf3 whole-run zero-throughput intervals (${zero_intervals_total}, limit ${MAX_ZERO_INTERVALS})" \
-		ha_counter_at_most_verdict "$zero_intervals_total" "$MAX_ZERO_INTERVALS" "whole-run zero intervals"
-	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside transition windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)" \
-		ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals outside [T, T+3] windows (MAX_STREAM_ZERO_INTERVALS)"
-	info "iperf3 whole-run zero-throughput streams: ${zero_streams_total} (${zero_streams_outside_events_total} outside transition windows)"
+	# Recorded for the master-relative comparison (the ledger's
+	# whole_run_zero_intervals), gated only when MAX_ZERO_INTERVALS is set.
+	echo "HARNESS_METRIC: whole_run_zero_intervals=${zero_intervals_total}"
+	if [[ -n "$MAX_ZERO_INTERVALS" ]]; then
+		ha_emit_verdict "iperf3 whole-run zero-throughput intervals (${zero_intervals_total}, limit ${MAX_ZERO_INTERVALS})" \
+			ha_counter_at_most_verdict "$zero_intervals_total" "$MAX_ZERO_INTERVALS" "whole-run zero intervals"
+	else
+		info "iperf3 whole-run zero-throughput intervals: ${zero_intervals_total} (recorded as whole_run_zero_intervals and judged master-relative, not gated: the crash's by-design detection and activation, about 1.1-1.5 s in the lab, alone zero every stream)"
+	fi
+	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside the crash and planned-move windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)" \
+		ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals outside the [T, T+3] windows (MAX_STREAM_ZERO_INTERVALS)"
+	info "iperf3 whole-run zero-throughput streams: ${zero_streams_total} (${zero_streams_outside_events_total} outside the crash and planned-move windows)"
+	ha_planned_move_cells "$LOCAL_IPERF_METRICS" "$planned_moves_registered"
 	pass "iperf3 sender retransmits ${retransmits}"
 	if [[ -n "$MAX_RETRANSMITS" ]]; then
 		ha_emit_verdict "iperf3 retransmits ${retransmits} (limit ${MAX_RETRANSMITS})" \
@@ -1964,6 +2198,17 @@ else
 fi
 # M1 JSON verdict fixture end
 
+# #18543: a client that had to be interrupted is its own cell, so the run
+# stays red under the right name rather than as a phantom 0.0 Gbps collapse.
+if [[ "$iperf_gate_ok" == true ]]; then
+	interrupt_verdict=$(iperf_client_interrupt_verdict "$LOCAL_IPERF_METRICS")
+	case "$interrupt_verdict" in
+	PASS\ *) pass "${interrupt_verdict#PASS }" ;;
+	FAIL\ *) fail "${interrupt_verdict#FAIL }" ;;
+	*)       void "${interrupt_verdict#VOID }" ;;
+	esac
+fi
+
 if [[ "$iperf_gate_ok" == true ]]; then
 	oracle_error="${LOCAL_IPERF_METRICS}.oracle.err"
 	if failover_oracles=$(python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" \
@@ -1992,9 +2237,11 @@ if (( FAIL == 0 && VOID > 0 )); then
 	exit 77
 fi
 
-# The summary is the one line the harness ledger parses. Keep its grammar
-# unchanged; measured FAIL outranks ordinary capture VOID.
-echo "  Failover test: $PASS passed, $FAIL failed"
+# The summary is the one line the harness ledger parses. Its grammar is the
+# pair plus ", <k> cost" (#18617: the planned-move COST count, recorded as
+# cells_cost, as test-rg-move-soak's is); measured FAIL outranks ordinary
+# capture VOID.
+echo "  Failover test: $PASS passed, $FAIL failed, ${COST:-0} cost"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [[ $FAIL -gt 0 ]]; then

@@ -14,10 +14,12 @@
 //! by an [`AcceptLoopSpec`] (name, poll interval, whether unclassified
 //! errors are retried, and the peer-label used for the #9003 check), a
 //! `running` flag, a [`PanicPolicy`], and a `serve` closure that serves
-//! one accepted `UnixStream`. The loop owes three things on every socket:
+//! one accepted `UnixStream`. The loop owes four things on every socket:
 //! an accept error never kills the loop (#9172), the peer is uid-checked
-//! before dispatch (#9003), and a handler panic is contained (#9900
-//! F-094). Each is implemented once, here.
+//! before dispatch (#9003), a handler panic is contained (#9900
+//! F-094), and a connection arriving while the loop is idle is accepted
+//! at once rather than after the poll interval (#18541). Each is
+//! implemented once, here.
 //!
 //! The policies really do differ, but each difference is one parameter:
 //! - The control loop's `Fail` is process-fatal (`return Err(msg)`).
@@ -52,7 +54,9 @@ use crate::server::ServerState;
 /// the label passed to `reject_unprivileged_peer` (#9003). The two
 /// differ on the reinject sockets (`"reinject submit socket"` for
 /// accept logs, `"reinject submit"` for the peer check), so both are
-/// carried explicitly.
+/// carried explicitly. `poll` is the longest idle wait between
+/// `running` checks; a connection arriving during it is accepted at
+/// once (`wait_for_pending_connection`, #18541).
 pub(crate) struct AcceptLoopSpec {
     pub name: &'static str,
     pub poll: Duration,
@@ -140,6 +144,9 @@ pub(crate) fn run_accept_loop(
                     }
                 }
             }
+            AcceptStep::Idle(max) => {
+                wait_for_pending_connection(listener, max);
+            }
             AcceptStep::Sleep(delay) => thread::sleep(delay),
             AcceptStep::Fail(msg) => {
                 if spec.retry_unclassified {
@@ -161,6 +168,59 @@ pub(crate) fn run_accept_loop(
 }
 
 pub(crate) use super::lifecycle::{accept_step, AcceptStep};
+
+/// Wait until `listener` has a connection pending or `max` elapses, and report
+/// whether one is pending (#18541).
+///
+/// The listeners are non-blocking so the loop can observe `running`. The idle
+/// wait used to be `thread::sleep(poll)`, which a connection arriving during
+/// the sleep could not cut short. The Go side dials one connection per
+/// session-socket request, right after reading the previous response — the
+/// moment this loop has gone idle — so every request waited out the remainder
+/// of the sleep: ~10 ms per request on the 10 ms session socket, two requests
+/// per synced session, which made a 522-session HA bulk take ~10 s to install
+/// and stretched every cold-prime fence by as much.
+///
+/// `poll(2)` on a listening socket reports `POLLIN` when a connection is
+/// queued, so the wait ends at the arrival and `max` only bounds how long the
+/// loop goes without re-checking `running` (shutdown latency is unchanged).
+/// It returns true only for `POLLIN` with none of `POLLERR`/`POLLHUP`/
+/// `POLLNVAL`. Every other outcome returns false: a timeout or `EINTR` at
+/// once, and an error, readiness without `POLLIN`, or `POLLIN` together with
+/// an error or hang-up bit only after sleeping `max`. That last arm matters: a
+/// listener that has been `shutdown(2)` polls `POLLIN|POLLHUP` forever while
+/// `accept` keeps returning `EAGAIN` (measured on this kernel), and reporting
+/// it as pending would cycle `WouldBlock -> Idle -> poll` at full speed. With
+/// these arms the loop cycles no faster than once per `max` in every state
+/// except a genuinely queued connection, which `accept` then consumes. The
+/// failure backoff (`AcceptStep::Sleep`) stays a plain sleep for the same
+/// reason: under `EMFILE` the listener IS readable.
+pub(crate) fn wait_for_pending_connection(listener: &UnixListener, max: Duration) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut pfd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // Round a sub-millisecond wait up to 1 ms: 0 would make poll(2) return
+    // at once and the loop spin.
+    let timeout_ms = i32::try_from(max.as_millis().max(1)).unwrap_or(i32::MAX);
+    // SAFETY: `pfd` is one valid, initialised `pollfd` for a descriptor the
+    // borrowed `listener` keeps open for the whole call; nfds is 1.
+    let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    let fault = libc::POLLERR | libc::POLLHUP | libc::POLLNVAL;
+    if rc > 0 && (pfd.revents & libc::POLLIN) != 0 && (pfd.revents & fault) == 0 {
+        return true;
+    }
+    if rc == 0 {
+        return false;
+    }
+    if rc < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+        return false;
+    }
+    thread::sleep(max);
+    false
+}
 
 #[cfg(test)]
 mod accept_loop_tests_17123 {
@@ -261,3 +321,7 @@ mod accept_loop_tests_17123 {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "accept_loop_idle_wake_tests.rs"]
+mod accept_loop_idle_wake_tests;

@@ -925,7 +925,7 @@ func (s *SessionSync) SendLivenessKeepalive() {
 	if err != nil {
 		slog.Debug("cluster sync: liveness keepalive send error", "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "liveness keepalive write failed", err)
 	}
 }
 
@@ -937,8 +937,23 @@ func (s *SessionSync) sendClockSync(conn net.Conn) {
 	err := writeMsg(conn, syncMsgClockSync, buf[:])
 	s.writeMu.Unlock()
 	if err != nil {
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "clock sync write failed", err)
 		slog.Warn("cluster sync: failed to send clock sync", "err", err)
+	}
+}
+
+// sendInstallHeartbeat sends the one sync-level heartbeat each installed
+// connection carries (#18561), so the peer's HeartbeatAck latches
+// peerHeartbeatAckEver early. A failed or partial write leaves the stream
+// in an unknown state, so it tears the connection down exactly like a
+// failed clock sync (seat U).
+func (s *SessionSync) sendInstallHeartbeat(conn net.Conn) {
+	s.writeMu.Lock()
+	err := writeMsg(conn, syncMsgHeartbeat, nil)
+	s.writeMu.Unlock()
+	if err != nil {
+		s.disconnectConn(conn, "install heartbeat write failed", err)
+		slog.Warn("cluster sync: failed to send install heartbeat", "err", err)
 	}
 }
 
@@ -1144,9 +1159,13 @@ func (s *SessionSync) sendLoop(ctx context.Context) {
 				s.onStreamMoved(true)
 			}
 			if err != nil {
+				// #18521: this Debug line was the ONLY trace of the
+				// teardown that opened the 56 s half-open window — a
+				// queued-frame write timing out against a peer that had
+				// stopped reading. The disconnect line now carries it.
 				slog.Debug("cluster sync: send error", "err", err)
 				s.stats.Errors.Add(1)
-				s.handleDisconnect(conn)
+				s.disconnectConn(conn, "queued frame write failed", err)
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}

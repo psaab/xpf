@@ -247,6 +247,9 @@ type SeededBareTupleIndex = HashMap<BareSessionTuple, BareTupleHandleBucket, Hot
 mod discriminator;
 mod key;
 mod pmech_directory;
+// #18562: node-wide read-only view of live #7770 punt seeds (embedded-ICMP
+// matcher only); maintained at this table's insert/remove choke points.
+mod punt_seed_directory;
 pub(crate) mod pptp;
 pub(crate) mod pptp_control;
 // #7188: `WireDiscriminator` is exported alongside the class enum because the
@@ -259,6 +262,12 @@ pub(crate) use discriminator::{TunnelDiscriminator, WireDiscriminator};
 mod routing_domain_wire;
 pub(crate) use key::*;
 pub(crate) use pmech_directory::*;
+pub(crate) use punt_seed_directory::{
+    PuntSeedDirectory, PuntSeedRow, PUNT_SEED_DIRECTORY_CONTENDED_TOTAL,
+    PUNT_SEED_DIRECTORY_FULL_TOTAL,
+};
+#[cfg(test)]
+pub(crate) use punt_seed_directory::PUNT_SEED_ROW_TTL_NS;
 pub(crate) use routing_domain_wire::{
     AMBIGUOUS_FABRIC_DOMAIN_BASE, QUARANTINED_ROUTING_DOMAIN,
     // #9546: named at the crate level so the conntrack mirror states absence
@@ -327,6 +336,16 @@ const TCP_CLOSING_TIMEOUT_NS: u64 = 30_000_000_000;
 /// posture of Junos and is well under Linux conntrack's CLOSE timeout while
 /// still tolerating a stray reordered segment after the RST.
 const TCP_RST_TIMEOUT_NS: u64 = 2_000_000_000;
+#[cfg(test)]
+pub(crate) const TCP_RST_TIMEOUT_NS_FOR_TEST: u64 = TCP_RST_TIMEOUT_NS;
+#[cfg(test)]
+thread_local! {
+    /// #18520 test instrument: `served_here` stores made by packet hits on
+    /// this thread. A hit stores only when the bit is clear, so a row is
+    /// written once, not per packet.
+    pub(crate) static SERVED_HERE_STORES_FOR_TEST: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
 const DEFAULT_UDP_SESSION_TIMEOUT_NS: u64 = 60_000_000_000;
 const DEFAULT_ICMP_SESSION_TIMEOUT_NS: u64 = 60_000_000_000;
 /// #16486: Junos protocol-based default timeout table (Security 10.2,
@@ -758,6 +777,22 @@ impl TcpHandshakeState {
             _ => None,
         }
     }
+
+    /// #16223/#18520: the per-incarnation monotonic order of handshake
+    /// wires. Unknown/legacy (0) ranks as Established, matching its import
+    /// meaning. The ONE formula for every "never regress a same-incarnation
+    /// stage" merge: the shared-map publish choke point
+    /// (`publish_shared_session`, its forward-wire alias twin) and the
+    /// worker import (`upsert_synced_with_origin`).
+    #[inline]
+    pub(crate) fn stage_rank(wire: u8) -> u8 {
+        match Self::from_wire(wire) {
+            Some(Self::Opening) => 1,
+            Some(Self::HandshakePending) => 2,
+            Some(Self::SynAckFirstPending) => 3,
+            Some(Self::Established) | None => 4,
+        }
+    }
 }
 
 impl SessionEntry {
@@ -1000,6 +1035,18 @@ macro_rules! debug_log {
 mod expire;
 mod install;
 mod lookup;
+// #18520: cross-worker TCP handshake relay (SYN on one worker, SYN-ACK on
+// another). Producers queue into the table's bounded outbox; the worker loop
+// fans it out to sibling command queues once per pass.
+mod handshake_relay;
+pub(crate) use handshake_relay::HandshakeRelay;
+// Only the cross-worker tests name the stage (and the per-thread drop
+// mirror) outside this module.
+#[cfg(test)]
+pub(crate) use handshake_relay::{
+    HANDSHAKE_RELAY_OUTBOX_CAP as HANDSHAKE_RELAY_OUTBOX_CAP_FOR_TEST, HandshakeRelayStage,
+    RELAY_CLOSE_FIN_FORWARD, RELAY_CLOSE_FIN_REVERSE, handshake_relay_outbox_drops_this_thread_for_test,
+};
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
 pub(crate) use lookup::{ExportWalkOutcome, ForwardNatMatchLookup, SeqVerdict};
@@ -1280,6 +1327,20 @@ struct SessionEntry {
     /// prevents a retransmitted SYN-ACK in the installing direction from
     /// clearing `handshake_pending`.
     syn_ack_first: bool,
+    /// #18520: a sibling worker's handshake relay advanced this half (the
+    /// SYN-ACK or the completion was observed on another worker's table).
+    /// Marks the pair as split across workers so this table's own completion
+    /// is relayed back; never synced, never read on the packet path.
+    handshake_relayed: bool,
+    /// #18520: a packet hit on THIS table admitted this half (slow-path Owner
+    /// replay or flow-cache probe). The relay receiver's "serves here" test
+    /// for a replica. A flag, not a timestamp: within one worker-loop pass
+    /// the packet clock (`loop_now_ns`) is sampled BEFORE
+    /// `apply_worker_commands` stamps a replica's `created_ns`, so
+    /// `last_seen > created` is false for a replica imported and hit in the
+    /// same pass. Preserved across a same-incarnation re-import; never
+    /// synced.
+    served_here: bool,
     /// #10888 carries this marker as the distinct SynAckFirstPending wire state.
     /// #965: absolute tick in the ordinary expiry wheel. Updated when a
     /// non-held deadline changes; while held, it is the horizon recheck tick.
@@ -1864,27 +1925,125 @@ struct ProbeHalfUndo {
     expires_after_ns: u64,
 }
 
+impl ProbeHalfUndo {
+    #[inline]
+    fn of(entry: &SessionEntry) -> Self {
+        Self {
+            counters: entry.counters,
+            observed_tcp_flags: entry.observed_tcp_flags,
+            observed_tos: entry.observed_tos,
+            established: entry.established,
+            handshake_pending: entry.handshake_pending,
+            syn_ack_first: entry.syn_ack_first,
+            last_seen_ns: entry.last_seen_ns,
+            expires_after_ns: entry.expires_after_ns,
+        }
+    }
+}
+
+/// #18533: `node_served_stamps` writes one deferring probe can make — the
+/// completion stamp and the reverse-fold stamp in `probe_hit_inner`, and
+/// nothing else on that path.
+const PROBE_UNDO_STAMP_SLOTS: usize = 2;
+
 /// #15947 fold: exact undo record for one deferring probe, keyed by
 /// the producer's canonical (stored record) key so a translated-alias
 /// packet identity resolves to the same record on admit and on drop.
+///
+/// #18533: captured LAZILY, each piece just before the probe first
+/// mutates it, and from the borrow that mutates it wherever one exists.
+/// The pre-#18533 record was an eager pre-probe snapshot of everything
+/// the probe COULD touch, taken on every packet: the canonical record,
+/// its companion (twice more for a reverse hit), the pressure-shed
+/// membership and four node-served stamp keys, each its own key lookup.
+/// A steady-state established forward hit touches only its own record,
+/// so its undo is now `matched` alone, copied out of the probe's single
+/// `record_by_key_mut` borrow. Restoring state the probe never wrote is
+/// a no-op, so restoring only what was written is the same rollback.
 struct ProbeUndo {
     canonical_key: SessionKey,
-    matched: (SessionKey, ProbeHalfUndo),
+    /// The probed (canonical) record: always written — accounting on a
+    /// forward hit, the reverse-only fallback charge, a refresh, or a
+    /// completion. Captured inside the probe's own borrow.
+    matched: ProbeHalfUndo,
+    /// The companion half, captured before its first write: the forward
+    /// entry a reverse hit charges (inside that charge's borrow), or the
+    /// half a completion establishes/propagates to (one lookup, only on
+    /// the completing packet).
     companion: Option<(SessionKey, ProbeHalfUndo)>,
-    accounting: Option<(SessionKey, ProbeHalfUndo)>,
-    shed_forward_key: SessionKey,
-    shed_was_present: bool,
-    /// #16217 (GLM F1, Final5): pre-probe `node_served_stamps`
-    /// snapshots for every stamp key the completing hit may write,
-    /// so a dropped probe restores them exactly and removes the
-    /// stage-transition marker instead of leaving Established
-    /// evidence behind. Bounded fixed array (at most 4 distinct
-    /// orientations), no heap allocation on the probe path.
-    stamp_snapshots: [Option<(SessionKey, Option<(u8, u64)>)>; 4],
-    stamp_snapshot_len: usize,
+    /// Pressure-shed membership of the pair's forward key, captured only
+    /// on completion — the sole probe-path writer of that index
+    /// (`propagate_tcp_state_to_companion` with `handshake_completed`).
+    shed: Option<(SessionKey, bool)>,
+    /// #16217 (GLM F1, Final5) / #18533: pre-write `node_served_stamps`
+    /// values for each stamp key this probe wrote, returned by the write
+    /// itself (`note_node_served_handshake_prior`), so a dropped probe
+    /// restores them exactly instead of leaving Established evidence
+    /// behind. Bounded fixed array, no heap allocation on the probe path.
+    stamp_snapshots: [Option<(SessionKey, Option<(u8, u64)>)>; PROBE_UNDO_STAMP_SLOTS],
+}
+
+impl ProbeUndo {
+    /// Record the pre-write value of `stamp_key` unless this probe already
+    /// wrote that key (the first capture is the pre-probe value).
+    #[inline]
+    fn capture_stamp(&mut self, stamp_key: &SessionKey, prior: Option<(u8, u64)>) {
+        for slot in &mut self.stamp_snapshots {
+            match slot {
+                Some((key, _)) if key == stamp_key => return,
+                Some(_) => {}
+                None => {
+                    *slot = Some((stamp_key.clone(), prior));
+                    return;
+                }
+            }
+        }
+        debug_assert!(false, "#18533: more stamp writes than PROBE_UNDO_STAMP_SLOTS");
+    }
+}
+
+/// #18533 test instrument: key-index lookups the deferring cache-hit
+/// probe and its admission spend on OPTIONAL work, so a cell can prove the
+/// steady-state established hit skips each one and the transition that
+/// needs it still runs it.
+#[cfg(test)]
+#[derive(Default)]
+struct ProbeCostProbes {
+    /// `handshake_expected_ack` calls (#16042 companion SYN-end lookup).
+    expected_ack: AtomicU64,
+    /// Lookups made only to build the rollback undo (companion record
+    /// and pressure-shed membership on a completing hit).
+    undo_capture: AtomicU64,
+    /// Canonical-key resolutions in `emit_probe_hit_state_update`.
+    emit_resolve: AtomicU64,
+    /// #18533 round 2: rollback undo records built by deferring probes.
+    undo_records: AtomicU64,
+}
+
+/// #18562: a dropped table's seeds are gone, so are their directory rows (a
+/// worker's table outlives no worker; the node directory outlives them all).
+impl Drop for SessionTable {
+    fn drop(&mut self) {
+        self.punt_seeds.retire_table(self.punt_seed_table_token);
+    }
 }
 
 pub(crate) struct SessionTable {
+    /// #18550: reader for this worker's RG activation epochs (the same
+    /// `rg_epochs` the wheel's SELF-HEAL gate reads through `ExpireHaContext`).
+    /// `restamp_lapsed_peer_synced` records the current epoch exactly as the
+    /// SELF-HEAL arm does, so an import-triggered re-stamp spends the
+    /// activation edge and a revived row ages after ONE idle window. `None`
+    /// (a table built outside a worker) leaves `seen_rg_epoch` untouched.
+    /// Wired once in `worker_loop_setup`.
+    rg_epoch_reader: Option<std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>>,
+    /// #18562: the node's punt-seed directory. `new()` gives a table a
+    /// private one; `worker_loop` wires every worker of the node to the ONE
+    /// in `SharedSessionOwnerRgIndexes::punt_seeds`. Written only by
+    /// `insert_record` / `remove_entry` / `refresh_in_place` / `Drop` below.
+    punt_seeds: std::sync::Arc<PuntSeedDirectory>,
+    /// #18562: this table's identity in `punt_seeds` (retire fence).
+    punt_seed_table_token: u64,
     /// #7699: the PPTP call associations THIS worker can resolve.
     ///
     /// Per-worker, and deliberately not shared behind a lock: `resolve` runs on
@@ -1986,8 +2145,16 @@ pub(crate) struct SessionTable {
     demoted_owner_rgs: FxHashSet<i32>,
     deltas: VecDeque<SessionDelta>,
     /// HA transition withheld by a deferring flow-cache probe until the
-    /// packet survives output-filter/policer admission.
-    pending_probe_state_updates: Vec<(SessionKey, u8, u8)>,
+    /// packet survives output-filter/policer admission:
+    /// `(admission_key, matched_key, class_before, handshake_before)`.
+    /// #18520: keyed for admission/rollback by the PROBED packet's canonical
+    /// key, which is what `emit_probe_hit_state_update` /
+    /// `rollback_dropped_probe_hit` resolve. A reverse-hit completion through
+    /// the #16223 companion arm transitions the FORWARD key (`matched_key`),
+    /// so keying by `matched_key` alone meant the reverse packet's admission
+    /// never published it (no HA Update, no handshake relay) and its rollback
+    /// never discarded it.
+    pending_probe_state_updates: Vec<(SessionKey, SessionKey, u8, u8)>,
     /// #15947 fold: exact pre-probe snapshots for deferring probes,
     /// held only until the cached verdict admits or drops the packet.
     pending_probe_undo: Vec<ProbeUndo>,
@@ -1995,8 +2162,15 @@ pub(crate) struct SessionTable {
     /// handshake STAGE TRANSITION into Established — the only cache
     /// hits allowed to restamp the shared maps' packet-count
     /// evidence. Recorded in `probe_hit_inner` beside the deferred
-    /// Update; consumed by `take_probe_stage_transition`.
-    pending_probe_stage_transitions: Vec<SessionKey>,
+    /// Update; consumed by `take_probe_stage_transition`. #18520: keyed
+    /// by the probed packet's canonical (admission) key, like the
+    /// deferred Update above — a forward key recorded by a reverse hit
+    /// was never taken and accumulated for the life of the worker.
+    /// `(admission_key, forward_key, forward_nat)`: the FORWARD pair the
+    /// caller restamps — a reverse-hit completion must not restamp the
+    /// shared maps keyed on the reverse tuple (that inserted a forward-wire
+    /// alias cloned from the REVERSE row).
+    pending_probe_stage_transitions: Vec<(SessionKey, SessionKey, crate::nat::NatDecision)>,
     last_gc_ns: u64,
     max_sessions: usize,
     /// Raw session slots reserved by an outstanding IPsec install plan.
@@ -2207,6 +2381,26 @@ pub(crate) struct SessionTable {
     /// Set by `set_session_limit_active`, driven from the worker's applied
     /// forwarding/screen-profile snapshot.
     session_limit_active: bool,
+    /// #18640: this table's slot in the node's HA fan-out, as (index, width).
+    /// HA session sync installs every peer session on EVERY worker as a
+    /// `SyncImport` copy, and demotion re-tags every worker's replica the same
+    /// way. One logical session must charge the per-source quota once per
+    /// node, as #10310 requires for local replicas, so only the worker this
+    /// slot designates charges a fanned-out copy
+    /// (`session_limit_charges_fanout_copy`). The default (0, 1) charges every
+    /// copy: a single table, as in standalone tests, is the whole node.
+    session_limit_shard_index: u32,
+    session_limit_shard_width: u32,
+    /// #18640: source-count decrements that found no count to take from. Always
+    /// zero while increments and decrements agree; a nonzero value is a balance
+    /// bug the saturating decrement would otherwise hide. Test builds only.
+    #[cfg(test)]
+    session_limit_dec_underflows: u64,
+    /// #18640: the process-wide keyed hash that picks the charged worker. Every
+    /// worker table is built from the same per-process seed, so they agree on
+    /// the designation; the seed keeps an outsider from aiming flows at one
+    /// worker's quota.
+    session_limit_shard_hash: HotPathSeededState,
     /// #2134/#3122/#10310/#10985/#11057: per-source-IP count of present
     /// forward-direction logical sessions, keyed by ingress zone and source
     /// IP. Always maintained, including when no screen profile configures a
@@ -2259,6 +2453,21 @@ pub(crate) struct SessionTable {
     /// attacker-keyed side tables; entries are dropped with their
     /// session via `remove_entry`. Node-local, never synced.
     node_served_stamps: SeededKeyMap<(u8, u64)>,
+    /// #18520: handshake transitions this worker observed on a pair split
+    /// across workers, awaiting the loop-pass fan-out to sibling command
+    /// queues (`session_glue::fan_out_handshake_relays`). Bounded by
+    /// `HANDSHAKE_RELAY_OUTBOX_CAP` (drop-newest, counted in
+    /// `HANDSHAKE_RELAY_OUTBOX_DROPS`); the drain keeps the allocation, so
+    /// steady state never allocates.
+    handshake_relay_outbox: Vec<HandshakeRelay>,
+    /// #18520 test instrument: calls into the #16223 evidence helpers, so a
+    /// cell can prove the established steady-state hit never reaches them.
+    #[cfg(test)]
+    handshake_progress_probes: AtomicU64,
+    /// #18533 test instrument: optional lookups on the deferring cache-hit
+    /// probe path (see `ProbeCostProbes`).
+    #[cfg(test)]
+    probe_cost_probes: ProbeCostProbes,
     /// #16217 (ct-slice HA emit): per-forward-key emit marks for the
     /// ct-slice stage/count Update vehicle. One entry per forward row
     /// this worker's ct-slice has collected; bounded by the forward
@@ -2361,6 +2570,9 @@ impl SessionTable {
         let seed = crate::hot_hash_seed::hot_path_hash_seed();
         let state = HotPathSeededState::new(seed);
         Self {
+            rg_epoch_reader: None,
+            punt_seeds: std::sync::Arc::new(PuntSeedDirectory::new()),
+            punt_seed_table_token: punt_seed_directory::next_punt_seed_table_token(),
             pptp: crate::session::pptp::PptpAssociations::default(),
             // Start with an empty slab and let it grow on demand.
             // `Slab::with_capacity(DEFAULT_MAX_SESSIONS)` would eagerly
@@ -2430,6 +2642,11 @@ impl SessionTable {
             last_pop_stats: WheelPopStats::default(),
             cumulative_pop_stats: WheelPopStats::default(),
             session_limit_active: false,
+            session_limit_shard_index: 0,
+            session_limit_shard_width: 1,
+            #[cfg(test)]
+            session_limit_dec_underflows: 0,
+            session_limit_shard_hash: state.clone(),
             // #2364/#10985: these counters key attacker-chosen IPs plus an
             // ingress-zone ID, so use the seeded hasher.
             session_limit_src_counts: HashMap::with_hasher(state.clone()),
@@ -2443,6 +2660,11 @@ impl SessionTable {
             // #16223: node-served evidence stamps share the seeded
             // attacker-keyed placement (tuple-keyed, cross-worker read).
             node_served_stamps: HashMap::with_hasher(state.clone()),
+            handshake_relay_outbox: Vec::with_capacity(16),
+            #[cfg(test)]
+            handshake_progress_probes: AtomicU64::new(0),
+            #[cfg(test)]
+            probe_cost_probes: ProbeCostProbes::default(),
             ct_slice_emit_marks: HashMap::with_hasher(state),
             // #4915: monotonic session-id counter starts at 1 (0 = "unknown"
             // sentinel on the wire); the node/worker namespace defaults to 0
@@ -2539,6 +2761,60 @@ impl SessionTable {
         if let Some(tat) = self.icmp_error_side_tats.get_mut(key) {
             icmp_error_tat_refund(tat);
         }
+    }
+
+    /// #18550: install the worker's RG activation-epoch reader (see the
+    /// `rg_epoch_reader` field). Called once from `worker_loop_setup`.
+    pub(crate) fn set_rg_epoch_reader(
+        &mut self,
+        reader: std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>,
+    ) {
+        self.rg_epoch_reader = Some(reader);
+    }
+
+    /// #18562: share the node's punt-seed directory with this table. Called
+    /// once from `worker_loop`, on an empty table (any row this table had
+    /// published to its previous directory is retired first).
+    pub(crate) fn set_punt_seed_directory(&mut self, directory: std::sync::Arc<PuntSeedDirectory>) {
+        self.punt_seeds.retire_table(self.punt_seed_table_token);
+        self.punt_seeds = directory;
+    }
+
+    /// #18562: the node's live punt seeds, for the embedded-ICMP matcher's
+    /// cross-worker fallback (`icmp_embed/nat_match_v4.rs` / `_v6.rs`).
+    pub(crate) fn punt_seed_directory(&self) -> &PuntSeedDirectory {
+        &self.punt_seeds
+    }
+
+    /// #18562: a directory row is a snapshot taken at insert. Every in-place
+    /// writer of a FORWARD entry's decision or metadata calls this first, so
+    /// a seed it rewrites (resolution, owner RG, zone pair) loses its row
+    /// instead of leaving a stale snapshot behind — fail closed: the row only
+    /// ever answers an error the shared maps could not. The writers:
+    /// `refresh_in_place`, `revalidate_forwarding_resolution_with_egress_zone`,
+    /// `rebind_forward_egress_zone`, `rebind_policy_pair`, `rebind_zones_pair`
+    /// (`update_reverse_route_on_filter_hit` writes reverse entries only, and a
+    /// row is never a reverse entry).
+    fn retire_punt_seed_row_before_rewrite(&self, key: &SessionKey) {
+        if self.punt_seeds.len() == 0 {
+            return;
+        }
+        if let Some(&handle) = self.key_to_handle.get(key)
+            && let Some(record) = self.entries.get(handle as usize)
+            && record.key == *key
+            && record.entry.origin == SessionOrigin::FabricPuntSeed
+        {
+            self.punt_seeds
+                .retire(key, self.punt_seed_table_token, record.entry.session_id);
+        }
+    }
+
+    /// #18550: the current activation epoch for `owner_rg_id`, if a reader is
+    /// installed. Same index mapping as the wheel's `epoch_of`.
+    pub(crate) fn current_rg_epoch(&self, owner_rg_id: i32) -> Option<u32> {
+        self.rg_epoch_reader
+            .as_ref()
+            .map(|reader| reader(owner_rg_id))
     }
 
     /// #4915 + #6311: namespace this table's session ids so the STABLE session
@@ -2738,6 +3014,9 @@ impl SessionTable {
         let hit_is_reverse = record.entry.metadata.is_reverse;
         let hit_nat = record.entry.decision.nat;
         let old_owner_rg_id = record.entry.metadata.owner_rg_id;
+        // #18562: this rewrites the hit's resolution / owner RG (and maybe the
+        // pair's egress zone, below) in place.
+        self.retire_punt_seed_row_before_rewrite(&canonical_key);
         if let Some(new_owner_rg_id) = owner_rg_id
             && new_owner_rg_id != old_owner_rg_id
         {
@@ -2771,6 +3050,7 @@ impl SessionTable {
                 )
             };
             if forward_key != reverse_key {
+                self.retire_punt_seed_row_before_rewrite(&forward_key);
                 if let Some(fwd) = self.entry_by_key_mut(&forward_key)
                     && !fwd.metadata.is_reverse
                     && fwd.metadata.egress_zone != new_zone
@@ -2833,6 +3113,8 @@ impl SessionTable {
         if fwd.metadata.is_reverse {
             return false;
         }
+        // #18562: the forward leg's egress zone is rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(&forward_key);
         if forward_key != reverse_key {
             if let Some(fwd) = self.entry_by_key_mut(&forward_key)
                 && fwd.metadata.egress_zone != new_egress_zone
@@ -3496,9 +3778,11 @@ impl SessionTable {
             for (key, handle) in &self.key_to_handle {
                 if let Some(record) = self.entries.get(*handle as usize) {
                     let ingress_zone = record.entry.metadata.ingress_zone;
-                    if !record.entry.metadata.is_reverse
-                        && install::session_limit_origin_counted(record.entry.origin)
-                    {
+                    if self.session_limit_counted(
+                        key,
+                        record.entry.origin,
+                        record.entry.metadata.is_reverse,
+                    ) {
                         let c = self
                             .session_limit_dst_counts
                             .entry((ingress_zone, key.dst_ip))
@@ -3519,6 +3803,99 @@ impl SessionTable {
         }
         self.session_limit_active = active;
     }
+    /// #18640: set this table's slot in the node's HA fan-out (see
+    /// `session_limit_shard_index`). Called once at worker launch with the
+    /// worker's rank in the bring-up's worker set and that set's size. The
+    /// counts are rebuilt from the slab under the new designation, so a later
+    /// decrement always matches the increment the same predicate made.
+    pub(crate) fn set_session_limit_shard(&mut self, index: u32, width: u32) {
+        let width = width.max(1);
+        let index = index.min(width - 1);
+        if index == self.session_limit_shard_index && width == self.session_limit_shard_width {
+            return;
+        }
+        self.session_limit_shard_index = index;
+        self.session_limit_shard_width = width;
+        self.rebuild_session_limit_counts();
+    }
+
+    /// #18640: source-count decrements that found no count (see the field).
+    #[cfg(test)]
+    pub(crate) fn session_limit_dec_underflows(&self) -> u64 {
+        self.session_limit_dec_underflows
+    }
+
+    /// #18640: this table's (index, width) slot, for the worker-setup cell.
+    #[cfg(test)]
+    pub(crate) fn session_limit_shard(&self) -> (u32, u32) {
+        (self.session_limit_shard_index, self.session_limit_shard_width)
+    }
+
+    /// #18640: whether THIS worker charges a fanned-out HA copy of the session
+    /// keyed `key`. Exactly one worker of the node's fan-out does.
+    #[inline]
+    fn session_limit_charges_fanout_copy(&self, key: &SessionKey) -> bool {
+        use std::hash::BuildHasher;
+        let width = self.session_limit_shard_width;
+        width <= 1
+            || (self.session_limit_shard_hash.hash_one(key) % u64::from(width))
+                == u64::from(self.session_limit_shard_index)
+    }
+
+    /// #2134/#3122/#10310/#18640: the counted-class predicate, the single
+    /// definition every increment, decrement and transition site uses.
+    ///
+    /// A row counts toward the per-source quota iff it is the forward half of
+    /// a logical session this worker is charged for:
+    /// - reverse rows never count (one charge per logical session);
+    /// - `WorkerLocalImport` replicas of a session another worker authored do
+    ///   not count (#10310);
+    /// - a fanned-out HA copy (`SyncImport`, and `SyncLiveness`, which is
+    ///   stored as `SyncImport`) counts on exactly ONE worker of the node
+    ///   (#18640), so a standby's quota sees each peer session once, spread
+    ///   across workers the way RSS spreads local sessions. #3122 holds: the
+    ///   copies still count, so failover cannot hand a client a fresh quota;
+    /// - every other origin (local flows, transient seeds, the serving worker's
+    ///   `SharedMaterialize` / `SharedPromote` row) counts on its own worker.
+    #[inline]
+    pub(crate) fn session_limit_counted(
+        &self,
+        key: &SessionKey,
+        origin: SessionOrigin,
+        is_reverse: bool,
+    ) -> bool {
+        if is_reverse || !install::session_limit_origin_counted(origin) {
+            return false;
+        }
+        if matches!(origin, SessionOrigin::SyncImport | SessionOrigin::SyncLiveness) {
+            return self.session_limit_charges_fanout_copy(key);
+        }
+        true
+    }
+
+    /// #18640: recompute the source (and, when enabled, destination) counts
+    /// from the live slab with the current predicate. Reservation counts are
+    /// local and unaffected.
+    fn rebuild_session_limit_counts(&mut self) {
+        let mut src: Vec<(u32, IpAddr, IpAddr)> = Vec::new();
+        for (key, handle) in &self.key_to_handle {
+            if let Some(record) = self.entries.get(*handle as usize)
+                && self.session_limit_counted(
+                    key,
+                    record.entry.origin,
+                    record.entry.metadata.is_reverse,
+                )
+            {
+                src.push((record.entry.metadata.ingress_zone, key.src_ip, key.dst_ip));
+            }
+        }
+        self.session_limit_src_counts.clear();
+        self.session_limit_dst_counts.clear();
+        for (zone, sip, dip) in src {
+            self.session_limit_inc(zone, sip, dip);
+        }
+    }
+
     /// #2134/#10985: non-mutating read of the live count for one source IP
     /// within an ingress zone. Used by the new-flow check before a session
     /// is created so the (limit+1)-th new flow is dropped only against its
@@ -3555,7 +3932,7 @@ impl SessionTable {
     /// #2134/#3122/#10310/#10985/#11057: increment the always-on source count
     /// and, when enabled, the optional destination count for a freshly
     /// counted session. Caller MUST have evaluated the shared counted-class
-    /// predicate (`!is_reverse && install::session_limit_origin_counted(origin)`).
+    /// predicate (`session_limit_counted`).
     #[inline]
     fn session_limit_inc(&mut self, ingress_zone: u32, src_ip: IpAddr, dst_ip: IpAddr) {
         let c = self
@@ -3584,6 +3961,14 @@ impl SessionTable {
             *c = c.saturating_sub(1);
             if *c == 0 {
                 self.session_limit_src_counts.remove(&src_key);
+            }
+        } else {
+            // #18640: a decrement with no matching increment. The saturating
+            // shape would otherwise hide a double decrement (or a decrement
+            // under a different predicate) completely; the cells assert 0.
+            #[cfg(test)]
+            {
+                self.session_limit_dec_underflows = self.session_limit_dec_underflows.saturating_add(1);
             }
         }
         if !self.session_limit_active {
@@ -3706,6 +4091,24 @@ impl SessionTable {
             Self::is_pressure_shed_unreplied(&record.key, &record.entry, false)
                 .then(|| record.key.clone());
         let bare_tuple = record.key.bare_tuple();
+        // #18562: the slab insert choke point publishes a forward punt seed to
+        // the node's directory; `remove_entry` is its retire twin.
+        if record.entry.origin == SessionOrigin::FabricPuntSeed && !record.entry.metadata.is_reverse {
+            let _ = self.punt_seeds.publish(
+                &record.key,
+                PuntSeedRow {
+                    decision: record.entry.decision,
+                    metadata: record.entry.metadata.clone(),
+                    session_id: record.entry.session_id,
+                    table_token: self.punt_seed_table_token,
+                    expires_at_ns: PuntSeedRow::deadline(
+                        record.entry.created_ns,
+                        record.entry.expires_after_ns,
+                    ),
+                },
+                record.entry.created_ns,
+            );
+        }
         let raw = self.entries.insert(record);
         let handle: u32 = raw.try_into().expect("slab handle exceeds u32");
         if let Some(key) = opening_key {
@@ -3839,6 +4242,33 @@ impl SessionTable {
             self.lookup_miss_stale_handle.load(AtomicOrdering::Relaxed),
             self.lookup_miss_key_mismatch.load(AtomicOrdering::Relaxed),
         )
+    }
+    /// #18520 test instrument: cumulative calls into
+    /// `cache_hit_handshake_progress` + `node_served_evidence`.
+    #[cfg(test)]
+    pub(crate) fn handshake_progress_probe_count_for_test(&self) -> u64 {
+        self.handshake_progress_probes
+            .load(AtomicOrdering::Relaxed)
+    }
+    /// #18533 test instrument: `(expected_ack, undo_capture, emit_resolve)`
+    /// lookup counts — see `ProbeCostProbes`.
+    #[cfg(test)]
+    pub(crate) fn probe_cost_counts_for_test(&self) -> (u64, u64, u64) {
+        (
+            self.probe_cost_probes.expected_ack.load(AtomicOrdering::Relaxed),
+            self.probe_cost_probes.undo_capture.load(AtomicOrdering::Relaxed),
+            self.probe_cost_probes.emit_resolve.load(AtomicOrdering::Relaxed),
+        )
+    }
+    /// #18533 round 2 test instrument: rollback undo records built.
+    #[cfg(test)]
+    pub(crate) fn probe_undo_records_for_test(&self) -> u64 {
+        self.probe_cost_probes.undo_records.load(AtomicOrdering::Relaxed)
+    }
+    /// #18533 test view: undo records awaiting admission or rollback.
+    #[cfg(test)]
+    pub(crate) fn pending_probe_undo_len_for_test(&self) -> usize {
+        self.pending_probe_undo.len()
     }
     #[cfg(test)]
     pub(crate) fn expiry_key_index_probe_count_for_test(&self) -> u64 {
@@ -4122,7 +4552,7 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, None)
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, None, false)
     }
 
     /// #16042: [`Self::probe_hit`] carrying the parsed segment ack.
@@ -4136,7 +4566,7 @@ impl SessionTable {
         dscp: u8,
         ack: Option<u32>,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, ack)
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, ack, false)
     }
 
     /// Probe a flow-cache hit while deferring the HA completion delta.
@@ -4157,10 +4587,13 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false, None)
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false, None, true)
     }
 
-    /// #16042: deferring probe carrying the parsed segment ack.
+    /// #16042: deferring probe carrying the parsed segment ack. Always
+    /// records the rollback undo (test view of
+    /// [`Self::probe_hit_deferring_state_update_with_ack_rollback`]).
+    #[cfg(test)]
     pub fn probe_hit_deferring_state_update_with_ack(
         &mut self,
         key: &SessionKey,
@@ -4171,12 +4604,71 @@ impl SessionTable {
         dscp: u8,
         ack: Option<u32>,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false, ack)
+        self.probe_hit_deferring_state_update_with_ack_rollback(
+            key, now_ns, len, tcp_flags, payload_len, dscp, ack, true,
+        )
+    }
+
+    /// #18533 round 2: the flow-cache hit's deferring probe.
+    /// `rollback_possible` says whether the caller can still drop this packet
+    /// after the probe (a cached `then discard`/`then reject` selection, or
+    /// any three-color policer) and so may call
+    /// [`Self::rollback_dropped_probe_hit`]. When it cannot, the probe records
+    /// no undo at all — that record (a few hundred bytes built and pushed on
+    /// every packet) exists only for the rollback — while the deferred HA
+    /// Update, the stage-transition marker and their admission keying are
+    /// unchanged. A caller that passes `false` and then rolls back restores
+    /// nothing; `flow_cache_hit.rs` derives the flag from the same selection
+    /// fields its drop test reads.
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    pub fn probe_hit_deferring_state_update_with_ack_rollback(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        len: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        dscp: u8,
+        ack: Option<u32>,
+        rollback_possible: bool,
+    ) -> bool {
+        self.probe_hit_inner(
+            key,
+            now_ns,
+            len,
+            tcp_flags,
+            payload_len,
+            dscp,
+            false,
+            ack,
+            rollback_possible,
+        )
     }
 
     /// Emit the HA Update withheld by
     /// [`Self::probe_hit_deferring_state_update`] after TX admission.
     pub fn emit_probe_hit_state_update(&mut self, key: &SessionKey) {
+        // #18533: steady state. Nothing is withheld, and the only undo is
+        // the one this packet's own probe just recorded under its canonical
+        // key — which IS the packet key on every non-alias hit. Consume it
+        // without resolving `key` through the session index (the resolution
+        // below was a key hash on every admitted cache-hit packet). Any other
+        // shape — a withheld Update, an alias packet key, an undo left by an
+        // unadmitted earlier probe — takes the resolving path unchanged.
+        if self.pending_probe_state_updates.is_empty() {
+            match self.pending_probe_undo.as_slice() {
+                [] => return,
+                [only] if only.canonical_key == *key => {
+                    self.pending_probe_undo.clear();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        #[cfg(test)]
+        self.probe_cost_probes
+            .emit_resolve
+            .fetch_add(1, AtomicOrdering::Relaxed);
         // #15947 fold: resolve the packet identity to the producer's
         // canonical stored key first, so a translated-alias admission
         // publishes (and consumes) the same record the probe queued.
@@ -4193,15 +4685,15 @@ impl SessionTable {
         let pending_matches = self
             .pending_probe_state_updates
             .iter()
-            .any(|(matched_key, _, _)| matched_key == &canonical);
+            .any(|(admission_key, _, _, _)| admission_key == &canonical);
         if pending_matches {
             let pending = std::mem::take(&mut self.pending_probe_state_updates);
             let mut retained = Vec::with_capacity(pending.len());
-            for (matched_key, class_before, handshake_before) in pending {
-                if matched_key == canonical {
+            for (admission_key, matched_key, class_before, handshake_before) in pending {
+                if admission_key == canonical {
                     self.emit_session_state_update(&matched_key, class_before, handshake_before);
                 } else {
-                    retained.push((matched_key, class_before, handshake_before));
+                    retained.push((admission_key, matched_key, class_before, handshake_before));
                 }
             }
             self.pending_probe_state_updates = retained;
@@ -4249,9 +4741,9 @@ impl SessionTable {
         let had_deferred = self
             .pending_probe_state_updates
             .iter()
-            .any(|(matched_key, _, _)| matched_key == &canonical);
+            .any(|(admission_key, _, _, _)| admission_key == &canonical);
         self.pending_probe_state_updates
-            .retain(|(matched_key, _, _)| matched_key != &canonical);
+            .retain(|(admission_key, _, _, _)| admission_key != &canonical);
         let Some(pos) = self
             .pending_probe_undo
             .iter()
@@ -4260,8 +4752,7 @@ impl SessionTable {
             return had_deferred;
         };
         let undo = self.pending_probe_undo.remove(pos);
-        let restore = |table: &mut Self, half: &(SessionKey, ProbeHalfUndo)| {
-            let (half_key, snap) = half;
+        let restore = |table: &mut Self, half_key: &SessionKey, snap: &ProbeHalfUndo| {
             let mut seen = snap.last_seen_ns;
             if let Some(entry) = table.entry_by_key_mut(half_key) {
                 entry.counters = snap.counters;
@@ -4281,22 +4772,20 @@ impl SessionTable {
             }
             table.push_to_wheel(half_key, seen);
         };
-        restore(self, &undo.matched);
-        if let Some(companion) = &undo.companion {
-            restore(self, companion);
+        // #18533: the undo holds exactly the pieces this probe wrote (see
+        // `ProbeUndo`); the pre-#18533 `accounting` snapshot always
+        // de-duplicated onto `matched` or `companion` and is gone.
+        restore(self, &undo.canonical_key, &undo.matched);
+        if let Some((companion_key, snap)) = &undo.companion {
+            restore(self, companion_key, snap);
         }
-        if let Some(accounting) = &undo.accounting {
-            if accounting.0 != undo.matched.0
-                && undo.companion.as_ref().map(|c| &c.0) != Some(&accounting.0)
-            {
-                restore(self, accounting);
+        if let Some((shed_forward_key, was_present)) = &undo.shed {
+            if *was_present {
+                self.pressure_shed_unreplied
+                    .insert(shed_forward_key.clone(), ());
+            } else {
+                self.pressure_shed_unreplied.remove(shed_forward_key);
             }
-        }
-        if undo.shed_was_present {
-            self.pressure_shed_unreplied
-                .insert(undo.shed_forward_key.clone(), ());
-        } else {
-            self.pressure_shed_unreplied.remove(&undo.shed_forward_key);
         }
         // #16217 (GLM F1): a dropped probe must leave NO Established
         // evidence behind. Remove the stage-transition marker the
@@ -4306,8 +4795,8 @@ impl SessionTable {
         // created). Pre-fix both survived the rollback, so a dropped
         // completing ACK still advanced node-level evidence.
         self.pending_probe_stage_transitions
-            .retain(|k| k != &undo.canonical_key);
-        for slot in undo.stamp_snapshots.iter().take(undo.stamp_snapshot_len) {
+            .retain(|(k, _, _)| k != &undo.canonical_key);
+        for slot in &undo.stamp_snapshots {
             let Some((stamp_key, prior)) = slot else {
                 continue;
             };
@@ -4323,22 +4812,44 @@ impl SessionTable {
         had_deferred
     }
 
-    /// #16217 (GLM B1): did the deferred probe completion for `key`
-    /// transition the handshake stage into Established? Consumes the
-    /// record. The flow-cache hit path restamps shared-map evidence
-    /// ONLY when this returns true — a steady-state established hit
-    /// (no transition) must never take the shared-map locks.
+    /// Test view of [`Self::take_probe_stage_transition_forward`] as a flag.
+    #[cfg(test)]
     pub fn take_probe_stage_transition(&mut self, key: &SessionKey) -> bool {
-        if let Some(pos) = self
+        self.take_probe_stage_transition_forward(key).is_some()
+    }
+
+    /// #16217 (GLM B1): did the deferred probe completion admitted under
+    /// `key` transition the handshake stage into Established? Consumes the
+    /// record. The flow-cache hit path restamps shared-map evidence ONLY
+    /// when this returns `Some` — a steady-state established hit (no
+    /// transition) must never take the shared-map locks.
+    ///
+    /// #18520: returns the FORWARD pair (canonical forward key + its NAT)
+    /// the transition completed, which is what those restamps are keyed
+    /// on. A reverse cache hit can complete the pair (#16223 companion arm,
+    /// SYN-ACK-first reverse ACK), and restamping on the reverse tuple wrote
+    /// a forward-wire alias cloned from the REVERSE shared row.
+    pub fn take_probe_stage_transition_forward(
+        &mut self,
+        key: &SessionKey,
+    ) -> Option<(SessionKey, crate::nat::NatDecision)> {
+        // Steady state: nothing pending, no key resolution at all.
+        if self.pending_probe_stage_transitions.is_empty() {
+            return None;
+        }
+        // #18520: the record is keyed by the probed packet's canonical key
+        // (see `pending_probe_stage_transitions`); resolve a translated
+        // alias the same way the admit/rollback calls do.
+        let canonical = self
+            .revalidation_record(key)
+            .map(|record| record.key.clone())
+            .unwrap_or_else(|| key.clone());
+        let pos = self
             .pending_probe_stage_transitions
             .iter()
-            .position(|k| k == key)
-        {
-            self.pending_probe_stage_transitions.remove(pos);
-            true
-        } else {
-            false
-        }
+            .position(|(k, _, _)| *k == canonical)?;
+        let (_, forward_key, forward_nat) = self.pending_probe_stage_transitions.remove(pos);
+        Some((forward_key, forward_nat))
     }
 
     fn probe_hit_inner(
@@ -4351,11 +4862,20 @@ impl SessionTable {
         dscp: u8,
         emit_state_update: bool,
         ack: Option<u32>,
+        record_undo: bool,
     ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
-        // #16042 fold: expected ack only for pending pairs — the helper
-        // returns None without the companion probe otherwise.
-        let expected_ack = self.handshake_expected_ack(key);
+        // #18533: the classic completion shape seen under the record borrow
+        // below — every conjunct except the #16042 ack check — with the
+        // canonical key, NAT and pre-completion wire state. The expected ack
+        // lives on the COMPANION record, so it is resolved after the borrow
+        // and only for this shape: an established, non-pending row (every
+        // steady-state packet) never pays that lookup. Pre-#18533 it ran
+        // first, on every packet, a record lookup only to return `None`.
+        let mut classic_candidate: Option<(SessionKey, crate::nat::NatDecision, u8, u8)> = None;
+        // #16223 progress shape (see below): armed after the ack verdict,
+        // because a refused classic candidate may still carry evidence.
+        let mut progress_shape = false;
         // #16223: split-path evidence of handshake progress observed on
         // the COMPANION half (see `cache_hit_handshake_progress`).
         let mut companion_progress = false;
@@ -4368,101 +4888,25 @@ impl SessionTable {
         let mut close_class_before = 0u8;
         let mut canonical_refresh_key: Option<SessionKey> = None;
         let mut reverse_fold: Option<(SessionKey, crate::nat::NatDecision)> = None;
-        // #15947 fold: capture the exact pre-probe state before any
-        // mutation, but only for the deferring arm (the sole caller
-        // that can roll back). Uses the non-counting revalidation
-        // resolver (record_by_key would count a spurious miss and
-        // perturb the #7919 counters the stage tests assert on), so a
-        // translated-alias packet identity keys the record by the
-        // producer's canonical stored key.
+        // #15947 fold / #18533: the deferring arm's rollback record (it is
+        // the sole caller that can roll back). The probed record is copied
+        // out of the borrow below BEFORE it is mutated; every other piece is
+        // added just before its first write (see `ProbeUndo`). The probed
+        // record's direction and NAT are kept for the completion capture.
         let mut probe_undo: Option<ProbeUndo> = None;
-        if !emit_state_update {
-            if let Some(record) = self.revalidation_record(key) {
-                let matched_key = record.key.clone();
-                let snap = |e: &SessionEntry| ProbeHalfUndo {
-                    counters: e.counters,
-                    observed_tcp_flags: e.observed_tcp_flags,
-                    observed_tos: e.observed_tos,
-                    established: e.established,
-                    handshake_pending: e.handshake_pending,
-                    syn_ack_first: e.syn_ack_first,
-                    last_seen_ns: e.last_seen_ns,
-                    expires_after_ns: e.expires_after_ns,
-                };
-                let matched_snap = snap(&record.entry);
-                let is_reverse = record.entry.metadata.is_reverse;
-                let nat = record.entry.decision.nat;
-                let companion_key = reverse_session_key(&matched_key, nat);
-                let companion = if companion_key != matched_key {
-                    self.revalidation_record(&companion_key).map(|r| (companion_key.clone(), snap(&r.entry)))
-                } else {
-                    None
-                };
-                let accounting = if is_reverse {
-                    // Mirror probe_hit_inner's reverse fold exactly:
-                    // forward companion if present, else the matched
-                    // reverse entry itself (reverse-only sessions).
-                    if self.revalidation_record(&companion_key).is_some() {
-                        self.revalidation_record(&companion_key)
-                            .map(|r| (companion_key.clone(), snap(&r.entry)))
-                    } else {
-                        Some((matched_key.clone(), matched_snap))
-                    }
-                } else {
-                    Some((matched_key.clone(), matched_snap))
-                };
-                let shed_forward_key = if is_reverse {
-                    companion_key.clone()
-                } else {
-                    matched_key.clone()
-                };
-                let shed_was_present =
-                    self.pressure_shed_unreplied.contains_key(&shed_forward_key);
-                // #16217 (GLM F1, Final5): snapshot every node-served
-                // stamp this probe may write (forward orientations of
-                // the matched + companion keys) BEFORE any mutation.
-                // Bounded stack array, direct == dedup, no heap
-                // allocation and no format/sort on this path.
-                let mut stamp_snapshots: [Option<(SessionKey, Option<(u8, u64)>)>; 4] =
-                    [None, None, None, None];
-                let mut stamp_snapshot_len = 0usize;
-                {
-                    let candidates = [
-                        Some(matched_key.clone()),
-                        Some(reverse_session_key(&matched_key, nat)),
-                        (companion_key != matched_key).then(|| companion_key.clone()),
-                        (companion_key != matched_key)
-                            .then(|| reverse_session_key(&companion_key, nat)),
-                    ];
-                    for cand in candidates.into_iter().flatten() {
-                        if stamp_snapshots[..stamp_snapshot_len]
-                            .iter()
-                            .any(|slot| slot.as_ref().is_some_and(|(k, _)| *k == cand))
-                        {
-                            continue;
-                        }
-                        if stamp_snapshot_len < stamp_snapshots.len() {
-                            let v = self.node_served_stamps.get(&cand).copied();
-                            stamp_snapshots[stamp_snapshot_len] = Some((cand, v));
-                            stamp_snapshot_len += 1;
-                        }
-                    }
-                }
-                probe_undo = Some(ProbeUndo {
-                    canonical_key: matched_key.clone(),
-                    matched: (matched_key, matched_snap),
-                    companion,
-                    accounting,
-                    shed_forward_key,
-                    shed_was_present,
-                    stamp_snapshots,
-                    stamp_snapshot_len,
-                });
-            }
-        }
-        match self.record_by_key_mut(key) {
+        let (probed_is_reverse, probed_nat) = match self.record_by_key_mut(key) {
             Some(record) => {
                 let entry = &mut record.entry;
+                let probed = (entry.metadata.is_reverse, entry.decision.nat);
+                if !emit_state_update && record_undo {
+                    probe_undo = Some(ProbeUndo {
+                        canonical_key: record.key.clone(),
+                        matched: ProbeHalfUndo::of(entry),
+                        companion: None,
+                        shed: None,
+                        stamp_snapshots: [None, None],
+                    });
+                }
                 let age = now_ns.saturating_sub(entry.last_seen_ns);
                 if age > entry.expires_after_ns {
                     // #16223: this half idle-crossed, but a live
@@ -4472,13 +4916,21 @@ impl SessionTable {
                     // check after the borrow instead of refusing.
                     companion_crossed = true;
                 } else {
+                // #18520: a live cache hit on this table. Stored only on
+                // change: a steady-state hit on a reverse row is otherwise
+                // read-only (accounting folds onto the forward row), and an
+                // unconditional store would dirty its line per packet.
+                if !entry.served_here {
+                    entry.served_here = true;
+                    #[cfg(test)]
+                    SERVED_HERE_STORES_FOR_TEST.with(|count| count.set(count.get() + 1));
+                }
                 // #14939 handshake completion (mirrors
                 // `touch_if_stale_with_payload`): not a keepalive refresh,
                 // so it applies even inside the throttle window.
-                // #16042: a known-but-wrong ack must not complete here.
-                let ack_valid = Self::handshake_ack_valid(expected_ack, ack);
+                // #16042: a known-but-wrong ack must not complete here —
+                // judged after the borrow (#18533, above).
                 if entry.handshake_pending
-                    && ack_valid
                     && !entry.closing
                     && matches!(key.protocol, PROTO_TCP)
                     && crate::tcp_flags::has_ack(tcp_flags)
@@ -4486,10 +4938,12 @@ impl SessionTable {
                     && !is_closing(tcp_flags)
                     && (entry.syn_ack_first == entry.metadata.is_reverse)
                 {
-                    handshake_state_before =
-                        entry.tcp_handshake_state_wire(key.protocol);
-                    close_class_before = entry.tcp_close_class_wire();
-                    completing = Some((record.key.clone(), entry.decision.nat));
+                    classic_candidate = Some((
+                        record.key.clone(),
+                        entry.decision.nat,
+                        entry.tcp_handshake_state_wire(key.protocol),
+                        entry.tcp_close_class_wire(),
+                    ));
                 }
                 // #16223: split-RG / fabric-ingress / replica rows never
                 // observe the completing segment on the pending half:
@@ -4503,14 +4957,17 @@ impl SessionTable {
                 // verdict to the companion-aware check after the borrow
                 // (the companion may be the half that observed the
                 // SYN-ACK / completing ACK).
-                if completing.is_none()
-                    && !entry.closing
+                // #18520: only a handshake-INCOMPLETE row can carry
+                // progress evidence — `cache_hit_handshake_progress`
+                // refuses an `established && !handshake_pending` hit on
+                // its first check, so arming it for every established
+                // payload packet only paid that refusal's lookup per
+                // packet (the gate `touch_if_stale_with_ack` already had).
+                progress_shape = !entry.closing
                     && matches!(key.protocol, PROTO_TCP)
                     && !is_closing(tcp_flags)
-                    && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len)
-                {
-                    companion_progress = true;
-                }
+                    && (!entry.established || entry.handshake_pending)
+                    && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len);
                 let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
                     / SESSION_KEEPALIVE_DIVISOR;
                 let payload_progress = entry.closing
@@ -4533,8 +4990,27 @@ impl SessionTable {
                     reverse_fold = Some((record.key.clone(), entry.decision.nat));
                 }
                 }
+                probed
             }
             None => return false,
+        };
+        #[cfg(test)]
+        if probe_undo.is_some() {
+            self.probe_cost_probes
+                .undo_records
+                .fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        if let Some((candidate_key, candidate_nat, state_before, class_before)) = classic_candidate {
+            // #16042: the classic arm completes only on the expected ack (or
+            // an unknown expectation / unparsed ack, which fails open).
+            if Self::handshake_ack_valid(self.handshake_expected_ack(key), ack) {
+                handshake_state_before = state_before;
+                close_class_before = class_before;
+                completing = Some((candidate_key, candidate_nat));
+            }
+        }
+        if completing.is_none() && progress_shape {
+            companion_progress = true;
         }
         // #16223: this half idle-crossed before the hit. Only a live,
         // progressed companion can resurrect it (the GC companion
@@ -4566,49 +5042,25 @@ impl SessionTable {
                 completing = Some((matched_key, nat));
             }
         }
-        // #16223 (second failure conjunct): the fused probe returns
-        // `false` once EITHER half idle-crosses (`age >
-        // expires_after`), and the GC companion probe refuses a
-        // never-established companion — so a pair whose hits were all
-        // throttled (`age < expires_after/4` re-stamps nothing) or
-        // whose serving worker never re-stamped the replica rows
-        // (live `last_seen == created` on every row) is reaped at
-        // 20 s while both nodes serve it. When this hit proves
-        // handshake progress but the classic completion did not land
-        // (e.g. the pair is SYN-ACK-first on the companion), keep the
-        // live pair alive: re-stamp BOTH halves on their current
-        // windows so the next progress hit can complete them instead
-        // of the GC reaping them mid-flow. Bounded: the re-stamp is
-        // THIS hit's real timestamp, so a flow that goes quiet still
-        // reaps one window after its last served packet.
-        if completing.is_none() && companion_progress {
-            if self.cache_hit_handshake_progress(key).is_some() {
-                let companion_key = {
-                    let hit_nat = self.entry_by_key(key).map(|e| e.decision.nat);
-                    hit_nat.map(|nat| reverse_session_key(key, nat))
-                };
-                let mut touched = false;
-                if let Some(entry) = self.entry_by_key_mut(key) {
-                    entry.last_seen_ns = now_ns;
-                    touched = true;
-                }
-                if let Some(companion_key) = companion_key {
-                    if companion_key != *key {
-                        if let Some(entry) = self.entry_by_key_mut(&companion_key) {
-                            entry.last_seen_ns = now_ns;
-                            touched = true;
-                        }
-                        if touched {
-                            self.push_to_wheel(&companion_key, now_ns);
-                        }
-                    }
-                }
-                if touched {
-                    self.push_to_wheel(key, now_ns);
-                }
-            }
-        }
+        // #18520: the former #16223 "second failure conjunct" arm here
+        // re-ran `cache_hit_handshake_progress(key)` when the call just
+        // above had returned `None`, to re-stamp both halves of a
+        // progressed-but-uncompleted pair. The helper is a pure `&self`
+        // read and nothing mutates the table between the two calls, so
+        // that second call could only return `None` again: the arm was
+        // unreachable and cost a second evidence scan on every payload
+        // packet of a non-established pair. Removed; live split pairs are
+        // instead completed by the cross-worker handshake relay
+        // (`handshake_relay.rs`) and retained by the GC
+        // `opening_companion_keeps_alive` arm.
         if let Some((matched_key, nat)) = completing {
+            // #18533: the completion is the first write to anything beyond
+            // the probed record (the companion half, the pressure-shed
+            // index) — capture both now, still pre-probe values. Rare: one
+            // completing packet per flow.
+            if let Some(undo) = probe_undo.as_mut() {
+                self.capture_completion_undo(undo, probed_is_reverse, probed_nat);
+            }
             let timeouts = self.timeouts;
             let opening_override_ns = self
                 .entry_by_key(&matched_key)
@@ -4657,19 +5109,34 @@ impl SessionTable {
                 // older flow's unadmitted transition. Bound the queue so a
                 // sustained dropped-ACK stream cannot grow it without
                 // limit; 64 covers a full poll batch of completions.
+                // #18520: the admission key is the probed packet's
+                // canonical key (what the admit/rollback calls resolve),
+                // which differs from `matched_key` when a reverse hit
+                // completes the forward half via the companion arm.
+                // #18533 round 2: without an undo (no rollback possible),
+                // resolve the canonical key here — the same resolution the
+                // admission emit applies; one lookup, completing packet only.
+                let admission_key = match probe_undo.as_ref() {
+                    Some(undo) => undo.canonical_key.clone(),
+                    None => self
+                        .revalidation_record(key)
+                        .map(|record| record.key.clone())
+                        .unwrap_or_else(|| key.clone()),
+                };
                 self.pending_probe_state_updates
-                    .retain(|(old_key, _, _)| old_key != &matched_key);
+                    .retain(|(old_admission, _, _, _)| old_admission != &admission_key);
                 if self.pending_probe_state_updates.len() >= 64 {
                     // Overflow must not silently lose an HA transition:
                     // publish the evicted oldest Update immediately and
                     // latch delta-loss so the worker forces a full resync
                     // (the same recovery used for delta-ring overflow).
-                    let (old_key, old_class, old_handshake) =
+                    let (_, old_key, old_class, old_handshake) =
                         self.pending_probe_state_updates.remove(0);
                     self.emit_session_state_update(&old_key, old_class, old_handshake);
                     self.set_delta_loss();
                 }
                 self.pending_probe_state_updates.push((
+                    admission_key.clone(),
                     matched_key.clone(),
                     close_class_before,
                     handshake_state_before,
@@ -4683,9 +5150,24 @@ impl SessionTable {
                 if !self
                     .pending_probe_stage_transitions
                     .iter()
-                    .any(|k| k == &matched_key)
+                    .any(|(k, _, _)| k == &admission_key)
                 {
-                    self.pending_probe_stage_transitions.push(matched_key.clone());
+                    let (stage_forward_key, stage_forward_nat) = match self.entry_by_key(&matched_key) {
+                        Some(entry) if entry.metadata.is_reverse => {
+                            let forward_key = reverse_session_key(&matched_key, nat);
+                            let forward_nat = self
+                                .entry_by_key(&forward_key)
+                                .map(|forward| forward.decision.nat)
+                                .unwrap_or(nat);
+                            (forward_key, forward_nat)
+                        }
+                        _ => (matched_key.clone(), nat),
+                    };
+                    self.pending_probe_stage_transitions.push((
+                        admission_key,
+                        stage_forward_key,
+                        stage_forward_nat,
+                    ));
                 }
             }
             self.push_to_wheel(&matched_key, now_ns);
@@ -4706,18 +5188,33 @@ impl SessionTable {
             } else {
                 (matched_key.clone(), 1)
             };
-            self.note_node_served_handshake(
+            let prior = self.note_node_served_handshake_prior(
                 &stamp_key,
                 TcpHandshakeState::Established.to_wire(),
                 stamp_rev,
             );
+            if let (Some(undo), Some(prior)) = (probe_undo.as_mut(), prior) {
+                undo.capture_stamp(&stamp_key, prior);
+            }
         } else if let Some(canonical_key) = canonical_refresh_key {
             self.touch(&canonical_key, now_ns);
         }
         if let Some((record_key, nat)) = reverse_fold {
             let mut stamped: Option<(SessionKey, u8, u64)> = None;
             let fwd_key = reverse_session_key(&record_key, nat);
-            if let Some(entry) = self.entry_by_key_mut(&fwd_key) {
+            if let Some(record) = self.record_by_key_mut(&fwd_key) {
+                // #18533: the forward companion's pre-charge state, from the
+                // borrow that charges it (no extra lookup). Skipped when a
+                // completion already captured it (that copy is the pre-probe
+                // one) and when the companion IS the probed record (its
+                // `matched` copy covers it).
+                if let Some(undo) = probe_undo.as_mut()
+                    && undo.companion.is_none()
+                    && record.key != undo.canonical_key
+                {
+                    undo.companion = Some((fwd_key.clone(), ProbeHalfUndo::of(&record.entry)));
+                }
+                let entry = &mut record.entry;
                 entry.counters.account(true, len);
                 entry.observed_tcp_flags |= tcp_flags;
                 let wire = entry.tcp_handshake_state_wire(fwd_key.protocol);
@@ -4727,7 +5224,12 @@ impl SessionTable {
                 entry.observed_tcp_flags |= tcp_flags;
             }
             if let Some((forward_key, wire, rev)) = stamped {
-                self.note_node_served_handshake(&forward_key, wire, rev);
+                // #18533: one stamp lookup, returning its pre-write value
+                // for the undo (was a separate per-packet snapshot lookup).
+                let prior = self.note_node_served_handshake_prior(&forward_key, wire, rev);
+                if let (Some(undo), Some(prior)) = (probe_undo.as_mut(), prior) {
+                    undo.capture_stamp(&forward_key, prior);
+                }
             }
         }
         if let Some(undo) = probe_undo {
@@ -4739,6 +5241,43 @@ impl SessionTable {
             self.pending_probe_undo.push(undo);
         }
         true
+    }
+
+    /// #18533: the completion half of the deferring probe's undo — the
+    /// companion record and the pair's pressure-shed membership, as the
+    /// pre-#18533 eager snapshot took them (companion = the canonical
+    /// key's reverse; shed keyed by the pair's forward key). Called right
+    /// before the completion's first write, when neither has been touched
+    /// by this probe yet, so the values are pre-probe.
+    fn capture_completion_undo(
+        &self,
+        undo: &mut ProbeUndo,
+        probed_is_reverse: bool,
+        probed_nat: crate::nat::NatDecision,
+    ) {
+        let companion_key = reverse_session_key(&undo.canonical_key, probed_nat);
+        if undo.companion.is_none() && companion_key != undo.canonical_key {
+            #[cfg(test)]
+            self.probe_cost_probes
+                .undo_capture
+                .fetch_add(1, AtomicOrdering::Relaxed);
+            if let Some(record) = self.revalidation_record(&companion_key)
+                && record.key != undo.canonical_key
+            {
+                undo.companion = Some((companion_key.clone(), ProbeHalfUndo::of(&record.entry)));
+            }
+        }
+        let shed_forward_key = if probed_is_reverse {
+            companion_key
+        } else {
+            undo.canonical_key.clone()
+        };
+        #[cfg(test)]
+        self.probe_cost_probes
+            .undo_capture
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        let was_present = self.pressure_shed_unreplied.contains_key(&shed_forward_key);
+        undo.shed = Some((shed_forward_key, was_present));
     }
 
 
@@ -5279,6 +5818,13 @@ impl SessionTable {
         true
     }
 
+    /// #18520: a transition INTO Established on a pair split across
+    /// workers also queues a `Completed` handshake relay for the siblings.
+    /// Every packet-driven completion (slow path, cache-hit probe incl. its
+    /// deferred TX-admission emit, HA-promote refresh) publishes through
+    /// this one choke point, which is why the relay producer lives here.
+    /// The relay consumer never calls it, so a relayed completion is never
+    /// relayed back (nor re-published).
     fn emit_session_state_update_inner(
         &mut self,
         matched_key: &SessionKey,
@@ -5299,6 +5845,14 @@ impl SessionTable {
         } else {
             matched_key.clone()
         };
+        if handshake_state_after == TcpHandshakeState::Established.to_wire()
+            && handshake_state_before != handshake_state_after
+        {
+            self.queue_completion_relay(&forward_key);
+        }
+        if class_after != class_before && class_after != 0 {
+            self.queue_close_relay(&forward_key);
+        }
         let Some(forward) = self.entry_by_key(&forward_key) else {
             return;
         };
@@ -5416,17 +5970,41 @@ impl SessionTable {
         handshake_wire: u8,
         rev_packets: u64,
     ) {
-        if rev_packets == 0 && handshake_wire != TcpHandshakeState::Established.to_wire() {
-            return;
+        let _ = self.note_node_served_handshake_prior(forward_key, handshake_wire, rev_packets);
+    }
+
+    /// #18533: [`Self::note_node_served_handshake`] returning what it
+    /// overwrote, so the deferring cache-hit probe records its rollback
+    /// value from the write's own lookup instead of a separate per-packet
+    /// snapshot lookup. `None`: nothing written. `Some(prior)`: written,
+    /// `prior` the stamp before the write (`None` when it was created).
+    /// The existing stamp is updated in place without cloning the key; only
+    /// a first stamp for the tuple pays the insert.
+    fn note_node_served_handshake_prior(
+        &mut self,
+        forward_key: &SessionKey,
+        handshake_wire: u8,
+        rev_packets: u64,
+    ) -> Option<Option<(u8, u64)>> {
+        let established = TcpHandshakeState::Established.to_wire();
+        if rev_packets == 0 && handshake_wire != established {
+            return None;
         }
-        let stamp = self
-            .node_served_stamps
-            .entry(forward_key.clone())
-            .or_insert((0, 0));
-        if handshake_wire == TcpHandshakeState::Established.to_wire() {
-            stamp.0 = handshake_wire;
+        let apply = |stamp: &mut (u8, u64)| {
+            if handshake_wire == established {
+                stamp.0 = handshake_wire;
+            }
+            stamp.1 = stamp.1.max(rev_packets);
+        };
+        if let Some(stamp) = self.node_served_stamps.get_mut(forward_key) {
+            let prior = *stamp;
+            apply(stamp);
+            return Some(Some(prior));
         }
-        stamp.1 = stamp.1.max(rev_packets);
+        let mut stamp = (0, 0);
+        apply(&mut stamp);
+        self.node_served_stamps.insert(forward_key.clone(), stamp);
+        Some(None)
     }
 
     /// #16223: node-level served evidence for the pair named by `key`
@@ -5438,6 +6016,9 @@ impl SessionTable {
     /// `node_served_stamps`. Returns zero evidence when nothing on the
     /// node has promoted/served the tuple.
     pub(crate) fn node_served_evidence(&self, key: &SessionKey) -> NodeServedEvidence {
+        #[cfg(test)]
+        self.handshake_progress_probes
+            .fetch_add(1, AtomicOrdering::Relaxed);
         let mut evidence = NodeServedEvidence::default();
         // Local serving pair, either orientation: an established,
         // non-pending, non-closing forward/reverse entry for the same
@@ -5500,6 +6081,9 @@ impl SessionTable {
         &self,
         hit_key: &SessionKey,
     ) -> Option<(SessionKey, crate::nat::NatDecision)> {
+        #[cfg(test)]
+        self.handshake_progress_probes
+            .fetch_add(1, AtomicOrdering::Relaxed);
         let hit = self.entry_by_key(hit_key)?;
         if hit.closing || (hit.established && !hit.handshake_pending) {
             return None;
@@ -5829,6 +6413,15 @@ impl SessionTable {
         }
         // Snapshot the OLD index-relevant + collision-relevant state (all Copy).
         let old_origin = record.entry.origin;
+        // #18562: a directory row is a snapshot taken at insert; an in-place
+        // rewrite of the seed (HA transition, promotion) retires it rather than
+        // leave a stale zone pair or decision behind. Fail-closed: the row only
+        // ever answers an error the shared maps could not.
+        if old_origin == SessionOrigin::FabricPuntSeed {
+            let session_id = record.entry.session_id;
+            self.punt_seeds
+                .retire(key, self.punt_seed_table_token, session_id);
+        }
         let old_nat = record.entry.decision.nat;
         let old_source_nat_static = record.entry.source_nat_static;
         let old_is_reverse = record.entry.metadata.is_reverse;
@@ -5836,7 +6429,7 @@ impl SessionTable {
         let old_ingress_zone = record.entry.metadata.ingress_zone;
         // #10310: a WorkerLocalImport replica is not counted, but a promote
         // to a local origin becomes one logical limit-session unit.
-        let old_counted = !old_is_reverse && install::session_limit_origin_counted(old_origin);
+        let old_counted = self.session_limit_counted(key, old_origin, old_is_reverse);
         let was_peer_synced = old_origin.is_peer_synced();
         if let RefreshPolicy::Update {
             collision_rules: true,
@@ -6119,8 +6712,7 @@ impl SessionTable {
                     RefreshTail {
                         old_counted,
                         old_ingress_zone,
-                        new_counted: !metadata.is_reverse
-                            && install::session_limit_origin_counted(origin),
+                        new_counted: self.session_limit_counted(key, origin, metadata.is_reverse),
                         new_ingress_zone: metadata.ingress_zone,
                     },
                     (was_peer_synced && !origin.is_peer_synced() && !metadata.is_reverse)
@@ -6147,8 +6739,7 @@ impl SessionTable {
                     RefreshTail {
                         old_counted,
                         old_ingress_zone,
-                        new_counted: !metadata.is_reverse
-                            && install::session_limit_origin_counted(old_origin),
+                        new_counted: self.session_limit_counted(key, old_origin, metadata.is_reverse),
                         new_ingress_zone: metadata.ingress_zone,
                     },
                     None,
@@ -6291,6 +6882,8 @@ impl SessionTable {
         egress_zone: u32,
         egress_zone_check: u32,
     ) -> bool {
+        // #18562: the forward entry's policy and zone pair are rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(key);
         let Some(forward) = self.entry_by_key(key) else {
             return false;
         };
@@ -6298,7 +6891,7 @@ impl SessionTable {
             return false;
         }
         let old_ingress_zone = forward.metadata.ingress_zone;
-        let forward_counted = install::session_limit_origin_counted(forward.origin);
+        let forward_counted = self.session_limit_counted(key, forward.origin, false);
         let single_local_delivery = forward.decision.resolution.disposition
             == crate::afxdp::ForwardingDisposition::LocalDelivery;
         let companion_key = reverse_session_key(key, forward.decision.nat);
@@ -6359,6 +6952,8 @@ impl SessionTable {
         egress_zone: u32,
         egress_zone_check: u32,
     ) -> bool {
+        // #18562: the forward entry's zone pair is rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(key);
         let Some(forward) = self.entry_by_key(key) else {
             return false;
         };
@@ -6366,7 +6961,7 @@ impl SessionTable {
             return false;
         }
         let old_ingress_zone = forward.metadata.ingress_zone;
-        let forward_counted = install::session_limit_origin_counted(forward.origin);
+        let forward_counted = self.session_limit_counted(key, forward.origin, false);
         let single_local_delivery = forward.decision.resolution.disposition
             == crate::afxdp::ForwardingDisposition::LocalDelivery;
         let companion_key = reverse_session_key(key, forward.decision.nat);
@@ -6772,6 +7367,7 @@ impl SessionTable {
         // zone/IP decrement cannot be forgotten by a future delete site.
         let removed_origin = record.entry.origin;
         let removed_is_reverse = metadata.is_reverse;
+        let removed_session_id = record.entry.session_id;
         // Borrow on `record` ends here; subsequent calls take
         // &mut self (cleanup helpers) without conflict.
         let _ = record;
@@ -6789,6 +7385,12 @@ impl SessionTable {
             "remove_entry leaked handle {} in a secondary index",
             handle
         );
+        // #18562: every removal (expire, delete, replace, take_synced_local)
+        // retires this incarnation's punt-seed directory row.
+        if removed_origin == SessionOrigin::FabricPuntSeed {
+            self.punt_seeds
+                .retire(key, self.punt_seed_table_token, removed_session_id);
+        }
         // Only AFTER all indices are clean, return slot to slab.
         let record = self.entries.remove(handle as usize);
         // #2134/#3122/#10310/#10985: decrement the matching zone/IP count
@@ -6797,7 +7399,7 @@ impl SessionTable {
         // shared counted-class predicate charges true HA peer imports, but
         // not a WorkerLocalImport replica, balancing the matching create or
         // promotion transition exactly.
-        if !removed_is_reverse && install::session_limit_origin_counted(removed_origin) {
+        if self.session_limit_counted(key, removed_origin, removed_is_reverse) {
             self.session_limit_dec(metadata.ingress_zone, key.src_ip, key.dst_ip);
         }
         // #9856: harvest an export tombstone for genuine terminal
@@ -7424,6 +8026,16 @@ mod close_refresh_gate_10885_tests;
 #[cfg(test)]
 #[path = "tcp_seq_15753_tests.rs"]
 mod tcp_seq_15753_tests;
+// #18562: the punt-seed directory's publish / retire / fence / deadline /
+// cap contract, driven through the table's own install and removal paths.
+#[cfg(test)]
+#[path = "punt_seed_directory_18562_tests.rs"]
+mod punt_seed_directory_18562_tests;
+// #18640: per-source session-cap accounting across the HA fan-out to every
+// worker.
+#[cfg(test)]
+#[path = "session_limit_fanout_18640_tests.rs"]
+mod session_limit_fanout_18640_tests;
 
 // #13939 (H09-02): an Owner hit that promotes a peer-synced pair, then
 // applies the deferred FIN/RST close, must close BOTH halves. The promotion
@@ -7525,6 +8137,16 @@ mod rst_ack_handshake_14630_tests;
 #[cfg(test)]
 #[path = "handshake_cache_hit_14939_tests.rs"]
 mod handshake_cache_hit_14939_tests;
+// #18520: SessionKey hashes per cached data hit (established vs pure Opening).
+#[cfg(test)]
+#[path = "hash_cost_18520_tests.rs"]
+mod hash_cost_18520_tests;
+
+// #18533: established cache-hit session lookups (totals + one cell per
+// optional lookup) and the per-probe timing MEASUREMENT.
+#[cfg(test)]
+#[path = "established_hit_cost_18533_tests.rs"]
+mod established_hit_cost_18533_tests;
 
 // #14945: the fused cache-hit probe (`probe_hit`) must be observably
 // identical to the liveness + keepalive + accounting sequence it

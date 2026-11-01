@@ -115,12 +115,12 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 			"refreshed", refreshed, "dropped", dropped)
 	}
 	var err error
-	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, m.routeOverlay, m.rgPrimaryProvider)
+	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, m.routeOverlay, m.rgPrimaryNowLocked())
 	if err != nil {
 		return false, fmt.Errorf("build interface-link refresh routes: %w", err)
 	}
 	next.builtRouteOverlay = cloneRouteOverlay(m.routeOverlay)
-	next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryProvider)
+	next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryNowLocked())
 	next.Fabrics = buildFabricSnapshotsFrom(cfg, liveXfrm)
 	next.TunnelEndpoints = buildTunnelEndpointSnapshots(cfg, next.Interfaces)
 	next.MirrorConfigs, next.MirrorExclusions = buildMirrorConfigSnapshots(cfg, next.Interfaces)
@@ -530,6 +530,17 @@ func interfaceRowForIfindex(snap *ConfigSnapshot, ifindex uint32) *InterfaceSnap
 		}
 	}
 	return nil
+}
+
+// ConfiguredInterfaceLinkName reports whether linuxName backs an interface
+// row of cfg: the pure, lock-free half of InterfaceLinkNameRelevant (#18573
+// review Z2). A caller that already holds its own mutex and its own config
+// snapshot (the daemon's direct-VIP reconcile, under directVIPMu) checks
+// relevance here before waking the interface-link refresher, without taking
+// m.mu. The refresher keeps only the newest name, so an irrelevant wake would
+// displace a pending relevant one and clear its retry debt unpublished.
+func ConfiguredInterfaceLinkName(cfg *config.Config, linuxName string) bool {
+	return configuredInterfaceLinkName(cfg, linuxName)
 }
 
 func configuredInterfaceLinkName(cfg *config.Config, linuxName string) bool {

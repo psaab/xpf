@@ -42,7 +42,7 @@ improvise it on the host.
 
 | Case | Environment | Why |
 |------|-------------|-----|
-| 1. Max throughput | **loss HA cluster** (`loss:xpf-userspace-fw0/1`) | mlx5 SR-IOV VFs, native XDP, AF_XDP zero-copy → line-rate (~23 Gbit/s). The virtio standalone caps ~2 Gbit/s (single worker), so it is NOT a max-throughput env. |
+| 1. Max throughput | **loss HA cluster** (`loss:xpf-userspace-fw0/1`) | mlx5 SR-IOV VFs, native XDP, AF_XDP zero-copy → line rate (the loss band in tier 2 of `docs/regression-test-matrix.md`). The virtio standalone caps ~2 Gbit/s (single worker), so it is NOT a max-throughput env. |
 | 2-4. Directional policy | **standalone 3-zone VM** (`xpf-fwd` + `trust-host`/`untrust-host`/`dmz-host`) | Purpose-built: one host per zone on dedicated bridges → clean trust/untrust/intra-zone policy tests. |
 
 The two envs are independent → the throughput run and the directional run can
@@ -107,8 +107,12 @@ trust   zone: ge-0-0-0 10.0.1.10   — trust-host   10.0.1.102
 untrust zone: ge-0-0-1 10.0.2.10   — untrust-host 10.0.2.102
 dmz     zone: ge-0-0-2 10.0.30.10  — dmz-host     10.0.30.101
 ```
-Loss cluster max-throughput target: **172.16.80.200 / 2001:559:8585:80::200**
-(reth0.80 WAN AF_XDP fast path). NEVER use 172.16.100.x — that is a different
+Loss cluster max-throughput target: `$IPERF_TARGET4` / `$IPERF_TARGET6` from
+`test/incus/loss-userspace-cluster.env` via `source test/incus/cluster-env.sh`
+(today 172.16.80.202 / 2001:559:8585:80::200, reth0.80 WAN AF_XDP fast path).
+Never hard-code them. v4 is NOT .200: the external v6 box
+also answers ARP for it, so a run can measure the wrong host (#18576). NEVER
+use 172.16.100.x — that is a different
 `loss:` uplink capped at ~9-10 Gb/s (the misdiagnosed "ceiling" of #1578).
 
 ## Procedure
@@ -128,14 +132,16 @@ git -C /home/ps/git/bpfrx worktree add --detach /var/tmp/worktrees/secmatrix ori
 
 Run detached (script file + no-pipe RC). After deploy + wait-for-up:
 ```bash
-H=loss:cluster-userspace-host
+source test/incus/cluster-env.sh        # IPERF_TARGET4/6 for the loss env (#18576)
+H="$CLUSTER_LAN_HOST"                   # loss:cluster-userspace-host
 for fam in v4 v6; do
-  tgt=$([ $fam = v4 ] && echo 172.16.80.200 || echo 2001:559:8585:80::200)
+  tgt=$([ $fam = v4 ] && echo "$IPERF_TARGET4" || echo "$IPERF_TARGET6")
   incus exec "$H" -- iperf3 -c "$tgt" -t 10 -P 12 -p 5201       # push
   incus exec "$H" -- iperf3 -c "$tgt" -t 10 -P 12 -p 5201 -R    # reverse
 done
 ```
-**PASS:** all 4 cells (v4/v6 × push/reverse) near line rate (~22-23 Gbit/s) with
+**PASS:** all 4 cells (v4/v6 × push/reverse) near line rate (same-session master,
+within the loss `-P12` band in tier 2 of `docs/regression-test-matrix.md`) with
 **0 retransmits** on the `[SUM] ... sender` line. A reverse cap with healthy push
 is a TX-path regression → FAIL.
 

@@ -379,6 +379,7 @@ fn icmp_te_nat_reversal_v4_rewrites_outer_dst_and_embedded_src() {
         },
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: icmp_budget_test_key(),
     };
 
@@ -544,6 +545,7 @@ fn icmp_te_nat_reversal_v4_with_port_snat() {
         },
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: icmp_budget_test_key(),
     };
 
@@ -679,6 +681,7 @@ fn icmp_dest_unreach_nat_reversal_v4() {
         },
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: icmp_budget_test_key(),
     };
 
@@ -745,6 +748,7 @@ fn icmp_dnat_reversal_v4_rewrites_embedded_dst_and_outer_src() {
         metadata: icmp_err_metadata(),
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: icmp_budget_test_key(),
     };
 
@@ -839,6 +843,7 @@ fn icmp_static_nat_reversal_v4_rewrites_embedded_dst() {
         metadata: icmp_err_metadata(),
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: icmp_budget_test_key(),
     };
 
@@ -899,6 +904,7 @@ fn icmp_snat_only_reversal_v4_leaves_destination_untouched() {
         metadata: icmp_err_metadata(),
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: icmp_budget_test_key(),
     };
 
@@ -1009,6 +1015,7 @@ fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
         },
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: icmp_budget_test_key(),
     };
 
@@ -1160,6 +1167,7 @@ fn icmpv6_dnat66_reversal_v6_rewrites_embedded_dst_and_outer_src() {
         metadata: icmp_err_metadata(),
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: icmp_budget_test_key(),
     };
 
@@ -1955,6 +1963,7 @@ fn icmp_embed_builder_nonbearing_quoted_icmp_keeps_word_13650() {
         metadata: icmp_err_metadata(),
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: icmp_budget_test_key(),
     };
     let out = build_nat_reversed_icmp_error_v4(&frame, icmp_err_meta_v4(), &m4)

@@ -67,10 +67,17 @@ var syncStatFields = []syncStatField{
 	{name: "BulkRecvCapped", label: "Bulk receive keys capped", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.BulkRecvCapped })},
 	{name: "BulkRecvAborted", label: "Bulk receive windows aborted", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.BulkRecvAborted })},
 	{name: "ConfigsApplyFailed", label: "Configs apply-failed", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigsApplyFailed })},
+	{name: "ConfigsRejectedAsAuthority", label: "Configs refused as RG0 authority", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigsRejectedAsAuthority })},
+	{name: "ConfigRejectedAsAuthorityLastGen", label: "Last config generation refused as RG0 authority", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigRejectedAsAuthorityLastGen })},
 	{name: "ImportsRefusedByHelper", label: "Imports refused by helper", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ImportsRefusedByHelper })},
 	{name: "ImportsRejectedByHelper", label: "Imports rejected by helper", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ImportsRejectedByHelper })},
 	{name: "ConfigsQueueFullDropped", label: "Configs queue-full-dropped", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigsQueueFullDropped })},
 	{name: "ConfigApplyNacksReceived", label: "Config apply-nacks received", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigApplyNacksReceived })},
+	{name: "ConfigApplyAcksSent", label: "Config apply-acks sent", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigApplyAcksSent })},
+	{name: "ConfigApplyAcksUnsent", label: "Config apply-acks unsent", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigApplyAcksUnsent })},
+	{name: "ConfigApplyAcksCredited", label: "Config apply-acks credited", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigApplyAcksCredited })},
+	{name: "ConfigApplyAcksIgnored", label: "Config apply-acks ignored", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigApplyAcksIgnored })},
+	{name: "BulkRerequestsSent", label: "Bulk re-requests sent", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.BulkRerequestsSent })},
 	{name: "IPsecSASent", label: "IPsec SAs sent", mode: RenderAlways, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.IPsecSASent })},
 	{name: "IPsecSAReceived", label: "IPsec SAs received", mode: RenderAlways, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.IPsecSAReceived })},
 	{name: "IPsecSAStaleIgnored", label: "IPsec SAs stale-ignored", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.IPsecSAStaleIgnored })},
@@ -210,6 +217,10 @@ func loadSyncStat(s *SessionSync, name string) uint64 {
 		return s.stats.BulkRecvAborted.Load()
 	case "ConfigsApplyFailed":
 		return s.stats.ConfigsApplyFailed.Load()
+	case "ConfigsRejectedAsAuthority":
+		return s.stats.ConfigsRejectedAsAuthority.Load()
+	case "ConfigRejectedAsAuthorityLastGen":
+		return s.stats.ConfigRejectedAsAuthorityLastGen.Load()
 	case "ImportsRefusedByHelper":
 		return s.stats.ImportsRefusedByHelper.Load()
 	case "ImportsRejectedByHelper":
@@ -218,6 +229,16 @@ func loadSyncStat(s *SessionSync, name string) uint64 {
 		return s.stats.ConfigsQueueFullDropped.Load()
 	case "ConfigApplyNacksReceived":
 		return s.stats.ConfigApplyNacksReceived.Load()
+	case "ConfigApplyAcksSent":
+		return s.stats.ConfigApplyAcksSent.Load()
+	case "ConfigApplyAcksUnsent":
+		return s.stats.ConfigApplyAcksUnsent.Load()
+	case "ConfigApplyAcksCredited":
+		return s.stats.ConfigApplyAcksCredited.Load()
+	case "ConfigApplyAcksIgnored":
+		return s.stats.ConfigApplyAcksIgnored.Load()
+	case "BulkRerequestsSent":
+		return s.stats.BulkRerequestsSent.Load()
 	case "IPsecSASent":
 		return s.stats.IPsecSASent.Load()
 	case "IPsecSAReceived":
@@ -380,6 +401,10 @@ func setSyncStatUint(snap *SyncStatsSnapshot, name string, v uint64) {
 		snap.BulkRecvAborted = v
 	case "ConfigsApplyFailed":
 		snap.ConfigsApplyFailed = v
+	case "ConfigsRejectedAsAuthority":
+		snap.ConfigsRejectedAsAuthority = v
+	case "ConfigRejectedAsAuthorityLastGen":
+		snap.ConfigRejectedAsAuthorityLastGen = v
 	case "ImportsRefusedByHelper":
 		snap.ImportsRefusedByHelper = v
 	case "ImportsRejectedByHelper":
@@ -388,6 +413,16 @@ func setSyncStatUint(snap *SyncStatsSnapshot, name string, v uint64) {
 		snap.ConfigsQueueFullDropped = v
 	case "ConfigApplyNacksReceived":
 		snap.ConfigApplyNacksReceived = v
+	case "ConfigApplyAcksSent":
+		snap.ConfigApplyAcksSent = v
+	case "ConfigApplyAcksUnsent":
+		snap.ConfigApplyAcksUnsent = v
+	case "ConfigApplyAcksCredited":
+		snap.ConfigApplyAcksCredited = v
+	case "ConfigApplyAcksIgnored":
+		snap.ConfigApplyAcksIgnored = v
+	case "BulkRerequestsSent":
+		snap.BulkRerequestsSent = v
 	case "IPsecSASent":
 		snap.IPsecSASent = v
 	case "IPsecSAReceived":

@@ -396,6 +396,12 @@ type Manager struct {
 	// a feed change so the duplicate-publish gate lets the refresh through.
 	feedOverlay map[string][]string
 	haGroups    map[int]HAGroupStatus
+	// transferPreActive (#18559) holds the data RGs whose helper forwarding
+	// is opened ahead of the cluster promotion while this node requests a
+	// transfer, each with its backstop deadline. It is an overlay on the
+	// helper-facing view only: haGroups and the rg_active BPF map keep the
+	// cluster truth. See manager_ha_preactivate.go. Guarded by m.mu.
+	transferPreActive map[int]time.Time
 	// rgPrimaryProvider reports local RG primacy for the route builder
 	// (#15742). Nil means no provider wired yet (boot window before
 	// applyDataplaneAndHACore, standalone, or tests): the builder then
@@ -405,6 +411,11 @@ type Manager struct {
 	// construction and refreshed in applyDataplaneAndHACore, mirroring
 	// frrHADemotionState's IsLocalPrimary source.
 	rgPrimaryProvider func(rgID int) (primary bool, known bool)
+	// heldRGReleaseFn is told which RGs an acknowledged helper inventory
+	// just DROPPED from the #18620 connected-row hold, so the owner of the
+	// routes-only publish can withdraw their connected rows. Called under
+	// m.mu: it must not block and must not take m.mu. Guarded by m.mu.
+	heldRGReleaseFn func(rgIDs []int)
 	// rgProviderWired latches true once SetRGPrimaryProvider installs a
 	// non-nil provider (#15919). The daemon gates clustered snapshot
 	// builds on RGProviderWiredFor so the nil-provider window cannot
@@ -704,6 +715,11 @@ type Manager struct {
 	// the session path — without this the #9629 sender would ship bound by
 	// nothing CI runs, the #6994 failure mode).
 	sessionRequestHook func(ControlRequest, *ProcessStatus) error
+	// ambiguousSyncZoneWarned records truncated session zone ids already
+	// reported as ambiguous (#18515), so the warning fires once per value per
+	// process (never reset; bounded by the 65536 possible values).
+	// Guarded by mu.
+	ambiguousSyncZoneWarned map[uint16]struct{}
 	// bumpFIBGenerationHook replaces the shim's generation-map bump in tests
 	// that need a nonzero generation without loading privileged BPF maps.
 	// Production leaves it nil.
@@ -885,6 +901,19 @@ func (m *Manager) SetRGPrimaryProvider(provider RGPrimaryProvider) {
 	}
 }
 
+// SetHeldRGReleaseFunc wires the callback that withdraws the connected rows
+// of RGs leaving the #18620 hold (helperActiveRGsLocked). Whichever path gets
+// the helper to acknowledge a deactivation fires it: the demotion edge, the
+// reconcile retry after a failed write, or a replay. Nil disables it.
+func (m *Manager) SetHeldRGReleaseFunc(fn func(rgIDs []int)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.heldRGReleaseFn = fn
+}
+
 // RGProviderWiredFor reports whether a snapshot build for cfg may rely
 // on RG ownership verdicts (#15919). Standalone configs (no chassis
 // cluster) never need a provider and always return true. Clustered
@@ -931,7 +960,8 @@ func (m *Manager) rgPrimaryNowLocked() RGPrimaryProvider {
 	if m == nil {
 		return nil
 	}
-	return m.rgPrimaryProvider
+	// #18559: route builders see a transfer pre-activation as local primacy.
+	return m.routeRGPrimaryLocked()
 }
 
 const rstSuppressionRetryBackoff = 5 * time.Second

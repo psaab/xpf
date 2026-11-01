@@ -223,7 +223,9 @@ running heartbeat onto the defaults just as a changed value does.
   information` on both surfaces — the local CLI
   (`pkg/cli/cli_show_cluster.go`) and the gRPC remote CLI
   (`pkg/grpcapi/server_show_cluster_text.go`) both call it — so a section
-  added there reaches both. Its "Peer fencing:" block (#72) renders
+  added there reaches both. State the Manager does not own is appended
+  through `SetInformationExtraFunc` (called without `m.mu` held); the daemon
+  uses it for the neighbor warm-up pass (#18625). Its "Peer fencing:" block (#72) renders
   `FenceStatus()`: the CURRENTLY configured action (`disabled` when the
   `peer-fencing` leaf is absent, which can differ from the action past
   events were recorded under) plus every `EventFence` attempt and its
@@ -458,7 +460,8 @@ down/up — can disrupt the control-link UDP receive path for 10-15+ seconds:
   virtual MAC — a 10-15s split-brain until the link recovers and dual-active
   resolution demotes one. The floor lets a slow-to-appear peer be heard first.
 
-The floor releases after 30s, then #11566 checks the separate session-sync
+The seen-then-lost floor can end earlier, once bring-up is proven over (#18549,
+below). The never-seen floor always runs its full 30s. After that, #11566 checks the separate session-sync
 receive-recency proof before confirming the peer absent. #11682 uses the full
 sync peer-silence window (30s by default), not the 2s window used to suppress
 heartbeat timeouts for previously-seen peers. An idle sync peer has no session
@@ -490,6 +493,68 @@ original arming stamp so a commit cannot push the floor out. The receiver's
 own never-seen arm is unchanged and races harmlessly with the Manager's:
 both funnel into `handlePeerNeverSeen`, which confirms at most once.
 
+### The boot floor ends once bring-up is PROVEN over (#18549)
+
+The seen-then-lost half of the floor was purely time-based, which
+contradicted the node's own readiness: a rejoined node reported
+`Takeover ready: yes` about 2 s after its heartbeat started, but could not
+declare its peer lost for the remaining ~28 s. `test-double-failover`
+crashes the peer ~20 s after the rejoin. On integ8 the second takeover
+waited for the floor:
+
+| cluster | `heartbeat started` | peer lost | outage |
+|---|---|---|---|
+| loss | 12:55:18.850 | 12:55:48.855 (+30.005 s) | ~13 s |
+| tcp | 12:53:59.023 | 12:54:29.031 (+30.008 s) | ~5 s |
+
+`checkTimeout` now ends the BOOT part of the floor early when
+`bootFloorProvenOver` holds (`heartbeat_boot_floor.go`). That part is a cold
+start's 30 s, or a boot floor inherited across restarts (#17764). The
+predicate has two parts:
+
+1. **The inbound bulk completed** (`syncBulkPrimed`, stamped at its
+   false->true edge in `syncBulkPrimedAtMono`; never timeout-released). A
+   full TCP bulk exchange over the same control link the heartbeats use,
+   finished after bring-up, is direct evidence the link is up.
+2. **The peer was then heard gap-free for `heartbeatBootStableWindow` (5 s).**
+   The run is tracked in `handlePeerHeartbeat` (`peerHBSteadySinceMono` /
+   `peerHBLastAdmitMono`); a gap of `interval*threshold` or more restarts it,
+   and peer loss resets it. The window runs from the later of the bulk
+   completion and the run start to the LAST ADMITTED frame, so the silence
+   being judged never counts as stability.
+
+Unchanged:
+
+- a heartbeat restart's own 5 s grace (#9722);
+- the never-seen arm (#4386/#11566/#16751);
+- the whole floor while the proof is missing. A boot-time VRF-rebind
+  disruption before the bulk completes is still covered, which is the
+  #17764 incident shape.
+
+A disruption that starts after the proof is a steady-state disruption: a
+heartbeat restart arms its own restart grace, and the sync-recency guard in
+`handlePeerTimeout` covers a live peer whose heartbeats are briefly lost. That
+is exactly what a node that booted long ago gets. Once proven, the proof
+never expires. A config-sync apply from the peer, which a rejoiner can
+receive right after connect, may land more than 5 s after the bulk. If its
+RX disruption outlasts the 5 s restart grace plus the 2 s sync-recency
+window, a takeover-ready rejoiner can then declare a live peer lost. That is
+the same exposure a long-running node has on such an apply, and the apply is
+skipped entirely when the configs are equivalent.
+
+A heartbeat-only restart (a management VRF rebind) does not reset the
+gap-free run, by design. The run is Manager-scoped, like the heartbeat
+session, so once the restart's own 5 s grace has passed, a run recorded
+before the restart can satisfy the proof and end an inherited boot floor
+(#17764). The mitigation for a live peer whose heartbeats the rebind dropped
+is the sync-recency guard in `handlePeerTimeout`
+(`syncSuppressesPeerTimeoutLocked`): the session-sync connection that
+completed the bulk keeps proving the peer alive while its frames stay fresh.
+That is the same guard a long-booted node relies on after a commit-driven
+restart.
+
+Cells: `heartbeat_boot_floor_18549_test.go`.
+
 ### Asymmetric peer visibility (#10775)
 
 Every current heartbeat carries a per-Manager session and increasing sequence,
@@ -516,11 +581,58 @@ per-RG entry from that mixed map echoed a stale sequence the peer's
 strict freshness check refused, so its lease went unrenewed for that
 frame. Cells: `heartbeat_echo_mixed_snapshot_14163_test.go`.
 
+### Peer wall-clock offset (#18585)
+
+Each heartbeat also carries the sender's wall clock, as an optional `XPFT`
+section (magic + int64 unix nanoseconds) appended to the body after the `XPFE`
+echo (or after the HA protocol version when there is no echo). It sits inside
+the MAC-covered body and BEFORE the fixed-tail epoch and auth trailers, which
+deployed readers index by a fixed offset from the end of the frame
+(`heartbeatFrameEpoch`, `heartbeatAuthTrailer`). #7487 records why a new
+section must never take those slots: an old node would read "no epoch", reject
+every frame, and go dual-primary mid-upgrade. Older readers stop after the echo
+and never see the section. A frame without it is byte-identical to the
+pre-#18585 encoding (the golden vectors pin that), and the HA protocol version
+is not bumped.
+
+The receiver takes peer-minus-local at the moment it ADMITS a frame
+(`admitFrame`, after the MAC and anti-replay checks), so a replayed archived
+frame cannot move the reading. A declared clock outside 2020–2100 is
+discarded: an older keyed sender's epoch marker matches the magic with
+probability 2^-32 per key. The reading drives:
+
+- a `Peer clock offset: ±N.Ns (peer behind/ahead of this node; measured Xs ago)`
+  line in `show chassis cluster status` and `information`;
+- an alarm at 10 s, cleared below 5 s. It is merged into the clock alarm
+  surfaces (`show system alarms`, `show security alarms detail`,
+  `show chassis cluster status`). The raise and the clear each log once and
+  reach syslog as `RT_SYSTEM - CLOCK_SKEW_ALARM_RAISED cause="peer-offset"` /
+  `..._CLEARED`, the local reference alarm's shape (`SetPeerClockAlarmHook`);
+- an early refusal of `request chassis cluster failover ... node <peer>` and
+  `data node <peer>` when a fresh reading is at or past 60 s (the guaranteed
+  fabric-auth break). The refusal names the number and both remedies: fix NTP
+  through `routing-instance mgmt`, or run the command on the target node,
+  where it is a local pull. Below 60 s, or without a fresh reading, the
+  request is proxied exactly as before.
+
+It is **visibility only**. The fabric verifier's accept band
+(`pkg/grpcapi/fabric_auth.go`) and the time a client signs at are unchanged,
+so the replay horizon is unchanged. Signing at `now + offset` would make
+cross-node RPC skew-tolerant. That is a different trade-off, and #7487 closed
+it as not worth the risk. A mixed-version pair shows no offset until both
+nodes send the section.
+
 ### A heartbeat RESTART is not a cold boot (#9722)
 
-`RestartHeartbeat` replaces the receiver on every config apply that rebinds the
-management VRF. On an HA node with a management interface that means every
-operator commit and every peer-synced apply. The replacement used to arm the
+`RestartHeartbeat` replaces the receiver when an apply moves the control link
+into or out of the management VRF. Before #18597 that was every config apply:
+networkd detached em0 from `vrf-mgmt` on every reconfigure and the rebind moved
+it back, so on an HA node every operator commit and every peer-synced apply
+restarted the heartbeat. networkd now renders `KeepMaster=yes` and the daemon
+gates the restart on the control link's VRF master actually having changed
+(`restartHeartbeatIfControlLinkMoved`, `pkg/daemon/README.md`), so an
+unrelated commit no longer restarts it; a restart still happens when the link
+really moved (for example after `vrf-mgmt` was recreated). The replacement used to arm the
 same 30s cold-boot floor. The seen-then-lost arm returns inside that floor
 before it checks staleness, so a peer that died within 30s after a commit was
 declared lost up to 30s late. In the default private-RG mode, that delay is the
@@ -535,7 +647,10 @@ starts (`armRestart`):
 After that, the ordinary `threshold*interval` staleness applies. A live peer
 whose heartbeats are briefly lost past the restart grace is still covered by the
 sync-recency guard that `handlePeerTimeout` consults
-(`syncSuppressesPeerTimeoutLocked`, #1792/#17056).
+(`syncSuppressesPeerTimeoutLocked`, #1792/#17056). Since #18561 that guard
+also needs, for a peer that answers sync-level heartbeats, one sync frame newer
+than the liveness probe sent at the first missed heartbeat; the restarting
+node's sync channel stays up through its bind retries and answers it.
 
 Two receivers are never armed and keep the cold-boot floor on both arms:
 - a replacement for a receiver that had NEVER seen the peer;
@@ -587,8 +702,14 @@ floor into its retry. Cells:
 
 ### A failed heartbeat restart is owed, not latched (#9751)
 
-`RestartHeartbeat` retries the bind five times, a second apart. If all five
-fail, it returns false with the sender and receiver both torn down. Before
+`RestartHeartbeat` retries the bind on `heartbeatRestartRetrySchedule`: 50ms,
+200ms and 750ms pauses, then 1s ones, about 5s in all (#18597; it was five
+attempts a second apart). The restart follows a control-link VRF move, and the
+enslave cycle makes networkd drop and re-add the link's static address
+5-30ms later, so a first bind that loses that race used to cost a 1s+
+heartbeat gap at the peer (1.6s measured on tcp) and now costs about 50ms. If
+every attempt fails, it returns false with the sender and receiver both torn
+down. Before
 #9751, every later `RestartHeartbeat` saw "not running" and returned at once,
 and the apply discarded the result. The heartbeat stayed dead across later
 applies until comms restarted. This node sent no heartbeats, so the peer
@@ -891,7 +1012,26 @@ partial drop, or when the preferred fabric connects with no fault.
   daemon wraps the refusal as `demotion peer barrier failed`, a
   `RetryablePreFailoverError`.
 - **Recovery.** A move releases pending barrier waiters and starts one
-  single-flight re-prime (`doBulkSync`); every refused barrier re-kicks it.
+  single-flight re-prime (`doBulkSync`); every refused barrier re-kicks it —
+  unless a pending bulk that captured the CURRENT epoch is still inside
+  `BulkAckPendingRetryAfter` (`fenceDischargeAwaited`, #18521). Without that
+  check each 0.5s manual-failover admission retry started a new full bulk the
+  moment the previous one finished writing; each replaced
+  `pendingBulkAckEpoch`, so the peer's eventual ack matched nothing and the
+  fence never discharged.
+- **Withheld receiver BulkAck (#18521).** A receiver that withholds the
+  BulkAck the fence waits on — reconcile skipped (zone map moved mid-bulk, no
+  zone snapshot, no dataplane) or failed, window aborted, transient helper
+  install failures — queues one `BulkRequest` after a backoff (1s doubling,
+  cap 30s, reset by a reconciled bulk; 10s doubling for transient install
+  failures, which are expected while the helper comes up; never shorter than
+  the withheld bulk's own receive duration, since each request costs the
+  sender a full table walk) and a stable zone map, single-flighted, for the
+  newest withheld bulk — on that bulk's own cause, floor and duration, even
+  when it was withheld while an earlier request waited (round 3) — and
+  dropped if a newer bulk was accepted meanwhile
+  (`sync_bulk_rerequest_18521.go`, `Bulk re-requests sent`). The pending-bulk
+  age behind every 35s retry decision is monotonic.
 - **Discharge.** Only a BulkAck for a bulk that captured the epoch BEFORE reading its
   session source advances `cleared`. `doBulkSync` captures before
   `BulkSnapshotSource`; the store walk captures at BulkStart; `BulkSyncSnapshot`
@@ -1237,8 +1377,47 @@ renders `/etc/chrony/sources.d/xpf.sources` from `set system ntp server`.
 So a cluster with no `system ntp server` has **no time source by
 construction**.
 
-- **Configure it:** `set system ntp server <address>`, the SAME reachable
-  source on both nodes.
+- **Configure it:** `set system ntp server <address> routing-instance mgmt`,
+  the SAME reachable source on both nodes. The management VRF is the only
+  off-box route BOTH nodes are guaranteed to have: the default instance's
+  default route leaves through a RETH, which only the node that owns that
+  redundancy group has (the other node's default is a blackhole), so a
+  default-instance source syncs at most one node and a failover moves which
+  one (#18584). With `routing-instance mgmt` on every server, xpfd renders
+  chrony `bindacqdevice vrf-mgmt` (`/etc/chrony/conf.d/xpf-acquisition.conf`)
+  and restarts chrony when the binding is added, changed or removed, and on
+  a daemon start unless chrony is synchronised and started after the binding
+  was written. A
+  cluster whose servers use the default instance gets a commit advisory
+  naming this. The distro `makestep 1 3` steps a clock that booted from a
+  lagging RTC within the first three updates. `mgmt` is honoured only when
+  a management-class interface (fxp*, em*, fab*) is configured, because that
+  is when the daemon creates `vrf-mgmt`; otherwise the commit warns and
+  nothing is bound.
+  - **Rollout on an existing cluster:** a deb deploy preserves node config
+    (`cluster-setup.sh deploy` prints this), so commit the stanza on the
+    RG0 primary (it config-syncs to the peer) and check both nodes reach
+    `Leap status: Normal` in `chronyc tracking`. On loss (2026-10-31) both
+    did 10 s after the commit, and fw1 logged `System clock was stepped by
+    75.716867 seconds`. Ubuntu-image nodes also carry the distro
+    `/etc/chrony/sources.d/ubuntu-ntp-pools.sources` and an NTS
+    `conf.d/ubuntu-nts.conf`; those pools are hostnames that chrony
+    resolves in the default instance, and before the binding they showed
+    reach 0. They are not xpf's and are left alone.
+  - **Hostnames and trust:** `bindacqdevice` binds chrony's NTP sockets,
+    not its resolver, so use IP-address servers where the default instance
+    has no route (a hostname is resolved outside the binding). The lab
+    points at public servers over unauthenticated NTP; an on-path attacker
+    who can move a node's clock can push the pair past the fabric token's
+    wall-clock window (which has no nonce — #7487), denying cross-node RPC
+    but not forging it. Production clusters should prefer internal or NTS
+    sources.
+  - **Downgrade:** a build older than #18584 does not know
+    `/etc/chrony/conf.d/xpf-acquisition.conf` and leaves it in place, so
+    chrony stays bound to `vrf-mgmt` (which still works: the VRF exists on
+    every build). To return to default-instance NTP after a downgrade,
+    `rm /etc/chrony/conf.d/xpf-acquisition.conf && systemctl restart chrony`
+    on each node.
 - **Commit-time advisory (#8357):** committing a `chassis cluster` with
   no `system ntp server` now emits a warning that names fabric RPC as
   what will fail. It is a WARNING, never an error — configuring a cluster
@@ -2557,6 +2736,29 @@ connection is authenticated, then seals every subsequent frame.
   bulk sent for that debt, #9626) so the surviving accept **inherits** the
   outstanding obligation and re-drives the bulk. See `docs/session-sync-architecture.md` → "Atomic Install +
   Cold-Prime Decision (#4962)".
+
+## Operator RG moves and the clock (#18583)
+
+Half of the operator's usual move loop crosses the fabric. On node A,
+`request chassis cluster failover redundancy-group <g> node A` is a local pull
+(`RequestPeerFailover` over the session-sync connection) and does not depend
+on the wall clock. `... node B`, the peer, is proxied over fabric gRPC to B
+(`proxyClusterFailover`), and B then runs the local pull. That leg is
+token-authenticated and fails past the skew bound above.
+
+So with the clocks apart, a loop issued from one node fails every move to the
+peer: with the #6708 "window Ns ahead/behind ours" error, or — with #18585 and
+a fresh heartbeat reading of 60 s or more — with the up-front
+"cross-node request not sent: ..." refusal (30–60 s still reaches the
+fabric and fails or passes on window alignment). Every move back then
+prints "already primary": the handler reads that from `IsLocalPrimary` and
+never contacts the peer. On loss on 2026-10-31 (fw1 72 s behind) that was 10
+FAIL and 10 VOID in 20 moves, and traffic never left node0.
+
+`make test-rg-move-soak` (matrix row H11) runs that loop and scores every move
+against both nodes' views, `rg-active`, the helper's `ha_groups` and the
+traffic. It never resyncs clocks. The definition of a correct move, the command
+paths and how to read each failure are in `docs/ha-rg-move-correctness.md`.
 
 ## Operating the control-link PSK (#6611)
 
@@ -3965,6 +4167,212 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
 
 `config`, `dataplane`.
 
+## Planned-shutdown resign and peer-restart hold release (#18540)
+
+Two ways a node leaves its peer: an orderly stop, and a restart the peer
+never saw as a loss. Before #18540 neither ended ownership promptly.
+
+**Orderly stop.** `Manager.ResignForPlannedShutdown` installs the reserved
+election debt `PlannedShutdownMonitorIface` (`__planned-shutdown__`) at full
+cost (`PlannedShutdownMonitorCost` = 255) on every RG, re-runs election (the
+node demotes itself through electRG's "Local weight 0" arm), and kicks the
+heartbeat sender for one out-of-cadence frame (`heartbeatSender.kick`,
+coalescing, never blocking). The daemon calls it from `runShutdownSequence`
+after the fail-closed actions (`rg_active` cleared on a fail-closed stop —
+a hitless-restart stop leaves it set — and Kea stopped on every HA stop,
+#6787) and before the VIP removal, VRRP stop and `Manager.Stop`. It is
+idempotent, and a no-op in two cases:
+
+- after `Stop`: the sender is gone, so nothing would hear it;
+- with no live peer (`!peerAlive`): there is nobody to hand over to, and the
+  demotion is not inert. The daemon's cluster-event watcher binds to the
+  never-cancelled daemon context, so it is still live during the shutdown
+  sequence. An RG0 primary->secondary event reaches
+  `ConfirmPendingOnDemotion` (#4378), which would make a pending
+  `commit confirmed` permanent on a lone node being restarted precisely to
+  get the rollback (#12171). It would also terminate the RG's IPsec SAs. A
+  lone node keeps ownership through its stop, as before.
+
+  Residual: "no live peer" is `peerAlive`, and a peer that died inside the
+  loss-detection window still reads as alive. That window is about
+  0.4-0.525 s after a hard crash at defaults when the #18570 probe goes
+  unanswered, longer for a peer without ack support or with pre-crash frames
+  handled after the probe, and up to the 5 s sync-suppression cap. A stop inside that window
+  still resigns, the watcher still sees the RG0 demotion, and a pending
+  commit-confirmed is still confirmed. Nothing here closes that window.
+
+Why weight 0 and not the #12164 floor. The fail-closed stop already installs
+the `__dataplane-arm__` floor (weight 1), and that moved nothing in the
+shapes that matter:
+
+- RG0 never yields on arm debt (#12164 N5);
+- the arm-debt yield (`electRG`, non-preempt arm) requires the peer in
+  Primary or Secondary, so a peer parked in secondary-hold by
+  `request chassis cluster failover` is not a target;
+- that holding peer's ManualFailover arm releases only for a peer at weight
+  0, in secondary-hold, or holding a committed transfer — never the floor.
+
+So the peer waited for heartbeat loss plus the sync-recency deferral, which
+the stopping node's own unread sync backlog keeps fresh (`notePeerLiveness`
+stamps at handle time): 3.3–3.4 s per `test-restart-connectivity` cycle on the
+loss cluster. The peer arms that act on weight 0 already exist — "Peer weight
+0", the ManualFailover dual-resign release, and `peerYieldedOwnership` for a
+not-ready receiver — so a peer running older code honours the resign too. The
+debt is in `reservedMonitorNames`, so a config apply's monitor reconcile
+cannot drop it, and it composes additively, so no later recalc on the way out
+lifts the weight off 0.
+
+The resign is ALSO announced explicitly: `buildHeartbeat` puts one reserved
+monitor entry per resigned RG first in the monitor section
+(`Interface = __planned-shutdown__`, `Up = false`), where the #14704 cap
+cannot truncate it. Weight 0 alone could not say "leaving". A transfer
+requester can sit at weight 0 for a moment inside its commit window, and the
+#18521 cell `TestInFlightRemoteTransferHoldOutlivesDualResignTimer18521`
+requires the owner to keep holding through that.
+
+A peer whose frame carries the marker AND weight 0 for an RG
+(`peerLeavingForPlannedShutdownLocked`) is leaving, and `electRG` releases
+two holds that would otherwise outlive it:
+
+- **The #18521 remote transfer-out lease hold.** It protects a transfer the
+  peer requested; a leaving requester never commits. The lease ends with the
+  hold.
+- **The 2 s dual-resign guard.** It is measured from this node's own yield
+  and keeps a just-made handoff from being undone by stale peer state. A
+  leaving peer completes no handoff.
+
+So the peer promotes on the resign frame. Pinned by
+`TestPlannedShutdownResignReleasesInFlightTransferLease18540` and
+`TestPlannedShutdownResignReleasesFreshManualFailoverHold18540`. An older
+peer stores the entry as one more peer monitor (display only) and acts on the
+weight 0 through its existing arms, keeping the guard and lease fallbacks.
+The marker is scoped per RG (an entry for another RG, or with `Up=true`,
+changes nothing; `TestPlannedShutdownMarkerWithoutResignKeepsLease18540`).
+
+Operator-visible side effect: for the fraction of a second between the
+resign and the stopping node's heartbeat going silent, the surviving node's
+`show chassis cluster interfaces` lists a peer monitor named
+`__planned-shutdown__` (down). That is the marker, not a configured
+interface. It disappears with the peer's next frame or on peer loss, which
+clears the peer monitors.
+
+One state still keeps the heartbeat-loss fallback: an #16592
+aborted-transfer marker, which makes `electRG` return before every promotion
+arm.
+
+The resign carries no barrier and waits for no acknowledgement: the caller is
+bounded by `TimeoutStopSec`.
+
+**The peer promotes before it drains the stopping node's backlog.** The peer
+now promotes while still draining that backlog (about 700 `session_v4` frames
+at roughly 21 ms each in the loss evidence), not after it. Imports that land
+after activation therefore become more common:
+
+- A late import does not replace a LOCAL session the new owner already
+  created (`synced_entry_allows_local_replace`; #9678, deliberate).
+- It does reach the dataplane. The import always writes the shared map and
+  queues the worker fan-out. Each worker installs the entry and writes the
+  `USERSPACE_SESSIONS` row itself; only the coordinator skips its own write
+  for an active owner RG. A worker miss falls back to the shared map. The
+  late-publish lane verified this (#18550, #18551).
+
+An earlier version of this paragraph said late imports never reach
+`USERSPACE_SESSIONS`. That was wrong: it read only the coordinator-side
+publish gate. The cycle-3 post-takeover loss in #18540 remains unexplained.
+The crash-takeover RST-signature leads are listed in #18550/#18551, none
+verified yet.
+
+**Peer restart that loss detection missed.** The heartbeat session is
+Manager-scoped (#6169), so it changes only when the peer daemon is a new
+process. `handlePeerHeartbeat` compares the admitted frame's session with the
+previous one while the peer is still believed alive; a change means the peer
+restarted inside the detection window (a crash plus `RestartSec=1` plus
+bring-up can land inside heartbeat threshold + sync deferral). It then ends the
+old incarnation's authority through `clearPeerIncarnationAuthorityLocked`, the
+same helper `handlePeerTimeout` uses: this node's ManualFailover park (and the
+#16743 drain pin), the #6656 peer transfer-out override, and the #15164
+aborted-request markers. The clear runs before the peer view is rebuilt,
+because the rebuild re-applies a surviving override to the new incarnation's
+frames. The other order would elect and render ONE frame of the new
+incarnation as secondary-hold, and then clear the override anyway. No cell
+pins this order (the restart fixtures carry no transfer override). Without it, the holding node stayed parked while the restarted peer sat
+in its startup hold at the floor, and no node owned the RG until that hold
+released (up to 30 s).
+
+It keys on the incarnation, not on state. A frame from the SAME incarnation
+dropping to the floor leaves the hold alone; that is the arm-debt and
+dual-resign policy's job. A frame with no heartbeat session (pre-echo
+protocol) carries no incarnation signal, so it changes nothing. Both orders
+are pinned: a restart before detection releases the hold here, and a restart
+after detection finds it already released and keeps the survivor the owner
+under non-preempt.
+
+Cells: `planned_shutdown_resign_18540_test.go`,
+`heartbeat_peer_restart_18540_test.go`, and the daemon ordering cell
+`pkg/daemon/shutdown_planned_resign_18540_test.go`.
+
+## Make-before-break transfer pre-activation (#18559)
+
+A requested transfer (`request chassis cluster failover redundancy-group N
+node <local>`, and the `data node <local>` batch) used to be break-before-make.
+The owner demoted inside its #5640 fence (`rg_active` cleared, VIPs removed)
+before acknowledging, and the requester only began activating after the ACK:
+election, `republishConnectedRGSync`, `SetRGActive`. Everything the owner
+fabric-redirected in between hit the requester's fabric-ingress HA-inactive
+gate and was dropped. On the loss cluster that was 100-137 ms per RG for
+single moves and about 200 ms per RG for the batch, which demotes and
+activates its members one after another.
+
+`RequestPeerFailover` and `RequestPeerFailoverBatch` now bracket the request
+with the `SetTransferPreActivateHooks` pair:
+
+- **activate** runs with the transfer's data RGs (ID > 0; RG0 owns no
+  forwarding) BEFORE the request is sent. The daemon opens this node's helper
+  forwarding for them (`beginTransferPreActivation`). The owner's fence is
+  unchanged: it still clears its own `rg_active` before it acknowledges, so
+  the cluster never has two primaries. What overlaps is dataplane forwarding,
+  and the requester carries nothing for those RGs until the owner starts
+  redirecting to it.
+- **release** runs with the same RGs on every return path. After a committed
+  transfer the promotion has already applied `rg_active=true` and the release
+  costs nothing. After a failed one the helper is told the cluster truth
+  again and the connected prefixes the pre-activation published are
+  withdrawn.
+
+A failed activation is not a refused transfer: it is logged
+(`transfer pre-activation failed; proceeding break-before-make`), released,
+and the request proceeds in the old order. Strict VIP ownership (#104) exists
+to forbid a dual-active window, so its RGs are not pre-activated.
+
+The helper-facing overlay lives in the userspace manager
+(`pkg/dataplane/userspace/manager_ha_preactivate.go`, see
+`pkg/dataplane/README.md`). It never touches the daemon's rg_active state
+machine, so no activation-keyed side effect (VIPs, GARP, RETH services) runs
+early. Cells: `pkg/cluster/transfer_preactivate_18559_test.go`,
+`pkg/daemon/transfer_preactivate_18559_test.go`,
+`pkg/dataplane/userspace/manager_ha_preactivate_18559_test.go`.
+
+Two consequences of opening forwarding early:
+
+- **The request waits for `applySem`.** The pre-activation's connected-route
+  republish takes `applySem`, so a failover issued during a long commit
+  starts only after that commit finishes. The promotion path already waited
+  on the same lock; it now waits before the request is sent.
+- **Helper side effects happen on the requester.** Pre-activation runs the
+  helper's ordinary activation for the RG. That includes `RefreshOwnerRGS`
+  and, when it leaves no group inactive, the node-wide
+  `promote_imported_persistent_nat_leases`. A failed transfer then runs the
+  ordinary demotion (`DemoteOwnerRGS` and its purge walk). Lease promotion has
+  no reverse step, so a requester whose transfer aborts keeps promoted
+  leases. That is the same state an old owner is left in after an ordinary
+  failover, which also has no reverse step. No cell yet observes the helper
+  through an aborted pre-activation; it is owed (#18559).
+
+The untargeted `request chassis cluster failover redundancy-group N` (run on
+the owner, no target node) still demotes locally and leaves the peer to
+promote on the next secondary-hold heartbeat. It gets no pre-activation,
+because no peer is asked anything.
+
 ## Failover timing by mode and event (CLAUDE.md authoritative)
 
 - Default compiler mode is private-RG election over the control link, with RETH VRRP suppressed (`pkg/config/compiler_system.go:3134-3137`; `pkg/vrrp/README.md:950-964`).
@@ -3973,13 +4381,39 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   do not describe silent-node-death detection while session sync stays
   connected: `syncSuppressesPeerTimeoutLocked` suppresses a timeout when
   last peer sync traffic is ≤2s old, capped at 5s continuous suppression.
-  Silent death with an established sync connection is approximately
-  max(threshold, remaining sync-recency window) plus up to one heartbeat tick:
-  0.5–2.1s from peer death at defaults and 1.0–2.2s in the lab, phase-dependent.
-  A process crash that closes sync, or an idle sync connection already >2s,
-  falls back to the raw heartbeat threshold. Startup/restart grace can also
-  defer handling. These are detection times, not end-to-end restoration SLAs
-  (`pkg/cluster/heartbeat.go:61-65,1916-1960`;
+  Since #18561 recency alone is not enough for a peer that has proved it
+  answers a sync-level heartbeat (`PeerHeartbeatAckSupported`; every
+  installed sync connection sends one heartbeat so the latch arms even on a
+  busy link). At the first missed heartbeat (older than 1.5 intervals)
+  `checkTimeout` sends ONE sync liveness probe for the window
+  (`prearmPeerLivenessProbe`). On the timeout tick, if no sync frame newer
+  than the probe has arrived, the timeout fires
+  (`peerAnsweredLivenessProbeLocked`); if one has, the peer is alive and the
+  window keeps the recency rule and the 5s cap with no further probes. A
+  live peer thus has (threshold - 1.5) intervals for one round trip (700 ms
+  in the lab's 200 ms x 5, 350 ms at the 100 ms x 5 default). A hard-killed
+  peer whose sync socket is half-open is declared on the timeout tick
+  (threshold plus up to one check of phase), provided the ack latch had armed
+  and no frame the peer queued before it died arrives after the probe. The
+  receiver checks staleness four times per heartbeat interval
+  (`timeoutCheckInterval`, floored at 10 ms; #18561), so the phase is at most
+  a quarter interval: 1.0-1.05 s in the lab, 0.5-0.525 s at defaults. With
+  one check per interval it was 1.0-1.2 s / 0.5-0.6 s. The staleness rule is
+  unchanged; only the time from crossing it to evaluating it shrinks. When no probe could be pre-armed
+  (the late-heartbeat ticks fell inside a restart or boot grace), the probe
+  goes out on the timeout tick and gets the same (threshold - 1.5) intervals
+  before its silence counts. A sync connection installed while heartbeats are
+  late is itself the answer (`resetPeerSyncSuppression` latches the proof
+  until the next admitted heartbeat), so a peer that has just redialled is not
+  re-probed and judged on one interval. A peer without ack support keeps
+  the recency-only rule (up to max(threshold, remaining 2s window) plus one
+  check, a quarter interval). `LivenessProbeStats` reports the latch and the probe counts, and
+  `show chassis cluster information` prints them ("Liveness probes sent"). A
+  process
+  crash that closes sync, or an idle sync connection already >2s, falls back
+  to the raw heartbeat threshold. Startup/restart grace can also defer
+  handling. These are detection times, not end-to-end restoration SLAs
+  (`pkg/cluster/heartbeat.go` `checkTimeout`, lines 1451-1516;
   `pkg/cluster/heartbeat_manager.go:790-832`;
   `pkg/cluster/heartbeat_suppress.go`;
   `docs/ha-cluster-userspace.conf:71-72`).
@@ -4000,10 +4434,23 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   `pkg/vrrp/README.md:950-964`).
 - Planned legacy VRRP shutdown sends three priority-0 advertisements; the
   backup arms a 1ms timer, and the run-loop test requires takeover within
-  50ms (test constraint, not SLA). Ordinary private-RG shutdown sends no
-  resign/transfer frame: after `rg_active` clears, the peer promotes through
-  heartbeat-loss detection, no sooner than its heartbeat threshold and
-  potentially later under the sync-recency guard. Private-RG operator
+  50ms (test constraint, not SLA). An orderly private-RG stop with a live
+  peer resigns every RG (#18540). After the fail-closed actions, the
+  stopping node installs the full-cost `__planned-shutdown__` debt (weight 0
+  locally and on the wire) and sends a heartbeat at once. The peer normally
+  promotes on that frame, including through its own ManualFailover hold,
+  instead of waiting for heartbeat loss. The fallback to heartbeat-loss
+  detection remains:
+  - for a stop that never reaches that step (crash, SIGKILL, wedged);
+  - for a lone node, which skips the resign;
+  - for a peer carrying an #16592 aborted-transfer marker.
+
+  A fresh hold and a live #18521 transfer lease are released by the resign
+  frame's planned-shutdown marker.
+
+  That fallback comes no sooner than the heartbeat threshold, and possibly
+  later under the sync-recency guard. See "Planned-shutdown
+  resign and peer-restart hold release (#18540)" above. Private-RG operator
   failover is a separate explicit peer-transfer/resignation path
   (`pkg/vrrp/instance.go:804-806`;
   `pkg/vrrp/instance_rx.go:155-174`;
@@ -4020,6 +4467,45 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
 - `Ready` and `TransferReady` are different gates. `Ready` allows VRRP to
   participate in election; `TransferReady` is the stricter gate for
   explicit operator-initiated `request chassis cluster failover`.
+- **The RG0 authority is never config-stale against a push it refused as
+  primary (#18610).** During a dual-active window the peer can push its config
+  while this node is still RG0 primary; `handleConfigSync` refuses it
+  (`cluster.ErrConfigSyncRejectedAuthority`). The receive edge has already
+  raised `lastRecvConfigGen` (#5563), and M-2/#4151 keeps the applied mark
+  pinned so the generation stays admissible if this node demotes. If this
+  node instead STAYS primary, the peer (now secondary) never pushes again, so
+  the received mark stayed above the applied mark indefinitely: every local RG
+  read `Transfer ready: no (standby config stale ...)`, the refusal had armed
+  the #6387 CF monitor failure, and a rolling upgrade started on the primary
+  aborted with "peer is NOT takeover-ready". `configApplyLoop` now records such
+  a refusal in `rejectedAsAuthorityConfigGen` instead of arming CF, and
+  `TransferReadinessSnapshot.ConfigStale` ignores received generations up to
+  that mark while this node is still the authority (`IsPrimaryFn`). Once it
+  demotes they count again, so it is not promoted back before the new
+  primary's push applies. The NACK (#7328) is still sent. An ordinary apply
+  failure, on a primary or not, is unchanged. `resetRecvGen` clears the mark
+  with the other generation marks. The refusal counts
+  `ConfigsRejectedAsAuthority` (not `ConfigsApplyFailed`) and records
+  `ConfigRejectedAsAuthorityLastGen`; the daemon's Warn names the generation
+  and says whether the refused config differs from the active one, in which
+  case the peer's version (including a commit made on the peer while it
+  believed itself primary) is discarded here. Mixed-version escape: a primary
+  still on a build without this fix stays stuck until it demotes, so demote
+  it (`request chassis cluster failover redundancy-group 0 node <peer>`) and
+  let the new primary's push apply before a rolling upgrade
+  (`docs/in-place-upgrade.md`).
+  Two edges (review of #18612): (1) the authority classification uses the
+  role at RECEIVE (`configApplyItem.authorityAtReceive`), not at apply. A
+  config received while this node was secondary and refused because a
+  promotion landed before the apply loop reached it is the previous primary's
+  last config, lost: it stays an apply failure (CF, stale, `ConfigsApplyFailed`)
+  with its own Warn naming the generation. (2) The losing node is converged:
+  the daemon's refusal clears the authority's (epoch x generation) push marker
+  and re-runs the reconcile, paced at `configAckOverdueAfter`, so the loser
+  receives the authority's config under a new wire generation, applies it,
+  ACKs, and its own #9569 send debt is superseded. Without it the marker,
+  claimed by the pre-split push, kept the loser divergent and its gate
+  refusing the handovers it starts.
 - **Every handover that promotes the peer refuses a config-stale peer
   (#9569).** The #5563 config-stale gate lives in `TransferReady`, which only
   the node that becomes primary evaluates, through `RequestPeerFailover`. The
@@ -4059,6 +4545,43 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
     The legacy refusal names the real cause ("peer predates config-apply ACK").
     With no session sync there is no push that could have failed, so
     handover proceeds as before. Crash takeover stays ungated.
+  - A peer reboot voids only the ACK its PREVIOUS boot delivered (#18521).
+    The applied mark is attributed to the boot that delivered it (the
+    connection's #9818 capability identity, which precedes any ACK on the
+    same ordered stream), and the BulkStart announcing a new boot
+    (`notePeerBootIncarnation`) zeroes it only when a different boot — or an
+    unattributed legacy peer — delivered it. The BulkStart is not ordered
+    against the new boot's ACK: a restarted standby can apply and ACK the
+    peer-connect push seconds before its first bulk starts, and zeroing that
+    ACK left the debt standing with nothing to re-push an in-sync config, so
+    failover onto the restarted standby was refused ("peer applied 0") until
+    the next commit (`config_ack_reboot_order_18521_test.go`). An ACK the
+    standby skips because the delivering connection is no longer active is
+    now logged instead of silent.
+  - An uncredited ACK no longer sticks (#18521). Only the newest send's ACK
+    clears the gate, and only a NACK, a reconnect or a commit re-pushed —
+    so a lost, skipped or discarded ACK refused failover onto an in-sync
+    standby until the next commit. `PeerConfigAckOverdue` reports a
+    connected ACK-capable peer that has left the newest send unacknowledged
+    for 10s, and the daemon (`repushIfConfigAckOverdue`: reconcile tick, and
+    on a stale-gate refusal) re-sends the last pushed config at its SAME wire
+    generation, at most once per 10s and only as RG0 authority. The standby's
+    duplicate path re-ACKs it without applying again, so neither node's config
+    epoch moves (a new generation would re-apply and make the epoch guard
+    refuse synced installs stamped with the older epoch). Counters
+    `Config apply-acks sent / unsent` (standby) and `credited / ignored`
+    (authority) name a future drop end to end.
+  - A former authority's debt is superseded by the new authority's config
+    (review of #18525 round 2). Only the RG0 authority re-pushes, but the
+    gate runs on every demoting node, so a node that lost RG0 with an
+    uncredited debt by a path its gate does not guard (a monitor-driven
+    weight change) refused every later data-RG handover. Once it APPLIES a
+    config the peer pushed, both nodes hold the peer's config and
+    `supersedeSentConfigDebtByPeer` retires the debt; a later send records a
+    fresh one. A duplicate re-ACK does not supersede (round 3): it never
+    passes the apply handler's RG0-primary refusal, and it says nothing
+    about this node's current config
+    (`TestFormerAuthorityDebtSupersededByPeerConfig18525`).
 - `TakeoverHoldTime` adds extra delay before election when this node would
   immediately preempt. Used to avoid election thrash on simultaneous boot.
 - **A committed requested transfer wins over `preempt` (#10776).** Once the
@@ -4173,6 +4696,51 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   the lease. reqID is threaded
   into `OnRemoteFailover`/`OnRemoteFailoverBatch`/`OnRemoteFailoverCommit`/
   `OnRemoteFailoverCommitBatch` (`sync.go`) to arm/clear it.
+- **An in-flight peer-requested transfer owns the owner's hold (#18521).**
+  While the reqID-bound transfer-out lease is LIVE, `electRG` does not run the
+  2s dual-resign / peer-yielded clear ("clearing manual failover (peer also
+  yielded)"); only the matching commit, the matching abort, lease expiry, peer
+  loss or an operator reset release the hold. The 2s timer runs from the
+  owner's demotion, but the requester legitimately advertises secondary-hold
+  until the owner's applied-ACK reaches it (its own pre-request hold is
+  released only then, and the ACK waits on the owner's demotion actuation) and
+  then spends up to `localFailoverCommitTimeout` (3s) in its local commit
+  settle. A demotion that took >2s to actuate cleared the hold mid-transfer,
+  ordinary election re-promoted a higher-priority owner, and the commit failed
+  with "still primary locally". A requester advertising PRIMARY during its
+  commit window never tripped the timer (no peer-yield predicate matches), so
+  the race needs the requester's pre-request hold or weight 0. An operator
+  hold (no lease) keeps the 2s rescue. The hold applies only while the
+  session-sync connection set that carried the request is still installed
+  (`transferChannelIntactLocked`): `ArmRemoteTransferOutLease` binds the lease
+  to the published sync source and its connection-slot removal generation
+  (`SessionSync.TransferChannelGen`, advanced by `setConnSlotLocked`, the only
+  production writer of a slot — `TestConnSlotWritesGoThroughTheSetter18525`).
+  Commit and abort frames are written once and never re-sent, so one queued
+  on a connection that was then torn down is gone, and a FRESH connection
+  cannot deliver it. Keying the hold on "sync connected" (the first review
+  round) let a redial that beat the owner's next election re-arm the
+  lease-long hold while the requester sat in its restored hold — no primary
+  for up to the lease (review of #18525 round 2). Once the binding breaks
+  (sync down, the request's connection torn down or superseded, a new
+  SessionSync published) the owner falls back to the pre-#18521 floor: the
+  2s rescue and the lease expiry. That rescue fires only while the requester
+  advertises secondary-hold or weight 0, so it does not re-promote the owner
+  over a requester that already promoted itself and is waiting for its
+  commit ACK on the new connection; that commit still lands. It CAN fire
+  while the requester is still in its pre-request hold waiting for the
+  applied-ACK — the binding breaks during a slow demotion actuation — and
+  before round 3 the owner then sent "applied" anyway, because the
+  actuation barrier resolves on the queued demotion edge: both nodes primary
+  until the commit was refused (review of #18525 round 3; master's
+  unconditional rescue has the same window in every slow-actuation
+  transfer). The applied-ACK is now sent only while
+  `RemoteTransferOutStillHeld` (lease armed for that reqID, hold still set);
+  otherwise the requester gets "failed" and keeps its hold. The residual is
+  the ACK's flight: a binding that breaks after "applied" is sent and before
+  the requester has promoted. Filling an empty slot (the other fabric
+  connecting) removes nothing and keeps the binding. Cells:
+  `failover_inflight_hold_18521_test.go`.
 - **A requester-side abort must not re-promote the requester (#15164,
   B22-01).** The lease above restores the OWNER, but it did nothing for the
   requester: after `abortRequestedPeerFailover` the requester had reported
@@ -4509,8 +5077,33 @@ it.
   (`sync_protocol.go`). `configEpochStale` interprets that value by the
   receiver's current RG0 role: a non-authority compares an untagged authority
   generation against `max(applyingConfigGen, lastAppliedConfigGen)`, while an
-  authority compares a tagged reverse epoch against its own `configGenCounter`
-  only after the peer advertises the reverse-tag capability (#11055). A
+  authority compares a tagged reverse epoch only after the peer advertises the
+  reverse-tag capability (#11055). The authority's threshold is
+  `authorityConfigEpochThreshold` (#18636). From its first config write to the
+  current peer incarnation, the threshold is the newest generation actually
+  written to that incarnation: `lastSentConfigGen`, raised as a max in
+  `recordLastSentConfigGen` just before the socket write and held in
+  `peerIncarnationState`, so a new peer incarnation is never compared against
+  a generation sent to its predecessor. One exception is a standby OS reboot.
+  The authority's peer-connect push lands on the rebooted peer's new
+  connection BEFORE that connection's BulkStart reports the new boot id (the
+  #18521 ordering), and the boot-id switch then retires the incarnation.
+  `retirePeerIncarnationLocked` therefore seeds the fresh mark from the
+  priming connection's own written-config mark (`authConn.lastSentConfigGen`).
+  That is the same attribution model as the capability set and the #18521
+  apply ACK. The switch's `OnPeerCapabilitiesChanged` also makes the daemon
+  clear its "already pushed" marker and reconcile, so the new incarnation
+  receives a push in any case. Before that first write it is
+  `configGenCounter`, the original comparison, which refuses (fail-closed) a
+  tagged generation the peer took from an earlier authority process (an older
+  boot, or a config edited while this node was down), until the reconnect
+  push lands. `configGenCounter` alone cannot be the threshold: it is a
+  reservation counter, and the 30 s config-sync reconcile tick reserves a
+  generation before it finds the config already pushed and no-ops. So it runs
+  one draw per tick past anything the peer was ever sent. On `loss` (#18636)
+  that refused every install from a converged peer, `Sessions
+  stale-config-ignored` climbed at 55-160/s on the RG0 primary, and the
+  primary never imported a session its peer created. A
   non-authority stamps `tag | lastAppliedConfigGen` only when the peer is known
   capable, received and applied marks agree and are nonzero, and the applied
   mark is newer than the floor captured on entry to the current non-authority
@@ -5000,13 +5593,24 @@ it.
     first. A row whose fold cannot be resolved falls back to zone ownership;
     `ShouldSyncZone` admits a mapped zone when this node is primary for any RG
     in its set.
-  - `SetZoneOwnership` installs the zone set, fold-to-RG lookup and local fold
-    resolver atomically, and advances `zoneRGMapGen` on each apply because the
-    resolver closes over an apply-time interface snapshot. The legacy
-    `SetZoneRGMap` setter adapts a single-RG map and bumps the generation only
-    when its contents change. Reconcile skips a bulk whose ownership snapshot
-    generation is stale, because old answers could delete a session this node
-    now owns.
+  - `InstallZoneOwnership` (#18374) installs the zone set, fold-to-RG lookup,
+    local fold resolver and NAT-scope folder atomically, and advances
+    `zoneRGMapGen` only when the zone map, the fold-to-RG map or the resolver
+    changed. A resolver is a func and cannot be compared, so the daemon passes
+    a `ResolverDigest` of what it closes over — the store's canonical
+    config-text digest (`ActiveDigestFor`, empty unless the config IS the
+    store's compiled active one) and the ifindex->name table it was built from
+    (`pkg/daemon/zone_ownership_install_18374.go`). A zero digest is unknown
+    and always advances. Every daemon install goes through it (a module-wide
+    AST cell enforces that), so a content-equal re-install on a config apply
+    or a link-state refresh no longer voids an in-flight bulk's reconcile.
+    `SetZoneOwnership` and `SetIngressFoldFn` remain for tests and advance on
+    every call (no digest); `SetNatScopeFoldFn` advances nothing, because no
+    reconcile snapshot captures the NAT-scope folder — only the send-side
+    stamp reads it. The legacy `SetZoneRGMap` setter adapts a single-RG map and
+    bumps the generation only when its contents change. Reconcile skips a bulk
+    whose ownership snapshot generation is stale, because old answers could
+    delete a session this node now owns.
   - Before publishing a new session-sync object, the daemon seeds a stable
     active-applied config's ownership snapshot. Exact-text and
     credential-equivalent config-sync skips also repair a still-nil map from
@@ -5219,3 +5823,46 @@ it.
   refusals, stale full-set, absolute-deadline junk-stream teardown,
   header-only cap refusal, cap-table census over all 44 dispatched
   labels).
+
+  **Session-sync teardown is abortive and names its cause; a stalled
+  receive loop is watched (#18521).** A peer whose receive loop stopped
+  draining (a synchronous helper install behind the userspace Manager's
+  mutex) made this node's 2s-deadline writer tear the connection down, and
+  the graceful FIN then queued behind ~1 MB of unsent bytes the stalled peer
+  could not accept — the dial side, the only side that redials, stayed
+  ESTABLISHED for 56s. A teardown of a connection judged dead now closes
+  with `SO_LINGER 0` (`abortSyncConn`, including `handleDisconnect`'s stale
+  branch, which used to leave its socket open). `Stop()` is NOT such a
+  judgment: it flushes what it already wrote (`flushOnStop`, until the peer
+  has acknowledged every byte, bounded by `syncStopFlushTimeout`, 1s) and
+  closes normally, aborting only a peer that did not take the bytes in time
+  (review of #18525 round 2: the abortive stop discarded a stopping
+  primary's newest deltas, which nothing re-sends). That bound does not
+  cover a peer reading below line rate: measured on loopback, ~520 KB of
+  ~1 MB in flight is still unflushed when it aborts (round 3). A
+  per-connection watchdog notices the kernel's report that the peer closed
+  the connection (RST or FIN) while the loop is behind: a loop still making
+  progress drains what the peer delivered (marked `peerClosed`: writers skip
+  it, a writer's failure does not tear it down, the dial side may redial
+  its slot, its frames earn no peer liveness); after an RST, a loop with one
+  handler call stuck for `syncWriteDeadline` is torn down at once. The drain
+  helps only a peer that does not come back before the drain completes
+  (stopped for good, or a crash whose restart — systemd's 1s `RestartSec` —
+  is slower than the drain): a redial retires the
+  drained connection through `handleDisconnect` (`retirePeerClosedSlot`,
+  round 3 — a plain supersession read as a peer reboot and evicted the
+  healthy other-fabric connection), discarding what was still queued, and
+  peer connect/disconnect callbacks run in dispatch order
+  (`dispatchPeerEvent`). `fabric N disconnected`
+  carries `reason`/`err`/per-connection summary; `receive loop exited` is
+  logged once per connection; and a handler that holds the loop for 1s is
+  reported with its message type, while blocked and on return, each kind at
+  most once per 10s per connection with a `suppressed` tally. Full
+  mechanism: `docs/session-sync-architecture.md` "Connection teardown and the
+  half-open window". Cells: `sync_conn_halfopen_18521_test.go` (loopback
+  TCP: the RST reaches a non-reading peer, the watchdog clears a stuck slot
+  and drains a progressing one, Stop flushes to a slow peer and still aborts
+  a stalled one, stale-branch close, exit reasons, rate-limited slow-handler
+  reports, `syncMsgName` census against `handleMessage`),
+  `sync_reprime_storm_18521_test.go` (one fence re-prime per epoch, receiver
+  re-request after a skipped reconcile).

@@ -668,7 +668,7 @@ func (m *Manager) statusLoop(ctx context.Context) {
 				if m.clusterHA && !haReplayAttemptedThisTick {
 					_ = m.refreshHAStateFromMapsLocked()
 				}
-				newActiveSig := activeHAGroupSignature(m.haGroups)
+				newActiveSig := activeHAGroupSignature(m.effectiveHAGroupMapLocked())
 				if m.clusterHA && !haReplayAttemptedThisTick && newActiveSig != "" && time.Since(m.lastRGActivateTime) >= 2*time.Second {
 					// Only sync watchdog updates to the helper from the poll.
 					// Do NOT sync active/inactive transitions here — that's

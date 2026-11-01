@@ -381,7 +381,8 @@ never sends to it, but the report on failure is always the full grid.
 iperf3 port, not the per-class grid, so the standing smoke stays green at
 18+ Gb/s while every harness here is unrunnable. The green everyone watches
 does not cover the dependency everything else needs. On the standing loss
-cluster the v4 target (172.16.80.200) is a declarative alias of the
+cluster the v4 target (172.16.80.202 since #18576; it was .200, which the
+external v6 box also answers ARP for) is a declarative alias of the
 incus-managed `xpf-mouse-target` host (#16213: pinned by
 `mouse-addr.service`, previously a hand `ip addr add` a reboot dropped),
 so `target-services.sh up` delegates to `mouse-target-setup.sh` and every

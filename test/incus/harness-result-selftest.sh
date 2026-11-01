@@ -374,6 +374,84 @@ score_gate() {
 		fi
 	fi
 }
+# #18583: the RG-move soak's summary carries ", <k> cost"; smoke-cells records
+# it as cells_cost (master-relative judging needs the number), and a COST
+# never turns a 0-failed row into a FAIL. Strict mode prints COST as failed.
+printf 'rg-move-soak: 4 passed, 0 failed, 2 cost (0 void)\n' >"$LOG"
+if [[ "$(adapt_field smoke-cells 0 1)" == "PASS" && "$(adapt_field smoke-cells 0 5)" == *"cells_cost=2"* ]]; then
+	ok "#18583: smoke-cells records the soak's cost count (cells_cost=2) on a PASS row"
+else
+	bad "#18583: smoke-cells did not record cost: verdict=$(adapt_field smoke-cells 0 1) metrics=$(adapt_field smoke-cells 0 5)"
+fi
+printf 'rg-move-soak: 2 passed, 2 failed, 2 cost (0 void)\n' >"$LOG"
+if [[ "$(adapt_field smoke-cells 1 1)" == "FAIL" ]]; then
+	ok "#18583: a strict-mode soak line with failures scores FAIL"
+else
+	bad "#18583: strict-mode soak line scored $(adapt_field smoke-cells 1 1), want FAIL"
+fi
+# #18614: the crash smokes' clock record. A run whose ANY clock call took the
+# XPF_FAILOVER_CLOCK_RESYNC=1 escape SET the node clocks: a would-be PASS is a
+# VOID (not H1-H3 evidence) carrying clock_resync=1, even when a later call
+# only measured. A clock VOID (no time source) turns a would-be PASS into a
+# VOID with the CLOCK_VOID reason. A clock FAIL stays FAIL, with
+# clock_converged=0 clock_void=0 telling it from a dataplane FAIL. A smoke
+# without the precondition carries no clock field. The producer side (the
+# library's real lines) is failover-clock-selftest.sh's.
+clock_rows_ok=1
+M_RESYNC='CLOCK_PRECONDITION: resync=1 converged=- verdict=PASS skew_s=+72.000 converge_s=- bound_s=5 budget_s=120 label=phase1'
+M_OK='CLOCK_PRECONDITION: resync=0 converged=1 verdict=PASS skew_s=+0.100 converge_s=7.4 bound_s=5 budget_s=120 label=final'
+M_FAIL='CLOCK_PRECONDITION: resync=0 converged=0 verdict=FAIL skew_s=+72.000 converge_s=- bound_s=5 budget_s=120 label=phase1'
+M_VOID='CLOCK_PRECONDITION: resync=0 converged=0 verdict=VOID skew_s=+0.000 converge_s=- bound_s=5 budget_s=120 label=phase1'
+V_LINE='CLOCK_VOID: phase1: clock precondition VOID: no time source (lab/NTP): the un-rebooted peer fw1 is not synchronised (Not synchronised)'
+for adapter in smoke-cells ha-smoke; do
+	printf '%s\n' "$M_RESYNC" "$M_OK" '  PASS  iperf3 throughput 9.0 Gbps' 'HA crash test: 7 passed, 0 failed' >"$LOG"
+	[[ "$(adapt_field "$adapter" 0 1)" == VOID && "$(adapt_field "$adapter" 0 2)" == *"clock_resync=1"*"cannot satisfy H1-H3"* &&
+		" $(adapt_field "$adapter" 0 5) " == *" clock_resync=1 "* ]] || { clock_rows_ok=0; echo "  $adapter resync: $(harness_adapt "$adapter" 0 "$LOG")"; }
+	printf '%s\n' "$M_OK" '  PASS  iperf3 throughput 9.0 Gbps' 'HA crash test: 7 passed, 0 failed' >"$LOG"
+	[[ "$(adapt_field "$adapter" 0 1)" == PASS && " $(adapt_field "$adapter" 0 5) " == *" clock_resync=0 clock_converged=1 clock_void=0 "* ]] ||
+		{ clock_rows_ok=0; echo "  $adapter measured: $(harness_adapt "$adapter" 0 "$LOG")"; }
+	printf '%s\n' "$M_OK" "$M_FAIL" '  FAIL  iperf3 throughput 9.0 Gbps' 'HA crash test: 6 passed, 1 failed' >"$LOG"
+	[[ "$(adapt_field "$adapter" 1 1)" == FAIL && " $(adapt_field "$adapter" 1 5) " == *" clock_converged=0 clock_void=0 "* ]] ||
+		{ clock_rows_ok=0; echo "  $adapter clock fail: $(harness_adapt "$adapter" 1 "$LOG")"; }
+	printf '%s\n' "$M_VOID" "$V_LINE" '  PASS  iperf3 throughput 9.0 Gbps' 'HA crash test: 7 passed, 0 failed' >"$LOG"
+	[[ "$(adapt_field "$adapter" 0 1)" == VOID && "$(adapt_field "$adapter" 0 2)" == *"clock precondition VOID: phase1: clock precondition VOID: no time source"* &&
+		" $(adapt_field "$adapter" 0 5) " == *" clock_void=1 "* ]] || { clock_rows_ok=0; echo "  $adapter clock void: $(harness_adapt "$adapter" 0 "$LOG")"; }
+	printf '%s\n' "$M_VOID" "$V_LINE" >"$LOG"
+	[[ "$(adapt_field "$adapter" 77 1)" == VOID && "$(adapt_field "$adapter" 77 2)" == *"CLOCK_VOID: phase1: clock precondition VOID"* ]] ||
+		{ clock_rows_ok=0; echo "  $adapter clock void, no summary: $(harness_adapt "$adapter" 77 "$LOG")"; }
+	printf '%s\n' '  PASS  iperf3 throughput 9.0 Gbps' 'HA crash test: 7 passed, 0 failed' >"$LOG"
+	[[ "$(adapt_field "$adapter" 0 1)" == PASS && "$(adapt_field "$adapter" 0 5)" != *clock_* ]] || clock_rows_ok=0
+done
+if ((clock_rows_ok)); then
+	ok "#18614: ha-smoke and smoke-cells: a resynced or clock-VOID would-be PASS is VOID with its reason; clock_resync/clock_converged/clock_void ride the row; none without the precondition"
+else
+	bad "#18614: the clock record is wrong on an HA smoke row"
+fi
+# #18617: HARNESS_METRIC lines ride the row (the LAST value per key); keys the
+# adapter computes itself and malformed values are refused; ha-smoke records
+# the ", <k> cost" count as cells_cost too (test-failover's planned moves).
+hm_ok=1
+for adapter in smoke-cells ha-smoke; do
+	printf '%s\n' 'HARNESS_METRIC: whole_run_zero_intervals=9' 'HARNESS_METRIC: whole_run_zero_intervals=12' \
+		'HARNESS_METRIC: cells_passed=999' 'HARNESS_METRIC: clock_void=1' 'HARNESS_METRIC: Bad-Key=3' \
+		'HARNESS_METRIC: worst_stall_s=abc' '  PASS  iperf3 throughput 9.0 Gbps' \
+		'  Failover test: 7 passed, 0 failed, 2 cost' >"$LOG"
+	m=" $(adapt_field "$adapter" 0 5) "
+	[[ "$m" == *" whole_run_zero_intervals=12 "* && "$m" == *" cells_passed=7 "* && "$m" == *" cells_cost=2 "* &&
+		"$m" != *"999"* && "$m" != *"clock_void"* && "$m" != *"Bad-Key"* && "$m" != *"worst_stall_s"* ]] ||
+		{ hm_ok=0; echo "  $adapter: $m"; }
+done
+if ((hm_ok)); then
+	ok "#18617: HARNESS_METRIC values ride the row (last wins), reserved keys and malformed values are refused, ha-smoke records cells_cost"
+else
+	bad "#18617: HARNESS_METRIC recording or ha-smoke cells_cost is wrong"
+fi
+printf 'Results: 7 passed, 0 failed, 2 skipped\n' >"$LOG"
+if [[ "$(adapt_field smoke-cells 0 5)" == *"cells_skipped=2"* && "$(adapt_field smoke-cells 0 5)" != *"cells_cost"* ]]; then
+	ok "#18583: the skipped slot still parses with no cost field (no shift)"
+else
+	bad "#18583: skipped/cost slots shifted: $(adapt_field smoke-cells 0 5)"
+fi
 for g in "${DECLARED_IPERF_SMOKES[@]}"; do score_gate "$g" ha-smoke; done
 for g in "${DECLARED_CELLS_SMOKES[@]}"; do score_gate "$g" smoke-cells; done
 if ((census_covered == census_total)); then
@@ -1602,7 +1680,10 @@ done <<<"$helper_gate_inventory"
 hermetic_target=$(sed -n '/^test-wire-properties:/,/^$/p' "$makefile")
 if [[ -z "$hermetic_target" ]]; then
 	bad "#12140: hermetic gate lookup swept ZERO lines for test-wire-properties — the target was renamed or removed (empty sweep)"
-elif [[ "$helper_gate_count" == "24" && "${#missing_helper_gates[@]}" == "0" &&
+# The pin counts every cluster --gate invocation in the Makefile. 25 on master
+# at 5e3655d536 (the pin still said 24: a gate landed without bumping it);
+# 26 with #18583's test-rg-move-soak.
+elif [[ "$helper_gate_count" == "26" && "${#missing_helper_gates[@]}" == "0" &&
 	"$hermetic_target" != *"--require-helper-attestation"* ]]; then
 	ok "#12140: all $helper_gate_count cluster gate invocations require helper provenance; hermetic gate is excluded"
 else

@@ -2179,6 +2179,15 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
 /// #9948 fail-on-revert: a matched reversed error must not be delivered when
 /// the packet's actual arrival-zone to egress-zone pair is denied. Removing
 /// the queued-prebuilt policy gate makes this cell queue one forward instead.
+///
+/// #18174: the forged Time Exceeded now arrives from the WRONG zone
+/// (`untrust`, ifindex 32) rather than the quoted session's egress zone.
+/// Until #18174 this cell fed a Time Exceeded from the RIGHT zone (`wan`) and
+/// asserted it was default-denied — which is exactly the traceroute/mtr
+/// blackhole the user reported (every NAT'd hop's error died here). A
+/// genuine path error from the expected arrival zone is RELATED
+/// (`poll_descriptor_snat_time_exceeded_admitted_as_related_18174`); the
+/// gate's job, which this cell keeps proving, is the wrong-zone forgery.
 #[test]
 fn poll_descriptor_embedded_icmp_reversal_zone_policy_denies_9948() {
     poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
@@ -2188,8 +2197,28 @@ fn poll_descriptor_embedded_icmp_reversal_zone_policy_denies_9948() {
         false,
         64,
         false,
-        12,
+        32,
         false,
+        false,
+    );
+}
+
+/// #18174 fail-on-revert: a NAT'd Time Exceeded (traceroute / mtr hop past
+/// an SNAT firewall) quoting a live session and arriving from that session's
+/// forward egress zone is RELATED and must be reversed and delivered to the
+/// client under `wan -> lan` default deny. Pre-#18174 only NAT'd PMTUD
+/// (#10666) was RELATED and this cell queued nothing (policy_deny=1).
+#[test]
+fn poll_descriptor_snat_time_exceeded_admitted_as_related_18174() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
+        false,
+        txn_ha_state(),
+        false,
+        false,
+        64,
+        false,
+        12,
+        true,
         false,
     );
 }
@@ -2265,7 +2294,8 @@ fn poll_descriptor_same_family_reversal_ttl_one_is_dropped_10320() {
 
 /// #10666 fail-on-revert: translated PMTUD for a live SNAT session is RELATED
 /// from the quoted flow's egress zone and must pass under WAN-to-LAN default
-/// deny; a different ICMP error keeps the #9948 zone-policy gate above.
+/// deny; a wrong-zone arrival keeps the #9948 zone-policy gate above (#18174
+/// widened the same admission to every same-family path error).
 #[test]
 fn poll_descriptor_snat_frag_needed_admitted_as_related_10666() {
     poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(

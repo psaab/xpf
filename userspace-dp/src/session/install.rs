@@ -641,6 +641,10 @@ impl SessionTable {
                 // for the reverse ACK that completes its asymmetric handshake.
                 handshake_pending: syn_ack_first,
                 syn_ack_first,
+                // #18520: no sibling relay has advanced a fresh entry.
+                handshake_relayed: false,
+                // #18520: a fresh install has not been served by a hit yet.
+                served_here: false,
                 // #7212: no static input-filter verdict has been derived for
                 // this ENTRY yet. The forward install's own first packet was
                 // adjudicated by the session-MISS path, but this constructor
@@ -759,8 +763,7 @@ impl SessionTable {
         // #10310: count one logical session per node, not every
         // WorkerLocalImport replica on the other RSS workers. True HA
         // peer imports remain counted for #3122 failover enforcement.
-        let counted =
-            !metadata.is_reverse && session_limit_origin_counted(origin);
+        let counted = self.session_limit_counted(&key, origin, metadata.is_reverse);
         if counted {
             // #2134/#3122: fresh-install count choke point. Capture the
             // Copy IPs before `key` is moved into the delta below. The
@@ -944,9 +947,37 @@ impl SessionTable {
         } else {
             None
         };
+        // #18520: the handshake stage is monotonic per incarnation at the
+        // WORKER import too, exactly as `publish_shared_session` keeps it
+        // for the shared map (#16223). The coordinator fans the RAW incoming
+        // row to the workers, so a later same-incarnation import carrying a
+        // LOWER stage — a bulk/export Open built from a sender shared row
+        // its ct-slice had not yet restamped, landing after the sender's
+        // completion Update — regressed an Established replica to the 20 s
+        // opening window, where the standby HOLD ceiling (3 x 20 s) then
+        // reaps it before a failback. Same rule as the shared map: the
+        // stage alone is kept; a stated close class still applies (it
+        // drives `closing` and the close window independently of the
+        // stage). A new incarnation (another session id) or a zero (legacy)
+        // id takes the incoming state. TCP with a carried id only, so other
+        // imports pay no extra lookup.
+        let wire_handshake = match wire_handshake {
+            Some(incoming) if wire_session_id != 0 => match self.entry_by_key_quiet(&key) {
+                Some(existing)
+                    if existing.session_id == wire_session_id
+                        && TcpHandshakeState::stage_rank(existing.tcp_handshake_state_wire(protocol))
+                            > TcpHandshakeState::stage_rank(incoming.to_wire()) =>
+                {
+                    TcpHandshakeState::from_wire(existing.tcp_handshake_state_wire(protocol))
+                }
+                _ => Some(incoming),
+            },
+            other => other,
+        };
         // Reject peer data that would clobber a locally-owned session
-        // unless explicitly allowed (e.g. during HA activation).
-        if matches!(self.entry_by_key(&key), Some(existing) if !existing.origin.is_peer_synced())
+        // unless explicitly allowed (e.g. during HA activation). #18620: a
+        // punt seed is not locally owned (`yields_to_peer`).
+        if matches!(self.entry_by_key(&key), Some(existing) if !existing.origin.yields_to_peer())
             && !allow_replace_local
         {
             return false;
@@ -1035,6 +1066,12 @@ impl SessionTable {
         // key_to_handle mapping internally before returning None.
         // #9752 round 3: unknown-never-default on re-import, computed BEFORE
         // the removal (the entry must still be in the table to consult).
+        // #18520: a same-incarnation re-import of a replica this worker has
+        // served keeps its served-here bit (the relay receiver's test).
+        let preserved_served_here = wire_session_id != 0
+            && self
+                .entry_by_key_quiet(&key)
+                .is_some_and(|existing| existing.session_id == wire_session_id && existing.served_here);
         let preserved = self.preserved_install_table_for(&key, &decision, wire_session_id);
         let mut decision = decision;
         if let Some((domain, check)) = preserved {
@@ -1120,6 +1157,10 @@ impl SessionTable {
                 established,
                 handshake_pending,
                 syn_ack_first,
+                // #18520: no sibling relay has advanced a fresh entry.
+                handshake_relayed: false,
+                // #18520: a same-incarnation re-import keeps the bit.
+                served_here: preserved_served_here,
                 // #7212: a peer-synced import carries NO locally-derived
                 // input-filter verdict — the peer adjudicated it against the
                 // peer's own interfaces. `UNVALIDATED` makes the first packet
@@ -1258,8 +1299,9 @@ impl SessionTable {
         self.push_to_wheel(&index_key, now_ns);
         // #10310: a WorkerLocalImport is a local replica of an already
         // counted logical session, not a new limit-session unit. A true HA
-        // peer import remains counted so failover cannot bypass #3122.
-        if !metadata.is_reverse && session_limit_origin_counted(origin) {
+        // peer import remains counted so failover cannot bypass #3122, but on
+        // ONE worker of the fan-out only (#18640).
+        if self.session_limit_counted(&index_key, origin, metadata.is_reverse) {
             self.session_limit_inc(session_limit_zone, index_key.src_ip, index_key.dst_ip);
         }
         true
@@ -1597,14 +1639,19 @@ impl SessionTable {
                 entry.origin = SessionOrigin::SyncImport;
             }
             // Borrow on `entry` ends here so the &mut self count helper can
-            // run. SyncImport and forward transient seeds are counted; seeds
-            // remain node-local through demotion and keep their existing charge.
-            let old_counted =
-                !is_reverse && session_limit_origin_counted(old_origin);
-            let new_counted =
-                will_flip && !is_reverse && session_limit_origin_counted(SessionOrigin::SyncImport);
+            // run. Transient seeds and TUN rows keep their origin and so their
+            // charge. A flip to SyncImport makes the row a fanned-out HA copy,
+            // charged on one worker of the node only (#18640): the owner's
+            // counted local row stops counting unless this worker is the
+            // designated one, and a sibling replica starts counting only if it
+            // is.
+            let new_origin = if will_flip { SessionOrigin::SyncImport } else { old_origin };
+            let old_counted = self.session_limit_counted(&key, old_origin, is_reverse);
+            let new_counted = self.session_limit_counted(&key, new_origin, is_reverse);
             if new_counted && !old_counted {
                 self.session_limit_inc(ingress_zone, key.src_ip, key.dst_ip);
+            } else if old_counted && !new_counted {
+                self.session_limit_dec(ingress_zone, key.src_ip, key.dst_ip);
             }
             demoted_keys.push(key);
         }
