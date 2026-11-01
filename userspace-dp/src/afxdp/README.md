@@ -2405,8 +2405,26 @@ own view's flow-cache entry:
     behind a current one. If the views were already released it is dropped
     as a mismatch, exactly as before this change, and never processed under
     the wrong view. With traffic on every binding a view lives for the
-    ring's drain time (milliseconds); only a worker with an idle binding keeps
-    it for the full 200 ms.
+    ring's drain time (milliseconds); only a worker with an idle binding
+    keeps it for the full 200 ms.
+
+    The RPS path, read in a v6.19-4683-gb7ef56a07672 tree (the 7.0 merge
+    window; the lab runs 7.0.0-rc7+):
+    1. virtio_net's `receive_buf` records the RX queue
+       (`drivers/net/virtio_net.c:2603`), then calls `napi_gro_receive`
+       (`:2608`).
+    2. `gro_normal_list` (`include/net/gro.h:524`) calls
+       `netif_receive_skb_list_internal`. With RPS on, that function sends
+       each skb to `get_rps_cpu`'s CPU via `enqueue_to_backlog`
+       (`net/core/dev.c:6375-6380`).
+    3. That CPU's `process_backlog` (`:6617`) calls
+       `__netif_receive_skb_core`, where `do_xdp_generic` runs the program
+       (`:5958-5962`). The stamp is read here.
+    4. The program's rxq is the recorded queue (`netif_get_rxqueue`,
+       `:5368-5376`). So every CPU passes `xsk_rcv_check` for the same
+       queue's socket.
+    5. Delivery is serialized only by `xsk_generic_rcv`'s `pool->rx_lock`
+       (`net/xdp/xsk.c:357`), taken after the stamp was read.
   - **Memory.** A retained view pins the publisher's deep-cloned
     `ForwardingState`, routes included: on the order of 100-150 MB per copy
     with a full IPv4 table. Under BGP churn faster than the grace both slots
