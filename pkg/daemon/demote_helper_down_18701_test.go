@@ -64,8 +64,9 @@ func (h *slowHA18701) SyncFabricState(context.Context) error            { return
 // #18697/#18685 verdict from.
 type readinessDP18701 struct {
 	dataplane.RuntimeDataPlane
-	ha       *slowHA18701
-	notReady atomic.Bool
+	ha             *slowHA18701
+	notReady       atomic.Bool
+	controlAnswers atomic.Bool
 }
 
 func (d *readinessDP18701) HA() dataplane.HAController { return d.ha }
@@ -73,6 +74,10 @@ func (d *readinessDP18701) Mode() dpuserspace.DataplaneMode {
 	return dpuserspace.ModeUserspaceStrict
 }
 func (d *readinessDP18701) HelperElectionNotReady() bool { return d.notReady.Load() }
+
+// HelperControlUnresponsive: true unless the test says the control thread
+// still answers (the frozen-worker verdict).
+func (d *readinessDP18701) HelperControlUnresponsive() bool { return !d.controlAnswers.Load() }
 
 func newDemotion18701(t *testing.T, notReady bool, hold time.Duration) (*Daemon, *order18701) {
 	t.Helper()
@@ -300,5 +305,89 @@ func TestDirectVIPOwnershipReadUnderTheLock18715(t *testing.T) {
 	}
 	if ev := log.snapshot(); slices.Index(ev, "vips-removed") >= 0 {
 		t.Fatalf("events %v: a reconcile that waited out a promotion removed the new owner's VIPs", ev)
+	}
+}
+
+// TestLegacyVRRPModeNeverTouchesDirectVIPs18715 (review, NL1): the helper-down
+// release is direct-mode only. In legacy VRRP mode VRRP owns the same RETH
+// addresses, so a not-ready helper must cause no direct-VIP add or remove on
+// either the event path or the reconcile pass; converging them to cluster
+// state there could add a VIP behind a VRRP BACKUP or strip a VRRP master's.
+func TestLegacyVRRPModeNeverTouchesDirectVIPs18715(t *testing.T) {
+	old := helperDownDemotionBound
+	helperDownDemotionBound = 200 * time.Millisecond
+	t.Cleanup(func() { helperDownDemotionBound = old })
+	d, log := newDemotion18701(t, true, 300*time.Millisecond)
+	d.store = fenceTestStore(t, rethFenceClusterSet)
+	d.resignRethRGFn = func(int) vipReleaseBarrier { return nil }
+	if d.isNoRethVRRP() {
+		t.Fatal("setup: the daemon is still in direct mode")
+	}
+	touched := 0
+	d.directRemoveVIPsFn = func(int) int { touched++; return 1 }
+	d.directAddVIPsFn = func(int) int { touched++; return 1 }
+	primeRG1Primary(t, d)
+	demoteRG1(t, d)
+	d.reconcileRGState()
+	if touched != 0 {
+		t.Fatalf("legacy VRRP mode: a not-ready helper made %d direct-VIP add/remove calls; events %v", touched, log.snapshot())
+	}
+}
+
+// TestRemoteFailoverOfAWedgedNodeCompletes18715 (review): a peer-requested
+// evacuation of the sick node must complete. The bounded write times out by
+// design against an unresponsive helper; with the VIPs released, the fence is
+// reported actuated so the requester's failover is not aborted and this node
+// is not restored as owner.
+func TestRemoteFailoverOfAWedgedNodeCompletes18715(t *testing.T) {
+	old := helperDownDemotionBound
+	helperDownDemotionBound = 200 * time.Millisecond
+	t.Cleanup(func() { helperDownDemotionBound = old })
+	d, log := newDemotion18701(t, true, 5*time.Second)
+	if !d.isNoRethVRRP() {
+		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+	}
+	primeRG1Primary(t, d)
+	d.armFailoverActuation(1, actuationReqID)
+	demoteRG1(t, d)
+	if err := d.waitFailoverActuated(1, actuationReqID); err != nil {
+		t.Fatalf("remote failover of a wedged node did not complete: %v (events %v)", err, log.snapshot())
+	}
+	if !slices.Contains(log.snapshot(), "vips-removed") {
+		t.Fatal("the fence was acked without the VIPs released")
+	}
+}
+
+// TestDemotionPrepRunsWhenControlStillAnswers18715 (review LOW 4): the prep is
+// skipped only when the helper's control socket is silent. With a frozen worker
+// (control answering) it still runs, AFTER the VIP release, so flows reaching
+// this node are redirected via the fabric instead of dropped.
+func TestDemotionPrepRunsWhenControlStillAnswers18715(t *testing.T) {
+	old := helperDownDemotionBound
+	helperDownDemotionBound = 200 * time.Millisecond
+	t.Cleanup(func() { helperDownDemotionBound = old })
+	for _, tc := range []struct {
+		name     string
+		answers  bool
+		wantPrep bool
+	}{{"control-silent", false, false}, {"frozen-worker-control-answers", true, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, log := newDemotion18701(t, true, 300*time.Millisecond)
+			if !d.isNoRethVRRP() {
+				t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+			}
+			d.dataplane().(*readinessDP18701).controlAnswers.Store(tc.answers)
+			d.tryPrepareDemotionFn = func(int) { log.add("prep") }
+			primeRG1Primary(t, d)
+			demoteRG1(t, d)
+			ev := log.snapshot()
+			prep, vips := slices.Index(ev, "prep"), slices.Index(ev, "vips-removed")
+			if tc.wantPrep && (prep < 0 || vips < 0 || prep < vips) {
+				t.Fatalf("events %v: with the control thread answering the prep must run, after the VIP release", ev)
+			}
+			if !tc.wantPrep && prep >= 0 {
+				t.Fatalf("events %v: with the control socket silent the prep must be skipped", ev)
+			}
+		})
 	}
 }

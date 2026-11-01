@@ -840,13 +840,21 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// trips (#18715 review: on udp RG2's handler started 10 s after
 		// RG1's). releaseDirectVIPsHelperDown only removes the VIPs of RGs
 		// this node no longer owns.
+		//
+		// The prep is skipped only when the helper's control socket is not
+		// answering (silence, or no helper at all): then it would just burn
+		// its 5 s. When the verdict is a frozen worker or a not-yet-armed
+		// helper whose control thread still answers, the prep still runs,
+		// AFTER the VIP release: it moves this node's flows to fabric
+		// redirect, so packets still arriving here are forwarded via the peer
+		// instead of dropped (#18715 review).
 		helperDownDemotion := clusterDemotionEdge && noRethVRRP && d.helperElectionNotReady()
 		if helperDownDemotion {
 			slog.Warn("cluster: demoting with an unresponsive helper; releasing VIPs before helper-side demotion (#18701)",
 				"rg", ev.GroupID, "helper", d.helperElectionReason())
 			d.releaseDirectVIPsHelperDown("cluster-secondary-helper-down")
 		}
-		if clusterDemotionEdge && d.dataplane() != nil && !helperDownDemotion {
+		if clusterDemotionEdge && d.dataplane() != nil && !(helperDownDemotion && d.helperControlUnresponsive()) {
 			d.tryPrepareUserspaceRGDemotion(ev.GroupID)
 		}
 		// #6177 item 1: capture the RETH resign barrier so the fence verdict
@@ -882,7 +890,17 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 			} else {
 				err = rt.HA().SetRGActive(ctx, ev.GroupID, cur)
 			}
-			if err != nil {
+			if err != nil && helperDownDemotion {
+				// #18715 review: the VIPs are already released and a helper
+				// that did not acknowledge within the bound is not answering,
+				// so this node forwards nothing for the RG either way. Report
+				// the failover fence ACTUATED so a peer-requested evacuation of
+				// this sick node completes instead of aborting and restoring it
+				// as owner (#16592). rg_active stays unrecorded, so reconcile
+				// retries the write.
+				slog.Warn("failed to update rg_active from cluster event; failover still reported actuated because the helper is unresponsive and the VIPs are released (#18701)",
+					"rg", ev.GroupID, "active", cur, "err", err)
+			} else if err != nil {
 				slog.Warn("failed to update rg_active from cluster event",
 					"rg", ev.GroupID, "active", cur, "err", err)
 				actuateErr = fmt.Errorf("redundancy group %d rg_active=%v not applied on demotion: %w",
@@ -1683,6 +1701,9 @@ func (d *Daemon) reconcileRGState() {
 				d.injectBlackholeRoutesFor(reconcileDPUserspaceActive, rgID)
 				var err error
 				if reconcileHelperDown {
+					if !d.helperControlUnresponsive() {
+						d.tryPrepareUserspaceRGDemotion(rgID)
+					}
 					err = setRGActiveBounded(context.Background(), reconcileDP.HA(), rgID, false, helperDownDemotionBound)
 				} else {
 					d.tryPrepareUserspaceRGDemotion(rgID)

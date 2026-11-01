@@ -65,3 +65,17 @@ func (d *Daemon) helperElectionReason() string {
 	}
 	return ""
 }
+
+// helperControlSource reports that the helper's control socket is not
+// answering: no helper running after an unexpected exit, or the silence
+// verdict. A frozen worker with an answering control thread is NOT this.
+type helperControlSource interface {
+	HelperControlUnresponsive() bool
+}
+
+func (d *Daemon) helperControlUnresponsive() bool {
+	if src, ok := d.dataplane().(helperControlSource); ok {
+		return src.HelperControlUnresponsive()
+	}
+	return true // without the surface, keep the conservative skip
+}

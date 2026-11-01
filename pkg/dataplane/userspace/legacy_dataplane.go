@@ -207,6 +207,15 @@ func (a *LegacyDataPlaneAdapter) HelperElectionNotReady() bool {
 	return m.HelperElectionNotReady()
 }
 
+// HelperControlUnresponsive forwards the #18701 control-silence check.
+func (a *LegacyDataPlaneAdapter) HelperControlUnresponsive() bool {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false
+	}
+	return m.HelperControlUnresponsive()
+}
+
 // HelperElectionReason forwards the #18701 verdict explanation.
 func (a *LegacyDataPlaneAdapter) HelperElectionReason() string {
 	m, err := a.managerOrErr()

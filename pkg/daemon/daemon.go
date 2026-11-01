@@ -1905,8 +1905,10 @@ type Daemon struct {
 	// the refresher starts.
 	interfaceLinkRefreshWake atomic.Pointer[chan string]
 	// Test hooks for direct-mode VIP ownership reconciliation.
-	directAddVIPsFn        func(int) int
-	directRemoveVIPsFn     func(int) int
+	directAddVIPsFn    func(int) int
+	directRemoveVIPsFn func(int) int
+	// tryPrepareDemotionFn replaces tryPrepareUserspaceRGDemotion in tests (#18701).
+	tryPrepareDemotionFn   func(int)
 	directAddStableLLFn    func(int)
 	directRemoveStableLLFn func(int)
 

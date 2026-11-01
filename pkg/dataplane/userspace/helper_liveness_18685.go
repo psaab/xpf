@@ -484,6 +484,23 @@ func (m *Manager) HelperElectionReason() string {
 	return m.liveTrack.currentReason(time.Now())
 }
 
+// HelperControlUnresponsive reports that the helper's control socket is not
+// answering: it exited unexpectedly and is not back, or control requests have
+// gone unanswered for the demote span. Never takes m.mu.
+func (m *Manager) HelperControlUnresponsive() bool {
+	if m == nil {
+		return false
+	}
+	return m.helperDownUnexpected.Load() || m.liveTrack.controlSilent(time.Now())
+}
+
+// controlSilent is the silence half of the verdict on its own.
+func (t *helperLivenessTracker) controlSilent(now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.silenceSpanLocked(now) >= helperWedgeDemoteSpan
+}
+
 // currentReason is the reason for a raised verdict, or "".
 func (t *helperLivenessTracker) currentReason(now time.Time) string {
 	t.mu.Lock()

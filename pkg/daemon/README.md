@@ -5057,12 +5057,24 @@ not yet armed, or wedged (#18697/#18685):
      udp, RG2's handler started 10 s after RG1's, so an RG2 VIP released only
      by its own handler would have stayed dual-held all that time (#18715
      review).
-2. The peer-barrier demotion prep is skipped, because there is no live helper
-   to drain.
+2. The peer-barrier demotion prep is skipped ONLY when the helper's control
+   socket is silent, or no helper is running (`HelperControlUnresponsive`).
+   When the verdict is a frozen worker, or a not-yet-armed helper whose
+   control thread still answers, the prep still runs, AFTER the VIP release.
+   It moves this node's flows to fabric redirect, so packets that still reach
+   this node are forwarded via the peer instead of dropped.
 3. The rg_active=false write is best-effort, bounded by
    `helperDownDemotionBound` (1 s) through `setRGActiveBounded`. A timeout
    leaves the apply unrecorded, so the reconcile loop retries it as it would
    any failed apply.
+4. When that bounded write fails, the failover fence is still reported
+   ACTUATED. The VIPs are released, and a helper that did not acknowledge in
+   time forwards nothing for the RG.
+   - Without this, a peer-requested evacuation of the sick node (#16592)
+     would abort and restore THIS node as owner. With the bounded write
+     timing out by design, that would be certain.
+   - A healthy-helper demotion keeps the #6371 rule: a failed clear is not
+     acked.
 
 The 2 s reconcile loop follows the same rule. With an unresponsive helper it
 releases every non-owned RG's VIPs before any per-RG helper round trip, skips
@@ -5083,6 +5095,10 @@ The helper-side part of each RG's demotion still runs per RG, in turn. It
 may wait on the Manager's `m.mu` behind the wedged helper's round trips
 (#18711). That delays the rg_active bookkeeping and the next RG's handler,
 but no longer the VIP release.
+
+Direct mode only, pinned: in legacy VRRP mode a not-ready helper causes no
+direct-VIP add or remove on either path, because VRRP owns those addresses
+there.
 
 Cells, in `demote_helper_down_18701_test.go`:
 - with an unresponsive helper, the VIPs are released before the rg_active
