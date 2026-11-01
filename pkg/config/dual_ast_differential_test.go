@@ -337,6 +337,11 @@ security {
 	{
 		name: "security-nat",
 		hier: `security {
+    zones {
+        // #15001 (306f84dc92) rejects NAT rule-sets naming undefined zones.
+        security-zone trust;
+        security-zone untrust;
+    }
     nat {
         source {
             pool snat-pool {
@@ -406,6 +411,11 @@ security {
 		// security-nat case, which uses the leaf form.
 		name: "security-nat-pool-address-block",
 		hier: `security {
+    zones {
+        // #15001 (306f84dc92) rejects NAT rule-sets naming undefined zones.
+        security-zone trust;
+        security-zone untrust;
+    }
     nat {
         source {
             pool snat-pool {
@@ -717,6 +727,10 @@ system {
     cluster {
         authentication-key test-cluster-psk-6611;
         reth-count 2;
+        // #16746 (d31dbbd49d): private-RG election needs a complete
+        // control link (control-interface AND peer-address).
+        control-interface em0;
+        peer-address 10.99.0.2;
         redundancy-group 0 {
             node 0 priority 100;
             node 1 priority 1;
@@ -849,7 +863,9 @@ protocols {
     bgp {
         group upstream {
             type external;
-            peer-as 65000;
+            // An eBGP peer must be in a different AS from the local
+            // autonomous-system 65000 (the type/peer-as consistency gate).
+            peer-as 65001;
             neighbor 172.16.50.1;
         }
     }
@@ -865,6 +881,11 @@ protocols {
 		// Keys[1:] fix both shapes compile to TWO StaticNATRuleSets.
 		name: "security-nat-static-multi-zone",
 		hier: `security {
+    zones {
+        // #15001 (306f84dc92) rejects NAT rule-sets naming undefined zones.
+        security-zone trust;
+        security-zone dmz;
+    }
     nat {
         static {
             rule-set rs {
@@ -1158,6 +1179,22 @@ func diffConfigSections(hier, flat *Config) string {
 		if name == "PhysicalInterfaces" {
 			continue
 		}
+		// An unexported field cannot be read through reflect.Value.Interface
+		// (it panics, which aborted every later pkg/config test from #16078 on).
+		// It is still compiled state, so it is compared DIRECTLY via its
+		// registered comparator rather than skipped; a new unexported field
+		// with no comparator is reported, so it cannot silently escape.
+		if !ct.Field(i).IsExported() {
+			cmp, ok := unexportedConfigFieldDiffs[name]
+			if !ok {
+				fmt.Fprintf(&b, "section %s is an unexported Config field with no comparator in unexportedConfigFieldDiffs; register one so the differential still covers it\n", name)
+				continue
+			}
+			if d := cmp(hier, flat); d != "" {
+				fmt.Fprintf(&b, "section %s differs:\n%s", name, d)
+			}
+			continue
+		}
 		hf := hv.Field(i).Interface()
 		ff := fv.Field(i).Interface()
 		if !reflect.DeepEqual(hf, ff) {
@@ -1166,6 +1203,19 @@ func diffConfigSections(hier, flat *Config) string {
 		}
 	}
 	return b.String()
+}
+
+// unexportedConfigFieldDiffs compares each unexported Config field directly
+// (this file is in package config, so it can). Keyed by field name; the
+// walker above reports any unexported field missing from this map.
+var unexportedConfigFieldDiffs = map[string]func(hier, flat *Config) string{
+	// #16078: user-identification stanzas surfaced as INERT.
+	"userIdentificationStanzas": func(hier, flat *Config) string {
+		if reflect.DeepEqual(hier.userIdentificationStanzas, flat.userIdentificationStanzas) {
+			return ""
+		}
+		return fmt.Sprintf("  hierarchical: %+v\n  flat-set:     %+v\n", hier.userIdentificationStanzas, flat.userIdentificationStanzas)
+	},
 }
 
 // sortedLines returns the non-empty lines of s sorted lexicographically,

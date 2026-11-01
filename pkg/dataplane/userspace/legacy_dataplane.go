@@ -207,6 +207,24 @@ func (a *LegacyDataPlaneAdapter) HelperElectionNotReady() bool {
 	return m.HelperElectionNotReady()
 }
 
+// HelperControlUnresponsive forwards the #18701 control-silence check.
+func (a *LegacyDataPlaneAdapter) HelperControlUnresponsive() bool {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false
+	}
+	return m.HelperControlUnresponsive()
+}
+
+// HelperElectionReason forwards the #18701 verdict explanation.
+func (a *LegacyDataPlaneAdapter) HelperElectionReason() string {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return ""
+	}
+	return m.HelperElectionReason()
+}
+
 // HelperAnswerAge forwards the #18685 answer age for /metrics.
 func (a *LegacyDataPlaneAdapter) HelperAnswerAge() time.Duration {
 	m, err := a.managerOrErr()

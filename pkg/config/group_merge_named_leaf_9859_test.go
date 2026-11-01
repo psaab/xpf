@@ -254,7 +254,7 @@ func TestGroupCanonicalAreaKeepsKeywordOverride9859(t *testing.T) {
 // spelling wins before compileChassis's int-keyed last-wins fold can alias
 // the two raw tokens.
 func TestGroupCanonicalRedundancyGroupKeepsKeywordOverride9859(t *testing.T) {
-	text := `groups { G { chassis { cluster { redundancy-group 01 node 0 priority 200; } } } } apply-groups G; chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-9859; node 0; redundancy-group 1 node 0 priority 100; } }`
+	text := `groups { G { chassis { cluster { redundancy-group 01 node 0 priority 200; } } } } apply-groups G; chassis { cluster { cluster-id 1; control-interface em0; peer-address 10.99.0.2; authentication-key test-cluster-psk-9859; node 0; redundancy-group 1 node 0 priority 100; } }`
 	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -271,7 +271,7 @@ func TestGroupCanonicalRedundancyGroupKeepsKeywordOverride9859(t *testing.T) {
 		t.Fatalf("RG 1 node 0 priority = %d, want inline priority 100", got)
 	}
 	t.Run("different RG IDs remain distinct", func(t *testing.T) {
-		text := `groups { G { chassis { cluster { redundancy-group 2 node 0 priority 200; } } } } apply-groups G; chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-9859; node 0; redundancy-group 1 node 0 priority 100; } }`
+		text := `groups { G { chassis { cluster { redundancy-group 2 node 0 priority 200; } } } } apply-groups G; chassis { cluster { cluster-id 1; control-interface em0; peer-address 10.99.0.2; authentication-key test-cluster-psk-9859; node 0; redundancy-group 1 node 0 priority 100; } }`
 		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {

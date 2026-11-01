@@ -140,6 +140,8 @@ func TestKitParseSetCommandsEquivalence16139(t *testing.T) {
 // downgraded to a warning leniently.
 const kitClusterNoKey = `chassis {
     cluster {
+        control-interface em0;
+        peer-address 10.99.0.2;
         cluster-id 1;
         node 0;
         reth-count 2;
@@ -158,6 +160,8 @@ const kitClusterNoKey = `chassis {
 // CompileConfig and still pass — here it cannot.
 const kitNodeFixture = `chassis {
     cluster {
+        control-interface em0;
+        peer-address 10.99.0.2;
         cluster-id 1;
         authentication-key test-cluster-psk-6611;
         reth-count 2;
@@ -275,6 +279,8 @@ func TestKitChannelsNotFlattened16139(t *testing.T) {
 		// strict set channel was flattened to lenient.
 		_ = compileSetStrict(t,
 			"set chassis cluster cluster-id 1",
+			"set chassis cluster control-interface em0",
+			"set chassis cluster peer-address 10.99.0.2",
 			"set chassis cluster node 0",
 			"set chassis cluster reth-count 2",
 			"set chassis cluster redundancy-group 1 node 0 priority 200",
@@ -302,6 +308,8 @@ func TestKitChannelsNotFlattened16139(t *testing.T) {
 	// leniently through compileSetLenient here.
 	setCfg := compileSetLenient(t,
 		"set chassis cluster cluster-id 1",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster node 0",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
