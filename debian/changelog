@@ -29,6 +29,15 @@ xpf (0.0.0) unstable; urgency=medium
     unmatched traffic differently until both run this build. New metric
     xpf_lo0_implicit_discard_hits_total{family}; the term name
     `implicit-discard` is reserved (commit warning) (#18728).
+  * IPsec host-input fence: the live readback of the fence overlay accepts
+    the #16841 zero-hop-limit DROP ahead of it again. Since #16841 every
+    host-inbound install carrying an overlay failed its readback and the
+    apply was marked failed. Rules ahead of the overlay are judged by an
+    expression-kind allowlist, checked against the kernel's own expression
+    names as well as the decoded rule, so queue, xt targets, dup, tproxy and
+    any unknown kind are refused. The readback is bracketed by the nftables
+    generation, so it retries, then fails closed, if the ruleset changes
+    under it (#18721).
   * make test-go: pkg/upgrade/manifest now runs uncached. Its managed-binary
     drift canary reads `git ls-files`, which the go test cache does not hash,
     so a newly tracked shell site with a stale BINS= list passed from cache
