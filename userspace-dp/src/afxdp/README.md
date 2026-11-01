@@ -2335,7 +2335,12 @@ leaving the stamp stale, when the judged line is:
 
 The owner keeps every ground. A non-owner still judges a line on the
 destination's connected interface and a gateway-routed destination, and a
-node with no HA view judges everything. The operator-level account is in
+node with no HA view judges everything. When the node later activates the RG, the
+decline is off and the line is judged as the owner's. That is correct only
+after `RefreshOwnerRGS` re-resolves it against the activated FIB, which
+relies on the #16270 ordering (connected prefixes republished before
+`SetRGActive`). The window between the HA store and the queued refresh is
+#18705. The operator-level account is in
 `docs/ha-failover-status.md` (#18531, #18691).
 
 ## Hot-path constants

@@ -8470,6 +8470,13 @@ fn non_owner_gateway_fallback_predicate_table_18691() {
         (1, rg(true, now_secs)),
         (2, rg(false, now_secs)),
     ]);
+    // No RG forwarding here at all: RG0 inactive too, so an RG-less egress
+    // cannot be masked by `ha_state.get(&0)` answering "active".
+    let none_active = BTreeMap::from([
+        (0, rg(false, now_secs)),
+        (1, rg(false, now_secs)),
+        (2, rg(false, now_secs)),
+    ]);
     let wan_key = exported_forward(&forwarding, Family::V4).key;
     let mut internet_key = wan_key.clone();
     internet_key.dst_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
@@ -8489,7 +8496,7 @@ fn non_owner_gateway_fallback_predicate_table_18691() {
     let mut dnat_line = line(ForwardingDisposition::ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX);
     dnat_line.nat.rewrite_dst = Some(wan_key.dst_ip);
     use ForwardingDisposition::*;
-    let rows: [(&str, Option<&BTreeMap<i32, HAGroupRuntime>>, &crate::session::SessionKey, SessionDecision, bool); 13] = [
+    let rows: [(&str, Option<&BTreeMap<i32, HAGroupRuntime>>, &crate::session::SessionKey, SessionDecision, bool); 14] = [
         ("live: FC on the gateway VLAN, RG1 the peer's", Some(&split), &wan_key, line(ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX), true),
         ("live: MissingNeighbor on the gateway VLAN", Some(&split), &wan_key, line(MissingNeighbor, WAN_GATEWAY_UNIT_IFINDEX), true),
         ("owner: RG1 forwarding here", Some(&owner), &wan_key, line(ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX), false),
@@ -8502,6 +8509,7 @@ fn non_owner_gateway_fallback_predicate_table_18691() {
         ("egress RG forwarding here, destination owner the peer's", Some(&wan_owner), &lan_dst_key, line(ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX), false),
         ("destination owner forwarding here (LAN destination on the LAN owner)", Some(&split), &lan_dst_key, line(ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX), false),
         ("no egress", Some(&split), &wan_key, line(ForwardCandidate, 0), false),
+        ("no egress, no RG forwarding here", Some(&none_active), &wan_key, line(ForwardCandidate, 0), false),
         ("DNAT: the post-translation destination decides", Some(&split), &internet_key, dnat_line, true),
     ];
     for (name, ha, key, judged, want) in rows {

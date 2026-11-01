@@ -725,8 +725,9 @@ Every judging path was checked:
 - `source_nat_revocation_on_session_hit_with_ingress` is the only producer
   of `StaleSourceNat`. It has one production caller, the session-hit slow
   path (`poll_descriptor/mod.rs`).
-- The flow-cache hit path (including #18671's forward-wire fallback) never
-  judges a translation.
+- The flow-cache hit path never judges a translation. (#18671, unmerged
+  at the time of writing, adds a forward-wire fallback to that path; it
+  serves from the cache and does not judge either.)
 - `RefreshOwnerRGS` and `DemoteOwnerRGS` store HA-enforced lines. An
   inactive egress becomes `HAInactive` or `FabricRedirect`, which the
   existing decline covers.
@@ -734,6 +735,20 @@ Every judging path was checked:
   covers.
 - Zone-policy revalidation (`ZonePolicy`) is a different ground and is
   unchanged.
+
+When this node later activates the RG, the decline turns off (condition 2),
+and the stored line is judged as the owner's. That is correct only because
+`RefreshOwnerRGS` re-resolves the line against the activated FIB, which
+carries the connected prefix again. That in turn rests on the #16270
+ordering: connected prefixes are republished before `SetRGActive`. The
+cell `activation_refresh_heals_the_line_and_keeps_the_flow_18691` pins the
+healed path (v4/v6). One window is pre-existing on master and is NOT closed
+here. The coordinator stores the activated HA state before it queues
+`RefreshOwnerRGS`. A worker pass that loads the new state while its queue
+is still empty judges a reply against the stale split-FIB line, and
+revokes. The window is one RX batch, or longer while a refused refresh
+waits as #9720 transition debt. It is pinned, ignored, by
+`activation_before_refresh_keeps_the_flow_18691` and tracked in #18705.
 
 ### Never-again gates
 

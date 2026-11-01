@@ -1323,7 +1323,7 @@ fn wan_reply_frame() -> (Vec<u8>, UserspaceDpMeta) {
     wan_reply_frame_for(Family::V4)
 }
 
-fn wan_reply_frame_for(family: Family) -> (Vec<u8>, UserspaceDpMeta) {
+pub(super) fn wan_reply_frame_for(family: Family) -> (Vec<u8>, UserspaceDpMeta) {
     wan_reply_frame_to(family, SPORT)
 }
 

@@ -412,3 +412,82 @@ fn lan_owner_gateway_routed_destination_still_judged_18691() {
         "an Unknown-owner destination keeps the judgment"
     );
 }
+
+/// Review (seat Y): the decline switches off when RG1 activates here, and the
+/// stored split-FIB line is healed by `RefreshOwnerRGS` re-resolving it
+/// against the activated FIB, which carries reth0.80 again (#16270
+/// republishes connected prefixes before `SetRGActive`). The first WAN reply
+/// after the refresh is judged on reth0.80 and kept. IPv4 and IPv6.
+#[test]
+fn activation_refresh_heals_the_line_and_keeps_the_flow_18691() {
+    for family in [Family::V4, Family::V6] {
+        let (mut sessions, split_forwarding, now_secs) = lan_owner_import(family, false);
+        let key = exported_forward(&split_forwarding, family).key;
+        assert_eq!(
+            stored_forward_line(&sessions, &key).egress_ifindex,
+            WAN_GATEWAY_UNIT_IFINDEX,
+            "premise: imported under the split FIB ({family:?})"
+        );
+        let owner_forwarding = fw1_owner_forwarding();
+        apply_commands(
+            &mut sessions,
+            &owner_forwarding,
+            &owner_ha(now_secs),
+            vec![WorkerCommand::RefreshOwnerRGS { owner_rgs: vec![1] }],
+        );
+        let line = stored_forward_line(&sessions, &key);
+        assert_eq!(
+            line.egress_ifindex, WAN_UNIT_IFINDEX,
+            "the refresh re-resolves onto reth0.80 ({family:?}): {line:?}"
+        );
+        let (frame, meta) = wan_reply_frame_for(family);
+        let out = drive(
+            &mut sessions,
+            &owner_forwarding,
+            &owner_ha(now_secs),
+            WAN,
+            &frame,
+            meta,
+            1,
+        );
+        assert_eq!(out.session_hit, 1, "the reply must hit the reverse row ({family:?})");
+        assert_eq!(
+            (out.snat_revoked, out.closes, sessions.len()),
+            (0, 0, 2),
+            "the healed line is judged valid ({family:?})"
+        );
+        assert_eq!(out.tx, [0, 0, 1], "the reply reaches the LAN host ({family:?})");
+    }
+}
+
+/// Review (seat Y) window, pre-existing on master: the coordinator stores
+/// the activated HA state before it queues `RefreshOwnerRGS`, so a worker
+/// pass can load the new state, find its queue still empty, and judge a
+/// reply against the stale split-FIB line. RG1 is now forwarding-active
+/// here, so this decline no longer applies and the line names reth0.50:
+/// StaleSourceNat. The window is one RX batch, or longer while a refused
+/// refresh waits as transition debt (#9720). Ignored until that issue is
+/// fixed; it asserts the behaviour the fix must produce. Un-ignored on
+/// 36acce9efb it fails with `(snat_revoked, closes, len) = (1, 1, 0)`.
+#[test]
+#[ignore = "#18705: a reply between the HA store and RefreshOwnerRGS judges the stale line"]
+fn activation_before_refresh_keeps_the_flow_18691() {
+    let (mut sessions, _, now_secs) = lan_owner_import(Family::V4, false);
+    let owner_forwarding = fw1_owner_forwarding();
+    let (frame, meta) = wan_reply_frame_for(Family::V4);
+    let out = drive(
+        &mut sessions,
+        &owner_forwarding,
+        &owner_ha(now_secs),
+        WAN,
+        &frame,
+        meta,
+        1,
+    );
+    assert_eq!(out.session_hit, 1, "the reply must hit the reverse row");
+    assert_eq!(
+        (out.snat_revoked, out.closes, sessions.len()),
+        (0, 0, 2),
+        "a line the refresh has not reached yet is no ground to revoke"
+    );
+}
