@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -179,18 +180,26 @@ func sleepBounded(dl time.Time, interval time.Duration) {
 // table is incomplete: resetting first would let election promote it before
 // #10261's late bulk flow arrives.
 func RejoinAndConfirm(cl RollingCluster, deadline time.Duration) error {
-	return rejoinAndConfirm(cl, deadline, drainPollInterval)
+	return rejoinAndConfirm(cl, deadline, drainPollInterval, nil, 0)
 }
 
 // rejoinAndConfirm shares the bounded rejoin state machine with rolling
 // upgrades, whose RollingConfig supplies a testable and operator-selected poll
 // cadence. The deadline begins once and bounds both the bulk-prime wait and
 // the post-reset per-RG confirmation.
-func rejoinAndConfirm(cl RollingCluster, deadline, pollInterval time.Duration) error {
+//
+// #18415: when logf is non-nil, a progress line (phase, elapsed against the
+// deadline, the four predicates and the last errors) is logged every
+// progressEvery. The binary rolling paths pass the Runner's logf; the kernel
+// roll's RejoinAndConfirm passes nil and stays as before.
+func rejoinAndConfirm(cl RollingCluster, deadline, pollInterval time.Duration,
+	logf func(format string, args ...any), progressEvery time.Duration) error {
 	dl := time.Now().Add(deadline)
 	if pollInterval <= 0 {
 		pollInterval = drainPollInterval
 	}
+	progress := newWaitProgress(logf, "rejoin, held secondary until the inbound bulk prime completes",
+		"", deadline, progressEvery)
 	var lastAErr, lastSErr, lastBErr, lastRErr error
 	timeout := func(alive, synced, bulkPrimed, rejoined bool) error {
 		base := fmt.Errorf("rejoin not confirmed within %s "+
@@ -242,6 +251,9 @@ func rejoinAndConfirm(cl RollingCluster, deadline, pollInterval time.Duration) e
 		} else if !bulkPrimed {
 			lastBErr = fmt.Errorf("session-sync inbound bulk prime not complete")
 		}
+		progress.observe(fmt.Sprintf("peer-alive=%v sync-established=%v bulk-primed=%v "+
+			"local-rejoined=not-queried-before-reset", alive, synced, bulkPrimed),
+			errors.Join(lastAErr, lastSErr, lastBErr))
 		sleepBounded(dl, pollInterval)
 	}
 
@@ -254,6 +266,9 @@ func rejoinAndConfirm(cl RollingCluster, deadline, pollInterval time.Duration) e
 	}
 	if err := cl.ResetFailover(); err != nil {
 		return fmt.Errorf("reset failover: %w", err)
+	}
+	if progress != nil {
+		progress.phase = "rejoin, failover reset sent, confirming every RG rejoined"
 	}
 	var rejoined bool
 	for {
@@ -283,6 +298,8 @@ func rejoinAndConfirm(cl RollingCluster, deadline, pollInterval time.Duration) e
 		if rerr != nil {
 			lastRErr = rerr
 		}
+		progress.observe(fmt.Sprintf("peer-alive=%v sync-established=%v bulk-primed=%v local-rejoined=%v",
+			alive, synced, bulkPrimed, rejoined), errors.Join(lastAErr, lastSErr, lastBErr, lastRErr))
 		sleepBounded(dl, pollInterval)
 	}
 }

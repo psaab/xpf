@@ -4,16 +4,22 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/cluster"
 )
 
 func TestRollingConfigRejoinDeadlineDefaultAndOverride18415(t *testing.T) {
 	var defaults RollingConfig
 	defaults.withDefaults()
-	if defaults.RejoinDeadline != 180*time.Second {
-		t.Fatalf("default RejoinDeadline = %s, want 180s", defaults.RejoinDeadline)
+	if defaults.RejoinDeadline != DefaultRejoinDeadline {
+		t.Fatalf("default RejoinDeadline = %s, want DefaultRejoinDeadline %s", defaults.RejoinDeadline, DefaultRejoinDeadline)
 	}
-	if DefaultRejoinDeadline != 180*time.Second {
-		t.Fatalf("exported DefaultRejoinDeadline = %s, want 180s", DefaultRejoinDeadline)
+	// The derivation: the peer's last bulk-prime attempt (+150s), the sweep's
+	// late-ack bound before it re-drives (35s), and 5s for that bulk's
+	// transfer and ack.
+	if want := 150*time.Second + cluster.BulkAckPendingRetryAfter + 5*time.Second; DefaultRejoinDeadline != want ||
+		DefaultRejoinDeadline != 190*time.Second {
+		t.Fatalf("exported DefaultRejoinDeadline = %s, want %s (= 190s)", DefaultRejoinDeadline, want)
 	}
 
 	const explicit = 37 * time.Millisecond
@@ -50,26 +56,26 @@ func TestRollingRejoinDeadlineAllowsSlowBulkPrime18415(t *testing.T) {
 	const primeDelay = 100 * time.Millisecond
 	const pollInterval = 2 * time.Millisecond
 	scaledOld60s := 60 * time.Millisecond
-	scaledDefault180s := DefaultRejoinDeadline / time.Second * time.Millisecond
-	if !(scaledOld60s < primeDelay && primeDelay < scaledDefault180s) {
+	scaledDefault := DefaultRejoinDeadline / time.Second * time.Millisecond
+	if !(scaledOld60s < primeDelay && primeDelay < scaledDefault) {
 		t.Fatalf("test timing is not scaled between old and new deadlines: old=%s prime=%s new=%s",
-			scaledOld60s, primeDelay, scaledDefault180s)
+			scaledOld60s, primeDelay, scaledDefault)
 	}
 
 	oldDeadlineCluster := newDelayedBulkPrime18415(primeDelay)
-	if err := rejoinAndConfirm(oldDeadlineCluster, scaledOld60s, pollInterval); err == nil {
+	if err := rejoinAndConfirm(oldDeadlineCluster, scaledOld60s, pollInterval, nil, 0); err == nil {
 		t.Fatal("bulk prime that completes after the scaled old 60s deadline unexpectedly succeeded")
 	}
 
 	cluster := newDelayedBulkPrime18415(primeDelay)
 	started := time.Now()
-	if err := rejoinAndConfirm(cluster, scaledDefault180s, pollInterval); err != nil {
-		t.Fatalf("bulk prime completing after scaled 60s but before scaled 180s must succeed: %v", err)
+	if err := rejoinAndConfirm(cluster, scaledDefault, pollInterval, nil, 0); err != nil {
+		t.Fatalf("bulk prime completing after scaled 60s but before the scaled default must succeed: %v", err)
 	}
 	elapsed := time.Since(started)
-	if elapsed < primeDelay || elapsed >= scaledDefault180s {
+	if elapsed < primeDelay || elapsed >= scaledDefault {
 		t.Fatalf("slow-prime rejoin elapsed %s, want >= prime completion %s and < configured deadline %s",
-			elapsed, primeDelay, scaledDefault180s)
+			elapsed, primeDelay, scaledDefault)
 	}
 	if !cluster.resetCalled {
 		t.Fatal("successful bulk prime must be followed by failover reset")
@@ -85,7 +91,7 @@ func TestRollingRejoinDeadlineTimesOutStuckBulkPrime18415(t *testing.T) {
 		stuck:       true,
 	}
 	started := time.Now()
-	err := rejoinAndConfirm(cluster, deadline, pollInterval)
+	err := rejoinAndConfirm(cluster, deadline, pollInterval, nil, 0)
 	elapsed := time.Since(started)
 	if err == nil {
 		t.Fatal("stuck inbound bulk prime unexpectedly succeeded")
@@ -116,7 +122,7 @@ func TestRejoinAndConfirmDoesNotResetAfterDeadline18415(t *testing.T) {
 		fakeCluster: &fakeCluster{peerAlive: true, synced: true},
 		delay:       40 * time.Millisecond,
 	}
-	err := rejoinAndConfirm(cluster, 20*time.Millisecond, time.Millisecond)
+	err := rejoinAndConfirm(cluster, 20*time.Millisecond, time.Millisecond, nil, 0)
 	if err == nil {
 		t.Fatal("rejoin succeeded after predicate RPC crossed the deadline")
 	}

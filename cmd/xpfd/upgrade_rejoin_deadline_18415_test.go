@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -43,5 +44,55 @@ func TestUpgradeRejoinDeadlineDefaultAndOverride18415(t *testing.T) {
 				t.Fatalf("runner config rejoin deadline = %s, want %s", got, want)
 			}
 		})
+	}
+}
+
+// #18415 review fold: --rejoin-deadline is validated at parse time, before
+// NewRunner and so long before ForceSecondary. The deadline is consulted only
+// AFTER the irreversible cut, so a value that guarantees a timeout must never
+// get that far.
+func TestUpgradeRejoinDeadlineValidation18415(t *testing.T) {
+	accept := []struct {
+		args []string
+		want time.Duration
+	}{
+		{[]string{"--rolling"}, upgrade.DefaultRejoinDeadline},
+		{[]string{"--rolling", "--rejoin-deadline=0"}, upgrade.DefaultRejoinDeadline},
+		{[]string{"--rollback", "--rolling", "--rejoin-deadline=0s"}, upgrade.DefaultRejoinDeadline},
+		{[]string{"--rolling", "--rejoin-deadline=" + upgrade.MinRejoinDeadline.String()}, upgrade.MinRejoinDeadline},
+		{[]string{"--rolling", "--rejoin-deadline=10m"}, 10 * time.Minute},
+		// Omitted on a standalone cut: nothing to validate.
+		{nil, upgrade.DefaultRejoinDeadline},
+		{[]string{"--rollback"}, upgrade.DefaultRejoinDeadline},
+	}
+	for _, tc := range accept {
+		flags, err := parseUpgradeArgs(tc.args)
+		if err != nil {
+			t.Errorf("parseUpgradeArgs(%v) = %v; want accepted", tc.args, err)
+			continue
+		}
+		if flags.rejoinDeadline != tc.want {
+			t.Errorf("parseUpgradeArgs(%v) rejoin deadline = %s, want %s", tc.args, flags.rejoinDeadline, tc.want)
+		}
+	}
+
+	refuse := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--rejoin-deadline=45s"}, "only valid with --rolling"},
+		{[]string{"--rollback", "--rejoin-deadline=45s"}, "only valid with --rolling"},
+		// Even the default value, spelled out, is refused without --rolling:
+		// the operator expected a bound that a standalone cut never applies.
+		{[]string{"--rejoin-deadline=" + upgrade.DefaultRejoinDeadline.String()}, "only valid with --rolling"},
+		{[]string{"--rolling", "--rejoin-deadline=-5s"}, "is negative"},
+		{[]string{"--rolling", "--rejoin-deadline=1ns"}, "below the " + upgrade.MinRejoinDeadline.String() + " minimum"},
+		{[]string{"--rollback", "--rolling", "--rejoin-deadline=29s"}, "below the " + upgrade.MinRejoinDeadline.String() + " minimum"},
+	}
+	for _, tc := range refuse {
+		_, err := parseUpgradeArgs(tc.args)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("parseUpgradeArgs(%v) = %v; want an error containing %q", tc.args, err, tc.want)
+		}
 	}
 }
