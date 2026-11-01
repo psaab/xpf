@@ -3,6 +3,8 @@ package nftables
 import (
 	"encoding/binary"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/google/nftables"
 	"github.com/mdlayher/netlink"
@@ -145,9 +147,11 @@ func dialLikeNftConn(c *nftables.Conn) (*netlink.Conn, error) {
 // smp_store_release of base_seq) BEFORE it switches rule visibility (:11033,
 // gencursor = nft_gencursor_next). A commit preempted between those two lines
 // is already counted in "before", yet its rule switch can land mid-pass, so
-// before == after with mixed views. The kernel's own interrupted-dump check
-// (cb->seq = base_seq, :1269) and nft's cache share this residual. Reaching it
-// needs a root writer outside xpf, preempted in that two-line gap.
+// before == after with mixed views. The kernel's own interrupted-dump check on
+// the rules dump has the same residual: nf_tables_dump_rules samples
+// cb->seq = nft_base_seq(net) (:3860) and nl_dump_check_consistent (:3833)
+// compares against it. Reaching it needs a root writer outside xpf, preempted
+// in that two-line gap.
 func readNftGeneration(c *nftables.Conn) (uint32, error) {
 	conn, err := dialLikeNftConn(c)
 	if err != nil {
@@ -204,8 +208,9 @@ func decodeNftGeneration(msgs []netlink.Message) (uint32, error) {
 
 // readAtStableNftGeneration runs read between two generation reads and returns
 // read's verdict only if no commit published a new generation in between.
-// Otherwise it retries, up to attempts times. If the ruleset is still moving
-// after that, it fails closed (#18721). See readNftGeneration for the residual
+// Otherwise it pauses for the next backoff step and retries: len(backoff)+1
+// attempts in all. If the ruleset is still moving after the last one, it logs
+// a Warn and fails closed (#18721). See readNftGeneration for the residual
 // window this cannot see.
 //
 // The fence readback reads the ruleset several times: the marker object, the
@@ -213,12 +218,20 @@ func decodeNftGeneration(msgs []netlink.Message) (uint32, error) {
 // otherwise replace a rule between GetRules and the dump. NLM_F_REPLACE keeps
 // the handle, so both views would describe different rules under one handle,
 // and a kind-identical rule with ACCEPT in place of DROP would pass both checks.
-func readAtStableNftGeneration(attempts int, gen func() (uint32, error), read func() error) error {
-	var before, after uint32
+func readAtStableNftGeneration(backoff []time.Duration, sleep func(time.Duration), gen func() (uint32, error), read func() error) error {
+	attempts := len(backoff) + 1
+	var first, before, after uint32
+	changes := 0
 	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			sleep(backoff[attempt-1])
+		}
 		var err error
 		if before, err = gen(); err != nil {
 			return err
+		}
+		if attempt == 0 {
+			first = before
 		}
 		verdict := read()
 		if after, err = gen(); err != nil {
@@ -227,6 +240,10 @@ func readAtStableNftGeneration(attempts int, gen func() (uint32, error), read fu
 		if before == after {
 			return verdict
 		}
+		changes++
 	}
-	return fmt.Errorf("host overlay readback: the nftables ruleset changed during each of %d attempts (last generation %d -> %d); failing closed", attempts, before, after)
+	slog.Warn("host overlay readback: the nftables ruleset kept changing; failing closed",
+		"attempts", attempts, "generation_changes", changes,
+		"first_generation", first, "last_generation", after)
+	return fmt.Errorf("host overlay readback: the nftables ruleset changed during each of %d attempts (%d generation changes, generation %d -> %d); failing closed", attempts, changes, first, after)
 }

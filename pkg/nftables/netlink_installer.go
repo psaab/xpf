@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
@@ -169,7 +170,7 @@ type netlinkInstaller struct {
 	forwardFenceReplaceFn   func(ForwardFenceSpec) error
 	// overlayReadbackBetweenReadsFn is nil in production. A kernel cell sets it
 	// to commit a change between the overlay readback's GetRules and its
-	// expression-name dump: the window readAtStableNftGeneration closes (#18721).
+	// expression-name dump: the window readAtStableNftGeneration narrows (#18721).
 	overlayReadbackBetweenReadsFn func()
 }
 
@@ -205,14 +206,29 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	}
 	// #18721: every read below must see ONE ruleset, so the whole readback is
 	// bracketed by the nf_tables generation (readAtStableNftGeneration).
-	return readAtStableNftGeneration(hostOverlayReadbackAttempts,
+	return readAtStableNftGeneration(hostOverlayReadbackBackoff, time.Sleep,
 		func() (uint32, error) { return readNftGeneration(c) },
 		func() error { return in.verifyHostInboundOverlayOnce(c, overlay) })
 }
 
-// hostOverlayReadbackAttempts bounds how often the overlay readback retries
-// when a commit lands mid-readback, before it fails closed (#18721).
-const hostOverlayReadbackAttempts = 3
+// hostOverlayReadbackBackoff is the pause before each retry of the
+// generation-bracketed overlay readback (#18721). It allows 5 attempts and at
+// most 262 ms of pausing.
+//
+// The generation counts EVERY commit in the namespace, xpfd's own included:
+// the IPsec divert, the transit barrier, the forward fence and the early-input
+// barrier, some of which run outside applySem. Each of those is one atomic
+// batch, so it bumps the generation once, but several can land back to back.
+// With no pause, a short burst of xpf's own unrelated writes could use up
+// every attempt and fail an operator's commit closed.
+//
+// The steps grow about 5x, so a burst of a few ms is waited out on the second
+// or third attempt and a burst of tens of ms by the fourth or fifth. The 262 ms
+// ceiling keeps the commit path's added latency bounded. Exhaustion still fails
+// closed.
+var hostOverlayReadbackBackoff = []time.Duration{
+	2 * time.Millisecond, 10 * time.Millisecond, 50 * time.Millisecond, 200 * time.Millisecond,
+}
 
 // verifyHostInboundOverlayOnce is one unbracketed pass of the overlay readback.
 func (in *netlinkInstaller) verifyHostInboundOverlayOnce(c *nftables.Conn, overlay HostInputFenceOverlay) error {
