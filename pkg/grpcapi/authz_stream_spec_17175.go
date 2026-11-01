@@ -38,9 +38,16 @@ import (
 // decision (coarse price, config-target price, command gate, config
 // gates) is request-independent for that method: every request-taking
 // switch in authorizeRPCContext falls through to its charge/ignore arm
-// for it. MonitorPacketDrop is that case today — rpcArgumentForms has
-// no arm for it, so it is judged on the bare `monitor security
-// packet-drop` charge, which needs no request.
+// for it. No served stream is that case today. MonitorPacketDrop was,
+// until #17184 gave rpcArgumentForms an arm for its filter fields; its
+// `false` entry then priced the typed EMPTY request at open, whose bare
+// charge an argument-scoped allow-commands cannot match, so the stream
+// was refused before the first message could be judged (#18760). A
+// request-independent declaration is never a bypass (authzRecvStream
+// still prices the decoded first message) but it is always at least as
+// strict as the true verdict, so a wrong `false` over-denies.
+// TestStreamWithArgumentFormsIsRequestDependent18760 fails if a stream
+// whose argument forms depend on its request is declared false.
 //
 // FAIL CLOSED ON DRIFT. A streaming method absent from this table is
 // treated as request-dependent (deferred full authorization on first
@@ -61,7 +68,7 @@ var streamRequestSpec17175 = map[string]bool{
 	pb.BpfrxService_Ping_FullMethodName:              true,
 	pb.BpfrxService_Traceroute_FullMethodName:        true,
 	pb.BpfrxService_MonitorInterface_FullMethodName:  true,
-	pb.BpfrxService_MonitorPacketDrop_FullMethodName: false,
+	pb.BpfrxService_MonitorPacketDrop_FullMethodName: true, // #18760: priced by rpcArgumentForms since #17184
 }
 
 // streamNeedsRequest reports whether fullMethod's authorization decision
