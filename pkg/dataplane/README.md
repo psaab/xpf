@@ -44,12 +44,20 @@ sent while exact queues were still backlogged.
 
 `userspace-xdp/src/ipv6_ext_walk.rs` is guarded by
 `test/mutation/shim-ext-parity-acceptance.sh`, not by `make test` alone. The
-script mutates the walk across 16 mutation rows plus one negative control,
+script mutates the walk across 19 mutation rows plus one negative control,
 bracketed by a green baseline (row 0) and a post-restore recheck, and requires
 the parity guards in
 `userspace-dp/src/afxdp/frame/tests_shim_ext_parity.rs` to red on each edit. It
 prints per-row accounting at the end, so the evidence quoted in a PR body is
 checkable against the matrix rather than against a bare `PASS`.
+
+Each row is a full release rebuild (5-10 min), so `ROWS=4-20` (or `ROWS=7,19`)
+runs a subset; the verdict then says it is not a full matrix, and a row number
+that names no declared row is refused before anything is touched. INT and TERM
+restore the walker and END the run (exit 130/143). Signal the process group to
+stop at once: bash runs the trap only after the current cargo step returns.
+`make test-shim-ext-parity-selftest` (also in `make selftest`) pins both
+behaviours against a stub cargo in seconds (#18738).
 
 One mutation per row, and one ARM per row where an edit applies to several: a
 row that mutated the GENERIC and AUTH revalidation bases together scored RED on
@@ -2131,11 +2139,12 @@ walk stepped over carried non-zero offset bits (`& 0xFFF8`, RFC 8200
 §4.5), which is field-for-field the semantics of
 `ExtChainWalk::non_first_fragment_offset_seen` on this side — so the
 corpus compares them for EQUALITY at every L3 offset, and
-`shim_is_not_more_permissive` pins that a first and a non-first fragment
-move that field in both walkers together. Before #6704 the shim returned a
-bare `(offset, protocol)` and the fragment dimension could not be compared
-from the test side at all; an earlier attempt to compare it hand-wrote a
-second walk loop in the test and asserted `X == X`.
+`shim_walk_is_not_more_permissive` (renamed in #14056) pins that a first
+and a non-first fragment move that field in both walkers together. Before
+#6704 the shim returned a bare `(offset, protocol)` and the fragment
+dimension could not be compared from the test side at all; an earlier
+attempt to compare it hand-wrote a second walk loop in the test and
+asserted `X == X`.
 
 Since #16038 the last field reports walk exhaustion: true iff the loop
 spent all `MAX_EXT_HDRS` iterations and still holds a traversable

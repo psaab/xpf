@@ -530,10 +530,10 @@ xpf-userspace-dp	afxdp::frame::tests_shim_ext_parity::refused_protocol_set_equal
 xpf-userspace-dp	afxdp::frame::tests_shim_ext_parity::shim_ext_parity_negative_control_unchanged_classifications
 xpf-userspace-dp	afxdp::frame::tests_shim_ext_parity::shim_fragment_sentinel_is_not_a_traversable_next_header
 xpf-userspace-dp	afxdp::frame::tests_shim_ext_parity::shim_ipv6_ext_walk_matches_userspace_walker
-xpf-userspace-dp	afxdp::frame::tests_shim_ext_parity::shim_is_not_more_permissive
 xpf-userspace-dp	afxdp::frame::tests_shim_ext_parity::shim_non_terminal_protocols_are_never_installable_by_userspace_6886
 xpf-userspace-dp	afxdp::frame::tests_shim_ext_parity::shim_walk_and_userspace_walk_agree_over_a_corpus
 xpf-userspace-dp	afxdp::frame::tests_shim_ext_parity::shim_walk_corpus_negative_control
+xpf-userspace-dp	afxdp::frame::tests_shim_ext_parity::shim_walk_is_not_more_permissive
 xpf-userspace-dp	afxdp::frame::tests_shim_wg_classify_8274::identical_five_tuples_classify_by_message_type_8274
 xpf-userspace-dp	afxdp::frame::tests_shim_wg_classify_8274::local_destination_is_required_for_either_message_type_8274
 xpf-userspace-dp	afxdp::frame::tests_shim_wg_classify_8274::only_type_four_is_claimed_by_the_worker_8274

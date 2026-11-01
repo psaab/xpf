@@ -1308,6 +1308,15 @@ test-host-inbound-lib:
 test-shim-ext-parity-lib:
 	bash ./test/mutation/shim-ext-parity-acceptance.sh
 
+# #18738: hermetic selftest of the acceptance harness's own control flow
+# (a stub cargo, a throwaway checkout, seconds not hours). TERM mid-row must
+# restore the walker and END the run (exit 143, no next row), with a
+# positive control on the pre-#18738 trap, and ROWS= must run only the named
+# rows and refuse an undeclared one. Also in `make selftest`.
+.PHONY: test-shim-ext-parity-selftest
+test-shim-ext-parity-selftest:
+	sh ./test/mutation/selftest-shim-ext-parity-acceptance.sh
+
 # #8136: the WHOLE test/incus Python suite. Before this, the only target that
 # ran any of it passed a LITERAL filename as the discovery pattern, so 1 of 21
 # files ran and the other 20 were executed by nothing — long enough for real
