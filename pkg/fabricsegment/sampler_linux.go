@@ -5,7 +5,7 @@ package fabricsegment
 import (
 	"context"
 	"errors"
-	"log/slog"
+	"fmt"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -20,27 +20,31 @@ const maxFramesPerSecond = 1000
 // runTapSampler opens an AF_PACKET tap on the fabric parent and feeds every
 // frame the knownSourceFilter accepts into tracker until ctx is done. It
 // only sees kernel-path frames (what the XDP shim passes); AF_XDP fast-path
-// frames never reach an AF_PACKET tap.
-func runTapSampler(ctx context.Context, link Link, tracker *Tracker) {
+// frames never reach an AF_PACKET tap. It returns nil when ctx ended it and
+// the error otherwise; the Monitor restarts it with backoff.
+func runTapSampler(ctx context.Context, link Link, tracker *Tracker) error {
 	fd, err := openTap(link)
 	if err != nil {
-		slog.Warn("fabric segment: cannot open the fabric tap; non-peer source MACs are not watched (#18719)",
-			"fabric", link.Name, "parent", link.Parent, "err", err)
-		return
+		return fmt.Errorf("open the fabric tap on %s: %w", link.Parent, err)
 	}
 	defer unix.Close(fd)
-	readTap(ctx, fd, link, tracker)
+	if err := readTap(ctx, fd, tracker); err != nil {
+		return fmt.Errorf("read the fabric tap on %s: %w", link.Parent, err)
+	}
+	return nil
 }
 
 // readTap feeds every frame the bound tap fd receives into tracker until ctx
-// is done or the read fails. It does not close fd.
-func readTap(ctx context.Context, fd int, link Link, tracker *Tracker) {
-	go func() {
-		<-ctx.Done()
-		// Unblock a pending read promptly; the receive timeout below is the
-		// backstop.
-		_ = unix.Shutdown(fd, unix.SHUT_RD)
-	}()
+// is done (nil) or a read fails for good (the error). It starts no goroutine
+// and never touches fd after it returns: a cancel is noticed within the 1 s
+// SO_RCVTIMEO. (#18751 review: a goroutine that shut the fd down on cancel
+// could hit an unrelated socket that had reused the fd number after the
+// reader closed it, and AF_PACKET does not implement shutdown anyway.)
+//
+// ENETDOWN is transient. The kernel reports it once on a socket bound to a
+// parent that went down (or was down at bind) and re-hooks the socket when
+// the parent comes back up, so the reader keeps reading and ticking.
+func readTap(ctx context.Context, fd int, tracker *Tracker) error {
 	buf := make([]byte, snapLen)
 	windowStart := time.Now()
 	inWindow := 0
@@ -48,15 +52,14 @@ func readTap(ctx context.Context, fd int, link Link, tracker *Tracker) {
 		n, _, err := unix.Recvfrom(fd, buf, 0)
 		now := time.Now()
 		if err != nil {
-			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) {
+			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) || errors.Is(err, unix.ENETDOWN) {
 				tracker.Tick(now)
 				continue
 			}
-			if ctx.Err() == nil {
-				slog.Warn("fabric segment: fabric tap read failed; watcher stopped (#18719)",
-					"fabric", link.Name, "parent", link.Parent, "err", err)
+			if ctx.Err() != nil {
+				return nil
 			}
-			return
+			return err
 		}
 		tracker.ObserveFrame(buf[:n], now)
 		if now.Sub(windowStart) >= time.Second {
@@ -65,13 +68,16 @@ func readTap(ctx context.Context, fd int, link Link, tracker *Tracker) {
 		}
 		inWindow++
 		if inWindow >= maxFramesPerSecond {
+			t := time.NewTimer(time.Second - now.Sub(windowStart))
 			select {
 			case <-ctx.Done():
-				return
-			case <-time.After(time.Second - now.Sub(windowStart)):
+				t.Stop()
+				return nil
+			case <-t.C:
 			}
 		}
 	}
+	return nil
 }
 
 func openTap(link Link) (int, error) {

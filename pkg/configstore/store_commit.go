@@ -317,9 +317,10 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 	}
 	// #18719: a constraint reminder (the #10105/#13967 fabric advisories)
 	// is reported on a commit that changes the config it is about, not on
-	// every commit. s.compiled is still the previously committed config.
-	// CommitCheckAs deliberately does not scope.
-	config.DropUnchangedScopedAdvisories(s.compiled, compiled)
+	// every commit, measured against the last OPERATOR commit's config
+	// (scopedAdvisoryBaselineLocked). CommitCheckAs deliberately does not
+	// scope.
+	config.DropUnchangedScopedAdvisories(s.scopedAdvisoryBaselineLocked(), compiled)
 
 	// #1799 Option A: persist BEFORE promote. On a PRE-rename failure the
 	// old active stays on disk and in memory; the operator sees the error
@@ -399,6 +400,7 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 
 	// Promote candidate to active
 	s.active = committedTree
+	s.advisoryBaselineTree = committedTree // #18719: an operator commit showed its reminders
 	s.candidate = s.active.Clone()
 	s.bumpCandidatePromotionLocked() // #5848: fresh candidate retains apply lineage
 	s.compiled = compiled
@@ -682,9 +684,10 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 	}
 	// #18719: a constraint reminder (the #10105/#13967 fabric advisories)
 	// is reported on a commit that changes the config it is about, not on
-	// every commit. s.compiled is still the previously committed config.
-	// CommitCheckAs deliberately does not scope.
-	config.DropUnchangedScopedAdvisories(s.compiled, compiled)
+	// every commit, measured against the last OPERATOR commit's config
+	// (scopedAdvisoryBaselineLocked). CommitCheckAs deliberately does not
+	// scope.
+	config.DropUnchangedScopedAdvisories(s.scopedAdvisoryBaselineLocked(), compiled)
 
 	if minutes < 0 {
 		return nil, fmt.Errorf("commit confirmed: timeout must be non-negative")
@@ -892,6 +895,7 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 
 	// Promote candidate to active
 	s.active = committedTree
+	s.advisoryBaselineTree = committedTree // #18719: an operator commit showed its reminders
 	s.candidate = s.active.Clone()
 	s.bumpCandidatePromotionLocked() // #5848: fresh candidate retains apply lineage
 	s.compiled = compiled

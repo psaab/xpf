@@ -45,7 +45,7 @@ func (d *Daemon) constructClusterManager(cfg *config.Config) bool {
 	// #18719: frames from a non-peer source MAC on the fabric parent are
 	// rendered in `show chassis cluster status`. The watcher itself is fed by
 	// the userspace manager's SyncFabricState.
-	d.cluster.SetFabricSegmentAlarmsFn(fabricsegment.Default().Alarms)
+	d.cluster.SetFabricSegmentAlarmsFn(func() []string { return fabricsegment.Default().Alarms() })
 	return true
 }
 

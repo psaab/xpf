@@ -1175,7 +1175,9 @@ Important current behavior:
   DSCP, IEEE 802.1p or inet-precedence classifier (management `fxp*`,
   control `em*`, fabric `fab*`, loopbacks and the fabric member parents
   themselves do not count; a classifier on the fabric parent IS the fallback
-  binding). It is also change-scoped: a commit that changes neither the fabric
+  binding). "Fabric-reachable" is deliberately broad: it does not ask whether
+  a redundancy group could actually split across that interface, because
+  under-reporting is the failure #18719 fixes. It is also change-scoped: a commit that changes neither the fabric
   nor those classifier bindings does not repeat it, while `commit check`
   reports it whenever it applies (`docs/config-schema.md`, "Constraint
   reminders are acknowledgeable or change-scoped").

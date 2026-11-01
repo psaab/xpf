@@ -222,8 +222,11 @@ running heartbeat onto the defaults just as a changed value does.
   `FormatStatus` also renders the #18719 fabric-segment alarm lines
   (`Warning: fabric link ...`, above every `Redundancy group:` block) from
   the source installed with `SetFabricSegmentAlarmsFn`
-  (`fabric_segment_alarm_18719.go`; the daemon wires
-  `fabricsegment.Default().Alarms`, see `pkg/fabricsegment` and
+  (`fabric_segment_alarm_18719.go`; the daemon wires a closure over the
+  current `fabricsegment.Default()` at construction, reported as
+  `HookFabricSegmentAlarms` by the #7280 `InstalledHooks` census). The lines
+  include a raised alarm and a "watcher is not running" line for a link
+  whose sampler is down (see `pkg/fabricsegment` and
   `docs/fabric-cross-chassis-fwd.md`).
   `FormatInformation` is the ONE render behind `show chassis cluster
   information` on both surfaces — the local CLI

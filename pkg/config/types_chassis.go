@@ -120,8 +120,16 @@ type ClusterConfig struct {
 	// attestation that the segment provides link authentication.
 	FabricLinkAuthenticated  bool
 	Fabric1LinkAuthenticated bool
-	ConfigSync               bool // enable config synchronization to peer on commit
-	ControlLinkRecovery      bool // enable control-link-recovery
+	// FabricLinkPrivate / Fabric1LinkPrivate are the operator's #18719
+	// acknowledgement that the fabric link is an isolated two-peer L2 domain
+	// (direct-attached, or a dedicated VLAN/bridge). They are NOT
+	// authentication: they silence only the #10105 commit reminder and never
+	// feed FabricLinkAuthenticated, the dataplane's link_authenticated, or
+	// any stamp-trust decision.
+	FabricLinkPrivate   bool
+	Fabric1LinkPrivate  bool
+	ConfigSync          bool // enable config synchronization to peer on commit
+	ControlLinkRecovery bool // enable control-link-recovery
 	// StrictSessionAuth is the legacy #7441 node-local config leaf, retained
 	// for configuration compatibility. Since #10717, keyed-node eviction of
 	// established connections that never authenticate is the default and no

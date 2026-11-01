@@ -2,6 +2,7 @@ package fabricsegment
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -156,7 +157,7 @@ func TestTrackerBoundsTheSourceTable18719(t *testing.T) {
 }
 
 // The exact instruction array the kernel runs, executed in a userspace VM.
-func TestKnownSourceFilterDropsOnlyTheTwoFabricMACs18719(t *testing.T) {
+func TestKnownSourceFilterDropsKnownAndSyntheticSources18719(t *testing.T) {
 	link := testLink(t)
 	raw, err := knownSourceFilter(link.LocalMAC, link.PeerMAC)
 	if err != nil {
@@ -180,7 +181,12 @@ func TestKnownSourceFilterDropsOnlyTheTwoFabricMACs18719(t *testing.T) {
 		{"10:66:6b:00:00:01", true},  // local's low half, different high word
 		{"10:66:6b:00:00:02", true},  // peer's low half, different high word
 		{"18:e8:29:2c:13:7a", true},  // a third host
-		{"02:bf:72:fe:00:05", true},  // stamp: dropped in userspace, not here
+		{"02:bf:72:fe:00:05", false}, // V1 zone stamp / RETH MAC namespace
+		{"02:bf:73:00:01:02", false}, // V2 scope stamp namespace
+		{"02:bf:71:00:00:01", true},  // the neighbours of the masked compare
+		{"02:bf:74:00:00:01", true},
+		{"02:be:72:00:00:01", true},
+		{"03:bf:72:00:00:01", true}, // group bit: userspace rejects it, not the filter
 	}
 	for _, tc := range cases {
 		n, err := vm.Run(frameFrom(mac(t, tc.src)))
@@ -202,11 +208,12 @@ func TestKnownSourceFilterDropsOnlyTheTwoFabricMACs18719(t *testing.T) {
 func TestMonitorArmsOnlyResolvedLinks18719(t *testing.T) {
 	var mu sync.Mutex
 	started := map[string]int{}
-	mon := NewMonitor(func(ctx context.Context, link Link, _ *Tracker) {
+	mon := NewMonitor(func(ctx context.Context, link Link, _ *Tracker) error {
 		mu.Lock()
 		started[link.Name]++
 		mu.Unlock()
 		<-ctx.Done()
+		return nil
 	})
 	defer mon.Stop()
 	ready := testLink(t)
@@ -274,5 +281,138 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("condition not reached")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestTrackerOverflowSourceHoldsTheAlarm18719 (#18751 review NIT): a ninth
+// source that keeps sending after the eight tracked ones went quiet must
+// keep the alarm raised. It must not clear and re-raise it at the moment the
+// tracked entries expire.
+func TestTrackerOverflowSourceHoldsTheAlarm18719(t *testing.T) {
+	var edges []bool
+	tr := NewTracker(testLink(t), func(_ Link, raised bool, _ string) { edges = append(edges, raised) })
+	t0 := time.Unix(3_000_000, 0)
+	for i := 0; i <= maxTrackedMACs; i++ { // eight tracked, the ninth overflows
+		tr.Observe(net.HardwareAddr{0x18, 0xe8, 0x29, 0x00, 0x01, byte(i + 1)}, t0)
+	}
+	ninth := net.HardwareAddr{0x18, 0xe8, 0x29, 0x00, 0x01, byte(maxTrackedMACs + 1)}
+	var last time.Time
+	for m := 1; m <= 20; m++ {
+		now := t0.Add(time.Duration(m) * time.Minute)
+		tr.Tick(now.Add(-time.Second))
+		tr.Observe(ninth, now)
+		last = now
+	}
+	if len(edges) != 1 || !edges[0] {
+		t.Fatalf("edges while the overflow source kept sending = %v, want [raise]", edges)
+	}
+	tr.Tick(last.Add(AlarmHold + time.Second))
+	if len(edges) != 2 || edges[1] {
+		t.Fatalf("edges after every source went quiet = %v, want [raise clear]", edges)
+	}
+}
+
+// TestTrackerRetireLogsTheClearOnce18719: retiring a raised tracker reports
+// exactly one clear with the reason; retiring again or retiring a tracker
+// that never raised reports nothing.
+func TestTrackerRetireLogsTheClearOnce18719(t *testing.T) {
+	type edge struct {
+		raised bool
+		detail string
+	}
+	var edges []edge
+	cb := func(_ Link, raised bool, detail string) { edges = append(edges, edge{raised, detail}) }
+	quiet := NewTracker(testLink(t), cb)
+	quiet.Retire("gone")
+	if len(edges) != 0 {
+		t.Fatalf("retiring an unraised tracker reported %v", edges)
+	}
+	tr := NewTracker(testLink(t), cb)
+	tr.Observe(mac(t, "18:e8:29:2c:13:7a"), time.Now())
+	tr.Retire("gone")
+	tr.Retire("gone")
+	if len(edges) != 2 || !edges[0].raised || edges[1].raised || edges[1].detail != "gone" {
+		t.Fatalf("edges = %v, want a raise then one clear with the reason", edges)
+	}
+	if tr.Alarm(time.Now()) != "" {
+		t.Fatal("a retired tracker still reports its alarm")
+	}
+}
+
+// TestMonitorRetiresARekeyedLink18719 (#18751 review NIT): a link whose
+// identity changes while its alarm is raised logs the clear, so the journal
+// keeps one clear per raise.
+func TestMonitorRetiresARekeyedLink18719(t *testing.T) {
+	var mu sync.Mutex
+	var edges []string
+	mon := NewMonitor(func(ctx context.Context, _ Link, _ *Tracker) error { <-ctx.Done(); return nil })
+	mon.transition = func(l Link, raised bool, detail string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if raised {
+			edges = append(edges, "raise "+l.Name)
+			return
+		}
+		edges = append(edges, "clear "+l.Name+": "+detail)
+	}
+	defer mon.Stop()
+	link := testLink(t)
+	mon.Update([]Link{link})
+	mon.trackerFor(link).Observe(mac(t, "18:e8:29:2c:13:7a"), time.Now())
+	moved := link
+	moved.PeerMAC = mac(t, "10:66:6a:00:00:09")
+	mon.Update([]Link{moved})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(edges) != 2 || edges[0] != "raise fab0" || !strings.HasPrefix(edges[1], "clear fab0: ") {
+		t.Fatalf("edges = %v, want a raise then the re-key clear", edges)
+	}
+}
+
+// TestMonitorRestartsAStoppedSampler18719 (#18751 review BLOCKING 1 and
+// MINOR 3): a sampler that stops on its own is restarted with backoff and
+// keeps its tracker, so evidence and a raised alarm survive the restart.
+func TestMonitorRestartsAStoppedSampler18719(t *testing.T) {
+	var mu sync.Mutex
+	var trackers []*Tracker
+	mon := NewMonitor(func(ctx context.Context, _ Link, tr *Tracker) error {
+		mu.Lock()
+		trackers = append(trackers, tr)
+		n := len(trackers)
+		mu.Unlock()
+		if n <= 2 {
+			return errors.New("simulated read failure")
+		}
+		<-ctx.Done()
+		return nil
+	})
+	mon.backoffMin, mon.backoffMax = time.Millisecond, 2*time.Millisecond
+	defer mon.Stop()
+	link := testLink(t)
+	mon.Update([]Link{link})
+	waitFor(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(trackers) == 3 })
+	mu.Lock()
+	defer mu.Unlock()
+	if trackers[0] != trackers[1] || trackers[1] != trackers[2] || trackers[0] != mon.trackerFor(link) {
+		t.Fatal("a restart replaced the tracker and lost its evidence")
+	}
+}
+
+// TestMonitorShowsAStoppedWatcher18719 (#18751 review BLOCKING 1): while a
+// sampler is down, status says the link is not being watched, and a raised
+// alarm is still listed.
+func TestMonitorShowsAStoppedWatcher18719(t *testing.T) {
+	mon := NewMonitor(func(context.Context, Link, *Tracker) error { return errors.New("network is down") })
+	mon.backoffMin, mon.backoffMax = time.Hour, time.Hour
+	defer mon.Stop()
+	link := testLink(t)
+	mon.Update([]Link{link})
+	waitFor(t, func() bool {
+		a := mon.Alarms()
+		return len(a) == 1 && strings.Contains(a[0], "watcher is not running") && strings.Contains(a[0], "network is down")
+	})
+	mon.trackerFor(link).Observe(mac(t, "18:e8:29:2c:13:7a"), time.Now())
+	if a := mon.Alarms(); len(a) != 2 || !strings.Contains(a[1], "18:e8:29:2c:13:7a") {
+		t.Fatalf("Alarms() = %v, want the not-running line and the raised alarm", a)
 	}
 }

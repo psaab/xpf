@@ -72,10 +72,11 @@ func fabricAdvisoryScope18719(cfg *Config) string {
 	}
 	cc := cfg.Chassis.Cluster
 	var b strings.Builder
-	fmt.Fprintf(&b, "fabric=%q/%q peer=%q/%q attested=%t/%t",
+	fmt.Fprintf(&b, "fabric=%q/%q peer=%q/%q authenticated=%t/%t private=%t/%t",
 		cc.FabricInterface, cc.Fabric1Interface,
 		cc.FabricPeerAddress, cc.Fabric1PeerAddress,
-		cc.FabricLinkAuthenticated, cc.Fabric1LinkAuthenticated)
+		cc.FabricLinkAuthenticated, cc.Fabric1LinkAuthenticated,
+		cc.FabricLinkPrivate, cc.Fabric1LinkPrivate)
 	for _, fab := range []string{"fab0", "fab1"} {
 		var ifc *InterfaceConfig
 		if cfg.Interfaces.Interfaces != nil {

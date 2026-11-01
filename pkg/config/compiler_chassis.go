@@ -473,6 +473,16 @@ func compileChassis(node *Node, ch *ChassisConfig) error {
 	if clusterNode.FindChild("fabric1-interface-authenticated") != nil {
 		ch.Cluster.Fabric1LinkAuthenticated = true
 	}
+	// #18719: the private-segment acknowledgement. Deliberately a separate
+	// field: it silences the #10105 reminder and NOTHING else, so an
+	// operator acknowledging a direct-attached link never asserts the
+	// authentication the stamp-trust gate reads.
+	if clusterNode.FindChild("fabric-interface-private") != nil {
+		ch.Cluster.FabricLinkPrivate = true
+	}
+	if clusterNode.FindChild("fabric1-interface-private") != nil {
+		ch.Cluster.Fabric1LinkPrivate = true
+	}
 	if clusterNode.FindChild("configuration-synchronize") != nil {
 		ch.Cluster.ConfigSync = true
 	}

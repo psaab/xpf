@@ -112,3 +112,107 @@ func TestCommitConfirmedScopesFabricZoneStampReminder18719(t *testing.T) {
 		t.Fatalf("an unrelated commit confirmed must not repeat the reminder; warnings=%v", compiled.Warnings)
 	}
 }
+
+// #18751 review MINOR 1: a baseline the operator never saw does not scope.
+// A node that booted from disk, took its config by config sync, or was
+// auto-rolled back shows the reminder once on its first operator commit.
+
+func committedFabricStore18719(t *testing.T) *Store {
+	t.Helper()
+	s := newTestStore(t)
+	enterCfg(t, s)
+	set18719(t, s,
+		"chassis cluster cluster-id 1",
+		"chassis cluster node 0",
+		"chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"chassis cluster fabric-interface fab0",
+	)
+	if w := commitWarnings18719(t, s); !hasWarning18719(w, fabricZoneStampMarker18719) {
+		t.Fatalf("precondition: the adding commit prints the reminder; warnings=%v", w)
+	}
+	return s
+}
+
+// unrelatedCommitsShowOnce18719 makes two unrelated operator commits: the
+// first must print the reminder (unseen baseline), the second must not.
+func unrelatedCommitsShowOnce18719(t *testing.T, s *Store, why string) {
+	t.Helper()
+	set18719(t, s, "system host-name after-"+why)
+	if w := commitWarnings18719(t, s); !hasWarning18719(w, fabricZoneStampMarker18719) {
+		t.Fatalf("after %s the first operator commit must show the reminder once; warnings=%v", why, w)
+	}
+	set18719(t, s, "system host-name later-"+why)
+	if w := commitWarnings18719(t, s); hasWarning18719(w, fabricZoneStampMarker18719) {
+		t.Fatalf("after %s the reminder must show only once; warnings=%v", why, w)
+	}
+}
+
+func TestBootLoadedBaselineShowsTheReminderOnce18719(t *testing.T) {
+	s := committedFabricStore18719(t)
+	restarted := newTestStoreAt(t, s.filePath)
+	if err := restarted.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	enterCfg(t, restarted)
+	unrelatedCommitsShowOnce18719(t, restarted, "boot-load")
+}
+
+func TestSyncedBaselineShowsTheReminderOnce18719(t *testing.T) {
+	s := committedFabricStore18719(t)
+	content := s.active.Format()
+	if _, err := s.SyncApply(content, nil); err != nil {
+		t.Fatalf("SyncApply: %v", err)
+	}
+	unrelatedCommitsShowOnce18719(t, s, "config-sync")
+}
+
+func TestRolledBackBaselineShowsTheReminderOnce18719(t *testing.T) {
+	s := committedFabricStore18719(t)
+	set18719(t, s, "system host-name confirmed-change")
+	if _, err := s.CommitConfirmed(1); err != nil {
+		t.Fatalf("CommitConfirmed: %v", err)
+	}
+	if _, ok := s.PromoteRollback(s.ConfirmGenForTesting()); !ok {
+		t.Fatal("premise: PromoteRollback must succeed")
+	}
+	unrelatedCommitsShowOnce18719(t, s, "auto-rollback")
+}
+
+// A DNS refresh republishes the compiled config without changing the
+// operator's tree; it must not reset the baseline, or configs with DNS
+// address books would see the reminder on every commit again.
+func TestDNSRefreshKeepsTheBaseline18719(t *testing.T) {
+	s := committedFabricStore18719(t)
+	base := s.ActiveConfig()
+	refreshed := *base
+	if !s.PublishRefreshedDNS(base, &refreshed) {
+		t.Fatal("premise: PublishRefreshedDNS must swap the compiled config")
+	}
+	set18719(t, s, "system host-name after-dns")
+	if w := commitWarnings18719(t, s); hasWarning18719(w, fabricZoneStampMarker18719) {
+		t.Fatalf("a DNS refresh must not make an unrelated commit repeat the reminder; warnings=%v", w)
+	}
+}
+
+// The commit-confirmed site records the baseline too: after an unrelated
+// commit confirmed and its confirmation, the next unrelated commit stays
+// quiet. (The pass-3 mutation matrix showed no cell could see a missing
+// record at the confirmed site.)
+func TestCommitConfirmedRecordsTheBaseline18719(t *testing.T) {
+	s := committedFabricStore18719(t)
+	set18719(t, s, "system host-name confirmed-change")
+	compiled, err := s.CommitConfirmed(5)
+	if err != nil {
+		t.Fatalf("CommitConfirmed: %v", err)
+	}
+	if hasWarning18719(compiled.Warnings, fabricZoneStampMarker18719) {
+		t.Fatalf("precondition: the unrelated commit confirmed is quiet; warnings=%v", compiled.Warnings)
+	}
+	if err := s.ConfirmCommit(); err != nil {
+		t.Fatalf("ConfirmCommit: %v", err)
+	}
+	set18719(t, s, "system host-name after-confirm")
+	if w := commitWarnings18719(t, s); hasWarning18719(w, fabricZoneStampMarker18719) {
+		t.Fatalf("after a confirmed commit the next unrelated commit must stay quiet; warnings=%v", w)
+	}
+}

@@ -2006,20 +2006,33 @@ whatever the commit touched cannot be satisfied or silenced, and it trains
 operators to skip the warning block, so the next real finding is missed. The
 rule for a reminder:
 
-- it is **acknowledgeable**: a config knob that records the operator's
-  attestation silences it (for #10105, the #16023
-  `fabric-interface-authenticated` / `fabric1-interface-authenticated`
-  attestation on every fabric link); and/or
-- it is **change-scoped**: register its exact text and the fingerprint of the
-  config region it is about in `changeScopedAdvisories18719`
-  (`pkg/config/advisory_scope_18719.go`). The operator commit paths
-  (`Store.Commit*` and `CommitConfirmed*`) call
-  `config.DropUnchangedScopedAdvisories(previous, next)`, which drops a
-  registered reminder when its region is unchanged since the previously
-  committed config (a first commit keeps it). `commit check` is not scoped and
-  reports every reminder whose condition holds.
-- it fires only when the config can make it matter (#13967 needs a
-  fabric-reachable BA classifier binding).
+- **It is acknowledgeable.** A config knob records the operator's
+  acknowledgement and silences it. The knob must assert EXACTLY what the
+  reminder is about and nothing stronger.
+  - For #10105, `chassis cluster fabric-interface-private` /
+    `fabric1-interface-private` say "an isolated two-peer segment" and feed
+    nothing else.
+  - The #16023 `fabric-interface-authenticated` pair also acknowledges it,
+    but it means MACsec/802.1X and makes stamps trusted under
+    `require-authenticated-fabric-stamps`. A reminder must never steer an
+    operator into a stronger attestation than the one it needs (#18751
+    review).
+- **And/or it is change-scoped.** Register its exact text and the
+  fingerprint of the config region it is about in
+  `changeScopedAdvisories18719` (`pkg/config/advisory_scope_18719.go`).
+  - The operator commit paths (`Store.Commit*` and `CommitConfirmed*`) call
+    `config.DropUnchangedScopedAdvisories(baseline, next)`, which drops a
+    registered reminder when its region is unchanged.
+  - The baseline is the config the last operator commit in THIS process
+    installed (`scopedAdvisoryBaselineLocked`). After a boot load, a
+    config-sync apply or an auto-rollback the operator has not seen the
+    reminder, so the next operator commit shows it once. A DNS refresh does
+    not reset the baseline.
+  - `commit check` is not scoped and reports every reminder whose condition
+    holds.
+- **It fires only when the config can make it matter.** #13967 needs a BA
+  classifier binding on a data interface. That predicate is deliberately
+  broad, because under-reporting is the failure #18719 fixes.
 
 `TestChangeScopedAdvisoryRegistryMatchesEmitters18719` pins that every
 registered text is emitted verbatim, so rewording a constant cannot silently

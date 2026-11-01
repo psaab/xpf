@@ -64,11 +64,21 @@ type Tracker struct {
 	mu       sync.Mutex
 	sources  map[string]*sourceRecord
 	overflow uint64 // frames from sources beyond maxTrackedMACs
-	raised   bool
+	// overflowLast is the last frame from an untracked (overflow) source.
+	// The alarm holds until it too is AlarmHold old, so a ninth source that
+	// keeps sending after the eight tracked ones went quiet does not clear
+	// and immediately re-raise the alarm.
+	overflowLast time.Time
+	raised       bool
 	// onTransition is called (outside the lock) when the alarm raises or
-	// clears. Nil means no callback.
-	onTransition func(link Link, raised bool, summary string)
+	// clears. detail is the alarm summary on a raise, and the reason on a
+	// clear. Nil means no callback.
+	onTransition func(link Link, raised bool, detail string)
 }
+
+// ClearHoldExpired is the clear reason when no foreign source was seen for
+// AlarmHold.
+const ClearHoldExpired = "no non-peer source MAC seen within the hold window"
 
 // NewTracker returns a tracker for link.
 func NewTracker(link Link, onTransition func(Link, bool, string)) *Tracker {
@@ -140,6 +150,7 @@ func (t *Tracker) Observe(src net.HardwareAddr, now time.Time) {
 		t.sources[key] = &sourceRecord{firstSeen: now, lastSeen: now, frames: 1}
 	default:
 		t.overflow++
+		t.overflowLast = now
 	}
 	fire := !t.raised
 	t.raised = true
@@ -159,16 +170,30 @@ func (t *Tracker) Tick(now time.Time) {
 			delete(t.sources, key)
 		}
 	}
-	if len(t.sources) == 0 {
+	quiet := len(t.sources) == 0 && (t.overflow == 0 || now.Sub(t.overflowLast) > AlarmHold)
+	if quiet {
 		t.overflow = 0
 	}
-	fire := t.raised && len(t.sources) == 0
+	fire := t.raised && quiet
 	if fire {
 		t.raised = false
 	}
 	t.mu.Unlock()
 	if fire && t.onTransition != nil {
-		t.onTransition(t.link, false, "")
+		t.onTransition(t.link, false, ClearHoldExpired)
+	}
+}
+
+// Retire ends this tracker's alarm because the link it watched is gone or
+// changed identity (#18751 review). A raised alarm reports its clear with
+// reason, so every raise is matched by exactly one clear in the log.
+func (t *Tracker) Retire(reason string) {
+	t.mu.Lock()
+	fire := t.raised
+	t.raised = false
+	t.mu.Unlock()
+	if fire && t.onTransition != nil {
+		t.onTransition(t.link, false, reason)
 	}
 }
 
@@ -192,6 +217,9 @@ func (t *Tracker) summaryLocked(now time.Time) string {
 			last = rec.lastSeen
 		}
 		frames += rec.frames
+	}
+	if t.overflowLast.After(last) {
+		last = t.overflowLast
 	}
 	sort.Strings(keys)
 	frames += t.overflow

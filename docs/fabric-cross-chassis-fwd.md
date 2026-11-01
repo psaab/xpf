@@ -1492,56 +1492,105 @@ commit touched, so operators learned to skip the warning block. It is now a
 constraint reminder in the #18719 sense (`docs/config-schema.md`,
 "Constraint reminders are acknowledgeable or change-scoped"):
 
-- **Acknowledgeable.** The #16023 per-link attestation silences it: with
-  `set chassis cluster fabric-interface-authenticated` (and
-  `fabric1-interface-authenticated` for a second fabric) on EVERY configured
-  fabric link, the #10105 line is not emitted. One unattested link keeps it.
-  The attestation is the existing #16023 leaf, and it changes no forwarding:
-  it is consulted at runtime only together with
-  `security flow require-authenticated-fabric-stamps`. Its description says
-  MACsec/802.1X; whether a direct-attached or dedicated-bridge link should
-  carry the same attestation, or a separate `fabric-link private` leaf
-  (the #18719 proposal), is left to the issue.
-- **Change-scoped.** Without the attestation the operator commit path prints
-  the reminder only when the commit adds or changes fabric configuration:
-  `chassis cluster fabric-interface`/`fabric1-interface`, the fabric peer
-  addresses, the attestations, and the `fab0`/`fab1` members and unit
-  addresses (`fabricAdvisoryScope18719`, `pkg/config/advisory_scope_18719.go`).
-  Removing an attestation is a change, so the reminder returns on that commit.
-  `commit check` is not scoped and reports it whenever it applies. The store
-  applies the filter at both commit sites (`Commit*` and `CommitConfirmed*`),
-  comparing against the previously committed config.
+- **Acknowledgeable, per link, without asserting authentication.**
+  - `set chassis cluster fabric-interface-private` (and
+    `fabric1-interface-private` for a second fabric) is the operator's
+    statement that the link is an isolated two-peer L2 domain:
+    direct-attached, or a dedicated VLAN/bridge. It silences the #10105 line
+    and does NOTHING else. It compiles to `FabricLinkPrivate`, which never
+    feeds `FabricLinkAuthenticated`, the dataplane's per-link
+    `link_authenticated`, or any stamp-trust decision.
+  - The #16023 attestation `fabric-interface-authenticated` also silences
+    it, but set it ONLY when MACsec/802.1X is actually configured on the
+    link. Under `security flow require-authenticated-fabric-stamps` it makes
+    the stamps on that link TRUSTED, so asserting it on a merely private
+    link would trust cloneable stamps (the #18751 review blocker).
+  - Every configured fabric link needs one of the two. One unacknowledged
+    link keeps the reminder.
+  - Cells: `TestFabricPrivateLeafNeverAuthenticates18719` (pkg/config) and
+    `TestFabricPrivateLeafNeverReachesLinkAuthenticated18719`
+    (pkg/dataplane/userspace).
+- **Change-scoped.** Without an acknowledgement, the operator commit path
+  prints the reminder only when the commit adds or changes fabric
+  configuration: `chassis cluster fabric-interface`/`fabric1-interface`, the
+  fabric peer addresses, both acknowledgement pairs, and the `fab0`/`fab1`
+  members and unit addresses (`fabricAdvisoryScope18719`,
+  `pkg/config/advisory_scope_18719.go`).
+  - Removing an acknowledgement is a change, so the reminder returns on that
+    commit.
+  - `commit check` is not scoped and reports it whenever it applies.
+  - The store applies the filter at both commit sites (`Commit*` and
+    `CommitConfirmed*`). It compares against the config the LAST OPERATOR
+    COMMIT in this process installed (`scopedAdvisoryBaselineLocked`,
+    `pkg/configstore/advisory_baseline_18719.go`). A node that booted from
+    disk, took its config by config sync, or was auto-rolled back never
+    showed its operator the reminder, so its first operator commit shows it
+    once.
 - **A runtime detector for the real violation.** The constraint cannot be
   proven, but a violation can be observed: frames on the fabric parent whose
   Ethernet source is neither this node's fabric MAC, nor the peer's, nor in
   xpf's synthetic namespace (`02:bf:72:*` zone stamps and RETH MACs,
-  `02:bf:73:*` V2 scope stamps). `pkg/fabricsegment` reads an AF_PACKET tap on
-  each armed fabric parent (armed once the peer fabric MAC has resolved),
-  behind a kernel cBPF filter that drops every frame from the two known
-  fabric MACs. It never touches the AF_XDP fast path: an AF_PACKET tap only
-  sees frames the XDP shim hands to the kernel (ARP, LLDP, NDP,
-  kernel-forwarded traffic), which is exactly where a third host's ARP/ND/DHCP
-  appears. Frames to the IEEE 802.1 link-constrained groups
-  (`01:80:c2:00:00:00`-`0f`: STP/RSTP, LACP, 802.1X, LLDP) are not
-  evidence: a bridge never relays them, so they prove only the adjacent
-  switch port, and a fabric on a dedicated switch VLAN is still a private
-  two-peer segment. Vendor link-local protocols outside that block (CDP,
-  PVST+ to `01:00:0c:cc:cc:cc`/`cd`) DO raise the alarm, which names the
-  source MAC. The tap socket is created with protocol 0 and only starts
-  receiving at `bind` (ETH_P_ALL on the fabric parent), so no frame from
-  another interface is queued before the bind. The reader handles at most
-  1000 accepted frames per second. A foreign source raises an alarm, rendered as a
-  `Warning: fabric link <fab> (<parent>) received N frame(s) from source
-  MAC(s) that are neither peer's fabric MAC (...)` line in `show chassis
-  cluster status` above the redundancy-group blocks, and logged once at the
-  raise (WARN) and once at the clear (INFO). The alarm holds for
-  `AlarmHold` (15 min) after the last foreign frame. A forged stamp carries
-  an xpf source MAC, so this detector cannot see a stamp forgery itself; it
-  sees the shared segment that makes one possible. Kernel-path cell:
-  `TestTapSamplerOnARealSegment18719` (`pkg/fabricsegment/sampler_linux_test.go`)
-  drives the real tap on veth pairs, and runs only in an empty network
-  namespace (`unshare -rn` on the compiled test binary). It skips elsewhere,
-  including in `make test`.
+  `02:bf:73:*` V2 scope stamps).
+  - **Tap and filter.** `pkg/fabricsegment` reads an AF_PACKET tap on each
+    armed fabric parent (armed once the peer fabric MAC has resolved). A
+    kernel cBPF filter drops the two fabric MACs and the synthetic
+    namespace, and userspace re-checks the namespace as a second layer.
+  - **What it can see.** The tap never touches the AF_XDP fast path, and on
+    a fabric parent the XDP shim runs BEFORE every AF_PACKET tap, so only
+    what the shim passes to the kernel can be seen. The shim XDP_PASSes
+    untagged non-IP frames (ARP, LLDP, any other ethertype) and hands IP
+    frames to the adjudicated path. So a third host's ARP is visible, while
+    an IP frame the shim redirects to AF_XDP (a unicast transit packet) is
+    not. The detector sees incidental third-host chatter, not traffic that
+    goes through the userspace dataplane. The loss gate's positive control
+    measures that boundary with the shim attached.
+  - **Not evidence.** Frames to the IEEE 802.1 link-constrained groups
+    (`01:80:c2:00:00:00`-`0f`: STP/RSTP, LACP, 802.1X, LLDP). A bridge never
+    relays them, so they prove only the adjacent switch port, and a fabric on
+    a dedicated switch VLAN is still a private two-peer segment.
+  - **Raises anyway.** Vendor link-local protocols outside that block (CDP,
+    PVST+ to `01:00:0c:cc:cc:cc`/`cd`). The alarm names the source MAC.
+  - **Socket.** The tap socket is created with protocol 0 and only starts
+    receiving at `bind` (ETH_P_ALL on the fabric parent), so no frame from
+    another interface is queued before the bind.
+  - **Rate.** The reader handles at most 1000 accepted frames per second.
+- **Lifecycle (#18751 review).**
+  - **Down/up.** An admin down/up of the parent (or a bind while it is down)
+    reports ENETDOWN once on the bound socket, and the kernel re-hooks the
+    socket when the parent comes back. The reader treats ENETDOWN as
+    transient and keeps reading.
+  - **Restart.** Any other reader exit is restarted by the Monitor with
+    exponential backoff (5 s to 5 min). The tracker survives, so evidence
+    and a raised alarm are not lost.
+  - **Status while down.** While a sampler is down, status shows `Warning:
+    fabric link <fab> (<parent>): the fabric-segment watcher is not running
+    (...)`, so an unwatched link does not read as a clean one. The hold
+    clock keeps running, so a raised alarm still clears.
+  - **Re-key.** A link whose identity (parent ifindex, either MAC) changes,
+    or that is removed, retires its tracker, and a raised alarm logs its
+    clear.
+  - **No shutdown goroutine.** The reader starts no goroutine and never
+    touches the fd after it returns. An earlier shutdown-on-cancel
+    goroutine could hit an unrelated socket that had reused the fd number.
+- **Alarm.** A foreign source raises an alarm, rendered as a `Warning: fabric
+  link <fab> (<parent>) received N frame(s) from source MAC(s) that are
+  neither peer's fabric MAC (...)` line in `show chassis cluster status`
+  above the redundancy-group blocks.
+  - It is logged once at the raise (WARN) and once at the clear (INFO, with
+    the reason).
+  - It holds for `AlarmHold` (15 min) after the last foreign frame,
+    including frames from sources beyond the 8 tracked ones.
+  - A forged stamp carries an xpf source MAC, so this detector cannot see a
+    stamp forgery itself; it sees the shared segment that makes one
+    possible.
+- **Kernel cells.** `make test-fabricsegment-kernel`, part of `make test`,
+  runs the cells in `pkg/fabricsegment/sampler_linux_test.go`
+  (`TapSamplerKernelCells18719`: tap and filter, parent down/up, bind while
+  down) under `unshare -rn` with `XPF_REQUIRE_NETNS=1`, by name.
+  - The filter is counted with `PACKET_STATISTICS`, so an accept-all filter
+    cannot hide behind the userspace re-check.
+  - No XDP program is attached there, so those cells do not establish
+    production visibility; the loss gate does.
 
 ## Native L2 group/unicast transit gate (#10691)
 
@@ -1588,6 +1637,10 @@ for the reasons in the #10105 section: no wire room, replay/epoch state):
   provides link authentication (MACsec / 802.1X; xpf implements neither)
   on that fabric link; the builder carries it as
   `FabricSnapshot.link_authenticated` (serialized `false`, not omitted).
+  Set it only where MACsec/802.1X is actually configured. The #18719
+  `fabric-interface-private` / `fabric1-interface-private` leaves acknowledge
+  a direct-attached or dedicated link for the #10105 reminder and never reach
+  `link_authenticated`.
 - Revocation is forced, not sampled: `link_authenticated` is config authority re-derived on every Go fabric sample and re-stamped on every Rust preservation/merge path (`restamp_fabric_link_authentication`), so deleting `fabric-interface-authenticated` forces false on surviving links even while the peer is unresolved.
 - Dataplane V0 gate (`zone_encoded_fabric_stamp_disposition`, before
   V1a/V1b): with the requirement on, a stamp on an unattested link is

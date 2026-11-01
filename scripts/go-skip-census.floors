@@ -142,12 +142,19 @@
 # #17583's vtysh oracle; and two loopback monitor gates replaced by PR #17430.
 # This is the file+message recount and each remaining PR's disposition is
 # listed explicitly in this PR body.
-total        = 607
+# PR #18751 (issue #18719) +1 priv-absent in
+# pkg/fabricsegment/sampler_linux_test.go: the ONE skip site of the
+# fabric-segment kernel cells (an empty private netns with CAP_NET_ADMIN and
+# CAP_NET_RAW unavailable). make test-fabricsegment-kernel forces those cells
+# by name under unshare -rn with XPF_REQUIRE_NETNS=1, where the site fails
+# instead. (origin/master already measures 652 against this 607 floor; this
+# line adds only #18751's own +1.)
+total        = 608
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 120
+priv-absent  = 121
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.

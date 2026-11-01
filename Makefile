@@ -175,6 +175,7 @@ test:
 	$(MAKE) harness-census || status=$$?; \
 	$(MAKE) test-routing-kernel || status=$$?; \
 	$(MAKE) test-daemon-kernel || status=$$?; \
+	$(MAKE) test-fabricsegment-kernel || status=$$?; \
 	$(MAKE) go-skip-census || status=$$?; \
 	echo ""; \
 	echo "make test: NOT EXAMINED by this run — the XDP shim's behavioural"; \
@@ -1234,6 +1235,28 @@ test-daemon-kernel:
 		exit 0; \
 	fi; \
 	exit $$rc
+
+# #18719 (#18751 review): the fabric-segment watcher's real-kernel cells
+# (AF_PACKET tap, cBPF filter counted with PACKET_STATISTICS, parent
+# down/up). Same contract as test-daemon-kernel: 77 from the leg is
+# NOT-EXAMINED unless XPF_REQUIRE_NETNS=1, which makes it a failure.
+.PHONY: test-fabricsegment-kernel test-fabricsegment-kernel-lib
+test-fabricsegment-kernel:
+	@out=$$(sh ./test/fabricsegment/selftest-fabricsegment-kernel_18719.sh 2>&1); rc=$$?; \
+	echo "$$out"; \
+	if [ $$rc -eq 77 ]; then \
+		if [ -n "$${XPF_REQUIRE_NETNS:-}" ]; then \
+			echo "test-fabricsegment-kernel: FAIL — XPF_REQUIRE_NETNS=1, but a private netns is unavailable."; \
+			exit 1; \
+		fi; \
+		echo "make test: NOT-EXAMINED — fabric-segment kernel cells (3 cells: #18719 tap/filter, parent down/up, bind while down)."; \
+		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
+		exit 0; \
+	fi; \
+	exit $$rc
+
+test-fabricsegment-kernel-lib:
+	sh ./test/fabricsegment/selftest-fabricsegment-kernel_18719.sh
 
 # Self-tests for the #6936/#11306 FBF steering verdicts. The helper cells pin
 # fail-closed route parsing (including errors and ECMP). Healthy steering is
