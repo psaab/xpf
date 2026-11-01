@@ -167,7 +167,7 @@ func TestOverlayReadbackAcceptsTheZeroHopDropAhead18721(t *testing.T) {
 	o := overlay18721()
 	exprs := inputExprs18721(t, HostInboundSpec{Overlay: &o})
 	marker := HostInputFenceOverlayCounterName(o)
-	if _, _, markerSeen, _ := decodeHostOverlayRule(&nftables.Rule{Exprs: exprs[0]}, nil, marker); markerSeen {
+	if _, _, markerSeen, _, _ := decodeHostOverlayRule(&nftables.Rule{Exprs: exprs[0]}, nil, marker); markerSeen {
 		t.Fatal("fixture: rule 0 is the overlay; the zero-hop DROP no longer leads, so this cell does not reach the defect")
 	}
 	// The byteorder is what makes the two views differ: the kernel readback
@@ -190,7 +190,7 @@ func TestOverlayReadbackAcceptsTheZeroHopDropAhead18721(t *testing.T) {
 func TestOverlayReadbackAcceptsTheOverlayFirst18721(t *testing.T) {
 	o := overlay18721()
 	exprs := inputExprs18721(t, HostInboundSpec{Overlay: &o, NoIPv6RejectZeroHopLimit: true})
-	if _, _, markerSeen, _ := decodeHostOverlayRule(&nftables.Rule{Exprs: exprs[0]}, nil, HostInputFenceOverlayCounterName(o)); !markerSeen {
+	if _, _, markerSeen, _, _ := decodeHostOverlayRule(&nftables.Rule{Exprs: exprs[0]}, nil, HostInputFenceOverlayCounterName(o)); !markerSeen {
 		t.Fatal("fixture: with the knob set the overlay should be rule 0")
 	}
 	for _, v := range views18721(t, exprs) {
@@ -443,5 +443,66 @@ func TestDecodeRuleExprNames18721(t *testing.T) {
 	}
 	if _, _, err := decodeRuleExprNames([]byte{1, 0}); err == nil {
 		t.Error("a short message decoded")
+	}
+}
+
+// #18721 fold 7 (AD): a marked rule whose interface scope is NEGATED is not a
+// fence on that interface. `iifname != "st0" counter name <marker> drop` drops
+// everything EXCEPT the revoked master. decodeHostOverlayRule used to ignore
+// Cmp.Op and Lookup.Invert, so it read that rule as a fence on st0.
+func TestOverlayReadbackRefusesANegatedScope18721(t *testing.T) {
+	// Single master: the iifname scope is a Cmp.
+	o := overlay18721()
+	exprs := inputExprs18721(t, HostInboundSpec{Overlay: &o, NoIPv6RejectZeroHopLimit: true})
+	cmpAt := -1
+	for i, e := range exprs[0] {
+		if _, ok := e.(*expr.Cmp); ok && cmpAt < 0 && i > 0 {
+			if m, ok := exprs[0][i-1].(*expr.Meta); ok && m.Key == expr.MetaKeyIIFNAME {
+				cmpAt = i
+			}
+		}
+	}
+	if cmpAt < 0 {
+		t.Fatalf("fixture: the single-master overlay rule has no iifname Cmp: %#v", exprs[0])
+	}
+	for _, v := range views18721(t, exprs) {
+		if err := verify18721(v, o); err != nil {
+			t.Fatalf("%s: control: the un-negated overlay must verify: %v", v.name, err)
+		}
+	}
+	neq := *exprs[0][cmpAt].(*expr.Cmp)
+	neq.Op = expr.CmpOpNeq
+	negated := append([][]expr.Any(nil), exprs...)
+	negated[0] = append(append(append([]expr.Any(nil), exprs[0][:cmpAt]...), &neq), exprs[0][cmpAt+1:]...)
+	for _, v := range views18721(t, negated) {
+		if err := verify18721(v, o); err == nil || !strings.Contains(err.Error(), "negates its interface scope") {
+			t.Errorf("%s: iifname != st0 marked drop: readback = %v, want \"negates its interface scope\"", v.name, err)
+		}
+	}
+
+	// Several masters: the iifname scope is a set lookup.
+	multi := CanonicalHostInputFenceOverlay(HostInputFenceOverlay{
+		MasterSet: []string{"st0", "st1"}, Generation: 2, PermitEpoch: 2, CloseRequestSeq: 2,
+		CloseRequestKey: "2/[xfrmi:st0,st1]", WatchGeneration: 2, State: "CLOSING",
+	})
+	mexprs := inputExprs18721(t, HostInboundSpec{Overlay: &multi, NoIPv6RejectZeroHopLimit: true})
+	lookupAt := -1
+	for i, e := range mexprs[0] {
+		if _, ok := e.(*expr.Lookup); ok {
+			lookupAt = i
+			break
+		}
+	}
+	if lookupAt < 0 {
+		t.Fatalf("fixture: the multi-master overlay rule has no set lookup: %#v", mexprs[0])
+	}
+	inv := *mexprs[0][lookupAt].(*expr.Lookup)
+	inv.Invert = true
+	inverted := append([][]expr.Any(nil), mexprs...)
+	inverted[0] = append(append(append([]expr.Any(nil), mexprs[0][:lookupAt]...), &inv), mexprs[0][lookupAt+1:]...)
+	for _, v := range views18721(t, inverted) {
+		if err := verify18721(v, multi); err == nil || !strings.Contains(err.Error(), "negates its interface scope") {
+			t.Errorf("%s: iifname != { st0, st1 } marked drop: readback = %v, want \"negates its interface scope\"", v.name, err)
+		}
 	}
 }

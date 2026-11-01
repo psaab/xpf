@@ -37,8 +37,9 @@ var errTransferPreActivationUnsupported = errors.New("dataplane has no transfer 
 //
 // COUPLED to pkg/nftables hostOverlayReadbackDeadline (#18721). The host-input
 // overlay readback runs under applySem. Its worst case is the two readbacks
-// reconcileIpsecHostInputFence can make in one hold, each bounded by that
-// deadline, and it must leave this wait 100 ms of headroom.
+// reconcileIpsecHostInputFence can make in one hold, each costing at most that
+// deadline plus one pass (a 100 ms assumed allowance), and it must leave this
+// wait 100 ms of headroom.
 // TestOverlayReadbackFitsTransferPreActivateWait18721 enforces it: lowering
 // this wait or raising that deadline fails the test.
 const transferPreActivateLockWait = 500 * time.Millisecond

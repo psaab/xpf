@@ -144,45 +144,77 @@ func TestHostOverlayReadbackBackoffIsGrowing18721(t *testing.T) {
 	}
 }
 
-// AD fold 6: the wall-clock deadline bounds the readback whatever one pass
-// costs. With the production backoff and deadline and a pass that takes 80 ms
-// (a slow table under load), a ruleset that never holds must stop on the
-// deadline: well before 5 attempts, within deadline + one pass, failing
-// closed. The clock is injected and advanced by the fake pass and the sleeps,
-// so the pass count is exact rather than load-dependent.
+// AD folds 6-7: the deadline bounds the RETRIES. A retry runs only if elapsed
+// + its pause + the slowest pass so far fits. The clock is injected and
+// advanced by the fake passes and the sleeps, so pass counts are exact rather
+// than load-dependent.
 func TestReadAtStableNftGenerationStopsAtTheDeadline18721(t *testing.T) {
-	const pass = 80 * time.Millisecond
 	clock := time.Unix(0, 0)
 	now := func() time.Time { return clock }
 	sleep := func(d time.Duration) { clock = clock.Add(d) }
-	gen, _ := genSeq18721(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
-	reads := 0
-	got := readAtStableNftGeneration(hostOverlayReadbackBackoff, hostOverlayReadbackDeadline, now, sleep, gen,
-		func() error { reads++; clock = clock.Add(pass); return nil })
-	elapsed := clock.Sub(time.Unix(0, 0))
-	if got == nil || !strings.Contains(got.Error(), "deadline") {
-		t.Fatalf("slow, moving readback = %v, want a fail-closed stop at the deadline", got)
+	run := func(passes ...time.Duration) (error, int, time.Duration) {
+		clock = time.Unix(0, 0)
+		gen, _ := genSeq18721(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+		reads := 0
+		err := readAtStableNftGeneration(hostOverlayReadbackBackoff, hostOverlayReadbackDeadline, now, sleep, gen,
+			func() error {
+				d := passes[len(passes)-1]
+				if reads < len(passes) {
+					d = passes[reads]
+				}
+				reads++
+				clock = clock.Add(d)
+				return nil
+			})
+		return err, reads, clock.Sub(time.Unix(0, 0))
 	}
-	// 80 ms passes against a 190 ms deadline:
-	//   - pass 1 ends at 80 ms; 80+2+80 = 162 fits, so pass 2 runs;
-	//   - pass 2 ends at 162 ms; 162+10+80 = 252 does not fit, so it stops.
-	// Without the previous-pass estimate it would start a third pass (162+10
-	// fits) and end at 252 ms, past the deadline.
-	if reads != 2 {
-		t.Errorf("readback made %d passes; with 80 ms passes the deadline must stop it after exactly 2", reads)
+
+	// Fast passes (20 ms) are retried: pass 1 ends at 20; 20+2+20 = 42 fits,
+	// so pass 2 ends at 42; 42+10+20 = 72 fits, so pass 3 ends at 72; then
+	// 72+40+20 = 132 does not fit, so it stops. 3 passes, 72 ms.
+	err, reads, elapsed := run(20 * time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "deadline") || reads != 3 || elapsed != 72*time.Millisecond {
+		t.Errorf("20 ms passes: %v after %d passes / %v, want a deadline stop after exactly 3 / 72ms", err, reads, elapsed)
 	}
-	if elapsed > hostOverlayReadbackDeadline {
-		t.Errorf("readback took %v of injected time, more than the %v deadline", elapsed, hostOverlayReadbackDeadline)
+	// Slow passes (80 ms) are not retried: 80+2+80 = 162 does not fit, so
+	// it stops after the first pass. Under load, a mid-read commit fails
+	// closed at once.
+	err, reads, _ = run(80 * time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "deadline") || reads != 1 {
+		t.Errorf("80 ms passes: %v after %d passes, want a deadline stop after exactly 1", err, reads)
 	}
-	// A fast pass gets every attempt: on a quick table, the deadline is not
-	// what limits a burst.
-	gen2, _ := genSeq18721(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
-	reads = 0
-	clock = time.Unix(0, 0)
-	got = readAtStableNftGeneration(hostOverlayReadbackBackoff, hostOverlayReadbackDeadline, now, sleep, gen2,
-		func() error { reads++; return nil })
-	if got == nil || !strings.Contains(got.Error(), "attempts exhausted") || reads != len(hostOverlayReadbackBackoff)+1 {
-		t.Errorf("fast, moving readback = %v after %d passes, want all %d attempts then exhaustion", got, reads, len(hostOverlayReadbackBackoff)+1)
+	// The estimate is the SLOWEST pass so far, not the last one. A 40 ms
+	// pass (40+2+40 = 82 fits), then a 1 ms pass ending at 43 ms: last-pass
+	// would admit pass 3 (43+10+1 = 54), slowest-pass does not (43+10+40 =
+	// 93).
+	err, reads, _ = run(40*time.Millisecond, time.Millisecond, time.Millisecond)
+	if err == nil || reads != 2 {
+		t.Errorf("50 ms then 5 ms passes: %v after %d passes, want a stop after exactly 2 (the slowest pass is the estimate)", err, reads)
+	}
+	// Instant passes get every attempt: 2+10+40 = 52 fits, and so does
+	// 52+80 = 132? No, 132 > 90, so instant passes stop before the
+	// fifth; the deadline, not the attempt count, limits a burst here too.
+	err, reads, _ = run(0)
+	if err == nil || reads != len(hostOverlayReadbackBackoff) {
+		t.Errorf("instant passes: %v after %d passes, want %d (the 80 ms step does not fit a 90 ms deadline after 52 ms of pauses)", err, reads, len(hostOverlayReadbackBackoff))
+	}
+}
+
+// AD fold 7 (the survivor): availability. One STABLE first pass returns its own
+// verdict however slow it is; the deadline only limits retries. A 300 ms first
+// pass must hand back nil (pass) and an error (refuse) unchanged, not a
+// fail-closed "changed" verdict.
+func TestReadAtStableNftGenerationKeepsASlowStableVerdict18721(t *testing.T) {
+	verdictErr := errors.New("the readback's own refusal")
+	for _, want := range []error{nil, verdictErr} {
+		clock := time.Unix(0, 0)
+		gen, _ := genSeq18721(5, 5)
+		got := readAtStableNftGeneration(hostOverlayReadbackBackoff, hostOverlayReadbackDeadline,
+			func() time.Time { return clock }, func(d time.Duration) { clock = clock.Add(d) }, gen,
+			func() error { clock = clock.Add(300 * time.Millisecond); return want })
+		if got != want {
+			t.Errorf("a stable 300 ms pass returned %v, want its own verdict %v", got, want)
+		}
 	}
 }
 
@@ -243,21 +275,34 @@ func TestVerifyHostInboundOverlayIsGenerationBracketed18721(t *testing.T) {
 	elapsed := time.Since(start)
 	// AD fold 5: production must actually PAUSE between attempts. The pure
 	// cells inject a recorder, and these call-site and live cells advance per
-	// pass, so only wall time can show the call site sleeps. A lower bound
-	// cannot flake: the exhaustion path sleeps every step.
-	var pause time.Duration
-	for _, d := range hostOverlayReadbackBackoff {
-		pause += d
-	}
+	// pass, so only wall time can show the call site sleeps. With near-instant
+	// passes, the steps that fit the deadline are all taken, so a lower bound
+	// of their sum cannot flake.
+	pause, attempts := pausesWithinDeadline18721()
 	if elapsed < pause {
-		t.Errorf("VerifyHostInboundOverlay exhausted its attempts in %v, less than the %v backoff; the call site is not pausing", elapsed, pause)
+		t.Errorf("VerifyHostInboundOverlay stopped in %v, less than the %v of pauses it must take; the call site is not pausing", elapsed, pause)
 	}
 	if err == nil || !strings.Contains(err.Error(), "changed during each of") {
 		t.Fatalf("VerifyHostInboundOverlay over a moving generation = %v, want the fail-closed \"changed during each of\"", err)
 	}
-	if want := 2 * (len(hostOverlayReadbackBackoff) + 1); gens != want {
-		t.Errorf("VerifyHostInboundOverlay read the generation %d times, want %d", gens, want)
+	if want := 2 * attempts; gens != want {
+		t.Errorf("VerifyHostInboundOverlay read the generation %d times, want %d (%d attempts)", gens, want, attempts)
 	}
+}
+
+// pausesWithinDeadline18721 is the production schedule for near-instant passes:
+// the attempts that fit the deadline, and the total pause before them.
+func pausesWithinDeadline18721() (time.Duration, int) {
+	var pause time.Duration
+	attempts := 1
+	for _, d := range hostOverlayReadbackBackoff {
+		if pause+d > hostOverlayReadbackDeadline {
+			break
+		}
+		pause += d
+		attempts++
+	}
+	return pause, attempts
 }
 
 // The production call site is bounded by the deadline (AD fold 6). The
@@ -287,8 +332,8 @@ func TestVerifyHostInboundOverlayStopsAtTheDeadline18721(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "deadline") {
 		t.Fatalf("slow, moving call site = %v, want a fail-closed stop at the deadline", err)
 	}
-	if gens >= 2*(len(hostOverlayReadbackBackoff)+1) {
-		t.Errorf("call site read the generation %d times; the deadline should have stopped it before all attempts", gens)
+	if gens != 2 {
+		t.Errorf("call site read the generation %d times; with 80 ms passes against a %v deadline it must stop after one pass (2 reads)", gens, hostOverlayReadbackDeadline)
 	}
 	if limit := hostOverlayReadbackDeadline + 80*time.Millisecond; elapsed > limit {
 		t.Errorf("call site took %v, more than the deadline + one pass (%v)", elapsed, limit)
@@ -429,14 +474,26 @@ func TestOverlayReadbackRetriesPastAMidReadbackCommit18721(t *testing.T) {
 				t.Fatalf("fixture: the replace did not keep handle %d at the head (%v)", head.Handle, err)
 			}
 		}
+		// Fold 7: whether the reread happens depends on pass speed, and this
+		// pass carries a commit. A fast pass is retried and the reread refuses
+		// the ACCEPT head. A slow pass (a loaded lab) stops at the deadline and
+		// fails closed at once. The security property holds either way: the
+		// readback NEVER passes. The exact schedule is pinned by the
+		// injected-clock cells.
 		err := in.VerifyHostInboundOverlay(o)
-		if err == nil {
+		switch {
+		case err == nil:
 			t.Error("readback passed with an ACCEPT replaced in ahead of the fence mid-readback")
-		} else if !strings.Contains(err.Error(), "leading rule absent") {
-			t.Errorf("readback = %v, want the reread to refuse the ACCEPT head (\"leading rule absent\")", err)
-		}
-		if calls != 2 {
-			t.Errorf("readback ran %d passes, want 2 (the first one spanned a commit)", calls)
+		case strings.Contains(err.Error(), "leading rule absent"):
+			if calls != 2 {
+				t.Errorf("the reread refused the ACCEPT head after %d passes, want 2", calls)
+			}
+		case strings.Contains(err.Error(), "deadline"):
+			if calls != 1 {
+				t.Errorf("a deadline stop after %d passes, want 1 (the pass that spanned the commit)", calls)
+			}
+		default:
+			t.Errorf("readback = %v, want the reread's refusal or a deadline stop", err)
 		}
 	})
 
@@ -455,11 +512,22 @@ func TestOverlayReadbackRetriesPastAMidReadbackCommit18721(t *testing.T) {
 			c.AddTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: "zz18721"})
 			flush("add an unrelated table", c)
 		}
-		if err := in.VerifyHostInboundOverlay(o); err != nil {
-			t.Errorf("readback after one unrelated commit: %v", err)
-		}
-		if calls != 2 {
-			t.Errorf("readback ran %d passes, want 2", calls)
+		// Fold 7: retried while passes are fast, and then it passes on the
+		// stable reread. If the commit-carrying pass is too slow for the
+		// deadline (a loaded lab) it fails closed at once instead, which is
+		// the intended trade-off.
+		err := in.VerifyHostInboundOverlay(o)
+		switch {
+		case err == nil:
+			if calls != 2 {
+				t.Errorf("readback passed after %d passes, want 2", calls)
+			}
+		case strings.Contains(err.Error(), "deadline"):
+			if calls != 1 {
+				t.Errorf("a deadline stop after %d passes, want 1", calls)
+			}
+		default:
+			t.Errorf("readback after one unrelated commit = %v, want a pass after the reread or a deadline stop", err)
 		}
 	})
 
@@ -483,11 +551,21 @@ func TestOverlayReadbackRetriesPastAMidReadbackCommit18721(t *testing.T) {
 			}
 			flush("burst commit", c)
 		}
-		if err := in.VerifyHostInboundOverlay(o); err != nil {
-			t.Errorf("readback after a two-commit burst: %v", err)
-		}
-		if calls != 3 {
-			t.Errorf("readback ran %d passes, want 3", calls)
+		// Fold 7: waited out only while passes are fast. Otherwise it stops at
+		// the deadline and fails closed; it is never "attempts exhausted" on
+		// a two-commit burst.
+		err := in.VerifyHostInboundOverlay(o)
+		switch {
+		case err == nil:
+			if calls != 3 {
+				t.Errorf("readback passed after %d passes, want 3", calls)
+			}
+		case strings.Contains(err.Error(), "deadline"):
+			if calls < 1 || calls > 2 {
+				t.Errorf("a deadline stop after %d passes, want 1 or 2", calls)
+			}
+		default:
+			t.Errorf("readback after a two-commit burst = %v, want a pass after the reread or a deadline stop", err)
 		}
 	})
 
@@ -513,11 +591,11 @@ func TestOverlayReadbackRetriesPastAMidReadbackCommit18721(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "changed during each of") {
 			t.Errorf("readback under constant churn = %v, want fail-closed \"changed during each of\"", err)
 		}
-		// It stops on attempts or on the deadline, whichever comes first.
-		// Either way, it retried, and it stayed within the deadline plus the
-		// overrun of one pass (a commit plus a readback here).
-		if max := len(hostOverlayReadbackBackoff) + 1; calls < 2 || calls > max {
-			t.Errorf("readback ran %d passes, want 2..%d", calls, max)
+		// It stops on attempts or on the deadline, whichever comes first, and
+		// stays within the deadline plus the overrun of one pass (here a commit
+		// plus a readback).
+		if max := len(hostOverlayReadbackBackoff) + 1; calls < 1 || calls > max {
+			t.Errorf("readback ran %d passes, want 1..%d", calls, max)
 		}
 		if limit := hostOverlayReadbackDeadline + 100*time.Millisecond; elapsed > limit {
 			t.Errorf("readback under churn took %v, more than %v", elapsed, limit)

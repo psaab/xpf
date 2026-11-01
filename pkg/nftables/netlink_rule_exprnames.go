@@ -211,12 +211,14 @@ func decodeNftGeneration(msgs []netlink.Message) (uint32, error) {
 // Otherwise it pauses for the next backoff step and retries: len(backoff)+1
 // attempts in all, inside a wall-clock deadline (#18721).
 //
-// Before each retry it stops when elapsed + the next pause + the previous
-// pass's measured duration would exceed deadline. The previous pass is the
-// estimate for the next one. That bounds the whole readback at run time,
-// whatever the table size and host load, instead of trusting an assumed
-// per-pass cost. If it runs out of attempts or of deadline, it logs a Warn and
-// fails closed. See readNftGeneration for the residual window this cannot see.
+// Before each retry it stops when elapsed + the next pause + the SLOWEST pass
+// seen so far would exceed deadline. The maximum, not the last pass, is the
+// conservative estimate for the next one. The first pass always runs and is
+// not bounded by the deadline: one stable pass returns its own verdict however
+// long it took. So a readback costs at most deadline + one pass, and the
+// deadline is short enough that retries happen only while passes are fast. If
+// it runs out of attempts or of deadline, it logs a Warn and fails closed. See
+// readNftGeneration for the residual window this cannot see.
 //
 // The fence readback reads the ruleset several times: the marker object, the
 // sets, GetRules, and the raw expression-name dump. A writer outside xpf could
@@ -227,12 +229,12 @@ func readAtStableNftGeneration(backoff []time.Duration, deadline time.Duration, 
 	attempts := len(backoff) + 1
 	start := now()
 	var first, before, after uint32
-	var lastPass time.Duration
+	var maxPass time.Duration
 	made, stoppedAtDeadline := 0, false
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
 			pause := backoff[attempt-1]
-			if now().Sub(start)+pause+lastPass > deadline {
+			if now().Sub(start)+pause+maxPass > deadline {
 				stoppedAtDeadline = true
 				break
 			}
@@ -250,7 +252,9 @@ func readAtStableNftGeneration(backoff []time.Duration, deadline time.Duration, 
 		if after, err = gen(); err != nil {
 			return err
 		}
-		lastPass = now().Sub(passStart)
+		if d := now().Sub(passStart); d > maxPass {
+			maxPass = d
+		}
 		made++
 		if before == after {
 			return verdict

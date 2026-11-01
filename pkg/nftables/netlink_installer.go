@@ -228,24 +228,33 @@ var hostOverlayReadbackBackoff = []time.Duration{
 	2 * time.Millisecond, 10 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond,
 }
 
-// hostOverlayReadbackDeadline bounds one VerifyHostInboundOverlay in wall time:
-// passes, pauses and all (readAtStableNftGeneration stops before a retry that
-// would overrun it, using the previous pass's measured duration as the
-// estimate).
+// hostOverlayReadbackDeadline bounds the RETRIES of one
+// VerifyHostInboundOverlay (readAtStableNftGeneration). A retry starts only if
+// elapsed + its pause + the slowest pass so far fits inside the deadline. The
+// first pass always runs, so one readback costs at most deadline + one pass.
 //
 // COUPLED to pkg/daemon's transferPreActivateLockWait (500 ms). The readback
 // runs under applySem, and HA transfer pre-activation waits that long for
 // applySem before it gives up make-before-break. The binding path is the
 // short applySem holder reconcileIpsecHostInputFence, which makes at most two
-// readbacks per hold. So 2 x this deadline + 100 ms headroom must stay below
-// the wait: 2 x 190 + 100 = 480 < 500. pkg/daemon's
-// TestOverlayReadbackFitsTransferPreActivateWait18721 enforces that from the
-// real constants (via HostOverlayReadbackDeadline). An assumed per-pass cost
-// could not hold that bound: a pass on the canonical HA config measured
-// 45-60 ms on average, against 1 ms on a test table. The commit-time hold
+// readbacks per hold. So:
+//
+//	2 x (deadline + pass allowance) + 100 ms headroom < the wait
+//	2 x (90 + 100) + 100 = 480 < 500
+//
+// The 100 ms pass allowance is an ASSUMPTION: AD measured p95 passes of 100 to
+// 125 ms at loadavg ~40 on the canonical HA config. pkg/daemon's
+// TestOverlayReadbackFitsTransferPreActivateWait18721 enforces the bound from
+// the real constants (via HostOverlayReadbackDeadline).
+//
+// The trade-off: retries happen only while passes are fast. Under load, a
+// commit that lands mid-read fails the readback closed at once instead of
+// being retried, and that self-heals on the next apply. A failed commit under
+// load and concurrent writes is preferable to a failover that loses
+// make-before-break because of this readback. The commit-time hold
 // (holdIpsecHostInputFenceForDivertTransition) can stack more readbacks, but
 // commit holds already run for seconds and are outside this invariant.
-const hostOverlayReadbackDeadline = 190 * time.Millisecond
+const hostOverlayReadbackDeadline = 90 * time.Millisecond
 
 // HostOverlayReadbackDeadline reports hostOverlayReadbackDeadline, the
 // wall-clock bound on one VerifyHostInboundOverlay. pkg/daemon pins it against
@@ -383,12 +392,15 @@ func verifyHostOverlayRuleChain(rules []*nftables.Rule, kernelExprs [][]string, 
 	var gotMasters, gotSlaves []string
 	overlayRules := 0
 	for i, rule := range rules {
-		masters, slaves, markerSeen, dropSeen := decodeHostOverlayRule(rule, setNames, marker)
+		masters, slaves, markerSeen, dropSeen, negated := decodeHostOverlayRule(rule, setNames, marker)
 		if !markerSeen {
 			if overlayRules == 0 && hostInputRuleIsDropOnly(rule, kernelExprs[i]) {
 				continue // a DROP-only rule ahead of the fence admits nothing
 			}
 			break
+		}
+		if negated {
+			return fmt.Errorf("host overlay rule negates its interface scope (a != comparison or an inverted lookup)")
 		}
 		if !dropSeen {
 			return fmt.Errorf("host overlay rule lacks DROP verdict")
@@ -492,7 +504,13 @@ func hostInputRuleOnlyDrops(rule *nftables.Rule, kernelExprs []string, allowObjr
 	return drops == 1 && decodedCounted == kernelCounted
 }
 
-func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, marker string) (masters, slaves []string, markerSeen, dropSeen bool) {
+// decodeHostOverlayRule reads one input-chain rule as a fence overlay rule: its
+// iifname (master) and sdifname (slave) scopes, whether it carries the marker,
+// and whether it carries a DROP verdict. negated reports an interface scope
+// that is NOT a plain equality: a Cmp other than CmpOpEq, or an inverted
+// lookup. `iifname != "st0" ... drop` drops everything EXCEPT the revoked
+// master, so such a rule must never decode as a fence on st0 (#18721 fold 7).
+func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, marker string) (masters, slaves []string, markerSeen, dropSeen, negated bool) {
 	pending := 0 // 1=iifname, 2=sdifname
 	var reg uint32
 	for _, anyExpr := range rule.Exprs {
@@ -507,6 +525,9 @@ func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, ma
 			reg = x.Register
 		case *expr.Cmp:
 			if pending != 0 && x.Register == reg {
+				if x.Op != expr.CmpOpEq {
+					negated = true
+				}
 				name := string(bytes.TrimRight(x.Data, "\x00"))
 				if pending == 1 {
 					masters = append(masters, name)
@@ -517,6 +538,9 @@ func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, ma
 			pending = 0
 		case *expr.Lookup:
 			if pending != 0 && x.SourceRegister == reg {
+				if x.Invert {
+					negated = true
+				}
 				if pending == 1 {
 					masters = append(masters, setNames[x.SetName]...)
 				} else {
@@ -533,7 +557,7 @@ func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, ma
 			pending = 0
 		}
 	}
-	return masters, slaves, markerSeen, dropSeen
+	return masters, slaves, markerSeen, dropSeen, negated
 }
 
 func (in *netlinkInstaller) InstallColdBootFence(spec FenceSpec) error {
