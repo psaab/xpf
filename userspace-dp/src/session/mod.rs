@@ -300,7 +300,7 @@ pub(crate) const SESSION_GC_INTERVAL_NS_FOR_TEST: u64 = SESSION_GC_INTERVAL_NS;
 pub(crate) const WHEEL_TICK_NS_FOR_TEST: u64 = wheel::WHEEL_TICK_NS;
 #[cfg(test)]
 pub(crate) const WHEEL_BUCKETS_FOR_TEST: usize = wheel::WHEEL_BUCKETS;
-const DEFAULT_MAX_SESSIONS: usize = 131072;
+pub(crate) const DEFAULT_MAX_SESSIONS: usize = 131072;
 /// Default per-worker concurrent sessions per source IP and ingress zone.
 /// A positive `limit-session source-ip-based` value overrides this ceiling.
 pub(crate) const DEFAULT_MAX_SESSIONS_PER_SOURCE: u32 = 4096;
@@ -325,7 +325,7 @@ const DEFAULT_TCP_SESSION_TIMEOUT_NS: u64 = 1_800_000_000_000;
 /// longer than a legitimate incomplete handshake needs and eventually deny
 /// new flows. 20 s matches the Junos `tcp-initial-timeout` default. This
 /// is the SYN-flood/half-open sibling of the #3046 RST-reap window.
-const DEFAULT_TCP_OPENING_TIMEOUT_NS: u64 = 20_000_000_000;
+pub(crate) const DEFAULT_TCP_OPENING_TIMEOUT_NS: u64 = 20_000_000_000;
 const TCP_CLOSING_TIMEOUT_NS: u64 = 30_000_000_000;
 /// #3046: a session torn down by RST is reaped far faster than a graceful
 /// FIN close. A RST abruptly aborts the socket — there is no half-closed /

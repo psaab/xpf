@@ -584,7 +584,10 @@ xpf-install: done. Next steps:
   Upgrades: `apt upgrade xpf-appliance` cuts the dataplane on a STANDALONE
   node (a bounded blip; mgmt/SSH is not cut). Use XPF_NO_POSTINST_CUT=1
   apt-get upgrade to stage-only and run `xpfd upgrade` at a chosen time. HA
-  nodes stage only; cut with `xpfd upgrade --rolling`.
+  nodes stage only; cut each node, secondary first, with the STAGED binary:
+  `/usr/local/share/xpf/staged/xpfd upgrade --rolling`. The installed
+  /usr/local/sbin/xpfd is still the OLD release until its cut, so it would
+  run the old orchestrator and its defaults (#18415).
 EOF
 }
 

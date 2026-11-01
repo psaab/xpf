@@ -1,4 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Upgrade: the HA rolling rejoin deadline is configurable with
+    `--rejoin-deadline` and defaults to 190s, a margin over the peer's 150s bulk-prime
+    retry loop plus one 35s late-ack re-drive and 5s for that bulk's
+    transfer. It bounds each of the two post-cut waits, so the worst case is
+    twice that. The flag is validated before any demotion: 0 or omitted means
+    the default, and a negative value, one under 30s, or the flag without
+    `--rolling` is refused. Both waits now log a progress line every 15s. On
+    timeout the node is still left held secondary and the peer is not
+    advanced. Run the staged binary
+    (`/usr/local/share/xpf/staged/xpfd upgrade --rolling`) to get the new
+    orchestrator on the first roll to this release (#18415).
   * Remote CLI: operational `show configuration | display set` (and
     `| display json|xml|inheritance`, chained `| display set | match x`,
     and `run show configuration | display set` from configuration mode)

@@ -322,6 +322,46 @@ So even an unblocked run answers **which synchronization site saturates
 first** (with the allocator leg split into its two #15956 domains). It is
 not a per-connection cost for the other sites, and nothing should cite it as one.
 
+### A separate class: contention driven by sessions HELD, not new flows per second (#18655)
+
+Every site above scales with the **new-flow rate**. #18655 measured one that
+does not. It scales with the **number of sessions the node holds**, so a
+connection-rate sweep cannot find it.
+
+The site was the per-worker conntrack-refresh slice (`run_ct_slice`). Its
+#16217 emit leg read each emit key's shared `(stage, fwd, rev)` by scanning
+BOTH whole shared maps under both global mutexes. Worker replication puts
+every session in every worker's table, so the cost per slice was
+`sessions × shared rows`, which is quadratic in the sessions held.
+
+On the tcp cluster with 4000 idle UDP sessions:
+- the scan held the mutexes about 100% of the time (17k calls/s at a
+  p50 of 57 µs);
+- every worker blocked behind it;
+- established flows on other hosts stalled with ping gaps of up to 7.9 s;
+- the stall lasted for as long as the sessions lived.
+
+1500 sessions at the same 450/s rate did not stall. 4000 at one third the
+rate did.
+
+Two consequences for anyone reading this harness's output:
+
+- A flat new-flows/sec plateau with all four sites cold is not evidence
+  that no lock is saturated. Check whether the sessions the sweep leaves
+  behind are what is saturating it.
+- A table-size site needs a **held-population** axis: create S sessions,
+  hold them, and watch an established flow. It does not need a rate axis.
+  `docs/log/18655.md` describes one such probe.
+
+#18655 removed the per-key scan. The emit leg now does one pass
+(`shared_rows_stage_and_counts`), with batched restamps and O(1) dedup.
+It also runs the whole-table shared-evidence leg once per refresh cycle
+rather than on each of the cycle's ceil(slab / 2048) slices: on tcp at
+16000 sessions, the per-slice repetition alone still saturated the
+mutexes. The leg remains O(n + N) per cycle per worker, so it is still a
+table-size-driven cost, but a linear one, and this harness does not
+cover it.
+
 The loss cluster is shared and lock-protected. The harness sources the
 `cluster-cell.sh` preamble, so it queues behind another agent's deploy or
 smoke rather than colliding. Never kill another holder; never `rm` the lock.

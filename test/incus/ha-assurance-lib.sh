@@ -719,6 +719,72 @@ ha_counter_at_most_verdict() {
 	return 1
 }
 
+# #18670 report-only (#18681): append the helper `PID:` line from a
+# data-plane statistics capture to a `show security flow statistics` capture,
+# so the flow-statistics delta can be read with ha_snapshot_counter_delta.
+# Prints nothing; never fails the caller (a missing PID line just leaves the
+# flow capture without one).
+ha_flowstats_append_helper_pid() {
+	if [[ $# -ne 2 ]]; then
+		printf 'flowstats pid append: expected <dp-stats-file> <flowstats-file>\n' >&2
+		return 2
+	fi
+	grep -E -m1 '^[[:space:]]*PID:' "$1" >>"$2" 2>/dev/null || true
+	return 0
+}
+
+# #18670 report-only (#18681): the `Host-inbound denies` delta per node across
+# the RG1 failback window, as "node0=<n|unavailable> node1=<n|unavailable>".
+# This value is xpfd's GlobalCtrHostInboundDeny mirror, refreshed at its 1 s
+# status poll with safeDelta absorbing helper resets, so it trails the helper by
+# up to a second and a helper restart does not rewind it; the helper-PID guard
+# that ha_snapshot_counter_delta applies is therefore stricter than this
+# counter needs and is not a guard on xpfd. Report-only until #18681 adds an
+# xpfd-side guard and allows for the poll lag.
+ha_host_inbound_denies_report() {
+	if [[ $# -ne 4 ]]; then
+		printf 'host-inbound report: expected <node0-pre> <node1-pre> <node0-post> <node1-post>\n' >&2
+		return 2
+	fi
+	local -a pre=("$1" "$2") post=("$3" "$4")
+	local i delta line=""
+	for i in 0 1; do
+		if delta=$(ha_snapshot_counter_delta manual-rg1-failback 1 "node${i}" "Host-inbound denies" \
+			phase-pre "${pre[$i]}" phase-post "${post[$i]}" 2>/dev/null); then
+			line+="${line:+ }node${i}=${delta}"
+		else
+			line+="${line:+ }node${i}=unavailable"
+		fi
+	done
+	printf '%s\n' "$line"
+}
+
+# #18670: a counter delta between two helper-status captures is only a
+# delta when both captures read the SAME helper process. A helper restart
+# inside the window zeroes the counters and regrows them past the baseline,
+# which reads as an ordinary (small) delta. The captures carry the helper's
+# `PID:` line: when either capture has one, both must, and they must agree;
+# anything else is VOID. Captures with no `PID:` line at all (fixtures, older
+# formats) carry no process identity and are not judged here.
+ha_snapshot_same_helper_verdict() {
+	if [[ $# -ne 3 ]]; then
+		printf 'snapshot helper identity: expected <before-file> <after-file> <node>\n' >&2
+		return 2
+	fi
+	local before_file="$1" after_file="$2" node="$3" before_pid after_pid
+	if ! grep -Eq '^[[:space:]]*PID:' "$before_file" 2>/dev/null \
+		&& ! grep -Eq '^[[:space:]]*PID:' "$after_file" 2>/dev/null; then
+		return 0
+	fi
+	if ! before_pid="$(ha_status_summary_value "$before_file" "PID")"; then return 2; fi
+	if ! after_pid="$(ha_status_summary_value "$after_file" "PID")"; then return 2; fi
+	if [[ "$before_pid" != "$after_pid" ]]; then
+		printf '%s: helper restarted inside the window (PID %s -> %s); its counters do not span it\n' \
+			"$node" "$before_pid" "$after_pid" >&2
+		return 2
+	fi
+}
+
 ha_snapshot_counter_delta() {
 	if [[ $# -ne 8 ]]; then
 		printf 'snapshot counter delta: expected <slice> <rg> <node> <label> <before-phase> <before-file> <after-phase> <after-file>\n' >&2
@@ -729,6 +795,7 @@ ha_snapshot_counter_delta() {
 	local before_value after_value
 	if ! ha_snapshot_identity_verdict "$before_file" "$slice" "$before_phase" "$node" "$rg"; then return 2; fi
 	if ! ha_snapshot_identity_verdict "$after_file" "$slice" "$after_phase" "$node" "$rg"; then return 2; fi
+	if ! ha_snapshot_same_helper_verdict "$before_file" "$after_file" "$node"; then return 2; fi
 	if ! before_value="$(ha_status_summary_value "$before_file" "$label")"; then return 2; fi
 	if ! after_value="$(ha_status_summary_value "$after_file" "$label")"; then return 2; fi
 	ha_nondecreasing_delta "$before_value" "$after_value"
