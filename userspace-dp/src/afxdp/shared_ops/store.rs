@@ -874,7 +874,11 @@ pub(in crate::afxdp) fn publish_shared_session(
             // the key ambiguous; the shared wire lookup then fails closed.
             let mut sessions = lock_shared_publish(shared_forward_wire_sessions);
             #[cfg(test)]
-            super::wire_lock_order_18658_tests::publish_between_wire_locks(&wire_key);
+            super::wire_lock_order_18658_tests::publish_between_wire_locks(
+                &wire_key,
+                shared_forward_wire_sessions,
+                &shared_owner_rg_indexes.wire_ambiguities,
+            );
             let mut wire_ambiguities =
                 lock_wire_ambiguities_for_publish(shared_owner_rg_indexes);
             wire_ambiguities.observe(wire_key.clone(), entry.key.clone());
@@ -1200,10 +1204,16 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                     // #18658: the forward-wire map before `wire_ambiguities`,
                     // the one order every path takes them in (see
                     // `publish_shared_session`).
+                    #[cfg(test)]
+                    super::wire_lock_order_18658_tests::removal_before_wire_locks(&wire_key);
                     let mut forward_wire_sessions =
                         lock_shared_recover(shared_forward_wire_sessions);
                     #[cfg(test)]
-                    super::wire_lock_order_18658_tests::removal_between_wire_locks(&wire_key);
+                    super::wire_lock_order_18658_tests::removal_between_wire_locks(
+                        &wire_key,
+                        shared_forward_wire_sessions,
+                        &shared_owner_rg_indexes.wire_ambiguities,
+                    );
                     let mut wire_ambiguities =
                         lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities);
                     let roster_before = wire_ambiguities.wire_owner_count(&wire_key);

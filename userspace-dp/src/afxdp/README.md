@@ -1934,13 +1934,21 @@ metric, unlike its #1807 twin
 The shared-session maps and their indexes are separate mutexes. Any path
 that holds two of them takes them in this order:
 
-    shared_sessions  →  forward-wire map  →  wire_ambiguities  →  owner-RG index
+    frag-assoc shard  →  shared_sessions  →  bare_tuple_sessions
+                                          →  forward-wire map  →  wire_ambiguities  →  owner-RG index
 
 - `remove_shared_session_if` holds `shared_sessions`, then takes the
   forward-wire map, then `wire_ambiguities` (survivor resolution needs
   both).
 - `publish_shared_session` releases `shared_sessions` before its wire
   section, then takes the map before the index.
+- `bare_tuple_sessions` is taken briefly under `shared_sessions` by the
+  publish (`store.rs:788`), the removal (`store.rs:1129`) and the clear
+  (`types/session_index.rs:651-653`), and released before anything else is locked.
+- A fragment-association lookup (`fragment_assoc::lookup_with_session`)
+  holds its shard while its `session_is_live` closure locks
+  `shared_sessions` (`poll_descriptor/mod.rs:8754`, `:8784`). So never lock
+  a frag-assoc shard while holding any shared-session guard.
 - Readers such as `lookup_shared_forward_wire_match` take the map and the
   index one at a time and never nest them.
 
@@ -1950,9 +1958,12 @@ removal holding the map and waiting for the index. Every worker and the
 coordinator queued behind the pair until xpfd was restarted; this was
 reproduced on tcp and loss after a 16000-session burst.
 
-`shared_ops/wire_lock_order_18658_tests.rs` forces that interleaving
-with test-only pause points between each path's two wire locks, and
-fails through a bounded timeout rather than hanging.
+`shared_ops/wire_lock_order_18658_tests.rs` pins the order two ways. A
+single-threaded cell probes, with `try_lock`, which wire lock each path
+holds between its two wire locks, so it names the first lock with no
+timing involved. A threaded cell forces the deadlock interleaving with
+test-only pause points and fails through a bounded timeout rather than
+hanging.
 
 The NAT pair has no nested inversion: a publish takes `nat_ambiguities`
 then the NAT map, while removal releases the NAT map before it takes
