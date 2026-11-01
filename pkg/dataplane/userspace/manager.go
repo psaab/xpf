@@ -768,6 +768,16 @@ type Manager struct {
 	lastRGActivateTime time.Time     // wall clock of last update_ha_state; statusLoop skips HA sync for 2s
 	// liveness counts consecutive unanswered status polls (#9651). Guarded by mu.
 	liveness helperLiveness
+	// #18685: round-trip and heartbeat liveness for the current helper
+	// generation (leaf mutex inside; never needs m.mu), and the generation
+	// a wedge kill last targeted, stored as gen+1 so zero means none (the
+	// watchdog and the status-loop path kill a generation at most once).
+	liveTrack      helperLivenessTracker
+	wedgeKilledGen atomic.Uint64
+	// #18697: set when the helper exits unexpectedly (a crash or a wedge
+	// kill), cleared when the next generation starts; that generation then
+	// inherits a not-ready verdict until it arms and looks healthy.
+	helperDownUnexpected atomic.Bool
 
 	rgTransitionInFlight atomic.Bool // set before syncHAStateLocked, cleared on completion
 
