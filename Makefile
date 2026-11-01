@@ -44,9 +44,18 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime
 TMPDIR ?= /var/worktrees/.cache/tmpdir
 GOCACHE ?= /var/worktrees/.cache/go-build
 GOTMPDIR ?= /wtgt
-CARGO_TARGET_DIR ?= /var/worktrees/.cache/cargo
+# #18839: the default CARGO_TARGET_DIR is BOX-WIDE, shared by every worktree
+# and lane on this host. `make clean` must never delete it (see `clean:`).
+CARGO_TARGET_DIR_SHARED := /var/worktrees/.cache/cargo
+CARGO_TARGET_DIR ?= $(CARGO_TARGET_DIR_SHARED)
 export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
 $(shell mkdir -p $(TMPDIR) $(GOCACHE) $(GOTMPDIR) $(CARGO_TARGET_DIR))
+# #18839: how CARGO_TARGET_DIR relates to the shared dir, by resolved path
+# (realpath when it exists, so a symlink or a trailing slash cannot hide it).
+clean_cargo_abs := $(or $(realpath $(CARGO_TARGET_DIR)),$(abspath $(CARGO_TARGET_DIR)))
+clean_shared_abs := $(or $(realpath $(CARGO_TARGET_DIR_SHARED)),$(abspath $(CARGO_TARGET_DIR_SHARED)))
+clean_cargo_is_shared := $(filter $(clean_shared_abs),$(clean_cargo_abs))
+clean_cargo_overlaps_shared := $(strip $(filter $(clean_shared_abs) $(clean_shared_abs)/%,$(clean_cargo_abs)) $(filter $(clean_cargo_abs)/%,$(clean_shared_abs)))
 
 # eBPF compilation flags
 .PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-connectivity-mtr-selftest test-wire-properties test-failover test-rolling-upgrade test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib clippy-rust
@@ -1009,7 +1018,38 @@ clean:
 	# re-introduction by a future PR.
 	rm -f pkg/dataplane/xpf*_bpfel.go pkg/dataplane/xpf*_bpfeb.go
 	rm -f pkg/dataplane/xpf*_bpfel.o pkg/dataplane/xpf*_bpfeb.o
-	rm -rf $(CARGO_TARGET_DIR) userspace-dp/target
+	rm -rf userspace-dp/target
+# #18839: CARGO_TARGET_DIR defaults to the SHARED box-wide target dir, so an
+# unconditional `rm -rf $(CARGO_TARGET_DIR)` here emptied every other lane's
+# in-flight cargo build (observed 2026-11-01: a concurrent `make deb` died
+# with "could not write output ... No such file or directory"). The decision
+# is made by make, not the shell, so `make -n clean` does not even NAME the
+# shared dir unless it would delete it.
+#   - a per-worktree CARGO_TARGET_DIR (no overlap with the shared dir): removed;
+#   - exactly the shared dir: kept, unless CLEAN_SHARED_CARGO=1 (loud);
+#   - a parent or a child of the shared dir: refused, opt-in or not.
+ifeq ($(clean_cargo_overlaps_shared),)
+	rm -rf $(CARGO_TARGET_DIR)
+else ifneq ($(clean_cargo_is_shared),)
+ifeq ($(CLEAN_SHARED_CARGO),1)
+	@echo "make clean: WARNING: CLEAN_SHARED_CARGO=1 deletes the box-wide SHARED cargo target dir; every other lane's in-flight cargo build on this host will fail (#18839)" >&2
+	rm -rf $(CARGO_TARGET_DIR_SHARED)
+else
+	@echo "make clean: kept the box-wide shared cargo target dir (the CARGO_TARGET_DIR default); removed only userspace-dp/target. A per-worktree CARGO_TARGET_DIR is removed; CLEAN_SHARED_CARGO=1 forces the shared one (#18839)"
+endif
+else
+	@echo "make clean: REFUSING to delete CARGO_TARGET_DIR: it contains, or lies inside, the box-wide shared cargo target dir (#18839)" >&2
+	@false
+endif
+
+# #18839: hermetic selftest of the `clean` guard above. Dry runs only
+# (`make -n clean`): the default env must not even NAME the shared cargo dir,
+# a per-worktree dir is removed, a parent or child of the shared dir is refused,
+# and CLEAN_SHARED_CARGO=1 is the only way to delete the shared one. A positive
+# control rebuilds the pre-#18839 recipe and requires the detector to fire.
+.PHONY: test-clean-shared-cargo-lib
+test-clean-shared-cargo-lib:
+	sh ./scripts/clean-shared-cargo-selftest.sh
 
 # Legacy standalone test environment management (single Incus VM/container).
 # The standalone instance name defaults to xpf-fw; override it for an
