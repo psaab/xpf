@@ -57,9 +57,23 @@
 #      requires them to SURVIVE a semantically null edit (so a guard rewritten
 #      to red on any change fails too). Neither of those is a claim that the
 #      working tree matches HEAD.
-#   3. RESTORE ON EXIT/INT/TERM, VERIFIED. A trap cannot catch SIGKILL, so the
-#      trap is not the safety property — property 2 is. The trap narrows the
-#      window; the `cmp` is what proves the restore happened.
+#   3. RESTORE ON EXIT/INT/TERM, VERIFIED, AND A SIGNAL ENDS THE RUN. The
+#      INT and TERM traps restore the walker, `cmp` it against GOLD, and EXIT
+#      (130 / 143). An earlier revision trapped INT and TERM with the plain
+#      cleanup, which does not exit: bash ran it (restoring the walker and
+#      DELETING GOLD) and then resumed the script into the next row, whose
+#      `cp GOLD` failed. A mutator that needs no temp file would then have
+#      mutated the restored walker with GOLD already gone, leaving the tree
+#      mutated with no restore possible. Measured on #18738: SIGTERM after
+#      row 3 ran into row 4 and ended "RESTORE FAILED".
+#      test/mutation/selftest-shim-ext-parity-acceptance.sh sends TERM
+#      mid-row and pins all of it. Cleanup runs once, so EXIT after a signal
+#      does not try a second restore from a deleted GOLD.
+#      A trap cannot catch SIGKILL, so the trap is not the safety property —
+#      property 2 is. The trap narrows the window; the `cmp` is what proves the
+#      restore happened. Bash runs a trap only after the current foreground
+#      command returns, so a TERM to this script's PID alone waits for the
+#      running cargo step; signal the process group to stop at once.
 #   4. EVERY ROW CARRIES AN EXPECTATION. A row that must RED and a row that must
 #      SURVIVE are both checked, so a harness that reds unconditionally fails
 #      just as loudly as one that never reds. The NEG-CTL row is a semantically
@@ -73,11 +87,19 @@
 #      either one reding, so it cannot support a claim about both.
 #
 # Usage:  test/mutation/shim-ext-parity-acceptance.sh
+#         ROWS=4-20 test/mutation/shim-ext-parity-acceptance.sh   (a subset)
+#
+# ROWS selects mutation rows by number: a comma list of N or N-M, e.g.
+# `ROWS=4-20` or `ROWS=7,19`. P1, P2, the row-0 baseline and the RESTORED row
+# always run. A number that names no declared row is REFUSED before anything is
+# touched, and a subset run says so in its verdict, so a partial matrix never
+# reads as a full one.
 # Requires: cargo + the pinned toolchain, python3; no root, no cluster, no
 # network.
-# Runtime: ~5 min per row, and there are 18 rows plus two preflights — the
-# mutated file is `#[path]`-included into the userspace-dp test binary, so
-# every row is a full release rebuild of that crate. Budget an hour and a half.
+# Runtime: ~5-10 min per row (10 measured at loadavg ~40 on #18738), and there
+# are 20 mutation rows plus row 0, RESTORED and two preflights — the mutated
+# file is `#[path]`-included into the userspace-dp test binary, so every row is
+# a full release rebuild of that crate. Budget two to four hours, or use ROWS.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -108,6 +130,34 @@ CONTROLS=(
   shim_ext_parity_negative_control_unchanged_classifications
 )
 ALL_TESTS=("${GUARDS[@]}" "${CONTROLS[@]}")
+
+# --- ROWS: validated before the lock, the capture or any mutation ----------
+# The declared row numbers come from this file's own `row` calls.
+declare -A declared_row_nums=()
+while read -r n; do declared_row_nums["$((10#${n}))"]=1; done < <(
+  sed -nE 's/^row [A-Za-z0-9_]+ +(red|survive) +" *([0-9]+)\..*/\2/p' "$0")
+declare -A selected_rows=()
+if [ -n "${ROWS:-}" ]; then
+  IFS=',' read -r -a row_specs <<<"${ROWS}"
+  for spec_ in "${row_specs[@]}"; do
+    if [[ "${spec_}" =~ ^([0-9]+)$ ]]; then
+      lo=$((10#${BASH_REMATCH[1]})); hi=${lo}
+    elif [[ "${spec_}" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      lo=$((10#${BASH_REMATCH[1]})); hi=$((10#${BASH_REMATCH[2]}))
+    else
+      echo "ROWS: '${spec_}' is not N or N-M (ROWS=${ROWS}); refusing" >&2; exit 2
+    fi
+    [ "${lo}" -le "${hi}" ] || { echo "ROWS: range '${spec_}' runs backwards; refusing" >&2; exit 2; }
+    for ((n_ = lo; n_ <= hi; n_++)); do
+      [ -n "${declared_row_nums[${n_}]:-}" ] || {
+        echo "ROWS: row ${n_} is not a declared mutation row (declared: $(printf '%s\n' "${!declared_row_nums[@]}" | sort -n | tr '\n' ' ')); refusing" >&2
+        exit 2
+      }
+      selected_rows["${n_}"]=1
+    done
+  done
+  echo "ROWS=${ROWS}: running rows $(printf '%s\n' "${!selected_rows[@]}" | sort -n | tr '\n' ' ')of ${#declared_row_nums[@]}"
+fi
 
 exec 9>"${LOCK}"
 flock -n 9 || { echo "another acceptance run holds ${LOCK}; refusing to interleave"; exit 1; }
@@ -165,11 +215,24 @@ echo "PRECONDITION: ${WALK_REL} matches git HEAD (index included, no assume-unch
 
 build_log="$(mktemp)"; test_log="$(mktemp)"; pysub="$(mktemp -t xpf4555sub.XXXXXX)"
 cp "${WALK}" "${GOLD}"
+cleaned=0
 cleanup() {
-  cp "${GOLD}" "${WALK}" || echo "RESTORE FAILED: ${GOLD} -> ${WALK}" >&2
+  # Once only: EXIT also fires after the INT/TERM handlers below exit, and a
+  # second pass would try to restore from the GOLD the first pass deleted.
+  [ "${cleaned}" -eq 1 ] && return
+  cleaned=1
+  if cp "${GOLD}" "${WALK}" && cmp -s "${GOLD}" "${WALK}"; then
+    :
+  else
+    echo "RESTORE FAILED: ${GOLD} -> ${WALK}" >&2
+  fi
   rm -f "${GOLD}" "${build_log}" "${test_log}" "${pysub}"
 }
-trap cleanup EXIT INT TERM
+# INT and TERM must END the run after restoring (property 3). A handler that
+# returns lets bash resume the script into the next row.
+trap cleanup EXIT
+trap 'echo "SIGNAL: INT, walker restored, run stopped" >&2; cleanup; exit 130' INT
+trap 'echo "SIGNAL: TERM, walker restored, run stopped" >&2; cleanup; exit 143' TERM
 
 fail() { echo "HARNESS ERROR: $*" >&2; exit 3; }
 
@@ -540,6 +603,11 @@ declare -a row_outcomes=()
 
 row() {  # row <mutator> <red|survive> <label>
   local fn="$1" want="$2" label="$3"
+  if [ ${#selected_rows[@]} -ne 0 ]; then
+    local num
+    num="$(printf '%s' "${label}" | sed -nE 's/^ *([0-9]+)\..*/\1/p')"
+    [ -n "${selected_rows[$((10#${num}))]:-}" ] || return 0
+  fi
   cp "${GOLD}" "${WALK}"
   "${fn}" || fail "mutator ${fn} did not apply"
   cmp -s "${GOLD}" "${WALK}" && fail "mutator ${fn} left the file unchanged"
@@ -616,6 +684,9 @@ echo "rows passed: ${rows_passed}/${rows_total} (plus row 0 baseline and preflig
 # so adding a row cannot leave the expectation behind — the failure mode this
 # very harness exists to prevent, one level up.
 declared_rows=$(grep -cE '^row [A-Za-z0-9_]+ +(red|survive)([[:space:]]|$)' "$0")
+if [ ${#selected_rows[@]} -ne 0 ]; then
+  declared_rows=${#selected_rows[@]}   # a ROWS subset: every SELECTED row must score
+fi
 declared_rows=$((declared_rows + 1))   # + the RESTORED row, which is not a `row` call
 if [ "${rows_total}" -ne "${declared_rows}" ]; then
   echo "INCOMPLETE: ${rows_total} rows scored but ${declared_rows} declared — the run did not"
@@ -629,5 +700,7 @@ if [ "${extractor_misses}" -ne 0 ]; then
   echo "  but the reason extractor no longer matches the text it reads. Fix \`explain()\`."
   rc=1
 fi
-echo "=== acceptance $([ ${rc} -eq 0 ] && echo PASS || echo FAIL) ==="
+subset=""
+[ ${#selected_rows[@]} -ne 0 ] && subset=" (ROWS=${ROWS}: ${#selected_rows[@]} of ${#declared_row_nums[@]} mutation rows; NOT a full matrix)"
+echo "=== acceptance $([ ${rc} -eq 0 ] && echo PASS || echo FAIL)${subset} ==="
 exit ${rc}

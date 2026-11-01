@@ -44,12 +44,20 @@ sent while exact queues were still backlogged.
 
 `userspace-xdp/src/ipv6_ext_walk.rs` is guarded by
 `test/mutation/shim-ext-parity-acceptance.sh`, not by `make test` alone. The
-script mutates the walk across 16 mutation rows plus one negative control,
+script mutates the walk across 19 mutation rows plus one negative control,
 bracketed by a green baseline (row 0) and a post-restore recheck, and requires
 the parity guards in
 `userspace-dp/src/afxdp/frame/tests_shim_ext_parity.rs` to red on each edit. It
 prints per-row accounting at the end, so the evidence quoted in a PR body is
 checkable against the matrix rather than against a bare `PASS`.
+
+Each row is a full release rebuild (5-10 min), so `ROWS=4-20` (or `ROWS=7,19`)
+runs a subset; the verdict then says it is not a full matrix, and a row number
+that names no declared row is refused before anything is touched. INT and TERM
+restore the walker and END the run (exit 130/143). Signal the process group to
+stop at once: bash runs the trap only after the current cargo step returns.
+`make test-shim-ext-parity-selftest` (also in `make selftest`) pins both
+behaviours against a stub cargo in seconds (#18738).
 
 One mutation per row, and one ARM per row where an edit applies to several: a
 row that mutated the GENERIC and AUTH revalidation bases together scored RED on
