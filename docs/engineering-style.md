@@ -1839,10 +1839,22 @@ they repeatedly bite:
     host load, and a timeout aborts the package mid-run exactly as a panic does:
     every later test never runs.
 
-    `scripts/go-timeout-watch.awk`, used by `go-test-json.sh` and by the
-    race legs' `go-test-watch.sh`, recognises go's own timeout panic: a
-    column-0 `panic: test timed out` line followed by `running tests:`. On it,
-    the script prints a VOID banner on stderr naming the package and exits 3.
+    `scripts/go-timeout-watch.awk` is the ONE timeout predicate, used by
+    `go-test-json.sh`, the race legs' `go-test-watch.sh` and mutate-lib's
+    `mutation_timed_out`. It recognises three shapes, each needing two
+    signals so that a test which merely prints the text is never voided:
+
+    | shape | first signal | second signal |
+    |---|---|---|
+    | alarm, tests running | column-0 `panic: test timed out after` | the package's next line is the indented `running tests:` |
+    | alarm, no test running (a hung Example) | the same panic line | blank line, `goroutine N [running]:`, then the `testing.(*M).startAlarm.func1()` frame |
+    | binary hung outside `m.Run` (a hung TestMain) | cmd/go's `*** Test killed with quit: ran too long` (at `-timeout` + 1m) | the package's `FAIL<TAB><pkg>` line immediately after |
+
+    `go test -json` interleaves packages line by line, so the side-file path
+    runs the predicate afterwards over that leg's events, tagged by package,
+    not over the reconstructed stream. On a hit, the script prints a VOID
+    banner on stderr naming every timed-out package and its shape, and
+    exits 3.
 
     What a **make** consumer observes:
 
@@ -1851,7 +1863,7 @@ they repeatedly bite:
       failing leg cannot turn it into `Error 1`.
     - The **stderr banner** names the timed-out package.
 
-    Failures reported for OTHER packages in a VOID leg are still real. Treat
+    Failures reported for OTHER packages in any leg are still real. Treat
     the named package as unmeasured, and rerun with a longer `GOTEST_TIMEOUT`
     or on a quieter host. Do not attribute over it.
 

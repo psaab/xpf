@@ -183,7 +183,15 @@ mutation_infra_broken() {
 # about a configured timeout), and matching those would score healthy kills as
 # void.
 mutation_timed_out() {
-	grep -qE '^panic: test timed out after ' "$1"
+	# #18778 (seat AC): the SAME two-signal predicate the gate legs use --
+	# alarm panic + "running tests:", alarm panic + the startAlarm frame (a
+	# hung Example), or cmd/go's "*** Test killed ... ran too long" + the
+	# package FAIL line (a hung TestMain). A bare column-0 panic line that a
+	# test printed itself is not a timeout.
+	local d
+	d=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+	awk -v DETECTONLY=1 -f "$d/go-timeout-watch.awk" "$1" 2>/dev/null
+	[ $? -eq 3 ]
 }
 
 # mutation_go_build_broken / mutation_rust_build_broken LOG

@@ -189,18 +189,48 @@ echo "== the HANG (#7611) =="
 # the goroutine dump naming the stuck test; the run has by then collected and
 # even FAILED real tests, so both numbers look scoreable and are not — they
 # describe the prefix of a run that never finished.
-cat > "$W/timeout.log" <<'EOF'
-ok  	github.com/psaab/xpf/pkg/cli	6.409s
---- FAIL: TestUnrelated (0.01s)
-panic: test timed out after 10m0s
-running tests:
-	TestRunReturnsOnBindFailure (600s)
-
-goroutine 1 [running]:
-testing.(*M).startAlarm.func1()
-FAIL	github.com/psaab/xpf/pkg/grpcapi	600.005s
-EOF
+# #18778: the fixture is go's REAL shape (go 1.27): "running tests:" is
+# tab-indented under the panic, and the alarm goroutine follows a blank line.
+# mutation_timed_out now shares the gate legs' two-signal predicate, which an
+# unindented "running tests:" would not satisfy -- no go release prints that.
+printf '%s\n' \
+	'ok  	github.com/psaab/xpf/pkg/cli	6.409s' \
+	'--- FAIL: TestUnrelated (0.01s)' \
+	'panic: test timed out after 10m0s' \
+	'	running tests:' \
+	'		TestRunReturnsOnBindFailure (600s)' \
+	'' \
+	'goroutine 17 [running]:' \
+	'testing.(*M).startAlarm.func1()' \
+	'FAIL	github.com/psaab/xpf/pkg/grpcapi	600.005s' > "$W/timeout.log"
 ck "a timed-out run is VOID even though it collected and failed tests" 	"yes 2 1 VOID(run did not finish: timeout)" 	"$(mutation_score_log go "$W/timeout.log" yes)"
+
+# #18778 seat AC: the two shapes the first predicate missed, and a bare
+# column-0 panic line a test printed itself (no second signal), which is a
+# real kill, not a hang.
+printf '%s\n' \
+	'--- FAIL: TestUnrelated (0.01s)' \
+	'panic: test timed out after 2s' \
+	'' \
+	'goroutine 17 [running]:' \
+	'testing.(*M).startAlarm.func1()' \
+	'FAIL	example.com/ex	2.010s' > "$W/timeout-example.log"
+ck "a hung Example (no running tests) is VOID" "yes 1 1 VOID(run did not finish: timeout)" \
+	"$(mutation_score_log go "$W/timeout-example.log" yes)"
+printf '%s\n' \
+	'--- FAIL: TestUnrelated (0.01s)' \
+	'SIGQUIT: quit' \
+	'*** Test killed with quit: ran too long (1m1s).' \
+	'FAIL	example.com/tm	61.061s' > "$W/timeout-testmain.log"
+ck "a hung TestMain killed by go test is VOID" "yes 1 1 VOID(run did not finish: timeout)" \
+	"$(mutation_score_log go "$W/timeout-testmain.log" yes)"
+printf '%s\n' \
+	'--- FAIL: TestSaysTimedOut (0.01s)' \
+	'panic: test timed out after 5s' \
+	'the dial timed out' \
+	'FAIL	example.com/fp	0.010s' > "$W/timeout-printed.log"
+ck "a panic line a test printed itself is still a kill" "yes 1 1 KILLED" \
+	"$(mutation_score_log go "$W/timeout-printed.log" yes)"
 
 # The discriminator that keeps the detector honest: "timeout" appears in
 # ordinary failure text constantly. Matching the bare word would score real

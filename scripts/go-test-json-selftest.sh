@@ -169,7 +169,9 @@ check "timeout, go-test-watch.sh: the leg is VOID (exit 3)" "$tw_rc" "3"
 # FALSE POSITIVES: a failing test whose own output says "timed out" -- an
 # unindented "panic: test timed out" line it prints itself, and the same text
 # indented through t.Log -- is an ordinary failure, never VOID. go's real
-# timeout panic is column-0 AND followed by its "running tests:" line.
+# timeout panic is column-0 AND followed by its "running tests:" line. The
+# test also prints cmd/go's kill line (not followed by the package FAIL line)
+# and the alarm frame AFTER a non-panic line, so neither second signal pairs.
 mkdir -p "$WORK/fp"
 cat > "$WORK/fp/go.mod" <<'EOT'
 module example.com/fp
@@ -187,6 +189,8 @@ import (
 func TestSaysTimedOut(t *testing.T) {
 	fmt.Println("panic: test timed out after 5s")
 	fmt.Println("the dial timed out")
+	fmt.Println("*** Test killed with quit: ran too long (1m1s).")
+	fmt.Println("testing.(*M).startAlarm.func1()")
 	t.Log("panic: test timed out after 5s\n\trunning tests:")
 	t.Fatal("request timed out")
 }
@@ -204,6 +208,105 @@ if [ "$fpj_rc" -ne 3 ] && [ "$fpj_rc" -ne 0 ]; then
 else
 	bad "false positive, side-file path: rc=$fpj_rc (want non-zero, not 3)"
 fi
+# #18778 seat AC: three timeouts the first watcher missed.
+# (1) -json interleaves packages LINE BY LINE (measured: 582 package switches
+# in a two-package run), so on the reconstructed human stream the line after
+# a panic is often ANOTHER package's. A fake go replays a canned interleaved
+# stream, deterministically: pkg a's panic, then a pkg b line, then a's
+# "running tests:". Only a per-package check sees it, and the banner must
+# name a alone -- b finished.
+mkdir -p "$WORK/fakego"
+cat > "$WORK/fakego/go" <<'EOT'
+#!/bin/sh
+for l in \
+ '{"Action":"output","Package":"example.com/a","Output":"=== RUN   TestHang\n"}' \
+ '{"Action":"output","Package":"example.com/b","Output":"=== RUN   TestB\n"}' \
+ '{"Action":"output","Package":"example.com/a","Output":"panic: test timed out after 2s\n"}' \
+ '{"Action":"output","Package":"example.com/b","Output":"    b_test.go:9: chatter\n"}' \
+ '{"Action":"output","Package":"example.com/a","Output":"\trunning tests:\n"}' \
+ '{"Action":"output","Package":"example.com/a","Output":"\t\tTestHang (2s)\n"}' \
+ '{"Action":"output","Package":"example.com/b","Output":"--- PASS: TestB (0.01s)\n"}' \
+ '{"Action":"output","Package":"example.com/b","Output":"ok  \texample.com/b\t0.02s\n"}' \
+ '{"Action":"output","Package":"example.com/a","Output":"FAIL\texample.com/a\t2.01s\n"}' \
+ '{"Action":"fail","Package":"example.com/a","Elapsed":2.01}'; do
+	printf '%s\n' "$l"
+done
+exit 1
+EOT
+chmod +x "$WORK/fakego/go"
+IJ="$WORK/interleave.json"; : > "$IJ"
+bash "$here/go-test-json.sh" "$IJ" "$WORK/fakego/go" ./... >/dev/null 2>"$WORK/il.err"; il_rc=$?
+check "timeout, interleaved -json stream: the leg is VOID (exit 3)" "$il_rc" "3"
+if grep -q "VOID: go test hit its -timeout in example.com/a\." "$WORK/il.err"; then
+	ok "timeout, interleaved -json stream: the banner names the timed-out package and not the one that passed"
+else
+	bad "timeout, interleaved -json stream: banner wrong: $(head -1 "$WORK/il.err")"
+fi
+# The side file is APPENDED to, so an earlier leg's timeout must not void a
+# later clean leg: replay a passing stream into the same file.
+cat > "$WORK/fakego/go" <<'EOT'
+#!/bin/sh
+printf '%s\n' '{"Action":"output","Package":"example.com/c","Output":"ok  \texample.com/c\t0.01s\n"}' '{"Action":"pass","Package":"example.com/c"}'
+EOT
+bash "$here/go-test-json.sh" "$IJ" "$WORK/fakego/go" ./... >/dev/null 2>&1; ap_rc=$?
+check "side file: a clean leg appended after a timed-out leg is not voided" "$ap_rc" "0"
+
+# (2) a hung Example: the alarm fires with NO test in the running list, so
+# there is no "running tests:" line -- a blank line and the goroutine dump
+# follow the panic. The alarm's own frame is the second signal.
+mkdir -p "$WORK/ex"
+printf 'module example.com/ex\n\ngo 1.21\n' > "$WORK/ex/go.mod"
+cat > "$WORK/ex/ex_test.go" <<'EOT'
+package ex
+
+import (
+	"fmt"
+	"time"
+)
+
+func Example() {
+	time.Sleep(30 * time.Second)
+	fmt.Println("x")
+	// Output: x
+}
+EOT
+( cd "$WORK/ex" && bash "$here/go-test-json.sh" "" go -timeout 2s ./... >/dev/null 2>"$WORK/ex.err" ); ex_rc=$?
+check "timeout, hung Example (no running tests): the leg is VOID (exit 3)" "$ex_rc" "3"
+grep -q "example.com/ex: alarm fired with no test running" "$WORK/ex.err" &&
+	ok "timeout, hung Example: the banner names the package and the shape" ||
+	bad "timeout, hung Example: banner wrong: $(cat "$WORK/ex.err" | head -2)"
+EJ="$WORK/ex.json"; : > "$EJ"
+( cd "$WORK/ex" && bash "$here/go-test-json.sh" "$EJ" go -timeout 2s ./... >/dev/null 2>&1 ); exj_rc=$?
+check "timeout, hung Example, side-file path: the leg is VOID (exit 3)" "$exj_rc" "3"
+
+# (3) a hung TestMain: the alarm is armed inside m.Run, so it never fires;
+# cmd/go kills the binary at -timeout + 1m and prints "*** Test killed with
+# quit: ran too long (1m1s)." then the package FAIL line. This row costs
+# about 62 s, so the text and side-file paths run concurrently.
+mkdir -p "$WORK/tm"
+printf 'module example.com/tm\n\ngo 1.21\n' > "$WORK/tm/go.mod"
+cat > "$WORK/tm/tm_test.go" <<'EOT'
+package tm
+
+import (
+	"testing"
+	"time"
+)
+
+func TestMain(m *testing.M) { time.Sleep(time.Hour); m.Run() }
+
+func TestX(t *testing.T) {}
+EOT
+TMJ="$WORK/tm.json"; : > "$TMJ"
+( cd "$WORK/tm" && bash "$here/go-test-json.sh" "" go -timeout 1s ./... >/dev/null 2>"$WORK/tm.err"; echo $? > "$WORK/tm.rc" ) &
+( cd "$WORK/tm" && bash "$here/go-test-json.sh" "$TMJ" go -timeout 1s ./... >/dev/null 2>&1; echo $? > "$WORK/tmj.rc" ) &
+wait
+check "timeout, hung TestMain (killed at -timeout + 1m): the leg is VOID (exit 3)" "$(cat "$WORK/tm.rc")" "3"
+check "timeout, hung TestMain, side-file path: the leg is VOID (exit 3)" "$(cat "$WORK/tmj.rc")" "3"
+grep -q "example.com/tm: binary killed by go test" "$WORK/tm.err" &&
+	ok "timeout, hung TestMain: the banner names the package and the shape" ||
+	bad "timeout, hung TestMain: banner wrong: $(head -2 "$WORK/tm.err")"
+
 # Control: a fast package under the same flag must NOT be voided.
 ( cd "$WORK/m" && bash "$here/go-test-json.sh" "" go -timeout 60s ./... >/dev/null 2>&1 ); ctl_rc=$?
 if [ "$ctl_rc" -ne 3 ]; then
