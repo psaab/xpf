@@ -38,6 +38,7 @@ func (m *Manager) FormatStatus() string {
 	for k, v := range m.peerGroups {
 		peerGroups[k] = v
 	}
+	transferRetries := m.abortedTransferRetryStatusLocked(time.Now()) // #18715
 	m.mu.RUnlock()
 
 	var b strings.Builder
@@ -164,6 +165,12 @@ func (m *Manager) FormatStatus() string {
 			rg.LocalPriority, rg.State, preempt, manual, monFails)
 		fmt.Fprintf(&b, "  Takeover ready: %s\n", readyStr)
 		fmt.Fprintf(&b, "  Transfer ready: %s\n", transferReadyStr)
+		// #18715: a requester retrying an aborted transfer says so, because
+		// the operator's request returned an error and the group will then
+		// move later on its own. Indented sub-line below the node row (#8206).
+		if retry, ok := transferRetries[rg.GroupID]; ok {
+			fmt.Fprintf(&b, "  Transfer retry: %s\n", retry)
+		}
 		// #7367: the forwarding sub-line. Placed AFTER the local node row and
 		// the two existing sub-lines, and indented, because the render is parsed
 		// by whole-line regexes: test-failover.sh does

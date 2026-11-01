@@ -517,6 +517,20 @@ For example, committing `deny-commands "show log"` closes either feed on the
 next re-authorization check; opening the stream does not preserve an obsolete
 command-policy verdict.
 
+The gRPC server-streaming methods (`Ping`, `Traceroute`, `MonitorInterface` and
+`MonitorPacketDrop`) are judged on their decoded first message, arguments
+included (#17175). The re-authorization tick re-prices that same retained
+message, so an argument-scoped regex applies in both directions:
+
+- `deny-commands "^monitor security packet-drop source-prefix 10\.99\."` refuses
+  the matching stream and admits the others.
+- `allow-commands "^monitor security packet-drop source-prefix 10\.99\."` admits
+  the matching stream. Like any allow-list, it refuses every request it does not
+  name, including the same command with other or no arguments.
+
+Until #18760, `MonitorPacketDrop` refused such an argument-scoped
+`allow-commands` before reading the request.
+
 **Session plumbing is not a command (#15077).** The remote `cli` calls
 `GetStatus` before every dispatched command (its reachability probe) and
 polls `GetConfigModeStatus` at every config-mode prompt; REST serves the

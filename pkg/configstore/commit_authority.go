@@ -171,6 +171,20 @@ func InternalCommitterAs(principal string) CommitAuthority {
 	return CommitAuthority{kind: authorityInternal, journalPrincipal: principal}
 }
 
+// BootstrapPrincipal names the daemon's first-boot import of the text config
+// (daemon.bootstrapFromFile). The #18744 placeholder gate does not judge that
+// import on a store that has never committed (placeholderJudgedLocked).
+const BootstrapPrincipal = "system:bootstrap"
+
+// isBootstrapImport reports whether a is the bootstrap import's authority: an
+// internal authority named BootstrapPrincipal. A session authority, or a
+// principal string passed to CommitWithDescriptionAs, never qualifies. Any
+// internal caller can mint one, so the name is reserved for
+// daemon.bootstrapFromFile by convention, not enforced by type.
+func (a CommitAuthority) isBootstrapImport() bool {
+	return a.kind == authorityInternal && a.journalPrincipal == BootstrapPrincipal
+}
+
 // IsInternal reports whether a is the system/daemon authority. Exported for the
 // daemon's logging and for tests asserting which authority a path used. An
 // epoch-bound internal authority (#15208) is still internal: it carries no

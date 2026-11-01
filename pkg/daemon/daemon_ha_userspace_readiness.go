@@ -28,6 +28,10 @@ type userspacePeerAwareTakeoverReadiness interface {
 }
 
 func (d *Daemon) tryPrepareUserspaceRGDemotion(rgID int) {
+	if d.tryPrepareDemotionFn != nil {
+		d.tryPrepareDemotionFn(rgID)
+		return
+	}
 	if err := d.prepareUserspaceRGDemotionWithTimeout(rgID, 5*time.Second); err != nil {
 		slog.Warn("userspace: prepare rg demotion failed", "rg", rgID, "err", err)
 	}

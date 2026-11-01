@@ -16,6 +16,12 @@ type failoverActuation struct {
 	done     chan struct{}
 	resolved bool
 	err      error
+	// confirmOnly marks a barrier armed for an ownerless transfer-out
+	// (#18715). The demotion event's resolveRG cannot resolve it: that event
+	// is a Secondary -> SecondaryHold edge that writes nothing to the helper,
+	// so it is no evidence. Only resolveRequest, with the confirm verdict,
+	// resolves it.
+	confirmOnly bool
 }
 
 // failoverActuationKey identifies ONE transfer-out request: the redundancy
@@ -173,7 +179,7 @@ func (r *failoverActuationRegistry) resolveRG(rgID int, cause error) {
 	r.mu.Lock()
 	var resolved []*failoverActuation
 	for key, b := range r.waiters {
-		if key.rgID != rgID || b == nil || b.resolved {
+		if key.rgID != rgID || b == nil || b.resolved || b.confirmOnly {
 			continue
 		}
 		b.resolved = true
@@ -205,6 +211,37 @@ func (r *failoverActuationRegistry) resolveRG(rgID int, cause error) {
 // which is the defect this function exists to prevent.
 func (r *failoverActuationRegistry) fail(rgID int, reqID uint64, b *failoverActuation, cause error) {
 	if b == nil || cause == nil {
+		return
+	}
+	key := failoverActuationKey{rgID: rgID, reqID: reqID}
+	r.mu.Lock()
+	fire := r.waiters[key] == b && !b.resolved
+	if fire {
+		b.resolved = true
+		b.err = cause
+	}
+	r.mu.Unlock()
+	if fire {
+		close(b.done)
+	}
+}
+
+// armConfirmOnly is arm for an ownerless transfer-out (#18715): the barrier
+// ignores resolveRG and is resolved only by resolveRequest.
+func (r *failoverActuationRegistry) armConfirmOnly(rgID int, reqID uint64) *failoverActuation {
+	b := r.arm(rgID, reqID)
+	r.mu.Lock()
+	b.confirmOnly = true
+	r.mu.Unlock()
+	return b
+}
+
+// resolveRequest resolves ONE request's barrier with cause (nil = actuated)
+// and leaves it for wait to consume. Identity-checked like fail, so it never
+// touches a newer request's barrier. Used by the #18715 ownerless confirm,
+// which is the only thing that may resolve a confirm-only barrier.
+func (r *failoverActuationRegistry) resolveRequest(rgID int, reqID uint64, b *failoverActuation, cause error) {
+	if b == nil {
 		return
 	}
 	key := failoverActuationKey{rgID: rgID, reqID: reqID}

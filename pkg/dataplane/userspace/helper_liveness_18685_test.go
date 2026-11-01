@@ -493,7 +493,7 @@ func TestManagerMutexWaitIsNotHeartbeatAge18704(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); m.statusLoop(ctx) }()
+	go func() { defer close(done); m.statusLoop(ctx, false) }()
 	t.Cleanup(func() { cancel(); <-done })
 
 	// Two consecutive polls each return a healthy reply and then wait 500 ms,

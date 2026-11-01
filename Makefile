@@ -476,6 +476,10 @@ test-race-dp:
 		$(GO) test -list "^Test.*($$alt)" ./pkg/cluster/ | grep -q '^Test' || { echo "test-race-dp: pkg/cluster -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
 	$(GO) test -race ./pkg/cluster/ -run 'DoesNotRaceUpdateGroups6550|DoesNotHoldMuAcrossManagerCallback6550|DoesNotRaceStopHeartbeat7257|StartHeartbeatSupersededByStopDoesNotPublish7257' -count=2
+	@for alt in 17175 18760 9051; do \
+		$(GO) test -list "^Test.*($$alt)" ./pkg/grpcapi/ | grep -q '^Test' || { echo "test-race-dp: pkg/grpcapi -run alternative $$alt matches no test" >&2; exit 1; }; \
+	done
+	$(GO) test -race ./pkg/grpcapi/ -run '17175|18760|9051' -count=2
 	$(GO) test -race -run 'Race|Concurrent' -count=1 $$($(GO) list ./pkg/... ./cmd/...)
 
 # #16715: the property leg above races every Race/Concurrent-named test
@@ -1303,6 +1307,15 @@ test-host-inbound-lib:
 # Run it when ipv6_ext_walk.rs or the parity guards change.
 test-shim-ext-parity-lib:
 	bash ./test/mutation/shim-ext-parity-acceptance.sh
+
+# #18738: hermetic selftest of the acceptance harness's own control flow
+# (a stub cargo, a throwaway checkout, seconds not hours). TERM mid-row must
+# restore the walker and END the run (exit 143, no next row), with a
+# positive control on the pre-#18738 trap, and ROWS= must run only the named
+# rows and refuse an undeclared one. Also in `make selftest`.
+.PHONY: test-shim-ext-parity-selftest
+test-shim-ext-parity-selftest:
+	sh ./test/mutation/selftest-shim-ext-parity-acceptance.sh
 
 # #8136: the WHOLE test/incus Python suite. Before this, the only target that
 # ran any of it passed a LITERAL filename as the discovery pattern, so 1 of 21

@@ -611,6 +611,17 @@ type Manager struct {
 	// this Manager is rebuilt and the cluster session inventory is replayed.
 	sessionRepairOverflowErr string
 
+	// napiBoundBootstrapGen is the helper generation whose all-bindings-bound
+	// NAPI bootstrap has fired (#18707, ensureXSKBoundNAPIBootstrapLocked).
+	napiBoundBootstrapGen uint64
+	// napiFloorBootstrapGen / napiFirstBoundGen / napiFirstBoundAt drive the
+	// partial-bind floor (ensurePartialBindNAPIBootstrapFloorLocked): the
+	// generation whose floor bootstrap fired (or was retired by all-bound),
+	// and when the generation was first seen with a bound binding.
+	napiFloorBootstrapGen uint64
+	napiFirstBoundGen     uint64
+	napiFirstBoundAt      time.Time
+
 	// abandonUnsupportedWarned / abandonUnsupportedGen latch the #18752 Warn
 	// that the helper lacks the abandon_owner_rg_export verb: once per helper
 	// generation (procGen), Debug after. The bool keeps a procGen of 0 from

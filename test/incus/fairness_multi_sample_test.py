@@ -1522,6 +1522,12 @@ class FairnessMultiSampleTest(unittest.TestCase):
         harness_copy = tmp_path / "fairness-harness.sh"
         harness_copy.write_text(HARNESS_PATH.read_text(encoding="utf-8"), encoding="utf-8")
         harness_copy.chmod(0o755)
+        # #13070 made the harness source its sibling cos-apply-lib.sh (the
+        # shared CoS port grid) at startup. Without the sibling the copy dies
+        # on the `source` line before the precheck, so the stub log is never
+        # written and the cell reports FileNotFoundError instead of its verdict.
+        cos_lib = HARNESS_PATH.with_name("cos-apply-lib.sh")
+        (tmp_path / cos_lib.name).write_text(cos_lib.read_text(encoding="utf-8"), encoding="utf-8")
         stub_log = tmp_path / "precheck.log"
         stub = tmp_path / "target-services.sh"
         stub.write_text(
@@ -1535,8 +1541,28 @@ class FairnessMultiSampleTest(unittest.TestCase):
             encoding="utf-8",
         )
         stub.chmod(0o755)
+        # A recording iperf3 first on PATH (AE on #18738): the gate must stop
+        # the harness BEFORE any traffic. A precheck that fails open (`|| true`)
+        # still exits 1 later, so the exit code alone cannot see it; this does.
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        self.iperf3_log = tmp_path / "iperf3-calls.log"
+        iperf3 = bindir / "iperf3"
+        iperf3.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                printf '%s\\n' "$*" >> "$IPERF3_LOG"
+                exit 1
+                """
+            ),
+            encoding="utf-8",
+        )
+        iperf3.chmod(0o755)
         env = {k: v for k, v in os.environ.items() if k != "SKIP_TARGET_PRECHECK"}
         env["PRECHECK_LOG"] = str(stub_log)
+        env["IPERF3_LOG"] = str(self.iperf3_log)
+        env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
         if extra_env:
             env.update(extra_env)
         result = subprocess.run(
@@ -1549,6 +1575,17 @@ class FairnessMultiSampleTest(unittest.TestCase):
         )
         return result, stub_log
 
+    # L on #18738: without COS_IFINDEX a mixed run exits 2 on the missing
+    # interface right after the gate. A fail-open precheck then still reds the
+    # mixed cells, but on `2 != 1`, and never reaches iperf3, so the traffic
+    # assertion could not see it. With COS_IFINDEX set, a fail-open gate runs
+    # on to traffic, and the traffic assertion (checked first) names it.
+    _MIXED_PAST_THE_GATE_ENV = {"COS_IFINDEX": "14"}
+
+    def _assert_no_traffic(self) -> None:
+        calls = self.iperf3_log.read_text(encoding="utf-8") if self.iperf3_log.exists() else ""
+        self.assertEqual(calls, "", f"the precheck gate let the harness launch iperf3: {calls!r}")
+
     def test_fairness_harness_mixed_cos_precheck_includes_mixed_port(self) -> None:
         # #13068 (D10-13): --mixed-cos drives BOTH the primary port and
         # MIXED_PORT, so the preflight gate must probe both before any
@@ -1556,8 +1593,11 @@ class FairnessMultiSampleTest(unittest.TestCase):
         # MIXED_PORT listener was discovered only after the full run window.
         with tempfile.TemporaryDirectory() as tmp:
             result, stub_log = self._run_harness_precheck_with_stub(
-                Path(tmp), ["--mixed-cos", "127.0.0.1", "5202", "1", "1"]
+                Path(tmp),
+                ["--mixed-cos", "127.0.0.1", "5202", "1", "1"],
+                extra_env=self._MIXED_PAST_THE_GATE_ENV,
             )
+            self._assert_no_traffic()
             self.assertEqual(result.returncode, 1)
             self.assertEqual(
                 stub_log.read_text(encoding="utf-8").splitlines(),
@@ -1571,8 +1611,9 @@ class FairnessMultiSampleTest(unittest.TestCase):
             result, stub_log = self._run_harness_precheck_with_stub(
                 Path(tmp),
                 ["--mixed-cos", "127.0.0.1", "5202", "1", "1"],
-                extra_env={"MIXED_PORT": "6205"},
+                extra_env={**self._MIXED_PAST_THE_GATE_ENV, "MIXED_PORT": "6205"},
             )
+            self._assert_no_traffic()
             self.assertEqual(result.returncode, 1)
             self.assertEqual(
                 stub_log.read_text(encoding="utf-8").splitlines(),
@@ -1587,6 +1628,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
             result, stub_log = self._run_harness_precheck_with_stub(
                 Path(tmp), ["127.0.0.1", "5210", "1", "1"]
             )
+            self._assert_no_traffic()
             self.assertEqual(result.returncode, 1)
             self.assertEqual(
                 stub_log.read_text(encoding="utf-8").splitlines(),

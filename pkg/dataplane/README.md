@@ -44,12 +44,20 @@ sent while exact queues were still backlogged.
 
 `userspace-xdp/src/ipv6_ext_walk.rs` is guarded by
 `test/mutation/shim-ext-parity-acceptance.sh`, not by `make test` alone. The
-script mutates the walk across 16 mutation rows plus one negative control,
+script mutates the walk across 19 mutation rows plus one negative control,
 bracketed by a green baseline (row 0) and a post-restore recheck, and requires
 the parity guards in
 `userspace-dp/src/afxdp/frame/tests_shim_ext_parity.rs` to red on each edit. It
 prints per-row accounting at the end, so the evidence quoted in a PR body is
 checkable against the matrix rather than against a bare `PASS`.
+
+Each row is a full release rebuild (5-10 min), so `ROWS=4-20` (or `ROWS=7,19`)
+runs a subset; the verdict then says it is not a full matrix, and a row number
+that names no declared row is refused before anything is touched. INT and TERM
+restore the walker and END the run (exit 130/143). Signal the process group to
+stop at once: bash runs the trap only after the current cargo step returns.
+`make test-shim-ext-parity-selftest` (also in `make selftest`) pins both
+behaviours against a stub cargo in seconds (#18738).
 
 One mutation per row, and one ARM per row where an edit applies to several: a
 row that mutated the GENERIC and AUTH revalidation bases together scored RED on
@@ -857,10 +865,28 @@ would blackhole every flow handed to it.
   `resetAfterHelperGoneLocked` — shared with `stopLocked` precisely so
   the crash path and the stop path cannot drift about which state a
   departed helper invalidates. `TakeoverReady()` goes false.
-- **Bounded restart.** Exponential backoff from
-  `helperRestartBackoffBase` to `helperRestartBackoffMax`, re-armed on
-  each failure so a helper that cannot start retries forever at a fixed
-  low rate instead of fork-storming. The restart calls the ORDINARY
+- **Bounded restart.** The first unexpected exit of a crash episode is
+  retried immediately (#18707); every further exit in the same episode
+  backs off exponentially from `helperRestartBackoffBase` to
+  `helperRestartBackoffMax` (0, 1s, 2s, ... 60s), re-armed on each
+  failure so a helper that cannot start retries forever at a fixed low
+  rate instead of fork-storming. The first retry used to wait the 1s base
+  as well, and that second was pure outage: the child is already reaped
+  and the shim already disarmed when the retry is scheduled, and the
+  bring-up readiness gates still run before forwarding is re-armed. The
+  immediate retry adds one attempt, not one earlier verdict: the
+  cumulative wait before the cap is still 63s (0+1+...+32 instead of
+  1+2+...+32). A Compile bring-up failure that re-arms a pending attempt-1
+  retry (`rearmHelperRestartLocked`) therefore re-arms it immediately too;
+  if that retry fails, it is charged as attempt 2 and waits the base.
+  The restart's status loop runs its first reconcile pass at once rather
+  than one `statusLoopInterval` later (`ensureStatusLoopFirstPassNowLocked`),
+  because that pass is what republishes the snapshot the replacement's
+  workers bind from. If the body discards that pass — most often the
+  #16653 stale-poll fence, when the daemon's own reaction to the restart
+  applies a status while the poll is off-lock — it is retried 100 ms later,
+  at most 10 times, instead of a whole tick later; once a pass runs to the
+  end the loop is back on its 1 s ticker. The restart calls the ORDINARY
   `ensureProcessLocked` against the CURRENT `m.cfg`, not the dead
   generation's argv, so a config replacement that landed while the
   helper was down is what starts, and the binding / XSK-liveness /
@@ -872,7 +898,8 @@ would blackhole every flow handed to it.
   read as "this helper is not coming back". It is **backoff at the cap** within
   one crash episode, not a lifetime restart count: a quiet interval longer than
   twice the maximum backoff resets the consecutive-attempt count. With the
-  shipped 1s base and 60s cap it trips at seven consecutive attempts and clears
+  shipped 1s base and 60s cap it trips at eight consecutive attempts (seven
+  before #18707's immediate first retry; the same 63s of cumulative backoff) and clears
   after more than 120s without another unexpected exit. `HelperSupervisorState`
   treats it as election debt only while the helper is down and the retry is
   still fenced to the current generation; an intentional stop does not resign.
@@ -1372,6 +1399,32 @@ publish. The ordering is load-bearing, not incidental:
    ifindex the accepted snapshot no longer adjudicates. It runs at the
    ACCEPTANCE POINTS ONLY, immediately after each `m.lastSnapshot = snap`.
 
+**Control-plane netdevs never enter the attach set (#18740).** The
+userspace dataplane never adjudicates `fxp*` (management) or `em*` (the
+cluster control link). Its ingress exclusion names them, and the shim's
+verdict for an ifindex outside the ingress set is `cpumap_or_pass`.
+
+Until #18740, `compileZones` still queued them like any zoned netdev:
+- Step 1 attached the shim to `fxp0` and `em0` FRESH on every apply,
+  because step 3 of the previous apply had detached and unpinned them.
+- Step 3 then detached it again 25-142 ms later.
+
+That is two XDP program changes per commit, per node, on the HA control
+link. One heartbeat frame that arrived at the instant of an `em0` attach was
+lost on a lab cluster.
+
+`compileZones` now leaves them, and VLAN children of them, out of
+`pendingXDP` and `pendingTC`. It records them as SKIPPED unarmed surfaces,
+so the arm-coverage proof still lists them and does not count them toward
+WouldGate. The name classes are single-sourced:
+`dataplane.ControlPlaneNetdevNameClass` backs both this exclusion and the
+userspace ingress classes "fxp name" and "em name", so a name the compile
+leaves unshimmed is always one the ingress set excludes.
+
+`fab*` is deliberately not in the list: `fab0` resolves to its local member's
+parent netdev, which carries the fabric redirect path. An unchanged commit
+now makes no XDP transition on any link.
+
 **Why the detach is last.** Until #5485 it ran before step 2, so any
 failure in between left the kernel on the new interface set while the
 control plane still reported the old one. That divergence is a policy
@@ -1450,7 +1503,8 @@ the separately documented unadjudicated-forward window.
 >
 > It mattered because **the attach set is strictly larger than the ingress
 > set**: `compiler_iface.go` puts every zoned netdev into
-> `st.xdpIfindexes`, tunnels included ("Tunnels need XDP for ingress"),
+> `st.xdpIfindexes` (since #18740, every one except `fxp*`/`em*`), tunnels
+> included ("Tunnels need XDP for ingress"),
 > and `syncInterfaceAttachments` reconciles the difference away only at
 > the two post-acceptance points. A tunnel netdev on a userspace-dataplane
 > box is an anchor TUN — ARPHRD_NONE, raw L3, **no Ethernet header** — so
@@ -2131,11 +2185,12 @@ walk stepped over carried non-zero offset bits (`& 0xFFF8`, RFC 8200
 §4.5), which is field-for-field the semantics of
 `ExtChainWalk::non_first_fragment_offset_seen` on this side — so the
 corpus compares them for EQUALITY at every L3 offset, and
-`shim_is_not_more_permissive` pins that a first and a non-first fragment
-move that field in both walkers together. Before #6704 the shim returned a
-bare `(offset, protocol)` and the fragment dimension could not be compared
-from the test side at all; an earlier attempt to compare it hand-wrote a
-second walk loop in the test and asserted `X == X`.
+`shim_walk_is_not_more_permissive` (renamed in #14056) pins that a first
+and a non-first fragment move that field in both walkers together. Before
+#6704 the shim returned a bare `(offset, protocol)` and the fragment
+dimension could not be compared from the test side at all; an earlier
+attempt to compare it hand-wrote a second walk loop in the test and
+asserted `X == X`.
 
 Since #16038 the last field reports walk exhaustion: true iff the loop
 spent all `MAX_EXT_HDRS` iterations and still holds a traversable
