@@ -181,6 +181,14 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) exception_packets: AtomicU64,
     pub(super) config_gen_mismatches: AtomicU64,
     pub(super) fib_gen_mismatches: AtomicU64,
+    // #18560: matched-view grace witnesses. A held packet served from the
+    // flow cache under its own left view (hit) or dropped because it missed
+    // (miss); and every generation-mismatch DROP split by the stamp's
+    // direction against the worker's validation.
+    pub(super) generation_held_hits: AtomicU64,
+    pub(super) generation_held_misses: AtomicU64,
+    pub(super) generation_mismatch_ahead: AtomicU64,
+    pub(super) generation_mismatch_behind: AtomicU64,
     pub(super) unsupported_packets: AtomicU64,
     pub(super) flow_cache_hits: AtomicU64,
     pub(super) flow_cache_misses: AtomicU64,
@@ -1081,9 +1089,12 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // #18566 adds one per-arm flow-cache eviction slot
 // (`PostHitFabricRedirectDestinationNowLocal`, arm count 19 -> 20) before
 // both sentinels; offsets advance by 8 bytes, size unchanged.
+// #18560 adds four unconditional u64 matched-view counters
+// (`generation_held_hits`/`_misses`, `generation_mismatch_ahead`/`_behind`)
+// before both sentinels; offsets advance by 32 bytes, size unchanged.
 const _: [(); 3072] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2896] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 3025] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2928] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 3057] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1134,6 +1145,10 @@ impl BindingLiveState {
             exception_packets: AtomicU64::new(0),
             config_gen_mismatches: AtomicU64::new(0),
             fib_gen_mismatches: AtomicU64::new(0),
+            generation_held_hits: AtomicU64::new(0),
+            generation_held_misses: AtomicU64::new(0),
+            generation_mismatch_ahead: AtomicU64::new(0),
+            generation_mismatch_behind: AtomicU64::new(0),
             unsupported_packets: AtomicU64::new(0),
             flow_cache_hits: AtomicU64::new(0),
             flow_cache_misses: AtomicU64::new(0),

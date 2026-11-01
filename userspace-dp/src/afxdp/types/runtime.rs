@@ -606,17 +606,25 @@ pub(in crate::afxdp) struct ValidationState {
 }
 
 /// #18560: how long a worker keeps a forwarding view it has left, so packets
-/// the shim still stamps with that view's generations are processed under it.
-/// The shim's stamp trails the worker by the helper reply plus Go's
-/// `userspace_ctrl` write (tens of ms measured); the bound only caps how long
-/// a ctrl write that never lands keeps an old table set alive.
-pub(in crate::afxdp) const MATCHED_VIEW_GRACE_NS: u64 = 1_000_000_000;
+/// the shim stamped with that view's generations are processed under it.
+/// Since #18598 the helper advances `userspace_ctrl` 28-48 us after its view
+/// store, so the packets left stamped with an old view are the ones already
+/// queued in the RX ring when the worker adopts. The loss diag probe
+/// (docs/log/18560.md, 0.0.29554, 6 operator moves under 8-stream load)
+/// measured the slowest worker adopting at most 15.7 ms after the store and
+/// the last such packet 15 ms after it. 200 ms is about 12x that, and it
+/// bounds how long a left `ForwardingState` stays pinned.
+pub(in crate::afxdp) const MATCHED_VIEW_GRACE_NS: u64 = 200_000_000;
 
-/// #18560: how many left views a worker keeps. An ownership edge publishes a
-/// burst (route snapshot, FIB bump, a second snapshot and bump after the FRR
-/// reload) inside one ctrl-write round trip, so the shim can lag by more than
-/// one view.
-pub(in crate::afxdp) const MATCHED_VIEW_SLOTS: usize = 3;
+/// #18560: how many left views a worker keeps. With the helper advancing the
+/// stamp at its store, the dropped packets in the same probe were stamped
+/// one publish behind (config +2 or FIB +1) in all but a handful: stamps two
+/// or three publishes behind were 4-16 packets per publish. Two slots cover
+/// the previous view and the one before it. Each retained view pins a
+/// deep-cloned `ForwardingState` (`publish_runtime_view`), shared by every
+/// worker, so this caps the extra table copies at two, each for at most the
+/// grace; on a full-table box that bound is the point (seat W).
+pub(in crate::afxdp) const MATCHED_VIEW_SLOTS: usize = 2;
 
 /// #18560: one forwarding view (tables plus the generation pair they were
 /// published with) a worker has moved past.

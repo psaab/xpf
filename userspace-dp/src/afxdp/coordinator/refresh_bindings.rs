@@ -139,6 +139,10 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.exception_packets = snap.exception_packets;
     binding.config_gen_mismatches = snap.config_gen_mismatches;
     binding.fib_gen_mismatches = snap.fib_gen_mismatches;
+    binding.generation_held_hits = snap.generation_held_hits;
+    binding.generation_held_misses = snap.generation_held_misses;
+    binding.generation_mismatch_ahead = snap.generation_mismatch_ahead;
+    binding.generation_mismatch_behind = snap.generation_mismatch_behind;
     binding.unsupported_packets = snap.unsupported_packets;
     binding.flow_cache_hits = snap.flow_cache_hits;
     binding.flow_cache_misses = snap.flow_cache_misses;
@@ -426,6 +430,10 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.exception_packets = 0;
     binding.config_gen_mismatches = 0;
     binding.fib_gen_mismatches = 0;
+    binding.generation_held_hits = 0;
+    binding.generation_held_misses = 0;
+    binding.generation_mismatch_ahead = 0;
+    binding.generation_mismatch_behind = 0;
     binding.unsupported_packets = 0;
     binding.flow_cache_hits = 0;
     binding.flow_cache_misses = 0;

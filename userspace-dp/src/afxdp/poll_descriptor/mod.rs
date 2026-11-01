@@ -850,7 +850,34 @@ fn note_admission_to_zone(slot: &mut u32, to_zone_id: u32) {
     *slot = to_zone_id;
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "#18560: production polls through poll_binding_process_descriptor_in_view; this wrapper keeps the test harnesses on the current view"))]
+/// #18560: the direction of a generation-mismatch stamp against the worker's
+/// validation: `Some(true)` AHEAD, `Some(false)` BEHIND, `None` for any other
+/// disposition. A config mismatch decides on the config generation; a FIB
+/// mismatch (config equal) on the FIB generation.
+#[inline]
+pub(in crate::afxdp) fn mismatch_stamp_ahead(
+    disposition: PacketDisposition,
+    meta: UserspaceDpMeta,
+    validation: ValidationState,
+) -> Option<bool> {
+    match disposition {
+        PacketDisposition::ConfigGenerationMismatch => {
+            Some(meta.config_generation > validation.config_generation)
+        }
+        PacketDisposition::FibGenerationMismatch => {
+            Some(meta.fib_generation > validation.fib_generation)
+        }
+        _ => None,
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "#18560: production polls through poll_binding_process_descriptor_in_view; this wrapper keeps the test harnesses on the current view"
+    )
+)]
 pub(super) fn poll_binding_process_descriptor_with_injection(
     binding: &mut BindingWorker,
     binding_index: usize,
@@ -1041,6 +1068,9 @@ pub(super) fn poll_binding_process_descriptor_in_view(
         0
     };
     let mut held_next = 0usize;
+    // #18560: a held pass's flow-cache lookups compare only. Cleared below
+    // before the pass returns, so no ordinary pass ever runs with it set.
+    binding.flow.flow_cache.held_compare_only = pass.held_pass;
     loop {
         let mut deferred_syn_cookie_challenge: Option<crate::screen::SynCookieChallenge> = None;
         // #15243 (A60-01): a held packet that carries an owned inner frame
@@ -2517,7 +2547,17 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         &mut binding.last_learned_neighbor,
                         telemetry,
                     ) {
-                        FlowCacheOutcome::Consumed => continue,
+                        FlowCacheOutcome::Consumed => {
+                            // #18560: the witness that the grace saved a
+                            // packet (served from its own view's entry).
+                            if pass.held_pass {
+                                binding
+                                    .live
+                                    .generation_held_hits
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            continue;
+                        }
                         FlowCacheOutcome::FallThrough => {}
                     }
                 }
@@ -2531,6 +2571,10 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                 // session misses and strict-syn drops on the demoting node per
                 // move (none without the grace).
                 if pass.held_pass {
+                    binding
+                        .live
+                        .generation_held_misses
+                        .fetch_add(1, Ordering::Relaxed);
                     record_disposition(
                         &worker_ctx.ident,
                         &binding.live,
@@ -13575,6 +13619,23 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                 binding.view_held.push((desc, meta));
                 recycle_now = false;
             } else {
+                // #18560: split every generation-mismatch DROP by the stamp's
+                // direction. AHEAD (the worker has not refreshed yet) is the
+                // #6592 orientation and always drops; BEHIND drops only when
+                // no retained view matches (never held, or expired).
+                if let Some(ahead) = mismatch_stamp_ahead(disposition, meta, validation) {
+                    if ahead {
+                        binding
+                            .live
+                            .generation_mismatch_ahead
+                            .fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        binding
+                            .live
+                            .generation_mismatch_behind
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 record_disposition(
                     &worker_ctx.ident,
                     &binding.live,
@@ -13631,6 +13692,7 @@ pub(super) fn poll_binding_process_descriptor_in_view(
     }
     received.release();
     drop(received);
+    binding.flow.flow_cache.held_compare_only = false;
     if held_len > 0 {
         binding.view_held.drain(..held_len);
     }
