@@ -937,6 +937,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
         source_nat_validation_key,
         now_ns,
         packet_icmp,
+        false,
     )
 }
 
@@ -1008,6 +1009,10 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     source_nat_validation_key: Option<&SessionKey>,
     now_ns: u64,
     packet_icmp: Option<(u8, u8)>,
+    // #18531: the packet arrived on the fabric link (the poll loop's
+    // `fabric_link_ingress`, the same predicate as the keep-transient purge
+    // gate in `session_glue/resolve.rs`).
+    fabric_link_ingress: bool,
 ) -> Option<PolicyRevocation> {
     let (
         forward_key,
@@ -1347,31 +1352,6 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     {
         return None;
     }
-    // #16215 (third shape): a peer-synced row whose STORED resolution is
-    // FabricRedirect names the fabric pseudo-egress (the fabric parent
-    // ifindex, e.g. 4 for fab0@ge-0-0-0) as its egress. That ifindex has
-    // no EgressInterface row, zone pair, or SNAT geometry, so judging it
-    // below can only answer `forwarding.egress.get(&fabric)` miss =
-    // invalid = revoke-and-delete both halves — exactly the egress-miss
-    // revocation proven live on fw0 (egress 4, dest_valid=true, dynamic
-    // provenance Some(false)). The fabric leg's NAT validity is judged
-    // on the egress owner when the packet arrives there; here the row
-    // carries no local egress verdict to judge against, so DECLINE like
-    // the terminal decline above. This covers rows demoted/retagged to
-    // SyncImport by DemoteOwnerRGS as well as true peer imports, and it
-    // applies regardless of failover timing (the live revocations fired
-    // in the pre-failover demote/republish window). A genuinely
-    // withdrawn SNAT rule still revokes once the row gains a real
-    // egress resolution (live or re-resolved) and runs the full
-    // geometry check below; locally-authored rows are judged as before.
-    if forward_origin.is_peer_synced()
-        && matches!(
-            forward_decision.resolution.disposition,
-            ForwardingDisposition::FabricRedirect
-        )
-    {
-        return None;
-    }
     // #16215: judge the packet's re-resolved decision, not a stored
     // terminal one — on EVERY node, not only the activating one. A
     // peer-synced row can still carry its standby-side terminal
@@ -1394,9 +1374,14 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // translations. Reverse hits keep the stored forward decision.
     // A genuinely withdrawn rule still revokes: the zone pair is read
     // off the live egress, and the translation geometry must match a
-    // live rule. Scoped to peer-synced rows with a locally-forwarding
-    // re-resolution; every other row judges its stored decision
-    // exactly as before. Copy-on-write: the caller owns the hit
+    // live rule. #18531: any origin with a locally-forwarding
+    // re-resolution (it was peer-synced only). A locally-authored row
+    // whose stored resolution is a FabricRedirect (persisted on the
+    // LAN node at a split-RG failback) must be judged against the real
+    // egress the moment its RG returns, even at the same generation,
+    // where nothing re-stores the row: the packet leaves on that
+    // egress. Every other row judges its stored decision exactly as
+    // before. Copy-on-write: the caller owns the hit
     // decision by value, so no other row is mutated (the stored row
     // is rewritten by RefreshOwnerRGS, or re-resolved again on the
     // next stale hit — never per-packet on the fast path).
@@ -1410,13 +1395,40 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // the non-terminal stored shapes (a real egress whose stored
     // geometry no longer matches the packet's re-resolved egress);
     // revocation stays a FRESH decision's verdict in both arms.
+    //
+    // #18531 (#18535 item 1): on a FABRIC-LINK arrival the live decision
+    // also stands in when it is HAInactive. That is still a real egress,
+    // only one whose RG this node does not forward, and the decline below
+    // then holds the session. The shape is the RG-taking node's window:
+    // the peer has demoted the egress RG and redirects the translated flow
+    // here before this node activates it. A keep-transient hit (a
+    // translated forward-wire alias on a non-owner) persists nothing, so
+    // its stored line is the import-time resolution against the split FIB.
+    // For v6, and for both families when the import found no neighbor
+    // (MissingNeighbor), that names reth0.50 (egress 13), whose address is
+    // not the reth0.80 translation. Judged as stored, it revoked the alias
+    // of a live flow.
+    //
+    // The rule, by arrival link (review N4):
+    // - Fabric arrival: the packet is the peer's redirect of a flow whose
+    //   egress the peer believes this node owns. This node does not
+    //   forward it (dropped, or the adopted candidate under #16217), so it
+    //   does not judge the translation; the egress owner does, and its
+    //   Close removes this copy (an alias-only owner's Close names the
+    //   translated tuple, which this node resolves to its canonical row,
+    //   `SessionDomain::delete_synced`).
+    // - Direct arrival on a non-owner: not a redirect. Nothing hands the
+    //   judgment to a peer, so the stored line is judged here, as before
+    //   (#12187: a later same-tuple static SNAT still revokes).
+    // Both are pinned by the #12187 cell. A live FabricRedirect names the
+    // fabric parent, not an egress, so it never stands in.
     let forward_decision = if !metadata.is_reverse
-        && forward_origin.is_peer_synced()
         && decision.resolution.egress_ifindex > 0
-        && matches!(
+        && (matches!(
             decision.resolution.disposition,
             ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
-        )
+        ) || (fabric_link_ingress
+            && decision.resolution.disposition == ForwardingDisposition::HAInactive))
         && !matches!(
             forward_decision.resolution.disposition,
             ForwardingDisposition::DiscardRoute | ForwardingDisposition::ClusterTerminalHAInactive
@@ -1428,6 +1440,52 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     } else {
         forward_decision
     };
+    // #16215 (third shape) / #18531: the JUDGED resolution names no
+    // egress this node forwards out of, so there is no local verdict to
+    // judge the translation against. Decline (keep the session; the
+    // packet takes its HA disposition: redirected to the owner or
+    // dropped) and leave the stamp stale, so the first judgment after
+    // the egress becomes local runs the full geometry check below.
+    //
+    // - FabricRedirect names the fabric parent (e.g. 4 for
+    //   fab0@ge-0-0-0), which has no EgressInterface row, so the
+    //   geometry check can only answer `forwarding.egress.get(&fabric)`
+    //   miss = invalid. That is the egress-miss revocation proven live
+    //   on fw0 (#16215) and the split-RG failback revocation on the LAN
+    //   node (#18531).
+    // - HAInactive names a real egress whose RG is not forwarding-active
+    //   here. Interface/pool translation validity belongs to the node
+    //   that owns that egress. On a split node the route can also be
+    //   the wrong interface: the peer-owned WAN connected prefix is
+    //   withheld, so the destination falls to the default via the WAN
+    //   gateway VLAN. The live failback had reth0.50, egress 13, whose
+    //   address is not the reth0.80 translation, on the node taking
+    //   RG1. Judging it revoked every imported flow arriving over the
+    //   fabric in the window after the peer demoted RG1 and before
+    //   this node activated it (#18531, the RG-taking side).
+    //
+    // Keyed on the resolution, whoever authored the row (#16215 gated the
+    // redirect arm on `is_peer_synced()`). Runs after the substitution
+    // above, so a forward hit whose live decision forwards locally is
+    // judged on that live egress, not declined on a stale stored one.
+    // A withdrawn translation is revoked by whichever node owns the
+    // egress, on its next slow-path hit with a stale stamp. The Close
+    // that emits reaches this node as a peer delete, which can remove a
+    // locally-authored redirect row because the row keeps its egress RG
+    // (`persisted_owner_rg_for_resolution`). An owner holding only the
+    // translated alias closes the translated tuple; this node resolves that
+    // peer delete through its forward-wire index to this row
+    // (`SessionDomain::delete_synced`).
+    // Reverse hits do not substitute (the reply's own resolution is the
+    // LAN egress), so a reply that arrives first after the RG returns
+    // judges the stored redirect and declines until `RefreshOwnerRGS`
+    // rewrites the stored line or a forward slow-path hit judges it.
+    if matches!(
+        forward_decision.resolution.disposition,
+        ForwardingDisposition::FabricRedirect | ForwardingDisposition::HAInactive
+    ) {
+        return None;
+    }
     // #15934: selector priority follows HIT DIRECTION (see
     // forward_selector_for_hit), not session-branch shape: a reverse hit
     // that reaches this arm because its forward companion IS materialized
@@ -2765,19 +2823,11 @@ fn reverse_hit_zone_policy(
             // newly resolved route so reply-only streams do not repeat a full
             // route lookup and judgment on every packet.
             if companion_forwarding_stale {
-                let owner_rg_id = matches!(
-                    input.decision.resolution.disposition,
-                    ForwardingDisposition::ForwardCandidate
-                        | ForwardingDisposition::FabricRedirect
-                        | ForwardingDisposition::HAInactive
-                        | ForwardingDisposition::LocalDelivery
-                )
-                .then(|| {
-                    crate::afxdp::forwarding::owner_rg_for_resolution(
-                        forwarding,
-                        input.decision.resolution,
-                    )
-                });
+                // #18531: a FabricRedirect keeps the recorded owner RG.
+                let owner_rg_id = crate::afxdp::forwarding::persisted_owner_rg_for_resolution(
+                    forwarding,
+                    input.decision.resolution,
+                );
                 // #14318: move the pair's egress zone with the persisted
                 // route. FabricRedirect keeps its recorded zone (the
                 // transport zone is not the flow's); others use live egress.

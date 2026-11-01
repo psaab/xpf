@@ -30,6 +30,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -374,12 +375,10 @@ func (d *Daemon) forceProbeNeighbors(cfg *config.Config) {
 	}
 	cap := getNeighborProbeMaxTargets()
 	start, count := d.forceProbeWindow(len(targets), cap)
-	if count < len(targets) {
-		slog.Warn("neighbor probe truncated",
-			"total", len(targets),
-			"cap", cap)
-	}
-	slog.Info("force-probe neighbors", "count", count)
+	// Review of #18625: both lines fired on every 15 s tick on every node.
+	// The truncation Warn is now edge-triggered, and the count logs at Debug.
+	d.neighborWarmHealth.noteProbeTruncation(count < len(targets), len(targets), cap)
+	slog.Debug("force-probe neighbors", "count", count)
 	for i := range count {
 		index := start + i
 		if index >= len(targets) {
@@ -487,9 +486,24 @@ func (d *Daemon) collectMonitoredNeighbors(cfg *config.Config) []probeTarget {
 			ForEachSnapshotNeighbor(fn func(ifindex int, ip net.IP))
 		}
 		if e, ok := rt.(indexEnumerator); ok && isProvider {
+			// #18617: never force-probe a cluster-owned address. The kernel
+			// can hold a neighbour entry for the source-NAT pool / proxy-ARP
+			// address (an earlier probe resolved it to whichever node
+			// answers ARP for it); an ICMP probe to it re-enters that node's
+			// dataplane as transit sourced from the cluster's own address and
+			// is default-denied there. The owned set is built once per pass.
+			plan := d.neighborWarmPlan(cfg)
+			ownedSkipped := 0
 			e.ForEachSnapshotNeighbor(func(ifindex int, ip net.IP) {
+				if a, ok := netip.AddrFromSlice(ip); ok && plan.owns(a.Unmap()) {
+					ownedSkipped++
+					return
+				}
 				addTarget(ip, ifindex, criticalityNormal)
 			})
+			if ownedSkipped > 0 {
+				slog.Debug("force-probe: skipped cluster-owned neighbour entries", "count", ownedSkipped)
+			}
 		}
 	}
 

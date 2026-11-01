@@ -133,6 +133,7 @@ fn make_entry(
         // exercise MAC-change eviction set `neighbor_shard` explicitly.
         neighbor_shard: NEIGHBOR_SHARD_NONE,
         fabric_established: false,
+        dest_owner_memo: Default::default(),
     }
 }
 

@@ -50,6 +50,8 @@ xpf_enter_destructive_cluster_cell "test-ha-crash $*" "$0" "$@"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/failover-clock-lib.sh
+source "${SCRIPT_DIR}/failover-clock-lib.sh"
 # #12203: shared scoped per-(node, RG) role reader for dual-active checks.
 # shellcheck source=test/incus/deploy-lib.sh
 source "${SCRIPT_DIR}/deploy-lib.sh"
@@ -69,6 +71,10 @@ DAEMON_RESTART_WAIT=30                      # max seconds for xpfd to restart
 
 PASS=0
 FAIL=0
+# #18614: a cell that could not be judged (the clock precondition's VOID). It
+# is neither a pass nor a fail, and a run with one exits 2, so a direct run is
+# as honest as the harness-result.sh row.
+VOID=0
 ERRORS=()
 LOG="/tmp/iperf3-ha-crash.log"
 # #9692: how long to let the established streams settle after a takeover, and
@@ -79,6 +85,7 @@ RECOVERY_MIN_GBPS="${RECOVERY_MIN_GBPS:-0.5}"
 info()  { echo "==> $*"; }
 pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
+void()  { echo "  VOID  $*"; VOID=$((VOID + 1)); }
 die()   { echo "FATAL: $*" >&2; exit 2; }
 
 # established_streams_recovered <phase> — #9692. The iperf3 client started
@@ -109,6 +116,22 @@ instance_running() {
 	[[ "$status" == "RUNNING" ]]
 }
 
+# start_instance <inst> <label> — #18523. `incus start` used to run with its
+# error discarded, so a VM that could not start at all (on tcp: "All virtual
+# functions on parent device mlx1 are already in use") surfaced only as
+# "xpfd did not restart within 90s". Name the start failure itself. A caller
+# skips the xpfd wait when this fails: a VM that did not start cannot run
+# xpfd, so the 90s wait would only add a second FAIL for the same cause.
+start_instance() {
+	local inst="$1" label="$2" err
+	if err=$(incus start "$inst" 2>&1); then
+		return 0
+	fi
+	instance_running "$inst" && return 0
+	fail "${label}: incus start ${inst} failed: $(printf '%s' "$err" | head -1)"
+	return 1
+}
+
 wait_for_xpfd() {
 	local inst="$1" max="$2"
 	for i in $(seq 1 "$max"); do
@@ -126,7 +149,7 @@ fw1_is_primary() {
 	local status
 	status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 	for rg in 0 1 2; do
-		if ! echo "$status" | grep -A2 "Redundancy group: $rg" | grep -q "node1.*primary"; then
+		if [[ "$(deploy_node_rg_role node1 "$rg" <<<"$status" || true)" != primary ]]; then
 			return 1
 		fi
 	done
@@ -134,15 +157,10 @@ fw1_is_primary() {
 }
 
 # Check that fw0 is primary for all RGs
+# #18523: fw0 owns every RG only when both nodes' own views agree. The
+# shared deploy-lib.sh helper is the one deploy-lib-selftest.sh drives.
 fw0_is_primary() {
-	local status
-	status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-	for rg in 0 1 2; do
-		if ! echo "$status" | grep -A2 "Redundancy group: $rg" | grep -q "node0.*primary"; then
-			return 1
-		fi
-	done
-	return 0
+	deploy_restore_fw0_owns_all
 }
 
 # Wait for fw1 to become primary, return elapsed seconds
@@ -231,32 +249,13 @@ test_new_tcp() {
 	return 1
 }
 
-# Restore fw0 as primary for all RGs
+# Restore fw0 as primary for all RGs.
+# #18523: the polled restore and its verdict (a refused or over-budget
+# restore FAILs; see deploy_restore_fw0_primary and RESTORE_FW0_WAIT /
+# RESTORE_FW0_BUDGET in docs/testing-procedures.md) live in deploy-lib.sh,
+# shared with the other HA smoke so the selftest drives the code run here.
 restore_fw0_primary() {
-	local label="$1"
-	# If fw0 is already primary, nothing to do
-	if fw0_is_primary; then
-		pass "$label: fw0 already primary"
-		return 0
-	fi
-	# Reset manual failover flags
-	for rg in 0 1 2; do
-		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-	done
-	sleep 1
-	# Manual failover all RGs to fw0 (from fw1 which is current primary)
-	for rg in 0 1 2; do
-		incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>/dev/null || true
-	done
-	sleep 5
-	if fw0_is_primary; then
-		pass "$label: fw0 restored as primary"
-		return 0
-	else
-		fail "$label: could not restore fw0 as primary"
-		return 1
-	fi
+	deploy_restore_fw0_primary "$1"
 }
 
 cleanup() {
@@ -338,6 +337,11 @@ else
 	die "Cannot reach iperf3 target $IPERF_TARGET from ${CLUSTER_LAN_HOST}"
 fi
 
+# #18614: one clock reading BEFORE the first crash. If chrony is not
+# synchronised here, there is no time source for a crash-rebooted node to
+# converge to, and the clock cell after the crash is VOID (lab/NTP), not FAIL.
+failover_clock_baseline "$FW0" "$FW1"
+
 # ═══════════════════════════════════════════════════════════════════════
 # Phase 1: Hard VM stop (kernel panic / power loss simulation)
 # ═══════════════════════════════════════════════════════════════════════
@@ -399,13 +403,16 @@ sleep 1
 
 # Restart fw0
 info "Phase 1: Restarting fw0"
-incus start "$FW0" 2>/dev/null || true
-
-restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
-if [[ -n "$restart_time" ]]; then
-	pass "phase1: fw0 xpfd restarted (${restart_time}s)"
-else
-	fail "phase1: fw0 xpfd did not restart within ${VM_RESTART_WAIT}s"
+if start_instance "$FW0" "phase1"; then
+	restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
+	if [[ -n "$restart_time" ]]; then
+		pass "phase1: fw0 xpfd restarted (${restart_time}s)"
+		# #18614: the post-crash clock state, logged before the settle, so a
+		# rejoin FAIL below carries it even if chrony converges first.
+		failover_clock_reading "phase1 post-restart" "$FW0" "$FW1"
+	else
+		fail "phase1: fw0 xpfd did not restart within ${VM_RESTART_WAIT}s"
+	fi
 fi
 
 # Wait for cluster to stabilize
@@ -421,6 +428,18 @@ fi
 
 # Check no dual-active
 check_no_dual_active "phase1-rejoin"
+
+# #18614 (was the #18523/#11872 resync, which ran right after the restart):
+# the force-stopped VM comes back on its RTC, and a skew past the fabric-auth
+# window breaks the failback below. Before it, wait for NTP to converge on both
+# nodes and log the skew and the time it took; never set a clock. It runs HERE,
+# after the rejoin checks, so those keep their 10 s settle and see the cluster
+# in its real post-crash clock state; only the failback waits. fail-only:
+# a converged run's cell count is unchanged (a resync still gets a PASS line
+# naming it, and a VOID gets a VOID line that harness-result.sh scores).
+if [[ -n "${restart_time:-}" ]]; then
+	failover_clock_cell fail-only "phase1" "$FW0" "$FW1" "$FW0" || true
+fi
 
 # Restore fw0 as primary for next phase
 restore_fw0_primary "phase1" || true
@@ -607,10 +626,14 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 	test_new_tcp "phase3-cycle${cycle}" "$CONN_TIMEOUT" || cycle_failures=$((cycle_failures + 1))
 
 	# Restart fw0
-	incus start "$FW0" 2>/dev/null || true
+	if ! start_instance "$FW0" "phase3-cycle${cycle}"; then
+		cycle_failures=$((cycle_failures + 1))
+		continue
+	fi
 	restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 	if [[ -n "$restart_time" ]]; then
 		pass "phase3-cycle${cycle}: fw0 restarted (${restart_time}s)"
+		failover_clock_reading "phase3-cycle${cycle} post-restart" "$FW0" "$FW1"
 	else
 		fail "phase3-cycle${cycle}: fw0 did not restart within ${VM_RESTART_WAIT}s"
 		cycle_failures=$((cycle_failures + 1))
@@ -634,6 +657,10 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 		fail "phase3-cycle${cycle}: fw0 cluster status unclear"
 		cycle_failures=$((cycle_failures + 1))
 	fi
+
+	# #18614: as in phase 1, after the rejoin checks and before the restore.
+	# Every cycle, the last included, so no unmeasured skew is left behind.
+	failover_clock_cell fail-only "phase3-cycle${cycle}" "$FW0" "$FW1" "$FW0" || true
 
 	# Restore fw0 as primary for next cycle (except last)
 	if [[ "$cycle" -lt "$CRASH_CYCLES" ]]; then
@@ -669,9 +696,14 @@ sleep 3
 # Ensure both nodes are running
 for inst in "$FW0" "$FW1"; do
 	if ! instance_running "$inst"; then
-		# Try to start it
-		incus start "$inst" 2>/dev/null || true
-		wait_for_xpfd "$inst" "$VM_RESTART_WAIT" >/dev/null 2>&1 || true
+		# Try to start it.
+		# #18614: a node started here also comes back on its RTC; check that
+		# NTP converges rather than leaving an unmeasured skew for the next
+		# harness (and never set the clock).
+		if start_instance "$inst" "final" &&
+			wait_for_xpfd "$inst" "$VM_RESTART_WAIT" >/dev/null 2>&1; then
+			failover_clock_cell fail-only "final" "$FW0" "$FW1" "$inst" || true
+		fi
 	fi
 	if instance_running "$inst"; then
 		pass "final: $inst running"
@@ -719,4 +751,9 @@ if [[ $FAIL -gt 0 ]]; then
 		echo "  - $err"
 	done
 	exit 1
+fi
+if [[ $VOID -gt 0 ]]; then
+	echo
+	echo "  ${VOID} cell(s) VOID: the run is not a pass (see the VOID lines above)"
+	exit 2
 fi

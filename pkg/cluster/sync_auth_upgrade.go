@@ -1008,6 +1008,6 @@ const SyncMsgAuthUpgradeRequestForTest = syncMsgAuthUpgradeRequest
 // lifecycle into a test about one line in the apply tail.
 func (s *SessionSync) InstallUnauthenticatedConnForTest(conn net.Conn) {
 	s.mu.Lock()
-	s.conn0 = &authConn{Conn: conn}
+	s.setConnSlotLocked(0, &authConn{Conn: conn})
 	s.mu.Unlock()
 }

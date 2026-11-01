@@ -915,7 +915,9 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
     );
     assert_eq!(
         coordinator.upsert_synced_session(alias),
-        crate::afxdp::SyncedImportOutcome::RejectedReserve,
+        // #18531: the alias of a held canonical row is refused under its own
+        // reason (it used to fail the reservation, `RejectedReserve`).
+        crate::afxdp::SyncedImportOutcome::RejectedSupersededAlias,
         "the translated alias is refused after the canonical Go-order import"
     );
 
@@ -1026,6 +1028,37 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
         )
         .is_some(),
         "a later same-tuple static SNAT still revokes the imported dynamic allocation"
+    );
+    // #18531 (review N4): the arrival link decides. The hit above arrived
+    // DIRECTLY on a node whose egress RG is inactive (empty HA state): its
+    // stored line is judged and the collision revokes here. The same hit
+    // arriving on the fabric link is the peer's redirect, and its live
+    // HAInactive stands in, so the judgment is declined: the egress owner
+    // judges the collision and its Close removes this copy.
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::HAInactive,
+        "fixture: the live decision on this non-owner is HAInactive"
+    );
+    assert!(
+        source_nat_revocation_on_session_hit_with_ingress(
+            &imported_snat_worker_forwarding(true),
+            &mut sessions,
+            &resolved.key,
+            &resolved.metadata,
+            resolved.metadata.ingress_ifindex,
+            resolved.metadata.ingress_vlan_id,
+            resolved.decision,
+            &flow,
+            resolved.origin,
+            resolved.source_nat_static,
+            resolved.source_nat_validation_key.as_ref(),
+            1_000_000_000,
+            None,
+            true,
+        )
+        .is_none(),
+        "the same collision arriving on the fabric link is declined, not revoked"
     );
 }
 
@@ -2844,6 +2877,7 @@ fn reverse_snat_hit_13652(
         None,
         1_000_000_000,
         None,
+        false,
     )
 }
 
@@ -2886,6 +2920,7 @@ fn reverse_snat_hit_fabric_15958(
         None,
         1_000_000_000,
         None,
+        false,
     )
 }
 
@@ -3697,6 +3732,7 @@ fn ha_imported_nptv6_wire_shape_still_fails_closed_15958() {
         None,
         1_000_000_000,
         None,
+        false,
     )
     .unwrap_or_else(|| {
         panic!(
@@ -3869,6 +3905,7 @@ fn ha_imported_legacy_dynamic_snat_without_provenance_fails_closed_15958() {
         None,
         1_000_000_000,
         None,
+        false,
     )
     .unwrap_or_else(|| {
         panic!(
@@ -4309,6 +4346,7 @@ fn reverse_only_vlan_interface_snat_survives_14128() {
             None,
             1_000_000_000,
             None,
+            false,
         )
         .is_none(),
         "interface-SNAT on logical VLAN unit 13 must survive a companion-less reverse hit (#14128)"
@@ -4334,6 +4372,7 @@ fn reverse_only_vlan_interface_snat_survives_14128() {
             None,
             1_000_000_000,
             None,
+            false,
         )
         .is_some(),
         "a logical-unit address change must revoke the stale interface translation"
@@ -6250,6 +6289,7 @@ fn reverse_hits_judge_forward_selector_by_direction_15934() {
             None,
             1_000_000_000,
             packet_icmp,
+            false,
         )
     }
 
@@ -7664,13 +7704,18 @@ fn demoted_local_snat_terminal_row_declines_on_old_owner_16215() {
 /// absent from `forwarding.egress`) must DECLINE on a forward hit — the
 /// fabric leg's NAT validity is judged on the egress owner, not here.
 /// Pre-fix the first validator check (`forwarding.egress.get(&4)` miss)
-/// revoked unconditionally. A locally-authored FabricRedirect row keeps
-/// the old fail-closed answer, and a peer-synced row that gains a REAL
-/// egress resolution still revokes when its SNAT rule is withdrawn.
+/// revoked unconditionally. A peer-synced row that gains a REAL egress
+/// resolution still revokes when its SNAT rule is withdrawn.
+///
+/// #18531: the decline is keyed on the stored resolution, not the origin.
+/// A locally-authored (`SharedPromote`) row with the same stored
+/// FabricRedirect declines too: it is the split-RG failback shape, a
+/// crash-takeover promotion hit after the RG1 demotion published and
+/// before `DemoteOwnerRGS` retagged it.
 ///
 /// RED-on-revert: removing the FabricRedirect decline revokes the first
-/// cell (fabric-ifindex egress miss); widening it to local origins
-/// revokes the control the wrong way (it must stay Some).
+/// cell (fabric-ifindex egress miss); re-gating it on `is_peer_synced()`
+/// revokes the `SharedPromote` cell (#18531).
 #[test]
 fn peer_synced_fabric_redirect_snat_declines_16215() {
     let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
@@ -7746,14 +7791,45 @@ fn peer_synced_fabric_redirect_snat_declines_16215() {
         "the peer-synced FabricRedirect row must survive its forward hit"
     );
 
-    // Control (scope guard): the decline is peer-synced-only. Pin the
-    // predicate the validator reads (entry origin) directly: local
-    // origins must NOT satisfy it, so a locally-authored row with this
-    // shape can never take the new decline.
-    assert!(origin.is_peer_synced());
-    assert!(!SessionOrigin::ForwardFlow.is_peer_synced());
-    assert!(!SessionOrigin::LocalMiss.is_peer_synced());
-    assert!(!SessionOrigin::ReverseFlow.is_peer_synced());
+    // #18531: the same stored FabricRedirect on a locally-authored row
+    // (the crash-takeover `SharedPromote` on the LAN node at a split-RG
+    // failback) names no local egress either, so it declines too.
+    let mut local_sessions = SessionTable::new();
+    local_sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(local_sessions.upsert_synced_with_origin(
+        SyncedSessionEntry {
+            decision: fabric_decision,
+            origin: SessionOrigin::SharedPromote,
+            ..synced.clone()
+        }
+        .into_session_install(1),
+        true
+    ));
+    let (_, _, local_origin) = local_sessions
+        .entry_with_origin(&key)
+        .expect("fixture: local FabricRedirect row installed");
+    assert!(
+        !local_origin.is_peer_synced(),
+        "fixture: the row must be locally authored, got {local_origin:?}"
+    );
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &forwarding,
+            &mut local_sessions,
+            &key,
+            &metadata,
+            fabric_decision,
+            &flow,
+            local_origin,
+            source_nat_static,
+            None,
+            1_000_000_000,
+            None,
+        )
+        .is_none(),
+        "a locally-authored FabricRedirect stored row must decline, not revoke (#18531)"
+    );
+    assert!(local_sessions.entry_with_origin(&key).is_some());
 
     // Withdrawn rule on a REAL-egress row still revokes: give the stored
     // row the real egress 12 resolution (the RefreshOwnerRGS rewrite

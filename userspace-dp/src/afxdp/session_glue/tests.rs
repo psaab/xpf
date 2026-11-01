@@ -5048,11 +5048,12 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
     );
     assert_eq!(adopted.decision.resolution.egress_ifindex, 12);
     // With RG1 reading inactive the synced hit stays transient
-    // (`keep_transient`): the worker row lands via the poll loop's
-    // Owner-verdict purge/promote after this resolve in production.
-    // The resolve contract under test here is the disposition the
-    // adoption filter admits.
-    assert!(adopted.deferred_synced_purge.is_some());
+    // (`keep_transient`). The resolve contract under test here is the
+    // disposition the adoption filter admits. #18531: this hit arrived on
+    // the fabric link, so the transient row is held, not purged. Purging
+    // removed the forward-wire alias of a live flow; where that alias was
+    // the node's only copy, the next packet missed and the flow died.
+    assert!(adopted.deferred_synced_purge.is_none());
 }
 /// #16217 (FZDiag24): the post-failover transient shape through the
 /// production session-HIT resolver. At the takeover instant the new
@@ -7525,6 +7526,7 @@ fn epoch_based_flow_cache_invalidation_for_demoted_owner_rg() {
         // #5147: no dynamic-neighbor dependency in this test entry.
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
         fabric_established: false,
+        dest_owner_memo: Default::default(),
     });
 
     // Before epoch bump, lookup should hit.
@@ -7621,6 +7623,7 @@ fn epoch_based_flow_cache_unrelated_rg_not_invalidated() {
         // #5147: no dynamic-neighbor dependency in this test entry.
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
         fabric_established: false,
+        dest_owner_memo: Default::default(),
     });
 
     // Bump epoch for RG 2 (unrelated).

@@ -176,6 +176,13 @@ with a `HasDynamic` positive control, so it cannot decay into a comment.
 (`ValidateOperationalLine`, #16798, reads the flag only to classify a node
 as NOT keyword-only; it does not honour it to accept arguments.)
 
+`ValidateOperationalLine` takes COMMAND words and does not strip an output
+pipe (#9628: the pipe is not tree grammar). A `|` passed in is judged as a
+trailing word, so a pipe directly under a keyword-only node is reported as
+`bad == "|"`. The remote CLI gate (#18664, `cmd/cli/README.md`) validates the
+pre-pipe words and uses that report to locate the pipe.
+`TestValidateOperationalLinePipePosition18664` pins the contract.
+
 It is OPT-IN AND NEVER A RELAXATION: an unmarked node is exactly as strict as
 before, so it cannot re-open #8289. The mutant that deletes the opt-in and
 admits any trailing word (`if currentNode != nil`) reds the #8289 and #7172

@@ -132,7 +132,7 @@ func TestSweepDoesNotRebulkWhileTheAckForThisDebtIsYoung_9626(t *testing.T) {
 	}
 
 	// Past the bound the ack is treated as lost, and the bulk goes again.
-	ss.pendingBulkAckSince.Store(time.Now().Add(-(BulkAckPendingRetryAfter + time.Second)).UnixNano())
+	ss.pendingBulkAckSince.Store(MonotonicNanos() - int64(BulkAckPendingRetryAfter+time.Second))
 	epoch2 := sweepBulk9626(t, ss)
 	if epoch2 == epoch {
 		t.Fatalf("the re-drive past the bound reused epoch %d", epoch)

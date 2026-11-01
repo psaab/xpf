@@ -2,6 +2,10 @@
 
 ## Quick Reference
 
+The pre-merge and merge-wave checklist for forwarding, performance and HA
+changes is `docs/regression-test-matrix.md`. This page describes how to run
+each harness.
+
 | Test | Command | Duration | When to Run |
 |------|---------|----------|-------------|
 | Unit tests (Go + Rust) | `make test` | ~minutes | Every code change |
@@ -12,6 +16,8 @@
 | Hard crash | `make test-ha-crash` | ~120s | Cluster state machine changes |
 | Private RG | `./test/incus/test-private-rg.sh` | varies; three raw deploys for `full` | Private RG election changes |
 | Restart | `make test-restart-connectivity` | ~30s | Shutdown/startup changes |
+| Throughput and stall matrix | `make perf-matrix` (`make perf-matrix-lib` hermetic) | ~10 min | Dataplane/forwarding changes; every merge wave (regression matrix F2/F6) |
+| One-node RG-move soak | `make test-rg-move-soak` (`make test-rg-move-soak-lib` hermetic) | ~4 min per 40 moves at 5 s | HA/failover/clock changes; every merge wave at 200 moves (regression matrix H11) |
 
 ## Test Categories
 
@@ -125,6 +131,63 @@ Scenarios:
   forwarding backstop.
 - Multi-cycle crash recovery — repeated crashes verify no state leak
 
+A failed `incus start` after a force-stop is a FAIL that names the `incus`
+error. The harness then skips the 90 s xpfd wait, so one cause records one
+FAIL. Before the first crash the harness takes one clock reading. After
+every crash reboot it waits for NTP to converge on both nodes: the
+node1-node0 skew, plus the reading's own error, within 5 s, and a
+synchronised Leap status on both, within 120 s. It runs this after the rejoin
+checks and before the failback, and after any node the final health check
+starts; a measure-only reading right after each restart keeps the post-crash
+state in the log. It never sets a clock. Not converging is judged from the
+current reading. It is VOID only when neither node is synchronised and no
+`system ntp` stanza is configured, when the stanza's servers fail an SNTP
+probe from the orchestrator too (a lab NTP outage), or when nothing could be
+measured. It is FAIL otherwise (lab, NTP or product), including one node
+synchronised and the other not, the #18584 class (#18614,
+`test/incus/failover-clock-lib.sh`, `docs/ha-rg-move-correctness.md`). A
+direct run exits 2 on a VOID cell.
+`XPF_FAILOVER_CLOCK_RESYNC=1` restores the #11872 resync for a lab with no
+NTP. It prints a banner, and the would-be PASS row is recorded VOID with
+`clock_resync=1`. `test-failover` and `test-double-failover` run the same
+check after their crash reboot.
+
+#### Restoring fw0 between phases
+
+`test-ha-crash.sh` and `test-restart-connectivity.sh` move RG0-2 back to
+fw0 after each phase that moved them, through the shared
+`deploy_restore_fw0_primary` in `test/incus/deploy-lib.sh` (#18523). It moves
+one RG at a time. It re-requests the yield from fw1 only while fw1's own view
+still claims the RG, and polls until the RG is restored. An RG counts as
+restored only when both nodes' own views agree: fw0 reads `node0 primary`,
+and fw1 reads `node1 secondary` or `secondary-hold`. A dual-primary RG, or an
+unreadable fw1, is not restored.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RESTORE_FW0_WAIT` | 60 | Seconds to keep re-requesting before giving up. |
+| `RESTORE_FW0_BUDGET` | 30 | Seconds a healthy restore may take. Healthy restores take 9-16 s, with one request per RG and no refusal. |
+
+A value that is not a whole number of seconds falls back to the default and
+prints an info line.
+
+Each restore records exactly one verdict:
+
+- **PASS** "fw0 already primary", or "fw0 restored as primary in Ns (R
+  request(s), 0 refused)": no refusal, and within `RESTORE_FW0_BUDGET`.
+- **FAIL** "fw0 restored only after Ns": the cluster was restored, but a
+  request was refused or the restore took longer than `RESTORE_FW0_BUDGET`.
+  The run continues on the restored cluster, but the run is not healthy. A
+  refused or slow restore is the #18521 class, for example a half-open
+  session sync or a demotion barrier fence that has not been discharged
+  ("session sync barrier fenced ... no re-prime has been acked on it yet").
+  Do not raise the budget to make this pass; the FAIL names the last refusal.
+- **FAIL** "could not restore fw0 as primary within Ns":
+  `RESTORE_FW0_WAIT` ran out. At preflight, both harnesses stop here.
+
+`deploy-lib-selftest.sh` drives this restore with a mocked `incus` and clock
+(`test_restore_fw0_verdict_18523`).
+
 ### 5. Private RG Election Test (`./test/incus/test-private-rg.sh`)
 
 Validates private-rg-election feature (VRRP elimination) on the shared `loss`
@@ -170,12 +233,59 @@ asserts no more than `MAX_LOST_PINGS` (default 2) lost pings per restart, over
 must run after VRRP MASTER). It is not a zero-loss or hitless-restart gate:
 HA mode does not do hitless restart.
 
+Between cycles it restores fw0 as the owner of every RG with the same
+verdict and the same `RESTORE_FW0_WAIT` / `RESTORE_FW0_BUDGET` knobs as the
+hard crash test (see "Restoring fw0 between phases" above).
+
+### 6a. One-node RG-move soak (`make test-rg-move-soak`)
+
+The operator's own loop: from ONE node, `request chassis cluster failover
+redundancy-group <rg> node 0|1`, alternating, `SOAK_SLEEP` seconds after each
+CLI return, under IPv4/IPv6 iperf3 and ping from the LAN host. It never fixes
+clocks. Each move is scored PASS / COST / FAIL / VOID against both nodes'
+views, `rg-active`, the helpers, whether the traffic itself followed (RETH
+counters and the LAN neighbour entry) and the move window's loss and stalls.
+Knobs, verdicts and how to read each failure: `docs/ha-rg-move-correctness.md`;
+pass rule: regression matrix row H11.
+
+### 7. Active/Active Split Test (`make test-active-active`)
+
+Moves RG1 (WAN) to fw1 while RG2 (LAN) stays on fw0, then checks that an
+iperf3 stream survives the split through fabric forwarding and the
+reunification. The split itself is scored from both nodes' own
+`show chassis cluster status` by `deploy_active_active_split_verdict`
+(`test/incus/deploy-lib.sh`, #18523):
+
+- **Ownership**: RG1 is `primary` on node1 in both views, and node0 is
+  `secondary` or `secondary-hold`. RG2 is `primary` on node0 in fw0's view
+  and non-owning in fw1's view.
+- **Forwarding**: each node's own `Forwarding: rg-active=` line. RG1 is
+  `active` on fw1 and `inactive` on fw0; RG2 is the reverse. The daemon
+  prints this line for every RG in both election modes, so the check is the
+  same in private-RG and legacy VRRP-backed mode.
+- A `-- DIVERGENCE: ...` suffix on any of these lines is a FAIL that quotes
+  the suffix (#7367). A missing row or line is a FAIL, never a skip.
+
 ## Known Issues and Workarounds
 
 ### Deploy doesn't update active config (raw path)
 **Issue:** `XPF_DEPLOY_FAST=1 make cluster-deploy` (raw path) pushes `xpf.conf` but the daemon loads from the configstore DB (`active.json`). Config changes in `xpf.conf` are ignored on subsequent deploys. (Since #9486 the default deb deploy preserves node config and never pushes `xpf.conf` — this issue cannot occur there.)
 **Fix:** Deploy script now clears `.configdb/` after pushing config (fixed in `cluster-setup.sh`, raw path).
 **Workaround:** Manually run `rm -rf /etc/xpf/.configdb` on VMs before restart.
+
+### HA restart/stop results distorted by a stale `/etc` xpfd unit (#18544)
+**Issue:** On a node that was raw-deployed even once,
+`/etc/systemd/system/xpfd.service` (and the two boot-barrier units next to
+it) shadows the packaged unit. Before #18544 the deb deploy never removed it. `systemctl show xpfd -p FragmentPath -p KillMode`
+then reports the `/etc` path and, on old copies, `KillMode=control-group`.
+systemd kills the userspace helper at SIGTERM, and xpfd's shutdown cannot
+clear `rg_active`. That distorts every restart/stop HA measurement (#18540).
+**Fix:** The deb deploy removes the shadows, daemon-reloads, and asserts the
+packaged units are loaded before the cut (`deploy_reconcile_unit_shadows`,
+`docs/test_env.md`). The fix reaches a
+cluster on its next `make cluster-deploy`. Before you trust restart/stop
+numbers from a node, check that `FragmentPath` is under
+`/usr/lib/systemd/system`.
 
 ### IPv6 SNAT requires explicit ::/0 rule
 **Issue:** SNAT rule `source-address 0.0.0.0/0` only matches IPv4. IPv6 traffic passes without SNAT, causing return path failures if the upstream lacks a route to the internal prefix.

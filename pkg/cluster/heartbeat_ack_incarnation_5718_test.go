@@ -615,6 +615,20 @@ func TestOnlyHandleDisconnectEmptiesTheRegistry_5718(t *testing.T) {
 				continue
 			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				// #18521 review round 2: production slot writes go through
+				// setConnSlotLocked (TestConnSlotWritesGoThroughTheSetter18525),
+				// so a slot is nilled by `s.setConnSlotLocked(idx, nil)`. Count
+				// that call as the site, attributed to its caller, alongside
+				// any direct `s.connN = nil` the setter census would also reject.
+				if call, ok := n.(*ast.CallExpr); ok {
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "setConnSlotLocked" &&
+						len(call.Args) == 2 {
+						if id, ok := call.Args[1].(*ast.Ident); ok && id.Name == "nil" {
+							sites = append(sites, site{fn: fn.Name.Name, pos: fset.Position(call.Pos()).String()})
+						}
+					}
+					return true
+				}
 				as, ok := n.(*ast.AssignStmt)
 				if !ok {
 					return true
@@ -638,7 +652,7 @@ func TestOnlyHandleDisconnectEmptiesTheRegistry_5718(t *testing.T) {
 	}
 
 	if len(sites) == 0 {
-		t.Fatal("no `s.connN = nil` site found in package cluster — if the fabric registry " +
+		t.Fatal("no `s.connN = nil` / `setConnSlotLocked(idx, nil)` site found in package cluster — if the fabric registry " +
 			"was restructured, re-point this guard rather than deleting it")
 	}
 	for _, s := range sites {

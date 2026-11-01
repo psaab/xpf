@@ -193,87 +193,23 @@ func (d *Daemon) applyDirectVIPOwnership(rgID int, want bool, reason string) {
 	}
 }
 
-// directAddVIPs adds VIPs for RETH interfaces in the given RG using netlink.
-// IPv6 addresses are added with IFA_F_NODAD to avoid DAD delays.
-// Idempotent — skips addresses that already exist. Returns the number of
-// addresses actually added (non-EEXIST).
+// directAddVIPs converges rgID's RETH VIPs for the RG OWNER: adds every
+// configured VIP that is absent (IPv6 with IFA_F_NODAD), stamps each as
+// xpf-owned, and deletes every stamped leftover the config no longer assigns
+// to its netdev (#18573 — a renumbered or removed RETH address). Idempotent.
+// Returns the number of addresses actually created. See
+// reconcileDirectVIPAddrs (direct_vip_reconcile_18573.go).
 func (d *Daemon) directAddVIPs(rgID int) int {
-	cfg := d.store.ActiveConfig()
-	if cfg == nil {
-		return 0
-	}
-	var added int
-	vipMap := vrrp.RethVIPsForRG(cfg, rgID)
-	for ifName, addrs := range vipMap {
-		linkByName := d.linkByNameFn
-		if linkByName == nil {
-			linkByName = netlink.LinkByName
-		}
-		link, err := linkByName(ifName)
-		if err != nil {
-			if d.shouldWarnVIPIface(ifName) {
-				slog.Warn("directAddVIPs: interface not found", "iface", ifName, "err", err)
-			}
-			continue
-		}
-		// Interface exists now — clear any previous warning suppression
-		d.clearVIPWarning(ifName)
-		for _, cidr := range addrs {
-			addr, err := netlink.ParseAddr(cidr)
-			if err != nil {
-				slog.Warn("directAddVIPs: bad address", "addr", cidr, "err", err)
-				continue
-			}
-			if addr.IP.To4() == nil {
-				addr.Flags = unix.IFA_F_NODAD
-			}
-			if err := netlink.AddrAdd(link, addr); err != nil {
-				if !errors.Is(err, syscall.EEXIST) {
-					slog.Warn("directAddVIPs: failed to add", "iface", ifName, "addr", cidr, "err", err)
-				}
-			} else {
-				slog.Info("directAddVIPs: added VIP", "iface", ifName, "addr", cidr)
-				added++
-			}
-		}
-	}
+	added, _ := d.reconcileDirectVIPAddrs(rgID, true)
 	return added
 }
 
-// directRemoveVIPs removes VIPs for RETH interfaces in the given RG.
-// Ignores "not found" errors for idempotency. Returns the number of
-// addresses actually removed.
+// directRemoveVIPs converges rgID's RETH VIPs for a NON-owner: deletes every
+// configured VIP of the RG (stamped or not) and every stamped leftover, so a
+// former owner also drops an address a commit renumbered away (#18573).
+// Idempotent; returns the number of addresses actually removed.
 func (d *Daemon) directRemoveVIPs(rgID int) int {
-	cfg := d.store.ActiveConfig()
-	if cfg == nil {
-		return 0
-	}
-	var removed int
-	vipMap := vrrp.RethVIPsForRG(cfg, rgID)
-	for ifName, addrs := range vipMap {
-		linkByName := d.linkByNameFn
-		if linkByName == nil {
-			linkByName = netlink.LinkByName
-		}
-		link, err := linkByName(ifName)
-		if err != nil {
-			continue // interface may not exist yet
-		}
-		for _, cidr := range addrs {
-			addr, err := netlink.ParseAddr(cidr)
-			if err != nil {
-				continue
-			}
-			if err := netlink.AddrDel(link, addr); err != nil {
-				if !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ESRCH) && !errors.Is(err, syscall.EADDRNOTAVAIL) {
-					slog.Warn("directRemoveVIPs: failed to remove", "iface", ifName, "addr", cidr, "err", err)
-				}
-			} else {
-				slog.Info("directRemoveVIPs: removed VIP", "iface", ifName, "addr", cidr)
-				removed++
-			}
-		}
-	}
+	_, removed := d.reconcileDirectVIPAddrs(rgID, false)
 	return removed
 }
 
@@ -749,6 +685,7 @@ func (d *Daemon) resetVIPWarnings() {
 	d.vipWarnedMu.Lock()
 	defer d.vipWarnedMu.Unlock()
 	d.vipWarnedIfaces = nil
+	d.directVIPLogged = nil // #18573 per-(netdev, VIP) latches
 }
 
 // shouldWarnVIPIface reports whether this interface's "interface not found"

@@ -3154,6 +3154,42 @@ set security log stream syslog-server host port 514
 > show configuration | display set | match log
 ```
 
+### xpf: display pipes in operational mode (#18664)
+
+`show configuration [<stanza> ...] | display <set|json|xml|inheritance>`
+works in operational mode on both the local console and the remote `cli`
+binary. You do not need configuration mode. A trailing output filter may
+follow it (`| display set | match log`, `| display json | count`). From
+configuration mode, `run show configuration | display set` does the same.
+
+- The pipe must be a separate word: `show configuration | display set`.
+  `show configuration |display set` is refused, with a hint showing the
+  spaced form.
+- An unknown word before the pipe is refused exactly as without the pipe:
+  `show configuration bogus | display set` ->
+  `unknown show configuration command: bogus`.
+- An invalid modifier is named: `| display yaml` ->
+  `unknown display format "yaml"`, `| frobnicate` ->
+  `syntax error: unknown pipe command "frobnicate"`.
+- On the remote `cli`, `| display` belongs to `show configuration` and
+  `show system rollback <N>`. After a keyword-only command that does not
+  parse it, the pipe is refused (exit 1, as before #18664) rather than
+  silently dropped; the message names the modifier:
+  `show chassis cluster | display json` ->
+  `syntax error: "show chassis cluster" does not accept the output modifier "| display json"`.
+- Operational `show configuration [<path>] | compare [rollback <N>]` is a
+  Junos command that xpf does not support. The remote `cli` refuses it and
+  names the command to use instead:
+  - `show configuration | compare rollback <N>` -> use
+    `show system rollback <N> | compare` (or `show system rollback compare
+    <N>`). Both diff rollback N against the ACTIVE configuration, which is
+    what the Junos command shows, without entering configuration mode.
+  - Bare `show configuration | compare`, or any scoped form such as
+    `show configuration interfaces | compare rollback 1` -> use
+    configuration mode: `configure`, then `show [<path>] | compare
+    [rollback <N>]`. That compares the CANDIDATE configuration, and it can
+    scope to a subtree, which the rollback compare cannot.
+
 ---
 
 ## Notes for xpf Implementation

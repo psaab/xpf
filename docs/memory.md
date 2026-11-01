@@ -83,13 +83,43 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 - **Timing**: compiler-default private-RG election uses heartbeat staleness
   (`set chassis cluster heartbeat-interval <ms>` ×
   `set chassis cluster heartbeat-threshold <n>`): 100ms × 5 = 500ms at
-  runtime defaults, 200ms × 5 = 1s in the deployed lab. If sync remains
-  connected with peer traffic ≤2s old, the guard suppresses heartbeat timeout
-  (5s continuous-suppression cap). Silent node death takes
-  max(threshold, remaining sync-recency window) plus up to one tick:
-  0.5–2.1s at defaults and 1.0–2.2s in the lab, phase-dependent. Process exit
-  that closes sync or idle sync falls through at the raw threshold, subject to
-  startup/restart grace. Legacy VRRP-backed RETH uses a 30ms default advert
+  runtime defaults, 200ms × 5 = 1s in the deployed lab. <!-- mirror:private-rg-peer-loss-detection n=6 -->The receiver checks
+  staleness every quarter heartbeat interval (interval / 4, floored at 10 ms;
+  #18639), so a peer is declared within that check period of its last admitted
+  heartbeat turning interval × threshold old. While session sync looks
+  connected, a peer that has acked a sync-level heartbeat on this incarnation
+  (#18570) must answer a liveness probe sent at its first missed heartbeat
+  (once its last heartbeat is 1.5 intervals old); any sync frame handled after
+  the probe counts as the answer. A hard-crashed peer is then declared at the
+  threshold, provided the ack latch had armed and no frame the peer queued
+  before it died is handled after the probe: about 0.5–0.525 s after its last
+  heartbeat (0.4–0.525 s after the crash) at defaults and 1.0–1.05 s (0.8–1.05
+  s) in the lab. A frame is stamped when it is handled, not when it arrived
+  (`notePeerLiveness`), so a pre-crash backlog handled after the probe answers
+  it; on the half-open socket a hard crash leaves, no FIN watchdog bounds that
+  backlog, and the recency rule below runs from the last such frame. If no
+  probe could be pre-armed because the late heartbeats fell inside the 5 s
+  restart grace or the boot floor, the crash is declared counting from the
+  grace's end: at the first check after it if sync is then disconnected or
+  more than 2 s stale; otherwise an ack-capable peer is probed then and gets
+  (threshold − 1.5) intervals (350 ms at defaults, 700 ms in the lab) plus a
+  check period, and a peer without ack support follows the rule below. A
+  peer without ack support keeps the #17056 recency rule: max(threshold,
+  remaining 2 s sync window) plus a check period, with a 5 s cap on continuous
+  suppression. A process crash that sends FIN, or sync idle for more than 2 s,
+  falls back to the plain threshold when the receiving standby is caught up,
+  subject to startup/restart grace; a standby still draining a backlog when
+  the peer's FIN/RST arrives keeps sync installed while it drains, and its
+  frames refresh peer recency for up to one 1 s watchdog tick, so there
+  detection is up to max(threshold, ~3 s) plus a check period — about 3.0 s at
+  defaults and 3.05 s in the lab, under the 5 s cap (#18521; the probe does
+  not shorten it, because backlog frames handled after the probe answer it).
+  `show chassis cluster information` prints "Liveness probes sent: N
+  (unanswered at timeout: M, peer acks probes: yes|no)", which tells an
+  operator which case applies. These are detection times, not traffic
+  restoration: activation adds about 0.34–0.44 s from peer-lost to the first
+  ping reply on the lab clusters (#18561), so a lab crash outage lands near
+  1.4 s.<!-- /mirror:private-rg-peer-loss-detection --> Legacy VRRP-backed RETH uses a 30ms default advert
   and >90ms/<120ms steady-state master-down timer; only a non-preempting
   BACKUP arms a 3s deafness shield. Planned legacy VRRP shutdown emits three
   priority-0 adverts and arms a 1ms backup timer (test constraint <50ms, not
@@ -98,10 +128,10 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
   peer promotes through heartbeat-loss detection, no earlier than the
   heartbeat threshold and possibly later under the sync guard. No end-to-end
   restoration/failback number is asserted
-  (`pkg/config/compiler_system.go:3132-3137`;
-  `pkg/cluster/heartbeat.go:61-98,1916-1960`;
-  `pkg/cluster/heartbeat_manager.go:790-832`;
-  `pkg/daemon/daemon_ha_sync.go:170-206`;
+  (`compileChassis` in `pkg/config/compiler_chassis.go`;
+  `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
+  `handlePeerTimeout` in `pkg/cluster/heartbeat_manager.go`;
+  `syncSuppressesPeerTimeoutLocked` in `pkg/cluster/heartbeat_suppress.go`;
   `pkg/vrrp/vrrp.go:153-166`;
   `pkg/vrrp/instance_timing.go:11-41,112-128`;
   `pkg/vrrp/instance.go:770-807`;

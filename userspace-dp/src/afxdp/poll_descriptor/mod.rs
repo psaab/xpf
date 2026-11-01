@@ -319,6 +319,60 @@ fn transit_source_class_disposition(disposition: ForwardingDisposition) -> bool 
     )
 }
 
+/// #18533 round 2: the routing domain both transit address-class gates judge
+/// in, or `None` for a disposition neither gate applies to. Split out so a
+/// caller running BOTH gates (the flow-cache hit) resolves the domain once —
+/// `effective_routing_domain_for_flow` falls back to `ingress_routing_domain`
+/// (two map probes) for every domain-0 flow.
+#[inline]
+pub(in crate::afxdp) fn transit_class_routing_domain(
+    forwarding: &ForwardingState,
+    disposition: ForwardingDisposition,
+    flow_routing_domain: u32,
+    meta: ForwardPacketMeta,
+    fabric_ingress_zone: Option<u32>,
+) -> Option<u32> {
+    transit_source_class_disposition(disposition).then(|| {
+        crate::afxdp::forwarding::effective_routing_domain_for_flow(
+            forwarding,
+            flow_routing_domain,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            fabric_ingress_zone,
+        )
+    })
+}
+
+/// #18533 round 2: [`transit_source_class_drop`] with the domain from
+/// [`transit_class_routing_domain`].
+#[inline]
+pub(in crate::afxdp) fn transit_source_class_drop_in(
+    forwarding: &ForwardingState,
+    source: IpAddr,
+    transit_domain: Option<u32>,
+) -> bool {
+    transit_domain.is_some_and(|routing_domain| {
+        crate::afxdp::frame::transit_src_is_martian(forwarding, source, routing_domain)
+    })
+}
+
+/// #18533 round 2: [`transit_destination_class_drop`] with the domain from
+/// [`transit_class_routing_domain`].
+#[inline]
+pub(in crate::afxdp) fn transit_destination_class_drop_in(
+    forwarding: &ForwardingState,
+    destination: IpAddr,
+    translated_destination: Option<IpAddr>,
+    transit_domain: Option<u32>,
+) -> bool {
+    transit_domain.is_some_and(|routing_domain| {
+        crate::afxdp::frame::transit_dst_is_martian(forwarding, destination, routing_domain)
+            || translated_destination.is_some_and(|d| {
+                crate::afxdp::frame::transit_dst_is_martian(forwarding, d, routing_domain)
+            })
+    })
+}
+
 #[inline]
 pub(in crate::afxdp) fn transit_source_class_drop(
     forwarding: &ForwardingState,
@@ -328,17 +382,17 @@ pub(in crate::afxdp) fn transit_source_class_drop(
     meta: ForwardPacketMeta,
     fabric_ingress_zone: Option<u32>,
 ) -> bool {
-    if !transit_source_class_disposition(disposition) {
-        return false;
-    }
-    let routing_domain = crate::afxdp::forwarding::effective_routing_domain_for_flow(
+    transit_source_class_drop_in(
         forwarding,
-        flow_routing_domain,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-        fabric_ingress_zone,
-    );
-    crate::afxdp::frame::transit_src_is_martian(forwarding, source, routing_domain)
+        source,
+        transit_class_routing_domain(
+            forwarding,
+            disposition,
+            flow_routing_domain,
+            meta,
+            fabric_ingress_zone,
+        ),
+    )
 }
 
 #[inline]
@@ -351,20 +405,18 @@ pub(in crate::afxdp) fn transit_destination_class_drop(
     meta: ForwardPacketMeta,
     fabric_ingress_zone: Option<u32>,
 ) -> bool {
-    if !transit_source_class_disposition(disposition) {
-        return false;
-    }
-    let routing_domain = crate::afxdp::forwarding::effective_routing_domain_for_flow(
+    transit_destination_class_drop_in(
         forwarding,
-        flow_routing_domain,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-        fabric_ingress_zone,
-    );
-    crate::afxdp::frame::transit_dst_is_martian(forwarding, destination, routing_domain)
-        || translated_destination.is_some_and(|d| {
-            crate::afxdp::frame::transit_dst_is_martian(forwarding, d, routing_domain)
-        })
+        destination,
+        translated_destination,
+        transit_class_routing_domain(
+            forwarding,
+            disposition,
+            flow_routing_domain,
+            meta,
+            fabric_ingress_zone,
+        ),
+    )
 }
 
 #[inline]
@@ -1385,31 +1437,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // flow-cache entry, or reinject can resurrect the
                 // packet; tunnel-decapped inners are judged on their
                 // own (inner) frame and hop limit.
-                if !worker_ctx.forwarding.no_ipv6_reject_zero_hop_limit {
-                    let zero_hop_dst = flow.as_ref().map(|f| f.dst_ip).or_else(|| {
-                        crate::afxdp::frame::parse_packet_destination_from_frame(packet_frame, meta)
-                        });
-                    if let Some(dst) = zero_hop_dst {
-                        let dst_is_local = matches!(
-                            crate::afxdp::forwarding::lookup_forwarding_resolution(
-                                worker_ctx.forwarding,
-                                dst,
+                // #18533: the locality verdict is a full FIB walk, so it is
+                // passed as a closure that runs only for a hop-limit-0 IPv6
+                // packet with the knob unset (`zero_hop_limit_local_drop`
+                // checks those first). The #16841 form computed it eagerly
+                // here for every valid packet, IPv4 included.
+                if zero_hop_limit_local_drop(worker_ctx.forwarding, packet_frame, meta, || {
+                    flow.as_ref()
+                        .map(|f| f.dst_ip)
+                        .or_else(|| {
+                            crate::afxdp::frame::parse_packet_destination_from_frame(
+                                packet_frame,
+                                meta,
                             )
-                            .resolution
-                            .disposition,
-                            ForwardingDisposition::LocalDelivery
-                        );
-                        if zero_hop_limit_local_drop(
-                            worker_ctx.forwarding,
-                            packet_frame,
-                            meta,
-                            dst_is_local,
-                        ) {
-                            telemetry.counters.touched = true;
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
-                        }
-                    }
+                        })
+                        .is_some_and(|dst| {
+                            matches!(
+                                crate::afxdp::forwarding::lookup_forwarding_resolution(
+                                    worker_ctx.forwarding,
+                                    dst,
+                                )
+                                .resolution
+                                .disposition,
+                                ForwardingDisposition::LocalDelivery
+                            )
+                        })
+                }) {
+                    telemetry.counters.touched = true;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
                 }
                 // #7160 (#2387) stage 9b: stamp the flow's ROUTING DOMAIN.
                 // The validated peer zone is the only remote ingress identity;
@@ -3554,6 +3610,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // selector, so ICMP-application DNAT
                                 // sessions survive revalidation.
                                 policy_packet_icmp(packet_frame, meta),
+                                fabric_link_ingress,
                             );
                         let owner_icmp_verdict =
                             if session_hit_revocation.is_none() && foreign_arrival_zone.is_none() {
@@ -8298,11 +8355,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // else-if chain would skip after conversion).
                             // Install the punt seed judged on the
                             // pre-redirect disposition.
+                            // #18174: never for a packet whose TTL / hop limit
+                            // expires here — the poll tail answers it with a
+                            // local Time Exceeded instead of redirecting it, so
+                            // a seed would only leave a session row (a punt seed
+                            // emits no HA delta) for a flow that never left this
+                            // node, the
+                            // FabricRedirect twin of the #14643 rollback the
+                            // ForwardCandidate miss path performs.
                             if should_seed_fabric_punt(
                                 seed_pre_disposition,
                                 packet_fabric_ingress,
                                 decision.nat,
-                            ) {
+                            ) && !matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                            {
                                 let seed_owner_rg = owner_rg_id;
                                 if let Some(seed_metadata) = fabric_punt_seed_metadata(
                                     worker_ctx.forwarding,
@@ -8446,7 +8512,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             decision.resolution.disposition,
                             packet_fabric_ingress,
                             decision.nat,
-                        ) {
+                        ) && !matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                        {
                             // #7770: PUNT SEED. This flow is about to cross the
                             // fabric because the peer owns its egress RG, and it
                             // is leaving here UNADJUDICATED — the session-miss
@@ -10333,6 +10400,47 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 if bindless_selector_match {
                     telemetry.dbg.policy_deny += 1;
                     telemetry.counters.record_transit_ipsec_fence_drop();
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
+                // #18174: a transit packet this node hands to the fabric peer
+                // (split RGs: the egress RG is peer-owned) is still routed by
+                // THIS node — the redirecting node is the hop. The fabric
+                // build decrements TTL / hop limit and refuses a packet that
+                // would expire (`fabric_redirect_build_failed`), and the peer
+                // skips the decrement on fabric ingress, so before this check
+                // nobody answered an expiring probe: traceroute/mtr hop 1 read
+                // `???` whenever the LAN RG and the WAN RG sat on different
+                // nodes (live on tcp, fw1 `fabric_redirect_unsendable_drops`
+                // = every TTL-1 probe). The session-hit and session-miss TE
+                // sites above only cover `ForwardCandidate`; the flow-cache
+                // hit path already covers `FabricRedirect` (#3779). Answer
+                // here, from the ingress unit this node owns, exactly as a
+                // local forward would; a suppressed reply drops the packet.
+                // A fabric arrival is never re-redirected and never decrements
+                // here, and an injected record keeps its TX-pool ownership.
+                if decision.resolution.disposition == ForwardingDisposition::FabricRedirect
+                    && !is_injected
+                    && (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0
+                    && let Some(flow) = flow.as_ref()
+                    && matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                {
+                    if let Some(request) = build_local_time_exceeded_request(
+                        packet_frame,
+                        desc,
+                        meta,
+                        &worker_ctx.ident,
+                        flow,
+                        worker_ctx.forwarding,
+                        worker_ctx.event_stream,
+                        worker_ctx.dynamic_neighbors,
+                        worker_ctx.ha_state,
+                        now_secs,
+                        telemetry.counters,
+                    ) {
+                        binding.scratch.scratch_forwards.push(request);
+                        continue;
+                    }
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }

@@ -262,7 +262,11 @@ func (s *SessionSync) enforceStrictSessionAuth() int {
 				"remote", connRemoteAddrString(c), "grace", strictSessionAuthGrace)
 		}
 		s.stats.PreKeyAuthEvictions.Add(1)
-		s.handleDisconnect(c)
+		reason := "pre-key connection never authenticated within the grace"
+		if doomedRetired[i] {
+			reason = "connection on a retired control-link key did not rekey within the grace"
+		}
+		s.disconnectConnNow(c, reason, nil)
 	}
 	return len(doomed)
 }

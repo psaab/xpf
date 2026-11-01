@@ -486,3 +486,36 @@ fn pmech_replay_sources_owned_frame_for_held_packets_15243() {
         "a refused decapsulated hold must be counted"
     );
 }
+
+/// #18533: the zero-hop-limit gate runs for every valid packet, and its
+/// locality verdict is a full FIB walk. That walk must stay inside the
+/// closure handed to `zero_hop_limit_local_drop` (which evaluates it only
+/// for a hop-limit-0 IPv6 packet), never be bound before the call — the
+/// #16841 shape that charged it to every IPv4 packet. The helper's own
+/// ordering is pinned by
+/// `zero_hop_gate_resolves_locality_only_for_ipv6_hop_limit_zero_18533`.
+#[test]
+fn zero_hop_gate_fib_walk_stays_in_the_lazy_closure_18533() {
+    let source = include_str!("mod.rs");
+    let gate = source
+        .split("#16841: Junos zero-hop-limit local rejection")
+        .nth(1)
+        .expect("zero-hop gate comment exists")
+        .split("#7160 (#2387) stage 9b")
+        .next()
+        .expect("zero-hop gate ends before stage 9b");
+    let call = gate
+        .find("zero_hop_limit_local_drop(")
+        .expect("the gate calls zero_hop_limit_local_drop");
+    let walk = gate
+        .find("lookup_forwarding_resolution(")
+        .expect("the gate resolves locality through the FIB");
+    assert!(
+        call < walk,
+        "the FIB walk must be inside the locality closure, not computed before the gate"
+    );
+    assert!(
+        !gate.contains("let dst_is_local"),
+        "no eager locality binding may precede the gate"
+    );
+}

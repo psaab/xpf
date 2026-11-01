@@ -170,6 +170,15 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
             .and_then(|b| <[u8; 16]>::try_from(b).ok())
             .map(Ipv6Addr::from);
         let expected_outer_dst = match fwd.decision.nat.rewrite_src {
+            // #18174: the fabric-ingress, already-reversed twin of the v4
+            // arm — the quote names the pre-NAT client, so does the outer
+            // destination.
+            Some(_)
+                if (meta.meta_flags & FABRIC_INGRESS_FLAG) != 0
+                    && IpAddr::V6(hdr.src_wire) == fwd.key.src_ip =>
+            {
+                Some(hdr.src_wire)
+            }
             Some(IpAddr::V6(v6)) => Some(v6),
             Some(_) => None,
             None => Some(hdr.src_wire),
@@ -216,6 +225,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
             related_expected_zone: fwd_egress_zone,
             metadata: fwd.metadata,
             outbound_snat: false,
+            quoted_is_reply: false,
             budget_key: fwd.key.clone(),
         });
     }
@@ -290,6 +300,14 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
             now_ns,
         )
         .map(|resolved| (resolved, true))
+    })
+    // #18562: the error for a NEW split-RG flow can land on a worker other
+    // than the one holding its worker-local punt seed, before the WAN owner's
+    // HA import reaches the shared maps. Last resort, fabric ingress, forward
+    // quote only — see `punt_seed_forward_quote_match`.
+    .or_else(|| {
+        super::punt_seed_forward_quote_match(ctx, &meta, &embedded_key, now_ns)
+            .map(|resolved| (resolved, false))
     });
     let Some((resolved, via_reply_key)) = found else {
         return EmbeddedMatchOutcome::NoMatch;
@@ -444,6 +462,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
         resolution,
         metadata: sl.metadata,
         outbound_snat,
+        quoted_is_reply,
         budget_key,
         related_expected_zone,
     })

@@ -681,6 +681,18 @@ mod tests_icmp_te;
 #[cfg(test)]
 #[path = "tests_icmp_zero_hop_15707.rs"]
 mod tests_icmp_zero_hop_15707;
+// #18174: traceroute/mtr through SNAT + RETH, end to end on the poll path.
+#[cfg(test)]
+#[path = "tests_mtr_icmp_errors_18174.rs"]
+mod tests_mtr_icmp_errors_18174;
+
+#[cfg(test)]
+#[path = "tests_neighbor_learn_fresh_18533.rs"]
+mod tests_neighbor_learn_fresh_18533;
+
+#[cfg(test)]
+#[path = "tests_hit_path_cost_18533.rs"]
+mod tests_hit_path_cost_18533;
 #[cfg(test)]
 #[path = "tests_named_pre_l3_10498.rs"]
 mod tests_named_pre_l3_10498;
@@ -738,6 +750,12 @@ mod tests_directed_broadcast_14654;
 #[path = "tests_fabric_zone_stamp.rs"]
 mod tests_fabric_zone_stamp;
 #[cfg(test)]
+#[path = "tests_split_rg_failback_18531.rs"]
+mod tests_split_rg_failback_18531;
+#[cfg(test)]
+#[path = "tests_punt_seed_shadow_18620.rs"]
+mod tests_punt_seed_shadow_18620;
+#[cfg(test)]
 #[path = "tests_gre_local_delivery.rs"]
 mod tests_gre_local_delivery;
 #[cfg(test)]
@@ -790,6 +808,9 @@ mod tests_synced_static_nptv6_15191;
 #[cfg(test)]
 #[path = "tests_txn_flow_cache.rs"]
 mod tests_txn_flow_cache;
+#[cfg(test)]
+#[path = "tests_late_synced_publish_18550.rs"]
+mod tests_late_synced_publish_18550;
 // #7541: the same bound with an IPv6 OUTER. Separate module rather than added to
 // the file above so the v4 cells' file-level docstring stays true about itself.
 #[cfg(test)]

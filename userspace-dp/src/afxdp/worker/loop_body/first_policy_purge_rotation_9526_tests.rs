@@ -2285,3 +2285,63 @@ fn extensive_rematch_declined_icmp_rebinds_renamed_zones_13655() {
     drop(shared);
     harness.shutdown();
 }
+
+/// #18562 (review seat L item 4): the REAL worker construction must hand its
+/// session table the node's ONE punt-seed directory
+/// (`sessions.set_punt_seed_directory(shared_owner_rg_indexes.punt_seeds)` in
+/// `worker_loop`). Without it every worker mirrors its seeds into a private
+/// directory, no other worker can see them, and the cross-worker fix silently
+/// fails closed — the full suite stayed green with the call deleted.
+///
+/// Observable: the directory `Arc`'s holder count. The bundle moved into the
+/// worker already holds one; a wired table holds exactly one more while the
+/// worker runs, and releases both on exit. RED with the wiring call removed
+/// (`running == baseline`).
+#[test]
+fn worker_loop_wires_its_table_to_the_node_punt_seed_directory_18562() {
+    let coord = Coordinator::new();
+    let channel = RuntimeViewChannel::default();
+    let (v, _forwarding) = view(1, &[rule("p-first", 0)]);
+    channel.publish(v);
+    let mut shared = WorkerSharedDataplane::from_coord(&coord);
+    shared.runtime = channel.reader();
+    let directory = Arc::clone(&shared.sessions.owner_rg_indexes.punt_seeds);
+    let baseline = Arc::strong_count(&directory);
+    let commands: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let heartbeat = Arc::new(AtomicU64::new(0));
+    let (startup_tx, _startup_rx) = std::sync::mpsc::channel();
+    let control = WorkerControlChannels::new(
+        commands,
+        Vec::new(),
+        Arc::new(WorkerCommandQueues::new(BTreeMap::new())),
+        stop.clone(),
+        heartbeat.clone(),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(crate::afxdp::binding_state::ExportBufferState::new()),
+        None,
+        startup_tx,
+    );
+    let plan = WorkerLaunchPlan::new(0, 0, Vec::new(), crate::PollMode::BusyPoll);
+    let cos = WorkerCoSState::from_coord(&coord);
+    let telemetry = WorkerPublishedTelemetry::new(
+        Arc::new(Mutex::new(ExceptionEventRing::new())),
+        Arc::new(Mutex::new(VecDeque::new())),
+        Arc::new(Mutex::new(None)),
+        Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+        Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new()),
+        Arc::new(crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new()),
+    );
+    let worker = std::thread::spawn(move || worker_loop(plan, shared, control, cos, telemetry));
+    wait_for_iterations(&heartbeat, 2);
+    let running = Arc::strong_count(&directory);
+    stop.store(true, Ordering::Relaxed);
+    worker.join().expect("worker thread exits cleanly");
+    let after = Arc::strong_count(&directory);
+    assert_eq!(
+        running,
+        baseline + 1,
+        "the running worker's session table must hold the node's punt-seed directory"
+    );
+    assert_eq!(after, baseline - 1, "the exited worker releases its bundle and its table");
+}

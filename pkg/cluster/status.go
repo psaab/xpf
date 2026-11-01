@@ -97,6 +97,11 @@ func (m *Manager) FormatStatus() string {
 		} else {
 			fmt.Fprintf(&b, "Peer session-sync wire version: %d\n", pw)
 		}
+		// #18585: the measured peer wall-clock offset; absent until an
+		// admitted heartbeat carried the peer's clock.
+		if line := m.formatPeerClockLine(); line != "" {
+			fmt.Fprintln(&b, line)
+		}
 	}
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "%-6s %-8s %-14s %-8s %-8s %s\n",
@@ -284,9 +289,19 @@ func FormatVRRPConfigRows(cfg *config.Config) string {
 	return b.String()
 }
 
+// SetInformationExtraFunc installs a renderer whose text FormatInformation
+// appends after its own sections. The daemon uses it for state the Manager does
+// not own (the neighbor warm-up pass, #18625). fn runs without m.mu held.
+func (m *Manager) SetInformationExtraFunc(fn func() string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.informationExtraFn = fn
+}
+
 // FormatInformation returns detailed cluster information matching vSRX output.
 func (m *Manager) FormatInformation() string {
 	m.mu.RLock()
+	extraFn := m.informationExtraFn
 	peerAlive := m.peerAlive
 	peerNodeID := m.peerNodeID
 	localVersion := m.localSoftwareVersion
@@ -367,6 +382,9 @@ func (m *Manager) FormatInformation() string {
 		}
 		fmt.Fprintf(&b, "  Peer software version: %s\n", peerVersion)
 		fmt.Fprintf(&b, "  Peer HA protocol version: %d\n", peerProtocol)
+		if line := m.formatPeerClockLine(); line != "" {
+			fmt.Fprintf(&b, "  %s\n", line)
+		}
 	}
 	fmt.Fprintf(&b, "  Sync transport: %s\n", m.SyncTransport())
 	fmt.Fprintln(&b)
@@ -482,6 +500,14 @@ func (m *Manager) FormatInformation() string {
 	fmt.Fprintf(&b, "  Epoch out-of-band rejected: %d\n", hbStats.EpochOutOfBandRejected)
 	fmt.Fprintf(&b, "  Epoch raises declined:      %d%s\n",
 		hbStats.EpochRaiseDeclinedAheadOfClock, epochRaiseDeclineNote(hbStats))
+	// #18561: the heartbeat-timeout liveness probe over session sync.
+	ackSupported, probesSent, probesUnanswered := m.LivenessProbeStats()
+	peerAcks := "no"
+	if ackSupported {
+		peerAcks = "yes"
+	}
+	fmt.Fprintf(&b, "  Liveness probes sent:       %d (unanswered at timeout: %d, peer acks probes: %s)\n",
+		probesSent, probesUnanswered, peerAcks)
 	fmt.Fprintln(&b)
 
 	// Sync link statistics.
@@ -645,6 +671,14 @@ func (m *Manager) FormatInformation() string {
 		fmt.Fprintln(&b, "Heartbeat events:")
 		for _, ev := range hbEvents {
 			fmt.Fprintf(&b, "  %s  %s\n", ev.Time.Format("Jan 02 15:04:05"), ev.Message)
+		}
+	}
+
+	// #18625: daemon-owned state (the neighbor warm-up pass).
+	if extraFn != nil {
+		if extra := extraFn(); extra != "" {
+			fmt.Fprintln(&b)
+			b.WriteString(extra)
 		}
 	}
 

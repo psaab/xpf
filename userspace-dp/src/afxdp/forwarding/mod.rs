@@ -418,6 +418,14 @@ pub(in crate::afxdp) fn unknown_ingress_vlan(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// #18533 round 2 test instrument: `ingress_routing_domain` resolutions
+    /// past the single-bool gate on this thread.
+    pub(in crate::afxdp) static INGRESS_ROUTING_DOMAIN_RESOLVES_FOR_TEST: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// #7160 (#2387): the ROUTING DOMAIN a received frame's flow belongs to — the
 /// value stamped onto `SessionKey.routing_domain` so two routing instances
 /// that share a 5-tuple are two conntrack entries rather than one.
@@ -463,6 +471,8 @@ pub(in crate::afxdp) fn ingress_routing_domain(
     if !forwarding.has_routing_domains {
         return 0;
     }
+    #[cfg(test)]
+    INGRESS_ROUTING_DOMAIN_RESOLVES_FOR_TEST.with(|count| count.set(count.get() + 1));
     if let Some(zone) = fabric_ingress_zone.filter(|zone| *zone != 0) {
         return forwarding
             .zone_routing_domain
@@ -606,6 +616,16 @@ mod tests_noroute_capped_import_9054;
 #[cfg(test)]
 #[path = "tests_noroute_unresolved_16021.rs"]
 mod tests_noroute_unresolved_16021;
+// #18517: split-node bare-gateway binding (peer-owned rows only, ECMP, VRF,
+// fabric fate) and the #15917 gateway-owner terminal attribution.
+#[cfg(test)]
+#[path = "tests_split_rg_gateway_18517.rs"]
+mod tests_split_rg_gateway_18517;
+// #18566: a cached FabricRedirect is superseded once its destination RG is
+// activated on this node.
+#[cfg(test)]
+#[path = "tests_fabric_redirect_activation_18566.rs"]
+mod tests_fabric_redirect_activation_18566;
 // #9522 Phase 0: selected lookup-semantic coverage for the route FIB (parity
 // corpus for a future LPM cutover; test-only, no production change).
 #[cfg(test)]

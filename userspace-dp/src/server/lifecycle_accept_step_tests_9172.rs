@@ -85,8 +85,9 @@ fn nothing_pending_keeps_the_loops_poll_interval_9172() {
         Instant::now(),
     );
     match d.step {
-        AcceptStep::Sleep(s) => assert_eq!(s, Duration::from_millis(10)),
-        other => panic!("WouldBlock must poll, got {other:?}"),
+        // #18541: an idle wait (readiness-woken), not a failure-backoff sleep.
+        AcceptStep::Idle(s) => assert_eq!(s, Duration::from_millis(10)),
+        other => panic!("WouldBlock must wait idle for a connection, got {other:?}"),
     }
     assert!(d.log.is_none(), "an idle poll writes nothing");
     assert_eq!(b.failures, 0, "an idle poll is not a failure episode");

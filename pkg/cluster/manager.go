@@ -189,6 +189,10 @@ type abortedPeerTransferFence struct {
 
 // Manager manages cluster redundancy group states.
 type Manager struct {
+	// peerClock is the #18585 peer wall-clock offset measured from admitted
+	// heartbeats (peer_clock_skew_18585.go). Its own mutex; never under mu.
+	peerClock peerClockState
+
 	nodeID         int
 	clusterID      int
 	groups         map[int]*RedundancyGroupState
@@ -292,6 +296,11 @@ type Manager struct {
 	// their deliberate holds are never auto-restored. Read/written under m.mu.
 	remoteTransferOutLeaseUntil map[int]time.Time
 	remoteTransferOutLeaseReqID map[int]uint64
+	// remoteTransferOutLeaseChannel binds each live lease to the session-sync
+	// connection set that was installed when the request demoted us (#18521
+	// review round 2). The leased hold outlives the 2s dual-resign rescue
+	// only while that binding is intact; see transferChannelIntactLocked.
+	remoteTransferOutLeaseChannel map[int]transferChannelBinding
 	// remoteTransferOutLease is how long an armed lease survives without a
 	// commit before electRG restores the owner. Sized above the requester's
 	// worst-case post-ACK commit latency; see DefaultRemoteTransferOutLease and
@@ -662,6 +671,24 @@ type Manager struct {
 	// the same critical section (#12165, #17056).
 	hbSuppressStart int64
 
+	// hbLivenessProbeMono is the CLOCK_MONOTONIC nanos stamp of the
+	// outstanding sync-channel liveness probe sent while peer heartbeats are
+	// late or suppressed (#18561); 0 = none. Under m.mu, cleared with
+	// hbSuppressStart.
+	hbLivenessProbeMono int64
+	// hbLivenessProbeAnswerBy is when the outstanding probe's silence starts
+	// to count: minLivenessProbeAnswer after a pre-armed probe, the full
+	// (threshold - 1.5) x interval after one sent on the timeout tick.
+	hbLivenessProbeAnswerBy int64
+	// hbLivenessProven latches, for the current suppression window, that the
+	// peer answered the probe (#18561): the window then falls back to the
+	// recency rule and the 5s cap, with no further probes.
+	hbLivenessProven bool
+	// livenessProbesSent / livenessProbeTimeouts count the #18561 probes and
+	// the unanswered ones a timeout tick acted on (LivenessProbeStats).
+	livenessProbesSent    uint64
+	livenessProbeTimeouts uint64
+
 	// peerHeartbeatFreshFn reports whether a peer heartbeat is currently
 	// within the timeout window (i.e. NOT stale). handlePeerTimeout consults
 	// it under m.mu before the suppression decision so a fresh heartbeat
@@ -688,6 +715,9 @@ type Manager struct {
 	// applying the newest config generation this node sent (#9569). Evaluated
 	// outside mu.
 	peerConfigStaleFn func() (bool, string)
+	// informationExtraFn renders daemon-owned lines appended to
+	// FormatInformation (#18625). Set once; called without m.mu held.
+	informationExtraFn func() string
 
 	// rgForwardingFn reports the DATAPLANE-side view of a redundancy group —
 	// applied rg_active and VRRP mastership. Supplied by the daemon, which owns
@@ -700,6 +730,15 @@ type Manager struct {
 	// actually applied its local failover side effects before the old
 	// owner is told to stand down.
 	localTransferCommitReadyFn func(rgIDs []int) error
+	// transferPreActivateFn / transferPreReleaseFn bracket a requested
+	// transfer on the REQUESTING node (#18559): before the owner is asked to
+	// demote, the daemon opens this node's dataplane forwarding for the
+	// transferring data RGs, so traffic the owner fabric-redirects after its
+	// demotion is forwarded instead of dropped (make-before-break). The
+	// release runs on every exit, success or failure. A failed pre-activation
+	// is not fatal: the transfer proceeds break-before-make, as before.
+	transferPreActivateFn func(rgIDs []int) error
+	transferPreReleaseFn  func(rgIDs []int)
 	// Retry policy for transient pre-failover prepare failures.
 	preManualFailoverRetryTimeout  time.Duration
 	preManualFailoverRetryInterval time.Duration
@@ -773,6 +812,17 @@ type Manager struct {
 	// released by a timeout: rolling rejoin must not promote a restarted node
 	// until it has actually received the peer's complete session state (#10261).
 	syncBulkPrimed bool
+	// syncBulkPrimedAtMono is the CLOCK_MONOTONIC stamp of syncBulkPrimed's
+	// false->true edge (0 while unprimed). #18549: one half of the proof
+	// that ends the cold-boot heartbeat floor early (bootFloorProvenOver).
+	syncBulkPrimedAtMono int64
+
+	// peerHBSteadySinceMono / peerHBLastAdmitMono track the current run of
+	// admitted peer heartbeats with no gap of interval*threshold or more:
+	// when the run began and its latest frame (CLOCK_MONOTONIC, 0 = none).
+	// #18549: the other half of the boot-floor proof. Reset on peer loss.
+	peerHBSteadySinceMono int64
+	peerHBLastAdmitMono   int64
 
 	// syncTransport records whether session sync uses "fabric" or
 	// "control-link" transport. Displayed in CLI status.
@@ -907,6 +957,7 @@ func NewManager(nodeID, clusterID int) *Manager {
 		localTransferOutHoldUntil:      make(map[int]time.Time),
 		remoteTransferOutLeaseUntil:    make(map[int]time.Time),
 		remoteTransferOutLeaseReqID:    make(map[int]uint64),
+		remoteTransferOutLeaseChannel:  make(map[int]transferChannelBinding),
 		abortedPeerTransferReqID:       make(map[int]uint64),
 		abortedPeerTransferFence:       make(map[int]abortedPeerTransferFence),
 		remoteTransferOutLease:         DefaultRemoteTransferOutLease,
@@ -975,6 +1026,16 @@ func (m *Manager) HeartbeatPeerAddr() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.hbPeerAddr
+}
+
+// HeartbeatLocalAddr returns the local address supplied to the last
+// successfully published heartbeat start: the address RestartHeartbeat will
+// reuse (#18597). pkg/daemon's cells read it to prove a control-link renumber
+// moved the heartbeat to the new address.
+func (m *Manager) HeartbeatLocalAddr() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.hbLocalAddr
 }
 
 // HeartbeatControlInterface returns the control-link INTERFACE the RUNNING

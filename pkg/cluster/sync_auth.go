@@ -328,6 +328,13 @@ type authConn struct {
 	peerCapabilityFlags  uint8
 	peerSessionSyncWire  uint16
 	peerCapabilityFlags2 uint8
+	// lastSentConfigGen is the newest config generation written on THIS
+	// connection (#18636), raised as a max at each config write. A boot-id
+	// switch on this priming stream seeds the fresh incarnation's sent mark
+	// from it: the authority's peer-connect push is written to a rebooted
+	// peer's new connection BEFORE that connection's BulkStart reports the
+	// new boot id (the #18521 ordering), and the new boot did receive it.
+	lastSentConfigGen atomic.Uint64
 	// peerCapabilitiesSeen records that this connection delivered the
 	// capabilities frame, including a legacy/short frame. Retirement defers
 	// eviction while this is false because the other fabric's frame may arrive
@@ -395,6 +402,11 @@ type authConn struct {
 	// receiveLoop goroutine that owns this connection — no lock needed.
 	recvSeq  uint64
 	recvSeen bool
+
+	// diag is the #18521 teardown diagnostics: install time, receive-loop
+	// counters, the in-flight handler the watchdog reports, and the first
+	// teardown reason. See sync_conn_teardown_18521.go.
+	diag syncConnDiag
 }
 
 // readAuthed reports whether inbound frames on this connection carry a trailer
@@ -616,6 +628,7 @@ func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabric
 // handled only after the handshake has completed and the connection is wrapped.
 func (s *SessionSync) wrapSyncConn(fabricIdx int, conn net.Conn, mode syncAuthMode, keys syncNoiseKeysWithPSK) *authConn {
 	ac := &authConn{Conn: conn}
+	ac.diag.installedMono.Store(MonotonicNanos())
 	if mode == syncAuthAuthenticated {
 		// #7163: the two directions get INDEPENDENT keys, straight from the
 		// Noise Split(). Before this they were the same bytes, which is what

@@ -50,6 +50,12 @@ pub(crate) struct WorkerLaunchPlan {
     pub(in crate::afxdp) node_id: u8,
     pub(in crate::afxdp) binding_plans: Vec<BindingPlan>,
     pub(in crate::afxdp) poll_mode: crate::PollMode,
+    /// #18640: this worker's (rank, width) in the bring-up's worker set, the
+    /// same set HA session sync fans every peer session out to. The worker's
+    /// session table charges a fanned-out copy toward the per-source quota
+    /// only when this slot designates it (`SessionTable::set_session_limit_shard`).
+    /// (0, 1) charges every copy, the pre-#18640 behaviour for a lone worker.
+    pub(in crate::afxdp) session_limit_shard: (u32, u32),
 }
 impl WorkerLaunchPlan {
     /// Build the per-worker launch plan from its per-worker inputs.
@@ -67,7 +73,14 @@ impl WorkerLaunchPlan {
             node_id,
             binding_plans,
             poll_mode,
+            session_limit_shard: (0, 1),
         }
+    }
+
+    /// #18640: record this worker's rank and the worker-set width.
+    pub(in crate::afxdp) fn with_session_limit_shard(mut self, rank: u32, width: u32) -> Self {
+        self.session_limit_shard = (rank, width.max(1));
+        self
     }
 }
 

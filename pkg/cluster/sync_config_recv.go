@@ -57,22 +57,44 @@ func (s *SessionSync) handleConfigApplyAck(conn net.Conn, payload []byte) bool {
 	s.mu.Lock()
 	if conn != nil && s.activeConnLocked() != conn {
 		s.mu.Unlock()
+		s.stats.ConfigApplyAcksIgnored.Add(1)
+		slog.Debug("cluster sync: ignoring config-apply ack on a connection that is not the active one",
+			"applied_gen", appliedGen, "remote", connRemoteAddrString(conn))
 		return false
 	}
 	lastSent := s.configApplyDebtSnapshot16756().generation
 	if lastSent == 0 || appliedGen > lastSent {
 		s.mu.Unlock()
+		s.stats.ConfigApplyAcksIgnored.Add(1)
 		slog.Debug("cluster sync: ignoring config-apply ack for an unsent generation",
 			"applied_gen", appliedGen, "last_sent_gen", lastSent)
 		return false
 	}
+	s.stats.ConfigApplyAcksCredited.Add(1)
+	// #18521: attribute the ACK to the peer boot that delivered it, so a
+	// later BulkStart announcing that same boot does not discard it (see
+	// notePeerBootIncarnation). The capabilities frame carrying the identity
+	// precedes any ACK on the same ordered stream; a legacy peer that
+	// announces none leaves the ACK unattributed, which keeps the old
+	// reset-on-reboot behaviour.
+	var ackBoot bootIncarnation
+	if id, known := s.connPeerIdentityLocked(conn); known {
+		ackBoot = id.boot
+	}
 	advanced := false
 	for {
 		old := s.peerAppliedConfigGen.Load()
-		if appliedGen <= old {
+		if appliedGen < old {
+			break
+		}
+		if appliedGen == old {
+			if ackBoot.known() {
+				s.peerAppliedConfigBoot = ackBoot
+			}
 			break
 		}
 		if s.peerAppliedConfigGen.CompareAndSwap(old, appliedGen) {
+			s.peerAppliedConfigBoot = ackBoot
 			advanced = true
 			break
 		}
@@ -95,7 +117,7 @@ func (s *SessionSync) handleHeartbeat(conn net.Conn, payload []byte) bool {
 	if err != nil {
 		slog.Debug("cluster sync: heartbeat ack send error", "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "heartbeat ack write failed", err)
 	}
 	return true
 }

@@ -243,7 +243,8 @@ cat > "${ALIAS_TMP}/incus" <<'STUB2'
 #!/usr/bin/env bash
 case "$1" in
   list)
-    # The mouse host holds .201; the .200 alias is not listed separately.
+    # The mouse host holds .201; the .202 alias (#18576, was .200) is not
+    # listed separately.
     echo "xpf-mouse-target,172.16.80.201"
     exit 0 ;;
   exec)
@@ -274,7 +275,7 @@ SETUP_LOG="${ALIAS_TMP}/setup-log"; : > "$SETUP_LOG"
 alias_env() {
     env PATH="${ALIAS_TMP}:${PATH}" OPEN_PORTS="$ALL" \
         STUB_SETUP_LOG="$SETUP_LOG" \
-        TARGET_V4=172.16.80.200 TARGET_ALIAS_V4=172.16.80.200 \
+        TARGET_V4=172.16.80.202 TARGET_ALIAS_V4=172.16.80.202 \
         MOUSE_TARGET_V4=172.16.80.201 INCUS_REMOTE=loss \
         bash "${ALIAS_TMP}/target-services.sh" "$@"
 }
@@ -285,11 +286,11 @@ $out"
 grep -qi "external lab hardware" <<< "$out" \
     && fail "#16213: status still calls the instance-held .200 external hardware:
 $out"
-grep -q "172.16.80.200" <<< "$out" >/dev/null \
+grep -q "172.16.80.202" <<< "$out" >/dev/null \
     && pass "#16213 alias owner is named in status"
 : > "$SETUP_LOG"
 alias_env up > /dev/null 2>&1
-grep -q "mouse-setup:up TARGET_ALIAS_V4=172.16.80.200 MOUSE_TARGET_V4=172.16.80.201" "$SETUP_LOG" \
+grep -q "mouse-setup:up TARGET_ALIAS_V4=172.16.80.202 MOUSE_TARGET_V4=172.16.80.201" "$SETUP_LOG" \
     || fail "#16213: up did not delegate to mouse-target-setup.sh (systemd pin); setup log:
 $(cat "$SETUP_LOG")"
 [[ -s "$SETUP_LOG" ]] && pass "#16213 up delegates to the systemd-pinned mouse setup"

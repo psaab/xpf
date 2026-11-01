@@ -8,6 +8,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/psaab/xpf/pkg/coalesce"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/routing"
 )
 
@@ -326,6 +327,31 @@ func (d *Daemon) scheduleConnectedRGRepublish(reason string) {
 		defer d.applySem.Release(1)
 		d.republishConnectedRG(reason)
 	}()
+}
+
+// wireUserspaceRGRouteHooks installs the cluster-ownership hooks of the
+// userspace manager's route builders. The RG-primary provider (#15742,
+// cleared without a cluster manager) and the #18620 release hook are wired
+// at client construction and refreshed on every dataplane apply.
+func (d *Daemon) wireUserspaceRGRouteHooks(mgr *dpuserspace.Manager) {
+	if d.cluster != nil {
+		mgr.SetRGPrimaryProvider(d.cluster.LocalGroupPrimary)
+	} else {
+		mgr.SetRGPrimaryProvider(nil)
+	}
+	mgr.SetHeldRGReleaseFunc(d.onHelperReleasedRGs)
+}
+
+// onHelperReleasedRGs is the userspace manager's #18620 release hook. An
+// acknowledged helper inventory dropped these RGs from the connected-row hold,
+// so their connected rows must now leave the helper FIB. The common case is the
+// demotion edge's own republish. This hook covers the paths that schedule none:
+// the reconcile retry of a failed rg_active=false write, and a watchdog or
+// replay inventory. It runs under the manager lock, so it only schedules; the
+// publish runs on its own goroutine under applySem.
+func (d *Daemon) onHelperReleasedRGs(rgIDs []int) {
+	_ = rgIDs // the republish rebuilds every RG's rows from current state
+	d.scheduleConnectedRGRepublish("helper-ack-release")
 }
 
 // republishConnectedRGSync runs the connected-RG republish inline

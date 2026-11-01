@@ -2248,9 +2248,10 @@ type NTPServerOption struct {
 	// Version is the NTP protocol version to use (0 = chrony default).
 	Version int
 	// RoutingInstance is the VRF the server is reached in ("" = default).
-	// Recorded but not yet honoured by the chrony renderer — chrony has no
-	// per-source VRF directive, so acting on it needs a routing change rather
-	// than a config one.
+	// Honoured for servers since #18584 when every server names the same
+	// VRF-backed instance: chrony has no per-source VRF directive, only one
+	// acquisition-socket device (`bindacqdevice`), so mixed instances stay
+	// advisory (config.NTPAcquisitionInstance). Peers stay advisory.
 	RoutingInstance string
 	// SourceAddress is `server/peer <addr> source-address <ip>` (#15709).
 	// Recorded but not rendered: chrony sources have no per-source

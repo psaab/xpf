@@ -404,13 +404,28 @@ type SyncStats struct {
 	// ConfigsApplyFailed counts config-sync messages that were admitted by the
 	// #3931 ordering guard but whose apply did NOT take effect on this node —
 	// a compile/promote failure (a mixed-build ISSU syntax error, a store
-	// rejection) or a transient RG0-primary rejection. On such a failure the
-	// config high-water mark (lastAppliedConfigGen) is deliberately NOT
-	// advanced, so the primary's re-push of the SAME generation is re-admitted
-	// and the standby re-converges instead of being silently stranded on the
-	// prior config (M-2/#4151). A persistently-nonzero value means a standby is
+	// rejection). On such a failure the config high-water mark
+	// (lastAppliedConfigGen) is deliberately NOT advanced, so the primary's
+	// re-push of the SAME generation is re-admitted and the standby
+	// re-converges instead of being silently stranded on the prior config
+	// (M-2/#4151). A persistently-nonzero value means a standby is
 	// repeatedly failing to apply the peer's config — investigate divergence.
+	// #18610: a refusal because THIS node is the RG0 config authority is not
+	// counted here; it counts ConfigsRejectedAsAuthority.
 	ConfigsApplyFailed atomic.Uint64
+	// ConfigsRejectedAsAuthority counts config-sync messages this node refused
+	// because it was the RG0 config authority when they arrived (#18610): the
+	// peer pushed while it believed itself primary, typically in a dual-active
+	// window. The high-water stays pinned and the generation is nacked, as for
+	// an apply failure, but it does not arm the #6387 CF signal. A nonzero
+	// value means a peer pushed a config this node discarded; if the peer had
+	// a commit of its own in that window, it was not applied here.
+	ConfigsRejectedAsAuthority atomic.Uint64
+	// ConfigRejectedAsAuthorityLastGen is the generation of the most recent
+	// such refusal (#18610), so the operator can compare it with the
+	// peer's sent generation. It is a statistic, not a readiness input:
+	// resetRecvGen does not clear it.
+	ConfigRejectedAsAuthorityLastGen atomic.Uint64
 	// ImportsRefusedByHelper counts synced-session installs the LOCAL userspace
 	// helper refused on semantic grounds (#6785) — a stale install generation, the
 	// aggregate synced-import ceiling, or a translated-tuple reservation refusal.
@@ -481,8 +496,22 @@ type SyncStats struct {
 	// failing to apply what this node sends; pair it with the peer's own
 	// ConfigsApplyFailed to see why.
 	ConfigApplyNacksReceived atomic.Uint64
-	IPsecSASent              atomic.Uint64
-	IPsecSAReceived          atomic.Uint64
+	// #18521: the positive config-apply ACK, end to end. On the standby,
+	// ConfigApplyAcksSent counts ACKs written and ConfigApplyAcksUnsent the
+	// ones skipped because the delivering connection was no longer active.
+	// On the authority, ConfigApplyAcksCredited counts ACKs accepted against
+	// the newest send and ConfigApplyAcksIgnored the ones refused (wrong
+	// connection, unsent generation). A stale-config refusal with a sent
+	// ACK on one side and no credited ACK on the other names the drop.
+	ConfigApplyAcksSent     atomic.Uint64
+	ConfigApplyAcksUnsent   atomic.Uint64
+	ConfigApplyAcksCredited atomic.Uint64
+	ConfigApplyAcksIgnored  atomic.Uint64
+	// BulkRerequestsSent counts the #18521 (D) BulkRequests this receiver
+	// queued after withholding a BulkAck.
+	BulkRerequestsSent atomic.Uint64
+	IPsecSASent        atomic.Uint64
+	IPsecSAReceived    atomic.Uint64
 	// IPsecSAStaleIgnored counts IPsec SA full-sets dropped by the #5706
 	// ordering guard: an incoming (incarnation, seq) that was NOT strictly
 	// newer than the last-applied pair — a full-set reordered across the
@@ -719,10 +748,14 @@ type SyncStatsSnapshot struct {
 	// through a new Manager accessor because the Manager holds only the
 	// SyncStatsProvider interface, and this is the same transport every other
 	// field in the status render already uses.
-	PeerBootIncarnation     string
-	ConfigsApplyFailed      uint64
-	ImportsRefusedByHelper  uint64
-	ImportsRejectedByHelper uint64
+	PeerBootIncarnation string
+	ConfigsApplyFailed  uint64
+	// #18610: refusals as the RG0 config authority, and the last refused
+	// generation.
+	ConfigsRejectedAsAuthority       uint64
+	ConfigRejectedAsAuthorityLastGen uint64
+	ImportsRefusedByHelper           uint64
+	ImportsRejectedByHelper          uint64
 	// #6778 receive-edge loss, and #7328's nack counter alongside it: the
 	// queue-full drop is recovered BY a nack, so a drop that is climbing while
 	// nacks are not tells the operator the recovery path itself is broken (a
@@ -730,6 +763,11 @@ type SyncStatsSnapshot struct {
 	// generation). Both are rendered only when nonzero.
 	ConfigsQueueFullDropped              uint64
 	ConfigApplyNacksReceived             uint64
+	ConfigApplyAcksSent                  uint64
+	ConfigApplyAcksUnsent                uint64
+	ConfigApplyAcksCredited              uint64
+	ConfigApplyAcksIgnored               uint64
+	BulkRerequestsSent                   uint64
 	IPsecSASent                          uint64
 	IPsecSAReceived                      uint64
 	IPsecSAStaleIgnored                  uint64
@@ -803,6 +841,11 @@ type TransferReadinessSnapshot struct {
 	BulkReceiveSessions   int
 	PeerConfigGen         uint64
 	AppliedConfigGen      uint64
+	// RejectedAsAuthorityConfigGen and LocalConfigAuthority (#18610): the
+	// highest received generation refused because this node was the RG0
+	// config authority, and whether it still is at snapshot time.
+	RejectedAsAuthorityConfigGen uint64
+	LocalConfigAuthority         bool
 }
 
 // ConfigStale reports whether this node has received a newer config generation
@@ -811,8 +854,20 @@ type TransferReadinessSnapshot struct {
 // received nor applied any generation) reports both generations as 0, which is
 // NOT stale, so the gate stays scoped to the genuine behind-the-primary case
 // and never blanket-blocks (#5563).
+//
+// #18610: received generations this node refused because it was the RG0 config
+// authority (RejectedAsAuthorityConfigGen) do not count while it still is
+// (LocalConfigAuthority). Its own config is the one the peer converges to, so
+// it is not behind anyone. Once it demotes they count again, so it cannot be
+// promoted back before the new primary's push applies here.
 func (s TransferReadinessSnapshot) ConfigStale() bool {
-	return s.PeerConfigGen > s.AppliedConfigGen
+	if s.PeerConfigGen <= s.AppliedConfigGen {
+		return false
+	}
+	if s.LocalConfigAuthority && s.PeerConfigGen <= s.RejectedAsAuthorityConfigGen {
+		return false
+	}
+	return true
 }
 
 // ReadyForManualFailover reports whether the sync path is settled enough to
@@ -999,8 +1054,15 @@ type SessionSync struct {
 	// never copied (it already holds a Mutex and atomics).
 	malformedRecordWarn malformedRecordWarnDetector
 	mu                  sync.Mutex
-	conn0               net.Conn
-	conn1               net.Conn
+	conn0               net.Conn // written only via setConnSlotLocked
+	conn1               net.Conn // written only via setConnSlotLocked
+	// connSlotRemovals counts installed connections removed from a fabric
+	// slot (#18521 review round 2); see setConnSlotLocked.
+	connSlotRemovals atomic.Uint64
+	// peerEventTail orders the OnPeerConnected / OnPeerDisconnected
+	// dispatches (#18521 review round 3); see dispatchPeerEvent.
+	peerEventMu   sync.Mutex
+	peerEventTail chan struct{}
 	// configCrypto0/configCrypto1 hold the per-connection ephemeral X25519
 	// state that encrypts the config-sync payload (#6629). They sit here,
 	// beside the conn they belong to and under the same mu, because their
@@ -1252,6 +1314,15 @@ type SessionSync struct {
 	// fenced before the batch failoverAckApplied reply is sent (#5640). reqID
 	// identifies the batch request whose barriers are being waited on (#6177).
 	WaitFailoverAppliedBatch func(rgIDs []int, reqID uint64) error
+	// TransferOutStillHeld reports, at the moment the applied-ack would be
+	// sent, whether every RG in rgIDs is still parked for request reqID:
+	// its remote transfer-out lease is armed for reqID, its manual hold is
+	// set and it is not primary (#18521 review round 3). A hold released
+	// while the demotion was actuating — the 2s rescue after the request's
+	// connection went away — means the owner may be primary again, and an
+	// "applied" sent then would promote the requester beside it. Nil = no
+	// check (tests that do not model the Manager).
+	TransferOutStillHeld func(rgIDs []int, reqID uint64) bool
 	// OnFenceReceived requests this node to disable all RGs, and reports what
 	// that achieved so a sequenced fence can be acknowledged truthfully
 	// (#7147). The returned FenceResult is encoded into syncMsgFenceAck; it is
@@ -1487,10 +1558,19 @@ type SessionSync struct {
 	zoneRGMu  sync.RWMutex
 	zoneRGMap ZoneRGMap
 	foldRGMap map[uint32]int
-	// zoneRGMapGen changes when the legacy SetZoneRGMap contents change and on
-	// every SetZoneOwnership apply (#9655/#11012), so an in-flight bulk can
-	// detect stale ownership or resolver snapshots. Guarded by zoneRGMu.
+	// zoneRGMapGen changes when something a bulk reconcile snapshot reads
+	// changes (#9655/#11012): the zone map, the fold->RG map, or the ingress
+	// fold resolver. The legacy setters (SetZoneRGMap on content, and
+	// SetZoneOwnership/SetIngressFoldFn on every call) and the daemon's
+	// InstallZoneOwnership (on content, #18374) advance it, so an in-flight
+	// bulk can detect stale ownership or resolver snapshots. Guarded by
+	// zoneRGMu.
 	zoneRGMapGen uint64
+	// ingressFoldDigest fingerprints what ingressFoldFn closes over, as
+	// supplied by InstallZoneOwnership (#18374). Zero means unknown: the
+	// legacy setters install a resolver without one, so the next install
+	// always advances zoneRGMapGen. Guarded by zoneRGMu.
+	ingressFoldDigest ResolverDigest
 
 	// ingressFoldFn resolves a LOCAL interface identity (in either session
 	// direction) to its cluster-stable RETH-relative fold on the sync wire.
@@ -1523,8 +1603,11 @@ type SessionSync struct {
 	deleteJournal       boundedFrameJournal
 	scopedDeleteJournal boundedFrameJournal
 	lastPeerRxMono      atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
-	readDeadline        time.Duration
-	peerSilenceLimit    time.Duration
+	// livenessProbeInFlight bounds RequestLivenessProbe to one pending
+	// write (#18561).
+	livenessProbeInFlight atomic.Bool
+	readDeadline          time.Duration
+	peerSilenceLimit      time.Duration
 	// bulkStartMu serializes queued incremental writes with the
 	// table-truth snapshot -> BulkStart boundary (#10283). A bulk holds it
 	// while reading BulkSnapshotSource and until BulkStart is written under
@@ -1655,6 +1738,49 @@ type SessionSync struct {
 	// testBulkRecvNow overrides the wall clock read for the window
 	// deadline. Test-only; production never sets it.
 	testBulkRecvNow func() time.Time
+	// testSlowHandlerThreshold / testConnWatchInterval shrink the #18521
+	// slow-handler threshold and watchdog tick. Test-only; zero means the
+	// production syncHandlerSlowThreshold / syncConnWatchInterval.
+	testSlowHandlerThreshold time.Duration
+	testConnWatchInterval    time.Duration
+	// testStopFlushTimeout replaces syncStopFlushTimeout; testOnStopFlush is
+	// called once Stop starts waiting on its flush (#18521 review round 2).
+	// Test-only.
+	testStopFlushTimeout time.Duration
+	testOnStopFlush      func()
+	// testOnWatchTick is called at the start of every connection-watchdog
+	// tick, so a cell can wait for whole evaluations. Test-only.
+	testOnWatchTick func()
+	// bulkRerequestInFlight single-flights the #18521 (D) re-request of a
+	// bulk whose reconcile was skipped because the zone map changed mid-bulk.
+	bulkRerequestInFlight atomic.Bool
+	// runDone is Start's context Done channel, so background waits end with
+	// the SessionSync. Nil for an object that was never started (tests);
+	// such waits are bounded on their own.
+	runDone <-chan struct{}
+	// testZoneMapSettle / testZoneMapSettleMax shrink the (D) settle window
+	// and its cap. Test-only; zero means zoneMapSettleWindow/zoneMapSettleMax.
+	testZoneMapSettle    time.Duration
+	testZoneMapSettleMax time.Duration
+	// bulkRerequestStreak counts consecutive withheld BulkAcks for the (D)
+	// re-request backoff; a reconciled bulk resets it. testBulkRerequestBackoff
+	// replaces the computed backoff in tests.
+	bulkRerequestStreak      atomic.Uint64
+	bulkRerequestLatest      atomic.Pointer[bulkRerequestPending]
+	testBulkRerequestBackoff time.Duration
+	// testOnBulkRerequestSent observes a queued re-request's cause and how
+	// long after its bulk was withheld it went out; testBulkRerequestUnit,
+	// when set, is what one second of the computed wait becomes, so a cell
+	// runs the real schedule scaled down. Test-only.
+	testOnBulkRerequestSent func(reason string, waited time.Duration)
+	testBulkRerequestUnit   time.Duration
+	// testBulkRerequestGate, when non-nil, holds a scheduled re-request's
+	// decision until it is closed, so a cell orders its own frames before
+	// the decision instead of racing a backoff. testOnBulkRerequestScheduled
+	// observes the computed wait before testBulkRerequestBackoff replaces
+	// it. Test-only.
+	testBulkRerequestGate        chan struct{}
+	testOnBulkRerequestScheduled func(reason string, wait time.Duration)
 	// bulkInstallFailedV4/V6 retain only transient helper-install failures for
 	// the active authoritative bulk. They are separate from the received-key
 	// set because a failed transport write must not make that snapshot complete;
@@ -1752,6 +1878,10 @@ type SessionSync struct {
 	// Highest config generation the peer positively acknowledged as applied.
 	// PeerConfigStale compares this with lastSentConfigDebt16756.generation.
 	peerAppliedConfigGen atomic.Uint64
+	// peerAppliedConfigBoot is the peer boot incarnation that delivered
+	// peerAppliedConfigGen (zero when unattributed). Guarded by mu. A reboot
+	// discards the ACK only when a DIFFERENT boot delivered it (#18521).
+	peerAppliedConfigBoot bootIncarnation
 
 	configGenCounter     atomic.Uint64
 	lastAppliedConfigGen atomic.Uint64
@@ -1777,6 +1907,13 @@ type SessionSync struct {
 	// applied<=received invariant holds after a reboot restarts the sender's
 	// monotonic counter lower.
 	lastRecvConfigGen atomic.Uint64
+	// rejectedAsAuthorityConfigGen is the highest received generation this
+	// node refused because it was the RG0 config authority at the time
+	// (ErrConfigSyncRejectedAuthority, #18610). TransferReadinessSnapshot
+	// does not count received generations up to it as staleness while this
+	// node is still the authority. Guarded like the other marks by
+	// configGenMu; cleared with them by resetRecvGen.
+	rejectedAsAuthorityConfigGen atomic.Uint64
 
 	// configEpochRoleMu tracks the config authority role when reverse stamps
 	// are produced. After becoming a non-authority, a retained applied mark is
@@ -2015,6 +2152,12 @@ type configApplyItem struct {
 	// incarnation is the peer boot the payload arrived under (#5084). Zero
 	// means un-incarnated and is never dropped on incarnation grounds.
 	incarnation bootIncarnation
+	// authorityAtReceive records whether this node was already the RG0 config
+	// authority when the payload arrived (#18610 review T1). A refusal counts
+	// as an authority refusal only then. A payload received as SECONDARY and
+	// refused because a promotion landed before the apply loop reached it is
+	// the previous primary's last config, lost: it keeps CF and staleness.
+	authorityAtReceive bool
 }
 type failoverAck struct {
 	status uint8
@@ -2209,6 +2352,7 @@ func (s *SessionSync) initGenState() {
 	s.configGenCounter.Store(seed)
 	s.lastAppliedConfigGen.Store(0)
 	s.lastRecvConfigGen.Store(0)
+	s.rejectedAsAuthorityConfigGen.Store(0)
 	s.configApplyCh = make(chan configApplyItem, 64)
 	// #5706: the full-set (IPsec/DHCP) ordering incarnation is this process's
 	// construction seed — constant for the process lifetime and, within a boot,
@@ -2297,8 +2441,11 @@ func (s *SessionSync) SetZoneRGMap(m map[uint16]int) {
 // #7095 ingress and #12075 egress identity against this apply-time config.
 // A nil zone map preserves the prior zone map (used when an apply result has
 // no zone-ID snapshot); a non-nil empty map installs an authoritative empty
-// map. Each apply advances the generation because the fold resolver closes
-// over an apply-time interface snapshot.
+// map. Each call advances the generation because the fold resolver closes
+// over an apply-time interface snapshot and a func cannot be compared. The
+// daemon installs through InstallZoneOwnership instead, which carries a
+// digest of what the resolver closes over and keeps the generation on a
+// content-equal re-install (#18374).
 func (s *SessionSync) SetZoneOwnership(zoneRG ZoneRGMap, foldRG map[uint32]int, foldFn func(uint32, uint16) uint32) {
 	var zones ZoneRGMap
 	if zoneRG != nil {
@@ -2317,6 +2464,7 @@ func (s *SessionSync) SetZoneOwnership(zoneRG ZoneRGMap, foldRG map[uint32]int, 
 	}
 	s.foldRGMap = folds
 	s.ingressFoldFn = foldFn
+	s.ingressFoldDigest = ResolverDigest{}
 	s.zoneRGMapGen++
 	s.zoneRGMu.Unlock()
 }
@@ -2337,6 +2485,7 @@ func (s *SessionSync) ZoneOwnershipInstalled() bool {
 func (s *SessionSync) SetIngressFoldFn(fn func(ifindex uint32, vlan uint16) uint32) {
 	s.zoneRGMu.Lock()
 	s.ingressFoldFn = fn
+	s.ingressFoldDigest = ResolverDigest{}
 	s.zoneRGMapGen++
 	s.zoneRGMu.Unlock()
 }
@@ -2394,13 +2543,20 @@ func (s *SessionSync) stampNatScopeFold(ifindex int32) uint32 {
 }
 
 // SetNatScopeFoldFn wires the #16826 logical-ifindex -> (parent, VLAN)
-// NAT-scope fold. It advances the ownership generation with the other
-// fold wiring: a bulk snapshot that captured the previous folder must
-// not reconcile against it after this changes.
+// NAT-scope fold.
+//
+// It does NOT advance the ownership generation. #16826 made it advance
+// "so a bulk snapshot that captured the previous folder must not reconcile
+// against it", but no snapshot ever captured it: zoneOwnershipSnapshot holds
+// the zone map, the fold->RG map and the ingress resolver, and the only
+// reader of this folder is the SEND-side stamp (stampNatScopeFold). A bulk
+// this node RECEIVES is reconciled without it, so the bump guarded nothing
+// and only voided reconciles: the daemon called it beside SetZoneOwnership on
+// every apply and link refresh, which is the +2 per apply in the #18374
+// journals (snapshot_map_gen=2 map_gen=4).
 func (s *SessionSync) SetNatScopeFoldFn(fn func(ifindex int32) uint32) {
 	s.zoneRGMu.Lock()
 	s.natScopeFoldFn = fn
-	s.zoneRGMapGen++
 	s.zoneRGMu.Unlock()
 }
 
@@ -2514,6 +2670,37 @@ func (s *SessionSync) LastPeerReceiveAge() (time.Duration, bool) {
 	}
 	return age, true
 }
+
+// LastPeerReceiveMono is the CLOCK_MONOTONIC nanos stamp of the last
+// accepted inbound sync frame (#18561 liveness probe); ok is false when no
+// frame was received. Lock-free.
+func (s *SessionSync) LastPeerReceiveMono() (int64, bool) {
+	last := s.lastPeerRxMono.Load()
+	return last, last != 0
+}
+
+// PeerHeartbeatAckSupported reports whether the peer has answered a
+// sync-level heartbeat with a heartbeat ack on this incarnation (#18561).
+// Lock-free.
+func (s *SessionSync) PeerHeartbeatAckSupported() bool {
+	return s.peerIncarnationState().peerHeartbeatAckEver.Load()
+}
+
+// RequestLivenessProbe sends one sync-level heartbeat from a goroutine so
+// the caller (the heartbeat-timeout policy, under Manager.mu) never blocks
+// on writeMu or a full socket (#18561). At most one probe write is in
+// flight; a request while one is pending is dropped, and the policy then
+// judges the peer on the frames that do or do not arrive.
+func (s *SessionSync) RequestLivenessProbe() {
+	if !s.livenessProbeInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer s.livenessProbeInFlight.Store(false)
+		s.SendLivenessKeepalive()
+	}()
+}
+
 func (s *SessionSync) readDeadlineDuration() time.Duration {
 	if s.readDeadline > 0 {
 		return s.readDeadline
@@ -2752,6 +2939,8 @@ func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, b
 	if mapGen != zoneSnap.mapGen {
 		slog.Info("cluster sync: reconcile stale sessions skipped (zone map changed during the bulk)",
 			"snapshot_map_gen", zoneSnap.mapGen, "map_gen", mapGen)
+		// #18521 (D): "the next bulk reconciles" — handleBulkEnd now asks the
+		// peer for it (scheduleBulkRerequest), after the map settles.
 		return false, inventoryGeneration, inventoryRequested
 	}
 	// #9655: judged by the zone answers this bulk started with. A zone the map
@@ -2831,7 +3020,7 @@ func (s *SessionSync) QueueIPsecSA(connectionNames []string) bool {
 		if err != nil {
 			slog.Warn("cluster sync: IPsec SA send error", "err", err)
 			s.stats.Errors.Add(1)
-			s.handleDisconnect(conn)
+			s.disconnectConn(conn, "IPsec SA write failed", err)
 			return false
 		}
 		s.stats.IPsecSASent.Add(1)
@@ -2875,7 +3064,7 @@ func (s *SessionSync) QueueIPsecSA(connectionNames []string) bool {
 		if err != nil {
 			slog.Warn("cluster sync: IPsec SA chunk send error", "err", err)
 			s.stats.Errors.Add(1)
-			s.handleDisconnect(conn)
+			s.disconnectConn(conn, "IPsec SA chunk write failed", err)
 			return false
 		}
 	}
@@ -3074,7 +3263,7 @@ func (s *SessionSync) queueDHCPLeaseSnapshot(family int, snapshot dhcpserver.Lea
 		if err != nil {
 			slog.Warn("cluster sync: DHCP lease send error", "family", family, "err", err)
 			s.stats.Errors.Add(1)
-			s.handleDisconnect(conn)
+			s.disconnectConn(conn, "DHCP lease write failed", err)
 			return
 		}
 		s.stats.DHCPLeasesSent.Add(1)
@@ -3132,7 +3321,7 @@ func (s *SessionSync) queueDHCPLeaseSnapshot(family int, snapshot dhcpserver.Lea
 		if err != nil {
 			slog.Warn("cluster sync: DHCP lease chunk send error", "family", family, "err", err)
 			s.stats.Errors.Add(1)
-			s.handleDisconnect(conn)
+			s.disconnectConn(conn, "DHCP lease chunk write failed", err)
 			return
 		}
 	}

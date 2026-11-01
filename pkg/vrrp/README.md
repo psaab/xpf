@@ -9,6 +9,13 @@ the timer values below apply only to the VRRP-backed mode
 This package drives VRRP-backed RETH and standalone VRRP; it is not the
 default RETH ownership/failover path.
 
+A VIP-set change on a running VRRP-backed instance is applied in place
+(`updateVIPs`, #10780), and the removed delta is deleted. The default direct
+mode used to have no delta at all, so a renumbered RETH address stayed on
+the owner. It now stamps and prunes its VIPs in pkg/daemon
+(`reconcileDirectVIPAddrs`, `pkg/vipstamp`, #18573). Its leftover sweep
+never deletes an address this package installs, because those carry no stamp.
+
 ## Entry points
 
 - `Manager` — `manager.go`. Owns every `Instance` goroutine, the event
@@ -437,11 +444,14 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   interval with local fallback — e.g. ~23 ms at priority 250 / 1 s,
   ~805 ms at priority 50 / 1 s) so the highest-priority backup promotes
   first rather than every backup claiming MASTER at once (#16771).
-  Private-RG operator failover is explicit peer transfer;
-  ordinary private-RG shutdown sends no resign/transfer frame, so after
-  `rg_active` clears the peer promotes through heartbeat-loss detection, no
-  sooner than the heartbeat threshold and potentially later under the
-  sync-recency guard (`instance.go:770-807`;
+  Private-RG operator failover is explicit peer transfer. An orderly
+  private-RG stop with a live peer resigns every RG at weight 0 and kicks
+  one heartbeat (#18540, `pkg/cluster` "Planned-shutdown resign"), so the
+  peer normally promotes on that frame. A stop that never reaches the
+  resign (crash, SIGKILL) and a lone node fall back to heartbeat-loss
+  detection. So does a peer carrying an aborted-transfer marker. That
+  fallback comes no sooner than the heartbeat threshold and possibly later
+  under the sync-recency guard (`instance.go:770-807`;
   `instance_rx.go:155-173`; `instance_prio0_run_test.go:143-149`;
   `pkg/cluster/failover.go:447-450`;
   `pkg/daemon/daemon_run_shutdown.go:418-428`;
@@ -449,16 +459,48 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
 - Heartbeat staleness threshold: runtime defaults 100ms × 5 = 500ms; deployed
   lab config 200ms × 5 = 1s. Name the knobs
   `set chassis cluster heartbeat-interval <ms>` and
-  `set chassis cluster heartbeat-threshold <n>`. These are not always peer-loss
-  declaration times: connected session sync with peer traffic within 2s
-  suppresses the timeout (5s continuous-suppression cap), so silent node death
-  with an established sync socket can take roughly 0.5–2.1s at defaults or
-  1.0–2.2s with the lab interval; a process exit that closes sync or an already
-  idle sync path falls through at the heartbeat threshold, subject to startup
-  and restart grace (`pkg/cluster/heartbeat.go:61-98,1916-1960`;
-  `pkg/daemon/daemon_ha_sync.go:170-206`;
-  `pkg/cluster/heartbeat_manager.go:790-832`;
-  `docs/ha-cluster-userspace.conf:71-72`).
+  `set chassis cluster heartbeat-threshold <n>`. <!-- mirror:private-rg-peer-loss-detection n=6 -->The receiver checks staleness
+  every quarter heartbeat interval (interval / 4, floored at 10 ms; #18639),
+  so a peer is declared within that check period of its last admitted
+  heartbeat turning interval × threshold old. While session sync looks
+  connected, a peer that has acked a sync-level heartbeat on this incarnation
+  (#18570) must answer a liveness probe sent at its first missed heartbeat
+  (once its last heartbeat is 1.5 intervals old); any sync frame handled after
+  the probe counts as the answer. A hard-crashed peer is then declared at the
+  threshold, provided the ack latch had armed and no frame the peer queued
+  before it died is handled after the probe: about 0.5–0.525 s after its last
+  heartbeat (0.4–0.525 s after the crash) at defaults and 1.0–1.05 s (0.8–1.05
+  s) in the lab. A frame is stamped when it is handled, not when it arrived
+  (`notePeerLiveness`), so a pre-crash backlog handled after the probe answers
+  it; on the half-open socket a hard crash leaves, no FIN watchdog bounds that
+  backlog, and the recency rule below runs from the last such frame. If no
+  probe could be pre-armed because the late heartbeats fell inside the 5 s
+  restart grace or the boot floor, the crash is declared counting from the
+  grace's end: at the first check after it if sync is then disconnected or
+  more than 2 s stale; otherwise an ack-capable peer is probed then and gets
+  (threshold − 1.5) intervals (350 ms at defaults, 700 ms in the lab) plus a
+  check period, and a peer without ack support follows the rule below. A
+  peer without ack support keeps the #17056 recency rule: max(threshold,
+  remaining 2 s sync window) plus a check period, with a 5 s cap on continuous
+  suppression. A process crash that sends FIN, or sync idle for more than 2 s,
+  falls back to the plain threshold when the receiving standby is caught up,
+  subject to startup/restart grace; a standby still draining a backlog when
+  the peer's FIN/RST arrives keeps sync installed while it drains, and its
+  frames refresh peer recency for up to one 1 s watchdog tick, so there
+  detection is up to max(threshold, ~3 s) plus a check period — about 3.0 s at
+  defaults and 3.05 s in the lab, under the 5 s cap (#18521; the probe does
+  not shorten it, because backlog frames handled after the probe answer it).
+  `show chassis cluster information` prints "Liveness probes sent: N
+  (unanswered at timeout: M, peer acks probes: yes|no)", which tells an
+  operator which case applies. These are detection times, not traffic
+  restoration: activation adds about 0.34–0.44 s from peer-lost to the first
+  ping reply on the lab clusters (#18561), so a lab crash outage lands near
+  1.4 s.<!-- /mirror:private-rg-peer-loss-detection --> (`timeoutCheckInterval` and `heartbeatReceiver.checkTimeout` in
+  `pkg/cluster/heartbeat.go`; `prearmPeerLivenessProbe`,
+  `peerAnsweredLivenessProbeLocked` and `syncSuppressesPeerTimeoutLocked` in
+  `pkg/cluster/heartbeat_suppress.go`; `notePeerLiveness` in
+  `pkg/cluster/sync_payload_caps_16041.go`; `handlePeerTimeout` in
+  `pkg/cluster/heartbeat_manager.go`; `docs/ha-cluster-userspace.conf:71-72`).
 - Async GARP: first pair <1 ms; remaining sent at 50 ms intervals in a
   background goroutine. Critical path stays addVIPs → sendAdvert →
   emitEvent (sync), then `go sendGARP(false)` (async).

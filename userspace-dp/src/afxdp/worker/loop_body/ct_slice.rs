@@ -350,6 +350,9 @@ pub(super) fn run_ct_slice(
         if !live_fabrics.is_empty() && live_fabrics.as_ref() != &forwarding.fabrics {
             let mut updated = (**forwarding).clone();
             updated.fabrics = live_fabrics.as_ref().clone();
+            // #18534 fold: different contents, so not the published
+            // snapshot's identity — per-flow memos key on it.
+            updated.restamp_local_derivation();
             *forwarding = Arc::new(updated);
         }
     }

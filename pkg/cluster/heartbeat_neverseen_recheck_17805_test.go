@@ -31,6 +31,7 @@ func (s *scriptedPeerSyncSource17805) IsConnected() bool { return true }
 func (s *scriptedPeerSyncSource17805) LastPeerReceiveAge() (time.Duration, bool) {
 	return 0, true
 }
+func (s *scriptedPeerSyncSource17805) TransferChannelGen() uint64 { return 0 }
 func (s *scriptedPeerSyncSource17805) PeerRecentlyActiveWithinSilenceWindow() bool {
 	n := s.calls.Add(1)
 	if int(n) > len(s.script) {

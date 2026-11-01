@@ -84,6 +84,40 @@ type vrfManager struct {
 	// is empty, but the stale kernel rules still need a retry.
 	termRequired      bool
 	termRemovePending bool
+
+	// moveMu guards masterMoves. It is separate from mu because the bind and
+	// unbind paths deliberately run without the manager lock.
+	moveMu sync.Mutex
+	// masterMoves counts, per link name, every IFLA_MASTER change this
+	// manager actually made (a LinkSetMaster or LinkSetNoMaster that
+	// succeeded). An idempotent bind of a link already in its VRF is NOT a
+	// move and does not count. #18597: the daemon restarts the cluster
+	// heartbeat after a management-VRF rebind only when the control link's
+	// count changed, so a commit that leaves em0 in vrf-mgmt no longer tears
+	// down the heartbeat sockets.
+	masterMoves map[string]uint64
+}
+
+// noteMasterMove records that this manager changed name's VRF master.
+func (v *vrfManager) noteMasterMove(name string) {
+	v.moveMu.Lock()
+	defer v.moveMu.Unlock()
+	if v.masterMoves == nil {
+		v.masterMoves = make(map[string]uint64)
+	}
+	v.masterMoves[name]++
+}
+
+// MasterMoveSeq returns how many times this manager has changed name's VRF
+// master. It only grows; callers compare two reads to learn whether a move
+// happened in between.
+func (v *vrfManager) MasterMoveSeq(name string) uint64 {
+	if v == nil {
+		return 0
+	}
+	v.moveMu.Lock()
+	defer v.moveMu.Unlock()
+	return v.masterMoves[name]
 }
 
 // Create creates a Linux VRF device and assigns it a routing table.
@@ -311,6 +345,7 @@ func (v *vrfManager) bindLinkToVRF(ifaceName string, iface netlink.Link, vrf *ne
 	if err := v.ops.LinkSetMaster(iface, vrf); err != nil {
 		return fmt.Errorf("bind %s to VRF %s: %w", ifaceName, vrf.Attrs().Name, err)
 	}
+	v.noteMasterMove(ifaceName)
 	slog.Info("interface bound to VRF", "interface", ifaceName, "vrf", vrf.Attrs().Name)
 	return nil
 }
@@ -396,6 +431,7 @@ func (v *vrfManager) UnbindInterfaceFromVRFs(ifaceName string, instanceNames []s
 		if err := v.ops.LinkSetNoMaster(iface); err != nil {
 			return false, fmt.Errorf("unbind %s from VRF %s: %w", ifaceName, instanceName, err)
 		}
+		v.noteMasterMove(ifaceName)
 		return true, nil
 	}
 	if len(lookupErrs) > 0 {

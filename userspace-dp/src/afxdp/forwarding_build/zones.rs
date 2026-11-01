@@ -96,9 +96,11 @@ pub(super) fn populate_zones(snapshot: &ConfigSnapshot, state: &mut ForwardingSt
         }
         // #3075: the event-stream codec now writes zone IDs as u32, so the
         // former >u8::MAX skip is retired — a stable name-hash zone id in
-        // [1, ZONE_ID_RESERVED_MIN-1] = [1, 65533] is fully addressable. The
-        // reserved-range reject above (>= ZONE_ID_RESERVED_MIN) remains the only
-        // out-of-range guard.
+        // [1, ZONE_ID_RESERVED_MIN-1] = [1, 0xFFFF_FFFD] (#16557: full u32) is
+        // fully addressable. The reserved-range reject above
+        // (>= ZONE_ID_RESERVED_MIN) remains the only out-of-range guard. A V1
+        // fabric stamp carries only the id's LOW 16 bits (#18518, see
+        // `rebuild_zone_low16_index` below).
         // zone_name_to_id is populated above by the shared SSOT helper.
         state.zone_id_to_name.insert(zone.id, zone.name.clone());
         // #3070/#3405/#3705: build the host-inbound admission set keyed by the
@@ -172,5 +174,196 @@ pub(super) fn populate_zones(snapshot: &ConfigSnapshot, state: &mut ForwardingSt
         if zone.tcp_rst {
             state.zone_tcp_rst.insert(zone.id, true);
         }
+    }
+    // #18518: V1 fabric stamps name a zone by its low 16 bits.
+    state.rebuild_zone_low16_index();
+    // Two admitted zones sharing low 16 bits cannot be told apart in a V1
+    // stamp, so their stamped split-RG punts drop as Invalid. Report it at
+    // build time rather than leaving only a per-packet drop counter, and only
+    // when a warning is NEW: snapshots republish on route churn, and an
+    // unchanged collision set must not repeat on every forwarding build.
+    report_zone_stamp_warnings(state);
+}
+
+/// #18518: log the V1 stamp warnings for `state` that the latch has not
+/// reported yet. The one production caller is `populate_zones`; the
+/// call-site cell drives it through `build_forwarding_state`
+/// (`production_build_reports_each_stamp_warning_once_18518`).
+fn report_zone_stamp_warnings(state: &ForwardingState) {
+    let fresh = with_zone_stamp_latch(|latch| latch.fresh_lines(zone_stamp_warnings(state)));
+    for line in &fresh {
+        eprintln!("xpf-userspace-dp: {line}");
+    }
+    #[cfg(test)]
+    ZONE_STAMP_LINES_EMITTED.with(|count| count.set(count.get() + fresh.len()));
+}
+
+/// #18518: process-wide memory of the V1 stamp warnings last reported, so
+/// each distinct warning is logged once while it persists (and again only if
+/// it clears and later returns). Control plane only; never on the packet path.
+#[cfg(not(test))]
+static ZONE_STAMP_WARNINGS: std::sync::Mutex<ZoneStampWarningLatch> =
+    std::sync::Mutex::new(ZoneStampWarningLatch { reported: Vec::new() });
+
+#[cfg(not(test))]
+fn with_zone_stamp_latch<R>(f: impl FnOnce(&mut ZoneStampWarningLatch) -> R) -> R {
+    f(&mut ZONE_STAMP_WARNINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+// Under test the latch (and an emitted-line count) are per test thread, so
+// parallel cells building forwarding states cannot reset each other's latch.
+#[cfg(test)]
+thread_local! {
+    static ZONE_STAMP_WARNINGS: std::cell::RefCell<ZoneStampWarningLatch> =
+        std::cell::RefCell::new(ZoneStampWarningLatch::default());
+    static ZONE_STAMP_LINES_EMITTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn with_zone_stamp_latch<R>(f: impl FnOnce(&mut ZoneStampWarningLatch) -> R) -> R {
+    ZONE_STAMP_WARNINGS.with(|latch| f(&mut latch.borrow_mut()))
+}
+
+#[derive(Default)]
+struct ZoneStampWarningLatch {
+    /// The sorted warning set of the previous build.
+    reported: Vec<String>,
+}
+
+impl ZoneStampWarningLatch {
+    /// The lines of `current` (sorted) that the previous build did not
+    /// report; `current` becomes the reported set.
+    fn fresh_lines(&mut self, current: Vec<String>) -> Vec<String> {
+        let fresh = current
+            .iter()
+            .filter(|line| self.reported.binary_search(line).is_err())
+            .cloned()
+            .collect();
+        self.reported = current;
+        fresh
+    }
+}
+
+/// #18518: the V1 stamp warnings for the admitted zone set, sorted so the
+/// same set compares equal whatever the map iteration order. One line per
+/// colliding low-16 value (names sorted), plus one per zone whose low 16 bits
+/// are 0 (that zone stamps `0x0000`, which decodes as no zone). Low 16 bits 0
+/// is reported only by the per-zone lines, never also as a collision.
+fn zone_stamp_warnings(state: &ForwardingState) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (&low, _) in state
+        .zone_low16_to_id
+        .iter()
+        .filter(|(low, id)| **id == 0 && **low != 0)
+    {
+        let mut names: Vec<&str> = state
+            .zone_id_to_name
+            .iter()
+            .filter(|(id, _)| **id as u16 == low)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        names.sort_unstable();
+        lines.push(format!(
+            "zones {names:?} share V1 fabric-stamp bits {low:#06x}; their stamped fabric punts cannot be attributed and will drop"
+        ));
+    }
+    for (&id, name) in &state.zone_id_to_name {
+        if id as u16 == 0 {
+            lines.push(format!(
+                "zone {name:?} (id {id:#010x}) has V1 fabric-stamp bits 0x0000; its stamped fabric punts cannot be attributed and will drop"
+            ));
+        }
+    }
+    lines.sort_unstable();
+    lines
+}
+
+#[cfg(test)]
+mod zone_stamp_warning_tests {
+    use super::*;
+
+    fn state_with_zones(ids: &[(u32, &str)]) -> ForwardingState {
+        let mut state = ForwardingState::default();
+        for &(id, name) in ids {
+            state.zone_id_to_name.insert(id, name.to_string());
+        }
+        state.rebuild_zone_low16_index();
+        state
+    }
+
+    /// #18518 review NIT: an unchanged warning set is reported once, not on
+    /// every forwarding build; only a NEW line is reported again.
+    /// FAIL-ON-REVERT: make `fresh_lines` return `current` unfiltered and
+    /// the second build re-reports both lines.
+    #[test]
+    fn zone_stamp_warnings_report_each_line_once_18518() {
+        let mut latch = ZoneStampWarningLatch::default();
+        let a = "a".to_string();
+        let b = "b".to_string();
+        assert_eq!(latch.fresh_lines(vec![a.clone(), b.clone()]), vec![a.clone(), b.clone()]);
+        assert!(latch.fresh_lines(vec![a.clone(), b.clone()]).is_empty(), "unchanged set re-reported");
+        assert!(latch.fresh_lines(vec![a.clone()]).is_empty(), "a cleared line is not a new one");
+        assert_eq!(latch.fresh_lines(vec![a.clone(), b.clone()]), vec![b.clone()], "a returning line is new again");
+        assert!(latch.fresh_lines(Vec::new()).is_empty());
+    }
+
+    /// #18518 review NIT: two zones whose ids both have low 16 bits 0 are
+    /// reported by their per-zone lines only, not also as a collision; a
+    /// real collision names both zones once, independent of map order.
+    /// FAIL-ON-REVERT: drop the `**low != 0` filter and a fourth line
+    /// (the 0x0000 collision) appears.
+    #[test]
+    fn zone_stamp_warnings_do_not_double_report_zero_low16_18518() {
+        let state = state_with_zones(&[
+            (0x0001_0000, "z0a"),
+            (0x0002_0000, "z0b"),
+            (0x0001_0007, "c1"),
+            (0x0002_0007, "c2"),
+            (0x0000_0009, "solo"),
+        ]);
+        let lines = zone_stamp_warnings(&state);
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("[\"c1\", \"c2\"]") && l.contains("0x0007")), "{lines:#?}");
+        assert_eq!(lines.iter().filter(|l| l.contains("bits 0x0000")).count(), 2, "{lines:#?}");
+        assert!(!lines.iter().any(|l| l.contains("solo")), "{lines:#?}");
+    }
+
+    /// #18518 round-3 NIT: the latch must be consulted at the production
+    /// call site, not only correct as a struct. Drives `populate_zones`
+    /// through `build_forwarding_state` and counts the lines it emitted.
+    /// FAIL-ON-REVERT: `populate_zones` not calling
+    /// `report_zone_stamp_warnings` emits nothing on the first build; the
+    /// call site iterating every warning instead of the latch's fresh lines
+    /// (or using a fresh latch per build) re-emits on the second build.
+    #[test]
+    fn production_build_reports_each_stamp_warning_once_18518() {
+        let emitted = || ZONE_STAMP_LINES_EMITTED.with(std::cell::Cell::get);
+        with_zone_stamp_latch(|latch| *latch = ZoneStampWarningLatch::default());
+        let colliding = || {
+            let mut snapshot = crate::afxdp::test_fixtures::nat_snapshot_with_fabric();
+            for (id, name) in [(0x0001_0007u32, "c1"), (0x0002_0007, "c2")] {
+                snapshot.zones.push(crate::ZoneSnapshot {
+                    name: name.to_string(),
+                    id,
+                    ..Default::default()
+                });
+            }
+            snapshot
+        };
+        let start = emitted();
+        let state = crate::afxdp::forwarding_build::build_forwarding_state(&colliding());
+        assert_eq!(
+            state.zone_low16_to_id.get(&0x0007),
+            Some(&0),
+            "FIXTURE: c1/c2 must collide in the stamp index"
+        );
+        assert_eq!(emitted() - start, 1, "first build must report the collision once");
+        let _ = crate::afxdp::forwarding_build::build_forwarding_state(&colliding());
+        assert_eq!(emitted() - start, 1, "an unchanged collision must not be re-reported");
+        let _ = crate::afxdp::forwarding_build::build_forwarding_state(&crate::afxdp::test_fixtures::nat_snapshot_with_fabric());
+        let _ = crate::afxdp::forwarding_build::build_forwarding_state(&colliding());
+        assert_eq!(emitted() - start, 2, "a collision that clears and returns is reported again");
     }
 }

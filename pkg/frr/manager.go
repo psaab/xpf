@@ -113,8 +113,26 @@ type Manager struct {
 	// changed (a structural impossibility while the exec stays under
 	// reloadMu — kept as a fail-safe invariant against refactors that
 	// move the exec outside the lock).
+	// buildMu serializes whole applies (#18561): the managed-section build
+	// mutates manager-wide render state (the quarantine set, the #16625 RIP
+	// group index, the narrowed-chain set) and must not interleave with
+	// another build. Before #18561 every ApplyFull ran under the daemon's
+	// applySem, which provided this; the HA reconcile now applies after
+	// releasing applySem. Order: buildMu -> reloadMu (never the reverse).
+	buildMu  sync.Mutex
 	reloadMu sync.Mutex
 	confGen  uint64
+	// writeGen mirrors confGen for lock-free readers (#18561): a caller
+	// rendering under its own lock captures it and passes a predicate to
+	// ApplyFullIfCurrent, so only a write that actually happened (not a
+	// refused render) supersedes the render.
+	writeGen atomic.Uint64
+	// unconditionalWriteGen counts only the writes made WITHOUT a staleness
+	// predicate: ApplyFull (the commit path) and Clear. A conditional
+	// ApplyFullIfCurrent caller (the daemon's HA reconcile) orders its own
+	// renders by its own sequence, so an older HA render that is still
+	// writing must not supersede a newer one (seat T, #18565). Lock-free.
+	unconditionalWriteGen atomic.Uint64
 	// Desired QNH metric actions and the exact previously emitted QNH
 	// sequences to clear are protected by reloadMu. frr.conf stays
 	// metric-free; overlays are replayed after each integrated reload.
@@ -560,8 +578,70 @@ type FullConfig struct {
 //  10. global dynamic protocols (OSPF/OSPFv3/BGP/RIP/ISIS)
 //  11. per-VRF dynamic protocols
 func (m *Manager) ApplyFull(fc *FullConfig) error {
+	m.buildMu.Lock()
+	defer m.buildMu.Unlock()
+	return m.applyFull(fc, nil)
+}
+
+// ErrFRRApplySuperseded is returned by ApplyFullIfCurrent when its
+// staleness predicate reports that a newer render exists (#18561). Nothing
+// was written or reloaded.
+var ErrFRRApplySuperseded = errors.New("frr: apply superseded by a newer render")
+
+// ApplyFullIfCurrent is ApplyFull for a config rendered before the caller
+// gave up the lock that orders renders (#18561: the HA reconcile renders
+// under the daemon's apply semaphore and reloads after releasing it, so an
+// RG activation never waits on frr-reload.py). current is evaluated inside
+// the write+reload critical section (reloadMu), immediately before the
+// managed-section write; when it reports false the apply is skipped and
+// ErrFRRApplySuperseded is returned. A caller that renders later bumps the
+// state current reads before it applies, so an older render can never
+// overwrite a newer one.
+func (m *Manager) ApplyFullIfCurrent(fc *FullConfig, current func() bool) error {
+	if current == nil {
+		return errors.New("frr: ApplyFullIfCurrent needs a staleness predicate")
+	}
+	m.buildMu.Lock()
+	defer m.buildMu.Unlock()
+	// Judge staleness BEFORE the build, so a superseded render never touches
+	// the build state or the gauges it publishes (quarantined route-maps,
+	// narrowed chains). The predicate is re-checked under reloadMu right
+	// before the write; a render overtaken while it was building is then
+	// skipped, and the writer that overtook it rebuilds after us (it waits on
+	// buildMu), so the gauges end on its render.
+	if !current() {
+		return ErrFRRApplySuperseded
+	}
+	return m.applyFull(fc, current)
+}
+
+// WriteGeneration is the number of managed-section writes so far (#18561).
+// Lock-free; it moves only when a write actually happens, never for a
+// render that was refused or superseded.
+func (m *Manager) WriteGeneration() uint64 { return m.writeGen.Load() }
+
+// UnconditionalWriteGeneration is the number of managed-section writes made
+// without a staleness predicate (ApplyFull, Clear) so far (#18565). A caller
+// that sequences its own conditional renders compares this, not
+// WriteGeneration, so its own older render's write does not drop its newer
+// one. Lock-free; moves only when such a write actually happens.
+func (m *Manager) UnconditionalWriteGeneration() uint64 { return m.unconditionalWriteGen.Load() }
+
+// BuildBarrier waits for any in-flight apply or clear to finish (#18561).
+// A caller that has already set the state its ApplyFullIfCurrent predicates
+// read (the daemon's factory-reset flag) then knows no apply that could still
+// write is running: a later one judges the predicate under buildMu and sees
+// the new state. The factory-reset wipe strips frr.conf without this
+// manager's locks, so it calls BuildBarrier first.
+func (m *Manager) BuildBarrier() {
+	m.buildMu.Lock()
+	m.buildMu.Unlock()
+}
+
+// applyFull is ApplyFull's body. Caller must hold buildMu.
+func (m *Manager) applyFull(fc *FullConfig, current func() bool) error {
 	if fc == nil {
-		return m.Clear()
+		return m.clearIf(current)
 	}
 
 	hasContent := fc.OSPF != nil || fc.OSPFv3 != nil || fc.BGP != nil || fc.RIP != nil || fc.ISIS != nil ||
@@ -574,7 +654,7 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		}
 	}
 	if !hasContent {
-		return m.Clear()
+		return m.clearIf(current)
 	}
 
 	// #11399 render-side belt: tolerant load / HA-sync / rollback can still
@@ -721,7 +801,7 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 	}
 
 	section, overlays := m.buildManagedSectionWithQNH11447(fc)
-	return m.commitManagedSection(section, overlays)
+	return m.commitManagedSectionIf(section, overlays, current)
 }
 
 // collectAllBGPAcceptDefault builds the GLOBAL union (default instance + every
@@ -981,6 +1061,17 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 // the failure returns (#15183). FRR loads are not transactional:
 // commands accepted before a later rejection may already have taken effect.
 func (m *Manager) commitManagedSection(section string, overlays map[string]string) error {
+	return m.commitManagedSectionIf(section, overlays, nil)
+}
+
+// commitManagedSectionIf is commitManagedSection with the #18561 staleness
+// predicate (nil = unconditional). A superseded apply returns before the
+// retry pre-cancel when it can, and re-checks under reloadMu, where the
+// decision is ordered against every other writer.
+func (m *Manager) commitManagedSectionIf(section string, overlays map[string]string, current func() bool) error {
+	if current != nil && !current() {
+		return ErrFRRApplySuperseded
+	}
 	m.signalRetryCancel()
 	m.reloadMu.Lock()
 	defer m.reloadMu.Unlock()
@@ -997,6 +1088,9 @@ func (m *Manager) commitManagedSection(section string, overlays map[string]strin
 			m.ensureRetryLocked(false)
 		}
 	}()
+	if current != nil && !current() {
+		return ErrFRRApplySuperseded
+	}
 
 	cleanup, broadcast, err := m.previousQNHMetricSequences11447()
 	if err != nil {
@@ -1009,6 +1103,10 @@ func (m *Manager) commitManagedSection(section string, overlays map[string]strin
 	m.qnhMetricOverlayBroadcastCleanup = broadcast
 	m.qnhMetricOverlays = cloneQNHMetricOverlays11447(overlays)
 	m.confGen++
+	m.writeGen.Store(m.confGen)
+	if current == nil {
+		m.unconditionalWriteGen.Add(1)
+	}
 	slog.Info("FRR config written", "path", m.frrConf, "generation", m.confGen)
 
 	err = m.reloadLocked()
@@ -1299,7 +1397,17 @@ func (m *Manager) applyQNHMetricOverlaysLocked(ctx context.Context) error {
 // (including ErrFRRReloadDegraded) instead of discarding it — `xpfd
 // cleanup` logs it loudly while still exiting 0 (#1880).
 func (m *Manager) Clear() error {
-	err := m.commitManagedSection("", nil)
+	m.buildMu.Lock()
+	defer m.buildMu.Unlock()
+	return m.clearIf(nil)
+}
+
+// clearIf is Clear's body. Caller must hold buildMu.
+func (m *Manager) clearIf(current func() bool) error {
+	err := m.commitManagedSectionIf("", nil, current)
+	if errors.Is(err, ErrFRRApplySuperseded) {
+		return err
+	}
 	// A clear attempt removes the managed section from the desired
 	// configuration. Reset the narrowing gauges even when reload reports a
 	// degraded outcome: its retry may later remove the section, and leaving

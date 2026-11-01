@@ -145,8 +145,24 @@ ok "test-failover wires crash and last-RG-moved timestamps and rejects early cli
 # #12618: test-failover applies the same [T, T+3] outside-window budget.
 grep -q -- '--event-sec "$failover_at_seconds"' "$FAILOVER" \
 	|| bad "test-failover.sh does not pass its crash instant to the window-excluded producer"
-grep -q -- '--event-sec "$failback_at_seconds"' "$FAILOVER" \
-	|| bad "test-failover.sh does not pass its failback instant to the window-excluded producer"
+# #18617: the harness's own moves are PLANNED (scored, not excused); the
+# behavioural cells near the end of this file drive the recording itself.
+grep -qF -- '"${planned_move_args[@]}" --event-window-sec 3' "$FAILOVER" \
+	|| bad "test-failover.sh does not pass its planned moves to the producer"
+producer_line="$(grep -nF 'elif ! python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" \' "$FAILOVER" | head -1 | cut -d: -f1)"
+builder_line="$(grep -n '^ha_build_planned_move_args$' "$FAILOVER" | head -1 | cut -d: -f1)"
+[[ -n "$producer_line" && -n "$builder_line" ]] && (( builder_line < producer_line )) \
+	|| bad "test-failover.sh must build the planned-move arguments before the producer call"
+if grep -qE -- '--event-sec "\$(failback_at_seconds|rg1_move_at_seconds)"' "$FAILOVER"; then
+	bad "test-failover.sh still EXCUSES a planned move as an --event-sec window"
+fi
+# The whole-run count (aggregate + every stream, no window) is red by design on
+# a crash run, so it is recorded for the master-relative comparison and gated
+# only when MAX_ZERO_INTERVALS is set (#18617).
+grep -qF 'MAX_ZERO_INTERVALS="${MAX_ZERO_INTERVALS:-}"' "$FAILOVER" \
+	|| bad "test-failover.sh must not gate the whole-run zero-interval count by default"
+grep -qF 'echo "HARNESS_METRIC: whole_run_zero_intervals=${zero_intervals_total}"' "$FAILOVER" \
+	|| bad "test-failover.sh must record the whole-run zero-interval count for the ledger"
 grep -q -- '--event-window-sec 3' "$FAILOVER" \
 	|| bad "test-failover.sh does not pin the [T, T+3] window width"
 grep -q 'stream_zero_intervals_outside_events_total' "$FAILOVER" \
@@ -263,8 +279,8 @@ summary_rc=0
 	eval "$summary_fixture"
 ) >"$summary_out" || summary_rc=$?
 [[ "$summary_rc" == "1" ]] || bad "FAIL-then-VOID must keep exit 1, got rc=$summary_rc"
-grep -q '^  Failover test: 4 passed, 1 failed$' "$summary_out" \
-	|| bad "FAIL-then-VOID must retain the existing summary grammar"
+grep -q '^  Failover test: 4 passed, 1 failed, 0 cost$' "$summary_out" \
+	|| bad "FAIL-then-VOID must retain the summary grammar (pair plus cost)"
 
 summary_out="${fixture_dir}/summary-void-only.out"
 summary_rc=0
@@ -290,8 +306,22 @@ summary_out="${fixture_dir}/summary-clean.out"
 	ERRORS=()
 	eval "$summary_fixture"
 ) >"$summary_out"
-grep -q '^  Failover test: 4 passed, 0 failed$' "$summary_out" \
-	|| bad "clean run must retain the existing summary grammar"
+grep -q '^  Failover test: 4 passed, 0 failed, 0 cost$' "$summary_out" \
+	|| bad "clean run must retain the summary grammar (pair plus cost)"
+summary_out="${fixture_dir}/summary-cost.out"
+(
+	PASS=4
+	# shellcheck disable=SC2034 # Read by the extracted summary fixture.
+	FAIL=0
+	VOID=0
+	# shellcheck disable=SC2034 # Read by the extracted summary fixture.
+	COST=2
+	# shellcheck disable=SC2034 # Read by the extracted summary fixture.
+	ERRORS=()
+	eval "$summary_fixture"
+) >"$summary_out"
+grep -q '^  Failover test: 4 passed, 0 failed, 2 cost$' "$summary_out" \
+	|| bad "a run with COST cells must report them in the summary (cells_cost)"
 ok "FAIL outranks ordinary VOID; VOID-only suppresses summary and exits 77"
 
 # --- Two-transition JSON-stream regression fixture ---------------------
@@ -630,6 +660,174 @@ grep -q '^FAIL iperf3 intervals: unrecognized failover interval verdict: MAYBE i
 	|| bad "unknown transition oracle statuses must be converted to FAIL"
 ok "unknown oracle statuses fail closed for intervals and both transitions"
 
+# --- #18543: an interrupted json-stream client is not a 0.0 Gbps completion ---
+# Shape taken from the integ7a/integ7b tcp test-failover logs: a blackholed
+# stream holds the client past -t, so the harness SIGTERMs it. iperf3 then
+# writes one closing interval covering the hung time (every stream at 0 bytes),
+# an `error` event and a locally built `end` whose sum_received is zeros. The
+# old producer called that completed, took avg_gbps from the zeros (0.0) and
+# counted the closing interval as a zero after peak (collapse) that marked
+# every stream as affected. The TWIN is the same run exiting on its own.
+interrupted_fixture="${fixture_dir}/interrupted.jsonl"
+completed_twin_fixture="${fixture_dir}/interrupted-twin-completed.jsonl"
+python3 - "$interrupted_fixture" "$completed_twin_fixture" <<'PY'
+import json
+import pathlib
+import sys
+
+duration = 20
+start = {"event": "start", "data": {"test_start": {"protocol": "TCP", "num_streams": 4, "duration": duration}}}
+intervals = []
+for second in range(duration):
+    streams = []
+    for sid in range(1, 5):
+        bps = 0 if (sid == 4 and second >= 12) else 6_000_000_000
+        streams.append({"socket": sid, "start": second, "end": second + 1, "bits_per_second": bps})
+    total = sum(s["bits_per_second"] for s in streams)
+    intervals.append({"event": "interval", "data": {"sum": {"start": second, "end": second + 1, "bits_per_second": total}, "streams": streams}})
+closing = {"event": "interval", "data": {
+    "sum": {"start": duration, "end": duration + 30.0, "bits_per_second": 0},
+    "streams": [{"socket": sid, "start": duration, "end": duration + 30.0, "bits_per_second": 0} for sid in range(1, 5)],
+}}
+error = {"event": "error", "data": "interrupt - the client has terminated by signal Terminated(15)"}
+stub_end = {"event": "end", "data": {
+    "sum_sent": {"start": 0, "end": duration + 30.0, "seconds": duration + 30.0, "bits_per_second": 8_640_000_000, "retransmits": 7},
+    "sum_received": {"start": 0, "end": duration + 30.0, "seconds": duration + 30.0, "bytes": 0, "bits_per_second": 0},
+}}
+real_end = {"event": "end", "data": {
+    "sum_sent": {"start": 0, "end": duration, "seconds": duration, "bits_per_second": 21_600_000_000, "retransmits": 7},
+    "sum_received": {"start": 0, "end": duration, "seconds": duration, "bits_per_second": 21_500_000_000},
+}}
+def write(path, events):
+    pathlib.Path(path).write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+write(sys.argv[1], [start, *intervals, closing, error, stub_end])
+write(sys.argv[2], [start, *intervals, real_end])
+PY
+interrupted_metrics="${fixture_dir}/interrupted.metrics.json"
+completed_twin_metrics="${fixture_dir}/interrupted-twin-completed.metrics.json"
+python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$interrupted_fixture" \
+	--event-sec 5 --event-sec 15 >"$interrupted_metrics"
+python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$completed_twin_fixture" \
+	--event-sec 5 --event-sec 15 >"$completed_twin_metrics"
+python3 - "$interrupted_metrics" "$completed_twin_metrics" <<'PY' || bad "#18543: an interrupted client must be scored as interrupted at its measured rate, and its twin unchanged"
+import json
+import sys
+
+m = json.load(open(sys.argv[1]))
+assert m["completed"] is False, ("interrupted run scored completed", m["completed"])
+assert m["client_error"].startswith("interrupt - the client has terminated"), m["client_error"]
+# 12 s at 24 Gbps + 8 s at 18 Gbps over 20 measured seconds; never the stub's 0.
+assert abs(m["avg_gbps"] - 21.6) < 1e-9, ("avg_gbps", m["avg_gbps"])
+assert m["avg_source"] == "intervals", m["avg_source"]
+assert m["post_duration_intervals_excluded"] == 1, m["post_duration_intervals_excluded"]
+assert m["collapse_detected"] is False, ("phantom collapse", m["collapse_reason"])
+assert m["zero_streams_total"] == 1, ("only stream 4 died", m["zero_streams_total"])
+assert m["observed_end_sec"] == 20.0, m["observed_end_sec"]
+assert len(m["interval_gbps"]) == 20, len(m["interval_gbps"])
+
+t = json.load(open(sys.argv[2]))
+assert t["completed"] is True and t["client_error"] == "", t
+assert abs(t["avg_gbps"] - 21.5) < 1e-9 and t["avg_source"] == "end", (t["avg_gbps"], t["avg_source"])
+assert t["post_duration_intervals_excluded"] == 0, t
+# The only differences between the twins are the interrupt's own fields.
+for key in ("zero_streams_total", "stream_zero_intervals_total", "zero_intervals_total",
+            "collapse_detected", "interval_gbps", "peak_gbps", "retransmits"):
+    assert m[key] == t[key], (key, m[key], t[key])
+PY
+ok "#18543: an interrupted client is completed=false at its measured-interval rate; its completed twin is unchanged"
+
+iperf_client_interrupt_verdict "$interrupted_metrics" | grep -q '^FAIL iperf3 client did not exit on its own and was interrupted (interrupt - the client has terminated by signal Terminated(15))' \
+	|| bad "#18543: the interrupt cell must FAIL and name the interrupt"
+iperf_client_interrupt_verdict "$completed_twin_metrics" | grep -qx 'PASS iperf3 client exited on its own (end event, no interrupt)' \
+	|| bad "#18543: a client that exited on its own must PASS the interrupt cell"
+printf '{"ok": true}\n' >"${fixture_dir}/no-client-error.metrics.json"
+iperf_client_interrupt_verdict "${fixture_dir}/no-client-error.metrics.json" | grep -qx 'VOID iperf3 client interrupt evidence unavailable: metrics carry no client_error field' \
+	|| bad "#18543: metrics without the field must VOID, never PASS"
+iperf_client_interrupt_verdict "${fixture_dir}/absent.metrics.json" | grep -q '^VOID iperf3 client interrupt evidence unavailable: metrics unreadable' \
+	|| bad "#18543: unreadable metrics must VOID, never PASS"
+[[ $(iperf_client_interrupt_verdict "$interrupted_metrics" | wc -l) -eq 1 ]] \
+	|| bad "#18543: the interrupt cell must print exactly one line"
+printf '{"ok": true, "client_error": ""}\n' >"${fixture_dir}/no-completed.metrics.json"
+iperf_client_interrupt_verdict "${fixture_dir}/no-completed.metrics.json" | grep -qx 'VOID iperf3 client interrupt evidence unavailable: completed is absent or malformed' \
+	|| bad "#18543: metrics without a completed flag must VOID, never PASS"
+ok "#18543: interrupt cell is total — FAIL interrupted, PASS on its own, VOID without evidence"
+
+# The KILL half of the stop helper's TERM-then-KILL escalation. A client that
+# outlives the TERM grace is SIGKILLed and writes nothing more: no closing
+# interval, no `error` event, no `end` block. Before this cell it scored
+# avg_gbps=0.0 and the interrupt cell called it "exited on its own".
+killed_fixture="${fixture_dir}/killed.jsonl"
+python3 - "$interrupted_fixture" "$killed_fixture" <<'PY'
+import json
+import pathlib
+import sys
+
+events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+kept = [
+    e for e in events
+    if e["event"] in ("start", "interval") and not (e["event"] == "interval" and e["data"]["sum"]["start"] >= 20)
+]
+assert len(kept) == len(events) - 3, (len(kept), len(events))
+pathlib.Path(sys.argv[2]).write_text("\n".join(json.dumps(e) for e in kept) + "\n", encoding="utf-8")
+PY
+killed_metrics="${fixture_dir}/killed.metrics.json"
+python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$killed_fixture" \
+	--event-sec 5 --event-sec 15 >"$killed_metrics"
+python3 - "$killed_metrics" "$completed_twin_metrics" <<'PY' || bad "#18543: a SIGKILLed client must be scored at its measured rate, never 0.0"
+import json
+import sys
+
+k = json.load(open(sys.argv[1]))
+t = json.load(open(sys.argv[2]))
+assert k["completed"] is False and k["client_error"] == "", (k["completed"], k["client_error"])
+assert abs(k["avg_gbps"] - 21.6) < 1e-9 and k["avg_source"] == "intervals", (k["avg_gbps"], k["avg_source"])
+assert k["observed_end_sec"] == 20.0, k["observed_end_sec"]
+for key in ("zero_streams_total", "stream_zero_intervals_total", "zero_intervals_total",
+            "collapse_detected", "interval_gbps", "peak_gbps"):
+    assert k[key] == t[key], (key, k[key], t[key])
+PY
+iperf_client_interrupt_verdict "$killed_metrics" | grep -q '^FAIL iperf3 client left no end event: it was killed outright' \
+	|| bad "#18543: a SIGKILLed client (no end, no error) must FAIL the interrupt cell, never PASS"
+ok "#18543: a SIGKILLed client is scored at its measured-interval rate and fails the interrupt cell"
+
+interrupted_smoke_verdicts=$(MOCK_CAPTURE_FILE="$interrupted_fixture" \
+	ha_smoke_iperf_verdicts /fixture/interrupted.jsonl 20 4 1 5 15)
+grep -q '^PASS iperf3 throughput: 21.600 Gbps' <<<"$interrupted_smoke_verdicts" \
+	|| bad "#18543: the shared smoke validator must report the measured 21.6 Gbps, not the stub's 0.0"
+grep -q '^FAIL iperf3 client did not exit on its own and was interrupted' <<<"$interrupted_smoke_verdicts" \
+	|| bad "#18543: the shared smoke validator must keep the interrupted run red under its own name"
+twin_smoke_verdicts=$(MOCK_CAPTURE_FILE="$completed_twin_fixture" \
+	ha_smoke_iperf_verdicts /fixture/twin.jsonl 20 4 1 5 15)
+grep -qx 'PASS iperf3 client exited on its own (end event, no interrupt)' <<<"$twin_smoke_verdicts" \
+	|| bad "#18543: the shared smoke validator must pass the interrupt cell for a client that exited"
+grep -qx 'FAIL iperf3 client interrupt: JSON metrics unavailable: fixture capture denied' <<<"$missing_smoke_verdicts" \
+	|| bad "#18543: failed capture must fail the interrupt cell too (one cell per class)"
+killed_smoke_verdicts=$(MOCK_CAPTURE_FILE="$killed_fixture" \
+	ha_smoke_iperf_verdicts /fixture/killed.jsonl 20 4 1 5 15)
+grep -q '^PASS iperf3 throughput: 21.600 Gbps' <<<"$killed_smoke_verdicts" \
+	|| bad "#18543: the shared smoke validator must report a SIGKILLed client's measured rate, not 0.0"
+grep -q '^FAIL iperf3 client left no end event' <<<"$killed_smoke_verdicts" \
+	|| bad "#18543: the shared smoke validator must fail a SIGKILLed client by name"
+# Callers accept only PASS/FAIL, so the lib maps the cell's VOID to FAIL. Strip
+# the producer's client_error to reach that branch through the real validator.
+strip_python_dir="${fixture_dir}/strip-client-error-python"
+mkdir -p "$strip_python_dir"
+cat >"$strip_python_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */iperf-json-metrics.py ]]; then
+	"$REAL_PYTHON" "$@" |
+		"$REAL_PYTHON" -c 'import json, sys; m = json.load(sys.stdin); m.pop("client_error", None); print(json.dumps(m))'
+	exit $?
+fi
+exec "$REAL_PYTHON" "$@"
+SH
+chmod +x "$strip_python_dir/python3"
+stripped_smoke_verdicts=$(REAL_PYTHON="$REAL_PYTHON" PATH="$strip_python_dir:$PATH" \
+	MOCK_CAPTURE_FILE="$completed_twin_fixture" ha_smoke_iperf_verdicts /fixture/twin.jsonl 20 4 1 5 15)
+grep -qx 'FAIL iperf3 client interrupt evidence unavailable: metrics carry no client_error field' <<<"$stripped_smoke_verdicts" \
+	|| bad "#18543: the shared smoke validator must map missing interrupt evidence to FAIL, never VOID or PASS"
+ok "#18543: shared smoke validator reports the measured rate and fails interrupted and killed clients by name"
+
 
 
 # --- WIRING + the #7673 PORT AGREEMENT, for EVERY HA smoke with a throughput cell ---
@@ -660,6 +858,17 @@ grep -q -- '--failover-check --json-stream --streams "$streams"' "$ORACLE_LIB" \
 	|| bad "shared smoke oracle does not route JSON interval telemetry to --failover-check"
 grep -Fq -- '--crash-at "${events[$((event_number - 1))]}"' "$ORACLE_LIB" \
 	|| bad "shared smoke oracle does not evaluate every supplied transition timestamp"
+# #18543: test-failover's Phase 5 has no behavioural harness, so pin the call
+# and its catch-all (the shared smoke path is covered behaviourally above).
+awk '/interrupt_verdict=\$\(iperf_client_interrupt_verdict "\$LOCAL_IPERF_METRICS"\)/,/^\tesac$/' \
+	"${SCRIPT_DIR}/test-failover.sh" | grep -qE '^[[:space:]]+FAIL\\ \*\) fail ' \
+	|| bad "test-failover.sh does not run the #18543 interrupt cell with a FAIL dispatch"
+# The enclosing guard too: for a stuck-at-end run with healthy streams this cell
+# is the only FAIL (completion and throughput both pass on the interval mean),
+# so a dead guard would turn that run green.
+awk '{ if (index($0, "interrupt_verdict=$(iperf_client_interrupt_verdict \"$LOCAL_IPERF_METRICS\")")) { print prev; found=1 } prev=$0 } END { exit !found }' \
+	"${SCRIPT_DIR}/test-failover.sh" | grep -qxF 'if [[ "$iperf_gate_ok" == true ]]; then' \
+	|| bad "test-failover.sh does not run the #18543 interrupt cell under the gate-ok guard"
 
 SMOKES=(test-double-failover.sh test-chained-crash.sh test-active-active.sh test-stress-failover.sh test-rolling-upgrade.sh)
 for smoke in "${SMOKES[@]}"; do
@@ -770,6 +979,243 @@ for smoke in "${SMOKES[@]}"; do
 
 done
 
+
+# --- #18617: planned moves are SCORED, not excused (seat Y) -----------------
+# The crash keeps its excused [T, T+3] window (--event-sec; its detection and
+# activation, about 1.1-1.5 s in the lab, are by design). A move the harness makes itself (--planned-move) is
+# scored like H11 at iperf3's 1 s resolution: no stall PASS; one stream
+# stalled at most 10 s and recovered COST; an all-stream zero interval, two
+# stalled streams, a longer stall, or a stream that never recovers FAIL. Its
+# zeros never count in the "outside" budget twice.
+planned_dir="${fixture_dir}/planned"
+mkdir -p "$planned_dir"
+python3 - "$planned_dir" <<'PY'
+import json, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+def fixture(name, zeros, n=40, streams=4, rates=None):
+    ev = []
+    for sec in range(n):
+        st, tot = [], 0
+        for sid in range(1, streams + 1):
+            bps = 0 if (sid, sec) in zeros else (rates or {}).get((sid, sec), 2_000_000_000)
+            tot += bps
+            st.append({"socket": sid, "start": sec, "end": sec + 1, "bits_per_second": bps})
+        ev.append({"event": "interval", "data": {"sum": {"start": sec, "end": sec + 1, "bits_per_second": tot}, "streams": st}})
+    ev.append({"event": "end", "data": {"sum_sent": {"bits_per_second": 8e9, "retransmits": 0}, "sum_received": {"bits_per_second": 8e9}}})
+    (d / f"{name}.jsonl").write_text("\n".join(json.dumps(e) for e in ev) + "\n", encoding="utf-8")
+fixture("clean", set())
+fixture("cost", {(2, 11)})
+fixture("two", {(2, 11), (3, 12)})
+fixture("aggregate", {(s, 11) for s in range(1, 5)})
+fixture("long", {(2, t) for t in range(11, 24)})
+fixture("died", {(2, t) for t in range(11, 40)})
+fixture("crash", {(s, 5) for s in range(1, 5)} | {(2, 11)})
+fixture("landing", {(2, 13)})
+# The live #18627 run's RG1 move: one stream truly stalled, two dipped to
+# 12 Mbit/s. A dip is not a stall (H11's stall is under 1 Mbit/s), so this is
+# a COST, not "3 streams stalled"; the dip itself is recorded per move.
+fixture("share", {(2, 11)}, rates={(3, 11): 12_000_000, (4, 11): 12_000_000})
+PY
+planned_metrics() { # <fixture> [producer args...]
+	local f="$1"
+	shift
+	python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "${planned_dir}/${f}.jsonl" "$@"
+}
+# shellcheck disable=SC2054 # the commas are inside one --planned-move value
+PLANNED_ARGS=(--event-sec 5 --planned-move rg1-split=10,11 --planned-move rg0-rg2-failback=30,31)
+check_planned() { # <fixture> <python assertion over m and moves> <description>
+	local out
+	out=$(planned_metrics "$1" "${PLANNED_ARGS[@]}")
+	python3 - "$out" "$2" <<'PY' || bad "planned moves, $3: $out"
+import json, sys
+m = json.loads(sys.argv[1])
+moves = {x["label"]: x for x in m["planned_moves"]}
+assert eval(sys.argv[2]), sys.argv[2]
+PY
+	ok "planned moves: $3"
+}
+check_planned clean 'moves["rg1-split"]["verdict"] == "PASS" and moves["rg0-rg2-failback"]["verdict"] == "PASS" and m["planned_move_cost_total"] == 0' "no stall at either move PASSes"
+check_planned cost 'moves["rg1-split"]["verdict"] == "COST" and moves["rg1-split"]["stall_sec"] == {"2": 1.0} and m["planned_move_cost_total"] == 1 and m["stream_zero_intervals_outside_events_total"] == 0 and m["planned_move_zero_intervals_total"] == 1' "one stream 1 s at the move is a COST (not excused, not counted outside twice)"
+check_planned two 'moves["rg1-split"]["verdict"] == "FAIL" and "2 streams stalled" in moves["rg1-split"]["text"]' "two stalled streams FAIL"
+check_planned aggregate 'moves["rg1-split"]["verdict"] == "FAIL" and "every stream stalled (under 1 Mbit/s) in 1 interval(s): an aggregate outage over 1 s" in moves["rg1-split"]["text"]' "an all-stream stalled interval FAILs (aggregate outage over 1 s), and the reason names the stall threshold it was decided by"
+check_planned long 'moves["rg1-split"]["verdict"] == "FAIL" and "stall over the 10 s bound: stream 2 13 s" in moves["rg1-split"]["text"] and m["stream_zero_intervals_outside_events_total"] > 0' "a 13 s stall FAILs (H11's 10 s bound), and its tail past the window still counts outside"
+check_planned died 'moves["rg1-split"]["verdict"] == "FAIL" and "never carried data again" in moves["rg1-split"]["text"]' "a stream that never recovers FAILs"
+check_planned share 'moves["rg1-split"]["verdict"] == "COST" and moves["rg1-split"]["stalled_streams"] == ["2"] and moves["rg1-split"]["low_share_streams"] == ["3", "4"] and "2 more stream(s) at or below 0.05 Gbit/s but not stalled" in moves["rg1-split"]["text"]' "streams dipped to 12 Mbit/s are low-share, not stalled (H11's 1 Mbit/s stall): the verdict is unchanged"
+check_planned share 'moves["rg1-split"]["min_stream_gbps"] == 0.0 and abs(moves["rg1-split"]["window_aggregate_gbps"] - 6.506) < 1e-6 and moves["rg0-rg2-failback"]["min_stream_gbps"] == 2.0 and moves["rg0-rg2-failback"]["window_aggregate_gbps"] == 8.0' "each move records its minimum per-stream rate and in-window aggregate rate (the transition dip)"
+check_planned crash 'm["stream_zero_intervals_outside_events_total"] == 0 and moves["rg1-split"]["verdict"] == "COST" and m["zero_intervals_total"] == 1 + 4 + 1' "the crash window stays excused while the planned move is still scored"
+# The landing anchor: a zero 2-3 s after the request but inside [land, land+3]
+# is the move's; with the request alone it would read as an unexplained outage.
+out=$(planned_metrics landing --planned-move rg1-split=10,12)
+python3 - "$out" <<'PY' || bad "a zero inside [land, land+3] must be the move's, not outside: $out"
+import json, sys
+m = json.loads(sys.argv[1])
+assert m["planned_moves"][0]["verdict"] == "COST", m
+assert m["stream_zero_intervals_outside_events_total"] == 0, m
+PY
+out=$(planned_metrics landing --planned-move rg1-split=10)
+python3 - "$out" <<'PY' || bad "control: with the request anchor alone the same zero must count outside: $out"
+import json, sys
+m = json.loads(sys.argv[1])
+assert m["planned_moves"][0]["verdict"] == "PASS", m
+assert m["stream_zero_intervals_outside_events_total"] == 1, m
+PY
+ok "planned moves: anchored at request AND landing; the request alone misses a stall in [land, land+3] (control)"
+
+# --- #18617: the recording is BEHAVIOURAL (seat X) ---------------------------
+# Run the real functions from test-failover.sh with stubbed incus, owner poll
+# and capture helpers. A textual grep passed with the instant reset after the
+# slice, made local, recorded only on the failure branch, or taken after the
+# request; each of those reds here.
+TF="${SCRIPT_DIR}/test-failover.sh"
+# Bash's SECONDS ticks on wall-clock second boundaries, not one second after
+# it is assigned. Assign it just after a boundary, so the instants taken in the
+# next ~0.9 s are exact and a 1.2 s+ request is always at least one tick.
+fx_align_second() { while (( 10#$(date +%N) > 100000000 )); do :; done; }
+tf_fn() { awk -v n="$1" '$0 == n "() {" {f = 1} f {print} f && $0 == "}" {exit}' "$TF"; }
+slice_src="$(tf_fn ha_run_rg1_failback_slice)"
+rg02_src="$(tf_fn ha_run_rg02_failback)"
+builder_src="$(tf_fn ha_build_planned_move_args)"
+cells_src="$(tf_fn ha_planned_move_cells)"
+callsite_src="$(sed -n '/^# M1 planned-move call-site fixture begin$/,/^# M1 planned-move call-site fixture end$/p' "$TF" | sed '1d;$d')"
+[[ -n "$slice_src" && -n "$rg02_src" && -n "$builder_src" && -n "$cells_src" && -n "$callsite_src" ]] \
+	|| bad "could not extract the planned-move functions or call site from test-failover.sh"
+run_slice() { # <owner-wait rc> -> "req=<request instant> land=<landing instant>"
+	(
+		set +eu
+		info() { :; }; void() { :; }; pass() { :; }; fail() { :; }
+		main_iperf_running() { return 0; }
+		ha_wait_for_session_sync_idle() { return 0; }
+		ha_capture_rg1_pair() { return 0; }
+		ha_rg1_owner_status_cell() { return 0; }
+		ha_target_reachability_cell() { return 0; }
+		ha_external_sweep() { :; }
+		ha_capture_rg1_sample_pair() { return 0; }
+		ha_recent_dead_streams_cell() { :; }
+		ha_rg1_evaluate() { :; }
+		sleep() { :; }
+		# The request takes 1.2 s of real time; the landing is observed 3 s after.
+		incus() { command sleep 1.2; echo "Manual failover triggered"; }
+		ha_wait_rg1_owner() { SECONDS=$((SECONDS + 3)); return "$FX_OWNER_RC"; }
+		FW0=fw0 FW1=fw1 MANUAL_FAILOVER_DEADLINE=10 FX_OWNER_RC="$1"
+		eval "$slice_src"
+		iperf_start_seconds=10
+		rg1_move_at_seconds="" rg1_move_landed_at_seconds=""
+		fx_align_second
+		SECONDS=100
+		ha_run_rg1_failback_slice >/dev/null 2>&1
+		echo "req=${rg1_move_at_seconds} land=${rg1_move_landed_at_seconds}"
+	)
+}
+landed="$(run_slice 0)"
+not_landed="$(run_slice 1)"
+# The request takes 1.2 s and the landing is 3 s after it: the landing is 94 or
+# 95 depending on the tick, but the PRE-request instant is exactly 90.
+[[ "$landed" =~ ^req=90\ land=(94|95)$ ]] \
+	|| bad "RG1 slice must record the PRE-request instant (90) and the observed landing (94-95) when RG1 lands, got '$landed'"
+[[ "$not_landed" == "req= land=" ]] \
+	|| bad "RG1 slice must record nothing when RG1 does not land, got '$not_landed'"
+ok "RG1 slice (behavioural): pre-request instant and landing recorded globally on landing, nothing on failure"
+run_callsite() { # <slice body> -> "req=<a> land=<b>"
+	(
+		set +eu
+		pass() { :; }
+		ha_run_rg02_failback() { all_primary=false; }
+		eval "ha_run_rg1_failback_slice() { $1; }"
+		rg1_move_at_seconds=stale rg1_move_landed_at_seconds=stale
+		eval "$callsite_src"
+		echo "req=${rg1_move_at_seconds} land=${rg1_move_landed_at_seconds}"
+	)
+}
+[[ "$(run_callsite 'rg1_move_at_seconds=90; rg1_move_landed_at_seconds=94')" == "req=90 land=94" ]] \
+	|| bad "the call site must keep the instants the slice recorded (a reset after the slice drops them)"
+[[ "$(run_callsite ':')" == "req= land=" ]] \
+	|| bad "the call site must clear the instants before the slice, so a slice that did not land leaves none"
+ok "call site (behavioural): instants cleared before the slice and kept after it"
+# shellcheck disable=SC2034 # read by the eval'd ha_run_rg02_failback
+run_rg02() { # -> "req=<list> land=<list> last=<s> all=<bool>"
+	(
+		set +eu
+		info() { :; }; fail() { :; }; rg_ownership_diagnosis() { :; }
+		sleep() { SECONDS=$((SECONDS + 1)); }
+		polls="${fixture_dir}/rg02-polls"
+		: >"$polls"
+		incus() {
+			case "$*" in
+			*"request chassis cluster failover redundancy-group"*)
+				command sleep 1.2
+				echo "Manual failover triggered"
+				;;
+			*"show chassis cluster status"*)
+				echo poll >>"$polls"
+				if (($(wc -l <"$polls") >= 3)); then
+					printf 'Redundancy group: 0 , Failover count: 2\nnode0  200  primary  no  yes  None\nRedundancy group: 2 , Failover count: 2\nnode0  200  primary  no  yes  None\n'
+				else
+					printf 'Redundancy group: 0 , Failover count: 1\nnode0  200  secondary  no  yes  None\nRedundancy group: 2 , Failover count: 1\nnode0  200  secondary  no  yes  None\n'
+				fi
+				;;
+			esac
+		}
+		FW0=fw0 FW1=fw1 MANUAL_FAILOVER_DEADLINE=10 RG1_FAILBACK_SETTLED=true RG1_FAILBACK_ELAPSED=1
+		eval "$rg02_src"
+		iperf_start_seconds=10
+		fx_align_second
+		SECONDS=200
+		ha_run_rg02_failback >/dev/null 2>&1
+		echo "req=${failback_request_at_seconds} land=${failback_landed_at_seconds} last=${failback_at_seconds} all=${all_primary}"
+	)
+}
+rg02="$(run_rg02)"
+[[ "$rg02" =~ ^req=190\ (191|192)\ land=([0-9]+)\ ([0-9]+)\ last=([0-9]+)\ all=true$ ]] \
+	|| bad "RG0/RG2 failback must record both requests' PRE-request instants (190, then 191-192 after RG0's 1.2 s request) and both landings, got '$rg02'"
+(( BASH_REMATCH[2] >= BASH_REMATCH[1] && BASH_REMATCH[3] >= BASH_REMATCH[2] && BASH_REMATCH[4] == BASH_REMATCH[3] )) \
+	|| bad "RG0/RG2 landings must follow the requests and the last one is the stream oracle's failback instant, got '$rg02'"
+ok "RG0/RG2 failback (behavioural): both requests and both poll-observed landings recorded, last landing kept for the oracle"
+# shellcheck disable=SC2154 # set by the eval'd ha_build_planned_move_args
+run_builder() { # <rg1 req> <rg1 land> <failback reqs> <failback lands>
+	(
+		set +eu
+		eval "$builder_src"
+		rg1_move_at_seconds="$1" rg1_move_landed_at_seconds="$2"
+		failback_request_at_seconds="$3" failback_landed_at_seconds="$4"
+		ha_build_planned_move_args
+		((${#planned_move_args[@]} == 0)) || printf '%s|' "${planned_move_args[@]}"
+		echo "n=${planned_moves_registered}"
+	)
+}
+[[ "$(run_builder 90 94 '190 191' '194 195')" == "--planned-move|rg1-split=90,94|--planned-move|rg0-rg2-failback=190,191,194,195|n=2" ]] \
+	|| bad "planned-move arguments must anchor each move at its requests AND landings: $(run_builder 90 94 '190 191' '194 195')"
+[[ "$(run_builder '' '' '190 191' '194 195')" == "--planned-move|rg0-rg2-failback=190,191,194,195|n=1" ]] \
+	|| bad "an RG1 move that did not land must not be registered: $(run_builder '' '' '190 191' '194 195')"
+[[ "$(run_builder 90 '' '' '')" == "n=0" ]] \
+	|| bad "a request with no landing, and a failback with none, register nothing: $(run_builder 90 '' '' '')"
+ok "planned-move arguments (behavioural): request and landing anchors per move; unlanded moves unregistered"
+run_cells() { # <fixture> <registered> -> recorded cells
+	(
+		set +eu
+		pass() { echo "P:$*"; }; fail() { echo "F:$*"; }; cost() { echo "C:$*"; }; void() { echo "V:$*"; }
+		eval "$cells_src"
+		planned_metrics "$1" "${PLANNED_ARGS[@]}" >"${fixture_dir}/cells-metrics.json"
+		ha_planned_move_cells "${fixture_dir}/cells-metrics.json" "$2"
+	)
+}
+share_cells="$(run_cells share 2)"
+for want in "HARNESS_METRIC: planned_rg1_split_low_share_streams=2" "HARNESS_METRIC: planned_rg1_split_min_stream_gbps=0.000" \
+	"HARNESS_METRIC: planned_rg1_split_window_aggregate_gbps=6.506" "HARNESS_METRIC: planned_rg0_rg2_failback_low_share_streams=0" \
+	"HARNESS_METRIC: planned_rg0_rg2_failback_min_stream_gbps=2.000" "HARNESS_METRIC: planned_rg0_rg2_failback_window_aggregate_gbps=8.000"; do
+	grep -qxF "$want" <<<"$share_cells" || bad "planned-move dip metrics: '$want' not emitted for the ledger: $share_cells"
+done
+[[ "$(grep -c '^C:' <<<"$share_cells")" == 1 && "$(grep -c '^V:' <<<"$share_cells")" == 0 ]] \
+	|| bad "planned-move dip metrics must not change the cells (one COST, no VOID): $share_cells"
+ok "planned-move dip metrics (behavioural): low-share count, minimum stream rate and window aggregate per move ride the ledger as HARNESS_METRIC"
+cells="$(run_cells cost 2)"
+[[ "$(grep -c '^C:iperf3 planned move rg1-split: stream 2 stalled 1 s' <<<"$cells")" == 1 \
+	&& "$(grep -c '^P:iperf3 planned move rg0-rg2-failback' <<<"$cells")" == 1 && "$(grep -c '^[FV]:' <<<"$cells")" == 0 ]] \
+	|| bad "planned-move cells: one COST and one PASS expected: $cells"
+[[ "$(run_cells two 2 | grep -c '^F:iperf3 planned move rg1-split: 2 streams stalled')" == 1 ]] \
+	|| bad "planned-move cells: a FAIL verdict must be a fail cell"
+[[ "$(run_cells clean 3 | grep -c '^V:iperf3 planned moves: 3 registered, 2 scored')" == 1 ]] \
+	|| bad "planned-move cells: a registered move the producer did not score must VOID"
+ok "planned-move cells (behavioural): PASS/COST/FAIL map to pass/cost/fail; an unscored move VOIDs"
 
 echo
 echo "iperf-throughput-lib self-test: $PASS passed"

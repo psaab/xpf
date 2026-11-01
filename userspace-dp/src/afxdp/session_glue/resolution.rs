@@ -459,6 +459,14 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target(
     connected_owner_rg_for_target_in_table(forwarding, target, None)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// #18534 test instrument: connected-owner resolutions on this thread,
+    /// so a cell can prove the cached hit path memoises them per snapshot.
+    pub(in crate::afxdp) static CONNECTED_OWNER_RESOLVES_FOR_TEST: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// RI-scoped owner (round-5): only connected rows in `table` (the
 /// session's installing table; None = default instance) may claim
 /// ownership. A cross-RI interface with the same prefix must not
@@ -468,6 +476,8 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
     target: IpAddr,
     table: Option<&str>,
 ) -> i32 {
+    #[cfg(test)]
+    CONNECTED_OWNER_RESOLVES_FOR_TEST.with(|count| count.set(count.get() + 1));
     // #17053: Source 1 is the canonical LPM (#15917) over the FIB
     // rows then the ledger — longest prefix wins and equal-length
     // ties pick the LOWEST ifindex, so the answer no longer depends
@@ -729,10 +739,34 @@ pub(in crate::afxdp) fn reresolve_stored_session(
     now_secs: u64,
     stored: &SessionDecision,
     stored_metadata: &SessionMetadata,
+    // #18531: the row's own (wire) key, read only to recognize a reverse
+    // whose un-NAT names its own destination.
+    wire_key: &SessionKey,
     target: IpAddr,
     looked_up: ForwardingResolution,
     fabric: FabricArrival<'_>,
 ) -> ForwardingResolution {
+    // #18531 (third failback teardown): an alias-synthesized reverse cannot
+    // reach its client; see `alias_reverse_return_resolution`. Before this,
+    // the RG-taking node's activation refresh re-resolved such a row onto the
+    // now-local SNAT address (`LocalDelivery`), and the next WAN reply was
+    // torn down by the host-inbound gate. Only that answer is replaced: the
+    // same self-targeting NAT shape is also what the reverse-synthesis arm
+    // installs for a reply that ARRIVES already un-NATed (the peer un-NATed
+    // it and handed it over the fabric), keyed by the client tuple. Its
+    // target is the real client, the lookup answers a real egress, and it
+    // must forward (loss diag8: replacing that answer dropped every reply on
+    // the LAN node after a FIB generation bump).
+    if looked_up.disposition == ForwardingDisposition::LocalDelivery
+        && reverse_un_nat_targets_itself(wire_key, stored.nat, stored_metadata)
+    {
+        return alias_reverse_return_resolution(
+            forwarding,
+            stored_metadata,
+            fabric.redirect_fabric_flag(),
+            looked_up,
+        );
+    }
     let install_table = install_table_name_for_session(forwarding, *stored, target);
     let looked_up = super::prefer_local_forward_candidate_for_fabric_ingress(
         forwarding,
@@ -934,6 +968,55 @@ fn rehome_or_retain_fabric_redirect_inner(
             next_hop: None,
             ..stored
         },
+    }
+}
+
+/// #18531 (third failback teardown): is this a reverse row whose un-NAT
+/// names its own wire destination? A reverse companion synthesized from a
+/// forward-wire ALIAS (the forward row keyed by the already-translated tuple)
+/// takes the alias key's source as the original client, which is the SNAT
+/// address itself. Its "un-NAT" therefore rewrites nothing, and the row
+/// cannot reach the real client: only the node holding the canonical
+/// (original-tuple) row knows it. A canonical reverse un-NATs to the client,
+/// which differs from its wire destination; a reverse with no NAT has no
+/// `rewrite_dst`; a NAT64 reverse un-NATs across families. None of them
+/// match.
+pub(in crate::afxdp) fn reverse_un_nat_targets_itself(
+    key: &SessionKey,
+    nat: NatDecision,
+    metadata: &SessionMetadata,
+) -> bool {
+    metadata.is_reverse
+        && nat.rewrite_dst == Some(key.dst_ip)
+        && nat.rewrite_dst_port.is_none_or(|port| port == key.dst_port)
+}
+
+/// #18531: the resolution of a reverse row that
+/// [`reverse_un_nat_targets_itself`]. Its resolution target is the SNAT
+/// address, which is a local address on the node owning the egress RG, so
+/// the target lookup answered `LocalDelivery`; the session-hit host-inbound
+/// gate then denied the reply and tore the live flow down. The reply belongs
+/// to the peer that holds the canonical row: hand it over the fabric (zone
+/// stamped with the reply's arrival zone), never to the host. A fabric
+/// arrival is never redirected back; it is dropped and the row is held
+/// (`HAInactive`) instead of being delivered locally.
+pub(in crate::afxdp) fn alias_reverse_return_resolution(
+    forwarding: &ForwardingState,
+    metadata: &SessionMetadata,
+    fabric_arrival: bool,
+    fallback: ForwardingResolution,
+) -> ForwardingResolution {
+    if !fabric_arrival
+        && let Some(redirect) =
+            resolve_fabric_redirect_for_ingress_zone(forwarding, Some(metadata.ingress_zone))
+    {
+        return redirect;
+    }
+    // No redirect (a fabric arrival, or no fabric): the reply is not this
+    // node's to deliver or forward, whatever the raw lookup answered.
+    ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        ..fallback
     }
 }
 

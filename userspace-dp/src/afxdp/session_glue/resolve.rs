@@ -384,6 +384,107 @@ pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
 }
 
 
+/// #18620: retire this worker's `FabricPuntSeed` for the flow once this node
+/// forwards the flow's egress. Returns whether the seed was retired. The
+/// caller passes the seed's canonical `key`, decision and metadata from its own
+/// lookup hit, so nothing is probed or cloned here for a packet that did not
+/// hit a seed. `key` is the row's canonical key, not the packet's: the two
+/// differ for a hit through the forward-wire alias, and deleting the packet's
+/// key there would leave the seed and drop the steering row of another tuple.
+///
+/// A punt seed (#7770) is the punting node's record of a flow whose egress RG
+/// the PEER owned when its first packet arrived. It is NAT-free and it
+/// fabric-redirects. Its only job is to admit the peer's fabric-returned reply
+/// until the peer's HA import lands. It is not authority: the peer adjudicated
+/// and translated the flow, and the seed is never exported, replicated or
+/// demoted.
+///
+/// That premise ends when this node forwards the flow's egress. A seed that
+/// survives to that point SHADOWS the flow. Every forward packet hits it first
+/// and leaves NAT-free toward a fabric peer that no longer forwards the RG,
+/// and the shadowed traffic keeps it from ever idling out. On loss this was the
+/// persistent half of #18620:
+///   - a demotion-window revocation removed the synced rows on the old owner;
+///   - the next packet minted a seed;
+///   - when the RG came back, the flow stayed silent (18 s, and 455-515 s in
+///     one run) until the trap moved the RG away again.
+///
+/// "This node forwards the egress" is asked of the FIB, not of the seed's
+/// stamp. The HA-inactive arm stamps the would-be egress RG, but the
+/// already-redirected arm stamps the fabric parent's RG (none), and a stamp
+/// says where the flow went then, not now. The fresh resolution must name a
+/// real local egress (ForwardCandidate, or MissingNeighbor while its neighbor
+/// resolves) whose RG is forwarding-active here. A FIB that still withholds the
+/// egress (cluster-terminal: the peer owns it), or that cannot route the flow
+/// at all (#10507's NoRoute retention), keeps the seed. This lookup runs only
+/// on a seed hit.
+///
+/// After the retirement the caller looks again. The packet then resolves
+/// against the node's synced session, if the shared maps hold one, or takes
+/// the ordinary miss path, which adjudicates policy and NAT afresh as the
+/// owner (and drops a non-SYN TCP segment under the SYN-first guard). The
+/// seed's recorded permit (#10507) is discarded with it, so nothing is
+/// forwarded under it: only current policy can admit the flow. Every other
+/// origin is untouched, MissingNeighborSeed included, which is minted by the
+/// egress owner itself and is its own authority.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(in crate::afxdp) fn retire_fabric_punt_seed_if_owner_active(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    conntrack: ConntrackFds,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    now_secs: u64,
+) -> bool {
+    let fresh = lookup_forwarding_resolution_for_session_without_cache(
+        forwarding,
+        dynamic_neighbors,
+        flow,
+        decision,
+    )
+    .resolution;
+    let egress_rg = if matches!(
+        fresh.disposition,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+    ) {
+        owner_rg_for_resolution(forwarding, fresh)
+    } else {
+        0
+    };
+    if !owner_rg_is_locally_active(ha_state, egress_rg, now_secs) {
+        return false;
+    }
+    let session_id = sessions.session_id_for(key);
+    // A seed carries no NAT state, so there is nothing to release. The
+    // steering row and the conntrack mirror go as for any removed session.
+    let delete_result = delete_session_map_entry_for_removed_session_with_origin_and_id(
+        session_map,
+        key,
+        decision,
+        metadata,
+        SessionOrigin::FabricPuntSeed,
+        conntrack.v4,
+        conntrack.v6,
+        session_id,
+    );
+    if delete_result == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy {
+        sessions.defer_conntrack_delete(crate::session::DeferredConntrackDelete {
+            key: key.clone(),
+            session_id,
+        });
+    }
+    // `delete` is the table's Terminal removal: it retires the #18562 punt
+    // seed directory row and emits no delta. A seed emits none by design, and
+    // the peer owns the flow's close.
+    sessions.delete(key);
+    true
+}
+
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn resolve_flow_session_decision_with_conntrack_inner(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
@@ -413,17 +514,48 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
     }
     let now_ns = shared.tick.ns;
     let now_secs = shared.tick.secs;
-    if let Some(hit) = lookup_session_across_scopes_with_shared_and_payload(
-        sessions,
-        shared.sessions,
-        shared.nat_sessions,
-        shared.forward_wire_sessions,
-        shared.owner_rg_indexes,
-        &flow.forward_key,
-        now_ns,
-        tcp_flags,
-        payload_len,
-    ) {
+    let lookup = |sessions: &mut SessionTable| {
+        lookup_session_across_scopes_with_shared_and_payload(
+            sessions,
+            shared.sessions,
+            shared.nat_sessions,
+            shared.forward_wire_sessions,
+            shared.owner_rg_indexes,
+            &flow.forward_key,
+            now_ns,
+            tcp_flags,
+            payload_len,
+        )
+    };
+    let mut found = lookup(sessions);
+    // #18620: a local punt seed whose egress this node now forwards has lost
+    // its premise. Retire it and look again, so the flow resolves against the
+    // synced session or a fresh adjudication instead of the seed. Gated on the
+    // origin the lookup already carries: no other hit pays anything.
+    // The row retired is the hit's CANONICAL key, which differs from the
+    // packet's key when the seed was found through its forward-wire alias
+    // (a seed whose HA-transition refresh gave it a translation).
+    if let Some(hit) = found.as_ref()
+        && hit.origin == SessionOrigin::FabricPuntSeed
+        && hit.shared_entry.is_none()
+        && !hit.lookup.metadata.is_reverse
+        && retire_fabric_punt_seed_if_owner_active(
+            sessions,
+            session_map,
+            shared.conntrack,
+            forwarding,
+            ha_state,
+            dynamic_neighbors,
+            flow,
+            hit.key.as_ref(&flow.forward_key),
+            hit.lookup.decision,
+            &hit.lookup.metadata,
+            now_secs,
+        )
+    {
+        found = lookup(sessions);
+    }
+    if let Some(hit) = found {
         let hit_origin = hit.origin;
         let poison_key = hit
             .shared_entry
@@ -498,7 +630,26 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         } else {
             None
         };
-        let deferred_synced_purge = if keep_transient {
+        // #18531: never purge on a fabric-link arrival. This removes the purge
+        // from its ORIGINAL population: it was introduced for fabric arrivals
+        // (75965fb3ff, predicate `ingress_is_fabric && synced && translated`)
+        // and widened to direct arrivals by 8ea4d780eb; #6599 later showed the
+        // purge-and-re-enter path is abusable by a spoofed direct packet.
+        // A translated forward packet the peer redirected over the fabric
+        // means the peer is handing the egress RG to this node: ownership is
+        // in transit (the RG-taking node's window between the peer's demotion
+        // and this node's activation). Purging removed the forward-wire alias
+        // of a live flow with no Close; where it was this node's only copy,
+        // the first packet after activation missed and the flow died.
+        // Why holding is safe: the row stays transient (not materialized),
+        // and the packet still takes its HA disposition. That is a drop (a
+        // fabric arrival is never redirected back) or, for a #16217 adopted
+        // hit, the adopted local candidate. The owner's Close or the row's
+        // idle timeout reclaims a held row. When this node owns the RG,
+        // nothing is held: `should_keep_synced_hit_transient` requires the
+        // owner RG to be inactive here. The purge of a translated hit that
+        // arrives DIRECTLY on a non-owner is unchanged.
+        let deferred_synced_purge = if keep_transient && !fabric_link_ingress {
             poison_key.map(|(key, decision, metadata, origin)| DeferredSyncedPurge {
                 key: key.clone(),
                 decision,
@@ -600,6 +751,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
             now_secs,
             &resolved.decision,
             &resolved.metadata,
+            resolved_key,
             resolution_target,
             looked_up_resolution,
             super::FabricArrival::Packet {
@@ -686,14 +838,12 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
                     };
                 let invalidate_policy_revalidation = previous_policy_to_zone_id
                     .is_some_and(|previous| previous != policy_to_zone_id);
-                let owner_rg_id = matches!(
-                    decision.resolution.disposition,
-                    ForwardingDisposition::ForwardCandidate
-                        | ForwardingDisposition::FabricRedirect
-                        | ForwardingDisposition::HAInactive
-                        | ForwardingDisposition::LocalDelivery
-                )
-                .then(|| owner_rg_for_resolution(forwarding, decision.resolution));
+                // #18531: a FabricRedirect keeps the recorded owner RG
+                // (the fabric parent names none); see the helper.
+                let owner_rg_id = crate::afxdp::forwarding::persisted_owner_rg_for_resolution(
+                    forwarding,
+                    decision.resolution,
+                );
                 // #14318: only a locally-forwarding route (or the recorded
                 // zone behind a fabric redirect, already in policy_to_zone_id)
                 // names the flow's new egress zone. Terminal routes do not.
@@ -864,6 +1014,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         now_secs,
         &resolved.decision,
         &resolved.metadata,
+        &flow.forward_key,
         resolution_target,
         looked_up_resolution,
         super::FabricArrival::Packet {
