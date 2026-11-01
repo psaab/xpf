@@ -53,7 +53,8 @@ func TestLo0NetlinkImplicitDiscardRule18728(t *testing.T) {
 		t.Fatalf("the implicit drop must be the LAST v4 rule:\n%s", canonRules(p))
 	}
 	canon := canonRule(p, r)
-	var nfproto, exemptLookup, drop bool
+	var nfproto, drop bool
+	exemptKeys := map[expr.MetaKey]bool{}
 	for i, e := range r {
 		switch x := e.(type) {
 		case *expr.Meta:
@@ -62,17 +63,20 @@ func TestLo0NetlinkImplicitDiscardRule18728(t *testing.T) {
 					nfproto = true
 				}
 			}
-		case *expr.Lookup:
-			if x.Invert {
-				exemptLookup = true
+			if i+1 < len(r) {
+				if l, ok := r[i+1].(*expr.Lookup); ok && l.Invert {
+					exemptKeys[x.Key] = true
+				}
 			}
 		case *expr.Verdict:
 			drop = x.Kind == expr.VerdictDrop
 		}
 	}
-	if !nfproto || !exemptLookup || !drop {
-		t.Fatalf("implicit rule must be `meta nfproto ipv4 iifname != {lo, em0} counter drop`; nfproto=%v exempt=%v drop=%v\n%s",
-			nfproto, exemptLookup, drop, canon)
+	// #18728 incident: the exemption must be matched on iifname AND on
+	// sdifname (a VRF slave shows the VRF master as iifname).
+	if !nfproto || !exemptKeys[expr.MetaKeyIIFNAME] || !exemptKeys[expr.MetaKey(metaKeySDIFNAME)] || !drop {
+		t.Fatalf("implicit rule must be `meta nfproto ipv4 iifname != {lo, em0} meta sdifname != {lo, em0} counter drop`; nfproto=%v exempt-keys=%v drop=%v\n%s",
+			nfproto, exemptKeys, drop, canon)
 	}
 	// canonRule renders set elements as hex of the 16-byte ifname.
 	for _, name := range []string{"lo", "em0"} {
@@ -154,5 +158,43 @@ func TestLo0ImplicitDiscardCounterNames18728(t *testing.T) {
 		if _, ok := ParseLo0ImplicitDiscardCounterName(bad); ok {
 			t.Errorf("%q must not parse as an implicit counter", bad)
 		}
+	}
+}
+
+// Fail closed (#18728 incident): an exemption with an empty name, or one
+// missing a required control/fabric netdev, refuses the whole plan.
+func TestLo0NetlinkImplicitDiscardRefusesInvalidExemption18728(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		exempt   []string
+		required []string
+	}{
+		{"empty name", []string{"lo", ""}, []string{"lo"}},
+		{"missing control link", []string{"lo", "fab1"}, []string{"lo", "em0", "fab1"}},
+		{"missing fabric member", []string{"lo", "em0", "fab1"}, []string{"lo", "em0", "fab1", "ge-7-0-0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newBuildPlan(t, "xpf_lo0", lo0FilterPriority)
+			buildLo0FilterNetlink(p, Lo0FilterSpec{
+				NoIPv6RejectZeroHopLimit:       true,
+				ImplicitDiscardV4:              true,
+				ImplicitDiscardExemptNetdevs:   tc.exempt,
+				ImplicitDiscardRequiredNetdevs: tc.required,
+			})
+			if p.err == nil {
+				t.Fatalf("an invalid exemption must fail the plan; rules:\n%s", canonRules(p))
+			}
+		})
+	}
+	// Positive control: a complete exemption builds.
+	p := newBuildPlan(t, "xpf_lo0", lo0FilterPriority)
+	buildLo0FilterNetlink(p, Lo0FilterSpec{
+		NoIPv6RejectZeroHopLimit:       true,
+		ImplicitDiscardV4:              true,
+		ImplicitDiscardExemptNetdevs:   []string{"lo", "em0", "fab1", "ge-7-0-0"},
+		ImplicitDiscardRequiredNetdevs: []string{"lo", "em0", "fab1", "ge-7-0-0"},
+	})
+	if p.err != nil || len(p.rules) != 1 {
+		t.Fatalf("complete exemption must build one rule: err=%v rules=%d", p.err, len(p.rules))
 	}
 }

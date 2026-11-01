@@ -11,7 +11,9 @@ xpf (0.0.0) unstable; urgency=medium
     bound. The kernel lo0 chain ends each family with a counted drop that
     exempts loopback and the cluster control link and fabric; fxp0 is NOT
     exempt. MANAGEMENT LOCKOUT RISK: the lo0 chain is stateless, so a lo0
-    filter without a catch-all drops all unmatched host traffic -- SSH and
+    filter without a catch-all drops all unmatched host traffic (the
+    control-link/fabric exemption matches VRF slaves by sdifname, and the
+    lo0 table is refused if that exemption is incomplete) -- SSH and
     other management on fxp0, IPv6 ND/RA, DHCPv6 replies, IKE/ESP (VPNs
     and the transit they carry), BGP/OSPF/BFD, RPM and ip-monitoring
     probe replies (WAN failover), and the return traffic of every

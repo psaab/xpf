@@ -159,9 +159,19 @@ the userspace dataplane admission boundary is in
       `control-interface`, `fabric-interface`/`fabric1-interface`, fabric
       interfaces and their `fabric-options member-interfaces`
       (`config.Lo0ImplicitDiscardExemptNetdevs`); a standalone node
-      exempts only `lo`. The exemption covers the IMPLICIT drop only — an
-      authored lo0 term that discards still applies to those netdevs
-      (#18729). The helper's own lo0 evaluation (the AF_XDP host-bound
+      exempts only `lo`. The exemption is matched on BOTH `iifname` and
+      `meta sdifname`: xpfd enslaves fxp/em/fab to `vrf-mgmt`, and for a VRF
+      slave the input hook's iifname is the VRF master, so an iifname-only
+      exemption missed the control link and fabric and cut them on the loss
+      cluster (#18755 incident; `TestLo0ImplicitDiscardExemptsVRFSlavesOnRealKernel18728`
+      pins it on a real kernel). The VRF master itself is not exempt, so
+      fxp0 (a slave of the same VRF) stays subject to the drop. The
+      renderer and installer FAIL CLOSED (the prior table, or the cold-boot
+      fence, stays) when an exemption name is empty or the set lacks a
+      control-link/fabric netdev resolved independently from the cluster
+      roles (`config.Lo0ImplicitDiscardRequiredNetdevs`). The exemption
+      covers the IMPLICIT drop only — an authored lo0 term that discards
+      still applies to those netdevs (#18729). The helper's own lo0 evaluation (the AF_XDP host-bound
       subset: interface-NAT addresses, solicited replies, Stage-11 IPsec
       passthrough) applies the synthetic term without the exemption;
       control-link and fabric host traffic reaches the kernel, not that
@@ -206,7 +216,14 @@ the userspace dataplane admission boundary is in
       (#18747), so a `family inet` accept term with no family-specific
       match also admits IPv6 ahead of the inet6 implicit discard. Make lo0
       changes with **`commit confirmed <minutes>`** so a filter that cuts
-      management rolls back on its own.
+      management rolls back on its own — but on a CLUSTER that is not a
+      safety net for a change that can cut the control link: the
+      auto-rollback runs on the committing node and cannot reach a peer
+      that lost the link, and the split hands RG0 to the node that holds the
+      bad config (#18755 incident). Bind a risky lo0 change on ONE node
+      (`groups nodeN`) with a node-local revert (for example a timer that
+      runs `nft delete table inet xpf_lo0` and removes the binding if `show
+      chassis cluster interfaces` reports the control link Down).
     - **lo0 and routing instances.** xpf binds only `lo0 unit 0` (other
       lo0 units are unsupported and warned) and the kernel chain has no
       VRF scope, so the lo0.0 filter — and its implicit discard — governs

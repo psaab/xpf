@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -377,4 +378,73 @@ func Lo0ImplicitDiscardExemptNetdevs(cfg *Config) []string {
 	}
 	sort.Strings(rest)
 	return append(out, rest...)
+}
+
+// Lo0ImplicitDiscardRequiredNetdevs returns the netdevs the lo0 implicit
+// discard's exemption MUST contain, resolved straight from the cluster ROLES
+// rather than through HostInboundLifelineSet: "lo", the control-interface,
+// the fabric-interface/fabric1-interface, every interface carrying
+// fabric-options member-interfaces, and those members. It is the
+// independent check ValidateLo0ImplicitDiscardExempt holds the rendered set
+// to, so a drift in the lifeline walk cannot silently drop a role from the
+// exemption (#18728 incident: the exemption must never leave the control
+// link or the fabric exposed to the implicit drop).
+func Lo0ImplicitDiscardRequiredNetdevs(cfg *Config) []string {
+	seen := map[string]bool{"lo": true}
+	out := []string{"lo"}
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			return
+		}
+		netdev := LogicalUnitDeviceKeyForRef(cfg, ref)
+		if netdev != "" && !seen[netdev] {
+			seen[netdev] = true
+			out = append(out, netdev)
+		}
+	}
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return out
+	}
+	cc := cfg.Chassis.Cluster
+	add(cc.ControlInterface)
+	add(cc.FabricInterface)
+	add(cc.Fabric1Interface)
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil || len(ifc.FabricMembers) == 0 {
+			continue
+		}
+		add(name)
+		for _, m := range ifc.FabricMembers {
+			add(m)
+		}
+	}
+	sort.Strings(out[1:])
+	return out
+}
+
+// ValidateLo0ImplicitDiscardExempt fails closed on an exemption set the lo0
+// implicit discard must not be installed with: any empty name (an exemption
+// that can never match), or a missing required role netdev
+// (Lo0ImplicitDiscardRequiredNetdevs). Both the text renderer and the netlink
+// installer refuse on a non-nil error, so a broken exemption keeps the prior
+// table (or the cold-boot fence) instead of cutting the control link.
+func ValidateLo0ImplicitDiscardExempt(exempt, required []string) error {
+	have := make(map[string]bool, len(exempt))
+	for _, n := range exempt {
+		if strings.TrimSpace(n) == "" {
+			return fmt.Errorf("lo0 implicit discard: exemption list %q contains an empty interface name", exempt)
+		}
+		have[n] = true
+	}
+	var missing []string
+	for _, n := range required {
+		if !have[n] {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("lo0 implicit discard: exemption list %q is missing required control/fabric netdevs %q", exempt, missing)
+	}
+	return nil
 }

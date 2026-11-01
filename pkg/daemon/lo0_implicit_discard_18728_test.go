@@ -48,8 +48,8 @@ func lineIndex18728(t *testing.T, lines []string, needle string) int {
 // exempting only loopback, and both counters are declared.
 func TestLo0OracleImplicitDiscardPerFamily18728(t *testing.T) {
 	payload := buildLo0FilterPayload(lo0AllowlistCfg18728(), "protect-re", "protect-re6")
-	wantV4 := `    meta nfproto ipv4 iifname != "lo" counter name "xpflo0implicit_inet" drop`
-	wantV6 := `    meta nfproto ipv6 iifname != "lo" counter name "xpflo0implicit_inet6" drop`
+	wantV4 := `    meta nfproto ipv4 iifname != "lo" meta sdifname != "lo" counter name "xpflo0implicit_inet" drop`
+	wantV6 := `    meta nfproto ipv6 iifname != "lo" meta sdifname != "lo" counter name "xpflo0implicit_inet6" drop`
 	lines := strings.Split(payload, "\n")
 	v4 := lineIndex18728(t, lines, wantV4)
 	v6 := lineIndex18728(t, lines, wantV6)
@@ -123,7 +123,7 @@ func TestLo0ImplicitDiscardExemptsClusterLinks18728(t *testing.T) {
 		t.Fatalf("exempt netdevs = %v, want %v (control link + fabric, never fxp0 or a data port)", got, want)
 	}
 	payload := buildLo0FilterPayload(cfg, "protect-re", "protect-re6")
-	wantRule := `meta nfproto ipv4 iifname != { "lo", "em0", "fab0", "ge-0-0-0" } counter name "xpflo0implicit_inet" drop`
+	wantRule := `meta nfproto ipv4 iifname != { "lo", "em0", "fab0", "ge-0-0-0" } meta sdifname != { "lo", "em0", "fab0", "ge-0-0-0" } counter name "xpflo0implicit_inet" drop`
 	if !strings.Contains(payload, wantRule) {
 		t.Fatalf("payload lacks %q:\n%s", wantRule, payload)
 	}

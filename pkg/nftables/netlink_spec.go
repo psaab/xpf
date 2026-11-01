@@ -242,6 +242,11 @@ type Lo0FilterSpec struct {
 	// (config.Lo0ImplicitDiscardExemptNetdevs: "lo", the cluster control
 	// link and fabric). It never empties: "lo" is always present.
 	ImplicitDiscardExemptNetdevs []string
+	// ImplicitDiscardRequiredNetdevs (#18728 incident) are the netdevs the
+	// exemption MUST contain, resolved independently from the cluster roles
+	// (config.Lo0ImplicitDiscardRequiredNetdevs). The builder refuses the
+	// plan if one is missing or any exemption name is empty.
+	ImplicitDiscardRequiredNetdevs []string
 }
 
 // HostInputFencePair binds one VRF master to one enslaved tunnel slave.

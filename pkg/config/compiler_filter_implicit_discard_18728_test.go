@@ -163,3 +163,38 @@ func TestImplicitDiscardTermNameReserved18728(t *testing.T) {
 		t.Fatalf("ImplicitDiscardTermName = %q", ImplicitDiscardTermName)
 	}
 }
+
+// #18728 incident: the required set is resolved from the cluster ROLES, and
+// the validator fails closed on an empty name or a missing role netdev. The
+// lab-shaped node1 config (control-interface em0, fab1 over ge-7/0/0, plus
+// fab0 over ge-0/0/0 for the peer) yields an exemption that satisfies it.
+func TestLo0ImplicitDiscardRequiredAndValidate18728(t *testing.T) {
+	cfg := &Config{}
+	cfg.Chassis.Cluster = &ClusterConfig{ControlInterface: "em0"}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"em0":  {Name: "em0", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+		"fab0": {Name: "fab0", FabricMembers: []string{"ge-0/0/0"}},
+		"fab1": {Name: "fab1", FabricMembers: []string{"ge-7/0/0"}},
+		"fxp0": {Name: "fxp0", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+	}
+	req := Lo0ImplicitDiscardRequiredNetdevs(cfg)
+	want := "lo,em0,fab0,fab1,ge-0-0-0,ge-7-0-0"
+	if strings.Join(req, ",") != want {
+		t.Fatalf("required = %v, want %s", req, want)
+	}
+	if err := ValidateLo0ImplicitDiscardExempt(Lo0ImplicitDiscardExemptNetdevs(cfg), req); err != nil {
+		t.Fatalf("the rendered exemption must satisfy the role requirement: %v", err)
+	}
+	for _, bad := range [][]string{
+		{"lo", "em0", "fab0", "fab1", "ge-0-0-0"},                 // fabric member of node1 missing
+		{"lo", "fab0", "fab1", "ge-0-0-0", "ge-7-0-0"},            // control link missing
+		{"lo", "em0", "", "fab0", "fab1", "ge-0-0-0", "ge-7-0-0"}, // empty name
+	} {
+		if err := ValidateLo0ImplicitDiscardExempt(bad, req); err == nil {
+			t.Errorf("exemption %q must be refused", bad)
+		}
+	}
+	if got := Lo0ImplicitDiscardRequiredNetdevs(&Config{}); strings.Join(got, ",") != "lo" {
+		t.Fatalf("standalone required = %v, want [lo]", got)
+	}
+}

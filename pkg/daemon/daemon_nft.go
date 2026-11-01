@@ -674,8 +674,17 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 	// implicit final discard when its filter has no terminal catch-all.
 	var implicitCounters []string
 	exempt := config.Lo0ImplicitDiscardExemptNetdevs(cfg)
+	exemptErr := config.ValidateLo0ImplicitDiscardExempt(exempt, config.Lo0ImplicitDiscardRequiredNetdevs(cfg))
 	emitImplicit := func(f *config.FirewallFilter, family, cfgFamily string) {
 		if config.FirewallFilterHasCatchAll(f) {
+			return
+		}
+		if exemptErr != nil {
+			// Fail closed (#18728 incident): an unvalidated exemption must
+			// never be installed. The refusal bareword makes `nft -f`
+			// reject the whole payload, exactly like the netlink builder's
+			// plan failure.
+			ruleLines = append(ruleLines, "    "+nftRefuseLo0ImplicitExempt)
 			return
 		}
 		implicitCounters = append(implicitCounters, xnft.Lo0ImplicitDiscardCounterName(cfgFamily))
@@ -729,14 +738,24 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 // ("inet" / "inet6"). The nfproto guard keeps it to its family (the chain is
 // inet, and the other family's filter may be absent or permit-by-default);
 // the iifname exemption (config.Lo0ImplicitDiscardExemptNetdevs: loopback,
-// cluster control link, fabric) keeps internal traffic off this drop. The
-// netlink mirror is buildLo0ImplicitDiscardNetlink.
+// cluster control link, fabric) keeps internal traffic off this drop. It is
+// matched on iifname AND sdifname: a VRF slave (xpfd puts fxp/em/fab in
+// vrf-mgmt) shows the VRF master as iifname and itself only as sdifname, so
+// iifname alone missed the control link and fabric (#18728 loss incident).
+// The netlink mirror is buildLo0ImplicitDiscardNetlink.
+// nftRefuseLo0ImplicitExempt is the constant refusal line the lo0 oracle
+// emits when the implicit discard's exemption fails
+// config.ValidateLo0ImplicitDiscardExempt: not valid nft, so the atomic load
+// fails and the prior table stays.
+const nftRefuseLo0ImplicitExempt = `comment "lo0 implicit-discard exemption invalid" __xpf_refuse_lo0_implicit_exempt__`
+
 func lo0ImplicitDiscardRule(family, cfgFamily string, exempt []string) string {
 	nfproto := "ipv4"
 	if family == "ip6" {
 		nfproto = "ipv6"
 	}
 	return "meta nfproto " + nfproto + " iifname != " + nftIifnameSet(exempt) +
+		" meta sdifname != " + nftIifnameSet(exempt) +
 		` counter name "` + xnft.Lo0ImplicitDiscardCounterName(cfgFamily) + `" drop`
 }
 

@@ -67,6 +67,13 @@ func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
 	for _, t := range spec.V4Terms {
 		buildLo0TermNetlink(p, t, famV4)
 	}
+	if spec.ImplicitDiscardV4 || spec.ImplicitDiscardV6 {
+		if err := config.ValidateLo0ImplicitDiscardExempt(spec.ImplicitDiscardExemptNetdevs,
+			spec.ImplicitDiscardRequiredNetdevs); err != nil {
+			p.fail(err)
+			return
+		}
+	}
 	if spec.ImplicitDiscardV4 {
 		buildLo0ImplicitDiscardNetlink(p, famV4, "inet", spec.ImplicitDiscardExemptNetdevs)
 	}
@@ -80,12 +87,20 @@ func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
 
 // buildLo0ImplicitDiscardNetlink queues the Junos implicit final discard for
 // one family's lo0 filter (#18728), mirroring lo0ImplicitDiscardRule in the
-// oracle: `meta nfproto <f> iifname != { exempt } counter name "<n>" drop`.
-// It follows that family's authored rules, so only a packet no authored term
-// terminated reaches it. The nfproto guard keeps it to its own family (the
-// chain is inet). The exemption keeps loopback and the cluster control/fabric
-// links off this drop; a nil/empty exemption list refuses the plan, so the
-// drop can never be emitted unscoped (which would drop loopback traffic).
+// oracle: `meta nfproto <f> iifname != { X } meta sdifname != { X } counter
+// name "<n>" drop`. It follows that family's authored rules, so only a packet
+// no authored term terminated reaches it. The nfproto guard keeps it to its
+// own family (the chain is inet).
+//
+// The exemption is matched on BOTH iifname and sdifname. For an l3mdev
+// (VRF) slave the input hook's iifname is the VRF MASTER, and the slave is
+// only visible as sdifname; xpfd enslaves fxp/em/fab to vrf-mgmt, so an
+// iifname-only exemption never matched the control link or the fabric and
+// the implicit drop cut them (#18728 loss incident). sdifname is empty for
+// non-VRF ingress, so the second compare is a no-op there. The VRF master is
+// deliberately NOT exempted: fxp0 is a slave of the same VRF and must stay
+// subject to the drop. A nil/empty list, an empty name, or a missing required
+// role netdev refuses the plan (checked by the caller).
 func buildLo0ImplicitDiscardNetlink(p *nlPlan, f nlFamily, family string, exempt []string) {
 	if len(exempt) == 0 {
 		p.fail(fmt.Errorf("lo0 implicit discard (%s): empty iifname exemption (refusing an unscoped drop that would include loopback)", family))
@@ -94,6 +109,7 @@ func buildLo0ImplicitDiscardNetlink(p *nlPlan, f nlFamily, family string, exempt
 	a := p.rule()
 	a.needNfproto(f)
 	a.iifnameExcept(exempt)
+	a.sdifnameExcept(exempt)
 	a.counterRef(Lo0ImplicitDiscardCounterName(family))
 	a.emit(verdictDrop()...)
 }

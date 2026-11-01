@@ -323,7 +323,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 			"fab0": {Name: "fab0", FabricMembers: []string{"ge-0/0/0"}},
 		}
 		oracle := buildLo0FilterPayload(cfg, "protect-re", "protect-re6")
-		if !strings.Contains(oracle, `iifname != { "lo", "em0", "fab0", "ge-0-0-0" }`) {
+		if !strings.Contains(oracle, `iifname != { "lo", "em0", "fab0", "ge-0-0-0" } meta sdifname != { "lo", "em0", "fab0", "ge-0-0-0" }`) {
 			t.Fatalf("oracle lacks the multi-name exemption; the diff below would not cover it:\n%s", oracle)
 		}
 		spec := toNftLo0Spec(cfg, "protect-re", "protect-re6")
