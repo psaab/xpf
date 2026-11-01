@@ -441,6 +441,9 @@ run_shell test/daemon/selftest-daemon-probes_15241.sh
 # passwordless sudo it SKIPs; when available, the compiled probe is invoked as
 # `sudo -n`. The fixture never creates a BPF map or uses host sudo.
 run_shell test/mutation/selftest-bpf-exist-cannot-create_6923.sh --selftest
+# #18839: `make clean` must never delete the box-wide shared cargo target dir.
+# Dry runs (`make -n clean`) only, with a positive control on the old recipe.
+run_shell scripts/clean-shared-cargo-selftest.sh
 # #18738: the shim-ext-parity acceptance harness's signal handling and ROWS
 # filter, against a stub cargo in a throwaway checkout. Seconds; no Rust build.
 run_shell test/mutation/selftest-shim-ext-parity-acceptance.sh
