@@ -348,6 +348,16 @@ cmd_create() {
 	# Create test container on cluster LAN
 	create_lan_host
 
+	# #18724: a NEW cluster is the one place a control-link key is minted.
+	# create_vm dies on an existing instance, so this runs only for VMs
+	# created just now; a deploy never generates one (a fresh key on a live
+	# pair splits it). An existing key file is kept.
+	if [[ -n "${CLUSTER_AUTH_KEY_FILE:-}" && -f "$CLUSTER_CONF" ]] &&
+		grep -aqF -- "$DEPLOY_CLUSTER_KEY_TOKEN" "$CLUSTER_CONF"; then
+		deploy_ensure_cluster_key "$CLUSTER_AUTH_KEY_FILE" generate ||
+			die "cannot create the cluster key file $CLUSTER_AUTH_KEY_FILE"
+	fi
+
 	info "Cluster environment ready. Run '$0 deploy all' to push xpfd."
 }
 
@@ -995,22 +1005,18 @@ deploy_vm() {
 		info "Pushing unified HA config to $vm..."
 		incus exec "$rinst" -- mkdir -p /etc/xpf
 		# #18724: the lab confs carry a token in place of the cluster
-		# authentication-key. Render the real key in from the host-side
-		# secret ($CLUSTER_AUTH_KEY_FILE) into a private temp file, push
-		# that at mode 0600, and remove it. A conf without the token is
+		# authentication-key. deploy_push_cluster_conf renders the real key
+		# in from the host-side secret ($CLUSTER_AUTH_KEY_FILE) into a
+		# private temp dir, pushes it at mode 0600, and removes the temp dir
+		# on every exit, including a signal. A conf without the token is
 		# pushed unchanged.
-		local conf_dir rendered_conf
-		conf_dir="$(umask 077 && mktemp -d)" || die "cannot create a private temp dir for the cluster conf"
-		rendered_conf="${conf_dir}/xpf.conf"
-		if ! deploy_render_cluster_conf "$CLUSTER_CONF" "${CLUSTER_AUTH_KEY_FILE:-}" "$rendered_conf"; then
-			rm -rf "$conf_dir"
-			die "refusing to push $CLUSTER_CONF to $vm (see the cluster key message above)"
-		fi
-		if ! incus file push --mode 0600 --uid 0 --gid 0 "$rendered_conf" "${rinst}/etc/xpf/xpf.conf"; then
-			rm -rf "$conf_dir"
-			die "pushing the cluster conf to $vm failed"
-		fi
-		rm -rf "$conf_dir"
+		local push_rc=0
+		deploy_push_cluster_conf "$CLUSTER_CONF" "${CLUSTER_AUTH_KEY_FILE:-}" "$rinst" /etc/xpf/xpf.conf || push_rc=$?
+		case "$push_rc" in
+		0) ;;
+		2) die "refusing to push $CLUSTER_CONF to $vm (see the cluster key message above)" ;;
+		*) die "pushing the cluster conf to $vm failed (exit $push_rc)" ;;
+		esac
 		push_shared_umem_phase0_artifact "$idx" "$rinst"
 		# Clear configstore DB so daemon bootstraps from the new text file.
 		# Without this, the daemon loads the OLD config from active.json.

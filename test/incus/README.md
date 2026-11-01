@@ -234,24 +234,60 @@ lab confs (`docs/ha-cluster-{userspace,tcp,udp}.conf`) carry the token
 `$CLUSTER_CONF` with the key from `$CLUSTER_AUTH_KEY_FILE`
 (`/var/worktrees/.cache/cluster-keys/<cluster>.key`, mode 0600 in a 0700
 directory; `deploy_render_cluster_conf` in `deploy-lib.sh`). It pushes the
-rendered copy at mode 0600 and deletes it.
-- An absent key file is generated with `openssl rand -base64 32`. An existing
-  one is never rewritten: it is the key the live cluster was rotated to.
+rendered copy at mode 0600 and deletes it, from a subshell whose EXIT trap
+removes the temp copy even when the push is interrupted
+(`deploy_push_cluster_conf`).
+- **A deploy never mints a key.** A missing key file is a refusal: a fresh
+  key on a deploy to a live cluster would split the pair. Restore the file,
+  or re-key the cluster with the rotation below.
+  - `cluster-setup.sh create` generates the file (`openssl rand -base64 32`)
+    for a newly created cluster, and so does `XPF_CLUSTER_KEY_GENERATE=1`.
+  - An existing file is never rewritten: it is the key the live cluster runs.
+  - `/var/worktrees/.cache/cluster-keys/` must never be pruned. The campaign
+    skill's never-prune list names it.
+- The key file and its directory must grant no group or other permission
+  bits. A symlink at the key path is refused, live or dangling.
 - A conf carrying the token is refused when no key file is named, or when the
   key is short, a published placeholder, or contains a quote, backslash or
   whitespace.
-- A conf without the token is pushed unchanged.
+- A conf without the token is pushed byte for byte. A tokenised conf changes
+  only at the token: final newlines and NUL bytes are kept. The substitution
+  runs in python3, which reads the key from the file, so the key never reaches
+  an argv or the environment.
 - The deb deploy pushes no config, so it is unaffected.
 - If the conf reaches a node unrendered, it still compiles, but it warns as a
   published placeholder.
 - To change a live cluster's key, use the rolling `additional-authentication-key`
   rotation (`pkg/cluster/README.md`, "Rotation"), then write the new key to
-  the file. Never raw-deploy a key that differs from the running one. The raw
-  `deploy all` is rolling (`deploy_rolling`): it restarts the secondary first
-  and the primary up to about 65 s later. In that window the restarted node
-  rejects the peer's heartbeats as unauthenticated, so expect it to treat the
-  peer as absent. A raw deploy from a branch that predates #18724 pushes the
-  old committed key, which is this case.
+  the file. Never raw-deploy a key that differs from the running one.
+  - The raw `deploy all` is rolling (`deploy_rolling` in `cluster-setup.sh`).
+    It restarts the secondary and waits for it to answer `show chassis
+    cluster status`. That wait is up to 60 s, but it exits as soon as the
+    restarted node answers, and under a key split that can be while the node
+    already reports itself primary. It then settles 5 s and runs the
+    primary's own deploy steps up to stopping its daemon. That whole span is
+    the skew window, and 65 s is not a bound on it in either direction.
+  - In the window the two nodes reject each other's heartbeats as
+    unauthenticated. Once its 30 s startup grace (`heartbeatStartupGrace`,
+    `pkg/cluster/heartbeat.go`) runs out with no authenticated peer, the
+    restarted node declares the peer absent and takes every redundancy group
+    while the old primary is still serving. From then until the old
+    primary's daemon stops there are two primaries and duplicate VIPs.
+  - A raw deploy from a branch that predates #18724 pushes the old committed
+    key, which is this case. The raw-deploy consumers are
+    `XPF_DEPLOY_FAST=1 make cluster-deploy` and `make test-private-rg`, which
+    forces `XPF_DEPLOY_FAST=1` (`test-private-rg.sh`, `privrg_deploy_config`).
+- **The text conf on a node is not the running config.** The config DB
+  (`/etc/xpf/.configdb`) is authoritative. `/etc/xpf/xpf.conf` only seeds a
+  store that was never committed, and the raw deploy replaces it with the
+  rendered conf when it wipes the DB. After a live rotation, the text conf
+  still holds the pre-rotation key until the next raw deploy. Older deploys
+  also left it at mode 0664: on loss and udp after the #18724 rotation it
+  holds the retired key. The daemon re-imports it only when the DB has no
+  active config AND no rollback slots survive (#10297 refuses the blind
+  import otherwise), which in practice means after a raw deploy, and a raw
+  deploy pushes a fresh render. Do not edit node files by hand; bootstrap a
+  node from text only through the raw deploy, so the key is rendered in.
 - Self-tests: `make test-deploy-lib` ("cluster key" cells).
 
 Never hardcode a node: source `cluster-env.sh` (directly or via
