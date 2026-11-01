@@ -1987,8 +1987,8 @@ assert_helper_status 2 ha_host_inbound_denies_report "$FS_PRE0"
 #     each in its own subshell.
 #   - The edited text does not parse (`bash -n`) or no longer defines <fn>.
 # Every built mutant's name is recorded in lib-fn-mutants.built, which the
-# end-of-file census reconciles. LIB_FN_MUTANT_LIB overrides the lib (the
-# refusal fixture below).
+# end-of-file census reconciles by name against LIB_FN_EXPECTED.
+# LIB_FN_MUTANT_LIB overrides the lib (the refusal fixture below).
 lib_fn_mutant() {
 	local fn="$1" name="$2" old="$3" new="$4"
 	local lib="${LIB_FN_MUTANT_LIB:-${ROOT}/test/incus/ha-assurance-lib.sh}"
@@ -2966,12 +2966,23 @@ for lan_state in lan-running lan-stopped; do
 done
 
 # lib_fn_mutant census (#18694): every mutant and no-op control above was
-# built through the guarded path, and no two cells share a name (a reused
-# name would overwrite another cell's mutant file).
+# built through the guarded path, no two cells share a name (a reused name
+# would overwrite another cell's mutant file), and the built set equals the
+# expected set BY NAME, so a cell that is silently skipped or deleted fails
+# here instead of shrinking the count. Adding a cell means adding its name.
+LIB_FN_EXPECTED='plain control-fixture-plain
+control-g1-pass control-g1-fail g1-strict g1-node0only g1-node1only
+g1-missing g1-malformed g1-rewound g1-pidmismatch g1-pidonesided
+g1-pidunwired control-g7-pass control-g7-identity g7-ownline
+g7-linefirstwins g7-entryfirstwins g7-prefix g7-nohint g7-noidentity'
 LIB_FN_BUILT="${TMP_DIR}/lib-fn-mutants.built"
 [[ -s "$LIB_FN_BUILT" ]] || fail_test 'lib_fn_mutant census: no mutant was built'
 LIB_FN_DUPLICATES="$(sort "$LIB_FN_BUILT" | uniq -d)"
 [[ -z "$LIB_FN_DUPLICATES" ]] || fail_test "lib_fn_mutant census: reused cell names: ${LIB_FN_DUPLICATES//$'\n'/ }"
+LIB_FN_MISSING="$(comm -23 <(tr ' ' '\n' <<<"$LIB_FN_EXPECTED" | sed '/^$/d' | sort -u) <(sort -u "$LIB_FN_BUILT"))"
+LIB_FN_UNEXPECTED="$(comm -13 <(tr ' ' '\n' <<<"$LIB_FN_EXPECTED" | sed '/^$/d' | sort -u) <(sort -u "$LIB_FN_BUILT"))"
+[[ -z "$LIB_FN_MISSING" ]] || fail_test "lib_fn_mutant census: expected cells not built: ${LIB_FN_MISSING//$'\n'/ }"
+[[ -z "$LIB_FN_UNEXPECTED" ]] || fail_test "lib_fn_mutant census: cells built but not in LIB_FN_EXPECTED: ${LIB_FN_UNEXPECTED//$'\n'/ }"
 printf 'lib_fn_mutant census: %s cells built through the guarded path: %s\n' \
 	"$(wc -l <"$LIB_FN_BUILT")" "$(tr '\n' ' ' <"$LIB_FN_BUILT")"
 
