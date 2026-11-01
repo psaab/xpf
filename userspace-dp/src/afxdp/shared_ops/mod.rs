@@ -16,7 +16,7 @@ mod lookup;
 mod reverse_synth;
 mod store;
 #[cfg(test)]
-pub(in crate::afxdp) mod stage_counts_18655_tests;
+pub(crate) mod stage_counts_18655_tests;
 pub(super) use counters::*;
 pub(super) use lookup::*;
 pub(super) use reverse_synth::*;

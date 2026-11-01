@@ -456,3 +456,7 @@ pub(super) fn run_ct_slice(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "ct_slice_scan_18655_tests.rs"]
+mod ct_slice_scan_18655_tests;

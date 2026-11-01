@@ -10,7 +10,7 @@
 //! on a revert to the old helper (no pass counted at all), and on a
 //! misaligned zip of keys to results (Updates for the wrong rows).
 
-use super::ct_slice::{CtSlicePairSet, run_ct_slice};
+use super::{CtSlicePairSet, run_ct_slice};
 use super::*;
 use crate::afxdp::shared_ops::stage_counts_18655_tests as fx;
 use crate::session::{SessionDeltaKind, SessionInstall, SessionOrigin, TcpHandshakeState};
