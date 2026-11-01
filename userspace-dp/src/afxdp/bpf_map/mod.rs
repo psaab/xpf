@@ -1679,6 +1679,13 @@ impl MapKeyWalk for FdMapWalk {
 /// row rescanned the map from the start: quadratic, minutes at 50k rows (the Go
 /// twin measured 225 s at a helper respawn). Asking while the key still exists
 /// continues from its bucket, so a whole walk is O(buckets + rows).
+///
+/// No step bound, unlike the Go walk (`walkDeleteBPFKeys`): the one caller,
+/// `clear_bpf_conntrack_maps` from `clear_mirror_with_batch`, holds the global
+/// tuple gate's clear fence (`begin_clear`). The fence drains in-flight tuple
+/// admissions and refuses new ones while the clear is pending or active, so no
+/// concurrent insert can keep the walk alive. Each step deletes a key, so the
+/// walk ends. A new caller without that fence would need a bound.
 pub(crate) fn delete_all_map_keys<W: MapKeyWalk>(
     map: &mut W,
     key_size: usize,

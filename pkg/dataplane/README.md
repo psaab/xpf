@@ -498,8 +498,18 @@ Guard layers (`build-userspace-xdp.sh`):
      a walk is O(buckets + rows).
    - **Collecting keys, then deleting after the loop,** as the `pkg/dataplane`
      stale-entry sweeps do, is also fine.
-   - **Guard:** `TestNoDeleteDuringBPFMapWalk18696` refuses any other loop in
-     `pkg/` that deletes from a map it is walking.
+   - **Guard:** `TestNoDeleteDuringBPFMapWalk18696`
+     (`bpf_map_walk_census_18696_test.go`) refuses any other loop in `pkg/`
+     that deletes from the map it is walking. A walk is a `NextKey*` or
+     iterator call in the loop's init, condition, post or body, or a range
+     over `Keys`/`All`/`Values`/`Iterate`. A delete is a `Delete` or
+     `BatchDelete` on the same receiver, or a direct call to a same-package
+     function that deletes through the parameter the walked map is passed in.
+     It is a syntactic scan, and its doc comment lists what it cannot see
+     (methods, closures, aliases, other packages).
+   - **Rust:** the helper has no such guard. Its #18696 census was by hand:
+     every `bpf_map_get_next_key` and `bpf_map_delete_elem` site in
+     `userspace-dp`.
 
    **Whether a restart releases the pin is MODE-DEPENDENT**, and this text
    has been wrong in both directions (#6928). It first said "a reload"
