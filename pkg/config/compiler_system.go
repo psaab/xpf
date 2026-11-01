@@ -1430,24 +1430,31 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts,
 			}
 		}
 		// Web management
-		if wmNode := svcNode.FindChild("web-management"); wmNode != nil {
+		// #18787: EVERY web-management sibling, not FindChild's first. Two
+		// braced blocks -- or a two-level packed `web-management api-auth
+		// ...;` line beside the braced stanza, which the brace-elision pass
+		// folds into a second block -- silently lost whichever block came
+		// second: HTTPS or the whole api-auth stanza, on a clean commit.
+		// Junos merges repeated stanzas; so does #13216 for the other
+		// service containers.
+		for _, wmNode := range svcNode.FindChildren("web-management") {
 			if sys.Services == nil {
 				sys.Services = &SystemServicesConfig{}
 			}
-			// #15018 census: allocate ONCE. A second `system` root
-			// re-enters here and must merge (flags set, scalars
-			// overwritten when authored), not reset the first root's
-			// web-management stanza.
+			// #15018 census: allocate ONCE. A second `system` root -- or a
+			// second web-management block (#18787) -- re-enters here and
+			// must merge (flags set, scalars overwritten when authored),
+			// not reset the first block's web-management stanza.
 			if sys.Services.WebManagement == nil {
 				sys.Services.WebManagement = &WebManagementConfig{}
 			}
-			if httpNode := wmNode.FindChild("http"); httpNode != nil {
+			for _, httpNode := range wmNode.FindChildren("http") {
 				sys.Services.WebManagement.HTTP = true
 				if ifNode := httpNode.FindChild("interface"); ifNode != nil {
 					sys.Services.WebManagement.HTTPInterface = nodeVal(ifNode)
 				}
 			}
-			if httpsNode := wmNode.FindChild("https"); httpsNode != nil {
+			for _, httpsNode := range wmNode.FindChildren("https") {
 				sys.Services.WebManagement.HTTPS = true
 				httpsSchema := refWebMgmtHTTPS.resolve()
 				for _, prop := range expandFlatRun(packedBodyChildren(httpsNode, httpsSchema), httpsSchema) {
