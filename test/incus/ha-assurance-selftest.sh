@@ -1834,12 +1834,12 @@ assert_helper_status 2 ha_pair_counter_budget_verdict 64 'Missing metric' manual
 assert_helper_status 2 ha_pair_counter_budget_verdict 64 'Session misses' manual-rg1-failback 1 phase-pre phase-post \
 	"$PAIR_PRE0" "$PAIR_PRE1" "$PAIR_POST0" "$OWNER1"
 
-printf 'Group 1 session-miss drops and the helper-identity guard (#18670)\n'
+printf 'Group 1a session-miss drops, 1b raw session-miss floor, helper-identity guard (#18670)\n'
 # Fixture rows are DELTAS over the RG1 failback window (phase-pre -> phase-post)
-# on a fixed per-node baseline. Group 1 judges `Screen drops` (the helper's
-# aggregate screen-drop counter, which the SYN-first transit miss gate feeds
-# for every non-SYN TCP session miss); misses and creates ride along so the
-# PR-like row can show what the raw-miss cell would have done.
+# on a fixed per-node baseline. 1a judges `Screen drops` (the aggregate the
+# SYN-first transit miss gate feeds) against 4; 1b judges raw `Session misses`
+# against a coarse floor of 256 (it sees misses 1a cannot, e.g. a lost SNAT
+# reply half that resolves to LocalDelivery and is denied host-inbound).
 write_ha_g1_snapshot() { # <path> <phase> <node> <misses> <creates> <screen> <pid>; '-' omits a line
 	local path="$1" phase="$2" node="$3" misses="$4" creates="$5" screen="$6" pid="$7"
 	{
@@ -1855,63 +1855,87 @@ G1_PRE1="${RG1_DIR}/g1-pre-node1.stats"
 G1_POST0="${RG1_DIR}/g1-post-node0.stats"
 G1_POST1="${RG1_DIR}/g1-post-node1.stats"
 # g1_row <m0> <c0> <s0> <m1> <c1> <s1> [pid0-post] [pid1-post]: post = baseline
-# + delta, baseline misses 100/200, creates 50/80, screen 3/4 (node0's from
-# G1_S0_BASE when set), PIDs 111/222.
-# A literal '-' omits that post line; 'x' writes a malformed value.
+# + delta. Baselines: misses 100/200, creates 50/80, screen 3/4 (overridden by
+# G1_S0_BASE / G1_S1_BASE), PIDs 111/222. A literal '-' omits that post line;
+# 'x' writes a malformed value.
 g1_val() { case "$1" in -) printf -- '-' ;; x) printf 'n/a' ;; *) printf '%s' "$(($1 + $2))" ;; esac; }
 g1_row() {
-	local s0="${G1_S0_BASE:-3}"
+	local s0="${G1_S0_BASE:-3}" s1="${G1_S1_BASE:-4}"
 	write_ha_g1_snapshot "$G1_PRE0" phase-pre node0 100 50 "$s0" 111
-	write_ha_g1_snapshot "$G1_PRE1" phase-pre node1 200 80 4 222
+	write_ha_g1_snapshot "$G1_PRE1" phase-pre node1 200 80 "$s1" 222
 	write_ha_g1_snapshot "$G1_POST0" phase-post node0 "$(g1_val "$1" 100)" "$(g1_val "$2" 50)" "$(g1_val "$3" "$s0")" "${7:-111}"
-	write_ha_g1_snapshot "$G1_POST1" phase-post node1 "$(g1_val "$4" 200)" "$(g1_val "$5" 80)" "$(g1_val "$6" 4)" "${8:-222}"
+	write_ha_g1_snapshot "$G1_POST1" phase-post node1 "$(g1_val "$4" 200)" "$(g1_val "$5" 80)" "$(g1_val "$6" "$s1")" "${8:-222}"
 }
-g1_verdict() {
-	ha_pair_counter_budget_verdict 0 'Screen drops' manual-rg1-failback 1 phase-pre phase-post \
+g1a_verdict() {
+	ha_pair_counter_budget_verdict 4 'Screen drops' manual-rg1-failback 1 phase-pre phase-post \
 		"$G1_PRE0" "$G1_PRE1" "$G1_POST0" "$G1_POST1"
 }
-g1_raw_misses_verdict() {
+g1b_verdict() {
+	ha_pair_counter_budget_verdict 256 'Session misses' manual-rg1-failback 1 phase-pre phase-post \
+		"$G1_PRE0" "$G1_PRE1" "$G1_POST0" "$G1_POST1"
+}
+g1_old_raw_verdict() {
 	ha_pair_counter_budget_verdict 64 'Session misses' manual-rg1-failback 1 phase-pre phase-post \
 		"$G1_PRE0" "$G1_PRE1" "$G1_POST0" "$G1_POST1"
 }
-# Row A, master-like (tcp master run 1: misses 20/41, creates 15/39, no drops): PASS.
+# Row A, master-like (tcp master run 1: misses 20/41, creates 15/39, no drops).
 g1_row 20 15 0 41 39 0
-assert_helper_status 0 g1_verdict
+assert_helper_status 0 g1a_verdict
+assert_helper_status 0 g1b_verdict
 # Row B, PR-like (#18656 tcp run 1: misses 26/45, creates 19/42, no drops):
-# the raw-miss cell this replaces FAILed it at 71 > 64; Group 1 PASSes.
+# the old raw cell (64) FAILed it at 71; both new checks PASS.
 g1_row 26 19 0 45 42 0
-assert_helper_status 1 g1_raw_misses_verdict
-assert_helper_status 0 g1_verdict
-# Row C, the HA failure: 40 established-flow packets on node1 missed and were
-# dropped by the SYN-first gate (40 misses, no creates, 40 screen drops). FAIL.
+assert_helper_status 1 g1_old_raw_verdict
+assert_helper_status 0 g1a_verdict
+assert_helper_status 0 g1b_verdict
+# Row C, established-flow loss on node1: 40 non-SYN misses dropped by the
+# SYN-first gate. 1a FAILs; 1b's coarse floor still PASSes (101).
 g1_row 20 15 0 81 39 40
-assert_helper_status 1 g1_verdict
-assert_contains "$(<"${ERR}")" 'Screen drops paired delta 40 (node0=0 node1=40) exceeds limit 0' 'group 1 row C detail'
-# Row D, one drop on node0 only: both nodes count. FAIL.
-g1_row 20 15 1 41 39 0
-assert_helper_status 1 g1_verdict
-# Row E, probe-blind: node1's post capture has no `Screen drops` line. VOID.
-g1_row 20 15 0 41 39 -
-assert_helper_status 2 g1_verdict
-# Row F, malformed `Screen drops` on node0 (on a 0 baseline, so that a
-# malformed value read as 0 would PASS rather than read as a rewind). VOID.
+assert_helper_status 1 g1a_verdict
+assert_contains "$(<"${ERR}")" 'Screen drops paired delta 40 (node0=0 node1=40) exceeds limit 4' 'group 1a row C detail'
+assert_helper_status 0 g1b_verdict
+# Row D, 5 drops on node0 only: both nodes count. 1a FAIL.
+g1_row 20 15 5 41 39 0
+assert_helper_status 1 g1a_verdict
+# Row E, probe-blind: node1's post capture has no `Screen drops` line (on a 0
+# baseline, so a missing value read as 0 would PASS, not read as a rewind).
+G1_S1_BASE=0 g1_row 20 15 0 41 39 -
+assert_helper_status 2 g1a_verdict
+# Row F, malformed `Screen drops` on node0 (0 baseline, same reason). VOID.
 G1_S0_BASE=0 g1_row 20 15 x 41 39 0
-assert_helper_status 2 g1_verdict
+assert_helper_status 2 g1a_verdict
 # Row G, a rewound `Screen drops` counter on node0. VOID.
 g1_row 20 15 -2 41 39 0
-assert_helper_status 2 g1_verdict
-# Row H, a helper restart inside the window on node0 (PID 111 -> 999): the
-# regrown counters read as a clean delta, but they do not span the window. VOID.
+assert_helper_status 2 g1a_verdict
+# Row H, a helper restart inside the window on node0 (PID 111 -> 999). VOID,
+# for both checks and for any other paired delta.
 g1_row 20 15 0 41 39 0 999
-assert_helper_status 2 g1_verdict
+assert_helper_status 2 g1a_verdict
 assert_contains "$(<"${ERR}")" 'node0: helper restarted inside the window (PID 111 -> 999)' 'group 1 row H detail'
-# Row I, a PID line in the pre capture only (node1 post capture lost it). VOID.
-g1_row 20 15 0 41 39 0 111 -
-assert_helper_status 2 g1_verdict
-# The same guard covers Groups 2-4, which share ha_snapshot_counter_delta.
-g1_row 20 15 0 41 39 0 999
+assert_helper_status 2 g1b_verdict
 assert_helper_status 2 ha_snapshot_counter_delta manual-rg1-failback 1 node0 'Session misses' \
 	phase-pre "$G1_PRE0" phase-post "$G1_POST0"
+# Row I, a PID line in the pre capture only (node1's post capture lost it). VOID.
+g1_row 20 15 0 41 39 0 111 -
+assert_helper_status 2 g1a_verdict
+# Row J, the 1a boundary at 4: 2+1 = 3 PASS, exactly 4 PASS, 3+2 = 5 FAIL.
+g1_row 20 15 2 41 39 1
+assert_helper_status 0 g1a_verdict
+g1_row 20 15 2 41 39 2
+assert_helper_status 0 g1a_verdict
+g1_row 20 15 3 41 39 2
+assert_helper_status 1 g1a_verdict
+# Row K, a lost SNAT reply half: its misses resolve to LocalDelivery (exempt
+# from the SYN-first gate, denied host-inbound), so 0 screen drops, but every
+# ACK/data packet misses. 1a PASSes; the 1b floor FAILs at 2000 > 256.
+g1_row 1000 15 0 1000 39 0
+assert_helper_status 0 g1a_verdict
+assert_helper_status 1 g1b_verdict
+assert_contains "$(<"${ERR}")" 'Session misses paired delta 2000 (node0=1000 node1=1000) exceeds limit 256' 'group 1b row K detail'
+# Row L, the 1b floor probe-blind: node0's post capture has no `Session
+# misses` line. VOID.
+g1_row - 15 0 41 39 0
+assert_helper_status 2 g1b_verdict
 
 # Mutation cells: each defence above must be load-bearing. A mutant is one lib
 # function's own text with one edit, sourced in a subshell over the real lib;
@@ -1930,50 +1954,65 @@ pathlib.Path(out).write_text(m.group(0).replace(old, new), encoding="utf-8")
 PY
 	printf '%s' "$out"
 }
-# assert_g1_mutant_flips <name> <want-status-under-mutant> <fn> <old> <new> <row...>
+# assert_g1_mutant_flips <name> <want-status-under-mutant> <verdict-fn> <lib-fn> <old> <new> <row...>
 assert_g1_mutant_flips() {
-	local name="$1" want="$2" fn="$3" old="$4" new="$5" mutant got
-	shift 5
+	local name="$1" want="$2" verdict="$3" fn="$4" old="$5" new="$6" mutant got
+	shift 6
 	mutant="$(lib_fn_mutant "$fn" "$name" "$old" "$new")" ||
 		fail_test "group 1 mutant ${name}: edit matched nothing in ${fn} (anchor moved?)"
 	[[ -s "$mutant" ]] || fail_test "group 1 mutant ${name}: no mutant text"
 	g1_row "$@"
 	# shellcheck source=/dev/null
-	if ( source "$mutant"; g1_verdict ) >/dev/null 2>&1; then got=0; else got=$?; fi
+	if ( source "$mutant"; "$verdict" ) >/dev/null 2>&1; then got=0; else got=$?; fi
 	[[ "$got" == "$want" ]] || fail_test "group 1 mutant ${name} ESCAPED: row $* scored ${got}, want ${want}"
 }
-# Strict bound: row A (0 drops, limit 0) flips PASS -> FAIL.
-assert_g1_mutant_flips strict 1 ha_pair_counter_budget_verdict '(( total <= limit ))' '(( total < limit ))' 20 15 0 41 39 0
+# Strict bound: row J at exactly 4 flips PASS -> FAIL.
+assert_g1_mutant_flips strict 1 g1a_verdict ha_pair_counter_budget_verdict '(( total <= limit ))' '(( total < limit ))' 20 15 2 41 39 2
 # node1 ignored: row C (40 drops on node1) flips FAIL -> PASS.
-assert_g1_mutant_flips node0only 0 ha_pair_counter_budget_verdict 'total=$((node0_delta + node1_delta))' 'total=$node0_delta' 20 15 0 81 39 40
-# Rewound counter accepted: row G flips VOID -> PASS.
-assert_g1_mutant_flips rewound 0 ha_nondecreasing_delta 'if post < baseline:' 'if False:' 20 15 -2 41 39 0
+assert_g1_mutant_flips node0only 0 g1a_verdict ha_pair_counter_budget_verdict 'total=$((node0_delta + node1_delta))' 'total=$node0_delta' 20 15 0 81 39 40
+# node0 ignored: row D (5 drops on node0) flips FAIL -> PASS.
+assert_g1_mutant_flips node1only 0 g1a_verdict ha_pair_counter_budget_verdict 'total=$((node0_delta + node1_delta))' 'total=$node1_delta' 20 15 5 41 39 0
+# 1b shares ha_pair_counter_budget_verdict with 1a, so the three mutants above
+# cover its arithmetic too; its own rows K and L, and its call site (pinned
+# below), cover what is specific to it.
+# Missing value read as 0: row E flips VOID -> PASS.
+G1_S1_BASE=0 assert_g1_mutant_flips missing 0 g1a_verdict ha_status_summary_value 'if len(matches) != 1:' 'if not matches:
+    print(0)
+    raise SystemExit(0)
+if len(matches) != 1:' 20 15 0 41 39 -
 # Malformed value read as 0: row F flips VOID -> PASS.
-G1_S0_BASE=0 assert_g1_mutant_flips malformed 0 ha_status_summary_value 'match = re.match(r"^(\d+)(?:\s|$)", matches[0])' 'match = re.match(r"^(\d+)(?:\s|$)", matches[0]) or re.match(r"(0)", "0")' 20 15 x 41 39 0
+G1_S0_BASE=0 assert_g1_mutant_flips malformed 0 g1a_verdict ha_status_summary_value 'match = re.match(r"^(\d+)(?:\s|$)", matches[0])' 'match = re.match(r"^(\d+)(?:\s|$)", matches[0]) or re.match(r"(0)", "0")' 20 15 x 41 39 0
+# Rewound counter accepted: row G flips VOID -> PASS.
+assert_g1_mutant_flips rewound 0 g1a_verdict ha_nondecreasing_delta 'if post < baseline:' 'if False:' 20 15 -2 41 39 0
 # PID mismatch ignored: row H flips VOID -> PASS.
-assert_g1_mutant_flips pidmismatch 0 ha_snapshot_same_helper_verdict 'if [[ "$before_pid" != "$after_pid" ]]; then' 'if false; then' 20 15 0 41 39 0 999
+assert_g1_mutant_flips pidmismatch 0 g1a_verdict ha_snapshot_same_helper_verdict 'if [[ "$before_pid" != "$after_pid" ]]; then' 'if false; then' 20 15 0 41 39 0 999
 # One-sided PID line skipped: row I flips VOID -> PASS.
-assert_g1_mutant_flips pidonesided 0 ha_snapshot_same_helper_verdict \
+assert_g1_mutant_flips pidonesided 0 g1a_verdict ha_snapshot_same_helper_verdict \
 	"if ! grep -Eq '^[[:space:]]*PID:' \"\$before_file\" 2>/dev/null \\
 		&& ! grep" \
 	"if ! grep -Eq '^[[:space:]]*PID:' \"\$before_file\" 2>/dev/null \\
 		|| ! grep" 20 15 0 41 39 0 111 -
 # Guard unwired from the shared delta: row H flips VOID -> PASS.
-assert_g1_mutant_flips pidunwired 0 ha_snapshot_counter_delta \
+assert_g1_mutant_flips pidunwired 0 g1a_verdict ha_snapshot_counter_delta \
 	'if ! ha_snapshot_same_helper_verdict "$before_file" "$after_file" "$node"; then return 2; fi' ':' 20 15 0 41 39 0 999
-# The consumer judges `Screen drops` with the Group 1 budget, and does not judge
-# raw `Session misses` (a call-site revert passes every row above).
-python3 - "${ROOT}/test/incus/test-failover.sh" <<'PY' || fail_test 'test-failover.sh Group 1 is not wired to the Screen drops budget'
+# The consumer emits BOTH judged checks with their own budgets and labels, and
+# refuses the retired knob (a call-site revert passes every row above).
+python3 - "${ROOT}/test/incus/test-failover.sh" <<'PY' || fail_test 'test-failover.sh Group 1a/1b are not wired as judged checks'
 import pathlib, re, sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 body = re.search(r"^ha_rg1_evaluate\(\) \{\n.*?^\}\n", text, re.M | re.S)
 if not body:
     raise SystemExit(1)
 b = body.group(0)
-calls = re.findall(r'ha_emit_verdict "RG1 Group 1 [^"]*"\s*\\\n\s*ha_pair_counter_budget_verdict "\$MAX_FAILOVER_SESSION_MISS_DROP_DELTA" "Screen drops"', b)
-if len(calls) != 1 or re.search(r'ha_pair_counter_budget_verdict "[^"]*" "Session misses"', b):
+a = re.findall(r'ha_emit_verdict "RG1 Group 1a [^"]*"\s*\\\n\s*ha_pair_counter_budget_verdict "\$MAX_FAILOVER_SESSION_MISS_DROP_DELTA" "Screen drops"', b)
+f = re.findall(r'ha_emit_verdict "RG1 Group 1b [^"]*"\s*\\\n\s*ha_pair_counter_budget_verdict "\$MAX_FAILOVER_RAW_SESSION_MISS_FLOOR" "Session misses"', b)
+if len(a) != 1 or len(f) != 1:
     raise SystemExit(1)
 if 'MAX_FAILOVER_SESSION_MISS_DELTA+x' not in text:
+    raise SystemExit(1)
+if not re.search(r'^MAX_FAILOVER_SESSION_MISS_DROP_DELTA="\$\{MAX_FAILOVER_SESSION_MISS_DROP_DELTA:-4\}"$', text, re.M):
+    raise SystemExit(1)
+if not re.search(r'^MAX_FAILOVER_RAW_SESSION_MISS_FLOOR="\$\{MAX_FAILOVER_RAW_SESSION_MISS_FLOOR:-256\}"$', text, re.M):
     raise SystemExit(1)
 PY
 

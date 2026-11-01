@@ -344,59 +344,84 @@ capture reads them:
   lost after the true floor was seen;
 - the drain-plus-loss case is pinned as a PASS (the known limit above).
 
-### `make test-failover` RG1 Group 1: session-miss drops (#18670)
+### `make test-failover` RG1 Group 1: session-miss drops and a raw floor (#18670)
 
-RG1 Group 1 exists for one HA failure: an established TCP flow whose session
-is missing after the RG1 failback.
+RG1 Group 1 exists for one HA failure: an established flow whose session is
+missing after the RG1 failback. It is two judged checks over the failback
+window, both nodes summed. Each check is VOID on its own failure modes, and
+the group fails if either check fails.
 
-- **What that failure looks like.** The lab configs carry no
-  `no-syn-check`. Under the SYN-first default, such a packet is a session
-  miss that the transit miss gate drops: it installs nothing and counts a
-  screen drop (`strict_syn_check_drops_new_flow_tunnel_with_payload`,
-  recorded as "strict-syn-check"). Closing (FIN/RST) misses and
-  unknown-flags fragments are dropped and counted the same way.
-- **What the cell judges.** The helper exposes only the aggregate `Screen
-  drops`. Group 1 is judged on its delta over the window, both nodes,
-  against `MAX_FAILOVER_SESSION_MISS_DROP_DELTA` (default 0). The
-  aggregate is an upper bound on those drops: other screen reasons can only
-  add to it, never hide one.
-  - Recorded failback windows read 0 on every node: tcp master ×4, tcp
-    #18656 ×4, loss master and #18656.
-- **Why not raw `Session misses`.** The cell used to budget the raw count
-  (limit 64), but a new flow is one miss and two creates, forward and
-  reverse. The raw count therefore charged every new flow opened in the
-  window, and grew with the window's length and background traffic. It
-  read 61 on master and 66–71 on #18656 with 0 drops in every window.
-  - Misses minus creates is no better: it is only a lower bound on real
-    misses. Each new flow, and each create-only path, hides up to one miss
-    on its node. The create-only paths are reverse repair, local delivery,
-    missing-neighbour seeding, and hit-path materialization of a
-    peer-synced session.
-  - Raw misses and creates per node stay in an `==> RG1 Group 1
-    report-only session counters` line.
+- **1a, session-miss drops.**
+  - The lab configs carry no `no-syn-check`. Under the SYN-first default,
+    an established TCP flow's packet that misses its session in transit is
+    dropped by the transit gate and counted as a screen drop
+    (`strict_syn_check_drops_new_flow_tunnel_with_payload`, recorded as
+    "strict-syn-check"). Closing (FIN/RST) misses and unknown-flags
+    fragments are counted the same way.
+  - The helper exposes those only in the aggregate `Screen drops`. 1a
+    judges its delta against `MAX_FAILOVER_SESSION_MISS_DROP_DELTA`
+    (default 4).
+  - `Screen drops` bounds `strict-syn-check` drops, not lost sessions as
+    such; other screen reasons add to it.
+  - Recorded windows read 0 on every node. 0 in 10 windows bounds the
+    per-window false-red rate only at about 26% (rule of three), while a
+    lost established flow drops on every packet; hence 4.
+- **1b, a coarse raw `Session misses` floor.**
+  - 1a is blind to a lost session whose miss resolves to LocalDelivery.
+  - The labs use catch-all `source-nat interface`. The WAN→LAN reply half
+    of a lost SNAT session is therefore addressed to the firewall's own
+    WAN address, and its miss resolves to LocalDelivery.
+  - LocalDelivery is exempt from the SYN-first gate, so the packet is
+    denied host-inbound (`host_inbound_denied_packets`) and never counted
+    as a screen drop. This is #18531's third mechanism, the one matrix row
+    H1 names.
+  - The miss counter runs before disposition, so 1b judges the raw delta
+    against `MAX_FAILOVER_RAW_SESSION_MISS_FLOOR` (default 256). Recorded
+    raw deltas are 18–61 on master and up to 71 on #18656, while a lost
+    reply half misses on every ACK or data packet.
+- **Why not misses net of creates.** A new flow is one miss and one or two
+  creates, depending on whether a local reverse companion is installed. The
+  #18676 review found that the create delta matched the RT_FLOW
+  `session_create` count on node1 in the recorded windows. Reverse repair, local delivery,
+  missing-neighbour seeding and hit-path materialization also create with
+  no miss. Misses minus creates is therefore only a lower bound on real
+  misses.
+  - Raw misses and creates per node are printed on a report-only line.
+- **Host-inbound denies, report-only.** test-failover also captures `show
+  security flow statistics` per node and phase, under the same helper-PID
+  guard. It prints the `Host-inbound denies` delta as a report-only line.
+  - That is the direct counter for the LocalDelivery reply half. The WAN
+    segment carries foreign lab devices (the #18558 ARP conflicts), so
+    its noise needs a master population before it is judged (#18681).
+  - Until then the LocalDelivery reply half is covered only by the 1b
+    floor.
 - **Helper identity.** Every Group 1–4 delta (`ha_snapshot_counter_delta`)
-  is VOID when the two captures' `PID:` lines differ, or when only one of
-  them has one. A helper restart inside the window zeroes the counters,
-  which then regrow past the baseline as an ordinary-looking delta.
-- **Retired knob.** `MAX_FAILOVER_SESSION_MISS_DELTA` is refused at start;
-  it no longer names anything.
-- **What it cannot see.**
-  - A lost UDP or ICMP session is recreated by its next packet (one miss,
-    two creates, no drop), so no counter here reports it. The stream
-    cells (iperf3 per-stream continuity and zero intervals) cover TCP
-    only. A UDP/ICMP continuity observable is open (#18679).
+  is VOID when the two captures' `PID:` lines differ, or when only one has
+  one. A helper restart inside the window zeroes the counters, which then
+  regrow past the baseline as an ordinary-looking delta.
+- **Retired knob.** `MAX_FAILOVER_SESSION_MISS_DELTA` (the old raw budget
+  of 64) is refused at start.
+- **What it cannot see.** A lost UDP or ICMP session is recreated by its
+  next packet (one miss, one or two creates, no drop).
+  - Neither check reports it unless the misses reach the 1b floor.
+  - The stream cells (iperf3 per-stream continuity and zero intervals)
+    cover TCP only. A UDP/ICMP continuity observable is open (#18679).
   - A moved session whose local row is lost but whose peer-synced copy
     survives is rebuilt on the hit path. That is the designed recovery,
     not a miss.
-- **Selftest.** `make test-ha-assurance-lib` covers:
-  - master-like and PR-like rows (PASS, with the raw-miss cell's FAIL on
-    the same files) and the established-flow drop (FAIL);
-  - the per-node sum;
+- **Selftest.** `make test-ha-assurance-lib` has rows for:
+  - master-like and PR-like runs (both checks PASS; the old raw-64 cell
+    FAILs the PR-like files);
+  - established-flow drops (1a FAIL, the 1b floor PASS);
+  - drops on node0 only;
+  - the 1a boundary (3 and 4 PASS, 5 FAIL);
+  - a lost reply half (1a PASS, 1b FAIL at 2000);
   - missing, malformed and rewound counters (VOID);
   - a helper restart and a one-sided `PID:` line (VOID).
 
-  A mutant of the lib's own function text must flip each of those, and a
-  pin keeps `test-failover.sh` judging `Screen drops`.
+  A mutant of the lib's own function text must flip each defence, and a
+  pin keeps `test-failover.sh` emitting both judged checks with their own
+  budgets.
 - **Not changed.** `scripts/userspace-ha-failover-validation.sh` has its
   own per-cycle raw `MAX_FAILOVER_SESSION_MISS_DELTA` check. That script
   is manual-only (`test/incus/HARNESSES.unreached`). It carries the same

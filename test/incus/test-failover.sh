@@ -91,20 +91,35 @@ MAX_STANDBY_WAN_TX_DELTA="${MAX_STANDBY_WAN_TX_DELTA:-0}"
 REQUIRE_FABRIC_ACTIVITY="${REQUIRE_FABRIC_ACTIVITY:-1}"
 MIN_FABRIC_TX_DELTA="${MIN_FABRIC_TX_DELTA:-1}"
 FABRIC_ACTIVITY_TRIGGER_DELTA="${FABRIC_ACTIVITY_TRIGGER_DELTA:-8}"
-# #18670: RG1 Group 1 judges the property it exists for: an ESTABLISHED TCP
-# flow whose session is missing after the move. Under the lab's SYN-first
-# default (no `no-syn-check`) such a packet is a session miss that the
-# transit miss gate DROPS and counts as a screen drop
+# #18670: RG1 Group 1 is two judged checks over the RG1 failback window,
+# both nodes summed.
+#
+# 1a, session-miss drops. An ESTABLISHED TCP flow whose session is missing
+# after the move is, under the lab's SYN-first default (no `no-syn-check`), a
+# transit session miss that the gate DROPS and counts as a screen drop
 # (`strict_syn_check_drops_new_flow_tunnel_with_payload`, recorded as
 # "strict-syn-check"; closing misses and unknown-flags fragments too). The
-# helper exposes only the aggregate `Screen drops`, an upper bound on those
-# drops (other screen reasons add to it, never hide one), so Group 1 is
-# judged on its delta. The raw `Session misses` count the cell used before
-# charged every new flow opened in the window as a miss (a new flow is one
-# miss and TWO creates) and is now report-only, beside `Session creates`.
-# Master's value in every recorded failback window (tcp x4, loss x1, and the
-# #18656 builds) was 0, so the budget is 0.
-MAX_FAILOVER_SESSION_MISS_DROP_DELTA="${MAX_FAILOVER_SESSION_MISS_DROP_DELTA:-0}"
+# helper exposes that only in the aggregate `Screen drops`, so 1a bounds
+# `strict-syn-check` drops (other screen reasons add to it), not lost sessions
+# as such. Recorded windows read 0 on every node (tcp master x4 and #18656 x4,
+# loss master and #18656 x1 each); 0 in 10 windows bounds the per-window
+# false-red rate only at about 26% (rule of three), and a lost established
+# flow drops on every packet, so the budget is 4.
+#
+# 1b, a coarse raw `Session misses` floor. 1a is blind to a lost session whose
+# miss resolves to LocalDelivery: with the labs' catch-all `source-nat
+# interface`, the WAN->LAN reply half of a lost SNAT session is addressed to
+# the firewall's own WAN address, LocalDelivery is exempt from the SYN-first
+# gate, and the packet is counted as a host-inbound deny instead (#18531's
+# third mechanism). The miss counter runs before disposition, so a raw floor
+# still sees it. Recorded raw deltas: 18-61 on master, up to 71 on #18656
+# (whose cache-served window opens more new flows; a new flow is one miss and
+# one or two creates, depending on whether a local reverse companion is
+# installed). A lost reply half misses on every ACK or data packet, thousands
+# per second at the lab's rates. 256 is 3.6x the largest recorded delta and
+# far below that.
+MAX_FAILOVER_SESSION_MISS_DROP_DELTA="${MAX_FAILOVER_SESSION_MISS_DROP_DELTA:-4}"
+MAX_FAILOVER_RAW_SESSION_MISS_FLOOR="${MAX_FAILOVER_RAW_SESSION_MISS_FLOOR:-256}"
 MAX_FAILOVER_NEIGHBOR_MISS_DELTA="${MAX_FAILOVER_NEIGHBOR_MISS_DELTA:-60}"
 MAX_FAILOVER_ROUTE_MISS_DELTA="${MAX_FAILOVER_ROUTE_MISS_DELTA:-32}"
 MAX_FAILOVER_POLICY_DENIED_DELTA="${MAX_FAILOVER_POLICY_DENIED_DELTA:-0}"
@@ -168,10 +183,10 @@ cost()  { echo "  COST  $*"; PASS=$((PASS + 1)); COST=$((COST + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 
 die() { echo "FATAL: $*" >&2; exit 2; }
-# #18670: the raw session-miss budget is gone; an override of it would be
-# silently ignored, so refuse it.
+# #18670: the old raw session-miss budget (64) is gone; an override of it
+# would be silently ignored, so refuse it.
 if [[ -n "${MAX_FAILOVER_SESSION_MISS_DELTA+x}" ]]; then
-	die "MAX_FAILOVER_SESSION_MISS_DELTA no longer applies (#18670): RG1 Group 1 judges Screen drops (SYN-first drops of non-SYN TCP session misses); set MAX_FAILOVER_SESSION_MISS_DROP_DELTA instead"
+	die "MAX_FAILOVER_SESSION_MISS_DELTA no longer applies (#18670): RG1 Group 1a judges Screen drops (MAX_FAILOVER_SESSION_MISS_DROP_DELTA) and Group 1b a coarse raw Session misses floor (MAX_FAILOVER_RAW_SESSION_MISS_FLOOR)"
 fi
 failover_duration_value() {
 	local requested="$1" minimum="$2"
@@ -210,6 +225,9 @@ HA_CAPTURE_DIR="${TMPDIR:-/var/worktrees/.cache/tmpdir}/test-failover-ha-$$"
 declare -A RG1_STATS=()
 declare -A RG1_INTERFACES=()
 declare -A RG1_STATUS=()
+# #18670 (report-only, #18681): `show security flow statistics` per node and
+# phase, for the host-inbound-denied delta.
+declare -A RG1_FLOWSTATS=()
 declare -A RG1_SAMPLE_STATS=()
 declare -A RG1_SAMPLE_INTERFACES=()
 RG1_FAILBACK_SETTLED=false
@@ -253,6 +271,15 @@ ha_capture_rg1_node() {
 	if ! ha_capture_cli "$node" 'show chassis cluster status' \
 		manual-rg1-failback "$phase" "$node_id" 1 "${RG1_STATUS["${phase}:${node_id}"]}"; then
 		result=2
+	fi
+	# #18670 report-only (#18681): a failed capture here never VOIDs the
+	# slice. The helper PID from the stats capture just above rides along so
+	# the delta gets the same helper-identity guard.
+	RG1_FLOWSTATS["${phase}:${node_id}"]="${base}.flowstats"
+	if ha_capture_cli "$node" 'show security flow statistics' \
+		manual-rg1-failback "$phase" "$node_id" 1 "${RG1_FLOWSTATS["${phase}:${node_id}"]}" 2>/dev/null; then
+		grep -E -m1 '^[[:space:]]*PID:' "${RG1_STATS["${phase}:${node_id}"]}" \
+			>>"${RG1_FLOWSTATS["${phase}:${node_id}"]}" 2>/dev/null || true
 	fi
 	return "$result"
 }
@@ -765,7 +792,8 @@ ha_emit_diagnostic_verdict() {
 
 ha_rg1_mark_groups_void() {
 	local reason="$1"
-	void "RG1 Group 1 session-miss budget: ${reason}"
+	void "RG1 Group 1a session-miss drops: ${reason}"
+	void "RG1 Group 1b raw session-miss floor: ${reason}"
 	void "RG1 Group 2 neighbor-miss budget: ${reason}"
 	void "RG1 Group 3 route-miss budget: ${reason}"
 	void "RG1 Group 4 policy-denied budget: ${reason}"
@@ -873,8 +901,24 @@ ha_rg1_evaluate() {
 		fi
 	done
 	info "RG1 Group 1 report-only session counters (phase-pre→phase-post): ${group1_line}"
-	ha_emit_verdict "RG1 Group 1 session-miss drops (Screen drops: SYN-first drops of non-SYN TCP session misses, phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_SESSION_MISS_DROP_DELTA})" \
+	local group1_inbound="" group1_denies
+	for group1_node in node0 node1; do
+		if group1_denies=$(ha_snapshot_counter_delta manual-rg1-failback 1 "$group1_node" "Host-inbound denies" \
+			phase-pre "${RG1_FLOWSTATS[phase-pre:${group1_node}]:-}" phase-post "${RG1_FLOWSTATS[phase-post:${group1_node}]:-}" 2>/dev/null); then
+			group1_inbound+="${group1_inbound:+ }${group1_node}=${group1_denies}"
+		else
+			group1_inbound+="${group1_inbound:+ }${group1_node}=unavailable"
+		fi
+	done
+	# Expires-when: #18681 closed
+	info "RG1 Group 1 report-only host-inbound denies (phase-pre→phase-post, not judged until #18681): ${group1_inbound}"
+	ha_emit_verdict "RG1 Group 1a session-miss drops (Screen drops: SYN-first drops of non-SYN TCP session misses, phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_SESSION_MISS_DROP_DELTA})" \
 		ha_pair_counter_budget_verdict "$MAX_FAILOVER_SESSION_MISS_DROP_DELTA" "Screen drops" \
+		manual-rg1-failback 1 phase-pre phase-post \
+		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
+		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
+	ha_emit_verdict "RG1 Group 1b raw session-miss floor (Session misses, phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_RAW_SESSION_MISS_FLOOR})" \
+		ha_pair_counter_budget_verdict "$MAX_FAILOVER_RAW_SESSION_MISS_FLOOR" "Session misses" \
 		manual-rg1-failback 1 phase-pre phase-post \
 		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
 		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
