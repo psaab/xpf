@@ -393,8 +393,10 @@ Differences that matter (#1881):
     two adjacent loads. It is not drop-only. While the shim still stamps
     the OLD generation the pair merely drops
     (`ConfigGenerationMismatch`, or `FibGenerationMismatch` when only the
-    FIB generation moved). But once the coordinator's reply reaches Go and
-    Go writes the new generation to `userspace_ctrl`, the shim stamps NEW;
+    FIB generation moved). But once the new generation reaches
+    `userspace_ctrl` (since #18560 the coordinator writes it itself right
+    after the view store, inside Go's grant; otherwise Go writes it from the
+    reply), the shim stamps NEW;
     those packets pass `classify_metadata` against the new validation and
     are forwarded under the STALE tables — a withdrawn route still
     resolves, a newly added deny is not applied.

@@ -920,14 +920,21 @@ fn rehome_or_retain_fabric_redirect_inner(
             // egress RG, when known, must be forwarding-active is
             // already guaranteed by HA enforcement upstream; here
             // we only refuse fabric egress (anti-loop).
+            // #18672: a MissingNeighbor takes the same two keep tests as a
+            // ForwardCandidate. Its next hop is unresolved, but it names the
+            // same local egress.
+            let local_candidate = matches!(
+                candidate.disposition,
+                ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+            );
             if destination_owner_unknown
-                && candidate.disposition == ForwardingDisposition::ForwardCandidate
+                && local_candidate
                 && candidate.egress_ifindex > 0
                 && !egress_is_fabric
             {
                 return candidate;
             }
-            if candidate.disposition == ForwardingDisposition::ForwardCandidate
+            if local_candidate
                 && connected_ifindex > 0
                 && candidate.egress_ifindex == connected_ifindex
                 && !egress_is_fabric
@@ -949,19 +956,22 @@ fn rehome_or_retain_fabric_redirect_inner(
     // Returning it here rewrote every stored FabricRedirect reverse row onto
     // the unresolved WAN gateway at RG activation. Replies then took the
     // MissingNeighbor arm, whose #1913 gate judged wan->wan and denied them.
-    // Retain the redirect ONLY for a known owner RG that is not
-    // forwarding-active here (`!destination_owner_active` excludes both
-    // Unknown and a locally Active owner). A locally owned destination
-    // keeps its local MissingNeighbor (resolve, then TX here). An
-    // unknown-owner (internet, gateway-routed) destination keeps its
-    // MissingNeighbor too: no peer owns it.
-    let missing_neighbor_toward_peer_owner = candidate.disposition
-        == ForwardingDisposition::MissingNeighbor
-        && !destination_owner_active
+    // #18659 retained the redirect only for a known owner RG that is not
+    // forwarding-active here.
+    // #18672: a MissingNeighbor reaches this point in two cases, and both
+    // retain the redirect:
+    // - the owner is known and not active here (#18659);
+    // - the owner is active but the candidate missed both keep tests above.
+    //   That is the transient-FIB-lag case, the same one in which a
+    //   ForwardCandidate retains.
+    // An unknown owner never reaches here with a usable local egress: the
+    // #16524 keep test above returned it. A fabric or zero egress is not a
+    // local mis-route and is still returned verbatim.
+    let missing_neighbor_retained = candidate.disposition == ForwardingDisposition::MissingNeighbor
         && candidate.egress_ifindex > 0
         && !super::forwarding::ingress_is_fabric(forwarding, candidate.egress_ifindex);
     if candidate.disposition != ForwardingDisposition::ForwardCandidate
-        && !missing_neighbor_toward_peer_owner
+        && !missing_neighbor_retained
     {
         return candidate;
     }
