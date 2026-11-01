@@ -1,4 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
+  * IPsec host-input fence: the live readback of the fence overlay accepts
+    the #16841 zero-hop-limit DROP ahead of it again. Since #16841 every
+    host-inbound install carrying an overlay failed its readback and the
+    apply was marked failed. Rules that can admit a packet ahead of the
+    overlay are still refused (#18721).
   * Upgrade: the HA rolling rejoin deadline is configurable with
     `--rejoin-deadline` and defaults to 190s, a margin over the peer's 150s bulk-prime
     retry loop plus one 35s late-ack re-drive and 5s for that bulk's

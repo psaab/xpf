@@ -66,8 +66,9 @@ type Installer interface {
 	InstallEarlyInputBarrierWithLifelineAdmit(lifelines []string) error
 	// InstallHostInbound installs the real host-inbound table (#3070/#3333).
 	InstallHostInbound(spec HostInboundSpec) error
-	// VerifyHostInboundOverlay reads back the exact marker and leading DROP
-	// rule for a candidate overlay before publication.
+	// VerifyHostInboundOverlay reads back the exact marker and the overlay's
+	// DROP rules for a candidate overlay before publication; only DROP-only
+	// rules may precede them (#18721).
 	VerifyHostInboundOverlay(overlay HostInputFenceOverlay) error
 	// InstallColdBootFence installs the #5644 cold-boot fail-closed fence
 	// (the xpf_hostinbound table reduced to mandatory admits + address drops).
@@ -186,9 +187,11 @@ func (in *netlinkInstaller) InstallHostInbound(spec HostInboundSpec) error {
 	return err
 }
 
-// counter proves all authority fields and canonical masters were committed;
-// for a nonempty set the first input rule is decoded and compared to the exact
-// master set plus the marker object and DROP verdict.
+// VerifyHostInboundOverlay reads the installed host-input table back: the
+// named marker counter proves all authority fields and canonical masters were
+// committed; for a nonempty set the input chain's overlay DROP rules are decoded
+// and compared to the exact master set plus the marker object and DROP verdict
+// (verifyHostOverlayRuleChain states which rules may precede them).
 func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverlay) error {
 	overlay = CanonicalHostInputFenceOverlay(overlay)
 	c, err := in.newConn()
@@ -236,13 +239,31 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	if err != nil {
 		return fmt.Errorf("read host overlay rules: %w", err)
 	}
+	return verifyHostOverlayRuleChain(rules, setNames, marker, overlay)
+}
+
+// verifyHostOverlayRuleChain judges the input chain's rules, in kernel order,
+// against an overlay (#9506 readback, #18721).
+//
+// The overlay exists so that no established/related ACCEPT can admit traffic
+// from a revoked master (HostInputFenceOverlay): the property is "no rule that
+// can admit a packet runs before the fence DROP", not "the fence DROP has
+// handle 1". So the chain may open with a prefix of DROP-only rules
+// (hostInputRuleIsDropOnly) — today the #16841 `ip6 hoplimit 0 fib daddr type
+// { local, anycast } drop`, which #16841 deliberately places first in every
+// host-input chain. A DROP-only rule admits nothing, so a packet from a fenced
+// master that it does not drop still reaches the fence DROP. Any other rule
+// ahead of the overlay (an ACCEPT, a jump/goto, a return to the accept
+// policy, a queue, a verdict map) fails the readback exactly as before.
+//
+// After that prefix come the overlay drops: paired slave-scoped rules first,
+// then the bare-master rule. All must carry the marker + DROP, the union of
+// iifname scopes must equal MasterSet plus pair masters, and the union of
+// sdifname scopes must equal the paired slaves (#14974).
+func verifyHostOverlayRuleChain(rules []*nftables.Rule, setNames map[string][]string, marker string, overlay HostInputFenceOverlay) error {
 	if len(rules) == 0 {
 		return fmt.Errorf("host overlay leading rule absent")
 	}
-	// Collect every leading overlay drop: paired slave-scoped rules first,
-	// then the bare-master rule. All must carry the marker + DROP, the union
-	// of iifname scopes must equal MasterSet plus pair masters, and the union
-	// of sdifname scopes must equal the paired slaves (#14974).
 	wantMasters := append([]string(nil), overlay.MasterSet...)
 	var wantSlaves []string
 	for _, pair := range overlay.MasterSlavePairs {
@@ -254,6 +275,9 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	for _, rule := range rules {
 		masters, slaves, markerSeen, dropSeen := decodeHostOverlayRule(rule, setNames, marker)
 		if !markerSeen {
+			if overlayRules == 0 && hostInputRuleIsDropOnly(rule) {
+				continue // a DROP-only rule ahead of the fence admits nothing
+			}
 			break
 		}
 		if !dropSeen {
@@ -279,6 +303,30 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 		return fmt.Errorf("host overlay readback mismatch: got masters=%v slaves=%v want masters=%v slaves=%v", gotMasters, gotSlaves, wantMasters, wantSlaves)
 	}
 	return nil
+}
+
+// hostInputRuleIsDropOnly reports whether a rule's only possible verdict is
+// DROP: it carries exactly one verdict, that verdict is DROP, and nothing in
+// it can hand the packet anywhere else (a verdict-map lookup, a queue). Such
+// a rule can run ahead of the #9506 fence overlay without weakening it.
+func hostInputRuleIsDropOnly(rule *nftables.Rule) bool {
+	drops := 0
+	for _, anyExpr := range rule.Exprs {
+		switch x := anyExpr.(type) {
+		case *expr.Verdict:
+			if x.Kind != expr.VerdictDrop {
+				return false
+			}
+			drops++
+		case *expr.Lookup:
+			if x.IsDestRegSet {
+				return false // a map lookup can write the verdict register
+			}
+		case *expr.Queue:
+			return false
+		}
+	}
+	return drops == 1
 }
 
 func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, marker string) (masters, slaves []string, markerSeen, dropSeen bool) {
