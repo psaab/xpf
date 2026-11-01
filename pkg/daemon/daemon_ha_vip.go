@@ -580,7 +580,11 @@ func (d *Daemon) claimLegacyNonVIPAnnounce(rgID int, generation uint64) bool {
 // CurrentDesired's epoch: epoch bumps on every reconcileLocked input
 // (every 2s reconcile pass), which would re-send the full burst forever.
 func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
-	if d.isNoRethVRRP() {
+	// #18769: no store means no active config to derive targets from.
+	// Return before claiming the activation so a later pass (with a
+	// store) still owns the announce, like every other HA path that
+	// guards d.store == nil.
+	if d.store == nil || d.isNoRethVRRP() {
 		return
 	}
 	d.rgStatesMu.RLock()
@@ -645,7 +649,7 @@ func (d *Daemon) nonVIPAnnounceClaimCurrent(rgID int, generation uint64) bool {
 // generation still claimed, before the first frame and (via stillValid)
 // before every follow-up/pool frame.
 func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int, generation uint64) cluster.AnnounceResult {
-	if d.isNoRethVRRP() {
+	if d.store == nil || d.isNoRethVRRP() { // #18769
 		return cluster.AnnounceResult{}
 	}
 	cfg := d.store.ActiveConfig()
