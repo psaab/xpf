@@ -459,6 +459,9 @@ impl SessionTable {
                             }
                             ev.shared_established |= shared.shared_established;
                             ev.rev_packets = ev.rev_packets.max(shared.rev_packets);
+                            // #18722: summed, not maxed — see `served_packets`.
+                            ev.served_packets =
+                                ev.served_packets.saturating_add(shared.served_packets);
                         }
                         ev
                     };
@@ -913,6 +916,18 @@ impl SessionTable {
     /// the opening window; a flow that goes quiet fails the window
     /// check once the companion crosses, so both halves then reap
     /// within one window of last activity (bounded, terminating).
+    ///
+    /// #18722: OPENING rows only. A completed (established,
+    /// non-pending) row is its own serving pair, so node-level
+    /// evidence for its tuple is evidence about ITSELF; its retention
+    /// is `companion_keeps_alive`'s, keyed on the companion's real
+    /// timestamp. And the node-level arm needs RECENT service, not the
+    /// cumulative proof alone: it keeps the row only when
+    /// `served_packets` advanced past the row's `node_served_seen`
+    /// baseline. Before #18722 both were missing, so an idle
+    /// established flow that had ever been answered re-stamped to
+    /// `now_ns` on every pass and never reaped (no Close, no RT_FLOW
+    /// close, session and NAT binding held for ever).
     fn opening_companion_keeps_alive(
         &mut self,
         key: &SessionKey,
@@ -926,26 +941,44 @@ impl SessionTable {
         if key.protocol != PROTO_TCP || entry.closing {
             return false;
         }
+        // #18722: a completed row is not an opening half; see above.
+        if entry.established && !entry.handshake_pending {
+            return false;
+        }
         // #16223 (node-level first): a promoted serving companion for
         // this tuple on this node (shared-map Established +
         // admitted reverse counters) retains the replica/opening row
         // BEFORE the local `syn_ack_first` / `handshake_pending`
         // refusals below — the live fw1 row is `syn_ack_first=true`
         // with no local companion, and the fw0 replicas are pure
-        // Opening. Retain on the SERVING pair's activity: re-stamp
-        // from `now_ns` (this GC pass is the retention event; the
-        // serving pair's own hits keep its stamp fresh, so a flow
-        // that goes quiet still crosses one window later when the
-        // shared/serving proof stops advancing — production merges
-        // the serving last-activity through the same evidence).
+        // Opening.
+        //
+        // #18722: retain on the serving pair's RECENT activity. The
+        // promoted proof is cumulative, so on its own it would hold a
+        // dead flow for ever. Require the node-wide served packet total
+        // to have advanced since this row's last check, then re-stamp
+        // from `now_ns`: this pass is the retention event, bounded by
+        // that advance exactly as `closing_counters_keep_alive` is.
+        // The serving worker's ct-slice restamps the shared counts
+        // within one refresh cycle (10-13 s, const-asserted inside the
+        // 20 s opening window, `slice_pacing.rs`), so a live flow
+        // advances between two crossings and a quiet one stops.
         if node_evidence.promoted_and_served() {
+            let served = node_evidence.served_packets;
             let Some(em) = self.entry_by_key_mut(key) else {
                 return false;
             };
-            em.last_seen_ns = now_ns;
-            self.rebucket_alive_entry(key, now_ns);
-            return true;
+            let advanced = served > em.node_served_seen;
+            em.node_served_seen = served;
+            if advanced {
+                em.last_seen_ns = now_ns;
+                self.rebucket_alive_entry(key, now_ns);
+                return true;
+            }
         }
+        let Some(entry) = self.entry_by_key(key) else {
+            return false;
+        };
         // Classic arm: only SYN-ACK-observed pending halves whose
         // completing segment was consumed elsewhere. Pure Opening and
         // SYN-ACK-first pairs keep the #6752/#13679/#4109 refusals.

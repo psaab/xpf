@@ -600,6 +600,58 @@ per idle-crossed entry, in the GC pass only — the per-packet forwarding path i
 unchanged (the alternative, refreshing the companion on every reverse packet,
 would add a hot-path re-bucket).
 
+**Opening-replica retention on node-level evidence (#16223, recency #18722).**
+`companion_keeps_alive` refuses an Opening or handshake-pending companion by
+design (#6752/#13679), so a split-posture replica pair that never sees its
+completing segment (it is consumed on another worker or the fabric peer) would
+reap on the 20 s opening window while the flow is served elsewhere on the node.
+`opening_companion_keeps_alive` (`expire.rs`, called after
+`companion_keeps_alive` on the same `companion_eligible` path) covers that case
+from `NodeServedEvidence`: this table's serving rows and node-served stamps,
+merged in the expire pass with the HA context's `node_served` probe
+(`shared_node_served_evidence`, the shared synced row for the tuple).
+
+Two conditions bound it (#18722):
+- **Opening rows only.** A completed row (`established && !handshake_pending`)
+  is its own serving pair, so node-level evidence for its tuple is evidence about
+  itself. Its retention is `companion_keeps_alive`'s alone, keyed on the
+  companion's real timestamp, and it reaps one window after its last packet in
+  either direction, with its Close.
+- **Recent service, not cumulative proof.** `promoted_and_served()` (an
+  Established wire plus reverse counters) only ever becomes true; it never
+  becomes false again. The arm also requires `NodeServedEvidence::served_packets`
+  to have ADVANCED past the row's `node_served_seen` baseline since its last
+  crossed check. `served_packets` sums per-source packet totals: this table's
+  serving-row counters, its stamps, and the shared row's `fwd_packets +
+  rev_packets`, which the serving worker's ct-slice restamps from live counters
+  once per refresh cycle (10-13 s, const-asserted inside the opening window,
+  `slice_pacing.rs`). On an advance the row is re-stamped to `now_ns` and
+  re-bucketed, bounded by that proof like `closing_counters_keep_alive`. Without
+  one, the row falls through to the classic pending arm and otherwise reaps.
+
+**Contract (the cells pin both bounds exactly).**
+- An idle COMPLETED row reaps at the first crossed check after its window,
+  so ONE window after its last packet in either direction, and emits its
+  Close.
+- An idle OPENING row whose serving pair stopped forwarding is KEPT by the
+  first crossed check after the last advance and REAPED by the next one: TWO
+  of its windows after that advance (plus the ct-slice restamp lag).
+  The reason is that `node_served_seen` starts at 0 at install, so the first
+  check after the session goes quiet still sees the last activity as an
+  advance.
+  Expires-when: #18739 closed (that issue seeds the baseline at install,
+  which makes this bound one window).
+
+Before #18722
+the arm re-stamped every row with cumulative proof to `now_ns` on every pass. An
+idle ESTABLISHED flow (a client gone without FIN or RST) was its own proof and
+never reaped: no Close delta, no RT_FLOW close, and the session and its NAT
+binding were held until admission or the pool refused new flows. Cells:
+`session/idle_served_keepalive_18722_tests.rs` (closure-modelled HA context) and
+`afxdp/tests_idle_served_keepalive_18722.rs` (the production
+`shared_node_served_evidence` closure driven by
+`restamp_shared_packet_counts_batch`).
+
 **Reverse companion honors the app idle window (#5153).** Because the probe
 compares the companion against `companion.expires_after_ns`, the reverse
 companion built by `build_reverse_session_from_forward_match`

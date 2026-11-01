@@ -212,6 +212,18 @@ pub(crate) struct NodeServedEvidence {
     /// an Established row. Input evidence only — never set from a
     /// shared row's Established wire.
     pub(crate) served_completed: bool,
+    /// #18722: admitted packets (forward + reverse) the evidence
+    /// sources have counted for the tuple, summed across sources:
+    /// this table's serving rows, its node-served stamps and the
+    /// shared synced row (restamped from the serving worker's live
+    /// counters by the ct-slice). Every source is monotonic per
+    /// incarnation, so the sum only moves when the serving pair
+    /// forwards a packet. Read ONLY by the expiry pass's node-level
+    /// retention arm, as a change-detection RECENCY proof
+    /// (`SessionEntry::node_served_seen`): the other fields are
+    /// cumulative, and keeping a row on cumulative proof kept a dead
+    /// flow forever. Never a completion input.
+    pub(crate) served_packets: u64,
     /// The Established wire came from the node's SHARED synced map:
     /// a serving worker published/restamped it only after its own
     /// pair completed the handshake. Trusted as completion proof on

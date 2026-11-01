@@ -572,13 +572,15 @@ pub(in crate::afxdp) fn shared_completion_evidence(
 }
 /// #16223: node-level served-handshake evidence for `key` (either
 /// half of the pair): the shared synced entry whose handshake wire is
-/// Established. The counter half of the evidence is NOT carried on
-/// the shared entry; production merges this wire with the serving
-/// worker's admitted-counter stamp (`SessionTable` node-served
+/// Established. The completion counter half (`rev_packets`) is not
+/// read from the shared entry; production merges this wire with the
+/// serving worker's admitted-counter stamp (`SessionTable` node-served
 /// stamps, surfaced through the expiry context). Either half's key
 /// may name the entry, and a reverse key also probes its derived
 /// forward companion, so a SNAT-translated reverse replica still
 /// finds the serving forward row.
+/// #18722: the matched entry's ct-slice-restamped live counts ride out
+/// as `served_packets`, the expiry pass's recency (advance) proof.
 pub(in crate::afxdp) fn shared_node_served_evidence(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     key: &SessionKey,
@@ -592,6 +594,7 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
             {
                 evidence.handshake_wire = entry.tcp_handshake_state;
                 evidence.shared_established = true;
+                evidence.served_packets = entry.fwd_packets.saturating_add(entry.rev_packets);
             }
         }
     };
@@ -617,6 +620,7 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
             if same || swapped || snat_reverse {
                 evidence.handshake_wire = entry.tcp_handshake_state;
                 evidence.shared_established = true;
+                evidence.served_packets = entry.fwd_packets.saturating_add(entry.rev_packets);
                 break;
             }
         }
