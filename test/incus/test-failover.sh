@@ -91,16 +91,20 @@ MAX_STANDBY_WAN_TX_DELTA="${MAX_STANDBY_WAN_TX_DELTA:-0}"
 REQUIRE_FABRIC_ACTIVITY="${REQUIRE_FABRIC_ACTIVITY:-1}"
 MIN_FABRIC_TX_DELTA="${MIN_FABRIC_TX_DELTA:-1}"
 FABRIC_ACTIVITY_TRIGGER_DELTA="${FABRIC_ACTIVITY_TRIGGER_DELTA:-8}"
-# #18670: RG1 Group 1 judges session misses NET of session creates, per
-# node floored at 0, summed over both nodes. A raw miss count charged every
-# new flow opened in the failback window as a miss (each new flow's first
-# packet takes the session-miss branch before it creates its session), so it
-# grew with the window's length and background new-flow traffic. Measured
-# net values on tcp and loss: 2-7 per node, at most 10 for both nodes, on
-# master and on #18656. 32 is about 3x that and half the former raw budget
-# of 64; a lost-session failover misses on every mid-stream packet of every
-# flow, which is orders of magnitude above it.
-MAX_FAILOVER_NET_SESSION_MISS_DELTA="${MAX_FAILOVER_NET_SESSION_MISS_DELTA:-32}"
+# #18670: RG1 Group 1 judges the property it exists for: an ESTABLISHED TCP
+# flow whose session is missing after the move. Under the lab's SYN-first
+# default (no `no-syn-check`) such a packet is a session miss that the
+# transit miss gate DROPS and counts as a screen drop
+# (`strict_syn_check_drops_new_flow_tunnel_with_payload`, recorded as
+# "strict-syn-check"; closing misses and unknown-flags fragments too). The
+# helper exposes only the aggregate `Screen drops`, an upper bound on those
+# drops (other screen reasons add to it, never hide one), so Group 1 is
+# judged on its delta. The raw `Session misses` count the cell used before
+# charged every new flow opened in the window as a miss (a new flow is one
+# miss and TWO creates) and is now report-only, beside `Session creates`.
+# Master's value in every recorded failback window (tcp x4, loss x1, and the
+# #18656 builds) was 0, so the budget is 0.
+MAX_FAILOVER_SESSION_MISS_DROP_DELTA="${MAX_FAILOVER_SESSION_MISS_DROP_DELTA:-0}"
 MAX_FAILOVER_NEIGHBOR_MISS_DELTA="${MAX_FAILOVER_NEIGHBOR_MISS_DELTA:-60}"
 MAX_FAILOVER_ROUTE_MISS_DELTA="${MAX_FAILOVER_ROUTE_MISS_DELTA:-32}"
 MAX_FAILOVER_POLICY_DENIED_DELTA="${MAX_FAILOVER_POLICY_DENIED_DELTA:-0}"
@@ -164,6 +168,11 @@ cost()  { echo "  COST  $*"; PASS=$((PASS + 1)); COST=$((COST + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 
 die() { echo "FATAL: $*" >&2; exit 2; }
+# #18670: the raw session-miss budget is gone; an override of it would be
+# silently ignored, so refuse it.
+if [[ -n "${MAX_FAILOVER_SESSION_MISS_DELTA+x}" ]]; then
+	die "MAX_FAILOVER_SESSION_MISS_DELTA no longer applies (#18670): RG1 Group 1 judges Screen drops (SYN-first drops of non-SYN TCP session misses); set MAX_FAILOVER_SESSION_MISS_DROP_DELTA instead"
+fi
 failover_duration_value() {
 	local requested="$1" minimum="$2"
 	if [[ ! "$minimum" =~ ^[0-9]+$ ]]; then
@@ -852,16 +861,21 @@ ha_rg1_evaluate() {
 		return
 	fi
 
-	local group1_detail
-	if group1_detail=$(ha_pair_net_counter_budget_verdict "$MAX_FAILOVER_NET_SESSION_MISS_DELTA" \
-		"Session misses" "Session creates" manual-rg1-failback 1 phase-pre phase-post \
-		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
-		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}" 2>&1); then
-		info "RG1 Group 1 report-only: ${group1_detail}"
-	fi
-	ha_emit_verdict "RG1 Group 1 session misses net of session creates (phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_NET_SESSION_MISS_DELTA})" \
-		ha_pair_net_counter_budget_verdict "$MAX_FAILOVER_NET_SESSION_MISS_DELTA" \
-		"Session misses" "Session creates" manual-rg1-failback 1 phase-pre phase-post \
+	local group1_misses group1_creates group1_line="" group1_node
+	for group1_node in node0 node1; do
+		if group1_misses=$(ha_snapshot_counter_delta manual-rg1-failback 1 "$group1_node" "Session misses" \
+			phase-pre "${RG1_STATS[phase-pre:${group1_node}]}" phase-post "${RG1_STATS[phase-post:${group1_node}]}" 2>/dev/null) \
+			&& group1_creates=$(ha_snapshot_counter_delta manual-rg1-failback 1 "$group1_node" "Session creates" \
+			phase-pre "${RG1_STATS[phase-pre:${group1_node}]}" phase-post "${RG1_STATS[phase-post:${group1_node}]}" 2>/dev/null); then
+			group1_line+="${group1_line:+ }${group1_node} misses=${group1_misses} creates=${group1_creates}"
+		else
+			group1_line+="${group1_line:+ }${group1_node} unavailable"
+		fi
+	done
+	info "RG1 Group 1 report-only session counters (phase-pre→phase-post): ${group1_line}"
+	ha_emit_verdict "RG1 Group 1 session-miss drops (Screen drops: SYN-first drops of non-SYN TCP session misses, phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_SESSION_MISS_DROP_DELTA})" \
+		ha_pair_counter_budget_verdict "$MAX_FAILOVER_SESSION_MISS_DROP_DELTA" "Screen drops" \
+		manual-rg1-failback 1 phase-pre phase-post \
 		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
 		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
 	ha_emit_verdict "RG1 Group 2 neighbor misses (phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_NEIGHBOR_MISS_DELTA})" \

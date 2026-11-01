@@ -344,43 +344,64 @@ capture reads them:
   lost after the true floor was seen;
 - the drain-plus-loss case is pinned as a PASS (the known limit above).
 
-### `make test-failover` RG1 Group 1: session misses net of creates (#18670)
+### `make test-failover` RG1 Group 1: session-miss drops (#18670)
 
-RG1 Group 1 compares the helper's `Session misses` across the RG1 failback
-window (phase-pre to phase-post, both nodes).
+RG1 Group 1 exists for one HA failure: an established TCP flow whose session
+is missing after the RG1 failback.
 
-Every new flow's first packet takes the session-miss branch before it
-creates its session (`session_misses`, then `session_creates`, in
-`poll_descriptor`). A raw miss count therefore charges every new flow
-opened in the window as a miss, and grows with the window's length and with
-background new-flow traffic. The cell is meant to catch lookups of existing
-sessions failing.
+- **What that failure looks like.** The lab configs carry no
+  `no-syn-check`. Under the SYN-first default, such a packet is a session
+  miss that the transit miss gate drops: it installs nothing and counts a
+  screen drop (`strict_syn_check_drops_new_flow_tunnel_with_payload`,
+  recorded as "strict-syn-check"). Closing (FIN/RST) misses and
+  unknown-flags fragments are dropped and counted the same way.
+- **What the cell judges.** The helper exposes only the aggregate `Screen
+  drops`. Group 1 is judged on its delta over the window, both nodes,
+  against `MAX_FAILOVER_SESSION_MISS_DROP_DELTA` (default 0). The
+  aggregate is an upper bound on those drops: other screen reasons can only
+  add to it, never hide one.
+  - Recorded failback windows read 0 on every node: tcp master ×4, tcp
+    #18656 ×4, loss master and #18656.
+- **Why not raw `Session misses`.** The cell used to budget the raw count
+  (limit 64), but a new flow is one miss and two creates, forward and
+  reverse. The raw count therefore charged every new flow opened in the
+  window, and grew with the window's length and background traffic. It
+  read 61 on master and 66–71 on #18656 with 0 drops in every window.
+  - Misses minus creates is no better: it is only a lower bound on real
+    misses. Each new flow, and each create-only path, hides up to one miss
+    on its node. The create-only paths are reverse repair, local delivery,
+    missing-neighbour seeding, and hit-path materialization of a
+    peer-synced session.
+  - Raw misses and creates per node stay in an `==> RG1 Group 1
+    report-only session counters` line.
+- **Helper identity.** Every Group 1–4 delta (`ha_snapshot_counter_delta`)
+  is VOID when the two captures' `PID:` lines differ, or when only one of
+  them has one. A helper restart inside the window zeroes the counters,
+  which then regrow past the baseline as an ordinary-looking delta.
+- **Retired knob.** `MAX_FAILOVER_SESSION_MISS_DELTA` is refused at start;
+  it no longer names anything.
+- **What it cannot see.**
+  - A lost UDP or ICMP session is recreated by its next packet (one miss,
+    two creates, no drop), so no counter here reports it. The stream
+    cells (iperf3 per-stream continuity and zero intervals) cover TCP
+    only. A UDP/ICMP continuity observable is open (#18679).
+  - A moved session whose local row is lost but whose peer-synced copy
+    survives is rebuilt on the hit path. That is the designed recovery,
+    not a miss.
+- **Selftest.** `make test-ha-assurance-lib` covers:
+  - master-like and PR-like rows (PASS, with the raw-miss cell's FAIL on
+    the same files) and the established-flow drop (FAIL);
+  - the per-node sum;
+  - missing, malformed and rewound counters (VOID);
+  - a helper restart and a one-sided `PID:` line (VOID).
 
-- **Predicate.** `ha_pair_net_counter_budget_verdict` (`ha-assurance-lib.sh`)
-  takes, per node, misses minus creates, floored at 0. It sums both nodes
-  and judges the total against `MAX_FAILOVER_NET_SESSION_MISS_DELTA`
-  (default 32). The floor is per node, so one node's surplus creates cannot
-  absorb the other node's misses.
-- **Unreadable counters.** Either counter missing, malformed or rewound on
-  either node makes the cell VOID, never PASS.
-- **Report-only line.** An `==> RG1 Group 1 report-only:` line prints the
-  per-node misses, creates and net values.
-- **Measured.** tcp and loss, master and #18656, 10 runs: net values of 2–7
-  per node, and at most 10 for both nodes. The raw count had a limit of 64
-  and read 61 on master and 66–71 on #18656. The excess was entirely
-  creates, in a longer and now cache-served window.
-- **Bound.** 32 is about 3x the largest net value measured. A failover that
-  loses sessions misses on every mid-stream packet of every flow, which is
-  orders of magnitude above it.
-- **Selftest.** `make test-ha-assurance-lib` has fixture rows: master-like,
-  PR-like (more creates, same net: PASS, where the raw cell FAILs), a real
-  miss regression (FAIL), the per-node floor, the boundary at 32/33, and
-  probe-blind and rewound counters (VOID). It has a mutant per defence that
-  must flip its row, and a pin that `test-failover.sh` calls the net
-  verdict.
-- **Not changed.** `scripts/userspace-ha-failover-validation.sh` has its own
-  per-cycle `MAX_FAILOVER_SESSION_MISS_DELTA` raw check, which this does
-  not change.
+  A mutant of the lib's own function text must flip each of those, and a
+  pin keeps `test-failover.sh` judging `Screen drops`.
+- **Not changed.** `scripts/userspace-ha-failover-validation.sh` has its
+  own per-cycle raw `MAX_FAILOVER_SESSION_MISS_DELTA` check. That script
+  is manual-only (`test/incus/HARNESSES.unreached`). It carries the same
+  new-flow bias and is left for its own follow-up (#18680) rather than
+  changed here unmeasured.
 
 ### `make test-failover` zero-interval cells: windows and definitions
 
