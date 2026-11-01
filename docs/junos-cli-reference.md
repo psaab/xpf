@@ -3173,9 +3173,14 @@ configuration mode, `run show configuration | display set` does the same.
   `syntax error: unknown pipe command "frobnicate"`.
 - On the remote `cli`, `| display` belongs to `show configuration` and
   `show system rollback <N>`. After a keyword-only command that does not
-  parse it, the pipe is refused rather than silently dropped:
+  parse it, the pipe is refused (exit 1, as before #18664) rather than
+  silently dropped; the message names the modifier:
   `show chassis cluster | display json` ->
   `syntax error: "show chassis cluster" does not accept the output modifier "| display json"`.
+- Operational `show configuration | compare [rollback <N>]` is a Junos
+  command that xpf does not support. The remote `cli` refuses it with a
+  pointer to configuration mode, where `show | compare [rollback <N>]`
+  works.
 
 ---
 

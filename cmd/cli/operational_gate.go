@@ -8,8 +8,10 @@ import (
 )
 
 // operationalPipeConsumers lists the keyword-only operational commands whose
-// handler parses a handler-level pipe (`| display <format>`, `| compare`)
-// itself, with splitShowPipe. It is keyed by canonical command path.
+// handler parses a handler-level pipe (`| display <format>`) itself, with
+// splitShowPipe. It is keyed by canonical command path. (Operational
+// `show configuration | compare` is NOT supported; the handler refuses it and
+// points at configuration mode.)
 //
 // Only keyword-only nodes need an entry. A pipe after a value slot, a leaf or
 // an AcceptsArgs tail is outside the #16798 gate (ValidateOperationalLine
@@ -40,9 +42,12 @@ var operationalPipeConsumers = map[string]bool{
 // the pipe still refuses exactly as #16798 does.
 //
 // Removing the pipe from the judged words must not reopen #16798 for piped
-// lines. A pipe placed directly under a keyword-only node is the shape #16798
-// refused, and most such handlers would print help or run the bare command
-// and drop the modifier, exiting 0 (`clear security | display set`,
+// lines. A pipe placed directly under a keyword-only node is a shape #16798
+// already refused: on master `show chassis | display set` exits 1 with
+// `unknown show chassis command: |`. #18664 keeps that refusal and changes
+// only its message, which now names the modifier. Admitting the pipe instead
+// would hand it to a handler that prints help or runs the bare command and
+// drops the modifier, exiting 0 (`clear security | display set`,
 // `show chassis | display set`). The pipe position is located by asking the
 // same validator about the words up to and including that `|`. The answer
 // bad == "|" means the pipe sits under a keyword-only node, and only an

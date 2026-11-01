@@ -58,9 +58,11 @@ rules:
 - A pipe directly under a keyword-only node is admitted only for a
   command in `operationalPipeConsumers`, whose handler parses the pipe
   itself. Today that is only `show configuration`. Every other
-  keyword-only node refuses with
-  `syntax error: "<path>" does not accept the output modifier "| ..."`,
-  because its handler would print help or run the bare command and drop
+  keyword-only node still refuses, exactly as before #18664 (exit 1),
+  but the message now names the modifier:
+  `syntax error: "<path>" does not accept the output modifier "| ..."`
+  instead of `unknown <path> command: |`. Admitting the pipe would hand
+  it to a handler that prints help or runs the bare command and drops
   the modifier, exiting 0 (the #16798 class). A pipe after a value slot,
   leaf or `AcceptsArgs` tail (`show configuration security | display
   set`, `show system rollback 1 | display json`) is still the handler's
@@ -72,7 +74,9 @@ rules:
 - An invalid modifier after `show configuration` is refused by the
   handler and named: `syntax error: unknown pipe command "frobnicate"`,
   `unknown display format "yaml"`, `syntax error: missing pipe
-  modifier`.
+  modifier`. `| compare [rollback <N>]` is not supported in operational
+  mode (Junos supports it); the handler says so and points at
+  configuration mode, where `show | compare [rollback <N>]` works.
 - A `|` glued to a word (`|display`, `configuration|display`) is not
   the pipe operator on any operational surface. `showPipeIndex`,
   `cliterm.SplitPipe` and `pkg/cli` `splitAtPipe` all need a bare `|`

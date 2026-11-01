@@ -8,8 +8,7 @@ package main
 // judged as an unknown trailing keyword under it and refused before
 // handleShow's `configuration` arm, which parses the pipe itself, could run.
 // Output filters were unaffected because dispatch peels them with
-// cliterm.SplitPipe first; the handler-level pipes (`| display <fmt>`,
-// `| compare`) were not.
+// cliterm.SplitPipe first; the handler-level `| display <fmt>` pipe was not.
 //
 // Fix: validateOperationalLine judges only the words before the first bare
 // `|` (showPipeIndex, the handlers' own token rule). A pipe directly under a
@@ -33,6 +32,13 @@ import (
 )
 
 const cfgOut18664 = "set system host-name fw0\nset interfaces ge-0/0/0 unit 0\n"
+
+// Junos supports operational `show configuration | compare [rollback <N>]`;
+// xpf does not, so the refusal must say that rather than call `compare` an
+// unknown pipe command.
+const opCompareUnsupported18664 = "syntax error: `| compare` is not supported on " +
+	"operational `show configuration`; use configuration mode " +
+	"(`configure`, then `show | compare [rollback <N>]`)"
 
 // rec18664 records the RPCs a dispatched line issues. Any RPC it does not
 // override nil-panics, which fails the cell: a refusal must happen before the
@@ -177,8 +183,10 @@ func TestOpPipeOnOtherCommands18664(t *testing.T) {
 
 // #16798 protection kept: an unknown token BEFORE the pipe refuses exactly as
 // the pipe-less line does, and a pipe directly under a keyword-only node whose
-// handler does not parse pipes still refuses (its handler would print help or
-// run the bare command and drop the modifier, exiting 0). These are the cells
+// handler does not parse pipes still refuses. On master those pipe rows were
+// already refused (exit 1, `unknown <path> command: |`); only the message
+// changed. Admitting them would hand the pipe to a handler that prints help or
+// runs the bare command and drops the modifier, exiting 0. These are the cells
 // that kill a fix which simply skips the gate when a pipe is present, or which
 // validates only the pre-pipe words.
 func TestOpPipeKeepsKeywordOnlyRefusal18664(t *testing.T) {
@@ -215,7 +223,9 @@ func TestOpPipeKeepsKeywordOnlyRefusal18664(t *testing.T) {
 func TestOpShowConfigurationBadPipe18664(t *testing.T) {
 	for _, tc := range []struct{ line, want string }{
 		{"show configuration | frobnicate", `syntax error: unknown pipe command "frobnicate"`},
-		{"show configuration | compare", `syntax error: unknown pipe command "compare"`},
+		{"show configuration | compare", opCompareUnsupported18664},
+		{"show configuration | compare rollback 1", opCompareUnsupported18664},
+		{"show configuration interfaces | compare", opCompareUnsupported18664},
 		{"show configuration | display yaml", `unknown display format "yaml"`},
 		{"show configuration | display set bogus", "usage: | display <supported-format>"},
 		{"show configuration |", "syntax error: missing pipe modifier"},

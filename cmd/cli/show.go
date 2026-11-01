@@ -79,6 +79,16 @@ func (c *ctl) handleShow(args []string) error {
 		if err != nil {
 			return err
 		}
+		if len(pipe) > 0 && pipe[0] == "compare" {
+			// #18664: Junos supports operational `show configuration |
+			// compare [rollback <N>]`; this surface does not (it has no
+			// active-vs-rollback scoped diff here). Say so and point at
+			// configuration mode, which does, instead of calling
+			// `compare` an unknown pipe command.
+			return fmt.Errorf("syntax error: `| compare` is not supported on " +
+				"operational `show configuration`; use configuration mode " +
+				"(`configure`, then `show | compare [rollback <N>]`)")
+		}
 		format, err := parseShowDisplay(pipe, true, true, true)
 		if err != nil {
 			return err
