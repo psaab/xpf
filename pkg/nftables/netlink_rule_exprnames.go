@@ -289,8 +289,21 @@ const GenerationChangeRereads = 3
 // lasts seconds, and `xpfd input-barrier ensure` runs outside the daemon, so
 // neither is coupled to that wait.
 func RereadOnGenerationChange[T any](rereads int, read func() (T, error)) (T, error) {
+	return RereadOnGenerationChangeAfter(rereads, nil, read)
+}
+
+// RereadOnGenerationChangeAfter is RereadOnGenerationChange with pause run
+// before each re-read (nil means none). `xpfd input-barrier ensure` runs
+// outside the daemon, so nothing serializes it with an apply, and a few
+// immediate re-reads could all land inside one multi-table apply. It pauses
+// between re-reads; the daemon's handoff runs under applySem and does not
+// (AG on #18759).
+func RereadOnGenerationChangeAfter[T any](rereads int, pause func(), read func() (T, error)) (T, error) {
 	v, err := read()
 	for i := 0; i < rereads && errors.Is(err, ErrGenerationChanged); i++ {
+		if pause != nil {
+			pause()
+		}
 		v, err = read()
 	}
 	return v, err

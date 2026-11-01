@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
@@ -51,8 +52,13 @@ func TestHandoffReverifyRereadsAcrossAMovedGeneration18746(t *testing.T) {
 		return true, nil
 	})
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	buf, restore := captureSlog(t)
+	defer restore()
 	if err := handoff18746(d); err != nil {
 		t.Fatalf("handoff across one moved generation = %v, want it to re-read and proceed", err)
+	}
+	if !strings.Contains(buf.String(), "handoff re-verify re-read after concurrent nft commits") || !strings.Contains(buf.String(), "rereads=1") {
+		t.Errorf("the handoff re-read left no Info evidence:\n%s", buf.String())
 	}
 	if *reads != 2 {
 		t.Errorf("re-verify read %d times, want 2 (the moved read and one re-read)", *reads)
@@ -146,5 +152,36 @@ func TestRefusedHandoffIsRedrivenByTheReassertOwner18746(t *testing.T) {
 	d.reassertHostInboundGapOnce(context.Background())
 	if applies != 2 {
 		t.Errorf("owner kept applying after the handoff completed: %d applies", applies)
+	}
+}
+
+// AG on #18759 (NIT 1): once the handoff is done the owner owes nothing,
+// whatever the retry debt or the pending bound still says. A barrierOwed that
+// dropped its "handoff not done" term re-applied every 30 s forever on such a
+// box, and no other daemon cell noticed.
+func TestReassertOwnerIdlesOnceHandedOff18746(t *testing.T) {
+	origReassert := hostInboundGapReassertFn
+	t.Cleanup(func() { hostInboundGapReassertFn = origReassert })
+	for name, owe := range map[string]func(*Daemon){
+		"retry debt owed":       func(d *Daemon) { d.earlyInputHandoffRetryOwed18746.Store(true) },
+		"pending bound expired": func(d *Daemon) { d.earlyInputPendingBoundSince = time.Now().Add(-time.Hour) },
+	} {
+		s, err := configstore.New(filepath.Join(t.TempDir(), "config"))
+		if err != nil {
+			t.Fatalf("configstore.New: %v", err)
+		}
+		d := &Daemon{applySem: semaphore.NewWeighted(1), store: s}
+		applies := 0
+		hostInboundGapReassertFn = func(*Daemon) error { applies++; return nil }
+		owe(d)
+		d.reassertHostInboundGapOnce(context.Background())
+		if applies != 1 {
+			t.Fatalf("%s: control: before the handoff the owner applied %d times, want 1", name, applies)
+		}
+		d.earlyInputHandoffDone.Store(true)
+		d.reassertHostInboundGapOnce(context.Background())
+		if applies != 1 {
+			t.Errorf("%s: after the handoff the owner applied again (%d applies), want none", name, applies)
+		}
 	}
 }

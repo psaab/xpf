@@ -461,9 +461,16 @@ func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config, expectedTa
 			// short reconcileIpsecHostInputFence hold the #18721 no-retry
 			// budget protects, so that budget does not apply here (see
 			// xnft.RereadOnGenerationChange).
+			reads := 0
 			ok, readErr := xnft.RereadOnGenerationChange(xnft.GenerationChangeRereads, func() (bool, error) {
+				reads++
 				return nftInstaller.TableEnforcing(table)
 			})
+			if reads > 1 {
+				// Once per handoff: evidence that the re-read path ran.
+				slog.Info("handoff re-verify re-read after concurrent nft commits",
+					"table", table, "rereads", reads-1, "err", readErr, "issue", "#18746")
+			}
 			if readErr == nil && ok {
 				continue
 			}

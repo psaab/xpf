@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"time"
 
 	"github.com/psaab/xpf/pkg/daemon"
 	xnft "github.com/psaab/xpf/pkg/nftables"
@@ -44,6 +45,28 @@ var hostInboundFirstApplied = func() bool {
 // reads inactive — the fail-closed direction for ensure.
 var xpfdUnitActive = func() bool {
 	return exec.Command("systemctl", "is-active", "--quiet", "xpfd").Run() == nil
+}
+
+// ensureRereadPause18746 runs between ensure's re-reads (AG on #18759).
+// ensure runs outside the daemon, so nothing serializes it with an apply, and
+// immediate re-reads could all land inside one multi-table apply. A package
+// var so tests can count the pauses without sleeping.
+var ensureRereadPause18746 = func() { time.Sleep(50 * time.Millisecond) }
+
+// ensureProbe18746 runs one ensure probe. It re-reads, after a pause, while the
+// probe reports a moved nf_tables generation (#18746). When it had to re-read
+// it says so on stdout, which the boot unit sends to the journal
+// (SyslogIdentifier=xpf-input-closed).
+func ensureProbe18746(stdout io.Writer, name string, probe func() (bool, error)) (bool, error) {
+	reads := 0
+	v, err := xnft.RereadOnGenerationChangeAfter(xnft.GenerationChangeRereads, ensureRereadPause18746, func() (bool, error) {
+		reads++
+		return probe()
+	})
+	if reads > 1 {
+		fmt.Fprintf(stdout, "input-barrier: %s probe re-read %d time(s) after concurrent nft commits (final error: %v)\n", name, reads-1, err)
+	}
+	return v, err
 }
 
 func parseInputBarrierArgs(args []string) error {
@@ -118,13 +141,14 @@ func runInputBarrierEnsure(stdout, stderr io.Writer) int {
 	// landing during the read (the live daemon's own apply, say) makes it
 	// unreadable, and an unreadable probe falls through to the install below.
 	// That would put global DROP into a live daemon or clobber a lifeline
-	// guard. Re-read at once on that error only; a probe that stays
-	// unreadable still falls through, fail-closed as documented above.
-	if drops, err := xnft.RereadOnGenerationChange(xnft.GenerationChangeRereads, hostInboundDropsInput); err == nil && drops && hostInboundFirstApplied() && xpfdUnitActive() {
+	// guard. Re-read, with a pause, on that error only (ensureProbe18746); a
+	// probe that stays unreadable still falls through, fail-closed as
+	// documented above.
+	if drops, err := ensureProbe18746(stdout, "host-inbound", hostInboundDropsInput); err == nil && drops && hostInboundFirstApplied() && xpfdUnitActive() {
 		fmt.Fprintln(stdout, "host-inbound enforcement is live; nothing to do (if stale, the daemon's next pre-apply converges the guard)")
 		return 0
 	}
-	if enforcing, err := xnft.RereadOnGenerationChange(xnft.GenerationChangeRereads, earlyInputBarrierEnforcing); err == nil && enforcing {
+	if enforcing, err := ensureProbe18746(stdout, "early-barrier", earlyInputBarrierEnforcing); err == nil && enforcing {
 		fmt.Fprintln(stdout, "early input barrier already present; nothing to do")
 		return 0
 	}

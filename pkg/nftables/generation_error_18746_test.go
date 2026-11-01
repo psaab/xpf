@@ -72,6 +72,17 @@ func TestRereadOnGenerationChange18746(t *testing.T) {
 	if _, err := RereadOnGenerationChange(3, read); err != real || *n != 1 {
 		t.Errorf("real error = %v after %d reads; want it unchanged after 1", err, *n)
 	}
+	// The pausing variant pauses before each re-read only.
+	pauses := 0
+	read, n = scripted(moved, moved, nil)
+	if _, err := RereadOnGenerationChangeAfter(3, func() { pauses++ }, read); err != nil || *n != 3 || pauses != 2 {
+		t.Errorf("pausing re-read = %v after %d reads and %d pauses; want nil after 3 reads, 2 pauses", err, *n, pauses)
+	}
+	pauses = 0
+	read, n = scripted(nil)
+	if _, _ = RereadOnGenerationChangeAfter(3, func() { pauses++ }, read); pauses != 0 {
+		t.Errorf("a first read that answers paused %d times, want 0", pauses)
+	}
 	// Zero re-reads is one read.
 	read, n = scripted(moved, nil)
 	if _, err := RereadOnGenerationChange(0, read); !errors.Is(err, ErrGenerationChanged) || *n != 1 {
