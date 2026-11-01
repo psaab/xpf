@@ -167,7 +167,7 @@ func TestOverlayReadbackAcceptsTheZeroHopDropAhead18721(t *testing.T) {
 	o := overlay18721()
 	exprs := inputExprs18721(t, HostInboundSpec{Overlay: &o})
 	marker := HostInputFenceOverlayCounterName(o)
-	if _, _, markerSeen, _ := decodeHostOverlayRule(&nftables.Rule{Exprs: exprs[0]}, nil, marker); markerSeen {
+	if _, _, markerSeen, _, _ := decodeHostOverlayRule(&nftables.Rule{Exprs: exprs[0]}, nil, marker); markerSeen {
 		t.Fatal("fixture: rule 0 is the overlay; the zero-hop DROP no longer leads, so this cell does not reach the defect")
 	}
 	// The byteorder is what makes the two views differ: the kernel readback
@@ -190,7 +190,7 @@ func TestOverlayReadbackAcceptsTheZeroHopDropAhead18721(t *testing.T) {
 func TestOverlayReadbackAcceptsTheOverlayFirst18721(t *testing.T) {
 	o := overlay18721()
 	exprs := inputExprs18721(t, HostInboundSpec{Overlay: &o, NoIPv6RejectZeroHopLimit: true})
-	if _, _, markerSeen, _ := decodeHostOverlayRule(&nftables.Rule{Exprs: exprs[0]}, nil, HostInputFenceOverlayCounterName(o)); !markerSeen {
+	if _, _, markerSeen, _, _ := decodeHostOverlayRule(&nftables.Rule{Exprs: exprs[0]}, nil, HostInputFenceOverlayCounterName(o)); !markerSeen {
 		t.Fatal("fixture: with the knob set the overlay should be rule 0")
 	}
 	for _, v := range views18721(t, exprs) {
@@ -383,10 +383,85 @@ func TestHostInputRuleIsDropOnly18721(t *testing.T) {
 			t.Errorf("%s: hostInputRuleIsDropOnly = %v, want %v", name, got, tc.want)
 		}
 	}
-	// The overlay variant admits the marker objref, and nothing else extra.
-	marked := &nftables.Rule{Exprs: []expr.Any{&expr.Objref{Name: "c"}, drop18721()}}
-	if !hostInputRuleOnlyDrops(marked, []string{"objref", "immediate"}, true) {
-		t.Error("an objref + DROP overlay rule is not DROP-only with objref allowed")
+}
+
+// #18721 fold 8 (AD MINOR): a marked rule must have EXACTLY the shape the
+// builder emits: iifname scope, optional sdifname scope, optional counter, the
+// marker objref, DROP. An EXTRA match narrows the fence and used to pass. AD's
+// three shapes are covered, `meta mark 0x99` among them, which makes the fence
+// a no-op for every unmarked packet. The real builder output is the control.
+func TestOverlayRuleTemplateRefusesAnExtraMatch18721(t *testing.T) {
+	o := overlay18721()
+	pair := CanonicalHostInputFenceOverlay(HostInputFenceOverlay{
+		MasterSlavePairs: []HostInputFencePair{{Master: "vrf-ipsec", Slave: "st0"}},
+		MasterSet:        []string{"st1", "st2"},
+		Generation:       3, PermitEpoch: 3, CloseRequestSeq: 3,
+		CloseRequestKey: "3/[xfrmi:st0,st1,st2]", WatchGeneration: 3, State: "CLOSING",
+	})
+	for name, ov := range map[string]HostInputFenceOverlay{"single master": o, "pair + master set": pair} {
+		exprs := inputExprs18721(t, HostInboundSpec{Overlay: &ov, NoIPv6RejectZeroHopLimit: true})
+		marker := HostInputFenceOverlayCounterName(ov)
+		for i, rule := range exprs {
+			if _, _, marked, _, _ := decodeHostOverlayRule(&nftables.Rule{Exprs: rule}, nil, marker); !marked {
+				continue
+			}
+			for _, v := range views18721(t, exprs[i:i+1]) {
+				if !hostOverlayRuleFitsTemplate(v.rules[0], v.names[0], marker) {
+					t.Errorf("%s: control: built overlay rule %d (%s view) does not fit the template: %#v", name, i, v.name, rule)
+				}
+			}
+		}
+	}
+
+	exprs := inputExprs18721(t, HostInboundSpec{Overlay: &o, NoIPv6RejectZeroHopLimit: true})
+	overlayRule := exprs[0]
+	last := len(overlayRule) - 1
+	insertBeforeMarker := func(extra ...expr.Any) []expr.Any {
+		// The marker objref is the expression just before the verdict.
+		out := append([]expr.Any(nil), overlayRule[:last-1]...)
+		out = append(out, extra...)
+		return append(out, overlayRule[last-1:]...)
+	}
+	// And between the marker and the verdict, and ahead of the scope.
+	markMatch := []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0x99, 0, 0, 0}},
+	}
+	for name, rule := range map[string][]expr.Any{
+		"meta mark 0x99 between the marker and the drop": append(append(append([]expr.Any(nil), overlayRule[:last]...), markMatch...), overlayRule[last]),
+		"meta mark 0x99 ahead of the iifname scope":      append(append([]expr.Any(nil), markMatch...), overlayRule...),
+	} {
+		narrowed := append([][]expr.Any(nil), exprs...)
+		narrowed[0] = rule
+		for _, v := range views18721(t, narrowed) {
+			if err := verify18721(v, o); err == nil || !strings.Contains(err.Error(), "outside the fence shape") {
+				t.Errorf("%s (%s view): readback = %v, want \"outside the fence shape\"", name, v.name, err)
+			}
+		}
+	}
+	for name, extra := range map[string][]expr.Any{
+		"meta l4proto tcp": {
+			&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{6}},
+		},
+		"ip saddr 10.0.0.1": {
+			&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV4}},
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 12, Len: 4},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{10, 0, 0, 1}},
+		},
+		"meta mark 0x99": {
+			&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0x99, 0, 0, 0}},
+		},
+	} {
+		narrowed := append([][]expr.Any(nil), exprs...)
+		narrowed[0] = insertBeforeMarker(extra...)
+		for _, v := range views18721(t, narrowed) {
+			if err := verify18721(v, o); err == nil || !strings.Contains(err.Error(), "outside the fence shape") {
+				t.Errorf("%s added to the marked rule (%s view): readback = %v, want \"outside the fence shape\"", name, v.name, err)
+			}
+		}
 	}
 }
 
@@ -443,5 +518,66 @@ func TestDecodeRuleExprNames18721(t *testing.T) {
 	}
 	if _, _, err := decodeRuleExprNames([]byte{1, 0}); err == nil {
 		t.Error("a short message decoded")
+	}
+}
+
+// #18721 fold 7 (AD): a marked rule whose interface scope is NEGATED is not a
+// fence on that interface. `iifname != "st0" counter name <marker> drop` drops
+// everything EXCEPT the revoked master. decodeHostOverlayRule used to ignore
+// Cmp.Op and Lookup.Invert, so it read that rule as a fence on st0.
+func TestOverlayReadbackRefusesANegatedScope18721(t *testing.T) {
+	// Single master: the iifname scope is a Cmp.
+	o := overlay18721()
+	exprs := inputExprs18721(t, HostInboundSpec{Overlay: &o, NoIPv6RejectZeroHopLimit: true})
+	cmpAt := -1
+	for i, e := range exprs[0] {
+		if _, ok := e.(*expr.Cmp); ok && cmpAt < 0 && i > 0 {
+			if m, ok := exprs[0][i-1].(*expr.Meta); ok && m.Key == expr.MetaKeyIIFNAME {
+				cmpAt = i
+			}
+		}
+	}
+	if cmpAt < 0 {
+		t.Fatalf("fixture: the single-master overlay rule has no iifname Cmp: %#v", exprs[0])
+	}
+	for _, v := range views18721(t, exprs) {
+		if err := verify18721(v, o); err != nil {
+			t.Fatalf("%s: control: the un-negated overlay must verify: %v", v.name, err)
+		}
+	}
+	neq := *exprs[0][cmpAt].(*expr.Cmp)
+	neq.Op = expr.CmpOpNeq
+	negated := append([][]expr.Any(nil), exprs...)
+	negated[0] = append(append(append([]expr.Any(nil), exprs[0][:cmpAt]...), &neq), exprs[0][cmpAt+1:]...)
+	for _, v := range views18721(t, negated) {
+		if err := verify18721(v, o); err == nil || !strings.Contains(err.Error(), "negates its interface scope") {
+			t.Errorf("%s: iifname != st0 marked drop: readback = %v, want \"negates its interface scope\"", v.name, err)
+		}
+	}
+
+	// Several masters: the iifname scope is a set lookup.
+	multi := CanonicalHostInputFenceOverlay(HostInputFenceOverlay{
+		MasterSet: []string{"st0", "st1"}, Generation: 2, PermitEpoch: 2, CloseRequestSeq: 2,
+		CloseRequestKey: "2/[xfrmi:st0,st1]", WatchGeneration: 2, State: "CLOSING",
+	})
+	mexprs := inputExprs18721(t, HostInboundSpec{Overlay: &multi, NoIPv6RejectZeroHopLimit: true})
+	lookupAt := -1
+	for i, e := range mexprs[0] {
+		if _, ok := e.(*expr.Lookup); ok {
+			lookupAt = i
+			break
+		}
+	}
+	if lookupAt < 0 {
+		t.Fatalf("fixture: the multi-master overlay rule has no set lookup: %#v", mexprs[0])
+	}
+	inv := *mexprs[0][lookupAt].(*expr.Lookup)
+	inv.Invert = true
+	inverted := append([][]expr.Any(nil), mexprs...)
+	inverted[0] = append(append(append([]expr.Any(nil), mexprs[0][:lookupAt]...), &inv), mexprs[0][lookupAt+1:]...)
+	for _, v := range views18721(t, inverted) {
+		if err := verify18721(v, multi); err == nil || !strings.Contains(err.Error(), "negates its interface scope") {
+			t.Errorf("%s: iifname != { st0, st1 } marked drop: readback = %v, want \"negates its interface scope\"", v.name, err)
+		}
 	}
 }

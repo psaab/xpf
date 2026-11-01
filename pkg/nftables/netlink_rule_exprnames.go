@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/google/nftables"
 	"github.com/mdlayher/netlink"
@@ -206,44 +205,41 @@ func decodeNftGeneration(msgs []netlink.Message) (uint32, error) {
 	return id, nil
 }
 
-// readAtStableNftGeneration runs read between two generation reads and returns
-// read's verdict only if no commit published a new generation in between.
-// Otherwise it pauses for the next backoff step and retries: len(backoff)+1
-// attempts in all. If the ruleset is still moving after the last one, it logs
-// a Warn and fails closed (#18721). See readNftGeneration for the residual
-// window this cannot see.
+// readAtStableNftGeneration runs ONE readback pass between two generation
+// reads. It returns that pass's verdict only if no commit published a new
+// generation in between. Otherwise it logs a Warn and fails closed at once,
+// with no retry (#18721 fold 8). See readNftGeneration for the residual window
+// this cannot see.
 //
 // The fence readback reads the ruleset several times: the marker object, the
 // sets, GetRules, and the raw expression-name dump. A writer outside xpf could
 // otherwise replace a rule between GetRules and the dump. NLM_F_REPLACE keeps
 // the handle, so both views would describe different rules under one handle,
 // and a kind-identical rule with ACCEPT in place of DROP would pass both checks.
-func readAtStableNftGeneration(backoff []time.Duration, sleep func(time.Duration), gen func() (uint32, error), read func() error) error {
-	attempts := len(backoff) + 1
-	var first, before, after uint32
-	changes := 0
-	for attempt := 0; attempt < attempts; attempt++ {
-		if attempt > 0 {
-			sleep(backoff[attempt-1])
-		}
-		var err error
-		if before, err = gen(); err != nil {
-			return err
-		}
-		if attempt == 0 {
-			first = before
-		}
-		verdict := read()
-		if after, err = gen(); err != nil {
-			return err
-		}
-		if before == after {
-			return verdict
-		}
-		changes++
+//
+// Earlier folds retried after a backoff, bounded by a deadline. Every version
+// of that bound rested on an assumed pass time that a measured slow pass broke.
+// A single pass is the only shape whose cost under applySem is provable, so
+// the retries were removed rather than tuned again. A concurrent commit, from
+// xpf or from outside it, now fails that readback closed.
+func readAtStableNftGeneration(gen func() (uint32, error), read func() error) error {
+	before, err := gen()
+	if err != nil {
+		return err
 	}
-	slog.Warn("host overlay readback: the nftables ruleset kept changing; failing closed",
-		"attempts", attempts, "generation_changes", changes,
-		"first_generation", first, "last_generation", after)
-	return fmt.Errorf("host overlay readback: the nftables ruleset changed during each of %d attempts (%d generation changes, generation %d -> %d); failing closed", attempts, changes, first, after)
+	verdict := read()
+	after, err := gen()
+	if err != nil {
+		return err
+	}
+	if before == after {
+		return verdict
+	}
+	// The generation is a commit counter, so the delta is the number of
+	// transactions that landed during the pass (uint32 subtraction is
+	// wrap-safe).
+	commits := after - before
+	slog.Warn("host overlay readback: generation changed during readback; failing closed",
+		"commits_observed", commits, "generation_before", before, "generation_after", after)
+	return fmt.Errorf("host overlay readback: generation changed during readback (%d commits observed, generation %d -> %d); failing closed", commits, before, after)
 }

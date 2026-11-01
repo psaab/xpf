@@ -13,10 +13,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
@@ -211,28 +211,9 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	}
 	// #18721: every read below must see ONE ruleset, so the whole readback is
 	// bracketed by the nf_tables generation (readAtStableNftGeneration).
-	return readAtStableNftGeneration(hostOverlayReadbackBackoff, time.Sleep,
+	return readAtStableNftGeneration(
 		func() (uint32, error) { return readNftGeneration(c) },
 		func() error { return in.verifyHostInboundOverlayOnce(c, overlay) })
-}
-
-// hostOverlayReadbackBackoff is the pause before each retry of the
-// generation-bracketed overlay readback (#18721). It allows 5 attempts and at
-// most 262 ms of pausing.
-//
-// The generation counts EVERY commit in the namespace, xpfd's own included:
-// the IPsec divert, the transit barrier, the forward fence and the early-input
-// barrier, some of which run outside applySem. Each of those is one atomic
-// batch, so it bumps the generation once, but several can land back to back.
-// With no pause, a short burst of xpf's own unrelated writes could use up
-// every attempt and fail an operator's commit closed.
-//
-// The steps grow about 5x, so a burst of a few ms is waited out on the second
-// or third attempt and a burst of tens of ms by the fourth or fifth. The 262 ms
-// ceiling keeps the commit path's added latency bounded. Exhaustion still fails
-// closed.
-var hostOverlayReadbackBackoff = []time.Duration{
-	2 * time.Millisecond, 10 * time.Millisecond, 50 * time.Millisecond, 200 * time.Millisecond,
 }
 
 // verifyHostInboundOverlayOnce is one unbracketed pass of the overlay readback.
@@ -257,23 +238,6 @@ func (in *netlinkInstaller) verifyHostInboundOverlayOnce(c *nftables.Conn, overl
 	if len(overlay.MasterSet) == 0 && len(overlay.MasterSlavePairs) == 0 {
 		return nil
 	}
-	sets, err := c.GetSets(tbl)
-	if err != nil {
-		return fmt.Errorf("read host overlay sets: %w", err)
-	}
-	setNames := map[string][]string{}
-	for _, set := range sets {
-		if set.KeyType.Name != "ifname" {
-			continue
-		}
-		elements, err := c.GetSetElements(set)
-		if err != nil {
-			return fmt.Errorf("read host overlay set %q: %w", set.Name, err)
-		}
-		for _, element := range elements {
-			setNames[set.Name] = append(setNames[set.Name], string(bytes.TrimRight(element.Key, "\x00")))
-		}
-	}
 	rules, err := c.GetRules(tbl, &nftables.Chain{Name: "input", Table: tbl})
 	if err != nil {
 		return fmt.Errorf("read host overlay rules: %w", err)
@@ -295,7 +259,55 @@ func (in *netlinkInstaller) verifyHostInboundOverlayOnce(c *nftables.Conn, overl
 		}
 		kernelExprs[i] = names
 	}
+	// Read only the ifname sets the overlay rules (the marker-carrying rules)
+	// reference. A full table has dozens of ifname sets, and reading all of them
+	// made each readback pass several times slower (#18723 fold 6). This cannot
+	// produce a false pass: a set the decode needs but did not read leaves its
+	// masters unresolved, and that is a mismatch.
+	setNames := map[string][]string{}
+	for _, name := range hostOverlayReferencedSets(rules, marker) {
+		set, err := c.GetSetByName(tbl, name)
+		if err != nil {
+			return fmt.Errorf("read host overlay set %q: %w", name, err)
+		}
+		if set.KeyType.Name != "ifname" {
+			continue
+		}
+		elements, err := c.GetSetElements(set)
+		if err != nil {
+			return fmt.Errorf("read host overlay set %q: %w", name, err)
+		}
+		for _, element := range elements {
+			setNames[name] = append(setNames[name], string(bytes.TrimRight(element.Key, "\x00")))
+		}
+	}
 	return verifyHostOverlayRuleChain(rules, kernelExprs, setNames, marker, overlay)
+}
+
+// hostOverlayReferencedSets returns, in first-seen order, the set names the
+// lookups of the marker-carrying (overlay) rules reference.
+func hostOverlayReferencedSets(rules []*nftables.Rule, marker string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, rule := range rules {
+		marked := false
+		for _, e := range rule.Exprs {
+			if o, ok := e.(*expr.Objref); ok && o.Name == marker {
+				marked = true
+				break
+			}
+		}
+		if !marked {
+			continue
+		}
+		for _, e := range rule.Exprs {
+			if l, ok := e.(*expr.Lookup); ok && !seen[l.SetName] {
+				seen[l.SetName] = true
+				out = append(out, l.SetName)
+			}
+		}
+	}
+	return out
 }
 
 // verifyHostOverlayRuleChain judges the input chain's rules, in kernel order,
@@ -335,17 +347,20 @@ func verifyHostOverlayRuleChain(rules []*nftables.Rule, kernelExprs [][]string, 
 	var gotMasters, gotSlaves []string
 	overlayRules := 0
 	for i, rule := range rules {
-		masters, slaves, markerSeen, dropSeen := decodeHostOverlayRule(rule, setNames, marker)
+		masters, slaves, markerSeen, dropSeen, negated := decodeHostOverlayRule(rule, setNames, marker)
 		if !markerSeen {
 			if overlayRules == 0 && hostInputRuleIsDropOnly(rule, kernelExprs[i]) {
 				continue // a DROP-only rule ahead of the fence admits nothing
 			}
 			break
 		}
+		if negated {
+			return fmt.Errorf("host overlay rule negates its interface scope (a != comparison or an inverted lookup)")
+		}
 		if !dropSeen {
 			return fmt.Errorf("host overlay rule lacks DROP verdict")
 		}
-		if !hostInputRuleOnlyDrops(rule, kernelExprs[i], true) {
+		if !hostOverlayRuleFitsTemplate(rule, kernelExprs[i], marker) {
 			return fmt.Errorf("host overlay rule carries an expression outside the fence shape: %v", kernelExprs[i])
 		}
 		overlayRules++
@@ -384,17 +399,11 @@ var hostInputHeadExprKinds = map[string]bool{
 }
 
 // hostInputRuleIsDropOnly reports whether a rule ahead of the overlay can only
-// drop: see hostInputRuleOnlyDrops. Such a rule can run ahead of the #9506
-// fence overlay without weakening it.
-func hostInputRuleIsDropOnly(rule *nftables.Rule, kernelExprs []string) bool {
-	return hostInputRuleOnlyDrops(rule, kernelExprs, false)
-}
-
-// hostInputRuleOnlyDrops judges one rule two ways and requires both:
+// drop. Such a rule can run ahead of the #9506 fence overlay without weakening
+// it. It judges one rule two ways and requires both:
 //
 //   - kernelExprs, the kernel's own expression names for the rule: every name
-//     must be in hostInputHeadExprKinds (plus "objref" when allowObjref, for
-//     the overlay's marker reference). This is the decoder-independent view:
+//     must be in hostInputHeadExprKinds. This is the decoder-independent view:
 //     google/nftables v0.3.0 SKIPS every expression it has no type for
 //     (expr.exprsFromBytes), so rule.Exprs alone cannot show a byteorder, rt,
 //     socket, dup or tproxy expression at all;
@@ -407,10 +416,10 @@ func hostInputRuleIsDropOnly(rule *nftables.Rule, kernelExprs []string) bool {
 // yields one, while a build plan carries it typed. A mismatch means
 // an expression the decoder could not type, or a rule that changed between the
 // two reads. Either way the readback fails closed.
-func hostInputRuleOnlyDrops(rule *nftables.Rule, kernelExprs []string, allowObjref bool) bool {
+func hostInputRuleIsDropOnly(rule *nftables.Rule, kernelExprs []string) bool {
 	kernelCounted := 0
 	for _, name := range kernelExprs {
-		if !hostInputHeadExprKinds[name] && !(allowObjref && name == "objref") {
+		if !hostInputHeadExprKinds[name] {
 			return false
 		}
 		if name != "byteorder" {
@@ -423,10 +432,6 @@ func hostInputRuleOnlyDrops(rule *nftables.Rule, kernelExprs []string, allowObjr
 		case *expr.Byteorder:
 			continue // present only in build plans; see the count note above
 		case *expr.Meta, *expr.Payload, *expr.Cmp, *expr.Bitwise, *expr.Fib, *expr.Counter:
-		case *expr.Objref:
-			if !allowObjref {
-				return false
-			}
 		case *expr.Lookup:
 			if x.IsDestRegSet {
 				return false // a map lookup can write the verdict register
@@ -444,7 +449,91 @@ func hostInputRuleOnlyDrops(rule *nftables.Rule, kernelExprs []string, allowObjr
 	return drops == 1 && decodedCounted == kernelCounted
 }
 
-func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, marker string) (masters, slaves []string, markerSeen, dropSeen bool) {
+// hostOverlayRuleFitsTemplate reports whether a marked (overlay) rule has
+// EXACTLY the shape the builder emits (#18721 fold 8):
+//
+//	meta iifname (== name | in anonymous set)
+//	[meta sdifname (== name | in anonymous set)]
+//	[counter]
+//	objref <marker counter>
+//	drop
+//
+// It is a positive template, not a list of refused kinds. An EXTRA match
+// narrows the fence and must not pass: `meta l4proto tcp`, `ip saddr ...` or
+// `meta mark 0x99` (which makes the fence a no-op). So must a negated or
+// inverted scope, a map lookup, or any second verdict. kernelExprs must name
+// exactly the typed expressions, in order, so a kind the decoder dropped cannot
+// hide inside a rule that otherwise fits.
+func hostOverlayRuleFitsTemplate(rule *nftables.Rule, kernelExprs []string, marker string) bool {
+	e := rule.Exprs
+	var names []string
+	i := 0
+	scope := func(key expr.MetaKey) bool {
+		if i+1 >= len(e) {
+			return false
+		}
+		m, ok := e[i].(*expr.Meta)
+		if !ok || m.Key != key || m.SourceRegister || m.Register != 1 {
+			return false
+		}
+		switch x := e[i+1].(type) {
+		case *expr.Cmp:
+			if x.Op != expr.CmpOpEq || x.Register != 1 || len(x.Data) != unix.IFNAMSIZ {
+				return false
+			}
+			names = append(names, "meta", "cmp")
+		case *expr.Lookup:
+			if x.SourceRegister != 1 || x.IsDestRegSet || x.DestRegister != 0 || x.Invert {
+				return false
+			}
+			names = append(names, "meta", "lookup")
+		default:
+			return false
+		}
+		i += 2
+		return true
+	}
+	if !scope(expr.MetaKeyIIFNAME) {
+		return false
+	}
+	if i < len(e) {
+		if m, ok := e[i].(*expr.Meta); ok && m.Key == expr.MetaKey(metaKeySDIFNAME) {
+			if !scope(expr.MetaKey(metaKeySDIFNAME)) {
+				return false
+			}
+		}
+	}
+	if i < len(e) {
+		if _, ok := e[i].(*expr.Counter); ok {
+			names = append(names, "counter")
+			i++
+		}
+	}
+	if i >= len(e) {
+		return false
+	}
+	if o, ok := e[i].(*expr.Objref); !ok || o.Type != nftObjTypeCounter || o.Name != marker {
+		return false
+	}
+	names = append(names, "objref")
+	i++
+	if i != len(e)-1 {
+		return false
+	}
+	if v, ok := e[i].(*expr.Verdict); !ok || v.Kind != expr.VerdictDrop || v.Chain != "" {
+		return false
+	}
+	names = append(names, "immediate")
+	return slices.Equal(kernelExprs, names)
+}
+
+// decodeHostOverlayRule reads one input-chain rule as a fence overlay rule: its
+// iifname (master) and sdifname (slave) scopes, whether it carries the marker,
+// and whether it carries a DROP verdict. negated reports an interface scope
+// that is NOT a plain equality: a Cmp other than CmpOpEq, or an inverted
+// lookup. `iifname != "st0" ... drop` drops everything EXCEPT the revoked
+// master, so such a rule must never decode as a fence on st0 (#18721 fold 7).
+func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, marker string) (masters, slaves []string, markerSeen, dropSeen, negated bool) {
 	pending := 0 // 1=iifname, 2=sdifname
 	var reg uint32
 	for _, anyExpr := range rule.Exprs {
@@ -459,6 +548,9 @@ func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, ma
 			reg = x.Register
 		case *expr.Cmp:
 			if pending != 0 && x.Register == reg {
+				if x.Op != expr.CmpOpEq {
+					negated = true
+				}
 				name := string(bytes.TrimRight(x.Data, "\x00"))
 				if pending == 1 {
 					masters = append(masters, name)
@@ -469,6 +561,9 @@ func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, ma
 			pending = 0
 		case *expr.Lookup:
 			if pending != 0 && x.SourceRegister == reg {
+				if x.Invert {
+					negated = true
+				}
 				if pending == 1 {
 					masters = append(masters, setNames[x.SetName]...)
 				} else {
@@ -485,7 +580,7 @@ func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, ma
 			pending = 0
 		}
 	}
-	return masters, slaves, markerSeen, dropSeen
+	return masters, slaves, markerSeen, dropSeen, negated
 }
 
 func (in *netlinkInstaller) InstallColdBootFence(spec FenceSpec) error {

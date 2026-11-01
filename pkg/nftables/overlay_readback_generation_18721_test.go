@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
@@ -34,83 +33,40 @@ func genSeq18721(ids ...uint32) (func() (uint32, error), *int) {
 	}, &calls
 }
 
-// testBackoff18721 is a 3-step backoff (4 attempts) for the pure cells. Its
-// sleeps are recorded, not slept.
-var testBackoff18721 = []time.Duration{2 * time.Millisecond, 10 * time.Millisecond, 50 * time.Millisecond}
-
+// #18721 fold 8: one readback is exactly ONE pass bracketed by two
+// generation reads, with no retry. A stable generation hands back the pass's
+// own verdict, however long the pass took. A moved generation fails closed at
+// once, whatever the pass decided.
 func TestReadAtStableNftGeneration18721(t *testing.T) {
 	errVerdict := errors.New("the readback's own verdict")
-	var slept []time.Duration
-	sleep := func(d time.Duration) { slept = append(slept, d) }
-
-	// A stable generation hands back the read's verdict, pass or fail, with
-	// no pause.
 	for _, want := range []error{nil, errVerdict} {
-		slept = nil
-		gen, _ := genSeq18721(5, 5)
+		gen, calls := genSeq18721(5, 5)
 		reads := 0
-		got := readAtStableNftGeneration(testBackoff18721, sleep, gen, func() error { reads++; return want })
-		if got != want || reads != 1 || len(slept) != 0 {
-			t.Errorf("stable generation, read returns %v: got %v after %d reads and sleeps %v, want %v after 1 read, no sleep", want, got, reads, slept, want)
+		got := readAtStableNftGeneration(gen, func() error { reads++; return want })
+		if got != want || reads != 1 || *calls != 2 {
+			t.Errorf("stable generation, read returns %v: got %v after %d reads / %d generation reads, want %v after 1 / 2", want, got, reads, *calls, want)
 		}
 	}
-
-	// One commit mid-read: the first verdict is discarded, the retry's is used.
-	{
-		slept = nil
-		gen, _ := genSeq18721(5, 6, 6, 6)
-		reads := 0
-		got := readAtStableNftGeneration(testBackoff18721, sleep, gen, func() error {
-			reads++
-			if reads == 1 {
-				return nil // a PASS read across a commit must not be returned
-			}
-			return errVerdict
-		})
-		if got != errVerdict || reads != 2 {
-			t.Errorf("one mid-read commit: got %v after %d reads, want the retry's verdict after 2", got, reads)
-		}
-		if len(slept) != 1 || slept[0] != testBackoff18721[0] {
-			t.Errorf("one mid-read commit: slept %v, want [%v]", slept, testBackoff18721[0])
-		}
+	// A moved generation: no retry, fail closed, even though the pass passed,
+	// and the Warn/error carry the number of commits that landed.
+	gen, calls := genSeq18721(5, 8)
+	reads := 0
+	got := readAtStableNftGeneration(gen, func() error { reads++; return nil })
+	if got == nil || !strings.Contains(got.Error(), "generation changed during readback") || !strings.Contains(got.Error(), "3 commits observed, generation 5 -> 8") {
+		t.Errorf("moved generation: got %v, want a fail-closed \"generation changed during readback (3 commits observed, generation 5 -> 8)\"", got)
 	}
-
-	// AD fold 4: a burst that moves the generation on attempts 1 and 2 and then
-	// holds is waited out with growing pauses, and the readback succeeds.
-	{
-		slept = nil
-		gen, calls := genSeq18721(1, 2, 3, 4, 4, 4)
-		reads := 0
-		got := readAtStableNftGeneration(testBackoff18721, sleep, gen, func() error { reads++; return nil })
-		if got != nil || reads != 3 || *calls != 6 {
-			t.Errorf("two-commit burst: got %v after %d reads / %d generation reads, want nil after 3 / 6", got, reads, *calls)
-		}
-		if len(slept) != 2 || slept[0] != testBackoff18721[0] || slept[1] != testBackoff18721[1] {
-			t.Errorf("two-commit burst: slept %v, want %v", slept, testBackoff18721[:2])
-		}
+	if reads != 1 || *calls != 2 {
+		t.Errorf("moved generation: %d reads / %d generation reads, want exactly 1 / 2 (no retry)", reads, *calls)
 	}
-
-	// A ruleset that never holds still fails closed after len(backoff)+1
-	// attempts, even though every read passed, having paused every step.
-	{
-		slept = nil
-		gen, calls := genSeq18721(1, 2, 3, 4, 5, 6, 7, 8, 9)
-		reads := 0
-		got := readAtStableNftGeneration(testBackoff18721, sleep, gen, func() error { reads++; return nil })
-		if got == nil || !strings.Contains(got.Error(), "changed during each of 4 attempts") || !strings.Contains(got.Error(), "4 generation changes") {
-			t.Errorf("moving ruleset: got %v, want a fail-closed \"changed during each of 4 attempts (4 generation changes ...)\"", got)
-		}
-		if reads != 4 || *calls != 8 {
-			t.Errorf("moving ruleset: %d reads / %d generation reads, want 4 / 8", reads, *calls)
-		}
-		if len(slept) != 3 || slept[0] != testBackoff18721[0] || slept[1] != testBackoff18721[1] || slept[2] != testBackoff18721[2] {
-			t.Errorf("moving ruleset: slept %v, want %v", slept, testBackoff18721)
-		}
+	// A refusal across a moved generation still fails closed.
+	gen2, _ := genSeq18721(1, 2)
+	if got := readAtStableNftGeneration(gen2, func() error { return errVerdict }); got == nil || got == errVerdict || !strings.Contains(got.Error(), "generation changed") {
+		t.Errorf("moved generation with a refusing pass: got %v, want the fail-closed generation error", got)
 	}
 
 	// A generation read error is the verdict, before or after the read.
 	genErr := errors.New("getgen failed")
-	if got := readAtStableNftGeneration(testBackoff18721, sleep, func() (uint32, error) { return 0, genErr }, func() error { return nil }); !errors.Is(got, genErr) {
+	if got := readAtStableNftGeneration(func() (uint32, error) { return 0, genErr }, func() error { return nil }); !errors.Is(got, genErr) {
 		t.Errorf("failing first generation read: got %v", got)
 	}
 	n := 0
@@ -121,23 +77,8 @@ func TestReadAtStableNftGeneration18721(t *testing.T) {
 		}
 		return 1, nil
 	}
-	if got := readAtStableNftGeneration(testBackoff18721, sleep, afterFails, func() error { return nil }); !errors.Is(got, genErr) {
+	if got := readAtStableNftGeneration(afterFails, func() error { return nil }); !errors.Is(got, genErr) {
 		t.Errorf("failing second generation read: got %v", got)
-	}
-}
-
-// The production backoff is bounded and growing (AD fold 4), and allows at
-// least the 3 attempts the first version had.
-func TestHostOverlayReadbackBackoffIsBoundedAndGrowing18721(t *testing.T) {
-	var total time.Duration
-	for i, d := range hostOverlayReadbackBackoff {
-		if d <= 0 || (i > 0 && d <= hostOverlayReadbackBackoff[i-1]) {
-			t.Errorf("backoff step %d = %v is not positive and growing: %v", i, d, hostOverlayReadbackBackoff)
-		}
-		total += d
-	}
-	if len(hostOverlayReadbackBackoff)+1 < 3 || total > 500*time.Millisecond {
-		t.Errorf("backoff %v: %d attempts, %v total pause; want >= 3 attempts within 500ms", hostOverlayReadbackBackoff, len(hostOverlayReadbackBackoff)+1, total)
 	}
 }
 
@@ -173,10 +114,11 @@ func TestDecodeNftGeneration18721(t *testing.T) {
 	}
 }
 
-// The production call site is bracketed: against a fake whose generation
-// moves on every read, VerifyHostInboundOverlay must return the fail-closed
-// "changed" verdict after 2 x attempts generation reads. It must never return
-// any one pass's verdict; here every pass errors on its first object read.
+// The production call site is bracketed and makes exactly ONE pass: against
+// a fake whose generation moves on every read, VerifyHostInboundOverlay must
+// return the fail-closed generation verdict after exactly 2 GETGEN reads. It
+// must never return the pass's own verdict; here the pass errors on its first
+// object read.
 func TestVerifyHostInboundOverlayIsGenerationBracketed18721(t *testing.T) {
 	gens := 0
 	getGen := netlink.HeaderType((unix.NFNL_SUBSYS_NFTABLES << 8) | unix.NFT_MSG_GETGEN)
@@ -194,30 +136,22 @@ func TestVerifyHostInboundOverlayIsGenerationBracketed18721(t *testing.T) {
 		return nftables.New(nftables.WithTestDial(fake))
 	})
 	err := in.VerifyHostInboundOverlay(overlay18721())
-	if err == nil || !strings.Contains(err.Error(), "changed during each of") {
-		t.Fatalf("VerifyHostInboundOverlay over a moving generation = %v, want the fail-closed \"changed during each of\"", err)
+	if err == nil || !strings.Contains(err.Error(), "generation changed during readback") {
+		t.Fatalf("VerifyHostInboundOverlay over a moving generation = %v, want the fail-closed generation verdict", err)
 	}
-	if want := 2 * (len(hostOverlayReadbackBackoff) + 1); gens != want {
-		t.Errorf("VerifyHostInboundOverlay read the generation %d times, want %d", gens, want)
+	if gens != 2 {
+		t.Errorf("VerifyHostInboundOverlay read the generation %d times, want exactly 2 (one pass, no retry)", gens)
 	}
 }
 
-// The production call site waits out a short burst (AD fold 4): the fake's
-// generation moves on attempts 1 and 2 and then holds, so the call site must
-// return the third, stable pass's own verdict. Here that verdict is the fake's
-// object-read error, not the fail-closed "changed" verdict.
-func TestVerifyHostInboundOverlayWaitsOutABurst18721(t *testing.T) {
-	gens := 0
+// And a stable generation hands back the pass's own verdict: here the fake's
+// object-read error, not a generation failure.
+func TestVerifyHostInboundOverlayReturnsTheStablePassVerdict18721(t *testing.T) {
 	getGen := netlink.HeaderType((unix.NFNL_SUBSYS_NFTABLES << 8) | unix.NFT_MSG_GETGEN)
 	fake := func(req []netlink.Message) ([]netlink.Message, error) {
 		if len(req) == 1 && req[0].Header.Type == getGen {
-			gens++
-			id := gens // reads 1..4 move (attempts 1 and 2); from read 5 it holds
-			if id > 5 {
-				id = 5
-			}
 			reply := genReply18721(t, unix.NFT_MSG_NEWGEN,
-				netlink.Attribute{Type: unix.NFTA_GEN_ID, Data: []byte{0, 0, 0, byte(id)}})
+				netlink.Attribute{Type: unix.NFTA_GEN_ID, Data: []byte{0, 0, 0, 7}})
 			reply.Header.Sequence, reply.Header.PID = req[0].Header.Sequence, req[0].Header.PID
 			return []netlink.Message{reply}, nil
 		}
@@ -227,11 +161,8 @@ func TestVerifyHostInboundOverlayWaitsOutABurst18721(t *testing.T) {
 		return nftables.New(nftables.WithTestDial(fake))
 	})
 	err := in.VerifyHostInboundOverlay(overlay18721())
-	if err == nil || strings.Contains(err.Error(), "changed during each of") || !strings.Contains(err.Error(), "read host overlay objects") {
-		t.Fatalf("VerifyHostInboundOverlay after a two-commit burst = %v, want the stable third pass's own verdict", err)
-	}
-	if gens != 6 {
-		t.Errorf("VerifyHostInboundOverlay read the generation %d times, want 6 (3 attempts)", gens)
+	if err == nil || strings.Contains(err.Error(), "generation changed") || !strings.Contains(err.Error(), "read host overlay objects") {
+		t.Fatalf("VerifyHostInboundOverlay over a stable generation = %v, want the pass's own verdict", err)
 	}
 }
 
@@ -265,9 +196,10 @@ func requirePrivateNetns18721(t *testing.T) {
 // REPLACES the zero-hop DROP in place (NLM_F_REPLACE keeps the handle). The
 // replacement has the same number of allowlisted expressions but ACCEPTs. An
 // unbracketed readback judges the old typed DROP against the new rule's names,
-// sees agreement, and passes with an ACCEPT ahead of the fence. The bracket
-// sees the generation move, rereads, and refuses the ACCEPT.
-func TestOverlayReadbackRetriesPastAMidReadbackCommit18721(t *testing.T) {
+// sees agreement, and passes with an ACCEPT ahead of the fence. Fold 8: the
+// bracket sees the generation move and FAILS CLOSED, with no retry; a stable
+// read of the untouched table passes (the control in install).
+func TestOverlayReadbackFailsClosedOnAMidReadbackCommit18721(t *testing.T) {
 	requirePrivateNetns18721(t)
 	in := NewNetlinkInstaller().(*netlinkInstaller)
 	o := overlay18721()
@@ -338,23 +270,21 @@ func TestOverlayReadbackRetriesPastAMidReadbackCommit18721(t *testing.T) {
 		}
 		err := in.VerifyHostInboundOverlay(o)
 		if err == nil {
-			t.Error("readback passed with an ACCEPT replaced in ahead of the fence mid-readback")
-		} else if !strings.Contains(err.Error(), "leading rule absent") {
-			t.Errorf("readback = %v, want the reread to refuse the ACCEPT head (\"leading rule absent\")", err)
+			t.Fatal("readback passed with an ACCEPT replaced in ahead of the fence mid-readback")
 		}
-		if calls != 2 {
-			t.Errorf("readback ran %d passes, want 2 (the first one spanned a commit)", calls)
+		if !strings.Contains(err.Error(), "generation changed during readback") {
+			t.Errorf("readback = %v, want the fail-closed generation verdict", err)
+		}
+		if calls != 1 {
+			t.Errorf("readback ran %d passes, want exactly 1 (no retry)", calls)
 		}
 	})
 
-	t.Run("a harmless mid-readback commit is retried and passes", func(t *testing.T) {
+	t.Run("a harmless mid-readback commit fails closed", func(t *testing.T) {
 		install()
 		calls := 0
 		in.overlayReadbackBetweenReadsFn = func() {
 			calls++
-			if calls != 1 {
-				return
-			}
 			c, err := nftables.New()
 			if err != nil {
 				t.Fatalf("conn: %v", err)
@@ -362,64 +292,51 @@ func TestOverlayReadbackRetriesPastAMidReadbackCommit18721(t *testing.T) {
 			c.AddTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: "zz18721"})
 			flush("add an unrelated table", c)
 		}
-		if err := in.VerifyHostInboundOverlay(o); err != nil {
-			t.Errorf("readback after one unrelated commit: %v", err)
-		}
-		if calls != 2 {
-			t.Errorf("readback ran %d passes, want 2", calls)
-		}
-	})
-
-	t.Run("a two-commit burst is waited out and passes", func(t *testing.T) {
-		install()
-		calls := 0
-		in.overlayReadbackBetweenReadsFn = func() {
-			calls++
-			if calls > 2 {
-				return
-			}
-			c, err := nftables.New()
-			if err != nil {
-				t.Fatalf("conn: %v", err)
-			}
-			name := "zz18721c"
-			if calls == 1 {
-				c.AddTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: name})
-			} else {
-				c.DelTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: name})
-			}
-			flush("burst commit", c)
-		}
-		if err := in.VerifyHostInboundOverlay(o); err != nil {
-			t.Errorf("readback after a two-commit burst: %v", err)
-		}
-		if calls != 3 {
-			t.Errorf("readback ran %d passes, want 3", calls)
-		}
-	})
-
-	t.Run("a ruleset that never holds still fails closed", func(t *testing.T) {
-		install()
-		calls := 0
-		in.overlayReadbackBetweenReadsFn = func() {
-			calls++
-			c, err := nftables.New()
-			if err != nil {
-				t.Fatalf("conn: %v", err)
-			}
-			if calls%2 == 1 {
-				c.AddTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: "zz18721b"})
-			} else {
-				c.DelTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: "zz18721b"})
-			}
-			flush("churn an unrelated table", c)
-		}
 		err := in.VerifyHostInboundOverlay(o)
-		if err == nil || !strings.Contains(err.Error(), "changed during each of") {
-			t.Errorf("readback under constant churn = %v, want fail-closed \"changed during each of\"", err)
+		if err == nil || !strings.Contains(err.Error(), "generation changed during readback") {
+			t.Errorf("readback across an unrelated commit = %v, want the fail-closed generation verdict", err)
 		}
-		if want := len(hostOverlayReadbackBackoff) + 1; calls != want {
-			t.Errorf("readback ran %d passes, want %d", calls, want)
+		if calls != 1 {
+			t.Errorf("readback ran %d passes, want exactly 1 (no retry)", calls)
+		}
+		// With the writer gone, the next readback is stable and passes.
+		in.overlayReadbackBetweenReadsFn = nil
+		if err := in.VerifyHostInboundOverlay(o); err != nil {
+			t.Errorf("stable readback after the commit: %v", err)
+		}
+	})
+
+	t.Run("a multi-master overlay reads only the sets its rules reference", func(t *testing.T) {
+		in.overlayReadbackBetweenReadsFn = nil
+		multi := CanonicalHostInputFenceOverlay(HostInputFenceOverlay{
+			MasterSet: []string{"st0", "st1", "st2"}, Generation: 9, PermitEpoch: 3, CloseRequestSeq: 4,
+			CloseRequestKey: "9/[xfrmi:st0,st1,st2]", WatchGeneration: 9, State: "CLOSING",
+		})
+		// Many unrelated ifname sets beside it: the screen-flood views below
+		// declare named sets, and the ingress scoping adds more.
+		spec := largeHostInboundSpec12128(24)
+		spec.Overlay = &multi
+		if err := in.InstallHostInbound(spec); err != nil {
+			t.Fatalf("install multi-master fenced table: %v", err)
+		}
+		c, err := nftables.New()
+		if err != nil {
+			t.Fatalf("conn: %v", err)
+		}
+		live, err := c.GetRules(tbl, chain)
+		if err != nil {
+			t.Fatalf("read live chain: %v", err)
+		}
+		if refs := hostOverlayReferencedSets(live, HostInputFenceOverlayCounterName(multi)); len(refs) == 0 {
+			t.Fatal("fixture: the multi-master overlay rule references no set, so the referenced-set read is not exercised")
+		}
+		if err := in.VerifyHostInboundOverlay(multi); err != nil {
+			t.Errorf("multi-master overlay readback: %v", err)
+		}
+		other := multi
+		other.MasterSet = []string{"st0", "st1"}
+		if err := in.VerifyHostInboundOverlay(CanonicalHostInputFenceOverlay(other)); err == nil {
+			t.Error("readback accepted a different master set for the multi-master overlay")
 		}
 	})
 	in.overlayReadbackBetweenReadsFn = nil
