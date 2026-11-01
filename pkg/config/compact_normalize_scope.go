@@ -1905,6 +1905,16 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"tcp-session no-sequence-check",
 		"tcp-session no-syn-check",
 		"tcp-session no-syn-check-in-tunnel",
+		// strict-syn-check was admitted with its siblings, then DROPPED by
+		// #16581 (aa14ad7335), whose diff replaced this line with
+		// fin-invalidate-session instead of adding beside it. From then on
+		// `tcp-session strict-syn-check;` committed clean at the strict gate
+		// and left TCPSession.StrictSynCheck UNSET -- the stricter handshake
+		// check the operator asked for, silently absent.
+		// TestSecurityFlagElisionFamily9056 (and ...RunsThroughTheRealPass,
+		// ...StrictGateAgrees) went red at that commit;
+		// TestStrictSynCheckEverySpellingSetsTheFlag pins every spelling.
+		"tcp-session strict-syn-check",
 		"tcp-session rst-invalidate-session",
 		"tcp-session fin-invalidate-session",
 		"vpn-monitor optimized":
