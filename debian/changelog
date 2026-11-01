@@ -8,8 +8,11 @@ xpf (0.0.0) unstable; urgency=medium
     A display pipe after another keyword-only command was already
     refused and still is (exit 1); only the message changes, naming the
     modifier instead of `unknown <path> command: |`. Operational
-    `show configuration | compare` is not supported, and now says so and
-    points at configuration mode (#18664).
+    `show configuration | compare` is not supported, and now says so:
+    `| compare rollback <N>` points at `show system rollback <N> |
+    compare` (rollback N against the active configuration), and the bare
+    or path-scoped forms point at configuration mode, which compares the
+    candidate (#18664).
   * Userspace dataplane: a peer-synced flow's original-tuple row now wins
     the import over its forward-wire alias (neither the alias nor a local
     promotion of it books the translation; the alias is refused, under its

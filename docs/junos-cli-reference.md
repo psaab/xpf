@@ -3177,10 +3177,18 @@ configuration mode, `run show configuration | display set` does the same.
   silently dropped; the message names the modifier:
   `show chassis cluster | display json` ->
   `syntax error: "show chassis cluster" does not accept the output modifier "| display json"`.
-- Operational `show configuration | compare [rollback <N>]` is a Junos
-  command that xpf does not support. The remote `cli` refuses it with a
-  pointer to configuration mode, where `show | compare [rollback <N>]`
-  works.
+- Operational `show configuration [<path>] | compare [rollback <N>]` is a
+  Junos command that xpf does not support. The remote `cli` refuses it and
+  names the command to use instead:
+  - `show configuration | compare rollback <N>` -> use
+    `show system rollback <N> | compare` (or `show system rollback compare
+    <N>`). Both diff rollback N against the ACTIVE configuration, which is
+    what the Junos command shows, without entering configuration mode.
+  - Bare `show configuration | compare`, or any scoped form such as
+    `show configuration interfaces | compare rollback 1` -> use
+    configuration mode: `configure`, then `show [<path>] | compare
+    [rollback <N>]`. That compares the CANDIDATE configuration, and it can
+    scope to a subtree, which the rollback compare cannot.
 
 ---
 

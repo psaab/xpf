@@ -35,10 +35,20 @@ const cfgOut18664 = "set system host-name fw0\nset interfaces ge-0/0/0 unit 0\n"
 
 // Junos supports operational `show configuration | compare [rollback <N>]`;
 // xpf does not, so the refusal must say that rather than call `compare` an
-// unknown pipe command.
-const opCompareUnsupported18664 = "syntax error: `| compare` is not supported on " +
-	"operational `show configuration`; use configuration mode " +
-	"(`configure`, then `show | compare [rollback <N>]`)"
+// unknown pipe command, and must point at the command that answers the
+// question. Bare and scoped compares point at configuration mode (candidate
+// diff)...
+const opCompareConfigMode18664 = "syntax error: `| compare` is not supported on " +
+	"operational `show configuration`; use configuration mode (`configure`, then " +
+	"`show [<path>] | compare [rollback <N>]`), which compares the candidate configuration"
+
+// ...and the unscoped rollback compare points at its operational equivalent,
+// `show system rollback <N> | compare` (ActiveBaseline: active vs rollback N).
+func opCompareSystemRollback18664(n string) string {
+	return "syntax error: `| compare rollback " + n + "` is not supported on " +
+		"operational `show configuration`; use `show system rollback " + n + " | compare`, " +
+		"which diffs rollback " + n + " against the active configuration"
+}
 
 // rec18664 records the RPCs a dispatched line issues. Any RPC it does not
 // override nil-panics, which fails the cell: a refusal must happen before the
@@ -47,7 +57,13 @@ type rec18664 struct {
 	pb.BpfrxServiceClient
 	config   []*pb.ShowConfigRequest
 	rollback []*pb.ShowRollbackRequest
+	compare  []*pb.ShowCompareRequest
 	text     []string
+}
+
+func (f *rec18664) ShowCompare(_ context.Context, in *pb.ShowCompareRequest, _ ...grpc.CallOption) (*pb.ShowCompareResponse, error) {
+	f.compare = append(f.compare, in)
+	return &pb.ShowCompareResponse{Output: "diff\n"}, nil
 }
 
 func (f *rec18664) ShowConfig(_ context.Context, in *pb.ShowConfigRequest, _ ...grpc.CallOption) (*pb.ShowConfigResponse, error) {
@@ -65,7 +81,9 @@ func (f *rec18664) ShowText(_ context.Context, in *pb.ShowTextRequest, _ ...grpc
 	return &pb.ShowTextResponse{Output: "node0 primary\nnode1 secondary\nother line\n"}, nil
 }
 
-func (f *rec18664) calls() int { return len(f.config) + len(f.rollback) + len(f.text) }
+func (f *rec18664) calls() int {
+	return len(f.config) + len(f.rollback) + len(f.compare) + len(f.text)
+}
 
 func dispatch18664(t *testing.T, line string, configMode bool) (*rec18664, string, error) {
 	t.Helper()
@@ -223,9 +241,11 @@ func TestOpPipeKeepsKeywordOnlyRefusal18664(t *testing.T) {
 func TestOpShowConfigurationBadPipe18664(t *testing.T) {
 	for _, tc := range []struct{ line, want string }{
 		{"show configuration | frobnicate", `syntax error: unknown pipe command "frobnicate"`},
-		{"show configuration | compare", opCompareUnsupported18664},
-		{"show configuration | compare rollback 1", opCompareUnsupported18664},
-		{"show configuration interfaces | compare", opCompareUnsupported18664},
+		{"show configuration | compare", opCompareConfigMode18664},
+		{"show configuration | compare rollback 1", opCompareSystemRollback18664("1")},
+		{"show configuration | compare rollback", opCompareSystemRollback18664("<N>")},
+		{"show configuration interfaces | compare", opCompareConfigMode18664},
+		{"show configuration interfaces | compare rollback 1", opCompareConfigMode18664},
 		{"show configuration | display yaml", `unknown display format "yaml"`},
 		{"show configuration | display set bogus", "usage: | display <supported-format>"},
 		{"show configuration |", "syntax error: missing pipe modifier"},
@@ -240,6 +260,26 @@ func TestOpShowConfigurationBadPipe18664(t *testing.T) {
 				t.Fatalf("dispatch(%q) issued %d RPCs; want refusal before the wire", tc.line, f.calls())
 			}
 		})
+	}
+}
+
+// The rollback pointer must name a command that exists in operational mode and
+// diffs rollback N against the ACTIVE configuration (ActiveBaseline), with no
+// configuration mode. A pointer to a missing or candidate-baseline command
+// would be the misleading message #18664 replaced.
+func TestOpCompareRollbackPointerTarget18664(t *testing.T) {
+	for _, line := range []string{"show system rollback 1 | compare", "show system rollback compare 1"} {
+		f, out, err := dispatch18664(t, line, false)
+		if err != nil || len(f.compare) != 1 || f.calls() != 1 {
+			t.Fatalf("dispatch(%q) = %v, compare=%d total=%d; want one ShowCompare", line, err, len(f.compare), f.calls())
+		}
+		if req := f.compare[0]; !req.GetActiveBaseline() || req.GetRollbackN() != 1 || len(req.GetPath()) != 0 {
+			t.Fatalf("dispatch(%q) ShowCompare active=%v n=%d path=%v; want ActiveBaseline/1/[]",
+				line, req.GetActiveBaseline(), req.GetRollbackN(), req.GetPath())
+		}
+		if out != "diff\n" {
+			t.Fatalf("dispatch(%q) output %q", line, out)
+		}
 	}
 }
 
