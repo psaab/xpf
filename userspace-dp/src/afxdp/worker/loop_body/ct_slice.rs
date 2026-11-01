@@ -184,6 +184,14 @@ impl CtSlicePairSet {
 ///   (see `run_ct_slice`), not once per slice. A cycle has
 ///   ceil(slab / 2048) slices, so per-slice runs made the leg
 ///   O(n^2 / 2048) per cycle.
+/// - has a latency bound, replacing #16223's "within one GC interval". A
+///   pair that completes just after a run is advanced at the next cycle
+///   start, at most
+///   max(CT_REFRESH_WINDOW_NS, ceil(slab / 2048) * CT_SLICE_INTERVAL_NS)
+///   later: 10 s at the default cap. That is inside the 20 s TCP opening
+///   window that replicas are reaped on. A const assert in
+///   `slice_pacing.rs` fails the build if the default cap or the windows
+///   would break this bound.
 /// - stays O(n + N) per run, taking the global shared-map mutexes a
 ///   bounded number of times: batched restamps, `CtSlicePairSet` dedup,
 ///   and one `shared_rows_stage_and_counts` pass for the whole emit set.

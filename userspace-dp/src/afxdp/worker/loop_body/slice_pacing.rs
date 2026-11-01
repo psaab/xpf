@@ -22,3 +22,21 @@ const _: () = assert!(EXPORT_SLICE_EMITS <= EXPORT_SLICE_BUDGET);
 pub(super) const CT_REFRESH_WINDOW_NS: u64 = 10_000_000_000; // full-table freshness target
 pub(super) const CT_SLICE_INTERVAL_NS: u64 = 100_000_000; // 100ms between slices
 pub(super) const CT_REFRESH_SLICE_BUDGET: usize = 2048; // max slab slots per slice
+// #18655: the ct-slice shared-evidence leg (`run_shared_evidence_leg`) runs
+// once per refresh cycle, on the cycle's first slice. A pair that completes
+// right after that slice has its shared stage advanced at the next cycle start,
+// which is at most
+//     max(CT_REFRESH_WINDOW_NS, ceil(slab / CT_REFRESH_SLICE_BUDGET) * CT_SLICE_INTERVAL_NS)
+// later. At the default cap that is the 10 s window. It must stay inside the
+// 20 s TCP opening window, because sibling replicas still marked Opening/Pending
+// are reaped on that window, and #16223 exists to stop reaping live pairs. A cap
+// increase that pushes a full cycle past the window, or a window at or over the
+// opening timeout, would quietly reopen those reaps, so it fails the build here.
+// (A larger runtime `max_sessions` than the default is not covered by this
+// compile-time check. Freshness then degrades as the comment above describes.)
+const _: () = assert!(
+    (crate::session::DEFAULT_MAX_SESSIONS.div_ceil(CT_REFRESH_SLICE_BUDGET) as u64)
+        * CT_SLICE_INTERVAL_NS
+        <= CT_REFRESH_WINDOW_NS
+        && CT_REFRESH_WINDOW_NS < crate::session::DEFAULT_TCP_OPENING_TIMEOUT_NS
+);
