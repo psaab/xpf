@@ -98,20 +98,21 @@ func setElementKeysEqual(got, want []nftables.SetElement) bool {
 	return true
 }
 
+// predicateReadbackBetweenReadsFn18746 is nil in production. A kernel cell
+// sets it to commit a change between inputRulesBeyondZeroHop's GetRules and its
+// expression-name dump, the window the generation bracket guards.
+var predicateReadbackBetweenReadsFn18746 func()
+
 // inputRulesBeyondZeroHop reads tbl's input chain and returns its rules other
 // than the exact #16841 zero-hop rule. An absent chain reads as no rules.
 //
 // The typed GetRules decode and the kernel expression-name dump are two
 // separate reads, so the pair is bracketed by the nf_tables generation
 // (readAtStableNftGeneration, AD on #18759). A commit landing between them is
-// an error, not a judgement over two different rulesets. So is a rule handle
-// missing from the dump. Unreadable proves nothing; callers decide what that
-// means.
-// predicateReadbackBetweenReadsFn18746 is nil in production. A kernel cell
-// sets it to commit a change between inputRulesBeyondZeroHop's GetRules and its
-// expression-name dump, the window the generation bracket guards.
-var predicateReadbackBetweenReadsFn18746 func()
-
+// a *GenerationChangedError (errors.Is ErrGenerationChanged), not a judgement
+// over two different rulesets. A rule handle missing from the dump is an
+// error too. Unreadable proves nothing; callers decide what that means and
+// may re-read (RereadOnGenerationChange).
 func inputRulesBeyondZeroHop(c *nftables.Conn, tbl *nftables.Table, chain *nftables.Chain) ([]*nftables.Rule, error) {
 	var out []*nftables.Rule
 	err := readAtStableNftGeneration(

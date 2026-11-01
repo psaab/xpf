@@ -434,17 +434,36 @@ func hostInboundCoverageNewcomers(cfg *config.Config, installed map[string]struc
 // ExecReload residue cleanup); no attestation there. Install success implies
 // exact shape: the installer flushes one atomic nf_tables batch, so success
 // leaves no partial table to verify.
-func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config, expectedTables []string, installedCovered map[string]struct{}) error {
+//
+// Every refusal on the first-handoff path leaves the barrier up, so it is
+// handed to a named retry owner (noteEarlyInputHandoffRefused18746). The
+// enforcement re-read below also re-reads at once, up to
+// xnft.GenerationChangeRereads times, when a commit lands during the read
+// (#18746, AG on #18759).
+func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config, expectedTables []string, installedCovered map[string]struct{}) (refusal error) {
 	if d.earlyInputHandoffDone.Load() {
 		return nftInstaller.RemoveEarlyInputBarrier()
 	}
+	defer func() {
+		if refusal != nil {
+			d.noteEarlyInputHandoffRefused18746(refusal)
+		}
+	}()
 	present, err := nftInstaller.EarlyInputBarrierPresent()
 	if err == nil && present {
 		if removeErr := nftInstaller.RemoveEarlyInputBarrier(); removeErr != nil {
 			return removeErr
 		}
 		for _, table := range expectedTables {
-			ok, readErr := nftInstaller.TableEnforcing(table)
+			// #18746: the predicate is generation-bracketed, so any nft commit
+			// landing during the read makes it unreadable. Re-read at once on
+			// that error only. This runs inside an apply, not inside the
+			// short reconcileIpsecHostInputFence hold the #18721 no-retry
+			// budget protects, so that budget does not apply here (see
+			// xnft.RereadOnGenerationChange).
+			ok, readErr := xnft.RereadOnGenerationChange(xnft.GenerationChangeRereads, func() (bool, error) {
+				return nftInstaller.TableEnforcing(table)
+			})
 			if readErr == nil && ok {
 				continue
 			}
@@ -553,7 +572,24 @@ func (d *Daemon) setEarlyInputHandoffDone() error {
 	}
 	d.earlyInputHandoffDone.Store(true)
 	d.earlyInputGuardSwapFailed.Store(false)
+	if d.earlyInputHandoffRetryOwed18746.Swap(false) {
+		slog.Info("early host-input barrier handed off after an earlier refusal; retry owner discharged", "issue", "#18746")
+	}
 	return nil
+}
+
+// noteEarlyInputHandoffRefused18746 hands a refused first handoff to its
+// retry owner, reassertHostInboundGapOnce. A refusal reinstalls the guard, so
+// the box stays closed until a later apply hands off. At boot there may be no
+// later commit or lease, so the debt makes the 30 s re-assert loop re-apply
+// the active config until the handoff completes. It does not nudge the loop:
+// a refusal caused by steady nft churn would otherwise turn into back-to-back
+// full applies.
+func (d *Daemon) noteEarlyInputHandoffRefused18746(err error) {
+	if !d.earlyInputHandoffRetryOwed18746.Swap(true) {
+		slog.Warn("early host-input barrier handoff refused; the host-inbound re-assert loop will re-apply the active config until it hands off",
+			"err", err, "interval", hostInboundGapReassertInterval.String(), "issue", "#18746")
+	}
 }
 
 // EarlyInputHandoffMarked reports whether the handoff marker file exists

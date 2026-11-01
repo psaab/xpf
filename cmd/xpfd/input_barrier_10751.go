@@ -114,11 +114,17 @@ func runInputBarrierEnsure(stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "early input barrier already handed off to the daemon; nothing to do")
 		return 0
 	}
-	if drops, err := hostInboundDropsInput(); err == nil && drops && hostInboundFirstApplied() && xpfdUnitActive() {
+	// #18746: both predicates are generation-bracketed, so an nft commit
+	// landing during the read (the live daemon's own apply, say) makes it
+	// unreadable, and an unreadable probe falls through to the install below.
+	// That would put global DROP into a live daemon or clobber a lifeline
+	// guard. Re-read at once on that error only; a probe that stays
+	// unreadable still falls through, fail-closed as documented above.
+	if drops, err := xnft.RereadOnGenerationChange(xnft.GenerationChangeRereads, hostInboundDropsInput); err == nil && drops && hostInboundFirstApplied() && xpfdUnitActive() {
 		fmt.Fprintln(stdout, "host-inbound enforcement is live; nothing to do (if stale, the daemon's next pre-apply converges the guard)")
 		return 0
 	}
-	if enforcing, err := earlyInputBarrierEnforcing(); err == nil && enforcing {
+	if enforcing, err := xnft.RereadOnGenerationChange(xnft.GenerationChangeRereads, earlyInputBarrierEnforcing); err == nil && enforcing {
 		fmt.Fprintln(stdout, "early input barrier already present; nothing to do")
 		return 0
 	}

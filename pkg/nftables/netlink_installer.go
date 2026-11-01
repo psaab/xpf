@@ -212,9 +212,19 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	}
 	// #18721: every read below must see ONE ruleset, so the whole readback is
 	// bracketed by the nf_tables generation (readAtStableNftGeneration).
-	return readAtStableNftGeneration(
+	err = readAtStableNftGeneration(
 		func() (uint32, error) { return readNftGeneration(c) },
 		func() error { return in.verifyHostInboundOverlayOnce(c, overlay) })
+	// The bracket does not log (#18746); this caller labels its own failure.
+	// A moved generation fails this readback closed, with no re-read: it runs
+	// inside reconcileIpsecHostInputFence's short applySem hold (#18721).
+	var moved *GenerationChangedError
+	if errors.As(err, &moved) {
+		slog.Warn("host overlay readback: generation changed during readback; failing closed",
+			"commits_observed", moved.CommitsObserved, "generation_before", moved.Before, "generation_after", moved.After)
+		return fmt.Errorf("host overlay readback: %w; failing closed", err)
+	}
+	return err
 }
 
 // verifyHostInboundOverlayOnce is one unbracketed pass of the overlay readback.

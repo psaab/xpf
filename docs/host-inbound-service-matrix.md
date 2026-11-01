@@ -1117,7 +1117,14 @@ applies to the pending-DHCP hold ALONE (#17854): an lo0-enforcement failure
 or an uncovered-destination (addresses-changed) hold has no substitute
 backstop once the barrier is gone, so it keeps the barrier until a
 successful apply hands off (the changed hold also fails its commit, driving
-that retry). While a hold is open, `HostInboundApplied` reports
+that retry). A handoff that is REFUSED after the barrier comes down (the
+enforcement re-verify finds a table missing, unreadable or zero-hop-only, or
+fresh addresses are uncovered) reinstalls the guard and owes a retry to the
+same 30s loop, which re-applies the active config until the handoff completes
+(#18746). Before that, a boot-time refusal waited for the next commit or
+lease with the box closed. The re-verify also re-reads up to three times when
+an nft commit lands during its read, so a single concurrent commit does not
+refuse the handoff. While a hold is open, `HostInboundApplied` reports
 `BarrierRetained` with the holding scopes (and `show security zones` renders
 a RETAINED line), so a retained barrier no longer reads as plain Current.
 

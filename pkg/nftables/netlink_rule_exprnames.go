@@ -2,8 +2,8 @@ package nftables
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
-	"log/slog"
 
 	"github.com/google/nftables"
 	"github.com/mdlayher/netlink"
@@ -205,11 +205,41 @@ func decodeNftGeneration(msgs []netlink.Message) (uint32, error) {
 	return id, nil
 }
 
+// ErrGenerationChanged matches, through errors.Is, every
+// *GenerationChangedError. Callers test for it to tell "a commit landed during
+// my readback" apart from a real read failure (#18746).
+var ErrGenerationChanged = errors.New("nftables generation changed during readback")
+
+// GenerationChangedError reports that a commit published a new nf_tables
+// generation while a bracketed readback ran (readAtStableNftGeneration). The
+// pass's verdict describes no single ruleset, so it is discarded.
+//
+// The error does no logging of its own. Each caller labels it and picks the
+// level (#18746, AG on #18759): the host overlay readback Warns, the
+// kernel-truth recheck logs Debug and Warns after several passes in a row, and
+// the boot handoff re-reads it (RereadOnGenerationChange).
+type GenerationChangedError struct {
+	// CommitsObserved is the number of transactions that landed during the
+	// pass. The generation is a commit counter, so this is After - Before
+	// (uint32 subtraction is wrap-safe).
+	CommitsObserved uint32
+	Before, After   uint32
+}
+
+func (e *GenerationChangedError) Error() string {
+	return fmt.Sprintf("generation changed during readback (%d commits observed, generation %d -> %d)",
+		e.CommitsObserved, e.Before, e.After)
+}
+
+// Is makes errors.Is(err, ErrGenerationChanged) true for this error.
+func (e *GenerationChangedError) Is(target error) bool { return target == ErrGenerationChanged }
+
 // readAtStableNftGeneration runs ONE readback pass between two generation
 // reads. It returns that pass's verdict only if no commit published a new
-// generation in between. Otherwise it logs a Warn and fails closed at once,
-// with no retry (#18721 fold 8). See readNftGeneration for the residual window
-// this cannot see.
+// generation in between. Otherwise it fails closed at once with a
+// *GenerationChangedError and no retry (#18721 fold 8). It does not log; see
+// GenerationChangedError. See readNftGeneration for the residual window this
+// cannot see.
 //
 // The fence readback reads the ruleset several times: the marker object, the
 // sets, GetRules, and the raw expression-name dump. A writer outside xpf could
@@ -221,7 +251,8 @@ func decodeNftGeneration(msgs []netlink.Message) (uint32, error) {
 // of that bound rested on an assumed pass time that a measured slow pass broke.
 // A single pass is the only shape whose cost under applySem is provable, so
 // the retries were removed rather than tuned again. A concurrent commit, from
-// xpf or from outside it, now fails that readback closed.
+// xpf or from outside it, now fails that readback closed. A caller outside
+// that applySem budget may re-read (RereadOnGenerationChange).
 func readAtStableNftGeneration(gen func() (uint32, error), read func() error) error {
 	before, err := gen()
 	if err != nil {
@@ -235,11 +266,32 @@ func readAtStableNftGeneration(gen func() (uint32, error), read func() error) er
 	if before == after {
 		return verdict
 	}
-	// The generation is a commit counter, so the delta is the number of
-	// transactions that landed during the pass (uint32 subtraction is
-	// wrap-safe).
-	commits := after - before
-	slog.Warn("host overlay readback: generation changed during readback; failing closed",
-		"commits_observed", commits, "generation_before", before, "generation_after", after)
-	return fmt.Errorf("host overlay readback: generation changed during readback (%d commits observed, generation %d -> %d); failing closed", commits, before, after)
+	return &GenerationChangedError{CommitsObserved: after - before, Before: before, After: after}
+}
+
+// GenerationChangeRereads is how many times RereadOnGenerationChange re-reads
+// after the first read before it gives up (#18746).
+const GenerationChangeRereads = 3
+
+// RereadOnGenerationChange runs read and, while it fails with
+// ErrGenerationChanged, runs it again at once, up to rereads more times. Any
+// other result, success or a real error, is returned as it stands. After the
+// last re-read the generation error itself is returned, so the caller still
+// fails closed.
+//
+// The re-reads are immediate, with no backoff: a generation change means one
+// commit landed during the pass, and the next pass usually reads one ruleset.
+// The #18721 no-retry rule does not apply to every caller. It bounds the host
+// overlay readback, which reconcileIpsecHostInputFence runs inside a short
+// applySem hold that HA transfer pre-activation waits on
+// (TestOverlayReadbackFitsTransferPreActivateWait18721). Do not use this
+// there. The boot handoff re-verify runs inside an apply, whose hold already
+// lasts seconds, and `xpfd input-barrier ensure` runs outside the daemon, so
+// neither is coupled to that wait.
+func RereadOnGenerationChange[T any](rereads int, read func() (T, error)) (T, error) {
+	v, err := read()
+	for i := 0; i < rereads && errors.Is(err, ErrGenerationChanged); i++ {
+		v, err = read()
+	}
+	return v, err
 }
