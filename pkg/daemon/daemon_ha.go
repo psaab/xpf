@@ -820,7 +820,26 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// transition window. ResignRG must follow preflight
 		// so traffic is already on the fabric path before
 		// the VRRP BACKUP transition removes VIPs.
-		if clusterDemotionEdge && d.dataplane() != nil {
+		// #18701: when this node is losing the RG and its own helper is not
+		// answering (dead, restarting, not yet armed, or wedged: the
+		// #18697/#18685 verdict), nothing on this node forwards for the RG,
+		// so there is nothing for make-before-break to protect. Every helper
+		// round trip below would burn its deadline first while both nodes
+		// hold the VIPs: on tcp the old primary kept the LAN VIP ~26 s after
+		// the peer took it, and the next ARP re-resolve landed on the dead
+		// node. So release the VIPs FIRST (the reconcile also cancels the
+		// GARP/NA re-announce and clears the RA/DHCP services), skip the
+		// peer-barrier demotion prep (there is no live helper to drain), and
+		// bound the helper-side demotion. The healthy path keeps the #18563
+		// ordering unchanged. Direct (no-RETH-VRRP) mode only: in legacy
+		// VRRP mode the VIPs follow the VRRP resign below.
+		helperDownDemotion := clusterDemotionEdge && noRethVRRP && d.helperElectionNotReady()
+		if helperDownDemotion {
+			slog.Warn("cluster: demoting with an unresponsive helper; releasing VIPs before helper-side demotion (#18701)",
+				"rg", ev.GroupID)
+			d.reconcileDirectVIPOwnership(ev.GroupID, "cluster-secondary-helper-down")
+		}
+		if clusterDemotionEdge && d.dataplane() != nil && !helperDownDemotion {
 			d.tryPrepareUserspaceRGDemotion(ev.GroupID)
 		}
 		// #6177 item 1: capture the RETH resign barrier so the fence verdict
@@ -847,7 +866,16 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 			if !cur && !clusterDemotionEdge {
 				d.tryPrepareUserspaceRGDemotion(ev.GroupID)
 			}
-			if err := rt.HA().SetRGActive(ctx, ev.GroupID, cur); err != nil {
+			var err error
+			if helperDownDemotion {
+				// #18701: best-effort and bounded. A timeout leaves the
+				// rg_active apply unrecorded, so the reconcile loop retries
+				// it, exactly as for any failed apply.
+				err = setRGActiveBounded(ctx, rt.HA(), ev.GroupID, cur, helperDownDemotionBound)
+			} else {
+				err = rt.HA().SetRGActive(ctx, ev.GroupID, cur)
+			}
+			if err != nil {
 				slog.Warn("failed to update rg_active from cluster event",
 					"rg", ev.GroupID, "active", cur, "err", err)
 				actuateErr = fmt.Errorf("redundancy group %d rg_active=%v not applied on demotion: %w",

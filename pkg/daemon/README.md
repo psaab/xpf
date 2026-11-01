@@ -5034,3 +5034,39 @@ Cells, in `demotion_route_order_18620_test.go`:
   publish lands inside the hold;
 - the failed-write cell;
 - `helper_release_republish_18620_test.go`, for the hook wiring.
+
+## A demotion with an unresponsive helper releases the VIPs first (#18701)
+
+The order above (rg_active=false, then the withdrawals, then the direct VIP
+release) assumes the helper answers. When it does not, every helper round trip
+on the demotion path burns its control deadline, and the VIP release waits
+behind all of them. On tcp (#18685 SIGSTOP cell) the old primary kept RG1's
+VIPs about 15 s, and the RG2 LAN VIP about 26 s, after the peer took the RGs.
+The LAN host's next ARP re-resolve landed on the dead node, which cost an 8.5 s
+second outage.
+
+So on a demotion edge in direct (no-RETH-VRRP) mode, when
+`HelperElectionNotReady()` reports that the local helper is dead, restarting,
+not yet armed, or wedged (#18697/#18685):
+
+1. `reconcileDirectVIPOwnership` runs FIRST. It removes the VIPs and the
+   stable link-local, cancels the GARP/NA re-announce, and clears the RA/DHCP
+   services.
+2. The peer-barrier demotion prep is skipped, because there is no live helper
+   to drain.
+3. The rg_active=false write is best-effort, bounded by
+   `helperDownDemotionBound` (1 s) through `setRGActiveBounded`. A timeout
+   leaves the apply unrecorded, so the reconcile loop retries it as it would
+   any failed apply.
+
+A healthy helper keeps the #18563/#18620 order unchanged. Legacy VRRP mode is
+unchanged too, since there the VIPs follow the VRRP resign.
+
+Cells, in `demote_helper_down_18701_test.go`:
+- with an unresponsive helper, the VIPs are released before the rg_active
+  write, and the handler does not wait out a write that never acknowledges;
+- with a healthy helper, rg_active goes first, the VIPs after it, and the
+  handler waits for the acknowledgement.
+
+Each of these mutants fails a cell: dropping the early release, an unbounded
+write, and ignoring the readiness verdict.
