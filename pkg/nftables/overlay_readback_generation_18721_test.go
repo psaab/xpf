@@ -41,7 +41,10 @@ var testBackoff18721 = []time.Duration{2 * time.Millisecond, 10 * time.Milliseco
 func TestReadAtStableNftGeneration18721(t *testing.T) {
 	errVerdict := errors.New("the readback's own verdict")
 	var slept []time.Duration
-	sleep := func(d time.Duration) { slept = append(slept, d) }
+	clock := time.Unix(0, 0)
+	now := func() time.Time { return clock }
+	sleep := func(d time.Duration) { slept = append(slept, d); clock = clock.Add(d) }
+	const noDeadline = time.Hour
 
 	// A stable generation hands back the read's verdict, pass or fail, with
 	// no pause.
@@ -49,7 +52,7 @@ func TestReadAtStableNftGeneration18721(t *testing.T) {
 		slept = nil
 		gen, _ := genSeq18721(5, 5)
 		reads := 0
-		got := readAtStableNftGeneration(testBackoff18721, sleep, gen, func() error { reads++; return want })
+		got := readAtStableNftGeneration(testBackoff18721, noDeadline, now, sleep, gen, func() error { reads++; return want })
 		if got != want || reads != 1 || len(slept) != 0 {
 			t.Errorf("stable generation, read returns %v: got %v after %d reads and sleeps %v, want %v after 1 read, no sleep", want, got, reads, slept, want)
 		}
@@ -60,7 +63,7 @@ func TestReadAtStableNftGeneration18721(t *testing.T) {
 		slept = nil
 		gen, _ := genSeq18721(5, 6, 6, 6)
 		reads := 0
-		got := readAtStableNftGeneration(testBackoff18721, sleep, gen, func() error {
+		got := readAtStableNftGeneration(testBackoff18721, noDeadline, now, sleep, gen, func() error {
 			reads++
 			if reads == 1 {
 				return nil // a PASS read across a commit must not be returned
@@ -81,7 +84,7 @@ func TestReadAtStableNftGeneration18721(t *testing.T) {
 		slept = nil
 		gen, calls := genSeq18721(1, 2, 3, 4, 4, 4)
 		reads := 0
-		got := readAtStableNftGeneration(testBackoff18721, sleep, gen, func() error { reads++; return nil })
+		got := readAtStableNftGeneration(testBackoff18721, noDeadline, now, sleep, gen, func() error { reads++; return nil })
 		if got != nil || reads != 3 || *calls != 6 {
 			t.Errorf("two-commit burst: got %v after %d reads / %d generation reads, want nil after 3 / 6", got, reads, *calls)
 		}
@@ -96,11 +99,11 @@ func TestReadAtStableNftGeneration18721(t *testing.T) {
 		slept = nil
 		gen, calls := genSeq18721(1, 2, 3, 4, 5, 6, 7, 8, 9)
 		reads := 0
-		got := readAtStableNftGeneration(testBackoff18721, sleep, gen, func() error { reads++; return nil })
+		got := readAtStableNftGeneration(testBackoff18721, noDeadline, now, sleep, gen, func() error { reads++; return nil })
 		// Generations 1..8 were read: 7 commits landed between the first read
 		// and the last, including those during the pauses.
-		if got == nil || !strings.Contains(got.Error(), "changed during each of 4 attempts") || !strings.Contains(got.Error(), "7 commits observed, generation 1 -> 8") {
-			t.Errorf("moving ruleset: got %v, want a fail-closed \"changed during each of 4 attempts (7 commits observed, generation 1 -> 8)\"", got)
+		if got == nil || !strings.Contains(got.Error(), "changed during each of 4 attempts") || !strings.Contains(got.Error(), "7 commits observed, generation 1 -> 8") || !strings.Contains(got.Error(), "attempts exhausted") {
+			t.Errorf("moving ruleset: got %v, want a fail-closed \"changed during each of 4 attempts (7 commits observed, generation 1 -> 8, ..., attempts exhausted)\"", got)
 		}
 		if reads != 4 || *calls != 8 {
 			t.Errorf("moving ruleset: %d reads / %d generation reads, want 4 / 8", reads, *calls)
@@ -112,7 +115,7 @@ func TestReadAtStableNftGeneration18721(t *testing.T) {
 
 	// A generation read error is the verdict, before or after the read.
 	genErr := errors.New("getgen failed")
-	if got := readAtStableNftGeneration(testBackoff18721, sleep, func() (uint32, error) { return 0, genErr }, func() error { return nil }); !errors.Is(got, genErr) {
+	if got := readAtStableNftGeneration(testBackoff18721, noDeadline, now, sleep, func() (uint32, error) { return 0, genErr }, func() error { return nil }); !errors.Is(got, genErr) {
 		t.Errorf("failing first generation read: got %v", got)
 	}
 	n := 0
@@ -123,23 +126,63 @@ func TestReadAtStableNftGeneration18721(t *testing.T) {
 		}
 		return 1, nil
 	}
-	if got := readAtStableNftGeneration(testBackoff18721, sleep, afterFails, func() error { return nil }); !errors.Is(got, genErr) {
+	if got := readAtStableNftGeneration(testBackoff18721, noDeadline, now, sleep, afterFails, func() error { return nil }); !errors.Is(got, genErr) {
 		t.Errorf("failing second generation read: got %v", got)
 	}
 }
 
-// The production backoff is bounded and growing (AD fold 4), and allows at
-// least the 3 attempts the first version had.
-func TestHostOverlayReadbackBackoffIsBoundedAndGrowing18721(t *testing.T) {
-	var total time.Duration
+// The production backoff is positive and growing, and allows at least the 3
+// attempts the first version had (AD fold 4).
+func TestHostOverlayReadbackBackoffIsGrowing18721(t *testing.T) {
 	for i, d := range hostOverlayReadbackBackoff {
 		if d <= 0 || (i > 0 && d <= hostOverlayReadbackBackoff[i-1]) {
 			t.Errorf("backoff step %d = %v is not positive and growing: %v", i, d, hostOverlayReadbackBackoff)
 		}
-		total += d
 	}
-	if len(hostOverlayReadbackBackoff)+1 < 3 || total > 500*time.Millisecond {
-		t.Errorf("backoff %v: %d attempts, %v total pause; want >= 3 attempts within 500ms", hostOverlayReadbackBackoff, len(hostOverlayReadbackBackoff)+1, total)
+	if len(hostOverlayReadbackBackoff)+1 < 3 {
+		t.Errorf("backoff %v gives %d attempts, want >= 3", hostOverlayReadbackBackoff, len(hostOverlayReadbackBackoff)+1)
+	}
+}
+
+// AD fold 6: the wall-clock deadline bounds the readback whatever one pass
+// costs. With the production backoff and deadline and a pass that takes 80 ms
+// (a slow table under load), a ruleset that never holds must stop on the
+// deadline: well before 5 attempts, within deadline + one pass, failing
+// closed. The clock is injected and advanced by the fake pass and the sleeps,
+// so the pass count is exact rather than load-dependent.
+func TestReadAtStableNftGenerationStopsAtTheDeadline18721(t *testing.T) {
+	const pass = 80 * time.Millisecond
+	clock := time.Unix(0, 0)
+	now := func() time.Time { return clock }
+	sleep := func(d time.Duration) { clock = clock.Add(d) }
+	gen, _ := genSeq18721(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+	reads := 0
+	got := readAtStableNftGeneration(hostOverlayReadbackBackoff, hostOverlayReadbackDeadline, now, sleep, gen,
+		func() error { reads++; clock = clock.Add(pass); return nil })
+	elapsed := clock.Sub(time.Unix(0, 0))
+	if got == nil || !strings.Contains(got.Error(), "deadline") {
+		t.Fatalf("slow, moving readback = %v, want a fail-closed stop at the deadline", got)
+	}
+	// 80 ms passes against a 190 ms deadline:
+	//   - pass 1 ends at 80 ms; 80+2+80 = 162 fits, so pass 2 runs;
+	//   - pass 2 ends at 162 ms; 162+10+80 = 252 does not fit, so it stops.
+	// Without the previous-pass estimate it would start a third pass (162+10
+	// fits) and end at 252 ms, past the deadline.
+	if reads != 2 {
+		t.Errorf("readback made %d passes; with 80 ms passes the deadline must stop it after exactly 2", reads)
+	}
+	if elapsed > hostOverlayReadbackDeadline {
+		t.Errorf("readback took %v of injected time, more than the %v deadline", elapsed, hostOverlayReadbackDeadline)
+	}
+	// A fast pass gets every attempt: on a quick table, the deadline is not
+	// what limits a burst.
+	gen2, _ := genSeq18721(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+	reads = 0
+	clock = time.Unix(0, 0)
+	got = readAtStableNftGeneration(hostOverlayReadbackBackoff, hostOverlayReadbackDeadline, now, sleep, gen2,
+		func() error { reads++; return nil })
+	if got == nil || !strings.Contains(got.Error(), "attempts exhausted") || reads != len(hostOverlayReadbackBackoff)+1 {
+		t.Errorf("fast, moving readback = %v after %d passes, want all %d attempts then exhaustion", got, reads, len(hostOverlayReadbackBackoff)+1)
 	}
 }
 
@@ -214,6 +257,41 @@ func TestVerifyHostInboundOverlayIsGenerationBracketed18721(t *testing.T) {
 	}
 	if want := 2 * (len(hostOverlayReadbackBackoff) + 1); gens != want {
 		t.Errorf("VerifyHostInboundOverlay read the generation %d times, want %d", gens, want)
+	}
+}
+
+// The production call site is bounded by the deadline (AD fold 6). The
+// fake's GETGEN is slow (40 ms), so every pass costs at least 80 ms. With a
+// generation that moves on every read, the call site must stop on the
+// deadline: before all 5 attempts, within deadline + one pass.
+func TestVerifyHostInboundOverlayStopsAtTheDeadline18721(t *testing.T) {
+	gens := 0
+	getGen := netlink.HeaderType((unix.NFNL_SUBSYS_NFTABLES << 8) | unix.NFT_MSG_GETGEN)
+	fake := func(req []netlink.Message) ([]netlink.Message, error) {
+		if len(req) == 1 && req[0].Header.Type == getGen {
+			gens++
+			time.Sleep(40 * time.Millisecond)
+			reply := genReply18721(t, unix.NFT_MSG_NEWGEN,
+				netlink.Attribute{Type: unix.NFTA_GEN_ID, Data: []byte{0, 0, 0, byte(gens)}})
+			reply.Header.Sequence, reply.Header.PID = req[0].Header.Sequence, req[0].Header.PID
+			return []netlink.Message{reply}, nil
+		}
+		return nltest.Error(int(unix.ENOENT), req)
+	}
+	in := newNetlinkInstallerConn(func() (*nftables.Conn, error) {
+		return nftables.New(nftables.WithTestDial(fake))
+	})
+	start := time.Now()
+	err := in.VerifyHostInboundOverlay(overlay18721())
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "deadline") {
+		t.Fatalf("slow, moving call site = %v, want a fail-closed stop at the deadline", err)
+	}
+	if gens >= 2*(len(hostOverlayReadbackBackoff)+1) {
+		t.Errorf("call site read the generation %d times; the deadline should have stopped it before all attempts", gens)
+	}
+	if limit := hostOverlayReadbackDeadline + 80*time.Millisecond; elapsed > limit {
+		t.Errorf("call site took %v, more than the deadline + one pass (%v)", elapsed, limit)
 	}
 }
 
@@ -429,12 +507,54 @@ func TestOverlayReadbackRetriesPastAMidReadbackCommit18721(t *testing.T) {
 			}
 			flush("churn an unrelated table", c)
 		}
+		start := time.Now()
 		err := in.VerifyHostInboundOverlay(o)
+		elapsed := time.Since(start)
 		if err == nil || !strings.Contains(err.Error(), "changed during each of") {
 			t.Errorf("readback under constant churn = %v, want fail-closed \"changed during each of\"", err)
 		}
-		if want := len(hostOverlayReadbackBackoff) + 1; calls != want {
-			t.Errorf("readback ran %d passes, want %d", calls, want)
+		// It stops on attempts or on the deadline, whichever comes first.
+		// Either way, it retried, and it stayed within the deadline plus the
+		// overrun of one pass (a commit plus a readback here).
+		if max := len(hostOverlayReadbackBackoff) + 1; calls < 2 || calls > max {
+			t.Errorf("readback ran %d passes, want 2..%d", calls, max)
+		}
+		if limit := hostOverlayReadbackDeadline + 100*time.Millisecond; elapsed > limit {
+			t.Errorf("readback under churn took %v, more than %v", elapsed, limit)
+		}
+	})
+
+	t.Run("a multi-master overlay reads only the sets its rules reference", func(t *testing.T) {
+		in.overlayReadbackBetweenReadsFn = nil
+		multi := CanonicalHostInputFenceOverlay(HostInputFenceOverlay{
+			MasterSet: []string{"st0", "st1", "st2"}, Generation: 9, PermitEpoch: 3, CloseRequestSeq: 4,
+			CloseRequestKey: "9/[xfrmi:st0,st1,st2]", WatchGeneration: 9, State: "CLOSING",
+		})
+		// Many unrelated ifname sets beside it: the screen-flood views below
+		// declare named sets, and the ingress scoping adds more.
+		spec := largeHostInboundSpec12128(24)
+		spec.Overlay = &multi
+		if err := in.InstallHostInbound(spec); err != nil {
+			t.Fatalf("install multi-master fenced table: %v", err)
+		}
+		c, err := nftables.New()
+		if err != nil {
+			t.Fatalf("conn: %v", err)
+		}
+		live, err := c.GetRules(tbl, chain)
+		if err != nil {
+			t.Fatalf("read live chain: %v", err)
+		}
+		if refs := hostOverlayReferencedSets(live, HostInputFenceOverlayCounterName(multi)); len(refs) == 0 {
+			t.Fatal("fixture: the multi-master overlay rule references no set, so the referenced-set read is not exercised")
+		}
+		if err := in.VerifyHostInboundOverlay(multi); err != nil {
+			t.Errorf("multi-master overlay readback: %v", err)
+		}
+		other := multi
+		other.MasterSet = []string{"st0", "st1"}
+		if err := in.VerifyHostInboundOverlay(CanonicalHostInputFenceOverlay(other)); err == nil {
+			t.Error("readback accepted a different master set for the multi-master overlay")
 		}
 	})
 	in.overlayReadbackBetweenReadsFn = nil

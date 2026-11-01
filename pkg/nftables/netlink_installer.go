@@ -206,14 +206,13 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	}
 	// #18721: every read below must see ONE ruleset, so the whole readback is
 	// bracketed by the nf_tables generation (readAtStableNftGeneration).
-	return readAtStableNftGeneration(hostOverlayReadbackBackoff, time.Sleep,
+	return readAtStableNftGeneration(hostOverlayReadbackBackoff, hostOverlayReadbackDeadline, time.Now, time.Sleep,
 		func() (uint32, error) { return readNftGeneration(c) },
 		func() error { return in.verifyHostInboundOverlayOnce(c, overlay) })
 }
 
 // hostOverlayReadbackBackoff is the pause before each retry of the
-// generation-bracketed overlay readback (#18721). It allows 5 attempts and at
-// most 132 ms of pausing per readback.
+// generation-bracketed overlay readback (#18721). It allows 5 attempts.
 //
 // The generation counts EVERY commit in the namespace, xpfd's own included:
 // the IPsec divert, the transit barrier, the forward fence and the early-input
@@ -223,30 +222,35 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 // every attempt and fail an operator's commit closed. The steps grow (2, 10,
 // 40, 80 ms), so a burst of a few ms is waited out on the second or third
 // attempt and one of tens of ms by the fourth or fifth. Exhaustion still
-// fails closed.
-//
-// COUPLED to pkg/daemon's transferPreActivateLockWait (500 ms). The pause runs
-// under applySem, and HA transfer pre-activation waits that long for applySem
-// before it gives up make-before-break. The IPsec hold path can make two
-// readbacks (verify, then reinstall and verify again), so the bound is
-// 2 x (pause + attempts x per-pass read allowance) + 100 ms headroom < the
-// wait. pkg/daemon's TestOverlayReadbackFitsTransferPreActivateWait18721
-// enforces it from both real constants (via HostOverlayReadbackBudget), so
-// raising either one fails that test.
+// fails closed. The total is bounded by hostOverlayReadbackDeadline, not by
+// these steps.
 var hostOverlayReadbackBackoff = []time.Duration{
 	2 * time.Millisecond, 10 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond,
 }
 
-// HostOverlayReadbackBudget reports the most one VerifyHostInboundOverlay can
-// spend pausing between attempts (the sum of hostOverlayReadbackBackoff), and
-// its attempt count. pkg/daemon pins this against transferPreActivateLockWait
-// (#18721); see hostOverlayReadbackBackoff.
-func HostOverlayReadbackBudget() (pause time.Duration, attempts int) {
-	for _, d := range hostOverlayReadbackBackoff {
-		pause += d
-	}
-	return pause, len(hostOverlayReadbackBackoff) + 1
-}
+// hostOverlayReadbackDeadline bounds one VerifyHostInboundOverlay in wall time:
+// passes, pauses and all (readAtStableNftGeneration stops before a retry that
+// would overrun it, using the previous pass's measured duration as the
+// estimate).
+//
+// COUPLED to pkg/daemon's transferPreActivateLockWait (500 ms). The readback
+// runs under applySem, and HA transfer pre-activation waits that long for
+// applySem before it gives up make-before-break. The binding path is the
+// short applySem holder reconcileIpsecHostInputFence, which makes at most two
+// readbacks per hold. So 2 x this deadline + 100 ms headroom must stay below
+// the wait: 2 x 190 + 100 = 480 < 500. pkg/daemon's
+// TestOverlayReadbackFitsTransferPreActivateWait18721 enforces that from the
+// real constants (via HostOverlayReadbackDeadline). An assumed per-pass cost
+// could not hold that bound: a pass on the canonical HA config measured
+// 45-60 ms on average, against 1 ms on a test table. The commit-time hold
+// (holdIpsecHostInputFenceForDivertTransition) can stack more readbacks, but
+// commit holds already run for seconds and are outside this invariant.
+const hostOverlayReadbackDeadline = 190 * time.Millisecond
+
+// HostOverlayReadbackDeadline reports hostOverlayReadbackDeadline, the
+// wall-clock bound on one VerifyHostInboundOverlay. pkg/daemon pins it against
+// transferPreActivateLockWait (#18721).
+func HostOverlayReadbackDeadline() time.Duration { return hostOverlayReadbackDeadline }
 
 // verifyHostInboundOverlayOnce is one unbracketed pass of the overlay readback.
 func (in *netlinkInstaller) verifyHostInboundOverlayOnce(c *nftables.Conn, overlay HostInputFenceOverlay) error {
@@ -270,23 +274,6 @@ func (in *netlinkInstaller) verifyHostInboundOverlayOnce(c *nftables.Conn, overl
 	if len(overlay.MasterSet) == 0 && len(overlay.MasterSlavePairs) == 0 {
 		return nil
 	}
-	sets, err := c.GetSets(tbl)
-	if err != nil {
-		return fmt.Errorf("read host overlay sets: %w", err)
-	}
-	setNames := map[string][]string{}
-	for _, set := range sets {
-		if set.KeyType.Name != "ifname" {
-			continue
-		}
-		elements, err := c.GetSetElements(set)
-		if err != nil {
-			return fmt.Errorf("read host overlay set %q: %w", set.Name, err)
-		}
-		for _, element := range elements {
-			setNames[set.Name] = append(setNames[set.Name], string(bytes.TrimRight(element.Key, "\x00")))
-		}
-	}
 	rules, err := c.GetRules(tbl, &nftables.Chain{Name: "input", Table: tbl})
 	if err != nil {
 		return fmt.Errorf("read host overlay rules: %w", err)
@@ -308,7 +295,55 @@ func (in *netlinkInstaller) verifyHostInboundOverlayOnce(c *nftables.Conn, overl
 		}
 		kernelExprs[i] = names
 	}
+	// Read only the ifname sets the overlay rules (the marker-carrying rules)
+	// reference. A full table has dozens of ifname sets, and reading all of them
+	// made each readback pass several times slower (#18723 fold 6). This cannot
+	// produce a false pass: a set the decode needs but did not read leaves its
+	// masters unresolved, and that is a mismatch.
+	setNames := map[string][]string{}
+	for _, name := range hostOverlayReferencedSets(rules, marker) {
+		set, err := c.GetSetByName(tbl, name)
+		if err != nil {
+			return fmt.Errorf("read host overlay set %q: %w", name, err)
+		}
+		if set.KeyType.Name != "ifname" {
+			continue
+		}
+		elements, err := c.GetSetElements(set)
+		if err != nil {
+			return fmt.Errorf("read host overlay set %q: %w", name, err)
+		}
+		for _, element := range elements {
+			setNames[name] = append(setNames[name], string(bytes.TrimRight(element.Key, "\x00")))
+		}
+	}
 	return verifyHostOverlayRuleChain(rules, kernelExprs, setNames, marker, overlay)
+}
+
+// hostOverlayReferencedSets returns, in first-seen order, the set names the
+// lookups of the marker-carrying (overlay) rules reference.
+func hostOverlayReferencedSets(rules []*nftables.Rule, marker string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, rule := range rules {
+		marked := false
+		for _, e := range rule.Exprs {
+			if o, ok := e.(*expr.Objref); ok && o.Name == marker {
+				marked = true
+				break
+			}
+		}
+		if !marked {
+			continue
+		}
+		for _, e := range rule.Exprs {
+			if l, ok := e.(*expr.Lookup); ok && !seen[l.SetName] {
+				seen[l.SetName] = true
+				out = append(out, l.SetName)
+			}
+		}
+	}
+	return out
 }
 
 // verifyHostOverlayRuleChain judges the input chain's rules, in kernel order,

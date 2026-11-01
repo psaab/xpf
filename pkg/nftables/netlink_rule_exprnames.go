@@ -209,22 +209,36 @@ func decodeNftGeneration(msgs []netlink.Message) (uint32, error) {
 // readAtStableNftGeneration runs read between two generation reads and returns
 // read's verdict only if no commit published a new generation in between.
 // Otherwise it pauses for the next backoff step and retries: len(backoff)+1
-// attempts in all. If the ruleset is still moving after the last one, it logs
-// a Warn and fails closed (#18721). See readNftGeneration for the residual
-// window this cannot see.
+// attempts in all, inside a wall-clock deadline (#18721).
+//
+// Before each retry it stops when elapsed + the next pause + the previous
+// pass's measured duration would exceed deadline. The previous pass is the
+// estimate for the next one. That bounds the whole readback at run time,
+// whatever the table size and host load, instead of trusting an assumed
+// per-pass cost. If it runs out of attempts or of deadline, it logs a Warn and
+// fails closed. See readNftGeneration for the residual window this cannot see.
 //
 // The fence readback reads the ruleset several times: the marker object, the
 // sets, GetRules, and the raw expression-name dump. A writer outside xpf could
 // otherwise replace a rule between GetRules and the dump. NLM_F_REPLACE keeps
 // the handle, so both views would describe different rules under one handle,
 // and a kind-identical rule with ACCEPT in place of DROP would pass both checks.
-func readAtStableNftGeneration(backoff []time.Duration, sleep func(time.Duration), gen func() (uint32, error), read func() error) error {
+func readAtStableNftGeneration(backoff []time.Duration, deadline time.Duration, now func() time.Time, sleep func(time.Duration), gen func() (uint32, error), read func() error) error {
 	attempts := len(backoff) + 1
+	start := now()
 	var first, before, after uint32
+	var lastPass time.Duration
+	made, stoppedAtDeadline := 0, false
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
-			sleep(backoff[attempt-1])
+			pause := backoff[attempt-1]
+			if now().Sub(start)+pause+lastPass > deadline {
+				stoppedAtDeadline = true
+				break
+			}
+			sleep(pause)
 		}
+		passStart := now()
 		var err error
 		if before, err = gen(); err != nil {
 			return err
@@ -236,17 +250,23 @@ func readAtStableNftGeneration(backoff []time.Duration, sleep func(time.Duration
 		if after, err = gen(); err != nil {
 			return err
 		}
+		lastPass = now().Sub(passStart)
+		made++
 		if before == after {
 			return verdict
 		}
 	}
 	// Commits observed over the whole run, pauses included: the generation is
 	// a commit counter, so the delta is the number of transactions that landed
-	// (uint32 subtraction is wrap-safe). Every attempt saw at least one, so
-	// the count is always at least attempts.
+	// (uint32 subtraction is wrap-safe).
 	commits := after - first
+	elapsed := now().Sub(start)
+	stop := "attempts exhausted"
+	if stoppedAtDeadline {
+		stop = fmt.Sprintf("stopped at the %v deadline", deadline)
+	}
 	slog.Warn("host overlay readback: the nftables ruleset kept changing; failing closed",
-		"attempts", attempts, "commits_observed", commits,
+		"attempts", made, "commits_observed", commits, "elapsed", elapsed, "stop", stop,
 		"first_generation", first, "last_generation", after)
-	return fmt.Errorf("host overlay readback: the nftables ruleset changed during each of %d attempts (%d commits observed, generation %d -> %d); failing closed", attempts, commits, first, after)
+	return fmt.Errorf("host overlay readback: the nftables ruleset changed during each of %d attempts (%d commits observed, generation %d -> %d, %v elapsed, %s); failing closed", made, commits, first, after, elapsed, stop)
 }

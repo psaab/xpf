@@ -35,11 +35,12 @@ var errTransferPreActivationUnsupported = errors.New("dataplane has no transfer 
 // operator's failover command; a commit in flight may hold the semaphore for
 // seconds, and an apply that is stuck would otherwise hang the request.
 //
-// COUPLED to pkg/nftables hostOverlayReadbackBackoff (#18721). The host-input
-// overlay readback backs off under applySem, so its worst case (the IPsec hold
-// path's two readbacks) must leave this wait 100 ms of headroom.
-// TestOverlayReadbackFitsTransferPreActivateWait18721 enforces it; lowering
-// this wait or raising that backoff fails the test.
+// COUPLED to pkg/nftables hostOverlayReadbackDeadline (#18721). The host-input
+// overlay readback runs under applySem. Its worst case is the two readbacks
+// reconcileIpsecHostInputFence can make in one hold, each bounded by that
+// deadline, and it must leave this wait 100 ms of headroom.
+// TestOverlayReadbackFitsTransferPreActivateWait18721 enforces it: lowering
+// this wait or raising that deadline fails the test.
 const transferPreActivateLockWait = 500 * time.Millisecond
 
 var errTransferPreActivationLockBusy = errors.New("apply semaphore busy")
