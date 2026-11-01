@@ -44,9 +44,11 @@ func EffectivePriority(basePriority, weight int) int {
 //   - the #12164 dataplane-arm-debt yield and committed-pin release,
 //     which compare the SCALED EffectivePriority so a fresh node at
 //     the weight-1 arm floor (EffectivePriority truncates to 0 for
-//     small priorities) still loses to a healthy peer. That arm is
-//     non-preempt-only today, but the preempt pin-release conjunct
-//     shares the scaled comparison and must keep it.
+//     small priorities) still loses to a healthy peer. The yield
+//     fires in BOTH modes now: the non-preempt yield and the #16739
+//     arm-debt exception under preempt (verifiedArmDebtPeer below),
+//     and the preempt pin-release conjunct shares the same scaled
+//     comparison, so all three must keep it.
 //
 // Both callers must therefore keep using EffectivePriority for the
 // arm-debt ordering and this helper only for the preempt comparison.

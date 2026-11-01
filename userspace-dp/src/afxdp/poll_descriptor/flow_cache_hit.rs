@@ -693,8 +693,19 @@ pub(super) fn stage_flow_cache_hit(
             flow_state.flow_cache.reclassify_hit_as_miss();
             return FlowCacheOutcome::FallThrough;
         }
-        let session_live = if ttl_would_expire {
-            fabric_session_live || sessions.session_is_live_at(&flow.forward_key, now_ns)
+        // #18656: the probe's verdict names which refusal fired, so a dead
+        // backing session is counted under its own eviction arm below.
+        // The TTL liveness-only probe does not attribute. When the probe
+        // served a post-NAT forward tuple through the forward-wire scope it
+        // names the canonical key it recorded its undo/deferred work under;
+        // the admit/rollback/transition calls below must use that key.
+        let mut probe_wire_canonical: Option<crate::session::SessionKey> = None;
+        let probe_verdict = if ttl_would_expire {
+            if fabric_session_live || sessions.session_is_live_at(&flow.forward_key, now_ns) {
+                crate::session::ProbeHitVerdict::Live
+            } else {
+                crate::session::ProbeHitVerdict::NoRecord
+            }
         } else {
             // HA completion is published only after output-filter/policer
             // admission below; probe_hit itself would emit it immediately.
@@ -705,7 +716,7 @@ pub(super) fn stage_flow_cache_hit(
             // the replay below can still drop this packet — the same two
             // inputs the drop test reads (`tx_selection.drop`, and a policer,
             // without which `policer_action.drop` is never set).
-            sessions.probe_hit_deferring_state_update_with_ack_rollback(
+            sessions.probe_hit_deferring_state_update_with_ack_rollback_verdict(
                 &flow.forward_key,
                 now_ns,
                 meta.pkt_len as u64,
@@ -715,15 +726,24 @@ pub(super) fn stage_flow_cache_hit(
                 ack,
                 cached_descriptor.tx_selection.drop
                     || !cached_descriptor.tx_selection.three_color_policers.is_empty(),
+                &mut probe_wire_canonical,
             )
         };
-        if !session_live {
+        let probe_session_key = probe_wire_canonical.as_ref().unwrap_or(&flow.forward_key);
+        if !probe_verdict.is_live() {
+            let arm = match (ttl_would_expire, probe_verdict) {
+                (true, _) => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDead,
+                (false, crate::session::ProbeHitVerdict::IdleCrossed) => {
+                    crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDeadIdleCrossed
+                }
+                (false, _) => {
+                    crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDeadNoRecord
+                }
+            };
             flow_state
                 .flow_cache
                 .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
-            flow_state.flow_cache.reclassify_hit_as_miss_arm(
-                crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDead,
-            );
+            flow_state.flow_cache.reclassify_hit_as_miss_arm(arm);
             return FlowCacheOutcome::FallThrough;
         }
         // #3779: TTL/hop-limit check BEFORE any egress side effect. The slow
@@ -880,7 +900,7 @@ pub(super) fn stage_flow_cache_hit(
             // locally. A dropped packet must leave neither behind, and
             // its withheld HA Update is discarded, never published.
             sessions.rollback_dropped_probe_hit(
-                &flow.forward_key,
+                probe_session_key,
                 meta.pkt_len as u64,
                 meta.tcp_flags,
             );
@@ -913,7 +933,7 @@ pub(super) fn stage_flow_cache_hit(
         }
         // The packet survived the cached output-filter/policer verdicts;
         // only now may a completing ACK's HA transition be published.
-        sessions.emit_probe_hit_state_update(&flow.forward_key);
+        sessions.emit_probe_hit_state_update(probe_session_key);
         // #16217 (GLM B1, completed): ALL cache-hit shared restamps run
         // ONLY behind the handshake stage transition into Established
         // (`take_probe_stage_transition`, consumed exactly once on the
@@ -931,7 +951,7 @@ pub(super) fn stage_flow_cache_hit(
         // reverse tuple cloned the reverse shared row into a forward-wire
         // alias.
         if let Some((stage_forward_key, stage_forward_nat)) =
-            sessions.take_probe_stage_transition_forward(&flow.forward_key)
+            sessions.take_probe_stage_transition_forward(probe_session_key)
         {
             // #16217: snapshot the serving pair's ACTUAL forward +
             // reverse packet counts onto the shared rows — the
@@ -1052,11 +1072,13 @@ pub(super) fn stage_flow_cache_hit(
             }
         }
         // #2501/#2749/#14945: this forwarded packet was already accounted
-        // against the session by the fused `probe_hit` above (keyed by its
-        // OWN tuple `flow.forward_key`, direction derived from the resolved
-        // entry, both directions folded onto the canonical forward entry,
-        // TCP control bits + DSCP observed for the SESSION_CLOSE RT_FLOW
-        // frame). No second session probe runs here.
+        // against the session by the fused `probe_hit` above (resolved from
+        // its OWN tuple `flow.forward_key`, or — #18656 — from the canonical
+        // key behind that tuple in the forward-wire scope, `probe_session_key`;
+        // direction derived from the resolved entry, both directions folded
+        // onto the canonical forward entry, TCP control bits + DSCP observed
+        // for the SESSION_CLOSE RT_FLOW frame). No second session probe runs
+        // here.
         let mut recycle_now = true;
         if matches!(
             cached_decision.resolution.disposition,
