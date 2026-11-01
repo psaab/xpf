@@ -1971,33 +1971,155 @@ assert_helper_status 2 ha_host_inbound_denies_report "$FS_PRE0"
 
 # Mutation cells: each defence above must be load-bearing. A mutant is one lib
 # function's own text with one edit, sourced in a subshell over the real lib;
-# the named row must FLIP. An edit that matches nothing fails here (a no-op
-# mutant would score as an escape for the wrong reason).
-lib_fn_mutant() { # <fn> <name> <old> <new> -> path of the mutated function text
-	local fn="$1" out="${TMP_DIR}/g1-mutant-$2.sh"
-	python3 - "${ROOT}/test/incus/ha-assurance-lib.sh" "$fn" "$out" "$3" "$4" <<'PY' || return 1
+# the named row must FLIP.
+#
+# lib_fn_mutant <fn> <name> <old> <new> -> path of the mutated function text.
+# It REFUSES (returns 1, reason on stderr) rather than hand back a mutant
+# that could score for the wrong reason (#18694):
+#   - <old> does not occur exactly once in the function. A no-op mutant
+#     would score as an escape for the wrong reason.
+#   - The extracted text is not the WHOLE function. The cut ends at the first
+#     column-0 `}`, which a heredoc inside the function can contain (a Python
+#     dict, say: #18690 hit it). A cut-short mutant fails to source, so a row
+#     expecting a non-zero status would be "killed" by the breakage rather
+#     than by the edit. Checked by comparing `declare -f <fn>` of the
+#     extracted text with `declare -f <fn>` after sourcing the unmodified lib,
+#     each in its own subshell.
+#   - The edited text does not parse (`bash -n`) or no longer defines <fn>.
+# Every built mutant's name is recorded in lib-fn-mutants.built, which the
+# end-of-file census reconciles. LIB_FN_MUTANT_LIB overrides the lib (the
+# refusal fixture below).
+lib_fn_mutant() {
+	local fn="$1" name="$2" old="$3" new="$4"
+	local lib="${LIB_FN_MUTANT_LIB:-${ROOT}/test/incus/ha-assurance-lib.sh}"
+	local orig="${TMP_DIR}/lib-fn-mutant-${name}.orig.sh" out="${TMP_DIR}/lib-fn-mutant-${name}.sh" want got
+	python3 - "$lib" "$fn" "$orig" "$out" "$old" "$new" <<'PY' || return 1
 import pathlib, re, sys
-lib, fn, out, old, new = sys.argv[1:]
+lib, fn, orig, out, old, new = sys.argv[1:]
 text = pathlib.Path(lib).read_text(encoding="utf-8")
 m = re.search(r"^" + re.escape(fn) + r"\(\) \{\n.*?^\}\n", text, re.M | re.S)
-if not m or m.group(0).count(old) != 1:
+if not m:
+    print(f"lib_fn_mutant: no function {fn} in {lib}", file=sys.stderr)
     raise SystemExit(1)
-pathlib.Path(out).write_text(m.group(0).replace(old, new), encoding="utf-8")
+body = m.group(0)
+if body.count(old) != 1:
+    print(f"lib_fn_mutant: the edit occurs {body.count(old)} times in {fn}, want exactly once", file=sys.stderr)
+    raise SystemExit(1)
+pathlib.Path(orig).write_text(body, encoding="utf-8")
+pathlib.Path(out).write_text(body.replace(old, new), encoding="utf-8")
 PY
+	want="$(bash -c 'source "$1" >/dev/null 2>&1; declare -f "$2"' _ "$lib" "$fn" 2>/dev/null)" || want=""
+	got="$(bash -c 'source "$1" >/dev/null 2>&1 && declare -f "$2"' _ "$orig" "$fn" 2>/dev/null)" || got=""
+	if [[ -z "$want" || "$got" != "$want" ]]; then
+		printf 'lib_fn_mutant %s: the extracted %s is not the whole function (cut short, e.g. at a column-0 } inside a heredoc)\n' \
+			"$name" "$fn" >&2
+		return 1
+	fi
+	if ! bash -n "$out" 2>/dev/null; then
+		printf 'lib_fn_mutant %s: the edited %s does not parse\n' "$name" "$fn" >&2
+		return 1
+	fi
+	if ! bash -c 'source "$1" >/dev/null 2>&1 && declare -F "$2" >/dev/null' _ "$out" "$fn"; then
+		printf 'lib_fn_mutant %s: the edited text no longer defines %s\n' "$name" "$fn" >&2
+		return 1
+	fi
+	printf '%s\n' "$name" >>"${TMP_DIR}/lib-fn-mutants.built"
 	printf '%s' "$out"
 }
+# lib_fn_noop_control <fn> <name> <anchor> -> path of an UNEDITED mutant: the
+# same extract, check and source path, with <anchor> replaced by itself.
+lib_fn_noop_control() { lib_fn_mutant "$1" "$2" "$3" "$3"; }
+# assert_lib_fn_control_holds <name> <fn> <anchor> <want-rc> <reason or ''> <cmd...>
+# Any mutant family runs one of its rows under the no-op control and requires
+# the row to hold, so a flip under a real mutant is the edit, not the path.
+assert_lib_fn_control_holds() {
+	local name="$1" fn="$2" anchor="$3" want="$4" needle="$5" control got
+	shift 5
+	control="$(lib_fn_noop_control "$fn" "control-${name}" "$anchor")" ||
+		fail_test "no-op control ${name}: lib_fn_mutant refused ${fn} (see stderr)"
+	# shellcheck source=/dev/null
+	if ( source "$control"; "$@" ) >"${OUT}" 2>"${ERR}"; then got=0; else got=$?; fi
+	[[ "$got" == "$want" ]] || fail_test "no-op control ${name}: unedited ${fn} scored ${got}, want ${want}"
+	if [[ -n "$needle" ]]; then
+		assert_contains "$(<"${ERR}")" "$needle" "no-op control ${name}"
+	fi
+}
+
+printf 'lib_fn_mutant refuses extractions that could score for the wrong reason (#18694)\n'
+LIB_FN_FIXTURE="${TMP_DIR}/lib-fn-mutant-fixture.sh"
+cat >"$LIB_FN_FIXTURE" <<'FIXTURE'
+fixture_heredoc_brace() {
+	python3 - <<'PY'
+values = {
+    "answer": 1,
+}
+print(values["answer"])
+PY
+	return 0
+}
+
+fixture_plain() {
+	local answer=1
+	return "$((answer - 1))"
+}
+
+fixture_redefined() {
+	return 0
+}
+
+fixture_redefined() {
+	return 1
+}
+FIXTURE
+# A mis-cut that PARSES, so only the extent check can refuse it (bash -n
+# cannot): the cut takes the FIRST
+# definition, but the sourced lib keeps the LAST, so a mutant of the stale
+# copy would be scored against behaviour the lib never runs.
+if LIB_FN_MUTANT_LIB="$LIB_FN_FIXTURE" lib_fn_mutant fixture_redefined stale \
+	'return 0' 'return 2' >"${OUT}" 2>"${ERR}"; then
+	fail_test 'lib_fn_mutant accepted a stale first definition of a redefined function'
+fi
+assert_contains "$(<"${ERR}")" 'is not the whole function' 'stale duplicate definition refused by the extent check'
+# The cut stops at the dict's column-0 `}`. The anchor sits INSIDE the cut,
+# so the exactly-once check passes and only the extent check can refuse it.
+if LIB_FN_MUTANT_LIB="$LIB_FN_FIXTURE" lib_fn_mutant fixture_heredoc_brace truncated \
+	'"answer": 1' '"answer": 2' >"${OUT}" 2>"${ERR}"; then
+	fail_test 'lib_fn_mutant accepted an extraction cut short at a column-0 } inside a heredoc'
+fi
+assert_contains "$(<"${ERR}")" 'is not the whole function' 'truncated extraction refused by the extent check'
+# An edit that breaks the syntax is refused, not scored.
+if LIB_FN_MUTANT_LIB="$LIB_FN_FIXTURE" lib_fn_mutant fixture_plain unparsable \
+	'return "$((answer - 1))"' 'return "$((answer - 1)"' >"${OUT}" 2>"${ERR}"; then
+	fail_test 'lib_fn_mutant accepted a mutant that does not parse'
+fi
+assert_contains "$(<"${ERR}")" 'does not parse' 'unparsable mutant refused'
+# A whole function is accepted, its mutant flips, and its no-op control holds.
+LIB_FN_PLAIN="$(LIB_FN_MUTANT_LIB="$LIB_FN_FIXTURE" lib_fn_mutant fixture_plain plain 'answer - 1' 'answer')" ||
+	fail_test 'lib_fn_mutant refused a whole fixture function'
+# shellcheck source=/dev/null
+if ( source "$LIB_FN_PLAIN"; fixture_plain ); then
+	fail_test 'the fixture_plain mutant did not flip its result'
+fi
+# shellcheck source=/dev/null
+LIB_FN_MUTANT_LIB="$LIB_FN_FIXTURE" assert_lib_fn_control_holds fixture-plain fixture_plain 'answer - 1' 0 '' \
+	fixture_plain
 # assert_g1_mutant_flips <name> <want-status-under-mutant> <verdict-fn> <lib-fn> <old> <new> <row...>
 assert_g1_mutant_flips() {
 	local name="$1" want="$2" verdict="$3" fn="$4" old="$5" new="$6" mutant got
 	shift 6
-	mutant="$(lib_fn_mutant "$fn" "$name" "$old" "$new")" ||
-		fail_test "group 1 mutant ${name}: edit matched nothing in ${fn} (anchor moved?)"
+	mutant="$(lib_fn_mutant "$fn" "g1-$name" "$old" "$new")" ||
+		fail_test "group 1 mutant ${name}: lib_fn_mutant refused ${fn} (see stderr)"
 	[[ -s "$mutant" ]] || fail_test "group 1 mutant ${name}: no mutant text"
 	g1_row "$@"
 	# shellcheck source=/dev/null
 	if ( source "$mutant"; "$verdict" ) >/dev/null 2>&1; then got=0; else got=$?; fi
 	[[ "$got" == "$want" ]] || fail_test "group 1 mutant ${name} ESCAPED: row $* scored ${got}, want ${want}"
 }
+# No-op controls: the guarded path leaves a PASS and a FAIL row as they are.
+g1_row 20 15 0 41 39 0
+assert_lib_fn_control_holds g1-pass ha_pair_counter_budget_verdict '(( total <= limit ))' 0 '' g1a_verdict
+g1_row 20 15 0 81 39 40
+assert_lib_fn_control_holds g1-fail ha_pair_counter_budget_verdict '(( total <= limit ))' 1 '' g1a_verdict
 # Strict bound: row J at exactly 4 flips PASS -> FAIL.
 assert_g1_mutant_flips strict 1 g1a_verdict ha_pair_counter_budget_verdict '(( total <= limit ))' '(( total < limit ))' 20 15 2 41 39 2
 # node1 ignored: row C (40 drops on node1) flips FAIL -> PASS.
@@ -2223,14 +2345,12 @@ standby_row 2 'phase' 'VOID identity phase mismatch' "$STANDBY_ID" phase-post
 # reason) must stop holding under it.
 # g7_row_holds_under <name> <lib-fn> <old> <new> <row-rc> <row-reason or ''> <file> [<phase>]
 # Returns 0 when the row's assertion still holds with the edited function.
-# The mutant must parse: a truncated extraction would otherwise "flip" every
-# row for the wrong reason.
+# lib_fn_mutant refuses a cut-short or unparsable mutant (#18694).
 g7_row_holds_under() {
 	local name="$1" fn="$2" old="$3" new="$4" rc="$5" needle="$6" file="$7" phase="${8:-mid}" mutant got
 	mutant="$(lib_fn_mutant "$fn" "g7-$name" "$old" "$new")" ||
-		fail_test "group 7 mutant ${name}: edit matched nothing in ${fn} (anchor moved?)"
+		fail_test "group 7 mutant ${name}: lib_fn_mutant refused ${fn} (see stderr)"
 	[[ -s "$mutant" ]] || fail_test "group 7 mutant ${name}: no mutant text"
-	bash -n "$mutant" || fail_test "group 7 mutant ${name}: the edited ${fn} does not parse"
 	# shellcheck source=/dev/null
 	if ( source "$mutant"; ha_rg_standby_status_verdict "$file" manual-rg1-failback "$phase" node1 1 ) \
 		>"${OUT}" 2>"${ERR}"; then got=0; else got=$?; fi
@@ -2242,14 +2362,13 @@ assert_g7_mutant_flips() {
 		fail_test "group 7 mutant ${1} ESCAPED: its row still scored ${5}${6:+ with '${6}'}"
 	fi
 }
-# Control: the same extract-and-source path with a no-op edit leaves the
-# PASS and the identity rows holding, so a flip below is the edit itself.
+# No-op controls: the guarded path leaves the PASS and the identity rows
+# holding, so a flip below is the edit itself.
 derive_standby "$STANDBY_ID"
-g7_row_holds_under control-pass ha_standby_status_verdict 'if ready <= 0:' 'if ready <= 0:' 0 '' "$STANDBY_ID" ||
-	fail_test 'group 7 mutant control: an unedited ha_standby_status_verdict flipped the PASS row'
-g7_row_holds_under control-identity ha_rg_standby_status_verdict 'ha_standby_status_verdict "$1" "$5"' \
-	'ha_standby_status_verdict "$1" "$5"' 2 'phase' "$STANDBY_ID" phase-post ||
-	fail_test 'group 7 mutant control: an unedited ha_rg_standby_status_verdict flipped the identity row'
+assert_lib_fn_control_holds g7-pass ha_standby_status_verdict 'if ready <= 0:' 0 '' \
+	ha_rg_standby_status_verdict "$STANDBY_ID" manual-rg1-failback mid node1 1
+assert_lib_fn_control_holds g7-identity ha_rg_standby_status_verdict 'ha_standby_status_verdict "$1" "$5"' 2 'phase' \
+	ha_rg_standby_status_verdict "$STANDBY_ID" manual-rg1-failback phase-post node1 1
 # R2: the pre-#18686 own-line parser. The real capture PASS row goes VOID.
 derive_standby "$STANDBY_ID"
 assert_g7_mutant_flips ownline ha_standby_status_verdict \
@@ -2845,6 +2964,16 @@ for lan_state in lan-running lan-stopped; do
 	assert_eq "$(reach_count "$TGT_WIRING" iperf_target_claim_cell "$lan_state")" 1 \
 		"test-connectivity test_cluster reaches iperf_target_claim_cell exactly once (${lan_state})"
 done
+
+# lib_fn_mutant census (#18694): every mutant and no-op control above was
+# built through the guarded path, and no two cells share a name (a reused
+# name would overwrite another cell's mutant file).
+LIB_FN_BUILT="${TMP_DIR}/lib-fn-mutants.built"
+[[ -s "$LIB_FN_BUILT" ]] || fail_test 'lib_fn_mutant census: no mutant was built'
+LIB_FN_DUPLICATES="$(sort "$LIB_FN_BUILT" | uniq -d)"
+[[ -z "$LIB_FN_DUPLICATES" ]] || fail_test "lib_fn_mutant census: reused cell names: ${LIB_FN_DUPLICATES//$'\n'/ }"
+printf 'lib_fn_mutant census: %s cells built through the guarded path: %s\n' \
+	"$(wc -l <"$LIB_FN_BUILT")" "$(tr '\n' ' ' <"$LIB_FN_BUILT")"
 
 printf 'PASS ha-assurance-selftest: M2.4, RG1 Groups 1-8, N6/N12 pins, sticky FAIL, blind markers, gate dominance, set-e VOID guard\n'
 
