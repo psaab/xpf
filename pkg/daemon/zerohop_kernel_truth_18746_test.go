@@ -116,3 +116,36 @@ func TestHandoffReverifyRefusesAZeroHopOnlyTable18746(t *testing.T) {
 		t.Errorf("handoff over an enforcing table = %v (barrier present=%v); want it to proceed with the barrier removed", err, present)
 	}
 }
+
+// emptyLo0Renderer18746 stands in for a renderer that drifts from the
+// daemon's preflight: it installs an EMPTY lo0 spec through the REAL netlink
+// installer and reports that installer's real count. The daemon preflight
+// still predicts real rules.
+type emptyLo0Renderer18746 struct{ xnft.Installer }
+
+func (e emptyLo0Renderer18746) InstallLo0(xnft.Lo0FilterSpec) (int, error) {
+	return e.Installer.InstallLo0(xnft.Lo0FilterSpec{})
+}
+
+// #18746 fix 3, end to end: the daemon's empty-shell guard (daemon_nft.go,
+// "rendered no rules") keys on InstallLo0's count. Since #16841 an empty
+// render still carried the zero-hop rule and counted 1, so the guard could
+// never fire. The daemon then recorded an empty policy-accept shell as a real
+// operator filter (lo0Enforced) and installed no fence.
+func TestLo0EmptyShellGuardFiresOnTheRealInstaller18746(t *testing.T) {
+	installer := realKernelInstaller18746(t)
+	nftInstaller = emptyLo0Renderer18746{installer}
+	cfg := lo0FenceTestConfig()
+	d := &Daemon{}
+	err := d.applyLo0Filter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "rendered no rules") {
+		t.Fatalf("an empty real render = %v, want the daemon_nft.go zero-rule guard (\"rendered no rules\")", err)
+	}
+	if d.lo0Enforced.Load() {
+		t.Error("an empty policy-accept shell was recorded as a real lo0 filter")
+	}
+	// The guard's fail-closed step installs the cold-boot fence over the shell.
+	if enforcing, err := installer.TableEnforcing(xnft.Lo0TableName); err != nil || !enforcing {
+		t.Errorf("after the guard, the lo0 table must be the enforcing cold-boot fence: enforcing=%v, %v", enforcing, err)
+	}
+}

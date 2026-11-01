@@ -84,8 +84,10 @@ type Installer interface {
 	// InstallGapFence installs the #5789 additive coverage-gap fence.
 	InstallGapFence(spec GapFenceSpec) error
 	// InstallLo0 installs the lo0 loopback input filter (#3445/#3392) and
-	// reports how many kernel rules the spec lowered to. ZERO rules means the
-	// installed table is an empty `policy accept` shell that enforces NOTHING —
+	// reports how many OPERATOR rules the spec lowered to. The #16841 zero-hop
+	// rule, which every input chain carries, is not counted (#18746). ZERO
+	// rules means the installed table is an empty `policy accept` shell that
+	// enforces NOTHING —
 	// a filter name that resolves to no filter, a filter with no terms, or one
 	// whose every term lowers to zero rules (a Junos match-nothing scope). The
 	// caller must not record such an install as a real operator filter being
@@ -515,8 +517,10 @@ func (in *netlinkInstaller) InstallGapFence(spec GapFenceSpec) error {
 	return err
 }
 
-// InstallLo0 returns the rendered rule count alongside the error so the caller
-// can tell a real operator filter from an empty `policy accept` shell (#6529).
+// InstallLo0 returns the rendered operator-rule count (nlPlan.operatorRules:
+// every rule but the #16841 zero-hop rule, #18746) alongside the error, so the
+// caller can tell a real operator filter from an empty `policy accept` shell
+// (#6529).
 // The count comes from the ACTUAL build — nlPlan.rules, populated as each rule
 // is batched — so it can never drift from the lowering the way a second,
 // daemon-side "does this spec enforce anything?" predicate would.
@@ -569,11 +573,11 @@ func (in *netlinkInstaller) replaceTable(name string, priority nftables.ChainPri
 			return 0, errors.Join(flushErr, fmt.Errorf("nftables readback %s: %w", name, readbackErr))
 		}
 		if installed {
-			return len(p.rules), nil
+			return p.operatorRules(), nil
 		}
 		return 0, flushErr
 	}
-	return len(p.rules), nil
+	return p.operatorRules(), nil
 }
 
 func (in *netlinkInstaller) DeleteTable(name string) error {

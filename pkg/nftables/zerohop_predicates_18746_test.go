@@ -130,3 +130,37 @@ func TestTablePredicatesIgnoreOnlyTheZeroHopRule18746(t *testing.T) {
 		t.Fatal("fixture: unexpected table name")
 	}
 }
+
+// #18746 fix 3: InstallLo0's rule count is what the daemon's empty-shell guard
+// (daemon_nft.go, "rendered no rules") keys on. Since #16841 a match-nothing
+// lo0 render still emitted the zero-hop rule, so it counted 1 and the guard
+// could never fire.
+func TestLo0RuleCountExcludesTheZeroHopRule18746(t *testing.T) {
+	empty := newBuildPlan(t, Lo0TableName, lo0FilterPriority)
+	buildLo0FilterNetlink(empty, Lo0FilterSpec{})
+	if len(empty.rules) != 1 || empty.zeroHopRules != 1 {
+		t.Fatalf("fixture: an empty lo0 render should be just the zero-hop rule, got %d rules (%d zero-hop)", len(empty.rules), empty.zeroHopRules)
+	}
+	if got := empty.operatorRules(); got != 0 {
+		t.Errorf("an empty lo0 render counts %d operator rules, want 0", got)
+	}
+	real := newBuildPlan(t, Lo0TableName, lo0FilterPriority)
+	buildLo0FilterNetlink(real, Lo0FilterSpec{V4Terms: []Lo0FilterTerm{{Name: "deny-telnet", Protocols: []string{"tcp"}, DestinationPorts: []string{"23"}, Action: "discard"}}})
+	if got := real.operatorRules(); got < 1 || got != len(real.rules)-1 {
+		t.Errorf("a one-term lo0 render counts %d operator rules of %d, want all but the zero-hop rule", got, len(real.rules))
+	}
+	knob := newBuildPlan(t, Lo0TableName, lo0FilterPriority)
+	buildLo0FilterNetlink(knob, Lo0FilterSpec{NoIPv6RejectZeroHopLimit: true})
+	if got := knob.operatorRules(); got != 0 || len(knob.rules) != 0 {
+		t.Errorf("with the zero-hop knob set an empty render has %d rules (%d operator), want 0", len(knob.rules), got)
+	}
+}
+
+func TestInstallLo0ReportsZeroForAnEmptyRender18746(t *testing.T) {
+	requirePrivateNetns18721(t)
+	in := NewNetlinkInstaller()
+	t.Cleanup(func() { _ = in.DeleteTable(Lo0TableName) })
+	if rules, err := in.InstallLo0(Lo0FilterSpec{}); err != nil || rules != 0 {
+		t.Errorf("InstallLo0(empty) = %d, %v; want 0 operator rules", rules, err)
+	}
+}

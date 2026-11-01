@@ -83,6 +83,10 @@ type nlPlan struct {
 	// ruleChains records the target chain for each corresponding rules entry so
 	// an uncertain Flush can verify the complete installed table by readback.
 	ruleChains []string
+	// zeroHopRules counts the #16841 zero-hop rules among rules. They head every
+	// input chain and enforce no operator policy, so operatorRules excludes them
+	// (#18746).
+	zeroHopRules int
 	// counters records every declared counter-object name (in order) for the
 	// counter-declaration parity check.
 	counters []string
@@ -397,7 +401,19 @@ func EmitZeroHopLimitLocalDrop(p *nlPlan, admit bool) {
 	if admit {
 		return
 	}
+	before := len(p.rules)
 	p.rule().hopLimitZero().fibLocalOrAnycast().emit(verdictDrop()...)
+	if len(p.rules) > before {
+		p.zeroHopRules++
+	}
+}
+
+// operatorRules is the number of planned rules that carry operator policy:
+// every rule except the #16841 zero-hop rules (#18746). InstallLo0 reports it,
+// so a match-nothing render reads 0 and the daemon's empty-shell guard can
+// fire.
+func (p *nlPlan) operatorRules() int {
+	return len(p.rules) - p.zeroHopRules
 }
 
 // iifnameExcept appends `iifname != "<n>"` / `iifname != { .. }` — the

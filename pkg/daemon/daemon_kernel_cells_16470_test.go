@@ -48,6 +48,7 @@ var daemonKernelCells16470 = []string{
 	"TestHostInboundDHCPManagementVRFGapDelivery12127",
 	"TestHostInputFenceLiveReadbackAndRestore9506",
 	"TestKernelTruthDeclaresDriftOnAZeroHopOnlyTable18746",
+	"TestLo0EmptyShellGuardFiresOnTheRealInstaller18746",
 	"TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385",
 	"TestMgmtStaticECMPLifecycleInKernel12539",
 	"TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084",

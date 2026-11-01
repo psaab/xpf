@@ -39,7 +39,7 @@ needs the kernel `nf_tables` MODULE but no `nft` BINARY:
   addresses.
 - `InstallGapFence(GapFenceSpec)` — the #5789 additive coverage-gap fence,
   with per-zone WG accepts limited to uncovered addresses.
-- `InstallLo0(Lo0FilterSpec)` — the lo0 loopback input filter (#3445/#3392).
+- `InstallLo0(Lo0FilterSpec)` — the lo0 loopback input filter (#3445/#3392). It returns the number of operator rules it installed, not counting the #16841 zero-hop rule (#18746). A match-nothing filter therefore reads 0, and the daemon's empty-shell guard refuses it.
 - `DeleteTable(name)` — idempotent teardown (fail-closed on a real error).
 
 **Other `Installer` operations:**
