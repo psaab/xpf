@@ -188,13 +188,23 @@ impl CtSlicePairSet {
 ///   pair that completes just after a run is advanced at the next cycle
 ///   start, at most
 ///   max(CT_REFRESH_WINDOW_NS, ceil(slab / 2048) * CT_SLICE_INTERVAL_NS)
-///   later: 10 s at the default cap. That is inside the 20 s TCP opening
-///   window that replicas are reaped on. A const assert in
-///   `slice_pacing.rs` fails the build if the default cap or the windows
-///   would break this bound.
-/// - stays O(n + N) per run, taking the global shared-map mutexes a
-///   bounded number of times: batched restamps, `CtSlicePairSet` dedup,
-///   and one `shared_rows_stage_and_counts` pass for the whole emit set.
+///   later: 10 s at the default cap; HA imports can stretch it to about
+///   13 s. (`upsert_synced_with_origin` has no per-table cap, so with a
+///   correct peer a table peaks near 2x the cap when both nodes'
+///   populations meet: 128 slices. The only hard import bound, #5674's
+///   shared-map ceiling, is looser; see #18687.) That is inside the 20 s
+///   TCP opening window that replicas are reaped on, for a pair that
+///   completes early enough in its replica's window; one that completes
+///   late (a SYN retried at 15 s, say) can still be reaped first. A const
+///   assert in `slice_pacing.rs` fails the build if the default cap or
+///   the windows would break this bound.
+/// - stays O(n + N) per run. It takes the global shared-map mutexes for
+///   batched restamps, `CtSlicePairSet` dedup and one
+///   `shared_rows_stage_and_counts` pass for the whole emit set, plus one
+///   short acquisition of both maps per not-yet-complete forward row
+///   (`node_served_forward_slice` -> `shared_completion_evidence`). So
+///   acquisitions are O(n) per run; each hold is short, and the leg runs
+///   once per refresh cycle (#18662 tracks bounding it).
 ///
 /// The pre-fix per-key whole-map scan was O(n * N) under both mutexes,
 /// on every slice. At 4000 sessions it held them ~100% of the time and

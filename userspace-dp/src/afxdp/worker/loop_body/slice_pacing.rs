@@ -27,13 +27,18 @@ pub(super) const CT_REFRESH_SLICE_BUDGET: usize = 2048; // max slab slots per sl
 // right after that slice has its shared stage advanced at the next cycle start,
 // which is at most
 //     max(CT_REFRESH_WINDOW_NS, ceil(slab / CT_REFRESH_SLICE_BUDGET) * CT_SLICE_INTERVAL_NS)
-// later. At the default cap that is the 10 s window. It must stay inside the
-// 20 s TCP opening window, because sibling replicas still marked Opening/Pending
-// are reaped on that window, and #16223 exists to stop reaping live pairs. A cap
-// increase that pushes a full cycle past the window, or a window at or over the
-// opening timeout, would quietly reopen those reaps, so it fails the build here.
-// (A larger runtime `max_sessions` than the default is not covered by this
-// compile-time check. Freshness then degrades as the comment above describes.)
+// later. That is 10 s at the default cap; HA imports can stretch it to about
+// 13 s. It must stay inside the 20 s TCP opening window, because sibling
+// replicas still marked Opening/Pending are reaped on that window, and #16223
+// exists to stop reaping live pairs. A cap increase that pushes a full cycle
+// past the window, or a window at or over the opening timeout, would quietly
+// reopen those reaps, so it fails the build here.
+// `max_sessions` is settable only in tests, so the default cap is the runtime
+// cap. What this assert cannot see is the slab growing past that cap through
+// HA imports: `upsert_synced_with_origin` has no per-table cap check. With a
+// correct peer, a table peaks near 2x the cap when both nodes' populations
+// meet (128 slices, about 12.8 s, still inside 20 s). The only hard bound on
+// imports, #5674's shared-map ceiling, is looser than that; see #18687.
 const _: () = assert!(
     (crate::session::DEFAULT_MAX_SESSIONS.div_ceil(CT_REFRESH_SLICE_BUDGET) as u64)
         * CT_SLICE_INTERVAL_NS
