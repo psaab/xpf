@@ -433,6 +433,16 @@ func (m *Manager) startStatusLoopLocked(firstPassNow bool) {
 // linkCycleRebindSleep seam in process_linkcycle.go.
 var statusLoopInterval = time.Second
 
+// statusLoopFirstPassRetry / statusLoopFirstPassRetries bound the retry of a
+// crash restart's first status pass when the body discards it (#18707, see
+// statusLoop): at most 10 extra polls, 100 ms apart, and only while the
+// first pass has not yet run to the end. Vars for the same test-seam reason
+// as statusLoopInterval; production never reassigns them.
+var (
+	statusLoopFirstPassRetry   = 100 * time.Millisecond
+	statusLoopFirstPassRetries = 10
+)
+
 // prepareDeferredPolicySnapshotLocked runs the daemon's candidate capture
 // outside Manager.mu immediately before a deferred full snapshot publish.
 // It returns false if capture fails or the target changed while the callback
@@ -479,16 +489,29 @@ func (m *Manager) prepareDeferredPolicySnapshotLocked() bool {
 }
 
 func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
-	ticker := time.NewTicker(statusLoopInterval)
+	// Read the seams once: the loop must not re-read the package vars while
+	// running (tests restore them at cleanup).
+	interval, firstPassRetry := statusLoopInterval, statusLoopFirstPassRetry
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	startTime := time.Now()
 	// #18707: firstPassNow runs the first pass immediately, then hands the
 	// cadence back to the ticker (see ensureStatusLoopFirstPassNowLocked).
+	// Until one pass runs to the end, a pass the body discards (any
+	// `continue` below — most often the #16653 stale-poll fence, when a
+	// concurrent status apply lands while the poll is off-lock, as the
+	// daemon's own reaction to the restart does) is retried after
+	// statusLoopFirstPassRetry rather than a whole tick later, at most
+	// statusLoopFirstPassRetries times. A discarded first pass otherwise
+	// cost a full second of outage (measured on udp: helper ready -> first
+	// apply_snapshot 1.005 s instead of ~6 ms).
 	tick := ticker.C
+	firstPassRetries := 0
 	if firstPassNow {
 		now := make(chan time.Time, 1)
 		now <- startTime
 		tick = now
+		firstPassRetries = statusLoopFirstPassRetries
 	}
 
 	for {
@@ -496,7 +519,12 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 		case <-ctx.Done():
 			return
 		case <-tick:
-			tick = ticker.C
+			if firstPassRetries > 0 {
+				firstPassRetries--
+				tick = time.After(firstPassRetry)
+			} else {
+				tick = ticker.C
+			}
 			m.mu.Lock()
 			if m.proc == nil {
 				m.mu.Unlock()
@@ -737,6 +765,13 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 			} else if m.shouldStandbyNeighborPrewarmLocked(now) {
 				m.lastStandbyNeighResolve = now
 				m.proactiveNeighborResolveAsyncLocked()
+			}
+			if tick != ticker.C {
+				// #18707: the owed first pass ran to the end. Back to the
+				// ticker, restarted so the next pass is a full interval away.
+				firstPassRetries = 0
+				tick = ticker.C
+				ticker.Reset(interval)
 			}
 			m.mu.Unlock()
 		}

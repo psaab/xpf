@@ -498,3 +498,137 @@ func chanClosed18707(ch <-chan struct{}) bool {
 		return false
 	}
 }
+
+// discardingPollHook18707 answers status polls like the harness stub, but the
+// first `discard` of them are made stale before they return: the test
+// goroutine bumps lastStatusSeq under m.mu while the poll is off-lock, which
+// is exactly what a concurrent status apply (UpdateRGActive, the daemon's
+// reaction to the restart) does, so the #16653 fence discards that pass.
+type discardingPollHook18707 struct {
+	discard int
+	polls   chan int
+	release chan struct{}
+	mu      sync.Mutex
+	n       int
+}
+
+func (h *discardingPollHook18707) hook(req ControlRequest, status *ProcessStatus) error {
+	if status != nil {
+		status.PID = 4242
+	}
+	if req.Type != "status" {
+		return nil
+	}
+	h.mu.Lock()
+	h.n++
+	n := h.n
+	h.mu.Unlock()
+	h.polls <- n
+	if n <= h.discard {
+		<-h.release
+	}
+	return nil
+}
+
+func (h *discardingPollHook18707) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.n
+}
+
+// startDiscardingRestart18707 crashes and restarts a real helper whose status
+// polls go through h, and services h: every discarded poll is made stale
+// before it returns.
+func startDiscardingRestart18707(t *testing.T, h *discardingPollHook18707) {
+	t.Helper()
+	statusLoopIntervalForTest18707(t, time.Hour)
+	oldRetry := statusLoopFirstPassRetry
+	statusLoopFirstPassRetry = time.Millisecond
+	t.Cleanup(func() { statusLoopFirstPassRetry = oldRetry })
+	rec := &delayRecorder18707{}
+	m := startNMHelper12159(t, nmPersistentHelper12159, rec.arm)
+	joinStatusLoopAtCleanup18707(t, m)
+	waitNMSupervisorRunning12159(t, m)
+	m.mu.Lock()
+	m.controlRequestHook = h.hook
+	m.mu.Unlock()
+	stop := make(chan struct{})
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		for {
+			select {
+			case <-stop:
+				return
+			case n := <-h.polls:
+				if n <= h.discard {
+					m.mu.Lock()
+					m.lastStatusSeq++
+					m.mu.Unlock()
+					h.release <- struct{}{}
+				}
+			}
+		}
+	}()
+	// Registered after joinStatusLoopAtCleanup18707, so it runs first: stop
+	// servicing only once the loop has been joined would deadlock a parked
+	// poll, so drain instead — the join below unblocks any parked hook.
+	t.Cleanup(func() {
+		close(stop)
+		<-served
+		for {
+			select {
+			case <-h.polls:
+				select {
+				case h.release <- struct{}{}:
+				default:
+				}
+			default:
+				return
+			}
+		}
+	})
+	killNMSupervisedChild12159(t, m)
+	rec.fire(t)
+	waitNMSupervisorRunning12159(t, m)
+}
+
+func waitPolls18707(t *testing.T, h *discardingPollHook18707, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if h.count() >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("status polls = %d, want %d: a discarded first pass is not retried before the 1h tick (#18707)", h.count(), want)
+}
+
+// A first pass discarded by the stale-poll fence is retried promptly, and
+// the loop goes back to its slow cadence as soon as one pass completes.
+func TestCrashRestartFirstPassRetriesWhenDiscarded18707(t *testing.T) {
+	h := &discardingPollHook18707{discard: 1, polls: make(chan int, 64), release: make(chan struct{})}
+	startDiscardingRestart18707(t, h)
+	waitPolls18707(t, h, 2)
+	// Pass 2 ran to the end, so the next poll is a full (1h) interval away.
+	// With a 1ms retry, a loop that kept retrying would poll ~300 times in
+	// this window.
+	time.Sleep(300 * time.Millisecond)
+	if got := h.count(); got != 2 {
+		t.Fatalf("status polls = %d after the first completed pass, want 2: the loop did not return to its ticker", got)
+	}
+}
+
+// Every pass discarded: the retry budget is bounded.
+func TestCrashRestartFirstPassRetryIsBounded18707(t *testing.T) {
+	h := &discardingPollHook18707{discard: 1 << 30, polls: make(chan int, 64), release: make(chan struct{})}
+	startDiscardingRestart18707(t, h)
+	want := 1 + statusLoopFirstPassRetries
+	waitPolls18707(t, h, want)
+	time.Sleep(300 * time.Millisecond)
+	if got := h.count(); got != want {
+		t.Fatalf("status polls = %d with every pass discarded, want exactly %d (the first pass plus %d retries)",
+			got, want, statusLoopFirstPassRetries)
+	}
+}

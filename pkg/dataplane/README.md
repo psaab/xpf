@@ -874,7 +874,11 @@ would blackhole every flow handed to it.
   The restart's status loop runs its first reconcile pass at once rather
   than one `statusLoopInterval` later (`ensureStatusLoopFirstPassNowLocked`),
   because that pass is what republishes the snapshot the replacement's
-  workers bind from. The restart calls the ORDINARY
+  workers bind from. If the body discards that pass — most often the
+  #16653 stale-poll fence, when the daemon's own reaction to the restart
+  applies a status while the poll is off-lock — it is retried 100 ms later,
+  at most 10 times, instead of a whole tick later; once a pass runs to the
+  end the loop is back on its 1 s ticker. The restart calls the ORDINARY
   `ensureProcessLocked` against the CURRENT `m.cfg`, not the dead
   generation's argv, so a config replacement that landed while the
   helper was down is what starts, and the binding / XSK-liveness /
