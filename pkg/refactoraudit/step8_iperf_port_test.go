@@ -1,6 +1,7 @@
 package refactoraudit
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -41,7 +42,13 @@ var (
 	schedRateRe = regexp.MustCompile(`(?m)^set class-of-service schedulers (\S+) transmit-rate (\S+)\s*$`)
 	// `set class-of-service scheduler-maps MAP forwarding-class FC scheduler SCHED`
 	schedMapRe = regexp.MustCompile(`(?m)^set class-of-service scheduler-maps \S+ forwarding-class (\S+) scheduler (\S+)\s*$`)
+	// `IPERF_TARGET4="A.B.C.D"` in the loss cluster env (#18741).
+	envIperfTarget4Re = regexp.MustCompile(`(?m)^IPERF_TARGET4="?([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)"?\s*$`)
 )
+
+// step8EnvFile is where loss's v4 iperf target is defined; step 8's row must
+// agree with it.
+const step8EnvFile = "test/incus/loss-userspace-cluster.env"
 
 // TestStep8ThroughputPortIsUnshaped asserts that the port
 // docs/engineering-style.md's step-8 throughput row names resolves, in
@@ -51,8 +58,16 @@ func TestStep8ThroughputPortIsUnshaped(t *testing.T) {
 	root := repoRootForMarkerSweep(t)
 	doc := readRepoFile(t, root, "docs/engineering-style.md")
 	cos := readRepoFile(t, root, "test/incus/cos-iperf-config.set")
+	env := readRepoFile(t, root, step8EnvFile)
 
-	row := step8ThroughputRow(t, doc)
+	target, err := lossIperfTarget4(env)
+	if err != nil {
+		t.Fatalf("%s: %v", step8EnvFile, err)
+	}
+	row, err := step8ThroughputRow(doc, target)
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := step8PortRe.FindStringSubmatch(row)
 	if m == nil {
 		t.Fatalf("could not find an `iperf3 … -p <port>` in step 8's throughput "+
@@ -104,33 +119,87 @@ func TestStep8IperfPortGateDetectsAShapedPort(t *testing.T) {
 
 	// And the row extractor must pick the throughput row's port, not some other
 	// `-p` elsewhere in a long document.
-	doc := "| x | y | `iperf3 -P 16 -t 30 -p 5211` → 172.16.80.202 | ≥ 23 Gbit/s |\n"
+	doc := "| x | y | `iperf3 -P 16 -t 30 -p 5211` → `$IPERF_TARGET4` (loss 172.16.80.202) | ≥ 23 Gbit/s |\n"
 	if m := step8PortRe.FindStringSubmatch(doc); m == nil || m[1] != "5211" {
 		t.Errorf("port extractor returned %v, want 5211", m)
 	}
 }
 
+// lossIperfTarget4 returns the single IPERF_TARGET4 address the loss env
+// assigns. It errors when the env does not assign exactly one.
+func lossIperfTarget4(env string) (string, error) {
+	m := envIperfTarget4Re.FindAllStringSubmatch(env, -1)
+	if len(m) != 1 {
+		return "", fmt.Errorf("want exactly one IPERF_TARGET4=\"<ipv4>\" assignment, found %d", len(m))
+	}
+	return m[0][1], nil
+}
+
 // step8ThroughputRow returns the step-8 table row that carries the iperf3
-// throughput check. It is located by CONTENT (an iperf3 invocation against the
-// documented target) rather than by line number, so an edit above it does not
-// silently make the gate inspect the wrong row. The target is loss's
-// IPERF_TARGET4: 172.16.80.202 since #18576 (b1b9c0ed1b), which moved off .200
-// because an external box also answers ARP for it.
-func step8ThroughputRow(t *testing.T, doc string) string {
-	t.Helper()
+// throughput check. It is located by CONTENT rather than by line number, so an
+// edit above it does not silently make the gate inspect the wrong row.
+//
+// The content is the documented target: the `$IPERF_TARGET4` token plus the
+// address the loss env actually assigns (#18741). It is no longer a literal.
+// The literal .200 broke when #18576 renumbered to .202, and a literal .202
+// would break on the next renumber. It also could not see an env-only move:
+// the doc would still say .202 while the harness iperfs elsewhere. Requiring
+// both the token and the env's address keeps the row unique, follows a
+// renumber of both files, and turns a doc/env mismatch red.
+func step8ThroughputRow(doc, target string) (string, error) {
 	var hits []string
 	for _, line := range strings.Split(doc, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "|") &&
-			strings.Contains(line, "iperf3") && strings.Contains(line, "172.16.80.202") {
+			strings.Contains(line, "iperf3") && strings.Contains(line, "$IPERF_TARGET4") &&
+			strings.Contains(line, target) {
 			hits = append(hits, line)
 		}
 	}
 	if len(hits) != 1 {
-		t.Fatalf("expected exactly ONE step-8 table row with an iperf3 check against "+
-			"172.16.80.202, found %d; the gate must not guess which one it means",
-			len(hits))
+		return "", fmt.Errorf("expected exactly ONE step-8 table row with an iperf3 check against "+
+			"$IPERF_TARGET4 and the loss env's address %s (%s), found %d; the gate must not guess "+
+			"which one it means, and a row naming another address disagrees with the env",
+			target, step8EnvFile, len(hits))
 	}
-	return hits[0]
+	return hits[0], nil
+}
+
+// The locator itself (AG): exactly one matching row is found; zero and two
+// are refused; a row whose address disagrees with the env is not a match.
+func TestStep8ThroughputRowLocator18741(t *testing.T) {
+	const target = "172.16.80.202"
+	row := "| Any change | deploy | `iperf3 -P 16 -t 30 -p 5211` → `$IPERF_TARGET4` (loss 172.16.80.202) | band |"
+	for name, tc := range map[string]struct {
+		doc  string
+		want bool
+	}{
+		"one row":                    {"intro\n" + row + "\noutro\n", true},
+		"zero rows":                  {"intro\n| x | `iperf3 -p 5211` → somewhere | y |\n", false},
+		"two rows":                   {row + "\n" + row + "\n", false},
+		"row disagrees with the env": {strings.ReplaceAll(row, "172.16.80.202", "172.16.80.200"), false},
+		"literal address, no token":  {"| x | `iperf3 -p 5211` → 172.16.80.202 | y |\n", false},
+		"not a table row":            {"`iperf3 -p 5211` → `$IPERF_TARGET4` (loss 172.16.80.202)\n", false},
+	} {
+		got, err := step8ThroughputRow(tc.doc, target)
+		if tc.want && (err != nil || got != row) {
+			t.Errorf("%s: step8ThroughputRow = %q, %v; want the row", name, got, err)
+		}
+		if !tc.want && err == nil {
+			t.Errorf("%s: step8ThroughputRow accepted %q", name, got)
+		}
+	}
+	if got, err := lossIperfTarget4("A=1\nIPERF_TARGET4=\"172.16.80.202\"\n"); err != nil || got != target {
+		t.Errorf("lossIperfTarget4 = %q, %v; want %s", got, err, target)
+	}
+	for name, env := range map[string]string{
+		"absent":  "A=1\n",
+		"twice":   "IPERF_TARGET4=\"1.2.3.4\"\nIPERF_TARGET4=\"5.6.7.8\"\n",
+		"comment": "# IPERF_TARGET4=\"1.2.3.4\"\n",
+	} {
+		if _, err := lossIperfTarget4(env); err == nil {
+			t.Errorf("lossIperfTarget4 accepted an env with the target %s", name)
+		}
+	}
 }
 
 // cosClassForPort resolves a destination port through the CoS fixture to its
