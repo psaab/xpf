@@ -449,9 +449,9 @@ func TestStreamRequestSpecCoversEveryStream17175(t *testing.T) {
 			t.Errorf("streamRequestSpec17175 declares %q, which BpfrxService does not serve as a stream — a stale entry hides an undeclared real stream (#17175)", full)
 		}
 	}
-	// The three request-dependent streams must be declared as such; a
-	// table that marked them request-independent would re-create the
-	// nil-request denial at open.
+	// Every served stream is request-dependent today (MonitorPacketDrop
+	// since #18760); a table that marked one request-independent would
+	// re-create the open-time denial of its argument-scoped allows.
 	for _, m := range []string{"Ping", "Traceroute", "MonitorInterface", "MonitorPacketDrop"} {
 		if !streamNeedsRequest17175(fullMethod17175(m)) {
 			t.Errorf("%s must be declared request-dependent in streamRequestSpec17175 (#17175)", m)
@@ -535,26 +535,19 @@ func streamCensusCfg17175(t *testing.T) *config.Config {
 
 // populatedStreamRequest17175 returns a fully-populated request for a
 // request-independent stream, so the census can prove no gate reads it.
+// No served stream is request-independent since #18760, so it has no arms;
+// a future `false` entry must add one (the F3 loop fails without it).
 func populatedStreamRequest17175(fullMethod string) any {
-	switch fullMethod {
-	case pb.BpfrxService_MonitorPacketDrop_FullMethodName:
-		return &pb.MonitorPacketDropRequest{SourcePrefix: "10.99.1.0/24", DestinationPrefix: "10.98.0.0/16", Protocol: "tcp", FromZone: "trust", Interface: "ge-0/0/0", SourcePort: 1234, DestinationPort: 443, Count: 7}
-	}
 	return nil
 }
 
 // TestStreamMonitorPacketDropAdmitDeny17175 drives MonitorPacketDrop
-// (the needsRequest=false stream) through the real interceptor: a
-// class whose bare `monitor security packet-drop` charge is denied
-// must be refused, and a class that admits it must stream even with a
-// populated filter request and survive ticks. Ticks re-price the
-// retained decoded message, which decides identically to the typed
-// empty request priced at open (census-enforced). No behavioural
-// cell can distinguish retained-message from nil pricing for this
-// method — the census proves nil and empty name identical forms, so
-// both price identically; the never-nil tick is a code invariant
-// (the watcher prices only retainedRequest's non-nil message or the
-// open price), guarded structurally by that census.
+// through the real interceptor: a class whose bare `monitor security
+// packet-drop` charge is denied must be refused (on the first message
+// since #18760 made it request-dependent), and a class that admits it
+// must stream with a populated filter request and survive ticks, which
+// re-price the retained decoded message. The argument-scoped allow and
+// deny rows live in authz_stream_argument_forms_18760_test.go.
 // TestStreamMonitorPacketDropTickRevocation17175 adds the mid-stream
 // revocation arm on the same tick.
 func TestStreamMonitorPacketDropAdmitDeny17175(t *testing.T) {

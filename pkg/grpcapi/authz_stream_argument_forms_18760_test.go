@@ -54,22 +54,27 @@ const (
 	uidNarrowAllow18760 = uidDiagAllow17175 // allowuser
 )
 
-// streamArgRows18760 has one entry per served stream: a request whose
-// argument text the narrow classes name, and one they do not.
-var streamArgRows18760 = map[string]struct{ named, other func() any }{
+// streamArgRows18760 has one entry per served stream: the typed empty
+// request the generated handler would decode from an empty message, a
+// request whose argument text the narrow classes name, and one they do not.
+var streamArgRows18760 = map[string]struct{ empty, named, other func() any }{
 	"Ping": {
+		func() any { return &pb.PingRequest{} },
 		func() any { return &pb.PingRequest{Target: "10.99.1.1"} },
 		func() any { return &pb.PingRequest{Target: "10.98.1.1"} },
 	},
 	"Traceroute": {
+		func() any { return &pb.TracerouteRequest{} },
 		func() any { return &pb.TracerouteRequest{Target: "10.99.1.1"} },
 		func() any { return &pb.TracerouteRequest{Target: "10.98.1.1"} },
 	},
 	"MonitorInterface": {
+		func() any { return &pb.MonitorInterfaceRequest{} },
 		func() any { return &pb.MonitorInterfaceRequest{InterfaceName: "ge-0/0/9"} },
 		func() any { return &pb.MonitorInterfaceRequest{InterfaceName: "ge-0/0/8"} },
 	},
 	"MonitorPacketDrop": {
+		func() any { return &pb.MonitorPacketDropRequest{} },
 		func() any {
 			return &pb.MonitorPacketDropRequest{SourcePrefix: "10.99.1.0/24", Protocol: "tcp", Count: 1}
 		},
@@ -137,11 +142,15 @@ func TestStreamArgumentScopedDenyRefusesNamedRequest18760(t *testing.T) {
 	}
 }
 
-// TestStreamWithArgumentFormsIsRequestDependent18760 keeps the two lists
-// from drifting: every served stream must have a row above, and every stream
-// whose argument forms depend on its request must be declared
-// request-dependent. (#17175's census checks the converse for entries declared
-// false; this checks the direction #18760 broke.)
+// TestStreamWithArgumentFormsIsRequestDependent18760 keeps the behavioural
+// rows above honest and complete: every served stream must have a row, and a
+// row's named request must produce argument forms different from its TYPED
+// EMPTY request (what open would price for a request-independent declaration),
+// unless the method is argument-free (methodsWithoutArgumentForms). Where the
+// forms differ, the stream must be declared request-dependent. That rule is
+// the contrapositive of #17175's F3 census (needsRequest=false => no
+// request-priced arm); stating it per row here is what ties the allow/deny
+// cells to the spec, so a row that stops exercising an argument fails.
 func TestStreamWithArgumentFormsIsRequestDependent18760(t *testing.T) {
 	desc := pb.BpfrxService_ServiceDesc
 	cfg := streamCensusCfg17175(t)
@@ -159,14 +168,14 @@ func TestStreamWithArgumentFormsIsRequestDependent18760(t *testing.T) {
 			continue
 		}
 		namedForms, namedOK := rpcArgumentForms(cfg, full, named, base)
-		emptyForms, emptyOK := rpcArgumentForms(cfg, full, nil, base)
+		emptyForms, emptyOK := rpcArgumentForms(cfg, full, row.empty(), base)
 		dependent := namedOK != emptyOK || fmt.Sprint(namedForms) != fmt.Sprint(emptyForms)
 		if dependent && !streamNeedsRequest17175(full) {
-			t.Errorf("%s: rpcArgumentForms depends on the request (named=%v/%v nil=%v/%v) but streamRequestSpec17175 declares it request-independent, so open prices the typed empty request (#18760)",
+			t.Errorf("%s: rpcArgumentForms depends on the request (named=%v/%v typed-empty=%v/%v) but streamRequestSpec17175 declares it request-independent, so open prices the typed empty request (#18760)",
 				full, namedForms, namedOK, emptyForms, emptyOK)
 		}
-		if !dependent {
-			t.Errorf("%s: the named request produced the same argument forms as nil (%v); the row does not exercise an argument (#18760)", full, namedForms)
+		if _, argFree := methodsWithoutArgumentForms[sd.StreamName]; !dependent && !argFree {
+			t.Errorf("%s: the named request produced the same argument forms as the typed empty request (%v); the row does not exercise an argument (#18760)", full, namedForms)
 		}
 	}
 }

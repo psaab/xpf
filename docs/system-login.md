@@ -524,15 +524,12 @@ message, so an argument-scoped regex applies in both directions:
 
 - `deny-commands "^monitor security packet-drop source-prefix 10\.99\."` refuses
   the matching stream and admits the others.
-- An `allow-commands` naming those arguments admits the matching stream.
+- `allow-commands "^monitor security packet-drop source-prefix 10\.99\."` admits
+  the matching stream. Like any allow-list, it refuses every request it does not
+  name, including the same command with other or no arguments.
 
-A stream may be declared request-independent (priced at open on its typed empty
-request) only when its argument forms do not depend on the request. Otherwise
-the open-time bare charge cannot match an argument-scoped `allow-commands`, and
-the stream is refused before its message is read. `MonitorPacketDrop` was in
-that state until #18760. A census
-(`TestStreamWithArgumentFormsIsRequestDependent18760`) now fails on a wrong
-declaration.
+Until #18760, `MonitorPacketDrop` refused such an argument-scoped
+`allow-commands` before reading the request.
 
 **Session plumbing is not a command (#15077).** The remote `cli` calls
 `GetStatus` before every dispatched command (its reachability probe) and
