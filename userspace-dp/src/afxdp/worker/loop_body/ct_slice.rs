@@ -129,6 +129,41 @@ pub(super) fn run_pending_neigh_timer(
     }
     true
 }
+/// #18655: order-preserving membership set for the ct-slice's
+/// `(key, nat)` pair lists. It replaces `Vec::contains` dedup, which was
+/// O(n^2) per slice. `NatDecision` has no `Hash`, so the set is keyed by
+/// `SessionKey`, with the (in practice single) NAT decisions seen for that
+/// key kept beside it. Membership is full `(key, nat)` pair equality,
+/// exactly what `Vec::contains` tested.
+pub(super) struct CtSlicePairSet {
+    seen: crate::afxdp::FastMap<SessionKey, Vec<crate::nat::NatDecision>>,
+}
+
+impl CtSlicePairSet {
+    /// A set holding every pair in `seed`, matching a dedup target that
+    /// starts out as a clone of `seed`.
+    pub(super) fn seeded(seed: &[(SessionKey, crate::nat::NatDecision)]) -> Self {
+        let mut set = Self {
+            seen: crate::afxdp::FastMap::default(),
+        };
+        for pair in seed {
+            set.insert(pair);
+        }
+        set
+    }
+
+    /// Record `pair`. Returns true when it was not already present, i.e.
+    /// when the former `!vec.contains(pair)` would have pushed it.
+    pub(super) fn insert(&mut self, pair: &(SessionKey, crate::nat::NatDecision)) -> bool {
+        let nats = self.seen.entry(pair.0.clone()).or_default();
+        if nats.contains(&pair.1) {
+            return false;
+        }
+        nats.push(pair.1);
+        true
+    }
+}
+
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 #[inline(never)]
 pub(super) fn run_ct_slice(
@@ -203,10 +238,24 @@ pub(super) fn run_ct_slice(
         // node-level proof; without this maintenance it only ever
         // carried the install-time Opening/Pending state, so replicas
         // reaped at 20 s despite a promoted serving pair. Full-table
-        // walk each slice: per-worker tables are small next to the
-        // 2048-slot conntrack budget above, and a completed pair must
-        // advance within one GC interval of its completion, not after
-        // a multi-second cursor rotation.
+        // walk each slice, so a completed pair advances within one GC
+        // interval of its completion and not after a multi-second
+        // cursor rotation.
+        //
+        // #18655: the walk is NOT small. a936a6f802 assumed per-worker
+        // tables are small next to the 2048-slot budget above, but
+        // `replicate_session_upsert` copies every session into every
+        // worker's table (`WorkerLocalImport`). Each slice therefore
+        // walks the node's whole session population, `n`, and a
+        // ceil(slab / 2048)-slice cycle repeats that walk once per
+        // slice. Everything below must stay O(n) per slice, with the
+        // global shared-map mutexes taken a bounded number of times:
+        // - no per-row lock acquisition (the restamps are batched);
+        // - no `Vec::contains` dedup (`CtSlicePairSet`);
+        // - no per-key scan of a shared map (`shared_rows_stage_and_counts`).
+        // The per-key whole-map scan made this O(n * N) under both
+        // mutexes. At 4000 sessions it held them ~100% of the time and
+        // stalled every worker for seconds.
         let mut established: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
         *established_cursor =
             sessions.established_forward_slice(*established_cursor, usize::MAX, &mut established);
@@ -237,28 +286,33 @@ pub(super) fn run_ct_slice(
         // kept the import-time rev=0 forever and no evidence arm
         // could ever fire for it. `restamp_*` take the max, so a
         // zero-count replica never regresses a served count.
+        // #18655: one batch, so each map's mutex is taken once per
+        // slice instead of once (or twice) per counted pair.
+        let mut counted: Vec<(SessionKey, crate::nat::NatDecision, u64, u64)> = Vec::new();
         for (key, nat) in sessions.ct_slice_forward_pairs() {
             let fwd = sessions.fwd_packets_for(&key);
             let rev = sessions.rev_packets_for(&key);
             if fwd > 0 || rev > 0 {
-                crate::afxdp::shared_ops::restamp_shared_packet_counts(
-                    shared_sessions,
-                    shared_forward_wire_sessions,
-                    &key,
-                    nat,
-                    fwd,
-                    rev,
-                );
+                counted.push((key, nat, fwd, rev));
             }
         }
+        crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+            shared_sessions,
+            shared_forward_wire_sessions,
+            &counted,
+        );
         let mut node_served: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
         sessions.node_served_forward_slice(0, usize::MAX, &shared_evidence, &mut node_served);
         // `collected` = strict-established pairs PLUS node-served
         // (evidence-collected) pairs: the stage/count/alias restamps
         // below target exactly this union.
+        // #18655: order-preserving dedup in O(1) per pair. The former
+        // `Vec::contains` loop was O(n^2) on the worker thread, measured
+        // at 3.5-7.2 ms per slice at ~4k forward rows.
         let mut collected = established.clone();
+        let mut collected_seen = CtSlicePairSet::seeded(&collected);
         for pair in node_served {
-            if !collected.contains(&pair) {
+            if collected_seen.insert(&pair) {
                 collected.push(pair);
             }
         }
@@ -274,20 +328,19 @@ pub(super) fn run_ct_slice(
         // (Pairs only in `ct_slice_forward_pairs` were already
         // stamped above; re-stamping the collected subset is a
         // max-idempotent no-cost overlap.)
+        counted.clear();
         for (key, nat) in &collected {
             let fwd = sessions.fwd_packets_for(key);
             let rev = sessions.rev_packets_for(key);
             if fwd > 0 || rev > 0 {
-                crate::afxdp::shared_ops::restamp_shared_packet_counts(
-                    shared_sessions,
-                    shared_forward_wire_sessions,
-                    key,
-                    *nat,
-                    fwd,
-                    rev,
-                );
+                counted.push((key.clone(), *nat, fwd, rev));
             }
         }
+        crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+            shared_sessions,
+            shared_forward_wire_sessions,
+            &counted,
+        );
         // #16217: advance the forward-wire KEY ALIAS slot beside the
         // canonical restamp so a completed fabric pair reads
         // Established under the NAT'd tuple too.
@@ -316,8 +369,9 @@ pub(super) fn run_ct_slice(
         {
             let mut emit_keys: Vec<(SessionKey, crate::nat::NatDecision)> =
                 canonical_transitioned.clone();
+            let mut emit_seen = CtSlicePairSet::seeded(&emit_keys);
             for pair in &alias_transitioned {
-                if !emit_keys.contains(pair) {
+                if emit_seen.insert(pair) {
                     emit_keys.push(pair.clone());
                 }
             }
@@ -326,18 +380,20 @@ pub(super) fn run_ct_slice(
             // above; the per-row mark inside the emit is the gate,
             // so offer every collected row and let it decide.
             for pair in &collected {
-                if !emit_keys.contains(pair) {
+                if emit_seen.insert(pair) {
                     emit_keys.push(pair.clone());
                 }
             }
-            for (key, nat) in &emit_keys {
-                let (stage, fwd, rev) =
-                    crate::afxdp::shared_ops::shared_row_stage_and_counts(
-                        shared_sessions,
-                        shared_forward_wire_sessions,
-                        key,
-                        *nat,
-                    );
+            // #18655: ONE pass over the shared maps for the whole batch
+            // (the former per-key helper scanned both whole maps under
+            // both mutexes for EVERY key). Values are read after the
+            // restamps above, exactly as before.
+            let rows = crate::afxdp::shared_ops::shared_rows_stage_and_counts(
+                shared_sessions,
+                shared_forward_wire_sessions,
+                &emit_keys,
+            );
+            for ((key, _nat), (stage, fwd, rev)) in emit_keys.iter().zip(rows) {
                 sessions.emit_ct_slice_state_update(key, stage, rev, fwd);
             }
         }
