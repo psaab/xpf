@@ -351,8 +351,13 @@ What the opt-in does not bypass:
   config DB a newer one wrote is still refused.
 - The same-version different-bytes refusal.
 
-The attestation manifest names the deb the deploy selected, so a downgraded
-cell attests the build it deployed.
+The attestation manifest (`dist-deb/xpf-deploy-manifest.json`) records:
+- the selected deb's payload hashes;
+- its file name;
+- since #18772, `deb_version`, the deployed package version. This is the
+  only field that names the build the nodes run when a cell deploys another
+  checkout's deb or downgrades. `version` and `build_git_sha` still describe
+  the deploying checkout, because the gate's checkout match keys on them.
 
 Self-tests: `make test-deploy-lib` ("deb plan" cells).
 

@@ -2794,7 +2794,7 @@ test_manifest_deb_hashes_package_payload() {
 	fixture=$(mktemp -d)
 	root="$fixture/root"
 	pkg="$fixture/pkg"
-	deb="$fixture/xpf-fixture.deb"
+	deb="$fixture/xpf_0.0.29580+gaaaaaaaaaaaa_amd64.deb"
 	manifest="$fixture/deb-manifest.json"
 	mkdir -p "$root" "$pkg/DEBIAN" "$pkg/usr/local/share/xpf/staged"
 	chmod 0755 "$pkg/DEBIAN"
@@ -2836,9 +2836,10 @@ doc = json.load(open(sys.argv[1], encoding="utf-8"))
 assert doc["schema"] == 2 and set(doc["nodes"]) == {"0"}
 record = doc["nodes"]["0"]
 assert record["mode"] == "deb" and record["deb"] == sys.argv[2]
+assert record["deb_version"] == "0.0.29580+gaaaaaaaaaaaa", record.get("deb_version")
 PY
 	then
-		bad "deb deploy manifest: mode or package basename missing"
+		bad "deb deploy manifest: mode, package basename or deb_version (#18772) missing"
 	else
 		ok "deb deploy manifest: attests payload bytes rather than a fresh local rebuild"
 	fi

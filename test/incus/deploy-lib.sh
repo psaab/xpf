@@ -782,7 +782,7 @@ deploy_manifest_sha_from_deb() {
 deploy_write_manifest() {
 	local root="$1" deb="${2:-}" expected_git_sha="${3:-}" scope="${4:-}"
 	local manifest xpfd_sha="" cli_sha="" helper_sha=""
-	local build_git_sha version build_time mode deb_name=""
+	local build_git_sha version build_time mode deb_name="" deb_version=""
 	[[ "$scope" == 0 || "$scope" == 1 || "$scope" == all ]] || {
 		warn "deploy manifest: node scope must be 0, 1, or all"
 		return 1
@@ -791,6 +791,11 @@ deploy_write_manifest() {
 	if [[ -n "$deb" ]]; then
 		mode="deb"
 		deb_name=$(basename "$deb")
+		# #18772: the deployed package version, from the deb itself. `version`
+		# below describes the deploying checkout; in an A/B cell that deploys
+		# another checkout's deb, or a deliberate downgrade, only this names
+		# the build the nodes run.
+		deb_version=$(deploy_deb_version "$deb" 2>/dev/null || true)
 		xpfd_sha=$(deploy_manifest_sha_from_deb "$deb" xpfd || true)
 		cli_sha=$(deploy_manifest_sha_from_deb "$deb" cli || true)
 		helper_sha=$(deploy_manifest_sha_from_deb "$deb" xpf-userspace-dp || true)
@@ -827,7 +832,7 @@ deploy_write_manifest() {
 	if ! MANIFEST_PATH="$manifest" MANIFEST_TMP="$tmp" \
 		MANIFEST_GITSHA="$build_git_sha" MANIFEST_VERSION="$version" \
 		MANIFEST_TIME="$build_time" MANIFEST_MODE="$mode" \
-		MANIFEST_DEB="$deb_name" MANIFEST_XPFD="$xpfd_sha" \
+		MANIFEST_DEB="$deb_name" MANIFEST_DEB_VERSION="$deb_version" MANIFEST_XPFD="$xpfd_sha" \
 		MANIFEST_CLI="$cli_sha" MANIFEST_HELPER="$helper_sha" \
 		MANIFEST_SCOPE="$scope" \
 		python3 - <<'PY'
@@ -841,6 +846,7 @@ entry = {
     "build_time": os.environ["MANIFEST_TIME"],
     "mode": os.environ["MANIFEST_MODE"],
     "deb": opt("MANIFEST_DEB"),
+    "deb_version": opt("MANIFEST_DEB_VERSION"),
     "binaries": {
         "xpfd": os.environ["MANIFEST_XPFD"],
         "cli": opt("MANIFEST_CLI"),
