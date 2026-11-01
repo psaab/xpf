@@ -838,28 +838,46 @@ def _mutant(anchor, replacement):
     return namespace
 
 
+def _with_stream_held(text, stream, start_from, until):
+    """``text`` with one stream's bytes zeroed for intervals starting in
+    ``[start_from, until)`` (the sum reduced to match): a REAL log made to
+    hold that stream down longer. Every other byte is the run's own."""
+    out = []
+    for line in text.splitlines():
+        event = json.loads(line)
+        if event.get("event") == "interval":
+            data = event["data"]
+            for row in data["streams"]:
+                if row["socket"] == stream and start_from <= row["start"] < until:
+                    data["sum"]["bits_per_second"] -= row["bits_per_second"]
+                    data["sum"]["bytes"] -= row["bytes"]
+                    row["bits_per_second"] = 0
+                    row["bytes"] = 0
+            line = json.dumps(event, separators=(",", ":"))
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
 class PreciseCrashAnchorTests(unittest.TestCase):
-    """#18692: the crash window in real seconds, on real straggler logs."""
+    """#18692: the crash cell in real seconds, on real straggler logs."""
+
+    INSIDE_STOP = 57.603
+    OUTSIDE_STOP = 53.938
 
     @staticmethod
-    def crash_anchor(module, text, clock_error=0.0, uncertainty=0.2):
-        """The harness's anchor for a crash at the fixture's real stop instant.
-
-        The clock reading is built so its midpoint lands ``clock_error`` s from
-        the aggregate's stop, with ``uncertainty`` s either side (offset 0;
-        rtt and slack split the width), the shape test-failover.sh passes.
-        """
+    def crash_anchor(module, text, before=-0.2, after=10.0, rtt=0.2):
+        """The harness's anchor: epochs ``before``/``after`` s from the
+        fixture's real stop (the sysrq exec brackets it), offset 0."""
         start = module.json_stream_start_epoch(text)
         stop = module.data_stop_anchor(text, 30.0, 90.0)
-        rtt = slack = uncertainty
-        epoch = start + stop.seconds + clock_error - slack / 2
         return module.event_anchor(
-            text, epoch=epoch, slack=slack, offset=0.0, rtt=rtt, label="crash", data_stop=True
+            text, before=start + stop.seconds + before, after=start + stop.seconds + after,
+            offset=0.0, rtt=rtt, label="crash", data_stop=True,
         )
 
     @staticmethod
-    def verdict(module, text, anchor):
-        return module.precise_stream_verdict(text, anchor, 8, json_stream=True)
+    def cell(module, text, anchor):
+        return module.precise_stream_cell(text, anchor, 8, json_stream=True)
 
     def setUp(self):
         import iperf3_sum_parse as module
@@ -867,146 +885,213 @@ class PreciseCrashAnchorTests(unittest.TestCase):
         self.module = module
         self.inside = _read(_INSIDE)
         self.outside = _read(_OUTSIDE)
+        # Stream 11 of the 4s05 log held down past its real resume: through
+        # the interval starting 62.0 s (resumes c+9.06 s), through 63.0 s
+        # (c+10.06 s), and for the rest of the log (never).
+        self.held_9s = _with_stream_held(self.outside, 11, 54.0, 63.0)
+        self.held_10s = _with_stream_held(self.outside, 11, 54.0, 64.0)
+        self.dead = _with_stream_held(self.outside, 11, 54.0, 1e9)
 
     def test_start_timestamp_uses_milliseconds(self):
         self.assertEqual(self.module.json_stream_start_epoch(self.outside), 1793496391.493)
         self.assertIsNone(self.module.json_stream_start_epoch('{"event":"start","data":{}}\n'))
 
-    def test_aggregate_stop_lands_on_the_crash_inside_the_clock_window(self):
-        for text, expected in ((self.inside, 57.603), (self.outside, 53.938)):
-            anchor = self.crash_anchor(self.module, text, clock_error=0.15)
+    def test_aggregate_stop_inside_the_sysrq_window_is_the_anchor(self):
+        for text, expected in ((self.inside, self.INSIDE_STOP), (self.outside, self.OUTSIDE_STOP)):
+            anchor = self.crash_anchor(self.module, text)
             self.assertAlmostEqual(anchor.seconds, expected, delta=0.002)
             self.assertAlmostEqual(anchor.uncertainty, 0.05)
+            self.assertAlmostEqual(anchor.after_epoch, 0.2, delta=0.002)
             self.assertIn("aggregate stop", anchor.source)
 
-    def test_stop_outside_the_clock_window_leaves_the_clock_anchor(self):
-        anchor = self.crash_anchor(self.module, self.inside, clock_error=2.0)
+    def test_no_stop_in_a_wide_window_is_no_precise_anchor(self):
+        # The window opens after the stop: no stop, and seconds wide.
+        self.assertIsNone(self.crash_anchor(self.module, self.inside, before=1.0, after=11.0))
+        # A narrow window off the stop stands as a clock anchor.
+        anchor = self.crash_anchor(self.module, self.inside, before=1.95, after=2.05, rtt=0.1)
         self.assertTrue(anchor.source.startswith("crash: orchestrator clock"), anchor.source)
-        self.assertAlmostEqual(anchor.seconds, 59.603, delta=0.002)
-        self.assertAlmostEqual(anchor.uncertainty, 0.2)
+        self.assertAlmostEqual(anchor.seconds, self.INSIDE_STOP + 2.0, delta=0.002)
+        self.assertAlmostEqual(anchor.uncertainty, 0.1, delta=1e-6)
 
-    def test_straggler_inside_the_deadline_passes_where_the_in_phase_integer_failed(self):
-        ok, reason = self.verdict(self.module, self.inside, self.crash_anchor(self.module, self.inside))
-        self.assertTrue(ok, reason)
-        self.assertIn("data max 2.91s", reason)
+    def test_resume_inside_three_seconds_passes_and_names_the_straddle(self):
+        status, reason = self.cell(self.module, self.inside, self.crash_anchor(self.module, self.inside))
+        self.assertEqual(status, "PASS", reason)
         self.assertIn("s11=2.91/", reason)
+        # s11's first data interval [60.0, 61.0) holds the 3 s line (60.603).
+        self.assertIn("the 3s line falls inside the interval streams 11 resumed in", reason)
         # The defect, on the same bytes: floor(57.603) = 57 FAILs s11.
         ok, reason = failover_stream_verdict(self.inside, 57, 8, json_stream=True)
         self.assertFalse(ok)
         self.assertEqual(reason, "streams 11 carried data before failover but did not resume within 3s")
 
-    def test_straggler_outside_the_deadline_fails_where_the_late_integer_passed(self):
-        ok, reason = self.verdict(self.module, self.outside, self.crash_anchor(self.module, self.outside))
-        self.assertFalse(ok)
-        self.assertTrue(reason.startswith("streams 11 carried data before failover but did not resume within 3s ["), reason)
+    def test_resume_at_four_seconds_is_a_cost(self):
+        status, reason = self.cell(self.module, self.outside, self.crash_anchor(self.module, self.outside))
+        self.assertEqual(status, "COST", reason)
+        self.assertTrue(reason.startswith(
+            "streams 11 resumed after failover but later than 3s (s11 4.05s): stragglers"), reason)
         self.assertIn("data max 4.05s", reason)
-        self.assertNotIn("within the anchor", reason)
         # The defect: an integer anchor one second late (55) PASSes s11.
         self.assertTrue(failover_stream_verdict(self.outside, 55, 8, json_stream=True)[0])
 
-    def test_late_clock_anchor_still_fails_inside_the_resume_interval(self):
-        # Clock-only (no stop refinement), 0.1 s late inside its ±0.2 s: s11's
-        # first data interval STARTS 2.96 s after it, but the bytes arrive at
-        # its very end, 3.95 s after.
-        anchor = self.module.EventAnchor(53.938 + 0.1, 0.2, "clock only")
-        ok, reason = self.verdict(self.module, self.outside, anchor)
-        self.assertFalse(ok, reason)
+    def test_ten_second_line_each_side(self):
+        status, reason = self.cell(self.module, self.held_9s, self.crash_anchor(self.module, self.held_9s))
+        self.assertEqual(status, "COST", reason)
+        self.assertRegex(reason, r"s11 9\.\d\ds")
+        status, reason = self.cell(self.module, self.held_10s, self.crash_anchor(self.module, self.held_10s))
+        self.assertEqual(status, "FAIL", reason)
+        self.assertTrue(reason.startswith(
+            "streams 11 carried data before failover but did not resume within 10s ["), reason)
+        self.assertRegex(reason, r"s11=10\.\d\d/")
+
+    def test_dead_stream_fails(self):
+        status, reason = self.cell(self.module, self.dead, self.crash_anchor(self.module, self.dead))
+        self.assertEqual(status, "FAIL", reason)
+        self.assertIn("did not resume within 10s", reason)
+        self.assertIn("s11=never/never", reason)
+
+    def test_late_clock_anchor_reads_inside_the_resume_interval(self):
+        # A clock-only anchor 0.1 s late inside its ±0.2 s: s11's first data
+        # interval STARTS 2.96 s after it, but its bytes arrive at the very
+        # end, 3.95 s after.
+        anchor = self.module.EventAnchor(self.OUTSIDE_STOP + 0.1, 0.2, "clock only")
+        status, reason = self.cell(self.module, self.outside, anchor)
+        self.assertEqual(status, "COST", reason)
         self.assertIn("s11=3.95/", reason)
 
-    def test_deadline_margin_inside_the_anchor_uncertainty_is_reported(self):
-        anchor = self.module.EventAnchor(57.603, 0.2, "clock only")
-        ok, reason = self.verdict(self.module, self.inside, anchor)
-        self.assertTrue(ok, reason)
-        self.assertIn("streams 11 are within the anchor's ±0.200s of the deadline", reason)
+    def test_integer_fallback_keeps_an_agreed_verdict_and_voids_a_split_one(self):
+        status, reason = self.module.integer_stream_cell(self.dead, 54, 8, json_stream=True)
+        self.assertEqual(status, "FAIL", reason)
+        self.assertIn("53s FAIL, 54s FAIL, 55s FAIL", reason)
+        status, reason = self.module.integer_stream_cell(self.outside, 54, 8, json_stream=True)
+        self.assertEqual(status, "VOID", reason)
+        self.assertIn("53s COST, 54s COST, 55s PASS", reason)
 
-    def test_cli_precise_path_and_metrics(self):
-        start = self.module.json_stream_start_epoch(self.outside)
+    def run_cli(self, text, *extra):
         command = [
             sys.executable, _PARSER_PATH, "--failover-check", "--json-stream",
-            "--streams", "8", "--min-throughput-gbps", "1", "--crash-at", "55",
-            "--crash-epoch", f"{start + 53.938 - 0.1:.6f}", "--crash-slack", "0.2",
-            "--client-clock-offset", "0", "--client-clock-rtt", "0.2", "--emit-metrics",
+            "--streams", "8", "--min-throughput-gbps", "1", "--crash-at", "54", *extra,
         ]
-        result = subprocess.run(command, input=self.outside, capture_output=True, text=True, check=True)
+        return subprocess.run(command, input=text, capture_output=True, text=True)
+
+    def test_cli_precise_cost_and_metrics(self):
+        start = self.module.json_stream_start_epoch(self.outside)
+        result = self.run_cli(
+            self.outside, "--straggler-cost",
+            "--crash-epoch", f"{start + self.OUTSIDE_STOP - 0.2:.6f}",
+            "--crash-epoch-after", f"{start + self.OUTSIDE_STOP + 10:.6f}",
+            "--client-clock-offset", "0", "--client-clock-rtt", "0.2", "--emit-metrics",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
-        self.assertTrue(lines[1].startswith("FAIL streams 11 carried data before failover"), lines[1])
+        self.assertTrue(lines[1].startswith("COST streams 11 resumed after failover"), lines[1])
         metrics = dict(line[len("METRIC "):].split("=", 1) for line in lines[2:])
         self.assertEqual(metrics["crash_anchor_precise"], "1")
         self.assertEqual(metrics["crash_at_s"], "53.938")
+        self.assertEqual(metrics["crash_stop_after_epoch_s"], "0.200")
         self.assertEqual(metrics["crash_resume_data_max_s"], "4.055")
-        self.assertEqual(metrics["crash_resume_data_never"], "0")
+        self.assertEqual(metrics["crash_resume_straggler_streams"], "1")
         for value in metrics.values():
             float(value)  # harness-result.sh records numeric metrics only
 
-        # No clock offset: the integer verdict, byte-for-byte the legacy one.
-        legacy = subprocess.run(
-            [arg for arg in command if arg not in ("--client-clock-offset", "0")],
-            input=self.outside, capture_output=True, text=True, check=True,
-        ).stdout.splitlines()
+    def test_cli_without_straggler_cost_is_the_old_verdict(self):
+        result = self.run_cli(self.outside)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
-            legacy[1], "PASS " + failover_stream_verdict(self.outside, 55, 8, json_stream=True)[1]
+            result.stdout.splitlines()[1],
+            "FAIL " + failover_stream_verdict(self.outside, 54, 8, json_stream=True)[1],
         )
-        self.assertEqual(legacy[2:4], ["METRIC crash_anchor_precise=0", "METRIC crash_at_s=55"])
+        self.assertEqual(len(result.stdout.splitlines()), 2)
+        refused = self.run_cli(self.outside, "--crash-epoch", "1")
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("need --straggler-cost", refused.stderr)
+
+    def test_cli_with_no_clock_reading_uses_the_integer_cell(self):
+        result = self.run_cli(self.outside, "--straggler-cost", "--emit-metrics")
+        lines = result.stdout.splitlines()
+        self.assertTrue(lines[1].startswith("VOID the integer failover anchor cannot place"), lines[1])
+        self.assertIn("METRIC crash_anchor_precise=0", lines)
 
     def test_precise_failback_without_post_event_interval_is_void(self):
         anchor = self.module.EventAnchor(83.0, 0.1, "observed")
-        ok, reason = self.module.precise_stream_verdict(
+        status, reason = self.module.precise_stream_cell(
             self.inside, anchor, 8, json_stream=True, event_label="failback"
         )
-        self.assertIsNone(ok)
+        self.assertEqual(status, "VOID", reason)
         self.assertIn("before the failback event", reason)
 
     # Executable mutants: each removes one piece of the fix and must flip the
     # row it names. A mutant that flips nothing would mean the row cannot see
     # the piece it claims to pin.
-    def assert_flips(self, anchor, replacement, text, anchor_builder, expected_ok):
-        ok, reason = self.verdict(self.module, text, anchor_builder(self.module, text))
-        self.assertEqual(ok, expected_ok, reason)
+    def assert_flips(self, anchor, replacement, judge, expected):
+        self.assertEqual(judge(self.module)[0], expected)
         # No-op control through the same exec path: the mechanism alone must
         # not move the row, so a flip below is the replacement's doing.
         control = types.SimpleNamespace(**_mutant(anchor, anchor))
-        ok, reason = self.verdict(control, text, anchor_builder(control, text))
-        self.assertEqual(ok, expected_ok, f"no-op control moved the row: {reason}")
+        self.assertEqual(judge(control)[0], expected, "no-op control moved the row")
         mutant = types.SimpleNamespace(**_mutant(anchor, replacement))
-        ok, reason = self.verdict(mutant, text, anchor_builder(mutant, text))
-        self.assertEqual(ok, not expected_ok, f"mutant did not flip the row: {reason}")
+        status, reason = judge(mutant)
+        self.assertNotEqual(status, expected, f"mutant did not flip the row: {reason}")
+
+    def precise(self, text, **anchor_args):
+        return lambda module: self.cell(module, text, self.crash_anchor(module, text, **anchor_args))
 
     def test_mutant_integer_anchor_flips_the_inside_row(self):
         self.assert_flips(
             "            return EventAnchor(\n                stop,",
             "            return EventAnchor(\n                math.floor(stop),",
-            self.inside, self.crash_anchor, True,
+            self.precise(self.inside), "PASS",
         )
 
-    def test_mutant_counting_the_crash_interval_flips_the_outside_row(self):
+    def test_mutant_counting_the_crash_interval_flips_the_four_second_row(self):
         self.assert_flips(
             "after = [row for row in intervals if row[0] >= anchor.latest]",
             "after = [row for row in intervals if row[1] > anchor.seconds]",
-            self.outside, self.crash_anchor, False,
+            self.precise(self.outside), "COST",
         )
 
     def test_mutant_resume_at_interval_start_flips_the_late_clock_row(self):
-        late = lambda module, text: module.EventAnchor(53.938 + 0.1, 0.2, "clock only")  # noqa: E731
+        late = lambda module: self.cell(  # noqa: E731
+            module, self.outside, module.EventAnchor(self.OUTSIDE_STOP + 0.1, 0.2, "clock only")
+        )
         self.assert_flips(
             "resume = end - (end - start) * min(1.0, bps / following)",
             "resume = start",
-            self.outside, late, False,
+            late, "COST",
         )
 
     def test_mutant_resume_at_interval_end_flips_the_inside_row(self):
         self.assert_flips(
             "resume = end - (end - start) * min(1.0, bps / following)",
             "resume = end",
-            self.inside, self.crash_anchor, True,
+            self.precise(self.inside), "PASS",
         )
 
     def test_mutant_without_the_stop_refinement_flips_the_early_clock_row(self):
-        # The clock reading's midpoint 0.15 s early (inside its ±0.2 s): only
-        # the aggregate-stop refinement puts s11 back inside the deadline.
-        early = lambda module, text: PreciseCrashAnchorTests.crash_anchor(  # noqa: E731
-            module, text, clock_error=-0.15
+        # A narrow clock window whose midpoint is 0.15 s early: only the
+        # aggregate-stop refinement puts s11 back inside 3 s.
+        self.assert_flips(
+            "    if data_stop:\n", "    if False:\n",
+            self.precise(self.inside, before=-0.25, after=-0.05, rtt=0.2), "PASS",
         )
-        self.assert_flips("    if data_stop:\n", "    if False:\n", self.inside, early, True)
+
+    def test_mutant_no_cost_line_flips_the_four_second_row(self):
+        self.assert_flips(
+            "RESUME_COST_SECONDS = 3.0", "RESUME_COST_SECONDS = 10.0",
+            self.precise(self.outside), "COST",
+        )
+
+    def test_mutant_no_fail_line_flips_the_ten_second_row(self):
+        self.assert_flips(
+            "RESUME_FAIL_SECONDS = 10.0", "RESUME_FAIL_SECONDS = 1e9",
+            self.precise(self.held_10s), "FAIL",
+        )
+
+    def test_mutant_fallback_trusting_one_anchor_flips_the_split_row(self):
+        self.assert_flips(
+            "    if len(set(statuses.values())) == 1:\n", "    if True:\n",
+            lambda module: module.integer_stream_cell(self.outside, 54, 8, json_stream=True),
+            "VOID",
+        )
 
 
 if __name__ == "__main__":

@@ -142,15 +142,22 @@ grep -q 'failback_at_seconds=$((SECONDS - iperf_start_seconds))' "$FAILOVER" \
 ! grep -q 'pass "iperf3 completed successfully (finished before' "$FAILOVER" \
 	|| bad "test-failover.sh accepts an iperf client that ended before failback"
 ok "test-failover wires crash and last-RG-moved timestamps and rejects early client completion"
-# #18692: the sub-second anchors. The epoch is the last read before the sysrq
-# (only the integer anchor between them), the failback epoch sits beside the
-# integer landing, and the oracle's METRIC lines reach the ledger.
+# #18692: the sub-second anchors. The two epochs bracket the sysrq exec (only
+# the integer anchor between the first and the exec), the failback epoch sits
+# beside the integer landing, the cells run under the COST policy, and the
+# oracle's COST and METRIC lines reach the summary and the ledger.
 epoch_line="$(grep -n '^failover_epoch=$(date +%s.%N)$' "$FAILOVER" | cut -d: -f1)"
 sysrq_line="$(grep -n "echo b > /proc/sysrq-trigger' || true; } 2>/dev/null$" "$FAILOVER" | head -1 | cut -d: -f1)"
-[[ -n "$epoch_line" && -n "$sysrq_line" ]] && (( sysrq_line - epoch_line == 2 )) \
-	|| bad "test-failover.sh must stamp failover_epoch immediately before the sysrq (#18692)"
-grep -qF -- '--crash-epoch "$failover_epoch" --crash-slack "$failover_crash_rtt")' "$FAILOVER" \
-	|| bad "test-failover.sh does not pass the sub-second crash anchor to the stream oracle (#18692)"
+after_line="$(grep -n '^failover_epoch_after=$(date +%s.%N)$' "$FAILOVER" | cut -d: -f1)"
+[[ -n "$epoch_line" && -n "$sysrq_line" && -n "$after_line" ]] &&
+	(( sysrq_line - epoch_line == 2 && after_line - sysrq_line == 1 )) \
+	|| bad "test-failover.sh must bracket the sysrq exec with failover_epoch and failover_epoch_after (#18692)"
+grep -qF -- '--crash-epoch "$failover_epoch" --crash-epoch-after "$failover_epoch_after")' "$FAILOVER" \
+	|| bad "test-failover.sh does not pass the sub-second crash window to the stream oracle (#18692)"
+grep -qF -- 'oracle_anchor_args=(--straggler-cost)' "$FAILOVER" \
+	|| bad "test-failover.sh must run the stream cells under the #18692 COST policy"
+grep -qF 'COST\ *) cost "${oracle#COST }" ;;' "$FAILOVER" \
+	|| bad "test-failover.sh must score the oracle's COST lines as cost cells (#18692)"
 grep -qF -- 'oracle_anchor_args+=(--failback-epoch "$failback_epoch")' "$FAILOVER" \
 	|| bad "test-failover.sh does not pass the sub-second failback anchor to the stream oracle (#18692)"
 grep -qF 'failback_epoch=$(date +%s.%N) # #18692: sub-second twin of the next line' "$FAILOVER" \

@@ -277,23 +277,35 @@ def failover_stream_verdict(
     )
 
 
-# ── #18692: the crash/failback window in real seconds ─────────────────────
+# ── #18692: the crash/failback cells in real seconds ──────────────────────
 #
-# The legacy window above takes an integer `$SECONDS` difference as the event
-# instant. It can sit a second early or late on iperf3's own clock, and a 1 s
-# interval rule then decides a stream that resumed 3-4 s after the event by
-# where the second fell. The precise path below fixes both:
+# The integer verdict above takes a `$SECONDS` difference as the event
+# instant. It can sit a second early or late on iperf3's own clock, and its
+# 1 s interval rule then decides a stream that resumed 3-4 s after the event
+# by where the second fell. The path below (opt-in: ``--straggler-cost``,
+# which test-failover passes) fixes both and changes the cell's policy:
 #
 #   1. The event instant comes from a sub-second source (an ``EventAnchor``
 #      with an explicit uncertainty), never from `$SECONDS`.
 #   2. Each stream's resume instant is read INSIDE its first data interval
-#      (``stream_resume_instants``), so the deadline is judged in real seconds
-#      rather than by which 1 s interval the first bytes fell in.
+#      (``stream_resume_instants``), so deadlines are judged in real seconds.
+#   3. Policy (#18692 review, the coordinator's decision): a stream that has
+#      not resumed within RESUME_FAIL_SECONDS is dead or stuck (FAIL); one
+#      that resumed after RESUME_COST_SECONDS is a straggler (COST: counted
+#      as passed, its latency in the cell text, judged master-relative). The
+#      3 s line sits inside TCP's RTO backoff on loss (resumes at 0.97-2.91 s,
+#      a gap, then stragglers at 3.75-4.59 s), so as a FAIL line it decided
+#      about a quarter of crash runs, master's included, by which side of a
+#      retransmission a stream landed on.
 #
-# The legacy verdict is kept byte-for-byte as the floor: any input the precise
-# path cannot use (no timestamps, no clock offset, legacy text output) falls
-# back to it.
+# With no usable precise anchor the cell falls back to the integer verdict
+# evaluated at the integer anchor and one second either side of it; it keeps
+# that verdict when all three agree and is VOID when they do not. Callers
+# without ``--straggler-cost`` (ha-smoke-iperf-lib.sh) get the integer
+# verdict exactly as before.
 
+RESUME_COST_SECONDS = 3.0
+RESUME_FAIL_SECONDS = 10.0
 # A stream counts as rate-recovered once it reaches this fraction of its
 # reference rate (#18692 ask 2).
 RATE_RECOVERY_FRACTION = 0.5
@@ -302,19 +314,25 @@ RATE_RECOVERY_FRACTION = 0.5
 # re-share the link; a stream that comes back at a smaller, steady share is
 # recovered at that share, not "never" (one real loss run kept a stream at
 # 15-43 % of its pre-crash rate for 66 s while the aggregate ran at or above
-# its pre-crash rate).
-# The post window ends at event+15 so later disruptions in the run (the
-# crashed node's rejoin, the planned RG split, the failback) cannot set it.
+# its pre-crash rate). The post window ends at event+15 so later disruptions
+# in the run (the crashed node's rejoin, the planned RG split, the failback)
+# cannot set it.
 _REF_PRE = (6.0, 1.0)
 _REF_POST = (5.0, 15.0)
 # Data-path anchor: the aggregate must fall below this fraction of its
 # pre-event rate for one whole interval to count as the event's stop.
 _STOP_EMPTY_FRACTION = 0.05
-# Error of the data-path stop estimate: rate noise inside the stop interval
-# (the loss aggregate varies about 2 % interval to interval, so about 0.02 s
-# of a 1 s interval) plus the time the client's socket buffers take to fill
-# once the path is dead.
+# DESIGN BUDGET for the data-path stop estimate, not a measured bound: rate
+# noise inside the stop interval (the loss aggregate varies about 2 % interval
+# to interval, so about 0.02 s of a 1 s interval) plus the time the client's
+# socket buffers take to fill once the path is dead (which only reads late).
+# test-failover records the stop's distance from the crash command's epoch
+# (`crash_stop_after_epoch_s`) so live runs build the evidence.
 _STOP_UNCERTAINTY = 0.05
+# A clock-only anchor wider than this is not precise: the crash's clock window
+# runs from the sysrq dispatch to the exec's return (seconds), so without the
+# aggregate's stop inside it the cell falls back to the integer verdict.
+_MAX_CLOCK_UNCERTAINTY = 0.25
 
 
 class EventAnchor:
@@ -324,6 +342,9 @@ class EventAnchor:
         self.seconds = seconds
         self.uncertainty = uncertainty
         self.source = source
+        # Seconds from the mapped event-command epoch to this anchor, when
+        # the anchor is a data stop inside a clock window (a live residual).
+        self.after_epoch: Optional[float] = None
 
     @property
     def latest(self) -> float:
@@ -361,56 +382,45 @@ def json_stream_start_epoch(text: str) -> Optional[float]:
     return None
 
 
-def clock_anchor(
+def clock_window(
     text: str,
-    epoch: Optional[float],
-    slack: float,
+    before: Optional[float],
+    after: Optional[float],
     offset: Optional[float],
     rtt: Optional[float],
-    label: str,
-) -> Optional[EventAnchor]:
-    """Map an orchestrator wall-clock instant onto iperf3's interval clock.
+) -> Optional[Tuple[float, float]]:
+    """``[lo, hi]`` on iperf3's interval clock that must hold the event.
 
-    - ``epoch``: orchestrator ``date +%s.%N`` taken just before the event's
-      command (the sysrq exec) or just after the poll that observed it.
-    - ``slack``: how long after ``epoch`` the event may still have happened
-      (the crash exec's own dispatch time, bounded by that node's measured
-      incus-exec round trip); 0 for an observed instant.
+    - ``before``/``after``: orchestrator ``date +%s.%N`` taken just before the
+      event's command and just after it returned (for an observed instant,
+      both are the observation's stamp).
     - ``offset``/``rtt``: iperf3 client host clock minus orchestrator clock,
       from the minimum-RTT ``incus exec date`` reading
       (``_failover_clock_offset``); its error bound is ``rtt / 2``.
 
     Only the orchestrator and the client host clocks enter; no firewall
-    node's clock (and no node0/node1 skew) is involved. The event lies in
-    ``[epoch - rtt/2, epoch + slack + rtt/2]`` after mapping; the anchor is
-    that interval's midpoint with half its width as the uncertainty.
+    node's clock (and no node0/node1 skew) is involved.
     """
-    if epoch is None or offset is None or rtt is None or rtt < 0 or slack < 0:
+    if None in (before, after, offset, rtt) or rtt < 0 or after < before:
         return None
     start = json_stream_start_epoch(text)
     if start is None:
         return None
-    return EventAnchor(
-        epoch + offset + slack / 2 - start,
-        (slack + rtt) / 2,
-        f"{label}: orchestrator clock mapped to the iperf3 client clock "
-        f"(offset {offset:+.3f}s, rtt {rtt:.3f}s, slack {slack:.3f}s) against "
-        "start.timestamp.timemillisecs",
-    )
+    return before + offset - rtt / 2 - start, after + offset + rtt / 2 - start
 
 
 def data_stop_anchor(text: str, lo: float, hi: float) -> Optional[EventAnchor]:
     """The instant the aggregate stopped, on iperf3's own clock, in [lo, hi].
 
     A crash kills the forwarding path for every stream at once, so the client
-    stops sending within milliseconds (its socket buffers fill). The interval
-    holding the crash carries a fraction of the pre-event rate equal to the
-    fraction of it before the crash; the next interval is empty. This reads
-    the event on the SAME clock as the windows, so no skew enters at all.
+    stops sending (its socket buffers fill). The interval holding the crash
+    carries a fraction of the pre-event rate equal to the fraction of it
+    before the crash; the next interval is empty. This reads the event on the
+    SAME clock as the windows, so no skew enters at all.
 
-    It is only a refinement: the caller passes the window the event must lie
-    in (from ``clock_anchor``), and a stop outside it, or no empty interval at
-    all (a takeover faster than one interval), returns None.
+    The first such stop at or after ``lo - 1.5`` is the candidate; it counts
+    only inside ``[lo, hi]``. With no empty interval at all (a takeover faster
+    than one interval) there is none.
     """
     rows, json_rows = _oracle_interval_rows(text, True)
     if not json_rows:
@@ -446,6 +456,46 @@ def data_stop_anchor(text: str, lo: float, hi: float) -> Optional[EventAnchor]:
     return None
 
 
+def event_anchor(
+    text: str,
+    *,
+    before: Optional[float],
+    after: Optional[float],
+    offset: Optional[float],
+    rtt: Optional[float],
+    label: str,
+    data_stop: bool,
+) -> Optional[EventAnchor]:
+    """The precise anchor for one event, or None to fall back.
+
+    - With ``data_stop`` (the crash): the aggregate's stop inside the clock
+      window. The window runs to the sysrq exec's return, so it is far wider
+      than the stop's own budget and only says where to look.
+    - Otherwise, or with no stop in the window: the window's midpoint, if the
+      window is narrow enough to count as precise (an observed instant).
+    """
+    window = clock_window(text, before, after, offset, rtt)
+    if window is None:
+        return None
+    lo, hi = window
+    source = (
+        f"{label}: orchestrator clock mapped to the iperf3 client clock "
+        f"(offset {offset:+.3f}s, rtt {rtt:.3f}s) against start.timestamp.timemillisecs"
+    )
+    if data_stop:
+        try:
+            stop = data_stop_anchor(text, lo, hi)
+        except ValueError:
+            stop = None
+        if stop is not None:
+            stop.source = f"{label}: {stop.source}, the window of {source}"
+            stop.after_epoch = stop.seconds - (before + offset - json_stream_start_epoch(text))
+            return stop
+    if (hi - lo) / 2 > _MAX_CLOCK_UNCERTAINTY:
+        return None
+    return EventAnchor((lo + hi) / 2, (hi - lo) / 2, source)
+
+
 def _stream_intervals(rows) -> Dict[int, List[Tuple[float, float, int]]]:
     streams: Dict[int, List[Tuple[float, float, int]]] = {}
     for stream, start, end, bps in rows:
@@ -458,9 +508,11 @@ def _stream_intervals(rows) -> Dict[int, List[Tuple[float, float, int]]]:
 
 
 def stream_resume_instants(rows, anchor: EventAnchor):
-    """Per-stream resume instant and rate-recovery interval after an event.
+    """Per-stream resume instant, its interval, and the rate-recovery start.
 
-    Returns ``{stream: (resume, rate_start)}``, each on iperf3's clock or None.
+    Returns ``{stream: (resume, rate_start, interval)}`` on iperf3's clock,
+    ``interval`` being the ``(start, end)`` of the first data interval; each
+    is None when the stream never gets there.
 
     Only intervals starting at or after ``anchor.latest`` are used: they hold
     no byte that can predate the event.
@@ -469,10 +521,11 @@ def stream_resume_instants(rows, anchor: EventAnchor):
       ``bps``. The stream's next interval gives its post-resume rate, so the
       data took ``(e - s) * bps / bps_next`` of the interval and the stream
       resumed at ``e`` minus that (clamped to ``s`` when the first interval
-      is the faster one, and ``s`` when there is no next interval). A stream
-      still ramping up inside its first interval carried fewer bytes than
-      the next interval's rate implies, which makes the estimate read late,
-      never early.
+      is the faster one, and ``s`` when there is no next interval). The true
+      instant is somewhere in ``[s, e)``: a stream still ramping inside the
+      interval makes the read late, a burst followed by a smaller share in
+      the next interval makes it early. Callers flag a deadline that falls
+      inside that interval rather than trust the read there.
     - ``rate_start``: start of the first such interval at or above
       ``RATE_RECOVERY_FRACTION`` of the stream's reference rate (the issue's
       interval-granular definition; the true instant is within one interval
@@ -497,7 +550,7 @@ def stream_resume_instants(rows, anchor: EventAnchor):
         ]
         reference = min(refs) if refs else 0
         after = [row for row in intervals if row[0] >= anchor.latest]
-        resume = None
+        resume = interval = None
         for index, (start, end, bps) in enumerate(after):
             if bps <= 0:
                 continue
@@ -506,20 +559,52 @@ def stream_resume_instants(rows, anchor: EventAnchor):
                 resume = end - (end - start) * min(1.0, bps / following)
             else:
                 resume = start
+            interval = (start, end)
             break
         rate_start = next(
             (start for start, _, bps in after
              if reference > 0 and bps >= RATE_RECOVERY_FRACTION * reference),
             None,
         )
-        result[stream] = (resume, rate_start)
+        result[stream] = (resume, rate_start, interval)
+    return result
+
+
+def _pre_event_streams(rows, seconds: float, pre_window_seconds: float = 5):
+    return {
+        stream for stream, start, end, bps in rows
+        if stream is not None and 0.5 <= end - start <= 1.5
+        and seconds - pre_window_seconds <= start < seconds and bps > 0
+    }
+
+
+def resume_latencies(text: str, anchor: EventAnchor, *, json_stream: bool, streams=None):
+    """``{stream: (data_latency, rate_latency, interval)}`` after the anchor.
+
+    Latencies are seconds after ``anchor.seconds``; ``interval`` is the first
+    data interval on iperf3's clock. ``streams`` defaults to the streams that
+    carried data in the five seconds before the event, the set the cell
+    judges.
+    """
+    rows, _ = _oracle_interval_rows(text, json_stream)
+    if streams is None:
+        streams = _pre_event_streams(rows, anchor.seconds)
+    result = {}
+    for stream, (resume, rate_start, interval) in stream_resume_instants(rows, anchor).items():
+        if stream not in streams:
+            continue
+        result[stream] = (
+            None if resume is None else max(0.0, resume - anchor.seconds),
+            None if rate_start is None else max(0.0, rate_start - anchor.seconds),
+            interval,
+        )
     return result
 
 
 def _latency_text(latencies, anchor: EventAnchor) -> str:
     def stat(index):
-        values = [pair[index] for pair in latencies.values() if pair[index] is not None]
-        never = sum(1 for pair in latencies.values() if pair[index] is None)
+        values = [entry[index] for entry in latencies.values() if entry[index] is not None]
+        never = sum(1 for entry in latencies.values() if entry[index] is None)
         if not values:
             return "none"
         text = f"max {max(values):.2f}s median {statistics.median(values):.2f}s"
@@ -529,8 +614,8 @@ def _latency_text(latencies, anchor: EventAnchor) -> str:
         return "never" if value is None else f"{value:.2f}"
 
     per_stream = " ".join(
-        f"s{stream}={fmt(resume)}/{fmt(rate)}"
-        for stream, (resume, rate) in sorted(latencies.items())
+        f"s{stream}={fmt(entry[0])}/{fmt(entry[1])}"
+        for stream, entry in sorted(latencies.items())
     )
     return (
         f"resume after the event: data {stat(0)}; "
@@ -541,52 +626,32 @@ def _latency_text(latencies, anchor: EventAnchor) -> str:
     )
 
 
-def resume_latencies(text: str, anchor: EventAnchor, *, json_stream: bool, streams=None):
-    """``{stream: (data_latency, rate_latency)}`` in seconds after the anchor.
-
-    ``streams`` defaults to the streams that carried data in the five seconds
-    before the event, the set the verdict judges.
-    """
-    rows, _ = _oracle_interval_rows(text, json_stream)
-    if streams is None:
-        streams = {
-            stream for stream, start, end, bps in rows
-            if stream is not None and 0.5 <= end - start <= 1.5
-            and anchor.seconds - 5 <= start < anchor.seconds and bps > 0
-        }
-    result = {}
-    for stream, (resume, rate_start) in stream_resume_instants(rows, anchor).items():
-        if stream not in streams:
-            continue
-        result[stream] = (
-            None if resume is None else max(0.0, resume - anchor.seconds),
-            None if rate_start is None else max(0.0, rate_start - anchor.seconds),
-        )
-    return result
-
-
-def precise_stream_verdict(
+def precise_stream_cell(
     text: str,
     anchor: EventAnchor,
     expected_streams: int,
     pre_window_seconds: float = 5,
-    recovery_deadline_seconds: float = 3,
     *,
     json_stream: bool = True,
     event_label: str = "failover",
-) -> Tuple[Optional[bool], str]:
-    """``failover_stream_verdict`` with the window in real seconds (#18692).
+) -> Tuple[str, str]:
+    """``(status, message)``: PASS, COST, FAIL or VOID, judged in real seconds.
 
-    Every pre-event stream must resume (``stream_resume_instants``) no later
-    than ``recovery_deadline_seconds`` after ``anchor.seconds``. The message
-    carries each stream's data and rate latency plus their max and median,
-    and says when a stream's margin to the deadline is inside the anchor's
-    own uncertainty.
+    - FAIL: a pre-event stream has not resumed within RESUME_FAIL_SECONDS
+      (dead or stuck), or the evidence is missing.
+    - COST: every stream resumed, some after RESUME_COST_SECONDS (named, with
+      their latency).
+    - PASS: every stream resumed within RESUME_COST_SECONDS.
+
+    The message carries each stream's data and rate latency plus max and
+    median, and names any stream whose verdict at a deadline rests on the
+    in-interval read or on the anchor's own uncertainty: one whose first data
+    interval, widened by the anchor's uncertainty, contains the deadline.
     """
     try:
         rows, _ = _oracle_interval_rows(text, json_stream)
     except ValueError as exc:
-        return False, f"invalid JSON-stream interval telemetry: {exc}"
+        return "FAIL", f"invalid JSON-stream interval telemetry: {exc}"
     intervals = [
         row for row in rows
         if row[0] is not None and 0.5 <= row[2] - row[1] <= 1.5
@@ -596,91 +661,117 @@ def precise_stream_verdict(
     has_post_event_interval = any(start >= anchor.latest for _, start, _, _ in intervals)
     if event_label == "failback" and not has_post_event_interval:
         if last_end is not None and last_end < anchor.latest:
-            return None, (
+            return "VOID", (
                 f"client telemetry ends at {last_end:.2f}s, before the "
                 f"failback event at {event:.3f}s: no failback stream evidence"
             )
-        return None, (
+        return "VOID", (
             f"client telemetry has no per-stream interval starting at or after "
             f"{anchor.latest:.3f}s: failback recovery window is uncovered"
         )
     if event_label != "failback" and (last_end is None or last_end < anchor.latest + 1):
-        return False, (
+        return "FAIL", (
             f"client telemetry ends at {last_end if last_end is not None else 0:.2f}s, "
             f"before a whole interval after the {event_label} event at {event:.3f}s: "
             f"no {event_label} stream evidence"
         )
 
-    before = {
-        stream for stream, start, _, bps in intervals
-        if event - pre_window_seconds <= start < event and bps > 0
-    }
+    before = _pre_event_streams(rows, event, pre_window_seconds)
     if len(before) != expected_streams:
-        return False, (
+        return "FAIL", (
             f"expected {expected_streams} active streams before {event_label}, observed "
             f"{len(before)} ({', '.join(map(str, sorted(before))) or 'none'})"
         )
 
     latencies = resume_latencies(text, anchor, json_stream=json_stream, streams=before)
-    deadline = recovery_deadline_seconds
-    missing = sorted(
+    dead = sorted(
         stream for stream in before
-        if latencies[stream][0] is None or latencies[stream][0] > deadline
+        if latencies[stream][0] is None or latencies[stream][0] > RESUME_FAIL_SECONDS
     )
-    close = sorted(
+    late = sorted(
         stream for stream in before
-        if latencies[stream][0] is not None
-        and abs(latencies[stream][0] - deadline) <= anchor.uncertainty
+        if stream not in dead and latencies[stream][0] > RESUME_COST_SECONDS
     )
-    detail = f" [{_latency_text(latencies, anchor)}"
-    if close:
-        detail += (
-            f"; streams {', '.join(map(str, close))} are within the anchor's "
-            f"±{anchor.uncertainty:.3f}s of the deadline"
+    close = []
+    for deadline in (RESUME_COST_SECONDS, RESUME_FAIL_SECONDS):
+        streams = sorted(
+            stream for stream in before
+            if latencies[stream][2] is not None
+            and latencies[stream][2][0] - anchor.uncertainty
+            <= event + deadline
+            < latencies[stream][2][1] + anchor.uncertainty
         )
-    detail += "]"
-    if missing:
-        return False, (
-            f"streams {', '.join(map(str, missing))} carried data before {event_label} "
-            f"but did not resume within {deadline:g}s" + detail
-        )
-    return True, (
-        f"all {len(before)} pre-{event_label} streams ({', '.join(map(str, sorted(before)))}) "
-        f"resumed data within {deadline:g}s" + detail
-    )
-
-
-def event_anchor(
-    text: str,
-    *,
-    epoch: Optional[float],
-    slack: float,
-    offset: Optional[float],
-    rtt: Optional[float],
-    label: str,
-    data_stop: bool,
-) -> Optional[EventAnchor]:
-    """The precise anchor for one event, or None to fall back to the legacy one.
-
-    ``clock_anchor`` is the measured source. For a crash (``data_stop``) the
-    aggregate's stop inside the clock window refines it to the stream data's
-    own clock; outside that window, or with no empty interval, the clock
-    anchor stands.
-    """
-    clock = clock_anchor(text, epoch, slack, offset, rtt, label)
-    if clock is None:
-        return None
-    if data_stop:
-        try:
-            stop = data_stop_anchor(
-                text, clock.seconds - clock.uncertainty, clock.latest
+        if streams:
+            close.append(
+                f"the {deadline:g}s line falls inside the interval streams "
+                f"{', '.join(map(str, streams))} resumed in (±{anchor.uncertainty:.3f}s anchor), "
+                "so the in-interval read decided their side of it"
             )
-        except ValueError:
-            stop = None
-        if stop is not None:
-            stop.source = f"{label}: {stop.source} = the window of {clock.source}"
-            return stop
-    return clock
+    detail = f" [{_latency_text(latencies, anchor)}" + "".join(f"; {note}" for note in close) + "]"
+    if dead:
+        return "FAIL", (
+            f"streams {', '.join(map(str, dead))} carried data before {event_label} "
+            f"but did not resume within {RESUME_FAIL_SECONDS:g}s" + detail
+        )
+    if late:
+        named = ", ".join(f"s{stream} {latencies[stream][0]:.2f}s" for stream in late)
+        return "COST", (
+            f"streams {', '.join(map(str, late))} resumed after {event_label} but later than "
+            f"{RESUME_COST_SECONDS:g}s ({named}): stragglers, judged master-relative" + detail
+        )
+    return "PASS", (
+        f"all {len(before)} pre-{event_label} streams ({', '.join(map(str, sorted(before)))}) "
+        f"resumed data within {RESUME_COST_SECONDS:g}s" + detail
+    )
+
+
+def integer_stream_cell(
+    text: str,
+    event_seconds: float,
+    expected_streams: int,
+    *,
+    json_stream: bool,
+    event_label: str = "failover",
+) -> Tuple[str, str]:
+    """The fallback cell when no precise anchor exists.
+
+    The integer verdict, with the COST/FAIL policy, at the integer anchor and
+    one second either side of it (the integer anchor's own error). All three
+    agreeing keeps the verdict; any disagreement is VOID, because the integer
+    clock cannot say which side of a line a stream fell on.
+    """
+    def one(at):
+        fail_ok, fail_text = failover_stream_verdict(
+            text, at, expected_streams, recovery_deadline_seconds=RESUME_FAIL_SECONDS,
+            json_stream=json_stream, event_label=event_label,
+        )
+        if fail_ok is None:
+            return "VOID", fail_text
+        if not fail_ok:
+            return "FAIL", fail_text
+        cost_ok, cost_text = failover_stream_verdict(
+            text, at, expected_streams, recovery_deadline_seconds=RESUME_COST_SECONDS,
+            json_stream=json_stream, event_label=event_label,
+        )
+        if cost_ok:
+            return "PASS", cost_text
+        return "COST", cost_text.replace(
+            "did not resume within", "resumed only after"
+        ) + f" (within {RESUME_FAIL_SECONDS:g}s): stragglers, judged master-relative"
+
+    cells = {at: one(at) for at in (event_seconds - 1, event_seconds, event_seconds + 1)}
+    statuses = {at: cell[0] for at, cell in cells.items()}
+    status, message = cells[event_seconds]
+    note = (
+        f" [integer anchor {event_seconds:g}s (harness SECONDS) and ±1 s: "
+        + ", ".join(f"{at:g}s {statuses[at]}" for at in sorted(cells)) + "]"
+    )
+    if len(set(statuses.values())) == 1:
+        return status, message + note
+    return "VOID", (
+        f"the integer {event_label} anchor cannot place the streams: "
+        f"the verdict changes within its own ±1 s" + note
+    )
 
 
 def main() -> int:
@@ -705,10 +796,18 @@ def main() -> int:
         action="store_true",
         help="parse iperf3 JSON Lines instead of legacy text output",
     )
-    # #18692 precise anchors. With --client-clock-offset/--client-clock-rtt
-    # and an epoch, the matching verdict is judged in real seconds; without
-    # them (or without start.timestamp.timemillisecs in the log) it falls
-    # back to the integer --crash-at/--failback-at verdict unchanged.
+    # #18692. Without --straggler-cost the stream cells are the integer
+    # verdict exactly as before (ha-smoke-iperf-lib.sh relies on that).
+    parser.add_argument(
+        "--straggler-cost",
+        action="store_true",
+        help=(
+            "judge the stream cells in real seconds when an anchor is precise: "
+            f"FAIL unresumed within {RESUME_FAIL_SECONDS:g}s, COST resumed after "
+            f"{RESUME_COST_SECONDS:g}s; otherwise the integer verdict at the anchor "
+            "and +/-1 s, VOID when those disagree"
+        ),
+    )
     parser.add_argument(
         "--crash-epoch",
         type=float,
@@ -716,13 +815,10 @@ def main() -> int:
         help="orchestrator wall clock (date +%%s.%%N) just before the crash command",
     )
     parser.add_argument(
-        "--crash-slack",
+        "--crash-epoch-after",
         type=float,
-        default=0.0,
-        help=(
-            "seconds after --crash-epoch the crash may still have happened "
-            "(the crashed node's measured incus-exec round trip)"
-        ),
+        default=None,
+        help="orchestrator wall clock just after the crash command returned or failed",
     )
     parser.add_argument(
         "--failback-epoch",
@@ -745,57 +841,74 @@ def main() -> int:
     parser.add_argument(
         "--emit-metrics",
         action="store_true",
-        help="after the verdicts, print METRIC lines (anchor and resume latencies)",
+        help="after the verdicts, print numeric METRIC lines (anchors and resume latencies)",
     )
     args = parser.parse_args()
+    precise_inputs = (
+        args.crash_epoch, args.crash_epoch_after, args.failback_epoch,
+        args.client_clock_offset, args.client_clock_rtt,
+    )
+    if not args.straggler_cost and any(value is not None for value in precise_inputs):
+        parser.error("the epoch and clock flags need --straggler-cost")
 
     text = sys.stdin.read()
 
-    def precise(epoch, slack, label, data_stop):
-        if not args.json_stream:
-            return None
-        return event_anchor(
-            text,
-            epoch=epoch,
-            slack=slack,
-            offset=args.client_clock_offset,
-            rtt=args.client_clock_rtt,
-            label=label,
-            data_stop=data_stop,
-        )
-
-    def stream_check(at, anchor, label):
-        if anchor is not None:
-            return precise_stream_verdict(
-                text, anchor, args.streams, json_stream=True, event_label=label
-            )
+    def legacy_check(at, label):
         return failover_stream_verdict(
             text, at, args.streams, json_stream=args.json_stream, event_label=label
         )
 
-    crash_anchor = precise(args.crash_epoch, args.crash_slack, "crash", True)
-    checks = [
-        failover_interval_verdict(
-            text,
-            min_bps=int(args.min_throughput_gbps * 1_000_000_000),
-            json_stream=args.json_stream,
-        ),
-        stream_check(args.crash_at, crash_anchor, "failover"),
-    ]
-    events = [("crash", args.crash_at, crash_anchor)]
+    def cell(at, before, after, label, data_stop):
+        anchor = None
+        if args.json_stream:
+            anchor = event_anchor(
+                text, before=before, after=after, offset=args.client_clock_offset,
+                rtt=args.client_clock_rtt, label="crash" if data_stop else "failback landed",
+                data_stop=data_stop,
+            )
+        if anchor is not None:
+            status, message = precise_stream_cell(
+                text, anchor, args.streams, json_stream=True, event_label=label
+            )
+        else:
+            status, message = integer_stream_cell(
+                text, at, args.streams, json_stream=args.json_stream, event_label=label
+            )
+        return status, message, anchor
+
+    def as_line(ok, message):
+        return ("VOID" if ok is None else ("PASS" if ok else "FAIL")), message
+
+    lines = [as_line(*failover_interval_verdict(
+        text,
+        min_bps=int(args.min_throughput_gbps * 1_000_000_000),
+        json_stream=args.json_stream,
+    ))]
+    events = []
+    if args.straggler_cost:
+        status, message, anchor = cell(
+            args.crash_at, args.crash_epoch, args.crash_epoch_after, "failover", True
+        )
+        lines.append((status, message))
+        events.append(("crash", args.crash_at, anchor))
+    else:
+        lines.append(as_line(*legacy_check(args.crash_at, "failover")))
     if args.failback_at is not None:
         if args.failback_at <= args.crash_at:
-            checks.append((
-                False,
+            lines.append((
+                "FAIL",
                 f"failback event at {args.failback_at:g}s does not follow the crash "
                 f"event at {args.crash_at:g}s: failback stream evidence is unordered",
             ))
+        elif args.straggler_cost:
+            status, message, anchor = cell(
+                args.failback_at, args.failback_epoch, args.failback_epoch, "failback", False
+            )
+            lines.append((status, message))
+            events.append(("failback", args.failback_at, anchor))
         else:
-            failback_anchor = precise(args.failback_epoch, 0.0, "failback landed", False)
-            checks.append(stream_check(args.failback_at, failback_anchor, "failback"))
-            events.append(("failback", args.failback_at, failback_anchor))
-    for ok, message in checks:
-        status = "VOID" if ok is None else ("PASS" if ok else "FAIL")
+            lines.append(as_line(*legacy_check(args.failback_at, "failback")))
+    for status, message in lines:
         print(f"{status} {message}")
     if args.emit_metrics:
         for name, at, anchor in events:
@@ -807,17 +920,24 @@ def main() -> int:
             print(f"METRIC {name}_anchor_precise=1")
             print(f"METRIC {name}_at_s={anchor.seconds:.3f}")
             print(f"METRIC {name}_anchor_uncertainty_s={anchor.uncertainty:.3f}")
+            if anchor.after_epoch is not None:
+                print(f"METRIC {name}_stop_after_epoch_s={anchor.after_epoch:.3f}")
             try:
                 latencies = resume_latencies(text, anchor, json_stream=True)
             except ValueError:
                 continue
             for index, kind in ((0, "data"), (1, "rate")):
-                values = [pair[index] for pair in latencies.values() if pair[index] is not None]
+                values = [entry[index] for entry in latencies.values() if entry[index] is not None]
                 if values:
                     print(f"METRIC {name}_resume_{kind}_max_s={max(values):.3f}")
                     print(f"METRIC {name}_resume_{kind}_median_s={statistics.median(values):.3f}")
-                never = sum(1 for pair in latencies.values() if pair[index] is None)
+                never = sum(1 for entry in latencies.values() if entry[index] is None)
                 print(f"METRIC {name}_resume_{kind}_never={never}")
+            late = sum(
+                1 for entry in latencies.values()
+                if entry[0] is not None and RESUME_COST_SECONDS < entry[0] <= RESUME_FAIL_SECONDS
+            )
+            print(f"METRIC {name}_resume_straggler_streams={late}")
     return 0
 
 
