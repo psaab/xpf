@@ -1004,6 +1004,73 @@ live-stage `undroppable_cached_hit_records_no_rollback_undo_18533` /
 still records the undo and un-charges the session);
 numbers in `docs/log/18534.md`.
 
+## Cache hits on a forward-wire tuple (#18656)
+
+The cache-hit probe serves the same record the slow path resolved when it
+seeded the cache entry. The slow path's local scope order is direct key,
+then reverse-translated alias, then `forward_wire_index` (a forward row's
+post-NAT tuple, `probe_local_wire_at`). Before #18656 the probe
+(`probe_hit_inner` via `record_by_key_mut`) stopped after the alias.
+
+The forward-wire case is the moved session in a split. With RG1 moved to
+the peer and RG2 left in place, the LAN node still owns the session and
+its SNAT. It fabric-redirects the forward data with the source already
+translated (`apply_nat_on_fabric`). On the new RG1 owner the packet's
+tuple is therefore the forward-wire alias of the synced row. Before the
+fix, every such hit failed the probe:
+
+- The probe returned `NoRecord` and the hit path evicted the entry
+  (`post_hit_session_dead`).
+- The slow path re-seeded it, and the next hit refused again.
+
+On loss this sent about 95% of the new owner's packets down the slow
+path, at 1.6 Gbit/s against 5.1 Gbit/s for flows started after the split,
+which never take this path.
+
+- **Resolution.** When the packet key names no direct or alias record,
+  the probe takes the forward-wire candidate through
+  `forward_wire_candidate_handle`. That is the selection
+  `find_forward_wire_match_inner` and the slow path use: a validated,
+  non-reverse, live candidate, with a second live candidate failing
+  closed (#14382). The probe then re-probes the candidate's canonical
+  key, so liveness, keepalive, accounting and handshake completion run
+  on the canonical row exactly as for a direct hit. A direct record that
+  exists but is idle-crossed never falls through to the wire scope, the
+  same rule as `has_session_hit_at`.
+- **What still refuses.** An idle-crossed canonical record, an ambiguous
+  wire tuple and a deleted session are all still refused. The candidate
+  selection is expiry-aware, so the wire scope cannot resurrect a dead
+  row. That is the property the probe exists for (#9991/#14945,
+  #16223).
+- **Canonical key out-param.** The probe recorded its undo, deferred HA
+  Update and stage marker under the canonical key. The `wire_canonical`
+  out-param of `probe_hit_deferring_state_update_with_ack_rollback_verdict`
+  names that key, and the hit path keys `rollback_dropped_probe_hit`,
+  `emit_probe_hit_state_update` and `take_probe_stage_transition_forward`
+  on it. Without it, a dropped wire-keyed packet would not be rolled back.
+- **Fences.** The #10670 fabric zone fence (`live_ingress_zone_matches_at`)
+  and the TTL arm's `session_is_live_at` resolve the same candidate.
+  Before the fix the zone fence returned `None` for a wire tuple, which
+  lets the lookup proceed. That was harmless only while the probe could
+  not serve such a hit.
+- **Cost.** A direct or alias hit is unchanged: the fallback runs only
+  where the probe used to refuse. A wire hit adds one forward-wire bucket
+  walk and the canonical re-probe, in both the zone fence and the probe.
+- **Attribution.** The probe returns a `ProbeHitVerdict`, and the hit path
+  counts a refusal under `post_hit_session_dead_no_record` or
+  `post_hit_session_dead_idle_crossed`. `post_hit_session_dead` now counts
+  only the TTL-expiring liveness probe.
+
+Cells:
+
+- `session/moved_session_probe_18656_tests.rs`: a wire hit served,
+  accounted and refreshed on the canonical row. Guards for idle-crossed,
+  ambiguous and deleted sessions. The undo keyed on the canonical key.
+  The zone fence and liveness resolving the canonical row.
+- `afxdp/poll_descriptor/flow_cache_hit_tests.rs`:
+  `moved_session_wire_keyed_hit_is_served_18656`, plus the two sub-arm
+  attribution cells.
+
 ## Flow-cache invalidation on reap (#3776)
 
 The #2220 keepalive only protects an ACTIVELY-forwarding flow — the cache

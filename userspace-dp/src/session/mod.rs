@@ -4552,7 +4552,8 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, None, false)
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, None, false, &mut None)
+            .is_live()
     }
 
     /// #16042: [`Self::probe_hit`] carrying the parsed segment ack.
@@ -4566,7 +4567,8 @@ impl SessionTable {
         dscp: u8,
         ack: Option<u32>,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, ack, false)
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, ack, false, &mut None)
+            .is_live()
     }
 
     /// Probe a flow-cache hit while deferring the HA completion delta.
@@ -4587,7 +4589,8 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false, None, true)
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false, None, true, &mut None)
+            .is_live()
     }
 
     /// #16042: deferring probe carrying the parsed segment ack. Always
@@ -4632,6 +4635,46 @@ impl SessionTable {
         ack: Option<u32>,
         rollback_possible: bool,
     ) -> bool {
+        self.probe_hit_deferring_state_update_with_ack_rollback_verdict(
+            key,
+            now_ns,
+            len,
+            tcp_flags,
+            payload_len,
+            dscp,
+            ack,
+            rollback_possible,
+            &mut None,
+        )
+        .is_live()
+    }
+
+    /// #18656: [`Self::probe_hit_deferring_state_update_with_ack_rollback`]
+    /// returning WHICH refusal fired, so the flow-cache hit path can count
+    /// the eviction under its own arm instead of one undifferentiated
+    /// `post_hit_session_dead`.
+    ///
+    /// `wire_canonical` is set when `key` named no direct/alias record and
+    /// the probe served the record behind it in the forward-wire scope (a
+    /// post-NAT forward tuple, e.g. a moved session's data arriving over
+    /// the fabric already source-translated by the peer). The caller must
+    /// then key [`Self::emit_probe_hit_state_update`],
+    /// [`Self::rollback_dropped_probe_hit`] and
+    /// [`Self::take_probe_stage_transition_forward`] on that canonical key:
+    /// the probe recorded its undo and deferred work under it.
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    pub fn probe_hit_deferring_state_update_with_ack_rollback_verdict(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        len: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        dscp: u8,
+        ack: Option<u32>,
+        rollback_possible: bool,
+        wire_canonical: &mut Option<SessionKey>,
+    ) -> ProbeHitVerdict {
         self.probe_hit_inner(
             key,
             now_ns,
@@ -4642,6 +4685,7 @@ impl SessionTable {
             false,
             ack,
             rollback_possible,
+            wire_canonical,
         )
     }
 
@@ -4863,7 +4907,8 @@ impl SessionTable {
         emit_state_update: bool,
         ack: Option<u32>,
         record_undo: bool,
-    ) -> bool {
+        wire_canonical: &mut Option<SessionKey>,
+    ) -> ProbeHitVerdict {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
         // #18533: the classic completion shape seen under the record borrow
         // below — every conjunct except the #16042 ack check — with the
@@ -4992,7 +5037,43 @@ impl SessionTable {
                 }
                 probed
             }
-            None => return false,
+            None => {
+                // #18656: no direct/alias record. A post-NAT forward tuple
+                // (the peer source-translated a moved session's data before
+                // the fabric) names its record only through the
+                // forward-wire scope, which the slow path consults
+                // (`probe_local_wire_at`) and seeded this cache entry from.
+                // Serve that same record — the live, unique candidate, so
+                // ambiguity and idle-crossed candidates still refuse — by
+                // re-probing its canonical key. Pre-#18656 this returned
+                // `false` on every such hit: the slow path re-seeded, the
+                // next hit refused again, and a moved flow ran ~95% on the
+                // slow path on the new RG owner. One level only: a
+                // canonical key is a direct key.
+                if wire_canonical.is_some() {
+                    return ProbeHitVerdict::NoRecord;
+                }
+                let Some(canonical) = self
+                    .forward_wire_candidate_handle(key, Some(now_ns))
+                    .and_then(|handle| self.entries.get(handle as usize))
+                    .map(|record| record.key.clone())
+                else {
+                    return ProbeHitVerdict::NoRecord;
+                };
+                *wire_canonical = Some(canonical.clone());
+                return self.probe_hit_inner(
+                    &canonical,
+                    now_ns,
+                    len,
+                    tcp_flags,
+                    payload_len,
+                    dscp,
+                    emit_state_update,
+                    ack,
+                    record_undo,
+                    wire_canonical,
+                );
+            }
         };
         #[cfg(test)]
         if probe_undo.is_some() {
@@ -5021,7 +5102,7 @@ impl SessionTable {
         // before (the caller falls through to the slow path / GC).
         if companion_crossed {
             if self.cache_hit_handshake_progress(key).is_none() {
-                return false;
+                return ProbeHitVerdict::IdleCrossed;
             }
             companion_progress = true;
         }
@@ -5240,7 +5321,7 @@ impl SessionTable {
             }
             self.pending_probe_undo.push(undo);
         }
-        true
+        ProbeHitVerdict::Live
     }
 
     /// #18533: the completion half of the deferring probe's undo — the
@@ -5286,9 +5367,16 @@ impl SessionTable {
     /// can reject stale flow-cache hits before any packet side effects.
     #[inline]
     pub fn session_is_live_at(&self, key: &SessionKey, now_ns: u64) -> bool {
-        self.record_by_key(key).is_some_and(|record| {
-            now_ns.saturating_sub(record.entry.last_seen_ns) <= record.entry.expires_after_ns
-        })
+        match self.record_by_key(key) {
+            Some(record) => {
+                now_ns.saturating_sub(record.entry.last_seen_ns) <= record.entry.expires_after_ns
+            }
+            // #18656: the flow-cache TTL arm's liveness probe resolves a
+            // post-NAT forward tuple through the forward-wire scope, like
+            // the fused probe (`probe_hit_inner`); the candidate selection
+            // is already expiry-aware.
+            None => self.forward_wire_candidate_handle(key, Some(now_ns)).is_some(),
+        }
     }
 
     /// #2220: per-session keepalive throttle for the flow-cache fast
@@ -8204,3 +8292,7 @@ mod ha_transition_17083_tests;
 #[cfg(test)]
 #[path = "translated_twin_matrix_17088_tests.rs"]
 mod translated_twin_matrix_17088_tests;
+
+#[cfg(test)]
+#[path = "moved_session_probe_18656_tests.rs"]
+mod moved_session_probe_18656_tests;

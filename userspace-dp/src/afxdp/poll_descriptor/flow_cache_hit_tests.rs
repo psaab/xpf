@@ -1107,6 +1107,14 @@ struct StageSeed {
     /// `install_ns` so a cell can choose whether the session is STALE at call
     /// time, which is the only axis `touch_if_stale` branches on.
     now_ns: u64,
+    /// #18656: the validated fabric arrival zone (`fabric_arrival_zone`,
+    /// the #10670 preflight's input). `None` keeps every earlier caller on
+    /// the unstamped shape.
+    fabric_arrival_zone: Option<u32>,
+    /// #18656: install the seeded session as a peer-synced HandshakePending
+    /// row (Established SYN-ACK observed, completing ACK outstanding)
+    /// instead of a local install, so a cache hit can complete it.
+    install_handshake_pending: bool,
 }
 
 impl Default for StageSeed {
@@ -1123,6 +1131,8 @@ impl Default for StageSeed {
             fabric_link_ingress: false,
             cross_umem_shared: None,
             now_ns: 1_000_000,
+            fabric_arrival_zone: None,
+            install_handshake_pending: false,
         }
     }
 }
@@ -1195,7 +1205,33 @@ fn run_stage_seeded(
     // stage's cross-binding arm writes to the queues asserted on below.
     let mut scratch_state = scratch();
     let mut sessions = SessionTable::new();
-    if let Some((install_ns, protocol, tcp_flags)) = seed.session {
+    if let Some((install_ns, protocol, tcp_flags)) = seed.session
+        && seed.install_handshake_pending
+    {
+        let installed = sessions.upsert_synced_with_origin(
+            crate::session::SessionInstall {
+                key: seed
+                    .install_key
+                    .clone()
+                    .unwrap_or_else(|| entry_for_session.key.clone()),
+                decision: entry_for_session.decision.clone(),
+                metadata: entry_for_session.metadata.clone(),
+                source_nat_static: None,
+                origin: crate::session::SessionOrigin::SyncImport,
+                now_ns: install_ns,
+                protocol,
+                tcp_flags,
+                session_id: 18656,
+                tcp_close_class: 0,
+                tcp_handshake_state: crate::session::TcpHandshakeState::HandshakePending.to_wire(),
+                persistent_lease_hold: None,
+                fwd_packets: 0,
+                rev_packets: 0,
+            },
+            true,
+        );
+        assert!(installed, "fixture invalid: the HandshakePending row did not install");
+    } else if let Some((install_ns, protocol, tcp_flags)) = seed.session {
         // Install from the CACHED entry's own decision + metadata, so the
         // session the accounting lands on is the one this cached flow
         // describes rather than an unrelated fixture.
@@ -1266,7 +1302,7 @@ fn run_stage_seeded(
         meta,
         &flow,
         seed.packet_fabric_ingress,
-        None,
+        seed.fabric_arrival_zone,
         seed.fabric_link_ingress,
         false,
         ValidationState::default(),
@@ -8324,4 +8360,292 @@ fn cached_hit_resolves_the_transit_routing_domain_once_18533() {
     let run = run_stage(&fixture, &frame, 0);
     assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: served");
     assert_eq!(resolves() - before, 1, "one routing-domain resolution for both gates");
+}
+
+/// #18656: a moved session's data reaches the new RG owner over the fabric
+/// ALREADY source-translated by the peer (it still owns the session and its
+/// SNAT), so the packet tuple is the session's forward-wire alias. The
+/// worker holds the session under its canonical (pre-NAT) key only; the
+/// slow path resolves the wire tuple through `forward_wire_index` and seeds
+/// a cache entry keyed by it. The cache hit must serve that entry from the
+/// same record.
+///
+/// Fail-on-revert: before #18656 the fused probe resolved only the direct
+/// key and the reverse alias, so this hit fell through with a
+/// `post_hit_session_dead` (no-record) eviction — on loss, ~18 k/s
+/// evictions and ~95% of the new owner's packets on the slow path.
+#[test]
+fn moved_session_wire_keyed_hit_is_served_18656() {
+    use crate::afxdp::NatDecision;
+    use crate::afxdp::flow_cache::FlowCacheEvictionArm as Arm;
+
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let wire = test_key();
+    let mut canonical = wire.clone();
+    canonical.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    canonical.src_port = 52424;
+    let mut nat = NatDecision::default();
+    nat.rewrite_src = Some(wire.src_ip);
+    nat.rewrite_src_port = Some(wire.src_port);
+    assert_eq!(
+        crate::session::forward_wire_key(&canonical, nat),
+        wire,
+        "fixture: the packet tuple is the canonical session's forward wire"
+    );
+    let mut entry = cached_entry();
+    entry.decision.nat = nat;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            install_key: Some(canonical.clone()),
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "#18656: the wire-keyed cache hit must be served"
+    );
+    assert_eq!(run.flow_cache_tallies, (1, 0, 0), "one served hit, no eviction");
+    for arm in [Arm::PostHitSessionDead, Arm::PostHitSessionDeadNoRecord, Arm::PostHitSessionDeadIdleCrossed] {
+        assert_eq!(run.flow_cache_evictions_by_arm[arm as usize], 0, "{arm:?}");
+    }
+    assert_eq!(
+        run.sessions.fwd_packets_for(&canonical),
+        1,
+        "the hit is accounted on the canonical record"
+    );
+}
+
+/// #18656 fixture: a cached entry keyed by the wire tuple of a canonical
+/// SNAT session installed under its pre-NAT key (see
+/// `moved_session_wire_keyed_hit_is_served_18656`).
+fn wire_keyed_entry_18656() -> (FlowCacheEntry, crate::session::SessionKey) {
+    use crate::afxdp::NatDecision;
+    let wire = test_key();
+    let mut canonical = wire.clone();
+    canonical.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    canonical.src_port = 52424;
+    let mut nat = NatDecision::default();
+    nat.rewrite_src = Some(wire.src_ip);
+    nat.rewrite_src_port = Some(wire.src_port);
+    assert_eq!(crate::session::forward_wire_key(&canonical, nat), wire);
+    let mut entry = cached_entry();
+    entry.decision.nat = nat;
+    (entry, canonical)
+}
+
+/// #18656: a DROPPED wire-keyed hit (cached `then discard`) is rolled back
+/// under the canonical key the probe charged. Keying the rollback on the
+/// packet's wire tuple finds no undo and leaves the dropped packet charged.
+#[test]
+fn dropped_wire_keyed_hit_rolls_back_canonical_charge_18656() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let (mut entry, canonical) = wire_keyed_entry_18656();
+    entry.descriptor.tx_selection.drop = true;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            install_key: Some(canonical.clone()),
+            ..StageSeed::default()
+        },
+    );
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: dropped in place");
+    assert_eq!(run.sessions.probe_undo_records_for_test(), 1, "premise: the probe built the undo");
+    let after = run.sessions.session_counters(&canonical).expect("counters");
+    assert_eq!(
+        (after.fwd_packets, after.fwd_bytes),
+        (0, 0),
+        "the dropped wire-keyed packet must not charge the canonical session"
+    );
+    assert_eq!(run.sessions.pending_probe_undo_len_for_test(), 0, "rollback consumed the undo");
+}
+
+/// #18656: an ADMITTED wire-keyed hit on a droppable selection (a policer
+/// that colours it green) consumes its undo under the canonical key at TX
+/// admission. Keying the admission on the wire tuple leaves the undo queued.
+#[test]
+fn admitted_wire_keyed_hit_consumes_canonical_undo_18656() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let (mut entry, canonical) = wire_keyed_entry_18656();
+    let state = crate::filter::ThreeColorPolicerState::sr_tcm_with_treatments(
+        1_000_000_000,
+        1_000_000,
+        1_000_000,
+        true,
+        crate::filter::ThreeColorTreatments {
+            red: crate::filter::ColorTreatment::drop(),
+            ..Default::default()
+        },
+    )
+    .expect("valid srTCM policer");
+    entry.descriptor.tx_selection.three_color_policers.push(Arc::new(
+        crate::filter::ThreeColorPolicerRuntime::new(90_656, "green-18656".into(), state),
+    ));
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            install_key: Some(canonical.clone()),
+            ..StageSeed::default()
+        },
+    );
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: served");
+    assert_eq!(run.sessions.probe_undo_records_for_test(), 1, "premise: the probe built the undo");
+    assert_eq!(
+        run.sessions.session_counters(&canonical).expect("counters").fwd_packets,
+        1,
+        "premise: the admitted packet is charged"
+    );
+    assert_eq!(
+        run.sessions.pending_probe_undo_len_for_test(),
+        0,
+        "admission consumed the undo under the canonical key"
+    );
+}
+
+/// #18656: the #10670 fabric zone fence judges a wire-keyed hit against the
+/// canonical record's ingress zone. A stamped fabric arrival from ANOTHER
+/// zone falls through before the lookup (no hit, no eviction, no charge);
+/// the same arrival stamped with the session's own zone is served. Without
+/// the fence's forward-wire resolution the preflight saw no record (`None`)
+/// and the now-serving probe would replay the foreign-zone packet.
+#[test]
+fn wire_keyed_hit_is_zone_fenced_18656() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let run_with_zone = |zone: u32| {
+        let (entry, canonical) = wire_keyed_entry_18656();
+        let run = run_stage_seeded(
+            &fixture,
+            &frame,
+            test_meta(&frame),
+            entry,
+            0,
+            StageSeed {
+                install_key: Some(canonical.clone()),
+                packet_fabric_ingress: true,
+                fabric_link_ingress: true,
+                fabric_arrival_zone: Some(zone),
+                ..StageSeed::default()
+            },
+        );
+        let charged = run.sessions.session_counters(&canonical).expect("counters").fwd_packets;
+        (run, charged)
+    };
+    let (foreign, charged) = run_with_zone(TEST_UNTRUST_ZONE_ID);
+    assert!(
+        matches!(foreign.outcome, FlowCacheOutcome::FallThrough),
+        "a foreign-zone stamp must not be served from the wire-keyed entry"
+    );
+    assert_eq!(foreign.flow_cache_tallies, (0, 1, 0), "fenced before the lookup, nothing evicted");
+    assert_eq!(charged, 0, "the fenced packet is not charged");
+    let (own, charged) = run_with_zone(TEST_TRUST_ZONE_ID);
+    assert!(
+        matches!(own.outcome, FlowCacheOutcome::Consumed),
+        "control: the session's own zone stamp is served"
+    );
+    assert_eq!(charged, 1);
+}
+
+/// #18656: a wire-keyed hit that COMPLETES a HandshakePending canonical row
+/// (a session opened just before the move; its completing ACK reaches the
+/// new owner already source-translated) hands its stage transition to the
+/// hit path under the canonical key, which consumes it for the #16217
+/// shared restamps. Taking it under the wire tuple finds nothing and leaves
+/// the marker queued.
+#[test]
+fn wire_keyed_completion_stage_transition_is_consumed_18656() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let (entry, canonical) = wire_keyed_entry_18656();
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            install_key: Some(canonical.clone()),
+            install_handshake_pending: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: served");
+    let mut sessions = run.sessions;
+    assert_eq!(
+        sessions.strict_pre_handshake_state(&canonical, 1_000_000).map(|s| (s.0, s.1)),
+        Some((true, false)),
+        "premise: the hit completed the handshake"
+    );
+    assert!(
+        sessions.take_probe_stage_transition_forward(&canonical).is_none(),
+        "the hit path consumed the stage transition under the canonical key"
+    );
+}
+
+/// #18656 attribution: with no record behind the wire tuple at all (the
+/// session is gone), the refusal is counted under the no-record sub-arm,
+/// never the TTL arm or the idle-crossed arm.
+#[test]
+fn wire_keyed_hit_without_record_counts_no_record_arm_18656() {
+    use crate::afxdp::flow_cache::FlowCacheEvictionArm as Arm;
+
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        cached_entry(),
+        0,
+        StageSeed {
+            session: None,
+            ..StageSeed::default()
+        },
+    );
+    assert!(matches!(run.outcome, FlowCacheOutcome::FallThrough));
+    assert_eq!(run.flow_cache_tallies, (0, 1, 1));
+    assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDeadNoRecord as usize], 1);
+    assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDead as usize], 0);
+    assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDeadIdleCrossed as usize], 0);
+}
+
+/// #18656 attribution: an idle-crossed record with no companion progress
+/// is counted under the idle-crossed sub-arm.
+#[test]
+fn idle_crossed_hit_counts_idle_crossed_arm_18656() {
+    use crate::afxdp::flow_cache::FlowCacheEvictionArm as Arm;
+
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let established_ns = crate::session::SessionTimeouts::default().tcp_established_ns;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        cached_entry(),
+        0,
+        StageSeed {
+            now_ns: 1_000_000 + established_ns + 1_000_000_000,
+            ..StageSeed::default()
+        },
+    );
+    assert!(matches!(run.outcome, FlowCacheOutcome::FallThrough));
+    assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDeadIdleCrossed as usize], 1);
+    assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDeadNoRecord as usize], 0);
+    assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDead as usize], 0);
 }

@@ -1916,8 +1916,26 @@ impl SessionTable {
         // find_unique_established_forward_nat_match_at (None). Expired
         // candidates are skipped by the same idle check, so one live plus
         // one idle-crossed candidate still resolves to the live survivor.
+        let handle = self.forward_wire_candidate_handle(wire_key, now_ns)?;
+        let record = self.entries.get(handle as usize)?;
+        Some((self.forward_match_from(record), record.entry.origin))
+    }
+
+    /// #18656: the forward-wire candidate SELECTION of
+    /// [`Self::find_forward_wire_match_inner`] (and so of the slow path's
+    /// `probe_local_wire_at`), as a slab handle and without cloning the
+    /// match. One validated, non-reverse candidate (live at `now_ns` when
+    /// given) is selected; a second one fails closed (#14382). The
+    /// flow-cache hit probe resolves a post-NAT forward tuple through this
+    /// so it serves exactly the record the slow path resolved and seeded
+    /// the cache entry from.
+    pub(super) fn forward_wire_candidate_handle(
+        &self,
+        wire_key: &SessionKey,
+        now_ns: Option<u64>,
+    ) -> Option<u32> {
         let bucket = self.forward_wire_index.get(wire_key)?;
-        let mut first: Option<(ForwardSessionMatch, SessionOrigin)> = None;
+        let mut first: Option<u32> = None;
         for &handle in bucket.iter() {
             let Some(record) = self.entries.get(handle as usize) else {
                 continue;
@@ -1931,11 +1949,10 @@ impl SessionTable {
             {
                 continue;
             }
-            let matched = (self.forward_match_from(record), entry.origin);
             if first.is_some() {
                 return None;
             }
-            first = Some(matched);
+            first = Some(handle);
         }
         first
     }
@@ -2004,6 +2021,12 @@ impl SessionTable {
     /// #10670: validate a stamped fabric cache candidate without cloning its
     /// session metadata. `None` means absent or idle-expired; `Some(false)`
     /// means live in another zone; `Some(true)` means live in `arrival_zone`.
+    ///
+    /// #18656: a key with no direct/alias record resolves through the
+    /// forward-wire scope ([`Self::forward_wire_candidate_handle`]), the
+    /// same record the flow-cache probe serves for a post-NAT fabric
+    /// arrival. Without it a wire-keyed hit would skip this zone fence
+    /// (`None` lets the lookup proceed) once the probe can serve it.
     #[inline]
     pub(crate) fn live_ingress_zone_matches_at(
         &self,
@@ -2011,7 +2034,13 @@ impl SessionTable {
         now_ns: u64,
         arrival_zone: u32,
     ) -> Option<bool> {
-        let entry = self.entry_by_key(key)?;
+        let entry = match self.entry_by_key(key) {
+            Some(entry) => entry,
+            None => {
+                let handle = self.forward_wire_candidate_handle(key, Some(now_ns))?;
+                &self.entries.get(handle as usize)?.entry
+            }
+        };
         if now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns {
             return None;
         }
