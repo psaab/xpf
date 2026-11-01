@@ -1056,6 +1056,7 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
             1_000_000_000,
             None,
             true,
+            None,
         )
         .is_none(),
         "the same collision arriving on the fabric link is declined, not revoked"
@@ -2878,6 +2879,7 @@ fn reverse_snat_hit_13652(
         1_000_000_000,
         None,
         false,
+        None,
     )
 }
 
@@ -2921,6 +2923,7 @@ fn reverse_snat_hit_fabric_15958(
         1_000_000_000,
         None,
         false,
+        None,
     )
 }
 
@@ -3733,6 +3736,7 @@ fn ha_imported_nptv6_wire_shape_still_fails_closed_15958() {
         1_000_000_000,
         None,
         false,
+        None,
     )
     .unwrap_or_else(|| {
         panic!(
@@ -3906,6 +3910,7 @@ fn ha_imported_legacy_dynamic_snat_without_provenance_fails_closed_15958() {
         1_000_000_000,
         None,
         false,
+        None,
     )
     .unwrap_or_else(|| {
         panic!(
@@ -4347,6 +4352,7 @@ fn reverse_only_vlan_interface_snat_survives_14128() {
             1_000_000_000,
             None,
             false,
+            None,
         )
         .is_none(),
         "interface-SNAT on logical VLAN unit 13 must survive a companion-less reverse hit (#14128)"
@@ -4373,6 +4379,7 @@ fn reverse_only_vlan_interface_snat_survives_14128() {
             1_000_000_000,
             None,
             false,
+            None,
         )
         .is_some(),
         "a logical-unit address change must revoke the stale interface translation"
@@ -6290,6 +6297,7 @@ fn reverse_hits_judge_forward_selector_by_direction_15934() {
             1_000_000_000,
             packet_icmp,
             false,
+            None,
         )
     }
 
@@ -8439,4 +8447,72 @@ fn imported_reth_vlan_scopeless_kept_16826() {
     // Identity present + no scope: revalidation derives (20,80)->22, so it
     // also survives — either path must not revoke.
     assert!(scoped_snat_hit_15176(&forwarding, decision, &metadata, &key).is_none());
+}
+
+/// The predicate, row by row: each of its four conditions is load-bearing,
+/// and every row it must leave judged stays judged.
+#[test]
+fn non_owner_gateway_fallback_predicate_table_18691() {
+    use crate::afxdp::tests_split_rg_failback_18531::{
+        exported_forward, owner_ha, rg, rg_taking_node_forwarding, split_ha, Family,
+        FABRIC_IFINDEX, LAN_HOST, WAN_UNIT_IFINDEX,
+    };
+    use super::judged_line_is_non_owner_gateway_fallback as p;
+    // reth0.50 in the captured split snapshot: the WAN gateway VLAN.
+    const WAN_GATEWAY_UNIT_IFINDEX: i32 = 13;
+    let forwarding = rg_taking_node_forwarding();
+    let now_secs = crate::afxdp::monotonic_nanos() / 1_000_000_000;
+    let split = split_ha(now_secs);
+    let owner = owner_ha(now_secs);
+    // RG1 (WAN) forwarding here, RG2 (LAN) the peer's.
+    let wan_owner = BTreeMap::from([
+        (0, rg(true, now_secs)),
+        (1, rg(true, now_secs)),
+        (2, rg(false, now_secs)),
+    ]);
+    // No RG forwarding here at all: RG0 inactive too, so an RG-less egress
+    // cannot be masked by `ha_state.get(&0)` answering "active".
+    let none_active = BTreeMap::from([
+        (0, rg(false, now_secs)),
+        (1, rg(false, now_secs)),
+        (2, rg(false, now_secs)),
+    ]);
+    let wan_key = exported_forward(&forwarding, Family::V4).key;
+    let mut internet_key = wan_key.clone();
+    internet_key.dst_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+    // A WAN-side line toward a LAN destination (RG2's connected prefix).
+    let mut lan_dst_key = wan_key.clone();
+    lan_dst_key.dst_ip = IpAddr::V4(LAN_HOST);
+    let line = |disposition, egress_ifindex| SessionDecision {
+        resolution: ForwardingResolution {
+            disposition,
+            egress_ifindex,
+            ..exported_forward(&forwarding, Family::V4).decision.resolution
+        },
+        ..exported_forward(&forwarding, Family::V4).decision
+    };
+    // DNAT to the peer-owned WAN host from a gateway-routed original
+    // destination: the post-translation destination decides.
+    let mut dnat_line = line(ForwardingDisposition::ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX);
+    dnat_line.nat.rewrite_dst = Some(wan_key.dst_ip);
+    use ForwardingDisposition::*;
+    let rows: [(&str, Option<&BTreeMap<i32, HAGroupRuntime>>, &crate::session::SessionKey, SessionDecision, bool); 14] = [
+        ("live: FC on the gateway VLAN, RG1 the peer's", Some(&split), &wan_key, line(ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX), true),
+        ("live: MissingNeighbor on the gateway VLAN", Some(&split), &wan_key, line(MissingNeighbor, WAN_GATEWAY_UNIT_IFINDEX), true),
+        ("owner: RG1 forwarding here", Some(&owner), &wan_key, line(ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX), false),
+        ("the destination's connected egress", Some(&split), &wan_key, line(ForwardCandidate, WAN_UNIT_IFINDEX), false),
+        ("gateway-routed destination (Unknown owner)", Some(&split), &internet_key, line(ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX), false),
+        ("fabric egress", Some(&split), &wan_key, line(ForwardCandidate, FABRIC_IFINDEX), false),
+        ("HAInactive is the existing decline's", Some(&split), &wan_key, line(HAInactive, WAN_GATEWAY_UNIT_IFINDEX), false),
+        ("LocalDelivery is not a forwarding line", Some(&split), &wan_key, line(LocalDelivery, WAN_GATEWAY_UNIT_IFINDEX), false),
+        ("no HA view (standalone)", None, &wan_key, line(ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX), false),
+        ("egress RG forwarding here, destination owner the peer's", Some(&wan_owner), &lan_dst_key, line(ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX), false),
+        ("destination owner forwarding here (LAN destination on the LAN owner)", Some(&split), &lan_dst_key, line(ForwardCandidate, WAN_GATEWAY_UNIT_IFINDEX), false),
+        ("no egress", Some(&split), &wan_key, line(ForwardCandidate, 0), false),
+        ("no egress, no RG forwarding here", Some(&none_active), &wan_key, line(ForwardCandidate, 0), false),
+        ("DNAT: the post-translation destination decides", Some(&split), &internet_key, dnat_line, true),
+    ];
+    for (name, ha, key, judged, want) in rows {
+        assert_eq!(p(&forwarding, ha.map(|h| (h, now_secs)), key, &judged), want, "{name}");
+    }
 }
