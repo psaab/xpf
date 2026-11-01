@@ -328,3 +328,128 @@ func TestRoundTripSiteRecordsLiveness18685(t *testing.T) {
 		t.Fatalf("an answer did not clear the silence: silentTrips=%d silentSince=%v", silent, since)
 	}
 }
+
+// --- #18704 review fold: judge a frozen worker by heartbeat AGE ---
+
+// TestJitteredFrozenHeartbeatStillDemotes18704 is the review's blocking case.
+// The helper re-derives every heartbeat on every status call from two fresh
+// clock reads, so a frozen worker's heartbeat wobbles by microseconds from poll
+// to poll. Change detection never saw a freeze; age must.
+func TestJitteredFrozenHeartbeatStillDemotes18704(t *testing.T) {
+	t0 := time.Now()
+	tr := newTracker18685(t0)
+	var raisedAt time.Duration
+	for sec := 1; sec <= 30 && raisedAt == 0; sec++ {
+		now := t0.Add(time.Duration(sec) * time.Second)
+		hbs := heartbeats18685(6, now.Add(-200*time.Millisecond))
+		// Worker 3 stopped at t0; its re-derived heartbeat jitters by up to
+		// +/-15 us on every call, as measured on the real helper.
+		jitter := time.Duration((sec*7919)%31-15) * time.Microsecond
+		hbs[3] = t0.Add(jitter)
+		tr.noteAnswered(1, now)
+		tr.noteStatus(1, now, hbs, true)
+		if tr.wedgeSuspected(now) {
+			raisedAt = now.Sub(t0)
+		}
+	}
+	if raisedAt < helperWorkerFrozenAfter || raisedAt > helperWorkerFrozenAfter+2*time.Second {
+		t.Fatalf("jittered frozen heartbeat raised the verdict after %s, want about %s", raisedAt, helperWorkerFrozenAfter)
+	}
+}
+
+// TestRealHelperHeartbeatFormatThroughDecode18704 is the contract cell. Status
+// JSON in the helper's own heartbeat format (RFC 3339 at nanosecond resolution,
+// the shape captured from a live udp helper: "2026-11-01T11:03:26.775281841Z"),
+// decoded by the real Go ProcessStatus decode, re-derived with fresh
+// nanoseconds every poll for a frozen worker, must reach the frozen verdict.
+func TestRealHelperHeartbeatFormatThroughDecode18704(t *testing.T) {
+	t0 := time.Date(2026, 11, 1, 11, 3, 26, 775281841, time.UTC)
+	tr := newTracker18685(t0)
+	raised := false
+	for sec := 1; sec <= 15; sec++ {
+		now := t0.Add(time.Duration(sec) * time.Second)
+		live := now.Add(-150 * time.Millisecond).Format(time.RFC3339Nano)
+		frozen := t0.Add(time.Duration(sec*313%997) * time.Nanosecond).Format(time.RFC3339Nano)
+		doc := `{"pid":4242,"forwarding_armed":true,"worker_heartbeats":["` + live + `","` + frozen + `","` + live + `"]}`
+		var st ProcessStatus
+		if err := json.Unmarshal([]byte(doc), &st); err != nil {
+			t.Fatalf("decode %s: %v", doc, err)
+		}
+		if len(st.WorkerHeartbeats) != 3 || st.WorkerHeartbeats[1].IsZero() {
+			t.Fatalf("decoded heartbeats %v from %s", st.WorkerHeartbeats, doc)
+		}
+		tr.noteAnswered(1, now)
+		tr.noteStatus(1, now, st.WorkerHeartbeats, st.ForwardingArmed)
+		raised = raised || tr.wedgeSuspected(now)
+	}
+	if !raised {
+		t.Fatal("a frozen worker in the helper's own heartbeat format never raised the verdict")
+	}
+}
+
+// TestDisarmedWorkersNeverFreeze18704: heartbeats of a helper that is not
+// forwarding-armed are parked workers, not frozen ones.
+func TestDisarmedWorkersNeverFreeze18704(t *testing.T) {
+	t0 := time.Now()
+	tr := newTracker18685(t0)
+	for sec := 1; sec <= 30; sec++ {
+		now := t0.Add(time.Duration(sec) * time.Second)
+		tr.noteAnswered(1, now)
+		tr.noteStatus(1, now, heartbeats18685(6, t0), false)
+	}
+	if tr.wedgeSuspected(t0.Add(30 * time.Second)) {
+		t.Fatal("a disarmed helper's parked workers raised the frozen verdict")
+	}
+}
+
+// TestFirstStatusAfterAGapNeedsConfirmation18704: one status showing an old
+// heartbeat (the first poll after a link cycle parked the workers) is not a
+// freeze; the next status must agree.
+func TestFirstStatusAfterAGapNeedsConfirmation18704(t *testing.T) {
+	t0 := time.Now()
+	tr := newTracker18685(t0)
+	gapEnd := t0.Add(30 * time.Second)
+	tr.noteAnswered(1, gapEnd)
+	tr.noteStatus(1, gapEnd, heartbeats18685(4, t0), true) // parked through the gap
+	if tr.wedgeSuspected(gapEnd) {
+		t.Fatal("a single status after a polling gap raised the frozen verdict")
+	}
+	next := gapEnd.Add(time.Second)
+	tr.noteAnswered(1, next)
+	tr.noteStatus(1, next, heartbeats18685(4, next), true) // workers resumed
+	if tr.wedgeSuspected(next) {
+		t.Fatal("workers that resumed after the gap were judged frozen")
+	}
+}
+
+// TestStaleGenerationAnswerDoesNotClearSilence18704 (review LOW b): an answer
+// from a round trip begun against the PREVIOUS generation says nothing about
+// the current helper and must not clear its silence.
+func TestStaleGenerationAnswerDoesNotClearSilence18704(t *testing.T) {
+	t0 := time.Now()
+	tr := &helperLivenessTracker{}
+	tr.reset(2, t0, false)
+	tr.noteSilent(2, t0, t0.Add(3*time.Second))
+	tr.noteSilent(2, t0.Add(30*time.Second), t0.Add(33*time.Second))
+	tr.noteAnswered(1, t0.Add(33*time.Second)) // a late reply to generation 1
+	if due, span := tr.killDue(t0.Add(33 * time.Second)); !due {
+		t.Fatalf("a stale-generation answer cleared the current generation's silence (span %s)", span)
+	}
+}
+
+// TestIntentionalStopRetiresTheGeneration18704 (review LOW a): after an
+// intentional stop, silence recorded against the stopped helper cannot accrue
+// into a verdict however long the stop-to-respawn takes.
+func TestIntentionalStopRetiresTheGeneration18704(t *testing.T) {
+	t0 := time.Now()
+	tr := newTracker18685(t0)
+	tr.noteSilent(1, t0, t0.Add(3*time.Second))
+	tr.retire()
+	tr.noteSilent(1, t0.Add(3*time.Second), t0.Add(60*time.Second))
+	if tr.wedgeSuspected(t0.Add(60 * time.Second)) {
+		t.Fatal("silence after an intentional stop raised the wedge verdict")
+	}
+	if due, _ := tr.killDue(t0.Add(60 * time.Second)); due {
+		t.Fatal("silence after an intentional stop made a kill due")
+	}
+}
