@@ -15,6 +15,14 @@
 #   6 a CHILD of the shared dir is refused
 #   7 CLEAN_SHARED_CARGO=1 removes the shared dir, with a WARNING
 #   8 CLEAN_SHARED_CARGO=1 does not unlock a parent
+#   9 `/` is refused (a parent check of the form "$dir/%" cannot see it)
+#  10 a value with whitespace is refused (rm would delete each word)
+#  11 a set-but-empty value is refused, with text that says so
+#  D  the dh path: dpkg-buildpackage runs `dh clean`, whose default
+#     dh_auto_clean runs `make clean`. debian/rules must override it, and the
+#     override must neither call `make clean` nor name the shared dir.
+#  DP positive control for D: the same dh probe on a copy of debian/ without
+#     the override must show dh_auto_clean
 #   P positive control: the pre-#18839 recipe, run through the same detector,
 #     names the shared dir (or cell 1 could not tell fixed from broken)
 #
@@ -99,6 +107,70 @@ if ! removes "$out" "$parent" && printf '%s\n' "$out" | grep -q "REFUSING"; then
 	pass "8 CLEAN_SHARED_CARGO=1 does not unlock a parent"
 else
 	failc "8 CLEAN_SHARED_CARGO=1 CARGO_TARGET_DIR=$parent: $(printf '%s' "$out" | tail -2)"
+fi
+
+out=$(dry Makefile CARGO_TARGET_DIR=/)
+if ! printf '%s\n' "$out" | grep -qE '^rm -rf /$' && printf '%s\n' "$out" | grep -q "REFUSING: CARGO_TARGET_DIR resolves to /"; then
+	pass "9 CARGO_TARGET_DIR=/ is refused"
+else
+	failc "9 CARGO_TARGET_DIR=/: $(printf '%s' "$out" | tail -2)"
+fi
+
+out=$(dry Makefile CARGO_TARGET_DIR="$WORK/a docs")
+if ! printf '%s\n' "$out" | grep -qE "^rm -rf $WORK/a" && printf '%s\n' "$out" | grep -q "contains whitespace"; then
+	pass "10 a CARGO_TARGET_DIR with whitespace is refused"
+else
+	failc "10 CARGO_TARGET_DIR='$WORK/a docs': $(printf '%s' "$out" | tail -2)"
+fi
+
+out=$(dry Makefile CARGO_TARGET_DIR=)
+if printf '%s\n' "$out" | grep -q "set but empty" && ! printf '%s\n' "$out" | grep -qE '^rm -rf *$'; then
+	pass "11 a set-but-empty CARGO_TARGET_DIR is refused, and says so"
+else
+	failc "11 CARGO_TARGET_DIR=(empty): $(printf '%s' "$out" | tail -2)"
+fi
+
+# D: the dh path. `make -n -f debian/rules override_dh_auto_clean` must not
+# call the Makefile clean or name the shared dir; when debhelper is present,
+# `dh clean --no-act` must route through the override, not dh_auto_clean.
+out=$(env -u MAKEFLAGS make --no-print-directory -n -f debian/rules override_dh_auto_clean 2>&1)
+# debian/rules has a `%: dh $@` catch-all, so a missing override would still
+# "succeed" here as `dh override_dh_auto_clean`: require the override's own line.
+if [ $? -ne 0 ] || ! printf '%s\n' "$out" | grep -qx 'rm -f xpfd cli xpf-userspace-dp'; then
+	failc "D debian/rules has no override_dh_auto_clean of its own: $(printf '%s' "$out" | tail -1)"
+elif names_shared "$out" || printf '%s\n' "$out" | grep -qE '(^|[ /])make( -[^ ]+)* clean'; then
+	failc "D the dh_auto_clean override still runs make clean or names $SHARED: $out"
+else
+	pass "D debian/rules overrides dh_auto_clean; the override runs no make clean"
+fi
+if command -v dh >/dev/null 2>&1; then
+	seq=$(timeout 60 dh clean --no-act 2>&1)
+	if printf '%s\n' "$seq" | grep -qx '[[:space:]]*debian/rules override_dh_auto_clean' &&
+		! printf '%s\n' "$seq" | grep -qx '[[:space:]]*dh_auto_clean'; then
+		pass "D dh clean routes through the override, not dh_auto_clean"
+	else
+		failc "D dh clean --no-act: $(printf '%s' "$seq" | tr '\n' ' ')"
+	fi
+	# DP: the same probe on a copy of debian/ WITHOUT the override.
+	mkdir -p "$WORK/pkg"
+	cp -a debian "$WORK/pkg/debian"
+	python3 - "$WORK/pkg/debian/rules" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+s2 = re.sub(r"^override_dh_auto_clean:\n(\t.*\n)*", "", s, flags=re.M)
+if s2 == s:
+    sys.exit("override not found")
+open(p, "w").write(s2)
+PY
+	seq=$(cd "$WORK/pkg" && timeout 60 dh clean --no-act 2>&1)
+	if printf '%s\n' "$seq" | grep -qx '[[:space:]]*dh_auto_clean'; then
+		pass "DP positive control: without the override, dh clean runs dh_auto_clean (cell D can see the defect)"
+	else
+		failc "DP without the override dh clean did not show dh_auto_clean: $(printf '%s' "$seq" | tr '\n' ' ')"
+	fi
+else
+	echo "NOTE: dh not installed; the dh clean --no-act probes (D, DP) were not run"
 fi
 
 # P: rebuild the pre-#18839 recipe in a copy and require cell 1's detector to

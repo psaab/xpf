@@ -44,8 +44,9 @@ STAGED = /usr/local/share/xpf/staged
 # and the pinned-toolchain helper build are used unchanged.
 # CARGO_TARGET_DIR is left at the project default on purpose: the
 # Makefile's build-userspace-dp installs from
-# userspace-dp/target/release/, and overriding the target dir to a
-# scratch path would install a stale binary.
+# $(CARGO_TARGET_DIR)/release/ (the box-wide shared cargo dir by default,
+# #14833/#18839), and overriding the target dir here would split the deb
+# build from the cache every other build warms.
 #
 # Stage the systemd units into debian/ under the package-canonical
 # names so dh_installsystemd finds them. The unit sources remain in
@@ -107,6 +108,17 @@ override_dh_auto_build:
 	onfail=$$(sed -n 's/^OnFailure=//p' scripts/image/xpf-kernel-promote.service | head -n1); \
 	    test -n "$$onfail" || { echo "FATAL: xpf-kernel-promote.service has no OnFailure= target" >&2; exit 1; }; \
 	    test -f "debian/xpf.$$onfail" || { echo "FATAL: OnFailure= target $$onfail not staged in the .deb (dangling recovery unit)" >&2; exit 1; }
+
+# #18839: dh's default clean step, dh_auto_clean, runs `make clean`, and
+# dpkg-buildpackage runs `dh clean` on every `make deb`. Before #18839 that
+# recipe ended with `rm -rf $(CARGO_TARGET_DIR)`, the box-wide shared cargo
+# target dir, so every deb build in any worktree emptied every lane's cargo
+# build. Packaging needs only the three top-level binaries gone, so a stale
+# one can never be staged if a build step were skipped;
+# override_dh_auto_build rebuilds all three. The cargo cache is left alone.
+# scripts/clean-shared-cargo-selftest.sh pins this path.
+override_dh_auto_clean:
+	rm -f xpfd cli xpf-userspace-dp
 
 # Nothing to test in the package build itself; the project test suite
 # is run separately. Skip dh's auto test (it would try `go test`).
