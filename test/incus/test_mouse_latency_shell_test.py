@@ -308,11 +308,13 @@ class AbortIsDistinguishableTests(unittest.TestCase):
         """A lock-contention abort must be able to write its artifact too.
 
         That is the purest 'never ran' case, and it used to be the one with
-        the least evidence.
+        the least evidence. The lock is a hard-coded per-host path, never
+        TMPDIR-derived (Copilot D.1); #14837 moved it from /tmp to the
+        /var/worktrees scratch root.
         """
         self.assertLess(
             MATRIX.index('OUT_ROOT="$1"'),
-            MATRIX.index('LOCK_FILE="/tmp/test-mouse-latency-matrix.lock"'),
+            MATRIX.index('LOCK_FILE="/var/worktrees/.cache/tmpdir/test-mouse-latency-matrix.lock"'),
         )
 
     def test_the_matrix_sources_the_shared_port_defaults(self):

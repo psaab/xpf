@@ -2027,8 +2027,8 @@ walk stepped over carried non-zero offset bits (`& 0xFFF8`, RFC 8200
 §4.5), which is field-for-field the semantics of
 `ExtChainWalk::non_first_fragment_offset_seen` on this side — so the
 corpus compares them for EQUALITY at every L3 offset, and
-`shim_is_not_more_permissive` pins that a first and a non-first fragment
-move that field in both walkers together. Before #6704 the shim returned a
+`shim_walk_is_not_more_permissive` (renamed in #14056) pins that a first
+and a non-first fragment move that field in both walkers together. Before #6704 the shim returned a
 bare `(offset, protocol)` and the fragment dimension could not be compared
 from the test side at all; an earlier attempt to compare it hand-wrote a
 second walk loop in the test and asserted `X == X`.

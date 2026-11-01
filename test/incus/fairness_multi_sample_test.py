@@ -1522,6 +1522,12 @@ class FairnessMultiSampleTest(unittest.TestCase):
         harness_copy = tmp_path / "fairness-harness.sh"
         harness_copy.write_text(HARNESS_PATH.read_text(encoding="utf-8"), encoding="utf-8")
         harness_copy.chmod(0o755)
+        # #13070 made the harness source its sibling cos-apply-lib.sh (the
+        # shared CoS port grid) at startup. Without the sibling the copy dies
+        # on the `source` line before the precheck, so the stub log is never
+        # written and the cell reports FileNotFoundError instead of its verdict.
+        cos_lib = HARNESS_PATH.with_name("cos-apply-lib.sh")
+        (tmp_path / cos_lib.name).write_text(cos_lib.read_text(encoding="utf-8"), encoding="utf-8")
         stub_log = tmp_path / "precheck.log"
         stub = tmp_path / "target-services.sh"
         stub.write_text(

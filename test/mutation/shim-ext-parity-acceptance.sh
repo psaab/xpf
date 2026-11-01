@@ -97,7 +97,7 @@ export TMPDIR="${TMPDIR:-/var/worktrees/.cache/tmpdir}"
 TEST_PATH="afxdp::frame::tests_shim_ext_parity"
 GUARDS=(
   shim_walk_and_userspace_walk_agree_over_a_corpus
-  shim_is_not_more_permissive
+  shim_walk_is_not_more_permissive
   shim_ipv6_ext_walk_matches_userspace_walker
 )
 # Negative controls: they assert nothing about any shim-side behaviour the
