@@ -890,15 +890,20 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 			} else {
 				err = rt.HA().SetRGActive(ctx, ev.GroupID, cur)
 			}
-			if err != nil && helperDownDemotion {
-				// #18715 review: the VIPs are already released and a helper
-				// that did not acknowledge within the bound is not answering,
-				// so this node forwards nothing for the RG either way. Report
-				// the failover fence ACTUATED so a peer-requested evacuation of
-				// this sick node completes instead of aborting and restoring it
-				// as owner (#16592). rg_active stays unrecorded, so reconcile
-				// retries the write.
-				slog.Warn("failed to update rg_active from cluster event; failover still reported actuated because the helper is unresponsive and the VIPs are released (#18701)",
+			if err != nil && helperDownDemotion && d.helperControlUnresponsive() {
+				// #18715 review: the VIPs are already released and the
+				// helper's control socket is NOT answering (silence, or no
+				// helper), so this node forwards nothing for the RG either
+				// way. Report the failover fence ACTUATED so a peer-requested
+				// evacuation of this sick node completes instead of aborting
+				// and restoring it as owner (#16592). rg_active stays
+				// unrecorded, so reconcile retries the write.
+				// Gated on the same predicate as the prep skip: when the
+				// control thread still answers (a frozen worker, or a
+				// not-yet-armed helper), the other workers may still be
+				// forwarding until the write lands, so a failed or late write
+				// keeps the #6371 abort (no two-owner window, #5640/#16592).
+				slog.Warn("failed to update rg_active from cluster event; failover still reported actuated because the helper's control socket is unresponsive and the VIPs are released (#18701)",
 					"rg", ev.GroupID, "active", cur, "err", err)
 			} else if err != nil {
 				slog.Warn("failed to update rg_active from cluster event",

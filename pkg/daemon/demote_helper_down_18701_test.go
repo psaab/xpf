@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -48,12 +49,14 @@ func (o *order18701) snapshot() []string {
 type slowHA18701 struct {
 	log  *order18701
 	hold time.Duration
+	err  error // returned by the rg_active=false write (an explicit refusal)
 }
 
 func (h *slowHA18701) SetRGActive(_ context.Context, _ int, active bool) error {
 	if !active {
 		h.log.add("rg_active=false sent")
 		time.Sleep(h.hold)
+		return h.err
 	}
 	return nil
 }
@@ -390,5 +393,93 @@ func TestDemotionPrepRunsWhenControlStillAnswers18715(t *testing.T) {
 				t.Fatalf("events %v: with the control socket silent the prep must be skipped", ev)
 			}
 		})
+	}
+}
+
+// TestSlowButAnsweringHelperFenceIsNotAcked18715 (review, demonstrated by L):
+// the twin of TestRemoteFailoverOfAWedgedNodeCompletes18715 with the control
+// thread STILL ANSWERING (a frozen worker, or a not-yet-armed helper). The
+// other workers may still forward until the write lands, so a write that misses
+// the bound must NOT be acked actuated: the #6371 abort runs instead.
+func TestSlowButAnsweringHelperFenceIsNotAcked18715(t *testing.T) {
+	old := helperDownDemotionBound
+	helperDownDemotionBound = 200 * time.Millisecond
+	t.Cleanup(func() { helperDownDemotionBound = old })
+	d, _ := newDemotion18701(t, true, 2*time.Second)
+	if !d.isNoRethVRRP() {
+		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+	}
+	d.dataplane().(*readinessDP18701).controlAnswers.Store(true)
+	d.tryPrepareDemotionFn = func(int) {}
+	primeRG1Primary(t, d)
+	d.armFailoverActuation(1, actuationReqID)
+	demoteRG1(t, d)
+	if err := d.waitFailoverActuated(1, actuationReqID); err == nil {
+		t.Fatal("the fence was acked actuated while an answering helper's rg_active write was still pending: a two-owner window (#5640/#16592)")
+	}
+}
+
+// TestReconcileLoopPrepRunsWhenControlStillAnswers18715 (review): the reconcile
+// loop's twin of TestDemotionPrepRunsWhenControlStillAnswers18715. With the
+// helper not ready, the retry skips the prep only when the control socket is
+// silent; with the control thread answering it runs the prep, after the VIP
+// release.
+func TestReconcileLoopPrepRunsWhenControlStillAnswers18715(t *testing.T) {
+	old := helperDownDemotionBound
+	helperDownDemotionBound = 200 * time.Millisecond
+	t.Cleanup(func() { helperDownDemotionBound = old })
+	for _, tc := range []struct {
+		name     string
+		answers  bool
+		wantPrep bool
+	}{{"control-silent", false, false}, {"frozen-worker-control-answers", true, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, log := newDemotion18701(t, true, 300*time.Millisecond)
+			if !d.isNoRethVRRP() {
+				t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+			}
+			d.dataplane().(*readinessDP18701).controlAnswers.Store(tc.answers)
+			d.tryPrepareDemotionFn = func(int) { log.add("prep") }
+			primeRG1Primary(t, d)
+			if _, err := d.cluster.ManualFailover(1); err != nil {
+				t.Fatalf("ManualFailover(1): %v", err)
+			}
+			for drained := true; drained; {
+				select {
+				case <-d.cluster.Events():
+				default:
+					drained = false
+				}
+			}
+			d.reconcileRGState()
+			ev := log.snapshot()
+			prep, vips := slices.Index(ev, "prep"), slices.Index(ev, "vips-removed")
+			if tc.wantPrep && (prep < 0 || vips < 0 || prep < vips) {
+				t.Fatalf("events %v: with the control thread answering the reconcile prep must run, after the VIP release", ev)
+			}
+			if !tc.wantPrep && prep >= 0 {
+				t.Fatalf("events %v: with the control socket silent the reconcile prep must be skipped", ev)
+			}
+		})
+	}
+}
+
+// TestAnsweringHelperRefusalIsNotAcked18715 (review, AH): an answering helper
+// that explicitly REFUSES the rg_active=false write keeps the #6371 rule: the
+// fence is not acked, whatever the readiness verdict says.
+func TestAnsweringHelperRefusalIsNotAcked18715(t *testing.T) {
+	d, _ := newDemotion18701(t, true, 0)
+	if !d.isNoRethVRRP() {
+		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+	}
+	dp := d.dataplane().(*readinessDP18701)
+	dp.controlAnswers.Store(true)
+	dp.ha.err = errors.New("rg_active refused by the helper")
+	d.tryPrepareDemotionFn = func(int) {}
+	primeRG1Primary(t, d)
+	d.armFailoverActuation(1, actuationReqID)
+	demoteRG1(t, d)
+	if err := d.waitFailoverActuated(1, actuationReqID); err == nil {
+		t.Fatal("an answering helper's explicit rg_active refusal was acked actuated (#6371)")
 	}
 }

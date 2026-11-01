@@ -5067,9 +5067,14 @@ not yet armed, or wedged (#18697/#18685):
    `helperDownDemotionBound` (1 s) through `setRGActiveBounded`. A timeout
    leaves the apply unrecorded, so the reconcile loop retries it as it would
    any failed apply.
-4. When that bounded write fails, the failover fence is still reported
-   ACTUATED. The VIPs are released, and a helper that did not acknowledge in
-   time forwards nothing for the RG.
+4. When that bounded write fails AND the helper's control socket is
+   unresponsive (the prep-skip predicate), the failover fence is still
+   reported ACTUATED. The VIPs are released, and a helper whose control socket
+   is silent forwards nothing for the RG.
+   - When the control thread still answers (a frozen worker, or a
+     not-yet-armed helper), the other workers may still be forwarding. In
+     that case a refused or late write keeps the #6371 abort, which avoids a
+     two-owner window (#5640/#16592).
    - Without this, a peer-requested evacuation of the sick node (#16592)
      would abort and restore THIS node as owner. With the bounded write
      timing out by design, that would be certain.
@@ -5090,6 +5095,12 @@ behind the 5 s prep, so a similar window may exist there (#18716).
 
 It carries the `rg` and the #18685/#18697 verdict reason. It is followed by
 `direct VIP reconcile: removed VIP` lines for every RG the node lost.
+
+When a peer-requested evacuation of the sick node completes this way, it logs
+`failed to update rg_active from cluster event; failover still reported
+actuated because the helper's control socket is unresponsive ...`. As with
+any manual failover, the sick node then keeps the RG in `Manual` until
+`request chassis cluster failover reset redundancy-group <N>`.
 
 The helper-side part of each RG's demotion still runs per RG, in turn. It
 may wait on the Manager's `m.mu` behind the wedged helper's round trips
