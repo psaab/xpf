@@ -178,7 +178,9 @@ const BootstrapPrincipal = "system:bootstrap"
 
 // isBootstrapImport reports whether a is the bootstrap import's authority: an
 // internal authority named BootstrapPrincipal. A session authority, or a
-// principal string passed to CommitWithDescriptionAs, never qualifies.
+// principal string passed to CommitWithDescriptionAs, never qualifies. Any
+// internal caller can mint one, so the name is reserved for
+// daemon.bootstrapFromFile by convention, not enforced by type.
 func (a CommitAuthority) isBootstrapImport() bool {
 	return a.kind == authorityInternal && a.journalPrincipal == BootstrapPrincipal
 }

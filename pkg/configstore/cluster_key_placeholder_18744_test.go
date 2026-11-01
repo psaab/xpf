@@ -101,6 +101,10 @@ func TestStoreFirstInteractiveCommitPlaceholderRefused18744(t *testing.T) {
 	requireRefusal18744(t, "Commit", err)
 	_, err = s.CommitWithDescriptionAs(BootstrapPrincipal, "")
 	requireRefusal18744(t, "CommitWithDescriptionAs(system:bootstrap)", err)
+	// A first `commit confirmed` is the documented safe way to make a first
+	// commit; it must be judged like any other interactive commit.
+	_, err = s.CommitConfirmed(1)
+	requireRefusal18744(t, "CommitConfirmed", err)
 	_, gen, _ := s.CompileCandidateGen()
 	_, err = s.CommitWithDescriptionGenAs(InternalCommitterAs("system:other"), "", gen)
 	requireRefusal18744(t, "another internal committer", err)

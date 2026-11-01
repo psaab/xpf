@@ -279,8 +279,10 @@ func (s *Store) CommitWithDescriptionGenAs(
 // commitWithDescriptionLocked is the shared body of CommitWithDescription and
 // the generation-bound CommitWithDescriptionGen. Caller holds s.mu.Lock.
 // bootstrapImport is true only for the daemon's bootstrap import, identified
-// by its authority (CommitAuthority.isBootstrapImport), never by a principal
-// string a caller could choose.
+// by its authority (CommitAuthority.isBootstrapImport): an internal authority
+// named BootstrapPrincipal. The session paths (CommitWithDescriptionAs takes a
+// principal string, not an authority) never set it. Any INTERNAL caller that
+// names BootstrapPrincipal would, so only daemon.bootstrapFromFile does.
 func (s *Store) commitWithDescriptionLocked(description, principal string, bootstrapImport bool) (*config.Config, error) {
 	// #3893: reject a user-session commit on a read-only secondary. The
 	// internal HA-sync ingress (SyncApply) and the commit-confirmed timeout
