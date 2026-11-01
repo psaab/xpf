@@ -941,7 +941,28 @@ fn rehome_or_retain_fabric_redirect_inner(
             return candidate;
         }
     }
-    if candidate.disposition != ForwardingDisposition::ForwardCandidate {
+    // #18659: a MissingNeighbor candidate on a local, non-fabric egress is
+    // the same gateway-route mis-resolution as the ForwardCandidate above,
+    // caught before its next hop resolved. On the node that has just taken
+    // the WAN RG, the split FIB answers a peer-owned LAN client with the WAN
+    // default gateway, and that gateway's ARP/ND entry is not learned yet.
+    // Returning it here rewrote every stored FabricRedirect reverse row onto
+    // the unresolved WAN gateway at RG activation. Replies then took the
+    // MissingNeighbor arm, whose #1913 gate judged wan->wan and denied them.
+    // Retain the redirect ONLY for a known owner RG that is not
+    // forwarding-active here (`!destination_owner_active` excludes both
+    // Unknown and a locally Active owner). A locally owned destination
+    // keeps its local MissingNeighbor (resolve, then TX here). An
+    // unknown-owner (internet, gateway-routed) destination keeps its
+    // MissingNeighbor too: no peer owns it.
+    let missing_neighbor_toward_peer_owner = candidate.disposition
+        == ForwardingDisposition::MissingNeighbor
+        && !destination_owner_active
+        && candidate.egress_ifindex > 0
+        && !super::forwarding::ingress_is_fabric(forwarding, candidate.egress_ifindex);
+    if candidate.disposition != ForwardingDisposition::ForwardCandidate
+        && !missing_neighbor_toward_peer_owner
+    {
         return candidate;
     }
     let destination_zone_known = forwarding.egress.iter().any(|(ifindex, _)| {

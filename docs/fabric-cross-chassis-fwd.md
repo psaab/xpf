@@ -1656,6 +1656,41 @@ the member stays at ifindex 0, the terminal is selected, and the gateway's
 owner in the lookup's own table stamps it
 (`terminal_gateway_owner_reached_by_out_of_table_explicit_member_18517`).
 
+### A missing WAN neighbor must not reroute a peer-owned reply (#18659)
+
+The same split shape reaches the stored-session path from the other side. A
+node that has just taken the WAN RG while the LAN RG stays on the peer
+re-resolves its synced sessions at RG activation (`refresh_owner_rgs`). The
+split FIB has no LAN connected row, so a fresh lookup for a reverse row's
+un-NATed LAN client answers the WAN default route. The node has only just
+taken the WAN, so that route's gateway is usually not learned yet, and the
+answer is `MissingNeighbor` on ge-x-0-2.50 toward the gateway.
+
+The stored decision of such a row is `FabricRedirect` to the LAN owner, and
+`rehome_or_retain_fabric_redirect` (#15958b) exists to keep it. Before #18659
+that guard ran only for a `ForwardCandidate` candidate. A `MissingNeighbor`
+candidate was returned as-is, so the activation refresh rewrote every
+worker's copy onto the unresolved WAN gateway. Each worker stamps a copy with
+its own revalidation generation, and the copy of the worker that had
+processed packets since the FIB bump looked current. A WAN reply that
+RSS-hashed to it did not re-resolve. It took the MissingNeighbor arm, whose
+#1913 gate judged the gateway's egress zone, and was default-denied wan->wan
+until the neighbor generation advanced (test-failover "RG1 Group 4", about
+50 ms per failback).
+
+Both the activation refresh and the reverse-hit conversion
+(`reverse_hit_departed_destination_redirect`) now treat a local, non-fabric
+`MissingNeighbor` exactly like a `ForwardCandidate`. The fabric redirect is
+kept or produced only when the reply destination's connected owner RG is
+known and is not forwarding-active on this node. A locally active owner keeps
+its local `MissingNeighbor` (resolve, then transmit here), and an unknown
+owner (an internet destination behind the gateway) does too. Neither case is
+ever sent over the fabric (`rehome_or_retain_missing_neighbor_table_18659`,
+`reverse_departed_destination_converts_missing_neighbor_18659`). The #1913
+gate is unchanged. It still judges every `MissingNeighbor` disposition that
+reaches it. What changed is that an established reverse row whose owner is
+the peer no longer reaches it.
+
 ### V1 zone stamps carry the zone id's low 16 bits (#18518)
 
 The V1 zone-encoded fabric stamp (`02:bf:72:fe:HH:LL` source MAC) has two
