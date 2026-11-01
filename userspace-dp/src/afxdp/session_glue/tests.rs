@@ -16961,10 +16961,12 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
          deleting the release call from handle_delete_synced, or restoring the \
          first-hit `break`, strands one of them"
     );
+    // #18656: a translating forward row also names its forward-WIRE flow-cache
+    // slot, so the delete records both keys for the #6457 eviction.
     assert_eq!(
         deleted_keys,
-        vec![key],
-        "control: the key was recorded (#6457)"
+        vec![key.clone(), crate::session::forward_wire_key(&key, decision.nat)],
+        "control: the key and its forward-wire slot were recorded (#6457, #18656)"
     );
 }
 
@@ -26777,4 +26779,60 @@ fn local_finder_reverse_install_preserves_snat_provenance_17080() {
         Some(false),
         "#17080: shared reverse row must carry the forward SNAT provenance"
     );
+}
+
+/// #18656 (review): a DeleteSynced of a forward session with a translating
+/// decision names BOTH flow-cache identities the session can back: its own
+/// key and its forward-WIRE tuple (the slot a moved session's post-NAT fabric
+/// data seeds on the new owner). Without the second key the wire-keyed slot
+/// survives the delete, and a re-install of the same session before the next
+/// packet replays the old seeded decision.
+#[test]
+fn delete_synced_also_names_the_forward_wire_slot_18656() {
+    const WORKER: u32 = 3;
+    let forwarding = ForwardingState::default();
+    let key = test_key();
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(41000),
+        ..NatDecision::default()
+    };
+    let wire = crate::session::forward_wire_key(&key, nat);
+    assert_ne!(wire, key, "fixture: SNAT moves the forward wire tuple");
+    let queued_commands = Arc::new(Mutex::new(VecDeque::new()));
+    {
+        let mut pending = queued_commands.lock().expect("worker queue");
+        assert!(crate::afxdp::worker_queue::push_bounded(
+            &mut pending,
+            WorkerCommand::DeleteSynced(key.clone()),
+        ));
+    }
+    let mut sessions = SessionTable::new();
+    let mut decision = test_decision();
+    decision.nat = nat;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        test_metadata(),
+        SessionOrigin::SyncImport,
+        1_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    let results = apply_worker_commands(
+        &queued_commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &BTreeMap::new(),
+        &dynamic_neighbors,
+        WORKER,
+        &mut scratch,
+    );
+    assert_eq!(results.deleted_synced_keys, vec![key.clone(), wire]);
+    assert!(sessions.probe_with_origin(&key).is_none(), "premise: the session is gone");
 }

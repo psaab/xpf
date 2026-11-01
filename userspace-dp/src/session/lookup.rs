@@ -709,43 +709,23 @@ impl SessionTable {
         wire_key: &SessionKey,
         now_ns: u64,
     ) -> SessionExpiryProbe<(ForwardSessionMatch, SessionOrigin)> {
-        let Some(bucket) = self.forward_wire_index.get(wire_key) else {
-            return SessionExpiryProbe::Absent;
-        };
-        let mut idle_crossed = false;
-        let mut first: Option<(ForwardSessionMatch, SessionOrigin)> = None;
-        for &handle in bucket.iter() {
-            let Some(record) = self.entries.get(handle as usize) else {
-                continue;
-            };
-            let entry = &record.entry;
-            if entry.metadata.is_reverse
-                || forward_wire_key(&record.key, entry.decision.nat) != *wire_key
-            {
-                continue;
-            }
-            if now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns {
-                idle_crossed = true;
-                continue;
-            }
-            let matched = (self.forward_match_from(record), entry.origin);
-            if first.is_some() {
-                // #14382: second live validated candidate — the wire
-                // tuple is ambiguous. Fail closed as Absent (the
-                // candidates are live, so IdleCrossed would be wrong),
-                // matching find_forward_wire_match_inner's None.
-                return SessionExpiryProbe::Absent;
-            }
-            first = Some(matched);
-        }
-        if let Some(matched) = first {
-            SessionExpiryProbe::Live(matched)
-        } else if idle_crossed {
-            SessionExpiryProbe::IdleCrossed
-        } else {
-            SessionExpiryProbe::Absent
+        // #18656 (review): the same candidate selection as
+        // `find_forward_wire_match_inner` and the flow-cache probe, so the
+        // three cannot drift apart. #14382: a second live validated candidate
+        // is ambiguous and fails closed as Absent (the candidates are live,
+        // so IdleCrossed would be wrong).
+        match self.forward_wire_candidate_expiry(wire_key, Some(now_ns)) {
+            SessionExpiryProbe::Live(handle) => match self.entries.get(handle as usize) {
+                Some(record) => {
+                    SessionExpiryProbe::Live((self.forward_match_from(record), record.entry.origin))
+                }
+                None => SessionExpiryProbe::Absent,
+            },
+            SessionExpiryProbe::IdleCrossed => SessionExpiryProbe::IdleCrossed,
+            SessionExpiryProbe::Absent => SessionExpiryProbe::Absent,
         }
     }
+
 
     /// #16217 (local adoption evidence): does this worker's table hold a
     /// local SERVING row for the canonical key behind `wire_key` that is
@@ -1934,7 +1914,28 @@ impl SessionTable {
         wire_key: &SessionKey,
         now_ns: Option<u64>,
     ) -> Option<u32> {
-        let bucket = self.forward_wire_index.get(wire_key)?;
+        match self.forward_wire_candidate_expiry(wire_key, now_ns) {
+            SessionExpiryProbe::Live(handle) => Some(handle),
+            SessionExpiryProbe::IdleCrossed | SessionExpiryProbe::Absent => None,
+        }
+    }
+
+    /// #18656: the forward-wire candidate walk itself, with the expiry
+    /// classification `find_forward_wire_match_expiry` reports: `Live` for
+    /// exactly one validated, non-reverse, live candidate; `IdleCrossed` when
+    /// validated candidates exist but none is live; `Absent` otherwise,
+    /// including two live candidates (#14382 ambiguity fails closed).
+    /// `now_ns = None` treats every validated candidate as live (the
+    /// inspection-only accessors).
+    fn forward_wire_candidate_expiry(
+        &self,
+        wire_key: &SessionKey,
+        now_ns: Option<u64>,
+    ) -> SessionExpiryProbe<u32> {
+        let Some(bucket) = self.forward_wire_index.get(wire_key) else {
+            return SessionExpiryProbe::Absent;
+        };
+        let mut idle_crossed = false;
         let mut first: Option<u32> = None;
         for &handle in bucket.iter() {
             let Some(record) = self.entries.get(handle as usize) else {
@@ -1943,18 +1944,23 @@ impl SessionTable {
             let entry = &record.entry;
             if entry.metadata.is_reverse
                 || forward_wire_key(&record.key, entry.decision.nat) != *wire_key
-                || now_ns.is_some_and(|now| {
-                    now.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns
-                })
             {
                 continue;
             }
+            if now_ns.is_some_and(|now| now.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns) {
+                idle_crossed = true;
+                continue;
+            }
             if first.is_some() {
-                return None;
+                return SessionExpiryProbe::Absent;
             }
             first = Some(handle);
         }
-        first
+        match first {
+            Some(handle) => SessionExpiryProbe::Live(handle),
+            None if idle_crossed => SessionExpiryProbe::IdleCrossed,
+            None => SessionExpiryProbe::Absent,
+        }
     }
 
     /// #4438: resolve the reverse entry whose translated (alias) tuple equals

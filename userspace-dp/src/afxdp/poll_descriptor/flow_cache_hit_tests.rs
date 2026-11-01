@@ -8439,6 +8439,41 @@ fn wire_keyed_entry_18656() -> (FlowCacheEntry, crate::session::SessionKey) {
     (entry, canonical)
 }
 
+/// #18656 (review): the likely live shape, a fabric-ingress SNAT-only row
+/// (`fabric_ingress = true`, the slow path's fabric wire placeholder). The
+/// wire-keyed hit is served exactly as for a plain synced row.
+#[test]
+fn moved_session_wire_keyed_hit_on_fabric_ingress_row_is_served_18656() {
+    use crate::afxdp::flow_cache::FlowCacheEvictionArm as Arm;
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let (mut entry, canonical) = wire_keyed_entry_18656();
+    entry.metadata.fabric_ingress = true;
+    assert!(
+        crate::afxdp::shared_ops::is_fabric_wire_placeholder(
+            entry.metadata.fabric_ingress,
+            entry.metadata.is_reverse,
+            entry.decision
+        ),
+        "premise: the installed row is the slow path's fabric wire placeholder shape"
+    );
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            install_key: Some(canonical.clone()),
+            ..StageSeed::default()
+        },
+    );
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(run.flow_cache_tallies, (1, 0, 0));
+    assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDeadNoRecord as usize], 0);
+    assert_eq!(run.sessions.fwd_packets_for(&canonical), 1);
+}
+
 /// #18656: a DROPPED wire-keyed hit (cached `then discard`) is rolled back
 /// under the canonical key the probe charged. Keying the rollback on the
 /// packet's wire tuple finds no undo and leaves the dropped packet charged.

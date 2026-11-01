@@ -1072,11 +1072,13 @@ pub(super) fn stage_flow_cache_hit(
             }
         }
         // #2501/#2749/#14945: this forwarded packet was already accounted
-        // against the session by the fused `probe_hit` above (keyed by its
-        // OWN tuple `flow.forward_key`, direction derived from the resolved
-        // entry, both directions folded onto the canonical forward entry,
-        // TCP control bits + DSCP observed for the SESSION_CLOSE RT_FLOW
-        // frame). No second session probe runs here.
+        // against the session by the fused `probe_hit` above (resolved from
+        // its OWN tuple `flow.forward_key`, or — #18656 — from the canonical
+        // key behind that tuple in the forward-wire scope, `probe_session_key`;
+        // direction derived from the resolved entry, both directions folded
+        // onto the canonical forward entry, TCP control bits + DSCP observed
+        // for the SESSION_CLOSE RT_FLOW frame). No second session probe runs
+        // here.
         let mut recycle_now = true;
         if matches!(
             cached_decision.resolution.disposition,

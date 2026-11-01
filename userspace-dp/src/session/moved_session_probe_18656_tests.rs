@@ -132,10 +132,24 @@ fn wire_key_hit_refuses_ambiguous_wire_tuple_18656() {
     d.nat = snat(40000);
     assert_eq!(forward_wire_key(&other, d.nat), wire, "premise: same wire tuple");
     assert!(table.upsert_synced(other, d, metadata(), now, PROTO_TCP, TCP_ACK, false));
-    assert!(
-        table.find_forward_wire_match_with_origin_at(&wire, now + SEC).is_none(),
-        "premise: the slow path's wire scope (probe_local_wire_at) fails closed"
-    );
+    // Premise, independent of the candidate walk under test: two validated,
+    // live, non-reverse forward rows really do share this wire tuple.
+    let live_candidates = table
+        .forward_wire_index
+        .get(&wire)
+        .map(|bucket| {
+            bucket
+                .iter()
+                .filter_map(|&h| table.entries.get(h as usize))
+                .filter(|r| {
+                    !r.entry.metadata.is_reverse
+                        && forward_wire_key(&r.key, r.entry.decision.nat) == wire
+                        && (now + SEC).saturating_sub(r.entry.last_seen_ns) <= r.entry.expires_after_ns
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(live_candidates, 2, "premise: two live candidates share the wire tuple");
     let (verdict, canonical) = probe(&mut table, &wire, now + SEC, false);
     assert_eq!(verdict, ProbeHitVerdict::NoRecord);
     assert_eq!(canonical, None);
@@ -186,4 +200,36 @@ fn wire_key_zone_fence_and_liveness_resolve_canonical_18656() {
     assert_eq!(table.live_ingress_zone_matches_at(&wire, now + SEC, zone), Some(true));
     assert_eq!(table.live_ingress_zone_matches_at(&wire, now + SEC, zone + 1), Some(false));
     assert!(table.session_is_live_at(&wire, now + SEC));
+}
+
+/// #18656 (review): the likely live shape. A fabric-arrival promotion marks
+/// the moved session's row `fabric_ingress = true`, which makes a SNAT-only
+/// forward row a fabric wire placeholder for the slow path
+/// (`is_fabric_wire_placeholder`: it takes its decision from the shared
+/// forward-wire entry). The probe still serves the local canonical row
+/// through the wire tuple, which is the liveness and accounting record.
+#[test]
+fn wire_key_hit_serves_fabric_ingress_placeholder_row_18656() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let nat = snat(40000);
+    let mut d = decision();
+    d.nat = nat;
+    let mut meta = metadata();
+    meta.fabric_ingress = true;
+    let now = 10 * SEC;
+    assert!(table.upsert_synced(forward.clone(), d, meta, now, PROTO_TCP, TCP_ACK, false));
+    let reverse = reverse_session_key(&forward, nat);
+    let mut rmeta = metadata();
+    rmeta.is_reverse = true;
+    assert!(table.upsert_synced(reverse, d, rmeta, now, PROTO_TCP, TCP_ACK, false));
+    let wire = forward_wire_key(&forward, nat);
+    assert!(
+        table.entry_by_key_quiet(&forward).expect("canonical").metadata.fabric_ingress,
+        "premise: the canonical row carries the promoted fabric-ingress mark"
+    );
+    let (verdict, canonical) = probe(&mut table, &wire, now + SEC, false);
+    assert_eq!(verdict, ProbeHitVerdict::Live);
+    assert_eq!(canonical.as_ref(), Some(&forward));
+    assert_eq!(table.entry_by_key_quiet(&forward).expect("canonical").counters.fwd_packets, 1);
 }

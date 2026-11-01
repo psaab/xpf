@@ -1006,11 +1006,19 @@ numbers in `docs/log/18534.md`.
 
 ## Cache hits on a forward-wire tuple (#18656)
 
-The cache-hit probe serves the same record the slow path resolved when it
-seeded the cache entry. The slow path's local scope order is direct key,
-then reverse-translated alias, then `forward_wire_index` (a forward row's
-post-NAT tuple, `probe_local_wire_at`). Before #18656 the probe
-(`probe_hit_inner` via `record_by_key_mut`) stopped after the alias.
+The cache-hit probe resolves a packet tuple through the same local scopes
+the slow path uses: direct key, then reverse-translated alias, then
+`forward_wire_index` (a forward row's post-NAT tuple, `probe_local_wire_at`).
+Before #18656 the probe (`probe_hit_inner` via `record_by_key_mut`) stopped
+after the alias.
+
+One shape differs. For a fabric-ingress SNAT-only forward row (a promoted
+moved session, `is_fabric_wire_placeholder`), the slow path takes its
+DECISION from the shared forward-wire entry rather than from the local row.
+The cache entry carries the decision the slow path seeded, and the probe
+guards liveness and accounting on the local canonical row: the same row the
+placeholder test matched. A cell pins this shape
+(`fabric_ingress = true`).
 
 The forward-wire case is the moved session in a split. With RG1 moved to
 the peer and RG2 left in place, the LAN node still owns the session and
@@ -1033,8 +1041,9 @@ per-session numbers, not a loss ceiling.
 
 - **Resolution.** When the packet key names no direct or alias record,
   the probe takes the forward-wire candidate through
-  `forward_wire_candidate_handle`. That is the selection
-  `find_forward_wire_match_inner` and the slow path use: a validated,
+  `forward_wire_candidate_handle`. That is the one candidate walk
+  (`forward_wire_candidate_expiry`) behind `find_forward_wire_match_inner`
+  and `find_forward_wire_match_expiry`, which the slow path uses: a validated,
   non-reverse, live candidate, with a second live candidate failing
   closed (#14382). The probe then re-probes the candidate's canonical
   key, so liveness, keepalive, accounting and handshake completion run
@@ -1067,6 +1076,12 @@ per-session numbers, not a loss ceiling.
     also pays one extra `forward_wire_index` probe per packet until the
     session is installed.
   - Non-fabric arrivals never run the fence and pay nothing.
+- **Out-of-band invalidation.** A forward session with a translating
+  decision can back a slot keyed by its forward-wire tuple. A control-plane
+  delete (`handle_delete_synced`) and the GC reap (`reap_expired_sessions`)
+  therefore invalidate that slot as well as the session-key slot. Otherwise
+  a delete followed by a re-install of the same session before the next
+  packet would replay the old seeded decision.
 - **Attribution.** The probe returns a `ProbeHitVerdict`, and the hit path
   counts a refusal under `post_hit_session_dead_no_record` or
   `post_hit_session_dead_idle_crossed`. `post_hit_session_dead` now counts

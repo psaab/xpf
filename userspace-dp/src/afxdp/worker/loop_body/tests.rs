@@ -517,6 +517,37 @@ mod flow_cache_invalidation_tests {
         );
     }
 
+    // #18656 (review): the reap of a forward session with a translating
+    // decision also evicts the slot keyed by its forward-WIRE tuple (the slot a
+    // moved session's post-NAT fabric data seeds on the new owner). RED on
+    // revert: the wire-keyed slot survives the reap.
+    #[test]
+    fn reap_also_evicts_the_forward_wire_slot_18656() {
+        let rg_epochs = reap_rg_epochs();
+        let forwarding = ForwardingState::default();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+        let key = reap_key(34601);
+        let wire = crate::session::forward_wire_key(&key, reap_decision(Some(41001)).nat);
+        assert_ne!(wire, key, "fixture: SNAT moves the forward wire tuple");
+        insert_cache_entry(&mut binding, &wire, Some(41001));
+        assert!(cache_hits(&mut binding, &wire, &rg_epochs), "precondition: the wire-keyed slot hits");
+        reap_expired_sessions(
+            std::slice::from_mut(&mut binding),
+            &[expired(key.clone(), Some(41001))],
+            &forwarding,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            1_000_000_000,
+            0,
+            &std::sync::Arc::new(std::sync::Mutex::new(FastMap::default())),
+        );
+        assert!(
+            !cache_hits(&mut binding, &wire, &rg_epochs),
+            "the reaped session's forward-wire slot is evicted"
+        );
+    }
+
     // #6457 H1: a control-plane session delete (operator `clear security flow
     // session`, cluster-stale sweep `BatchDeleteSessions`, HA DeleteSynced
     // propagation — all funnelled through `WorkerCommand::DeleteSynced`) must
