@@ -98,7 +98,9 @@ type Installer interface {
 	DeleteTable(name string) error
 	// TableEnforcing reports whether the named inet-family table currently
 	// ENFORCES an input hook: the table exists with a type-filter
-	// input-hook chain carrying at least one rule. A present-but-empty
+	// input-hook chain carrying at least one rule other than the exact
+	// #16841 zero-hop-limit DROP (#18746), which every xpf input chain
+	// carries and which is no evidence of host-inbound policy. A present-but-empty
 	// (flushed shell) table is NOT enforcing — with no input hook it
 	// filters nothing. The `ensure` command and the handoff tripwire
 	// prove liveness through this instead of bare presence (#10751
@@ -106,7 +108,8 @@ type Installer interface {
 	TableEnforcing(name string) (bool, error)
 	// TableDropsInput reports whether the named inet-family table
 	// currently DROPS on its input hook: enforcing shape (see above)
-	// PLUS at least one rule carrying a DROP verdict. An admits-only
+	// PLUS at least one rule carrying a DROP verdict, not counting the exact
+	// #16841 zero-hop-limit DROP (#18746). An admits-only
 	// table (mandatory accepts, zero DROP — e.g. a zero-drop fence
 	// shell, or a stale restore that lost its drops) under the
 	// tables' `policy accept` admits everything it does not
@@ -633,7 +636,13 @@ func (in *netlinkInstaller) TableEnforcing(name string) (bool, error) {
 		}
 		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
 	}
-	return len(rules) > 0, nil
+	// #18746: the #16841 zero-hop rule heads every input chain xpf installs,
+	// so a table holding only that rule is still an empty shell.
+	operator, err := inputRulesBeyondZeroHop(c, tbl, chain, rules)
+	if err != nil {
+		return false, err
+	}
+	return len(operator) > 0, nil
 }
 
 // TableDropsInput reports whether the named inet-family table currently
@@ -681,7 +690,14 @@ func (in *netlinkInstaller) TableDropsInput(name string) (bool, error) {
 		}
 		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
 	}
-	for _, rule := range rules {
+	// #18746: the #16841 zero-hop rule's DROP is not host-inbound enforcement.
+	// Since #16841 it sits in every xpf input chain, so counting it made an
+	// admits-only table read as dropping.
+	operator, err := inputRulesBeyondZeroHop(c, tbl, chain, rules)
+	if err != nil {
+		return false, err
+	}
+	for _, rule := range operator {
 		for _, anyExpr := range rule.Exprs {
 			if verdict, ok := anyExpr.(*expr.Verdict); ok && verdict.Kind == expr.VerdictDrop {
 				return true, nil
