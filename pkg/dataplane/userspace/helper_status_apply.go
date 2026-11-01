@@ -91,6 +91,10 @@ func (m *Manager) resolveCtrlEnableLocked(status *ProcessStatus, ctrl *userspace
 		probeBindingsReady, allBindingsBound := m.bindingReadinessLocked(status)
 		if allBindingsBound {
 			m.ensureXSKBoundNAPIBootstrapLocked()
+		} else {
+			// A generation that binds only SOME bindings still gets a
+			// post-bind probe for those (partial-bind floor).
+			m.ensurePartialBindNAPIBootstrapFloorLocked(anyBindingBound(status), time.Now())
 		}
 		m.ensureCtrlEnablePrewarmLocked(!allBindingsBound)
 		// Fire OnXSKBound callback once when all bindings are bound.
@@ -155,6 +159,17 @@ func (m *Manager) ensureCtrlEnablePrewarmLocked(bootstrapNAPI bool) {
 		}
 		m.proactiveNeighborResolveLocked()
 	}
+}
+
+// anyBindingBound reports whether at least one registered binding with a real
+// ifindex is bound — the start of the partial-bind floor's window (#18707).
+func anyBindingBound(status *ProcessStatus) bool {
+	for _, b := range status.Bindings {
+		if b.Ifindex > 0 && b.Registered && b.Bound {
+			return true
+		}
+	}
+	return false
 }
 
 // bindingReadinessLocked folds the helper's per-binding flags into the two

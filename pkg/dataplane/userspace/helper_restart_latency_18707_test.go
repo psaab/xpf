@@ -114,6 +114,7 @@ func TestFirstCrashRestartsImmediatelyRepeatsBackOff18707(t *testing.T) {
 	statusLoopIntervalForTest18707(t, time.Hour)
 	rec := &delayRecorder18707{}
 	m := startNMHelper12159(t, nmPersistentHelper12159, rec.arm)
+	joinStatusLoopAtCleanup18707(t, m)
 	waitNMSupervisorRunning12159(t, m)
 
 	for i, want := range []time.Duration{0, helperRestartBackoffBase, 2 * helperRestartBackoffBase} {
@@ -137,6 +138,7 @@ func TestCrashRestartRunsFirstStatusPassImmediately18707(t *testing.T) {
 	statusLoopIntervalForTest18707(t, time.Hour)
 	rec := &delayRecorder18707{}
 	m := startNMHelper12159(t, nmPersistentHelper12159, rec.arm)
+	joinStatusLoopAtCleanup18707(t, m)
 	waitNMSupervisorRunning12159(t, m)
 
 	polled := make(chan struct{}, 1)
@@ -175,6 +177,24 @@ func TestCrashRestartRunsFirstStatusPassImmediately18707(t *testing.T) {
 		t.Fatal("the restarted helper's status loop did not poll before its first tick (interval 1h); " +
 			"the first reconcile pass — the one that republishes the snapshot — still waits a tick (#18707)")
 	}
+}
+
+// joinStatusLoopAtCleanup18707 stops the helper and JOINS the status loop the
+// crash restart started, before the earlier-registered cleanup restores
+// statusLoopInterval: the loop reads that var as it starts, so restoring it
+// while the goroutine may still be starting is a data race. t.Cleanup is
+// LIFO, so registering this after startNMHelper12159 runs it first.
+func joinStatusLoopAtCleanup18707(t *testing.T, m *Manager) {
+	t.Helper()
+	t.Cleanup(func() {
+		m.mu.Lock()
+		m.stopLocked()
+		done := m.syncDone
+		m.mu.Unlock()
+		if done != nil {
+			<-done
+		}
+	})
 }
 
 func statusLoopIntervalForTest18707(t *testing.T, d time.Duration) {
@@ -256,7 +276,10 @@ func TestNAPIBootstrapFiresOnAllBindingsBound18707(t *testing.T) {
 			t.Fatal(err)
 		}
 		armed, prewarmStamp := m.napiBoundBootstrapGen, m.lastNAPIBootstrap
-		again := m.ensureXSKBoundNAPIBootstrapLocked()
+		// Read the second arm's channel while m.mu is still held: an armed
+		// callback cannot run (and close it) until the lock is released, so
+		// only the not-armed path returns it already closed.
+		againClosed := chanClosed18707(m.ensureXSKBoundNAPIBootstrapLocked())
 		m.mu.Unlock()
 		if armed != 1 {
 			t.Fatalf("all-bound status pass armed generation %d, want 1", armed)
@@ -265,9 +288,7 @@ func TestNAPIBootstrapFiresOnAllBindingsBound18707(t *testing.T) {
 			t.Fatal("the prewarm armed its debounced bootstrap in the same all-bound pass; " +
 				"the probes would fire twice")
 		}
-		select {
-		case <-again:
-		default:
+		if !againClosed {
 			t.Fatal("a second arm in the same generation scheduled another bootstrap; it must fire once per generation")
 		}
 		waitNAPIBootstrapRecorded18707(t, m)
@@ -323,4 +344,157 @@ func TestNAPIBootstrapFiresOnAllBindingsBound18707(t *testing.T) {
 			t.Fatalf("generation 2's all-bound pass armed generation %d, want 2", armed)
 		}
 	})
+}
+
+// napiTwoBindings18707 is a two-binding status: the second binding is a sibling
+// queue on the same interface. Every single-binding cell above reads "all
+// bound" and "any bound" as the same predicate; this fixture separates them.
+func napiTwoBindings18707(firstBound, secondBound bool) *ProcessStatus {
+	s := readyHelperStatus()
+	b := s.Bindings[0]
+	b.Bound = firstBound
+	second := b
+	second.Slot, second.QueueID, second.Bound = 1, 1, secondBound
+	s.Bindings = []BindingStatus{b, second}
+	return s
+}
+
+// The bound bootstrap waits for EVERY binding, not the first one to bind.
+func TestNAPIBootstrapWaitsForEveryBinding18707(t *testing.T) {
+	m := napiManager18707(t, 1)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := 0; i < 50; i++ {
+		if err := m.applyHelperStatusLocked(napiTwoBindings18707(true, false)); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	if m.napiBoundBootstrapGen != 0 {
+		t.Fatalf("all-bound bootstrap armed for generation %d with one of two bindings still unbound", m.napiBoundBootstrapGen)
+	}
+	if err := m.applyHelperStatusLocked(napiTwoBindings18707(true, true)); err != nil {
+		t.Fatal(err)
+	}
+	if m.napiBoundBootstrapGen != 1 {
+		t.Fatalf("all-bound bootstrap armed generation %d once both bindings bound, want 1", m.napiBoundBootstrapGen)
+	}
+}
+
+// The partial-bind floor (review scenario): one binding binds, its sibling
+// stays registered-but-unbound for the whole generation, and ctrl enables
+// anyway. The bound queue must still get a post-bind probe. Elapsed time is
+// simulated by moving the generation's first-bound stamp back by the floor
+// between passes; nothing waits on the clock.
+func TestNAPIPartialBindFloorProbesBoundQueues18707(t *testing.T) {
+	m, ctrl := seamedManager(t)
+	cmd := exec.Command("true")
+	m.proc = cmd
+	m.procGen = 1
+	m.procSup = &helperGeneration{gen: 1, cmd: cmd, exited: make(chan struct{})}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.applyHelperStatusLocked(napiTwoBindings18707(true, false)); err != nil {
+		t.Fatal(err)
+	}
+	if m.napiFirstBoundGen != 1 {
+		t.Fatalf("first pass with a bound binding did not open the floor window (napiFirstBoundGen=%d)", m.napiFirstBoundGen)
+	}
+	if m.napiFloorBootstrapGen != 0 {
+		t.Fatal("partial-bind floor armed in the very pass that opened its window")
+	}
+	if !ctrl.haveStored || ctrl.stored.Enabled != 1 {
+		t.Fatal("premise: ctrl did not enable with the second binding registered-but-unbound; " +
+			"the hole this floor covers needs ctrl ENABLED")
+	}
+
+	m.napiFirstBoundAt = m.napiFirstBoundAt.Add(-napiPartialBindFloor)
+	if err := m.applyHelperStatusLocked(napiTwoBindings18707(true, false)); err != nil {
+		t.Fatal(err)
+	}
+	if m.napiFloorBootstrapGen != 1 {
+		t.Fatalf("partial-bind floor did not arm %v after the first bind (napiFloorBootstrapGen=%d); "+
+			"the bound queue is never probed while its sibling stays unbound", napiPartialBindFloor, m.napiFloorBootstrapGen)
+	}
+	if m.napiBoundBootstrapGen != 0 {
+		t.Fatal("all-bound bootstrap armed while a binding is still unbound")
+	}
+
+	// The stuck binding binds late: it needs its own probe, so the all-bound
+	// bootstrap still fires after the floor did.
+	if err := m.applyHelperStatusLocked(napiTwoBindings18707(true, true)); err != nil {
+		t.Fatal(err)
+	}
+	if m.napiBoundBootstrapGen != 1 {
+		t.Fatalf("late all-bound pass armed generation %d after the floor fired, want 1", m.napiBoundBootstrapGen)
+	}
+}
+
+// The floor's own predicate, with the clock injected: no window before a
+// binding is bound, the boundary at exactly napiPartialBindFloor, once per
+// generation, and retired by the all-bound bootstrap.
+func TestNAPIPartialBindFloorWindow18707(t *testing.T) {
+	t0 := time.Unix(1_000_000, 0)
+
+	t.Run("nothing_bound_never_opens", func(t *testing.T) {
+		m := napiManager18707(t, 1)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for i := 0; i < 10; i++ {
+			m.ensurePartialBindNAPIBootstrapFloorLocked(false, t0.Add(time.Duration(i)*time.Hour))
+		}
+		if m.napiFirstBoundGen != 0 || m.napiFloorBootstrapGen != 0 {
+			t.Fatalf("floor opened/armed with no binding bound: firstBoundGen=%d floorGen=%d",
+				m.napiFirstBoundGen, m.napiFloorBootstrapGen)
+		}
+	})
+
+	t.Run("boundary_and_once", func(t *testing.T) {
+		m := napiManager18707(t, 1)
+		m.mu.Lock()
+		m.ensurePartialBindNAPIBootstrapFloorLocked(true, t0)
+		m.ensurePartialBindNAPIBootstrapFloorLocked(true, t0.Add(napiPartialBindFloor-time.Nanosecond))
+		before := m.napiFloorBootstrapGen
+		armed := m.ensurePartialBindNAPIBootstrapFloorLocked(true, t0.Add(napiPartialBindFloor))
+		at := m.napiFloorBootstrapGen
+		armedClosed := chanClosed18707(armed)
+		againClosed := chanClosed18707(m.ensurePartialBindNAPIBootstrapFloorLocked(true, t0.Add(10*napiPartialBindFloor)))
+		m.mu.Unlock()
+		if before != 0 {
+			t.Fatalf("floor armed before %v elapsed", napiPartialBindFloor)
+		}
+		if at != 1 || armedClosed {
+			t.Fatalf("floor did not arm at exactly %v (floorGen=%d, callback scheduled=%v)",
+				napiPartialBindFloor, at, !armedClosed)
+		}
+		if !againClosed {
+			t.Fatal("floor armed a second bootstrap in the same generation")
+		}
+		<-armed
+	})
+
+	t.Run("all_bound_retires_floor", func(t *testing.T) {
+		m := napiManager18707(t, 1)
+		m.mu.Lock()
+		done := m.ensureXSKBoundNAPIBootstrapLocked()
+		m.ensurePartialBindNAPIBootstrapFloorLocked(true, t0)
+		lateClosed := chanClosed18707(m.ensurePartialBindNAPIBootstrapFloorLocked(true, t0.Add(10*napiPartialBindFloor)))
+		m.mu.Unlock()
+		<-done
+		if !lateClosed {
+			t.Fatal("partial-bind floor armed after the generation's all-bound bootstrap already fired")
+		}
+	})
+}
+
+// chanClosed18707 reports whether an arm returned an already-closed channel,
+// i.e. scheduled nothing. Call it while m.mu is held: a scheduled callback
+// needs the lock before it can close its channel.
+func chanClosed18707(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
