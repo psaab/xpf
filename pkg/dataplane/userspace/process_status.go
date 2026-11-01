@@ -557,6 +557,13 @@ func (m *Manager) statusLoop(ctx context.Context) {
 					pollErr = &statusDecodeError{cause: pollErr}
 				}
 			}
+			// #18685 (review): the heartbeat-age reference is when the round
+			// trip RETURNED, taken before re-acquiring m.mu. The reply's
+			// heartbeats were converted against the helper's clock when it
+			// built the reply; any later wait on m.mu would be added to every
+			// worker's age, so two polls finishing behind a long m.mu holder
+			// would make a healthy helper's workers look frozen.
+			pollReturnedAt := time.Now()
 			m.mu.Lock()
 			// A helper restart or replacement may have happened while the poll
 			// was off-lock. Its response belongs to the old process and must not
@@ -582,7 +589,7 @@ func (m *Manager) statusLoop(ctx context.Context) {
 				m.noteStatusPollResultLocked(nil, pollResultTime)
 				// #18685: worker heartbeats and the arm state feed the
 				// frozen-worker and post-kill parts of the wedge verdict.
-				m.liveTrack.noteStatus(pollProcGen, pollResultTime, status.WorkerHeartbeats, status.ForwardingArmed)
+				m.liveTrack.noteStatus(pollProcGen, pollReturnedAt, status.WorkerHeartbeats, status.ForwardingArmed)
 			} else if errors.Is(pollErr, errStatusDecode) {
 				// #18293: answered but undecodable. Surface it as a decode
 				// error and never kill: the helper provably answered.

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"math"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -30,7 +31,14 @@ func (c *xpfCollector) collectHelperLiveness(ch chan<- prometheus.Metric, dp api
 	if p.HelperElectionNotReady() {
 		notReady = 1
 	}
-	c.emitConstMetric(ch, c.helperAnswerAgeSeconds, prometheus.GaugeValue, p.HelperAnswerAge().Seconds())
+	// A negative age means no live helper generation (none started yet, or
+	// one retired by an intentional stop): NaN, not 0, which would read as
+	// "just answered".
+	age := math.NaN()
+	if d := p.HelperAnswerAge(); d >= 0 {
+		age = d.Seconds()
+	}
+	c.emitConstMetric(ch, c.helperAnswerAgeSeconds, prometheus.GaugeValue, age)
 	c.emitConstMetric(ch, c.helperElectionNotReady, prometheus.GaugeValue, notReady)
 	c.emitConstMetric(ch, c.helperWedgeKillsTotal, prometheus.CounterValue, float64(p.HelperWedgeKills()))
 }

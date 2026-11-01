@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -57,9 +58,6 @@ const (
 	// helperWedgeMinSilentTrips is how many silent round trips either verdict
 	// needs. One timeout alone is not a wedge.
 	helperWedgeMinSilentTrips = 2
-	// helperWorkerFrozenAfter is how long a worker heartbeat may stay unchanged
-	// across answered polls before the worker counts as frozen.
-	helperWorkerFrozenAfter = 10 * time.Second
 	// helperWedgeClearAfter is how long the helper must look healthy (answering,
 	// no frozen worker) before a suspected verdict clears, and helperWedgeClear
 	// Trips how many answers that span must contain. Without it a helper that
@@ -111,6 +109,7 @@ type helperLivenessTracker struct {
 	lastStatusAt time.Time
 
 	// suspected verdict with hysteresis
+	reason         string // why the verdict is raised, for the transition log
 	suspected      bool
 	suspectedSince time.Time
 	healthySince   time.Time
@@ -140,8 +139,12 @@ func (t *helperLivenessTracker) reset(gen uint64, now time.Time, inheritNotReady
 	t.armedSeen = false
 	t.suspected = inheritNotReady
 	t.suspectedSince = time.Time{}
+	t.reason = ""
 	if inheritNotReady {
 		t.suspectedSince = now
+		t.reason = "first helper generation after an unexpected exit, not yet armed and healthy"
+		slog.Warn("userspace: helper restarted after an unexpected exit; holding election debt until it is armed and healthy (#18697)",
+			"generation", gen)
 	}
 	t.healthySince, t.healthyTrips = time.Time{}, 0
 }
@@ -156,6 +159,7 @@ func (t *helperLivenessTracker) retire() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.retired = true
+	t.lastAnswer = time.Time{} // no live generation: the answer age is undefined, not growing
 	t.silentSince, t.silentTrips = time.Time{}, 0
 	t.hbOldest, t.hbOldestIdx, t.frozenStreak = 0, -1, 0
 	t.suspected, t.inherited = false, false
@@ -262,6 +266,11 @@ func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats
 	t.evaluateLocked(now)
 }
 
+// helperWorkerFrozenAfter is how old a worker heartbeat may be at an answered
+// status before the worker counts as frozen. A var only so a cell can shrink
+// it; production never changes it.
+var helperWorkerFrozenAfter = 10 * time.Second
+
 // helperWorkerFrozenStatuses is how many consecutive answered statuses must
 // show a worker heartbeat at least helperWorkerFrozenAfter old.
 const helperWorkerFrozenStatuses = 2
@@ -283,13 +292,24 @@ func (t *helperLivenessTracker) silenceSpanLocked(now time.Time) time.Duration {
 	return now.Sub(t.silentSince)
 }
 
-// evaluateLocked raises or clears the suspected verdict.
+// evaluateLocked raises or clears the suspected verdict. The raise and the
+// clear are state transitions and are logged once each, naming the input, so
+// an operator can tell this debt from a kernel or fence arm failure (the debt
+// itself lands on the shared dataplane-arm monitor).
 func (t *helperLivenessTracker) evaluateLocked(now time.Time) {
-	raise := t.silenceSpanLocked(now) >= helperWedgeDemoteSpan || t.frozenWorkerLocked() >= 0
-	if raise {
+	reason := ""
+	if span := t.silenceSpanLocked(now); span >= helperWedgeDemoteSpan {
+		reason = fmt.Sprintf("no control request answered for %s over %d round trips", span.Round(100*time.Millisecond), t.silentTrips)
+	} else if i := t.frozenWorkerLocked(); i >= 0 {
+		reason = fmt.Sprintf("worker %d heartbeat %s old", i, t.hbOldest.Round(100*time.Millisecond))
+	}
+	if reason != "" {
 		if !t.suspected {
 			t.suspected = true
 			t.suspectedSince = now
+			t.reason = reason
+			slog.Warn("userspace: helper looks wedged; raising election debt so a healthy peer takes the data RGs (#18685)",
+				"reason", reason, "generation", t.gen)
 		}
 		return
 	}
@@ -303,8 +323,12 @@ func (t *helperLivenessTracker) evaluateLocked(now time.Time) {
 		return
 	}
 	if now.Sub(t.healthySince) >= helperWedgeClearAfter && t.healthyTrips >= helperWedgeClearTrips {
+		slog.Info("userspace: helper healthy again; clearing the wedge election debt (#18685)",
+			"was", t.reason, "raised_for", now.Sub(t.suspectedSince).Round(time.Second).String(),
+			"generation", t.gen)
 		t.suspected = false
 		t.inherited = false
+		t.reason = ""
 	}
 }
 
@@ -339,12 +363,15 @@ func (t *helperLivenessTracker) killDue(now time.Time) (bool, time.Duration) {
 	return true, span
 }
 
-// answerAge is the time since the generation's last answered round trip.
+// answerAge is the time since the generation's last answered round trip. It
+// is negative when there is no live generation (none started yet, or one
+// retired by an intentional stop), so the metric can say "undefined" rather
+// than read 0 as if the helper had just answered.
 func (t *helperLivenessTracker) answerAge(now time.Time) time.Duration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.lastAnswer.IsZero() {
-		return 0
+	if t.lastAnswer.IsZero() || t.retired {
+		return -1
 	}
 	return now.Sub(t.lastAnswer)
 }

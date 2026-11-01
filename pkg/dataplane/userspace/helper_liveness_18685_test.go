@@ -1,11 +1,13 @@
 package userspace
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -451,5 +453,84 @@ func TestIntentionalStopRetiresTheGeneration18704(t *testing.T) {
 	}
 	if due, _ := tr.killDue(t0.Add(60 * time.Second)); due {
 		t.Fatal("silence after an intentional stop made a kill due")
+	}
+}
+
+// TestManagerMutexWaitIsNotHeartbeatAge18704 (review MINOR): the heartbeat-age
+// reference is when the status round trip RETURNED. A healthy helper whose
+// replies then wait behind a long m.mu holder, on two consecutive polls, must
+// not look frozen. Before the fix the reference was taken after re-acquiring
+// m.mu, so the wait was added to every worker's age.
+func TestManagerMutexWaitIsNotHeartbeatAge18704(t *testing.T) {
+	oldInterval, oldFrozen := statusLoopInterval, helperWorkerFrozenAfter
+	statusLoopInterval, helperWorkerFrozenAfter = 5*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { statusLoopInterval, helperWorkerFrozenAfter = oldInterval, oldFrozen })
+
+	m, _ := stalePollManager16653(t)
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var polls atomic.Int32
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		st := armedStatus16653()
+		if req.Type == "status" {
+			// A healthy helper: every worker heartbeat is fresh at the
+			// moment the reply is built.
+			now := time.Now()
+			st.WorkerHeartbeats = []time.Time{now, now, now, now}
+			if polls.Add(1) <= 2 {
+				// Off-lock, mid round trip: let the test take m.mu so the
+				// loop waits for it after this reply returns.
+				entered <- struct{}{}
+				<-proceed
+			}
+		}
+		if status != nil {
+			*status = *st
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); m.statusLoop(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	// Two consecutive polls each return a healthy reply and then wait 500 ms,
+	// more than the shrunken 300 ms freeze bound, for m.mu.
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("the status loop never reached a status round trip")
+		}
+		m.mu.Lock()
+		proceed <- struct{}{}
+		time.Sleep(500 * time.Millisecond)
+		m.mu.Unlock()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for polls.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if m.liveTrack.wedgeSuspected(time.Now()) {
+		t.Fatal("waiting on m.mu after a healthy reply made the workers look frozen")
+	}
+}
+
+// TestAnswerAgeUndefinedWithoutALiveGeneration18704 (review LOW b): the answer
+// age is negative (undefined) before any generation and after an intentional
+// stop, rather than climbing through a planned stop-to-respawn.
+func TestAnswerAgeUndefinedWithoutALiveGeneration18704(t *testing.T) {
+	var tr helperLivenessTracker
+	if got := tr.answerAge(time.Now()); got >= 0 {
+		t.Fatalf("answer age before any generation = %s, want negative", got)
+	}
+	t0 := time.Now()
+	tr.reset(1, t0, false)
+	if got := tr.answerAge(t0.Add(time.Second)); got != time.Second {
+		t.Fatalf("answer age of a live generation = %s, want 1s", got)
+	}
+	tr.retire()
+	if got := tr.answerAge(t0.Add(time.Minute)); got >= 0 {
+		t.Fatalf("answer age after an intentional stop = %s, want negative", got)
 	}
 }
