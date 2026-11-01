@@ -32,17 +32,20 @@ func TestTerminalConflictReachesLo0Builder11896(t *testing.T) {
 // TestLo0TextOracleRefusesTerminalConflict11896 pins the text-oracle half: a
 // conflicting term must refuse the load with the constant bareword.
 func TestLo0TextOracleRefusesTerminalConflict11896(t *testing.T) {
-	payload := buildLo0FilterPayload(lo0Cfg9875(&config.FirewallFilterTerm{
+	term := &config.FirewallFilterTerm{
 		Name: "conflict", Protocols: []string{"tcp"},
 		TerminalActions: []config.FilterAction{config.FilterActionAccept, config.FilterActionDiscard}, Action: config.FilterActionDiscard,
-	}), "protect-re", "")
+	}
+	payload := buildLo0FilterPayload(lo0Cfg9875(term), "protect-re", "")
 	if !strings.Contains(payload, nftRefuseUnrepresentableFrom) {
 		t.Fatalf("#11896: the oracle must emit the constant refusal rule for a conflicting "+
 			"term so the nft load fails closed; payload:\n%s", payload)
 	}
-	if strings.Contains(payload, " drop") {
-		t.Errorf("#11896: the oracle must not emit a verdict for a conflicting term; payload:\n%s", payload)
-	}
+	// #18746: key the no-verdict check on the term's OWN lines. Since #16841
+	// (2fa9d69062) every lo0 chain opens with the zero-hop-limit DROP, so "no
+	// ` drop` anywhere in the payload" went red without any change to how
+	// this term renders.
+	lo0OwnLinesRefuseWithoutVerdict18746(t, term)
 }
 
 // TestLo0TerminalConflictEndToEnd11896 proves the production path: a
