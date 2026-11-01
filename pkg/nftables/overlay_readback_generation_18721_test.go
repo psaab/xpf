@@ -97,8 +97,10 @@ func TestReadAtStableNftGeneration18721(t *testing.T) {
 		gen, calls := genSeq18721(1, 2, 3, 4, 5, 6, 7, 8, 9)
 		reads := 0
 		got := readAtStableNftGeneration(testBackoff18721, sleep, gen, func() error { reads++; return nil })
-		if got == nil || !strings.Contains(got.Error(), "changed during each of 4 attempts") || !strings.Contains(got.Error(), "4 generation changes") {
-			t.Errorf("moving ruleset: got %v, want a fail-closed \"changed during each of 4 attempts (4 generation changes ...)\"", got)
+		// Generations 1..8 were read: 7 commits landed between the first read
+		// and the last, including those during the pauses.
+		if got == nil || !strings.Contains(got.Error(), "changed during each of 4 attempts") || !strings.Contains(got.Error(), "7 commits observed, generation 1 -> 8") {
+			t.Errorf("moving ruleset: got %v, want a fail-closed \"changed during each of 4 attempts (7 commits observed, generation 1 -> 8)\"", got)
 		}
 		if reads != 4 || *calls != 8 {
 			t.Errorf("moving ruleset: %d reads / %d generation reads, want 4 / 8", reads, *calls)
@@ -193,7 +195,20 @@ func TestVerifyHostInboundOverlayIsGenerationBracketed18721(t *testing.T) {
 	in := newNetlinkInstallerConn(func() (*nftables.Conn, error) {
 		return nftables.New(nftables.WithTestDial(fake))
 	})
+	start := time.Now()
 	err := in.VerifyHostInboundOverlay(overlay18721())
+	elapsed := time.Since(start)
+	// AD fold 5: production must actually PAUSE between attempts. The pure
+	// cells inject a recorder, and these call-site and live cells advance per
+	// pass, so only wall time can show the call site sleeps. A lower bound
+	// cannot flake: the exhaustion path sleeps every step.
+	var pause time.Duration
+	for _, d := range hostOverlayReadbackBackoff {
+		pause += d
+	}
+	if elapsed < pause {
+		t.Errorf("VerifyHostInboundOverlay exhausted its attempts in %v, less than the %v backoff; the call site is not pausing", elapsed, pause)
+	}
 	if err == nil || !strings.Contains(err.Error(), "changed during each of") {
 		t.Fatalf("VerifyHostInboundOverlay over a moving generation = %v, want the fail-closed \"changed during each of\"", err)
 	}

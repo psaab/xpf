@@ -221,7 +221,6 @@ func decodeNftGeneration(msgs []netlink.Message) (uint32, error) {
 func readAtStableNftGeneration(backoff []time.Duration, sleep func(time.Duration), gen func() (uint32, error), read func() error) error {
 	attempts := len(backoff) + 1
 	var first, before, after uint32
-	changes := 0
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
 			sleep(backoff[attempt-1])
@@ -240,10 +239,14 @@ func readAtStableNftGeneration(backoff []time.Duration, sleep func(time.Duration
 		if before == after {
 			return verdict
 		}
-		changes++
 	}
+	// Commits observed over the whole run, pauses included: the generation is
+	// a commit counter, so the delta is the number of transactions that landed
+	// (uint32 subtraction is wrap-safe). Every attempt saw at least one, so
+	// the count is always at least attempts.
+	commits := after - first
 	slog.Warn("host overlay readback: the nftables ruleset kept changing; failing closed",
-		"attempts", attempts, "generation_changes", changes,
+		"attempts", attempts, "commits_observed", commits,
 		"first_generation", first, "last_generation", after)
-	return fmt.Errorf("host overlay readback: the nftables ruleset changed during each of %d attempts (%d generation changes, generation %d -> %d); failing closed", attempts, changes, first, after)
+	return fmt.Errorf("host overlay readback: the nftables ruleset changed during each of %d attempts (%d commits observed, generation %d -> %d); failing closed", attempts, commits, first, after)
 }
