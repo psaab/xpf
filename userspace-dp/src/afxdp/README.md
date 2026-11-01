@@ -2310,6 +2310,34 @@ learn; removal, a new source MAC, a new snapshot, interval expiry and an
 unpublished snapshot all take it); and the ignored full-poll `MEASUREMENT`
 `tests_hit_path_cost_18533.rs` (numbers in `docs/log/18534.md`).
 
+## First-hit source-NAT revalidation on a non-owner (#16215, #18531, #18691)
+
+`poll_descriptor/policy_revalidation.rs::source_nat_revocation_on_session_hit_with_ingress`
+is the only producer of `StaleSourceNat`. It judges the FORWARD line of the
+hit's pair against live NAT rules and the egress's addresses, once per stale
+stamp, on the session-hit slow path (`poll_descriptor/mod.rs`; the flow-cache
+hit path never judges). Translation validity belongs to the node that
+forwards the egress, so the judgment is declined, keeping the session and
+leaving the stamp stale, when the judged line is:
+
+- terminal on a peer-synced row (#16109);
+- `FabricRedirect` or `HAInactive`, for any origin (#16215, #18531);
+- a non-owner's split-FIB gateway fallback (#18691,
+  `judged_line_is_non_owner_gateway_fallback`). This is a local
+  `ForwardCandidate`/`MissingNeighbor` that meets all three conditions:
+  its egress is in an RG that is not forwarding-active here (an RG-less
+  egress, such as a fabric link, never matches); the
+  destination's connected owner RG is known and not active here; and the
+  egress is not the destination's connected interface. The worker import
+  (`session_glue/commands/upsert_synced.rs`) stores that line for a
+  peer-owned forward row by design (#326). A reply arriving over the
+  fabric judged it and revoked valid flows.
+
+The owner keeps every ground. A non-owner still judges a line on the
+destination's connected interface and a gateway-routed destination, and a
+node with no HA view judges everything. The operator-level account is in
+`docs/ha-failover-status.md` (#18531, #18691).
+
 ## Hot-path constants
 
 - `RX_BATCH_SIZE = 64`

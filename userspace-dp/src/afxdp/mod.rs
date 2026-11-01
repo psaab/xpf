@@ -753,6 +753,9 @@ mod tests_fabric_zone_stamp;
 #[path = "tests_split_rg_failback_18531.rs"]
 mod tests_split_rg_failback_18531;
 #[cfg(test)]
+#[path = "tests_lan_owner_idle_import_18691.rs"]
+mod tests_lan_owner_idle_import_18691;
+#[cfg(test)]
 #[path = "tests_punt_seed_shadow_18620.rs"]
 mod tests_punt_seed_shadow_18620;
 #[cfg(test)]

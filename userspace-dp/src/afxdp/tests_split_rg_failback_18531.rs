@@ -257,15 +257,15 @@ pub(super) fn bindings() -> Vec<BindingWorker> {
     vec![wan, fabric, lan]
 }
 
-struct Outcome {
-    session_hit: u64,
-    snat_revoked: u64,
-    tx: [u64; 3],
-    closes: usize,
+pub(super) struct Outcome {
+    pub(super) session_hit: u64,
+    pub(super) snat_revoked: u64,
+    pub(super) tx: [u64; 3],
+    pub(super) closes: usize,
     /// Each Close delta's key and NAT decision: what the daemon turns into
     /// the peer's delete of that key and its reverse companion.
-    closed: Vec<(crate::session::SessionKey, NatDecision)>,
-    ha_inactive: u64,
+    pub(super) closed: Vec<(crate::session::SessionKey, NatDecision)>,
+    pub(super) ha_inactive: u64,
 }
 
 /// Push one descriptor through the production poll pipeline on binding
@@ -273,7 +273,7 @@ struct Outcome {
 /// `neighbor_generation`. Fresh bindings per packet: a fresh flow cache
 /// stands in for the RG-epoch invalidation that sends the first
 /// post-transition packet down the slow path in production.
-fn drive(
+pub(super) fn drive(
     sessions: &mut SessionTable,
     forwarding: &ForwardingState,
     ha: &BTreeMap<i32, HAGroupRuntime>,
@@ -348,7 +348,7 @@ fn drive_at(
 }
 
 /// One mid-stream LAN -> WAN ACK on the LAN binding.
-fn lan_ack(
+pub(super) fn lan_ack(
     sessions: &mut SessionTable,
     forwarding: &ForwardingState,
     ha: &BTreeMap<i32, HAGroupRuntime>,
@@ -797,7 +797,7 @@ fn wan_owner_revokes_redirected_flow_with_withdrawn_translation_18531() {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Family {
+pub(super) enum Family {
     V4,
     V6,
 }
@@ -808,9 +808,9 @@ const LAN_HOST6: Ipv6Addr = Ipv6Addr::new(
 const WAN_HOST6: Ipv6Addr = Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200);
 const SNAT_IP6: Ipv6Addr = Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x8);
 /// fw1's fabric link in the captured snapshot.
-const LOCAL_FABRIC_MAC: [u8; 6] = [0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60];
+pub(super) const LOCAL_FABRIC_MAC: [u8; 6] = [0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60];
 
-fn addrs(family: Family) -> (IpAddr, IpAddr, IpAddr) {
+pub(super) fn addrs(family: Family) -> (IpAddr, IpAddr, IpAddr) {
     match family {
         Family::V4 => (
             IpAddr::V4(LAN_HOST),
@@ -832,7 +832,7 @@ fn addrs(family: Family) -> (IpAddr, IpAddr, IpAddr) {
 /// resolves to a REAL egress, 13, in RG1. Master's FIB cannot bind a gateway
 /// inside a withheld prefix, so the fixture leaves reth0.50's prefix
 /// connected to reach the same resolution.
-fn rg_taking_node_forwarding() -> ForwardingState {
+pub(super) fn rg_taking_node_forwarding() -> ForwardingState {
     let raw = include_str!("testdata_15742h/snap-split-fw1.json");
     let mut v: serde_json::Value = serde_json::from_str(raw).expect("json");
     let snap = v.get_mut("snapshot").expect("snapshot");
@@ -872,7 +872,7 @@ fn window_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
 }
 
 /// The forward row as fw1 (owner of both RGs) exports it.
-fn exported_forward(forwarding: &ForwardingState, family: Family) -> SyncedSessionEntry {
+pub(super) fn exported_forward(forwarding: &ForwardingState, family: Family) -> SyncedSessionEntry {
     let (lan, wan, snat) = addrs(family);
     let neighbor_mac = match family {
         Family::V4 => [0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4],
@@ -904,7 +904,7 @@ fn import_on(
 /// As `import_on`; `served = false` imports the pair with no admitted
 /// packets on the wire, so the #16217 established-with-traffic reverse
 /// guard cannot be what holds it.
-fn import_on_with_service(
+pub(super) fn import_on_with_service(
     sessions: &mut SessionTable,
     forwarding: &ForwardingState,
     ha: &BTreeMap<i32, HAGroupRuntime>,
@@ -966,7 +966,7 @@ fn fabric_forward_frame(
     (frame, meta)
 }
 
-fn set_flow(meta: &mut UserspaceDpMeta, src: IpAddr, dst: IpAddr, sport: u16, dport: u16) {
+pub(super) fn set_flow(meta: &mut UserspaceDpMeta, src: IpAddr, dst: IpAddr, sport: u16, dport: u16) {
     match (src, dst) {
         (IpAddr::V4(s), IpAddr::V4(d)) => {
             meta.flow_src_addr[..4].copy_from_slice(&s.octets());

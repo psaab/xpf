@@ -903,6 +903,86 @@ fn source_nat_translation_still_valid(
     (valid && destination_valid, valid.then_some(false))
 }
 
+/// #18691: does the JUDGED forward line name an egress that only this node's
+/// split FIB would use, for a destination a peer RG owns?
+///
+/// All four must hold:
+/// - the line is a local `ForwardCandidate` or `MissingNeighbor`;
+/// - its egress belongs to an RG that is not forwarding-active here (an
+///   egress with no RG, including none and a fabric link, never matches);
+/// - the destination's connected owner RG is known and not forwarding-active
+///   here (`DestinationOwner::Inactive`);
+/// - the egress is not the destination's connected interface.
+///
+/// That is the gateway-route fallback of a non-owner. A node that does not
+/// own an RG withholds that RG's connected prefixes from its FIB, so a WAN
+/// destination the peer serves on its connected interface (reth0.80)
+/// resolves here to the default via the WAN gateway VLAN (reth0.50). The
+/// worker import stores exactly that line for a peer-owned forward row:
+/// `handle_upsert_synced` keeps the raw local resolution on a node whose
+/// egress RG is inactive, so the row is ready at activation (#326). Judging
+/// the translation against it judges a line the owner never uses: for
+/// interface SNAT it compares the address minted on reth0.80 with reth0.50's
+/// and can only answer "invalid" (#18691, live: the LAN owner of an RG split
+/// revoked an idle flow at its first reply); for pool SNAT it reads
+/// reth0.50's zone and scope instead of the owner's.
+///
+/// Translation validity belongs to the node that forwards the destination,
+/// the rule the `FabricRedirect | HAInactive` decline already states for
+/// lines that say they are foreign. The owner judges on its own egress at
+/// its next slow-path hit with a stale stamp, and its Close removes this
+/// copy (`split_rg_failback_wan_owner_delete_removes_lan_row_18531`).
+///
+/// Lines that keep being judged here:
+/// - every line on a node with no HA view (`ha == None`, standalone);
+/// - any egress whose RG is forwarding-active here, i.e. the owner;
+/// - a line on the destination's own connected interface, even when its RG
+///   is the peer's (`split_rg_failback_twin_stored_real_egress_invalid_
+///   translation_revokes_18531`);
+/// - a gateway-routed destination with no connected owner
+///   (`DestinationOwner::Unknown`), where the default-route egress IS the
+///   owner's egress.
+fn judged_line_is_non_owner_gateway_fallback(
+    forwarding: &ForwardingState,
+    ha: Option<(&BTreeMap<i32, HAGroupRuntime>, u64)>,
+    forward_key: &SessionKey,
+    judged: &SessionDecision,
+) -> bool {
+    let Some((ha_state, now_secs)) = ha else {
+        return false;
+    };
+    let resolution = judged.resolution;
+    if !matches!(
+        resolution.disposition,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+    ) {
+        return false;
+    }
+    // An egress with no RG (no egress at all, or a fabric link, which has no
+    // egress row) is not a peer-owned line: `owner_rg_for_flow` answers 0.
+    let egress_rg = crate::afxdp::forwarding::owner_rg_for_flow(forwarding, resolution.egress_ifindex);
+    if egress_rg <= 0
+        || ha_state
+            .get(&egress_rg)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+    {
+        return false;
+    }
+    let target = judged.nat.rewrite_dst.unwrap_or(forward_key.dst_ip);
+    let table = crate::afxdp::session_glue::install_table_name_for_session(forwarding, *judged, target);
+    let owner = crate::afxdp::session_glue::DestinationOwner::from_dest_rg(
+        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(forwarding, target, table),
+        ha_state,
+        now_secs,
+    );
+    if !matches!(owner, crate::afxdp::session_glue::DestinationOwner::Inactive(_)) {
+        return false;
+    }
+    let connected =
+        crate::afxdp::session_glue::connected_ifindex_for_target_in_table(forwarding, target, table);
+    connected > 0 && connected != resolution.egress_ifindex
+}
+
 /// Revalidate source NAT before any policy-generation, ICMP, host-delivery, or
 /// foreign-hit early exit. A reverse hit is judged through its forward
 /// companion; a forward hit with no local entry is checked sessionlessly and
@@ -938,6 +1018,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
         now_ns,
         packet_icmp,
         false,
+        None,
     )
 }
 
@@ -1013,6 +1094,11 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // `fabric_link_ingress`, the same predicate as the keep-transient purge
     // gate in `session_glue/resolve.rs`).
     fabric_link_ingress: bool,
+    // #18691: this node's HA view and clock, so a judged line naming an
+    // egress this node does not forward can be recognized. `None`
+    // (standalone wrappers, unit fixtures) keeps every judgment exactly as
+    // before.
+    ha: Option<(&BTreeMap<i32, HAGroupRuntime>, u64)>,
 ) -> Option<PolicyRevocation> {
     let (
         forward_key,
@@ -1484,6 +1570,11 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         forward_decision.resolution.disposition,
         ForwardingDisposition::FabricRedirect | ForwardingDisposition::HAInactive
     ) {
+        return None;
+    }
+    // #18691: the same rule for a judged line that does not SAY it is
+    // foreign. See `judged_line_is_non_owner_gateway_fallback`.
+    if judged_line_is_non_owner_gateway_fallback(forwarding, ha, &forward_key, &forward_decision) {
         return None;
     }
     // #15934: selector priority follows HIT DIRECTION (see
