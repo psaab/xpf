@@ -136,9 +136,18 @@ func dialLikeNftConn(c *nftables.Conn) (*netlink.Conn, error) {
 }
 
 // readNftGeneration returns the namespace's nf_tables ruleset generation
-// (NFT_MSG_GETGEN). The kernel bumps it on every committed transaction. So two
-// reads that return the same ID bracket a window with no commit in it, and
-// every read inside that window saw one ruleset (#18721).
+// (NFT_MSG_GETGEN). The kernel bumps it on every committed transaction, so two
+// reads that return the same ID bracket a window that no commit published
+// into (#18721).
+//
+// The bracket NARROWS the race; it does not close it. nf_tables_commit
+// publishes the new generation (linux v7.0 net/netfilter/nf_tables_api.c:11028,
+// smp_store_release of base_seq) BEFORE it switches rule visibility (:11033,
+// gencursor = nft_gencursor_next). A commit preempted between those two lines
+// is already counted in "before", yet its rule switch can land mid-pass, so
+// before == after with mixed views. The kernel's own interrupted-dump check
+// (cb->seq = base_seq, :1269) and nft's cache share this residual. Reaching it
+// needs a root writer outside xpf, preempted in that two-line gap.
 func readNftGeneration(c *nftables.Conn) (uint32, error) {
 	conn, err := dialLikeNftConn(c)
 	if err != nil {
@@ -194,9 +203,10 @@ func decodeNftGeneration(msgs []netlink.Message) (uint32, error) {
 }
 
 // readAtStableNftGeneration runs read between two generation reads and returns
-// read's verdict only if no commit landed in between. Otherwise it retries,
-// up to attempts times. If the ruleset is still moving after that, it fails
-// closed (#18721).
+// read's verdict only if no commit published a new generation in between.
+// Otherwise it retries, up to attempts times. If the ruleset is still moving
+// after that, it fails closed (#18721). See readNftGeneration for the residual
+// window this cannot see.
 //
 // The fence readback reads the ruleset several times: the marker object, the
 // sets, GetRules, and the raw expression-name dump. A writer outside xpf could
