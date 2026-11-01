@@ -219,7 +219,10 @@ Until #18686, Group 7 was handed `RG1_STATUS`. The parser also expected
 `rg1 active=` on its own line, and the selftest fixtures (hand-written in the
 parser's shape) agreed with it. So Group 7 was VOID on every live run, and an
 offline replay confirmed it: VOID on 117 of 117 preserved runs. It is now
-handed `RG1_STATS`, and the same 117 runs judge PASS. The selftest rows are
+handed `RG1_STATS`. The verdict judges all 117 captures PASS. With the RG1
+slice's owner preconditions applied, the harness would score 116 PASS, and
+1 VOID by precondition (in that run node0 owned RG1 at phase-pre, so
+`can_measure` is false). The selftest rows are
 the real captured file
 (`test/fixtures/ha-assurance/rg1-failback-mid-node1-18686.stats`), each row
 changing one line of it, plus the production renderer golden. A pin checks

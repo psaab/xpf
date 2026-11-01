@@ -2142,8 +2142,10 @@ if (( ${#rewind_failures[@]} != 0 )); then
 fi
 printf 'Groups 7-8 RG readiness and exact ten-sample maxima\n'
 # #18686: Group 7's rows are the REAL capture test-failover took on tcp
-# (test-failover-ha-2269141, `show chassis cluster data-plane statistics` on
-# the former owner at phase=mid), each row changing exactly ONE line of it.
+# (run test-failover-ha-2269141, build
+# userspace-forwarding-ok-20260402-bfb00432-24934-gd340b1bf46,
+# `show chassis cluster data-plane statistics` on the former owner at
+# phase=mid), each row changing exactly ONE line of it.
 # The hand-written fixtures these replaced matched the parser rather than the
 # product, which is how the verdict stayed VOID on every live run.
 STANDBY_REAL_STATS="${ROOT}/test/fixtures/ha-assurance/rg1-failback-mid-node1-18686.stats"
@@ -2215,8 +2217,86 @@ standby_row 2 'this looks like a `show chassis cluster status` capture' 'VOID .s
 derive_standby "$STANDBY_ID"
 standby_row 2 'phase' 'VOID identity phase mismatch' "$STANDBY_ID" phase-post
 
+# Group 7 mutation cells (#18686), on the #18676 machinery: each mutant is one
+# lib function's text with one exactly-once edit (lib_fn_mutant), sourced in a
+# subshell over the real lib. The named row's own assertion (status AND
+# reason) must stop holding under it.
+# g7_row_holds_under <name> <lib-fn> <old> <new> <row-rc> <row-reason or ''> <file> [<phase>]
+# Returns 0 when the row's assertion still holds with the edited function.
+# The mutant must parse: a truncated extraction would otherwise "flip" every
+# row for the wrong reason.
+g7_row_holds_under() {
+	local name="$1" fn="$2" old="$3" new="$4" rc="$5" needle="$6" file="$7" phase="${8:-mid}" mutant got
+	mutant="$(lib_fn_mutant "$fn" "g7-$name" "$old" "$new")" ||
+		fail_test "group 7 mutant ${name}: edit matched nothing in ${fn} (anchor moved?)"
+	[[ -s "$mutant" ]] || fail_test "group 7 mutant ${name}: no mutant text"
+	bash -n "$mutant" || fail_test "group 7 mutant ${name}: the edited ${fn} does not parse"
+	# shellcheck source=/dev/null
+	if ( source "$mutant"; ha_rg_standby_status_verdict "$file" manual-rg1-failback "$phase" node1 1 ) \
+		>"${OUT}" 2>"${ERR}"; then got=0; else got=$?; fi
+	[[ "$got" == "$rc" ]] && { [[ -z "$needle" ]] || [[ "$(<"${ERR}")" == *"$needle"* ]]; }
+}
+# assert_g7_mutant_flips <name> <lib-fn> <old> <new> <row-rc> <row-reason or ''> <file> [<phase>]
+assert_g7_mutant_flips() {
+	if g7_row_holds_under "$@"; then
+		fail_test "group 7 mutant ${1} ESCAPED: its row still scored ${5}${6:+ with '${6}'}"
+	fi
+}
+# Control: the same extract-and-source path with a no-op edit leaves the
+# PASS and the identity rows holding, so a flip below is the edit itself.
+derive_standby "$STANDBY_ID"
+g7_row_holds_under control-pass ha_standby_status_verdict 'if ready <= 0:' 'if ready <= 0:' 0 '' "$STANDBY_ID" ||
+	fail_test 'group 7 mutant control: an unedited ha_standby_status_verdict flipped the PASS row'
+g7_row_holds_under control-identity ha_rg_standby_status_verdict 'ha_standby_status_verdict "$1" "$5"' \
+	'ha_standby_status_verdict "$1" "$5"' 2 'phase' "$STANDBY_ID" phase-post ||
+	fail_test 'group 7 mutant control: an unedited ha_rg_standby_status_verdict flipped the identity row'
+# R2: the pre-#18686 own-line parser. The real capture PASS row goes VOID.
+derive_standby "$STANDBY_ID"
+assert_g7_mutant_flips ownline ha_standby_status_verdict \
+	'mine = [entry for entry in entries if re.match(rf"^rg{rg}(?:\s|$)", entry)]' \
+	'mine = [line.strip() for line in lines if re.match(rf"^\s*rg{rg} active=(true|false)\s*$", line)]' \
+	0 '' "$STANDBY_ID"
+# M07: a duplicated HA groups line is read first-wins instead of VOID.
+derive_standby "$STANDBY_ID" "${STANDBY_HA_GROUPS}" "${STANDBY_HA_GROUPS}"$'\n'"${STANDBY_HA_GROUPS}"
+assert_g7_mutant_flips linefirstwins ha_standby_status_verdict \
+	'    if len(matches) != 1:
+        void(key, "missing" if not matches else "ambiguous")' \
+	'    if not matches:
+        void(key, "missing")' \
+	2 'HA groups field ambiguous' "$STANDBY_ID"
+# M08: a duplicated rg1 entry is read first-wins instead of VOID.
+derive_standby "$STANDBY_ID" 'rg1 active=false watchdog=136578' \
+	'rg1 active=false watchdog=136578; rg1 active=true watchdog=136578'
+assert_g7_mutant_flips entryfirstwins ha_standby_status_verdict \
+	'if len(mine) != 1:
+    void(f"rg{rg} active", "missing" if not mine else "ambiguous")' \
+	'if not mine:
+    void(f"rg{rg} active", "missing")' \
+	2 'rg1 active field ambiguous' "$STANDBY_ID"
+# M10: the rg id prefix-matches, so rg10 counts as an rg1 entry.
+derive_standby "$STANDBY_ID" 'rg2 active=true watchdog=136578' \
+	'rg2 active=true watchdog=136578; rg10 active=true watchdog=136578'
+assert_g7_mutant_flips prefix ha_standby_status_verdict \
+	're.match(rf"^rg{rg}(?:\s|$)", entry)' 're.match(rf"^rg{rg}", entry)' \
+	0 '' "$STANDBY_ID"
+# M12: the wrong-capture hint is dropped (still VOID, but the reason no
+# longer says which capture this is).
+assert_g7_mutant_flips nohint ha_standby_status_verdict \
+	'if reason == "missing" and any(re.match(r"^Redundancy group:", line) for line in lines):' 'if False:' \
+	2 'this looks like a `show chassis cluster status` capture' "$STANDBY_REAL_STATUS"
+# M16: the identity check is dropped, so a phase-post capture is judged.
+derive_standby "$STANDBY_ID"
+assert_g7_mutant_flips noidentity ha_rg_standby_status_verdict \
+	'	if ! ha_snapshot_identity_verdict "$1" "$2" "$3" "$4" "$5"; then return 2; fi
+' '' \
+	2 'phase' "$STANDBY_ID" phase-post
+
 printf 'Group 7 call site is handed the data-plane statistics capture (#18686)\n'
-if ! python3 - "${ROOT}/test/incus/test-failover.sh" <<'PY'; then
+# group7_call_site_pin <test-failover.sh>: 0 when Group 7 is wired to the
+# data-plane statistics capture. It is run on the real file, and on a copy
+# with the call reverted to RG1_STATUS, which it must refuse.
+group7_call_site_pin() {
+	python3 - "$1" <<'PY'
 import pathlib
 import re
 import sys
@@ -2233,7 +2313,24 @@ capture = re.search(r"ha_capture_cli \"\$node\" 'show chassis cluster data-plane
 if not binding or not capture:
     raise SystemExit("RG1_STATS is no longer the `show chassis cluster data-plane statistics` capture")
 PY
+}
+group7_call_site_pin "${ROOT}/test/incus/test-failover.sh" ||
 	fail_test 'Group 7 must be handed RG1_STATS[mid:node1], the data-plane statistics capture'
+GROUP7_REVERTED="${TMP_DIR}/test-failover-group7-reverted.sh"
+python3 - "${ROOT}/test/incus/test-failover.sh" "$GROUP7_REVERTED" <<'PY' ||
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+old = 'ha_rg_standby_status_verdict "${RG1_STATS[mid:node1]}"'
+if text.count(old) != 1:
+    raise SystemExit(1)
+pathlib.Path(sys.argv[2]).write_text(
+    text.replace(old, 'ha_rg_standby_status_verdict "${RG1_STATUS[mid:node1]}"'), encoding="utf-8")
+PY
+	fail_test 'group 7 call-site revert: anchor matched nothing in test-failover.sh'
+if group7_call_site_pin "$GROUP7_REVERTED" 2>/dev/null; then
+	fail_test 'group 7 call-site pin ESCAPED: it accepts the pre-#18686 RG1_STATUS call'
 fi
 
 SAMPLE_STATS=()

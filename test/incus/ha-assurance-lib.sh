@@ -1029,13 +1029,14 @@ def one(key, pattern):
         void(key, "missing" if not matches else "ambiguous")
     return matches[0]
 
-values = {
-    "Enabled": one("Enabled", re.compile(r"^\s*Enabled:\s*(true|false)\s*$")).groups(),
-    "Forwarding armed": one("Forwarding armed",
-                            re.compile(r"^\s*Forwarding armed:\s*(true|false)\s*$")).groups(),
-    "Ready bindings": one("Ready bindings",
-                          re.compile(r"^\s*Ready bindings:\s*(\d+)/(\d+)\s*$")).groups(),
-}
+# One assignment per field, not a dict literal: a `}` in column 0 would end
+# this function early for the selftest's lib_fn_mutant extractor.
+values = {}
+values["Enabled"] = one("Enabled", re.compile(r"^\s*Enabled:\s*(true|false)\s*$")).groups()
+values["Forwarding armed"] = one("Forwarding armed",
+                                 re.compile(r"^\s*Forwarding armed:\s*(true|false)\s*$")).groups()
+values["Ready bindings"] = one("Ready bindings",
+                               re.compile(r"^\s*Ready bindings:\s*(\d+)/(\d+)\s*$")).groups()
 groups = one("HA groups", re.compile(r"^\s*HA groups:\s*(.*?)\s*$")).group(1)
 entries = [entry.strip() for entry in groups.split(";")]
 # rg1 must not match rg10: the RG id is a whole token.
