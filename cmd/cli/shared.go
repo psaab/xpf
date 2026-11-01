@@ -183,12 +183,11 @@ func (c *ctl) dispatchOperational(line string) error {
 	// keep their help; value-slot/leaf failures fall through to the
 	// existing strict handlers. `?`/`help` are client verbs absent
 	// from the operational tree and are handled below.
+	// #18664: the gate judges only the words before the first bare
+	// `|`; see validateOperationalLine for the pipe rule.
 	if parts[0] != "?" && parts[0] != "help" {
-		if prefix, bad, ambiguous, badOK := cmdtree.ValidateOperationalLine(parts); badOK {
-			if ambiguous {
-				return fmt.Errorf("ambiguous %s command: %s", strings.Join(prefix, " "), bad)
-			}
-			return fmt.Errorf("unknown %s command: %s", strings.Join(prefix, " "), bad)
+		if err := validateOperationalLine(parts); err != nil {
+			return err
 		}
 	}
 	switch parts[0] {

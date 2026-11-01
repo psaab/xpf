@@ -214,11 +214,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				mgr.SetPolicySnapshotCommitter(d.policyInvalidationSnapshotPublished)
 				mgr.SetPolicySnapshotPublishFailure(d.rejectDeferredSnapshotPublish)
 				mgr.SetPolicySnapshotPrePublisher(d.capturePolicyInvalidationBeforeDeferredPublish)
-				if d.cluster != nil {
-					mgr.SetRGPrimaryProvider(d.cluster.LocalGroupPrimary)
-				} else {
-					mgr.SetRGPrimaryProvider(nil)
-				}
+				d.wireUserspaceRGRouteHooks(mgr)
 			}
 		}
 	}
@@ -667,9 +663,11 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	d.reconcileProxyARP(cfg)
 
 	// 2.7. Re-bind management VRF interfaces after networkd.Apply().
-	// networkctl reconfigure strips VRF master bindings because networkd
-	// considers the daemon-created vrf-mgmt device "unmanaged" and ignores
-	// the VRF= directive. Re-bind here to restore VRF membership. This is the
+	// Before #18597, networkctl reconfigure stripped VRF master bindings
+	// because networkd could not resolve the daemon-created vrf-mgmt device
+	// named by VRF= and so treated the link as having no master. The
+	// .network now renders KeepMaster=yes; this pass binds whatever is not a
+	// member yet and is a no-op for links that stayed bound. This is the
 	// AUTHORITATIVE management-VRF bind (post-networkd): #5700 surfaces its
 	// failure into commit truth (joined into networkdErr — mirroring the #1956
 	// device-map-teardown joins above) instead of swallowing at WARN, so a
@@ -700,15 +698,21 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		if err := d.rebindManagementVRFIfaces(cfg); err != nil {
 			result.Phase.Networkd = errors.Join(result.Phase.Networkd, err)
 		}
-		// Restart heartbeat after VRF rebind — networkd reconfigure moves
-		// the control interface (em0) out of vrf-mgmt temporarily, which
-		// invalidates the heartbeat UDP sockets. Without this restart,
-		// the recovering node stops receiving peer heartbeats and declares
-		// split-brain after the grace period expires.
+		// Restart the heartbeat only if a bind since the last decision moved
+		// the control interface (em0) into or out of a VRF: a move
+		// invalidates the heartbeat UDP sockets bound through it, and without
+		// a restart the node stops receiving peer heartbeats (#1792).
+		//
+		// #18597: this used to restart on EVERY apply, because networkd's
+		// reconfigure detached em0 from vrf-mgmt on every commit and the
+		// rebind above moved it back. networkd now renders KeepMaster=yes, so
+		// an unrelated commit moves nothing and the sockets are left alone.
+		//
+		// #9751: a failed restart is reported, not discarded. It leaves the
+		// heartbeat stopped, and the next apply retries it (the gate always
+		// lets an owed restart through).
 		if d.cluster != nil {
-			// #9751: a failed restart is reported, not discarded. It leaves the
-			// heartbeat stopped, and the next apply retries it.
-			if err := d.restartHeartbeatAfterRebindForCurrentCommsEpoch(); err != nil {
+			if err := d.restartHeartbeatIfControlLinkMoved(cfg, true); err != nil {
 				result.Phase.Networkd = errors.Join(result.Phase.Networkd, err)
 			}
 		}
@@ -1147,8 +1151,17 @@ func (d *Daemon) reconcileAfterRethLinkCycle(cfg *config.Config, needLinkCycleRe
 					continue
 				}
 				if needLinkCycleRecovery {
-					d.directAddVIPs(rg.ID)
-					d.addStableRethLinkLocal(rg.ID)
+					// #18579 review Z1: directAddVIPs now also DELETES
+					// leftovers, so it runs under directVIPMu like every other
+					// direct-VIP actuation, and re-checks ownership under the
+					// lock so a demotion that raced this apply cannot have its
+					// removal undone by a stale IsLocalPrimary read.
+					d.directVIPMu.Lock()
+					if d.shouldOwnDirectVIPs(rg.ID) {
+						d.directAddVIPs(rg.ID)
+						d.addStableRethLinkLocal(rg.ID)
+					}
+					d.directVIPMu.Unlock()
 				}
 				if needLinkCycleRecovery {
 					d.scheduleDirectAnnounce(rg.ID, "link-cycle-recovery")

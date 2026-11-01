@@ -71,6 +71,10 @@ DAEMON_RESTART_WAIT=30                      # max seconds for xpfd to restart
 
 PASS=0
 FAIL=0
+# #18614: a cell that could not be judged (the clock precondition's VOID). It
+# is neither a pass nor a fail, and a run with one exits 2, so a direct run is
+# as honest as the harness-result.sh row.
+VOID=0
 ERRORS=()
 LOG="/tmp/iperf3-ha-crash.log"
 # #9692: how long to let the established streams settle after a takeover, and
@@ -81,6 +85,7 @@ RECOVERY_MIN_GBPS="${RECOVERY_MIN_GBPS:-0.5}"
 info()  { echo "==> $*"; }
 pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
+void()  { echo "  VOID  $*"; VOID=$((VOID + 1)); }
 die()   { echo "FATAL: $*" >&2; exit 2; }
 
 # established_streams_recovered <phase> — #9692. The iperf3 client started
@@ -332,6 +337,11 @@ else
 	die "Cannot reach iperf3 target $IPERF_TARGET from ${CLUSTER_LAN_HOST}"
 fi
 
+# #18614: one clock reading BEFORE the first crash. If chrony is not
+# synchronised here, there is no time source for a crash-rebooted node to
+# converge to, and the clock cell after the crash is VOID (lab/NTP), not FAIL.
+failover_clock_baseline "$FW0" "$FW1"
+
 # ═══════════════════════════════════════════════════════════════════════
 # Phase 1: Hard VM stop (kernel panic / power loss simulation)
 # ═══════════════════════════════════════════════════════════════════════
@@ -397,11 +407,9 @@ if start_instance "$FW0" "phase1"; then
 	restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 	if [[ -n "$restart_time" ]]; then
 		pass "phase1: fw0 xpfd restarted (${restart_time}s)"
-		# #18523 (#11872): the force-stopped VM comes back with its clock behind
-		# in the no-NTP lab, which breaks fabric-auth windows. Resync both nodes
-		# from one host reading, as test-failover and test-double-failover do.
-		failover_resync_node_clocks "$FW0" "$FW1" >/dev/null ||
-			fail "phase1: could not resync both firewall clocks from host UTC"
+		# #18614: the post-crash clock state, logged before the settle, so a
+		# rejoin FAIL below carries it even if chrony converges first.
+		failover_clock_reading "phase1 post-restart" "$FW0" "$FW1"
 	else
 		fail "phase1: fw0 xpfd did not restart within ${VM_RESTART_WAIT}s"
 	fi
@@ -420,6 +428,18 @@ fi
 
 # Check no dual-active
 check_no_dual_active "phase1-rejoin"
+
+# #18614 (was the #18523/#11872 resync, which ran right after the restart):
+# the force-stopped VM comes back on its RTC, and a skew past the fabric-auth
+# window breaks the failback below. Before it, wait for NTP to converge on both
+# nodes and log the skew and the time it took; never set a clock. It runs HERE,
+# after the rejoin checks, so those keep their 10 s settle and see the cluster
+# in its real post-crash clock state; only the failback waits. fail-only:
+# a converged run's cell count is unchanged (a resync still gets a PASS line
+# naming it, and a VOID gets a VOID line that harness-result.sh scores).
+if [[ -n "${restart_time:-}" ]]; then
+	failover_clock_cell fail-only "phase1" "$FW0" "$FW1" "$FW0" || true
+fi
 
 # Restore fw0 as primary for next phase
 restore_fw0_primary "phase1" || true
@@ -613,8 +633,7 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 	restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 	if [[ -n "$restart_time" ]]; then
 		pass "phase3-cycle${cycle}: fw0 restarted (${restart_time}s)"
-		failover_resync_node_clocks "$FW0" "$FW1" >/dev/null ||
-			fail "phase3-cycle${cycle}: could not resync both firewall clocks from host UTC"
+		failover_clock_reading "phase3-cycle${cycle} post-restart" "$FW0" "$FW1"
 	else
 		fail "phase3-cycle${cycle}: fw0 did not restart within ${VM_RESTART_WAIT}s"
 		cycle_failures=$((cycle_failures + 1))
@@ -638,6 +657,10 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 		fail "phase3-cycle${cycle}: fw0 cluster status unclear"
 		cycle_failures=$((cycle_failures + 1))
 	fi
+
+	# #18614: as in phase 1, after the rejoin checks and before the restore.
+	# Every cycle, the last included, so no unmeasured skew is left behind.
+	failover_clock_cell fail-only "phase3-cycle${cycle}" "$FW0" "$FW1" "$FW0" || true
 
 	# Restore fw0 as primary for next cycle (except last)
 	if [[ "$cycle" -lt "$CRASH_CYCLES" ]]; then
@@ -674,12 +697,12 @@ sleep 3
 for inst in "$FW0" "$FW1"; do
 	if ! instance_running "$inst"; then
 		# Try to start it.
-		# #18523 (#11872): a node started here also comes back with its clock
-		# behind; resync both so the skew is not left for the next harness.
+		# #18614: a node started here also comes back on its RTC; check that
+		# NTP converges rather than leaving an unmeasured skew for the next
+		# harness (and never set the clock).
 		if start_instance "$inst" "final" &&
 			wait_for_xpfd "$inst" "$VM_RESTART_WAIT" >/dev/null 2>&1; then
-			failover_resync_node_clocks "$FW0" "$FW1" >/dev/null ||
-				fail "final: could not resync both firewall clocks from host UTC"
+			failover_clock_cell fail-only "final" "$FW0" "$FW1" "$inst" || true
 		fi
 	fi
 	if instance_running "$inst"; then
@@ -728,4 +751,9 @@ if [[ $FAIL -gt 0 ]]; then
 		echo "  - $err"
 	done
 	exit 1
+fi
+if [[ $VOID -gt 0 ]]; then
+	echo
+	echo "  ${VOID} cell(s) VOID: the run is not a pass (see the VOID lines above)"
+	exit 2
 fi

@@ -84,6 +84,8 @@ pub(super) fn worker_loop_setup(
     // #18550: the coordinator's RG activation epochs, for the session table's
     // import-triggered SELF-HEAL re-stamp (`restamp_lapsed_peer_synced`).
     rg_epochs: &Arc<[AtomicU32; MAX_RG_EPOCHS]>,
+    // #18640: this worker's (rank, width) in the bring-up's worker set.
+    session_limit_shard: (u32, u32),
 ) -> WorkerLoopSetup {
     pin_current_thread(worker_id);
     // #1620: per-worker cold-path TSC calibration. Runs ONCE at
@@ -170,6 +172,10 @@ pub(super) fn worker_loop_setup(
     // screen profile configures a destination session limit. Source-IP counts
     // remain always maintained for the default per-source quota.
     sessions.set_session_limit_active(screen_state.any_session_limit_dst_configured());
+    // #18640: HA session sync installs every peer session on every worker of
+    // this bring-up set; only the worker this slot designates charges a copy
+    // toward the per-source quota, so the node charges each session once.
+    sessions.set_session_limit_shard(session_limit_shard.0, session_limit_shard.1);
     let mut bindings = Vec::with_capacity(binding_plans.len());
     // #6245: accumulate EXPLICIT per-slot terminal failures and recovered
     // shared-group fallbacks so the WorkerStartupReport can carry the causal
@@ -340,6 +346,9 @@ mod worker_setup_harness {
         /// node-level fallback (RG 0), read back from the REAL setup.
         pub(super) rg_epoch_rg1: Option<u32>,
         pub(super) rg_epoch_rg0: Option<u32>,
+        /// #18640: the session table's per-source quota shard, read back from
+        /// the REAL setup.
+        pub(super) session_limit_shard: (u32, u32),
     }
 
     /// Drive the REAL `worker_loop_setup`.
@@ -358,6 +367,14 @@ mod worker_setup_harness {
     /// Spawning also matches production, where setup always runs on a freshly
     /// spawned worker.
     pub(super) fn drive_worker_setup(binding_plans: Vec<BindingPlan>) -> SetupObservation {
+        drive_worker_setup_with_shard(binding_plans, (0, 1))
+    }
+
+    /// `drive_worker_setup` with an explicit #18640 quota shard.
+    pub(super) fn drive_worker_setup_with_shard(
+        binding_plans: Vec<BindingPlan>,
+        session_limit_shard: (u32, u32),
+    ) -> SetupObservation {
         // DO NOT "simplify" this to an inline call. `worker_loop_setup` opens
         // with `pin_current_thread(worker_id)`, so calling it on the cargo test
         // thread PINS that thread — and the pin outlives this cell and follows
@@ -400,6 +417,7 @@ mod worker_setup_harness {
                 &runtime_atomics,
                 &cold_path_atomics,
                 &rg_epochs,
+                session_limit_shard,
             );
             let returned_at_ns = crate::afxdp::monotonic_nanos();
             SetupObservation {
@@ -409,6 +427,7 @@ mod worker_setup_harness {
                 returned_at_ns,
                 rg_epoch_rg1: setup.sessions.current_rg_epoch(1),
                 rg_epoch_rg0: setup.sessions.current_rg_epoch(0),
+                session_limit_shard: setup.sessions.session_limit_shard(),
             }
         })
         .join()
@@ -449,6 +468,15 @@ mod worker_setup_harness {
     ///
     /// If this ever goes empty, the harness stopped reaching the bind and every
     /// future cell built on it is vacuous.
+    /// #18640: the worker's session table takes the (rank, width) its launch
+    /// plan carries, so a fanned-out HA copy charges the per-source quota on
+    /// one worker of the node only. Fails if setup stops applying it.
+    #[test]
+    fn worker_setup_applies_the_session_limit_shard_18640() {
+        let setup = drive_worker_setup_with_shard(vec![unbindable_plan()], (2, 6));
+        assert_eq!(setup.session_limit_shard, (2, 6));
+    }
+
     #[test]
     fn the_harness_reaches_the_real_bind_path() {
         let setup = drive_worker_setup(vec![unbindable_plan()]);

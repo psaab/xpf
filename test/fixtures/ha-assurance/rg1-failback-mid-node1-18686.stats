@@ -1,0 +1,205 @@
+HA capture identity: slice=manual-rg1-failback phase=mid node=node1 rg=1
+Services Synchronized:
+    Service name                     Sent         Received
+    Session create                   2502         12274
+      of which mirror sweep          439          
+    Session close                    0            78
+    Config                           3            3
+    IPsec SA                         0            0
+    DHCP leases                      0            0
+    Bulk syncs (sent)                6            
+    Sessions installed                            11209
+    Errors                           0            
+    Imports refused by helper: 1064
+    Config apply-acks sent: 3
+    Config apply-acks credited: 2
+    Install fence seq                7            
+
+Userspace dataplane helper:
+  PID:                       185627
+  Helper mode:               rust-afxdp-bootstrap
+  Linked libelf version:     0.196
+  Linked zlib version:       1.3.2
+  Linked zstd version:       1.5.7
+  io_uring active:           true
+  io_uring mode:             io_uring
+  Enabled:                   true
+  Forwarding armed:          true
+  Forwarding supported:      true
+  Workers:                   10
+  Ring entries:              16384
+  Last snapshot generation:  67
+  Last FIB generation:       14
+  Last snapshot policies:    1
+  Last snapshot age:         2.8s
+  Interface addresses:       27
+  Neighbor entries:          4
+  Session table entries:     7195/1310720
+  Flow cache capacity:       122880
+  Neighbor generation:       1576
+  Route entries:             9
+  Local HA forwarding role:  active
+  HA groups:                 rg0 active=true watchdog=136578; rg1 active=false watchdog=136578; rg2 active=true watchdog=136578
+  Fabric links:              fab1 parent=ge-7-0-0 peer=10.99.15.1
+  Degraded path counters:    ctrl_disabled=20 early_filter=6671 interface_nat_no_session=28 pass_to_kernel=6681 transit_drop=10
+  Last resolution:           ha_inactive egress-ifindex=3 next-hop=fe80::1266:6aff:fedb:fa16
+  Bound bindings:            30/30
+  XSK-registered bindings:   30/30
+  Zerocopy bindings:         20/30
+  Hugepage-backed bindings:  0/30
+  UMEM fallback bytes:       5033164800
+  Shared UMEM bindings:      20/30
+  Armed queues:              10/10
+  Ready queues:              10/10
+  Armed bindings:            30/30
+  Ready bindings:            30/30
+  RX packets:                388311311
+  Validated packets:         388309801
+  Forward candidates:        388308893
+  Flowless forwards:         0 pkts / 0 bytes
+  Route misses:              0
+  UMEM slice drops:          0
+  Unknown VLAN drops:        0
+  Destination MAC drops:     0
+  Martian drops:             44
+  DNS illegal-reply drops:   0
+  IPv6 ext-header drops:     0
+  V4-mapped IPv6 drops:    0
+  Transit output-filter drops: 0
+  Transit source-martian drops: 0
+  Transit IPsec-fence drops:  0
+  Transit L2-group drops:     0
+  Forward build failures:     0
+  No-egress-binding drops:    0
+  Invalid fabric-stamp drops: 0
+  Unstamped fabric-ingress drops: 0
+  Ambiguous fabric-zone drops: 0
+  Ambiguous fabric zones:     0
+  Neighbor misses:           0
+  Exception packets:         1928
+  Flow cache hits:           388267126
+  Flow cache misses:         760
+  Flow cache evictions:      88
+  Flow cache evictions by arm: gen=45 rg_epoch=5 lease=0 deny_expiry=0 scheduler=0 phase_flush=0 collision=0 neighbor_mac=9 decision_invalid=0 deny_superseded=0 session_dead=0 enforce_changed=0 owner_active_redirect=0 fabric_local_wins=0 fabric_ingress_local_wins=0 fabric_redirect_on_fabric=0 fabric_local_same_owner=0 fabric_ingress_discard_now_local=0 forward_candidate_egress_departed=29 destination_now_local=0 session_dead_no_record=0 session_dead_idle_crossed=0
+  Session hits:              825
+  Session misses:            278
+  Session creates:           216
+  Session expires:           178
+  Session delta pending:     0
+  Session delta generated:   0
+  Session delta dropped:     0
+  Session delta drained:     0
+  Event stream frames:       read=9000 written=810 decode_errors=0 seq_gaps=0
+  Event stream producer:     sent=8893 dropped=0 write_stalls=0 replay_evictions=0 invalid_acks=0
+  Event stream rt_flow:      session_close[sent=179 dropped=0] session_create[sent=205 dropped=0]
+  Event stream events:       policy_deny=58 screen_drop=0 screen_alarm=0 filter_log=0 session_close=179 session_create=205 unknown_drops=0
+  Event stream drops:        policy_deny=0 screen_drop=0 filter_log=0 session_close=0 session_create=0
+  Policy denied packets:     0
+  Screen drops:              0
+  SNAT packets:              373053241
+  DNAT packets:              15255597
+  NAT64 translations:        0
+  NAT64 no-source-pool drops:0
+  NAT64 pool-exhausted drops:0
+  NAT64 fragment drops:      0
+  NAT64 ineligible-source drops:0
+  NAT64 ineligible-destination drops:0
+  NAT64 ext-header ineligible drops:0
+  NAT64 tunnel encap unsupported drops:0
+  NAT64 ineligible-protocol drops:0
+  NAT frag untranslated drops:0
+  NAT flowless untranslated drops:0
+  NAT flow-backed NoRoute untranslated drops:0
+  Fragment overlap drops:    0
+  Fragment overlap overflow drops:0
+  Fragment overlap shard-full drops:0
+  Fragment overlap post-NAT drops:0
+  Fragment overlap max-lifetime evictions:0
+Source NAT pools:
+  Pool                 Rule                 Persist Permit           LiveFlows   MaxFlows    UsedPorts  Leases     Alloc      Reuse      Exhaust   
+  pool-snat-pool       pool-snat            false  -                3           1000        3          0          0          1514       0         
+  TX packets:                388304750
+  TX bytes:                  566884333968
+  TX errors:                 0
+  TX errors non-admission:   0
+  CoS queue drops lifetime:  4058
+  CoS admission drops:       4058
+  CoS flow-share drops:      241
+  CoS buffer drops:          3817
+  CoS ECN marked:            0
+  TX shared recycle unk:     0
+  TX completions:            388302837
+  Mirrored packets:          0
+  Mirrored bytes:            0
+  Mirror drops:              no-frame=0 tx-frame-reserve=0 no-binding=0 queue-full=0 same-worker=0 cross-worker=0
+  Kernel RX dropped:         0
+  Kernel RX invalid descs:   0
+  Kernel RX ring full:       0
+  Direct TX packets:         104138867
+  Copy-path TX packets:      0
+  In-place TX packets:       284120438
+  In-place VLAN push desc:   272408852
+  In-place VLAN pop desc:    11711586
+  In-place VLAN no-headroom: 0
+  In-place L2 memmove fb:    0
+  Direct TX no-frame fb:     0
+  Direct TX build-none fb:   0
+  Direct TX disallowed fb:   0
+  Pending fill frames:       0
+  Spare fill frames:         0
+  Free TX frames:            0
+  Pending TX prepared:       0
+  Pending TX local:          0
+  Outstanding TX:            2382
+  In-flight recycles:        0
+  Slow path local-delivery:  387
+  Slow path missing-neigh:   0
+  Slow path no-route:        0
+  Slow path next-table:      0
+  Slow path forward-build:   0
+  Slow path active:          true
+  Slow path live MTU:        9000
+  Slow path device:          xpf-usp0
+  Slow path mode:            io_uring
+  Slow path queued:          0
+  Slow path injected:        387 pkts / 11865 bytes
+  Slow path dropped:         0 pkts / 0 bytes
+  Slow path rate-limited:    0
+  Slow path queue-full:      0
+  Slow path MTU-exceeded:    0
+  Slow path write errors:    0
+  Slow path per-binding:     387 pkts / 0 drops
+  Slow path delegated active: true
+  Slow path delegated live MTU: 9000
+  Slow path delegated device: xpf-usp1
+  Slow path delegated mode: io_uring
+  Slow path delegated queued: 0
+  Slow path delegated injected: 0 pkts / 0 bytes
+  Slow path delegated dropped: 0 pkts / 0 bytes
+  Slow path delegated rate-limited: 0
+  Slow path delegated queue-full: 0
+  Slow path delegated MTU-exceeded: 0
+  Slow path delegated write errors: 0
+  Recent exceptions:         32
+  Worker 0 heartbeat age:    405ms
+  Worker 1 heartbeat age:    405ms
+  Worker 2 heartbeat age:    406ms
+  Worker 3 heartbeat age:    406ms
+  Worker 4 heartbeat age:    405ms
+  Worker 5 heartbeat age:    405ms
+  Worker 6 heartbeat age:    406ms
+  Worker 7 heartbeat age:    405ms
+  Worker 8 heartbeat age:    406ms
+  Worker 9 heartbeat age:    406ms
+Worker runtime (cumulative since worker start; last column is rolling ~60s CPU window):
+  Worker TID      Active%  SpinIdle%  BlockIdle%  CPU%     CPU%60s  WorkLoops    IdleLoops   
+  0      185653   8.0      0.2      91.8       9.9      67.3     66828210     10599062    
+  1      185654   5.0      2.0      93.0       8.8      59.4     49219911     63963307    
+  2      185655   0.9      1.9      97.2       4.8      2.0      9990736      57048763    
+  3      185656   0.8      1.7      97.5       4.4      59.5     11107691     54426830    
+  4      185657   3.9      3.1      93.0       8.8      67.6     33407082     99220055    
+  5      185658   7.5      0.6      91.9       9.9      67.0     64437590     21631919    
+  6      185659   4.5      0.6      94.9       6.9      1.9      40129831     21687594    
+  7      185660   7.1      0.7      92.2       9.5      67.9     54625505     25107755    
+  8      185661   8.0      0.3      91.7       10.0     65.6     54385782     11367553    
+  9      185662   6.5      1.7      91.8       10.0     66.2     46551628     53470597    

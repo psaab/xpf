@@ -73,6 +73,11 @@ are covered by the last bullet):
   claims plus normalized plain-reply aliases, sharded by seeded key hash
   so packet probes take at most one shard read lock (and none at all
   when `active_claim_count` is 0).
+- `punt_seed_directory.rs` — #18562: the node-wide, READ-ONLY view of
+  this node's live #7770 `FabricPuntSeed` rows, consulted only by the
+  embedded-ICMP matcher's last-resort fallback for a FABRIC-ingress
+  forward quote. Written only by `SessionTable` itself; see "Punt-seed
+  directory (#18562)" below.
 - `pptp.rs` — RFC 2637 PPTP call associations (#7699 stage 1):
   `PptpCall`, the canonically-ordered learned `(call-id A, call-id B)`
   pair from which both directions derive the same
@@ -1601,6 +1606,135 @@ deliberate semantics tightening, not a regression: the two counters are
 now consistently local-only, so their difference (the "Current sessions"
 gauge) is a coherent local-forwarding metric on every node.
 
+## Punt-seed directory (#18562)
+
+A #7770 punt seed is worker-local: it is never published to the shared
+maps, never HA-exported and emits no deltas. During an RG split the first
+ICMP error for a NEW punted flow comes back over the fabric and RSS lands it
+on any worker, usually not the seed's; before the WAN owner's HA import
+arrives, that worker's matcher found nothing and the error was default-denied
+`wan -> lan`. Every worker's table therefore mirrors its forward
+`FabricPuntSeed` rows into the node's ONE `PuntSeedDirectory`
+(`SharedSessionOwnerRgIndexes::punt_seeds`, wired in `worker_loop`), and the
+matcher reads it.
+
+The row is a snapshot, so its contract is lifecycle, held at the table's own
+choke points rather than at call sites:
+
+| event | site | effect |
+|---|---|---|
+| a forward `FabricPuntSeed` record enters the slab | `insert_record` | publish `(key -> decision, metadata, session_id, table token, deadline)` |
+| any removal (expire / delete / replace / take_synced_local) | `remove_entry` (the sole removal sink) | retire iff the row is still this table's incarnation |
+| an in-place rewrite of the seed's decision or metadata | `refresh_in_place`, `revalidate_forwarding_resolution_with_egress_zone`, `rebind_forward_egress_zone`, `rebind_policy_pair`, `rebind_zones_pair` (via `retire_punt_seed_row_before_rewrite`) | retire (fail closed; never re-published) |
+| the table is moved to another directory or dropped | `set_punt_seed_directory` / `Drop` | retire every row of this table |
+
+(`update_reverse_route_on_filter_hit` writes reverse entries only; a row is
+never a reverse entry.) A row stops matching at the EARLIER of the seed's idle
+deadline as installed and `PUNT_SEED_ROW_TTL_NS` (2 s) after install: it only
+bridges the gap until the WAN owner's HA import lands in the shared maps, and a
+seed kept alive by traffic outlives its row, never the reverse.
+
+Cost (#18562 review): publish runs on a worker's punted new-flow path, so the
+work under a shard lock is bounded PER CALL. The directory is 32 shards by
+seeded key hash. Expiry is a per-shard FIFO of `(deadline, key, incarnation)`.
+One call pops at most `MAINTAIN_BUDGET` (32) slots, expired or stale; a retire
+removes the row and leaves its slot to be dropped when it reaches the front.
+A queue at `QUEUE_CAP` (2x the shard cap) refuses further publishes instead of
+being compacted in one pass. A full shard refuses with no scan, and publish
+takes its shard with `try_lock`, so a worker never waits on the directory
+(`retire` and `probe` do wait, behind at most one bounded call).
+A shard reserves its table on its first publish for TWICE its 1024-row live
+cap, and never admits more live rows than half that table's item capacity
+(derived from `capacity()` at reservation). Above half, churn that leaves
+tombstones makes hashbrown RESIZE the table under the lock (review seat L r3:
+339-383 us once per shard); at or below half it can only rehash in place, and
+at ~29% load it practically never does (bench: 0 rehashes in 100k churn
+publishes; the 1024-reserve / 896-live alternative kept a recurring ~50 us
+in-place rehash and ~28.7k rows). So 32768 live rows node-wide, which with
+the 2 s bridge TTL sustains ~16k new punted flows/s before a shard refuses.
+Memory: ~1.43 MiB of address space per used shard (4096 hashbrown buckets of
+a 52 B key + 256 B `PuntSeedRow`, plus a 2048-slot queue), ~46 MiB if all 32
+are used, close to
+fully resident once a shard holds a few hundred randomly placed rows, and kept
+for the life of the helper process. A bounded residual: slots are reclaimed
+only from the queue front, so more than 2048 publishes into ONE shard within a
+TTL with nearly all retired behind a long-lived live front (~32k/s node-wide)
+fill that shard's queue and further publishes there are refused until the
+front expires (at most 2 s). A refused
+or skipped publish only means that seed's cross-worker errors keep the
+pre-#18562 verdict; both are counted and exposed in helper status
+(`punt_seed_directory_full_total`, `punt_seed_directory_contended_total`, beside
+the `punt_seed_directory_rows` gauge, which includes expired rows not yet
+reclaimed). Nothing materializes, promotes, exports, sweeps or replicates from the
+directory, and no data packet reads it. Cells:
+`punt_seed_directory_18562_tests.rs` (lifecycle per writer, fence, deadline,
+and the work-counted O(1) bounds) and
+`worker_loop_wires_its_table_to_the_node_punt_seed_directory_18562` (the real
+worker construction).
+
+## A punt seed is not authority (#18620)
+
+A #7770 `FabricPuntSeed` records a flow whose egress RG the PEER owned when
+its first packet arrived. It is NAT-free and fabric-redirects, and the peer
+adjudicated and translated the flow. Two rules follow, and both are keyed on
+the seed's own origin:
+
+- **Retired once this node forwards its egress.**
+  `retire_fabric_punt_seed_if_owner_active` (afxdp/session_glue/resolve.rs)
+  runs when a slow-path lookup hits this worker's forward seed. That is gated
+  on the origin the lookup already returns, so no other packet pays anything.
+  - The seed is retired when a fresh FIB resolution of the flow names a real
+    local egress (ForwardCandidate, or MissingNeighbor while its neighbor
+    resolves) whose RG is forwarding-active here. The seed's stamp is not
+    consulted: the already-redirected arm stamps none, and a stamp says where
+    the flow went, not where it goes now. A FIB that still withholds the egress
+    (cluster-terminal) or cannot route the flow (#10507's NoRoute retention)
+    keeps the seed.
+  - It removes the steering row and the conntrack mirror as for any removed
+    session. Removal goes through `delete`, the Terminal sink, which also
+    retires the #18562 directory row and emits no delta.
+  - The row removed is the hit's CANONICAL key. A seed that an HA-transition
+    refresh gave a translation can be hit through its forward-wire alias, and
+    deleting the packet's (alias) key there would leave the seed and drop
+    another tuple's steering row.
+  - The caller then looks again. The packet resolves against the node's synced
+    session, if the shared maps hold one, or takes the ordinary miss path,
+    which adjudicates policy and NAT afresh as the owner.
+  - The seed's recorded permit goes with it. #10507 Cell 7a now proves its
+    property through that miss path: the post-activation ACK is a SYN-first
+    drop, and the next SYN is denied by live policy.
+  - Why: a seed that survives to that point shadows the flow. Every forward
+    packet hits it first and leaves NAT-free toward a peer that no longer
+    forwards the RG, and that traffic keeps the seed from ever idling out. On
+    loss this was the persistent half of #18620, with ping and iperf outages
+    of 18-515 s until the RG moved away again.
+- **It yields to the peer.** `SessionOrigin::yields_to_peer` is
+  `is_peer_synced() || FabricPuntSeed`. A peer import or a peer delete of the
+  key replaces the seed even where the egress RG is locally active: the
+  worker install guard in `upsert_synced_with_origin`, and the #9048/#9714
+  delete guard in `handle_delete_synced`.
+  - Authored rows (ForwardFlow, LocalMiss, SharedPromote, ...) and the
+    owner-minted `MissingNeighborSeed` keep `peer_delete_refused_local_owned`.
+    On the owner they ARE the authority.
+  - The coordinator-side guards read shared-map rows. A seed is never in the
+    shared maps, so they are unchanged.
+
+A seed whose egress RG is still the peer's (the split it was minted for) is
+untouched by both rules. Cells: `afxdp/tests_punt_seed_shadow_18620.rs`.
+
+Residual (review of #18638): retirement is LAZY. It happens at the flow's next
+forward hit, not at the RG activation.
+- In between, an embedded ICMP error quoting the punted flow can still match
+  the seed: through the worker's table, or, for a fabric-ingress error,
+  through its #18562 directory row, which expires at most
+  `PUNT_SEED_ROW_TTL_NS` (2 s) after the seed was minted.
+- Such an error is delivered toward the LAN host as it would have been
+  mid-split. No data packet is admitted this way. The error belongs to a flow
+  this node ingressed and its own policy permitted.
+- Reply-direction data packets are not covered by this residual: the #10507
+  fence still revokes them on activation (seat V probe:
+  `session_hit=1 revoked=1 tx=0`).
+
 ## Corruption contract (#1855)
 
 A `key_to_handle` mapping that points at a vacant or reused slab slot is
@@ -2715,7 +2849,7 @@ live-session-create publish site, and `cli_show_flow.go` renders `val.SessionID`
 fallback ONLY when `val.SessionID == 0` (an absent/legacy id). Additive and
 node-local-safe.
 
-## Per-zone, per-IP session-limit lifecycle (#2134; #3122 peer-synced fix; #2128 leak-fix; #10985 zone isolation; #11057 default quota)
+## Per-zone, per-IP session-limit lifecycle (#2134; #3122 peer-synced fix; #2128 leak-fix; #10985 zone isolation; #11057 default quota; #18640 one charge per node)
 
 Junos `set security screen ids-option <name> limit-session
 source-ip-based <n>` overrides the default per-source quota when `<n>` is
@@ -2739,6 +2873,46 @@ by `demote_owner_rg`, after which it is a true HA peer origin and must count.
 True HA peer origins (`SyncImport` / `SharedMaterialize`) remain counted so a
 standby cannot bypass the cap after failover — the #3122 limit-bypass fix is
 preserved.
+
+**One charge per node for fanned-out HA copies (#18640).** HA session sync
+installs every peer session on EVERY worker as a `SyncImport` copy (the
+`UpsertSynced` fan-out in `afxdp/ha/session_import.rs`), and `demote_owner_rg`
+re-tags every worker's replica the same way. Charging each copy made a
+standby's per-worker count the source's whole session total, N times the
+logical sessions: a source the primary held under its per-worker cap (up to
+`4096 × N`) was over the cap on every worker after failover, and every new flow
+from it was dropped until the copies expired. A fanned-out copy
+(`SyncImport`, and `SyncLiveness`, stored as `SyncImport`) now counts only on
+the ONE worker that a process-keyed hash of its forward key, modulo the
+fan-out width, designates (`session_limit_charges_fanout_copy`). Each worker
+learns its (rank, width) in the bring-up's worker set at launch
+(`WorkerLaunchPlan::session_limit_shard` →
+`SessionTable::set_session_limit_shard`, which rebuilds the counts from the
+slab). The node therefore charges each peer session once, spread across
+workers the way RSS spreads local sessions; #3122 still holds because the
+copies still count. A lone table (width 1, standalone tests) charges every
+copy, as before.
+
+Residual: the designation spreads a source's synced charges evenly across the
+workers, while the primary charged each local session on the worker RSS
+delivered it to. If RSS concentrated a source on one worker (L3-only UDP
+hashing, for example), the primary capped it near one worker's limit. After
+failover the standby's worker for that source holds only its share of the
+charges, so it can admit more new flows than the primary would have. That is
+still bounded by the `limit × N` node-wide figure that per-worker enforcement
+allows for an evenly spread source.
+
+Residual: the width is the bring-up set's size. Copies designated to a planned
+worker whose table never comes up are charged nowhere, an undercount, which errs
+toward admitting. Test builds count source decrements that find no count
+(`session_limit_dec_underflows`); the #18640 cells assert it stays 0, because
+the saturating decrement would otherwise hide a double decrement. `SharedMaterialize` / `SharedPromote` rows are the serving
+worker's own copy and count there.
+
+**The predicate is one function.** `SessionTable::session_limit_counted(key,
+origin, is_reverse)` is the only counted-class test. Every increment, the sole
+decrement in `remove_entry`, and every transition below evaluate it, so an
+increment and its decrement always agree on a row.
 
 **Count vs. HA Open delta are now SEPARATE conditions (#3122 / #12179).**
 The fresh-install path increments the count for any counted-class session,
@@ -2765,7 +2939,8 @@ in-place ingress-zone change moves a counted session between zone/IP pairs.
 | worker-local replica (#10310) | `upsert_synced_with_origin` (after the insert) | **none** until a promote or demote transition |
 | any removal (expire / clear / RST / fabric-cancel / take_synced_local) | `remove_entry` success path (the sole removal sink) | decrement when counted |
 | in-place HA promote synced→local | `update_session` promote branch (`mod.rs`) | transition-only (WLI→local increments; counted import→local none) |
-| in-place HA demote local→synced | `demote_owner_rg` | transition-only (WLI→SyncImport increments; counted local→SyncImport none) |
+| in-place HA demote local→synced | `demote_owner_rg` | transition-only, by the keyed predicate: a row that becomes a charged `SyncImport` copy increments, a counted local row that becomes an uncharged copy decrements (#18640) |
+| worker launch | `set_session_limit_shard` | rebuild the counts from the slab under the new (rank, width) |
 
 Removals are structurally exhaustive through `remove_entry`, so a future
 delete site cannot forget the decrement; `remove_entry`'s decrement uses the
@@ -2819,7 +2994,9 @@ independently per worker and ingress zone. The unconfigured default is
 `source-ip-based <n>` replaces 4096 with `<n>` on each worker. With RSS
 spreading flows across N workers, the effective admitted cap is approximately
 `per_worker_limit × N`. A `WorkerLocalImport` replica of one logical flow
-does not add another slot on every sibling.
+does not add another slot on every sibling, and neither does a fanned-out HA
+`SyncImport` copy (#18640), so the same bound holds on a standby after
+failover.
 
 For example, on a 6-worker loss-userspace cluster, the default allows at most
 approximately 24,576 sessions from one source IP in one ingress zone if RSS

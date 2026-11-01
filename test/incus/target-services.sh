@@ -31,24 +31,33 @@
 # the other — which #8467's void check has been waiting for.
 #
 # #16213 UPDATE — THE FIRST TARGET IS THE SAME HOST. On the standing loss
-# cluster, 172.16.80.200 (what IPERF_TARGET4 and $TARGET_V4 point at) is
-# NOT external hardware: it is a second address on xpf-mouse-target
-# itself. It arrived by hand (`ip addr add`, undocumented), so any
-# recreate or reboot silently dropped it (observed UP->gone) while every
-# harness kept measuring `.200`. TARGET_ALIAS_V4 names it (cluster-env.sh
-# derives it from IPERF_TARGET4; loss .200, tcp .210, udp .211) and
+# cluster, the v4 iperf target (what IPERF_TARGET4 and $TARGET_V4 point
+# at) is NOT external hardware: it is a second address on
+# xpf-mouse-target itself. It was 172.16.80.200 until #18576, which found
+# that the external v6 box (f6:f0:06:10:77:d5, the ::200 holder) ALSO
+# answers ARP for v4 .200, so the loss firewall's neighbor entry decided
+# which of two servers a v4 measurement reached. loss now targets
+# 172.16.80.202, which only the container holds. test-connectivity's
+# iperf-target cell probes it from the container and must PASS (exactly
+# one holder). The .200 alias arrived by hand (`ip addr add`,
+# undocumented), so any recreate or reboot silently dropped it (observed
+# UP->gone) while every harness kept measuring `.200`. TARGET_ALIAS_V4
+# names it (cluster-env.sh derives it from IPERF_TARGET4; loss .202, tcp
+# .210, udp .211) and
 # mouse-target-setup.sh pins it declaratively in mouse-addr.service
 # beside the mouse address — on the tcp/udp wire targets the alias IS
 # the pinned address, so nothing extra is emitted there. The v6 ::200
 # address IS external: it DAD-failed as a duplicate when tried on the
-# container, so dual-stack smokes reach v4 on this host and v6 on that
-# hardware — two different hosts. That split is a fact to design around
+# container, so dual-stack smokes reach v6 on that hardware and v4 on this
+# host. Two different hosts. That
+# split is a fact to design around
 # (a v6 failure is not a v4 failure), not a premise to keep stating
 # wrongly for both families.
 #
 # WHY `up` CAN FAIL WITH A DESCRIPTION RATHER THAN A FIX. The target is
 # addressed by IP. When the IP is held by an incus instance (the loss
-# case today: xpf-mouse-target holds both .200 and .201), `up` delegates
+# case today: xpf-mouse-target holds both .202 and .201, #18576), `up`
+# delegates
 # to mouse-target-setup.sh, which pins every service under systemd
 # (mouse-iperf3@<port>, mouse-echo) so a listener survives reboot and a
 # failed unit is VISIBLE in `systemctl` instead of serving by accident
@@ -65,13 +74,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 [[ -f "${SCRIPT_DIR}/cluster-env.sh" ]] && source "${SCRIPT_DIR}/cluster-env.sh" 2>/dev/null || true
 
-TARGET_V4="${TARGET_V4:-${IPERF_TARGET4:-172.16.80.200}}"
+TARGET_V4="${TARGET_V4:-${IPERF_TARGET4:-172.16.80.202}}"
 # #16213: the primary target's address as a declarative alias of the
-# mouse host. cluster-env.sh derives it from IPERF_TARGET4 (loss .200);
+# mouse host. cluster-env.sh derives it from IPERF_TARGET4 (loss .202
+# since #18576);
 # the literal keeps a bare invocation consistent with TARGET_V4 above.
 # When TARGET_V4 == TARGET_ALIAS_V4, the alias's owner is the instance
 # holding MOUSE_TARGET_V4 (the mouse host), and `up`/`status` say so.
-TARGET_ALIAS_V4="${TARGET_ALIAS_V4:-172.16.80.200}"
+TARGET_ALIAS_V4="${TARGET_ALIAS_V4-172.16.80.202}"
 MOUSE_TARGET_V4="${MOUSE_TARGET_V4:-172.16.80.201}"
 # The probe runs from the container the harnesses actually SEND from, not
 # from the workstation and not from a firewall node.
@@ -157,8 +167,8 @@ target_instance() {
 
 # alias_owner echoes the incus instance name holding MOUSE_TARGET_V4 when
 # TARGET_V4 is the declarative alias (TARGET_ALIAS_V4, #16213), or
-# nothing. On loss the primary .200 is a second address on the mouse
-# host (.201): when `incus list` does not surface .200 (an alias is not
+# nothing. On loss the primary .202 (.200 before #18576) is a second
+# address on the mouse host (.201): when `incus list` does not surface it (an alias is not
 # always listed), the owner is still that host, and naming it is what
 # lets `up` delegate instead of declaring the target unmanageable.
 alias_owner() {

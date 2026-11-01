@@ -530,8 +530,11 @@ access, or use console.
   `XPF_NO_POSTINST_CUT=1 apt-get upgrade` to stage only and run `xpfd upgrade`
   at a chosen time.
 - **HA node** (`/etc/xpf/node-id` present): stage only — `apt upgrade` does NOT
-  cut. Cut with `xpfd upgrade --rolling` so the cluster keeps forwarding. Do
-  not `apt upgrade` both nodes expecting auto-rolling.
+  cut. Cut each node, secondary first, with the STAGED binary,
+  `/usr/local/share/xpf/staged/xpfd upgrade --rolling`, so the cluster keeps
+  forwarding. Before its cut, `/usr/local/sbin/xpfd` is still the old release
+  and would run the old orchestrator and its defaults (#18415). Do not
+  `apt upgrade` both nodes expecting auto-rolling.
 
 This is #1917's existing, reviewed mechanism — #1924 does not change it.
 

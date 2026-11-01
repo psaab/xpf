@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -712,13 +713,6 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 	tr := mergeSyncHoldTransition(s.SetCluster(isPrimary), mirror)
 	clusterOwnershipEdge := ev.OldState != ev.NewState &&
 		(ev.OldState == cluster.StatePrimary || ev.NewState == cluster.StatePrimary)
-	if clusterOwnershipEdge && !isPrimary {
-		d.scheduleFRRHAReconcile("cluster-state")
-		d.scheduleConnectedRGRepublish("cluster-state")
-		// #16690: the event already consumed the rg-state edge, so the
-		// reconcile safety net will see Changed=false and skip gating.
-		d.scheduleIPMonGating("cluster-state")
-	}
 	if isPrimary {
 		// #16270 (option a): republish the connected RG prefixes
 		// SYNCHRONOUSLY, before SetRGActive reports the RG
@@ -861,6 +855,35 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 			} else {
 				recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
 			}
+		}
+		// #18620: the demotion twin of #16270. The schedules that WITHDRAW this
+		// RG's routes run only after the rg_active=false write above has been
+		// attempted. That write's UpdateRGActive acknowledges the helper under
+		// m.mu, so it is the point after which the helper no longer forwards
+		// the RG. Before #18620 these three were scheduled at the top of the
+		// handler, ahead of SetRGActive. The connected-RG republish then raced
+		// UpdateRGActive for m.mu, and on loss it won on about one demotion in
+		// ten: the helper applied a FIB without the RG's connected rows while
+		// it still forwarded the RG.
+		//
+		// The connected-row verdict is now also held at the manager
+		// (routeRGPrimaryLocked keeps an RG the helper last acknowledged as
+		// active). This ordering is what makes a withdrawal publish happen at
+		// all once the ack has landed, instead of being duplicate-skipped
+		// against a racing build that kept the rows.
+		//
+		// These stay asynchronous; the demotion is not blocked on applySem.
+		// The FRR and ip-monitoring reconciles are debounced 250 ms, but a
+		// SetRGActive delayed past that (m.mu held by a long apply) used to
+		// let them run first. Scheduling them here orders them by
+		// construction. injectBlackholeRoutes above is a no-op on the
+		// userspace dataplane, so it cannot move the helper FIB first.
+		if clusterOwnershipEdge {
+			d.scheduleFRRHAReconcile("cluster-state")
+			d.scheduleConnectedRGRepublish("cluster-state")
+			// #16690: the event already consumed the rg-state edge, so the
+			// reconcile safety net will see Changed=false and skip gating.
+			d.scheduleIPMonGating("cluster-state")
 		}
 
 		// no-reth-vrrp direct mode: always reconcile actual VIP
@@ -2694,43 +2717,58 @@ func (d *Daemon) filterDHCPConfigForMasterRGsWithMasters(cfg *config.Config, mas
 // defensive per-probe bound matching the pre-#5451 per-dial DialTimeout.
 const neighborWarmProbeTimeout = 50 * time.Millisecond
 
-// neighborWarmMaxSockets caps how many datagram sockets warmNeighborCache
-// opens, regardless of session-table size: one reusable unconnected socket per
-// address family (IPv4 + IPv6). Before #5451 the warmup opened one CONNECTED
-// socket per unique session IP — at CGNAT scale (tens of thousands of unique
-// destinations) that burst of DialTimeout calls exhausted ephemeral ports / file
-// descriptors and stalled failover convergence, the worst possible time for a
-// local resource storm. Reusing one unconnected socket per family and sending an
-// unconnected datagram per destination triggers the same kernel neighbor
-// resolution (route lookup → neigh_resolve_output → arp_solicit/ndisc_solicit)
-// while bounding the FD/port high-water mark by this constant.
-const neighborWarmMaxSockets = 2
+// neighborWarmSocketsPerInterface caps how many datagram sockets
+// warmNeighborCache opens per probed interface, regardless of session-table
+// size: one reusable unconnected socket per address family. Before #5451 the
+// warmup opened one CONNECTED socket per unique session IP; at CGNAT scale
+// (tens of thousands of unique destinations) that exhausted ephemeral ports
+// and file descriptors and stalled failover convergence. #18617 binds each
+// socket to the interface that carries the endpoint's on-link prefix, so the
+// high-water mark is two sockets per configured interface that has a probed
+// endpoint: bounded by the config, never by the session table.
+const neighborWarmSocketsPerInterface = 2
 
 // neighborWarmDialer opens datagram sockets used by warmNeighborCache to
 // trigger kernel neighbor (ARP/ND) resolution. It is a seam so tests can count
 // sockets opened and capture probed destinations without touching the network
 // (#5451).
 type neighborWarmDialer interface {
-	// open returns one datagram socket for the given network ("udp4"/"udp6").
-	open(network string) (neighborWarmConn, error)
+	// open returns one datagram socket for the given network ("udp4"/"udp6"),
+	// bound to ifname (#18617) so a probe can only leave through the
+	// interface that carries the endpoint's on-link prefix.
+	open(network, ifname string) (neighborWarmConn, error)
 }
 
 // neighborWarmConn is a single unconnected datagram socket that can probe many
 // destinations. probe sends a byte to dst, which triggers neighbor resolution
-// for that destination's next-hop.
+// for that destination.
 type neighborWarmConn interface {
 	probe(dst netip.AddrPort) error
 	Close() error
 }
 
-// udpNeighborWarmDialer is the production neighborWarmDialer: it opens a real
-// unconnected UDP socket via net.ListenUDP.
+// udpNeighborWarmDialer is the production neighborWarmDialer: an unconnected
+// UDP socket bound to the interface with SO_BINDTODEVICE.
 type udpNeighborWarmDialer struct{}
 
-func (udpNeighborWarmDialer) open(network string) (neighborWarmConn, error) {
-	conn, err := net.ListenUDP(network, nil)
+func (udpNeighborWarmDialer) open(network, ifname string) (neighborWarmConn, error) {
+	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+		var serr error
+		if err := c.Control(func(fd uintptr) {
+			serr = unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, ifname)
+		}); err != nil {
+			return err
+		}
+		return serr
+	}}
+	pc, err := lc.ListenPacket(context.Background(), network, "")
 	if err != nil {
 		return nil, err
+	}
+	conn, ok := pc.(*net.UDPConn)
+	if !ok {
+		pc.Close()
+		return nil, fmt.Errorf("neighbor warm: %s socket is %T, not *net.UDPConn", network, pc)
 	}
 	return &udpNeighborWarmConn{conn: conn}, nil
 }
@@ -2740,7 +2778,7 @@ type udpNeighborWarmConn struct{ conn *net.UDPConn }
 func (c *udpNeighborWarmConn) probe(dst netip.AddrPort) error {
 	// A send is what actually drives ARP/ND: connect() alone only does the
 	// route lookup. One byte to (dst, port 1) on the unconnected socket makes
-	// the kernel call neigh_resolve_output() for the next-hop.
+	// the kernel call neigh_resolve_output() for the on-link destination.
 	_ = c.conn.SetWriteDeadline(time.Now().Add(neighborWarmProbeTimeout))
 	_, err := c.conn.WriteToUDPAddrPort([]byte{0}, dst)
 	return err
@@ -2755,18 +2793,46 @@ func (d *Daemon) warmDialer() neighborWarmDialer {
 	return udpNeighborWarmDialer{}
 }
 
-// warmNeighborCache iterates synced sessions and sends ARP requests /
-// ICMPv6 Neighbor Solicitations for unique destination IPs. This
-// pre-populates the kernel neighbor cache so that bpf_fib_lookup
-// returns SUCCESS (not NO_NEIGH) for the first packet after failover.
+// neighborWarmCounts is what one warmNeighborCache pass did, by #18617 verdict.
+type neighborWarmCounts struct {
+	at                               time.Time
+	probedV4, probedV6               int
+	skippedOwned, skippedNotHeld     int
+	skippedRouted, skippedNotUnicast int
+	// bindFailures: probe sockets that could not be opened and bound; that
+	// interface's endpoints were not probed this pass.
+	bindFailures int
+	// primaryNotHeld: RETH prefixes of an RG this node is primary for whose
+	// interface holds no address in them (nothing there is probed).
+	primaryNotHeld int
+}
+
+// warmNeighborCache walks synced sessions and probes each unique endpoint that
+// is an on-link neighbour of this node, so the kernel neighbour cache (which
+// feeds the helper's neighbour snapshot) is warm when this node forwards.
 //
-// It reuses ONE unconnected datagram socket per address family (see
-// neighborWarmMaxSockets) rather than opening a connected socket per unique IP,
-// so the failover-time FD/ephemeral-port high-water mark is bounded by a
-// constant instead of by session-table size (#5451). Every unique IP is still
-// warmed; warming stays best-effort (a per-probe error does not abort the
-// rest).
+// #18617: only endpoints inside a configured prefix this node currently holds
+// are probed, from a socket bound to that prefix's interface. Cluster-owned
+// addresses (interface/RETH/VRRP addresses, source-NAT pool, proxy-ARP) and
+// routed endpoints are skipped; see neighbor_warm_plan_18617.go. Before this,
+// a probe to a LAN host from a node holding only the WAN redundancy group left
+// through the WAN default route, came back to the cluster's own WAN address,
+// and was default-denied as transit on this node.
+//
+// Sockets: at most neighborWarmSocketsPerInterface per probed interface
+// (#5451). Warming stays best-effort: a per-probe error does not abort the
+// rest.
 func (d *Daemon) warmNeighborCache() {
+	var cfg *config.Config
+	if d.store != nil {
+		cfg = d.store.ActiveConfig()
+	}
+	d.warmNeighborCacheFor(cfg)
+}
+
+// warmNeighborCacheFor is warmNeighborCache against an explicit config; the
+// plan is built from cfg (nil probes nothing).
+func (d *Daemon) warmNeighborCacheFor(cfg *config.Config) {
 	// #2114: snapshot-per-operation (plan §5.3 rule 5) — one load feeds
 	// both the v4 and the v6 iteration below.
 	rt := d.dataplane()
@@ -2777,77 +2843,92 @@ func (d *Daemon) warmNeighborCache() {
 	seen := make(map[[4]byte]bool)
 	seenV6 := make(map[[16]byte]bool)
 
-	// Iterate IPv4 sessions: collect unique dst IPs (forward entries
-	// need ARP for the next-hop toward the destination) and unique src IPs
-	// (return entries need ARP for the on-link client).
+	// Collect unique endpoints of forward entries: the dst (next hop toward
+	// the destination) and the src (the on-link client of the return path).
 	_ = rt.Sessions().ForEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		if val.IsReverse != 0 {
 			return true
 		}
-		if !seen[key.DstIP] {
-			seen[key.DstIP] = true
-		}
-		if !seen[key.SrcIP] {
-			seen[key.SrcIP] = true
-		}
+		seen[key.DstIP] = true
+		seen[key.SrcIP] = true
 		return true
 	})
-
-	// Iterate IPv6 sessions.
 	_ = rt.Sessions().ForEachV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 		if val.IsReverse != 0 {
 			return true
 		}
-		if !seenV6[key.DstIP] {
-			seenV6[key.DstIP] = true
-		}
-		if !seenV6[key.SrcIP] {
-			seenV6[key.SrcIP] = true
-		}
+		seenV6[key.DstIP] = true
+		seenV6[key.SrcIP] = true
 		return true
 	})
+	if len(seen) == 0 && len(seenV6) == 0 {
+		return
+	}
+
+	plan := d.neighborWarmPlan(cfg)
+	now := time.Now()
+	d.neighborWarmHealth.notePrimaryNotHeld(plan.primaryNotHeld, now)
+
+	counts := neighborWarmCounts{at: now, primaryNotHeld: len(plan.primaryNotHeld)}
+	byIfV4 := make(map[string][]netip.Addr)
+	byIfV6 := make(map[string][]netip.Addr)
+	classify := func(addr netip.Addr, byIf map[string][]netip.Addr) {
+		if !addr.IsGlobalUnicast() {
+			counts.skippedNotUnicast++
+			return
+		}
+		ifname, verdict := plan.classify(addr)
+		switch verdict {
+		case neighborWarmProbe:
+			byIf[ifname] = append(byIf[ifname], addr)
+		case neighborWarmOwned:
+			counts.skippedOwned++
+		case neighborWarmNotHeld:
+			counts.skippedNotHeld++
+		default:
+			counts.skippedRouted++
+		}
+	}
+	for ip4 := range seen {
+		classify(netip.AddrFrom4(ip4), byIfV4)
+	}
+	for ip6 := range seenV6 {
+		classify(netip.AddrFrom16(ip6), byIfV6)
+	}
 
 	dialer := d.warmDialer()
-
-	// Resolve IPv4 neighbors by sending a UDP datagram per destination to
-	// trigger kernel ARP. One reusable unconnected socket serves every
-	// destination, so FD/port cost is O(1), not O(unique IPs).
-	count := 0
-	if len(seen) > 0 {
-		if conn, err := dialer.open("udp4"); err == nil {
-			for ip4 := range seen {
-				addr := netip.AddrFrom4(ip4)
-				if !addr.IsGlobalUnicast() || addr.IsPrivate() && addr.IsLoopback() {
-					continue
-				}
+	probe := func(network string, byIf map[string][]netip.Addr) int {
+		n := 0
+		for ifname, addrs := range byIf {
+			conn, err := dialer.open(network, ifname)
+			// Review of #18625: a bind failure used to be a Debug line and a
+			// silent skip. Count it, and Warn on its rising edge.
+			d.neighborWarmHealth.noteBind(network, ifname, err)
+			if err != nil {
+				counts.bindFailures++
+				continue
+			}
+			for _, addr := range addrs {
 				if conn.probe(netip.AddrPortFrom(addr, 1)) == nil {
-					count++
+					n++
 				}
 			}
 			conn.Close()
 		}
+		return n
 	}
+	counts.probedV4 = probe("udp4", byIfV4)
+	counts.probedV6 = probe("udp6", byIfV6)
+	d.lastNeighborWarmCounts.Store(&counts)
 
-	// Resolve IPv6 neighbors (one reusable unconnected socket).
-	countV6 := 0
-	if len(seenV6) > 0 {
-		if conn, err := dialer.open("udp6"); err == nil {
-			for ip6 := range seenV6 {
-				addr := netip.AddrFrom16(ip6)
-				if !addr.IsGlobalUnicast() {
-					continue
-				}
-				if conn.probe(netip.AddrPortFrom(addr, 1)) == nil {
-					countV6++
-				}
-			}
-			conn.Close()
-		}
-	}
-
-	if count > 0 || countV6 > 0 {
-		slog.Info("cluster: neighbor cache warmup complete",
-			"ipv4_hosts", count, "ipv6_hosts", countV6)
+	// #18617: Debug, not Info. This pass runs on every synced-session install
+	// (scheduleStandbyNeighborRefresh, at most once a second), so an Info line
+	// here was a per-second log under steady HA load.
+	slog.Debug("cluster: neighbor cache warmup complete",
+		"ipv4_hosts", counts.probedV4, "ipv6_hosts", counts.probedV6,
+		"skipped_owned", counts.skippedOwned, "skipped_not_held", counts.skippedNotHeld,
+		"skipped_routed", counts.skippedRouted, "skipped_not_unicast", counts.skippedNotUnicast)
+	if counts.probedV4 > 0 || counts.probedV6 > 0 {
 		// Brief pause to allow ARP/NDP responses before traffic arrives.
 		time.Sleep(200 * time.Millisecond)
 	}

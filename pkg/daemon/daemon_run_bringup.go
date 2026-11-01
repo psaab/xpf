@@ -37,6 +37,10 @@ func (d *Daemon) constructClusterManager(cfg *config.Config) bool {
 	}
 	cc := cfg.Chassis.Cluster
 	d.cluster = cluster.NewManager(cc.NodeID, cc.ClusterID)
+	// #18585: the heartbeat-measured peer clock alarm reaches syslog in the
+	// local reference alarm's RT_SYSTEM CLOCK_SKEW_ALARM_* shape. Wired at
+	// construction, before any heartbeat can be admitted.
+	d.cluster.SetPeerClockAlarmHook(d.peerClockAlarmSyslog)
 	return true
 }
 
@@ -672,7 +676,7 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 		if rt != nil && d.cluster != nil {
 			if adapter, ok := rt.(interface{ Manager() *dpuserspace.Manager }); ok {
 				if mgr := adapter.Manager(); mgr != nil {
-					mgr.SetRGPrimaryProvider(d.cluster.LocalGroupPrimary)
+					d.wireUserspaceRGRouteHooks(mgr)
 				}
 			}
 		}

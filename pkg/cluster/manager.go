@@ -189,6 +189,10 @@ type abortedPeerTransferFence struct {
 
 // Manager manages cluster redundancy group states.
 type Manager struct {
+	// peerClock is the #18585 peer wall-clock offset measured from admitted
+	// heartbeats (peer_clock_skew_18585.go). Its own mutex; never under mu.
+	peerClock peerClockState
+
 	nodeID         int
 	clusterID      int
 	groups         map[int]*RedundancyGroupState
@@ -667,6 +671,24 @@ type Manager struct {
 	// the same critical section (#12165, #17056).
 	hbSuppressStart int64
 
+	// hbLivenessProbeMono is the CLOCK_MONOTONIC nanos stamp of the
+	// outstanding sync-channel liveness probe sent while peer heartbeats are
+	// late or suppressed (#18561); 0 = none. Under m.mu, cleared with
+	// hbSuppressStart.
+	hbLivenessProbeMono int64
+	// hbLivenessProbeAnswerBy is when the outstanding probe's silence starts
+	// to count: minLivenessProbeAnswer after a pre-armed probe, the full
+	// (threshold - 1.5) x interval after one sent on the timeout tick.
+	hbLivenessProbeAnswerBy int64
+	// hbLivenessProven latches, for the current suppression window, that the
+	// peer answered the probe (#18561): the window then falls back to the
+	// recency rule and the 5s cap, with no further probes.
+	hbLivenessProven bool
+	// livenessProbesSent / livenessProbeTimeouts count the #18561 probes and
+	// the unanswered ones a timeout tick acted on (LivenessProbeStats).
+	livenessProbesSent    uint64
+	livenessProbeTimeouts uint64
+
 	// peerHeartbeatFreshFn reports whether a peer heartbeat is currently
 	// within the timeout window (i.e. NOT stale). handlePeerTimeout consults
 	// it under m.mu before the suppression decision so a fresh heartbeat
@@ -693,6 +715,9 @@ type Manager struct {
 	// applying the newest config generation this node sent (#9569). Evaluated
 	// outside mu.
 	peerConfigStaleFn func() (bool, string)
+	// informationExtraFn renders daemon-owned lines appended to
+	// FormatInformation (#18625). Set once; called without m.mu held.
+	informationExtraFn func() string
 
 	// rgForwardingFn reports the DATAPLANE-side view of a redundancy group —
 	// applied rg_active and VRRP mastership. Supplied by the daemon, which owns
@@ -1001,6 +1026,16 @@ func (m *Manager) HeartbeatPeerAddr() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.hbPeerAddr
+}
+
+// HeartbeatLocalAddr returns the local address supplied to the last
+// successfully published heartbeat start: the address RestartHeartbeat will
+// reuse (#18597). pkg/daemon's cells read it to prove a control-link renumber
+// moved the heartbeat to the new address.
+func (m *Manager) HeartbeatLocalAddr() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.hbLocalAddr
 }
 
 // HeartbeatControlInterface returns the control-link INTERFACE the RUNNING

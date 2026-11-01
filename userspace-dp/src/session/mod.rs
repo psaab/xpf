@@ -247,6 +247,9 @@ type SeededBareTupleIndex = HashMap<BareSessionTuple, BareTupleHandleBucket, Hot
 mod discriminator;
 mod key;
 mod pmech_directory;
+// #18562: node-wide read-only view of live #7770 punt seeds (embedded-ICMP
+// matcher only); maintained at this table's insert/remove choke points.
+mod punt_seed_directory;
 pub(crate) mod pptp;
 pub(crate) mod pptp_control;
 // #7188: `WireDiscriminator` is exported alongside the class enum because the
@@ -259,6 +262,12 @@ pub(crate) use discriminator::{TunnelDiscriminator, WireDiscriminator};
 mod routing_domain_wire;
 pub(crate) use key::*;
 pub(crate) use pmech_directory::*;
+pub(crate) use punt_seed_directory::{
+    PuntSeedDirectory, PuntSeedRow, PUNT_SEED_DIRECTORY_CONTENDED_TOTAL,
+    PUNT_SEED_DIRECTORY_FULL_TOTAL,
+};
+#[cfg(test)]
+pub(crate) use punt_seed_directory::PUNT_SEED_ROW_TTL_NS;
 pub(crate) use routing_domain_wire::{
     AMBIGUOUS_FABRIC_DOMAIN_BASE, QUARANTINED_ROUTING_DOMAIN,
     // #9546: named at the crate level so the conntrack mirror states absence
@@ -291,7 +300,7 @@ pub(crate) const SESSION_GC_INTERVAL_NS_FOR_TEST: u64 = SESSION_GC_INTERVAL_NS;
 pub(crate) const WHEEL_TICK_NS_FOR_TEST: u64 = wheel::WHEEL_TICK_NS;
 #[cfg(test)]
 pub(crate) const WHEEL_BUCKETS_FOR_TEST: usize = wheel::WHEEL_BUCKETS;
-const DEFAULT_MAX_SESSIONS: usize = 131072;
+pub(crate) const DEFAULT_MAX_SESSIONS: usize = 131072;
 /// Default per-worker concurrent sessions per source IP and ingress zone.
 /// A positive `limit-session source-ip-based` value overrides this ceiling.
 pub(crate) const DEFAULT_MAX_SESSIONS_PER_SOURCE: u32 = 4096;
@@ -316,7 +325,7 @@ const DEFAULT_TCP_SESSION_TIMEOUT_NS: u64 = 1_800_000_000_000;
 /// longer than a legitimate incomplete handshake needs and eventually deny
 /// new flows. 20 s matches the Junos `tcp-initial-timeout` default. This
 /// is the SYN-flood/half-open sibling of the #3046 RST-reap window.
-const DEFAULT_TCP_OPENING_TIMEOUT_NS: u64 = 20_000_000_000;
+pub(crate) const DEFAULT_TCP_OPENING_TIMEOUT_NS: u64 = 20_000_000_000;
 const TCP_CLOSING_TIMEOUT_NS: u64 = 30_000_000_000;
 /// #3046: a session torn down by RST is reaped far faster than a graceful
 /// FIN close. A RST abruptly aborts the socket — there is no half-closed /
@@ -2011,6 +2020,14 @@ struct ProbeCostProbes {
     undo_records: AtomicU64,
 }
 
+/// #18562: a dropped table's seeds are gone, so are their directory rows (a
+/// worker's table outlives no worker; the node directory outlives them all).
+impl Drop for SessionTable {
+    fn drop(&mut self) {
+        self.punt_seeds.retire_table(self.punt_seed_table_token);
+    }
+}
+
 pub(crate) struct SessionTable {
     /// #18550: reader for this worker's RG activation epochs (the same
     /// `rg_epochs` the wheel's SELF-HEAL gate reads through `ExpireHaContext`).
@@ -2020,6 +2037,13 @@ pub(crate) struct SessionTable {
     /// (a table built outside a worker) leaves `seen_rg_epoch` untouched.
     /// Wired once in `worker_loop_setup`.
     rg_epoch_reader: Option<std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>>,
+    /// #18562: the node's punt-seed directory. `new()` gives a table a
+    /// private one; `worker_loop` wires every worker of the node to the ONE
+    /// in `SharedSessionOwnerRgIndexes::punt_seeds`. Written only by
+    /// `insert_record` / `remove_entry` / `refresh_in_place` / `Drop` below.
+    punt_seeds: std::sync::Arc<PuntSeedDirectory>,
+    /// #18562: this table's identity in `punt_seeds` (retire fence).
+    punt_seed_table_token: u64,
     /// #7699: the PPTP call associations THIS worker can resolve.
     ///
     /// Per-worker, and deliberately not shared behind a lock: `resolve` runs on
@@ -2357,6 +2381,26 @@ pub(crate) struct SessionTable {
     /// Set by `set_session_limit_active`, driven from the worker's applied
     /// forwarding/screen-profile snapshot.
     session_limit_active: bool,
+    /// #18640: this table's slot in the node's HA fan-out, as (index, width).
+    /// HA session sync installs every peer session on EVERY worker as a
+    /// `SyncImport` copy, and demotion re-tags every worker's replica the same
+    /// way. One logical session must charge the per-source quota once per
+    /// node, as #10310 requires for local replicas, so only the worker this
+    /// slot designates charges a fanned-out copy
+    /// (`session_limit_charges_fanout_copy`). The default (0, 1) charges every
+    /// copy: a single table, as in standalone tests, is the whole node.
+    session_limit_shard_index: u32,
+    session_limit_shard_width: u32,
+    /// #18640: source-count decrements that found no count to take from. Always
+    /// zero while increments and decrements agree; a nonzero value is a balance
+    /// bug the saturating decrement would otherwise hide. Test builds only.
+    #[cfg(test)]
+    session_limit_dec_underflows: u64,
+    /// #18640: the process-wide keyed hash that picks the charged worker. Every
+    /// worker table is built from the same per-process seed, so they agree on
+    /// the designation; the seed keeps an outsider from aiming flows at one
+    /// worker's quota.
+    session_limit_shard_hash: HotPathSeededState,
     /// #2134/#3122/#10310/#10985/#11057: per-source-IP count of present
     /// forward-direction logical sessions, keyed by ingress zone and source
     /// IP. Always maintained, including when no screen profile configures a
@@ -2527,6 +2571,8 @@ impl SessionTable {
         let state = HotPathSeededState::new(seed);
         Self {
             rg_epoch_reader: None,
+            punt_seeds: std::sync::Arc::new(PuntSeedDirectory::new()),
+            punt_seed_table_token: punt_seed_directory::next_punt_seed_table_token(),
             pptp: crate::session::pptp::PptpAssociations::default(),
             // Start with an empty slab and let it grow on demand.
             // `Slab::with_capacity(DEFAULT_MAX_SESSIONS)` would eagerly
@@ -2596,6 +2642,11 @@ impl SessionTable {
             last_pop_stats: WheelPopStats::default(),
             cumulative_pop_stats: WheelPopStats::default(),
             session_limit_active: false,
+            session_limit_shard_index: 0,
+            session_limit_shard_width: 1,
+            #[cfg(test)]
+            session_limit_dec_underflows: 0,
+            session_limit_shard_hash: state.clone(),
             // #2364/#10985: these counters key attacker-chosen IPs plus an
             // ingress-zone ID, so use the seeded hasher.
             session_limit_src_counts: HashMap::with_hasher(state.clone()),
@@ -2719,6 +2770,43 @@ impl SessionTable {
         reader: std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>,
     ) {
         self.rg_epoch_reader = Some(reader);
+    }
+
+    /// #18562: share the node's punt-seed directory with this table. Called
+    /// once from `worker_loop`, on an empty table (any row this table had
+    /// published to its previous directory is retired first).
+    pub(crate) fn set_punt_seed_directory(&mut self, directory: std::sync::Arc<PuntSeedDirectory>) {
+        self.punt_seeds.retire_table(self.punt_seed_table_token);
+        self.punt_seeds = directory;
+    }
+
+    /// #18562: the node's live punt seeds, for the embedded-ICMP matcher's
+    /// cross-worker fallback (`icmp_embed/nat_match_v4.rs` / `_v6.rs`).
+    pub(crate) fn punt_seed_directory(&self) -> &PuntSeedDirectory {
+        &self.punt_seeds
+    }
+
+    /// #18562: a directory row is a snapshot taken at insert. Every in-place
+    /// writer of a FORWARD entry's decision or metadata calls this first, so
+    /// a seed it rewrites (resolution, owner RG, zone pair) loses its row
+    /// instead of leaving a stale snapshot behind — fail closed: the row only
+    /// ever answers an error the shared maps could not. The writers:
+    /// `refresh_in_place`, `revalidate_forwarding_resolution_with_egress_zone`,
+    /// `rebind_forward_egress_zone`, `rebind_policy_pair`, `rebind_zones_pair`
+    /// (`update_reverse_route_on_filter_hit` writes reverse entries only, and a
+    /// row is never a reverse entry).
+    fn retire_punt_seed_row_before_rewrite(&self, key: &SessionKey) {
+        if self.punt_seeds.len() == 0 {
+            return;
+        }
+        if let Some(&handle) = self.key_to_handle.get(key)
+            && let Some(record) = self.entries.get(handle as usize)
+            && record.key == *key
+            && record.entry.origin == SessionOrigin::FabricPuntSeed
+        {
+            self.punt_seeds
+                .retire(key, self.punt_seed_table_token, record.entry.session_id);
+        }
     }
 
     /// #18550: the current activation epoch for `owner_rg_id`, if a reader is
@@ -2926,6 +3014,9 @@ impl SessionTable {
         let hit_is_reverse = record.entry.metadata.is_reverse;
         let hit_nat = record.entry.decision.nat;
         let old_owner_rg_id = record.entry.metadata.owner_rg_id;
+        // #18562: this rewrites the hit's resolution / owner RG (and maybe the
+        // pair's egress zone, below) in place.
+        self.retire_punt_seed_row_before_rewrite(&canonical_key);
         if let Some(new_owner_rg_id) = owner_rg_id
             && new_owner_rg_id != old_owner_rg_id
         {
@@ -2959,6 +3050,7 @@ impl SessionTable {
                 )
             };
             if forward_key != reverse_key {
+                self.retire_punt_seed_row_before_rewrite(&forward_key);
                 if let Some(fwd) = self.entry_by_key_mut(&forward_key)
                     && !fwd.metadata.is_reverse
                     && fwd.metadata.egress_zone != new_zone
@@ -3021,6 +3113,8 @@ impl SessionTable {
         if fwd.metadata.is_reverse {
             return false;
         }
+        // #18562: the forward leg's egress zone is rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(&forward_key);
         if forward_key != reverse_key {
             if let Some(fwd) = self.entry_by_key_mut(&forward_key)
                 && fwd.metadata.egress_zone != new_egress_zone
@@ -3684,9 +3778,11 @@ impl SessionTable {
             for (key, handle) in &self.key_to_handle {
                 if let Some(record) = self.entries.get(*handle as usize) {
                     let ingress_zone = record.entry.metadata.ingress_zone;
-                    if !record.entry.metadata.is_reverse
-                        && install::session_limit_origin_counted(record.entry.origin)
-                    {
+                    if self.session_limit_counted(
+                        key,
+                        record.entry.origin,
+                        record.entry.metadata.is_reverse,
+                    ) {
                         let c = self
                             .session_limit_dst_counts
                             .entry((ingress_zone, key.dst_ip))
@@ -3707,6 +3803,99 @@ impl SessionTable {
         }
         self.session_limit_active = active;
     }
+    /// #18640: set this table's slot in the node's HA fan-out (see
+    /// `session_limit_shard_index`). Called once at worker launch with the
+    /// worker's rank in the bring-up's worker set and that set's size. The
+    /// counts are rebuilt from the slab under the new designation, so a later
+    /// decrement always matches the increment the same predicate made.
+    pub(crate) fn set_session_limit_shard(&mut self, index: u32, width: u32) {
+        let width = width.max(1);
+        let index = index.min(width - 1);
+        if index == self.session_limit_shard_index && width == self.session_limit_shard_width {
+            return;
+        }
+        self.session_limit_shard_index = index;
+        self.session_limit_shard_width = width;
+        self.rebuild_session_limit_counts();
+    }
+
+    /// #18640: source-count decrements that found no count (see the field).
+    #[cfg(test)]
+    pub(crate) fn session_limit_dec_underflows(&self) -> u64 {
+        self.session_limit_dec_underflows
+    }
+
+    /// #18640: this table's (index, width) slot, for the worker-setup cell.
+    #[cfg(test)]
+    pub(crate) fn session_limit_shard(&self) -> (u32, u32) {
+        (self.session_limit_shard_index, self.session_limit_shard_width)
+    }
+
+    /// #18640: whether THIS worker charges a fanned-out HA copy of the session
+    /// keyed `key`. Exactly one worker of the node's fan-out does.
+    #[inline]
+    fn session_limit_charges_fanout_copy(&self, key: &SessionKey) -> bool {
+        use std::hash::BuildHasher;
+        let width = self.session_limit_shard_width;
+        width <= 1
+            || (self.session_limit_shard_hash.hash_one(key) % u64::from(width))
+                == u64::from(self.session_limit_shard_index)
+    }
+
+    /// #2134/#3122/#10310/#18640: the counted-class predicate, the single
+    /// definition every increment, decrement and transition site uses.
+    ///
+    /// A row counts toward the per-source quota iff it is the forward half of
+    /// a logical session this worker is charged for:
+    /// - reverse rows never count (one charge per logical session);
+    /// - `WorkerLocalImport` replicas of a session another worker authored do
+    ///   not count (#10310);
+    /// - a fanned-out HA copy (`SyncImport`, and `SyncLiveness`, which is
+    ///   stored as `SyncImport`) counts on exactly ONE worker of the node
+    ///   (#18640), so a standby's quota sees each peer session once, spread
+    ///   across workers the way RSS spreads local sessions. #3122 holds: the
+    ///   copies still count, so failover cannot hand a client a fresh quota;
+    /// - every other origin (local flows, transient seeds, the serving worker's
+    ///   `SharedMaterialize` / `SharedPromote` row) counts on its own worker.
+    #[inline]
+    pub(crate) fn session_limit_counted(
+        &self,
+        key: &SessionKey,
+        origin: SessionOrigin,
+        is_reverse: bool,
+    ) -> bool {
+        if is_reverse || !install::session_limit_origin_counted(origin) {
+            return false;
+        }
+        if matches!(origin, SessionOrigin::SyncImport | SessionOrigin::SyncLiveness) {
+            return self.session_limit_charges_fanout_copy(key);
+        }
+        true
+    }
+
+    /// #18640: recompute the source (and, when enabled, destination) counts
+    /// from the live slab with the current predicate. Reservation counts are
+    /// local and unaffected.
+    fn rebuild_session_limit_counts(&mut self) {
+        let mut src: Vec<(u32, IpAddr, IpAddr)> = Vec::new();
+        for (key, handle) in &self.key_to_handle {
+            if let Some(record) = self.entries.get(*handle as usize)
+                && self.session_limit_counted(
+                    key,
+                    record.entry.origin,
+                    record.entry.metadata.is_reverse,
+                )
+            {
+                src.push((record.entry.metadata.ingress_zone, key.src_ip, key.dst_ip));
+            }
+        }
+        self.session_limit_src_counts.clear();
+        self.session_limit_dst_counts.clear();
+        for (zone, sip, dip) in src {
+            self.session_limit_inc(zone, sip, dip);
+        }
+    }
+
     /// #2134/#10985: non-mutating read of the live count for one source IP
     /// within an ingress zone. Used by the new-flow check before a session
     /// is created so the (limit+1)-th new flow is dropped only against its
@@ -3743,7 +3932,7 @@ impl SessionTable {
     /// #2134/#3122/#10310/#10985/#11057: increment the always-on source count
     /// and, when enabled, the optional destination count for a freshly
     /// counted session. Caller MUST have evaluated the shared counted-class
-    /// predicate (`!is_reverse && install::session_limit_origin_counted(origin)`).
+    /// predicate (`session_limit_counted`).
     #[inline]
     fn session_limit_inc(&mut self, ingress_zone: u32, src_ip: IpAddr, dst_ip: IpAddr) {
         let c = self
@@ -3772,6 +3961,14 @@ impl SessionTable {
             *c = c.saturating_sub(1);
             if *c == 0 {
                 self.session_limit_src_counts.remove(&src_key);
+            }
+        } else {
+            // #18640: a decrement with no matching increment. The saturating
+            // shape would otherwise hide a double decrement (or a decrement
+            // under a different predicate) completely; the cells assert 0.
+            #[cfg(test)]
+            {
+                self.session_limit_dec_underflows = self.session_limit_dec_underflows.saturating_add(1);
             }
         }
         if !self.session_limit_active {
@@ -3894,6 +4091,24 @@ impl SessionTable {
             Self::is_pressure_shed_unreplied(&record.key, &record.entry, false)
                 .then(|| record.key.clone());
         let bare_tuple = record.key.bare_tuple();
+        // #18562: the slab insert choke point publishes a forward punt seed to
+        // the node's directory; `remove_entry` is its retire twin.
+        if record.entry.origin == SessionOrigin::FabricPuntSeed && !record.entry.metadata.is_reverse {
+            let _ = self.punt_seeds.publish(
+                &record.key,
+                PuntSeedRow {
+                    decision: record.entry.decision,
+                    metadata: record.entry.metadata.clone(),
+                    session_id: record.entry.session_id,
+                    table_token: self.punt_seed_table_token,
+                    expires_at_ns: PuntSeedRow::deadline(
+                        record.entry.created_ns,
+                        record.entry.expires_after_ns,
+                    ),
+                },
+                record.entry.created_ns,
+            );
+        }
         let raw = self.entries.insert(record);
         let handle: u32 = raw.try_into().expect("slab handle exceeds u32");
         if let Some(key) = opening_key {
@@ -6198,6 +6413,15 @@ impl SessionTable {
         }
         // Snapshot the OLD index-relevant + collision-relevant state (all Copy).
         let old_origin = record.entry.origin;
+        // #18562: a directory row is a snapshot taken at insert; an in-place
+        // rewrite of the seed (HA transition, promotion) retires it rather than
+        // leave a stale zone pair or decision behind. Fail-closed: the row only
+        // ever answers an error the shared maps could not.
+        if old_origin == SessionOrigin::FabricPuntSeed {
+            let session_id = record.entry.session_id;
+            self.punt_seeds
+                .retire(key, self.punt_seed_table_token, session_id);
+        }
         let old_nat = record.entry.decision.nat;
         let old_source_nat_static = record.entry.source_nat_static;
         let old_is_reverse = record.entry.metadata.is_reverse;
@@ -6205,7 +6429,7 @@ impl SessionTable {
         let old_ingress_zone = record.entry.metadata.ingress_zone;
         // #10310: a WorkerLocalImport replica is not counted, but a promote
         // to a local origin becomes one logical limit-session unit.
-        let old_counted = !old_is_reverse && install::session_limit_origin_counted(old_origin);
+        let old_counted = self.session_limit_counted(key, old_origin, old_is_reverse);
         let was_peer_synced = old_origin.is_peer_synced();
         if let RefreshPolicy::Update {
             collision_rules: true,
@@ -6488,8 +6712,7 @@ impl SessionTable {
                     RefreshTail {
                         old_counted,
                         old_ingress_zone,
-                        new_counted: !metadata.is_reverse
-                            && install::session_limit_origin_counted(origin),
+                        new_counted: self.session_limit_counted(key, origin, metadata.is_reverse),
                         new_ingress_zone: metadata.ingress_zone,
                     },
                     (was_peer_synced && !origin.is_peer_synced() && !metadata.is_reverse)
@@ -6516,8 +6739,7 @@ impl SessionTable {
                     RefreshTail {
                         old_counted,
                         old_ingress_zone,
-                        new_counted: !metadata.is_reverse
-                            && install::session_limit_origin_counted(old_origin),
+                        new_counted: self.session_limit_counted(key, old_origin, metadata.is_reverse),
                         new_ingress_zone: metadata.ingress_zone,
                     },
                     None,
@@ -6660,6 +6882,8 @@ impl SessionTable {
         egress_zone: u32,
         egress_zone_check: u32,
     ) -> bool {
+        // #18562: the forward entry's policy and zone pair are rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(key);
         let Some(forward) = self.entry_by_key(key) else {
             return false;
         };
@@ -6667,7 +6891,7 @@ impl SessionTable {
             return false;
         }
         let old_ingress_zone = forward.metadata.ingress_zone;
-        let forward_counted = install::session_limit_origin_counted(forward.origin);
+        let forward_counted = self.session_limit_counted(key, forward.origin, false);
         let single_local_delivery = forward.decision.resolution.disposition
             == crate::afxdp::ForwardingDisposition::LocalDelivery;
         let companion_key = reverse_session_key(key, forward.decision.nat);
@@ -6728,6 +6952,8 @@ impl SessionTable {
         egress_zone: u32,
         egress_zone_check: u32,
     ) -> bool {
+        // #18562: the forward entry's zone pair is rewritten in place.
+        self.retire_punt_seed_row_before_rewrite(key);
         let Some(forward) = self.entry_by_key(key) else {
             return false;
         };
@@ -6735,7 +6961,7 @@ impl SessionTable {
             return false;
         }
         let old_ingress_zone = forward.metadata.ingress_zone;
-        let forward_counted = install::session_limit_origin_counted(forward.origin);
+        let forward_counted = self.session_limit_counted(key, forward.origin, false);
         let single_local_delivery = forward.decision.resolution.disposition
             == crate::afxdp::ForwardingDisposition::LocalDelivery;
         let companion_key = reverse_session_key(key, forward.decision.nat);
@@ -7141,6 +7367,7 @@ impl SessionTable {
         // zone/IP decrement cannot be forgotten by a future delete site.
         let removed_origin = record.entry.origin;
         let removed_is_reverse = metadata.is_reverse;
+        let removed_session_id = record.entry.session_id;
         // Borrow on `record` ends here; subsequent calls take
         // &mut self (cleanup helpers) without conflict.
         let _ = record;
@@ -7158,6 +7385,12 @@ impl SessionTable {
             "remove_entry leaked handle {} in a secondary index",
             handle
         );
+        // #18562: every removal (expire, delete, replace, take_synced_local)
+        // retires this incarnation's punt-seed directory row.
+        if removed_origin == SessionOrigin::FabricPuntSeed {
+            self.punt_seeds
+                .retire(key, self.punt_seed_table_token, removed_session_id);
+        }
         // Only AFTER all indices are clean, return slot to slab.
         let record = self.entries.remove(handle as usize);
         // #2134/#3122/#10310/#10985: decrement the matching zone/IP count
@@ -7166,7 +7399,7 @@ impl SessionTable {
         // shared counted-class predicate charges true HA peer imports, but
         // not a WorkerLocalImport replica, balancing the matching create or
         // promotion transition exactly.
-        if !removed_is_reverse && install::session_limit_origin_counted(removed_origin) {
+        if self.session_limit_counted(key, removed_origin, removed_is_reverse) {
             self.session_limit_dec(metadata.ingress_zone, key.src_ip, key.dst_ip);
         }
         // #9856: harvest an export tombstone for genuine terminal
@@ -7793,6 +8026,16 @@ mod close_refresh_gate_10885_tests;
 #[cfg(test)]
 #[path = "tcp_seq_15753_tests.rs"]
 mod tcp_seq_15753_tests;
+// #18562: the punt-seed directory's publish / retire / fence / deadline /
+// cap contract, driven through the table's own install and removal paths.
+#[cfg(test)]
+#[path = "punt_seed_directory_18562_tests.rs"]
+mod punt_seed_directory_18562_tests;
+// #18640: per-source session-cap accounting across the HA fan-out to every
+// worker.
+#[cfg(test)]
+#[path = "session_limit_fanout_18640_tests.rs"]
+mod session_limit_fanout_18640_tests;
 
 // #13939 (H09-02): an Owner hit that promotes a peer-synced pair, then
 // applies the deferred FIN/RST close, must close BOTH halves. The promotion

@@ -298,6 +298,18 @@ later):
    covering connected prefix beats a selected non-cluster terminal
    only while a cluster-terminal row proves republication is owed;
    settled-FIB operator discards are bit-identical).
+   The demotion side was still unordered until #18620. The cluster-state
+   republish that WITHDRAWS the RG's connected rows ran async ahead of
+   `SetRGActive(false)`, and on loss its snapshot reached the helper first
+   on about one demotion in ten. The window was 50-80 ms with the helper
+   still forwarding the RG. Live SNAT sessions were revoked as stale source
+   NAT, and the punt seed that replaced them blackholed the flow when the RG
+   returned (18-515 s ping/iperf outages). Fix:
+   - the demotion edge schedules its withdrawing reconciles after the write;
+   - the route builders hold an RG's connected rows while the helper last
+     acknowledged it active;
+   - a punt seed is retired once its egress RG is local, and it yields to the
+     peer's import or delete.
 3. **Supersession (#16270 cache leg, #16222).** Cache revalidation
    had supersession arms for `FabricRedirect` and `DiscardRoute`
    but none for a locally-egressing `ForwardCandidate` whose egress
@@ -652,6 +664,96 @@ sends (the Go legs were read, not run). Residuals are tracked in #18535:
   - 6 to 12 s of outage at the double-failover second takeover (peer-loss
     detection; the flows survive).
 
+**#18691: a non-owner does not judge a translation against its own
+gateway fallback.** The node keeping the LAN RG of a split revoked a quiet
+SNAT flow at its first reply. That node held the flow only as rows
+sync-imported from the WAN owner. The worker import re-resolves the forward
+row against the split FIB, where the WAN RG's connected prefix (reth0.80)
+is withheld, and keeps that raw local line on purpose so the row is ready
+at activation (#326). The line is therefore the default via the WAN
+gateway VLAN (reth0.50). The peer's own line cannot replace it, because it
+names the peer's ifindexes. The server's reply arrives over the fabric from
+the WAN owner, and the reverse hit judges the forward companion's stored
+line. The reth0.80 interface translation does not match reth0.50's
+address, so `StaleSourceNat` tore the pair down and dropped the reply.
+
+Live, on tcp with one idle flow (all RGs to node1, then RG1 alone to node0,
+65 s idle, one line each way), 2 of 3 reps failed on master 19e5a71d55,
+which has #18660. The same 2 of 3 failed on a build without #18660.
+`xpf_userspace_snat_revoked_sessions_total` on the LAN owner equalled the
+FAIL count. A fresh flow loses one ACK and retransmits after 200 ms. In
+#18683 the sender was already backed off to a 64 s RTO and lost 120 s.
+
+The rule now (`judged_line_is_non_owner_gateway_fallback`, checked next to
+the `FabricRedirect | HAInactive` decline): the judgment is declined when
+all four of these hold.
+
+1. The judged line is a local `ForwardCandidate` or `MissingNeighbor`.
+2. Its egress belongs to an RG that is not forwarding-active here. An
+   egress with no RG (none, or a fabric link) never matches.
+3. The destination's connected owner RG is known and not forwarding-active
+   here.
+4. The egress is not the destination's connected interface.
+
+When declined, the session is kept, the packet takes its HA disposition,
+and the stamp stays stale.
+
+Revocations that still happen:
+
+- On the node that forwards the egress, every ground is judged as before.
+  An interface readdressed on the owner still revokes on the first LAN
+  packet and on the first reply (`owner_readdressed_translation_still_revokes_18691`).
+- On a non-owner, a line on the destination's own connected interface is
+  still judged. That covers the #18531 twin (forward) and its reverse
+  sibling (`lan_owner_connected_line_invalid_translation_still_revokes_18691`).
+- A gateway-routed destination with no connected owner is still judged,
+  because the default route IS the owner's egress there
+  (`lan_owner_gateway_routed_destination_still_judged_18691`). Conditions
+  3 and 4 both exclude it, so this cell pins neither alone. The shape only
+  condition 3 excludes (the destination's connected owner RG forwarding
+  here while the line leaves on another, inactive-RG egress) is pinned by
+  the predicate table.
+- A node with no HA view (standalone) is judged exactly as before.
+
+Revocations that can no longer happen: a non-owner's verdict on its own
+split-FIB fallback for a peer-owned destination. That verdict compared the
+translation with an interface and zone the owner never uses. For interface
+SNAT it could only answer "invalid", and the flow was valid. It was never a
+legitimate ground. A translation that really is stale is still revoked by
+the owner on its next slow-path hit with a stale stamp, and the owner's
+Close removes this node's copy
+(`split_rg_failback_wan_owner_delete_removes_lan_row_18531`).
+
+Every judging path was checked:
+
+- `source_nat_revocation_on_session_hit_with_ingress` is the only producer
+  of `StaleSourceNat`. It has one production caller, the session-hit slow
+  path (`poll_descriptor/mod.rs`).
+- The flow-cache hit path never judges a translation. (#18671, unmerged
+  at the time of writing, adds a forward-wire fallback to that path; it
+  serves from the cache and does not judge either.)
+- `RefreshOwnerRGS` and `DemoteOwnerRGS` store HA-enforced lines. An
+  inactive egress becomes `HAInactive` or `FabricRedirect`, which the
+  existing decline covers.
+- The worker import is the producer of the raw local line this rule
+  covers.
+- Zone-policy revalidation (`ZonePolicy`) is a different ground and is
+  unchanged.
+
+When this node later activates the RG, the decline turns off (condition 2),
+and the stored line is judged as the owner's. That is correct only because
+`RefreshOwnerRGS` re-resolves the line against the activated FIB, which
+carries the connected prefix again. That in turn rests on the #16270
+ordering: connected prefixes are republished before `SetRGActive`. The
+cell `activation_refresh_heals_the_line_and_keeps_the_flow_18691` pins the
+healed path (v4/v6). One window is pre-existing on master and is NOT closed
+here. The coordinator stores the activated HA state before it queues
+`RefreshOwnerRGS`. A worker pass that loads the new state while its queue
+is still empty judges a reply against the stale split-FIB line, and
+revokes. The window is one RX batch, or longer while a refused refresh
+waits as #9720 transition debt. It is pinned, ignored, by
+`activation_before_refresh_keeps_the_flow_18691` and tracked in #18705.
+
 ### Never-again gates
 
 - **Aged cell, not young cell.** The harness gate is
@@ -982,6 +1084,45 @@ Root cause was barrier/bulk ack delivery stuck behind bulk data (P0). With
 priority ack channel, acks should deliver promptly. Needs live validation
 on split-RG cluster.
 
+### Crash takeover: dead peer no longer held by the sync-recency window (#18561, #18570)
+
+A force-stopped peer (`incus stop --force`, no FIN) leaves the survivor's sync
+socket half-open, so `syncSuppressesPeerTimeoutLocked`'s 2 s recency window
+kept the dead peer alive for up to 2 s past the heartbeat threshold (loss:
+peer loss declared 0.7-1.58 s after the kill at 200 ms x 5). For a peer that
+answers sync-level heartbeats, a suppressed timeout tick now needs a sync frame
+handled after a liveness probe sent at the first missed heartbeat, once the last
+heartbeat is 1.5 intervals old (`prearmPeerLivenessProbe`,
+`peerAnsweredLivenessProbeLocked`). On loss
+(0.0.26111) declaration came about 1.0 s after the last delivered ping, i.e. at
+the threshold. The crash ping outage went from 2.20 s (baseline) to 1.37 s
+together with #18565, which takes the RG-edge FRR and ip-monitoring reconciles
+off the activation path (RG0/1/2 active +57/+126/+261 ms after peer loss).
+H10's 1.4 s crash bound was met in that single run.
+
+### Crash detection phase: four staleness checks per interval (#18561)
+
+With the #18570 probe, a crashed peer is declared on the first staleness check
+after its last heartbeat crosses interval x threshold. The receiver checked once
+per interval, so detection was the threshold plus 0-1 interval of phase. It now
+checks four times per interval (`timeoutCheckInterval`, floored at 10 ms), so the
+phase is at most a quarter interval. The staleness rule is unchanged.
+
+Measured on tcp (200 ms x 5) with session churn so that sync is dense at death,
+crash detection from the last heartbeat on the wire to `marking peer lost`:
+
+| build | n | median | p90 | max |
+|---|---|---|---|---|
+| master 7c45627f9d | 10 | 2.157 s | 2.250 s | 2.258 s |
+| + #18570 | 10 | 1.074 s | 1.135 s | 1.198 s |
+| + #18570 + four checks per interval | 9 | 1.025 s | 1.046 s | 1.048 s |
+
+Activation is unchanged by both: about 0.34-0.38 s from peer-lost to the first
+ping reply. The cluster event loop activates RGs one at a time, and each
+`SetRGActive` waits for the helper to republish that RG's sessions. Detection
+plus activation therefore still lands near TCP's 1.4 s retransmit, and 2 of the
+9 trials had a stream resume after 3 s.
+
 ### Daemon restart blackhole: orderly stop now resigns (#18540) — NEEDS LIVE GATE
 
 `make test-restart-connectivity` lost 1/7/33 pings per cycle on loss (tcp: 8).
@@ -1039,6 +1180,43 @@ independent reasons:
 
 Both are covered by hermetic cells; neither has been through `make
 test-ha-crash` on a cluster yet.
+
+### A RETH address removed by commit stayed on the RG owner (#18573) — FIXED IN SOURCE
+
+In direct-VIP mode (private-RG election, the compiler default) the add and
+remove passes both derived their set from the active config at call time. A
+commit that renumbered `reth0.50` (`.10` -> `.42` on tcp, `.11` -> `.43` on
+udp) left the old address on the owner indefinitely. The owner answered ARP for
+it, and a demotion left it behind too. Because the userspace snapshot is built
+from the kernel listing, interface SNAT kept translating new LAN flows to the
+removed address (udp: LAN to 1.1.1.1 0/30) until the next snapshot.
+
+Now every direct-mode VIP is stamped in the kernel (`IFA_PROTO`,
+`pkg/vipstamp`), and every reconcile pass deletes a stamped address the config
+no longer assigns to its netdev, on the owner and the non-owner alike. The
+snapshot builder never publishes such a leftover, and a reconcile-path change
+queues an interface-link snapshot refresh. See `pkg/daemon/README.md`
+"Direct-mode VIP failover" and `pkg/dataplane/README.md` "Interface rows
+never publish a direct-VIP leftover (#18573)".
+
+**Limit:** a pre-#18573 VIP that the config had already dropped before the
+upgrade carries no stamp and must be deleted by hand once (or cleared by a
+reboot). The same goes for a renumber committed while the owner still runs the
+old binary. Until then it can still be the interface-SNAT source. See
+`docs/in-place-upgrade.md` "Honest limits".
+
+**Status:** unit, real-kernel (netns) and mutation-checked (9/9). Live on
+tcp, deb `0.0.26066+gb5290d13d20d`, 2026-10-31 02:19 UTC:
+
+- A renumber `.10` -> `.42` and `::a` -> `::42` dropped the old pair from
+  fw0 within 1 s of `commit complete`. fw1 (non-owner) held neither pair.
+  The commit's snapshot listed only `.42`/`::42`. LAN to 1.1.1.1 was 10/10,
+  SNATed to `.42`.
+- An RG1+RG2 move to node1 and back left the new owner with only `.42`/`::42`
+  and the former owner with nothing. Nothing resurrected `.10`. SNAT stayed
+  on `.42`, 10/10.
+- The reverse renumber (`.42` -> `.10`, restoring the found state) behaved
+  the same.
 
 ## What Still Needs Work
 
@@ -1175,6 +1353,13 @@ dataplane before the owner closes its own:
 6. requester: commit-ready, commit -> owner; release the pre-activation
 ```
 
+Step 2 waits at most 500 ms for applySem (`transferPreActivateLockWait`,
+#18569), and the overlay's 5 s TTL starts once the lock is held. If a
+commit holds the semaphore longer, the pre-activation is skipped with a
+`transfer pre-activation skipped, apply semaphore busy` warning and the
+transfer runs break-before-make; the request itself is never held behind
+an apply.
+
 Before #18559, step 2 did not exist. Everything the owner redirected between
 step 4 and step 5 was dropped at the requester's fabric-ingress HA-inactive
 gate: 100-137 ms per RG for per-RG moves and about 200 ms per RG for the
@@ -1197,6 +1382,15 @@ Every packet still lost after #18559 is a `config_generation_mismatch` /
 route republish, and the FRR-driven republish and FIB bump after every
 ownership edge) drops in-flight packets until Go rewrites the shim's
 generation stamp. That is #18560.
+
+Since #18560 the helper advances that stamp itself, right after the view
+store, inside a 250 ms grant Go stamps on each `apply_snapshot` and
+`bump_fib_generation` round trip; Go's own write from the reply remains as
+the fallback. The window shrinks from the rest of the apply plus the round
+trip (about 1 ms of line rate per generation change) to the packets already
+queued in the RX rings. Mechanism, ownership rules and counters:
+`docs/afxdp-packet-processing.md` ("Generation stamp: who writes it").
+Loss-cluster numbers are in `docs/log/18560-ctrl-stamp.md`.
 
 The untargeted form (`request chassis cluster failover redundancy-group N`
 on the owner) still demotes locally and lets the peer promote on the next

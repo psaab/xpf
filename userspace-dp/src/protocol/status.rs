@@ -214,6 +214,21 @@ pub(crate) struct ProcessStatus {
     /// Additive + `default`ed (#1961).
     #[serde(rename = "nat_reverse_ambiguous_total", default)]
     pub nat_reverse_ambiguous_total: u64,
+    /// #18562: rows resident in the node's punt-seed directory (non-zero only
+    /// during an RG split). Includes rows past their deadline that have not
+    /// been reclaimed yet (they no longer match). Additive + `default`ed
+    /// (#1961).
+    #[serde(rename = "punt_seed_directory_rows", default)]
+    pub punt_seed_directory_rows: u64,
+    /// #18562: punt-seed directory publishes refused at a full shard — punted
+    /// flows whose cross-worker first error keeps the pre-#18562 verdict.
+    /// Additive + `default`ed (#1961).
+    #[serde(rename = "punt_seed_directory_full_total", default)]
+    pub punt_seed_directory_full_total: u64,
+    /// #18562: punt-seed directory publishes skipped on a contended shard
+    /// lock. Additive + `default`ed (#1961).
+    #[serde(rename = "punt_seed_directory_contended_total", default)]
+    pub punt_seed_directory_contended_total: u64,
     /// #6751 PR 2/3: interface-mode SNAT admissions that failed CLOSED with no
     /// free translated identity — a completed full-cycle PAT probe, a port-less
     /// protocol whose single identity is owned, or a peer-synced import whose
@@ -1468,6 +1483,18 @@ pub(crate) struct ProcessStatus {
     /// domain in the currently published forwarding snapshot.
     #[serde(rename = "ambiguous_fabric_zone_count", default)]
     pub ambiguous_fabric_zone_count: u64,
+    /// #18560: cumulative `userspace_ctrl` stamp advances the helper made
+    /// itself at the worker-visible publish, inside a Go grant.
+    #[serde(rename = "ctrl_stamp_advances_total", default)]
+    pub ctrl_stamp_advances_total: u64,
+    /// #18560: generation changes inside a grant that the helper left for Go
+    /// to stamp (grant expired, ctrl disabled, stamp not the one the workers
+    /// left, or metadata version mismatch).
+    #[serde(rename = "ctrl_stamp_declines_total", default)]
+    pub ctrl_stamp_declines_total: u64,
+    /// #18560: ctrl stamp advances that failed to open, read or write the map.
+    #[serde(rename = "ctrl_stamp_errors_total", default)]
+    pub ctrl_stamp_errors_total: u64,
     /// #9654: whether the learned-route import is capped (#8355, #9054) in the
     /// forwarding state the live workers serve NOW, as projected by
     /// `Coordinator::learned_route_import_capped_now`.

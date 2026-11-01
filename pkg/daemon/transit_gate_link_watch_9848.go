@@ -18,6 +18,9 @@ func (d *Daemon) startTransitGateLinkWatch(ctx context.Context, wg *sync.WaitGro
 		return
 	}
 	refreshWake := make(chan string, 1)
+	// #18573: the direct-VIP reconcile queues a refresh after it changes a
+	// RETH address, so the helper never keeps SNATing from a removed one.
+	d.interfaceLinkRefreshWake.Store(&refreshWake)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()

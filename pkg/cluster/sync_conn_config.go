@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/configstore"
@@ -342,6 +343,7 @@ func (s *SessionSync) writeConfigWithPeerSnapshotGuard(
 		return false, nil
 	}
 	s.recordLastSentConfigGen(gen)
+	noteConfigGenWrittenOnConn(conn, gen)
 	s.writeMu.Lock()
 	err := writeMsg(conn, msgType, payload)
 	s.writeMu.Unlock()
@@ -475,6 +477,7 @@ func (s *SessionSync) queueConfigOnConn(
 		s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
 		s.writeMu.Lock()
 		s.recordLastSentConfigGen(gen)
+		noteConfigGenWrittenOnConn(conn, gen)
 		err = writeMsg(conn, msgType, payload)
 		s.writeMu.Unlock()
 		s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
@@ -501,6 +504,11 @@ func (s *SessionSync) queueConfigOnConn(
 	return true
 }
 func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
+	// #18636: raise the per-peer-incarnation sent high-water the RG0
+	// authority's config-epoch guard compares against. Before the ACK-debt
+	// early return below, which skips non-newer generations for its own
+	// bookkeeping only.
+	notePeerConfigGenSent(&s.peerIncarnationState().lastSentConfigGen, gen)
 	// #17816: publish the generation and the receiving incarnation's
 	// ACK capability as one mutex-protected snapshot. The gate takes the
 	// same lock for its read, so it cannot pair a new generation with the
@@ -525,6 +533,28 @@ func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
 		hook()
 	}
 	s.configApplyDebtMu.Unlock()
+}
+
+// notePeerConfigGenSent raises a sent-generation high-water to gen (#18636).
+// Concurrent writers (the two fabric connections) race through the CAS loop;
+// a lower generation never overwrites a higher one.
+func notePeerConfigGenSent(mark *atomic.Uint64, gen uint64) {
+	for {
+		cur := mark.Load()
+		if gen <= cur || mark.CompareAndSwap(cur, gen) {
+			return
+		}
+	}
+}
+
+// noteConfigGenWrittenOnConn raises the per-connection written-config mark
+// (#18636) that a boot-id switch on this connection seeds into the new
+// incarnation (retirePeerIncarnationLocked). Connections that are not an
+// authConn (bare test fixtures) carry no mark.
+func noteConfigGenWrittenOnConn(conn net.Conn, gen uint64) {
+	if ac, ok := conn.(*authConn); ok {
+		notePeerConfigGenSent(&ac.lastSentConfigGen, gen)
+	}
 }
 
 // errConfigApplyQueueFull is the health-debt reason recorded when a config
@@ -664,6 +694,40 @@ func (s *SessionSync) recordAppliedConfigGen(gen uint64) {
 	}
 }
 
+// ErrConfigSyncRejectedAuthority is the error a config-received callback
+// returns when it refuses the peer's config because THIS node is the RG0
+// config authority (the daemon's handleConfigSync). It is not an apply
+// failure: the config this node runs is the one the peer converges to.
+// configApplyLoop still keeps the applied high-water pinned (M-2/#4151) and
+// still nacks (#7328), so the generation stays eligible if this node later
+// demotes, but it does not arm the #6387 CF health signal and it records the
+// generation in rejectedAsAuthorityConfigGen, which keeps
+// TransferReadinessSnapshot.ConfigStale false while this node remains the
+// authority (#18610).
+var ErrConfigSyncRejectedAuthority = errors.New("config sync rejected: this node is RG0 primary")
+
+// localConfigAuthority reports whether this node is the RG0 config authority
+// now (IsPrimaryFn; false when unwired). Sampled at config receive onto the
+// apply item and at readiness snapshot (#18610).
+func (s *SessionSync) localConfigAuthority() bool {
+	return s.IsPrimaryFn != nil && s.IsPrimaryFn()
+}
+
+// recordConfigRejectedAsAuthority raises the rejected-as-authority high-water
+// (#18610) under configGenMu, the lock every config-generation mark takes
+// (#5084), so resetRecvGen's clear cannot be lost to it. Called only from
+// configApplyLoop.
+func (s *SessionSync) recordConfigRejectedAsAuthority(gen uint64) {
+	if gen == 0 {
+		return
+	}
+	s.configGenMu.Lock()
+	defer s.configGenMu.Unlock()
+	if gen > s.rejectedAsAuthorityConfigGen.Load() {
+		s.rejectedAsAuthorityConfigGen.Store(gen)
+	}
+}
+
 // recordRecvConfigGen advances the RECEIVED config high-water (#5563) under
 // configGenMu, for the same reason recordAppliedConfigGen does (#5084): the
 // raise is a load/compare/store and resetRecvGen clears the mark from another
@@ -719,6 +783,15 @@ func (s *SessionSync) endConfigApply() {
 	s.configGenMu.Lock()
 	defer s.configGenMu.Unlock()
 	s.applyingConfigGen.Store(0)
+}
+
+// ApplyingConfigGen returns the generation configApplyLoop is applying right
+// now, or 0 outside an apply. The config-received callback runs inside the
+// beginConfigApply/endConfigApply window, so it reads the generation of the
+// payload it was handed; the daemon uses it to name the generation in its
+// RG0-authority refusal log (#18610).
+func (s *SessionSync) ApplyingConfigGen() uint64 {
+	return s.applyingConfigGen.Load()
 }
 
 // configApplyLoop is the single ordered consumer of config-sync messages
@@ -845,11 +918,31 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 				continue
 			}
 			if applyErr != nil {
-				// transient RG0-primary rejection). Do NOT advance the
-				// high-water: leaving it at the last-applied generation keeps
-				// the standby eligible for the primary's re-push so it
-				// re-converges instead of being silently stranded (M-2/#4151).
-				s.stats.ConfigsApplyFailed.Add(1)
+				// The apply did not take effect (a compile/promote failure, or
+				// this node refusing the push as the RG0 config authority,
+				// #18610). Do NOT advance the high-water: leaving it at the
+				// last-applied generation keeps the standby eligible for the
+				// primary's re-push so it re-converges instead of being
+				// silently stranded (M-2/#4151).
+				//
+				// #18610 review T1: only a payload that arrived while this
+				// node was ALREADY the authority is an authority refusal (a
+				// dual-active push). One received as secondary and refused
+				// because a promotion landed before this loop reached it is the
+				// previous primary's last config, and it is lost: it stays an
+				// apply failure, so CF and staleness keep signalling it.
+				refusedByRole := errors.Is(applyErr, ErrConfigSyncRejectedAuthority)
+				rejectedAsAuthority := refusedByRole && item.authorityAtReceive
+				if rejectedAsAuthority {
+					s.stats.ConfigsRejectedAsAuthority.Add(1)
+					s.stats.ConfigRejectedAsAuthorityLastGen.Store(item.gen)
+				} else {
+					s.stats.ConfigsApplyFailed.Add(1)
+				}
+				if refusedByRole && !item.authorityAtReceive {
+					slog.Warn("cluster sync: discarded the previous RG0 primary's config: it arrived while this node was secondary and this node was promoted before applying it, so any commit it carried is not in effect here",
+						"incoming_gen", item.gen, "last_applied_gen", s.lastAppliedConfigGen.Load(), "size", len(item.text))
+				}
 				// Debug, not Warn: handleConfigSync (the callback) already logs
 				// the authoritative one-time reason WHY the apply failed
 				// (RG0-primary rejection at Warn, compile/promote failure at
@@ -857,7 +950,8 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 				// M-2/#4151 high-water retention, and the same generation may be
 				// re-pushed on every reconnect while the condition persists — a
 				// Warn here would spam (CLAUDE.md logging rule). The
-				// rate-independent observable is the ConfigsApplyFailed counter
+				// rate-independent observable is the ConfigsApplyFailed (or,
+				// for an authority refusal, ConfigsRejectedAsAuthority) counter
 				// above (surfaced in cluster status), not this log.
 				slog.Debug("cluster sync: config apply failed — retaining prior high-water so the peer re-push re-converges",
 					"incoming_gen", item.gen, "last_applied_gen", s.lastAppliedConfigGen.Load(), "size", len(item.text), "err", applyErr)
@@ -871,7 +965,20 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 				// persistent apply failure thus surfaces as a CF monitor-failure /
 				// degraded health instead of only the terse `Transfer ready: no`
 				// string.
-				s.noteConfigApplyFailure(applyErr)
+				//
+				// #18610: a refusal because THIS node is the RG0 config
+				// authority is not a stranded standby. Arming CF for it put a
+				// monitor failure on the primary, and its received generation
+				// kept ConfigStale true for as long as this node stayed primary
+				// (the peer, now secondary, never pushes again), which blocked
+				// a rolling upgrade started on the primary. Record the
+				// generation instead; ConfigStale ignores it while this node is
+				// still the authority, and counts it again once it demotes.
+				if rejectedAsAuthority {
+					s.recordConfigRejectedAsAuthority(item.gen)
+				} else {
+					s.noteConfigApplyFailure(applyErr)
+				}
 				// #7328: tell the SENDER this generation did not take effect.
 				// #4151 leaves this node eligible for a re-push of the SAME
 				// generation, but the sender's #5863 (epoch x generation) marker

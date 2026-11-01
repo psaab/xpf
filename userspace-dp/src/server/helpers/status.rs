@@ -222,6 +222,11 @@ pub(crate) fn project_status(state: &mut ServerState) {
     state.status.embedded_error_per_session_suppressed_total =
         state.afxdp.embedded_error_per_session_suppressed_total();
     state.status.nat_reverse_ambiguous_total = state.afxdp.nat_reverse_ambiguous_total();
+    // #18562: punt-seed directory residency and refusals.
+    state.status.punt_seed_directory_rows = state.afxdp.punt_seed_directory_rows();
+    state.status.punt_seed_directory_full_total = state.afxdp.punt_seed_directory_full_total();
+    state.status.punt_seed_directory_contended_total =
+        state.afxdp.punt_seed_directory_contended_total();
     state.status.interface_snat_identity_exhaustion_total =
         state.afxdp.interface_snat_identity_exhaustion_total();
     state
@@ -740,6 +745,11 @@ pub(crate) fn project_status(state: &mut ServerState) {
     state.status.fabric_link_unresolved_peer_total =
         state.afxdp.fabric_link_unresolved_peer_total();
     state.status.ambiguous_fabric_zone_count = state.afxdp.ambiguous_fabric_zone_count();
+    // #18560: helper-side userspace_ctrl stamp advances.
+    let (advances, declines, errors) = state.afxdp.ctrl_stamp_counters();
+    state.status.ctrl_stamp_advances_total = advances;
+    state.status.ctrl_stamp_declines_total = declines;
+    state.status.ctrl_stamp_errors_total = errors;
     // #9654: capped NOW, from the published runtime view and only while a live
     // worker serves it. None (key omitted) when no worker is live.
     state.status.learned_route_import_capped = state.afxdp.learned_route_import_capped_now();

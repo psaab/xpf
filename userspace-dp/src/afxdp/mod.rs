@@ -681,6 +681,10 @@ mod tests_icmp_te;
 #[cfg(test)]
 #[path = "tests_icmp_zero_hop_15707.rs"]
 mod tests_icmp_zero_hop_15707;
+// #18174: traceroute/mtr through SNAT + RETH, end to end on the poll path.
+#[cfg(test)]
+#[path = "tests_mtr_icmp_errors_18174.rs"]
+mod tests_mtr_icmp_errors_18174;
 
 #[cfg(test)]
 #[path = "tests_neighbor_learn_fresh_18533.rs"]
@@ -752,6 +756,12 @@ mod tests_fabric_zone_stamp;
 #[cfg(test)]
 #[path = "tests_split_rg_failback_18531.rs"]
 mod tests_split_rg_failback_18531;
+#[cfg(test)]
+#[path = "tests_lan_owner_idle_import_18691.rs"]
+mod tests_lan_owner_idle_import_18691;
+#[cfg(test)]
+#[path = "tests_punt_seed_shadow_18620.rs"]
+mod tests_punt_seed_shadow_18620;
 #[cfg(test)]
 #[path = "tests_gre_local_delivery.rs"]
 mod tests_gre_local_delivery;
@@ -875,6 +885,8 @@ pub(crate) mod worker_queue;
 #[path = "worker_runtime.rs"]
 mod worker_runtime;
 pub use self::coordinator::Coordinator;
+#[cfg(test)]
+pub(crate) use self::coordinator::{UserspaceCtrlValue, EXPECTED_CTRL_METADATA_VERSION};
 // #3789: re-export the full-reconcile abort outcome into afxdp scope so
 // the control-plane server (`server/helpers.rs` + `handlers/snapshot.rs`)
 // can name `afxdp::ReconcileError` on `reconcile_status_bindings`.

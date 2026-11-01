@@ -1656,6 +1656,62 @@ the member stays at ifindex 0, the terminal is selected, and the gateway's
 owner in the lookup's own table stamps it
 (`terminal_gateway_owner_reached_by_out_of_table_explicit_member_18517`).
 
+### A missing WAN neighbor must not reroute a peer-owned reply (#18659)
+
+The same split shape reaches the stored-session path from the other side. A
+node that has just taken the WAN RG while the LAN RG stays on the peer
+re-resolves its synced sessions at RG activation (`refresh_owner_rgs`). The
+split FIB has no LAN connected row, so a fresh lookup for a reverse row's
+un-NATed LAN client answers the WAN default route. The node has only just
+taken the WAN, so that route's gateway is usually not learned yet, and the
+answer is `MissingNeighbor` on ge-x-0-2.50 toward the gateway.
+
+The stored decision of such a row is `FabricRedirect` to the LAN owner, and
+`rehome_or_retain_fabric_redirect` (#15958b) exists to keep it. Before #18659
+that guard ran only for a `ForwardCandidate` candidate. A `MissingNeighbor`
+candidate was returned as-is, so the activation refresh rewrote every
+worker's copy onto the unresolved WAN gateway. Each worker stamps a copy with
+its own revalidation generation, and the copy of the worker that had
+processed packets since the FIB bump looked current. A WAN reply that
+RSS-hashed to it did not re-resolve. It took the MissingNeighbor arm, whose
+#1913 gate judged the gateway's egress zone, and was default-denied wan->wan
+until the neighbor generation advanced (test-failover "RG1 Group 4", about
+50 ms per failback).
+
+On its own, #18659 made both the activation refresh and the reverse-hit
+conversion (`reverse_hit_departed_destination_redirect`) keep or produce the
+fabric redirect for a local, non-fabric `MissingNeighbor` in exactly one
+case: the reply destination's connected owner RG was known and was not
+forwarding-active on this node. A locally active owner kept its local
+`MissingNeighbor`, and an unknown owner (an internet destination behind the
+gateway) did too. #18659 never sent either case over the fabric
+(`rehome_or_retain_missing_neighbor_table_18659`,
+`reverse_departed_destination_converts_missing_neighbor_18659`). For the
+activation-refresh path (`rehome_or_retain_fabric_redirect`), #18672
+supersedes the locally-active half of that, as described next.
+
+#18672 extended the stored-redirect retain in `rehome_or_retain_fabric_redirect`,
+the activation-refresh and stored-session path, to a locally active owner.
+That case needs the LAN RG's activation refresh to run before the LAN
+connected row is republished; #16270 and #18563 order against that. Before
+#18672, a `ForwardCandidate` whose egress missed the destination's connected
+interface kept the stored redirect (the transient-FIB-lag retain), while a
+`MissingNeighbor` on the same egress was returned as-is, the #18659 row
+shape. A `MissingNeighbor` now takes the `ForwardCandidate` keep tests. It is
+kept when it names the destination's connected egress, or when the owner is
+unknown (#16524). Otherwise it retains the redirect
+(`rehome_or_retain_owner_active_missing_neighbor_18672`). A fabric or zero
+egress is still returned verbatim.
+
+The packet-path backstop `reverse_hit_departed_destination_redirect` is
+unchanged by #18672. It still converts only rows whose owner is the peer
+(known, not active here). An owner-active `MissingNeighbor` row that missed
+the refresh retain is healed by the next FIB bump, which makes it stale and
+re-resolves it, exactly as for a `ForwardCandidate`. The #1913
+gate is unchanged. It still judges every `MissingNeighbor` disposition that
+reaches it. What changed is that an established reverse row whose owner is
+the peer no longer reaches it.
+
 ### V1 zone stamps carry the zone id's low 16 bits (#18518)
 
 The V1 zone-encoded fabric stamp (`02:bf:72:fe:HH:LL` source MAC) has two
@@ -1677,3 +1733,71 @@ zone shares its low 16 bits, as that receiver zone. A zone whose id has low 16
 bits 0 cannot be stamped at all; the build logs both cases. V2 NAT-scope
 stamps already carried a 24-bit scope id resolved to a full-width identity and
 are unchanged.
+
+## ICMP errors and expiring probes across a split (#18174)
+
+With the LAN RG on one node and the WAN RG on the other, traceroute/mtr
+crosses the fabric twice, and three rules keep it working:
+
+- **The redirecting node is the hop.** A transit packet that the LAN owner
+  hands to the WAN owner is still routed by the LAN owner: the fabric build
+  decrements TTL / hop limit and refuses an expiring packet, and the WAN owner
+  skips the decrement on fabric ingress. So the poll tail
+  (`poll_descriptor/mod.rs`, the FabricRedirect TTL check before the #9950
+  overlap record) answers a non-fabric, non-injected FabricRedirect whose TTL
+  would expire with a local Time Exceeded from the ingress unit, and the #7770
+  punt-seed sites install no seed for it.
+- **An error crosses the fabric stamped with the zone it arrived in.** The WAN
+  owner matches the hop's error to its own (fabric-ingress) row, whose reverse
+  half is a "fabric return" FabricRedirect stamped with the FORWARD ingress
+  zone (`lan`). `restamp_embedded_fabric_redirect`
+  (`poll_descriptor/embedded_icmp.rs`) re-stamps the embedded error's redirect
+  with its actual arrival zone (`wan`), so the LAN owner's RELATED check
+  (expected: the quoted session's forward egress zone) holds and a forged
+  error still faces that zone's policy.
+- **The LAN owner matches an already-reversed quote, on fabric ingress only.**
+  The frame it receives already names the client (outer destination and quote
+  in pre-NAT form), so it hits the forward session's canonical reply alias; the
+  #14665 outer-destination gate in `icmp_embed/nat_match_v4.rs` /
+  `nat_match_v6.rs` accepts the quoted pre-NAT source as the outer destination
+  only when `FABRIC_INGRESS_FLAG` is set. The same bytes arriving on the WAN
+  stay unmatched (`pre_nat_quote_off_fabric_is_not_related_18174`).
+
+- **The LAN owner matches the FIRST error on any of its workers (#18562).**
+  The only record the LAN owner holds for a NEW punted flow is its #7770 punt
+  seed, and that seed is worker-local: it lives in the session table of the
+  worker whose LAN queue saw the probe, and the shared maps never carry it.
+  The fabric NIC RSS-hashes the returning error independently, so it usually
+  lands on another worker, which found nothing in its own table or in the
+  shared maps (the WAN owner's HA import arrives ~hundreds of ms later) and
+  default-denied it `wan -> lan` — every `mtr -u` / UDP traceroute probe is a
+  new flow, so hop 2 read `???` for the whole split. Each worker's table now
+  mirrors its forward punt seeds into the node's one read-only
+  `PuntSeedDirectory` (`session/punt_seed_directory.rs`, held in
+  `SharedSessionOwnerRgIndexes::punt_seeds`), and the session-fallback arm of
+  `nat_match_v4.rs` / `nat_match_v6.rs` consults it last — after the local
+  table and the shared maps both missed — for a FABRIC-ingress error whose
+  quote is the punted FORWARD packet (`punt_seed_forward_quote_match`).
+
+  Why this keeps #7770's guarantees. The row is a snapshot of a seed that THIS
+  node's own policy permitted for a packet that ingressed on THIS node's
+  non-fabric interface; nothing arriving on the fabric can create one. It is
+  maintained only at the session table's own choke points (published by
+  `insert_record`; retired by `remove_entry`, the table's sole removal sink,
+  by every in-place rewrite of the seed, and by dropping the table) and stops
+  matching at the earlier of the seed's install-time idle deadline and a 2 s
+  bridge TTL (the first error arrives one hop RTT after the probe; later ones
+  are answered by the HA import), so it never outlives the seed it mirrors.
+  Every directory operation does bounded work per call and a worker never
+  waits on it (sharded, FIFO expiry with a per-call pop budget, `try_lock`
+  publish); it sustains ~16k new punted flows/s, and refusals past that are
+  counted in helper status. It is not session state: nothing materializes, promotes, exports,
+  sweeps, replicates or demotes from it, no data packet reads it, and an
+  admitted error still passes the F-077 per-session budget, the #14665
+  outer-destination gate, the path-error type scope and the zone-validated
+  RELATED check (expected zone: the seed's adjudicated egress zone, against
+  the authenticated fabric stamp). The admission it grants is the one the
+  same frame already gets once the WAN owner's HA import lands in the shared
+  maps; it only closes the window before that. The same bytes arriving off
+  the fabric stay unmatched
+  (`cross_worker_punt_seed_never_matches_off_fabric_18562`).

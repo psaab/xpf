@@ -411,6 +411,11 @@ type Manager struct {
 	// construction and refreshed in applyDataplaneAndHACore, mirroring
 	// frrHADemotionState's IsLocalPrimary source.
 	rgPrimaryProvider func(rgID int) (primary bool, known bool)
+	// heldRGReleaseFn is told which RGs an acknowledged helper inventory
+	// just DROPPED from the #18620 connected-row hold, so the owner of the
+	// routes-only publish can withdraw their connected rows. Called under
+	// m.mu: it must not block and must not take m.mu. Guarded by m.mu.
+	heldRGReleaseFn func(rgIDs []int)
 	// rgProviderWired latches true once SetRGPrimaryProvider installs a
 	// non-nil provider (#15919). The daemon gates clustered snapshot
 	// builds on RGProviderWiredFor so the nil-provider window cannot
@@ -894,6 +899,19 @@ func (m *Manager) SetRGPrimaryProvider(provider RGPrimaryProvider) {
 	} else if !m.rgProviderWired && wasWired {
 		slog.Warn("userspace: RG primary provider cleared; clustered snapshot builds are gated until it is rewired (#15919)")
 	}
+}
+
+// SetHeldRGReleaseFunc wires the callback that withdraws the connected rows
+// of RGs leaving the #18620 hold (helperActiveRGsLocked). Whichever path gets
+// the helper to acknowledge a deactivation fires it: the demotion edge, the
+// reconcile retry after a failed write, or a replay. Nil disables it.
+func (m *Manager) SetHeldRGReleaseFunc(fn func(rgIDs []int)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.heldRGReleaseFn = fn
 }
 
 // RGProviderWiredFor reports whether a snapshot build for cfg may rely

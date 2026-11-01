@@ -72,14 +72,14 @@ is right and this table needs an edit in the same change.
 | Runnable shell | 59 = 58 harnesses + `harness-result.sh` (the envelope) |
 | Sourced shell libraries | 23 = the 21 named in `scripts/harness-census.sh` (`cluster-cell.sh`, `cluster-env.sh`, `cluster-lock.sh`, `cos-apply-lib.sh`, `deploy-lib.sh`, `fbf-steering-lib.sh`, `failover-client-lib.sh`, `failover-clock-lib.sh`, `failover-journal-lib.sh`, `ha-assurance-lib.sh`, `ha-smoke-iperf-lib.sh`, `host-inbound-lib.sh`, `iperf-throughput-lib.sh`, `mouse-elephant-lib.sh`, `newflow-ceiling-lib.sh`, `private-rg-lib.sh`, `screen-probe-lib.sh`, `stress-failover-lib.sh`, `target-services.sh`, `wire-config-snapshot-lib.sh`, `wire-gate-lib.sh`) + `active-fw.sh` + `v6-na-recovery-lib-12495.sh` (both declared in `HARNESSES.unreached` as `LIBRARY`) |
 | Hermetic shell self-tests | 33 `*-selftest.sh`, listed below |
-| Python | 57 = 26 tests (`*_test.py`, `test_*.py`) + 31 modules/helpers (incl. `unittest_shim.py`, `wire-routing-separation-temporal-selftest.py`) |
+| Python | 59 = 27 tests (`*_test.py`, `test_*.py`) + 32 modules/helpers (incl. `unittest_shim.py`, `wire-routing-separation-temporal-selftest.py`) |
 | Cluster defs & fixtures | 26 tracked files that are neither `*.sh` nor `*.py` outside the Rust crates (listed under Non-code files) |
 | Rust crates | `cold-path-flooder/` (`Cargo.toml`, `Cargo.lock`, `src/main.rs`, `.gitignore`), `newflow-gen/` (same four) |
 | Declarations | `GO_BUILDTAG_REVIEWED`, `HARNESSES.unreached`, `LEDGER_COVERAGE.unreached`, `ledger-expected-red.txt` (counted in Non-code files above) |
 
 ### Runnable shell (58 harnesses + the envelope)
 
-Reached by a Makefile recipe today (33, per `harness-census.sh`,
+Reached by a Makefile recipe today (35, per `harness-census.sh`,
 which also counts the 5 `scripts/userspace-*.sh`): `cc-rollback-functional.sh`,
 `cluster-build-identity.sh`, `cluster-setup.sh`, `dhcp-lease-failover.sh`,
 `harness-result.sh`, `ipsec-9506-fixture.sh`,
@@ -88,7 +88,7 @@ which also counts the 5 `scripts/userspace-*.sh`): `cc-rollback-functional.sh`,
 `test-active-active.sh`, `test-chained-crash.sh`,
 `test-connectivity.sh`, `test-double-failover.sh`, `test-failover.sh`,
 `test-fbf-steering.sh`, `test-ha-crash.sh`, `test-host-inbound.sh`,
-`test-private-rg.sh`, `test-restart-connectivity.sh`,
+`test-private-rg.sh`, `test-restart-connectivity.sh`, `rg-move-soak.sh`,
 `test-rolling-upgrade.sh`, `test-stress-failover.sh`,
 `test-wire-properties.sh`, `wg-interop.sh`, `wire-appmatch-twins.sh`,
 `wire-conntrack-lifecycle.sh`, `wire-hostinbound-deny.sh`,
@@ -141,7 +141,7 @@ a new one with no registration fails `scripts/selftest-census.sh` by name.
 
 ### Python modules vs tests
 
-Modules/helpers (31): `cluster_status_parse.py`,
+Modules/helpers (32): `cluster_status_parse.py`,
 `cos_be_contention_validate.py`, `cos_fixture_spec.py`, `fairness_cov.py`,
 `fairness_equal_flow_capture.py`, `fairness_multi_sample.py`,
 `fairness_surplus_giveback_validate.py`, `host_inbound_probe.py`,
@@ -153,11 +153,12 @@ Modules/helpers (31): `cluster_status_parse.py`,
 `step1-rss-multinomial.py`, `step2-sched-switch-classify.py`,
 `step2-sched-switch-reduce.py`, `step3-tx-kick-classify.py`,
 `unittest_shim.py`, `v6-na-parse-12495.py`,
+`rg_move_soak.py` (the #18583 RG-move soak; `rg-move-soak.sh` runs it),
 `wire-routing-separation-temporal-selftest.py`, `wire_probe_burst.py`,
 `wire_raw_tcp_burst.py`, `wire_routing_probe.py`, `wire_tcp_accept.py`,
 `wire_tcp_hold.py`.
 
-Tests (26, run by `run-selftests.sh` §3b via `unittest discover` over
+Tests (27, run by `run-selftests.sh` §3b via `unittest discover` over
 `*_test.py`/`test_*.py`): `cluster_status_parse_test.py`,
 `cos_be_contention_validate_test.py`, `cos_port_grid_test.py`,
 `fairness_cos_active_fw_test.py`, `fairness_cov_test.py`,
@@ -168,7 +169,8 @@ Tests (26, run by `run-selftests.sh` §3b via `unittest discover` over
 `mouse_latency_aggregate_test.py`, `mouse_latency_orchestrate_test.py`,
 `mouse_latency_probe_test.py`, `newflow_ceiling_analyze_test.py`,
 `policy_scheduler_validate_test.py`,
-`retire_ebpf_artifact_schema_test.py`, `rolling_upgrade_oracle_test.py`,
+`retire_ebpf_artifact_schema_test.py`, `rg_move_soak_test.py`,
+`rolling_upgrade_oracle_test.py`,
 `step1_histogram_classify_test.py`, `step1_rate_spread_analysis_test.py`,
 `step1_rss_multinomial_test.py`, `step2_sched_switch_classify_test.py`,
 `step2_sched_switch_reduce_test.py`, `step3_tx_kick_classify_test.py`,
@@ -182,6 +184,9 @@ canonical default), `tcp-userspace-cluster.env`,
 Configs/fixtures: `cos-iperf-config.set`, `cos-iperf-same-class.set`,
 `cos-iperf-symmetric.set`, `fbf-two-upstream-config.set`,
 `sqm-cookbook-config.set`, `failover-client-connect-error.jsonl`,
+`failover-crash-straggler-2s91.jsonl` and
+`failover-crash-straggler-4s05.jsonl` (real loss crash-run iperf3 logs,
+cut; #18692 rows in `iperf3_sum_parse_test.py`),
 `loss-userspace-shared-umem-phase0-node0.json`,
 `loss-userspace-shared-umem-phase0-node1.json`, `xpf-cluster-fw0.conf`,
 `xpf-cluster-fw1.conf`, `xpf-internet-test.conf`, `xpf-test.conf`,
@@ -219,7 +224,7 @@ Cluster selection (highest precedence first):
 | `XPF_CLUSTER_LOCK` / `XPF_CLUSTER_LOCK_TIMEOUT` | Lock file (default under `/var/worktrees/.cache/tmpdir/`) / wait timeout in seconds for `with-cluster.sh`; `XPF_CLUSTER_LOCK_HELD` is set inside a live cell and makes nested cells reentrant |
 | `XPF_LEDGER`, `XPF_REPO_ROOT` | Ledger directory override / repo-root override for `harness-result.sh`; defaults `test/results/ledger.d/` and the git toplevel |
 | `TMPDIR`, `GOCACHE`, `GOTMPDIR`, `CARGO_TARGET_DIR` | Scratch pins for self-tests; `run-selftests.sh` defaults them under `/var/worktrees/.cache` and an explicit caller value wins |
-| Sourced env files | Set `INCUS_REMOTE`, `VM0`/`VM1` or `FW0`/`FW1`, `LAN_HOST`, `PROFILE`, `CLUSTER_CONF`, `LAN_*`, `WAN_*`, `IPERF_TARGET4/6`, `MOUSE_TARGET_*`, `DMZ_*`; `cluster-env.sh` derives the rest, and an explicit caller override of any derived name wins |
+| Sourced env files | Set `INCUS_REMOTE`, `VM0`/`VM1` or `FW0`/`FW1`, `LAN_HOST`, `PROFILE`, `CLUSTER_CONF`, `LAN_*`, `WAN_*`, `IPERF_TARGET4/6`, `MOUSE_TARGET_*`, `DMZ_*`, and loss's `TARGET_ALIAS_V4_DEPRECATED` (`.200`; `mouse-target-setup.sh` keeps that pin only while held, and the expiry is in the env file). `cluster-env.sh` derives the rest. An explicit caller override of any derived name wins. Exception, the #18576 leak guard: loading a DIFFERENT env first unsets every name still equal to the value the previous env resolved, and the census in `cluster-env-selftest.sh` keeps that guard list complete. Run knob, not set by env files: `MOUSE_TARGET_CLAIM_PROBE=skip` skips `mouse-target-setup.sh up`'s claim probe of a new address. The skip is recorded in `mouse-addr.service` and shown by `status` |
 
 Never hardcode a node: source `cluster-env.sh` (directly or via
 `deploy-lib.sh`) and use `$FW0`, `$FW1`, `$CLUSTER_LAN_HOST`. For live

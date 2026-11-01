@@ -368,8 +368,12 @@ The manual sequence above is available as one guarded command:
 
 ```
 xpfd upgrade --rollback [--target <version>]
-xpfd upgrade --rollback --rolling [--target <version>]
+xpfd upgrade --rollback --rolling [--target <version>] [--rejoin-deadline <duration>]
 ```
+
+`--rejoin-deadline` bounds the rolling form's two post-cut waits (see
+[Rejoin deadline](#rejoin-deadline---rejoin-deadline-18415)); it is refused
+without `--rolling`.
 
 Without `--rolling`, the command is for a standalone node and refuses when
 `/etc/xpf/node-id` marks the node as clustered. On HA, run the rolling form
@@ -669,9 +673,19 @@ unit drop-in before the next cut.
 
 ## HA rolling upgrade (`xpfd upgrade --rolling`)
 
+```
+/usr/local/share/xpf/staged/xpfd upgrade --rolling [--rejoin-deadline <duration>]
+```
+
 Cuts the LOCAL clustered node with a controlled drain so the cluster
 keeps forwarding. Run on each node in turn (the deploy driver sequences
 both); exactly one node is primary throughout.
+
+Run the STAGED binary, as `test/incus/cluster-setup.sh` does. Before the cut,
+`/usr/local/sbin/xpfd` is still the OLD release, so `xpfd upgrade --rolling`
+runs the old orchestrator with the old defaults. On the first roll to the
+release carrying #18415, only the staged binary has the 190s rejoin default
+and the progress lines.
 
 Upgrade the standby (secondary) first, let it converge with the old primary,
 fail over, and then upgrade the former primary. Configurations persist
@@ -804,10 +818,11 @@ state machines are untouched.
    including any failure while resuming a ROLLINGBACK journal, which counts
    as stop-attempted even when this run has not STOPped yet (#12175).
 6. wait for session sync to re-establish, bounded by `RejoinDeadline`
-   (60s default). The cut just restarted xpfd, so the local gRPC socket
-   refuses connections for the first few seconds — that `connection
-   refused` is the EXPECTED transient, treated as "not ready yet" and
-   re-polled until the deadline (NOT a hard abort on the first dial
+   (190s default; see [Rejoin deadline](#rejoin-deadline---rejoin-deadline-18415)).
+   The cut just restarted xpfd, so
+   the local gRPC socket refuses connections for the first few seconds —
+   that `connection refused` is the EXPECTED transient, treated as "not ready
+   yet" and re-polled until the deadline (NOT a hard abort on the first dial
    error). Only the deadline aborts, surfacing the last observed error;
    the node is then left secondary for the operator to inspect.
 7. `ResetFailover()` to rejoin election, then a **per-RG rejoin confirm**
@@ -838,6 +853,81 @@ state machines are untouched.
    so the binary rolling cut and the LANE-1 kernel roll share ONE definition
    of "rejoined". On failure the node is left secondary and the error tells
    the driver explicitly not to advance to the peer.
+
+### Rejoin deadline (`--rejoin-deadline`, #18415)
+
+`RejoinDeadline` bounds EACH of the two post-cut waits separately: step 6
+(session sync re-establishes on the restarted daemon) and step 7 (the node
+stays held secondary until its inbound bulk prime completes, then the failover
+reset and the per-RG rejoin confirm). The worst case after the cut is therefore
+**2 x RejoinDeadline**: 6m20s at the default.
+
+**Default: 190s.** `upgrade.DefaultRejoinDeadline` is derived in
+`pkg/upgrade/rolling.go` from these constants:
+
+- **The peer's retry schedule.** The upgraded node is primed by its PEER's
+  bulk. `startSessionSyncPrimeRetry` (`pkg/daemon/daemon_ha_sync.go`) re-pushes
+  a node's OUTBOUND bulk until that peer acks it, with attempts after 10s, 20s,
+  then 30s four more times. The last attempt is at +150s
+  (`upgrade.PeerBulkPrimeRetryWindow`). The schedule that matters is therefore
+  the peer's: in a forward roll it is the OLD binary's, and in a rollback the
+  newer one's.
+- **The late-ack bound.** If that last attempt's ack is withheld, the peer's
+  sweep waits `cluster.BulkAckPendingRetryAfter` (35s) before it re-drives the
+  owed cold prime, which lands at about +185s.
+- **Transfer and ack.** 5s are added for that bulk's transfer and ack.
+
+`TestSyncPrimeRetryWindowBoundsRollingRejoin18415` (`pkg/daemon`) fails if the
+schedule changes without the rolling default being re-derived.
+
+The pre-#18415 default was 60s, and it aborted rolls whose prime completed a few
+seconds later. The observed cause was the first inbound bulk being discarded on
+a zone-map generation move (`snapshot_map_gen` != `map_gen`). #18547 (under
+#18374) removed that cause, so a healthy roll primes on the first bulk. The 190s
+default is margin for a lost ack or a reconnect. It is still a hard,
+fail-closed bound.
+
+**The flag.** `--rejoin-deadline <duration>` is validated at parse time, before
+the runner is built and so before any demotion. The deadline is consulted only
+after the irreversible cut, so a value that would guarantee a timeout must never
+get that far.
+
+- `0`, or omitting the flag, selects the default.
+- A negative value is refused.
+- A value below `upgrade.MinRejoinDeadline` (30s) is refused. Such a bound
+  cannot cover the daemon restart plus the peer's first retry at +10s.
+- The flag is refused without `--rolling`, because a standalone cut or
+  rollback has no rejoin phase (the same rule as `--target` without
+  `--rollback`).
+- The library also refuses a negative `RollingConfig.RejoinDeadline` before
+  `ForceSecondary`.
+
+**Progress.** Both waits log a line every 15s
+(`DefaultRejoinProgressInterval`). Each line gives the phase, the elapsed time
+against the deadline, the predicates and the last observed error, for example:
+
+```
+rolling: still waiting: rejoin, held secondary until the inbound bulk prime completes: 15s elapsed of 3m10s deadline (peer-alive=true sync-established=true bulk-primed=false local-rejoined=not-queried-before-reset; last error seen: session-sync inbound bulk prime not complete); Ctrl-C is deferred until the run finishes
+```
+
+The first line of each wait notes that Ctrl-C is deferred: after STOP the
+#16796 signal guard holds an interrupt until the run finishes. A wait that
+completes inside the first interval prints nothing.
+
+**What a timeout leaves.** The node stays **held secondary**: the
+`ForceSecondary` hold (manual failover on every RG) is not cleared, because
+`ResetFailover` never runs after the deadline (it is re-checked immediately
+before the reset). The command exits 1 and tells the driver not to advance;
+the peer is never drained. The cluster keeps forwarding on the peer. To recover:
+
+1. Inspect the node: `show chassis cluster status`, session-sync state and the
+   journal.
+2. When it is healthy and primed, rejoin it with `xpfd upgrade kernel rejoin`.
+   This is the same confirmed node rejoin as step 7: bulk-prime gate, reset of
+   every RG, per-RG readback. Alternatively, run `request chassis cluster
+   failover reset redundancy-group <N>` for each configured RG and check the
+   weights.
+3. Then roll the peer.
 
 ### `--unit` and the cluster control endpoint (#1983)
 
@@ -1164,6 +1254,28 @@ within the deadline, the rolling driver fails back and ABORTS WITHOUT
 cutting. A peer that cannot take over therefore never leads to a cut — at
 worst the drain times out and the local node is restored to forwarding.
 
+**An RG0 primary that refused a peer push (#18610).** After a dual-active
+window the RG0 primary may have refused the peer's config push as the
+authority. Before #18610 that refusal left the primary reading `Transfer
+ready: no (standby config stale ...)` on every RG and carrying `CF` for as
+long as it stayed primary, so `xpfd upgrade --rolling` started there aborted
+with "peer is NOT takeover-ready". A build with #18610 does not count that
+refusal against itself while it is the authority. If the stuck primary still
+runs an older build (a mixed-version roll from a release without the fix),
+demote it first: `request chassis cluster failover redundancy-group 0 node
+<peer>`. The new primary pushes its config, the old primary applies it, reads
+`Transfer ready: yes`, and the roll can start. That push REPLACES the old
+primary's config with the peer's, so first check `show chassis cluster
+information` (`Last config generation refused as RG0 authority`) and the
+journal Warn, which says whether the refused config differed from the active
+one; if it did, re-apply any change you need after the failover.
+The losing node had the mirror symptom: its own refused push left a #9569 send
+debt, so a roll started THERE refused with the stale-config gate. A primary with
+#18610 re-pushes its config after refusing (at most once per 10 s), which the
+loser applies, clearing the debt. Against an older primary, a new commit on the
+primary clears it: it is pushed under a new generation, which the loser
+applies.
+
 ## Session-sync wire version on the in-place path (#7990)
 
 The LANE-1 in-place rolling path had **no session-sync version check at all**
@@ -1263,6 +1375,26 @@ reconcile above (extend it only for maps whose loss is truly safe).
   staged node restarts, it waits for sync to re-establish before resetting
   failover and rejoining. This is not an unplanned-failover timing promise
   (`pkg/upgrade/rolling.go:92-108,366-375`).
+- **Direct-VIP leftovers from a pre-#18573 xpf.** From #18573, xpf prunes
+  only the RETH VIPs it can prove it installed, meaning addresses that carry
+  `IFA_PROTO 0xbf` (`pkg/vipstamp`). An address a pre-#18573 binary left
+  behind after a renumber carries no stamp, so the upgraded daemon never
+  removes it. The same is true of an address a renumber leaves behind when
+  it is committed while the RG owner still runs the old binary, for example
+  mid rolling upgrade: the old owner keeps the old address unstamped, and its
+  drain removes only the configured set. Such an address:
+  - stays on the netdev, so the owner keeps answering ARP for it;
+  - can still be the interface-SNAT source, because the userspace snapshot
+    filter also skips unstamped addresses. This is the udp LAN-to-1.1.1.1
+    0/30 blackhole measured in #18573.
+
+  To find one, run `ip -d addr show dev <reth netdev>` (for example
+  `ge-0-0-2.50`). Look for an address with no `proto 0xbf` that
+  `show configuration interfaces <reth> unit <n>` no longer lists. Remove it
+  with `ip addr del` on the node that holds it, or reboot that node: RETH
+  VIPs are not persisted, so a reboot clears it. A configured VIP that an
+  older xpf installed needs nothing; the first owner pass after the upgrade
+  stamps it with `NLM_F_REPLACE`.
 - Kernel/OS upgrades are #1930; a signed/hosted apt repo is #1924.
 
 ### APT package-selection boundary (#10848)
@@ -1374,7 +1506,7 @@ OFF-BOX address reachable over a dataplane interface** — the far end of a
 transit link, or the HA peer's dataplane address.
 
 The management classifier is `config.IsManagementIfName`, the #7515 SSOT already
-shared by the daemon's `vrf-mgmt` binder, the networkd `VRF=` emitter and the
+shared by the daemon's `vrf-mgmt` binder, the networkd `KeepMaster=yes` emitter and the
 ip-monitoring next-hop validator. It is injected by the caller for the same
 reason `HelperStatus` is, and a `nil` classifier is "no information" rather than
 "ineligible" — but both production constructors wire it, and tests bind that

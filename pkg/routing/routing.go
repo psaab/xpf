@@ -154,6 +154,17 @@ func (m *Manager) BindInterfaceToVRF(ifaceName, instanceName string) error {
 	return m.vrf.BindInterfaceToVRF(ifaceName, instanceName)
 }
 
+// VRFMasterMoveSeq reports how many times this manager has changed the VRF
+// master of the named link (#18597). An idempotent bind of a link already in
+// its VRF does not count, so two equal reads mean the daemon did not move the
+// link in between.
+func (m *Manager) VRFMasterMoveSeq(ifaceName string) uint64 {
+	if m == nil || m.vrf == nil {
+		return 0
+	}
+	return m.vrf.MasterMoveSeq(ifaceName)
+}
+
 // UnbindInterfaceFromVRFs detaches an interface only if its current master is
 // one of the named routing-instance VRFs. Unrelated masters are left intact.
 func (m *Manager) UnbindInterfaceFromVRFs(ifaceName string, instanceNames []string) (bool, error) {

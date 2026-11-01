@@ -1295,6 +1295,29 @@ Detected by the presence of `/etc/xpf/node-id` (contents `0` or `1`).
 Absent → standalone. Cluster mode triggers the bondless-RETH naming
 convention (`fxp0`, `em0`, `ge-{0,7}-0-X`).
 
+### Live control-link changes are refused at commit (#8965, #8987, #9121, #18606)
+
+The cluster-endpoint commit preflights in `cluster_topology_preflight.go`
+and `cluster_control_local_addr_preflight_18606.go` run at all three apply
+paths (`commitAndApply`, `syncAndApply`, `commitConfirmedAndApply`): the peer
+address (#8965), the control interface (#8987), the config-sync endpoint
+(#9121) and, since #18606, this node's OWN control-link address (refused when
+the commit removes the address the running heartbeat is bound to; the address
+set compared is the one networkd renders, so adding `dhcp` / `dhcpv6` to the
+control unit while keeping the bound static address is a renumber too). On the
+local commit paths they run before promotion. On the synced path only the
+#18606 gate does — it runs inside `Store.SyncApplyGated`, on the compiled peer
+text, so a refused push promotes nothing; the #8965/#8987/#9121 synced checks
+still run after `SyncApply` has promoted (#18622). Each refusal
+names the procedure: set the change on BOTH nodes and restart xpfd on both,
+offline. The design, the per-path safety arguments and the
+abstain cases are in `docs/ha-no-hitless-restart.md`. Cells:
+`cluster_control_local_addr_preflight_18606_test.go` (decision table, the
+running-bind read, each apply path refusing a renumber, the synced re-push /
+later push / later local commit / background apply after a refusal, a
+steady-state synced text passing, and the wiring census against the #8965
+sibling) and `pkg/configstore/sync_apply_gated_18606_test.go`.
+
 ### Cluster-comms epoch lifecycle (`startClusterComms` / `stopClusterComms`, #4958)
 
 `startClusterComms` (`daemon_ha_sync.go`) launches an **asynchronous
@@ -1988,6 +2011,92 @@ digest-gated. Pinned by `ra_pd_renew_standalone_16773_test.go`, including
 fail-first and unavailable-store recovery without a second DHCP nudge, plus
 a no-retry-after-success control.
 
+### Session-derived neighbour warm-up probes only held on-link endpoints (#18617)
+
+`warmNeighborCache` (`daemon_ha.go`) sends one 1-byte UDP datagram to port 1
+of each unique session endpoint, so the kernel resolves a neighbour, which then
+reaches the helper's neighbour snapshot. In cluster mode it runs on the 15 s
+resolve tick and on every synced-session install
+(`OnForwardSessionInstalled` → `scheduleStandbyNeighborRefresh`, at most once
+a second).
+
+Before #18617 it probed every global endpoint through the default route. On a
+node holding RG1 (WAN) but not RG2 (LAN), as in test-failover's manual RG1
+failback slice, the probe to a LAN host's global address went out the WAN,
+came back from the upstream router to the cluster's own WAN address, and was
+default-denied as transit on this node. That happened about once a second for
+the whole split, and it is the RG1 Group 4 "policy denied" failure on every
+run. Probes to the source-NAT pool / proxy-ARP address looped the same way
+through whichever node answers ARP for it. Every routed peer, internet hosts
+included, received a junk datagram, and its ICMP port-unreachable reply showed
+up as a host-inbound deny.
+
+The per-pass plan (`neighbor_warm_plan_18617.go`) is built from the active
+config, not from the kernel route table:
+
+- **owned** (never probed): every configured unit address, including RETH
+  VIPs this node does not hold right now; VRRP virtual addresses; source-NAT
+  pool addresses and prefixes; proxy-ARP addresses; and any address the kernel
+  holds on a configured interface (a DHCP lease).
+- **probed**: an endpoint inside a configured unit prefix that this node holds
+  now. Holding means the unit is non-RETH or this node is primary for the
+  RETH's RG, AND the kernel holds an address inside the prefix on that
+  interface. A DHCP unit contributes the prefix of its held lease. The longest
+  configured prefix decides. The probe socket is bound to that unit's
+  interface (`SO_BINDTODEVICE`), so it cannot follow a default route.
+- **skipped** (counted at Debug): routed endpoints, whose gateway is warmed
+  by the configured-target pass (`resolveNeighbors`) and by the force-probe
+  re-validation of existing kernel entries; and endpoints on a RETH prefix
+  this node does not hold.
+
+`collectMonitoredNeighbors` (force-probe) drops owned addresses from the
+kernel neighbour entries it re-validates. Sockets are bounded at two per
+probed interface (#5451's bound, now per interface). The two per-second lines
+(`neighbor cache warmup complete`, `proactive neighbor resolution`) and
+force-probe's per-tick `force-probe neighbors` log at Debug. None is a state
+transition, so no Info line remains in this subsystem.
+
+**Seeing that it works (review of #18625).** A pass that probes nothing reads
+exactly like a fixed one: Group 4 is 0 either way, and the standby gap below
+keeps Group 2 flat. So the last pass is shown in `show chassis cluster
+information` (through `Manager.SetInformationExtraFunc`):
+
+```
+Neighbor warm-up (last pass 2s ago):
+  Probed: 12 IPv4, 4 IPv6
+  Skipped: 2 cluster-owned, 3 not held, 40 routed, 0 not unicast
+  Socket bind failures: 0
+  Primary prefixes not held: 0
+```
+
+Before the first pass it reads `Neighbor warm-up: no pass yet`. The two
+silent no-op causes Warn once on their rising edge
+(`neighbor_warm_health_18617.go`):
+
+- a RETH prefix of an RG this node is primary for, where the kernel holds no
+  address in the prefix on that interface, once it has persisted 5 s (a VIP
+  normally lands within milliseconds of activation);
+- a probe socket that cannot be opened and bound.
+
+Force-probe's `neighbor probe truncated` Warn is edge-triggered as well.
+
+**Coverage.**
+
+- On the RG owner, an on-link endpoint is probed as before, through the
+  interface its connected route uses. Inside a VRF the bound socket now
+  resolves where the old unbound probe got `Network is unreachable`.
+- A routed endpoint is no longer probed. Its gateway is warmed only by the
+  configured-target pass (`resolveNeighbors`: static next hops, DHCP gateways,
+  backup router, NAT and address-book host targets). A dynamic-routing next
+  hop (BGP/OSPF) is covered only by force-probe, and only once it is already
+  in the kernel neighbour table.
+- On a node that does not own an RG, the old probe to an endpoint on that
+  RG's prefix followed whatever other route existed (usually the WAN default
+  route), so it never resolved a neighbour on the RETH member. A standby holds
+  no address there, so neither the kernel nor the helper can resolve
+  neighbours on it. That standby pre-warm gap predates #18617 and is tracked
+  in #18621.
+
 ### Direct-mode VIP failover (private-rg-election / no-reth-vrrp)
 
 When `no-reth-vrrp` or `private-rg-election` is configured, the daemon owns
@@ -2029,6 +2138,111 @@ foreign address and the real gateway's ARP cache was never updated → post-
 failover blackhole until the stale entry aged out. #2377 fixed the identical
 forced-.1 in `vrrp.sendGARP` but missed this direct-mode site; #3922 routes
 both through the shared `vrrp.GatewayProbeTarget` helper.
+
+**VIP ownership is stamped in the kernel (#18573).** `directAddVIPs` /
+`directRemoveVIPs` both run `reconcileDirectVIPAddrs`
+(`direct_vip_reconcile_18573.go`). Before #18573 both derived their address
+set from the active config at call time and recorded nothing. A commit that
+renumbered a RETH unit (`.10` -> `.42`) therefore left `.10` on the RG owner
+indefinitely: the owner pass only added the new set, demotion only removed the
+new set, and `reconcileInterfaceAddresses` skips RETH netdevs. Now:
+
+- Every direct-mode VIP is installed with `IFA_PROTO = vipstamp.Proto`
+  (`0xbf`, `pkg/vipstamp`; raw netlink because netlink v1.3.1 cannot encode or
+  decode it). The stamp lives on the kernel address object, so it is not a
+  shadow registry: every removal path (commit, demotion, link-cycle flush,
+  operator `ip addr del`, netdev deletion) removes the record with the
+  address, and a later foreign install of the same address carries its own
+  proto, never xpf's.
+- Every pass deletes each stamped **leftover** (`vipstamp.Leftover`: stamped,
+  and `config.AddressIdentitiesByNetdev` assigns no such address to that
+  netdev). The predicate is config-only, so the owner and the non-owner reach
+  the same verdict. It covers a renumber, a removed unit or RETH, a moved
+  VLAN id and a unit disabled by commit, in both families.
+- The owner (`want=true`) adds absent configured VIPs and stamps one that is
+  present but unstamped (installed by a pre-#18573 xpf) with an
+  `NLM_F_REPLACE`, so a later renumber of it is caught too. After any delete
+  it re-asserts every configured VIP, because deleting an IPv4 primary
+  without `promote_secondaries` takes its subnet's secondaries with it.
+- The non-owner (`want=false`) still deletes every configured VIP of the RG,
+  stamped or not (the pre-#18573 contract), so it never holds the address.
+  After an RG move the new owner installs only its own active config's set.
+- Never deleted: an unstamped address the config does not name for this RG
+  (DHCP lease, kernel or stable link-local, another daemon's address), and a
+  stamped address the config still assigns to its netdev. With
+  `promote_secondaries=0`, deleting an IPv4 primary makes the kernel delete
+  every secondary in its subnet, foreign ones included. The guarantee does
+  not rely on systemd's `50-default.conf` setting that sysctl to 1. Before
+  the first IPv4 delete on a netdev, `guardIPv4PrimaryCascade` sets
+  `net.ipv4.conf.<netdev>.promote_secondaries=1`. If the write fails, the
+  pass skips any IPv4 **leftover** delete whose subnet holds an address that
+  is neither being deleted nor a configured VIP of this RG, and warns once.
+  A not-owner delete is never skipped: the demoting node must drop the VIP
+  the peer now owns, or both nodes hold it
+  (`TestDirectVIPRenumberOnKernel18573` runs with the sysctl pinned to 1 and
+  to 0, plus a control that proves the 0 case cascades).
+- A kernel that ignores `IFA_PROTO` accepts a stamped add and records 0
+  (before 6.3 the kernel's netlink parser drops type 11; the appliance floor
+  is 6.18). The first pass that writes a stamp reads it back once. If the stamp
+  reads back as 0, the pass latches `directVIPStampUnsupported` for the
+  process lifetime, warns once, and stops adopting. If it reads back intact,
+  `directVIPStampVerified` latches, and no later pass (including every
+  promotion, on the GARP path) pays the extra dump. Without the latch every tick
+  would REPLACE every VIP. On such a node, leftover removal cannot work and
+  the warning says so.
+- `reconcileAfterRethLinkCycle` (`daemon_apply_dataplane.go`) re-adds VIPs
+  after a link cycle through `directAddVIPs`, which can now delete. It takes
+  `directVIPMu` and re-checks ownership under it, like every other
+  direct-VIP actuation, so a demotion racing the apply cannot have its
+  removal undone. Lock order is `applySem` -> `directVIPMu`; nothing under
+  `directVIPMu` waits for `applySem`.
+- If the ownership dump fails, the pass degrades to the pre-#18573
+  add-all / remove-all over the configured set. It does not delete on a
+  readback it does not have, and it never does less than the old code.
+  The warning fires once per failure streak (`directVIPDumpFailing`).
+- Every netdev on which a pass deletes a leftover is queued to the
+  interface-link snapshot refresher (`interfaceLinkRefreshWake`), so a
+  reconcile-path removal republishes the userspace interface rows without a
+  commit. Adds and not-owner removals do not queue, because a configured
+  address is merged into its row whether or not the kernel holds it. The
+  queue runs under `directVIPMu`, so it uses the lock-free
+  `wakeInterfaceLinkSnapshot` and never takes the userspace manager's `m.mu`.
+  Before waking, it checks relevance with the pure
+  `dpuserspace.ConfiguredInterfaceLinkName`, against the reconcile's own
+  config. The refresher keeps only the newest pending name, and a name with
+  no configured row publishes nothing. Waking it for a leftover on a unit the
+  commit removed would therefore displace a pending relevant refresh (for
+  example a recreated netdev's new ifindex, #15263) and clear its retry debt
+  with nothing published. That is why the check happens before the wake
+  (review Z2 on #18579).
+- The leftover sweep is global: every RG's pass, RG0's included, judges every
+  stamped address on every netdev. That is why the configured set must span
+  every group (`TestDirectVIPOtherRGsStampedVIPsSurviveEveryPass18573`). A
+  set that knew only the passing RG would delete and re-add another group's
+  VIPs every 2 s. The `removed` count that `applyDirectVIPOwnership` feeds
+  into the RG's service edge (`prev || removed > 0`) counts only this RG's
+  not-owner deletions, never a leftover.
+- Per-(netdev, VIP) diagnostics are latched in `directVIPLogged`: bad
+  address, failed add/remove/stamp, and adoption. Each logs once, not once
+  per tick. A commit clears them all (`resetVIPWarnings`). A failure latch
+  also re-arms when its operation next succeeds (`directVIPLogClear`, the
+  #7532 pattern), so a failure on a later failover with no commit in between
+  warns again.
+- Cost: one `RTM_GETADDR` dump per RG per 2 s pass. A shared per-tick dump
+  was considered and rejected. A cached dump read by a later RG's pass would
+  miss a concurrent link-cycle flush, the very removal it must see, and the
+  per-RG dump still makes fewer netlink calls than the pre-#18573 blind
+  `AddrAdd` per VIP per tick. The commit's own snapshot never carries the leftover:
+  see `pkg/dataplane/README.md` "Interface rows never publish a direct-VIP
+  leftover (#18573)".
+
+**Limit:** a VIP that a pre-#18573 xpf installed and that the config had
+already dropped before the upgrade carries no stamp and is not removed. The
+same applies to a renumber committed while the owner still runs the old
+binary. It must be deleted by hand once, or cleared by a reboot. See
+`docs/in-place-upgrade.md` "Honest limits". Cells: `direct_vip_reconcile_18573_test.go`
+(fake table, real config) and `direct_vip_kernel_18573_test.go` (private
+netns, forced by `test/daemon/selftest-daemon-kernel_15241.sh`).
 
 ## Interface management
 
@@ -3890,8 +4104,29 @@ never lock an operator out of a remote box it manages.
   Seams: `rsyslogRestartFn` / `chronyReloadFn` (both owners go through one
   entry point, which is what makes the re-drive assertable), `chronyRunCmd`
   (per-leg outcomes without a real chronyc), and `rsyslogConfDir` /
-  `chronySourcesPath` / `chronyThresholdPath` as vars so the reconcile runs
-  against a temp dir. Tests: `service_reload_debt_6800_test.go` (latch +
+  `chronySourcesPath` / `chronyThresholdPath` / `chronyAcquisitionPath` as
+  vars so the reconcile runs against a temp dir. #18584 added a third
+  managed chrony file, `/etc/chrony/conf.d/xpf-acquisition.conf`
+  (`bindacqdevice vrf-<instance>`, rendered when every `system ntp server`
+  names the same VRF-backed routing-instance — `config.NTPAcquisitionInstance`
+  decides). It rides the threshold leg's conf.d restart, because chronyd reads
+  conf.d only at start, and its debt is reported under `chrony-threshold`.
+  While a binding is on disk, or was just added or removed
+  (`chronyAcqRestartOwed`), that leg RESTARTS chrony outright instead of
+  trying `systemctl reload` first: a unit with an ExecReload would report
+  the reload done while chronyd kept its old sockets. On the first apply of
+  each daemon process that renders an UNCHANGED binding, `applySystemNTP`
+  restarts chrony unless `chronyc -n tracking` reports `Leap status: Normal`
+  AND chrony.service's `ExecMainStartTimestamp` is later than the binding
+  file's mtime (`chronySyncedFn`, `chronyLoadedBindingFn`,
+  `chronyAcqStartRestarted`) — synchronised alone is not proof the running
+  chronyd read the file (an xpfd that wrote it and died before restarting
+  chrony leaves an old chronyd that may still sync via the default instance):
+  chrony.service does not order after xpfd, so a chronyd started before
+  `vrf-mgmt` existed is restarted once the VRF does (re-opening its
+  `makestep` window), while a synchronised one is left alone — a gratuitous
+  restart leaves it unsynchronised ~10 s, which the clock monitor raises.
+  Cells: `ntp_acquisition_18584_test.go`. Tests: `service_reload_debt_6800_test.go` (latch +
   discharge pairs for both services; the steady-state retry with an explicit
   "the files really are converged" premise guard and its debt-free negative;
   per-leg outcome pairs; the two SYMMETRIC "owed leg survives an apply that
@@ -4067,7 +4302,9 @@ never lock an operator out of a remote box it manages.
   abort; `vrfErr` is the deferred VRF-device-setup failure, captured by
   `applyConfigLocked` and threaded into the tail `errors.Join(..., mgmtRouteErr,
   vrfErr)`. The AUTHORITATIVE post-networkd management-VRF re-bind (which
-  `networkctl reconfigure` necessitates by stripping the master binding) is
+  `networkctl reconfigure` used to necessitate by stripping the master
+  binding; since #18597 networkd renders `KeepMaster=yes` and the rebind is a
+  no-op for a link that stayed bound) is
   extracted into `rebindManagementVRFIfaces`, which aggregates and RETURNS its
   bind failures; `applyDataplaneAndHACore` joins them into `networkdErr` (like the
   #1956 device-map-teardown joins), so a genuine management-VRF bind failure also
@@ -4080,11 +4317,47 @@ never lock an operator out of a remote box it manages.
   its bind retries into `networkdErr`. That restart leaves the heartbeat stopped,
   owing a retry the next apply performs. The old call discarded
   `RestartHeartbeat`'s result. `HeartbeatRestartOwed` separates that case from a
-  heartbeat that was never running, which is not an error. Deliberately LEFT best-effort (WARN, not surfaced): the
+  heartbeat that was never running, which is not an error.
+
+  **The heartbeat restart is gated on a real control-link move (#18597).**
+  The restart used to run after EVERY apply with a management VRF, because
+  networkd's reconfigure detached em0 from `vrf-mgmt` on every commit and the
+  rebind moved it back. Measured on the loss cluster (master 0.0.26151, 20
+  commits that changed only `fxp0`'s description): every commit cycled em0
+  twice on both nodes and removed its address, the restart's first bind failed
+  (`bind: cannot assign requested address`), and once both nodes declared the
+  other lost and fw1 took every RG. networkd now renders `KeepMaster=yes`, and
+  `restartHeartbeatIfControlLinkMoved` (`heartbeat_rebind_gate_18597.go`)
+  restarts only when `routing.VRFMasterMoveSeq` for the configured control
+  link moved since the previous decision, or (post-networkd pass and reassert
+  tick only) a failed restart is still owed. It runs right after BOTH bind passes: after
+  step 0b in `applyVRFReconcile`, so a move there (vrf-mgmt recreated, or a
+  drifted em0) is followed by the restart at once rather than after the whole
+  networkd and dataplane apply, after the step-2.7 rebind, and in
+  `reassertMgmtVRFOnce` when the background loop moves a drifted control link
+  back (it used to rebind em0 and leave the sockets stale until the next
+  commit). A move of another management link (fxp0, fab0) does not restart the
+  heartbeat. A failure of the step-0b restart is NOT joined into commit truth:
+  it leaves the restart owed (#9751), and the post-networkd pass of the same
+  apply retries and reports it, so a 0b failure that 2.7 repairs does not fail
+  the commit (worst case, every bind failing, two ~5s restart windows under
+  applySem in one apply). The reassert tick also passes when only an owed
+  restart is outstanding and retries it (one restart per 30s tick), so a
+  restart that failed there does not leave the heartbeat stopped until the next
+  apply. A live renumber of this node's control-link address is refused at
+  commit by the #18606 preflight (separate PR, landing before or with this
+  one): the gate no longer restarts the heartbeat on every commit, so that
+  refusal, not an accidental per-commit restart failure, is what keeps a
+  renumber from silently stranding the heartbeat on the old address. An
+  in-PR runtime re-bind (a `LocalAddress` transport-key field) was tried and
+  removed after two review rounds each found a new HA defect in it. Cells:
+  `heartbeat_rebind_gate_18597_test.go`.
+
+  Deliberately LEFT best-effort (WARN, not surfaced): the
   routing-instance member binds (they run BEFORE `applyInterfaceReconcile` creates
   tunnel/xfrmi members, so a not-yet-created member is an EXPECTED transient
-  absence, not a permanent failure) and the pre-networkd management bind (stripped
-  and re-established by the authoritative rebind above) — surfacing either would
+  absence, not a permanent failure) and the pre-networkd management bind (the
+  authoritative rebind above re-attempts it) — surfacing either would
   reject configs that commit fine today. Tests:
   `vrf_setup_bind_commit_truth_5700_test.go` (direct `applyVRFReconcile`
   surfaces-setup / tolerates-success / ctx-cancel-is-not-a-VRF-error via a
@@ -4652,3 +4925,112 @@ never lock an operator out of a remote box it manages.
   actuation acquires `applySem` and republishes the routes-only snapshot. A
   confirmed changed publish is followed by a FIB-generation bump; an
   unconfirmed bump remains retryable even when the next publish is a duplicate.
+
+## RG-edge FRR reconcile is coalesced (#18561)
+
+`scheduleFRRHAReconcile` no longer starts one applySem-holding
+`frr-reload.py` per RG ownership edge. The first edge of a burst arms a
+`frrHAReconcileDebounce` (250 ms) timer, and edges that arrive while it is
+armed join it. The timer runs one reconcile, which reads the active config
+and cluster state at run time. An edge that lands after the timer fired arms
+a new one, so no edge is lost (`daemon_frr_ha_coalesce.go`).
+
+Why: on a crash takeover the election promotes every RG at once. Each
+promotion's synchronous `republishConnectedRGSync` (#16270) takes applySem,
+and each earlier edge's reload held it for 300-600 ms. On the loss cluster
+RG2 (LAN) became active 0.62 s after RG1. The helper FIB does not depend on
+FRR for transit forwarding, so the debounce only delays the kernel and
+routing-protocol view by 250 ms. Cells: `frr_ha_coalesce_18561_test.go`.
+
+Coalescing alone did not fix the crash case: the coalesced reload still
+held applySem for 300-600 ms, and on loss RG2 activated 0.45 s after RG1
+because its republish queued behind it. `runFRRHAReconcile` therefore
+renders under applySem (the render reads the active config and cluster
+ownership and stays ordered against config applies) and runs the reload
+AFTER releasing it. `frrApplySeq` keeps that out-of-lock apply from
+overwriting a newer config. An HA render captures two values under
+applySem: `frrApplySeq` (bumped by every HA render and by every RG ownership
+edge, so a render that predates an edge, including a demotion, is never
+applied) and the FRR manager's `UnconditionalWriteGeneration` (moved only
+by a predicate-free managed-section write that actually happened: the commit
+path's `ApplyFull` or a `Clear`, such as the fail-closed boot clear). A
+commit-path render that `ApplyFull` refuses before writing therefore does not
+cancel the HA reload, and neither does an older HA render that is still
+writing when a newer one is taken: HA renders order among themselves by the
+sequence alone (seat T found the older write dropping the newer render when
+`WriteGeneration`, which counts every write, was compared).
+`applyFRRConfigIfCurrent` applies only while both are unchanged and no
+factory reset is in progress. The FRR manager judges that predicate under
+its build lock (`buildMu`, which also serializes the managed-section build
+and its gauges) before building, and again under `reloadMu` immediately
+before the write; a superseded render returns `frr.ErrFRRApplySuperseded`
+and writes nothing. With `buildMu` and the reset barrier in place the
+recheck under `reloadMu` and the HA render's own sequence bump are
+defence-in-depth (a render overtaken while it waited on `buildMu` skips a
+write that the overtaking render would replace anyway); both are pinned by
+cells (`TestPredicateRecheckedBeforeWrite18561`,
+`TestFRRHARenderSupersededByLaterWrite18561`). `factoryReset` calls `frr.Manager.BuildBarrier` right
+after raising its reset flag, so no HA write can follow the wipe's
+managed-section strip.
+
+The 250 ms debounce applies to demotion edges as well as promotions. For a
+demotion it delays the kernel/routing-protocol withdrawal of the RG's
+routes; the helper FIB is republished on the edge itself. An HA render taken
+before the demotion edge is superseded by it unless it has already passed
+its last check (under `reloadMu`) when the edge lands. A render past that
+check still writes and reloads FRR with the RG's routes, and they stay
+advertised until the edge's own reconcile, at least 250 ms later, withdraws
+them. The predicate narrows that window to one write-and-reload; it does
+not close it.
+
+The RG-edge ip-monitoring gating reconcile (`scheduleIPMonGating`, #16690)
+is coalesced behind the same debounce (`ipmonGateHA`). When the gate
+changes it holds applySem across an FRR reload and a snapshot publish (the
+#3757 FRR-before-snapshot order needs both under one hold). On loss
+(0.0.26110) it started between RG1's and RG2's crash activations and RG2
+went active 0.52 s after peer loss; after the debounce, one run reads the
+gate predicate once the burst of activations has finished.
+
+## Demotion edge withdraws routes only after rg_active=false (#18620)
+
+`handleClusterEvent` schedules the three route-withdrawing reconciles of a
+cluster demotion edge only AFTER the `SetRGActive(false)` write:
+`scheduleFRRHAReconcile`, `scheduleConnectedRGRepublish` and
+`scheduleIPMonGating`. This is the demotion twin of #16270, which publishes
+the connected rows BEFORE `SetRGActive(true)` on promotion.
+
+Why: they used to be scheduled at the top of the handler. The connected-RG
+republish is an async goroutine on applySem, and it raced `UpdateRGActive`
+for the userspace manager's lock. On loss it won on about one demotion in
+ten. The helper then held a FIB without the RG's connected rows while it
+still forwarded the RG, for the 50-80 ms until the HA update landed.
+
+In that window, live SNAT sessions were revoked on their first FIB-stale hit
+(the #16215 StaleSourceNat path, +12 to +16 sessions per window). The next
+packet minted a #7770 punt seed that shadowed the flow when the RG returned:
+the 3-500 s ping and iperf outages of #18620.
+
+The schedules stay asynchronous; a demotion does not wait on applySem. The
+FRR and ip-monitoring reconciles are debounced 250 ms, so they reordered only
+when `SetRGActive` itself was delayed past that. Scheduling them after the
+write orders them by construction. `injectBlackholeRoutes`, which still runs
+before the write, is a no-op on the userspace dataplane and cannot move the
+helper FIB.
+
+The manager-side hold in pkg/dataplane (`helperActiveRGsLocked`) is the
+second half: no publisher can withdraw an RG's connected rows before the
+helper's acknowledgement. This ordering is what guarantees a withdrawal
+publish happens once that acknowledgement has landed.
+
+The schedules run even when the write FAILS. The reconcile retry that later
+lands it schedules none of them. The rows themselves stay held until the
+helper acknowledges, so scheduling here cannot withdraw them early. When the
+retry's ack does land, the manager's release hook
+(`wireUserspaceRGRouteHooks` -> `onHelperReleasedRGs`) schedules the
+withdrawal.
+
+Cells, in `demotion_route_order_18620_test.go`:
+- the ordering cell. The SetRGActive fake holds for 150 ms, and on revert the
+  publish lands inside the hold;
+- the failed-write cell;
+- `helper_release_republish_18620_test.go`, for the hook wiring.

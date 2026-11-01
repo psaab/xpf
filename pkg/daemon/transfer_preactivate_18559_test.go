@@ -1,10 +1,14 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #18559: the daemon half of the make-before-break transfer. The route
@@ -17,10 +21,12 @@ type fakePreActivateDP struct {
 	publishErr error
 	reverted   bool
 	marked     []int
+	until      time.Time
 }
 
 func (f *fakePreActivateDP) BeginTransferPreActivation(rgIDs []int, until time.Time) {
 	f.marked = append([]int(nil), rgIDs...)
+	f.until = until
 	f.recordCall("mark")
 	if time.Until(until) <= 0 || time.Until(until) > transferPreActivateTTL {
 		f.recordCall("bad-deadline")
@@ -113,5 +119,87 @@ func TestBeginTransferPreActivationUnsupportedDataplane18559(t *testing.T) {
 	d := routeListenerBumpDaemon11565(t, &fakeOverlayDP{})
 	if err := d.beginTransferPreActivation([]int{1}); !errors.Is(err, errTransferPreActivationUnsupported) {
 		t.Fatalf("err = %v, want errTransferPreActivationUnsupported", err)
+	}
+}
+
+// #18569: the pre-activation waits for applySem at most
+// transferPreActivateLockWait. A busy semaphore (a commit in flight, or a
+// stuck apply) makes the transfer fall back to break-before-make instead of
+// hanging the failover request, and nothing is marked or published. RED on
+// revert (the wait was unbounded under the daemon-lifetime context).
+func TestBeginTransferPreActivationBoundsApplySemWait18569(t *testing.T) {
+	d, dp := newPreActivateDaemon18559(t)
+	logs, restore := captureSlog(t)
+	defer restore()
+	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- d.beginTransferPreActivation([]int{1}) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(transferPreActivateLockWait + 2*time.Second):
+		d.applySem.Release(1)
+		<-done
+		t.Fatal("the pre-activation waited unbounded for applySem")
+	}
+	d.applySem.Release(1)
+	if !errors.Is(err, errTransferPreActivationLockBusy) {
+		t.Fatalf("busy applySem returned %v, want errTransferPreActivationLockBusy", err)
+	}
+	if waited := time.Since(start); waited < transferPreActivateLockWait/2 {
+		t.Fatalf("gave up after %v; it must wait up to %v for an apply to finish", waited, transferPreActivateLockWait)
+	}
+	if got := dp.callsSnapshot(); len(got) != 0 {
+		t.Fatalf("calls = %v after a busy-semaphore fallback, want none", got)
+	}
+	if !strings.Contains(logs.String(), "transfer pre-activation skipped, apply semaphore busy") {
+		t.Fatalf("the break-before-make fallback was not logged:\n%s", logs.String())
+	}
+}
+
+// panickingOverlayDP18569 panics inside the route republish that runs while
+// the pre-activation holds applySem.
+type panickingOverlayDP18569 struct{ *fakePreActivateDP }
+
+func (p *panickingOverlayDP18569) PublishRouteOverlaySnapshotWithLatch(*config.Config, []config.RouteOverlayEntry, map[string]bool, bool) (bool, error) {
+	panic("route publisher failed")
+}
+
+// The pre-activation's applySem hold is released on every exit, including
+// a panic in the republish: otherwise every later apply deadlocks. RED if
+// the release is not deferred.
+func TestPreActivationReleasesApplySemOnPanic18569(t *testing.T) {
+	d, dp := newPreActivateDaemon18559(t)
+	d.setDataplane(&panickingOverlayDP18569{dp})
+	func() {
+		defer func() { _ = recover() }()
+		_ = d.beginTransferPreActivation([]int{1})
+	}()
+	if !d.applySem.TryAcquire(1) {
+		t.Fatal("applySem leaked after a panic inside the pre-activation's republish")
+	}
+	d.applySem.Release(1)
+}
+
+// The TTL starts once applySem is held, so a wait that eats into it cannot
+// publish an already-shortened overlay. RED if the deadline is computed
+// before the acquire.
+func TestTransferPreActivationTTLStartsAfterLock18569(t *testing.T) {
+	d, dp := newPreActivateDaemon18559(t)
+	hold := transferPreActivateLockWait / 2
+	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	time.AfterFunc(hold, func() { d.applySem.Release(1) })
+	start := time.Now()
+	if err := d.beginTransferPreActivation([]int{1}); err != nil {
+		t.Fatalf("beginTransferPreActivation after a short wait: %v", err)
+	}
+	if dp.until.Before(start.Add(hold).Add(transferPreActivateTTL)) {
+		t.Fatalf("overlay deadline %v is less than the TTL after the lock was taken (start %v + wait %v + TTL %v)",
+			dp.until, start, hold, transferPreActivateTTL)
 	}
 }

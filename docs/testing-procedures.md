@@ -17,6 +17,7 @@ each harness.
 | Private RG | `./test/incus/test-private-rg.sh` | varies; three raw deploys for `full` | Private RG election changes |
 | Restart | `make test-restart-connectivity` | ~30s | Shutdown/startup changes |
 | Throughput and stall matrix | `make perf-matrix` (`make perf-matrix-lib` hermetic) | ~10 min | Dataplane/forwarding changes; every merge wave (regression matrix F2/F6) |
+| One-node RG-move soak | `make test-rg-move-soak` (`make test-rg-move-soak-lib` hermetic) | ~4 min per 40 moves at 5 s | HA/failover/clock changes; every merge wave at 200 moves (regression matrix H11) |
 
 ## Test Categories
 
@@ -132,8 +133,24 @@ Scenarios:
 
 A failed `incus start` after a force-stop is a FAIL that names the `incus`
 error. The harness then skips the 90 s xpfd wait, so one cause records one
-FAIL. Every node the harness starts, including in the final health check,
-has its clock resynced from host UTC (#11872).
+FAIL. Before the first crash the harness takes one clock reading. After
+every crash reboot it waits for NTP to converge on both nodes: the
+node1-node0 skew, plus the reading's own error, within 5 s, and a
+synchronised Leap status on both, within 120 s. It runs this after the rejoin
+checks and before the failback, and after any node the final health check
+starts; a measure-only reading right after each restart keeps the post-crash
+state in the log. It never sets a clock. Not converging is judged from the
+current reading. It is VOID only when neither node is synchronised and no
+`system ntp` stanza is configured, when the stanza's servers fail an SNTP
+probe from the orchestrator too (a lab NTP outage), or when nothing could be
+measured. It is FAIL otherwise (lab, NTP or product), including one node
+synchronised and the other not, the #18584 class (#18614,
+`test/incus/failover-clock-lib.sh`, `docs/ha-rg-move-correctness.md`). A
+direct run exits 2 on a VOID cell.
+`XPF_FAILOVER_CLOCK_RESYNC=1` restores the #11872 resync for a lab with no
+NTP. It prints a banner, and the would-be PASS row is recorded VOID with
+`clock_resync=1`. `test-failover` and `test-double-failover` run the same
+check after their crash reboot.
 
 #### Restoring fw0 between phases
 
@@ -219,6 +236,17 @@ HA mode does not do hitless restart.
 Between cycles it restores fw0 as the owner of every RG with the same
 verdict and the same `RESTORE_FW0_WAIT` / `RESTORE_FW0_BUDGET` knobs as the
 hard crash test (see "Restoring fw0 between phases" above).
+
+### 6a. One-node RG-move soak (`make test-rg-move-soak`)
+
+The operator's own loop: from ONE node, `request chassis cluster failover
+redundancy-group <rg> node 0|1`, alternating, `SOAK_SLEEP` seconds after each
+CLI return, under IPv4/IPv6 iperf3 and ping from the LAN host. It never fixes
+clocks. Each move is scored PASS / COST / FAIL / VOID against both nodes'
+views, `rg-active`, the helpers, whether the traffic itself followed (RETH
+counters and the LAN neighbour entry) and the move window's loss and stalls.
+Knobs, verdicts and how to read each failure: `docs/ha-rg-move-correctness.md`;
+pass rule: regression matrix row H11.
 
 ### 7. Active/Active Split Test (`make test-active-active`)
 

@@ -47,16 +47,25 @@ func TestNetworkdUnitInterpolationInventory_10718(t *testing.T) {
 	// Counts distinguish every renderer branch that emits a sink. Expression
 	// checks make the allowed boundary explicit: descriptions are sanitized;
 	// single-token fields are validated in renderedUnitTokenError.
+	//
+	// #17042 moved the .link body into RenderLink, whose LinkSpec fields are
+	// refused by validateLinkSpec (the same #9886/#10089/#15079/#10718
+	// ladder), so its sinks interpolate spec.* rather than ifc.*. This
+	// inventory was not updated with that move and was red on master; #18597
+	// records the spec.* sinks.
+	//
+	// #18597: there is no VRF= sink. The VRF is a daemon-owned netlink device
+	// that networkd cannot resolve, so the row renders the constant
+	// KeepMaster=yes instead (no interpolation).
 	want := map[string]map[string]int{
-		"Name":             {"ifc.Name": 4},
-		"Description":      {"sanitizeUnitValue(ifc.Description)": 3},
+		"Name":             {"ifc.Name": 3, "spec.Name": 1},
+		"Description":      {"sanitizeUnitValue(ifc.Description)": 2, "sanitizeUnitValue(spec.Description)": 1},
 		"Mode":             {"mode": 1},
 		"LACPTransmitRate": {"rate": 1},
-		"OriginalName":     {"ifc.OriginalName": 1},
-		"MACAddress":       {"ifc.MACAddress": 1},
+		"OriginalName":     {"spec.OriginalName": 1},
+		"MACAddress":       {"spec.MACAddress": 1},
 		"BitsPerSecond":    {"speed": 1},
-		"Duplex":           {"ifc.Duplex": 1},
-		"VRF":              {"ifc.VRFName": 1},
+		"Duplex":           {"spec.Duplex": 1},
 		"Bond":             {"ifc.BondMaster": 1},
 		"Bridge":           {"ifc.BridgeMaster": 1},
 		// #15222: two Address=addr sinks remain — the ordered static
