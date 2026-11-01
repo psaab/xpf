@@ -167,9 +167,9 @@ func validateIPsecResponderIdentityStrict(cfg *Config) error {
 			return fmt.Errorf("security ipsec vpn %q: ike gateway %q has mixed hostname/IP endpoints including %q but no discriminating remote-identity; peer-only PSK selectors cover IP literals, not the hostname's resolved peer identity — configure `security ike gateway %s remote-identity <type> <value>` (#17772)", c.VPN, c.Gateway, c.Identity, c.Gateway)
 		}
 		if c.Kind == "peer-selector-is-other-local-identity" {
-			return fmt.Errorf("security ipsec vpn %q and %q: peer-only PSK selector %q on ike gateway %q equals the effective local identity on ike gateway %q; distinct PSK connections with different effective keys must not share an owner identity — configure distinct gateway identities or local addresses (#17772)", c.VPN, c.OtherVPN, c.Identity, c.Gateway, c.OtherGateway)
+			return fmt.Errorf("security ipsec vpn %q and %q: peer-only PSK selector %q on ike gateway %q equals the effective local identity %q on ike gateway %q (strongSwan: %s); distinct PSK connections with different effective keys must not share an owner identity — configure distinct gateway identities or local addresses (#17772)", c.VPN, c.OtherVPN, c.Identity, c.Gateway, c.OtherIdentity, c.OtherGateway, c.Rule)
 		}
-		return fmt.Errorf("security ipsec vpn %q and %q: peer-only PSK selector %q is shared by distinct ike gateways %q and %q using different effective keys; configure distinct remote-identity values so each PSK is selectable only for its intended peer (#17772)", c.VPN, c.OtherVPN, c.Identity, c.Gateway, c.OtherGateway)
+		return fmt.Errorf("security ipsec vpn %q and %q: peer-only PSK selector %q on ike gateway %q and selector %q on ike gateway %q are the same strongSwan identity (%s) but use different effective keys; configure distinct remote-identity values so each PSK is selectable only for its intended peer (#17772)", c.VPN, c.OtherVPN, c.Identity, c.Gateway, c.OtherIdentity, c.OtherGateway, c.Rule)
 	}
 	return nil
 }

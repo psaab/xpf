@@ -255,7 +255,9 @@ func (m *Manager) renderConfigMembersWithConnectionKeys(
 		if conflict, unsafe := pskIdentityConflicts[name]; unsafe {
 			skipped[name] = true
 			slog.Warn("skipping IPsec VPN: peer-only PSK identity collides with another connection or leaves a mixed hostname endpoint without an identity — configure distinct peer identities before loading",
-				"vpn", name, "gateway", conflict.Gateway, "other_vpn", conflict.OtherVPN, "identity", conflict.Identity)
+				"vpn", name, "gateway", conflict.Gateway, "other_vpn", conflict.OtherVPN,
+				"other_gateway", conflict.OtherGateway, "identity", conflict.Identity,
+				"other_identity", conflict.OtherIdentity, "rule", conflict.Rule)
 			continue
 		}
 		// Expand once before writing the connection so an explicit selector set

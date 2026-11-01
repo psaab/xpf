@@ -19,9 +19,15 @@ type IPsecPSKIdentityConflict struct {
 	OtherVPN     string
 	Gateway      string
 	OtherGateway string
-	Identity     string
-	Kind         string
-	AffectedVPNs []string
+	// Identity is the rendered selector on Gateway; OtherIdentity is the
+	// rendered selector (peer selector or effective local identity) on
+	// OtherGateway that strongSwan treats as the same owner, and Rule names
+	// the equality rule that made them equal (#18428).
+	Identity      string
+	OtherIdentity string
+	Rule          string
+	Kind          string
+	AffectedVPNs  []string
 }
 
 type ipsecPSKPeerSelector struct {
@@ -35,7 +41,7 @@ type ipsecPSKIdentityGroup struct {
 	members         []string
 	psks            map[string]struct{}
 	peerSelectors   []ipsecPSKPeerSelector
-	localIdentities []ipsecIKEIdentity
+	localIdentities []ipsecPSKPeerSelector
 	mixedHostname   string
 }
 
@@ -106,8 +112,8 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 			endpointList = gw.Address
 		}
 		if gw != nil && gw.LocalIDValue != "" {
-			identity, _ := ipsecIKEIdentityKey(gw.LocalIDType, gw.LocalIDValue)
-			group.localIdentities = append(group.localIdentities, identity)
+			identity, rendered := ipsecIKEIdentityKey(gw.LocalIDType, gw.LocalIDValue)
+			group.localIdentities = append(group.localIdentities, ipsecPSKPeerSelector{identity: identity, rendered: rendered})
 		} else {
 			localAddress := vpn.LocalAddr
 			if localAddress == "" && gw != nil {
@@ -118,8 +124,8 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 				if err != nil {
 					continue
 				}
-				identity, _ := ipsecIKEIdentityKey("inet", addr.String())
-				group.localIdentities = append(group.localIdentities, identity)
+				identity, rendered := ipsecIKEIdentityKey("inet", addr.String())
+				group.localIdentities = append(group.localIdentities, ipsecPSKPeerSelector{identity: identity, rendered: rendered})
 			}
 		}
 		if mixedHostname, mixed := ipsecMixedHostnameAndIP(endpointList); mixed &&
@@ -170,11 +176,17 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 			if a.key == b.key || ipsecPSKSetsEqual(a.psks, b.psks) {
 				continue
 			}
+			// #18428: strongSwan's equals() is directional (a type-9 left
+			// operand compares as a DN against the right operand's raw
+			// bytes), but which side is the lookup key depends on the
+			// exchange, not on gateway names. For DETECTION a match in
+			// either direction is a collision, so every pair is tested both
+			// ways; ipsecIdentitiesCollide reports the rule that matched.
 			conflict := IPsecPSKIdentityConflict{}
 			for _, peer := range a.peerSelectors {
 				for _, other := range b.peerSelectors {
-					if peer.identity.equals(other.identity) {
-						conflict = ipsecPSKIdentityConflict(a, b, peer.rendered, "shared-peer-selector")
+					if rule, ok := ipsecIdentitiesCollide(peer.identity, other.identity); ok {
+						conflict = ipsecPSKIdentityConflict(a, b, peer.rendered, other.rendered, rule, "shared-peer-selector")
 						break
 					}
 				}
@@ -185,8 +197,8 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 			if conflict.Kind == "" {
 				for _, peer := range a.peerSelectors {
 					for _, local := range b.localIdentities {
-						if peer.identity.equals(local) {
-							conflict = ipsecPSKIdentityConflict(a, b, peer.rendered, "peer-selector-is-other-local-identity")
+						if rule, ok := ipsecIdentitiesCollide(peer.identity, local.identity); ok {
+							conflict = ipsecPSKIdentityConflict(a, b, peer.rendered, local.rendered, rule, "peer-selector-is-other-local-identity")
 							break
 						}
 					}
@@ -198,8 +210,8 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 			if conflict.Kind == "" {
 				for _, peer := range b.peerSelectors {
 					for _, local := range a.localIdentities {
-						if peer.identity.equals(local) {
-							conflict = ipsecPSKIdentityConflict(b, a, peer.rendered, "peer-selector-is-other-local-identity")
+						if rule, ok := ipsecIdentitiesCollide(peer.identity, local.identity); ok {
+							conflict = ipsecPSKIdentityConflict(b, a, peer.rendered, local.rendered, rule, "peer-selector-is-other-local-identity")
 							break
 						}
 					}
@@ -216,19 +228,21 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 	return conflicts
 }
 
-func ipsecPSKIdentityConflict(a, b *ipsecPSKIdentityGroup, identity, kind string) IPsecPSKIdentityConflict {
+func ipsecPSKIdentityConflict(a, b *ipsecPSKIdentityGroup, identity, otherIdentity, rule, kind string) IPsecPSKIdentityConflict {
 	affected := make([]string, 0, len(a.members)+len(b.members))
 	affected = append(affected, a.members...)
 	affected = append(affected, b.members...)
 	sort.Strings(affected)
 	return IPsecPSKIdentityConflict{
-		VPN:          a.members[0],
-		OtherVPN:     b.members[0],
-		Gateway:      a.gateway,
-		OtherGateway: b.gateway,
-		Identity:     identity,
-		Kind:         kind,
-		AffectedVPNs: affected,
+		VPN:           a.members[0],
+		OtherVPN:      b.members[0],
+		Gateway:       a.gateway,
+		OtherGateway:  b.gateway,
+		Identity:      identity,
+		OtherIdentity: otherIdentity,
+		Rule:          rule,
+		Kind:          kind,
+		AffectedVPNs:  affected,
 	}
 }
 
@@ -352,6 +366,9 @@ func ipsecIKEIdentityKey(idType, idValue string) (ipsecIKEIdentity, string) {
 		}
 		return ipsecTypedIdentityString(11, selector), selector
 	}
+	if ipsecStrongSwanAnySelector(selector) {
+		return ipsecIKEIdentity{typeID: 0}, selector
+	}
 	if strings.HasPrefix(selector, "@#") {
 		return ipsecTypedIdentity(11, ipsecChunkFromHex(selector[2:])), selector
 	}
@@ -384,6 +401,21 @@ func ipsecIKEIdentityKey(idType, idValue string) (ipsecIKEIdentity, string) {
 		return ipsecTypedIdentityString(11, selector), selector
 	}
 	return ipsecTypedIdentityString(2, selector), selector
+}
+
+// ipsecStrongSwanAnySelector reports whether identification_create_from_string
+// maps the rendered selector to ID_ANY (#18428). strongSwan tests these exact
+// strings, after the type prefixes and the '=' (DN) branch and only for
+// selectors without '@', so the declared xpf type does not matter whenever it
+// renders the value unprefixed (inet, inet6, distinguished-name,
+// user-at-hostname, ...). Near spellings such as "::0" or " 0.0.0.0" are NOT
+// ID_ANY (an IPv6 address and an FQDN), and neither is "@0.0.0.0".
+func ipsecStrongSwanAnySelector(selector string) bool {
+	switch selector {
+	case "", "%any", "%any6", "0.0.0.0", "*", "::", "0::0":
+		return true
+	}
+	return false
 }
 
 var ipsecStrongSwanIdentityPrefixes = [...]struct {
@@ -538,6 +570,89 @@ func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
 		return ipsecASCIIEqualFold(identity.encoding, other.encoding)
 	default:
 		return identity.encoding == other.encoding
+	}
+}
+
+// ipsecIdentitiesCollide reports whether strongSwan would treat a and b as
+// the same PSK owner, and names the rule that made them equal (#18428).
+// equals() is a faithful port of strongSwan's directional comparison; for
+// collision DETECTION either direction counts, because which identity is the
+// lookup key and which the owner depends on the exchange.
+func ipsecIdentitiesCollide(a, b ipsecIKEIdentity) (string, bool) {
+	if a.equals(b) {
+		return ipsecIdentityEqualityRule(a, b), true
+	}
+	if b.equals(a) {
+		// Only a type-9 left operand is direction-sensitive, so the rule
+		// text ("DN ...") already names the operand order.
+		return ipsecIdentityEqualityRule(b, a), true
+	}
+	return "", false
+}
+
+// ipsecIdentityEqualityRule describes why left.equals(right) holds.
+func ipsecIdentityEqualityRule(left, right ipsecIKEIdentity) string {
+	switch left.typeID {
+	case 0:
+		return "ID_ANY equals any ID_ANY"
+	case 9:
+		if right.typeID != 9 {
+			if left.encoding == right.encoding {
+				return "DN encoding equals " + ipsecIdentityTypeName(right.typeID) + " bytes"
+			}
+			return "DN compared against " + ipsecIdentityTypeName(right.typeID) +
+				" bytes as a DN (PrintableString/emailAddress case-insensitive)"
+		}
+		if left.encoding == right.encoding {
+			return "identical DN encoding"
+		}
+		return "DN equality (same RDNs; PrintableString/emailAddress case-insensitive)"
+	case 2:
+		if left.encoding == right.encoding {
+			return "identical FQDN"
+		}
+		return "FQDN case-insensitive"
+	case 3:
+		if left.encoding == right.encoding {
+			return "identical RFC822 address"
+		}
+		return "RFC822 case-insensitive (whole address, including the local part)"
+	default:
+		return "identical " + ipsecIdentityTypeName(left.typeID) + " encoding"
+	}
+}
+
+// ipsecIdentityTypeName names a strongSwan id_type_t value for diagnostics.
+func ipsecIdentityTypeName(typeID uint32) string {
+	switch typeID {
+	case 0:
+		return "ID_ANY"
+	case 1:
+		return "IPV4_ADDR"
+	case 2:
+		return "FQDN"
+	case 3:
+		return "RFC822"
+	case 4:
+		return "IPV4_ADDR_SUBNET"
+	case 5:
+		return "IPV6_ADDR"
+	case 6:
+		return "IPV6_ADDR_SUBNET"
+	case 7:
+		return "IPV4_ADDR_RANGE"
+	case 8:
+		return "IPV6_ADDR_RANGE"
+	case 9:
+		return "DN"
+	case 10:
+		return "GENERAL_NAME"
+	case 11:
+		return "KEY_ID"
+	case 201:
+		return "URI"
+	default:
+		return "identity type " + strconv.FormatInt(int64(int32(typeID)), 10)
 	}
 }
 
@@ -939,6 +1054,14 @@ func ipsecDNIdentityEqual(a, b ipsecIKEIdentity) bool {
 		return true
 	}
 	if !a.dnValid || !b.dnValid || len(a.rdns) == 0 || len(a.rdns) != len(b.rdns) {
+		return false
+	}
+	// compare_dn() declares a match only when both enumerators END at the end
+	// of their DN. asn1_unwrap's chunk_skip returns chunk_empty (NULL ptr) for
+	// an empty value at the very end, so a DN whose LAST attribute value is
+	// empty never matches structurally — only byte-identically (above).
+	// `CN=Peer, O=` therefore differs from `CN=peer, O=` (oracle-confirmed).
+	if len(a.rdns[len(a.rdns)-1].value) == 0 || len(b.rdns[len(b.rdns)-1].value) == 0 {
 		return false
 	}
 	const emailAddressOID = "\x2a\x86\x48\x86\xf7\x0d\x01\x09\x01"

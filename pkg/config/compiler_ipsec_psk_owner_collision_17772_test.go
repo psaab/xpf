@@ -172,10 +172,14 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireCollision17772(t, cmds)
 	})
 
-	t.Run("KEY_ID remote identity does not match another gateway type-9 local identity", func(t *testing.T) {
+	// #18428: strongSwan's comparison is directional (only a type-9 LEFT
+	// operand compares as a DN), but which identity is the lookup key depends
+	// on the exchange, so detection treats a match in either direction as a
+	// collision. This shape matches with the local DN on the left.
+	t.Run("KEY_ID remote identity collides with another gateway type-9 local identity", func(t *testing.T) {
 		cmds := identityPair17772("key-id", "300f310d300b0603550403130450454552", "hostname", "gw-b.example.com",
 			"set security ike gateway gw-b local-identity distinguished-name CN=peer")
-		requireNoCollision17772(t, cmds)
+		requireCollision17772(t, cmds)
 	})
 
 	t.Run("mixed hostname and IP gateway without explicit remote identity is refused", func(t *testing.T) {
@@ -456,10 +460,6 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"IPv4 range equals type-7 DER", "inet", "198.51.100.1-198.51.100.2", "inet", "ipv4range:#c6336401c6336402"},
 			{"IPv6 range equals type-8 DER", "inet", "2001:db8::1-2001:db8::2", "inet", "ipv6range:#20010db800000000000000000000000120010db8000000000000000000000002"},
 			{"hyphenated FQDN remains type 2", "inet", "host-a-host-b", "inet", "fqdn:host-a-host-b"},
-			{"ID_ANY equality ignores encoding", "inet", "{0}:a", "inet", "{0}:b"},
-			{"wrapped numeric type is ID_ANY", "inet", "{4294967296}:x", "inet", "{0}:y"},
-			{"empty numeric type equals zero", "inet", "{}:a", "inet", "{0}:a"},
-			{"empty numeric type ignores encoding", "inet", "{}:a", "inet", "{}:b"},
 			{"IPv4 prefix suffix ignores trailing text", "inet", "198.51.100.1/24junk", "inet", "198.51.100.1/24"},
 			{"IPv4 prefix accepts leading zero", "inet", "198.51.100.1/024", "inet", "198.51.100.1/24"},
 			{"IPv4 prefix accepts leading plus", "inet", "198.51.100.1/+24", "inet", "198.51.100.1/24"},
@@ -513,6 +513,10 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"UTF8String and IA5String compare exact content", "inet", "asn1dn:#300f310d300b06035504030c0470656572", "inet", "asn1dn:#300f310d300b0603550403160470656572"},
 			{"emailAddress IA5 side folds NUL value with raw tag", "inet", "asn1dn:#30143112301006092a864886f70d0109011603410042", "inet", "asn1dn:#30143112301006092a864886f70d0109011f03410042"},
 			{"identical high-tag value equals exact bytes", "inet", "asn1dn:#300e310c300a06035504031f026100", "inet", "asn1dn:#300e310c300a06035504031f026100"},
+			{"reverse operand order: KEY_ID DER versus DN collides (#18428)", "inet", "keyid:#300f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"reverse operand order: FQDN raw DER case versus DN collides (#18428)", "inet", "{2}:#300f310d300b0603550403130450454552", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"reverse operand order: rendered KEY_ID case versus DN collides (#18428)", "key-id", "300f310d300b0603550403130450454552", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"reverse operand order: KEY_ID versus DN case variant collides (#18428)", "inet", "keyid:#300f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"},
 		}
 		for _, pair := range pairs {
 			t.Run(pair.name, func(t *testing.T) {
@@ -570,11 +574,7 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d300b060355040313047065657200", "inet", "asn1dn:#300f310d300b060355040313045045455200"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#308900000000000000000f310d300b0603550403130470656572", "inet", "asn1dn:#308900000000000000000f310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#30810f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"))
-		requireNoCollision17772(t, identityPair17772("inet", "keyid:#300f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"))
-		requireNoCollision17772(t, identityPair17772("inet", "{2}:#300f310d300b0603550403130450454552", "inet", "asn1dn:#300f310d300b0603550403130470656572"))
-		requireNoCollision17772(t, identityPair17772("key-id", "300f310d300b0603550403130450454552", "inet", "asn1dn:#300f310d300b0603550403130470656572"))
 		requireNoCollision17772(t, identityPair17772("inet", "keyid:#300f310d300b0603550403130470656572", "inet", "keyid:#300f310d300b0603550403130450454552"))
-		requireNoCollision17772(t, identityPair17772("inet", "keyid:#300f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "keyid:#3082000f310d300b0603550403130470656572"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "keyid:#300f310d300b0603550403130470656572"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "keyid:#434e3d706565725c"))
