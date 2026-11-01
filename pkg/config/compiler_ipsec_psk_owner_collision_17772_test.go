@@ -166,20 +166,19 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			t.Fatalf("error must never leak PSK material: %v", err)
 		}
 	})
-	t.Run("type-9 remote identity matches another gateway KEY_ID local identity", func(t *testing.T) {
+	// #18428 round 3: strongSwan selects a PSK through has_owner(),
+	// lookup->matches(owner), and matches_* is type-strict, so a DN and a
+	// KEY_ID with the same DER bytes can never select each other's secret.
+	t.Run("type-9 remote identity does not match another gateway KEY_ID local identity", func(t *testing.T) {
 		cmds := identityPair17772("distinguished-name", "CN=peer", "hostname", "gw-b.example.com",
 			"set security ike gateway gw-b local-identity key-id 300f310d300b0603550403130450454552")
-		requireCollision17772(t, cmds)
+		requireNoCollision17772(t, cmds)
 	})
 
-	// #18428: strongSwan's comparison is directional (only a type-9 LEFT
-	// operand compares as a DN), but which identity is the lookup key depends
-	// on the exchange, so detection treats a match in either direction as a
-	// collision. This shape matches with the local DN on the left.
-	t.Run("KEY_ID remote identity collides with another gateway type-9 local identity", func(t *testing.T) {
+	t.Run("KEY_ID remote identity does not match another gateway type-9 local identity", func(t *testing.T) {
 		cmds := identityPair17772("key-id", "300f310d300b0603550403130450454552", "hostname", "gw-b.example.com",
 			"set security ike gateway gw-b local-identity distinguished-name CN=peer")
-		requireCollision17772(t, cmds)
+		requireNoCollision17772(t, cmds)
 	})
 
 	t.Run("mixed hostname and IP gateway without explicit remote identity is refused", func(t *testing.T) {
@@ -494,17 +493,8 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"nonminimal two-octet value length compares DN values", "inet", "asn1dn:#3011310f300d06035504031382000470656572", "inet", "asn1dn:#3011310f300d06035504031382000450454552"},
 			{"maximum eight-octet outer length compares DN values", "inet", "asn1dn:#3088000000000000000f310d300b0603550403130470656572", "inet", "asn1dn:#3088000000000000000f310d300b0603550403130450454552"},
 			{"identical malformed total length remains exact-equal", "inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130470656572"},
-			{"identical malformed DN bytes equal KEY_ID bytes", "inet", "asn1dn:#3000", "inet", "keyid:#3000"},
-			{"DN left compares KEY_ID DER bytes", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "keyid:#300f310d300b0603550403130470656572"},
-			{"DN left folds KEY_ID DER case", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "keyid:#300f310d300b0603550403130450454552"},
-			{"textual DN left compares KEY_ID DER bytes", "distinguished-name", "CN=peer", "inet", "keyid:#300f310d300b0603550403130470656572"},
-			{"numeric type-9 DN left compares KEY_ID DER bytes", "inet", "{9}:#300f310d300b0603550403130470656572", "inet", "keyid:#300f310d300b0603550403130470656572"},
-			{"DN left folds rendered KEY_ID DER case", "distinguished-name", "CN=peer", "key-id", "300f310d300b0603550403130450454552"},
-			{"DN left compares FQDN type raw DER", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "{2}:#300f310d300b0603550403130450454552"},
-			{"DN left compares KEY_ID padded DER case", "inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "keyid:#3082000f310d300b0603550403130450454552"},
 			{"unknown DN fallback matches raw KEY_ID bytes", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
 			{"high-tag value compares to canonical PrintableString", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
-			{"high-tag DN left compares canonical KEY_ID bytes", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "keyid:#300f310d300b0603550403130470656572"},
 			{"high-tag value matches other raw tag same content", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b0603550403040470656572"},
 			{"raw high-tag value matches UTF8String bytes", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b06035504030c0470656572"},
 			{"raw high-tag value matches IA5String bytes", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b0603550403160470656572"},
@@ -513,14 +503,38 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"UTF8String and IA5String compare exact content", "inet", "asn1dn:#300f310d300b06035504030c0470656572", "inet", "asn1dn:#300f310d300b0603550403160470656572"},
 			{"emailAddress IA5 side folds NUL value with raw tag", "inet", "asn1dn:#30143112301006092a864886f70d0109011603410042", "inet", "asn1dn:#30143112301006092a864886f70d0109011f03410042"},
 			{"identical high-tag value equals exact bytes", "inet", "asn1dn:#300e310c300a06035504031f026100", "inet", "asn1dn:#300e310c300a06035504031f026100"},
-			{"reverse operand order: KEY_ID DER versus DN collides (#18428)", "inet", "keyid:#300f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
-			{"reverse operand order: FQDN raw DER case versus DN collides (#18428)", "inet", "{2}:#300f310d300b0603550403130450454552", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
-			{"reverse operand order: rendered KEY_ID case versus DN collides (#18428)", "key-id", "300f310d300b0603550403130450454552", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
-			{"reverse operand order: KEY_ID versus DN case variant collides (#18428)", "inet", "keyid:#300f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"},
 		}
 		for _, pair := range pairs {
 			t.Run(pair.name, func(t *testing.T) {
 				requireCollision17772(t, identityPair17772(pair.aType, pair.a, pair.bType, pair.b))
+			})
+		}
+	})
+
+	// #18428 round 3: these DN/raw-encoding pairs compare equal under
+	// strongSwan's directional equals(), but the PSK lookup uses the
+	// type-strict matches(), so neither can select the other's secret. They
+	// commit in BOTH gateway orders.
+	t.Run("cross-type DN versus raw-encoding owners commit in both gateway orders", func(t *testing.T) {
+		pairs := []struct{ name, aType, a, bType, b string }{
+			{"DN left compares FQDN type raw DER", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "{2}:#300f310d300b0603550403130450454552"},
+			{"DN left compares KEY_ID DER bytes", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "keyid:#300f310d300b0603550403130470656572"},
+			{"DN left compares KEY_ID padded DER case", "inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "keyid:#3082000f310d300b0603550403130450454552"},
+			{"DN left folds KEY_ID DER case", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "keyid:#300f310d300b0603550403130450454552"},
+			{"DN left folds rendered KEY_ID DER case", "distinguished-name", "CN=peer", "key-id", "300f310d300b0603550403130450454552"},
+			{"high-tag DN left compares canonical KEY_ID bytes", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "keyid:#300f310d300b0603550403130470656572"},
+			{"identical malformed DN bytes equal KEY_ID bytes", "inet", "asn1dn:#3000", "inet", "keyid:#3000"},
+			{"numeric type-9 DN left compares KEY_ID DER bytes", "inet", "{9}:#300f310d300b0603550403130470656572", "inet", "keyid:#300f310d300b0603550403130470656572"},
+			{"FQDN raw DER case versus DN", "inet", "{2}:#300f310d300b0603550403130450454552", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"KEY_ID DER versus DN", "inet", "keyid:#300f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"KEY_ID versus DN case variant", "inet", "keyid:#300f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"},
+			{"rendered KEY_ID case versus DN", "key-id", "300f310d300b0603550403130450454552", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"textual DN left compares KEY_ID DER bytes", "distinguished-name", "CN=peer", "inet", "keyid:#300f310d300b0603550403130470656572"},
+		}
+		for _, pair := range pairs {
+			t.Run(pair.name, func(t *testing.T) {
+				requireNoCollision17772(t, identityPair17772(pair.aType, pair.a, pair.bType, pair.b))
+				requireNoCollision17772(t, identityPair17772(pair.bType, pair.b, pair.aType, pair.a))
 			})
 		}
 	})

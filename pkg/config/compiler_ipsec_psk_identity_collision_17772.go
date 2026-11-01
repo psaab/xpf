@@ -176,12 +176,15 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 			if a.key == b.key || ipsecPSKSetsEqual(a.psks, b.psks) {
 				continue
 			}
-			// #18428: strongSwan's equals() is directional (a type-9 left
-			// operand compares as a DN against the right operand's raw
-			// bytes), but which side is the lookup key depends on the
-			// exchange, not on gateway names. For DETECTION a match in
-			// either direction is a collision, so every pair is tested both
-			// ways; ipsecIdentitiesCollide reports the rule that matched.
+			// #18428: strongSwan selects a secret through has_owner()
+			// (mem_cred.c), lookup->matches(owner), and every matches_* is
+			// type-strict except that an ID_ANY owner matches anything.
+			// Peer selectors are owners: two collide when one presented
+			// identity can select both (ipsecIdentitiesCollide). An effective
+			// local identity is the `me` lookup of its own exchange: it
+			// exposes another connection's secret when it selects that
+			// connection's owner (ipsecLookupSelectsOwner). equals() is not
+			// on the lookup path.
 			conflict := IPsecPSKIdentityConflict{}
 			for _, peer := range a.peerSelectors {
 				for _, other := range b.peerSelectors {
@@ -197,7 +200,7 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 			if conflict.Kind == "" {
 				for _, peer := range a.peerSelectors {
 					for _, local := range b.localIdentities {
-						if rule, ok := ipsecIdentitiesCollide(peer.identity, local.identity); ok {
+						if rule, ok := ipsecLookupSelectsOwner(local.identity, peer.identity); ok {
 							conflict = ipsecPSKIdentityConflict(a, b, peer.rendered, local.rendered, rule, "peer-selector-is-other-local-identity")
 							break
 						}
@@ -210,7 +213,7 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 			if conflict.Kind == "" {
 				for _, peer := range b.peerSelectors {
 					for _, local := range a.localIdentities {
-						if rule, ok := ipsecIdentitiesCollide(peer.identity, local.identity); ok {
+						if rule, ok := ipsecLookupSelectsOwner(local.identity, peer.identity); ok {
 							conflict = ipsecPSKIdentityConflict(b, a, peer.rendered, local.rendered, rule, "peer-selector-is-other-local-identity")
 							break
 						}
@@ -573,36 +576,52 @@ func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
 	}
 }
 
-// ipsecIdentitiesCollide reports whether strongSwan would treat a and b as
-// the same PSK owner, and names the rule that made them equal (#18428).
-// equals() is a faithful port of strongSwan's directional comparison; for
-// collision DETECTION either direction counts, because which identity is the
-// lookup key and which the owner depends on the exchange.
+// ipsecIdentitiesCollide reports whether one presented identity could select
+// the secrets of both a and b, and names the rule that made them one owner
+// (#18428). strongSwan selects a PSK through has_owner() in mem_cred.c:
+// lookup->matches(owner) for each configured owner. Every matches_* is
+// type-strict (matches_binary, matches_string, matches_dn_internal,
+// matches_range return ID_MATCH_NONE unless both identities have the same
+// type), except that an ID_ANY owner returns ID_MATCH_ANY for any lookup. So
+// two owners collide only when their strongSwan types (parsed from the
+// RENDERED selectors, which the key already carries) are equal and they
+// compare equal, or when either is ID_ANY. equals() is directional only for a
+// type-9 left operand against another type, which this type gate excludes,
+// so the same-type test is symmetric. A DN whose DER equals a KEY_ID's bytes
+// is NOT a collision: matches() never crosses the types (oracle-confirmed).
 func ipsecIdentitiesCollide(a, b ipsecIKEIdentity) (string, bool) {
-	if a.equals(b) {
-		return ipsecIdentityEqualityRule(a, b), true
+	if a.typeID == 0 || b.typeID == 0 {
+		return "ID_ANY owner matches every identity", true
 	}
-	if b.equals(a) {
-		// Only a type-9 left operand is direction-sensitive, so the rule
-		// text ("DN ...") already names the operand order.
-		return ipsecIdentityEqualityRule(b, a), true
+	if a.typeID == b.typeID && a.equals(b) {
+		return ipsecIdentityEqualityRule(a, b), true
 	}
 	return "", false
 }
 
-// ipsecIdentityEqualityRule describes why left.equals(right) holds.
+// ipsecLookupSelectsOwner reports whether lookup, used as the `me` identity of
+// has_owner(), selects a secret owned by owner: lookup->matches(owner). It is
+// ipsecIdentitiesCollide's rule with the operand roles fixed. An ID_ANY owner
+// matches every lookup, but matches_any() makes an ID_ANY LOOKUP match only an
+// ID_ANY owner. An effective local identity is ID_ANY when it is spelled as a
+// wildcard or comes from an unspecified local address (`local-address
+// 0.0.0.0` / `::`); charon then presents its real source address, which
+// commit cannot know, so such a local identity selects no peer selector.
+func ipsecLookupSelectsOwner(lookup, owner ipsecIKEIdentity) (string, bool) {
+	if owner.typeID == 0 {
+		return "ID_ANY owner matches every identity", true
+	}
+	if lookup.typeID == 0 {
+		return "", false
+	}
+	return ipsecIdentitiesCollide(lookup, owner)
+}
+
+// ipsecIdentityEqualityRule describes why left.equals(right) holds for two
+// identities of the same strongSwan type.
 func ipsecIdentityEqualityRule(left, right ipsecIKEIdentity) string {
 	switch left.typeID {
-	case 0:
-		return "ID_ANY equals any ID_ANY"
 	case 9:
-		if right.typeID != 9 {
-			if left.encoding == right.encoding {
-				return "DN encoding equals " + ipsecIdentityTypeName(right.typeID) + " bytes"
-			}
-			return "DN compared against " + ipsecIdentityTypeName(right.typeID) +
-				" bytes as a DN (PrintableString/emailAddress case-insensitive)"
-		}
 		if left.encoding == right.encoding {
 			return "identical DN encoding"
 		}

@@ -1,6 +1,7 @@
 package ipsec
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -8,8 +9,9 @@ import (
 
 // #18428 review folds, render belt side. config.IPsecPSKIdentityConflicts is
 // shared with commit validation; these cells pin the renderer's use of it:
-// either-direction collisions skip both connections whatever the gateway
-// names, an ID_ANY remote-identity under any unprefixed type never becomes a
+// cross-type DN/raw-encoding owners render (strongSwan's matches() is
+// type-strict, so neither selects the other's secret) whatever the gateway
+// order, an ID_ANY remote-identity under any unprefixed type never becomes a
 // PSK owner, and the conflict carries both selectors and the equality rule.
 func TestPSKIdentityFoldsRender18428(t *testing.T) {
 	manager := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
@@ -27,7 +29,7 @@ func TestPSKIdentityFoldsRender18428(t *testing.T) {
 		}
 	}
 
-	t.Run("directional DN/KEY_ID pairs skip both connections in either gateway order", func(t *testing.T) {
+	t.Run("cross-type DN/KEY_ID pairs render both connections in either gateway order", func(t *testing.T) {
 		pairs := []struct{ name, aType, a, bType, b string }{
 			{"textual DN versus rendered KEY_ID", "distinguished-name", "CN=peer", "key-id", "300f310d300b0603550403130470656572"},
 			{"asn1dn versus keyid prefix", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "keyid:#300f310d300b0603550403130470656572"},
@@ -42,8 +44,8 @@ func TestPSKIdentityFoldsRender18428(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s (swapped=%v): renderConfig: %v", p.name, swapped, err)
 				}
-				if rendered["gw-a"] || rendered["gw-b"] {
-					t.Errorf("%s (swapped=%v): colliding connections must not render: rendered=%v\n%s", p.name, swapped, rendered, text)
+				if !rendered["gw-a"] || !rendered["gw-b"] {
+					t.Errorf("%s (swapped=%v): cross-type owners must both render: rendered=%v\n%s", p.name, swapped, rendered, text)
 				}
 			}
 		}
@@ -85,14 +87,14 @@ func TestPSKIdentityFoldsRender18428(t *testing.T) {
 	})
 
 	t.Run("conflict names both selectors and the equality rule", func(t *testing.T) {
-		conflicts := config.IPsecPSKIdentityConflicts(pair("key-id", "300f310d300b0603550403130470656572", "distinguished-name", "CN=peer", "203.0.113.1", "203.0.113.2"))
+		conflicts := config.IPsecPSKIdentityConflicts(pair("distinguished-name", "CN=Peer,O=Corp", "user-at-hostname", "cn=peer,o=corp", "203.0.113.1", "203.0.113.2"))
 		if len(conflicts) != 1 {
 			t.Fatalf("want one conflict, got %+v", conflicts)
 		}
 		c := conflicts[0]
-		if c.Identity != "@#300f310d300b0603550403130470656572" || c.OtherIdentity != "CN=peer" ||
-			c.Rule != "DN encoding equals KEY_ID bytes" {
-			t.Fatalf("conflict = identity %q other %q rule %q, want both rendered selectors and the DN/KEY_ID rule",
+		if c.Identity != "CN=Peer,O=Corp" || c.OtherIdentity != "cn=peer,o=corp" ||
+			!strings.HasPrefix(c.Rule, "DN equality") {
+			t.Fatalf("conflict = identity %q other %q rule %q, want both rendered selectors and the DN rule",
 				c.Identity, c.OtherIdentity, c.Rule)
 		}
 	})

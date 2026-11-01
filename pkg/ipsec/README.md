@@ -1049,47 +1049,73 @@ all files stay in `package ipsec`, so the public API is unchanged.
   DN length parsing accepts bounded long-form lengths (up to eight length
   octets), including redundant leading zeros; containing TLVs must match their
   declared total lengths.
-  strongSwan's cross-type DN comparison is directional: a type-9 left identity
-  compares the right raw encoding with `compare_dn()` semantics, including
-  KEY_ID or other identity types, while the reverse type order is type-gated.
-  `equals()` ports that faithfully, but collision DETECTION treats a match in
-  EITHER direction as a collision (#18428 review): which identity is the lookup
-  key and which the owner depends on the exchange, not on gateway names, and
-  the one-direction check refused `distinguished-name CN=peer` versus
-  `key-id 300f…` only when the DN gateway sorted first. Exact identical
-  bytes still match even for malformed DN encodings; structural folding
-  requires comparable nonempty DNs of the same encoded length. strongSwan
-  declares a structural match only when both RDN enumerators end at the DN
-  end, and an EMPTY last attribute value unwraps to a NULL chunk, so a DN whose
-  last value is empty matches only byte-identically: `CN=Peer, O=` and
-  `CN=peer, O=` are distinct (oracle-confirmed; an empty value that is not
-  last still folds). `atodn()` parses at most 20 RDNs (`appendRDN`); a longer
-  textual DN is not a DN to strongSwan but a literal KEY_ID of its text,
-  compared byte for byte (no case folding). The ID_ANY spellings `""`,
-  `%any`, `%any6`, `0.0.0.0`, `*`, `::` and `0::0` are ID_ANY whenever they
-  reach strongSwan unprefixed and without `@`, whatever the declared xpf type
-  (`distinguished-name 0.0.0.0` and `user-at-hostname ::` included); near
-  spellings (`::0`, ` 0.0.0.0`, `@0.0.0.0`) are not. Named type prefixes
-  (`fqdn:`, `FQDN:`, `DnS:` …) match case-insensitively.
+  **What counts as a collision (#18428 round 3).** strongSwan selects a
+  PSK through `has_owner()` (`mem_cred.c`): `lookup->matches(owner)` over
+  each secret's configured owners. `equals()` is not on that path.
+  `matches_binary`, `matches_string` and `matches_dn_internal` return no
+  match unless both identities have the same type; an ID_ANY owner matches
+  every lookup. So two peer selectors collide when their strongSwan types
+  (parsed from the RENDERED selectors) are equal and they compare equal, or
+  when either is ID_ANY (`ipsecIdentitiesCollide`); same-type `equals()` is
+  symmetric, so gateway order no longer matters. A DN and a KEY_ID (or FQDN
+  raw bytes) with the same DER never select each other's secret and commit
+  in both orders; `equals()`'s directional type-9-left comparison against
+  other types is not a lookup. An effective local identity is the `me`
+  LOOKUP of its own exchange (`ipsecLookupSelectsOwner`): it exposes another
+  connection's secret when it selects that connection's owner, and
+  `matches_any()` makes an ID_ANY lookup match only an ID_ANY owner, so a
+  wildcard `local-identity` or an unspecified `local-address 0.0.0.0` / `::`
+  (charon then presents its real source address) is not a collision.
+  Exact identical bytes still match even for malformed DN encodings;
+  structural folding requires comparable nonempty DNs of the same encoded
+  length. strongSwan declares a structural match only when both RDN
+  enumerators end at the DN end, and an EMPTY last attribute value unwraps to
+  a NULL chunk, so a DN whose last value is empty matches only
+  byte-identically: `CN=Peer, O=` and `CN=peer, O=` are distinct
+  (oracle-confirmed; an empty value that is not last still folds). `atodn()`
+  parses at most 20 RDNs (`appendRDN`); a longer textual DN is not a DN to
+  strongSwan but a literal KEY_ID of its text, compared byte for byte (no case
+  folding). The ID_ANY spellings `""`, `%any`, `%any6`, `0.0.0.0`, `*`, `::`
+  and `0::0` are ID_ANY whenever they reach strongSwan unprefixed and without
+  `@`, whatever the declared xpf type (`distinguished-name 0.0.0.0` and
+  `user-at-hostname ::` included); near spellings (`::0`, ` 0.0.0.0`,
+  `@0.0.0.0`) are not. Named type prefixes (`fqdn:`, `FQDN:`, `DnS:` …) match
+  case-insensitively.
+  DN matching follows charon's `rdn_matching` setting, which defaults to
+  `strict` (`/etc/strongswan.d/charon.conf`) and which xpf does not set:
+  RDN order is significant and the collision check assumes it. An operator
+  who sets `rdn_matching = reordered` or `relaxed` makes RDN-order swaps match
+  in strongSwan, and xpf will NOT refuse those collisions.
+  Not modelled (strongSwan matches them, this check does not): wildcard
+  owners (an FQDN/RFC822 with `*`, a DN RDN value `*`; a bare `*` is already
+  ID_ANY), address/subnet/range containment within one IP family
+  (`matches_range` matches an address against a covering subnet or range, and
+  a subnet against an overlapping range), and DN encodings that differ only in
+  their length octets (`matches()` skips `equals()`'s total-length check).
   The refusal and the render-belt warning name BOTH rendered selectors and the
-  equality rule that made them one owner (for example "DN encoding equals
-  KEY_ID bytes", "FQDN case-insensitive", "RFC822 case-insensitive (whole
-  address, including the local part)").
+  rule that made them one owner (for example "identical DN encoding",
+  "DN equality (same RDNs; PrintableString/emailAddress case-insensitive)",
+  "FQDN case-insensitive", "RFC822 case-insensitive (whole address, including
+  the local part)").
   **Upgrade note (#18428).** Collision classes changed relative to the
-  declared-type key. Newly REFUSED at commit: RFC822 addresses that differ
-  only in case, local part included (`Alice@corp.example` vs
-  `alice@corp.example`); a DN and a `user-at-hostname` (or `inet`) of the same
-  text, which render one owner; a DN and a KEY_ID/FQDN raw encoding of the
-  same DER, in either gateway order; an explicit type prefix of any case
-  (`FQDN:peer.example`) against the matching hostname; ID_ANY spellings under
-  non-inet types, which are now wildcards (#16845 refuses them on a gateway
-  with no discriminating address, and an IP-addressed gateway's secret is
-  re-scoped to the address instead of the wildcard owner). Newly ACCEPTED:
-  DNs that differ only in RDN order, and case variants whose last RDN value is
-  empty. A config that commits on the old build but collides now loads
-  leniently with the colliding VPNs SKIPPED (warning naming both selectors) and
-  every later commit is refused until the identities are made distinct. Run
-  `commit check` on the new build before upgrading.
+  declared-type key. Measured examples (one `CompileConfig` cell run on
+  master and on this build; not an exhaustive list): newly REFUSED at commit
+  are RFC822 addresses that differ only in case, local part included
+  (`Alice@corp.example` vs `alice@corp.example`); a DN and a
+  `user-at-hostname` or `inet` value of the same text, which render one owner;
+  an explicit type prefix of any case (`FQDN:peer.example`) against the
+  matching hostname; `key-id 7a:7a` against `key-id 7a7a` (one
+  `chunk_from_hex()` value); an untyped range against its `ipv4range:#` form;
+  a `/24junk` subnet suffix against `/24`; and ID_ANY spellings under non-inet
+  types, which are now wildcards (#16845 refuses them on a gateway with no
+  discriminating address, and an IP-addressed gateway's secret is re-scoped to
+  the address instead of the wildcard owner). Newly ACCEPTED: DNs that differ
+  only in RDN order (under the default strict `rdn_matching`), and case
+  variants whose last RDN value is empty. A config that commits on the old
+  build but collides now loads leniently with the colliding VPNs SKIPPED
+  (warning naming both selectors) and every later commit is refused until the
+  identities are made distinct. Run `commit check` on the new build before
+  upgrading.
   A mixed hostname/IP gateway requires a discriminating `remote-identity`: IP
   selectors cannot cover a
   hostname's resolved peer identity, so without that identity the correct
