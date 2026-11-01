@@ -140,8 +140,20 @@ func (in *netlinkInstaller) tableMatchesPlan(name string, plan *nlPlan) (bool, e
 		if len(rules) != len(wantRules) {
 			return false, fmt.Errorf("installed chain %s has %d rules, planned %d", chainName, len(rules), len(wantRules))
 		}
+		// #18746: GetRules drops the expressions google/nftables cannot type,
+		// byteorder among them, so the #16841 zero-hop rule never compared equal
+		// and an uncertain-ACK recovery could never succeed. Judge those
+		// expressions against the kernel's own names instead.
+		namesByHandle, err := readRuleExprNames(c, table, chainName)
+		if err != nil {
+			return false, fmt.Errorf("read chain %s rule expressions: %w", chainName, err)
+		}
 		for i, rule := range rules {
-			matches, err := expressionsMatch(byte(nftables.TableFamilyINet), wantRules[i], rule.Exprs, setNames)
+			kernelNames, ok := namesByHandle[rule.Handle]
+			if !ok {
+				return false, fmt.Errorf("installed chain %s rule %d (handle %d) absent from the expression dump", chainName, i, rule.Handle)
+			}
+			matches, err := ruleMatchesPlan(byte(nftables.TableFamilyINet), wantRules[i], rule.Exprs, kernelNames, setNames)
 			if err != nil {
 				return false, fmt.Errorf("compare chain %s rule %d: %w", chainName, i, err)
 			}
@@ -183,6 +195,64 @@ func optionalChainPriorityEqual(a, b *nftables.ChainPriority) bool {
 
 func optionalChainPolicyEqual(a, b *nftables.ChainPolicy) bool {
 	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
+// decoderDroppedExprNames are the kernel expression kinds that google/nftables
+// v0.3.0 drops on readback: expr.exprFromName has no case for them, so
+// exprsFromBytes skips them without trace (#18721). A planned expression of
+// one of these kinds can never appear in GetRules' rule.Exprs.
+var decoderDroppedExprNames = map[string]bool{
+	"byteorder": true, "dup": true, "tproxy": true, "socket": true, "rt": true,
+}
+
+// decoderDroppedExprName returns the kernel name of a planned expression whose
+// kind the decoder drops (see decoderDroppedExprNames), or "" for a kind the
+// decoder keeps.
+func decoderDroppedExprName(e expr.Any) string {
+	switch e.(type) {
+	case *expr.Byteorder:
+		return "byteorder"
+	case *expr.Dup:
+		return "dup"
+	case *expr.TProxy:
+		return "tproxy"
+	case *expr.Socket:
+		return "socket"
+	case *expr.Rt:
+		return "rt"
+	}
+	return ""
+}
+
+// ruleMatchesPlan compares one installed rule with its planned expressions
+// (#18746). want is the plan. got is GetRules' typed decode, which lacks every
+// decoder-dropped expression. kernelNames is the kernel's own expression list
+// for the same rule (readRuleExprNames).
+//
+// The kernel list must have one entry per planned expression. At each
+// position where the plan holds a decoder-dropped kind, the kernel must name
+// exactly that kind. That is fail-closed: a dropped expression the kernel does
+// not hold is a mismatch, not a pass. No other position may name a dropped
+// kind. Every remaining planned expression is then compared byte-for-byte with
+// the typed decode.
+func ruleMatchesPlan(family byte, want, got []expr.Any, kernelNames []string, setNames map[uint32]string) (bool, error) {
+	if len(kernelNames) != len(want) {
+		return false, nil
+	}
+	decodable := make([]expr.Any, 0, len(want))
+	for i, w := range want {
+		if dropped := decoderDroppedExprName(w); dropped != "" {
+			if kernelNames[i] != dropped {
+				return false, nil
+			}
+			continue
+		}
+		if decoderDroppedExprNames[kernelNames[i]] {
+			return false, nil
+		}
+		decodable = append(decodable, w)
+	}
+	return expressionsMatch(family, decodable, got, setNames)
 }
 
 func expressionsMatch(family byte, want, got []expr.Any, setNames map[uint32]string) (bool, error) {

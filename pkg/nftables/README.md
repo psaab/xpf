@@ -56,7 +56,16 @@ have committed the batch while its ACK was lost (#12128). `replaceTable`
 reads back the table against the complete plan and treats an exact match as
 success; otherwise it preserves the `Flush()` error, joining any readback
 error. Callers must not assume that an error means the previous table remains
-untouched. The delete-then-recreate is existence-check-first, so an absent
+untouched.
+
+google/nftables v0.3.0 drops the expressions it cannot type on readback,
+including the `byteorder` in the #16841 zero-hop rule. So since #16841 that
+comparison could never match, and every lost-ACK recovery reported failure.
+`ruleMatchesPlan` (#18746) fixes this. It judges each decoder-dropped planned
+expression (`decoderDroppedExprNames`: byteorder, dup, tproxy, socket, rt)
+against the kernel's own expression names (`readRuleExprNames`), position by
+position. It compares the rest byte for byte with the typed decode. A
+dropped expression the kernel does not hold is still a mismatch. The delete-then-recreate is existence-check-first, so an absent
 table on cold boot does NOT abort the batch (#12.2). Table names
 `xpf_hostinbound` (prio 10) / `xpf_hostinbound_gap` (prio 11) / `xpf_lo0`
 (prio 0) and the named counters are unchanged from the exec-`nft` path, so
