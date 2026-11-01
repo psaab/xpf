@@ -2304,3 +2304,62 @@ fn conntrack_rmw_app_id_succeeds_without_lease_13668() {
         999
     );
 }
+
+/// #18641: the batched activation republish writes exactly the rows the per-entry
+/// publish writes, every one inside its row's shard lock.
+#[test]
+fn batched_republish_writes_the_single_publish_row_set_18641() {
+    let snat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..NatDecision::default()
+    };
+    let mut forward = local_delivery_decision(0);
+    forward.resolution.disposition = ForwardingDisposition::ForwardCandidate;
+    forward.nat = snat;
+    let mut kernel_local_snat = local_delivery_decision(0);
+    kernel_local_snat.nat = snat;
+    let mut reverse_meta = synced_forward_metadata();
+    reverse_meta.is_reverse = true;
+    let cases: Vec<(SessionKey, SessionDecision, SessionMetadata)> = vec![
+        (SessionKey { src_port: 41001, ..plain_key() }, forward, synced_forward_metadata()),
+        (SessionKey { src_port: 41002, ..plain_key() }, local_delivery_decision(0), synced_forward_metadata()),
+        (SessionKey { src_port: 41003, ..plain_key() }, kernel_local_snat, synced_forward_metadata()),
+        (SessionKey { src_port: 41004, ..plain_key() }, forward, reverse_meta),
+    ];
+    let mut single: Vec<(SessionKey, Option<u8>)> = Vec::new();
+    for (key, decision, metadata) in &cases {
+        clear_session_map_writes();
+        publish_session_map_entry_for_session(
+            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+            key,
+            *decision,
+            metadata,
+            false,
+            false,
+        )
+        .expect("recorder-only publish");
+        single.extend(session_map_writes().into_iter().map(|w| (w.key, w.value)));
+    }
+    let entries: Vec<(SessionKey, smallvec::SmallVec<[(SessionKey, u8); 4]>)> = cases
+        .iter()
+        .map(|(key, decision, metadata)| {
+            (
+                key.clone(),
+                session_entry_steering_rows(key, *decision, metadata, SessionOrigin::ForwardFlow, false, false),
+            )
+        })
+        .collect();
+    clear_session_map_writes();
+    let outcomes = publish_session_entries_batch(SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD), &entries);
+    assert!(outcomes.iter().all(Option::is_none));
+    let writes = session_map_writes();
+    assert!(writes.iter().all(|w| w.owner_lock_held), "every batched row write ran inside its shard lock");
+    let mut batched: Vec<(SessionKey, Option<u8>)> = writes.into_iter().map(|w| (w.key, w.value)).collect();
+    let order = |v: &mut Vec<(SessionKey, Option<u8>)>| {
+        v.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+    };
+    order(&mut single);
+    order(&mut batched);
+    assert!(!single.is_empty());
+    assert_eq!(batched, single, "the batch must write the per-entry publish's rows, no more and no fewer");
+}

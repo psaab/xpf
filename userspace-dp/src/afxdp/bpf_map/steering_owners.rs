@@ -54,6 +54,14 @@
 //! still stand for live shared authority. A worker that panics is not respawned,
 //! so its claims stay until that stop.
 //!
+//! **Batched coordinator publishes (#18641).** `publish_entries` publishes many entries
+//! as one holder, used by the RG-activation republish, which had written one row per
+//! syscall inside the `SetRGActive` control request: 112-152 ms per RG on tcp, on the
+//! path of every interface-SNAT reply. It takes every holdings shard in index order,
+//! then one row shard at a time, and writes that shard's rows as ONE batch inside the
+//! shard lock. It honours `BPF_MAP_UPDATE_BATCH`'s partial success: rows the batch did
+//! not apply are written singly, and only rows that landed are claimed.
+//!
 //! **Locking.** An operation for a worker takes its key's holdings shard, then one row
 //! shard at a time; row-shard code never takes a holdings lock. Each BPF write or
 //! delete runs inside its row's shard lock, so a sibling's teardown cannot find a row
@@ -511,30 +519,146 @@ impl SteeringRowOwners {
         {
             let mut rows = self.row_shard(row);
             write(coalesce_action(rows.get(row), owner, action))?;
-            let owners = rows.entry(*row).or_default();
-            match owners.iter_mut().find(|(key, _, _)| key == owner) {
-                Some((_, held_claim, held_action)) => {
-                    held_claim.insert(claim);
-                    *held_action = action;
-                }
-                None => owners.push((owner.clone(), claim, action)),
-            }
+            record_row_claim(&mut rows, row, owner, claim, action);
         }
-        match holdings.get_mut(owner) {
-            Some(rows_held) => match rows_held.iter_mut().find(|(held_row, _, _)| held_row == row) {
-                Some((_, held_claim, held_action)) => {
-                    held_claim.insert(claim);
-                    *held_action = action;
-                }
-                None => rows_held.push((*row, claim, action)),
-            },
-            None => {
-                let mut held = Held::new();
-                held.push((*row, claim, action));
-                holdings.insert(owner.clone(), held);
-            }
-        }
+        record_holding(holdings, row, owner, claim, action);
         Ok(())
+    }
+
+    /// #18641: publish MANY entries as `holder` with batched BPF writes,
+    /// with the per-entry outcome `publish_entry` would give each one.
+    ///
+    /// Locking keeps the registry's order: every holdings shard is taken (in
+    /// index order, before any row shard), then one row shard at a time. Each
+    /// row shard's writes run inside that shard's lock as ONE `write_batch`
+    /// call (plus single writes for the rows the batch did not apply), and a
+    /// claim is recorded only for a row whose write landed. With every
+    /// holdings shard held no other registry operation can interleave, so the
+    /// end state is the one the entries' sequential `publish_entry` calls
+    /// would leave, except that an entry whose write fails keeps the rows it
+    /// already wrote in OTHER shards claimed (sequential publishing would
+    /// have stopped at the failed row). That entry's error is returned, and
+    /// its stale rows are not released, as `publish_entry` does.
+    ///
+    /// `write_batch(payloads)` returns how many leading payloads it applied
+    /// and the error that stopped it, if any (the `BPF_MAP_UPDATE_BATCH`
+    /// partial-success contract: `count` elements landed, the next one did
+    /// not). Rows it did not apply are retried one at a time with `write`;
+    /// a partial batch is never treated as complete. A row named twice in
+    /// one shard's work (two entries aliasing one physical row) is written
+    /// on its own, so its coalesced action sees the claim the earlier owner
+    /// just recorded.
+    pub(crate) fn publish_entries<T: Copy>(
+        &self,
+        holder: SteeringHolder,
+        entries: &[(SessionKey, SmallVec<[(SteeringRow, T); 4]>)],
+        action_of: impl Fn(&T) -> u8,
+        with_action: impl Fn(&T, u8) -> T,
+        mut write_batch: impl FnMut(&[T]) -> (usize, Option<io::Error>),
+        mut write: impl FnMut(&T) -> io::Result<()>,
+        mut delete: impl FnMut(&SteeringRow),
+        mut restore: impl FnMut(&SteeringRow, u8),
+    ) -> Vec<Option<io::Error>> {
+        let claim = holder.claim();
+        let mut failed: Vec<Option<io::Error>> = (0..entries.len()).map(|_| None).collect();
+        let mut holdings: Vec<MutexGuard<'_, FastMap<SessionKey, Held>>> =
+            self.holdings.iter().map(lock).collect();
+        let mut by_shard: Vec<Vec<(usize, usize)>> = (0..NUM_SHARDS).map(|_| Vec::new()).collect();
+        for (entry_idx, (_, rows)) in entries.iter().enumerate() {
+            for (row_idx, (row, _)) in rows.iter().enumerate() {
+                by_shard[row_shard_idx(row)].push((entry_idx, row_idx));
+            }
+        }
+        for (shard_idx, items) in by_shard.iter().enumerate() {
+            if items.is_empty() {
+                continue;
+            }
+            let mut rows = lock(&self.rows[shard_idx]);
+            let mut named: FastMap<SteeringRow, u32> = FastMap::default();
+            for &(e, r) in items {
+                *named.entry(entries[e].1[r].0).or_insert(0) += 1;
+            }
+            let mut once: SmallVec<[(usize, usize); 64]> = SmallVec::new();
+            let mut aliased: SmallVec<[(usize, usize); 8]> = SmallVec::new();
+            for &(entry_idx, row_idx) in items {
+                let row = &entries[entry_idx].1[row_idx].0;
+                if named.get(row).copied().unwrap_or(0) > 1 {
+                    aliased.push((entry_idx, row_idx));
+                } else {
+                    once.push((entry_idx, row_idx));
+                }
+            }
+            let physical: Vec<T> = once
+                .iter()
+                .map(|&(e, r)| {
+                    let (owner, entry_rows) = &entries[e];
+                    let (row, payload) = &entry_rows[r];
+                    with_action(payload, coalesce_action(rows.get(row), owner, action_of(payload)))
+                })
+                .collect();
+            let mut next = 0;
+            while next < once.len() {
+                let (applied, stopped) = write_batch(&physical[next..]);
+                let applied = applied.min(once.len() - next);
+                for &(e, r) in &once[next..next + applied] {
+                    let (owner, entry_rows) = &entries[e];
+                    let (row, payload) = &entry_rows[r];
+                    let action = action_of(payload);
+                    record_row_claim(&mut rows, row, owner, claim, action);
+                    record_holding(&mut holdings[key_shard_idx(owner)], row, owner, claim, action);
+                }
+                next += applied;
+                if next >= once.len() {
+                    break;
+                }
+                // The batch stopped short (an error, or it applied nothing):
+                // the row it stopped at goes on its own, then batching resumes.
+                let _ = stopped;
+                let (e, r) = once[next];
+                if failed[e].is_none() {
+                    let (owner, entry_rows) = &entries[e];
+                    let (row, payload) = &entry_rows[r];
+                    match write(&physical[next]) {
+                        Ok(()) => {
+                            let action = action_of(payload);
+                            record_row_claim(&mut rows, row, owner, claim, action);
+                            record_holding(&mut holdings[key_shard_idx(owner)], row, owner, claim, action);
+                        }
+                        Err(err) => failed[e] = Some(err),
+                    }
+                }
+                next += 1;
+            }
+            for &(e, r) in &aliased {
+                if failed[e].is_some() {
+                    continue;
+                }
+                let (owner, entry_rows) = &entries[e];
+                let (row, payload) = &entry_rows[r];
+                let action = action_of(payload);
+                match write(&with_action(payload, coalesce_action(rows.get(row), owner, action))) {
+                    Ok(()) => {
+                        record_row_claim(&mut rows, row, owner, claim, action);
+                        record_holding(&mut holdings[key_shard_idx(owner)], row, owner, claim, action);
+                    }
+                    Err(err) => failed[e] = Some(err),
+                }
+            }
+        }
+        for (entry_idx, (owner, entry_rows)) in entries.iter().enumerate() {
+            if failed[entry_idx].is_some() {
+                continue;
+            }
+            let held = &mut holdings[key_shard_idx(owner)];
+            let stale: SmallVec<[SteeringRow; 4]> = held_rows(held, owner, claim)
+                .into_iter()
+                .filter(|held_row| !entry_rows.iter().any(|(row, _)| row == held_row))
+                .collect();
+            for row in &stale {
+                self.release_locked(Some(&mut **held), row, owner, claim, &mut delete, &mut restore);
+            }
+        }
+        failed
     }
 
     /// Clear `claim` from `owner`'s claim on `row` and, unless another owner
@@ -621,6 +745,50 @@ impl SteeringRowOwners {
     #[cfg(test)]
     pub(crate) fn held_row_count_for(&self, owner: &SessionKey, holder: SteeringHolder) -> usize {
         self.held_rows_for(owner, holder).len()
+    }
+}
+
+/// Record `owner`'s `claim` on `row` with the action it published (the
+/// row-shard half of a successful write). Caller holds the row's shard.
+fn record_row_claim(
+    rows: &mut FastMap<SteeringRow, Owners>,
+    row: &SteeringRow,
+    owner: &SessionKey,
+    claim: Claim,
+    action: u8,
+) {
+    let owners = rows.entry(*row).or_default();
+    match owners.iter_mut().find(|(key, _, _)| key == owner) {
+        Some((_, held_claim, held_action)) => {
+            held_claim.insert(claim);
+            *held_action = action;
+        }
+        None => owners.push((owner.clone(), claim, action)),
+    }
+}
+
+/// Record that `claim`'s holder holds `row` for `owner` (the holdings half of
+/// a successful write). Caller holds `owner`'s holdings shard.
+fn record_holding(
+    holdings: &mut FastMap<SessionKey, Held>,
+    row: &SteeringRow,
+    owner: &SessionKey,
+    claim: Claim,
+    action: u8,
+) {
+    match holdings.get_mut(owner) {
+        Some(rows_held) => match rows_held.iter_mut().find(|(held_row, _, _)| held_row == row) {
+            Some((_, held_claim, held_action)) => {
+                held_claim.insert(claim);
+                *held_action = action;
+            }
+            None => rows_held.push((*row, claim, action)),
+        },
+        None => {
+            let mut held = Held::new();
+            held.push((*row, claim, action));
+            holdings.insert(owner.clone(), held);
+        }
     }
 }
 

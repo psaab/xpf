@@ -676,25 +676,43 @@ pub(in crate::afxdp) fn republish_bpf_session_entries_for_owner_rgs(
             })
             .collect()
     };
+    // #18641: one batched publish for the whole RG set. It writes exactly the
+    // rows `publish_session_map_entry_for_session` would write for each entry
+    // (`session_entry_steering_rows`, origin ForwardFlow as before), with the
+    // same ownership claims, but as one BPF_MAP_UPDATE_BATCH per registry row
+    // shard instead of one syscall per row. It ran inside the SetRGActive
+    // control request at about 26 us per entry (112-152 ms per RG on tcp),
+    // and every interface-SNAT reply waits for it.
+    let batch: Vec<(SessionKey, smallvec::SmallVec<[(SessionKey, u8); 4]>)> = entries
+        .iter()
+        .filter(|(_, _, metadata, origin)| {
+            // #10612 (N1): skip stale-zone rows (fence BEFORE the BPF publish,
+            // mirroring prewarm). BPF-only gap: narrow race, heals on demotion.
+            let stale =
+                crate::afxdp::session_glue::synced_entry_is_stale_replay(*origin, metadata, forwarding);
+            if stale {
+                crate::afxdp::session_glue::note_stale_replay_fence_drop();
+            }
+            !stale
+        })
+        .map(|(key, decision, metadata, _)| {
+            (
+                key.clone(),
+                session_entry_steering_rows(
+                    key,
+                    *decision,
+                    metadata,
+                    SessionOrigin::ForwardFlow,
+                    forwarding.has_routing_domains,
+                    forwarding.has_multiple_zones,
+                ),
+            )
+        })
+        .collect();
     let mut published = 0u32;
     let mut errors = 0u32;
-    for (key, decision, metadata, origin) in &entries {
-        // #10612 (N1): skip stale-zone rows (fence BEFORE the BPF publish,
-        // mirroring prewarm). BPF-only gap: narrow race, heals on demotion.
-        if crate::afxdp::session_glue::synced_entry_is_stale_replay(*origin, metadata, forwarding) {
-            crate::afxdp::session_glue::note_stale_replay_fence_drop();
-            continue;
-        }
-        if publish_session_map_entry_for_session(
-            session_map,
-            key,
-            *decision,
-            metadata,
-            forwarding.has_routing_domains,
-            forwarding.has_multiple_zones,
-        )
-        .is_ok()
-        {
+    for outcome in publish_session_entries_batch(session_map, &batch) {
+        if outcome.is_none() {
             published += 1;
         } else {
             errors += 1;

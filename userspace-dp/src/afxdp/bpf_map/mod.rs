@@ -285,6 +285,77 @@ fn write_steering_row(map: SteeringMap<'_>, key: &SessionKey, value: u8) -> io::
     Ok(())
 }
 
+/// #18641: kernels or maps that reject `BPF_MAP_UPDATE_BATCH` fall back to single
+/// updates; once one does, the batch syscall is not tried again.
+static STEERING_BATCH_UNSUPPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Most rows one `BPF_MAP_UPDATE_BATCH` call carries.
+const STEERING_BATCH_MAX: usize = 4096;
+
+/// #18641: the BPF update of many steering rows, run inside ONE row shard's lock
+/// (the `SteeringRowOwners::publish_entries` batch closure). Returns how many LEADING
+/// rows landed and the error that stopped the rest, the `BPF_MAP_UPDATE_BATCH`
+/// partial-success contract: the kernel applies elements in order and reports in
+/// `count` how many it processed before an element failed. A short count is never
+/// read as success; the registry retries the remainder one row at a time.
+fn write_steering_rows_batch(map: SteeringMap<'_>, rows: &[(&SessionKey, u8)]) -> (usize, Option<io::Error>) {
+    use std::sync::atomic::Ordering;
+    #[cfg(test)]
+    {
+        SESSION_MAP_WRITES.with(|records| {
+            let mut records = records.borrow_mut();
+            for (key, value) in rows {
+                records.push(SessionMapWriteRecord {
+                    key: (*key).clone(),
+                    value: Some(*value),
+                    owner_lock_held: map.owners.shard_is_locked(&session_map_row(key)),
+                });
+            }
+        });
+        if map.fd == RECORDER_ONLY_MAP_FD {
+            return (rows.len(), None);
+        }
+    }
+    if STEERING_BATCH_UNSUPPORTED.load(Ordering::Relaxed) {
+        return (0, Some(io::Error::from_raw_os_error(libc::EOPNOTSUPP)));
+    }
+    let mut applied = 0usize;
+    for chunk in rows.chunks(STEERING_BATCH_MAX) {
+        let keys: Vec<UserspaceSessionMapKey> = chunk.iter().map(|(key, _)| session_map_key(key)).collect();
+        let values: Vec<u8> = chunk.iter().map(|(_, value)| *value).collect();
+        let mut count = chunk.len() as u32;
+        let opts = libbpf_sys::bpf_map_batch_opts {
+            sz: std::mem::size_of::<libbpf_sys::bpf_map_batch_opts>() as _,
+            elem_flags: libbpf_sys::BPF_ANY as u64,
+            flags: 0,
+        };
+        let rc = unsafe {
+            libbpf_sys::bpf_map_update_batch(
+                map.fd,
+                keys.as_ptr().cast::<c_void>(),
+                values.as_ptr().cast::<c_void>(),
+                &mut count,
+                &opts,
+            )
+        };
+        let landed = (count as usize).min(chunk.len());
+        if rc < 0 {
+            let errno = -rc;
+            if landed == 0 && applied == 0 && matches!(errno, libc::EINVAL | libc::EOPNOTSUPP | libc::ENOSYS) {
+                STEERING_BATCH_UNSUPPORTED.store(true, Ordering::Relaxed);
+            }
+            return (applied + landed, Some(io::Error::from_raw_os_error(errno)));
+        }
+        if landed < chunk.len() {
+            // Success with a short count: the rest was not applied.
+            return (applied + landed, None);
+        }
+        applied += landed;
+    }
+    (applied, None)
+}
+
 /// The BPF delete of one steering row, run inside the row's owner-shard lock. `key` names
 /// the row when the caller derived it; a row released only because the holder held it has
 /// no key, and the recorder decodes one (`session_key_for_row`).
@@ -2529,19 +2600,7 @@ pub(super) fn publish_session_map_entry_for_session_with_conntrack(
     ct: Option<ConntrackCtx<'_>>,
 ) -> io::Result<()> {
     if uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains, has_multiple_zones) {
-        let mut rows: smallvec::SmallVec<[(SessionKey, u8); 2]> = smallvec::SmallVec::new();
-        rows.push((key.clone(), USERSPACE_SESSION_ACTION_PASS_TO_KERNEL));
-        // For SNATed local-delivery sessions (e.g., ICMP to an interface-NAT
-        // address), the reply packet arrives with the SNAT address as
-        // destination. Publish the reverse session key so the XDP shim
-        // redirects reply packets to the helper for reverse-NAT processing
-        // instead of passing them to the kernel where no NAT reversal exists.
-        if decision.nat.rewrite_src.is_some() {
-            let reverse_wire = reverse_session_key(key, decision.nat);
-            if reverse_wire != *key {
-                rows.push((reverse_wire, USERSPACE_SESSION_ACTION_REDIRECT));
-            }
-        }
+        let rows = kernel_local_session_rows(key, decision.nat);
         // #9560: ONE entry publish, so a worker's claims move from a live row set it held
         // for this key (refresh, demote, promote) to exactly these rows.
         publish_session_rows(map, key, &rows)?;
@@ -2581,6 +2640,76 @@ pub(super) fn publish_session_map_entry_for_session_with_conntrack(
         );
     }
     result
+}
+
+/// The rows a kernel-local (`PASS_TO_KERNEL`) entry occupies: its own key and, for an
+/// SNATed local-delivery session (e.g. ICMP to an interface-NAT address), the reverse
+/// wire key as REDIRECT. The reply arrives with the SNAT address as destination, and
+/// the shim must steer it to the helper for reverse NAT, not to the kernel, which has
+/// no NAT reversal.
+fn kernel_local_session_rows(key: &SessionKey, nat: NatDecision) -> smallvec::SmallVec<[(SessionKey, u8); 4]> {
+    let mut rows: smallvec::SmallVec<[(SessionKey, u8); 4]> = smallvec::SmallVec::new();
+    rows.push((key.clone(), USERSPACE_SESSION_ACTION_PASS_TO_KERNEL));
+    if nat.rewrite_src.is_some() {
+        let reverse_wire = reverse_session_key(key, nat);
+        if reverse_wire != *key {
+            rows.push((reverse_wire, USERSPACE_SESSION_ACTION_REDIRECT));
+        }
+    }
+    rows
+}
+
+/// #18641: the steering rows one entry's publish writes, exactly the set
+/// `publish_session_map_entry_for_session_with_conntrack` writes for it.
+pub(super) fn session_entry_steering_rows(
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    origin: SessionOrigin,
+    has_routing_domains: bool,
+    has_multiple_zones: bool,
+) -> smallvec::SmallVec<[(SessionKey, u8); 4]> {
+    if uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains, has_multiple_zones) {
+        kernel_local_session_rows(key, decision.nat)
+    } else {
+        live_session_rows(key, decision.nat, metadata.is_reverse)
+    }
+}
+
+/// #18641: publish many entries' steering rows as the handle's holder, with one
+/// `BPF_MAP_UPDATE_BATCH` per row shard instead of one syscall per row. `entries` pairs
+/// each owner (entry key) with its rows (`session_entry_steering_rows`). The result
+/// carries, per entry, the error that stopped its publish, or `None`. Ownership,
+/// coalescing and stale-row release are `publish_session_rows`' (see
+/// `SteeringRowOwners::publish_entries`).
+pub(super) fn publish_session_entries_batch(
+    map: SteeringMap<'_>,
+    entries: &[(SessionKey, smallvec::SmallVec<[(SessionKey, u8); 4]>)],
+) -> Vec<Option<io::Error>> {
+    let claims: Vec<(SessionKey, smallvec::SmallVec<[(SteeringRow, (&SessionKey, u8)); 4]>)> = entries
+        .iter()
+        .map(|(owner, rows)| {
+            (
+                owner.clone(),
+                rows.iter()
+                    .filter(|(key, _)| steering_key_is_publishable(key))
+                    .map(|(key, value)| (session_map_row(key), (key, *value)))
+                    .collect(),
+            )
+        })
+        .collect();
+    map.owners.publish_entries(
+        map.holder,
+        &claims,
+        |&(_, value)| value,
+        |&(key, _), action| (key, action),
+        |payloads| write_steering_rows_batch(map, payloads),
+        |&(key, value)| write_steering_row(map, key, value),
+        |row| delete_steering_row(map, row, None),
+        |row, action| {
+            let _ = write_steering_row(map, &session_key_for_row(row), action);
+        },
+    )
 }
 
 /// Verify a session key exists in the BPF map (read-back after publish).
@@ -2808,6 +2937,10 @@ mod ha;
 mod metrics;
 mod pin;
 mod steering_owners;
+// #18641: the batched multi-entry steering publish.
+#[cfg(test)]
+#[path = "steering_batch_18641_tests.rs"]
+mod steering_batch_18641_tests;
 
 pub(in crate::afxdp) use ha::*;
 pub(in crate::afxdp) use metrics::*;
