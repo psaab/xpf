@@ -167,6 +167,10 @@ type netlinkInstaller struct {
 	// skip/reinstall decision without manufacturing netlink dump messages.
 	forwardFenceLiveEqualFn func(ForwardFenceSpec) (bool, error)
 	forwardFenceReplaceFn   func(ForwardFenceSpec) error
+	// overlayReadbackBetweenReadsFn is nil in production. A kernel cell sets it
+	// to commit a change between the overlay readback's GetRules and its
+	// expression-name dump: the window readAtStableNftGeneration closes (#18721).
+	overlayReadbackBetweenReadsFn func()
 }
 
 // NewNetlinkInstaller returns an Installer that talks to the host's default
@@ -199,6 +203,19 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	if err != nil {
 		return fmt.Errorf("nftables conn: %w", err)
 	}
+	// #18721: every read below must see ONE ruleset, so the whole readback is
+	// bracketed by the nf_tables generation (readAtStableNftGeneration).
+	return readAtStableNftGeneration(hostOverlayReadbackAttempts,
+		func() (uint32, error) { return readNftGeneration(c) },
+		func() error { return in.verifyHostInboundOverlayOnce(c, overlay) })
+}
+
+// hostOverlayReadbackAttempts bounds how often the overlay readback retries
+// when a commit lands mid-readback, before it fails closed (#18721).
+const hostOverlayReadbackAttempts = 3
+
+// verifyHostInboundOverlayOnce is one unbracketed pass of the overlay readback.
+func (in *netlinkInstaller) verifyHostInboundOverlayOnce(c *nftables.Conn, overlay HostInputFenceOverlay) error {
 	tbl := &nftables.Table{Family: nftables.TableFamilyINet, Name: HostInboundTableName}
 	objs, err := c.GetNamedObjects(tbl)
 	if err != nil {
@@ -239,6 +256,9 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	rules, err := c.GetRules(tbl, &nftables.Chain{Name: "input", Table: tbl})
 	if err != nil {
 		return fmt.Errorf("read host overlay rules: %w", err)
+	}
+	if in.overlayReadbackBetweenReadsFn != nil {
+		in.overlayReadbackBetweenReadsFn()
 	}
 	// #18721: GetRules drops every expression google/nftables has no type for,
 	// so the rules are judged against the kernel's own expression names too.

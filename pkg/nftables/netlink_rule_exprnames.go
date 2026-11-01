@@ -23,15 +23,9 @@ import (
 // The dump dials exactly as c does (its TestDial or its NetNS, otherwise the
 // calling thread's namespace), so it reads the same ruleset GetRules read.
 func readRuleExprNames(c *nftables.Conn, table *nftables.Table, chain string) (map[uint64][]string, error) {
-	var conn *netlink.Conn
-	if c.TestDial != nil {
-		conn = nltest.Dial(c.TestDial)
-	} else {
-		var err error
-		conn, err = netlink.Dial(unix.NETLINK_NETFILTER, &netlink.Config{NetNS: c.NetNS})
-		if err != nil {
-			return nil, fmt.Errorf("dial netfilter netlink: %w", err)
-		}
+	conn, err := dialLikeNftConn(c)
+	if err != nil {
+		return nil, err
 	}
 	defer conn.Close()
 
@@ -125,4 +119,104 @@ func decodeRuleExprNames(data []byte) (uint64, []string, error) {
 		return 0, nil, fmt.Errorf("rule message without a handle")
 	}
 	return handle, names, nil
+}
+
+// dialLikeNftConn opens a raw netfilter netlink socket on the same target as c:
+// its TestDial, else its NetNS (0 = the calling thread's namespace), the way
+// google/nftables dials (Conn.dialNetlink).
+func dialLikeNftConn(c *nftables.Conn) (*netlink.Conn, error) {
+	if c.TestDial != nil {
+		return nltest.Dial(c.TestDial), nil
+	}
+	conn, err := netlink.Dial(unix.NETLINK_NETFILTER, &netlink.Config{NetNS: c.NetNS})
+	if err != nil {
+		return nil, fmt.Errorf("dial netfilter netlink: %w", err)
+	}
+	return conn, nil
+}
+
+// readNftGeneration returns the namespace's nf_tables ruleset generation
+// (NFT_MSG_GETGEN). The kernel bumps it on every committed transaction. So two
+// reads that return the same ID bracket a window with no commit in it, and
+// every read inside that window saw one ruleset (#18721).
+func readNftGeneration(c *nftables.Conn) (uint32, error) {
+	conn, err := dialLikeNftConn(c)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	msgs, err := conn.Execute(netlink.Message{
+		Header: netlink.Header{
+			Type:  netlink.HeaderType((unix.NFNL_SUBSYS_NFTABLES << 8) | unix.NFT_MSG_GETGEN),
+			Flags: netlink.Request,
+		},
+		Data: []byte{unix.AF_UNSPEC, unix.NFNETLINK_V0, 0, 0},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("get nftables generation: %w", err)
+	}
+	return decodeNftGeneration(msgs)
+}
+
+// decodeNftGeneration reads NFTA_GEN_ID from exactly one NFT_MSG_NEWGEN reply.
+func decodeNftGeneration(msgs []netlink.Message) (uint32, error) {
+	if len(msgs) != 1 {
+		return 0, fmt.Errorf("nftables generation reply: %d messages, want 1", len(msgs))
+	}
+	msg := msgs[0]
+	if want := netlink.HeaderType((unix.NFNL_SUBSYS_NFTABLES << 8) | unix.NFT_MSG_NEWGEN); msg.Header.Type != want {
+		return 0, fmt.Errorf("nftables generation reply type %#x, want %#x", msg.Header.Type, want)
+	}
+	if len(msg.Data) < 4 {
+		return 0, fmt.Errorf("short nftables generation reply (%d bytes)", len(msg.Data))
+	}
+	ad, err := netlink.NewAttributeDecoder(msg.Data[4:])
+	if err != nil {
+		return 0, err
+	}
+	ad.ByteOrder = binary.BigEndian
+	var (
+		id   uint32
+		have bool
+	)
+	for ad.Next() {
+		if ad.Type() == unix.NFTA_GEN_ID {
+			id, have = ad.Uint32(), true
+		}
+	}
+	if err := ad.Err(); err != nil {
+		return 0, fmt.Errorf("decode nftables generation: %w", err)
+	}
+	if !have {
+		return 0, fmt.Errorf("nftables generation reply without NFTA_GEN_ID")
+	}
+	return id, nil
+}
+
+// readAtStableNftGeneration runs read between two generation reads and returns
+// read's verdict only if no commit landed in between. Otherwise it retries,
+// up to attempts times. If the ruleset is still moving after that, it fails
+// closed (#18721).
+//
+// The fence readback reads the ruleset several times: the marker object, the
+// sets, GetRules, and the raw expression-name dump. A writer outside xpf could
+// otherwise replace a rule between GetRules and the dump. NLM_F_REPLACE keeps
+// the handle, so both views would describe different rules under one handle,
+// and a kind-identical rule with ACCEPT in place of DROP would pass both checks.
+func readAtStableNftGeneration(attempts int, gen func() (uint32, error), read func() error) error {
+	var before, after uint32
+	for attempt := 0; attempt < attempts; attempt++ {
+		var err error
+		if before, err = gen(); err != nil {
+			return err
+		}
+		verdict := read()
+		if after, err = gen(); err != nil {
+			return err
+		}
+		if before == after {
+			return verdict
+		}
+	}
+	return fmt.Errorf("host overlay readback: the nftables ruleset changed during each of %d attempts (last generation %d -> %d); failing closed", attempts, before, after)
 }

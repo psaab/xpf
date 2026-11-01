@@ -5,7 +5,9 @@ xpf (0.0.0) unstable; urgency=medium
     apply was marked failed. Rules ahead of the overlay are judged by an
     expression-kind allowlist, checked against the kernel's own expression
     names as well as the decoded rule, so queue, xt targets, dup, tproxy and
-    any unknown kind are refused (#18721).
+    any unknown kind are refused. The readback is bracketed by the nftables
+    generation, so it retries, then fails closed, if the ruleset changes
+    under it (#18721).
   * Upgrade: the HA rolling rejoin deadline is configurable with
     `--rejoin-deadline` and defaults to 190s, a margin over the peer's 150s bulk-prime
     retry loop plus one 35s late-ack re-drive and 5s for that bulk's
