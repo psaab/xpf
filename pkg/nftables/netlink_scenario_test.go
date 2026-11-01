@@ -154,12 +154,15 @@ func lo0Scenario() Lo0FilterSpec {
 				Action:           "discard",
 			},
 			{
-				// dport-except + icmp type+code + frag, reject (pair).
+				// dport-except + icmp type+code, reject (pair). No IPv4
+				// is-fragment: 4def87efbe (#13955) refuses it on lo0 because
+				// the input hook runs after defragmentation, so this fixture
+				// made every lo0 install fail (#18745). IPv6 fragment
+				// coverage is the v6-frag term below.
 				Name:            "reject-term",
 				DestPortsExcept: []string{"80", "443"},
 				ICMPTypes:       []int{3},
 				ICMPCodes:       []int{4},
-				IsFragment:      true,
 				Action:          "reject",
 			},
 			{

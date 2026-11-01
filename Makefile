@@ -175,6 +175,7 @@ test:
 	$(MAKE) harness-census || status=$$?; \
 	$(MAKE) test-routing-kernel || status=$$?; \
 	$(MAKE) test-daemon-kernel || status=$$?; \
+	$(MAKE) test-nftables-kernel || status=$$?; \
 	$(MAKE) go-skip-census || status=$$?; \
 	echo ""; \
 	echo "make test: NOT EXAMINED by this run — the XDP shim's behavioural"; \
@@ -1222,6 +1223,31 @@ test-daemon-kernel-lib:
 # requiring these cells can set XPF_REQUIRE_NETNS=1; in that mode a
 # missing forcing prerequisite fails instead of being reported as
 # unexamined.
+# #18745: every pkg/nftables test under a forced netns. The pkg/nftables
+# real-kernel cells SKIP without a netns, so under a plain `go test` they
+# read as passes. Six of them sat red for weeks that way (#16841, #13955,
+# #10483, #11574). The runner fails on any SKIP under XPF_REQUIRE_NETNS=1,
+# and like test-daemon-kernel it reports NOT-EXAMINED on a host that cannot
+# create a netns.
+.PHONY: test-nftables-kernel-lib test-nftables-kernel
+test-nftables-kernel-lib:
+	sh ./test/nftables/selftest-nftables-kernel_18745.sh
+
+test-nftables-kernel:
+	@out=$$(sh ./test/nftables/selftest-nftables-kernel_18745.sh 2>&1); rc=$$?; \
+	echo "$$out"; \
+	if [ $$rc -eq 77 ]; then \
+		if [ -n "$${XPF_REQUIRE_NETNS:-}" ]; then \
+			echo "test-nftables-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the forcing prerequisites are unavailable."; \
+			exit 1; \
+		fi; \
+		echo "make test: NOT-EXAMINED — nftables-kernel (every pkg/nftables test under a private netns, #18745)."; \
+		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
+		echo "  Run where unprivileged user namespaces are available, or set XPF_REQUIRE_NETNS=1 to fail instead."; \
+		exit 0; \
+	fi; \
+	exit $$rc
+
 .PHONY: test-daemon-kernel
 test-daemon-kernel:
 	@out=$$(sh ./test/daemon/selftest-daemon-kernel_15241.sh 2>&1); rc=$$?; \

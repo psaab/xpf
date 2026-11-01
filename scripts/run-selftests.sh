@@ -433,6 +433,7 @@ run_shell test/routing/selftest-routing-probes_9812.sh
 # go/unshare/ip/bash/nsenter/timeout/sleep/nft or where unprivileged
 # user namespaces are unavailable.
 run_shell test/daemon/selftest-daemon-kernel_15241.sh
+run_shell test/nftables/selftest-nftables-kernel_18745.sh
 # The probes pin missing-tool behavior and the -json=false argv contract.
 # Fifteen hermetic fixture cells: no Go build or netns.
 run_shell test/daemon/selftest-daemon-probes_15241.sh
