@@ -73,9 +73,13 @@ func TestTCPSessionEveryLeafEverySpelling18762(t *testing.T) {
 			twoLevel: `security { flow tcp-session ` + name + v + `; }`,
 		})
 	}
-	empty := compileText(t, `security { flow { } }`)
+	// The positive control compares against an EMPTY tcp-session stanza,
+	// not an empty flow: `flow { }` leaves TCPSession nil, so any braced
+	// `tcp-session { ... }` would "differ" even for a leaf the compiler
+	// never reads (seat AD's schema-only zz-new-flag mutant stayed green).
+	empty := compileText(t, `security { flow { tcp-session { } } }`)
 	if empty == nil {
-		t.Fatal("empty flow stanza did not compile")
+		t.Fatal("empty tcp-session stanza did not compile")
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {

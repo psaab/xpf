@@ -134,6 +134,10 @@ var knownBlindScopePairs8852 = map[string]string{
 	"flow aging":        "plain-container",
 	"flow icmp-session": "plain-container",
 	"flow tcp-session":  "plain-container",
+	// #18762: time-wait-state is a plain packedTail container; arm 2 emits no
+	// site for it, so its fold rests on TestTCPSessionEveryLeafEverySpelling18762
+	// (two-level rows) and the #2419 two-level census arm.
+	"tcp-session time-wait-state": "plain-container",
 	// #10078: tcp-mss is now a declared kind container so the arm can reject
 	// misspelled kinds while its value tail stays opaque. The compact census
 	// therefore sees a plain container again and emits no site for this pair.

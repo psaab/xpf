@@ -78,3 +78,44 @@ func TestStrictSynCheckEverySpellingSetsTheFlag(t *testing.T) {
 		t.Fatal("fixture drift")
 	}
 }
+
+// Upgrade effect of #18762 (seat AC): while the admission was missing, an
+// elided `tcp-session strict-syn-check;` was dropped before the #16479 mutual-
+// exclusion gate saw it, so a config carrying it beside `no-syn-check`
+// committed clean. Re-admitting the pair re-arms the gate. Pin both paths for
+// both shapes: strict commit REJECTS; the tolerant load (boot / peer-sync)
+// WARNS and keeps both flags (strict-syn-check wins in the dataplane).
+func TestStrictSynCheckBesideNoSynCheckAfterReadmission18762(t *testing.T) {
+	for name, text := range map[string]string{
+		"braced": `security { flow { tcp-session { strict-syn-check; no-syn-check; } } }`,
+		"elided": `security { flow { tcp-session strict-syn-check; tcp-session no-syn-check; } }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree, perrs := NewParser(text).Parse()
+			if len(perrs) > 0 {
+				t.Fatalf("parse: %v", perrs)
+			}
+			if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "cannot be enabled if `no-syn-check` is enabled") {
+				t.Errorf("strict commit of %q = %v, want the #16479 mutual-exclusion rejection", text, err)
+			}
+			tree2, _ := NewParser(text).Parse()
+			cfg, err := CompileConfigLenient(tree2)
+			if err != nil {
+				t.Fatalf("tolerant load of %q failed (it must boot, #1960): %v", text, err)
+			}
+			ts := cfg.Security.Flow.TCPSession
+			if ts == nil || !ts.StrictSynCheck || !ts.NoSynCheck {
+				t.Errorf("tolerant load lost a flag: %+v (want StrictSynCheck and NoSynCheck both set)", ts)
+			}
+			warned := false
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "strict-syn-check (downgraded to warning on tolerant path)") {
+					warned = true
+				}
+			}
+			if !warned {
+				t.Errorf("tolerant load did not warn about the strict-syn-check / no-syn-check conflict: %v", cfg.Warnings)
+			}
+		})
+	}
+}

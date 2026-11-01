@@ -1,0 +1,312 @@
+# #18771 two-level brace-elision KNOWN-DIVERGENT INVENTORY (equals-gate)
+#
+# Each line: <site> TAB <strict drop shape>. A site is the census leaf whose
+# `outer inner leaf value;` spelling (two container levels packed onto one
+# line) compiles differently from its fully braced twin on the tolerant path.
+#
+#   REFUSED            strict commit rejects the two-level spelling and accepts
+#                      the braced twin: loud, the safe kind
+#   COMMITS-DIFFERENT  strict commit accepts both and they compile differently:
+#                      the silent shape that hid strict-syn-check (#18762)
+#   UNCLASSIFIED       the census's synthesized braced twin is itself refused
+#                      strictly, so this fixture cannot tell (needs a hand fixture)
+#
+# TestCompactBlockEquivalenceInventory2419 fails on a NEW divergent site, on a
+# listed site that now compiles equivalently (remove the line: the list only
+# shrinks), and on any shape change. Sites under `security flow` are not
+# allowed here at all (asserted divergence-free). Seeded 2026-11-01 from
+# origin/master d199fe64b6 + #18763; triage in #18771.
+bridge-domains xpfname domain-type	COMMITS-DIFFERENT
+bridge-domains xpfname interface	UNCLASSIFIED
+bridge-domains xpfname routing-interface	COMMITS-DIFFERENT
+firewall family any filter xpfarg interface-specific	COMMITS-DIFFERENT
+firewall family inet6 filter xpfarg interface-specific	COMMITS-DIFFERENT
+firewall family inet filter xpfarg interface-specific	COMMITS-DIFFERENT
+firewall filter xpfarg interface-specific	COMMITS-DIFFERENT
+firewall policer xpfarg if-exceeding bandwidth-limit	UNCLASSIFIED
+firewall policer xpfarg if-exceeding burst-size-limit	UNCLASSIFIED
+firewall policer xpfarg logical-interface-policer	UNCLASSIFIED
+firewall policer xpfarg then discard	UNCLASSIFIED
+firewall policer xpfarg then forwarding-class	UNCLASSIFIED
+firewall policer xpfarg then loss-priority	UNCLASSIFIED
+forwarding-options port-mirroring instance xpfarg input ingress interface	REFUSED
+forwarding-options port-mirroring instance xpfarg output interface	UNCLASSIFIED
+interfaces xpfname aggregated-ether-options lacp active	COMMITS-DIFFERENT
+interfaces xpfname aggregated-ether-options lacp passive	COMMITS-DIFFERENT
+interfaces xpfname aggregated-ether-options lacp periodic	COMMITS-DIFFERENT
+interfaces xpfname tunnel wireguard listen-port	COMMITS-DIFFERENT
+interfaces xpfname tunnel wireguard peer	COMMITS-DIFFERENT
+interfaces xpfname tunnel wireguard private-key	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg family inet6 address xpfarg preferred	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg family inet6 address xpfarg primary	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg accept-data	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg advertise-interval	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg inet6-advertise-interval	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg no-preempt	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg priority	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg track-interface	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg track-priority-cost	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg virtual-address	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg virtual-inet6-address	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg virtual-link-local-address	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg accept-data	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg advertise-interval	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg inet6-advertise-interval	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg no-preempt	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg priority	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg track-interface	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg track-priority-cost	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg virtual-address	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg virtual-inet6-address	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg virtual-link-local-address	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet6 dad-disable	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg family inet6 dhcpv6	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg family inet6 mtu	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet address xpfarg preferred	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg family inet address xpfarg primary	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg accept-data	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg advertise-interval	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg no-preempt	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg priority	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg track-interface	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg track-priority-cost	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg virtual-address	UNCLASSIFIED
+interfaces xpfname unit xpfarg family inet mtu	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg family inet targeted-broadcast	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg family inet unnumbered-address	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg family iso address	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg tunnel wireguard listen-port	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg tunnel wireguard peer	COMMITS-DIFFERENT
+interfaces xpfname unit xpfarg tunnel wireguard private-key	COMMITS-DIFFERENT
+protocols bgp disable	REFUSED
+protocols bgp graceful-restart	UNCLASSIFIED
+protocols bgp log-updown	UNCLASSIFIED
+protocols bgp multipath ibgp	UNCLASSIFIED
+protocols bgp multipath multiple-as	UNCLASSIFIED
+routing-instances xpfname description	COMMITS-DIFFERENT
+routing-instances xpfname instance-type	COMMITS-DIFFERENT
+routing-instances xpfname interface	COMMITS-DIFFERENT
+routing-instances xpfname protocols bgp disable	REFUSED
+routing-instances xpfname protocols bgp graceful-restart	UNCLASSIFIED
+routing-instances xpfname protocols bgp log-updown	UNCLASSIFIED
+routing-instances xpfname protocols bgp multipath ibgp	UNCLASSIFIED
+routing-instances xpfname protocols bgp multipath multiple-as	UNCLASSIFIED
+schedulers scheduler xpfarg daily all-day	COMMITS-DIFFERENT
+schedulers scheduler xpfarg daily exclude	COMMITS-DIFFERENT
+schedulers scheduler xpfarg daily start-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg daily stop-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg friday all-day	COMMITS-DIFFERENT
+schedulers scheduler xpfarg friday exclude	COMMITS-DIFFERENT
+schedulers scheduler xpfarg friday start-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg friday stop-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg monday all-day	COMMITS-DIFFERENT
+schedulers scheduler xpfarg monday exclude	COMMITS-DIFFERENT
+schedulers scheduler xpfarg monday start-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg monday stop-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg saturday all-day	COMMITS-DIFFERENT
+schedulers scheduler xpfarg saturday exclude	COMMITS-DIFFERENT
+schedulers scheduler xpfarg saturday start-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg saturday stop-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg sunday all-day	COMMITS-DIFFERENT
+schedulers scheduler xpfarg sunday exclude	COMMITS-DIFFERENT
+schedulers scheduler xpfarg sunday start-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg sunday stop-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg thursday all-day	COMMITS-DIFFERENT
+schedulers scheduler xpfarg thursday exclude	COMMITS-DIFFERENT
+schedulers scheduler xpfarg thursday start-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg thursday stop-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg tuesday all-day	COMMITS-DIFFERENT
+schedulers scheduler xpfarg tuesday exclude	COMMITS-DIFFERENT
+schedulers scheduler xpfarg tuesday start-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg tuesday stop-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg wednesday all-day	COMMITS-DIFFERENT
+schedulers scheduler xpfarg wednesday exclude	COMMITS-DIFFERENT
+schedulers scheduler xpfarg wednesday start-time	COMMITS-DIFFERENT
+schedulers scheduler xpfarg wednesday stop-time	COMMITS-DIFFERENT
+security address-book global description	COMMITS-DIFFERENT
+security address-book xpfname address-set	COMMITS-DIFFERENT
+security address-book xpfname address-set xpfarg address	COMMITS-DIFFERENT
+security address-book xpfname address-set xpfarg address-set	COMMITS-DIFFERENT
+security address-book xpfname description	COMMITS-DIFFERENT
+security dynamic-address address-name xpfarg profile fail-mode	UNCLASSIFIED
+security dynamic-address address-name xpfarg profile feed-name	UNCLASSIFIED
+security ike gateway xpfarg dead-peer-detection always-send	COMMITS-DIFFERENT
+security ike gateway xpfarg dead-peer-detection interval	COMMITS-DIFFERENT
+security ike gateway xpfarg dead-peer-detection optimized	COMMITS-DIFFERENT
+security ike gateway xpfarg dead-peer-detection probe-idle-tunnel	COMMITS-DIFFERENT
+security ike gateway xpfarg dead-peer-detection threshold	COMMITS-DIFFERENT
+security ike gateway xpfarg dynamic hostname	UNCLASSIFIED
+security ike policy xpfarg local-certificate	COMMITS-DIFFERENT
+security ipsec gateway xpfarg dead-peer-detection always-send	COMMITS-DIFFERENT
+security ipsec gateway xpfarg dead-peer-detection interval	COMMITS-DIFFERENT
+security ipsec gateway xpfarg dead-peer-detection optimized	COMMITS-DIFFERENT
+security ipsec gateway xpfarg dead-peer-detection probe-idle-tunnel	COMMITS-DIFFERENT
+security ipsec gateway xpfarg dead-peer-detection threshold	COMMITS-DIFFERENT
+security ipsec gateway xpfarg dynamic hostname	UNCLASSIFIED
+security ipsec policy xpfarg perfect-forward-secrecy keys	UNCLASSIFIED
+security ipsec vpn xpfarg ike gateway	UNCLASSIFIED
+security ipsec vpn xpfarg ike ipsec-policy	UNCLASSIFIED
+security ipsec vpn xpfarg vpn-monitor destination-ip	UNCLASSIFIED
+security ipsec vpn xpfarg vpn-monitor optimized	UNCLASSIFIED
+security ipsec vpn xpfarg vpn-monitor source-interface	UNCLASSIFIED
+security log report	COMMITS-DIFFERENT
+security log source-address	COMMITS-DIFFERENT
+security nat destination pool xpfarg port	UNCLASSIFIED
+security nat nat64 rule-set xpfarg match source-address-name	UNCLASSIFIED
+security nat nat64 rule-set xpfarg match source-address	UNCLASSIFIED
+security nat source pool-utilization-alarm clear-threshold	UNCLASSIFIED
+security nat source pool-utilization-alarm raise-threshold	COMMITS-DIFFERENT
+security nat source pool xpfarg persistent-nat inactivity-timeout	COMMITS-DIFFERENT
+security nat source pool xpfarg persistent-nat permit	COMMITS-DIFFERENT
+security nat source pool xpfarg port no-random-allocation	COMMITS-DIFFERENT
+security nat source pool xpfarg port no-translation	COMMITS-DIFFERENT
+security nat source pool xpfarg port random-allocation	COMMITS-DIFFERENT
+security nat source pool xpfarg port	UNCLASSIFIED
+security pki ca-profile	COMMITS-DIFFERENT
+security pki ca-profile xpfarg ca-identity	COMMITS-DIFFERENT
+security pki ca-profile xpfarg enrollment retry	COMMITS-DIFFERENT
+security pki ca-profile xpfarg enrollment retry-interval	COMMITS-DIFFERENT
+security pki ca-profile xpfarg enrollment url	COMMITS-DIFFERENT
+security pki ca-profile xpfarg revocation-check crl url	COMMITS-DIFFERENT
+security pki ca-profile xpfarg revocation-check disable	COMMITS-DIFFERENT
+security pki ca-profile xpfarg revocation-check use-ocsp	COMMITS-DIFFERENT
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg match application	UNCLASSIFIED
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg match destination-address-excluded	UNCLASSIFIED
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg match destination-address	UNCLASSIFIED
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg match source-address-excluded	UNCLASSIFIED
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg match source-address	UNCLASSIFIED
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg scheduler-name	UNCLASSIFIED
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then deny count	UNCLASSIFIED
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then deny log	UNCLASSIFIED
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then permit	UNCLASSIFIED
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then reject	UNCLASSIFIED
+security policies global policy xpfarg match application	UNCLASSIFIED
+security policies global policy xpfarg match destination-address-excluded	UNCLASSIFIED
+security policies global policy xpfarg match destination-address	UNCLASSIFIED
+security policies global policy xpfarg match from-zone	UNCLASSIFIED
+security policies global policy xpfarg match source-address-excluded	UNCLASSIFIED
+security policies global policy xpfarg match source-address	UNCLASSIFIED
+security policies global policy xpfarg match to-zone	UNCLASSIFIED
+security policies global policy xpfarg scheduler-name	UNCLASSIFIED
+security policies global policy xpfarg then deny count	UNCLASSIFIED
+security policies global policy xpfarg then deny log	UNCLASSIFIED
+security policies global policy xpfarg then permit	UNCLASSIFIED
+security policies global policy xpfarg then reject	UNCLASSIFIED
+security zones functional-zone management description	COMMITS-DIFFERENT
+security zones functional-zone management host-inbound-traffic protocols	UNCLASSIFIED
+security zones functional-zone management host-inbound-traffic system-services	UNCLASSIFIED
+security zones functional-zone management interfaces	UNCLASSIFIED
+security zones functional-zone management interfaces xpfname host-inbound-traffic protocols	UNCLASSIFIED
+security zones functional-zone management interfaces xpfname host-inbound-traffic system-services	UNCLASSIFIED
+security zones functional-zone management screen	UNCLASSIFIED
+security zones security-zone xpfarg address-book description	COMMITS-DIFFERENT
+security zones security-zone xpfarg advanced-connection-tracking mode	REFUSED
+security zones security-zone xpfarg advanced-connection-tracking timeout	REFUSED
+security zones security-zone xpfarg advanced-connection-tracking track-all-policies-to-this-zone	REFUSED
+security zones security-zone xpfarg advance-policy-based-routing-profile	REFUSED
+security zones security-zone xpfarg application-tracking	REFUSED
+security zones security-zone xpfarg enable-reverse-reroute	REFUSED
+security zones security-zone xpfarg interfaces xpfname host-inbound-traffic protocols	UNCLASSIFIED
+security zones security-zone xpfarg interfaces xpfname host-inbound-traffic system-services	UNCLASSIFIED
+security zones security-zone xpfarg source-identity-log	REFUSED
+security zones security-zone xpfarg unidirectional-session-refreshing	REFUSED
+security zones security-zone xpfarg white-list	REFUSED
+services flow-monitoring version9 template xpfarg template-refresh-rate seconds	COMMITS-DIFFERENT
+services flow-monitoring version-ipfix template xpfarg ipv4-template export-extension	COMMITS-DIFFERENT
+services flow-monitoring version-ipfix template xpfarg ipv6-template export-extension	COMMITS-DIFFERENT
+services flow-monitoring version-ipfix template xpfarg template-refresh-rate seconds	COMMITS-DIFFERENT
+system login class	REFUSED
+system login class xpfarg allow-commands	REFUSED
+system login class xpfarg allow-configuration	REFUSED
+system login class xpfarg deny-commands	REFUSED
+system login class xpfarg deny-configuration	REFUSED
+system login class xpfarg idle-timeout	REFUSED
+system login class xpfarg permissions	REFUSED
+system login user	REFUSED
+system login user xpfarg authentication encrypted-password	REFUSED
+system login user xpfarg authentication ssh-dsa	REFUSED
+system login user xpfarg authentication ssh-ed25519	REFUSED
+system login user xpfarg authentication ssh-rsa	REFUSED
+system login user xpfarg class	REFUSED
+system login user xpfarg uid	REFUSED
+system services dhcp-local-server dynamic-dns backend	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns conflict-policy	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns destination-interface	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns domain	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns enable	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns forward-zone	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns hostname-source	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns require-tsig	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns reverse-zone	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns routing-instance	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns source-address	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns tsig-algorithm	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns tsig-key	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns tsig-secret	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns ttl	COMMITS-DIFFERENT
+system services dhcp-local-server dynamic-dns update-server	COMMITS-DIFFERENT
+system services dhcp-local-server expired-leases-processing enable	COMMITS-DIFFERENT
+system services dhcp-local-server expired-leases-processing flush-timer	COMMITS-DIFFERENT
+system services dhcp-local-server expired-leases-processing hold-time	COMMITS-DIFFERENT
+system services dhcp-local-server expired-leases-processing max-leases	COMMITS-DIFFERENT
+system services dhcp-local-server expired-leases-processing max-time	COMMITS-DIFFERENT
+system services dhcp-local-server expired-leases-processing reclaim-timer	COMMITS-DIFFERENT
+system services dhcp-local-server expired-leases-processing unwarned-cycles	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns backend	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns conflict-policy	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns destination-interface	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns domain	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns enable	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns forward-zone	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns hostname-source	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns require-tsig	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns reverse-zone	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns routing-instance	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns source-address	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns tsig-algorithm	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns tsig-key	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns tsig-secret	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns ttl	COMMITS-DIFFERENT
+system services dhcpv6-local-server dynamic-dns update-server	COMMITS-DIFFERENT
+system services dhcpv6-local-server expired-leases-processing enable	COMMITS-DIFFERENT
+system services dhcpv6-local-server expired-leases-processing flush-timer	COMMITS-DIFFERENT
+system services dhcpv6-local-server expired-leases-processing hold-time	COMMITS-DIFFERENT
+system services dhcpv6-local-server expired-leases-processing max-leases	COMMITS-DIFFERENT
+system services dhcpv6-local-server expired-leases-processing max-time	COMMITS-DIFFERENT
+system services dhcpv6-local-server expired-leases-processing reclaim-timer	COMMITS-DIFFERENT
+system services dhcpv6-local-server expired-leases-processing unwarned-cycles	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg api-token	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg aws-access-key	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg aws-region	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg aws-secret-key	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg backend	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg checkip-allowlist	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg checkip-url	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg destination-interface	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg forward-zone	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg hosted-zone-id	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg ok-response	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg password	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg require-tsig	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg reverse-zone	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg routing-instance	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg server	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg source-address	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg tsig-algorithm	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg tsig-key	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg tsig-secret	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg update-server	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg url-template	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg username	COMMITS-DIFFERENT
+system services dynamic-dns provider xpfarg zone	COMMITS-DIFFERENT
+system services web-management api-auth class	COMMITS-DIFFERENT
+system services web-management api-auth expires	COMMITS-DIFFERENT
+system services web-management api-auth metrics-require-auth	UNCLASSIFIED
+system services web-management http interface	UNCLASSIFIED
+system services web-management https certificate	UNCLASSIFIED
+system services web-management https interface	UNCLASSIFIED
+system services web-management https private-key	UNCLASSIFIED
+system services web-management https system-generated-certificate	COMMITS-DIFFERENT

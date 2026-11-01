@@ -15510,7 +15510,15 @@ the value sits in a single typed slot:
     ACK pass, and a handshake-incomplete session is never served data from
     the flow cache), and commit rejects `strict-syn-check` together with
     `no-syn-check` / `no-syn-check-in-tunnel` (the lenient load path warns
-    and the dataplane keeps strict-wins precedence there). Missing selector
+    and the dataplane keeps strict-wins precedence there). **Upgrade note
+    (#18762):** from #16581 until #18762, the brace-elided spelling
+    `tcp-session strict-syn-check;` was silently dropped before this gate
+    ran. A config committed in that window with elided `strict-syn-check`
+    beside `no-syn-check` therefore BOOTS after upgrade with a warning and
+    strict-syn-check ENFORCED (strict wins), and its next commit is REFUSED
+    until one of the two leaves is removed. The same window also dropped
+    elided `rst-sequence-check`, `maximum-window` and two-level
+    `time-wait-state` children, which now take effect as written. Missing selector
     keys decode false, and
     the protocol-v34 exact-version gate rejects a v33 helper that would ignore
     an explicitly configured selector. #15753 enforces the remaining

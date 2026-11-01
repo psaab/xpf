@@ -927,7 +927,11 @@ type censusResult struct {
 	// is kept OUT of `divergent`, so it can only add a failure.
 	twoLevelDivergent []string
 	twoLevelChecked   int
-	skipped           map[string]int
+	// twoLevelShape is each divergent two-level site's DROP SHAPE on the
+	// STRICT commit path (see twoLevelDropShape18771), inventoried in
+	// twoLevelInventoryPath so the list can only shrink.
+	twoLevelShape map[string]string
+	skipped       map[string]int
 	// dropShape records, for each DIVERGENT site, what the compact spelling
 	// actually produced:
 	//
@@ -1068,11 +1072,67 @@ func renderScaffold(text string, canonical, rendered []string) string {
 	return text
 }
 
+const twoLevelInventoryPath = "testdata/compact_block_two_level_18771.txt"
+
+// Two-level drop shapes on the STRICT commit path. The census compiles
+// tolerantly (a divergence is any compiled difference); the shape says what
+// an operator committing the two-level spelling actually experiences:
+//
+//	REFUSED            strict commit rejects the two-level spelling while
+//	                   accepting the braced twin: loud, the safe kind
+//	COMMITS-DIFFERENT  strict commit accepts both and they compile
+//	                   differently: the silent strict-syn-check shape
+//	UNCLASSIFIED       the census's synthesized braced twin is itself
+//	                   refused strictly, so this fixture cannot tell; each
+//	                   needs a hand-built fixture (#18771)
+const (
+	twoLevelRefused          = "REFUSED"
+	twoLevelCommitsDifferent = "COMMITS-DIFFERENT"
+	twoLevelUnclassified     = "UNCLASSIFIED"
+)
+
+func twoLevelDropShape18771(braced, twoLevel string) string {
+	strict := func(text string) error {
+		tr, pe := NewParser(text).Parse()
+		if len(pe) > 0 {
+			return pe[0]
+		}
+		_, err := CompileConfig(tr)
+		return err
+	}
+	if strict(braced) != nil {
+		return twoLevelUnclassified
+	}
+	if strict(twoLevel) != nil {
+		return twoLevelRefused
+	}
+	return twoLevelCommitsDifferent
+}
+
+func readTwoLevelInventory(t *testing.T) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(twoLevelInventoryPath)
+	if err != nil {
+		t.Fatalf("read two-level inventory: %v", err)
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		site, shape := splitInventoryLine(line)
+		out[site] = shape
+	}
+	return out
+}
+
 func runCompactBlockCensus(t *testing.T) censusResult {
 	t.Helper()
 	res := censusResult{
 		skipped: map[string]int{}, state: map[string]string{},
 		dropShape: map[string]string{}, unobservedClass: map[string]int{},
+		twoLevelShape: map[string]string{},
 	}
 	emptyCfg := compileText(t, "")
 	for _, s := range collectCompactSites() {
@@ -1173,6 +1233,7 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 				res.twoLevelChecked++
 				if !cfgEqual(cb1, c2) {
 					res.twoLevelDivergent = append(res.twoLevelDivergent, siteKey)
+					res.twoLevelShape[siteKey] = twoLevelDropShape18771(blockV1, twoLevel)
 				}
 			}
 		}
@@ -1415,6 +1476,35 @@ func TestCompactBlockEquivalenceInventory2419(t *testing.T) {
 	if res.twoLevelChecked == 0 {
 		t.Errorf("#18762: two-level arm checked ZERO cells, so the assertion above measures nothing")
 	}
+	// Everywhere else the two-level arm is an EQUALS-GATE against its
+	// inventory (#18771), seeded with every divergent site and its strict
+	// drop shape. A new divergent site reds; a site that now compiles
+	// equivalently must leave the file (the list only shrinks); and a shape
+	// change reds too, because REFUSED -> COMMITS-DIFFERENT is a loud
+	// rejection turning into a silent drop.
+	inv := readTwoLevelInventory(t)
+	for _, site := range res.twoLevelDivergent {
+		want, listed := inv[site]
+		got := res.twoLevelShape[site]
+		switch {
+		case !listed:
+			t.Errorf("#18771: NEW two-level divergent site (%s): %s\n"+
+				"    `outer inner leaf value;` compiles differently from the braced twin. Admit the (outer, inner) pair after measuring it (#8690), or, only if it is deliberate, add it to %s with its shape.",
+				got, site, twoLevelInventoryPath)
+		case want != got:
+			t.Errorf("#18771: two-level site %q changed drop shape %s -> %s (update %s; %s -> %s is a regression)",
+				site, want, got, twoLevelInventoryPath, twoLevelRefused, twoLevelCommitsDifferent)
+		}
+	}
+	divergentNow := map[string]bool{}
+	for _, site := range res.twoLevelDivergent {
+		divergentNow[site] = true
+	}
+	for site := range inv {
+		if !divergentNow[site] {
+			t.Errorf("#18771: %s lists %q as two-level divergent, but it now compiles equivalently (or is no longer checked); remove the line", twoLevelInventoryPath, site)
+		}
+	}
 
 	// Positive control, both directions.
 	//
@@ -1484,7 +1574,7 @@ func TestCompactBlockCensusReport2419(t *testing.T) {
 	t.Logf("  two-level cells CHECKED (#18762):       %d", res.twoLevelChecked)
 	t.Logf("  two-level cells DIVERGENT (#18762):     %d", len(res.twoLevelDivergent))
 	for _, site := range res.twoLevelDivergent {
-		t.Logf("    two-level divergent: %s", site)
+		t.Logf("    two-level divergent: %s\t%s", site, res.twoLevelShape[site])
 	}
 	keys := make([]string, 0, len(res.skipped))
 	for k := range res.skipped {
