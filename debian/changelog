@@ -1,7 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
   * Upgrade: the HA rolling rejoin deadline is configurable with
-    `--rejoin-deadline` and defaults to 190s: the peer's last bulk-prime
-    retry at +150s, the 35s late-ack re-drive, and 5s for that bulk's
+    `--rejoin-deadline` and defaults to 190s, a margin over the peer's 150s bulk-prime
+    retry loop plus one 35s late-ack re-drive and 5s for that bulk's
     transfer. It bounds each of the two post-cut waits, so the worst case is
     twice that. The flag is validated before any demotion: 0 or omitted means
     the default, and a negative value, one under 30s, or the flag without
@@ -10,6 +10,20 @@ xpf (0.0.0) unstable; urgency=medium
     advanced. Run the staged binary
     (`/usr/local/share/xpf/staged/xpfd upgrade --rolling`) to get the new
     orchestrator on the first roll to this release (#18415).
+  * Remote CLI: operational `show configuration | display set` (and
+    `| display json|xml|inheritance`, chained `| display set | match x`,
+    and `run show configuration | display set` from configuration mode)
+    renders again instead of failing with `unknown show configuration
+    command: |`. The unknown-subcommand gate now judges only the words
+    before the first `|`. An unknown word before the pipe still refuses.
+    A display pipe after another keyword-only command was already
+    refused and still is (exit 1); only the message changes, naming the
+    modifier instead of `unknown <path> command: |`. Operational
+    `show configuration | compare` is not supported, and now says so:
+    `| compare rollback <N>` points at `show system rollback <N> |
+    compare` (rollback N against the active configuration), and the bare
+    or path-scoped forms point at configuration mode, which compares the
+    candidate (#18664).
   * Userspace dataplane: a peer-synced flow's original-tuple row now wins
     the import over its forward-wire alias (neither the alias nor a local
     promotion of it books the translation; the alias is refused, under its
@@ -54,6 +68,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Dataplane: include live branch-stat and v6 proxy-NDP maps in the
     retained userspace-XDP shim allowlist with their BPF map types
     (#18390).
+  * Userspace dataplane tests: select distinct live-seed host slots in the
+    IPv6 /64 ICMP-rate-limit victim regression, replacing its collision-
+    dependent admission threshold with an exact 1600/1600 expectation
+    (#18404).
   * CI: Keep the harness-census workflow printable ASCII so its wiring
     self-test remains fail-closed (#18389).
   * Incus HA assurance: accept `secondary-hold` as the peer's non-owner state
