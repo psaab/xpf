@@ -12,6 +12,8 @@ func packedRG6665(t *testing.T, body string) *RedundancyGroup {
 	t.Helper()
 	text := fmt.Sprintf(`chassis {
     cluster {
+        control-interface em0;
+        peer-address 10.99.0.2;
         cluster-id 1;
         node 0;
         authentication-key "test-cluster-psk-value";

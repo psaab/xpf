@@ -17,6 +17,8 @@ import (
 func rethLAGLines(extra ...string) []string {
 	return append([]string{
 		"set chassis cluster cluster-id 1",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster authentication-key test-cluster-psk-16586",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
@@ -109,6 +111,8 @@ func TestRethLAGGroupedPerNodeRejected16586(t *testing.T) {
 		"set groups node1 interfaces ge-7/0/2 gigether-options redundant-parent reth1",
 		`set apply-groups "${node}"`,
 		"set chassis cluster cluster-id 1",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster authentication-key test-cluster-psk-16586",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
@@ -188,6 +192,8 @@ func TestRethSingleChildPerNodeUnchanged16586(t *testing.T) {
 		"set groups node1 interfaces ge-7/0/1 gigether-options redundant-parent reth1",
 		`set apply-groups "${node}"`,
 		"set chassis cluster cluster-id 1",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster authentication-key test-cluster-psk-16586",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",

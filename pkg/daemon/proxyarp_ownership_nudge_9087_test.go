@@ -40,6 +40,8 @@ func drainNudge9087(t *testing.T, d *Daemon) bool {
 func TestMasterEdgeNudgesProxyARP9087(t *testing.T) {
 	store := testStoreWithSetConfig(t, []string{
 		"set chassis cluster cluster-id 1",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-9087",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
@@ -62,6 +64,8 @@ func TestMasterEdgeNudgesProxyARP9087(t *testing.T) {
 func TestBackupEdgeNudgesProxyARP9087(t *testing.T) {
 	store := testStoreWithSetConfig(t, []string{
 		"set chassis cluster cluster-id 1",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-9087",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
