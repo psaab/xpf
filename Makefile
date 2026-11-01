@@ -1115,9 +1115,10 @@ test-close-keyword-lint-lib:
 	python3 -m unittest scripts/test_close_keyword_lint.py
 
 test-cos-apply-lib:
-	bash ./test/incus/cos-apply-lib-selftest.sh
+	bash ./test/incus/cos-apply-lib-selftest.sh </dev/null
 	python3 -m unittest discover -s test/incus -p 'test_cos_apply_lib.py'
 	go test -count=1 -run 6440 ./cmd/cli/
+	go test -count=1 -run 18730 ./pkg/config/
 
 # Self-test the #7159 mouse-latency elephant lifecycle. The defect it guards is
 # a CORRUPT MEASUREMENT rather than an error: the rep script stopped its

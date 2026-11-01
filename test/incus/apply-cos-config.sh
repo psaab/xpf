@@ -265,6 +265,13 @@ if ! cos_require_markers "commit check on $TARGET" "$CHECK_OUT" \
 	echo "no live state changed (commit check runs on the candidate only)" >&2
 	exit 4
 fi
+# #18730: a set whose filters lack a terminal catch-all would DISCARD every
+# packet that matches no term once #18728 is deployed. The target's own commit
+# check names such filters; refuse before anything is committed.
+if ! cos_refuse_catchall_less "$CHECK_OUT" "$SETS_TMP"; then
+	echo "no live state changed (refused before commit)" >&2
+	exit 8
+fi
 
 # ---- Phase 2: atomic commit ----
 # Delete + set are in ONE transaction. If `commit` fails, the
