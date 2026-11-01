@@ -256,6 +256,7 @@ pub(crate) fn worker_loop(
         node_id,
         binding_plans,
         poll_mode,
+        session_limit_shard,
     } = plan;
     let WorkerSharedDataplane {
         runtime: shared_runtime,
@@ -351,6 +352,7 @@ pub(crate) fn worker_loop(
         &runtime_atomics,
         &cold_path_atomics,
         &rg_epochs,
+        session_limit_shard,
     );
     // #18562: every worker of this node publishes its #7770 punt seeds to the
     // node's ONE directory, which the embedded-ICMP matcher reads when an
