@@ -160,10 +160,12 @@ pub(crate) struct BindingWorker {
     /// 2 * RX_BATCH_SIZE - 1 and parking never allocates on the hot path.
     pub(in crate::afxdp) view_held: Vec<(XdpDesc, UserspaceDpMeta)>,
     /// #18560: an ordinary pass has validated a native RX packet carrying the
-    /// worker's CURRENT stamp since the worker last adopted a view. The ring
-    /// is FIFO, so no packet stamped with an older view can follow it on
-    /// this binding; once every binding is there (and none holds parked
-    /// packets) the worker releases its retained views early.
+    /// worker's CURRENT stamp since the worker last adopted a view. In native
+    /// mode the ring has one producer, so no packet stamped with an older
+    /// view can follow it on this binding (generic mode can reorder a
+    /// straggler by a few us; see `PrevViews::release_if_drained`). Once
+    /// every binding is there (and none holds parked packets) the worker
+    /// releases its retained views early.
     pub(in crate::afxdp) seen_current_stamp: bool,
     /// #8274 step 3: per-worker WireGuard decap output buffer.
     ///

@@ -746,9 +746,13 @@ impl PrevViews {
 
     /// Early release (#18560, seat AE). `drained` is true once every binding
     /// of the worker has validated a native packet with the current stamp
-    /// since the adoption and holds no parked packet. Each binding's RX ring
-    /// is FIFO, so no packet stamped with a left view can still arrive on it;
-    /// keeping the views would only pin their table copies until the grace.
+    /// since the adoption and holds no parked packet. In native mode a
+    /// binding's RX ring has one producer, so no packet stamped with a left
+    /// view can still arrive on it; keeping the views would only pin their
+    /// table copies until the grace. In generic mode fed from several CPUs a
+    /// few-us reorder window can deliver an older-stamped straggler after a
+    /// current one; released views drop it as a mismatch, exactly as before
+    /// the grace (seat AE).
     /// This bounds the pinning to the drain time (milliseconds) whenever
     /// every binding carries traffic. An idle binding never proves its ring
     /// drained, so its worker falls back to the grace.

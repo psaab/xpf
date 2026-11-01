@@ -2387,9 +2387,16 @@ own view's flow-cache entry:
   - **Early release** (`PrevViews::release_if_drained`). The views are
     dropped as soon as every binding of the worker has validated a native
     packet with the CURRENT stamp since the adoption and holds no parked
-    packet. Each ring is FIFO, so nothing older can follow. With traffic on
-    every binding a view lives for the ring's drain time (milliseconds);
-    only a worker with an idle binding keeps it for the full 200 ms.
+    packet. In native mode each ring has one producer (the queue's XDP
+    execution stamps and enqueues together, and generations only go up), so
+    nothing older can follow. In generic mode fed from several CPUs (veth or
+    ipvlan, such as the fabric's xdpgeneric parent) each CPU reads the stamp
+    before taking the socket RX lock, so for a few us an older-stamped packet
+    can land behind a current one. If the views were already released it is
+    dropped as a mismatch, exactly as before this change, and never processed
+    under the wrong view. With traffic on every binding a view lives for the
+    ring's drain time (milliseconds); only a worker with an idle binding keeps
+    it for the full 200 ms.
   - **Memory.** A retained view pins the publisher's deep-cloned
     `ForwardingState`, routes included: on the order of 100-150 MB per copy
     with a full IPv4 table. Under BGP churn faster than the grace both slots
