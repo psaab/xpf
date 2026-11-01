@@ -507,20 +507,23 @@ func lo0RenderedRuleCount(cfg *config.Config, filterV4, filterV6 string) int {
 	// family's implicit final discard, so an empty or match-nothing filter now
 	// enforces (drop all but the exempt netdevs, the Junos empty-filter
 	// semantic) instead of rendering an empty policy-accept shell.
-	implicit := func(f *config.FirewallFilter) int {
+	implicit := func(f *config.FirewallFilter, v4 bool) int {
 		if f == nil || config.FirewallFilterHasCatchAll(f) {
 			return 0
+		}
+		if v4 && len(config.Lo0ImplicitDiscardVRFMasters(cfg)) > 0 {
+			return 2 // the IPv4 VRF-local accept + the drop
 		}
 		return 1
 	}
 	count := 0
 	if filterV4 != "" {
 		f := cfg.Firewall.FiltersInet[filterV4]
-		count += countFilter(f, "ip") + implicit(f)
+		count += countFilter(f, "ip") + implicit(f, true)
 	}
 	if filterV6 != "" {
 		f := cfg.Firewall.FiltersInet6[filterV6]
-		count += countFilter(f, "ip6") + implicit(f)
+		count += countFilter(f, "ip6") + implicit(f, false)
 	}
 	return count
 }
@@ -688,6 +691,9 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 			return
 		}
 		implicitCounters = append(implicitCounters, xnft.Lo0ImplicitDiscardCounterName(cfgFamily))
+		if masters := config.Lo0ImplicitDiscardVRFMasters(cfg); family == "ip" && len(masters) > 0 {
+			ruleLines = append(ruleLines, "    "+lo0VRFLocalAcceptRule(masters))
+		}
 		ruleLines = append(ruleLines, "    "+lo0ImplicitDiscardRule(family, cfgFamily, exempt))
 	}
 	if filterV4 != "" {
@@ -748,6 +754,18 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 // config.ValidateLo0ImplicitDiscardExempt: not valid nft, so the atomic load
 // fails and the prior table stays.
 const nftRefuseLo0ImplicitExempt = `comment "lo0 implicit-discard exemption invalid" __xpf_refuse_lo0_implicit_exempt__`
+
+// lo0VRFLocalAcceptRule renders the accept that precedes the IPv4 implicit
+// discard for IPv4 traffic the box generates inside a VRF: the input hook
+// reports the VRF MASTER as both iifname and sdifname for it (measured; sdif
+// is not 0). A packet received on a VRF slave carries the slave as sdifname,
+// so fxp0 traffic is not exempted. The VRF analogue of the `lo` exemption;
+// netlink mirror buildLo0VRFLocalAccept. IPv4 only: see
+// config.Lo0ImplicitDiscardVRFMasters for why IPv6 has no such exemption.
+func lo0VRFLocalAcceptRule(masters []string) string {
+	return "meta nfproto ipv4 iifname " + nftIifnameSet(masters) +
+		" meta sdifname " + nftIifnameSet(masters) + " accept"
+}
 
 func lo0ImplicitDiscardRule(family, cfgFamily string, exempt []string) string {
 	nfproto := "ipv4"

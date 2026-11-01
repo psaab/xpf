@@ -96,8 +96,8 @@ func installsImplicitDiscardOnly18728(t *testing.T, cfg *config.Config, priorEnf
 // policy-accept shell.
 func TestVacatedLo0FilterInstallsImplicitDiscard18728(t *testing.T) {
 	cfg := vacatedLo0Config()
-	if got := lo0RenderedRuleCount(cfg, "protect-re", "protect-re6"); got != 2 {
-		t.Fatalf("daemon preflight count = %d, want 2 (one implicit discard per family)", got)
+	if got := lo0RenderedRuleCount(cfg, "protect-re", "protect-re6"); got != 3 {
+		t.Fatalf("daemon preflight count = %d, want 3 (the IPv4 VRF-local accept and one implicit discard per family)", got)
 	}
 	spec := installsImplicitDiscardOnly18728(t, cfg, true)
 	if len(spec.V4Terms)+len(spec.V6Terms) != 0 {
@@ -185,8 +185,8 @@ func TestMatchNothingLo0RenderInstallsImplicitDiscard18728(t *testing.T) {
 			{Name: "nothing-v6", SourceAddresses: []string{"10.0.0.0/8"}, Action: config.FilterActionDiscard},
 		}},
 	}
-	if got := lo0RenderedRuleCount(cfg, "protect-re", "protect-re6"); got != 2 {
-		t.Fatalf("daemon preflight count = %d, want 2 (the match-nothing terms render nothing; one implicit discard per family)", got)
+	if got := lo0RenderedRuleCount(cfg, "protect-re", "protect-re6"); got != 3 {
+		t.Fatalf("daemon preflight count = %d, want 3 (the match-nothing terms render nothing; the IPv4 VRF-local accept and one implicit discard per family)", got)
 	}
 	installsImplicitDiscardOnly18728(t, cfg, true)
 }

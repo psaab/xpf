@@ -225,6 +225,7 @@ func toNftLo0Spec(cfg *config.Config, filterV4, filterV6 string) xnft.Lo0FilterS
 	if spec.ImplicitDiscardV4 || spec.ImplicitDiscardV6 {
 		spec.ImplicitDiscardExemptNetdevs = config.Lo0ImplicitDiscardExemptNetdevs(cfg)
 		spec.ImplicitDiscardRequiredNetdevs = config.Lo0ImplicitDiscardRequiredNetdevs(cfg)
+		spec.ImplicitDiscardVRFMasters = config.Lo0ImplicitDiscardVRFMasters(cfg)
 	}
 	return spec
 }

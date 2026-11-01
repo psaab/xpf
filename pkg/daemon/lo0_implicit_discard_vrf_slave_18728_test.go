@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,6 +30,14 @@ import (
 //     a fix that exempts the VRF master would fail here;
 //   - ge-0-0-1 is an ordinary non-VRF port and must be dropped (control
 //     that the implicit discard is installed at all).
+//
+// It also checks locally generated traffic: IPv4 the box sends to its own
+// fxp0 address inside vrf-mgmt (iifname = sdifname = vrf-mgmt) and traffic in
+// the default table (iifname lo) are exempt. IPv6 VRF-local traffic is NOT
+// exempt, because it is indistinguishable from fxp0 ingress; the property
+// that forbids exempting it is asserted directly: an IPv6 packet injected on
+// fxp0 with the box's OWN address as source must not get past the lo0 table
+// (a prerouting counter in the same run proves it arrived).
 const lo0VRFSlaveChild18728 = "XPF_LO0_VRF_SLAVE_CHILD_18728"
 
 func TestLo0ImplicitDiscardExemptsVRFSlavesOnRealKernel18728(t *testing.T) {
@@ -130,6 +140,57 @@ func lo0VRFSlaveChild18728Body(t *testing.T) {
 		}
 	}
 	addrOf := func(cidr string) string { return strings.Split(cidr, "/")[0] }
+	// Spoof fixture: a second own address on fxp0 that the fxp0 peer also
+	// holds, so the peer can send a packet whose SOURCE is one of the box's
+	// own IPv6 addresses to the box's fxp0 address. The peer resolves the
+	// target with a static neighbor (an NA from the box would be addressed
+	// to its own address and never leave it).
+	fxp := links["fxp0"]
+	const spoofSrc6 = "fd00:136::135"
+	run("ip", "-6", "addr", "add", spoofSrc6+"/64", "dev", "fxp0", "nodad")
+	run("nsenter", "-t", fxp.pid, "-n", "ip", "-6", "addr", "add", spoofSrc6+"/128", "dev", fxp.peerDev, "nodad")
+	fxpIf, err := net.InterfaceByName("fxp0")
+	if err != nil {
+		t.Fatalf("fxp0: %v", err)
+	}
+	run("nsenter", "-t", fxp.pid, "-n", "ip", "-6", "neigh", "replace", addrOf(fxp.v6),
+		"lladdr", fxpIf.HardwareAddr.String(), "dev", fxp.peerDev, "nud", "permanent")
+	// The probe table counts the spoofed echo requests at prerouting (they
+	// arrived: the positive control) and at input AFTER xpf_lo0 (priority
+	// 100 > the lo0 chain's 0): a packet the lo0 table drops is never seen
+	// there.
+	probe := func(fresh bool) (pre, in int) {
+		t.Helper()
+		match := "ip6 saddr " + spoofSrc6 + " ip6 daddr " + addrOf(fxp.v6) + " icmpv6 type echo-request"
+		if fresh {
+			c := exec.Command(findNft(), "-f", "-")
+			c.Stdin = strings.NewReader("add table inet xpfprobe18728\ndelete table inet xpfprobe18728\n" +
+				"table inet xpfprobe18728 {\n" +
+				"  chain pre { type filter hook prerouting priority -300; policy accept; " + match + " counter comment \"pre\"; }\n" +
+				"  chain in { type filter hook input priority 100; policy accept; " + match + " counter comment \"in\"; }\n}\n")
+			if out, err := c.CombinedOutput(); err != nil {
+				t.Fatalf("install probe table: %v: %s", err, out)
+			}
+			return 0, 0
+		}
+		out, err := exec.Command(findNft(), "list", "table", "inet", "xpfprobe18728").CombinedOutput()
+		if err != nil {
+			t.Fatalf("list probe table: %v: %s", err, out)
+		}
+		pre, in = -1, -1
+		for _, m := range regexp.MustCompile(`counter packets (\d+) bytes \d+ comment "(pre|in)"`).FindAllStringSubmatch(string(out), -1) {
+			n, _ := strconv.Atoi(m[1])
+			if m[2] == "pre" {
+				pre = n
+			} else {
+				in = n
+			}
+		}
+		if pre < 0 || in < 0 {
+			t.Fatalf("probe counters not found:\n%s", out)
+		}
+		return pre, in
+	}
 	ping := func(l *link, v6 bool) bool {
 		args := []string{"-t", l.pid, "-n", "ping", "-c", "2", "-W", "1"}
 		addr := addrOf(l.v4)
@@ -138,6 +199,19 @@ func lo0VRFSlaveChild18728Body(t *testing.T) {
 			addr = addrOf(l.v6)
 		}
 		return exec.Command("nsenter", append(args, addr)...).Run() == nil
+	}
+	// localPing pings one of this namespace's own addresses from inside the
+	// namespace: bound to the VRF device (`ping -I vrf-mgmt`; `ip vrf exec`
+	// needs cgroup BPF that a user namespace lacks) or in the default table.
+	localPing := func(addr string, v6, inVRF bool) bool {
+		args := []string{"-c", "2", "-W", "1"}
+		if v6 {
+			args = append(args, "-6")
+		}
+		if inVRF {
+			args = append(args, "-I", "vrf-mgmt")
+		}
+		return exec.Command("ping", append(args, addr)...).Run() == nil
 	}
 	nodeCfg := func(fabric, member string) *config.Config {
 		cfg := &config.Config{}
@@ -183,6 +257,41 @@ func lo0VRFSlaveChild18728Body(t *testing.T) {
 					failed = true
 				}
 			}
+		}
+		// Locally generated traffic: IPv4 inside vrf-mgmt to the box's own
+		// fxp0 address (iifname = sdifname = vrf-mgmt) is exempt, the VRF
+		// analogue of `lo`; in the default table to the data port's address
+		// (iifname lo) both families are exempt. The fxp0-RECEIVED rows above
+		// stay dropped (sdifname fxp0), so the IPv4 exemption is keyed on
+		// sdifname.
+		for _, c := range []struct {
+			name, addr string
+			v6, inVRF  bool
+		}{
+			{"local in vrf-mgmt to own fxp0", addrOf(links["fxp0"].v4), false, true},
+			{"local in default table to own ge-0-0-1", addrOf(links["ge-0-0-1"].v4), false, false},
+			{"local in default table to own ge-0-0-1", addrOf(links["ge-0-0-1"].v6), true, false},
+		} {
+			if !localPing(c.addr, c.v6, c.inVRF) {
+				t.Errorf("%s %s v6=%v: locally generated traffic was dropped (must be exempt)", node.name, c.name, c.v6)
+				failed = true
+			}
+		}
+		// IPv6 inside vrf-mgmt to the box's own fxp0 address is not exempt
+		// (its sdifname is fxp0, the same as fxp0 ingress). Observed, not
+		// asserted: a future discriminator that exempts it safely must not
+		// fail this cell. The property that matters is the spoof row below.
+		t.Logf("%s local in vrf-mgmt to own fxp0 v6: reachable=%v (not exempt by design; see config.Lo0ImplicitDiscardVRFMasters)",
+			node.name, localPing(addrOf(fxp.v6), true, true))
+		probe(true)
+		_ = exec.Command("nsenter", "-t", fxp.pid, "-n", "ping", "-6", "-c", "3", "-i", "0.2", "-W", "1",
+			"-I", spoofSrc6, addrOf(fxp.v6)).Run()
+		pre, in := probe(false)
+		t.Logf("%s own-source IPv6 injected on fxp0: prerouting=%d input-after-lo0=%d", node.name, pre, in)
+		if pre < 3 || in != 0 {
+			t.Errorf("%s own-source IPv6 injected on fxp0: prerouting=%d (want >= 3: it arrived) input-after-lo0=%d (want 0: the implicit discard must drop it)",
+				node.name, pre, in)
+			failed = true
 		}
 	}
 	if failed {

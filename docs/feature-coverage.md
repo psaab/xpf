@@ -165,7 +165,26 @@ the userspace dataplane admission boundary is in
       exemption missed the control link and fabric and cut them on the loss
       cluster (#18755 incident; `TestLo0ImplicitDiscardExemptsVRFSlavesOnRealKernel18728`
       pins it on a real kernel). The VRF master itself is not exempt, so
-      fxp0 (a slave of the same VRF) stays subject to the drop. The
+      fxp0 (a slave of the same VRF) stays subject to the drop.
+      **Locally generated traffic.** Traffic the box sends to its own
+      address in the default table arrives on `lo` and is exempt. IPv4 it
+      sends to its own address INSIDE a VRF (vrf-mgmt or a routing
+      instance) arrives with the VRF master as both iifname and sdifname,
+      which wire traffic never does, so the IPv4 drop is preceded by
+      `meta nfproto ipv4 iifname { <VRF masters> } meta sdifname { <VRF
+      masters> } accept` (`config.Lo0ImplicitDiscardVRFMasters`). IPv6
+      has no such exemption: IPv6 VRF-local traffic carries the slave that
+      owns the address (fxp0) as sdifname, exactly like fxp0 ingress, and
+      a packet spoofed onto fxp0 with the box's own IPv6 address as source
+      matched every candidate selector the local packet matched
+      (iifname, sdifname, `fib saddr type local`, pkttype, ct status;
+      measured in a netns, and the kernel does not drop own-source IPv6
+      from the wire as it drops an IPv4 martian). Exempting it would let
+      anyone on the fxp0 segment bypass the implicit discard, so a lo0
+      inet6 filter without a catch-all also drops IPv6 the box sends to its
+      own in-VRF addresses unless a term accepts it. The real-kernel cell
+      asserts the spoofed packet is dropped and the IPv4 VRF-local and
+      default-table local traffic is not. The
       renderer and installer FAIL CLOSED (the prior table, or the cold-boot
       fence, stays) when an exemption name is empty or the set lacks a
       control-link/fabric netdev resolved independently from the cluster
@@ -205,6 +224,9 @@ the userspace dataplane admission boundary is in
       - **probe replies**: RPM probes and `services ip-monitoring` (#1827).
         Their replies are host-bound return traffic, so dropping them
         fails the probes and triggers WAN failover;
+      - **IPv6 the box sends to its own in-VRF addresses** (for example to
+        its own fxp0 IPv6 address from inside vrf-mgmt; see "Locally
+        generated traffic" above);
       - **return traffic of every connection the firewall itself opens.**
         The chain is STATELESS (no `ct state established` accept), so a
         host-originated ping, TCP connect or UDP query sees its reply

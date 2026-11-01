@@ -247,6 +247,11 @@ type Lo0FilterSpec struct {
 	// (config.Lo0ImplicitDiscardRequiredNetdevs). The builder refuses the
 	// plan if one is missing or any exemption name is empty.
 	ImplicitDiscardRequiredNetdevs []string
+	// ImplicitDiscardVRFMasters are the VRF master devices whose LOCALLY
+	// GENERATED IPv4 traffic (iifname = sdifname = the master) the implicit
+	// discard exempts (config.Lo0ImplicitDiscardVRFMasters), rendered as an
+	// accept immediately ahead of the IPv4 drop. IPv6 has no such accept.
+	ImplicitDiscardVRFMasters []string
 }
 
 // HostInputFencePair binds one VRF master to one enslaved tunnel slave.

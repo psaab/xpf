@@ -227,12 +227,16 @@ func (f *fakeNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error) {
 // lowering to zero rules) sets fakeNftInstaller.lo0Rules explicitly rather than
 // relying on this approximation.
 //
-// #18728: each family's implicit final discard is one more rendered rule, so
-// a filter with no terms but no catch-all renders one rule, not zero.
+// #18728: each family's implicit final discard adds its drop rule, plus (IPv4
+// only) the VRF-local accept ahead of it when the spec names VRF masters, so
+// a filter with no terms but no catch-all renders one or two rules, not zero.
 func fakeLo0Rules(s xnft.Lo0FilterSpec) int {
 	n := len(s.V4Terms) + len(s.V6Terms)
 	if s.ImplicitDiscardV4 {
 		n++
+		if len(s.ImplicitDiscardVRFMasters) > 0 {
+			n++
+		}
 	}
 	if s.ImplicitDiscardV6 {
 		n++

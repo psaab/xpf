@@ -9,8 +9,10 @@ xpf (0.0.0) unstable; urgency=medium
     unconstrained accept/discard/reject, modifier-only or routing-instance
     term) is unchanged, as are interfaces and families with no filter
     bound. The kernel lo0 chain ends each family with a counted drop that
-    exempts loopback and the cluster control link and fabric; fxp0 is NOT
-    exempt. MANAGEMENT LOCKOUT RISK: the lo0 chain is stateless, so a lo0
+    exempts loopback, the cluster control link and fabric, and IPv4 the box
+    sends to its own address inside a VRF; fxp0 is NOT exempt, nor is IPv6
+    the box sends to its own in-VRF address (indistinguishable from
+    spoofed fxp0 ingress). MANAGEMENT LOCKOUT RISK: the lo0 chain is stateless, so a lo0
     filter without a catch-all drops all unmatched host traffic (the
     control-link/fabric exemption matches VRF slaves by sdifname, and the
     lo0 table is refused if that exemption is incomplete) -- SSH and

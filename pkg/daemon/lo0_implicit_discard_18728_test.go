@@ -69,7 +69,7 @@ func TestLo0OracleImplicitDiscardPerFamily18728(t *testing.T) {
 			}
 		}
 	}
-	if !(ssh4 >= 0 && ssh4 < v4 && v4 < ssh6 && ssh6 < v6) {
+	if !(ssh4 >= 0 && ssh4 < v4-1 && v4 < ssh6 && ssh6 < v6) {
 		t.Fatalf("rule order ssh4=%d drop4=%d ssh6=%d drop6=%d; want the drop after its own family's rules\n%s", ssh4, v4, ssh6, v6, payload)
 	}
 	for _, decl := range []string{"  counter xpflo0implicit_inet {", "  counter xpflo0implicit_inet6 {"} {
@@ -77,8 +77,19 @@ func TestLo0OracleImplicitDiscardPerFamily18728(t *testing.T) {
 			t.Errorf("payload lacks counter declaration %q:\n%s", decl, payload)
 		}
 	}
-	if got := lo0RenderedRuleCount(lo0AllowlistCfg18728(), "protect-re", "protect-re6"); got != 4 {
-		t.Errorf("rendered rule count = %d, want 4 (two ssh accepts + two implicit drops)", got)
+	// The IPv4 VRF-local accept (iifname = sdifname = VRF master: traffic the
+	// box generates inside a VRF) sits right before the IPv4 drop. IPv6 has
+	// none: its VRF-local traffic carries the address-owning slave as
+	// sdifname, indistinguishable from fxp0 ingress, so the line before the
+	// IPv6 drop is the authored ssh accept.
+	if want := `    meta nfproto ipv4 iifname "vrf-mgmt" meta sdifname "vrf-mgmt" accept`; lines[v4-1] != want {
+		t.Errorf("line before the IPv4 implicit drop = %q, want %q", lines[v4-1], want)
+	}
+	if strings.Contains(payload, "meta nfproto ipv6 iifname \"vrf-mgmt\"") || ssh6 != v6-1 {
+		t.Errorf("IPv6 must have no VRF-local accept (ssh6=%d drop6=%d):\n%s", ssh6, v6, payload)
+	}
+	if got := lo0RenderedRuleCount(lo0AllowlistCfg18728(), "protect-re", "protect-re6"); got != 5 {
+		t.Errorf("rendered rule count = %d, want 5 (two ssh accepts + the IPv4 VRF-local accept + two implicit drops)", got)
 	}
 }
 
@@ -162,7 +173,7 @@ func TestLo0ExplicitDiscardTermUnchanged18728(t *testing.T) {
 // fakeLo0Rules mirrors the installer count, implicit rules included.
 func TestFakeLo0RulesCountsImplicitDiscard18728(t *testing.T) {
 	spec := toNftLo0Spec(lo0AllowlistCfg18728(), "protect-re", "protect-re6")
-	if got := fakeLo0Rules(spec); got != 4 {
-		t.Fatalf("fakeLo0Rules = %d, want 4", got)
+	if got := fakeLo0Rules(spec); got != 5 {
+		t.Fatalf("fakeLo0Rules = %d, want 5", got)
 	}
 }

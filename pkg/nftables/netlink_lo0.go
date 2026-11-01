@@ -75,6 +75,7 @@ func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
 		}
 	}
 	if spec.ImplicitDiscardV4 {
+		buildLo0VRFLocalAccept(p, famV4, spec.ImplicitDiscardVRFMasters)
 		buildLo0ImplicitDiscardNetlink(p, famV4, "inet", spec.ImplicitDiscardExemptNetdevs)
 	}
 	for _, t := range spec.V6Terms {
@@ -83,6 +84,31 @@ func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
 	if spec.ImplicitDiscardV6 {
 		buildLo0ImplicitDiscardNetlink(p, famV6, "inet6", spec.ImplicitDiscardExemptNetdevs)
 	}
+}
+
+// buildLo0VRFLocalAccept queues `meta nfproto ipv4 iifname {VRF masters} meta
+// sdifname {VRF masters} accept` ahead of the IPv4 implicit discard,
+// mirroring the oracle's lo0VRFLocalAcceptRule: IPv4 traffic the box
+// generates inside a VRF loops through the VRF master, and the input hook
+// then reports the MASTER as both iifname and sdifname (measured in a netns:
+// `ping -I vrf-mgmt <own fxp0 address>` matches iifname "vrf-mgmt" and
+// sdifname "vrf-mgmt"; sdif is not 0). It is the VRF analogue of `lo`. The
+// sdifname guard is load-bearing: a packet RECEIVED on a VRF slave (fxp0 in
+// vrf-mgmt) shows the same master as iifname but carries the SLAVE as
+// sdifname, and must stay subject to the drop. It runs after every authored
+// rule, so it only changes the implicit discard's verdict. The caller emits
+// it for IPv4 only: IPv6 VRF-local traffic carries the address-owning slave
+// as sdifname and cannot be told apart from fxp0 ingress (see
+// config.Lo0ImplicitDiscardVRFMasters).
+func buildLo0VRFLocalAccept(p *nlPlan, f nlFamily, masters []string) {
+	if len(masters) == 0 {
+		return
+	}
+	a := p.rule()
+	a.needNfproto(f)
+	a.iifname(masters)
+	a.sdifname(masters)
+	a.emit(verdictAccept()...)
 }
 
 // buildLo0ImplicitDiscardNetlink queues the Junos implicit final discard for

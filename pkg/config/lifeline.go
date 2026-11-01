@@ -423,6 +423,47 @@ func Lo0ImplicitDiscardRequiredNetdevs(cfg *Config) []string {
 	return out
 }
 
+// Lo0ImplicitDiscardVRFMasters returns the l3mdev (VRF) master devices xpfd
+// creates: the management VRF (ManagementVRFDeviceName) and "vrf-<name>" for
+// every non-forwarding routing instance. The lo0 implicit discard exempts
+// LOCALLY GENERATED IPv4 traffic inside a VRF, which the input hook reports
+// with the VRF master as BOTH iifname and sdifname (measured in a netns; sdif
+// is not 0): the VRF analogue of the `lo` exemption (Junos lo0 filters do not
+// see the box talking to itself). A packet RECEIVED on a VRF slave carries
+// the slave as sdifname, and only local transmit delivers a packet on the
+// master device itself, so `iifname {masters} meta sdifname {masters}` cannot
+// match wire traffic (fxp0 ingress stays subject to the drop).
+//
+// IPv6 has NO such exemption. IPv6 traffic the box sends to its own address
+// inside a VRF reaches the input hook as iifname = the master and sdifname =
+// the slave that owns the address (fxp0), exactly like a packet received on
+// fxp0. Measured in a netns (#18728): a spoofed packet injected on fxp0 with
+// the box's own IPv6 address as source matched every candidate selector the
+// local packet matched (iifname, sdifname, `fib saddr type local`, pkttype
+// host, ct status), and the kernel does not drop own-source IPv6 from the
+// wire the way it drops an IPv4 martian. Exempting it would let anyone on a
+// VRF slave's segment bypass the lo0 filter's implicit discard, so IPv6
+// VRF-local traffic stays subject to it: a lo0 inet6 filter without a
+// catch-all needs a term for it.
+func Lo0ImplicitDiscardVRFMasters(cfg *Config) []string {
+	seen := map[string]bool{ManagementVRFDeviceName: true}
+	out := []string{ManagementVRFDeviceName}
+	if cfg != nil {
+		for _, ri := range cfg.RoutingInstances {
+			if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" || IsReservedRoutingInstanceName(ri.Name) {
+				continue
+			}
+			m := LinuxIfName("vrf-" + ri.Name)
+			if !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ValidateLo0ImplicitDiscardExempt fails closed on an exemption set the lo0
 // implicit discard must not be installed with: any empty name (an exemption
 // that can never match), or a missing required role netdev
