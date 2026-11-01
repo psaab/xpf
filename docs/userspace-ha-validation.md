@@ -556,7 +556,7 @@ interval at the crash. The other five (all recorded PASS) never emptied it,
 with lowest intervals of 0.75–1.2 Gbit/s, so they need the clock anchor,
 which they did not record. The precise verdict matches the recorded verdict
 on all 24, and none flips within ±0.05 s of its anchor. Resume instants are
-bimodal over the 192 streams: 0.96–2.91 s after the crash, then six
+bimodal over the 192 streams: 0.97–2.91 s after the crash, then six
 stragglers at 3.75–4.59 s, with nothing in between. On four runs no in-phase
 integer anchor reproduces the recorded verdict, so the anchor was a second
 off. On the two rows above, the recorded verdict is right only because of
