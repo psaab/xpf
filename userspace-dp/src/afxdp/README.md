@@ -2381,12 +2381,22 @@ own view's flow-cache entry:
 - **Retention** (`PrevViews`, `types/runtime.rs`). On every adoption the
   worker loop records the view it is leaving: the validation pair plus the
   `Arc<ForwardingState>` it was published with.
-  - It keeps up to `MATCHED_VIEW_SLOTS` (2) views, each for
+  - It keeps up to `MATCHED_VIEW_SLOTS` (2) views, each for at most
     `MATCHED_VIEW_GRACE_NS` (200 ms). Both constants carry their derivation
     from the probes.
-  - The views pinned are the publisher's deep-cloned `ForwardingState`s,
-    shared by every worker, so the extra table copies are at most two, each
-    for at most 200 ms.
+  - **Early release** (`PrevViews::release_if_drained`). The views are
+    dropped as soon as every binding of the worker has validated a native
+    packet with the CURRENT stamp since the adoption and holds no parked
+    packet. Each ring is FIFO, so nothing older can follow. With traffic on
+    every binding a view lives for the ring's drain time (milliseconds);
+    only a worker with an idle binding keeps it for the full 200 ms.
+  - **Memory.** A retained view pins the publisher's deep-cloned
+    `ForwardingState`, routes included: on the order of 100-150 MB per copy
+    with a full IPv4 table. Under BGP churn faster than the grace both slots
+    of a worker can stay full, and a lagging worker can pin a different
+    older pair than its siblings. So the bound is two copies per worker for
+    at most 200 ms each, which the early release usually cuts to the drain
+    time.
   - Only a forward move with both views installed earns a slot.
   - A generation that goes down (a reset) clears the list. A publish that
     changes the CoS runtime config clears it too, because the binding's
@@ -2447,12 +2457,15 @@ own view's flow-cache entry:
 - **#6592.** No packet is processed under tables newer or older than its own
   stamp: AHEAD stays a drop, and BEHIND runs only under the exact view whose
   pair it carries.
-- **Operator semantic.** A commit applies to the packets the shim stamps after
-  its view store. A packet stamped earlier and still queued is forwarded by
-  the decision its own view cached, or dropped. It is never re-judged by the
-  new configuration, and it never takes a decision the new configuration
-  would not also have to make from scratch. The grace ends 200 ms after the
-  worker leaves the view.
+- **Operator semantic.** A commit applies to the packets that arrive after
+  its view is installed. A packet already queued in a receive ring when the
+  worker adopts the new view is forwarded by the decision its own (previous)
+  view cached, or dropped; it is never re-judged by the new configuration.
+  That includes a just-committed deny: a queued packet of an established flow
+  that the new policy denies can still be forwarded by its cached accept.
+  The window is one ring backlog per binding: the ring's drain time, and at
+  most 200 ms. The same statement is in `pkg/configstore/README.md` ("When a
+  commit takes effect in the userspace dataplane").
 - **Witnesses** (per binding, in the status reply):
   - `generation_held_hits`: a held packet served from its own view's entry.
   - `generation_held_misses`: a held packet dropped (no entry, a fence, or a
@@ -2461,12 +2474,19 @@ own view's flow-cache entry:
     generation-mismatch drop, split by the stamp's direction.
 
   So the saving is measurable and so is what remains: AHEAD stays, by design.
-- **Cost.**
-  - A matched stamp pays nothing: the park check sits in the mismatch branch.
+- **Cost** (seat AE: stated, not "nothing").
+  - Per packet of ordinary (Valid) traffic, the descriptor pass carries four
+    well-predicted branches: `held_next < held_len`, the `!pass.held_pass`
+    guard before the PMech pop, the `metadata_packets` guard, and the
+    `pass.held_pass` test on the flow-cache `Consumed` arm. It also carries
+    one branch-free flag store, `seen_current_stamp`. The iperf3 A/B against
+    master is the measurement (`docs/log/18560.md`).
+  - The park check itself sits in the mismatch branch.
   - Per RX batch, the poll adds one `view_held.is_empty()` test and a
     two-slot `PrevViews::is_empty()` test.
-  - Per worker tick, it adds one two-slot expiry check while views are
-    retained.
+  - Per worker tick, while views are retained, it adds one two-slot expiry
+    check and the early-release scan over the worker's bindings. At an
+    adoption it adds one flag reset per binding.
   - Parking never allocates: `view_held` is pre-sized to `2 * RX_BATCH_SIZE`,
     and a held pass appends re-parked packets before it drains its consumed
     prefix in place.

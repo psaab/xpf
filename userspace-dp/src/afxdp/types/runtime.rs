@@ -612,18 +612,27 @@ pub(in crate::afxdp) struct ValidationState {
 /// queued in the RX ring when the worker adopts. The loss diag probe
 /// (docs/log/18560.md, 0.0.29554, 6 operator moves under 8-stream load)
 /// measured the slowest worker adopting at most 15.7 ms after the store and
-/// the last such packet 15 ms after it. 200 ms is about 12x that, and it
-/// bounds how long a left `ForwardingState` stays pinned.
+/// the last such packet 15 ms after it. 200 ms is about 12x that. It is the
+/// upper bound on how long a left `ForwardingState` stays pinned; the early
+/// release (`release_if_drained`) usually ends it within the drain time.
 pub(in crate::afxdp) const MATCHED_VIEW_GRACE_NS: u64 = 200_000_000;
 
 /// #18560: how many left views a worker keeps. With the helper advancing the
 /// stamp at its store, the dropped packets in the same probe were stamped
 /// one publish behind (config +2 or FIB +1) in all but a handful: stamps two
 /// or three publishes behind were 4-16 packets per publish. Two slots cover
-/// the previous view and the one before it. Each retained view pins a
-/// deep-cloned `ForwardingState` (`publish_runtime_view`), shared by every
-/// worker, so this caps the extra table copies at two, each for at most the
-/// grace; on a full-table box that bound is the point (seat W).
+/// the previous view and the one before it.
+///
+/// Memory, stated plainly (seats W, AE): each retained view pins a
+/// deep-cloned `ForwardingState` (`publish_runtime_view`), routes included:
+/// on the order of 100-150 MB per copy with a full IPv4 table. Under BGP
+/// churn faster than the grace, both slots of a worker stay full, and a
+/// lagging worker can pin a different older pair than its siblings, so the
+/// bound is two copies per worker, not two process-wide. What keeps that
+/// benign is `PrevViews::release_if_drained`: a worker drops its views as
+/// soon as every binding has passed the stamp switch, so with traffic on
+/// every binding a view lives for the ring's drain time (milliseconds), and
+/// only a worker with an idle binding holds them for the full grace.
 pub(in crate::afxdp) const MATCHED_VIEW_SLOTS: usize = 2;
 
 /// #18560: one forwarding view (tables plus the generation pair they were
@@ -733,6 +742,22 @@ impl PrevViews {
         } else if !self.is_empty() {
             self.expire(now_ns);
         }
+    }
+
+    /// Early release (#18560, seat AE). `drained` is true once every binding
+    /// of the worker has validated a native packet with the current stamp
+    /// since the adoption and holds no parked packet. Each binding's RX ring
+    /// is FIFO, so no packet stamped with a left view can still arrive on it;
+    /// keeping the views would only pin their table copies until the grace.
+    /// This bounds the pinning to the drain time (milliseconds) whenever
+    /// every binding carries traffic. An idle binding never proves its ring
+    /// drained, so its worker falls back to the grace.
+    pub(in crate::afxdp) fn release_if_drained(&mut self, drained: bool) -> bool {
+        if drained && !self.is_empty() {
+            self.clear();
+            return true;
+        }
+        false
     }
 
     /// The worker loop's forwarding swap (#18560): a publish that changes the

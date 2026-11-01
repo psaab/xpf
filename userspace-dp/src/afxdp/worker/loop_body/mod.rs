@@ -892,7 +892,21 @@ pub(crate) fn worker_loop(
         // #18560: keep the view being left (its tables are the current
         // `forwarding` Arc until the swap below) for the packets still stamped
         // with it; otherwise drop expired views.
+        let adopting = live_validation != validation;
         prev_views.on_tick(validation, &forwarding, live_validation, loop_now_ns);
+        if adopting {
+            for binding in bindings.iter_mut() {
+                binding.seen_current_stamp = false;
+            }
+        } else if !prev_views.is_empty() {
+            // #18560: release the retained views as soon as every binding has
+            // passed the stamp switch (seat AE), not only at the grace.
+            prev_views.release_if_drained(
+                bindings
+                    .iter()
+                    .all(|binding| binding.seen_current_stamp && binding.view_held.is_empty()),
+            );
+        }
         if live_validation != validation {
             validation = live_validation;
         }

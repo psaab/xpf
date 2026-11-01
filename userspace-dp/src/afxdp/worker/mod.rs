@@ -159,6 +159,12 @@ pub(crate) struct BindingWorker {
     /// before it drains the prefix it consumed, so the length can reach
     /// 2 * RX_BATCH_SIZE - 1 and parking never allocates on the hot path.
     pub(in crate::afxdp) view_held: Vec<(XdpDesc, UserspaceDpMeta)>,
+    /// #18560: an ordinary pass has validated a native RX packet carrying the
+    /// worker's CURRENT stamp since the worker last adopted a view. The ring
+    /// is FIFO, so no packet stamped with an older view can follow it on
+    /// this binding; once every binding is there (and none holds parked
+    /// packets) the worker releases its retained views early.
+    pub(in crate::afxdp) seen_current_stamp: bool,
     /// #8274 step 3: per-worker WireGuard decap output buffer.
     ///
     /// Separate from `WorkerScratch` and behind a `RefCell` on purpose. The
@@ -615,6 +621,7 @@ impl BindingWorker {
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
             view_held: Vec::with_capacity(2 * RX_BATCH_SIZE as usize),
+            seen_current_stamp: false,
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             // GEMINI-NEXT.md Section 3 cold start: lazy allocation. The
@@ -777,6 +784,7 @@ impl BindingWorker {
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
             view_held: Vec::with_capacity(2 * RX_BATCH_SIZE as usize),
+            seen_current_stamp: false,
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             pending_neigh: super::types::FastMap::default(),
@@ -905,6 +913,7 @@ impl BindingWorker {
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
             view_held: Vec::with_capacity(2 * RX_BATCH_SIZE as usize),
+            seen_current_stamp: false,
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             pending_neigh: super::types::FastMap::default(),

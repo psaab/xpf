@@ -1144,6 +1144,84 @@ fn worker_loop_view_steps_18560() {
     );
 }
 
+/// Early release (seat AE): views go as soon as every binding has passed the
+/// stamp switch, not only at the grace. RED if `release_if_drained` never
+/// releases, or releases while a binding has not drained.
+#[test]
+fn retained_views_release_once_drained_18560() {
+    let fwd = Arc::new(ForwardingState::default());
+    let mut views = views_with(STAMPED, &fwd, NEWER);
+    assert!(
+        !views.release_if_drained(false),
+        "an undrained worker keeps its views"
+    );
+    assert!(!views.is_empty());
+    assert!(
+        views.release_if_drained(true),
+        "a drained worker releases them before the grace"
+    );
+    assert!(
+        views.is_empty(),
+        "and the left table copies are no longer pinned"
+    );
+    assert!(!views.release_if_drained(true), "nothing left to release");
+}
+
+/// The drain witness: an ordinary pass that validates a native current-stamped
+/// packet marks the binding; a held pass (validating under a LEFT view) and
+/// parked packets do not. RED if the held pass's packets count as current.
+#[test]
+fn only_current_stamped_native_packets_mark_the_binding_drained_18560() {
+    let mut fx = udp_flow_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    run_pass(&mut fx, &fwd, STAMPED, PassView::current(), true);
+    run_pass(&mut fx, &fwd, STAMPED, PassView::current(), true);
+    let views = views_with(STAMPED, &fwd, NEWER);
+    fx.binding.seen_current_stamp = false; // the adoption reset
+    let normal = PassView {
+        prev_views: Some(&views),
+        held_pass: false,
+        view: None,
+    };
+    run_pass(&mut fx, &fwd, NEWER, normal, true);
+    assert_eq!(
+        fx.binding.view_held.len(),
+        1,
+        "premise: the 7/9 packet is parked"
+    );
+    assert!(
+        !fx.binding.seen_current_stamp,
+        "a parked (older) packet proves nothing"
+    );
+    let prev = views.get(0).expect("retained view");
+    run_pass(
+        &mut fx,
+        &prev.forwarding,
+        prev.validation,
+        PassView {
+            prev_views: Some(&views),
+            held_pass: true,
+            view: Some(0),
+        },
+        false,
+    );
+    assert_eq!(
+        fx.binding.live.generation_held_hits.load(Ordering::Relaxed),
+        1,
+        "premise: a held hit"
+    );
+    assert!(
+        !fx.binding.seen_current_stamp,
+        "a held pass validates under the LEFT view: not the switch"
+    );
+    fx.meta.config_generation = NEWER.config_generation;
+    run_pass(&mut fx, &fwd, NEWER, normal, true);
+    assert!(
+        fx.binding.seen_current_stamp,
+        "a native packet with the current stamp passes the switch"
+    );
+}
+
 /// The production loops must call the helpers the two cells above pin.
 #[test]
 fn held_pass_wiring_is_present_18560() {
@@ -1160,6 +1238,26 @@ fn held_pass_wiring_is_present_18560() {
             .count(),
         1,
         "worker loop must clear views on a CoS change"
+    );
+    for needle in [
+        "prev_views.release_if_drained(",
+        ".all(|binding| binding.seen_current_stamp && binding.view_held.is_empty())",
+        "binding.seen_current_stamp = false;",
+    ] {
+        assert_eq!(
+            loop_body.matches(needle).count(),
+            1,
+            "worker loop must use `{needle}` (early release)"
+        );
+    }
+    let descriptor = std::fs::read_to_string(root.join("../poll_descriptor/mod.rs"))
+        .expect("read descriptor pass");
+    assert_eq!(
+        descriptor
+            .matches("binding.seen_current_stamp |= !is_injected & !pass.held_pass;")
+            .count(),
+        1,
+        "the drain witness is set only by ordinary passes on native packets"
     );
     let lifecycle = std::fs::read_to_string(root.join("lifecycle.rs")).expect("read lifecycle");
     for needle in [

@@ -1116,6 +1116,11 @@ pub(super) fn poll_binding_process_descriptor_in_view(
             if disposition == PacketDisposition::Valid {
                 telemetry.counters.validated_packets += 1;
                 telemetry.counters.validated_bytes += desc.len as u64;
+                // #18560: early release of retained views (`PrevViews::
+                // release_if_drained`). Branch-free; a held pass validates
+                // under a LEFT view, an injected packet never came off the
+                // ring, so neither counts.
+                binding.seen_current_stamp |= !is_injected & !pass.held_pass;
                 // SAFETY: per the `area` contract in this function's
                 // header comment.
                 //

@@ -726,6 +726,17 @@ identity that participates in the config-lock gate (#5870/#6197, see
 "Config-lock ownership gate"). Generation binding remains necessary for
 same-session/internal concurrent callers.
 
+## When a commit takes effect in the userspace dataplane (#18560)
+
+A commit applies to the packets that arrive after its view is installed in the
+dataplane. Packets already queued in a binding's receive ring when a worker
+adopts the new view may be processed under the PREVIOUS configuration: they
+are served by the flow-cache decision their own view cached, or dropped. That
+includes a just-committed deny: a queued packet of an established flow can
+still be forwarded by its cached accept. The window is the ring's drain time,
+bounded by 200 ms (`MATCHED_VIEW_GRACE_NS`). See the matched-view grace in
+`userspace-dp/src/afxdp/README.md`.
+
 ## Authority-bound commit: holder turnover (#6808)
 
 Generation binding answers *"is the candidate CONTENT the one that was
