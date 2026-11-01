@@ -726,6 +726,46 @@ ha_counter_at_most_verdict() {
 # `PID:` line: when either capture has one, both must, and they must agree;
 # anything else is VOID. Captures with no `PID:` line at all (fixtures, older
 # formats) carry no process identity and are not judged here.
+# #18670 report-only (#18681): append the helper `PID:` line from a
+# data-plane statistics capture to a `show security flow statistics` capture,
+# so the flow-statistics delta can be read with ha_snapshot_counter_delta.
+# Prints nothing; never fails the caller (a missing PID line just leaves the
+# flow capture without one).
+ha_flowstats_append_helper_pid() {
+	if [[ $# -ne 2 ]]; then
+		printf 'flowstats pid append: expected <dp-stats-file> <flowstats-file>\n' >&2
+		return 2
+	fi
+	grep -E -m1 '^[[:space:]]*PID:' "$1" >>"$2" 2>/dev/null || true
+	return 0
+}
+
+# #18670 report-only (#18681): the `Host-inbound denies` delta per node across
+# the RG1 failback window, as "node0=<n|unavailable> node1=<n|unavailable>".
+# This value is xpfd's GlobalCtrHostInboundDeny mirror, refreshed at its 1 s
+# status poll with safeDelta absorbing helper resets, so it trails the helper by
+# up to a second and a helper restart does not rewind it; the helper-PID guard
+# that ha_snapshot_counter_delta applies is therefore stricter than this
+# counter needs and is not a guard on xpfd. Report-only until #18681 adds an
+# xpfd-side guard and allows for the poll lag.
+ha_host_inbound_denies_report() {
+	if [[ $# -ne 4 ]]; then
+		printf 'host-inbound report: expected <node0-pre> <node1-pre> <node0-post> <node1-post>\n' >&2
+		return 2
+	fi
+	local -a pre=("$1" "$2") post=("$3" "$4")
+	local i delta line=""
+	for i in 0 1; do
+		if delta=$(ha_snapshot_counter_delta manual-rg1-failback 1 "node${i}" "Host-inbound denies" \
+			phase-pre "${pre[$i]}" phase-post "${post[$i]}" 2>/dev/null); then
+			line+="${line:+ }node${i}=${delta}"
+		else
+			line+="${line:+ }node${i}=unavailable"
+		fi
+	done
+	printf '%s\n' "$line"
+}
+
 ha_snapshot_same_helper_verdict() {
 	if [[ $# -ne 3 ]]; then
 		printf 'snapshot helper identity: expected <before-file> <after-file> <node>\n' >&2

@@ -101,10 +101,11 @@ FABRIC_ACTIVITY_TRIGGER_DELTA="${FABRIC_ACTIVITY_TRIGGER_DELTA:-8}"
 # "strict-syn-check"; closing misses and unknown-flags fragments too). The
 # helper exposes that only in the aggregate `Screen drops`, so 1a bounds
 # `strict-syn-check` drops (other screen reasons add to it), not lost sessions
-# as such. Recorded windows read 0 on every node (tcp master x4 and #18656 x4,
-# loss master and #18656 x1 each); 0 in 10 windows bounds the per-window
-# false-red rate only at about 26% (rule of three), and a lost established
-# flow drops on every packet, so the budget is 4.
+# as such. Recorded windows read 0 on every node (tcp master x5 and #18656 x5,
+# loss master and #18656 x1 each); 0 in 12 windows bounds the per-window
+# false-red rate only at about 22% (exact binomial 95% bound,
+# 1 - 0.05^(1/12)), and a lost established flow drops on every retransmitted
+# packet, so the budget is 4.
 #
 # 1b, a coarse raw `Session misses` floor. 1a is blind to a lost session whose
 # miss resolves to LocalDelivery: with the labs' catch-all `source-nat
@@ -113,11 +114,13 @@ FABRIC_ACTIVITY_TRIGGER_DELTA="${FABRIC_ACTIVITY_TRIGGER_DELTA:-8}"
 # gate, and the packet is counted as a host-inbound deny instead (#18531's
 # third mechanism). The miss counter runs before disposition, so a raw floor
 # still sees it. Recorded raw deltas: 18-61 on master, up to 71 on #18656
-# (whose cache-served window opens more new flows; a new flow is one miss and
-# one or two creates, depending on whether a local reverse companion is
-# installed). A lost reply half misses on every ACK or data packet, thousands
-# per second at the lab's rates. 256 is 3.6x the largest recorded delta and
-# far below that.
+# (a new flow is one miss and one or two creates, depending on whether a local
+# reverse companion is installed). A flow that loses its reply path stalls
+# within about one RTT: roughly a window of ACK misses per stream, then one per
+# RTO backoff. So 1b detects a BROAD reply-half loss (most streams, the #18531
+# failback shape), with about 185 misses of headroom over the largest recorded
+# delta; a single-stream loss can stay under it and is left to the iperf3
+# stream-continuity cells.
 MAX_FAILOVER_SESSION_MISS_DROP_DELTA="${MAX_FAILOVER_SESSION_MISS_DROP_DELTA:-4}"
 MAX_FAILOVER_RAW_SESSION_MISS_FLOOR="${MAX_FAILOVER_RAW_SESSION_MISS_FLOOR:-256}"
 MAX_FAILOVER_NEIGHBOR_MISS_DELTA="${MAX_FAILOVER_NEIGHBOR_MISS_DELTA:-60}"
@@ -278,8 +281,8 @@ ha_capture_rg1_node() {
 	RG1_FLOWSTATS["${phase}:${node_id}"]="${base}.flowstats"
 	if ha_capture_cli "$node" 'show security flow statistics' \
 		manual-rg1-failback "$phase" "$node_id" 1 "${RG1_FLOWSTATS["${phase}:${node_id}"]}" 2>/dev/null; then
-		grep -E -m1 '^[[:space:]]*PID:' "${RG1_STATS["${phase}:${node_id}"]}" \
-			>>"${RG1_FLOWSTATS["${phase}:${node_id}"]}" 2>/dev/null || true
+		ha_flowstats_append_helper_pid "${RG1_STATS["${phase}:${node_id}"]}" \
+			"${RG1_FLOWSTATS["${phase}:${node_id}"]}"
 	fi
 	return "$result"
 }
@@ -901,15 +904,11 @@ ha_rg1_evaluate() {
 		fi
 	done
 	info "RG1 Group 1 report-only session counters (phase-pre→phase-post): ${group1_line}"
-	local group1_inbound="" group1_denies
-	for group1_node in node0 node1; do
-		if group1_denies=$(ha_snapshot_counter_delta manual-rg1-failback 1 "$group1_node" "Host-inbound denies" \
-			phase-pre "${RG1_FLOWSTATS[phase-pre:${group1_node}]:-}" phase-post "${RG1_FLOWSTATS[phase-post:${group1_node}]:-}" 2>/dev/null); then
-			group1_inbound+="${group1_inbound:+ }${group1_node}=${group1_denies}"
-		else
-			group1_inbound+="${group1_inbound:+ }${group1_node}=unavailable"
-		fi
-	done
+	local group1_inbound
+	group1_inbound=$(ha_host_inbound_denies_report \
+		"${RG1_FLOWSTATS[phase-pre:node0]:-}" "${RG1_FLOWSTATS[phase-pre:node1]:-}" \
+		"${RG1_FLOWSTATS[phase-post:node0]:-}" "${RG1_FLOWSTATS[phase-post:node1]:-}" 2>/dev/null) \
+		|| group1_inbound="node0=unavailable node1=unavailable"
 	# Expires-when: #18681 closed
 	info "RG1 Group 1 report-only host-inbound denies (phase-pre→phase-post, not judged until #18681): ${group1_inbound}"
 	ha_emit_verdict "RG1 Group 1a session-miss drops (Screen drops: SYN-first drops of non-SYN TCP session misses, phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_SESSION_MISS_DROP_DELTA})" \

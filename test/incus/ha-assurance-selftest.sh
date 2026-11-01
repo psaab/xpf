@@ -1937,6 +1937,48 @@ assert_contains "$(<"${ERR}")" 'Session misses paired delta 2000 (node0=1000 nod
 g1_row - 15 0 41 39 0
 assert_helper_status 2 g1b_verdict
 
+# The report-only host-inbound path (#18681): the helper PID from the
+# data-plane capture is appended to the flow-statistics capture, then the
+# `Host-inbound denies` delta per node is printed, `unavailable` when it cannot
+# be read.
+write_ha_flowstats() { # <path> <phase> <node> <denies|'-'>
+	{
+		printf 'HA capture identity: slice=manual-rg1-failback phase=%s node=%s rg=1\n' "$2" "$3"
+		printf 'Flow statistics:\n  Screen drops:                  7\n'
+		[[ "$4" == '-' ]] || printf '  Host-inbound denies:           %s\n' "$4"
+	} >"$1"
+}
+FS_PRE0="${RG1_DIR}/fs-pre-node0.flowstats"; FS_PRE1="${RG1_DIR}/fs-pre-node1.flowstats"
+FS_POST0="${RG1_DIR}/fs-post-node0.flowstats"; FS_POST1="${RG1_DIR}/fs-post-node1.flowstats"
+fs_row() { # <n0-pre> <n0-post> <n1-pre> <n1-post> [n0-post-pid]
+	g1_row 20 15 0 41 39 0 "${5:-111}"
+	write_ha_flowstats "$FS_PRE0" phase-pre node0 "$1"; write_ha_flowstats "$FS_POST0" phase-post node0 "$2"
+	write_ha_flowstats "$FS_PRE1" phase-pre node1 "$3"; write_ha_flowstats "$FS_POST1" phase-post node1 "$4"
+	ha_flowstats_append_helper_pid "$G1_PRE0" "$FS_PRE0"; ha_flowstats_append_helper_pid "$G1_POST0" "$FS_POST0"
+	ha_flowstats_append_helper_pid "$G1_PRE1" "$FS_PRE1"; ha_flowstats_append_helper_pid "$G1_POST1" "$FS_POST1"
+}
+fs_report() { ha_host_inbound_denies_report "$FS_PRE0" "$FS_PRE1" "$FS_POST0" "$FS_POST1"; }
+fs_row 10 25 4 4
+assert_contains "$(<"$FS_POST0")" 'PID:                       111' 'flowstats capture carries the helper PID line'
+assert_helper_value 'node0=15 node1=0' fs_report
+# node1's post capture lost its counter line: that node reads unavailable.
+fs_row 10 25 4 -
+assert_helper_value 'node0=15 node1=unavailable' fs_report
+# A helper restart on node0 (PID 111 -> 999): the guard is stricter than this
+# xpfd mirror needs, so node0 reads unavailable rather than a value.
+fs_row 10 25 4 9 999
+assert_helper_value 'node0=unavailable node1=5' fs_report
+# A data-plane capture with no PID line appends nothing; with no PID on either
+# side the delta is still read.
+g1_row 20 15 0 41 39 0
+write_ha_g1_snapshot "$G1_PRE0" phase-pre node0 100 50 3 -
+write_ha_g1_snapshot "$G1_POST0" phase-post node0 120 65 3 -
+write_ha_flowstats "$FS_PRE0" phase-pre node0 10; write_ha_flowstats "$FS_POST0" phase-post node0 12
+ha_flowstats_append_helper_pid "$G1_PRE0" "$FS_PRE0"; ha_flowstats_append_helper_pid "$G1_POST0" "$FS_POST0"
+write_ha_flowstats "$FS_PRE1" phase-pre node1 4; write_ha_flowstats "$FS_POST1" phase-post node1 4
+assert_helper_value 'node0=2 node1=0' fs_report
+assert_helper_status 2 ha_host_inbound_denies_report "$FS_PRE0"
+
 # Mutation cells: each defence above must be load-bearing. A mutant is one lib
 # function's own text with one edit, sourced in a subshell over the real lib;
 # the named row must FLIP. An edit that matches nothing fails here (a no-op

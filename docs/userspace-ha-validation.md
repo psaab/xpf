@@ -363,9 +363,10 @@ the group fails if either check fails.
     (default 4).
   - `Screen drops` bounds `strict-syn-check` drops, not lost sessions as
     such; other screen reasons add to it.
-  - Recorded windows read 0 on every node. 0 in 10 windows bounds the
-    per-window false-red rate only at about 26% (rule of three), while a
-    lost established flow drops on every packet; hence 4.
+  - Recorded windows read 0 on every node. 0 in 12 windows bounds the
+    per-window false-red rate only at about 22% (the exact binomial 95%
+    bound, 1 − 0.05^(1/12)), while a lost established flow drops on every
+    retransmitted packet; hence 4.
 - **1b, a coarse raw `Session misses` floor.**
   - 1a is blind to a lost session whose miss resolves to LocalDelivery.
   - The labs use catch-all `source-nat interface`. The WAN→LAN reply half
@@ -377,8 +378,14 @@ the group fails if either check fails.
     H1 names.
   - The miss counter runs before disposition, so 1b judges the raw delta
     against `MAX_FAILOVER_RAW_SESSION_MISS_FLOOR` (default 256). Recorded
-    raw deltas are 18–61 on master and up to 71 on #18656, while a lost
-    reply half misses on every ACK or data packet.
+    raw deltas are 18–61 on master and up to 71 on #18656.
+  - A flow that loses its reply path stalls within about one RTT: roughly
+    a window of ACK misses per stream, then one per RTO backoff. 1b
+    therefore detects a broad reply-half loss (most streams, the #18531
+    failback shape), with about 185 misses of headroom over the largest
+    recorded delta.
+  - A single-stream loss can stay under the floor. It is left to the
+    iperf3 stream-continuity cells.
 - **Why not misses net of creates.** A new flow is one miss and one or two
   creates, depending on whether a local reverse companion is installed. The
   #18676 review found that the create delta matched the RT_FLOW
@@ -388,11 +395,21 @@ the group fails if either check fails.
   misses.
   - Raw misses and creates per node are printed on a report-only line.
 - **Host-inbound denies, report-only.** test-failover also captures `show
-  security flow statistics` per node and phase, under the same helper-PID
-  guard. It prints the `Host-inbound denies` delta as a report-only line.
+  security flow statistics` per node and phase, and prints the `Host-inbound
+  denies` delta as a report-only line (`ha_host_inbound_denies_report`).
+  - That value is xpfd's `GlobalCtrHostInboundDeny` mirror. It is
+    refreshed at xpfd's 1 s status poll, and `safeDelta` absorbs helper
+    resets (`pkg/dataplane/userspace/manager_counters.go`), so it trails
+    the helper by up to a second and does not rewind on a helper restart.
+  - The helper `PID:` line appended to the capture comes from the
+    data-plane capture taken just before it. The helper-PID guard it
+    feeds is therefore stricter than this counter needs, and it is not a
+    guard on xpfd.
   - That is the direct counter for the LocalDelivery reply half. The WAN
     segment carries foreign lab devices (the #18558 ARP conflicts), so
     its noise needs a master population before it is judged (#18681).
+  - The judged check also needs an xpfd-side identity guard and must
+    allow for the poll lag.
   - Until then the LocalDelivery reply half is covered only by the 1b
     floor.
 - **Helper identity.** Every Group 1–4 delta (`ha_snapshot_counter_delta`)
