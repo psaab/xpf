@@ -1,0 +1,219 @@
+//go:build linux
+
+package fabricsegment
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"net"
+	"sort"
+	"testing"
+	"time"
+
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
+)
+
+// TestTapSamplerOnARealSegment18719 drives the real kernel path
+// (newFilteredTap, bindTap, the cBPF filter, readTap, ObserveFrame) on veth
+// pairs. It runs only in an otherwise EMPTY network namespace (only "lo"), so
+// it can never add interfaces to a host's namespace; elsewhere it skips. Run
+// it unprivileged with:
+//
+//	go test -c -o /var/tmp/fz/fabricsegment.test ./pkg/fabricsegment/
+//	unshare -rn /var/tmp/fz/fabricsegment.test -test.run TapSampler -test.v
+//
+// What it pins:
+//   - nothing is queued between socket creation and bind: a frame from a
+//     foreign source on the fabric parent AND on another interface, both
+//     delivered before bind, must not be counted (an ETH_P_ALL socket()
+//     would queue both);
+//   - after bind, the local and peer source MACs, an xpf synthetic source, an
+//     IEEE 802.1 link-constrained frame (LLDP) and a foreign frame on another
+//     interface are not counted, and a foreign broadcast on the fabric is.
+func TestTapSamplerOnARealSegment18719(t *testing.T) {
+	requireEmptyNetns(t)
+	fab, fabWire := vethPair(t, "xfs0", "xfs1")
+	other, otherWire := vethPair(t, "xfs2", "xfs3")
+
+	link := Link{
+		Name:          "fab0",
+		Parent:        fab.Attrs().Name,
+		ParentIfindex: fab.Attrs().Index,
+		LocalMAC:      fab.Attrs().HardwareAddr,
+		PeerMAC:       fabWire.Attrs().HardwareAddr,
+	}
+	bcast := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	lldp := net.HardwareAddr{0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e}
+	preBindFab := mac(t, "18:e8:29:00:00:a1")
+	preBindOther := mac(t, "18:e8:29:00:00:b1")
+	lldpSpeaker := mac(t, "18:e8:29:00:00:c1")
+	otherHost := mac(t, "18:e8:29:00:00:e1")
+	thirdHost := mac(t, "18:e8:29:00:00:d1")
+	synthetic := mac(t, "02:bf:72:00:01:00")
+
+	// Witnesses are bound with ETH_P_ALL to each receiving interface. Once a
+	// witness has read a frame, the kernel's receive pass for it is over, so
+	// a socket that missed it cannot get it later.
+	fabWitness := boundTap(t, fab.Attrs().Index)
+	otherWitness := boundTap(t, other.Attrs().Index)
+
+	fd, err := newFilteredTap(link)
+	if err != nil {
+		t.Fatalf("newFilteredTap: %v", err)
+	}
+	defer unix.Close(fd)
+
+	sendFrame(t, fabWire.Attrs().Index, bcast, preBindFab)
+	sendFrame(t, otherWire.Attrs().Index, bcast, preBindOther)
+	awaitSource(t, fabWitness, preBindFab)
+	awaitSource(t, otherWitness, preBindOther)
+
+	if err := bindTap(fd, link); err != nil {
+		t.Fatalf("bindTap: %v", err)
+	}
+	tracker := NewTracker(link, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); readTap(ctx, fd, link, tracker) }()
+	defer func() { cancel(); <-done }()
+
+	sendFrame(t, otherWire.Attrs().Index, bcast, otherHost)
+	sendFrame(t, fabWire.Attrs().Index, bcast, link.PeerMAC)
+	sendFrame(t, fabWire.Attrs().Index, bcast, link.LocalMAC)
+	sendFrame(t, fabWire.Attrs().Index, bcast, synthetic)
+	sendFrame(t, fabWire.Attrs().Index, lldp, lldpSpeaker)
+	// Last on the fabric: once it is counted, every earlier fabric frame on
+	// this socket has been handled.
+	sendFrame(t, fabWire.Attrs().Index, bcast, thirdHost)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for tracker.Alarm(time.Now()) == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("a foreign broadcast on the fabric parent never raised the alarm")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got, want := trackedSources(tracker), []string{thirdHost.String()}; !equalStrings(got, want) {
+		t.Fatalf("tracked sources = %v, want exactly %v", got, want)
+	}
+}
+
+func requireEmptyNetns(t *testing.T) {
+	t.Helper()
+	links, err := netlink.LinkList()
+	if err != nil {
+		t.Skipf("cannot list links: %v", err)
+	}
+	for _, l := range links {
+		if l.Attrs().Name != "lo" {
+			t.Skipf("not an empty network namespace (found %q); run under unshare -rn", l.Attrs().Name)
+		}
+	}
+}
+
+func vethPair(t *testing.T, a, b string) (netlink.Link, netlink.Link) {
+	t.Helper()
+	if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: a}, PeerName: b}); err != nil {
+		if errors.Is(err, unix.EPERM) {
+			t.Skipf("no CAP_NET_ADMIN: %v", err)
+		}
+		t.Fatalf("add veth %s/%s: %v", a, b, err)
+	}
+	t.Cleanup(func() {
+		if l, err := netlink.LinkByName(a); err == nil {
+			_ = netlink.LinkDel(l)
+		}
+	})
+	var out [2]netlink.Link
+	for i, name := range []string{a, b} {
+		l, err := netlink.LinkByName(name)
+		if err != nil {
+			t.Fatalf("link %s: %v", name, err)
+		}
+		if err := netlink.LinkSetUp(l); err != nil {
+			t.Fatalf("up %s: %v", name, err)
+		}
+		out[i] = l
+	}
+	return out[0], out[1]
+}
+
+func boundTap(t *testing.T, ifindex int) int {
+	t.Helper()
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.EPERM) {
+			t.Skipf("no CAP_NET_RAW: %v", err)
+		}
+		t.Fatalf("witness socket: %v", err)
+	}
+	t.Cleanup(func() { unix.Close(fd) })
+	if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Sec: 1}); err != nil {
+		t.Fatalf("witness timeout: %v", err)
+	}
+	if err := unix.Bind(fd, &unix.SockaddrLinklayer{Protocol: htons(unix.ETH_P_ALL), Ifindex: ifindex}); err != nil {
+		t.Fatalf("witness bind: %v", err)
+	}
+	return fd
+}
+
+func awaitSource(t *testing.T, fd int, src net.HardwareAddr) {
+	t.Helper()
+	buf := make([]byte, 128)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		n, _, err := unix.Recvfrom(fd, buf, 0)
+		if err != nil {
+			continue
+		}
+		if n >= 12 && net.HardwareAddr(buf[6:12]).String() == src.String() {
+			return
+		}
+	}
+	t.Fatalf("witness never saw a frame from %s", src)
+}
+
+const testEtherType = 0x88b5 // IEEE 802 local experimental
+
+func sendFrame(t *testing.T, ifindex int, dst, src net.HardwareAddr) {
+	t.Helper()
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("sender socket: %v", err)
+	}
+	defer unix.Close(fd)
+	frame := make([]byte, 60)
+	copy(frame[0:6], dst)
+	copy(frame[6:12], src)
+	binary.BigEndian.PutUint16(frame[12:14], testEtherType)
+	sa := &unix.SockaddrLinklayer{Protocol: htons(testEtherType), Ifindex: ifindex, Halen: 6}
+	copy(sa.Addr[:], dst)
+	if err := unix.Sendto(fd, frame, 0, sa); err != nil {
+		t.Fatalf("send from %s: %v", src, err)
+	}
+}
+
+func trackedSources(tr *Tracker) []string {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	out := make([]string, 0, len(tr.sources))
+	for k := range tr.sources {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

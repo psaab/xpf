@@ -17,6 +17,7 @@ import (
 	"github.com/psaab/xpf/pkg/ddns"
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/psaab/xpf/pkg/dhcpserver"
+	"github.com/psaab/xpf/pkg/fabricsegment"
 	"github.com/psaab/xpf/pkg/frr"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/ipmon"
@@ -41,6 +42,10 @@ func (d *Daemon) constructClusterManager(cfg *config.Config) bool {
 	// local reference alarm's RT_SYSTEM CLOCK_SKEW_ALARM_* shape. Wired at
 	// construction, before any heartbeat can be admitted.
 	d.cluster.SetPeerClockAlarmHook(d.peerClockAlarmSyslog)
+	// #18719: frames from a non-peer source MAC on the fabric parent are
+	// rendered in `show chassis cluster status`. The watcher itself is fed by
+	// the userspace manager's SyncFabricState.
+	d.cluster.SetFabricSegmentAlarmsFn(fabricsegment.Default().Alarms)
 	return true
 }
 

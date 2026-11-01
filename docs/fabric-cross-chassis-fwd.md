@@ -1485,6 +1485,64 @@ stamps on a declared-shared fabric would be forwarding logic and is out of
 scope. The existing control-link PSK mandate remains separately enforceable
 (#6611).
 
+### Acknowledging the reminder, and watching for a violation (#18719)
+
+The reminder used to print on EVERY commit of every cluster, whatever the
+commit touched, so operators learned to skip the warning block. It is now a
+constraint reminder in the #18719 sense (`docs/config-schema.md`,
+"Constraint reminders are acknowledgeable or change-scoped"):
+
+- **Acknowledgeable.** The #16023 per-link attestation silences it: with
+  `set chassis cluster fabric-interface-authenticated` (and
+  `fabric1-interface-authenticated` for a second fabric) on EVERY configured
+  fabric link, the #10105 line is not emitted. One unattested link keeps it.
+  The attestation is the existing #16023 leaf, and it changes no forwarding:
+  it is consulted at runtime only together with
+  `security flow require-authenticated-fabric-stamps`. Its description says
+  MACsec/802.1X; whether a direct-attached or dedicated-bridge link should
+  carry the same attestation, or a separate `fabric-link private` leaf
+  (the #18719 proposal), is left to the issue.
+- **Change-scoped.** Without the attestation the operator commit path prints
+  the reminder only when the commit adds or changes fabric configuration:
+  `chassis cluster fabric-interface`/`fabric1-interface`, the fabric peer
+  addresses, the attestations, and the `fab0`/`fab1` members and unit
+  addresses (`fabricAdvisoryScope18719`, `pkg/config/advisory_scope_18719.go`).
+  Removing an attestation is a change, so the reminder returns on that commit.
+  `commit check` is not scoped and reports it whenever it applies. The store
+  applies the filter at both commit sites (`Commit*` and `CommitConfirmed*`),
+  comparing against the previously committed config.
+- **A runtime detector for the real violation.** The constraint cannot be
+  proven, but a violation can be observed: frames on the fabric parent whose
+  Ethernet source is neither this node's fabric MAC, nor the peer's, nor in
+  xpf's synthetic namespace (`02:bf:72:*` zone stamps and RETH MACs,
+  `02:bf:73:*` V2 scope stamps). `pkg/fabricsegment` reads an AF_PACKET tap on
+  each armed fabric parent (armed once the peer fabric MAC has resolved),
+  behind a kernel cBPF filter that drops every frame from the two known
+  fabric MACs. It never touches the AF_XDP fast path: an AF_PACKET tap only
+  sees frames the XDP shim hands to the kernel (ARP, LLDP, NDP,
+  kernel-forwarded traffic), which is exactly where a third host's ARP/ND/DHCP
+  appears. Frames to the IEEE 802.1 link-constrained groups
+  (`01:80:c2:00:00:00`-`0f`: STP/RSTP, LACP, 802.1X, LLDP) are not
+  evidence: a bridge never relays them, so they prove only the adjacent
+  switch port, and a fabric on a dedicated switch VLAN is still a private
+  two-peer segment. Vendor link-local protocols outside that block (CDP,
+  PVST+ to `01:00:0c:cc:cc:cc`/`cd`) DO raise the alarm, which names the
+  source MAC. The tap socket is created with protocol 0 and only starts
+  receiving at `bind` (ETH_P_ALL on the fabric parent), so no frame from
+  another interface is queued before the bind. The reader handles at most
+  1000 accepted frames per second. A foreign source raises an alarm, rendered as a
+  `Warning: fabric link <fab> (<parent>) received N frame(s) from source
+  MAC(s) that are neither peer's fabric MAC (...)` line in `show chassis
+  cluster status` above the redundancy-group blocks, and logged once at the
+  raise (WARN) and once at the clear (INFO). The alarm holds for
+  `AlarmHold` (15 min) after the last foreign frame. A forged stamp carries
+  an xpf source MAC, so this detector cannot see a stamp forgery itself; it
+  sees the shared segment that makes one possible. Kernel-path cell:
+  `TestTapSamplerOnARealSegment18719` (`pkg/fabricsegment/sampler_linux_test.go`)
+  drives the real tap on veth pairs, and runs only in an empty network
+  namespace (`unshare -rn` on the compiled test binary). It skips elsewhere,
+  including in `make test`.
+
 ## Native L2 group/unicast transit gate (#10691)
 
 Accepting broadcast and multicast destination MACs at the pre-L3 gate permits
