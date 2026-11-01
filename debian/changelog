@@ -12,7 +12,8 @@ xpf (0.0.0) unstable; urgency=medium
     exempts loopback, the cluster control link and fabric, and IPv4 the box
     sends to its own address inside a VRF; fxp0 is NOT exempt, nor is IPv6
     the box sends to its own in-VRF address (indistinguishable from
-    spoofed fxp0 ingress). MANAGEMENT LOCKOUT RISK: the lo0 chain is stateless, so a lo0
+    spoofed fxp0 ingress; a term accepting the box's own source address
+    admits that spoofed traffic too). MANAGEMENT LOCKOUT RISK: the lo0 chain is stateless, so a lo0
     filter without a catch-all drops all unmatched host traffic (the
     control-link/fabric exemption matches VRF slaves by sdifname, and the
     lo0 table is refused if that exemption is incomplete) -- SSH and

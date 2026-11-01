@@ -198,3 +198,44 @@ func TestLo0ImplicitDiscardRequiredAndValidate18728(t *testing.T) {
 		t.Fatalf("standalone required = %v, want [lo]", got)
 	}
 }
+
+// TestLo0InputV6WarningCarriesVRFLocalCaveat18728: the kernel lo0 mirror
+// cannot exempt IPv6 the box sends to its own in-VRF address (it is
+// indistinguishable from fxp0 ingress), so the lo0 input-v6 no-catch-all
+// warning says so, and warns that a term accepting the box's own source
+// address also admits that source spoofed from the wire. Only the lo0
+// input-v6 hook carries the clause: the lo0 inet (v4) hook has the VRF-local
+// exemption, and a data-interface inet6 filter is not host-bound.
+func TestLo0InputV6WarningCarriesVRFLocalCaveat18728(t *testing.T) {
+	cfg := compileSetLinesT(t, []string{
+		"set system dataplane-type userspace",
+		"set firewall family inet filter lo4 term ssh from destination-port 22",
+		"set firewall family inet filter lo4 term ssh then accept",
+		"set firewall family inet6 filter lo6 term ssh from destination-port 22",
+		"set firewall family inet6 filter lo6 term ssh then accept",
+		"set firewall family inet6 filter in6 term web from destination-port 443",
+		"set firewall family inet6 filter in6 term web then accept",
+		"set interfaces lo0 unit 0 family inet filter input lo4",
+		"set interfaces lo0 unit 0 family inet6 filter input lo6",
+		"set interfaces ge-0-0-0 unit 0 family inet6 filter input in6",
+	})
+	warnings := ValidateConfig(cfg)
+	const caveat = "also discards IPv6 the firewall sends to its own address inside a VRF"
+	const spoof = "also admits packets spoofed with it from the wire"
+	lo6 := hasNoCatchAllWarn(warnings, "lo6")
+	if lo6 == "" {
+		t.Fatalf("no no-catch-all warning for lo0 input-v6 filter lo6: %v", warnings)
+	}
+	if !strings.Contains(lo6, caveat) || !strings.Contains(lo6, spoof) {
+		t.Errorf("lo0 input-v6 warning lacks the VRF-local / spoof caveat: %q", lo6)
+	}
+	for _, name := range []string{"lo4", "in6"} {
+		w := hasNoCatchAllWarn(warnings, name)
+		if w == "" {
+			t.Fatalf("no no-catch-all warning for %s: %v", name, warnings)
+		}
+		if strings.Contains(w, caveat) {
+			t.Errorf("%s warning must not carry the lo0 IPv6 VRF-local caveat: %q", name, w)
+		}
+	}
+}

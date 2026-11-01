@@ -164,7 +164,11 @@ the userspace dataplane admission boundary is in
       slave the input hook's iifname is the VRF master, so an iifname-only
       exemption missed the control link and fabric and cut them on the loss
       cluster (#18755 incident; `TestLo0ImplicitDiscardExemptsVRFSlavesOnRealKernel18728`
-      pins it on a real kernel). The VRF master itself is not exempt, so
+      pins it on a real kernel). Both legs are needed: IPv6 neighbor
+      discovery on a VRF slave arrives with the slave as iifname and no
+      sdif (the VRF code keeps the ingress device for NDISC), everything
+      else with the master as iifname and the slave as sdifname. The VRF
+      master itself is not exempt, so
       fxp0 (a slave of the same VRF) stays subject to the drop.
       **Locally generated traffic.** Traffic the box sends to its own
       address in the default table arrives on `lo` and is exempt. IPv4 it
@@ -182,9 +186,22 @@ the userspace dataplane admission boundary is in
       from the wire as it drops an IPv4 martian). Exempting it would let
       anyone on the fxp0 segment bypass the implicit discard, so a lo0
       inet6 filter without a catch-all also drops IPv6 the box sends to its
-      own in-VRF addresses unless a term accepts it. The real-kernel cell
-      asserts the spoofed packet is dropped and the IPv4 VRF-local and
-      default-table local traffic is not. The
+      own in-VRF addresses unless a term accepts it (`commit check` says so
+      in the lo0 input-v6 warning). **Such a term reopens the spoof:** a term
+      that accepts the box's OWN source address also accepts a packet
+      spoofed with that source from the fxp0 segment, exactly the traffic
+      the missing exemption keeps out; scope it as narrowly as the service
+      needs (protocol, port, destination) and treat it as accepting
+      anything from that segment. #18786 tracks a safe IPv6 discriminator
+      (an output-hook skb mark, which survives local transmit and cannot
+      arrive from the wire). The IPv4 exemption rests on a kernel
+      invariant: a received packet always carries the slave as sdif, and
+      only a frame transmitted INTO the VRF device (local transmit, a raw
+      AF_PACKET send on the master, a tc/XDP redirect to it, a VRF as a
+      bridge port) shows the master; xpf builds none but the first. The
+      real-kernel cell asserts the spoofed packet is dropped and the IPv4
+      VRF-local and default-table local traffic is not, with the fabric as
+      an IPVLAN child (the lab shape) on node1. The
       renderer and installer FAIL CLOSED (the prior table, or the cold-boot
       fence, stays) when an exemption name is empty or the set lacks a
       control-link/fabric netdev resolved independently from the cluster
@@ -226,7 +243,8 @@ the userspace dataplane admission boundary is in
         fails the probes and triggers WAN failover;
       - **IPv6 the box sends to its own in-VRF addresses** (for example to
         its own fxp0 IPv6 address from inside vrf-mgmt; see "Locally
-        generated traffic" above);
+        generated traffic" above). A term keyed on the box's own source
+        address also admits that source spoofed from the wire;
       - **return traffic of every connection the firewall itself opens.**
         The chain is STATELESS (no `ct state established` accept), so a
         host-originated ping, TCP connect or UDP query sees its reply

@@ -434,6 +434,16 @@ func Lo0ImplicitDiscardRequiredNetdevs(cfg *Config) []string {
 // master device itself, so `iifname {masters} meta sdifname {masters}` cannot
 // match wire traffic (fxp0 ingress stays subject to the drop).
 //
+// Invariant (kernel source, review seat AE): a RECEIVED packet always carries
+// the slave as sdif, because ip_rcv records IPCB->iif before vrf_ip_rcv
+// switches skb->dev to the master. Only a frame transmitted INTO the VRF
+// device shows iif = sdif = the master: vrf_local_xmit (the box's own
+// traffic), a local CAP_NET_RAW AF_PACKET send on the master, a tc or XDP
+// redirect to the VRF device, or a VRF enslaved as a bridge port. xpf builds
+// none of the last three (nested VRFs are refused, and the userspace helper
+// reinjects host-bound packets through a TUN, not the VRF device). A change
+// that adds one of them must revisit this exemption.
+//
 // IPv6 has NO such exemption. IPv6 traffic the box sends to its own address
 // inside a VRF reaches the input hook as iifname = the master and sdifname =
 // the slave that owns the address (fxp0), exactly like a packet received on
@@ -444,7 +454,9 @@ func Lo0ImplicitDiscardRequiredNetdevs(cfg *Config) []string {
 // wire the way it drops an IPv4 martian. Exempting it would let anyone on a
 // VRF slave's segment bypass the lo0 filter's implicit discard, so IPv6
 // VRF-local traffic stays subject to it: a lo0 inet6 filter without a
-// catch-all needs a term for it.
+// catch-all needs a term for it. #18786 tracks a safe discriminator (an
+// output-hook skb mark survives vrf_local_xmit and cannot arrive from the
+// wire).
 func Lo0ImplicitDiscardVRFMasters(cfg *Config) []string {
 	seen := map[string]bool{ManagementVRFDeviceName: true}
 	out := []string{ManagementVRFDeviceName}

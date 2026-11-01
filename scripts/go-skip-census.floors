@@ -142,16 +142,24 @@
 # #17583's vtysh oracle; and two loopback monitor gates replaced by PR #17430.
 # This is the file+message recount and each remaining PR's disposition is
 # listed explicitly in this PR body.
-total        = 607
+# #18728 adds three skip sites, all in
+# pkg/daemon/lo0_implicit_discard_vrf_slave_18728_test.go (the lo0
+# implicit-discard VRF-slave real-kernel cell): "netns unavailable" (one
+# priv-absent: a private netns needs unprivileged userns or root) and "nft
+# not found" / "%s not available" (two other: tool-gated). Each becomes a
+# FAILURE under XPF_REQUIRE_NETNS=1, which the daemon-kernel forcing leg
+# (test/daemon/selftest-daemon-kernel_15241.sh) sets, and the leg pins the
+# cell by name. This raises only those three; it does not bank other drift.
+total        = 610
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 120
+priv-absent  = 121
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 468
+other        = 470
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket

@@ -21,9 +21,10 @@ import (
 // slave the input hook's iifname is the VRF MASTER (`vrf-mgmt`); the slave is
 // only visible as sdifname. An iifname-only exemption therefore never matched
 // them. This cell reproduces that shape on a real kernel in a private netns
-// (node1 naming: em0 + fab1 over ge-7/0/0), installs the lo0 table through
-// the production netlink installer, and pings each address from its own
-// peer namespace:
+// (node1 naming: em0 + fab1, an IPVLAN child of ge-7-0-0 as on the lab
+// nodes; node0's fab0 is a plain veth), installs the lo0 table through the
+// production netlink installer, and pings each address from its own peer
+// namespace, sourced from the peer's own address:
 //
 //   - em0 and fab1 are VRF slaves and must stay reachable (exempt);
 //   - fxp0 is a slave of the SAME VRF and must be dropped (not exempt), so
@@ -110,6 +111,10 @@ func lo0VRFSlaveChild18728Body(t *testing.T) {
 		dev, peerDev, v4, peerV4, v6, peerV6 string
 		vrf                                  bool
 		pid                                  string
+		// ipvlanParent, when set, makes dev an IPVLAN (l2) child of a veth
+		// named ipvlanParent whose peer end is peerDev: the lab's fabric
+		// shape, where the IPVLAN child is the VRF slave (and so the sdif).
+		ipvlanParent string
 	}
 	// One topology carries both nodes' role netdevs, so a node0 or a node1
 	// config is checked against the same kernel (#18728 incident: node1
@@ -117,13 +122,19 @@ func lo0VRFSlaveChild18728Body(t *testing.T) {
 	links := map[string]*link{
 		"em0":      {dev: "em0", peerDev: "pem0", v4: "10.99.12.2/30", peerV4: "10.99.12.1/30", v6: "fd00:99:12::2/64", peerV6: "fd00:99:12::1/64", vrf: true},
 		"fab0":     {dev: "fab0", peerDev: "pfab0", v4: "10.99.13.6/30", peerV4: "10.99.13.5/30", v6: "fd00:99:13::6/64", peerV6: "fd00:99:13::5/64", vrf: true},
-		"fab1":     {dev: "fab1", peerDev: "pfab1", v4: "10.99.13.2/30", peerV4: "10.99.13.1/30", v6: "fd00:99:13:1::2/64", peerV6: "fd00:99:13:1::1/64", vrf: true},
+		"fab1":     {dev: "fab1", peerDev: "pfab1", v4: "10.99.13.2/30", peerV4: "10.99.13.1/30", v6: "fd00:99:13:1::2/64", peerV6: "fd00:99:13:1::1/64", vrf: true, ipvlanParent: "ge-7-0-0"},
 		"fxp0":     {dev: "fxp0", peerDev: "pfxp", v4: "10.136.126.134/24", peerV4: "10.136.126.113/24", v6: "fd00:136::134/64", peerV6: "fd00:136::113/64", vrf: true},
 		"ge-0-0-1": {dev: "ge-0-0-1", peerDev: "pdata", v4: "10.0.61.1/24", peerV4: "10.0.61.100/24", v6: "fd00:61::1/64", peerV6: "fd00:61::100/64", vrf: false},
 	}
 	for _, l := range links {
 		l.pid = peer()
-		run("ip", "link", "add", l.dev, "type", "veth", "peer", "name", l.peerDev, "netns", l.pid)
+		if l.ipvlanParent != "" {
+			run("ip", "link", "add", l.ipvlanParent, "type", "veth", "peer", "name", l.peerDev, "netns", l.pid)
+			run("ip", "link", "set", l.ipvlanParent, "up")
+			run("ip", "link", "add", "link", l.ipvlanParent, "name", l.dev, "type", "ipvlan", "mode", "l2")
+		} else {
+			run("ip", "link", "add", l.dev, "type", "veth", "peer", "name", l.peerDev, "netns", l.pid)
+		}
 		if l.vrf {
 			run("ip", "link", "set", l.dev, "master", "vrf-mgmt")
 		}
@@ -140,6 +151,38 @@ func lo0VRFSlaveChild18728Body(t *testing.T) {
 		}
 	}
 	addrOf := func(cidr string) string { return strings.Split(cidr, "/")[0] }
+	// Pin IPv6 neighbors both ways on the NOT-exempt ports (fxp0 and
+	// ge-0-0-1). The implicit drop discards neighbor discovery there (an NA
+	// reaches the input hook with the INGRESS device as iifname, sdif 0: the
+	// VRF code keeps the ingress device for NDISC), so with dynamic ND those
+	// IPv6 rows would measure ND, not the echo verdict. That made the fxp0
+	// IPv6 "NOT exempt" row read unreachable even under a mutant that
+	// accepts all IPv6 with iifname vrf-mgmt (#18755 review seat AE). The
+	// exempt ports (em0, fab0, fab1) keep dynamic ND on purpose: their IPv6
+	// rows also prove that ND on a VRF slave, which matches the exemption
+	// by iifname rather than sdifname, gets through.
+	peerMAC := func(l *link) string {
+		t.Helper()
+		out, err := exec.Command("nsenter", "-t", l.pid, "-n", "ip", "-o", "link", "show", l.peerDev).CombinedOutput()
+		f := strings.Fields(string(out))
+		for i := range f {
+			if f[i] == "link/ether" && i+1 < len(f) {
+				return f[i+1]
+			}
+		}
+		t.Fatalf("peer MAC of %s: %v: %s", l.peerDev, err, out)
+		return ""
+	}
+	for _, name := range []string{"fxp0", "ge-0-0-1"} {
+		l := links[name]
+		ifc, err := net.InterfaceByName(l.dev)
+		if err != nil {
+			t.Fatalf("%s: %v", l.dev, err)
+		}
+		run("ip", "-6", "neigh", "replace", addrOf(l.peerV6), "lladdr", peerMAC(l), "dev", l.dev, "nud", "permanent")
+		run("nsenter", "-t", l.pid, "-n", "ip", "-6", "neigh", "replace", addrOf(l.v6),
+			"lladdr", ifc.HardwareAddr.String(), "dev", l.peerDev, "nud", "permanent")
+	}
 	// Spoof fixture: a second own address on fxp0 that the fxp0 peer also
 	// holds, so the peer can send a packet whose SOURCE is one of the box's
 	// own IPv6 addresses to the box's fxp0 address. The peer resolves the
@@ -191,11 +234,16 @@ func lo0VRFSlaveChild18728Body(t *testing.T) {
 		}
 		return pre, in
 	}
+	// ping reaches one of this namespace's addresses from the link's peer,
+	// SOURCED from the peer's own address. Without -I the fxp0 peer would
+	// pick the spoof fixture's /128 below (longest matching prefix), the
+	// reply would be addressed to one of the box's own addresses, and the
+	// IPv6 fxp0 row would read unreachable whatever the lo0 table did.
 	ping := func(l *link, v6 bool) bool {
-		args := []string{"-t", l.pid, "-n", "ping", "-c", "2", "-W", "1"}
+		args := []string{"-t", l.pid, "-n", "ping", "-c", "2", "-W", "1", "-I", addrOf(l.peerV4)}
 		addr := addrOf(l.v4)
 		if v6 {
-			args = append(args, "-6")
+			args = []string{"-t", l.pid, "-n", "ping", "-6", "-c", "2", "-W", "1", "-I", addrOf(l.peerV6)}
 			addr = addrOf(l.v6)
 		}
 		return exec.Command("nsenter", append(args, addr)...).Run() == nil

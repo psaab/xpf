@@ -761,7 +761,11 @@ const nftRefuseLo0ImplicitExempt = `comment "lo0 implicit-discard exemption inva
 // is not 0). A packet received on a VRF slave carries the slave as sdifname,
 // so fxp0 traffic is not exempted. The VRF analogue of the `lo` exemption;
 // netlink mirror buildLo0VRFLocalAccept. IPv4 only: see
-// config.Lo0ImplicitDiscardVRFMasters for why IPv6 has no such exemption.
+// config.Lo0ImplicitDiscardVRFMasters for why IPv6 has no such exemption,
+// and for the invariant the rule rests on: only a frame transmitted INTO the
+// VRF device (local transmit, a raw AF_PACKET send on the master, a tc/XDP
+// redirect to it, a VRF as a bridge port) shows iif = sdif = the master, and
+// xpf builds none but the first.
 func lo0VRFLocalAcceptRule(masters []string) string {
 	return "meta nfproto ipv4 iifname " + nftIifnameSet(masters) +
 		" meta sdifname " + nftIifnameSet(masters) + " accept"

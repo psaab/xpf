@@ -99,7 +99,11 @@ func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
 // rule, so it only changes the implicit discard's verdict. The caller emits
 // it for IPv4 only: IPv6 VRF-local traffic carries the address-owning slave
 // as sdifname and cannot be told apart from fxp0 ingress (see
-// config.Lo0ImplicitDiscardVRFMasters).
+// config.Lo0ImplicitDiscardVRFMasters). Invariant: only a frame transmitted
+// INTO the VRF device (local transmit, a raw AF_PACKET send on the master, a
+// tc/XDP redirect to it, a VRF as a bridge port) shows iif = sdif = the
+// master; xpf builds none but the first, and the helper reinjects through a
+// TUN.
 func buildLo0VRFLocalAccept(p *nlPlan, f nlFamily, masters []string) {
 	if len(masters) == 0 {
 		return
@@ -123,7 +127,11 @@ func buildLo0VRFLocalAccept(p *nlPlan, f nlFamily, masters []string) {
 // only visible as sdifname; xpfd enslaves fxp/em/fab to vrf-mgmt, so an
 // iifname-only exemption never matched the control link or the fabric and
 // the implicit drop cut them (#18728 loss incident). sdifname is empty for
-// non-VRF ingress, so the second compare is a no-op there. The VRF master is
+// non-VRF ingress, so the second compare is a no-op there. The iifname leg
+// still matters for VRF slaves: IPv6 neighbor discovery on a slave reaches
+// the input hook with the SLAVE as iifname and sdif 0 (the VRF code keeps
+// the ingress device for NDISC), so only `iifname != X` exempts the control
+// link's and fabric's ND. The VRF master is
 // deliberately NOT exempted: fxp0 is a slave of the same VRF and must stay
 // subject to the drop. A nil/empty list, an empty name, or a missing required
 // role netdev refuses the plan (checked by the caller).

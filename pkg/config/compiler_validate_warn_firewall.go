@@ -442,13 +442,26 @@ func validateFilterNoCatchAllWarnings(cfg *Config) []string {
 				if FirewallFilterHasCatchAll(h.filter) {
 					continue
 				}
+				// lo0 inet6: the kernel mirror cannot exempt IPv6 the box
+				// sends to its own address inside a VRF (it is
+				// indistinguishable from fxp0 ingress, see
+				// Lo0ImplicitDiscardVRFMasters), so say so where the
+				// operator looks.
+				lo0v6 := ""
+				if (ifName == "lo0" || ifc.Name == "lo0") && h.dir == "input-v6" {
+					lo0v6 = "; on lo0 this also discards IPv6 the firewall " +
+						"sends to its own address inside a VRF (vrf-mgmt or a " +
+						"routing instance), and a term that accepts the " +
+						"firewall's own source address also admits packets " +
+						"spoofed with it from the wire"
+				}
 				warnings = append(warnings, fmt.Sprintf(
 					"interface %s unit %d: filter %s %q has no terminal "+
 						"catch-all term; unmatched traffic is discarded "+
-						"(Junos default) and counted as implicit-discard; add "+
+						"(Junos default) and counted as implicit-discard%s; add "+
 						"a final `term <name> { then accept; }` if you intended "+
 						"permit-by-default (#18728)",
-					ifName, unitNum, h.dir, h.name))
+					ifName, unitNum, h.dir, h.name, lo0v6))
 			}
 		}
 	}
