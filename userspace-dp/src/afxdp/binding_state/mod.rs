@@ -1081,9 +1081,13 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // #18566 adds one per-arm flow-cache eviction slot
 // (`PostHitFabricRedirectDestinationNowLocal`, arm count 19 -> 20) before
 // both sentinels; offsets advance by 8 bytes, size unchanged.
+// #18656 adds two per-arm flow-cache eviction slots (the
+// `PostHitSessionDead` sub-arms `NoRecord` / `IdleCrossed`, arm count
+// 20 -> 22) before both sentinels; offsets advance by 16 bytes, size
+// unchanged.
 const _: [(); 3072] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2896] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 3025] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2912] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 3041] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {

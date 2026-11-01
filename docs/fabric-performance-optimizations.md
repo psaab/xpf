@@ -7,6 +7,34 @@
 | Direct (all RGs same node) | 7.8 Gbps | 23.0 Gbps |
 | Fabric (split-RG) | 2.0 Gbps | 3.5 Gbps |
 
+**Correction (#18656, 2026-11-01).** The split-RG row above was measured
+on flows that existed before the split, and those flows were not running
+on the fabric path the rest of this page describes. The LAN node still
+owns such a session and its SNAT, so after the move it fabric-redirects
+the forward data already source-translated (`apply_nat_on_fabric`). On
+the new WAN owner the packet's tuple is then the session's forward-wire
+alias. Until #18656, the flow-cache hit probe could not resolve that
+alias. Every hit was refused (`post_hit_session_dead`, all no-record),
+the slow path re-resolved the packet and re-seeded the cache, and about
+95% of the new owner's packets took that per-packet loop.
+
+Same-session moved-vs-fresh controls, iperf3 `-P8`:
+
+| Cluster | Build | Moved flows | Fresh flows (split first, then load) |
+|---|---|---|---|
+| tcp | master | 5.8–5.9 Gbit/s | 8.6 Gbit/s |
+| tcp | #18656 | 15.3–15.9 Gbit/s | 16.7 Gbit/s |
+| loss | master | 1.47–1.58 Gbit/s | VOID (iperf3 `--cport` collision) |
+| loss | #18656 | 2.96–3.04 Gbit/s | 3.68–3.77 Gbit/s |
+
+On the fixed build, the new owner serves moved flows from the flow cache:
+on tcp, 19.67M cache hits against 19.61M received packets and 0
+evictions. That leaves the copy-mode fabric itself (#12655) as the limit.
+The loss numbers above come from one session with no master fresh
+baseline, so they are not a statement of the loss fabric ceiling. H9's
+loss floor stays unset until #18678 re-measures it. Matrix row H9
+(`docs/regression-test-matrix.md`) carries the same correction.
+
 ## Architecture: How Fabric Redirect Works Today
 
 In strict userspace mode, steady-state fabric transit stays on the AF_XDP
@@ -95,6 +123,9 @@ Server 172.16.80.200:5201 -> 172.16.80.8:43446
 
 The fabric path runs at 3.5 Gbps with CPUs mostly idle (~2% peak in profiles).
 This is NOT a CPU bottleneck — it's the virtio-net bridge throughput between VMs.
+(Measured before #18656; see the correction under "Current State": flows that
+existed before the split were on a per-packet slow-path loop on the new owner,
+so this figure understated the fabric.)
 
 ### Contributing factors
 
