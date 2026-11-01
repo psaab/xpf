@@ -611,6 +611,13 @@ type Manager struct {
 	// this Manager is rebuilt and the cluster session inventory is replayed.
 	sessionRepairOverflowErr string
 
+	// abandonUnsupportedWarned / abandonUnsupportedGen latch the #18752 Warn
+	// that the helper lacks the abandon_owner_rg_export verb: once per helper
+	// generation (procGen), Debug after. The bool keeps a procGen of 0 from
+	// reading as "already warned".
+	abandonUnsupportedWarned bool
+	abandonUnsupportedGen    uint64
+
 	// syncedImportRefusals counts HA synced-session imports the helper REFUSED
 	// on semantic grounds (#6785) — a stale install generation, the aggregate
 	// import ceiling, or a translated-tuple reservation refusal. Each one rolls

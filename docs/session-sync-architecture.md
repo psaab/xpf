@@ -2398,15 +2398,49 @@ window. Workers need nothing: the next fresh kick supersedes the abandoned
 sequence and skips its buffered entries as foreign, exactly as after the idle
 expiry. The idle expiry stays the backstop for a helper without the verb.
 
+The helper answers the verb with `session_export_abandoned: true` only when it
+closed a window. The pager logs Info for that case and Debug when nothing
+matched, which is routine after a page 1 refused BUSY: that page names a window
+that never opened. A helper built before #18752 refuses the verb with the
+dispatcher's `unknown request type` wording. The pager classifies that with
+`isUnknownVerbError`, the same check the session-counter capability probe uses.
+It logs one Warn per helper process generation (`procGen`) and Debug after
+that, not the generic could-not-abandon Warn on every aborted export.
+
 The debt itself has no automatic bound, and that is deliberate. Admitting a
 demotion before the peer is primed is what the barrier exists to prevent
 (#10387), because the peer would then delete sessions missing from its
-unprimed table. What the refusal now carries is the debt's state, so an
-operator can see why every failback fails:
-`ColdPrimeDebtDetail` reports how long the prime has been owed, that it
-clears when a bulk re-drive is acked, and the last bulk failure. The other
-re-drive failures (`tombstone dropped` under churn, a generation change)
-still cost one sweep re-drive (~7 s) each. They no longer hold a window open.
+unprimed table. What #18752 adds is the debt's state, visible in three places,
+so an operator can see why every failback fails:
+
+- **The barrier refusal.** It appends `ColdPrimeDebtDetail`: how long the
+  prime has been owed (stamped at the first arm of an episode and kept across
+  re-arms), that it clears when a bulk re-drive is acked, and the last bulk
+  failure. `doBulkSyncWithBulkSend` records that failure through a deferred
+  `noteBulkResult`. A success does not clear it; only the peer's ack
+  (`dischargeColdPrime`) clears the stamp and the failure.
+- **`show chassis cluster information`.** The Cold synchronization block shows
+  `Cold prime owed to peer (no bulk pending): …` and the line `Blocks: manual
+  failover/failback and ISSU drain of this node's RGs` while
+  `ColdPrimeDebtStatus` is true. That is the barrier's own predicate,
+  `coldPrimeOwedWithoutPendingBulk`, so a debt whose paying bulk is still in
+  flight is not shown as refusing. It reaches the Manager through
+  `SyncStatsProvider.ColdPrimeDebtStatus`, on the interface rather than a type
+  assertion: a failed assertion would show no line, which looks exactly like
+  no debt.
+- **One latched Warn per episode.** The sync sweep calls
+  `maybeWarnLongOwedColdPrime` every tick. Once the debt has been owed with no
+  bulk pending for `coldPrimeLongOwedAfter` (60 s), it logs Warn once. 60 s is
+  the helper's idle expiry, so it is the longest stall a single abandoned
+  window can cause even without the verb, and it is about eight re-drives. A
+  debt still owed past it is failing for a reason that will not go away by
+  itself. The latch resets when a new episode is armed. The sweep's
+  own early returns (no primary predicate, incremental sync paused,
+  disconnected) skip it too, so a disconnect does not raise it.
+
+The other re-drive failures (`tombstone dropped` under churn, a generation
+change) still cost one sweep re-drive (~7 s) each. They no longer hold a window
+open.
 
 ## Incremental Sweep and Delete Journal
 

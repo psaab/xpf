@@ -726,6 +726,7 @@ func (s *SessionSync) clearPendingBulkAck() {
 func (s *SessionSync) armColdPrimeLocked() {
 	if !s.needColdPrime.Load() {
 		s.coldPrimeOwedSince.Store(time.Now().UnixNano())
+		s.coldPrimeLongOwedWarned.Store(false)
 	}
 	s.needColdPrime.Store(true)
 	s.coldPrimeGen.Add(1)
@@ -737,9 +738,11 @@ type bulkFailure struct {
 	at  time.Time
 }
 
-// noteBulkResult records a failed bulk for transfer-readiness display. A
-// success leaves the last failure in place: the debt it explains is only paid
-// by the peer's ack (dischargeColdPrime clears both).
+// noteBulkResult records a failed bulk for the cold-prime debt display (the
+// demotion barrier's refusal, `show chassis cluster information`, and the
+// latched long-owed Warn). A success leaves the last failure in place: the
+// debt it explains is only paid by the peer's ack (dischargeColdPrime clears
+// both).
 func (s *SessionSync) noteBulkResult(err error) {
 	if err != nil {
 		s.lastBulkFailure.Store(&bulkFailure{err: err.Error(), at: time.Now()})
@@ -873,6 +876,43 @@ func (s *SessionSync) ColdPrimeDebtDetail() string {
 		owed, last)
 }
 
+// coldPrimeLongOwedAfter is when an unpaid cold prime earns its one latched
+// Warn (#18752). 60 s is the helper's owner-RG export-window idle expiry
+// (EXPORT_WINDOW_IDLE_EXPIRY_NS): the longest stall a single abandoned window
+// could cause even on a helper without the abandon verb. It is also about eight
+// re-drives at the sweep's cadence, so a debt still owed past it is failing
+// for a reason that is not going away by itself, while every failback and
+// ISSU drain of this node's RGs is being refused.
+const coldPrimeLongOwedAfter = 60 * time.Second
+
+// ColdPrimeDebtStatus (#18752) reports whether the demotion barrier is
+// currently refusing for an unpaid cold prime (owed with no qualifying bulk
+// in flight) and the ColdPrimeDebtDetail text that explains it. Display only.
+func (s *SessionSync) ColdPrimeDebtStatus() (owedWithoutBulk bool, detail string) {
+	if !s.coldPrimeOwedWithoutPendingBulk() {
+		return false, ""
+	}
+	return true, s.ColdPrimeDebtDetail()
+}
+
+// maybeWarnLongOwedColdPrime logs ONE Warn per debt episode once the debt has
+// been owed with no bulk pending for coldPrimeLongOwedAfter. The sweep calls it
+// every tick; the latch resets when a new episode is armed (armColdPrimeLocked
+// with no debt owed), which is the only way a discharged debt comes back.
+func (s *SessionSync) maybeWarnLongOwedColdPrime(now time.Time) bool {
+	since := s.coldPrimeOwedSince.Load()
+	if since == 0 || now.Sub(time.Unix(0, since)) < coldPrimeLongOwedAfter {
+		return false
+	}
+	owed, detail := s.ColdPrimeDebtStatus()
+	if !owed || !s.coldPrimeLongOwedWarned.CompareAndSwap(false, true) {
+		return false
+	}
+	slog.Warn("cluster sync: cold prime owed to peer past the long-owed threshold with no bulk pending; manual failover/failback and ISSU drain (ForceSecondary) of this node's RGs are refused until a re-driven bulk is acked (#18752)",
+		"threshold", coldPrimeLongOwedAfter, "debt", detail)
+	return true
+}
+
 // ColdPrimeOwedWithoutPendingBulk reports whether userspace demotion would
 // otherwise admit a vacuous barrier. Callers should perform this readiness
 // precheck before the demotion-specific barrier path; that path repeats the
@@ -890,7 +930,6 @@ func (s *SessionSync) TransferReadiness() TransferReadinessSnapshot {
 		Connected:        s.stats.Connected.Load(),
 		BulkAckRetryOwed: s.bulkAckRetryOwed.Load(),
 	}
-
 	if epoch, age, ok := s.PendingBulkAck(); ok {
 		snap.PendingBulkAckEpoch = epoch
 		snap.PendingBulkAckAge = age

@@ -1805,6 +1805,8 @@ type SessionSync struct {
 	// barrier's refusal say for how long, and why, the debt is unpaid.
 	coldPrimeOwedSince atomic.Int64
 	lastBulkFailure    atomic.Pointer[bulkFailure]
+	// coldPrimeLongOwedWarned latches the one long-owed Warn per debt episode.
+	coldPrimeLongOwedWarned atomic.Bool
 
 	// Generation-guard domain (#2170/#9915/#10512): see sessionGenState
 	// in sync_gen_state_16159.go and the lock-order graph above.

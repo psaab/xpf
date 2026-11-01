@@ -70,6 +70,7 @@ pub(super) fn owner_rg_abandon(
         req.client_window,
     ) {
         Ok(cleared) => {
+            response.session_export_abandoned = cleared;
             if cleared {
                 eprintln!(
                     "xpf-userspace-dp: owner-RG export window abandoned by its client (seq={} client_window={}) (#18752)",

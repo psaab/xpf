@@ -564,6 +564,13 @@ func (m *Manager) FormatInformation() string {
 			}
 		}
 		fmt.Fprintf(&b, "  Bulk syncs completed: %d\n", bulkCount)
+		if owed, detail := m.coldPrimeDebtStatus(); owed {
+			// #18752: the demotion barrier refuses every manual failover or
+			// failback and every ISSU drain of this node's RGs while this
+			// holds; say so where an operator looks before trying one.
+			fmt.Fprintf(&b, "  Cold prime owed to peer (no bulk pending): %s\n", detail)
+			fmt.Fprintln(&b, "    Blocks: manual failover/failback and ISSU drain of this node's RGs")
+		}
 	} else {
 		fmt.Fprintln(&b, "  Not configured")
 	}

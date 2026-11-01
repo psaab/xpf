@@ -16,9 +16,11 @@ package userspace
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -42,6 +44,9 @@ type windowHelper18752 struct {
 	// (opening the window) and then close the connection without answering:
 	// page 1's response is lost.
 	dropReply func(req ControlRequest) bool
+	// noAbandonVerb models a helper built before #18752: it refuses the
+	// abandon verb with the real dispatcher's unknown-verb wording.
+	noAbandonVerb bool
 }
 
 func startWindowHelper18752(t *testing.T, sock string, pagesPerWindow int) *windowHelper18752 {
@@ -89,14 +94,18 @@ func (h *windowHelper18752) answer(req ControlRequest, pagesPerWindow int) Contr
 	defer h.mu.Unlock()
 	ex := req.SessionExport
 	switch {
+	case req.Type == "abandon_owner_rg_export" && h.noAbandonVerb:
+		h.abandons = append(h.abandons, *ex)
+		return ControlResponse{OK: false, Error: "unknown request type " + req.Type}
 	case req.Type == "abandon_owner_rg_export":
 		h.abandons = append(h.abandons, *ex)
 		byToken := ex.ContinuationIncarnation == 1 && ex.ContinuationSequence == h.open
 		byClient := ex.ClientWindow != 0 && ex.ClientWindow == h.openClient
-		if h.open != 0 && (byToken || byClient) {
+		cleared := h.open != 0 && (byToken || byClient)
+		if cleared {
 			h.open, h.pagesLeft, h.openClient = 0, 0, 0
 		}
-		return ControlResponse{OK: true}
+		return ControlResponse{OK: true, SessionExportAbandoned: cleared}
 	case req.Type != "export_owner_rg_sessions":
 		return ControlResponse{OK: false, Error: "unknown request type " + req.Type}
 	case !ex.Continuation:
@@ -298,5 +307,155 @@ func TestEachExportNamesItsWindow18752(t *testing.T) {
 	}
 	if len(ids) != 2 || ids[0] == 0 || ids[1] == 0 || ids[0] == ids[1] {
 		t.Fatalf("page-1 client window ids = %v, want two distinct nonzero ids", ids)
+	}
+}
+
+// syncBuf18752 is a goroutine-safe log sink: the fake helper and the pager log
+// from different goroutines.
+type syncBuf18752 struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuf18752) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// lines returns the captured records at level that contain substr.
+func (b *syncBuf18752) lines(level, substr string) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []string
+	for _, l := range strings.Split(b.buf.String(), "\n") {
+		if strings.Contains(l, "level="+level) && strings.Contains(l, substr) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func captureLogs18752(t *testing.T) *syncBuf18752 {
+	t.Helper()
+	b := &syncBuf18752{}
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(b, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	return b
+}
+
+// bumpGenerationOnEveryPageOne18752 makes every export abort between pages,
+// the way a peer reboot's commit churn does.
+func bumpGenerationOnEveryPageOne18752(m *Manager, h *windowHelper18752) {
+	h.beforeReply = func(req ControlRequest) {
+		if req.Type == "export_owner_rg_sessions" && !req.SessionExport.Continuation {
+			m.mu.Lock()
+			m.generation++
+			m.mu.Unlock()
+		}
+	}
+}
+
+const (
+	abandonClosedMsg18752  = "abandoned aborted owner-RG export window"
+	abandonNoMatchMsg18752 = "abandon matched no open window"
+	abandonNoVerbMsg18752  = "does not support abandon_owner_rg_export"
+	abandonFailedMsg18752  = "could not abandon the aborted owner-RG export window"
+)
+
+// The Info line claims a window was closed, so it must appear only when the
+// helper says it closed one. An abandon after page 1 was refused BUSY names a
+// window that never opened (another export holds the helper's single window):
+// that is routine on every re-drive during a BUSY spell and must stay at Debug,
+// and the other export's window must be left alone.
+func TestAbandonLogsInfoOnlyWhenItClosedAWindow18752(t *testing.T) {
+	logs := captureLogs18752(t)
+	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
+	h := startWindowHelper18752(t, sock, 3)
+
+	// Matched: the generation-change abort closes our own open window.
+	bumpGenerationOnEveryPageOne18752(m, h)
+	if _, _, err := m.ExportOwnerRGSessionsPaged([]int{1}); !errors.Is(err, ErrOwnerRGExportIncomplete) {
+		t.Fatalf("export 1 err = %v, want the generation-change abort", err)
+	}
+	if got := logs.lines("INFO", abandonClosedMsg18752); len(got) != 1 {
+		t.Fatalf("matched abandon logged %d Info %q line(s), want 1: %q", len(got), abandonClosedMsg18752, got)
+	}
+	if got := logs.lines("DEBUG", abandonNoMatchMsg18752); len(got) != 0 {
+		t.Fatalf("matched abandon logged the no-match Debug line: %q", got)
+	}
+
+	// Unmatched: another export's window (client 777) is open, so page 1 is
+	// refused BUSY and our abandon names a window that never opened.
+	h.mu.Lock()
+	h.beforeReply = nil
+	h.nextSeq++
+	h.open, h.pagesLeft, h.openClient = h.nextSeq, 2, 777
+	foreign := h.open
+	h.mu.Unlock()
+	if _, _, err := m.ExportOwnerRGSessionsPaged([]int{1}); err == nil || !strings.Contains(err.Error(), "busy") {
+		t.Fatalf("export 2 err = %v, want the BUSY refusal", err)
+	}
+	open, _, abandons := h.snapshot()
+	if len(abandons) != 2 {
+		t.Fatalf("abandons = %d, want 2 (one per aborted export)", len(abandons))
+	}
+	if open != foreign {
+		t.Fatalf("helper window = %d after the unmatched abandon, want the other export's window %d left open", open, foreign)
+	}
+	if got := logs.lines("INFO", abandonClosedMsg18752); len(got) != 1 {
+		t.Fatalf("after the unmatched abandon there are %d Info %q lines, want still 1 — it closed nothing: %q",
+			len(got), abandonClosedMsg18752, got)
+	}
+	if got := logs.lines("DEBUG", abandonNoMatchMsg18752); len(got) != 1 {
+		t.Fatalf("unmatched abandon logged %d Debug %q line(s), want 1", len(got), abandonNoMatchMsg18752)
+	}
+}
+
+// A helper built before #18752 refuses the verb. That is a capability gap, not
+// a failed abandon: Warn once per helper generation, Debug after, and never the
+// generic could-not-abandon Warn, which would repeat on every aborted export.
+func TestAbandonUnsupportedVerbWarnsOncePerHelperGeneration18752(t *testing.T) {
+	logs := captureLogs18752(t)
+	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
+	h := startWindowHelper18752(t, sock, 3)
+	h.noAbandonVerb = true
+	bumpGenerationOnEveryPageOne18752(m, h)
+
+	abort := func(n int) {
+		t.Helper()
+		// The old helper keeps the aborted window until its idle expiry;
+		// model that expiry so the next export opens a fresh window.
+		h.mu.Lock()
+		h.open, h.pagesLeft, h.openClient = 0, 0, 0
+		h.mu.Unlock()
+		if _, _, err := m.ExportOwnerRGSessionsPaged([]int{1}); !errors.Is(err, ErrOwnerRGExportIncomplete) {
+			t.Fatalf("export %d err = %v, want the generation-change abort", n, err)
+		}
+	}
+
+	abort(1)
+	abort(2)
+	if _, _, abandons := h.snapshot(); len(abandons) != 2 {
+		t.Fatalf("abandons sent = %d, want 2 (the Go side cannot know the helper lacks the verb until it asks)", len(abandons))
+	}
+	if got := logs.lines("WARN", abandonNoVerbMsg18752); len(got) != 1 {
+		t.Fatalf("two aborts on one helper generation logged %d unsupported-verb Warn(s), want 1: %q", len(got), got)
+	}
+	if got := logs.lines("DEBUG", abandonNoVerbMsg18752); len(got) != 1 {
+		t.Fatalf("the repeat logged %d unsupported-verb Debug line(s), want 1", len(got))
+	}
+	if got := logs.lines("WARN", abandonFailedMsg18752); len(got) != 0 {
+		t.Fatalf("an unknown-verb refusal was logged as a failed abandon: %q", got)
+	}
+
+	// A new helper process may be a different build: say it again.
+	m.mu.Lock()
+	m.procGen++
+	m.mu.Unlock()
+	abort(3)
+	if got := logs.lines("WARN", abandonNoVerbMsg18752); len(got) != 2 {
+		t.Fatalf("after a helper restart there are %d unsupported-verb Warn(s), want 2", len(got))
 	}
 }

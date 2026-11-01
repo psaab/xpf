@@ -6643,6 +6643,10 @@ fn abandon_owner_rg_export_closes_the_window_over_the_wire_18752() {
     });
     let abandoned = run_request(state.clone(), abandon);
     assert!(abandoned.ok, "abandon failed: {}", abandoned.error);
+    assert!(
+        abandoned.session_export_abandoned,
+        "an abandon that closed the open window must say so (the Go side logs Info only then)"
+    );
 
     let again = run_request(state.clone(), page1_request());
     assert!(
@@ -6683,17 +6687,45 @@ fn abandon_owner_rg_export_closes_the_window_over_the_wire_18752() {
         client_window: 0x5eed_18752,
         ..SessionExportRequest::default()
     });
-    let closed = run_request(state.clone(), by_client);
+    let closed = run_request(state.clone(), by_client.clone());
     assert!(
         closed.ok,
         "abandon by client window failed: {}",
         closed.error
+    );
+    assert!(
+        closed.session_export_abandoned,
+        "a client-window abandon that closed the window must say so"
     );
     let after = run_request(state.clone(), page1_request());
     assert!(
         after.ok,
         "the fresh kick after a client-window abandon must proceed: {}",
         after.error
+    );
+
+    // A late duplicate names a window that is gone: it succeeds, closes
+    // nothing, and says so — routine, so the Go side keeps it at Debug.
+    let duplicate = run_request(state.clone(), by_client);
+    assert!(
+        duplicate.ok && !duplicate.session_export_abandoned,
+        "a duplicate abandon must succeed without claiming a close: ok={} abandoned={} err={}",
+        duplicate.ok,
+        duplicate.session_export_abandoned,
+        duplicate.error
+    );
+
+    // The Go side reads this exact key (ControlResponse.SessionExportAbandoned,
+    // json "session_export_abandoned"), and false is omitted.
+    let wire = serde_json::to_value(&closed).expect("serialize response");
+    assert_eq!(
+        wire["session_export_abandoned"],
+        serde_json::Value::Bool(true)
+    );
+    let wire = serde_json::to_value(&duplicate).expect("serialize response");
+    assert!(
+        wire.get("session_export_abandoned").is_none(),
+        "a false abandon answer must be omitted from the wire: {wire}"
     );
 }
 

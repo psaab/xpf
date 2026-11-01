@@ -1092,6 +1092,17 @@ pub(crate) struct ControlResponse {
     /// the helper still holds entries from the same tokenized window.
     #[serde(rename = "session_export_more", default)]
     pub session_export_more: bool,
+    /// #18752: `abandon_owner_rg_export` answer — `true` only when the named
+    /// window was still open and is now closed. `false` means nothing
+    /// matched (the window had already closed, belonged to another client,
+    /// or another helper incarnation), which is routine on every re-drive
+    /// after a page-1 BUSY.
+    #[serde(
+        rename = "session_export_abandoned",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub session_export_abandoned: bool,
     /// #9856: terminal completeness metadata for the active export window.
     /// These are emitted on every control response; non-export verbs carry
     /// zero values.

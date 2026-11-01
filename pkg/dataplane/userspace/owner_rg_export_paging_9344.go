@@ -327,7 +327,7 @@ func (m *Manager) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExpo
 // stays until the helper's idle expiry, which is the pre-#18752 behaviour.
 // Called with ownerRGExportLease held and m.mu NOT held.
 func (m *Manager) abandonOwnerRGExportWindow(controlSocket string, clientWindow, incarnation, sequence uint64, cause error) {
-	_, err := m.requestDetailedAtSocket(ControlRequest{
+	resp, err := m.requestDetailedAtSocket(ControlRequest{
 		Type:           "abandon_owner_rg_export",
 		SuppressStatus: true,
 		SessionExport: &SessionExportRequest{
@@ -338,11 +338,36 @@ func (m *Manager) abandonOwnerRGExportWindow(controlSocket string, clientWindow,
 		},
 	}, controlSocket)
 	if err != nil {
+		if isUnknownVerbError(err) {
+			// A helper without the verb (older build). Say so once per helper
+			// generation, then quietly: every abort would otherwise repeat it,
+			// and the idle expiry still closes the window.
+			m.mu.Lock()
+			first := !m.abandonUnsupportedWarned || m.abandonUnsupportedGen != m.procGen
+			m.abandonUnsupportedWarned, m.abandonUnsupportedGen = true, m.procGen
+			m.mu.Unlock()
+			if first {
+				slog.Warn("userspace: helper does not support abandon_owner_rg_export; aborted owner-RG export windows stay open until the helper's 60 s idle expiry (#18752)",
+					"client_window", clientWindow, "sequence", sequence, "cause", cause)
+			} else {
+				slog.Debug("userspace: helper does not support abandon_owner_rg_export (#18752)",
+					"client_window", clientWindow, "sequence", sequence)
+			}
+			return
+		}
 		slog.Warn("userspace: could not abandon the aborted owner-RG export window; the helper keeps it until its idle expiry (#18752)",
 			"client_window", clientWindow, "sequence", sequence, "cause", cause, "err", err)
 		return
 	}
-	slog.Info("userspace: abandoned aborted owner-RG export window (#18752)",
+	if resp.SessionExportAbandoned {
+		slog.Info("userspace: abandoned aborted owner-RG export window (#18752)",
+			"client_window", clientWindow, "sequence", sequence, "cause", cause)
+		return
+	}
+	// Nothing matched: the window had already closed (a helper-side error
+	// path, or page 1 was refused BUSY and never opened ours). Routine on
+	// every re-drive after a BUSY, so not at Info.
+	slog.Debug("userspace: owner-RG export abandon matched no open window (#18752)",
 		"client_window", clientWindow, "sequence", sequence, "cause", cause)
 }
 
