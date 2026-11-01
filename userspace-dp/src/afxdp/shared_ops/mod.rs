@@ -16,6 +16,8 @@ mod lookup;
 mod reverse_synth;
 mod store;
 #[cfg(test)]
+pub(crate) mod stage_counts_18655_tests;
+#[cfg(test)]
 pub(crate) mod wire_lock_order_18658_tests;
 pub(super) use counters::*;
 pub(super) use lookup::*;

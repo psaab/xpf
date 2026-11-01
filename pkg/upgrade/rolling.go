@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/psaab/xpf/pkg/cluster"
 )
 
 // targetWireVerdict judges a TARGET binary's protocol constants (from its
@@ -179,15 +182,74 @@ type RollingCluster interface {
 	LocalRejoinComplete() (bool, error)
 }
 
+// PeerBulkPrimeRetryWindow is when the session-sync bulk-prime retry loop
+// (startSessionSyncPrimeRetry, pkg/daemon/daemon_ha_sync.go) makes its last
+// attempt: after 10s, 20s, then 30s four more times, so at +150s. A test in
+// pkg/daemon pins this mirror against the daemon's schedule.
+//
+// The loop re-pushes a node's OUTBOUND bulk until its peer acks it. The node
+// being rolled is primed by the PEER's bulk, so the schedule that bounds this
+// wait is the peer's. In a forward roll that is the OLD binary's schedule; in a
+// rollback it is the newer one's.
+const PeerBulkPrimeRetryWindow = 150 * time.Second
+
+// rejoinTransferGrace is the transfer-and-ack time allowed for the last bulk
+// after it is re-driven: a few hundred sessions take a few seconds on the lab
+// clusters (#18415's timelines).
+const rejoinTransferGrace = 5 * time.Second
+
+// DefaultRejoinDeadline bounds each post-cut wait (session-sync re-establish,
+// then the held-secondary rejoin including the inbound bulk prime) when the
+// operator does not override it. It is a conservative margin, not the latest
+// possible prime: the peer's retry loop ends at +PeerBulkPrimeRetryWindow
+// (150s), although its last real send can be earlier, because a send is
+// deferred while an ack has been pending under cluster.BulkAckPendingRetryAfter
+// (35s). The sweep also keeps re-driving an owed cold prime after the loop
+// whenever the pending ack is that old, so there is no single "last" re-push.
+// The default allows the loop's end, one more re-drive (35s) and
+// rejoinTransferGrace (5s) for that bulk's transfer and ack. Total: 190s.
+//
+// The pre-#18415 60s default aborted rolls whose prime completed a few seconds
+// later. That observed cause, the first inbound bulk being discarded on a
+// zone-map generation move, was removed by #18547 (under #18374), so a healthy
+// roll primes on the first bulk. This default is margin for a lost ack or a
+// reconnect, and it is still a hard, fail-closed bound.
+const DefaultRejoinDeadline = PeerBulkPrimeRetryWindow + cluster.BulkAckPendingRetryAfter + rejoinTransferGrace
+
+// MinRejoinDeadline is the smallest --rejoin-deadline the CLI accepts. A
+// smaller bound cannot cover even the daemon restart plus the first
+// bulk-prime retry (+10s on the peer), so it would make the roll fail AFTER
+// the irreversible cut and leave the node held secondary.
+const MinRejoinDeadline = 30 * time.Second
+
+// DefaultRejoinProgressInterval is how often the post-cut waits log a progress
+// line. Each wait can run for RejoinDeadline, and a signal is deferred until
+// the run finishes, so without these lines the CLI is silent for up to
+// 2 x RejoinDeadline.
+const DefaultRejoinProgressInterval = 15 * time.Second
+
+// newRollingCluster builds the cluster-control surface for RunRolling and
+// RunRollingRollback. It is a package var so tests can drive those real entry
+// points (and the Config -> RollingConfig threading they own) against a fake
+// cluster.
+var newRollingCluster = NewCLICluster
+
 // RollingConfig tunes the rolling driver timing.
 type RollingConfig struct {
 	// DrainDeadline bounds the wait for the strong drain predicate.
 	DrainDeadline time.Duration
 	// RejoinDeadline bounds the wait for session-sync to re-establish
-	// after the cut.
+	// after the cut. Zero selects DefaultRejoinDeadline; an explicit
+	// value (including a short test override) is honored exactly.
 	RejoinDeadline time.Duration
 	// PollInterval is the predicate poll cadence.
 	PollInterval time.Duration
+	// ProgressInterval is the cadence of the post-cut progress lines. Zero
+	// selects DefaultRejoinProgressInterval.
+	ProgressInterval time.Duration
+	// progress, when set, reports waitPredicate's state at ProgressInterval.
+	// Only the post-cut session-sync wait sets it.
+	progress *waitProgress
 	// SignalGuard is the #16796 interrupt capture forwarded to the
 	// inner cut/rollback (may be nil). Pre-STOP it aborts (the rolling
 	// driver then fails back); at/after STOP it defers to completion.
@@ -199,11 +261,82 @@ func (c *RollingConfig) withDefaults() {
 		c.DrainDeadline = 30 * time.Second
 	}
 	if c.RejoinDeadline == 0 {
-		c.RejoinDeadline = 60 * time.Second
+		c.RejoinDeadline = DefaultRejoinDeadline
 	}
 	if c.PollInterval == 0 {
 		c.PollInterval = 500 * time.Millisecond
 	}
+	if c.ProgressInterval == 0 {
+		c.ProgressInterval = DefaultRejoinProgressInterval
+	}
+}
+
+// checkRejoinDeadline refuses a negative RejoinDeadline before anything is
+// demoted. The CLI already rejects one (and anything under MinRejoinDeadline)
+// at parse time. This guards a programmatic caller, for which a negative bound
+// would mean an immediate timeout after the cut.
+func (c RollingConfig) checkRejoinDeadline(what string) error {
+	if c.RejoinDeadline < 0 {
+		return fmt.Errorf("%s: rejoin deadline %s is negative; refusing before any drain", what, c.RejoinDeadline)
+	}
+	return nil
+}
+
+// waitProgress emits the operator progress line for one post-cut wait. It is
+// polled once per predicate iteration (at PollInterval, 500ms by default) and
+// prints at most once per interval, so it adds no work to a hot loop.
+type waitProgress struct {
+	logf      func(format string, args ...any)
+	phase     string
+	predicate string // waitPredicate's state label, e.g. "sync-established"
+	deadline  time.Duration
+	every     time.Duration
+	start     time.Time
+	next      time.Time
+	lines     int
+}
+
+func newWaitProgress(logf func(format string, args ...any), phase, predicate string, deadline, every time.Duration) *waitProgress {
+	if logf == nil || every <= 0 {
+		return nil
+	}
+	now := time.Now()
+	return &waitProgress{logf: logf, phase: phase, predicate: predicate, deadline: deadline,
+		every: every, start: now, next: now.Add(every)}
+}
+
+// observePredicate is observe for a single-predicate waitPredicate loop.
+func (p *waitProgress) observePredicate(ok bool, lastErr error) {
+	if p == nil {
+		return
+	}
+	p.observe(fmt.Sprintf("%s=%v", p.predicate, ok), lastErr)
+}
+
+// observe logs the current state when an interval has passed since the wait
+// started or since the last line. The first line also says why Ctrl-C does
+// nothing: after STOP the signal guard defers it until the run finishes.
+func (p *waitProgress) observe(state string, lastErr error) {
+	if p == nil {
+		return
+	}
+	now := time.Now()
+	if now.Before(p.next) {
+		return
+	}
+	p.next = now.Add(p.every)
+	p.lines++
+	errText := "none"
+	if lastErr != nil {
+		// errors.Join separates with newlines; keep the progress line one line.
+		errText = strings.ReplaceAll(lastErr.Error(), "\n", "; ")
+	}
+	note := ""
+	if p.lines == 1 {
+		note = "; Ctrl-C is deferred until the run finishes"
+	}
+	p.logf("rolling: still waiting: %s: %s elapsed of %s deadline (%s; last error seen: %s)%s",
+		p.phase, now.Sub(p.start).Round(time.Second), p.deadline, state, errText, note)
 }
 
 // RunRolling cuts over the LOCAL clustered node with a controlled drain so
@@ -241,12 +374,12 @@ func RunRolling(r *Runner, cfg Config) error {
 	}
 	defer func() { _ = h.Release() }()
 
-	cl, err := NewCLICluster(cfg.Unit)
+	cl, err := newRollingCluster(cfg.Unit)
 	if err != nil {
 		return fmt.Errorf("upgrade --rolling: %w", err)
 	}
 	return RunWithSignalGuard(r.logf, func(g *SignalGuard) error {
-		return runRollingWith(r, cl, RollingConfig{SignalGuard: g})
+		return runRollingWith(r, cl, RollingConfig{RejoinDeadline: cfg.RejoinDeadline, SignalGuard: g})
 	})
 }
 
@@ -260,12 +393,12 @@ func RunRollingRollback(r *Runner, cfg Config, target string) error {
 	}
 	defer func() { _ = h.Release() }()
 
-	cl, err := NewCLICluster(cfg.Unit)
+	cl, err := newRollingCluster(cfg.Unit)
 	if err != nil {
 		return fmt.Errorf("upgrade --rollback --rolling: %w", err)
 	}
 	return RunWithSignalGuard(r.logf, func(g *SignalGuard) error {
-		return runRollingRollbackWith(r, cl, RollingConfig{SignalGuard: g}, target)
+		return runRollingRollbackWith(r, cl, RollingConfig{RejoinDeadline: cfg.RejoinDeadline, SignalGuard: g}, target)
 	})
 }
 
@@ -276,6 +409,9 @@ func RunRollingRollback(r *Runner, cfg Config, target string) error {
 func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, target string) error {
 	r.resetCommittedCut()
 	rc.withDefaults()
+	if err := rc.checkRejoinDeadline("rolling rollback"); err != nil {
+		return err
+	}
 
 	// The pre-demote refusal gates run here, before ForceSecondary: the
 	// rollback plan gate plus the peer/sync/compat/readiness gates below.
@@ -374,11 +510,13 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 	if err := waitPredicate(RollingConfig{
 		DrainDeadline: rc.RejoinDeadline,
 		PollInterval:  rc.PollInterval,
+		progress: newWaitProgress(r.logf, "rolled-back node re-establishing session sync",
+			"sync-established", rc.RejoinDeadline, rc.ProgressInterval),
 	}, true, cl.SyncEstablished); err != nil {
 		return fmt.Errorf("rolling rollback: rolled-back node did not re-establish session sync within %s: %w", rc.RejoinDeadline, err)
 	}
 	r.logf("rolling: rolled-back node re-synced")
-	if err := RejoinAndConfirm(cl, rc.RejoinDeadline); err != nil {
+	if err := rejoinAndConfirm(cl, rc.RejoinDeadline, rc.PollInterval, r.logf, rc.ProgressInterval); err != nil {
 		return fmt.Errorf("rolling rollback: local node did not rejoin election after rollback within %s: %w", rc.RejoinDeadline, err)
 	}
 	r.logf("rolling: local node rejoined election, confirmed for every configured RG; rollback complete for this node")
@@ -439,6 +577,9 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 	}()
 	rc.withDefaults()
 	logf := r.logf
+	if err := rc.checkRejoinDeadline("rolling"); err != nil {
+		return err
+	}
 
 	// 1. Preconditions. Any failure aborts WITHOUT touching the dataplane.
 	alive, err := cl.PeerAlive()
@@ -613,10 +754,12 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 	if err := waitPredicate(RollingConfig{
 		DrainDeadline: rc.RejoinDeadline,
 		PollInterval:  rc.PollInterval,
+		progress: newWaitProgress(logf, "upgraded node re-establishing session sync",
+			"sync-established", rc.RejoinDeadline, rc.ProgressInterval),
 	}, true, cl.SyncEstablished); err != nil {
 		return fmt.Errorf("rolling: upgraded node did not re-establish session sync "+
-			"within %s — leaving it secondary; operator should verify before "+
-			"failing back: %w", rc.RejoinDeadline, err)
+			"within %s — leaving it secondary; operator should verify, then recover "+
+			"with `xpfd upgrade kernel rejoin` once it is primed: %w", rc.RejoinDeadline, err)
 	}
 	logf("rolling: upgraded node re-synced")
 
@@ -634,20 +777,21 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 	//    whose ForceSecondary then leaves that RG with NO PRIMARY ON EITHER
 	//    NODE until the peer's DrainDeadline expires.
 	//
-	//    RejoinAndConfirm is the #5138 readback, and it was already declared on
-	//    the RollingCluster interface right here in this file — it was simply
-	//    never wired into this, its other caller. Reusing it (rather than
-	//    open-coding a poll) also keeps the binary rolling cut and the LANE-1
-	//    kernel roll on ONE definition of "rejoined", which is the property the
-	//    external driver's never-both-down gate depends on.
+	//    The shared rejoinAndConfirm state machine supplies the #5138
+	//    readback; the exported RejoinAndConfirm used by the LANE-1 kernel
+	//    roll wraps the same core with its drain polling cadence. This path
+	//    supplies RollingConfig.PollInterval, keeping both rolling waits
+	//    on one definition of "rejoined", which the external driver's
+	//    never-both-down gate depends on.
 	//
 	//    The forward-verify is the natural post-promotion check the external
 	//    driver runs (controlled promotion, never while passive).
-	if err := RejoinAndConfirm(cl, rc.RejoinDeadline); err != nil {
+	if err := rejoinAndConfirm(cl, rc.RejoinDeadline, rc.PollInterval, logf, rc.ProgressInterval); err != nil {
 		return fmt.Errorf("rolling: local node did not rejoin election after the cut "+
 			"within %s — leaving it secondary; the driver MUST NOT advance to the peer "+
 			"(draining it would leave a redundancy group with no primary on either "+
-			"node): %w", rc.RejoinDeadline, err)
+			"node); recover with `xpfd upgrade kernel rejoin` once it is primed: %w",
+			rc.RejoinDeadline, err)
 	}
 	rejoinConfirmed = true
 	logf("rolling: local node rejoined election, confirmed for every configured RG; " +
@@ -686,6 +830,7 @@ func waitPredicate(rc RollingConfig, tolerateTransientErr bool, pred func() (boo
 			// transient that has since cleared.
 			lastErr = nil
 		}
+		rc.progress.observePredicate(ok, lastErr)
 		if time.Now().After(end) {
 			if lastErr != nil {
 				return fmt.Errorf("predicate not satisfied within %s (last error: %w)", rc.DrainDeadline, lastErr)

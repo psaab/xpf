@@ -129,6 +129,236 @@ pub(super) fn run_pending_neigh_timer(
     }
     true
 }
+/// #18655: order-preserving membership set for the ct-slice's
+/// `(key, nat)` pair lists. It replaces `Vec::contains` dedup, which was
+/// O(n^2) per slice. `NatDecision` has no `Hash`, so the set is keyed by
+/// `SessionKey`, with the (in practice single) NAT decisions seen for that
+/// key kept beside it. Membership is full `(key, nat)` pair equality,
+/// exactly what `Vec::contains` tested.
+pub(super) struct CtSlicePairSet {
+    seen: crate::afxdp::FastMap<SessionKey, Vec<crate::nat::NatDecision>>,
+}
+
+impl CtSlicePairSet {
+    /// A set holding every pair in `seed`, matching a dedup target that
+    /// starts out as a clone of `seed`.
+    pub(super) fn seeded(seed: &[(SessionKey, crate::nat::NatDecision)]) -> Self {
+        let mut set = Self {
+            seen: crate::afxdp::FastMap::default(),
+        };
+        for pair in seed {
+            set.insert(pair);
+        }
+        set
+    }
+
+    /// Record `pair`. Returns true when it was not already present, i.e.
+    /// when the former `!vec.contains(pair)` would have pushed it.
+    pub(super) fn insert(&mut self, pair: &(SessionKey, crate::nat::NatDecision)) -> bool {
+        let nats = self.seen.entry(pair.0.clone()).or_default();
+        if nats.contains(&pair.1) {
+            return false;
+        }
+        nats.push(pair.1);
+        true
+    }
+}
+
+/// #16223/#16217: the shared-evidence leg of the ct-slice. It advances
+/// the shared synced entries for this worker's completed pairs to the
+/// Established wire, stamps the shared counters, and queues the HA
+/// stage/count Updates. Expiry retention and replica completion on
+/// sibling workers consult that wire as node-level proof. Without this
+/// maintenance it only ever carried the install-time Opening/Pending
+/// state, so replicas reaped at 20 s despite a promoted serving pair.
+///
+/// #18655: this is a WHOLE-TABLE walk, and the table is not small.
+/// a936a6f802 assumed per-worker tables are small next to the
+/// 2048-slot conntrack budget, but `replicate_session_upsert` copies
+/// every session into every worker's table (`WorkerLocalImport`). So
+/// `n`, the rows walked here, is the node's whole session population,
+/// and `N`, the shared rows, is about 2n.
+///
+/// The leg therefore:
+/// - runs ONCE per conntrack-refresh cycle, on the cycle's first slice
+///   (see `run_ct_slice`), not once per slice. A cycle has
+///   ceil(slab / 2048) slices, so per-slice runs made the leg
+///   O(n^2 / 2048) per cycle.
+/// - has a latency bound, replacing #16223's "within one GC interval". A
+///   pair that completes just after a run is advanced at the next cycle
+///   start, at most
+///   max(CT_REFRESH_WINDOW_NS, ceil(slab / 2048) * CT_SLICE_INTERVAL_NS)
+///   later: 10 s at the default cap; HA imports can stretch it to about
+///   13 s. (`upsert_synced_with_origin` has no per-table cap, so with a
+///   correct peer a table peaks near 2x the cap when both nodes'
+///   populations meet: 128 slices. The only hard import bound, #5674's
+///   shared-map ceiling, is looser; see #18687.) That is inside the 20 s
+///   TCP opening window that replicas are reaped on, for a pair that
+///   completes early enough in its replica's window; one that completes
+///   late (a SYN retried at 15 s, say) can still be reaped first. A const
+///   assert in `slice_pacing.rs` fails the build if the default cap or
+///   the windows would break this bound.
+/// - stays O(n + N) per run. It takes the global shared-map mutexes for
+///   batched restamps, `CtSlicePairSet` dedup and one
+///   `shared_rows_stage_and_counts` pass for the whole emit set, plus one
+///   short acquisition of both maps per not-yet-complete forward row
+///   (`node_served_forward_slice` -> `shared_completion_evidence`). So
+///   acquisitions are O(n) per run; each hold is short, and the leg runs
+///   once per refresh cycle (#18662 tracks bounding it).
+///
+/// The pre-fix per-key whole-map scan was O(n * N) under both mutexes,
+/// on every slice. At 4000 sessions it held them ~100% of the time and
+/// stalled every worker for seconds.
+#[inline(never)]
+fn run_shared_evidence_leg(
+    sessions: &mut crate::session::SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    established_cursor: &mut usize,
+) {
+    let mut established: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    *established_cursor =
+        sessions.established_forward_slice(*established_cursor, usize::MAX, &mut established);
+    // #16217/#16223: assemble completion evidence NODE-WIDE (the
+    // shared maps are visible here): (a) any worker's local row
+    // Established, (b) reverse traffic for the canonical key in
+    // the shared synced/replica maps, or (c) #16223
+    // cache_hit_handshake_progress completion — folded via the
+    // counter stamps in `node_served_evidence`. Shared
+    // Established is OUTPUT only (the restamp below), never an
+    // input, so there is no chicken-and-egg.
+    let shared_evidence = |key: &SessionKey| {
+        crate::afxdp::shared_ops::shared_completion_evidence(
+            shared_sessions,
+            shared_forward_wire_sessions,
+            key,
+        )
+    };
+    // #16217 (fw1 rev=0 leg): stamp EVERY forward pair this
+    // worker's table holds -- any origin incl. `SyncImport`
+    // replicas, any stage -- with its OWN live counters BEFORE
+    // the evidence read below. Pre-fix only `established` pairs
+    // were stamped, and `established_forward_slice` requires
+    // `established && !handshake_pending && rev>0`, so a pending
+    // `SyncImport` replica on fw1 that DOES serve reverse traffic
+    // (its local counters move where packets land -- fabric
+    // pre-FO / post-FO replies) never stamped: its shared row
+    // kept the import-time rev=0 forever and no evidence arm
+    // could ever fire for it. `restamp_*` take the max, so a
+    // zero-count replica never regresses a served count.
+    // #18655: one batch, so each map's mutex is taken once per
+    // slice instead of once (or twice) per counted pair.
+    let mut counted: Vec<(SessionKey, crate::nat::NatDecision, u64, u64)> = Vec::new();
+    for (key, nat) in sessions.ct_slice_forward_pairs() {
+        let fwd = sessions.fwd_packets_for(&key);
+        let rev = sessions.rev_packets_for(&key);
+        if fwd > 0 || rev > 0 {
+            counted.push((key, nat, fwd, rev));
+        }
+    }
+    crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+        shared_sessions,
+        shared_forward_wire_sessions,
+        &counted,
+    );
+    let mut node_served: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    sessions.node_served_forward_slice(0, usize::MAX, &shared_evidence, &mut node_served);
+    // `collected` = strict-established pairs PLUS node-served
+    // (evidence-collected) pairs: the stage/count/alias restamps
+    // below target exactly this union.
+    // #18655: order-preserving dedup in O(1) per pair. The former
+    // `Vec::contains` loop was O(n^2) on the worker thread, measured
+    // at 3.5-7.2 ms per slice at ~4k forward rows.
+    let mut collected = established.clone();
+    let mut collected_seen = CtSlicePairSet::seeded(&collected);
+    for pair in node_served {
+        if collected_seen.insert(&pair) {
+            collected.push(pair);
+        }
+    }
+    let canonical_transitioned =
+        crate::afxdp::shared_ops::restamp_shared_handshakes_established(
+            shared_sessions,
+            &collected,
+        );
+    // #16217: the collected pairs' ACTUAL fwd+rev counts (folded
+    // by their serving workers; the promotion above only moved
+    // the stage) must ride onto the shared rows, or the peer's
+    // scoped adoption arm keeps reading the import-time counts.
+    // (Pairs only in `ct_slice_forward_pairs` were already
+    // stamped above; re-stamping the collected subset is a
+    // max-idempotent no-cost overlap.)
+    counted.clear();
+    for (key, nat) in &collected {
+        let fwd = sessions.fwd_packets_for(key);
+        let rev = sessions.rev_packets_for(key);
+        if fwd > 0 || rev > 0 {
+            counted.push((key.clone(), *nat, fwd, rev));
+        }
+    }
+    crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+        shared_sessions,
+        shared_forward_wire_sessions,
+        &counted,
+    );
+    // #16217: advance the forward-wire KEY ALIAS slot beside the
+    // canonical restamp so a completed fabric pair reads
+    // Established under the NAT'd tuple too.
+    let alias_transitioned = crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
+        shared_sessions,
+        shared_forward_wire_sessions,
+        &collected,
+    );
+    // #16217 (ct-slice HA emit): the restamps above advanced
+    // THIS node's shared rows, but no HA delta carries that
+    // evidence — emission is transition-only and fw0's split
+    // forward half never locally transitions, so fw1's imported
+    // rows kept the Open-time stage/counts forever (FZDiag20/23:
+    // fw0 shared rev=103505, fw1 rev=0, no delta in 60 s). Queue
+    // a stage/count Update for each collected forward row whose
+    // shared stage transitioned to Established, or whose counts
+    // first show rev>0, reusing the shared-evidence Update
+    // vehicle. Rate-limited per row inside
+    // `emit_ct_slice_state_update` (once per stage transition
+    // per node; the restamp's transition list is the detector,
+    // and already-at-wire=4 rows are not re-detected, so
+    // steady-state slices stay silent). Counts are read AFTER
+    // the restamps so the Update carries wire=4 + rev counts;
+    // the alias-transitioned rows are already canonical-
+    // transitioned or alias-only, so the union is drained once.
+    {
+        let mut emit_keys: Vec<(SessionKey, crate::nat::NatDecision)> =
+            canonical_transitioned.clone();
+        let mut emit_seen = CtSlicePairSet::seeded(&emit_keys);
+        for pair in &alias_transitioned {
+            if emit_seen.insert(pair) {
+                emit_keys.push(pair.clone());
+            }
+        }
+        // Rows that did not transition stage may still have
+        // crossed rev>0 for the first time on the count stamps
+        // above; the per-row mark inside the emit is the gate,
+        // so offer every collected row and let it decide.
+        for pair in &collected {
+            if emit_seen.insert(pair) {
+                emit_keys.push(pair.clone());
+            }
+        }
+        // #18655: ONE pass over the shared maps for the whole batch
+        // (the former per-key helper scanned both whole maps under
+        // both mutexes for EVERY key). Values are read after the
+        // restamps above, exactly as before.
+        let rows = crate::afxdp::shared_ops::shared_rows_stage_and_counts(
+            shared_sessions,
+            shared_forward_wire_sessions,
+            &emit_keys,
+        );
+        for ((key, _nat), (stage, fwd, rev)) in emit_keys.iter().zip(rows) {
+            sessions.emit_ct_slice_state_update(key, stage, rev, fwd);
+        }
+    }
+}
+
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 #[inline(never)]
 pub(super) fn run_ct_slice(
@@ -173,7 +403,8 @@ pub(super) fn run_ct_slice(
         *last_ct_slice_ns = loop_now_ns;
         // Stamp the cycle start on the FIRST slice of a cycle (cursor at the
         // top) so successive cycles are paced to the freshness window.
-        if *ct_refresh_cursor == 0 {
+        let shared_evidence_due = *ct_refresh_cursor == 0;
+        if shared_evidence_due {
             *ct_cycle_start_ns = loop_now_ns;
         }
         let ct_outcome = refresh_bpf_conntrack_last_seen(
@@ -196,150 +427,18 @@ pub(super) fn run_ct_slice(
         // slice".
         *session_volume_high_water =
             (*session_volume_high_water).max(ct_outcome.max_session_volume);
-        // #16223: on the same cadence, advance the shared synced
-        // entries for this worker's completed pairs to the
-        // Established wire. The expiry retention and replica
-        // completion on sibling workers consult that wire as
-        // node-level proof; without this maintenance it only ever
-        // carried the install-time Opening/Pending state, so replicas
-        // reaped at 20 s despite a promoted serving pair. Full-table
-        // walk each slice: per-worker tables are small next to the
-        // 2048-slot conntrack budget above, and a completed pair must
-        // advance within one GC interval of its completion, not after
-        // a multi-second cursor rotation.
-        let mut established: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
-        *established_cursor =
-            sessions.established_forward_slice(*established_cursor, usize::MAX, &mut established);
-        // #16217/#16223: assemble completion evidence NODE-WIDE (the
-        // shared maps are visible here): (a) any worker's local row
-        // Established, (b) reverse traffic for the canonical key in
-        // the shared synced/replica maps, or (c) #16223
-        // cache_hit_handshake_progress completion — folded via the
-        // counter stamps in `node_served_evidence`. Shared
-        // Established is OUTPUT only (the restamp below), never an
-        // input, so there is no chicken-and-egg.
-        let shared_evidence = |key: &SessionKey| {
-            crate::afxdp::shared_ops::shared_completion_evidence(
+        // #18655: the shared-evidence leg walks the whole table, so it
+        // runs once per refresh cycle (its first slice). Small tables
+        // finish a cycle in one slice, so their cadence (once per
+        // CT_REFRESH_WINDOW_NS) is unchanged. Large tables no longer
+        // repeat the walk on each of their ceil(slab / 2048) slices.
+        if shared_evidence_due {
+            run_shared_evidence_leg(
+                sessions,
                 shared_sessions,
                 shared_forward_wire_sessions,
-                key,
-            )
-        };
-        // #16217 (fw1 rev=0 leg): stamp EVERY forward pair this
-        // worker's table holds -- any origin incl. `SyncImport`
-        // replicas, any stage -- with its OWN live counters BEFORE
-        // the evidence read below. Pre-fix only `established` pairs
-        // were stamped, and `established_forward_slice` requires
-        // `established && !handshake_pending && rev>0`, so a pending
-        // `SyncImport` replica on fw1 that DOES serve reverse traffic
-        // (its local counters move where packets land -- fabric
-        // pre-FO / post-FO replies) never stamped: its shared row
-        // kept the import-time rev=0 forever and no evidence arm
-        // could ever fire for it. `restamp_*` take the max, so a
-        // zero-count replica never regresses a served count.
-        for (key, nat) in sessions.ct_slice_forward_pairs() {
-            let fwd = sessions.fwd_packets_for(&key);
-            let rev = sessions.rev_packets_for(&key);
-            if fwd > 0 || rev > 0 {
-                crate::afxdp::shared_ops::restamp_shared_packet_counts(
-                    shared_sessions,
-                    shared_forward_wire_sessions,
-                    &key,
-                    nat,
-                    fwd,
-                    rev,
-                );
-            }
-        }
-        let mut node_served: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
-        sessions.node_served_forward_slice(0, usize::MAX, &shared_evidence, &mut node_served);
-        // `collected` = strict-established pairs PLUS node-served
-        // (evidence-collected) pairs: the stage/count/alias restamps
-        // below target exactly this union.
-        let mut collected = established.clone();
-        for pair in node_served {
-            if !collected.contains(&pair) {
-                collected.push(pair);
-            }
-        }
-        let canonical_transitioned =
-            crate::afxdp::shared_ops::restamp_shared_handshakes_established(
-                shared_sessions,
-                &collected,
+                established_cursor,
             );
-        // #16217: the collected pairs' ACTUAL fwd+rev counts (folded
-        // by their serving workers; the promotion above only moved
-        // the stage) must ride onto the shared rows, or the peer's
-        // scoped adoption arm keeps reading the import-time counts.
-        // (Pairs only in `ct_slice_forward_pairs` were already
-        // stamped above; re-stamping the collected subset is a
-        // max-idempotent no-cost overlap.)
-        for (key, nat) in &collected {
-            let fwd = sessions.fwd_packets_for(key);
-            let rev = sessions.rev_packets_for(key);
-            if fwd > 0 || rev > 0 {
-                crate::afxdp::shared_ops::restamp_shared_packet_counts(
-                    shared_sessions,
-                    shared_forward_wire_sessions,
-                    key,
-                    *nat,
-                    fwd,
-                    rev,
-                );
-            }
-        }
-        // #16217: advance the forward-wire KEY ALIAS slot beside the
-        // canonical restamp so a completed fabric pair reads
-        // Established under the NAT'd tuple too.
-        let alias_transitioned = crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
-            shared_sessions,
-            shared_forward_wire_sessions,
-            &collected,
-        );
-        // #16217 (ct-slice HA emit): the restamps above advanced
-        // THIS node's shared rows, but no HA delta carries that
-        // evidence — emission is transition-only and fw0's split
-        // forward half never locally transitions, so fw1's imported
-        // rows kept the Open-time stage/counts forever (FZDiag20/23:
-        // fw0 shared rev=103505, fw1 rev=0, no delta in 60 s). Queue
-        // a stage/count Update for each collected forward row whose
-        // shared stage transitioned to Established, or whose counts
-        // first show rev>0, reusing the shared-evidence Update
-        // vehicle. Rate-limited per row inside
-        // `emit_ct_slice_state_update` (once per stage transition
-        // per node; the restamp's transition list is the detector,
-        // and already-at-wire=4 rows are not re-detected, so
-        // steady-state slices stay silent). Counts are read AFTER
-        // the restamps so the Update carries wire=4 + rev counts;
-        // the alias-transitioned rows are already canonical-
-        // transitioned or alias-only, so the union is drained once.
-        {
-            let mut emit_keys: Vec<(SessionKey, crate::nat::NatDecision)> =
-                canonical_transitioned.clone();
-            for pair in &alias_transitioned {
-                if !emit_keys.contains(pair) {
-                    emit_keys.push(pair.clone());
-                }
-            }
-            // Rows that did not transition stage may still have
-            // crossed rev>0 for the first time on the count stamps
-            // above; the per-row mark inside the emit is the gate,
-            // so offer every collected row and let it decide.
-            for pair in &collected {
-                if !emit_keys.contains(pair) {
-                    emit_keys.push(pair.clone());
-                }
-            }
-            for (key, nat) in &emit_keys {
-                let (stage, fwd, rev) =
-                    crate::afxdp::shared_ops::shared_row_stage_and_counts(
-                        shared_sessions,
-                        shared_forward_wire_sessions,
-                        key,
-                        *nat,
-                    );
-                sessions.emit_ct_slice_state_update(key, stage, rev, fwd);
-            }
         }
     }
     // Check if fabric links were updated by the coordinator (e.g. after
@@ -367,3 +466,7 @@ pub(super) fn run_ct_slice(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "ct_slice_scan_18655_tests.rs"]
+mod ct_slice_scan_18655_tests;

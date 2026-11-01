@@ -344,6 +344,107 @@ capture reads them:
   lost after the true floor was seen;
 - the drain-plus-loss case is pinned as a PASS (the known limit above).
 
+### `make test-failover` RG1 Group 1: session-miss drops and a raw floor (#18670)
+
+RG1 Group 1 exists for one HA failure: an established flow whose session is
+missing after the RG1 failback. It is two judged checks over the failback
+window, both nodes summed. Each check is VOID on its own failure modes, and
+the group fails if either check fails.
+
+- **1a, session-miss drops.**
+  - The lab configs carry no `no-syn-check`. Under the SYN-first default,
+    an established TCP flow's packet that misses its session in transit is
+    dropped by the transit gate and counted as a screen drop
+    (`strict_syn_check_drops_new_flow_tunnel_with_payload`, recorded as
+    "strict-syn-check"). Closing (FIN/RST) misses and unknown-flags
+    fragments are counted the same way.
+  - The helper exposes those only in the aggregate `Screen drops`. 1a
+    judges its delta against `MAX_FAILOVER_SESSION_MISS_DROP_DELTA`
+    (default 4).
+  - `Screen drops` bounds `strict-syn-check` drops, not lost sessions as
+    such; other screen reasons add to it.
+  - Recorded windows read 0 on every node. 0 in 12 windows bounds the
+    per-window false-red rate only at about 22% (the exact binomial 95%
+    bound, 1 − 0.05^(1/12)), while a lost established flow drops on every
+    retransmitted packet; hence 4.
+- **1b, a coarse raw `Session misses` floor.**
+  - 1a is blind to a lost session whose miss resolves to LocalDelivery.
+  - The labs use catch-all `source-nat interface`. The WAN→LAN reply half
+    of a lost SNAT session is therefore addressed to the firewall's own
+    WAN address, and its miss resolves to LocalDelivery.
+  - LocalDelivery is exempt from the SYN-first gate, so the packet is
+    denied host-inbound (`host_inbound_denied_packets`) and never counted
+    as a screen drop. This is #18531's third mechanism, the one matrix row
+    H1 names.
+  - The miss counter runs before disposition, so 1b judges the raw delta
+    against `MAX_FAILOVER_RAW_SESSION_MISS_FLOOR` (default 256). Recorded
+    raw deltas are 18–61 on master and up to 71 on #18656.
+  - A flow that loses its reply path stalls within about one RTT: roughly
+    a window of ACK misses per stream, then one per RTO backoff. 1b
+    therefore detects a broad reply-half loss (most streams, the #18531
+    failback shape), with about 185 misses of headroom over the largest
+    recorded delta.
+  - A single-stream loss can stay under the floor. It is left to the
+    iperf3 stream-continuity cells.
+- **Why not misses net of creates.** A new flow is one miss and one or two
+  creates, depending on whether a local reverse companion is installed. The
+  #18676 review found that the create delta matched the RT_FLOW
+  `session_create` count on node1 in the recorded windows. Reverse repair, local delivery,
+  missing-neighbour seeding and hit-path materialization also create with
+  no miss. Misses minus creates is therefore only a lower bound on real
+  misses.
+  - Raw misses and creates per node are printed on a report-only line.
+- **Host-inbound denies, report-only.** test-failover also captures `show
+  security flow statistics` per node and phase, and prints the `Host-inbound
+  denies` delta as a report-only line (`ha_host_inbound_denies_report`).
+  - That value is xpfd's `GlobalCtrHostInboundDeny` mirror. It is
+    refreshed at xpfd's 1 s status poll, and `safeDelta` absorbs helper
+    resets (`pkg/dataplane/userspace/manager_counters.go`), so it trails
+    the helper by up to a second and does not rewind on a helper restart.
+  - The helper `PID:` line appended to the capture comes from the
+    data-plane capture taken just before it. The helper-PID guard it
+    feeds is therefore stricter than this counter needs, and it is not a
+    guard on xpfd.
+  - That is the direct counter for the LocalDelivery reply half. The WAN
+    segment carries foreign lab devices (the #18558 ARP conflicts), so
+    its noise needs a master population before it is judged (#18681).
+  - The judged check also needs an xpfd-side identity guard and must
+    allow for the poll lag.
+  - Until then the LocalDelivery reply half is covered only by the 1b
+    floor.
+- **Helper identity.** Every Group 1–4 delta (`ha_snapshot_counter_delta`)
+  is VOID when the two captures' `PID:` lines differ, or when only one has
+  one. A helper restart inside the window zeroes the counters, which then
+  regrow past the baseline as an ordinary-looking delta.
+- **Retired knob.** `MAX_FAILOVER_SESSION_MISS_DELTA` (the old raw budget
+  of 64) is refused at start.
+- **What it cannot see.** A lost UDP or ICMP session is recreated by its
+  next packet (one miss, one or two creates, no drop).
+  - Neither check reports it unless the misses reach the 1b floor.
+  - The stream cells (iperf3 per-stream continuity and zero intervals)
+    cover TCP only. A UDP/ICMP continuity observable is open (#18679).
+  - A moved session whose local row is lost but whose peer-synced copy
+    survives is rebuilt on the hit path. That is the designed recovery,
+    not a miss.
+- **Selftest.** `make test-ha-assurance-lib` has rows for:
+  - master-like and PR-like runs (both checks PASS; the old raw-64 cell
+    FAILs the PR-like files);
+  - established-flow drops (1a FAIL, the 1b floor PASS);
+  - drops on node0 only;
+  - the 1a boundary (3 and 4 PASS, 5 FAIL);
+  - a lost reply half (1a PASS, 1b FAIL at 2000);
+  - missing, malformed and rewound counters (VOID);
+  - a helper restart and a one-sided `PID:` line (VOID).
+
+  A mutant of the lib's own function text must flip each defence, and a
+  pin keeps `test-failover.sh` emitting both judged checks with their own
+  budgets.
+- **Not changed.** `scripts/userspace-ha-failover-validation.sh` has its
+  own per-cycle raw `MAX_FAILOVER_SESSION_MISS_DELTA` check. That script
+  is manual-only (`test/incus/HARNESSES.unreached`). It carries the same
+  new-flow bias and is left for its own follow-up (#18680) rather than
+  changed here unmeasured.
+
 ### `make test-failover` zero-interval cells: windows and definitions
 
 `scripts/iperf-json-metrics.py` scores the whole-run iperf3 stream. A
