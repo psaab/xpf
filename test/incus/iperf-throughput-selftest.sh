@@ -142,6 +142,31 @@ grep -q 'failback_at_seconds=$((SECONDS - iperf_start_seconds))' "$FAILOVER" \
 ! grep -q 'pass "iperf3 completed successfully (finished before' "$FAILOVER" \
 	|| bad "test-failover.sh accepts an iperf client that ended before failback"
 ok "test-failover wires crash and last-RG-moved timestamps and rejects early client completion"
+# #18692: the sub-second anchors. The two epochs bracket the sysrq exec (only
+# the integer anchor between the first and the exec), the failback epoch sits
+# beside the integer landing, the cells run under the COST policy, and the
+# oracle's COST and METRIC lines reach the summary and the ledger.
+epoch_line="$(grep -n '^failover_epoch=$(date +%s.%N)$' "$FAILOVER" | cut -d: -f1)"
+sysrq_line="$(grep -n "echo b > /proc/sysrq-trigger' || true; } 2>/dev/null$" "$FAILOVER" | head -1 | cut -d: -f1)"
+after_line="$(grep -n '^failover_epoch_after=$(date +%s.%N)$' "$FAILOVER" | cut -d: -f1)"
+[[ -n "$epoch_line" && -n "$sysrq_line" && -n "$after_line" ]] &&
+	(( sysrq_line - epoch_line == 2 && after_line - sysrq_line == 1 )) \
+	|| bad "test-failover.sh must bracket the sysrq exec with failover_epoch and failover_epoch_after (#18692)"
+grep -qF -- '--crash-epoch "$failover_epoch" --crash-epoch-after "$failover_epoch_after")' "$FAILOVER" \
+	|| bad "test-failover.sh does not pass the sub-second crash window to the stream oracle (#18692)"
+grep -qF -- 'oracle_anchor_args=(--straggler-cost)' "$FAILOVER" \
+	|| bad "test-failover.sh must run the stream cells under the #18692 COST policy"
+grep -qF 'COST\ *) cost "${oracle#COST }" ;;' "$FAILOVER" \
+	|| bad "test-failover.sh must score the oracle's COST lines as cost cells (#18692)"
+grep -qF -- '--resume-event-sec "$(ha_crash_resume_at "$LOCAL_IPERF_LOG")" \' "$FAILOVER" \
+	|| bad "test-failover.sh must hand the producer the crash cell's anchor as a resume window (#18692)"
+grep -qF -- 'oracle_anchor_args+=(--failback-epoch "$failback_epoch")' "$FAILOVER" \
+	|| bad "test-failover.sh does not pass the sub-second failback anchor to the stream oracle (#18692)"
+grep -qF 'failback_epoch=$(date +%s.%N) # #18692: sub-second twin of the next line' "$FAILOVER" \
+	|| bad "test-failover.sh must stamp failback_epoch beside failback_at_seconds (#18692)"
+grep -qF 'METRIC\ *) echo "HARNESS_METRIC: ${oracle#METRIC }" ;;' "$FAILOVER" \
+	|| bad "test-failover.sh must record the oracle's METRIC lines as HARNESS_METRIC (#18692)"
+ok "test-failover reads and passes the #18692 sub-second crash/failback anchors"
 # #12618: test-failover applies the same [T, T+3] outside-window budget.
 grep -q -- '--event-sec "$failover_at_seconds"' "$FAILOVER" \
 	|| bad "test-failover.sh does not pass its crash instant to the window-excluded producer"
@@ -582,6 +607,49 @@ assert m["stream_zero_intervals_total"] == 1, m
 assert m["stream_zero_intervals_outside_events_total"] == 0, m
 PY
 ok "producer exclusion is decided by the full-length interval bounds, not a shortened stream row"
+
+# #18692: a straggler that resumes at T+5 is the crash stream cell's COST, so
+# its zero seconds past [T, T+3] must not red the "outside" cell when the crash
+# is a --resume-event-sec; a stream that never resumes keeps them, and without
+# the flag the same bytes still count (the twin).
+straggler_fixture="${fixture_dir}/straggler.jsonl"
+dead_fixture="${fixture_dir}/straggler-dead.jsonl"
+python3 - "$straggler_fixture" "$dead_fixture" <<'PY'
+import json
+import pathlib
+import sys
+
+def write(path, resume_at):
+    events = []
+    for second in range(30):
+        streams = []
+        total = 0
+        for sid in range(1, 5):
+            bps = 0 if (sid == 4 and second >= 10 and (resume_at is None or second < resume_at)) else 6_000_000_000
+            total += bps
+            streams.append({"socket": sid, "start": second, "end": second + 1, "bits_per_second": bps})
+        events.append({"event": "interval", "data": {"sum": {"start": second, "end": second + 1, "bits_per_second": total}, "streams": streams}})
+    events.append({"event": "end", "data": {"sum_sent": {"bits_per_second": 18_000_000_000, "retransmits": 0}, "sum_received": {"bits_per_second": 18_000_000_000}}})
+    pathlib.Path(path).write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+
+write(sys.argv[1], 15)
+write(sys.argv[2], None)
+PY
+straggler_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$straggler_fixture" --event-sec 10 --resume-event-sec 10)
+straggler_twin=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$straggler_fixture" --event-sec 10)
+dead_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$dead_fixture" --event-sec 10 --resume-event-sec 10)
+python3 - "$straggler_out" "$straggler_twin" "$dead_out" <<'PY' || bad "#18692: a straggler resuming at T+5 must not red the outside cell; a dead stream and the flagless twin must"
+import json, sys
+straggler, twin, dead = (json.loads(arg) for arg in sys.argv[1:])
+assert straggler["stream_zero_intervals_total"] == 5, straggler
+assert straggler["stream_zero_intervals_outside_events_total"] == 0, straggler
+assert straggler["stream_zero_intervals_resume_excused_total"] == 2, straggler
+assert twin["stream_zero_intervals_outside_events_total"] == 2, twin
+assert twin["stream_zero_intervals_resume_excused_total"] == 0, twin
+assert dead["stream_zero_intervals_outside_events_total"] == 17, dead
+assert dead["stream_zero_intervals_resume_excused_total"] == 0, dead
+PY
+ok "#18692: a straggler resuming at T+5 is excused to the 10 s line; a dead stream and the flagless twin are not"
 
 # Completion requires an end event or evidence that the expected duration ran.
 incomplete_fixture="${fixture_dir}/incomplete.jsonl"

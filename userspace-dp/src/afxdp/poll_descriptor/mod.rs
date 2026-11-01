@@ -3611,6 +3611,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // sessions survive revalidation.
                                 policy_packet_icmp(packet_frame, meta),
                                 fabric_link_ingress,
+                                // #18691: decline a non-owner's
+                                // gateway-route fallback line.
+                                Some((worker_ctx.ha_state, now_secs)),
                             );
                         let owner_icmp_verdict =
                             if session_hit_revocation.is_none() && foreign_arrival_zone.is_none() {

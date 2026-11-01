@@ -14,6 +14,17 @@ use super::*;
 /// gateway/default-routed) is not peer-ownership and never
 /// converts. The session's stored owner stamp is deliberately NOT
 /// consulted: pre-fix rows carry the reply-egress row's RG there.
+///
+/// #18659: a local `MissingNeighbor` converts on the same terms as a
+/// `ForwardCandidate`. In both the local egress cannot reach a
+/// destination whose owner is the peer. MissingNeighbor only says the
+/// local next hop (the WAN gateway, on a node that has just taken the
+/// WAN RG) is not resolved yet. Without this, a row the activation
+/// refresh had already laundered onto that gateway kept answering
+/// MissingNeighbor, and its replies took the #1913 MissingNeighbor
+/// gate (wan->wan, default deny) until the neighbor generation moved.
+/// Both no-convert guards are unchanged: a locally active owner or an
+/// unknown owner keeps its local MissingNeighbor.
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn reverse_hit_departed_destination_redirect(
     forwarding: &ForwardingState,
@@ -28,7 +39,10 @@ pub(in crate::afxdp) fn reverse_hit_departed_destination_redirect(
 ) -> Option<ForwardingResolution> {
     if !is_reverse
         || fabric_link_ingress
-        || disposition != ForwardingDisposition::ForwardCandidate
+        || !matches!(
+            disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        )
     {
         return None;
     }
@@ -799,6 +813,9 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         // connected prefix) is not peer-ownership and never
         // converts. Anti-loop: a fabric-link arrival never
         // re-redirects. Non-reverse hits are bit-identical.
+        // #18659: a local MissingNeighbor (the unresolved WAN gateway
+        // a split FIB names for a peer-owned client) converts on the
+        // same terms; see the helper.
         if let Some(redirect) = reverse_hit_departed_destination_redirect(
             forwarding,
             ha_state,

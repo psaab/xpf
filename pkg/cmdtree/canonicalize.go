@@ -41,6 +41,16 @@ const (
 // lines the tree models loosely (dynamic values, AcceptsArgs tails).
 // CanonicalAmbiguous under a keyword-only node is reported with
 // ambiguous=true so callers can name the ambiguity.
+//
+// WORDS ARE COMMAND WORDS. The output pipe is not operational-tree
+// grammar (#9628), and this function does not strip it: a `|` passed in
+// is judged like any other word, so one directly under a keyword-only
+// node comes back as bad == "|". The remote dispatcher (cmd/cli
+// validateOperationalLine, #18664) depends on both halves of that. It
+// validates the words before the first bare `|`, then passes the words
+// up to and including that `|` to learn whether the pipe sits under a
+// keyword-only node, where only a handler that parses pipes may receive
+// it. TestValidateOperationalLinePipePosition18664 pins the contract.
 func ValidateOperationalLine(words []string) (prefix []string, bad string, ambiguous bool, ok bool) {
 	if len(words) == 0 {
 		return nil, "", false, false

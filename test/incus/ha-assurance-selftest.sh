@@ -1259,27 +1259,17 @@ PY
 assert_helper_value 13 ha_status_fabric_tx_packets "${FABRIC_INTERFACES}"
 assert_helper_status 2 ha_status_fabric_tx_packets "${TMP_DIR}/missing-fabric.txt"
 
-STANDBY_STATUS="${TMP_DIR}/standby-status.txt"
-cat >"${STANDBY_STATUS}" <<'EOF'
-Enabled: true
-Forwarding armed: true
-rg1 active=false
-Ready bindings: 2/8
-EOF
-assert_helper_status 0 ha_standby_status_verdict "${STANDBY_STATUS}" 1
-cat >"${STANDBY_STATUS}" <<'EOF'
-Enabled: true
-Forwarding armed: true
-rg1 active=true
-Ready bindings: 2/8
-EOF
-assert_helper_status 1 ha_standby_status_verdict "${STANDBY_STATUS}" 1
-cat >"${STANDBY_STATUS}" <<'EOF'
-Enabled: true
-rg1 active=false
-Ready bindings: 2/8
-EOF
-assert_helper_status 2 ha_standby_status_verdict "${STANDBY_STATUS}" 1
+# #18686: the standby parser is fed the production renderer's golden, not
+# hand-written lines. The fixtures this replaced put `rg1 active=false` on a
+# line of its own, which matched the parser and never the product: the
+# summary joins every group onto ONE `HA groups:` line. Against real
+# captures the verdict was therefore VOID on every run. The golden carries
+# `rg0 active=true` and `rg1 active=false` on that one line, so selecting
+# the RG out of the line is what these rows prove. The real-capture rows
+# are in the Group 7 block below.
+assert_helper_status 0 ha_standby_status_verdict "${STATISTICS_RENDERED}" 1
+assert_helper_status 1 ha_standby_status_verdict "${STATISTICS_RENDERED}" 0
+assert_contains "$(<"${ERR}")" 'rg0 is active' 'golden standby status selects rg0 out of the HA groups line'
 
 assert_helper_status 0 ha_ttl_output_verdict 1 'Time exceeded: Hop limit'
 assert_helper_status 1 ha_ttl_output_verdict 0 '64 bytes from 1.1.1.1: icmp_seq=1 ttl=64'
@@ -1834,6 +1824,352 @@ assert_helper_status 2 ha_pair_counter_budget_verdict 64 'Missing metric' manual
 assert_helper_status 2 ha_pair_counter_budget_verdict 64 'Session misses' manual-rg1-failback 1 phase-pre phase-post \
 	"$PAIR_PRE0" "$PAIR_PRE1" "$PAIR_POST0" "$OWNER1"
 
+printf 'Group 1a session-miss drops, 1b raw session-miss floor, helper-identity guard (#18670)\n'
+# Fixture rows are DELTAS over the RG1 failback window (phase-pre -> phase-post)
+# on a fixed per-node baseline. 1a judges `Screen drops` (the aggregate the
+# SYN-first transit miss gate feeds) against 4; 1b judges raw `Session misses`
+# against a coarse floor of 256 (it sees misses 1a cannot, e.g. a lost SNAT
+# reply half that resolves to LocalDelivery and is denied host-inbound).
+write_ha_g1_snapshot() { # <path> <phase> <node> <misses> <creates> <screen> <pid>; '-' omits a line
+	local path="$1" phase="$2" node="$3" misses="$4" creates="$5" screen="$6" pid="$7"
+	{
+		printf 'HA capture identity: slice=manual-rg1-failback phase=%s node=%s rg=1\n' "$phase" "$node"
+		[[ "$pid" == '-' ]] || printf '  PID:                       %s\n' "$pid"
+		[[ "$misses" == '-' ]] || printf '  Session misses:            %s\n' "$misses"
+		[[ "$creates" == '-' ]] || printf '  Session creates:           %s\n' "$creates"
+		[[ "$screen" == '-' ]] || printf '  Screen drops:              %s\n' "$screen"
+	} >"$path"
+}
+G1_PRE0="${RG1_DIR}/g1-pre-node0.stats"
+G1_PRE1="${RG1_DIR}/g1-pre-node1.stats"
+G1_POST0="${RG1_DIR}/g1-post-node0.stats"
+G1_POST1="${RG1_DIR}/g1-post-node1.stats"
+# g1_row <m0> <c0> <s0> <m1> <c1> <s1> [pid0-post] [pid1-post]: post = baseline
+# + delta. Baselines: misses 100/200, creates 50/80, screen 3/4 (overridden by
+# G1_S0_BASE / G1_S1_BASE), PIDs 111/222. A literal '-' omits that post line;
+# 'x' writes a malformed value.
+g1_val() { case "$1" in -) printf -- '-' ;; x) printf 'n/a' ;; *) printf '%s' "$(($1 + $2))" ;; esac; }
+g1_row() {
+	local s0="${G1_S0_BASE:-3}" s1="${G1_S1_BASE:-4}"
+	write_ha_g1_snapshot "$G1_PRE0" phase-pre node0 100 50 "$s0" 111
+	write_ha_g1_snapshot "$G1_PRE1" phase-pre node1 200 80 "$s1" 222
+	write_ha_g1_snapshot "$G1_POST0" phase-post node0 "$(g1_val "$1" 100)" "$(g1_val "$2" 50)" "$(g1_val "$3" "$s0")" "${7:-111}"
+	write_ha_g1_snapshot "$G1_POST1" phase-post node1 "$(g1_val "$4" 200)" "$(g1_val "$5" 80)" "$(g1_val "$6" "$s1")" "${8:-222}"
+}
+g1a_verdict() {
+	ha_pair_counter_budget_verdict 4 'Screen drops' manual-rg1-failback 1 phase-pre phase-post \
+		"$G1_PRE0" "$G1_PRE1" "$G1_POST0" "$G1_POST1"
+}
+g1b_verdict() {
+	ha_pair_counter_budget_verdict 256 'Session misses' manual-rg1-failback 1 phase-pre phase-post \
+		"$G1_PRE0" "$G1_PRE1" "$G1_POST0" "$G1_POST1"
+}
+g1_old_raw_verdict() {
+	ha_pair_counter_budget_verdict 64 'Session misses' manual-rg1-failback 1 phase-pre phase-post \
+		"$G1_PRE0" "$G1_PRE1" "$G1_POST0" "$G1_POST1"
+}
+# Row A, master-like (tcp master run 1: misses 20/41, creates 15/39, no drops).
+g1_row 20 15 0 41 39 0
+assert_helper_status 0 g1a_verdict
+assert_helper_status 0 g1b_verdict
+# Row B, PR-like (#18656 tcp run 1: misses 26/45, creates 19/42, no drops):
+# the old raw cell (64) FAILed it at 71; both new checks PASS.
+g1_row 26 19 0 45 42 0
+assert_helper_status 1 g1_old_raw_verdict
+assert_helper_status 0 g1a_verdict
+assert_helper_status 0 g1b_verdict
+# Row C, established-flow loss on node1: 40 non-SYN misses dropped by the
+# SYN-first gate. 1a FAILs; 1b's coarse floor still PASSes (101).
+g1_row 20 15 0 81 39 40
+assert_helper_status 1 g1a_verdict
+assert_contains "$(<"${ERR}")" 'Screen drops paired delta 40 (node0=0 node1=40) exceeds limit 4' 'group 1a row C detail'
+assert_helper_status 0 g1b_verdict
+# Row D, 5 drops on node0 only: both nodes count. 1a FAIL.
+g1_row 20 15 5 41 39 0
+assert_helper_status 1 g1a_verdict
+# Row E, probe-blind: node1's post capture has no `Screen drops` line (on a 0
+# baseline, so a missing value read as 0 would PASS, not read as a rewind).
+G1_S1_BASE=0 g1_row 20 15 0 41 39 -
+assert_helper_status 2 g1a_verdict
+# Row F, malformed `Screen drops` on node0 (0 baseline, same reason). VOID.
+G1_S0_BASE=0 g1_row 20 15 x 41 39 0
+assert_helper_status 2 g1a_verdict
+# Row G, a rewound `Screen drops` counter on node0. VOID.
+g1_row 20 15 -2 41 39 0
+assert_helper_status 2 g1a_verdict
+# Row H, a helper restart inside the window on node0 (PID 111 -> 999). VOID,
+# for both checks and for any other paired delta.
+g1_row 20 15 0 41 39 0 999
+assert_helper_status 2 g1a_verdict
+assert_contains "$(<"${ERR}")" 'node0: helper restarted inside the window (PID 111 -> 999)' 'group 1 row H detail'
+assert_helper_status 2 g1b_verdict
+assert_helper_status 2 ha_snapshot_counter_delta manual-rg1-failback 1 node0 'Session misses' \
+	phase-pre "$G1_PRE0" phase-post "$G1_POST0"
+# Row I, a PID line in the pre capture only (node1's post capture lost it). VOID.
+g1_row 20 15 0 41 39 0 111 -
+assert_helper_status 2 g1a_verdict
+# Row J, the 1a boundary at 4: 2+1 = 3 PASS, exactly 4 PASS, 3+2 = 5 FAIL.
+g1_row 20 15 2 41 39 1
+assert_helper_status 0 g1a_verdict
+g1_row 20 15 2 41 39 2
+assert_helper_status 0 g1a_verdict
+g1_row 20 15 3 41 39 2
+assert_helper_status 1 g1a_verdict
+# Row K, a lost SNAT reply half: its misses resolve to LocalDelivery (exempt
+# from the SYN-first gate, denied host-inbound), so 0 screen drops, but every
+# ACK/data packet misses. 1a PASSes; the 1b floor FAILs at 2000 > 256.
+g1_row 1000 15 0 1000 39 0
+assert_helper_status 0 g1a_verdict
+assert_helper_status 1 g1b_verdict
+assert_contains "$(<"${ERR}")" 'Session misses paired delta 2000 (node0=1000 node1=1000) exceeds limit 256' 'group 1b row K detail'
+# Row L, the 1b floor probe-blind: node0's post capture has no `Session
+# misses` line. VOID.
+g1_row - 15 0 41 39 0
+assert_helper_status 2 g1b_verdict
+
+# The report-only host-inbound path (#18681): the helper PID from the
+# data-plane capture is appended to the flow-statistics capture, then the
+# `Host-inbound denies` delta per node is printed, `unavailable` when it cannot
+# be read.
+write_ha_flowstats() { # <path> <phase> <node> <denies|'-'>
+	{
+		printf 'HA capture identity: slice=manual-rg1-failback phase=%s node=%s rg=1\n' "$2" "$3"
+		printf 'Flow statistics:\n  Screen drops:                  7\n'
+		[[ "$4" == '-' ]] || printf '  Host-inbound denies:           %s\n' "$4"
+	} >"$1"
+}
+FS_PRE0="${RG1_DIR}/fs-pre-node0.flowstats"; FS_PRE1="${RG1_DIR}/fs-pre-node1.flowstats"
+FS_POST0="${RG1_DIR}/fs-post-node0.flowstats"; FS_POST1="${RG1_DIR}/fs-post-node1.flowstats"
+fs_row() { # <n0-pre> <n0-post> <n1-pre> <n1-post> [n0-post-pid]
+	g1_row 20 15 0 41 39 0 "${5:-111}"
+	write_ha_flowstats "$FS_PRE0" phase-pre node0 "$1"; write_ha_flowstats "$FS_POST0" phase-post node0 "$2"
+	write_ha_flowstats "$FS_PRE1" phase-pre node1 "$3"; write_ha_flowstats "$FS_POST1" phase-post node1 "$4"
+	ha_flowstats_append_helper_pid "$G1_PRE0" "$FS_PRE0"; ha_flowstats_append_helper_pid "$G1_POST0" "$FS_POST0"
+	ha_flowstats_append_helper_pid "$G1_PRE1" "$FS_PRE1"; ha_flowstats_append_helper_pid "$G1_POST1" "$FS_POST1"
+}
+fs_report() { ha_host_inbound_denies_report "$FS_PRE0" "$FS_PRE1" "$FS_POST0" "$FS_POST1"; }
+fs_row 10 25 4 4
+assert_contains "$(<"$FS_POST0")" 'PID:                       111' 'flowstats capture carries the helper PID line'
+assert_helper_value 'node0=15 node1=0' fs_report
+# node1's post capture lost its counter line: that node reads unavailable.
+fs_row 10 25 4 -
+assert_helper_value 'node0=15 node1=unavailable' fs_report
+# A helper restart on node0 (PID 111 -> 999): the guard is stricter than this
+# xpfd mirror needs, so node0 reads unavailable rather than a value.
+fs_row 10 25 4 9 999
+assert_helper_value 'node0=unavailable node1=5' fs_report
+# A data-plane capture with no PID line appends nothing; with no PID on either
+# side the delta is still read.
+g1_row 20 15 0 41 39 0
+write_ha_g1_snapshot "$G1_PRE0" phase-pre node0 100 50 3 -
+write_ha_g1_snapshot "$G1_POST0" phase-post node0 120 65 3 -
+write_ha_flowstats "$FS_PRE0" phase-pre node0 10; write_ha_flowstats "$FS_POST0" phase-post node0 12
+ha_flowstats_append_helper_pid "$G1_PRE0" "$FS_PRE0"; ha_flowstats_append_helper_pid "$G1_POST0" "$FS_POST0"
+write_ha_flowstats "$FS_PRE1" phase-pre node1 4; write_ha_flowstats "$FS_POST1" phase-post node1 4
+assert_helper_value 'node0=2 node1=0' fs_report
+assert_helper_status 2 ha_host_inbound_denies_report "$FS_PRE0"
+
+# Mutation cells: each defence above must be load-bearing. A mutant is one lib
+# function's own text with one edit, sourced in a subshell over the real lib;
+# the named row must FLIP.
+#
+# lib_fn_mutant <fn> <name> <old> <new> -> path of the mutated function text.
+# It REFUSES (returns 1, reason on stderr) rather than hand back a mutant
+# that could score for the wrong reason (#18694):
+#   - <old> does not occur exactly once in the function. A no-op mutant
+#     would score as an escape for the wrong reason.
+#   - The extracted text is not the WHOLE function. The cut ends at the first
+#     column-0 `}`, which a heredoc inside the function can contain (a Python
+#     dict, say: #18690 hit it). A cut-short mutant fails to source, so a row
+#     expecting a non-zero status would be "killed" by the breakage rather
+#     than by the edit. Checked by comparing `declare -f <fn>` of the
+#     extracted text with `declare -f <fn>` after sourcing the unmodified lib,
+#     each in its own subshell.
+#   - The edited text does not parse (`bash -n`) or no longer defines <fn>.
+# Every built mutant's name is recorded in lib-fn-mutants.built, which the
+# end-of-file census reconciles by name against LIB_FN_EXPECTED.
+# LIB_FN_MUTANT_LIB overrides the lib (the refusal fixture below).
+lib_fn_mutant() {
+	local fn="$1" name="$2" old="$3" new="$4"
+	local lib="${LIB_FN_MUTANT_LIB:-${ROOT}/test/incus/ha-assurance-lib.sh}"
+	local orig="${TMP_DIR}/lib-fn-mutant-${name}.orig.sh" out="${TMP_DIR}/lib-fn-mutant-${name}.sh" want got
+	python3 - "$lib" "$fn" "$orig" "$out" "$old" "$new" <<'PY' || return 1
+import pathlib, re, sys
+lib, fn, orig, out, old, new = sys.argv[1:]
+text = pathlib.Path(lib).read_text(encoding="utf-8")
+m = re.search(r"^" + re.escape(fn) + r"\(\) \{\n.*?^\}\n", text, re.M | re.S)
+if not m:
+    print(f"lib_fn_mutant: no function {fn} in {lib}", file=sys.stderr)
+    raise SystemExit(1)
+body = m.group(0)
+if body.count(old) != 1:
+    print(f"lib_fn_mutant: the edit occurs {body.count(old)} times in {fn}, want exactly once", file=sys.stderr)
+    raise SystemExit(1)
+pathlib.Path(orig).write_text(body, encoding="utf-8")
+pathlib.Path(out).write_text(body.replace(old, new), encoding="utf-8")
+PY
+	want="$(bash -c 'source "$1" >/dev/null 2>&1; declare -f "$2"' _ "$lib" "$fn" 2>/dev/null)" || want=""
+	got="$(bash -c 'source "$1" >/dev/null 2>&1 && declare -f "$2"' _ "$orig" "$fn" 2>/dev/null)" || got=""
+	if [[ -z "$want" || "$got" != "$want" ]]; then
+		printf 'lib_fn_mutant %s: the extracted %s is not the whole function (cut short, e.g. at a column-0 } inside a heredoc)\n' \
+			"$name" "$fn" >&2
+		return 1
+	fi
+	if ! bash -n "$out" 2>/dev/null; then
+		printf 'lib_fn_mutant %s: the edited %s does not parse\n' "$name" "$fn" >&2
+		return 1
+	fi
+	if ! bash -c 'source "$1" >/dev/null 2>&1 && declare -F "$2" >/dev/null' _ "$out" "$fn"; then
+		printf 'lib_fn_mutant %s: the edited text no longer defines %s\n' "$name" "$fn" >&2
+		return 1
+	fi
+	printf '%s\n' "$name" >>"${TMP_DIR}/lib-fn-mutants.built"
+	printf '%s' "$out"
+}
+# lib_fn_noop_control <fn> <name> <anchor> -> path of an UNEDITED mutant: the
+# same extract, check and source path, with <anchor> replaced by itself.
+lib_fn_noop_control() { lib_fn_mutant "$1" "$2" "$3" "$3"; }
+# assert_lib_fn_control_holds <name> <fn> <anchor> <want-rc> <reason or ''> <cmd...>
+# Any mutant family runs one of its rows under the no-op control and requires
+# the row to hold, so a flip under a real mutant is the edit, not the path.
+assert_lib_fn_control_holds() {
+	local name="$1" fn="$2" anchor="$3" want="$4" needle="$5" control got
+	shift 5
+	control="$(lib_fn_noop_control "$fn" "control-${name}" "$anchor")" ||
+		fail_test "no-op control ${name}: lib_fn_mutant refused ${fn} (see stderr)"
+	# shellcheck source=/dev/null
+	if ( source "$control"; "$@" ) >"${OUT}" 2>"${ERR}"; then got=0; else got=$?; fi
+	[[ "$got" == "$want" ]] || fail_test "no-op control ${name}: unedited ${fn} scored ${got}, want ${want}"
+	if [[ -n "$needle" ]]; then
+		assert_contains "$(<"${ERR}")" "$needle" "no-op control ${name}"
+	fi
+}
+
+printf 'lib_fn_mutant refuses extractions that could score for the wrong reason (#18694)\n'
+LIB_FN_FIXTURE="${TMP_DIR}/lib-fn-mutant-fixture.sh"
+cat >"$LIB_FN_FIXTURE" <<'FIXTURE'
+fixture_heredoc_brace() {
+	python3 - <<'PY'
+values = {
+    "answer": 1,
+}
+print(values["answer"])
+PY
+	return 0
+}
+
+fixture_plain() {
+	local answer=1
+	return "$((answer - 1))"
+}
+
+fixture_redefined() {
+	return 0
+}
+
+fixture_redefined() {
+	return 1
+}
+FIXTURE
+# A mis-cut that PARSES, so only the extent check can refuse it (bash -n
+# cannot): the cut takes the FIRST
+# definition, but the sourced lib keeps the LAST, so a mutant of the stale
+# copy would be scored against behaviour the lib never runs.
+if LIB_FN_MUTANT_LIB="$LIB_FN_FIXTURE" lib_fn_mutant fixture_redefined stale \
+	'return 0' 'return 2' >"${OUT}" 2>"${ERR}"; then
+	fail_test 'lib_fn_mutant accepted a stale first definition of a redefined function'
+fi
+assert_contains "$(<"${ERR}")" 'is not the whole function' 'stale duplicate definition refused by the extent check'
+# The cut stops at the dict's column-0 `}`. The anchor sits INSIDE the cut,
+# so the exactly-once check passes and only the extent check can refuse it.
+if LIB_FN_MUTANT_LIB="$LIB_FN_FIXTURE" lib_fn_mutant fixture_heredoc_brace truncated \
+	'"answer": 1' '"answer": 2' >"${OUT}" 2>"${ERR}"; then
+	fail_test 'lib_fn_mutant accepted an extraction cut short at a column-0 } inside a heredoc'
+fi
+assert_contains "$(<"${ERR}")" 'is not the whole function' 'truncated extraction refused by the extent check'
+# An edit that breaks the syntax is refused, not scored.
+if LIB_FN_MUTANT_LIB="$LIB_FN_FIXTURE" lib_fn_mutant fixture_plain unparsable \
+	'return "$((answer - 1))"' 'return "$((answer - 1)"' >"${OUT}" 2>"${ERR}"; then
+	fail_test 'lib_fn_mutant accepted a mutant that does not parse'
+fi
+assert_contains "$(<"${ERR}")" 'does not parse' 'unparsable mutant refused'
+# A whole function is accepted, its mutant flips, and its no-op control holds.
+LIB_FN_PLAIN="$(LIB_FN_MUTANT_LIB="$LIB_FN_FIXTURE" lib_fn_mutant fixture_plain plain 'answer - 1' 'answer')" ||
+	fail_test 'lib_fn_mutant refused a whole fixture function'
+# shellcheck source=/dev/null
+if ( source "$LIB_FN_PLAIN"; fixture_plain ); then
+	fail_test 'the fixture_plain mutant did not flip its result'
+fi
+# shellcheck source=/dev/null
+LIB_FN_MUTANT_LIB="$LIB_FN_FIXTURE" assert_lib_fn_control_holds fixture-plain fixture_plain 'answer - 1' 0 '' \
+	fixture_plain
+# assert_g1_mutant_flips <name> <want-status-under-mutant> <verdict-fn> <lib-fn> <old> <new> <row...>
+assert_g1_mutant_flips() {
+	local name="$1" want="$2" verdict="$3" fn="$4" old="$5" new="$6" mutant got
+	shift 6
+	mutant="$(lib_fn_mutant "$fn" "g1-$name" "$old" "$new")" ||
+		fail_test "group 1 mutant ${name}: lib_fn_mutant refused ${fn} (see stderr)"
+	[[ -s "$mutant" ]] || fail_test "group 1 mutant ${name}: no mutant text"
+	g1_row "$@"
+	# shellcheck source=/dev/null
+	if ( source "$mutant"; "$verdict" ) >/dev/null 2>&1; then got=0; else got=$?; fi
+	[[ "$got" == "$want" ]] || fail_test "group 1 mutant ${name} ESCAPED: row $* scored ${got}, want ${want}"
+}
+# No-op controls: the guarded path leaves a PASS and a FAIL row as they are.
+g1_row 20 15 0 41 39 0
+assert_lib_fn_control_holds g1-pass ha_pair_counter_budget_verdict '(( total <= limit ))' 0 '' g1a_verdict
+g1_row 20 15 0 81 39 40
+assert_lib_fn_control_holds g1-fail ha_pair_counter_budget_verdict '(( total <= limit ))' 1 '' g1a_verdict
+# Strict bound: row J at exactly 4 flips PASS -> FAIL.
+assert_g1_mutant_flips strict 1 g1a_verdict ha_pair_counter_budget_verdict '(( total <= limit ))' '(( total < limit ))' 20 15 2 41 39 2
+# node1 ignored: row C (40 drops on node1) flips FAIL -> PASS.
+assert_g1_mutant_flips node0only 0 g1a_verdict ha_pair_counter_budget_verdict 'total=$((node0_delta + node1_delta))' 'total=$node0_delta' 20 15 0 81 39 40
+# node0 ignored: row D (5 drops on node0) flips FAIL -> PASS.
+assert_g1_mutant_flips node1only 0 g1a_verdict ha_pair_counter_budget_verdict 'total=$((node0_delta + node1_delta))' 'total=$node1_delta' 20 15 5 41 39 0
+# 1b shares ha_pair_counter_budget_verdict with 1a, so the three mutants above
+# cover its arithmetic too; its own rows K and L, and its call site (pinned
+# below), cover what is specific to it.
+# Missing value read as 0: row E flips VOID -> PASS.
+G1_S1_BASE=0 assert_g1_mutant_flips missing 0 g1a_verdict ha_status_summary_value 'if len(matches) != 1:' 'if not matches:
+    print(0)
+    raise SystemExit(0)
+if len(matches) != 1:' 20 15 0 41 39 -
+# Malformed value read as 0: row F flips VOID -> PASS.
+G1_S0_BASE=0 assert_g1_mutant_flips malformed 0 g1a_verdict ha_status_summary_value 'match = re.match(r"^(\d+)(?:\s|$)", matches[0])' 'match = re.match(r"^(\d+)(?:\s|$)", matches[0]) or re.match(r"(0)", "0")' 20 15 x 41 39 0
+# Rewound counter accepted: row G flips VOID -> PASS.
+assert_g1_mutant_flips rewound 0 g1a_verdict ha_nondecreasing_delta 'if post < baseline:' 'if False:' 20 15 -2 41 39 0
+# PID mismatch ignored: row H flips VOID -> PASS.
+assert_g1_mutant_flips pidmismatch 0 g1a_verdict ha_snapshot_same_helper_verdict 'if [[ "$before_pid" != "$after_pid" ]]; then' 'if false; then' 20 15 0 41 39 0 999
+# One-sided PID line skipped: row I flips VOID -> PASS.
+assert_g1_mutant_flips pidonesided 0 g1a_verdict ha_snapshot_same_helper_verdict \
+	"if ! grep -Eq '^[[:space:]]*PID:' \"\$before_file\" 2>/dev/null \\
+		&& ! grep" \
+	"if ! grep -Eq '^[[:space:]]*PID:' \"\$before_file\" 2>/dev/null \\
+		|| ! grep" 20 15 0 41 39 0 111 -
+# Guard unwired from the shared delta: row H flips VOID -> PASS.
+assert_g1_mutant_flips pidunwired 0 g1a_verdict ha_snapshot_counter_delta \
+	'if ! ha_snapshot_same_helper_verdict "$before_file" "$after_file" "$node"; then return 2; fi' ':' 20 15 0 41 39 0 999
+# The consumer emits BOTH judged checks with their own budgets and labels, and
+# refuses the retired knob (a call-site revert passes every row above).
+python3 - "${ROOT}/test/incus/test-failover.sh" <<'PY' || fail_test 'test-failover.sh Group 1a/1b are not wired as judged checks'
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+body = re.search(r"^ha_rg1_evaluate\(\) \{\n.*?^\}\n", text, re.M | re.S)
+if not body:
+    raise SystemExit(1)
+b = body.group(0)
+a = re.findall(r'ha_emit_verdict "RG1 Group 1a [^"]*"\s*\\\n\s*ha_pair_counter_budget_verdict "\$MAX_FAILOVER_SESSION_MISS_DROP_DELTA" "Screen drops"', b)
+f = re.findall(r'ha_emit_verdict "RG1 Group 1b [^"]*"\s*\\\n\s*ha_pair_counter_budget_verdict "\$MAX_FAILOVER_RAW_SESSION_MISS_FLOOR" "Session misses"', b)
+if len(a) != 1 or len(f) != 1:
+    raise SystemExit(1)
+if 'MAX_FAILOVER_SESSION_MISS_DELTA+x' not in text:
+    raise SystemExit(1)
+if not re.search(r'^MAX_FAILOVER_SESSION_MISS_DROP_DELTA="\$\{MAX_FAILOVER_SESSION_MISS_DROP_DELTA:-4\}"$', text, re.M):
+    raise SystemExit(1)
+if not re.search(r'^MAX_FAILOVER_RAW_SESSION_MISS_FLOOR="\$\{MAX_FAILOVER_RAW_SESSION_MISS_FLOOR:-256\}"$', text, re.M):
+    raise SystemExit(1)
+PY
+
 printf 'Groups 5-6 exact mid-post and fabric trigger decisions\n'
 WAN_PRE="${RG1_DIR}/wan-pre.interfaces"
 WAN_MID="${RG1_DIR}/wan-mid.interfaces"
@@ -1927,23 +2263,194 @@ if (( ${#rewind_failures[@]} != 0 )); then
 	fail_test "${rewind_failures[*]}"
 fi
 printf 'Groups 7-8 RG readiness and exact ten-sample maxima\n'
-STANDBY_ID="${RG1_DIR}/standby.status"
-write_ha_status_snapshot "$STANDBY_ID" phase-post node1 1 0 0 0 0
-{
-	printf 'Enabled: true\nForwarding armed: true\nrg1 active=false\nReady bindings: 2/8\n'
-} >>"$STANDBY_ID"
-assert_helper_status 0 ha_rg_standby_status_verdict "$STANDBY_ID" manual-rg1-failback phase-post node1 1
-for predicate in enabled armed active ready; do
-	write_ha_status_snapshot "$STANDBY_ID" phase-post node1 1 0 0 0 0
-	case "$predicate" in
-	enabled) printf 'Enabled: false\nForwarding armed: true\nrg1 active=false\nReady bindings: 2/8\n' >>"$STANDBY_ID" ;;
-	armed) printf 'Enabled: true\nForwarding armed: false\nrg1 active=false\nReady bindings: 2/8\n' >>"$STANDBY_ID" ;;
-	active) printf 'Enabled: true\nForwarding armed: true\nrg1 active=true\nReady bindings: 2/8\n' >>"$STANDBY_ID" ;;
-	ready) printf 'Enabled: true\nForwarding armed: true\nrg1 active=false\nReady bindings: 0/8\n' >>"$STANDBY_ID" ;;
-	esac
-	assert_helper_status 1 ha_rg_standby_status_verdict "$STANDBY_ID" manual-rg1-failback phase-post node1 1
-done
-assert_helper_status 2 ha_rg_standby_status_verdict "$STANDBY_ID" manual-rg1-failback phase-pre node1 1
+# #18686: Group 7's rows are the REAL capture test-failover took on tcp
+# (run test-failover-ha-2269141, build
+# userspace-forwarding-ok-20260402-bfb00432-24934-gd340b1bf46,
+# `show chassis cluster data-plane statistics` on the former owner at
+# phase=mid), each row changing exactly ONE line of it.
+# The hand-written fixtures these replaced matched the parser rather than the
+# product, which is how the verdict stayed VOID on every live run.
+STANDBY_REAL_STATS="${ROOT}/test/fixtures/ha-assurance/rg1-failback-mid-node1-18686.stats"
+STANDBY_REAL_STATUS="${ROOT}/test/fixtures/ha-assurance/rg1-failback-mid-node1-18686.status"
+STANDBY_ID="${RG1_DIR}/standby.stats"
+STANDBY_HA_GROUPS='  HA groups:                 rg0 active=true watchdog=136578; rg1 active=false watchdog=136578; rg2 active=true watchdog=136578'
+
+# derive_standby <dst> [<old> <new>]...: the real capture with each <old>
+# line-fragment replaced by <new>. Each <old> must occur exactly once, so a
+# fixture that drifts fails here instead of turning a row into a no-op.
+derive_standby() {
+	python3 - "$STANDBY_REAL_STATS" "$@" <<'PY'
+import pathlib
+import sys
+
+source, destination, *pairs = sys.argv[1:]
+text = pathlib.Path(source).read_text(encoding="utf-8")
+for old, new in zip(pairs[0::2], pairs[1::2]):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"derive_standby: {old!r} occurs {count} times in {source}")
+    text = text.replace(old, new, 1)
+pathlib.Path(destination).write_text(text, encoding="utf-8")
+PY
+}
+
+# standby_row <rc> <stderr substring or ''> <row> <file> [<phase>]
+standby_row() {
+	local expected="$1" needle="$2" row="$3" file="$4" phase="${5:-mid}"
+	assert_helper_status "$expected" ha_rg_standby_status_verdict "$file" manual-rg1-failback "$phase" node1 1
+	if [[ -n "$needle" ]]; then
+		assert_contains "$(<"${ERR}")" "$needle" "Group 7 row ${row}"
+	fi
+}
+
+derive_standby "$STANDBY_ID"
+standby_row 0 '' 'PASS real capture (enabled, armed, rg1 inactive, 30/30 ready)' "$STANDBY_ID"
+
+derive_standby "$STANDBY_ID" '  Enabled:                   true' '  Enabled:                   false'
+standby_row 1 'Enabled is not true' 'FAIL enabled=false' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" '  Forwarding armed:          true' '  Forwarding armed:          false'
+standby_row 1 'Forwarding armed is not true' 'FAIL armed=false' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" 'rg1 active=false' 'rg1 active=true'
+standby_row 1 'rg1 is active' 'FAIL rg1 active' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" '  Ready bindings:            30/30' '  Ready bindings:            0/30'
+standby_row 1 'no ready bindings' 'FAIL no ready bindings' "$STANDBY_ID"
+
+derive_standby "$STANDBY_ID" $'  Enabled:                   true\n' ''
+standby_row 2 'Enabled field missing' 'VOID Enabled missing' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" 'rg1 active=false watchdog=136578; ' ''
+standby_row 2 'rg1 active field missing' 'VOID rg1 entry missing' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" "${STANDBY_HA_GROUPS}"$'\n' ''
+standby_row 2 'HA groups field missing' 'VOID HA groups line missing' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" 'rg1 active=false watchdog=136578' \
+	'rg1 active=false watchdog=136578; rg1 active=true watchdog=136578'
+standby_row 2 'rg1 active field ambiguous' 'VOID rg1 entry ambiguous' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" "${STANDBY_HA_GROUPS}" "${STANDBY_HA_GROUPS}"$'\n'"${STANDBY_HA_GROUPS}"
+standby_row 2 'HA groups field ambiguous' 'VOID HA groups line ambiguous' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" 'rg1 active=false' 'rg1 active=maybe'
+standby_row 2 'rg1 active field malformed' 'VOID rg1 entry malformed' "$STANDBY_ID"
+# The id is a whole token: an rg10 entry is neither rg1 nor an rg1 duplicate.
+derive_standby "$STANDBY_ID" 'rg2 active=true watchdog=136578' \
+	'rg2 active=true watchdog=136578; rg10 active=true watchdog=136578'
+standby_row 0 '' 'PASS rg10 is not rg1' "$STANDBY_ID"
+# The capture Group 7 used to be handed: no readiness fields at all.
+standby_row 2 'this looks like a `show chassis cluster status` capture' 'VOID .status passed by mistake' \
+	"$STANDBY_REAL_STATUS"
+# Identity: a capture from another phase is never judged.
+derive_standby "$STANDBY_ID"
+standby_row 2 'phase' 'VOID identity phase mismatch' "$STANDBY_ID" phase-post
+
+# Group 7 mutation cells (#18686), on the #18676 machinery: each mutant is one
+# lib function's text with one exactly-once edit (lib_fn_mutant), sourced in a
+# subshell over the real lib. The named row's own assertion (status AND
+# reason) must stop holding under it.
+# g7_row_holds_under <name> <lib-fn> <old> <new> <row-rc> <row-reason or ''> <file> [<phase>]
+# Returns 0 when the row's assertion still holds with the edited function.
+# lib_fn_mutant refuses a cut-short or unparsable mutant (#18694).
+g7_row_holds_under() {
+	local name="$1" fn="$2" old="$3" new="$4" rc="$5" needle="$6" file="$7" phase="${8:-mid}" mutant got
+	mutant="$(lib_fn_mutant "$fn" "g7-$name" "$old" "$new")" ||
+		fail_test "group 7 mutant ${name}: lib_fn_mutant refused ${fn} (see stderr)"
+	[[ -s "$mutant" ]] || fail_test "group 7 mutant ${name}: no mutant text"
+	# shellcheck source=/dev/null
+	if ( source "$mutant"; ha_rg_standby_status_verdict "$file" manual-rg1-failback "$phase" node1 1 ) \
+		>"${OUT}" 2>"${ERR}"; then got=0; else got=$?; fi
+	[[ "$got" == "$rc" ]] && { [[ -z "$needle" ]] || [[ "$(<"${ERR}")" == *"$needle"* ]]; }
+}
+# assert_g7_mutant_flips <name> <lib-fn> <old> <new> <row-rc> <row-reason or ''> <file> [<phase>]
+assert_g7_mutant_flips() {
+	if g7_row_holds_under "$@"; then
+		fail_test "group 7 mutant ${1} ESCAPED: its row still scored ${5}${6:+ with '${6}'}"
+	fi
+}
+# No-op controls: the guarded path leaves the PASS and the identity rows
+# holding, so a flip below is the edit itself.
+derive_standby "$STANDBY_ID"
+assert_lib_fn_control_holds g7-pass ha_standby_status_verdict 'if ready <= 0:' 0 '' \
+	ha_rg_standby_status_verdict "$STANDBY_ID" manual-rg1-failback mid node1 1
+assert_lib_fn_control_holds g7-identity ha_rg_standby_status_verdict 'ha_standby_status_verdict "$1" "$5"' 2 'phase' \
+	ha_rg_standby_status_verdict "$STANDBY_ID" manual-rg1-failback phase-post node1 1
+# R2: the pre-#18686 own-line parser. The real capture PASS row goes VOID.
+derive_standby "$STANDBY_ID"
+assert_g7_mutant_flips ownline ha_standby_status_verdict \
+	'mine = [entry for entry in entries if re.match(rf"^rg{rg}(?:\s|$)", entry)]' \
+	'mine = [line.strip() for line in lines if re.match(rf"^\s*rg{rg} active=(true|false)\s*$", line)]' \
+	0 '' "$STANDBY_ID"
+# M07: a duplicated HA groups line is read first-wins instead of VOID.
+derive_standby "$STANDBY_ID" "${STANDBY_HA_GROUPS}" "${STANDBY_HA_GROUPS}"$'\n'"${STANDBY_HA_GROUPS}"
+assert_g7_mutant_flips linefirstwins ha_standby_status_verdict \
+	'    if len(matches) != 1:
+        void(key, "missing" if not matches else "ambiguous")' \
+	'    if not matches:
+        void(key, "missing")' \
+	2 'HA groups field ambiguous' "$STANDBY_ID"
+# M08: a duplicated rg1 entry is read first-wins instead of VOID.
+derive_standby "$STANDBY_ID" 'rg1 active=false watchdog=136578' \
+	'rg1 active=false watchdog=136578; rg1 active=true watchdog=136578'
+assert_g7_mutant_flips entryfirstwins ha_standby_status_verdict \
+	'if len(mine) != 1:
+    void(f"rg{rg} active", "missing" if not mine else "ambiguous")' \
+	'if not mine:
+    void(f"rg{rg} active", "missing")' \
+	2 'rg1 active field ambiguous' "$STANDBY_ID"
+# M10: the rg id prefix-matches, so rg10 counts as an rg1 entry.
+derive_standby "$STANDBY_ID" 'rg2 active=true watchdog=136578' \
+	'rg2 active=true watchdog=136578; rg10 active=true watchdog=136578'
+assert_g7_mutant_flips prefix ha_standby_status_verdict \
+	're.match(rf"^rg{rg}(?:\s|$)", entry)' 're.match(rf"^rg{rg}", entry)' \
+	0 '' "$STANDBY_ID"
+# M12: the wrong-capture hint is dropped (still VOID, but the reason no
+# longer says which capture this is).
+assert_g7_mutant_flips nohint ha_standby_status_verdict \
+	'if reason == "missing" and any(re.match(r"^Redundancy group:", line) for line in lines):' 'if False:' \
+	2 'this looks like a `show chassis cluster status` capture' "$STANDBY_REAL_STATUS"
+# M16: the identity check is dropped, so a phase-post capture is judged.
+derive_standby "$STANDBY_ID"
+assert_g7_mutant_flips noidentity ha_rg_standby_status_verdict \
+	'	if ! ha_snapshot_identity_verdict "$1" "$2" "$3" "$4" "$5"; then return 2; fi
+' '' \
+	2 'phase' "$STANDBY_ID" phase-post
+
+printf 'Group 7 call site is handed the data-plane statistics capture (#18686)\n'
+# group7_call_site_pin <test-failover.sh>: 0 when Group 7 is wired to the
+# data-plane statistics capture. It is run on the real file, and on a copy
+# with the call reverted to RG1_STATUS, which it must refuse.
+group7_call_site_pin() {
+	python3 - "$1" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+calls = re.findall(r'ha_rg_standby_status_verdict "([^"]+)" \\\n\s*(\S+) (\S+) (\S+) (\S+)\n', text)
+want = ("${RG1_STATS[mid:node1]}", "manual-rg1-failback", "mid", "node1", "1")
+if calls != [want]:
+    raise SystemExit(f"Group 7 call sites are {calls}, want exactly [{want}]")
+# RG1_STATS must name the data-plane statistics capture.
+binding = re.search(r'RG1_STATS\["\$\{phase\}:\$\{node_id\}"\]="\$\{base\}\.stats"\n', text)
+capture = re.search(r"ha_capture_cli \"\$node\" 'show chassis cluster data-plane statistics' \\\n"
+                    r'\s*manual-rg1-failback "\$phase" "\$node_id" 1 "\$\{RG1_STATS\["\$\{phase\}:\$\{node_id\}"\]\}"', text)
+if not binding or not capture:
+    raise SystemExit("RG1_STATS is no longer the `show chassis cluster data-plane statistics` capture")
+PY
+}
+group7_call_site_pin "${ROOT}/test/incus/test-failover.sh" ||
+	fail_test 'Group 7 must be handed RG1_STATS[mid:node1], the data-plane statistics capture'
+GROUP7_REVERTED="${TMP_DIR}/test-failover-group7-reverted.sh"
+python3 - "${ROOT}/test/incus/test-failover.sh" "$GROUP7_REVERTED" <<'PY' ||
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+old = 'ha_rg_standby_status_verdict "${RG1_STATS[mid:node1]}"'
+if text.count(old) != 1:
+    raise SystemExit(1)
+pathlib.Path(sys.argv[2]).write_text(
+    text.replace(old, 'ha_rg_standby_status_verdict "${RG1_STATUS[mid:node1]}"'), encoding="utf-8")
+PY
+	fail_test 'group 7 call-site revert: anchor matched nothing in test-failover.sh'
+if group7_call_site_pin "$GROUP7_REVERTED" 2>/dev/null; then
+	fail_test 'group 7 call-site pin ESCAPED: it accepts the pre-#18686 RG1_STATUS call'
+fi
 
 SAMPLE_STATS=()
 SAMPLE_INTERFACES=()
@@ -2457,6 +2964,27 @@ for lan_state in lan-running lan-stopped; do
 	assert_eq "$(reach_count "$TGT_WIRING" iperf_target_claim_cell "$lan_state")" 1 \
 		"test-connectivity test_cluster reaches iperf_target_claim_cell exactly once (${lan_state})"
 done
+
+# lib_fn_mutant census (#18694): every mutant and no-op control above was
+# built through the guarded path, no two cells share a name (a reused name
+# would overwrite another cell's mutant file), and the built set equals the
+# expected set BY NAME, so a cell that is silently skipped or deleted fails
+# here instead of shrinking the count. Adding a cell means adding its name.
+LIB_FN_EXPECTED='plain control-fixture-plain
+control-g1-pass control-g1-fail g1-strict g1-node0only g1-node1only
+g1-missing g1-malformed g1-rewound g1-pidmismatch g1-pidonesided
+g1-pidunwired control-g7-pass control-g7-identity g7-ownline
+g7-linefirstwins g7-entryfirstwins g7-prefix g7-nohint g7-noidentity'
+LIB_FN_BUILT="${TMP_DIR}/lib-fn-mutants.built"
+[[ -s "$LIB_FN_BUILT" ]] || fail_test 'lib_fn_mutant census: no mutant was built'
+LIB_FN_DUPLICATES="$(sort "$LIB_FN_BUILT" | uniq -d)"
+[[ -z "$LIB_FN_DUPLICATES" ]] || fail_test "lib_fn_mutant census: reused cell names: ${LIB_FN_DUPLICATES//$'\n'/ }"
+LIB_FN_MISSING="$(comm -23 <(tr ' ' '\n' <<<"$LIB_FN_EXPECTED" | sed '/^$/d' | sort -u) <(sort -u "$LIB_FN_BUILT"))"
+LIB_FN_UNEXPECTED="$(comm -13 <(tr ' ' '\n' <<<"$LIB_FN_EXPECTED" | sed '/^$/d' | sort -u) <(sort -u "$LIB_FN_BUILT"))"
+[[ -z "$LIB_FN_MISSING" ]] || fail_test "lib_fn_mutant census: expected cells not built: ${LIB_FN_MISSING//$'\n'/ }"
+[[ -z "$LIB_FN_UNEXPECTED" ]] || fail_test "lib_fn_mutant census: cells built but not in LIB_FN_EXPECTED: ${LIB_FN_UNEXPECTED//$'\n'/ }"
+printf 'lib_fn_mutant census: %s cells built through the guarded path: %s\n' \
+	"$(wc -l <"$LIB_FN_BUILT")" "$(tr '\n' ' ' <"$LIB_FN_BUILT")"
 
 printf 'PASS ha-assurance-selftest: M2.4, RG1 Groups 1-8, N6/N12 pins, sticky FAIL, blind markers, gate dominance, set-e VOID guard\n'
 

@@ -1483,6 +1483,18 @@ pub(crate) struct ProcessStatus {
     /// domain in the currently published forwarding snapshot.
     #[serde(rename = "ambiguous_fabric_zone_count", default)]
     pub ambiguous_fabric_zone_count: u64,
+    /// #18560: cumulative `userspace_ctrl` stamp advances the helper made
+    /// itself at the worker-visible publish, inside a Go grant.
+    #[serde(rename = "ctrl_stamp_advances_total", default)]
+    pub ctrl_stamp_advances_total: u64,
+    /// #18560: generation changes inside a grant that the helper left for Go
+    /// to stamp (grant expired, ctrl disabled, stamp not the one the workers
+    /// left, or metadata version mismatch).
+    #[serde(rename = "ctrl_stamp_declines_total", default)]
+    pub ctrl_stamp_declines_total: u64,
+    /// #18560: ctrl stamp advances that failed to open, read or write the map.
+    #[serde(rename = "ctrl_stamp_errors_total", default)]
+    pub ctrl_stamp_errors_total: u64,
     /// #9654: whether the learned-route import is capped (#8355, #9054) in the
     /// forwarding state the live workers serve NOW, as projected by
     /// `Coordinator::learned_route_import_capped_now`.

@@ -11515,12 +11515,84 @@ reserved for whole-dataplane selection where a rewrite shim
     different effective keys when their peer-only selectors overlap, or
     when one connection's remote identity matches another gateway's effective
     local identity (configured `local-identity`, otherwise its effective local IP
-    address). Identity comparison canonicalizes DN case-ignore attributes and
-    RDN/AVA ordering, unifies `user-at-hostname`/`email`/`rfc822` aliases with
-    case-insensitive domains, and compares key-id spellings by strongSwan-effective
-    bytes while keeping rendered values raw. A mixed hostname/IP gateway requires
-    a discriminating `remote-identity` for every dial target; IP selectors cannot
-    cover a hostname's eventual peer identity. Tolerant loads warn
+    address). #18428 derives collision keys from the exact swanctl selector,
+    not the declared Junos identity type, so distinct types that render one owner
+    share a collision class.
+    Selector parsing first honors named and numeric strongSwan type prefixes,
+    then DN syntax, `@#`/`@` forms, and untyped IP/subnet/range/FQDN/KEY_ID parsing.
+    Invalid colon-containing untyped selectors and unsupported DN attributes
+    are literal KEY_ID bytes. Textual `atodn()` values are encoded as type-9
+    DER with source-order RDNs. Only supported named attributes are accepted;
+    numeric OIDs are not aliases. Leading spaces do not prevent slash-delimiter
+    selection, spaces terminate the attribute token, and `+`/backslash are
+    ordinary value bytes. DN value tags are consumed as one raw octet, so
+    `0x1f` is tag 31 rather than a high-tag-number prefix or a
+    PrintableString alias.
+    PrintableString values fold ASCII case only when
+    both compared tags are PrintableString; emailAddress IA5 values also fold
+    ASCII case. Other values compare bytes, even across differing tags, so DN
+    equality is pairwise and not reducible to a transitive canonical key.
+    A collision is a presented identity that can select two secrets.
+    strongSwan selects through `has_owner()`: `lookup->matches(owner)`, which
+    is type-strict for strings, DNs and binary identities (not for the
+    address/subnet/range family), while an ID_ANY owner matches everything
+    (#18428 round 3). So two peer selectors collide
+    when their parsed strongSwan types are equal and they compare equal, or
+    when either is ID_ANY; a DN and a KEY_ID/FQDN raw encoding of the same DER
+    never collide, in either gateway order. An effective local identity is a
+    lookup: an ID_ANY local identity or an unspecified `local-address` selects
+    no concrete owner. DN matching assumes charon's default
+    `rdn_matching = strict` (xpf does not set it); `reordered` or `relaxed`
+    would make RDN-order swaps collide unrefused. Not modelled (#18682): wildcard
+    owners (`*` in an FQDN/RFC822 or a DN value), address/subnet/range
+    containment, and DN encodings differing only in length octets.
+    The exact-byte shortcut still matches identical malformed DN/KEY_ID bytes;
+    structural folding requires nonempty comparable DN structures with equal
+    total encoded lengths, and a DN whose LAST attribute value is empty matches
+    only byte-identically (`CN=Peer, O=` and `CN=peer, O=` are distinct).
+    `atodn()` parses at most 20 RDNs; a longer textual DN is a literal KEY_ID of
+    its text. `""`, `%any`, `%any6`, `0.0.0.0`, `*`, `::` and `0::0` are ID_ANY
+    under every declared type that renders its value unprefixed, and such a
+    `remote-identity` is a wildcard, not a peer selector (#16845). Type
+    prefixes (`fqdn:`, `FQDN:` …) match case-insensitively. Refusals name both
+    rendered selectors and the equality rule.
+    **Upgrade note (#18428):** measured examples, not exhaustive. Newly
+    refused: RFC822 case variants (local part included), a DN versus a
+    `user-at-hostname`/`inet` value of the same text, an explicit type prefix
+    versus the matching hostname, `key-id 7a:7a` versus `7a7a`, an untyped
+    range versus its `ipv4range:#` form, a `/24junk` suffix versus `/24`, and
+    ID_ANY spellings under non-inet types (refused by #16845 without a
+    discriminating gateway address; otherwise the secret is re-scoped to that
+    address). Newly accepted: RDN-order swaps (strict `rdn_matching`) and case
+    variants with an empty last RDN value. On upgrade a colliding config loads
+    leniently with the colliding VPNs skipped (warning) and every later commit
+    is refused until fixed; run `commit check` on the new build first.
+    DN parsing requires constructed SEQUENCE, SET, and attribute-SEQUENCE
+    containers plus primitive OIDs. Constructed-OID lookalikes and any empty
+    RDN SET are malformed for structural comparison and use exact-byte equality
+    only.
+    DN parsing accepts bounded long-form lengths (up to eight length octets),
+    including redundant leading zeros; containing TLVs must match their declared
+    total lengths.
+    FQDN and RFC822 comparisons fold ASCII letters only; RFC822 IDs fold the
+    whole address, and non-ASCII bytes remain byte-sensitive. `@#` and
+    `keyid:#` mirror `chunk_from_hex()`: lowercase `0x` is stripped, every
+    colon is removed when sizing, decoding fills from the right and skips at
+    most one colon before each low nibble, invalid nibbles become zero, and
+    odd values are left-padded. For example, `7a::7a` decodes to `a07a`, not
+    `7a7a`. Untyped subnets mask host bits; lengths parse a decimal `strtol()`
+    prefix (leading whitespace/sign accepted, trailing bytes ignored, no digits
+    means zero), saturate at signed 64-bit limits, narrow to signed 32-bit, then
+    must fit the address family. Numeric prefixes use `strtoul()` base
+    detection and 32-bit enum conversion; empty
+    `{}` means type 0 (`ID_ANY`), whose equality ignores identity encoding.
+    Types 2/3 containing NUL never compare equal; DN PrintableString and
+    emailAddress comparisons stop at a matching NUL.
+    `uri:` is type 201; `xmppaddr:` is an ASN.1 GeneralName. FQDN and selector
+    spellings remain authored in rendered output.
+    A mixed hostname/IP gateway requires a discriminating `remote-identity`
+    for every dial target; IP selectors cannot cover a hostname's eventual
+    peer identity. Tolerant loads warn
     and skip the affected connection groups. No new configuration knob is
     introduced.
   - `security nat static rule-set rule match` — declared the

@@ -1929,6 +1929,47 @@ logged nothing. Note that counter is still not exported as a Prometheus
 metric, unlike its #1807 twin
 (`xpf_userspace_worker_command_queue_poison_recoveries_total`) — see #6641.
 
+### Shared-session lock order (#18658)
+
+The shared-session maps and their indexes are separate mutexes. Any path
+that holds two of them takes them in this order:
+
+    frag-assoc shard  →  shared_sessions  →  bare_tuple_sessions
+                                          →  forward-wire map  →  wire_ambiguities  →  owner-RG index
+
+- `remove_shared_session_if` holds `shared_sessions`, then takes the
+  forward-wire map, then `wire_ambiguities` (survivor resolution needs
+  both).
+- `publish_shared_session` releases `shared_sessions` before its wire
+  section, then takes the map before the index.
+- `bare_tuple_sessions` is taken briefly under `shared_sessions` by the
+  publish (`store.rs:788`), the removal (`store.rs:1133`) and the clear
+  (`types/session_index.rs:651-653`), and released before anything else is locked.
+- A fragment-association lookup (`fragment_assoc::lookup_with_session`)
+  holds its shard while its `session_is_live` closure locks
+  `shared_sessions` (`poll_descriptor/mod.rs:8754`, `:8784`). So never lock
+  a frag-assoc shard while holding any shared-session guard.
+- Readers such as `lookup_shared_forward_wire_match` take the map and the
+  index one at a time and never nest them.
+
+Before #18658 the publish took `wire_ambiguities` first. A publish
+holding the index and waiting for the map then deadlocked against a
+removal holding the map and waiting for the index. Every worker and the
+coordinator queued behind the pair until xpfd was restarted; this was
+reproduced on tcp and loss after a 16000-session burst.
+
+`shared_ops/wire_lock_order_18658_tests.rs` pins the order two ways. A
+single-threaded cell probes, with `try_lock`, which wire lock each path
+holds between its two wire locks, so it names the first lock with no
+timing involved. A threaded cell forces the deadlock interleaving with
+test-only pause points and fails through a bounded timeout rather than
+hanging.
+
+The NAT pair has no nested inversion: a publish takes `nat_ambiguities`
+then the NAT map, while removal releases the NAT map before it takes
+`nat_ambiguities`. Keep it that way, or extend the order above to cover
+it.
+
 ## WireGuard handshake-session poison policy (#6227 item 5)
 
 `afxdp/wg/handshake_session.rs` holds seven call sites across the
@@ -2309,6 +2350,44 @@ share one, and no swap keeps the published state and its epoch);
 learn; removal, a new source MAC, a new snapshot, interval expiry and an
 unpublished snapshot all take it); and the ignored full-poll `MEASUREMENT`
 `tests_hit_path_cost_18533.rs` (numbers in `docs/log/18534.md`).
+
+## First-hit source-NAT revalidation on a non-owner (#16215, #18531, #18691)
+
+`poll_descriptor/policy_revalidation.rs::source_nat_revocation_on_session_hit_with_ingress`
+is the only producer of `StaleSourceNat`. It judges the FORWARD line of the
+hit's pair against live NAT rules and the egress's addresses, once per stale
+stamp, on the session-hit slow path (`poll_descriptor/mod.rs`; the flow-cache
+hit path never judges). Translation validity belongs to the node that
+forwards the egress, so the judgment is declined, keeping the session and
+leaving the stamp stale, when the judged line is:
+
+- terminal on a peer-synced row (#16109);
+- `FabricRedirect` or `HAInactive`, for any origin (#16215, #18531);
+- a non-owner's split-FIB gateway fallback (#18691,
+  `judged_line_is_non_owner_gateway_fallback`). This is a local
+  `ForwardCandidate`/`MissingNeighbor` that meets all three conditions:
+  its egress is in an RG that is not forwarding-active here (an RG-less
+  egress, such as a fabric link, never matches); the
+  destination's connected owner RG is known and not active here; and the
+  egress is not the destination's connected interface. The worker import
+  (`session_glue/commands/upsert_synced.rs`) stores that line for a
+  peer-owned forward row by design (#326). A reply arriving over the
+  fabric judged it and revoked valid flows.
+
+The owner keeps every ground (condition 2). A non-owner still judges a line
+on the destination's connected interface (condition 4) and a gateway-routed
+destination, which conditions 3 (owner `Unknown`) and 4 (no connected
+interface) both exclude, so its end-to-end control pins neither alone. The
+shape only condition 3 excludes, a destination whose connected owner RG is
+forwarding here while the line leaves on another, inactive-RG egress, is
+pinned by the predicate table (`non_owner_gateway_fallback_predicate_table_18691`).
+A node with no HA view judges everything. When the node later activates the RG, the
+decline is off and the line is judged as the owner's. That is correct only
+after `RefreshOwnerRGS` re-resolves it against the activated FIB, which
+relies on the #16270 ordering (connected prefixes republished before
+`SetRGActive`). The window between the HA store and the queued refresh is
+#18705. The operator-level account is in
+`docs/ha-failover-status.md` (#18531, #18691).
 
 ## Hot-path constants
 

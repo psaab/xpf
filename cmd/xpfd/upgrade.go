@@ -185,6 +185,7 @@ func newUpgradeConfig(flags upgradeFlags) upgrade.Config {
 		ConfigDBDir:         flags.configDBDir,
 		JournalPath:         flags.journalPath,
 		Unit:                flags.unit,
+		RejoinDeadline:      flags.rejoinDeadline,
 		StartHealthDeadline: flags.healthDeadline,
 		Sys:                 buildUpgradeSystem(flags),
 		Logf:                func(format string, a ...any) { fmt.Printf(format+"\n", a...) },
@@ -296,6 +297,7 @@ type upgradeFlags struct {
 	target                                                                        string
 	stagedDir, versionsDir, stagedGenDir, sbinDir, configDBDir, journalPath, unit string
 	healthDeadline                                                                time.Duration
+	rejoinDeadline                                                                time.Duration
 }
 
 // parseUpgradeArgs parses the `xpfd upgrade [--rolling] [flags]` argument set.
@@ -325,6 +327,12 @@ func parseUpgradeArgs(args []string) (upgradeFlags, error) {
 	unit := fs.String("unit", upgrade.DefaultUnit, "systemd unit name")
 	healthDeadline := fs.Duration("health-deadline", 30*time.Second,
 		"post-start helper-health deadline before auto-rollback (standalone)")
+	rejoinDeadline := fs.Duration("rejoin-deadline", upgrade.DefaultRejoinDeadline,
+		"HA rolling only: bound on EACH post-cut wait (session-sync re-establish, then the held-secondary "+
+			"rejoin including the inbound bulk prime), so the worst case is twice this; 0 or omitted means "+
+			"the default; minimum "+upgrade.MinRejoinDeadline.String()+". On timeout the node is left held "+
+			"secondary: inspect it, then run `xpfd upgrade kernel rejoin` once it is primed (or "+
+			"`request chassis cluster failover reset redundancy-group <N>` per RG)")
 	if err := fs.Parse(args); err != nil {
 		return upgradeFlags{}, err
 	}
@@ -335,6 +343,16 @@ func parseUpgradeArgs(args []string) (upgradeFlags, error) {
 	}
 	if *target != "" && !*rollback {
 		return upgradeFlags{}, fmt.Errorf("--target is only valid with --rollback")
+	}
+	rejoinSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "rejoin-deadline" {
+			rejoinSet = true
+		}
+	})
+	resolvedRejoin, err := resolveRejoinDeadline(*rejoinDeadline, rejoinSet, *rolling)
+	if err != nil {
+		return upgradeFlags{}, err
 	}
 	return upgradeFlags{
 		rolling:        *rolling,
@@ -348,5 +366,39 @@ func parseUpgradeArgs(args []string) (upgradeFlags, error) {
 		journalPath:    *journalPath,
 		unit:           *unit,
 		healthDeadline: *healthDeadline,
+		rejoinDeadline: resolvedRejoin,
 	}, nil
+}
+
+// resolveRejoinDeadline validates --rejoin-deadline at parse time (#18415).
+// Parse time is before NewRunner and long before ForceSecondary, which is the
+// point: the deadline is only consulted AFTER the irreversible cut, so a bad
+// value must never get that far.
+//
+//   - Given without --rolling: refused. A standalone cut or rollback has no
+//     HA rejoin phase, so the operator expected a bound that would not apply
+//     (the same rule as --target without --rollback).
+//   - 0: the default, as when the flag is omitted.
+//   - Negative, or 0 < d < upgrade.MinRejoinDeadline: refused. Such a bound
+//     cannot cover the daemon restart plus the peer's first bulk-prime retry,
+//     so it would fail the roll after the cut and leave the node held
+//     secondary.
+func resolveRejoinDeadline(d time.Duration, set, rolling bool) (time.Duration, error) {
+	if set && !rolling {
+		return 0, fmt.Errorf("--rejoin-deadline is only valid with --rolling " +
+			"(a standalone cut or rollback has no HA rejoin phase)")
+	}
+	switch {
+	case d == 0:
+		return upgrade.DefaultRejoinDeadline, nil
+	case d < 0:
+		return 0, fmt.Errorf("--rejoin-deadline %s is negative; use 0 or omit it for the default %s",
+			d, upgrade.DefaultRejoinDeadline)
+	case d < upgrade.MinRejoinDeadline:
+		return 0, fmt.Errorf("--rejoin-deadline %s is below the %s minimum: the rejoin is waited "+
+			"for only AFTER the irreversible cut, so a bound this short would fail the roll and "+
+			"leave the node held secondary; use 0 or omit it for the default %s",
+			d, upgrade.MinRejoinDeadline, upgrade.DefaultRejoinDeadline)
+	}
+	return d, nil
 }

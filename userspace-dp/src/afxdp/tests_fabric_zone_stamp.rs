@@ -6677,6 +6677,495 @@ fn split_rg_refresh_keeps_fabric_redirect_15958b() {
     }
 }
 
+/// #18659: the fw0 split snapshot as the node that has just taken the WAN RG
+/// sees it. Nothing has been learned on the WAN gateway VLAN yet (ifindex
+/// 13, ge-0-0-2.50), so a fresh lookup for the peer-owned LAN client answers
+/// MissingNeighbor toward 172.16.50.1 instead of a ForwardCandidate.
+fn fw0_forwarding_unresolved_gateway_18659() -> ForwardingState {
+    let mut forwarding = fw0_forwarding_15958b();
+    forwarding
+        .neighbors
+        .retain(|(ifindex, _), _| *ifindex != 13);
+    forwarding
+}
+
+/// #18659 precondition: the shape the activation refresh saw on loss. The
+/// split FIB has no LAN connected row, the WAN default route's gateway is
+/// unresolved, and the LAN client's connected owner is RG2 (ledger).
+#[test]
+fn split_rg_unresolved_gateway_fixture_shape_18659() {
+    let forwarding = fw0_forwarding_unresolved_gateway_18659();
+    for (lan_host, gateway) in [
+        (
+            IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)),
+        ),
+        (
+            IpAddr::V6(
+                "2001:559:8585:ef00:1266:6aff:fe0b:d017"
+                    .parse()
+                    .expect("lan v6"),
+            ),
+            IpAddr::V6("2001:559:8585:50::1".parse().expect("gw v6")),
+        ),
+    ] {
+        let looked_up =
+            crate::afxdp::forwarding::lookup_forwarding_resolution(&forwarding, lan_host)
+                .resolution;
+        assert_eq!(
+            looked_up.disposition,
+            ForwardingDisposition::MissingNeighbor,
+            "{lan_host}: the split FIB must answer the WAN gateway, unresolved, got {looked_up:?}"
+        );
+        assert_eq!(looked_up.egress_ifindex, 13, "{lan_host}: via ge-0-0-2.50");
+        assert_eq!(
+            looked_up.next_hop,
+            Some(gateway),
+            "{lan_host}: default-route gateway"
+        );
+        assert_eq!(
+            crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, lan_host),
+            2,
+            "{lan_host}: connected owner must be the peer-owned LAN RG (ledger)"
+        );
+    }
+}
+
+/// #18659: the RG-activation refresh must keep the stored FabricRedirect of
+/// a peer-owned reverse row while the WAN gateway is unresolved. The pre-fix
+/// helper returned the MissingNeighbor candidate, which rewrote the row onto
+/// ge-0-0-2.50 / 172.16.50.1 (the live diag dump:
+/// `old=(FabricRedirect, eg4) new=MissingNeighbor/eg12`).
+#[test]
+fn split_rg_refresh_keeps_fabric_redirect_unresolved_gateway_18659() {
+    for v6 in [false, true] {
+        let synthesis = fw0_forwarding_15958b();
+        let forwarding = fw0_forwarding_unresolved_gateway_18659();
+        let now_ns = monotonic_nanos();
+        let now_secs = now_ns / 1_000_000_000;
+        let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+        let mut sessions = if v6 {
+            fw0_both_halves_sessions_v6_15958b(&synthesis, now_ns)
+        } else {
+            fw0_both_halves_sessions_15958b(&synthesis, now_ns)
+        };
+        sessions.set_forwarding_revalidation_gen(7, 9);
+        let items = crate::afxdp::session_glue::commands::collect_refresh_owner_rgs_items(
+            &sessions,
+            &forwarding,
+            &ha_state,
+            &Arc::new(ShardedNeighborMap::default()),
+            now_secs,
+        );
+        let reverse_items: Vec<_> = items
+            .iter()
+            .filter(|(_, _, metadata, _, _)| metadata.is_reverse)
+            .collect();
+        assert!(
+            !reverse_items.is_empty(),
+            "v6={v6}: refresh must visit the reverse companion"
+        );
+        for (_, decision, _, _, _) in &reverse_items {
+            assert_eq!(
+                decision.resolution.disposition,
+                ForwardingDisposition::FabricRedirect,
+                "v6={v6}: an unresolved WAN gateway must not launder the peer-owned reply \
+                 onto ge-0-0-2.50, got {:?}",
+                decision.resolution
+            );
+            assert_eq!(
+                decision.resolution.egress_ifindex, 4,
+                "v6={v6}: fabric parent"
+            );
+        }
+    }
+}
+
+fn missing_neighbor_wan_18659() -> ForwardingResolution {
+    ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        local_ifindex: 0,
+        egress_ifindex: 13,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 50,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    }
+}
+
+fn stored_fabric_redirect_18659() -> ForwardingResolution {
+    ForwardingResolution {
+        disposition: ForwardingDisposition::FabricRedirect,
+        local_ifindex: 0,
+        egress_ifindex: 4,
+        tx_ifindex: 4,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    }
+}
+
+/// #18659 retain table for `rehome_or_retain_fabric_redirect` with a
+/// MissingNeighbor candidate. A KNOWN owner that is NOT active here retains
+/// the redirect. An unknown owner keeps the candidate verbatim: an internet
+/// destination is never redirected. A fabric or zero egress also keeps the
+/// candidate. The locally active owner moved to #18672: like a
+/// ForwardCandidate, it keeps the candidate only on the destination's
+/// connected egress (`rehome_or_retain_owner_active_missing_neighbor_18672`).
+#[test]
+fn rehome_or_retain_missing_neighbor_table_18659() {
+    use crate::afxdp::session_glue::DestinationOwner;
+    let forwarding = fw0_forwarding_unresolved_gateway_18659();
+    assert!(
+        crate::afxdp::forwarding::ingress_is_fabric(&forwarding, 4),
+        "fixture: ifindex 4 is the fabric parent"
+    );
+    let lan_host = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    let internet = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let lan_zone = 21230;
+    let candidate = missing_neighbor_wan_18659();
+    let rehome = |candidate: ForwardingResolution, owner: DestinationOwner, target: IpAddr| {
+        crate::afxdp::session_glue::rehome_or_retain_fabric_redirect(
+            &forwarding,
+            stored_fabric_redirect_18659(),
+            candidate,
+            lan_zone,
+            owner,
+            Some(target),
+            None,
+        )
+    };
+    // Peer-owned destination: retain the fabric redirect (the fix).
+    let peer = rehome(candidate, DestinationOwner::Inactive(2), lan_host);
+    assert_eq!(
+        peer.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "peer owner: {peer:?}"
+    );
+    assert_eq!(
+        peer.egress_ifindex, 4,
+        "peer owner: redirect egress is the fabric parent"
+    );
+    // Unknown owner (internet, gateway-routed): never redirected.
+    let unknown = rehome(candidate, DestinationOwner::Unknown, internet);
+    assert_eq!(
+        unknown, candidate,
+        "an unknown owner keeps its MissingNeighbor"
+    );
+    // A MissingNeighbor on the fabric parent is not a local mis-route.
+    let fabric_candidate = ForwardingResolution {
+        egress_ifindex: 4,
+        tx_ifindex: 4,
+        ..candidate
+    };
+    let fabric = rehome(fabric_candidate, DestinationOwner::Inactive(2), lan_host);
+    assert_eq!(
+        fabric, fabric_candidate,
+        "fabric-egress MissingNeighbor is kept verbatim"
+    );
+    // A zero egress names no local route to reject.
+    let zero_candidate = ForwardingResolution {
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        ..candidate
+    };
+    let zero = rehome(zero_candidate, DestinationOwner::Inactive(2), lan_host);
+    assert_eq!(
+        zero, zero_candidate,
+        "zero-egress MissingNeighbor is kept verbatim"
+    );
+    // Other non-forwarding candidates keep their pre-#18659 behaviour.
+    let inactive_candidate = ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        ..candidate
+    };
+    let ha = rehome(inactive_candidate, DestinationOwner::Inactive(2), lan_host);
+    assert_eq!(
+        ha, inactive_candidate,
+        "HAInactive is not widened by #18659"
+    );
+}
+
+/// #18672: with a locally ACTIVE owner, a MissingNeighbor gets the
+/// ForwardCandidate keep tests. It keeps the candidate when it names the
+/// destination's connected egress, or when the owner is unknown (#16524
+/// mirror). Otherwise, the transient-FIB-lag case, it retains the stored
+/// redirect exactly as a ForwardCandidate does. Before #18672 the WAN
+/// MissingNeighbor row was returned as-is: the #18659 row shape (seat W
+/// repro on #18660).
+#[test]
+fn rehome_or_retain_owner_active_missing_neighbor_18672() {
+    use crate::afxdp::session_glue::DestinationOwner;
+    let forwarding = fw0_forwarding_unresolved_gateway_18659();
+    let lan_host = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    let internet = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let lan_zone = 21230;
+    let lan_ifindex = crate::afxdp::session_glue::connected_ifindex_for_target_in_table(
+        &forwarding,
+        lan_host,
+        None,
+    );
+    assert!(
+        lan_ifindex > 0,
+        "fixture: the ledger names the LAN host's connected egress"
+    );
+    assert_ne!(
+        lan_ifindex, 13,
+        "fixture: the connected egress is not the WAN VLAN"
+    );
+    let rehome = |candidate: ForwardingResolution, owner: DestinationOwner, target: IpAddr| {
+        crate::afxdp::session_glue::rehome_or_retain_fabric_redirect(
+            &forwarding,
+            stored_fabric_redirect_18659(),
+            candidate,
+            lan_zone,
+            owner,
+            Some(target),
+            None,
+        )
+    };
+    let wan_mn = missing_neighbor_wan_18659();
+    let wan_fc = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        neighbor_mac: Some([0x00, 0x10, 0xdb, 0xff, 0x10, 0x01]),
+        ..wan_mn
+    };
+    // Control: the ForwardCandidate on the WAN retains (transient FIB lag).
+    let fc = rehome(wan_fc, DestinationOwner::Active(2), lan_host);
+    assert_eq!(
+        fc.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "control: {fc:?}"
+    );
+    assert_eq!(fc.egress_ifindex, 4);
+    // The fix: the MissingNeighbor on the same egress retains the same way.
+    let mn = rehome(wan_mn, DestinationOwner::Active(2), lan_host);
+    assert_eq!(
+        mn.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "owner-active MissingNeighbor off the connected egress must not launder onto WAN, got {mn:?}"
+    );
+    assert_eq!(mn.egress_ifindex, 4);
+    // On the destination's connected egress it resolves locally: kept.
+    let on_link = ForwardingResolution {
+        egress_ifindex: lan_ifindex,
+        tx_ifindex: lan_ifindex,
+        next_hop: Some(lan_host),
+        tx_vlan_id: 0,
+        ..wan_mn
+    };
+    let kept = rehome(on_link, DestinationOwner::Active(2), lan_host);
+    assert_eq!(
+        kept, on_link,
+        "owner-active MissingNeighbor on the connected egress is kept"
+    );
+    // Unknown owner: never redirected (#16524 mirror), v4 and v6.
+    let unknown = rehome(wan_mn, DestinationOwner::Unknown, internet);
+    assert_eq!(
+        unknown, wan_mn,
+        "an unknown owner keeps its MissingNeighbor"
+    );
+    let wan_mn_v6 = ForwardingResolution {
+        next_hop: Some(IpAddr::V6("2001:559:8585:50::1".parse().expect("gw v6"))),
+        ..wan_mn
+    };
+    let internet_v6 = IpAddr::V6("2606:4700:4700::1111".parse().expect("internet v6"));
+    let unknown_v6 = rehome(wan_mn_v6, DestinationOwner::Unknown, internet_v6);
+    assert_eq!(
+        unknown_v6, wan_mn_v6,
+        "an unknown v6 owner keeps its MissingNeighbor"
+    );
+    // Fabric and zero egress stay verbatim under an active owner too.
+    let fabric_mn = ForwardingResolution {
+        egress_ifindex: 4,
+        tx_ifindex: 4,
+        ..wan_mn
+    };
+    assert_eq!(
+        rehome(fabric_mn, DestinationOwner::Active(2), lan_host),
+        fabric_mn
+    );
+    let zero_mn = ForwardingResolution {
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        ..wan_mn
+    };
+    assert_eq!(
+        rehome(zero_mn, DestinationOwner::Active(2), lan_host),
+        zero_mn
+    );
+}
+
+/// #18659 conversion table for `reverse_hit_departed_destination_redirect`
+/// with a MissingNeighbor disposition: it converts exactly where a
+/// ForwardCandidate converts, and nowhere else.
+#[test]
+fn reverse_departed_destination_converts_missing_neighbor_18659() {
+    let forwarding = fw0_forwarding_unresolved_gateway_18659();
+    let now_secs = 1_000u64;
+    let lan_host = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    let internet = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let lan_zone = 21230;
+    let split = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let both = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let convert = |ha: &BTreeMap<i32, HAGroupRuntime>,
+                   fabric_link: bool,
+                   is_reverse: bool,
+                   target: IpAddr,
+                   disposition: ForwardingDisposition| {
+        crate::afxdp::session_glue::reverse_hit_departed_destination_redirect(
+            &forwarding,
+            ha,
+            now_secs,
+            fabric_link,
+            is_reverse,
+            target,
+            None,
+            lan_zone,
+            disposition,
+        )
+    };
+    let mn = ForwardingDisposition::MissingNeighbor;
+    let converted =
+        convert(&split, false, true, lan_host, mn).expect("peer-owned MissingNeighbor converts");
+    assert_eq!(converted.disposition, ForwardingDisposition::FabricRedirect);
+    assert_eq!(converted.egress_ifindex, 4);
+    assert_eq!(
+        convert(
+            &split,
+            false,
+            true,
+            lan_host,
+            ForwardingDisposition::ForwardCandidate
+        )
+        .map(|r| r.disposition),
+        Some(ForwardingDisposition::FabricRedirect),
+        "control: ForwardCandidate converts on the same terms"
+    );
+    assert_eq!(
+        convert(&both, false, true, lan_host, mn),
+        None,
+        "locally active owner never converts"
+    );
+    assert_eq!(
+        convert(&split, false, true, internet, mn),
+        None,
+        "unknown owner never converts"
+    );
+    assert_eq!(
+        convert(&split, true, true, lan_host, mn),
+        None,
+        "a fabric-link arrival never re-redirects"
+    );
+    assert_eq!(
+        convert(&split, false, false, lan_host, mn),
+        None,
+        "a forward hit never converts"
+    );
+    assert_eq!(
+        convert(
+            &split,
+            false,
+            true,
+            lan_host,
+            ForwardingDisposition::HAInactive
+        ),
+        None,
+        "other dispositions are not widened"
+    );
+}
+
+/// #18659 packet path: the row the pre-fix activation refresh left behind
+/// (reverse companion rewritten to MissingNeighbor on the unresolved WAN
+/// gateway, stamped with the current generation) must still send the WAN
+/// reply over the fabric to the LAN owner. Before the fix the reply took the
+/// MissingNeighbor arm, whose #1913 gate judged wan->wan and denied it. That
+/// was the live `deny@poll_descriptor/mod.rs:11869 ... local=MissingNeighbor/eg12`
+/// shape.
+#[test]
+fn split_rg_laundered_reverse_row_wan_reply_fabric_tx_18659() {
+    let synthesis = fw0_forwarding_15958b();
+    let forwarding = fw0_forwarding_unresolved_gateway_18659();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let mut sessions = fw0_both_halves_sessions_15958b(&synthesis, now_ns);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let reverse_key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+        src_port: 443,
+        dst_port: 12345,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let (mut decision, metadata, _) = sessions
+        .entry_with_origin(&reverse_key)
+        .expect("fixture: TCP reverse companion keyed by the reply wire tuple");
+    assert!(metadata.is_reverse);
+    decision.resolution = missing_neighbor_wan_18659();
+    assert!(
+        sessions.refresh_for_ha_transition(&reverse_key, decision, metadata.clone(), now_ns),
+        "launder the row as the pre-fix refresh did"
+    );
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(172, 16, 80, 8),
+        443,
+        12345,
+        TCP_FLAG_ACK,
+        [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00],
+    );
+    let mut meta = txn_meta_v4(14, TCP_FLAG_ACK, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
+    meta.protocol = PROTO_TCP;
+    meta.flow_src_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+    meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+    meta.flow_src_port = 443;
+    meta.flow_dst_port = 12345;
+    let mut bindings = wan_lan_bindings_fw0_15958b();
+    let (_batch, dbg, egress) = txn_run_multi_binding_15958(
+        &mut bindings,
+        0,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(
+        dbg.policy_deny, 0,
+        "the WAN reply must not reach the #1913 MissingNeighbor gate"
+    );
+    let egress = egress.expect("the WAN reply must cross the fabric to the LAN owner");
+    assert_eq!(
+        &egress[0..6],
+        &[0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60],
+        "peer fabric MAC"
+    );
+    assert_eq!(&egress[30..34], &[10, 0, 61, 102], "un-NATed LAN client");
+    assert_eq!(
+        bindings[0]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "WAN must not TX the reply"
+    );
+}
+
 fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
     let lan_host: Ipv6Addr = "2001:559:8585:ef00:1266:6aff:fe0b:d017"
         .parse()

@@ -91,7 +91,38 @@ MAX_STANDBY_WAN_TX_DELTA="${MAX_STANDBY_WAN_TX_DELTA:-0}"
 REQUIRE_FABRIC_ACTIVITY="${REQUIRE_FABRIC_ACTIVITY:-1}"
 MIN_FABRIC_TX_DELTA="${MIN_FABRIC_TX_DELTA:-1}"
 FABRIC_ACTIVITY_TRIGGER_DELTA="${FABRIC_ACTIVITY_TRIGGER_DELTA:-8}"
-MAX_FAILOVER_SESSION_MISS_DELTA="${MAX_FAILOVER_SESSION_MISS_DELTA:-64}"
+# #18670: RG1 Group 1 is two judged checks over the RG1 failback window,
+# both nodes summed.
+#
+# 1a, session-miss drops. An ESTABLISHED TCP flow whose session is missing
+# after the move is, under the lab's SYN-first default (no `no-syn-check`), a
+# transit session miss that the gate DROPS and counts as a screen drop
+# (`strict_syn_check_drops_new_flow_tunnel_with_payload`, recorded as
+# "strict-syn-check"; closing misses and unknown-flags fragments too). The
+# helper exposes that only in the aggregate `Screen drops`, so 1a bounds
+# `strict-syn-check` drops (other screen reasons add to it), not lost sessions
+# as such. Recorded windows read 0 on every node (tcp master x5 and #18656 x5,
+# loss master and #18656 x1 each); 0 in 12 windows bounds the per-window
+# false-red rate only at about 22% (exact binomial 95% bound,
+# 1 - 0.05^(1/12)), and a lost established flow drops on every retransmitted
+# packet, so the budget is 4.
+#
+# 1b, a coarse raw `Session misses` floor. 1a is blind to a lost session whose
+# miss resolves to LocalDelivery: with the labs' catch-all `source-nat
+# interface`, the WAN->LAN reply half of a lost SNAT session is addressed to
+# the firewall's own WAN address, LocalDelivery is exempt from the SYN-first
+# gate, and the packet is counted as a host-inbound deny instead (#18531's
+# third mechanism). The miss counter runs before disposition, so a raw floor
+# still sees it. Recorded raw deltas: 18-61 on master, up to 71 on #18656
+# (a new flow is one miss and one or two creates, depending on whether a local
+# reverse companion is installed). A flow that loses its reply path stalls
+# within about one RTT: roughly a window of ACK misses per stream, then one per
+# RTO backoff. So 1b detects a BROAD reply-half loss (most streams, the #18531
+# failback shape), with about 185 misses of headroom over the largest recorded
+# delta; a single-stream loss can stay under it and is left to the iperf3
+# stream-continuity cells.
+MAX_FAILOVER_SESSION_MISS_DROP_DELTA="${MAX_FAILOVER_SESSION_MISS_DROP_DELTA:-4}"
+MAX_FAILOVER_RAW_SESSION_MISS_FLOOR="${MAX_FAILOVER_RAW_SESSION_MISS_FLOOR:-256}"
 MAX_FAILOVER_NEIGHBOR_MISS_DELTA="${MAX_FAILOVER_NEIGHBOR_MISS_DELTA:-60}"
 MAX_FAILOVER_ROUTE_MISS_DELTA="${MAX_FAILOVER_ROUTE_MISS_DELTA:-32}"
 MAX_FAILOVER_POLICY_DENIED_DELTA="${MAX_FAILOVER_POLICY_DENIED_DELTA:-0}"
@@ -155,6 +186,11 @@ cost()  { echo "  COST  $*"; PASS=$((PASS + 1)); COST=$((COST + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 
 die() { echo "FATAL: $*" >&2; exit 2; }
+# #18670: the old raw session-miss budget (64) is gone; an override of it
+# would be silently ignored, so refuse it.
+if [[ -n "${MAX_FAILOVER_SESSION_MISS_DELTA+x}" ]]; then
+	die "MAX_FAILOVER_SESSION_MISS_DELTA no longer applies (#18670): RG1 Group 1a judges Screen drops (MAX_FAILOVER_SESSION_MISS_DROP_DELTA) and Group 1b a coarse raw Session misses floor (MAX_FAILOVER_RAW_SESSION_MISS_FLOOR)"
+fi
 failover_duration_value() {
 	local requested="$1" minimum="$2"
 	if [[ ! "$minimum" =~ ^[0-9]+$ ]]; then
@@ -192,6 +228,9 @@ HA_CAPTURE_DIR="${TMPDIR:-/var/worktrees/.cache/tmpdir}/test-failover-ha-$$"
 declare -A RG1_STATS=()
 declare -A RG1_INTERFACES=()
 declare -A RG1_STATUS=()
+# #18670 (report-only, #18681): `show security flow statistics` per node and
+# phase, for the host-inbound-denied delta.
+declare -A RG1_FLOWSTATS=()
 declare -A RG1_SAMPLE_STATS=()
 declare -A RG1_SAMPLE_INTERFACES=()
 RG1_FAILBACK_SETTLED=false
@@ -235,6 +274,15 @@ ha_capture_rg1_node() {
 	if ! ha_capture_cli "$node" 'show chassis cluster status' \
 		manual-rg1-failback "$phase" "$node_id" 1 "${RG1_STATUS["${phase}:${node_id}"]}"; then
 		result=2
+	fi
+	# #18670 report-only (#18681): a failed capture here never VOIDs the
+	# slice. The helper PID from the stats capture just above rides along so
+	# the delta gets the same helper-identity guard.
+	RG1_FLOWSTATS["${phase}:${node_id}"]="${base}.flowstats"
+	if ha_capture_cli "$node" 'show security flow statistics' \
+		manual-rg1-failback "$phase" "$node_id" 1 "${RG1_FLOWSTATS["${phase}:${node_id}"]}" 2>/dev/null; then
+		ha_flowstats_append_helper_pid "${RG1_STATS["${phase}:${node_id}"]}" \
+			"${RG1_FLOWSTATS["${phase}:${node_id}"]}"
 	fi
 	return "$result"
 }
@@ -747,7 +795,8 @@ ha_emit_diagnostic_verdict() {
 
 ha_rg1_mark_groups_void() {
 	local reason="$1"
-	void "RG1 Group 1 session-miss budget: ${reason}"
+	void "RG1 Group 1a session-miss drops: ${reason}"
+	void "RG1 Group 1b raw session-miss floor: ${reason}"
 	void "RG1 Group 2 neighbor-miss budget: ${reason}"
 	void "RG1 Group 3 route-miss budget: ${reason}"
 	void "RG1 Group 4 policy-denied budget: ${reason}"
@@ -843,8 +892,32 @@ ha_rg1_evaluate() {
 		return
 	fi
 
-	ha_emit_verdict "RG1 Group 1 session misses (phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_SESSION_MISS_DELTA})" \
-		ha_pair_counter_budget_verdict "$MAX_FAILOVER_SESSION_MISS_DELTA" "Session misses" \
+	local group1_misses group1_creates group1_line="" group1_node
+	for group1_node in node0 node1; do
+		if group1_misses=$(ha_snapshot_counter_delta manual-rg1-failback 1 "$group1_node" "Session misses" \
+			phase-pre "${RG1_STATS[phase-pre:${group1_node}]}" phase-post "${RG1_STATS[phase-post:${group1_node}]}" 2>/dev/null) \
+			&& group1_creates=$(ha_snapshot_counter_delta manual-rg1-failback 1 "$group1_node" "Session creates" \
+			phase-pre "${RG1_STATS[phase-pre:${group1_node}]}" phase-post "${RG1_STATS[phase-post:${group1_node}]}" 2>/dev/null); then
+			group1_line+="${group1_line:+ }${group1_node} misses=${group1_misses} creates=${group1_creates}"
+		else
+			group1_line+="${group1_line:+ }${group1_node} unavailable"
+		fi
+	done
+	info "RG1 Group 1 report-only session counters (phase-pre→phase-post): ${group1_line}"
+	local group1_inbound
+	group1_inbound=$(ha_host_inbound_denies_report \
+		"${RG1_FLOWSTATS[phase-pre:node0]:-}" "${RG1_FLOWSTATS[phase-pre:node1]:-}" \
+		"${RG1_FLOWSTATS[phase-post:node0]:-}" "${RG1_FLOWSTATS[phase-post:node1]:-}" 2>/dev/null) \
+		|| group1_inbound="node0=unavailable node1=unavailable"
+	# Expires-when: #18681 closed
+	info "RG1 Group 1 report-only host-inbound denies (phase-pre→phase-post, not judged until #18681): ${group1_inbound}"
+	ha_emit_verdict "RG1 Group 1a session-miss drops (Screen drops: SYN-first drops of non-SYN TCP session misses, phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_SESSION_MISS_DROP_DELTA})" \
+		ha_pair_counter_budget_verdict "$MAX_FAILOVER_SESSION_MISS_DROP_DELTA" "Screen drops" \
+		manual-rg1-failback 1 phase-pre phase-post \
+		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
+		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
+	ha_emit_verdict "RG1 Group 1b raw session-miss floor (Session misses, phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_RAW_SESSION_MISS_FLOOR})" \
+		ha_pair_counter_budget_verdict "$MAX_FAILOVER_RAW_SESSION_MISS_FLOOR" "Session misses" \
 		manual-rg1-failback 1 phase-pre phase-post \
 		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
 		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
@@ -896,8 +969,12 @@ ha_rg1_evaluate() {
 			void "RG1 Group 6 dynamic fabric TX unavailable: ${reason:-counter delta unavailable}"
 		fi
 	fi
+	# #18686: the readiness fields (Enabled, Forwarding armed, the HA groups
+	# line, Ready bindings) are in the data-plane statistics capture
+	# (RG1_STATS), not the cluster-status one (RG1_STATUS). Handed .status,
+	# this group was VOID on every run.
 	ha_emit_verdict "RG1 Group 7 former-owner readiness on RG1" \
-		ha_rg_standby_status_verdict "${RG1_STATUS[mid:node1]}" \
+		ha_rg_standby_status_verdict "${RG1_STATS[mid:node1]}" \
 		manual-rg1-failback mid node1 1
 
 	local sample_error="${HA_CAPTURE_DIR}/rg1-samples.err"
@@ -1686,8 +1763,26 @@ info "Crashing fw0 (sysrq reboot — unclean shutdown, tests worst-case failover
 # Braces, not just 2>/dev/null on the command: bash prints its own
 # "Killed" job notice for the SIGKILLed child, which would land in the
 # test transcript as alarming noise.
+#
+# #18692: the per-stream crash cell also needs the crash instant to well
+# under a second on iperf3's own clock; the integer $SECONDS difference can
+# sit a second either side of it. Read:
+#   - before the sysrq, the LAN host's clock minus this host's (the iperf3
+#     client stamps its start with the LAN host's clock):
+#     `_failover_clock_offset`'s minimum-RTT reading, "<offset_s> <rtt_s>";
+#   - this host's clock just before the sysrq exec (`failover_epoch`) and
+#     just after it returns or is killed as the VM dies
+#     (`failover_epoch_after`). Only that pair bounds when the sysrq ran: an
+#     exec round trip measured beforehand is a minimum, not a limit.
+# iperf3_sum_parse.py looks for the aggregate's own stop inside that window
+# and anchors on it; with no stop there, or any reading missing, the cell
+# falls back to the integer anchor (judged at it and +/-1 s).
+failover_client_clock=$(_failover_clock_offset "$CLUSTER_LAN_HOST" 3) || failover_client_clock=""
+failover_epoch=$(date +%s.%N)
 failover_at_seconds=$((SECONDS - iperf_start_seconds))
 { timeout -k 5 10 incus exec "$FW0" -- bash -c 'echo b > /proc/sysrq-trigger' || true; } 2>/dev/null
+failover_epoch_after=$(date +%s.%N)
+info "#18692 crash anchor: integer ${failover_at_seconds}s after iperf start; epochs ${failover_epoch}..${failover_epoch_after}; LAN-host clock offset/rtt ${failover_client_clock:-unread}"
 
 # Wait for fw1 to detect failure and become primary
 sleep 3
@@ -1821,6 +1916,7 @@ fi
 ha_run_rg02_failback() {
 	local rg fo_start fo_elapsed moved
 	failback_at_seconds=0
+	failback_epoch=""
 	failback_request_at_seconds=""
 	failback_landed_at_seconds=""
 	info "Manual failover: requesting fw1 to failover RG0 and RG2 to fw0"
@@ -1868,6 +1964,7 @@ ha_run_rg02_failback() {
 		done
 		fo_elapsed=$(($(date +%s) - fo_start))
 		if ((moved)); then
+			failback_epoch=$(date +%s.%N) # #18692: sub-second twin of the next line
 			failback_at_seconds=$((SECONDS - iperf_start_seconds))
 			failback_landed_at_seconds="${failback_landed_at_seconds:+$failback_landed_at_seconds }${failback_at_seconds}"
 			if ((fo_elapsed > slowest)); then
@@ -2101,6 +2198,27 @@ ha_build_planned_move_args
 # Missing, malformed, or incomplete metrics are VOID evidence, never a
 # zero-valued throughput FAIL; valid averages go through the anchored cell.
 # M1 JSON capture/gate fixture begin
+# ha_crash_resume_at <log> -- the crash instant the per-stream crash cell
+# uses (#18692; the same clock window, then the aggregate's stop within +/-1 s
+# of the integer anchor), printed as seconds on iperf3's clock, else the
+# integer anchor. The producer excuses a RESUMING stream's zero seconds up to
+# the cell's 10 s FAIL line from there, so a straggler is one COST, not a COST
+# plus an "outside" zero-interval FAIL.
+ha_crash_resume_at() {
+	local anchor_args=() line
+	if [[ "${failover_client_clock:-}" =~ ^-?[0-9.]+\ [0-9.]+$ ]]; then
+		anchor_args=(--client-clock-offset "${failover_client_clock% *}"
+			--client-clock-rtt "${failover_client_clock#* }"
+			--crash-epoch "${failover_epoch:-}" --crash-epoch-after "${failover_epoch_after:-}")
+	fi
+	if line=$(python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" --print-crash-anchor \
+		--crash-at "$failover_at_seconds" "${anchor_args[@]}" <"$1" 2>/dev/null) &&
+		[[ "$line" =~ ^-?[0-9.]+\  ]]; then
+		printf '%s\n' "${line%% *}"
+	else
+		printf '%s\n' "$failover_at_seconds"
+	fi
+}
 LOCAL_IPERF_LOG="${TMPDIR:-/var/worktrees/.cache/tmpdir}/iperf3-failover.$$.json-stream.log"
 LOCAL_IPERF_METRICS="${TMPDIR:-/var/worktrees/.cache/tmpdir}/iperf3-failover.$$.metrics.json"
 LOCAL_IPERF_GATE_ERR="${LOCAL_IPERF_METRICS}.gate.err"
@@ -2114,6 +2232,7 @@ if ! incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log \
 elif ! python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" \
 	"$LOCAL_IPERF_LOG" --event-sec "$failover_at_seconds" \
 	"${planned_move_args[@]}" --event-window-sec 3 \
+	--resume-event-sec "$(ha_crash_resume_at "$LOCAL_IPERF_LOG")" \
 	>"$LOCAL_IPERF_METRICS" 2>"$LOCAL_IPERF_PRODUCER_ERR"; then
 	printf '{"ok":false,"error":"metrics_parse_failed"}\n' >"$LOCAL_IPERF_METRICS"
 fi
@@ -2140,6 +2259,13 @@ if [[ "$iperf_gate_ok" == true ]]; then
 	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside the crash and planned-move windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)" \
 		ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals outside the [T, T+3] windows (MAX_STREAM_ZERO_INTERVALS)"
 	info "iperf3 whole-run zero-throughput streams: ${zero_streams_total} (${zero_streams_outside_events_total} outside the crash and planned-move windows)"
+	# #18692: zero seconds of streams that resumed before the crash cell's
+	# 10 s FAIL line are that cell's COST, not "outside" zeros; the count is
+	# recorded so the excusal itself stays visible.
+	resume_excused=$(python3 -c 'import json, sys; print(int(json.load(open(sys.argv[1])).get("stream_zero_intervals_resume_excused_total", 0)))' \
+		"$LOCAL_IPERF_METRICS" 2>/dev/null) || resume_excused=0
+	echo "HARNESS_METRIC: crash_resume_excused_zero_intervals=${resume_excused}"
+	info "iperf3 per-stream zero intervals of streams that resumed within the crash cell's 10 s line (not counted outside): ${resume_excused}"
 	ha_planned_move_cells "$LOCAL_IPERF_METRICS" "$planned_moves_registered"
 	pass "iperf3 sender retransmits ${retransmits}"
 	if [[ -n "$MAX_RETRANSMITS" ]]; then
@@ -2211,16 +2337,35 @@ fi
 
 if [[ "$iperf_gate_ok" == true ]]; then
 	oracle_error="${LOCAL_IPERF_METRICS}.oracle.err"
+	# #18692: the sub-second anchors read at the crash and the failback, and
+	# the stream cells' policy (--straggler-cost): FAIL when a stream has not
+	# resumed within 10 s, COST when it resumed after 3 s. A cell without a
+	# precise anchor is the integer verdict at --crash-at/--failback-at and
+	# +/-1 s, VOID when those disagree.
+	oracle_anchor_args=(--straggler-cost)
+	if [[ "$failover_client_clock" =~ ^-?[0-9.]+\ [0-9.]+$ ]]; then
+		oracle_anchor_args+=(--client-clock-offset "${failover_client_clock% *}"
+			--client-clock-rtt "${failover_client_clock#* }"
+			--crash-epoch "$failover_epoch" --crash-epoch-after "$failover_epoch_after")
+		if [[ -n "${failback_epoch:-}" ]]; then
+			oracle_anchor_args+=(--failback-epoch "$failback_epoch")
+		fi
+	else
+		info "#18692: the LAN-host clock reading is missing; the stream cells use the integer anchors"
+	fi
 	if failover_oracles=$(python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" \
 		--failover-check --json-stream --streams "$IPERF_STREAMS" \
 		--min-throughput-gbps "$MIN_THROUGHPUT" --crash-at "$failover_at_seconds" \
 		--failback-at "$failback_at_seconds" \
+		"${oracle_anchor_args[@]}" --emit-metrics \
 		<"$LOCAL_IPERF_LOG" 2>"$oracle_error"); then
 		while IFS= read -r oracle; do
 			case "$oracle" in
 			PASS\ *) pass "${oracle#PASS }" ;;
 			FAIL\ *) fail "${oracle#FAIL }" ;;
 			VOID\ *) void "${oracle#VOID }" ;;
+			COST\ *) cost "${oracle#COST }" ;;
+			METRIC\ *) echo "HARNESS_METRIC: ${oracle#METRIC }" ;;
 			*)       fail "iperf3 failover oracle returned an unrecognised verdict: ${oracle}" ;;
 			esac
 		done <<< "$failover_oracles"
