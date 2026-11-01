@@ -3614,6 +3614,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // #18691: decline a non-owner's
                                 // gateway-route fallback line.
                                 Some((worker_ctx.ha_state, now_secs)),
+                                // #18710: judge a not-yet-materialized
+                                // forward companion from the shared map.
+                                Some(worker_ctx.shared_sessions),
                             );
                         let owner_icmp_verdict =
                             if session_hit_revocation.is_none() && foreign_arrival_zone.is_none() {

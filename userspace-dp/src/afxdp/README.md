@@ -2389,6 +2389,16 @@ relies on the #16270 ordering (connected prefixes republished before
 #18705. The operator-level account is in
 `docs/ha-failover-status.md` (#18531, #18691).
 
+A reverse hit whose forward companion this worker has not materialized
+(`SourceNatRevalidationTarget::NoLocalEntry`) is judged on the forward row in
+the SHARED map when that row is locally authored (#18710,
+`shared_forward_companion_for_reverse_hit`). A fresh flow's first reply can
+reach a worker before it drains the creating worker's replica command, and
+the sessionless arm, which fails closed without forward VLAN provenance,
+dropped that reply (a SYN-ACK: a 1 s SYN retransmit). A peer-synced shared
+row and a reply with no shared companion keep the sessionless arm. With no
+local row, a failed judgment drops only the packet.
+
 ## Hot-path constants
 
 - `RX_BATCH_SIZE = 64`

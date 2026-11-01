@@ -1,0 +1,380 @@
+// Probe: a fresh SNAT flow whose FIRST reply is polled by a worker that does
+// not hold the forward row.
+//
+// Live (#18683 run 3, tcp, 0.0.29548): on the owner of every RG, in steady
+// state, `xpf_userspace_snat_revoked_sessions_total` rose by one within a
+// second of test-failover opening its pool-mode SNAT flows (10.0.62.240 ->
+// :5210), with no Close logged. A revocation without a Close fits the
+// canonical-less reverse arm of the first-hit source-NAT revalidation: no
+// local forward companion, so the reply is judged sessionlessly and dropped.
+//
+// RSS hashes the reply tuple independently of the forward tuple, so a fresh
+// flow's first reply lands on another worker most of the time. These cells
+// create the flow on worker A and poll its first reply on worker B, which
+// shares A's shared session maps but holds no rows of its own.
+use super::tests_split_rg_failback_18531::*;
+use super::tests_support::*;
+use super::*;
+
+const POOL_CLIENT: Ipv4Addr = Ipv4Addr::new(10, 0, 61, 241);
+const IFACE_CLIENT: Ipv4Addr = Ipv4Addr::new(10, 0, 61, 102);
+const SYN: u8 = crate::tcp_flags::TCP_SYN;
+const SYN_ACK: u8 = crate::tcp_flags::TCP_SYN | crate::tcp_flags::TCP_ACK;
+
+struct Shared {
+    sessions: Arc<Mutex<FastMap<crate::session::SessionKey, SyncedSessionEntry>>>,
+    nat: Arc<Mutex<FastMap<crate::session::SessionKey, SyncedSessionEntry>>>,
+    wire: Arc<Mutex<FastMap<crate::session::SessionKey, SyncedSessionEntry>>>,
+    owner_rg: SharedSessionOwnerRgIndexes,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Shared {
+            sessions: Arc::new(Mutex::new(FastMap::default())),
+            nat: Arc::new(Mutex::new(FastMap::default())),
+            wire: Arc::new(Mutex::new(FastMap::default())),
+            owner_rg: SharedSessionOwnerRgIndexes::default(),
+        }
+    }
+}
+
+struct Poll {
+    missing_neigh: u64,
+    session_hit: u64,
+    session_miss: u64,
+    snat_revoked: u64,
+    tx: [u64; 3],
+    closes: usize,
+}
+
+fn poll(
+    sessions: &mut SessionTable,
+    shared: &Shared,
+    forwarding: &ForwardingState,
+    ha: &BTreeMap<i32, HAGroupRuntime>,
+    ingress: usize,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> Poll {
+    poll_at(sessions, shared, forwarding, ha, ingress, frame, meta, 7)
+}
+
+#[expect(clippy::too_many_arguments, reason = "test harness")]
+fn poll_at(
+    sessions: &mut SessionTable,
+    shared: &Shared,
+    forwarding: &ForwardingState,
+    ha: &BTreeMap<i32, HAGroupRuntime>,
+    ingress: usize,
+    frame: &[u8],
+    mut meta: UserspaceDpMeta,
+    config_generation: u64,
+) -> Poll {
+    meta.config_generation = config_generation;
+    let mut bindings = bindings();
+    let (_batch, dbg, _egress) = txn_run_multi_binding_with_shared_maps(
+        &mut bindings,
+        ingress,
+        sessions,
+        forwarding,
+        ha,
+        frame,
+        meta,
+        &shared.sessions,
+        &shared.nat,
+        &shared.wire,
+        &shared.owner_rg,
+        config_generation,
+        1,
+    );
+    assert_eq!(
+        dbg.rx, 1,
+        "anti-vacuity: the descriptor must reach the poll body"
+    );
+    let tx = |b: &BindingWorker| b.live.tx_packets.load(std::sync::atomic::Ordering::Relaxed);
+    let closes = sessions
+        .drain_deltas(64)
+        .iter()
+        .filter(|d| d.kind == crate::session::SessionDeltaKind::Close)
+        .count();
+    Poll {
+        missing_neigh: dbg.missing_neigh,
+        session_hit: dbg.session_hit,
+        session_miss: dbg.session_miss,
+        snat_revoked: dbg.snat_revoked_sessions,
+        tx: [
+            tx(&bindings[WAN]),
+            tx(&bindings[FABRIC]),
+            tx(&bindings[LAN]),
+        ],
+        closes,
+    }
+}
+
+fn lan_syn(client: Ipv4Addr) -> (Vec<u8>, UserspaceDpMeta) {
+    let frame = build_txn_tcp_syn_frame_v4(
+        client,
+        WAN_HOST,
+        SPORT,
+        5210,
+        SYN,
+        [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03],
+    );
+    let mut meta = txn_meta_v4(LAN_IFINDEX as u32, SYN, frame.len() as u16);
+    set_flow(
+        &mut meta,
+        IpAddr::V4(client),
+        IpAddr::V4(WAN_HOST),
+        SPORT,
+        5210,
+    );
+    (frame, meta)
+}
+
+fn wan_syn_ack(translated: Ipv4Addr, port: u16) -> (Vec<u8>, UserspaceDpMeta) {
+    let frame = build_txn_tcp_syn_frame_v4(
+        WAN_HOST,
+        translated,
+        5210,
+        port,
+        SYN_ACK,
+        [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01],
+    );
+    let mut meta = txn_meta_v4(WAN_UNIT_IFINDEX as u32, SYN_ACK, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
+    set_flow(
+        &mut meta,
+        IpAddr::V4(WAN_HOST),
+        IpAddr::V4(translated),
+        5210,
+        port,
+    );
+    (frame, meta)
+}
+
+/// Create the flow on worker A (the SYN), then poll its first reply on
+/// worker A or worker B. Returns (A's create poll, the reply poll,
+/// translated address/port).
+fn first_reply(client: Ipv4Addr, reply_on_b: bool) -> (Poll, Poll, Ipv4Addr, u16) {
+    first_reply_with(client, reply_on_b, |_, _| {})
+}
+
+/// As `first_reply`, with `tamper` applied to the shared session map (and
+/// the forward key) after the flow is created and before its reply.
+fn first_reply_with(
+    client: Ipv4Addr,
+    reply_on_b: bool,
+    tamper: impl FnOnce(
+        &mut FastMap<crate::session::SessionKey, SyncedSessionEntry>,
+        &crate::session::SessionKey,
+    ),
+) -> (Poll, Poll, Ipv4Addr, u16) {
+    let mut forwarding = fw1_owner_forwarding();
+    // The captured snapshot learned no neighbor for the pool clients
+    // (10.0.61.240/28); give the client one so a delivered reply is visible
+    // end to end (without it the reply stops at MissingNeighbor, a harness
+    // artefact, not part of #18710).
+    forwarding
+        .neighbors
+        .entry((LAN_IFINDEX, IpAddr::V4(client)))
+        .or_insert(NeighborEntry {
+            mac: [0x10, 0x66, 0x6a, 0xfd, 0x4b, 0x5c],
+        });
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha = owner_ha(now_secs);
+    let shared = Shared::new();
+    let mut a = SessionTable::new();
+    a.set_forwarding_revalidation_gen(7, 9);
+    let (frame, meta) = lan_syn(client);
+    let created = poll(&mut a, &shared, &forwarding, &ha, LAN, &frame, meta);
+    let mut key = forward_key();
+    key.src_ip = IpAddr::V4(client);
+    key.dst_port = 5210;
+    let (decision, _, _) = a
+        .entry_with_origin(&key)
+        .unwrap_or_else(|| panic!("fixture: worker A created the forward row ({client})"));
+    let IpAddr::V4(translated) = decision
+        .nat
+        .rewrite_src
+        .expect("fixture: source-translated")
+    else {
+        panic!("v4")
+    };
+    let port = decision.nat.rewrite_src_port.unwrap_or(SPORT);
+    assert!(
+        shared.sessions.lock().unwrap().contains_key(&key),
+        "premise: the creating worker published the forward row to the shared map"
+    );
+    tamper(&mut shared.sessions.lock().unwrap(), &key);
+    let mut b = SessionTable::new();
+    b.set_forwarding_revalidation_gen(7, 9);
+    let (frame, meta) = wan_syn_ack(translated, port);
+    let reply = if reply_on_b {
+        poll(&mut b, &shared, &forwarding, &ha, WAN, &frame, meta)
+    } else {
+        poll(&mut a, &shared, &forwarding, &ha, WAN, &frame, meta)
+    };
+    (created, reply, translated, port)
+}
+
+/// Control: the first reply polled by the worker that created the flow is
+/// judged against its local forward row and delivered (interface SNAT).
+#[test]
+fn first_reply_on_the_creating_worker_is_delivered_18710() {
+    for (label, client) in [("interface", IFACE_CLIENT), ("pool", POOL_CLIENT)] {
+        let (created, reply, _, _) = first_reply(client, false);
+        assert_eq!(created.session_miss, 1, "{label}: the SYN creates the flow");
+        assert_eq!(
+            reply.session_hit, 1,
+            "{label}: the reply hits the reverse row"
+        );
+        assert_eq!((reply.snat_revoked, reply.closes), (0, 0), "{label}");
+        assert_eq!(reply.tx, [0, 0, 1], "{label}: delivered to the LAN host");
+    }
+}
+
+/// #18710: the first reply polled by a worker that does not hold the forward
+/// row yet (it has not drained the creating worker's replica) must not be
+/// dropped by the canonical-less reverse arm. RED today for interface and
+/// pool SNAT: `snat_revoked = 1`, no Close, nothing transmitted.
+#[test]
+fn first_reply_on_another_worker_is_not_revoked_18710() {
+    for (label, client) in [("interface", IFACE_CLIENT), ("pool", POOL_CLIENT)] {
+        let (_, reply, _, _) = first_reply(client, true);
+        assert_eq!(
+            reply.session_hit, 1,
+            "{label}: the reply hits the shared reverse row"
+        );
+        assert_eq!(
+            (reply.snat_revoked, reply.closes),
+            (0, 0),
+            "{label}: a forward row not materialized yet is no ground to revoke"
+        );
+    }
+    for (label, client) in [("interface", IFACE_CLIENT), ("pool", POOL_CLIENT)] {
+        let (_, reply, _, _) = first_reply(client, true);
+        assert_eq!(reply.tx, [0, 0, 1], "{label}: delivered to the LAN host");
+    }
+}
+
+/// Control: a reply whose forward companion is genuinely absent (no local
+/// row and no shared row) still fails closed, as before.
+#[test]
+fn first_reply_with_no_companion_anywhere_still_revokes_18710() {
+    for (label, client) in [("interface", IFACE_CLIENT), ("pool", POOL_CLIENT)] {
+        let (_, reply, _, _) = first_reply_with(client, true, |shared, key| {
+            shared.remove(key);
+        });
+        assert_eq!(
+            reply.session_hit, 1,
+            "{label}: the reply hits the shared reverse row"
+        );
+        assert_eq!(
+            reply.snat_revoked, 1,
+            "{label}: no companion anywhere keeps the fail-closed arm"
+        );
+        assert_eq!(reply.tx, [0, 0, 0], "{label}: dropped");
+    }
+}
+
+/// Control: a PEER-SYNCED shared companion carries the peer's line, so the
+/// shared judgment does not apply to it and the sessionless arm decides, as
+/// before.
+#[test]
+fn first_reply_with_a_peer_synced_shared_companion_keeps_the_old_arm_18710() {
+    let (_, reply, _, _) = first_reply_with(IFACE_CLIENT, true, |shared, key| {
+        if let Some(entry) = shared.get_mut(key) {
+            entry.origin = SessionOrigin::SyncImport;
+        }
+    });
+    assert_eq!(
+        reply.session_hit, 1,
+        "the reply hits the shared reverse row"
+    );
+    assert_eq!(
+        reply.snat_revoked, 1,
+        "the peer-synced companion is not judged from the shared map"
+    );
+}
+
+/// Characterization (printed, not asserted): the outcome matrix the #18710
+/// issue quotes.
+#[test]
+fn fresh_flow_first_reply_probe() {
+    for (label, client) in [("pool", POOL_CLIENT), ("interface", IFACE_CLIENT)] {
+        for reply_on_b in [false, true] {
+            let (created, reply, translated, port) = first_reply(client, reply_on_b);
+            eprintln!(
+                "PROBE {label} reply_on_{}: create miss={} tx={:?}; translated {translated}:{port}; \
+                 reply hit={} miss={} snat_revoked={} closes={} tx={:?} missing_neigh={}",
+                if reply_on_b { "B" } else { "A" },
+                created.session_miss,
+                created.tx,
+                reply.session_hit,
+                reply.session_miss,
+                reply.snat_revoked,
+                reply.closes,
+                reply.tx,
+                reply.missing_neigh
+            );
+        }
+    }
+}
+
+/// Positive control: a translation the live config no longer produces (the
+/// SNAT rules were withdrawn by a commit after the flow was created) still
+/// revokes on the first reply. On the creating worker the local pair is torn
+/// down (one Close); on a worker that judges the shared row the reply is
+/// dropped and nothing local is torn down.
+#[test]
+fn withdrawn_translation_still_revokes_on_either_worker_18710() {
+    for (label, client) in [("interface", IFACE_CLIENT), ("pool", POOL_CLIENT)] {
+        for reply_on_b in [false, true] {
+            let mut forwarding = fw1_owner_forwarding();
+            forwarding
+                .neighbors
+                .entry((LAN_IFINDEX, IpAddr::V4(client)))
+                .or_insert(NeighborEntry { mac: [0x10, 0x66, 0x6a, 0xfd, 0x4b, 0x5c] });
+            let mut withdrawn = fw1_owner_forwarding();
+            withdrawn
+                .neighbors
+                .entry((LAN_IFINDEX, IpAddr::V4(client)))
+                .or_insert(NeighborEntry { mac: [0x10, 0x66, 0x6a, 0xfd, 0x4b, 0x5c] });
+            withdrawn.source_nat_rules.clear();
+            let now_secs = monotonic_nanos() / 1_000_000_000;
+            let ha = owner_ha(now_secs);
+            let shared = Shared::new();
+            let mut a = SessionTable::new();
+            a.set_forwarding_revalidation_gen(7, 9);
+            let (frame, meta) = lan_syn(client);
+            poll(&mut a, &shared, &forwarding, &ha, LAN, &frame, meta);
+            let mut key = forward_key();
+            key.src_ip = IpAddr::V4(client);
+            key.dst_port = 5210;
+            let (decision, _, _) = a.entry_with_origin(&key).expect("fixture: forward row");
+            let IpAddr::V4(translated) = decision.nat.rewrite_src.expect("translated") else {
+                panic!("v4")
+            };
+            let port = decision.nat.rewrite_src_port.unwrap_or(SPORT);
+            let mut b = SessionTable::new();
+            b.set_forwarding_revalidation_gen(8, 9);
+            a.set_forwarding_revalidation_gen(8, 9);
+            let (frame, meta) = wan_syn_ack(translated, port);
+            let table = if reply_on_b { &mut b } else { &mut a };
+            let reply = poll_at(table, &shared, &withdrawn, &ha, WAN, &frame, meta, 8);
+            let on = if reply_on_b { "B" } else { "A" };
+            assert_eq!(reply.snat_revoked, 1, "{label} on {on}: a withdrawn translation revokes");
+            assert_eq!(reply.tx, [0, 0, 0], "{label} on {on}: the reply is dropped");
+            if reply_on_b {
+                assert_eq!(reply.closes, 0, "{label} on B: nothing local to tear down");
+            } else {
+                assert_eq!(
+                    (reply.closes, a.len()),
+                    (1, 0),
+                    "{label} on A: the local pair is torn down"
+                );
+            }
+        }
+    }
+}

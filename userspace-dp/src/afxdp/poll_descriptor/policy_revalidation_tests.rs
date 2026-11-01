@@ -1057,6 +1057,7 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
             None,
             true,
             None,
+            None,
         )
         .is_none(),
         "the same collision arriving on the fabric link is declined, not revoked"
@@ -2880,6 +2881,7 @@ fn reverse_snat_hit_13652(
         None,
         false,
         None,
+        None,
     )
 }
 
@@ -2923,6 +2925,7 @@ fn reverse_snat_hit_fabric_15958(
         1_000_000_000,
         None,
         false,
+        None,
         None,
     )
 }
@@ -3737,6 +3740,7 @@ fn ha_imported_nptv6_wire_shape_still_fails_closed_15958() {
         None,
         false,
         None,
+        None,
     )
     .unwrap_or_else(|| {
         panic!(
@@ -3910,6 +3914,7 @@ fn ha_imported_legacy_dynamic_snat_without_provenance_fails_closed_15958() {
         1_000_000_000,
         None,
         false,
+        None,
         None,
     )
     .unwrap_or_else(|| {
@@ -4353,6 +4358,7 @@ fn reverse_only_vlan_interface_snat_survives_14128() {
             None,
             false,
             None,
+            None,
         )
         .is_none(),
         "interface-SNAT on logical VLAN unit 13 must survive a companion-less reverse hit (#14128)"
@@ -4379,6 +4385,7 @@ fn reverse_only_vlan_interface_snat_survives_14128() {
             1_000_000_000,
             None,
             false,
+            None,
             None,
         )
         .is_some(),
@@ -6297,6 +6304,7 @@ fn reverse_hits_judge_forward_selector_by_direction_15934() {
             1_000_000_000,
             packet_icmp,
             false,
+            None,
             None,
         )
     }

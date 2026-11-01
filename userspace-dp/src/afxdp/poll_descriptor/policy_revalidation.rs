@@ -1019,6 +1019,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
         packet_icmp,
         false,
         None,
+        None,
     )
 }
 
@@ -1075,6 +1076,69 @@ fn selector_provenance_absent(
         )
 }
 
+/// The judged forward pair, as `source_nat_revocation_on_session_hit_with_ingress`
+/// builds it: key, decision, metadata, origin, the local canonical key to
+/// tear down (`None` when there is no local row), stored static provenance.
+type JudgedForward = (
+    SessionKey,
+    SessionDecision,
+    crate::session::SessionMetadata,
+    SessionOrigin,
+    Option<SessionKey>,
+    Option<bool>,
+);
+
+/// #18710: the forward companion of a reverse hit that this worker has not
+/// materialized yet, taken from the SHARED map.
+///
+/// A fresh flow's first reply can reach a worker before that worker has
+/// drained the creating worker's replica command: the forward row is in the
+/// shared map but not in this table, `source_nat_revalidation_target` answers
+/// `NoLocalEntry`, and the sessionless arm fails closed (a locally created
+/// reverse row carries no forward VLAN provenance) and drops the reply. For
+/// TCP that is the SYN-ACK, so the connection waits a 1 s SYN retransmit.
+/// Judge the shared forward row instead, exactly as a local companion is
+/// judged, when it is a locally authored forward row (a flow this node
+/// created). A peer-synced shared row carries the peer's line and keeps the
+/// sessionless arm, and so does a reply with no shared companion at all.
+/// There is no local row to tear down, so a failed judgment drops only this
+/// packet (`canonical_key: None`).
+fn shared_forward_companion_for_reverse_hit(
+    sessions: &SessionTable,
+    shared_sessions: Option<&Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>>,
+    session_key: &SessionKey,
+    decision: SessionDecision,
+) -> Option<JudgedForward> {
+    let shared_sessions = shared_sessions?;
+    let reverse_key = sessions
+        .revalidation_canonical_key(session_key)
+        .unwrap_or_else(|| session_key.clone());
+    let reverse_decision = sessions
+        .entry_with_origin(&reverse_key)
+        .map(|(decision, _, _)| decision)
+        .unwrap_or(decision);
+    let forward_query = crate::session::reverse_session_key(&reverse_key, reverse_decision.nat);
+    if !matches!(
+        sessions.source_nat_revalidation_target(&forward_query),
+        SourceNatRevalidationTarget::NoLocalEntry
+    ) {
+        return None;
+    }
+    let shared = crate::afxdp::shared_ops::lock_shared_recover(shared_sessions);
+    let entry = shared.get(&forward_query)?;
+    if entry.origin.is_peer_synced() {
+        return None;
+    }
+    Some((
+        entry.key.clone(),
+        entry.decision,
+        entry.metadata.clone(),
+        entry.origin,
+        None,
+        entry.source_nat_static,
+    ))
+}
+
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     forwarding: &ForwardingState,
@@ -1099,7 +1163,16 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // (standalone wrappers, unit fixtures) keeps every judgment exactly as
     // before.
     ha: Option<(&BTreeMap<i32, HAGroupRuntime>, u64)>,
+    // #18710: the worker's shared session map, consulted only when a reverse
+    // hit finds no local forward companion. `None` keeps the sessionless
+    // arm exactly as before.
+    shared_sessions: Option<&Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>>,
 ) -> Option<PolicyRevocation> {
+    let shared_companion = if metadata.is_reverse {
+        shared_forward_companion_for_reverse_hit(sessions, shared_sessions, session_key, decision)
+    } else {
+        None
+    };
     let (
         forward_key,
         forward_decision,
@@ -1107,7 +1180,9 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         forward_origin,
         canonical_key,
         stored_static,
-    ) = if metadata.is_reverse {
+    ) = if let Some(companion) = shared_companion {
+        companion
+    } else if metadata.is_reverse {
         let reverse_key = sessions
             .revalidation_canonical_key(session_key)
             .unwrap_or_else(|| session_key.clone());

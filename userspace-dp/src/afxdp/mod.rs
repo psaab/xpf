@@ -756,6 +756,9 @@ mod tests_split_rg_failback_18531;
 #[path = "tests_lan_owner_idle_import_18691.rs"]
 mod tests_lan_owner_idle_import_18691;
 #[cfg(test)]
+#[path = "tests_fresh_flow_first_reply.rs"]
+mod tests_fresh_flow_first_reply;
+#[cfg(test)]
 #[path = "tests_punt_seed_shadow_18620.rs"]
 mod tests_punt_seed_shadow_18620;
 #[cfg(test)]

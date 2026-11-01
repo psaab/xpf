@@ -3946,6 +3946,45 @@ pub(super) fn txn_run_multi_binding_at_generations(
     config_generation: u64,
     neighbor_generation: u64,
 ) -> (BatchCounters, DebugPollCounters, Option<Vec<u8>>) {
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    txn_run_multi_binding_with_shared_maps(
+        bindings,
+        ingress_index,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        config_generation,
+        neighbor_generation,
+    )
+}
+
+/// As `txn_run_multi_binding_at_generations`, with every shared session map
+/// supplied by the caller, so two worker tables can share one shared view
+/// (a flow created on one worker, its reply polled on another; #18710).
+#[expect(clippy::too_many_arguments, reason = "test harness")]
+pub(super) fn txn_run_multi_binding_with_shared_maps(
+    bindings: &mut Vec<BindingWorker>,
+    ingress_index: usize,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    config_generation: u64,
+    neighbor_generation: u64,
+) -> (BatchCounters, DebugPollCounters, Option<Vec<u8>>) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128usize;
     let meta_offset = frame_offset - meta_len;
@@ -3986,9 +4025,6 @@ pub(super) fn txn_run_multi_binding_at_generations(
         }
         Arc::new(map)
     };
-    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
-    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
@@ -4014,7 +4050,7 @@ pub(super) fn txn_run_multi_binding_at_generations(
         shared_sessions: &shared_sessions,
         shared_nat_sessions: &shared_nat_sessions,
         shared_forward_wire_sessions: &shared_forward_wire_sessions,
-        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        shared_owner_rg_indexes,
         ike_exchanges: &ike_exchanges,
         slow_path: None,
         event_stream: None,
