@@ -2305,8 +2305,10 @@ fn conntrack_rmw_app_id_succeeds_without_lease_13668() {
     );
 }
 
-/// #18641: the batched activation republish writes exactly the rows the per-entry
-/// publish writes, every one inside its row's shard lock.
+/// #18641: the batched publish writes exactly the rows the per-entry publish
+/// writes, every one inside its row's shard lock, for a local origin (the
+/// activation republish passes ForwardFlow) and for a peer-synced one (the
+/// origin that selects the kernel-local PASS rows).
 #[test]
 fn batched_republish_writes_the_single_publish_row_set_18641() {
     let snat = NatDecision {
@@ -2326,40 +2328,40 @@ fn batched_republish_writes_the_single_publish_row_set_18641() {
         (SessionKey { src_port: 41003, ..plain_key() }, kernel_local_snat, synced_forward_metadata()),
         (SessionKey { src_port: 41004, ..plain_key() }, forward, reverse_meta),
     ];
-    let mut single: Vec<(SessionKey, Option<u8>)> = Vec::new();
-    for (key, decision, metadata) in &cases {
-        clear_session_map_writes();
-        publish_session_map_entry_for_session(
-            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
-            key,
-            *decision,
-            metadata,
-            false,
-            false,
-        )
-        .expect("recorder-only publish");
-        single.extend(session_map_writes().into_iter().map(|w| (w.key, w.value)));
-    }
-    let entries: Vec<(SessionKey, smallvec::SmallVec<[(SessionKey, u8); 4]>)> = cases
-        .iter()
-        .map(|(key, decision, metadata)| {
-            (
-                key.clone(),
-                session_entry_steering_rows(key, *decision, metadata, SessionOrigin::ForwardFlow, false, false),
-            )
-        })
-        .collect();
-    clear_session_map_writes();
-    let outcomes = publish_session_entries_batch(SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD), &entries);
-    assert!(outcomes.iter().all(Option::is_none));
-    let writes = session_map_writes();
-    assert!(writes.iter().all(|w| w.owner_lock_held), "every batched row write ran inside its shard lock");
-    let mut batched: Vec<(SessionKey, Option<u8>)> = writes.into_iter().map(|w| (w.key, w.value)).collect();
     let order = |v: &mut Vec<(SessionKey, Option<u8>)>| {
         v.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
     };
-    order(&mut single);
-    order(&mut batched);
-    assert!(!single.is_empty());
-    assert_eq!(batched, single, "the batch must write the per-entry publish's rows, no more and no fewer");
+    for origin in [SessionOrigin::ForwardFlow, SessionOrigin::SyncImport] {
+        let mut single: Vec<(SessionKey, Option<u8>)> = Vec::new();
+        for (key, decision, metadata) in &cases {
+            clear_session_map_writes();
+            publish_session_map_entry_for_session_with_origin(
+                SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+                key,
+                *decision,
+                metadata,
+                origin,
+                false,
+                false,
+            )
+            .expect("recorder-only publish");
+            single.extend(session_map_writes().into_iter().map(|w| (w.key, w.value)));
+        }
+        let entries: Vec<(SessionKey, smallvec::SmallVec<[(SessionKey, u8); 4]>)> = cases
+            .iter()
+            .map(|(key, decision, metadata)| {
+                (key.clone(), session_entry_steering_rows(key, *decision, metadata, origin, false, false))
+            })
+            .collect();
+        clear_session_map_writes();
+        let outcomes = publish_session_entries_batch(SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD), &entries);
+        assert!(outcomes.iter().all(Option::is_none));
+        let writes = session_map_writes();
+        assert!(writes.iter().all(|w| w.owner_lock_held), "every batched row write ran inside its shard lock");
+        let mut batched: Vec<(SessionKey, Option<u8>)> = writes.into_iter().map(|w| (w.key, w.value)).collect();
+        order(&mut single);
+        order(&mut batched);
+        assert!(!single.is_empty());
+        assert_eq!(batched, single, "{origin:?}: the batch must write the per-entry publish's rows, no more and no fewer");
+    }
 }
