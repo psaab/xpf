@@ -672,6 +672,21 @@ cmd_deploy() {
 			-- env XPF_CLUSTER_SKIP_BUILD=1 \
 			"${SCRIPT_DIR}/cluster-setup.sh" deploy "$target"
 	fi
+	# #18772: on the deb path, decide every target node's action (upgrade,
+	# byte-identical same version, refused or opted-in downgrade) BEFORE the
+	# manifest is invalidated or anything is pushed. A refused cell then costs
+	# nothing and the previous attestation survives.
+	if [[ "${XPF_DEPLOY_FAST:-}" != "1" ]]; then
+		local preflight_deb preflight_idx preflight_nodes=()
+		preflight_deb=$(deploy_select_deb "$PROJECT_ROOT/dist-deb" 2>/dev/null || true)
+		[[ -n "$preflight_deb" ]] || die "no xpf_*.deb found in dist-deb/ — run 'make deb' first (the default deploy build)"
+		case "$target" in
+		all) for preflight_idx in 0 1; do preflight_nodes+=("$(r "$(vm_name "$preflight_idx")")"); done ;;
+		*) preflight_nodes+=("$(r "$(vm_name "$target")")") ;;
+		esac
+		deploy_deb_preflight "$preflight_deb" "${preflight_nodes[@]}" ||
+			die "deb deploy refused before any change (see above); the previous attestation manifest is untouched"
+	fi
 	deploy_manifest_invalidate "$PROJECT_ROOT" "$target" ||
 		die "cannot invalidate prior executable attestation manifest"
 	# #16290: from here the prior attestation is gone, so ANY abort before
@@ -806,7 +821,25 @@ deploy_vm_deb() {
 
 	# Unique-slot deb install (#10026): push+install+cleanup through the
 	# tested helper, so a same-name re-push cannot collide in a fixed slot.
-	deploy_install_deb "$rinst" "$deb"
+	# #18772/#18764: the node's action was already vetted by cmd_deploy's
+	# preflight; re-derive it here against the node as it is now.
+	local action
+	action=$(deploy_deb_node_action "$rinst" "$deb") ||
+		die "deb deploy of $vm refused (see above)"
+	case "$action" in
+	skip-same)
+		info "$vm already runs $(basename "$deb") byte for byte; skipping the install and the cut (#18764)"
+		return 0
+		;;
+	install-downgrade)
+		warn "LAB DOWNGRADE (XPF_DEPLOY_ALLOW_DOWNGRADE=1): deploying $(basename "$deb") over $(deploy_running_deb_version "$rinst") on $vm"
+		deploy_reset_binary_floor "$rinst" || die "could not reset the anti-rollback floor on $vm"
+		deploy_install_deb "$rinst" "$deb" allow-downgrade
+		;;
+	*)
+		deploy_install_deb "$rinst" "$deb"
+		;;
+	esac
 
 	# #18544: a raw deploy leaves /etc/systemd/system copies of xpfd.service
 	# and the two boot barriers behind, and they shadow the units this deb

@@ -710,6 +710,171 @@ test_deb_repush_uses_distinct_remote_slots() {
 
 # The helper behavior test above is not enough if the deploy script stops
 # calling it. Pin the production wiring and reject the retired fixed path.
+# ── #18772/#18764: the deb deploy plan ─────────────────────────────────
+test_deb_plan_orders_versions() {
+	local bad_rows="" row deb run want got
+	for row in "0.0.29582+gfcc612e43943 0.0.29579+g218c32023079 upgrade" \
+		"0.0.29579+g218c32023079 0.0.29582+gfcc612e43943 downgrade" \
+		"0.0.29582+gfcc612e43943 0.0.29582+gfcc612e43943 same" \
+		"0.0.10 0.0.9 upgrade" \
+		"0.0.9 - fresh"; do
+		read -r deb run want <<<"$row"
+		[[ "$run" == - ]] && run=""
+		got=$(deploy_deb_plan "$deb" "$run")
+		[[ "$got" == "$want" ]] || bad_rows+=" [$deb vs '$run': $got, want $want]"
+	done
+	if [[ -z "$bad_rows" ]]; then
+		ok "deb plan: dpkg ordering gives upgrade, downgrade, same and fresh (numeric, not lexical)"
+	else
+		bad "deb plan: wrong verdicts:$bad_rows"
+	fi
+}
+
+# _plan_action <running-version> <runs-deb 0|1> [allow]: deploy_deb_node_action
+# for a deb of version 0.0.29580 against a mocked node. Prints
+# "<rc>|<stdout>|<stderr>".
+_plan_action() {
+	local run="$1" same_bytes="$2" allow="${3:-}" out err rc d
+	d=$(mktemp -d)
+	: >"$d/xpf_0.0.29580+gaaaaaaaaaaaa_amd64.deb"
+	(
+		deploy_running_deb_version() { printf '%s\n' "$run"; }
+		deploy_node_runs_deb() { [[ "$same_bytes" == 1 ]]; }
+		if [[ -n "$allow" ]]; then export XPF_DEPLOY_ALLOW_DOWNGRADE="$allow"; else unset XPF_DEPLOY_ALLOW_DOWNGRADE; fi
+		deploy_deb_node_action inst:vm "$d/xpf_0.0.29580+gaaaaaaaaaaaa_amd64.deb" >"$d/out" 2>"$d/err"
+	)
+	rc=$?
+	printf '%s|%s|%s' "$rc" "$(<"$d/out")" "$(<"$d/err")"
+	rm -rf "$d"
+}
+
+test_deb_node_action_upgrade_installs() {
+	local got
+	got=$(_plan_action 0.0.29570+gbbbbbbbbbbbb 0)
+	if [[ "$got" == "0|install|" ]]; then
+		ok "deb plan: an upgrade installs, with no downgrade flag"
+	else
+		bad "deb plan: an upgrade must print install (got $got)"
+	fi
+}
+
+test_deb_node_action_downgrade_refused_without_optin() {
+	local got allow fails=""
+	for allow in "" true yes 0; do
+		got=$(_plan_action 0.0.29590+gcccccccccccc 0 "$allow")
+		[[ "${got%%|*}" == 1 && "$got" == *"xpf_0.0.29580+gaaaaaaaaaaaa is not newer than the running 0.0.29590+gcccccccccccc on inst:vm"* &&
+			"$got" == *"scripts/next-deb-version.sh"* && "$got" == *"XPF_DEPLOY_ALLOW_DOWNGRADE=1"* ]] ||
+			fails+=" [allow='$allow': $got]"
+		[[ "$got" == 1\|\|* ]] || fails+=" [allow='$allow': printed an action]"
+	done
+	if [[ -z "$fails" ]]; then
+		ok "deb plan: a downgrade is refused up front, naming both versions and the fix, unless XPF_DEPLOY_ALLOW_DOWNGRADE is exactly 1"
+	else
+		bad "deb plan: a downgrade without the exact opt-in must be refused:$fails"
+	fi
+}
+
+test_deb_node_action_downgrade_optin() {
+	local got
+	got=$(_plan_action 0.0.29590+gcccccccccccc 0 1)
+	if [[ "$got" == "0|install-downgrade|" ]]; then
+		ok "deb plan: XPF_DEPLOY_ALLOW_DOWNGRADE=1 turns a downgrade into install-downgrade"
+	else
+		bad "deb plan: the opted-in downgrade must print install-downgrade (got $got)"
+	fi
+}
+
+test_deb_node_action_same_version() {
+	local same diff
+	same=$(_plan_action 0.0.29580+gaaaaaaaaaaaa 1)
+	diff=$(_plan_action 0.0.29580+gaaaaaaaaaaaa 0 1)
+	if [[ "$same" == "0|skip-same|" && "${diff%%|*}" == 1 && "$diff" == *"not these bytes"* &&
+		"$diff" == *"scripts/next-deb-version.sh"* ]]; then
+		ok "deb plan: the same version byte for byte is skip-same; same version with other bytes is refused, even opted in"
+	else
+		bad "deb plan: same version must skip when identical and refuse otherwise (identical: $same; different: $diff)"
+	fi
+}
+
+test_deb_node_runs_deb_compares_both_binaries() {
+	local fails="" case_ want_x want_h run_x run_h expect
+	for case_ in "X H X H 0" "X H Y H 1" "X H X Z 1" "X H - H 1" "X H X - 1"; do
+		read -r want_x want_h run_x run_h expect <<<"$case_"
+		(
+			deploy_manifest_sha_from_deb() { case "$2" in xpfd) echo "$want_x" ;; *) echo "$want_h" ;; esac; }
+			deploy_running_xpfd_sha256() { [[ "$run_x" == - ]] && return 1; echo "$run_x"; }
+			deploy_running_xpf_userspace_dp_sha256() { [[ "$run_h" == - ]] && return 1; echo "$run_h"; }
+			deploy_node_runs_deb inst:vm /dev/null
+		)
+		[[ "$?" == "$expect" ]] || fails+=" [$case_]"
+	done
+	if [[ -z "$fails" ]]; then
+		ok "deb plan: byte identity needs BOTH the running xpfd and helper to match the deb; an unreadable one is not identical"
+	else
+		bad "deb plan: deploy_node_runs_deb verdicts wrong:$fails"
+	fi
+}
+
+test_deb_preflight_refuses_before_any_change() {
+	local d out rc
+	d=$(mktemp -d)
+	: >"$d/xpf_0.0.29580+gaaaaaaaaaaaa_amd64.deb"
+	out=$(
+		deploy_running_deb_version() { case "$1" in a:fw0) echo 0.0.29570+gbbbbbbbbbbbb ;; *) echo 0.0.29590+gcccccccccccc ;; esac; }
+		deploy_node_runs_deb() { return 1; }
+		incus() { echo "UNEXPECTED incus $*"; }
+		unset XPF_DEPLOY_ALLOW_DOWNGRADE
+		deploy_deb_preflight "$d/xpf_0.0.29580+gaaaaaaaaaaaa_amd64.deb" a:fw0 a:fw1 2>&1
+	)
+	rc=$?
+	rm -rf "$d"
+	if ((rc != 0)) && [[ "$out" == *"a:fw0 install"* && "$out" == *"not newer than the running 0.0.29590+gcccccccccccc on a:fw1"* &&
+		"$out" != *UNEXPECTED* ]]; then
+		ok "deb plan: the preflight refuses a cell when any node would downgrade, and touches no node"
+	else
+		bad "deb plan: preflight rc=$rc out=$out"
+	fi
+}
+
+test_deb_install_downgrade_flag() {
+	setup_fake_vm
+	local deb plain allowed
+	deb=$(mktemp --suffix=.deb)
+	make_local_bin "$deb" "DEB-BYTES"
+	deploy_install_deb vm "$deb" >/dev/null 2>&1
+	plain=$(grep -c -- "--allow-downgrades" "$FAKE_CALL_LOG")
+	deploy_install_deb vm "$deb" allow-downgrade >/dev/null 2>&1
+	allowed=$(grep -c "apt-get install -y --reinstall --allow-downgrades /tmp/xpf-deb\." "$FAKE_CALL_LOG")
+	if [[ "$plain" == 0 && "$allowed" == 1 ]]; then
+		ok "deb plan: only the opted-in install passes --allow-downgrades to apt"
+	else
+		bad "deb plan: --allow-downgrades must appear only on the opted-in install (plain=$plain allowed=$allowed)"
+	fi
+	rm -f "$deb"; teardown_fake_vm
+}
+
+test_deb_plan_wiring() {
+	local f="$SCRIPT_DIR/cluster-setup.sh" deploy vmdeb fails=""
+	deploy=$(awk '/^cmd_deploy\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$f")
+	vmdeb=$(awk '/^deploy_vm_deb\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$f")
+	# The preflight runs before the manifest is invalidated (#18772: leave it untouched).
+	awk '/deploy_deb_preflight/{p=NR} /deploy_manifest_invalidate "\$PROJECT_ROOT"/{i=NR} END{exit !(p && i && p < i)}' <<<"$deploy" ||
+		fails+=" preflight-not-before-invalidate"
+	# deploy_vm_deb decides before installing; only install-downgrade resets the floor and allows the downgrade.
+	awk '/deploy_deb_node_action/{a=NR} /deploy_install_deb/{if(!i)i=NR} END{exit !(a && i && a < i)}' <<<"$vmdeb" ||
+		fails+=" action-not-before-install"
+	grep -Fq 'skip-same)' <<<"$vmdeb" || fails+=" no-skip-same"
+	[[ "$(grep -c 'deploy_reset_binary_floor' <<<"$vmdeb")" == 1 && "$(grep -c 'allow-downgrade$' <<<"$vmdeb")" == 1 ]] ||
+		fails+=" floor-reset-or-allow-outside-the-branch"
+	awk '/install-downgrade\)/{b=1} b&&/deploy_reset_binary_floor/{r=1} b&&/allow-downgrade$/{a=1} b&&/;;/{exit} END{exit !(r && a)}' <<<"$vmdeb" ||
+		fails+=" branch-incomplete"
+	if [[ -z "$fails" ]]; then
+		ok "deb plan wiring: cmd_deploy preflights before invalidating; deploy_vm_deb acts on the plan, and only install-downgrade resets the floor"
+	else
+		bad "deb plan wiring:$fails"
+	fi
+}
+
 test_deb_repush_wiring() {
 	local f="$SCRIPT_DIR/cluster-setup.sh" code
 	code=$(awk '/^deploy_vm_deb\(\)/,/^}/' "$f")
@@ -4237,6 +4402,15 @@ test_cluster_helper_raw_deploy_uses_root_ownership
 test_standalone_helper_raw_deploy_uses_root_ownership
 test_deb_repush_uses_distinct_remote_slots
 test_deb_repush_wiring
+test_deb_plan_orders_versions
+test_deb_node_action_upgrade_installs
+test_deb_node_action_downgrade_refused_without_optin
+test_deb_node_action_downgrade_optin
+test_deb_node_action_same_version
+test_deb_node_runs_deb_compares_both_binaries
+test_deb_preflight_refuses_before_any_change
+test_deb_install_downgrade_flag
+test_deb_plan_wiring
 test_unit_shadow_removed_packaged_unit_governs_18544
 test_unit_shadow_stale_load_without_file_reloads_18544
 test_unit_shadow_mask_symlink_left_alone_18544

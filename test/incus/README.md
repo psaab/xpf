@@ -305,6 +305,57 @@ measurement, resolve the active node with `active_fw_detect` from
 `active-fw.sh`; it returns 1 when no candidate is primary, and callers
 must fail closed rather than fall back to a hardcoded node.
 
+## Deb deploys in A/B gate cells (#18772, #18764)
+
+The default `make cluster-deploy` (deb path) installs the selected `.deb` on
+each node, then cuts it with `xpfd upgrade --rolling`. Before it pushes
+anything or touches `dist-deb/xpf-deploy-manifest.json`, it decides each
+target node's action by comparing the deb's version with the version the node
+runs (`dpkg-query -W xpf`). The logic is in `deploy_deb_node_action` and
+`deploy_deb_preflight` (`deploy-lib.sh`):
+
+| deb vs running | action |
+|---|---|
+| newer, or nothing installed | install and cut, as always |
+| same version, and the running `xpfd` and userspace helper match the deb's byte for byte | **skip** the install and the cut; the manifest is written from the deb, so the attestation is kept (#18764) |
+| same version, other bytes (or unreadable) | **refused**: a re-staged same version cannot be cut (#16219); build a new version |
+| older | **refused** up front, naming both versions and the fix, unless `XPF_DEPLOY_ALLOW_DOWNGRADE=1` |
+
+A refusal costs the cell nothing: no node is touched, and the previous
+attestation manifest survives.
+
+**Putting master back (A→B→A).** Two ways:
+- Allocate a fresh, higher version for every deploy in the cell's order,
+  including a rebuild of A for the final step. For example:
+  `make deb DEB_VERSION="$(scripts/next-deb-version.sh --git .)+g$(git rev-parse --short=12 HEAD)"`.
+  This keeps every deploy a real upgrade, and it is what production does.
+- Deploy the older A deliberately with `XPF_DEPLOY_ALLOW_DOWNGRADE=1`. The
+  value must be exactly `1`.
+
+Pin the deb to deploy with `XPF_DEPLOY_DEB_PATH`. Otherwise the highest
+version in `dist-deb/` wins.
+
+**What the opt-in does.** For each node that would downgrade:
+- It logs `LAB DOWNGRADE` loudly.
+- It removes the node's binary anti-rollback floor, `/var/lib/xpf/binary-floor`
+  (#10848). That is exactly what `dpkg --purge` does to it.
+- It installs with `apt-get install --allow-downgrades`, and cuts as usual.
+
+The floor exists to refuse a validly-signed OLD build as a replay. It refuses
+both the postinst publish and the cut, so it has to go before the install.
+The cut re-enrolls it at the deployed version. The product code is
+unchanged, so production nodes keep refusing downgrades.
+
+What the opt-in does not bypass:
+- The cut's config-envelope check. An older binary that cannot read the
+  config DB a newer one wrote is still refused.
+- The same-version different-bytes refusal.
+
+The attestation manifest names the deb the deploy selected, so a downgraded
+cell attests the build it deployed.
+
+Self-tests: `make test-deploy-lib` ("deb plan" cells).
+
 ## How to add a harness
 
 1. Name it: `test-*.sh` / `wire-*.sh` for a gate, `*-lib.sh` for a sourced

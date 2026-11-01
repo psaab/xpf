@@ -1684,9 +1684,14 @@ deploy_preflight_cleanup() {
 # both the package and its temporary directory are removed after apt, including
 # failed push/install paths.
 deploy_install_deb() {
-	local rinst="$1" deb="$2"
+	local rinst="$1" deb="$2" allow_downgrade="${3:-}"
 	local base tmpdir remote_deb rc
+	local -a apt_flags=(-y --reinstall)
 	base=$(basename "$deb")
+	# #18772: a deliberate lab downgrade (deploy_deb_node_action said
+	# install-downgrade, which needs XPF_DEPLOY_ALLOW_DOWNGRADE=1) is the only
+	# caller that passes --allow-downgrades. Without it apt refuses as before.
+	[[ "$allow_downgrade" == allow-downgrade ]] && apt_flags+=(--allow-downgrades)
 
 	# mktemp creates the directory atomically on the target, so even a same-name
 	# re-push gets a distinct, absent destination. Validate the returned path
@@ -1711,7 +1716,7 @@ deploy_install_deb() {
 
 	# apt install is STAGE-ONLY on a clustered node (node-id present): it
 	# refreshes the staging path but does NOT cut the dataplane.
-	if incus exec "$rinst" -- apt-get install -y --reinstall "$remote_deb"; then
+	if incus exec "$rinst" -- apt-get install "${apt_flags[@]}" "$remote_deb"; then
 		:
 	else
 		rc=$?
@@ -1723,6 +1728,140 @@ deploy_install_deb() {
 	if ! incus exec "$rinst" -- rm -rf "$tmpdir"; then
 		die "installed $base on $rinst but could not remove temporary .deb slot $tmpdir"
 	fi
+}
+
+# ── Deb deploy plan: upgrade, same version, deliberate downgrade (#18772, #18764) ──
+#
+# The deb path cuts a node with `apt-get install` (stage) plus `xpfd upgrade
+# --rolling` (cut). Two shapes used to fail MID-CELL, after earlier steps had
+# spent cluster time, and the failed deploy invalidated the attestation
+# manifest so the next gate VOIDed:
+#   - a DOWNGRADE (an A->B->A cell putting master back): apt refuses
+#     without --allow-downgrades. Past apt, the product's anti-rollback floor
+#     (/var/lib/xpf/binary-floor, #10848) refuses both the postinst publish
+#     and the cut, by design: a validly-signed old build is a replay;
+#   - the SAME version again: the re-stage mints a new source generation,
+#     and the cut refuses to replace the live dir (#16219).
+#
+# Now the plan is decided up front, before anything is pushed or the
+# manifest is touched:
+#   upgrade / fresh     install and cut, as before;
+#   same + identical    the node already runs this deb byte for byte: skip
+#                       the install and the cut, and the manifest is written
+#                       from the deb as usual, so the attestation is kept;
+#   same + different    refuse (rebuild under a new version);
+#   downgrade           refuse, naming both versions and the fix, UNLESS
+#                       XPF_DEPLOY_ALLOW_DOWNGRADE=1. That is a deliberate lab
+#                       A/B step: apt gets --allow-downgrades and the node's
+#                       binary anti-rollback floor is reset first (what
+#                       `dpkg --purge` does to it, debian/xpf.postrm), and the
+#                       cut re-enrolls the floor at the deployed version. The
+#                       product code is unchanged. A downgrade across a
+#                       config-envelope bump is still refused by the cut's
+#                       envelope check (the older binary cannot read the DB).
+
+# deploy_running_deb_version <rinst>: the xpf package version a node runs,
+# or "" when none is installed.
+deploy_running_deb_version() {
+	local rinst="$1" ver
+	ver=$(incus exec -n "$rinst" -- dpkg-query -W -f='${Version}' xpf 2>/dev/null || true)
+	printf '%s\n' "$ver"
+}
+
+# deploy_deb_plan <deb_version> <running_version>: upgrade | same | downgrade
+# | fresh (nothing running). Pure, so the ordering is a table cell.
+deploy_deb_plan() {
+	local deb_ver="$1" run_ver="$2"
+	if [[ -z "$run_ver" ]]; then
+		printf 'fresh\n'
+	elif dpkg --compare-versions "$deb_ver" gt "$run_ver"; then
+		printf 'upgrade\n'
+	elif dpkg --compare-versions "$deb_ver" eq "$run_ver"; then
+		printf 'same\n'
+	else
+		printf 'downgrade\n'
+	fi
+}
+
+# deploy_allow_downgrade: the explicit lab opt-in. Exactly "1"; anything else
+# (unset, "true", "yes") is no.
+deploy_allow_downgrade() {
+	[[ "${XPF_DEPLOY_ALLOW_DOWNGRADE:-}" == 1 ]]
+}
+
+# deploy_node_runs_deb <rinst> <deb>: true when the node's RUNNING xpfd and
+# userspace helper are byte-identical to the deb's staged ones.
+deploy_node_runs_deb() {
+	local rinst="$1" deb="$2" want got
+	want=$(deploy_manifest_sha_from_deb "$deb" xpfd) || return 1
+	got=$(deploy_running_xpfd_sha256 "$rinst" 3) || return 1
+	[[ "$want" == "$got" ]] || return 1
+	want=$(deploy_manifest_sha_from_deb "$deb" xpf-userspace-dp) || return 1
+	got=$(deploy_running_xpf_userspace_dp_sha256 "$rinst" 3) || return 1
+	[[ "$want" == "$got" ]]
+}
+
+# deploy_deb_node_action <rinst> <deb>: what to do on one node. Prints one of
+#   install            upgrade or fresh install
+#   install-downgrade  deliberate downgrade (opt-in present)
+#   skip-same          already running this deb byte for byte
+# and returns 0, or prints the refusal and returns 1. Never mutates the node.
+deploy_deb_node_action() {
+	local rinst="$1" deb="$2" deb_ver run_ver plan
+	deb_ver=$(deploy_deb_version "$deb") || {
+		printf 'refusing: %s is not a parseable xpf_<version>_<arch>.deb\n' "$deb" >&2
+		return 1
+	}
+	run_ver=$(deploy_running_deb_version "$rinst")
+	plan=$(deploy_deb_plan "$deb_ver" "$run_ver")
+	case "$plan" in
+	upgrade | fresh)
+		printf 'install\n'
+		;;
+	same)
+		if deploy_node_runs_deb "$rinst" "$deb"; then
+			printf 'skip-same\n'
+		else
+			printf 'refusing: %s already runs xpf %s, but not these bytes (or they cannot be read); a re-staged same version cannot be cut (#16219) -- build a fresh DEB_VERSION with scripts/next-deb-version.sh\n' \
+				"$rinst" "$run_ver" >&2
+			return 1
+		fi
+		;;
+	downgrade)
+		if deploy_allow_downgrade; then
+			printf 'install-downgrade\n'
+		else
+			printf 'refusing: xpf_%s is not newer than the running %s on %s; an A->B->A cell needs monotonically increasing versions -- build a fresh DEB_VERSION with scripts/next-deb-version.sh (e.g. rebuild A as a higher version), or set XPF_DEPLOY_ALLOW_DOWNGRADE=1 for a deliberate lab downgrade (it resets the node'"'"'s anti-rollback floor)\n' \
+				"$deb_ver" "$run_ver" "$rinst" >&2
+			return 1
+		fi
+		;;
+	esac
+}
+
+# deploy_deb_preflight <deb> <rinst>...: decide every target node's action
+# BEFORE the first push or manifest invalidation, so a refused cell costs
+# nothing and the previous attestation survives. Prints "<rinst> <action>"
+# per node.
+deploy_deb_preflight() {
+	local deb="$1" rinst action rc=0
+	shift
+	for rinst in "$@"; do
+		if action=$(deploy_deb_node_action "$rinst" "$deb"); then
+			printf '%s %s\n' "$rinst" "$action"
+		else
+			rc=1
+		fi
+	done
+	return "$rc"
+}
+
+# deploy_reset_binary_floor <rinst>: the opted-in downgrade's floor reset,
+# loudly. Only deploy_vm_deb's install-downgrade branch calls it.
+deploy_reset_binary_floor() {
+	local rinst="$1"
+	warn "LAB DOWNGRADE (XPF_DEPLOY_ALLOW_DOWNGRADE=1): resetting the binary anti-rollback floor /var/lib/xpf/binary-floor on $rinst so the older build can publish and cut; the cut re-enrolls the floor at the deployed version"
+	incus exec -n "$rinst" -- rm -f /var/lib/xpf/binary-floor
 }
 
 # ── Prebuilt-deb selection (#16308) ─────────────────────────────────
