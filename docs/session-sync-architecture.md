@@ -2381,15 +2381,32 @@ that way. For the next minute every 7 s re-drive failed BUSY,
 fw0 was refused `demotion peer barrier failed: cold prime owed without pending
 outbound bulk`. That stall needs a multi-page window (more than 8192 owner-RG
 deltas) and a generation change inside it; a small session table exports in
-one terminal page and never holds a window open. `ExportOwnerRGSessionsPagedStream`
-now records the window token as soon as a page reports `more`, BEFORE any
-abort check, and on any error return sends `abandon_owner_rg_export` with that
-token while still holding the export lease. The helper clears the window iff
-the token still names it (`open_export_abandon_if`), so a late or duplicate
-abandon cannot close a newer window. Workers need nothing: the next fresh kick
-supersedes the abandoned sequence and its buffered entries are skipped as
-foreign, exactly as after the idle expiry, which stays the backstop for a
-helper without the verb.
+one terminal page and never holds a window open.
+
+The fix names each window from BOTH ends. Before sending page 1, the pager
+picks a nonzero client window id (`session_export_client_window`), and the
+helper records it on the window. On any error return after page 1 was sent,
+`ExportOwnerRGSessionsPagedStream` sends `abandon_owner_rg_export` with that id
+and with the helper's token if a page-1 response delivered one. It does this
+while still holding the export lease, so no new window can start first. The
+client id matters because a lost or timed-out page-1 response — likely under
+exactly the load that causes the generation churn — would otherwise leave the
+pager with no token to name the window. The helper clears the window iff the id
+or the token still names it (`open_export_abandon_client_if` /
+`open_export_abandon_if`), so a late or duplicate abandon cannot close a newer
+window. Workers need nothing: the next fresh kick supersedes the abandoned
+sequence and skips its buffered entries as foreign, exactly as after the idle
+expiry. The idle expiry stays the backstop for a helper without the verb.
+
+The debt itself has no automatic bound, and that is deliberate. Admitting a
+demotion before the peer is primed is what the barrier exists to prevent
+(#10387), because the peer would then delete sessions missing from its
+unprimed table. What the refusal now carries is the debt's state, so an
+operator can see why every failback fails:
+`ColdPrimeDebtDetail` reports how long the prime has been owed, that it
+clears when a bulk re-drive is acked, and the last bulk failure. The other
+re-drive failures (`tombstone dropped` under churn, a generation change)
+still cost one sweep re-drive (~7 s) each. They no longer hold a window open.
 
 ## Incremental Sweep and Delete Journal
 

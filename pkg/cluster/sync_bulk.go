@@ -89,7 +89,8 @@ func (s *SessionSync) DoBulkSync() error {
 // bulkSendHeld is true, the caller owns bulkSendMu across this function; that
 // scope is used by the survivor re-drive to close the clear-then-replace gap
 // before a barrier can be admitted (#10387).
-func (s *SessionSync) doBulkSyncWithBulkSend(bulkSendHeld bool) error {
+func (s *SessionSync) doBulkSyncWithBulkSend(bulkSendHeld bool) (retErr error) {
+	defer func() { s.noteBulkResult(retErr) }()
 	if s.BulkSyncOverride != nil {
 		slog.Info("cluster sync: running bulk sync override (fast-population pre-step)")
 		if err := s.BulkSyncOverride(); err != nil {
@@ -723,8 +724,26 @@ func (s *SessionSync) clearPendingBulkAck() {
 // already covered by the predicate's generation re-read plus the barrier
 // admission's outer snapshot checks, which retry or refuse on change.
 func (s *SessionSync) armColdPrimeLocked() {
+	if !s.needColdPrime.Load() {
+		s.coldPrimeOwedSince.Store(time.Now().UnixNano())
+	}
 	s.needColdPrime.Store(true)
 	s.coldPrimeGen.Add(1)
+}
+
+// bulkFailure is the most recent doBulkSync failure (#18752), for display.
+type bulkFailure struct {
+	err string
+	at  time.Time
+}
+
+// noteBulkResult records a failed bulk for transfer-readiness display. A
+// success leaves the last failure in place: the debt it explains is only paid
+// by the peer's ack (dischargeColdPrime clears both).
+func (s *SessionSync) noteBulkResult(err error) {
+	if err != nil {
+		s.lastBulkFailure.Store(&bulkFailure{err: err.Error(), at: time.Now()})
+	}
 }
 
 // coldPrimeOwedGen is the generation of the outstanding cold-prime debt, or 0
@@ -761,6 +780,8 @@ func (s *SessionSync) dischargeColdPrime(stamp uint64) {
 	defer s.mu.Unlock()
 	if s.coldPrimeGen.Load() == stamp {
 		s.needColdPrime.Store(false)
+		s.coldPrimeOwedSince.Store(0)
+		s.lastBulkFailure.Store(nil)
 	}
 }
 
@@ -831,6 +852,27 @@ func (s *SessionSync) coldPrimeOwedWithoutPendingBulk() bool {
 	return true
 }
 
+// ColdPrimeDebtDetail (#18752) describes the outstanding cold-prime debt for
+// the demotion barrier's refusal: how long it has been owed, that it clears
+// only when a bulk re-drive is acked, and the last bulk failure that kept it
+// unpaid. It is "" when no debt is owed. Display only: it never changes what
+// the barrier admits.
+func (s *SessionSync) ColdPrimeDebtDetail() string {
+	if !s.needColdPrime.Load() {
+		return ""
+	}
+	owed := "unknown"
+	if since := s.coldPrimeOwedSince.Load(); since != 0 {
+		owed = time.Since(time.Unix(0, since)).Round(time.Second).String()
+	}
+	last := "none recorded"
+	if f := s.lastBulkFailure.Load(); f != nil {
+		last = fmt.Sprintf("%s (%s ago)", f.err, time.Since(f.at).Round(time.Second))
+	}
+	return fmt.Sprintf("owed for %s; it clears when a bulk re-drive (every sweep tick) is acked by the peer; last bulk error: %s",
+		owed, last)
+}
+
 // ColdPrimeOwedWithoutPendingBulk reports whether userspace demotion would
 // otherwise admit a vacuous barrier. Callers should perform this readiness
 // precheck before the demotion-specific barrier path; that path repeats the
@@ -848,6 +890,7 @@ func (s *SessionSync) TransferReadiness() TransferReadinessSnapshot {
 		Connected:        s.stats.Connected.Load(),
 		BulkAckRetryOwed: s.bulkAckRetryOwed.Load(),
 	}
+
 	if epoch, age, ok := s.PendingBulkAck(); ok {
 		snap.PendingBulkAckEpoch = epoch
 		snap.PendingBulkAckAge = age

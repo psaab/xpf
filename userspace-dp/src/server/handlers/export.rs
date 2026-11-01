@@ -29,13 +29,14 @@ pub(super) fn owner_rg_kick(
             export_req.max as usize,
         )
     } else {
-        guard.afxdp.kick_owner_rg_export_v2(
+        guard.afxdp.kick_owner_rg_export_v2_client(
             &export_req.owner_rgs,
             export_req.max as usize,
             export_req.continuation,
             export_req.protocol_version,
             export_req.continuation_incarnation,
             export_req.continuation_sequence,
+            export_req.client_window,
         )
     };
     match kick {
@@ -66,12 +67,13 @@ pub(super) fn owner_rg_abandon(
         req.protocol_version,
         req.continuation_incarnation,
         req.continuation_sequence,
+        req.client_window,
     ) {
         Ok(cleared) => {
             if cleared {
                 eprintln!(
-                    "xpf-userspace-dp: owner-RG export window {} abandoned by its client (#18752)",
-                    req.continuation_sequence
+                    "xpf-userspace-dp: owner-RG export window abandoned by its client (seq={} client_window={}) (#18752)",
+                    req.continuation_sequence, req.client_window
                 );
             }
         }

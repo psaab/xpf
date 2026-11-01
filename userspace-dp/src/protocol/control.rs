@@ -1942,6 +1942,12 @@ pub(crate) struct SessionExportRequest {
     /// #9856: opaque sequence component of the continuation token.
     #[serde(rename = "session_export_seq", default)]
     pub continuation_sequence: u64,
+    /// #18752: a client-chosen nonzero id for the window a page-1 kick
+    /// opens. The client knows it before it sends the kick, so it can
+    /// abandon the window even when page 1's response (and with it the
+    /// helper's token) was lost or timed out.
+    #[serde(rename = "session_export_client_window", default)]
+    pub client_window: u64,
 }
 
 /// #7919: the 5-tuple a `session_counters` query names.

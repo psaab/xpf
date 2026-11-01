@@ -1799,6 +1799,13 @@ type SessionSync struct {
 	sessionMirrorWarnedV4 atomic.Bool
 	sessionMirrorWarnedV6 atomic.Bool
 
+	// coldPrimeOwedSince (#18752) is when the current cold-prime debt was
+	// first armed (UnixNano; 0 = none owed), and lastBulkFailure the most
+	// recent doBulkSync failure. Both are display-only: they let the demotion
+	// barrier's refusal say for how long, and why, the debt is unpaid.
+	coldPrimeOwedSince atomic.Int64
+	lastBulkFailure    atomic.Pointer[bulkFailure]
+
 	// Generation-guard domain (#2170/#9915/#10512): see sessionGenState
 	// in sync_gen_state_16159.go and the lock-order graph above.
 	genState sessionGenState

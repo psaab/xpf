@@ -27,16 +27,21 @@ import (
 )
 
 type windowHelper18752 struct {
-	mu        sync.Mutex
-	open      uint64 // open window sequence, 0 = none
-	nextSeq   uint64
-	pagesLeft int // pages after page 1 in the open window
-	abandons  []SessionExportRequest
-	busy      int
+	mu         sync.Mutex
+	open       uint64 // open window sequence, 0 = none
+	openClient uint64 // client window id the open window was kicked with
+	nextSeq    uint64
+	pagesLeft  int // pages after page 1 in the open window
+	abandons   []SessionExportRequest
+	busy       int
 	// beforeReply runs after a request is read and before it is answered,
 	// with no helper lock held: the cell uses it to change the Manager's
 	// config generation while a page is in flight.
 	beforeReply func(req ControlRequest)
+	// dropReply, when it returns true, makes the helper process the request
+	// (opening the window) and then close the connection without answering:
+	// page 1's response is lost.
+	dropReply func(req ControlRequest) bool
 }
 
 func startWindowHelper18752(t *testing.T, sock string, pagesPerWindow int) *windowHelper18752 {
@@ -68,6 +73,9 @@ func startWindowHelper18752(t *testing.T, sock string, pagesPerWindow int) *wind
 					f(req)
 				}
 				resp := h.answer(req, pagesPerWindow)
+				if f := h.dropReply; f != nil && f(req) {
+					return
+				}
 				body, _ := json.Marshal(&resp)
 				_, _ = c.Write(append(body, '\n'))
 			}(conn)
@@ -83,8 +91,10 @@ func (h *windowHelper18752) answer(req ControlRequest, pagesPerWindow int) Contr
 	switch {
 	case req.Type == "abandon_owner_rg_export":
 		h.abandons = append(h.abandons, *ex)
-		if ex.ContinuationIncarnation == 1 && ex.ContinuationSequence == h.open {
-			h.open, h.pagesLeft = 0, 0
+		byToken := ex.ContinuationIncarnation == 1 && ex.ContinuationSequence == h.open
+		byClient := ex.ClientWindow != 0 && ex.ClientWindow == h.openClient
+		if h.open != 0 && (byToken || byClient) {
+			h.open, h.pagesLeft, h.openClient = 0, 0, 0
 		}
 		return ControlResponse{OK: true}
 	case req.Type != "export_owner_rg_sessions":
@@ -96,7 +106,7 @@ func (h *windowHelper18752) answer(req ControlRequest, pagesPerWindow int) Contr
 				"owner-RG export busy (window %d open); retry with backoff", h.open)}
 		}
 		h.nextSeq++
-		h.open, h.pagesLeft = h.nextSeq, pagesPerWindow-1
+		h.open, h.pagesLeft, h.openClient = h.nextSeq, pagesPerWindow-1, ex.ClientWindow
 	default:
 		if h.open == 0 || ex.ContinuationSequence != h.open {
 			return ControlResponse{OK: false, Error: "no open export window"}
@@ -111,7 +121,7 @@ func (h *windowHelper18752) answer(req ControlRequest, pagesPerWindow int) Contr
 		SessionDeltas:            []SessionDeltaInfo{{Event: "open", SrcIP: "10.0.0.1"}},
 	}
 	if !resp.SessionExportMore {
-		h.open = 0
+		h.open, h.openClient = 0, 0
 	}
 	return resp
 }
@@ -147,8 +157,8 @@ func TestAbortedOwnerRGExportDoesNotLeaveTheWindowBusy18752(t *testing.T) {
 	}
 	open, _, abandons := h.snapshot()
 	if len(abandons) != 1 || abandons[0].ContinuationIncarnation != 1 || abandons[0].ContinuationSequence != 1 ||
-		abandons[0].ProtocolVersion != MinProtocolOwnerRGExportPaging {
-		t.Fatalf("abandons after the aborted export = %+v, want exactly one for token (1,1) at protocol %d",
+		abandons[0].ClientWindow == 0 || abandons[0].ProtocolVersion != MinProtocolOwnerRGExportPaging {
+		t.Fatalf("abandons after the aborted export = %+v, want exactly one naming client window and token (1,1) at protocol %d",
 			abandons, MinProtocolOwnerRGExportPaging)
 	}
 	if open != 0 {
@@ -232,5 +242,61 @@ func TestSinkErrorOnTerminalPageSendsNoAbandon18752(t *testing.T) {
 	}
 	if open, _, abandons := h.snapshot(); len(abandons) != 0 || open != 0 {
 		t.Fatalf("terminal-page sink error: abandons=%d open=%d, want 0 and 0", len(abandons), open)
+	}
+}
+
+// Lost page 1 (#18752 review): the helper opened the window, but its page-1
+// response never reached the pager, so the pager has no helper token. It
+// named the window itself before sending, and the abandon carries that id.
+// Before the client id existed, this shape left the window BUSY for the full
+// idle expiry even with the abandon in place.
+func TestLostPageOneResponseStillAbandonsTheWindow18752(t *testing.T) {
+	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
+	h := startWindowHelper18752(t, sock, 3)
+	var dropped sync.Once
+	h.dropReply = func(req ControlRequest) bool {
+		drop := false
+		if req.Type == "export_owner_rg_sessions" && !req.SessionExport.Continuation {
+			dropped.Do(func() { drop = true })
+		}
+		return drop
+	}
+
+	if _, _, err := m.ExportOwnerRGSessionsPaged([]int{1}); err == nil {
+		t.Fatal("export 1 succeeded although page 1's response was dropped")
+	}
+	open, _, abandons := h.snapshot()
+	if len(abandons) != 1 || abandons[0].ClientWindow == 0 ||
+		abandons[0].ContinuationIncarnation != 0 || abandons[0].ContinuationSequence != 0 {
+		t.Fatalf("abandons after the lost page 1 = %+v, want exactly one carrying only the client window id", abandons)
+	}
+	if open != 0 {
+		t.Fatalf("helper window %d still open after the lost-page-1 abandon", open)
+	}
+	if _, _, err := m.ExportOwnerRGSessionsPaged([]int{1}); err != nil {
+		t.Fatalf("export 2 failed after the lost page 1: %v", err)
+	}
+	if _, busy, _ := h.snapshot(); busy != 0 {
+		t.Fatalf("helper refused %d fresh kick(s) BUSY", busy)
+	}
+}
+
+// Every page-1 kick names its window, and two exports never reuse an id.
+func TestEachExportNamesItsWindow18752(t *testing.T) {
+	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
+	h := startPagingHelper9344(t, sock, []pageReply9344{{deltas: 1}, {deltas: 1}})
+	for i := 0; i < 2; i++ {
+		if _, _, err := m.ExportOwnerRGSessionsPaged([]int{1}); err != nil {
+			t.Fatalf("export %d: %v", i+1, err)
+		}
+	}
+	var ids []uint64
+	for _, req := range h.got {
+		if req.Type == "export_owner_rg_sessions" && !req.SessionExport.Continuation {
+			ids = append(ids, req.SessionExport.ClientWindow)
+		}
+	}
+	if len(ids) != 2 || ids[0] == 0 || ids[1] == 0 || ids[0] == ids[1] {
+		t.Fatalf("page-1 client window ids = %v, want two distinct nonzero ids", ids)
 	}
 }
