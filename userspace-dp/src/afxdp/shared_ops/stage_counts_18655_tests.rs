@@ -278,6 +278,18 @@ fn mixed_state() -> (Map, Map, Vec<(SessionKey, crate::nat::NatDecision)>) {
     queries.push((base.clone(), base_nat));
     queries.push((base_reverse.clone(), dnat()));
     queries.push((base_wire.clone(), snat(Some(47002))));
+    // A no-NAT forward row whose canonical key equals another flow's WIRE
+    // key. It has no alias of its own, so it lives only in
+    // `shared_sessions`, where the W role must NOT vouch (W is wire-only).
+    // Without this row a mutant that lets W vouch in `shared_sessions`
+    // survives, because every other W-keyed row also has a wire alias
+    // carrying the same values.
+    let shadow = key(client, 30005, server, 443, crate::ip_proto::PROTO_TCP);
+    let shadow_nat = snat(Some(47101));
+    publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &row(&shadow, shadow_nat, stages[1], 2, 0, false, 3008));
+    let shadow_wire = crate::session::forward_wire_key(&shadow, shadow_nat);
+    publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &row(&shadow_wire, no_nat(), stages[3], 77, 88, false, 3009));
+    queries.push((shadow.clone(), shadow_nat));
     // A row stored directly under its own wire tuple (the shape the B5
     // cell pins) and a reverse row in the wire map.
     {
@@ -316,6 +328,13 @@ fn batched_stage_counts_equal_the_per_key_scan_18655() {
     // rows, and both maps hold rows.
     assert!(nonzero > queries.len() / 2, "fixture: too few matching queries ({nonzero})");
     assert!(!wires.is_empty() && !holders.is_empty(), "fixture: both maps must be populated");
+    // The shadow row (keyed by another flow's wire key, shared map only)
+    // must not leak into that flow's answer.
+    let shadow_q = queries
+        .iter()
+        .position(|(k, _)| k.src_port == 30005)
+        .expect("fixture: shadow query present");
+    assert_eq!(batched[shadow_q].1, 2, "#18655: a W-keyed shared_sessions row must not vouch");
     // Each query must also be answered the same when it is the only one
     // in its batch (no cross-key leakage through shared slots).
     drop(wires);
