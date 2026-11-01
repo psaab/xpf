@@ -873,6 +873,7 @@ fn cache_hit_restamp_gate_fires_only_on_stage_transition_16217() {
 }
 
 /// #16217 split shape (FZFixWire): the serving pair is Established on
+#[test]
 fn split_serving_established_replica_pending_completes_and_announces_16217() {
     let forward = key_v4();
     let now = 1_000_000_000u64;
