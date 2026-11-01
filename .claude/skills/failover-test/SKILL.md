@@ -195,7 +195,7 @@ loss-userspace-cluster:
   CLI=/usr/local/sbin/cli
 local-cluster:
   FW0=xpf-fw0  FW1=xpf-fw1
-  HOST=cluster-lan-host  TARGET=172.16.80.200
+  HOST=cluster-lan-host  TARGET=$IPERF_TARGET4 (172.16.100.200, the cluster-env.sh default)
 ```
 
 Mutating and measurement commands belong inside the enclosing lock cell. The

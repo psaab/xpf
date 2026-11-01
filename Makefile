@@ -885,6 +885,49 @@ harness-census:
 test-harness-census-lib:
 	bash ./test/incus/harness-census-selftest.sh
 
+# #18645: the instruction census. A temporary instruction carries an expiry
+# marker (an `Expires-when:` line naming `#NNNN closed`, or a free-text
+# condition plus a `Review-by:` date at most 180 days ahead; grammar in
+# scripts/instructions-census.py and the campaign skill). Scope: docs/,
+# .claude/skills/, test/incus/, scripts/, this Makefile, CLAUDE.md (read, never
+# written), README.md, AGENTS.md and pkg/**/README.md.
+# - `instructions-census` (also CI, against the PR's base, and `make selftest`)
+#   fails bad marker syntax everywhere, and a past Review-by date ONLY in files
+#   the change touches (merge-base with origin/master, plus uncommitted and
+#   untracked files), so a calendar day cannot red every open PR at once.
+# - `instructions-census-online` is the campaign keeper's hourly SWEEP
+#   (--online --all): every marker, expired dates and CLOSED issues, plus a
+#   14-day lead-time warning. It exits 77 (SKIP) without `gh`, which make
+#   reports as a failure: a skipped check is not a pass.
+.PHONY: instructions-census instructions-census-online test-instructions-census-lib
+instructions-census:
+	python3 scripts/instructions-census.py --base origin/master
+
+instructions-census-online:
+	python3 scripts/instructions-census.py --online --all
+
+test-instructions-census-lib:
+	bash ./test/incus/instructions-census-selftest.sh
+
+# #18645: the mirror census. Text deliberately copied into several Markdown
+# files sits between `<!-- mirror:<id> n=<copies> -->` and
+# `<!-- /mirror:<id> -->`; the census fails when same-id blocks differ after
+# whitespace normalisation, when the block count is not the declared n, or when
+# a block has no partner. Hermetic; runs in CI and in `make selftest`.
+.PHONY: mirror-census test-mirror-census-lib
+mirror-census:
+	python3 scripts/mirror-census.py
+
+test-mirror-census-lib:
+	bash ./test/incus/mirror-census-selftest.sh
+
+# #18645: self-test the shared deb version allocator (scripts/next-deb-version.sh,
+# see the DEB_VERSION comment below). Hermetic: a private counter, never the
+# shared one.
+.PHONY: test-next-deb-version-lib
+test-next-deb-version-lib:
+	bash ./scripts/next-deb-version-selftest.sh
+
 # Bake the distributable appliance image (#1879 Path C): one
 # offline-built bootable root disk (REVIEWED-PIN Ubuntu server cloudimg
 # base — PINNED_BASE_RELEASE + PINNED_BASE_SHA256 in bake.py, not
@@ -1959,6 +2002,19 @@ loss-cluster-restart:
 # project's git tags are non-numeric (e.g. userspace-forwarding-ok-*),
 # so synthesize 0.0.<commit-count>+g<short-sha>[.dirty] — monotonic in
 # commit count, carries the exact source sha, and is policy-valid.
+#
+# An EXPLICIT version for a cluster deploy (`make deb DEB_VERSION=...`) comes
+# from scripts/next-deb-version.sh (#18645), never from a hand-picked number:
+#   make deb DEB_VERSION="$(scripts/next-deb-version.sh --git .)+g$(git rev-parse --short=12 HEAD)"
+# It allocates from the shared counter /var/worktrees/.cache/deb-version-counter
+# under flock. The floor is what the six lab nodes RUN (read-only
+# `dpkg-query -W xpf`, plus a margin of 100 when the counter is created), an
+# explicit --floor / XPF_DEB_VERSION_FLOOR, and the --git commit counts. A
+# stray deb on disk is only a warning, never a floor, and a jump of more than
+# 1000 above the floor needs --force-jump. Hand-picked numbers collided across
+# lanes, and a number below the one a node runs is an apt downgrade the deploy
+# refuses; `--claim <version>` registers a hand-picked build and refuses one at
+# or below the counter. The stock default below is unchanged.
 # The shared probe compares tracked files with HEAD, scans untracked package/
 # image inputs, and asks Go for the compiled inputs of `build`/`build-ctl` so
 # ignored sources consumed by the compiler are included. Unattestable GOFLAGS

@@ -763,8 +763,7 @@ impl SessionTable {
         // #10310: count one logical session per node, not every
         // WorkerLocalImport replica on the other RSS workers. True HA
         // peer imports remain counted for #3122 failover enforcement.
-        let counted =
-            !metadata.is_reverse && session_limit_origin_counted(origin);
+        let counted = self.session_limit_counted(&key, origin, metadata.is_reverse);
         if counted {
             // #2134/#3122: fresh-install count choke point. Capture the
             // Copy IPs before `key` is moved into the delta below. The
@@ -1300,8 +1299,9 @@ impl SessionTable {
         self.push_to_wheel(&index_key, now_ns);
         // #10310: a WorkerLocalImport is a local replica of an already
         // counted logical session, not a new limit-session unit. A true HA
-        // peer import remains counted so failover cannot bypass #3122.
-        if !metadata.is_reverse && session_limit_origin_counted(origin) {
+        // peer import remains counted so failover cannot bypass #3122, but on
+        // ONE worker of the fan-out only (#18640).
+        if self.session_limit_counted(&index_key, origin, metadata.is_reverse) {
             self.session_limit_inc(session_limit_zone, index_key.src_ip, index_key.dst_ip);
         }
         true
@@ -1639,14 +1639,19 @@ impl SessionTable {
                 entry.origin = SessionOrigin::SyncImport;
             }
             // Borrow on `entry` ends here so the &mut self count helper can
-            // run. SyncImport and forward transient seeds are counted; seeds
-            // remain node-local through demotion and keep their existing charge.
-            let old_counted =
-                !is_reverse && session_limit_origin_counted(old_origin);
-            let new_counted =
-                will_flip && !is_reverse && session_limit_origin_counted(SessionOrigin::SyncImport);
+            // run. Transient seeds and TUN rows keep their origin and so their
+            // charge. A flip to SyncImport makes the row a fanned-out HA copy,
+            // charged on one worker of the node only (#18640): the owner's
+            // counted local row stops counting unless this worker is the
+            // designated one, and a sibling replica starts counting only if it
+            // is.
+            let new_origin = if will_flip { SessionOrigin::SyncImport } else { old_origin };
+            let old_counted = self.session_limit_counted(&key, old_origin, is_reverse);
+            let new_counted = self.session_limit_counted(&key, new_origin, is_reverse);
             if new_counted && !old_counted {
                 self.session_limit_inc(ingress_zone, key.src_ip, key.dst_ip);
+            } else if old_counted && !new_counted {
+                self.session_limit_dec(ingress_zone, key.src_ip, key.dst_ip);
             }
             demoted_keys.push(key);
         }

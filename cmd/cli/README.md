@@ -42,6 +42,59 @@ nodes keep their help listing; failures involving a value slot or a
 leaf fall through to the existing strict handlers (usage /
 unknown-filter / exact-arity errors).
 
+**The output pipe is not tree grammar (#18664, the #9628 rule).** The
+gate (`validateOperationalLine`, `operational_gate.go`) validates only
+the words before the first bare `|` token. It finds that token with
+`showPipeIndex`, the same rule `splitShowPipe` uses in the handlers, so
+the gate and the handler agree on where the command ends. Before this,
+the bare `|` was judged as an unknown keyword under the keyword-only
+`show configuration` node, and operational `show configuration |
+display set` failed with `unknown show configuration command: |`. The
+rules:
+
+- An unknown word BEFORE the pipe refuses exactly as without the pipe
+  (`show configuration bogus | display set` ->
+  `unknown show configuration command: bogus`).
+- A pipe directly under a keyword-only node is admitted only for a
+  command in `operationalPipeConsumers`, whose handler parses the pipe
+  itself. Today that is only `show configuration`. Every other
+  keyword-only node still refuses, exactly as before #18664 (exit 1),
+  but the message now names the modifier:
+  `syntax error: "<path>" does not accept the output modifier "| ..."`
+  instead of `unknown <path> command: |`. Admitting the pipe would hand
+  it to a handler that prints help or runs the bare command and drops
+  the modifier, exiting 0 (the #16798 class). A pipe after a value slot,
+  leaf or `AcceptsArgs` tail (`show configuration security | display
+  set`, `show system rollback 1 | display json`) is still the handler's
+  business, as before.
+- Output filters (`| match`, `| count`, ...) never reach the gate. They
+  are peeled first by `cliterm.SplitPipe` in `dispatch`, so a chained
+  `show configuration | display set | match x` reaches the gate as
+  `show configuration | display set`.
+- An invalid modifier after `show configuration` is refused by the
+  handler and named: `syntax error: unknown pipe command "frobnicate"`,
+  `unknown display format "yaml"`, `syntax error: missing pipe
+  modifier`.
+- `| compare [rollback <N>]` is not supported on operational
+  `show configuration` (Junos supports it). The handler says so and
+  points at the command that answers the question
+  (`opShowConfigurationCompareErr`):
+  - Unscoped `| compare rollback <N>` points at `show system rollback
+    <N> | compare`. That command diffs rollback N against the ACTIVE
+    configuration (`ShowCompare{ActiveBaseline}`), which is the Junos
+    operational meaning, and needs no configuration mode, which a
+    view-only class cannot enter.
+  - Bare `| compare` and any scoped path (`show configuration interfaces
+    | compare [rollback <N>]`) point at configuration-mode `show
+    [<path>] | compare [rollback <N>]`, because the rollback compare has
+    no subtree selector here. Configuration mode compares the CANDIDATE,
+    and the message says so.
+- A `|` glued to a word (`|display`, `configuration|display`) is not
+  the pipe operator on any operational surface. `showPipeIndex`,
+  `cliterm.SplitPipe` and `pkg/cli` `splitAtPipe` all need a bare `|`
+  word. The glued token is refused as an unknown word, with a hint
+  showing the spaced form.
+
 ## Local-only verbs run without a live daemon (#4909)
 
 `main.go` normally probes the daemon with `GetStatus` at startup and
