@@ -1908,7 +1908,16 @@ type Daemon struct {
 	directAddVIPsFn    func(int) int
 	directRemoveVIPsFn func(int) int
 	// tryPrepareDemotionFn replaces tryPrepareUserspaceRGDemotion in tests (#18701).
-	tryPrepareDemotionFn   func(int)
+	tryPrepareDemotionFn func(int)
+	// directVIPsConfirmAbsentFn replaces directVIPsConfirmedAbsent in tests
+	// (#18715).
+	directVIPsConfirmAbsentFn func(int) error
+	// rgActiveWrites is the single-flight set of helper-down rg_active writes,
+	// one per RG (#18715); rgActiveLateFail latches the late-failure log per
+	// RG. Both under rgActiveWriteMu.
+	rgActiveWriteMu        sync.Mutex
+	rgActiveWrites         map[int]*inflightRGActiveWrite
+	rgActiveLateFail       map[int]bool
 	directAddStableLLFn    func(int)
 	directRemoveStableLLFn func(int)
 

@@ -4788,6 +4788,101 @@ because no peer is asked anything.
   `failover_abort_16818_test.go` (both priority orderings, both post-ACK
   abort causes, abort frame delivered/lost, hold heartbeat before/after
   the commit, plus the batch form).
+- **An aborted transfer whose old owner never re-promotes is retried
+  (#18715).** The #17713 fence above resolves when the old owner reclaims
+  PRIMARY after an observed hold. An owner that does not re-promote never
+  sends that frame. Two shapes reach that state: a requester that out-ranks
+  the owner (ordinary election keeps the restored owner secondary;
+  `TestFailedFenceRestorationKeepsHigherPriorityRequesterFenced17713` pins that
+  step), and an owner in dataplane-arm debt (#12164, a wedged helper, #18701),
+  which yields to the healthier requester. Both nodes then sat secondary until
+  an operator reset the requester.
+
+  **The sequence.** The operator's `request chassis cluster failover
+  redundancy-group <N> node <requester>` returns its abort error, exactly as
+  before. Then:
+  1. The requester (`transfer_retry_18715.go`) starts a retry chain when all
+     of these hold continuously, judged on every admitted heartbeat after its
+     election:
+     - it holds the aborted marker;
+     - neither node is primary;
+     - it can serve the group: election-ready, no arm debt of its own, no
+       hold, weight above 0. When both nodes are sick, a retry achieves
+       nothing.
+  2. The first attempt waits a quiet period: two heartbeat timeouts, floored
+     at 5 s. That lets the abort's own restoration play out. An owner that
+     CAN re-promote advertises PRIMARY within one interval, which resolves
+     the marker and cancels the chain. A dying peer is declared lost before
+     the retry. The floor also exceeds the owner's 2 s dual-resign rescue and
+     the requester's 3 s commit-ready window.
+  3. Each attempt is the ordinary `RequestPeerFailover` sequence. It commits
+     only on the owner's applied ack. A #18715 owner acks a request for a
+     group it does not own only after it confirmed its own dataplane inactive
+     (`pkg/daemon/README.md`, "A transfer request for a group neither node
+     owns"). So a retry can never make a second owner.
+  4. A failed attempt re-arms the marker under its own reqID, and the chain
+     adopts it. The chain backs off 5 s, 10 s, 20 s, then every 30 s, and
+     never gives up while the condition holds: an ownerless group is an
+     outage. At 0.2/s or less, the owner-side transfer request, session-sync
+     barrier and rg_active write stay inside the control-socket budget.
+
+  **Epoch.** A chain belongs to one marker reqID and to the group's operator
+  epoch. Every operator failover or reset entry point bumps that epoch:
+  `ManualFailover` (also when serving a peer's request), the batch forms,
+  `RequestPeerFailover`, `ResetFailover` and `ForceSecondary`. The chain ends
+  the moment any of these happens: the marker clears, the epoch moves, the
+  peer is lost or restarts, the group is removed, or the owner goes primary.
+  An attempt re-checks its epoch under `m.mu`, both at the reservation and
+  again inside the commit's critical section. An operator decision that lands
+  while an attempt is in flight therefore aborts it instead of being
+  overridden. A newer operator request for the same group is refused by the
+  in-flight reservation (`failover already in progress`); it is not
+  silently overtaken.
+
+  **What an operator sees.** The first attempt logs a WARN:
+
+      cluster: an earlier failover of this redundancy group to this node was aborted, and the peer has not taken the group back, so neither node is primary for it; retrying the transfer to this node ... (#18715)
+
+  It carries `rg`, `aborted_req_id`, `reason` and `ownerless_for`. Later
+  attempts log at Debug. A commit logs `transfer retry committed`, and a
+  cancellation after any attempt logs at Info with the reason. While a chain
+  exists, `show chassis cluster status` prints an indented sub-line under the
+  node row (the #8206 layout holds):
+
+      Transfer retry: pending (transfer <reqID> aborted and the peer has not taken the group back (peer secondary, weight 1); <n> attempt(s), next attempt in <t>)
+
+  It ends with the last error, if there was one. The event history records
+  the first attempt and the commit.
+
+  **Mixed versions.** An owner older than #18715 rejects every retry, as it
+  rejected any request for a group it does not own. The requester keeps
+  retrying with backoff, and nothing else changes: the trap is the same as
+  before #18715, and a reset on the requester still ends it. A requester
+  older than #18715 never retries.
+
+  Cells: `transfer_retry_18715_test.go`, with two real Managers:
+  - convergence from the arm-debt trap when the late write lands, after a
+    slow write, across a watchdog kill and restart, and when the helper
+    answers again (then the owner re-promotes). Each row has exactly one
+    owner at the end and no round with two over at least 40 rounds;
+  - the #17713 higher-priority-requester shape converges;
+  - an old owner is retried with growing backoff, never dual;
+  - a requester in arm debt does not retry, and resumes once it re-arms;
+  - a pending retry never fires after an operator decision (back to the
+    sick node, a local failover, a reset);
+  - a failed operator action restarts the epoch;
+  - a reset during an in-flight attempt blocks its commit;
+  - the owner-side predicate: freshness, peer primary, re-checked under the
+    hold lock;
+  - the requester drops an ack whose reqID is not its current request;
+  - the status line;
+  - the production goroutine launch, run under `-race`.
+
+  The control cell with attempts dropped stays ownerless. Each of these
+  mutants fails a cell: no retry, no freshness check, no peer-primary check,
+  no re-check in the hold section, a no-op operator epoch, no admit at the
+  commit, a retry that gives up, no status line, and ignoring the requester's
+  own arm debt.
 - **The ISSU drain pin is a state fact, not a derived weight (#16743).**
   `ForceSecondary` sets `forcedSecondary` alongside `ManualFailover` and
   `Weight=0`. While set, `recalcWeight`, `debtDerivedWeightLocked`, and

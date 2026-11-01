@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -92,6 +94,7 @@ func newDemotion18701(t *testing.T, notReady bool, hold time.Duration) (*Daemon,
 	d.setDataplane(dp)
 	d.directRemoveVIPsFn = func(int) int { log.add("vips-removed"); return 1 }
 	d.directAddVIPsFn = func(int) int { return 0 }
+	d.directVIPsConfirmAbsentFn = func(int) error { log.add("vips-confirmed"); return nil }
 	d.directVIPMu.Lock()
 	if d.directVIPOwned == nil {
 		d.directVIPOwned = make(map[int]bool)
@@ -182,6 +185,7 @@ func runTwoRGDemotion18701(t *testing.T, demote []int) []string {
 	}
 	d.directRemoveVIPsFn = func(rg int) int { log.add(fmt.Sprintf("vips-removed:%d", rg)); return 1 }
 	d.directAddVIPsFn = func(int) int { return 0 }
+	d.directVIPsConfirmAbsentFn = func(int) error { return nil }
 	d.directVIPMu.Lock()
 	d.directVIPOwned = map[int]bool{1: true, 2: true}
 	d.directVIPMu.Unlock()
@@ -396,16 +400,19 @@ func TestDemotionPrepRunsWhenControlStillAnswers18715(t *testing.T) {
 	}
 }
 
-// TestSlowButAnsweringHelperFenceIsNotAcked18715 (review, demonstrated by L):
-// the twin of TestRemoteFailoverOfAWedgedNodeCompletes18715 with the control
-// thread STILL ANSWERING (a frozen worker, or a not-yet-armed helper). The
-// other workers may still forward until the write lands, so a write that misses
-// the bound must NOT be acked actuated: the #6371 abort runs instead.
-func TestSlowButAnsweringHelperFenceIsNotAcked18715(t *testing.T) {
+// TestSlowButAnsweringHelperFenceAckedAfterTheWrite18715 (fold 3, L fix 1):
+// with the helper's control thread STILL ANSWERING (a frozen worker, or a
+// not-yet-armed helper) nothing is bounded. The demotion waits for the real
+// rg_active=false result, here 1.5 s, past the 1 s helper-down bound, and acks
+// the fence only once that write has succeeded. Before fold 3 the write was
+// bounded at 1 s and the late success was thrown away as an abort, which left
+// the RG with no primary (L, BLOCKING).
+func TestSlowButAnsweringHelperFenceAckedAfterTheWrite18715(t *testing.T) {
 	old := helperDownDemotionBound
 	helperDownDemotionBound = 200 * time.Millisecond
 	t.Cleanup(func() { helperDownDemotionBound = old })
-	d, _ := newDemotion18701(t, true, 2*time.Second)
+	const hold = 1500 * time.Millisecond
+	d, _ := newDemotion18701(t, true, hold)
 	if !d.isNoRethVRRP() {
 		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
 	}
@@ -413,10 +420,265 @@ func TestSlowButAnsweringHelperFenceIsNotAcked18715(t *testing.T) {
 	d.tryPrepareDemotionFn = func(int) {}
 	primeRG1Primary(t, d)
 	d.armFailoverActuation(1, actuationReqID)
+	start := time.Now()
+	demoteRG1(t, d)
+	took := time.Since(start)
+	if err := d.waitFailoverActuated(1, actuationReqID); err != nil {
+		t.Fatalf("an answering helper's rg_active=false write succeeded after %s and the fence was still not acked: %v", hold, err)
+	}
+	if took < hold {
+		t.Fatalf("the fence resolved after %s, before the %s write completed: a two-owner window (#5640)", took, hold)
+	}
+}
+
+// TestHelperAnsweringMidWriteUsesTheRealResult18715 (fold 3, U item 3): the
+// control socket is silent when the demotion starts (so the prep is skipped and
+// the write is bounded) and starts answering mid-write. The fence decision then
+// samples the socket FRESH, finds it answering, and waits for the real result:
+// a failed write aborts, a successful one acks. The prep decision keeps the
+// entry sample: it is not re-run.
+func TestHelperAnsweringMidWriteUsesTheRealResult18715(t *testing.T) {
+	old := helperDownDemotionBound
+	helperDownDemotionBound = 200 * time.Millisecond
+	t.Cleanup(func() { helperDownDemotionBound = old })
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantAck bool
+	}{
+		{"write-times-out", errors.New("control request timed out"), false},
+		{"write-succeeds", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, log := newDemotion18701(t, true, 600*time.Millisecond)
+			if !d.isNoRethVRRP() {
+				t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+			}
+			dp := d.dataplane().(*readinessDP18701)
+			dp.ha.err = tc.err
+			d.tryPrepareDemotionFn = func(int) { log.add("prep") }
+			primeRG1Primary(t, d)
+			d.armFailoverActuation(1, actuationReqID)
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				dp.controlAnswers.Store(true)
+			}()
+			demoteRG1(t, d)
+			err := d.waitFailoverActuated(1, actuationReqID)
+			if tc.wantAck && err != nil {
+				t.Fatalf("the helper answered and the write succeeded, but the fence was not acked: %v", err)
+			}
+			if !tc.wantAck && err == nil {
+				t.Fatal("the helper answered mid-write and the write then failed: that is a refusal, and the fence was acked anyway (#6371)")
+			}
+			if slices.Contains(log.snapshot(), "prep") {
+				t.Fatal("the prep ran although the control socket was silent at entry: the prep decision must use the entry sample")
+			}
+		})
+	}
+}
+
+// TestAnsweringAtEntryIsNeverBounded18715 (fold 3, L fix 1): a control socket
+// that answers when the demotion starts means the write is not bounded at all.
+// If the socket then goes silent mid-write, the demotion still waits for the
+// real result and acks a write that lands; a bounded write would have given up
+// at the bound and, with the entry sample "answering", could only abort.
+func TestAnsweringAtEntryIsNeverBounded18715(t *testing.T) {
+	old := helperDownDemotionBound
+	helperDownDemotionBound = 200 * time.Millisecond
+	t.Cleanup(func() { helperDownDemotionBound = old })
+	d, _ := newDemotion18701(t, true, 600*time.Millisecond)
+	if !d.isNoRethVRRP() {
+		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+	}
+	dp := d.dataplane().(*readinessDP18701)
+	dp.controlAnswers.Store(true)
+	d.tryPrepareDemotionFn = func(int) {}
+	primeRG1Primary(t, d)
+	d.armFailoverActuation(1, actuationReqID)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		dp.controlAnswers.Store(false)
+	}()
+	demoteRG1(t, d)
+	if err := d.waitFailoverActuated(1, actuationReqID); err != nil {
+		t.Fatalf("the write landed after the socket went silent mid-write, and the fence was not acked: %v", err)
+	}
+}
+
+// TestSilentAckNeedsEveryVIPConfirmedGone18715 (fold 3, U item 2): a failed
+// write is acked as a fence only when every direct VIP of the RG is confirmed
+// off the interfaces. The release skips failed deletes and clears the
+// ownership flag regardless, so "released" is not proof.
+func TestSilentAckNeedsEveryVIPConfirmedGone18715(t *testing.T) {
+	old := helperDownDemotionBound
+	helperDownDemotionBound = 200 * time.Millisecond
+	t.Cleanup(func() { helperDownDemotionBound = old })
+	d, _ := newDemotion18701(t, true, 5*time.Second)
+	if !d.isNoRethVRRP() {
+		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+	}
+	d.directVIPsConfirmAbsentFn = func(int) error { return errors.New("VIP 10.0.61.1/24 is still on ge-0-0-1") }
+	primeRG1Primary(t, d)
+	d.armFailoverActuation(1, actuationReqID)
 	demoteRG1(t, d)
 	if err := d.waitFailoverActuated(1, actuationReqID); err == nil {
-		t.Fatal("the fence was acked actuated while an answering helper's rg_active write was still pending: a two-owner window (#5640/#16592)")
+		t.Fatal("the fence was acked on a silent helper while a VIP of the RG was still on the interface")
 	}
+}
+
+// noSurfaceDP18715 is a runtime WITHOUT the helperControlSource surface.
+type noSurfaceDP18715 struct {
+	dataplane.RuntimeDataPlane
+	ha *slowHA18701
+}
+
+func (d *noSurfaceDP18715) HA() dataplane.HAController { return d.ha }
+func (d *noSurfaceDP18715) Mode() dpuserspace.DataplaneMode {
+	return dpuserspace.ModeUserspaceStrict
+}
+func (d *noSurfaceDP18715) HelperElectionNotReady() bool { return true }
+
+// TestNoControlSurfaceSplitsTheFallback18715 (fold 3, U item 4): without the
+// control-socket surface the prep is skipped (conservative) but a failed write
+// is NOT acked (fail closed).
+func TestNoControlSurfaceSplitsTheFallback18715(t *testing.T) {
+	d, log := newDemotion18701(t, true, 0)
+	if !d.isNoRethVRRP() {
+		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+	}
+	ha := &slowHA18701{log: log, err: errors.New("no helper")}
+	d.setDataplane(&noSurfaceDP18715{ha: ha})
+	if _, ok := d.dataplane().(helperControlSource); ok {
+		t.Fatal("setup: the fixture runtime must not carry the control surface")
+	}
+	d.tryPrepareDemotionFn = func(int) { log.add("prep") }
+	primeRG1Primary(t, d)
+	d.armFailoverActuation(1, actuationReqID)
+	demoteRG1(t, d)
+	if slices.Contains(log.snapshot(), "prep") {
+		t.Fatal("without the surface the prep must be skipped")
+	}
+	if err := d.waitFailoverActuated(1, actuationReqID); err == nil {
+		t.Fatal("without the surface a failed write was acked as a fence: the ack fallback must fail closed")
+	}
+}
+
+// countingHA18715 blocks every rg_active write until release is closed.
+type countingHA18715 struct {
+	calls   atomic.Int32
+	release chan struct{}
+	err     error
+}
+
+func (h *countingHA18715) SetRGActive(context.Context, int, bool) error {
+	h.calls.Add(1)
+	<-h.release
+	return h.err
+}
+func (h *countingHA18715) SetHAWatchdog(context.Context, int, uint64) error { return nil }
+func (h *countingHA18715) SyncFabricState(context.Context) error            { return nil }
+
+// TestHelperDownWritesAreSingleFlight18715 (fold 3, U item 5): an abandoned
+// write keeps running, and a later demotion or reconcile pass for the same RG
+// joins it instead of stacking another write behind a wedged helper.
+func TestHelperDownWritesAreSingleFlight18715(t *testing.T) {
+	old := helperDownDemotionBound
+	helperDownDemotionBound = 50 * time.Millisecond
+	t.Cleanup(func() { helperDownDemotionBound = old })
+	d, _ := newDemotion18701(t, true, 0)
+	ha := &countingHA18715{release: make(chan struct{})}
+	for range 3 {
+		if err := d.helperDownRGActiveWrite(context.Background(), ha, 1, false, true); err == nil {
+			t.Fatal("a write against a blocked, silent helper returned success")
+		}
+	}
+	if got := ha.calls.Load(); got != 1 {
+		t.Fatalf("%d rg_active writes in flight for one RG, want 1", got)
+	}
+	close(ha.release)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		d.rgActiveWriteMu.Lock()
+		n := len(d.rgActiveWrites)
+		d.rgActiveWriteMu.Unlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the released write never left the in-flight set")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := d.helperDownRGActiveWrite(context.Background(), ha, 1, false, true); err != nil {
+		t.Fatalf("a fresh write after the old one finished: %v", err)
+	}
+	if got := ha.calls.Load(); got != 2 {
+		t.Fatalf("calls = %d, want 2 (one per write once the first finished)", got)
+	}
+}
+
+// TestAbandonedWriteLogsItsLateOutcome18715 (fold 3, U item 1): the outcome
+// of a write the demotion stopped waiting for is logged when it arrives: a
+// success at Info, the first failure of a streak at Warn, repeats at Debug.
+func TestAbandonedWriteLogsItsLateOutcome18715(t *testing.T) {
+	old := helperDownDemotionBound
+	helperDownDemotionBound = 20 * time.Millisecond
+	t.Cleanup(func() { helperDownDemotionBound = old })
+	var buf syncBuffer18715
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	d, _ := newDemotion18701(t, true, 0)
+	abandon := func(err error) {
+		ha := &countingHA18715{release: make(chan struct{}), err: err}
+		_ = d.helperDownRGActiveWrite(context.Background(), ha, 1, false, true)
+		close(ha.release)
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			d.rgActiveWriteMu.Lock()
+			n := len(d.rgActiveWrites)
+			d.rgActiveWriteMu.Unlock()
+			if n == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the abandoned write never finished")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(20 * time.Millisecond) // the log runs after the set is cleared
+	}
+	abandon(errors.New("refused"))
+	abandon(errors.New("refused again"))
+	abandon(nil)
+	out := buf.String()
+	for _, want := range []string{
+		"level=WARN msg=\"cluster: an rg_active write the demotion had stopped waiting for failed",
+		"level=DEBUG msg=\"cluster: abandoned rg_active write failed again\"",
+		"level=INFO msg=\"cluster: the helper acknowledged an rg_active write the demotion had stopped waiting for",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+type syncBuffer18715 struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer18715) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer18715) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 // TestReconcileLoopPrepRunsWhenControlStillAnswers18715 (review): the reconcile

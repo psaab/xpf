@@ -308,7 +308,24 @@ func (m *Manager) revalidateLocked(r *failoverReservation) (missing []int, super
 // and advertises an explicit transfer-out state so the peer can claim
 // primary without relying on weight-zero election semantics.
 func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
+	return m.manualFailoverWith(rgID, nil)
+}
+
+// manualFailoverWith is ManualFailover with an optional admission predicate
+// that runs under m.mu twice: before the pre-hook (a cheap early refusal) and
+// again in the critical section that installs the hold, so nothing can change
+// between the authoritative check and the hold (#18715 ownerless accept).
+func (m *Manager) manualFailoverWith(rgID int, admit func(rg *RedundancyGroupState, now time.Time) error) (FailoverOutcome, error) {
 	m.mu.Lock()
+	m.noteOperatorFailoverLocked(rgID)
+	if admit != nil {
+		if rg, ok := m.groups[rgID]; ok {
+			if err := admit(rg, time.Now()); err != nil {
+				m.mu.Unlock()
+				return FailoverApplied, err
+			}
+		}
+	}
 	resv, rerr := m.reserveLocked([]int{rgID}, nil, false, false)
 	if rerr != nil {
 		m.mu.Unlock()
@@ -351,6 +368,11 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 		return FailoverSuperseded, nil
 	}
 	rg := m.groups[rgID]
+	if admit != nil {
+		if err := admit(rg, time.Now()); err != nil {
+			return FailoverApplied, err
+		}
+	}
 	oldState := rg.State
 	m.clearRemoteTransferOutLeaseLocked(rgID)
 	rg.transferCommitRolePinned = false
@@ -384,6 +406,9 @@ func (m *Manager) ForceSecondary() error {
 	if !m.peerAlive {
 		m.mu.Unlock()
 		return fmt.Errorf("peer not alive — cannot force secondary without active peer")
+	}
+	for rgID := range m.groups {
+		m.noteOperatorFailoverLocked(rgID)
 	}
 	// Snapshot EVERY configured RG (including disabled) so membership/active
 	// revalidation covers the whole config, but RESERVE only active RGs —
@@ -477,6 +502,7 @@ func (m *Manager) ResetFailover(rgID int) error {
 	if !ok {
 		return fmt.Errorf("redundancy group %d not found", rgID)
 	}
+	m.noteOperatorFailoverLocked(rgID)
 	if m.kernelUpgradeHold {
 		slog.Info("cluster: failover reset leaves kernel-upgrade hold in place (single-RG reset is not a node rejoin)", "rg", rgID)
 	}
@@ -744,10 +770,28 @@ func (m *Manager) preActivateTransfer(activate func([]int) error, release func([
 // "request chassis cluster failover redundancy-group N node <local>" is run.
 func (m *Manager) RequestPeerFailover(rgID int) error {
 	m.mu.Lock()
+	m.noteOperatorFailoverLocked(rgID)
+	m.mu.Unlock()
+	return m.requestPeerFailover(rgID, nil)
+}
+
+// requestPeerFailover is the RequestPeerFailover sequence. admit, when set,
+// runs under m.mu at the reservation and again inside the commit's critical
+// section; a non-nil error abandons the request (before sending) or aborts it
+// (after the owner's applied ack). The #18715 retry passes its staleness
+// check here so a retry can never act on an epoch an operator has ended.
+func (m *Manager) requestPeerFailover(rgID int, admit func() error) error {
+	m.mu.Lock()
 	rg, ok := m.groups[rgID]
 	if !ok {
 		m.mu.Unlock()
 		return fmt.Errorf("redundancy group %d not found", rgID)
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			m.mu.Unlock()
+			return err
+		}
 	}
 	// Reserve this RG for the whole request. Without the reservation, a
 	// concurrent request could consume the hold after this request clears it,
@@ -856,7 +900,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 		m.recalcWeight(rg)
 	}
 	m.mu.Unlock()
-	if err := m.commitRequestedPeerFailover(rgID, reqID); err != nil {
+	if err := m.commitRequestedPeerFailoverWith(rgID, reqID, admit); err != nil {
 		// The commit applies the transfer override before running the
 		// election. Roll back the reqID-matched override and restore the
 		// preexisting local manual-failover hold on every commit failure.
@@ -878,12 +922,21 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 }
 
 func (m *Manager) commitRequestedPeerFailover(rgID int, reqID uint64) error {
+	return m.commitRequestedPeerFailoverWith(rgID, reqID, nil)
+}
+
+func (m *Manager) commitRequestedPeerFailoverWith(rgID int, reqID uint64, admit func() error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	rg, ok := m.groups[rgID]
 	if !ok {
 		return fmt.Errorf("redundancy group %d not found", rgID)
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return err
+		}
 	}
 	if !rg.IsReadyForTakeover(m.takeoverHoldTime) {
 		readySince := "<zero>"
@@ -1366,6 +1419,7 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 	}
 
 	m.mu.Lock()
+	m.noteOperatorFailoverLocked(ids...)
 	resv, rerr := m.reserveLocked(ids, nil, false, false)
 	if rerr != nil {
 		m.mu.Unlock()
@@ -1442,6 +1496,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	}
 
 	m.mu.Lock()
+	m.noteOperatorFailoverLocked(ids...)
 	for _, rgID := range ids {
 		rg, ok := m.groups[rgID]
 		if !ok {

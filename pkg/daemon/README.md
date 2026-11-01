@@ -5057,33 +5057,61 @@ not yet armed, or wedged (#18697/#18685):
      udp, RG2's handler started 10 s after RG1's, so an RG2 VIP released only
      by its own handler would have stayed dual-held all that time (#18715
      review).
-2. The peer-barrier demotion prep is skipped ONLY when the helper's control
-   socket is silent, or no helper is running (`HelperControlUnresponsive`).
-   When the verdict is a frozen worker, or a not-yet-armed helper whose
-   control thread still answers, the prep still runs, AFTER the VIP release.
-   It moves this node's flows to fabric redirect, so packets that still reach
-   this node are forwarded via the peer instead of dropped.
-3. The rg_active=false write is best-effort, bounded by
-   `helperDownDemotionBound` (1 s) through `setRGActiveBounded`. A timeout
-   leaves the apply unrecorded, so the reconcile loop retries it as it would
-   any failed apply.
-4. When that bounded write fails AND the helper's control socket is
-   unresponsive (the prep-skip predicate), the failover fence is still
-   reported ACTUATED. The VIPs are released, and a helper whose control socket
-   is silent forwards nothing for the RG.
-   - When the control thread still answers (a frozen worker, or a
-     not-yet-armed helper), the other workers may still be forwarding. In
-     that case a refused or late write keeps the #6371 abort, which avoids a
-     two-owner window (#5640/#16592).
-   - Without this, a peer-requested evacuation of the sick node (#16592)
-     would abort and restore THIS node as owner. With the bounded write
-     timing out by design, that would be certain.
+2. The helper's control socket is sampled ONCE, at the start of the demotion
+   (`helperControlSilentForPrep`). That one sample decides both the prep and
+   whether the write below is bounded, so the two cannot disagree.
+   - The peer-barrier demotion prep is skipped ONLY when the socket is silent,
+     or no helper is running. When the verdict is a frozen worker, or a
+     not-yet-armed helper whose control thread still answers, the prep still
+     runs, AFTER the VIP release. It moves this node's flows to fabric
+     redirect, so packets that still reach this node are forwarded via the
+     peer instead of dropped.
+3. The rg_active=false write (`helperDownRGActiveWrite`):
+   - Socket answering at entry: NOT bounded. The real result decides: success
+     is a fence, an error is a refusal (#6371). Fold 3 of #18715 removed the
+     1 s bound here. A slow-but-answering write used to be cut off at 1 s and
+     reported as an abort, which left the RG with no primary (see the
+     ownerless retry below).
+   - Socket silent at entry: bounded by `helperDownDemotionBound` (1 s). When
+     the bound expires the socket is sampled AGAIN, fresh. If it answers now
+     (the helper recovered, or was respawned) the real result is awaited after
+     all. If it is still silent the write is abandoned to the background.
+   - One write per RG is in flight at a time. A later demotion or reconcile
+     pass for the same RG joins it instead of stacking another write behind a
+     wedged helper.
+   - An abandoned write's late outcome is logged when it arrives: success at
+     Info, the first failure of a streak at Warn, repeats at Debug. It is not
+     recorded; the reconcile loop retries until a write it waited for lands.
+4. A failed write is still reported as an ACTUATED failover fence only when
+   all of these hold (`helperDownFenceSilentAck`):
+   - the socket was silent at entry;
+   - it is silent now (a fresh sample);
+   - every configured direct VIP of the RG is confirmed off its interface
+     (`directVIPsConfirmedAbsent` re-reads the kernel's addresses). The
+     release itself is no proof: it skips a delete that fails, falls back to a
+     blind pass when the address dump fails, and clears the ownership flag
+     either way.
+
+   Then this node forwards nothing for the RG: no VIP attracts traffic to it,
+   and a helper whose control socket is silent is assumed to forward nothing.
+   - That last part is an ASSUMPTION, bounded by the 30 s silence kill
+     (#18685). A control thread blocked on a lock it shares with the workers
+     (the #18658 shape) can be silent while workers still forward. The window
+     ends at the kill, which stops the helper.
+   - Anything else keeps the #6371 abort: a refused or failed write while the
+     control thread answers (a frozen worker, a not-yet-armed helper, or one
+     that started answering mid-write), or a VIP still present.
+   - Without the ack, a peer-requested evacuation of the sick node (#16592)
+     would abort and restore THIS node as owner.
+   - Without a control surface at all, the two fallbacks split: the prep is
+     skipped (conservative) and the ack is refused (fail closed).
    - A healthy-helper demotion keeps the #6371 rule: a failed clear is not
      acked.
 
 The 2 s reconcile loop follows the same rule. With an unresponsive helper it
-releases every non-owned RG's VIPs before any per-RG helper round trip, skips
-the demotion prep, and bounds the rg_active=false retry.
+releases every non-owned RG's VIPs before any per-RG helper round trip, takes
+one control-socket sample per RG for the prep and the bound, and joins any
+write still in flight.
 
 A healthy helper keeps the #18563/#18620 order unchanged. Legacy VRRP mode is
 also unchanged: there the VIPs follow the VRRP resign, and that resign waits
@@ -5093,14 +5121,23 @@ behind the 5 s prep, so a similar window may exist there (#18716).
 
     cluster: demoting with an unresponsive helper; releasing VIPs before helper-side demotion (#18701)
 
-It carries the `rg` and the #18685/#18697 verdict reason. It is followed by
-`direct VIP reconcile: removed VIP` lines for every RG the node lost.
+It carries the `rg`, the #18685/#18697 verdict reason and `control_silent`
+(the entry sample). It is followed by `direct VIP reconcile: removed VIP`
+lines for every RG the node lost.
 
 When a peer-requested evacuation of the sick node completes this way, it logs
 `failed to update rg_active from cluster event; failover still reported
-actuated because the helper's control socket is unresponsive ...`. As with
-any manual failover, the sick node then keeps the RG in `Manual` until
-`request chassis cluster failover reset redundancy-group <N>`.
+actuated because the helper's control socket is silent and every VIP of the
+group is confirmed released`. When the fence is NOT acked, the
+`failed to update rg_active from cluster event` WARN carries
+`fence_not_acked_because`.
+
+As with any manual failover, the sick node then keeps the RG in `Manual`.
+While that hold stands this node will not take the RG back, even if the new
+owner gets sick too: its election stays in the hold unless the peer resigns
+at weight 0 or transfers the RG out. Clear it with
+`request chassis cluster failover reset redundancy-group <N>` on THIS node.
+Peer loss also clears it (`clearPeerIncarnationAuthorityLocked`).
 
 The helper-side part of each RG's demotion still runs per RG, in turn. It
 may wait on the Manager's `m.mu` behind the wedged helper's round trips
@@ -5115,7 +5152,107 @@ Cells, in `demote_helper_down_18701_test.go`:
 - with an unresponsive helper, the VIPs are released before the rg_active
   write, and the handler does not wait out a write that never acknowledges;
 - with a healthy helper, rg_active goes first, the VIPs after it, and the
-  handler waits for the acknowledgement.
+  handler waits for the acknowledgement;
+- a slow-but-answering write (1.5 s) is acked after it lands, never before;
+- answering at entry is never bounded, even when the socket goes silent
+  mid-write;
+- silent at entry, then answering mid-write: a failed write aborts, a
+  successful one acks, and the prep keeps the entry decision;
+- a silent ack needs every VIP confirmed gone;
+- without the control surface the prep is skipped and the ack refused;
+- helper-down writes are single-flight, and an abandoned write's late
+  outcome is logged.
 
 Each of these mutants fails a cell: dropping the early release, an unbounded
-write, and ignoring the readiness verdict.
+write, ignoring the readiness verdict, dropping the fresh sample at bound
+expiry, bounding an answering write, a silent ack without the VIP confirm, an
+ack fallback of true, no single-flight, and no late-outcome log. Re-sampling
+the socket for the prep instead of reusing the entry sample is not
+observable (the two reads are microseconds apart); the entry sample exists so
+the prep and the bound cannot disagree, and the fresh sample at the ack is
+pinned.
+
+## A transfer request for a group neither node owns (#18715)
+
+An aborted transfer can leave a redundancy group with no primary (see
+`pkg/cluster/README.md`, "An aborted transfer whose old owner never
+re-promotes"). The requester then retries the transfer. This node, the old
+owner, receives that retry as an ordinary remote failover request for a group
+it does NOT own.
+
+**Behaviour change in `OnRemoteFailover`.** Before #18715, such a request was
+always rejected (`ErrRemoteFailoverRejected`), because a stale or delayed
+request must not demote a node into a dual resign while the peer owns the
+group. That guard stays for every group the peer owns. The one exception,
+`acceptOwnerlessTransferOut`, is a group that neither node owns:
+
+1. **Atomic accept.** `cluster.ManualFailoverOwnerless` evaluates the
+   predicate under the cluster lock, in the same critical section that
+   installs the Manual hold (and once more before the pre-hook, as a cheap
+   early refusal). The predicate:
+   - this node is not primary, and the group is enabled;
+   - the latest peer heartbeat is at most two heartbeat intervals old;
+   - that heartbeat shows the peer not primary.
+
+   The peer sends a frame every interval, so a view within two intervals has
+   missed at most one frame. An older view may predate a promotion, and a
+   delayed request from an old epoch would then install a hold this node does
+   not need.
+
+   What is left is a promotion after the peer's latest frame. The requester
+   closes it: it drops an applied ack whose reqID is not the request it is
+   waiting on (`completeFailoverWait`), and the hold's lease then restores
+   this node.
+2. **The ack waits for real actuation.** The applied-ack waits on a
+   confirm-only barrier. The ordinary demotion event cannot resolve it: that
+   event is a Secondary to SecondaryHold edge that writes nothing to the
+   helper. `confirmOwnerlessInactive` resolves it, and needs all of:
+   - the RG state machine wants the group inactive;
+   - a FRESH rg_active=false write returns success, within
+     `ownerlessConfirmBound` (2 s). A write already in flight is joined; it
+     completes after the request arrived, so its success is as fresh;
+   - every direct VIP of the group is confirmed absent (the same
+     `directVIPsConfirmedAbsent` as above).
+
+   A timeout, a failed write, or a VIP still present fails the barrier and the
+   ack. The requester keeps its fence and retries later. After a watchdog kill
+   and restart of the helper, the fresh write succeeds, so the next retry
+   converges.
+3. **Afterwards** this node holds the group in `Manual`, exactly as after a
+   completed evacuation. Clear it with
+   `request chassis cluster failover reset redundancy-group <N>` on this node;
+   peer loss also clears it. The #5079 lease restores this node if the
+   requester never commits.
+
+Batch requests (`OnRemoteFailoverBatch`) keep the old rule: a batch that names
+a group this node does not own is rejected. The requester retries one group at
+a time.
+
+**Mixed versions.**
+
+| Owner | Requester | Result |
+|-------|-----------|--------|
+| #18715 | #18715 | The requester retries; the owner accepts on a fresh ownerless view and acks after its confirm. The group converges. |
+| before #18715 | #18715 | The owner rejects every retry, as it rejected any request for a group it does not own. The trap is unchanged; the requester keeps retrying with backoff (Debug after the first Warn). |
+| #18715 | before #18715 | No retries. An operator's explicit `request chassis cluster failover redundancy-group <N> node <requester>` now recovers the trap, where it used to be rejected. |
+| before #18715 | before #18715 | Unchanged: an operator reset on the requester ends the trap. |
+
+**What an operator sees** on this node:
+
+    cluster: the peer asked for a redundancy group that neither node owns; confirming this node's dataplane inactive for it before acknowledging (#18715)
+
+and, when the confirm fails,
+`ownerless transfer not acknowledged; this node could not confirm its
+dataplane inactive (#18715)` with the reason. A rejected request logs at Info.
+
+Cells, in `ownerless_transfer_18715_test.go`: the ack follows the fresh write
+and the VIP confirm and leaves the Manual hold; a peer that owns the group, or
+a stale view, is rejected with no hold, no write and no barrier left; a
+refused write, a timed-out write, a VIP still present and a group still
+desired active each fail the ack; the hold event cannot resolve the barrier;
+after a helper restart the next request is acked; the installed
+`OnRemoteFailover` closure routes a non-owned RG to the accept and still rejects
+a peer-owned one. Each of these mutants fails a cell: no VIP confirm, no fresh
+write, a barrier the hold event can resolve, and the pre-#18715 reject in the
+wiring.
+The predicate's own cells are in `pkg/cluster/transfer_retry_18715_test.go`.
