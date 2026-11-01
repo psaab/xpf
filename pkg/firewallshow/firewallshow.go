@@ -230,6 +230,8 @@ func WriteAllFilters(buf *strings.Builder, cfg *config.Config) {
 			for _, term := range filters[name].Terms {
 				WriteTerm(buf, term, false)
 			}
+			// #18728: this config-only view has no counter reading.
+			WriteImplicitDiscard(buf, filters[name], ImplicitDiscardCounter{}, false)
 			buf.WriteString("\n")
 		}
 	}

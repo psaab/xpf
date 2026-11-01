@@ -1,6 +1,7 @@
 package config
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -340,4 +341,40 @@ func HostInboundLifelineInterface(name string, lifelines map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// Lo0ImplicitDiscardExemptNetdevs returns the kernel netdevs whose host-bound
+// traffic the kernel lo0 mirror's IMPLICIT final discard (#18728) does not
+// drop: the loopback device "lo", plus the explicitly configured
+// chassis-cluster control link and fabric interfaces (the positive,
+// non-fxp0 entries of HostInboundLifelineSet: control-interface,
+// fabric-interface/fabric1-interface, fabric-options member-interfaces and
+// the fabric interfaces themselves), resolved to their Linux device names.
+//
+// The exemption covers the implicit drop only. An authored lo0 term that
+// discards still applies to these netdevs (that gap is #18729). fxp0 is NOT
+// exempt: on Junos the lo0 filter governs management traffic too, so a lo0
+// filter with no terminal catch-all must accept the management services it
+// needs. The list is sorted after the leading "lo" so the rendered rule is
+// deterministic.
+func Lo0ImplicitDiscardExemptNetdevs(cfg *Config) []string {
+	out := []string{"lo"}
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return out
+	}
+	seen := map[string]bool{"lo": true}
+	var rest []string
+	for key, isLifeline := range HostInboundLifelineSet(cfg) {
+		if !isLifeline || LifelineBaseName(key) == "fxp0" {
+			continue
+		}
+		netdev := LogicalUnitDeviceKeyForRef(cfg, key)
+		if netdev == "" || seen[netdev] {
+			continue
+		}
+		seen[netdev] = true
+		rest = append(rest, netdev)
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
 }

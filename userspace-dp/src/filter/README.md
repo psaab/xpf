@@ -167,7 +167,10 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   `continue_term`, CONTINUES to the next term instead of returning. A
   matched TERMINATING term (including a modifier-only implicit accept)
   sets the result action and returns. If no term terminates, the
-  accumulated modifiers ride the implicit default Accept. `continue_term`
+  accumulated modifiers ride the evaluator's default Accept — which a
+  Go-built snapshot never reaches unless the filter has a terminal
+  catch-all ahead of it, because a filter without one ends in the
+  synthetic `implicit-discard` term (#18728, below). `continue_term`
   is compared in `filter_term_semantics_match` (it flips
   terminate-vs-fall-through without changing the parsed match vecs, so a
   flow-cache rebuild must catch a `then next term` toggle). The cached
@@ -230,40 +233,70 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   spill is off the hot path, and this keeps the cached and live paths
   meter-identical for ALL policer counts rather than diverging above two.
 
-  **No-match default is implicit ACCEPT — a deliberate divergence from
-  Junos (#3295).** When a packet matches NO term in a filter, the
-  evaluation returns `FilterResult::default()`, whose action is
-  `FilterAction::Accept` (`mod.rs`). The same default-Accept applies to a
-  missing filter key and to a cross-family mismatch, and the separate
-  TX-selection path has its own Accept defaults
-  (`TxSelectionFilterResult` / `CachedTxSelectionFilterResult`). Junos
-  stateless firewall filters instead carry an implicit final **discard**:
-  a packet matching no explicit term is silently dropped. xpf keeps
-  implicit-accept as the no-match default ON PURPOSE and does NOT flip it
-  to discard. A global flip would blackhole the classify-and-pass OUTPUT
-  filter idiom that rides the implicit accept — concretely the CoS
-  `bandwidth-output` filters attached as `interfaces reth0 unit 80 family
-  inet/inet6 filter output` (a pure dest-port allowlist with no final
-  catch-all), whose unmatched egress would be dropped at TX selection
-  (`afxdp/tx/cos_classify.rs` gates `drop` on `action != Accept`). That
-  violates the project "keep GOOD" doctrine (#2124/#3261). The research
-  record is `docs/research/3295-filter-failopen/plan.md`.
+  **No-match is the Junos implicit final DISCARD (#18728).** A packet that
+  matches no term of a filter is discarded, as on Junos (Juniper, "How
+  Standard Firewall Filters Evaluate Packets": a packet that matches none
+  of the terms is discarded; a filter with no terms discards everything).
+  The decision is made in the Go control plane, not in this crate: `buildFirewallFilterSnapshots`
+  (`pkg/dataplane/userspace/filters.go`, `appendImplicitDiscard`) ends
+  every filter that has no terminal catch-all term
+  (`config.FirewallFilterHasCatchAll` false) with a synthetic LAST term
+  named `implicit-discard` — no `from`, `then count implicit-discard;
+  then discard;` — and marks the in-process Go snapshot
+  `ImplicitDiscard` (show-surface metadata, not on the wire, so the
+  snapshot shape and protocol version are unchanged). The Rust compiler
+  compiles it as an ordinary term, so no evaluator needs a special case.
+  The cells measure the input non-routing walk (v4/v6), live and cached
+  TX selection (`cos_classify` drops on `action != Accept`), the plain
+  and metered lo0 walks, and the #7212 static verdict: an established
+  session whose input filter now ends in the implicit discard is revoked,
+  since the synthetic term is a flow-invariant deny. Because
+  the term is counted, `Filter::needs_tx_eval` is true for every filter
+  that carries it, so a pure-accept OUTPUT allowlist (no count/log/class)
+  is now evaluated at TX instead of skipped. Its counter is an ordinary
+  term counter at ordinal = number of authored terms; `show firewall`
+  renders it as `Term: implicit-discard` with its hit count
+  (`dpuserspace.ImplicitDiscardCounterForFilter`), and
+  `xpf_filter_hits_total{term="implicit-discard"}` exports it.
 
-  **Operator workaround for Junos-style deny-by-default.** An operator
-  who wants Junos stateless-filter parity appends an explicit final
-  unconstrained term: `term <last> { then discard; }` (the inverse of
-  Junos's "write a final accept"). The Go control plane emits a commit
-  WARNING (`validateFilterNoCatchAllWarnings`,
-  `pkg/config/compiler_validate_warn.go`) for any filter attached to an
-  interface/lo0 input/output hook that has no terminal catch-all term, so
-  the divergence and the workaround are surfaced at commit; it is never a
-  commit error (implicit-accept is the documented default and a hard
-  reject would brick a previously-accepted config). An authored
-  `then next term` fall-through term is NOT a catch-all (a modifier-only
-  term without the bit terminates as implicit accept, #14632, but is
-  scoped by its `from` and so is also not treated as a catch-all); a
-  `then routing-instance` PBR term terminates but is not
-  accept/discard/reject and so is also not treated as a catch-all.
+  What does NOT change: `FilterResult::default()` is still Accept, and it
+  is still what a missing filter key, a cross-family mismatch (an IPv6
+  packet on an interface with only a `family inet` filter), and an
+  interface with no filter bound return — a filter that is not applied
+  filters nothing. The #6835 routing-instance defer still returns Accept +
+  `deferred_at_routing_term` BEFORE the walk reaches the synthetic term,
+  so a matched PBR term keeps its routing decision. Filter lists
+  (`input-list` / `output-list`) are not supported (a strict commit
+  rejects them, #10293), so the Junos list rule — one implicit discard at
+  the end of the list, not per filter — does not arise. Evidence:
+  `filter/implicit_discard_18728_tests.rs`, which decodes the Go-built
+  snapshots pinned in `testdata/firewall_implicit_discard_18728.json`.
+
+  **What counts as a catch-all.** A term whose `from` is fully
+  unconstrained and that terminates. "Terminates" is exactly the inverse
+  of this crate's `continue_term` (`next_term && action.is_empty() &&
+  routing_instance.is_empty()`), so `then accept` / `discard` /
+  `reject`, a modifier-only term (count/log/policer/forwarding-class/dscp
+  with no `next term`, which terminates as implicit accept, #14632) and a
+  `then routing-instance` term all count; an authored `then { ...; next
+  term; }` does not. The same predicate drives the commit warning
+  (`validateFilterNoCatchAllWarnings`), which names every attached filter
+  that will discard unmatched traffic: an operator who meant
+  permit-by-default appends `term <name> { then accept; }`. It is never a
+  commit error. Before #18728 xpf ACCEPTED unmatched traffic (#3295), so
+  a config written for that default — notably a classify-and-pass CoS
+  output filter such as the lab `bandwidth-output` filters, which now
+  carry `term default then accept` (#18730) — must add the final accept
+  BEFORE upgrading; see the upgrade note in `docs/feature-coverage.md`.
+
+  **Mixed-version rollout.** The synthetic term is built by the Go
+  control plane, so the semantics follow the Go build: a new Go daemon
+  with an older helper would still discard (the term is an ordinary term
+  on an unchanged wire shape), and an older Go daemon never emits it.
+  During a rolling cluster upgrade the two nodes therefore evaluate the
+  same filter differently (the upgraded node drops unmatched traffic, the
+  old node accepts it), and which behaviour a flow sees can change at
+  failover.
 
   **Fall-through log action follows the terminal verdict (#2616).** A
   matched fall-through logging term records its identity
@@ -1166,8 +1199,8 @@ reads as "no constraint" = WIDENING). A partially-unresolvable
 `from {source,destination}-address` list fails the OTHER way: the surviving
 tokens still build a matcher, so the term silently enforces a NARROWER set
 than the operator wrote — a `then discard`/`reject` term drops only the
-surviving subset and the rest falls through to the implicit accept (fail-OPEN
-for the deny). The all-unresolvable case was already covered at match-time
+surviving subset and the rest falls through to the later terms — a final
+accept, or before #18728 the implicit accept (fail-OPEN for the deny). The all-unresolvable case was already covered at match-time
 (`constrained && PortMatcher::Any` / `constrained && empty`, #2400/#3205);
 the partial case was not. Two wire bools close it, same shape as the #3406
 markers (Go builder sets, `parse_term` rejects the whole snapshot; strict
@@ -1228,8 +1261,8 @@ snapshot; strict commit gates are the primary defense):
 
 Whole-candidate-snapshot rejection (the reconcile preflight retains the
 previous good state) — not term poisoning — because poisoning a discard/reject
-term to match-nothing would let its traffic fall through to implicit accept
-(fail-OPEN). It also prevents #11893's conservative conflict `discard` from
+term to match-nothing would let its traffic fall through to a later accept
+(before #18728, also the implicit accept) — fail-OPEN. It also prevents #11893's conservative conflict `discard` from
 becoming a newly installed drop. This keeps tolerant peer-sync bootable without
 wedging subsequent sync: the rejected candidate never replaces the last-good
 generation.

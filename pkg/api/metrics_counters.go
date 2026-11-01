@@ -134,6 +134,12 @@ func (c *xpfCollector) collectLo0Counters(ch chan<- prometheus.Metric) {
 		return
 	}
 	for _, ctr := range counts {
+		// #18728: the per-family implicit-discard counter is not a `then
+		// count` counter; emitting it under the counter label would collide
+		// with an authored count of the same name. `show firewall` renders it.
+		if ctr.ImplicitDiscardFamily != "" {
+			continue
+		}
 		c.emitConstMetric(ch, c.lo0CounterHits,
 			prometheus.CounterValue, float64(ctr.Packets), ctr.Counter)
 	}
@@ -1104,6 +1110,20 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 				}
 				c.emitConstMetric(ch, c.filterHitsTotal, prometheus.CounterValue,
 					float64(agg.totalPkts), name, family, termName)
+			}
+			// #18728: the synthetic implicit-discard term is not in
+			// filter.Terms, so its helper counter gets its own series. An
+			// authored term of the same name already owns that labelset
+			// (and the by-name aggregate folded the synthetic row into it),
+			// so it is not emitted twice: a duplicate labelset fails Gather
+			// (#15192).
+			if _, authored := aggs[dpuserspace.ImplicitDiscardTermName]; !authored && !config.FirewallFilterHasCatchAll(filter) {
+				if ctr, ok := userspaceCounters[dpuserspace.FirewallFilterTermCounterNameKey{
+					Family: family, FilterName: name, TermName: dpuserspace.ImplicitDiscardTermName,
+				}]; ok {
+					c.emitConstMetric(ch, c.filterHitsTotal, prometheus.CounterValue,
+						float64(ctr.Packets), name, family, dpuserspace.ImplicitDiscardTermName)
+				}
 			}
 		}
 	}

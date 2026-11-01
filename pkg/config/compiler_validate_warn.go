@@ -1923,14 +1923,13 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	// enforcement (incomplete tunnel stanzas warn, since no device exists).
 	warnings = append(warnings, validateLo0UnsupportedFilterBindingsWarnings(cfg)...)
 
-	// #3295: a firewall filter attached to an interface/lo0 input/output hook
-	// with no terminal catch-all term relies on xpf's implicit-accept of
-	// unmatched traffic — the deliberate divergence from Junos's implicit final
-	// discard. WARN-only: surface the divergence (and the explicit-final-term
-	// workaround) without changing the runtime default, which would blackhole
-	// the classify-and-pass output-filter idiom ("keep GOOD", #2124/#3261). See
-	// docs/research/3295-filter-failopen/plan.md and
-	// userspace-dp/src/filter/README.md.
+	// #3295/#18728: a firewall filter attached to an interface/lo0
+	// input/output hook with no terminal catch-all term DISCARDS traffic that
+	// matches no term (the Junos implicit final discard, #18728; before it xpf
+	// accepted). WARN-only: `commit check` names each such filter so an
+	// operator who meant permit-by-default adds a final `then accept`. The
+	// same predicate (FirewallFilterHasCatchAll) marks the runtime filter. See
+	// userspace-dp/src/filter/README.md and docs/feature-coverage.md.
 	warnings = append(warnings, validateFilterNoCatchAllWarnings(cfg)...)
 
 	// #2509: `security pre-id-default-policy then log session-init/session-close`

@@ -39,7 +39,7 @@ func uncoveredCfg16001(markV6 bool) *config.Config {
 }
 
 func TestBuildFirewallFilterSnapshotsUncoveredExceptRefuses16001(t *testing.T) {
-	snaps := BuildFirewallFilterSnapshots(uncoveredCfg16001(true))
+	snaps := authoredFilterSnapshots18728(t, BuildFirewallFilterSnapshots(uncoveredCfg16001(true)))
 	byFamily := map[string]FirewallTermSnapshot{}
 	for _, s := range snaps {
 		if len(s.Terms) == 1 {
@@ -71,7 +71,7 @@ func TestBuildFirewallFilterSnapshotsUncoveredExceptRefuses16001(t *testing.T) {
 // Anti-over-fix control: the identical config without the marker installs
 // exactly as before (hand-built / older-peer terms keep today's behavior).
 func TestBuildFirewallFilterSnapshotsUnmarkedExceptInstalls16001(t *testing.T) {
-	snaps := BuildFirewallFilterSnapshots(uncoveredCfg16001(false))
+	snaps := authoredFilterSnapshots18728(t, BuildFirewallFilterSnapshots(uncoveredCfg16001(false)))
 	for _, s := range snaps {
 		for _, term := range s.Terms {
 			if term.FromUnrepresentable {

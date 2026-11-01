@@ -366,34 +366,23 @@ func validateLo0UnsupportedFilterBindingsWarnings(cfg *Config) []string {
 
 // validateFilterNoCatchAllWarnings emits a WARN-only commit-time message when a
 // firewall filter ATTACHED to an interface (or lo0) input/output hook has no
-// terminal catch-all term — i.e. it relies on xpf's implicit-accept of any
-// packet that matches no term.
+// terminal catch-all term, i.e. some packet can match no term.
 //
-// Junos stateless firewall filters carry an implicit final DISCARD: a packet
-// matching no explicit term is silently dropped. xpf instead falls through to
-// an implicit ACCEPT (userspace-dp/src/filter/engine/eval.rs: a no-match
-// evaluation returns FilterResult::default(), whose action is Accept). So an
-// imported SRX/Junos allowlist filter (terms that accept specific traffic, no
-// final discard) PERMITS everything it did not explicitly match under xpf,
-// where it would deny under Junos.
+// #18728: xpf follows the Junos stateless-filter semantics. A packet that
+// matches no term is DISCARDED by an implicit final term, as if the filter
+// ended with `term t { then discard; }`, and is counted under the filter's
+// `implicit-discard` counter. The compiler marks such a filter
+// (FirewallFilterHasCatchAll false) and the userspace dataplane appends the
+// synthetic discard term; the lo0 kernel mirror renders a per-family counted
+// drop. Before #18728 xpf ACCEPTED unmatched traffic (#3295), so a config
+// written for the old default (a classify-and-pass output filter, an
+// allowlist that meant "and permit the rest") now drops what it used to pass.
 //
-// This divergence is DELIBERATE and is not changed at runtime (#3295). A global
-// flip of the no-match default to discard would blackhole the classify-and-pass
-// OUTPUT filter idiom that rides the implicit accept — concretely the CoS
-// `bandwidth-output` filters attached as `interfaces reth0 unit 80 family
-// inet/inet6 filter output` (a pure dest-port allowlist with no final
-// catch-all), whose unmatched egress would be dropped at TX selection
-// (afxdp/tx/cos_classify.rs gates drop on action != Accept). That violates the
-// project "keep GOOD" doctrine (#2124/#3261). The research record is
-// docs/research/3295-filter-failopen/plan.md; the runtime contract is in
-// userspace-dp/src/filter/README.md.
-//
-// The warning is the operator-visibility mitigation: it surfaces the divergence
-// at commit so an operator who WANTS Junos stateless-discard parity can append
-// an explicit final `term <last> { then discard; }` (the inverse of Junos's
-// "write a final accept"). It is never an error — implicit-accept is the
-// documented, intentional default, and a hard reject would brick a boot on a
-// previously-accepted committed config.
+// The warning is the operator-visibility surface for that: `commit check`
+// names every attached filter that will discard unmatched traffic, so an
+// operator who meant permit-by-default appends a final `term <name> { then
+// accept; }`. It is never an error. Discarding unmatched traffic IS the
+// Junos semantic, and a hard reject would brick a boot on a committed config.
 //
 // Scope: only filters actually attached to an input/output hook are checked
 // (library/unused filters are skipped to avoid noise). lo0 is stored as an
@@ -450,16 +439,15 @@ func validateFilterNoCatchAllWarnings(cfg *Config) []string {
 					!lo0FilterHookEnforced(ifc, unitNum, unit, h.input) {
 					continue
 				}
-				if firewallFilterHasCatchAllTerminator(h.filter) {
+				if FirewallFilterHasCatchAll(h.filter) {
 					continue
 				}
 				warnings = append(warnings, fmt.Sprintf(
 					"interface %s unit %d: filter %s %q has no terminal "+
-						"catch-all term; xpf accepts traffic matching no term "+
-						"(Junos stateless filters imply a final discard) — append "+
-						"an explicit final `term <name> { then discard; }` for "+
-						"Junos-style deny-by-default, or `then accept` to make "+
-						"permit-by-default explicit",
+						"catch-all term; unmatched traffic is discarded "+
+						"(Junos default) and counted as implicit-discard; add "+
+						"a final `term <name> { then accept; }` if you intended "+
+						"permit-by-default (#18728)",
 					ifName, unitNum, h.dir, h.name))
 			}
 		}
@@ -467,16 +455,28 @@ func validateFilterNoCatchAllWarnings(cfg *Config) []string {
 	return warnings
 }
 
-// firewallFilterHasCatchAllTerminator reports whether the filter contains a
-// term that both (a) is a terminating action (`then accept`/`discard`/`reject`
-// with no `then next term`) and (b) has a fully unconstrained `from` (matches
-// every packet). Such a term governs every packet that reaches it, so the
-// filter does not rely on the implicit no-match default. An authored
-// `then next term` fall-through is NOT a terminator, and a modifier-only term
-// terminates as implicit accept but is scoped by its `from`, so neither is a
-// catch-all; a `then routing-instance` PBR
-// term terminates but is not accept/discard/reject and so is not a catch-all.
-func firewallFilterHasCatchAllTerminator(f *FirewallFilter) bool {
+// FirewallFilterHasCatchAll reports whether some term of the filter matches
+// every packet that reaches it AND ends evaluation there, so no packet can
+// fall off the end of the filter into the #18728 implicit final discard.
+//
+// A term is such a catch-all when its `from` is fully unconstrained
+// (firewallTermFromUnconstrained) and it terminates. A term terminates unless
+// it is the authored `then next term` fall-through of a term with no
+// terminating action and no routing-instance: the exact `continue_term`
+// definition of the Rust filter compiler (`next_term && action.is_empty() &&
+// routing_instance.is_empty()`, #5142/#14632). So these all count:
+//   - `then accept` / `discard` / `reject`;
+//   - a modifier-only term (count/log/policer/forwarding-class/dscp, no
+//     terminating action, no `next term`), which terminates as implicit accept
+//     (#14632);
+//   - a `then routing-instance` (FBF/PBR) term, which terminates on the
+//     routing evaluator's decision.
+//
+// This one predicate decides BOTH the commit warning
+// (validateFilterNoCatchAllWarnings) and the runtime marker the dataplane
+// snapshot carries (`implicit_discard`), so the filters `commit check` names
+// are exactly the filters that will discard unmatched traffic.
+func FirewallFilterHasCatchAll(f *FirewallFilter) bool {
 	if f == nil {
 		return false
 	}
@@ -484,29 +484,19 @@ func firewallFilterHasCatchAllTerminator(f *FirewallFilter) bool {
 		if t == nil {
 			continue
 		}
-		if firewallTermIsTerminatingAction(t) && firewallTermFromUnconstrained(t) {
+		if firewallTermTerminates(t) && firewallTermFromUnconstrained(t) {
 			return true
 		}
 	}
 	return false
 }
 
-// firewallTermIsTerminatingAction reports whether the term carries an explicit
-// terminating action (accept/discard/reject) and is not an explicit
-// fall-through (`then next term`). `then routing-instance` (PBR) terms are
-// not terminating for this purpose; a modifier-only term (Action == "",
-// no authored `next term`) terminates as implicit accept (#14632) but is
-// likewise not an accept/discard/reject catch-all for this warning.
-func firewallTermIsTerminatingAction(t *FirewallFilterTerm) bool {
-	if t.NextTerm {
-		return false
-	}
-	switch t.Action {
-	case FilterActionAccept, FilterActionDiscard, FilterActionReject:
-		return true
-	default:
-		return false
-	}
+// firewallTermTerminates reports whether evaluation stops at this term when
+// it matches. Only an authored `then next term` on a term with no terminating
+// action and no routing-instance falls through; a terminal action wins over
+// the bit (#5142).
+func firewallTermTerminates(t *FirewallFilterTerm) bool {
+	return !(t.NextTerm && t.Action == FilterActionUnset && t.RoutingInstance == "")
 }
 
 // firewallTermFromUnconstrained reports whether the term's `from` is empty

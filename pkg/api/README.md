@@ -2469,7 +2469,14 @@ the drop fails loudly instead of going quietly vacuous.
     the CLI/gRPC text paths use), so the canonical metrics path does not
     report 0/stale while `show firewall filter` shows real hits (#3461); the
     per-term counter-slot stride is the shared
-    `config.FilterTermExpansionCount` SSOT (#3459).
+    `config.FilterTermExpansionCount` SSOT (#3459). The synthetic
+    `implicit-discard` term of a filter with no terminal catch-all (#18728)
+    is not a config term, so its helper row is emitted after the authored
+    terms as its own `term="implicit-discard"` series — unless an authored
+    term already owns that name (the by-name aggregate then folds both into
+    that one series; never a duplicate labelset, #15192). The kernel lo0
+    implicit-discard counters (`xpflo0implicit_<family>`) are not `then
+    count` counters and are skipped by `xpf_lo0_counter_hits_total`.
   - **Invalid-UTF-8 label values cannot crash a scrape**
     (#15086, #16707, #17753): every const-metric emit in this package goes
     through the single choke point `emitConstMetric`

@@ -9,14 +9,19 @@ import (
 	xnft "github.com/psaab/xpf/pkg/nftables"
 )
 
-// lo0_vacated_enforced_6529_test.go carries the #9940 fail-on-revert proofs
-// for the two zero-render shapes that survived #9883: a DEFINED-but-empty
+// lo0_vacated_enforced_6529_test.go carries the #9940 proofs for the two
+// shapes that used to render zero rules after #9883: a DEFINED-but-empty
 // filter and a DEFINED filter whose terms all match nothing.
 //
-// The daemon must reject either shape BEFORE InstallLo0 runs. That preserves
-// the prior live xpf_lo0 table, returns a commit-visible error, and logs the
-// refusal. On cold start, the same refusal takes the existing #6476 fence path
-// so the host input path is not left open.
+// Before #18728 both rendered an empty policy-accept shell, so the daemon
+// refused them BEFORE InstallLo0 (retaining the prior table, or fencing on
+// cold start). Since #18728 neither has a terminal catch-all, so each family
+// renders the Junos implicit final discard: the filter is a real
+// discard-everything filter (except the exempt netdevs) and INSTALLS. The
+// cells below pin that; the zero-render refusal itself is kept as a
+// defensive preflight that no defined filter reaches any more, and the
+// renderer-drift guard (TestLo0InstallerDriftRefusesAndFences9940) still
+// covers a post-install zero count.
 //
 // TestRealLo0FilterStillEnforces6529 is the anti-over-fix half and must remain
 // green: a render with at least one kernel rule still installs and records
@@ -28,9 +33,9 @@ import (
 
 // vacatedLo0Config returns a config whose lo0 input filters are DEFINED but
 // carry no terms. It is a legitimate compiler output shape (strict compilation
-// accepts it with the existing no-terminal-catch-all warning), but it is not a
-// legitimate RE-protection render: swapping it would install an empty
-// policy-accept shell. #9940 therefore refuses it unconditionally.
+// accepts it with the no-terminal-catch-all warning). Since #18728 it is the
+// Junos empty filter: it discards all host-bound traffic but the exempt
+// netdevs.
 func vacatedLo0Config() *config.Config {
 	cfg := hostInboundTestConfig()
 	cfg.System.Lo0FilterInputV4 = "protect-re"
@@ -46,83 +51,70 @@ func vacatedLo0Config() *config.Config {
 	return cfg
 }
 
-// TestVacatedLo0FilterRefusesEmptyRender9940 is the primary #9940 proof:
-// a DEFINED-but-empty render must retain a prior real table, return an error,
-// and never call the installer.
-func TestVacatedLo0FilterRefusesEmptyRender9940(t *testing.T) {
-	cfg := vacatedLo0Config()
-
+// installsImplicitDiscardOnly18728 runs applyLo0Filter against a fake
+// installer and asserts the #18728 outcome for a filter whose authored terms
+// render nothing: InstallLo0 runs once, both families carry the implicit
+// discard with the "lo" exemption, no fence is installed, and the real-filter
+// latch is set.
+func installsImplicitDiscardOnly18728(t *testing.T, cfg *config.Config, priorEnforced bool) xnft.Lo0FilterSpec {
+	t.Helper()
 	calls, fences := 0, 0
+	var spec xnft.Lo0FilterSpec
 	orig := nftInstaller
 	nftInstaller = &fakeNftInstaller{
-		lo0:              func(xnft.Lo0FilterSpec) error { calls++; return nil },
+		lo0:              func(s xnft.Lo0FilterSpec) error { calls++; spec = s; return nil },
 		lo0ColdBootFence: func(xnft.FenceSpec) error { fences++; return nil },
 	}
 	defer func() { nftInstaller = orig }()
 
 	d := &Daemon{}
-	// Model the prior live real xpf_lo0 table. The fake has no kernel state,
-	// so lo0Enforced is the observable retention latch.
-	d.lo0Enforced.Store(true)
-	logBuf, restoreLog := captureSlog(t)
-	defer restoreLog()
-	err := d.applyLo0Filter(cfg)
-	if err == nil {
-		t.Fatal("an empty lo0 render must fail closed, got nil")
+	d.lo0Enforced.Store(priorEnforced)
+	if err := d.applyLo0Filter(cfg); err != nil {
+		t.Fatalf("a no-catch-all lo0 filter renders its implicit discard and must install, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "renders no rules") {
-		t.Fatalf("error must identify the empty render, got %v", err)
-	}
-	if !strings.Contains(logBuf.String(), "refusing to replace the live table with an empty policy-accept shell") {
-		t.Fatalf("empty-render refusal must be operator-visible in the log, got %q", logBuf.String())
-	}
-	if calls != 0 {
-		t.Fatalf("empty render must be refused before InstallLo0; call count=%d", calls)
+	if calls != 1 {
+		t.Fatalf("InstallLo0 call count=%d, want 1", calls)
 	}
 	if fences != 0 {
-		t.Fatalf("a retained real table must not be replaced by a fence; fence count=%d", fences)
+		t.Fatalf("a real (implicit-discard) filter must not be replaced by a fence; fence count=%d", fences)
 	}
 	if !d.lo0Enforced.Load() {
-		t.Fatal("refusing the empty render must retain the prior real-table state")
+		t.Fatal("the installed implicit-discard filter is a real operator filter; lo0Enforced must be set")
+	}
+	if !spec.ImplicitDiscardV4 || !spec.ImplicitDiscardV6 {
+		t.Fatalf("both families must carry the implicit discard, got v4=%v v6=%v", spec.ImplicitDiscardV4, spec.ImplicitDiscardV6)
+	}
+	if len(spec.ImplicitDiscardExemptNetdevs) == 0 || spec.ImplicitDiscardExemptNetdevs[0] != "lo" {
+		t.Fatalf("implicit discard must exempt loopback first, got %v", spec.ImplicitDiscardExemptNetdevs)
+	}
+	return spec
+}
+
+// TestVacatedLo0FilterInstallsImplicitDiscard18728 (formerly the #9940
+// empty-render refusal): a DEFINED-but-empty lo0 filter replaces a prior
+// real table with the Junos discard-everything filter, never an empty
+// policy-accept shell.
+func TestVacatedLo0FilterInstallsImplicitDiscard18728(t *testing.T) {
+	cfg := vacatedLo0Config()
+	if got := lo0RenderedRuleCount(cfg, "protect-re", "protect-re6"); got != 2 {
+		t.Fatalf("daemon preflight count = %d, want 2 (one implicit discard per family)", got)
+	}
+	spec := installsImplicitDiscardOnly18728(t, cfg, true)
+	if len(spec.V4Terms)+len(spec.V6Terms) != 0 {
+		t.Fatalf("an empty filter has no authored terms, got %+v", spec)
+	}
+	payload := buildLo0FilterPayload(cfg, "protect-re", "protect-re6")
+	for _, fam := range []string{"ipv4", "ipv6"} {
+		if !strings.Contains(payload, "meta nfproto "+fam+" iifname != ") {
+			t.Errorf("oracle lacks the %s implicit discard:\n%s", fam, payload)
+		}
 	}
 }
 
-// TestVacatedLo0ColdStartRefusesAndFences9940 proves the no-prior-table arm:
-// refusal is still visible, InstallLo0 is not called, and the existing
-// fail-closed fence is installed as the only protection.
-func TestVacatedLo0ColdStartRefusesAndFences9940(t *testing.T) {
-	cfg := vacatedLo0Config()
-
-	calls, fences := 0, 0
-	orig := nftInstaller
-	nftInstaller = &fakeNftInstaller{
-		lo0:              func(xnft.Lo0FilterSpec) error { calls++; return nil },
-		lo0ColdBootFence: func(xnft.FenceSpec) error { fences++; return nil },
-	}
-	defer func() { nftInstaller = orig }()
-
-	d := &Daemon{}
-	logBuf, restoreLog := captureSlog(t)
-	defer restoreLog()
-	err := d.applyLo0Filter(cfg)
-	if err == nil {
-		t.Fatal("an empty lo0 render must fail closed, got nil")
-	}
-	if !strings.Contains(err.Error(), "renders no rules") {
-		t.Fatalf("error must identify the empty render, got %v", err)
-	}
-	if !strings.Contains(logBuf.String(), "refusing to replace the live table with an empty policy-accept shell") {
-		t.Fatalf("cold-start empty-render refusal must be operator-visible in the log, got %q", logBuf.String())
-	}
-	if calls != 0 {
-		t.Fatalf("empty render must be refused before InstallLo0; call count=%d", calls)
-	}
-	if fences != 1 {
-		t.Fatalf("cold-start empty render must install one fail-closed fence; count=%d", fences)
-	}
-	if d.lo0Enforced.Load() {
-		t.Fatal("a fence is not a real operator filter")
-	}
+// TestVacatedLo0ColdStartInstallsImplicitDiscard18728: the same shape on cold
+// start installs the real filter instead of falling back to the fence.
+func TestVacatedLo0ColdStartInstallsImplicitDiscard18728(t *testing.T) {
+	installsImplicitDiscardOnly18728(t, vacatedLo0Config(), false)
 }
 
 // TestLo0InstallerDriftRefusesAndFences9940 covers the renderer-drift guard:
@@ -176,10 +168,12 @@ func TestLo0InstallerDriftRefusesAndFences9940(t *testing.T) {
 	}
 }
 
-// TestMatchNothingLo0RenderRefuses9940 proves the second residual shape:
-// terms are present in both family pools, but each term is constrained to the
-// opposite address family and therefore lowers to no kernel rules.
-func TestMatchNothingLo0RenderRefuses9940(t *testing.T) {
+// TestMatchNothingLo0RenderInstallsImplicitDiscard18728 (formerly the #9940
+// match-nothing refusal): terms are present in both family pools but each is
+// constrained to the opposite address family and lowers to no kernel rule.
+// The filters have no catch-all, so each family renders its implicit discard
+// and the filter installs.
+func TestMatchNothingLo0RenderInstallsImplicitDiscard18728(t *testing.T) {
 	cfg := lo0FenceTestConfig()
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
@@ -191,38 +185,10 @@ func TestMatchNothingLo0RenderRefuses9940(t *testing.T) {
 			{Name: "nothing-v6", SourceAddresses: []string{"10.0.0.0/8"}, Action: config.FilterActionDiscard},
 		}},
 	}
-
-	calls, fences := 0, 0
-	orig := nftInstaller
-	nftInstaller = &fakeNftInstaller{
-		lo0:              func(xnft.Lo0FilterSpec) error { calls++; return nil },
-		lo0ColdBootFence: func(xnft.FenceSpec) error { fences++; return nil },
+	if got := lo0RenderedRuleCount(cfg, "protect-re", "protect-re6"); got != 2 {
+		t.Fatalf("daemon preflight count = %d, want 2 (the match-nothing terms render nothing; one implicit discard per family)", got)
 	}
-	defer func() { nftInstaller = orig }()
-
-	d := &Daemon{}
-	d.lo0Enforced.Store(true)
-	logBuf, restoreLog := captureSlog(t)
-	defer restoreLog()
-	err := d.applyLo0Filter(cfg)
-	if err == nil {
-		t.Fatal("a match-nothing lo0 render must fail closed, got nil")
-	}
-	if !strings.Contains(err.Error(), "renders no rules") {
-		t.Fatalf("error must identify the match-nothing render, got %v", err)
-	}
-	if !strings.Contains(logBuf.String(), "refusing to replace the live table with an empty policy-accept shell") {
-		t.Fatalf("match-nothing refusal must be operator-visible in the log, got %q", logBuf.String())
-	}
-	if calls != 0 {
-		t.Fatalf("match-nothing render must be refused before InstallLo0; call count=%d", calls)
-	}
-	if fences != 0 {
-		t.Fatalf("a retained real table must not be replaced by a fence; fence count=%d", fences)
-	}
-	if !d.lo0Enforced.Load() {
-		t.Fatal("refusing the match-nothing render must retain the prior real-table state")
-	}
+	installsImplicitDiscardOnly18728(t, cfg, true)
 }
 
 // TestRealLo0FilterStillEnforces6529 is the anti-over-fix half: a real filter

@@ -248,14 +248,17 @@ func TestNoCatchAllAdvisoryNamesTheTerm12092(t *testing.T) {
 	if got == "" {
 		t.Fatalf("expected a no-catch-all warning for attached allowlist filter, got: %v", ValidateConfig(cfg))
 	}
-	if !strings.Contains(got, "term <name> { then discard; }") {
+	// #18728: the remedy is now the permit-by-default final accept (the
+	// filter already discards unmatched traffic); it must still name the term.
+	if !strings.Contains(got, "term <name> { then accept; }") {
 		t.Fatalf("advisory does not name the term: %q", got)
 	}
 }
 
 func TestNoCatchAllPrintedRemedySilencesAdvisory12092(t *testing.T) {
-	// The printed remedy, `term <name> { then discard; }`, with `last`
-	// substituted and pasted as hierarchical config, must silence the warning.
+	// The printed remedy, `term <name> { then accept; }` (#18728), with
+	// `last` substituted and pasted as hierarchical config, must silence the
+	// warning.
 	tree := hierTree(t, `system {
     dataplane-type userspace;
 }
@@ -266,7 +269,7 @@ firewall {
                 from { destination-port 22; }
                 then { accept; }
             }
-            term last { then discard; }
+            term last { then accept; }
         }
     }
 }

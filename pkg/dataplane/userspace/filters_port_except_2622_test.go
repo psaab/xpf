@@ -26,7 +26,7 @@ func TestFilterSnapshotPortExceptEmitted(t *testing.T) {
 			Action:            config.FilterActionDiscard,
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("expected 1 filter with 1 term, got %#v", snaps)
 	}
@@ -49,7 +49,7 @@ func TestFilterSnapshotPortExceptEmptyStaysEmpty(t *testing.T) {
 			Name: "t", Action: config.FilterActionAccept,
 		}}},
 	}
-	term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]
+	term := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0]
 	if len(term.SourcePortsExcept) != 0 || len(term.DestPortsExcept) != 0 {
 		t.Errorf("unconstrained term must emit empty except vectors, got src=%v dst=%v",
 			term.SourcePortsExcept, term.DestPortsExcept)

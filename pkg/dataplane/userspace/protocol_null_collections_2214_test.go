@@ -94,12 +94,20 @@ func TestEmptyFilterTermsMarshalsEmptyArrayNotNull(t *testing.T) {
 	}
 	raw := fieldRawMessage(t, filters[0], "terms")
 	if raw == "null" || raw == "" {
-		t.Fatalf("terms marshaled as %q, want \"[]\" — a null aborts the Rust snapshot decode (#2214 no-transit)", raw)
+		t.Fatalf("terms marshaled as %q, want an array — a null aborts the Rust snapshot decode (#2214 no-transit)", raw)
 	}
-	if raw != "[]" {
-		t.Fatalf("terms = %q, want \"[]\"", raw)
+	// #18728: a zero-term filter is the Junos discard-everything filter, so
+	// its snapshot carries exactly the synthetic implicit-discard term. The
+	// builder's own zero-term result is still the non-nil [] pinned by
+	// TestBuildFilterTermSnapshotsNeverNil.
+	if raw != implicitDiscardTermWire2214 {
+		t.Fatalf("terms = %q, want %q", raw, implicitDiscardTermWire2214)
 	}
 }
+
+// implicitDiscardTermWire2214 is the wire of a zero-term filter's terms since
+// #18728: the lone synthetic implicit-discard term.
+const implicitDiscardTermWire2214 = `[{"name":"implicit-discard","action":"discard","count":"implicit-discard"}]`
 
 // buildFilterTermSnapshots returns a non-nil empty slice for a filter with no
 // terms (covers nil filter and the all-nil-terms case too).
@@ -157,7 +165,8 @@ func TestSnapshotWireNoNullCollections2214(t *testing.T) {
 	if !strings.Contains(wire, `"pool_addresses":[]`) {
 		t.Fatal(`snapshot wire missing "pool_addresses":[] for the empty-pool NAT64 rule (#2214)`)
 	}
-	if !strings.Contains(wire, `"terms":[]`) {
-		t.Fatal(`snapshot wire missing "terms":[] for the zero-term filter (#2214)`)
+	// #18728: the zero-term filter's terms are the lone synthetic term.
+	if !strings.Contains(wire, `"terms":`+implicitDiscardTermWire2214) {
+		t.Fatal(`snapshot wire missing the zero-term filter's implicit-discard terms array (#2214/#18728)`)
 	}
 }

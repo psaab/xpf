@@ -1469,11 +1469,19 @@ The fix mirrors the host-inbound cold-boot fence for the lo0 table:
   (#5790 teardown parity). It does NOT install a fence: fencing on a SUCCESSFUL
   install would deny host-bound traffic on a clean commit; the gate being false is
   what matters, and the next failed install fences from the current snapshot.
-  Fail-on-revert: `pkg/daemon/lo0_vacated_enforced_6529_test.go` (four cases plus
-  the anti-over-fix `TestRealLo0FilterStillEnforces6529`, which pins that a real
+  Fail-on-revert: `pkg/daemon/lo0_vacated_enforced_6529_test.go` (the drift and
+  anti-over-fix `TestRealLo0FilterStillEnforces6529` cells, which pin that a real
   filter still skips the day-2 fence) and
   `pkg/nftables/netlink_lo0_zero_render_6529_test.go` (a spec WITH terms really can
-  render zero rules — the case a term-count gate misses).
+  render zero rules — the case a term-count gate misses). **Since #18728** the
+  second and third doors (no terms, or only match-nothing terms) no longer
+  render zero rules: such a filter has no terminal catch-all, so each family
+  renders its implicit final discard and the filter installs as the Junos
+  discard-everything filter (except `lo` and the cluster control/fabric
+  netdevs). The daemon's zero-render preflight stays as a defensive check that
+  no defined filter reaches; the same test file pins the new install outcome
+  (`TestVacatedLo0FilterInstallsImplicitDiscard18728`,
+  `TestMatchNothingLo0RenderInstallsImplicitDiscard18728`).
 - A zero-drop fence (an addressless boot snapshot) is likewise not a real filter,
   so it leaves `lo0Enforced` false and a later failed real invocation
   re-fences from a possibly-now-addressed snapshot; a catastrophic double-failure
@@ -1483,11 +1491,16 @@ The fix mirrors the host-inbound cold-boot fence for the lo0 table:
 **Pre-existing residuals (NOT introduced or addressed by #6476/#6489, tracked
 separately):**
 
-- A retained REAL lo0 filter with **no catch-all term** is a valid config
-  (`compiler_filter_nocatchall_3295_test`); such a filter need not itself cover a
-  new day-2 address. That is the lo0 filter's own coverage semantics, independent
-  of this boot fence — the fence only guarantees the RE path is not left fully
-  open when NO real filter is loaded.
+- A retained REAL lo0 filter's coverage of a new day-2 address is the lo0
+  filter's own semantics, independent of this boot fence — the fence only
+  guarantees the RE path is not left fully open when NO real filter is loaded.
+  Since #18728 a lo0 filter with **no catch-all term** ends in the Junos
+  implicit final discard (kernel `xpflo0implicit_<family>` drop, exempting
+  `lo` and the cluster control/fabric netdevs), so it denies a new address by
+  default; one with a final `then accept` admits it. An empty or
+  match-nothing lo0 filter therefore now renders that one drop rule and
+  installs (drop-all except the exempt netdevs) instead of being refused as an
+  empty policy-accept shell (#9940).
 - The two shared-mechanism behaviours #6492 filed against this fence body — a
   management IP shared onto a non-lifeline interface picking up a global `daddr`
   drop, and a zone-less router yielding empty address sets → an accept-all fence

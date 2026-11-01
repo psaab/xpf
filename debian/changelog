@@ -1,4 +1,20 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Firewall filters: a packet that matches no term of a stateless firewall
+    filter (interface input/output, inet and inet6, and the lo0 input
+    filter) is now DISCARDED, as on Junos, instead of accepted. Each such
+    filter ends in a synthetic `implicit-discard` term with its own counter,
+    shown by `show firewall` and exported as
+    xpf_filter_hits_total{term="implicit-discard"}; a filter with no terms
+    discards everything. A filter with a terminal catch-all term (an
+    unconstrained accept/discard/reject, modifier-only or routing-instance
+    term) is unchanged, as are interfaces and families with no filter
+    bound. The kernel lo0 chain ends each family with a counted drop that
+    exempts loopback and the cluster control link and fabric; fxp0 is NOT
+    exempt. UPGRADE: add a final `term <name> { then accept; }` to every
+    filter meant to permit by default BEFORE upgrading; `commit check` on
+    the old build names each affected filter (#3295 warning). During a
+    rolling cluster upgrade the two nodes treat unmatched traffic
+    differently until both run this build (#18728).
   * Upgrade: the HA rolling rejoin deadline is configurable with
     `--rejoin-deadline` and defaults to 190s, a margin over the peer's 150s bulk-prime
     retry loop plus one 35s late-ack re-drive and 5s for that bulk's

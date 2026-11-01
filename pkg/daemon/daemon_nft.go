@@ -318,9 +318,13 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 	// installs the #6476 fence before returning the commit-visible error.
 	//
 	// #9940's preflight below applies the same fail-closed rule to DEFINED filters
-	// whose lowering produces zero rules (no terms or match-nothing terms). It
-	// runs BEFORE InstallLo0, so existing-state keeps its real table and cold-start
-	// installs the #6476 fence; no empty policy-accept shell is ever installed.
+	// whose lowering produces zero rules. It runs BEFORE InstallLo0, so
+	// existing-state keeps its real table and cold-start installs the #6476
+	// fence; no empty policy-accept shell is ever installed. Since #18728 a
+	// filter with no terminal catch-all (including one with no terms or only
+	// match-nothing terms) renders its family's implicit final discard, so it
+	// is NOT zero-rule: it installs and drops all host-bound traffic of that
+	// family except the exempt netdevs (the Junos empty-filter semantic).
 	//
 	// The rendered-rule count remains a defensive post-install drift guard only:
 	// if the installer reports zero after a non-empty preflight, the atomic
@@ -499,12 +503,24 @@ func lo0RenderedRuleCount(cfg *config.Config, filterV4, filterV6 string) int {
 		return count
 	}
 
+	// #18728: a defined filter with no terminal catch-all also renders its
+	// family's implicit final discard, so an empty or match-nothing filter now
+	// enforces (drop all but the exempt netdevs, the Junos empty-filter
+	// semantic) instead of rendering an empty policy-accept shell.
+	implicit := func(f *config.FirewallFilter) int {
+		if f == nil || config.FirewallFilterHasCatchAll(f) {
+			return 0
+		}
+		return 1
+	}
 	count := 0
 	if filterV4 != "" {
-		count += countFilter(cfg.Firewall.FiltersInet[filterV4], "ip")
+		f := cfg.Firewall.FiltersInet[filterV4]
+		count += countFilter(f, "ip") + implicit(f)
 	}
 	if filterV6 != "" {
-		count += countFilter(cfg.Firewall.FiltersInet6[filterV6], "ip6")
+		f := cfg.Firewall.FiltersInet6[filterV6]
+		count += countFilter(f, "ip6") + implicit(f)
 	}
 	return count
 }
@@ -654,16 +670,30 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 			}
 		}
 	}
+	// #18728: each family's authored rules are followed by that family's
+	// implicit final discard when its filter has no terminal catch-all.
+	var implicitCounters []string
+	exempt := config.Lo0ImplicitDiscardExemptNetdevs(cfg)
+	emitImplicit := func(f *config.FirewallFilter, family, cfgFamily string) {
+		if config.FirewallFilterHasCatchAll(f) {
+			return
+		}
+		implicitCounters = append(implicitCounters, xnft.Lo0ImplicitDiscardCounterName(cfgFamily))
+		ruleLines = append(ruleLines, "    "+lo0ImplicitDiscardRule(family, cfgFamily, exempt))
+	}
 	if filterV4 != "" {
 		if f, ok := cfg.Firewall.FiltersInet[filterV4]; ok {
 			emit(f, "ip")
+			emitImplicit(f, "ip", "inet")
 		}
 	}
 	if filterV6 != "" {
 		if f, ok := cfg.Firewall.FiltersInet6[filterV6]; ok {
 			emit(f, "ip6")
+			emitImplicit(f, "ip6", "inet6")
 		}
 	}
+	counters = append(counters, implicitCounters...)
 
 	var rules []string
 	rules = append(rules, "add table inet xpf_lo0")
@@ -690,6 +720,24 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 	rules = append(rules, "}")
 
 	return strings.Join(rules, "\n") + "\n"
+}
+
+// lo0ImplicitDiscardRule renders the Junos implicit final discard for one
+// family's lo0 filter (#18728): the rule after that family's authored rules,
+// reached only by a packet no authored term terminated. family is the oracle
+// pass ("ip" / "ip6"), cfgFamily the config family that names the counter
+// ("inet" / "inet6"). The nfproto guard keeps it to its family (the chain is
+// inet, and the other family's filter may be absent or permit-by-default);
+// the iifname exemption (config.Lo0ImplicitDiscardExemptNetdevs: loopback,
+// cluster control link, fabric) keeps internal traffic off this drop. The
+// netlink mirror is buildLo0ImplicitDiscardNetlink.
+func lo0ImplicitDiscardRule(family, cfgFamily string, exempt []string) string {
+	nfproto := "ipv4"
+	if family == "ip6" {
+		nfproto = "ipv6"
+	}
+	return "meta nfproto " + nfproto + " iifname != " + nftIifnameSet(exempt) +
+		` counter name "` + xnft.Lo0ImplicitDiscardCounterName(cfgFamily) + `" drop`
 }
 
 // applyHostInboundFilter is the KERNEL-nftables PRIMARY enforcement of

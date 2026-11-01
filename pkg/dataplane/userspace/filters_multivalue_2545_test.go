@@ -23,7 +23,7 @@ func TestFilterSnapshotMultiValueEmitted(t *testing.T) {
 			Action:    config.FilterActionDiscard,
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("expected 1 filter with 1 term, got %#v", snaps)
 	}
@@ -53,7 +53,7 @@ func TestFilterSnapshotMultiValueEmptyStaysEmpty(t *testing.T) {
 			Name: "t", Action: config.FilterActionAccept,
 		}}},
 	}
-	term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]
+	term := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0]
 	if len(term.Protocols) != 0 || len(term.DSCPValues) != 0 ||
 		len(term.ICMPTypes) != 0 || len(term.ICMPCodes) != 0 {
 		t.Errorf("unconstrained term must emit empty vectors, got proto=%v dscp=%v itype=%v icode=%v",

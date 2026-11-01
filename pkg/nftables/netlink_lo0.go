@@ -55,13 +55,47 @@ func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
 	}
 	declareCounters(spec.V4Terms)
 	declareCounters(spec.V6Terms)
+	// #18728: the implicit-discard counters, after the authored ones (the
+	// oracle's declaration order).
+	if spec.ImplicitDiscardV4 {
+		p.counterObj(Lo0ImplicitDiscardCounterName("inet"))
+	}
+	if spec.ImplicitDiscardV6 {
+		p.counterObj(Lo0ImplicitDiscardCounterName("inet6"))
+	}
 
 	for _, t := range spec.V4Terms {
 		buildLo0TermNetlink(p, t, famV4)
 	}
+	if spec.ImplicitDiscardV4 {
+		buildLo0ImplicitDiscardNetlink(p, famV4, "inet", spec.ImplicitDiscardExemptNetdevs)
+	}
 	for _, t := range spec.V6Terms {
 		buildLo0TermNetlink(p, t, famV6)
 	}
+	if spec.ImplicitDiscardV6 {
+		buildLo0ImplicitDiscardNetlink(p, famV6, "inet6", spec.ImplicitDiscardExemptNetdevs)
+	}
+}
+
+// buildLo0ImplicitDiscardNetlink queues the Junos implicit final discard for
+// one family's lo0 filter (#18728), mirroring lo0ImplicitDiscardRule in the
+// oracle: `meta nfproto <f> iifname != { exempt } counter name "<n>" drop`.
+// It follows that family's authored rules, so only a packet no authored term
+// terminated reaches it. The nfproto guard keeps it to its own family (the
+// chain is inet). The exemption keeps loopback and the cluster control/fabric
+// links off this drop; a nil/empty exemption list refuses the plan, so the
+// drop can never be emitted unscoped (which would drop loopback traffic).
+func buildLo0ImplicitDiscardNetlink(p *nlPlan, f nlFamily, family string, exempt []string) {
+	if len(exempt) == 0 {
+		p.fail(fmt.Errorf("lo0 implicit discard (%s): empty iifname exemption (refusing an unscoped drop that would include loopback)", family))
+		return
+	}
+	a := p.rule()
+	a.needNfproto(f)
+	a.iifnameExcept(exempt)
+	a.counterRef(Lo0ImplicitDiscardCounterName(family))
+	a.emit(verdictDrop()...)
 }
 
 // buildLo0TermNetlink lowers one filter term to 0, 1, or 2 kernel rules,

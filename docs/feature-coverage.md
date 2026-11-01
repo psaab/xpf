@@ -117,19 +117,75 @@ the userspace dataplane admission boundary is in
     it would fail open for discard/reject (#3359). The #3359 reject
     message no longer falsely claims "Junos rejects this"; it explains
     the xpf single-term representability limit instead.
-  - **No-match default is implicit ACCEPT (deliberate divergence from
-    Junos, #3295).** A packet matching no term in a stateless firewall
-    filter (interface input/output and lo0) is ACCEPTED, whereas Junos
-    stateless filters carry an implicit final discard. xpf keeps
-    implicit-accept on purpose: flipping the no-match default to discard
-    would blackhole the classify-and-pass OUTPUT-filter idiom (the CoS
-    `bandwidth-output` allowlist on `reth0 unit 80 ... filter output`),
-    violating the "keep GOOD" doctrine (#2124/#3261). For Junos-style
-    deny-by-default, append an explicit final `term <last> { then
-    discard; }`. A commit WARNING is emitted for any filter attached to
-    an interface/lo0 hook that has no terminal catch-all term. See
-    `userspace-dp/src/filter/README.md` and
-    `docs/research/3295-filter-failopen/plan.md`.
+  - **No-match is the Junos implicit final DISCARD (#18728).** A packet
+    that matches no term of a stateless firewall filter (interface
+    `filter input` / `filter output`, inet and inet6, and the lo0 input
+    filter) is DISCARDED, and a filter with no terms discards everything
+    — Junos parity. It is counted per filter as the synthetic final term
+    `implicit-discard`, shown by `show firewall` / `show firewall filter
+    <name>` (`Term: implicit-discard (Junos implicit final discard: no
+    term above matched)` with its hit count) and exported as
+    `xpf_filter_hits_total{term="implicit-discard"}`. A filter that is not
+    bound to an interface, or a family with no filter bound, filters
+    nothing (still accepted); the #6835 routing-instance defer is
+    unchanged. A filter with a terminal catch-all term — an unconstrained
+    `then accept`/`discard`/`reject`, an unconstrained modifier-only term
+    (`then count c;`, which terminates as implicit accept, #14632), or an
+    unconstrained `then routing-instance` — never reaches the implicit
+    discard; `then { ...; next term; }` is not a catch-all. `commit check`
+    WARNS for every attached filter without one; for permit-by-default
+    add a final `term <name> { then accept; }`. Implicit discard of an
+    established flow revokes the session like an explicit static
+    discard (#7212). Filter lists (`input-list`/`output-list`) are not
+    supported (#10293), so the Junos one-discard-per-list rule does not
+    arise. See `userspace-dp/src/filter/README.md`.
+    - **lo0 kernel mirror.** The kernel `inet xpf_lo0` chain ends each
+      family's lo0 filter with `meta nfproto <f> iifname != { "lo",
+      <control link>, <fabric> } counter drop` (named counter
+      `xpflo0implicit_inet` / `xpflo0implicit_inet6`, shown in `show
+      firewall` as `Kernel lo0 implicit-discard`). The exempt netdevs are
+      loopback plus the explicitly configured chassis-cluster
+      `control-interface`, `fabric-interface`/`fabric1-interface`, fabric
+      interfaces and their `fabric-options member-interfaces`
+      (`config.Lo0ImplicitDiscardExemptNetdevs`); a standalone node
+      exempts only `lo`. The exemption covers the IMPLICIT drop only — an
+      authored lo0 term that discards still applies to those netdevs
+      (#18729). **fxp0 is not exempt**: as on Junos, the lo0 filter
+      governs management traffic, so a lo0 filter without a catch-all
+      must accept SSH/NTP/DNS replies/BGP/ICMP(v6) including IPv6
+      neighbor discovery, or that traffic is dropped. The kernel chain
+      is stateless (it has no `ct state established` accept), so return
+      traffic of connections the firewall itself opens also needs a
+      term. The helper's own lo0 evaluation (the AF_XDP host-bound
+      subset) applies the synthetic term without the exemption; control
+      link and fabric host traffic reaches the kernel, not that path. The
+      implicit drop is family-guarded, but authored kernel lo0 terms with
+      no family-specific match are not, so a `family inet` term also
+      matches IPv6 there (pre-existing, #18747).
+    - **Upgrade note.** Before #18728 xpf ACCEPTED unmatched traffic
+      (#3295). On upgrade a filter written for that default — an
+      allowlist that meant "and permit the rest", or a classify-and-pass
+      CoS output filter such as the lab `bandwidth-output` filters —
+      starts dropping what it used to pass, and a lo0 filter without a
+      catch-all starts dropping unmatched host-bound traffic. **Add the
+      final `then accept` term BEFORE upgrading.** The pre-upgrade
+      detector is the OLD build's #3295 commit warning: `commit check`
+      on the running (old) version already prints `filter ... has no
+      terminal catch-all term; xpf accepts traffic matching no term` for
+      every affected attached filter. (The old warning treated a
+      modifier-only or routing-instance catch-all as missing, so it can
+      name a filter the new build does not; the reverse never happens.)
+      After the upgrade the new semantics apply at boot through the
+      tolerant load path with no commit prompt; the warning appears as a
+      `config validation` WARN in the journal and in `show system
+      alarms` / `show security alarms`. During a rolling cluster upgrade
+      the two nodes evaluate the same filter differently (the upgraded
+      node discards unmatched traffic, the old node accepts it), so a
+      flow's treatment can change at failover until both nodes run the
+      new build — fix the filters first. No `xpfd upgrade` preflight
+      refuses an affected config: the upgrade runner that executes is the
+      OLD build's, so a check added here could not run on the one
+      transition that matters.
 
 ## Flow processing
 
