@@ -2792,7 +2792,7 @@ The userspace dataplane participates in the chassis cluster HA:
 
 - The compiler-default private-RG mode detects peer loss using heartbeat
   staleness (100ms × 5 = 500ms at runtime defaults, 200ms × 5 = 1s in the
-  deployed lab config). The receiver checks staleness every quarter heartbeat
+  deployed lab config). <!-- mirror:private-rg-peer-loss-detection n=6 -->The receiver checks staleness every quarter heartbeat
   interval (interval / 4, floored at 10 ms; #18639), so a peer is declared
   within that check period of its last admitted heartbeat turning interval ×
   threshold old. While session sync looks connected, a peer that has acked a
@@ -2826,7 +2826,7 @@ The userspace dataplane participates in the chassis cluster HA:
   M, peer acks probes: yes|no)", which tells an operator which case applies.
   These are detection times, not traffic restoration: activation adds about
   0.34–0.44 s from peer-lost to the first ping reply on the lab clusters
-  (#18561), so a lab crash outage lands near 1.4 s. (`compileChassis` in
+  (#18561), so a lab crash outage lands near 1.4 s.<!-- /mirror:private-rg-peer-loss-detection --> (`compileChassis` in
   `pkg/config/compiler_chassis.go`; `timeoutCheckInterval` and
   `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
   `prearmPeerLivenessProbe`, `peerAnsweredLivenessProbeLocked` and
