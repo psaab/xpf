@@ -82,18 +82,32 @@ const (
 type helperLivenessTracker struct {
 	mu  sync.Mutex
 	gen uint64
+	// retired is set by an intentional stop and cleared by the next reset;
+	// while set, no evidence is recorded and no verdict is raised.
+	retired bool
 
 	lastAnswer     time.Time
 	silentSince    time.Time
 	silentTrips    int
 	lastRGActivate time.Time
 
-	// heartbeat freeze, from answered statuses. Freeze is judged against the
-	// time of the latest answered status, never the wall clock, so a stretch
-	// with no polls at all (a RETH MAC link cycle skips the status loop and
-	// parks the workers) can never age a worker into "frozen".
-	hbLast       []time.Time
-	hbChanged    []time.Time
+	// heartbeat freeze, from answered statuses. A worker is judged by the
+	// AGE of its heartbeat at the moment a status was answered (status time
+	// minus heartbeat), the same quantity fwdstatus.heartbeatsHealthy reads
+	// from the same field. It is NOT judged by whether the value changed:
+	// the helper re-derives every heartbeat on every status call from two
+	// fresh clock reads (coordinator/status.rs worker_heartbeats), so a
+	// frozen worker's heartbeat still wobbles by microseconds from poll to
+	// poll (#18704 review: 1207 distinct values in 2000 conversions of one
+	// fixed heartbeat), and change detection never fires.
+	// Freeze is evaluated only at answered statuses, never against the wall
+	// clock, so a stretch with no polls at all (a RETH MAC link cycle skips
+	// the status loop and parks the workers) can never age a worker into
+	// "frozen"; and it needs helperWorkerFrozenStatuses consecutive statuses
+	// to agree, so the first status after such a stretch cannot either.
+	hbOldest     time.Duration // oldest worker heartbeat age at lastStatusAt
+	hbOldestIdx  int
+	frozenStreak int
 	lastStatusAt time.Time
 
 	// suspected verdict with hysteresis
@@ -117,10 +131,11 @@ func (t *helperLivenessTracker) reset(gen uint64, now time.Time, inheritNotReady
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.gen = gen
+	t.retired = false
 	t.lastAnswer = now
 	t.silentSince = time.Time{}
 	t.silentTrips = 0
-	t.hbLast, t.hbChanged, t.lastStatusAt = nil, nil, time.Time{}
+	t.hbOldest, t.hbOldestIdx, t.frozenStreak, t.lastStatusAt = 0, -1, 0, time.Time{}
 	t.inherited = inheritNotReady
 	t.armedSeen = false
 	t.suspected = inheritNotReady
@@ -128,6 +143,22 @@ func (t *helperLivenessTracker) reset(gen uint64, now time.Time, inheritNotReady
 	if inheritNotReady {
 		t.suspectedSince = now
 	}
+	t.healthySince, t.healthyTrips = time.Time{}, 0
+}
+
+// retire ends the generation at an intentional stop (stopLocked). Evidence
+// recorded against the stopped process must not keep accruing: a stop-to-
+// respawn longer than the demote span would otherwise turn a planned restart
+// into a wedge verdict (#18704 review). The suspected verdict is dropped too,
+// which matches F2 for an intentional stop: the transit gate then leaves the
+// arm bit exactly as it is.
+func (t *helperLivenessTracker) retire() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.retired = true
+	t.silentSince, t.silentTrips = time.Time{}, 0
+	t.hbOldest, t.hbOldestIdx, t.frozenStreak = 0, -1, 0
+	t.suspected, t.inherited = false, false
 	t.healthySince, t.healthyTrips = time.Time{}, 0
 }
 
@@ -149,7 +180,7 @@ func (t *helperLivenessTracker) noteRGActivate(now time.Time) {
 func (t *helperLivenessTracker) noteAnswered(gen uint64, end time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if gen != t.gen {
+	if gen != t.gen || t.retired {
 		return
 	}
 	t.lastAnswer = end
@@ -166,7 +197,7 @@ func (t *helperLivenessTracker) noteAnswered(gen uint64, end time.Time) {
 func (t *helperLivenessTracker) noteSilent(gen uint64, start, end time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if gen != t.gen {
+	if gen != t.gen || t.retired {
 		return
 	}
 	if t.silentSince.IsZero() {
@@ -191,7 +222,7 @@ func (t *helperLivenessTracker) noteRoundTrip(gen uint64, start, end time.Time, 
 func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats []time.Time, forwardingArmed bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if gen != t.gen {
+	if gen != t.gen || t.retired {
 		return
 	}
 	if forwardingArmed && !t.armedSeen {
@@ -203,19 +234,27 @@ func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats
 		}
 	}
 	t.lastStatusAt = now
-	if len(heartbeats) != len(t.hbLast) {
-		t.hbLast = append([]time.Time(nil), heartbeats...)
-		t.hbChanged = make([]time.Time, len(heartbeats))
-		for i := range t.hbChanged {
-			t.hbChanged[i] = now
-		}
-	} else {
+	t.hbOldest, t.hbOldestIdx = 0, -1
+	// Worker heartbeats only mean "this worker is looping" while forwarding
+	// is armed; a disarmed or not-yet-armed helper parks its workers.
+	if forwardingArmed {
 		for i, hb := range heartbeats {
-			if !hb.Equal(t.hbLast[i]) {
-				t.hbLast[i] = hb
-				t.hbChanged[i] = now
+			if hb.IsZero() {
+				continue // not yet published
+			}
+			// A heartbeat ahead of the status time is a torn conversion;
+			// it is no evidence of a freeze (fwdstatus treats it as not
+			// healthy for its own display, which is the fail-closed choice
+			// THERE; here the fail-closed choice is not to demote on it).
+			if age := now.Sub(hb); age > t.hbOldest {
+				t.hbOldest, t.hbOldestIdx = age, i
 			}
 		}
+	}
+	if t.hbOldest >= helperWorkerFrozenAfter {
+		t.frozenStreak++
+	} else {
+		t.frozenStreak = 0
 	}
 	if t.frozenWorkerLocked() >= 0 {
 		t.healthySince, t.healthyTrips = time.Time{}, 0
@@ -223,19 +262,18 @@ func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats
 	t.evaluateLocked(now)
 }
 
-// frozenWorkerLocked returns the index of a worker whose heartbeat had not
-// moved for helperWorkerFrozenAfter as of the latest answered status, or -1.
-// A zero heartbeat (not yet published) never counts.
+// helperWorkerFrozenStatuses is how many consecutive answered statuses must
+// show a worker heartbeat at least helperWorkerFrozenAfter old.
+const helperWorkerFrozenStatuses = 2
+
+// frozenWorkerLocked returns the index of the worker whose heartbeat was at
+// least helperWorkerFrozenAfter old at the latest answered status, confirmed
+// by helperWorkerFrozenStatuses consecutive statuses, or -1.
 func (t *helperLivenessTracker) frozenWorkerLocked() int {
-	for i, hb := range t.hbLast {
-		if hb.IsZero() {
-			continue
-		}
-		if t.lastStatusAt.Sub(t.hbChanged[i]) >= helperWorkerFrozenAfter {
-			return i
-		}
+	if t.frozenStreak < helperWorkerFrozenStatuses {
+		return -1
 	}
-	return -1
+	return t.hbOldestIdx
 }
 
 func (t *helperLivenessTracker) silenceSpanLocked(now time.Time) time.Duration {
@@ -288,8 +326,8 @@ func (t *helperLivenessTracker) killDue(now time.Time) (bool, time.Duration) {
 	defer t.mu.Unlock()
 	span := t.silenceSpanLocked(now)
 	frozen := time.Duration(0)
-	if i := t.frozenWorkerLocked(); i >= 0 {
-		frozen = t.lastStatusAt.Sub(t.hbChanged[i])
+	if t.frozenWorkerLocked() >= 0 {
+		frozen = t.hbOldest
 	}
 	if span < helperWedgeMinSpan && frozen < helperWorkerFrozenKillAfter {
 		return false, max(span, frozen)

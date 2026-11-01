@@ -964,10 +964,18 @@ count with time and adds a worker-progress input:
     callers is never charged to the helper.
   - Each answered status also carries the workers' heartbeats.
 - **Suspected (cheap, reversible).** The verdict is raised by either of:
-  - a worker whose heartbeat has not moved for `helperWorkerFrozenAfter`
-    (10 s) across answered statuses. This is the primary input. On tcp the
-    #18655 busy convoy froze heartbeats for 16-22 s while the control thread
-    answered in about 2 ms and transit was dead.
+  - a worker whose heartbeat is at least `helperWorkerFrozenAfter` (10 s)
+    OLD at an answered status (status time minus heartbeat, the quantity
+    `fwdstatus.heartbeatsHealthy` reads from the same field), on
+    `helperWorkerFrozenStatuses` (2) consecutive statuses, while forwarding
+    is armed. This is the primary input. On tcp the #18655 busy convoy aged
+    heartbeats to 16-22 s while the control thread answered in about 2 ms and
+    transit was dead.
+    - The verdict is judged by AGE, not by whether the value changed. The
+      helper re-derives every heartbeat on every status call from two fresh
+      clock reads (`coordinator/status.rs` `worker_heartbeats`), so a frozen
+      worker's heartbeat still wobbles by microseconds from poll to poll, and
+      change detection never fires (#18704 review).
   - two silent round trips spanning `helperWedgeDemoteSpan` (5 s).
 
   The daemon's transit gate reads it lock-free (`HelperElectionNotReady`) and
@@ -989,6 +997,10 @@ count with time and adds a worker-progress input:
   same tracker as a second path; a generation is killed at most once. Recovery
   belongs to the supervisor, and the next generation inherits the not-ready
   verdict until it arms (#18697 above).
+- **Intentional stop.** `stopLocked` retires the tracker's generation. Silence
+  recorded against a stopped helper therefore cannot accrue into a verdict
+  during a planned stop-to-respawn, and a late answer from an older generation
+  never clears the current one's silence.
 - **Bounds** come from the measured healthy population (#18658 cells): the
   status round trip stayed under 31 ms on udp and tcp through 16k-session
   bursts on every build, including during the #18655 convoy.
