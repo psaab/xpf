@@ -1943,7 +1943,7 @@ that holds two of them takes them in this order:
 - `publish_shared_session` releases `shared_sessions` before its wire
   section, then takes the map before the index.
 - `bare_tuple_sessions` is taken briefly under `shared_sessions` by the
-  publish (`store.rs:788`), the removal (`store.rs:1129`) and the clear
+  publish (`store.rs:788`), the removal (`store.rs:1133`) and the clear
   (`types/session_index.rs:651-653`), and released before anything else is locked.
 - A fragment-association lookup (`fragment_assoc::lookup_with_session`)
   holds its shard while its `session_is_live` closure locks
