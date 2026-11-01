@@ -161,3 +161,51 @@ source fix, as decided by the lane coordinator.
     PASS);
   - PR: `6dc6c79d1c3c299b` (soak PASS), `cfbfe9881f2bcdf3` (failover FAIL),
     `3ae3abc74d9aa002` (failover FAIL), `a2ff4ce882f52a3e` (ha-crash PASS).
+
+## Root cause of the Group 4 regression, and the re-gate on top of #18659
+
+- **Timestamp**: 2026-11-01
+- **Finding**: the RG1 Group 4 denies were a master defect, #18659 (fixed
+  by #18660, merged 1406176ce1), which this PR exposed more often.
+  - On RG activation, the HA refresh rewrote each peer-owned reverse row
+    onto the unresolved WAN gateway (MissingNeighbor).
+  - The copy on the worker that had processed packets since the FIB bump
+    carried the current generation stamp, so a WAN reply hashed to that
+    worker took the MissingNeighbor arm and was default-denied wan->wan.
+  - This PR moves the stamp 1.6 ms after an apply, against 15-20 ms on
+    master (1.7 kHz ctrl-row sampler), and showed the denies in 4 of 6
+    runs, against 1 of 7 on master.
+  - The earlier "0 advances after boot" reading was a reboot-reset mis-diff:
+    post-boot the stamp made 9 advances and 1 decline, and the decline was
+    the boot apply exceeding its grant.
+  - The earlier "persists 74 s" reading was also wrong: each burst lasts
+    about 50 ms.
+- **Action**: merged origin/master 1406176ce1 into this branch (cee55a0f0e)
+  and re-gated in one loss lock cell, arms in order: master 1406176ce1
+  (0.0.29517), this PR cee55a0f0e (0.0.29518), and #18675 (0.0.29519).
+  Each arm ran test-failover x2, test-ha-crash, and test-rg-move-soak
+  SOAK_RG=1,2 x40. Host and VM loadavg were recorded beside each gate.
+- **Finding**:
+
+  | arm | test-failover | RG1 Group 4 | wan->wan TCP denies | ha-crash | soak (to node0 / to node1) | worst stall |
+  |---|---|---|---|---|---|---|
+  | master | 67P/2F, 65P/3F | PASS, PASS | 0 | 44/0 (row VOID: exe_check unavailable) | 20P / 20P | 1.4 s |
+  | this PR | 66P/3F, 65P/3F | PASS, PASS | 0 | 44/0 | 20P / 20P | 1.1 s |
+
+  - Group 4 is fixed on this PR.
+  - The remaining test-failover FAILs show up on both arms: the rg1-split
+    stall (#18656), zero intervals, and interval collapse.
+  - One extra FAIL here: "stream 7 did not resume within 3s" at the crash.
+    In every run on every arm, all 8 streams go to zero for exactly one 1 s
+    interval at the takeover. The failing stream stayed at zero 3 more
+    seconds and then recovered. Attribution and further samples are in
+    progress.
+- **Ledger rows** (this commit):
+  - master: `0af88aacd69099f8` (failover FAIL), `ebf494c4c4ad57cc`
+    (failover FAIL), `f2a42b08bd7fa17d` (ha-crash VOID, exe_check
+    unavailable), `ea979dfa3dff7eae` (soak PASS);
+  - PR: `df2c8029e48693ab` (failover FAIL), `3f9c250fecb27622` (failover
+    FAIL), `c2b29495db3b3569` (ha-crash PASS), `de00db418ccfdc62` (soak
+    PASS);
+  - PR earlier (instrumented pr3 run, 0.0.27070): `3d986529ef8457cd`
+    (failover VOID).
