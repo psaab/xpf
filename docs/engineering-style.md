@@ -1833,6 +1833,14 @@ they repeatedly bite:
     target test in an optional 5th TAB column, refines the verdict with
     `mutation_verdict_for_target`.
 
+    **A timed-out package is VOID, not red (#18778).** test-go passes an
+    explicit `-timeout $(GOTEST_TIMEOUT)` (default 60m). go test's 10m
+    default is reachable by pkg/daemon at high host load, and a timeout aborts
+    the package mid-run exactly as a panic does: every later test never runs.
+    On go test's `panic: test timed out`, `scripts/go-test-json.sh` prints a
+    VOID banner and exits 3. Treat a 3 as "this package was not measured" and
+    rerun with a longer timeout or on a quieter host; do not attribute over it.
+
     **A name is not a reason (#9564).** A guard with a LIVENESS fatal ("the
     parser found no anchors") and a violation branch scores KILLED by name
     whichever branch fired, so a mutant that merely broke the fixture reads as

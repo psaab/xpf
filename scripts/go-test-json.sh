@@ -39,8 +39,28 @@ fi
 go_bin=$1
 shift
 
+# #18778: go test's timeout panic aborts a package mid-run, so every later
+# test in it never runs. That is neither a pass nor an attributable failure:
+# VOID the leg loudly with a distinct status (3) instead of letting it read
+# as an ordinary FAIL. The detector passes every line through unchanged.
+timeout_watch() {
+	awk '{ print; fflush() } /^panic: test timed out after /{ t = 1 } END { exit t ? 3 : 0 }'
+}
+void_banner() {
+	echo "go-test-json.sh: VOID: go test hit its -timeout (\"panic: test timed out\")." >&2
+	echo "  Every test after that point in the timed-out package NEVER RAN; this leg is" >&2
+	echo "  neither a pass nor an attributable failure. Rerun with a longer -timeout" >&2
+	echo "  (make GOTEST_TIMEOUT=...) or on a quieter host." >&2
+}
+
 if [ -z "$json" ]; then
-	exec "$go_bin" test "$@"
+	"$go_bin" test "$@" | timeout_watch
+	rc=("${PIPESTATUS[@]}")
+	if [ "${rc[1]}" -eq 3 ]; then
+		void_banner
+		exit 3
+	fi
+	exit "${rc[0]}"
 fi
 
 if ! command -v jq >/dev/null 2>&1; then
@@ -57,7 +77,7 @@ fi
 # stderr is deliberately NOT piped. `go test -json` reports build and setup
 # failures on stderr as plain text, not as JSON events, so folding it into the
 # pipe would both corrupt the event stream and hide the message.
-"$go_bin" test -json "$@" | tee -a "$json" | jq -j 'select(.Output != null) | .Output'
+"$go_bin" test -json "$@" | tee -a "$json" | jq -j 'select(.Output != null) | .Output' | timeout_watch
 rc=("${PIPESTATUS[@]}")
 
 # rc[0] is the verdict. tee and jq are reported separately because a failure in
@@ -71,5 +91,9 @@ fi
 if [ "${rc[2]}" -ne 0 ]; then
 	echo "go-test-json.sh: jq failed (rc=${rc[2]}); the reconstructed output above is truncated" >&2
 	exit 2
+fi
+if [ "${rc[3]}" -eq 3 ]; then
+	void_banner
+	exit 3
 fi
 exit "${rc[0]}"

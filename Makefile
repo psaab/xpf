@@ -411,12 +411,16 @@ GOTESTJSON ?=
 # derives the set (every package whose tests exec git) and fails until
 # the leg matches; #18642 added pkg/upgrade/manifest (its drift canary
 # runs `git ls-files`).
+# #18778: an explicit, generous per-package -timeout. go test's 10m default is
+# reached by pkg/daemon at high host load, and a timeout aborts the package
+# mid-run exactly like a panic; scripts/go-test-json.sh VOIDs such a leg (exit 3).
+GOTEST_TIMEOUT ?= 60m
 test-go: test-race-dp
 	@status=0; \
 	$(GO) vet ./... || status=$$?; \
 	[ -z "$(GOTESTJSON)" ] || : > "$(GOTESTJSON)"; \
-	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" ./... || status=$$?; \
-	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/upgrade/manifest/ || status=$$?; \
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -timeout $(GOTEST_TIMEOUT) ./... || status=$$?; \
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -timeout $(GOTEST_TIMEOUT) -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/upgrade/manifest/ || status=$$?; \
 	sh scripts/go-buildtag-census.sh || status=$$?; \
 	sh scripts/go-deadcode-gate.sh; dc=$$?; if [ $$dc -eq 77 ]; then echo "test-go: go-deadcode-gate SKIPPED (no go1.26 toolchain; see script header)"; elif [ $$dc -ne 0 ] && [ $$status -eq 0 ]; then status=$$dc; fi; \
 	exit $$status

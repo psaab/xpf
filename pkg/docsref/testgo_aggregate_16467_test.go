@@ -19,10 +19,13 @@ var testGoLegs16467 = []struct {
 }{
 	{"vet", func(l string) bool { return l == "$(GO) vet ./... || status=$$?; \\" }},
 	{"test ./...", func(l string) bool {
-		return l == `bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" ./... || status=$$?; \`
+		// #18778: an explicit -timeout, so a package cut off at go test's
+		// 10m default cannot read as an ordinary failure.
+		return l == `bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -timeout $(GOTEST_TIMEOUT) ./... || status=$$?; \`
 	}},
 	{"uncached census packages", func(l string) bool {
 		return strings.Contains(l, "-count=1") && strings.Contains(l, "./pkg/docsref/") &&
+			strings.Contains(l, "-timeout $(GOTEST_TIMEOUT)") &&
 			strings.HasSuffix(l, "|| status=$$?; \\")
 	}},
 	{"build-tag census", func(l string) bool {
@@ -158,8 +161,8 @@ func TestMakefileTestGoRunsAllLegs16467(t *testing.T) {
 		"\t@status=0; \\\n" +
 		"\t$(GO) vet ./... || status=$$?; \\\n" +
 		"\t[ -z \"$(GOTESTJSON)\" ] || : > \"$(GOTESTJSON)\"; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" ./... || status=$$?; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -count=1 ./pkg/docsref/ || status=$$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) ./... || status=$$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) -count=1 ./pkg/docsref/ || status=$$?; \\\n" +
 		"\texit $$status\n" +
 		"\tsh scripts/go-buildtag-census.sh\n"
 	if err := validateTestGoAggregate16467(ownLine); err == nil {
@@ -171,8 +174,8 @@ func TestMakefileTestGoRunsAllLegs16467(t *testing.T) {
 		"\t@status=0; \\\n" +
 		"\t$(GO) vet ./...; \\\n" +
 		"\t[ -z \"$(GOTESTJSON)\" ] || : > \"$(GOTESTJSON)\"; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" ./... || status=$$?; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -count=1 ./pkg/docsref/ || status=$$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) ./... || status=$$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) -count=1 ./pkg/docsref/ || status=$$?; \\\n" +
 		"\tsh scripts/go-buildtag-census.sh || status=$$?; \\\n" +
 		"\texit $$status\n"
 	if err := validateTestGoAggregate16467(droppedCapture); err == nil ||
@@ -187,8 +190,8 @@ func TestMakefileTestGoRunsAllLegs16467(t *testing.T) {
 		"\t$(GO) vet ./... || status=$$?; \\\n" +
 		"\t[ -z \"$(GOTESTJSON)\" ] || : > \"$(GOTESTJSON)\"; \\\n" +
 		"\tsh scripts/go-buildtag-census.sh || status=$$?; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" ./... || status=$$?; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -count=1 ./pkg/docsref/ || status=$$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) ./... || status=$$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) -count=1 ./pkg/docsref/ || status=$$?; \\\n" +
 		"\texit $$status\n"
 	if err := validateTestGoAggregate16467(censusFirst); err == nil ||
 		!strings.Contains(err.Error(), "out of order") {
