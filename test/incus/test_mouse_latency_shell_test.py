@@ -304,18 +304,56 @@ class AbortIsDistinguishableTests(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertIn(code, MATRIX)
 
+    def _lock_assignments(self):
+        return re.findall(r"^\s*LOCK_FILE=(.*)$", MATRIX, re.MULTILINE)
+
+    def test_the_lock_path_is_assigned_exactly_once(self):
+        """Copilot D.1: one per-host mutex, so ONE assignment of LOCK_FILE.
+
+        A later reassignment (for example from TMPDIR) would silently move the
+        mutex between invocations.
+        """
+        assignments = self._lock_assignments()
+        self.assertEqual(
+            len(assignments), 1,
+            f"LOCK_FILE must be assigned exactly once, found {assignments!r}",
+        )
+
+    def test_the_lock_path_is_never_environment_derived(self):
+        """Copilot D.1: two invocations with different TMPDIR (or any other
+        environment) must lock the SAME file, so the value carries no
+        expansion at all. This is the property, not a literal path: the next
+        correct move of the lock (as #14837 moved it from /tmp to the
+        /var/worktrees scratch root) keeps this green.
+        """
+        for value in self._lock_assignments():
+            self.assertNotIn(
+                "$", value,
+                f"LOCK_FILE={value} expands a variable; the mutex must be a fixed per-host path",
+            )
+
+    def test_the_only_lock_opened_is_lock_file(self):
+        """The mutex is fd 9 on $LOCK_FILE, and nothing else is opened as a
+        lock. An `exec 9>` onto any other path, a TMPDIR-derived one say,
+        would bypass the fixed path above.
+        """
+        opens = re.findall(r"^\s*exec\s+[0-9]+\s*>\s*(\S+)", MATRIX, re.MULTILINE)
+        self.assertEqual(
+            opens, ['"$LOCK_FILE"'],
+            f"the only exec-opened fd must be the mutex on \"$LOCK_FILE\", found {opens!r}",
+        )
+
     def test_out_root_is_resolved_before_the_mutex(self):
         """A lock-contention abort must be able to write its artifact too.
 
         That is the purest 'never ran' case, and it used to be the one with
-        the least evidence. The lock is a hard-coded per-host path, never
-        TMPDIR-derived (Copilot D.1); #14837 moved it from /tmp to the
-        /var/worktrees scratch root.
+        the least evidence.
         """
-        self.assertLess(
-            MATRIX.index('OUT_ROOT="$1"'),
-            MATRIX.index('LOCK_FILE="/var/worktrees/.cache/tmpdir/test-mouse-latency-matrix.lock"'),
-        )
+        out_root = MATRIX.find('OUT_ROOT="$1"')
+        lock = re.search(r"^\s*LOCK_FILE=", MATRIX, re.MULTILINE)
+        self.assertNotEqual(out_root, -1, 'OUT_ROOT="$1" is not assigned')
+        self.assertIsNotNone(lock, "LOCK_FILE is not assigned")
+        self.assertLess(out_root, lock.start(), "OUT_ROOT must be resolved before the mutex is taken")
 
     def test_the_matrix_sources_the_shared_port_defaults(self):
         """#8244 defect 1: the default lived in two files and drifted.

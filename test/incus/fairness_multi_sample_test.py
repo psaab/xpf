@@ -1541,8 +1541,28 @@ class FairnessMultiSampleTest(unittest.TestCase):
             encoding="utf-8",
         )
         stub.chmod(0o755)
+        # A recording iperf3 first on PATH (AE on #18738): the gate must stop
+        # the harness BEFORE any traffic. A precheck that fails open (`|| true`)
+        # still exits 1 later, so the exit code alone cannot see it; this does.
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        self.iperf3_log = tmp_path / "iperf3-calls.log"
+        iperf3 = bindir / "iperf3"
+        iperf3.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                printf '%s\\n' "$*" >> "$IPERF3_LOG"
+                exit 1
+                """
+            ),
+            encoding="utf-8",
+        )
+        iperf3.chmod(0o755)
         env = {k: v for k, v in os.environ.items() if k != "SKIP_TARGET_PRECHECK"}
         env["PRECHECK_LOG"] = str(stub_log)
+        env["IPERF3_LOG"] = str(self.iperf3_log)
+        env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
         if extra_env:
             env.update(extra_env)
         result = subprocess.run(
@@ -1554,6 +1574,10 @@ class FairnessMultiSampleTest(unittest.TestCase):
             timeout=30,
         )
         return result, stub_log
+
+    def _assert_no_traffic(self) -> None:
+        calls = self.iperf3_log.read_text(encoding="utf-8") if self.iperf3_log.exists() else ""
+        self.assertEqual(calls, "", f"the precheck gate let the harness launch iperf3: {calls!r}")
 
     def test_fairness_harness_mixed_cos_precheck_includes_mixed_port(self) -> None:
         # #13068 (D10-13): --mixed-cos drives BOTH the primary port and
@@ -1569,6 +1593,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 stub_log.read_text(encoding="utf-8").splitlines(),
                 ["check", "5202", "5205"],
             )
+            self._assert_no_traffic()
 
     def test_fairness_harness_precheck_honors_mixed_port_override(self) -> None:
         # The probe must see the MIXED_PORT the run will actually use, not
@@ -1584,6 +1609,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 stub_log.read_text(encoding="utf-8").splitlines(),
                 ["check", "5202", "6205"],
             )
+            self._assert_no_traffic()
 
     def test_fairness_harness_single_class_precheck_checks_only_primary_port(self) -> None:
         # The mixed gate must not over-reject: a single-class run sends to
@@ -1598,6 +1624,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 stub_log.read_text(encoding="utf-8").splitlines(),
                 ["check", "5210"],
             )
+            self._assert_no_traffic()
 
     def _kill_group_if_alive(self, pgid: int) -> None:
         # Keep a RED run of the #13068 abort tests from leaking the fake
