@@ -246,9 +246,12 @@ rendered copy at mode 0600 and deletes it.
   published placeholder.
 - To change a live cluster's key, use the rolling `additional-authentication-key`
   rotation (`pkg/cluster/README.md`, "Rotation"), then write the new key to
-  the file. A raw deploy of a conf whose key differs from the running one only
-  converges because it re-keys both nodes together; never raw-deploy one node
-  with a different key.
+  the file. Never raw-deploy a key that differs from the running one. The raw
+  `deploy all` is rolling (`deploy_rolling`): it restarts the secondary first
+  and the primary up to about 65 s later. In that window the restarted node
+  rejects the peer's heartbeats as unauthenticated, so expect it to treat the
+  peer as absent. A raw deploy from a branch that predates #18724 pushes the
+  old committed key, which is this case.
 - Self-tests: `make test-deploy-lib` ("cluster key" cells).
 
 Never hardcode a node: source `cluster-env.sh` (directly or via
