@@ -107,3 +107,57 @@ source fix, as decided by the lane coordinator.
     `teardown_publish_inside_a_grant_never_writes_the_row_18560`. The
     `LateWrite` comment now says it over-reports (fires at `now >= deadline`)
     on purpose.
+- **Timestamp**: 2026-11-01 00:00-01:41 UTC (re-gate after #18638)
+- **Action**: Merged origin/master 3f5daa77a7 (`--no-ff`, 9fb6843a19) with
+  no conflicts.
+  - Full Rust release suite: 75 failures, identical by name to master.
+  - pkg/dataplane/userspace: 70 failures, all in the base set.
+  - Ignored-cell census: OK.
+- **Builds and versions.** The deployed floor was 0.0.26900, so these start
+  at +100. Each arm was its own lock cell deploying its own deb, back to back
+  per gate, with counters read before and after.
+  - master 3f5daa77a7: 0.0.27000 (soak), 0.0.27020 and 0.0.27060
+    (failover), 0.0.27040 (ha-crash).
+  - PR 9fb6843a19: 0.0.27010 (soak), 0.0.27030 and 0.0.27070 (failover),
+    0.0.27050 (ha-crash).
+- **A/B on loss.**
+
+  | gate | master 3f5daa77a7 | PR 9fb6843a19 |
+  |---|---|---|
+  | test-rg-move-soak SOAK_RG=1,2, 40 moves | 40/0/0, max v4 gap 248 ms | 40/0/0, max v4 gap 208 ms |
+  | test-failover, run 1 | 67 passed / 2 failed | 66 passed / 3 failed (+ RG1 Group 4) |
+  | test-failover, run 2 | 66 passed / 3 failed | 65 passed / 4 failed (+ RG1 Group 4) |
+  | test-ha-crash | 44 passed / 0 failed | 44 passed / 0 failed |
+
+  - The failover failures both arms share: whole-run per-stream zero
+    intervals, rg1-split planned-move stalls, and (in run 2) a stream that
+    did not resume within 3 s.
+  - **RG1 Group 4 (policy denied packets) fails on the PR in 2 of 2 runs and
+    passes on master in 2 of 2.** Paired delta 60 and 213, all on node0, the
+    node that was crashed and rejoined. Those denies are replies to
+    established SNAT flows, denied as `wan -> wan` transit right after RG1
+    fails back to node0:
+    - run 1: `.202:5210 -> .7` (pool SNAT), 59 denies in 27 ms;
+    - run 2: `.202:5211 -> .8` (interface SNAT), 194 denies on seven iperf3
+      streams, some lasting until 01:38:11 (74 s).
+  - Counter deltas per arm. On node0 these span its crash and reboot, so they
+    cover the rejoined process only.
+
+    | counter | master soak | PR soak | master failover node0 | PR failover node0 |
+    |---|---|---|---|---|
+    | config_gen_mismatches (node0 / node1) | +460k / +436k | +244k / +264k | - | - |
+    | fib_gen_mismatches (node0 / node1) | +17k / +30k | +50k / +38k | +1 and +0 | +696 and +1754 |
+    | ctrl stamp advances / declines / errors | - | 244 / 0 / 0 and 228 / 0 / 0 | - | 0 / 1 / 0 (node1: 10 / 0 / 0) |
+    | Sessions stale-config-ignored (both nodes) | flat at 0 (#18646) | flat at 0 | flat at 0 | flat at 0 |
+
+  - Verdict under the re-gate rule ("merge if the PR fails no move class or
+    cell that master passes"): **NOT mergeable.** RG1 Group 4 is a cell
+    master passes. The deny pattern points at the rejoined node's
+    activation; its helper declined its only stamp change, and its FIB
+    generation mismatches are elevated.
+- **Ledger rows** committed:
+  - master: `4946aca7fc092059` (soak PASS), `eb635957bc413f64` (failover
+    FAIL), `3097baef25a122b9` (failover FAIL), `f748c8365d7416d7` (ha-crash
+    PASS);
+  - PR: `6dc6c79d1c3c299b` (soak PASS), `cfbfe9881f2bcdf3` (failover FAIL),
+    `3ae3abc74d9aa002` (failover FAIL), `a2ff4ce882f52a3e` (ha-crash PASS).
