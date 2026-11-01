@@ -1259,27 +1259,17 @@ PY
 assert_helper_value 13 ha_status_fabric_tx_packets "${FABRIC_INTERFACES}"
 assert_helper_status 2 ha_status_fabric_tx_packets "${TMP_DIR}/missing-fabric.txt"
 
-STANDBY_STATUS="${TMP_DIR}/standby-status.txt"
-cat >"${STANDBY_STATUS}" <<'EOF'
-Enabled: true
-Forwarding armed: true
-rg1 active=false
-Ready bindings: 2/8
-EOF
-assert_helper_status 0 ha_standby_status_verdict "${STANDBY_STATUS}" 1
-cat >"${STANDBY_STATUS}" <<'EOF'
-Enabled: true
-Forwarding armed: true
-rg1 active=true
-Ready bindings: 2/8
-EOF
-assert_helper_status 1 ha_standby_status_verdict "${STANDBY_STATUS}" 1
-cat >"${STANDBY_STATUS}" <<'EOF'
-Enabled: true
-rg1 active=false
-Ready bindings: 2/8
-EOF
-assert_helper_status 2 ha_standby_status_verdict "${STANDBY_STATUS}" 1
+# #18686: the standby parser is fed the production renderer's golden, not
+# hand-written lines. The fixtures this replaced put `rg1 active=false` on a
+# line of its own, which matched the parser and never the product: the
+# summary joins every group onto ONE `HA groups:` line. Against real
+# captures the verdict was therefore VOID on every run. The golden carries
+# `rg0 active=true` and `rg1 active=false` on that one line, so selecting
+# the RG out of the line is what these rows prove. The real-capture rows
+# are in the Group 7 block below.
+assert_helper_status 0 ha_standby_status_verdict "${STATISTICS_RENDERED}" 1
+assert_helper_status 1 ha_standby_status_verdict "${STATISTICS_RENDERED}" 0
+assert_contains "$(<"${ERR}")" 'rg0 is active' 'golden standby status selects rg0 out of the HA groups line'
 
 assert_helper_status 0 ha_ttl_output_verdict 1 'Time exceeded: Hop limit'
 assert_helper_status 1 ha_ttl_output_verdict 0 '64 bytes from 1.1.1.1: icmp_seq=1 ttl=64'
@@ -1927,23 +1917,100 @@ if (( ${#rewind_failures[@]} != 0 )); then
 	fail_test "${rewind_failures[*]}"
 fi
 printf 'Groups 7-8 RG readiness and exact ten-sample maxima\n'
-STANDBY_ID="${RG1_DIR}/standby.status"
-write_ha_status_snapshot "$STANDBY_ID" phase-post node1 1 0 0 0 0
-{
-	printf 'Enabled: true\nForwarding armed: true\nrg1 active=false\nReady bindings: 2/8\n'
-} >>"$STANDBY_ID"
-assert_helper_status 0 ha_rg_standby_status_verdict "$STANDBY_ID" manual-rg1-failback phase-post node1 1
-for predicate in enabled armed active ready; do
-	write_ha_status_snapshot "$STANDBY_ID" phase-post node1 1 0 0 0 0
-	case "$predicate" in
-	enabled) printf 'Enabled: false\nForwarding armed: true\nrg1 active=false\nReady bindings: 2/8\n' >>"$STANDBY_ID" ;;
-	armed) printf 'Enabled: true\nForwarding armed: false\nrg1 active=false\nReady bindings: 2/8\n' >>"$STANDBY_ID" ;;
-	active) printf 'Enabled: true\nForwarding armed: true\nrg1 active=true\nReady bindings: 2/8\n' >>"$STANDBY_ID" ;;
-	ready) printf 'Enabled: true\nForwarding armed: true\nrg1 active=false\nReady bindings: 0/8\n' >>"$STANDBY_ID" ;;
-	esac
-	assert_helper_status 1 ha_rg_standby_status_verdict "$STANDBY_ID" manual-rg1-failback phase-post node1 1
-done
-assert_helper_status 2 ha_rg_standby_status_verdict "$STANDBY_ID" manual-rg1-failback phase-pre node1 1
+# #18686: Group 7's rows are the REAL capture test-failover took on tcp
+# (test-failover-ha-2269141, `show chassis cluster data-plane statistics` on
+# the former owner at phase=mid), each row changing exactly ONE line of it.
+# The hand-written fixtures these replaced matched the parser rather than the
+# product, which is how the verdict stayed VOID on every live run.
+STANDBY_REAL_STATS="${ROOT}/test/fixtures/ha-assurance/rg1-failback-mid-node1-18686.stats"
+STANDBY_REAL_STATUS="${ROOT}/test/fixtures/ha-assurance/rg1-failback-mid-node1-18686.status"
+STANDBY_ID="${RG1_DIR}/standby.stats"
+STANDBY_HA_GROUPS='  HA groups:                 rg0 active=true watchdog=136578; rg1 active=false watchdog=136578; rg2 active=true watchdog=136578'
+
+# derive_standby <dst> [<old> <new>]...: the real capture with each <old>
+# line-fragment replaced by <new>. Each <old> must occur exactly once, so a
+# fixture that drifts fails here instead of turning a row into a no-op.
+derive_standby() {
+	python3 - "$STANDBY_REAL_STATS" "$@" <<'PY'
+import pathlib
+import sys
+
+source, destination, *pairs = sys.argv[1:]
+text = pathlib.Path(source).read_text(encoding="utf-8")
+for old, new in zip(pairs[0::2], pairs[1::2]):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"derive_standby: {old!r} occurs {count} times in {source}")
+    text = text.replace(old, new, 1)
+pathlib.Path(destination).write_text(text, encoding="utf-8")
+PY
+}
+
+# standby_row <rc> <stderr substring or ''> <row> <file> [<phase>]
+standby_row() {
+	local expected="$1" needle="$2" row="$3" file="$4" phase="${5:-mid}"
+	assert_helper_status "$expected" ha_rg_standby_status_verdict "$file" manual-rg1-failback "$phase" node1 1
+	if [[ -n "$needle" ]]; then
+		assert_contains "$(<"${ERR}")" "$needle" "Group 7 row ${row}"
+	fi
+}
+
+derive_standby "$STANDBY_ID"
+standby_row 0 '' 'PASS real capture (enabled, armed, rg1 inactive, 30/30 ready)' "$STANDBY_ID"
+
+derive_standby "$STANDBY_ID" '  Enabled:                   true' '  Enabled:                   false'
+standby_row 1 'Enabled is not true' 'FAIL enabled=false' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" '  Forwarding armed:          true' '  Forwarding armed:          false'
+standby_row 1 'Forwarding armed is not true' 'FAIL armed=false' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" 'rg1 active=false' 'rg1 active=true'
+standby_row 1 'rg1 is active' 'FAIL rg1 active' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" '  Ready bindings:            30/30' '  Ready bindings:            0/30'
+standby_row 1 'no ready bindings' 'FAIL no ready bindings' "$STANDBY_ID"
+
+derive_standby "$STANDBY_ID" $'  Enabled:                   true\n' ''
+standby_row 2 'Enabled field missing' 'VOID Enabled missing' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" 'rg1 active=false watchdog=136578; ' ''
+standby_row 2 'rg1 active field missing' 'VOID rg1 entry missing' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" "${STANDBY_HA_GROUPS}"$'\n' ''
+standby_row 2 'HA groups field missing' 'VOID HA groups line missing' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" 'rg1 active=false watchdog=136578' \
+	'rg1 active=false watchdog=136578; rg1 active=true watchdog=136578'
+standby_row 2 'rg1 active field ambiguous' 'VOID rg1 entry ambiguous' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" "${STANDBY_HA_GROUPS}" "${STANDBY_HA_GROUPS}"$'\n'"${STANDBY_HA_GROUPS}"
+standby_row 2 'HA groups field ambiguous' 'VOID HA groups line ambiguous' "$STANDBY_ID"
+derive_standby "$STANDBY_ID" 'rg1 active=false' 'rg1 active=maybe'
+standby_row 2 'rg1 active field malformed' 'VOID rg1 entry malformed' "$STANDBY_ID"
+# The id is a whole token: an rg10 entry is neither rg1 nor an rg1 duplicate.
+derive_standby "$STANDBY_ID" 'rg2 active=true watchdog=136578' \
+	'rg2 active=true watchdog=136578; rg10 active=true watchdog=136578'
+standby_row 0 '' 'PASS rg10 is not rg1' "$STANDBY_ID"
+# The capture Group 7 used to be handed: no readiness fields at all.
+standby_row 2 'this looks like a `show chassis cluster status` capture' 'VOID .status passed by mistake' \
+	"$STANDBY_REAL_STATUS"
+# Identity: a capture from another phase is never judged.
+derive_standby "$STANDBY_ID"
+standby_row 2 'phase' 'VOID identity phase mismatch' "$STANDBY_ID" phase-post
+
+printf 'Group 7 call site is handed the data-plane statistics capture (#18686)\n'
+if ! python3 - "${ROOT}/test/incus/test-failover.sh" <<'PY'; then
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+calls = re.findall(r'ha_rg_standby_status_verdict "([^"]+)" \\\n\s*(\S+) (\S+) (\S+) (\S+)\n', text)
+want = ("${RG1_STATS[mid:node1]}", "manual-rg1-failback", "mid", "node1", "1")
+if calls != [want]:
+    raise SystemExit(f"Group 7 call sites are {calls}, want exactly [{want}]")
+# RG1_STATS must name the data-plane statistics capture.
+binding = re.search(r'RG1_STATS\["\$\{phase\}:\$\{node_id\}"\]="\$\{base\}\.stats"\n', text)
+capture = re.search(r"ha_capture_cli \"\$node\" 'show chassis cluster data-plane statistics' \\\n"
+                    r'\s*manual-rg1-failback "\$phase" "\$node_id" 1 "\$\{RG1_STATS\["\$\{phase\}:\$\{node_id\}"\]\}"', text)
+if not binding or not capture:
+    raise SystemExit("RG1_STATS is no longer the `show chassis cluster data-plane statistics` capture")
+PY
+	fail_test 'Group 7 must be handed RG1_STATS[mid:node1], the data-plane statistics capture'
+fi
 
 SAMPLE_STATS=()
 SAMPLE_INTERFACES=()

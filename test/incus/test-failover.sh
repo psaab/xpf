@@ -896,8 +896,12 @@ ha_rg1_evaluate() {
 			void "RG1 Group 6 dynamic fabric TX unavailable: ${reason:-counter delta unavailable}"
 		fi
 	fi
+	# #18686: the readiness fields (Enabled, Forwarding armed, the HA groups
+	# line, Ready bindings) are in the data-plane statistics capture
+	# (RG1_STATS), not the cluster-status one (RG1_STATUS). Handed .status,
+	# this group was VOID on every run.
 	ha_emit_verdict "RG1 Group 7 former-owner readiness on RG1" \
-		ha_rg_standby_status_verdict "${RG1_STATUS[mid:node1]}" \
+		ha_rg_standby_status_verdict "${RG1_STATS[mid:node1]}" \
 		manual-rg1-failback mid node1 1
 
 	local sample_error="${HA_CAPTURE_DIR}/rg1-samples.err"
