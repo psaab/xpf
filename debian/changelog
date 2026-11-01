@@ -1,4 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Remote CLI: operational `show configuration | display set` (and
+    `| display json|xml|inheritance`, chained `| display set | match x`,
+    and `run show configuration | display set` from configuration mode)
+    renders again instead of failing with `unknown show configuration
+    command: |`. The unknown-subcommand gate now judges only the words
+    before the first `|`. An unknown word before the pipe still refuses.
+    A display pipe after another keyword-only command was already
+    refused and still is (exit 1); only the message changes, naming the
+    modifier instead of `unknown <path> command: |`. Operational
+    `show configuration | compare` is not supported, and now says so:
+    `| compare rollback <N>` points at `show system rollback <N> |
+    compare` (rollback N against the active configuration), and the bare
+    or path-scoped forms point at configuration mode, which compares the
+    candidate (#18664).
   * Userspace dataplane: a peer-synced flow's original-tuple row now wins
     the import over its forward-wire alias (neither the alias nor a local
     promotion of it books the translation; the alias is refused, under its
