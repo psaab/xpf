@@ -1002,7 +1002,16 @@ fn distinct_host_slot_rotation_sources_v6(n: usize) -> Vec<IpAddr> {
             }
         }
     }
-    panic!("could not find {n} distinct-host-slot IIDs in one /64 in 10000 probes");
+    // Not a fixture fault: 10000 IIDs of one /64 land in fewer than 16 of the
+    // 64 host slots only if the host tier stopped separating IIDs inside a
+    // /64 (for example, host slots keyed on the /64): the #16510 regression
+    // this cell guards.
+    panic!(
+        "host tier does not separate IIDs inside one /64: only {} distinct \
+         host slots among 10000 IIDs of 2001:db8:67::/64, need {n} (#16510 \
+         per-/128 host shares regressed?)",
+        out.len()
+    );
 }
 
 /// #15248 (A67-01): probe `n` DISTINCT-slot IPv4 documentation sources —
