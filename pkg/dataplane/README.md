@@ -997,6 +997,10 @@ count with time and adds a worker-progress input:
   same tracker as a second path; a generation is killed at most once. Recovery
   belongs to the supervisor, and the next generation inherits the not-ready
   verdict until it arms (#18697 above).
+- **Heartbeat reference time.** Ages are measured against the moment the
+  status round trip RETURNED, taken before the status loop re-acquires
+  `m.mu`. Waiting on `m.mu` after a healthy reply is therefore never charged
+  to the workers (#18704 review).
 - **Intentional stop.** `stopLocked` retires the tracker's generation. Silence
   recorded against a stopped helper therefore cannot accrue into a verdict
   during a planned stop-to-respawn, and a late answer from an older generation
@@ -1009,6 +1013,44 @@ count with time and adds a worker-progress input:
     helper is silent, unlike the cached status behind the other families;
   - `xpf_userspace_helper_election_not_ready`;
   - `xpf_userspace_helper_wedge_kills_total`.
+
+#### Reading the verdict (operators)
+
+- **What raises it.** `xpf_userspace_helper_election_not_ready` is 1 while
+  this node's helper must not hold the data RGs. Each raise logs one WARN
+  that names its input:
+  - `helper looks wedged; raising election debt ... reason="worker N
+    heartbeat Xs old"`, the frozen-worker input;
+  - `reason="no control request answered for Xs over N round trips"`, the
+    silence input;
+  - `helper restarted after an unexpected exit; holding election debt until
+    it is armed and healthy (#18697)`.
+
+  The debt itself lands on the shared dataplane-arm monitor. So in `show
+  chassis cluster status` it looks like any other arm failure
+  (`__dataplane-arm__`), and the WARN line above is what tells them apart.
+  A distinct monitor key was not added: the #12164 arm-debt yield keys on
+  that one monitor.
+- **Automatic clear.** The verdict clears by itself after
+  `helperWedgeClearAfter` (5 s) and `helperWedgeClearTrips` (3) answers of
+  healthy behaviour, which means no silence and no frozen worker. After an
+  unexpected exit it also needs the new helper to report `ForwardingArmed`
+  first. Each clear logs one INFO, `helper healthy again; clearing the wedge
+  election debt`, carrying the original reason and how long it was raised.
+  Under non-preempt the RGs stay on the peer after the clear.
+- **Automatic kill.** If the verdict persists, the helper is killed after
+  30 s of silence or 2 min of a frozen worker, logged as `... killing it so
+  the supervisor fails closed and restarts it (#18685)`. The supervisor
+  restarts it, and #18696 bounds how long that takes.
+- **If it never clears.** A helper that keeps answering with a frozen worker
+  for under 2 min at a time, over and over, would hold the debt without
+  being killed. `systemctl restart xpfd` on that node recovers it; the peer
+  is already carrying the RGs.
+- **`xpf_userspace_helper_answer_age_seconds`** is the age of the last
+  answer to ANY control request, from the live generation. It is NaN when
+  no generation is live (before the first helper, or after an intentional
+  stop), so it never reads 0 for "never answered". The per-status staleness
+  flag on `/metrics` and the status summary is #18689.
 
 Bound by `helper_liveness_18685_test.go` (the 90 s-cadence kill, the sparse
 kill, demote before kill, slow-but-answering, frozen worker demote and clear,

@@ -1,10 +1,12 @@
 package api
 
 import (
+	"math"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -40,4 +42,29 @@ func TestHelperLivenessFamiliesEmitted18685(t *testing.T) {
 	if got != 3 {
 		t.Fatalf("emitted %d helper liveness metrics, want 3", got)
 	}
+}
+
+// TestHelperAnswerAgeUndefinedIsNaN18704: with no live helper generation the
+// age is undefined, and the gauge says so with NaN instead of reading 0, which
+// would look like "just answered".
+func TestHelperAnswerAgeUndefinedIsNaN18704(t *testing.T) {
+	c := &xpfCollector{}
+	c.initGlobalDescriptors()
+	ch := make(chan prometheus.Metric, 8)
+	c.collectHelperLiveness(ch, fakeLiveness18685{age: -1})
+	close(ch)
+	for m := range ch {
+		if m.Desc() != c.helperAnswerAgeSeconds {
+			continue
+		}
+		var out dto.Metric
+		if err := m.Write(&out); err != nil {
+			t.Fatal(err)
+		}
+		if v := out.GetGauge().GetValue(); !math.IsNaN(v) {
+			t.Fatalf("answer age with no live generation = %v, want NaN", v)
+		}
+		return
+	}
+	t.Fatal("answer age not emitted")
 }
