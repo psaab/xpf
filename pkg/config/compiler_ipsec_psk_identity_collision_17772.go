@@ -177,8 +177,10 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 				continue
 			}
 			// #18428: strongSwan selects a secret through has_owner()
-			// (mem_cred.c), lookup->matches(owner), and every matches_* is
-			// type-strict except that an ID_ANY owner matches anything.
+			// (mem_cred.c), lookup->matches(owner). The modelled rule is
+			// type-strict plus "an ID_ANY owner matches anything"; the
+			// classes matches() also covers are listed on
+			// ipsecIdentitiesCollide (#18682).
 			// Peer selectors are owners: two collide when one presented
 			// identity can select both (ipsecIdentitiesCollide). An effective
 			// local identity is the `me` lookup of its own exchange: it
@@ -579,16 +581,24 @@ func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
 // ipsecIdentitiesCollide reports whether one presented identity could select
 // the secrets of both a and b, and names the rule that made them one owner
 // (#18428). strongSwan selects a PSK through has_owner() in mem_cred.c:
-// lookup->matches(owner) for each configured owner. Every matches_* is
-// type-strict (matches_binary, matches_string, matches_dn_internal,
-// matches_range return ID_MATCH_NONE unless both identities have the same
-// type), except that an ID_ANY owner returns ID_MATCH_ANY for any lookup. So
-// two owners collide only when their strongSwan types (parsed from the
-// RENDERED selectors, which the key already carries) are equal and they
-// compare equal, or when either is ID_ANY. equals() is directional only for a
-// type-9 left operand against another type, which this type gate excludes,
-// so the same-type test is symmetric. A DN whose DER equals a KEY_ID's bytes
-// is NOT a collision: matches() never crosses the types (oracle-confirmed).
+// lookup->matches(owner) for each configured owner, and an ID_ANY owner
+// returns ID_MATCH_ANY for any lookup.
+//
+// The MODELLED rule: two owners collide when their strongSwan types (parsed
+// from the RENDERED selectors, which the key already carries) are equal and
+// they compare equal, or when either is ID_ANY. That is exact for
+// matches_binary, matches_string and matches_dn_internal, which return
+// ID_MATCH_NONE unless both identities have the same type, so a DN whose DER
+// equals a KEY_ID's bytes is NOT a collision (oracle-confirmed). equals() is
+// directional only for a type-9 left operand against another type, which the
+// type gate excludes, so the same-type test is symmetric.
+//
+// NOT modelled (matches() can select both secrets; #18682): wildcard owners
+// (`*` in an FQDN, an RFC822 address or a DN value); address/subnet/range
+// containment, because matches_range is NOT type-strict and crosses those
+// types within one address family; and DN encodings that differ only in
+// their length octets, which matches() compares without equals()'s
+// total-length check.
 func ipsecIdentitiesCollide(a, b ipsecIKEIdentity) (string, bool) {
 	if a.typeID == 0 || b.typeID == 0 {
 		return "ID_ANY owner matches every identity", true

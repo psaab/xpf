@@ -11534,15 +11534,16 @@ reserved for whole-dataplane selection where a rewrite shim
     equality is pairwise and not reducible to a transitive canonical key.
     A collision is a presented identity that can select two secrets.
     strongSwan selects through `has_owner()`: `lookup->matches(owner)`, which
-    is type-strict for strings, DNs and binary identities, while an ID_ANY
-    owner matches everything (#18428 round 3). So two peer selectors collide
+    is type-strict for strings, DNs and binary identities (not for the
+    address/subnet/range family), while an ID_ANY owner matches everything
+    (#18428 round 3). So two peer selectors collide
     when their parsed strongSwan types are equal and they compare equal, or
     when either is ID_ANY; a DN and a KEY_ID/FQDN raw encoding of the same DER
     never collide, in either gateway order. An effective local identity is a
     lookup: an ID_ANY local identity or an unspecified `local-address` selects
     no concrete owner. DN matching assumes charon's default
     `rdn_matching = strict` (xpf does not set it); `reordered` or `relaxed`
-    would make RDN-order swaps collide unrefused. Not modelled: wildcard
+    would make RDN-order swaps collide unrefused. Not modelled (#18682): wildcard
     owners (`*` in an FQDN/RFC822 or a DN value), address/subnet/range
     containment, and DN encodings differing only in length octets.
     The exact-byte shortcut still matches identical malformed DN/KEY_ID bytes;

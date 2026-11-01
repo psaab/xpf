@@ -1053,8 +1053,8 @@ all files stay in `package ipsec`, so the public API is unchanged.
   PSK through `has_owner()` (`mem_cred.c`): `lookup->matches(owner)` over
   each secret's configured owners. `equals()` is not on that path.
   `matches_binary`, `matches_string` and `matches_dn_internal` return no
-  match unless both identities have the same type; an ID_ANY owner matches
-  every lookup. So two peer selectors collide when their strongSwan types
+  match unless both identities have the same type (`matches_range` does not;
+  see "Not modelled" below); an ID_ANY owner matches every lookup. So two peer selectors collide when their strongSwan types
   (parsed from the RENDERED selectors) are equal and they compare equal, or
   when either is ID_ANY (`ipsecIdentitiesCollide`); same-type `equals()` is
   symmetric, so gateway order no longer matters. A DN and a KEY_ID (or FQDN
@@ -1086,7 +1086,7 @@ all files stay in `package ipsec`, so the public API is unchanged.
   RDN order is significant and the collision check assumes it. An operator
   who sets `rdn_matching = reordered` or `relaxed` makes RDN-order swaps match
   in strongSwan, and xpf will NOT refuse those collisions.
-  Not modelled (strongSwan matches them, this check does not): wildcard
+  Not modelled (strongSwan matches them, this check does not; #18682): wildcard
   owners (an FQDN/RFC822 with `*`, a DN RDN value `*`; a bare `*` is already
   ID_ANY), address/subnet/range containment within one IP family
   (`matches_range` matches an address against a covering subnet or range, and
