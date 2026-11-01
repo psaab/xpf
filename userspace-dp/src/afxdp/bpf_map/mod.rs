@@ -1635,6 +1635,80 @@ pub(crate) fn delete_bpf_conntrack_entry_for_session_under_gate(
     }
 }
 
+/// #18696: the two kernel calls a walk-and-delete over a BPF map makes,
+/// behind a trait so the walk's cost can be counted against a model of the
+/// kernel hash map (`bpf_map_tests.rs`).
+pub(crate) trait MapKeyWalk {
+    /// `bpf_map_get_next_key`: the first key when `current` is `None`, else
+    /// the key after `current`. `Ok(true)` wrote a key into `next`,
+    /// `Ok(false)` is the end of the map, `Err(())` a failed scan.
+    fn next_key(&mut self, current: Option<&[u8]>, next: &mut [u8]) -> Result<bool, ()>;
+    /// `bpf_map_delete_elem`; `false` on failure.
+    fn delete(&mut self, key: &[u8]) -> bool;
+}
+
+struct FdMapWalk(c_int);
+
+impl MapKeyWalk for FdMapWalk {
+    fn next_key(&mut self, current: Option<&[u8]>, next: &mut [u8]) -> Result<bool, ()> {
+        let current = current.map_or(std::ptr::null(), |key| key.as_ptr().cast::<c_void>());
+        let rc = unsafe {
+            libbpf_sys::bpf_map_get_next_key(self.0, current, next.as_mut_ptr().cast::<c_void>())
+        };
+        // libbpf returns -errno: ENOENT is the clean end of iteration;
+        // anything else is a real scan failure (a half-swept map converges on
+        // retry — deletes are idempotent — but the caller reports it).
+        match rc {
+            0 => Ok(true),
+            rc if rc == -libc::ENOENT => Ok(false),
+            _ => Err(()),
+        }
+    }
+
+    fn delete(&mut self, key: &[u8]) -> bool {
+        unsafe { libbpf_sys::bpf_map_delete_elem(self.0, key.as_ptr().cast::<c_void>()) == 0 }
+    }
+}
+
+/// Deletes every key in `map`; returns how many it deleted.
+///
+/// #18696: the NEXT key is read before the current key is deleted. For a key
+/// that is no longer in the map, the kernel's hash-map get_next_key falls back
+/// to a scan from bucket 0 (htab_map_get_next_key -> find_first_elem). The loop
+/// this replaces deleted a key and then asked for the key after it, so every
+/// row rescanned the map from the start: quadratic, minutes at 50k rows (the Go
+/// twin measured 225 s at a helper respawn). Asking while the key still exists
+/// continues from its bucket, so a whole walk is O(buckets + rows).
+///
+/// No step bound, unlike the Go walk (`walkDeleteBPFKeys`): the one caller,
+/// `clear_bpf_conntrack_maps` from `clear_mirror_with_batch`, holds the global
+/// tuple gate's clear fence (`begin_clear`). The fence drains in-flight tuple
+/// admissions and refuses new ones while the clear is pending or active, so no
+/// concurrent insert can keep the walk alive. Each step deletes a key, so the
+/// walk ends. A new caller without that fence would need a bound.
+pub(crate) fn delete_all_map_keys<W: MapKeyWalk>(
+    map: &mut W,
+    key_size: usize,
+) -> Result<usize, ()> {
+    let mut current = vec![0u8; key_size];
+    let mut next = vec![0u8; key_size];
+    if !map.next_key(None, &mut current)? {
+        return Ok(0);
+    }
+    let mut deleted = 0usize;
+    loop {
+        let more = map.next_key(Some(&current), &mut next)?;
+        if !map.delete(&current) {
+            return Err(());
+        }
+        deleted += 1;
+        if !more {
+            return Ok(deleted);
+        }
+        std::mem::swap(&mut current, &mut next);
+    }
+}
+
 pub(crate) fn clear_bpf_conntrack_maps(
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
@@ -1643,35 +1717,7 @@ pub(crate) fn clear_bpf_conntrack_maps(
         if fd < 0 {
             return Ok(0);
         }
-        let mut key = vec![0u8; key_size];
-        let mut next = vec![0u8; key_size];
-        let mut current: *const c_void = std::ptr::null();
-        let mut deleted = 0usize;
-        loop {
-            let rc = unsafe {
-                libbpf_sys::bpf_map_get_next_key(fd, current, next.as_mut_ptr().cast::<c_void>())
-            };
-            if rc != 0 {
-                // libbpf returns -errno: ENOENT is the clean end of
-                // iteration; anything else is a real scan failure (a
-                // half-swept map converges on retry — deletes are
-                // idempotent — but this call reports the failure).
-                if rc == -libc::ENOENT {
-                    break;
-                }
-                return Err(what);
-            }
-            let rc = unsafe {
-                libbpf_sys::bpf_map_delete_elem(fd, next.as_ptr().cast::<c_void>())
-            };
-            if rc != 0 {
-                return Err(what);
-            }
-            deleted += 1;
-            key.copy_from_slice(&next);
-            current = key.as_ptr().cast::<c_void>();
-        }
-        Ok(deleted)
+        delete_all_map_keys(&mut FdMapWalk(fd), key_size).map_err(|()| what)
     }
     Ok((
         clear_one(conntrack_v4_fd, std::mem::size_of::<BpfSessionKeyV4>(), "conntrack-v4-clear")?,
@@ -2804,11 +2850,13 @@ mod publish_conntrack;
 // the relocated `bpf_map_tests.rs` (`use super::*`) resolve them by bare
 // name exactly as before. Mirrors the `publish_conntrack.rs` precedent
 // (#1356).
+pub(crate) mod ctrl_row;
 mod ha;
 mod metrics;
 mod pin;
 mod steering_owners;
 
+pub(in crate::afxdp) use ctrl_row::*;
 pub(in crate::afxdp) use ha::*;
 pub(in crate::afxdp) use metrics::*;
 pub(in crate::afxdp) use pin::*;

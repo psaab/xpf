@@ -480,6 +480,37 @@ Guard layers (`build-userspace-xdp.sh`):
    it. Guarded by `session_value_offsets_6816_test.go`, which pins the
    defect's mechanism as well as the fix.
 
+   **Never delete the key a map walk just returned, then ask for the key
+   after it (#18696).** The kernel hash map's `get_next_key`
+   (`htab_map_get_next_key`) looks its argument up first. For a key that is
+   no longer in the map, it falls back to `find_first_elem`, a scan from
+   bucket 0. A "NextKey, Delete, NextKey(deleted key)" loop therefore
+   rescans the map from the start on every row, which is quadratic. The
+   spawn-time steering clear (`clearStaleSteeringRows`) did this on the
+   8,388,608-bucket `userspace_sessions` map. It took 225 s for 50,002 rows
+   at a helper respawn, with transit dead and the node still primary. The
+   ctrl-enable conntrack flush and the helper's own conntrack clear
+   (`clear_bpf_conntrack_maps`) had the same shape.
+   - **Delete while walking** through `walkDeleteBPFKeys`
+     (`pkg/dataplane/userspace/bpf_map_walk.go`, Go) or
+     `delete_all_map_keys` (`userspace-dp/src/afxdp/bpf_map/mod.rs`,
+     Rust). Both read the next key while the current one still exists, so
+     a walk is O(buckets + rows).
+   - **Collecting keys, then deleting after the loop,** as the `pkg/dataplane`
+     stale-entry sweeps do, is also fine.
+   - **Guard:** `TestNoDeleteDuringBPFMapWalk18696`
+     (`bpf_map_walk_census_18696_test.go`) refuses any other loop in `pkg/`
+     that deletes from the map it is walking. A walk is a `NextKey*` or
+     iterator call in the loop's init, condition, post or body, or a range
+     over `Keys`/`All`/`Values`/`Iterate`. A delete is a `Delete` or
+     `BatchDelete` on the same receiver, or a direct call to a same-package
+     function that deletes through the parameter the walked map is passed in.
+     It is a syntactic scan, and its doc comment lists what it cannot see
+     (methods, closures, aliases, other packages).
+   - **Rust:** the helper has no such guard. Its #18696 census was by hand:
+     every `bpf_map_get_next_key` and `bpf_map_delete_elem` site in
+     `userspace-dp`.
+
    **Whether a restart releases the pin is MODE-DEPENDENT**, and this text
    has been wrong in both directions (#6928). It first said "a reload"
    releases it — nothing does. It then said restarting NEVER releases it and

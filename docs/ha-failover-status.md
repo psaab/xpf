@@ -664,6 +664,96 @@ sends (the Go legs were read, not run). Residuals are tracked in #18535:
   - 6 to 12 s of outage at the double-failover second takeover (peer-loss
     detection; the flows survive).
 
+**#18691: a non-owner does not judge a translation against its own
+gateway fallback.** The node keeping the LAN RG of a split revoked a quiet
+SNAT flow at its first reply. That node held the flow only as rows
+sync-imported from the WAN owner. The worker import re-resolves the forward
+row against the split FIB, where the WAN RG's connected prefix (reth0.80)
+is withheld, and keeps that raw local line on purpose so the row is ready
+at activation (#326). The line is therefore the default via the WAN
+gateway VLAN (reth0.50). The peer's own line cannot replace it, because it
+names the peer's ifindexes. The server's reply arrives over the fabric from
+the WAN owner, and the reverse hit judges the forward companion's stored
+line. The reth0.80 interface translation does not match reth0.50's
+address, so `StaleSourceNat` tore the pair down and dropped the reply.
+
+Live, on tcp with one idle flow (all RGs to node1, then RG1 alone to node0,
+65 s idle, one line each way), 2 of 3 reps failed on master 19e5a71d55,
+which has #18660. The same 2 of 3 failed on a build without #18660.
+`xpf_userspace_snat_revoked_sessions_total` on the LAN owner equalled the
+FAIL count. A fresh flow loses one ACK and retransmits after 200 ms. In
+#18683 the sender was already backed off to a 64 s RTO and lost 120 s.
+
+The rule now (`judged_line_is_non_owner_gateway_fallback`, checked next to
+the `FabricRedirect | HAInactive` decline): the judgment is declined when
+all four of these hold.
+
+1. The judged line is a local `ForwardCandidate` or `MissingNeighbor`.
+2. Its egress belongs to an RG that is not forwarding-active here. An
+   egress with no RG (none, or a fabric link) never matches.
+3. The destination's connected owner RG is known and not forwarding-active
+   here.
+4. The egress is not the destination's connected interface.
+
+When declined, the session is kept, the packet takes its HA disposition,
+and the stamp stays stale.
+
+Revocations that still happen:
+
+- On the node that forwards the egress, every ground is judged as before.
+  An interface readdressed on the owner still revokes on the first LAN
+  packet and on the first reply (`owner_readdressed_translation_still_revokes_18691`).
+- On a non-owner, a line on the destination's own connected interface is
+  still judged. That covers the #18531 twin (forward) and its reverse
+  sibling (`lan_owner_connected_line_invalid_translation_still_revokes_18691`).
+- A gateway-routed destination with no connected owner is still judged,
+  because the default route IS the owner's egress there
+  (`lan_owner_gateway_routed_destination_still_judged_18691`). Conditions
+  3 and 4 both exclude it, so this cell pins neither alone. The shape only
+  condition 3 excludes (the destination's connected owner RG forwarding
+  here while the line leaves on another, inactive-RG egress) is pinned by
+  the predicate table.
+- A node with no HA view (standalone) is judged exactly as before.
+
+Revocations that can no longer happen: a non-owner's verdict on its own
+split-FIB fallback for a peer-owned destination. That verdict compared the
+translation with an interface and zone the owner never uses. For interface
+SNAT it could only answer "invalid", and the flow was valid. It was never a
+legitimate ground. A translation that really is stale is still revoked by
+the owner on its next slow-path hit with a stale stamp, and the owner's
+Close removes this node's copy
+(`split_rg_failback_wan_owner_delete_removes_lan_row_18531`).
+
+Every judging path was checked:
+
+- `source_nat_revocation_on_session_hit_with_ingress` is the only producer
+  of `StaleSourceNat`. It has one production caller, the session-hit slow
+  path (`poll_descriptor/mod.rs`).
+- The flow-cache hit path never judges a translation. (#18671, unmerged
+  at the time of writing, adds a forward-wire fallback to that path; it
+  serves from the cache and does not judge either.)
+- `RefreshOwnerRGS` and `DemoteOwnerRGS` store HA-enforced lines. An
+  inactive egress becomes `HAInactive` or `FabricRedirect`, which the
+  existing decline covers.
+- The worker import is the producer of the raw local line this rule
+  covers.
+- Zone-policy revalidation (`ZonePolicy`) is a different ground and is
+  unchanged.
+
+When this node later activates the RG, the decline turns off (condition 2),
+and the stored line is judged as the owner's. That is correct only because
+`RefreshOwnerRGS` re-resolves the line against the activated FIB, which
+carries the connected prefix again. That in turn rests on the #16270
+ordering: connected prefixes are republished before `SetRGActive`. The
+cell `activation_refresh_heals_the_line_and_keeps_the_flow_18691` pins the
+healed path (v4/v6). One window is pre-existing on master and is NOT closed
+here. The coordinator stores the activated HA state before it queues
+`RefreshOwnerRGS`. A worker pass that loads the new state while its queue
+is still empty judges a reply against the stale split-FIB line, and
+revokes. The window is one RX batch, or longer while a refused refresh
+waits as #9720 transition debt. It is pinned, ignored, by
+`activation_before_refresh_keeps_the_flow_18691` and tracked in #18705.
+
 ### Never-again gates
 
 - **Aged cell, not young cell.** The harness gate is
@@ -1292,6 +1382,15 @@ Every packet still lost after #18559 is a `config_generation_mismatch` /
 route republish, and the FRR-driven republish and FIB bump after every
 ownership edge) drops in-flight packets until Go rewrites the shim's
 generation stamp. That is #18560.
+
+Since #18560 the helper advances that stamp itself, right after the view
+store, inside a 250 ms grant Go stamps on each `apply_snapshot` and
+`bump_fib_generation` round trip; Go's own write from the reply remains as
+the fallback. The window shrinks from the rest of the apply plus the round
+trip (about 1 ms of line rate per generation change) to the packets already
+queued in the RX rings. Mechanism, ownership rules and counters:
+`docs/afxdp-packet-processing.md` ("Generation stamp: who writes it").
+Loss-cluster numbers are in `docs/log/18560-ctrl-stamp.md`.
 
 The untargeted form (`request chassis cluster failover redundancy-group N`
 on the owner) still demotes locally and lets the peer promote on the next

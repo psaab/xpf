@@ -14,9 +14,9 @@
 //! - `(old validation, new forwarding)` — a packet stamped at the OLD
 //!   generation matches the worker's old validation, classifies `Valid`, and
 //!   is then forwarded under the NEW tables. (#6291.)
-//! - `(new validation, old forwarding)` — once the coordinator's reply reaches
-//!   Go and Go writes the new generation into `userspace_ctrl`, the shim stamps
-//!   NEW. Those packets match the worker's new validation, classify `Valid`,
+//! - `(new validation, old forwarding)` — once the new generation reaches
+//!   `userspace_ctrl` (the coordinator writes it right after the view store
+//!   since #18560, or Go writes it from the reply), the shim stamps NEW. Those packets match the worker's new validation, classify `Valid`,
 //!   and are forwarded under the STALE tables — a withdrawn route still
 //!   resolves, a newly added deny is not applied. (#6592, the mirror.)
 //!

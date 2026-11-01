@@ -172,7 +172,7 @@ use occupancy::{
 #[cfg(test)]
 use occupancy::{PAT_PORT_QUARANTINE_NS, RecycleRing, SMALL_POOL_QUARANTINE_MAX_RANGE};
 #[cfg(test)]
-pub(super) const PAT_PORT_QUARANTINE_NS_FOR_TEST: u64 = PAT_PORT_QUARANTINE_NS;
+pub(crate) const PAT_PORT_QUARANTINE_NS_FOR_TEST: u64 = PAT_PORT_QUARANTINE_NS;
 #[cfg(test)]
 pub(super) const SMALL_POOL_QUARANTINE_MAX_RANGE_FOR_TEST: u32 = SMALL_POOL_QUARANTINE_MAX_RANGE;
 #[cfg(test)]
