@@ -756,6 +756,52 @@ ha_pair_counter_budget_verdict() {
 	return 1
 }
 
+# #18670: a paired budget on <label> NET of <offset-label>, floored at zero
+# per node. The RG1 Group 1 session-miss cell used the raw count
+# (ha_pair_counter_budget_verdict): but every new flow's first packet takes
+# the helper's session-miss branch before it creates its session, so a raw
+# miss count charges each new flow opened in the window as a miss, and grows
+# with the window's length and background new-flow traffic rather than with
+# lookups of EXISTING sessions failing. Net of `Session creates`, a miss that
+# created nothing is what is left.
+#
+# The floor is per node: a node whose creates exceed its misses (sessions
+# created on other paths) contributes 0, and can never absorb another
+# node's misses. Either counter unreadable, malformed or rewound on either
+# node is VOID (2), never a PASS. On success prints the per-node detail on
+# stdout (report-only); on failure the detail goes to stderr.
+ha_pair_net_counter_budget_verdict() {
+	if [[ $# -ne 11 ]]; then
+		printf 'paired net counter budget: expected <limit> <label> <offset-label> <slice> <rg> <before-phase> <after-phase> <node0-before> <node1-before> <node0-after> <node1-after>\n' >&2
+		return 2
+	fi
+	local limit="$1" label="$2" offset_label="$3" slice="$4" rg="$5" before_phase="$6" after_phase="$7"
+	local -a before=("$8" "$9") after=("${10}" "${11}")
+	if [[ ! "$limit" =~ ^[0-9]+$ ]]; then
+		printf '%s net counter limit is malformed: %s\n' "$label" "$limit" >&2
+		return 2
+	fi
+	local i node gross offset net total=0 detail=""
+	for i in 0 1; do
+		node="node${i}"
+		if ! gross="$(ha_snapshot_counter_delta "$slice" "$rg" "$node" "$label" \
+			"$before_phase" "${before[$i]}" "$after_phase" "${after[$i]}")"; then return 2; fi
+		if ! offset="$(ha_snapshot_counter_delta "$slice" "$rg" "$node" "$offset_label" \
+			"$before_phase" "${before[$i]}" "$after_phase" "${after[$i]}")"; then return 2; fi
+		if (( gross > offset )); then net=$((gross - offset)); else net=0; fi
+		total=$((total + net))
+		detail+="${detail:+ }${node}=${gross}-${offset}->${net}"
+	done
+	if (( total <= limit )); then
+		printf '%s net of %s paired delta %s (%s) within limit %s\n' \
+			"$label" "$offset_label" "$total" "$detail" "$limit"
+		return 0
+	fi
+	printf '%s net of %s paired delta %s (%s) exceeds limit %s\n' \
+		"$label" "$offset_label" "$total" "$detail" "$limit" >&2
+	return 1
+}
+
 ha_snapshot_interface_delta() {
 	if [[ $# -ne 9 ]]; then
 		printf 'snapshot interface delta: expected <slice> <rg> <node> <regex> <direction> <before-phase> <before-file> <after-phase> <after-file>\n' >&2

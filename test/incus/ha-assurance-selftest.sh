@@ -1834,6 +1834,142 @@ assert_helper_status 2 ha_pair_counter_budget_verdict 64 'Missing metric' manual
 assert_helper_status 2 ha_pair_counter_budget_verdict 64 'Session misses' manual-rg1-failback 1 phase-pre phase-post \
 	"$PAIR_PRE0" "$PAIR_PRE1" "$PAIR_POST0" "$OWNER1"
 
+printf 'Group 1 session misses net of session creates (#18670)\n'
+# Fixture rows are DELTAS over the RG1 failback window (phase-pre -> phase-post)
+# per node, written on top of a fixed baseline: misses 100/200, creates 50/80.
+write_ha_net_snapshot() {
+	local path="$1" phase="$2" node="$3" misses="$4" creates="$5"
+	{
+		printf 'HA capture identity: slice=manual-rg1-failback phase=%s node=%s rg=1\n' "$phase" "$node"
+		[[ "$misses" == '-' ]] || printf 'Session misses: %s\n' "$misses"
+		[[ "$creates" == '-' ]] || printf 'Session creates: %s\n' "$creates"
+	} >"$path"
+}
+NET_PRE0="${RG1_DIR}/net-pre-node0.stats"
+NET_PRE1="${RG1_DIR}/net-pre-node1.stats"
+NET_POST0="${RG1_DIR}/net-post-node0.stats"
+NET_POST1="${RG1_DIR}/net-post-node1.stats"
+write_ha_net_snapshot "$NET_PRE0" phase-pre node0 100 50
+write_ha_net_snapshot "$NET_PRE1" phase-pre node1 200 80
+# net_row <n0-miss> <n0-create> <n1-miss> <n1-create>: post = baseline + delta;
+# a literal '-' omits that line (probe-blind), 'x' writes a malformed value.
+net_row() {
+	local m0="$1" c0="$2" m1="$3" c1="$4"
+	v() { case "$1" in -) printf -- '-' ;; x) printf 'n/a' ;; *) printf '%s' "$(($1 + $2))" ;; esac; }
+	write_ha_net_snapshot "$NET_POST0" phase-post node0 "$(v "$m0" 100)" "$(v "$c0" 50)"
+	write_ha_net_snapshot "$NET_POST1" phase-post node1 "$(v "$m1" 200)" "$(v "$c1" 80)"
+}
+net_verdict() {
+	ha_pair_net_counter_budget_verdict 32 'Session misses' 'Session creates' \
+		manual-rg1-failback 1 phase-pre phase-post "$NET_PRE0" "$NET_PRE1" "$NET_POST0" "$NET_POST1"
+}
+raw_verdict() {
+	ha_pair_counter_budget_verdict 64 'Session misses' manual-rg1-failback 1 phase-pre phase-post \
+		"$NET_PRE0" "$NET_PRE1" "$NET_POST0" "$NET_POST1"
+}
+# Row A, master-like (tcp master run 1: 20/15, 41/39): net 5+2 = 7, PASS.
+net_row 20 15 41 39
+assert_helper_status 0 net_verdict
+assert_contains "$(<"${OUT}")" 'paired delta 7 (node0=20-15->5 node1=41-39->2) within limit 32' 'net row A detail'
+# Row B, PR-like (#18656 tcp run 1: 26/19, 45/42): MORE creates, the same net
+# shape. The raw cell this replaces FAILED it at 71 > 64; the net cell PASSes.
+net_row 26 19 45 42
+assert_helper_status 1 raw_verdict
+assert_helper_status 0 net_verdict
+# Row C, a real miss regression: row A's creates with 40 more misses on node0
+# (existing flows finding no session). Net 45+2 = 47 > 32, FAIL.
+net_row 60 15 41 39
+assert_helper_status 1 net_verdict
+assert_contains "$(<"${ERR}")" 'paired delta 47 (node0=60-15->45 node1=41-39->2) exceeds limit 32' 'net row C detail'
+# Row D, the per-node floor: node0 created 20 more sessions than it missed;
+# that surplus must not absorb node1's 35 net misses. Floored: 0 + 35 = 35,
+# FAIL (an unfloored sum would read 15 and PASS).
+net_row 10 30 45 10
+assert_helper_status 1 net_verdict
+# Row E, the boundary: net exactly 32 PASSes, 33 FAILs.
+net_row 30 0 2 0
+assert_helper_status 0 net_verdict
+net_row 31 0 2 0
+assert_helper_status 1 net_verdict
+# Row F, probe-blind: node1's post snapshot has no `Session creates` line.
+# VOID, never PASS.
+net_row 20 15 5 -
+assert_helper_status 2 net_verdict
+# Row G, probe-blind: node0's post misses value is malformed. VOID.
+net_row x 15 41 39
+assert_helper_status 2 net_verdict
+# Row H, a rewound creates counter (restart between the snapshots). VOID.
+net_row 20 -10 41 39
+assert_helper_status 2 net_verdict
+# Malformed limit and wrong arity are VOID.
+assert_helper_status 2 ha_pair_net_counter_budget_verdict x 'Session misses' 'Session creates' \
+	manual-rg1-failback 1 phase-pre phase-post "$NET_PRE0" "$NET_PRE1" "$NET_POST0" "$NET_POST1"
+assert_helper_status 2 ha_pair_net_counter_budget_verdict 32 'Session misses'
+
+# Mutation cells: each defence above must be load-bearing. A mutant is the
+# lib's own function text with one edit, sourced in a subshell; the named row
+# must FLIP. A mutant whose edit matched nothing fails here (a no-op mutant
+# would score as an escape for the wrong reason).
+NET_FN="${TMP_DIR}/net-fn.sh"
+python3 - "${ROOT}/test/incus/ha-assurance-lib.sh" "$NET_FN" <<'PY'
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+m = re.search(r"^ha_pair_net_counter_budget_verdict\(\) \{\n.*?^\}\n", text, re.M | re.S)
+if not m:
+    raise SystemExit("cannot extract ha_pair_net_counter_budget_verdict")
+pathlib.Path(sys.argv[2]).write_text(m.group(0), encoding="utf-8")
+PY
+net_mutant() { # <name> <old> <new> -> path of the mutated function text
+	local out="${TMP_DIR}/net-mutant-$1.sh"
+	python3 - "$NET_FN" "$out" "$2" "$3" <<'PY' || fail_test "net mutant $1: edit matched nothing"
+import pathlib, sys
+src, out, old, new = sys.argv[1:]
+text = pathlib.Path(src).read_text(encoding="utf-8")
+if text.count(old) != 1:
+    raise SystemExit(1)
+pathlib.Path(out).write_text(text.replace(old, new), encoding="utf-8")
+PY
+	printf '%s' "$out"
+}
+# assert_net_mutant_flips <mutant> <expected-status-under-mutant> <row...>
+assert_net_mutant_flips() {
+	local mutant="$1" want="$2" got
+	shift 2
+	# An empty or missing path means net_mutant's edit matched nothing (its
+	# fail_test ran inside the command substitution, which cannot exit here).
+	[[ -s "$mutant" ]] || fail_test "net mutant text missing for row $* (edit anchor moved?)"
+	cmp -s "$mutant" "$NET_FN" && fail_test "net mutant $(basename "$mutant") is identical to the original"
+	net_row "$@"
+	# shellcheck source=/dev/null
+	if ( source "$mutant"; net_verdict ) >/dev/null 2>&1; then got=0; else got=$?; fi
+	[[ "$got" == "$want" ]] || fail_test "net mutant $(basename "$mutant") ESCAPED: row $* scored ${got}, want ${want}"
+}
+FLOOR='if (( gross > offset )); then net=$((gross - offset)); else net=0; fi'
+# Raw count (offset ignored): row B flips PASS -> FAIL.
+assert_net_mutant_flips "$(net_mutant raw "$FLOOR" 'net=$gross')" 1 26 19 45 42
+# No per-node floor: row D flips FAIL -> PASS.
+assert_net_mutant_flips "$(net_mutant nofloor "$FLOOR" 'net=$((gross - offset))')" 0 10 30 45 10
+# Misses ignored: row C flips FAIL -> PASS.
+assert_net_mutant_flips "$(net_mutant nomiss "$FLOOR" 'net=0')" 0 60 15 41 39
+# Strict bound: row E (net 32) flips PASS -> FAIL.
+assert_net_mutant_flips "$(net_mutant strict '(( total <= limit ))' '(( total < limit ))')" 1 30 0 2 0
+# Probe-blind creates fail open (0): row F flips VOID -> PASS.
+assert_net_mutant_flips "$(net_mutant failopen '"$before_phase" "${before[$i]}" "$after_phase" "${after[$i]}")"; then return 2; fi
+		if (( gross' '"$before_phase" "${before[$i]}" "$after_phase" "${after[$i]}")"; then offset=0; fi
+		if (( gross')" 0 20 15 5 -
+# The consumer is wired to the NET verdict on misses and creates, with the
+# NET limit (a call-site revert to the raw verdict passes every row above).
+python3 - "${ROOT}/test/incus/test-failover.sh" <<'PY' || fail_test 'test-failover.sh Group 1 is not wired to the net-of-creates verdict'
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+body = re.search(r"^ha_rg1_evaluate\(\) \{\n.*?^\}\n", text, re.M | re.S)
+if not body:
+    raise SystemExit(1)
+calls = re.findall(r'ha_emit_verdict "RG1 Group 1 [^"]*"\s*\\\n\s*ha_pair_net_counter_budget_verdict "\$MAX_FAILOVER_NET_SESSION_MISS_DELTA"\s*\\\n\s*"Session misses" "Session creates"', body.group(0))
+if len(calls) != 1 or "ha_pair_counter_budget_verdict \"$MAX_FAILOVER_SESSION_MISS_DELTA\"" in body.group(0):
+    raise SystemExit(1)
+PY
+
 printf 'Groups 5-6 exact mid-post and fabric trigger decisions\n'
 WAN_PRE="${RG1_DIR}/wan-pre.interfaces"
 WAN_MID="${RG1_DIR}/wan-mid.interfaces"

@@ -344,6 +344,44 @@ capture reads them:
   lost after the true floor was seen;
 - the drain-plus-loss case is pinned as a PASS (the known limit above).
 
+### `make test-failover` RG1 Group 1: session misses net of creates (#18670)
+
+RG1 Group 1 compares the helper's `Session misses` across the RG1 failback
+window (phase-pre to phase-post, both nodes).
+
+Every new flow's first packet takes the session-miss branch before it
+creates its session (`session_misses`, then `session_creates`, in
+`poll_descriptor`). A raw miss count therefore charges every new flow
+opened in the window as a miss, and grows with the window's length and with
+background new-flow traffic. The cell is meant to catch lookups of existing
+sessions failing.
+
+- **Predicate.** `ha_pair_net_counter_budget_verdict` (`ha-assurance-lib.sh`)
+  takes, per node, misses minus creates, floored at 0. It sums both nodes
+  and judges the total against `MAX_FAILOVER_NET_SESSION_MISS_DELTA`
+  (default 32). The floor is per node, so one node's surplus creates cannot
+  absorb the other node's misses.
+- **Unreadable counters.** Either counter missing, malformed or rewound on
+  either node makes the cell VOID, never PASS.
+- **Report-only line.** An `==> RG1 Group 1 report-only:` line prints the
+  per-node misses, creates and net values.
+- **Measured.** tcp and loss, master and #18656, 10 runs: net values of 2–7
+  per node, and at most 10 for both nodes. The raw count had a limit of 64
+  and read 61 on master and 66–71 on #18656. The excess was entirely
+  creates, in a longer and now cache-served window.
+- **Bound.** 32 is about 3x the largest net value measured. A failover that
+  loses sessions misses on every mid-stream packet of every flow, which is
+  orders of magnitude above it.
+- **Selftest.** `make test-ha-assurance-lib` has fixture rows: master-like,
+  PR-like (more creates, same net: PASS, where the raw cell FAILs), a real
+  miss regression (FAIL), the per-node floor, the boundary at 32/33, and
+  probe-blind and rewound counters (VOID). It has a mutant per defence that
+  must flip its row, and a pin that `test-failover.sh` calls the net
+  verdict.
+- **Not changed.** `scripts/userspace-ha-failover-validation.sh` has its own
+  per-cycle `MAX_FAILOVER_SESSION_MISS_DELTA` raw check, which this does
+  not change.
+
 ### `make test-failover` zero-interval cells: windows and definitions
 
 `scripts/iperf-json-metrics.py` scores the whole-run iperf3 stream. A
