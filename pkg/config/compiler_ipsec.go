@@ -1001,22 +1001,32 @@ func IsAnyIPsecSelector(s string) bool {
 }
 
 // IsAnyIPsecRemoteIdentity reports whether a gateway remote-identity
-// (type, value) is an ID_ANY spelling (#16845). Only inet/inet6
-// identities carry an IP value strongSwan parses as ID_ANY; other types
-// (hostname/@fqdn, key-id, distinguished-name, ...) discriminate by
-// their value as before. A bare "*" or "%any" value is ID_ANY under
-// every type (strongSwan parses "*" as a wildcard identity), so it is
-// refused regardless of the declared type.
+// (type, value) is an ID_ANY spelling (#16845) and so discriminates no peer.
+// It is derived from the same strongSwan classification the PSK collision
+// key uses (#18428): any declared type whose RENDERED selector strongSwan
+// parses as ID_ANY counts, not only inet/inet6. strongSwan maps "", "%any",
+// "%any6", "0.0.0.0", "*", "::" and "0::0" to ID_ANY whenever they reach it
+// unprefixed, so `distinguished-name 0.0.0.0` or `user-at-hostname ::` is a
+// wildcard owner exactly like `inet 0.0.0.0`; a numeric `{0}:` prefix is
+// ID_ANY too. The earlier, broader spellings stay wildcards (fail closed): a
+// bare "*" / "%any" / "%any6" under any type, and any unspecified inet/inet6
+// address. An empty value means "no remote-identity configured", not ID_ANY.
 func IsAnyIPsecRemoteIdentity(idType, idValue string) bool {
+	if idValue == "" {
+		return false
+	}
 	v := strings.TrimSpace(idValue)
 	if v == "*" || v == "%any" || v == "%any6" {
 		return true
 	}
 	switch idType {
 	case "inet", "inet6":
-		return IsAnyIPsecSelector(v)
+		if IsAnyIPsecSelector(v) {
+			return true
+		}
 	}
-	return false
+	identity, _ := ipsecIKEIdentityKey(idType, idValue)
+	return identity.typeID == 0
 }
 
 // HasDiscriminatingIPsecAddress reports whether a comma-separated
