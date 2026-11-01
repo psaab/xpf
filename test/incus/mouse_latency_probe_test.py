@@ -283,14 +283,22 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
         return result, connection_count
 
     async def test_persistent_mode_reuses_one_connection_per_coroutine(self):
+        # G10 (#18737 triage): judge REUSE directly, not a completion count. At
+        # loadavg ~30, 0.2 s gave fewer than 4 completions and the cell failed
+        # with reuse intact. The property is "at most one connection per
+        # coroutine, and some coroutine completed more than one attempt on it".
+        # 0.5 s keeps that observable under load.
         result, connection_count = await self._run_local_echo_probe(
             concurrency=3,
-            duration=0.2,
+            duration=0.5,
             min_interval_ms=0.0,
         )
         self.assertEqual(result["config"]["connection_mode"], "persistent")
         self.assertEqual(result["config"]["min_interval_ms"], 0.0)
-        self.assertGreater(result["totals"]["completed"], 3)
+        self.assertGreaterEqual(
+            max(result["totals"]["attempts_per_coroutine"]), 2,
+            "no coroutine made a second attempt, so connection reuse was not exercised",
+        )
         self.assertEqual(
             result["totals"]["attempted"],
             result["totals"]["completed"] + result["totals"]["errors"],
@@ -303,17 +311,26 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("max_start_gap_us", result["coroutines"][0])
 
     async def test_min_interval_bounds_persistent_attempt_rate(self):
+        # G10 (#18737 triage): judge the INTERVAL bound, not a completion count.
+        # Load can only stretch the gaps and cut attempts. It cannot shorten a
+        # gap or add an attempt, so the upper bound on attempts and the lower
+        # bound on the start gap stay sound under load. The old ">= 3 completed
+        # in 0.12 s" failed at loadavg ~30 with the bound intact. 0.3 s keeps
+        # at least one gap observable.
+        duration, interval_ms = 0.3, 20.0
         result, connection_count = await self._run_local_echo_probe(
             concurrency=1,
-            duration=0.12,
-            min_interval_ms=20.0,
+            duration=duration,
+            min_interval_ms=interval_ms,
         )
-        self.assertEqual(result["config"]["min_interval_ms"], 20.0)
-        self.assertGreaterEqual(result["totals"]["completed"], 3)
-        self.assertLessEqual(result["totals"]["attempted"], 8)
+        self.assertEqual(result["config"]["min_interval_ms"], interval_ms)
+        self.assertGreaterEqual(result["totals"]["completed"], 2, "no start gap was observable")
+        self.assertLessEqual(result["totals"]["attempted"], int(duration * 1000 / interval_ms) + 2)
         self.assertLessEqual(connection_count, 1)
         self.assertGreater(result["phase_us"]["sleep_overshoot_us"]["count"], 0)
         self.assertGreaterEqual(result["phase_us"]["start_gap_us"]["max"], 15_000)
+        self.assertGreaterEqual(result["phase_us"]["start_gap_us"]["p50"], 15_000,
+                                "the median start gap is under the 20 ms min interval")
 
     async def test_min_interval_bounds_per_attempt_rate(self):
         result, connection_count = await self._run_local_echo_probe(
