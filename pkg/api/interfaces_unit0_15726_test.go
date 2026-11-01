@@ -51,6 +51,8 @@ func newTestAPIServerWithConfig15726(t *testing.T) (*Server, interface{}) {
 	sets := []string{
 		"set chassis cluster reth-count 1",
 		"set chassis cluster authentication-key test-cluster-psk-6611",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces lo gigether-options redundant-parent reth0",

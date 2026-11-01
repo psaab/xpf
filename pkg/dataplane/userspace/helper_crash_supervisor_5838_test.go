@@ -325,9 +325,16 @@ func TestStaleWaiterCannotMutateNewerGeneration5838(t *testing.T) {
 }
 
 // TestHelperRestartBackoffIsBounded5838 pins invariant 4's fork-storm half.
+//
+// #18707: attempt 1 — the first unexpected exit of an episode — restarts
+// immediately, so the fork-storm bound is "at most ONE zero-delay retry per
+// episode": every later attempt waits at least the base.
 func TestHelperRestartBackoffIsBounded5838(t *testing.T) {
+	if d := helperRestartDelay(1); d != 0 {
+		t.Fatalf("attempt 1 delay %v, want the immediate first retry (#18707)", d)
+	}
 	prev := time.Duration(0)
-	for attempt := 1; attempt <= 20; attempt++ {
+	for attempt := 2; attempt <= 20; attempt++ {
 		d := helperRestartDelay(attempt)
 		if d < helperRestartBackoffBase {
 			t.Fatalf("attempt %d delay %v is below the base %v — a crash loop would fork-storm",

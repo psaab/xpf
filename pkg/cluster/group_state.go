@@ -148,6 +148,9 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 			delete(m.remoteTransferOutLeaseReqID, id)
 			delete(m.remoteTransferOutLeaseChannel, id)
 			m.clearAbortedPeerTransferLocked(id)
+			m.cancelAbortedTransferRetryLocked(id, "redundancy group removed")
+			delete(m.operatorEpoch, id)
+			delete(m.ownerlessPriorHolds, id)
 			delete(m.groups, id)
 		}
 	}
@@ -467,6 +470,15 @@ func (m *Manager) SetPeerGroupStateForTesting(rgID int, st NodeState) {
 	}
 	m.peerGroups[rgID] = PeerGroupState{GroupID: rgID, State: st}
 	m.peerAlive = true
+	m.lastPeerHeartbeatAt = time.Now()
+}
+
+// SetPeerHeartbeatAgeForTesting backdates the last admitted peer heartbeat,
+// for the #18715 ownerless-accept freshness check. Test-only.
+func (m *Manager) SetPeerHeartbeatAgeForTesting(age time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastPeerHeartbeatAt = time.Now().Add(-age)
 }
 
 // IsLocalPrimary returns true if this node is primary for the given RG.

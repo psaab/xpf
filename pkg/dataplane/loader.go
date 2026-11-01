@@ -536,6 +536,11 @@ func xdpAttachModeMatches(ifindex int, wantGeneric bool) bool {
 // When forceGeneric is false, tries native driver mode only (no automatic fallback).
 // On restart, reuses a previously pinned link and atomically replaces the program.
 func (m *Manager) AttachXDP(ifindex int, forceGeneric bool) error {
+	if seam := xdpTransitionSeam18740; seam != nil {
+		if handled, err := seam("attach", ifindex, forceGeneric); handled {
+			return err
+		}
+	}
 	m.xdpOwnershipMu.Lock()
 	defer m.xdpOwnershipMu.Unlock()
 	// #2114 A3 carve-out: the attach family keeps its own pre-registry
@@ -725,6 +730,11 @@ func tagDetachLinkError10519(op string, err error) error {
 // DetachXDP detaches the XDP program from the given interface and
 // removes its pin file.
 func (m *Manager) DetachXDP(ifindex int) error {
+	if seam := xdpTransitionSeam18740; seam != nil {
+		if handled, err := seam("detach", ifindex, false); handled {
+			return err
+		}
+	}
 	m.xdpOwnershipMu.Lock()
 	defer m.xdpOwnershipMu.Unlock()
 	l, exists := m.xdpLinkFor(ifindex)

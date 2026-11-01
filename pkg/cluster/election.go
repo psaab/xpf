@@ -142,14 +142,25 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 		// failover cannot leave both nodes secondary. A committed transfer clears
 		// the lease first (reqID-bound), so this never fires on a real handoff.
 		if until, leased := m.remoteTransferOutLeaseUntil[rg.GroupID]; leased && !time.Now().Before(until) {
+			leaseReqID := m.remoteTransferOutLeaseReqID[rg.GroupID]
 			slog.Warn("cluster: remote transfer-out lease expired without commit, restoring",
-				"rg", rg.GroupID, "req_id", m.remoteTransferOutLeaseReqID[rg.GroupID])
+				"rg", rg.GroupID, "req_id", leaseReqID)
+			prior, hasPrior := m.takeOwnerlessPriorHoldLocked(rg.GroupID, leaseReqID)
 			m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
 			rg.ManualFailover = false
 			rg.forcedSecondary = false
 			rg.ManualFailoverAt = time.Time{}
 			m.manualFailoverRestoreWeightLocked(rg)
 			clearedManualFailover = true
+			if hasPrior {
+				// #18715: an ownerless accept parked an RG that was already
+				// held (operator Manual, or the ISSU drain pin). The lapsed
+				// transfer gives that hold back, not ordinary election.
+				m.restoreOperatorHoldLocked(rg.GroupID, prior, "Prior hold restored after a lapsed ownerless transfer")
+				if rg.ManualFailover {
+					return electNoChange, ""
+				}
+			}
 			// Fall through to normal priority/tie-break election below.
 		} else if leased && m.transferChannelIntactLocked(rg.GroupID) &&
 			!m.peerLeavingForPlannedShutdownLocked(rg.GroupID, peerGroup) {
@@ -233,6 +244,9 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 				reason = "cluster: clearing manual failover (peer resigned for a planned shutdown)"
 				m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
 			}
+			// #18715: this rescue ends every hold, as it did before #18715,
+			// so no ownerless prior hold is left to give back.
+			delete(m.ownerlessPriorHolds, rg.GroupID)
 			// The peer has also yielded (for >2s, or is leaving). Clear manual
 			// failover and restore weight so normal election can promote one
 			// node.

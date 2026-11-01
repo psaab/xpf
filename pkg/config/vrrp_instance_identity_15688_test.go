@@ -62,6 +62,8 @@ func TestVRRPInstanceIdentityDifferentVRIDsCommits(t *testing.T) {
 func TestVRRPInstanceIdentityExplicitVsRethFailsCommit(t *testing.T) {
 	lines := []string{
 		"set chassis cluster cluster-id 1",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster authentication-key test-cluster-psk-15688",
 		"set chassis cluster reth-count 1",
 		"set chassis cluster no-private-rg-election",
@@ -93,6 +95,8 @@ func TestVRRPInstanceIdentityExplicitVsRethFailsCommit(t *testing.T) {
 func TestVRRPInstanceIdentityDuplicateRethInterfacesFailsCommit(t *testing.T) {
 	lines := []string{
 		"set chassis cluster cluster-id 1",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster authentication-key test-cluster-psk-15688",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster no-private-rg-election",

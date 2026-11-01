@@ -3336,6 +3336,75 @@ open either exception. On the tolerant load/sync path, a short primary still
 boots with a warning, preserving the no-brick upgrade path;
 `ClusterAuthKeyStrengthWarnings` continues to warn below 16 characters and
 for published placeholders on both paths.
+
+**Published placeholders (#18744).** A strict commit refuses a published
+placeholder (a value containing `change-me` or `example-only`, matched without
+case) that it INTRODUCES into either key leaf. The predicate is
+`validateClusterAuthKeyPlaceholderStrict`.
+
+"Introduces" is judged against the active config's accepted set, byte for byte.
+A placeholder the active config already signs with or accepts keeps committing
+with the warning. That keeps two things working:
+- routine commits on a node already keyed with a placeholder;
+- the whole rotation off it:
+  - Steps 1-2 keep the placeholder as the signer while a real key is staged.
+  - Steps 3-4 move the retiring placeholder to the additional slot. That
+    commit passes because the active config signs with it. Every later
+    commit at steps 3-4, and backing out of them, passes because the active
+    config holds it as the ADDITIONAL key.
+  - Step 5 drops it.
+
+Refused:
+- staging a placeholder as the additional key (rotating TO one);
+- a placeholder primary the active config does not hold;
+- keying an unkeyed or standalone running node with a placeholder;
+- a rollback or `load override` that brings back a placeholder the active
+  config has retired;
+- an interactive first commit of a placeholder on a store that has never
+  committed. There is no accepted set, and a placeholder let in there would
+  count as pre-existing forever after.
+
+The refusal never echoes the key or the matched marker.
+
+Who is judged is decided by the store (`placeholderJudgedLocked`, keyed on the
+store's commit history, not on whether it holds a compiled config):
+- A store that has committed judges every commit and commit check.
+- A store that has never committed judges every committer except the
+  bootstrap import (`bootstrapFromFile`, committing as `system:bootstrap`).
+  That includes a #1922 Item 1b store whose first commit was
+  confirmed-rolled-back. So a reimaged node bootstrapping a placeholder conf
+  still gets an active config, with the warning. The bootstrap pre-flight
+  compiles as the same authority, so its device-map check still runs.
+- `xpfd check-config` and the day-0 loaders are not judged; they vet what the
+  bootstrap import would accept.
+- The tolerant load and config-sync paths never judge. The lenient downgrade
+  in the gate is only a fallback for a future tolerant caller.
+
+Residual: after a #1960 compile-failed load (committed, but the active config
+no longer compiles), the accepted set is unknown. A repair commit that
+introduces a placeholder only warns.
+
+Operational consequences:
+- Inside a `commit confirmed` window that moved a node off a placeholder, a
+  MANUAL early revert (`rollback 1` + `commit`) is refused, because the
+  placeholder is no longer in the active set. The window's own timeout
+  restore is not a strict commit and still restores it.
+- A replacement (RMA) node that already holds a committed config cannot be
+  keyed with the cluster's placeholder by a commit. Rotate the surviving node
+  off the placeholder first, or bring the replacement up from an empty store
+  through the bootstrap import.
+
+**Upgrade note (#18744).** A node that already runs a placeholder key keeps
+working: its routine commits and the rotation off the placeholder keep
+committing with the existing warning.
+
+Newly refused at commit:
+- introducing a placeholder, for example `set chassis cluster
+  additional-authentication-key <placeholder>`, or a `load override` of a
+  reference config onto a running node;
+- an interactive first commit of a placeholder on a fresh box.
+
+Persisted and peer-synced configs, and the first-boot import, boot as before.
 These checks cover the duplicate-identity beacon too: anyone who knows a weak
 or published PSK can sign a beacon that passes authentication and triggers its
 warn-only duplicate-node-id signal. Warnings never disclose the key.
@@ -3357,7 +3426,14 @@ exercises the ENFORCING branch rather than the `keyConfigured == false`
 shortcut. Those values are **published in a public repository**: a config
 copied from them satisfies the gate while remaining trivially forgeable by
 anyone who has read the repo. They are marked `CHANGE-ME` and trip the
-placeholder warning above. Replace them before any real deployment.
+placeholder warning above. A commit that introduces one is refused (#18744);
+only the first-boot import of one onto a never-committed store is let through.
+Replace them before any real deployment. The HA lab confs
+(`docs/ha-cluster-{userspace,tcp,udp}.conf`) carry the #18732 render token
+instead of a key. `TestNoTrackedFileCarriesARealClusterKey18744`
+(`pkg/config`) fails if any tracked `.conf`, `.set` or `.md` gains a chassis
+cluster key of 16 or more characters that is neither a placeholder nor that
+token. The generated `docs/issues/*-history.md` mirrors are exempt.
 `TestShippedClusterConfigsAreKeyed_6611` / `...UseOneKeyPerCluster_6611`
 (`pkg/config`) lock the keyed and one-key-per-cluster properties;
 `TestBootstrapFromFileRejectsUnkeyedCluster_6611` (`pkg/daemon`) and
@@ -4788,6 +4864,148 @@ because no peer is asked anything.
   `failover_abort_16818_test.go` (both priority orderings, both post-ACK
   abort causes, abort frame delivered/lost, hold heartbeat before/after
   the commit, plus the batch form).
+- **An aborted transfer whose old owner never re-promotes is retried
+  (#18715).** The #17713 fence above resolves when the old owner reclaims
+  PRIMARY after an observed hold. An owner that does not re-promote never
+  sends that frame. Two shapes reach that state: a requester that out-ranks
+  the owner (ordinary election keeps the restored owner secondary;
+  `TestFailedFenceRestorationKeepsHigherPriorityRequesterFenced17713` pins that
+  step), and an owner in dataplane-arm debt (#12164, a wedged helper, #18701),
+  which yields to the healthier requester. Both nodes then sat secondary until
+  an operator reset the requester.
+
+  **The sequence.** The operator's `request chassis cluster failover
+  redundancy-group <N> node <requester>` returns its abort error, exactly as
+  before. Then:
+  1. The requester (`transfer_retry_18715.go`) starts a retry chain when all
+     of these hold continuously, judged on every admitted heartbeat after its
+     election:
+     - it holds the aborted marker;
+     - neither node is primary;
+     - it can serve the group: election-ready, no arm debt of its own, no
+       hold, weight above 0. When both nodes are sick, a retry achieves
+       nothing.
+  2. The first attempt waits a quiet period: two heartbeat timeouts, floored
+     at 5 s. That lets the abort's own restoration play out. An owner that
+     CAN re-promote advertises PRIMARY within one interval, which resolves
+     the marker and cancels the chain. A dying peer is declared lost before
+     the retry. The floor also exceeds the owner's 2 s dual-resign rescue and
+     the requester's 3 s commit-ready window.
+  3. Each attempt is the ordinary `RequestPeerFailover` sequence. It commits
+     only on the owner's applied ack. A #18715 owner acks a request for a
+     group it does not own only after it confirmed its own dataplane inactive
+     (`pkg/daemon/README.md`, "A transfer request for a group neither node
+     owns"). So a retry can never make a second owner.
+  4. A failed attempt re-arms the marker under its own reqID, and the chain
+     adopts it. The chain backs off 5 s, 10 s, 20 s, then every 30 s, and
+     never gives up while the condition holds: an ownerless group is an
+     outage. At 0.2/s or less, the owner-side transfer request, session-sync
+     barrier and rg_active write stay inside the control-socket budget.
+
+  **Epoch.** A chain belongs to one marker reqID and to the group's operator
+  epoch. Every operator failover or reset entry point bumps that epoch:
+  `ManualFailover` (also when serving a peer's request), the batch forms,
+  `RequestPeerFailover`, `ResetFailover` and `ForceSecondary`.
+
+  The epoch moves only once a command is ADMITTED: it has won the failover
+  reservation, or it is a reset (which has none). So a command refused at
+  admission has no side effects. For example, `failover already in progress`
+  while a retry attempt holds the reservation leaves the chain intact, and
+  the attempt still commits. A command that is admitted and then fails later
+  (in its pre-hook, say) has still moved the epoch. This opens no window
+  where a successful operator action fails to cancel a retry:
+  - while an attempt is in flight, it holds the reservation, so every
+    reserving command is refused visibly, with an error, rather than
+    silently overtaken;
+  - a reset needs no reservation, and the attempt's commit-time re-check
+    catches it;
+  - `ForceSecondary` supersedes the reservation and moves the epoch once it
+    holds it.
+
+  The chain ends the moment any of these happens: the marker clears, the
+  epoch moves, the peer is lost or restarts, the group is removed, or the
+  owner goes primary.
+  An attempt re-checks its epoch under `m.mu`, both at the reservation and
+  again inside the commit's critical section. An operator decision that lands
+  while an attempt is in flight therefore aborts it instead of being
+  overridden. A newer operator request for the same group is refused by the
+  in-flight reservation (`failover already in progress`); it is not
+  silently overtaken.
+
+  **What an operator sees.** The first attempt logs a WARN:
+
+      cluster: an earlier failover of this redundancy group to this node was aborted, and the peer has not taken the group back, so neither node is primary for it; retrying the transfer to this node ... (#18715)
+
+  It carries `rg`, `aborted_req_id`, `reason` and `ownerless_for`. Later
+  attempts log at Debug. A commit logs `transfer retry committed`, and a
+  cancellation after any attempt logs at Info with the reason. While a chain
+  exists, `show chassis cluster status` prints an indented sub-line under the
+  node row (the #8206 layout holds):
+
+      Transfer retry: pending (transfer <reqID> aborted and the peer has not taken the group back (peer secondary, weight 1); <n> attempt(s), next attempt in <t>)
+
+  It ends with the last error, if there was one. An attempt that is due but
+  waits for another failover's reservation shows `deferred (failover in
+  progress)`. The event history records the first attempt and the commit.
+
+  **The owner's prior hold.** The owner-side accept
+  (`ManualFailoverOwnerless`) may find the group already held: an operator
+  `Manual` hold, or the ISSU drain pin from `ForceSecondary`. Every
+  transfer-out exit clears `ManualFailover` and `forcedSecondary`: the abort
+  (`AbortRemoteTransferOut`), lease expiry (`electRG`), and the commit
+  (`FinalizePeerTransferOut`). So the accept records the hold it found
+  (`ownerlessPriorHolds`, keyed to the reqID):
+  - abort and lease expiry give it back exactly;
+  - a commit spends a `Manual` hold but keeps the drain pin, without a
+    commit-role pin, because the pin would arm the #15734 rescue that clears
+    the hold;
+  - an accept that lands while an earlier one still parks the group (a lost
+    abort frame) carries the earlier record over, instead of recording the
+    earlier accept's own hold;
+  - any newer failover, reset or drain, the dual-resign rescue, peer loss and
+    RG removal drop the record.
+
+  Refusing the accept on a drained node instead would put the trap back
+  during ISSU.
+
+  **Mixed versions.** An owner older than #18715 rejects every retry, as it
+  rejected any request for a group it does not own. The requester keeps
+  retrying with backoff, and nothing else changes: the trap is the same as
+  before #18715, and a reset on the requester still ends it. A requester
+  older than #18715 never retries.
+
+  Cells: `transfer_retry_18715_test.go`, with two real Managers:
+  - convergence from the arm-debt trap when the late write lands, after a
+    slow write, across a watchdog kill and restart, and when the helper
+    answers again (then the owner re-promotes). Each row has exactly one
+    owner at the end and no round with two over at least 40 rounds;
+  - the #17713 higher-priority-requester shape converges;
+  - an old owner is retried with growing backoff, never dual;
+  - a requester in arm debt does not retry, and resumes once it re-arms;
+  - a pending retry never fires after an operator decision (back to the
+    sick node, a local failover, a reset);
+  - a failed operator action restarts the epoch, and one refused at
+    admission leaves the chain intact, for `ManualFailover`,
+    `RequestPeerFailover` and both batch forms;
+  - the owner's prior hold: the drain pin survives abort, lease expiry and
+    commit; a Manual hold comes back after abort and lease expiry; a node
+    with no hold is left unheld, including across chained accepts;
+  - a due attempt held back by another failover shows as deferred;
+  - a reset during an in-flight attempt blocks its commit;
+  - the owner-side predicate: freshness, peer primary, re-checked under the
+    hold lock;
+  - the requester drops an ack whose reqID is not its current request;
+  - the status line;
+  - the production goroutine launch, run under `-race`.
+
+  The control cell with attempts dropped stays ownerless. Each of these
+  mutants fails a cell: no retry, no freshness check, no peer-primary check,
+  no re-check in the hold section, a no-op operator epoch, no admit at the
+  commit, a retry that gives up, no status line, ignoring the requester's
+  own arm debt, a bump before the reservation at each operator entry point,
+  dropping the prior-hold restore at abort or lease expiry, dropping the
+  drain pin at commit, recording a chained accept's own hold, and no
+  deferred status.
 - **The ISSU drain pin is a state fact, not a derived weight (#16743).**
   `ForceSecondary` sets `forcedSecondary` alongside `ManualFailover` and
   `Weight=0`. While set, `recalcWeight`, `debtDerivedWeightLocked`, and
