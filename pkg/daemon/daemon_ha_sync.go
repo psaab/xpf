@@ -183,6 +183,13 @@ func syncPrimeProgressObserved(current, baseline cluster.SyncStatsSnapshot) bool
 		current.DeletesReceived > baseline.DeletesReceived
 }
 
+// syncPrimeRetryIntervals is the bulk-prime retry schedule: the waits before
+// each attempt, so the last attempt is at their sum (150s). The HA rolling
+// upgrade's rejoin deadline is derived from that total
+// (upgrade.PeerBulkPrimeRetryWindow, #18415), and
+// TestSyncPrimeRetryWindowBoundsRollingRejoin18415 pins the two together.
+var syncPrimeRetryIntervals = []time.Duration{10 * time.Second, 20 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second}
+
 // syncPrimeRetryIntervalsForTest overrides the prime-retry sleep schedule
 // so the #15686 regression can fire the first attempt without waiting out
 // the production 10s first interval. Nil in production.
@@ -194,7 +201,7 @@ func (d *Daemon) startSessionSyncPrimeRetry(gen uint64) {
 		return
 	}
 	go func() {
-		intervals := []time.Duration{10 * time.Second, 20 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second}
+		intervals := syncPrimeRetryIntervals
 		if syncPrimeRetryIntervalsForTest != nil {
 			intervals = syncPrimeRetryIntervalsForTest
 		}
