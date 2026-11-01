@@ -13,10 +13,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
@@ -206,60 +206,10 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	}
 	// #18721: every read below must see ONE ruleset, so the whole readback is
 	// bracketed by the nf_tables generation (readAtStableNftGeneration).
-	return readAtStableNftGeneration(hostOverlayReadbackBackoff, hostOverlayReadbackDeadline, time.Now, time.Sleep,
+	return readAtStableNftGeneration(
 		func() (uint32, error) { return readNftGeneration(c) },
 		func() error { return in.verifyHostInboundOverlayOnce(c, overlay) })
 }
-
-// hostOverlayReadbackBackoff is the pause before each retry of the
-// generation-bracketed overlay readback (#18721). It allows 5 attempts.
-//
-// The generation counts EVERY commit in the namespace, xpfd's own included:
-// the IPsec divert, the transit barrier, the forward fence and the early-input
-// barrier, some of which run outside applySem. Each of those is one atomic
-// batch, so it bumps the generation once, but several can land back to back.
-// With no pause, a short burst of xpf's own unrelated writes could use up
-// every attempt and fail an operator's commit closed. The steps grow (2, 10,
-// 40, 80 ms), so a burst of a few ms is waited out on the second or third
-// attempt and one of tens of ms by the fourth or fifth. Exhaustion still
-// fails closed. The total is bounded by hostOverlayReadbackDeadline, not by
-// these steps.
-var hostOverlayReadbackBackoff = []time.Duration{
-	2 * time.Millisecond, 10 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond,
-}
-
-// hostOverlayReadbackDeadline bounds the RETRIES of one
-// VerifyHostInboundOverlay (readAtStableNftGeneration). A retry starts only if
-// elapsed + its pause + the slowest pass so far fits inside the deadline. The
-// first pass always runs, so one readback costs at most deadline + one pass.
-//
-// COUPLED to pkg/daemon's transferPreActivateLockWait (500 ms). The readback
-// runs under applySem, and HA transfer pre-activation waits that long for
-// applySem before it gives up make-before-break. The binding path is the
-// short applySem holder reconcileIpsecHostInputFence, which makes at most two
-// readbacks per hold. So:
-//
-//	2 x (deadline + pass allowance) + 100 ms headroom < the wait
-//	2 x (90 + 100) + 100 = 480 < 500
-//
-// The 100 ms pass allowance is an ASSUMPTION: AD measured p95 passes of 100 to
-// 125 ms at loadavg ~40 on the canonical HA config. pkg/daemon's
-// TestOverlayReadbackFitsTransferPreActivateWait18721 enforces the bound from
-// the real constants (via HostOverlayReadbackDeadline).
-//
-// The trade-off: retries happen only while passes are fast. Under load, a
-// commit that lands mid-read fails the readback closed at once instead of
-// being retried, and that self-heals on the next apply. A failed commit under
-// load and concurrent writes is preferable to a failover that loses
-// make-before-break because of this readback. The commit-time hold
-// (holdIpsecHostInputFenceForDivertTransition) can stack more readbacks, but
-// commit holds already run for seconds and are outside this invariant.
-const hostOverlayReadbackDeadline = 90 * time.Millisecond
-
-// HostOverlayReadbackDeadline reports hostOverlayReadbackDeadline, the
-// wall-clock bound on one VerifyHostInboundOverlay. pkg/daemon pins it against
-// transferPreActivateLockWait (#18721).
-func HostOverlayReadbackDeadline() time.Duration { return hostOverlayReadbackDeadline }
 
 // verifyHostInboundOverlayOnce is one unbracketed pass of the overlay readback.
 func (in *netlinkInstaller) verifyHostInboundOverlayOnce(c *nftables.Conn, overlay HostInputFenceOverlay) error {
@@ -405,7 +355,7 @@ func verifyHostOverlayRuleChain(rules []*nftables.Rule, kernelExprs [][]string, 
 		if !dropSeen {
 			return fmt.Errorf("host overlay rule lacks DROP verdict")
 		}
-		if !hostInputRuleOnlyDrops(rule, kernelExprs[i], true) {
+		if !hostOverlayRuleFitsTemplate(rule, kernelExprs[i], marker) {
 			return fmt.Errorf("host overlay rule carries an expression outside the fence shape: %v", kernelExprs[i])
 		}
 		overlayRules++
@@ -444,17 +394,11 @@ var hostInputHeadExprKinds = map[string]bool{
 }
 
 // hostInputRuleIsDropOnly reports whether a rule ahead of the overlay can only
-// drop: see hostInputRuleOnlyDrops. Such a rule can run ahead of the #9506
-// fence overlay without weakening it.
-func hostInputRuleIsDropOnly(rule *nftables.Rule, kernelExprs []string) bool {
-	return hostInputRuleOnlyDrops(rule, kernelExprs, false)
-}
-
-// hostInputRuleOnlyDrops judges one rule two ways and requires both:
+// drop. Such a rule can run ahead of the #9506 fence overlay without weakening
+// it. It judges one rule two ways and requires both:
 //
 //   - kernelExprs, the kernel's own expression names for the rule: every name
-//     must be in hostInputHeadExprKinds (plus "objref" when allowObjref, for
-//     the overlay's marker reference). This is the decoder-independent view:
+//     must be in hostInputHeadExprKinds. This is the decoder-independent view:
 //     google/nftables v0.3.0 SKIPS every expression it has no type for
 //     (expr.exprsFromBytes), so rule.Exprs alone cannot show a byteorder, rt,
 //     socket, dup or tproxy expression at all;
@@ -467,10 +411,10 @@ func hostInputRuleIsDropOnly(rule *nftables.Rule, kernelExprs []string) bool {
 // yields one, while a build plan carries it typed. A mismatch means
 // an expression the decoder could not type, or a rule that changed between the
 // two reads. Either way the readback fails closed.
-func hostInputRuleOnlyDrops(rule *nftables.Rule, kernelExprs []string, allowObjref bool) bool {
+func hostInputRuleIsDropOnly(rule *nftables.Rule, kernelExprs []string) bool {
 	kernelCounted := 0
 	for _, name := range kernelExprs {
-		if !hostInputHeadExprKinds[name] && !(allowObjref && name == "objref") {
+		if !hostInputHeadExprKinds[name] {
 			return false
 		}
 		if name != "byteorder" {
@@ -483,10 +427,6 @@ func hostInputRuleOnlyDrops(rule *nftables.Rule, kernelExprs []string, allowObjr
 		case *expr.Byteorder:
 			continue // present only in build plans; see the count note above
 		case *expr.Meta, *expr.Payload, *expr.Cmp, *expr.Bitwise, *expr.Fib, *expr.Counter:
-		case *expr.Objref:
-			if !allowObjref {
-				return false
-			}
 		case *expr.Lookup:
 			if x.IsDestRegSet {
 				return false // a map lookup can write the verdict register
@@ -502,6 +442,84 @@ func hostInputRuleOnlyDrops(rule *nftables.Rule, kernelExprs []string, allowObjr
 		decodedCounted++
 	}
 	return drops == 1 && decodedCounted == kernelCounted
+}
+
+// hostOverlayRuleFitsTemplate reports whether a marked (overlay) rule has
+// EXACTLY the shape the builder emits (#18721 fold 8):
+//
+//	meta iifname (== name | in anonymous set)
+//	[meta sdifname (== name | in anonymous set)]
+//	[counter]
+//	objref <marker counter>
+//	drop
+//
+// It is a positive template, not a list of refused kinds. An EXTRA match
+// narrows the fence and must not pass: `meta l4proto tcp`, `ip saddr ...` or
+// `meta mark 0x99` (which makes the fence a no-op). So must a negated or
+// inverted scope, a map lookup, or any second verdict. kernelExprs must name
+// exactly the typed expressions, in order, so a kind the decoder dropped cannot
+// hide inside a rule that otherwise fits.
+func hostOverlayRuleFitsTemplate(rule *nftables.Rule, kernelExprs []string, marker string) bool {
+	e := rule.Exprs
+	var names []string
+	i := 0
+	scope := func(key expr.MetaKey) bool {
+		if i+1 >= len(e) {
+			return false
+		}
+		m, ok := e[i].(*expr.Meta)
+		if !ok || m.Key != key || m.SourceRegister || m.Register != 1 {
+			return false
+		}
+		switch x := e[i+1].(type) {
+		case *expr.Cmp:
+			if x.Op != expr.CmpOpEq || x.Register != 1 || len(x.Data) != unix.IFNAMSIZ {
+				return false
+			}
+			names = append(names, "meta", "cmp")
+		case *expr.Lookup:
+			if x.SourceRegister != 1 || x.IsDestRegSet || x.DestRegister != 0 || x.Invert {
+				return false
+			}
+			names = append(names, "meta", "lookup")
+		default:
+			return false
+		}
+		i += 2
+		return true
+	}
+	if !scope(expr.MetaKeyIIFNAME) {
+		return false
+	}
+	if i < len(e) {
+		if m, ok := e[i].(*expr.Meta); ok && m.Key == expr.MetaKey(metaKeySDIFNAME) {
+			if !scope(expr.MetaKey(metaKeySDIFNAME)) {
+				return false
+			}
+		}
+	}
+	if i < len(e) {
+		if _, ok := e[i].(*expr.Counter); ok {
+			names = append(names, "counter")
+			i++
+		}
+	}
+	if i >= len(e) {
+		return false
+	}
+	if o, ok := e[i].(*expr.Objref); !ok || o.Type != nftObjTypeCounter || o.Name != marker {
+		return false
+	}
+	names = append(names, "objref")
+	i++
+	if i != len(e)-1 {
+		return false
+	}
+	if v, ok := e[i].(*expr.Verdict); !ok || v.Kind != expr.VerdictDrop || v.Chain != "" {
+		return false
+	}
+	names = append(names, "immediate")
+	return slices.Equal(kernelExprs, names)
 }
 
 // decodeHostOverlayRule reads one input-chain rule as a fence overlay rule: its

@@ -383,10 +383,85 @@ func TestHostInputRuleIsDropOnly18721(t *testing.T) {
 			t.Errorf("%s: hostInputRuleIsDropOnly = %v, want %v", name, got, tc.want)
 		}
 	}
-	// The overlay variant admits the marker objref, and nothing else extra.
-	marked := &nftables.Rule{Exprs: []expr.Any{&expr.Objref{Name: "c"}, drop18721()}}
-	if !hostInputRuleOnlyDrops(marked, []string{"objref", "immediate"}, true) {
-		t.Error("an objref + DROP overlay rule is not DROP-only with objref allowed")
+}
+
+// #18721 fold 8 (AD MINOR): a marked rule must have EXACTLY the shape the
+// builder emits: iifname scope, optional sdifname scope, optional counter, the
+// marker objref, DROP. An EXTRA match narrows the fence and used to pass. AD's
+// three shapes are covered, `meta mark 0x99` among them, which makes the fence
+// a no-op for every unmarked packet. The real builder output is the control.
+func TestOverlayRuleTemplateRefusesAnExtraMatch18721(t *testing.T) {
+	o := overlay18721()
+	pair := CanonicalHostInputFenceOverlay(HostInputFenceOverlay{
+		MasterSlavePairs: []HostInputFencePair{{Master: "vrf-ipsec", Slave: "st0"}},
+		MasterSet:        []string{"st1", "st2"},
+		Generation:       3, PermitEpoch: 3, CloseRequestSeq: 3,
+		CloseRequestKey: "3/[xfrmi:st0,st1,st2]", WatchGeneration: 3, State: "CLOSING",
+	})
+	for name, ov := range map[string]HostInputFenceOverlay{"single master": o, "pair + master set": pair} {
+		exprs := inputExprs18721(t, HostInboundSpec{Overlay: &ov, NoIPv6RejectZeroHopLimit: true})
+		marker := HostInputFenceOverlayCounterName(ov)
+		for i, rule := range exprs {
+			if _, _, marked, _, _ := decodeHostOverlayRule(&nftables.Rule{Exprs: rule}, nil, marker); !marked {
+				continue
+			}
+			for _, v := range views18721(t, exprs[i:i+1]) {
+				if !hostOverlayRuleFitsTemplate(v.rules[0], v.names[0], marker) {
+					t.Errorf("%s: control: built overlay rule %d (%s view) does not fit the template: %#v", name, i, v.name, rule)
+				}
+			}
+		}
+	}
+
+	exprs := inputExprs18721(t, HostInboundSpec{Overlay: &o, NoIPv6RejectZeroHopLimit: true})
+	overlayRule := exprs[0]
+	last := len(overlayRule) - 1
+	insertBeforeMarker := func(extra ...expr.Any) []expr.Any {
+		// The marker objref is the expression just before the verdict.
+		out := append([]expr.Any(nil), overlayRule[:last-1]...)
+		out = append(out, extra...)
+		return append(out, overlayRule[last-1:]...)
+	}
+	// And between the marker and the verdict, and ahead of the scope.
+	markMatch := []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0x99, 0, 0, 0}},
+	}
+	for name, rule := range map[string][]expr.Any{
+		"meta mark 0x99 between the marker and the drop": append(append(append([]expr.Any(nil), overlayRule[:last]...), markMatch...), overlayRule[last]),
+		"meta mark 0x99 ahead of the iifname scope":      append(append([]expr.Any(nil), markMatch...), overlayRule...),
+	} {
+		narrowed := append([][]expr.Any(nil), exprs...)
+		narrowed[0] = rule
+		for _, v := range views18721(t, narrowed) {
+			if err := verify18721(v, o); err == nil || !strings.Contains(err.Error(), "outside the fence shape") {
+				t.Errorf("%s (%s view): readback = %v, want \"outside the fence shape\"", name, v.name, err)
+			}
+		}
+	}
+	for name, extra := range map[string][]expr.Any{
+		"meta l4proto tcp": {
+			&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{6}},
+		},
+		"ip saddr 10.0.0.1": {
+			&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV4}},
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 12, Len: 4},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{10, 0, 0, 1}},
+		},
+		"meta mark 0x99": {
+			&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0x99, 0, 0, 0}},
+		},
+	} {
+		narrowed := append([][]expr.Any(nil), exprs...)
+		narrowed[0] = insertBeforeMarker(extra...)
+		for _, v := range views18721(t, narrowed) {
+			if err := verify18721(v, o); err == nil || !strings.Contains(err.Error(), "outside the fence shape") {
+				t.Errorf("%s added to the marked rule (%s view): readback = %v, want \"outside the fence shape\"", name, v.name, err)
+			}
+		}
 	}
 }
 
