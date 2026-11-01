@@ -310,56 +310,68 @@ must fail closed rather than fall back to a hardcoded node.
 The default `make cluster-deploy` (deb path) installs the selected `.deb` on
 each node, then cuts it with `xpfd upgrade --rolling`. Before it pushes
 anything or touches `dist-deb/xpf-deploy-manifest.json`, it decides each
-target node's action by comparing the deb's version with the version the node
-runs (`dpkg-query -W xpf`). The logic is in `deploy_deb_node_action` and
-`deploy_deb_preflight` (`deploy-lib.sh`):
+target node's action. It compares the deb's version with the version the node
+has installed: only a `dpkg-query` status of `ii` counts as installed, and
+`rc` or no record counts as nothing installed. The logic is in
+`deploy_deb_node_action` and `deploy_deb_preflight` (`deploy-lib.sh`):
 
-| deb vs running | action |
+| deb vs installed | action |
 |---|---|
 | newer, or nothing installed | install and cut, as always |
-| same version, and the running `xpfd` and userspace helper match the deb's byte for byte | **skip** the install and the cut; the manifest is written from the deb, so the attestation is kept (#18764) |
+| same version, byte-identical | **skip** the install and the cut; the manifest is still written from the deb, so the attestation is kept (#18764) |
 | same version, other bytes (or unreadable) | **refused**: a re-staged same version cannot be cut (#16219); build a new version |
-| older | **refused** up front, naming both versions and the fix, unless `XPF_DEPLOY_ALLOW_DOWNGRADE=1` |
+| older | **refused** up front, naming both versions and the fix, unless `XPF_DEPLOY_ALLOW_DOWNGRADE` is set to **that deb's exact version** |
+| half-installed (any dpkg state other than `ii` or `rc`) | **refused**: repair the package first |
+
+"Byte-identical" means all of these match the deb:
+- the running `xpfd` process;
+- the running userspace helper process;
+- all four managed binaries in `/var/lib/xpf/versions/current` (`xpfd`, `cli`,
+  `xpf-userspace-dp`, `xpf-day0-config`).
 
 A refusal costs the cell nothing: no node is touched, and the previous
-attestation manifest survives.
+attestation manifest survives. A bad `XPF_DEPLOY_DEB_PATH` is reported, not
+swallowed.
 
 **Putting master back (A→B→A).** Two ways:
 - Allocate a fresh, higher version for every deploy in the cell's order,
-  including a rebuild of A for the final step. For example:
+  including a rebuild of A for the final step:
   `make deb DEB_VERSION="$(scripts/next-deb-version.sh --git .)+g$(git rev-parse --short=12 HEAD)"`.
-  This keeps every deploy a real upgrade, and it is what production does.
-- Deploy the older A deliberately with `XPF_DEPLOY_ALLOW_DOWNGRADE=1`. The
-  value must be exactly `1`.
+  This keeps every deploy a real upgrade, which is what production does.
+- Deploy the older A deliberately:
+  `XPF_DEPLOY_DEB_PATH=<A.deb> XPF_DEPLOY_ALLOW_DOWNGRADE=<A's exact version>`.
+  The opt-in is bound to the version, so an export left in a shell cannot
+  authorize an unrelated later downgrade.
 
-Pin the deb to deploy with `XPF_DEPLOY_DEB_PATH`. Otherwise the highest
-version in `dist-deb/` wins.
+**What the opt-in does.** For each downgrading node:
+- It logs `LAB DOWNGRADE`.
+- It moves the binary anti-rollback floor `/var/lib/xpf/binary-floor` (#10848)
+  aside. That is what `dpkg --purge` does to it.
+- It installs with `apt-get install --allow-downgrades`, then cuts as usual.
 
-**What the opt-in does.** For each node that would downgrade:
-- It logs `LAB DOWNGRADE` loudly.
-- It removes the node's binary anti-rollback floor, `/var/lib/xpf/binary-floor`
-  (#10848). That is exactly what `dpkg --purge` does to it.
-- It installs with `apt-get install --allow-downgrades`, and cuts as usual.
+The floor exists to refuse a validly-signed OLD build as a replay, and it
+refuses both the postinst publish and the cut. A committed cut re-enrolls it
+at the deployed version and the saved floor is discarded. If the install,
+publish or cut fails, the saved floor is put back, so a node is never left
+without one. The product code is unchanged; production nodes keep refusing
+downgrades. The opt-in does not bypass the cut's config-envelope check, so an
+older binary that cannot read the config DB a newer one wrote is still
+refused.
 
-The floor exists to refuse a validly-signed OLD build as a replay. It refuses
-both the postinst publish and the cut, so it has to go before the install.
-The cut re-enrolls it at the deployed version. The product code is
-unchanged, so production nodes keep refusing downgrades.
+**Attestation.** The manifest records the selected deb's payload hashes, its
+file name, and `deb_version`, the deployed package version. `version` and
+`build_git_sha` still describe the deploying checkout, because the ledger's
+checkout match keys on them. Each harness-result row carries:
+- `deb_version`;
+- `deb_build_match`: `match`, `mismatch` (the deb's `+g<sha>` is not this
+  checkout's commit, the cross-checkout A/B case; harness-result also warns),
+  or `unknown`.
 
-What the opt-in does not bypass:
-- The cut's config-envelope check. An older binary that cannot read the
-  config DB a newer one wrote is still refused.
-- The same-version different-bytes refusal.
+A `mismatch` row measured the other arm's build. Read it as that build, or
+run the gate from the checkout that built the deb.
 
-The attestation manifest (`dist-deb/xpf-deploy-manifest.json`) records:
-- the selected deb's payload hashes;
-- its file name;
-- since #18772, `deb_version`, the deployed package version. This is the
-  only field that names the build the nodes run when a cell deploys another
-  checkout's deb or downgrades. `version` and `build_git_sha` still describe
-  the deploying checkout, because the gate's checkout match keys on them.
-
-Self-tests: `make test-deploy-lib` ("deb plan" cells).
+Self-tests: `make test-deploy-lib` ("deb plan" cells) and
+`make test-harness-ledger-lib` (#18772 cell).
 
 ## How to add a harness
 

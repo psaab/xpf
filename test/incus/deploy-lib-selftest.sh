@@ -760,15 +760,17 @@ test_deb_node_action_upgrade_installs() {
 
 test_deb_node_action_downgrade_refused_without_optin() {
 	local got allow fails=""
-	for allow in "" true yes 0; do
+	# The opt-in is bound to the deb's exact version: a bare 1, a boolean, or
+	# another version (a stale export from an earlier cell) authorizes nothing.
+	for allow in "" true yes 0 1 0.0.29579+gaaaaaaaaaaaa 0.0.29580; do
 		got=$(_plan_action 0.0.29590+gcccccccccccc 0 "$allow")
 		[[ "${got%%|*}" == 1 && "$got" == *"xpf_0.0.29580+gaaaaaaaaaaaa is not newer than the running 0.0.29590+gcccccccccccc on inst:vm"* &&
-			"$got" == *"scripts/next-deb-version.sh"* && "$got" == *"XPF_DEPLOY_ALLOW_DOWNGRADE=1"* ]] ||
+			"$got" == *"scripts/next-deb-version.sh"* && "$got" == *"XPF_DEPLOY_ALLOW_DOWNGRADE=0.0.29580+gaaaaaaaaaaaa"* ]] ||
 			fails+=" [allow='$allow': $got]"
 		[[ "$got" == 1\|\|* ]] || fails+=" [allow='$allow': printed an action]"
 	done
 	if [[ -z "$fails" ]]; then
-		ok "deb plan: a downgrade is refused up front, naming both versions and the fix, unless XPF_DEPLOY_ALLOW_DOWNGRADE is exactly 1"
+		ok "deb plan: a downgrade is refused up front, naming both versions and the fix, unless XPF_DEPLOY_ALLOW_DOWNGRADE is that deb's exact version"
 	else
 		bad "deb plan: a downgrade without the exact opt-in must be refused:$fails"
 	fi
@@ -776,9 +778,9 @@ test_deb_node_action_downgrade_refused_without_optin() {
 
 test_deb_node_action_downgrade_optin() {
 	local got
-	got=$(_plan_action 0.0.29590+gcccccccccccc 0 1)
+	got=$(_plan_action 0.0.29590+gcccccccccccc 0 0.0.29580+gaaaaaaaaaaaa)
 	if [[ "$got" == "0|install-downgrade|" ]]; then
-		ok "deb plan: XPF_DEPLOY_ALLOW_DOWNGRADE=1 turns a downgrade into install-downgrade"
+		ok "deb plan: XPF_DEPLOY_ALLOW_DOWNGRADE=<that deb's version> turns a downgrade into install-downgrade"
 	else
 		bad "deb plan: the opted-in downgrade must print install-downgrade (got $got)"
 	fi
@@ -787,7 +789,7 @@ test_deb_node_action_downgrade_optin() {
 test_deb_node_action_same_version() {
 	local same diff
 	same=$(_plan_action 0.0.29580+gaaaaaaaaaaaa 1)
-	diff=$(_plan_action 0.0.29580+gaaaaaaaaaaaa 0 1)
+	diff=$(_plan_action 0.0.29580+gaaaaaaaaaaaa 0 0.0.29580+gaaaaaaaaaaaa)
 	if [[ "$same" == "0|skip-same|" && "${diff%%|*}" == 1 && "$diff" == *"not these bytes"* &&
 		"$diff" == *"scripts/next-deb-version.sh"* ]]; then
 		ok "deb plan: the same version byte for byte is skip-same; same version with other bytes is refused, even opted in"
@@ -797,21 +799,88 @@ test_deb_node_action_same_version() {
 }
 
 test_deb_node_runs_deb_compares_both_binaries() {
-	local fails="" case_ want_x want_h run_x run_h expect
-	for case_ in "X H X H 0" "X H Y H 1" "X H X Z 1" "X H - H 1" "X H X - 1"; do
-		read -r want_x want_h run_x run_h expect <<<"$case_"
+	local fails="" case_ expect
+	# Each case: which binary differs (or is unreadable) on the node; "-" means none.
+	for case_ in "- 0" "run-xpfd 1" "run-helper 1" "live-xpfd 1" "live-cli 1" "live-xpf-userspace-dp 1" "live-xpf-day0-config 1" "unread-cli 1"; do
+		read -r _ck_odd expect <<<"$case_"
 		(
-			deploy_manifest_sha_from_deb() { case "$2" in xpfd) echo "$want_x" ;; *) echo "$want_h" ;; esac; }
-			deploy_running_xpfd_sha256() { [[ "$run_x" == - ]] && return 1; echo "$run_x"; }
-			deploy_running_xpf_userspace_dp_sha256() { [[ "$run_h" == - ]] && return 1; echo "$run_h"; }
+			deploy_manifest_sha_from_deb() { echo "sha-$2"; }
+			deploy_running_xpfd_sha256() { [[ "$_ck_odd" == run-xpfd ]] && echo other || echo sha-xpfd; }
+			deploy_running_xpf_userspace_dp_sha256() { [[ "$_ck_odd" == run-helper ]] && echo other || echo sha-xpf-userspace-dp; }
+			deploy_live_version_bin_sha256() {
+				[[ "$_ck_odd" == "unread-$2" ]] && return 1
+				[[ "$_ck_odd" == "live-$2" ]] && echo other || echo "sha-$2"
+			}
 			deploy_node_runs_deb inst:vm /dev/null
 		)
 		[[ "$?" == "$expect" ]] || fails+=" [$case_]"
 	done
 	if [[ -z "$fails" ]]; then
-		ok "deb plan: byte identity needs BOTH the running xpfd and helper to match the deb; an unreadable one is not identical"
+		ok "deb plan: byte identity needs the running xpfd and helper AND all four managed binaries in the live version dir; an unreadable one is not identical"
 	else
 		bad "deb plan: deploy_node_runs_deb verdicts wrong:$fails"
+	fi
+}
+
+test_deb_running_version_reads_dpkg_state() {
+	local fails="" row want got
+	for row in "ii  0.0.29598+gabc|0.0.29598+gabc" "ii 0.0.29598+gabc|0.0.29598+gabc" "rc  0.0.29598+gabc|" "|" "iU  0.0.29598+gabc|!iU" "iF  0.0.29598+gabc|!iF" "un  0.0.1|"; do
+		_ck_dpkg_state="${row%%|*}" want="${row#*|}"
+		got=$(deploy_running_deb_state() { printf '%s' "$_ck_dpkg_state"; }; deploy_running_deb_version inst:vm)
+		[[ "$got" == "$want" ]] || fails+=" ['$_ck_dpkg_state': '$got', want '$want']"
+	done
+	# A half-installed package is refused by the node action, naming the state.
+	got=$(_plan_action '!iU' 0 2>&1)
+	[[ "${got%%|*}" == 1 && "$got" == *"dpkg state iU"* ]] || fails+=" [half-installed not refused: $got]"
+	if [[ -z "$fails" ]]; then
+		ok "deb plan: only an installed (ii) package is a running version; rc/none is fresh, and a half-installed state is refused"
+	else
+		bad "deb plan: dpkg state handling wrong:$fails"
+	fi
+}
+
+# _ck_floor_run <dir> <fn>: run a floor helper with incus mocked to execute its
+# command locally against <dir> instead of /var/lib/xpf.
+_ck_floor_run() {
+	local d="$1" fn="$2"
+	(
+		incus() {
+			[[ "$1" == exec ]] || return 0
+			shift; while [[ "$1" != -- ]]; do shift; done; shift
+			local -a argv=()
+			local a
+			for a in "$@"; do argv+=("${a//\/var\/lib\/xpf/$d}"); done
+			"${argv[@]}"
+		}
+		warn() { :; }
+		"$fn" inst:vm
+	)
+}
+
+test_deb_floor_moved_aside_and_restored() {
+	local d fails=""
+	d=$(mktemp -d)
+	# Failure path: the floor comes back.
+	printf '0.0.29598+gold\n' >"$d/binary-floor"
+	_ck_floor_run "$d" deploy_reset_binary_floor
+	[[ ! -e "$d/binary-floor" && -e "$d/binary-floor.lab-downgrade-saved" ]] || fails+=" reset-did-not-move"
+	_ck_floor_run "$d" deploy_restore_binary_floor
+	[[ "$(cat "$d/binary-floor" 2>/dev/null)" == 0.0.29598+gold && ! -e "$d/binary-floor.lab-downgrade-saved" ]] || fails+=" restore-did-not-restore"
+	# Committed path: the cut re-enrolled a new floor; the saved one is dropped.
+	_ck_floor_run "$d" deploy_reset_binary_floor
+	printf '0.0.29580+gnew\n' >"$d/binary-floor"
+	_ck_floor_run "$d" deploy_drop_saved_binary_floor
+	[[ "$(cat "$d/binary-floor")" == 0.0.29580+gnew && ! -e "$d/binary-floor.lab-downgrade-saved" ]] || fails+=" drop-lost-the-new-floor"
+	# A failure AFTER re-enrollment keeps the re-enrolled floor.
+	_ck_floor_run "$d" deploy_reset_binary_floor
+	printf '0.0.29580+gnew\n' >"$d/binary-floor"
+	_ck_floor_run "$d" deploy_restore_binary_floor
+	[[ "$(cat "$d/binary-floor")" == 0.0.29580+gnew && ! -e "$d/binary-floor.lab-downgrade-saved" ]] || fails+=" restore-clobbered-a-reenrolled-floor"
+	rm -rf "$d"
+	if [[ -z "$fails" ]]; then
+		ok "deb plan: the downgrade moves the floor aside, a failure restores it, a committed cut keeps the re-enrolled one"
+	else
+		bad "deb plan: anti-rollback floor handling wrong:$fails"
 	fi
 }
 
@@ -864,10 +933,13 @@ test_deb_plan_wiring() {
 	awk '/deploy_deb_node_action/{a=NR} /deploy_install_deb/{if(!i)i=NR} END{exit !(a && i && a < i)}' <<<"$vmdeb" ||
 		fails+=" action-not-before-install"
 	grep -Fq 'skip-same)' <<<"$vmdeb" || fails+=" no-skip-same"
-	[[ "$(grep -c 'deploy_reset_binary_floor' <<<"$vmdeb")" == 1 && "$(grep -c 'allow-downgrade$' <<<"$vmdeb")" == 1 ]] ||
+	[[ "$(grep -c 'deploy_reset_binary_floor' <<<"$vmdeb")" == 1 && "$(grep -c 'allow-downgrade; then' <<<"$vmdeb")" == 1 ]] ||
 		fails+=" floor-reset-or-allow-outside-the-branch"
-	awk '/install-downgrade\)/{b=1} b&&/deploy_reset_binary_floor/{r=1} b&&/allow-downgrade$/{a=1} b&&/;;/{exit} END{exit !(r && a)}' <<<"$vmdeb" ||
+	awk '/install-downgrade\)/{b=1} b&&/deploy_reset_binary_floor/{r=1} b&&/allow-downgrade; then/{a=1} b&&/deploy_restore_binary_floor/{x=1} b&&/;;/{exit} END{exit !(r && a && x)}' <<<"$vmdeb" ||
 		fails+=" branch-incomplete"
+	# The cut restores the floor on failure and drops the saved one on commit.
+	grep -Fq '((floor_saved)) && deploy_restore_binary_floor "$rinst"' <<<"$vmdeb" &&
+		grep -Fq '((floor_saved)) && deploy_drop_saved_binary_floor "$rinst"' <<<"$vmdeb" || fails+=" cut-floor-handling"
 	if [[ -z "$fails" ]]; then
 		ok "deb plan wiring: cmd_deploy preflights before invalidating; deploy_vm_deb acts on the plan, and only install-downgrade resets the floor"
 	else
@@ -4409,6 +4481,8 @@ test_deb_node_action_downgrade_refused_without_optin
 test_deb_node_action_downgrade_optin
 test_deb_node_action_same_version
 test_deb_node_runs_deb_compares_both_binaries
+test_deb_running_version_reads_dpkg_state
+test_deb_floor_moved_aside_and_restored
 test_deb_preflight_refuses_before_any_change
 test_deb_install_downgrade_flag
 test_deb_plan_wiring
