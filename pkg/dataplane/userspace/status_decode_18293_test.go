@@ -129,7 +129,7 @@ func TestStatusLoopUndecodableAnswersNoKill18293(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		m.statusLoop(ctx)
+		m.statusLoop(ctx, false)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -298,7 +298,7 @@ func TestStatusLoopSilentDecodeSilentSequence18293(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		m.statusLoop(ctx)
+		m.statusLoop(ctx, false)
 	}()
 	t.Cleanup(func() {
 		cancel()

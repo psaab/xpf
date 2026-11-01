@@ -1369,8 +1369,11 @@ reconcile above (extend it only for maps whose loss is truly safe).
 
 - **No true zero-gap standalone restart.** The helper is an `exec.Command`
   child held in xpfd memory; a fresh xpfd spawns a NEW helper and clears
-  the XSKMAP. Standalone cut-over is a bounded, MEASURED multi-second gap
-  (the ~3s NAPI bootstrap window is the floor). True zero-gap
+  the XSKMAP. Standalone cut-over is a bounded, MEASURED multi-second gap.
+  Its floor used to be a fixed ~3s NAPI bootstrap timer; since #18707 the
+  bootstrap fires as soon as the new helper's XSKs are all bound, so the
+  floor is helper bring-up, XSK bind and the ctrl-enable readiness pass.
+  True zero-gap
   (decoupled-helper re-attach) is future M-mech-2. The HA rolling path uses a
   planned drain rather than heartbeat-loss detection: it runs
   `ForceSecondary()` then waits for `DrainComplete()` (peer PRIMARY, local
