@@ -1811,3 +1811,108 @@ deploy_select_deb() {
 	fi
 	deploy_deb_newest "$dir"
 }
+
+# ── Lab cluster control-channel key (#18724) ─────────────────────────────
+#
+# The HA lab configs (docs/ha-cluster-{userspace,tcp,udp}.conf) used to carry
+# their `chassis cluster authentication-key` in the repository: loss the
+# published `…-CHANGE-ME` placeholder, tcp and udp random keys that were just
+# as public once committed. The raw deploy pushes $CLUSTER_CONF verbatim, so a
+# re-setup restored the published key even after a live rotation.
+#
+# The configs now carry DEPLOY_CLUSTER_KEY_TOKEN in place of the key, and the
+# raw push renders the file with the key from a host-side secret
+# ($CLUSTER_AUTH_KEY_FILE, set per cluster in the env file). The token keeps
+# the #6611 placeholder marker on purpose: a conf that reaches a node WITHOUT
+# rendering still compiles, but it warns as a published placeholder instead of
+# looking like a real key.
+#
+# Nothing here prints the key: the substitution is a bash expansion (never an
+# argv), failures name files and lengths only, and the rendered file is
+# written under umask 077 and removed by the caller after the push.
+DEPLOY_CLUSTER_KEY_TOKEN="xpf-lab-cluster-key-substituted-at-deploy-CHANGE-ME"
+
+# deploy_cluster_key_problem <key>: why <key> cannot be a lab cluster key, or
+# "" when it can. A conf string cannot hold a double quote, a backslash or a
+# newline; 16 is pkg/config's MinAdvisedControlLinkKeyLen; and a key that
+# matches a #6611 placeholder marker would just reintroduce the problem.
+deploy_cluster_key_problem() {
+	local key="$1" lower
+	lower="${1,,}"
+	if [[ -z "$key" ]]; then
+		printf 'is empty'
+	elif [[ "$key" == *[[:space:]\"\\]* ]]; then
+		printf 'contains whitespace, a double quote or a backslash'
+	elif ((${#key} < 16)); then
+		printf 'is %d characters, under the 16-character floor' "${#key}"
+	elif [[ "$lower" == *change-me* || "$lower" == *example-only* ]]; then
+		printf 'matches a published placeholder marker'
+	fi
+}
+
+# deploy_ensure_cluster_key <file>: make sure <file> holds a usable key,
+# generating one with `openssl rand -base64 32` when it is absent. The
+# directory is created 0700 and the file 0600. An existing file is never
+# rewritten: it is the key the live cluster was rotated to.
+deploy_ensure_cluster_key() {
+	local file="$1" dir key problem tmp
+	[[ -n "$file" ]] || {
+		warn "cluster key: no key file named (set CLUSTER_AUTH_KEY_FILE in the cluster env file)"
+		return 1
+	}
+	if [[ ! -e "$file" ]]; then
+		dir="$(dirname "$file")"
+		(umask 077 && mkdir -p "$dir") || return 1
+		chmod 0700 "$dir" 2>/dev/null || true
+		tmp="$(umask 077 && mktemp "${file}.XXXXXX")" || return 1
+		if ! (umask 077 && openssl rand -base64 32 >"$tmp"); then
+			rm -f "$tmp"
+			warn "cluster key: could not generate $file (is openssl installed?)"
+			return 1
+		fi
+		chmod 0600 "$tmp" && mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+		info "cluster key: generated a new key in $file (mode 0600)"
+	fi
+	[[ -f "$file" && -r "$file" ]] || {
+		warn "cluster key: $file is not a readable regular file"
+		return 1
+	}
+	key="$(<"$file")"
+	key="${key%$'\n'}"
+	problem="$(deploy_cluster_key_problem "$key")"
+	if [[ -n "$problem" ]]; then
+		warn "cluster key: the key in $file $problem; regenerate it with \`openssl rand -base64 32\`"
+		return 1
+	fi
+	return 0
+}
+
+# deploy_render_cluster_conf <src> <key_file> <out>: write <src> to <out> with
+# every DEPLOY_CLUSTER_KEY_TOKEN replaced by the key in <key_file>. A conf
+# without the token (an older or hand-keyed config) is copied unchanged and
+# <key_file> is not consulted. Fails closed when the token is present but no
+# usable key exists, or when the token survives rendering.
+deploy_render_cluster_conf() {
+	local src="$1" key_file="$2" out="$3" content key
+	[[ -f "$src" ]] || {
+		warn "cluster conf: $src not found"
+		return 1
+	}
+	content="$(<"$src")"
+	if [[ "$content" != *"$DEPLOY_CLUSTER_KEY_TOKEN"* ]]; then
+		(umask 077 && printf '%s\n' "$content" >"$out")
+		return
+	fi
+	deploy_ensure_cluster_key "$key_file" || {
+		warn "cluster conf: $src carries the lab key token but no usable key is available; refusing to push it"
+		return 1
+	}
+	key="$(<"$key_file")"
+	key="${key%$'\n'}"
+	content="${content//"$DEPLOY_CLUSTER_KEY_TOKEN"/"$key"}"
+	if [[ "$content" == *"$DEPLOY_CLUSTER_KEY_TOKEN"* ]]; then
+		warn "cluster conf: the lab key token survived rendering $src; refusing to push it"
+		return 1
+	fi
+	(umask 077 && printf '%s\n' "$content" >"$out")
+}

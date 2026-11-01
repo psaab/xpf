@@ -3894,6 +3894,142 @@ test_rolling_secondary_hold_counts_as_secondary
 test_rolling_secondary_peer_down_defaults
 test_rolling_secondary_empty_defaults
 test_rolling_rg_ids
+# ── #18724: lab cluster key substitution ───────────────────────────────
+# A conf carrying DEPLOY_CLUSTER_KEY_TOKEN is pushed only after the token is
+# replaced by the key from the host-side secret; nothing prints the key.
+_ck_conf() { # dir -> path of a two-line conf carrying the token
+	printf 'chassis { cluster {\n        authentication-key "%s";\n} }\n' "$DEPLOY_CLUSTER_KEY_TOKEN" >"$1/in.conf"
+	printf '%s' "$1/in.conf"
+}
+
+test_cluster_key_render_substitutes_the_token() {
+	local d key src out log expect
+	d=$(mktemp -d); key="AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/AB="
+	printf '%s\n' "$key" >"$d/k.key"; chmod 0600 "$d/k.key"
+	src=$(_ck_conf "$d"); out="$d/out.conf"
+	# umask 022 so the 0600 check is the function's own doing, not the caller's.
+	log=$(umask 022 && deploy_render_cluster_conf "$src" "$d/k.key" "$out" 2>&1)
+	expect=$(printf 'chassis { cluster {\n        authentication-key "%s";\n} }' "$key")
+	if [[ -f "$out" && "$(<"$out")" == "$expect" && "$(stat -c %a "$out")" == 600 &&
+		"$(<"$out")" != *"$DEPLOY_CLUSTER_KEY_TOKEN"* && "$log" != *"$key"* ]]; then
+		ok "cluster key: the token is replaced by the key, the output is 0600, and the key is never printed"
+	else
+		bad "cluster key: rendering must replace the token with the key in a 0600 file without printing it"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_render_without_token_is_unchanged() {
+	local d out
+	d=$(mktemp -d); out="$d/out.conf"
+	printf 'chassis { cluster { authentication-key "hand-keyed-0123456789"; } }\n' >"$d/in.conf"
+	if deploy_render_cluster_conf "$d/in.conf" "" "$out" >/dev/null 2>&1 && cmp -s "$d/in.conf" "$out" &&
+		[[ ! -e "$d/k.key" ]]; then
+		ok "cluster key: a conf without the token is copied byte for byte and needs no key file"
+	else
+		bad "cluster key: a conf without the token must be pushed unchanged"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_render_refuses_without_key_file() {
+	local d src
+	d=$(mktemp -d); src=$(_ck_conf "$d")
+	if deploy_render_cluster_conf "$src" "" "$d/out.conf" >/dev/null 2>&1 || [[ -e "$d/out.conf" ]]; then
+		bad "cluster key: a token-carrying conf with no CLUSTER_AUTH_KEY_FILE must be refused"
+	else
+		ok "cluster key: a token-carrying conf with no key file named is refused and nothing is written"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_generated_when_absent() {
+	local d src key
+	d=$(mktemp -d); src=$(_ck_conf "$d")
+	if (umask 022 && deploy_render_cluster_conf "$src" "$d/keys/new.key" "$d/out.conf") >/dev/null 2>&1; then
+		key="$(<"$d/keys/new.key")"
+		if [[ "$(stat -c %a "$d/keys/new.key")" == 600 && "$(stat -c %a "$d/keys")" == 700 &&
+			-z "$(deploy_cluster_key_problem "$key")" && ${#key} -ge 40 &&
+			"$(<"$d/out.conf")" == *"authentication-key \"$key\";"* ]]; then
+			ok "cluster key: an absent key file is generated (0700 dir, 0600 file, openssl base64) and used"
+		else
+			bad "cluster key: a generated key must be 0600 in a 0700 dir, valid, and rendered in"
+		fi
+	else
+		bad "cluster key: rendering must generate an absent key file"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_existing_file_is_never_rewritten() {
+	local d src before after
+	d=$(mktemp -d); src=$(_ck_conf "$d")
+	printf 'Zm9vYmFyYmF6cXV4MDEyMzQ1Njc4OWFiY2RlZmdoaWo=\n' >"$d/k.key"; chmod 0600 "$d/k.key"
+	before=$(sha256sum "$d/k.key")
+	deploy_render_cluster_conf "$src" "$d/k.key" "$d/out.conf" >/dev/null 2>&1
+	deploy_render_cluster_conf "$src" "$d/k.key" "$d/out2.conf" >/dev/null 2>&1
+	after=$(sha256sum "$d/k.key")
+	if [[ "$before" == "$after" ]] && cmp -s "$d/out.conf" "$d/out2.conf"; then
+		ok "cluster key: an existing key file (the key the live cluster runs) is never rewritten"
+	else
+		bad "cluster key: an existing key file must be used as is, never regenerated"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_refuses_unusable_keys() {
+	local d src k bad_keys=0 cases=('short' 'xpf-lab-ha-psk-cluster-22-CHANGE-ME' 'has"a-double-quote-0123456789' 'has a space 0123456789abcdef')
+	d=$(mktemp -d); src=$(_ck_conf "$d")
+	for k in "${cases[@]}"; do
+		printf '%s\n' "$k" >"$d/k.key"; chmod 0600 "$d/k.key"; rm -f "$d/out.conf"
+		if deploy_render_cluster_conf "$src" "$d/k.key" "$d/out.conf" >/dev/null 2>&1 || [[ -e "$d/out.conf" ]]; then
+			bad_keys=$((bad_keys + 1))
+		fi
+	done
+	if ((bad_keys == 0)); then
+		ok "cluster key: a short, placeholder, quote- or space-carrying key is refused and nothing is written"
+	else
+		bad "cluster key: $bad_keys unusable key(s) were rendered into a conf"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_deploy_pushes_only_the_rendered_conf() {
+	local body
+	body=$(awk '/^deploy_vm\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$SCRIPT_DIR/cluster-setup.sh")
+	if grep -Fq 'deploy_render_cluster_conf "$CLUSTER_CONF" "${CLUSTER_AUTH_KEY_FILE:-}" "$rendered_conf"' <<<"$body" &&
+		grep -Fq 'incus file push --mode 0600 --uid 0 --gid 0 "$rendered_conf" "${rinst}/etc/xpf/xpf.conf"' <<<"$body" &&
+		! grep -Eq 'incus file push[^#]*"\$CLUSTER_CONF"' <<<"$body"; then
+		ok "cluster key: deploy_vm pushes the rendered conf (0600) and never \$CLUSTER_CONF itself"
+	else
+		bad "cluster key: deploy_vm must render \$CLUSTER_CONF and push only the rendered file"
+	fi
+}
+
+test_cluster_key_lab_confs_carry_only_the_token() {
+	local root conf env missing=0 n=0 keyline
+	root="$(cd "$SCRIPT_DIR/../.." && pwd)"
+	for conf in "$root"/docs/ha-cluster-*.conf; do
+		grep -Fq "$DEPLOY_CLUSTER_KEY_TOKEN" "$conf" || continue
+		n=$((n + 1))
+		# Every authentication-key line in a tokenised conf is the token.
+		while IFS= read -r keyline; do
+			[[ "$keyline" == *"\"$DEPLOY_CLUSTER_KEY_TOKEN\""* ]] || missing=$((missing + 1))
+		done < <(grep -E '^\s*(additional-)?authentication-key\s' "$conf")
+		# ...and some cluster env file both selects it and names a key file.
+		for env in "$SCRIPT_DIR"/*cluster.env; do
+			grep -Eq "^CLUSTER_CONF=\"(\\\$\\{PROJECT_ROOT\\}/)?docs/$(basename "$conf")\"" "$env" &&
+				grep -Eq '^CLUSTER_AUTH_KEY_FILE="/[^"]+"' "$env" && continue 2
+		done
+		missing=$((missing + 1))
+	done
+	if ((n >= 3 && missing == 0)); then
+		ok "cluster key: the $n tokenised lab confs carry no literal key, and each env selecting one names a key file"
+	else
+		bad "cluster key: $n tokenised confs, $missing with a literal key or no env naming CLUSTER_AUTH_KEY_FILE (want >=3, 0)"
+	fi
+}
+
 test_verify_pushed_sha_match
 test_verify_pushed_sha_mismatch_hardfails
 test_verify_pushed_sha_absent_hardfails
@@ -3993,6 +4129,14 @@ test_preflight_unmeasured_headroom_prescribes_measurement_remediation
 test_preflight_precedes_destructive_steps_standalone
 test_preflight_precedes_destructive_steps_cluster
 
+test_cluster_key_render_substitutes_the_token
+test_cluster_key_render_without_token_is_unchanged
+test_cluster_key_render_refuses_without_key_file
+test_cluster_key_generated_when_absent
+test_cluster_key_existing_file_is_never_rewritten
+test_cluster_key_refuses_unusable_keys
+test_cluster_key_deploy_pushes_only_the_rendered_conf
+test_cluster_key_lab_confs_carry_only_the_token
 echo "----------------------------------------"
 echo "deploy-lib selftest: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

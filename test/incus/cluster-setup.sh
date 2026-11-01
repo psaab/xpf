@@ -994,7 +994,23 @@ deploy_vm() {
 	if [[ -f "$CLUSTER_CONF" ]]; then
 		info "Pushing unified HA config to $vm..."
 		incus exec "$rinst" -- mkdir -p /etc/xpf
-		incus file push "$CLUSTER_CONF" "${rinst}/etc/xpf/xpf.conf"
+		# #18724: the lab confs carry a token in place of the cluster
+		# authentication-key. Render the real key in from the host-side
+		# secret ($CLUSTER_AUTH_KEY_FILE) into a private temp file, push
+		# that at mode 0600, and remove it. A conf without the token is
+		# pushed unchanged.
+		local conf_dir rendered_conf
+		conf_dir="$(umask 077 && mktemp -d)" || die "cannot create a private temp dir for the cluster conf"
+		rendered_conf="${conf_dir}/xpf.conf"
+		if ! deploy_render_cluster_conf "$CLUSTER_CONF" "${CLUSTER_AUTH_KEY_FILE:-}" "$rendered_conf"; then
+			rm -rf "$conf_dir"
+			die "refusing to push $CLUSTER_CONF to $vm (see the cluster key message above)"
+		fi
+		if ! incus file push --mode 0600 --uid 0 --gid 0 "$rendered_conf" "${rinst}/etc/xpf/xpf.conf"; then
+			rm -rf "$conf_dir"
+			die "pushing the cluster conf to $vm failed"
+		fi
+		rm -rf "$conf_dir"
 		push_shared_umem_phase0_artifact "$idx" "$rinst"
 		# Clear configstore DB so daemon bootstraps from the new text file.
 		# Without this, the daemon loads the OLD config from active.json.

@@ -224,7 +224,32 @@ Cluster selection (highest precedence first):
 | `XPF_CLUSTER_LOCK` / `XPF_CLUSTER_LOCK_TIMEOUT` | Lock file (default under `/var/worktrees/.cache/tmpdir/`) / wait timeout in seconds for `with-cluster.sh`; `XPF_CLUSTER_LOCK_HELD` is set inside a live cell and makes nested cells reentrant |
 | `XPF_LEDGER`, `XPF_REPO_ROOT` | Ledger directory override / repo-root override for `harness-result.sh`; defaults `test/results/ledger.d/` and the git toplevel |
 | `TMPDIR`, `GOCACHE`, `GOTMPDIR`, `CARGO_TARGET_DIR` | Scratch pins for self-tests; `run-selftests.sh` defaults them under `/var/worktrees/.cache` and an explicit caller value wins |
-| Sourced env files | Set `INCUS_REMOTE`, `VM0`/`VM1` or `FW0`/`FW1`, `LAN_HOST`, `PROFILE`, `CLUSTER_CONF`, `LAN_*`, `WAN_*`, `IPERF_TARGET4/6`, `MOUSE_TARGET_*`, `DMZ_*`, and loss's `TARGET_ALIAS_V4_DEPRECATED` (`.200`; `mouse-target-setup.sh` keeps that pin only while held, and the expiry is in the env file). `cluster-env.sh` derives the rest. An explicit caller override of any derived name wins. Exception, the #18576 leak guard: loading a DIFFERENT env first unsets every name still equal to the value the previous env resolved, and the census in `cluster-env-selftest.sh` keeps that guard list complete. Run knob, not set by env files: `MOUSE_TARGET_CLAIM_PROBE=skip` skips `mouse-target-setup.sh up`'s claim probe of a new address. The skip is recorded in `mouse-addr.service` and shown by `status` |
+| Sourced env files | Set `INCUS_REMOTE`, `VM0`/`VM1` or `FW0`/`FW1`, `LAN_HOST`, `PROFILE`, `CLUSTER_CONF`, `CLUSTER_AUTH_KEY_FILE` (#18724; see below), `LAN_*`, `WAN_*`, `IPERF_TARGET4/6`, `MOUSE_TARGET_*`, `DMZ_*`, and loss's `TARGET_ALIAS_V4_DEPRECATED` (`.200`; `mouse-target-setup.sh` keeps that pin only while held, and the expiry is in the env file). `cluster-env.sh` derives the rest. An explicit caller override of any derived name wins. Exception, the #18576 leak guard: loading a DIFFERENT env first unsets every name still equal to the value the previous env resolved, and the census in `cluster-env-selftest.sh` keeps that guard list complete. Run knob, not set by env files: `MOUSE_TARGET_CLAIM_PROBE=skip` skips `mouse-target-setup.sh up`'s claim probe of a new address. The skip is recorded in `mouse-addr.service` and shown by `status` |
+
+
+**The cluster authentication key is not in the repository (#18724).** The
+lab confs (`docs/ha-cluster-{userspace,tcp,udp}.conf`) carry the token
+`xpf-lab-cluster-key-substituted-at-deploy-CHANGE-ME` in place of
+`chassis cluster authentication-key`. `cluster-setup.sh`'s raw deploy renders
+`$CLUSTER_CONF` with the key from `$CLUSTER_AUTH_KEY_FILE`
+(`/var/worktrees/.cache/cluster-keys/<cluster>.key`, mode 0600 in a 0700
+directory; `deploy_render_cluster_conf` in `deploy-lib.sh`). It pushes the
+rendered copy at mode 0600 and deletes it.
+- An absent key file is generated with `openssl rand -base64 32`. An existing
+  one is never rewritten: it is the key the live cluster was rotated to.
+- A conf carrying the token is refused when no key file is named, or when the
+  key is short, a published placeholder, or contains a quote, backslash or
+  whitespace.
+- A conf without the token is pushed unchanged.
+- The deb deploy pushes no config, so it is unaffected.
+- If the conf reaches a node unrendered, it still compiles, but it warns as a
+  published placeholder.
+- To change a live cluster's key, use the rolling `additional-authentication-key`
+  rotation (`pkg/cluster/README.md`, "Rotation"), then write the new key to
+  the file. A raw deploy of a conf whose key differs from the running one only
+  converges because it re-keys both nodes together; never raw-deploy one node
+  with a different key.
+- Self-tests: `make test-deploy-lib` ("cluster key" cells).
 
 Never hardcode a node: source `cluster-env.sh` (directly or via
 `deploy-lib.sh`) and use `$FW0`, `$FW1`, `$CLUSTER_LAN_HOST`. For live
