@@ -571,6 +571,29 @@ pub(crate) enum SessionExpiryProbe<T> {
     Absent,
 }
 
+/// #18656: the fused flow-cache hit probe's verdict
+/// (`SessionTable::probe_hit_inner`). The two refusals are distinct
+/// eviction arms on the hit path (`post_hit_session_dead_no_record`,
+/// `post_hit_session_dead_idle_crossed`): before the split one
+/// `post_hit_session_dead` count could not say whether the serving worker
+/// had no record for the packet key or held a stale one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeHitVerdict {
+    /// The backing session is live; the probe refreshed and accounted it.
+    Live,
+    /// The packet key resolved no record on this table.
+    NoRecord,
+    /// The record was idle-crossed and no companion proved progress.
+    IdleCrossed,
+}
+
+impl ProbeHitVerdict {
+    #[inline]
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::Live)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ForwardNatExpiryProbe {
     Live(ForwardSessionMatch),

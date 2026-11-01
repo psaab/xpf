@@ -185,11 +185,20 @@ pub(super) fn reap_expired_sessions(
                 session_id: expired_entry.session_id,
             });
         }
+        // #18656: also the slot keyed by the session's forward-WIRE tuple
+        // (see `handle_delete_synced`): the reap would otherwise leave it for
+        // the per-packet probe alone to refuse.
+        let wire = (!expired_entry.metadata.is_reverse)
+            .then(|| crate::session::forward_wire_key(&expired_entry.key, expired_entry.decision.nat))
+            .filter(|wire| *wire != expired_entry.key);
         for binding in bindings.iter_mut() {
             binding
                 .flow
                 .flow_cache
                 .invalidate_slot(&expired_entry.key, binding.ifindex);
+            if let Some(wire) = wire.as_ref() {
+                binding.flow.flow_cache.invalidate_slot(wire, binding.ifindex);
+            }
         }
     }
     deferred

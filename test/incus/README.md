@@ -193,6 +193,15 @@ cut; #18692 rows in `iperf3_sum_parse_test.py`),
 `xpf-vlan-test.conf`, `xpfd.service`, `requirements-step1.txt`,
 `requirements-step2.txt`, `.gitignore`.
 
+Every firewall filter in the CoS fixtures (`bandwidth-output` and
+`bandwidth-output-reverse`, inet and inet6) ends with an explicit
+`term default { then accept; }` (#18728). Junos stateless filters end in an
+implicit final discard. Traffic that matches no class term (other ports,
+ICMP, the cross-class mice in `mouse-elephant-lib.sh`) passes only because
+of that term, so keep it LAST when editing a fixture. The fixture parsers
+(`cos_fixture_spec.py`, `cos-apply-lib.sh`) read only the numbered class
+terms and ignore it.
+
 ## Exit codes are not verdicts
 
 `harness-result.sh:12-39` is the canonical statement; summary:

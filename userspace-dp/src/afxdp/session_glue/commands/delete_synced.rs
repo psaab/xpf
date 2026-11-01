@@ -440,6 +440,20 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
         sessions.pptp_mut().forget_control_channel(control);
     }
     deleted_keys.push(key.clone());
+    // #18656: a forward session with a translating decision can also back a
+    // flow-cache slot keyed by its forward-WIRE tuple (a moved session's
+    // post-NAT data arriving over the fabric; the probe serves it through the
+    // forward-wire scope). Invalidate that slot too, so a delete followed by a
+    // re-install of the same session before the next packet cannot replay the
+    // old seeded decision.
+    if let Some(lookup) = delete_alias.as_ref()
+        && !lookup.metadata.is_reverse
+    {
+        let wire = crate::session::forward_wire_key(&key, lookup.decision.nat);
+        if wire != key {
+            deleted_keys.push(wire);
+        }
+    }
     if let Some(lookup) = delete_alias {
         // #4388: release the NAT pool port reserved for this peer-synced
         // session at install (`handle_upsert_synced` /

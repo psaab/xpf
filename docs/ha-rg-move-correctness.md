@@ -426,6 +426,11 @@ to the moment the next one is issued, on the LAN host's clock.
   node1 against node0 was about 9.6 against 39 Gbit/s on tcp, and about 2.7
   against 11.5 Gbit/s on loss: the copy-mode fabric ceiling,
   `docs/fabric-performance-optimizations.md`. That is expected, not a failure.
+  - Part of those split figures was #18656, not the fabric. Flows that
+    existed before the move ran on a per-packet slow-path loop on the new
+    owner. On tcp, an IPv4 `SOAK_RG=2` soak's split-tail aggregate went from
+    8.9 Gbit/s on master to 14.9 on the fix. An RG1-only soak went from 6.6
+    to 15.5. Both were 12/12 PASS on both builds.
   - Under `-P8` the congested fabric also drops pings throughout the split
     window. On loss that was up to 66 per 5 s window, with no gap longer than
     87 ms.
