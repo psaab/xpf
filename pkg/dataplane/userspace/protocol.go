@@ -813,6 +813,13 @@ type ControlRequest struct {
 	NeighborGeneration uint64             `json:"neighbor_generation,omitempty"`
 	NeighborReplace    bool               `json:"neighbor_replace,omitempty"`
 	Fabrics            []FabricSnapshot   `json:"fabrics,omitempty"`
+	// CtrlStampDeadlineMonoNS (#18560) is the absolute CLOCK_MONOTONIC
+	// deadline of the grant that lets the helper advance the userspace_ctrl
+	// generation stamp itself at its worker-visible publish. Stamped only by
+	// requestDetailedAtSocket, only on requests that carry a Snapshot
+	// (apply_snapshot, bump_fib_generation; ctrlStampGrantFor); 0 grants
+	// nothing.
+	CtrlStampDeadlineMonoNS uint64 `json:"ctrl_stamp_deadline_mono_ns,omitempty"`
 }
 
 // LeaseExportRequest is the #16589 paging window for the lease exports.

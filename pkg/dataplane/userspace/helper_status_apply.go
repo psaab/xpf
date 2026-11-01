@@ -358,18 +358,11 @@ func (m *Manager) flushStaleBPFStateOnCtrlEnableLocked() {
 	cutoffSec := m.ctrlDisabledAt / 1_000_000_000
 	for _, mapName := range []string{"sessions", "sessions_v6"} {
 		if ctMap := m.bpfShim.Map(mapName); ctMap != nil {
-			keySize := ctMap.KeySize()
-			valSize := ctMap.ValueSize()
-			var key, nextKey []byte
-			key = make([]byte, keySize)
-			nextKey = make([]byte, keySize)
-			val := make([]byte, valSize)
-			deleted, kept := 0, 0
-			for {
-				if err := ctMap.NextKey(key, nextKey); err != nil {
-					break
-				}
-				copy(key, nextKey)
+			val := make([]byte, ctMap.ValueSize())
+			// #18696: walkDeleteBPFKeys reads the next key before deleting the
+			// current one; deleting first restarted the kernel walk from bucket 0
+			// on every delete.
+			deleted, kept := walkDeleteBPFKeys(ctMap, func(key []byte) bool {
 				// Read session value to check the Created timestamp, at the
 				// offset the ABI struct actually puts it at (#6816).
 				if cutoffSec > 0 {
@@ -378,14 +371,12 @@ func (m *Manager) flushStaleBPFStateOnCtrlEnableLocked() {
 						created := binary.NativeEndian.Uint64(
 							val[dataplane.SessionValueCreatedOffset:end])
 						if created > 0 && created <= cutoffSec {
-							kept++
-							continue // synced session — keep it
+							return false // synced session — keep it
 						}
 					}
 				}
-				_ = ctMap.Delete(key)
-				deleted++
-			}
+				return true
+			})
 			if deleted > 0 || kept > 0 {
 				slog.Info("userspace: flushed stale BPF conntrack on ctrl enable",
 					"map", mapName, "deleted", deleted, "kept_synced", kept,

@@ -99,7 +99,9 @@ const UNSAFE_CEILING_PER_DIR: &[(&str, usize)] = &[
     (".", 97),
     ("afxdp", 80),
     ("afxdp/binding_state", 2),
-    ("afxdp/bpf_map", 64),
+    // #18560: +3, the userspace_ctrl row open (map info), lookup and update
+    // (`bpf_map/ctrl_row.rs`) behind the helper-side stamp advance.
+    ("afxdp/bpf_map", 67),
     ("afxdp/coordinator", 0),
     ("afxdp/coordinator/reconcile", 0),
     ("afxdp/coordinator/wg_control", 30),

@@ -477,6 +477,200 @@ the group fails if either check fails.
   new-flow bias and is left for its own follow-up (#18680) rather than
   changed here unmeasured.
 
+### `make test-failover` per-stream crash and failback cells (#18692)
+
+`iperf3_sum_parse.py --failover-check --straggler-cost` (test-failover
+passes it) prints one cell per event, judged in real seconds on iperf3's own
+interval clock. Every stream that carried data in the 5 s before the crash
+(or the failback) is judged by its resume instant:
+
+- **FAIL**: it has not resumed within **10 s** (dead or stuck), or the
+  telemetry is missing.
+- **COST**: it resumed, but **after 3 s** (a straggler). The cell names it
+  with its latency. A COST counts as passed and is recorded as `cells_cost`,
+  judged master-relative like H11's COST. `cells_cost` also counts the
+  planned-move COSTs, so the ledger's `crash_resume_straggler_streams` is
+  what tells a straggler COST from a planned-move one.
+- **PASS**: every stream resumed within 3 s.
+
+**Why the 3 s line is a COST, not a FAIL** (the coordinator's decision on
+#18703). Over 192 streams in 24 preserved loss runs, resumes fall at
+0.97–2.91 s, then nothing, then six stragglers at 3.75–4.59 s. The 3 s line
+sits in that gap, inside TCP's RTO backoff. As a FAIL line it red-flagged
+about a quarter of crash runs, master's included, on which side of a
+retransmission a stream landed. Under the green-on-master rule that blocks
+PRs at random. The 10 s line still catches a stream that never comes back.
+The straggler latencies stay visible: ledger metrics
+`crash_resume_data_max_s`/`_median_s`, `crash_resume_straggler_streams` and
+the rest, judged against master's band.
+
+**The defect it replaced.** The old window took the event instant from
+`$((SECONDS - iperf_start_seconds))`: two integer truncations plus the
+iperf3 launch delay, so it could sit a second either side of the real crash
+on iperf3's clock. It then asked for data in an interval STARTING in
+`[T+1, T+3]`, so the 1 s interval grid decided a stream that resumed 3–4 s
+after the crash. Both directions are in the preserved loss runs:
+
+- an in-phase anchor (T = floor of the crash) FAILs a stream that resumed
+  2.91 s after the crash (`r-18598/failover-dbg2-025351`, stream 11);
+- an anchor one second late PASSes a stream that resumed 4.05 s after it
+  (`r-18598/failover-master2-012401`, stream 11);
+- an anchor one second early counts the interval holding the crash, so its
+  pre-crash bytes pass as a resume.
+
+**The anchor** (`EventAnchor`: an instant plus its error bound).
+
+1. **The crash window.** test-failover reads, from the orchestrator:
+   - the LAN host's clock minus its own, from the minimum-RTT
+     `incus exec date` reading (`_failover_clock_offset`, error ±rtt/2). The
+     iperf3 client stamps its start (`start.timestamp.timemillisecs`) with
+     the LAN host's clock;
+   - `failover_epoch`, just before the sysrq exec;
+   - `failover_epoch_after`, just after the exec returns. The exec never
+     returns cleanly, because the VM dies under it, so this is `timeout`
+     reaping it about 10–15 s later.
+
+   Only that pair bounds when the sysrq ran. An exec round trip measured
+   beforehand is a minimum, not a limit. No firewall node's clock enters, so
+   node clock skew cannot move the window.
+2. **The crash instant: the stop on iperf3's own clock** inside that window.
+   A crash kills every stream's path at once, so the interval holding it
+   carries the pre-crash rate for the part of it before the crash. Two reads:
+   - **The aggregate's stop**, when the next interval is empty (under 5 %
+     of the pre-crash rate).
+   - **The streams that stopped together**, when it is not. In a fast
+     takeover some streams resume inside the next interval: the #18703 live
+     run on 0.0.29546 kept 8 % there. The streams that stayed down for that
+     whole interval still carry the crash. At least a quarter of them (and
+     at least three) must stop in the same interval. The stop is the median
+     of their own fractions, and in that run 5 streams agreed at 0.24 s into
+     the interval.
+
+   Either way the crash lies inside the stop interval, so the next interval
+   is wholly after it. Its ±0.05 s is a DESIGN BUDGET, not a measured bound:
+   rate noise of about 2 % per interval, plus socket buffers filling, which
+   only reads late. Live runs record `crash_stop_after_epoch_s`, the stop's
+   distance from the mapped `failover_epoch`, to build the evidence; the
+   live run read 0.117 s.
+3. **The failback**: `failback_epoch`, taken just after the poll that saw
+   the last RG land, on the same clock mapping. As before, the anchor is
+   that observation, not the move itself.
+4. **No clock window that holds the stop** (a reading missing, or no
+   `timemillisecs`): the same stop, searched within ±1 s of the integer
+   anchor. It is on iperf3's own clock and needs no clock reading. A stop
+   before the clock window's start, when there is one, is not the crash.
+5. **No stop at all**: the integer verdict under the same COST/FAIL policy,
+   evaluated at the integer anchor and one second either side of it. No
+   interval starting before anchor+1 counts as resume evidence for any of
+   the three. With the old `[T+1, T+deadline]` window, the anchor-1
+   candidate's window starts at the anchor, so when the crash lies in the
+   second after the anchor, the interval holding it starts just after the
+   anchor and its PRE-crash bytes read as a resume for every stream, a dead
+   one included. The #18703 review reproduced exactly that: "52s PASS" for a
+   stream that never resumes. The cell keeps the verdict when all three
+   agree and is VOID when they do not, because the integer clock cannot say
+   which side of a line a stream fell on. Callers without `--straggler-cost`
+   (`ha-smoke-iperf-lib.sh`) get the old integer verdict unchanged.
+
+**The zero-interval cell agrees with the policy.** test-failover passes the
+crash cell's own anchor (`--print-crash-anchor`, else the integer one) to
+`iperf-json-metrics.py --resume-event-sec`. A stream's zero seconds inside
+`[T, T+10]` are then not "outside" zeros when that stream carries data
+again later: they are the crash cell's COST. A stream that never resumes
+keeps them. The count is recorded as
+`crash_resume_excused_zero_intervals`. This does not make that cell green
+on the preserved runs: it was red on all 24 of them, master included, and
+almost all of its zeros sit in the RG1 split window (about 111–151 s), not
+at the crash. A straggler added at most one zero per run.
+
+**The resume instant.** Only intervals that start at or after the anchor's
+latest edge are used, so no pre-event byte is counted. In a stream's first
+such interval with data, `[s, e)`, the stream's next interval gives its
+post-resume rate. So the data took `duration × bps / bps_next` of the
+interval, and the resume instant is `e` minus that. The read has an error
+band: a stream still ramping inside the interval reads late, and a burst
+followed by a smaller share in the next interval reads early. The true
+instant is somewhere in `[s, e)`. So when a 3 s or 10 s line, widened by
+the anchor's uncertainty, falls inside a stream's resume interval, the cell
+names the stream: the in-interval read decided its side of that line. The
+2s91 fixture's stream 11 is one such case at 3 s.
+
+**What the cell reports.** Beside the status, each stream's data latency and
+its rate latency. The rate latency is the first interval at or above 50 % of
+the lower of the stream's own pre-crash mean (`[T-6, T-1)`) and its own
+median over `[T+5, T+15)`. After a takeover the streams re-share the link:
+one loss run (`r-18598b/failover-dbg18672-122007`, stream 13) kept a stream
+at 15–43 % of its pre-crash rate for 66 s while the aggregate ran at or
+above its pre-crash rate. The post window ends before the rejoin, split and
+failback, so none of them sets the reference. The cell also gives max and
+median of both latencies. The ledger row records `HARNESS_METRIC` lines for:
+
+- `crash_resume_data_max_s`, `_median_s` and `_never`, and their `rate`
+  twins;
+- `crash_resume_straggler_streams`;
+- `crash_at_s`, `crash_anchor_uncertainty_s`, `crash_anchor_precise` and
+  `crash_stop_after_epoch_s`;
+- the same `failback_*`.
+
+So arms are compared on the distribution (#18561).
+
+**Preserved runs re-judged.** This was done offline, with the data stop as
+the anchor, since those runs recorded no epoch (method and table in
+`docs/log/18692.md`). Of 29 preserved loss runs, 24 have an empty aggregate
+interval at the crash. Two more anchor on the streams that stopped together
+(both PASS, data max 2.61 s and 2.26 s). The last three (all recorded PASS)
+take the integer fallback, which gives PASS for each of them at every
+integer anchor from 2 s before their dip to 1 s after it. On the 3 s line alone, the real-seconds verdict matches the
+recorded verdict on all 24, and none flips within ±0.05 s of its anchor.
+Under the COST policy, the six recorded FAILs are COSTs (stragglers at
+3.75–4.59 s) and no run FAILs. On four runs no in-phase integer anchor
+reproduces the recorded verdict, so the anchor was a second off. On the two
+rows above, the recorded verdict is right only because of which way it was
+off.
+
+**Selftest.** `iperf3_sum_parse_test.PreciseCrashAnchorTests` (run by
+`make test-incus-lib`) judges two real loss logs
+(`test/incus/failover-crash-straggler-{2s91,4s05}.jsonl`), the #18703 live
+run (`test/incus/failover-crash-fast-takeover.jsonl`), and three logs
+derived from the 4s05 one by holding its stream 11 down longer (every other
+byte is the run's own). The rows:
+
+| row | stream 11 resumes | status |
+|---|---|---|
+| 2s91 | 2.91 s | PASS (3 s line inside its resume interval: named) |
+| 4s05 | 4.05 s | COST |
+| 4s05 held to 9 s | 9.06 s | COST (10 s line inside its resume interval: named) |
+| 4s05 held to 10 s | 10.14 s | FAIL |
+| 4s05 held forever | never | FAIL |
+| fast takeover (the #18703 live run, aggregate never empty) | 2.39 s max | PASS, anchored on 5 streams' stop |
+| 4s05, integer anchor 54 s, no clock | stop found within ±1 s | COST |
+| dead, integer anchor 53 s, no clock | stop found within ±1 s | FAIL |
+| 4s05, three-anchor cell at 54 s | 53 s COST, 54 s COST, 55 s PASS | VOID |
+| dead, three-anchor cell at 53 s | FAIL at all three (no evidence before 54 s) | FAIL |
+
+It also pins the integer anchors that mis-score the two real logs. Eleven
+executable mutants each flip a named row. Each mutant is one exact textual
+replacement of the parser source, executed in a fresh namespace, with a
+no-op control through the same path. The mutants:
+
+- an integer anchor;
+- counting the interval that holds the crash;
+- the resume at the interval start;
+- the resume at the interval end;
+- no stop refinement;
+- no 3 s COST line;
+- no 10 s FAIL line;
+- a fallback that trusts one integer anchor;
+- the anchor-1 candidate counting the interval that holds the crash (the
+  review's "52s PASS");
+- a fallback without the ±1 s stop search;
+- the aggregate stop only, with no stop of streams together.
+
+`make test-iperf-throughput-lib` adds the producer rows. A straggler that
+resumes at T+5 is excused to the 10 s line (0 outside, 2 excused). The same
+bytes without `--resume-event-sec` count 2 outside. A dead stream is not
+excused (17 outside).
+
 ### `make test-failover` zero-interval cells: windows and definitions
 
 `scripts/iperf-json-metrics.py` scores the whole-run iperf3 stream. A
@@ -491,6 +685,7 @@ can be up to about 1 s off iperf's own clock.
 | Event | Anchors | Kind | How its zero intervals are scored |
 |---|---|---|---|
 | the crash (`failover_at_seconds`) | the crash instant | **excused** (`--event-sec`) | not counted: peer-loss detection is by design (in the lab about 1.0–1.05 s after the last heartbeat, 0.8–1.05 s after the crash, when the #18570 probe goes unanswered; about 1.2 s more under the sync-recency rule for a peer without ack support, whose last sync frame is about one interval younger than its last heartbeat) |
+| the crash, for a stream that resumes (`--resume-event-sec`, #18692) | the crash stream cell's own anchor (sub-second when it has one), to its 10 s FAIL line | **excused for that stream only** | not counted outside: a resuming straggler is the crash cell's COST. A stream that never carries data again keeps its zeros. Counted as `crash_resume_excused_zero_intervals` |
 | the RG1 move that starts the split slice (RG1 on node0, RG0/RG2 on node1) | the instant before the request, and the poll-observed landing | **planned** (`--planned-move rg1-split=...`) | scored as a move, below |
 | the RG0/RG2 failback that ends the split | the instant before each of the two requests, and each RG's poll-observed landing | **planned** (`--planned-move rg0-rg2-failback=...`) | scored as a move, below |
 

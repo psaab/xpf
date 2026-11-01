@@ -1763,8 +1763,26 @@ info "Crashing fw0 (sysrq reboot — unclean shutdown, tests worst-case failover
 # Braces, not just 2>/dev/null on the command: bash prints its own
 # "Killed" job notice for the SIGKILLed child, which would land in the
 # test transcript as alarming noise.
+#
+# #18692: the per-stream crash cell also needs the crash instant to well
+# under a second on iperf3's own clock; the integer $SECONDS difference can
+# sit a second either side of it. Read:
+#   - before the sysrq, the LAN host's clock minus this host's (the iperf3
+#     client stamps its start with the LAN host's clock):
+#     `_failover_clock_offset`'s minimum-RTT reading, "<offset_s> <rtt_s>";
+#   - this host's clock just before the sysrq exec (`failover_epoch`) and
+#     just after it returns or is killed as the VM dies
+#     (`failover_epoch_after`). Only that pair bounds when the sysrq ran: an
+#     exec round trip measured beforehand is a minimum, not a limit.
+# iperf3_sum_parse.py looks for the aggregate's own stop inside that window
+# and anchors on it; with no stop there, or any reading missing, the cell
+# falls back to the integer anchor (judged at it and +/-1 s).
+failover_client_clock=$(_failover_clock_offset "$CLUSTER_LAN_HOST" 3) || failover_client_clock=""
+failover_epoch=$(date +%s.%N)
 failover_at_seconds=$((SECONDS - iperf_start_seconds))
 { timeout -k 5 10 incus exec "$FW0" -- bash -c 'echo b > /proc/sysrq-trigger' || true; } 2>/dev/null
+failover_epoch_after=$(date +%s.%N)
+info "#18692 crash anchor: integer ${failover_at_seconds}s after iperf start; epochs ${failover_epoch}..${failover_epoch_after}; LAN-host clock offset/rtt ${failover_client_clock:-unread}"
 
 # Wait for fw1 to detect failure and become primary
 sleep 3
@@ -1898,6 +1916,7 @@ fi
 ha_run_rg02_failback() {
 	local rg fo_start fo_elapsed moved
 	failback_at_seconds=0
+	failback_epoch=""
 	failback_request_at_seconds=""
 	failback_landed_at_seconds=""
 	info "Manual failover: requesting fw1 to failover RG0 and RG2 to fw0"
@@ -1945,6 +1964,7 @@ ha_run_rg02_failback() {
 		done
 		fo_elapsed=$(($(date +%s) - fo_start))
 		if ((moved)); then
+			failback_epoch=$(date +%s.%N) # #18692: sub-second twin of the next line
 			failback_at_seconds=$((SECONDS - iperf_start_seconds))
 			failback_landed_at_seconds="${failback_landed_at_seconds:+$failback_landed_at_seconds }${failback_at_seconds}"
 			if ((fo_elapsed > slowest)); then
@@ -2178,6 +2198,27 @@ ha_build_planned_move_args
 # Missing, malformed, or incomplete metrics are VOID evidence, never a
 # zero-valued throughput FAIL; valid averages go through the anchored cell.
 # M1 JSON capture/gate fixture begin
+# ha_crash_resume_at <log> -- the crash instant the per-stream crash cell
+# uses (#18692; the same clock window, then the aggregate's stop within +/-1 s
+# of the integer anchor), printed as seconds on iperf3's clock, else the
+# integer anchor. The producer excuses a RESUMING stream's zero seconds up to
+# the cell's 10 s FAIL line from there, so a straggler is one COST, not a COST
+# plus an "outside" zero-interval FAIL.
+ha_crash_resume_at() {
+	local anchor_args=() line
+	if [[ "${failover_client_clock:-}" =~ ^-?[0-9.]+\ [0-9.]+$ ]]; then
+		anchor_args=(--client-clock-offset "${failover_client_clock% *}"
+			--client-clock-rtt "${failover_client_clock#* }"
+			--crash-epoch "${failover_epoch:-}" --crash-epoch-after "${failover_epoch_after:-}")
+	fi
+	if line=$(python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" --print-crash-anchor \
+		--crash-at "$failover_at_seconds" "${anchor_args[@]}" <"$1" 2>/dev/null) &&
+		[[ "$line" =~ ^-?[0-9.]+\  ]]; then
+		printf '%s\n' "${line%% *}"
+	else
+		printf '%s\n' "$failover_at_seconds"
+	fi
+}
 LOCAL_IPERF_LOG="${TMPDIR:-/var/worktrees/.cache/tmpdir}/iperf3-failover.$$.json-stream.log"
 LOCAL_IPERF_METRICS="${TMPDIR:-/var/worktrees/.cache/tmpdir}/iperf3-failover.$$.metrics.json"
 LOCAL_IPERF_GATE_ERR="${LOCAL_IPERF_METRICS}.gate.err"
@@ -2191,6 +2232,7 @@ if ! incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log \
 elif ! python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" \
 	"$LOCAL_IPERF_LOG" --event-sec "$failover_at_seconds" \
 	"${planned_move_args[@]}" --event-window-sec 3 \
+	--resume-event-sec "$(ha_crash_resume_at "$LOCAL_IPERF_LOG")" \
 	>"$LOCAL_IPERF_METRICS" 2>"$LOCAL_IPERF_PRODUCER_ERR"; then
 	printf '{"ok":false,"error":"metrics_parse_failed"}\n' >"$LOCAL_IPERF_METRICS"
 fi
@@ -2217,6 +2259,13 @@ if [[ "$iperf_gate_ok" == true ]]; then
 	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside the crash and planned-move windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)" \
 		ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals outside the [T, T+3] windows (MAX_STREAM_ZERO_INTERVALS)"
 	info "iperf3 whole-run zero-throughput streams: ${zero_streams_total} (${zero_streams_outside_events_total} outside the crash and planned-move windows)"
+	# #18692: zero seconds of streams that resumed before the crash cell's
+	# 10 s FAIL line are that cell's COST, not "outside" zeros; the count is
+	# recorded so the excusal itself stays visible.
+	resume_excused=$(python3 -c 'import json, sys; print(int(json.load(open(sys.argv[1])).get("stream_zero_intervals_resume_excused_total", 0)))' \
+		"$LOCAL_IPERF_METRICS" 2>/dev/null) || resume_excused=0
+	echo "HARNESS_METRIC: crash_resume_excused_zero_intervals=${resume_excused}"
+	info "iperf3 per-stream zero intervals of streams that resumed within the crash cell's 10 s line (not counted outside): ${resume_excused}"
 	ha_planned_move_cells "$LOCAL_IPERF_METRICS" "$planned_moves_registered"
 	pass "iperf3 sender retransmits ${retransmits}"
 	if [[ -n "$MAX_RETRANSMITS" ]]; then
@@ -2288,16 +2337,35 @@ fi
 
 if [[ "$iperf_gate_ok" == true ]]; then
 	oracle_error="${LOCAL_IPERF_METRICS}.oracle.err"
+	# #18692: the sub-second anchors read at the crash and the failback, and
+	# the stream cells' policy (--straggler-cost): FAIL when a stream has not
+	# resumed within 10 s, COST when it resumed after 3 s. A cell without a
+	# precise anchor is the integer verdict at --crash-at/--failback-at and
+	# +/-1 s, VOID when those disagree.
+	oracle_anchor_args=(--straggler-cost)
+	if [[ "$failover_client_clock" =~ ^-?[0-9.]+\ [0-9.]+$ ]]; then
+		oracle_anchor_args+=(--client-clock-offset "${failover_client_clock% *}"
+			--client-clock-rtt "${failover_client_clock#* }"
+			--crash-epoch "$failover_epoch" --crash-epoch-after "$failover_epoch_after")
+		if [[ -n "${failback_epoch:-}" ]]; then
+			oracle_anchor_args+=(--failback-epoch "$failback_epoch")
+		fi
+	else
+		info "#18692: the LAN-host clock reading is missing; the stream cells use the integer anchors"
+	fi
 	if failover_oracles=$(python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" \
 		--failover-check --json-stream --streams "$IPERF_STREAMS" \
 		--min-throughput-gbps "$MIN_THROUGHPUT" --crash-at "$failover_at_seconds" \
 		--failback-at "$failback_at_seconds" \
+		"${oracle_anchor_args[@]}" --emit-metrics \
 		<"$LOCAL_IPERF_LOG" 2>"$oracle_error"); then
 		while IFS= read -r oracle; do
 			case "$oracle" in
 			PASS\ *) pass "${oracle#PASS }" ;;
 			FAIL\ *) fail "${oracle#FAIL }" ;;
 			VOID\ *) void "${oracle#VOID }" ;;
+			COST\ *) cost "${oracle#COST }" ;;
+			METRIC\ *) echo "HARNESS_METRIC: ${oracle#METRIC }" ;;
 			*)       fail "iperf3 failover oracle returned an unrecognised verdict: ${oracle}" ;;
 			esac
 		done <<< "$failover_oracles"

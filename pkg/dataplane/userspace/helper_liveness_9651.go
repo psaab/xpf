@@ -107,8 +107,8 @@ func (m *Manager) killWedgedHelperLocked(now time.Time) {
 		return
 	}
 	_, span := m.liveTrack.killDue(now)
-	slog.Error("userspace dataplane helper answered no control request; killing it so the supervisor fails closed and restarts it (#18685)",
-		"unanswered_for", span.Round(time.Second).String(),
+	slog.Error("userspace dataplane helper is wedged; killing it so the supervisor fails closed and restarts it (#18685)",
+		"reason", m.liveTrack.killReason(now), "for", span.Round(time.Second).String(),
 		"pid", m.proc.Process.Pid, "generation", m.procGen)
 	m.liveTrack.kills.Add(1)
 	_ = m.proc.Process.Kill()

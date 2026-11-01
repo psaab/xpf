@@ -22,8 +22,9 @@
 //!   loading them in the opposite one. That can only ever exclude ONE of the
 //!   two torn orientations: #6291 excluded `(old validation, new forwarding)`
 //!   and left the mirror `(new validation, old forwarding)` reachable, which
-//!   is not drop-only — once Go writes the new generation to `userspace_ctrl`
-//!   the shim stamps NEW, and a worker holding the old forwarding classifies
+//!   is not drop-only — once the new generation reaches `userspace_ctrl`
+//!   (the coordinator itself after the view store since #18560, or Go from the
+//!   reply) the shim stamps NEW, and a worker holding the old forwarding classifies
 //!   those packets `Valid` and forwards them under the STALE tables. #6592
 //!   publishes both halves in ONE `Arc` (`types/runtime_view.rs`), so a worker
 //!   observes whichever view was published as a unit and BOTH orientations are

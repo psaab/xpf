@@ -6816,11 +6816,12 @@ fn stored_fabric_redirect_18659() -> ForwardingResolution {
 }
 
 /// #18659 retain table for `rehome_or_retain_fabric_redirect` with a
-/// MissingNeighbor candidate. Only a KNOWN owner that is NOT active here
-/// retains the redirect. A locally active owner and an unknown owner keep
-/// the candidate verbatim: the security half of the fix, which must never
-/// send a local RG's traffic over the fabric and never redirect an
-/// internet destination. A fabric or zero egress also keeps the candidate.
+/// MissingNeighbor candidate. A KNOWN owner that is NOT active here retains
+/// the redirect. An unknown owner keeps the candidate verbatim: an internet
+/// destination is never redirected. A fabric or zero egress also keeps the
+/// candidate. The locally active owner moved to #18672: like a
+/// ForwardCandidate, it keeps the candidate only on the destination's
+/// connected egress (`rehome_or_retain_owner_active_missing_neighbor_18672`).
 #[test]
 fn rehome_or_retain_missing_neighbor_table_18659() {
     use crate::afxdp::session_glue::DestinationOwner;
@@ -6854,12 +6855,6 @@ fn rehome_or_retain_missing_neighbor_table_18659() {
     assert_eq!(
         peer.egress_ifindex, 4,
         "peer owner: redirect egress is the fabric parent"
-    );
-    // Locally active owner: never redirected over the fabric.
-    let local = rehome(candidate, DestinationOwner::Active(2), lan_host);
-    assert_eq!(
-        local, candidate,
-        "a locally active owner keeps its MissingNeighbor"
     );
     // Unknown owner (internet, gateway-routed): never redirected.
     let unknown = rehome(candidate, DestinationOwner::Unknown, internet);
@@ -6898,6 +6893,116 @@ fn rehome_or_retain_missing_neighbor_table_18659() {
     assert_eq!(
         ha, inactive_candidate,
         "HAInactive is not widened by #18659"
+    );
+}
+
+/// #18672: with a locally ACTIVE owner, a MissingNeighbor gets the
+/// ForwardCandidate keep tests. It keeps the candidate when it names the
+/// destination's connected egress, or when the owner is unknown (#16524
+/// mirror). Otherwise, the transient-FIB-lag case, it retains the stored
+/// redirect exactly as a ForwardCandidate does. Before #18672 the WAN
+/// MissingNeighbor row was returned as-is: the #18659 row shape (seat W
+/// repro on #18660).
+#[test]
+fn rehome_or_retain_owner_active_missing_neighbor_18672() {
+    use crate::afxdp::session_glue::DestinationOwner;
+    let forwarding = fw0_forwarding_unresolved_gateway_18659();
+    let lan_host = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    let internet = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let lan_zone = 21230;
+    let lan_ifindex = crate::afxdp::session_glue::connected_ifindex_for_target_in_table(
+        &forwarding,
+        lan_host,
+        None,
+    );
+    assert!(
+        lan_ifindex > 0,
+        "fixture: the ledger names the LAN host's connected egress"
+    );
+    assert_ne!(
+        lan_ifindex, 13,
+        "fixture: the connected egress is not the WAN VLAN"
+    );
+    let rehome = |candidate: ForwardingResolution, owner: DestinationOwner, target: IpAddr| {
+        crate::afxdp::session_glue::rehome_or_retain_fabric_redirect(
+            &forwarding,
+            stored_fabric_redirect_18659(),
+            candidate,
+            lan_zone,
+            owner,
+            Some(target),
+            None,
+        )
+    };
+    let wan_mn = missing_neighbor_wan_18659();
+    let wan_fc = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        neighbor_mac: Some([0x00, 0x10, 0xdb, 0xff, 0x10, 0x01]),
+        ..wan_mn
+    };
+    // Control: the ForwardCandidate on the WAN retains (transient FIB lag).
+    let fc = rehome(wan_fc, DestinationOwner::Active(2), lan_host);
+    assert_eq!(
+        fc.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "control: {fc:?}"
+    );
+    assert_eq!(fc.egress_ifindex, 4);
+    // The fix: the MissingNeighbor on the same egress retains the same way.
+    let mn = rehome(wan_mn, DestinationOwner::Active(2), lan_host);
+    assert_eq!(
+        mn.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "owner-active MissingNeighbor off the connected egress must not launder onto WAN, got {mn:?}"
+    );
+    assert_eq!(mn.egress_ifindex, 4);
+    // On the destination's connected egress it resolves locally: kept.
+    let on_link = ForwardingResolution {
+        egress_ifindex: lan_ifindex,
+        tx_ifindex: lan_ifindex,
+        next_hop: Some(lan_host),
+        tx_vlan_id: 0,
+        ..wan_mn
+    };
+    let kept = rehome(on_link, DestinationOwner::Active(2), lan_host);
+    assert_eq!(
+        kept, on_link,
+        "owner-active MissingNeighbor on the connected egress is kept"
+    );
+    // Unknown owner: never redirected (#16524 mirror), v4 and v6.
+    let unknown = rehome(wan_mn, DestinationOwner::Unknown, internet);
+    assert_eq!(
+        unknown, wan_mn,
+        "an unknown owner keeps its MissingNeighbor"
+    );
+    let wan_mn_v6 = ForwardingResolution {
+        next_hop: Some(IpAddr::V6("2001:559:8585:50::1".parse().expect("gw v6"))),
+        ..wan_mn
+    };
+    let internet_v6 = IpAddr::V6("2606:4700:4700::1111".parse().expect("internet v6"));
+    let unknown_v6 = rehome(wan_mn_v6, DestinationOwner::Unknown, internet_v6);
+    assert_eq!(
+        unknown_v6, wan_mn_v6,
+        "an unknown v6 owner keeps its MissingNeighbor"
+    );
+    // Fabric and zero egress stay verbatim under an active owner too.
+    let fabric_mn = ForwardingResolution {
+        egress_ifindex: 4,
+        tx_ifindex: 4,
+        ..wan_mn
+    };
+    assert_eq!(
+        rehome(fabric_mn, DestinationOwner::Active(2), lan_host),
+        fabric_mn
+    );
+    let zero_mn = ForwardingResolution {
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        ..wan_mn
+    };
+    assert_eq!(
+        rehome(zero_mn, DestinationOwner::Active(2), lan_host),
+        zero_mn
     );
 }
 

@@ -357,6 +357,10 @@ pub(crate) struct NatScopeCtx<'a> {
 }
 
 pub(crate) use allocator::allocator_capacity;
+// #18698: tests outside `nat` that free and re-reserve a small-pool port must
+// step past the #16035 quarantine; they read its length from here.
+#[cfg(test)]
+pub(crate) use allocator::PAT_PORT_QUARANTINE_NS_FOR_TEST;
 pub(crate) use allocator::{
     DeterministicV4, DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
     MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PersistentLeaseHold,
