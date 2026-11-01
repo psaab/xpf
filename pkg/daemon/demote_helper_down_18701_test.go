@@ -275,3 +275,30 @@ func TestReconcileLoopReleasesVIPsFirstWithUnresponsiveHelper18701(t *testing.T)
 		t.Fatalf("the reconcile pass waited %s on a helper that never acknowledges", took)
 	}
 }
+
+// TestDirectVIPOwnershipReadUnderTheLock18715 (review hardening): ownership is
+// read under directVIPMu, so a reconcile that waited for the lock while the RG
+// was promoted acts on the CURRENT owner and does not remove the VIPs the
+// promotion added.
+func TestDirectVIPOwnershipReadUnderTheLock18715(t *testing.T) {
+	d, log := newDemotion18701(t, false, 0)
+	primeRG1Primary(t, d)
+	d.cluster.SetGroupStateForTesting(1, cluster.StateSecondary)
+	d.directVIPMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		d.reconcileDirectVIPOwnership(1, "test")
+		close(done)
+	}()
+	time.Sleep(100 * time.Millisecond) // the reconcile is now waiting for the lock
+	d.cluster.SetGroupStateForTesting(1, cluster.StatePrimary)
+	d.directVIPMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconcile never finished")
+	}
+	if ev := log.snapshot(); slices.Index(ev, "vips-removed") >= 0 {
+		t.Fatalf("events %v: a reconcile that waited out a promotion removed the new owner's VIPs", ev)
+	}
+}
