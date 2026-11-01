@@ -353,12 +353,14 @@ Two consequences for anyone reading this harness's output:
   hold them, and watch an established flow. It does not need a rate axis.
   `docs/log/18655.md` describes one such probe.
 
-#18655 removed the per-key scan. The emit leg now does one pass per slice
+#18655 removed the per-key scan. The emit leg now does one pass
 (`shared_rows_stage_and_counts`), with batched restamps and O(1) dedup.
-The other whole-table walks in the slice are still O(n) per slice, and a
-cycle repeats them ceil(slab / 2048) times. So at very large session
-counts the slice remains a table-size-driven cost, and it is not covered
-by this harness.
+It also runs the whole-table shared-evidence leg once per refresh cycle
+rather than on each of the cycle's ceil(slab / 2048) slices: on tcp at
+16000 sessions, the per-slice repetition alone still saturated the
+mutexes. The leg remains O(n + N) per cycle per worker, so it is still a
+table-size-driven cost, but a linear one, and this harness does not
+cover it.
 
 The loss cluster is shared and lock-protected. The harness sources the
 `cluster-cell.sh` preamble, so it queues behind another agent's deploy or

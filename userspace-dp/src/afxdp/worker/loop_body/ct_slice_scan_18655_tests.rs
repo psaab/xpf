@@ -21,7 +21,7 @@ const ROWS_18655: u16 = 12;
 /// locally Established), so every one is collected. Shared maps: the same
 /// rows published, half with shared `rev > 0` and half with `rev == 0`,
 /// plus unrelated flows the pass must still visit.
-fn slice_fixture_18655() -> (
+fn slice_fixture_18655(rows: u16) -> (
     crate::session::SessionTable,
     Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -39,9 +39,9 @@ fn slice_fixture_18655() -> (
     let client = fx::v4(10, 0, 61, 102);
     let server = fx::v4(172, 16, 80, 200);
     let mut announced = Vec::new();
-    for i in 0..ROWS_18655 {
+    for i in 0..rows {
         let forward = fx::key(client, 21000 + i, server, 5201, crate::ip_proto::PROTO_TCP);
-        let nat = fx::snat(Some(42000 + i));
+        let nat = fx::snat(Some(42000u16.wrapping_add(i)));
         let shared_rev = if i % 2 == 0 { 3 } else { 0 };
         let e = fx::row(&forward, nat, established, 5, shared_rev, false, 7000 + u64::from(i));
         assert!(
@@ -124,7 +124,7 @@ fn shared_rows(
 
 #[test]
 fn ct_slice_reads_shared_stage_in_one_pass_per_slice_18655() {
-    let (mut sessions, shared, wire_map, announced) = slice_fixture_18655();
+    let (mut sessions, shared, wire_map, announced) = slice_fixture_18655(ROWS_18655);
     let rows = shared_rows(&shared, &wire_map);
     let mut clocks = (0usize, 0u64, 0u64, 0u64, 0usize);
     let work = || crate::afxdp::shared_ops::STAGE_COUNTS_WORK_18655.with(|w| w.get());
@@ -202,4 +202,43 @@ fn pair_set_dedup_matches_vec_contains_18655() {
     }
     assert_eq!(by_set, by_vec, "#18655: set dedup must keep Vec::contains order and content");
     assert_eq!(by_set.len(), 6, "fixture: 3 seed + 3 new pairs (incl. same key, other NAT)");
+}
+
+/// A table larger than one slice's 2048-slot budget needs several slices
+/// per refresh cycle. The shared-evidence leg walks the WHOLE table, so it
+/// must run once per cycle (its first slice), not on every slice. Running
+/// it per slice made the work per cycle O(n^2 / 2048). On tcp at 16000
+/// sessions that kept the global mutexes saturated even with the batched
+/// read.
+#[test]
+fn ct_slice_shared_evidence_runs_once_per_refresh_cycle_18655() {
+    let (mut sessions, shared, wire_map, _announced) = slice_fixture_18655(2100);
+    let mut clocks = (0usize, 0u64, 0u64, 0u64, 0usize);
+    let work = || crate::afxdp::shared_ops::STAGE_COUNTS_WORK_18655.with(|w| w.get());
+    let before = work();
+    let start = 20_000_000_000u64;
+    let mut now = start;
+    run_slice_18655(&mut sessions, &shared, &wire_map, &mut clocks, now);
+    assert_ne!(clocks.0, 0, "fixture: the cycle must need more than one slice");
+    let mut slices = 1;
+    while clocks.0 != 0 {
+        now += 100_000_000;
+        run_slice_18655(&mut sessions, &shared, &wire_map, &mut clocks, now);
+        slices += 1;
+        assert!(slices < 64, "fixture: the refresh cycle never completed");
+    }
+    let after = work();
+    assert_eq!(
+        after.0 - before.0,
+        1,
+        "#18655: the whole-table shared-evidence leg must run once per refresh cycle, \
+         not once per slice ({slices} slices this cycle)"
+    );
+    // Between cycles nothing runs.
+    now += 100_000_000;
+    run_slice_18655(&mut sessions, &shared, &wire_map, &mut clocks, now);
+    assert_eq!(work().0, after.0, "#18655: no leg between refresh cycles");
+    // The next cycle (one refresh window after the first) runs it again.
+    run_slice_18655(&mut sessions, &shared, &wire_map, &mut clocks, start + 10_000_000_000);
+    assert_eq!(work().0 - after.0, 1, "#18655: the next cycle must run the leg again");
 }
