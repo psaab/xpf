@@ -5049,9 +5049,14 @@ So on a demotion edge in direct (no-RETH-VRRP) mode, when
 `HelperElectionNotReady()` reports that the local helper is dead, restarting,
 not yet armed, or wedged (#18697/#18685):
 
-1. `reconcileDirectVIPOwnership` runs FIRST. It removes the VIPs and the
-   stable link-local, cancels the GARP/NA re-announce, and clears the RA/DHCP
-   services.
+1. `releaseDirectVIPsHelperDown` runs FIRST, for EVERY RG. It removes the VIPs
+   and the stable link-local, cancels the GARP/NA re-announce, and clears the
+   RA/DHCP services of each RG this node no longer owns. Each reconcile keys
+   on that RG's own local state, so an RG the node still owns keeps its VIPs.
+   - Every RG matters because cluster events are handled one at a time. On
+     udp, RG2's handler started 10 s after RG1's, so an RG2 VIP released only
+     by its own handler would have stayed dual-held all that time (#18715
+     review).
 2. The peer-barrier demotion prep is skipped, because there is no live helper
    to drain.
 3. The rg_active=false write is best-effort, bounded by
@@ -5059,8 +5064,25 @@ not yet armed, or wedged (#18697/#18685):
    leaves the apply unrecorded, so the reconcile loop retries it as it would
    any failed apply.
 
+The 2 s reconcile loop follows the same rule. With an unresponsive helper it
+releases every non-owned RG's VIPs before any per-RG helper round trip, skips
+the demotion prep, and bounds the rg_active=false retry.
+
 A healthy helper keeps the #18563/#18620 order unchanged. Legacy VRRP mode is
-unchanged too, since there the VIPs follow the VRRP resign.
+also unchanged: there the VIPs follow the VRRP resign, and that resign waits
+behind the 5 s prep, so a similar window may exist there (#18716).
+
+**What an operator sees.** One WARN per demoted RG:
+
+    cluster: demoting with an unresponsive helper; releasing VIPs before helper-side demotion (#18701)
+
+It carries the `rg` and the #18685/#18697 verdict reason. It is followed by
+`direct VIP reconcile: removed VIP` lines for every RG the node lost.
+
+The helper-side part of each RG's demotion still runs per RG, in turn. It
+may wait on the Manager's `m.mu` behind the wedged helper's round trips
+(#18711). That delays the rg_active bookkeeping and the next RG's handler,
+but no longer the VIP release.
 
 Cells, in `demote_helper_down_18701_test.go`:
 - with an unresponsive helper, the VIPs are released before the rg_active

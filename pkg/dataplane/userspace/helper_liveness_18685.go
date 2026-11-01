@@ -472,6 +472,29 @@ func (m *Manager) HelperElectionNotReady() bool {
 	return m.helperDownUnexpected.Load() || m.liveTrack.wedgeSuspected(time.Now())
 }
 
+// HelperElectionReason explains HelperElectionNotReady for log lines (#18701).
+// Empty when the helper is ready. Never takes m.mu.
+func (m *Manager) HelperElectionReason() string {
+	if m == nil {
+		return ""
+	}
+	if m.helperDownUnexpected.Load() {
+		return "helper exited unexpectedly and has not been respawned yet"
+	}
+	return m.liveTrack.currentReason(time.Now())
+}
+
+// currentReason is the reason for a raised verdict, or "".
+func (t *helperLivenessTracker) currentReason(now time.Time) string {
+	t.mu.Lock()
+	defer t.unlockAndFlush()
+	t.evaluateLocked(now)
+	if !t.suspected {
+		return ""
+	}
+	return t.reason
+}
+
 // HelperAnswerAge is the time since the helper last answered any control
 // round trip (#18685), for the status-age gauge.
 func (m *Manager) HelperAnswerAge() time.Duration {

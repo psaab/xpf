@@ -37,3 +37,31 @@ func setRGActiveBounded(ctx context.Context, ha dataplane.HAController, rgID int
 		return ctx.Err()
 	}
 }
+
+// releaseDirectVIPsHelperDown runs the direct-VIP reconcile for every RG of the
+// cluster. Each reconcile keys on that RG's own local state
+// (shouldOwnDirectVIPs), so it removes the VIPs, re-announce, and RA/DHCP
+// services only of RGs this node no longer owns, and leaves an owned RG's
+// VIPs in place. Used when the local helper is not answering, so that no RG's
+// VIP release waits behind another RG's helper round trips (#18701).
+func (d *Daemon) releaseDirectVIPsHelperDown(reason string) {
+	if d.cluster == nil {
+		return
+	}
+	for _, rg := range d.cluster.GroupStates() {
+		d.reconcileDirectVIPOwnership(rg.GroupID, reason)
+	}
+}
+
+// helperElectionReasonSource is the optional surface that explains the
+// #18697/#18685 verdict, for the #18701 demotion log line.
+type helperElectionReasonSource interface {
+	HelperElectionReason() string
+}
+
+func (d *Daemon) helperElectionReason() string {
+	if src, ok := d.dataplane().(helperElectionReasonSource); ok {
+		return src.HelperElectionReason()
+	}
+	return ""
+}

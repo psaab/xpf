@@ -832,12 +832,19 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// peer-barrier demotion prep (there is no live helper to drain), and
 		// bound the helper-side demotion. The healthy path keeps the #18563
 		// ordering unchanged. Direct (no-RETH-VRRP) mode only: in legacy
-		// VRRP mode the VIPs follow the VRRP resign below.
+		// VRRP mode the VIPs follow the VRRP resign below (#18716).
+		//
+		// The release covers EVERY RG, not just this event's: cluster events
+		// are handled one at a time, so a sibling RG demoted in the same
+		// election would otherwise wait behind this handler's helper round
+		// trips (#18715 review: on udp RG2's handler started 10 s after
+		// RG1's). releaseDirectVIPsHelperDown only removes the VIPs of RGs
+		// this node no longer owns.
 		helperDownDemotion := clusterDemotionEdge && noRethVRRP && d.helperElectionNotReady()
 		if helperDownDemotion {
 			slog.Warn("cluster: demoting with an unresponsive helper; releasing VIPs before helper-side demotion (#18701)",
-				"rg", ev.GroupID)
-			d.reconcileDirectVIPOwnership(ev.GroupID, "cluster-secondary-helper-down")
+				"rg", ev.GroupID, "helper", d.helperElectionReason())
+			d.releaseDirectVIPsHelperDown("cluster-secondary-helper-down")
 		}
 		if clusterDemotionEdge && d.dataplane() != nil && !helperDownDemotion {
 			d.tryPrepareUserspaceRGDemotion(ev.GroupID)
@@ -1602,6 +1609,17 @@ func (d *Daemon) reconcileRGState() {
 	// publication) re-evaluates exactly once per reconcile pass.
 	anyRGChanged := false
 
+	// #18701: with an unresponsive local helper, release every non-owned RG's
+	// direct VIPs BEFORE any per-RG helper round trip below, and skip the
+	// demotion prep and bound the rg_active=false write in the loop. Without
+	// this, an RG that still needs its demotion applied runs the 5 s prep and
+	// an unbounded write before its own VIP reconcile, and a later RG waits
+	// behind both.
+	reconcileHelperDown := noRethVRRP && d.helperElectionNotReady()
+	if reconcileHelperDown {
+		d.releaseDirectVIPsHelperDown("reconcile-helper-down")
+	}
+
 	for _, rgID := range rgIDs {
 		clusterPri := d.cluster.IsLocalPrimary(rgID)
 		vrrp := rgVRRP[rgID] // may be nil if no VRRP instances for this RG
@@ -1663,8 +1681,14 @@ func (d *Daemon) reconcileRGState() {
 				// Deactivation ordering: blackholes FIRST, then
 				// clear rg_active.
 				d.injectBlackholeRoutesFor(reconcileDPUserspaceActive, rgID)
-				d.tryPrepareUserspaceRGDemotion(rgID)
-				if err := reconcileDP.HA().SetRGActive(context.Background(), rgID, false); err != nil {
+				var err error
+				if reconcileHelperDown {
+					err = setRGActiveBounded(context.Background(), reconcileDP.HA(), rgID, false, helperDownDemotionBound)
+				} else {
+					d.tryPrepareUserspaceRGDemotion(rgID)
+					err = reconcileDP.HA().SetRGActive(context.Background(), rgID, false)
+				}
+				if err != nil {
 					if s.ShouldLogApplyError(err.Error()) {
 						slog.Warn("reconcile: failed to update rg_active",
 							"rg", rgID, "active", false, "err", err)

@@ -207,6 +207,15 @@ func (a *LegacyDataPlaneAdapter) HelperElectionNotReady() bool {
 	return m.HelperElectionNotReady()
 }
 
+// HelperElectionReason forwards the #18701 verdict explanation.
+func (a *LegacyDataPlaneAdapter) HelperElectionReason() string {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return ""
+	}
+	return m.HelperElectionReason()
+}
+
 // HelperAnswerAge forwards the #18685 answer age for /metrics.
 func (a *LegacyDataPlaneAdapter) HelperAnswerAge() time.Duration {
 	m, err := a.managerOrErr()
