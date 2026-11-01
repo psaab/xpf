@@ -917,7 +917,17 @@ type censusResult struct {
 	// only ADD a failure, never mask or re-baseline the original gate.
 	bracedPackedDivergent []string
 	bracedPackedChecked   int
-	skipped               map[string]int
+	// twoLevelDivergent / twoLevelChecked record the THIRD arm (#18762):
+	// the leaf packed onto the GRANDPARENT line, eliding the immediate
+	// container too -- `outer inner leaf value;` against the fully braced
+	// twin. The original arm only ever elides ONE level, so a container
+	// whose own packed tail is handled but whose (outer, inner) pair is not
+	// admitted (`tcp-session time-wait-state session-ageout;`) compiled to
+	// nothing and appeared in no inventory. Like the braced-packed arm it
+	// is kept OUT of `divergent`, so it can only add a failure.
+	twoLevelDivergent []string
+	twoLevelChecked   int
+	skipped           map[string]int
 	// dropShape records, for each DIVERGENT site, what the compact spelling
 	// actually produced:
 	//
@@ -1151,6 +1161,21 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 				}
 			}
 		}
+		if len(rendered) >= 2 && strings.TrimSpace(ctx) == "" {
+			outerParent := rendered[:len(rendered)-2]
+			outer := rendered[len(rendered)-2]
+			ctx2 := renderScaffold(contextForStanza(s.container[:len(s.container)-2], s.container[len(s.container)-2]), s.container, rendered)
+			twoLevel := pre + nest(outerParent, ctx2+outer+" "+stanza+" "+s.leaf+" "+v1+";")
+			if s.flag {
+				twoLevel = pre + nest(outerParent, ctx2+outer+" "+stanza+" "+s.leaf+";")
+			}
+			if c2 := compileTextPanicsafe15064(t, twoLevel); c2 != nil {
+				res.twoLevelChecked++
+				if !cfgEqual(cb1, c2) {
+					res.twoLevelDivergent = append(res.twoLevelDivergent, siteKey)
+				}
+			}
+		}
 		res.checked++
 		if !cfgEqual(cb1, cc) {
 			res.divergent = append(res.divergent, siteKey)
@@ -1373,6 +1398,24 @@ func TestCompactBlockEquivalenceInventory2419(t *testing.T) {
 		t.Errorf("#15064: braced-packed arm checked ZERO cells — the instance-site population vanished, so the arm above measures nothing")
 	}
 
+	// #18762: the two-level arm is ASSERTED under `security flow`, where a
+	// dropped value is a dropped security or session-handling knob that
+	// commits clean; elsewhere it RECORDS (TestCompactBlockCensusReport2419)
+	// and the measured list is filed as its own issue.
+	var flowTwoLevelDivergent []string
+	for _, site := range res.twoLevelDivergent {
+		if strings.HasPrefix(site, "security flow ") {
+			flowTwoLevelDivergent = append(flowTwoLevelDivergent, site)
+		}
+	}
+	if len(flowTwoLevelDivergent) > 0 {
+		t.Errorf("#18762: two-level-elided `security flow` site(s) drop their value (`outer inner leaf value;` compiles differently from the braced twin): %v\n"+
+			"    Admit the (outer, inner) pair in compactNormalizeInScope, or fix the reader.", flowTwoLevelDivergent)
+	}
+	if res.twoLevelChecked == 0 {
+		t.Errorf("#18762: two-level arm checked ZERO cells, so the assertion above measures nothing")
+	}
+
 	// Positive control, both directions.
 	//
 	// A one-directional control cannot distinguish a working instrument from one
@@ -1438,6 +1481,11 @@ func TestCompactBlockCensusReport2419(t *testing.T) {
 	t.Logf("  cells DIVERGENT:                 %d", len(res.divergent))
 	t.Logf("  braced-packed cells CHECKED (#15064):   %d", res.bracedPackedChecked)
 	t.Logf("  braced-packed cells DIVERGENT (#15064): %d", len(res.bracedPackedDivergent))
+	t.Logf("  two-level cells CHECKED (#18762):       %d", res.twoLevelChecked)
+	t.Logf("  two-level cells DIVERGENT (#18762):     %d", len(res.twoLevelDivergent))
+	for _, site := range res.twoLevelDivergent {
+		t.Logf("    two-level divergent: %s", site)
+	}
 	keys := make([]string, 0, len(res.skipped))
 	for k := range res.skipped {
 		keys = append(keys, k)

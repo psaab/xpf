@@ -183,6 +183,20 @@ the other two and changes nothing in the shipped product.
 | `packedStatements: true` on the container | **how** the folded tail splits | the tail becomes a CHAIN — each statement nested under the previous — so everything after the first is lost |
 | `args: N` on each leaf | where each statement **ends** | the split cannot find the boundary and declines to guess |
 
+**Elision is per level (#18762).** Each packed level is its own `(container,
+head)` pair. `tcp-session time-wait-state session-ageout;` needs
+`(tcp-session, time-wait-state)` admitted. time-wait-state's own `packedTail`
+only covers `time-wait-state session-ageout;` inside tcp-session's braces. The
+#2419 census has a third, **two-level** arm that packs `outer inner leaf
+value;` and compares it with the braced twin:
+
+- It asserts no divergence under `security flow`.
+- Everywhere else it records; the measured sites are filed in #18771.
+
+Losing a single admission line is enough to drop a security flag:
+`(tcp-session, strict-syn-check)` disappeared in #16581, and the only signal was
+that census.
+
 **Which of the three needs the same-keyword collision check, and which cannot.**
 `compactNormalizeInScope` is keyed on a **(container, head) PAIR**, so an
 admission reaches *every* container with that keyword: firewall filter terms

@@ -1812,6 +1812,12 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"tcp-session initial-timeout",
 		"tcp-session tcp-initial-timeout",
 		"tcp-session time-wait-timeout",
+		// #18762 fold: maximum-window (#15753, sequence-check window bound)
+		// was never admitted, so `tcp-session maximum-window 65536;`
+		// compiled to 0 -- the window the sequence check enforces silently
+		// fell back to its default. Measured empty+silent like its siblings
+		// (testdata/compact_block_divergences_2419.txt listed it `empty`).
+		"tcp-session maximum-window",
 		"then log",
 		"thursday start-time",
 		"thursday stop-time",
@@ -1915,6 +1921,19 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		// ...StrictGateAgrees) went red at that commit;
 		// TestStrictSynCheckEverySpellingSetsTheFlag pins every spelling.
 		"tcp-session strict-syn-check",
+		// #18762 fold: rst-sequence-check (#15753, validate a TCP RST's
+		// sequence against the receive window) was never admitted, so the
+		// elided spelling committed clean and compiled RstSequenceCheck=false
+		// -- reaching the dataplane flow snapshot as false. Same class and
+		// measurement as strict-syn-check above.
+		"tcp-session rst-sequence-check",
+		// #18762 fold: `tcp-session time-wait-state session-ageout;` (the
+		// container itself elided one level above its packed tail) compiled
+		// to nothing -- time-wait-state's own packedTail (#16662) only covers
+		// `time-wait-state session-ageout;` INSIDE tcp-session's braces. The
+		// #2419 census never generated this two-level spelling, so it was in
+		// no inventory; its two-level arm now does.
+		"tcp-session time-wait-state",
 		"tcp-session rst-invalidate-session",
 		"tcp-session fin-invalidate-session",
 		"vpn-monitor optimized":

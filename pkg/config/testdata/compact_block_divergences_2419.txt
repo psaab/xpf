@@ -314,8 +314,6 @@ routing-instances xpfname protocols bgp multipath multiple-as	empty
 security address-book global description	empty
 security address-book xpfname address-set	partial
 security address-book xpfname description	empty
-security flow tcp-session maximum-window	empty
-security flow tcp-session rst-sequence-check	empty
 security ike policy xpfarg local-certificate	empty
 security log report	empty
 security log source-address	empty
