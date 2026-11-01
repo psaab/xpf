@@ -122,6 +122,12 @@ func TestRotationOffPlaceholderCommits18744(t *testing.T) {
 		{"routine commit on a placeholder-keyed node", placeholderP18744, "", placeholderP18744, "", true, false},
 		{"step 1-2: stage the real key beside the placeholder signer", placeholderP18744, "", placeholderP18744, keyA16858, true, false},
 		{"step 3-4: stage the retiring placeholder signer as additional", placeholderP18744, keyA16858, keyA16858, placeholderP18744, false, true},
+		// A routine commit while the window sits at steps 3-4, and backing out
+		// of them: both are judged against an active config that holds the
+		// placeholder as the ADDITIONAL key, so the additional slot must count
+		// as accepted.
+		{"routine commit at steps 3-4", keyA16858, placeholderP18744, keyA16858, placeholderP18744, false, true},
+		{"backing out of steps 3-4", keyA16858, placeholderP18744, placeholderP18744, keyA16858, true, false},
 		{"step 5: finalize", keyA16858, placeholderP18744, keyA16858, "", false, false},
 	}
 	for _, st := range steps {
@@ -154,6 +160,24 @@ func TestRollbackReintroducingPlaceholderRefused18744(t *testing.T) {
 // Fresh state is not judged: no active config (empty store, bootstrap import,
 // check-config, direct CompileConfig) keeps the warning only, so a reimaged
 // node bootstrapping a placeholder conf still gets an active config.
+// The caller decides whether to judge (configstore). Judged with no active
+// config, the accepted set is empty, so any placeholder is introduced: that
+// is an interactive first commit on a store that never committed.
+func TestJudgedWithNoActiveConfigRefusesAnyPlaceholder18744(t *testing.T) {
+	_, err := CompileConfigJudgingPlaceholders(clusterTree16858(t, placeholderP18744, ""), nil, true)
+	requirePlaceholderRefusal18744(t, err, "authentication-key")
+	_, err = CompileConfigForNodeJudgingPlaceholders(clusterTree16858(t, keyA16858, placeholderP18744), 0, nil, true)
+	requirePlaceholderRefusal18744(t, err, "additional-authentication-key")
+	// CONTROL: the same compile not judged only warns.
+	cfg, err := CompileConfigJudgingPlaceholders(clusterTree16858(t, placeholderP18744, ""), nil, false)
+	if err != nil {
+		t.Fatalf("not judged, a placeholder was refused: %v", err)
+	}
+	if !placeholderWarned18744(cfg, "authentication-key") {
+		t.Fatalf("not judged, the placeholder warning is missing: %q", cfg.Warnings)
+	}
+}
+
 func TestPlaceholderFreshStateWarnsOnly18744(t *testing.T) {
 	for name, compile := range map[string]func() (*Config, error){
 		"CompileConfig": func() (*Config, error) {
@@ -181,6 +205,7 @@ func TestPlaceholderFreshStateWarnsOnly18744(t *testing.T) {
 // directly to reach the downgrade branch.
 func TestPlaceholderRefusalDowngradedOnTolerantPath18744(t *testing.T) {
 	opts := currentClusterOpts(currentConfig16858(t, keyA16858, ""))
+	opts.judgePlaceholders18744 = true
 	opts.lenientClusterAuthKey = true
 	cfg, err := compileTree(clusterTree16858(t, keyA16858, placeholderP18744), opts, nil)
 	if err != nil {

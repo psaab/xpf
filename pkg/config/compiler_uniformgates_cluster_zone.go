@@ -694,7 +694,7 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 	// (the value), where the transition message would send them through the
 	// overlap procedure with the same unusable key. Same lenient downgrade.
 	if err := validateClusterAuthKeyPlaceholderStrict(
-		cfg, opts.currentConfigPresent18744, opts.currentClusterAccepted16858); err != nil {
+		cfg, opts.judgePlaceholders18744, opts.currentClusterAccepted16858); err != nil {
 		if opts.lenientClusterAuthKey {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("cluster authentication (downgraded to warning on tolerant path): %v", err))

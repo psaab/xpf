@@ -215,7 +215,7 @@ func (s *Store) Commit() (*config.Config, error) {
 func (s *Store) CommitWithDescription(description string) (*config.Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.commitWithDescriptionLocked(description, UnknownPrincipal)
+	return s.commitWithDescriptionLocked(description, UnknownPrincipal, false)
 }
 
 // CommitWithDescriptionAs is the standalone caller variant with an explicit
@@ -223,7 +223,7 @@ func (s *Store) CommitWithDescription(description string) (*config.Config, error
 func (s *Store) CommitWithDescriptionAs(principal, description string) (*config.Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.commitWithDescriptionLocked(description, principal)
+	return s.commitWithDescriptionLocked(description, principal, false)
 }
 
 // CommitWithDescriptionGen is CommitWithDescription bound to an expected
@@ -273,12 +273,15 @@ func (s *Store) CommitWithDescriptionGenAs(
 		return nil, fmt.Errorf("%w (examined generation %d, current %d)",
 			ErrCandidateGenerationConflict, expectedGen, s.candidateGen)
 	}
-	return s.commitWithDescriptionLocked(description, authority.JournalPrincipal())
+	return s.commitWithDescriptionLocked(description, authority.JournalPrincipal(), authority.isBootstrapImport())
 }
 
 // commitWithDescriptionLocked is the shared body of CommitWithDescription and
 // the generation-bound CommitWithDescriptionGen. Caller holds s.mu.Lock.
-func (s *Store) commitWithDescriptionLocked(description, principal string) (*config.Config, error) {
+// bootstrapImport is true only for the daemon's bootstrap import, identified
+// by its authority (CommitAuthority.isBootstrapImport), never by a principal
+// string a caller could choose.
+func (s *Store) commitWithDescriptionLocked(description, principal string, bootstrapImport bool) (*config.Config, error) {
 	// #3893: reject a user-session commit on a read-only secondary. The
 	// internal HA-sync ingress (SyncApply) and the commit-confirmed timeout
 	// revert (PromoteRollback) promote the active config directly and never
@@ -311,7 +314,7 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 			"(newlines and other control characters are not allowed in commit descriptions)")
 	}
 
-	committedTree, compiled, err := s.compileAuthSafeCandidate(s.candidate)
+	committedTree, compiled, err := s.compileAuthSafeCandidate(s.candidate, bootstrapImport)
 	if err != nil {
 		return nil, fmt.Errorf("commit check failed: %w", err)
 	}
@@ -671,7 +674,7 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 		return nil, fmt.Errorf("not in configuration mode")
 	}
 
-	committedTree, compiled, err := s.compileAuthSafeCandidate(s.candidate)
+	committedTree, compiled, err := s.compileAuthSafeCandidate(s.candidate, false)
 	if err != nil {
 		return nil, fmt.Errorf("commit check failed: %w", err)
 	}

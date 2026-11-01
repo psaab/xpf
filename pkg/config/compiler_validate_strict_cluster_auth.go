@@ -472,8 +472,8 @@ func clusterKeyIsPublishedPlaceholder(raw string) bool {
 }
 
 // validateClusterAuthKeyPlaceholderStrict refuses a strict commit that
-// INTRODUCES a published placeholder into either control-link key leaf of a
-// node that already has an active configuration (#18744).
+// INTRODUCES a published placeholder into either control-link key leaf
+// (#18744).
 //
 // Until this gate a placeholder was warning-only everywhere, so a key copied
 // from a reference config committed with one advisory among the rest of the
@@ -487,39 +487,48 @@ func clusterKeyIsPublishedPlaceholder(raw string) bool {
 // byte (the same exact-byte view the #16858 transition gate uses). A
 // placeholder the active config already signs with or accepts is
 // pre-existing, and it keeps committing with the warning
-// (ClusterAuthKeyStrengthWarnings). That keeps two things working:
-//   - routine commits on a node already keyed with a placeholder, and the
-//     first step of rotating off it, where the placeholder stays the
-//     signing primary while a real key is staged as the additional key;
-//   - the second step, which stages the retiring placeholder signer as the
-//     additional key beside the new primary. The active config signs with
-//     it, so it is in the active set.
+// (ClusterAuthKeyStrengthWarnings). That keeps the whole rotation off it
+// working:
+//   - Steps 1-2: the placeholder stays the signing primary while a real key
+//     is staged as the additional key.
+//   - Steps 3-4: the retiring placeholder signer moves to the additional
+//     slot beside the new primary. That commit is judged against an active
+//     config that signs with it. Every later commit at steps 3-4, and backing
+//     out of them, is judged against an active config that holds it as the
+//     ADDITIONAL key; that is why the additional slot counts as accepted.
 //
-// Refused: a placeholder staged as the additional key over an active config
-// that does not hold it (rotating TO a placeholder), a placeholder primary the
-// active config does not hold (also refused by the transition gate, but this
-// message names the actual problem), keying an unkeyed active cluster with
-// one, and a rollback or load override that brings back a placeholder the
-// active config has since retired.
+// Refused:
+//   - a placeholder staged as the additional key over an active config that
+//     does not hold it (rotating TO a placeholder);
+//   - a placeholder primary the active config does not hold (the transition
+//     gate refuses it too, but this message names the actual problem);
+//   - keying an unkeyed or standalone node with one;
+//   - a rollback or load override that brings back a placeholder the active
+//     config has since retired;
+//   - any placeholder in a judged commit on a store that has never
+//     committed, because there is no accepted set.
 //
-// Fresh state is deliberately NOT judged. With no active config
-// (currentPresent false), there is nothing to have introduced it into, and
-// that is the state of the unattended paths:
-//   - daemon.bootstrapFromFile, the first-boot import that runs as an
-//     ordinary commit on an empty store;
-//   - configstore.CheckText and the day-0 loaders;
-//   - a direct CompileConfig.
+// WHETHER to judge is the caller's decision (judge, set by configstore
+// through CompileConfigJudgingPlaceholders). configstore judges every commit
+// and commit check, except:
+//   - the bootstrap import (daemon.bootstrapFromFile, committer
+//     system:bootstrap) on a store that has never committed, including a
+//     #1922 Item 1b store whose first commit was confirmed-rolled-back.
+//     Refusing there would turn a placeholder conf on a reimaged node from a
+//     warning into a node with no active config;
+//   - a store whose committed config no longer compiles (#1960). Its accepted
+//     set is unknown, so a repair commit that introduces a placeholder only
+//     warns. That is the residual.
 //
-// Refusing there would turn a placeholder conf on a reimaged node from a
-// warning into a node with no active config. The residual is the first
-// interactive commit on an empty store, which also only warns. The tolerant
-// load and config-sync paths never supply the active state, and they
-// downgrade any refusal to a warning (#1960 no-brick).
+// check-config, the day-0 loaders and a direct CompileConfig are not judged.
+// They vet exactly what the bootstrap import would accept. The tolerant load
+// and config-sync paths never judge either; the lenient downgrade below is
+// only a fallback for a future tolerant caller.
 //
 // Neither the key nor the matched marker is echoed: when the key IS a marker,
 // naming the marker prints the key.
-func validateClusterAuthKeyPlaceholderStrict(cfg *Config, currentPresent bool, active *clusterAcceptedKeys16858) error {
-	if cfg == nil || cfg.Chassis.Cluster == nil || !currentPresent {
+func validateClusterAuthKeyPlaceholderStrict(cfg *Config, judge bool, active *clusterAcceptedKeys16858) error {
+	if cfg == nil || cfg.Chassis.Cluster == nil || !judge {
 		return nil
 	}
 	var introduced []string
