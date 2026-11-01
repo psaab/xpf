@@ -476,6 +476,10 @@ test-race-dp:
 		$(GO) test -list "^Test.*($$alt)" ./pkg/cluster/ | grep -q '^Test' || { echo "test-race-dp: pkg/cluster -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
 	$(GO) test -race ./pkg/cluster/ -run 'DoesNotRaceUpdateGroups6550|DoesNotHoldMuAcrossManagerCallback6550|DoesNotRaceStopHeartbeat7257|StartHeartbeatSupersededByStopDoesNotPublish7257' -count=2
+	@for alt in 17175 18760 9051; do \
+		$(GO) test -list "^Test.*($$alt)" ./pkg/grpcapi/ | grep -q '^Test' || { echo "test-race-dp: pkg/grpcapi -run alternative $$alt matches no test" >&2; exit 1; }; \
+	done
+	$(GO) test -race ./pkg/grpcapi/ -run '17175|18760|9051' -count=2
 	$(GO) test -race -run 'Race|Concurrent' -count=1 $$($(GO) list ./pkg/... ./cmd/...)
 
 # #16715: the property leg above races every Race/Concurrent-named test
