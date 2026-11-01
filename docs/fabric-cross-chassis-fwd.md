@@ -1553,7 +1553,7 @@ constraint reminder in the #18719 sense (`docs/config-schema.md`,
       before generic XDP) equals frames sent. For the invisible classes,
       `xpf_userspace_fabric_unstamped_ingress_drops_total` rose by exactly
       the frames sent. That counter is therefore the complementary signal for
-      unicast IP from a third speaker.
+      unicast IP from a third speaker. Surfacing it in the alarm is #18775.
     - So the detector sees a third host's ARP/ND/DHCP/mDNS/MLD chatter, not
       unicast traffic aimed at the cluster.
   - **Not evidence.** Frames to the IEEE 802.1 link-constrained groups
