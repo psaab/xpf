@@ -1235,7 +1235,7 @@ test-daemon-kernel:
 			echo "test-daemon-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the forcing prerequisites are unavailable."; \
 			exit 1; \
 		fi; \
-		echo "make test: NOT-EXAMINED — daemon-kernel (30 cells: #9637 ingress, #11409 unzoned-ingress, #9637 reinject, #12034 shared-VRF, #12229 lifeline, #12087 secure-tunnel, the 21 #16470 mgmt-VRF/RI-VRF/DHCP/#9506 cells, plus the 3 #18573 direct-VIP stamp cells)."; \
+		echo "make test: NOT-EXAMINED — daemon-kernel (33 cells: #9637 ingress, #11409 unzoned-ingress, #9637 reinject, #12034 shared-VRF, #12229 lifeline, #12087 secure-tunnel, the 21 #16470 mgmt-VRF/RI-VRF/DHCP/#9506 cells, plus the 3 #18573 direct-VIP stamp cells and the 3 #18746 zero-hop cells)."; \
 		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
 		echo "  Run where unprivileged user namespaces are available, or set XPF_REQUIRE_NETNS=1 to fail instead."; \
 		exit 0; \
