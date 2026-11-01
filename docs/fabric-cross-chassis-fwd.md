@@ -1559,13 +1559,22 @@ constraint reminder in the #18719 sense (`docs/config-schema.md`,
     reports ENETDOWN once on the bound socket, and the kernel re-hooks the
     socket when the parent comes back. The reader treats ENETDOWN as
     transient and keeps reading.
+  - **Unregister.** An UNREGISTERED parent also reports ENETDOWN, but the
+    kernel unbinds the socket (ifindex -1) and never re-hooks it, and a
+    parent deleted while down unbinds it silently. So on every ENETDOWN and
+    every receive timeout the reader checks `getsockname`. If unbound, it
+    stops with "the fabric parent was unregistered", and the link reads as
+    not running until the fabric refresh re-keys it to the re-created parent.
   - **Restart.** Any other reader exit is restarted by the Monitor with
-    exponential backoff (5 s to 5 min). The tracker survives, so evidence
-    and a raised alarm are not lost.
+    exponential backoff: 5 s, doubling, capped at 5 min, back to 5 s after a
+    run of at least 1 min (`restartDelay`). The tracker survives, so
+    evidence and a raised alarm are not lost.
   - **Status while down.** While a sampler is down, status shows `Warning:
     fabric link <fab> (<parent>): the fabric-segment watcher is not running
     (...)`, so an unwatched link does not read as a clean one. The hold
-    clock keeps running, so a raised alarm still clears.
+    clock keeps running, so a raised alarm still clears, and that clear is
+    logged with the reason "the hold window passed while the fabric-segment
+    watcher was not running; the segment was unobserved, not clean".
   - **Re-key.** A link whose identity (parent ifindex, either MAC) changes,
     or that is removed, retires its tracker, and a raised alarm logs its
     clear.
@@ -1586,7 +1595,8 @@ constraint reminder in the #18719 sense (`docs/config-schema.md`,
 - **Kernel cells.** `make test-fabricsegment-kernel`, part of `make test`,
   runs the cells in `pkg/fabricsegment/sampler_linux_test.go`
   (`TapSamplerKernelCells18719`: tap and filter, parent down/up, bind while
-  down) under `unshare -rn` with `XPF_REQUIRE_NETNS=1`, by name.
+  down, parent re-created) under `unshare -rn` with `XPF_REQUIRE_NETNS=1`,
+  by name. Without a usable netns, the NOT-EXAMINED line names the cause.
   - The filter is counted with `PACKET_STATISTICS`, so an accept-all filter
     cannot hide behind the userspace re-check.
   - No XDP program is attached there, so those cells do not establish

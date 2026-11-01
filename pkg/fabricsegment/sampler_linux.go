@@ -43,7 +43,13 @@ func runTapSampler(ctx context.Context, link Link, tracker *Tracker) error {
 //
 // ENETDOWN is transient. The kernel reports it once on a socket bound to a
 // parent that went down (or was down at bind) and re-hooks the socket when
-// the parent comes back up, so the reader keeps reading and ticking.
+// the parent comes back up, so the reader keeps reading and ticking. An
+// UNREGISTERED parent is not transient: the kernel also reports ENETDOWN,
+// but unbinds the socket (ifindex -1) and never re-hooks it, and a parent
+// deleted while already down unbinds it with no error at all. So on every
+// ENETDOWN and every receive timeout the reader checks the binding and
+// returns errParentGone; the Monitor then shows the link as not running and
+// retries until the fabric refresh re-keys it (#18751 review).
 func readTap(ctx context.Context, fd int, tracker *Tracker) error {
 	buf := make([]byte, snapLen)
 	windowStart := time.Now()
@@ -53,6 +59,9 @@ func readTap(ctx context.Context, fd int, tracker *Tracker) error {
 		now := time.Now()
 		if err != nil {
 			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) || errors.Is(err, unix.ENETDOWN) {
+				if tapUnbound(fd) {
+					return errParentGone
+				}
 				tracker.Tick(now)
 				continue
 			}
@@ -78,6 +87,20 @@ func readTap(ctx context.Context, fd int, tracker *Tracker) error {
 		}
 	}
 	return nil
+}
+
+// errParentGone stops a reader whose fabric parent was unregistered.
+var errParentGone = errors.New("the fabric parent was unregistered; the tap is no longer bound")
+
+// tapUnbound reports whether the kernel unbound the tap from its parent
+// (packet_notifier sets the socket's ifindex to -1 on NETDEV_UNREGISTER).
+func tapUnbound(fd int) bool {
+	sa, err := unix.Getsockname(fd)
+	if err != nil {
+		return false
+	}
+	ll, ok := sa.(*unix.SockaddrLinklayer)
+	return ok && ll.Ifindex == -1
 }
 
 func openTap(link Link) (int, error) {

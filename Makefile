@@ -1246,11 +1246,12 @@ test-fabricsegment-kernel:
 	echo "$$out"; \
 	if [ $$rc -eq 77 ]; then \
 		if [ -n "$${XPF_REQUIRE_NETNS:-}" ]; then \
-			echo "test-fabricsegment-kernel: FAIL — XPF_REQUIRE_NETNS=1, but a private netns is unavailable."; \
+			echo "test-fabricsegment-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the leg skipped: $$(printf '%s\n' "$$out" | sed -n 's/^SKIP: //p' | head -1)"; \
 			exit 1; \
 		fi; \
-		echo "make test: NOT-EXAMINED — fabric-segment kernel cells (3 cells: #18719 tap/filter, parent down/up, bind while down)."; \
-		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
+		cause=$$(printf '%s\n' "$$out" | sed -n 's/^SKIP: //p' | head -1); \
+		echo "make test: NOT-EXAMINED — fabric-segment kernel cells (4 cells: #18719 tap/filter, parent down/up, bind while down, parent re-created)."; \
+		echo "  Cause: $${cause:-unknown (the leg returned 77 without a SKIP line)}. The real-kernel cells did not run."; \
 		exit 0; \
 	fi; \
 	exit $$rc

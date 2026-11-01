@@ -416,3 +416,76 @@ func TestMonitorShowsAStoppedWatcher18719(t *testing.T) {
 		t.Fatalf("Alarms() = %v, want the not-running line and the raised alarm", a)
 	}
 }
+
+// TestMonitorRestartBackoff18719 (#18751 review NIT): the production restart
+// schedule on a fake clock. min first, doubling, capped at max, reset to min
+// after a run of at least stableRun.
+func TestMonitorRestartBackoff18719(t *testing.T) {
+	var mu sync.Mutex
+	now := time.Unix(5_000_000, 0)
+	runs := []time.Duration{0, 0, 0, 0, 0, 0, 0, 0, stableRun + time.Second, 0}
+	var waits []time.Duration
+	i := 0
+	done := make(chan struct{})
+	mon := NewMonitor(func(context.Context, Link, *Tracker) error {
+		mu.Lock()
+		if i < len(runs) {
+			now = now.Add(runs[i])
+			i++
+		}
+		mu.Unlock()
+		return errors.New("stop")
+	})
+	mon.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	mon.wait = func(ctx context.Context, _ *Tracker, d time.Duration) bool {
+		mu.Lock()
+		waits = append(waits, d)
+		n := len(waits)
+		now = now.Add(d)
+		mu.Unlock()
+		if n == len(runs) {
+			close(done)
+			<-ctx.Done()
+			return false
+		}
+		return true
+	}
+	mon.Update([]Link{testLink(t)})
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the supervisor did not restart the sampler enough times")
+	}
+	mon.Stop()
+	s := time.Second
+	want := []time.Duration{5 * s, 10 * s, 20 * s, 40 * s, 80 * s, 160 * s, 300 * s, 300 * s, 5 * s, 10 * s}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(waits) != len(want) {
+		t.Fatalf("waits = %v, want %v", waits, want)
+	}
+	for k := range want {
+		if waits[k] != want[k] {
+			t.Fatalf("waits = %v, want %v (restartBackoffMin=%v restartBackoffMax=%v)", waits, want, restartBackoffMin, restartBackoffMax)
+		}
+	}
+}
+
+// TestClearWhileWatcherDownSaysSo18719 (#18751 review NIT): a hold that
+// runs out while the sampler is down clears with the watcher-down reason,
+// not as if the segment had been observed clean.
+func TestClearWhileWatcherDownSaysSo18719(t *testing.T) {
+	var reasons []string
+	tr := NewTracker(testLink(t), func(_ Link, raised bool, detail string) {
+		if !raised {
+			reasons = append(reasons, detail)
+		}
+	})
+	tr.Observe(mac(t, "18:e8:29:2c:13:7a"), time.Now().Add(-AlarmHold-2*time.Second))
+	if !waitTicking(context.Background(), tr, 1200*time.Millisecond) {
+		t.Fatal("waitTicking reported a cancelled context")
+	}
+	if len(reasons) != 1 || reasons[0] != ClearWatcherDown {
+		t.Fatalf("clear reasons = %q, want exactly the watcher-down reason", reasons)
+	}
+}

@@ -6,8 +6,9 @@
 # The cells drive the fabric-segment watcher's real AF_PACKET tap on veth
 # pairs: nothing queued before bind, the kernel cBPF filter (counted with
 # PACKET_STATISTICS, so an accept-all filter cannot hide behind the
-# userspace re-check), the IEEE 802.1 link-constrained exclusion, and the
-# reader surviving a parent down/up and a bind while the parent is down.
+# userspace re-check), the IEEE 802.1 link-constrained exclusion, the
+# reader surviving a parent down/up and a bind while the parent is down,
+# and an unregistered parent reading as not running until re-keyed.
 # Under a plain `go test` they SKIP, and a skipped cell reads exactly like a
 # passing one, so this leg forces them and checks every cell BY NAME.
 #
@@ -39,7 +40,7 @@ if ! unshare -rn true 2>/dev/null; then
 	exit 77
 fi
 
-CELLS="TestTapSamplerOnARealSegment18719 TestTapSamplerSurvivesParentDownUp18719 TestTapSamplerBoundWhileParentDown18719"
+CELLS="TestTapSamplerOnARealSegment18719 TestTapSamplerSurvivesParentDownUp18719 TestTapSamplerBoundWhileParentDown18719 TestTapSamplerParentRecreated18719"
 pattern=$(printf '%s' "$CELLS" | tr ' ' '|')
 
 # -count=1: a cached PASS must never stand in for a run that did not happen.

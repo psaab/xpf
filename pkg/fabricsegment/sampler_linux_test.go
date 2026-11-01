@@ -28,6 +28,7 @@ var TapSamplerKernelCells18719 = []string{
 	"TestTapSamplerOnARealSegment18719",
 	"TestTapSamplerSurvivesParentDownUp18719",
 	"TestTapSamplerBoundWhileParentDown18719",
+	"TestTapSamplerParentRecreated18719",
 }
 
 // TestTapSamplerOnARealSegment18719 drives the real kernel path
@@ -175,6 +176,58 @@ func TestTapSamplerBoundWhileParentDown18719(t *testing.T) {
 	src := mac(t, "18:e8:29:00:02:a1")
 	sendFrame(t, fabWire.Attrs().Index, bcastMAC, src)
 	awaitTracked(t, tracker, src)
+}
+
+// TestTapSamplerParentRecreated18719 (#18751 review): an UNREGISTERED parent
+// unbinds the tap for good (ifindex -1, never re-hooked). The link must read
+// as not running instead of watching nothing while looking clean, and after
+// the fabric refresh re-keys it to the re-created parent a foreign frame
+// raises the alarm again.
+func TestTapSamplerParentRecreated18719(t *testing.T) {
+	requireEmptyNetns(t)
+	fab, fabWire := vethPair(t, "xfs0", "xfs1")
+	link := linkFor(fab, fabWire)
+	mon := NewMonitor(runTapSampler)
+	mon.backoffMin, mon.backoffMax = 200*time.Millisecond, 200*time.Millisecond
+	defer mon.Stop()
+	mon.Update([]Link{link})
+	before := mac(t, "18:e8:29:00:03:a1")
+	waitUntil(t, 5*time.Second, "the first tap armed", func() bool { return mon.trackerFor(link) != nil })
+	time.Sleep(300 * time.Millisecond) // let the sampler bind
+	sendFrame(t, fabWire.Attrs().Index, bcastMAC, before)
+	awaitTracked(t, mon.trackerFor(link), before)
+
+	if err := netlink.LinkDel(fab); err != nil {
+		t.Fatalf("delete the parent: %v", err)
+	}
+	waitUntil(t, 6*time.Second, "the link reads as not running after its parent was deleted", func() bool {
+		for _, a := range mon.Alarms() {
+			if strings.Contains(a, "watcher is not running") {
+				return true
+			}
+		}
+		return false
+	})
+
+	fab2, fabWire2 := vethPair(t, "xfs0", "xfs1")
+	link2 := linkFor(fab2, fabWire2)
+	mon.Update([]Link{link2}) // the fabric refresh re-keys to the new parent
+	waitUntil(t, 5*time.Second, "the re-keyed tap armed", func() bool { return mon.trackerFor(link2) != nil })
+	time.Sleep(300 * time.Millisecond)
+	after := mac(t, "18:e8:29:00:03:b1")
+	sendFrame(t, fabWire2.Attrs().Index, bcastMAC, after)
+	awaitTracked(t, mon.trackerFor(link2), after)
+}
+
+func waitUntil(t *testing.T, d time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting until %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 var (

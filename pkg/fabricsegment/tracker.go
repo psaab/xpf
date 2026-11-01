@@ -80,6 +80,11 @@ type Tracker struct {
 // AlarmHold.
 const ClearHoldExpired = "no non-peer source MAC seen within the hold window"
 
+// ClearWatcherDown is the clear reason when the hold window ran out while the
+// sampler was not running: nothing was observed, which is not the same as a
+// clean segment (#18751 review).
+const ClearWatcherDown = "the hold window passed while the fabric-segment watcher was not running; the segment was unobserved, not clean"
+
 // NewTracker returns a tracker for link.
 func NewTracker(link Link, onTransition func(Link, bool, string)) *Tracker {
 	return &Tracker{link: link, sources: map[string]*sourceRecord{}, onTransition: onTransition}
@@ -163,7 +168,10 @@ func (t *Tracker) Observe(src net.HardwareAddr, now time.Time) {
 
 // Tick expires sources older than AlarmHold and clears the alarm when none
 // remain. The sampler calls it on every receive timeout.
-func (t *Tracker) Tick(now time.Time) {
+func (t *Tracker) Tick(now time.Time) { t.tick(now, ClearHoldExpired) }
+
+// tick is Tick with the clear reason the caller can vouch for.
+func (t *Tracker) tick(now time.Time, reason string) {
 	t.mu.Lock()
 	for key, rec := range t.sources {
 		if now.Sub(rec.lastSeen) > AlarmHold {
@@ -180,7 +188,7 @@ func (t *Tracker) Tick(now time.Time) {
 	}
 	t.mu.Unlock()
 	if fire && t.onTransition != nil {
-		t.onTransition(t.link, false, ClearHoldExpired)
+		t.onTransition(t.link, false, reason)
 	}
 }
 

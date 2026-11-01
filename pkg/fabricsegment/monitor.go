@@ -36,7 +36,10 @@ type Monitor struct {
 	backoffMin time.Duration
 	backoffMax time.Duration
 	transition func(Link, bool, string) // alarm edges; logTransition in production
-	running    map[string]*monitored    // by Link.key()
+	// wait sleeps out a restart delay, ticking the tracker; false if ctx
+	// ended first. waitTicking in production; tests use a fake clock.
+	wait    func(ctx context.Context, tracker *Tracker, d time.Duration) bool
+	running map[string]*monitored // by Link.key()
 }
 
 type monitored struct {
@@ -58,6 +61,7 @@ func NewMonitor(sample sampleFunc) *Monitor {
 		backoffMin: restartBackoffMin,
 		backoffMax: restartBackoffMax,
 		transition: logTransition,
+		wait:       waitTicking,
 		running:    map[string]*monitored{},
 	}
 }
@@ -142,7 +146,7 @@ func (m *Monitor) Update(links []Link) {
 // raised alarm) survives a restart. While the sampler is down the hold clock
 // keeps running, so a raised alarm still clears on schedule.
 func (m *Monitor) supervise(ctx context.Context, mon *monitored) {
-	backoff := m.backoffMin
+	var backoff time.Duration
 	for {
 		started := m.now()
 		err := m.sample(ctx, mon.link, mon.tracker)
@@ -152,22 +156,31 @@ func (m *Monitor) supervise(ctx context.Context, mon *monitored) {
 		if err == nil {
 			err = errors.New("sampler returned without an error")
 		}
-		stable := m.now().Sub(started) >= stableRun
-		if stable {
-			backoff = m.backoffMin
-		}
-		m.markDown(mon, err, stable, backoff)
-		if !waitTicking(ctx, mon.tracker, backoff) {
+		ranFor := m.now().Sub(started)
+		backoff = restartDelay(backoff, ranFor, m.backoffMin, m.backoffMax)
+		m.markDown(mon, err, ranFor >= stableRun, backoff)
+		if !m.wait(ctx, mon.tracker, backoff) {
 			return
 		}
 		m.mu.Lock()
 		mon.down = false
 		m.mu.Unlock()
-		backoff *= 2
-		if backoff > m.backoffMax {
-			backoff = m.backoffMax
-		}
 	}
+}
+
+// restartDelay is the wait before restarting a sampler that ran for ranFor
+// and stopped, given the previous delay (0 before the first stop): min after
+// the first stop or after a stable run, otherwise double the previous delay,
+// capped at max.
+func restartDelay(prev, ranFor, min, max time.Duration) time.Duration {
+	if prev == 0 || ranFor >= stableRun {
+		return min
+	}
+	d := 2 * prev
+	if d > max {
+		d = max
+	}
+	return d
 }
 
 func (m *Monitor) markDown(mon *monitored, err error, stable bool, retry time.Duration) {
@@ -193,7 +206,8 @@ func (m *Monitor) markDown(mon *monitored, err error, stable bool, retry time.Du
 }
 
 // waitTicking sleeps d (in steps of at most a second, ticking tracker) and
-// reports false if ctx ended first.
+// reports false if ctx ended first. A clear while waiting is reported as
+// ClearWatcherDown: the sampler is down, so the window passed unobserved.
 func waitTicking(ctx context.Context, tracker *Tracker, d time.Duration) bool {
 	deadline := time.Now().Add(d)
 	for {
@@ -211,7 +225,7 @@ func waitTicking(ctx context.Context, tracker *Tracker, d time.Duration) bool {
 			return false
 		case <-t.C:
 		}
-		tracker.Tick(time.Now())
+		tracker.tick(time.Now(), ClearWatcherDown)
 	}
 }
 
