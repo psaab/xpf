@@ -122,13 +122,40 @@ type helperLivenessTracker struct {
 	armedSeen bool
 
 	kills atomic.Uint64
+
+	// pendingLogs holds the transition log records built under mu. They are
+	// emitted by unlockAndFlush AFTER mu is released, so a blocked stderr or
+	// journald can never hold the tracker mutex, which the transit tick reads
+	// through HelperElectionNotReady (#18704 review).
+	pendingLogs []trackerLog
+}
+
+// trackerLog is one deferred transition log line.
+type trackerLog struct {
+	warn bool
+	msg  string
+	args []any
+}
+
+// unlockAndFlush releases mu and then emits the log records built under it.
+func (t *helperLivenessTracker) unlockAndFlush() {
+	logs := t.pendingLogs
+	t.pendingLogs = nil
+	t.mu.Unlock()
+	for _, l := range logs {
+		if l.warn {
+			slog.Warn(l.msg, l.args...)
+		} else {
+			slog.Info(l.msg, l.args...)
+		}
+	}
 }
 
 // reset starts a new generation. inheritNotReady carries a raised verdict
 // across an unexpected exit.
 func (t *helperLivenessTracker) reset(gen uint64, now time.Time, inheritNotReady bool) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.unlockAndFlush()
 	t.gen = gen
 	t.retired = false
 	t.lastAnswer = now
@@ -143,8 +170,9 @@ func (t *helperLivenessTracker) reset(gen uint64, now time.Time, inheritNotReady
 	if inheritNotReady {
 		t.suspectedSince = now
 		t.reason = "first helper generation after an unexpected exit, not yet armed and healthy"
-		slog.Warn("userspace: helper restarted after an unexpected exit; holding election debt until it is armed and healthy (#18697)",
-			"generation", gen)
+		t.pendingLogs = append(t.pendingLogs, trackerLog{warn: true,
+			msg:  "userspace: helper restarted after an unexpected exit; holding election debt until it is armed and healthy (#18697)",
+			args: []any{"generation", gen}})
 	}
 	t.healthySince, t.healthyTrips = time.Time{}, 0
 }
@@ -183,7 +211,7 @@ func (t *helperLivenessTracker) noteRGActivate(now time.Time) {
 // noteAnswered records a round trip the helper answered, ended at end.
 func (t *helperLivenessTracker) noteAnswered(gen uint64, end time.Time) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.unlockAndFlush()
 	if gen != t.gen || t.retired {
 		return
 	}
@@ -200,7 +228,7 @@ func (t *helperLivenessTracker) noteAnswered(gen uint64, end time.Time) {
 // noteSilent records a round trip that got no answer, started at start.
 func (t *helperLivenessTracker) noteSilent(gen uint64, start, end time.Time) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.unlockAndFlush()
 	if gen != t.gen || t.retired {
 		return
 	}
@@ -225,7 +253,7 @@ func (t *helperLivenessTracker) noteRoundTrip(gen uint64, start, end time.Time, 
 // noteStatus records an answered status: worker heartbeats and arm state.
 func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats []time.Time, forwardingArmed bool) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.unlockAndFlush()
 	if gen != t.gen || t.retired {
 		return
 	}
@@ -308,8 +336,9 @@ func (t *helperLivenessTracker) evaluateLocked(now time.Time) {
 			t.suspected = true
 			t.suspectedSince = now
 			t.reason = reason
-			slog.Warn("userspace: helper looks wedged; raising election debt so a healthy peer takes the data RGs (#18685)",
-				"reason", reason, "generation", t.gen)
+			t.pendingLogs = append(t.pendingLogs, trackerLog{warn: true,
+				msg:  "userspace: helper looks wedged; raising election debt so a healthy peer takes the data RGs (#18685)",
+				args: []any{"reason", reason, "generation", t.gen}})
 		}
 		return
 	}
@@ -323,9 +352,10 @@ func (t *helperLivenessTracker) evaluateLocked(now time.Time) {
 		return
 	}
 	if now.Sub(t.healthySince) >= helperWedgeClearAfter && t.healthyTrips >= helperWedgeClearTrips {
-		slog.Info("userspace: helper healthy again; clearing the wedge election debt (#18685)",
-			"was", t.reason, "raised_for", now.Sub(t.suspectedSince).Round(time.Second).String(),
-			"generation", t.gen)
+		t.pendingLogs = append(t.pendingLogs, trackerLog{
+			msg: "userspace: helper healthy again; clearing the wedge election debt (#18685)",
+			args: []any{"was", t.reason, "raised_for", now.Sub(t.suspectedSince).Round(time.Second).String(),
+				"generation", t.gen}})
 		t.suspected = false
 		t.inherited = false
 		t.reason = ""
@@ -336,7 +366,7 @@ func (t *helperLivenessTracker) evaluateLocked(now time.Time) {
 // silence that is not followed by another round trip still ages into it.
 func (t *helperLivenessTracker) wedgeSuspected(now time.Time) bool {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.unlockAndFlush()
 	t.evaluateLocked(now)
 	return t.suspected
 }
@@ -361,6 +391,19 @@ func (t *helperLivenessTracker) killDue(now time.Time) (bool, time.Duration) {
 		return false, span
 	}
 	return true, span
+}
+
+// killReason names what made the kill due, for the kill log line.
+func (t *helperLivenessTracker) killReason(now time.Time) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if span := t.silenceSpanLocked(now); span >= helperWedgeMinSpan {
+		return fmt.Sprintf("no control request answered for %s over %d round trips", span.Round(time.Second), t.silentTrips)
+	}
+	if i := t.frozenWorkerLocked(); i >= 0 {
+		return fmt.Sprintf("worker %d heartbeat %s old", i, t.hbOldest.Round(time.Second))
+	}
+	return "unknown"
 }
 
 // answerAge is the time since the generation's last answered round trip. It
@@ -472,8 +515,8 @@ func (m *Manager) watchHelperLiveness(g *helperGeneration, tick time.Duration) {
 				return // the status-loop path already killed this generation
 			}
 			m.liveTrack.kills.Add(1)
-			slog.Error("userspace dataplane helper answered no control request; killing it so the supervisor fails closed and restarts it (#18685)",
-				"unanswered_for", span.Round(time.Second).String(),
+			slog.Error("userspace dataplane helper is wedged; killing it so the supervisor fails closed and restarts it (#18685)",
+				"reason", m.liveTrack.killReason(now), "for", span.Round(time.Second).String(),
 				"pid", g.cmd.Process.Pid, "generation", g.gen)
 			_ = g.cmd.Process.Kill()
 			return

@@ -3,10 +3,12 @@ package userspace
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -532,5 +534,62 @@ func TestAnswerAgeUndefinedWithoutALiveGeneration18704(t *testing.T) {
 	tr.retire()
 	if got := tr.answerAge(t0.Add(time.Minute)); got >= 0 {
 		t.Fatalf("answer age after an intentional stop = %s, want negative", got)
+	}
+}
+
+// lockProbeHandler18704 records, for every log record, whether the tracker
+// mutex was free at the moment the record was emitted.
+type lockProbeHandler18704 struct {
+	tr      *helperLivenessTracker
+	mu      sync.Mutex
+	records []string
+	locked  int
+}
+
+func (h *lockProbeHandler18704) Enabled(context.Context, slog.Level) bool { return true }
+func (h *lockProbeHandler18704) Handle(_ context.Context, r slog.Record) error {
+	free := h.tr.mu.TryLock()
+	if free {
+		h.tr.mu.Unlock()
+	}
+	h.mu.Lock()
+	h.records = append(h.records, r.Message)
+	if !free {
+		h.locked++
+	}
+	h.mu.Unlock()
+	return nil
+}
+func (h *lockProbeHandler18704) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *lockProbeHandler18704) WithGroup(string) slog.Handler      { return h }
+
+// TestTransitionLogsAreEmittedOutsideTheTrackerLock18704 (review nit): the
+// raise and clear lines are built under t.mu but written after it is released,
+// so a blocked stderr or journald can never stall the lock-free readers (the
+// transit tick reads the verdict through HelperElectionNotReady).
+func TestTransitionLogsAreEmittedOutsideTheTrackerLock18704(t *testing.T) {
+	tr := &helperLivenessTracker{}
+	h := &lockProbeHandler18704{tr: tr}
+	old := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	t0 := time.Now()
+	tr.reset(1, t0, true) // inherited: logs the #18697 hold
+	tr.noteSilent(1, t0, t0.Add(3*time.Second))
+	tr.noteSilent(1, t0.Add(3*time.Second), t0.Add(6*time.Second)) // raise
+	for sec := 7; sec <= 20; sec++ {
+		now := t0.Add(time.Duration(sec) * time.Second)
+		tr.noteAnswered(1, now)
+		tr.noteStatus(1, now, heartbeats18685(2, now), true) // armed + healthy: clear
+	}
+	tr.wedgeSuspected(t0.Add(21 * time.Second))
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.records) < 2 {
+		t.Fatalf("expected the hold/raise and the clear lines, got %v", h.records)
+	}
+	if h.locked != 0 {
+		t.Fatalf("%d of %d transition log lines were emitted while the tracker mutex was held: %v", h.locked, len(h.records), h.records)
 	}
 }
