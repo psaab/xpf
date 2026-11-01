@@ -209,3 +209,39 @@ source fix, as decided by the lane coordinator.
     PASS);
   - PR earlier (instrumented pr3 run, 0.0.27070): `3d986529ef8457cd`
     (failover VOID).
+
+## Extra test-failover samples, and the "did not resume within 3 s" attribution
+
+- **Timestamp**: 2026-11-01 11:26-12:30 UTC
+- **Action**: Ran one more loss lock cell in the arm order #18675
+  1f005de08d (0.0.29531), master 19e5a71d55 (0.0.29532), this PR
+  aca5b05ca5 (0.0.29533), and a never-merged #18675 diag build
+  (0.0.29534) that logs every stored-redirect retain. Each arm ran
+  test-failover x2, deploy-verified, with loadavg per gate. Afterwards
+  loss was left on master 0.0.29535.
+- **Finding**:
+  - "streams N carried data before failover but did not resume within
+    3s" is evaluated at the fw0 crash (`--crash-at`), not at the
+    rg1-split.
+  - Every run drops all 8 streams to 0 for one 1-s interval at the
+    takeover. A FAIL is one stream that stays at 0 for 2-3 more
+    intervals: one TCP RTO doubling.
+  - The window is integer-truncated, so a straggler that resumes 2.5-3.5 s
+    after the crash passes or fails by chance (filed as #18692).
+  - n=4 per arm, all from these two cells:
+    - master: 1/4 (1406176ce1 0/2, 19e5a71d55 1/2);
+    - this PR: 1/4 (cee55a0f0e 1/2, aca5b05ca5 0/2);
+    - #18675: 2/4 (a95b62c7bd 2/2, 1f005de08d 0/2);
+    - diag build: 0/2.
+
+    Master 3f5daa77a7 also failed it once in 4, earlier.
+  - Measured from node1's heartbeat-timeout line, each run's worst stream
+    regained >= 0.05 Gbit/s at 1.0, 0.3, 0.3, 3.1 s on master; 3.2, -0.2,
+    0.5, 0.4 s on this PR; and 2.5, 1.9, 0.0, -0.7 s on #18675. Negative
+    values mean the stream was back before node1 logged the takeover.
+  - Under the pre-registered decision rule (master >= 1/4 and no PR arm
+    4/4), this is the shared crash-takeover RTO failure, not this PR's.
+  - RG1 Group 4 passed in all 8 runs across the PR, #18675 and diag arms.
+- **Ledger rows** (this commit): master `5acade3203da6ea6` and
+  `896f7eb2591be2c6` (failover FAIL); PR `99ebfcfdd221444a` and
+  `5cd05174204394b7` (failover FAIL).
