@@ -4120,3 +4120,30 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
         "lease recovery must evict the fail-closed deny so the recovered scheduled permit can win (#13639)"
     );
 }
+
+/// #18656: the Go collector labels `flow_cache_evictions_by_arm` BY ORDINAL
+/// (`pkg/api/metrics_userspace_binding.go`, `flowCacheEvictionArmLabels`), so
+/// a Rust arm added, removed or reordered without the Go list silently
+/// mislabels every later arm in Prometheus. Pin the two lists equal.
+#[test]
+fn eviction_arm_labels_match_go_collector_18656() {
+    let go = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pkg/api/metrics_userspace_binding.go"
+    ));
+    let start = go
+        .find("var flowCacheEvictionArmLabels = []string{")
+        .expect("Go label list present");
+    let body = &go[start..];
+    let body = &body[..body.find("\n}").expect("Go label list closes")];
+    let go_labels: Vec<&str> = body
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.trim().strip_prefix('"')?.strip_suffix("\","))
+        .collect();
+    let rust_labels: Vec<&str> = FlowCacheEvictionArm::ALL.iter().map(|a| a.label()).collect();
+    assert_eq!(go_labels, rust_labels);
+    for (i, arm) in FlowCacheEvictionArm::ALL.iter().enumerate() {
+        assert_eq!(*arm as usize, i, "ALL is in ordinal order");
+    }
+}

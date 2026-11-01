@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * make test-go: pkg/upgrade/manifest now runs uncached. Its managed-binary
+    drift canary reads `git ls-files`, which the go test cache does not hash,
+    so a newly tracked shell site with a stale BINS= list passed from cache
+    (#18642).
   * Upgrade: the HA rolling rejoin deadline is configurable with
     `--rejoin-deadline` and defaults to 190s, a margin over the peer's 150s bulk-prime
     retry loop plus one 35s late-ack re-drive and 5s for that bulk's

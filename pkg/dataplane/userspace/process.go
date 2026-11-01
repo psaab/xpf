@@ -161,21 +161,17 @@ func (m *Manager) stopForNewGenerationLocked(cfg config.UserspaceConfig) error {
 // A nil map (test-only: production Load precedes every spawn) logs at debug and returns 0.
 // Best-effort like the loop it replaces: the count is deletion ATTEMPTS, not verified
 // deletions. Returns rows deleted.
+//
+// #18696: the walk is walkDeleteBPFKeys, which reads the next key before deleting the
+// current one. The loop it replaces deleted and then asked for the key after the deleted
+// key, which restarts the kernel's walk from bucket 0 of this 8,388,608-bucket map on
+// every row: 225 s for 50,002 rows at a helper respawn, with transit dead throughout.
 func clearStaleSteeringRows(usMap *ebpf.Map) (deleted int) {
 	if usMap == nil {
 		slog.Debug("userspace: no steering map handle; nothing to clear")
 		return 0
 	}
-	key := make([]byte, usMap.KeySize())
-	nextKey := make([]byte, usMap.KeySize())
-	for {
-		if err := usMap.NextKey(key, nextKey); err != nil {
-			break
-		}
-		copy(key, nextKey)
-		_ = usMap.Delete(key)
-		deleted++
-	}
+	deleted, _ = walkDeleteBPFKeys(usMap, nil)
 	return deleted
 }
 
@@ -1012,6 +1008,10 @@ func (m *Manager) stopLocked() {
 	if !preRetirementCrash || !m.restartAttemptInProgress {
 		m.procGen++
 	}
+	// #18704 review: the liveness tracker's generation ends here too, so
+	// silence recorded against the stopped helper cannot accrue into a wedge
+	// verdict while a planned stop-to-respawn runs.
+	m.liveTrack.retire()
 	// This record bit describes a currently running supervisor retry, not
 	// durable episode history; an intentional stop makes that claim stale.
 	m.helperCrash.RecoveredSinceCrash = false

@@ -1089,12 +1089,19 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // #18566 adds one per-arm flow-cache eviction slot
 // (`PostHitFabricRedirectDestinationNowLocal`, arm count 19 -> 20) before
 // both sentinels; offsets advance by 8 bytes, size unchanged.
+// #18656 adds two per-arm flow-cache eviction slots (the
+// `PostHitSessionDead` sub-arms `NoRecord` / `IdleCrossed`, arm count
+// 20 -> 22) before both sentinels; offsets advance by 16 bytes, size
+// unchanged.
 // #18560 adds four unconditional u64 matched-view counters
 // (`generation_held_hits`/`_misses`, `generation_mismatch_ahead`/`_behind`)
-// before both sentinels; offsets advance by 32 bytes, size unchanged.
-const _: [(); 3072] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2928] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 3057] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+// before both sentinels; offsets advance by 32 bytes (merged with #18656:
+// 48 bytes over the pre-#18656 values). The size grows by one 64-byte
+// alignment unit, 3072 -> 3136: the 48 bytes no longer fit the tail slack
+// (compiler-reported).
+const _: [(); 3136] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2944] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 3073] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {

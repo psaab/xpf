@@ -29,7 +29,7 @@ func TestStaleSeqFencePreservesPollHealthAccounting17728(t *testing.T) {
 	}{
 		{
 			name:             "answered_poll_resets_wedge_count",
-			initialFailures:  helperWedgeFailedPolls - 1,
+			initialFailures:  5,
 			wantFailures:     0,
 			wantFirstFailure: false,
 		},
@@ -44,11 +44,14 @@ func TestStaleSeqFencePreservesPollHealthAccounting17728(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, ctrl := stalePollManager16653(t)
 			firstFailure := time.Now().Add(-time.Second)
-			m.mu.Lock()
-			m.liveness.failures = tc.initialFailures
+			// #18685: the liveness evidence lives in the round-trip tracker.
+			m.liveTrack.mu.Lock()
+			m.liveTrack.silentTrips = tc.initialFailures
 			if tc.initialFailures != 0 {
-				m.liveness.firstFailure = firstFailure
+				m.liveTrack.silentSince = firstFailure
 			}
+			m.liveTrack.mu.Unlock()
+			m.mu.Lock()
 			seqBefore := m.lastStatusSeq
 			m.mu.Unlock()
 
@@ -132,10 +135,12 @@ func TestStaleSeqFencePreservesPollHealthAccounting17728(t *testing.T) {
 				t.Fatal("second poll never started: first tick did not complete")
 			}
 
+			m.liveTrack.mu.Lock()
+			failures := m.liveTrack.silentTrips
+			firstFailureZero := m.liveTrack.silentSince.IsZero()
+			gotFirstFailure := m.liveTrack.silentSince
+			m.liveTrack.mu.Unlock()
 			m.mu.Lock()
-			failures := m.liveness.failures
-			firstFailureZero := m.liveness.firstFailure.IsZero()
-			gotFirstFailure := m.liveness.firstFailure
 			cached := m.lastStatus
 			gotSeq := m.lastStatusSeq
 			m.mu.Unlock()

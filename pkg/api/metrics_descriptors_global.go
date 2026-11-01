@@ -94,6 +94,27 @@ func (c *xpfCollector) initGlobalDescriptors() {
 			"emitted, including at zero (#9043).",
 		nil, nil,
 	)
+	c.helperAnswerAgeSeconds = prometheus.NewDesc(
+		"xpf_userspace_helper_answer_age_seconds",
+		"Seconds since the userspace helper last answered any control request "+
+			"(#18685). It keeps growing while the helper is wedged, unlike the "+
+			"cached helper status the other userspace families report.",
+		nil, nil,
+	)
+	c.helperElectionNotReady = prometheus.NewDesc(
+		"xpf_userspace_helper_election_not_ready",
+		"1 while this node's helper must not hold the RGs at full weight: it "+
+			"exited unexpectedly and is not back armed and healthy (#18697), or a "+
+			"worker heartbeat stopped moving or control requests went unanswered "+
+			"(#18685). The daemon raises election debt while it is 1.",
+		nil, nil,
+	)
+	c.helperWedgeKillsTotal = prometheus.NewDesc(
+		"xpf_userspace_helper_wedge_kills_total",
+		"Helpers killed as wedged (#18685): no control answer for 30 s, or a "+
+			"worker frozen for 2 min. The supervisor restarts each one.",
+		nil, nil,
+	)
 	c.statusPollDecodeErrorsTotal = prometheus.NewDesc(
 		"xpf_status_poll_decode_errors_total",
 		"Total status polls the userspace helper ANSWERED but the daemon "+

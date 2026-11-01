@@ -132,9 +132,13 @@ type xpfCollector struct {
 
 	// #9019: work the dataplane DECLINED to do. Both counters existed with no
 	// reader; see metrics_dataplane_silent_skips_9019.go.
-	napiProbeTargetSkipsTotal              *prometheus.Desc
-	bindingWedgeGiveupsTotal               *prometheus.Desc
-	statusPollDecodeErrorsTotal            *prometheus.Desc
+	napiProbeTargetSkipsTotal   *prometheus.Desc
+	bindingWedgeGiveupsTotal    *prometheus.Desc
+	statusPollDecodeErrorsTotal *prometheus.Desc
+	// #18685: helper liveness, per runtime Manager (metrics_helper_liveness_18685.go).
+	helperAnswerAgeSeconds                 *prometheus.Desc
+	helperElectionNotReady                 *prometheus.Desc
+	helperWedgeKillsTotal                  *prometheus.Desc
 	learnedRouteCapHitsTotal               *prometheus.Desc
 	learnedRouteCapGroupShedsTotal         *prometheus.Desc
 	learnedRouteCapGroupShedsByFamilyTotal *prometheus.Desc
@@ -1736,6 +1740,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		userspaceStatus = fetchUserspaceStatus(dp)
 	}
 	c.collectFwdStatus(ch, dp, userspaceStatus)
+	// #18685: emitted whether or not the helper answered, because a helper
+	// that has stopped answering is exactly what these report.
+	c.collectHelperLiveness(ch, dp)
 	// #8321 finding 14: the CONTROL-PLANE collectors run BEFORE the dataplane
 	// gate below, because none of them reads dataplane state and all of them
 	// matter most when the dataplane is absent.

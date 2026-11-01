@@ -701,10 +701,11 @@ Each move is one cell, judged by H11's rules at 1 s resolution. A stream is
 `--planned-stall-gbps 0.001`). A stream between that and the 0.05 Gbit/s
 zero threshold is **low-share**: a transition dip, not a stall. It does not
 change the move's verdict. On the live run on 2026-10-31 the aggregate fell
-from about 9 to 1.2 Gbit/s at the RG1 move, below H9's 2.0–3.5 Gbit/s split
-ceiling on loss. Two streams ran at 12 Mbit/s and one stopped. That dip is a
-transition cost (H10), so each planned move records it on the ledger as
-`HARNESS_METRIC` lines, judged master-relative like `cells_cost`:
+from about 9 to 1.2 Gbit/s at the RG1 move, below the 2.0–3.5 Gbit/s split
+figure H9 then cited for loss. That figure itself measured the #18656
+slow-path state; H9 now cites the fixed-build rates. Two streams ran at
+12 Mbit/s and one stopped. That dip is a transition cost (H10), so each
+planned move records it on the ledger as `HARNESS_METRIC` lines, judged master-relative like `cells_cost`:
 
 - `planned_<move>_low_share_streams`: the number of low-share streams;
 - `planned_<move>_min_stream_gbps`: the lowest per-stream rate in the

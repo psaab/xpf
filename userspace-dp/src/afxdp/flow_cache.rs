@@ -1080,9 +1080,18 @@ pub(super) enum FlowCacheEvictionArm {
     /// not stick (the slow path re-seeding the redirect each packet) shows up
     /// here instead of hiding under the owner-active arm.
     PostHitFabricRedirectDestinationNowLocal = 19,
+    /// #18656 sub-arms of PostHitSessionDead: which refusal inside the
+    /// fused cache-hit probe (`SessionTable::probe_hit_inner`) fired.
+    /// NoRecord: the packet key resolved no record on this worker's table
+    /// (direct key or reverse-translated alias). IdleCrossed: the record
+    /// was found but its idle deadline had passed and no companion proved
+    /// the flow live (#16223). PostHitSessionDead keeps the TTL-expiring
+    /// liveness-only probe, which does not attribute.
+    PostHitSessionDeadNoRecord = 20,
+    PostHitSessionDeadIdleCrossed = 21,
 }
 
-pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 20;
+pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 22;
 
 impl FlowCacheEvictionArm {
     pub(super) const ALL: [Self; FLOW_CACHE_EVICTION_ARM_COUNT] = [
@@ -1106,6 +1115,8 @@ impl FlowCacheEvictionArm {
         Self::PostHitFabricIngressDiscardNowLocal,
         Self::PostHitForwardCandidateEgressDeparted,
         Self::PostHitFabricRedirectDestinationNowLocal,
+        Self::PostHitSessionDeadNoRecord,
+        Self::PostHitSessionDeadIdleCrossed,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -1138,6 +1149,8 @@ impl FlowCacheEvictionArm {
             Self::PostHitFabricRedirectDestinationNowLocal => {
                 "post_hit_fabric_redirect_destination_now_local"
             }
+            Self::PostHitSessionDeadNoRecord => "post_hit_session_dead_no_record",
+            Self::PostHitSessionDeadIdleCrossed => "post_hit_session_dead_idle_crossed",
         }
     }
 }
