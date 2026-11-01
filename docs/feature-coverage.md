@@ -220,7 +220,7 @@ the userspace dataplane admission boundary is in
   arbitrates instead. Heartbeat staleness is interval × threshold,
   configured with `set chassis cluster heartbeat-interval <ms>` and
   `set chassis cluster heartbeat-threshold <n>`: 100ms × 5 = 500ms at runtime
-  defaults or 200ms × 5 = 1s in the deployed lab config. The receiver checks
+  defaults or 200ms × 5 = 1s in the deployed lab config. <!-- mirror:private-rg-peer-loss-detection n=6 -->The receiver checks
   staleness every quarter heartbeat interval (interval / 4, floored at 10 ms;
   #18639), so a peer is declared within that check period of its last admitted
   heartbeat turning interval × threshold old. While session sync looks
@@ -256,7 +256,7 @@ the userspace dataplane admission boundary is in
   operator which case applies. These are detection times, not traffic
   restoration: activation adds about 0.34–0.44 s from peer-lost to the first
   ping reply on the lab clusters (#18561), so a lab crash outage lands near
-  1.4 s. (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` in
+  1.4 s.<!-- /mirror:private-rg-peer-loss-detection --> (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` in
   `pkg/cluster/heartbeat.go`; `timeoutCheckInterval` and
   `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
   `prearmPeerLivenessProbe`, `peerAnsweredLivenessProbeLocked` and

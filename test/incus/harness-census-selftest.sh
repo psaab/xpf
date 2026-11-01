@@ -524,7 +524,9 @@ CI_WORKFLOW="${REPO_ROOT}/.github/workflows/test.yml"
 # Slice the census job block through the next top-level job so checks are
 # scoped to the gated job, not other workflow jobs.
 CENSUS_JOB="$(awk 'BEGIN{in_job=0} /^  census:/{in_job=1; print; next} /^  [A-Za-z0-9_.-]+:/{if (in_job) exit} in_job{print}' "$CI_WORKFLOW")"
-# Allowlist: the census job must equal this literal byte for byte. A
+# Allowlist: the census job must equal this literal byte for byte. The only
+# `if:` it admits is the exact `${{ !cancelled() }}` on the #18645 steps, which
+# runs MORE (a step after a red one), never less. A
 # deny-list cannot enumerate every fail-open edit (if:, continue-on-error,
 # shell:, needs:, env:, ref:, || true, || :, heredoc decoys), so any
 # deviation -- including a renamed job or moved run line -- fails closed.
@@ -543,7 +545,11 @@ EXPECTED_CENSUS_JOB="$(cat <<'EXPECTED_CENSUS_JOB_EOF'
     env:
       TMPDIR: /tmp
     steps:
+      # #18645: full history, so the instruction census can diff against
+      # the PR's base (its PR mode fails closed without a merge-base).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Prepare temporary directory
         run: mkdir -p "$TMPDIR"
       - name: Census runnable-harness reachability
@@ -569,6 +575,30 @@ EXPECTED_CENSUS_JOB="$(cat <<'EXPECTED_CENSUS_JOB_EOF'
         run: bash ./test/incus/go-skip-census-selftest.sh
       - name: Self-test the ignored-cell census
         run: bash ./test/incus/ignored-cell-census-selftest.sh
+      # #18645: expiry markers and mirrored doc blocks. Hermetic file scans.
+      # The instruction census runs in PR mode: marker syntax everywhere, an
+      # expired Review-by only in files this PR touches (so a calendar day
+      # cannot red every open PR). Its --online --all sweep (closed issues,
+      # every date) is the campaign keeper's, not CI's. `!cancelled()` runs each step even when an earlier
+      # census step already failed, so one red cannot hide the next (#18611);
+      # the job still fails.
+      - name: Instruction census (expiry markers)
+        if: ${{ !cancelled() }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/instructions-census.py --base "$BASE_SHA"
+      - name: Self-test the instruction census
+        if: ${{ !cancelled() }}
+        run: bash ./test/incus/instructions-census-selftest.sh
+      - name: Mirror census
+        if: ${{ !cancelled() }}
+        run: python3 scripts/mirror-census.py
+      - name: Self-test the mirror census
+        if: ${{ !cancelled() }}
+        run: bash ./test/incus/mirror-census-selftest.sh
+      - name: Self-test the deb version allocator
+        if: ${{ !cancelled() }}
+        run: bash ./scripts/next-deb-version-selftest.sh
 EXPECTED_CENSUS_JOB_EOF
 )"
 # The workflow frame around the census job is pinned too: all seven gate

@@ -1490,6 +1490,7 @@ address — same expectation.
   address with one holder. `.200` remains dual-held. It stays pinned on
   the container only as a deprecated alias until its expiry (see the loss
   env), and nothing should target it.
+  <!-- Expires-when: #18576 closed -->
 - **R6 — UDP load realism.** `iperf3 -u` at high rates is host-bound and its
   loss numbers conflate generator/target CPU with dataplane loss. The V4
   knee-finding + fw counter reconciliation is the guard; dedicated UDP
