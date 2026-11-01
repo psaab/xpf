@@ -43,11 +43,14 @@ sees the same sessions the userspace path is processing.
 re-resolution pipeline. It serves the session-hit arm, reverse synthesis and
 the HA refresh/demote commands. For a stored `FabricRedirect`,
 `rehome_or_retain_fabric_redirect` decides whether a fresh local candidate
-may replace the redirect. Since #18659 a `MissingNeighbor` candidate on a
-local, non-fabric egress is judged like a `ForwardCandidate`. When the
-destination's connected owner RG is known and not forwarding-active here,
-the redirect is kept. An unknown owner, a locally active owner, a fabric
-egress and a zero egress keep the candidate verbatim. The packet-path
+may replace the redirect. Since #18659, a `MissingNeighbor` candidate on a
+local, non-fabric egress keeps the redirect when the destination's connected
+owner RG is known and not forwarding-active here. Only in that peer-owned
+case is it judged like a `ForwardCandidate`. An unknown owner, a locally
+active owner, a fabric egress and a zero egress keep the candidate verbatim.
+With a locally active owner this still differs from `ForwardCandidate`,
+which keeps the redirect when its egress misses the connected interface
+(#18672). The packet-path
 backstop `reverse_hit_departed_destination_redirect` (`resolve.rs`) converts
 `MissingNeighbor` on the same terms. Mechanism and live evidence:
 `docs/fabric-cross-chassis-fwd.md` (#18659), `docs/log/18659.md`.
