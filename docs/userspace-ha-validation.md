@@ -477,6 +477,115 @@ the group fails if either check fails.
   new-flow bias and is left for its own follow-up (#18680) rather than
   changed here unmeasured.
 
+### `make test-failover` per-stream crash and failback cells (#18692)
+
+`iperf3_sum_parse.py --failover-check` prints one cell per event: every
+stream that carried data in the 5 s before the crash (or the failback) must
+carry data again within 3 s of it. Since #18692 the 3 s is judged in real
+seconds on iperf3's own interval clock.
+
+**The defect it replaced.** The old window took the event instant from
+`$((SECONDS - iperf_start_seconds))`: two integer truncations plus the
+iperf3 launch delay, so it could sit a second either side of the real crash
+on iperf3's clock. It then asked for data in an interval STARTING in
+`[T+1, T+3]`, so the 1 s interval grid decided a stream that resumed 3–4 s
+after the crash. Both directions are in the preserved loss runs:
+
+- an in-phase anchor (T = floor of the crash) FAILs a stream that resumed
+  2.91 s after the crash (`r-18598/failover-dbg2-025351`, stream 11);
+- an anchor one second late PASSes a stream that resumed 4.05 s after it
+  (`r-18598/failover-master2-012401`, stream 11);
+- an anchor one second early counts the interval holding the crash, so its
+  pre-crash bytes pass as a resume.
+
+**The anchor** (`EventAnchor`: an instant plus its error bound). The sources,
+in order:
+
+1. The crash: test-failover.sh reads three things just before the sysrq:
+   - the LAN host's clock minus the orchestrator's, from the minimum-RTT
+     `incus exec date` reading (`_failover_clock_offset`, error ±rtt/2). The
+     iperf3 client stamps its start (`start.timestamp.timemillisecs`) with
+     the LAN host's clock;
+   - fw0's incus-exec round trip, which bounds how long after the stamp the
+     sysrq exec can still be in flight;
+   - `failover_epoch=$(date +%s.%N)`.
+
+   No firewall node's clock enters, so node clock skew cannot move the
+   anchor. With the 0.18–0.21 s incus-exec round trips that
+   `failover-clock-lib.sh` records on loss, the window is about ±0.2 s.
+2. The crash, refined: inside that window, the aggregate's own stop on
+   iperf3's clock. A crash kills every stream's path at once, so the
+   interval holding it carries the pre-crash rate for the part of it before
+   the crash, and the next interval is empty. The stop is read to ±0.05 s
+   on the same clock as the windows. With no empty interval (a takeover
+   faster than one interval) or a stop outside the window, the clock anchor
+   stands.
+3. The failback: `failback_epoch`, taken just after the poll that saw the
+   last RG land, on the same clock mapping. As before, the anchor is that
+   observation, not the move itself.
+4. Any reading missing, or a log without `timemillisecs`: the integer
+   verdict, unchanged byte for byte.
+
+**The resume instant.** Only intervals that start at or after the anchor's
+latest edge are used, so no pre-event byte is counted. In a stream's first
+such interval with data, the stream's next interval gives its post-resume
+rate, so the data took `duration × bps / bps_next` of the interval. The
+resume instant is the interval's end minus that. A stream ramping after an
+RTO only makes this read late, never early. A stream fails when that
+instant is more than 3 s after the anchor.
+
+**What the cell reports.** Beside PASS/FAIL, each stream's data latency and
+its rate latency. The rate latency is the first interval at or above 50 % of
+the lower of the stream's own pre-crash mean (`[T-6, T-1)`) and its own
+median over `[T+5, T+15)`. After a takeover the streams re-share the link,
+and one loss run (`r-18598b/failover-dbg18672-122007`, stream 13) kept a
+stream at 15–43 % of its pre-crash rate for 66 s while the aggregate ran at
+or above its pre-crash rate. The post window ends before the rejoin,
+split and failback, so none of them sets the reference. The cell also gives
+max and median of both latencies, and names any stream whose margin to the
+deadline is within the anchor's uncertainty. The ledger row records
+`HARNESS_METRIC: crash_resume_data_max_s` (and `_median_s`, `_never`, the
+`rate` twins, `crash_at_s`, `crash_anchor_uncertainty_s`,
+`crash_anchor_precise`, and the same `failback_*`), so arms are compared on
+the distribution (#18561).
+
+**Preserved runs re-judged.** This was done offline, with the data stop as
+the anchor, since those runs recorded no epoch (method and table in
+`docs/log/18692.md`). Of 29 preserved loss runs, 24 have an empty aggregate
+interval at the crash. The other five (all recorded PASS) never emptied it,
+with lowest intervals of 0.75–1.2 Gbit/s, so they need the clock anchor,
+which they did not record. The precise verdict matches the recorded verdict
+on all 24, and none flips within ±0.05 s of its anchor. Resume instants are
+bimodal over the 192 streams: 0.96–2.91 s after the crash, then six
+stragglers at 3.75–4.59 s, with nothing in between. On four runs no in-phase
+integer anchor reproduces the recorded verdict, so the anchor was a second
+off. On the two rows above, the recorded verdict is right only because of
+which way it was off.
+
+**What this cannot change.** The 3 s deadline sits inside the RTO backoff.
+After a 1–2 s takeover, a stream resumes at its next retransmission. Linux
+backs off from an RTO of at least 200 ms, so the retransmissions fall about
+0.2, 0.6, 1.4 and 3.0 s (and later, with a larger RTO) after the stream's
+last unacknowledged send, which can precede the crash. So a stream resuming
+at 2.9 s and one at 3.8 s can be the same TCP event with a different RTO
+(an inference from the schedule, not measured per stream). Judging in real seconds makes the
+verdict repeatable on the same bytes. It does not make the deadline a
+property of the product. That is a policy question for #18561.
+
+**Selftest.** `iperf3_sum_parse_test.PreciseCrashAnchorTests` (run by
+`make test-incus-lib`) judges two real loss logs
+(`test/incus/failover-crash-straggler-{2s91,4s05}.jsonl`), one straggler
+each side of the deadline. It also pins the two integer anchors that
+mis-score them. Five executable mutants, each one exact textual replacement
+of the parser source executed in a fresh namespace, must each flip a named
+row:
+
+- an integer anchor;
+- counting the interval that holds the crash;
+- the resume at the interval start;
+- the resume at the interval end;
+- no stop refinement.
+
 ### `make test-failover` zero-interval cells: windows and definitions
 
 `scripts/iperf-json-metrics.py` scores the whole-run iperf3 stream. A

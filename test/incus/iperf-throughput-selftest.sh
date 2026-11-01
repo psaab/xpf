@@ -142,6 +142,22 @@ grep -q 'failback_at_seconds=$((SECONDS - iperf_start_seconds))' "$FAILOVER" \
 ! grep -q 'pass "iperf3 completed successfully (finished before' "$FAILOVER" \
 	|| bad "test-failover.sh accepts an iperf client that ended before failback"
 ok "test-failover wires crash and last-RG-moved timestamps and rejects early client completion"
+# #18692: the sub-second anchors. The epoch is the last read before the sysrq
+# (only the integer anchor between them), the failback epoch sits beside the
+# integer landing, and the oracle's METRIC lines reach the ledger.
+epoch_line="$(grep -n '^failover_epoch=$(date +%s.%N)$' "$FAILOVER" | cut -d: -f1)"
+sysrq_line="$(grep -n "echo b > /proc/sysrq-trigger' || true; } 2>/dev/null$" "$FAILOVER" | head -1 | cut -d: -f1)"
+[[ -n "$epoch_line" && -n "$sysrq_line" ]] && (( sysrq_line - epoch_line == 2 )) \
+	|| bad "test-failover.sh must stamp failover_epoch immediately before the sysrq (#18692)"
+grep -qF -- '--crash-epoch "$failover_epoch" --crash-slack "$failover_crash_rtt")' "$FAILOVER" \
+	|| bad "test-failover.sh does not pass the sub-second crash anchor to the stream oracle (#18692)"
+grep -qF -- 'oracle_anchor_args+=(--failback-epoch "$failback_epoch")' "$FAILOVER" \
+	|| bad "test-failover.sh does not pass the sub-second failback anchor to the stream oracle (#18692)"
+grep -qF 'failback_epoch=$(date +%s.%N) # #18692: sub-second twin of the next line' "$FAILOVER" \
+	|| bad "test-failover.sh must stamp failback_epoch beside failback_at_seconds (#18692)"
+grep -qF 'METRIC\ *) echo "HARNESS_METRIC: ${oracle#METRIC }" ;;' "$FAILOVER" \
+	|| bad "test-failover.sh must record the oracle's METRIC lines as HARNESS_METRIC (#18692)"
+ok "test-failover reads and passes the #18692 sub-second crash/failback anchors"
 # #12618: test-failover applies the same [T, T+3] outside-window budget.
 grep -q -- '--event-sec "$failover_at_seconds"' "$FAILOVER" \
 	|| bad "test-failover.sh does not pass its crash instant to the window-excluded producer"

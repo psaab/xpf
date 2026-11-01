@@ -1763,8 +1763,26 @@ info "Crashing fw0 (sysrq reboot — unclean shutdown, tests worst-case failover
 # Braces, not just 2>/dev/null on the command: bash prints its own
 # "Killed" job notice for the SIGKILLed child, which would land in the
 # test transcript as alarming noise.
+#
+# #18692: the per-stream crash oracle also needs the crash instant to well
+# under a second on iperf3's own clock; the integer $SECONDS difference can
+# sit a second either side of it. Read, immediately before the sysrq:
+#   - the LAN host's clock minus this host's (the iperf3 client stamps its
+#     start with the LAN host's clock): `_failover_clock_offset`'s minimum-RTT
+#     reading, "<offset_s> <rtt_s>";
+#   - fw0's incus-exec round trip, which bounds how long after the stamp the
+#     sysrq exec can still be in flight;
+#   - this host's clock (`failover_epoch`), last, right before the exec.
+# iperf3_sum_parse.py maps these onto the interval clock and refines the
+# instant with the aggregate's own stop inside that window. Any reading
+# missing leaves the integer anchor in charge, as before.
+failover_client_clock=$(_failover_clock_offset "$CLUSTER_LAN_HOST" 3) || failover_client_clock=""
+failover_crash_rtt=$(_failover_clock_offset "$FW0" 3) || failover_crash_rtt=""
+failover_crash_rtt=${failover_crash_rtt#* }
+failover_epoch=$(date +%s.%N)
 failover_at_seconds=$((SECONDS - iperf_start_seconds))
 { timeout -k 5 10 incus exec "$FW0" -- bash -c 'echo b > /proc/sysrq-trigger' || true; } 2>/dev/null
+info "#18692 crash anchor: integer ${failover_at_seconds}s after iperf start; epoch ${failover_epoch}; LAN-host clock offset/rtt ${failover_client_clock:-unread}; fw0 exec rtt ${failover_crash_rtt:-unread}"
 
 # Wait for fw1 to detect failure and become primary
 sleep 3
@@ -1898,6 +1916,7 @@ fi
 ha_run_rg02_failback() {
 	local rg fo_start fo_elapsed moved
 	failback_at_seconds=0
+	failback_epoch=""
 	failback_request_at_seconds=""
 	failback_landed_at_seconds=""
 	info "Manual failover: requesting fw1 to failover RG0 and RG2 to fw0"
@@ -1945,6 +1964,7 @@ ha_run_rg02_failback() {
 		done
 		fo_elapsed=$(($(date +%s) - fo_start))
 		if ((moved)); then
+			failback_epoch=$(date +%s.%N) # #18692: sub-second twin of the next line
 			failback_at_seconds=$((SECONDS - iperf_start_seconds))
 			failback_landed_at_seconds="${failback_landed_at_seconds:+$failback_landed_at_seconds }${failback_at_seconds}"
 			if ((fo_elapsed > slowest)); then
@@ -2288,16 +2308,32 @@ fi
 
 if [[ "$iperf_gate_ok" == true ]]; then
 	oracle_error="${LOCAL_IPERF_METRICS}.oracle.err"
+	# #18692: the sub-second anchors read at the crash and the failback. The
+	# oracle judges a verdict in real seconds only when its anchor is complete,
+	# and otherwise keeps the integer --crash-at/--failback-at verdict.
+	oracle_anchor_args=()
+	if [[ "$failover_client_clock" =~ ^-?[0-9.]+\ [0-9.]+$ && "$failover_crash_rtt" =~ ^[0-9.]+$ ]]; then
+		oracle_anchor_args+=(--client-clock-offset "${failover_client_clock% *}"
+			--client-clock-rtt "${failover_client_clock#* }"
+			--crash-epoch "$failover_epoch" --crash-slack "$failover_crash_rtt")
+		if [[ -n "${failback_epoch:-}" ]]; then
+			oracle_anchor_args+=(--failback-epoch "$failback_epoch")
+		fi
+	else
+		info "#18692: a clock reading for the crash anchor is missing; the stream oracle keeps the integer anchors"
+	fi
 	if failover_oracles=$(python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" \
 		--failover-check --json-stream --streams "$IPERF_STREAMS" \
 		--min-throughput-gbps "$MIN_THROUGHPUT" --crash-at "$failover_at_seconds" \
 		--failback-at "$failback_at_seconds" \
+		"${oracle_anchor_args[@]}" --emit-metrics \
 		<"$LOCAL_IPERF_LOG" 2>"$oracle_error"); then
 		while IFS= read -r oracle; do
 			case "$oracle" in
 			PASS\ *) pass "${oracle#PASS }" ;;
 			FAIL\ *) fail "${oracle#FAIL }" ;;
 			VOID\ *) void "${oracle#VOID }" ;;
+			METRIC\ *) echo "HARNESS_METRIC: ${oracle#METRIC }" ;;
 			*)       fail "iperf3 failover oracle returned an unrecognised verdict: ${oracle}" ;;
 			esac
 		done <<< "$failover_oracles"
