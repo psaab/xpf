@@ -176,9 +176,14 @@ func (m *Manager) requestDetailedLocked(req ControlRequest) (ControlResponse, er
 // the caller's immutable socket snapshot. It deliberately does not read m.cfg,
 // so paged exports can release m.mu while waiting on a helper response and
 // revalidate the helper/config generation before applying the response.
-func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket string) (ControlResponse, error) {
+func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket string) (resp ControlResponse, retErr error) {
 	m.controlReqMu.Lock()
 	defer m.controlReqMu.Unlock()
+	// #18685: every round trip is liveness evidence. The silence clock starts
+	// here, after controlReqMu, so time spent queued behind other callers is
+	// never charged to the helper.
+	rtStart, rtGen, received := time.Now(), m.liveTrack.generation(), false
+	defer func() { m.liveTrack.noteRoundTrip(rtGen, rtStart, time.Now(), retErr, received) }()
 	if controlSocket == "" {
 		return ControlResponse{}, &knownUnsentError{msg: errControlSocketNotConfigured.Error(), cause: errControlSocketNotConfigured}
 	}
@@ -255,7 +260,6 @@ func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket stri
 	if _, err := conn.Write(append(body, '\n')); err != nil {
 		return ControlResponse{}, err
 	}
-	var resp ControlResponse
 	// #9003: byte-bounded, not merely deadline-bounded. Over AF_UNIX a 3 s
 	// deadline still admits GB-scale allocation at memory bandwidth, and
 	// ControlResponse retains four unbounded slice fields.
@@ -266,6 +270,7 @@ func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket stri
 	} else {
 		decodeErr = json.NewDecoder(bufio.NewReader(bounded)).Decode(&resp)
 	}
+	received = bounded.received > 0
 	if decodeErr != nil {
 		// #9322: the cap is checked FIRST. A truncated body reaches
 		// json.Decoder as io.ErrUnexpectedEOF, byte-identical to a helper that

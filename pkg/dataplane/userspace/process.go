@@ -1049,6 +1049,10 @@ func (m *Manager) stopLocked() {
 	if !preRetirementCrash || !m.restartAttemptInProgress {
 		m.procGen++
 	}
+	// #18704 review: the liveness tracker's generation ends here too, so
+	// silence recorded against the stopped helper cannot accrue into a wedge
+	// verdict while a planned stop-to-respawn runs.
+	m.liveTrack.retire()
 	// This record bit describes a currently running supervisor retry, not
 	// durable episode history; an intentional stop makes that claim stale.
 	m.helperCrash.RecoveredSinceCrash = false

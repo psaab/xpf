@@ -50,7 +50,10 @@ suite if any list diverges from `manifest.Names()`, fail-closed (a site
 that drops its `BINS=` literal trips the canary rather than passing
 vacuously). To add a managed binary: add an entry to the `managed`
 slice in `pkg/upgrade/manifest/manifest.go`, then update each shell
-site to match — the canary tells you which ones.
+site to match — the canary tells you which ones. The canary's census
+scope comes from `git ls-files`, which the `go test` cache does not hash,
+so `make test-go` runs this package on its `-count=1` leg (#18642): a
+cached pass would not see a newly tracked shell site with a stale list.
 
 ## State machine (`pkg/upgrade`)
 

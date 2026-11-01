@@ -288,7 +288,12 @@ func (m *Manager) startHelperSupervisorLocked(cmd *exec.Cmd) {
 	m.haWatchdogProcessGen.Add(1)
 	g := &helperGeneration{gen: m.procGen, cmd: cmd, exited: make(chan struct{})}
 	m.procSup = g
+	// #18697/#18685: a generation started right after an unexpected exit (a
+	// crash or a wedge kill) keeps a not-ready verdict, and so the election
+	// debt, until it reports ForwardingArmed and then looks healthy.
+	m.liveTrack.reset(m.procGen, time.Now(), m.helperDownUnexpected.Swap(false))
 	go m.superviseHelper(g)
+	go m.watchHelperLiveness(g, helperWatchdogTick)
 }
 
 // bindOwedInventoryDebtLocked binds reset-marked inventory debt to the
@@ -355,6 +360,9 @@ func (m *Manager) resetQuietHelperCrashEpisodeLocked(now time.Time) bool {
 // cluster peer.
 func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	now := time.Now()
+	// #18697: the node must not keep the RGs while this helper is gone. The
+	// daemon's transit tick reads this lock-free and raises election debt.
+	m.helperDownUnexpected.Store(true)
 	// The Prometheus counter is per unexpected exit, not per completed
 	// episode; otherwise a persistent loop inside the quiet window is silent.
 	m.helperCrashUnexpectedExitsTotal++

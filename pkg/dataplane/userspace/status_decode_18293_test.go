@@ -107,8 +107,8 @@ func TestStatusCloseWithoutReplyIsSilence18293(t *testing.T) {
 }
 
 // TestStatusLoopUndecodableAnswersNoKill18293 drives the real statusLoop:
-// >30 polls answered undecodable -> decode counter advances, wedge count
-// stays zero, no kill. The manager's proc is the test process itself, so a
+// 35 polls answered undecodable -> decode counter advances, no silence is
+// recorded, no kill. The manager's proc is the test process itself, so a
 // wedge kill would SIGKILL the test runner — survival is part of the proof,
 // and liveness state is asserted directly.
 func TestStatusLoopUndecodableAnswersNoKill18293(t *testing.T) {
@@ -140,10 +140,13 @@ func TestStatusLoopUndecodableAnswersNoKill18293(t *testing.T) {
 	for {
 		m.mu.Lock()
 		dec := m.liveness.decodeErrors
-		failures := m.liveness.failures
-		kills := m.liveness.kills
 		m.mu.Unlock()
-		if dec >= uint64(helperWedgeFailedPolls+5) {
+		// #18685: silence and kills live in the round-trip tracker.
+		m.liveTrack.mu.Lock()
+		failures := m.liveTrack.silentTrips
+		m.liveTrack.mu.Unlock()
+		kills := m.liveTrack.kills.Load()
+		if dec >= uint64(35) {
 			if failures != 0 {
 				t.Fatalf("wedge failures = %d after %d undecodable answers, want 0", failures, dec)
 			}
@@ -153,7 +156,7 @@ func TestStatusLoopUndecodableAnswersNoKill18293(t *testing.T) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("decodeErrors = %d after 5s, want >= %d (loop not polling the undecodable helper?)", dec, helperWedgeFailedPolls+5)
+			t.Fatalf("decodeErrors = %d after 5s, want >= 35 (loop not polling the undecodable helper?)", dec)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -234,19 +237,17 @@ func TestStatusStalledHelperIsSilence18293(t *testing.T) {
 			if !isStatusReadTimeout(err) {
 				t.Fatalf("stalled helper error = %v (%T), want a read-timeout in the chain", err, err)
 			}
-			// Wedge-countable through the real counter: feeding this
-			// exact error advances failures and never the decode count.
-			before := StatusPollDecodeErrors()
-			m2 := &Manager{}
-			now := time.Now()
-			for i := range helperWedgeFailedPolls {
-				_ = m2.noteStatusPollResultLocked(err, now.Add(time.Duration(i)*time.Second))
+			// Wedge-countable through the real round-trip site (#18685):
+			// the call itself recorded one silent round trip, and the
+			// decode counter did not move.
+			m.liveTrack.mu.Lock()
+			silent, since := m.liveTrack.silentTrips, m.liveTrack.silentSince
+			m.liveTrack.mu.Unlock()
+			if silent != 1 || since.IsZero() {
+				t.Fatalf("tracker after one stalled round trip: silentTrips=%d silentSince=%v, want 1 and set (timeout must count as silence)", silent, since)
 			}
-			if m2.liveness.failures != helperWedgeFailedPolls {
-				t.Fatalf("wedge failures = %d after %d stalled polls, want %d (timeout must advance the counter)", m2.liveness.failures, helperWedgeFailedPolls, helperWedgeFailedPolls)
-			}
-			if m2.liveness.decodeErrors != 0 || StatusPollDecodeErrors()-before != 0 {
-				t.Fatalf("stalled polls moved the decode counter: per-manager=%d global delta=%d, want 0", m2.liveness.decodeErrors, StatusPollDecodeErrors()-before)
+			if m.liveness.decodeErrors != 0 {
+				t.Fatalf("stalled poll moved the decode counter: %d, want 0", m.liveness.decodeErrors)
 			}
 		})
 	}
@@ -311,10 +312,12 @@ func TestStatusLoopSilentDecodeSilentSequence18293(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		m.mu.Lock()
-		failures := m.liveness.failures
 		dec := m.liveness.decodeErrors
-		kills := m.liveness.kills
 		m.mu.Unlock()
+		m.liveTrack.mu.Lock()
+		failures := m.liveTrack.silentTrips
+		m.liveTrack.mu.Unlock()
+		kills := m.liveTrack.kills.Load()
 		mu.Lock()
 		n := calls
 		mu.Unlock()

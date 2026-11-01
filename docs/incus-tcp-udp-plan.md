@@ -396,7 +396,8 @@ Additional observed facts:
   shared. New configs follow the same rule: **stack deltas live in the shared
   section only via the env-selected conf file; node deltas stay in groups.**
 - HA parameters: `cluster-id 22`, shared PSK
-  (`authentication-key "xpf-lab-ha-psk-cluster-22-CHANGE-ME"` — lab value,
+  (a per-cluster key kept OUT of the repository since #18724: the conf
+  carries a token and `cluster-setup.sh` substitutes `$CLUSTER_AUTH_KEY_FILE`;
   must differ per new cluster, §5-S4), `reth-count 2`, heartbeat
   200 ms × threshold 5 on `em0`, `configuration-synchronize`, RG0 (control,
   200/100), RG1 (WAN reth0, interface-monitor on `ge-*/0/2`), RG2 (LAN reth1,

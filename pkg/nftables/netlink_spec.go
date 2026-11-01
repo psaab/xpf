@@ -242,10 +242,13 @@ type HostInputFencePair struct {
 }
 
 // HostInputFenceOverlay is the generation-tagged master-interface revocation
-// overlay. It is merged at the very head of the ordinary host-input chain so
-// established/related accepts cannot bypass a revoked master. The marker fields
-// are encoded into the named counter and are checked by readback before the
-// daemon publishes the generation.
+// overlay. It is merged at the head of the ordinary host-input chain, ahead of
+// every rule that can admit a packet, so established/related accepts cannot
+// bypass a revoked master. Only DROP-only rules (an expression-kind allowlist,
+// hostInputRuleIsDropOnly) may run before it: today the #16841 zero-hop-limit
+// local DROP, which leads every host-input chain (#18721). The marker fields
+// are encoded into the named counter and are
+// checked by readback before the daemon publishes the generation.
 type HostInputFenceOverlay struct {
 	MasterSet        []string
 	SlaveSet         []string
