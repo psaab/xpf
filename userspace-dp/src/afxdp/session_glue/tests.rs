@@ -18455,6 +18455,39 @@ fn drop8114_reserve_for(
     nat
 }
 
+/// Try to reserve the one-port fixture for `key` at `now_ns`, without
+/// asserting the outcome. #18698: a port freed from this ONE-port pool is in
+/// #16035's small-pool quarantine for `PAT_PORT_QUARANTINE_NS` after its
+/// release, so a re-reservation's result depends on WHEN it is asked.
+/// `drop8114_reserve_for` above asks at a fixed 1_000 ns and is for fresh
+/// fixtures only.
+fn drop8114_try_reserve_at(
+    forwarding: &ForwardingState,
+    key: &SessionKey,
+    worker_id: u32,
+    now_ns: u64,
+) -> bool {
+    let flow = crate::nat::SourceNatFlowKey {
+        protocol: key.protocol,
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+        routing_scope: 0,
+    };
+    forwarding.source_nat_rules[0].pool_allocator.reserve_flow(
+        flow,
+        crate::nat::TranslatedTuple {
+            ip: "203.0.113.1".parse().unwrap(),
+            port: 20000,
+        },
+        0,
+        false,
+        now_ns,
+        crate::nat::NatHolder::Worker(worker_id),
+    )
+}
+
 /// A peer queue plus the id-keyed map that names it — the SAME `Arc`, because
 /// the repair resolves the id by pointer identity.
 fn drop8114_queues(
@@ -19482,12 +19515,14 @@ fn delete_drop_sweep_releases_nat_before_a_still_queued_delete_synced_10288() {
     let mut sweep = super::DeleteDropSweep::default();
     sweep.arm();
     let mut evicted = Vec::new();
+    // The sweep's clock, which stamps the freed port's quarantine (#16035).
+    const SWEEP_NOW_NS: u64 = 2_000_000;
     let n = sweep.step_with_nat(
         &mut sessions,
         &shared_sessions,
         SteeringMap::unshared_for_test(-1),
         &forwarding,
-        2_000_000,
+        SWEEP_NOW_NS,
         WORKER,
         &mut evicted,
     );
@@ -19557,9 +19592,39 @@ fn delete_drop_sweep_releases_nat_before_a_still_queued_delete_synced_10288() {
 
     // PORT REUSE (issue acceptance): a distinct flow serves the freed port
     // again, proving the allocation was actually unlinked.
+    //
+    // #18698: since #16035 (9527c76055, 2026-10-23), a port freed from a pool
+    // of at most SMALL_POOL_QUARANTINE_MAX_RANGE ports is quarantined against
+    // a DIFFERENT flow for PAT_PORT_QUARANTINE_NS (60 s) after its release,
+    // so a late packet of the old flow is never delivered to the new one. The
+    // specific-port reserve below honours that quarantine like the claim paths
+    // do. This step was written before #16035 and asked at the fixture's fixed
+    // 1_000 ns, which is earlier than the sweep's own release at SWEEP_NOW_NS
+    // and so inside the quarantine. It was refused, and the failure read as a
+    // pool leak. The port is reusable once the quarantine has elapsed, and both
+    // halves are pinned here: refused just after the release, served after it.
     let mut reuse_key = key.clone();
     reuse_key.src_port += 1;
-    drop8114_reserve_for(&forwarding, &reuse_key, WORKER);
+    let pool = &forwarding.source_nat_rules[0].pool_allocator;
+    assert!(
+        !drop8114_try_reserve_at(&forwarding, &reuse_key, WORKER, SWEEP_NOW_NS + 1),
+        "#16035: inside its quarantine the freed port must not go to a different flow"
+    );
+    assert!(
+        !pool.debug_is_port_occupied(0, 20000),
+        "a refused reserve must leave the freed port free"
+    );
+    let after_quarantine = SWEEP_NOW_NS + crate::nat::PAT_PORT_QUARANTINE_NS_FOR_TEST;
+    assert!(
+        drop8114_try_reserve_at(&forwarding, &reuse_key, WORKER, after_quarantine),
+        "#10288 acceptance: once the quarantine has elapsed, a distinct flow must be \
+         able to take the freed 203.0.113.1:20000 — otherwise the swept port is \
+         leaked for good"
+    );
+    assert!(
+        pool.debug_is_port_occupied(0, 20000) && pool.live_flow_count() == 1,
+        "the re-reservation must hold the port as one live flow"
+    );
 }
 
 // ---------------------------------------------------------------------------
