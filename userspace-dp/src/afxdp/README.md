@@ -2390,13 +2390,32 @@ relies on the #16270 ordering (connected prefixes republished before
 `docs/ha-failover-status.md` (#18531, #18691).
 
 A reverse hit whose forward companion this worker has not materialized
-(`SourceNatRevalidationTarget::NoLocalEntry`) is judged on the forward row in
-the SHARED map when that row is locally authored (#18710,
-`shared_forward_companion_for_reverse_hit`). A fresh flow's first reply can
-reach a worker before it drains the creating worker's replica command, and
-the sessionless arm, which fails closed without forward VLAN provenance,
-dropped that reply (a SYN-ACK: a 1 s SYN retransmit). A peer-synced shared
-row and a reply with no shared companion keep the sessionless arm. With no
+(`SourceNatRevalidationTarget::NoLocalEntry`) can be judged on the forward row
+in the SHARED map (#18710, `shared_forward_companion_for_reverse_hit`). A
+fresh flow's first reply can reach a worker before it drains the creating
+worker's replica command. The sessionless arm, which fails closed without
+forward VLAN provenance, used to drop that reply; for TCP it is the SYN-ACK,
+so the connection waited a 1 s SYN retransmit.
+
+The shared row is judged only when all three of these hold:
+- it is a forward row;
+- its own translation maps back to this reply's reverse key. A shared row at
+  the original tuple can belong to a newer flow with a different translation
+  (the same client tuple reused), and a stale reverse row of the older flow
+  must not be validated by it;
+- this node created it. That means origin `ForwardFlow`, the slow-path
+  create, or `MissingNeighborSeed`, the same create committed before the
+  neighbor resolved and published to the shared map by #14661.
+
+Every other origin keeps the sessionless arm:
+- the peer-synced set and `SharedPromote` carry a line imported from the
+  peer;
+- `FabricPuntSeed` is a local note of a flow whose authoritative session is
+  the peer's;
+- `LocalMiss`, `ReverseFlow` and `TunOrigin` are not a transit flow this node
+  translated.
+
+A reply with no shared companion also keeps the sessionless arm. With no
 local row, a failed judgment drops only the packet.
 
 ## Hot-path constants

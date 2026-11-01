@@ -378,3 +378,266 @@ fn withdrawn_translation_still_revokes_on_either_worker_18710() {
         }
     }
 }
+
+/// Review fold (AC #1, flow identity): the shared row at the original tuple
+/// can belong to a NEWER flow on the same client tuple with a different
+/// translation. A reply for the OLDER translation must not be validated by
+/// it: the shared judgment applies only when the shared row's own
+/// translation maps back to this reply's reverse key; otherwise the
+/// sessionless arm decides, as before.
+#[test]
+fn first_reply_for_another_flows_translation_keeps_the_old_arm_18710() {
+    for (label, client) in [("interface", IFACE_CLIENT), ("pool", POOL_CLIENT)] {
+        let (_, reply, _, _) = first_reply_with(client, true, |shared, key| {
+            let entry = shared.get_mut(key).expect("fixture: shared forward row");
+            let port = entry.decision.nat.rewrite_src_port.unwrap_or(SPORT);
+            entry.decision.nat.rewrite_src_port = Some(port.wrapping_add(1));
+        });
+        assert_eq!(
+            reply.session_hit, 1,
+            "{label}: the reply hits the shared reverse row"
+        );
+        assert_eq!(
+            reply.snat_revoked, 1,
+            "{label}: a shared row of another translation is not this flow's companion"
+        );
+        assert_eq!(reply.tx, [0, 0, 0], "{label}: dropped");
+    }
+}
+
+/// Review fold (AC #2, predicate breadth): only a forward row this node
+/// CREATED is judged from the shared map — `ForwardFlow` or
+/// `MissingNeighborSeed`. Every other origin, and a reverse row, keeps the
+/// sessionless arm.
+#[test]
+fn first_reply_judges_only_creating_flow_origins_18710() {
+    let cases: [(&str, SessionOrigin, bool, u64); 8] = [
+        ("forward_flow", SessionOrigin::ForwardFlow, false, 0),
+        ("missing_neighbor_seed", SessionOrigin::MissingNeighborSeed, false, 0),
+        ("shared_promote", SessionOrigin::SharedPromote, false, 1),
+        ("fabric_punt_seed", SessionOrigin::FabricPuntSeed, false, 1),
+        ("local_miss", SessionOrigin::LocalMiss, false, 1),
+        ("tun_origin", SessionOrigin::TunOrigin, false, 1),
+        ("reverse_flow", SessionOrigin::ReverseFlow, false, 1),
+        ("forward_flow marked reverse", SessionOrigin::ForwardFlow, true, 1),
+    ];
+    for (label, origin, is_reverse, revoked) in cases {
+        let (_, reply, _, _) = first_reply_with(IFACE_CLIENT, true, |shared, key| {
+            let entry = shared.get_mut(key).expect("fixture: shared forward row");
+            entry.origin = origin;
+            entry.metadata.is_reverse = is_reverse;
+        });
+        assert_eq!(reply.session_hit, 1, "{label}: the reply hits");
+        assert_eq!(reply.snat_revoked, revoked, "{label}");
+        let delivered = if revoked == 0 { 1 } else { 0 };
+        assert_eq!(reply.tx, [0, 0, delivered], "{label}");
+    }
+}
+
+/// Review fold (AC #3a): the creating worker's replica reaches worker B
+/// AFTER B already judged and delivered a reply from the shared row. The
+/// late replica must not double the pair or tear anything down, and the
+/// next reply hits B's own pair.
+#[test]
+fn replica_after_a_shared_judged_reply_leaves_one_pair_18710() {
+    let mut forwarding = fw1_owner_forwarding();
+    forwarding
+        .neighbors
+        .entry((LAN_IFINDEX, IpAddr::V4(IFACE_CLIENT)))
+        .or_insert(NeighborEntry { mac: [0x10, 0x66, 0x6a, 0xfd, 0x4b, 0x5c] });
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha = owner_ha(now_secs);
+    let shared = Shared::new();
+    let mut a = SessionTable::new();
+    a.set_forwarding_revalidation_gen(7, 9);
+    let (frame, meta) = lan_syn(IFACE_CLIENT);
+    poll(&mut a, &shared, &forwarding, &ha, LAN, &frame, meta);
+    let mut key = forward_key();
+    key.src_ip = IpAddr::V4(IFACE_CLIENT);
+    key.dst_port = 5210;
+    let (decision, _, _) = a.entry_with_origin(&key).expect("fixture: forward row");
+    let IpAddr::V4(translated) = decision.nat.rewrite_src.expect("translated") else {
+        panic!("v4")
+    };
+    let port = decision.nat.rewrite_src_port.unwrap_or(SPORT);
+    let reverse_key = crate::session::reverse_session_key(&key, decision.nat);
+    let mut b = SessionTable::new();
+    b.set_forwarding_revalidation_gen(7, 9);
+    let (frame, meta) = wan_syn_ack(translated, port);
+    let first = poll(&mut b, &shared, &forwarding, &ha, WAN, &frame, meta);
+    assert_eq!(
+        (first.snat_revoked, first.closes, first.tx),
+        (0, 0, [0, 0, 1]),
+        "premise: B judged the first reply from the shared row and delivered it"
+    );
+    // The creating worker's replica commands, drained late on B.
+    let (forward_entry, reverse_entry) = {
+        let map = shared.sessions.lock().unwrap();
+        (
+            map.get(&key).cloned().expect("shared forward row"),
+            map.get(&reverse_key).cloned().expect("shared reverse row"),
+        )
+    };
+    apply_commands(
+        &mut b,
+        &forwarding,
+        &ha,
+        vec![
+            WorkerCommand::UpsertSynced(crate::afxdp::shared_ops::synced_replica_entry(&forward_entry)),
+            WorkerCommand::UpsertSynced(crate::afxdp::shared_ops::synced_replica_entry(&reverse_entry)),
+        ],
+    );
+    let late_closes = b
+        .drain_deltas(64)
+        .iter()
+        .filter(|d| d.kind == crate::session::SessionDeltaKind::Close)
+        .count();
+    assert_eq!(late_closes, 0, "the late replica tears nothing down");
+    assert!(
+        b.last_seen_ns(&key).is_some() && b.last_seen_ns(&reverse_key).is_some(),
+        "B now holds the pair"
+    );
+    assert_eq!(b.len(), 2, "one pair on B, not two");
+    let (frame, meta) = wan_syn_ack(translated, port);
+    let second = poll(&mut b, &shared, &forwarding, &ha, WAN, &frame, meta);
+    assert_eq!(
+        (second.session_hit, second.snat_revoked, second.closes, second.tx),
+        (1, 0, 0, [0, 0, 1]),
+        "the next reply hits B's own pair and is delivered"
+    );
+}
+
+/// An ICMPv4 echo frame of `icmp_type` (8 request, 0 reply) with identifier
+/// `id`, untagged.
+fn icmp_echo(src: Ipv4Addr, dst: Ipv4Addr, icmp_type: u8, id: u16, dst_mac: [u8; 6]) -> Vec<u8> {
+    let mut frame = Vec::new();
+    write_eth_header(&mut frame, dst_mac, [0x00, 0x25, 0x90, 0x12, 0x34, 0x56], 0, 0x0800);
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 64, PROTO_ICMP, 0x00, 0x00,
+    ]);
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&dst.octets());
+    let ip_csum = checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
+    let icmp_start = frame.len();
+    let id = id.to_be_bytes();
+    frame.extend_from_slice(&[icmp_type, 0, 0x00, 0x00, id[0], id[1], 0x00, 0x01]);
+    let icmp_csum = checksum16(&frame[icmp_start..]);
+    frame[icmp_start + 2..icmp_start + 4].copy_from_slice(&icmp_csum.to_be_bytes());
+    frame
+}
+
+fn icmp_meta(ingress_ifindex: i32, frame_len: usize, src: Ipv4Addr, dst: Ipv4Addr, sport: u16, dport: u16) -> UserspaceDpMeta {
+    let mut meta = txn_meta_v4(ingress_ifindex as u32, 0, frame_len as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    set_flow(&mut meta, IpAddr::V4(src), IpAddr::V4(dst), sport, dport);
+    meta
+}
+
+/// Review fold (AC #3b): an ICMP echo. One of the two live increments in
+/// #18683 run 3 was a new ICMP session's first reply. The echo request is
+/// created on worker A; its reply is polled on A and on B.
+#[test]
+fn first_icmp_echo_reply_on_another_worker_is_not_revoked_18710() {
+    for reply_on_b in [false, true] {
+        let mut forwarding = fw1_owner_forwarding();
+        forwarding
+            .neighbors
+            .entry((LAN_IFINDEX, IpAddr::V4(IFACE_CLIENT)))
+            .or_insert(NeighborEntry { mac: [0x10, 0x66, 0x6a, 0xfd, 0x4b, 0x5c] });
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let ha = owner_ha(now_secs);
+        let shared = Shared::new();
+        let mut a = SessionTable::new();
+        a.set_forwarding_revalidation_gen(7, 9);
+        let id = 0x1234u16;
+        let frame = icmp_echo(IFACE_CLIENT, WAN_HOST, 8, id, [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03]);
+        let meta = icmp_meta(LAN_IFINDEX, frame.len(), IFACE_CLIENT, WAN_HOST, id, 0);
+        let created = poll(&mut a, &shared, &forwarding, &ha, LAN, &frame, meta);
+        assert_eq!(created.tx, [1, 0, 0], "premise: the echo request is forwarded to the WAN");
+        let key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_ICMP,
+            src_ip: IpAddr::V4(IFACE_CLIENT),
+            dst_ip: IpAddr::V4(WAN_HOST),
+            src_port: id,
+            dst_port: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let (decision, _, _) = a
+            .entry_with_origin(&key)
+            .expect("fixture: worker A created the ICMP forward row");
+        let IpAddr::V4(translated) = decision.nat.rewrite_src.expect("source-translated") else {
+            panic!("v4")
+        };
+        // The reply's flow, computed by hand rather than by the session
+        // layer's own `reverse_session_key` (an oracle that shares the code
+        // under test cannot catch it): addresses swapped, the translated
+        // identifier in the source-port slot, and the destination-port slot
+        // unchanged (0 for an echo). The ICMP key convention keeps ports
+        // unswapped; `icmp_echo_reverse_key_from_first_principles_18710`
+        // pins it independently.
+        let reply_id = decision.nat.rewrite_src_port.unwrap_or(id);
+        let mut b = SessionTable::new();
+        b.set_forwarding_revalidation_gen(7, 9);
+        let frame = icmp_echo(WAN_HOST, translated, 0, reply_id, [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01]);
+        let mut meta = icmp_meta(WAN_UNIT_IFINDEX, frame.len(), WAN_HOST, translated, reply_id, 0);
+        meta.ingress_vlan_id = 80;
+        let table = if reply_on_b { &mut b } else { &mut a };
+        let reply = poll(table, &shared, &forwarding, &ha, WAN, &frame, meta);
+        let on = if reply_on_b { "B" } else { "A" };
+        assert_eq!(reply.session_hit, 1, "on {on}: the echo reply hits");
+        assert_eq!((reply.snat_revoked, reply.closes), (0, 0), "on {on}: not revoked");
+        assert_eq!(reply.tx, [0, 0, 1], "on {on}: delivered to the LAN host");
+    }
+}
+
+/// Review fold (independent oracle for the ICMP cell): the reverse key of an
+/// ICMP echo flow, written down from first principles and compared against
+/// `reverse_session_key`. The echo reply (type 0) answers the request (type
+/// 8) with the same identifier, from the request's destination to its
+/// (translated) source. The ICMP key keeps the identifier in the source-port
+/// slot in BOTH directions (it is not swapped like TCP/UDP ports), so the
+/// reverse key is (WAN host -> translated address, src_port = translated
+/// identifier, dst_port = the forward dst_port, 0 for an echo).
+#[test]
+fn icmp_echo_reverse_key_from_first_principles_18710() {
+    let translated = Ipv4Addr::new(172, 16, 80, 8);
+    let forward = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        src_ip: IpAddr::V4(IFACE_CLIENT),
+        dst_ip: IpAddr::V4(WAN_HOST),
+        src_port: 0x1234,
+        dst_port: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    for (label, rewrite_src_port, want_id) in [
+        ("identifier translated", Some(0x4321u16), 0x4321u16),
+        ("identifier preserved", None, 0x1234u16),
+    ] {
+        let nat = NatDecision {
+            rewrite_src: Some(IpAddr::V4(translated)),
+            rewrite_src_port,
+            ..NatDecision::default()
+        };
+        let want = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_ICMP,
+            src_ip: IpAddr::V4(WAN_HOST),
+            dst_ip: IpAddr::V4(translated),
+            src_port: want_id,
+            dst_port: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        assert_eq!(
+            crate::session::reverse_session_key(&forward, nat),
+            want,
+            "{label}: the echo reply's key"
+        );
+    }
+}

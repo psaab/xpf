@@ -1098,9 +1098,23 @@ type JudgedForward = (
 /// reverse row carries no forward VLAN provenance) and drops the reply. For
 /// TCP that is the SYN-ACK, so the connection waits a 1 s SYN retransmit.
 /// Judge the shared forward row instead, exactly as a local companion is
-/// judged, when it is a locally authored forward row (a flow this node
-/// created). A peer-synced shared row carries the peer's line and keeps the
-/// sessionless arm, and so does a reply with no shared companion at all.
+/// judged, when ALL of these hold; otherwise the sessionless arm decides, as
+/// before:
+/// - it is a FORWARD row (`!metadata.is_reverse`);
+/// - it is THIS reply's flow: its own translation maps back to the reply's
+///   reverse key. A shared row at the original tuple can belong to a newer
+///   flow with a different translation (the same client tuple reused); a
+///   stale reverse row of the older flow must not be validated by it;
+/// - this node created it: origin `ForwardFlow` (the slow-path create) or
+///   `MissingNeighborSeed` (the same create committed before the neighbor
+///   resolved, published to the shared map by #14661 so a reply on another
+///   queue finds it). Both carry the flow's own translation and this node's
+///   line. Every other origin keeps the old arm: the peer-synced set
+///   (`SyncImport`/`SyncLiveness`/`SharedMaterialize`/`WorkerLocalImport`)
+///   and `SharedPromote` carry a line imported from the peer;
+///   `FabricPuntSeed` is a local note of a flow whose authoritative session
+///   is the peer's; `LocalMiss`, `ReverseFlow` and `TunOrigin` are not a
+///   transit flow this node translated.
 /// There is no local row to tear down, so a failed judgment drops only this
 /// packet (`canonical_key: None`).
 fn shared_forward_companion_for_reverse_hit(
@@ -1126,7 +1140,15 @@ fn shared_forward_companion_for_reverse_hit(
     }
     let shared = crate::afxdp::shared_ops::lock_shared_recover(shared_sessions);
     let entry = shared.get(&forward_query)?;
-    if entry.origin.is_peer_synced() {
+    if entry.metadata.is_reverse
+        || !matches!(
+            entry.origin,
+            SessionOrigin::ForwardFlow | SessionOrigin::MissingNeighborSeed
+        )
+    {
+        return None;
+    }
+    if crate::session::reverse_session_key(&entry.key, entry.decision.nat) != reverse_key {
         return None;
     }
     Some((
