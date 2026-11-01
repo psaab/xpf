@@ -1929,6 +1929,36 @@ logged nothing. Note that counter is still not exported as a Prometheus
 metric, unlike its #1807 twin
 (`xpf_userspace_worker_command_queue_poison_recoveries_total`) — see #6641.
 
+### Shared-session lock order (#18658)
+
+The shared-session maps and their indexes are separate mutexes. Any path
+that holds two of them takes them in this order:
+
+    shared_sessions  →  forward-wire map  →  wire_ambiguities  →  owner-RG index
+
+- `remove_shared_session_if` holds `shared_sessions`, then takes the
+  forward-wire map, then `wire_ambiguities` (survivor resolution needs
+  both).
+- `publish_shared_session` releases `shared_sessions` before its wire
+  section, then takes the map before the index.
+- Readers such as `lookup_shared_forward_wire_match` take the map and the
+  index one at a time and never nest them.
+
+Before #18658 the publish took `wire_ambiguities` first. A publish
+holding the index and waiting for the map then deadlocked against a
+removal holding the map and waiting for the index. Every worker and the
+coordinator queued behind the pair until xpfd was restarted; this was
+reproduced on tcp and loss after a 16000-session burst.
+
+`shared_ops/wire_lock_order_18658_tests.rs` forces that interleaving
+with test-only pause points between each path's two wire locks, and
+fails through a bounded timeout rather than hanging.
+
+The NAT pair has no nested inversion: a publish takes `nat_ambiguities`
+then the NAT map, while removal releases the NAT map before it takes
+`nat_ambiguities`. Keep it that way, or extend the order above to cover
+it.
+
 ## WireGuard handshake-session poison policy (#6227 item 5)
 
 `afxdp/wg/handshake_session.rs` holds seven call sites across the

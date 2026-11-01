@@ -856,11 +856,25 @@ pub(in crate::afxdp) fn publish_shared_session(
     if !entry.metadata.is_reverse {
         let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
         if wire_key != entry.key {
-            // #14383: record the wire-key owner BEFORE the map write (same
-            // order as the NAT publish) so a reader can never observe a
-            // wire alias whose owner has not been recorded. A publish that
-            // displaces a DIFFERENT forward session marks the key
-            // ambiguous; the shared wire lookup then fails closed.
+            // #18658: LOCK ORDER — the forward-wire MAP before
+            // `wire_ambiguities`, never the reverse. That is the order
+            // `remove_shared_session_if` takes them in (both inside
+            // `shared_sessions`). This publish used to take the index first,
+            // so a publish holding `wire_ambiguities` and waiting for the map
+            // could deadlock against a removal holding the map and waiting for
+            // the index. Every worker and the coordinator then queued behind
+            // them, permanently (tcp and loss, master 0050ac4172).
+            //
+            // #14383 still holds: a reader can never observe a wire alias
+            // whose owner is unrecorded. The owner is recorded below, after
+            // both locks are taken and before the alias is inserted, and
+            // readers (`lookup_shared_forward_wire_match`) read the map first,
+            // so none can reach the alias before this publish releases the
+            // map. A publish that displaces a DIFFERENT forward session marks
+            // the key ambiguous; the shared wire lookup then fails closed.
+            let mut sessions = lock_shared_publish(shared_forward_wire_sessions);
+            #[cfg(test)]
+            super::wire_lock_order_18658_tests::publish_between_wire_locks(&wire_key);
             let mut wire_ambiguities =
                 lock_wire_ambiguities_for_publish(shared_owner_rg_indexes);
             wire_ambiguities.observe(wire_key.clone(), entry.key.clone());
@@ -868,7 +882,6 @@ pub(in crate::afxdp) fn publish_shared_session(
             // later removal resolves survivors in O(1) instead of scanning
             // `shared_sessions`.
             wire_ambiguities.observe_wire_owner(wire_key.clone(), entry.key.clone());
-            let mut sessions = lock_shared_publish(shared_forward_wire_sessions);
             // #16217 (Codex alias-republish regression): the alias
             // slot must keep a monotonic handshake stage + packet
             // counts exactly like the canonical row above. The
@@ -1184,8 +1197,13 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                     // `publish_shared_session` answers in O(1); the scan
                     // below is only the fail-closed fallback for
                     // unrecorded/at-ceiling state, reseeding the roster.
+                    // #18658: the forward-wire map before `wire_ambiguities`,
+                    // the one order every path takes them in (see
+                    // `publish_shared_session`).
                     let mut forward_wire_sessions =
                         lock_shared_recover(shared_forward_wire_sessions);
+                    #[cfg(test)]
+                    super::wire_lock_order_18658_tests::removal_between_wire_locks(&wire_key);
                     let mut wire_ambiguities =
                         lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities);
                     let roster_before = wire_ambiguities.wire_owner_count(&wire_key);
