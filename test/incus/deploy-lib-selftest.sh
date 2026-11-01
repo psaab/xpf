@@ -3894,6 +3894,338 @@ test_rolling_secondary_hold_counts_as_secondary
 test_rolling_secondary_peer_down_defaults
 test_rolling_secondary_empty_defaults
 test_rolling_rg_ids
+# ── #18724: lab cluster key substitution ───────────────────────────────
+# A conf carrying DEPLOY_CLUSTER_KEY_TOKEN is pushed only after the token is
+# replaced by the key from the host-side secret; nothing prints the key.
+_ck_conf() { # dir -> path of a two-line conf carrying the token
+	printf 'chassis { cluster {\n        authentication-key "%s";\n} }\n' "$DEPLOY_CLUSTER_KEY_TOKEN" >"$1/in.conf"
+	printf '%s' "$1/in.conf"
+}
+
+test_cluster_key_render_substitutes_the_token() {
+	local d key src out log expect
+	d=$(mktemp -d); key="AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/AB="
+	printf '%s\n' "$key" >"$d/k.key"; chmod 0600 "$d/k.key"
+	src=$(_ck_conf "$d"); out="$d/out.conf"
+	# umask 022 so the 0600 check is the function's own doing, not the caller's.
+	log=$(umask 022 && deploy_render_cluster_conf "$src" "$d/k.key" "$out" 2>&1)
+	printf 'chassis { cluster {\n        authentication-key "%s";\n} }\n' "$key" >"$d/expect"
+	# cmp, not $(<): a dropped or added final newline must be visible.
+	if [[ -f "$out" ]] && cmp -s "$out" "$d/expect" && [[ "$(stat -c %a "$out")" == 600 &&
+		"$log" != *"$key"* ]]; then
+		ok "cluster key: the token is replaced by the key, the output is 0600, and the key is never printed"
+	else
+		bad "cluster key: rendering must replace the token with the key in a 0600 file without printing it"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_render_is_byte_exact() {
+	local d fails=""
+	d=$(mktemp -d)
+	printf '%s\n' "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/AB=" >"$d/k.key"; chmod 0600 "$d/k.key"
+	# No token: no final newline, two trailing newlines, an embedded NUL.
+	printf 'set system host-name x' >"$d/a.conf"
+	printf 'a\n\n' >"$d/b.conf"
+	printf 'a\0b\n' >"$d/c.conf"
+	for f in a b c; do
+		deploy_render_cluster_conf "$d/$f.conf" "" "$d/$f.out" >/dev/null 2>&1 && cmp -s "$d/$f.conf" "$d/$f.out" ||
+			fails+=" no-token-$f"
+	done
+	# Token, no final newline: only the token changes.
+	printf 'authentication-key "%s";' "$DEPLOY_CLUSTER_KEY_TOKEN" >"$d/t.conf"
+	printf 'authentication-key "%s";' "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/AB=" >"$d/t.expect"
+	deploy_render_cluster_conf "$d/t.conf" "$d/k.key" "$d/t.out" >/dev/null 2>&1 && cmp -s "$d/t.out" "$d/t.expect" ||
+		fails+=" token-no-final-newline"
+	if [[ -z "$fails" ]]; then
+		ok "cluster key: rendering is byte-exact (final newlines and NULs kept; only the token changes)"
+	else
+		bad "cluster key: rendering must preserve every byte but the token:$fails"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_render_without_token_is_unchanged() {
+	local d out
+	d=$(mktemp -d); out="$d/out.conf"
+	printf 'chassis { cluster { authentication-key "hand-keyed-0123456789"; } }\n' >"$d/in.conf"
+	if deploy_render_cluster_conf "$d/in.conf" "" "$out" >/dev/null 2>&1 && cmp -s "$d/in.conf" "$out" &&
+		[[ ! -e "$d/k.key" ]]; then
+		ok "cluster key: a conf without the token is copied byte for byte and needs no key file"
+	else
+		bad "cluster key: a conf without the token must be pushed unchanged"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_render_refuses_without_key_file() {
+	local d src
+	d=$(mktemp -d); src=$(_ck_conf "$d")
+	if deploy_render_cluster_conf "$src" "" "$d/out.conf" >/dev/null 2>&1 || [[ -e "$d/out.conf" ]]; then
+		bad "cluster key: a token-carrying conf with no CLUSTER_AUTH_KEY_FILE must be refused"
+	else
+		ok "cluster key: a token-carrying conf with no key file named is refused and nothing is written"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_missing_file_is_refused_on_deploy() {
+	local d src
+	d=$(mktemp -d); src=$(_ck_conf "$d")
+	if (unset XPF_CLUSTER_KEY_GENERATE; deploy_render_cluster_conf "$src" "$d/keys/new.key" "$d/out.conf") >/dev/null 2>&1 ||
+		[[ -e "$d/keys/new.key" || -e "$d/out.conf" ]]; then
+		bad "cluster key: a deploy with the key file missing must be refused and must generate nothing"
+	else
+		ok "cluster key: a deploy with the key file missing is refused, and nothing is generated or written"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_symlink_is_refused() {
+	local d src fails=""
+	d=$(mktemp -d); src=$(_ck_conf "$d"); mkdir -m 0700 "$d/keys"
+	printf '%s\n' "Zm9vYmFyYmF6cXV4MDEyMzQ1Njc4OWFiY2RlZmdoaWo=" >"$d/real.key"; chmod 0600 "$d/real.key"
+	ln -s "$d/real.key" "$d/keys/live.key"
+	ln -s "$d/nowhere.key" "$d/keys/dangling.key"
+	deploy_render_cluster_conf "$src" "$d/keys/live.key" "$d/o1" >/dev/null 2>&1 && fails+=" live-symlink"
+	XPF_CLUSTER_KEY_GENERATE=1 deploy_render_cluster_conf "$src" "$d/keys/dangling.key" "$d/o2" >/dev/null 2>&1 && fails+=" dangling-symlink"
+	[[ -e "$d/nowhere.key" ]] && fails+=" generated-through-symlink"
+	if [[ -z "$fails" ]]; then
+		ok "cluster key: a symlink at the key path is refused, live or dangling, even with generation enabled"
+	else
+		bad "cluster key: a symlinked key path must be refused:$fails"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_generation_refuses_an_unfixable_dir() {
+	local d src
+	d=$(mktemp -d); src=$(_ck_conf "$d")
+	# A directory the generator cannot set to 0700 (one owned by someone else,
+	# or on a read-only mount) must stop generation before a key is written.
+	# Only the directory chmod fails; the file chmod still works, so the cell
+	# sees whether generation stopped at the directory or carried on.
+	if (chmod() { [[ "$1" == 0700 ]] && return 1; command chmod "$@"; }
+		XPF_CLUSTER_KEY_GENERATE=1 deploy_render_cluster_conf "$src" "$d/keys/new.key" "$d/out.conf") >/dev/null 2>&1 ||
+		[[ -n "$(ls -A "$d/keys" 2>/dev/null)" || -e "$d/out.conf" ]]; then
+		bad "cluster key: a key dir that cannot be set to 0700 must refuse generation and write no key"
+	else
+		ok "cluster key: a key dir that cannot be set to 0700 refuses generation and writes no key"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_create_mints_the_key() {
+	local body
+	body=$(awk '/^cmd_create\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$SCRIPT_DIR/cluster-setup.sh")
+	# The mint must follow the create_vm loop (which dies on an existing VM).
+	if grep -Fq 'deploy_ensure_cluster_key "$CLUSTER_AUTH_KEY_FILE" generate' <<<"$body" &&
+		awk '/create_vm "\$idx"/{v=NR} /deploy_ensure_cluster_key/{k=NR} END{exit !(v && k > v)}' <<<"$body"; then
+		ok "cluster key: only cluster-setup.sh create mints a key, after its VMs are newly created"
+	else
+		bad "cluster key: cmd_create must mint the key file after create_vm, with an explicit 'generate'"
+	fi
+}
+
+test_cluster_key_generated_when_absent() {
+	local d src key
+	d=$(mktemp -d); src=$(_ck_conf "$d")
+	if (umask 022 && XPF_CLUSTER_KEY_GENERATE=1 deploy_render_cluster_conf "$src" "$d/keys/new.key" "$d/out.conf") >/dev/null 2>&1; then
+		key="$(<"$d/keys/new.key")"
+		if [[ "$(stat -c %a "$d/keys/new.key")" == 600 && "$(stat -c %a "$d/keys")" == 700 &&
+			-z "$(deploy_cluster_key_problem "$key")" && ${#key} -ge 40 &&
+			"$(<"$d/out.conf")" == *"authentication-key \"$key\";"* ]]; then
+			ok "cluster key: with XPF_CLUSTER_KEY_GENERATE=1 an absent key file is generated (0700 dir, 0600 file, openssl base64) and used"
+		else
+			bad "cluster key: a generated key must be 0600 in a 0700 dir, valid, and rendered in"
+		fi
+	else
+		bad "cluster key: XPF_CLUSTER_KEY_GENERATE=1 must generate an absent key file"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_existing_file_is_never_rewritten() {
+	local d src before after
+	d=$(mktemp -d); src=$(_ck_conf "$d")
+	printf 'Zm9vYmFyYmF6cXV4MDEyMzQ1Njc4OWFiY2RlZmdoaWo=\n' >"$d/k.key"; chmod 0600 "$d/k.key"
+	before=$(sha256sum "$d/k.key")
+	deploy_render_cluster_conf "$src" "$d/k.key" "$d/out.conf" >/dev/null 2>&1
+	deploy_render_cluster_conf "$src" "$d/k.key" "$d/out2.conf" >/dev/null 2>&1
+	after=$(sha256sum "$d/k.key")
+	if [[ "$before" == "$after" ]] && cmp -s "$d/out.conf" "$d/out2.conf"; then
+		ok "cluster key: an existing key file (the key the live cluster runs) is never rewritten"
+	else
+		bad "cluster key: an existing key file must be used as is, never regenerated"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_refuses_unusable_keys() {
+	local d src k bad_keys=0 cases=('short' 'xpf-lab-ha-psk-cluster-22-CHANGE-ME' 'has"a-double-quote-0123456789' 'has a space 0123456789abcdef')
+	d=$(mktemp -d); src=$(_ck_conf "$d")
+	for k in "${cases[@]}"; do
+		printf '%s\n' "$k" >"$d/k.key"; chmod 0600 "$d/k.key"; rm -f "$d/out.conf"
+		if deploy_render_cluster_conf "$src" "$d/k.key" "$d/out.conf" >/dev/null 2>&1 || [[ -e "$d/out.conf" ]]; then
+			bad_keys=$((bad_keys + 1))
+		fi
+	done
+	if ((bad_keys == 0)); then
+		ok "cluster key: a short, placeholder, quote- or space-carrying key is refused and nothing is written"
+	else
+		bad "cluster key: $bad_keys unusable key(s) were rendered into a conf"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_deploy_pushes_only_the_rendered_conf() {
+	local body
+	body=$(awk '/^deploy_vm\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$SCRIPT_DIR/cluster-setup.sh")
+	if grep -Fq 'deploy_push_cluster_conf "$CLUSTER_CONF" "${CLUSTER_AUTH_KEY_FILE:-}" "$rinst" /etc/xpf/xpf.conf' <<<"$body" &&
+		! grep -Eq 'incus file push[^#]*"\$CLUSTER_CONF"' <<<"$body"; then
+		ok "cluster key: deploy_vm pushes the conf only through deploy_push_cluster_conf, never \$CLUSTER_CONF itself"
+	else
+		bad "cluster key: deploy_vm must push \$CLUSTER_CONF through deploy_push_cluster_conf only"
+	fi
+}
+
+# _ck_push <dir> <mode>: run deploy_push_cluster_conf against a mock incus
+# with TMPDIR=<dir>/tmp. mode "ok" records the push; "TERM"/"INT"/"HUP"
+# signals the push subshell mid-push, the shape of an operator's ^C or a
+# killed session. Prints the exit status.
+_ck_push() {
+	local d="$1" mode="$2" src
+	src=$(_ck_conf "$d")
+	(
+		incus() {
+			printf '%s\n' "$*" >"$d/args"
+			cp "${@: -2:1}" "$d/pushed"
+			[[ "$mode" == ok ]] || kill -s "$mode" "$BASHPID"
+		}
+		TMPDIR="$d/tmp" deploy_push_cluster_conf "$src" "$d/k.key" "inst:vm" /etc/xpf/xpf.conf
+	) >/dev/null 2>&1
+	printf '%s' "$?"
+}
+
+test_cluster_key_push_renders_and_cleans_up() {
+	local d key rc
+	d=$(mktemp -d); mkdir "$d/tmp"; key="AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/AB="
+	printf '%s\n' "$key" >"$d/k.key"; chmod 0600 "$d/k.key"
+	rc=$(_ck_push "$d" ok)
+	if [[ "$rc" == 0 && "$(<"$d/args")" == "file push --mode 0600 --uid 0 --gid 0 $d/tmp/"*"/xpf.conf inst:vm/etc/xpf/xpf.conf" &&
+		"$(<"$d/pushed")" == *"authentication-key \"$key\";"* && -z "$(ls -A "$d/tmp")" ]]; then
+		ok "cluster key: deploy_push_cluster_conf pushes the rendered conf at 0600 root:root and leaves nothing in TMPDIR"
+	else
+		bad "cluster key: deploy_push_cluster_conf must push the rendered conf at 0600 and remove its temp dir (rc=$rc)"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_push_cleans_up_on_a_signal() {
+	local d sig rc left=""
+	d=$(mktemp -d); mkdir "$d/tmp"
+	printf '%s\n' "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/AB=" >"$d/k.key"; chmod 0600 "$d/k.key"
+	for sig in TERM INT HUP; do
+		rc=$(_ck_push "$d" "$sig")
+		# The push was reached (the rendered copy existed) and the subshell
+		# died by the signal, yet the copy is gone.
+		if [[ ! -s "$d/pushed" || "$rc" == 0 || -n "$(ls -A "$d/tmp")" ]]; then
+			left+=" $sig(rc=$rc)"
+		fi
+		rm -f "$d/pushed"; rm -rf "$d/tmp"/*
+	done
+	if [[ -z "$left" ]]; then
+		ok "cluster key: a TERM, INT or HUP during the push still removes the rendered copy from TMPDIR"
+	else
+		bad "cluster key: a signal during the push must not leave the rendered copy behind:$left"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_refuses_open_permissions() {
+	local d src fails=""
+	d=$(mktemp -d); src=$(_ck_conf "$d"); mkdir -m 0700 "$d/keys"
+	printf '%s\n' "Zm9vYmFyYmF6cXV4MDEyMzQ1Njc4OWFiY2RlZmdoaWo=" >"$d/keys/k.key"
+	chmod 0644 "$d/keys/k.key"
+	if deploy_render_cluster_conf "$src" "$d/keys/k.key" "$d/out.conf" >/dev/null 2>&1 || [[ -e "$d/out.conf" ]]; then
+		fails+=" 0644-file"
+	fi
+	chmod 0600 "$d/keys/k.key"; chmod 0755 "$d/keys"
+	if deploy_render_cluster_conf "$src" "$d/keys/k.key" "$d/out.conf" >/dev/null 2>&1 || [[ -e "$d/out.conf" ]]; then
+		fails+=" 0755-dir"
+	fi
+	# Positive control: the same key at 0600 in a 0700 dir renders.
+	chmod 0700 "$d/keys"
+	deploy_render_cluster_conf "$src" "$d/keys/k.key" "$d/out.conf" >/dev/null 2>&1 || fails+=" 0600/0700-control"
+	if [[ -z "$fails" ]]; then
+		ok "cluster key: a key file with group/other bits, or in such a dir, is refused; 0600 in 0700 renders"
+	else
+		bad "cluster key: open key-file permissions must be refused:$fails"
+	fi
+	rm -rf "$d"
+}
+
+test_cluster_key_each_env_names_its_own_key_file() {
+	local env cluster file seen="" problems="" n=0
+	for env in "$SCRIPT_DIR"/*-userspace-cluster.env; do
+		cluster="$(basename "$env" -userspace-cluster.env)"
+		file="$(sed -n 's/^CLUSTER_AUTH_KEY_FILE="\(.*\)"$/\1/p' "$env")"
+		n=$((n + 1))
+		[[ "$(basename "$file")" == "$cluster.key" ]] || problems+=" $cluster->${file:-unset}"
+		[[ " $seen " == *" $file "* ]] && problems+=" $cluster(shared)"
+		seen+=" $file"
+	done
+	if ((n >= 3)) && [[ -z "$problems" ]]; then
+		ok "cluster key: each of the $n userspace cluster envs names its own <cluster>.key"
+	else
+		bad "cluster key: every userspace cluster env must name its own key file ($n envs):$problems"
+	fi
+}
+
+# The two legacy confs no userspace env selects keep their published
+# CHANGE-ME placeholder: tokenising them would re-key those regression
+# clusters mid-way through their next rolling raw deploy. They may carry ONLY
+# a placeholder, never a real key. Every other docs/ha-cluster*.conf must
+# carry the token, and the cell fails on anything else rather than skipping.
+CK_PLACEHOLDER_EXEMPT_CONFS=(ha-cluster.conf ha-cluster-loss.conf)
+
+test_cluster_key_lab_confs_carry_only_the_token() {
+	local root conf env base keyline value n=0 tokenised=0 problems=""
+	root="$(cd "$SCRIPT_DIR/../.." && pwd)"
+	for conf in "$root"/docs/ha-cluster*.conf; do
+		n=$((n + 1))
+		base="$(basename "$conf")"
+		if [[ " ${CK_PLACEHOLDER_EXEMPT_CONFS[*]} " == *" $base "* ]]; then
+			while IFS= read -r keyline; do
+				value="${keyline#*\"}"; value="${value%%\"*}"
+				[[ "${value,,}" == *change-me* || "${value,,}" == *example-only* ]] ||
+					problems+=" $base(non-placeholder key)"
+			done < <(grep -E '^\s*(additional-)?authentication-key\s' "$conf")
+			continue
+		fi
+		if ! grep -Fq "$DEPLOY_CLUSTER_KEY_TOKEN" "$conf"; then
+			problems+=" $base(no token)"
+			continue
+		fi
+		tokenised=$((tokenised + 1))
+		# Every authentication-key line in a tokenised conf is the token.
+		while IFS= read -r keyline; do
+			[[ "$keyline" == *"\"$DEPLOY_CLUSTER_KEY_TOKEN\""* ]] || problems+=" $base(literal key)"
+		done < <(grep -E '^\s*(additional-)?authentication-key\s' "$conf")
+		# ...and some cluster env file both selects it and names a key file.
+		for env in "$SCRIPT_DIR"/*cluster.env; do
+			grep -Eq "^CLUSTER_CONF=\"(\\\$\\{PROJECT_ROOT\\}/)?docs/$base\"" "$env" &&
+				grep -Eq '^CLUSTER_AUTH_KEY_FILE="/[^"]+"' "$env" && continue 2
+		done
+		problems+=" $base(no env names a key file)"
+	done
+	if ((tokenised >= 3 && n == tokenised + ${#CK_PLACEHOLDER_EXEMPT_CONFS[@]})) && [[ -z "$problems" ]]; then
+		ok "cluster key: $tokenised lab confs carry only the token with a key file named, and the ${#CK_PLACEHOLDER_EXEMPT_CONFS[@]} legacy confs only a placeholder"
+	else
+		bad "cluster key: docs/ha-cluster*.conf ($n, $tokenised tokenised):${problems:- missing confs}"
+	fi
+}
+
 test_verify_pushed_sha_match
 test_verify_pushed_sha_mismatch_hardfails
 test_verify_pushed_sha_absent_hardfails
@@ -3993,6 +4325,23 @@ test_preflight_unmeasured_headroom_prescribes_measurement_remediation
 test_preflight_precedes_destructive_steps_standalone
 test_preflight_precedes_destructive_steps_cluster
 
+test_cluster_key_render_substitutes_the_token
+test_cluster_key_render_is_byte_exact
+test_cluster_key_render_without_token_is_unchanged
+test_cluster_key_render_refuses_without_key_file
+test_cluster_key_missing_file_is_refused_on_deploy
+test_cluster_key_symlink_is_refused
+test_cluster_key_generation_refuses_an_unfixable_dir
+test_cluster_key_create_mints_the_key
+test_cluster_key_generated_when_absent
+test_cluster_key_existing_file_is_never_rewritten
+test_cluster_key_refuses_unusable_keys
+test_cluster_key_deploy_pushes_only_the_rendered_conf
+test_cluster_key_push_renders_and_cleans_up
+test_cluster_key_push_cleans_up_on_a_signal
+test_cluster_key_refuses_open_permissions
+test_cluster_key_each_env_names_its_own_key_file
+test_cluster_key_lab_confs_carry_only_the_token
 echo "----------------------------------------"
 echo "deploy-lib selftest: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
