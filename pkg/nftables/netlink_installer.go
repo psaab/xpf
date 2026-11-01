@@ -213,21 +213,39 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 
 // hostOverlayReadbackBackoff is the pause before each retry of the
 // generation-bracketed overlay readback (#18721). It allows 5 attempts and at
-// most 262 ms of pausing.
+// most 132 ms of pausing per readback.
 //
 // The generation counts EVERY commit in the namespace, xpfd's own included:
 // the IPsec divert, the transit barrier, the forward fence and the early-input
 // barrier, some of which run outside applySem. Each of those is one atomic
 // batch, so it bumps the generation once, but several can land back to back.
 // With no pause, a short burst of xpf's own unrelated writes could use up
-// every attempt and fail an operator's commit closed.
+// every attempt and fail an operator's commit closed. The steps grow (2, 10,
+// 40, 80 ms), so a burst of a few ms is waited out on the second or third
+// attempt and one of tens of ms by the fourth or fifth. Exhaustion still
+// fails closed.
 //
-// The steps grow about 5x, so a burst of a few ms is waited out on the second
-// or third attempt and a burst of tens of ms by the fourth or fifth. The 262 ms
-// ceiling keeps the commit path's added latency bounded. Exhaustion still fails
-// closed.
+// COUPLED to pkg/daemon's transferPreActivateLockWait (500 ms). The pause runs
+// under applySem, and HA transfer pre-activation waits that long for applySem
+// before it gives up make-before-break. The IPsec hold path can make two
+// readbacks (verify, then reinstall and verify again), so the bound is
+// 2 x (pause + attempts x per-pass read allowance) + 100 ms headroom < the
+// wait. pkg/daemon's TestOverlayReadbackFitsTransferPreActivateWait18721
+// enforces it from both real constants (via HostOverlayReadbackBudget), so
+// raising either one fails that test.
 var hostOverlayReadbackBackoff = []time.Duration{
-	2 * time.Millisecond, 10 * time.Millisecond, 50 * time.Millisecond, 200 * time.Millisecond,
+	2 * time.Millisecond, 10 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond,
+}
+
+// HostOverlayReadbackBudget reports the most one VerifyHostInboundOverlay can
+// spend pausing between attempts (the sum of hostOverlayReadbackBackoff), and
+// its attempt count. pkg/daemon pins this against transferPreActivateLockWait
+// (#18721); see hostOverlayReadbackBackoff.
+func HostOverlayReadbackBudget() (pause time.Duration, attempts int) {
+	for _, d := range hostOverlayReadbackBackoff {
+		pause += d
+	}
+	return pause, len(hostOverlayReadbackBackoff) + 1
 }
 
 // verifyHostInboundOverlayOnce is one unbracketed pass of the overlay readback.
