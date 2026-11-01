@@ -719,13 +719,6 @@ ha_counter_at_most_verdict() {
 	return 1
 }
 
-# #18670: a counter delta between two helper-status captures is only a
-# delta when both captures read the SAME helper process. A helper restart
-# inside the window zeroes the counters and regrows them past the baseline,
-# which reads as an ordinary (small) delta. The captures carry the helper's
-# `PID:` line: when either capture has one, both must, and they must agree;
-# anything else is VOID. Captures with no `PID:` line at all (fixtures, older
-# formats) carry no process identity and are not judged here.
 # #18670 report-only (#18681): append the helper `PID:` line from a
 # data-plane statistics capture to a `show security flow statistics` capture,
 # so the flow-statistics delta can be read with ha_snapshot_counter_delta.
@@ -766,6 +759,13 @@ ha_host_inbound_denies_report() {
 	printf '%s\n' "$line"
 }
 
+# #18670: a counter delta between two helper-status captures is only a
+# delta when both captures read the SAME helper process. A helper restart
+# inside the window zeroes the counters and regrows them past the baseline,
+# which reads as an ordinary (small) delta. The captures carry the helper's
+# `PID:` line: when either capture has one, both must, and they must agree;
+# anything else is VOID. Captures with no `PID:` line at all (fixtures, older
+# formats) carry no process identity and are not judged here.
 ha_snapshot_same_helper_verdict() {
 	if [[ $# -ne 3 ]]; then
 		printf 'snapshot helper identity: expected <before-file> <after-file> <node>\n' >&2
