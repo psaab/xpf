@@ -3154,6 +3154,29 @@ set security log stream syslog-server host port 514
 > show configuration | display set | match log
 ```
 
+### xpf: display pipes in operational mode (#18664)
+
+`show configuration [<stanza> ...] | display <set|json|xml|inheritance>`
+works in operational mode on both the local console and the remote `cli`
+binary. You do not need configuration mode. A trailing output filter may
+follow it (`| display set | match log`, `| display json | count`). From
+configuration mode, `run show configuration | display set` does the same.
+
+- The pipe must be a separate word: `show configuration | display set`.
+  `show configuration |display set` is refused, with a hint showing the
+  spaced form.
+- An unknown word before the pipe is refused exactly as without the pipe:
+  `show configuration bogus | display set` ->
+  `unknown show configuration command: bogus`.
+- An invalid modifier is named: `| display yaml` ->
+  `unknown display format "yaml"`, `| frobnicate` ->
+  `syntax error: unknown pipe command "frobnicate"`.
+- On the remote `cli`, `| display` belongs to `show configuration` and
+  `show system rollback <N>`. After a keyword-only command that does not
+  parse it, the pipe is refused rather than silently dropped:
+  `show chassis cluster | display json` ->
+  `syntax error: "show chassis cluster" does not accept the output modifier "| display json"`.
+
 ---
 
 ## Notes for xpf Implementation

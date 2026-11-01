@@ -424,22 +424,38 @@ func (c *ctl) handleConfigShow(args []string, quoted []bool) error {
 	return nil
 }
 
+// showPipeIndex returns the index of the first bare `|` operator token in
+// args, or -1. It is the one rule in this binary for where a command ends and
+// its pipe begins: splitShowPipe (the handlers) and the #16798 keyword-only
+// gate in dispatchOperational (#18664) both call it, so the gate cannot judge
+// a different command from the one the handler runs. Quote provenance
+// (quoted[i]) makes a quoted "|" path data; a nil mask means args came from
+// an already-tokenized caller. A `|` glued to a word (`|display`,
+// `configuration|display`) is NOT the operator. It is an ordinary word here,
+// as it is in cliterm.SplitPipe, which splits only on a space-delimited " | ".
+func showPipeIndex(args []string, quoted []bool) int {
+	for i, arg := range args {
+		if arg == "|" && !(i < len(quoted) && quoted[i]) {
+			return i
+		}
+	}
+	return -1
+}
+
 // splitShowPipe separates a show command's path from its single pipe modifier.
 // Quote provenance distinguishes a quoted path token equal to "|" from the
 // bare operator; a nil mask means args came from an already-tokenized caller.
 func splitShowPipe(args []string, quoted []bool) (path, pipe []string, err error) {
-	pipeIndex := -1
-	for i, arg := range args {
-		if arg != "|" || (i < len(quoted) && quoted[i]) {
-			continue
-		}
-		if pipeIndex >= 0 {
-			return nil, nil, fmt.Errorf("syntax error: only one pipe modifier is allowed")
-		}
-		pipeIndex = i
-	}
+	pipeIndex := showPipeIndex(args, quoted)
 	if pipeIndex < 0 {
 		return args, nil, nil
+	}
+	var tailQuoted []bool
+	if pipeIndex+1 < len(quoted) {
+		tailQuoted = quoted[pipeIndex+1:]
+	}
+	if showPipeIndex(args[pipeIndex+1:], tailQuoted) >= 0 {
+		return nil, nil, fmt.Errorf("syntax error: only one pipe modifier is allowed")
 	}
 	if pipeIndex == len(args)-1 {
 		return nil, nil, fmt.Errorf("syntax error: missing pipe modifier")
@@ -453,7 +469,13 @@ func parseShowDisplay(pipe []string, allowJSON, allowXML, allowInheritance bool)
 	if len(pipe) == 0 {
 		return pb.ConfigFormat_HIERARCHICAL, nil
 	}
-	if len(pipe) != 2 || pipe[0] != "display" {
+	if pipe[0] != "display" {
+		// #18664: name the verb, in the console's wording (pkg/cli
+		// handleShow `configuration` arm), instead of a generic usage
+		// line that never says what was wrong.
+		return 0, fmt.Errorf("syntax error: unknown pipe command %q", pipe[0])
+	}
+	if len(pipe) != 2 {
 		return 0, fmt.Errorf("usage: | display <supported-format>")
 	}
 	switch pipe[1] {

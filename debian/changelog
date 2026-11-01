@@ -1,4 +1,12 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Remote CLI: operational `show configuration | display set` (and
+    `| display json|xml|inheritance`, chained `| display set | match x`,
+    and `run show configuration | display set` from configuration mode)
+    renders again instead of failing with `unknown show configuration
+    command: |`. The unknown-subcommand gate now judges only the words
+    before the first `|`. An unknown word before the pipe still refuses,
+    and a display pipe after a command that does not parse it refuses
+    with a message naming the modifier (#18664).
   * Userspace dataplane: a peer-synced flow's original-tuple row now wins
     the import over its forward-wire alias (neither the alias nor a local
     promotion of it books the translation; the alias is refused, under its
