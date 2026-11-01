@@ -24,6 +24,7 @@ import (
 // The demotion WARN reads the verdict reason through the RUNTIME dataplane,
 // which in production is the adapter (the #18704 lesson).
 var _ helperElectionReasonSource = (*dpuserspace.LegacyDataPlaneAdapter)(nil)
+var _ helperControlSource = (*dpuserspace.LegacyDataPlaneAdapter)(nil)
 
 type order18701 struct {
 	mu     sync.Mutex
