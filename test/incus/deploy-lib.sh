@@ -1811,3 +1811,191 @@ deploy_select_deb() {
 	fi
 	deploy_deb_newest "$dir"
 }
+
+# ── Lab cluster control-channel key (#18724) ─────────────────────────────
+#
+# The HA lab configs (docs/ha-cluster-{userspace,tcp,udp}.conf) used to carry
+# their `chassis cluster authentication-key` in the repository: loss the
+# published `…-CHANGE-ME` placeholder, tcp and udp random keys that were just
+# as public once committed. The raw deploy pushes $CLUSTER_CONF verbatim, so a
+# re-setup restored the published key even after a live rotation.
+#
+# The configs now carry DEPLOY_CLUSTER_KEY_TOKEN in place of the key, and the
+# raw push renders the file with the key from a host-side secret
+# ($CLUSTER_AUTH_KEY_FILE, set per cluster in the env file). The token keeps
+# the #6611 placeholder marker on purpose: a conf that reaches a node WITHOUT
+# rendering still compiles, but it warns as a published placeholder instead of
+# looking like a real key.
+#
+# Nothing here prints the key: the substitution is a bash expansion (never an
+# argv), failures name files and lengths only, and the rendered file is
+# written under umask 077 and removed by the caller after the push.
+DEPLOY_CLUSTER_KEY_TOKEN="xpf-lab-cluster-key-substituted-at-deploy-CHANGE-ME"
+
+# deploy_cluster_key_problem <key>: why <key> cannot be a lab cluster key, or
+# "" when it can. A conf string cannot hold a double quote, a backslash or a
+# newline; 16 is pkg/config's MinAdvisedControlLinkKeyLen; and a key that
+# matches a #6611 placeholder marker would just reintroduce the problem.
+deploy_cluster_key_problem() {
+	local key="$1" lower
+	lower="${1,,}"
+	if [[ -z "$key" ]]; then
+		printf 'is empty'
+	elif [[ "$key" == *[[:space:]\"\\]* ]]; then
+		printf 'contains whitespace, a double quote or a backslash'
+	elif ((${#key} < 16)); then
+		printf 'is %d characters, under the 16-character floor' "${#key}"
+	elif [[ "$lower" == *change-me* || "$lower" == *example-only* ]]; then
+		printf 'matches a published placeholder marker'
+	fi
+}
+
+# deploy_cluster_key_mode_problem <file>: refuse a key file, or the directory
+# holding it, that grants ANY group or other permission bit. The generator
+# creates them 0600 and 0700, but an existing file is never rewritten, so a
+# key someone copied in at 0644, or a directory left 0755, would otherwise be
+# rendered and pushed as if it were private. Prints the fix; never the key.
+deploy_cluster_key_mode_problem() {
+	local file="$1" dir mode
+	dir="$(dirname "$file")"
+	mode="$(stat -c %a "$file" 2>/dev/null)" || {
+		warn "cluster key: cannot stat $file"
+		return 1
+	}
+	if (((8#$mode & 8#077) != 0)); then
+		warn "cluster key: $file is mode $mode, readable or writable beyond its owner; run \`chmod 0600 $file\` (and rotate the key if anyone else could have read it)"
+		return 1
+	fi
+	mode="$(stat -c %a "$dir" 2>/dev/null)" || {
+		warn "cluster key: cannot stat $dir"
+		return 1
+	}
+	if (((8#$mode & 8#077) != 0)); then
+		warn "cluster key: $dir is mode $mode, open beyond its owner; run \`chmod 0700 $dir\`"
+		return 1
+	fi
+	return 0
+}
+
+# deploy_ensure_cluster_key <file> [generate]: make sure <file> holds a
+# usable key. An existing file is never rewritten: it is the key the live
+# cluster runs. A MISSING file is a refusal, because minting a fresh key on a
+# deploy to a live cluster splits the pair. It is generated (`openssl rand
+# -base64 32`, directory 0700, file 0600) only on an explicit opt-in: the
+# second argument `generate`, which `cluster-setup.sh create` passes for a
+# newly created cluster, or XPF_CLUSTER_KEY_GENERATE=1. A symlink at the key
+# path is refused outright, dangling or not.
+deploy_ensure_cluster_key() {
+	local file="$1" mode="${2:-}" dir key problem tmp
+	[[ -n "$file" ]] || {
+		warn "cluster key: no key file named (set CLUSTER_AUTH_KEY_FILE in the cluster env file)"
+		return 1
+	}
+	if [[ -L "$file" ]]; then
+		warn "cluster key: $file is a symlink; refusing it. Point CLUSTER_AUTH_KEY_FILE at the real file"
+		return 1
+	fi
+	if [[ ! -e "$file" && "$mode" != generate && "${XPF_CLUSTER_KEY_GENERATE:-0}" != 1 ]]; then
+		warn "cluster key: $file does not exist. It holds the key the running cluster signs with, so a deploy never mints one: restore the file, or re-key the cluster with the rolling additional-authentication-key rotation (pkg/cluster/README.md, \"Rotation\"). For a NEW cluster, \`cluster-setup.sh create\` generates it, or set XPF_CLUSTER_KEY_GENERATE=1"
+		return 1
+	fi
+	if [[ ! -e "$file" ]]; then
+		dir="$(dirname "$file")"
+		(umask 077 && mkdir -p "$dir") || return 1
+		if ! chmod 0700 "$dir"; then
+			warn "cluster key: could not set $dir to mode 0700; refusing to generate a key there"
+			return 1
+		fi
+		tmp="$(umask 077 && mktemp "${file}.XXXXXX")" || return 1
+		if ! (umask 077 && openssl rand -base64 32 >"$tmp"); then
+			rm -f "$tmp"
+			warn "cluster key: could not generate $file (is openssl installed?)"
+			return 1
+		fi
+		chmod 0600 "$tmp" && mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+		info "cluster key: generated a new key in $file (mode 0600)"
+	fi
+	[[ -f "$file" && -r "$file" ]] || {
+		warn "cluster key: $file is not a readable regular file"
+		return 1
+	}
+	deploy_cluster_key_mode_problem "$file" || return 1
+	key="$(<"$file")"
+	problem="$(deploy_cluster_key_problem "$key")"
+	if [[ -n "$problem" ]]; then
+		warn "cluster key: the key in $file $problem; regenerate it with \`openssl rand -base64 32\`"
+		return 1
+	fi
+	return 0
+}
+
+# deploy_render_cluster_conf <src> <key_file> <out>: write <src> to <out>
+# (mode 0600) with every DEPLOY_CLUSTER_KEY_TOKEN replaced by the key in
+# <key_file>. Byte for byte otherwise: trailing newlines and NUL bytes are kept
+# as they are. A conf without the token (an older or hand-keyed config) is
+# copied unchanged and <key_file> is not consulted. Fails closed when the
+# token is present but no usable key exists, or when the token survives.
+#
+# The substitution runs in python3, reading the key from <key_file> itself, so
+# the key never reaches an argv or the environment; only paths do.
+deploy_render_cluster_conf() {
+	local src="$1" key_file="$2" out="$3" rc
+	[[ -f "$src" ]] || {
+		warn "cluster conf: $src not found"
+		return 1
+	}
+	if ! grep -aqF -- "$DEPLOY_CLUSTER_KEY_TOKEN" "$src"; then
+		install -m 0600 -- "$src" "$out"
+		return
+	fi
+	deploy_ensure_cluster_key "$key_file" || {
+		warn "cluster conf: $src carries the lab key token but no usable key is available; refusing to push it"
+		return 1
+	}
+	rc=0
+	CK_SRC="$src" CK_KEY_FILE="$key_file" CK_OUT="$out" CK_TOKEN="$DEPLOY_CLUSTER_KEY_TOKEN" \
+		python3 -I - <<'PY' || rc=$?
+import os, sys
+src, key_file, out, token = (os.environ[k] for k in ("CK_SRC", "CK_KEY_FILE", "CK_OUT", "CK_TOKEN"))
+token = token.encode()
+# The bash check read the key with $(<), which drops trailing newlines; match it.
+key = open(key_file, "rb").read().rstrip(b"\n")
+# Defence in depth behind deploy_cluster_key_problem, which cannot see a NUL.
+if not key or any(b < 0x21 or b > 0x7e or b in b'"\\' for b in key) or token in key:
+    sys.exit(4)
+data = open(src, "rb").read().replace(token, key)
+if token in data:
+    sys.exit(5)
+old = os.umask(0o077)
+try:
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+finally:
+    os.umask(old)
+with os.fdopen(fd, "wb") as f:
+    f.write(data)
+PY
+	case "$rc" in
+	0) return 0 ;;
+	4) warn "cluster conf: the key in $key_file is not a printable, quote-free key; refusing to push $src" ;;
+	5) warn "cluster conf: the lab key token survived rendering $src; refusing to push it" ;;
+	*) warn "cluster conf: rendering $src failed (python3 exit $rc)" ;;
+	esac
+	rm -f "$out"
+	return 1
+}
+
+# deploy_push_cluster_conf <src> <key_file> <instance> <dest>: render <src>
+# into a private temp dir and push the result to <instance><dest> at mode
+# 0600, root:root. The body is a subshell whose EXIT trap removes the temp
+# dir. bash runs an EXIT trap when HUP, INT or TERM kills the shell too, so a
+# render or push that is interrupted never leaves the rendered copy (it holds
+# the key) in $TMPDIR; the signal cell pins that for all three.
+# Exit status: 0 pushed, 2 refused to render (the message is already out),
+# 1 or 3 the temp dir or the push failed.
+deploy_push_cluster_conf() (
+	src="$1" key_file="$2" instance="$3" dest="$4"
+	conf_dir="$(umask 077 && mktemp -d)" || exit 1
+	trap 'rm -rf "$conf_dir"' EXIT
+	deploy_render_cluster_conf "$src" "$key_file" "$conf_dir/xpf.conf" || exit 2
+	incus file push --mode 0600 --uid 0 --gid 0 "$conf_dir/xpf.conf" "${instance}${dest}" || exit 3
+)
