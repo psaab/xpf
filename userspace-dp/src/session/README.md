@@ -1024,8 +1024,12 @@ fix, every such hit failed the probe:
 - The slow path re-seeded it, and the next hit refused again.
 
 On loss this sent about 95% of the new owner's packets down the slow
-path, at 1.6 Gbit/s against 5.1 Gbit/s for flows started after the split,
-which never take this path.
+path. In one session (debug build 0.0.29000 on master 0050ac4172,
+2026-11-01 about 04:00Z), moved flows ran at 1.5–1.6 Gbit/s against
+5.0–5.3 Gbit/s for flows started after the split, which never take this
+path. In the #18671 confirmation session the fixed build measured moved
+flows at 2.96–3.04 and fresh flows at 3.68–3.77 Gbit/s, so these are
+per-session numbers, not a loss ceiling.
 
 - **Resolution.** When the packet key names no direct or alias record,
   the probe takes the forward-wire candidate through
@@ -1053,9 +1057,16 @@ which never take this path.
   Before the fix the zone fence returned `None` for a wire tuple, which
   lets the lookup proceed. That was harmless only while the probe could
   not serve such a hit.
-- **Cost.** A direct or alias hit is unchanged: the fallback runs only
-  where the probe used to refuse. A wire hit adds one forward-wire bucket
-  walk and the canonical re-probe, in both the zone fence and the probe.
+- **Cost.** A direct or alias hit is unchanged: the probe's fallback runs
+  only where the probe used to refuse. A wire hit adds one forward-wire
+  bucket walk and the canonical re-probe, in both the zone fence and the
+  probe.
+  - The #10670 zone fence runs before the cache lookup on every stamped
+    fabric arrival (`flow_cache_hit.rs`, the `fabric_arrival_zone`
+    preflight). A NEW fabric flow, whose session does not exist yet, so
+    also pays one extra `forward_wire_index` probe per packet until the
+    session is installed.
+  - Non-fabric arrivals never run the fence and pay nothing.
 - **Attribution.** The probe returns a `ProbeHitVerdict`, and the hit path
   counts a refusal under `post_hit_session_dead_no_record` or
   `post_hit_session_dead_idle_crossed`. `post_hit_session_dead` now counts

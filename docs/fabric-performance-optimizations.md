@@ -31,8 +31,8 @@ On the fixed build, the new owner serves moved flows from the flow cache:
 on tcp, 19.67M cache hits against 19.61M received packets and 0
 evictions. That leaves the copy-mode fabric itself (#12655) as the limit.
 The loss numbers above come from one session with no master fresh
-baseline, so they are not a statement of the loss fabric ceiling.
-Re-measure the split row before using it as one. Matrix row H9
+baseline, so they are not a statement of the loss fabric ceiling. H9's
+loss floor stays unset until #18678 re-measures it. Matrix row H9
 (`docs/regression-test-matrix.md`) carries the same correction.
 
 ## Architecture: How Fabric Redirect Works Today
