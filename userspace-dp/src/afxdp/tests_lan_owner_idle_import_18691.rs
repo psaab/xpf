@@ -491,3 +491,37 @@ fn activation_before_refresh_keeps_the_flow_18691() {
         "a line the refresh has not reached yet is no ground to revoke"
     );
 }
+
+/// Review (seat X): on the LAN owner the decline never sends a packet out a
+/// local egress. With a translation no rule produces (172.16.80.99, as if
+/// the owner had readdressed reth0.80), the first LAN packet is handed to the
+/// WAN owner over the fabric, whose own first-hit judgment revokes it there
+/// (`owner_readdressed_translation_still_revokes_18691`), and nothing leaves
+/// the WAN binding here.
+#[test]
+fn lan_owner_readdressed_translation_leaves_only_via_the_fabric_18691() {
+    let forwarding = rg_taking_node_forwarding();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let mut sessions = import_pair(
+        &forwarding,
+        &split_ha(now_secs),
+        Family::V4,
+        false,
+        Numbering::Peer,
+        Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 99))),
+        None,
+    );
+    let key = exported_forward(&forwarding, Family::V4).key;
+    assert_eq!(
+        stored_forward_line(&sessions, &key).egress_ifindex,
+        WAN_GATEWAY_UNIT_IFINDEX,
+        "premise: the split-FIB gateway line"
+    );
+    let out = lan_ack(&mut sessions, &forwarding, &split_ha(now_secs), 1);
+    assert_eq!(out.session_hit, 1, "the LAN packet must hit the row");
+    assert_eq!(
+        out.tx,
+        [0, 1, 0],
+        "a declined packet leaves only via the fabric, never the local WAN"
+    );
+}

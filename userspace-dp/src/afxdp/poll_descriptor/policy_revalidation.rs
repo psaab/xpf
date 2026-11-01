@@ -1505,7 +1505,10 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     //   `SessionDomain::delete_synced`).
     // - Direct arrival on a non-owner: not a redirect. Nothing hands the
     //   judgment to a peer, so the stored line is judged here, as before
-    //   (#12187: a later same-tuple static SNAT still revokes).
+    //   (#12187: a later same-tuple static SNAT still revokes). Exception
+    //   (#18691): a stored split-FIB gateway-fallback line for a peer-owned
+    //   destination is declined below
+    //   (`judged_line_is_non_owner_gateway_fallback`), whatever the arrival.
     // Both are pinned by the #12187 cell. A live FabricRedirect names the
     // fabric parent, not an egress, so it never stands in.
     let forward_decision = if !metadata.is_reverse

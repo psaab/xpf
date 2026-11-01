@@ -2333,9 +2333,14 @@ leaving the stamp stale, when the judged line is:
   peer-owned forward row by design (#326). A reply arriving over the
   fabric judged it and revoked valid flows.
 
-The owner keeps every ground. A non-owner still judges a line on the
-destination's connected interface and a gateway-routed destination, and a
-node with no HA view judges everything. When the node later activates the RG, the
+The owner keeps every ground (condition 2). A non-owner still judges a line
+on the destination's connected interface (condition 4) and a gateway-routed
+destination, which conditions 3 (owner `Unknown`) and 4 (no connected
+interface) both exclude, so its end-to-end control pins neither alone. The
+shape only condition 3 excludes, a destination whose connected owner RG is
+forwarding here while the line leaves on another, inactive-RG egress, is
+pinned by the predicate table (`non_owner_gateway_fallback_predicate_table_18691`).
+A node with no HA view judges everything. When the node later activates the RG, the
 decline is off and the line is judged as the owner's. That is correct only
 after `RefreshOwnerRGS` re-resolves it against the activated FIB, which
 relies on the #16270 ordering (connected prefixes republished before

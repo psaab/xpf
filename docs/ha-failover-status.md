@@ -708,7 +708,11 @@ Revocations that still happen:
   sibling (`lan_owner_connected_line_invalid_translation_still_revokes_18691`).
 - A gateway-routed destination with no connected owner is still judged,
   because the default route IS the owner's egress there
-  (`lan_owner_gateway_routed_destination_still_judged_18691`).
+  (`lan_owner_gateway_routed_destination_still_judged_18691`). Conditions
+  3 and 4 both exclude it, so this cell pins neither alone. The shape only
+  condition 3 excludes (the destination's connected owner RG forwarding
+  here while the line leaves on another, inactive-RG egress) is pinned by
+  the predicate table.
 - A node with no HA view (standalone) is judged exactly as before.
 
 Revocations that can no longer happen: a non-owner's verdict on its own
