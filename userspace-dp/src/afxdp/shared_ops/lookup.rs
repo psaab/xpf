@@ -580,7 +580,7 @@ pub(in crate::afxdp) fn shared_completion_evidence(
 /// forward companion, so a SNAT-translated reverse replica still
 /// finds the serving forward row.
 /// #18722: the matched entry's ct-slice-restamped live counts ride out
-/// as `served_packets`, the expiry pass's recency (advance) proof.
+/// as `shared_served`, the expiry pass's per-contributor recency proof.
 pub(in crate::afxdp) fn shared_node_served_evidence(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     key: &SessionKey,
@@ -594,7 +594,7 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
             {
                 evidence.handshake_wire = entry.tcp_handshake_state;
                 evidence.shared_established = true;
-                evidence.served_packets = entry.fwd_packets.saturating_add(entry.rev_packets);
+                evidence.shared_served = Some(entry.fwd_packets.saturating_add(entry.rev_packets));
             }
         }
     };
@@ -620,7 +620,7 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
             if same || swapped || snat_reverse {
                 evidence.handshake_wire = entry.tcp_handshake_state;
                 evidence.shared_established = true;
-                evidence.served_packets = entry.fwd_packets.saturating_add(entry.rev_packets);
+                evidence.shared_served = Some(entry.fwd_packets.saturating_add(entry.rev_packets));
                 break;
             }
         }

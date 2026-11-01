@@ -612,31 +612,99 @@ merged in the expire pass with the HA context's `node_served` probe
 (`shared_node_served_evidence`, the shared synced row for the tuple).
 
 Two conditions bound it (#18722):
-- **Opening rows only.** A completed row (`established && !handshake_pending`)
-  is its own serving pair, so node-level evidence for its tuple is evidence about
-  itself. Its retention is `companion_keeps_alive`'s alone, keyed on the
-  companion's real timestamp, and it reaps one window after its last packet in
-  either direction, with its Close.
+- **Not for a completed row this node serves.** A completed row
+  (`established && !handshake_pending`) that this node authored or promoted
+  (`!origin.is_peer_synced()`) is its own serving pair, so node-level evidence
+  for its tuple is evidence about itself. Its retention is
+  `companion_keeps_alive`'s alone, keyed on the companion's real timestamp, and
+  it reaps one window after its last packet in either direction, with its
+  Close. A completed REPLICA (`SyncImport`, `SharedMaterialize`,
+  `WorkerLocalImport`, ...) still takes the arm: on a worker that serves
+  neither direction both of its halves are never refreshed while the flow is
+  live on another worker, and reaping it would run the replica teardown
+  (conntrack mirror delete, flow-cache eviction) under a live flow.
 - **Recent service, not cumulative proof.** `promoted_and_served()` (an
   Established wire plus reverse counters) only ever becomes true; it never
-  becomes false again. The arm also requires `NodeServedEvidence::served_packets`
-  to have ADVANCED past the row's `node_served_seen` baseline since its last
-  crossed check. `served_packets` sums per-source packet totals: this table's
-  serving-row counters, its stamps, and the shared row's `fwd_packets +
-  rev_packets`, which the serving worker's ct-slice restamps from live counters
-  once per refresh cycle (10-13 s, const-asserted inside the opening window,
-  `slice_pacing.rs`). On an advance the row is re-stamped to `now_ns` and
-  re-bucketed, bounded by that proof like `closing_counters_keep_alive`. Without
-  one, the row falls through to the classic pending arm and otherwise reaps.
+  becomes false again. The arm also needs a PRESENT evidence contributor to
+  have CHANGED from the row's baseline for it since its last crossed check.
+  There are two contributors, each `Some(count)` only while its source row
+  exists:
+  - `NodeServedEvidence::local_served`: this table's pair forward row
+    `fwd+rev` counters plus its node-served stamps. The baseline is
+    `node_served_seen_local`.
+  - `NodeServedEvidence::shared_served`: the matched Established shared row's
+    `fwd_packets + rev_packets`, which the serving worker's ct-slice restamps
+    from live counters once per refresh cycle (10-13 s, const-asserted inside
+    the opening window, `slice_pacing.rs`). The baseline is
+    `node_served_seen_shared`.
 
-**Contract (the cells pin both bounds exactly).**
-- An idle COMPLETED row reaps at the first crossed check after its window,
-  so ONE window after its last packet in either direction, and emits its
-  Close.
-- An idle OPENING row whose serving pair stopped forwarding is KEPT by the
-  first crossed check after the last advance and REAPED by the next one: TWO
-  of its windows after that advance (plus the ct-slice restamp lag).
-  The reason is that `node_served_seen` starts at 0 at install, so the first
+  On a change the row is re-stamped to `now_ns` and re-bucketed, bounded by
+  that proof like `closing_counters_keep_alive`. Without one, the row falls
+  through to the classic pending arm and otherwise reaps.
+
+  They are compared per contributor, not as one sum (#18742), because a sum
+  is not monotonic in either direction:
+  - A DEAD flow whose companion half is reaped first loses that half's
+    counters from the sum. A sum compared with `!=` reads the drop as
+    activity and grants a third window. Per contributor, the vanished
+    contributor is absent, which is neither activity nor silence.
+  - A LIVE flow whose source is replaced also drops: the local pair is
+    removed, or the shared row is republished by a new incarnation with lower
+    counts. A sum compared with `>` reads that as silence and reaps a live
+    flow. Per contributor, a present count that moved in either direction is
+    a change.
+
+**Decision model: one decision per PAIR (#18722, #18742 review).** Read this
+model, not the patch history; three review rounds found three per-HALF
+bookkeeping artefacts (a gate that caught replicas, a summed total that was not
+monotonic, companion baselines left at zero), and all three are closed by
+treating the (forward, reverse) pair as the decision unit.
+- **Unit.** The node-level arm runs when either half of a pair crosses its
+  window. Its evidence describes the TUPLE, so a KEEP applies to both halves
+  (`align_node_kept_companion`): this half and its companion are re-stamped to
+  `now_ns` and take the same contributor baselines, and the companion's pending
+  wheel hint goes stale. The two halves then cross together.
+- **Evidence.** Two contributors, each `Some(count)` only while its source exists:
+  `local_served` (this table's forward-row `fwd+rev` counters plus node-served
+  stamps; present while that forward row or its stamp exists) and
+  `shared_served` (the matched Established shared row's counts; present while
+  that row exists). A PRESENT contributor whose count differs from the half's
+  baseline for it is activity (up: packets; down: a replaced incarnation). An
+  ABSENT contributor is neither activity nor silence.
+- **Both halves reap** at the first crossed check at which no present
+  contributor changed: the half being checked falls through and reaps, and its
+  companion, aligned to the same instant and baselines, reaps in the same pass.
+- **Where the halves diverge** (each has a cell in
+  `session/idle_served_keepalive_18722_tests.rs`):
+  - a CLOSING companion is never aligned: it keeps its own close fuse
+    (#10885/#14630) and reaps on it while the other half may be kept;
+  - NON-TCP pairs never take the arm: they age on the classic rules
+    (`companion_keeps_alive`) regardless of node evidence;
+  - a COMPLETED row this node serves (`!origin.is_peer_synced()`) never
+    takes the arm itself, even on live advancing evidence: its retention is
+    `companion_keeps_alive`'s alone, so it reaps one window after its own last
+    packet. As a COMPANION it is aligned like any other half. Its baselines
+    are never read, and when it crosses, `companion_keeps_alive` keeps it from
+    the kept half's re-stamp anyway (the classic whole-flow rule);
+  - the #16223 split REPLICA that holds only a node-served stamp and no
+    companion is decided alone, on the stamp as its local contributor.
+
+**Contract (the cells pin both bounds exactly).** These bounds hold on a node
+that FORWARDS the session's RG, or on a standalone node: the HA `Age` path,
+where `companion_eligible` is set. On a node that does not forward the RG, the
+#2120 standby gate (`standby_gate_decision`, the `Hold` arm) keeps peer-synced
+replicas regardless of activity until the owner's Close/delete arrives or the
+stale ceiling (`stale_ceiling_ns`) passes. That is what keeps a long-lived flow
+alive across a failover (#131), and #18722 does not change it.
+- An idle COMPLETED row this node serves (`!origin.is_peer_synced()`) reaps
+  at the first crossed check after its window, so ONE window after its last
+  packet in either direction, and emits its Close.
+- An idle OPENING row, or an idle completed REPLICA, whose serving pair
+  stopped forwarding is KEPT by the first crossed check after the last change
+  and REAPED by the next one: TWO of its windows after that change (plus the
+  ct-slice restamp lag). A replica keeps living for as long as the serving
+  pair's counts move.
+  The reason is that the `node_served_seen_*` baselines start at 0 at install, so the first
   check after the session goes quiet still sees the last activity as an
   advance.
   Expires-when: #18739 closed (that issue seeds the baseline at install,

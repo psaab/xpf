@@ -459,9 +459,8 @@ impl SessionTable {
                             }
                             ev.shared_established |= shared.shared_established;
                             ev.rev_packets = ev.rev_packets.max(shared.rev_packets);
-                            // #18722: summed, not maxed — see `served_packets`.
-                            ev.served_packets =
-                                ev.served_packets.saturating_add(shared.served_packets);
+                            // #18722: the shared contributor, kept separate.
+                            ev.shared_served = shared.shared_served;
                         }
                         ev
                     };
@@ -917,17 +916,27 @@ impl SessionTable {
     /// check once the companion crosses, so both halves then reap
     /// within one window of last activity (bounded, terminating).
     ///
-    /// #18722: OPENING rows only. A completed (established,
-    /// non-pending) row is its own serving pair, so node-level
-    /// evidence for its tuple is evidence about ITSELF; its retention
-    /// is `companion_keeps_alive`'s, keyed on the companion's real
-    /// timestamp. And the node-level arm needs RECENT service, not the
-    /// cumulative proof alone: it keeps the row only when
-    /// `served_packets` advanced past the row's `node_served_seen`
-    /// baseline. Before #18722 both were missing, so an idle
-    /// established flow that had ever been answered re-stamped to
-    /// `now_ns` on every pass and never reaped (no Close, no RT_FLOW
-    /// close, session and NAT binding held for ever).
+    /// #18722: two bounds.
+    /// - A completed (established, non-pending) row that THIS node
+    ///   authored or promoted (`!origin.is_peer_synced()`) is the serving
+    ///   pair itself: node-level evidence for its tuple is evidence about
+    ///   ITSELF, so its retention is `companion_keeps_alive`'s alone, keyed
+    ///   on the companion's real timestamp. A peer-synced or worker-local
+    ///   REPLICA is not: on a worker that serves neither direction both of
+    ///   its halves are never refreshed while the flow is live elsewhere,
+    ///   so it still takes the node-level arm (#18742 review, seat L).
+    /// - The node-level arm needs RECENT service, not the cumulative proof
+    ///   alone: it keeps the row only when a PRESENT evidence contributor
+    ///   (`local_served`, `shared_served`) changed from the row's baseline
+    ///   for it since its last crossed check. Per contributor, not summed:
+    ///   a dead flow's companion reaped first removes the local contributor
+    ///   (absent is not a change, so no extra window), and a live flow's
+    ///   source replaced by a new incarnation moves that contributor (a
+    ///   change, so no false reap).
+    /// Before #18722 both were missing, so an idle established flow that
+    /// had ever been answered re-stamped to `now_ns` on every pass and
+    /// never reaped (no Close, no RT_FLOW close, session and NAT binding
+    /// held for ever).
     fn opening_companion_keeps_alive(
         &mut self,
         key: &SessionKey,
@@ -941,8 +950,9 @@ impl SessionTable {
         if key.protocol != PROTO_TCP || entry.closing {
             return false;
         }
-        // #18722: a completed row is not an opening half; see above.
-        if entry.established && !entry.handshake_pending {
+        // #18722: a completed row this node serves is not an opening
+        // half; a completed REPLICA still needs node-level proof. See above.
+        if entry.established && !entry.handshake_pending && !entry.origin.is_peer_synced() {
             return false;
         }
         // #16223 (node-level first): a promoted serving companion for
@@ -956,7 +966,7 @@ impl SessionTable {
         // #18722: retain on the serving pair's RECENT activity. The
         // promoted proof is cumulative, so on its own it would hold a
         // dead flow for ever. Require the node-wide served packet total
-        // to have advanced since this row's last check, then re-stamp
+        // to have changed since this row's last check, then re-stamp
         // from `now_ns`: this pass is the retention event, bounded by
         // that advance exactly as `closing_counters_keep_alive` is.
         // The serving worker's ct-slice restamps the shared counts
@@ -964,15 +974,22 @@ impl SessionTable {
         // 20 s opening window, `slice_pacing.rs`), so a live flow
         // advances between two crossings and a quiet one stops.
         if node_evidence.promoted_and_served() {
-            let served = node_evidence.served_packets;
             let Some(em) = self.entry_by_key_mut(key) else {
                 return false;
             };
-            let advanced = served > em.node_served_seen;
-            em.node_served_seen = served;
+            let mut advanced = false;
+            if let Some(local) = node_evidence.local_served {
+                advanced |= local != em.node_served_seen_local;
+                em.node_served_seen_local = local;
+            }
+            if let Some(shared) = node_evidence.shared_served {
+                advanced |= shared != em.node_served_seen_shared;
+                em.node_served_seen_shared = shared;
+            }
             if advanced {
                 em.last_seen_ns = now_ns;
                 self.rebucket_alive_entry(key, now_ns);
+                self.align_node_kept_companion(key, entry_nat, now_ns, node_evidence);
                 return true;
             }
         }
@@ -1015,6 +1032,52 @@ impl SessionTable {
         self.rebucket_alive_entry(key, now_ns);
         true
     }
+    /// #18722 (#18742 review): the node-level arm decides for the TUPLE, so
+    /// a keep applies to the pair. The companion is re-stamped with this
+    /// half and takes the same contributor baselines, so the two halves age
+    /// together from here. Without this, two artefacts appear:
+    /// - `companion_keeps_alive` read this half's `now_ns` re-stamp as
+    ///   companion activity and kept the other half on manufactured
+    ///   freshness, without updating its baselines.
+    /// - A companion crossing later re-read the same evidence as a change
+    ///   against its zero baseline.
+    /// Either way a dead flow's second half got a third window.
+    ///
+    /// A CLOSING companion is not aligned: it keeps its own close fuse
+    /// (#10885/#14630). A completed companion this node serves is aligned
+    /// like any other: it never takes the node-level arm itself (the gate
+    /// above), so its baselines are never read, and when it crosses,
+    /// `companion_keeps_alive` keeps it from this half's re-stamp anyway (the
+    /// whole-flow rule).
+    fn align_node_kept_companion(
+        &mut self,
+        key: &SessionKey,
+        entry_nat: NatDecision,
+        now_ns: u64,
+        node_evidence: NodeServedEvidence,
+    ) {
+        let companion_key = reverse_session_key(key, entry_nat);
+        if companion_key == *key {
+            return;
+        }
+        let Some(cm) = self.entry_by_key_mut(&companion_key) else {
+            return;
+        };
+        if cm.closing {
+            return;
+        }
+        if let Some(local) = node_evidence.local_served {
+            cm.node_served_seen_local = local;
+        }
+        if let Some(shared) = node_evidence.shared_served {
+            cm.node_served_seen_shared = shared;
+        }
+        if cm.last_seen_ns < now_ns {
+            cm.last_seen_ns = now_ns;
+            self.rebucket_alive_entry(&companion_key, now_ns);
+        }
+    }
+
     /// #2120: the standby retention decision for an idle-crossed entry.
     /// Pure (reads only the passed snapshot + the HA context closures),
     /// so it can be unit-tested in isolation and called from the expire

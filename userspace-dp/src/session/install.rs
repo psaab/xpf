@@ -728,7 +728,8 @@ impl SessionTable {
                 // seeded at that transition instead.
                 closing_counters_seen: 0,
                 // #18722: no node-level retention check has run yet.
-                node_served_seen: 0,
+                node_served_seen_local: 0,
+                node_served_seen_shared: 0,
                 // #2749: seed the cumulative TCP control bits with the trigger
                 // packet's flags (typically the SYN) so even a flow that closes
                 // before any further forward packet is accounted reports a
@@ -1267,7 +1268,8 @@ impl SessionTable {
                     0
                 },
                 // #18722: no node-level retention check has run yet.
-                node_served_seen: 0,
+                node_served_seen_local: 0,
+                node_served_seen_shared: 0,
                 // #2749: a re-imported synced entry observes its own ToS / TCP
                 // flags once local traffic forwards through it (the peer's
                 // observed values are not carried on the HA session-sync delta).

@@ -238,6 +238,164 @@ mod flow_cache_invalidation_tests {
         tcp_close_class: 0, tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(), rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, }
     }
 
+    // #18742 F1 (seat L): a LIVE flow's established SyncImport replica on a
+    // worker that serves neither direction must never reach the replica
+    // teardown, which (unfenced for SyncImport) deletes the conntrack mirror
+    // row (`delete_session_map_entry_for_removed_session_with_origin_and_id`)
+    // and evicts the flow-cache descriptor under the live flow. Asserted
+    // DIRECTLY on the mirror row through the hermetic conntrack test map
+    // (`CONNTRACK_TEST_MAP_FD`: publish inserts, the teardown's delete
+    // removes), and on the descriptor as a second observable. The serving
+    // worker's ct-slice restamps the shared row (production
+    // `restamp_shared_packet_counts_batch`) and the expiry pass reads it
+    // through the production closure (`shared_node_served_evidence`).
+    // Control in the same cell: once the restamps stop, the dead replica
+    // expires and the teardown DOES delete the mirror row and evict the
+    // descriptor, so both observables can see a teardown. RED at 1981f3299e
+    // (the replica reaps at window 1 while live).
+    #[test]
+    fn live_flow_replica_never_reaches_teardown_18722() {
+        const SEC: u64 = 1_000_000_000;
+        let rg_epochs = reap_rg_epochs();
+        let forwarding = ForwardingState::default();
+        let key = reap_key(40100);
+        let reverse = crate::session::reverse_session_key(&key, NatDecision::default());
+        let t0 = 1_000 * SEC;
+        let mut table = crate::session::SessionTable::new();
+        for (k, is_reverse, id) in [(&key, false, 0x4_8722u64), (&reverse, true, 0x5_8722u64)] {
+            let mut metadata = reap_metadata();
+            metadata.is_reverse = is_reverse;
+            assert!(table.upsert_synced_with_origin(
+                crate::session::SessionInstall {
+                    key: k.clone(),
+                    decision: reap_decision(None),
+                    metadata,
+                    source_nat_static: None,
+                    origin: SessionOrigin::SyncImport,
+                    now_ns: t0,
+                    protocol: PROTO_TCP,
+                    tcp_flags: 0,
+                    session_id: id,
+                    tcp_close_class: 0,
+                    tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
+                    persistent_lease_hold: None,
+                    fwd_packets: 0,
+                    rev_packets: 0,
+                },
+                false,
+            ));
+        }
+        let window = 1_800 * SEC;
+        assert_eq!(table.timeout_secs_for(&key), 1_800, "premise: established replica");
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+        insert_cache_entry(&mut binding, &key, None);
+        assert!(cache_hits(&mut binding, &key, &rg_epochs), "premise: descriptor cached");
+        // The replica's conntrack mirror row, as its import publishes it.
+        let ct = crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD;
+        crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+        assert_eq!(
+            crate::afxdp::bpf_map::publish_bpf_conntrack_entry_with_source_nat(
+                ct,
+                ct,
+                &key,
+                reap_decision(None),
+                &reap_metadata(),
+                &FastMap::default(),
+                0,
+                0,
+                0x4_8722,
+                1_800,
+                SessionOrigin::SyncImport,
+                None,
+            ),
+            crate::afxdp::bpf_map::ConntrackPublishResult::Written,
+            "premise: the replica's mirror row is published"
+        );
+        let mirror_row = || crate::afxdp::bpf_map::conntrack_row_for_test(&key).is_some();
+        assert!(mirror_row(), "premise: the mirror row exists");
+        let shared = std::sync::Arc::new(std::sync::Mutex::new({
+            let mut map = FastMap::default();
+            map.insert(key.clone(), serving_shared_entry(&key, 0x4_8722));
+            map
+        }));
+        let wires = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let node_served = |k: &SessionKey| {
+            crate::afxdp::shared_ops::shared_node_served_evidence(&shared, k)
+        };
+        let forwards = |_: i32| true;
+        let epoch = |_: i32| 0u32;
+        let ha = crate::session::ExpireHaContext {
+            node_active: true,
+            forwards_rg: &forwards,
+            epoch_of: &epoch,
+            ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
+            ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
+            node_served: &node_served,
+        };
+        let gc = |table: &mut crate::session::SessionTable,
+                      binding: &mut BindingWorker,
+                      now: u64|
+         -> bool {
+            let expired = table.expire_stale_entries_ha(now, Some(&ha));
+            let hit = expired.iter().any(|e| e.key == key || e.key == reverse);
+            reap_expired_sessions(
+                std::slice::from_mut(binding),
+                &expired,
+                &forwarding,
+                SteeringMap::unshared_for_test(-1),
+                ct,
+                ct,
+                now,
+                0,
+                &shared,
+            );
+            hit
+        };
+        // Live: the serving worker forwards; its ct-slice restamps every 10 s.
+        let live_until = t0 + 3 * window;
+        let mut now = t0;
+        while now < live_until {
+            now += SEC;
+            if (now - t0) % (10 * SEC) == 0 {
+                let n = (now - t0) / SEC;
+                crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+                    &shared,
+                    &wires,
+                    &[(key.clone(), NatDecision::default(), 10 * n, 10 * n)],
+                );
+            }
+            assert!(
+                !gc(&mut table, &mut binding, now),
+                "#18742 F1: the live flow's replica reached teardown at +{} s",
+                (now - t0) / SEC
+            );
+        }
+        assert!(
+            mirror_row(),
+            "#18742 F1: the live flow's conntrack mirror row must survive (show security flow session)"
+        );
+        assert!(
+            cache_hits(&mut binding, &key, &rg_epochs),
+            "#18742 F1: the live flow's flow-cache descriptor must survive"
+        );
+        // Control: the flow dies (no more restamps); the replica now expires
+        // and the teardown evicts the descriptor.
+        let mut reaped = false;
+        while now < live_until + 3 * window && !reaped {
+            now += SEC;
+            reaped = gc(&mut table, &mut binding, now);
+        }
+        assert!(reaped, "control: the dead replica must expire");
+        assert!(
+            !mirror_row(),
+            "control: the replica teardown deletes the mirror row, so the live half above can see one"
+        );
+        assert!(
+            !cache_hits(&mut binding, &key, &rg_epochs),
+            "control: the replica teardown evicts the descriptor"
+        );
+    }
+
     // #16223/#17683: a WorkerLocalImport replica's expiry must NOT evict
     // the serving pair's cache or release its NAT state. Its own exact
     // persistent lease reference is still released while the serving entry's

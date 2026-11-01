@@ -8,10 +8,10 @@
 //!
 //! It pins that the recency proof the expiry pass reads is the one
 //! production actually moves: while the serving pair forwards, the
-//! restamps advance `served_packets` and the opening replica survives;
+//! restamps advance `shared_served` and the opening replica survives;
 //! once they stop, the replica reaps within two of its windows. A
 //! `shared_node_served_evidence` that dropped the counts (the pre-#18722
-//! shape) leaves `served_packets` at 0, so the replica reaps on its first
+//! shape) leaves `shared_served` absent, so the replica reaps on its first
 //! crossed window even while served: the survival half reds.
 
 use super::*;
@@ -139,8 +139,8 @@ fn shared_restamps_keep_an_opening_replica_only_while_they_advance_18722() {
     }
     assert!(
         crate::afxdp::shared_ops::shared_node_served_evidence(&shared_sessions, &forward)
-            .served_packets
-            > 0,
+            .shared_served
+            .is_some_and(|served| served > 0),
         "premise: the production evidence carries the restamped counts"
     );
     assert!(

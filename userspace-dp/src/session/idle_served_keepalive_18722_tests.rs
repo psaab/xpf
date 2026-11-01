@@ -48,7 +48,7 @@ fn shared_established(served: u64) -> NodeServedEvidence {
     NodeServedEvidence {
         handshake_wire: TcpHandshakeState::Established.to_wire(),
         shared_established: true,
-        served_packets: served,
+        shared_served: Some(served),
         ..NodeServedEvidence::default()
     }
 }
@@ -304,12 +304,13 @@ fn import_replica_pair(
 
 /// LIVE SHAPE 1 (udp, node1): an ESTABLISHED replica on a node that
 /// forwards its RG (the HA `Age` path), its tuple's shared row Established
-/// with frozen counts. Both replica origins the node-level arm treats as
-/// local service are covered. It must reap within ONE established window
-/// of its last refresh. RED on master: the cumulative node-level arm
-/// re-stamps it on every pass and it never ages out.
+/// with FROZEN counts (the flow is dead). Both replica origins are
+/// covered. A replica is not the serving pair, so it takes the node-level
+/// arm: the window-1 check still reads the frozen counts as a change from
+/// the zero baseline and KEEPS it, the window-2 check REAPS it. RED on
+/// master: the cumulative node-level arm keeps it for ever.
 #[test]
-fn idle_established_replica_reaps_within_one_window_18722() {
+fn idle_established_replica_reaps_within_two_windows_18722() {
     for origin in [SessionOrigin::SyncImport, SessionOrigin::WorkerLocalImport] {
         let t0 = 1_000 * SEC;
         let mut table = SessionTable::new();
@@ -339,18 +340,303 @@ fn idle_established_replica_reaps_within_one_window_18722() {
         let forwards = |_: i32| true;
         let epoch = |_: i32| 0u32;
         let ha = ha_with(&node_served, &forwards, &epoch);
-        let _ = table.expire_stale_entries_ha(t0 + window - SEC, Some(&ha));
-        assert!(
-            table.entry_by_key(&forward).is_some(),
-            "{origin:?}: anti-vacuity, the replica lives inside its window"
+        let events = run_gc_events(&mut table, &ha, &forward, &reverse, t0, t0 + 10 * window);
+        assert_keep_then_reap(&events, t0, window, &format!("established {origin:?}"));
+    }
+}
+
+/// #18742 F1 (seat L): the LIVE twin. The same established replica on a
+/// worker that serves neither direction (its halves are never refreshed
+/// here) while the serving worker elsewhere on the node keeps forwarding:
+/// its ct-slice restamps the shared counts every 10 s. The replica must
+/// survive five windows; reaping it would run the replica teardown
+/// (conntrack mirror delete, flow-cache eviction) under the live flow.
+/// RED at 1981f3299e, whose opening-only gate sent every completed row to
+/// `companion_keeps_alive` alone and reaped this one at window 1.
+#[test]
+fn live_established_replica_is_kept_while_its_serving_pair_advances_18722() {
+    for origin in [SessionOrigin::SyncImport, SessionOrigin::WorkerLocalImport] {
+        let t0 = 1_000 * SEC;
+        let mut table = SessionTable::new();
+        let (forward, reverse) = import_replica_pair(
+            &mut table,
+            origin,
+            TcpHandshakeState::Established.to_wire(),
+            t0,
         );
-        let _ = table.expire_stale_entries_ha(t0 + window + 2 * SEC, Some(&ha));
+        let window = table
+            .entry_by_key(&forward)
+            .expect("forward")
+            .expires_after_ns;
+        let served = Cell::new(80u64);
+        let node_served = |_: &SessionKey| shared_established(served.get());
+        let forwards = |_: i32| true;
+        let epoch = |_: i32| 0u32;
+        let ha = ha_with(&node_served, &forwards, &epoch);
+        let mut kept = 0usize;
+        let mut now = t0;
+        while now < t0 + 5 * window {
+            now += SEC;
+            if (now - t0) % (10 * SEC) == 0 {
+                served.set(served.get() + 25);
+            }
+            let _ = table.expire_stale_entries_ha(now, Some(&ha));
+            kept += table.last_pop_stats().kept_alive_by_companion;
+        }
         assert!(
-            table.entry_by_key(&forward).is_none() && table.entry_by_key(&reverse).is_none(),
-            "#18722 {origin:?}: an idle established replica must age out one window after its \
-             last refresh, not be re-stamped for ever by its own cumulative evidence"
+            table.entry_by_key(&forward).is_some() && table.entry_by_key(&reverse).is_some(),
+            "#18742 F1 {origin:?}: a live flow's established replica must survive on a \
+             non-serving worker while the serving pair's counts move"
+        );
+        assert!(
+            kept >= 2,
+            "{origin:?}: anti-vacuity, the node-level arm kept it ({kept})"
         );
     }
+}
+
+/// #18742 (seat L, MINOR): the served total can DROP while the flow lives
+/// (a local serving pair removed, the shared row republished lower). A drop
+/// is a change, not silence, so the replica is kept; only an unchanged total
+/// reaps it. Events: kept at +21 s (0 -> 100), kept at +42 s (100 -> 60, the
+/// drop), reaped at +63 s (60 unchanged). RED with an increase-only (`>`)
+/// check: the drop reads as no advance and the live replica reaps at +42 s.
+#[test]
+fn a_served_total_drop_counts_as_a_change_18722() {
+    let t0 = 1_000 * SEC;
+    let mut table = SessionTable::new();
+    let (forward, reverse) = import_replica_pair(
+        &mut table,
+        SessionOrigin::SyncImport,
+        TcpHandshakeState::Opening.to_wire(),
+        t0,
+    );
+    let window = table
+        .entry_by_key(&forward)
+        .expect("forward")
+        .expires_after_ns;
+    assert_eq!(window, 20 * SEC, "premise: opening window");
+    let served = Cell::new(100u64);
+    let node_served = |_: &SessionKey| shared_established(served.get());
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    let mut events = Vec::new();
+    let mut now = t0;
+    while now < t0 + 10 * window {
+        now += SEC;
+        if now == t0 + 30 * SEC {
+            served.set(60);
+        }
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+        if table.last_pop_stats().kept_alive_by_companion > 0 {
+            events.push(("kept", (now - t0) / SEC));
+        }
+        if table.entry_by_key(&forward).is_none() && table.entry_by_key(&reverse).is_none() {
+            events.push(("reaped", (now - t0) / SEC));
+            break;
+        }
+    }
+    assert_eq!(
+        events,
+        vec![("kept", 21), ("kept", 42), ("reaped", 63)],
+        "#18742: a drop in the served total must keep the replica; only an unchanged total reaps it"
+    );
+}
+
+/// #18742 (seat U, NIT): the bounds are for a node that FORWARDS the RG. On a
+/// node that does not, the #2120 standby gate HOLDS peer-synced replicas
+/// regardless of activity (that is what keeps a flow alive across a
+/// failover, #131) until the owner's delete or the stale ceiling. Both idle
+/// shapes, frozen evidence: still present two windows in, counted as held.
+#[test]
+fn standby_holds_idle_replicas_regardless_of_activity_18722() {
+    for wire in [
+        TcpHandshakeState::Established.to_wire(),
+        TcpHandshakeState::Opening.to_wire(),
+    ] {
+        let t0 = 1_000 * SEC;
+        let mut table = SessionTable::new();
+        let (forward, reverse) =
+            import_replica_pair(&mut table, SessionOrigin::SyncImport, wire, t0);
+        let window = table
+            .entry_by_key(&forward)
+            .expect("forward")
+            .expires_after_ns;
+        let frozen = shared_established(80);
+        let node_served = move |_: &SessionKey| frozen;
+        let forwards = |_: i32| false;
+        let epoch = |_: i32| 0u32;
+        let ha = ha_with(&node_served, &forwards, &epoch);
+        let mut held = 0usize;
+        let mut now = t0;
+        // Two windows plus slack: past where the `Age` path reaps (window 2).
+        let probe_at = t0 + 2 * window + 3 * SEC;
+        if window > 100 * SEC {
+            // Established: one jump per window boundary keeps the loop short.
+            for at in [t0 + window + 2 * SEC, probe_at] {
+                let _ = table.expire_stale_entries_ha(at, Some(&ha));
+                held += table.last_pop_stats().held_standby;
+            }
+        } else {
+            while now < probe_at {
+                now += SEC;
+                let _ = table.expire_stale_entries_ha(now, Some(&ha));
+                held += table.last_pop_stats().held_standby;
+            }
+        }
+        assert!(
+            table.entry_by_key(&forward).is_some() && table.entry_by_key(&reverse).is_some(),
+            "#18722 wire {wire}: on a node that does not forward the RG the replica is HELD, \
+             not aged by the node-level arm"
+        );
+        assert!(
+            held > 0,
+            "wire {wire}: anti-vacuity, the standby HOLD arm ran ({held})"
+        );
+    }
+}
+
+/// #18742 (seat U, NIT): promotion. A replica imported while this node is
+/// standby is held; then the RG moves here (forwarding flips with an epoch
+/// bump). SelfHeal re-stamps it at the promotion, so it gets a FULL window
+/// from the promotion before any check, then the replica contract (frozen
+/// counts: kept at window 1, reaped at window 2) applies from there.
+#[test]
+fn promotion_selfheals_then_ages_on_the_replica_contract_18722() {
+    let t0 = 1_000 * SEC;
+    let mut table = SessionTable::new();
+    let (forward, reverse) = import_replica_pair(
+        &mut table,
+        SessionOrigin::SyncImport,
+        TcpHandshakeState::Opening.to_wire(),
+        t0,
+    );
+    let window = table
+        .entry_by_key(&forward)
+        .expect("forward")
+        .expires_after_ns;
+    let frozen = shared_established(80);
+    let node_served = move |_: &SessionKey| frozen;
+    let forwarding = Cell::new(false);
+    let rg_epoch = Cell::new(0u32);
+    let forwards = |_: i32| forwarding.get();
+    let epoch = |_: i32| rg_epoch.get();
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    let mut now = t0;
+    while now < t0 + 30 * SEC {
+        now += SEC;
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+    }
+    assert!(
+        table.entry_by_key(&forward).is_some(),
+        "premise: held while standby"
+    );
+    forwarding.set(true);
+    rg_epoch.set(1);
+    // The GC visits a held row at its held re-check tick, so SelfHeal fires
+    // there, not at the flip itself; the contract is relative to the heal.
+    let mut heal_at = None;
+    let mut events = Vec::new();
+    while now < t0 + 30 * SEC + 20 * window {
+        now += SEC;
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+        let stats = table.last_pop_stats();
+        if heal_at.is_none() && stats.healed_on_promote > 0 {
+            heal_at = Some(now);
+            continue;
+        }
+        let Some(healed) = heal_at else { continue };
+        if stats.kept_alive_by_companion > 0 {
+            events.push(("kept", now));
+        }
+        if table.entry_by_key(&forward).is_none() && table.entry_by_key(&reverse).is_none() {
+            events.push(("reaped", now));
+            break;
+        }
+        if now < healed + window {
+            assert!(
+                events.is_empty(),
+                "#18722: no keep-alive decision may run inside the window after the SelfHeal"
+            );
+        }
+    }
+    let healed = heal_at.expect("anti-vacuity: the promotion edge must self-heal the replica");
+    assert_keep_then_reap(&events, healed, window, "promoted replica");
+}
+
+/// #18671 interaction (merged in this branch): a moved session's packets
+/// arrive keyed by its forward-wire tuple, and since #18656 the probe
+/// serves them on the canonical row (accounting included). Those hits must
+/// advance the row's served total, so the node-level arm's recency proof
+/// sees a live moved flow.
+#[test]
+fn wire_keyed_hits_on_a_moved_session_advance_the_served_total_18722() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            172, 16, 80, 8,
+        ))),
+        rewrite_src_port: Some(40000),
+        ..crate::nat::NatDecision::default()
+    };
+    let mut d = super::tests::decision();
+    d.nat = nat;
+    let now = 10 * SEC;
+    assert!(table.upsert_synced(
+        forward.clone(),
+        d,
+        super::tests::metadata(),
+        now,
+        crate::ip_proto::PROTO_TCP,
+        TCP_ACK,
+        false
+    ));
+    let reverse = reverse_session_key(&forward, nat);
+    let mut rmeta = super::tests::metadata();
+    rmeta.is_reverse = true;
+    assert!(table.upsert_synced(
+        reverse,
+        d,
+        rmeta,
+        now,
+        crate::ip_proto::PROTO_TCP,
+        TCP_ACK,
+        false
+    ));
+    let wire = forward_wire_key(&forward, nat);
+    assert_ne!(wire, forward, "premise: SNAT moves the forward wire tuple");
+    let before = table
+        .node_served_evidence(&forward)
+        .local_served
+        .expect("premise: forward row present");
+    let mut wire_canonical = None;
+    let verdict = table.probe_hit_deferring_state_update_with_ack_rollback_verdict(
+        &wire,
+        now + 600 * SEC,
+        1514,
+        TCP_ACK | TCP_PSH,
+        1448,
+        0,
+        None,
+        false,
+        &mut wire_canonical,
+    );
+    assert_eq!(
+        verdict,
+        ProbeHitVerdict::Live,
+        "premise: the wire-keyed hit is served (#18656)"
+    );
+    let after = table
+        .node_served_evidence(&forward)
+        .local_served
+        .expect("forward row present");
+    assert!(
+        after > before,
+        "#18722 x #18671: a wire-keyed hit on a moved session must advance the served total \
+         ({before} -> {after})"
+    );
 }
 
 /// LIVE SHAPE 2 (udp, node0): an OPENING replica (20 s window) of the same
@@ -444,3 +730,452 @@ fn assert_keep_then_reap(events: &[(&'static str, u64)], quiet: u64, window: u64
         "#18722 {label}: the reap must be the next crossed check, one window after the keep, got {rel:?}"
     );
 }
+
+/// #18742 case 2 (coordinator): a DEAD flow whose companion is removed
+/// FIRST. Both halves are kept once at the window-1 check (+21 s; the arm
+/// keeps the pair together). Then the forward half is removed before the
+/// next check (+30 s), the way its own owner's Close or reap removes it.
+/// Its counters were the reverse half's local contributor, so that
+/// contributor VANISHES. Absent is not a change, so the reverse half still
+/// reaps at its window-2 check (+42 s), not one window later. RED under a
+/// summed total compared with `!=` (the vanished counters read as a drop,
+/// a "change"), and RED with an absent contributor read as 0.
+#[test]
+fn a_removed_companion_is_not_activity_18722() {
+    let t0 = 1_000 * SEC;
+    let mut table = SessionTable::new();
+    let (forward, reverse) = import_replica_pair(
+        &mut table,
+        SessionOrigin::SyncImport,
+        TcpHandshakeState::Opening.to_wire(),
+        t0,
+    );
+    let frozen = shared_established(80);
+    let node_served = move |_: &SessionKey| frozen;
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    let mut kept_at = Vec::new();
+    let mut reverse_gone = None;
+    let mut now = t0;
+    while now < t0 + 200 * SEC && reverse_gone.is_none() {
+        now += SEC;
+        if now == t0 + 30 * SEC {
+            assert!(
+                table.entry_by_key(&forward).is_some(),
+                "premise: the forward half was kept at +21 s"
+            );
+            table.delete(&forward);
+        }
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+        if table.last_pop_stats().kept_alive_by_companion > 0 {
+            kept_at.push((now - t0) / SEC);
+        }
+        if table.entry_by_key(&reverse).is_none() {
+            reverse_gone = Some((now - t0) / SEC);
+        }
+    }
+    assert_eq!(
+        kept_at,
+        vec![21],
+        "premise: one keep, at the window-1 check"
+    );
+    assert_eq!(
+        reverse_gone,
+        Some(42),
+        "#18742: the reverse half must reap at its window-2 check; its removed companion's \
+         vanished counters are not activity"
+    );
+}
+
+/// #18742 case 1 (seat L): a LIVE flow whose evidence source is REPLACED.
+/// The reverse replica's local contributor is its forward row, which this
+/// table serves (counters advancing). At +30 s that forward row is removed
+/// (the pair moved), and the shared row is republished by a new serving
+/// incarnation with LOWER counts that then advance again. The live replica
+/// must survive three more windows. RED under a summed total compared with
+/// `>` (the sum drops: false silence, false reap), and RED with per-
+/// contributor `>` (the republished-lower shared count is below its old
+/// baseline at the next check).
+#[test]
+fn a_live_flows_replaced_source_is_activity_not_silence_18722() {
+    let t0 = 1_000 * SEC;
+    let mut table = SessionTable::new();
+    let (forward, reverse) = import_replica_pair(
+        &mut table,
+        SessionOrigin::SyncImport,
+        TcpHandshakeState::Opening.to_wire(),
+        t0,
+    );
+    let window = table
+        .entry_by_key(&reverse)
+        .expect("reverse")
+        .expires_after_ns;
+    let shared = Cell::new(300u64);
+    let node_served = |_: &SessionKey| shared_established(shared.get());
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    let replaced_at = t0 + 30 * SEC;
+    let mut now = t0;
+    while now < replaced_at + 3 * window {
+        now += SEC;
+        if now < replaced_at {
+            // This table serves the forward row: its counters advance.
+            table.account_packet(&forward, 100, TCP_ACK, 0);
+        }
+        if now == replaced_at {
+            table.delete(&forward);
+            shared.set(20);
+        }
+        if now > replaced_at && (now - t0) % (10 * SEC) == 0 {
+            shared.set(shared.get() + 25);
+        }
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+        assert!(
+            table.entry_by_key(&reverse).is_some(),
+            "#18742: the live flow's replica was reaped at +{} s after its source was replaced",
+            (now - t0) / SEC
+        );
+    }
+}
+
+/// Install one replica row (either half) as the HA import path does.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "#18722 test helper: one import per field"
+)]
+fn import_row(
+    table: &mut SessionTable,
+    key: &SessionKey,
+    is_reverse: bool,
+    origin: SessionOrigin,
+    wire: u8,
+    close_class: u8,
+    now_ns: u64,
+    allow_replace_local: bool,
+) {
+    let mut metadata = super::tests::metadata();
+    metadata.is_reverse = is_reverse;
+    assert!(
+        table.upsert_synced_with_origin(
+            SessionInstall {
+                key: key.clone(),
+                decision: super::tests::decision(),
+                metadata,
+                source_nat_static: None,
+                origin,
+                now_ns,
+                protocol: key.protocol,
+                tcp_flags: 0,
+                session_id: if is_reverse { 0x9_8722 } else { 0x8_8722 },
+                tcp_close_class: close_class,
+                tcp_handshake_state: wire,
+                persistent_lease_hold: None,
+                fwd_packets: 40,
+                rev_packets: 40,
+            },
+            allow_replace_local,
+        ),
+        "premise: the replica row must install"
+    );
+}
+
+/// PAIR-MODEL EXCEPTION 1: a CLOSING companion is never aligned. The
+/// forward replica is kept by the node-level arm at +21 s; the reverse
+/// half is CLOSING in TIME_WAIT (close class 2, both FIN bits, so the
+/// classic `companion_keeps_alive` cannot keep the forward half from it and
+/// the node-level arm is what keeps it) and was imported at +15 s, so it
+/// has not crossed. The keep must not re-stamp it or move its baselines: it
+/// keeps its own close fuse (#10885/#14630).
+#[test]
+fn pair_exception_closing_companion_is_not_aligned_18722() {
+    let t0 = 1_000 * SEC;
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+    let established = TcpHandshakeState::Established.to_wire();
+    import_row(
+        &mut table,
+        &forward,
+        false,
+        SessionOrigin::SyncImport,
+        TcpHandshakeState::Opening.to_wire(),
+        0,
+        t0,
+        false,
+    );
+    import_row(
+        &mut table,
+        &reverse,
+        true,
+        SessionOrigin::SyncImport,
+        established,
+        2,
+        t0 + 15 * SEC,
+        false,
+    );
+    assert!(
+        table.entry_by_key(&reverse).expect("reverse").closing,
+        "premise: the companion is closing"
+    );
+    let frozen = shared_established(80);
+    let node_served = move |_: &SessionKey| frozen;
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    let mut now = t0;
+    while now < t0 + 21 * SEC {
+        now += SEC;
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+    }
+    assert!(
+        table.last_pop_stats().kept_alive_by_companion > 0,
+        "premise: the forward half was kept at +21 s"
+    );
+    let rev = table
+        .entry_by_key(&reverse)
+        .expect("the closing companion is still present");
+    assert_eq!(
+        rev.last_seen_ns,
+        t0 + 15 * SEC,
+        "#18722: a closing companion is not re-stamped by the pair keep"
+    );
+    assert_eq!(
+        (rev.node_served_seen_local, rev.node_served_seen_shared),
+        (0, 0),
+        "#18722: a closing companion does not take the pair baselines"
+    );
+}
+
+/// PAIR-MODEL EXCEPTION 2: NON-TCP pairs never take the node-level arm.
+/// A UDP replica pair with served, advancing node evidence still ages on
+/// the classic rules: both halves reap at their own window.
+#[test]
+fn pair_exception_non_tcp_never_takes_the_arm_18722() {
+    let t0 = 1_000 * SEC;
+    let mut table = SessionTable::new();
+    let mut forward = key_v4();
+    forward.protocol = crate::ip_proto::PROTO_UDP;
+    forward.dst_port = 53;
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+    import_row(
+        &mut table,
+        &forward,
+        false,
+        SessionOrigin::SyncImport,
+        0,
+        0,
+        t0,
+        false,
+    );
+    import_row(
+        &mut table,
+        &reverse,
+        true,
+        SessionOrigin::SyncImport,
+        0,
+        0,
+        t0,
+        false,
+    );
+    let window = table
+        .entry_by_key(&forward)
+        .expect("forward")
+        .expires_after_ns;
+    let served = Cell::new(80u64);
+    let node_served = |_: &SessionKey| shared_established(served.get());
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    let mut kept = 0usize;
+    let mut now = t0;
+    while now < t0 + window + 2 * SEC {
+        now += SEC;
+        served.set(served.get() + 10);
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+        kept += table.last_pop_stats().kept_alive_by_companion;
+    }
+    assert_eq!(
+        kept, 0,
+        "#18722: no keep-alive arm may keep an idle UDP replica on node evidence"
+    );
+    assert!(
+        table.entry_by_key(&forward).is_none() && table.entry_by_key(&reverse).is_none(),
+        "#18722: a UDP pair reaps on its own window whatever the node evidence says"
+    );
+}
+
+/// PAIR-MODEL EXCEPTION 3: a COMPLETED row this node serves never takes the
+/// node-level arm, even when the node evidence for its tuple is LIVE and
+/// advancing (here: the shared counts rise every second, as a mirror of some
+/// other service would). Its retention is `companion_keeps_alive`'s alone,
+/// so with no packets on either of its own halves it reaps one window after
+/// its last packet. RED with the gate removed (the advancing evidence keeps
+/// it for ever).
+#[test]
+fn pair_exception_completed_local_row_never_takes_the_arm_18722() {
+    let t0 = 1_000 * SEC;
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    assert!(
+        table
+            .lookup_with_origin(&reverse, t0 + MS, TCP_SYN | TCP_ACK)
+            .is_some()
+    );
+    table.account_packet(&reverse, 60, TCP_SYN | TCP_ACK, 0);
+    let last = t0 + 2 * MS;
+    assert!(table.lookup_with_origin(&forward, last, TCP_ACK).is_some());
+    table.account_packet(&forward, 52, TCP_ACK, 0);
+    let window = table
+        .entry_by_key(&forward)
+        .expect("forward")
+        .expires_after_ns;
+    let served = Cell::new(80u64);
+    let node_served = |_: &SessionKey| shared_established(served.get());
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    served.set(served.get() + 1_000);
+    let _ = table.expire_stale_entries_ha(last + window - SEC, Some(&ha));
+    assert!(
+        table.entry_by_key(&forward).is_some(),
+        "anti-vacuity: alive inside its window"
+    );
+    served.set(served.get() + 1_000);
+    let _ = table.expire_stale_entries_ha(last + window + 2 * SEC, Some(&ha));
+    assert_eq!(
+        table.last_pop_stats().kept_alive_by_companion,
+        0,
+        "#18722: advancing node evidence must not keep a completed row this node serves"
+    );
+    assert!(
+        table.entry_by_key(&forward).is_none() && table.entry_by_key(&reverse).is_none(),
+        "#18722: a completed local pair reaps one window after its own last packet"
+    );
+}
+
+/// PAIR-MODEL EXCEPTION 4: the #16223 B1 split replica. A lone reverse
+/// half (no forward row in this table, no shared row) whose only local
+/// evidence is a node-served stamp is decided alone, on that stamp: kept
+/// at the window-1 check (the stamp reads as a change from 0), reaped at
+/// the window-2 check (unchanged).
+#[test]
+fn pair_exception_stamp_only_split_replica_is_decided_alone_18722() {
+    let t0 = 1_000 * SEC;
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+    import_row(
+        &mut table,
+        &reverse,
+        true,
+        SessionOrigin::SyncImport,
+        TcpHandshakeState::Opening.to_wire(),
+        0,
+        t0,
+        false,
+    );
+    table.note_node_served_handshake(&forward, TcpHandshakeState::Established.to_wire(), 7);
+    let ev = table.node_served_evidence(&reverse);
+    assert!(
+        table.entry_by_key(&forward).is_none(),
+        "premise: no forward row here"
+    );
+    assert_eq!(
+        ev.local_served,
+        Some(7),
+        "premise: the stamp is the local contributor"
+    );
+    let node_served = |_: &SessionKey| NodeServedEvidence::default();
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    let window = table
+        .entry_by_key(&reverse)
+        .expect("reverse")
+        .expires_after_ns;
+    let mut events = Vec::new();
+    let mut now = t0;
+    while now < t0 + 10 * window {
+        now += SEC;
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+        if table.last_pop_stats().kept_alive_by_companion > 0 {
+            events.push(("kept", now));
+        }
+        if table.entry_by_key(&reverse).is_none() {
+            events.push(("reaped", now));
+            break;
+        }
+    }
+    assert_keep_then_reap(&events, t0, window, "stamp-only split replica");
+}
+
+/// #18742 (seat L, NIT): the two per-contributor baselines
+/// (`node_served_seen_local` / `_shared`) grow `SessionEntry` by 16 B.
+/// Pin the size so the next growth is a decision, not an accident. Re-pin
+/// with a cited reason when a field is added on purpose. The hot fields the
+/// expiry scan reads are printed with their cache lines for the PR record
+/// (they are compared against master there, not pinned here, because a
+/// `repr(Rust)` layout reorders on any field change).
+#[test]
+fn session_entry_size_is_pinned_18722() {
+    use std::mem::{offset_of, size_of};
+    let hot = [
+        ("last_seen_ns", offset_of!(SessionEntry, last_seen_ns)),
+        (
+            "expires_after_ns",
+            offset_of!(SessionEntry, expires_after_ns),
+        ),
+        ("wheel_tick", offset_of!(SessionEntry, wheel_tick)),
+        ("held_wheel_tick", offset_of!(SessionEntry, held_wheel_tick)),
+        ("origin", offset_of!(SessionEntry, origin)),
+        ("metadata", offset_of!(SessionEntry, metadata)),
+        ("decision", offset_of!(SessionEntry, decision)),
+        ("first_held_ns", offset_of!(SessionEntry, first_held_ns)),
+        ("seen_rg_epoch", offset_of!(SessionEntry, seen_rg_epoch)),
+        ("closing", offset_of!(SessionEntry, closing)),
+        ("reset", offset_of!(SessionEntry, reset)),
+        ("fin_own", offset_of!(SessionEntry, fin_own)),
+        ("fin_peer", offset_of!(SessionEntry, fin_peer)),
+        ("established", offset_of!(SessionEntry, established)),
+        (
+            "handshake_pending",
+            offset_of!(SessionEntry, handshake_pending),
+        ),
+        ("syn_ack_first", offset_of!(SessionEntry, syn_ack_first)),
+        ("counters", offset_of!(SessionEntry, counters)),
+        (
+            "closing_counters_seen",
+            offset_of!(SessionEntry, closing_counters_seen),
+        ),
+        (
+            "node_served_seen_local",
+            offset_of!(SessionEntry, node_served_seen_local),
+        ),
+        (
+            "node_served_seen_shared",
+            offset_of!(SessionEntry, node_served_seen_shared),
+        ),
+    ];
+    let lines: Vec<_> = hot
+        .iter()
+        .map(|(n, o)| format!("{n}@{o}/L{}", o / 64))
+        .collect();
+    eprintln!(
+        "SESSION_ENTRY_LAYOUT size={} align={} {}",
+        size_of::<SessionEntry>(),
+        std::mem::align_of::<SessionEntry>(),
+        lines.join(" ")
+    );
+    assert_eq!(
+        size_of::<SessionEntry>(),
+        SESSION_ENTRY_SIZE_18722,
+        "SessionEntry changed size: re-pin with a cited reason (master + 16 B at #18722)"
+    );
+}
+
+/// Master `SessionEntry` (600 B at 218c320230) plus the two 8 B baselines
+/// `node_served_seen_local` / `node_served_seen_shared` (#18722).
+const SESSION_ENTRY_SIZE_18722: usize = 616;

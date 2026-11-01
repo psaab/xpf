@@ -1521,17 +1521,19 @@ struct SessionEntry {
     /// pre-close volume must not retain it. Forward entry only
     /// (counters fold there); 0 for a not-yet-closing entry.
     closing_counters_seen: u64,
-    /// #18722: `NodeServedEvidence::served_packets` as the expiry pass
-    /// last saw it for THIS row, the baseline of the node-level
-    /// retention arm (`opening_companion_keeps_alive`). That arm keeps
-    /// an idle-crossed opening row only when the node-wide serving total
-    /// ADVANCED past this baseline, so a quiet flow's frozen counters
-    /// stop retaining it. 0 at install, so the first crossed check
-    /// retains on any served count: a dead flow's opening row reaps
-    /// within two of its windows (plus the ct-slice restamp lag) of
-    /// the serving pair's last packet. #18739 tracks seeding it at
-    /// install so that bound becomes one window.
-    node_served_seen: u64,
+    /// #18722: this row's baselines for the node-level retention arm
+    /// (`opening_companion_keeps_alive`), one per evidence contributor
+    /// (`NodeServedEvidence::local_served` / `shared_served`), as the
+    /// expiry pass last saw them. The arm keeps an idle-crossed opening row
+    /// or completed replica only when a PRESENT contributor changed from its
+    /// baseline, so a quiet flow's frozen counters stop retaining it and a
+    /// reaped companion's vanished counters do not read as activity. 0 at
+    /// install, so the first crossed check retains on any served count: a
+    /// dead flow's row reaps within two of its windows (plus the ct-slice
+    /// restamp lag) of the serving pair's last packet. #18739 tracks
+    /// seeding them at install so that bound becomes one window.
+    node_served_seen_local: u64,
+    node_served_seen_shared: u64,
     /// #2749: the IP ToS byte observed on the FORWARD direction of this
     /// session (DSCP in the high 6 bits, ECN cleared — the shim meta carries
     /// only the 6-bit DSCP). Stamped from `meta.dscp << 2` on every forward
@@ -6121,6 +6123,8 @@ impl SessionTable {
         let mut evidence = NodeServedEvidence::default();
         let mut local_packets = 0u64;
         let mut stamp_packets = 0u64;
+        let mut forward_found = false;
+        let mut stamp_found = false;
         // Local serving pair, either orientation: an established,
         // non-pending, non-closing forward/reverse entry for the same
         // bare tuple whose forward counters prove reverse service.
@@ -6155,6 +6159,7 @@ impl SessionTable {
                 };
                 if let Some(fwd) = fwd {
                     evidence.rev_packets = evidence.rev_packets.max(fwd.counters.rev_packets);
+                    forward_found = true;
                     local_packets = local_packets.max(
                         fwd.counters
                             .fwd_packets
@@ -6169,6 +6174,7 @@ impl SessionTable {
             }
             evidence.rev_packets = evidence.rev_packets.max(rev);
             stamp_packets = stamp_packets.max(rev);
+            stamp_found = true;
         }
         // The stamp is keyed by the canonical forward key; a reverse
         // hit names its companion.
@@ -6180,12 +6186,16 @@ impl SessionTable {
                 }
                 evidence.rev_packets = evidence.rev_packets.max(rev);
                 stamp_packets = stamp_packets.max(rev);
+                stamp_found = true;
             }
         }
-        // #18722: per-source maxima summed, so an advance in EITHER
-        // source advances the total (a max across sources would hide a
-        // smaller source that is still moving).
-        evidence.served_packets = local_packets.saturating_add(stamp_packets);
+        // #18722: this table's contributor exists while the pair's forward
+        // row or its node-served stamp does (the stamp is dropped with the
+        // forward row; a split replica can hold a stamp with no forward row,
+        // #16223 B1). Absent, it is `None`, never 0: a reaped companion is
+        // not a drop to compare.
+        evidence.local_served = (forward_found || stamp_found)
+            .then(|| local_packets.saturating_add(stamp_packets));
         evidence
     }
 
