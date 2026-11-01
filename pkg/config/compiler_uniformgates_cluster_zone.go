@@ -688,6 +688,20 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 			return err
 		}
 	}
+	// #18744: a published placeholder introduced over an active config.
+	// Ordered before the transition gate: a one-shot change TO a placeholder
+	// trips both, and this message names the problem the operator must fix
+	// (the value), where the transition message would send them through the
+	// overlap procedure with the same unusable key. Same lenient downgrade.
+	if err := validateClusterAuthKeyPlaceholderStrict(
+		cfg, opts.currentConfigPresent18744, opts.currentClusterAccepted16858); err != nil {
+		if opts.lenientClusterAuthKey {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("cluster authentication (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	if err := validateClusterAuthKeyTransitionStrict(cfg, opts.currentClusterAccepted16858); err != nil {
 		if opts.lenientClusterAuthKey {
 			cfg.Warnings = append(cfg.Warnings,
@@ -702,8 +716,9 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 	// primary is the persisted/current signing key and a distinct,
 	// floor-length replacement is staged as the additional key for the
 	// #6630 rotation; the tolerant path downgrades that rejection to a
-	// warning. Short additional keys and published placeholders warn on
-	// both paths rather than failing the config.
+	// warning. Short additional keys warn on both paths rather than failing
+	// the config. Published placeholders warn on both paths too; the strict
+	// path also refuses one introduced over an active config (#18744, above).
 	cfg.Warnings = append(cfg.Warnings, ClusterAuthKeyStrengthWarnings(cfg)...)
 
 	return nil

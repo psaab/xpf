@@ -3336,6 +3336,47 @@ open either exception. On the tolerant load/sync path, a short primary still
 boots with a warning, preserving the no-brick upgrade path;
 `ClusterAuthKeyStrengthWarnings` continues to warn below 16 characters and
 for published placeholders on both paths.
+
+**Published placeholders (#18744).** A strict commit refuses a published
+placeholder (a value containing `change-me` or `example-only`, matched without
+case) that it INTRODUCES into either key leaf over an active config. The
+predicate is `validateClusterAuthKeyPlaceholderStrict`.
+
+"Introduces" is judged against the active config's accepted set, byte for byte.
+A placeholder the active config already signs with or accepts keeps committing
+with the warning. That keeps two things working:
+- routine commits on a node already keyed with a placeholder;
+- the whole rotation off it. Steps 1-2 keep the placeholder as the signer
+  while a real key is staged. Steps 3-4 stage the retiring placeholder signer
+  as the additional key, and the active config signs with it, so it is
+  accepted. Step 5 drops it.
+
+Refused:
+- staging a placeholder as the additional key (rotating TO one);
+- a placeholder primary the active config does not hold;
+- keying an unkeyed or standalone running node with a placeholder;
+- a rollback or `load override` that brings back a placeholder the active
+  config has retired.
+
+The refusal never echoes the key or the matched marker.
+
+Fresh state is not judged. With no active config there is nothing to
+introduce a placeholder into, and that covers:
+- the first-boot import (`bootstrapFromFile` commits onto an empty store);
+- `xpfd check-config` and the day-0 loaders;
+- the first interactive commit on an empty store.
+
+These keep the warning, so a reimaged node bootstrapping a placeholder conf
+still gets an active config. The tolerant load and config-sync paths never
+supply the active state, and they downgrade a refusal to a warning.
+
+**Upgrade note (#18744).** A node that already runs a placeholder key is
+unaffected: its routine commits and the rotation off the placeholder keep
+committing with the existing warning. What is newly refused at commit is
+introducing a placeholder over an active config, for example `set chassis
+cluster additional-authentication-key <placeholder>` or a `load override` of
+a reference config onto a running node. Persisted and peer-synced configs
+boot as before.
 These checks cover the duplicate-identity beacon too: anyone who knows a weak
 or published PSK can sign a beacon that passes authentication and triggers its
 warn-only duplicate-node-id signal. Warnings never disclose the key.
@@ -3357,7 +3398,8 @@ exercises the ENFORCING branch rather than the `keyConfigured == false`
 shortcut. Those values are **published in a public repository**: a config
 copied from them satisfies the gate while remaining trivially forgeable by
 anyone who has read the repo. They are marked `CHANGE-ME` and trip the
-placeholder warning above. Replace them before any real deployment.
+placeholder warning above, and a commit that introduces one over an active
+config is refused (#18744). Replace them before any real deployment.
 `TestShippedClusterConfigsAreKeyed_6611` / `...UseOneKeyPerCluster_6611`
 (`pkg/config`) lock the keyed and one-key-per-cluster properties;
 `TestBootstrapFromFileRejectsUnkeyedCluster_6611` (`pkg/daemon`) and

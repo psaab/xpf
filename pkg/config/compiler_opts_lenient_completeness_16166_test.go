@@ -81,6 +81,7 @@ var lenientCompletenessAllowlist16166 = map[string]string{
 	"suppressSSHUnmanagedAdvisory16737":  "advisory suppressor (#16737), true in lenientCompileOpts",
 	"tolerant":                           "tolerant-path mode bit (#17153), true only in lenientCompileOpts",
 	"igpIdentityExcused16810":            "compileTree-only exemption for the node-specific IGP identity gate; it is not a lenient downgrade",
+	"currentConfigPresent18744":          "active-config presence for the #18744 placeholder gate, supplied only by the strict candidate pipeline; tolerant compiles leave it false, and the gate's own downgrade is lenientClusterAuthKey",
 }
 
 // walkBoolFields16166 visits every bool field reachable from v,

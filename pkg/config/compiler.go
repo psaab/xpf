@@ -163,7 +163,14 @@ func CompileConfigForNodeWithCurrentClusterPrimary(tree *ConfigTree, nodeID int,
 // held only for equality checks and never logged or rendered.
 func currentClusterOpts(cfg *Config) compileOpts {
 	opts := strictCompileOpts()
-	if cfg == nil || cfg.Chassis.Cluster == nil {
+	if cfg == nil {
+		return opts
+	}
+	// #18744: an active config exists, so a published placeholder in the
+	// candidate is judged against it even when that config has no cluster
+	// stanza or no key yet (keying a running node with a placeholder).
+	opts.currentConfigPresent18744 = true
+	if cfg.Chassis.Cluster == nil {
 		return opts
 	}
 	k := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal())

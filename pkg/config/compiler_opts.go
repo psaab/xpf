@@ -3938,6 +3938,14 @@ type compileOpts struct {
 	// direct CompileConfig and every tolerant compile) keeps both protections
 	// closed. Held only for equality checks and never logged or rendered.
 	currentClusterAccepted16858 *clusterAcceptedKeys16858
+	// currentConfigPresent18744 is true when configstore's strict
+	// candidate pipeline supplied an active config at all, with or without a
+	// cluster stanza or keys. The #18744 placeholder gate refuses a published
+	// key only when one is INTRODUCED over an active config. Fresh state
+	// (bootstrap import on an empty store, check-config, day-0, direct
+	// CompileConfig) and every tolerant compile leave it false, so those keep
+	// the warning instead of refusing.
+	currentConfigPresent18744 bool
 }
 
 // strictCompileOpts returns the compileOpts for the strict commit /
