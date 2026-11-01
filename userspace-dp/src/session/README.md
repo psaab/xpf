@@ -2837,7 +2837,13 @@ hashing, for example), the primary capped it near one worker's limit. After
 failover the standby's worker for that source holds only its share of the
 charges, so it can admit more new flows than the primary would have. That is
 still bounded by the `limit × N` node-wide figure that per-worker enforcement
-allows for an evenly spread source. `SharedMaterialize` / `SharedPromote` rows are the serving
+allows for an evenly spread source.
+
+Residual: the width is the bring-up set's size. Copies designated to a planned
+worker whose table never comes up are charged nowhere, an undercount, which errs
+toward admitting. Test builds count source decrements that find no count
+(`session_limit_dec_underflows`); the #18640 cells assert it stays 0, because
+the saturating decrement would otherwise hide a double decrement. `SharedMaterialize` / `SharedPromote` rows are the serving
 worker's own copy and count there.
 
 **The predicate is one function.** `SessionTable::session_limit_counted(key,

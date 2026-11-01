@@ -2391,6 +2391,11 @@ pub(crate) struct SessionTable {
     /// copy: a single table, as in standalone tests, is the whole node.
     session_limit_shard_index: u32,
     session_limit_shard_width: u32,
+    /// #18640: source-count decrements that found no count to take from. Always
+    /// zero while increments and decrements agree; a nonzero value is a balance
+    /// bug the saturating decrement would otherwise hide. Test builds only.
+    #[cfg(test)]
+    session_limit_dec_underflows: u64,
     /// #18640: the process-wide keyed hash that picks the charged worker. Every
     /// worker table is built from the same per-process seed, so they agree on
     /// the designation; the seed keeps an outsider from aiming flows at one
@@ -2639,6 +2644,8 @@ impl SessionTable {
             session_limit_active: false,
             session_limit_shard_index: 0,
             session_limit_shard_width: 1,
+            #[cfg(test)]
+            session_limit_dec_underflows: 0,
             session_limit_shard_hash: state.clone(),
             // #2364/#10985: these counters key attacker-chosen IPs plus an
             // ingress-zone ID, so use the seeded hasher.
@@ -3812,6 +3819,12 @@ impl SessionTable {
         self.rebuild_session_limit_counts();
     }
 
+    /// #18640: source-count decrements that found no count (see the field).
+    #[cfg(test)]
+    pub(crate) fn session_limit_dec_underflows(&self) -> u64 {
+        self.session_limit_dec_underflows
+    }
+
     /// #18640: this table's (index, width) slot, for the worker-setup cell.
     #[cfg(test)]
     pub(crate) fn session_limit_shard(&self) -> (u32, u32) {
@@ -3948,6 +3961,14 @@ impl SessionTable {
             *c = c.saturating_sub(1);
             if *c == 0 {
                 self.session_limit_src_counts.remove(&src_key);
+            }
+        } else {
+            // #18640: a decrement with no matching increment. The saturating
+            // shape would otherwise hide a double decrement (or a decrement
+            // under a different predicate) completely; the cells assert 0.
+            #[cfg(test)]
+            {
+                self.session_limit_dec_underflows = self.session_limit_dec_underflows.saturating_add(1);
             }
         }
         if !self.session_limit_active {

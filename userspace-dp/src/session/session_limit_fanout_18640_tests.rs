@@ -69,23 +69,29 @@ fn per_worker(tables: &[SessionTable]) -> Vec<u32> {
 /// Every table's count must equal the rows the production predicate charges
 /// on that table (the census invariant, per worker).
 fn assert_balanced(tables: &[SessionTable], label: &str) {
+    assert_balanced_in(tables, crate::test_zone_ids::TEST_LAN_ZONE_ID, label);
+}
+
+/// `assert_balanced` for one ingress zone, plus no unmatched decrement anywhere.
+fn assert_balanced_in(tables: &[SessionTable], zone: u32, label: &str) {
+    for (i, t) in tables.iter().enumerate() {
+        assert_eq!(t.session_limit_dec_underflows(), 0, "{label}: worker {i} decremented a count it never charged");
+    }
     for (i, t) in tables.iter().enumerate() {
         let mut charged = 0u32;
         t.iter_with_origin(|key, _d, md, origin| {
-            if md.ingress_zone == crate::test_zone_ids::TEST_LAN_ZONE_ID
-                && key.src_ip == src()
-                && t.session_limit_counted(key, origin, md.is_reverse)
-            {
+            if md.ingress_zone == zone && key.src_ip == src() && t.session_limit_counted(key, origin, md.is_reverse) {
                 charged += 1;
             }
         });
         assert_eq!(
-            t.session_limit_src_count(crate::test_zone_ids::TEST_LAN_ZONE_ID, src()),
+            t.session_limit_src_count(zone, src()),
             charged,
-            "{label}: worker {i} count must equal the rows it is charged for"
+            "{label}: worker {i} count in zone {zone} must equal the rows it is charged for"
         );
     }
 }
+
 
 fn node_sum(tables: &[SessionTable]) -> u32 {
     tables
@@ -324,4 +330,94 @@ fn synced_copies_still_enforce_the_cap_after_failover_18640() {
             per_worker(&tables)
         );
     }
+}
+
+
+/// Review W: the HA-transition refresh (the activation scan) must keep one charge
+/// per node. Reverting its tail to the origin-only predicate charged every worker
+/// (`[64, 64, 64, 64]`), the #18640 defect itself.
+#[test]
+fn ha_transition_refresh_keeps_one_charge_per_node_18640() {
+    let mut tables = node_tables();
+    let s = 64u16;
+    for p in 0..s {
+        let k = fwd_key(45000 + p);
+        let rev = reverse_session_key(&k, NatDecision::default());
+        for t in tables.iter_mut() {
+            assert!(t.upsert_synced_with_origin(install(&k, SessionOrigin::SyncImport, false), false));
+            assert!(t.upsert_synced_with_origin(install(&rev, SessionOrigin::SyncImport, true), false));
+        }
+    }
+    assert_eq!(node_sum(&tables), u32::from(s));
+    let mut meta = metadata();
+    meta.owner_rg_id = 1;
+    for p in 0..s {
+        let k = fwd_key(45000 + p);
+        for t in tables.iter_mut() {
+            assert!(t.refresh_for_ha_transition(&k, decision(), meta.clone(), NOW + 1_000_000));
+        }
+    }
+    assert_eq!(node_sum(&tables), u32::from(s), "after the HA refresh: {:?}", per_worker(&tables));
+    assert!(per_worker(&tables).iter().all(|c| *c < u32::from(s)), "{:?}", per_worker(&tables));
+    assert_balanced(&tables, "after the HA refresh");
+}
+
+/// Review W: an in-place zone move must move each charge once. Reverting the
+/// zone moves to the origin-only predicate put 4 x S in the new zone.
+#[test]
+fn zone_move_moves_one_charge_per_node_18640() {
+    let mut tables = node_tables();
+    let s = 64u16;
+    let lan = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+    let moved = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+    for p in 0..s {
+        let k = fwd_key(46000 + p);
+        // The pair rebinds need the reverse companion.
+        let rev = reverse_session_key(&k, NatDecision::default());
+        for t in tables.iter_mut() {
+            assert!(t.upsert_synced_with_origin(install(&k, SessionOrigin::SyncImport, false), false));
+            assert!(t.upsert_synced_with_origin(install(&rev, SessionOrigin::SyncImport, true), false));
+        }
+    }
+    for p in 0..s {
+        let k = fwd_key(46000 + p);
+        for t in tables.iter_mut() {
+            assert!(t.rebind_zones_pair(&k, moved, 0, lan, 0));
+        }
+    }
+    let in_zone = |zone: u32| -> Vec<u32> { tables.iter().map(|t| t.session_limit_src_count(zone, src())).collect() };
+    assert_eq!(in_zone(lan).iter().sum::<u32>(), 0, "nothing left in the old zone: {:?}", in_zone(lan));
+    assert_eq!(in_zone(moved).iter().sum::<u32>(), u32::from(s), "one charge per session in the new zone: {:?}", in_zone(moved));
+    assert_balanced_in(&tables, moved, "after the zone move");
+    assert_balanced_in(&tables, lan, "old zone after the zone move");
+}
+
+/// Review W, the policy-pair twin: `rebind_policy_pair` also moves a counted
+/// session's zone pair in place, and must move each charge once.
+#[test]
+fn policy_rebind_moves_one_charge_per_node_18640() {
+    let mut tables = node_tables();
+    let s = 64u16;
+    let lan = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+    let moved = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+    for p in 0..s {
+        let k = fwd_key(47000 + p);
+        // The pair rebinds need the reverse companion.
+        let rev = reverse_session_key(&k, NatDecision::default());
+        for t in tables.iter_mut() {
+            assert!(t.upsert_synced_with_origin(install(&k, SessionOrigin::SyncImport, false), false));
+            assert!(t.upsert_synced_with_origin(install(&rev, SessionOrigin::SyncImport, true), false));
+        }
+    }
+    let counter = std::sync::Arc::new(crate::policy::PolicyRuleCounter::default());
+    for p in 0..s {
+        let k = fwd_key(47000 + p);
+        for t in tables.iter_mut() {
+            assert!(t.rebind_policy_pair(&k, 7, 7, counter.clone(), moved, 0, lan, 0));
+        }
+    }
+    let in_zone = |zone: u32| -> Vec<u32> { tables.iter().map(|t| t.session_limit_src_count(zone, src())).collect() };
+    assert_eq!(in_zone(lan).iter().sum::<u32>(), 0, "{:?}", in_zone(lan));
+    assert_eq!(in_zone(moved).iter().sum::<u32>(), u32::from(s), "{:?}", in_zone(moved));
+    assert_balanced_in(&tables, moved, "after the policy rebind");
 }
