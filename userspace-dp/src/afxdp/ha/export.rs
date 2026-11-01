@@ -110,6 +110,36 @@ impl crate::afxdp::Coordinator {
         self.kick_owner_rg_export_inner(owner_rgs, max, kick)
     }
 
+    /// #18752: close the open window named by a v2 token that its client
+    /// abandoned. Validation mirrors a continuation's: the paging marker and a
+    /// nonzero token are required. A token from another helper incarnation, or
+    /// for a window that is no longer open, names nothing here: `Ok(false)`.
+    /// Workers need nothing: the next fresh kick supersedes the abandoned
+    /// sequence at the worker and its buffered entries are skipped as foreign,
+    /// exactly as after an idle expiry. Called under the `ServerState` lock.
+    pub fn abandon_owner_rg_export(
+        &self,
+        protocol_version: i32,
+        incarnation: u64,
+        sequence: u64,
+    ) -> Result<bool, String> {
+        if protocol_version != crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION {
+            return Err(format!(
+                "owner-RG export protocol version {protocol_version} is unsupported; want {}",
+                crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION
+            ));
+        }
+        if incarnation == 0 || sequence == 0 {
+            return Err(
+                "owner-RG export abandon requires nonzero incarnation and sequence".to_string(),
+            );
+        }
+        if incarnation != self.sessions.export_incarnation() {
+            return Ok(false);
+        }
+        Ok(self.sessions.open_export_abandon_if(sequence))
+    }
+
     fn kick_owner_rg_export_inner(
         &self,
         owner_rgs: &[i32],

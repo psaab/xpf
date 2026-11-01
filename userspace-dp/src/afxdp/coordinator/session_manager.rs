@@ -397,6 +397,20 @@ impl SessionManager {
         }
     }
 
+    /// #18752: the explicit form of the idle expiry. A client that abandoned
+    /// a window mid-way (the Go pager aborting between pages) closes it now
+    /// instead of leaving every fresh kick BUSY for EXPORT_WINDOW_IDLE_EXPIRY_NS.
+    /// Clears iff `sequence` is still the open window, so a late or duplicate
+    /// abandon can never close a newer one; returns whether it cleared.
+    pub(in crate::afxdp) fn open_export_abandon_if(&self, sequence: u64) -> bool {
+        let mut open = self.open_export.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(open.as_ref(), Some(w) if w.sequence == sequence) {
+            *open = None;
+            return true;
+        }
+        false
+    }
+
     /// Test seam for the idle-expiry path: overwrite the activity stamp of
     /// the open window (no-op when idle), so a cell can age a window out
     /// without sleeping 60 s.

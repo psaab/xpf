@@ -2365,6 +2365,32 @@ survivor re-drive so the two cannot stack. The daemon also now wires the runtime
 BEFORE `ss.Start()`, which removes the trigger and gives the `SetRuntime` writes
 a happens-before edge over the goroutines `Start` spawns.
 
+**An aborted paged export must close its helper window (#18752).** The
+re-drive above only helps if the next attempt can start. The owner-RG export
+the bulk is built from is paged (#9344/#9856), and the helper keeps ONE export
+window open from page 1 until a terminal page or one of its own error paths;
+while a window is open, every fresh kick is refused `owner-RG export busy
+(window N open)` until `EXPORT_WINDOW_IDLE_EXPIRY_NS` (60 s) of inactivity.
+The Go pager can also decide to abort between pages — most often
+`helper/config generation changed during export window`, which any snapshot or
+FIB publish causes, plus a dropped-delta or token report, a sink error or an
+oversized page. Before #18752 that abort left the window open on the helper.
+On udp, after fw0's crash reboot, fw1's first cold-prime bulk to it aborted
+that way. For the next minute every 7 s re-drive failed BUSY,
+`ColdPrimeOwedWithoutPendingBulk` stayed true, and every manual failback to
+fw0 was refused `demotion peer barrier failed: cold prime owed without pending
+outbound bulk`. That stall needs a multi-page window (more than 8192 owner-RG
+deltas) and a generation change inside it; a small session table exports in
+one terminal page and never holds a window open. `ExportOwnerRGSessionsPagedStream`
+now records the window token as soon as a page reports `more`, BEFORE any
+abort check, and on any error return sends `abandon_owner_rg_export` with that
+token while still holding the export lease. The helper clears the window iff
+the token still names it (`open_export_abandon_if`), so a late or duplicate
+abandon cannot close a newer window. Workers need nothing: the next fresh kick
+supersedes the abandoned sequence and its buffered entries are skipped as
+foreign, exactly as after the idle expiry, which stays the backstop for a
+helper without the verb.
+
 ## Incremental Sweep and Delete Journal
 
 ### Background Sweep

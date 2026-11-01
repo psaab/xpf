@@ -3,6 +3,7 @@ package userspace
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 )
 
@@ -115,12 +116,29 @@ func (f OwnerRGExportPageFunc) OnOwnerRGExportPage(deltas []SessionDeltaInfo) er
 // earlier pages, so callers must discard/abort any derived state and must
 // not frame or acknowledge a window. ExportOwnerRGSessionsPaged wraps this
 // for callers that still need the whole slice.
-func (m *Manager) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExportPageSink) (ProcessStatus, int, error) {
+func (m *Manager) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExportPageSink) (_ ProcessStatus, _ int, retErr error) {
 	if sink == nil {
 		return ProcessStatus{}, 0, fmt.Errorf("%w: nil page sink", ErrOwnerRGExportIncomplete)
 	}
 	ownerRGExportLease.Lock()
 	defer ownerRGExportLease.Unlock()
+	// #18752: a window this call opened and then abandoned on an error must be
+	// closed on the helper NOW. Otherwise the helper keeps it open until its
+	// 60 s idle expiry and answers every fresh kick BUSY in the meantime: the
+	// HA cold prime then cannot be paid, ColdPrimeOwedWithoutPendingBulk stays
+	// true, and every manual failback in that minute is refused. The helper
+	// closes a window itself on a terminal page and on its own error paths,
+	// so this only matters when the abort is decided HERE (a helper/config
+	// generation change between pages, a dropped-delta or token report, a
+	// sink error, an oversized page). Best effort and lease-held, so no new
+	// window can start before it lands; the idle expiry stays the backstop.
+	var openIncarnation, openSequence uint64
+	var openSocket string
+	defer func() {
+		if retErr != nil && openSequence != 0 {
+			m.abandonOwnerRGExportWindow(openSocket, openIncarnation, openSequence, retErr)
+		}
+	}()
 
 	m.mu.Lock()
 	if m.proc == nil {
@@ -183,6 +201,19 @@ func (m *Manager) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExpo
 			SuppressStatus: true,
 			SessionExport:  &req,
 		}, controlSocket)
+		// #18752: record whether the helper is now holding a window open,
+		// BEFORE any check below can abort. A page that reports more keeps
+		// the window open (page 1 opened it); a terminal page closed it.
+		if err == nil {
+			if resp.SessionExportMore && resp.SessionExportSeq != 0 {
+				if page == 0 {
+					openIncarnation, openSequence = resp.SessionExportIncarnation, resp.SessionExportSeq
+					openSocket = controlSocket
+				}
+			} else {
+				openSequence = 0
+			}
+		}
 		m.mu.Lock()
 		if m.proc == nil ||
 			m.procGen != exportProcGen ||
@@ -273,6 +304,32 @@ func (m *Manager) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExpo
 		ownerRGExportPageDeltas,
 		collected,
 	)
+}
+
+// abandonOwnerRGExportWindow asks the helper to close the owner-RG export
+// window (incarnation, sequence) that an aborted paged export left open
+// (#18752). The helper clears it only if that token still names its open
+// window, so a late or duplicate abandon can never close a newer window. A
+// helper without the verb answers "unknown request type"; the window then
+// stays until the helper's idle expiry, which is the pre-#18752 behaviour.
+// Called with ownerRGExportLease held and m.mu NOT held.
+func (m *Manager) abandonOwnerRGExportWindow(controlSocket string, incarnation, sequence uint64, cause error) {
+	_, err := m.requestDetailedAtSocket(ControlRequest{
+		Type:           "abandon_owner_rg_export",
+		SuppressStatus: true,
+		SessionExport: &SessionExportRequest{
+			ProtocolVersion:         MinProtocolOwnerRGExportPaging,
+			ContinuationIncarnation: incarnation,
+			ContinuationSequence:    sequence,
+		},
+	}, controlSocket)
+	if err != nil {
+		slog.Warn("userspace: could not abandon the aborted owner-RG export window; the helper keeps it until its idle expiry (#18752)",
+			"sequence", sequence, "cause", cause, "err", err)
+		return
+	}
+	slog.Info("userspace: abandoned aborted owner-RG export window (#18752)",
+		"sequence", sequence, "cause", cause)
 }
 
 // ExportOwnerRGSessionsPaged collects ONE complete window into a slice.

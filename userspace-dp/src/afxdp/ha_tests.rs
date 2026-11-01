@@ -13165,3 +13165,94 @@ fn synced_delete_outcome_contract_table_17138() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #18752: an abandoned window used to block every fresh kick BUSY until its
+// 60 s idle expiry, which stranded the HA cold prime after a peer reboot.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn owner_rg_export_abandon_unblocks_the_next_fresh_kick_18752() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, _export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let (incarnation, sequence) = wait.token();
+
+    // Premise: the stuck state. The client gave up after page 1, and a fresh
+    // kick (the cold-prime re-drive) is refused BUSY.
+    let err = coordinator
+        .kick_owner_rg_export_unpaged(&[1], 3)
+        .err()
+        .expect("fresh kick while the abandoned window is open must be BUSY");
+    assert!(err.contains("busy"), "{err}");
+
+    let cleared = coordinator
+        .abandon_owner_rg_export(
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            incarnation,
+            sequence,
+        )
+        .expect("abandon with the window's own token");
+    assert!(cleared, "the abandon must clear the window it names");
+    coordinator
+        .kick_owner_rg_export_unpaged(&[1], 3)
+        .expect("fresh kick after the abandon must proceed");
+}
+
+#[test]
+fn owner_rg_export_abandon_with_a_stale_token_leaves_the_window_open_18752() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    let (incarnation, sequence) = wait.token();
+
+    for (bad_incarnation, bad_sequence) in
+        [(incarnation + 1, sequence), (incarnation, sequence + 1)]
+    {
+        let cleared = coordinator
+            .abandon_owner_rg_export(
+                crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+                bad_incarnation,
+                bad_sequence,
+            )
+            .expect("a well-formed token naming another window is not an error");
+        assert!(
+            !cleared,
+            "({bad_incarnation},{bad_sequence}) does not name the open window ({incarnation},{sequence})"
+        );
+    }
+    for (version, inc, seq) in [
+        (
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION + 1,
+            incarnation,
+            sequence,
+        ),
+        (
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            0,
+            sequence,
+        ),
+        (
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            incarnation,
+            0,
+        ),
+    ] {
+        assert!(
+            coordinator
+                .abandon_owner_rg_export(version, inc, seq)
+                .is_err(),
+            "malformed abandon ({version},{inc},{seq}) must be refused"
+        );
+    }
+    assert_window_untouched_17127(&coordinator, seq_before, wait.token(), &export_buffer);
+}

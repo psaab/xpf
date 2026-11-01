@@ -50,6 +50,38 @@ pub(super) fn owner_rg_kick(
     }
 }
 
+/// #18752: close an owner-RG export window its client abandoned (the Go pager
+/// aborts between pages on a generation change, a dropped-delta report or a
+/// sink error). Without it the window stays open until its idle expiry and
+/// every fresh kick in the meantime is refused BUSY — which stranded the HA
+/// cold prime and refused every failback for a minute on udp. Locked phase
+/// only; no worker command is sent.
+pub(super) fn owner_rg_abandon(
+    guard: &mut ServerState,
+    session_export: Option<SessionExportRequest>,
+    response: &mut ControlResponse,
+) {
+    let req = session_export.unwrap_or_default();
+    match guard.afxdp.abandon_owner_rg_export(
+        req.protocol_version,
+        req.continuation_incarnation,
+        req.continuation_sequence,
+    ) {
+        Ok(cleared) => {
+            if cleared {
+                eprintln!(
+                    "xpf-userspace-dp: owner-RG export window {} abandoned by its client (#18752)",
+                    req.continuation_sequence
+                );
+            }
+        }
+        Err(err) => {
+            response.ok = false;
+            response.error = err;
+        }
+    }
+}
+
 /// Lock-free phase: block for the worker acks, drain the deltas, and fold the
 /// result into the response. Called by the dispatcher with the `ServerState`
 /// lock RELEASED. Mirrors the pre-split `Ok`/`Err` handling (deltas + persist

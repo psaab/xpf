@@ -6587,6 +6587,67 @@ fn export_owner_rg_sessions_reports_more_and_a_continuation_pages_the_window() {
     );
 }
 
+/// #18752: the abandon verb is reachable over the control socket, and a window
+/// the client abandoned no longer blocks the next fresh kick. Before it, the
+/// second page-1 kick below was refused "owner-RG export busy" until the 60 s
+/// idle expiry.
+#[test]
+fn abandon_owner_rg_export_closes_the_window_over_the_wire_18752() {
+    use std::sync::atomic::Ordering;
+
+    let state = new_state(ProcessStatus::default());
+    let ack = {
+        let mut guard = state.lock().expect("lock state");
+        let ack = guard.afxdp.test_install_export_worker(0);
+        guard.afxdp.test_seed_export_buffer_deltas(0, 5);
+        ack
+    };
+    ack.store(u64::MAX, Ordering::Release);
+    let page1_request = || {
+        let mut r = req("export_owner_rg_sessions");
+        r.session_export = Some(SessionExportRequest {
+            owner_rgs: vec![1],
+            max: 3,
+            protocol_version: crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            continuation: false,
+            continuation_incarnation: 0,
+            continuation_sequence: 0,
+        });
+        r
+    };
+    let page1 = run_request(state.clone(), page1_request());
+    assert!(
+        page1.ok && page1.session_export_more,
+        "fixture: page 1 must leave the window open: {}",
+        page1.error
+    );
+
+    let busy = run_request(state.clone(), page1_request());
+    assert!(
+        !busy.ok && busy.error.contains("busy"),
+        "premise: a fresh kick while the abandoned window is open is BUSY, got ok={} err={}",
+        busy.ok,
+        busy.error
+    );
+
+    let mut abandon = req("abandon_owner_rg_export");
+    abandon.session_export = Some(SessionExportRequest {
+        protocol_version: crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+        continuation_incarnation: page1.session_export_incarnation,
+        continuation_sequence: page1.session_export_seq,
+        ..SessionExportRequest::default()
+    });
+    let abandoned = run_request(state.clone(), abandon);
+    assert!(abandoned.ok, "abandon failed: {}", abandoned.error);
+
+    let again = run_request(state.clone(), page1_request());
+    assert!(
+        again.ok,
+        "the fresh kick after the abandon must proceed: {}",
+        again.error
+    );
+}
+
 /// The negative half, and the one that says the more-bit is not simply always
 /// true: an UNCAPPED export over the control socket drains everything and
 /// reports no remainder.
