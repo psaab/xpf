@@ -407,13 +407,16 @@ GOTESTJSON ?=
 # #6743 r2-N3 lesson recorded in pkg/refactoraudit's own doc.go.
 # Any future package whose tests read the tree outside the compiled
 # sources (git grep, git ls-files, subprocess census) MUST be added
-# to this leg, not given a cached-only gate.
+# to this leg, not given a cached-only gate. pkg/docsref's #15255 census
+# derives the set (every package whose tests exec git) and fails until
+# the leg matches; #18642 added pkg/upgrade/manifest (its drift canary
+# runs `git ls-files`).
 test-go: test-race-dp
 	@status=0; \
 	$(GO) vet ./... || status=$$?; \
 	[ -z "$(GOTESTJSON)" ] || : > "$(GOTESTJSON)"; \
 	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" ./... || status=$$?; \
-	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ || status=$$?; \
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/upgrade/manifest/ || status=$$?; \
 	sh scripts/go-buildtag-census.sh || status=$$?; \
 	sh scripts/go-deadcode-gate.sh; dc=$$?; if [ $$dc -eq 77 ]; then echo "test-go: go-deadcode-gate SKIPPED (no go1.26 toolchain; see script header)"; elif [ $$dc -ne 0 ] && [ $$status -eq 0 ]; then status=$$dc; fi; \
 	exit $$status
