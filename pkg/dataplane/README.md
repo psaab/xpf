@@ -1372,6 +1372,32 @@ publish. The ordering is load-bearing, not incidental:
    ifindex the accepted snapshot no longer adjudicates. It runs at the
    ACCEPTANCE POINTS ONLY, immediately after each `m.lastSnapshot = snap`.
 
+**Control-plane netdevs never enter the attach set (#18740).** The
+userspace dataplane never adjudicates `fxp*` (management) or `em*` (the
+cluster control link). Its ingress exclusion names them, and the shim's
+verdict for an ifindex outside the ingress set is `cpumap_or_pass`.
+
+Until #18740, `compileZones` still queued them like any zoned netdev:
+- Step 1 attached the shim to `fxp0` and `em0` FRESH on every apply,
+  because step 3 of the previous apply had detached and unpinned them.
+- Step 3 then detached it again 25-142 ms later.
+
+That is two XDP program changes per commit, per node, on the HA control
+link. One heartbeat frame that arrived at the instant of an `em0` attach was
+lost on a lab cluster.
+
+`compileZones` now leaves them, and VLAN children of them, out of
+`pendingXDP` and `pendingTC`. It records them as SKIPPED unarmed surfaces,
+so the arm-coverage proof still lists them and does not count them toward
+WouldGate. The name classes are single-sourced:
+`dataplane.ControlPlaneNetdevNameClass` backs both this exclusion and the
+userspace ingress classes "fxp name" and "em name", so a name the compile
+leaves unshimmed is always one the ingress set excludes.
+
+`fab*` is deliberately not in the list: `fab0` resolves to its local member's
+parent netdev, which carries the fabric redirect path. An unchanged commit
+now makes no XDP transition on any link.
+
 **Why the detach is last.** Until #5485 it ran before step 2, so any
 failure in between left the kernel on the new interface set while the
 control plane still reported the old one. That divergence is a policy
@@ -1450,7 +1476,8 @@ the separately documented unadjudicated-forward window.
 >
 > It mattered because **the attach set is strictly larger than the ingress
 > set**: `compiler_iface.go` puts every zoned netdev into
-> `st.xdpIfindexes`, tunnels included ("Tunnels need XDP for ingress"),
+> `st.xdpIfindexes` (since #18740, every one except `fxp*`/`em*`), tunnels
+> included ("Tunnels need XDP for ingress"),
 > and `syncInterfaceAttachments` reconciles the difference away only at
 > the two post-acceptance points. A tunnel netdev on a userspace-dataplane
 > box is an anchor TUN — ARPHRD_NONE, raw L3, **no Ethernet header** — so
