@@ -104,7 +104,7 @@ func TestStep8IperfPortGateDetectsAShapedPort(t *testing.T) {
 
 	// And the row extractor must pick the throughput row's port, not some other
 	// `-p` elsewhere in a long document.
-	doc := "| x | y | `iperf3 -P 16 -t 30 -p 5211` → 172.16.80.200 | ≥ 23 Gbit/s |\n"
+	doc := "| x | y | `iperf3 -P 16 -t 30 -p 5211` → 172.16.80.202 | ≥ 23 Gbit/s |\n"
 	if m := step8PortRe.FindStringSubmatch(doc); m == nil || m[1] != "5211" {
 		t.Errorf("port extractor returned %v, want 5211", m)
 	}
@@ -113,19 +113,21 @@ func TestStep8IperfPortGateDetectsAShapedPort(t *testing.T) {
 // step8ThroughputRow returns the step-8 table row that carries the iperf3
 // throughput check. It is located by CONTENT (an iperf3 invocation against the
 // documented target) rather than by line number, so an edit above it does not
-// silently make the gate inspect the wrong row.
+// silently make the gate inspect the wrong row. The target is loss's
+// IPERF_TARGET4: 172.16.80.202 since #18576 (b1b9c0ed1b), which moved off .200
+// because an external box also answers ARP for it.
 func step8ThroughputRow(t *testing.T, doc string) string {
 	t.Helper()
 	var hits []string
 	for _, line := range strings.Split(doc, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "|") &&
-			strings.Contains(line, "iperf3") && strings.Contains(line, "172.16.80.200") {
+			strings.Contains(line, "iperf3") && strings.Contains(line, "172.16.80.202") {
 			hits = append(hits, line)
 		}
 	}
 	if len(hits) != 1 {
 		t.Fatalf("expected exactly ONE step-8 table row with an iperf3 check against "+
-			"172.16.80.200, found %d; the gate must not guess which one it means",
+			"172.16.80.202, found %d; the gate must not guess which one it means",
 			len(hits))
 	}
 	return hits[0]
