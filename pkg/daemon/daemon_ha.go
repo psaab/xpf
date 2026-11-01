@@ -854,7 +854,7 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// below is bounded, so the two cannot disagree. The fence ack after
 		// the write re-samples it fresh (helperDownFenceSilentAck), because
 		// by then the entry sample may be seconds old.
-		helperDownDemotion := clusterDemotionEdge && noRethVRRP && d.helperElectionNotReady()
+		helperDownDemotion := clusterDemotionEdge && noRethVRRP && d.helperDownForDemotion()
 		controlSilentAtEntry := helperDownDemotion && d.helperControlSilentForPrep()
 		if helperDownDemotion {
 			slog.Warn("cluster: demoting with an unresponsive helper; releasing VIPs before helper-side demotion (#18701)",
@@ -1650,7 +1650,7 @@ func (d *Daemon) reconcileRGState() {
 	// this, an RG that still needs its demotion applied runs the 5 s prep and
 	// an unbounded write before its own VIP reconcile, and a later RG waits
 	// behind both.
-	reconcileHelperDown := noRethVRRP && d.helperElectionNotReady()
+	reconcileHelperDown := noRethVRRP && d.helperDownForDemotion()
 	if reconcileHelperDown {
 		d.releaseDirectVIPsHelperDown("reconcile-helper-down")
 	}

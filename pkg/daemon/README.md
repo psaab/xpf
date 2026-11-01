@@ -5047,7 +5047,16 @@ second outage.
 
 So on a demotion edge in direct (no-RETH-VRRP) mode, when
 `HelperElectionNotReady()` reports that the local helper is dead, restarting,
-not yet armed, or wedged (#18697/#18685):
+not yet armed, or wedged (#18697/#18685), OR no helper is running after an
+unexpected exit (`HelperExitedUnexpectedly`; #18791):
+
+- The second covers the #18791 restart grace, when the exit has not raised
+  election debt yet but nothing answers control.
+- A peer-requested transfer in that window therefore releases the VIPs first
+  instead of blocking on the restarting helper.
+- Pinned by `TestPeerRequestDuringTheGraceTakesTheVIPFirstPath18791`.
+
+The steps:
 
 1. `releaseDirectVIPsHelperDown` runs FIRST, for EVERY RG. It removes the VIPs
    and the stable link-local, cancels the GARP/NA re-announce, and clears the

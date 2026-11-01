@@ -778,6 +778,18 @@ type Manager struct {
 	// kill), cleared when the next generation starts; that generation then
 	// inherits a not-ready verdict until it arms and looks healthy.
 	helperDownUnexpected atomic.Bool
+	// #18791: the unexpected-exit grace (helper_exit_grace_18791.go): the
+	// deadline of the current exit's grace in UnixNano (0 = none: debt at
+	// once), why it was waived, and when the last unexpected exit was
+	// observed (the crash-loop window). Lock-free.
+	exitGraceDeadlineNs  atomic.Int64
+	exitGraceWaiveReason atomic.Pointer[string]
+	lastUnexpectedExitNs atomic.Int64
+	// exitGraceAfterFunc arms the grace-expiry wake; nil is time.AfterFunc
+	// (cells inject a recorder). testAfterExitFlagRead runs between the exit
+	// flag's read and the tracker reset at a generation start (cells only).
+	exitGraceAfterFunc    func(time.Duration, func())
+	testAfterExitFlagRead func()
 
 	rgTransitionInFlight atomic.Bool // set before syncHAStateLocked, cleared on completion
 

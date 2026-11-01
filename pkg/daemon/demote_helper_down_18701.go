@@ -334,6 +334,27 @@ func (d *Daemon) raSenders() []ra.SenderInfo {
 	return d.ra.Status()
 }
 
+// helperExitSource reports that no helper is running after an unexpected
+// exit (#18791). It holds during the unexpected-exit grace too, when
+// HelperElectionNotReady does not.
+type helperExitSource interface {
+	HelperExitedUnexpectedly() bool
+}
+
+// helperDownForDemotion decides whether a demotion takes the helper-down
+// (VIP-first, bounded write) path. That is the #18697/#18685 verdict, or no
+// helper running after an unexpected exit. The second covers the #18791 grace,
+// where the exit has not raised election debt yet but nothing answers control:
+// a peer-requested transfer then releases the VIPs first instead of blocking
+// on the restarting helper.
+func (d *Daemon) helperDownForDemotion() bool {
+	if d.helperElectionNotReady() {
+		return true
+	}
+	src, ok := d.dataplane().(helperExitSource)
+	return ok && src.HelperExitedUnexpectedly()
+}
+
 // helperElectionReasonSource is the optional surface that explains the
 // #18697/#18685 verdict, for the #18701 demotion log line.
 type helperElectionReasonSource interface {

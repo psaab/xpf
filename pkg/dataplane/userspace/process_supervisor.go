@@ -275,7 +275,9 @@ func (m *Manager) startHelperSupervisorLocked(cmd *exec.Cmd) {
 	// #18697/#18685: a generation started right after an unexpected exit (a
 	// crash or a wedge kill) keeps a not-ready verdict, and so the election
 	// debt, until it reports ForwardingArmed and then looks healthy.
-	m.liveTrack.reset(m.procGen, time.Now(), m.helperDownUnexpected.Swap(false))
+	// #18791: the hand-off carries an unexpected exit's verdict (and its
+	// restart grace) into the new generation without a ready gap.
+	m.handOffExitVerdictLocked(m.procGen, time.Now())
 	go m.superviseHelper(g)
 	go m.watchHelperLiveness(g, helperWatchdogTick)
 }
@@ -346,6 +348,10 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	now := time.Now()
 	// #18697: the node must not keep the RGs while this helper is gone. The
 	// daemon's transit tick reads this lock-free and raises election debt.
+	// #18791: unless the replacement arms within the restart grace. The
+	// grace is decided and published BEFORE the flag, so a reader that sees
+	// the flag also sees this exit's deadline.
+	m.noteUnexpectedExitGraceLocked(now)
 	m.helperDownUnexpected.Store(true)
 	// The Prometheus counter is per unexpected exit, not per completed
 	// episode; otherwise a persistent loop inside the quiet window is silent.
@@ -361,8 +367,14 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	if g.cmd.Process != nil {
 		pid = g.cmd.Process.Pid
 	}
+	grace := "none (election debt at once)"
+	if d := m.exitGraceDeadline(); !d.IsZero() {
+		grace = helperExitGrace.String()
+	} else if why := m.exitGraceWaiveReason.Load(); why != nil {
+		grace += ": " + *why
+	}
 	slog.Error("userspace dataplane helper exited unexpectedly; failing closed and scheduling restart (#5838)",
-		"pid", pid, "disposition", detail, "generation", g.gen)
+		"pid", pid, "disposition", detail, "generation", g.gen, "election_grace", grace)
 
 	// Retire the independent helper-session epoch immediately, but keep the
 	// explicit fail-closed disarm FIRST. The restart timer must continue to use

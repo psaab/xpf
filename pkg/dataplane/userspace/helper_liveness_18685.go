@@ -120,6 +120,10 @@ type helperLivenessTracker struct {
 	// back to a helper that is not yet forwarding (#18697).
 	inherited bool
 	armedSeen bool
+	// graceUntil (#18791) is the unexpected-exit grace deadline an inherited
+	// generation still runs under: until then the verdict is NOT raised, and
+	// an arm before it ends the episode with no debt. Zero once decided.
+	graceUntil time.Time
 
 	kills atomic.Uint64
 
@@ -154,6 +158,14 @@ func (t *helperLivenessTracker) unlockAndFlush() {
 // reset starts a new generation. inheritNotReady carries a raised verdict
 // across an unexpected exit.
 func (t *helperLivenessTracker) reset(gen uint64, now time.Time, inheritNotReady bool) {
+	t.resetWithGrace(gen, now, inheritNotReady, time.Time{})
+}
+
+// resetWithGrace is reset with the #18791 unexpected-exit grace: when
+// inheritNotReady and graceUntil is still ahead, the inherited verdict is held
+// back until graceUntil, and an arm before it ends the episode with no debt.
+// A zero or past graceUntil raises it at once, as reset does.
+func (t *helperLivenessTracker) resetWithGrace(gen uint64, now time.Time, inheritNotReady bool, graceUntil time.Time) {
 	t.mu.Lock()
 	defer t.unlockAndFlush()
 	t.gen = gen
@@ -167,7 +179,14 @@ func (t *helperLivenessTracker) reset(gen uint64, now time.Time, inheritNotReady
 	t.suspected = inheritNotReady
 	t.suspectedSince = time.Time{}
 	t.reason = ""
-	if inheritNotReady {
+	t.graceUntil = time.Time{}
+	if inheritNotReady && graceUntil.After(now) {
+		t.suspected = false
+		t.graceUntil = graceUntil
+		t.pendingLogs = append(t.pendingLogs, trackerLog{warn: true,
+			msg:  "userspace: helper restarted after an unexpected exit; keeping the RGs locally while it arms, up to the restart grace (#18791)",
+			args: []any{"generation", gen, "grace_left", graceUntil.Sub(now).Round(10 * time.Millisecond).String()}})
+	} else if inheritNotReady {
 		t.suspectedSince = now
 		t.reason = "first helper generation after an unexpected exit, not yet armed and healthy"
 		t.pendingLogs = append(t.pendingLogs, trackerLog{warn: true,
@@ -191,6 +210,7 @@ func (t *helperLivenessTracker) retire() {
 	t.silentSince, t.silentTrips = time.Time{}, 0
 	t.hbOldest, t.hbOldestIdx, t.frozenStreak = 0, -1, 0
 	t.suspected, t.inherited = false, false
+	t.graceUntil = time.Time{}
 	t.healthySince, t.healthyTrips = time.Time{}, 0
 }
 
@@ -325,6 +345,7 @@ func (t *helperLivenessTracker) silenceSpanLocked(now time.Time) time.Duration {
 // an operator can tell this debt from a kernel or fence arm failure (the debt
 // itself lands on the shared dataplane-arm monitor).
 func (t *helperLivenessTracker) evaluateLocked(now time.Time) {
+	t.evaluateExitGraceLocked(now)
 	reason := ""
 	if span := t.silenceSpanLocked(now); span >= helperWedgeDemoteSpan {
 		reason = fmt.Sprintf("no control request answered for %s over %d round trips", span.Round(100*time.Millisecond), t.silentTrips)
@@ -469,7 +490,10 @@ func (m *Manager) HelperElectionNotReady() bool {
 	if m == nil {
 		return false
 	}
-	return m.helperDownUnexpected.Load() || m.liveTrack.wedgeSuspected(time.Now())
+	now := time.Now()
+	// #18791: inside the unexpected-exit grace the exit alone raises nothing;
+	// the replacement may still arm in time. The wedge verdict is unchanged.
+	return (m.helperDownUnexpected.Load() && !m.exitGraceOpen(now)) || m.liveTrack.wedgeSuspected(now)
 }
 
 // HelperElectionReason explains HelperElectionNotReady for log lines (#18701).
@@ -478,8 +502,11 @@ func (m *Manager) HelperElectionReason() string {
 	if m == nil {
 		return ""
 	}
-	if m.helperDownUnexpected.Load() {
-		return "helper exited unexpectedly and has not been respawned yet"
+	if m.helperDownUnexpected.Load() && !m.exitGraceOpen(time.Now()) {
+		if why := m.exitGraceWaiveReason.Load(); why != nil {
+			return "helper exited unexpectedly and has not been respawned yet (no restart grace: " + *why + ")"
+		}
+		return "helper exited unexpectedly and was not respawned and armed within the " + helperExitGrace.String() + " restart grace"
 	}
 	return m.liveTrack.currentReason(time.Now())
 }
