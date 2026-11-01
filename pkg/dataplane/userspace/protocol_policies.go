@@ -22,7 +22,7 @@ type FirewallFilterSnapshot struct {
 // marked filter, at the ordinal after every authored term, so the show
 // surfaces key it by (name, ordinal) and an authored term of the same name
 // is never mistaken for it.
-const ImplicitDiscardTermName = "implicit-discard"
+const ImplicitDiscardTermName = config.ImplicitDiscardTermName
 
 // implicitDiscardTermSnapshot is the synthetic final term: unconstrained,
 // counted, discard.

@@ -1931,6 +1931,8 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	// same predicate (FirewallFilterHasCatchAll) marks the runtime filter. See
 	// userspace-dp/src/filter/README.md and docs/feature-coverage.md.
 	warnings = append(warnings, validateFilterNoCatchAllWarnings(cfg)...)
+	// #18728: `implicit-discard` is the synthetic final term's reserved name.
+	warnings = append(warnings, validateImplicitDiscardTermNameWarnings(cfg)...)
 
 	// #2509: `security pre-id-default-policy then log session-init/session-close`
 	// is parsed and stored on PreIDDefaultPolicy.LogSessionInit/LogSessionClose

@@ -10,11 +10,21 @@ xpf (0.0.0) unstable; urgency=medium
     term) is unchanged, as are interfaces and families with no filter
     bound. The kernel lo0 chain ends each family with a counted drop that
     exempts loopback and the cluster control link and fabric; fxp0 is NOT
-    exempt. UPGRADE: add a final `term <name> { then accept; }` to every
-    filter meant to permit by default BEFORE upgrading; `commit check` on
-    the old build names each affected filter (#3295 warning). During a
-    rolling cluster upgrade the two nodes treat unmatched traffic
-    differently until both run this build (#18728).
+    exempt. MANAGEMENT LOCKOUT RISK: the lo0 chain is stateless, so a lo0
+    filter without a catch-all drops all unmatched host traffic -- SSH and
+    other management on fxp0, IPv6 ND/RA, DHCPv6 replies, IKE/ESP (VPNs
+    and the transit they carry), BGP/OSPF/BFD, RPM and ip-monitoring
+    probe replies (WAN failover), and the return traffic of every
+    connection the box opens -- in every routing instance. Use `commit
+    confirmed` for lo0 changes. UPGRADE: add a final `term <name> { then
+    accept; }` to every filter meant to permit by default BEFORE
+    upgrading. The package's preinst refuses the upgrade when the running
+    build reports such a filter (`show system alarms`, #3295 warning);
+    override with XPF_UPGRADE_ACCEPT_IMPLICIT_DISCARD=1. Image upgrades
+    are not gated. During a rolling cluster upgrade the two nodes treat
+    unmatched traffic differently until both run this build. New metric
+    xpf_lo0_implicit_discard_hits_total{family}; the term name
+    `implicit-discard` is reserved (commit warning) (#18728).
   * make test-go: pkg/upgrade/manifest now runs uncached. Its managed-binary
     drift canary reads `git ls-files`, which the go test cache does not hash,
     so a newly tracked shell site with a stale BINS= list passed from cache

@@ -139,53 +139,116 @@ the userspace dataplane admission boundary is in
     discard (#7212). Filter lists (`input-list`/`output-list`) are not
     supported (#10293), so the Junos one-discard-per-list rule does not
     arise. See `userspace-dp/src/filter/README.md`.
+    - **What counts as a catch-all (and what does not).** The predicate
+      keys on an UNCONSTRAINED `from`, so a term that matches the whole
+      family by address — `from source-address 0.0.0.0/0` (or `::/0`)
+      `then accept` with nothing else — is not counted: `commit check`
+      warns and `show firewall` lists an `implicit-discard` row that can
+      never count (traffic never reaches it). Harmless; drop the `from` to
+      silence it. `implicit-discard` is the synthetic term's reserved name:
+      an authored term with that name commits with a warning, because
+      name-scoped consumers (the Prometheus `xpf_filter_hits_total` series)
+      fold the two counters into one.
     - **lo0 kernel mirror.** The kernel `inet xpf_lo0` chain ends each
       family's lo0 filter with `meta nfproto <f> iifname != { "lo",
       <control link>, <fabric> } counter drop` (named counter
       `xpflo0implicit_inet` / `xpflo0implicit_inet6`, shown in `show
-      firewall` as `Kernel lo0 implicit-discard`). The exempt netdevs are
-      loopback plus the explicitly configured chassis-cluster
+      firewall` as `Kernel lo0 implicit-discard` and exported as
+      `xpf_lo0_implicit_discard_hits_total{family}`). The exempt netdevs
+      are loopback plus the explicitly configured chassis-cluster
       `control-interface`, `fabric-interface`/`fabric1-interface`, fabric
       interfaces and their `fabric-options member-interfaces`
       (`config.Lo0ImplicitDiscardExemptNetdevs`); a standalone node
       exempts only `lo`. The exemption covers the IMPLICIT drop only — an
       authored lo0 term that discards still applies to those netdevs
-      (#18729). **fxp0 is not exempt**: as on Junos, the lo0 filter
-      governs management traffic, so a lo0 filter without a catch-all
-      must accept SSH/NTP/DNS replies/BGP/ICMP(v6) including IPv6
-      neighbor discovery, or that traffic is dropped. The kernel chain
-      is stateless (it has no `ct state established` accept), so return
-      traffic of connections the firewall itself opens also needs a
-      term. The helper's own lo0 evaluation (the AF_XDP host-bound
-      subset) applies the synthetic term without the exemption; control
-      link and fabric host traffic reaches the kernel, not that path. The
-      implicit drop is family-guarded, but authored kernel lo0 terms with
-      no family-specific match are not, so a `family inet` term also
-      matches IPv6 there (pre-existing, #18747).
+      (#18729). The helper's own lo0 evaluation (the AF_XDP host-bound
+      subset: interface-NAT addresses, solicited replies, Stage-11 IPsec
+      passthrough) applies the synthetic term without the exemption;
+      control-link and fabric host traffic reaches the kernel, not that
+      path.
+    - **What a lo0 filter without a catch-all drops.** Everything
+      host-bound it does not explicitly accept, on every interface but
+      the exempt ones — **fxp0 included** (as on Junos, the lo0 filter
+      governs management traffic). Before writing one, list what the box
+      needs and accept each:
+      - management: SSH, NTP, DNS, SNMP, ICMP and ICMPv6 (the REST and
+        gRPC listeners are on 127.0.0.1, which arrives on exempt `lo`);
+      - **IPv6 neighbor discovery and router advertisements** (ICMPv6
+        133-137): the kernel processes them through the input hook, so
+        without a term ND stays INCOMPLETE and all IPv6 to and from the
+        box fails;
+      - **DHCPv6 client replies** (UDP 547 -> 546): the DHCPv6 client
+        uses a UDP socket (`nclient6`), so its replies pass the input hook.
+        DHCPv4 is unaffected: its client uses a raw AF_PACKET socket
+        (`nclient4`), which receives before netfilter;
+      - **IKE (UDP 500/4500) and ESP**: IPsec terminated on the box is
+        host-bound, and Stage-11 IPsec passthrough is local delivery that
+        walks the lo0 filter in the helper
+        (`afxdp/poll_descriptor/mod.rs`, `apply_lo0_filter_action`), so
+        without terms the VPN — and the transit traffic it carries — goes
+        down;
+      - **routing protocols**: BGP (TCP 179), OSPF (protocol 89), BFD (UDP
+        3784/3785/4784), and any protocol run inside a GRE tunnel. The
+        GRE outer header itself is decapsulated by the helper (native GRE,
+        `afxdp/gre.rs`) and gated by host-inbound, not lo0, so the tunnel
+        stays up, but host-bound packets inside it are lo0-filtered;
+      - **probe replies**: RPM probes and `services ip-monitoring` (#1827).
+        Their replies are host-bound return traffic, so dropping them
+        fails the probes and triggers WAN failover;
+      - **return traffic of every connection the firewall itself opens.**
+        The chain is STATELESS (no `ct state established` accept), so a
+        host-originated ping, TCP connect or UDP query sees its reply
+        dropped. Review seat AG measured this in a private netns for
+        ping, a TCP connect, a UDP query and ping6, where the neighbor
+        entry stays INCOMPLETE.
+      An empty lo0 filter is therefore drop-all-but-exempt for its family.
+      One exception: authored kernel lo0 terms carry no family guard
+      (#18747), so a `family inet` accept term with no family-specific
+      match also admits IPv6 ahead of the inet6 implicit discard. Make lo0
+      changes with **`commit confirmed <minutes>`** so a filter that cuts
+      management rolls back on its own.
+    - **lo0 and routing instances.** xpf binds only `lo0 unit 0` (other
+      lo0 units are unsupported and warned) and the kernel chain has no
+      VRF scope, so the lo0.0 filter — and its implicit discard — governs
+      host-bound traffic in EVERY routing instance: VRF BGP and BFD, VRF
+      RPM probes, pings to VRF addresses. This matches Junos, where an
+      instance without its own loopback unit inherits the lo0.0 input
+      filter. Accept each instance's host services in the lo0.0 filter
+      (scope terms by destination address where needed).
     - **Upgrade note.** Before #18728 xpf ACCEPTED unmatched traffic
       (#3295). On upgrade a filter written for that default — an
-      allowlist that meant "and permit the rest", or a classify-and-pass
-      CoS output filter such as the lab `bandwidth-output` filters —
-      starts dropping what it used to pass, and a lo0 filter without a
-      catch-all starts dropping unmatched host-bound traffic. **Add the
-      final `then accept` term BEFORE upgrading.** The pre-upgrade
-      detector is the OLD build's #3295 commit warning: `commit check`
-      on the running (old) version already prints `filter ... has no
-      terminal catch-all term; xpf accepts traffic matching no term` for
-      every affected attached filter. (The old warning treated a
-      modifier-only or routing-instance catch-all as missing, so it can
-      name a filter the new build does not; the reverse never happens.)
-      After the upgrade the new semantics apply at boot through the
-      tolerant load path with no commit prompt; the warning appears as a
-      `config validation` WARN in the journal and in `show system
-      alarms` / `show security alarms`. During a rolling cluster upgrade
-      the two nodes evaluate the same filter differently (the upgraded
-      node discards unmatched traffic, the old node accepts it), so a
-      flow's treatment can change at failover until both nodes run the
-      new build — fix the filters first. No `xpfd upgrade` preflight
-      refuses an affected config: the upgrade runner that executes is the
-      OLD build's, so a check added here could not run on the one
-      transition that matters.
+      allowlist that meant "and permit the rest", a classify-and-pass CoS
+      output filter such as the lab `bandwidth-output` filters, or a lo0
+      filter without a final accept (a management LOCKOUT risk, see the
+      list above) — starts dropping what it used to pass. **Add the final
+      `then accept` term BEFORE upgrading.**
+      - **The deb upgrade refuses an affected config.** `debian/xpf.preinst`
+        runs before unpack (the earliest point that still aborts cleanly:
+        the old package and daemon stay untouched). It asks the running
+        daemon for `show system alarms`. If that lists a pre-#18728
+        `has no terminal catch-all term; xpf accepts traffic matching no
+        term` warning, it prints the filters and refuses. The old warning
+        flags a superset (it did not count modifier-only or
+        routing-instance catch-alls), so it can refuse a filter the new
+        build would not discard on, never the reverse. Override with
+        `XPF_UPGRADE_ACCEPT_IMPLICIT_DISCARD=1` (pass it through to dpkg).
+        A daemon that cannot be queried is reported but does not block the
+        upgrade (that is the recovery path). Without the gate, a standalone
+        node's postinst would perform the cut itself, so an `apt upgrade`
+        over fxp0 could cut its own session.
+      - **Where the check does not run:** image upgrades (no maintainer
+        scripts), and `xpfd upgrade --rolling`, which executes the old
+        `/usr/local/sbin` binary and cuts over a build that apt has
+        already staged. For the rolling path, the preinst gate ran at that
+        apt step on each node.
+      - **After the upgrade** the new semantics apply at boot through the
+        tolerant load path with no commit prompt. The warning appears as a
+        `config validation` WARN in the journal and in `show system alarms`
+        / `show security alarms`.
+      - **During a rolling cluster upgrade** the two nodes evaluate the same
+        filter differently (the upgraded node discards unmatched traffic,
+        the old node accepts it), so a flow's treatment can change at
+        failover until both nodes run the new build. Fix the filters first.
 
 ## Flow processing
 

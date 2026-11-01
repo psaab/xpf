@@ -209,6 +209,70 @@ migrate_legacy_layout() {
          "$oldver into $verdir; sbin now resolves through versions/current." >&2
 }
 
+# #18728 implicit-discard gate (before unpack). The new package makes a
+# stateless firewall filter DISCARD every packet that matches no term (the
+# Junos implicit final discard); the running build ACCEPTS it. A filter
+# written for the old default (an allowlist that meant "and permit the rest",
+# a classify-and-pass CoS output filter, a lo0 filter without a final accept)
+# would start dropping traffic the moment the new daemon starts -- on a
+# standalone node the postinst performs that cut itself, so an `apt upgrade`
+# over fxp0 could cut its own session.
+#
+# This is the EARLIEST point that can still abort cleanly: before unpack, a
+# failing preinst leaves the old package installed and the daemon untouched.
+# (The postinst's staged `publish-generation` runs the NEW binary, but only
+# after dpkg has unpacked it over staged/; failing there half-configures the
+# package and only skips the cut.) The new binaries are not on disk yet, so
+# the check asks the RUNNING daemon through the OLD cli: `show system
+# alarms` lists the config-validation warnings, and every build since #3295
+# warns for each attached filter with no terminal catch-all. The WORDING
+# tells the semantics of the running build: the pre-#18728 text says "xpf
+# accepts traffic matching no term" (the upgrade changes behaviour: refuse);
+# the #18728 text says the traffic "is discarded" (no change: allow). The old
+# predicate flags a superset of the new one (it did not count modifier-only
+# or routing-instance terms as catch-alls), so it can refuse a filter the new
+# build would not discard on, never the reverse; the override covers that.
+#
+# A daemon that cannot be queried (stopped, wedged) is NOT a refusal: that
+# is the recovery path, and blocking it would strand the box. The gate says
+# so loudly and proceeds.
+#
+# Override: XPF_UPGRADE_ACCEPT_IMPLICIT_DISCARD=1 (e.g. after reviewing the
+# listed filters, or when they really are meant to be deny-by-default).
+implicit_discard_gate() {
+    if [ "${XPF_UPGRADE_ACCEPT_IMPLICIT_DISCARD:-}" = "1" ]; then
+        echo "xpf: #18728 implicit-discard gate overridden" \
+             "(XPF_UPGRADE_ACCEPT_IMPLICIT_DISCARD=1)." >&2
+        return 0
+    fi
+    cli_bin="$SBIN/cli"
+    if [ ! -x "$cli_bin" ]; then
+        return 0
+    fi
+    if ! alarms=$(timeout 20 "$cli_bin" -c "show system alarms" 2>/dev/null); then
+        echo "xpf: #18728 could not query the running daemon's alarms; cannot" \
+             "check for filters without a terminal catch-all. Proceeding. After" \
+             "the upgrade, unmatched traffic is DISCARDED (Junos implicit final" \
+             "discard): check 'show system alarms' for such filters." >&2
+        return 0
+    fi
+    flagged=$(printf '%s\n' "$alarms" |
+        grep 'has no terminal catch-all term; xpf accepts traffic matching no term' || true)
+    if [ -z "$flagged" ]; then
+        return 0
+    fi
+    echo "xpf: refusing to upgrade (#18728): the new version DISCARDS traffic that" >&2
+    echo "xpf: matches no term of a stateless firewall filter (Junos implicit final" >&2
+    echo "xpf: discard). The running version accepts it, and these attached filters" >&2
+    echo "xpf: have no terminal catch-all term, so they would start dropping traffic" >&2
+    echo "xpf: (a lo0 filter: host traffic, including management on fxp0):" >&2
+    printf '%s\n' "$flagged" | sed 's/^[[:space:]]*/xpf:   /' >&2
+    echo "xpf: Add a final 'term <name> { then accept; }' to each filter meant to" >&2
+    echo "xpf: permit by default (use 'commit confirmed' for lo0 changes), then re-run" >&2
+    echo "xpf: the upgrade. To upgrade anyway, set XPF_UPGRADE_ACCEPT_IMPLICIT_DISCARD=1." >&2
+    return 1
+}
+
 case "$1" in
     upgrade)
         # /run is tmpfs and may lack our subdir on a fresh boot.
@@ -231,6 +295,13 @@ case "$1" in
             echo "xpf: another in-place upgrade is in progress (holds $LOCK)." >&2
             echo "xpf: refusing to unpack — wait for it to finish, then re-run apt." >&2
             cat "$LOCK" 2>/dev/null >&2 || true
+            exit 1
+        fi
+
+        # #18728: refuse BEFORE unpack (and before the #1964 snapshot below,
+        # which mutates versions/) when the running config has attached
+        # filters the new implicit final discard would turn into drops.
+        if ! implicit_discard_gate; then
             exit 1
         fi
 

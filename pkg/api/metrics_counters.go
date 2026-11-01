@@ -136,8 +136,10 @@ func (c *xpfCollector) collectLo0Counters(ch chan<- prometheus.Metric) {
 	for _, ctr := range counts {
 		// #18728: the per-family implicit-discard counter is not a `then
 		// count` counter; emitting it under the counter label would collide
-		// with an authored count of the same name. `show firewall` renders it.
+		// with an authored count of the same name. It has its own series.
 		if ctr.ImplicitDiscardFamily != "" {
+			c.emitConstMetric(ch, c.lo0ImplicitDiscardHits,
+				prometheus.CounterValue, float64(ctr.Packets), ctr.ImplicitDiscardFamily)
 			continue
 		}
 		c.emitConstMetric(ch, c.lo0CounterHits,

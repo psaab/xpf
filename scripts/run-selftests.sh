@@ -340,6 +340,7 @@ run_shell test/debian/postrm-test.sh
 run_shell test/debian/preinst-besteffort-test.sh
 run_shell test/debian/preinst-migrate-test.sh
 run_shell test/debian/preinst-safe-segment-test.sh
+run_shell test/debian/preinst-implicit-discard-test.sh
 # #7423: the mutation harness's scoring library. Hermetic (fixture logs). The
 # refusal cell is the one that matters -- a runner that gates in one language
 # scores every cross-language mutation as an ESCAPE, which is a claim that the

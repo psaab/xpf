@@ -87,6 +87,7 @@ type xpfCollector struct {
 	vrfOverlapPBRAdmitted        *prometheus.Desc
 	riMemberDeviceConflicts      *prometheus.Desc
 	lo0CounterHits               *prometheus.Desc
+	lo0ImplicitDiscardHits       *prometheus.Desc
 	pbrRulesInstalled            *prometheus.Desc
 	pbrRulesDesired              *prometheus.Desc
 	pbrRulesApplied              *prometheus.Desc

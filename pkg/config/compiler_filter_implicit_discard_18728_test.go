@@ -125,3 +125,41 @@ func TestLo0ImplicitDiscardExemptNetdevs18728(t *testing.T) {
 		}
 	}
 }
+
+// The synthetic term's name is reserved: an authored `implicit-discard` term
+// is warned about (on any filter, attached or not), once per filter, and an
+// ordinary name is not.
+func TestImplicitDiscardTermNameReserved18728(t *testing.T) {
+	cfg := compileSetLinesT(t, []string{
+		"set system dataplane-type userspace",
+		"set firewall family inet filter clash term implicit-discard from destination-port 23",
+		"set firewall family inet filter clash term implicit-discard then accept",
+		"set firewall family inet filter clash term default then accept",
+		"set firewall family inet6 filter clash6 term implicit-discard then discard",
+		"set firewall family inet filter fine term web from destination-port 443",
+		"set firewall family inet filter fine term web then accept",
+	})
+	var got []string
+	for _, w := range ValidateConfig(cfg) {
+		if strings.Contains(w, "reserved for the synthetic Junos implicit final discard") {
+			got = append(got, w)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("want one reserved-name warning per clashing filter (2), got %d: %q", len(got), got)
+	}
+	for _, want := range []string{`filter "clash" term "implicit-discard"`, `inet6 filter "clash6"`} {
+		found := false
+		for _, w := range got {
+			if strings.Contains(w, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no warning containing %q in %q", want, got)
+		}
+	}
+	if ImplicitDiscardTermName != "implicit-discard" {
+		t.Fatalf("ImplicitDiscardTermName = %q", ImplicitDiscardTermName)
+	}
+}

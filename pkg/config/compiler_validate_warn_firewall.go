@@ -491,6 +491,55 @@ func FirewallFilterHasCatchAll(f *FirewallFilter) bool {
 	return false
 }
 
+// ImplicitDiscardTermName is the name of the synthetic final term that ends
+// every filter without a terminal catch-all (#18728): the dataplane
+// snapshot's discard term, its counter, and the show surfaces' row. It is
+// reserved: an authored term of the same name is warned about at commit
+// (validateImplicitDiscardTermNameWarnings) because name-scoped consumers
+// such as the Prometheus xpf_filter_hits_total series fold the two counters
+// into one.
+const ImplicitDiscardTermName = "implicit-discard"
+
+// validateImplicitDiscardTermNameWarnings warns, for every firewall filter
+// (inet and inet6, attached or not), about an authored term named
+// ImplicitDiscardTermName. WARN-only: the term still works exactly as
+// authored and the show surfaces key the synthetic term by ordinal, but its
+// xpf_filter_hits_total series merges with the synthetic term's, so the
+// counts are not separable.
+func validateImplicitDiscardTermNameWarnings(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	var warnings []string
+	for _, fam := range []struct {
+		name    string
+		filters map[string]*FirewallFilter
+	}{{"inet", cfg.Firewall.FiltersInet}, {"inet6", cfg.Firewall.FiltersInet6}} {
+		names := make([]string, 0, len(fam.filters))
+		for name := range fam.filters {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			f := fam.filters[name]
+			if f == nil {
+				continue
+			}
+			for _, t := range f.Terms {
+				if t != nil && t.Name == ImplicitDiscardTermName {
+					warnings = append(warnings, fmt.Sprintf(
+						"firewall family %s filter %q term %q: the term name is reserved for the "+
+							"synthetic Junos implicit final discard (#18728); its xpf_filter_hits_total "+
+							"series merges with that term's counter — rename the term",
+						fam.name, name, t.Name))
+					break
+				}
+			}
+		}
+	}
+	return warnings
+}
+
 // firewallTermTerminates reports whether evaluation stops at this term when
 // it matches. Only an authored `then next term` on a term with no terminating
 // action and no routing-instance falls through; a terminal action wins over

@@ -2476,7 +2476,10 @@ the drop fails loudly instead of going quietly vacuous.
     term already owns that name (the by-name aggregate then folds both into
     that one series; never a duplicate labelset, #15192). The kernel lo0
     implicit-discard counters (`xpflo0implicit_<family>`) are not `then
-    count` counters and are skipped by `xpf_lo0_counter_hits_total`.
+    count` counters: they are kept out of `xpf_lo0_counter_hits_total` and
+    exported as `xpf_lo0_implicit_discard_hits_total{family}` (control-plane
+    signal, emitted before the dataplane gate like the lo0 `then count`
+    series; resets on every table rebuild).
   - **Invalid-UTF-8 label values cannot crash a scrape**
     (#15086, #16707, #17753): every const-metric emit in this package goes
     through the single choke point `emitConstMetric`

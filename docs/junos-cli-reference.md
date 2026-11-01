@@ -2248,7 +2248,13 @@ implicit-discard (Junos implicit final discard: no term above matched)` /
 always counted), and Prometheus exports it as
 `xpf_filter_hits_total{term="implicit-discard"}`. A lo0 filter also shows
 `Kernel lo0 implicit-discard: …` — the kernel chain's per-family counted
-drop, which exempts loopback and the cluster control/fabric links. The
+drop, which exempts loopback and the cluster control/fabric links, and
+Prometheus exports that one as `xpf_lo0_implicit_discard_hits_total{family}`.
+The kernel lo0 counters (named and implicit) reset to zero on every commit
+and every DHCP/DHCPv6 re-render, because the `inet xpf_lo0` table is
+recreated each time; use `rate()`. The helper's `implicit-discard` counter
+carries over a commit only while the term keeps its ordinal and shape
+(#15108), so adding or removing an authored term above it resets it. The
 EFFECTIVE view shows the same synthetic term, labelled the same way.
 
 The EFFECTIVE view (`… effective`, #4422) rebuilds and prints the

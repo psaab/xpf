@@ -11,7 +11,7 @@ import (
 // carries the Junos implicit final discard (#18728). It mirrors
 // dpuserspace.ImplicitDiscardTermName; this package does not import the
 // dataplane package, and pkg/firewallshow's test pins the two equal.
-const ImplicitDiscardTermName = "implicit-discard"
+const ImplicitDiscardTermName = config.ImplicitDiscardTermName
 
 // ImplicitDiscardCounter is one surface's reading of a filter's
 // implicit-discard counter. Have is false when the surface has no reading

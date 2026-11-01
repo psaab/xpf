@@ -279,7 +279,12 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   `reject`, a modifier-only term (count/log/policer/forwarding-class/dscp
   with no `next term`, which terminates as implicit accept, #14632) and a
   `then routing-instance` term all count; an authored `then { ...; next
-  term; }` does not. The same predicate drives the commit warning
+  term; }` does not. A whole-family address match (`from source-address
+  0.0.0.0/0` or `::/0` and nothing else) is a constrained `from`, so it
+  is not counted: the filter gets a synthetic term no packet can reach
+  (its count stays 0) and `commit check` warns. The name
+  `implicit-discard` is reserved (an authored term with it warns at
+  commit; name-scoped counters would merge). The same predicate drives the commit warning
   (`validateFilterNoCatchAllWarnings`), which names every attached filter
   that will discard unmatched traffic: an operator who meant
   permit-by-default appends `term <name> { then accept; }`. It is never a
