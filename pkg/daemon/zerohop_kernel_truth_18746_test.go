@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	gnft "github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"github.com/psaab/xpf/pkg/config"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"golang.org/x/sync/semaphore"
@@ -77,6 +80,100 @@ func TestKernelTruthDeclaresDriftOnAZeroHopOnlyTable18746(t *testing.T) {
 	}
 	if !d.HostInboundApplied().Current() {
 		t.Errorf("control: the host-inbound table must stand: %+v", d.HostInboundApplied())
+	}
+
+	// The host-inbound arm (AD on #18759): strip the real host-inbound table
+	// down to ONLY its own zero-hop rule. Every other input rule is deleted
+	// by handle, so xpf's exact encoding of the zero-hop rule stays. Kernel
+	// truth must then declare host-inbound drift. Before #18746,
+	// TableDropsInput counted the zero-hop DROP, so this table "stood".
+	c, err := gnft.New()
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	tbl := &gnft.Table{Family: gnft.TableFamilyINet, Name: xnft.HostInboundTableName}
+	chain := &gnft.Chain{Name: "input", Table: tbl}
+	rules, err := c.GetRules(tbl, chain)
+	if err != nil || len(rules) < 2 {
+		t.Fatalf("read the real host-inbound chain: %d rules, %v", len(rules), err)
+	}
+	zeroHop := false
+	for _, e := range rules[0].Exprs {
+		if _, ok := e.(*expr.Fib); ok {
+			zeroHop = true
+		}
+	}
+	if !zeroHop {
+		t.Fatalf("fixture: host-inbound rule 0 is not the zero-hop DROP: %#v", rules[0].Exprs)
+	}
+	for _, r := range rules[1:] {
+		if err := c.DelRule(&gnft.Rule{Table: tbl, Chain: chain, Handle: r.Handle}); err != nil {
+			t.Fatalf("queue delete of handle %d: %v", r.Handle, err)
+		}
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatalf("strip host-inbound to the zero-hop rule: %v", err)
+	}
+	d = hostDriftDaemon15264()
+	d.recheckHostKernelTruth15264(time.Now())
+	if d.HostInboundApplied().Current() || d.hostInboundEnforced.Load() {
+		t.Errorf("a host-inbound table holding only the zero-hop rule was not drift: applied=%+v enforced=%v",
+			d.HostInboundApplied(), d.hostInboundEnforced.Load())
+	}
+}
+
+// AD on #18759: an unreadable kernel-truth pass stays Current, so a probe that
+// is stuck unreadable must still be visible. Each unreadable pass logs at
+// Debug, and the third consecutive one logs a single Warn. A readable pass
+// resets the count.
+func TestKernelTruthStuckUnreadableIsVisible18746(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	readErr := errors.New("generation changed during readback")
+	failing := true
+	nftInstaller = &fakeNftInstaller{
+		tableDropsInput: func(string) (bool, error) {
+			if failing {
+				return false, readErr
+			}
+			return true, nil
+		},
+		tableEnforcing: func(string) (bool, error) {
+			if failing {
+				return false, readErr
+			}
+			return true, nil
+		},
+	}
+	d := hostDriftDaemon15264()
+	buf, restore := captureSlog(t)
+	defer restore()
+	for i := 0; i < 5; i++ {
+		d.recheckHostKernelTruth15264(time.Now())
+	}
+	if !d.HostInboundApplied().Current() || !d.lo0Enforced.Load() {
+		t.Fatalf("unreadable passes must stay Current: %+v lo0=%v", d.HostInboundApplied(), d.lo0Enforced.Load())
+	}
+	out := buf.String()
+	if got := strings.Count(out, "drift detection is blind"); got != 1 {
+		t.Errorf("stuck-unreadable Warn logged %d times over 5 unreadable passes, want exactly 1:\n%s", got, out)
+	}
+	if got := strings.Count(out, "could not read the kernel"); got != 5 {
+		t.Errorf("unreadable Debug logged %d times over 5 passes, want 5", got)
+	}
+	// A readable pass resets the count; the next episode warns again.
+	failing = false
+	d.recheckHostKernelTruth15264(time.Now())
+	if d.hostKernelTruthUnreadable18746.Load() != 0 {
+		t.Errorf("a readable pass left the unreadable count at %d", d.hostKernelTruthUnreadable18746.Load())
+	}
+	failing = true
+	buf.Reset()
+	for i := 0; i < 3; i++ {
+		d.recheckHostKernelTruth15264(time.Now())
+	}
+	if got := strings.Count(buf.String(), "drift detection is blind"); got != 1 {
+		t.Errorf("the second stuck-unreadable episode logged %d Warns, want 1", got)
 	}
 }
 

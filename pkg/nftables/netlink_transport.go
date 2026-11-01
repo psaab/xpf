@@ -242,6 +242,11 @@ func ruleMatchesPlan(family byte, want, got []expr.Any, kernelNames []string, se
 	decodable := make([]expr.Any, 0, len(want))
 	for i, w := range want {
 		if dropped := decoderDroppedExprName(w); dropped != "" {
+			// Only the kind and position are compared, not the dropped
+			// expression's parameters (they are not decoded). That is safe:
+			// xpf plans only CONSTANT dropped-kind expressions
+			// (fibAddrTypeHton, the rst_suppress.go socket matches), so a
+			// parameter mismatch needs a writer outside xpf.
 			if kernelNames[i] != dropped {
 				return false, nil
 			}

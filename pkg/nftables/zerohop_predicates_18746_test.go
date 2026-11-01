@@ -1,6 +1,7 @@
 package nftables
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -162,5 +163,45 @@ func TestInstallLo0ReportsZeroForAnEmptyRender18746(t *testing.T) {
 	t.Cleanup(func() { _ = in.DeleteTable(Lo0TableName) })
 	if rules, err := in.InstallLo0(Lo0FilterSpec{}); err != nil || rules != 0 {
 		t.Errorf("InstallLo0(empty) = %d, %v; want 0 operator rules", rules, err)
+	}
+}
+
+// AD on #18759: the predicates read the chain twice (the typed GetRules decode
+// and the kernel expression-name dump), so the pair is generation-bracketed.
+// A commit between the two reads is an error ("unreadable"), not a verdict
+// over two different rulesets.
+func TestTablePredicatesAreGenerationBracketed18746(t *testing.T) {
+	requirePrivateNetns18721(t)
+	in := NewNetlinkInstaller().(*netlinkInstaller)
+	t.Cleanup(func() {
+		predicateReadbackBetweenReadsFn18746 = nil
+		_ = in.DeleteTable(HostInboundTableName)
+	})
+	if _, err := in.replaceTable(HostInboundTableName, hostInboundPriority, func(p *nlPlan) {
+		EmitZeroHopLimitLocalDrop(p, false)
+		p.rule().daddr(famV4, []string{"192.0.2.1"}, false).emit(verdictDrop()...)
+	}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	n := 0
+	predicateReadbackBetweenReadsFn18746 = func() {
+		n++
+		c, err := nftables.New()
+		if err != nil {
+			t.Fatalf("conn: %v", err)
+		}
+		c.AddTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: fmt.Sprintf("zz18746g%d", n)})
+		if err := c.Flush(); err != nil {
+			t.Fatalf("mid-read commit: %v", err)
+		}
+	}
+	for name, probe := range map[string]func(string) (bool, error){"TableEnforcing": in.TableEnforcing, "TableDropsInput": in.TableDropsInput} {
+		if got, err := probe(HostInboundTableName); err == nil || !strings.Contains(err.Error(), "generation changed during readback") {
+			t.Errorf("%s across a mid-read commit = %v, %v; want the fail-closed generation error", name, got, err)
+		}
+	}
+	predicateReadbackBetweenReadsFn18746 = nil
+	if got, err := in.TableDropsInput(HostInboundTableName); err != nil || !got {
+		t.Errorf("control: stable TableDropsInput = %v, %v; want true", got, err)
 	}
 }

@@ -1348,6 +1348,11 @@ type Daemon struct {
 	// low-rate kernel-truth recheck first finds an established table
 	// missing, cleared when a later pass observes no drift.
 	hostDriftNoticed15264 atomic.Bool
+	// hostKernelTruthUnreadable18746 counts consecutive recheck passes whose
+	// kernel reads failed (#18746, AD on #18759). An unreadable pass proves
+	// nothing and stays Current, so a probe that is stuck unreadable would
+	// otherwise be blind with no trace. See noteKernelTruthUnreadable18746.
+	hostKernelTruthUnreadable18746 atomic.Int32
 
 	// hostInboundConntrackDebt is the #6802 retry debt: a conntrack revocation
 	// that FAILED, so stale kernel entries for now-denied host services may

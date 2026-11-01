@@ -2,12 +2,14 @@ package nftables
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
+	"golang.org/x/sys/unix"
 )
 
 // #18746: the #16841 zero-hop-limit local DROP (EmitZeroHopLimitLocalDrop)
@@ -96,34 +98,64 @@ func setElementKeysEqual(got, want []nftables.SetElement) bool {
 	return true
 }
 
-// inputRulesBeyondZeroHop returns the rules of tbl's input chain other than the
-// exact #16841 zero-hop rule. Every rule handle must appear in the kernel
-// expression dump. If one does not, it is an error: unreadable proves nothing.
-func inputRulesBeyondZeroHop(c *nftables.Conn, tbl *nftables.Table, chain *nftables.Chain, rules []*nftables.Rule) ([]*nftables.Rule, error) {
-	namesByHandle, err := readRuleExprNames(c, tbl, chain.Name)
+// inputRulesBeyondZeroHop reads tbl's input chain and returns its rules other
+// than the exact #16841 zero-hop rule. An absent chain reads as no rules.
+//
+// The typed GetRules decode and the kernel expression-name dump are two
+// separate reads, so the pair is bracketed by the nf_tables generation
+// (readAtStableNftGeneration, AD on #18759). A commit landing between them is
+// an error, not a judgement over two different rulesets. So is a rule handle
+// missing from the dump. Unreadable proves nothing; callers decide what that
+// means.
+// predicateReadbackBetweenReadsFn18746 is nil in production. A kernel cell
+// sets it to commit a change between inputRulesBeyondZeroHop's GetRules and its
+// expression-name dump, the window the generation bracket guards.
+var predicateReadbackBetweenReadsFn18746 func()
+
+func inputRulesBeyondZeroHop(c *nftables.Conn, tbl *nftables.Table, chain *nftables.Chain) ([]*nftables.Rule, error) {
+	var out []*nftables.Rule
+	err := readAtStableNftGeneration(
+		func() (uint32, error) { return readNftGeneration(c) },
+		func() error {
+			out = nil
+			rules, err := c.GetRules(tbl, chain)
+			if err != nil {
+				if errors.Is(err, unix.ENOENT) {
+					return nil
+				}
+				return err
+			}
+			if predicateReadbackBetweenReadsFn18746 != nil {
+				predicateReadbackBetweenReadsFn18746()
+			}
+			namesByHandle, err := readRuleExprNames(c, tbl, chain.Name)
+			if err != nil {
+				return fmt.Errorf("read %s %s rule expressions: %w", tbl.Name, chain.Name, err)
+			}
+			setElements := func(name string) ([]nftables.SetElement, error) {
+				set, err := c.GetSetByName(tbl, name)
+				if err != nil {
+					return nil, err
+				}
+				return c.GetSetElements(set)
+			}
+			for _, rule := range rules {
+				names, ok := namesByHandle[rule.Handle]
+				if !ok {
+					return fmt.Errorf("%s %s rule handle %d absent from the expression dump", tbl.Name, chain.Name, rule.Handle)
+				}
+				zeroHop, err := isZeroHopLimitLocalDropRule(rule, names, setElements)
+				if err != nil {
+					return err
+				}
+				if !zeroHop {
+					out = append(out, rule)
+				}
+			}
+			return nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("read %s %s rule expressions: %w", tbl.Name, chain.Name, err)
-	}
-	setElements := func(name string) ([]nftables.SetElement, error) {
-		set, err := c.GetSetByName(tbl, name)
-		if err != nil {
-			return nil, err
-		}
-		return c.GetSetElements(set)
-	}
-	out := make([]*nftables.Rule, 0, len(rules))
-	for _, rule := range rules {
-		names, ok := namesByHandle[rule.Handle]
-		if !ok {
-			return nil, fmt.Errorf("%s %s rule handle %d absent from the expression dump", tbl.Name, chain.Name, rule.Handle)
-		}
-		zeroHop, err := isZeroHopLimitLocalDropRule(rule, names, setElements)
-		if err != nil {
-			return nil, err
-		}
-		if !zeroHop {
-			out = append(out, rule)
-		}
+		return nil, err
 	}
 	return out, nil
 }

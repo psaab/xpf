@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 	"strings"
@@ -668,6 +669,10 @@ func (in *netlinkInstaller) replaceTable(name string, priority nftables.ChainPri
 			return 0, errors.Join(flushErr, fmt.Errorf("nftables readback %s: %w", name, readbackErr))
 		}
 		if installed {
+			// #18746: recovery used to be silent, so a lost ACK left no trace.
+			// It is rare (a large replace with an overflowed ACK socket), and
+			// it fires once per affected install.
+			slog.Info("nftables flush ACK lost; kernel readback matches the plan", "table", name, "flush_err", err)
 			return p.operatorRules(), nil
 		}
 		return 0, flushErr
@@ -728,18 +733,11 @@ func (in *netlinkInstaller) TableEnforcing(name string) (bool, error) {
 	if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookInput || chain.Type != nftables.ChainTypeFilter {
 		return false, nil
 	}
-	rules, err := c.GetRules(tbl, chain)
-	if err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return false, nil
-		}
-		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
-	}
 	// #18746: the #16841 zero-hop rule heads every input chain xpf installs,
 	// so a table holding only that rule is still an empty shell.
-	operator, err := inputRulesBeyondZeroHop(c, tbl, chain, rules)
+	operator, err := inputRulesBeyondZeroHop(c, tbl, chain)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
 	}
 	return len(operator) > 0, nil
 }
@@ -782,19 +780,12 @@ func (in *netlinkInstaller) TableDropsInput(name string) (bool, error) {
 	if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookInput || chain.Type != nftables.ChainTypeFilter {
 		return false, nil
 	}
-	rules, err := c.GetRules(tbl, chain)
-	if err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return false, nil
-		}
-		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
-	}
 	// #18746: the #16841 zero-hop rule's DROP is not host-inbound enforcement.
 	// Since #16841 it sits in every xpf input chain, so counting it made an
 	// admits-only table read as dropping.
-	operator, err := inputRulesBeyondZeroHop(c, tbl, chain, rules)
+	operator, err := inputRulesBeyondZeroHop(c, tbl, chain)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
 	}
 	for _, rule := range operator {
 		for _, anyExpr := range rule.Exprs {
