@@ -4829,9 +4829,26 @@ because no peer is asked anything.
   **Epoch.** A chain belongs to one marker reqID and to the group's operator
   epoch. Every operator failover or reset entry point bumps that epoch:
   `ManualFailover` (also when serving a peer's request), the batch forms,
-  `RequestPeerFailover`, `ResetFailover` and `ForceSecondary`. The chain ends
-  the moment any of these happens: the marker clears, the epoch moves, the
-  peer is lost or restarts, the group is removed, or the owner goes primary.
+  `RequestPeerFailover`, `ResetFailover` and `ForceSecondary`.
+
+  The epoch moves only once a command is ADMITTED: it has won the failover
+  reservation, or it is a reset (which has none). So a command refused at
+  admission has no side effects. For example, `failover already in progress`
+  while a retry attempt holds the reservation leaves the chain intact, and
+  the attempt still commits. A command that is admitted and then fails later
+  (in its pre-hook, say) has still moved the epoch. This opens no window
+  where a successful operator action fails to cancel a retry:
+  - while an attempt is in flight, it holds the reservation, so every
+    reserving command is refused visibly, with an error, rather than
+    silently overtaken;
+  - a reset needs no reservation, and the attempt's commit-time re-check
+    catches it;
+  - `ForceSecondary` supersedes the reservation and moves the epoch once it
+    holds it.
+
+  The chain ends the moment any of these happens: the marker clears, the
+  epoch moves, the peer is lost or restarts, the group is removed, or the
+  owner goes primary.
   An attempt re-checks its epoch under `m.mu`, both at the reservation and
   again inside the commit's critical section. An operator decision that lands
   while an attempt is in flight therefore aborts it instead of being
@@ -4870,7 +4887,8 @@ because no peer is asked anything.
   - a requester in arm debt does not retry, and resumes once it re-arms;
   - a pending retry never fires after an operator decision (back to the
     sick node, a local failover, a reset);
-  - a failed operator action restarts the epoch;
+  - a failed operator action restarts the epoch, and one refused at
+    admission leaves the chain intact;
   - a reset during an in-flight attempt blocks its commit;
   - the owner-side predicate: freshness, peer primary, re-checked under the
     hold lock;

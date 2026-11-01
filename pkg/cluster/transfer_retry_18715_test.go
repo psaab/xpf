@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -666,5 +667,43 @@ func TestAbortedTransferRetryOnItsOwnGoroutine18715(t *testing.T) {
 	}
 	if dual != 0 || converged < 40 {
 		t.Fatalf("dual=%d converged-rounds=%d: want the requester as the only primary for 40 rounds", dual, converged)
+	}
+}
+
+// TestRefusedOperatorCommandLeavesTheRetryIntact18715 (L, fold 5): an operator
+// command refused at admission has no side effects. ManualFailover on the
+// requester while a retry attempt holds the reservation is refused with
+// "failover already in progress"; it must not end the retry's epoch, so the
+// attempt still commits. Before fold 5 the epoch moved before the reservation,
+// the commit was refused, and the abort ran.
+func TestRefusedOperatorCommandLeavesTheRetryIntact18715(t *testing.T) {
+	fastRetry18715(t, 10*time.Millisecond, 10*time.Millisecond, 40*time.Millisecond)
+	p := trapArmDebt18715(t, func(int, bool) error { return nil })
+	var refused error
+	var epochBefore, epochAfter uint64
+	p.inFlight = func(attempt int) {
+		if attempt != 2 {
+			return
+		}
+		p.req.mu.RLock()
+		epochBefore = p.req.operatorEpoch[1]
+		p.req.mu.RUnlock()
+		_, refused = p.req.ManualFailover(1)
+		p.req.mu.RLock()
+		epochAfter = p.req.operatorEpoch[1]
+		p.req.mu.RUnlock()
+	}
+	last, rounds, dual, _, stopped := runRounds18715(p, 2000, 40, func(r roles18715) bool { return r.owner != r.req })
+	if p.attempts < 2 {
+		t.Fatal("setup: the retry never fired")
+	}
+	if refused == nil || !strings.Contains(refused.Error(), "already in progress") {
+		t.Fatalf("setup: the operator command during the attempt was not refused at admission: %v", refused)
+	}
+	if epochAfter != epochBefore {
+		t.Fatalf("a refused operator command moved the operator epoch (%d -> %d)", epochBefore, epochAfter)
+	}
+	if p.commits != 1 || !stopped || dual != 0 || last != (roles18715{req: true}) {
+		t.Fatalf("commits=%d stopped=%v dual=%d final=%+v after %d rounds: the attempt must still commit", p.commits, stopped, dual, last, rounds)
 	}
 }

@@ -78,7 +78,12 @@ type abortedTransferRetry struct {
 // noteOperatorFailoverLocked records that an operator (or the peer, through a
 // transfer request this node is serving) issued a failover or reset for the
 // RGs. It ends any retry chain for them: a stale retry must never override a
-// newer operator decision. Caller holds m.mu.
+// newer operator decision. Every caller invokes it once the command is
+// ADMITTED (it won the failover reservation; a reset has none and is always
+// admitted once the RG exists), so a command refused at admission, such as
+// "failover already in progress" while a retry attempt holds the reservation,
+// leaves the chain intact. A command admitted and then failing later (in its
+// pre-hook, say) has still moved the epoch. Caller holds m.mu.
 func (m *Manager) noteOperatorFailoverLocked(rgIDs ...int) {
 	if m.operatorEpoch == nil {
 		m.operatorEpoch = make(map[int]uint64)
@@ -237,7 +242,7 @@ func (m *Manager) runAbortedTransferRetry(rgID int, chain *abortedTransferRetry)
 		}
 		return nil
 	}
-	err := m.requestPeerFailover(rgID, admit)
+	err := m.requestPeerFailover(rgID, admit, false)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

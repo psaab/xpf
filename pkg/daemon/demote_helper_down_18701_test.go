@@ -506,6 +506,41 @@ func TestAnsweringAtEntryIsNeverBounded18715(t *testing.T) {
 	}
 }
 
+// TestPrepKeepsTheEntrySampleAcrossTheVIPRelease18715 (L, fold 5): the VIP
+// release runs between the entry sample and the prep decision, and it is not
+// instant (every RG's removal and service clear under directVIPMu), while the
+// silence verdict is a time threshold that can flip inside it. The prep must
+// follow the ENTRY sample, the same one that bounded the write: here the
+// socket is silent at entry and starts answering during the release, and the
+// prep must stay skipped. Re-sampling for the prep would run it, so the prep
+// and the bound would disagree about one demotion.
+func TestPrepKeepsTheEntrySampleAcrossTheVIPRelease18715(t *testing.T) {
+	old := helperDownDemotionBound
+	helperDownDemotionBound = 200 * time.Millisecond
+	t.Cleanup(func() { helperDownDemotionBound = old })
+	d, log := newDemotion18701(t, true, 50*time.Millisecond)
+	if !d.isNoRethVRRP() {
+		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+	}
+	dp := d.dataplane().(*readinessDP18701)
+	dp.controlAnswers.Store(false)
+	d.directRemoveVIPsFn = func(int) int {
+		log.add("vips-removed")
+		dp.controlAnswers.Store(true) // the verdict flips during the release
+		return 1
+	}
+	d.tryPrepareDemotionFn = func(int) { log.add("prep") }
+	primeRG1Primary(t, d)
+	demoteRG1(t, d)
+	ev := log.snapshot()
+	if !slices.Contains(ev, "vips-removed") {
+		t.Fatalf("events %v: setup: the release did not run", ev)
+	}
+	if slices.Contains(ev, "prep") {
+		t.Fatalf("events %v: the prep re-read the control socket after the VIP release instead of using the entry sample", ev)
+	}
+}
+
 // TestSilentAckNeedsEveryVIPConfirmedGone18715 (fold 3, U item 2): a failed
 // write is acked as a fence only when every direct VIP of the RG is confirmed
 // off the interfaces. The release skips failed deletes and clears the

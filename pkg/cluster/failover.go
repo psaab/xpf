@@ -317,7 +317,6 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 // between the authoritative check and the hold (#18715 ownerless accept).
 func (m *Manager) manualFailoverWith(rgID int, admit func(rg *RedundancyGroupState, now time.Time) error) (FailoverOutcome, error) {
 	m.mu.Lock()
-	m.noteOperatorFailoverLocked(rgID)
 	if admit != nil {
 		if rg, ok := m.groups[rgID]; ok {
 			if err := admit(rg, time.Now()); err != nil {
@@ -331,6 +330,10 @@ func (m *Manager) manualFailoverWith(rgID int, admit func(rg *RedundancyGroupSta
 		m.mu.Unlock()
 		return FailoverApplied, rerr
 	}
+	// #18715: the operator epoch moves once the command is admitted (it won
+	// the reservation), not before: a command refused at admission has no
+	// side effects.
+	m.noteOperatorFailoverLocked(rgID)
 	staleFn := m.peerConfigStaleFn
 	m.mu.Unlock()
 
@@ -407,9 +410,6 @@ func (m *Manager) ForceSecondary() error {
 		m.mu.Unlock()
 		return fmt.Errorf("peer not alive — cannot force secondary without active peer")
 	}
-	for rgID := range m.groups {
-		m.noteOperatorFailoverLocked(rgID)
-	}
 	// Snapshot EVERY configured RG (including disabled) so membership/active
 	// revalidation covers the whole config, but RESERVE only active RGs —
 	// matching parent: disabled RGs are never demoted, so they must not block
@@ -431,6 +431,10 @@ func (m *Manager) ForceSecondary() error {
 	if rerr != nil {
 		m.mu.Unlock()
 		return rerr
+	}
+	// #18715: admitted, so the operator epoch of every RG moves.
+	for rgID := range m.groups {
+		m.noteOperatorFailoverLocked(rgID)
 	}
 	ids := activeIDs
 	m.mu.Unlock()
@@ -769,10 +773,7 @@ func (m *Manager) preActivateTransfer(activate func([]int) error, release func([
 // making the local node eligible to become primary. Used when
 // "request chassis cluster failover redundancy-group N node <local>" is run.
 func (m *Manager) RequestPeerFailover(rgID int) error {
-	m.mu.Lock()
-	m.noteOperatorFailoverLocked(rgID)
-	m.mu.Unlock()
-	return m.requestPeerFailover(rgID, nil)
+	return m.requestPeerFailover(rgID, nil, true)
 }
 
 // requestPeerFailover is the RequestPeerFailover sequence. admit, when set,
@@ -780,7 +781,9 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 // section; a non-nil error abandons the request (before sending) or aborts it
 // (after the owner's applied ack). The #18715 retry passes its staleness
 // check here so a retry can never act on an epoch an operator has ended.
-func (m *Manager) requestPeerFailover(rgID int, admit func() error) error {
+// operator marks an operator command: it moves the RG's operator epoch once
+// it wins the reservation (#18715). The retry passes false.
+func (m *Manager) requestPeerFailover(rgID int, admit func() error, operator bool) error {
 	m.mu.Lock()
 	rg, ok := m.groups[rgID]
 	if !ok {
@@ -821,6 +824,9 @@ func (m *Manager) requestPeerFailover(rgID int, admit func() error) error {
 	}
 	owner := m.nextFailoverOwnerLocked()
 	m.failoverInProgress[rgID] = owner
+	if operator {
+		m.noteOperatorFailoverLocked(rgID)
+	}
 	fn := m.peerFailoverFn
 	commitFn := m.peerFailoverCommitFn
 	abortFn := m.peerFailoverAbortFn
@@ -1419,12 +1425,12 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 	}
 
 	m.mu.Lock()
-	m.noteOperatorFailoverLocked(ids...)
 	resv, rerr := m.reserveLocked(ids, nil, false, false)
 	if rerr != nil {
 		m.mu.Unlock()
 		return res, rerr
 	}
+	m.noteOperatorFailoverLocked(ids...) // #18715: once admitted
 	staleFn := m.peerConfigStaleFn
 	m.mu.Unlock()
 
@@ -1496,7 +1502,6 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	}
 
 	m.mu.Lock()
-	m.noteOperatorFailoverLocked(ids...)
 	for _, rgID := range ids {
 		rg, ok := m.groups[rgID]
 		if !ok {
@@ -1535,6 +1540,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 		m.failoverInProgress[rgID] = owner
 		batchOwners[rgID] = owner
 	}
+	m.noteOperatorFailoverLocked(ids...) // #18715: once admitted
 	fn := m.peerFailoverBatchFn
 	commitFn := m.peerFailoverCommitBatchFn
 	abortFn := m.peerFailoverAbortBatchFn

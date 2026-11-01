@@ -5156,6 +5156,8 @@ Cells, in `demote_helper_down_18701_test.go`:
 - a slow-but-answering write (1.5 s) is acked after it lands, never before;
 - answering at entry is never bounded, even when the socket goes silent
   mid-write;
+- the prep keeps the entry sample when the verdict flips during the VIP
+  release;
 - silent at entry, then answering mid-write: a failed write aborts, a
   successful one acks, and the prep keeps the entry decision;
 - a silent ack needs every VIP confirmed gone;
@@ -5166,11 +5168,14 @@ Cells, in `demote_helper_down_18701_test.go`:
 Each of these mutants fails a cell: dropping the early release, an unbounded
 write, ignoring the readiness verdict, dropping the fresh sample at bound
 expiry, bounding an answering write, a silent ack without the VIP confirm, an
-ack fallback of true, no single-flight, and no late-outcome log. Re-sampling
-the socket for the prep instead of reusing the entry sample is not
-observable (the two reads are microseconds apart); the entry sample exists so
-the prep and the bound cannot disagree, and the fresh sample at the ack is
-pinned.
+ack fallback of true, no single-flight, no late-outcome log, and re-sampling
+the socket for the prep instead of reusing the entry sample. That last one
+matters because the VIP release sits between the entry sample and the prep
+decision. The release is not instant: it removes every RG's VIPs and clears
+their services under `directVIPMu`. The silence verdict is a time threshold
+(#18685) that can flip inside it, so a second read could skip the bound but
+run the prep, or the reverse, within one demotion. The cell flips the verdict
+inside the VIP removal (review L, fold 5).
 
 ## A transfer request for a group neither node owns (#18715)
 
