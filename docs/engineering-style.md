@@ -224,6 +224,31 @@ stack, where the next bare `pop` can take it.
   32 are plausibly real. Tidying the stack is the destructive move it already
   documents.
 
+### The box-wide build caches are SHARED. Never clean them from one worktree.
+
+`GOCACHE` (`/var/worktrees/.cache/go-build`) and the default `CARGO_TARGET_DIR`
+(`/var/worktrees/.cache/cargo`) serve every worktree and lane on the host.
+`go clean -cache` cold-rebuilds every other session. Deleting the cargo dir
+breaks every in-flight cargo build: on 2026-11-01, `make clean` emptied it and
+a concurrent `make deb` died with "could not write output ... No such file or
+directory" (#18839).
+
+- `make deb` was a deleter too. `dpkg-buildpackage` runs `dh clean`, and its
+  default `dh_auto_clean` runs `make clean`, so every deb build in any worktree
+  emptied the shared dir and forced the next cargo build cold.
+  `debian/rules` now overrides `dh_auto_clean` to remove only the three
+  top-level binaries.
+- `make clean` keeps the shared cargo dir. It removes `userspace-dp/target`
+  and a per-worktree `CARGO_TARGET_DIR` you set explicitly. It refuses a
+  parent or child of the shared dir, `/`, an empty value, and a value with
+  whitespace. Only `CLEAN_SHARED_CARGO=1` deletes the shared dir, with a
+  WARNING, and only when nothing else is building.
+  `make test-clean-shared-cargo-lib` pins both paths, the dh one included.
+- With one shared target dir, `$(CARGO_TARGET_DIR)/release/xpf-userspace-dp`
+  is last-writer-wins across worktrees. `make deb` builds and installs it
+  inside one heavy-cargo flock hold, which is safe. Run any other cargo build
+  under the same flock, or a copied binary can be the other checkout's.
+
 
 ## First principles
 
