@@ -1502,7 +1502,10 @@ type HeartbeatStats struct {
 // Caller must hold m.mu.
 func (m *Manager) clearPeerIncarnationAuthorityLocked(reason string) {
 	// #18715: a retry belongs to the peer incarnation whose transfer aborted.
+	// Peer loss also ends every hold below, the drain pin included, so no
+	// ownerless prior hold is left to restore.
 	m.cancelAllAbortedTransferRetriesLocked(reason)
+	clear(m.ownerlessPriorHolds)
 	for _, rg := range m.groups {
 		if rg.ManualFailover {
 			slog.Info("cluster: clearing manual failover ("+reason+")", "rg", rg.GroupID)

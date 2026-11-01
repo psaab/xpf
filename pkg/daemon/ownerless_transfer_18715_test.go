@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/ra"
 )
 
 // #18715 (1'): the owner-side half of the aborted-transfer retry. A transfer
@@ -45,8 +48,8 @@ func manualHold18715(d *Daemon) bool {
 }
 
 // TestOwnerlessAcceptAcksOnlyAfterTheConfirm18715: the accepted request is
-// acked only after the fresh write and the VIP confirm, and this node ends
-// with the same Manual hold a completed evacuation leaves (coordinator 4).
+// acked only after the fresh write and the VIP confirm, and the group is parked
+// in Manual from the ack until the transfer ends (a commit then clears it).
 func TestOwnerlessAcceptAcksOnlyAfterTheConfirm18715(t *testing.T) {
 	d, log, confirms := newOwnerless18715(t, 0, nil)
 	if err := d.acceptOwnerlessTransferOut(1, actuationReqID); err != nil {
@@ -61,7 +64,7 @@ func TestOwnerlessAcceptAcksOnlyAfterTheConfirm18715(t *testing.T) {
 		t.Fatalf("events %v confirms=%d: the ack needs a fresh rg_active=false write and the VIP confirm", ev, *confirms)
 	}
 	if !manualHold18715(d) {
-		t.Fatal("an accepted ownerless transfer must leave the Manual hold a completed evacuation leaves")
+		t.Fatal("an accepted ownerless transfer must park the group in Manual until the transfer ends")
 	}
 }
 
@@ -207,4 +210,108 @@ func TestOnRemoteFailoverRoutesNonOwnedRGsToTheOwnerlessAccept18715(t *testing.T
 			t.Fatalf("OnRemoteFailover for a peer-owned RG: %v, want ErrRemoteFailoverRejected", err)
 		}
 	})
+}
+
+// stableLLDaemon18715 is a daemon with a real RETH config (cluster 1, RG1 on
+// reth0 unit 50) behind the fake kernel, and the REAL confirm check.
+func stableLLDaemon18715(t *testing.T, d *Daemon) (*fakeKernel18573, string, string) {
+	t.Helper()
+	d.store = rethStore18573(t, "172.16.50.42/24", "2001:db8:50::42/64")
+	k := newFakeKernel18573(t)
+	k.install(t, d)
+	d.directVIPsConfirmAbsentFn = nil
+	cfg := d.store.ActiveConfig()
+	ll := config.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, 1).String()
+	for _, netdev := range cfg.RemoveNetdevs(1) {
+		if _, ok := k.links[netdev]; ok {
+			return k, netdev, ll
+		}
+	}
+	t.Fatalf("setup: none of RG1's netdevs %v is in the fake kernel", cfg.RemoveNetdevs(1))
+	return nil, "", ""
+}
+
+// TestConfirmCoversTheStableRouterLinkLocal18715 (review U, fold 6 B): the
+// stable router link-local is the RA source, i.e. the hosts' IPv6 default
+// router, and its removal is best-effort. A node that kept it, or still runs
+// an RA sender with that source, still claims the router identity, so the
+// confirm must refuse.
+func TestConfirmCoversTheStableRouterLinkLocal18715(t *testing.T) {
+	d, _ := newDemotion18701(t, false, 0)
+	k, netdev, ll := stableLLDaemon18715(t, d)
+	if err := d.directVIPsConfirmedAbsent(1); err != nil {
+		t.Fatalf("control: nothing is installed, yet the confirm refused: %v", err)
+	}
+	k.put(netdev, ll+"/128", 0)
+	if err := d.directVIPsConfirmedAbsent(1); err == nil || !strings.Contains(err.Error(), "link-local") {
+		t.Fatalf("the stable router link-local is still on %s and the confirm passed: %v", netdev, err)
+	}
+	k.rows = nil
+	ifaces := rethInterfacesForRG(d.store.ActiveConfig(), 1)
+	if len(ifaces) == 0 {
+		t.Fatal("setup: RG1 has no RETH interfaces")
+	}
+	d.raSendersFn = func() []ra.SenderInfo {
+		return []ra.SenderInfo{{Interface: ifaces[0], SrcAddr: ll, State: "active"}}
+	}
+	if err := d.directVIPsConfirmedAbsent(1); err == nil || !strings.Contains(err.Error(), "RA sender") {
+		t.Fatalf("an RA sender is still active with the stable router source and the confirm passed: %v", err)
+	}
+	d.raSendersFn = func() []ra.SenderInfo {
+		return []ra.SenderInfo{{Interface: ifaces[0], SrcAddr: "fe80::1234", State: "active"}}
+	}
+	if err := d.directVIPsConfirmedAbsent(1); err != nil {
+		t.Fatalf("control: a per-node RA source is not the router identity, yet the confirm refused: %v", err)
+	}
+}
+
+// TestStableLLDeleteFailureFailsTheAckAndTheConfirm18715 (review U, fold 6 B):
+// with the stable router link-local delete failing (left on the interface),
+// both the helper-down silent ack and the ownerless confirm refuse.
+func TestStableLLDeleteFailureFailsTheAckAndTheConfirm18715(t *testing.T) {
+	t.Run("silent-ack", func(t *testing.T) {
+		d, _ := newDemotion18701(t, true, 0)
+		k, netdev, ll := stableLLDaemon18715(t, d)
+		k.put(netdev, ll+"/128", 0) // the best-effort delete failed
+		if err := d.helperDownFenceSilentAck(1, true); err == nil {
+			t.Fatal("the silent ack passed with the stable router link-local still installed")
+		}
+	})
+	t.Run("ownerless-confirm", func(t *testing.T) {
+		d, _, _ := newOwnerless18715(t, 0, nil)
+		k, netdev, ll := stableLLDaemon18715(t, d)
+		d.directRemoveStableLLFn = func(int) {} // the delete fails: the address stays
+		k.put(netdev, ll+"/128", 0)
+		if err := d.acceptOwnerlessTransferOut(1, actuationReqID); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		if err := d.waitFailoverActuated(1, actuationReqID); err == nil {
+			t.Fatal("the ownerless confirm acked with the stable router link-local still installed")
+		}
+	})
+}
+
+// TestLateWriteOvertakingANewerStateIsReasserted18715 (review U NIT): writes
+// given up on can land after a newer write of the other value (the
+// controller's m.mu hands off in no order). A landed write whose value the
+// RG no longer wants re-arms the reconcile retry.
+func TestLateWriteOvertakingANewerStateIsReasserted18715(t *testing.T) {
+	d, _ := newDemotion18701(t, false, 0)
+	s := d.getOrCreateRGState(1)
+	s.SetCluster(true) // promoted since the write started
+	s.MarkApplied(true)
+	if s.NeedsApply() {
+		t.Fatal("setup: the promotion's write is recorded")
+	}
+	ha := &countingHA18715{release: make(chan struct{})}
+	close(ha.release)
+	w := d.startRGActiveWrite(context.Background(), ha, 1, false)
+	<-w.done
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.NeedsApply() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !s.NeedsApply() {
+		t.Fatal("a stale rg_active=false landed after the promotion and nothing re-armed the reconcile retry")
+	}
 }

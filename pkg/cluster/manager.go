@@ -857,6 +857,12 @@ type Manager struct {
 	abortedTransferRetries map[int]*abortedTransferRetry
 	operatorEpoch          map[int]uint64
 	lastPeerHeartbeatAt    time.Time
+	// ownerlessPriorHolds is the hold (operator Manual, or the ISSU drain
+	// pin) an ownerless accept found in place, given back when that transfer
+	// ends without a commit; a commit keeps only the drain pin (#18715). Any
+	// newer decision (a failover, reset or drain), the dual-resign rescue,
+	// peer loss and RG removal drop it. Under m.mu.
+	ownerlessPriorHolds map[int]ownerlessPriorHold
 	// abortedTransferRetryLaunchFn starts one retry attempt; nil runs it on
 	// its own goroutine. Tests capture it to run attempts deterministically.
 	abortedTransferRetryLaunchFn func(func())
@@ -986,6 +992,7 @@ func NewManager(nodeID, clusterID int) *Manager {
 		failoverGen:                    make(map[int]uint64),
 		abortedTransferRetries:         make(map[int]*abortedTransferRetry),
 		operatorEpoch:                  make(map[int]uint64),
+		ownerlessPriorHolds:            make(map[int]ownerlessPriorHold),
 		bootEpochReady:                 make(chan struct{}),
 	}
 }

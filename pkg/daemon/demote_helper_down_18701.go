@@ -12,7 +12,9 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/ra"
 )
 
 // helperDownDemotionBound caps how long a demotion waits for the helper-side
@@ -28,10 +30,19 @@ var helperDownDemotionBound = time.Second
 // within helperDownDemotionBound.
 var errRGActiveWriteBoundExpired = errors.New("rg_active write not acknowledged within the helper-down bound")
 
-// inflightRGActiveWrite is one in-flight helper-side rg_active write. A write that a
-// caller stopped waiting for still runs to completion; only one runs per RG at
-// a time (#18715 review), so a wedged helper never accumulates writes, and a
-// caller that arrives while one is in flight for the same value joins it.
+// inflightRGActiveWrite is one in-flight helper-side rg_active write. A write
+// that a caller stopped waiting for still runs to completion. Writes of the
+// same value are single-flight per RG (#18715 review), so a wedged helper never
+// accumulates writes, and a caller that arrives while one is in flight joins it.
+//
+// The set is keyed by (RG, value), and the other rg_active writers (promotion,
+// the reconcile activation, shutdown) do not go through it. So a write that was
+// given up on can land AFTER a newer write of the opposite value: the
+// controller serialises writes on its m.mu, and a Go mutex hands off in no
+// guaranteed order. The ordering is therefore not relied on. When a write here
+// completes with a value the RG state machine no longer wants, the applied
+// record is invalidated (InvalidateApplied), so the next reconcile pass, within
+// 2 s, re-drives the current value.
 type inflightRGActiveWrite struct {
 	active    bool
 	done      chan struct{}
@@ -64,8 +75,24 @@ func (d *Daemon) startRGActiveWrite(ctx context.Context, ha dataplane.HAControll
 		if w.abandoned.Load() {
 			d.logLateRGActiveWrite(rgID, active, w.err)
 		}
+		d.reassertAfterOvertakingWrite(rgID, active, w.err)
 	}()
 	return w
+}
+
+// reassertAfterOvertakingWrite handles a write that landed after the RG's
+// desired state moved to the other value (see inflightRGActiveWrite): it arms
+// the reconcile retry so the current value is written again.
+func (d *Daemon) reassertAfterOvertakingWrite(rgID int, active bool, err error) {
+	if err != nil {
+		return // nothing landed
+	}
+	s := d.getOrCreateRGState(rgID)
+	if desired, _ := s.CurrentDesired(); desired != active {
+		s.InvalidateApplied()
+		slog.Info("cluster: an rg_active write landed after the redundancy group's desired state changed; re-driving the current state (#18715)",
+			"rg", rgID, "landed", active, "desired", desired)
+	}
 }
 
 // await waits up to bound (0 = no bound) for the write. timedOut reports that
@@ -183,13 +210,23 @@ func (d *Daemon) releaseDirectVIPsHelperDown(reason string) {
 	}
 }
 
-// directVIPsConfirmedAbsent re-reads the kernel's addresses and returns nil
-// only when no configured direct VIP of rgID is on its interface (#18715
-// review). The release path (reconcileDirectVIPAddrs) skips a delete that
-// fails and, when the address dump fails, falls back to a blind pass, and the
-// ownership flag is cleared either way, so "released" there is not proof. A
-// dump failure, a link lookup error other than "not found", or a VIP still
-// present is an error. An interface that does not exist carries no VIP.
+// directVIPsConfirmedAbsent returns nil only when nothing on this node still
+// claims rgID's router identity (#18715 review):
+//
+//   - no configured direct VIP of rgID is on its interface;
+//   - the stable router link-local (StableRethLinkLocal) is on none of the RG's
+//     netdevs. It is the RA source, so hosts use it as their IPv6 default
+//     router, and its removal is best-effort (a failed delete only warns), so
+//     a node that kept it would still answer neighbor solicitations for the
+//     router;
+//   - no RA sender for the RG's interfaces is still active with that source.
+//
+// It re-reads the kernel's addresses. The release path (reconcileDirectVIPAddrs)
+// skips a delete that fails and, when the address dump fails, falls back to a
+// blind pass, and the ownership flag is cleared either way, so "released" there
+// is not proof. A dump failure, a link lookup error other than "not found", or
+// an address still present is an error. An interface that does not exist
+// carries no address.
 func (d *Daemon) directVIPsConfirmedAbsent(rgID int) error {
 	if d.directVIPsConfirmAbsentFn != nil {
 		return d.directVIPsConfirmAbsentFn(rgID)
@@ -202,12 +239,33 @@ func (d *Daemon) directVIPsConfirmedAbsent(rgID int) error {
 		return nil
 	}
 	desired := cfg.RethVIPsForRG(rgID)
-	if len(desired) == 0 {
+	var stableLL netip.Addr
+	var llNetdevs []string
+	if cfg.Chassis.Cluster != nil {
+		stableLL, _ = netip.AddrFromSlice(config.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, rgID).To16())
+		llNetdevs = cfg.RemoveNetdevs(rgID)
+	}
+	if len(desired) == 0 && len(llNetdevs) == 0 {
 		return nil
 	}
 	linkByName := d.linkByNameFn
 	if linkByName == nil {
 		linkByName = netlink.LinkByName
+	}
+	// resolve returns the ifindex, or 0 for an interface that does not exist.
+	resolve := func(netdev string) (int, error) {
+		link, err := linkByName(netdev)
+		if err != nil {
+			var notFound netlink.LinkNotFoundError
+			if errors.As(err, &notFound) {
+				return 0, nil
+			}
+			return 0, fmt.Errorf("resolve %s: %w", netdev, err)
+		}
+		if link == nil || link.Attrs() == nil {
+			return 0, fmt.Errorf("resolve %s: no link attributes", netdev)
+		}
+		return link.Attrs().Index, nil
 	}
 	d.directVIPMu.Lock()
 	defer d.directVIPMu.Unlock()
@@ -215,32 +273,65 @@ func (d *Daemon) directVIPsConfirmedAbsent(rgID int) error {
 	if err != nil {
 		return fmt.Errorf("address dump failed: %w", err)
 	}
-	for netdev, cidrs := range desired {
-		link, err := linkByName(netdev)
-		if err != nil {
-			var notFound netlink.LinkNotFoundError
-			if errors.As(err, &notFound) {
-				continue
+	present := func(idx int, addr netip.Addr) bool {
+		for _, row := range rows {
+			if row.LinkIndex == idx && row.Prefix.Addr() == addr {
+				return true
 			}
-			return fmt.Errorf("resolve %s: %w", netdev, err)
 		}
-		if link == nil || link.Attrs() == nil {
-			return fmt.Errorf("resolve %s: no link attributes", netdev)
+		return false
+	}
+	for netdev, cidrs := range desired {
+		idx, err := resolve(netdev)
+		if err != nil {
+			return err
 		}
-		idx := link.Attrs().Index
+		if idx == 0 {
+			continue
+		}
 		for _, cidr := range cidrs {
 			p, err := netip.ParsePrefix(cidr)
 			if err != nil {
 				continue // the reconcile reports a bad address; it is never installed
 			}
-			for _, row := range rows {
-				if row.LinkIndex == idx && row.Prefix.Addr() == p.Addr() {
-					return fmt.Errorf("VIP %s is still on %s", cidr, netdev)
+			if present(idx, p.Addr()) {
+				return fmt.Errorf("VIP %s is still on %s", cidr, netdev)
+			}
+		}
+	}
+	for _, netdev := range llNetdevs {
+		idx, err := resolve(netdev)
+		if err != nil {
+			return err
+		}
+		if idx != 0 && present(idx, stableLL) {
+			return fmt.Errorf("stable router link-local %s is still on %s", stableLL, netdev)
+		}
+	}
+	if stableLL.IsValid() {
+		for _, sender := range d.raSenders() {
+			if sender.State != "active" || sender.SrcAddr != stableLL.String() {
+				continue
+			}
+			for _, name := range rethInterfacesForRG(cfg, rgID) {
+				if sender.Interface == name {
+					return fmt.Errorf("an RA sender on %s is still active with the stable router source %s", name, stableLL)
 				}
 			}
 		}
 	}
 	return nil
+}
+
+// raSenders reports the RA manager's senders; raSendersFn replaces it in tests.
+func (d *Daemon) raSenders() []ra.SenderInfo {
+	if d.raSendersFn != nil {
+		return d.raSendersFn()
+	}
+	if d.ra == nil {
+		return nil
+	}
+	return d.ra.Status()
 }
 
 // helperElectionReasonSource is the optional surface that explains the
@@ -306,7 +397,7 @@ var ownerlessConfirmBound = 2 * time.Second
 // keeps its fence.
 func (d *Daemon) acceptOwnerlessTransferOut(rgID int, reqID uint64) error {
 	barrier := d.failoverActuations.armConfirmOnly(rgID, reqID)
-	outcome, err := d.cluster.ManualFailoverOwnerless(rgID)
+	outcome, err := d.cluster.ManualFailoverOwnerless(rgID, reqID)
 	if err != nil {
 		d.disarmFailoverActuation(rgID, reqID, barrier)
 		if errors.Is(err, cluster.ErrRemoteFailoverRejected) {

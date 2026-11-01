@@ -1912,6 +1912,8 @@ type Daemon struct {
 	// directVIPsConfirmAbsentFn replaces directVIPsConfirmedAbsent in tests
 	// (#18715).
 	directVIPsConfirmAbsentFn func(int) error
+	// raSendersFn replaces the RA manager's Status in tests (#18715).
+	raSendersFn func() []ra.SenderInfo
 	// rgActiveWrites is the single-flight set of helper-down rg_active writes,
 	// one per RG (#18715); rgActiveLateFail latches the late-failure log per
 	// RG. Both under rgActiveWriteMu.

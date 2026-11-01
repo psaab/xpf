@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #18715: an aborted transfer whose old owner never re-promotes must not leave
@@ -35,6 +37,9 @@ type retryPair18715 struct {
 	// inFlight runs inside a request, after the owner parked the RG and
 	// before the ack returns (an operator action racing the attempt).
 	inFlight func(attempt int)
+	// lostAbort drops the owner-side restore and the abort frame, so only
+	// the owner's lease can end the transfer (lease-expiry cells).
+	lostAbort bool
 }
 
 func newRetryPair18715(t *testing.T, owner, req *Manager) *retryPair18715 {
@@ -51,6 +56,9 @@ func newRetryPair18715(t *testing.T, owner, req *Manager) *retryPair18715 {
 	})
 	req.SetPeerFailoverAbortFunc(func(rgID int, reqID uint64) error {
 		p.aborts++
+		if p.lostAbort {
+			return errors.New("abort frame lost")
+		}
 		return owner.AbortRemoteTransferOut(rgID, reqID)
 	})
 	req.mu.Lock()
@@ -73,7 +81,7 @@ func (p *retryPair18715) request(rgID int) (uint64, error) {
 	case p.oldOwner:
 		err = fmt.Errorf("%w: redundancy group %d", ErrRemoteFailoverRejected, rgID)
 	default:
-		_, err = p.owner.ManualFailoverOwnerless(rgID)
+		_, err = p.owner.ManualFailoverOwnerless(rgID, reqID)
 	}
 	if err != nil {
 		status := failoverAckFailed
@@ -90,7 +98,9 @@ func (p *retryPair18715) request(rgID int) (uint64, error) {
 	}
 	if ferr := p.fence(attempt, ownerWasPrimary); ferr != nil {
 		// handleRemoteFailover restores the owner after a failed fence.
-		_ = p.owner.AbortRemoteTransferOut(rgID, reqID)
+		if !p.lostAbort {
+			_ = p.owner.AbortRemoteTransferOut(rgID, reqID)
+		}
 		return reqID, failoverAckError([]int{rgID}, failoverAck{status: failoverAckFailed, detail: ferr.Error()})
 	}
 	return reqID, nil
@@ -141,6 +151,38 @@ func fastRetry18715(t *testing.T, quiet, minB, maxB time.Duration) {
 func trapArmDebt18715(t *testing.T, fence func(attempt int, ownerWasPrimary bool) error) *retryPair18715 {
 	t.Helper()
 	owner, req := armDebtPair12164(t)
+	return trapArmDebtWith18715(t, owner, req, fence)
+}
+
+// twoRGPair18715 is armDebtPair12164 with a second RG, for the batch forms.
+func twoRGPair18715(t *testing.T) (owner, req *Manager) {
+	t.Helper()
+	cfg := &config.ClusterConfig{
+		ControlInterface: "em0",
+		RedundancyGroups: []*config.RedundancyGroup{
+			{ID: 1, NodePriorities: map[int]int{0: 200, 1: 100}},
+			{ID: 2, NodePriorities: map[int]int{0: 200, 1: 100}},
+		},
+	}
+	owner, req = NewManager(0, 1), NewManager(1, 1)
+	owner.UpdateConfig(cfg)
+	req.UpdateConfig(cfg)
+	for _, id := range []int{1, 2} {
+		owner.SetRGReady(id, true, nil)
+		req.SetRGReady(id, true, nil)
+		owner.SetMonitorWeight(id, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
+		req.SetMonitorWeight(id, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
+	}
+	exchangeElection12164(owner, req)
+	if !owner.IsLocalPrimary(1) || req.IsLocalPrimary(1) {
+		t.Fatal("precondition: owner primary / requester secondary for RG1")
+	}
+	t.Cleanup(func() { owner.Stop(); req.Stop() })
+	return owner, req
+}
+
+func trapArmDebtWith18715(t *testing.T, owner, req *Manager, fence func(attempt int, ownerWasPrimary bool) error) *retryPair18715 {
+	t.Helper()
 	p := newRetryPair18715(t, owner, req)
 	p.fence = func(attempt int, ownerWasPrimary bool) error {
 		if attempt == 1 {
@@ -352,7 +394,7 @@ func TestPendingRetryNeverOverridesTheOperator18715(t *testing.T) {
 		act  func(p *retryPair18715)
 	}{
 		{"back-to-sick-node", func(p *retryPair18715) {
-			if _, err := p.req.ManualFailoverOwnerless(1); err != nil {
+			if _, err := p.req.ManualFailoverOwnerless(1, 9001); err != nil {
 				p.t.Fatalf("ManualFailoverOwnerless: %v", err)
 			}
 		}},
@@ -483,7 +525,7 @@ func TestOwnerlessAcceptRequiresAFreshOwnerlessView18715(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := ownerlessOwner18715(t)
 			tc.setup(m)
-			_, err := m.ManualFailoverOwnerless(1)
+			_, err := m.ManualFailoverOwnerless(1, 1)
 			m.mu.RLock()
 			held := m.groups[1].ManualFailover
 			m.mu.RUnlock()
@@ -518,7 +560,7 @@ func TestOwnerlessAcceptChecksUnderTheHoldLock18715(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := ownerlessOwner18715(t)
 			m.SetPreManualFailoverHook(func(int) error { tc.flip(m); return nil })
-			_, err := m.ManualFailoverOwnerless(1)
+			_, err := m.ManualFailoverOwnerless(1, 1)
 			if !errors.Is(err, ErrRemoteFailoverRejected) {
 				t.Fatalf("err=%v: a change during the pre-hook must refuse the hold", err)
 			}
@@ -677,8 +719,144 @@ func TestAbortedTransferRetryOnItsOwnGoroutine18715(t *testing.T) {
 // attempt still commits. Before fold 5 the epoch moved before the reservation,
 // the commit was refused, and the abort ran.
 func TestRefusedOperatorCommandLeavesTheRetryIntact18715(t *testing.T) {
+	refusedCommandRow18715(t, false, func(m *Manager) error { _, err := m.ManualFailover(1); return err })
+}
+
+// priorHold18715 reads the owner's hold fields for RG1.
+type priorHold18715 struct {
+	manual, forced bool
+	weight         int
+	state          NodeState
+}
+
+func holdOf18715(m *Manager) priorHold18715 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rg := m.groups[1]
+	return priorHold18715{rg.ManualFailover, rg.forcedSecondary, rg.Weight, rg.State}
+}
+
+// expireLease18715 makes the owner's transfer-out lease for RG1 lapse now.
+func expireLease18715(m *Manager) {
+	m.mu.Lock()
+	if _, ok := m.remoteTransferOutLeaseUntil[1]; ok {
+		m.remoteTransferOutLeaseUntil[1] = time.Now().Add(-time.Second)
+	}
+	m.mu.Unlock()
+}
+
+// TestOwnerlessAcceptKeepsTheOwnersPriorHold18715 (review U, fold 6): an
+// ownerless accept on a node that is already held must not erase that hold.
+// Every transfer-out exit clears ManualFailover and forcedSecondary; before
+// fold 6 a DRAINED node (ISSU ForceSecondary) that accepted and then saw an
+// abort ended manual=false forced=false weight=255 and re-took the RG. Now:
+//   - drain pin: kept through abort, lease expiry AND commit; never primary;
+//   - operator Manual hold: given back after abort and lease expiry; a commit
+//     spends it like any completed transfer-out;
+//   - no prior hold: every exit leaves the node unheld, as before #18715.
+//
+// The abort and lease-expiry rows run until at least two ownerless accepts
+// have reached the owner. In the lease-expiry rows the abort frames are lost,
+// so the later accept lands while the earlier one still parks the RG: it must
+// carry the ORIGINAL prior hold over, not record the earlier accept's own hold
+// as one.
+func TestOwnerlessAcceptKeepsTheOwnersPriorHold18715(t *testing.T) {
 	fastRetry18715(t, 10*time.Millisecond, 10*time.Millisecond, 40*time.Millisecond)
-	p := trapArmDebt18715(t, func(int, bool) error { return nil })
+	for _, hold := range []string{"drain", "manual", "none"} {
+		for _, exit := range []string{"abort", "lease-expiry", "commit"} {
+			t.Run(hold+"/"+exit, func(t *testing.T) {
+				p := trapArmDebt18715(t, func(int, bool) error { return nil })
+				switch hold {
+				case "drain":
+					if err := p.owner.ForceSecondary(); err != nil {
+						t.Fatalf("ForceSecondary: %v", err)
+					}
+				case "manual":
+					if _, err := p.owner.ManualFailover(1); err != nil {
+						t.Fatalf("ManualFailover: %v", err)
+					}
+				}
+				before := holdOf18715(p.owner)
+				if before.manual != (hold != "none") || before.forced != (hold == "drain") {
+					t.Fatalf("setup: owner hold %+v", before)
+				}
+				target := 3 // two ownerless accepts
+				switch exit {
+				case "abort":
+					p.fence = func(int, bool) error { return errors.New("confirm failed") }
+				case "lease-expiry":
+					p.fence = func(int, bool) error { return errors.New("ack lost") }
+					p.lostAbort = true
+				case "commit":
+					p.fence = func(int, bool) error { return nil }
+					target = 2
+				}
+				ownerPrimary := 0
+				for i := 0; i < 400 && p.attempts < target; i++ {
+					if r := p.round(); r.owner {
+						ownerPrimary++
+					}
+					time.Sleep(2 * time.Millisecond)
+				}
+				if p.attempts < target {
+					t.Fatalf("setup: %d attempts, want %d", p.attempts, target)
+				}
+				// No further accepts: what is left is the exit under test.
+				p.req.mu.Lock()
+				p.req.abortedTransferRetryLaunchFn = func(func()) {}
+				p.req.mu.Unlock()
+				if exit == "lease-expiry" {
+					if mid := holdOf18715(p.owner); !mid.manual || mid.state != StateSecondaryHold {
+						t.Fatalf("setup: the lost abort should leave the accept's hold in place, got %+v", mid)
+					}
+					expireLease18715(p.owner)
+				}
+				for range 40 {
+					if r := p.round(); r.owner {
+						ownerPrimary++
+					}
+					time.Sleep(2 * time.Millisecond)
+				}
+				after := holdOf18715(p.owner)
+				if ownerPrimary != 0 {
+					t.Fatalf("the owner was primary in %d rounds (hold now %+v)", ownerPrimary, after)
+				}
+				switch hold {
+				case "drain":
+					if !after.forced || !after.manual || after.weight != 0 {
+						t.Fatalf("%s erased the drain pin: %+v (before %+v)", exit, after, before)
+					}
+				case "manual":
+					if exit != "commit" && !after.manual {
+						t.Fatalf("%s did not give the operator Manual hold back: %+v", exit, after)
+					}
+					if exit == "commit" && after.manual {
+						t.Fatalf("a committed transfer kept a spent Manual hold: %+v", after)
+					}
+				case "none":
+					if after.manual || after.forced {
+						t.Fatalf("%s left a node that had no hold held: %+v (an accept's own hold was kept as a prior one)", exit, after)
+					}
+				}
+			})
+		}
+	}
+}
+
+// refusedCommandRow18715 drives one operator command issued on the requester
+// while a retry attempt holds the RG's reservation. The command must be
+// refused at admission, leave the operator epoch unchanged, and the attempt
+// must still commit (review L and U: a refused command has no side effects).
+func refusedCommandRow18715(t *testing.T, twoRGs bool, command func(m *Manager) error) {
+	t.Helper()
+	fastRetry18715(t, 10*time.Millisecond, 10*time.Millisecond, 40*time.Millisecond)
+	var p *retryPair18715
+	if twoRGs {
+		owner, req := twoRGPair18715(t)
+		p = trapArmDebtWith18715(t, owner, req, func(int, bool) error { return nil })
+	} else {
+		p = trapArmDebt18715(t, func(int, bool) error { return nil })
+	}
 	var refused error
 	var epochBefore, epochAfter uint64
 	p.inFlight = func(attempt int) {
@@ -688,7 +866,7 @@ func TestRefusedOperatorCommandLeavesTheRetryIntact18715(t *testing.T) {
 		p.req.mu.RLock()
 		epochBefore = p.req.operatorEpoch[1]
 		p.req.mu.RUnlock()
-		_, refused = p.req.ManualFailover(1)
+		refused = command(p.req)
 		p.req.mu.RLock()
 		epochAfter = p.req.operatorEpoch[1]
 		p.req.mu.RUnlock()
@@ -705,5 +883,40 @@ func TestRefusedOperatorCommandLeavesTheRetryIntact18715(t *testing.T) {
 	}
 	if p.commits != 1 || !stopped || dual != 0 || last != (roles18715{req: true}) {
 		t.Fatalf("commits=%d stopped=%v dual=%d final=%+v after %d rounds: the attempt must still commit", p.commits, stopped, dual, last, rounds)
+	}
+}
+
+// TestRefusedPeerRequestLeavesTheRetryIntact18715 (review U, fold 6): the
+// RequestPeerFailover and batch entry points follow the same admission rule
+// as ManualFailover. Each row kills its own bump-before-reserve mutant.
+func TestRefusedPeerRequestLeavesTheRetryIntact18715(t *testing.T) {
+	t.Run("RequestPeerFailover", func(t *testing.T) {
+		refusedCommandRow18715(t, false, func(m *Manager) error { return m.RequestPeerFailover(1) })
+	})
+	t.Run("RequestPeerFailoverBatch", func(t *testing.T) {
+		refusedCommandRow18715(t, true, func(m *Manager) error { return m.RequestPeerFailoverBatch([]int{1, 2}) })
+	})
+	t.Run("ManualFailoverBatch", func(t *testing.T) {
+		refusedCommandRow18715(t, true, func(m *Manager) error { _, err := m.ManualFailoverBatch([]int{1, 2}); return err })
+	})
+}
+
+// TestTransferRetryStatusShowsADeferredAttempt18715 (review U NIT): a due
+// attempt that waits for another failover's reservation says so, instead of
+// "next attempt in 0s".
+func TestTransferRetryStatusShowsADeferredAttempt18715(t *testing.T) {
+	fastRetry18715(t, time.Millisecond, time.Hour, time.Hour)
+	p := trapArmDebt18715(t, func(int, bool) error { return nil })
+	p.req.mu.Lock()
+	p.req.abortedTransferRetryLaunchFn = func(func()) {}
+	p.req.mu.Unlock()
+	p.round()
+	time.Sleep(5 * time.Millisecond)
+	p.req.mu.Lock()
+	p.req.failoverInProgress[1] = 777
+	p.req.mu.Unlock()
+	out := p.req.FormatStatus()
+	if !strings.Contains(out, "deferred (failover in progress)") {
+		t.Fatalf("a due attempt held back by another failover is not shown as deferred:\n%s", out)
 	}
 }

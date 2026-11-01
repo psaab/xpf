@@ -308,14 +308,17 @@ func (m *Manager) revalidateLocked(r *failoverReservation) (missing []int, super
 // and advertises an explicit transfer-out state so the peer can claim
 // primary without relying on weight-zero election semantics.
 func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
-	return m.manualFailoverWith(rgID, nil)
+	return m.manualFailoverWith(rgID, nil, nil)
 }
 
 // manualFailoverWith is ManualFailover with an optional admission predicate
 // that runs under m.mu twice: before the pre-hook (a cheap early refusal) and
 // again in the critical section that installs the hold, so nothing can change
 // between the authoritative check and the hold (#18715 ownerless accept).
-func (m *Manager) manualFailoverWith(rgID int, admit func(rg *RedundancyGroupState, now time.Time) error) (FailoverOutcome, error) {
+//
+// beforeHold, when set, runs in that same critical section after the lease is
+// cleared and before the hold is written, so it sees the RG as it was.
+func (m *Manager) manualFailoverWith(rgID int, admit func(rg *RedundancyGroupState, now time.Time) error, beforeHold func(rg *RedundancyGroupState)) (FailoverOutcome, error) {
 	m.mu.Lock()
 	if admit != nil {
 		if rg, ok := m.groups[rgID]; ok {
@@ -377,6 +380,13 @@ func (m *Manager) manualFailoverWith(rgID int, admit func(rg *RedundancyGroupSta
 		}
 	}
 	oldState := rg.State
+	if beforeHold != nil {
+		beforeHold(rg) // before the lease clear: it reads the earlier transfer's lease
+	} else {
+		// #18715: a new operator (or ordinary remote) hold supersedes any
+		// hold an ownerless accept was keeping to give back.
+		delete(m.ownerlessPriorHolds, rgID)
+	}
 	m.clearRemoteTransferOutLeaseLocked(rgID)
 	rg.transferCommitRolePinned = false
 	rg.ManualFailover = true
@@ -465,6 +475,7 @@ func (m *Manager) ForceSecondary() error {
 		rg := m.groups[rgID]
 		oldState := rg.State
 		m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
+		delete(m.ownerlessPriorHolds, rg.GroupID) // #18715: the drain supersedes it
 		rg.transferCommitRolePinned = false
 		rg.Weight = 0
 		rg.forcedSecondary = true
@@ -548,6 +559,7 @@ func (m *Manager) ResetFailover(rgID int) error {
 	// lets repeated resets accumulate dormant entries. Clearing it keeps the
 	// lease maps in lockstep with ManualFailover on every reset path (#6301).
 	m.clearRemoteTransferOutLeaseLocked(rgID)
+	delete(m.ownerlessPriorHolds, rgID) // #18715: the reset is the newer decision
 	// Invalidate any in-flight ManualFailover / ManualFailoverBatch whose
 	// pre-failover hook released m.mu: bump the per-RG failover generation so
 	// its post-hook re-check abandons the trailing SecondaryHold write instead
@@ -1156,6 +1168,7 @@ func (m *Manager) ClearRemoteTransferOutLease(rgID int, reqID uint64) {
 		return
 	}
 	m.clearRemoteTransferOutLeaseLocked(rgID)
+	delete(m.ownerlessPriorHolds, rgID) // #18715: FinalizePeerTransferOut already used it
 }
 
 func (m *Manager) clearRemoteTransferOutLeaseLocked(rgID int) {
@@ -1244,6 +1257,7 @@ func (m *Manager) AbortRemoteTransferOut(rgID int, reqID uint64) error {
 	if !leased || cur != reqID {
 		return nil
 	}
+	prior, hasPrior := m.takeOwnerlessPriorHoldLocked(rgID, reqID)
 	m.clearRemoteTransferOutLeaseLocked(rgID)
 	if !rg.ManualFailover {
 		return nil
@@ -1252,7 +1266,16 @@ func (m *Manager) AbortRemoteTransferOut(rgID int, reqID uint64) error {
 	rg.forcedSecondary = false
 	rg.ManualFailoverAt = time.Time{}
 	m.manualFailoverRestoreWeightLocked(rg)
-	slog.Info("cluster: remote transfer-out aborted by requester, restoring owner", "rg", rgID, "req_id", reqID)
+	if hasPrior {
+		// #18715: the ownerless accept parked an RG that was already held
+		// (an operator Manual hold, or the ISSU drain pin). Put that hold
+		// back instead of restoring the node to ordinary election.
+		m.restoreOperatorHoldLocked(rgID, prior, "Prior hold restored after an aborted ownerless transfer")
+		slog.Info("cluster: remote transfer-out aborted by requester, restoring the hold this node had before it (#18715)",
+			"rg", rgID, "req_id", reqID, "drain_pin", prior.forcedSecondary)
+	} else {
+		slog.Info("cluster: remote transfer-out aborted by requester, restoring owner", "rg", rgID, "req_id", reqID)
+	}
 	m.runElection()
 	return nil
 }
@@ -1314,13 +1337,33 @@ func (m *Manager) FinalizePeerTransferOut(rgID int) error {
 		return fmt.Errorf("%w: redundancy group %d still primary locally", ErrRemoteFailoverRejected, rgID)
 	}
 
+	// #18715: an ownerless accept on a DRAINED node (ISSU ForceSecondary)
+	// keeps the drain pin through the commit: the node stays drained after
+	// handing the RG off. Any other prior hold is spent by the transfer, as
+	// with every completed transfer-out.
+	prior, hasPrior := m.takeOwnerlessPriorHoldLocked(rgID, m.remoteTransferOutLeaseReqID[rgID])
+	keepDrain := hasPrior && prior.forcedSecondary && prior.rg == rg &&
+		m.failoverGen[rgID] == prior.generation
+
 	oldState := rg.State
-	rg.ManualFailover = false
-	rg.forcedSecondary = false
-	rg.ManualFailoverAt = time.Time{}
-	rg.State = StateSecondary
-	rg.transferCommitRolePinned = true
-	rg.transferCommitRole = StateSecondary
+	if keepDrain {
+		rg.ManualFailover = true
+		rg.forcedSecondary = true
+		rg.ManualFailoverAt = prior.at
+		rg.Weight = prior.weight
+		rg.State = prior.state
+		// No commit-role pin: the drain hold itself keeps this node
+		// secondary, and the pin would arm the #15734 rescue that clears
+		// the hold once the peer is stably primary.
+		rg.transferCommitRolePinned = false
+	} else {
+		rg.ManualFailover = false
+		rg.forcedSecondary = false
+		rg.ManualFailoverAt = time.Time{}
+		rg.State = StateSecondary
+		rg.transferCommitRolePinned = true
+		rg.transferCommitRole = StateSecondary
+	}
 	// A completed transfer-out invalidates any stale inbound-transfer view
 	// from the previous owner direction. If we keep forcing the peer into
 	// secondary-hold here, the next heartbeat can immediately re-elect the
@@ -1476,6 +1519,7 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 		}
 		oldState := rg.State
 		m.clearRemoteTransferOutLeaseLocked(rgID)
+		delete(m.ownerlessPriorHolds, rgID) // #18715: a new hold supersedes it
 		rg.transferCommitRolePinned = false
 		res.Applied = append(res.Applied, rgID)
 		rg.ManualFailover = true

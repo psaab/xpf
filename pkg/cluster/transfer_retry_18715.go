@@ -286,15 +286,22 @@ func (m *Manager) abortedTransferRetryStatusLocked(now time.Time) map[int]string
 	}
 	out := make(map[int]string, len(m.abortedTransferRetries))
 	for rgID, chain := range m.abortedTransferRetries {
+		due := chain.nextAt
+		if due.IsZero() {
+			due = chain.since.Add(m.abortedTransferRetryQuietLocked())
+		}
 		var when string
 		switch {
 		case chain.inFlight:
 			when = "attempt in flight"
+		case !now.Before(due) && m.failoverInProgress[rgID] != 0:
+			// Due, but evaluate does not fire while another failover
+			// holds the RG's reservation.
+			when = "deferred (failover in progress)"
 		case chain.nextAt.IsZero():
-			due := chain.since.Add(m.abortedTransferRetryQuietLocked())
 			when = fmt.Sprintf("first attempt in %s", maxDuration(0, due.Sub(now)).Round(100*time.Millisecond))
 		default:
-			when = fmt.Sprintf("next attempt in %s", maxDuration(0, chain.nextAt.Sub(now)).Round(100*time.Millisecond))
+			when = fmt.Sprintf("next attempt in %s", maxDuration(0, due.Sub(now)).Round(100*time.Millisecond))
 		}
 		s := fmt.Sprintf("pending (%s; %d attempt(s), %s)", chain.reason, chain.attempts, when)
 		if chain.lastErr != "" {
@@ -358,11 +365,77 @@ func (m *Manager) ownerlessTransferAdmitLocked(rg *RedundancyGroupState, now tim
 	return nil
 }
 
-// ManualFailoverOwnerless serves a peer's transfer request for an RG this node
-// does not own (#18715). It installs the same hold ManualFailover does, and
+// ManualFailoverOwnerless serves a peer's transfer request reqID for an RG this
+// node does not own (#18715). It installs the same hold ManualFailover does, and
 // only when ownerlessTransferAdmitLocked passes in the critical section that
 // installs it. The caller must still confirm the local dataplane inactive for
 // the RG before it acks the request applied; this call only parks the RG.
-func (m *Manager) ManualFailoverOwnerless(rgID int) (FailoverOutcome, error) {
-	return m.manualFailoverWith(rgID, m.ownerlessTransferAdmitLocked)
+//
+// The RG may already be held: an operator Manual hold, or the ISSU drain pin
+// (ForceSecondary). Every exit from a transfer-out clears both, so the hold
+// found here is recorded and given back when the transfer ends without a
+// commit (abort, lease expiry). A commit spends an ordinary hold, as any
+// completed transfer-out does, but keeps the drain pin: a drained node stays
+// drained after handing the RG off. Refusing the accept on a drained node
+// instead would put the ownerless trap back during ISSU, where convergence
+// matters most.
+func (m *Manager) ManualFailoverOwnerless(rgID int, reqID uint64) (FailoverOutcome, error) {
+	return m.manualFailoverWith(rgID, m.ownerlessTransferAdmitLocked, func(*RedundancyGroupState) {
+		m.noteOwnerlessPriorHoldLocked(rgID, reqID)
+	})
+}
+
+// ownerlessPriorHold is the hold an ownerless accept found in place.
+type ownerlessPriorHold struct {
+	reqID uint64
+	snap  operatorHoldSnapshot
+}
+
+// noteOwnerlessPriorHoldLocked records rgID's current hold, if any, for the
+// ownerless transfer reqID. Only the hold arms are kept: the transfer-override
+// and aborted-marker arms belong to other protocols.
+//
+// When the RG is still parked by an EARLIER transfer-out that has not ended
+// (its lease is armed: the requester's abort frame was lost, so only the lease
+// can end it), the hold in place is that transfer's, not a prior one. The
+// earlier transfer's recorded prior hold, if any, carries over to reqID;
+// snapshotting the transfer's own hold instead would turn it into a "prior"
+// hold that an abort then gives back. Called before the earlier lease is
+// cleared. Caller holds m.mu.
+func (m *Manager) noteOwnerlessPriorHoldLocked(rgID int, reqID uint64) {
+	if m.ownerlessPriorHolds == nil {
+		m.ownerlessPriorHolds = make(map[int]ownerlessPriorHold)
+	}
+	if _, leased := m.remoteTransferOutLeaseReqID[rgID]; leased {
+		if rg := m.groups[rgID]; rg != nil && rg.ManualFailover {
+			if p, ok := m.ownerlessPriorHolds[rgID]; ok {
+				p.reqID = reqID
+				m.ownerlessPriorHolds[rgID] = p
+			}
+			return
+		}
+	}
+	snap := m.snapshotOperatorHoldLocked(rgID)
+	snap.override, snap.hasOverride = transferOverride{}, false
+	snap.abortedReqID, snap.hasAborted = 0, false
+	snap.abortedFence, snap.hasAbortedFence = abortedPeerTransferFence{}, false
+	if !snap.armed {
+		delete(m.ownerlessPriorHolds, rgID)
+		return
+	}
+	m.ownerlessPriorHolds[rgID] = ownerlessPriorHold{reqID: reqID, snap: snap}
+}
+
+// takeOwnerlessPriorHoldLocked removes rgID's recorded prior hold and returns
+// it when it belongs to transfer reqID. Caller holds m.mu.
+func (m *Manager) takeOwnerlessPriorHoldLocked(rgID int, reqID uint64) (operatorHoldSnapshot, bool) {
+	p, ok := m.ownerlessPriorHolds[rgID]
+	if !ok {
+		return operatorHoldSnapshot{}, false
+	}
+	delete(m.ownerlessPriorHolds, rgID)
+	if p.reqID != reqID {
+		return operatorHoldSnapshot{}, false
+	}
+	return p.snap, true
 }

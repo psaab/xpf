@@ -150,6 +150,7 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 			m.clearAbortedPeerTransferLocked(id)
 			m.cancelAbortedTransferRetryLocked(id, "redundancy group removed")
 			delete(m.operatorEpoch, id)
+			delete(m.ownerlessPriorHolds, id)
 			delete(m.groups, id)
 		}
 	}

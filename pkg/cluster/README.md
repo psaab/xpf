@@ -4868,8 +4868,29 @@ because no peer is asked anything.
 
       Transfer retry: pending (transfer <reqID> aborted and the peer has not taken the group back (peer secondary, weight 1); <n> attempt(s), next attempt in <t>)
 
-  It ends with the last error, if there was one. The event history records
-  the first attempt and the commit.
+  It ends with the last error, if there was one. An attempt that is due but
+  waits for another failover's reservation shows `deferred (failover in
+  progress)`. The event history records the first attempt and the commit.
+
+  **The owner's prior hold.** The owner-side accept
+  (`ManualFailoverOwnerless`) may find the group already held: an operator
+  `Manual` hold, or the ISSU drain pin from `ForceSecondary`. Every
+  transfer-out exit clears `ManualFailover` and `forcedSecondary`: the abort
+  (`AbortRemoteTransferOut`), lease expiry (`electRG`), and the commit
+  (`FinalizePeerTransferOut`). So the accept records the hold it found
+  (`ownerlessPriorHolds`, keyed to the reqID):
+  - abort and lease expiry give it back exactly;
+  - a commit spends a `Manual` hold but keeps the drain pin, without a
+    commit-role pin, because the pin would arm the #15734 rescue that clears
+    the hold;
+  - an accept that lands while an earlier one still parks the group (a lost
+    abort frame) carries the earlier record over, instead of recording the
+    earlier accept's own hold;
+  - any newer failover, reset or drain, the dual-resign rescue, peer loss and
+    RG removal drop the record.
+
+  Refusing the accept on a drained node instead would put the trap back
+  during ISSU.
 
   **Mixed versions.** An owner older than #18715 rejects every retry, as it
   rejected any request for a group it does not own. The requester keeps
@@ -4888,7 +4909,12 @@ because no peer is asked anything.
   - a pending retry never fires after an operator decision (back to the
     sick node, a local failover, a reset);
   - a failed operator action restarts the epoch, and one refused at
-    admission leaves the chain intact;
+    admission leaves the chain intact, for `ManualFailover`,
+    `RequestPeerFailover` and both batch forms;
+  - the owner's prior hold: the drain pin survives abort, lease expiry and
+    commit; a Manual hold comes back after abort and lease expiry; a node
+    with no hold is left unheld, including across chained accepts;
+  - a due attempt held back by another failover shows as deferred;
   - a reset during an in-flight attempt blocks its commit;
   - the owner-side predicate: freshness, peer primary, re-checked under the
     hold lock;
@@ -4899,8 +4925,11 @@ because no peer is asked anything.
   The control cell with attempts dropped stays ownerless. Each of these
   mutants fails a cell: no retry, no freshness check, no peer-primary check,
   no re-check in the hold section, a no-op operator epoch, no admit at the
-  commit, a retry that gives up, no status line, and ignoring the requester's
-  own arm debt.
+  commit, a retry that gives up, no status line, ignoring the requester's
+  own arm debt, a bump before the reservation at each operator entry point,
+  dropping the prior-hold restore at abort or lease expiry, dropping the
+  drain pin at commit, recording a chained accept's own hold, and no
+  deferred status.
 - **The ISSU drain pin is a state fact, not a derived weight (#16743).**
   `ForceSecondary` sets `forcedSecondary` alongside `ManualFailover` and
   `Weight=0`. While set, `recalcWeight`, `debtDerivedWeightLocked`, and

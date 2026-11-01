@@ -5076,9 +5076,17 @@ not yet armed, or wedged (#18697/#18685):
      the bound expires the socket is sampled AGAIN, fresh. If it answers now
      (the helper recovered, or was respawned) the real result is awaited after
      all. If it is still silent the write is abandoned to the background.
-   - One write per RG is in flight at a time. A later demotion or reconcile
-     pass for the same RG joins it instead of stacking another write behind a
-     wedged helper.
+   - Writes of the same value are single-flight per RG. A later demotion or
+     reconcile pass for the same RG joins the write in flight instead of
+     stacking another behind a wedged helper.
+   - The set is keyed by (RG, value), and the other rg_active writers
+     (promotion, the reconcile activation, shutdown) do not go through it. So
+     a write that was given up on can land AFTER a newer write of the other
+     value: the controller serialises writes on its `m.mu`, and a Go mutex
+     hands off in no guaranteed order. That ordering is not relied on. A write
+     that lands with a value the RG state machine no longer wants invalidates
+     the applied record (`reassertAfterOvertakingWrite`), so the next
+     reconcile pass, within 2 s, writes the current value again.
    - An abandoned write's late outcome is logged when it arrives: success at
      Info, the first failure of a streak at Warn, repeats at Debug. It is not
      recorded; the reconcile loop retries until a write it waited for lands.
@@ -5086,11 +5094,17 @@ not yet armed, or wedged (#18697/#18685):
    all of these hold (`helperDownFenceSilentAck`):
    - the socket was silent at entry;
    - it is silent now (a fresh sample);
-   - every configured direct VIP of the RG is confirmed off its interface
-     (`directVIPsConfirmedAbsent` re-reads the kernel's addresses). The
-     release itself is no proof: it skips a delete that fails, falls back to a
-     blind pass when the address dump fails, and clears the ownership flag
-     either way.
+   - nothing on this node still claims the RG's router identity
+     (`directVIPsConfirmedAbsent` re-reads the kernel's addresses):
+     - every configured direct VIP of the RG is off its interface;
+     - the stable router link-local (`StableRethLinkLocal`) is off every RG
+       netdev. It is the RA source, so hosts use it as their IPv6 default
+       router, and its removal only warns on failure;
+     - no RA sender for the RG's interfaces is still active with that source.
+
+     The release itself is no proof: it skips a delete that fails, falls back
+     to a blind pass when the address dump fails, and clears the ownership
+     flag either way.
 
    Then this node forwards nothing for the RG: no VIP attracts traffic to it,
    and a helper whose control socket is silent is assumed to forward nothing.
@@ -5132,12 +5146,20 @@ group is confirmed released`. When the fence is NOT acked, the
 `failed to update rg_active from cluster event` WARN carries
 `fence_not_acked_because`.
 
-As with any manual failover, the sick node then keeps the RG in `Manual`.
-While that hold stands this node will not take the RG back, even if the new
-owner gets sick too: its election stays in the hold unless the peer resigns
-at weight 0 or transfers the RG out. Clear it with
-`request chassis cluster failover reset redundancy-group <N>` on THIS node.
-Peer loss also clears it (`clearPeerIncarnationAuthorityLocked`).
+**What the sick node is left in.**
+- **After a peer-requested evacuation.** The node holds the RG in `Manual`
+  only from its applied-ack until the requester commits, aborts, or the
+  #5079 lease lapses. On commit, `FinalizePeerTransferOut` clears `Manual`.
+  The node is then plain secondary, with the committed-secondary role pin
+  that keeps it secondary while the peer is primary.
+- **After a local, untargeted failover** (`request chassis cluster failover
+  redundancy-group <N>`, no commit). The node keeps `Manual` until
+  `request chassis cluster failover reset redundancy-group <N>` on THIS node.
+  Peer loss also clears it (`clearPeerIncarnationAuthorityLocked`).
+
+  While that hold stands, this node will not take the RG back, even if the
+  new owner gets sick too: its election stays in the hold unless the peer
+  resigns at weight 0 or transfers the RG out.
 
 The helper-side part of each RG's demotion still runs per RG, in turn. It
 may wait on the Manager's `m.mu` behind the wedged helper's round trips
@@ -5216,18 +5238,40 @@ group. That guard stays for every group the peer owns. The one exception,
    - a FRESH rg_active=false write returns success, within
      `ownerlessConfirmBound` (2 s). A write already in flight is joined; it
      completes after the request arrived, so its success is as fresh;
-   - every direct VIP of the group is confirmed absent (the same
+   - nothing still claims the group's router identity: its VIPs, the stable
+     router link-local, an RA sender with that source (the same
      `directVIPsConfirmedAbsent` as above).
 
-   A timeout, a failed write, or a VIP still present fails the barrier and the
-   ack. The requester keeps its fence and retries later. After a watchdog kill
+   A timeout, a failed write, or any of those still present fails the barrier
+   and the ack. The requester keeps its fence and retries later. After a watchdog kill
    and restart of the helper, the fresh write succeeds, so the next retry
    converges.
-3. **Afterwards** this node holds the group in `Manual`, exactly as after a
-   completed evacuation. Clear it with
-   `request chassis cluster failover reset redundancy-group <N>` on this node;
-   peer loss also clears it. The #5079 lease restores this node if the
-   requester never commits.
+3. **Afterwards.** From the ack until the transfer ends, this node holds the
+   group in `Manual`. How the transfer ends decides what is left:
+   - **Commit:** `FinalizePeerTransferOut` clears `Manual`, leaving plain
+     secondary with the committed-secondary role pin.
+   - **Abort, or the #5079 lease lapsing:** the node returns to whatever it
+     had before the accept.
+4. **A hold already in place is kept** (review U). The node may already be
+   held when the request arrives: an operator `Manual` hold, or the ISSU drain
+   pin from `ForceSecondary`. Every transfer-out exit clears both
+   `ManualFailover` and `forcedSecondary`, so the accept records the hold it
+   found (`ManualFailoverOwnerless`, keyed to the request's reqID):
+   - **Abort and lease expiry** give that hold back, exactly.
+   - **A commit** spends an operator `Manual` hold, as any completed
+     transfer-out does, but KEEPS the drain pin. A drained node stays drained
+     (`Manual`, `forcedSecondary`, weight 0) after handing the RG off, and
+     takes no commit-role pin, because the pin would arm the #15734 rescue
+     that clears the hold.
+   - **Chained accepts.** When an accept lands while an earlier one still
+     parks the group (its abort frame was lost, so only its lease can end
+     it), the earlier accept's recorded hold carries over. The earlier
+     accept's own hold is never recorded as a "prior" one.
+   - **What drops the record:** any newer decision (an operator failover or
+     reset, a new drain), the dual-resign rescue, peer loss, and RG removal.
+
+   Refusing the accept on a drained node instead would put the ownerless trap
+   back during ISSU, where convergence matters most.
 
 Batch requests (`OnRemoteFailoverBatch`) keep the old rule: a batch that names
 a group this node does not own is rejected. The requester retries one group at
@@ -5250,14 +5294,25 @@ and, when the confirm fails,
 `ownerless transfer not acknowledged; this node could not confirm its
 dataplane inactive (#18715)` with the reason. A rejected request logs at Info.
 
-Cells, in `ownerless_transfer_18715_test.go`: the ack follows the fresh write
-and the VIP confirm and leaves the Manual hold; a peer that owns the group, or
-a stale view, is rejected with no hold, no write and no barrier left; a
-refused write, a timed-out write, a VIP still present and a group still
-desired active each fail the ack; the hold event cannot resolve the barrier;
-after a helper restart the next request is acked; the installed
-`OnRemoteFailover` closure routes a non-owned RG to the accept and still rejects
-a peer-owned one. Each of these mutants fails a cell: no VIP confirm, no fresh
-write, a barrier the hold event can resolve, and the pre-#18715 reject in the
-wiring.
-The predicate's own cells are in `pkg/cluster/transfer_retry_18715_test.go`.
+Cells, in `ownerless_transfer_18715_test.go`:
+- the ack follows the fresh write and the VIP confirm, and parks the group in
+  Manual;
+- a peer that owns the group, or a stale view, is rejected with no hold, no
+  write and no barrier left;
+- a refused write, a timed-out write, a VIP still present and a group still
+  desired active each fail the ack;
+- the stable router link-local left on an interface, or an RA sender still
+  active with it, fails the confirm, and a failed link-local delete fails both
+  the silent ack and the ownerless confirm;
+- the hold event cannot resolve the barrier;
+- after a helper restart the next request is acked;
+- the installed `OnRemoteFailover` closure routes a non-owned RG to the accept
+  and still rejects a peer-owned one;
+- a write that lands after the desired state changed re-arms the reconcile
+  retry.
+
+Each of these mutants fails a cell: no VIP confirm, no fresh write, a barrier
+the hold event can resolve, the pre-#18715 reject in the wiring, no
+link-local check, no RA-sender check, and no re-assert after an overtaking
+write. The prior-hold rule (drain pin, Manual, chained accepts) and the
+predicate have their cells in `pkg/cluster/transfer_retry_18715_test.go`.
