@@ -452,7 +452,7 @@ func TestStreamRequestSpecCoversEveryStream17175(t *testing.T) {
 	// The three request-dependent streams must be declared as such; a
 	// table that marked them request-independent would re-create the
 	// nil-request denial at open.
-	for _, m := range []string{"Ping", "Traceroute", "MonitorInterface"} {
+	for _, m := range []string{"Ping", "Traceroute", "MonitorInterface", "MonitorPacketDrop"} {
 		if !streamNeedsRequest17175(fullMethod17175(m)) {
 			t.Errorf("%s must be declared request-dependent in streamRequestSpec17175 (#17175)", m)
 		}
@@ -582,8 +582,9 @@ system {
 `
 	populated := &pb.MonitorPacketDropRequest{SourcePrefix: "10.99.1.0/24", Protocol: "tcp", Count: 1}
 
-	// Deny: the bare charge is denied, so open must refuse before the
-	// handler is entered, regardless of the populated filters.
+	// Deny: the bare charge is denied, so the stream must be refused
+	// before the handler is entered, regardless of the populated filters
+	// (on the first message since #18760 made it request-dependent).
 	s := streamServer17175(t, cfgText)
 	errc, entered, cancel := runStream17175(t, s, uidPingDeny17175,
 		fullMethod17175("MonitorPacketDrop"), populated)
@@ -601,7 +602,7 @@ system {
 
 	// Admit: the allowlist admits ^monitor, so the populated request
 	// streams and survives ticks (ticks re-price the retained decoded
-	// message, identically to the typed empty request).
+	// message).
 	s2 := streamServer17175(t, cfgText)
 	errc2, entered2, cancel2 := runStream17175(t, s2, uidDiagAllow17175,
 		fullMethod17175("MonitorPacketDrop"), populated)
