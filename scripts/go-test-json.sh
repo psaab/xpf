@@ -18,11 +18,12 @@
 #
 # usage: go-test-json.sh <jsonfile-or-empty> <go> [go test args...]
 #
-# With an EMPTY first argument this execs `<go> test <args>` unchanged — no
-# `-json`, no `jq`, no pipeline. That is deliberate: `make test-go` is the shared
-# gate and its default path must not acquire a jq dependency or a new failure
-# mode. The selftest asserts the default path's stdout and exit code are
-# identical to a direct `go test`.
+# With an EMPTY first argument this runs `<go> test <args>` with no `-json`
+# and no `jq`; its stdout passes through the #18778 timeout watcher (awk),
+# which changes no line. That is deliberate: `make test-go` is the shared gate
+# and its default path must not acquire a jq dependency. The selftest asserts
+# the default path's stdout and exit code match a direct `go test`, except
+# that a go-test timeout exits 3 (VOID).
 #
 # With a jsonfile it runs `<go> test -json <args>`, APPENDS the raw event stream
 # to that file, and reconstructs the human-readable stream on stdout from the
@@ -39,25 +40,18 @@ fi
 go_bin=$1
 shift
 
-# #18778: go test's timeout panic aborts a package mid-run, so every later
-# test in it never runs. That is neither a pass nor an attributable failure:
-# VOID the leg loudly with a distinct status (3) instead of letting it read
-# as an ordinary FAIL. The detector passes every line through unchanged.
-timeout_watch() {
-	awk '{ print; fflush() } /^panic: test timed out after /{ t = 1 } END { exit t ? 3 : 0 }'
-}
-void_banner() {
-	echo "go-test-json.sh: VOID: go test hit its -timeout (\"panic: test timed out\")." >&2
-	echo "  Every test after that point in the timed-out package NEVER RAN; this leg is" >&2
-	echo "  neither a pass nor an attributable failure. Rerun with a longer -timeout" >&2
-	echo "  (make GOTEST_TIMEOUT=...) or on a quieter host." >&2
-}
+# #18778: both paths pass the human stream through the shared timeout
+# watcher (scripts/go-timeout-watch.awk), which changes no line. go test's
+# timeout panic aborts a package mid-run, so every later test in it never
+# runs; the watcher prints a VOID banner naming the package and the script
+# exits 3, so a cut-off package reads as neither a pass nor an ordinary FAIL.
+here=$(cd "$(dirname "$0")" && pwd)
+timeout_watch() { awk -f "$here/go-timeout-watch.awk"; }
 
 if [ -z "$json" ]; then
 	"$go_bin" test "$@" | timeout_watch
 	rc=("${PIPESTATUS[@]}")
 	if [ "${rc[1]}" -eq 3 ]; then
-		void_banner
 		exit 3
 	fi
 	exit "${rc[0]}"
@@ -93,7 +87,6 @@ if [ "${rc[2]}" -ne 0 ]; then
 	exit 2
 fi
 if [ "${rc[3]}" -eq 3 ]; then
-	void_banner
 	exit 3
 fi
 exit "${rc[0]}"

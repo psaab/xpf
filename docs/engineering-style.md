@@ -1833,13 +1833,27 @@ they repeatedly bite:
     target test in an optional 5th TAB column, refines the verdict with
     `mutation_verdict_for_target`.
 
-    **A timed-out package is VOID, not red (#18778).** test-go passes an
-    explicit `-timeout $(GOTEST_TIMEOUT)` (default 60m). go test's 10m
-    default is reachable by pkg/daemon at high host load, and a timeout aborts
-    the package mid-run exactly as a panic does: every later test never runs.
-    On go test's `panic: test timed out`, `scripts/go-test-json.sh` prints a
-    VOID banner and exits 3. Treat a 3 as "this package was not measured" and
-    rerun with a longer timeout or on a quieter host; do not attribute over it.
+    **A timed-out package is VOID, not red (#18778).** test-go and
+    test-race-dp pass an explicit `-timeout $(GOTEST_TIMEOUT)` (default 60m).
+    go test's 10m default is reachable by pkg/daemon (and by -race legs) at high
+    host load, and a timeout aborts the package mid-run exactly as a panic does:
+    every later test never runs.
+
+    `scripts/go-timeout-watch.awk`, used by `go-test-json.sh` and by the
+    race legs' `go-test-watch.sh`, recognises go's own timeout panic: a
+    column-0 `panic: test timed out` line followed by `running tests:`. On it,
+    the script prints a VOID banner on stderr naming the package and exits 3.
+
+    What a **make** consumer observes:
+
+    - make itself exits **2** on any recipe failure.
+    - The recipe ends **`Error 3`**. `keep()` makes VOID sticky, so a later
+      failing leg cannot turn it into `Error 1`.
+    - The **stderr banner** names the timed-out package.
+
+    Failures reported for OTHER packages in a VOID leg are still real. Treat
+    the named package as unmeasured, and rerun with a longer `GOTEST_TIMEOUT`
+    or on a quieter host. Do not attribute over it.
 
     **A name is not a reason (#9564).** A guard with a LIVENESS fatal ("the
     parser found no anchors") and a violation branch scores KILLED by name

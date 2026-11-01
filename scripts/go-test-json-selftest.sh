@@ -154,14 +154,56 @@ EOT
 to_err="$WORK/to.err"
 ( cd "$WORK/to" && bash "$here/go-test-json.sh" "" go -timeout 2s ./... >"$WORK/to.out" 2>"$to_err" ); to_rc=$?
 check "timeout, default path: the leg is VOID (exit 3)" "$to_rc" "3"
-if grep -q "VOID: go test hit its -timeout" "$to_err" && grep -q "panic: test timed out after" "$WORK/to.out"; then
-	ok "timeout, default path: VOID banner printed and the timeout panic passed through"
+if grep -q "VOID: go test hit its -timeout in example.com/to\." "$to_err" && grep -q "panic: test timed out after" "$WORK/to.out"; then
+	ok "timeout, default path: VOID banner names the package and the timeout panic passed through"
 else
-	bad "timeout, default path: missing VOID banner or the passed-through timeout panic"
+	bad "timeout, default path: missing package-named VOID banner or the passed-through timeout panic"
 fi
 TJ="$WORK/to.json"; : > "$TJ"
 ( cd "$WORK/to" && bash "$here/go-test-json.sh" "$TJ" go -timeout 2s ./... >/dev/null 2>"$to_err" ); tj_rc=$?
 check "timeout, side-file path: the leg is VOID (exit 3)" "$tj_rc" "3"
+# The race legs use go-test-watch.sh (full command line, so the recipe keeps
+# its literal `test -race` text); it must VOID the same way.
+( cd "$WORK/to" && bash "$here/go-test-watch.sh" go test -timeout 2s ./... >/dev/null 2>"$to_err" ); tw_rc=$?
+check "timeout, go-test-watch.sh: the leg is VOID (exit 3)" "$tw_rc" "3"
+# FALSE POSITIVES: a failing test whose own output says "timed out" -- an
+# unindented "panic: test timed out" line it prints itself, and the same text
+# indented through t.Log -- is an ordinary failure, never VOID. go's real
+# timeout panic is column-0 AND followed by its "running tests:" line.
+mkdir -p "$WORK/fp"
+cat > "$WORK/fp/go.mod" <<'EOT'
+module example.com/fp
+
+go 1.21
+EOT
+cat > "$WORK/fp/fp_test.go" <<'EOT'
+package fp
+
+import (
+	"fmt"
+	"testing"
+)
+
+func TestSaysTimedOut(t *testing.T) {
+	fmt.Println("panic: test timed out after 5s")
+	fmt.Println("the dial timed out")
+	t.Log("panic: test timed out after 5s\n\trunning tests:")
+	t.Fatal("request timed out")
+}
+EOT
+( cd "$WORK/fp" && bash "$here/go-test-json.sh" "" go -timeout 60s ./... >/dev/null 2>&1 ); fp_rc=$?
+if [ "$fp_rc" -ne 3 ] && [ "$fp_rc" -ne 0 ]; then
+	ok "false positive: a failing test that prints \"timed out\" is an ordinary failure (rc=$fp_rc), not VOID"
+else
+	bad "false positive: a failing test that prints \"timed out\" gave rc=$fp_rc (want non-zero, not 3)"
+fi
+FJ="$WORK/fp.json"; : > "$FJ"
+( cd "$WORK/fp" && bash "$here/go-test-json.sh" "$FJ" go -timeout 60s ./... >/dev/null 2>&1 ); fpj_rc=$?
+if [ "$fpj_rc" -ne 3 ] && [ "$fpj_rc" -ne 0 ]; then
+	ok "false positive, side-file path: ordinary failure (rc=$fpj_rc), not VOID"
+else
+	bad "false positive, side-file path: rc=$fpj_rc (want non-zero, not 3)"
+fi
 # Control: a fast package under the same flag must NOT be voided.
 ( cd "$WORK/m" && bash "$here/go-test-json.sh" "" go -timeout 60s ./... >/dev/null 2>&1 ); ctl_rc=$?
 if [ "$ctl_rc" -ne 3 ]; then

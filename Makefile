@@ -411,17 +411,21 @@ GOTESTJSON ?=
 # derives the set (every package whose tests exec git) and fails until
 # the leg matches; #18642 added pkg/upgrade/manifest (its drift canary
 # runs `git ls-files`).
-# #18778: an explicit, generous per-package -timeout. go test's 10m default is
-# reached by pkg/daemon at high host load, and a timeout aborts the package
-# mid-run exactly like a panic; scripts/go-test-json.sh VOIDs such a leg (exit 3).
+# #18778: an explicit, generous per-package -timeout, on the test-go legs and
+# the test-race-dp legs alike. go test's 10m default is reached by pkg/daemon
+# at high host load, and a timeout aborts the package mid-run exactly like a
+# panic; scripts/go-test-json.sh / go-test-watch.sh VOID such a leg (exit 3).
+# `keep` makes VOID sticky: a later failing leg cannot overwrite status 3, so
+# the recipe ends "Error 3" (make itself exits 2 on any recipe failure).
 GOTEST_TIMEOUT ?= 60m
 test-go: test-race-dp
 	@status=0; \
-	$(GO) vet ./... || status=$$?; \
+	keep() { [ "$$status" -eq 3 ] || status=$$1; }; \
+	$(GO) vet ./... || keep $$?; \
 	[ -z "$(GOTESTJSON)" ] || : > "$(GOTESTJSON)"; \
-	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -timeout $(GOTEST_TIMEOUT) ./... || status=$$?; \
-	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -timeout $(GOTEST_TIMEOUT) -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/upgrade/manifest/ || status=$$?; \
-	sh scripts/go-buildtag-census.sh || status=$$?; \
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -timeout $(GOTEST_TIMEOUT) ./... || keep $$?; \
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -timeout $(GOTEST_TIMEOUT) -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/upgrade/manifest/ || keep $$?; \
+	sh scripts/go-buildtag-census.sh || keep $$?; \
 	sh scripts/go-deadcode-gate.sh; dc=$$?; if [ $$dc -eq 77 ]; then echo "test-go: go-deadcode-gate SKIPPED (no go1.26 toolchain; see script header)"; elif [ $$dc -ne 0 ] && [ $$status -eq 0 ]; then status=$$dc; fi; \
 	exit $$status
 
@@ -471,20 +475,20 @@ test-race-dp:
 	@for alt in DataplaneCell NATPoolAlarm ForwardingStatus BootstrapExit RuntimeDataplaneNeverBareRootManager EventStreamFallbackLoop RunUserspaceEventStream LiveDataPlane_ GRPCShowBuffers_ SystemAction_ GRPCServer_ RESTServer_ ManagementProbe ConsoleCLIProbeWiring FullResync ReconcilePassUsesOneDataplaneSnapshot ReconcileBlackholeWrappersStillReloadPerCall MTUWarningsCrossCommitRace; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/daemon/ | grep -q '^Test' || { echo "test-race-dp: pkg/daemon -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
-	$(GO) test -race ./pkg/daemon/ -run 'DataplaneCell|NATPoolAlarm|ForwardingStatus|BootstrapExit|RuntimeDataplaneNeverBareRootManager|EventStreamFallbackLoop|RunUserspaceEventStream|LiveDataPlane_|GRPCShowBuffers_|SystemAction_|GRPCServer_|RESTServer_|ManagementProbe|ConsoleCLIProbeWiring|FullResync|ReconcilePassUsesOneDataplaneSnapshot|ReconcileBlackholeWrappersStillReloadPerCall|MTUWarningsCrossCommitRace' -count=2
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/daemon/ -run 'DataplaneCell|NATPoolAlarm|ForwardingStatus|BootstrapExit|RuntimeDataplaneNeverBareRootManager|EventStreamFallbackLoop|RunUserspaceEventStream|LiveDataPlane_|GRPCShowBuffers_|SystemAction_|GRPCServer_|RESTServer_|ManagementProbe|ConsoleCLIProbeWiring|FullResync|ReconcilePassUsesOneDataplaneSnapshot|ReconcileBlackholeWrappersStillReloadPerCall|MTUWarningsCrossCommitRace' -count=2
 	@for alt in ArmedGate PreArm AllConcurrentSaveNoRace StatusPathReadRacesCompileWrite DetachXDPIsSerializedWithFenceLease; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/dataplane/ | grep -q '^Test' || { echo "test-race-dp: pkg/dataplane -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
-	$(GO) test -race ./pkg/dataplane/ -run 'ArmedGate|PreArm|AllConcurrentSaveNoRace|StatusPathReadRacesCompileWrite|DetachXDPIsSerializedWithFenceLease' -count=2
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/dataplane/ -run 'ArmedGate|PreArm|AllConcurrentSaveNoRace|StatusPathReadRacesCompileWrite|DetachXDPIsSerializedWithFenceLease' -count=2
 	@for alt in DoesNotRaceUpdateGroups6550 DoesNotHoldMuAcrossManagerCallback6550 DoesNotRaceStopHeartbeat7257 StartHeartbeatSupersededByStopDoesNotPublish7257; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/cluster/ | grep -q '^Test' || { echo "test-race-dp: pkg/cluster -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
-	$(GO) test -race ./pkg/cluster/ -run 'DoesNotRaceUpdateGroups6550|DoesNotHoldMuAcrossManagerCallback6550|DoesNotRaceStopHeartbeat7257|StartHeartbeatSupersededByStopDoesNotPublish7257' -count=2
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/cluster/ -run 'DoesNotRaceUpdateGroups6550|DoesNotHoldMuAcrossManagerCallback6550|DoesNotRaceStopHeartbeat7257|StartHeartbeatSupersededByStopDoesNotPublish7257' -count=2
 	@for alt in 17175 18760 9051; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/grpcapi/ | grep -q '^Test' || { echo "test-race-dp: pkg/grpcapi -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
-	$(GO) test -race ./pkg/grpcapi/ -run '17175|18760|9051' -count=2
-	$(GO) test -race -run 'Race|Concurrent' -count=1 $$($(GO) list ./pkg/... ./cmd/...)
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/grpcapi/ -run '17175|18760|9051' -count=2
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) -run 'Race|Concurrent' -count=1 $$($(GO) list ./pkg/... ./cmd/...)
 
 # #16715: the property leg above races every Race/Concurrent-named test
 # in pkg/ and cmd/ by property, not by a hand-kept package list, so the
