@@ -1997,6 +1997,35 @@ those keywords resolve from `setSchema` via `config.DescribeSetPath`
 (#16161 deleted the last cmdtree overlay, the retained
 `set system dataplane` map).
 
+### Constraint reminders are acknowledgeable or change-scoped (#18719)
+
+A commit warning is either a FINDING ("this config has a problem", silenced by
+fixing the config) or a constraint REMINDER ("this config is only safe if
+something outside xpf's view holds"). A reminder that fires on every commit
+whatever the commit touched cannot be satisfied or silenced, and it trains
+operators to skip the warning block, so the next real finding is missed. The
+rule for a reminder:
+
+- it is **acknowledgeable**: a config knob that records the operator's
+  attestation silences it (for #10105, the #16023
+  `fabric-interface-authenticated` / `fabric1-interface-authenticated`
+  attestation on every fabric link); and/or
+- it is **change-scoped**: register its exact text and the fingerprint of the
+  config region it is about in `changeScopedAdvisories18719`
+  (`pkg/config/advisory_scope_18719.go`). The operator commit paths
+  (`Store.Commit*` and `CommitConfirmed*`) call
+  `config.DropUnchangedScopedAdvisories(previous, next)`, which drops a
+  registered reminder when its region is unchanged since the previously
+  committed config (a first commit keeps it). `commit check` is not scoped and
+  reports every reminder whose condition holds.
+- it fires only when the config can make it matter (#13967 needs a
+  fabric-reachable BA classifier binding).
+
+`TestChangeScopedAdvisoryRegistryMatchesEmitters18719` pins that every
+registered text is emitted verbatim, so rewording a constant cannot silently
+take it out of scoping. The census of the remaining unconditional advisories
+is on #18719.
+
 ### RETH `redundancy-group` token fail-open (#6782)
 
 `interfaces <name> redundant-ether-options redundancy-group <id>` is an

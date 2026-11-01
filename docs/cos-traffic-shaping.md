@@ -1170,7 +1170,15 @@ Important current behavior:
   without one, queue selection and loss-priority rewriting use the egress
   defaults. A configured cluster fabric emits a commit-time warning about the
   fallback because voice and network-control traffic may receive best-effort
-  treatment (#13967).
+  treatment (#13967). Since #18719 the warning fires only when there is a peer
+  classification to lose: some unit on a fabric-reachable interface binds a
+  DSCP, IEEE 802.1p or inet-precedence classifier (management `fxp*`,
+  control `em*`, fabric `fab*`, loopbacks and the fabric member parents
+  themselves do not count; a classifier on the fabric parent IS the fallback
+  binding). It is also change-scoped: a commit that changes neither the fabric
+  nor those classifier bindings does not repeat it, while `commit check`
+  reports it whenever it applies (`docs/config-schema.md`, "Constraint
+  reminders are acknowledgeable or change-scoped").
 
 - a firewall filter `then forwarding-class <fc>` (input or output) is the
   packet's FINAL forwarding class for egress DSCP rewriting (#14663): it

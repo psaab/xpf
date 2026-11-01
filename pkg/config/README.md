@@ -29,6 +29,14 @@ nothing internal.
   earlier by #4288/#5834 and LDP has no auth leaf, so neither is a
   decode site.
 
+- `DropUnchangedScopedAdvisories` — `advisory_scope_18719.go` (#18719).
+  Change-scopes the registered constraint REMINDERS (`changeScopedAdvisories18719`:
+  the #10105 fabric zone-stamp and #13967 fabric BA-fallback lines, emitted by
+  `compiler_fabric_stamp_10105.go`). `configstore` calls it at both operator
+  commit sites with the previously committed config; `commit check` does not.
+  The rule (a reminder is acknowledgeable or change-scoped, never unconditional
+  on every commit) is in `docs/config-schema.md`.
+
 **Recursion and size bounds are load-bearing security guards (H-2).** The
 lexer and recursive-descent parser are reachable, unauthenticated, from the
 localhost gRPC/REST config-load API AND the HA peer config-sync ingress
