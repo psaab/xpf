@@ -83,6 +83,15 @@ const nodeIDFile = "/etc/xpf/node-id"
 // torn multiword interface read.
 type dpSlot struct{ v dataplane.RuntimeDataPlane }
 
+// clusterCommsEpoch owns joins for work launched by one communications
+// generation. The pointer is published and captured under clusterCommsMu;
+// Adds for either group happen under the same lock before workers start.
+type clusterCommsEpoch struct {
+	generation       uint64
+	constructorWG    sync.WaitGroup
+	fabricPopulateWG sync.WaitGroup
+}
+
 // Daemon is the main xpf daemon.
 type Daemon struct {
 	opts  Options
@@ -419,6 +428,12 @@ type Daemon struct {
 	// be toggled from the apply path like its three sibling loops.
 	ipsecSASync    ipsecSASyncState
 	ipsecSANudgeCh chan struct{} // nudge: peer (re)connect -> IPsec SA re-advertise (#4385)
+	// #17784 retry state coalesces peer-fenced fallback names; the same mutex
+	// guards one asynchronous retry pass so fallback initiation never runs in
+	// the IPsec advertisement loop.
+	ipsecFallbackMu           sync.Mutex
+	ipsecFallbacks            map[string]ipsecFallbackRetryState
+	ipsecFallbackRetryRunning bool
 	// #4899 DHCP-lease-change IPsec rebind recovery state. When a DHCP
 	// renewal moves the kernel address an IPsec gateway is dynamically bound
 	// to (external-interface, no explicit local-address), the management-only
@@ -864,6 +879,17 @@ type Daemon struct {
 	// sockets and capture probed destinations without touching the network
 	// (#5451).
 	neighborWarmDialer neighborWarmDialer
+	// neighborWarmPlanInputs replaces the runtime inputs of the #18617 warm
+	// plan (RG ownership, per-interface kernel addresses) in tests; zero
+	// value = production (cluster state + netlink).
+	neighborWarmPlanInputs neighborWarmPlanInputs
+	// lastNeighborWarmCounts is the most recent warmNeighborCache pass's
+	// per-verdict counts (#18617), for tests and diagnostics.
+	lastNeighborWarmCounts atomic.Pointer[neighborWarmCounts]
+	// neighborWarmHealth is the edge state behind the warm-up's Warns
+	// (primary prefix not held, probe-socket bind failure, force-probe
+	// truncation), review of #18625.
+	neighborWarmHealth neighborWarmHealth
 	syncPrimeRetryGen  atomic.Uint64
 	// syncPrimeRetryBeforeSleepForTest blocks the retry loop at the
 	// sleep boundary for the 10387 drain-window cell. Nil in production.
@@ -907,6 +933,13 @@ type Daemon struct {
 	configSyncHasPushed   bool
 	configSyncPushedEpoch uint64
 	configSyncPushedGen   uint64
+	// configAckRepushAtMono rate-limits the #18521 overdue-ACK re-push
+	// (cluster.MonotonicNanos of the last one; 0 = never).
+	configAckRepushAtMono atomic.Int64
+	// configAuthorityRepushAtMono paces the re-push that follows refusing a
+	// peer's config as RG0 authority (#18610 review T2), at the same
+	// configAckOverdueAfter spacing as the overdue-ACK re-push.
+	configAuthorityRepushAtMono atomic.Int64
 	// #15212: configSyncPushedDigest is the digest of the text carried by
 	// configSyncPushedWireGen, so a late ACK can be matched to the exact
 	// marked content it applied. configSyncAppliedGen is the highest wire
@@ -927,6 +960,9 @@ type Daemon struct {
 	// SessionSync.QueueConfig push so a unit test can count pushes without a
 	// live TCP sync transport (mirrors syncPeerForTest for the commit path).
 	configSyncPushForTest func()
+	// configResendForTest replaces the #18521 same-generation re-send's
+	// queue call with a capture of the text and wire generation. Test-only.
+	configResendForTest func(text string, gen uint64)
 
 	// #9530: configPeerStateForTest, when non-nil, replaces the cluster-derived
 	// (peer reachable, peer reads RG0 secondary) answer config sync uses to mark
@@ -1055,20 +1091,25 @@ type Daemon struct {
 	// / commitAndApply paths without standing up the full dataplane.
 	applyBodyForTest func(*config.Config)
 	// dnsRefreshMu guards the published-answer baseline.
-	// lastDNSRefreshAnswers holds the DNS answers last actually APPLIED
-	// for lastDNSRefreshBase (store generation + config pointer identity,
-	// read back after apply-time re-resolution under applySem, never a
-	// pre-apply proposal). Every writer holds applySem and records
-	// unconditionally — inside the hold it IS the newest applied state;
-	// failed applies invalidate. (Round-4: digest CAS removed, it only
+	// lastDNSRefreshAnswers holds the DNS state (prefixes and resolver failure
+	// flag) last actually APPLIED for lastDNSRefreshBase (store generation +
+	// config pointer identity, read back after apply-time re-resolution under
+	// applySem, never a pre-apply proposal). Every writer holds applySem and
+	// records unconditionally — inside the hold it IS the newest applied
+	// state; failed applies invalidate. (Round-4: digest CAS removed, it only
 	// ever dropped the newest record.)
 	dnsRefreshMu          sync.Mutex
 	lastDNSRefreshBase    *config.Config
-	lastDNSRefreshAnswers map[string][]string
-	// dnsResolvedConfigs marks configs already resolved outside applySem
-	// (#16601) — notably the DNS refresher's clone — so the pre-apply
-	// resolver does not resolve them again. Guarded by dnsRefreshMu.
-	dnsResolvedConfigs map[*config.Config]struct{}
+	lastDNSRefreshAnswers map[string]config.DNSAnswerState
+	// dnsRefreshApplying identifies the periodic refresher clone while its
+	// apply runs under applySem. The ordinary-apply baseline defer must not
+	// publish it; applyDNSRefreshedConfig owns its generation-CAS publication.
+	dnsRefreshApplying *config.Config
+	// dnsResolvedConfigs maps resolved clones to their exact source config
+	// (#16601); map membership also marks DNS already resolved outside
+	// applySem, so the pre-apply resolver does not resolve it again.
+	// Guarded by dnsRefreshMu.
+	dnsResolvedConfigs map[*config.Config]*config.Config
 	// relayRefRGIndex is the per-packet DHCP-relay gate's precomputed
 	// ref→RG index (#17086), keyed by config pointer identity: rebuilt
 	// only when the active config pointer changes, so the per-packet
@@ -1100,6 +1141,11 @@ type Daemon struct {
 	// after management-VRF rebind and before the final terminator reassertion.
 	// It models late networkd cleanup without replacing the apply pipeline.
 	beforeFinalVRFMissReassertForTest func()
+	// confirmTargetFeedInstallPending marks a rollback-target producer set
+	// temporarily installed while C2 remains active. Its callback must not
+	// re-apply C2 and tear the target feed back down before the next rollback
+	// timer fire (#17741). Zero means no such installation is pending.
+	confirmTargetFeedInstallPending atomic.Uint64
 	// confirmFeedDeferrals counts, per commit-confirmed generation, how often a
 	// timed-out rollback was deferred because its target waits on a
 	// dynamic-address feed (#9615). Read and written only by
@@ -1116,6 +1162,11 @@ type Daemon struct {
 	// the wiring re-reads under the semaphore — which is how a first version of
 	// the #6716 guard stayed green against a reverted call site.
 	preApplyHookForTest func()
+	// beforeCommitConfirmedPromotionForTest fires after the rollback-target
+	// pre-flight and before the store atomically checks the captured window
+	// generation and promotes. It lets the #17695 test confirm the pending
+	// window at the exact time-of-check/time-of-use boundary.
+	beforeCommitConfirmedPromotionForTest func()
 
 	// bootstrapTeardownForTest, when non-nil, replaces the real per-step
 	// teardown executed inside enterBootstrapMode (#5868). Test-only seam:
@@ -1124,6 +1175,10 @@ type Daemon struct {
 	// steps) to exercise the failure-aggregation and honest DEGRADED/complete
 	// reporting without faking the concrete netlink/FRR/dataplane owners.
 	bootstrapTeardownForTest func() []bootstrapTeardownStep
+
+	// dhcpRelayReconcileForTest substitutes the relay reconcile result so
+	// bootstrap's degraded aggregation can be tested without a live relay.
+	dhcpRelayReconcileForTest func(*config.Config) error
 
 	// applyErrForTest is the error the applyBodyForTest seam returns from
 	// applyConfigLocked (default nil = success). Test-only: lets a test drive
@@ -1439,6 +1494,14 @@ type Daemon struct {
 	// publish — readers treat that as "no mgmt VRF interfaces yet".
 	mgmtVRFInterfaces atomic.Pointer[map[string]bool]
 
+	// hbControlLinkMoves is the control link's routing VRF master-move count
+	// (routing.Manager.VRFMasterMoveSeq) at the last heartbeat-restart
+	// decision (#18597). The heartbeat is restarted after a management-VRF
+	// rebind only when the count moved since then, so a commit that leaves
+	// em0 in vrf-mgmt keeps its heartbeat sockets. Read and written only by
+	// the apply path under applySem; see controlLinkMovedSinceLastCheck.
+	hbControlLinkMoves controlLinkMoveMark
+
 	// rgStates tracks the unified cluster + VRRP state for each
 	// redundancy group. Both watchClusterEvents and watchVRRPEvents
 	// funnel transitions through rgStateMachine, which determines the
@@ -1491,14 +1554,17 @@ type Daemon struct {
 	// the two fabric slots (fab0/fab1) are one parameterized state, not
 	// hand-mirrored field pairs — fab1 drifted into real defects twice
 	// (#15683, #15918) while the copies were maintained by hand.
+	//
+	// Epoch-scoped (#17060): slot state is (re)installed by the populate
+	// loops each comms epoch and zeroed by clearFabricSlots during
+	// stopClusterComms or successor preflight.
 	fabricMu sync.RWMutex
 	// fabricSlots holds both slots under fabricMu, EXCEPT refreshCh,
 	// which is guarded by clusterCommsMu exactly as the former
-	// per-slot refresh-channel fields were (#4958): the
-	// constructor publishes it and stopClusterComms nils it under that
-	// lock, while populate loops receive their channel by value.
+	// per-slot refresh-channel fields were (#4958): the constructor
+	// publishes it and teardown/preflight nil it under that lock, while
+	// populate loops receive their channel by value.
 	fabricSlots [2]fabricSlot
-
 	// vipWarnedIfaces tracks interfaces that already emitted a
 	// "directAddVIPs: interface not found" warning to avoid log spam
 	// from the reconcile ticker. Reset on config commit.
@@ -1604,17 +1670,24 @@ type Daemon struct {
 	// nil selects the real method; production never sets it.
 	startClusterCommsFn func(context.Context)
 
+	// clusterCommsLifecycleMu serializes epoch creation and successor
+	// preparation with final teardown side effects. It is acquired before
+	// clusterCommsMu when both are needed. Stop joins its captured per-epoch
+	// work outside this lock; successor preparation joins all registered
+	// constructors while holding it, and constructor registration takes it too.
+	clusterCommsLifecycleMu sync.Mutex
 	// clusterCommsMu guards the cluster-comms epoch state that is published
 	// asynchronously by the startClusterComms constructor goroutine and torn
 	// down by stopClusterComms: sessionSync, the fabric slots' refreshCh channels,
-	// clusterCommsCtx/clusterCommsCancel, clusterCommsGen (#4958), and
-	// activeClusterTransport, which joined the epoch in #6290. Before
-	// #4958 the constructor wrote sessionSync (and re-dereferenced it) and the
-	// fabric channels from an untracked goroutine with no lock, so a
-	// stop→start restart could nil-deref (stop nils sessionSync between the
-	// goroutine's write and its next read) or let a stale constructor overwrite
-	// a newer epoch's session/endpoints. The mutex makes every read/write of
-	// these fields race-free; clusterCommsGen provides publish-if-current.
+	// clusterCommsCtx/clusterCommsCancel, clusterCommsGen (#4958), the current
+	// clusterCommsEpoch and its constructor/fabric join groups, and
+	// activeClusterTransport, which joined the epoch in #6290. Before #4958 the
+	// constructor wrote sessionSync (and re-dereferenced it) and the fabric
+	// channels from an untracked goroutine with no lock, so a stop→start restart
+	// could nil-deref (stop nils sessionSync between the goroutine's write and its
+	// next read) or let a stale constructor overwrite a newer epoch's
+	// session/endpoints. The mutex makes every read/write of these fields
+	// race-free; clusterCommsGen provides publish-if-current.
 	clusterCommsMu sync.Mutex
 	// sessionSyncTimeoutProfile is the latest applied timeout profile. The
 	// atomic snapshot bridges apply callbacks and asynchronous sync publication.
@@ -1629,11 +1702,15 @@ type Daemon struct {
 	// instead of clobbering the live epoch's state.
 	clusterCommsGen uint64
 
-	// clusterCommsWG tracks the in-flight startClusterComms constructor
-	// goroutine(s) so stopClusterComms can join them before nilling the shared
-	// comms state (#4958). Without the join a cancelled constructor could still
-	// be mid-publish while stop tore the epoch down.
-	clusterCommsWG sync.WaitGroup
+	// clusterCommsEpoch owns the constructor and fabric-loop joins for the
+	// current generation. beginClusterCommsEpoch replaces it under this lock;
+	// stopClusterComms captures and detaches it before waiting outside the lock.
+	clusterCommsEpoch *clusterCommsEpoch
+	// clusterCommsConstructorsWG joins constructors from predecessor epochs
+	// before successor preparation retires a published SessionSync. Its Add
+	// operations share clusterCommsLifecycleMu with Wait, preventing an Add
+	// from racing the preflight join.
+	clusterCommsConstructorsWG sync.WaitGroup
 
 	// startupGoodbyeRA tracks whether cold-backup cleanup is complete for each
 	// inactive RG. Distinct router identities must successfully receive a
@@ -1704,6 +1781,11 @@ type Daemon struct {
 	// bouncing rsyslog/chrony — but it also meant a FAILED reload was erased by
 	// the very convergence that preceded it. See daemon_service_reload_debt.go.
 	svcReloadDebt serviceReloadDebt
+	// chronyAcqStartRestarted: chrony has been restarted by this process
+	// since it first rendered a `bindacqdevice` (#18584). Read and written
+	// only by applySystemNTP, which runs under applySem. See there for why
+	// the first binding apply of every process restarts chrony.
+	chronyAcqStartRestarted bool
 	// routingDebt is the #9693 routing reconcile debt (routing_reconcile_debt_9693.go).
 	routingDebt routingReconcileDebt
 	// #11497: a day-2 real+gap nft failure leaves the newcomer without a
@@ -1760,6 +1842,21 @@ type Daemon struct {
 	// readiness bit flips so the VRRP/direct-ownership side effects that set
 	// the bit have a chance to propagate before the peer finalizes demotion.
 	localFailoverCommitDelay time.Duration
+	// frrHA coalesces RG-edge FRR reconciles (#18561); see daemon_frr_ha_coalesce.go.
+	frrHA frrHACoalescer
+	// ipmonGateHA coalesces RG-edge ip-monitoring gating reconciles behind
+	// the same debounce (#18561): the reconcile holds applySem across an FRR
+	// reload and a snapshot publish.
+	ipmonGateHA frrHACoalescer
+	// frrApplySeq orders HA FRR renders (#18561): every HA render (under
+	// applySem) and every RG ownership edge bumps it, and an HA render is
+	// applied, after applySem is released, only while it is unchanged and
+	// the FRR manager's WriteGeneration has not moved (see
+	// applyFRRConfigIfCurrent), so it can never overwrite a newer config.
+	frrApplySeq atomic.Uint64
+	// fibHashMu serializes reconcileFibMultipathHashPolicy, which the HA
+	// reconcile now reaches outside applySem (#18561).
+	fibHashMu sync.Mutex
 	// failoverActuations owns the failover fence barriers (#16124): the
 	// wait map watchClusterEvents resolves once it has finished ACTUATING
 	// a demotion (VRRP resign to priority-0 / rg_active clear), the
@@ -1784,6 +1881,29 @@ type Daemon struct {
 	// vrrpMgr.ResignRG directly; unit tests inject a barrier they control so
 	// the deferred fence verdict is drivable without real VRRP instances.
 	resignRethRGFn func(rgID int) vipReleaseBarrier
+	// directVIPDumpFailing latches the direct-VIP ownership dump failure so
+	// its warning fires once per failure streak, not per 2s reconcile tick
+	// (#18573).
+	directVIPDumpFailing atomic.Bool
+	// directVIPStampUnsupported latches, for the process lifetime, a kernel
+	// that accepted a stamped VIP but read it back with IFA_PROTO 0 (review
+	// Z1 on #18579). Set once by verifyDirectVIPStamps; adoption stops.
+	directVIPStampUnsupported atomic.Bool
+	// directVIPStampVerified latches the first stamp that read back with
+	// vipstamp.Proto, so the capability read-back costs one dump per
+	// process, not one per writing pass (review Z2 on #18579).
+	directVIPStampVerified atomic.Bool
+	// directVIPLogged latches the per-(netdev, VIP) direct-VIP reconcile
+	// diagnostics (bad address, failed add/remove/stamp, adoption) so each
+	// logs once per commit, not per 2s tick (#18573). Guarded by
+	// vipWarnedMu and cleared by resetVIPWarnings with vipWarnedIfaces.
+	directVIPLogged map[string]bool
+	// interfaceLinkRefreshWake is the debounced interface-link snapshot
+	// refresher's wake channel, published by startTransitGateLinkWatch so
+	// the direct-VIP reconcile can republish the userspace interface rows
+	// after it changes a RETH address outside a commit (#18573). nil until
+	// the refresher starts.
+	interfaceLinkRefreshWake atomic.Pointer[chan string]
 	// Test hooks for direct-mode VIP ownership reconciliation.
 	directAddVIPsFn        func(int) int
 	directRemoveVIPsFn     func(int) int
@@ -1804,6 +1924,10 @@ type Daemon struct {
 	// fabric peer-MAC resolution can be driven against a synthetic
 	// neighbour table.
 	neighListFn func(int, int) ([]netlink.Neigh, error)
+
+	// fabricRetryAfterFn supplies the fast-retry timer. Production uses
+	// time.After; tests can synchronize cancellation with the timer arm.
+	fabricRetryAfterFn func(time.Duration) <-chan time.Time
 
 	// eventStreamConnected is set when the helper's binary event stream
 	// is live. The polling fallback loop uses this to decide its cadence:

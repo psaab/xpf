@@ -86,6 +86,9 @@ ha_smoke_iperf_verdicts() {
 			printf 'FAIL iperf3 completion: JSON stream ended at %.3fs of %ss without a valid end event\n' \
 				"$observed_end_sec" "$duration"
 		fi
+		# #18543: callers accept only PASS/FAIL, so missing evidence fails closed.
+		interrupt_verdict=$(iperf_client_interrupt_verdict "$metrics_file")
+		printf '%s\n' "${interrupt_verdict/#VOID /FAIL }"
 	else
 		reason="$capture_error"
 		if [[ -z "$reason" ]]; then
@@ -97,6 +100,7 @@ ha_smoke_iperf_verdicts() {
 		[[ -n "$reason" ]] || reason="JSON-stream metrics were unavailable or invalid"
 		printf 'FAIL iperf3 throughput: JSON metrics unavailable: %s\n' "$reason"
 		printf 'FAIL iperf3 completion: JSON metrics unavailable: %s\n' "$reason"
+		printf 'FAIL iperf3 client interrupt: JSON metrics unavailable: %s\n' "$reason"
 	fi
 
 	for event_number in 1 2; do

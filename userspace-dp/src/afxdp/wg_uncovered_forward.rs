@@ -262,7 +262,6 @@ pub(in crate::afxdp) fn wg_uncovered_flow_hash(inner: &[u8]) -> u64 {
             // Fragment header (44) means only offset 0 carries ports.
             let mut proto = inner[6];
             let mut off = 40usize;
-            let mut frag_offset: u16 = 0;
             let mut fragmented = false;
             loop {
                 match proto {
@@ -278,7 +277,6 @@ pub(in crate::afxdp) fn wg_uncovered_flow_hash(inner: &[u8]) -> u64 {
                     }
                     44 if inner.len() >= off + 8 => {
                         proto = inner[off];
-                        frag_offset = (u16::from_be_bytes([inner[off + 2], inner[off + 3]]) >> 3) & 0x1fff;
                         fragmented = true;
                         off += 8;
                         break;

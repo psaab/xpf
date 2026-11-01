@@ -43,13 +43,8 @@ func (m *Manager) syncHAStateLocked() error {
 	if len(m.haGroups) == 0 {
 		return nil
 	}
-	groups := make([]HAGroupStatus, 0, len(m.haGroups))
-	for _, group := range m.haGroups {
-		groups = append(groups, group)
-	}
-	sort.Slice(groups, func(i, j int) bool {
-		return groups[i].RGID < groups[j].RGID
-	})
+	// #18559: the helper-facing view carries live transfer pre-activations.
+	groups := m.effectiveHAGroupsLocked()
 	// Log the HA state being sent to helper for debugging demotion detection.
 	for _, g := range groups {
 		if g.RGID > 0 && g.RGID <= 3 {
@@ -77,8 +72,7 @@ func (m *Manager) syncHAStateLocked() error {
 	// smaller configured set while the helper still owns this inventory; the
 	// lock-free watchdog snapshot must retain that membership until a new full
 	// publish lands.
-	m.helperHAStatePublished = true
-	m.haWatchdogHelperInventory = append(m.haWatchdogHelperInventory[:0], groups...)
+	m.adoptHelperInventoryLocked(groups)
 	m.publishHAWatchdogSnapshotLocked()
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		return err
@@ -931,21 +925,14 @@ func (m *Manager) configHasDataRGLocked() bool {
 // helper integrity preflight can reject — so the dataplane genuinely cannot
 // forward and the legitimate disarm still applies.
 //
-// CLASS (i) — unrepresentable policy CONTENT (caps.PolicyContentRejected is
-// non-empty: a policy names an application protocol/port or address the matcher
-// cannot represent). buildOneRuleSnapshot emits the `__unsupported__` sentinel
-// for such a rule, and a CURRENT helper rejects it via its non-mutating
-// integrity preflight while staying armed (keeping previous-good, or leaving
-// the default-deny PolicyState on a fresh boot). Disarming here would XDP_PASS
-// transit to the kernel and bypass that reject — the fail-OPEN #3261 closes —
-// so we KEEP the helper armed. The ONLY exception is an OLDER local helper that
-// predates the preflight: it would silently drop the sentinel and process the
-// resulting match-any rule with forwarding armed. We disarm just that narrow
-// case, keyed on the helper's reported snapshot protocol version (the helper
-// ships in the same .deb as the daemon, so this is only a transient
-// helper-upgrade-lag window on a single node), NOT on the content being
-// unrepresentable.
-//
+// CLASS (i) — policy content requiring fail-closed handling. Generic
+// unrepresentable content carries `__unsupported__` and the current helper
+// rejects the whole snapshot, retaining previous-good (fresh boot: default-
+// deny). DNS-only rules carry `__dns_unavailable__`; a current helper accepts
+// the snapshot but quarantines that rule to deny while siblings enforce. An
+// older local helper does not recognize the DNS marker, so the same
+// PolicyContentRejected diagnostic triggers the narrow compatibility disarm
+// below rather than risking it silently dropping the marker.
 // caps are read from the snapshot being published (snap.Capabilities), NOT
 // re-derived from cfg: only the snapshot value is feed-aware (#2049) and
 // reflects the ACTUAL per-rule sentinels, so a healthy dynamic-address feed
@@ -1283,6 +1270,9 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	}
 
 	prior, known := m.haGroups[rgID]
+	// #18559: a real promotion or demotion supersedes a transfer
+	// pre-activation for this RG.
+	m.supersedeTransferPreActiveLocked(rgID, prior, known, active)
 	group := prior
 	group.RGID = rgID
 	group.Active = active
@@ -1331,13 +1321,8 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 		m.rgTransitionInFlight.Store(true)
 		defer m.rgTransitionInFlight.Store(false)
 	}
-	groups := make([]HAGroupStatus, 0, len(m.haGroups))
-	for _, g := range m.haGroups {
-		groups = append(groups, g)
-	}
-	sort.Slice(groups, func(i, j int) bool {
-		return groups[i].RGID < groups[j].RGID
-	})
+	// #18559: other RGs may be pre-active for a transfer in flight.
+	groups := m.effectiveHAGroupsLocked()
 	var status ProcessStatus
 	req := ControlRequest{
 		Type: "update_ha_state",
@@ -1360,8 +1345,7 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	// inventory and holds ctrl one extra tick during takeover. Safe: the Active
 	// bits just written to rg_active are the ones the helper acknowledged.
 	m.pendingHAStateReplay = false
-	m.helperHAStatePublished = true
-	m.haWatchdogHelperInventory = append(m.haWatchdogHelperInventory[:0], groups...)
+	m.adoptHelperInventoryLocked(groups)
 	m.publishHAWatchdogSnapshotLocked()
 	if active {
 		// The helper has already acknowledged the RG activation update.
@@ -1419,10 +1403,9 @@ func (m *Manager) haWatchdogGroupsLocked() []HAGroupStatus {
 	if !m.helperHAStatePublished || len(m.haWatchdogHelperInventory) == 0 {
 		return nil
 	}
-	desired := make(map[int]HAGroupStatus, len(m.haGroups))
-	for id, group := range m.haGroups {
-		desired[id] = group
-	}
+	// #18559: a live transfer pre-activation is Go-side intent like the
+	// cluster truth, so a refresh must not read it as a demotion.
+	desired := m.effectiveHAGroupMapLocked()
 	groups := make([]HAGroupStatus, 0, len(m.haWatchdogHelperInventory))
 	for _, prior := range m.haWatchdogHelperInventory {
 		group := prior
@@ -1791,11 +1774,7 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	// published helper inventory retain the direct manager view.
 	groups := m.haWatchdogGroupsLocked()
 	if len(groups) == 0 {
-		groups = make([]HAGroupStatus, 0, len(m.haGroups))
-		for _, g := range m.haGroups {
-			groups = append(groups, g)
-		}
-		sort.Slice(groups, func(i, j int) bool { return groups[i].RGID < groups[j].RGID })
+		groups = m.effectiveHAGroupsLocked()
 	}
 	sessionSocketPath := m.sessionSocketPath()
 	processGen := m.haWatchdogProcessGen.Load()

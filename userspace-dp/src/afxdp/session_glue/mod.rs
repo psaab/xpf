@@ -7,14 +7,17 @@ mod delete_drop_sweep;
 mod install_table_purge;
 mod promote;
 
-pub(in crate::afxdp) use delete_drop_sweep::{DELETE_DROP_SWEEP_BUDGET, DeleteDropSweep};
+pub(in crate::afxdp) use delete_drop_sweep::DeleteDropSweep;
+#[cfg(test)]
+pub(in crate::afxdp) use delete_drop_sweep::DELETE_DROP_SWEEP_BUDGET;
 pub(in crate::afxdp) use install_table_purge::{
-    INSTALL_TABLE_PURGE_BUDGET, InstallTablePurge, install_table_purge_predicate,
+    InstallTablePurge, install_table_purge_predicate,
 };
 pub(in crate::afxdp) use promote::{
-    ConntrackFds, SharedSessionRefs, Tick, maybe_promote_synced_session,
-    maybe_promote_synced_session_with_conntrack, SessionHitVerdict,
+    ConntrackFds, SharedSessionRefs, Tick, maybe_promote_synced_session_with_conntrack, SessionHitVerdict,
 };
+#[cfg(test)]
+pub(in crate::afxdp) use promote::maybe_promote_synced_session;
 /// #10507 Cell 5a test seam: command-driven Demote/Refresh funnels for
 /// cross-module poll tests (unshared map, no BPF). Production `handle_*`
 /// stay `pub(in session_glue)`; these `#[cfg(test)]` delegates widen
@@ -66,12 +69,13 @@ mod resolution;
 // afxdp/mod.rs can name these leaves directly (see there).
 pub(in crate::afxdp) mod worker_commands;
 pub(in crate::afxdp) mod revalidation;
+
 mod tx_cancel;
 mod resolve;
 #[cfg(test)]
 mod modularity_13082_tests;
 pub(super) use forward_commit::{
-    ComposedNat, ForwardMetaInput, NatFailure, compose_outbound_source_nat, forward_session_metadata,
+    ForwardMetaInput, NatFailure, compose_outbound_source_nat, forward_session_metadata,
     forward_synced_entry, seed_forward_tcp_epilogue,
 };
 pub(super) use resolution::*;
@@ -79,15 +83,12 @@ pub(super) use worker_commands::*;
 pub(super) use revalidation::*;
 pub(super) use tx_cancel::*;
 pub(super) use resolve::*;
-pub(crate) use resolution::{INSTALL_TABLE_PURGE_NEEDED, policy_id_for_list_request};
-pub(crate) use revalidation::{
-    forward_export_candidates_for_owner_rgs, publish_worker_session_map_entry,
-};
+pub(crate) use resolution::policy_id_for_list_request;
+pub(crate) use revalidation::publish_worker_session_map_entry;
 #[cfg(test)]
 pub(crate) use revalidation::export_forward_sessions_for_owner_rgs;
 pub(crate) use worker_commands::{
     PEER_DELETE_REFUSED_LOCAL_OWNED, SESSION_DELETE_DROP_EPOCH,
-    SESSION_DELETE_REPLICA_DROPPED, SESSION_DELETE_REPLICA_DROP_REPAIRED,
     SESSION_REPLICATION_ENQUEUED, SESSION_REPLICATION_LOCK_CONTENDED,
     SESSION_REPLICATION_QUEUE_DEPTH_MAX, SESSION_REPLICATION_QUEUE_DEPTH_SUM,
     SESSION_REPLICATION_UPSERTS, session_delete_drop_epoch,
@@ -127,12 +128,20 @@ mod steering_row_owners_9560_tests;
 #[cfg(test)]
 #[path = "upsert_synced_14669_tests.rs"]
 mod upsert_synced_14669_tests;
+// #18550: a late peer re-import revives an idle-lapsed replica on the owner.
+#[cfg(test)]
+#[path = "lapsed_replica_reimport_18550_tests.rs"]
+mod lapsed_replica_reimport_18550_tests;
 #[cfg(test)]
 #[path = "shared_replica_hold_17683_tests.rs"]
 mod shared_replica_hold_17683_tests;
 #[cfg(test)]
 #[path = "probe_policy_17058_tests.rs"]
 mod probe_policy_17058_tests;
+// #18520: SYN on worker A + SYN-ACK on worker B must establish both tables.
+#[cfg(test)]
+#[path = "cross_worker_handshake_18520_tests.rs"]
+mod cross_worker_handshake_18520_tests;
 
 // #6600: the coordinator's pre-publish NAT reservation resolves the synced zone
 // pair through the SAME helper the worker-side upsert uses, so the two cannot

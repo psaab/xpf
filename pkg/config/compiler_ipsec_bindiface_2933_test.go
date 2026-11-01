@@ -139,9 +139,10 @@ func TestSecureTunnelBindIfaceCollisionRejectedAtCommit(t *testing.T) {
 }
 
 // TestSecureTunnelBindIfaceUnambiguousCommits proves the alias-collision gate
-// remains surgical: distinct units and distinct devices commit cleanly, and
-// same-bind VPNs commit only when their rendered traffic-selector unions are
-// provably disjoint (#11380).
+// remains surgical: distinct units and distinct devices commit cleanly, as
+// does a single VPN with a valid bind-interface. Multiple VPNs sharing one
+// if_id are separately rejected by the #17779 capture-owner gate, even when
+// their rendered traffic-selector unions are disjoint (#11380).
 func TestSecureTunnelBindIfaceUnambiguousCommits(t *testing.T) {
 	cases := []struct {
 		name string
@@ -159,17 +160,6 @@ func TestSecureTunnelBindIfaceUnambiguousCommits(t *testing.T) {
 			cmds: []string{
 				"set security ipsec vpn V1 bind-interface st0",
 				"set security ipsec vpn V2 bind-interface st1",
-			},
-		},
-		{
-			name: "same bind with disjoint rendered selectors (#11380)",
-			cmds: []string{
-				"set security ipsec vpn V1 bind-interface st0.0",
-				"set security ipsec vpn V1 traffic-selector to-peer-a local-ip 10.0.0.0/24",
-				"set security ipsec vpn V1 traffic-selector to-peer-a remote-ip 198.51.100.0/24",
-				"set security ipsec vpn V2 bind-interface st0.0",
-				"set security ipsec vpn V2 traffic-selector to-peer-b local-ip 10.0.0.0/24",
-				"set security ipsec vpn V2 traffic-selector to-peer-b remote-ip 203.0.113.0/24",
 			},
 		},
 		{

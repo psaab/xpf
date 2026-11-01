@@ -173,12 +173,12 @@ pub(in crate::afxdp::session_glue) fn handle_install_pptp_call(
     // #15950: a command queued while enabled must not install
     // after the ALG is disabled.
     if ctx.forwarding.pptp_enabled() {
-        if let Err(e) = ctx
+        if let Err(_e) = ctx
             .sessions
             .pptp_mut()
             .install(call, control, learned_ns)
         {
-            debug_log!("PPTP association refused: {:?}", e);
+            debug_log!("PPTP association refused: {:?}", _e);
         }
     }
 }

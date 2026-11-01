@@ -168,6 +168,7 @@ func resolveRIPIfNames(resolve func(string) string, rip *config.RIPConfig) *conf
 		out.Groups = groups
 	}
 	out.Redistribute = append([]string(nil), rip.Redistribute...)
+	out.GlobalRedistribute = append([]string(nil), rip.GlobalRedistribute...)
 	return &out
 }
 

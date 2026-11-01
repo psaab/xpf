@@ -218,6 +218,66 @@ else
 fi
 
 
+# #18567: the post-failback pool probe verdict and its port.
+for cell in \
+	"pass|[  5]   0.00-2.00   sec  1.2 GBytes  5.1 Gbits/sec  receiver
+iperf Done." \
+	"busy|iperf3: error - the server is busy running a test. try again later" \
+	"fail|iperf3: error - unable to connect to server - server may have stopped running or not be running: Connection timed out" \
+	"fail|[  5]   0.00-1.00   sec   640 KBytes  5.24 Mbits/sec  receiver
+[  5]   1.00-2.00   sec  0.00 Bytes  0.00 bits/sec" \
+	"fail|" ; do
+	want=${cell%%|*}
+	got=$(failover_pool_probe_verdict "${cell#*|}")
+	if [[ "$got" == "$want" ]]; then
+		ok "pool probe verdict: ${want} for '${cell#*|}'"
+	else
+		bad "pool probe verdict: want ${want}, got ${got} for '${cell#*|}'"
+	fi
+done
+# A client killed by timeout(1) prints interval and receiver lines but no
+# "iperf Done"; the fixture above pins that it scores fail, not pass.
+TF="${SCRIPT_DIR}/test-failover.sh"
+# shellcheck disable=SC2016 # the patterns match the script's literal ${...}
+{
+	pool_port=$(sed -n 's/^POOL_PORT="${POOL_PORT:-\([0-9]*\)}"$/\1/p' "$TF")
+	post_port=$(sed -n 's/^POOL_POST_PORT="${POOL_POST_PORT:-\([0-9]*\)}"$/\1/p' "$TF")
+	main_port=$(sed -n 's/^IPERF_PORT="${IPERF_PORT:-\([0-9]*\)}"$/\1/p' "$TF")
+	post_assigns=$(grep -c '^[[:space:]]*POOL_POST_PORT=' "$TF")
+	phase1b_on_pool=$(grep -c -- '-p ${POOL_PORT} -P 2 > /tmp/iperf3-pool-8280.log' "$TF")
+	probe_on_post=$(grep -c -- '-p ${POOL_POST_PORT} > /tmp/iperf3-pool-8280-post.log' "$TF")
+}
+if [[ -z "$pool_port" || -z "$post_port" || -z "$main_port" ]]; then
+	bad "could not read the POOL_PORT / POOL_POST_PORT / IPERF_PORT defaults from test-failover.sh (got '${pool_port}' '${post_port}' '${main_port}'): the port cell is not measuring anything"
+elif [[ "$post_assigns" == 1 && "$phase1b_on_pool" == 1 && "$probe_on_post" == 1 &&
+      "$pool_port" != "$post_port" && "$main_port" != "$post_port" ]]; then
+	ok "the post-failback pool probe uses its own port (${post_port}; Phase 1b runs on POOL_PORT ${pool_port}, the main client on ${main_port})"
+else
+	bad "the post-failback pool probe must not share a running client's port (POOL_PORT=${pool_port} IPERF_PORT=${main_port} POOL_POST_PORT=${post_port}; POOL_POST_PORT assignments=${post_assigns}, Phase 1b on POOL_PORT=${phase1b_on_pool}, probe on POOL_POST_PORT=${probe_on_post})"
+fi
+# The caller must route each verdict to the right counter: busy is a VOID,
+# anything else that is not pass is the #8341 FAIL. Pinned on the script text,
+# because the arms run only on a live cluster.
+tf_case=$(awk '/case "\$\(failover_pool_probe_verdict "\$pool_log"\)" in/,/^[[:space:]]*esac/' "${SCRIPT_DIR}/test-failover.sh")
+if grep -Pzq 'pass\)\n\s*pass "a pool-mode TCP flow connects' <<<"$tf_case" &&
+   grep -Pzq 'busy\)\n\s*void "a pool-mode TCP flow was NOT MEASURED' <<<"$tf_case" &&
+   grep -Pzq 'fail\)\n\s*fail "a pool-mode TCP flow did not complete' <<<"$tf_case" &&
+   grep -Pzq '\*\)\n\s*fail "the pool probe verdict helper returned an unrecognised' <<<"$tf_case"; then
+	ok "test-failover routes pool probe verdicts: pass->pass, busy->void, fail->fail, other->fail(unrecognised)"
+else
+	bad "test-failover must route pool probe verdicts: pass->pass, busy->void, fail->fail, other->fail(unrecognised)"
+fi
+# A probe whose launch failed must be a VOID, never scored from a previous
+# run's log: both launch steps record failure and the first branch checks it.
+# shellcheck disable=SC2016 # the patterns match the script's literal text
+if grep -q -- '-- rm -f /tmp/iperf3-pool-8280-post.log || pool_probe_started=0$' "$TF" &&
+   grep -q -- '/tmp/iperf3-pool-8280-post.log 2>&1 &" || pool_probe_started=0$' "$TF" &&
+   grep -Pzq 'if \[\[ "\$pool_probe_started" != 1 \]\]; then\n\s*void "#8280/#8341: the post-failback pool probe could not be started' "$TF"; then
+	ok "a pool probe that failed to launch is a VOID, not scored from a stale log"
+else
+	bad "a pool probe that failed to launch must be a VOID, not scored from a stale log"
+fi
+
 echo "----------------------------------------"
 echo "failover client selftest: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

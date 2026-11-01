@@ -54,6 +54,26 @@ FAKE_CALL_LOG=""
 # Rejecting an existing target models the Incus same-name re-push collision.
 FAKE_REJECT_EXISTING=0
 FAKE_MKTEMP_SEQ=""
+# #18544: the fragment systemd has LOADED for each unit, one file per unit in
+# this directory. Like FAKE_MKTEMP_SEQ it lives on disk, for the same subshell
+# reason. It changes only on fake_systemd_boot and `systemctl daemon-reload`,
+# never when a unit file is written or removed. That gap lets a cell catch a
+# reconcile that edits the disk but forgets to reload. The directory exists
+# only after a cell calls fake_systemd_boot, so other cells' daemon-reloads
+# leave the fake VM tree untouched.
+FAKE_SYSTEMD_DIR=""
+FAKE_SYSTEMD_UNITS=(xpfd.service xpf-transit-closed.service xpf-input-closed.service)
+# A remote path that the fake `rm`/`mv` reports as moved or removed but leaves
+# in place. A removal that reports success says nothing about the unit systemd
+# has loaded.
+FAKE_REMOVE_NOOP_PATH=""
+# "<unit>=<state>": systemd REJECTS that unit's packaged file and reports
+# <state> (e.g. bad-setting, as for a directive the node's systemd does not
+# know). It applies only while the packaged file is the loaded one.
+FAKE_LOADSTATE_OVERRIDE=""
+# When set to N, the Nth and every later `systemctl daemon-reload` fails
+# (rc 1) and reloads nothing. The count lives in a file (subshells).
+FAKE_RELOAD_FAIL_FROM=""
 
 setup_fake_vm() {
 	FAKE_VM=$(mktemp -d)
@@ -69,7 +89,64 @@ setup_fake_vm() {
 	FAKE_REJECT_EXISTING=0
 	FAKE_MKTEMP_SEQ=$(mktemp)
 	printf '0' > "$FAKE_MKTEMP_SEQ"
+	FAKE_SYSTEMD_DIR="$FAKE_VM/run/fake-systemd"
+	FAKE_REMOVE_NOOP_PATH=""
+	FAKE_LOADSTATE_OVERRIDE=""
+	FAKE_RELOAD_FAIL_FROM=""
 	mkdir -p "$FAKE_VM/usr/local/sbin" "$FAKE_VM/etc/systemd/system" "$FAKE_VM/tmp"
+}
+
+# _fake_systemd_resolve <unit> prints the fragment systemd would load for
+# <unit> from the fake disk right now, in unit search-path order: /etc, then
+# /run/systemd/system and /usr/local/lib (both of which /etc outranks), then
+# the package dirs. A symlink counts, as a mask or alias does for systemd. It
+# prints nothing when no unit exists.
+_fake_systemd_resolve() {
+	local d
+	for d in etc/systemd/system run/systemd/system usr/local/lib/systemd/system \
+		usr/lib/systemd/system lib/systemd/system; do
+		if [[ -e "$FAKE_VM/$d/$1" || -L "$FAKE_VM/$d/$1" ]]; then
+			printf '/%s/%s\n' "$d" "$1"
+			return 0
+		fi
+	done
+}
+
+# _fake_systemd_reload: re-read the disk for every modeled unit.
+_fake_systemd_reload() {
+	local u
+	mkdir -p "$FAKE_SYSTEMD_DIR"
+	for u in "${FAKE_SYSTEMD_UNITS[@]}"; do
+		_fake_systemd_resolve "$u" >"$FAKE_SYSTEMD_DIR/$u.fragment"
+	done
+}
+
+# fake_systemd_boot: systemd loads whatever units the fake disk holds now.
+fake_systemd_boot() { _fake_systemd_reload; }
+
+# fake_systemd_loaded <unit>: the fragment systemd currently has loaded.
+fake_systemd_loaded() {
+	cat "$FAKE_SYSTEMD_DIR/$1.fragment" 2>/dev/null
+}
+
+# fake_systemd_set_loaded <unit> <path>: model a stale load.
+fake_systemd_set_loaded() {
+	printf '%s\n' "$2" >"$FAKE_SYSTEMD_DIR/$1.fragment"
+}
+
+# _fake_systemd_loadstate <unit>: LoadState for the loaded fragment.
+_fake_systemd_loadstate() {
+	local frag
+	frag=$(fake_systemd_loaded "$1")
+	if [[ -z "$frag" ]]; then
+		echo not-found
+	elif [[ "$(readlink "$FAKE_VM$frag" 2>/dev/null)" == /dev/null ]]; then
+		echo masked
+	elif [[ "$FAKE_LOADSTATE_OVERRIDE" == "$1="* && ( "$frag" == /usr/lib/* || "$frag" == /lib/* ) ]]; then
+		echo "${FAKE_LOADSTATE_OVERRIDE#*=}"
+	else
+		echo loaded
+	fi
 }
 
 # fake_calls_contain <extended-regex> — did any recorded incus call match?
@@ -86,6 +163,10 @@ teardown_fake_vm() {
 	FAKE_REJECT_EXISTING=0
 	[[ -n "$FAKE_MKTEMP_SEQ" ]] && rm -f "$FAKE_MKTEMP_SEQ"
 	FAKE_MKTEMP_SEQ=""
+	FAKE_SYSTEMD_DIR=""
+	FAKE_REMOVE_NOOP_PATH=""
+	FAKE_LOADSTATE_OVERRIDE=""
+	FAKE_RELOAD_FAIL_FROM=""
 }
 
 # incus mock: supports `incus exec <inst> -- <cmd...>` and
@@ -181,6 +262,16 @@ _fake_exec() {
 			[[ -f "$FAKE_VM/${2#/}" ]]
 			return $?
 		fi
+		# test -L <path>  /  deploy_reconcile_unit_shadow's mask guard
+		if [[ "$1" == "-L" ]]; then
+			[[ -L "$FAKE_VM/${2#/}" ]]
+			return $?
+		fi
+		# test -e <path>  /  its free-/etc-path check before a restore
+		if [[ "$1" == "-e" ]]; then
+			[[ -e "$FAKE_VM/${2#/}" ]]
+			return $?
+		fi
 		return 2
 		;;
 	rm)
@@ -188,9 +279,56 @@ _fake_exec() {
 		while [[ "${1:-}" == -* ]]; do shift; done
 		local remote_path="${1:-}" rel
 		[[ -n "$remote_path" && "$remote_path" == /* && "$remote_path" != "/" ]] || return 2
+		# #18544: report success and remove nothing for the armed path.
+		[[ -n "$FAKE_REMOVE_NOOP_PATH" && "$remote_path" == "$FAKE_REMOVE_NOOP_PATH" ]] && return 0
 		rel="${remote_path#/}"
 		rm -rf -- "$FAKE_VM/${rel:?}"
 		return 0
+		;;
+	mv)
+		# mv -f <src> <dst>, both VM paths (#18544 parks a unit file).
+		shift
+		[[ "${1:-}" == -f ]] && shift
+		local mv_src="${1:-}" mv_dst="${2:-}"
+		[[ "$mv_src" == /* && "$mv_dst" == /* ]] || return 2
+		[[ -n "$FAKE_REMOVE_NOOP_PATH" && "$mv_src" == "$FAKE_REMOVE_NOOP_PATH" ]] && return 0
+		mv -f "$FAKE_VM/${mv_src#/}" "$FAKE_VM/${mv_dst#/}"
+		return $?
+		;;
+	mkdir)
+		shift
+		[[ "${1:-}" == -p ]] && shift
+		[[ "${1:-}" == /* ]] || return 2
+		mkdir -p "$FAKE_VM/${1#/}"
+		return $?
+		;;
+	find)
+		# find <dir> -mindepth 2 -maxdepth 2 -type l -name <unit>: the
+		# install-link scan. Paths come back as VM paths.
+		shift
+		local find_dir="$1"
+		shift
+		[[ "$find_dir" == /* ]] || return 2
+		[[ -d "$FAKE_VM$find_dir" ]] || return 1
+		find "$FAKE_VM$find_dir" "$@" | sed "s|^$FAKE_VM||"
+		return 0
+		;;
+	readlink)
+		# readlink <path>: the literal link target, as on the VM.
+		shift
+		readlink "$FAKE_VM/${1#/}"
+		return $?
+		;;
+	ln)
+		# ln -sfn <target> <link>: the target is stored verbatim (a VM path);
+		# only the link itself lives under $FAKE_VM.
+		shift
+		[[ "$1" == "-sfn" ]] || return 2
+		local ln_target="$2" ln_link="$3"
+		[[ "$ln_link" == /* ]] || return 2
+		mkdir -p "$(dirname "$FAKE_VM/${ln_link#/}")"
+		ln -sfn "$ln_target" "$FAKE_VM/${ln_link#/}"
+		return $?
 		;;
 	mktemp)
 		shift
@@ -224,11 +362,30 @@ _fake_exec() {
 	systemctl)
 		shift
 		case "$1" in
-		daemon-reload) return 0 ;;
+		daemon-reload)
+			# #18544: reload re-reads the disk, but only once a cell has
+			# booted the fake systemd (see FAKE_SYSTEMD_DIR).
+			if [[ -n "$FAKE_RELOAD_FAIL_FROM" && -d "$FAKE_SYSTEMD_DIR" ]]; then
+				local reload_n
+				reload_n=$(( $(cat "$FAKE_SYSTEMD_DIR/reload.count" 2>/dev/null || echo 0) + 1 ))
+				printf '%s' "$reload_n" >"$FAKE_SYSTEMD_DIR/reload.count"
+				(( reload_n >= FAKE_RELOAD_FAIL_FROM )) && return 1
+			fi
+			if [[ -n "$FAKE_SYSTEMD_DIR" && -d "$FAKE_SYSTEMD_DIR" ]]; then
+				_fake_systemd_reload
+			fi
+			return 0
+			;;
 		show)
 			# systemctl show -p ExecStart --value xpfd  => emit a
-			# "{ path=... ; ... }" line; -p MainPID --value => the pid.
-			if [[ "$*" == *ExecStart* ]]; then
+			# "{ path=... ; ... }" line; -p MainPID --value => the pid;
+			# -p FragmentPath/LoadState --value <unit> => the LOADED
+			# fragment and its state (#18544); <unit> is the last arg.
+			if [[ "$*" == *FragmentPath* ]]; then
+				fake_systemd_loaded "${!#}"
+			elif [[ "$*" == *LoadState* ]]; then
+				[[ -d "$FAKE_SYSTEMD_DIR" ]] && _fake_systemd_loadstate "${!#}"
+			elif [[ "$*" == *ExecStart* ]]; then
 				echo "{ path=$FAKE_EXECSTART ; argv[]=$FAKE_EXECSTART ; ... }"
 			elif [[ "$*" == *MainPID* ]]; then
 				echo "$FAKE_MAINPID"
@@ -567,6 +724,499 @@ test_deb_repush_wiring() {
 	ok "deb re-push wiring: deploy_vm_deb uses the unique-slot helper"
 }
 
+# ── #18544: raw-deploy unit shadows on the deb path ───────────────────
+# The fixture models a node that was raw-deployed once and deb-deployed
+# since. The raw push left a regular-file /etc copy (for xpfd, with the
+# pre-#18213 KillMode), and the deb installed the packaged unit under
+# /usr/lib. The raw `systemctl enable` pointed the install link at the /etc
+# copy, and systemd loaded the /etc copy. That was the measured state of
+# the lab nodes on 2026-10-30. The paths are LITERALS, not the lib's
+# constants, so a wrong constant in the lib cannot bring its fixture along
+# with it.
+#
+# unit_shadow_fixture <file|mask|alias|none> <packaged: 1|0>
+#   (xpfd.service, wants link in multi-user.target.wants)
+unit_shadow_fixture() {
+	local kind="$1" packaged="$2"
+	local etc="$FAKE_VM/etc/systemd/system"
+	mkdir -p "$etc/multi-user.target.wants"
+	case "$kind" in
+		file) printf '[Service]\nExecStart=/usr/local/sbin/xpfd\nKillMode=control-group\n' >"$etc/xpfd.service" ;;
+		mask) ln -s /dev/null "$etc/xpfd.service" ;;
+		alias) ln -s /opt/stale/xpfd.service "$etc/xpfd.service" ;;
+		none) ;;
+	esac
+	if [[ "$packaged" == 1 ]]; then
+		mkdir -p "$FAKE_VM/usr/lib/systemd/system"
+		printf '[Service]\nExecStartPre=/usr/local/sbin/xpfd verify-dataplane\nExecStart=/usr/local/sbin/xpfd\nKillMode=mixed\n' \
+			>"$FAKE_VM/usr/lib/systemd/system/xpfd.service"
+	fi
+	ln -s /etc/systemd/system/xpfd.service "$etc/multi-user.target.wants/xpfd.service"
+	fake_systemd_boot
+}
+
+# Any call that starts, stops, restarts or re-enables a unit. The reconcile
+# runs while xpfd is live and forwarding, ahead of the controlled cut, so a
+# single one of these is an uncontrolled restart.
+UNIT_SHADOW_SERVICE_TOUCH='systemctl (start|stop|restart|try-restart|reload-or-restart|try-reload-or-restart|kill|enable|reenable|disable|mask|unmask|isolate)( |$)|--now'
+
+# rc + stderr of one reconcile run, in a subshell because die() exits.
+unit_shadow_run() {
+	UNIT_SHADOW_RC=0
+	UNIT_SHADOW_ERR=$( ( "$@" ) 2>&1 >/dev/null ) || UNIT_SHADOW_RC=$?
+}
+
+test_unit_shadow_removed_packaged_unit_governs_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	local problems=() loaded link
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	loaded=$(fake_systemd_loaded xpfd.service)
+	link=$(readlink "$FAKE_VM/etc/systemd/system/multi-user.target.wants/xpfd.service")
+	(( UNIT_SHADOW_RC == 0 )) || problems+=("reconcile rc=$UNIT_SHADOW_RC")
+	[[ -e "$FAKE_VM/etc/systemd/system/xpfd.service" ]] && problems+=("the /etc copy is still on disk")
+	[[ -e "$FAKE_VM/var/lib/xpf-deploy-unit-shadow/xpfd.service" ]] && problems+=("the parked copy was not dropped")
+	fake_calls_contain '^exec vm -- systemctl daemon-reload$' || problems+=("no daemon-reload was issued")
+	[[ "$loaded" == /usr/lib/systemd/system/xpfd.service ]] ||
+		problems+=("systemd has '${loaded:-nothing}' loaded, not the packaged unit")
+	[[ "$link" == /usr/lib/systemd/system/xpfd.service ]] ||
+		problems+=("wants link still -> '$link', not the packaged unit")
+	grep -qx 'KillMode=mixed' "$FAKE_VM/usr/lib/systemd/system/xpfd.service" 2>/dev/null ||
+		problems+=("the packaged unit was altered")
+	# Idempotence: a second deploy against the reconciled node succeeds and
+	# leaves it exactly as it was.
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	(( UNIT_SHADOW_RC == 0 )) || problems+=("second run rc=$UNIT_SHADOW_RC")
+	[[ "$(fake_systemd_loaded xpfd.service)" == "$loaded" && -f "$FAKE_VM/usr/lib/systemd/system/xpfd.service" &&
+		! -e "$FAKE_VM/etc/systemd/system/xpfd.service" &&
+		"$(readlink "$FAKE_VM/etc/systemd/system/multi-user.target.wants/xpfd.service")" == "$link" ]] ||
+		problems+=("second run changed the node")
+	# Across BOTH runs: never start/stop/restart/re-enable the live daemon.
+	fake_calls_contain "$UNIT_SHADOW_SERVICE_TOUCH" &&
+		problems+=("touched the live service: $(grep -E "$UNIT_SHADOW_SERVICE_TOUCH" "$FAKE_CALL_LOG" | head -n1)")
+	if (( ${#problems[@]} )); then
+		bad "unit shadow (#18544): the packaged unit must govern after reconcile: ${problems[*]}"
+	else
+		ok "unit shadow (#18544): /etc copy removed, daemon-reloaded, packaged unit loaded, wants link re-pointed, no restart, idempotent"
+	fi
+	teardown_fake_vm
+}
+
+# The /etc copy was removed by an earlier run whose daemon-reload never ran:
+# nothing is left on disk to find, yet systemd still has the stale unit
+# loaded, and that unit governs the cut's stop.
+test_unit_shadow_stale_load_without_file_reloads_18544() {
+	setup_fake_vm
+	unit_shadow_fixture none 1
+	fake_systemd_set_loaded xpfd.service /etc/systemd/system/xpfd.service
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC == 0 )) && fake_calls_contain '^exec vm -- systemctl daemon-reload$' &&
+		[[ "$(fake_systemd_loaded xpfd.service)" == /usr/lib/systemd/system/xpfd.service ]]; then
+		ok "unit shadow (#18544): a /etc copy still LOADED with no file on disk is reloaded away"
+	else
+		bad "unit shadow (#18544): a /etc copy still loaded after its file was removed must be reloaded (rc=$UNIT_SHADOW_RC, loaded=$(fake_systemd_loaded xpfd.service))"
+	fi
+	teardown_fake_vm
+}
+
+# A /dev/null symlink at the /etc path is a mask (xpf-deploy.py's #7559 daemon
+# hold). Removing it would unmask a deliberately held daemon.
+test_unit_shadow_mask_symlink_left_alone_18544() {
+	setup_fake_vm
+	unit_shadow_fixture mask 1
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC == 0 )) &&
+		[[ "$(readlink "$FAKE_VM/etc/systemd/system/xpfd.service")" == /dev/null ]] &&
+		! fake_calls_contain '(rm|mv) .*/etc/systemd/system/xpfd\.service( |$)'; then
+		ok "unit shadow (#18544): a mask symlink at the /etc path is left in place"
+	else
+		bad "unit shadow (#18544): a mask symlink must be left alone (rc=$UNIT_SHADOW_RC, link=$(readlink "$FAKE_VM/etc/systemd/system/xpfd.service"))"
+	fi
+	teardown_fake_vm
+}
+
+# Any other symlink at the /etc path is an alias this deploy did not write.
+# It must not be removed, and it must not pass as "the packaged unit" when
+# systemd loads it in place of the packaged file.
+test_unit_shadow_alias_symlink_not_packaged_hardfails_18544() {
+	setup_fake_vm
+	unit_shadow_fixture alias 1
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"not the packaged"* ]] &&
+		[[ "$(readlink "$FAKE_VM/etc/systemd/system/xpfd.service")" == /opt/stale/xpfd.service ]] &&
+		! fake_calls_contain '(rm|mv) .*/etc/systemd/system/xpfd\.service( |$)'; then
+		ok "unit shadow (#18544): an alias symlink that keeps governing hard-fails and is not removed"
+	else
+		bad "unit shadow (#18544): an alias symlink in place of the packaged unit must hard-fail, untouched (rc=$UNIT_SHADOW_RC, link=$(readlink "$FAKE_VM/etc/systemd/system/xpfd.service"))"
+	fi
+	teardown_fake_vm
+}
+
+# With no packaged unit to fall back to, removing the /etc copy would leave
+# the node with no unit at all. The reconcile must refuse and keep it.
+test_unit_shadow_kept_without_packaged_unit_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 0
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ -f "$FAKE_VM/etc/systemd/system/xpfd.service" ]] &&
+		[[ "$UNIT_SHADOW_ERR" == *"refusing to remove"* ]] &&
+		! fake_calls_contain '(rm|mv) .*/etc/systemd/system/xpfd\.service( |$)'; then
+		ok "unit shadow (#18544): no packaged unit -> hard fail, /etc copy kept"
+	else
+		bad "unit shadow (#18544): with no packaged unit the /etc copy must be kept and the deploy refused (rc=$UNIT_SHADOW_RC, /etc copy present=$([[ -f "$FAKE_VM/etc/systemd/system/xpfd.service" ]] && echo yes || echo no))"
+	fi
+	teardown_fake_vm
+}
+
+# A move that reports success while the file stays. The verdict comes from
+# the unit systemd LOADED, not from the move's exit status.
+test_unit_shadow_surviving_removal_hardfails_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	FAKE_REMOVE_NOOP_PATH=/etc/systemd/system/xpfd.service
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"not the packaged"* ]]; then
+		ok "unit shadow (#18544): a /etc copy still loaded after removal + daemon-reload hard-fails"
+	else
+		bad "unit shadow (#18544): a /etc copy that survives removal must hard-fail on the LOADED unit (rc=$UNIT_SHADOW_RC)"
+	fi
+	teardown_fake_vm
+}
+
+# No unit anywhere, so systemd loaded nothing. The cut cannot be governed
+# by the packaged unit; fail here, ahead of the cut.
+test_unit_shadow_no_loaded_unit_hardfails_18544() {
+	setup_fake_vm
+	unit_shadow_fixture none 0
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"not loaded"* ]]; then
+		ok "unit shadow (#18544): no loaded xpfd unit hard-fails"
+	else
+		bad "unit shadow (#18544): no loaded xpfd unit must hard-fail (rc=$UNIT_SHADOW_RC)"
+	fi
+	teardown_fake_vm
+}
+
+# The /etc copy outranked a runtime unit in /run/systemd/system. Removing it
+# PROMOTES that unit over the packaged one. "A fragment exists and it is not
+# /etc" would pass this; the positive check must refuse it and put the
+# previous unit back, so the node is as it was before the deploy.
+test_unit_shadow_promoted_runtime_unit_rolls_back_18544() {
+	setup_fake_vm
+	mkdir -p "$FAKE_VM/run/systemd/system"
+	printf '[Service]\nExecStart=/usr/local/sbin/xpfd\n' >"$FAKE_VM/run/systemd/system/xpfd.service"
+	unit_shadow_fixture file 1
+	local problems=()
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	(( UNIT_SHADOW_RC != 0 )) || problems+=("reconcile passed (rc=0) with /run/systemd/system/xpfd.service loaded")
+	[[ "$UNIT_SHADOW_ERR" == *"not the packaged"* ]] || problems+=("no 'not the packaged' diagnostic")
+	grep -qx 'KillMode=control-group' "$FAKE_VM/etc/systemd/system/xpfd.service" 2>/dev/null ||
+		problems+=("the previous /etc copy was not put back")
+	[[ "$(fake_systemd_loaded xpfd.service)" == /etc/systemd/system/xpfd.service ]] ||
+		problems+=("systemd has '$(fake_systemd_loaded xpfd.service)' loaded after the rollback")
+	[[ "$(readlink "$FAKE_VM/etc/systemd/system/multi-user.target.wants/xpfd.service")" == /etc/systemd/system/xpfd.service ]] ||
+		problems+=("the wants link was re-pointed despite the failed check")
+	if (( ${#problems[@]} )); then
+		bad "unit shadow (#18544): a promoted non-packaged unit must fail and roll back: ${problems[*]}"
+	else
+		ok "unit shadow (#18544): a promoted /run/systemd/system unit fails the positive check and the /etc copy is put back"
+	fi
+	teardown_fake_vm
+}
+
+# The packaged file is the fragment, but systemd rejects it (LoadState
+# bad-setting, e.g. a directive the node's systemd does not know). The path
+# alone would pass; LoadState must not.
+test_unit_shadow_packaged_unit_rejected_rolls_back_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	FAKE_LOADSTATE_OVERRIDE=xpfd.service=bad-setting
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"not loaded"* ]] &&
+		grep -qx 'KillMode=control-group' "$FAKE_VM/etc/systemd/system/xpfd.service" 2>/dev/null &&
+		[[ "$(fake_systemd_loaded xpfd.service)" == /etc/systemd/system/xpfd.service ]]; then
+		ok "unit shadow (#18544): a packaged unit systemd rejects fails LoadState and the /etc copy is put back"
+	else
+		bad "unit shadow (#18544): a rejected packaged unit must fail on LoadState and roll back (rc=$UNIT_SHADOW_RC, loaded=$(fake_systemd_loaded xpfd.service))"
+	fi
+	teardown_fake_vm
+}
+
+# The raw deploy also pushes both boot barriers into /etc, shadowing their
+# packaged copies. This uses the udp-node link shape: every install link
+# (sysinit.target.wants for WantedBy=, systemd-networkd.service.requires and
+# xpfd.service.requires for RequiredBy=) targets the /etc copy. After the
+# reconcile, all three units load the packaged file. Every install link still
+# exists, so enablement and RequiredBy= survive, and each one targets the
+# packaged file.
+test_unit_shadow_barrier_units_reconciled_18544() {
+	setup_fake_vm
+	local etc="$FAKE_VM/etc/systemd/system" u l problems=()
+	local -a links=(
+		multi-user.target.wants/xpfd.service
+		sysinit.target.wants/xpf-transit-closed.service
+		systemd-networkd.service.requires/xpf-transit-closed.service
+		sysinit.target.wants/xpf-input-closed.service
+		systemd-networkd.service.requires/xpf-input-closed.service
+		xpfd.service.requires/xpf-input-closed.service
+	)
+	mkdir -p "$FAKE_VM/usr/lib/systemd/system"
+	for u in xpfd.service xpf-transit-closed.service xpf-input-closed.service; do
+		printf '[Unit]\nDescription=stale raw push of %s\n' "$u" >"$etc/$u"
+		printf '[Unit]\nDescription=packaged %s\n' "$u" >"$FAKE_VM/usr/lib/systemd/system/$u"
+	done
+	for l in "${links[@]}"; do
+		mkdir -p "$etc/$(dirname "$l")"
+		ln -s "/etc/systemd/system/$(basename "$l")" "$etc/$l"
+	done
+	fake_systemd_boot
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	(( UNIT_SHADOW_RC == 0 )) || problems+=("rc=$UNIT_SHADOW_RC: $UNIT_SHADOW_ERR")
+	for u in xpfd.service xpf-transit-closed.service xpf-input-closed.service; do
+		[[ -e "$etc/$u" ]] && problems+=("$u: /etc copy still on disk")
+		[[ "$(fake_systemd_loaded "$u")" == "/usr/lib/systemd/system/$u" ]] ||
+			problems+=("$u: loaded '$(fake_systemd_loaded "$u")'")
+	done
+	for l in "${links[@]}"; do
+		if [[ ! -L "$etc/$l" ]]; then
+			problems+=("$l: install link gone (unit no longer enabled / RequiredBy= lost)")
+		elif [[ "$(readlink "$etc/$l")" != "/usr/lib/systemd/system/$(basename "$l")" ]]; then
+			problems+=("$l -> $(readlink "$etc/$l")")
+		fi
+	done
+	fake_calls_contain "$UNIT_SHADOW_SERVICE_TOUCH" &&
+		problems+=("touched a live unit: $(grep -E "$UNIT_SHADOW_SERVICE_TOUCH" "$FAKE_CALL_LOG" | head -n1)")
+	if (( ${#problems[@]} )); then
+		bad "unit shadow (#18544): xpfd + both boot barriers must load the packaged units with every install link kept: ${problems[*]}"
+	else
+		ok "unit shadow (#18544): xpfd + both boot barriers load the packaged units; all 6 install links kept and re-pointed; no unit touched"
+	fi
+	teardown_fake_vm
+}
+
+# An earlier run was interrupted after its move: the copy is parked, the /etc
+# path is empty, and no reload ever ran. This run finds nothing to move
+# (removed=0), and its check fails because a /run unit is promoted. It must
+# still put the parked copy back and name it, not leave the node on an
+# unverified unit with the copy stranded (seat H, round 2).
+test_unit_shadow_interrupted_stash_restored_18544() {
+	setup_fake_vm
+	mkdir -p "$FAKE_VM/run/systemd/system" "$FAKE_VM/var/lib/xpf-deploy-unit-shadow"
+	printf '[Service]\nExecStart=/usr/local/sbin/xpfd\n' >"$FAKE_VM/run/systemd/system/xpfd.service"
+	unit_shadow_fixture none 1
+	printf '[Service]\nExecStart=/usr/local/sbin/xpfd\nKillMode=control-group\n' \
+		>"$FAKE_VM/var/lib/xpf-deploy-unit-shadow/xpfd.service"
+	fake_systemd_set_loaded xpfd.service /etc/systemd/system/xpfd.service
+	local problems=()
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	(( UNIT_SHADOW_RC != 0 )) || problems+=("reconcile passed with /run/systemd/system/xpfd.service loaded")
+	[[ "$UNIT_SHADOW_ERR" == *"/var/lib/xpf-deploy-unit-shadow/xpfd.service"* ]] ||
+		problems+=("the error does not name the parked copy")
+	grep -qx 'KillMode=control-group' "$FAKE_VM/etc/systemd/system/xpfd.service" 2>/dev/null ||
+		problems+=("the parked copy was not put back at /etc")
+	[[ -e "$FAKE_VM/var/lib/xpf-deploy-unit-shadow/xpfd.service" ]] && problems+=("the parked copy is still stranded")
+	[[ "$(fake_systemd_loaded xpfd.service)" == /etc/systemd/system/xpfd.service ]] ||
+		problems+=("systemd has '$(fake_systemd_loaded xpfd.service)' loaded after the restore")
+	if (( ${#problems[@]} )); then
+		bad "unit shadow (#18544): a copy parked by an interrupted run must be restored on a failed check: ${problems[*]}"
+	else
+		ok "unit shadow (#18544): a copy parked by an interrupted earlier run is restored and named when the check fails"
+	fi
+	teardown_fake_vm
+}
+
+# The rollback's reload fails. The error must say so, not claim the node is
+# "as it was" while systemd still has the unverified unit loaded.
+test_unit_shadow_rollback_reload_failure_reported_18544() {
+	setup_fake_vm
+	mkdir -p "$FAKE_VM/run/systemd/system"
+	printf '[Service]\nExecStart=/usr/local/sbin/xpfd\n' >"$FAKE_VM/run/systemd/system/xpfd.service"
+	unit_shadow_fixture file 1
+	FAKE_RELOAD_FAIL_FROM=2
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"daemon-reload FAILED"* ]] &&
+		[[ "$UNIT_SHADOW_ERR" != *"as it was"* ]]; then
+		ok "unit shadow (#18544): a failed rollback reload is reported, not claimed as a clean restore"
+	else
+		bad "unit shadow (#18544): a failed rollback reload must be reported truthfully (rc=$UNIT_SHADOW_RC, err=$UNIT_SHADOW_ERR)"
+	fi
+	teardown_fake_vm
+}
+
+# A deb pinned through XPF_DEPLOY_DEB_PATH can predate the boot barriers
+# (#9852, #10751) and ship no packaged copy. On a raw-deployed node the /etc
+# barrier copies are then the only ones. The barriers must be skipped with a
+# warning, while xpfd, which is required, is still reconciled (seat G).
+test_unit_shadow_unpackaged_barrier_skipped_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	local etc="$FAKE_VM/etc/systemd/system" u problems=()
+	for u in xpf-transit-closed.service xpf-input-closed.service; do
+		printf '[Unit]\nDescription=raw push of %s\n' "$u" >"$etc/$u"
+	done
+	fake_systemd_boot
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	(( UNIT_SHADOW_RC == 0 )) || problems+=("rc=$UNIT_SHADOW_RC: $UNIT_SHADOW_ERR")
+	for u in xpf-transit-closed.service xpf-input-closed.service; do
+		[[ -f "$etc/$u" ]] || problems+=("$u: the only copy was removed")
+		[[ "$UNIT_SHADOW_ERR" == *"No packaged $u"* ]] || problems+=("$u: no skip warning")
+	done
+	[[ "$(fake_systemd_loaded xpfd.service)" == /usr/lib/systemd/system/xpfd.service ]] ||
+		problems+=("xpfd not reconciled: loaded '$(fake_systemd_loaded xpfd.service)'")
+	if (( ${#problems[@]} )); then
+		bad "unit shadow (#18544): unpackaged barriers must be skipped, xpfd still reconciled: ${problems[*]}"
+	else
+		ok "unit shadow (#18544): a deb with no packaged barriers skips them with a warning and still reconciles xpfd"
+	fi
+	teardown_fake_vm
+}
+
+# One unit in the loop fails its check. The wrapper must fail the deploy, not
+# carry on to the cut with that unit unverified.
+test_unit_shadow_loop_propagates_unit_failure_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	local etc="$FAKE_VM/etc/systemd/system" u
+	mkdir -p "$FAKE_VM/run/systemd/system"
+	for u in xpf-transit-closed.service xpf-input-closed.service; do
+		printf '[Unit]\nDescription=raw push of %s\n' "$u" >"$etc/$u"
+		printf '[Unit]\nDescription=packaged %s\n' "$u" >"$FAKE_VM/usr/lib/systemd/system/$u"
+	done
+	printf '[Unit]\nDescription=runtime %s\n' xpf-transit-closed.service \
+		>"$FAKE_VM/run/systemd/system/xpf-transit-closed.service"
+	fake_systemd_boot
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"xpf-transit-closed.service"*"not the packaged"* ]]; then
+		ok "unit shadow (#18544): one failing unit fails the whole reconcile"
+	else
+		bad "unit shadow (#18544): a failing unit in the loop must fail the deploy (rc=$UNIT_SHADOW_RC)"
+	fi
+	teardown_fake_vm
+}
+
+# A parked copy exists, but the /etc path is occupied (here by an alias). The
+# restore must not overwrite what is there; it names both and fails.
+test_unit_shadow_occupied_path_not_overwritten_18544() {
+	setup_fake_vm
+	unit_shadow_fixture alias 1
+	mkdir -p "$FAKE_VM/var/lib/xpf-deploy-unit-shadow"
+	printf '[Service]\nKillMode=control-group\n' >"$FAKE_VM/var/lib/xpf-deploy-unit-shadow/xpfd.service"
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"NOT restored"* ]] &&
+		[[ "$(readlink "$FAKE_VM/etc/systemd/system/xpfd.service")" == /opt/stale/xpfd.service ]] &&
+		[[ -f "$FAKE_VM/var/lib/xpf-deploy-unit-shadow/xpfd.service" ]]; then
+		ok "unit shadow (#18544): a parked copy is never restored over an occupied /etc path"
+	else
+		bad "unit shadow (#18544): an occupied /etc path must not be overwritten by the restore (rc=$UNIT_SHADOW_RC)"
+	fi
+	teardown_fake_vm
+}
+
+# An interrupted run parked a barrier, and the deb deployed now predates the
+# barriers. The parked copy is the unit's ONLY copy. It must go back to /etc,
+# or the node boots without the transit barrier while its
+# systemd-networkd.service.requires link still names it (both seats, round 3).
+test_unit_shadow_unpackaged_barrier_stash_restored_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	local etc="$FAKE_VM/etc/systemd/system" stash="$FAKE_VM/var/lib/xpf-deploy-unit-shadow" problems=()
+	mkdir -p "$stash" "$etc/systemd-networkd.service.requires"
+	printf '[Unit]\nDescription=raw push of transit barrier\n' >"$stash/xpf-transit-closed.service"
+	ln -s /etc/systemd/system/xpf-transit-closed.service "$etc/systemd-networkd.service.requires/xpf-transit-closed.service"
+	printf '[Unit]\nDescription=raw push of input barrier\n' >"$etc/xpf-input-closed.service"
+	fake_systemd_boot
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	(( UNIT_SHADOW_RC == 0 )) || problems+=("rc=$UNIT_SHADOW_RC: $UNIT_SHADOW_ERR")
+	grep -q 'raw push of transit barrier' "$etc/xpf-transit-closed.service" 2>/dev/null ||
+		problems+=("the parked transit barrier was not put back at /etc")
+	[[ -e "$stash/xpf-transit-closed.service" ]] && problems+=("the parked copy is still stranded")
+	[[ "$UNIT_SHADOW_ERR" == *"Put the parked"*"xpf-transit-closed.service"* ]] ||
+		problems+=("no warning naming the restore")
+	[[ "$UNIT_SHADOW_ERR" == *"Leaving /etc/systemd/system/xpf-transit-closed.service as it is"* ]] &&
+		problems+=("warned 'as it is' about a path that was empty")
+	[[ "$(fake_systemd_loaded xpf-transit-closed.service)" == /etc/systemd/system/xpf-transit-closed.service ]] ||
+		problems+=("transit barrier not loaded after the restore: '$(fake_systemd_loaded xpf-transit-closed.service)'")
+	[[ -f "$etc/xpf-input-closed.service" ]] || problems+=("the input barrier's only copy was removed")
+	if (( ${#problems[@]} )); then
+		bad "unit shadow (#18544): a parked barrier must be restored when the deb ships none: ${problems[*]}"
+	else
+		ok "unit shadow (#18544): a barrier parked by an interrupted run is put back when the deployed deb ships no packaged copy"
+	fi
+	teardown_fake_vm
+}
+
+# The same, but the /etc path is occupied: the restore must not overwrite it,
+# and the warning must name the parked copy rather than claim nothing is
+# wrong.
+test_unit_shadow_unpackaged_barrier_occupied_named_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	local etc="$FAKE_VM/etc/systemd/system" stash="$FAKE_VM/var/lib/xpf-deploy-unit-shadow"
+	mkdir -p "$stash"
+	printf '[Unit]\nDescription=parked transit barrier\n' >"$stash/xpf-transit-closed.service"
+	printf '[Unit]\nDescription=current transit barrier\n' >"$etc/xpf-transit-closed.service"
+	fake_systemd_boot
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	if (( UNIT_SHADOW_RC == 0 )) &&
+		grep -q 'current transit barrier' "$etc/xpf-transit-closed.service" 2>/dev/null &&
+		[[ -f "$stash/xpf-transit-closed.service" ]] &&
+		[[ "$UNIT_SHADOW_ERR" == *"/var/lib/xpf-deploy-unit-shadow/xpf-transit-closed.service"*"NOT restored"* ]]; then
+		ok "unit shadow (#18544): with no packaged barrier, a parked copy is named and never restored over an occupied /etc path"
+	else
+		bad "unit shadow (#18544): an occupied barrier path must be kept and the parked copy named (rc=$UNIT_SHADOW_RC)"
+	fi
+	teardown_fake_vm
+}
+
+# The restore in the skip branch reloads; when that reload fails, the warning
+# must say so rather than report a clean restore.
+test_unit_shadow_unpackaged_barrier_reload_failure_reported_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	local stash="$FAKE_VM/var/lib/xpf-deploy-unit-shadow"
+	mkdir -p "$stash"
+	printf '[Unit]\nDescription=raw push of transit barrier\n' >"$stash/xpf-transit-closed.service"
+	fake_systemd_boot
+	# Reload #1 is xpfd's own reconcile; #2 is the barrier restore.
+	FAKE_RELOAD_FAIL_FROM=2
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	if (( UNIT_SHADOW_RC == 0 )) && [[ "$UNIT_SHADOW_ERR" == *"xpf-transit-closed.service, but daemon-reload FAILED"* ]] &&
+		[[ "$UNIT_SHADOW_ERR" != *"xpf-transit-closed.service and reloaded"* ]]; then
+		ok "unit shadow (#18544): a failed reload after a skip-branch restore is reported"
+	else
+		bad "unit shadow (#18544): a failed reload after a skip-branch restore must be reported (rc=$UNIT_SHADOW_RC)"
+	fi
+	teardown_fake_vm
+}
+
+# The helper is useless unless the deb path calls it, and the call's
+# POSITION matters. After the deb install, the packaged units on disk are the
+# ones being deployed. Before the `upgrade --rolling` cut, the cut's stop
+# already runs under the packaged KillMode. The call is anchored at line end:
+# a backgrounded `... &` call would race the cut.
+test_unit_shadow_reconcile_wired_into_deb_deploy_18544() {
+	local code n_install n_reconcile n_cut
+	code=$(awk '/^deploy_vm_deb\(\)/,/^}/' "$SCRIPT_DIR/cluster-setup.sh")
+	_body_line() {
+		grep -nE "$1" <<<"$code" | grep -vE '^[0-9]+:[[:space:]]*#' | head -n1 | cut -d: -f1
+	}
+	# shellcheck disable=SC2016  # literal $rinst/$deb: matching source text
+	n_install=$(_body_line '^[[:space:]]*deploy_install_deb "\$rinst" "\$deb"')
+	# shellcheck disable=SC2016  # literal $rinst: matching source text
+	n_reconcile=$(_body_line '^[[:space:]]*deploy_reconcile_unit_shadows "\$rinst"[[:space:]]*$')
+	n_cut=$(_body_line 'xpfd upgrade --rolling')
+	if [[ -z "$n_reconcile" ]]; then
+		bad "unit shadow wiring (#18544): deploy_vm_deb never calls deploy_reconcile_unit_shadows as a plain foreground statement"
+	elif [[ -z "$n_install" || -z "$n_cut" ]]; then
+		bad "unit shadow wiring (#18544): could not locate the install/cut anchors in deploy_vm_deb; the test is stale, fix the pattern"
+	elif (( n_install < n_reconcile && n_reconcile < n_cut )); then
+		ok "unit shadow wiring (#18544): deploy_vm_deb reconciles after the deb install (:$n_install) and before the cut (:$n_cut)"
+	else
+		bad "unit shadow wiring (#18544): reconcile at :$n_reconcile must sit between the deb install (:$n_install) and the cut (:$n_cut)"
+	fi
+	unset -f _body_line
+}
+
 test_reconcile_stale_pin_removes_managed() {
 	setup_fake_vm
 	mkdir -p "$FAKE_VM/etc/systemd/system/xpfd.service.d"
@@ -881,11 +1531,11 @@ test_preflight_cleans_up_on_reject() {
 	rm -f "$lb"; teardown_fake_vm
 }
 
-# #9558: the two refusal arms must print DIFFERENT remediation. verify-dataplane
-# exits 3 ONLY for the #1864 kernel-verifier reject; every other refusal (for
-# example a live pinned-map ABI mismatch) exits 1, and "make generate" cannot fix
-# it. A presence check alone would pass the pre-fix wrapper, which printed the
-# #1864 text for BOTH, so the exit-1 cell asserts that remediation is ABSENT.
+# #9558: exit 3 is the #1864 kernel-verifier reject; legacy other refusals
+# (for example a live pinned-map ABI mismatch) exit 1, and "make generate"
+# cannot fix those. A presence check alone would pass the pre-fix wrapper,
+# which printed the #1864 text for BOTH, so the exit-1 cell asserts that
+# remediation is absent. #17769 adds distinct code-4/5 remediation cells below.
 test_preflight_verifier_reject_prescribes_1864_remediation() {
 	setup_fake_vm
 	local lb; lb=$(mktemp); make_local_bin "$lb" "BAD-SHIM"
@@ -898,6 +1548,46 @@ test_preflight_verifier_reject_prescribes_1864_remediation() {
 		bad "preflight #9558: exit 3 must print the #1864 make-generate remediation; got: $out"
 	else
 		ok "preflight #9558: exit 3 (kernel-verifier REJECT) prints the #1864 make-generate remediation"
+	fi
+	rm -f "$lb"; teardown_fake_vm
+}
+
+test_preflight_low_headroom_prescribes_budget_remediation() {
+	setup_fake_vm
+	local lb; lb=$(mktemp); make_local_bin "$lb" "LOW-HEADROOM-SHIM"
+	FAKE_VERIFY_RC=4
+	local out rc=0
+	out=$( ( deploy_verify_dataplane_preflight vm "$lb" ) 2>&1 ) || rc=$?
+	if [[ $rc -eq 0 ]]; then
+		bad "preflight #17769: exit 4 (LOW-HEADROOM) must hard-fail"
+	elif [[ "$out" != *"(exit 4)"* || "$out" != *"LOW-HEADROOM"* ||
+		"$out" != *"Free verifier headroom"* || "$out" != *"sufficient measured headroom"* ]]; then
+		bad "preflight #17769: exit 4 must prescribe measured headroom remediation; got: $out"
+	elif [[ "$out" == *"rebuilding the shim will not help"* || "$out" == *"stale pin cleared"* ]]; then
+		bad "preflight #17769: exit 4 received the unrelated generic/pinned-map remediation; got: $out"
+	else
+		ok "preflight #17769: exit 4 refuses with low-headroom remediation, not stale-pin advice"
+	fi
+	rm -f "$lb"; teardown_fake_vm
+}
+
+test_preflight_unmeasured_headroom_prescribes_measurement_remediation() {
+	setup_fake_vm
+	local lb; lb=$(mktemp); make_local_bin "$lb" "UNMEASURED-HEADROOM-SHIM"
+	FAKE_VERIFY_RC=5
+	local out rc=0
+	out=$( ( deploy_verify_dataplane_preflight vm "$lb" ) 2>&1 ) || rc=$?
+	if [[ $rc -eq 0 ]]; then
+		bad "preflight #17769: exit 5 (UNMEASURED-HEADROOM) must hard-fail"
+	elif [[ "$out" != *"(exit 5)"* || "$out" != *"UNMEASURED-HEADROOM"* ||
+		"$out" != *"processed-instruction count was unavailable"* ||
+		"$out" != *"kernel that reports processed-instruction counts"* ]]; then
+		bad "preflight #17769: exit 5 must prescribe restoring measurement; got: $out"
+	elif [[ "$out" == *"LOW-HEADROOM:"* || "$out" == *"Free verifier headroom"* ||
+		"$out" == *"rebuilding the shim will not help"* || "$out" == *"stale pin cleared"* ]]; then
+		bad "preflight #17769: exit 5 was confused with measured low headroom or generic refusal; got: $out"
+	else
+		ok "preflight #17769: exit 5 refuses with measurement remediation, not low-headroom/stale-pin advice"
 	fi
 	rm -f "$lb"; teardown_fake_vm
 }
@@ -2409,6 +3099,398 @@ node0   200
 	fi
 }
 
+# #18523: `show chassis cluster status` prints Takeover/Transfer/Forwarding
+# sub-lines under the LOCAL node's row, so on fw0 the node1 row sits four
+# lines below the header. The HA smokes read every (node, RG) through
+# deploy_node_rg_role; the control proves the `grep -A2` window they used
+# misses exactly this row.
+test_rg_role_reader_skips_local_sublines_18523() {
+	local split='Redundancy group: 1 , Failover count: 1
+node0  200      secondary-hold no       yes      None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=inactive vrrp-master=none
+node1  100      primary        no       no       None
+
+Redundancy group: 2 , Failover count: 0
+node0  200      primary        no       no       None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=active vrrp-master=none
+node1  100      secondary      no       no       None
+'
+	local old_window
+	old_window=$(printf '%s' "$split" | grep -A2 "Redundancy group: 1" | grep node1 | awk '{print $3}' || true)
+	if [[ $(printf '%s' "$split" | deploy_node_rg_role node1 1) == primary ]] &&
+		[[ $(printf '%s' "$split" | deploy_node_rg_role node0 1) == secondary-hold ]] &&
+		[[ $(printf '%s' "$split" | deploy_node_rg_role node1 2) == secondary ]] &&
+		[[ -z "$old_window" ]]; then
+		ok "RG role reader: peer row below local sub-lines is read; grep -A2 misses it (#18523)"
+	else
+		bad "RG role reader: peer row below local sub-lines (#18523) not read, or the grep -A2 control no longer misses it"
+	fi
+}
+
+# #18523: each node's own `Forwarding: rg-active=` line is the forwarding
+# authority. Missing, duplicated, wrong-RG and non-active/inactive lines fail
+# (rc 1). A DIVERGENCE suffix, or any token besides rg-active=/vrrp-master=,
+# is surfaced (rc 2, `<value> -- <suffix>`) so a caller comparing against a
+# bare value FAILs and names it; the reader used to drop it.
+test_rg_local_forwarding_reader_18523() {
+	local fw1_view='Redundancy group: 1 , Failover count: 4
+node1  100      primary        no       no       None
+  Forwarding: rg-active=active vrrp-master=none
+node0  200      secondary-hold no       yes      None
+
+Redundancy group: 2 , Failover count: 3
+node1  100      secondary      no       no       None
+  Forwarding: rg-active=inactive vrrp-master=none
+node0  200      primary        no       no       None
+'
+	local dup='Redundancy group: 1 , Failover count: 1
+node0  200      primary        no       no       None
+  Forwarding: rg-active=active vrrp-master=none
+  Forwarding: rg-active=inactive vrrp-master=none
+'
+	local partial='Redundancy group: 1 , Failover count: 1
+node0  200      secondary-hold no       yes      None
+  Forwarding: rg-active=inactive vrrp-master=partial -- DIVERGENCE: VRRP master on only some member interfaces
+node1  100      primary        no       no       None
+'
+	local nospace='Redundancy group: 2 , Failover count: 1
+node0  200      primary        no       no       None
+  Forwarding: rg-active=active vrrp-master=none --DIVERGENCE: this node is forwarding for a group it does not own
+'
+	local odd='Redundancy group: 1 , Failover count: 1
+node0  200      primary        no       no       None
+  Forwarding: rg-active=maybe vrrp-master=none
+'
+	local got rc missing=()
+	got=$(printf '%s' "$fw1_view" | deploy_rg_local_forwarding 1) && [[ "$got" == active ]] || missing+=("fw1 RG1 active")
+	got=$(printf '%s' "$fw1_view" | deploy_rg_local_forwarding 2) && [[ "$got" == inactive ]] || missing+=("fw1 RG2 inactive")
+	printf '%s' "$fw1_view" | deploy_rg_local_forwarding 3 >/dev/null && missing+=("RG3 absent")
+	printf '%s' "$dup" | deploy_rg_local_forwarding 1 >/dev/null && missing+=("duplicate")
+	printf '%s' 'No VRRP groups configured' | deploy_rg_local_forwarding 1 >/dev/null && missing+=("no block")
+	printf '%s' "$odd" | deploy_rg_local_forwarding 1 >/dev/null && missing+=("value not active/inactive")
+	got=$(printf '%s' "$partial" | deploy_rg_local_forwarding 1)
+	rc=$?
+	[[ $rc -eq 2 && "$got" == 'inactive -- DIVERGENCE: VRRP master on only some member interfaces' ]] ||
+		missing+=("DIVERGENCE suffix rc=$rc got='$got'")
+	got=$(printf '%s' "$nospace" | deploy_rg_local_forwarding 2)
+	rc=$?
+	[[ $rc -eq 2 && "$got" == 'active -- DIVERGENCE: this node is forwarding for a group it does not own' ]] ||
+		missing+=("unspaced suffix rc=$rc got='$got'")
+	if ((${#missing[@]} == 0)); then
+		ok "RG forwarding reader: exact-RG local rg-active; missing/duplicate/odd fail; DIVERGENCE suffix surfaced rc 2 (#18523)"
+	else
+		bad "RG forwarding reader (#18523): ${missing[*]}"
+	fi
+}
+
+# aa_view <local-node-id> then, for RG1 and RG2 in order, three words:
+# <local role> <local Forwarding value, or - for no line> <peer role>.
+# Renders the FormatStatus shape: local row, Takeover/Transfer/Forwarding
+# sub-lines, then the peer row.
+aa_view() {
+	local me="$1" peer=$((1 - $1)) rg=1
+	shift
+	while (($# >= 3)); do
+		printf 'Redundancy group: %s , Failover count: 1\n' "$rg"
+		printf 'node%s  100      %-14s no       no       None\n' "$me" "$1"
+		printf '  Takeover ready: yes\n  Transfer ready: yes\n'
+		[[ "$2" == - ]] || printf '  Forwarding: %s\n' "$2"
+		printf 'node%s  200      %-14s no       no       None\n\n' "$peer" "$3"
+		rg=$((rg + 1))
+		shift 3
+	done
+}
+
+# aa_split_row <label> <fw0-status> <fw1-status> <want-pass> <want-fail> <needle>
+# drives the real deploy_active_active_split_verdict under
+# `set -euo pipefail` and checks the exact PASS/FAIL counts and one needle.
+aa_split_row() {
+	local label="$1" s0="$2" s1="$3" want_pass="$4" want_fail="$5" needle="$6" out
+	# shellcheck disable=SC2030,SC2031,SC2329 # mocks and counters scoped to this subshell
+	out=$(
+		PASS=0 FAIL=0
+		pass() { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$*"; }
+		fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$*"; }
+		set -euo pipefail
+		deploy_active_active_split_verdict "$s0" "$s1"
+		printf 'RESULT pass=%d fail=%d CONTINUED\n' "$PASS" "$FAIL"
+	)
+	if [[ "$out" == *"RESULT pass=$want_pass fail=$want_fail CONTINUED"* && "$out" == *"$needle"* ]]; then
+		ok "active-active split verdict: $label (#18523)"
+	else
+		bad "active-active split verdict: $label (#18523): want pass=$want_pass fail=$want_fail with '$needle'; got: $(tr '\n' '|' <<<"$out")"
+	fi
+}
+
+# #18523: test-active-active.sh scores the RG split through this verdict.
+# RG2 is read from BOTH views (fw1 claiming RG2 primary, or forwarding it,
+# used to pass), and a DIVERGENCE suffix on any Forwarding line FAILs.
+test_active_active_split_verdict_18523() {
+	local a='rg-active=active vrrp-master=none' i='rg-active=inactive vrrp-master=none'
+	local s0 s1
+	s0=$(aa_view 0 secondary-hold "$i" primary primary "$a" secondary)
+	s1=$(aa_view 1 primary "$a" secondary-hold secondary "$i" primary)
+	aa_split_row "healthy split" "$s0" "$s1" 4 0 "RG2 (LAN) forwarding stayed on fw0"
+	aa_split_row "old owner plain secondary" \
+		"$(aa_view 0 secondary "$i" primary primary "$a" secondary)" "$s1" 4 0 "RG1 (WAN) moved to fw1"
+	aa_split_row "fw1's own view does not hold RG1" \
+		"$s0" "$(aa_view 1 secondary-hold "$a" secondary-hold secondary "$i" primary)" 3 1 \
+		"RG1 did not move to fw1 (fw0 view: node0=secondary-hold node1=primary; fw1 view: node1=secondary-hold)"
+	aa_split_row "fw1 also claims RG2 primary" \
+		"$s0" "$(aa_view 1 primary "$a" secondary-hold primary "$i" primary)" 3 1 \
+		"RG2 not owned by fw0 alone (fw0 view: node0=primary; fw1 view: node1=primary)"
+	aa_split_row "fw1 also forwards RG2" \
+		"$s0" "$(aa_view 1 primary "$a" secondary-hold secondary "$a" primary)" 3 1 \
+		"RG2 (LAN) forwarding not on fw0 alone (fw0 rg-active=active, fw1 rg-active=active)"
+	aa_split_row "DIVERGENCE on fw0 RG1" \
+		"$(aa_view 0 secondary-hold 'rg-active=inactive vrrp-master=partial -- DIVERGENCE: VRRP master on only some member interfaces' primary primary "$a" secondary)" \
+		"$s1" 3 1 "fw0 rg-active=inactive -- DIVERGENCE: VRRP master on only some member interfaces"
+	aa_split_row "DIVERGENCE on fw1 RG2" \
+		"$s0" "$(aa_view 1 primary "$a" secondary-hold secondary 'rg-active=inactive vrrp-master=none -- DIVERGENCE: this node owns the group but is not forwarding for it' primary)" \
+		3 1 "fw1 rg-active=inactive -- DIVERGENCE"
+	aa_split_row "RG1 did not move" \
+		"$(aa_view 0 primary "$a" secondary primary "$a" secondary)" \
+		"$(aa_view 1 secondary "$i" primary secondary "$i" primary)" 2 2 \
+		"RG1 did not move to fw1 (fw0 view: node0=primary node1=secondary; fw1 view: node1=secondary)"
+	aa_split_row "no Forwarding lines" \
+		"$(aa_view 0 secondary-hold - primary primary - secondary)" \
+		"$(aa_view 1 primary - secondary-hold secondary - primary)" 2 2 \
+		"RG1 (WAN) forwarding not on fw1 alone (fw0 rg-active=missing, fw1 rg-active=missing)"
+	aa_split_row "fw1 status empty" "$s0" "" 0 4 "fw1 view: node1=missing"
+}
+
+# ── #18523: restore_fw0_primary with a mocked incus and clock ──────────
+# The mock keeps per-RG state in files (every `incus` call runs in a
+# command-substitution subshell) and `sleep N` advances SECONDS instead of
+# waiting. A granted yield makes fw1 read secondary-hold at once; fw0 reads
+# primary RM_DELAY mocked seconds later. Each refused request answers with
+# the barrier-fence error seen on integ7a.
+RM_REFUSAL='error: demotion peer barrier failed: session sync barrier fenced seq=0'
+
+rm_role() {
+	local view="$1" rg="$2" own granted=0 at=0
+	own=$(<"$RM_ST/own$rg")
+	if [[ -s "$RM_ST/granted$rg" ]]; then
+		granted=1
+		at=$(<"$RM_ST/granted$rg")
+	fi
+	if [[ "$view" == 0 ]]; then
+		if [[ "$own" == 0 ]] || ((granted && SECONDS >= at + RM_DELAY)); then
+			echo primary
+		else
+			echo secondary
+		fi
+	elif [[ "$RM_FW1" == dual ]] || [[ "$own" == 1 && "$granted" == 0 ]]; then
+		echo primary
+	elif ((granted)); then
+		echo secondary-hold
+	else
+		echo secondary
+	fi
+}
+
+rm_status() {
+	local me="$1" peer=$((1 - $1)) rg
+	for rg in 0 1 2; do
+		printf 'Redundancy group: %s , Failover count: 1\n' "$rg"
+		printf 'node%s  100      %-14s no       no       None\n' "$me" "$(rm_role "$me" "$rg")"
+		printf '  Takeover ready: yes\n  Transfer ready: yes\n'
+		printf 'node%s  200      %-14s no       no       None\n\n' "$peer" "$(rm_role "$peer" "$rg")"
+	done
+}
+
+rm_incus() {
+	local inst="$2" cmd="${*: -1}" rg left
+	printf '%s %s\n' "$inst" "$cmd" >>"$RM_ST/calls"
+	case "$cmd" in
+	"show chassis cluster status")
+		if [[ "$inst" == fw0 ]]; then
+			rm_status 0
+		elif [[ "$RM_FW1" == unreadable ]]; then
+			return 1
+		else
+			rm_status 1
+		fi
+		;;
+	"request chassis cluster failover reset redundancy-group "*) ;;
+	"request chassis cluster failover redundancy-group "*)
+		rg=${cmd##* }
+		left=$(<"$RM_ST/refuse")
+		if ((left > 0)); then
+			echo $((left - 1)) >"$RM_ST/refuse"
+			echo "$RM_REFUSAL"
+			return 1
+		fi
+		[[ -s "$RM_ST/granted$rg" ]] || echo "$SECONDS" >"$RM_ST/granted$rg"
+		echo "Manual failover completed for redundancy group $rg"
+		;;
+	*) return 99 ;;
+	esac
+}
+
+# rm_run <owner-at-start 0|1> <refusals> <delay> <fw1 normal|dual|unreadable>
+#        [RESTORE_FW0_WAIT=<v>] [RESTORE_FW0_BUDGET=<v>]
+# runs the real deploy_restore_fw0_primary and prints its verdicts plus
+# `RESULT rc=<rc> pass=<n> fail=<n> yields=<n> CONTINUED`. Both knobs are
+# unset unless passed, so a caller's environment cannot move a row.
+rm_run() {
+	local owner="$1" refuse="$2" delay="$3" fw1="$4" rg kv
+	shift 4
+	RM_ST=$(mktemp -d)
+	for rg in 0 1 2; do echo "$owner" >"$RM_ST/own$rg"; done
+	echo "$refuse" >"$RM_ST/refuse"
+	: >"$RM_ST/calls"
+	# shellcheck disable=SC2030,SC2031,SC2329 # mocks and counters scoped to this subshell
+	(
+		unset RESTORE_FW0_WAIT RESTORE_FW0_BUDGET
+		for kv in "$@"; do
+			case "$kv" in
+			RESTORE_FW0_WAIT=*) export RESTORE_FW0_WAIT="${kv#*=}" ;;
+			RESTORE_FW0_BUDGET=*) export RESTORE_FW0_BUDGET="${kv#*=}" ;;
+			*) echo "rm_run: unknown setting $kv" ;;
+			esac
+		done
+		export FW0=fw0 FW1=fw1 RM_DELAY="$delay" RM_FW1="$fw1"
+		PASS=0 FAIL=0
+		incus() { rm_incus "$@"; }
+		sleep() { SECONDS=$((SECONDS + ${1%.*})); }
+		pass() { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$*"; }
+		fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$*"; }
+		info() { printf '  info  %s\n' "$*"; }
+		set -euo pipefail
+		rc=0
+		deploy_restore_fw0_primary t || rc=$?
+		printf 'RESULT rc=%d pass=%d fail=%d yields=%d CONTINUED\n' "$rc" "$PASS" "$FAIL" \
+			"$(grep -c 'request chassis cluster failover redundancy-group' "$RM_ST/calls" || true)"
+	)
+	rm -rf "$RM_ST"
+}
+
+# rm_row <label> <want RESULT prefix> <needle> <rm_run args...>
+rm_row() {
+	local label="$1" want="$2" needle="$3" out
+	shift 3
+	out=$(rm_run "$@")
+	if [[ "$out" == *"RESULT $want"* && "$out" == *CONTINUED* && "$out" == *"$needle"* ]]; then
+		ok "restore verdict: $label (#18523)"
+	else
+		bad "restore verdict: $label (#18523): want '$want' with '$needle'; got: $(tr '\n' '|' <<<"$out")"
+	fi
+}
+
+# #18523: the restore verdict both HA smokes run. A completed restore FAILs
+# on any refusal or over RESTORE_FW0_BUDGET (rc 0, the run continues); one
+# that never completes FAILs with rc 1. fw0 counts as restored only when
+# fw1's own view agrees, so a dual-primary RG and an unreadable fw1 are
+# "not restored", never an abort.
+test_restore_fw0_verdict_18523() {
+	rm_row "already restored" "rc=0 pass=1 fail=0 yields=0" "t: fw0 already primary" 0 0 0 normal
+	rm_row "prompt, no refusal" "rc=0 pass=1 fail=0 yields=3" "(3 request(s), 0 refused)" 1 0 0 normal
+	rm_row "one refusal" "rc=0 pass=0 fail=1 yields=4" \
+		"4 request(s), 1 refused; last refusal: RG0: $RM_REFUSAL)" 1 1 0 normal
+	rm_row "three refusals" "rc=0 pass=0 fail=1 yields=6" "6 request(s), 3 refused" 1 3 0 normal
+	rm_row "over budget, no refusal" "rc=0 pass=0 fail=1 yields=3" "(budget 30s; 3 request(s), 0 refused)" \
+		1 0 12 normal
+	rm_row "same restore, RESTORE_FW0_BUDGET=45" "rc=0 pass=1 fail=0 yields=3" "(3 request(s), 0 refused)" \
+		1 0 12 normal RESTORE_FW0_BUDGET=45
+	rm_row "RESTORE_FW0_BUDGET=abc falls back to 30" "rc=0 pass=0 fail=1" "budget 30s" \
+		1 0 12 normal RESTORE_FW0_BUDGET=abc
+	rm_row "refused until the deadline" "rc=1 pass=0 fail=1" \
+		"could not restore fw0 as primary within 60s (last refusal: RG0: $RM_REFUSAL)" 1 20 0 normal
+	rm_row "RESTORE_FW0_WAIT=abc falls back to 60" "rc=1 pass=0 fail=1" "within 60s" \
+		1 20 0 normal RESTORE_FW0_WAIT=abc
+	rm_row "dual-primary is not restored" "rc=1 pass=0 fail=1" "could not restore fw0 as primary" \
+		0 0 0 dual
+	rm_row "fw1 unreadable is not restored" "rc=1 pass=0 fail=1 yields=0" "could not restore fw0 as primary" \
+		0 0 0 unreadable
+}
+
+# #18523: the healthy predicate at its edges: equal to the budget passes,
+# one second over or one refusal fails.
+test_restore_healthy_boundaries_18523() {
+	if deploy_restore_healthy 0 30 0 && deploy_restore_healthy 30 30 0 &&
+		! deploy_restore_healthy 31 30 0 && ! deploy_restore_healthy 0 30 1 &&
+		! deploy_restore_healthy 31 30 2; then
+		ok "restore healthy predicate: took<=budget and zero refusals (#18523)"
+	else
+		bad "restore healthy predicate (#18523): budget/refusal edges wrong"
+	fi
+}
+
+# ha_smoke_pin_problems_18523 <dir> prints one problem per line for the
+# HA smokes in <dir>: a missing file; a `grep -A<n>` window over
+# "Redundancy group" in code (any spacing; it missed the peer row and
+# aborted active-active); restore/fw0_is_primary not delegating to the
+# shared, selftested deploy-lib.sh helpers; active-active not scoring the
+# split through deploy_active_active_split_verdict.
+ha_smoke_pin_problems_18523() {
+	local dir="$1" f code fn
+	for f in test-active-active.sh test-ha-crash.sh test-restart-connectivity.sh test-stress-failover.sh; do
+		if [[ ! -r "$dir/$f" ]]; then
+			echo "$f(missing)"
+			continue
+		fi
+		code=$(grep -v '^[[:space:]]*#' "$dir/$f")
+		if awk '/Redundancy group/ && /(-A[[:space:]]*[0-9]|--after-context)/ { hit = 1 } END { exit !hit }' <<<"$code"; then
+			echo "$f(grep-A-window)"
+		fi
+	done
+	for f in test-ha-crash.sh test-restart-connectivity.sh; do
+		[[ -r "$dir/$f" ]] || continue
+		if [[ $(grep -c '^restore_fw0_primary() {$' "$dir/$f") != 1 || $(grep -c '^fw0_is_primary() {$' "$dir/$f") != 1 ]]; then
+			echo "$f(restore-defs-not-one)"
+		fi
+		fn=$(awk '/^restore_fw0_primary\(\) \{$/ { c = 1 } c { print } c && /^}$/ { exit }' "$dir/$f")
+		# shellcheck disable=SC2016 # a literal harness line, not an expansion
+		[[ "$fn" == *'deploy_restore_fw0_primary "$1"'* ]] || echo "$f(restore-not-shared)"
+		fn=$(awk '/^fw0_is_primary\(\) \{$/ { c = 1 } c { print } c && /^}$/ { exit }' "$dir/$f")
+		[[ "$fn" == *deploy_restore_fw0_owns_all* ]] || echo "$f(fw0_is_primary-not-shared)"
+	done
+	f=test-active-active.sh
+	if [[ -r "$dir/$f" ]]; then
+		code=$(grep -v '^[[:space:]]*#' "$dir/$f")
+		# shellcheck disable=SC2016 # a literal harness line, not an expansion
+		[[ "$code" == *'deploy_active_active_split_verdict "$fw0_status" "$fw1_status"'* ]] ||
+			echo "$f(split-verdict-not-shared)"
+	fi
+}
+
+# #18523: guard the HARNESS lines, not only the library. The real smokes
+# must report no problem, and a fixture copy with a spaced `grep -A 2`, a
+# single-quoted `grep -A2`, a local restore, and a deleted file must report
+# each one (a matcher that finds nothing would otherwise pass a clean board).
+test_ha_smoke_site_pins_18523() {
+	local real fixture problems f missing=()
+	real=$(ha_smoke_pin_problems_18523 "$SCRIPT_DIR")
+	[[ -z "$real" ]] || missing+=("real smokes: $(tr '\n' ' ' <<<"$real")")
+	fixture=$(mktemp -d)
+	for f in test-active-active.sh test-ha-crash.sh test-restart-connectivity.sh test-stress-failover.sh; do
+		cp "$SCRIPT_DIR/$f" "$fixture/$f"
+	done
+	# shellcheck disable=SC2016 # literal harness lines, not expansions
+	printf '%s\n' 'r=$(grep -A 2 "Redundancy group: 1" <<<"$s" | grep node1 || true)' >>"$fixture/test-active-active.sh"
+	# shellcheck disable=SC2016
+	printf '%s\n' "r=\$(grep -A2 'Redundancy group: 1' <<<\"\$s\" || true)" >>"$fixture/test-restart-connectivity.sh"
+	# shellcheck disable=SC2016 # a sed program, not an expansion
+	sed -i 's/deploy_restore_fw0_primary "\$1"/local_restore "$1"/' "$fixture/test-ha-crash.sh"
+	rm "$fixture/test-stress-failover.sh"
+	problems=$(ha_smoke_pin_problems_18523 "$fixture")
+	rm -rf "$fixture"
+	for f in "test-active-active.sh(grep-A-window)" "test-restart-connectivity.sh(grep-A-window)" \
+		"test-ha-crash.sh(restore-not-shared)" "test-stress-failover.sh(missing)"; do
+		[[ "$problems" == *"$f"* ]] || missing+=("control not flagged: $f")
+	done
+	if ((${#missing[@]} == 0)); then
+		ok "HA smoke pins: shared readers, restore and split verdict; controls flagged (#18523)"
+	else
+		bad "HA smoke pins (#18523): ${missing[*]}"
+	fi
+}
+
 test_dual_active_committed_rows() {
 	local allp='0=primary 1=primary 2=primary'
 	local alls='0=secondary 1=secondary 2=secondary'
@@ -2478,6 +3560,12 @@ test_dual_active_smoke_site_pins() {
 	fi
 }
 test_dual_active_scoped_reader
+test_rg_role_reader_skips_local_sublines_18523
+test_rg_local_forwarding_reader_18523
+test_active_active_split_verdict_18523
+test_restore_fw0_verdict_18523
+test_restore_healthy_boundaries_18523
+test_ha_smoke_site_pins_18523
 test_dual_active_committed_rows
 test_dual_active_retired_grep_counterfactual
 test_dual_active_smoke_site_pins
@@ -2817,6 +3905,25 @@ test_cluster_helper_raw_deploy_uses_root_ownership
 test_standalone_helper_raw_deploy_uses_root_ownership
 test_deb_repush_uses_distinct_remote_slots
 test_deb_repush_wiring
+test_unit_shadow_removed_packaged_unit_governs_18544
+test_unit_shadow_stale_load_without_file_reloads_18544
+test_unit_shadow_mask_symlink_left_alone_18544
+test_unit_shadow_alias_symlink_not_packaged_hardfails_18544
+test_unit_shadow_kept_without_packaged_unit_18544
+test_unit_shadow_surviving_removal_hardfails_18544
+test_unit_shadow_no_loaded_unit_hardfails_18544
+test_unit_shadow_promoted_runtime_unit_rolls_back_18544
+test_unit_shadow_packaged_unit_rejected_rolls_back_18544
+test_unit_shadow_barrier_units_reconciled_18544
+test_unit_shadow_interrupted_stash_restored_18544
+test_unit_shadow_rollback_reload_failure_reported_18544
+test_unit_shadow_unpackaged_barrier_skipped_18544
+test_unit_shadow_loop_propagates_unit_failure_18544
+test_unit_shadow_occupied_path_not_overwritten_18544
+test_unit_shadow_unpackaged_barrier_stash_restored_18544
+test_unit_shadow_unpackaged_barrier_occupied_named_18544
+test_unit_shadow_unpackaged_barrier_reload_failure_reported_18544
+test_unit_shadow_reconcile_wired_into_deb_deploy_18544
 test_manifest_node_index_maps_configured_instances
 test_manifest_raw_records_verified_binary_hashes
 test_manifest_deb_hashes_package_payload
@@ -2881,6 +3988,8 @@ test_preflight_cleans_up_on_reject
 test_preflight_verifier_reject_prescribes_1864_remediation
 test_preflight_other_refusal_prescribes_no_make_generate
 test_preflight_missing_local_binary_hardfails
+test_preflight_low_headroom_prescribes_budget_remediation
+test_preflight_unmeasured_headroom_prescribes_measurement_remediation
 test_preflight_precedes_destructive_steps_standalone
 test_preflight_precedes_destructive_steps_cluster
 

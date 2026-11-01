@@ -1621,12 +1621,14 @@ pub(in crate::afxdp) fn term_match_extra_from_meta_and_frame(
 // and a fully-qualified `crate::afxdp::frame::inspect::...` path, and the second
 // would break on a move. See `addr_class.rs` for why this group was the seam.
 pub(in crate::afxdp) use super::addr_class::{
-    dest_is_directed_broadcast, dest_is_directed_broadcast_in_table,
+    dest_is_directed_broadcast,
     dest_is_multicast_or_broadcast, icmp_error_table_for_meta, l2_dst_is_group_or_broadcast,
     neighbor_ip_is_learnable, neighbor_mac_is_learnable, source_is_invalid_for_icmp_error,
-    src_is_directed_broadcast, src_is_directed_broadcast_in_table, transit_dst_is_martian,
-    transit_src_is_martian, v4_addr_is_directed_broadcast_in_table,
+    src_is_directed_broadcast, transit_dst_is_martian, transit_src_is_martian,
 };
+
+
+
 
 /// Is the shim-stamped metadata tuple a RESOLVED flow identity, or only the
 /// state the shim was in when it stopped parsing?
@@ -2908,8 +2910,9 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress(
     parse_zone_encoded_fabric_ingress_from_frame(frame, meta, forwarding, ha_state, now_secs)
 }
 
-/// Decode a synthetic fabric source-MAC identity. V1 carries a u32 zone id
-/// at frame[10..12]; V2 carries a stable 24-bit NAT-scope id in its last three
+/// Decode a synthetic fabric source-MAC identity. V1 carries the LOW 16 bits
+/// of the u32 zone id at frame[10..12] (#16557/#18518: resolved back to the
+/// full id by `ForwardingState::zone_id_for_stamp`); V2 carries a stable 24-bit NAT-scope id in its last three
 /// bytes and resolves that id to this node's logical ifindex.
 ///
 /// Absent means the source MAC lacks either complete marker; other local or
@@ -2980,13 +2983,16 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
     if frame.len() < 12 {
         return ZoneEncodedFabricStamp::Invalid;
     }
-    // #3075: zone id is a u32 carried big-endian in frame[10] (high) /
-    // frame[11] (low). The old u8 scheme hardcoded frame[10]=0x00, which still
-    // decodes correctly here (id < 256 has a 0 high byte).
-    let id = u32::from(u16::from_be_bytes([frame[10], frame[11]]));
-    if id == 0 || !forwarding.zone_id_to_name.contains_key(&id) {
+    // #3075: the stamp's two bytes are frame[10] (high) / frame[11] (low).
+    // #18518: since #16557 they are the LOW 16 bits of a u32 zone id, so
+    // resolve them against the RECEIVER's admitted zones; an unknown or
+    // colliding value is Invalid, never a guess between two admitted zones.
+    // A sender-only zone whose low bits match one receiver zone resolves to
+    // that receiver zone (docs/fabric-cross-chassis-fwd.md, #18518); the V1b
+    // and owner-RG gates still apply to it.
+    let Some(id) = forwarding.zone_id_for_stamp(u16::from_be_bytes([frame[10], frame[11]])) else {
         return ZoneEncodedFabricStamp::Invalid;
-    }
+    };
     // #6458/#15916: fabric-link identity + RG-ownership (V1a/V1b).
     // Proved peer punt validates; the all-locally-active shape is
     // ambiguous (co-moved legitimate punt vs forged clone) and is

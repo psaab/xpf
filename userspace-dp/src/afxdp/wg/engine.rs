@@ -63,9 +63,10 @@ use super::peer::{Peer, PeerConfig, encode_roam_endpoint};
 use super::session::{REJECT_AFTER_MESSAGES, ReplayDecision, WgSession};
 use super::tai64n::Tai64nClock;
 use super::{
-    POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, WG_KEY_LEN, WG_NOISE_PATTERN, WG_PROTOCOL_ID_BYTES,
-    WG_SMALL_ORDER_KEYS, WG_ZERO_PSK, pad_to_16, padded_len_capped,
+    POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, WG_KEY_LEN, WG_NOISE_PATTERN, WG_PROTOCOL_ID_BYTES, WG_ZERO_PSK, pad_to_16, padded_len_capped,
 };
+#[cfg(test)]
+use super::WG_SMALL_ORDER_KEYS;
 use arc_swap::ArcSwap;
 use curve25519_dalek::MontgomeryPoint;
 use rustc_hash::FxHashMap;
@@ -393,6 +394,15 @@ pub(crate) struct PeerEntry {
     pub(crate) config: Arc<PeerConfig>,
 }
 
+/// Endpoint captured with the peer-table position used by the quote-match
+/// path. The IP-keyed bucket keeps packet lookups scoped to peers sharing
+/// that underlay while preserving table order for duplicate endpoints.
+struct EndpointPeerIndexEntry {
+    table_index: u32,
+    endpoint: SocketAddr,
+    peer: Arc<Peer>,
+}
+
 /// Atomically-swappable peer-routing table. The fields are reconciled
 /// together (a new config snapshot rebuilds all of them) and a hot-path
 /// reader must observe them as a unit, or else it can pair a
@@ -496,6 +506,12 @@ pub(crate) struct WgEngine {
     /// Combined peer-routing table behind a single ArcSwap. See
     /// `PeerTable` doc for the atomicity rationale.
     table: ArcSwap<PeerTable>,
+    /// #17774: effective peer endpoints grouped by canonical IP. Reconcile
+    /// and live-endpoint changes update the index; packet-path PMTU reads
+    /// probe only peers sharing the destination IP, without allocating or
+    /// scanning the full peer table. Each entry also preserves the endpoint
+    /// port for exact quote-to-peer matching.
+    endpoint_peers_by_ip: RwLock<FxHashMap<IpAddr, Vec<EndpointPeerIndexEntry>>>,
     /// Slow-path serialization lock for peer-table mutation.
     /// `reconcile_peers` and `install_session` both take it to
     /// prevent stale-Arc install races across peer removal. Hot path
@@ -588,6 +604,7 @@ impl WgEngine {
             pending_by_peer: RwLock::new(FxHashMap::default()),
             listen_port: config.listen_port,
             table: ArcSwap::from_pointee(PeerTable::empty()),
+            endpoint_peers_by_ip: RwLock::new(FxHashMap::default()),
             reconcile_lock: std::sync::Mutex::new(()),
             sessions_by_local_index: RwLock::new(FxHashMap::default()),
             counters: WgCounters::default(),
@@ -935,6 +952,50 @@ impl WgEngine {
             .map(|e| (e.peer.pubkey, e.peer.live_endpoint().or(e.config.endpoint)))
             .collect()
     }
+    /// #17774: return the smallest fresh learned PMTU among peers whose
+    /// current effective endpoint has `endpoint_ip`. The endpoint index
+    /// is maintained on reconcile and live-endpoint adoption, so this
+    /// packet-path lookup performs one hash probe and visits only peers
+    /// sharing the underlay IP; it allocates nothing.
+    #[inline]
+    pub(crate) fn learned_pmtu_for_endpoint_ip(
+        &self,
+        endpoint_ip: IpAddr,
+        now_ns: u64,
+    ) -> Option<usize> {
+        let endpoints = self
+            .endpoint_peers_by_ip
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut best: Option<usize> = None;
+        for indexed in endpoints.get(&endpoint_ip)? {
+            if let Some(pmtu) = indexed.peer.learned_pmtu(now_ns) {
+                best = Some(best.map_or(pmtu, |current| current.min(pmtu)));
+            }
+        }
+        best
+    }
+
+    /// #17774: resolve the first current peer whose canonical endpoint
+    /// matches an IP/port quote. The shared IP index preserves peer-table
+    /// order for duplicate endpoints and avoids materializing every peer.
+    #[inline]
+    pub(crate) fn peer_for_endpoint_ip_port(
+        &self,
+        endpoint_ip: IpAddr,
+        endpoint_port: u16,
+    ) -> Option<[u8; WG_KEY_LEN]> {
+        let endpoints = self
+            .endpoint_peers_by_ip
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        endpoints
+            .get(&endpoint_ip)?
+            .iter()
+            .find(|indexed| indexed.endpoint.port() == endpoint_port)
+            .map(|indexed| indexed.peer.pubkey)
+    }
+
 
     /// #1434 B1b cryptokey routing on EGRESS: longest-prefix-match the
     /// inner destination IP against the AllowedIPs table and return the
@@ -999,7 +1060,51 @@ impl WgEngine {
         peer_pubkey: &[u8; WG_KEY_LEN],
         endpoint: std::net::SocketAddr,
     ) {
-        if let Some(peer) = self.peer_arc(peer_pubkey) {
+        // Serialize with reconcile so the endpoint and its IP index are
+        // updated against the same peer/config snapshot.
+        let _guard = self
+            .reconcile_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let table = self.load_table();
+        let Some(&idx) = table.peer_index_by_pubkey.get(peer_pubkey) else {
+            return;
+        };
+        let Some(entry) = table.peers.get(idx as usize) else {
+            return;
+        };
+        let peer = &entry.peer;
+        let old_endpoint = peer.live_endpoint().or(entry.config.endpoint);
+        let old_canonical = old_endpoint.map(super::canonicalize_endpoint);
+        let new_canonical = super::canonicalize_endpoint(endpoint);
+        if old_canonical != Some(new_canonical) {
+            let mut endpoints = self
+                .endpoint_peers_by_ip
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(old) = old_canonical {
+                let remove_key = if let Some(peers) = endpoints.get_mut(&old.ip()) {
+                    peers.retain(|candidate| candidate.peer.pubkey != *peer_pubkey);
+                    peers.is_empty()
+                } else {
+                    false
+                };
+                if remove_key {
+                    endpoints.remove(&old.ip());
+                }
+            }
+            let peers = endpoints.entry(new_canonical.ip()).or_default();
+            let insert_at = peers.partition_point(|candidate| candidate.table_index < idx);
+            peers.insert(
+                insert_at,
+                EndpointPeerIndexEntry {
+                    table_index: idx,
+                    endpoint: new_canonical,
+                    peer: peer.clone(),
+                },
+            );
+            peer.adopt_live_endpoint(endpoint);
+        } else {
             peer.adopt_live_endpoint(endpoint);
         }
     }
@@ -1177,7 +1282,7 @@ impl WgEngine {
                     if entry.config.endpoint == *prev_configured
                         && entry.config.endpoint_host == *prev_host
                     {
-                        entry.peer.adopt_live_endpoint(*live);
+                        self.adopt_live_endpoint(pubkey, *live);
                     }
                 }
             }
@@ -1371,6 +1476,25 @@ impl WgEngine {
                 cg.remove(pubkey);
             }
         }
+        let mut endpoint_peers_by_ip: FxHashMap<IpAddr, Vec<EndpointPeerIndexEntry>> =
+            FxHashMap::default();
+        for (table_index, entry) in new_peers.iter().enumerate() {
+            if let Some(endpoint) = entry.peer.live_endpoint().or(entry.config.endpoint) {
+                let endpoint = super::canonicalize_endpoint(endpoint);
+                endpoint_peers_by_ip
+                    .entry(endpoint.ip())
+                    .or_default()
+                    .push(EndpointPeerIndexEntry {
+                        table_index: table_index as u32,
+                        endpoint,
+                        peer: entry.peer.clone(),
+                    });
+            }
+        }
+        *self
+            .endpoint_peers_by_ip
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = endpoint_peers_by_ip;
         // Publish the new table. Atomic release-store; any reader
         // doing `.load()` after this point sees the new table whole.
         self.table.store(Arc::new(PeerTable {

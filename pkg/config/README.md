@@ -864,9 +864,15 @@ empty but marked unresolved (`DNSUnresolved`, #17782), distinct from a
 resolver failure (`DNSLookupFailed`, #16595) or a successful zero-address
 answer. A lookup FAILURE keeps the last good answer (stale-while-error,
 `DNSLookupFailed`, #16595, retained in the cache), while a successful lookup
-with no usable address matches nothing (fail-closed). Resolution (`RefreshDNSAddressBooks`: bounded
-8-worker pool, 10s aggregate deadline, per-name 5s cap) runs outside
-`configstore` `s.mu` and `applySem` for commit, peer-sync, and rollback:
+with no usable address matches nothing (fail-closed). A successful
+family-scoped answer with only opposite-family addresses is also runtime-empty:
+it remains a successful answer and matches nothing, but junos-host projection
+omits only that term and preserves sibling static denies (#17721). The
+family-specific warning identifies the successful family-empty result
+separately from a resolver failure. This does not exempt the successful-empty
+answer from strict validation. Resolution
+(`RefreshDNSAddressBooks`: bounded 8-worker pool, 10s aggregate deadline,
+per-name 5s cap) runs outside `configstore` `s.mu` and `applySem` for commit,
 commits warm the sampled candidate before strict promotion compile (a
 DNS-bearing candidate edited during that lookup is rejected by generation
 binding), peer-sync pre-resolves its text with the local node identity before
@@ -874,17 +880,20 @@ binding), peer-sync pre-resolves its text with the local node identity before
 The periodic tick resolves its clone outside the semaphore and applies it
 without re-resolving.
 `RefreshDNSAddressBooks` mutates its argument in place, so it must never be
-given the published active config (#15933); refreshed answers publish as a new store
-generation (#16606). #16687: the daemon's pre-apply resolver
-(`resolveDNSBeforeApply`) now resolves EVERY config into a private
-`CloneForDNSRefresh` clone and returns the clone — no arm writes
-through its argument, whatever the caller's provenance (published
-active, frozen rollback target, or owned) — and the #9811 debt retry
-resolves the same way. `policymatch`'s query-snapshot cache keys on
+given the published active config (#15933); refreshed answers publish as
+a new store generation (#16606).
+`resolveDNSBeforeApply` now resolves EVERY config into a private
+`CloneForDNSRefresh` clone and returns it. The clone deep-copies the full
+config graph, not just DNS answer state, so apply-time writes to non-DNS
+policies, interfaces, NAT, IPsec, or maps cannot reach through to the
+published generation (#17734). No arm writes through its argument,
+whatever the caller's provenance (published active, frozen rollback
+target, or owned); the #9811 debt retry resolves the same way.
+`policymatch`'s query-snapshot cache keys on
 `DNSAnswersDigest` (scoped identity + prefixes + DNSLookupFailed +
-DNSUnresolved) in addition to the config pointer and feed digest, so even a
-future in-place write cannot leave a stale `ContentRejected` verdict
-resident on the same pointer.
+`DNSUnresolved`) in addition to the config pointer and feed digest, so even a
+future in-place write cannot leave a stale `ContentRejected` verdict resident
+on the same pointer.
 These expansions live in `Address.ExpandedPrefixes` /
 `DNSAddresses` and are returned by `Address.UsableValues()`, which every
 resolver (policy, NAT, junos-host, userspace book table) now consumes so a
@@ -1507,9 +1516,10 @@ before the gate could judge, silently selecting unit 0) and the #15278 gate
 bindings for `st0.0` AND `st0.1` — stanza-less, authored-unit-0-only,
 unitless-tunnel-stanza, or bare-`bind-interface st0` spelling — identifies
 no single logical unit. A stanza carrying no unit of its own plus a single
-bound unit 0 still folds to `.0` (#18024 doctrine), and two VPNs sharing
-the SAME unit are not siblings, so legitimate multi-VPN sharing keeps
-folding.
+bound unit 0 still folds to `.0` (#18024 doctrine). Two VPNs on the same
+unit do not add sibling units to this folding decision, but strict capture
+admission rejects that shared if_id (#17779); tolerant load keeps the common
+fold and warns.
 
 **Unsupported security-policy `match` leaves are rejected at commit (#3113,
 interim):** Junos SRX security policies match traffic with a rich `match`
@@ -1901,23 +1911,23 @@ covered. The tolerant load/peer-sync path downgrades to a warning
 binary silently accepted still boots — the policy keeps its match-any-for-missing
 compilation, now flagged (#1960 no-brick doctrine, same as #3113).
 
-**Shared secure-tunnel bind selectors must be disjoint (#11380):** two VPNs
-binding the same `st<N>[.unit]` share one XFRM if_id, so XFRM cannot select the
-right SA from that id alone when their rendered traffic selectors overlap.
+**Shared secure-tunnel selectors and capture ownership (#11380/#17779):** two
+VPNs binding the same `st<N>[.unit]` share one XFRM if_id, so XFRM cannot select
+the right SA from that id alone when their rendered traffic selectors overlap.
 `validateIPsecBindTrafficSelectorOverlapStrict`
-(`compiler_validate_strict_ipsec_bind_ts_11380.go`) compares the rendered
-local/remote selector unions at strict commit. It rejects any pair whose local
-and remote address sets both intersect, including route-based VPNs whose
-omitted selectors render the dual-stack wildcard
-`0.0.0.0/0,::/0`. Prefixes, hosts, and inclusive address ranges are compared;
-an omitted or unknown side is not proof of disjointness. Sharing is admitted
-only when every pair of rendered selector unions is provably disjoint, such as
-two VPNs with non-overlapping remote prefixes. The wildcard value is a shared
-config constant consumed by the renderer and this gate, preventing the gate's
-default model from drifting from swanctl output. The tolerant load / peer-sync
-path warns (`lenientIPsecBindTSOverlap`) rather than newly bricking an
-already-persisted config (#1960). This is a static admission proof; it does not
-replace the lab check that each routed prefix is encrypted only on its own SA.
+(`compiler_validate_strict_ipsec_bind_ts_11380.go`) models the rendered
+local/remote selector unions, including route-based VPNs whose omitted selectors
+render the dual-stack wildcard `0.0.0.0/0,::/0`. Prefixes, hosts, and inclusive
+address ranges are compared; an omitted or unknown side is not proof of
+disjointness.
+
+Selector disjointness alone does not make shared binds safe for the runtime
+capture plan: queue keys are owned by VPN name, and the plan marks the whole
+generation `OwnerContested` / `QuarantineAll` when multiple VPNs claim one
+if_id, even if their selectors are disjoint. The #17779 AST gate therefore
+rejects this shape at strict commit and warns on tolerant load / peer-sync;
+the runtime quarantine behavior is unchanged. Overlapping selectors remain a
+separate XFRM-SA hazard (#11380), and tolerant loads may report both warnings.
 
 **Repeated unnamed routing containers merge (#12043/#12120):** hierarchical
 loads retain repeated `routing-options` children (`static`, `generate`, and
@@ -1997,17 +2007,18 @@ so inherited bindings are covered. Its tolerant path warns
 (`lenientSecureTunnelBindIface`), while pkg/routing retains the runtime
 fail-closed backstop for an if_id collision.
 
-The same gate also enforces the route-based VPN capture limit (#16699):
-at most **32 distinct secure-tunnel capture tunnels** (distinct
-`bind-interface` XFRM if_ids, `MaxRouteBasedVPNCaptureTunnels`) are
-supported per IPsec capture generation, because each tunnel owns four
-NFQUEUE provenance classes in the daemon capture plan. A 33rd distinct
-tunnel cannot be represented, so strict commit / commit-check rejects it
-naming the limit, the tolerant load / peer-sync path warns and still
-boots (#1960), and the daemon QUEUE_OPEN capture stage returns a non-nil
-error so a runtime over-cap fails the apply visibly instead of silently
-installing a box-wide quarantine. VPNs sharing one bind-interface count
-once toward the limit.
+The same gate also enforces the route-based VPN capture bounds (#16699,
+#17779). The daemon capture plan emits four NFQUEUE provenance keys PER
+valid VPN claimant (one per VPN name), and supports at most **32 VPN
+claimants per generation** (`MaxRouteBasedVPNCaptureTunnels`). Ownership is
+derived from each VPN's final compiled (last-wins) bind-interface; separate
+#2933/#5297 checks still validate every authored occurrence. The plan marks the
+whole generation `OwnerContested` / `QuarantineAll` whenever multiple VPN names
+claim one `bind-interface` XFRM if_id, even when those VPNs share the same
+bind-interface and have disjoint selectors (#11380 only protects XFRM SA
+selection). Strict commit/commit-check rejects a 33rd claimant or any shared
+if_id owners, naming the runtime limit; tolerant load / peer-sync warns and
+still boots (#1960). Runtime quarantine behavior is unchanged.
 
 The same gate carries a DISTINCT `bind-interface` fail-closed arm (#5297): a
 NON-EMPTY bind-interface that `XFRMIfNameAndID` resolves to **if_id 0** (any name

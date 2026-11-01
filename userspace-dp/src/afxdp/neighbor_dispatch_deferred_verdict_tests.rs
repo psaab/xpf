@@ -16,7 +16,6 @@
 
 use super::*;
 use crate::afxdp::event_emit::RT_FLOW_ACTION_REJECT;
-use crate::afxdp::test_fixtures::*;
 use crate::event_stream::codec::DataplaneEventKind;
 use crate::session::SessionKey;
 use crate::session::TunnelDiscriminator;

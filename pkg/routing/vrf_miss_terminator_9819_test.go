@@ -255,8 +255,9 @@ func returnRules9819(ops *fakeRuleOps, family int) []string {
 }
 
 // TestRibGroupReturnRules9819 pins which destinations get a return path and
-// what it is. Since #16616 a return exists only for a peer whose rib the
-// source's own rib-group names in import-rib (the VRF->VRF import case);
+// what it is. Since #16616/#17705 a return from the lookup source to a peer
+// prefix exists only when the peer's own rib-group names the lookup-source
+// rib in import-rib (the import destination, not the peer being returned to);
 // tenants that each leak only into main get NO tenant->tenant return. Each
 // iif/oif rule carries `to <leaked-prefix>` (#11062); no catch-all may let
 // unrelated VRF misses reach main.
@@ -285,8 +286,8 @@ func TestRibGroupReturnRules9819(t *testing.T) {
 		"n":     {"10.70.0.0/24"},
 		"plain": {"10.80.0.0/24"},
 	}
-	// #16616: no source names a peer rib (src-leak imports only src+main,
-	// b-leak only b+main, f-leak only f+main), so no return rules at all.
+	// #16616/#17705: no peer's group names the lookup source's rib
+	// (src-leak imports only src+main, b-leak only b+main, etc.).
 	wantV4 := []string{}
 	wantV6 := []string{}
 
@@ -315,10 +316,10 @@ func TestRibGroupReturnRules9819(t *testing.T) {
 	}
 }
 
-// TestRibGroupReturnRulesAuthorizedPeer16616 pins the authorized side of
-// #16616: when src's rib-group names b's rib (and vice versa), each gets
-// the destination-scoped return to the other's leaked prefix; a third
-// tenant leaking only into main gets none, and receives none.
+// #16616/#17705: when src's rib-group names b's rib, a return from b's
+// lookup context reaches src's prefixes; b's group naming src's rib
+// authorizes the opposite direction. A third tenant leaking only into main
+// gets none, and receives none.
 func TestRibGroupReturnRulesAuthorizedPeer16616(t *testing.T) {
 	ribGroups := map[string]*config.RibGroup{
 		"src-auth": {ImportRibs: []string{"src.inet.0", "b.inet.0", "inet.0"}},
@@ -341,6 +342,45 @@ func TestRibGroupReturnRulesAuthorizedPeer16616(t *testing.T) {
 		"iif= oif=vrf-src table=300 dst=10.40.0.0/24 src=<nil> pref=1225",
 		"iif=vrf-b oif= table=200 dst=10.30.0.0/24 src=<nil> pref=1225",
 		"iif=vrf-src oif= table=300 dst=10.40.0.0/24 src=<nil> pref=1225",
+	}
+	ops := newFakeRuleOps()
+	rg := &ribGroupManager{ops: ops}
+	if err := rg.Apply(ribGroups, instances, connected); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := returnRules9819(ops, unix.AF_INET); strings.Join(got, "\n") != strings.Join(wantV4, "\n") {
+		t.Errorf("v4 return rules =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(wantV4, "\n"))
+	}
+	if got := returnRules9819(ops, unix.AF_INET6); len(got) != 0 {
+		t.Errorf("v6 return rules = %v, want none (no v6 groups)", got)
+	}
+}
+
+// TestRibGroupReturnRulesAsymmetric17705 is the directional discriminator
+// for #17705: a's rib-group names b.inet.0 in import-rib ("install a's
+// routes into b.inet.0 and inet.0"), which authorizes b-context traffic
+// to reach a's prefixes — but says nothing about a reaching b. b names
+// only itself and main and must get the b->a return; a must get NO
+// a->b return. The pre-#17705 check consulted the lookup source's own
+// group for the peer's rib, so it installed both directions.
+func TestRibGroupReturnRulesAsymmetric17705(t *testing.T) {
+	ribGroups := map[string]*config.RibGroup{
+		"a-x": {ImportRibs: []string{"a.inet.0", "b.inet.0", "inet.0"}},
+		"b-x": {ImportRibs: []string{"b.inet.0", "inet.0"}},
+	}
+	instances := []*config.RoutingInstanceConfig{
+		{Name: "a", TableID: 200, InterfaceRoutesRibGroup: "a-x"},
+		{Name: "b", TableID: 300, InterfaceRoutesRibGroup: "b-x"},
+	}
+	connected := map[string][]string{
+		"a": {"10.30.0.0/24"},
+		"b": {"10.40.0.0/24"},
+	}
+	// Only the b->a return pair (b's lookup context reaching a's
+	// prefix via a's table); NO a->b pair. /24: 1001+(32-24)*28 = 1225.
+	wantV4 := []string{
+		"iif= oif=vrf-b table=200 dst=10.30.0.0/24 src=<nil> pref=1225",
+		"iif=vrf-b oif= table=200 dst=10.30.0.0/24 src=<nil> pref=1225",
 	}
 	ops := newFakeRuleOps()
 	rg := &ribGroupManager{ops: ops}

@@ -235,7 +235,7 @@ fn idle_persistent_address_only_controls_stay_admissible_14671() {
     assert_eq!(t.port, 4001);
 
     // Same port to a remote H1's TargetHostPort lease does not permit.
-    let (alloc2, pool2, t1b) = h1_idle(PersistentNatPermit::TargetHostPort);
+    let (alloc2, pool2, _t1b) = h1_idle(PersistentNatPermit::TargetHostPort);
     let other_remote = tcp_flow("10.0.2.2", 4000, REMOTE2, 443);
     let t = reserve_persistent(
         &alloc2,

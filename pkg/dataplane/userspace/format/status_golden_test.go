@@ -195,7 +195,7 @@ func TestFormatStatusSummaryRejectReasonsAbsentByteCompare10500(t *testing.T) {
 	for i, reason := range withReasons.LastSnapshotRejectReasons {
 		prefix := strings.Repeat(" ", 29)
 		if i == 0 {
-			prefix = "  Last snapshot rejection:   "
+			prefix = "  Last policy diagnostic:    "
 		}
 		line := prefix + reason + "\n"
 		before, after, found := strings.Cut(want, line)

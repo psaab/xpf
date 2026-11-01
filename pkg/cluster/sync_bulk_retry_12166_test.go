@@ -102,7 +102,7 @@ func TestForcedResyncRetriesWithheldBulk12166(t *testing.T) {
 	}
 
 	delete(standbyDP.failSetV4, flakyKey)
-	primary.pendingBulkAckSince.Store(time.Now().Add(-(BulkAckPendingRetryAfter + time.Minute)).UnixNano())
+	primary.pendingBulkAckSince.Store(MonotonicNanos() - int64(BulkAckPendingRetryAfter+time.Minute))
 	for range 5 {
 		primary.syncSweep()
 	}
@@ -158,7 +158,7 @@ func TestBulkRetrySourceFailureRetainsReadiness12166(t *testing.T) {
 	if err := ss.BulkSync(); err != nil {
 		t.Fatalf("initial authoritative bulk: %v", err)
 	}
-	ss.pendingBulkAckSince.Store(time.Now().Add(-(BulkAckPendingRetryAfter + time.Minute)).UnixNano())
+	ss.pendingBulkAckSince.Store(MonotonicNanos() - int64(BulkAckPendingRetryAfter+time.Minute))
 	ss.BulkSnapshotSource = func() (BulkSnapshot, error) {
 		return BulkSnapshot{}, errors.New("snapshot unavailable")
 	}

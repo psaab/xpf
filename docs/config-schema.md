@@ -590,9 +590,10 @@ compile time (`media_mtu_16594.go`): the compiled `InterfaceConfig.MTU`
 Junos peer with the same configured value. An unset `mtu` still
 materialises the 1500 L3 default; a media value at or below the header
 size clamps to L3 1 rather than collapsing to "unset". Tunnel,
-loopback, `fab*`, `reth*`, `ae*` and `irb*` devices have no Ethernet
-media on the named device and pass through untranslated; their
-physical parents translate on their own stanzas. Family `mtu` is
+loopback, `fab*`, `reth*` and `irb*` devices have no Ethernet media on
+the named device and pass through untranslated; their physical parents
+translate on their own stanzas. Aggregated Ethernet has a media MTU and
+uses the same overhead translation as other Ethernet. Family `mtu` is
 already L3 and is never translated. Operators migrating a Junos
 config should keep the Junos number: copying `mtu 1514` now means
 the same thing on both boxes (before #16594 xpf applied it verbatim
@@ -14763,9 +14764,11 @@ scope committed against a pre-`4` helper disarms it and aborts the commit
 `docs/userspace-dataplane-architecture.md` *Config-snapshot protocol version*).
 The rest of the config still loads (#1960 no-brick).
 The id→name reverse maps resolve a colliding id to the survivor deterministically
-(`config.StableZoneIDOwner`; `pkg/cli/apply.go:syslogZoneNameMap`,
-`pkg/dataplane/userspace/manager_sessionsync_request.go:zoneNameByID`) rather than to whichever
-name won a map-iteration race. The quarantine is surfaced to the operator as a
+(`config.StableZoneIDOwner`; `pkg/cli/apply.go:syslogZoneNameMap`) rather than to whichever
+name won a map-iteration race. The HA session-sync import resolves its u16 session
+value against the post-quarantine published zones
+(`pkg/dataplane/userspace/manager_sessionsync_request.go:resolveTruncatedZone`, #18515), so a
+quarantined loser never appears there. The quarantine is surfaced to the operator as a
 loud one-shot `slog.Error` naming both zones, on `ProcessStatus.ZoneIDCollisions`
 (`show`), and as the `xpf_userspace_zone_id_collision` 0/1 gauge, so an operator
 is paged until one zone is renamed. Regression coverage:

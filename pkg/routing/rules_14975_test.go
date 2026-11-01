@@ -79,8 +79,9 @@ func TestRibGroupReturnLongestPrefixPriority14975(t *testing.T) {
 // the kernel first-match picks the narrower peer's table; clear() must sweep
 // the derived band on re-apply and on zero-transition.
 func TestRibGroupReturnRulesLPMApply14975(t *testing.T) {
-	// #16616: return rules exist only where the source's rib-group names
-	// the peer rib. src names broad+narrow; broad/narrow name src.
+	// #16616/#17705: returns from lookup source src to broad/narrow prefixes
+	// are authorized because each destination owner's group names src; src's
+	// group names the peers too, authorizing the reverse lookup contexts.
 	ribGroups := map[string]*config.RibGroup{
 		"src-leak":    {Name: "src-leak", ImportRibs: []string{"inet.0", "inet6.0", "broad.inet.0", "broad.inet6.0", "narrow.inet.0", "narrow.inet6.0"}},
 		"broad-leak":  {Name: "broad-leak", ImportRibs: []string{"inet.0", "inet6.0", "src.inet.0", "src.inet6.0"}},

@@ -223,6 +223,9 @@ type plannedAction struct {
 	testOwner string
 	testName  string
 	ops       []plannedOp
+	// checkTriggerUntilCeiling marks a cooldown replay that must recheck its
+	// trigger-until ceiling under staleReason immediately before commit (#17696).
+	checkTriggerUntilCeiling bool
 	// deferredBudgetUsed marks a replay that already consumed its one
 	// budget-deferral (#15021); a second pre-commit denial (e.g. an older slot
 	// pruned between wait-computation and pre-check) drops as global_budget
@@ -431,6 +434,11 @@ type Engine struct {
 
 	// Injectable clock for tests; nil means time.Now.
 	nowFn func() time.Time
+
+	// beforePendingPurgeFn is a test-only seam immediately before Apply takes
+	// pendingMu for the #16650 parked-entry purge. It permits deterministic
+	// coverage of event insertion in the unlocked publication/purge window.
+	beforePendingPurgeFn func()
 
 	// afterDrainFn is a test-only seam (#5062). When non-nil, supersede invokes
 	// it exactly at the drain->re-enqueue boundary (after the queue has been
@@ -757,31 +765,29 @@ func (e *Engine) apply(policies []*config.EventPolicy, cfg *config.Config, enfor
 
 	// #16650: reconcile parked deferred edges against the new live set.
 	// The pending maps are keyed by policy name (cooldown also by event)
-	// with no generation, so without this a predecessor's parked entry
-	// survives a same-name redefine: it occupies the key, a successor's
-	// in-cooldown edge finds the key taken when its cooldown park is
-	// inserted and is silently dropped, and drainDeferred then deletes
-	// the stale entry on semRev mismatch without ever replaying the
-	// successor. The budget map has the same shape - deferBudget returns
-	// false when a stale hold occupies the policy key. Purge every parked
-	// entry whose stamped semRev no longer matches the live revision
-	// (redefined or removed policies), decrementing the gauge by the
-	// number removed. Entries for unchanged policies keep their stamp
-	// == live rev and survive, preserving the #15021 replay.
+	// with no generation, so predecessor entries can occupy a key across a
+	// same-name redefine. Purge every parked entry whose stamped semRev no
+	// longer matches the live revision (redefined or removed policies),
+	// decrementing the gauge by the number removed. Cooldown insertion also
+	// validates its captured revision and replaces a stale same-key entry,
+	// closing the unlock-before-purge lost-successor-edge window (#17709).
+	// Entries for unchanged policies keep their stamp == live rev and
+	// survive, preserving the #15021 replay.
 	// Lock order: pendingMu -> e.mu is the deferred worker's order, so
 	// taking pendingMu while holding e.mu would invert it and can
 	// deadlock against drainDeferred/deferredWorker (which hold
-	// pendingMu while taking e.mu). Bound the purge to an unlock/
-	// relock window instead: snapshot the live revisions under e.mu,
-	// drop e.mu, purge under pendingMu alone, then relock. apply's
-	// caller contract does not promise atomicity across that window -
-	// an event evaluated in the gap still sees the predecessor's entry,
-	// exactly as if the purge had not yet run, and the next Apply (or
-	// drain) converges. nextRev is a fresh local map, so reading it
-	// after unlocking is race-free.
+	// pendingMu while taking e.mu). Bound the purge to an unlock/relock
+	// window instead, preserving that order. A cooldown park inserted there
+	// must compare its stamped revision to the live generation and replace a
+	// stale same-key entry; the purge then preserves the successor park while
+	// removing any remaining predecessor entries. nextRev is a fresh local
+	// map, so reading it after unlocking is race-free.
 	func() {
 		e.mu.Unlock()
 		defer e.mu.Lock()
+		if e.beforePendingPurgeFn != nil {
+			e.beforePendingPurgeFn()
+		}
 		e.pendingMu.Lock()
 		defer e.pendingMu.Unlock()
 		var purged int64
@@ -1107,9 +1113,19 @@ func (e *Engine) deferredWorker() {
 				if cand := e.budgetWakeAtFn(now); wake.IsZero() || cand.Before(wake) {
 					wake = cand
 				}
-			} else if exp, ok := e.oldestBudgetExpiryLocked(now); ok {
-				if wake.IsZero() || exp.Before(wake) {
-					wake = exp
+			} else {
+				exp, ok := e.oldestBudgetExpiryLocked(now)
+				if ok {
+					if wake.IsZero() || exp.Before(wake) {
+						wake = exp
+					}
+				} else if wake.IsZero() || now.Before(wake) {
+					// The last budget slot may expire after a
+					// no-progress drain but before this recomputation.
+					// Pruning then returns no expiry even though the
+					// parked action is now ready; ensure another drain
+					// runs without requiring a new external nudge.
+					wake = now
 				}
 			}
 		}
@@ -1213,24 +1229,19 @@ func (e *Engine) drainDeferred() {
 				// parked early in the cooldown with a `within`
 				// window shorter than the 30 s cooldown decayed
 				// below its trigger-on threshold before the drain
-				// and was silently discarded; conversely (#16641)
-				// events windowed while parked can push a
-				// trigger-until window past its ceiling — the
-				// parked crossing still fired before/at the
-				// ceiling and must replay. #15945's live-window
-				// re-check is therefore narrowed to a
-				// revision/liveness re-check (policy still
-				// present at the same semantic revision);
-				// staleReason remains the commit-time backstop.
-				// Synthetic edges with no recorded verdict
-				// (hasMatched=false, test-only) keep the #15945
-				// live-window re-check so a synthetically parked
-				// decayed edge still cannot replay.
+				// and was silently discarded (#16848). But while
+				// events windowed during parking preserve a trigger-until
+				// ceiling (#16641), a recorded crossing cannot replay
+				// once the live window has crossed that ceiling (#17708).
+				// The drain preserves the recorded verdict except for
+				// that upper-bound check; synthetic edges with no
+				// recorded verdict (hasMatched=false, test-only) keep the
+				// full #15945 live-window re-check.
 				replay := false
 				if rt != nil && e.semRev[de.action.policyName] == de.action.semRev {
 					if pol := e.policyByNameLocked(de.action.policyName); pol != nil {
 						if de.hasMatched {
-							replay = de.matched
+							replay = de.matched && e.withinUntilCeilingsMatch(pol, rt, de.evName, now)
 						} else {
 							replay = e.withinMatches(pol, rt, de.evName, now)
 						}
@@ -1745,6 +1756,9 @@ func staleErr(reason string) error {
 //     races the arm-on-commit timing, so a duplicate can slip into the queue
 //     while the worker is blocked; the cooldown is re-enforced here at commit
 //     time so a within-window duplicate is suppressed, not double-committed.
+//   - "trigger-until ceiling exceeded": a deferred cooldown crossing was
+//     queued below its ceiling, but the live window crossed it while the
+//     worker was blocked.
 //
 // The empty string means the action is safe to commit. Called by applyOnce
 // while it holds the config lock, so the check reflects the last committed Apply
@@ -1762,6 +1776,13 @@ func (e *Engine) staleReason(a plannedAction) string {
 	if rt := e.runtime[a.policyName]; rt != nil && !rt.lastTrigger().IsZero() &&
 		e.now().Sub(rt.lastTrigger()) < policyCooldown {
 		return "cooldown active"
+	}
+	if a.checkTriggerUntilCeiling {
+		pol := e.policyByNameLocked(a.policyName)
+		rt := e.runtime[a.policyName]
+		if !e.withinUntilCeilingsMatch(pol, rt, a.event, e.now()) {
+			return "trigger-until ceiling exceeded"
+		}
 	}
 	return ""
 }

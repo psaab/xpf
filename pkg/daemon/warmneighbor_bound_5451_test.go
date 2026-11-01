@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -51,28 +52,31 @@ func (d *warmNeighborTestDP) Sessions() dataplane.SessionStore { return d.store 
 // constant and (b) every unique IP was warmed.
 type countingWarmDialer struct {
 	mu       sync.Mutex
-	opens    int                // total sockets opened (the resource high-water)
-	probedV4 map[netip.Addr]int // dst -> probe count (udp4 socket)
-	probedV6 map[netip.Addr]int // dst -> probe count (udp6 socket)
+	opens    int                   // total sockets opened (the resource high-water)
+	probedV4 map[netip.Addr]int    // dst -> probe count (udp4 socket)
+	probedV6 map[netip.Addr]int    // dst -> probe count (udp6 socket)
+	boundTo  map[netip.Addr]string // dst -> interface its socket was bound to (#18617)
 }
 
 func newCountingWarmDialer() *countingWarmDialer {
 	return &countingWarmDialer{
 		probedV4: map[netip.Addr]int{},
 		probedV6: map[netip.Addr]int{},
+		boundTo:  map[netip.Addr]string{},
 	}
 }
 
-func (c *countingWarmDialer) open(network string) (neighborWarmConn, error) {
+func (c *countingWarmDialer) open(network, ifname string) (neighborWarmConn, error) {
 	c.mu.Lock()
 	c.opens++
 	c.mu.Unlock()
-	return &countingWarmConn{dialer: c, network: network}, nil
+	return &countingWarmConn{dialer: c, network: network, ifname: ifname}, nil
 }
 
 type countingWarmConn struct {
 	dialer  *countingWarmDialer
 	network string
+	ifname  string
 }
 
 func (c *countingWarmConn) probe(dst netip.AddrPort) error {
@@ -83,6 +87,7 @@ func (c *countingWarmConn) probe(dst netip.AddrPort) error {
 	} else {
 		c.dialer.probedV4[dst.Addr()]++
 	}
+	c.dialer.boundTo[dst.Addr()] = c.ifname
 	return nil
 }
 
@@ -126,12 +131,18 @@ func TestWarmNeighborCacheBoundsSocketsAtCGNATScale(t *testing.T) {
 	}
 	d.setDataplane(&warmNeighborTestDP{store: &warmNeighborTestStore{v4: v4, v6: v6}}) // #2114: publish through the cell
 
-	d.warmNeighborCache()
+	// #18617: the warm-up probes only on-link endpoints of a held prefix, so
+	// put every test endpoint on one held non-RETH unit. Its own addresses
+	// sit outside the generated ranges so none of them is "owned".
+	cfg, in := oneUnitWarmConfig5451()
+	d.neighborWarmPlanInputs = in
+	d.warmNeighborCacheFor(cfg)
 
-	// (a) Bound: sockets opened must be a small constant, NOT ~one per IP.
-	if dialer.opens > neighborWarmMaxSockets {
-		t.Errorf("opened %d sockets for %d unique IPs; want <= %d (socket per family, not per IP)",
-			dialer.opens, 2*n, neighborWarmMaxSockets)
+	// (a) Bound: sockets opened must be a small constant per interface, NOT
+	// ~one per IP. Every endpoint is on one interface here.
+	if dialer.opens > neighborWarmSocketsPerInterface {
+		t.Errorf("opened %d sockets for %d unique IPs on one interface; want <= %d (socket per family, not per IP)",
+			dialer.opens, 2*n, neighborWarmSocketsPerInterface)
 	}
 
 	// (b) Coverage: every unique destination must be warmed exactly once — no
@@ -172,4 +183,28 @@ func assertWarmedExactly(got map[netip.Addr]int, want map[netip.Addr]bool) error
 		}
 	}
 	return nil
+}
+
+// oneUnitWarmConfig5451 is a single non-RETH unit whose prefixes (held by the
+// kernel) contain every endpoint the #5451 cell generates.
+func oneUnitWarmConfig5451() (*config.Config, neighborWarmPlanInputs) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/1": {Name: "ge-0/0/1", Units: map[int]*config.InterfaceUnit{
+			0: {Addresses: []string{"100.127.255.254/10", "2001:db8:ffff::1/32"}},
+		}},
+	}
+	in := neighborWarmPlanInputs{
+		rgPrimary: func(int) bool { return false },
+		localAddrs: func(ifname string) []netip.Prefix {
+			if ifname != "ge-0-0-1" {
+				return nil
+			}
+			return []netip.Prefix{
+				netip.MustParsePrefix("100.127.255.254/10"),
+				netip.MustParsePrefix("2001:db8:ffff::1/32"),
+			}
+		},
+	}
+	return cfg, in
 }

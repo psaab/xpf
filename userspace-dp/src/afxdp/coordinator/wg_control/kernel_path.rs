@@ -445,6 +445,8 @@ impl WgKernelPathView for ShimMapsKernelPathView {
     }
 
     fn destination_is_local(&self, dst: IpAddr, tunnel_logical_ifindex: i32) -> bool {
+        #[cfg(not(test))]
+        let _ = tunnel_logical_ifindex;
         // #14328: locality is a property of the INNER packet in the TUNNEL's
         // routing domain. The outer ingress ifindex (which `ingress` above
         // consumes for coverage) is deliberately not a parameter any more:

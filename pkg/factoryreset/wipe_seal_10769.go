@@ -31,30 +31,33 @@ import (
 // Tests point them at a disposable tree; production values
 // remain the image paths whose previous-tenant state must not survive reset.
 var (
-	wipeMachineIDPath         = "/etc/machine-id"
-	wipeApplianceMarkerPath   = "/etc/xpf/appliance"
-	wipeSSHHostKeyDir         = "/etc/ssh"
-	wipeRootSSHUserDir        = "/root/.ssh"
-	wipeRootBashHistory       = "/root/.bash_history"
-	wipeSNMPEngineIDPath      = "/var/lib/xpf/snmp-engine-id"
-	wipeSNMPEngineBootsPath   = "/var/lib/xpf/snmp-engineboots"
-	wipeUEFIStatePath         = "/var/lib/xpf/uefi-bootorder-front"
-	wipeFeedShrinkHistoryPath = configstore.FeedShrinkHistoryPath
-	wipeSystemdRandomSeed     = "/var/lib/systemd/random-seed"
-	wipeAptListsDir           = "/var/lib/apt/lists"
-	wipeAptArchiveDir         = "/var/cache/apt/archives"
-	wipeRunUtmpPath           = "/run/utmp"
-	wipeDay0RejectedPath      = "/etc/xpf/.day0-config-rejected"
-	wipeRootGrownPath         = "/etc/xpf/.root-grown"
-	wipeDDNSLeaseStatePath    = ddns.DefaultLeaseStatePath()
-	wipeDDNSSurfaceAPath      = ddns.DefaultSurfaceAStatePath()
-	wipePasswdBackupPaths     = []string{"/etc/passwd-", "/etc/shadow-", "/etc/group-", "/etc/gshadow-"}
-	wipeManagedHostKeysPath   = "/etc/ssh/ssh_known_hosts"
-	wipeManagedDropins        = []string{
+	wipeMachineIDPath             = "/etc/machine-id"
+	wipeApplianceMarkerPath       = "/etc/xpf/appliance"
+	wipeSSHHostKeyDir             = "/etc/ssh"
+	wipeRootSSHUserDir            = "/root/.ssh"
+	wipeRootBashHistory           = "/root/.bash_history"
+	wipeSNMPEngineIDPath          = "/var/lib/xpf/snmp-engine-id"
+	wipeSNMPEngineBootsPath       = "/var/lib/xpf/snmp-engineboots"
+	wipeUEFIStatePath             = "/var/lib/xpf/uefi-bootorder-front"
+	wipeFeedShrinkHistoryPath     = configstore.FeedShrinkHistoryPath
+	wipeEthtoolForcedRegistryPath = configstore.EthtoolForcedRegistryPath
+	wipeNoRedirectsCapturePath    = configstore.NoRedirectsCapturePath
+	wipeSystemdRandomSeed         = "/var/lib/systemd/random-seed"
+	wipeAptListsDir               = "/var/lib/apt/lists"
+	wipeAptArchiveDir             = "/var/cache/apt/archives"
+	wipeRunUtmpPath               = "/run/utmp"
+	wipeDay0RejectedPath          = "/etc/xpf/.day0-config-rejected"
+	wipeRootGrownPath             = "/etc/xpf/.root-grown"
+	wipeDDNSLeaseStatePath        = ddns.DefaultLeaseStatePath()
+	wipeDDNSSurfaceAPath          = ddns.DefaultSurfaceAStatePath()
+	wipePasswdBackupPaths         = []string{"/etc/passwd-", "/etc/shadow-", "/etc/group-", "/etc/gshadow-"}
+	wipeManagedHostKeysPath       = "/etc/ssh/ssh_known_hosts"
+	wipeManagedDropins            = []string{
 		"/etc/ssh/sshd_config.d/00-xpf.conf",
 		"/etc/ssh/sshd_config.d/xpf.conf",
 		"/etc/chrony/sources.d/xpf.sources",
 		"/etc/chrony/conf.d/xpf-threshold.conf",
+		"/etc/chrony/conf.d/xpf-acquisition.conf",
 		"/etc/systemd/resolved.conf.d/xpf.conf",
 		"/etc/systemd/resolved.conf.d/bpfrx.conf",
 	}
@@ -158,6 +161,54 @@ var wipeSealMapping = map[string]wipeSealDisposition{
 	"/var/lib/apt/lists/*": {leg: true},
 }
 
+// listNoRedirectsCaptureCrashTemps returns fsatomic staging files that
+// were left beside the durable redirect capture by a process that crashed
+// before rename. These files contain the same prior-tenant snapshot bytes
+// as the canonical state and must not survive factory reset.
+func listNoRedirectsCaptureCrashTemps(path string) ([]string, error) {
+	dir := filepath.Dir(path)
+	prefix := "." + filepath.Base(path) + ".tmp-"
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("zeroize: inspect no-redirects capture directory for %s: %w", path, err)
+	}
+	var temps []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			temps = append(temps, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return temps, nil
+}
+
+// eraseNoRedirectsCaptureCrashTemps erases only fsatomic temp siblings for
+// the redirect capture, refuses symlinks and hardlinks through the shared
+// reset primitive, and verifies the synced directory after the sweep.
+func eraseNoRedirectsCaptureCrashTemps(path string) error {
+	listErr, err := configstore.SweepCrashTempsWithListError(func() ([]string, error) {
+		return listNoRedirectsCaptureCrashTemps(path)
+	})
+	if listErr != nil {
+		return listErr
+	}
+	if err != nil {
+		return fmt.Errorf("zeroize: erase no-redirects capture crash temps for %s: %w", path, err)
+	}
+	dir := filepath.Dir(path)
+	if err := fsatomic.SyncDir(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("zeroize: sync no-redirects capture directory %s: %w", dir, err)
+	}
+	if temps, err := listNoRedirectsCaptureCrashTemps(path); err != nil {
+		return err
+	} else if len(temps) != 0 {
+		return fmt.Errorf("zeroize: no-redirects capture crash temps reappeared for %s: %v", path, temps)
+	}
+	return nil
+}
+
 const wipeManagedHostKeysHeader = "# Managed by xpfd — do not edit\n"
 
 // wipeEraseSSHHostKeys removes the sealed ssh_host_* key files. The
@@ -253,19 +304,23 @@ func wipeImageSealResidue() error {
 	}
 
 	// xpf-owned identity/state on every host: SNMP engine identity (the
-	// daemon regenerates it), the name-keyed feed-shrink history (tenant
-	// state that must not cross a reset), and the day-0 rejection /
-	// root-grow first-boot markers under /etc/xpf.
+	// daemon regenerates it), forced-NIC state, feed-shrink history, and the
+	// no-redirects capture (tenant state that must not cross a reset), plus the
+	// day-0 rejection / root-grow first-boot markers under /etc/xpf.
 	for _, path := range []string{
 		wipeSNMPEngineIDPath,
 		wipeSNMPEngineBootsPath,
 		wipeUEFIStatePath,
+		wipeEthtoolForcedRegistryPath,
 		wipeFeedShrinkHistoryPath,
+		wipeNoRedirectsCapturePath,
 		wipeDay0RejectedPath,
 		wipeRootGrownPath,
 	} {
 		fail(wipeRemovePath(path))
 	}
+	fail(wipeEthtoolForcedRegistryCrashTemps(wipeEthtoolForcedRegistryPath))
+	fail(eraseNoRedirectsCaptureCrashTemps(wipeNoRedirectsCapturePath))
 	fail(feeds.EraseShrinkHistoryCrashTemps(wipeFeedShrinkHistoryPath))
 
 	// Appliance-only: systemd's persisted random seed and /run/utmp are
@@ -397,6 +452,45 @@ func wipeImageSealResidue() error {
 	return nil
 }
 
+func listEthtoolForcedRegistryCrashTemps(path string) ([]string, error) {
+	dir := filepath.Dir(path)
+	prefix := "." + filepath.Base(path) + ".tmp-"
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("zeroize: inspect forced-interface registry directory for %s: %w", path, err)
+	}
+	var temps []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			temps = append(temps, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return temps, nil
+}
+
+func wipeEthtoolForcedRegistryCrashTemps(path string) error {
+	temps, err := listEthtoolForcedRegistryCrashTemps(path)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, temp := range temps {
+		if err := wipeRemovePath(temp); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	remaining, err := listEthtoolForcedRegistryCrashTemps(path)
+	if err != nil {
+		errs = append(errs, err)
+	} else if len(remaining) != 0 {
+		errs = append(errs, fmt.Errorf("zeroize: forced-interface registry crash temps reappeared after sweep: %v", remaining))
+	}
+	return errors.Join(errs...)
+}
+
 // wipeStopKeaAndEraseLeases is a package var (like performWipe) so
 // the final-verification regression can bypass the Kea leg and prove the
 // pre-completion check catches what the bypassed leg missed.
@@ -510,12 +604,27 @@ func wipeFinalEraseVerification(completion Completion) error {
 			}
 		}
 	}
-	for _, path := range []string{wipeDDNSLeaseStatePath, wipeDDNSSurfaceAPath, wipeIPsecStatePath} {
+	for _, path := range []string{wipeDDNSLeaseStatePath, wipeDDNSSurfaceAPath, wipeIPsecStatePath, wipeNoRedirectsCapturePath} {
 		if _, err := os.Lstat(path); err == nil {
 			errs = append(errs, fmt.Errorf("zeroize: state file %s present at final verification", path))
 		} else if !os.IsNotExist(err) {
 			errs = append(errs, fmt.Errorf("zeroize: inspect state file %s: %w", path, err))
 		}
+	}
+	if _, err := os.Lstat(wipeEthtoolForcedRegistryPath); err == nil {
+		errs = append(errs, fmt.Errorf("zeroize: forced-interface registry %s present at final verification", wipeEthtoolForcedRegistryPath))
+	} else if !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("zeroize: inspect forced-interface registry %s: %w", wipeEthtoolForcedRegistryPath, err))
+	}
+	if temps, err := listEthtoolForcedRegistryCrashTemps(wipeEthtoolForcedRegistryPath); err != nil {
+		errs = append(errs, err)
+	} else if len(temps) != 0 {
+		errs = append(errs, fmt.Errorf("zeroize: forced-interface registry crash temps present at final verification: %v", temps))
+	}
+	if temps, err := listNoRedirectsCaptureCrashTemps(wipeNoRedirectsCapturePath); err != nil {
+		errs = append(errs, err)
+	} else if len(temps) != 0 {
+		errs = append(errs, fmt.Errorf("zeroize: no-redirects capture crash temps present at final verification: %v", temps))
 	}
 	if _, err := os.Lstat(wipeFeedShrinkHistoryPath); err == nil {
 		errs = append(errs, fmt.Errorf("zeroize: feed shrink history %s present at final verification", wipeFeedShrinkHistoryPath))

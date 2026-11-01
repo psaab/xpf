@@ -216,12 +216,12 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		}
 		resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 		var routeErr error
-		next.Routes, next.LearnedRouteImportCapped, routeErr = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryProvider)
+		next.Routes, next.LearnedRouteImportCapped, routeErr = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryNowLocked())
 		if routeErr != nil {
 			return false, fmt.Errorf("build route overlay snapshot: %w", routeErr)
 		}
 		next.builtRouteOverlay = cloneRouteOverlay(desiredOverlay)
-		next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryProvider)
+		next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryNowLocked())
 		if schedulerState != nil {
 			if err := m.rebuildScheduledPolicySectionsWithLatchLocked(&next, cfg, schedulerCopy, failClosed); err != nil {
 				return false, fmt.Errorf("build policy overlay snapshot for scheduler state: %w", err)
@@ -320,12 +320,12 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	// Carrying a stale `true` keeps the helper delegating NoRoute after the
 	// table shrank back under the cap; carrying a stale `false` re-opens the
 	// blackhole this issue is about.
-	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryProvider)
+	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryNowLocked())
 	if err != nil {
 		return false, fmt.Errorf("build route overlay snapshot: %w", err)
 	}
 	next.builtRouteOverlay = cloneRouteOverlay(desiredOverlay)
-	next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryProvider)
+	next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryNowLocked())
 
 	// #5328 (A6-b2-F4): when the caller supplies a policy-scheduler active-state
 	// map, refresh the policy snapshot's inactive bits from that map in THIS
@@ -607,10 +607,11 @@ func configsContentEqual(a, b *config.Config) bool {
 	return helperVisibleSecretDigest9161(a) == helperVisibleSecretDigest9161(b)
 }
 
-// dnsAnswersContentEqual16606 compares the runtime DNS answers of two
-// configs by scoped identity (#16606). Order within an entry is
+// dnsAnswersContentEqual16606 compares the runtime DNS state of two
+// configs by scoped identity (#16606/#17723). Order within an entry is
 // significant, matching the refresher's change detection: a reordered
-// answer set is a different enforced prefix order.
+// answer set or a different lookup-failed flag is a different enforced
+// state.
 func dnsAnswersContentEqual16606(a, b *config.Config) bool {
 	sa := config.DNSAnswersSnapshot(a)
 	sb := config.DNSAnswersSnapshot(b)
@@ -619,7 +620,7 @@ func dnsAnswersContentEqual16606(a, b *config.Config) bool {
 	}
 	for k, va := range sa {
 		vb, ok := sb[k]
-		if !ok || !slices.Equal(va, vb) {
+		if !ok || va.DNSLookupFailed != vb.DNSLookupFailed || !slices.Equal(va.Prefixes, vb.Prefixes) {
 			return false
 		}
 	}

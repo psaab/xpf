@@ -1797,20 +1797,14 @@ type UserspaceMapPins struct {
 type UserspaceCapabilities struct {
 	ForwardingSupported bool     `json:"forwarding_supported"`
 	UnsupportedReasons  []string `json:"unsupported_reasons,omitempty"`
-	// PolicyContentRejected lists the reasons the published snapshot carries
-	// the reserved __unsupported__ sentinel term and will be REJECTED by the
-	// helper's non-mutating integrity preflight (the #2124 fail-closed family).
-	// UNLIKE UnsupportedReasons, these entries do NOT disarm the helper
-	// (#3261): the snapshot still publishes, the current helper rejects it via
-	// SnapshotIntegrityError and KEEPS the previous-good PolicyState (running
-	// node) or leaves the default-deny PolicyState (fresh boot) — it never
-	// fails open to the kernel. Setting ForwardingSupported=false for this
-	// class instead DISARMS the helper, so the XDP shim XDP_PASSes transit to
-	// the kernel and bypasses the integrity reject — the system-level
-	// fail-OPEN #3261 closes. Go-side diagnostic only; omitempty so
-	// representable configs keep their exact wire shape (and snapshot hash).
-	// The Rust helper has no field for this and (lacking deny_unknown_fields)
-	// silently ignores it on decode.
+	// PolicyContentRejected lists Go-side policy-content diagnostics. Most
+	// entries correspond to a reserved __unsupported__ sentinel and a whole-
+	// snapshot integrity rejection by Rust. DNS-only rules instead carry the
+	// dedicated __dns_unavailable__ marker: Rust quarantines that rule to deny
+	// while accepting siblings, and this entry remains visible to operators.
+	// Neither class sets ForwardingSupported=false. The diagnostic is Go-side
+	// only; the Rust helper has no capability field and ignores it on decode.
+	// omitempty keeps representable configs' wire shape and snapshot hash stable.
 	PolicyContentRejected []string `json:"policy_content_rejected,omitempty"`
 }
 

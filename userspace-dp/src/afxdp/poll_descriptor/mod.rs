@@ -53,7 +53,7 @@ mod prerouting_scope;
 
 mod policy_revalidation;
 pub(in crate::afxdp) use policy_revalidation::{
-    ROUTE_CHANGE_ALARM_INTERVAL_NS, ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL,
+    ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL,
     should_alarm_route_change,
 };
 #[cfg(test)]
@@ -75,7 +75,6 @@ mod rx_telemetry;
 pub(in crate::afxdp) mod session_admission;
 mod session_hit_authority;
 
-use crate::nat::PersistentInbound;
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
 pub(in crate::afxdp) use embedded_icmp::{
     EmbeddedIcmpReversal, enforce_queued_embedded_icmp_policy, queued_embedded_icmp_identity,
@@ -119,9 +118,9 @@ use session_hit_authority::{
 
 use super::poll_stages::{
     FabricIngressOutcome, IpsecPassthroughOutcome, ScreenCheckOutcome, StageOutcome,
-    SynCookieAckOutcome, ike_host_inbound_gate_context,
-    ike_host_inbound_gate_context_with_ambiguous, reinject_ipsec_passthrough, screen_zone_roles,
-    stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
+    SynCookieAckOutcome, stage_classify_fabric_ingress,
+    ike_host_inbound_gate_context_with_ambiguous,
+    reinject_ipsec_passthrough, screen_zone_roles,
     stage_ipsec_passthrough_check_with_scope, stage_link_layer_classify, stage_native_gre_decap,
     stage_parse_flow_and_learn, stage_screen_check_with_ambiguous,
     stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous, stage_wg_decap,
@@ -320,6 +319,60 @@ fn transit_source_class_disposition(disposition: ForwardingDisposition) -> bool 
     )
 }
 
+/// #18533 round 2: the routing domain both transit address-class gates judge
+/// in, or `None` for a disposition neither gate applies to. Split out so a
+/// caller running BOTH gates (the flow-cache hit) resolves the domain once —
+/// `effective_routing_domain_for_flow` falls back to `ingress_routing_domain`
+/// (two map probes) for every domain-0 flow.
+#[inline]
+pub(in crate::afxdp) fn transit_class_routing_domain(
+    forwarding: &ForwardingState,
+    disposition: ForwardingDisposition,
+    flow_routing_domain: u32,
+    meta: ForwardPacketMeta,
+    fabric_ingress_zone: Option<u32>,
+) -> Option<u32> {
+    transit_source_class_disposition(disposition).then(|| {
+        crate::afxdp::forwarding::effective_routing_domain_for_flow(
+            forwarding,
+            flow_routing_domain,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            fabric_ingress_zone,
+        )
+    })
+}
+
+/// #18533 round 2: [`transit_source_class_drop`] with the domain from
+/// [`transit_class_routing_domain`].
+#[inline]
+pub(in crate::afxdp) fn transit_source_class_drop_in(
+    forwarding: &ForwardingState,
+    source: IpAddr,
+    transit_domain: Option<u32>,
+) -> bool {
+    transit_domain.is_some_and(|routing_domain| {
+        crate::afxdp::frame::transit_src_is_martian(forwarding, source, routing_domain)
+    })
+}
+
+/// #18533 round 2: [`transit_destination_class_drop`] with the domain from
+/// [`transit_class_routing_domain`].
+#[inline]
+pub(in crate::afxdp) fn transit_destination_class_drop_in(
+    forwarding: &ForwardingState,
+    destination: IpAddr,
+    translated_destination: Option<IpAddr>,
+    transit_domain: Option<u32>,
+) -> bool {
+    transit_domain.is_some_and(|routing_domain| {
+        crate::afxdp::frame::transit_dst_is_martian(forwarding, destination, routing_domain)
+            || translated_destination.is_some_and(|d| {
+                crate::afxdp::frame::transit_dst_is_martian(forwarding, d, routing_domain)
+            })
+    })
+}
+
 #[inline]
 pub(in crate::afxdp) fn transit_source_class_drop(
     forwarding: &ForwardingState,
@@ -329,17 +382,17 @@ pub(in crate::afxdp) fn transit_source_class_drop(
     meta: ForwardPacketMeta,
     fabric_ingress_zone: Option<u32>,
 ) -> bool {
-    if !transit_source_class_disposition(disposition) {
-        return false;
-    }
-    let routing_domain = crate::afxdp::forwarding::effective_routing_domain_for_flow(
+    transit_source_class_drop_in(
         forwarding,
-        flow_routing_domain,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-        fabric_ingress_zone,
-    );
-    crate::afxdp::frame::transit_src_is_martian(forwarding, source, routing_domain)
+        source,
+        transit_class_routing_domain(
+            forwarding,
+            disposition,
+            flow_routing_domain,
+            meta,
+            fabric_ingress_zone,
+        ),
+    )
 }
 
 #[inline]
@@ -352,20 +405,18 @@ pub(in crate::afxdp) fn transit_destination_class_drop(
     meta: ForwardPacketMeta,
     fabric_ingress_zone: Option<u32>,
 ) -> bool {
-    if !transit_source_class_disposition(disposition) {
-        return false;
-    }
-    let routing_domain = crate::afxdp::forwarding::effective_routing_domain_for_flow(
+    transit_destination_class_drop_in(
         forwarding,
-        flow_routing_domain,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-        fabric_ingress_zone,
-    );
-    crate::afxdp::frame::transit_dst_is_martian(forwarding, destination, routing_domain)
-        || translated_destination.is_some_and(|d| {
-            crate::afxdp::frame::transit_dst_is_martian(forwarding, d, routing_domain)
-        })
+        destination,
+        translated_destination,
+        transit_class_routing_domain(
+            forwarding,
+            disposition,
+            flow_routing_domain,
+            meta,
+            fabric_ingress_zone,
+        ),
+    )
 }
 
 #[inline]
@@ -548,7 +599,7 @@ use resolver_enqueue::{
 };
 
 use filter::{
-    NonPbrInputFilterEval, SessionHitInputFilterEval, SessionHitPbrRouteRevalidation,
+    NonPbrInputFilterEval, SessionHitInputFilterEval,
     apply_lo0_filter_action, collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit, evaluate_non_pbr_input_filter,
     evaluate_non_pbr_input_filter_counters_cached,
@@ -781,6 +832,23 @@ pub(super) fn rollback_recorded_persistent_inbound_hold(
         now_ns,
     );
 }
+// #17190 fold (B3): the routed-pair store (`note_admission_to_zone` below)
+// is restored loop-visible state, NOT the burn-down's inert
+// `let _ = &to_zone_id`. On this path the finalized-resolution store
+// overwrites it before any read, so the dead-store deny fires — but
+// `admission_to_zone` is only ever read under `== 0` guards across
+// descriptor iterations, and the store keeps the routed pair's value in
+// place for any early-read path. Restructuring it away (deleting the
+// store, or a read-back alias) would reintroduce the stale-zone bug; the
+// reviewers' agreed resolution is to keep the store and exempt exactly
+// this one assignment. The exemption is scoped to the tiny helper below:
+// no fn-wide allow remains, so every other store in
+// `poll_binding_process_descriptor_with_injection` stays under the deny.
+#[allow(unused_assignments)]
+#[inline]
+fn note_admission_to_zone(slot: &mut u32, to_zone_id: u32) {
+    *slot = to_zone_id;
+}
 
 pub(super) fn poll_binding_process_descriptor_with_injection(
     binding: &mut BindingWorker,
@@ -932,7 +1000,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // references. The owned bytes live in
                 // `replay_scratch_frame` for the rest of the pass; the
                 // native descriptor is recycled by the ordinary epilogue.
-                let mut replay_scratch_frame: Vec<u8> = Vec::new();
+                let replay_scratch_frame: Vec<u8>;
                 let raw_frame = if let Some(owned) = replay_owned_frame.take() {
                     replay_scratch_frame = owned;
                     replay_scratch_frame.as_slice()
@@ -1369,31 +1437,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // flow-cache entry, or reinject can resurrect the
                 // packet; tunnel-decapped inners are judged on their
                 // own (inner) frame and hop limit.
-                if !worker_ctx.forwarding.no_ipv6_reject_zero_hop_limit {
-                    let zero_hop_dst = flow.as_ref().map(|f| f.dst_ip).or_else(|| {
-                        crate::afxdp::frame::parse_packet_destination_from_frame(packet_frame, meta)
-                        });
-                    if let Some(dst) = zero_hop_dst {
-                        let dst_is_local = matches!(
-                            crate::afxdp::forwarding::lookup_forwarding_resolution(
-                                worker_ctx.forwarding,
-                                dst,
+                // #18533: the locality verdict is a full FIB walk, so it is
+                // passed as a closure that runs only for a hop-limit-0 IPv6
+                // packet with the knob unset (`zero_hop_limit_local_drop`
+                // checks those first). The #16841 form computed it eagerly
+                // here for every valid packet, IPv4 included.
+                if zero_hop_limit_local_drop(worker_ctx.forwarding, packet_frame, meta, || {
+                    flow.as_ref()
+                        .map(|f| f.dst_ip)
+                        .or_else(|| {
+                            crate::afxdp::frame::parse_packet_destination_from_frame(
+                                packet_frame,
+                                meta,
                             )
-                            .resolution
-                            .disposition,
-                            ForwardingDisposition::LocalDelivery
-                        );
-                        if zero_hop_limit_local_drop(
-                            worker_ctx.forwarding,
-                            packet_frame,
-                            meta,
-                            dst_is_local,
-                        ) {
-                            telemetry.counters.touched = true;
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
-                        }
-                    }
+                        })
+                        .is_some_and(|dst| {
+                            matches!(
+                                crate::afxdp::forwarding::lookup_forwarding_resolution(
+                                    worker_ctx.forwarding,
+                                    dst,
+                                )
+                                .resolution
+                                .disposition,
+                                ForwardingDisposition::LocalDelivery
+                            )
+                        })
+                }) {
+                    telemetry.counters.touched = true;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
                 }
                 // #7160 (#2387) stage 9b: stamp the flow's ROUTING DOMAIN.
                 // The validated peer zone is the only remote ingress identity;
@@ -3240,7 +3312,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     false,
                                 ),
                             };
-                        seed_packet_already_counted = input_already_counted;
+                        let _ = &input_already_counted;
                         // #13641: cache seeding is not an accounting
                         // chokepoint. It is skipped for non-cacheable
                         // session hits, failed installs, local delivery, and
@@ -3538,6 +3610,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // selector, so ICMP-application DNAT
                                 // sessions survive revalidation.
                                 policy_packet_icmp(packet_frame, meta),
+                                fabric_link_ingress,
                             );
                         let owner_icmp_verdict =
                             if session_hit_revocation.is_none() && foreign_arrival_zone.is_none() {
@@ -5287,9 +5360,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         );
                         // #7770 authorization is on the real routed pair,
                         // before any HA fabric redirect changes the egress.
+                        // #17190 fold (B3): this store is restored, not the
+                        // burn-down's `let _ = &to_zone_id` read-back. The
+                        // finalized-resolution store below
+                        // (`admission_to_zone = if final_resolution...`)
+                        // overwrites it on this path, but the store is
+                        // loop-visible state: later descriptor iterations
+                        // read `admission_to_zone` under `== 0` guards, and
+                        // any future early-read path must see the routed
+                        // pair's value, never a stale one.
                         let route_from_zone_id = from_zone_id;
                         let route_to_zone_id = to_zone_id;
-                        admission_to_zone = to_zone_id;
+                        note_admission_to_zone(&mut admission_to_zone, to_zone_id);
                         // Borrow zone names as &str for string-typed downstream
                         // callers (static_nat, match_source_nat_for_flow, debug
                         // log). No clone — the borrow lives only inside this
@@ -5300,12 +5382,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             .get(&from_zone_id)
                             .map(|s| s.as_str())
                             .unwrap_or("");
-                        let mut to_zone: &str = worker_ctx
-                            .forwarding
-                            .zone_id_to_name
-                            .get(&to_zone_id)
-                            .map(|s| s.as_str())
-                            .unwrap_or("");
+                        let to_zone: &str;
                         // #2210 + #2209: port-scan / IP-sweep screen
                         // detection at the new-flow / session-MISS
                         // decision. Running it HERE (not on the per-packet
@@ -5575,13 +5652,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     telemetry.dbg.local += 1;
                                     telemetry.dbg.policy_deny += 1;
                                     telemetry.counters.touched = true;
-                                    if persistent_lease_hold_outer.is_some() {
+                                    if let Some(hold_key) = persistent_lease_hold_outer.take() {
                                         rollback_persistent_inbound_hold(
                                             worker_ctx.forwarding,
-                                            persistent_lease_hold_outer,
+                                            Some(hold_key),
+
                                             now_ns,
                                         );
-                                        persistent_lease_hold_outer = None;
                                     }
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
@@ -6580,13 +6657,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 );
                             } else {
                                 sessions.note_admission_refused();
-                                if persistent_lease_hold_outer.is_some() {
+                                if let Some(hold_key) = persistent_lease_hold_outer.take() {
                                     rollback_persistent_inbound_hold(
                                         worker_ctx.forwarding,
-                                        persistent_lease_hold_outer,
+                                        Some(hold_key),
+
                                         now_ns,
                                     );
-                                    persistent_lease_hold_outer = None;
                                 }
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
@@ -8278,11 +8355,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // else-if chain would skip after conversion).
                             // Install the punt seed judged on the
                             // pre-redirect disposition.
+                            // #18174: never for a packet whose TTL / hop limit
+                            // expires here — the poll tail answers it with a
+                            // local Time Exceeded instead of redirecting it, so
+                            // a seed would only leave a session row (a punt seed
+                            // emits no HA delta) for a flow that never left this
+                            // node, the
+                            // FabricRedirect twin of the #14643 rollback the
+                            // ForwardCandidate miss path performs.
                             if should_seed_fabric_punt(
                                 seed_pre_disposition,
                                 packet_fabric_ingress,
                                 decision.nat,
-                            ) {
+                            ) && !matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                            {
                                 let seed_owner_rg = owner_rg_id;
                                 if let Some(seed_metadata) = fabric_punt_seed_metadata(
                                     worker_ctx.forwarding,
@@ -8426,7 +8512,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             decision.resolution.disposition,
                             packet_fabric_ingress,
                             decision.nat,
-                        ) {
+                        ) && !matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                        {
                             // #7770: PUNT SEED. This flow is about to cross the
                             // fabric because the peer owns its egress RG, and it
                             // is leaving here UNADJUDICATED — the session-miss
@@ -9249,6 +9336,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }
+                                if let Some(inner_frame) = owned_packet_frame.take() {
+                                    let forward = binding
+                                        .scratch
+                                        .scratch_forwards
+                                        .last_mut()
+                                        .expect("queued embedded ICMP forward");
+                                    let PendingForwardFrame::PrebuiltTransit {
+                                        ingress_source,
+                                        ..
+                                    } = &mut forward.frame
+                                    else {
+                                        unreachable!("embedded ICMP must queue PrebuiltTransit");
+                                    };
+                                    *ingress_source = PrebuiltTransitIngress::Owned(inner_frame);
+                                }
                                 telemetry.counters.touched = true;
                                 continue;
                             }
@@ -9397,6 +9499,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     );
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
+                                }
+                                if let Some(inner_frame) = owned_packet_frame.take() {
+                                    let forward = binding
+                                        .scratch
+                                        .scratch_forwards
+                                        .last_mut()
+                                        .expect("queued embedded ICMP forward");
+                                    let PendingForwardFrame::PrebuiltTransit {
+                                        ingress_source,
+                                        ..
+                                    } = &mut forward.frame
+                                    else {
+                                        unreachable!("embedded ICMP must queue PrebuiltTransit");
+                                    };
+                                    *ingress_source = PrebuiltTransitIngress::Owned(inner_frame);
                                 }
                                 telemetry.counters.touched = true;
                                 continue;
@@ -10286,6 +10403,47 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
+                // #18174: a transit packet this node hands to the fabric peer
+                // (split RGs: the egress RG is peer-owned) is still routed by
+                // THIS node — the redirecting node is the hop. The fabric
+                // build decrements TTL / hop limit and refuses a packet that
+                // would expire (`fabric_redirect_build_failed`), and the peer
+                // skips the decrement on fabric ingress, so before this check
+                // nobody answered an expiring probe: traceroute/mtr hop 1 read
+                // `???` whenever the LAN RG and the WAN RG sat on different
+                // nodes (live on tcp, fw1 `fabric_redirect_unsendable_drops`
+                // = every TTL-1 probe). The session-hit and session-miss TE
+                // sites above only cover `ForwardCandidate`; the flow-cache
+                // hit path already covers `FabricRedirect` (#3779). Answer
+                // here, from the ingress unit this node owns, exactly as a
+                // local forward would; a suppressed reply drops the packet.
+                // A fabric arrival is never re-redirected and never decrements
+                // here, and an injected record keeps its TX-pool ownership.
+                if decision.resolution.disposition == ForwardingDisposition::FabricRedirect
+                    && !is_injected
+                    && (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0
+                    && let Some(flow) = flow.as_ref()
+                    && matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                {
+                    if let Some(request) = build_local_time_exceeded_request(
+                        packet_frame,
+                        desc,
+                        meta,
+                        &worker_ctx.ident,
+                        flow,
+                        worker_ctx.forwarding,
+                        worker_ctx.event_stream,
+                        worker_ctx.dynamic_neighbors,
+                        worker_ctx.ha_state,
+                        now_secs,
+                        telemetry.counters,
+                    ) {
+                        binding.scratch.scratch_forwards.push(request);
+                        continue;
+                    }
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
                 // #9950 post-commit overlap record + translated re-check. Keep
                 // this before forward/session/zone accounting so shard-full and
                 // overlap drops are not counted as forwarded candidates.
@@ -10305,7 +10463,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             now_ns,
                             &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
                         );
-                    let mut pre_admission = pre_overlap.admission.take();
+                    let pre_admission = pre_overlap.admission.take();
                     let pre_overlap_dropped = pre_overlap.dropped;
                     telemetry
                         .counters
@@ -12372,14 +12530,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // a reverse session. Without this, the SYN-ACK hits
                                 // session miss → policy deny (no rule for WAN→LAN).
                                 let mut pending_decision = decision;
-                                let mut source_nat_release_key = None;
-                                let mut source_nat_static = None;
+                                let source_nat_release_key;
+                                let source_nat_static;
                                 // #2218: matched SNAT/static-SNAT rule counter
                                 // for the seeded translated flow; incremented at
                                 // the committed seed install below.
-                                let mut source_nat_counter: Option<
+                                let source_nat_counter: Option<
                                     std::sync::Arc<crate::nat::NatRuleCounter>,
-                                > = None;
+                                >;
                                 // #1861 §5.3: true when the seed install was
                                 // ATTEMPTED and refused (max_sessions). Gates
                                 // the pending-neighbor buffering below: a
@@ -12395,7 +12553,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // reserve a pool identity. The deferred probe
                                 // (if any) fires only after every later gate
                                 // admits, using this pre-composition snapshot.
-                                let mut probe_admitted_14661 = false;
+                                let probe_admitted_14661;
                                 if let Some(flow) = flow.as_ref() {
                                     // #1913 (Codex r2): policy was already
                                     // evaluated (and any DENY dropped+recycled)
@@ -12510,13 +12668,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_id,
                                             );
                                         }
-                                        if persistent_lease_hold_outer.is_some() {
+                                        if let Some(hold_key) =
+                                            persistent_lease_hold_outer.take()
+                                        {
                                             rollback_persistent_inbound_hold(
                                                 worker_ctx.forwarding,
-                                                persistent_lease_hold_outer,
+                                                Some(hold_key),
                                                 now_ns,
                                             );
-                                            persistent_lease_hold_outer = None;
                                         }
                                         telemetry.dbg.policy_deny += 1;
                                         telemetry.counters.record_transit_ipsec_fence_drop();
@@ -12643,7 +12802,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // external authority live; refuse the seed
                                     // instead of colliding with a victim tuple.
                                     let seed_gate_refused_14661 = !shed_teardown_allowed;
-                                    let mut seed_install_permit_14661 =
+                                    let seed_install_permit_14661 =
                                         if pending_capacity_available && !seed_gate_refused_14661 {
                                             match crate::afxdp::bpf_map::global_tuple_gate()
                                                 .try_acquire_installs([flow.forward_key.clone()])
@@ -12936,13 +13095,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // and drop the frame instead of
                                         // buffering it for replay.
                                         seed_install_refused = true;
-                                        if persistent_lease_hold_outer.is_some() {
+                                        if let Some(hold_key) =
+                                            persistent_lease_hold_outer.take()
+                                        {
                                             rollback_persistent_inbound_hold(
                                                 worker_ctx.forwarding,
-                                                persistent_lease_hold_outer,
+                                                Some(hold_key),
                                                 now_ns,
                                             );
-                                            persistent_lease_hold_outer = None;
                                         }
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,

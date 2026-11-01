@@ -62,9 +62,11 @@ reach = hard FAIL). Verify a lane's claimed runs obey this;
 - **Both reviewers must agree.** If pool reviewer 1 says PLAN-READY and
   pool reviewer 2 says PLAN-NEEDS-MAJOR, iterate. If both say PLAN-KILL,
   stop and report — do NOT push through.
-- **Smoke v4 AND v6.** Every test cycle hits both
-  172.16.80.200 and 2001:559:8585:80::200. v4-only smoke masks
-  dual-stack regressions.
+- **Smoke v4 AND v6.** Every test cycle hits both `$IPERF_TARGET4`
+  and `$IPERF_TARGET6`, read from the loss env through
+  `source test/incus/cluster-env.sh` (today 172.16.80.202 and
+  2001:559:8585:80::200; v4 moved off the dual-held .200 in #18576).
+  Never hard-code them. v4-only smoke masks dual-stack regressions.
 - **Smoke push AND reverse.** Every iperf3 invocation runs
   twice: once default (push, client→server) and once with `-R`
   (reverse, server→client). Push-only smoke once let a TX-path
@@ -358,6 +360,7 @@ CLI
 #      (single-stream) lines so a fixed `$N` index is fragile;
 #      anchoring on the `sender` word avoids that.
 set -o pipefail
+source test/incus/cluster-env.sh   # IPERF_TARGET4/6 for the loss env (#18576)
 echo "=== Pass A — CoS disabled, v4+v6 × push+reverse ==="
 # Targets named explicitly to avoid colon-delimited packing (IPv6
 # addresses contain colons, which makes any `${var%%:*}`-style split
@@ -365,8 +368,8 @@ echo "=== Pass A — CoS disabled, v4+v6 × push+reverse ==="
 # fixed-string grep so the dots in interval/timestamp tokens are
 # matched literally rather than as regex wildcards.
 declare -A TARGETS=(
-  [v4]="172.16.80.200"
-  [v6]="2001:559:8585:80::200"
+  [v4]="$IPERF_TARGET4"
+  [v6]="$IPERF_TARGET6"
 )
 # Filter strategy: don't pin the interval string ("0.00-5.00") — iperf3
 # timing drift can print "0.00-5.01" or similar, which would falsely
@@ -385,8 +388,8 @@ done
 # regression. Pick the last `[SUM] ... sender` line so the Retr column
 # stays visible without the brittle interval-string match.
 echo "=== Pass A — 12-stream reverse reproducer (CoS disabled) ==="
-sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 12 -t 10 -p 5201 -R"       2>&1 | grep -F -- "[SUM]" | grep -F -- "sender" | tail -1 || { echo "NO SUM SENDER LINE — iperf3 failed"; exit 1; }
-sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 2001:559:8585:80::200 -P 12 -t 10 -p 5201 -R" 2>&1 | grep -F -- "[SUM]" | grep -F -- "sender" | tail -1 || { echo "NO SUM SENDER LINE — iperf3 failed"; exit 1; }
+sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c $IPERF_TARGET4 -P 12 -t 10 -p 5201 -R"       2>&1 | grep -F -- "[SUM]" | grep -F -- "sender" | tail -1 || { echo "NO SUM SENDER LINE — iperf3 failed"; exit 1; }
+sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c $IPERF_TARGET6 -P 12 -t 10 -p 5201 -R" 2>&1 | grep -F -- "[SUM]" | grep -F -- "sender" | tail -1 || { echo "NO SUM SENDER LINE — iperf3 failed"; exit 1; }
 
 # === Pass B: CoS ENABLED ===
 sg incus-admin -c "./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0"
@@ -462,9 +465,9 @@ Plan doc: docs/pr/<ISSUE>-<SLUG>/plan.md
 - [x] Go suite: 30 packages pass
 - [x] Deploy on loss userspace cluster
 - [x] **Pass A — CoS disabled** (best-effort fast path)
-  - [x] v4 push: <Mbps>, <retrans> retrans against 172.16.80.200
+  - [x] v4 push: <Mbps>, <retrans> retrans against `$IPERF_TARGET4` (<address>)
   - [x] v4 reverse (`-R`): <Mbps>, <retrans> retrans
-  - [x] v6 push: <Mbps>, <retrans> retrans against 2001:559:8585:80::200
+  - [x] v6 push: <Mbps>, <retrans> retrans against `$IPERF_TARGET6` (<address>)
   - [x] v6 reverse (`-R`): <Mbps>, <retrans> retrans
   - [x] v4 multi-stream reverse: `iperf3 -P 12 -t 10 -R` — line rate, 0 retrans
   - [x] v6 multi-stream reverse: `iperf3 -P 12 -t 10 -R` — line rate, 0 retrans

@@ -1228,6 +1228,11 @@ which share `config.AuthorizeConfigMutation`. Flat `load set` /
 `LoadMutationLines`; the hierarchical branch already rendered through
 `FormatSet`.
 
+The scratch rendering preserves quoted-token provenance and re-escapes
+decoded double quotes and backslashes using the lexer’s normal string
+encoding, so quotes in string data do not suppress split-statement
+adjudication (#17689).
+
 #### `insert` is adjudicated on both endpoints (#16786)
 
 `insert <element> before|after <ref>` moves an existing element relative

@@ -164,6 +164,13 @@ pub(in crate::afxdp::session_glue) fn dispatch_worker_commands(
             WorkerCommand::VacateAllSharedExactSlots => {
                 *ctx.vacate_all_shared_exact_slots = true;
             }
+            // #18520: apply a sibling's cross-worker handshake transition.
+            // Session-table mutation only (no BPF, no shared-map lock); a
+            // relay that does not match this table's incarnation/stage is a
+            // no-op.
+            WorkerCommand::HandshakeRelay(relay) => {
+                ctx.sessions.apply_handshake_relay(&relay, ctx.now_ns);
+            }
         }
     }
 }

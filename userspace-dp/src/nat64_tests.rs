@@ -3094,7 +3094,7 @@ fn nat64_v6_to_v4_icmp_error_restores_embedded_dst_port_6472() {
     // RED-on-revert pin: the data-packet entry leaves the ORIGINAL client
     // port verbatim (unassociable — the pre-#6472 behavior).
     let mut buf2 = vec![0u8; v6_pkt.len() + 64];
-    let w2 = write_v6_to_v4_into(&mut buf2, &v6_pkt, pool_v4, server_v4, false)
+    let _w2 = write_v6_to_v4_into(&mut buf2, &v6_pkt, pool_v4, server_v4, false)
         .expect("data-packet entry translates");
     assert_eq!(
         &buf2[28 + 22..28 + 24],
@@ -6308,8 +6308,9 @@ fn frag_assoc_sustained_rate_recycles_own_oldest_16593() {
     // per-session quota refused every datagram past the first 32 until
     // their 2 s TTL expired (~1840 misses); own-oldest recycling admits
     // each new head by displacing only that session's oldest entry.
-    // Two release variants are driven: with MF=0 release (the production
-    // consult path) and without it (recycle alone must suffice).
+    // Two test variants are driven: one uses the explicit release hook to
+    // model completed trains; the other leaves entries for own-oldest recycle.
+    // Production completion coverage is exercised by the #17720 regressions.
     use std::sync::atomic::Ordering;
     let src = IpAddr::V6("2001:db8::593".parse().unwrap());
     let dst = IpAddr::V6("64:ff9b::0808:0808".parse().unwrap());
@@ -6386,6 +6387,167 @@ fn frag_assoc_sustained_rate_recycles_own_oldest_16593() {
     assert!(!evicted, "zone refusal must not report a live eviction");
     assert!(cache.lookup(&refused, 1_001, 1, |_| true).is_none(), "zone refusal stays fail-closed");
     assert_eq!(FRAG_QUOTA_REFUSALS.load(Ordering::Relaxed) - refusals_before, 1, "#16593: zone/shard refusals must be counted");
+}
+
+#[test]
+fn frag_assoc_mf0_tail_waits_for_missing_middle_17720() {
+    let src = Ipv4Addr::new(192, 0, 2, 17);
+    let dst = Ipv4Addr::new(198, 51, 100, 23);
+    let fragment = |offset_units: u16, more: bool, payload_len: usize| {
+        let total_len = 20 + payload_len;
+        let mut packet = vec![0; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[4..6].copy_from_slice(&0x1772u16.to_be_bytes());
+        let frag_word = offset_units | if more { 0x2000 } else { 0 };
+        packet[6..8].copy_from_slice(&frag_word.to_be_bytes());
+        packet[9] = PROTO_UDP;
+        packet[12..16].copy_from_slice(&src.octets());
+        packet[16..20].copy_from_slice(&dst.octets());
+        packet
+    };
+    let head = fragment(0, true, 16);
+    let tail = fragment(4, false, 8);
+    let middle = fragment(2, true, 16);
+    let authority = frag_test_authority();
+    let key = first_fragment_key(&head, libc::AF_INET, authority).expect("head key");
+    let head_range = crate::fragment_assoc::fragment_range(&head, libc::AF_INET, authority)
+        .expect("head range");
+    let tail_range = crate::fragment_assoc::fragment_range(&tail, libc::AF_INET, authority)
+        .expect("tail range");
+    let middle_range = crate::fragment_assoc::fragment_range(&middle, libc::AF_INET, authority)
+        .expect("middle range");
+    let session = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        src_ip: key.src,
+        dst_ip: key.dst,
+        src_port: 12345,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let cache = FragAssoc::new();
+    let decision = frag_test_decision(NatDecision::default());
+    cache.install_with_session_and_range(
+        key,
+        decision,
+        None,
+        session,
+        1,
+        1_000,
+        1,
+        0,
+        Some(head_range),
+    );
+
+    // Arrival order head, terminal tail, middle: tail alone cannot prove that
+    // the [16,32) range exists, so the still-needed middle must hit the entry.
+    assert!(cache.lookup(&key, 1_001, 1, |_| true).is_some(), "tail consult must hit before recording");
+    assert!(!cache.record_fragment(&key, tail_range));
+    assert_eq!(cache.len(), 1, "incomplete coverage must retain the association");
+    assert!(
+        cache.lookup(&key, 1_002, 1, |_| true).is_some(),
+        "the reordered middle must still inherit the admitted decision"
+    );
+    assert!(cache.record_fragment(&key, middle_range));
+    assert_eq!(cache.len(), 0, "the complete prefix releases the association");
+}
+
+#[test]
+fn frag_assoc_mf0_tail_releases_after_middle_coverage_17720() {
+    let src = Ipv4Addr::new(192, 0, 2, 18);
+    let dst = Ipv4Addr::new(198, 51, 100, 24);
+    let fragment = |offset_units: u16, more: bool, payload_len: usize| {
+        let total_len = 20 + payload_len;
+        let mut packet = vec![0; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[4..6].copy_from_slice(&0x1773u16.to_be_bytes());
+        let frag_word = offset_units | if more { 0x2000 } else { 0 };
+        packet[6..8].copy_from_slice(&frag_word.to_be_bytes());
+        packet[9] = PROTO_UDP;
+        packet[12..16].copy_from_slice(&src.octets());
+        packet[16..20].copy_from_slice(&dst.octets());
+        packet
+    };
+    let head = fragment(0, true, 16);
+    let middle = fragment(2, true, 16);
+    let tail = fragment(4, false, 8);
+    let authority = frag_test_authority();
+    let key = first_fragment_key(&head, libc::AF_INET, authority).expect("head key");
+    let range = |packet: &[u8]| {
+        crate::fragment_assoc::fragment_range(packet, libc::AF_INET, authority)
+            .expect("fragment range")
+    };
+    let session = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        src_ip: key.src,
+        dst_ip: key.dst,
+        src_port: 12345,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let cache = FragAssoc::new();
+    let decision = frag_test_decision(NatDecision::default());
+    cache.install_with_session_and_range(
+        key,
+        decision,
+        None,
+        session,
+        1,
+        1_000,
+        1,
+        0,
+        Some(range(&head)),
+    );
+
+    // Control order head, middle, terminal: coverage is still recorded in
+    // network-byte order and the association is released by the final consult.
+    assert!(cache.lookup(&key, 1_001, 1, |_| true).is_some());
+    assert!(!cache.record_fragment(&key, range(&middle)));
+    assert!(cache.lookup(&key, 1_002, 1, |_| true).is_some());
+    assert!(cache.lookup(&key, 1_003, 1, |_| true).is_some(), "tail consult must hit before recording");
+    assert!(cache.record_fragment(&key, range(&tail)));
+    assert_eq!(cache.len(), 0, "terminal completion releases the association");
+    assert!(cache.lookup(&key, 1_004, 1, |_| true).is_none());
+}
+
+#[test]
+fn frag_range_uses_non_atomic_ipv6_header_after_atomic_prefix_17720() {
+    // A leading atomic Fragment header must not shift the payload start used
+    // for the following real fragmented datagram.
+    let mut packet = vec![0u8; 72];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&32u16.to_be_bytes());
+    packet[6] = 44;
+    packet[7] = 64;
+
+    // Atomic prefix header: its Next Header points at the actual fragment.
+    packet[40] = 44;
+    packet[44..48].copy_from_slice(&0x1111_1111u32.to_be_bytes());
+    // Non-atomic head: 16 bytes of fragmentable payload follow this header.
+    packet[48] = PROTO_UDP;
+    packet[50..52].copy_from_slice(&1u16.to_be_bytes());
+    packet[52..56].copy_from_slice(&0x2222_2222u32.to_be_bytes());
+
+    let range = crate::fragment_assoc::fragment_range(
+        &packet,
+        libc::AF_INET6,
+        frag_test_authority(),
+    )
+    .expect("real fragment range after atomic prefix");
+    assert_eq!(
+        range,
+        crate::fragment_assoc::FragmentRange {
+            start: 0,
+            end: 16,
+            more: true,
+        },
+        "geometry must start after the selected non-atomic Fragment header"
+    );
 }
 
 #[test]
@@ -10642,7 +10804,7 @@ fn nat64_15956_into_builders_byte_identical_with_poisoned_dst() {
         let mut frame = vec![0xaau8; 12];
         frame.extend_from_slice(&0x86ddu16.to_be_bytes());
         frame.extend_from_slice(&pkt);
-        let mut want = build_nat64_v6_to_v4_frame(&frame, snat, dst4, [0x11; 6], [0x22; 6], 0, false).expect("ref v6to4");
+        let want = build_nat64_v6_to_v4_frame(&frame, snat, dst4, [0x11; 6], [0x22; 6], 0, false).expect("ref v6to4");
         let mut dst = vec![0xEEu8; frame.len() + 4];
         let n = build_nat64_v6_to_v4_frame_into(&mut dst, &frame, snat, dst4, [0x11; 6], [0x22; 6], 0, false).expect("into v6to4");
         // Identification (L3 bytes 4..6) + header checksum (10..12) are

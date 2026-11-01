@@ -845,11 +845,16 @@ type PeerGroupState struct {
 
 // heartbeatSender sends periodic heartbeat packets.
 type heartbeatSender struct {
-	mgr        *Manager
-	conn       *net.UDPConn
-	peerAddr   *net.UDPAddr
-	interval   time.Duration
-	stopCh     chan struct{}
+	mgr      *Manager
+	conn     *net.UDPConn
+	peerAddr *net.UDPAddr
+	interval time.Duration
+	stopCh   chan struct{}
+	// kickCh requests an out-of-cadence send (ResignForPlannedShutdown).
+	// Buffered 1 so kicks coalesce and kick never blocks; a sender built
+	// without newHeartbeatSender has a nil channel, which the run loop
+	// never selects and kick's default arm skips.
+	kickCh     chan struct{}
 	wg         sync.WaitGroup
 	sent       atomic.Uint64
 	sendErrors atomic.Uint64
@@ -929,6 +934,17 @@ func newHeartbeatSender(mgr *Manager, conn *net.UDPConn, peerAddr *net.UDPAddr, 
 		peerAddr: peerAddr,
 		interval: interval,
 		stopCh:   make(chan struct{}),
+		kickCh:   make(chan struct{}, 1),
+	}
+}
+
+// kick asks the run loop to send one frame now, on its own goroutine, so the
+// frame is built and written in sequence order with the ticker's frames. It
+// never blocks: a pending kick absorbs later ones.
+func (s *heartbeatSender) kick() {
+	select {
+	case s.kickCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -956,6 +972,8 @@ func (s *heartbeatSender) run() {
 		select {
 		case <-s.stopCh:
 			return
+		case <-s.kickCh:
+			s.send()
 		case <-ticker.C:
 			s.send()
 			ticks++
@@ -1408,20 +1426,60 @@ func (r *heartbeatReceiver) admitFrame(frame []byte, pkt *HeartbeatPacket) bool 
 	// Store CLOCK_MONOTONIC, not wall clock: the timeout comparison
 	// must be immune to wall-clock steps (#1792).
 	r.lastSeen.Store(MonotonicNanos())
+	// #18585: only an ADMITTED frame (MAC + replay checks passed on a keyed
+	// cluster) may update the measured peer clock offset, so a replayed
+	// archived frame cannot steer it (#7487's admitted-path rule).
+	r.mgr.notePeerWallClock(pkt.WallClockUnixNano, time.Now())
 	r.mgr.handlePeerHeartbeat(pkt)
 	return true
 }
 
+// timeoutChecksPerInterval is how many times per heartbeat interval the
+// receiver evaluates peer staleness (#18561). The staleness rule itself is
+// unchanged (the last admitted heartbeat older than interval x threshold);
+// only the phase between the peer's death crossing that threshold and the
+// next evaluation shrinks. With one check per interval a dead peer was
+// declared anywhere in threshold + [0, 1) intervals: 1.0-1.2 s in the lab's
+// 200 ms x 5, which measured 1.054-1.109 s with the #18570 probe on tcp.
+// Four checks per interval bound the phase at a quarter interval: 1.0-1.05 s
+// in the lab, 0.5-0.525 s at the 100 ms x 5 default.
+const timeoutChecksPerInterval = 4
+
+// minTimeoutCheckInterval floors the check cadence for very short heartbeat
+// intervals so the timeout goroutine never spins.
+const minTimeoutCheckInterval = 10 * time.Millisecond
+
+// timeoutCheckInterval is the receiver's staleness check cadence for a
+// heartbeat interval: interval / timeoutChecksPerInterval, floored at
+// minTimeoutCheckInterval and never longer than the interval itself.
+func timeoutCheckInterval(interval time.Duration) time.Duration {
+	c := interval / timeoutChecksPerInterval
+	if c < minTimeoutCheckInterval {
+		c = minTimeoutCheckInterval
+	}
+	if interval > 0 && c > interval {
+		c = interval
+	}
+	return c
+}
+
+// newTimeoutTicker is the timeout loop's ticker constructor, a seam so a cell
+// can observe the cadence the loop actually runs at (#18561).
+var newTimeoutTicker = func(d time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(d)
+	return t.C, t.Stop
+}
+
 func (r *heartbeatReceiver) timeoutLoop() {
 	defer r.wg.Done()
-	ticker := time.NewTicker(r.interval)
-	defer ticker.Stop()
+	tick, stop := newTimeoutTicker(timeoutCheckInterval(r.interval))
+	defer stop()
 
 	for {
 		select {
 		case <-r.stopCh:
 			return
-		case <-ticker.C:
+		case <-tick:
 			r.checkTimeout()
 		}
 	}
@@ -1466,15 +1524,34 @@ func (r *heartbeatReceiver) checkTimeout() {
 	// commit for up to 30s. It still keeps whatever remained of a grace its
 	// predecessor was inside (inheritedHold). At boot, that is the cold-boot
 	// grace, which the boot-time apply's restart must not cut short.
-	if time.Since(r.startedAt) < r.seenThenLostGrace() || time.Now().Before(r.inheritedHold) {
+	//
+	// #18549: the BOOT part of that floor (a cold start's 30s, or a boot
+	// floor inherited across restarts) ends early once bring-up is proven
+	// over — inbound bulk complete, then the peer heard gap-free for
+	// heartbeatBootStableWindow (heartbeat_boot_floor.go). A rejoined node
+	// that reports takeover-ready must be able to notice its peer dying. A
+	// restart's own grace is never shortened.
+	restartFloor := r.seenGrace > 0 && time.Since(r.startedAt) < r.seenGrace
+	bootFloor := (r.seenGrace == 0 && time.Since(r.startedAt) < heartbeatStartupGrace) ||
+		time.Now().Before(r.inheritedHold)
+	if restartFloor || (bootFloor && !r.mgr.bootFloorProvenOver()) {
 		return
 	}
 	// Compare in the CLOCK_MONOTONIC domain. The previous
 	// time.Unix(0, lastNano) round-trip produced a Time with no monotonic
 	// reading, making time.Since pure wall-clock — a forward step > timeout
 	// fired a false peer-lost on a healthy cluster (#1792).
-	if heartbeatStale(lastNano, MonotonicNanos(), timeout) {
+	nowMono := MonotonicNanos()
+	if heartbeatStale(lastNano, nowMono, timeout) {
 		r.mgr.handlePeerTimeout()
+		return
+	}
+	// #18561: at the first missed heartbeat (older than 1.5 intervals: one
+	// expected heartbeat plus jitter), probe the peer once over the sync
+	// channel, so the timeout tick can judge the sync-recency suppression on
+	// evidence from after the heartbeats went late (heartbeat_suppress.go).
+	if r.threshold >= 2 && heartbeatStale(lastNano, nowMono, r.interval*3/2) {
+		r.mgr.prearmPeerLivenessProbe(nowMono)
 	}
 }
 

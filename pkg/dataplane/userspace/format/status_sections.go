@@ -392,12 +392,10 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	if len(status.Capabilities.UnsupportedReasons) > 0 {
 		fmt.Fprintf(b, "  Forwarding blocked by:     %s\n", strings.Join(status.Capabilities.UnsupportedReasons, "; "))
 	}
-	// #10500: name the last-snapshot policy content the userspace matcher
-	// cannot represent (kept fail-closed by the helper preflight). One
-	// reason per line — reasons carry "; "-joined causes, so joining
-	// would be unparseable.
+	// #10500: show whole-snapshot refusal reasons and per-rule DNS quarantine
+	// diagnostics; the reason text identifies the affected fail-closed behavior.
 	if len(status.LastSnapshotRejectReasons) > 0 {
-		fmt.Fprintf(b, "  Last snapshot rejection:   %s\n", status.LastSnapshotRejectReasons[0])
+		fmt.Fprintf(b, "  Last policy diagnostic:    %s\n", status.LastSnapshotRejectReasons[0])
 		for _, reason := range status.LastSnapshotRejectReasons[1:] {
 			fmt.Fprintf(b, "%29s%s\n", "", reason)
 		}

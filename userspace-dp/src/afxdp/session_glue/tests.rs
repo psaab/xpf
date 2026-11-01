@@ -5048,11 +5048,12 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
     );
     assert_eq!(adopted.decision.resolution.egress_ifindex, 12);
     // With RG1 reading inactive the synced hit stays transient
-    // (`keep_transient`): the worker row lands via the poll loop's
-    // Owner-verdict purge/promote after this resolve in production.
-    // The resolve contract under test here is the disposition the
-    // adoption filter admits.
-    assert!(adopted.deferred_synced_purge.is_some());
+    // (`keep_transient`). The resolve contract under test here is the
+    // disposition the adoption filter admits. #18531: this hit arrived on
+    // the fabric link, so the transient row is held, not purged. Purging
+    // removed the forward-wire alias of a live flow; where that alias was
+    // the node's only copy, the next packet missed and the flow died.
+    assert!(adopted.deferred_synced_purge.is_none());
 }
 /// #16217 (FZDiag24): the post-failover transient shape through the
 /// production session-HIT resolver. At the takeover instant the new
@@ -7525,6 +7526,7 @@ fn epoch_based_flow_cache_invalidation_for_demoted_owner_rg() {
         // #5147: no dynamic-neighbor dependency in this test entry.
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
         fabric_established: false,
+        dest_owner_memo: Default::default(),
     });
 
     // Before epoch bump, lookup should hit.
@@ -7621,6 +7623,7 @@ fn epoch_based_flow_cache_unrelated_rg_not_invalidated() {
         // #5147: no dynamic-neighbor dependency in this test entry.
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
         fabric_established: false,
+        dest_owner_memo: Default::default(),
     });
 
     // Bump epoch for RG 2 (unrelated).
@@ -8075,14 +8078,14 @@ fn owner_rg_export_direct_matches_ring_bytes_9856() {
     while !sessions.drain_deltas(256).is_empty() {}
     let _ = sessions.take_delta_loss();
 
-    let ident = BindingIdentity {
+    let _ident = BindingIdentity {
         slot: 0,
         queue_id: 0,
         worker_id: 0,
         interface: Arc::<str>::from("x9856e"),
         ifindex: 0,
     };
-    let forwarding = ForwardingState::default();
+    let _forwarding = ForwardingState::default();
     // Harvest the tuple from a real walk (entry truth, not fresh fixtures).
     let kick = sessions.current_epoch();
     let mut tuple = None;
@@ -13434,7 +13437,7 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
     let _ = sessions.drain_deltas(RING_CAP);
     let expired = sessions.expire_stale_entries(EXPIRE_NS);
     assert_eq!(expired.len(), N);
-    let mut ring_deltas = sessions.drain_deltas(usize::MAX);
+    let ring_deltas = sessions.drain_deltas(usize::MAX);
     let overflow_deltas: Vec<_> = expired
         .iter()
         .filter_map(|entry| entry.overflow_close.clone())
@@ -17801,7 +17804,7 @@ fn a_cdn_forgets_both_aliases_everywhere_and_allows_reuse_11601() {
         "198.51.100.7".parse().unwrap(),
         "203.0.113.9".parse().unwrap(),
     );
-    let control = ControlChannelId::new(pac, 1723, pns, 49152);
+    let _control = ControlChannelId::new(pac, 1723, pns, 49152);
     let queues: Vec<_> = (0..2)
         .map(|_| Arc::new(Mutex::new(VecDeque::new())))
         .collect();
@@ -18554,7 +18557,7 @@ fn a_refused_deletesynced_releases_the_siblings_reservation_8114() {
 /// is the cheap-looking version of this fix and it is worse than the bug.
 #[test]
 fn a_queued_deletesynced_leaves_the_release_to_its_worker_8114() {
-    use std::sync::atomic::Ordering;
+
 
     let forwarding = drop8114_forwarding();
     let nat = drop8114_reserve(&forwarding, 3);
@@ -18603,7 +18606,7 @@ fn a_queued_deletesynced_leaves_the_release_to_its_worker_8114() {
 /// Fires on: falling back to "release for some worker" when the lookup misses.
 #[test]
 fn an_unattributable_refused_delete_is_counted_but_not_repaired_8114() {
-    use std::sync::atomic::Ordering;
+
 
     let forwarding = drop8114_forwarding();
     let nat = drop8114_reserve(&forwarding, 3);
@@ -22419,7 +22422,7 @@ fn promote_skips_republish_for_stale_zone_rows_10612() {
         conntrack: ConntrackFds { v4: -1, v6: -1 },
         tick: Tick::from_ns(1_000_000),
 };
-    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let _peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let drops_before = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
         .load(std::sync::atomic::Ordering::Relaxed);
     let promoted = crate::afxdp::session_glue::maybe_promote_synced_session(

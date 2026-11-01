@@ -1130,18 +1130,17 @@ fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
 /// #15742 round-4 LIVE shape: the cluster Null0 default reaches the
 /// helper as DISCARD (RTN_BLACKHOLE), pref 200, marked
 /// cluster_terminal -- not reject. The destinations are off-link, so
-/// LPM reaches the default; gateway neighbors are removed so the
-/// pref-5 forwarding row has no live member and the terminal row is
-/// selected (the #15098 rule). The demotion must come from the
-/// terminal path itself: lookup surfaces the cluster terminal, HA
-/// enforcement keeps the demotion because the forwarding sibling's
-/// egress RG1 is peer-owned, and the fabric helper converts it.
-/// Controls: (a) same rows with cluster_terminal cleared
-/// (operator-equivalent discard) stay DiscardRoute and never
-/// redirect; (b) RG1 locally owned keeps the plain terminal drop.
-/// FAIL-ON-REVERT: drop the cluster_terminal demotion in
-/// enforce_ha_resolution_snapshot and the split cell resolves
-/// DiscardRoute instead of FabricRedirect.
+/// LPM reaches the default. Pre-#18517 the bare WAN gateway resolved
+/// to ifindex 0 (its transit prefix is suppressed), so the terminal
+/// was selected and the demotion came from the terminal path.
+/// #18517: the FIB binds the bare gateway to the peer-owned connected
+/// row (the WAN egress), so the pref-5 forwarding row
+/// is selected; HA enforcement demotes it (egress RG1 peer-owned) and
+/// the fabric helper redirects. Controls: (a) an unmarked (operator)
+/// discard is outranked the same way; (b) RG1 locally owned forwards
+/// locally. The terminal path itself is pinned by #16216 below.
+/// FAIL-ON-REVERT: drop the peer-owned binding in
+/// resolve_next_hop_target_v4/v6 and the split lookup egress is 0.
 #[test]
 fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
     let build = |cluster: bool| {
@@ -1149,15 +1148,11 @@ fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
         for route in &mut snapshot.routes {
             route.preference = 5;
         }
-        // Point the pref-5 forwarding rows at TEST-NET gateways with
-        // no neighbor entry. Native liveness (build-time gateway
-        // resolution against connected prefixes) and lookup liveness
-        // then both treat the member as undrivable, so the #15098
-        // terminal-row rule selects the pref-200 discard -- exactly
-        // the split-node state where the WAN gateway neighbor is not
-        // usable locally. Repointing (vs deleting neighbors) is
-        // needed because deleting empties next_hops when the neighbor
-        // is the gateway's only resolution path.
+        // Strip the interface qualifier from the pref-5 rows: Go emits
+        // configured gateways bare, which is the live split-node shape.
+        // (Pre-#18517 a bare gateway in the suppressed WAN prefix could
+        // not resolve, so the #15098 terminal-row rule selected the
+        // pref-200 discard; it now binds the peer-owned egress.)
         for route in &mut snapshot.routes {
             for nh in &mut route.next_hops {
                 if nh.starts_with("172.16.80.1") {
@@ -1168,10 +1163,9 @@ fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
             }
         }
         // Live post-#15745 shape: the WAN unit's connected transit
-        // prefixes are suppressed on the split node, so the bare
-        // gateway cannot resolve an ifindex at FIB build (NH ifindex
-        // 0, terminal selected); connected_by_ifindex still records
-        // the prefix for source attribution.
+        // prefixes are suppressed on the split node; connected_by_ifindex
+        // and `connected_v*_peer_owned` still record them, and #18517
+        // binds the bare gateway to the latter.
         for iface in &mut snapshot.interfaces {
             if iface.name == "reth0.80" {
                 iface.connected_rg_peer_owned = true;
@@ -1219,58 +1213,156 @@ fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
         IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)),
     ];
 
-    // Split: cluster discard demotes and fabric-redirects, both families.
+    // #18517: the bare gateway is no longer stranded at ifindex 0. It
+    // sits in the peer-owned WAN prefix that the by-ifindex ledger still
+    // records, so the FIB binds the member to that egress and the pref-5
+    // forwarding row -- not the pref-200 terminal -- is selected. HA
+    // enforcement demotes the row because its egress RG1 is peer-owned,
+    // and the fabric helper redirects it: the outcome the terminal path
+    // produced, without needing a terminal at the prefix (a non-default
+    // static has none; see static_via_peer_owned_gateway_binds_*_18517).
+    let wan_ifindex = 12;
     let state = build(true);
     for dst in dsts {
         let raw = lookup_forwarding_resolution(&state, dst).resolution;
         assert_eq!(
-            raw.disposition,
-            ForwardingDisposition::ClusterTerminalHAInactive,
-            "lookup must surface the cluster terminal for {dst}, got {:?}",
-            raw.disposition
+            raw.egress_ifindex, wan_ifindex,
+            "the bare gateway must bind the peer-owned WAN egress for {dst}, got {raw:?}"
         );
         let blocked = enforce_ha_resolution(&state, &inactive, raw);
         assert_eq!(
             blocked.disposition,
-            ForwardingDisposition::ClusterTerminalHAInactive,
-            "peer-owned sibling must keep the demotion for {dst}"
+            ForwardingDisposition::HAInactive,
+            "peer-owned egress RG1 must demote the forwarding row for {dst}, got {:?}",
+            blocked.disposition
         );
         let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
         assert_eq!(
             redirected.disposition,
             ForwardingDisposition::FabricRedirect,
-            "split cluster discard must fabric-redirect for {dst}, got {:?}",
+            "split node must fabric-redirect {dst}, got {:?}",
             redirected.disposition
         );
     }
 
-    // Control (a): unmarked discard (operator semantics) stays a drop.
+    // Control (a): the terminal's cluster mark is irrelevant while the
+    // pref-5 row resolves. An operator discard at pref 200 is outranked
+    // the same way (Junos: the static via the RETH is active on both
+    // nodes), so the split node still crosses the fabric.
     let op_state = build(false);
     for dst in dsts {
         let raw = lookup_forwarding_resolution(&op_state, dst).resolution;
-        assert_eq!(raw.disposition, ForwardingDisposition::DiscardRoute);
+        assert_eq!(raw.egress_ifindex, wan_ifindex);
         let blocked = enforce_ha_resolution(&op_state, &inactive, raw);
-        assert_eq!(
-            blocked.disposition,
-            ForwardingDisposition::DiscardRoute,
-            "operator discard must stay a drop for {dst}"
-        );
         let redirected = redirect_via_fabric_if_needed(&op_state, blocked, 24, None);
-        assert_eq!(redirected.disposition, ForwardingDisposition::DiscardRoute);
+        assert_eq!(
+            redirected.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "a resolvable pref-5 static must outrank an operator discard for {dst}"
+        );
     }
 
-    // Control (b): locally-owned RG1 -- the cluster terminal is not
-    // demoted; it resolves back to the plain terminal drop (the
-    // forwarding row has no live member in this fixture, so the
-    // terminal is the selected row and must drop, not redirect).
+    // Control (b): locally-owned RG1 forwards out the local WAN member.
+    // It must neither demote, nor cross the fabric, nor fall to the
+    // terminal drop.
     for dst in dsts {
         let raw = lookup_forwarding_resolution(&state, dst).resolution;
         let resolved = enforce_ha_resolution(&state, &active, raw);
-        assert_eq!(
-            resolved.disposition,
-            ForwardingDisposition::DiscardRoute,
-            "locally-owned cluster terminal must drop, not redirect, for {dst}: got {:?}",
+        assert_eq!(resolved.egress_ifindex, wan_ifindex);
+        assert!(
+            !matches!(
+                resolved.disposition,
+                ForwardingDisposition::HAInactive
+                    | ForwardingDisposition::ClusterTerminalHAInactive
+                    | ForwardingDisposition::FabricRedirect
+                    | ForwardingDisposition::DiscardRoute
+            ),
+            "locally-owned RG1 must forward {dst} locally, got {:?}",
             resolved.disposition
+        );
+    }
+}
+
+/// #18517 (review fold): a NON-default static whose bare gateway sits in
+/// the peer-owned WAN prefix has no cluster terminal at its own prefix.
+/// Unbound, the member resolved to ifindex 0 and the row ended in
+/// NoRoute; and because Go suppresses a learned same-prefix route
+/// behind a configured static that is at least as preferred, nothing
+/// else could carry the prefix. The FIB must bind the peer-owned egress so
+/// the row HA-demotes and crosses the fabric on the split node, and
+/// forwards locally once the RG is local again.
+/// FAIL-ON-REVERT: drop either `peer_owned_connected_target_v4/v6` call and
+/// that family's lookup egress is 0.
+#[test]
+fn static_via_peer_owned_gateway_binds_peer_owned_egress_18517() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    // Live shape: Go emits configured gateways bare, so the default
+    // cannot lend the static an egress by recursion either.
+    for route in &mut snapshot.routes {
+        for nh in &mut route.next_hops {
+            if nh.starts_with("172.16.80.1") {
+                *nh = "172.16.80.1".to_string();
+            } else if nh.starts_with("2001:559:8585:80::1") {
+                *nh = "2001:559:8585:80::1".to_string();
+            }
+        }
+    }
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            iface.connected_rg_peer_owned = true;
+        }
+    }
+    let row = |family: &str, table: &str, destination: &str, next_hop: &str| RouteSnapshot {
+        table: table.to_string(),
+        family: family.to_string(),
+        destination: destination.to_string(),
+        next_hops: vec![next_hop.to_string()],
+        preference: 5,
+        ..Default::default()
+    };
+    snapshot
+        .routes
+        .push(row("inet", "inet.0", "10.30.0.0/24", "172.16.80.1"));
+    snapshot.routes.push(row(
+        "inet6",
+        "inet6.0",
+        "2001:db8:30::/64",
+        "2001:559:8585:80::1",
+    ));
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let inactive = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(
+        1,
+        inactive_ha_runtime(now_secs),
+    )])));
+    let active = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(
+        1,
+        active_ha_runtime(now_secs),
+    )])));
+    for dst in [
+        IpAddr::V4(Ipv4Addr::new(10, 30, 0, 5)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x30, 0, 0, 0, 0, 5)),
+    ] {
+        let raw = lookup_forwarding_resolution(&state, dst).resolution;
+        assert_eq!(
+            raw.egress_ifindex, 12,
+            "the bare gateway for {dst} must bind the peer-owned WAN egress: {raw:?}"
+        );
+        let blocked = enforce_ha_resolution(&state, &inactive, raw);
+        assert_eq!(blocked.disposition, ForwardingDisposition::HAInactive);
+        assert_eq!(
+            redirect_via_fabric_if_needed(&state, blocked, 24, None).disposition,
+            ForwardingDisposition::FabricRedirect,
+            "split node must fabric-redirect {dst}"
+        );
+        let local = enforce_ha_resolution(&state, &active, raw);
+        assert!(
+            matches!(
+                local.disposition,
+                ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+            ),
+            "locally-owned RG1 must forward {dst} out the WAN, got {:?}",
+            local.disposition
         );
     }
 }
@@ -1292,10 +1384,16 @@ fn demoted_cluster_terminal_discard_route_rescues_via_fabric_16216() {
     for route in &mut snapshot.routes {
         route.preference = 5;
     }
+    // #18517: a bare gateway inside the peer-owned WAN prefix now binds
+    // its peer-owned egress, so it would be selected over the terminal.
+    // Point the forwarding rows at TEST-NET-1, which no prefix covers:
+    // the member stays undrivable and the terminal is selected. The
+    // destination is inside the peer-owned WAN prefix, so the terminal
+    // attributes through the destination's by-ifindex ledger entry.
     for route in &mut snapshot.routes {
         for nh in &mut route.next_hops {
             if nh.starts_with("172.16.80.1") {
-                *nh = "172.16.80.1".to_string();
+                *nh = "192.0.2.1".to_string();
             }
         }
     }
@@ -1321,7 +1419,7 @@ fn demoted_cluster_terminal_discard_route_rescues_via_fabric_16216() {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let inactive_map = BTreeMap::from([(1, inactive_ha_runtime(now_secs))]);
     let active_map = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
-    let dst = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
 
     let raw = lookup_forwarding_resolution(&state, dst).resolution;
     assert_eq!(
@@ -1684,6 +1782,9 @@ fn zone_encoded_fabric_redirect_round_trips_zone_id_above_255() {
     // #6458: a configured high-id zone is RG-bound (a reth member), so the
     // stamp validation finds it in `zone_to_rgs`.
     state.zone_to_rgs.insert(zone_id, vec![2]);
+    // #18518: a hand-inserted zone must join the stamp index, exactly as
+    // `populate_zones` builds it for every admitted zone.
+    state.rebuild_zone_low16_index();
 
     // Encode: the src MAC carries 300 as 02:bf:72:fe:01:2c.
     let redirected = resolve_zone_encoded_fabric_redirect_by_id(&state, zone_id)
@@ -1952,6 +2053,9 @@ fn zone_encoded_fabric_stamp_rejected_for_zone_without_rg_members_6458() {
     let mut state = build_forwarding_state(&nat_snapshot_with_fabric());
     let mgmt_id: u32 = 9;
     state.zone_id_to_name.insert(mgmt_id, "mgmt".into());
+    // #18518: keep the stamp index in step with the hand-inserted zone, so
+    // the stamp is refused for having no RG members, not for naming no zone.
+    state.rebuild_zone_low16_index();
     // No zone_to_rgs entry: mgmt has no RG-bound members.
     let mut frame = vec![0u8; 64];
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
@@ -1979,7 +2083,6 @@ fn zone_encoded_fabric_stamp_rejected_for_zone_without_rg_members_6458() {
 // #6458 preservation pin: the legitimate split-RG shape — claimed zone
 // `lan` (RG 2) is NOT forwarding-active locally while a DIFFERENT RG (1)
 // is — plus the unicast fabric dst MAC — keeps the override working.
-#[test]
 // #16023 decisive regression (unit half): with require-authenticated set,
 // the byte-identical forged stamp that the split-RG cell below honours
 // (remote-RG zone, unicast dst) is Invalid on an unauthenticated link, in
@@ -2991,7 +3094,7 @@ fn reconcile_build_cannot_launder_refused_neighbor_mac_16555() {
     let original = NeighborEntry {
         mac: [0x02, 0, 0, 0, 0, 1],
     };
-    let spoofed = NeighborEntry {
+    let _spoofed = NeighborEntry {
         mac: [0x02, 0, 0, 0, 0, 2],
     };
     assert!(coordinator.apply_manager_neighbors(true, 1, &[(7, target, original)]));
@@ -3791,6 +3894,7 @@ fn embedded_icmp_to_inactive_owner_rg_uses_zone_encoded_fabric_redirect() {
         },
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: super::super::tests_support::icmp_budget_test_key(),
     };
 
@@ -3860,6 +3964,7 @@ fn embedded_icmp_no_route_uses_zone_encoded_fabric_redirect() {
         },
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: super::super::tests_support::icmp_budget_test_key(),
     };
 
@@ -3929,6 +4034,7 @@ fn embedded_icmp_discard_route_uses_zone_encoded_fabric_redirect() {
         },
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: super::super::tests_support::icmp_budget_test_key(),
     };
 
@@ -3994,6 +4100,7 @@ fn embedded_icmp_from_fabric_does_not_redirect_back_to_fabric() {
         },
         related_expected_zone: 0,
         outbound_snat: false,
+        quoted_is_reply: false,
         budget_key: super::super::tests_support::icmp_budget_test_key(),
     };
 
@@ -5320,7 +5427,7 @@ fn canonical_route_table_borrows_default_and_owns_vrf() {
     // pre-#4674 `String` return type cannot match the `Cow::Borrowed` /
     // `Cow::Owned` patterns, so this test fails to compile against the
     // reverted signature.
-    use crate::afxdp::forwarding::fib::{DEFAULT_V4_TABLE, DEFAULT_V6_TABLE};
+
     use std::borrow::Cow;
 
     // v4 -> v6 default remap: borrowed (zero alloc), equals inet6.0.
@@ -12660,10 +12767,15 @@ fn terminal_attribution_same_table_lpm_15917() {
 /// table. Fixture: forwarding defaults (pref 5) via 172.16.80.1 /
 /// 2001:559:8585:80::1 with no live member (mirrors the #15742
 /// gateway test above), marked cluster terminals at pref 200, WAN
-/// peer-owned, plus the tenant interface (31, `tenant-x`, RG3
+/// peer-owned, plus the tenant interface (9, `tenant-x`, RG3
 /// peer-owned) covering the same gateway prefixes. Off-link
 /// destinations 8.8.8.8 / 2001:4860:4860::8888 in the default table
-/// must attribute via the gateway to ifindex 12 — never 31.
+/// must attribute via the gateway to ifindex 12 — never 9.
+/// #18517: the gateway now binds that owner at FIB build (the
+/// forwarding row is selected, not the terminal); the table scoping
+/// is asserted on the bound egress. The tenant ifindex (9) is BELOW the
+/// WAN's (12): both prefixes are /24, so a lookup that lost its table
+/// scope would tie-break to the lower ifindex and pick the tenant.
 #[test]
 fn terminal_gateway_owner_table_scoped_15917() {
     use crate::{InterfaceSnapshot, ZoneSnapshot};
@@ -12697,7 +12809,7 @@ fn terminal_gateway_owner_table_scoped_15917() {
         zone: "dmz2".to_string(),
         routing_instance: "tenant-x".to_string(),
         linux_name: "ge-0-0-2".to_string(),
-        ifindex: 31,
+        ifindex: 9,
         redundancy_group: 3,
         connected_rg_peer_owned: true,
         hardware_addr: "02:bf:72:02:00:01".to_string(),
@@ -12753,22 +12865,21 @@ fn terminal_gateway_owner_table_scoped_15917() {
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
         IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)),
     ] {
+        // #18517: the bare gateway binds its peer-owned owner at FIB
+        // build (`peer_owned_connected_target_*`, row-table scoped), so the
+        // forwarding row is selected and the scoping property moves to the
+        // bound egress. The gateway-owner arm itself is pinned by
+        // `terminal_gateway_owner_reached_by_out_of_table_explicit_member_18517`.
         let raw = lookup_forwarding_resolution(&state, dst).resolution;
         assert_eq!(
-            raw.disposition,
-            ForwardingDisposition::ClusterTerminalHAInactive,
-            "off-link lookup must surface cluster terminal for {dst}, got {:?}",
-            raw.disposition
-        );
-        assert_eq!(
-            raw.source_ifindex, 12,
-            "gateway-owner attribution for {dst} must be the default-table WAN ifindex 12, not the cross-VRF tenant ifindex 31"
+            raw.egress_ifindex, 12,
+            "the gateway owner for {dst} must be the default-table WAN ifindex 12, not the cross-VRF tenant ifindex 9: {raw:?}"
         );
         let blocked = enforce_ha_resolution(&state, &ha, raw);
         assert_eq!(
             blocked.disposition,
-            ForwardingDisposition::ClusterTerminalHAInactive,
-            "gateway-owner demotion must survive HA enforcement for {dst}"
+            ForwardingDisposition::HAInactive,
+            "the peer-owned gateway owner must demote {dst}"
         );
         assert_eq!(
             redirect_via_fabric_if_needed(&state, blocked, 24, None).disposition,

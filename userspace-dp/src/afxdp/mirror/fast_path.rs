@@ -132,6 +132,16 @@ pub(in crate::afxdp) fn commit_staged_mirror_clone(
     if !staged.selected {
         return;
     }
+    // Oversize selected frames have no staged snapshot. Keep their NoFrame
+    // result without requiring a copy or a caller-provided fallback slice.
+    if staged.frame.is_none() && staged.frame_len > tx_frame_capacity() {
+        record_mirror_clone_result(
+            &ingress_binding.live,
+            MirrorCloneResult::NoFrame,
+            staged.frame_len,
+        );
+        return;
+    }
     let frame = staged.frame.as_deref().unwrap_or(original_frame);
     let result = if frame.len() <= tx_frame_capacity() {
         enqueue_mirror_clone(
@@ -434,7 +444,7 @@ pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
     meta: ForwardPacketMeta,
     flow_key: Option<&SessionKey>,
     cos_queue_id: Option<u8>,
-    now_ns: u64,
+    _now_ns: u64,
 ) -> MirrorCloneResult {
     // #15114: rewrite/push/strip the outer tag to the output unit's VID.
     let Some(out_frame) = mirror_output_frame(forwarding, config.output_ifindex, &frame) else {

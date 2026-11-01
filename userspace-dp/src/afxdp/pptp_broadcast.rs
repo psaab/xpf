@@ -186,6 +186,7 @@ fn retry_pending_pptp_call_installs(
                             } else {
                                 inbox.drop_call_install(retry.call, retry.control, retry.learned_ns);
                             }
+                            let _ = &e;
                         }
                     }
                 }
@@ -407,6 +408,7 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_at_epoch(
                          broadcasting and recording retry: {:?}",
                         e
                     );
+                    let _ = e;
                 }
                 let (accepted, mut unsent) =
                     broadcast_pptp_install(peer_worker_commands, call, control, seg.captured_ns);

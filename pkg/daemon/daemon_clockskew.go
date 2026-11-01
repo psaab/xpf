@@ -121,11 +121,31 @@ func (d *Daemon) clockSkewAlarms() []clockskew.ActiveAlarm {
 	if d == nil {
 		return nil
 	}
-	m := d.clockSkewAlarm.Load()
-	if m == nil {
-		return nil
+	var out []clockskew.ActiveAlarm
+	if m := d.clockSkewAlarm.Load(); m != nil {
+		out = m.ActiveAlarms()
 	}
-	return m.ActiveAlarms()
+	// #18585: the inter-node alarm, measured over admitted heartbeats by the
+	// cluster manager. Merged here so it reaches every surface the local
+	// reference alarm does (show system alarms, show security alarms detail,
+	// show chassis cluster status).
+	if d.cluster != nil {
+		if offset, raisedAt, raised := d.cluster.PeerClockSkewAlarm(); raised {
+			out = append(out, clockskew.ActiveAlarm{
+				Kind:       clockskew.KindPeerOffset,
+				OffsetSecs: offset.Seconds(),
+				FirstSeen:  raisedAt,
+			})
+		}
+	}
+	return out
+}
+
+// peerClockAlarmSyslog forwards one #18585 peer-offset alarm transition to the
+// same syslog streams as the local reference alarm.
+func (d *Daemon) peerClockAlarmSyslog(raised bool, offset time.Duration) {
+	severity, msg := clockskew.PeerOffsetSyslogLine(raised, offset.Seconds())
+	d.clockSkewAlarmEmitter()(severity, msg)
 }
 
 // clockSkewAlarmEmitter forwards one raise/clear transition to configured

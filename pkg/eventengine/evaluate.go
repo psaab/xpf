@@ -116,10 +116,12 @@ type deferredCooldownPark struct {
 // interleave and pair the old policy's commands/plant class with the new
 // semantic revision.
 // matched records the evaluate-time withinMatches verdict for this exact event
-// (#16848/#15945): the drain must replay the crossing verdict, not re-decide it
-// against a window that may have decayed (short window < cooldown) or filled
-// past the trigger-until ceiling (events windowed while parked, #16641) in the
-// 30 s wait. The drain still re-checks revision / liveness only.
+// (#16848/#15945). The drain preserves that crossing when a short trigger-on
+// window decays, but rechecks live trigger-until ceilings because events
+// windowed while parked can cross the ceiling before drain (#16641/#17708).
+// Deferred actions check again at commit if the worker waits on the config
+// lock while more events arrive (#17696); neither check changes the recorded
+// trigger-on verdict, and revision and liveness are checked as well.
 func (e *Engine) captureDeferCooldownLocked(pol *config.EventPolicy, rt *policyRuntime, ev rpm.Event, now time.Time, matched bool) *deferredCooldownPark {
 	e.counters.cooldownSuppressed.Add(1)
 	if rt.suppressedDirection == nil {
@@ -134,14 +136,27 @@ func (e *Engine) captureDeferCooldownLocked(pol *config.EventPolicy, rt *policyR
 	if !ok || len(ops) == 0 {
 		return nil
 	}
-	a := plannedAction{policyName: pol.Name, semRev: e.semRev[pol.Name], policyOrder: e.policyOrder[pol.Name], plantClass: pol.PlantClass, event: ev.Name, testOwner: ev.TestOwner, testName: ev.TestName, ops: ops}
+	a := plannedAction{
+		policyName:               pol.Name,
+		semRev:                   e.semRev[pol.Name],
+		policyOrder:              e.policyOrder[pol.Name],
+		plantClass:               pol.PlantClass,
+		event:                    ev.Name,
+		testOwner:                ev.TestOwner,
+		testName:                 ev.TestName,
+		ops:                      ops,
+		checkTriggerUntilCeiling: policyHasTriggerUntil(pol),
+	}
 	return &deferredCooldownPark{key: pol.Name + "\x00" + ev.Name, edge: deferredEdge{action: a, evName: ev.Name, triggers: trig, matched: matched, hasMatched: true}}
 }
 
 // insertDeferredCooldownParks inserts edges captured under e.mu into
 // pending.cooldown under pendingMu. Called after evaluateEventMode has
-// released e.mu. The first park for a (policy,event) key wins, matching the
-// pre-#16645 semantics.
+// released e.mu. The pendingMu -> e.mu order is also used by drainDeferred and
+// deferredWorker; validating the captured revision here lets a successor park
+// replace a stale same-key predecessor entry during Apply's purge window.
+// Within one semantic revision, the first park for a (policy,event) key wins,
+// matching the pre-#16645 semantics.
 func (e *Engine) insertDeferredCooldownParks(parks []*deferredCooldownPark) {
 	if len(parks) == 0 {
 		return
@@ -154,10 +169,20 @@ func (e *Engine) insertDeferredCooldownParks(parks []*deferredCooldownPark) {
 		if p == nil {
 			continue
 		}
-		if _, exists := e.pending.cooldown[p.key]; !exists {
-			e.pending.cooldown[p.key] = p.edge
+		e.mu.Lock()
+		liveRev, live := e.semRev[p.edge.action.policyName]
+		e.mu.Unlock()
+		if !live || liveRev != p.edge.action.semRev {
+			continue
+		}
+		if old, exists := e.pending.cooldown[p.key]; exists {
+			if old.action.semRev == p.edge.action.semRev {
+				continue
+			}
+		} else {
 			e.counters.pendingDeferred.Add(1)
 		}
+		e.pending.cooldown[p.key] = p.edge
 	}
 	e.pendingMu.Unlock()
 	e.startDeferredWorker()
@@ -422,6 +447,51 @@ func policyHasTriggerOn(pol *config.EventPolicy) bool {
 		}
 	}
 	return false
+}
+
+// policyHasTriggerUntil reports whether the policy has any positive
+// `within { trigger until N }` clause.
+func policyHasTriggerUntil(pol *config.EventPolicy) bool {
+	for _, wc := range pol.WithinClauses {
+		if wc != nil && wc.TriggerUntil > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// withinUntilCeilingsMatch checks only the live `trigger until` upper bounds.
+// A cooldown edge's recorded verdict must survive decay of a short `trigger
+// on` window (#16848). Recheck these ceilings after parked events have crossed
+// them before drain (#17708) or commit while the worker waited on the config
+// lock (#17696), without changing the recorded trigger-on crossing decision.
+func (e *Engine) withinUntilCeilingsMatch(pol *config.EventPolicy, rt *policyRuntime, eventName string, now time.Time) bool {
+	if pol == nil || rt == nil {
+		return false
+	}
+	timestamps := rt.windows[eventName]
+	for _, wc := range pol.WithinClauses {
+		if wc == nil {
+			return false
+		}
+		if wc.TriggerUntil <= 0 {
+			continue
+		}
+		window, ok := withinWindow(wc.Seconds)
+		if !ok {
+			return false
+		}
+		count := 0
+		for _, ts := range timestamps {
+			if now.Sub(ts) <= window {
+				count++
+			}
+		}
+		if count > wc.TriggerUntil {
+			return false
+		}
+	}
+	return true
 }
 
 // withinMatches evaluates temporal trigger clauses against the policy's runtime

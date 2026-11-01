@@ -2908,3 +2908,320 @@ fn peer_for_dest_at_1024_peer_scale_15250() {
         Some(pubs[1024])
     );
 }
+
+/// #17774: the packet-facing helper must route through the endpoint-IP
+/// index, not enumerate `peer_endpoints` and probe every peer's PMTU.
+#[test]
+fn wg_pmtu_endpoint_lookup_is_indexed_17774() {
+    let frame = crate::test_support::source_scan::blank_comments_and_strings(
+        include_str!("../frame/wg.rs"),
+    );
+    let start = frame
+        .find("fn wg_learned_pmtu_for_endpoint(")
+        .expect("the PMTU helper is present");
+    let body = &frame[start..];
+    let body = &body[..body.find("\n}").expect("the helper body closes")];
+    assert!(
+        body.contains("learned_pmtu_for_endpoint_ip"),
+        "packet-path PMTU lookup must use the endpoint index"
+    );
+    assert!(
+        !body.contains("peer_endpoints"),
+        "packet-path PMTU lookup must not collect/scan peer endpoints"
+    );
+
+    let start = frame
+        .find("fn learn_wg_pmtu(")
+        .expect("the PTB learner is present");
+    let body = &frame[start..];
+    let body = &body[..body.find("\n}").expect("the PTB learner body closes")];
+    assert!(
+        body.contains("peer_for_endpoint_ip_port") && !body.contains("peer_endpoints"),
+        "PTB quote matching must use the endpoint index instead of collecting all peers"
+    );
+
+    let engine_src = crate::test_support::source_scan::blank_comments_and_strings(
+        include_str!("engine.rs"),
+    );
+    let start = engine_src
+        .find("pub(crate) fn learned_pmtu_for_endpoint_ip(")
+        .expect("the indexed engine accessor is present");
+    let accessor = &engine_src[start..];
+    let accessor = &accessor[..accessor
+        .find("\n    }")
+        .expect("the indexed accessor body closes")];
+    assert!(
+        accessor.contains("endpoint_peers_by_ip") && accessor.contains(".get(&endpoint_ip)"),
+        "the engine accessor must directly hash-probe the endpoint index"
+    );
+    assert!(
+        !accessor.contains("peer_endpoints")
+            && !accessor.contains(".peers.iter()")
+            && !accessor.contains(".collect("),
+        "the indexed accessor must not scan the full peer table or allocate"
+    );
+
+    let start = engine_src
+        .find("pub(crate) fn peer_for_endpoint_ip_port(")
+        .expect("the indexed quote-to-peer accessor is present");
+    let accessor = &engine_src[start..];
+    let accessor = &accessor[..accessor
+        .find("\n    }")
+        .expect("the quote-to-peer accessor body closes")];
+    assert!(
+        accessor.contains("endpoint_peers_by_ip") && accessor.contains(".get(&endpoint_ip)"),
+        "quote resolution must hash-probe the endpoint index"
+    );
+    assert!(
+        !accessor.contains("peer_endpoints")
+            && !accessor.contains(".peers.iter()")
+            && !accessor.contains(".collect("),
+        "quote resolution must not scan the full peer table or allocate"
+    );
+}
+
+/// #17774: endpoint-IP lookup preserves the shared-underlay minimum,
+/// misses, expiry, and live-roam indexing semantics.
+#[test]
+fn learned_pmtu_endpoint_index_semantics_17774() {
+    let (local_priv, _) = keypair();
+    let (_, a_pub) = keypair();
+    let (_, b_pub) = keypair();
+    let (_, unset_pub) = keypair();
+    let peer = |pubkey, endpoint| WgPeerConfig {
+        pubkey,
+        endpoint,
+        endpoint_host: None,
+        persistent_keepalive: 0,
+        allowed_ips: vec![],
+        preshared_key: [0u8; 32].into(),
+    };
+    let engine = WgEngine::new(WgEngineConfig {
+        local_private_key: local_priv.into(),
+        listen_port: 51820,
+        peers: vec![
+            peer(a_pub, Some("198.51.100.7:51820".parse().unwrap())),
+            peer(b_pub, Some("198.51.100.7:51821".parse().unwrap())),
+            peer(unset_pub, None),
+        ],
+    });
+    assert_eq!(
+        engine.peer_for_endpoint_ip_port("198.51.100.7".parse().unwrap(), 51820),
+        Some(a_pub),
+        "a quote with the first peer's endpoint port resolves that peer"
+    );
+    assert_eq!(
+        engine.peer_for_endpoint_ip_port("198.51.100.7".parse().unwrap(), 51821),
+        Some(b_pub),
+        "a quote with the second peer's endpoint port resolves that peer"
+    );
+    assert_eq!(
+        engine.peer_for_endpoint_ip_port("198.51.100.7".parse().unwrap(), 51822),
+        None,
+        "an unknown endpoint port is not attributed to a peer"
+    );
+    assert!(engine.note_peer_pmtu(&a_pub, 1400, false, 0, 100));
+    assert!(engine.note_peer_pmtu(&b_pub, 1300, false, 0, 100));
+    assert_eq!(
+        engine.learned_pmtu_for_endpoint_ip("198.51.100.7".parse().unwrap(), 101),
+        Some(1300),
+        "peers sharing an endpoint IP use the smallest fresh learned PMTU"
+    );
+    assert_eq!(
+        engine.learned_pmtu_for_endpoint_ip("198.51.100.8".parse().unwrap(), 101),
+        None,
+        "an unclaimed endpoint IP is a miss"
+    );
+    assert_eq!(
+        engine.learned_pmtu_for_endpoint_ip(
+            "198.51.100.7".parse().unwrap(),
+            100 + super::super::pmtu::WG_PMTU_AGE_NS + 1,
+        ),
+        None,
+        "expired peer values are excluded"
+    );
+    assert_eq!(
+        engine.learned_pmtu_for_endpoint_ip("203.0.113.9".parse().unwrap(), 101),
+        None,
+        "an endpoint with no learned peer value remains unset"
+    );
+
+    engine.reconcile_peers(&[
+        peer(a_pub, Some("203.0.113.8:51820".parse().unwrap())),
+        peer(b_pub, Some("198.51.100.7:51821".parse().unwrap())),
+        peer(unset_pub, None),
+    ]);
+    assert_eq!(
+        engine.learned_pmtu_for_endpoint_ip("203.0.113.8".parse().unwrap(), 101),
+        Some(1400),
+        "reconcile indexes a peer's updated configured endpoint"
+    );
+    assert_eq!(
+        engine.peer_for_endpoint_ip_port("203.0.113.8".parse().unwrap(), 51820),
+        Some(a_pub),
+        "reconcile updates the exact endpoint index"
+    );
+    assert_eq!(
+        engine.learned_pmtu_for_endpoint_ip("198.51.100.7".parse().unwrap(), 101),
+        Some(1300),
+        "reconcile removes a peer from its prior endpoint bucket"
+    );
+
+    engine.adopt_live_endpoint(&b_pub, "198.51.100.7:51822".parse().unwrap());
+    assert_eq!(
+        engine.peer_for_endpoint_ip_port("198.51.100.7".parse().unwrap(), 51822),
+        Some(b_pub),
+        "a same-IP live port change updates quote resolution"
+    );
+    assert_eq!(
+        engine.peer_for_endpoint_ip_port("198.51.100.7".parse().unwrap(), 51821),
+        None,
+        "a same-IP live port change removes the previous quote endpoint"
+    );
+    engine.adopt_live_endpoint(&a_pub, "203.0.113.9:51820".parse().unwrap());
+    assert_eq!(
+        engine.learned_pmtu_for_endpoint_ip("203.0.113.9".parse().unwrap(), 101),
+        Some(1400),
+        "a live roam moves the peer into the new endpoint-IP bucket"
+    );
+    assert_eq!(
+        engine.learned_pmtu_for_endpoint_ip("203.0.113.8".parse().unwrap(), 101),
+        None,
+        "a live roam removes the peer from its configured endpoint bucket"
+    );
+    assert_eq!(
+        engine.learned_pmtu_for_endpoint_ip("198.51.100.7".parse().unwrap(), 101),
+        Some(1300),
+        "the prior shared-IP bucket retains only the still-configured peer"
+    );
+}
+
+/// #17774: concurrent offers must converge on the smallest value without
+/// losing either a shrink or the latest aging timestamp.
+#[test]
+fn concurrent_peer_pmtu_notes_converge_to_minimum_17774() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    const WRITERS: usize = 8;
+    const ROUNDS: usize = 1000;
+    const OFFERS: [usize; WRITERS] = [1400, 1390, 1380, 1370, 1360, 1350, 1340, 1330];
+    let (local_priv, _) = keypair();
+    let (_, peer_pub) = keypair();
+    let engine = Arc::new(WgEngine::new(WgEngineConfig {
+        local_private_key: local_priv.into(),
+        listen_port: 51820,
+        peers: vec![WgPeerConfig {
+            pubkey: peer_pub,
+            endpoint: Some("192.0.2.1:51820".parse().unwrap()),
+            endpoint_host: None,
+            persistent_keepalive: 0,
+            allowed_ips: vec![],
+            preshared_key: [0u8; 32].into(),
+        }],
+    }));
+    let peer = engine.peer_arc(&peer_pub).expect("configured peer");
+    let start = Arc::new(Barrier::new(WRITERS + 1));
+    let finish = Arc::new(Barrier::new(WRITERS + 1));
+    let mut workers = Vec::with_capacity(WRITERS);
+    for (writer, offer) in OFFERS.into_iter().enumerate() {
+        let engine = engine.clone();
+        let start = start.clone();
+        let finish = finish.clone();
+        let now_ns = 50_001 + writer as u64;
+        workers.push(thread::spawn(move || {
+            for _ in 0..ROUNDS {
+                start.wait();
+                engine.note_peer_pmtu(&peer_pub, offer, false, 0, now_ns);
+                finish.wait();
+            }
+        }));
+    }
+
+    for round in 0..ROUNDS {
+        // Each round starts from a fresh learned value, then releases all
+        // writers together to widen the stale-read / concurrent-store race.
+        peer.pmtu_mtu.store(1500, Ordering::Relaxed);
+        peer.pmtu_learned_ns.store(50_000, Ordering::Relaxed);
+        start.wait();
+        finish.wait();
+        assert_eq!(
+            engine.peer_pmtu(&peer_pub, 50_008),
+            Some(1330),
+            "racing notes lost the minimum at round {round}"
+        );
+        assert_eq!(
+            peer.pmtu_learned_ns.load(Ordering::Relaxed),
+            50_008,
+            "a racing older timestamp regressed the age stamp at round {round}"
+        );
+    }
+    for worker in workers {
+        worker.join().expect("PMTU note writer must not panic");
+    }
+}
+
+/// #17774: writers racing an expired entry must not refresh its stamp
+/// before they agree on the smallest replacement MTU.
+#[test]
+fn expired_concurrent_peer_pmtu_notes_keep_minimum_17774() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    const WRITERS: usize = 8;
+    const ROUNDS: usize = 1000;
+    const OFFERS: [usize; WRITERS] = [1400, 1390, 1380, 1370, 1360, 1350, 1340, 1330];
+    let now_ns = super::super::pmtu::WG_PMTU_AGE_NS + 10;
+    let (local_priv, _) = keypair();
+    let (_, peer_pub) = keypair();
+    let engine = Arc::new(WgEngine::new(WgEngineConfig {
+        local_private_key: local_priv.into(),
+        listen_port: 51820,
+        peers: vec![WgPeerConfig {
+            pubkey: peer_pub,
+            endpoint: Some("192.0.2.2:51820".parse().unwrap()),
+            endpoint_host: None,
+            persistent_keepalive: 0,
+            allowed_ips: vec![],
+            preshared_key: [0u8; 32].into(),
+        }],
+    }));
+    let peer = engine.peer_arc(&peer_pub).expect("configured peer");
+    let start = Arc::new(Barrier::new(WRITERS + 1));
+    let finish = Arc::new(Barrier::new(WRITERS + 1));
+    let mut workers = Vec::with_capacity(WRITERS);
+    for offer in OFFERS {
+        let engine = engine.clone();
+        let start = start.clone();
+        let finish = finish.clone();
+        workers.push(thread::spawn(move || {
+            for _ in 0..ROUNDS {
+                start.wait();
+                engine.note_peer_pmtu(&peer_pub, offer, false, 0, now_ns);
+                finish.wait();
+            }
+        }));
+    }
+
+    for round in 0..ROUNDS {
+        // The stored 1200 has expired. All simultaneous offers become
+        // candidates, so the smallest one must win regardless of ordering.
+        peer.pmtu_mtu.store(1200, Ordering::Relaxed);
+        peer.pmtu_learned_ns.store(1, Ordering::Relaxed);
+        start.wait();
+        finish.wait();
+        assert_eq!(
+            engine.peer_pmtu(&peer_pub, now_ns),
+            Some(1330),
+            "expired concurrent notes lost the smallest offer at round {round}"
+        );
+        assert_eq!(
+            peer.pmtu_learned_ns.load(Ordering::Relaxed),
+            now_ns,
+            "the expired entry's replacement stamp was not published at round {round}"
+        );
+    }
+    for worker in workers {
+        worker.join().expect("expired PMTU note writer must not panic");
+    }
+}

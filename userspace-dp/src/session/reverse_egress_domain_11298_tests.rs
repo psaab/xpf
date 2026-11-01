@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::test_zone_ids::*;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 
 const DOMAIN_A: u32 = 100_001;
 const DOMAIN_B: u32 = 100_002;

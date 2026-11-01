@@ -154,15 +154,11 @@ func IsRequiredProtocolGateError(err error) bool {
 	return false
 }
 
-// recordPolicyContentRejectionLocked tracks the #3261 diagnostic for the
-// just-built snapshot: the reasons (if any) it carries unrepresentable policy
-// content that the helper integrity preflight will reject. It is called at the
-// snapshot-build site BEFORE the publish so it is recorded even when the
-// publish is rejected (the helper keeps previous-good / default-deny while
-// staying armed — never fail-open). A one-shot slog line fires only on a
-// transition (per the logging rules — NOT per apply): a Warn when content
-// becomes unrepresentable (the operator must see the snapshot is being
-// rejected) and an Info when it becomes representable again.
+// recordPolicyContentRejectionLocked tracks fail-closed content diagnostics for
+// the just-built snapshot. Whole-snapshot refusal entries retain the helper's
+// previous-good/default-deny state; DNS quarantine entries describe rules
+// Rust accepts as deny while loading siblings. It records the result before
+// publish and emits one warning on transition, not per apply.
 func (m *Manager) recordPolicyContentRejectionLocked(reasons []string) {
 	had := len(m.lastSnapshotRejectReasons) > 0
 	now := len(reasons) > 0
@@ -170,11 +166,11 @@ func (m *Manager) recordPolicyContentRejectionLocked(reasons []string) {
 	switch {
 	case now && !had:
 		slog.Warn(
-			"userspace: snapshot carries unrepresentable policy content; the helper integrity preflight rejects it and retains the previous-good state (fresh boot: default-deny). Helper stays armed — no kernel fail-open. Edit out the offending application/address and re-commit to restore enforcement.",
+			"userspace: policy content requires fail-closed handling; see diagnostics. Whole-snapshot integrity failures retain previous-good/default-deny, while unresolved DNS rules are quarantined to deny and sibling rules remain active.",
 			"reasons", reasons,
 		)
 	case had && !now:
-		slog.Info("userspace: policy content is representable again; snapshot will publish normally")
+		slog.Info("userspace: policy content fail-closed diagnostics cleared")
 	}
 }
 
@@ -1234,15 +1230,14 @@ func (m *Manager) rebuildScheduledPolicySectionsWithLatchLocked(next *ConfigSnap
 	// userspace keeps the old FIB with retries that cannot converge.
 	policies = scrubPoliciesForQuarantinedZones(policies, quarantinedZoneNamesForConfig(cfg))
 	next.Policies = policies
-	// #3261 / #10688 / #12047: recompute refusal reasons from the scrubbed
-	// policies and refreshed address-book rows before the scheduler republish.
-	// Keep the operator-facing count equal to what is actually published, exactly
-	// as the full build does after quarantine (builder.go): Summary.PolicyCount
-	// must equal len(next.Policies).
+	// #3261 / #10688 / #12047: recompute refusal reasons and per-rule DNS
+	// quarantine diagnostics from the scrubbed policies and refreshed
+	// address-book rows before scheduler republish.
+	// Keep operator-facing counts tied to the published snapshot.
 	next.Summary.PolicyCount = len(policies)
 	next.AddressBooks = books
 	invalidatePolicySnapshotIdentity(next)
-	next.Capabilities.PolicyContentRejected = collectPolicyContentRejections(policies)
+	next.Capabilities.PolicyContentRejected = collectPolicyContentDiagnostics(policies)
 	next.Capabilities.PolicyContentRejected = append(next.Capabilities.PolicyContentRejected,
 		collectPolicyZoneRejections(policies, next.Zones)...)
 	next.Capabilities.PolicyContentRejected = append(next.Capabilities.PolicyContentRejected,
@@ -1462,7 +1457,11 @@ func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snap
 		if owner != nil && owner.VLANID > 0 && owner.ParentIfindex > 0 {
 			continue
 		}
-		if !refreshAttachAdmission(snapshot, uint32(ifindex), interfaceRowForIfindex(snapshot, uint32(ifindex))) {
+		row := owner
+		if row == nil {
+			row = interfaceRowForIfindex(snapshot, uint32(ifindex))
+		}
+		if !refreshStructuralAttachAdmission(uint32(ifindex), row, owner) {
 			delete(allowed, ifindex)
 		}
 	}

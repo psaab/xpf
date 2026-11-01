@@ -501,7 +501,7 @@ fn retire_worker_completes_persistent_lease_15956() {
 #[test]
 fn new_flow_allocation_falls_back_and_publishes_pat_owner_under_held_live_read_15956() {
     let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
-    let addrs = [pool_ip];
+    let _addrs = [pool_ip];
     let alloc = Arc::new(PortAllocator::new(1, 20_000, 20_001));
     let guard = alloc.debug_hold_live_read();
     let done = Arc::new(AtomicBool::new(false));
@@ -815,7 +815,7 @@ fn restore_and_fast_insert_race_at_cap_minus_one_admits_exactly_one_15956() {
         })
     };
     let racer_b = {
-        let alloc = Arc::clone(&alloc);
+        let _alloc = Arc::clone(&alloc);
         let barrier = Arc::clone(&barrier);
         let snapshot = Arc::clone(&snapshot);
         std::thread::spawn(move || {

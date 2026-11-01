@@ -721,6 +721,20 @@ impl SessionOrigin {
     pub(crate) fn is_transient_local_seed(self) -> bool {
         matches!(self, Self::MissingNeighborSeed | Self::FabricPuntSeed)
     }
+
+    /// #18620: whether a peer import or a peer delete of the same key may
+    /// replace this worker's row, whatever the local RG state. Peer-synced
+    /// rows, as before. Also a `FabricPuntSeed`: it records a flow the peer
+    /// adjudicated and translated, so the peer's row for that key is the
+    /// authority the seed was only standing in for. Refusing the peer in
+    /// favour of a seed (the #9048/#9714 local-owned guards keyed on
+    /// `!is_peer_synced()`) kept a NAT-free fabric redirect in place of the
+    /// flow's real session. Authored rows (ForwardFlow, LocalMiss,
+    /// SharedPromote, ...) and the owner-minted MissingNeighborSeed stay
+    /// protected: on the owner they ARE the authority.
+    pub(crate) fn yields_to_peer(self) -> bool {
+        self.is_peer_synced() || matches!(self, Self::FabricPuntSeed)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

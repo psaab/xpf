@@ -156,6 +156,18 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) connected_v6_by_ifindex: FastMap<i32, Vec<PrefixV6>>,
     pub(in crate::afxdp) connected_v4: Vec<ConnectedRouteV4>,
     pub(in crate::afxdp) connected_v6: Vec<ConnectedRouteV6>,
+    /// #18517: the connected rows withheld from `connected_v4`/`connected_v6`
+    /// because their RETH unit's RG is peer-owned (#15742), each with its OWN
+    /// row table. `populate_interfaces` pushes a row here exactly when it
+    /// skips the transit push, so membership IS the peer-owned property; the
+    /// FIB build binds a bare gateway only to these rows
+    /// (`peer_owned_connected_target_v4/v6`), never to an arbitrary
+    /// by-ifindex ledger row. Read only by the FIB build; the vectors stay in
+    /// every published state (one row per peer-owned unit address, never read
+    /// on the packet path). Sorted longest-prefix-first, lowest ifindex first
+    /// on equal lengths (`sort_connected`).
+    pub(in crate::afxdp) connected_v4_peer_owned: Vec<ConnectedRouteV4>,
+    pub(in crate::afxdp) connected_v6_peer_owned: Vec<ConnectedRouteV6>,
     /// #16217/#17053: build-time cache of the canonical
     /// `connected_lpm_ifindex(.., RowsThenLedger)` owner answer,
     /// keyed by (prefix_len, network) with per-table-key slots.
@@ -391,6 +403,11 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) ifindex_unambiguous_zone_id: FastMap<i32, u32>,
     pub(in crate::afxdp) zone_name_to_id: FastMap<String, u32>,
     pub(in crate::afxdp) zone_id_to_name: FastMap<u32, String>,
+    /// #18518: low 16 bits -> full zone id over `zone_id_to_name`'s keys,
+    /// `0` when two admitted ids share their low 16 bits. A V1 fabric zone
+    /// stamp carries only those 16 bits (two MAC bytes) since #16557 made
+    /// zone ids full u32 hashes; built by `populate_zones`.
+    pub(in crate::afxdp) zone_low16_to_id: FastMap<u16, u32>,
     /// The zone maps passed the snapshot-level duplicate/collision validator.
     /// Hand-built test states leave this false, so removed-zone purging is
     /// fail-closed unless the maps came from the real forwarding builder.
@@ -552,6 +569,22 @@ pub(in crate::afxdp) struct ForwardingState {
     /// flips across publishes. Workers read it atomically with the
     /// enabled bit from their loaded view; they never infer transitions.
     pub(in crate::afxdp) pptp_epoch: u64,
+    /// #18534: identity of THIS forwarding snapshot's contents. Two sources,
+    /// disjoint ranges, so two worker-visible states with different contents
+    /// never share a nonzero value, and none is mutated after it is stamped:
+    /// - the coordinator advances it on every `publish_runtime_view` (counting
+    ///   up from 1), the only coordinator path that hands workers a new
+    ///   forwarding `Arc`;
+    /// - a worker that derives its own variant of a published snapshot (the
+    ///   ct-slice fabric swap, `run_ct_slice`) restamps the copy with
+    ///   [`Self::restamp_local_derivation`] (high bit set) before adopting it.
+    ///
+    /// Per-flow memos of pure functions of the forwarding tables (the flow
+    /// cache's destination-owner RG, the post-admission neighbor-learn
+    /// shortcut) key on it. 0 = never stamped (unit fixtures, the pre-publish
+    /// default): such a state may be mutated in place, so memos are disabled
+    /// for it.
+    pub(in crate::afxdp) publish_epoch: u64,
     /// #2008 M5: L3/L4 application-identification catalog. Resolves a session's
     /// 5-tuple to the numeric app_id stamped on the conntrack session at
     /// create time, so `show security flow session` reports a real application
@@ -569,8 +602,6 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) tcp_no_sequence_check: bool,
     pub(in crate::afxdp) tcp_rst_sequence_check: bool,
     pub(in crate::afxdp) tcp_maximum_window: u32,
-    pub(in crate::afxdp) tcp_time_wait_session_ageout: bool,
-    pub(in crate::afxdp) tcp_time_wait_apply_to_half_closed: bool,
     /// #3527: per-ingress-zone override (zone id → ns) of the global half-open
     /// (`tcp_opening_ns`) TCP window, built from each screened zone's
     /// `syn-flood timeout`. Pushed onto the worker `SessionTable` via
@@ -796,7 +827,72 @@ pub(in crate::afxdp) enum ConnectedOwnerIndex {
     Miss,
 }
 
+/// #18534 fold: the high bit marks a `publish_epoch` minted by a worker for
+/// a local derivation of a published snapshot. The coordinator counts up
+/// from 1 and never reaches it, so the two ranges cannot collide.
+pub(in crate::afxdp) const LOCAL_DERIVATION_EPOCH_BIT: u64 = 1 << 63;
+
+/// #18534 fold: process-wide source of local-derivation epochs, so two
+/// derivations (on any workers) never share one either.
+static LOCAL_DERIVATION_EPOCHS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 impl ForwardingState {
+    /// #18534 fold: give a worker-local derivation of a published snapshot
+    /// (same tables with one field replaced, e.g. the ct-slice fabric swap)
+    /// an identity of its own. Keeping the published epoch would let a memo
+    /// computed against the published contents be read against different
+    /// ones. A fresh epoch, not 0: 0 would turn every memo off until the next
+    /// coordinator publish, while a fresh one costs one re-resolution per
+    /// flow, the same as any publish. Cold path (a fabric-set change).
+    pub(in crate::afxdp) fn restamp_local_derivation(&mut self) {
+        let n = LOCAL_DERIVATION_EPOCHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        self.publish_epoch = LOCAL_DERIVATION_EPOCH_BIT | n;
+    }
+
+    /// #18518: (re)build `zone_low16_to_id` from `zone_id_to_name`.
+    pub(in crate::afxdp) fn rebuild_zone_low16_index(&mut self) {
+        self.zone_low16_to_id.clear();
+        for &id in self.zone_id_to_name.keys() {
+            self.zone_low16_to_id
+                .entry(id as u16)
+                .and_modify(|full| {
+                    if *full != id {
+                        *full = 0;
+                    }
+                })
+                .or_insert(id);
+        }
+    }
+
+    /// #18518: the full zone id a V1 fabric stamp's 16 bits name, or `None`
+    /// when no admitted zone has those low bits or two do (colliding —
+    /// never guess a tenant identity). Hand-built test states that fill
+    /// `zone_id_to_name` without running `populate_zones` take the scan arm.
+    pub(in crate::afxdp) fn zone_id_for_stamp(&self, low: u16) -> Option<u32> {
+        if low == 0 {
+            return None;
+        }
+        if !self.zone_low16_to_id.is_empty() {
+            return self
+                .zone_low16_to_id
+                .get(&low)
+                .copied()
+                .filter(|id| *id != 0);
+        }
+        let mut found = None;
+        for &id in self.zone_id_to_name.keys() {
+            if id as u16 != low {
+                continue;
+            }
+            if found.is_some_and(|prior| prior != id) {
+                return None;
+            }
+            found = Some(id);
+        }
+        found
+    }
+
     /// #17053: (re)build the connected-owner longest-prefix indexes
     /// from `connected_v4`/`connected_v6` plus the by-ifindex ledger
     /// rows. Called once per forwarding-state build (after the

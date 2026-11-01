@@ -829,10 +829,11 @@ func (mon *Monitor) ipCycleTimeout(numTargets int) time.Duration {
 //     leniently-loaded one probes source-free (the kernel picks a
 //     same-family source) rather than binding the wrong family's
 //     address and never completing.
-//   - Otherwise with secondary-ip-address: (secondary, device, true) only
-//     when netlink confirms the source is present on that local interface.
-//     A confirmed absence returns canMeasure=false; an inconclusive query
-//     preserves the neutral treatment instead of releasing state.
+//   - Otherwise with secondary-ip-address: measurability requires the
+//     configured address to be installed on the interface and to match
+//     the target's family (#18413). A confirmed absence or family
+//     mismatch returns canMeasure=false; an inconclusive lookup preserves
+//     the neutral treatment instead of releasing state.
 //   - Otherwise (bound target, not primary, no installed secondary source):
 //     ("", device, false) — the node holds no source for this target
 //     and cannot measure it at all. A not-completed probe for such a
@@ -860,24 +861,33 @@ func (mon *Monitor) probeSourceFor(rg *config.RedundancyGroup, target *config.IP
 		return "", device, true
 	}
 	if target.SecondaryIPAddress != "" {
-		present, verified := mon.installedAddress(device, target.SecondaryIPAddress)
-		// An inconclusive netlink lookup is not proof the source is absent;
-		// preserve the neutral treatment until presence can be determined.
+		present, verified := mon.installedAddress(device, target.SecondaryIPAddress, target.Address)
+		// For a same-family source, an inconclusive netlink lookup is not
+		// proof of absence; preserve the neutral treatment.
 		return target.SecondaryIPAddress, device, present || !verified
 	}
 	return "", device, false
 }
 
-// installedAddress checks whether address is assigned to device in the
-// current kernel address list. LinkByName's typed not-found result is confirmed
-// only by a clean LinkList, since its legacy dump fallback can hide
-// ErrDumpInterrupted. Other lookup failures are inconclusive, so callers
+// installedAddress reports whether the configured secondary source is
+// installed on device and matches target's family. A family mismatch is
+// deterministically unbindable, so it is absence even if netlink is
+// unavailable. For compatible families, LinkByName's typed not-found result
+// is confirmed only by a clean LinkList, since its legacy dump fallback can
+// hide ErrDumpInterrupted. Other lookup failures are inconclusive, so callers
 // preserve state rather than treating inspection failures as absence.
-func (mon *Monitor) installedAddress(device, address string) (present, verified bool) {
+func (mon *Monitor) installedAddress(device, address, target string) (present, verified bool) {
 	ip := net.ParseIP(stripCIDR(address))
+	targetIP := net.ParseIP(target)
 	if device == "" || ip == nil {
 		return false, true
 	}
+	// A family-mismatched source can never bind the probe socket, even if
+	// netlink cannot confirm whether it is installed.
+	if targetIP != nil && (ip.To4() != nil) != (targetIP.To4() != nil) {
+		return false, true
+	}
+	wantV4 := ip.To4() != nil
 
 	nlh := mon.getNlHandle()
 	link, err := nlh.LinkByName(device)
@@ -928,7 +938,8 @@ func (mon *Monitor) installedAddress(device, address string) (present, verified 
 		return false, false
 	}
 	for _, addr := range addrs {
-		if addr.IPNet != nil && addr.IP.Equal(ip) {
+		if addr.IPNet != nil && addr.IPNet.IP != nil &&
+			(addr.IPNet.IP.To4() != nil) == wantV4 && addr.IPNet.IP.Equal(ip) {
 			return true, true
 		}
 	}
@@ -1259,6 +1270,7 @@ var reservedMonitorNames = []string{
 	DataplaneArmMonitorIface,
 	HelperCrashLoopMonitorIface,
 	startupSyncHoldMonitorIface,
+	PlannedShutdownMonitorIface,
 }
 
 // isReservedMonitorName reports whether a monitor key belongs to some owner

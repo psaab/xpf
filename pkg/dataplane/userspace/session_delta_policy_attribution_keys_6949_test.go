@@ -11,8 +11,8 @@ import (
 )
 
 // TestSessionDeltaPolicyAttributionWireKeysLockstepWithRust6949 pins the Go
-// DECODER's JSON keys for the five policy-attribution fields on
-// SessionDeltaInfo to the keys the Rust producer actually emits.
+// DECODER's JSON keys for policy attribution and the app-timeout/log presence
+// marker on SessionDeltaInfo to the keys the Rust producer actually emits.
 //
 // #6949: the binary event-stream open frame had carried policy_id (#3056/#3301),
 // policy_counter_idx (#3073), the per-application inactivity timeout (#3227) and
@@ -80,6 +80,15 @@ func TestSessionDeltaPolicyAttributionWireKeysLockstepWithRust6949(t *testing.T)
 		}
 	}
 
+	statedKey := rustWireKeyInStruct(t, binding, "SessionDeltaInfo", "app_timeout_log_stated", false)
+	var stated SessionDeltaInfo
+	if err := json.Unmarshal([]byte(fmt.Sprintf(`{"event":"open",%q:true}`, statedKey)), &stated); err != nil {
+		t.Fatalf("unmarshal stated app-timeout/log delta: %v", err)
+	}
+	if !stated.AppTimeoutLogStated {
+		t.Fatalf("AppTimeoutLogStated = false for a %q:true delta", statedKey)
+	}
+
 	// nat64 is a bool and nat64_snat_v4 a string; both are asserted on their
 	// TRUE / non-empty value for the same reason — false and "" are what an
 	// absent key decodes to.
@@ -103,16 +112,15 @@ func TestSessionDeltaPolicyAttributionWireKeysLockstepWithRust6949(t *testing.T)
 			info.Nat64SnatV4, "203.0.113.5", snatKey)
 	}
 
-	// An old helper omits all five keys. That must leave the pre-existing
-	// zero values rather than failing the decode, which is what makes the
-	// addition rolling-upgrade safe in the helper-older direction.
+	// An old helper omits these fields. Their zero values must remain valid,
+	// which is what makes the addition rolling-upgrade safe in the helper-older direction.
 	var legacy SessionDeltaInfo
 	if err := json.Unmarshal([]byte(`{"event":"open","src_port":12345}`), &legacy); err != nil {
 		t.Fatalf("unmarshal legacy delta: %v", err)
 	}
 	if legacy.PolicyID != 0 || legacy.PolicyCounterIdx != 0 || legacy.AppTimeout != 0 ||
-		legacy.Nat64 || legacy.Nat64SnatV4 != "" {
-		t.Fatalf("legacy delta decoded as %+v, want the zero attribution", legacy)
+		legacy.AppTimeoutLogStated || legacy.Nat64 || legacy.Nat64SnatV4 != "" {
+		t.Fatalf("legacy delta decoded as %+v, want the zero attribution and absent marker", legacy)
 	}
 }
 
@@ -152,13 +160,14 @@ func TestSessionDeltaIngressAndPolicyRuleIdentityKeys11070(t *testing.T) {
 // already at parity and stopped.
 //
 // A claim fix owes two proofs: that it landed, and that it is TRUE. This
-// asserts the second: the Rust producer really does declare all five keys the
-// comment claims parity on. Deleting a field from binding.rs makes the sentence
-// false again and reds this, which a wording-only guard could not see.
+// asserts the second: the Rust producer really does declare all policy fields and
+// the app-timeout/log presence marker that the comment claims parity on. Deleting
+// a field from binding.rs makes the sentence false again and reds this, which a
+// wording-only guard could not see.
 func TestSessionDeltaPolicyAttributionCommentIsNotFalse6949(t *testing.T) {
 	binding := filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "binding.rs")
 	for _, f := range []string{
-		"policy_id", "policy_counter_idx", "app_timeout", "nat64", "nat64_snat_v4",
+		"policy_id", "policy_counter_idx", "app_timeout", "app_timeout_log_stated", "nat64", "nat64_snat_v4",
 	} {
 		// rustWireKeyInStruct Fatalf's when the field (or its struct) is
 		// gone, which is the RED this test exists for.

@@ -481,6 +481,9 @@ pub struct Coordinator {
     /// the epoch to stamp on the next publish when it flips.
     pub(crate) pptp_last_enabled: Option<bool>,
     pub(crate) pptp_epoch_counter: u64,
+    /// #18534: source of `ForwardingState::publish_epoch`, advanced on every
+    /// forwarding publish.
+    pub(crate) forwarding_publish_epoch_counter: u64,
     pub(crate) reconcile_calls: u64,
     /// #2522: count of teardowns that paid the 500ms mlx5 zero-copy
     /// EBUSY quiesce. Bumped only when live workers were torn down AND a
@@ -740,6 +743,7 @@ impl Coordinator {
             runtime_view_publication_generation: 0,
             pptp_last_enabled: None,
             pptp_epoch_counter: 0,
+            forwarding_publish_epoch_counter: 0,
             reconcile_calls: 0,
             reconcile_quiesce_count: 0,
             last_bind_failures: BTreeMap::new(),
@@ -2288,7 +2292,10 @@ impl Coordinator {
     }
 
     fn store_runtime_view(&mut self, forwarding: Arc<ForwardingState>) {
+        #[cfg(test)]
         let previous = self.ha.runtime.load_full();
+        #[cfg(not(test))]
+        let _ = self.ha.runtime.load_full();
         self.runtime_view_publication_generation =
             self.runtime_view_publication_generation.saturating_add(1);
         let view = Arc::new(RuntimeView::new_with_ipsec_authority(
@@ -2353,6 +2360,12 @@ impl Coordinator {
             _ => {}
         }
         self.forwarding.pptp_epoch = self.pptp_epoch_counter;
+        // #18534: every forwarding Arc a worker can adopt carries a fresh
+        // nonzero identity; per-flow memos of forwarding-table lookups key
+        // on it (`ForwardingState::publish_epoch`).
+        self.forwarding_publish_epoch_counter =
+            self.forwarding_publish_epoch_counter.saturating_add(1);
+        self.forwarding.publish_epoch = self.forwarding_publish_epoch_counter;
         let forwarding = Arc::new(self.forwarding.clone());
         self.store_runtime_view(forwarding);
     }
@@ -2618,6 +2631,10 @@ mod routing_domain;
 #[cfg(test)]
 #[path = "ipsec_inner_dead_worker_15149_tests.rs"]
 mod ipsec_inner_dead_worker_15149_tests;
+
+#[cfg(test)]
+#[path = "forwarding_publish_epoch_18534_tests.rs"]
+mod forwarding_publish_epoch_18534_tests;
 
 #[cfg(test)]
 #[allow(unused_must_use)] // #17144: fixture setup discards; dedicated cells assert outcomes.

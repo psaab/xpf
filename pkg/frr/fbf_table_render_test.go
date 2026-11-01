@@ -186,7 +186,7 @@ func TestGenerateInterfaceOnlyTunnelRouteInTable12036(t *testing.T) {
 	}
 	got := New().generateStaticRouteInTable(
 		sr, "", 100, nil, nil, map[string]string{"st0.0": "st0.0"})
-	if want := "ip route 0.0.0.0/0 st0.0 table 100\n"; got != want {
+	if want := "ip route 0.0.0.0/0 st0.0 5 table 100\n"; got != want {
 		t.Fatalf("interface-only forwarding-instance route = %q, want %q", got, want)
 	}
 }
@@ -288,11 +288,11 @@ func TestApplyFullForwardingInstanceTable(t *testing.T) {
 	}
 	got := string(data)
 	wants := []string{
-		"ip route 0.0.0.0/0 172.16.50.1\n",             // master untouched
-		"ip route 0.0.0.0/0 172.16.80.1 table 100\n",   // forwarding v4
-		"ip route 10.66.0.0/16 Null0 table 100\n",      // forwarding discard stays out of main
-		"ipv6 route ::/0 2001:db8:80::1 table 100\n",   // forwarding v6
-		"ip route 10.9.0.0/16 10.9.0.1 vrf vrf-BLUE\n", // VRF takes precedence
+		"ip route 0.0.0.0/0 172.16.50.1 5\n",             // master untouched
+		"ip route 0.0.0.0/0 172.16.80.1 5 table 100\n",   // forwarding v4
+		"ip route 10.66.0.0/16 Null0 5 table 100\n",      // forwarding discard stays out of main
+		"ipv6 route ::/0 2001:db8:80::1 5 table 100\n",   // forwarding v6
+		"ip route 10.9.0.0/16 10.9.0.1 5 vrf vrf-BLUE\n", // VRF takes precedence
 	}
 	for _, want := range wants {
 		if !strings.Contains(got, want) {

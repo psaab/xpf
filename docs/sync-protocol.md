@@ -668,8 +668,9 @@ advances ONLY AFTER the apply succeeds — `OnConfigReceived` now returns an
 mark only on a `nil` return. If the apply does NOT take effect — a
 compile/promote failure (a mixed-build ISSU syntax error), a store rejection, or
 a transient RG0-primary rejection (`handleConfigSync` refuses the config while
-this node believes it is the RG0 config authority) — the loop counts
-`ConfigsApplyFailed` and leaves the high-water at the last-applied generation.
+this node believes it is the RG0 config authority) — the loop leaves the
+high-water at the last-applied generation. It counts `ConfigsApplyFailed`, or
+`ConfigsRejectedAsAuthority` for the RG0-primary refusal (#18610).
 The primary's re-push of the SAME generation is then re-admitted (not dropped as
 stale) and the standby re-converges. The pre-#4151 order advanced the mark on
 admission, BEFORE the apply, so an apply failure left the mark ahead of the
@@ -749,10 +750,14 @@ the first push) — so a *stable* connection with one persistent apply failure
 receives **no second delivery**, and any gate keyed on a re-delivery edge (an "N
 consecutive failures" count, or the original elapsed-check that only re-ran on
 another failure) could never fire and would strand the standby silently forever.
-When the timer fires — grace elapsed, `DefaultConfigApplyFailGrace` 30s,
-comfortably longer than a transient RG0-primary rejection so it never flaps — it
+When the timer fires — grace elapsed, `DefaultConfigApplyFailGrace` 30s — it
 fires `OnConfigApplyHealth(true)` regardless of whether any further config
-arrived. If a re-delivery *does* arrive after the streak has persisted
+arrived. An RG0-primary refusal does not start this timer at all (#18610): the
+refusing node is the config authority, not a stranded standby, and when it wins
+the dual-active and stays primary nothing re-pushes, so no grace length would
+have kept it from flapping into CF. Such a refusal counts
+`ConfigsRejectedAsAuthority` instead and is exempted from the staleness gate
+below while the node stays primary. If a re-delivery *does* arrive after the streak has persisted
 **strictly** longer than the grace (`>`, not `>=`), an on-edge fast path raises
 immediately; both paths are idempotent and **epoch-guarded** so CF raises at
 most once per streak and a success that cancels a timer already past its
@@ -868,7 +873,22 @@ this genuine behind-the-primary case: a legitimate same-generation failover
 (`applied == received`) stays ready, and a legacy/fresh peer (both marks 0) is
 never blocked. `resetRecvGen` zeroes `lastRecvConfigGen` alongside
 `lastAppliedConfigGen`, so the `applied <= received` invariant holds across a
-reconnect re-prime. This is a **planned/manual** readiness gate only; the
+reconnect re-prime. **Authority exception (#18610):** received generations
+this node refused BECAUSE it was the RG0 config authority
+(`ErrConfigSyncRejectedAuthority`, recorded in `rejectedAsAuthorityConfigGen`)
+do not make it config-stale while it is still the authority
+(`TransferReadinessSnapshot.LocalConfigAuthority`, sampled from `IsPrimaryFn`):
+the peer converges to this node's config, not the reverse. Before the
+exception, a primary that won a dual-active stayed `Transfer ready: no`
+indefinitely, because the peer, now secondary, never pushes again. Once the
+node demotes, those generations count again, so it cannot be promoted back
+before the new primary's push applies here. `resetRecvGen` clears the mark with
+the other two. The classification uses the role sampled when the payload
+ARRIVED (`configApplyItem.authorityAtReceive`): a config received while this
+node was secondary and refused only because a promotion landed before the apply
+loop reached it is the previous primary's last config, lost, and stays an
+ordinary apply failure (stale, CF, `ConfigsApplyFailed`, and a Warn naming the
+generation). This is a **planned/manual** readiness gate only; the
 UNPLANNED/crash failover path is not gated (a stale-standby crash-takeover is a
 separate availability-vs-security tradeoff — the alternative is a total outage).
 The residual window is narrow: a config committed on the primary but whose
@@ -1658,13 +1678,15 @@ All counters are `atomic.Uint64` / `atomic.Bool`, lock-free:
 | SessionsSent | Sessions queued to sendCh |
 | SessionsReceived | Session messages received from peer |
 | SessionsInstalled | Sessions successfully written to BPF map |
-| SessionsStaleConfigIgnored | Session installs refused by the #5274 config-epoch guard: the peer stamped a config epoch (#3931 `configGenCounter`) strictly older than this node's `lastAppliedConfigGen`, so a newer config that may deny the session is already applied here (a stale permit across the HA boundary) |
+| SessionsStaleConfigIgnored | Session installs refused by the #5274 config-epoch guard (a stale permit across the HA boundary). On a non-authority: the peer's untagged epoch (its #3931 `configGenCounter`) is strictly older than `max(applyingConfigGen, lastAppliedConfigGen)`, so a newer config that may deny the session is already applied here. On the RG0 authority (#11055): the peer's reverse-tagged applied generation is strictly older than the newest config generation actually written to the current peer incarnation (`lastSentConfigGen`; `configGenCounter` before the first write), so the peer has not applied a config this node sent (#18636) |
 | DeletesSent | Delete messages queued |
 | DeletesReceived | Delete messages received |
 | BulkSyncs | Completed bulk sync operations |
 | ConfigsSent/Received | Config sync messages |
 | ConfigsStaleIgnored | Config messages dropped by the #3931 ordering guard (incoming generation not strictly newer than last-applied) |
-| ConfigsApplyFailed | Config messages admitted by the ordering guard but whose apply did NOT take effect (compile/promote failure or a transient RG0-primary rejection). The high-water is left unadvanced so the peer's re-push re-converges the standby (M-2/#4151) |
+| ConfigsApplyFailed | Config messages admitted by the ordering guard but whose apply did NOT take effect (compile/promote failure). The high-water is left unadvanced so the peer's re-push re-converges the standby (M-2/#4151). An RG0-primary refusal is not counted here since #18610 |
+| ConfigsRejectedAsAuthority | Config messages this node refused because it was the RG0 config authority when they arrived (#18610): the peer pushed while it believed itself primary. The high-water stays pinned and the generation is nacked, but no CF is armed and the node is not config-stale while it stays primary. Nonzero means a peer's config was discarded here |
+| ConfigRejectedAsAuthorityLastGen | Generation of the most recent such refusal (#18610); a statistic, not cleared by `resetRecvGen` |
 | ConfigsQueueFullDropped | Config payloads that never reached the ordered apply queue because it was full at enqueue (#6778). The non-blocking send discards the INCOMING payload — the NEWEST generation — so the node is left on a superseded config. The received high-water is still raised (the node reads config-stale), a config-apply nack re-arms the sender's #5863 marker, and the #6387 grace timer arms. A nonzero value climbing while `ConfigApplyNacksReceived` on the PEER stays at zero means the recovery path itself is broken |
 | ConfigApplyNacksReceived | #7328 config-apply nacks accepted from the peer — one per generation this node pushed that the peer refused, failed to apply, or dropped at its receive edge (#6778). A nack naming a superseded generation is ignored and not counted |
 | BulkPrimesWithoutIncarnation | `BulkStart` frames received carrying no boot incarnation (#5084) — a peer on a pre-#5084 build, or a peer whose own `boot_id` was unreadable. The incarnation fence is in its fail-open state against that peer; expected during a rolling upgrade, and NOT a health/alarm state |

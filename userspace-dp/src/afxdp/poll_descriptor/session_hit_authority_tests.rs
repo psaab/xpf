@@ -1082,7 +1082,7 @@ fn syn_cookie_final_admission_uses_translated_tuple_15947() {
     // supplied effective tuple, not flow.dst_ip: deny by choosing a
     // source in lan (no lan->wan permit in this snapshot).
     let fw = forwarding(false);
-    let mut flow = cookie_flow();
+    let flow = cookie_flow();
     let meta = UserspaceDpMeta {
         ingress_ifindex: LAN_A as u32,
         ingress_vlan_id: 0,

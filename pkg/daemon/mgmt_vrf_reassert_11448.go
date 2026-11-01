@@ -49,7 +49,12 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 		drifted = d.mgmtVRFInterfacesOutsideVRF()
 	}
 	snmpNeedsIndexReconcile := d.snmpVRFNeedsIndexReconcile()
-	if !missing && len(drifted) == 0 && !bindingChanged && !fab1Ready && !snmpNeedsIndexReconcile {
+	// #18597: an owed heartbeat restart (#9751) — one that exhausted its bind
+	// retries and left the heartbeat STOPPED — also passes the gate, so the
+	// tick retries it instead of leaving the node silent until the next
+	// apply.
+	hbOwed := d.heartbeatRestartOwed()
+	if !missing && len(drifted) == 0 && !bindingChanged && !fab1Ready && !snmpNeedsIndexReconcile && !hbOwed {
 		return
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
@@ -76,7 +81,8 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 		drifted = d.mgmtVRFInterfacesOutsideVRF()
 	}
 	snmpNeedsIndexReconcile = d.snmpVRFNeedsIndexReconcile()
-	if len(drifted) == 0 && !bindingChanged && !fab1Ready {
+	hbOwed = d.heartbeatRestartOwed()
+	if len(drifted) == 0 && !bindingChanged && !fab1Ready && !hbOwed {
 		if recreated || snmpNeedsIndexReconcile {
 			d.restartSNMPForVRFRecreate()
 		}
@@ -94,12 +100,25 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 		rebound = true
 		slog.Info("management interface bound to the management VRF", "interface", name)
 	}
-	if rebound || bindingChanged || fab1Ready {
+	if rebound || bindingChanged || fab1Ready || hbOwed {
 		var cfg *config.Config
 		if d.store != nil {
 			cfg = d.store.ActiveConfig()
 		}
 		if cfg != nil && cfg.Chassis.Cluster != nil && !d.inBootstrap() {
+			// #18597: a drifted control link this tick moved back leaves the
+			// heartbeat sockets bound through it stale. Restart them now, the
+			// same gate the apply uses, instead of leaving them until the next
+			// commit. An unmoved control link (only fxp0 or fab0 drifted)
+			// restarts nothing. retryOwed is set, so an owed restart is
+			// retried here too. That is bounded: one RestartHeartbeat (its ~5s
+			// bind-retry schedule, under applySem) per tick, one tick per
+			// mgmtVRFReassertInterval, until a restart succeeds or the next
+			// apply's post-networkd pass does.
+			if err := d.restartHeartbeatIfControlLinkMoved(cfg, true); err != nil {
+				slog.Warn("cluster: heartbeat restart after management-VRF reassert failed; the next tick or apply retries it",
+					"err", err)
+			}
 			d.reconcileClusterTransportBinding(cfg, false)
 		}
 	}

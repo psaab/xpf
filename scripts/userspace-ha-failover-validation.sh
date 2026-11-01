@@ -418,6 +418,10 @@ capture_sync_snapshot() {
 	run_vm "$vm" 'cli -c "show chassis cluster data-plane statistics"' >"$(sync_snapshot_path "$label" "$vm")" 2>&1 || true
 }
 
+# #18632: idle = N samples at an unchanged floor, the latest of them
+# included, with no create outstanding beyond that floor and nothing
+# pending at those reads (see ha_session_sync_idle_sample in
+# test/incus/ha-assurance-lib.sh).
 wait_for_session_sync_idle() {
 	local label="$1"
 	local stable_needed="$SESSION_SYNC_IDLE_STABLE_SAMPLES"
@@ -427,15 +431,19 @@ wait_for_session_sync_idle() {
 	source_node="$(node_name "$SOURCE_NODE")"
 	target_node="$(node_name "$TARGET_NODE")"
 	local prev_source_sent="" prev_target_recv="" prev_target_pending="" prev_target_drained=""
-	local baseline_sent="" baseline_received=""
+	local baseline_sent="" baseline_received="" baseline_dropped=""
 	while (( tries > 0 )); do
-		capture_sync_snapshot "$SOURCE_VM" "${label}-source"
+		# #18632: TARGET first, then source (see ha_session_sync_idle_sample):
+		# sent - received then reads high, not low; only a source stall
+		# between the enqueue and the sent count, longer than the gap
+		# between the reads, could read it low, which FAILs the wait.
 		capture_sync_snapshot "$TARGET_VM" "${label}-target"
+		capture_sync_snapshot "$SOURCE_VM" "${label}-source"
 		local source_path target_path
 		source_path="$(sync_snapshot_path "${label}-source" "$SOURCE_VM")"
 		target_path="$(sync_snapshot_path "${label}-target" "$TARGET_VM")"
 		local sample_status sample_diagnostic
-		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" 2>&1)"; then
+		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" "$baseline_dropped" 2>&1)"; then
 			sample_status=0
 		else
 			sample_status=$?
@@ -444,11 +452,17 @@ wait_for_session_sync_idle() {
 			void "${label}: session sync evidence blind: ${sample_diagnostic}"
 			return 0
 		fi
+		if (( sample_status != 0 && sample_status != 1 && sample_status != 3 && sample_status != 4 )); then
+			# #18632: an unknown verdict is VOID, as in test-failover.
+			void "${label}: session sync sample verdict ${sample_status} unknown: ${sample_diagnostic}"
+			return 0
+		fi
 		# The helper verdicts above are fail-closed on blind evidence, so
 		# these re-reads cannot fail on the paths that use their values
-		# (0/1/3 all imply the helper parsed every field).
-		local source_sent target_recv target_pending target_drained
+		# (0/1/3/4 all imply the helper parsed every field).
+		local source_sent target_recv target_pending target_drained source_dropped
 		source_sent="$(ha_sync_stats_value "$source_path" "Session create" sent)"
+		source_dropped="$(ha_status_summary_value "$source_path" "Session delta dropped")"
 		target_recv="$(ha_sync_stats_value "$target_path" "Session create" received)"
 		target_pending="$(ha_status_summary_value "$target_path" "Session delta pending")"
 		target_drained="$(ha_status_summary_value "$target_path" "Session delta drained")"
@@ -458,21 +472,28 @@ wait_for_session_sync_idle() {
 				pass "${label}: session sync idle (source_sent=${source_sent} target_recv=${target_recv} target_delta_pending=${target_pending} target_delta_drained=${target_drained})"
 				return 0
 			fi
-		elif (( sample_status == 3 )); then
-			# #16289: counter rewind (daemon restart / epoch reset) is
-			# the ONLY re-baseline trigger.
+		elif (( sample_status == 3 || sample_status == 4 )); then
+			# #16289: counter rewind (daemon or helper restart), or
+			# #18632: a new floor. Moving DOWN shrinks what the baseline
+			# can absorb (creates in flight at it) and never grows it; a
+			# create lost after the wait has seen the true floor is never
+			# absorbed. These are the ONLY re-baseline triggers; both
+			# restart the streak.
 			stable=0
 			baseline_sent="$source_sent"
 			baseline_received="$target_recv"
+			baseline_dropped="$source_dropped"
 		else
-			stable=0
-			# Ordinary not-idle. Establish the baseline only when none
-			# exists yet (first sample); otherwise keep it — an
-			# outstanding unreceived delta must persist until
-			# received, never be absorbed into a new baseline.
+			# Ordinary not-idle: above the floor, or something pending.
+			# It neither counts nor resets the count (#18632: see
+			# ha_session_sync_idle_sample). Establish the baseline only
+			# when none exists yet (first sample); otherwise keep it —
+			# an outstanding unreceived delta, or a source drop, must
+			# persist, never be absorbed into a new baseline.
 			if [[ -z "$baseline_sent" ]]; then
 				baseline_sent="$source_sent"
 				baseline_received="$target_recv"
+				baseline_dropped="$source_dropped"
 			fi
 		fi
 		prev_source_sent="$source_sent"

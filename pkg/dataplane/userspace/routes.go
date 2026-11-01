@@ -335,8 +335,22 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 	// per-route causes, and the show surfaces consult that same function.
 	staticRouteExclusions := config.StaticRouteExclusions(cfg)
 	nextTableRulePriorities := configNextTableRulePriorities(cfg, staticRouteExclusions)
-	connectedNetworks := make(map[routeSnapshotTableFamily][]*net.IPNet)
+	// gatewayNetworks is the directly-connected coverage the #11317
+	// recursive-static filter judges bare gateways against. It is a SUPERSET
+	// of the transit connected rows: a peer-owned RETH prefix is withheld from
+	// the transit FIB (#15742) but its gateway is still directly connected.
+	gatewayNetworks := make(map[routeSnapshotTableFamily][]*net.IPNet)
 	interfaceTablesV4, interfaceTablesV6 := buildInterfaceRouteTables(cfg)
+	addGatewayNetworks := func(table, family string, prefixes []string) {
+		for _, prefix := range prefixes {
+			_, network, err := net.ParseCIDR(prefix)
+			if err != nil {
+				continue
+			}
+			key := routeSnapshotTableFamily{table: table, family: family}
+			gatewayNetworks[key] = append(gatewayNetworks[key], network)
+		}
+	}
 	addConnectedRoutes := func(table, family string, prefixes []string) {
 		for _, prefix := range prefixes {
 			addSnapshot(RouteSnapshot{
@@ -344,13 +358,8 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 				Family:      family,
 				Destination: prefix,
 			})
-			_, network, err := net.ParseCIDR(prefix)
-			if err != nil {
-				continue
-			}
-			key := routeSnapshotTableFamily{table: table, family: family}
-			connectedNetworks[key] = append(connectedNetworks[key], network)
 		}
+		addGatewayNetworks(table, family, prefixes)
 	}
 	for _, iface := range interfaces {
 		if iface.Name == "" {
@@ -359,13 +368,6 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 		// Configured interface identities can survive without their kernel netdev.
 		// Their addresses must not publish connected rows or cover learned-route gaps.
 		if iface.Ifindex <= 0 {
-			continue
-		}
-		// #15742: a peer-owned RETH unit's connected prefix must not enter
-		// the helper FIB as a transit prefix. Zebra withdraws it with the
-		// VIPs; leaving it in makes LPM shadow the default (and hence the
-		// HA fabric redirect) for every destination inside the WAN prefix.
-		if iface.ConnectedRGPeerOwned {
 			continue
 		}
 		v4Table := interfaceTablesV4[iface.Name]
@@ -377,6 +379,27 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 			v6Table = "inet6.0"
 		}
 		v4Prefixes, v6Prefixes := connectedPrefixesForInterface(iface)
+		// #15742: a peer-owned RETH unit's connected prefix must not enter
+		// the helper FIB as a transit prefix. Zebra withdraws it with the
+		// VIPs; leaving it in makes LPM shadow the default (and hence the
+		// HA fabric redirect) for every destination inside the WAN prefix.
+		//
+		// #18517: it still covers gateways. A static whose gateway sits in
+		// the peer-owned prefix (the WAN default on a split node) must reach
+		// the helper: its FIB binds that gateway to the peer-owned egress
+		// (`peer_owned_connected_target_v4/v6`), so the row HA-demotes and
+		// crosses the fabric. Filtering it as recursive left only the
+		// unstamped Null0 terminal, so every new flow toward the peer-owned
+		// egress was discarded instead of fabric-redirected. Consequence
+		// (Junos semantics, see docs/fabric-cross-chassis-fwd.md): the kept
+		// static now also suppresses a same-prefix learned route via a LOCAL
+		// interface in addLearnedRouteSnapshots, on the split node as on the
+		// owner, so that prefix rides the fabric.
+		if iface.ConnectedRGPeerOwned {
+			addGatewayNetworks(v4Table, "inet", v4Prefixes)
+			addGatewayNetworks(v6Table, "inet6", v6Prefixes)
+			continue
+		}
 		addConnectedRoutes(v4Table, "inet", v4Prefixes)
 		addConnectedRoutes(v6Table, "inet6", v6Prefixes)
 	}
@@ -409,7 +432,7 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 			tableName, familyName := normalizeRouteSnapshotFamily(table, family, route.Destination)
 			if !helperRefused && staticRouteHasOnlyUnresolvedBareGateways(
 				route, tableName, familyName, instanceName, instanceType,
-				connectedNetworks, interfaces,
+				gatewayNetworks, interfaces,
 			) {
 				// When every bare gateway is recursive, the config row would
 				// resolve with ifindex 0 and suppress the kernel's resolved
@@ -650,8 +673,9 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 	//
 	// PREFERENCE-AWARE GAP-FILL. Keep a config-derived route when its
 	// preference is at least as good as the imported route's learned
-	// protocol distance (#16620 Junos scale: OSPF 10, IS-IS 115 (FRR
-	// fixed), RIP 100, BGP 170; other protocols 200). When the config
+	// protocol distance (#16620 Junos scale: OSPF 10, IS-IS conservatively
+	// 15 because RTPROT does not identify its level, RIP 100, BGP 170;
+	// other protocols 200). When the config
 	// route is a worse-preference fallback (for example preference
 	// 250), publish both: the Rust FIB's ascending-preference
 	// tie-break then selects the kernel's already-selected learned
@@ -802,32 +826,33 @@ func ribGroupReturnRuleInstance(rule netlink.Rule, instanceTableIDs map[string]i
 	return instanceName, instanceName != ""
 }
 
-// ribGroupReturnAuthorized reports whether sourceName's interface-routes
-// rib-group for family names peerName's rib in its import-rib list — the
-// #16616 authorization for a rib-group return. It mirrors the kernel
-// applier's authorization against the compiled config so a stale kernel
-// return rule left by an older binary cannot republish an unauthorized
-// tenant->tenant row into the userspace FIB. A source with no matching
-// instance or rib-group is unauthorized (fail-closed).
+// ribGroupReturnAuthorized reports whether peerName's interface-routes
+// rib-group for family names sourceName's rib in its import-rib list — the
+// #16616/#17705 authorization for a rib-group return. Import-rib describes
+// where the peer's routes are installed: naming sourceName's rib therefore
+// authorizes a return from that lookup source to the peer's prefixes. It
+// mirrors the kernel applier's authorization so a stale kernel rule from
+// an older binary cannot republish an unauthorized tenant->tenant row.
+// Missing instances or rib-groups fail closed.
 func ribGroupReturnAuthorized(cfg *config.Config, sourceName, peerName string, family int) bool {
 	if cfg == nil || sourceName == "" || peerName == "" || sourceName == peerName {
 		return false
 	}
-	var source *config.RoutingInstanceConfig
+	var peer *config.RoutingInstanceConfig
 	for _, inst := range cfg.RoutingInstances {
-		if inst != nil && inst.Name == sourceName {
-			source = inst
+		if inst != nil && inst.Name == peerName {
+			peer = inst
 			break
 		}
 	}
-	if source == nil {
+	if peer == nil {
 		return false
 	}
-	groupName := source.InterfaceRoutesRibGroup
-	want := peerName + ".inet.0"
+	groupName := peer.InterfaceRoutesRibGroup
+	want := sourceName + ".inet.0"
 	if family == syscall.AF_INET6 {
-		groupName = source.InterfaceRoutesRibGroupV6
-		want = peerName + ".inet6.0"
+		groupName = peer.InterfaceRoutesRibGroupV6
+		want = sourceName + ".inet6.0"
 	}
 	if groupName == "" {
 		return false
@@ -1370,7 +1395,7 @@ type routeSnapshotTableFamily struct {
 func staticRouteHasOnlyUnresolvedBareGateways(
 	route *config.StaticRoute,
 	table, family, instanceName, instanceType string,
-	connectedNetworks map[routeSnapshotTableFamily][]*net.IPNet,
+	gatewayNetworks map[routeSnapshotTableFamily][]*net.IPNet,
 	interfaces []InterfaceSnapshot,
 ) bool {
 	// Without an interface inventory there is no evidence that a gateway is
@@ -1380,7 +1405,7 @@ func staticRouteHasOnlyUnresolvedBareGateways(
 		route.NextTable != "" || len(route.NextHops) == 0 {
 		return false
 	}
-	networks := connectedNetworks[routeSnapshotTableFamily{table: table, family: family}]
+	networks := gatewayNetworks[routeSnapshotTableFamily{table: table, family: family}]
 	hasBare, hasDirect := false, false
 	for _, nextHop := range route.NextHops {
 		if nextHop.Interface != "" {
@@ -1841,16 +1866,14 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 	return capped, suppressedMTUs, nil
 }
 
-// learnedRouteProtocolDistance returns the effective distance the
-// managed section assigns (#16620) for dynamic routes whose kernel
-// protocol identifies their routing daemon, so the helper FIB orders
-// an imported learned route against Junos-scale config preferences
-// exactly as zebra does. Delegates to pkg/frr's table (the renderer's
-// own constants) so the two can never drift: OSPF 10 (internal),
-// RIP 100, BGP 170, IS-IS at FRR's fixed 115. RTPROT_BGP does not
-// distinguish eBGP from iBGP, and Junos has a single BGP preference
-// (170), so 170 is correct for both. The kernel-selected row itself
-// is the source of truth that the route is active.
+// learnedRouteProtocolDistance returns the Junos-scale preference used by the
+// helper FIB to arbitrate imported kernel-selected routes against configured
+// routes. It delegates to pkg/frr's shared table, not zebra's rendered
+// distance: for IS-IS it chooses the more-preferred Junos L1 value 15 because
+// rtnetlink exposes only `isis`, not its L1/L2 level. FRR itself still fixes
+// IS-IS at 115; #17735's compile/render belts reject configurations whose
+// static or RIP distance cannot preserve Junos ordering there. RTPROT_BGP
+// does not distinguish eBGP from iBGP, and Junos has one BGP preference (170).
 func learnedRouteProtocolDistance(protocol string) (int, bool) {
 	return frr.JunosProtocolDistance(protocol)
 }

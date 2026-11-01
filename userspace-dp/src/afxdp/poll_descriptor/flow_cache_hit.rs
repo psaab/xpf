@@ -201,42 +201,6 @@ pub(super) fn stage_flow_cache_hit(
         false
     };
 
-    // #16217 (fold B6): on EVERY hit a marked (adopted) entry's
-    // ownership is re-derived BEFORE the mutating lookup
-    // (side-effect-free peek: no tallies/LRU/lease re-stamp) via
-    // `revalidate_fabric_established_fresh` — judged against the
-    // AUTHORITATIVE fresh RG set (`forwarding_active_rgs`, loaded
-    // from the coordinator ArcSwap for THIS packet), the same
-    // ownership evidence the adoption gate proves. The result DRIVES
-    // the `EnforceChanged` suppression below (a lapsed mark
-    // suppresses nothing). Pre-fold the fresh revalidation was
-    // computed against the lagging `ha_state` snapshot and then
-    // DISCARDED (`let _ = adopted_mark_revalidated;`), so the raw
-    // mark alone suppressed the demotion even after failback. The
-    // mark NEVER suppresses `ForwardCandidateEgressDeparted`
-    // (checked BEFORE enforce in the validator), so a departed
-    // egress supersedes despite a live mark and re-resolves toward
-    // FabricRedirect. Unmarked entries compute `false` and are
-    // bit-identical.
-    let (adopted_mark, adopted_mark_revalidated) = {
-        let peek_lookup = FlowCacheLookup::for_packet(meta, validation, worker_ctx.forwarding);
-        match flow_state
-            .flow_cache
-            .peek_entry(&flow.forward_key, peek_lookup)
-        {
-            Some(peeked) if peeked.fabric_established => (
-                true,
-                crate::afxdp::forwarding::revalidate_fabric_established_fresh(
-                    worker_ctx.forwarding,
-                    worker_ctx.forwarding_active_rgs,
-                    peeked.fabric_established,
-                    peeked.decision.resolution,
-                ),
-            ),
-            _ => (false, false),
-        }
-    };
-
     if let Some(cached) = flow_state.flow_cache.lookup_counted_with_scheduler_expiry(
         &flow.forward_key,
         // #5139: resolve the LOGICAL (VLAN-selecting) ingress ifindex into the
@@ -266,6 +230,34 @@ pub(super) fn stage_flow_cache_hit(
         // relaxed atomic load + compare. A mismatch means the cached dst_mac
         // or neighbor liveness may be stale;
         let neighbor_mac_stale = cached.neighbor_mac_epoch_stale(worker_ctx.dynamic_neighbors);
+        // #16217 (fold B6): on EVERY hit a marked (adopted) entry's
+        // ownership is re-derived via `revalidate_fabric_established_fresh`
+        // — judged against the AUTHORITATIVE fresh RG set
+        // (`forwarding_active_rgs`, loaded from the coordinator ArcSwap
+        // for THIS packet), the same ownership evidence the adoption
+        // gate proves. The result DRIVES the `EnforceChanged`
+        // suppression below (a lapsed mark suppresses nothing). Pre-fold
+        // the fresh revalidation was computed against the lagging
+        // `ha_state` snapshot and then DISCARDED (`let _ =
+        // adopted_mark_revalidated;`), so the raw mark alone suppressed
+        // the demotion even after failback. The mark NEVER suppresses
+        // `ForwardCandidateEgressDeparted` (checked BEFORE enforce in the
+        // validator), so a departed egress supersedes despite a live mark
+        // and re-resolves toward FabricRedirect. Unmarked entries compute
+        // `false` and are bit-identical.
+        // #18533: judged on the entry the lookup returned. It was a
+        // separate side-effect-free `peek_entry` BEFORE the lookup — a
+        // second flow-cache set hash and way scan on every hit — but the
+        // lookup matches the same identity (key, binding-substituted
+        // ingress, logical ingress) and writes neither input
+        // (`fabric_established`, `decision.resolution`), so the verdict
+        // is the same.
+        let adopted_mark_revalidated = crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            worker_ctx.forwarding,
+            worker_ctx.forwarding_active_rgs,
+            cached.fabric_established,
+            cached.decision.resolution,
+        );
         // #16220: sub-attribute the decision revalidation so the live
         // readout names the exact rejecting check.
         // #16217: an entry seeded by the fabric-adoption resolve carries
@@ -292,7 +284,13 @@ pub(super) fn stage_flow_cache_hit(
         {
             None
         } else {
-            let reason = crate::afxdp::forwarding::cached_flow_decision_invalid_reason_for_flow(
+            // #18534: the destination-owner arm's connected-owner RG comes
+            // from the entry's per-snapshot memo, not a per-packet walk of
+            // the connected-owner index.
+            let target_ip = resolution_target_for_session(flow, cached.decision);
+            let install_table =
+                install_table_name_for_session(worker_ctx.forwarding, cached.decision, target_ip);
+            let reason = crate::afxdp::forwarding::cached_flow_decision_invalid_reason_for_cached_flow(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
                 worker_ctx.dynamic_neighbors,
@@ -301,13 +299,10 @@ pub(super) fn stage_flow_cache_hit(
                 packet_fabric_ingress,
                 fabric_link_ingress,
                 Some(&flow.forward_key),
-                resolution_target_for_session(flow, cached.decision),
-                install_table_name_for_session(
-                    worker_ctx.forwarding,
-                    cached.decision,
-                    resolution_target_for_session(flow, cached.decision),
-                ),
+                target_ip,
+                install_table,
                 cached.decision.resolution,
+                || cached.destination_owner_rg(worker_ctx.forwarding, target_ip, install_table),
             );
             // #16217 (fold B6): the mark suppresses ONLY the
             // `EnforceChanged` demotion, and ONLY while the FRESH
@@ -399,6 +394,9 @@ pub(super) fn stage_flow_cache_hit(
                     Some(crate::afxdp::forwarding::CachedDecisionInvalid::OwnerActiveRedirect) => {
                         crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitOwnerActiveRedirect
                     }
+                    Some(
+                        crate::afxdp::forwarding::CachedDecisionInvalid::FabricRedirectDestinationNowLocal,
+                    ) => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricRedirectDestinationNowLocal,
                     Some(crate::afxdp::forwarding::CachedDecisionInvalid::FabricLocalWins) => {
                         crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricLocalWins
                     }
@@ -583,14 +581,20 @@ pub(super) fn stage_flow_cache_hit(
         }
         // #11413: a Consumed FlowCache hit bypasses the slow-path destination
         // class gate, so reject it before liveness, rewrite, accounting or TX.
-        if transit_destination_class_drop(
+        // #18533 round 2: both address-class gates below judge in one
+        // routing domain; resolve it once for the pair.
+        let transit_domain = transit_class_routing_domain(
             worker_ctx.forwarding,
             cached_decision.resolution.disposition,
-            flow.dst_ip,
-            cached_decision.nat.rewrite_dst,
             flow.forward_key.routing_domain,
             ForwardPacketMeta::from(meta),
             fabric_arrival_zone,
+        );
+        if transit_destination_class_drop_in(
+            worker_ctx.forwarding,
+            flow.dst_ip,
+            cached_decision.nat.rewrite_dst,
+            transit_domain,
         ) {
             scratch.scratch_recycle.push(desc.addr);
             telemetry.counters.record_martian_drop();
@@ -620,14 +624,7 @@ pub(super) fn stage_flow_cache_hit(
         // #10689: a Consumed flow-cache hit bypasses every poll-loop
         // slow-path source-class gate, so enforce the same transit invariant
         // here before liveness, TTL, filters, accounting or TX side effects.
-        if transit_source_class_drop(
-            worker_ctx.forwarding,
-            cached_decision.resolution.disposition,
-            flow.src_ip,
-            flow.forward_key.routing_domain,
-            ForwardPacketMeta::from(meta),
-            fabric_arrival_zone,
-        ) {
+        if transit_source_class_drop_in(worker_ctx.forwarding, flow.src_ip, transit_domain) {
             scratch.scratch_recycle.push(desc.addr);
             telemetry.counters.record_transit_source_martian_drop();
             return FlowCacheOutcome::Consumed;
@@ -704,7 +701,11 @@ pub(super) fn stage_flow_cache_hit(
             // #16042: carry the parsed ack so a wrong-ack cached segment
             // cannot complete the handshake.
             let ack = crate::afxdp::frame::extract_tcp_seq_ack_window(packet_frame).map(|(_, ack, _)| ack);
-            sessions.probe_hit_deferring_state_update_with_ack(
+            // #18533 round 2: the probe records its rollback undo only when
+            // the replay below can still drop this packet — the same two
+            // inputs the drop test reads (`tx_selection.drop`, and a policer,
+            // without which `policer_action.drop` is never set).
+            sessions.probe_hit_deferring_state_update_with_ack_rollback(
                 &flow.forward_key,
                 now_ns,
                 meta.pkt_len as u64,
@@ -712,6 +713,8 @@ pub(super) fn stage_flow_cache_hit(
                 super::tcp_payload_len(packet_frame, meta),
                 meta.dscp,
                 ack,
+                cached_descriptor.tx_selection.drop
+                    || !cached_descriptor.tx_selection.three_color_policers.is_empty(),
             )
         };
         if !session_live {
@@ -865,6 +868,13 @@ pub(super) fn stage_flow_cache_hit(
             now_ns,
         );
         if cached_descriptor.tx_selection.drop || policer_action.drop {
+            // #18533 round 2: the probe recorded an undo for this packet only
+            // because one of these could fire.
+            debug_assert!(
+                cached_descriptor.tx_selection.drop
+                    || !cached_descriptor.tx_selection.three_color_policers.is_empty(),
+                "a policer drop requires a policer"
+            );
             // #15947 (H29-04 arm 2): the deferring probe above already
             // charged this packet and may have completed the handshake
             // locally. A dropped packet must leave neither behind, and
@@ -915,7 +925,14 @@ pub(super) fn stage_flow_cache_hit(
         // shared-map locks per packet. The ct-slice (10 s cadence) is
         // the backstop for completions that never take a completing
         // cache hit.
-        if sessions.take_probe_stage_transition(&flow.forward_key) {
+        // #18520: restamp the FORWARD pair the transition completed — a
+        // reverse cache hit (the #16223 companion arm, a SYN-ACK-first
+        // reverse ACK) completes it too, and keying these restamps on the
+        // reverse tuple cloned the reverse shared row into a forward-wire
+        // alias.
+        if let Some((stage_forward_key, stage_forward_nat)) =
+            sessions.take_probe_stage_transition_forward(&flow.forward_key)
+        {
             // #16217: snapshot the serving pair's ACTUAL forward +
             // reverse packet counts onto the shared rows — the
             // adoption gate's completed-handshake evidence for a
@@ -924,18 +941,18 @@ pub(super) fn stage_flow_cache_hit(
             crate::afxdp::shared_ops::restamp_shared_packet_counts(
                 worker_ctx.shared_sessions,
                 worker_ctx.shared_forward_wire_sessions,
-                &flow.forward_key,
-                cached_decision.nat,
-                sessions.fwd_packets_for(&flow.forward_key),
-                sessions.rev_packets_for(&flow.forward_key),
+                &stage_forward_key,
+                stage_forward_nat,
+                sessions.fwd_packets_for(&stage_forward_key),
+                sessions.rev_packets_for(&stage_forward_key),
             );
             // Legacy reverse-count snapshot (same transition bound).
-            let rev = sessions.rev_packets_for(&flow.forward_key);
+            let rev = sessions.rev_packets_for(&stage_forward_key);
             if rev > 0 {
                 crate::afxdp::shared_ops::restamp_shared_rev_packets(
                     worker_ctx.shared_sessions,
-                    &flow.forward_key,
-                    cached_decision.nat,
+                    &stage_forward_key,
+                    stage_forward_nat,
                     rev,
                 );
             }
@@ -945,8 +962,8 @@ pub(super) fn stage_flow_cache_hit(
             // Opening/syn_ack_first flags.
             crate::afxdp::shared_ops::restamp_shared_handshake_established(
                 worker_ctx.shared_sessions,
-                &flow.forward_key,
-                cached_decision.nat,
+                &stage_forward_key,
+                stage_forward_nat,
             );
             // #16217 (wire-cadence residual): the ct-slice restamp only
             // runs on the 10 s conntrack-refresh cadence, so advance
@@ -957,7 +974,7 @@ pub(super) fn stage_flow_cache_hit(
             crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
                 worker_ctx.shared_sessions,
                 worker_ctx.shared_forward_wire_sessions,
-                &[(flow.forward_key.clone(), cached_decision.nat)],
+                &[(stage_forward_key.clone(), stage_forward_nat)],
             );
         }
         // #3778/#11430/#11679: BA queue and LP inputs are packet-dependent,
@@ -1261,7 +1278,7 @@ pub(super) fn stage_flow_cache_hit(
                     // completion recycles to the ingress slot via the
                     // shared-recycle path. Bound the target queue exactly
                     // as the dispatcher does.
-                    let Some(mut target_tx) =
+                    let Some(target_tx) =
                         inline_target.and_then(|target_bi| tx.get_mut(target_bi, binding_index))
                     else {
                         unreachable!("inline_target resolved above");

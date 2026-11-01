@@ -116,6 +116,29 @@ func (s *Store) PublishRefreshedDNS(base, refreshed *config.Config) bool {
 	return true
 }
 
+// PublishRefreshedDNSForGeneration swaps the compiled active config to
+// refreshed only while the active operator-tree generation still matches
+// generation, then publishes the new compiled snapshot. Unlike
+// PublishRefreshedDNS's base-pointer CAS, this permits a same-generation DNS
+// clone published by another apply to be superseded by a refresh tick that
+// already applied later under the daemon's apply serialization. A commit or
+// sync that changes the operator tree has a different guarded hash and rejects
+// stale refresh. Like PublishRefreshedDNS, this does not modify the persisted
+// operator tree and MUST be called under apply serialization.
+func (s *Store) PublishRefreshedDNSForGeneration(generation string, refreshed *config.Config) bool {
+	if s == nil || generation == "" || refreshed == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active == nil || guardedConfigHash(s.active) != generation {
+		return false
+	}
+	s.compiled = refreshed
+	s.publishActiveLocked()
+	return true
+}
+
 // CandidateGeneration returns the current candidate generation token. Used by
 // the daemon's commit transaction (paired with CompileCandidateGen) and by
 // tests asserting that mutating ops advance the token.

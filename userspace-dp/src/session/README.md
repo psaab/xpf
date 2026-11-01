@@ -30,6 +30,11 @@ are covered by the last bullet):
   standby-gate fields `seen_rg_epoch` / `first_held_ns` plus the #16881
   `held_wheel_tick` and its scheduling-input markers, see "Standby retention"
   below) stays file-private in `mod.rs`, NOT here.
+- `handshake_relay.rs` — #18520 cross-worker TCP handshake relay: the
+  `HandshakeRelay` record, the bounded per-table outbox producers
+  (`queue_synack_promotion_relay` from the post-admission sequence note,
+  `queue_completion_relay` from the HA-Update choke point) and the consumer
+  `apply_handshake_relay`. See "Cross-worker handshake relay (#18520)" below.
 - `expire.rs` — timer-wheel sweeps + eviction: `expire_stale_entries`
   (the per-tick bucket drain / lazy-delete GC pass), the throttled
   `push_to_wheel` scheduler, `wheel_observe`, and the #2120 standby
@@ -68,6 +73,11 @@ are covered by the last bullet):
   claims plus normalized plain-reply aliases, sharded by seeded key hash
   so packet probes take at most one shard read lock (and none at all
   when `active_claim_count` is 0).
+- `punt_seed_directory.rs` — #18562: the node-wide, READ-ONLY view of
+  this node's live #7770 `FabricPuntSeed` rows, consulted only by the
+  embedded-ICMP matcher's last-resort fallback for a FABRIC-ingress
+  forward quote. Written only by `SessionTable` itself; see "Punt-seed
+  directory (#18562)" below.
 - `pptp.rs` — RFC 2637 PPTP call associations (#7699 stage 1):
   `PptpCall`, the canonically-ordered learned `(call-id A, call-id B)`
   pair from which both directions derive the same
@@ -334,7 +344,10 @@ both halves, companion resolved through `reverse_session_key` so NAT
 alias pairs validate the same way). A wrong-ack SYN-ACK never promotes
 and a wrong-ack completing segment never clears `handshake_pending`:
 the pair stays on the opening window. Companion resolution runs ONLY
-for `handshake_pending` pairs — established hot-path hits skip it.
+for `handshake_pending` pairs — established hot-path hits skip it. (Since
+#18533 the cached-hit probe also skips the record lookup that used to
+decide this: `handshake_expected_ack` is called only for a segment that
+already matches every other classic-completion conjunct.)
 Unknown evidence fails OPEN, never closed: when the companion end was
 never observed (mid-stream pickup, HA import — imports carry no ISN) or
 the caller parsed no ack, the gate is flags-only exactly as before, so
@@ -646,9 +659,12 @@ timeout). An actively-forwarding cached flow is thus re-stamped whenever
 its idle time crosses `expires_after_ns / N`, keeping its age ~`T/N` in
 steady state regardless of co-resident flow rates, so it can never be
 GC'd mid-flow (reaped only if a real inter-packet gap exceeds `T`). The
-steady-state per-hit cost is two warm session-index probes (admission plus
-keepalive) and integer compares; the `last_seen_ns` write + throttled
-`push_to_wheel` run only when actually stale. Allocation-free.
+admission check, keepalive and accounting described here have been one
+fused `probe_hit` borrow since #14945; an established forward hit costs one
+session-index lookup in total (see "Established cache-hit cost (#18533)"
+below — the "two warm probes" this paragraph used to state is
+pre-#14945). The `last_seen_ns` write + throttled `push_to_wheel` run only
+when actually stale. Allocation-free.
 
 For closing TCP, #10885 keeps the timer directional on bare ACKs: reset
 entries and FIN-owning halves do not slide on ACK-only hits, while the
@@ -677,6 +693,316 @@ be served from the cache for a whole timeout window without its session
 ever being touched, then be reaped while still forwarding (an HA Close
 delta to the peer + BPF redirect-key deletion + a stale flow-cache
 descriptor out-living its session). UDP (60 s) was the most exposed.
+
+## Cross-worker handshake relay (#18520)
+
+Each worker owns its `SessionTable`, and RSS hashes the two directions of a
+flow independently (under SNAT they differ by construction). The SYN installs
+the authoritative pair on worker A and fans `WorkerLocalImport` replicas to
+the siblings; the SYN-ACK lands on worker B, which promotes only ITS replica
+pair; the completing ACK and client data return to A. Before #18520 no
+handshake state crossed between the tables: A's pair stayed pure Opening
+(`established=false, handshake_pending=false`) for the life of the flow, the
+`Timeout:` column read 20, HA sync exported Opening, and every cached payload
+packet on A ran the #16223 evidence scan (`cache_hit_handshake_progress` +
+`node_served_evidence`) only to be refused. The #16223 node-level arms that
+were meant to bridge the gap read `node_served_stamps`, but nothing ever
+merged a sibling's stamps into another table — only the table's own
+completions wrote them (the #16223 tests called `note_node_served_handshake`
+on the replica table directly, a merge production never performs).
+
+The relay carries the two transitions a single worker would have made itself:
+
+| Stage | Produced where | Applied by the receiver when |
+|---|---|---|
+| `Promoted` | `note_tcp_seq_scaled` on an admitted SYN-ACK that just promoted a pair split across workers (replica origin or relayed marker); targets the author worker named by the forward session id when it is on this node | the receiver's pair is pure Opening, the relayed SYN-ACK ack equals ITS client SYN end (`tcp_peer_ack_end`, #16042), same forward session id, and the pair serves traffic here. Sets `established && handshake_pending` (the #6752 opening-class gap) and seeds the reverse half's `tcp_peer_ack_end` with the server SYN end, so a bare completing ACK is validated exactly as on a single worker. A DATA segment completes a pending pair through the #16223 companion arm, which checks no ack — on a relayed pair exactly as on a single worker (#18528). |
+| `Completed` | `emit_session_state_update_inner` on a transition INTO Established of a split pair — the single choke point every packet-driven completion publishes through, so a deferred cache-hit completion relays only after TX admission, exactly like its HA Update; fans out to every sibling | the receiver's pair is already handshake-pending — a SYN-ACK was seen on it (validated, for a SYN-first pair; the installing segment itself, for a SYN-ACK-first pickup) — same session id, serving. Never applied to a pure Opening pair (#6752/#13679). |
+| `Closed` | the same choke point on a close-CLASS transition (first FIN, second FIN, RST) of a split pair, carrying the pair's close bits (RST, FIN forward, FIN reverse). The reverse FIN is also read from the forward half's `fin_peer`, so a sender whose reverse half is gone still relays it (the forward half is always present and carries every forward FIN as `fin_own`). Fans out to every sibling | same session id, serving. ORs the FIN bits into both halves exactly as a local FIN stamps them. A RST bit makes the pair CLOSING and never sets the sticky `reset` fuse (see "Blind RST" under Limits). The pair then goes on the shared close window (`tcp_close_window_for_entry`: 30 s closing, TIME_WAIT once one FIN per direction has been seen on ANY worker) and is re-stamped from now (close progress, #10885). A relay that adds nothing changes nothing. Whatever a relay can establish, a relay can close: before this stage, a server RST that RSS delivered only to B left A's relay-established authoritative row Established for 1800 s, pinning its SNAT port, slot and limit-session count (a replica's close announces only to the HA peer, #9582, and replica expiry sends no Close). |
+
+Producers push into a bounded outbox (`HANDSHAKE_RELAY_OUTBOX_CAP` = 256,
+drop-newest, counted in `HANDSHAKE_RELAY_OUTBOX_DROPS`); the worker loop
+drains it once per pass after the binding sweep
+(`session_glue::fan_out_handshake_relays`) into the recipient command queues
+(`WorkerCommand::HandshakeRelay`), one counted lock per recipient
+(`HANDSHAKE_RELAY_LOCK_ATTEMPTS`/`_CONTENDED`, kept apart from the #4800
+replication pair so its fan-out ratio stays exact; a refused push counts in
+`HANDSHAKE_RELAY_REFUSED`; none of the four is exported yet, #18529). The
+receiver applies it in `apply_worker_commands`. Nothing runs per packet: an
+empty outbox costs one `is_empty` per loop pass, and only split pairs relay (a
+flow whose SYN and SYN-ACK land on one worker relays nothing). A relayed
+transition is never relayed back, and the receiver publishes no HA Update for
+it — the sender already published the same transition for the same session id
+from its own row (a replica announces with the installer's carried id, #9582;
+a stage advance to Established always announces), so one completion yields
+one Established Update node-wide.
+"Serving" is the locally-authored row, or a row with the per-entry
+`served_here` bit, which every admitted packet hit on THIS table sets
+(slow-path Owner replay, flow-cache probe) and a same-incarnation re-import
+keeps. It is a flag on purpose: a worker-loop pass samples the packet clock
+(`loop_now_ns`) BEFORE `apply_worker_commands` stamps a replica's
+`created_ns` with a later read, so a timestamp test (`last_seen > created`)
+was false for a replica imported and hit in the same pass — the common case
+under load, where B then refused A's completion and stayed on the opening
+window for the life of an upload. Idle replicas on uninvolved workers never
+set the bit, so they keep their opening-window reap; carried HA counters are
+not used. A hit stores the bit only while it is clear. A steady-state hit
+on a reverse row is otherwise read-only (accounting folds onto the forward
+row), so an unconditional store would dirty that line on every packet.
+
+Relays share the bounded worker command queue (4096) with HA-correctness
+commands, so a relay is never queued once the recipient queue holds
+`HANDSHAKE_RELAY_QUEUE_WATERMARK` (half the cap, enforced at compile time);
+refused relays count in `HANDSHAKE_RELAY_REFUSED`. A `Completed` or `Closed` relay is broadcast (the
+SYN-ACK worker's id is recorded nowhere), so a split flow costs at most one
+targeted `Promoted` plus N-1 `Completed` and, at close, N-1 `Closed`
+commands, on top of the 2(N-1) replica upserts its install already sends.
+
+The relay's evidence is the single-worker evidence: B's replica cannot
+validate a SYN-ACK ack (replicas carry no client ISN, so B fails open as
+before), but the relay carries the ack and A — which seeded the client ISN at
+install — refuses a wrong one, so a forged SYN-ACK on B never promotes the
+authoritative pair.
+
+Limits (the relay narrows the split gap, it does not erase it):
+
+- **Ordering race.** The relay crosses on the next loop pass of each worker.
+  If the client's completing ACK reaches A before B's `Promoted` relay is
+  applied, A cannot complete on it; A then completes on a later client
+  segment (a bare ACK whose ack still equals the server SYN end, or any data
+  segment through the companion arm) or on B's `Completed` relay when B
+  completes. A connection that goes idle right after its handshake with that
+  race lost (no further segment in either direction) still reaps on the 20 s
+  opening window, as it did before #18520.
+- **Missing forward replica.** The `Promoted` producer reads the session id
+  from B's forward replica. A SYN-ACK that B serves before applying the
+  `UpsertSynced` replica (materialized from the shared map) or from the flow
+  cache relays nothing; that flow behaves as before #18520.
+- **Delivery.** A relay refused by a full outbox or at the queue watermark
+  is counted and dropped, never retried.
+  - For `Promoted` and `Completed` that is the pre-#18520 fallback: the
+    flow stays on the opening window.
+  - A dropped `Closed` relay is worse than before #18520. The
+    relay-established sibling row stays on its established window (1800 s
+    by default) until it idles out, pinning its SNAT port, slot and
+    limit-session count. Before #18520 the same flow reaped on the 20 s
+    opening window.
+  - Only `HANDSHAKE_RELAY_OUTBOX_DROPS` and `HANDSHAKE_RELAY_REFUSED` show
+    it, and neither is exported yet (#18529).
+  - `Closed` is deliberately not exempt from the watermark. Under a
+    teardown storm it would crowd the HA headroom that the watermark keeps.
+
+  A `Promoted` relay
+  whose target worker resolves is delivered only there: if that worker no
+  longer holds the serving forward row (an RSS indirection change or a
+  reconcile mid-handshake), the relay is refused and nobody else gets it.
+- **Pending stage on a replica in its own namespace.** A `WorkerLocalImport`
+  replica carrying THIS worker's own id (re-imported after a reconcile, or
+  re-materialized) does not announce its `Promoted` transition, and its
+  receiver stays silent too, so the HA peer sees Opening until the
+  completion (which always announces). Both stages are opening-class, so the
+  peer's window is the same.
+- **Blind RST on a split pair.** No worker of a split pair can check a
+  RST's sequence number. B never sees the client ACKs that set the RST
+  target (`tcp_peer_rcv_nxt`), and A never notes a server segment, so
+  `tcp_closing_seq_verdict` is `Unknown` on both. The poll path drops only
+  `Invalid`, so it admits a RST with any sequence number on whichever worker
+  RSS gives it. An attacker needs only the 5-tuple. Stray reply-side RSTs
+  during live flows also occur on this dataplane, which is why
+  `rst-invalidate-session` defaults off.
+  - The receiving worker takes the RST locally, as before #18520: its rows go
+    on the fixed 2 s reset fuse. A replica reaps without a Close and
+    re-materializes from the shared row on its next segment.
+  - The relay carries the RST to the siblings only as CLOSING, which keeps
+    the pair forwarding. Traffic keeps refreshing the 30 s close window. Once
+    the flow goes quiet the pair reaps within two close windows (one more if
+    segments still arrived after the relay, the #14937 counter retention),
+    emitting the Close that frees its SNAT port.
+  - What a blind RST costs: a live split flow that then idles for more than
+    30 s is reaped, where it would otherwise hold the established window.
+    Before #18520 every split pair stayed on the 20 s opening window anyway,
+    so this is no worse than master.
+  - Relaying it as a hard reset (round 2) killed the live flow on every
+    worker. The authoritative reap then deleted the shared row and the HA
+    peer's copy, so even the replica could not recover.
+  - Carrying the RST's sequence number to the receiver is not cheap.
+    Sequence state is noted only on slow-path segments, so on a cache-served
+    flow it is stale, and an exact match would refuse legitimate RSTs.
+  - FINs need no such softening. The FIN check holds on the sender: the
+    FIN-direction row on the worker that receives it has noted that
+    direction's slow-path segments, so a FIN must land within one window of
+    the tracked send end. The window is that row's own, because the
+    companion there has no sequence state. The check is `Unknown`, and so
+    admits any FIN, only before the first slow-path segment of that
+    direction on that worker, for example a freshly HA-imported row. Even
+    then, a single relayed FIN gives the same refreshable 30 s CLOSING
+    window. TIME_WAIT needs one FIN per direction, and the client direction
+    cannot be forged from the WAN.
+- **Session-id reuse across a helper restart.** Session ids restart at 1 on
+  every helper start (`next_session_id`), and the incarnation fence is
+  (key, session id). A new connection that reuses a 5-tuple a sibling or the
+  standby still holds from the previous lifetime, on the same worker index,
+  can carry the old id. The import guard then keeps the old stage, and a
+  relay may apply to the other incarnation in either direction: a stage
+  (Established where Opening is due) or close progress. Close progress
+  puts a live row on the 30 s refreshable CLOSING window, never the reset
+  fuse. The collision is rare (same tuple, same worker, same counter value).
+  The same class already exists for the shared map (#16223) and the import
+  anchor (#16043). A per-boot epoch in the id is not added here: the id is a
+  wire and RT_FLOW correlation field whose consumers assume the
+  node/worker/counter layout.
+
+Two coupled fixes ride with it:
+
+- **Deferred-probe admission key.** A reverse cache hit that completes the
+  forward half via the #16223 companion arm recorded its withheld HA Update
+  and its #16217 stage-transition marker under the FORWARD key, but the
+  flow-cache caller admits/rolls back by the PROBED (reverse) key. The Update
+  was never published (and with 64 such flows the overflow arm forced a full
+  delta-loss resync), the rollback never discarded it, and the stage marker
+  was never taken and accumulated for the life of the worker. Both are now
+  keyed by the probed packet's canonical key (`pending_probe_state_updates`
+  carries `(admission_key, matched_key, …)`). The stage marker also carries
+  the FORWARD pair and NAT, which `take_probe_stage_transition_forward`
+  hands the flow-cache caller for its shared-map restamps: a reverse hit
+  completes the pair too, and restamping on the reverse tuple cloned the
+  reverse shared row into a forward-wire alias.
+- **Steady-state cost.** `probe_hit_inner` armed `companion_progress` for
+  every payload packet, including established ones, and ran
+  `cache_hit_handshake_progress` twice per non-established payload packet —
+  the second call (the #16223 "second failure conjunct" re-stamp arm) could
+  never succeed, because the helper is a pure read and the first call had
+  just returned `None`. The gate now matches `touch_if_stale_with_ack`
+  (`!established || handshake_pending`) and the dead arm is gone. Measured
+  with the test-only `SESSION_KEY_HASHES_FOR_TEST` counter
+  (`afxdp/session_glue/cross_worker_handshake_18520_tests.rs`): see
+  `docs/log/18520.md` for the per-packet hash counts.
+
+**HA replicas (failback).** The completion the relay produces on the
+authoritative row emits its Established HA Update immediately, so the peer
+imports Established (1800 s window) instead of Opening. Two gaps that let a
+replica fall back to Opening are closed with it:
+
+- The worker import (`upsert_synced_with_origin`) now keeps the handshake
+  stage monotonic per incarnation, exactly as `publish_shared_session`
+  already did for the shared map: the coordinator fans the RAW incoming row
+  to the workers, so a later same-session-id import carrying a lower stage
+  (a bulk/export Open built from a sender shared row whose wire the 10 s
+  ct-slice had not yet restamped) regressed an Established replica to
+  Opening. A different session id or a zero id takes the incoming state; for
+  the same incarnation the stage is kept and a stated close class still
+  applies (it drives `closing` and the close window independently of the
+  stage). Both merges use the one
+  `TcpHandshakeState::stage_rank` formula.
+- The deferred cache-hit completion publishes on TX admission (the
+  admission-key fix above), including a replica's completion through the
+  #16223 companion arm.
+
+Standby retention ceiling (#2120 HOLD, `stale_ceiling_ns`): a held replica is
+reaped once it has been HELD (counted from the first GC pass that found it
+idle-crossed) longer than `min(STALE_SYNCED_CEILING_MULT x expires_after,
+STALE_SYNCED_CEILING_ABS_NS)` = 3 x window, capped at 7 days. With no hits,
+no state-changing re-import and no primary-liveness renewal (same-id
+same-state re-imports preserve the anchor and the HOLD clock, #16043), an
+Opening replica (20 s window) is idle at 20 s and reaped at about 20 + 60 s;
+an Established one (1800 s) is not even idle for 30 min and is held a
+further 90 min. Note the packet path refuses an idle-crossed row before the
+GC ever reaps it: a held Opening replica older than 20 s misses on the first
+post-failback packet until the activation `RefreshOwnerRGS` re-stamps it, or
+until a synced import lands on it on the node that now forwards its RG
+(`restamp_lapsed_peer_synced`, #18550).
+
+Cells: `afxdp/session_glue/cross_worker_handshake_18520_tests.rs` (upload and
+download splits establish both tables and A emits an Established HA Update;
+a wrong relayed SYN-ACK ack never promotes A; pure Opening / foreign
+incarnation / idle replica are refused; the established cache hit never
+reaches the evidence helpers; an HA-imported Opening session served
+mid-stream across two workers survives 60 s of production GC passes, also
+after a 30 s standby HOLD and activation; a stale same-incarnation Opening
+import does not regress an Established replica, which stays live through
+60 s of standby and serves the first failback packet; the Opening vs
+Established retention ceiling) and `session/hash_cost_18520_tests.rs`.
+
+## Established cache-hit cost (#18533)
+
+Per admitted cache-served packet the flow-cache stage
+(`afxdp/poll_descriptor/flow_cache_hit.rs`) makes three session-table calls:
+`probe_hit_deferring_state_update_with_ack` (liveness, keepalive, accounting,
+handshake completion), `emit_probe_hit_state_update` after TX admission, and
+`take_probe_stage_transition_forward`. For a steady-state established,
+non-pending, non-closing pair they cost:
+
+| Hit | `SessionKey` index lookups |
+|---|---|
+| forward | 1 — the probed record (`record_by_key_mut`) |
+| reverse | 3 — the probed record, the forward companion the hit is charged to (#2501/#2749), and the #16223 node-served stamp write |
+
+The same as 2026-10-20 (`69c7c69af6`) for a forward hit; a reverse hit adds
+only the stamp write. Between those dates the hit regained 7 lookups per
+forward packet, each needed by some transition but paid on every packet:
+
+- **Rollback undo is lazy.** A deferring probe can be rolled back when the
+  cached output filter or policer drops the packet (#15947), so it records
+  what it changed. The #15947/#16223 record was an eager snapshot of
+  everything the probe COULD touch, taken first on every packet: the
+  canonical record, its companion (and the companion twice more for a
+  reverse hit), the pressure-shed membership and four node-served stamp
+  keys. `ProbeUndo` is now built just before each first write: the probed
+  record from the probe's own borrow; the forward companion from the borrow
+  of the reverse-hit charge; the stamp's prior value returned by the write
+  itself (`note_node_served_handshake_prior`); the companion's handshake
+  state and the shed membership (`capture_completion_undo`, two lookups)
+  only on the completing packet. Restoring state the probe never wrote is a
+  no-op, so restoring only what it wrote is the same rollback; the former
+  `accounting` snapshot always de-duplicated onto `matched`/`companion` and
+  is gone.
+- **No undo at all when the packet cannot be dropped (round 2).** The undo
+  exists only for `rollback_dropped_probe_hit`, which the hit path calls
+  only when the cached replay drops the packet: a `then discard`/`then
+  reject` selection or a three-color policer. The hit passes
+  `rollback_possible = tx_selection.drop || !three_color_policers.is_empty()`
+  to `probe_hit_deferring_state_update_with_ack_rollback`; without either,
+  the probe builds no `ProbeUndo` (a few hundred bytes built and pushed per
+  packet, the 1.2% `memmove` under the probe in the round-1 loss profile).
+  The deferred HA Update and stage marker are unchanged; their admission key
+  is then resolved on the completing packet itself (the resolution the
+  admission emit applies) instead of read from the undo.
+- **The #16042 expected ack is resolved only for a completion candidate.**
+  The probe judges every classic-completion conjunct under its borrow and
+  calls `handshake_expected_ack` (record + companion lookups) only when all
+  of them hold; a known-but-wrong ack still refuses the classic arm, and a
+  refused candidate still arms the #16223 progress check as before.
+- **The admission emit resolves nothing in the steady state.** With no
+  withheld HA Update and exactly one undo, recorded under the packet's own
+  canonical key (every non-alias hit), the emit consumes it directly. An
+  alias packet key, a withheld Update, or an undo another flow left behind
+  takes the resolving path unchanged.
+
+Outside the session table, the same hit path dropped more per-packet costs
+(see `afxdp/README.md`, "Established cache-hit cost"): the #16217
+pre-lookup `peek_entry` (a second flow-cache set hash), the #16841
+zero-hop-limit gate's eager FIB walk, and in round 2 (#18534) the HA
+validator's per-packet connected-owner walk, the post-admission neighbor
+learn's re-derivations, and one of two routing-domain resolutions.
+
+Cells: `session/established_hit_cost_18533_tests.rs` — the totals above for
+a same-worker pair and a split-worker pair (worker A forward, `WorkerLocalImport`
+replica on worker B reverse); one cell per optional lookup proving the
+steady state skips it (`ProbeCostProbes`: expected ack, undo capture, emit
+resolve) and the transition still runs it (a wrong-ack completing segment is
+refused and the right one completes; a dropped completion restores both
+halves and the shed membership; a dropped reverse hit restores the forward
+charge and the stamp, both a created and an advanced one; an alias admission
+and another flow's admission resolve, and the latter leaves this flow's undo
+for its rollback); and an ignored `MEASUREMENT` cell timing the four
+workloads. `afxdp/poll_descriptor/flow_cache_hit_tests.rs`
+`live_established_cache_hit_hashes_the_flow_key_twice_18533` pins the whole
+live hit stage at two key hashes. Numbers: `docs/log/18533.md`. Round 2
+(#18534): `undo_is_recorded_only_when_a_drop_is_still_possible_18533`,
+`completion_without_an_undo_publishes_under_its_canonical_key_18533`, and the
+live-stage `undroppable_cached_hit_records_no_rollback_undo_18533` /
+`droppable_cached_hit_rolls_back_its_charge_18533` (a cached `then discard`
+still records the undo and un-charges the session);
+numbers in `docs/log/18534.md`.
 
 ## Flow-cache invalidation on reap (#3776)
 
@@ -1142,6 +1468,18 @@ every idle entry ages, exactly as before):
   re-bucket; fires once per activation, then the entry ages normally.
   `first_held_ns` is left UNTOUCHED so a flapping RG cannot reset the leak
   ceiling.
+  The same edit, including recording the current epoch, is also applied
+  outside the wheel by `restamp_lapsed_peer_synced` (#18550). It runs when a
+  synced import lands on a peer-synced row that is ALREADY idle-crossed on the
+  node that forwards its RG (`handle_upsert_synced`, `!allow_replace_local`:
+  the owner RG is forwarding-active here, or the owner RG is 0 and any RG is).
+  Without it the #16043 same-state anchor kept the row fail-closed at lookup
+  until the wheel's next visit, up to 255 s for a held row. The epoch comes
+  from the worker's `rg_epochs` through the table's `rg_epoch_reader` (wired
+  in `worker_loop_setup`). Recording it spends the activation edge, so a
+  revived row that the flow has abandoned ages after one window instead of
+  being self-healed a second time. Rows still within their window, the
+  standby, and local rows are untouched.
 - **HOLD** — this node does NOT forward the entry (standby / demotion
   window) and it is peer-synced or this node forwards something
   (`peer_synced || node_active`, the "in a cluster" guard that excludes a
@@ -1267,6 +1605,135 @@ closed** — it excludes peer-synced / promoted reaps, matching
 deliberate semantics tightening, not a regression: the two counters are
 now consistently local-only, so their difference (the "Current sessions"
 gauge) is a coherent local-forwarding metric on every node.
+
+## Punt-seed directory (#18562)
+
+A #7770 punt seed is worker-local: it is never published to the shared
+maps, never HA-exported and emits no deltas. During an RG split the first
+ICMP error for a NEW punted flow comes back over the fabric and RSS lands it
+on any worker, usually not the seed's; before the WAN owner's HA import
+arrives, that worker's matcher found nothing and the error was default-denied
+`wan -> lan`. Every worker's table therefore mirrors its forward
+`FabricPuntSeed` rows into the node's ONE `PuntSeedDirectory`
+(`SharedSessionOwnerRgIndexes::punt_seeds`, wired in `worker_loop`), and the
+matcher reads it.
+
+The row is a snapshot, so its contract is lifecycle, held at the table's own
+choke points rather than at call sites:
+
+| event | site | effect |
+|---|---|---|
+| a forward `FabricPuntSeed` record enters the slab | `insert_record` | publish `(key -> decision, metadata, session_id, table token, deadline)` |
+| any removal (expire / delete / replace / take_synced_local) | `remove_entry` (the sole removal sink) | retire iff the row is still this table's incarnation |
+| an in-place rewrite of the seed's decision or metadata | `refresh_in_place`, `revalidate_forwarding_resolution_with_egress_zone`, `rebind_forward_egress_zone`, `rebind_policy_pair`, `rebind_zones_pair` (via `retire_punt_seed_row_before_rewrite`) | retire (fail closed; never re-published) |
+| the table is moved to another directory or dropped | `set_punt_seed_directory` / `Drop` | retire every row of this table |
+
+(`update_reverse_route_on_filter_hit` writes reverse entries only; a row is
+never a reverse entry.) A row stops matching at the EARLIER of the seed's idle
+deadline as installed and `PUNT_SEED_ROW_TTL_NS` (2 s) after install: it only
+bridges the gap until the WAN owner's HA import lands in the shared maps, and a
+seed kept alive by traffic outlives its row, never the reverse.
+
+Cost (#18562 review): publish runs on a worker's punted new-flow path, so the
+work under a shard lock is bounded PER CALL. The directory is 32 shards by
+seeded key hash. Expiry is a per-shard FIFO of `(deadline, key, incarnation)`.
+One call pops at most `MAINTAIN_BUDGET` (32) slots, expired or stale; a retire
+removes the row and leaves its slot to be dropped when it reaches the front.
+A queue at `QUEUE_CAP` (2x the shard cap) refuses further publishes instead of
+being compacted in one pass. A full shard refuses with no scan, and publish
+takes its shard with `try_lock`, so a worker never waits on the directory
+(`retire` and `probe` do wait, behind at most one bounded call).
+A shard reserves its table on its first publish for TWICE its 1024-row live
+cap, and never admits more live rows than half that table's item capacity
+(derived from `capacity()` at reservation). Above half, churn that leaves
+tombstones makes hashbrown RESIZE the table under the lock (review seat L r3:
+339-383 us once per shard); at or below half it can only rehash in place, and
+at ~29% load it practically never does (bench: 0 rehashes in 100k churn
+publishes; the 1024-reserve / 896-live alternative kept a recurring ~50 us
+in-place rehash and ~28.7k rows). So 32768 live rows node-wide, which with
+the 2 s bridge TTL sustains ~16k new punted flows/s before a shard refuses.
+Memory: ~1.43 MiB of address space per used shard (4096 hashbrown buckets of
+a 52 B key + 256 B `PuntSeedRow`, plus a 2048-slot queue), ~46 MiB if all 32
+are used, close to
+fully resident once a shard holds a few hundred randomly placed rows, and kept
+for the life of the helper process. A bounded residual: slots are reclaimed
+only from the queue front, so more than 2048 publishes into ONE shard within a
+TTL with nearly all retired behind a long-lived live front (~32k/s node-wide)
+fill that shard's queue and further publishes there are refused until the
+front expires (at most 2 s). A refused
+or skipped publish only means that seed's cross-worker errors keep the
+pre-#18562 verdict; both are counted and exposed in helper status
+(`punt_seed_directory_full_total`, `punt_seed_directory_contended_total`, beside
+the `punt_seed_directory_rows` gauge, which includes expired rows not yet
+reclaimed). Nothing materializes, promotes, exports, sweeps or replicates from the
+directory, and no data packet reads it. Cells:
+`punt_seed_directory_18562_tests.rs` (lifecycle per writer, fence, deadline,
+and the work-counted O(1) bounds) and
+`worker_loop_wires_its_table_to_the_node_punt_seed_directory_18562` (the real
+worker construction).
+
+## A punt seed is not authority (#18620)
+
+A #7770 `FabricPuntSeed` records a flow whose egress RG the PEER owned when
+its first packet arrived. It is NAT-free and fabric-redirects, and the peer
+adjudicated and translated the flow. Two rules follow, and both are keyed on
+the seed's own origin:
+
+- **Retired once this node forwards its egress.**
+  `retire_fabric_punt_seed_if_owner_active` (afxdp/session_glue/resolve.rs)
+  runs when a slow-path lookup hits this worker's forward seed. That is gated
+  on the origin the lookup already returns, so no other packet pays anything.
+  - The seed is retired when a fresh FIB resolution of the flow names a real
+    local egress (ForwardCandidate, or MissingNeighbor while its neighbor
+    resolves) whose RG is forwarding-active here. The seed's stamp is not
+    consulted: the already-redirected arm stamps none, and a stamp says where
+    the flow went, not where it goes now. A FIB that still withholds the egress
+    (cluster-terminal) or cannot route the flow (#10507's NoRoute retention)
+    keeps the seed.
+  - It removes the steering row and the conntrack mirror as for any removed
+    session. Removal goes through `delete`, the Terminal sink, which also
+    retires the #18562 directory row and emits no delta.
+  - The row removed is the hit's CANONICAL key. A seed that an HA-transition
+    refresh gave a translation can be hit through its forward-wire alias, and
+    deleting the packet's (alias) key there would leave the seed and drop
+    another tuple's steering row.
+  - The caller then looks again. The packet resolves against the node's synced
+    session, if the shared maps hold one, or takes the ordinary miss path,
+    which adjudicates policy and NAT afresh as the owner.
+  - The seed's recorded permit goes with it. #10507 Cell 7a now proves its
+    property through that miss path: the post-activation ACK is a SYN-first
+    drop, and the next SYN is denied by live policy.
+  - Why: a seed that survives to that point shadows the flow. Every forward
+    packet hits it first and leaves NAT-free toward a peer that no longer
+    forwards the RG, and that traffic keeps the seed from ever idling out. On
+    loss this was the persistent half of #18620, with ping and iperf outages
+    of 18-515 s until the RG moved away again.
+- **It yields to the peer.** `SessionOrigin::yields_to_peer` is
+  `is_peer_synced() || FabricPuntSeed`. A peer import or a peer delete of the
+  key replaces the seed even where the egress RG is locally active: the
+  worker install guard in `upsert_synced_with_origin`, and the #9048/#9714
+  delete guard in `handle_delete_synced`.
+  - Authored rows (ForwardFlow, LocalMiss, SharedPromote, ...) and the
+    owner-minted `MissingNeighborSeed` keep `peer_delete_refused_local_owned`.
+    On the owner they ARE the authority.
+  - The coordinator-side guards read shared-map rows. A seed is never in the
+    shared maps, so they are unchanged.
+
+A seed whose egress RG is still the peer's (the split it was minted for) is
+untouched by both rules. Cells: `afxdp/tests_punt_seed_shadow_18620.rs`.
+
+Residual (review of #18638): retirement is LAZY. It happens at the flow's next
+forward hit, not at the RG activation.
+- In between, an embedded ICMP error quoting the punted flow can still match
+  the seed: through the worker's table, or, for a fabric-ingress error,
+  through its #18562 directory row, which expires at most
+  `PUNT_SEED_ROW_TTL_NS` (2 s) after the seed was minted.
+- Such an error is delivered toward the LAN host as it would have been
+  mid-split. No data packet is admitted this way. The error belongs to a flow
+  this node ingressed and its own policy permitted.
+- Reply-direction data packets are not covered by this residual: the #10507
+  fence still revokes them on activation (seat V probe:
+  `session_hit=1 revoked=1 tx=0`).
 
 ## Corruption contract (#1855)
 
@@ -2382,7 +2849,7 @@ live-session-create publish site, and `cli_show_flow.go` renders `val.SessionID`
 fallback ONLY when `val.SessionID == 0` (an absent/legacy id). Additive and
 node-local-safe.
 
-## Per-zone, per-IP session-limit lifecycle (#2134; #3122 peer-synced fix; #2128 leak-fix; #10985 zone isolation; #11057 default quota)
+## Per-zone, per-IP session-limit lifecycle (#2134; #3122 peer-synced fix; #2128 leak-fix; #10985 zone isolation; #11057 default quota; #18640 one charge per node)
 
 Junos `set security screen ids-option <name> limit-session
 source-ip-based <n>` overrides the default per-source quota when `<n>` is
@@ -2406,6 +2873,46 @@ by `demote_owner_rg`, after which it is a true HA peer origin and must count.
 True HA peer origins (`SyncImport` / `SharedMaterialize`) remain counted so a
 standby cannot bypass the cap after failover — the #3122 limit-bypass fix is
 preserved.
+
+**One charge per node for fanned-out HA copies (#18640).** HA session sync
+installs every peer session on EVERY worker as a `SyncImport` copy (the
+`UpsertSynced` fan-out in `afxdp/ha/session_import.rs`), and `demote_owner_rg`
+re-tags every worker's replica the same way. Charging each copy made a
+standby's per-worker count the source's whole session total, N times the
+logical sessions: a source the primary held under its per-worker cap (up to
+`4096 × N`) was over the cap on every worker after failover, and every new flow
+from it was dropped until the copies expired. A fanned-out copy
+(`SyncImport`, and `SyncLiveness`, stored as `SyncImport`) now counts only on
+the ONE worker that a process-keyed hash of its forward key, modulo the
+fan-out width, designates (`session_limit_charges_fanout_copy`). Each worker
+learns its (rank, width) in the bring-up's worker set at launch
+(`WorkerLaunchPlan::session_limit_shard` →
+`SessionTable::set_session_limit_shard`, which rebuilds the counts from the
+slab). The node therefore charges each peer session once, spread across
+workers the way RSS spreads local sessions; #3122 still holds because the
+copies still count. A lone table (width 1, standalone tests) charges every
+copy, as before.
+
+Residual: the designation spreads a source's synced charges evenly across the
+workers, while the primary charged each local session on the worker RSS
+delivered it to. If RSS concentrated a source on one worker (L3-only UDP
+hashing, for example), the primary capped it near one worker's limit. After
+failover the standby's worker for that source holds only its share of the
+charges, so it can admit more new flows than the primary would have. That is
+still bounded by the `limit × N` node-wide figure that per-worker enforcement
+allows for an evenly spread source.
+
+Residual: the width is the bring-up set's size. Copies designated to a planned
+worker whose table never comes up are charged nowhere, an undercount, which errs
+toward admitting. Test builds count source decrements that find no count
+(`session_limit_dec_underflows`); the #18640 cells assert it stays 0, because
+the saturating decrement would otherwise hide a double decrement. `SharedMaterialize` / `SharedPromote` rows are the serving
+worker's own copy and count there.
+
+**The predicate is one function.** `SessionTable::session_limit_counted(key,
+origin, is_reverse)` is the only counted-class test. Every increment, the sole
+decrement in `remove_entry`, and every transition below evaluate it, so an
+increment and its decrement always agree on a row.
 
 **Count vs. HA Open delta are now SEPARATE conditions (#3122 / #12179).**
 The fresh-install path increments the count for any counted-class session,
@@ -2432,7 +2939,8 @@ in-place ingress-zone change moves a counted session between zone/IP pairs.
 | worker-local replica (#10310) | `upsert_synced_with_origin` (after the insert) | **none** until a promote or demote transition |
 | any removal (expire / clear / RST / fabric-cancel / take_synced_local) | `remove_entry` success path (the sole removal sink) | decrement when counted |
 | in-place HA promote synced→local | `update_session` promote branch (`mod.rs`) | transition-only (WLI→local increments; counted import→local none) |
-| in-place HA demote local→synced | `demote_owner_rg` | transition-only (WLI→SyncImport increments; counted local→SyncImport none) |
+| in-place HA demote local→synced | `demote_owner_rg` | transition-only, by the keyed predicate: a row that becomes a charged `SyncImport` copy increments, a counted local row that becomes an uncharged copy decrements (#18640) |
+| worker launch | `set_session_limit_shard` | rebuild the counts from the slab under the new (rank, width) |
 
 Removals are structurally exhaustive through `remove_entry`, so a future
 delete site cannot forget the decrement; `remove_entry`'s decrement uses the
@@ -2486,7 +2994,9 @@ independently per worker and ingress zone. The unconfigured default is
 `source-ip-based <n>` replaces 4096 with `<n>` on each worker. With RSS
 spreading flows across N workers, the effective admitted cap is approximately
 `per_worker_limit × N`. A `WorkerLocalImport` replica of one logical flow
-does not add another slot on every sibling.
+does not add another slot on every sibling, and neither does a fanned-out HA
+`SyncImport` copy (#18640), so the same bound holds on a standby after
+failover.
 
 For example, on a 6-worker loss-userspace cluster, the default allows at most
 approximately 24,576 sessions from one source IP in one ingress zone if RSS

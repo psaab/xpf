@@ -920,7 +920,15 @@ upgrade --rolling` secondary-first. This is the default since #9486,
 validated live on the loss userspace cluster. `XPF_DEPLOY_FAST=1` keeps the
 raw push+restart path for the dev inner loop. The deb path preserves node
 config: it never pushes `CLUSTER_CONF`, clears the config DB, or pushes
-Phase-0 artifacts (upgrades must never wipe operator config).
+Phase-0 artifacts (upgrades must never wipe operator config). After the
+install and before the cut, the deb path removes raw-deploy
+`/etc/systemd/system` copies of `xpfd.service` and the two boot-barrier
+units. Those copies shadow the packaged units, so without the removal the cut
+and every later stop would run under the raw push's stale settings. It runs
+`daemon-reload`, asserts that each loaded unit is the packaged file with
+`LoadState=loaded` (rolling the copy back from `/var/lib` if not), and never
+restarts a unit outside the cut. A barrier the deployed deb does not ship is
+skipped with a warning (#18544; `docs/test_env.md`).
 
 ## Host-wide upgrade lock (#1965)
 
@@ -1156,6 +1164,28 @@ within the deadline, the rolling driver fails back and ABORTS WITHOUT
 cutting. A peer that cannot take over therefore never leads to a cut — at
 worst the drain times out and the local node is restored to forwarding.
 
+**An RG0 primary that refused a peer push (#18610).** After a dual-active
+window the RG0 primary may have refused the peer's config push as the
+authority. Before #18610 that refusal left the primary reading `Transfer
+ready: no (standby config stale ...)` on every RG and carrying `CF` for as
+long as it stayed primary, so `xpfd upgrade --rolling` started there aborted
+with "peer is NOT takeover-ready". A build with #18610 does not count that
+refusal against itself while it is the authority. If the stuck primary still
+runs an older build (a mixed-version roll from a release without the fix),
+demote it first: `request chassis cluster failover redundancy-group 0 node
+<peer>`. The new primary pushes its config, the old primary applies it, reads
+`Transfer ready: yes`, and the roll can start. That push REPLACES the old
+primary's config with the peer's, so first check `show chassis cluster
+information` (`Last config generation refused as RG0 authority`) and the
+journal Warn, which says whether the refused config differed from the active
+one; if it did, re-apply any change you need after the failover.
+The losing node had the mirror symptom: its own refused push left a #9569 send
+debt, so a roll started THERE refused with the stale-config gate. A primary with
+#18610 re-pushes its config after refusing (at most once per 10 s), which the
+loser applies, clearing the debt. Against an older primary, a new commit on the
+primary clears it: it is pushed under a new generation, which the loser
+applies.
+
 ## Session-sync wire version on the in-place path (#7990)
 
 The LANE-1 in-place rolling path had **no session-sync version check at all**
@@ -1255,6 +1285,26 @@ reconcile above (extend it only for maps whose loss is truly safe).
   staged node restarts, it waits for sync to re-establish before resetting
   failover and rejoining. This is not an unplanned-failover timing promise
   (`pkg/upgrade/rolling.go:92-108,366-375`).
+- **Direct-VIP leftovers from a pre-#18573 xpf.** From #18573, xpf prunes
+  only the RETH VIPs it can prove it installed, meaning addresses that carry
+  `IFA_PROTO 0xbf` (`pkg/vipstamp`). An address a pre-#18573 binary left
+  behind after a renumber carries no stamp, so the upgraded daemon never
+  removes it. The same is true of an address a renumber leaves behind when
+  it is committed while the RG owner still runs the old binary, for example
+  mid rolling upgrade: the old owner keeps the old address unstamped, and its
+  drain removes only the configured set. Such an address:
+  - stays on the netdev, so the owner keeps answering ARP for it;
+  - can still be the interface-SNAT source, because the userspace snapshot
+    filter also skips unstamped addresses. This is the udp LAN-to-1.1.1.1
+    0/30 blackhole measured in #18573.
+
+  To find one, run `ip -d addr show dev <reth netdev>` (for example
+  `ge-0-0-2.50`). Look for an address with no `proto 0xbf` that
+  `show configuration interfaces <reth> unit <n>` no longer lists. Remove it
+  with `ip addr del` on the node that holds it, or reboot that node: RETH
+  VIPs are not persisted, so a reboot clears it. A configured VIP that an
+  older xpf installed needs nothing; the first owner pass after the upgrade
+  stamps it with `NLM_F_REPLACE`.
 - Kernel/OS upgrades are #1930; a signed/hosted apt repo is #1924.
 
 ### APT package-selection boundary (#10848)
@@ -1366,7 +1416,7 @@ OFF-BOX address reachable over a dataplane interface** — the far end of a
 transit link, or the HA peer's dataplane address.
 
 The management classifier is `config.IsManagementIfName`, the #7515 SSOT already
-shared by the daemon's `vrf-mgmt` binder, the networkd `VRF=` emitter and the
+shared by the daemon's `vrf-mgmt` binder, the networkd `KeepMaster=yes` emitter and the
 ip-monitoring next-hop validator. It is injected by the caller for the same
 reason `HelperStatus` is, and a `nil` classifier is "no information" rather than
 "ineligible" — but both production constructors wire it, and tests bind that

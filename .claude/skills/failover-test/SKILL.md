@@ -191,11 +191,11 @@ the local defaults, `CLUSTER_ENV=` the same via make):
 ```
 loss-userspace-cluster:
   FW0=loss:xpf-userspace-fw0  FW1=loss:xpf-userspace-fw1
-  HOST=loss:cluster-userspace-host  TARGET=172.16.80.200
+  HOST=loss:cluster-userspace-host  TARGET=$IPERF_TARGET4 (172.16.80.202, #18576)
   CLI=/usr/local/sbin/cli
 local-cluster:
   FW0=xpf-fw0  FW1=xpf-fw1
-  HOST=cluster-lan-host  TARGET=172.16.80.200
+  HOST=cluster-lan-host  TARGET=$IPERF_TARGET4 (172.16.100.200, the cluster-env.sh default)
 ```
 
 Mutating and measurement commands belong inside the enclosing lock cell. The
@@ -250,7 +250,7 @@ for node in "$FW0" "$FW1"; do
     echo "=== $node ==="
     sg incus-admin -c "incus exec $node -- cli -c 'show chassis cluster status'"
     sg incus-admin -c "incus exec $node -- cli -c 'show chassis cluster data-plane statistics'" | grep -E 'SNAT|Session|Forward|flow cache|installed'
-    sg incus-admin -c "incus exec $node -- cli -c 'show security flow session destination-prefix 172.16.80.200/32'" | head -10
+    sg incus-admin -c "incus exec $node -- cli -c 'show security flow session destination-prefix ${IPERF_TARGET4}/32'" | head -10
 done
 ```
 

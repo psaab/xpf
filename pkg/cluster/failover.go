@@ -508,7 +508,7 @@ func (m *Manager) ResetFailover(rgID int) error {
 	// entry (reqID + peer snapshot together, #17125), so a later abort
 	// restore for a pre-reset reqID then no-ops on reqID mismatch.
 	m.clearPeerTransferOutOverrideLocked(rgID)
-	delete(m.abortedPeerTransferReqID, rgID)
+	m.clearAbortedPeerTransferLocked(rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
 	delete(m.localTransferOutHoldUntil, rgID)
 	// Drop any armed remote transfer-out lease for this RG, mirroring the
@@ -564,6 +564,8 @@ type operatorHoldSnapshot struct {
 	hasOverride     bool
 	abortedReqID    uint64
 	hasAborted      bool
+	abortedFence    abortedPeerTransferFence
+	hasAbortedFence bool
 	generation      uint64
 }
 
@@ -596,6 +598,7 @@ func (m *Manager) snapshotOperatorHoldLocked(rgID int) operatorHoldSnapshot {
 	}
 	if reqID, ok := m.abortedPeerTransferReqID[rgID]; ok {
 		snap.abortedReqID, snap.hasAborted = reqID, true
+		snap.abortedFence, snap.hasAbortedFence = m.abortedPeerTransferFence[rgID]
 	}
 	return snap
 }
@@ -669,6 +672,11 @@ func (m *Manager) restoreOperatorHoldLocked(rgID int, snapshot operatorHoldSnaps
 	}
 	if snapshot.hasAborted {
 		m.abortedPeerTransferReqID[rgID] = snapshot.abortedReqID
+		if snapshot.hasAbortedFence {
+			m.abortedPeerTransferFence[rgID] = snapshot.abortedFence
+		} else {
+			delete(m.abortedPeerTransferFence, rgID)
+		}
 	}
 	if !snapshot.armed {
 		return
@@ -689,6 +697,46 @@ func (m *Manager) restoreOperatorHoldLocked(rgID int, snapshot operatorHoldSnaps
 	if oldState != rg.State {
 		m.sendEvent(rg.GroupID, oldState, rg.State, eventReason)
 	}
+}
+
+// clearAbortedPeerTransferLocked clears the request marker and its lifetime
+// mode together. Caller holds m.mu.
+func (m *Manager) clearAbortedPeerTransferLocked(rgID int) {
+	delete(m.abortedPeerTransferReqID, rgID)
+	delete(m.abortedPeerTransferFence, rgID)
+}
+
+// preActivateTransfer runs the #18559 make-before-break pre-activation for
+// the data RGs (ID > 0) in rgIDs and returns the matching release, or nil
+// when there is nothing to release: no hook, no data RG, or the activation
+// failed. A failed activation is logged and the transfer proceeds without
+// it — the pre-#18559 break-before-make sequence, never a refusal. Called
+// WITHOUT m.mu: the hook performs dataplane I/O.
+func (m *Manager) preActivateTransfer(activate func([]int) error, release func([]int), rgIDs []int) func() {
+	if activate == nil {
+		return nil
+	}
+	data := make([]int, 0, len(rgIDs))
+	for _, rgID := range rgIDs {
+		if rgID > 0 {
+			data = append(data, rgID)
+		}
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	if err := activate(data); err != nil {
+		slog.Warn("cluster: transfer pre-activation failed; proceeding break-before-make",
+			"rgs", data, "err", err)
+		if release != nil {
+			release(data)
+		}
+		return nil
+	}
+	if release == nil {
+		return nil
+	}
+	return func() { release(data) }
 }
 
 // RequestPeerFailover asks the peer to transfer the given RG out of primary,
@@ -735,6 +783,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	transferReadyFn := m.transferReadinessFn
 	peerAlive := m.peerAlive
 	localCommitReadyFn := m.localTransferCommitReadyFn
+	preActivateFn, preReleaseFn := m.transferPreActivateFn, m.transferPreReleaseFn
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
@@ -764,13 +813,21 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 			)
 		}
 	}
+	// #18559: open local forwarding before the owner demotes, so the
+	// traffic it fabric-redirects after its #5640 fence has somewhere to go.
+	// Deferred release AFTER the reservation release above is registered, so
+	// it runs first on return: by then a successful transfer has applied
+	// rg_active through the ordinary promotion and the release is a no-op.
+	if release := m.preActivateTransfer(preActivateFn, preReleaseFn, []int{rgID}); release != nil {
+		defer release()
+	}
 	reqID, err := fn(rgID)
 	if err != nil {
 		// #16592: the owner may already be holding without a successful
 		// fence. Retain the abort marker before releasing our reservation
 		// and send the bound abort. The local manual hold is unchanged.
 		if reqID != 0 {
-			m.abortRequestedPeerFailover(rgID, reqID, operatorHoldSnapshot{}, abortFn)
+			m.abortRequestedPeerFailover(rgID, reqID, operatorHoldSnapshot{}, abortFn, true)
 		}
 		return err
 	}
@@ -792,6 +849,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 		// caller and must not replay here.
 		hold.override, hold.hasOverride = transferOverride{}, false
 		hold.abortedReqID, hold.hasAborted = 0, false
+		hold.abortedFence, hold.hasAbortedFence = abortedPeerTransferFence{}, false
 		rg.ManualFailover = false
 		rg.forcedSecondary = false
 		rg.ManualFailoverAt = time.Time{}
@@ -802,17 +860,17 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 		// The commit applies the transfer override before running the
 		// election. Roll back the reqID-matched override and restore the
 		// preexisting local manual-failover hold on every commit failure.
-		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn)
+		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn, false)
 		return err
 	}
 	if localCommitReadyFn != nil {
 		if err := localCommitReadyFn([]int{rgID}); err != nil {
-			m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn)
+			m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn, false)
 			return err
 		}
 	}
 	if err := commitFn(rgID, reqID); err != nil {
-		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn)
+		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn, false)
 		return err
 	}
 	m.notePeerTransferCommitted(rgID)
@@ -842,7 +900,7 @@ func (m *Manager) commitRequestedPeerFailover(rgID int, reqID uint64) error {
 	}
 
 	m.applyPeerTransferOutOverrideLocked(rgID, reqID)
-	delete(m.abortedPeerTransferReqID, rgID)
+	m.clearAbortedPeerTransferLocked(rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
 	delete(m.localTransferOutHoldUntil, rgID)
 	peerGroup := m.peerGroups[rgID]
@@ -861,12 +919,20 @@ func (m *Manager) commitRequestedPeerFailover(rgID int, reqID uint64) error {
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold operatorHoldSnapshot, abortFn func(rgID int, reqID uint64) error) {
+func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold operatorHoldSnapshot, abortFn func(rgID int, reqID uint64) error, fenceUntilOwnerPrimary bool) {
 	// #15164: record the aborted reqID BEFORE any election can re-run, so a
 	// heartbeat that still advertises the owner's secondary-hold under this
 	// request cannot re-promote us via "Peer transfer out". Then notify the
 	// owner (best-effort, outside m.mu) so it restores promptly; its lease
 	// remains the fallback if the frame is lost.
+	// #17713: a failed pre-commit request retains its promotion fence through
+	// ordinary-secondary owner-restoration heartbeats. Those heartbeats do not
+	// prove ownership restoration when ordinary election leaves a higher-
+	// priority requester as the only eligible primary. The marker resolves
+	// only after a newer PRIMARY heartbeat follows an observed hold, a later
+	// transfer is acknowledged, or reset/peer loss/RG removal ends the epoch.
+	// Post-commit aborts use the legacy hold-only expiry because they belong to
+	// a different transfer epoch.
 	//
 	// #16818: the election below must run UNCONDITIONALLY. The commit may
 	// already have promoted this node, and the #16592 aborted-marker arm in
@@ -878,11 +944,22 @@ func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold operat
 	// ran no election at all — so RequestPeerFailover reported failure
 	// while this node kept the RG. Demoting here, under the marker and
 	// before the abort frame can restore the owner, also closes the race
-	// where the owner's restored (non-hold) heartbeat expires the marker
-	// in applyTransferCommitOverridesOnPeerStateLocked before any election
-	// has applied it.
+	// where the restored heartbeat arrives before any election applied it.
 	m.mu.Lock()
 	m.abortedPeerTransferReqID[rgID] = reqID
+	if fenceUntilOwnerPrimary {
+		peerFence := abortedPeerTransferFence{}
+		if peerGroup, ok := m.peerGroups[rgID]; ok {
+			peerFence = abortedPeerTransferFence{
+				heartbeatSession:  peerGroup.heartbeatSession,
+				heartbeatSequence: peerGroup.heartbeatSequence,
+				sawHold:           peerGroup.State == StateSecondaryHold,
+			}
+		}
+		m.abortedPeerTransferFence[rgID] = peerFence
+	} else {
+		delete(m.abortedPeerTransferFence, rgID)
+	}
 	if m.restorePeerTransferOutOverrideLocked(rgID, reqID) {
 		delete(m.peerTransferCommitGraceUntil, rgID)
 	}
@@ -901,7 +978,7 @@ func (m *Manager) notePeerTransferCommitted(rgID int) {
 	defer m.mu.Unlock()
 
 	m.clearPeerTransferOutOverrideLocked(rgID)
-	delete(m.abortedPeerTransferReqID, rgID)
+	m.clearAbortedPeerTransferLocked(rgID)
 	if rg := m.groups[rgID]; rg != nil {
 		rg.transferCommitRolePinned = true
 		rg.transferCommitRole = StatePrimary
@@ -966,9 +1043,47 @@ func (m *Manager) ArmRemoteTransferOutLease(rgIDs []int, reqID uint64) {
 		}
 		m.remoteTransferOutLeaseUntil[rgID] = until
 		m.remoteTransferOutLeaseReqID[rgID] = reqID
+		if m.remoteTransferOutLeaseChannel == nil {
+			m.remoteTransferOutLeaseChannel = make(map[int]transferChannelBinding)
+		}
+		binding := m.captureTransferChannelLocked()
+		m.remoteTransferOutLeaseChannel[rgID] = binding
 		slog.Info("cluster: armed remote transfer-out lease",
-			"rg", rgID, "req_id", reqID, "expires_in", m.remoteTransferOutLease.String())
+			"rg", rgID, "req_id", reqID, "expires_in", m.remoteTransferOutLease.String(),
+			"bound_to_sync_connection", binding.src != nil)
 	}
+}
+
+// RemoteTransferOutStillHeld reports whether every RG in rgIDs is still parked
+// for the peer's request reqID: the remote transfer-out lease is armed for
+// reqID and the manual hold is still set, so the RG is not primary (#18521
+// review round 3). The applied-ack is sent only while this holds
+// (SessionSync.TransferOutStillHeld). It closes the window where the hold's
+// connection binding broke during a slow demotion actuation, the 2s rescue
+// re-promoted this owner, and the actuation barrier — which resolves on the
+// queued demotion edge regardless of the Manager's later state — let
+// "applied" go out anyway, promoting the requester beside it. What remains
+// is the ack's own flight: a binding that breaks after the ack is sent, while
+// the requester has not yet promoted and still advertises its hold, can let
+// the rescue re-promote this owner until the requester's commit is refused
+// (FinalizePeerTransferOut) and it aborts.
+func (m *Manager) RemoteTransferOutStillHeld(rgIDs []int, reqID uint64) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(rgIDs) == 0 {
+		return false
+	}
+	// The hold is the whole test of "not primary": ManualFailover elects the
+	// RG out of primary in the same critical section that sets it, and every
+	// path that re-promotes it (the rescue, an abort, a reset) clears it.
+	for _, rgID := range rgIDs {
+		rg, ok := m.groups[rgID]
+		cur, leased := m.remoteTransferOutLeaseReqID[rgID]
+		if !ok || !leased || cur != reqID || !rg.ManualFailover {
+			return false
+		}
+	}
+	return true
 }
 
 // ClearRemoteTransferOutLease disarms the lease for an RG once the transfer-out
@@ -987,6 +1102,68 @@ func (m *Manager) ClearRemoteTransferOutLease(rgID int, reqID uint64) {
 func (m *Manager) clearRemoteTransferOutLeaseLocked(rgID int) {
 	delete(m.remoteTransferOutLeaseUntil, rgID)
 	delete(m.remoteTransferOutLeaseReqID, rgID)
+	delete(m.remoteTransferOutLeaseChannel, rgID)
+}
+
+// transferChannelBinding identifies the session-sync connection set a
+// remote transfer-out request was handled on (#18521 review round 2): the
+// published sync source and its connection-slot removal generation at the
+// moment the lease was armed. src is nil when no connection was up.
+type transferChannelBinding struct {
+	src     peerSyncSource
+	gen     uint64
+	dropped bool // the binding was observed broken (logged once)
+}
+
+// captureTransferChannelLocked records the current transfer channel. It runs
+// inside OnRemoteFailover, i.e. on the receive loop of the connection that
+// delivered the request, so the connection set it captures contains that
+// connection. Caller holds m.mu.
+func (m *Manager) captureTransferChannelLocked() transferChannelBinding {
+	if m.peerSync == nil || !m.peerSync.IsConnected() {
+		return transferChannelBinding{}
+	}
+	return transferChannelBinding{src: m.peerSync, gen: m.peerSync.TransferChannelGen()}
+}
+
+// transferChannelIntactLocked reports whether the connection set captured
+// when rgID's lease was armed is still the one installed: same published
+// source, still connected, and no installed connection removed from its slot
+// since (#18521 review round 2).
+//
+// This, and not "some connection is up", is the condition under which the
+// requester's commit or abort can still reach us. Both frames are written once
+// and never re-sent; a frame queued on a connection that was then torn down
+// (a writer's write-timeout teardown, the receive watchdog, a supersede) is
+// gone, and a FRESH connection cannot deliver it. Keying the hold on
+// IsConnected let a redial that beat the owner's next election re-arm the
+// lease-long hold while the requester sat in its restored hold: no primary
+// for up to the whole lease. A broken binding returns the owner to the
+// pre-#18521 floor — the 2s dual-resign rescue and the lease expiry — which
+// fires only while the requester advertises secondary-hold or weight 0, so it
+// does not re-promote the owner over a requester that already promoted itself
+// and is waiting for its commit ACK on the new connection. It does fire while
+// the requester is still in its pre-request hold waiting for our applied-ACK;
+// RemoteTransferOutStillHeld then refuses that ACK (review round 3), leaving
+// only the window of an ACK already in flight when the binding breaks.
+//
+// Removals only: an empty slot that fills (the other fabric connecting)
+// removes nothing, so it keeps the binding. Caller holds m.mu.
+func (m *Manager) transferChannelIntactLocked(rgID int) bool {
+	b, ok := m.remoteTransferOutLeaseChannel[rgID]
+	if !ok || b.dropped || b.src == nil {
+		return false
+	}
+	if b.src == m.peerSync && m.peerSync.IsConnected() && m.peerSync.TransferChannelGen() == b.gen {
+		return true
+	}
+	b.dropped = true
+	m.remoteTransferOutLeaseChannel[rgID] = b
+	slog.Info("cluster: the session-sync connection that carried the remote transfer-out request "+
+		"is gone; its commit or abort can no longer arrive, so the owner hold falls back to the "+
+		"dual-resign rescue and the lease expiry (#18521)",
+		"rg", rgID, "req_id", m.remoteTransferOutLeaseReqID[rgID])
+	return false
 }
 
 // AbortRemoteTransferOut restores this node after an abandoned transfer-out,
@@ -1090,7 +1267,7 @@ func (m *Manager) FinalizePeerTransferOut(rgID int) error {
 	// secondary-hold here, the next heartbeat can immediately re-elect the
 	// old owner during rapid failback/failover sequences.
 	m.clearPeerTransferOutOverrideLocked(rgID)
-	delete(m.abortedPeerTransferReqID, rgID)
+	m.clearAbortedPeerTransferLocked(rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
 	m.localTransferOutHoldUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
 	if oldState != rg.State {
@@ -1309,6 +1486,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	transferReadyFn := m.transferReadinessFn
 	peerAlive := m.peerAlive
 	localCommitReadyFn := m.localTransferCommitReadyFn
+	preActivateFn, preReleaseFn := m.transferPreActivateFn, m.transferPreReleaseFn
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
@@ -1343,11 +1521,15 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 		}
 	}
 
+	// #18559: batch form of the make-before-break pre-activation above.
+	if release := m.preActivateTransfer(preActivateFn, preReleaseFn, ids); release != nil {
+		defer release()
+	}
 	reqID, err := fn(ids)
 	if err != nil {
 		// #16592: batch form of the single-RG request-ack failure above.
 		if reqID != 0 {
-			m.abortRequestedPeerFailoverBatch(ids, reqID, nil, abortFn)
+			m.abortRequestedPeerFailoverBatch(ids, reqID, nil, abortFn, true)
 		}
 		return err
 	}
@@ -1363,6 +1545,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 			// override/aborted arms must not replay here.
 			snap.override, snap.hasOverride = transferOverride{}, false
 			snap.abortedReqID, snap.hasAborted = 0, false
+			snap.abortedFence, snap.hasAbortedFence = abortedPeerTransferFence{}, false
 			holdSnapshots[rgID] = snap
 			rg.ManualFailover = false
 			rg.forcedSecondary = false
@@ -1373,17 +1556,17 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	m.mu.Unlock()
 
 	if err := m.commitRequestedPeerFailoverBatch(ids, reqID); err != nil {
-		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn)
+		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn, false)
 		return err
 	}
 	if localCommitReadyFn != nil {
 		if err := localCommitReadyFn(ids); err != nil {
-			m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn)
+			m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn, false)
 			return err
 		}
 	}
 	if err := commitFn(ids, reqID); err != nil {
-		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn)
+		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn, false)
 		return err
 	}
 	m.notePeerTransferCommittedBatch(ids)
@@ -1416,7 +1599,7 @@ func (m *Manager) commitRequestedPeerFailoverBatch(rgIDs []int, reqID uint64) er
 
 	for _, rgID := range rgIDs {
 		m.applyPeerTransferOutOverrideLocked(rgID, reqID)
-		delete(m.abortedPeerTransferReqID, rgID)
+		m.clearAbortedPeerTransferLocked(rgID)
 		delete(m.peerTransferCommitGraceUntil, rgID)
 		delete(m.localTransferOutHoldUntil, rgID)
 	}
@@ -1441,13 +1624,29 @@ func (m *Manager) commitRequestedPeerFailoverBatch(rgIDs []int, reqID uint64) er
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]operatorHoldSnapshot, abortFn func(rgIDs []int, reqID uint64) error) {
+func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]operatorHoldSnapshot, abortFn func(rgIDs []int, reqID uint64) error, fenceUntilOwnerPrimary bool) {
 	// #16818: batch form of abortRequestedPeerFailover — the election must
 	// run unconditionally so the aborted-marker arm demotes every RG the
 	// batch commit promoted, whatever snapshot the override restore left.
+	// #17713: only failed pre-commit requests retain the marker through
+	// restored secondary heartbeats; post-commit aborts use the legacy
+	// hold-only expiry.
 	m.mu.Lock()
 	for _, rgID := range rgIDs {
 		m.abortedPeerTransferReqID[rgID] = reqID
+		if fenceUntilOwnerPrimary {
+			peerFence := abortedPeerTransferFence{}
+			if peerGroup, ok := m.peerGroups[rgID]; ok {
+				peerFence = abortedPeerTransferFence{
+					heartbeatSession:  peerGroup.heartbeatSession,
+					heartbeatSequence: peerGroup.heartbeatSequence,
+					sawHold:           peerGroup.State == StateSecondaryHold,
+				}
+			}
+			m.abortedPeerTransferFence[rgID] = peerFence
+		} else {
+			delete(m.abortedPeerTransferFence, rgID)
+		}
 		if m.restorePeerTransferOutOverrideLocked(rgID, reqID) {
 			delete(m.peerTransferCommitGraceUntil, rgID)
 		}
@@ -1470,7 +1669,7 @@ func (m *Manager) notePeerTransferCommittedBatch(rgIDs []int) {
 
 	for _, rgID := range rgIDs {
 		m.clearPeerTransferOutOverrideLocked(rgID)
-		delete(m.abortedPeerTransferReqID, rgID)
+		m.clearAbortedPeerTransferLocked(rgID)
 		if rg := m.groups[rgID]; rg != nil {
 			rg.transferCommitRolePinned = true
 			rg.transferCommitRole = StatePrimary
@@ -1523,7 +1722,7 @@ func (m *Manager) FinalizePeerTransferOutBatch(rgIDs []int) error {
 		// heartbeat can still force the peer into secondary-hold and snap the
 		// RG back during rapid alternating moves.
 		m.clearPeerTransferOutOverrideLocked(rgID)
-		delete(m.abortedPeerTransferReqID, rgID)
+		m.clearAbortedPeerTransferLocked(rgID)
 		delete(m.peerTransferCommitGraceUntil, rgID)
 		m.localTransferOutHoldUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
 		if oldState != rg.State {
@@ -1674,15 +1873,35 @@ func (m *Manager) suppressPeerTimeoutForTransferCommitLocked(now time.Time) (boo
 // read/mutated through the *Manager receiver as before. Caller must hold
 // m.mu write-locked (matching the existing handlePeerHeartbeat protocol).
 func (m *Manager) applyTransferCommitOverridesOnPeerStateLocked(newPeerGroups map[int]PeerGroupState, now time.Time) {
-	// #15164: an aborted-request marker lives only while the peer still
-	// advertises the hold it was recorded against (raw wire state, before
-	// the override/grace rewrites below). Once the peer reports any other
-	// state the abort has taken effect (or been superseded) and a later,
-	// legitimate transfer-out must promote normally again.
+	// #15164: post-commit abort markers live only while the peer still
+	// advertises the hold they were recorded against. #17713 distinguishes a
+	// failed pre-commit fence: an ordinary-secondary owner-restoration
+	// heartbeat does not prove the owner reclaimed PRIMARY, so that marker
+	// remains until a newer PRIMARY follows an observed hold, a committed new
+	// transfer, reset, peer loss, or RG removal resolves the epoch.
 	for rgID := range m.abortedPeerTransferReqID {
 		peerGroup, ok := newPeerGroups[rgID]
+		fence, fenced := m.abortedPeerTransferFence[rgID]
+		if fenced {
+			if ok && peerGroup.heartbeatSession != 0 &&
+				(peerGroup.heartbeatSession != fence.heartbeatSession ||
+					peerGroup.heartbeatSequence > fence.heartbeatSequence) {
+				switch peerGroup.State {
+				case StateSecondaryHold:
+					fence.heartbeatSession = peerGroup.heartbeatSession
+					fence.heartbeatSequence = peerGroup.heartbeatSequence
+					fence.sawHold = true
+					m.abortedPeerTransferFence[rgID] = fence
+				case StatePrimary:
+					if fence.sawHold {
+						m.clearAbortedPeerTransferLocked(rgID)
+					}
+				}
+			}
+			continue
+		}
 		if !ok || peerGroup.State != StateSecondaryHold {
-			delete(m.abortedPeerTransferReqID, rgID)
+			m.clearAbortedPeerTransferLocked(rgID)
 		}
 	}
 	for rgID := range m.transferOverrides {

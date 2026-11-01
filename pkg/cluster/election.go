@@ -97,8 +97,10 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	// #16592: an aborted transfer is not authority to promote through ANY
 	// election arm. Skipping only "Peer transfer out" lets a higher-priority
 	// non-preempt requester win the subsequent "neither is primary" election
-	// on the same stale hold. Peer loss, a fresh non-hold heartbeat, reset,
-	// or a new acknowledged transfer clears this marker.
+	// on the same stale hold. Failed pre-commit fences (#17713) survive owner
+	// restoration heartbeats that report ordinary secondary and resolve only
+	// when a newer owner-primary heartbeat follows an observed hold, a later
+	// transfer commits, or an explicit reset/peer loss/RG removal ends epoch.
 	if _, aborted := m.abortedPeerTransferReqID[rg.GroupID]; aborted {
 		if rg.State == StatePrimary {
 			return electLocalSecondary, "Peer transfer aborted"
@@ -147,6 +149,48 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			m.manualFailoverRestoreWeightLocked(rg)
 			clearedManualFailover = true
 			// Fall through to normal priority/tie-break election below.
+		} else if leased && m.transferChannelIntactLocked(rg.GroupID) &&
+			!m.peerLeavingForPlannedShutdownLocked(rg.GroupID, peerGroup) {
+			// #18521: a LIVE lease means a peer-requested transfer this node
+			// demoted for is still in flight: the requester has not yet sent
+			// its commit or abort. That hold belongs to the transfer protocol,
+			// and only the protocol releases it — the matching commit
+			// (FinalizePeerTransferOut), the matching abort
+			// (AbortRemoteTransferOut), the lease expiry above, peer loss, or
+			// an operator reset. The 2s dual-resign timer below must not:
+			// it is measured from OUR demotion, while the requester can
+			// legitimately advertise secondary-hold (its own pre-request hold
+			// is released only after our applied-ACK, which waits on our
+			// demotion actuation) and then spends up to its local
+			// commit-ready window (localFailoverCommitTimeout, 3s) before the
+			// commit. A demotion that took >2s to actuate, or a commit window
+			// >2s, cleared this hold mid-transfer and let normal election
+			// re-promote the owner the requester was about to commit away
+			// from. The lease is sized above the requester's whole post-ACK
+			// window (SetRemoteTransferOutLeaseDuration), so it is the
+			// "outlives the commit window" bound, and the abort frame is the
+			// prompt path when the requester gives up.
+			//
+			// ONLY while the session-sync connection set that carried the
+			// request is still installed (transferChannelIntactLocked). Commit
+			// and abort both travel on sync and are written once: with sync
+			// down (review of #18525), or after the request's connection was
+			// torn down and a fresh one came up (round 2), a frame lost with
+			// the old connection can never arrive, and holding here would
+			// leave the RG with no primary for the rest of the lease. Then the
+			// pre-#18521 2s rescue below applies again. A requester that is
+			// still mid-commit has already promoted itself (it advertises
+			// primary, not hold or weight 0), so that rescue does not fire
+			// against it, and its commit on the new connection still lands.
+			// The rescue CAN fire while the requester still advertises its
+			// pre-request hold because it is waiting for our applied-ACK; the
+			// ACK is then refused (RemoteTransferOutStillHeld, review round
+			// 3), so the requester never promotes beside us. What remains is
+			// the ACK's own flight: a binding that breaks after "applied" is
+			// sent, before the requester has promoted, lets the rescue run
+			// while the requester promotes, until its commit is refused
+			// ("still primary locally") and it aborts.
+			return electNoChange, ""
 		} else {
 			peerResigned := peerGroup != nil && peerGroup.Weight <= 0
 			peerTransferOut := peerGroup != nil && peerGroup.State == StateSecondaryHold
@@ -171,12 +215,26 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			if !peerResigned && !peerTransferOut && !peerCommittedPrimary {
 				return electNoChange, ""
 			}
-			if time.Since(rg.ManualFailoverAt) < 2*time.Second {
+			// #18540: a peer that resigned this RG for a planned shutdown is
+			// LEAVING. The 2s guard protects a handoff this node just made from
+			// being undone by stale peer state, and the #18521 lease hold above
+			// protects a transfer the peer requested; a leaving peer will
+			// complete neither, so holding only stretches the outage to
+			// heartbeat loss. Release now, and end the lease with the hold —
+			// the transfer it bounded has been abandoned by its requester.
+			peerLeaving := m.peerLeavingForPlannedShutdownLocked(rg.GroupID, peerGroup)
+			if time.Since(rg.ManualFailoverAt) < 2*time.Second && !peerLeaving {
 				return electNoChange, ""
 			}
-			// The peer has also yielded for >2s. Clear manual failover and
-			// restore weight so normal election can promote one node.
-			slog.Info("cluster: clearing manual failover (peer also yielded)",
+			reason := "cluster: clearing manual failover (peer also yielded)"
+			if peerLeaving {
+				reason = "cluster: clearing manual failover (peer resigned for a planned shutdown)"
+				m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
+			}
+			// The peer has also yielded (for >2s, or is leaving). Clear manual
+			// failover and restore weight so normal election can promote one
+			// node.
+			slog.Info(reason,
 				"rg", rg.GroupID,
 				"peer_state", peerGroup.State.String(),
 				"peer_weight", peerGroup.Weight)

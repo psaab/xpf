@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,20 +15,22 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/feeds"
 )
 
 // #16661 (R3-A32-01): a `commit confirmed` that removes or renames a
-// dynamic-address feed can never roll back. C1 binds dyn1 to feed `malware`;
-// C2 removes/renames the feed, so C2's apply cancels the `malware` producer.
-// At fire time the #9615 check sees C1 refused feed-only, defers 24x5s waiting
-// for a producer only the rollback's own apply would restart, then enters
-// bootstrap. Fix: at fire time, before classifying a feed-only refusal whose
-// producer is absent, reconcile the feed producers FOR THE TARGET, restart
-// the bounded deferral, and let the async fetch converge (onUpdate / next
-// deferred fire). Never reach bootstrap for that refusal.
+// dynamic-address feed can leave its rollback target without a producer. C1
+// binds dyn1 to `malware`; C2 removes/renames that feed.
 //
-// Acceptance (issue): defect and rename arms apply c1-feed-target with
-// bootstrap=false; both controls unchanged.
+// #17741: restarting the target producer invokes the real feeds callback.
+// Re-applying active C2 there cancels the just-restarted producer and removes
+// its snapshot, so every timer can restart the deferral budget forever. The
+// daemon now defers that active-config callback while the target producer is
+// installed. This regression waits for the real callback to return before the
+// next timer fire, then proves the C1 producer and snapshot survived.
+//
+// Acceptance: remove and rename cases apply C1 with bootstrap=false; controls
+// remain unchanged.
 
 // feedTargetText16661 builds C1 (host c1-feed-target) via set commands so the
 // feed-server URL can point at the httptest server.
@@ -83,6 +86,10 @@ func abandonedText16661(t *testing.T, url, feedName string) string {
 		return tree.Format()
 	}
 	// C2 renames the feed malware -> feedName (same server).
+	feedPath := "/malware.txt"
+	if feedName == "malware2" {
+		feedPath = "/malware2.txt"
+	}
 	tree := &config.ConfigTree{}
 	for _, line := range []string{
 		"set system host-name c2-abandoned",
@@ -90,7 +97,7 @@ func abandonedText16661(t *testing.T, url, feedName string) string {
 		"set security zones security-zone untrust",
 		"set security dynamic-address feed-server threat url " + url,
 		"set security dynamic-address feed-server threat allow-destination 127.0.0.0/8",
-		"set security dynamic-address feed-server threat feed-name " + feedName + " path /malware.txt",
+		"set security dynamic-address feed-server threat feed-name " + feedName + " path " + feedPath,
 		"set security policies from-zone trust to-zone untrust policy p1 match source-address any",
 		"set security policies from-zone trust to-zone untrust policy p1 match destination-address any",
 		"set security policies from-zone trust to-zone untrust policy p1 match application any",
@@ -108,9 +115,10 @@ func abandonedText16661(t *testing.T, url, feedName string) string {
 }
 
 type harness16661 struct {
-	d       *Daemon
-	s       *configstore.Store
-	applied *[]string
+	d                     *Daemon
+	s                     *configstore.Store
+	applied               *[]string
+	targetCallbackSettled <-chan struct{}
 }
 
 // setup16661: real feeds.Manager against an httptest TLS feed server.
@@ -121,7 +129,13 @@ type harness16661 struct {
 // the defect rests on, so arming C2 cancels the target's producer.
 func setup16661(t *testing.T, rename bool) *harness16661 {
 	t.Helper()
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/malware2.txt" {
+			// Keep C2's renamed producer from invoking an unrelated callback;
+			// the callback under test belongs to C1's restarted malware feed.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("192.0.2.0/24\n"))
 	}))
@@ -129,8 +143,32 @@ func setup16661(t *testing.T, rename bool) *harness16661 {
 
 	s := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
 	applied := &[]string{}
+	targetCallbackSettled := make(chan struct{}, 1)
+	initialFeedCallbackSettled := make(chan struct{}, 1)
 	d := &Daemon{applySem: semaphore.NewWeighted(1), store: s, daemonCtx: context.Background()}
-	d.ensureFeedManager()
+	// Keep the real onFeedUpdate path and signal only after it returns. The
+	// timer loop waits for that signal before its next fire, so the test cannot
+	// race the callback's active-config reconciliation.
+	d.feeds = feeds.New(func() error {
+		targetFeedCallback := d.confirmTargetFeedInstallPending.Load() != 0
+		if targetFeedCallback {
+			info, ok := d.feeds.AllFeeds()["malware"]
+			targetFeedCallback = ok && info.Prefixes > 0
+		}
+		err := d.onFeedUpdate()
+		if targetFeedCallback {
+			select {
+			case targetCallbackSettled <- struct{}{}:
+			default:
+			}
+		} else {
+			select {
+			case initialFeedCallbackSettled <- struct{}{}:
+			default:
+			}
+		}
+		return err
+	})
 	d.feeds.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")})
 	pool := x509.NewCertPool()
 	pool.AddCert(server.Certificate())
@@ -172,6 +210,23 @@ func setup16661(t *testing.T, rename bool) *harness16661 {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	select {
+	case <-initialFeedCallbackSettled:
+		callbackDeadline := time.Now().Add(2 * time.Second)
+		for {
+			info, ok := d.feeds.AllFeeds()["malware"]
+			if ok && info.HasPublished && !info.PublicationDebt {
+				break
+			}
+			if time.Now().After(callbackDeadline) {
+				t.Fatalf("C1 initial callback did not settle: feed=%+v present=%v",
+					info, ok)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("C1 initial feed callback did not settle")
+	}
 	*applied = nil // discard the C1 setup apply; assertions count from the window
 
 	// Arm commit confirmed over C1 with C2, then apply C2 (cancels malware
@@ -202,7 +257,7 @@ func setup16661(t *testing.T, rename bool) *harness16661 {
 	if got := d.feedSnapshotsForConfig(mustPendingTarget16661(t, s)); len(got) != 0 {
 		t.Fatalf("premise: fire-time overlay for C1 must be empty, got %v", got)
 	}
-	return &harness16661{d: d, s: s, applied: applied}
+	return &harness16661{d: d, s: s, applied: applied, targetCallbackSettled: targetCallbackSettled}
 }
 
 func mustPendingTarget16661(t *testing.T, s *configstore.Store) *config.Config {
@@ -214,26 +269,47 @@ func mustPendingTarget16661(t *testing.T, s *configstore.Store) *config.Config {
 	return target
 }
 
+func waitForTargetFeedCallback16661(t *testing.T, h *harness16661) {
+	t.Helper()
+	select {
+	case <-h.targetCallbackSettled:
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			feed, ok := h.d.feeds.AllFeeds()["malware"]
+			if !ok || feed.Prefixes == 0 {
+				t.Fatalf("rollback-target callback settled without preserving C1 feed: feed=%+v present=%v",
+					feed, ok)
+			}
+			if feed.PublicationDebt {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("feed manager did not settle the deferred callback as publication debt")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if got := len(h.d.feedSnapshotsForConfig(mustPendingTarget16661(t, h.s))["dyn1"]); got != 1 {
+			t.Fatalf("target callback settled without a C1 snapshot: overlay size=%d", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("rollback-target feed callback did not settle: feeds=%v applied=%v",
+			h.d.feeds.AllFeeds(), *h.applied)
+	}
+}
+
 func fireUntilApplied16661(t *testing.T, h *harness16661) {
 	t.Helper()
 	gen := h.s.ConfirmGenForTesting()
-	// Fire repeatedly: first fire reconciles target producers + defers;
-	// the restarted fetch installs async; a later fire (or onUpdate-driven
-	// state) sees the snapshot and the normal rollback applies C1. Bound
-	// well above the deferral cap to prove bootstrap is never reached even
-	// past the old cap.
-	for i := 0; i < confirmRollbackFeedRetryMax+10; i++ {
+	// Wait for the real feed callback and the manager's publication-debt update
+	// to settle before the next timer fire; C2 reconciliation cannot race it.
+	for range confirmRollbackFeedRetryMax + 10 {
 		h.s.InvokeRollbackTimerForTesting(gen)
 		if !h.s.IsConfirmPending() {
 			return
 		}
-		// Give the restarted producer a chance to fetch between fires.
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			if len(h.d.feedSnapshotsForConfig(mustPendingTarget16661(t, h.s))["dyn1"]) == 1 {
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
+		waitForTargetFeedCallback16661(t, h)
+		if got := h.d.confirmFeedDeferrals[gen]; got != 1 {
+			t.Fatalf("target callback changed deferral count before next timer: got=%d, want 1", got)
 		}
 	}
 	t.Fatalf("rollback never resolved after %d fires: pending=%v applied=%v bootstrap=%v active=%q",
@@ -247,6 +323,9 @@ func assertAppliedC1NoBootstrap16661(t *testing.T, h *harness16661) {
 	}
 	if got := hostName9615(h.s); got != "c1-feed-target" {
 		t.Fatalf("store must roll back to c1-feed-target, got %q (applied=%v)", got, *h.applied)
+	}
+	if got := h.d.confirmFeedDeferrals[h.s.ConfirmGenForTesting()]; got != 0 {
+		t.Fatalf("successful rollback left deferral count=%d, want cleared", got)
 	}
 	found := false
 	for _, a := range *h.applied {
@@ -401,4 +480,77 @@ func TestFeedStillDownAfterProducerRestartStillBounded16661(t *testing.T) {
 			t.Fatalf("refused feed-down target was applied: %v", *applied)
 		}
 	}
+}
+
+// TestFeedCallbackWaitingOnApplySemRechecksRollbackTargetMarker17741 closes
+// the check-before-acquire race: the feed callback passes its fast check and
+// pauses, rollback preflight marks/restarts C1 under applySem, then the callback
+// resumes and must recheck the marker after it acquires that semaphore.
+func TestFeedCallbackWaitingOnApplySemRechecksRollbackTargetMarker17741(t *testing.T) {
+	h := setup16661(t, false)
+	appliedBefore := len(*h.applied)
+	hookReached := make(chan struct{})
+	resumeCallback := make(chan struct{})
+	var hookOnce, releaseOnce sync.Once
+	releaseCallback := func() { releaseOnce.Do(func() { close(resumeCallback) }) }
+	t.Cleanup(releaseCallback)
+	h.d.preApplyHookForTest = func() {
+		hookOnce.Do(func() {
+			close(hookReached)
+			<-resumeCallback
+		})
+	}
+	callbackDone := make(chan error, 1)
+	go func() { callbackDone <- h.d.onFeedUpdate() }()
+	select {
+	case <-hookReached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("feed callback did not pass its marker check and reach the pre-apply hook")
+	}
+
+	gen := h.s.ConfirmGenForTesting()
+	h.s.InvokeRollbackTimerForTesting(gen)
+	if got := h.d.confirmTargetFeedInstallPending.Load(); got != gen {
+		releaseCallback()
+		t.Fatalf("rollback preflight marker = %d, want pending generation %d", got, gen)
+	}
+	releaseCallback()
+	select {
+	case err := <-callbackDone:
+		if err == nil {
+			t.Fatal("callback waiting on applySem re-applied active C2 instead of deferring")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("callback did not settle after rollback preflight released applySem")
+	}
+	if got := len(*h.applied); got != appliedBefore {
+		t.Fatalf("waiting feed callback applied another config: before=%v after=%v",
+			(*h.applied)[:appliedBefore], *h.applied)
+	}
+
+	waitForTargetFeedCallback16661(t, h)
+	if got := h.d.confirmFeedDeferrals[gen]; got != 1 {
+		t.Fatalf("callback completion changed deferral count before next timer: got=%d, want 1", got)
+	}
+	h.s.InvokeRollbackTimerForTesting(gen)
+	assertAppliedC1NoBootstrap16661(t, h)
+}
+
+// TestStartupActiveApplyIsNotDeferredByRollbackTargetMarker17741 protects
+// the generic applyActiveConfigResult caller used during daemon bringup:
+// rollback-feed deferral must stay specific to feed callbacks.
+func TestStartupActiveApplyIsNotDeferredByRollbackTargetMarker17741(t *testing.T) {
+	h := setup16661(t, false)
+	gen := h.s.ConfirmGenForTesting()
+	h.d.confirmTargetFeedInstallPending.Store(gen)
+	before := len(*h.applied)
+
+	if err := h.d.applyActiveConfigResult(); err != nil {
+		t.Fatalf("startup-style active apply was deferred: %v", err)
+	}
+	if got := len(*h.applied); got != before+1 || (*h.applied)[got-1] != "c2-abandoned" {
+		t.Fatalf("startup-style apply did not reconcile active C2: before=%v after=%v",
+			(*h.applied)[:before], *h.applied)
+	}
+	h.d.confirmTargetFeedInstallPending.CompareAndSwap(gen, 0)
 }

@@ -196,6 +196,17 @@ type feedState struct {
 	// count/hash in ShrinkHighWater.Prefixes.
 	epochContentPrefixes []string
 	epochContentHash     [32]byte
+	// epochRebootstrapPending is armed only when RestoreShrinkHighWater
+	// (or an Apply seed from shrinkHistory) restores a remembered
+	// high-water baseline for this feed WITHOUT a usable epoch —
+	// count-only, corrupt-digest, or dropped-legacy shapes (#16651).
+	// It authorizes exactly one epoch re-bootstrap: the first install
+	// that passes every guard establishes and persists the epoch. An
+	// empty epoch without this marker is an ordinary live feed that
+	// was never restored epoch-less (or a true bootstrap handled
+	// separately) and must NOT be rebased by an ordinary unacknowledged
+	// install (#17690: an ordinary install never rebases — #14395).
+	epochRebootstrapPending bool
 
 	// The active refused candidate and one-shot acknowledgement are runtime
 	// status, not persisted across a producer replacement. The refusal counter,
@@ -668,6 +679,10 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 			if len(history.epochPrefixes) > 0 {
 				fs.epochContentPrefixes = append([]string(nil), history.epochPrefixes...)
 				fs.epochContentHash = history.epochHash
+			} else {
+				// #17690: remembered baseline restored without a usable
+				// epoch — authorize exactly one guarded re-bootstrap.
+				fs.epochRebootstrapPending = true
 			}
 		}
 		newFeeds[p.name] = fs
@@ -717,6 +732,7 @@ func carryForwardSnapshot(dst, src *feedState) {
 	dst.shrinkHighWaterHash = src.shrinkHighWaterHash
 	dst.epochContentPrefixes = append([]string(nil), src.epochContentPrefixes...)
 	dst.epochContentHash = src.epochContentHash
+	dst.epochRebootstrapPending = src.epochRebootstrapPending
 	// Carry the last confirmed publish state across a same-name producer
 	// replacement. The daemon's apply re-enforces a carried snapshot; matching
 	// content stays no-thrash, while an existing content mismatch remains
@@ -1685,18 +1701,22 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	// the acknowledged set (mirrors the existing acknowledged-shrink epoch
 	// semantics).
 	//
-	// #16651: when NO epoch exists — a legacy count-only record, a record
-	// whose epoch digest was dropped as corrupt, or a pre-#15075 rotated
-	// record dropped on restore — and this candidate has passed every
-	// guard above (including the restored count high-water), the install
-	// re-establishes the epoch from the installed set and persists it.
+	// #16651/#17690: when a REMEMBERED baseline was restored WITHOUT a
+	// usable epoch — a legacy count-only record, a record whose epoch
+	// digest was dropped as corrupt, or a pre-#15075 rotated record
+	// dropped on restore (epochRebootstrapPending, armed at restore/seed
+	// time) — and this candidate has passed every guard above (including
+	// the restored count high-water), the install re-establishes the
+	// epoch from the installed set and persists it, exactly once.
 	// Keying this on !hasRememberedBaseline left every such feed
 	// epoch-less forever: churn then stayed predecessor-only (the empty
 	// epoch fell back to fs.prefixes per install), and the count-only
-	// record was re-persisted on each restart. This arm only fires while
-	// the epoch is empty, so it cannot move a live epoch.
+	// record was re-persisted on each restart. An empty epoch WITHOUT
+	// the restore marker is not this shape: an ordinary unacknowledged
+	// install on such a live feed never manufactures an epoch (#14395).
 	epochRebased := false
-	if (wasBootstrap && !hasRememberedBaseline) || guardBypass || len(fs.epochContentPrefixes) == 0 {
+	restoredEpochlessRebootstrap := fs.epochRebootstrapPending && len(fs.epochContentPrefixes) == 0
+	if (wasBootstrap && !hasRememberedBaseline) || guardBypass || restoredEpochlessRebootstrap {
 		fs.epochContentPrefixes = append([]string(nil), res.prefixes...)
 		fs.epochContentHash = res.hash
 		epochRebased = true
@@ -1704,6 +1724,9 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 			fs.shrinkHighWaterCount = newCount
 			fs.shrinkHighWaterHash = res.hash
 		}
+	}
+	if epochRebased || fs.hasSnapshot {
+		fs.epochRebootstrapPending = false
 	}
 	if epochRebased {
 		m.rememberShrinkEpochLocked(fs.name, fs.shrinkHighWaterCount, fs.shrinkHighWaterHash, fs.epochContentPrefixes, fs.epochContentHash)

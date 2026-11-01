@@ -411,17 +411,23 @@ sg incus-admin -c 'incus exec xpf-fw1 -- ip addr show ge-7-0-1.50' | grep '172.1
 
 The checked-in cluster config uses the compiler-default private-RG mode (no
 `no-private-rg-election`), so RETH VRRP is suppressed. Its heartbeat staleness
-is 200ms × 5 = 1s. While connected sync has peer traffic ≤2s old, the guard
-suppresses heartbeat timeout, capped at 5s; silent node death can take roughly
-1.0–2.2s from phase timing, while a process crash that closes sync falls
-through at the raw threshold. The old ~60ms/30ms-VRRP failover text describes a
-legacy test path, not this default. The prior ~150ms recovery expectation is
-removed; no source-backed end-to-end recovery bound exists
-(`pkg/config/compiler_system.go:3132-3137`;
-`pkg/cluster/heartbeat.go:61-65,1916-1960`;
-`pkg/cluster/heartbeat_manager.go:790-832`;
-`pkg/daemon/daemon_ha_sync.go:170-206`;
-`docs/ha-cluster.conf:70-72`).
+is 200ms × 5 = 1s, checked every quarter interval (50 ms, #18639). A
+hard-crashed peer that has acked a sync-level heartbeat does not answer the
+#18570 liveness probe and is declared at the threshold, about 1.0–1.05 s after
+its last heartbeat (0.8–1.05 s after the crash), provided no frame it queued
+before it died is handled after the probe; a peer without ack support keeps
+the sync-recency rule (max(threshold, remaining 2 s sync window) plus a check
+period, capped at 5 s); a process crash that sends FIN falls through at the
+plain threshold. `show chassis cluster information` ("Liveness probes sent:
+... peer acks probes: yes|no") shows which case applies. Activation adds about
+0.34–0.44 s before traffic resumes.
+The old ~60ms/30ms-VRRP failover text describes a legacy test path, not this
+default. The prior ~150ms recovery expectation is removed; no source-backed
+end-to-end recovery bound exists (`compileChassis` in
+`pkg/config/compiler_chassis.go`; `heartbeatReceiver.checkTimeout` in
+`pkg/cluster/heartbeat.go`; `syncSuppressesPeerTimeoutLocked` in
+`pkg/cluster/heartbeat_suppress.go`; `handlePeerTimeout` in
+`pkg/cluster/heartbeat_manager.go`; `docs/ha-cluster.conf:70-72`).
 
 ```bash
 # 15s rapid ping probe spans the failover guard window and restart recovery.
@@ -681,3 +687,71 @@ that a REJECT hard-fails without stopping the daemon or pushing into
 each deploy path precedes every destructive step in its function. Moving the
 call below `systemctl stop xpfd` keeps the function correct and makes the gate
 useless, so that ordering is asserted rather than commented.
+
+### Deb-deploy unit shadow reconcile (#18544)
+
+The raw paths push `test/incus/xpfd.service` and the two boot barriers
+(`scripts/image/xpf-{transit,input}-closed.service`) into
+`/etc/systemd/system`. The `.deb` installs its own copy of all three under
+`/usr/lib/systemd/system` (`debian/rules`; `xpfd.service` also gains an
+`ExecStartPre` verify-dataplane line). systemd prefers `/etc`, so on a node
+that was raw-deployed even once, the `/etc` copies shadowed the packaged units
+through every later deb deploy. The #1917 `10-xpf-version.conf` drop-in still
+pinned xpfd's ExecStart/ExecStartPre, but every other setting came from the
+raw push, however old. On 2026-10-30 the loss and tcp nodes ran xpfd with
+`KillMode=control-group` under debs that ship `KillMode=mixed` (#18213). As a
+result, systemd SIGTERMed the helper alongside xpfd, and xpfd's orderly
+shutdown could not clear `rg_active`. loss fw0's barrier copies were also
+older than the packaged barriers.
+
+The deb path (`deploy_vm_deb`) now calls `deploy_reconcile_unit_shadows`
+after the deb install and before the `xpfd upgrade --rolling` cut. For each of
+`xpfd.service`, `xpf-transit-closed.service` and `xpf-input-closed.service`
+it:
+
+- skips a boot barrier, with a warning, when the deployed deb ships no
+  packaged copy of it. A deb pinned through `XPF_DEPLOY_DEB_PATH` may predate
+  the barriers (#9852, #10751), and the raw-pushed `/etc` copies are then the
+  only ones. A copy that an interrupted earlier run parked is put back first,
+  into a free `/etc` path only, because it is then the unit's only copy. An
+  occupied path is never overwritten, and the warning names the parked copy.
+  `xpfd.service` is required: with no packaged copy, the deploy keeps the
+  `/etc` file and hard-fails;
+- parks a regular-file `/etc/systemd/system/<unit>` in
+  `/var/lib/xpf-deploy-unit-shadow/`. That is persistent, so a reboot between
+  the move and the check cannot lose it, and it is outside every unit search
+  path. This leaves the node like a production install, where the unit
+  shipped in the deployed deb governs. It does not re-sync from the worktree,
+  because a pinned `XPF_DEPLOY_DEB_PATH` deb may come from a different tree;
+- runs `systemctl daemon-reload`, also when the file is already gone but
+  systemd still has it loaded;
+- ASSERTS the loaded unit POSITIVELY: `LoadState=loaded`, and `FragmentPath`
+  is the unit's file under `/usr/lib/systemd/system` or
+  `/lib/systemd/system`. That catches a unit the `/etc` copy used to outrank
+  (`/run/systemd/system`, `/usr/local/lib/systemd/system`, a runtime mask) and
+  a packaged file systemd rejects. On failure it puts back ANY parked copy,
+  including one left by an earlier interrupted run, as long as the `/etc` path
+  is free; it never overwrites an occupied one. Then it reloads and
+  hard-fails. The error names the parked copy and says whether that reload
+  worked;
+- after the check passes, drops the parked copy, and re-points every install
+  link (`/etc/systemd/system/*/<unit>`: the `WantedBy=` `.wants` and
+  `RequiredBy=` `.requires` links, e.g. `sysinit.target.wants`,
+  `systemd-networkd.service.requires`, `xpfd.service.requires`) that still
+  targets the removed file. systemd adds those dependencies by link name, so
+  enablement and the barriers' `RequiredBy=` hold either way; re-pointing
+  makes the links match a package install;
+- never removes a symlink at the `/etc` path. A `/dev/null` link is a mask
+  (the `xpf-deploy.py` #7559 hold); it governs on purpose, so the deploy
+  leaves it and warns. Any other link is an alias, and the positive check
+  decides: one that systemd does not resolve to the packaged file fails the
+  deploy;
+- never starts, stops or restarts a unit. The new settings first apply at the
+  unit's next stop/start: for xpfd, the cut's stop, which is the deploy's
+  existing controlled restart; for the barriers, the next boot. A second run
+  changes nothing.
+
+A later raw deploy (`XPF_DEPLOY_FAST=1`) pushes the `/etc` copies again,
+which is that path's contract. Check a node with
+`systemctl show xpfd xpf-transit-closed xpf-input-closed -p FragmentPath -p KillMode`.
+After a deb deploy, each `FragmentPath` is under `/usr/lib/systemd/system`.

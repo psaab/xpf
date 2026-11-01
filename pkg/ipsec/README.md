@@ -185,12 +185,13 @@ the apply path pays no fsync (the file is regenerated on every apply).
   real 6.0.5 captures, including a local-address move that keeps every name.
 - `ConnectionNamesForVPN(cfg *config.Config) map[string]string`,
   `RenderedVPNSet(cfg *config.Config) map[string]bool` — `policy.go` (#15024).
-  `ConnectionNamesForVPN` maps each surviving VPN to its swanctl connection
-  name (the gateway name for a named-gateway group, else the VPN name —
-  or the `inline-<name>` prefixed name when an inline VPN's name collides
-  with a referenced gateway object, #16676); `RenderedVPNSet` is the
-  VPN-keyed set built on it, so selector fences count every grouped
-  member. Nil means the render failed (UNKNOWN — fail closed).
+  name (the gateway name for a named-gateway group, else the VPN name or
+  a collision-escaped `inline-`-prefixed name for an inline VPN. Additional
+  prefixes are added if needed to avoid an already-claimed connection key,
+  including a gateway named `inline-<name>` (#16676/#17731));
+  `RenderedVPNSet` is the VPN-keyed set built on it, so selector fences
+  count every grouped member. Nil means the render failed (UNKNOWN — fail
+  closed).
 - `SANameIndex`, `BuildSANameIndex(ipsecCfg) SANameIndex`,
   `(SANameIndex).VPNs(saName) []string`, `(SANameIndex).Collisions() []string` —
   `policy.go`. The inverse of the render (#9511): every SA name
@@ -411,12 +412,14 @@ all files stay in `package ipsec`, so the public API is unchanged.
   made a peer that runs both VPNs as children of one IKE SA reject the
   second child's traffic selectors (TS_UNACCEPTABLE). Inline
   literal/hostname and empty endpoints keep per-VPN connections — except
-  when an inline VPN's name equals a gateway object another VPN
-  references (#16676): strict commit rejects that naming, and the
-  tolerant render separates it as `inline-<name>` so each peer keeps
-  its own connection instead of folding into the gateway's. Child SA
-  names are unchanged, so `--initiate --child` and the #9624 gate are
-  unaffected; the IKE SA name in `--list-sas` is now the gateway name.
+  when an inline VPN's name equals a gateway object another VPN references
+  (#16676): strict commit rejects that naming, while tolerant rendering
+  assigns connection keys config-wide, reserving gateway names before
+  prefixing inline names until each key is unique (#17731). Thus a gateway
+  named `inline-<name>` cannot collide with the escaped inline VPN `<name>`;
+  non-colliding configurations keep their existing names. Child SA names
+  are unchanged, so `--initiate --child` and the #9624 gate are unaffected;
+  the IKE SA name in `--list-sas` is now the gateway name.
 - IKE version negotiation supports v1-only, v2-only, or dual (default).
   Aggressive mode is opt-in.
 - NAT traversal modes: `disable`, `force`, `enable` (auto-detect).

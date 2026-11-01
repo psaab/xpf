@@ -191,9 +191,20 @@ pub(crate) struct SessionScope {
     pub discriminator: TunnelDiscriminator,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// #18520 test instrument: `SessionKey` hashes performed on this thread,
+    /// so a cell can count the per-packet key-index lookups a hit path pays.
+    /// Test builds only; the production `Hash` is unchanged.
+    pub(crate) static SESSION_KEY_HASHES_FOR_TEST: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
 impl std::hash::Hash for SessionKey {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        #[cfg(test)]
+        SESSION_KEY_HASHES_FOR_TEST.with(|count| count.set(count.get() + 1));
         // Fixed image, no heap: [af, proto, src(1+16), dst(1+16),
         // sport LE, dport LE, routing_domain LE, disc_tag, disc_val LE]
         // = 2 + 17 + 17 + 2 + 2 + 4 + 1 + 4 = 49 bytes for both families
@@ -202,7 +213,7 @@ impl std::hash::Hash for SessionKey {
         let mut img = [0u8; 49];
         img[0] = self.addr_family;
         img[1] = self.protocol;
-        let mut put_ip = |slot: &mut [u8], ip: &IpAddr| match ip {
+        let put_ip = |slot: &mut [u8], ip: &IpAddr| match ip {
             IpAddr::V4(v4) => {
                 slot[0] = 4;
                 slot[1..5].copy_from_slice(&v4.octets());
@@ -512,6 +523,15 @@ fn nat_applied_key(
 /// routing domain preserved (#8103/#7160).
 pub(crate) fn forward_wire_key(forward_key: &SessionKey, nat: NatDecision) -> SessionKey {
     nat_applied_key(forward_key, nat, Dir::Same, Disc::Keep, Domain::Keep)
+}
+
+/// #18531: is a FORWARD row keyed `key` with decision `nat` a forward-wire
+/// alias, i.e. keyed by its own already-translated tuple? The daemon
+/// synthesizes one for every fabric-redirect delta, beside the canonical
+/// (original-tuple) row. A translating decision whose wire tuple is the key
+/// itself has nothing left to translate. Callers check `!is_reverse`.
+pub(crate) fn is_forward_wire_alias(key: &SessionKey, nat: NatDecision) -> bool {
+    (nat.rewrite_src.is_some() || nat.rewrite_dst.is_some()) && forward_wire_key(key, nat) == *key
 }
 
 /// A reverse entry's translated alias (#17088: also called with

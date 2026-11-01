@@ -1388,7 +1388,7 @@ fn deny_reply_no_zone_tcp_rst_is_silent_drop() {
 fn deny_reply_plain_deny_non_tcp_is_silent_drop() {
     let (frame, meta, flow) = icmp_v4_echo();
     let mut pipeline = tx_pipeline(64, 64);
-    let mut forwarding = ForwardingState::default();
+    let forwarding = ForwardingState::default();
     let mut counters = BatchCounters::default();
     let sent = enqueue_deny_reply(
         &mut pipeline,

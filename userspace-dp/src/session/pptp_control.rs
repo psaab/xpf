@@ -223,7 +223,7 @@ impl PptpControlInbox {
         self.push_in_domain(0, seg)
     }
 
-    pub(crate) fn push_in_domain(&self, routing_domain: u32, mut seg: PendingControlSegment) -> bool {
+    pub(crate) fn push_in_domain(&self, routing_domain: u32, seg: PendingControlSegment) -> bool {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),

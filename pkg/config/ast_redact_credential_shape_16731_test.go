@@ -26,6 +26,13 @@ var credentialRows16731 = []struct {
 	{"dhcp-local global password", "set system services dhcp-local-server authentication password LEAK16731-DHCPGLOB", "LEAK16731-DHCPGLOB"},
 	{"dhcpv6 group password", "set system services dhcpv6-local-server group g6 authentication password LEAK16731-DHCP6", "LEAK16731-DHCP6"},
 	{"dhcp-relay group password", "set forwarding-options dhcp-relay group rg authentication password LEAK16731-RELAY", "LEAK16731-RELAY"},
+	// #17787: novel valued *-key spellings not in the distinctive
+	// enumeration (issue examples ssh-key / master-key, plus an
+	// invented signing-key) must fail closed via the trailing
+	// valued-*-key fallback, not leak until enumerated.
+	{"novel ssh-key", "set system services ssh hostkey ssh-key LEAK17787-SSHKEY", "LEAK17787-SSHKEY"},
+	{"novel master-key", "set system services dhcp-local-server group g1 authentication master-key LEAK17787-MASTERKEY", "LEAK17787-MASTERKEY"},
+	{"novel signing-key", "set services dns dnssec signing-key LEAK17787-SIGNKEY", "LEAK17787-SIGNKEY"},
 }
 
 // TestCredentialShapedLeavesMasked16731 is the RED-on-revert net: every
@@ -105,15 +112,146 @@ func TestCredentialShapedNonSecretsRender16731(t *testing.T) {
 		"set policy-options community CUST16731 members 65000:100",
 		"set system services ssh no-password-authentication",
 		"set system master-password pseudorandom-function hmac-sha2-256",
+		"set services foo17787 signing-key",
 	}
 	out := buildRedactTree(t, lines).RedactedClone().FormatSet()
-	for _, keep := range []string{"secname16731", "prof16731", "tls16731", "AKIA16731PUBLIC", "xpf-key-16731", "42", "4242", "CUST16731", "65000:100", "hmac-sha2-256"} {
+	for _, keep := range []string{"secname16731", "prof16731", "tls16731", "AKIA16731PUBLIC", "xpf-key-16731", "42", "4242", "CUST16731", "65000:100", "hmac-sha2-256", "signing-key"} {
 		if !strings.Contains(out, keep) {
 			t.Errorf("non-secret %q was masked (over-redaction):\n%s", keep, out)
 		}
 	}
 	if strings.Contains(out, SecretDataPlaceholder) {
 		t.Errorf("placeholder emitted for a tree with no secrets:\n%s", out)
+	}
+}
+
+// TestValuedKeyFallbackCaseAndPublicControls18435 pins the case-insensitive
+// valued-*key fallback on both flat and hierarchical ASTs, without widening
+// it past the `-key` suffix or masking public key identifiers.
+func TestValuedKeyFallbackCaseAndPublicControls18435(t *testing.T) {
+	rows := []struct {
+		keyword string
+		secret  string
+	}{
+		{"Signing-Key", "LEAK18435-SIGNING"},
+		{"SSH-Key", "LEAK18435-SSH"},
+		{"Master-Key", "LEAK18435-MASTER"},
+		{"Pre-Shared-Key", "LEAK18435-PSK"},
+	}
+	var flatLines []string
+	var hierarchical strings.Builder
+	hierarchical.WriteString("services {\n    foo {\n")
+	for _, row := range rows {
+		flatLines = append(flatLines, "set services foo "+row.keyword+" "+row.secret)
+		hierarchical.WriteString("        " + row.keyword + " " + row.secret + ";\n")
+	}
+	hierarchical.WriteString("    }\n}\n")
+
+	flat := buildRedactTree(t, flatLines).RedactedClone()
+	hier, errs := NewParser(hierarchical.String()).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("hierarchical NewParser: %v", errs)
+	}
+	for name, tree := range map[string]*ConfigTree{"flat": flat, "hierarchical": hier.RedactedClone()} {
+		for format, rendered := range map[string]string{"Format": tree.Format(), "FormatSet": tree.FormatSet()} {
+			for _, row := range rows {
+				if strings.Contains(rendered, row.secret) {
+					t.Errorf("%s %s leaked %s:\n%s", name, format, row.keyword, rendered)
+				}
+			}
+			if !strings.Contains(rendered, SecretDataPlaceholder) {
+				t.Errorf("%s %s emitted no redaction placeholder:\n%s", name, format, rendered)
+			}
+		}
+	}
+
+	controls := []string{
+		"set system ntp Trusted-Key 18435",
+		"set system services dhcp-local-server dynamic-dns TSIG-Key xpf-key-18435",
+		"set system services dynamic-dns provider p1 AWS-Access-Key AKIA18435PUBLIC",
+		"set services foo authentication-key-chain chain18435",
+		"set services foo signing-keys signing-keys-value18435",
+		"set services foo signing-key-v2 signing-v2-value18435",
+		"set services foo rsa-key-2048 rsa-value18435",
+	}
+	controlOut := buildRedactTree(t, controls).RedactedClone().FormatSet()
+	for _, keep := range []string{
+		"18435", "xpf-key-18435", "AKIA18435PUBLIC", "chain18435",
+		"signing-keys-value18435", "signing-v2-value18435", "rsa-value18435",
+	} {
+		if !strings.Contains(controlOut, keep) {
+			t.Errorf("control %q was masked or dropped:\n%s", keep, controlOut)
+		}
+	}
+	if strings.Contains(controlOut, SecretDataPlaceholder) {
+		t.Errorf("public/residual controls emitted a redaction placeholder:\n%s", controlOut)
+	}
+
+	hierControls, errs := NewParser(`
+system {
+    ntp { Trusted-Key 18435; }
+    services {
+        dhcp-local-server { dynamic-dns { TSIG-Key xpf-key-18435; } }
+        dynamic-dns { provider p1 { AWS-Access-Key AKIA18435PUBLIC; } }
+    }
+}
+services {
+    foo {
+        authentication-key-chain chain18435;
+        signing-keys signing-keys-value18435;
+        signing-key-v2 signing-v2-value18435;
+        rsa-key-2048 rsa-value18435;
+    }
+}
+`).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("hierarchical controls NewParser: %v", errs)
+	}
+	hierControlOut := hierControls.RedactedClone().Format()
+	for _, keep := range []string{
+		"18435", "xpf-key-18435", "AKIA18435PUBLIC", "chain18435",
+		"signing-keys-value18435", "signing-v2-value18435", "rsa-value18435",
+	} {
+		if !strings.Contains(hierControlOut, keep) {
+			t.Errorf("hierarchical control %q was masked or dropped:\n%s", keep, hierControlOut)
+		}
+	}
+	if strings.Contains(hierControlOut, SecretDataPlaceholder) {
+		t.Errorf("hierarchical public/residual controls emitted a redaction placeholder:\n%s", hierControlOut)
+	}
+}
+
+// TestCredentialShapedSSHKnownHostKeysStayPublic17787 pins SSH known-host
+// key material as public data in its schema-defined host context. Include
+// every currently supported key type so new variants do not get caught by
+// the generic valued-*-key fallback.
+func TestCredentialShapedSSHKnownHostKeysStayPublic17787(t *testing.T) {
+	for keyType := range SSHKnownHostTypes {
+		keyType := keyType
+		t.Run(keyType, func(t *testing.T) {
+			keyToken := keyType
+			if strings.Contains(keyToken, "@") {
+				keyToken = `"` + keyToken + `"`
+			}
+			cases := []struct {
+				name, line, value string
+			}{
+				{"direct", "set security ssh-known-hosts host h17787.example " + keyToken + " HOSTKEY17787", "HOSTKEY17787"},
+				{"config group", "set groups g17787 security ssh-known-hosts host h17787.example " + keyToken + " HOSTKEY17787GROUP", "HOSTKEY17787GROUP"},
+			}
+			for _, tc := range cases {
+				tc := tc
+				t.Run(tc.name, func(t *testing.T) {
+					out := buildRedactTree(t, []string{tc.line}).RedactedClone().FormatSet()
+					if strings.Contains(out, SecretDataPlaceholder) {
+						t.Fatalf("public SSH known-host key was masked:\n%s", out)
+					}
+					if !strings.Contains(out, keyType) || !strings.Contains(out, tc.value) {
+						t.Fatalf("public SSH known-host key %q missing or altered:\n%s", keyType, out)
+					}
+				})
+			}
+		})
 	}
 }
 

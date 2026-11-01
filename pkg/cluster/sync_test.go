@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -3422,7 +3423,7 @@ func TestPendingBulkAckClearedOnDisconnect(t *testing.T) {
 	ss.conn0 = localConn
 	ss.stats.Connected.Store(true)
 	ss.pendingBulkAckEpoch.Store(7)
-	ss.pendingBulkAckSince.Store(time.Now().UnixNano())
+	ss.pendingBulkAckSince.Store(MonotonicNanos())
 
 	ss.handleDisconnect(localConn)
 
@@ -3435,7 +3436,7 @@ func TestTransferReadinessReportsPendingBulkAckAndBulkReceive(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	ss.stats.Connected.Store(true)
 	ss.pendingBulkAckEpoch.Store(9)
-	ss.pendingBulkAckSince.Store(time.Now().Add(-1500 * time.Millisecond).UnixNano())
+	ss.pendingBulkAckSince.Store(MonotonicNanos() - int64(1500*time.Millisecond))
 	ss.bulkMu.Lock()
 	ss.bulkInProgress = true
 	ss.bulkRecvEpoch = 4
@@ -5028,7 +5029,10 @@ func TestReceiveLoopDisconnectsSilentConnectionAfterAckCapableReconnect(t *testi
 	if got := ss.getActiveConn(); got != nil {
 		t.Fatalf("expected active conn to be cleared, got %v", got)
 	}
-	if err := <-serverDone; err != nil && !errors.Is(err, net.ErrClosed) && !strings.Contains(err.Error(), "use of closed network connection") && !strings.Contains(err.Error(), "EOF") {
+	// #18521: the teardown is abortive (SO_LINGER 0), so the peer's read now
+	// ends in ECONNRESET rather than EOF — the RST is what reaches a peer whose
+	// receive window is closed, where a FIN would queue behind unsent bytes.
+	if err := <-serverDone; err != nil && !errors.Is(err, net.ErrClosed) && !strings.Contains(err.Error(), "use of closed network connection") && !strings.Contains(err.Error(), "EOF") && !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatalf("server loop failed: %v", err)
 	}
 }
@@ -5560,7 +5564,7 @@ func TestBulkAckNoPendingIgnored(t *testing.T) {
 	// Regression guard: an ack for a genuinely pending outbound bulk MUST still
 	// complete — set the flags, fire the callback, and clear the pending epoch.
 	ss.pendingBulkAckEpoch.Store(7)
-	ss.pendingBulkAckSince.Store(time.Now().UnixNano())
+	ss.pendingBulkAckSince.Store(MonotonicNanos())
 	var pendingBuf [8]byte
 	binary.LittleEndian.PutUint64(pendingBuf[:], 7)
 	ss.handleMessage(nil, syncMsgBulkAck, pendingBuf[:])

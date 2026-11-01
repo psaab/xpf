@@ -165,8 +165,9 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"/etc/rsyslog.d drop-ins are on disk but rsyslog has not re-read "+
 			"them, so records may still be flowing to a destination the "+
 			"operator REMOVED; `chrony-sources` and `chrony-threshold` mean "+
-			"chrony is still running the previous server set or "+
-			"logchange/maxchange. The daemon re-drives the owed reload "+
+			"chrony is still running the previous server set or the "+
+			"previous conf.d (logchange/maxchange, or the #18584 "+
+			"bindacqdevice routing-instance binding). The daemon re-drives the owed reload "+
 			"autonomously every 30s; 0 once it succeeds.",
 		[]string{"service"}, nil,
 	)
@@ -504,15 +505,12 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 	c.userspacePolicyContentRejected = prometheus.NewDesc(
 		"xpf_userspace_policy_content_rejected",
 		"1 while the most recently built userspace snapshot carries "+
-			"unrepresentable policy content (a policy names an "+
-			"application protocol/port or address the matcher cannot "+
-			"represent) that the helper integrity preflight rejects "+
-			"(#3261). The helper stays armed and retains the "+
-			"previous-good policy state (a fresh boot lands on "+
-			"default-deny) — it never fails open to the kernel. Nonzero "+
-			"means the running dataplane policy is NOT the committed "+
-			"config; edit out the offending application/address and "+
-			"re-commit. 0 when the last build was fully representable.",
+			"either whole-snapshot policy integrity refusals or per-rule "+
+			"DNS quarantines. A refusal retains previous-good/default-deny; "+
+			"a DNS quarantine is enforced as deny while valid sibling rules "+
+			"load. The diagnostic is Go-owned and does not imply a kernel "+
+			"fail-open. 0 when the last build has no policy-content "+
+			"refusals or quarantines.",
 		nil, nil,
 	)
 	c.userspaceZoneIDCollision = prometheus.NewDesc(

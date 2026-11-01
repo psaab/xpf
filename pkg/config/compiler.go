@@ -685,21 +685,6 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 		return nil, dupNATRuleSetErr
 	}
 
-	// #16607: duplicate source-NAT rule-set CONTEXT gate — see
-	// validateSourceNATDuplicateContextAST. Two differently-named source
-	// rule-sets with the same normalised (from, to) context (after #3096
-	// scope-list expansion) compile to one concatenated first-match table
-	// in definition order, so the later rule-set's rules — including a
-	// `source-nat off` exemption — are unreachable behind an earlier
-	// catch-all. Junos refuses this shape at commit. Pre-expansion,
-	// top-level `security` stanzas only, beside the #6454 name gate (which
-	// owns same-named pairs); strict rejects, lenient warns.
-	dupSNATCtxWarnings, dupSNATCtxErr := validateSourceNATDuplicateContextAST(
-		tree, opts.lenientSourceNATDuplicateContext)
-	if dupSNATCtxErr != nil {
-		return nil, dupSNATCtxErr
-	}
-
 	// #6455 Finding 1: the POST-expansion half of the duplicate-name gate
 	// family. The three gates above scan only top-level stanzas, so a duplicate
 	// authored ENTIRELY inside an applied group body — appended wholesale by
@@ -714,9 +699,19 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// dup_names_expanded_6455.go.
 	dupExpandedWarnings, dupExpandedErr := validateDuplicateNamesExpandedAST(
 		tree, opts.lenientDuplicateNamesExpanded,
-		concatWarnings(dupBlockWarnings, dupNATRuleWarnings, dupNATRuleSetWarnings, dupSNATCtxWarnings))
+		concatWarnings(dupBlockWarnings, dupNATRuleWarnings, dupNATRuleSetWarnings))
 	if dupExpandedErr != nil {
 		return nil, dupExpandedErr
+	}
+
+	// #17712: compare source-NAT duplicate contexts only after group inheritance.
+	// The raw inline fragments can both look unscoped even when their effective
+	// contexts differ; the expanded gate also retains the #16607 duplicate
+	// control for contexts that remain equal after inheritance.
+	dupSNATCtxWarnings, dupSNATCtxErr := validateSourceNATDuplicateContextExpandedAST(
+		tree, opts.lenientSourceNATDuplicateContext)
+	if dupSNATCtxErr != nil {
+		return nil, dupSNATCtxErr
 	}
 
 	// #5878: numeric interface-unit alias gate (#5631) as a BOTH-NODE-effective
@@ -904,6 +899,8 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	cfg.Warnings = append(cfg.Warnings, loginPackedWarnings...)
 	cfg.Warnings = append(cfg.Warnings, schedulerWindowWarnings11358...)
 	appendClusterNTPAdvisoryLocked(cfg, opts)
+	appendClusterNTPInstanceAdvisoryLocked(cfg, opts)
+	appendNTPRoutingInstanceAdvisoryLocked(cfg)
 	appendContestedTrunkZoneAdvisoryLocked(cfg, opts)
 	appendDPDThresholdIKEv2AdvisoryLocked(cfg, opts)
 	appendGreUnitFilterShadowAdvisoryLocked(cfg, opts)

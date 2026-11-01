@@ -71,13 +71,14 @@ const (
 		"run `make generate`. See pkg/dataplane/README.md (#4977)."
 )
 
-// userspaceXDPFixedFreshnessInputs are the non-.rs build inputs that
-// determine the shim object's bytes: the Cargo manifest + locked
-// dependency graph, the pinned Rust toolchain, BOTH the crate-local and
-// the repo-root cargo config (cargo loads ancestor configs too, so a
-// root-level BPF-target rustflags edit could change the .o — currently
-// inert x86_64, hashed for completeness), the build recipe itself
-// (build-userspace-xdp.sh embeds the bpf-linker version pin), and
+// userspaceXDPFixedFreshnessInputs are the non-.rs inputs used by the
+// shim recipe or retained conservatively in its freshness inventory:
+// the Cargo manifest + lockfile, pinned Rust toolchain, both repo-root
+// and crate-local Cargo configs (the recipe builds from an isolated cwd
+// and explicitly passes the required target/build-std/linker settings,
+// so hierarchical configs cannot steer it; hashing both remains
+// conservative and forces restamping after config edits), the recipe
+// itself (which embeds the bpf-linker pin), and
 // bpf/headers/xpf_common.h (whose MAX_INTERFACES #define is awk-extracted
 // by the recipe (build-userspace-xdp.sh) and sizes the shim's
 // binding array + maps). Paths are repo-relative POSIX.
@@ -290,9 +291,11 @@ func pinnedShimToolchain(path string) (string, error) {
 
 // verdictProvenanceClean reports whether a gate verdict's recorded
 // provenance (#15218, #16657) proves a pinned build under the scrubbed
-// codegen env with the pinned bpf-linker. Anything else — absent
-// provenance, unpinned, wrong toolchain/linker, foreign env digest —
-// is not provenance a consumer gate may trust.
+// codegen env with the pinned bpf-linker. The manifest uses this
+// provenance only to adopt the source/object build digest; that
+// freshness property is kernel-independent. Exact kernel equality for
+// accepting a retained headroom verdict belongs to the release
+// retention gate (#17768), not this source/object freshness check.
 func verdictProvenanceClean(repoRoot string, v *userspaceXDPGateVerdict) bool {
 	p := v.Provenance
 	if p == nil || !p.Pinned {

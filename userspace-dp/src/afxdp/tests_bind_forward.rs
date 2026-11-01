@@ -2014,7 +2014,7 @@ fn replay_synced_sessions_publishes_kernel_local_for_local_delivery_13675() {
     use crate::afxdp::bpf_map::{
         clear_session_map_writes, session_map_writes, SteeringMap, RECORDER_ONLY_MAP_FD,
     };
-    let mut coordinator = Coordinator::new();
+    let coordinator = Coordinator::new();
     // Active owner RG 1 so allow_replace_local=false, as in production
     // for a session this node is actively forwarding.
     coordinator.store_ha_lease_for_test(1, 60);

@@ -569,22 +569,37 @@ func (m *Manager) statusLoop(ctx context.Context) {
 				slog.Debug("userspace: status poll discarded; RETH MAC link cycle started during helper RPC")
 				continue
 			}
+			// #9651: account for this same-process poll before the status
+			// sequence fence. A concurrent status apply makes the reply stale
+			// for publication, but does not undo the fact that the helper
+			// answered (or failed to answer).
+			pollResultTime := time.Now()
+			if pollErr == nil {
+				m.noteStatusPollResultLocked(nil, pollResultTime)
+			} else if errors.Is(pollErr, errStatusDecode) {
+				// #18293: answered but undecodable. Surface it as a decode
+				// error and never kill: the helper provably answered.
+				slog.Warn("userspace dataplane status poll decode failed; helper answered but its status could not be decoded (#18293)", "err", pollErr)
+				_ = m.noteStatusPollResultLocked(pollErr, pollResultTime)
+			} else {
+				slog.Warn("userspace dataplane status poll failed", "err", pollErr)
+				// #9651: a helper that answers nothing for long enough is killed,
+				// and the supervisor fails closed and restarts it.
+				if m.noteStatusPollResultLocked(pollErr, pollResultTime) {
+					m.killWedgedHelperLocked(pollResultTime)
+				}
+			}
 			// #16653: a concurrent mutator applied a newer helper status
-			// while this poll was off-lock. Discard the older reply in
-			// the same shape as the link-cycle discard above: skip the
-			// whole tick body. Every serviced action is level-triggered
-			// on persistent state, so the next tick re-evaluates against
-			// the newer cached status; applying the stale reply first
-			// would only overwrite it (ctrl=1 / ForwardingArmed=true
-			// over a durable disarm) until that tick.
+			// while this poll was off-lock. The stale reply must not overwrite
+			// that state or service status-dependent work. Poll-health
+			// accounting has already run above because this poll still belongs
+			// to the same helper generation and link-cycle lease.
 			if m.lastStatusSeq != pollStatusSeq {
 				m.mu.Unlock()
 				slog.Debug("userspace: status poll discarded; newer helper status applied during helper RPC")
 				continue
 			}
-			if err := pollErr; err == nil {
-				// #9651: an answered poll resets the wedge count.
-				m.noteStatusPollResultLocked(nil, time.Now())
+			if pollErr == nil {
 				// #6034: the helper's replace-generation fence can outlive this
 				// Manager (for example across a future reconnect/ISSU). Resume from
 				// its applied generation before any reconciliation on this tick can
@@ -653,7 +668,7 @@ func (m *Manager) statusLoop(ctx context.Context) {
 				if m.clusterHA && !haReplayAttemptedThisTick {
 					_ = m.refreshHAStateFromMapsLocked()
 				}
-				newActiveSig := activeHAGroupSignature(m.haGroups)
+				newActiveSig := activeHAGroupSignature(m.effectiveHAGroupMapLocked())
 				if m.clusterHA && !haReplayAttemptedThisTick && newActiveSig != "" && time.Since(m.lastRGActivateTime) >= 2*time.Second {
 					// Only sync watchdog updates to the helper from the poll.
 					// Do NOT sync active/inactive transitions here — that's
@@ -683,19 +698,6 @@ func (m *Manager) statusLoop(ctx context.Context) {
 					slog.Debug("userspace dataplane forwarding sync deferred; HA inventory replay pending")
 				} else if err := m.syncDesiredForwardingStateLocked(); err != nil {
 					slog.Warn("userspace dataplane forwarding sync failed", "err", err)
-				}
-			} else if errors.Is(err, errStatusDecode) {
-				// #18293: answered but undecodable. Surface it as a decode
-				// error (counted in noteStatusPollResultLocked) and never
-				// kill: the helper provably answered.
-				slog.Warn("userspace dataplane status poll decode failed; helper answered but its status could not be decoded (#18293)", "err", err)
-				_ = m.noteStatusPollResultLocked(err, time.Now())
-			} else {
-				slog.Warn("userspace dataplane status poll failed", "err", err)
-				// #9651: a helper that answers nothing for long enough is killed,
-				// and the supervisor fails closed and restarts it.
-				if now := time.Now(); m.noteStatusPollResultLocked(err, now) {
-					m.killWedgedHelperLocked(now)
 				}
 			}
 			// Keep the targeted kernel prewarm during initial startup. After

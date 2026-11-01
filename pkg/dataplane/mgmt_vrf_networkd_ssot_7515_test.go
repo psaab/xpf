@@ -7,10 +7,11 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #7515 — the networkd `VRF=vrf-mgmt` stanza is the third site of the
-// management-interface class. It must agree with the daemon's management-VRF
-// set: if it drifts, `networkctl reconfigure` strips a binding the daemon just
-// made, or preserves one the daemon never made.
+// #7515 — the networkd row's VRFName (rendered as `KeepMaster=yes` since
+// #18597; formerly a `VRF=vrf-mgmt` stanza networkd could not resolve) is the
+// third site of the management-interface class. It must agree with the
+// daemon's management-VRF set: if it drifts, `networkctl reconfigure` releases
+// a binding the daemon just made, or pins one the daemon never made.
 //
 // The assertion is against config.IsManagementIfName, not a prefix literal. The
 // name list below is a probe POPULATION mirrored from the sibling tests — a
@@ -23,7 +24,8 @@ var mgmtIfNameCases7515 = []string{
 }
 
 // TestNetworkdVRFStanzaAgreesWithManagementSSOT7515 drives the real networkd
-// model builder and reads VRF= off the emitted models.
+// model builder and reads VRFName (the KeepMaster=yes source) off the emitted
+// models.
 //
 // FAIL-ON-REVERT: put the raw prefix list back at the emitter and this stays
 // green only while the two coincide — narrow or widen either side alone and it

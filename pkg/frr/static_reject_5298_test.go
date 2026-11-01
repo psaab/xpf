@@ -89,9 +89,9 @@ func TestStaticDiscardRendersNull0_5298(t *testing.T) {
 func TestStaticRejectRenderShape_5298(t *testing.T) {
 	m := New()
 
-	// Default preference (0 in a hand-built route → no trailing distance).
+	// Default preference (0 in a hand-built route → explicit distance 5).
 	sr := &config.StaticRoute{Destination: "192.0.2.0/24", Reject: true}
-	if got, want := m.generateStaticRoute(sr, "", nil, nil, nil), "ip route 192.0.2.0/24 reject\n"; got != want {
+	if got, want := m.generateStaticRoute(sr, "", nil, nil, nil), "ip route 192.0.2.0/24 reject 5\n"; got != want {
 		t.Errorf("reject (no pref) = %q, want %q", got, want)
 	}
 

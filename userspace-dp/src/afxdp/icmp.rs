@@ -141,13 +141,13 @@ pub(super) fn can_generate_icmp_error_reply(
                 meta.ingress_vlan_id,
             );
             if source_is_invalid_for_icmp_error(meta.addr_family, packet)
-                || crate::afxdp::frame::src_is_directed_broadcast_in_table(
+                || crate::afxdp::frame::src_is_directed_broadcast(
                     forwarding,
                     packet,
                     icmp_table,
                 )
                 || dest_is_multicast_or_broadcast(meta.addr_family, packet)
-                || crate::afxdp::frame::dest_is_directed_broadcast_in_table(
+                || crate::afxdp::frame::dest_is_directed_broadcast(
                     forwarding,
                     packet,
                     icmp_table,
@@ -229,20 +229,27 @@ pub(super) fn packet_hop_limit_v6(frame: &[u8], meta: UserspaceDpMeta) -> Option
 /// (dropped); with the knob set it is admitted. Transit packets are
 /// unaffected here — they are dropped with an ICMPv6 Time Exceeded
 /// under RFC 4443 §3.3 regardless of the knob (see
-/// `build_local_time_exceeded_v6`). `dst_is_local` must be the caller's
-/// table-scoped local-delivery verdict for this packet (a
+/// `build_local_time_exceeded_v6`). `dst_is_local` must yield the
+/// caller's table-scoped local-delivery verdict for this packet (a
 /// `LocalDelivery` resolution, or the shim's local-destination test),
 /// never a global address-membership guess.
+///
+/// #18533: `dst_is_local` is evaluated LAST, and only for a hop-limit-0
+/// IPv6 packet with the knob unset. The poll loop calls this for every
+/// valid packet, and its verdict is a full FIB walk (table-name string
+/// compares plus the connected and route scans); computing it first, as
+/// the #16841 call site did, charged that walk to every IPv4 and every
+/// ordinary IPv6 packet whose answer could not change the result.
 #[inline]
 pub(super) fn zero_hop_limit_local_drop(
     forwarding: &ForwardingState,
     frame: &[u8],
     meta: UserspaceDpMeta,
-    dst_is_local: bool,
+    dst_is_local: impl FnOnce() -> bool,
 ) -> bool {
-    dst_is_local
-        && !forwarding.no_ipv6_reject_zero_hop_limit
+    !forwarding.no_ipv6_reject_zero_hop_limit
         && packet_hop_limit_v6(frame, meta) == Some(0)
+        && dst_is_local()
 }
 
 pub(super) fn build_local_time_exceeded_request(

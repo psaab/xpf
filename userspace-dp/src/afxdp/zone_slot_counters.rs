@@ -62,7 +62,6 @@
 //! map entry, or a live slot map would keep folding into an orphaned Arc that
 //! the snapshot no longer sees).
 
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};

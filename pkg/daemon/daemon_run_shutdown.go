@@ -188,6 +188,11 @@ func (d *Daemon) runShutdownSequence(shutdownApplyCtx context.Context, wg *sync.
 		// atomic nft loads + local credential reconciles, no FRR/netlink reload),
 		// so this cannot hang on unbounded work; bound it defensively anyway so a
 		// wedged apply cannot keep shutdown blocked beyond its shared deadline.
+		// #18561: the HA FRR reconcile renders under applySem but runs its
+		// frr-reload.py AFTER releasing it, so this drain does not wait for that
+		// reload. It needs no wait: the FRR manager serializes it (buildMu,
+		// reloadMu), and frr.Stop below kills an in-flight reload's process
+		// group.
 		if d.applySem != nil {
 			if acquired, err := d.acquireApplySemForShutdownContext(shutdownApplyCtx); acquired {
 				d.applySem.Release(1)
@@ -361,6 +366,36 @@ func (d *Daemon) runShutdownSequence(shutdownApplyCtx context.Context, wg *sync.
 		}
 	}
 
+	// HAND EVERY REDUNDANCY GROUP TO THE PEER NOW, not on heartbeat loss.
+	//
+	// Until this, an orderly private-RG stop sent the peer nothing but the
+	// arm-floor weight (1) installed by markDataplaneNotArmed above. RG0
+	// never yields on that, and a peer parked in secondary-hold by an
+	// earlier manual failover cannot take a data RG on it either, so the
+	// peer waited for heartbeat loss plus the session-sync recency window —
+	// 3.3 s on the loss cluster, with this node's helper already gone. The
+	// resign advertises weight 0 on every RG and sends a heartbeat at once;
+	// the peer's existing weight-0 arms promote it, including through its
+	// own ManualFailover hold (see pkg/cluster/planned_shutdown_resign.go).
+	//
+	// ORDER. After the fail-closed actions above: on a fail-closed stop
+	// rg_active is cleared (this node no longer forwards; a hitless-restart
+	// stop deliberately leaves it set), and on every HA stop Kea is stopped
+	// (#6787 — the peer must not start serving DHCP while this node still
+	// does). Before the VIP removal, VRRP stop and d.cluster.Stop below,
+	// because the heartbeat sender is the channel that carries the resign
+	// and Stop closes it.
+	//
+	// haMode, not `hitless`, for the reason the Kea stop gives: an HA stop
+	// relinquishes ownership either way (VRRP's priority-0 burst also fires
+	// on a hitless restart). The call never blocks on the peer, and with no
+	// live peer it is a no-op: the cluster-event watcher is still running
+	// here (it binds to the never-cancelled daemon context), and a lone
+	// node's RG0 demotion would confirm a pending commit-confirmed.
+	if haMode && d.cluster != nil {
+		d.cluster.ResignForPlannedShutdown()
+	}
+
 	// #5308: cancel + join the two long-lived loops that bind to d.daemonCtx
 	// (never cancelled in production) rather than the run WaitGroup above, so
 	// wg.Wait does NOT cover them. Both call into subsystems torn down further
@@ -443,7 +478,8 @@ func (d *Daemon) runShutdownSequence(shutdownApplyCtx context.Context, wg *sync.
 
 	// Stop the FRR manager (after ipmon, whose actuator is an FRR
 	// writer): cancels the degraded-retry goroutine and kills any
-	// in-flight frr-reload.py process group (#1880).
+	// in-flight frr-reload.py process group (#1880), including an HA
+	// reconcile's reload that runs outside applySem (#18561).
 	if d.frr != nil {
 		d.frr.Stop()
 	}

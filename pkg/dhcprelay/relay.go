@@ -609,6 +609,31 @@ const startupRetryInterval = 5 * time.Second
 // a cheap name->ifindex lookup and idempotent (unchanged ifindex => no action).
 const ifindexCheckInterval = 5 * time.Second
 
+// relayStopTimeout bounds config reconciliation's join of a stopped relay.
+// A timeout leaves the relay tracked and prevents a replacement from starting;
+// callers can report the incomplete stop and a later reconcile can finish it.
+var relayStopTimeout = 5 * time.Second
+
+func waitRelayStopped(iface string, done <-chan struct{}, deadline time.Time) error {
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		remaining = 0
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		select {
+		case <-done:
+			return nil
+		default:
+			return fmt.Errorf("timed out stopping interface %q after %s", iface, relayStopTimeout)
+		}
+	}
+}
+
 // sessionOutcome is how a single relay session ended, telling the supervisor
 // (runRelay) whether to stop, rebind immediately, or retry after a delay.
 type sessionOutcome int
@@ -865,6 +890,7 @@ type interfaceRelay struct {
 	kernelName       string
 	cancel           context.CancelFunc
 	done             chan struct{}
+	stopping         bool // protected by Manager.mu; set when a bounded join times out
 	requestsRelayed  atomic.Uint64
 	repliesForwarded atomic.Uint64
 
@@ -1038,8 +1064,9 @@ type ifindexResolver func(ifaceName string) (int, error)
 
 // Manager manages per-interface DHCP relay goroutines.
 type Manager struct {
-	mu     sync.Mutex
-	relays map[string]*interfaceRelay // keyed by interface name
+	applyMu sync.Mutex // serializes reconcile transactions and stop joins
+	mu      sync.Mutex
+	relays  map[string]*interfaceRelay // keyed by interface name
 
 	// Injectable seams (defaulted in NewManager; overridden by tests).
 	newConn       packetConnFactory
@@ -1459,26 +1486,33 @@ func computeDesired(cfg *config.DHCPRelayConfig, resolveIfName func(string) stri
 //   - interface in both, spec changed         -> stop then start (restart)
 //   - interface in both, spec unchanged       -> leave running (no churn)
 //
-// A nil cfg stops all relays (relay configuration removed). Stop-then-start of
-// a changed/removed interface reuses the same ir.cancel()+<-ir.done teardown as
-// Stop(): the per-interface supervisor (#2347 runRelay) and socket lifecycle
-// (#1915 close-on-cancel + WaitGroup join) fully close the old listener before
-// the replacement binds, so a restart never races EADDRINUSE and never hangs.
-func (m *Manager) Apply(ctx context.Context, cfg *config.DHCPRelayConfig) {
+// A nil cfg requests removal of every relay (relay configuration removed).
+// Stop-then-start of a changed interface joins the old owner before binding a
+// replacement. If an owner does not exit by the Apply stop deadline, Apply
+// returns an error, retains that owner in the managed set, and does not start
+// its replacement; a later reconcile can finish the stop.
+func (m *Manager) Apply(ctx context.Context, cfg *config.DHCPRelayConfig) error {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+
+	stopDeadline := time.Now().Add(relayStopTimeout)
+
+	var applyErrs []error
 	var v6cfg *config.DHCPRelayV6Config
 	if cfg != nil {
 		v6cfg = cfg.V6
 	}
 	resolveIfName := m.ifNameResolver()
 	if m.v6 != nil {
-		m.v6.apply(ctx, v6cfg, resolveIfName, m.shouldRelay)
+		if err := m.v6.apply(ctx, v6cfg, resolveIfName, m.shouldRelay, stopDeadline); err != nil {
+			applyErrs = append(applyErrs, err)
+		}
 	}
 	desired := computeDesired(cfg, resolveIfName)
 	// Phase 1 (under lock): decide which running relays to stop and which
 	// desired relays to start, mutating m.relays to the post-reconcile set.
-	// We collect the relays to stop and start them OUTSIDE the lock so the
-	// bounded <-ir.done join does not hold m.mu (Stats()/concurrent Apply
-	// would otherwise block on a teardown).
+	// We collect relays to stop and start them OUTSIDE the lock so the bounded
+	// done join does not hold m.mu and stall Stats() or packet-gate callbacks.
 	m.mu.Lock()
 
 	var toStop []*interfaceRelay // removed or changed: tear down
@@ -1491,6 +1525,16 @@ func (m *Manager) Apply(ctx context.Context, cfg *config.DHCPRelayConfig) {
 	// changed relay is removed here and re-added in the start loop below.
 	for name, ir := range m.relays {
 		d, want := desired[name]
+		if ir.stopping {
+			toStop = append(toStop, ir)
+			delete(m.relays, name)
+			if want {
+				replaced[name] = ir
+			}
+			slog.Info("dhcp-relay: retrying an incomplete stop before reconciling",
+				"interface", name)
+			continue
+		}
 		if !want {
 			toStop = append(toStop, ir)
 			delete(m.relays, name)
@@ -1563,9 +1607,32 @@ func (m *Manager) Apply(ctx context.Context, cfg *config.DHCPRelayConfig) {
 	// Phase 2 (outside lock): tear down removed/changed relays. For a changed
 	// interface this completes BEFORE the replacement's listener binds below,
 	// so the old SO_BINDTODEVICE socket is fully closed (no EADDRINUSE).
+	timedOut := make(map[string]struct{})
 	for _, ir := range toStop {
 		ir.cancel()
-		<-ir.done
+		if err := waitRelayStopped(ir.ifaceName, ir.done, stopDeadline); err != nil {
+			applyErrs = append(applyErrs, fmt.Errorf("dhcp-relay: %w", err))
+			timedOut[ir.ifaceName] = struct{}{}
+
+			// Keep the still-live relay visible and prevent a replacement
+			// from claiming the same interface until the old owner exits.
+			m.mu.Lock()
+			ir.stopping = true
+			current := m.relays[ir.ifaceName]
+			var pending *interfaceRelay
+			if current != ir {
+				if current != nil {
+					delete(m.relays, ir.ifaceName)
+					pending = current
+				}
+				m.relays[ir.ifaceName] = ir
+			}
+			m.mu.Unlock()
+			if pending != nil {
+				pending.cancel()
+				close(pending.done)
+			}
+		}
 	}
 
 	// Phase 2.5 (outside lock, AFTER the join): migrate outstanding-request
@@ -1585,6 +1652,9 @@ func (m *Manager) Apply(ctx context.Context, cfg *config.DHCPRelayConfig) {
 	// hardest for maximum-packet-rate, whose documented remedy is to raise it
 	// on a busy segment: doing that mid-boot-storm would flush every binding.
 	for _, s := range toStart {
+		if _, failed := timedOut[s.ir.ifaceName]; failed {
+			continue
+		}
 		old, ok := replaced[s.ir.ifaceName]
 		if !ok {
 			continue
@@ -1603,6 +1673,9 @@ func (m *Manager) Apply(ctx context.Context, cfg *config.DHCPRelayConfig) {
 
 	// Phase 3 (outside lock): launch the new/restarted relays.
 	for _, s := range toStart {
+		if _, failed := timedOut[s.ir.ifaceName]; failed {
+			continue
+		}
 		go func(relay *interfaceRelay, rctx context.Context, servers []*net.UDPAddr) {
 			defer close(relay.done)
 			m.runRelay(rctx, relay.cancel, relay, servers)
@@ -1629,6 +1702,7 @@ func (m *Manager) Apply(ctx context.Context, cfg *config.DHCPRelayConfig) {
 				"effective_window", pendingWindow(s.ir.pending.capacity(), s.ir.maxPacketRate))
 		}
 	}
+	return errors.Join(applyErrs...)
 }
 
 // Stats returns per-interface relay statistics.
@@ -1709,6 +1783,8 @@ func (m *Manager) Stats() []RelayStats {
 
 // Stop stops all running relay goroutines and waits for them to finish.
 func (m *Manager) Stop() {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
 	m.mu.Lock()
 	relays := make(map[string]*interfaceRelay, len(m.relays))
 	for k, v := range m.relays {

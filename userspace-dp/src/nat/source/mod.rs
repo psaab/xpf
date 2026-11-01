@@ -1,7 +1,9 @@
 mod keys;
 pub(crate) use keys::*;
 mod lease_note_7560;
-pub(crate) use lease_note_7560::{dropped_persistent_lease_note, report_dropped_leases};
+pub(crate) use lease_note_7560::report_dropped_leases;
+#[cfg(test)]
+pub(crate) use lease_note_7560::dropped_persistent_lease_note;
 // Source NAT (SNAT) rules + matching + lookup.
 //
 // Owns rule parsing from snapshots, the address/port-pool match
@@ -45,7 +47,7 @@ pub(crate) use lease_note_7560::{dropped_persistent_lease_note, report_dropped_l
 use super::allocator::{
     AllocRequest, DeterministicV4, DeterministicV6, InterfaceDomainReserve, NS_PER_SEC, NatHolder,
     PersistentParams, PersistentSourceKey, PoolAddressFamily, PortAllocator, TranslatedTuple,
-    DETERMINISTIC_NAT64_BIB_TIMEOUT_NS, deterministic_indices_v4, persistent_egress_scope,
+    DETERMINISTIC_NAT64_BIB_TIMEOUT_NS, deterministic_indices_v4,
     persistent_egress_scope_v2,
 };
 use super::iface_registry::InterfaceNatAllocators;

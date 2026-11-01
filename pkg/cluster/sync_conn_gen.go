@@ -856,7 +856,7 @@ type sessionStampView interface {
 	stampInstallTable() (*uint32, *uint32)
 	stampSourceNatICMP() (*bool, *uint8, *uint8)
 	stampPolicyIdentity() (*string, *uint32)
-	stampAppTimeoutLog() (*uint32, *uint8)
+	stampAppTimeoutLog() (*uint32, *uint8, *bool)
 }
 
 type sessionValueView struct{ v *dataplane.SessionValue }
@@ -874,8 +874,8 @@ func (w sessionValueView) stampSourceNatICMP() (*bool, *uint8, *uint8) {
 func (w sessionValueView) stampPolicyIdentity() (*string, *uint32) {
 	return &w.v.PolicyRuleID, &w.v.PolicyCounterIdx
 }
-func (w sessionValueView) stampAppTimeoutLog() (*uint32, *uint8) {
-	return &w.v.AppTimeout, &w.v.LogFlags
+func (w sessionValueView) stampAppTimeoutLog() (*uint32, *uint8, *bool) {
+	return &w.v.AppTimeout, &w.v.LogFlags, &w.v.AppTimeoutLogStated
 }
 
 type sessionValueV6View struct{ v *dataplane.SessionValueV6 }
@@ -893,8 +893,8 @@ func (w sessionValueV6View) stampSourceNatICMP() (*bool, *uint8, *uint8) {
 func (w sessionValueV6View) stampPolicyIdentity() (*string, *uint32) {
 	return &w.v.PolicyRuleID, &w.v.PolicyCounterIdx
 }
-func (w sessionValueV6View) stampAppTimeoutLog() (*uint32, *uint8) {
-	return &w.v.AppTimeout, &w.v.LogFlags
+func (w sessionValueV6View) stampAppTimeoutLog() (*uint32, *uint8, *bool) {
+	return &w.v.AppTimeout, &w.v.LogFlags, &w.v.AppTimeoutLogStated
 }
 
 // scopedKeyOf/scopedKeyOfV6 build the scoped sender keys; plain
@@ -1025,19 +1025,20 @@ func stampInstallGen[K comparable, SK comparable](
 		}
 		s.genState.recvGenMu.Unlock()
 	}
-	// #16700: per-app timeout (incl. 86401 never) and then-log flags;
-	// restore last sent / received on a stamp-less mirror resend.
-	appTimeout, logFlags := view.stampAppTimeoutLog()
+	// #16700/#17780: preserve the per-app timeout and then-log pair. A
+	// presence marker distinguishes stated (0,0) from a legacy stamp-less
+	// resend; non-zero values remain self-describing for old peers.
+	appTimeout, logFlags, stated := view.stampAppTimeoutLog()
 	if *appTimeoutLogSent == nil {
 		*appTimeoutLogSent = make(map[K]appTimeoutLogMemo)
 	}
-	if !stampAppTimeoutLogLocked(*appTimeoutLogSent, key, sessionID, appTimeout, logFlags, s.sentCap()) && s.growSentCap() {
-		stampAppTimeoutLogLocked(*appTimeoutLogSent, key, sessionID, appTimeout, logFlags, s.sentCap())
+	if !stampAppTimeoutLogLocked(*appTimeoutLogSent, key, sessionID, appTimeout, logFlags, stated, s.sentCap()) && s.growSentCap() {
+		stampAppTimeoutLogLocked(*appTimeoutLogSent, key, sessionID, appTimeout, logFlags, stated, s.sentCap())
 	}
-	if *appTimeout == 0 && *logFlags == 0 && sessionID != 0 {
+	if *appTimeout == 0 && *logFlags == 0 && !*stated && sessionID != 0 {
 		s.genState.recvGenMu.Lock()
-		if at, lf, ok := lookupAppTimeoutLogLocked(*appTimeoutLogRecv, key, sessionID); ok {
-			*appTimeout, *logFlags = at, lf
+		if at, lf, ok, recorded := lookupAppTimeoutLogLocked(*appTimeoutLogRecv, key, sessionID); ok {
+			*appTimeout, *logFlags, *stated = at, lf, recorded
 		}
 		s.genState.recvGenMu.Unlock()
 	}
@@ -1600,6 +1601,8 @@ func (s *SessionSync) resetRecvGen() {
 	// across the reset window. The reconnect re-push then re-establishes both
 	// (received on receive, applied on successful apply).
 	s.lastRecvConfigGen.Store(0)
+	// #18610: the rejected-as-authority mark belongs to the same namespace.
+	s.rejectedAsAuthorityConfigGen.Store(0)
 	s.configGenMu.Unlock()
 	s.resetConfigEpochReverseFloor()
 	// #5706: reset the full-set (IPsec/DHCP) ordering high-water marks for the
@@ -1680,7 +1683,7 @@ func (s *SessionSync) configEpochStale(epoch uint64) bool {
 				return false
 			}
 			epoch &= configEpochGenMask
-			return epoch < s.configGenCounter.Load()
+			return epoch < s.authorityConfigEpochThreshold()
 		}
 		if epoch&configEpochReverseTag != 0 {
 			return false
@@ -1691,6 +1694,26 @@ func (s *SessionSync) configEpochStale(epoch uint64) bool {
 		barrier = applied
 	}
 	return epoch < barrier
+}
+
+// authorityConfigEpochThreshold is the generation a reverse-tagged peer epoch
+// must reach for the RG0 authority to accept the install (#18636). From the
+// first config write to the current peer incarnation it is the newest
+// generation actually written to that incarnation (lastSentConfigGen): a peer
+// that has applied it holds every config this authority ever told it about.
+// configGenCounter cannot serve: it reserves a generation on every reconcile
+// tick, including the ones that find the config already pushed and send
+// nothing, so it runs one draw per 30 s past anything the peer can hold.
+// Before any write to this incarnation, the peer's tagged generation came
+// from its view of an earlier authority process, which may be an older boot
+// or a config edited while this node was down; that keeps the original
+// reservation-counter comparison, which refuses it (fail-closed) until the
+// reconnect push lands, normally within seconds.
+func (s *SessionSync) authorityConfigEpochThreshold() uint64 {
+	if sent := s.peerIncarnationState().lastSentConfigGen.Load(); sent != 0 {
+		return sent
+	}
+	return s.configGenCounter.Load()
 }
 
 // rollBackStaleConfigInstallV4 removes a synced session whose config epoch went
@@ -1803,8 +1826,8 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	if s.genState.appTimeoutLogRecvV4 == nil {
 		s.genState.appTimeoutLogRecvV4 = make(map[dataplane.SessionKey]appTimeoutLogMemo)
 	}
-	if !stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV4, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap()) && s.growRecvCap() {
-		stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV4, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap())
+	if !stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV4, key, val.SessionID, &val.AppTimeout, &val.LogFlags, &val.AppTimeoutLogStated, s.recvCap()) && s.growRecvCap() {
+		stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV4, key, val.SessionID, &val.AppTimeout, &val.LogFlags, &val.AppTimeoutLogStated, s.recvCap())
 	}
 	s.genState.recvGenMu.Unlock()
 	err := s.sessions.PutClusterSyncedV4(key, val)
@@ -1871,8 +1894,8 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	if s.genState.appTimeoutLogRecvV6 == nil {
 		s.genState.appTimeoutLogRecvV6 = make(map[dataplane.SessionKeyV6]appTimeoutLogMemo)
 	}
-	if !stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV6, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap()) && s.growRecvCap() {
-		stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV6, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap())
+	if !stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV6, key, val.SessionID, &val.AppTimeout, &val.LogFlags, &val.AppTimeoutLogStated, s.recvCap()) && s.growRecvCap() {
+		stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV6, key, val.SessionID, &val.AppTimeout, &val.LogFlags, &val.AppTimeoutLogStated, s.recvCap())
 	}
 	s.genState.recvGenMu.Unlock()
 	err := s.sessions.PutClusterSyncedV6(key, val)

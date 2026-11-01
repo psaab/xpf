@@ -851,6 +851,36 @@ pub(in crate::afxdp) fn ensure_resolver(coord: &mut Coordinator) -> Option<Arc<N
 /// [`bring_up_workers`] shell. The startup-report SENDER is
 /// owned by the shell and passed BY REFERENCE (`startup_report_tx`); each worker
 /// clones it. Verbatim move of the pre-#6240 inline spawn loop.
+/// #18640: each worker's (rank, width) slot in a bring-up set: its rank among the
+/// set's worker ids (ascending, so ranks are 0..width-1 and unique) and the set's size.
+/// HA session sync fans every peer session out to every worker of this set, and a
+/// worker's session table charges a fanned-out copy toward the per-source quota only
+/// when its slot designates it (`SessionTable::session_limit_counted`), so exactly one
+/// worker of the set charges each session.
+pub(super) fn session_limit_shards(
+    worker_ids: impl ExactSizeIterator<Item = u32>,
+) -> BTreeMap<u32, (u32, u32)> {
+    let width = worker_ids.len() as u32;
+    worker_ids
+        .enumerate()
+        .map(|(rank, worker_id)| (worker_id, (rank as u32, width)))
+        .collect()
+}
+
+/// #18640: the launch plan for one worker of the set, carrying its quota slot. A
+/// worker missing from `shards` (cannot happen: both come from the same map) gets
+/// (0, 1), which charges every copy, the pre-#18640 behaviour.
+pub(super) fn worker_launch_plan(
+    worker_id: u32,
+    node_id: u8,
+    binding_plans: Vec<BindingPlan>,
+    poll_mode: crate::PollMode,
+    shards: &BTreeMap<u32, (u32, u32)>,
+) -> WorkerLaunchPlan {
+    let (rank, width) = shards.get(&worker_id).copied().unwrap_or((0, 1));
+    WorkerLaunchPlan::new(worker_id, node_id, binding_plans, poll_mode).with_session_limit_shard(rank, width)
+}
+
 fn spawn_workers(
     coord: &mut Coordinator,
     workers: BTreeMap<u32, Vec<BindingPlan>>,
@@ -870,6 +900,10 @@ fn spawn_workers(
     let mut planned_slots_by_worker: BTreeMap<u32, std::collections::BTreeSet<u32>> =
         BTreeMap::new();
     let mut spawned_worker_ids: Vec<u32> = Vec::new();
+    // #18640: HA session sync fans every peer session out to every worker of
+    // this set, so each worker's quota charges a copy only when its rank in
+    // the set designates it.
+    let session_limit_shards = session_limit_shards(workers.keys().copied());
     for (worker_id, binding_plans) in workers {
         let plan_count = binding_plans.len();
         // #5143: the slot set this worker is REQUIRED to bind. Captured before
@@ -991,8 +1025,13 @@ fn spawn_workers(
         // `Arc::clone` per field, no extra allocation. The bundles borrow
         // `coord` HERE and are then MOVED into the worker body, which
         // never touches `coord` (it must be 'static for the spawn).
-        let launch_plan =
-            WorkerLaunchPlan::new(worker_id, node_id, binding_plans, worker_poll_mode);
+        let launch_plan = worker_launch_plan(
+            worker_id,
+            node_id,
+            binding_plans,
+            worker_poll_mode,
+            &session_limit_shards,
+        );
         let shared_dataplane = WorkerSharedDataplane::from_coord(coord);
         let control_channels = WorkerControlChannels::new(
             commands_clone,
@@ -1399,3 +1438,7 @@ mod dead_worker_wiring_tests;
 #[cfg(test)]
 #[path = "bringup_test_seams_17111_tests.rs"]
 mod test_seams_parity_tests;
+
+#[cfg(test)]
+#[path = "bringup_session_limit_shard_18640_tests.rs"]
+mod session_limit_shard_tests;

@@ -35,7 +35,7 @@ mod flow_cache_invalidation_tests {
         ExpiredSession, SessionDecision, SessionKey, SessionMetadata, SessionOrigin,
     };
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
 
     const REAP_INGRESS_IF: i32 = 24;
 
@@ -166,6 +166,7 @@ mod flow_cache_invalidation_tests {
             // #5147: no dynamic-neighbor dependency in this test entry.
             neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
             fabric_established: false,
+            dest_owner_memo: Default::default(),
         });
     }
 

@@ -136,7 +136,7 @@ mod roam_snapshot_tests;
 mod poison_tests;
 
 pub(crate) use engine::{
-    DecapError, DecapOutcome, EncapError, EncapOutcome, InitiationAction, InstallSessionError,
+    DecapError, EncapError, EncapOutcome, InitiationAction,
     PeerTable, WgEngine, WgEngineConfig, WgPeerConfig,
 };
 pub(crate) use scratch::WgWorkerScratch;

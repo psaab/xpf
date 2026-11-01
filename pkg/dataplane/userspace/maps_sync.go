@@ -527,7 +527,7 @@ func (m *Manager) syncUserspaceClassifierMapsLocked(snapshot *ConfigSnapshot) er
 	if err := checkInterfaceNATAddressCapacity(len(natV4), len(natV6)); err != nil {
 		return err
 	}
-	proxyV6 := buildDesiredProxyNDPAddressSets(snapshot)
+	proxyV6 := buildDesiredProxyNDPAddressSets(snapshot, m.rgPrimaryProvider)
 	if err := checkProxyNDPAddressCapacity(len(proxyV6)); err != nil {
 		return err
 	}
@@ -1670,17 +1670,47 @@ func pruneNATAddressKeys(
 // nothing: there is no domain to key them under, and guessing domain 0
 // would pass NDP in a foreign domain. Parse failures are skipped
 // exactly as the installer skips them.
-func buildDesiredProxyNDPAddressSets(snapshot *ConfigSnapshot) map[userspaceLocalV6Key]struct{} {
+// #17742: clustered proxy entries are filtered by the manager's live
+// local-primary provider using one Config.RefRGIndexFor index, the
+// precomputed form of the config ownership resolver used by the installer.
+// This avoids publishing shim targets for an RG the local node does not own;
+// unknown ownership keeps the installer's existing fail-open behavior.
+//
+// #17743: proxy entries and snapshot rows can spell one kernel interface
+// differently. Resolve both through the same config resolver as the kernel
+// installer; resolve snapshot names once because each call builds tunnel data.
+func buildDesiredProxyNDPAddressSets(snapshot *ConfigSnapshot, primary RGPrimaryProvider) map[userspaceLocalV6Key]struct{} {
 	desired := make(map[userspaceLocalV6Key]struct{})
 	if snapshot == nil || snapshot.Config == nil {
 		return desired
 	}
-	for _, entry := range snapshot.Config.Security.NAT.ProxyARP {
+	cfg := snapshot.Config
+	var refRG *config.RefRGIndex
+	if cfg.Chassis.Cluster != nil && primary != nil && len(cfg.Security.NAT.ProxyARP) > 0 {
+		refRG = cfg.RefRGIndexFor()
+	}
+	interfaceKernelNames := make([]string, len(snapshot.Interfaces))
+	for i, iface := range snapshot.Interfaces {
+		interfaceKernelNames[i] = snapshot.Config.ResolveKernelIfName(iface.Name)
+	}
+	for _, entry := range cfg.Security.NAT.ProxyARP {
 		if entry == nil {
 			continue
 		}
-		for _, iface := range snapshot.Interfaces {
-			if iface.Name != entry.Interface || iface.AdminDisabled {
+		if refRG != nil {
+			if rgID, owned := refRG.Lookup(entry.Interface); owned && rgID > 0 {
+				localPrimary, known := primary(rgID)
+				if known && !localPrimary {
+					continue
+				}
+			}
+		}
+		entryKernel := snapshot.Config.ResolveKernelIfName(entry.Interface)
+		if entryKernel == "" {
+			continue
+		}
+		for i, iface := range snapshot.Interfaces {
+			if iface.AdminDisabled || interfaceKernelNames[i] != entryKernel {
 				continue
 			}
 			for _, cidr := range entry.Addresses {

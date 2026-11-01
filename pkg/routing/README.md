@@ -32,7 +32,7 @@ which makes each domain unit-testable with a fake (see `rules_test.go`'s
 | File | Domain | Owns |
 |------|--------|------|
 | `routing.go` | `Manager` façade | sole `*netlink.Handle`, domain refs |
-| `vrf.go` | `vrfManager` | VRF lifecycle + `BindInterfaceToVRF`; own `mu` + tracked set |
+| `vrf.go` | `vrfManager` | VRF lifecycle + `BindInterfaceToVRF`; own `mu` + tracked set. `VRFMasterMoveSeq(name)` (#18597) counts, per link, the IFLA_MASTER changes this manager actually made (a successful `LinkSetMaster` or `LinkSetNoMaster`); an idempotent bind of a link already in its VRF and a failed bind do not count. pkg/daemon restarts the cluster heartbeat only when the control link's count moved |
 | `vrf_miss_terminator_9819.go` + `rule_l3mdev_linux.go` | (part of `vrfManager`) | the #9819 VRF miss terminator (`l3mdev unreachable`, pref 2000), installed before any VRF device exists; the raw FRA_L3MDEV request |
 | `routes.go` | `routeReader` | incremental and buffered kernel routing-table reads (`routeLister`) |
 | `routeformat.go` | free fns | Junos `show route` formatters |
@@ -530,12 +530,14 @@ same family and priority and does not validate DSCP/action fields.
   because it is a LOOKUP rule: a lookup that misses the VRF's table moves on
   down this list.
 - `1001–1999`: rib-group **return rules** (#9819, narrowed by #11062,
-  LPM-ordered by #14975, authorized by #16616). For each family in which a
-  source instance leaked, install an iif/oif pair per prefix leaked by a
-  different instance — but only when the source's own rib-group for that
-  family names the peer's rib (`<peer>.inet.0` / `<peer>.inet6.0`) in its
-  import-rib list. Tenants leaking only into main get no tenant->tenant
-  return. Priority is `pref = config.RibGroupReturnRulePriority(prefix-len, addr-bits)`
+  LPM-ordered by #14975, authorized by #16616/#17705). For each family in
+  which a lookup-source instance leaked, install an iif/oif pair per prefix
+  leaked by a different instance — but only when the destination owner's
+  rib-group for that family names the lookup-source rib
+  (`<source>.inet.0` / `<source>.inet6.0`) in `import-rib`. Thus A's group
+  naming `b.inet.0` authorizes B-context returns to A's prefixes, not A->B.
+  Tenants leaking only into main get no tenant->tenant return. Priority is
+  `pref = config.RibGroupReturnRulePriority(prefix-len, addr-bits)`
   (1001 + (bits−len)×28 for IPv4, ×7 for IPv6; longer prefixes first):
   `to <peer-prefix> iif vrf-<instance> lookup <peer-table>` and
   `to <peer-prefix> oif vrf-<instance> lookup <peer-table>`. The pre-#14975
@@ -1313,18 +1315,22 @@ row misleads a human, a missing FIB entry misdirects a packet.
 The snapshot builder uses **preference-aware same-prefix arbitration**. For
 each canonical `(table, family, prefix)`, it finds the best configured route.
 For learned BGP, OSPF, IS-IS, and RIP routes, it compares that preference with
-FRR's default distances: external BGP 20, OSPF 110, IS-IS 115, and RIP 120.
-RTPROT_BGP does not distinguish eBGP from iBGP.
-A configured route at or below that distance remains sole. If the configured
-route is worse, both rows remain: a fallback at preference 200 or better is
-ordered behind the learned route by stamping the learned row with its protocol
-distance; a fallback above 200 already follows the learned row at preference
-200. Static and other learned routes keep the existing rule: config at 200 or
-better remains sole, while a worse configured fallback stays beside the import
-at preference 200. The Rust FIB selects the first live tier by preference, and
-a later live configured backup remains usable if an earlier tier is unresolved
-(#11316). If no tier is live, the preferred tier's existing drivable-member
-fallback preserves neighbor resolution.
+their Junos-scale preferences: BGP 170, OSPF 10 (conservative internal), IS-IS
+15 (the more-preferred level because RTPROT metadata does not distinguish
+L1/L2), and RIP 100. This is intentionally distinct from zebra's FRR distances:
+IS-IS is fixed at 115, so #17735 rejects same-table active RIP+IS-IS and static
+preferences 15..114 with IS-IS at strict commit, and withholds the conflicting
+route on tolerant render. RTPROT_BGP does not distinguish eBGP from iBGP.
+A configured route at or below the Junos-scale distance remains sole. If the
+configured route is worse, both rows remain: a fallback at preference 200 or
+better is ordered behind the learned route by stamping the learned row with
+its Junos-scale preference; a fallback above 200 already follows the learned
+route at preference 200. Static and other learned routes keep the existing
+rule: config at 200 or better remains sole, while a worse configured fallback
+stays beside the import at preference 200. The Rust FIB selects the first live
+tier by preference, and a later live configured backup remains usable if an
+earlier tier is unresolved (#11316). If no tier is live, the preferred tier's
+existing drivable-member fallback preserves neighbor resolution.
 
 ### Known limitation
 

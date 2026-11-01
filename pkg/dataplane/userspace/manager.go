@@ -336,14 +336,12 @@ type Manager struct {
 	deferredReplayRebinds  []PolicySessionRebind
 	deferredReplayReady    bool
 	deferredReplayInFlight bool
-	// lastSnapshotRejectReasons holds the #3261 diagnostic: the reasons the
-	// most recently built snapshot carries unrepresentable policy content that
-	// the helper integrity preflight rejects (previous-good retained, or
-	// fresh-boot default-deny — never fail-open). Set under m.mu at every full
-	// snapshot build, surfaced via ProcessStatus.LastSnapshotRejectReasons and
-	// the xpf_userspace_policy_content_rejected gauge so the Go/Rust skew
-	// (ForwardingSupported=true while the helper rejected the snapshot) is
-	// observable. nil/empty means the last build was fully representable.
+	// lastSnapshotRejectReasons holds the most recent Go-side policy-content
+	// diagnostics: whole-snapshot refusal reasons and per-rule DNS quarantine
+	// warnings. Set under m.mu for each full snapshot build and surfaced via
+	// ProcessStatus.LastSnapshotRejectReasons plus the established content
+	// diagnostic gauge. A DNS quarantine does not mean the snapshot was rejected;
+	// current Rust helpers enforce the affected rule as deny and load siblings.
 	lastSnapshotRejectReasons []string
 	// lastZoneIDCollisions holds the #3719 diagnostic: the zones the most
 	// recent snapshot build QUARANTINED because their StableZoneID collided
@@ -398,6 +396,12 @@ type Manager struct {
 	// a feed change so the duplicate-publish gate lets the refresh through.
 	feedOverlay map[string][]string
 	haGroups    map[int]HAGroupStatus
+	// transferPreActive (#18559) holds the data RGs whose helper forwarding
+	// is opened ahead of the cluster promotion while this node requests a
+	// transfer, each with its backstop deadline. It is an overlay on the
+	// helper-facing view only: haGroups and the rg_active BPF map keep the
+	// cluster truth. See manager_ha_preactivate.go. Guarded by m.mu.
+	transferPreActive map[int]time.Time
 	// rgPrimaryProvider reports local RG primacy for the route builder
 	// (#15742). Nil means no provider wired yet (boot window before
 	// applyDataplaneAndHACore, standalone, or tests): the builder then
@@ -407,6 +411,11 @@ type Manager struct {
 	// construction and refreshed in applyDataplaneAndHACore, mirroring
 	// frrHADemotionState's IsLocalPrimary source.
 	rgPrimaryProvider func(rgID int) (primary bool, known bool)
+	// heldRGReleaseFn is told which RGs an acknowledged helper inventory
+	// just DROPPED from the #18620 connected-row hold, so the owner of the
+	// routes-only publish can withdraw their connected rows. Called under
+	// m.mu: it must not block and must not take m.mu. Guarded by m.mu.
+	heldRGReleaseFn func(rgIDs []int)
 	// rgProviderWired latches true once SetRGPrimaryProvider installs a
 	// non-nil provider (#15919). The daemon gates clustered snapshot
 	// builds on RGProviderWiredFor so the nil-provider window cannot
@@ -706,6 +715,11 @@ type Manager struct {
 	// the session path — without this the #9629 sender would ship bound by
 	// nothing CI runs, the #6994 failure mode).
 	sessionRequestHook func(ControlRequest, *ProcessStatus) error
+	// ambiguousSyncZoneWarned records truncated session zone ids already
+	// reported as ambiguous (#18515), so the warning fires once per value per
+	// process (never reset; bounded by the 65536 possible values).
+	// Guarded by mu.
+	ambiguousSyncZoneWarned map[uint16]struct{}
 	// bumpFIBGenerationHook replaces the shim's generation-map bump in tests
 	// that need a nonzero generation without loading privileged BPF maps.
 	// Production leaves it nil.
@@ -822,6 +836,14 @@ type Manager struct {
 	// nil pointer ⇒ omit the field from the wire (userspace-dp
 	// defaults to 0xff per #1620 plan §4.3).
 	coldPathSampleMask *uint64
+
+	// #17736: Linux names of parents quarantined by the RX-VLAN audit.
+	// refreshAttachAdmission refuses these until the audit confirms that
+	// the tag-strip hazard is gone. Guarded by mu.
+	rxVlanQuarantinedParents map[string]bool
+	// rxVlanPreconditionCheck is a test seam. Production uses
+	// dataplane.EnsureRxVlanParsePreconditions directly.
+	rxVlanPreconditionCheck func(string) (error, error)
 }
 
 // #1620: set the cold-path sample mask. Called by the daemon at
@@ -832,6 +854,26 @@ func (m *Manager) SetColdPathSampleMask(mask *uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.coldPathSampleMask = mask
+}
+
+// SetRxVlanParentQuarantined records whether the RX-VLAN audit has detached
+// parentLinuxName because its RX tag-strip precondition could not be met.
+// The link-refresh reconciler consults this state before attempting an XDP
+// attach; clearing it is safe only after the audit has confirmed recovery.
+func (m *Manager) SetRxVlanParentQuarantined(parentLinuxName string, quarantined bool) {
+	if m == nil || parentLinuxName == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if quarantined {
+		if m.rxVlanQuarantinedParents == nil {
+			m.rxVlanQuarantinedParents = make(map[string]bool)
+		}
+		m.rxVlanQuarantinedParents[parentLinuxName] = true
+		return
+	}
+	delete(m.rxVlanQuarantinedParents, parentLinuxName)
 }
 
 // RGPrimaryProvider reports whether this node is primary for rgID and
@@ -857,6 +899,19 @@ func (m *Manager) SetRGPrimaryProvider(provider RGPrimaryProvider) {
 	} else if !m.rgProviderWired && wasWired {
 		slog.Warn("userspace: RG primary provider cleared; clustered snapshot builds are gated until it is rewired (#15919)")
 	}
+}
+
+// SetHeldRGReleaseFunc wires the callback that withdraws the connected rows
+// of RGs leaving the #18620 hold (helperActiveRGsLocked). Whichever path gets
+// the helper to acknowledge a deactivation fires it: the demotion edge, the
+// reconcile retry after a failed write, or a replay. Nil disables it.
+func (m *Manager) SetHeldRGReleaseFunc(fn func(rgIDs []int)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.heldRGReleaseFn = fn
 }
 
 // RGProviderWiredFor reports whether a snapshot build for cfg may rely
@@ -905,7 +960,8 @@ func (m *Manager) rgPrimaryNowLocked() RGPrimaryProvider {
 	if m == nil {
 		return nil
 	}
-	return m.rgPrimaryProvider
+	// #18559: route builders see a transfer pre-activation as local primacy.
+	return m.routeRGPrimaryLocked()
 }
 
 const rstSuppressionRetryBackoff = 5 * time.Second

@@ -872,27 +872,32 @@ step. Both are required — neither sees the other's case:
   the helper snapshot, while the shared static-route exclusion map gives the
   show surfaces the same `NOT INSTALLED` reason. The Rust snapshot builder also
   fails closed on a mismatched literal before its family-specific parser runs.
-- **Protocol distances on the Junos scale (#16620).** Static
+- **Protocol distances on the Junos scale (#16620/#17735).** Static
   `preference` values are Junos preferences and render VERBATIM as the
-  FRR static distance (see the #12060 range note below), so the dynamic
-  protocols are pinned to their Junos preferences in every stanza
+  FRR static distance (see the #12060 range note below), so protocols with
+  FRR distance knobs are pinned to their Junos preferences in every stanza
   (global and per-VRF): OSPF/OSPFv3 `distance ospf|ospf6 intra-area 10
   inter-area 10 external 150`, BGP `distance bgp 170 170 170` (external,
-  internal, local — Junos has one BGP preference), RIP `distance 100`.
-  IS-IS has NO distance knob in FRR stable/10.6 (no CLI/YANG leaf;
-  isisd sends no ZAPI distance), so zebra keeps its fixed 115 against
-  Junos 15 (L1) / 18 (L2): statics at preference 15..115 (L1) /
-  18..115 (L2) order differently against IS-IS than on Junos — the one
-  bounded residual. `protocol_distance_16620.go` owns the constants;
-  `JunosProtocolDistance` is the shared table the helper FIB
-  (`pkg/dataplane/userspace` learned-route gap-fill) compares against,
-  and `protocol_distance_16620_test.go` proves the zebra winner equals
-  the Junos winner for every static preference 1..254 outside that
-  IS-IS window (`preference 180` loses to iBGP, `preference 12` loses
-  to OSPF internal). Internal distances stay consistent on the new
-  scale without moving: DHCP 200 and cluster Null0 250 remain worse
-  than a default static (5), and the ip-monitoring overlay at 1 still
-  beats everything.
+  internal, local — Junos has one BGP preference), and RIP `distance 100`.
+  FRR stable/10.6 has NO IS-IS distance knob (no CLI/YANG leaf; isisd sends
+  no ZAPI distance), so zebra fixes IS-IS at 115 rather than Junos 15 (L1) /
+  18 (L2). Consequently, same-table active RIP+IS-IS is rejected at strict
+  commit: zebra would select RIP 100 over IS-IS 115, reversing Junos's
+  IS-IS-over-RIP order. A tolerant load warns and the FRR renderer withholds
+  RIP, preserving the Junos-preferred IS-IS route.
+  Static preferences 15..114 are also rejected when IS-IS is active: no
+  FRR distance can make such a static lose to fixed IS-IS 115 while still
+  preserving the user's Junos ordering, and the tolerant renderer withholds
+  that static route. This applies to qualified-next-hop preferences too.
+  The helper FIB uses Junos-scale distances, not zebra's rendered values;
+  for imported IS-IS routes it conservatively uses preference 15 because
+  kernel protocol metadata does not identify the L1/L2 level. The
+  `protocol_distance_16620_test.go` arbitration proof now checks every
+  static preference against independent Junos values and counts an IS-IS
+  divergence only where the #17735 fail-closed gate refuses it.
+  DHCP 200 and cluster Null0 250 remain worse than a default static (5),
+  and the ip-monitoring overlay at 1 still beats everything. Zero (omitted)
+  preference renders explicitly as Junos distance 5 (#17699).
 - **FRR static-distance range (#12060).** Route-level and qualified-next-hop
 - **Floating static via `qualified-next-hop` (#3871).** A static route's
   `qualified-next-hop <gw> { preference N; metric M; }` is the Junos floating-
@@ -2032,6 +2037,26 @@ step. Both are required — neither sees the other's case:
   shutdown) cancels in-flight process groups and reaps the retry
   goroutine; `DisableDegradedRetry()` is the one-shot (`xpfd cleanup`)
   configuration.
+- Guarded apply (#18561): `ApplyFullIfCurrent(fc, current)` is
+  `ApplyFull` for a config rendered before the caller released the lock
+  that orders renders (the daemon's HA reconcile renders under applySem and
+  reloads after releasing it). `current` is evaluated before the retry
+  pre-cancel and again under `reloadMu`, immediately before the
+  managed-section write; when it reports false nothing is written or
+  reloaded and `ErrFRRApplySuperseded` is returned (a superseded `Clear`
+  keeps the narrowing gauges). `buildMu` serializes every `ApplyFull` /
+  `ApplyFullIfCurrent` / `Clear` across build AND commit: the build mutates
+  manager-wide state (quarantine set, #16625 RIP group index, narrowed
+  chains), and before #18561 only the daemon's applySem kept two builds
+  apart. `ApplyFullIfCurrent` judges its predicate under `buildMu` before
+  building, so a superseded render never touches the gauges.
+  `WriteGeneration()` (lock-free) moves only on a managed-section write that
+  happened; `UnconditionalWriteGeneration()` moves only on such a write made
+  without a predicate (`ApplyFull`, `Clear`), which is what a caller that
+  orders its own conditional renders compares, so its own older render's
+  write never drops its newer one; `BuildBarrier()` waits out any apply in flight (the daemon's
+  factory reset calls it after raising its flag). Lock order: buildMu ->
+  reloadMu -> retryMu.
 - Benign-reload re-check (#15203, A12-06): when the primary `--reload`
   fails (and frr-pythontools is present), `reloadLocked` re-checks with
   `frr-reload.py --test --stdout` before falling back. Removing IS-IS

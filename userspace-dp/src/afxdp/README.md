@@ -158,6 +158,36 @@ sync.
         the Time Exceeded / Packet-Too-Big builders, which resolve the same
         logical unit (#6102 — before that fix they wrongly keyed the physical
         index).
+      - **#18174 — the SOURCE of a generated ICMP error on a RETH:** every
+        builder above sources the reply from `forwarding.egress[unit]
+        .primary_v4/v6`. For an untagged RETH unit Go emits TWO rows on one
+        ifindex: the base row (`reth1`, kernel-observed, carrying only the
+        per-node `169.254.<rg>.<node+1>/32` RETH address and the kernel
+        fe80 address) BEFORE the unit row (`reth1.0`, carrying the LAN
+        address). Each row picks first non-link-local, else first, but the
+        shared-ifindex merge in `forwarding_build/interfaces.rs` was
+        first-row-wins, so the base row's link-local FALLBACK shadowed the
+        unit's address and the firewall's own Time Exceeded answered as
+        169.254.2.1 (traceroute/mtr hop 1). `merge_undesignated_primary` now
+        lets a non-link-local pick replace a link-local incumbent; between
+        two non-link-local (or two link-local) undesignated picks the first
+        row still wins, and a designated primary (#16513) still beats both.
+        `primary_v4/v6` is not only the generated-error source: on an
+        untagged RETH unit every consumer below flips from the per-node
+        `169.254.<rg>.<node+1>` / fe80 address to the unit address — interface
+        source NAT toward that unit (`forwarding/nat.rs`), the WireGuard outer
+        source (`frame/wg.rs`), ingress-interface local delivery
+        (`forwarding/local_delivery.rs`), the fabric owner-RG gate for local
+        addresses (`forwarding/fabric.rs::owner_rg_for_local_address`) and the
+        peer-import translated-address check (`ha/session_import.rs`). Each was
+        reading an unroutable, per-node address there (interface SNAT handed
+        it out as a translation), so this is the intended identity; the
+        169.254 address is still delivered locally through the FIB local route.
+        Cell: `interface_snat_toward_reth_unit_uses_unit_address_18174`.
+        Cells: `shared_ifindex_reth_base_link_local_does_not_shadow_unit_address_18174`
+        (`forwarding_build/primary_address_15155.rs`) and
+        `hop_one_time_exceeded_is_sourced_from_lan_address_not_reth_link_local_18174`
+        (`tests_mtr_icmp_errors_18174.rs`, through the poll path).
       - **#3609 — per-interface host-inbound override:** the local-delivery
         host-inbound gate (`poll_descriptor/filter.rs::host_inbound_gated_lo0_action`
         → `forwarding::host_inbound_admits_iface_for_destination`) looks up
@@ -948,11 +978,91 @@ sync.
     the translation boundary. The queued policy gate skips reverse-zone
     policy only for that validated PMTUD disposition and only when resolution
     is `ForwardCandidate`; route, HA, and fabric dispositions remain
-    authoritative. Matching NAT'd Time-Exceeded and other non-PMTUD errors
-    still use the #9948 policy gate, and a wrong-zone PTB still follows zone
-    policy. The untranslated #10286 path is type-scoped by #10684: v4 types
-    4/5 retain arrival-to-egress policy; the path-error and v6 RELATED coverage
-    is unchanged.
+    authoritative. A wrong-zone error still follows zone policy (#9948). The
+    #10286 path is type-scoped by #10684: v4 types 4/5 retain
+    arrival-to-egress policy.
+  - **#18174 — NAT'd Time Exceeded / Destination Unreachable are RELATED
+    too (same-family):** #10666 admitted only NAT'd PMTUD, so every NAT'd
+    Time Exceeded (each traceroute/mtr hop past an SNAT firewall) and every
+    NAT'd Destination Unreachable (a UDP traceroute's final port
+    unreachable) was matched, reversed and then default-denied on the
+    reverse `wan -> lan` pair — live on loss and tcp as `POLICY_DENY
+    src=<hop> dst=<LAN host>` for every hop, mtr showing `???` past hop 1.
+    The same-family arm now applies ONE type set to translated and
+    untranslated matches alike (`outer_is_related_path_error`: v4 3/11/12,
+    v6 1-4) with the same direction-derived zone check. The builders are
+    the same code for PMTUD and Time Exceeded, so the narrower NAT'd scope
+    bought no safety; the per-session F-077 budget and the arrival-zone
+    check bound both. The widening applies to FORWARD quotes only (the new
+    `EmbeddedIcmpMatch::quoted_is_reply == false`: errors the session's far
+    side sends back about the client's packets). A NAT'd REPLY-quote error
+    keeps #10666's PMTUD-only scope: the outbound SNAT error (#6474 — the
+    internal host originates it and the builder re-NATs it to the public
+    identity) and its already-re-NAT'd fabric hand-off at the peer (#13772,
+    where `outbound_snat` is deliberately false) remain a `lan -> wan`
+    policy decision on the internal sender (#13649). A wrong-zone forgery (the retargeted
+    `poll_descriptor_embedded_icmp_reversal_zone_policy_denies_9948`), a
+    NAT'd Redirect, HAInactive and every non-ForwardCandidate disposition
+    stay gated. A FabricRedirect is still adjudicated on the peer — and
+    the peer could not match it at all: the redirecting node had already
+    reversed the frame (outer dst = client, quote in pre-NAT form), the
+    quote hit the forward session's CANONICAL reply alias in the
+    forward-NAT arm (`reply_matches_forward_session`), and the #14665
+    outer-destination gate expected `rewrite_src` (the SNAT address), so
+    every split-RG SNAT error — traceroute AND PMTUD — declined to
+    `NoMatch` at the LAN-RG owner. At FABRIC ingress only, a quote whose
+    source equals the forward key's pre-NAT source now expects that source
+    as the outer destination (`nat_match_v4.rs`/`nat_match_v6.rs`); the
+    match is then a forward quote whose expected zone (the forward egress
+    zone) equals the authenticated WAN stamp, and the RELATED rule admits
+    it.
+    **Split RGs, live (tcp, RG2 on node1):** two more defects the harness
+    shape above could not see. (a) The WAN-RG owner's session for the probe
+    is its own FABRIC-INGRESS row, whose reverse half production synthesis
+    stores as a "fabric return" FabricRedirect stamped with the FORWARD
+    ingress zone (`lan`); the embedded arm reused that cached redirect, so
+    the LAN owner saw a `lan` arrival, failed the RELATED check and
+    default-denied every hop `lan -> lan` (live: `POLICY_DENY src=<hop>
+    dst=10.0.62.102 ingress_zone=lan egress_zone=lan` on fw1).
+    `restamp_embedded_fabric_redirect` now re-stamps an embedded error's
+    FabricRedirect with the zone it ACTUALLY arrived in (never on a fabric
+    arrival). (b) Hop 1: the LAN owner hands transit to the WAN owner over
+    the fabric, so it is the router, but the session-hit and session-miss
+    Time Exceeded sites only covered `ForwardCandidate`; the fabric build
+    refused the expiring probe (`fabric_redirect_build_failed`) and the peer
+    skips the decrement on fabric ingress, so nobody answered. The poll
+    tail now answers a non-fabric, non-injected FabricRedirect whose TTL /
+    hop limit would expire with a local Time Exceeded (the flow-cache hit
+    path already did, #3779), and both #7770 punt-seed sites skip the seed
+    for such a packet so it leaves no session row behind (a punt seed emits
+    no HA delta; the
+    FabricRedirect twin of the #14643 ForwardCandidate rollback). #18562:
+    the punt seed is worker-local, so the FIRST error of a new split flow
+    usually lands on ANOTHER worker of the LAN owner (the fabric NIC hashes it
+    independently of the LAN probe) before the WAN owner's HA delta is
+    imported; that worker's table and the shared maps were empty, so it
+    returned NoMatch and was default-denied `wan -> lan`. Each worker now
+    mirrors its forward punt seeds into the node's read-only
+    `PuntSeedDirectory` (`session/punt_seed_directory.rs`, maintained at the
+    table's `insert_record` / `remove_entry` / in-place-rewrite / `Drop`
+    choke points; sharded, O(1) amortized, never blocks a worker), and the session-fallback arm consults it last, only for a
+    fabric-ingress FORWARD quote (`icmp_embed::punt_seed_forward_quote_match`);
+    every RELATED gate applies unchanged. Cells:
+    `split_rg_first_error_on_another_worker_reaches_lan_host_18174`
+    (un-ignored), `cross_worker_punt_seed_never_matches_off_fabric_18562`,
+    and the lifecycle cells in `session/punt_seed_directory_18562_tests.rs`.
+    The #18174 cells:
+    `split_rg_live_shape_time_exceeded_reaches_lan_host_18174` (node1's own
+    LAN-created row, node0's fabric-ingress row, both via the poll path),
+    `split_rg_after_establishment_synced_import_reaches_lan_host_18174`
+    (node1 holds the row only as an HA import through
+    `synthesized_synced_reverse_entry` + `WorkerCommand::UpsertSynced`), and
+    `split_rg_hop_one_time_exceeded_is_answered_by_lan_owner_18174`. NAT64
+    (cross-family) RELATED admission is unchanged — still PMTUD only.
+    Cells: `tests_mtr_icmp_errors_18174.rs` (real ICMP-echo and UDP probes
+    through the poll path, v4+v6, SNAT and non-NAT, single node and the
+    split-RG fabric chain across both nodes) and
+    `poll_descriptor_snat_time_exceeded_admitted_as_related_18174`.
   - **#9528 — both ICMP-error arms run AFTER the interface input filter and
     the PBR verdict:** each arm `continue`s with the descriptor consumed, and
     each used to run ahead of a gate below it. The #6472 arm ran before the
@@ -1144,15 +1254,14 @@ sync.
     unknown tunnel kind) fails open to `Forward`.
     **Per-peer WG underlay (#2845):** for WireGuard the underlay MTU is
     NOT one-per-interface — different peers of one wg endpoint can have
-    different endpoints / transport routes / underlay MTUs. The dispatcher
-    threads the pre-encap inner destination into `post_transform_inner_mtu`,
-    which passes it to `frame::wg_endpoint_physical_outer_mtu`. That helper
-    selects the SAME peer the encap path will (`engine.peer_for_dest` —
-    AllowedIPs LPM on the inner destination) and resolves the physical
-    underlay MTU via THAT peer's endpoint route, so the advertised inner PMTU
-    matches the underlay the encap guard will actually admit the packet onto.
-    When the inner destination is unavailable, no live engine is present, or
-    no peer covers it, it falls back to the first peer with an endpoint (the
+    different endpoints / transport routes / underlay MTUs. `post_transform_inner_mtu`
+    threads the pre-encap inner destination to `frame::wg_selected_peer_outer`,
+    which selects the SAME peer as the encap path (`engine.peer_for_dest` —
+    AllowedIPs LPM on the inner destination) and resolves that peer's physical
+    underlay route. The pad-aware WG inner-MTU calculation therefore matches
+    the underlay the encap guard will actually admit the packet onto. When the
+    inner destination is unavailable, no live engine is present, or no peer
+    covers it, selection falls back to the first peer with an endpoint (the
     pre-#2845 per-interface behaviour — byte-identical when all peers share
     one underlay). A covering peer with NO endpoint resolves to the
     conservative logical-ifindex MTU rather than borrowing a different peer's
@@ -2034,6 +2143,172 @@ fires for every fixture built on a default `Coordinator::new()`; the six reds
 are real but their count is a property of the fixture population as much as of
 the shape.) Shape (ii) is the one #8171 already established for the entries
 themselves, and it is empirically the cheap one.
+
+## Established cache-hit cost (#18533)
+
+Two per-packet costs on the established flow-cache hit path, outside the
+session table, were removed in #18533 (the session-table half is in
+`session/README.md`, "Established cache-hit cost"):
+
+- **Zero-hop-limit gate (`poll_descriptor/mod.rs`, #16841).** The gate runs
+  before decap/session/cache for every valid packet. Its locality verdict
+  is a full FIB walk (`lookup_forwarding_resolution`: table-name string
+  compares, connected-prefix and route scans), and the #16841 call site
+  computed it eagerly, so every IPv4 packet and every ordinary IPv6 packet
+  paid it — the `lookup_forwarding_resolution_v4_inner` self time plus
+  `memcmp` (~5.7% of worker cycles in the loss -P8 profile) that the
+  profile charged to `poll_binding_process_descriptor_with_injection`.
+  `zero_hop_limit_local_drop` now takes the verdict as a closure and runs it
+  last, after the knob and `packet_hop_limit_v6 == Some(0)` checks; only a
+  hop-limit-0 IPv6 packet walks the FIB. Verdicts are unchanged.
+- **One flow-cache lookup per hit (`poll_descriptor/flow_cache_hit.rs`,
+  #16217 fold B6).** The fabric-adoption mark revalidation used a
+  side-effect-free `peek_entry` before the real lookup: a second set hash
+  and way scan on every hit. The lookup matches the same identity (key,
+  binding-substituted ingress, logical ingress) and writes neither input
+  (`fabric_established`, `decision.resolution`), so the revalidation now
+  reads the entry the lookup returned and `peek_entry` is gone.
+
+Cells: `tests_icmp_zero_hop_15707.rs`
+`zero_hop_gate_resolves_locality_only_for_ipv6_hop_limit_zero_18533` (the
+helper evaluates the closure only for hop-limit-0 IPv6 with the knob unset),
+`poll_descriptor_structure_13081_tests.rs`
+`zero_hop_gate_fib_walk_stays_in_the_lazy_closure_18533` (the call site keeps
+the walk inside the closure), and `flow_cache_hit_tests.rs`
+`live_established_cache_hit_hashes_the_flow_key_twice_18533` (the whole live
+hit stage hashes the flow key twice: flow-cache set index + session record).
+
+Round 2 (#18534), against the integ6 loss -P8 profile
+(`connected_owner_index_lookup` 2.3% + `connected_owner_rg_for_target_in_table`
+1.2%, `ingress_routing_domain` 1.9%, `src_ip_on_link_for_ingress` 1.0%,
+`learn_dynamic_neighbor_with_mac` 1.0%):
+
+- **Forwarding snapshot identity.** `ForwardingState::publish_epoch` names
+  a forwarding state's contents. The coordinator stamps it on every
+  `publish_runtime_view` — its only path that hands workers a new
+  forwarding `Arc` — counting up from 1, and a validation-only republish
+  keeps it (same `Arc`). The one worker-local derivation, the ct-slice
+  fabric swap in `run_ct_slice` (the published tables with `fabrics`
+  replaced by the coordinator's live fabric set), restamps its copy with
+  `ForwardingState::restamp_local_derivation`: a process-wide counter with
+  the high bit set (`LOCAL_DERIVATION_EPOCH_BIT`), a range the coordinator
+  never reaches. No stamped state is mutated afterwards, so two
+  worker-visible states with different contents never share a nonzero
+  epoch, and per-flow memos of pure functions of the forwarding tables key
+  on it. The swap restamps rather than zeroing because 0 means "never
+  stamped" (fixtures mutate their state in place) and disables every memo
+  below until the next coordinator publish; a fresh epoch costs one
+  re-resolution per flow, the same as a publish.
+- **Destination-owner RG memoised per flow (HA validator).** The
+  `ForwardCandidateEgressDeparted` destination-owner arm resolved the
+  destination's connected owner on every ForwardCandidate hit of a
+  clustered node: `connected_owner_index_current` (a sum over every
+  interface's prefix list) plus one `FastMap` probe per prefix length with
+  `&str` table compares (9 probes for a /24 destination, up to 66 v4 / 258
+  v6 for a routed one). `FlowCacheEntry::destination_owner_rg` memoises the
+  answer per `(publish_epoch, target)` in the entry (`DestOwnerMemo`, a
+  `Cell`), and the hit hands it to
+  `cached_flow_decision_invalid_reason_for_cached_flow` as a lazy closure.
+  Only WHICH RG owns the destination is memoised; whether that RG is active
+  is still judged against the live HA state per packet, so an RG departure
+  (which does not publish a new forwarding snapshot) is seen on the next
+  packet.
+- **A cached FabricRedirect yields to its now-local destination RG
+  (#18566).** The same memo serves the FabricRedirect twin of that arm,
+  `fabric_redirect_destination_now_local`: a cached FabricRedirect hit on
+  DIRECT ingress whose destination's connected owner RG is known and now
+  forwarding-active on this node is superseded
+  (`CachedDecisionInvalid::FabricRedirectDestinationNowLocal`, counted
+  under its own `post_hit_fabric_redirect_destination_now_local` arm so a
+  re-home that does not stick is visible), and the slow path re-homes the
+  flow to the local egress (`reresolve_stored_session`). No other fence
+  caught it: the RG-epoch fence re-checks the entry's STAMP owner, which for
+  a `wan -> lan` reverse flow is the session's WAN RG, not the LAN RG being
+  activated; and the activation's route republish runs before `rg_active`
+  (#16270), so the generation fence can predate the activation. On loss a
+  per-RG move left fw1 fabric-redirecting RG2's ACKs to fw0, which dropped
+  them as `ha_inactive`, for over 20 s. Fabric arrivals (owned by the #10314
+  and owner-active arms), unknown destination owners and standalone nodes
+  are unchanged; a FabricRedirect hit pays one HA-map lookup. The arm fires
+  only where the slow path re-homes the flow into an entry the cache then
+  keeps (`fabric_redirect_rehome_agrees`); anywhere else evicting re-seeds
+  the redirect, or re-homes into a candidate the next hit evicts, once per
+  packet. Concretely: the entry's stamp owner must be unknown or active here
+  (a peer-owned stamp is the #16222 option-B redirect, and a re-homed
+  ForwardCandidate under it would be evicted by
+  `forward_candidate_owner_departed` on every hit), and the fresh
+  HA-enforced answer must be a ForwardCandidate or MissingNeighbor via the
+  target's connected interface and not the fabric. That keeps the redirect
+  while the FIB still carries the connected row as peer-owned (built before
+  the activation; the arm waits for the republish) and for a self-targeting
+  alias reverse, whose fresh answer is LocalDelivery and which the slow path
+  always redirects again (#18531). The check applies the session path's
+  interface-NAT local answer before its FIB lookup: the bare FIB calls a
+  local SNAT address MissingNeighbor on its connected /24. The check costs one FIB lookup per
+  FabricRedirect hit whose destination RG is local, a state that lasts until
+  the entry is re-homed. Routed destinations (no connected owner) are not
+  covered yet (#18588).
+- **Post-admission neighbor learn.** Every admitted hit re-ran the on-link
+  scan, the owned-IP probes and the VLAN-alias resolve before the learn's
+  dedup leg coalesced the duplicate. `LearnedNeighborDedup` now records the
+  `publish_epoch` its derivations were confirmed under; a fresh duplicate
+  (same key, same snapshot, inside the refresh interval, unchanged neighbor
+  epochs) returns before them. Any neighbor MAC replacement or removal,
+  snapshot rotation, interval expiry or new source MAC takes the full path.
+- **One routing-domain resolution for both transit address-class gates.**
+  `transit_class_routing_domain` resolves it once and the hit calls the
+  `_in` variants of the destination and source gates; the stand-alone gates
+  are thin compositions of the same helpers.
+
+Still on the per-hit path and NOT removed: the per-flow FIB lookup the HA
+validator makes for every cached FabricRedirect hit (not on fabric-link
+ingress), and `prefer_local_forward_candidate_for_fabric_ingress_for_flow`
+for other fabric-ingress hits. Their result depends on the dynamic neighbor
+map as well as the snapshot (`select_v4_route` consults neighbor presence),
+and the map has no generation that covers both inserts and removals
+(`insert_generation` moves on every learn; the per-shard epochs move only on
+replacement/removal), so no memo key is sound yet. Neither is on the
+steady-state path of a cluster whose RGs are local (the integ6 profile shows
+neither).
+
+TX-side `memmove` (integ6: 2.0% under `transmit_prepared_queue`, 0.6%
+under `VecDeque<PreparedTxRequest>::push_back_mut`): this is not a frame
+copy. The default `SharedUmemPolicy` is cross-NIC for `mlx5_core`
+(`shared_umem.rs`), which groups the LAN and WAN VFs into one UMEM per
+worker when eligible, so a cross-binding hit takes the in-place path — the
+same profile's 1.1% `HashMap<u64, PreparedTxRecycle>::insert` is recorded
+only for in-place sends (`in_flight_prepared_recycles`), which corroborates
+it; the status's shared-UMEM plan is the authority. The bytes moved are
+the `PreparedTxRequest` itself (about 300 bytes by field count, ~184 of them
+an `Option<OverlapAdmissionTokens>` that is `None` on every cache hit),
+moved four times per packet between the hit, the stage and the finalise
+queues. Shrinking it needs the overlap tokens off the struct without a
+per-fragment allocation; not done here. A true cross-UMEM hit (separate
+UMEMs) instead copies the whole frame in `build_forwarded_frame_into_from_frame`
+on the fallback path, which no shared-UMEM loss hit takes.
+
+Round-2 cells: `flow_cache_hit_tests.rs` — the memo
+(`destination_owner_rg_is_never_memoised_unpublished_18534`,
+`destination_owner_rg_resolves_once_per_snapshot_and_target_18534`,
+`destination_owner_rg_resolves_again_on_a_new_snapshot_18534`), the live hit
+reading it (`cached_hit_reads_a_current_destination_owner_memo_18534`,
+`cached_hit_resolves_a_stale_destination_owner_memo_once_18534`), the
+departure still judged per packet
+(`memoised_destination_owner_still_sees_its_departure_18534`), the rollback
+undo (`undroppable_cached_hit_records_no_rollback_undo_18533`,
+`droppable_cached_hit_rolls_back_its_charge_18533`) and
+`cached_hit_resolves_the_transit_routing_domain_once_18533`, plus the
+policer half of the rollback predicate
+(`red_policer_drop_rolls_back_the_probe_charge_18534`: a red-dropping
+three-color policer and no cached discard);
+`coordinator/forwarding_publish_epoch_18534_tests.rs`;
+`worker/loop_body/fabric_swap_epoch_18534_tests.rs` (the ct-slice fabric
+swap restamps its derived copy with a fresh high-bit epoch, two swaps never
+share one, and no swap keeps the published state and its epoch);
+`tests_neighbor_learn_fresh_18533.rs` (a fresh duplicate skips the full
+learn; removal, a new source MAC, a new snapshot, interval expiry and an
+unpublished snapshot all take it); and the ignored full-poll `MEASUREMENT`
+`tests_hit_path_cost_18533.rs` (numbers in `docs/log/18534.md`).
 
 ## Hot-path constants
 

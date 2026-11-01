@@ -4,8 +4,7 @@ use super::{
 };
 use crate::nat::{
     DnatTable, NatDecision, SourceNatFailure, SourceNatLookup, SourceNatRule, StaticNatTable,
-    parse_source_nat_rules_with_previous, release_source_nat_allocation_for_worker,
-    reserve_synced_source_nat_allocation_for_worker, rollback_source_nat_allocation_for_worker,
+    parse_source_nat_rules_with_previous, rollback_source_nat_allocation_for_worker,
 };
 // #9902 review: `match_source_nat` is #[cfg(test)]-gated (Untracked
 // allocator) — this import exists only for the test-only
@@ -15,16 +14,18 @@ use crate::nat::match_source_nat;
 use crate::nat64::{Nat64ReverseInfo, Nat64State};
 use crate::nptv6::Nptv6State;
 use crate::policy::{
-    AppCatalog, PolicyAction, PolicyCounterStore, PolicyState, evaluate_policy,
-    parse_policy_state_with_counters, parse_policy_state_with_counters_and_functional,
+    AppCatalog, PolicyAction, PolicyCounterStore, PolicyState, parse_policy_state_with_counters_and_functional,
 };
+#[cfg(test)]
+use crate::policy::evaluate_policy;
 use crate::prefix::{PrefixV4, PrefixV6};
 use crate::screen::{
     UnresolvedProfileRef, ScreenProfile, ScreenState, ScreenVerdict, extract_screen_info,
 };
+#[cfg(test)]
+use crate::session::SessionInstall;
 use crate::session::{
-    ForwardSessionMatch, SessionCounters, SessionDecision, SessionDelta, SessionDeltaKind,
-    SessionInstall, SessionKey, SessionLookup, SessionLookupAux, SessionMetadata, SessionOrigin,
+    ForwardSessionMatch, SessionDecision, SessionDelta, SessionDeltaKind, SessionKey, SessionLookup, SessionLookupAux, SessionMetadata, SessionOrigin,
     SessionTable, SessionUpdate, forward_wire_key, reverse_canonical_key, reverse_session_key,
 };
 use crate::slowpath::{EnqueueOutcome, SlowPathReinjector, SlowPathStatus, open_tun};
@@ -33,12 +34,11 @@ use crate::xsk_ffi::{BufIdx, SocketConfig, Umem, UmemConfig, User};
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use core::ffi::{c_int, c_void};
-use core::ptr::NonNull;
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use ipnet::{Ipv4Net, Ipv6Net};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::CString;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
@@ -104,14 +104,13 @@ pub(crate) mod wg_uncovered_forward;
 pub use ha::HA_REFRESH_NEEDS_CONTROL_SOCKET;
 pub(crate) use ha::{
     HelperMutationBegin, HelperMutationOutcome, SYNCED_DELETE_REFUSED_PREFIX,
-    SYNCED_IMPORT_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX, SyncedDeleteMode,
-    SyncedDeleteOutcome, SyncedImportOutcome,
+    SYNCED_IMPORT_REFUSED_PREFIX, SyncedDeleteMode, SyncedDeleteOutcome, SyncedImportOutcome,
 };
 // #7919: the per-session counter query's wait handle + reply row, used by the
 // control-socket handler's two-phase dispatch.
 pub(crate) use ha::HaRefreshOutcome;
 pub(crate) use ha::SessionDomain;
-pub(crate) use ha::{SessionCounterQueryWait, WorkerSessionCounters};
+pub(crate) use ha::SessionCounterQueryWait;
 #[path = "icmp.rs"]
 mod icmp;
 mod icmp_embed;
@@ -217,7 +216,9 @@ use self::forwarding::*;
 pub(crate) use self::forwarding_build::neighbor_family_mismatch;
 use self::forwarding_build::*;
 use self::frame::*;
-use self::gre::{encapsulate_native_gre_frame, try_native_gre_decap_from_frame};
+use self::gre::encapsulate_native_gre_frame;
+#[cfg(test)]
+use self::gre::try_native_gre_decap_from_frame;
 use self::icmp::{
     FABRIC_INGRESS_FLAG, GRE_DECAP_INGRESS_FLAG, build_local_time_exceeded_request, is_icmp_error,
     packet_ttl_would_expire, zero_hop_limit_local_drop,
@@ -241,7 +242,6 @@ use self::icmp_embed::{
     build_nat_reversed_icmp_error_v6,
     build_snat_outbound_icmp_error_v4,
     build_snat_outbound_icmp_error_v6,
-    finalize_embedded_icmp_resolution,
     finalize_embedded_icmp_resolution_parts,
     // #8271: production names the frame slice explicitly; it also supplies the
     try_embedded_icmp_nat_match_from_frame_with_owner_indexes,
@@ -249,8 +249,10 @@ use self::icmp_embed::{
 };
 use self::icmp_ptb::{
     EgressMtuDecision, build_frag_needed_v4, build_packet_too_big_v6,
-    forwarded_egress_mtu_decision, post_transform_inner_mtu, ptb_reply_suppressed,
+    forwarded_egress_mtu_decision, ptb_reply_suppressed,
 };
+#[cfg(test)]
+use self::icmp_embed::finalize_embedded_icmp_resolution;
 use self::icmp_ratelimit::{GeneratedErrorReason, allow_generated_error_zoned};
 use self::mirror::*;
 use self::mpsc_inbox::MpscInbox;
@@ -652,7 +654,7 @@ pub(crate) use coordinator::neigh_monitor_test_serial;
 /// #10512 T2: test-only worker bundle for server-level policy-list
 /// cells (lets server tests drive a populated coordinator).
 #[cfg(test)]
-pub(crate) use coordinator::{ListTestWorker, register_list_test_worker};
+pub(crate) use coordinator::register_list_test_worker;
 // #8121 part 2: idle persistent-NAT lease sync records.
 pub(crate) use coordinator::{
     IdleLeaseImportCounts, LeasePoolId, LeasePoolMode, PoolDisplayLease, PoolIdleLease,
@@ -679,6 +681,18 @@ mod tests_icmp_te;
 #[cfg(test)]
 #[path = "tests_icmp_zero_hop_15707.rs"]
 mod tests_icmp_zero_hop_15707;
+// #18174: traceroute/mtr through SNAT + RETH, end to end on the poll path.
+#[cfg(test)]
+#[path = "tests_mtr_icmp_errors_18174.rs"]
+mod tests_mtr_icmp_errors_18174;
+
+#[cfg(test)]
+#[path = "tests_neighbor_learn_fresh_18533.rs"]
+mod tests_neighbor_learn_fresh_18533;
+
+#[cfg(test)]
+#[path = "tests_hit_path_cost_18533.rs"]
+mod tests_hit_path_cost_18533;
 #[cfg(test)]
 #[path = "tests_named_pre_l3_10498.rs"]
 mod tests_named_pre_l3_10498;
@@ -736,6 +750,12 @@ mod tests_directed_broadcast_14654;
 #[path = "tests_fabric_zone_stamp.rs"]
 mod tests_fabric_zone_stamp;
 #[cfg(test)]
+#[path = "tests_split_rg_failback_18531.rs"]
+mod tests_split_rg_failback_18531;
+#[cfg(test)]
+#[path = "tests_punt_seed_shadow_18620.rs"]
+mod tests_punt_seed_shadow_18620;
+#[cfg(test)]
 #[path = "tests_gre_local_delivery.rs"]
 mod tests_gre_local_delivery;
 #[cfg(test)]
@@ -788,6 +808,9 @@ mod tests_synced_static_nptv6_15191;
 #[cfg(test)]
 #[path = "tests_txn_flow_cache.rs"]
 mod tests_txn_flow_cache;
+#[cfg(test)]
+#[path = "tests_late_synced_publish_18550.rs"]
+mod tests_late_synced_publish_18550;
 // #7541: the same bound with an IPv6 OUTER. Separate module rather than added to
 // the file above so the v4 cells' file-level docstring stays true about itself.
 #[cfg(test)]
@@ -1932,6 +1955,7 @@ impl BatchCounters {
 }
 
 pub(in crate::afxdp) mod poll_descriptor;
+#[cfg(test)]
 use poll_descriptor::poll_binding_process_descriptor;
 
 // #946 Phase 1: per-packet pipeline stages extracted from the
@@ -2001,9 +2025,10 @@ use disposition::{
 // afxdp/forward_request.rs.
 mod forward_request;
 use forward_request::{
-    ForwardRejectReply, build_live_forward_request_from_frame,
-    build_live_forward_request_from_frame_with_dynamic, should_install_local_reverse_session,
+    ForwardRejectReply, build_live_forward_request_from_frame_with_dynamic, should_install_local_reverse_session,
 };
+#[cfg(test)]
+use forward_request::build_live_forward_request_from_frame;
 // `build_live_forward_request` is only referenced by tests in
 // afxdp/frame/tests.rs; gate its import behind cfg(test).
 #[cfg(test)]

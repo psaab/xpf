@@ -63,7 +63,7 @@ func TestApplyFullPreferredRoutes(t *testing.T) {
 	// route (step 7) before the per-VRF static (step 8).
 	blackhole := strings.Index(got, "ip route 0.0.0.0/0 Null0 tag 2500 250")
 	injected := strings.Index(got, "ip route 0.0.0.0/0 172.16.80.1 1\n")
-	perVRF := strings.Index(got, "ip route 10.9.0.0/16 10.9.0.1 vrf vrf-ISP-B")
+	perVRF := strings.Index(got, "ip route 10.9.0.0/16 10.9.0.1 5 vrf vrf-ISP-B")
 	if blackhole < 0 || injected < 0 || perVRF < 0 {
 		t.Fatalf("expected sections missing: blackhole=%d injected=%d perVRF=%d\n%s",
 			blackhole, injected, perVRF, got)

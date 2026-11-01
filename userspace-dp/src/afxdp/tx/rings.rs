@@ -16,7 +16,7 @@ use crate::afxdp::{
     RX_WAKE_MIN_INTERVAL_NS, TX_WAKE_MIN_INTERVAL_NS, UMEM_FRAME_SIZE,
 };
 
-use super::stats::{record_kick_latency, record_tx_completions_with_stamp, record_tx_kick_batch};
+use super::stats::{record_kick_latency, record_tx_completions_with_stamp};
 use super::update_binding_debug_state;
 // #14641: test-only seam that runs after `drain_pending_fill` has published a
 // batch to the kernel FILL ring but before it returns. A test can scribble

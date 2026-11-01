@@ -73,6 +73,15 @@ pub(super) struct EmbeddedIcmpMatch {
     /// descriptor with the internal (pre-NAT) source on the wire and an
     /// unassociable quote. `false` on every inbound match.
     pub(super) outbound_snat: bool,
+    /// #18174: the quote names the session's REPLY packet (the matchers'
+    /// `via_reply_key XOR is_reverse`; always `false` on the forward-NAT
+    /// arm, whose quote is the post-NAT forward packet). The RELATED gate
+    /// widens NAT'd admission to every path error only for FORWARD quotes
+    /// — the traceroute/mtr case, errors from the session's far side about
+    /// the client's packets. A NAT'd reply-quote error (an outbound SNAT
+    /// error, including its already-re-NAT'd fabric hand-off at the peer,
+    /// #13772) keeps #10666's PMTUD-only scope.
+    pub(super) quoted_is_reply: bool,
     /// #10667: the F-077 gating key this match was charged against. The
     /// poll arms refund it via
     /// `SessionTable::refund_icmp_error_not_delivered` on every post-match
@@ -111,6 +120,53 @@ pub(in crate::afxdp::icmp_embed) struct NatMatchCtx<'a> {
     pub shared_owner_rg_indexes: Option<&'a crate::afxdp::types::SharedSessionOwnerRgIndexes>,
     pub shared_forward_wire_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub ingress_zone_override: Option<u32>,
+}
+
+/// #18562: the session-fallback arm's last probe — this NODE's live #7770
+/// punt seed for the quoted FORWARD packet, when the error landed on a worker
+/// other than the one whose LAN queue minted the seed.
+///
+/// Reached only after the local table and the node's shared maps BOTH missed
+/// the quote in either direction, and only for:
+///  * a FABRIC-ingress frame — a punted flow leaves this node over the fabric
+///    and its far side is the peer's, so the peer (WAN owner) is the only
+///    place an error about its forward packets can come back from; the same
+///    quote arriving anywhere else stays unmatched;
+///  * the as-is FORWARD key (the quote is the client's packet, already
+///    reversed to pre-NAT form by the peer — seeds are NAT-free, #7770), so
+///    the match is a forward quote whose RELATED arrival zone is the seed's
+///    adjudicated egress zone, exactly as for a same-worker local hit.
+///
+/// The row is a snapshot of a seed THIS node's own policy permitted for a
+/// packet that ingressed on THIS node's non-fabric interface
+/// (`should_seed_fabric_punt` / `fabric_punt_seed_metadata`), retired with
+/// that seed (`session/punt_seed_directory.rs`). Nothing here creates,
+/// refreshes or exports session state; the caller's F-077 budget, #14665
+/// outer-destination gate, type scope and zone-validated RELATED rule apply
+/// unchanged.
+pub(in crate::afxdp::icmp_embed) fn punt_seed_forward_quote_match(
+    ctx: &NatMatchCtx<'_>,
+    meta: &UserspaceDpMeta,
+    forward_key: &SessionKey,
+    now_ns: u64,
+) -> Option<ResolvedSessionLookup> {
+    if (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0 {
+        return None;
+    }
+    let row = ctx.sessions.punt_seed_directory().probe(forward_key, now_ns)?;
+    Some(ResolvedSessionLookup::local_query(
+        SessionLookup {
+            decision: row.decision,
+            metadata: row.metadata,
+            forwarding_generation: crate::session::ForwardingGenerationStamp::default(),
+            aux: crate::session::SessionLookupAux {
+                session_id: row.session_id,
+                source_nat_static: None,
+                leak_incarnation: 0,
+            },
+        },
+        SessionOrigin::FabricPuntSeed,
+    ))
 }
 
 /// Outcome of an embedded-ICMP match attempt. THREE states, not two: a
@@ -364,7 +420,7 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    _shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
@@ -392,7 +448,7 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame_with_ingress_zone(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    _shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
     ingress_zone_override: Option<u32>,
@@ -983,7 +1039,7 @@ mod return_resolution_15771 {
         "2001:db8:99::50".parse().expect("v6 target")
     }
 
-    fn egress_row(ifindex: i32, src_mac: [u8; 6]) -> EgressInterface {
+    fn egress_row(_ifindex: i32, src_mac: [u8; 6]) -> EgressInterface {
         EgressInterface {
             bind_ifindex: 0,
             vlan_id: 0,

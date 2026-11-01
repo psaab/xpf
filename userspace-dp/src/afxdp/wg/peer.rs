@@ -534,10 +534,12 @@ pub(crate) struct Peer {
     /// confirmed-session gate. Was an engine-GLOBAL `AtomicBool` (S2a); this is
     /// the per-peer generalization so peer B's rekey drives B's attempt.
     pub(crate) rekey_request_pending: AtomicBool,
+    /// #17774: sequence word guarding coherent reads and writes of the
+    /// learned PMTU value/stamp pair. Odd while a writer is updating it.
+    pmtu_seq: AtomicU64,
     /// #16711: learned outer path MTU for this peer (0 = none), from a
-    /// validated underlay PTB quoting this peer's WG outer. Packed in
-    /// `wg::pmtu`; aged via `pmtu_learned_ns`. Peer-resident so it
-    /// survives same-engine reconciles like `live_endpoint`.
+    /// validated underlay PTB quoting this peer's WG outer. Peer-resident so
+    /// it survives same-engine reconciles like `live_endpoint`.
     pub(crate) pmtu_mtu: AtomicU64,
     /// #16711: CLOCK_MONOTONIC ns of the last accepted PTB for
     /// `pmtu_mtu` (0 = never). See `wg::pmtu::WG_PMTU_AGE_NS`.
@@ -577,6 +579,7 @@ impl Peer {
             handshake_request_pending: AtomicBool::new(false),
             handshake_request_last_ns: AtomicU64::new(0),
             rekey_request_pending: AtomicBool::new(false),
+            pmtu_seq: AtomicU64::new(0),
             pmtu_mtu: AtomicU64::new(0),
             pmtu_learned_ns: AtomicU64::new(0),
         }
@@ -597,20 +600,58 @@ impl Peer {
     }
 
     /// #16711: the fresh learned outer PMTU for this peer, if any.
+    /// The sequence check makes the MTU and aging stamp one coherent
+    /// snapshot even while a validated PTB is being recorded.
     #[inline]
     pub(crate) fn learned_pmtu(&self, now_ns: u64) -> Option<usize> {
-        super::pmtu::effective_pmtu(
-            self.pmtu_mtu.load(Ordering::Relaxed),
-            self.pmtu_learned_ns.load(Ordering::Relaxed),
-            now_ns,
-        )
+        loop {
+            let seq_before = self.pmtu_seq.load(Ordering::Acquire);
+            if seq_before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let stored_mtu = self.pmtu_mtu.load(Ordering::Relaxed);
+            let learned_ns = self.pmtu_learned_ns.load(Ordering::Relaxed);
+            fence(Ordering::Acquire);
+            let seq_after = self.pmtu_seq.load(Ordering::Acquire);
+            if seq_before == seq_after {
+                return super::pmtu::effective_pmtu(stored_mtu, learned_ns, now_ns);
+            }
+        }
+    }
+
+    /// Claim the PMTU sequence as an odd writer generation. The successful
+    /// acquire CAS also imports the preceding writer's published pair.
+    #[inline]
+    fn begin_pmtu_update(&self) -> u64 {
+        let mut seq = self.pmtu_seq.load(Ordering::Relaxed);
+        loop {
+            if seq & 1 != 0 {
+                std::hint::spin_loop();
+                seq = self.pmtu_seq.load(Ordering::Relaxed);
+                continue;
+            }
+            match self.pmtu_seq.compare_exchange_weak(
+                seq,
+                seq.wrapping_add(1),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    // Pair the odd marker with readers' acquire fence so no
+                    // MTU/stamp store can be observed under the old generation.
+                    fence(Ordering::Release);
+                    return seq;
+                }
+                Err(observed) => seq = observed,
+            }
+        }
     }
 
     /// #17747: cap a validated PTB's advertised outer MTU to the
-    /// local egress/route budget before applying the family floor.
-    /// Only a strictly smaller result lowers the store; every
-    /// accepted offer refreshes the aging stamp. Returns true when
-    /// the stored MTU changed.
+    /// local egress/route budget before applying the family's mandatory floor.
+    /// Only a strictly smaller fresh value lowers the store; every accepted
+    /// offer refreshes the aging stamp. Returns true when the value changes.
     #[inline]
     pub(crate) fn offer_pmtu(
         &self,
@@ -619,20 +660,41 @@ impl Peer {
         local_mtu: usize,
         now_ns: u64,
     ) -> bool {
-        let current = self.learned_pmtu(now_ns);
-        match super::pmtu::pmtu_after_offer(current, offered_mtu, outer_v6, local_mtu) {
-            Some(v) => {
-                self.pmtu_mtu.store(v as u64, Ordering::Relaxed);
-                self.pmtu_learned_ns.store(now_ns, Ordering::Relaxed);
-                true
+        let seq = self.begin_pmtu_update();
+        let changed = loop {
+            let stored_mtu = self.pmtu_mtu.load(Ordering::Relaxed);
+            let learned_ns = self.pmtu_learned_ns.load(Ordering::Relaxed);
+            let current = super::pmtu::effective_pmtu(stored_mtu, learned_ns, now_ns);
+            match super::pmtu::pmtu_after_offer(current, offered_mtu, outer_v6, local_mtu) {
+                Some(next_mtu) => {
+                    if self
+                        .pmtu_mtu
+                        .compare_exchange(
+                            stored_mtu,
+                            next_mtu as u64,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        self.pmtu_learned_ns.fetch_max(now_ns, Ordering::Relaxed);
+                        break true;
+                    }
+                }
+                None => {
+                    // Refresh aging on a repeat/equal-or-larger PTB so a
+                    // stable narrow path does not expire between PTBs.
+                    self.pmtu_learned_ns.fetch_max(now_ns, Ordering::Relaxed);
+                    break false;
+                }
             }
-            None => {
-                // Refresh aging on a repeat/equal-or-larger PTB so a
-                // stable narrow path does not expire between PTBs.
-                self.pmtu_learned_ns.store(now_ns, Ordering::Relaxed);
-                false
-            }
-        }
+        };
+        // Publish both atomics under one even generation. Readers retry
+        // rather than treating a pre-CAS timestamp as proof that an expired
+        // MTU is fresh.
+        self.pmtu_seq
+            .store(seq.wrapping_add(2), Ordering::Release);
+        changed
     }
 
     /// #4092 responder handshake anti-replay check-and-update. Given the

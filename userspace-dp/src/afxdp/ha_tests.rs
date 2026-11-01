@@ -1663,6 +1663,7 @@ fn current_generation_install_and_delete_still_apply_on_poisoned_shared_mutex() 
     );
 }
 
+
 // #2962: kicking an export for an EMPTY owner-RG set is a no-op — it must
 // not consume an export sequence and the wait must drain nothing, preserving
 // the pre-split early return semantics.
@@ -2123,7 +2124,8 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
     persistent_lease_hold: None,
         source_nat_static: None,
     };
-    let mut publish = |mut entry: SyncedSessionEntry, port: u16| {
+    let publish = |mut entry: SyncedSessionEntry, port: u16| {
+
         entry.key.src_port = port;
         // test_metadata() is fabric-ingress by default; plain rows clear it,
         // fabric-ingress rows keep it, so both legs are exercised as-is.
@@ -4382,11 +4384,15 @@ fn a_pass1_refused_import_is_counted_and_not_published_6979_f1() {
 /// ```
 ///
 /// and they mean opposite things. The FIRST operand failing is correct
-/// behaviour: the peer owns the redundancy group, so this node must not take
-/// the redirect. The SECOND failing is a gap: the entry is recorded in the
-/// shared map and answered to Go as installed, while no kernel row exists. A
-/// counter that fired on "did not publish" would sit permanently nonzero on a
-/// healthy standby and report nothing, so the conjunction had to be split
+/// behaviour: THIS node is forwarding-active for the owner RG (or the owner RG
+/// is 0 and any RG is active here), so the
+/// coordinator leaves the steering publish to the workers, which publish after
+/// their own local-replace guard (#18550; this comment previously read "the
+/// peer owns the redundancy group", the inverse of what the predicate tests).
+/// The SECOND failing is a gap: the entry is recorded in the shared map and
+/// answered to Go as installed, while no kernel row exists. A counter that
+/// fired on "did not publish" would also fire on every active-owner import the
+/// workers publish and report nothing, so the conjunction had to be split
 /// before either could be measured.
 ///
 /// Three legs, and B and C are the ones that earn the metric:
@@ -4395,9 +4401,9 @@ fn a_pass1_refused_import_is_counted_and_not_published_6979_f1() {
 ///      `bpf_maps.session_map_fd == None`, which is not contrived: it is an HA
 ///      standby taking bulk sync before its first snapshot apply, and the
 ///      interval between `stop_inner` and the next `reconcile::bringup`.
-///   B. peer owns the RG, no map -> does NOT count. Without this leg the
-///      counter is a rename of "did not publish" and climbs on every healthy
-///      peer-owned import.
+///   B. this node is ACTIVE for the RG, no map -> does NOT count. Without this
+///      leg the counter is a rename of "did not publish" and climbs on every
+///      active-owner import (whose steering rows the workers publish).
 ///   C. admitted, map PRESENT -> does NOT count. `fd: -1` is a real descriptor
 ///      that is not a map, so the publish is attempted and fails; that failure
 ///      belongs to the #1789 publish-error counter, not to this one. Without
@@ -4439,10 +4445,10 @@ fn synced_import_unpublished_counts_the_absent_map_not_the_owner_decision_7209()
          no signal at all"
     );
 
-    // --- Leg B: the PEER owns the RG -> not publishing is correct. ---------
-    let mut peer_owned = Coordinator::new();
-    register_test_worker_7209(&mut peer_owned);
-    peer_owned
+    // --- Leg B: THIS node is active for the RG -> workers publish. --------
+    let mut owner_active = Coordinator::new();
+    register_test_worker_7209(&mut owner_active);
+    owner_active
         .update_ha_state(&[HAGroupStatus {
             rg_id: test_metadata().owner_rg_id,
             active: true,
@@ -4452,7 +4458,7 @@ fn synced_import_unpublished_counts_the_absent_map_not_the_owner_decision_7209()
         .expect("update ha state");
     assert!(
         !crate::afxdp::session_glue::synced_entry_allows_local_replace(
-            &peer_owned.ha.rg_runtime.load(),
+            &owner_active.ha.rg_runtime.load(),
             test_metadata().owner_rg_id,
             monotonic_nanos() / 1_000_000_000,
         ),
@@ -4461,19 +4467,19 @@ fn synced_import_unpublished_counts_the_absent_map_not_the_owner_decision_7209()
          every non-publish"
     );
     assert!(
-        peer_owned.bpf_maps.load().session_map_fd.is_none(),
+        owner_active.bpf_maps.load().session_map_fd.is_none(),
         "leg B must ALSO have no map, so the only difference from leg A is the \
          owner decision"
     );
-    let before_b = peer_owned.synced_import_unpublished_total();
-    peer_owned.upsert_synced_session(reserve6600_entry(42001, 22001));
+    let before_b = owner_active.synced_import_unpublished_total();
+    owner_active.upsert_synced_session(reserve6600_entry(42001, 22001));
     assert_eq!(
-        peer_owned.synced_import_unpublished_total(),
+        owner_active.synced_import_unpublished_total(),
         before_b,
-        "an import this node correctly declined to publish because the PEER owns \
-         the redundancy group was counted as an unpublished gap. The metric then \
-         climbs on every healthy peer-owned import and stops meaning anything \
-         (#7209)"
+        "an import whose coordinator publish was correctly left to the workers \
+         because THIS node is active for the redundancy group was counted as an \
+         unpublished gap. The metric then climbs on every active-owner import \
+         and stops meaning anything (#7209)"
     );
 
     // --- Leg C: a map IS present -> the gap counter must stay still. -------
@@ -4536,7 +4542,7 @@ fn synced_import_unpublished_counts_the_absent_map_not_the_owner_decision_7209()
 #[test]
 fn no_worker_registered_keeps_a_synced_import_off_the_reservation_path_7209() {
     // --- Leg A: NO worker -> the reservation must not run at all. ----------
-    let mut no_worker = Coordinator::new();
+    let no_worker = Coordinator::new();
     assert!(
         no_worker.workers.records().is_empty(),
         "fixture broken: a fresh Coordinator must have no worker records, or \
@@ -5341,7 +5347,7 @@ fn an_import_under_an_emptied_forwarding_table_publishes_a_dead_reverse_companio
     // empty-table leg produces, for a completely different reason. Without
     // this the control could not distinguish "resolved to a real owner" from
     // "resolved to nothing", which is the whole contrast.
-    healthy.update_ha_state(&[
+    let _ = healthy.update_ha_state(&[
         HAGroupStatus {
             rg_id: 1,
             active: true,
@@ -5458,7 +5464,7 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
     // prewarm's reason rather than the replay's. Measured: it did, and only the
     // counter assertion caught it. Activating here, with no sessions yet, makes
     // the prewarm a no-op and leaves the replay as the only repair path.
-    coordinator.update_ha_state(&[
+    let _ = coordinator.update_ha_state(&[
         HAGroupStatus {
             rg_id: 1,
             active: true,
@@ -11771,7 +11777,7 @@ fn coord_list_pages_beyond_4096_10512() {
     assert_eq!(page2.len(), 4, "terminal page holds the rest");
     assert!(complete2, "terminal page must complete");
     assert!(cont2.is_empty(), "terminal page continues nothing");
-    let mut ids: std::collections::HashSet<u64> = page1
+    let ids: std::collections::HashSet<u64> = page1
         .iter()
         .chain(page2.iter())
         .map(|r| r.expected_rt_flow_session_id)

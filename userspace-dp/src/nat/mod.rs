@@ -356,17 +356,15 @@ pub(crate) struct NatScopeCtx<'a> {
     pub(crate) routing_domain: u32,
 }
 
-#[cfg(test)]
-pub(crate) use allocator::PersistentLeaseDebugState;
 pub(crate) use allocator::allocator_capacity;
 pub(crate) use allocator::{
     DeterministicV4, DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
     MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PersistentLeaseHold,
-    PersistentLeaseOwner, PersistentSourceKey, PortAllocator, PortAllocatorSnapshot, ReseedOutcome,
+    PersistentLeaseOwner, PersistentSourceKey, PortAllocator, ReseedOutcome,
     SourceNatReservationSnapshot, DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
-    deterministic_indices_v4, sticky_pool_index,
+    deterministic_indices_v4,
 };
-pub(crate) use destination::{DnatKey, DnatLookup, DnatTable, DnatValue};
+pub(crate) use destination::{DnatLookup, DnatTable};
 pub(crate) use iface_registry::{
     INTERFACE_SNAT_IDENTITY_EXHAUSTION, INTERFACE_SNAT_PAT_COLLISIONS,
     INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION, INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS,
@@ -388,7 +386,6 @@ pub(crate) use source::{
     allocate_nat64_pool_port,
     allocate_nat64_pool_port_deterministic_v6,
     flowless_source_nat_rule_possible,
-    match_source_nat_result_for_tuple,
     match_source_nat_result_for_tuple_with_icmp,
     iface_peer_idle_any_contended,
     nat64_peer_or_interface_owns_idle_import,
@@ -396,36 +393,23 @@ pub(crate) use source::{
     nat64_rollback_idle_import,
     nat64_refuse_if_peer_owns,
     nat64_refuse_if_static_owns,
-    nptv6_owns_wire_identity,
     parse_source_nat_rules_with_previous,
     peer_owns_identity_in,
     release_nat64_pool_port,
-    acquire_recorded_persistent_inbound_hold, release_recorded_persistent_inbound_hold,
-    release_persistent_inbound_for_session, release_persistent_inbound_with_hold,
-    release_recorded_persistent_inbound,
-    release_source_nat_allocation_for_worker, release_source_nat_allocation_for_worker_with_hold,
+    acquire_recorded_persistent_inbound_hold, release_recorded_persistent_inbound_hold, release_source_nat_allocation_for_worker_with_hold,
     release_source_nat_allocation_for_worker_preserving_persistent_hold,
     release_synced_source_nat_allocation_untracked_with_hold,
     release_synced_source_nat_allocation_untracked_preserving_persistent_hold,
-    rollback_recorded_persistent_inbound, rollback_source_nat_allocation_for_worker_with_hold,
+    rollback_recorded_persistent_inbound,
     release_synced_source_nat_allocation_untracked,
     reserve_nat64_pool_port,
     reserve_nat64_pool_port_capture_and_replace,
-    reserve_synced_source_nat_allocation_for_worker,
     reserve_synced_source_nat_allocation_for_worker_preserving_persistent_hold,
     reserve_synced_source_nat_allocation_untracked_preserving_persistent_hold,
     reserve_synced_source_nat_allocation_untracked_with_hold,
     reserve_synced_source_nat_allocation_untracked_with_holder_snapshot_and_hold,
-    // #6600: the coordinator's pre-publish reservation and its rollback. NOT
-    // test-only, unlike the untracked entry points below — these are the
-    // production import path.
-    reserve_synced_source_nat_allocation_untracked,
-    reserve_synced_source_nat_allocation_untracked_with_holder_snapshot,
-    acquire_persistent_inbound_for_synced,
     persistent_inbound_hold_owner_for_synced,
-    retained_pool_index_map,
     retained_pool_index_map_v4,
-    rollback_persistent_inbound_for_session,
     rollback_source_nat_allocation_for_worker,
     static_owns_wire_identity,
     sync_interface_overlap_peers,
@@ -443,25 +427,23 @@ pub(crate) use source::parse_source_nat_rules;
 // mint single-holder allocations.
 pub(crate) use source::retire_worker_from_pool_rules;
 pub(crate) use source::{
-    ChallengeSourceNat, challenge_source_nat_shape, pool_address_ranges_v4,
-    pool_address_ranges_v6, source_nat_translation_matches,
+    ChallengeSourceNat, challenge_source_nat_shape, pool_address_ranges_v4, source_nat_translation_matches,
     source_nat_tuple_translation_possible,
 };
 #[cfg(test)]
 pub(crate) use source::{
-    match_source_nat, match_source_nat_result, release_source_nat_allocation,
-    reserve_synced_source_nat_allocation, rollback_source_nat_allocation,
+    match_source_nat, match_source_nat_result, match_source_nat_result_for_tuple,
+    release_source_nat_allocation, reserve_synced_source_nat_allocation, rollback_source_nat_allocation,
 };
 // #7560 residual: nat64.rs is the third reseed call site and needs the same note.
 pub(crate) use source::report_dropped_leases;
 // #7799: the NAT64 mint path checks its precomputed draining-pool allocator list.
-pub(crate) use source::address_has_draining_pool_occupancy;
 // #8447: rule-match outcome counters (process-global).
-pub(crate) use source::{SourceNatMatchSnapshot, process_source_nat_match_counters};
-// #6979: reachable from the afxdp coordinator test that binds the retirement
+pub(crate) use source::process_source_nat_match_counters;
+// #6979: reachable fro the afxdp coordinator test that binds the retirement
 // wiring; the primitive itself stays covered by nat::tests_pool.
 pub(crate) use allocator::TranslatedTuple;
-pub(crate) use static_nat::{InterfaceStaticView, StaticExternalIdentities, StaticNatEntry, StaticNatTable};
+pub(crate) use static_nat::{InterfaceStaticView, StaticExternalIdentities, StaticNatTable};
 pub(crate) use status::source_nat_pool_statuses;
 
 /// NatDecision is the cross-cutting output type for every NAT
@@ -818,3 +800,12 @@ impl NatCounterStore {
         self.source_parse_errors() + self.destination_parse_errors() + self.static_parse_errors()
     }
 }
+
+#[cfg(test)]
+pub(crate) use source::{
+    acquire_persistent_inbound_for_synced, nptv6_owns_wire_identity,
+    release_persistent_inbound_for_session, release_recorded_persistent_inbound,
+    release_source_nat_allocation_for_worker, reserve_synced_source_nat_allocation_for_worker,
+    reserve_synced_source_nat_allocation_untracked, retained_pool_index_map,
+    SourceNatMatchSnapshot,
+};

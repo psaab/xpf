@@ -124,7 +124,7 @@ func TestNestedCommitConfirmedPreflightsRetainedTarget16668(t *testing.T) {
 	}
 	// Premise: the retained target really is C1, and the unconfirmed
 	// active (C2) really is the config the mirror refuses naming dyn1.
-	target, pending, first := s.RollbackTargetForArm()
+	target, pending, first, _ := s.RollbackTargetForArm()
 	if !pending || first || target == nil || target.System.HostName != "c1-healthy" {
 		t.Fatalf("RollbackTargetForArm = (%v, pending=%v, first=%v), want c1-healthy pending target", target, pending, first)
 	}
@@ -146,7 +146,7 @@ func TestNestedCommitConfirmedPreflightsRetainedTarget16668(t *testing.T) {
 		t.Fatal("nested arm must keep the window pending")
 	}
 	// Extending must not have replaced the rollback target.
-	target, pending, _ = s.RollbackTargetForArm()
+	target, pending, _, _ = s.RollbackTargetForArm()
 	if !pending || target == nil || target.System.HostName != "c1-healthy" {
 		t.Fatalf("after nested arm target = %v pending=%v, want retained c1-healthy", target, pending)
 	}
@@ -181,7 +181,7 @@ func TestNestedCommitConfirmedRefusesUnappliableRetainedTarget16668(t *testing.T
 	if got := s.ActiveConfig().System.HostName; got != "c2-clean" {
 		t.Fatalf("active = %q, want c2-clean", got)
 	}
-	target, pending, _ := s.RollbackTargetForArm()
+	target, pending, _, _ := s.RollbackTargetForArm()
 	if !pending || target == nil || target.System.HostName != "c1-refused" {
 		t.Fatalf("retained target = %v pending=%v, want c1-refused", target, pending)
 	}
@@ -222,7 +222,7 @@ func TestRollbackTargetForArmNonNested16668(t *testing.T) {
 	if _, err := s.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	target, pending, first := s.RollbackTargetForArm()
+	target, pending, first, _ := s.RollbackTargetForArm()
 	if pending || first || target == nil || target.System.HostName != "only" {
 		t.Fatalf("no window: target=%v pending=%v first=%v, want active only", target, pending, first)
 	}
@@ -230,7 +230,7 @@ func TestRollbackTargetForArmNonNested16668(t *testing.T) {
 	if _, err := s.CommitConfirmed(5); err != nil {
 		t.Fatalf("CommitConfirmed: %v", err)
 	}
-	target, pending, first = s.RollbackTargetForArm()
+	target, pending, first, _ = s.RollbackTargetForArm()
 	if !pending || first || target == nil || target.System.HostName != "only" {
 		t.Fatalf("pending window: target=%v pending=%v first=%v, want retained only", target, pending, first)
 	}

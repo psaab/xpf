@@ -360,6 +360,11 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 			if ierr := clusterControlInterfaceCommitPreflight(d.cluster, cand); ierr != nil {
 				return ierr
 			}
+			// #18606: and the LOCAL end of the control link — this node's own
+			// address, which #8965 (the peer address) cannot see.
+			if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, d.store.ActiveConfig(), cand); lerr != nil {
+				return lerr
+			}
 			// #9121: and the CONFIG-SYNC endpoint, which is the field set the
 			// two gates above should have been keyed on. They read the
 			// HEARTBEAT pair, an exact proxy in control-link mode and no proxy
@@ -669,8 +674,29 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	d.pendingRenameMu.Lock()
 	oldActive := d.store.ActiveConfig()
 	var syncErr error
-	compiled, syncErr = d.store.SyncApply(configText, chassisPreserve)
+	// #18606: the local control-address gate runs INSIDE SyncApply, on the
+	// compiled peer text and BEFORE anything is promoted. Refusing after
+	// promotion (where the #8965-family synced checks below still sit) leaves
+	// the refused text active: the identical re-push after the nack, any later
+	// push, a later local commit (whose running-config arm then abstains) and
+	// every background applier (DHCP callback, feeds, config poll, apply-debt
+	// retry) would apply it with no preflight, and the partition arrives
+	// silently within one reconcile cadence. Refused here, the standby keeps
+	// its config, nacks, and every re-push is refused the same way.
+	var localAddrRefused error
+	compiled, syncErr = d.store.SyncApplyGated(configText, chassisPreserve, func(c *config.Config) error {
+		localAddrRefused = clusterControlLocalAddressCommitPreflight(d.cluster, oldActive, c)
+		return localAddrRefused
+	})
 	d.pendingRenameMu.Unlock()
+	if localAddrRefused != nil {
+		slog.Error("cluster: refusing a peer-synced change of this node's control-link address; "+
+			"nothing was promoted and this node keeps its running config. The pair cannot be "+
+			"renumbered live: change the address on BOTH nodes offline (stop xpfd on both, or take "+
+			"the cluster down) and start them on the new config",
+			"err", localAddrRefused)
+		return nil, localAddrRefused
+	}
 	if syncErr != nil {
 		return nil, syncErr
 	}
@@ -975,8 +1001,10 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	// rollback-time abort). The pre-flight and the promotion are now bound to one
 	// candidate generation, so a concurrent candidate edit cannot slip a different
 	// candidate into the promotion after the pre-flight cleared the examined one.
-	// The rollback target is stable across the transaction: it changes
-	// only under d.applySem, held here from pre-flight through the commit.
+	// Active config mutations are serialized by d.applySem, but the pending
+	// confirmation window can also be cleared by ConfirmCommit outside that
+	// semaphore. Carry the rollback-window generation captured atomically with
+	// the target and bind it at promotion, refusing a stale pre-flight.
 	// #16668: on a NESTED arm (a window already pending) the store retains
 	// the ORIGINAL rollback target, not the unconfirmed active config, so
 	// the gates below resolve the target via RollbackTargetForArm rather
@@ -984,6 +1012,7 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	// refuses an extension whose unconfirmed config is not yet appliable
 	// and falsely clears one whose true target is unappliable.
 	var peerSnapshotAuth *peerSnapshotProtocolAuthorization
+	var rollbackConfirmGen uint64
 	oldActive, compiled, err := d.commitWithGenBinding(
 		discardGen,
 		func(cand *config.Config) error {
@@ -1017,6 +1046,11 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			if ierr := clusterControlInterfaceCommitPreflight(d.cluster, cand); ierr != nil {
 				return ierr
 			}
+			// #18606: and the LOCAL end of the control link — this node's own
+			// address, which #8965 (the peer address) cannot see.
+			if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, d.store.ActiveConfig(), cand); lerr != nil {
+				return lerr
+			}
 			// #9121: and the CONFIG-SYNC endpoint, which is the field set the
 			// two gates above should have been keyed on. They read the
 			// HEARTBEAT pair, an exact proxy in control-link mode and no proxy
@@ -1044,7 +1078,24 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// nothing has been promoted.
 			// #9588: the Go refusal mirror decides, with the LIVE feed overlay
 			// for this target (representability is feed-aware).
-			rollbackTarget, _, _ := d.store.RollbackTargetForArm()
+			rollbackTarget, rollbackPending, rollbackFirst, confirmGen := d.store.RollbackTargetForArm()
+			rollbackConfirmGen = confirmGen
+			if !rollbackFirst && rollbackTarget == nil {
+				switch {
+				case rollbackPending:
+					return fmt.Errorf("commit confirmed rollback target invariant: pending non-first window has no retained target")
+				default:
+					return fmt.Errorf("commit confirmed rollback target invariant: active non-first config is absent")
+				}
+			}
+			// A first-commit rollback returns to bootstrap, even when Store.Load
+			// compiled the empty never-committed tree into a non-nil config
+			// (#7291). Target-specific gates have no policy snapshot to validate
+			// in that case; the candidate's device-map gate still runs below.
+			targetForPreflight := rollbackTarget
+			if rollbackFirst {
+				targetForPreflight = nil
+			}
 			// #16665: while in the #9615 refused-target bootstrap safe
 			// state the active config IS the refused target, so this gate
 			// would refuse every `commit confirmed` and leave no commit
@@ -1055,15 +1106,18 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// too. Outside that provenance the gate is unchanged. On a
 			// nested arm the #16668 target resolution above stands: the
 			// refused target is the retained one, not the active config.
-			if !(d.inBootstrap() && d.bootstrapFromRefusedRollback.Load()) {
+			if !rollbackFirst && !(d.inBootstrap() && d.bootstrapFromRefusedRollback.Load()) {
 				if rerr := rollbackTargetAppliablePreflight(rollbackTarget, d.feedSnapshotsForConfig(rollbackTarget)); rerr != nil {
 					return rerr
 				}
 			}
-			return d.deviceMapCommitPreflight(cand, rollbackTarget)
+			return d.deviceMapCommitPreflight(cand, targetForPreflight)
 		},
 		func(gen uint64) (*config.Config, error) {
-			return d.store.CommitConfirmedGenAs(authority, minutes, gen)
+			if d.beforeCommitConfirmedPromotionForTest != nil {
+				d.beforeCommitConfirmedPromotionForTest()
+			}
+			return d.store.CommitConfirmedGenAndConfirmAs(authority, minutes, gen, rollbackConfirmGen)
 		},
 	)
 	if err != nil {

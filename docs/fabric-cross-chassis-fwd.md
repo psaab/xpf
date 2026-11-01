@@ -1359,7 +1359,8 @@ validation (#8444)".
 ## Fabric stamp authentication: document-and-constrain (#10105)
 
 Parent-filed from the #9901 lane (F-073 residual): the baseline V1 zone stamp
-(`02:bf:72:fe:<hi>:<lo>`, `FABRIC_ZONE_MAC_MAGIC`, u16 BE `StableZoneID`) is
+(`02:bf:72:fe:<hi>:<lo>`, `FABRIC_ZONE_MAC_MAGIC`, the low 16 bits of the u32
+`StableZoneID`, big-endian; see #18518 below) is
 cloneable by any L2-adjacent host on a shared fabric segment. #9901 wired
 `routing_table` via the `ingress_routing_domain` SSOT without changing that
 wire format and left this protocol-design question: shared-secret MAC vs
@@ -1548,3 +1549,199 @@ Decisive regression: `forged_stamp_drops_when_link_authentication_required_16023
 plus `zone_encoded_fabric_stamp_requires_link_authentication_16023`
 (unit dispositions incl. attested controls). Live-cluster third-host proof
 on a switched fabric VLAN is still owed before acceptance.
+
+## Split node keeps statics whose gateway is peer-owned (#18517)
+
+On a split node (the WAN RG is peer-owned, the LAN RG is local) a new flow
+toward the WAN has no local egress. Before #18517 the path was the cluster
+terminal: the cluster-mode Null0 default (`renderClusterModeDefaults`, tag 2500,
+kernel metric 20) is the terminal row; `select_source_ifindex_v4/v6` stamps it
+with the would-be egress by resolving the CONFIGURED default's gateway through
+the helper's by-ifindex connected ledger (where peer-owned prefixes live);
+`enforce_ha_resolution_snapshot` keeps it `ClusterTerminalHAInactive` because
+that egress RG is peer-owned; and `redirect_via_fabric_if_needed_at` sends it
+across the fabric. Since #18517 the configured default's own member is bound to
+that egress instead (below), so the forwarding row is selected and demoted to
+`HAInactive`.
+
+Either way, the chain needs the configured default in the helper snapshot.
+`buildRouteSnapshotsWithRGPrimary` withholds a peer-owned RETH unit's
+connected prefix from the transit FIB (#15742), and before #18517 it also left
+it out of the gateway coverage the #11317 recursive-static filter consults, so
+`route 0.0.0.0/0 next-hop <WAN gateway>` was dropped as "recursive". With no
+forwarding row covering the destination the stamp was 0, the terminal demoted
+to an unstamped `DiscardRoute`, and every new flow from the split node to the
+WAN was discarded (`show route fib` showed only `discard cluster-terminal`).
+
+The peer-owned prefix now counts as gateway coverage (`gatewayNetworks`) while
+staying out of the transit rows, so the split node keeps the configured default
+and fabric-redirects new WAN flows to the owner. A gateway covered by no prefix
+is still filtered exactly as #11317 intends.
+
+Keeping the static is only half of it. A configured static at least as
+preferred as a learned same-prefix route suppresses that learned route
+(`addLearnedRouteSnapshots`), and Go emits configured gateways bare. On the
+split node the bare gateway matches no transit row, so the member would stay at
+ifindex 0. For the default that falls back to the terminal path above, but a
+NON-default static (`10.30.0.0/24 next-hop <WAN gateway>`) has no terminal at
+its prefix and ended in `NoRoute`, with the learned route that used to carry it
+suppressed. The FIB build (`resolve_next_hop_target_v4/v6`) therefore binds a
+bare gateway that no transit row covers to a PEER-OWNED connected row
+(`peer_owned_connected_target_v4/v6`; v6 link-local gateways excluded). The
+member gets the peer-owned RETH egress, HA enforcement demotes the row to
+`HAInactive` because that RG is peer-owned, and the fabric helper redirects it.
+Once the RG is local again, the same row forwards out the local member. With
+the gateway bound, the configured default is selected over the terminal on the
+split node (pref 5 over 200), which matches Junos, where a static via a RETH is
+active on both nodes. The terminal path now serves only prefixes with no
+resolvable forwarding row, for example a split node with no configured default,
+where a destination inside a peer-owned prefix is attributed through the
+destination's own ledger entry
+(`demoted_cluster_terminal_discard_route_rescues_via_fabric_16216`).
+
+**What the binding may bind.** `populate_interfaces` records a connected row in
+`connected_v4_peer_owned`/`connected_v6_peer_owned` exactly when it withholds
+that row from the transit `connected_v4`/`connected_v6` because the unit is
+peer-owned, and each row keeps its OWN routing table. The binding scans only
+those rows, filtered by `entry.table == table` (the #4446 scoping
+`infer_connected_route_target_*` applies to transit rows); equal-length matches
+pick the lowest ifindex, whatever the snapshot order
+(`equal_length_peer_owned_rows_bind_the_lowest_ifindex_18517`). It does not
+consult the by-ifindex ledger
+(`connected_*_by_ifindex`): the ledger merges every row that shares an ifindex
+under the one routing instance that first claimed it
+(`ifindex_to_routing_instance`), so a non-peer-owned prefix of another instance
+can appear in a VRF's scope there
+(`bare_gateway_never_binds_a_non_peer_owned_ledger_row_18517`). A tenant-VRF
+static binds its own peer-owned RETH and never the default table's
+(`tenant_vrf_static_binds_its_own_peer_owned_reth_18517`).
+
+**A learned same-prefix route via a local interface is replaced.** On the
+split node the configured static now suppresses a same-prefix learned route
+whose next hop is on a LOCAL interface, for example an eBGP, OSPF or DHCP
+default from a second ISP on the locally-owned LAN RG or a per-node interface.
+Before #18517 the static was filtered as recursive there, so the learned route
+survived and the split node forwarded that prefix out its own ISP. Now every
+transit flow to the prefix goes `HAInactive`, then `FabricRedirect`, to the WAN
+RG's owner, and the split node's helper FIB disagrees with its kernel (zebra
+withdrew the static with the connected route, so the kernel keeps the learned
+route). This is the Junos behaviour (the preference-5 static via the RETH is
+active cluster-wide), and the owner node emits the same row
+(`TestSplitNodeStaticReplacesLocalLearnedTwin18517`). It makes the fabric
+load-bearing for that prefix: with the fabric link down the redirect still
+targets it (#4082 fail-open fallback) and the flow is lost there, and with no
+resolvable fabric the `HAInactive` demotion stands and the flow is dropped;
+master forwarded both cases out the local learned route
+(`split_node_static_fate_follows_the_fabric_18517`).
+
+**ECMP.** An ECMP static with one member via the peer-owned gateway and one via
+a local gateway splits by neighbor state, not by config alone: lookup liveness
+for a gateway member is an installed neighbor. With no neighbor entry for the
+WAN gateway on the split node the peer-owned member is only a non-live
+fallback, and the local member carries every flow. With a learned or stale
+entry, flows hash across both members and the peer-owned member's share crosses
+the fabric (`ecmp_static_with_one_peer_owned_member_18517`). Both outcomes are
+accepted: the first keeps traffic local, the second matches the owner's
+forwarding.
+
+**The #15917 gateway-owner arm.** `select_source_ifindex_v4/v6` still resolves
+a cluster terminal's would-be egress through the gateway of an unbound member
+of a covering forwarding row. A bare gateway that a peer-owned row of the
+route's own table covers no longer reaches it (the build binds that gateway
+first). It is reached by an
+explicit-interface member (`<gw>@<iface>`, Go's `qualified-next-hop <gw>
+interface <iface>`) whose interface fails table resolution in
+`explicit_ifindex_in_route_table`, for example an interface of another VRF:
+the member stays at ifindex 0, the terminal is selected, and the gateway's
+owner in the lookup's own table stamps it
+(`terminal_gateway_owner_reached_by_out_of_table_explicit_member_18517`).
+
+### V1 zone stamps carry the zone id's low 16 bits (#18518)
+
+The V1 zone-encoded fabric stamp (`02:bf:72:fe:HH:LL` source MAC) has two
+bytes for the zone. Since #16557 zone ids are u32 `StableZoneID` hashes, so the
+stamp carries only their low 16 bits. Before #18518 the receiver decoded
+`u32::from(u16)` and required an exact `zone_id_to_name` hit, so every stamped
+redirect for a zone id above 0xFFFF was `Invalid` and dropped — which is every
+new flow a split node fabric-redirects (above). `populate_zones` now builds
+`zone_low16_to_id` and `ForwardingState::zone_id_for_stamp` resolves the stamp
+to the unique admitted zone with those low bits; two zones sharing low 16 bits
+collide, and a colliding stamp stays `Invalid` (never a guess between two
+admitted zones; this is not the #15916 `Ambiguous` disposition). The build logs
+each colliding set (`zones [...] share V1 fabric-stamp bits`) when the set of
+stamp warnings changes, not on every forwarding build. The receiver resolves the bits
+against its OWN admitted zones, so both nodes must admit the same zone set. A
+zone present only on the sender, for example during config-sync skew, decodes
+as unknown and its punts drop until the receiver commits it, or, if a receiver
+zone shares its low 16 bits, as that receiver zone. A zone whose id has low 16
+bits 0 cannot be stamped at all; the build logs both cases. V2 NAT-scope
+stamps already carried a 24-bit scope id resolved to a full-width identity and
+are unchanged.
+
+## ICMP errors and expiring probes across a split (#18174)
+
+With the LAN RG on one node and the WAN RG on the other, traceroute/mtr
+crosses the fabric twice, and three rules keep it working:
+
+- **The redirecting node is the hop.** A transit packet that the LAN owner
+  hands to the WAN owner is still routed by the LAN owner: the fabric build
+  decrements TTL / hop limit and refuses an expiring packet, and the WAN owner
+  skips the decrement on fabric ingress. So the poll tail
+  (`poll_descriptor/mod.rs`, the FabricRedirect TTL check before the #9950
+  overlap record) answers a non-fabric, non-injected FabricRedirect whose TTL
+  would expire with a local Time Exceeded from the ingress unit, and the #7770
+  punt-seed sites install no seed for it.
+- **An error crosses the fabric stamped with the zone it arrived in.** The WAN
+  owner matches the hop's error to its own (fabric-ingress) row, whose reverse
+  half is a "fabric return" FabricRedirect stamped with the FORWARD ingress
+  zone (`lan`). `restamp_embedded_fabric_redirect`
+  (`poll_descriptor/embedded_icmp.rs`) re-stamps the embedded error's redirect
+  with its actual arrival zone (`wan`), so the LAN owner's RELATED check
+  (expected: the quoted session's forward egress zone) holds and a forged
+  error still faces that zone's policy.
+- **The LAN owner matches an already-reversed quote, on fabric ingress only.**
+  The frame it receives already names the client (outer destination and quote
+  in pre-NAT form), so it hits the forward session's canonical reply alias; the
+  #14665 outer-destination gate in `icmp_embed/nat_match_v4.rs` /
+  `nat_match_v6.rs` accepts the quoted pre-NAT source as the outer destination
+  only when `FABRIC_INGRESS_FLAG` is set. The same bytes arriving on the WAN
+  stay unmatched (`pre_nat_quote_off_fabric_is_not_related_18174`).
+
+- **The LAN owner matches the FIRST error on any of its workers (#18562).**
+  The only record the LAN owner holds for a NEW punted flow is its #7770 punt
+  seed, and that seed is worker-local: it lives in the session table of the
+  worker whose LAN queue saw the probe, and the shared maps never carry it.
+  The fabric NIC RSS-hashes the returning error independently, so it usually
+  lands on another worker, which found nothing in its own table or in the
+  shared maps (the WAN owner's HA import arrives ~hundreds of ms later) and
+  default-denied it `wan -> lan` — every `mtr -u` / UDP traceroute probe is a
+  new flow, so hop 2 read `???` for the whole split. Each worker's table now
+  mirrors its forward punt seeds into the node's one read-only
+  `PuntSeedDirectory` (`session/punt_seed_directory.rs`, held in
+  `SharedSessionOwnerRgIndexes::punt_seeds`), and the session-fallback arm of
+  `nat_match_v4.rs` / `nat_match_v6.rs` consults it last — after the local
+  table and the shared maps both missed — for a FABRIC-ingress error whose
+  quote is the punted FORWARD packet (`punt_seed_forward_quote_match`).
+
+  Why this keeps #7770's guarantees. The row is a snapshot of a seed that THIS
+  node's own policy permitted for a packet that ingressed on THIS node's
+  non-fabric interface; nothing arriving on the fabric can create one. It is
+  maintained only at the session table's own choke points (published by
+  `insert_record`; retired by `remove_entry`, the table's sole removal sink,
+  by every in-place rewrite of the seed, and by dropping the table) and stops
+  matching at the earlier of the seed's install-time idle deadline and a 2 s
+  bridge TTL (the first error arrives one hop RTT after the probe; later ones
+  are answered by the HA import), so it never outlives the seed it mirrors.
+  Every directory operation does bounded work per call and a worker never
+  waits on it (sharded, FIFO expiry with a per-call pop budget, `try_lock`
+  publish); it sustains ~16k new punted flows/s, and refusals past that are
+  counted in helper status. It is not session state: nothing materializes, promotes, exports,
+  sweeps, replicates or demotes from it, no data packet reads it, and an
+  admitted error still passes the F-077 per-session budget, the #14665
+  outer-destination gate, the path-error type scope and the zone-validated
+  RELATED check (expected zone: the seed's adjudicated egress zone, against
+  the authenticated fabric stamp). The admission it grants is the one the
+  same frame already gets once the WAN owner's HA import lands in the shared
+  maps; it only closes the window before that. The same bytes arriving off
+  the fabric stay unmatched
+  (`cross_worker_punt_seed_never_matches_off_fabric_18562`).

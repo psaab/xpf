@@ -44,10 +44,9 @@ func TestHeartbeatRestartAfterRebindReportsOnlyAFailedRestart_9751(t *testing.T)
 	}
 }
 
-// The helper reports nothing unless the apply step uses it and keeps its
-// error. Pinned on the AST of the apply step: a restartHeartbeatAfterRebind
-// call whose error is joined into networkdErr, and no bare, discarded
-// RestartHeartbeat() call left in the file.
+// The helper reports nothing unless the apply step uses the epoch-fenced
+// wrapper and keeps its error. Pin that call on the apply path and reject a
+// bare, discarded RestartHeartbeat() call.
 func TestVRFRebindApplyJoinsTheHeartbeatRestartError_9751(t *testing.T) {
 	f, err := parser.ParseFile(token.NewFileSet(), "daemon_apply_dataplane.go", nil, 0)
 	if err != nil {
@@ -65,7 +64,21 @@ func TestVRFRebindApplyJoinsTheHeartbeatRestartError_9751(t *testing.T) {
 			if !ok {
 				return true
 			}
-			if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "restartHeartbeatAfterRebind" {
+			// #18597: the apply step now goes through the move gate, which
+			// returns the epoch-fenced wrapper's error unchanged
+			// (heartbeat_rebind_gate_18597.go).
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "restartHeartbeatIfControlLinkMoved" {
+				return true
+			}
+			// The post-networkd pass is the apply's owner of the #9751 retry:
+			// retryOwed must be true here, or an owed restart is retried by
+			// no apply at all (heartbeat_rebind_gate_18597_test.go pins the
+			// per-site values).
+			if len(call.Args) != 2 {
+				return true
+			}
+			if id, ok := call.Args[1].(*ast.Ident); !ok || id.Name != "true" {
 				return true
 			}
 			for _, st := range s.Body.List {
@@ -73,7 +86,7 @@ func TestVRFRebindApplyJoinsTheHeartbeatRestartError_9751(t *testing.T) {
 				if !ok || len(as.Lhs) != 1 {
 					continue
 				}
-				if l, ok := as.Lhs[0].(*ast.Ident); ok && l.Name == "networkdErr" {
+				if l, ok := as.Lhs[0].(*ast.SelectorExpr); ok && l.Sel.Name == "Networkd" {
 					joined++
 				}
 			}
@@ -87,7 +100,7 @@ func TestVRFRebindApplyJoinsTheHeartbeatRestartError_9751(t *testing.T) {
 		return true
 	})
 	if joined != 1 {
-		t.Errorf("found %d restartHeartbeatAfterRebind calls whose error is joined into networkdErr, want 1", joined)
+		t.Errorf("found %d epoch-fenced heartbeat restart calls whose error is joined into networkdErr, want 1", joined)
 	}
 	if discarded != 0 {
 		t.Errorf("found %d RestartHeartbeat() calls whose result is discarded, want 0", discarded)

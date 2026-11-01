@@ -77,19 +77,13 @@ func deriveUserspaceCapabilities(cfg *config.Config) UserspaceCapabilities {
 	// SYN-cookie material, color-aware 3-color policers, persistent SNAT under
 	// HA). These set ForwardingSupported=false and legitimately disarm.
 	//
-	// Class (i) — unrepresentable policy CONTENT (a policy naming an application
-	// protocol/port or address the matcher cannot represent) is NOT decided
-	// here. It must NOT disarm: buildOneRuleSnapshot emits a reserved sentinel
-	// (the __unsupported__ application term or the __unsupported_address__
-	// literal) and the helper's non-mutating integrity preflight rejects the
-	// WHOLE snapshot while staying armed (previous-good retained; fresh boot =
-	// default-deny). Crucially, class (i) is feed-aware: a dynamic-address feed
-	// name resolves only through the snapshot's overlay (#2049), which this
-	// cfg-only gate cannot see. Deriving it here would FALSE-POSITIVE on every
-	// healthy feed policy. So the snapshot builder computes PolicyContentRejected
-	// from the ACTUAL built rules' sentinels (collectPolicyContentRejections),
-	// and that snapshot value — not this gate — drives both the diagnostic and
-	// the narrow old-helper disarm.
+	// Class (i) — policy-content fail-closed handling is feed-aware and comes
+	// from the exact built snapshot. Generic unrepresentable content uses the
+	// __unsupported__ sentinel and the helper refuses the whole snapshot; a
+	// never-resolved DNS rule uses __dns_unavailable__ and current Rust helpers
+	// quarantine only that rule to deny. This snapshot diagnostic also drives
+	// the narrow old-helper disarm, while the cfg-only gate above cannot see
+	// dynamic feed overlays and would false-positive on healthy feed policies.
 	//
 	// CLASS (ii):
 	// Pool-mode source NAT is now implemented in the userspace dataplane

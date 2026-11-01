@@ -33,7 +33,7 @@ use super::*;
 use smallvec::SmallVec;
 
 use super::tcp_segmentation::segment_forwarded_tcp_frames_into_prepared;
-use crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic;
+use crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame;
 
 mod cos;
 mod shared_recycle;
@@ -58,14 +58,14 @@ use shared_recycle::{
     shared_recycle_target_index, shared_recycle_target_index_for_split,
 };
 pub(in crate::afxdp) use slow_path::{
-    SlowPathOutlet, extract_l3_packet_with_nat, handle_forward_build_failure,
-    maybe_reinject_slow_path, maybe_reinject_slow_path_from_frame,
+    SlowPathOutlet, handle_forward_build_failure,
     maybe_reinject_slow_path_from_frame_with_outlet, reinject_host_authorized, slow_path_admit,
 };
+#[cfg(test)]
+pub(in crate::afxdp) use slow_path::{extract_l3_packet_with_nat, maybe_reinject_slow_path, maybe_reinject_slow_path_from_frame};
 // pub(in crate::afxdp::tx) was previously pub(super) on the
 // extract_l3_packet[_from_frame] family; the re-export keeps the
 // pre-split sibling-tx/ visibility verbatim.
-pub(in crate::afxdp::tx) use slow_path::{extract_l3_packet, extract_l3_packet_from_frame};
 
 // #2208: test-only fault injection for the oversized-frame control flow.
 // A built copy-path frame larger than `tx_frame_capacity()` (4096) cannot
@@ -230,7 +230,7 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb_with_dynamic(
         crate::afxdp::icmp_ptb::post_transform_needs_inner_dst(decision, forwarding),
     );
     let mtu = if is_nat64 || uses_native_tunnel {
-        crate::afxdp::icmp_ptb::post_transform_inner_mtu_with_dynamic(
+        crate::afxdp::icmp_ptb::post_transform_inner_mtu(
             decision,
             forwarding,
             is_nat64,
@@ -532,7 +532,7 @@ fn build_sub1280_tunnel_outer_fragments(
         return None;
     }
     let (built, wg_commit) =
-        crate::afxdp::frame::build_forwarded_frame_from_frame_with_commit_and_dynamic(
+        crate::afxdp::frame::build_forwarded_frame_from_frame(
             source_frame,
             meta,
             decision,
@@ -791,7 +791,7 @@ fn enqueue_copy_fallback_frame(
                 },
             )
         };
-        crate::afxdp::frame::build_nat64_forwarded_frames_with_commit_and_dynamic(
+        crate::afxdp::frame::build_nat64_forwarded_frames(
             source_frame,
             request.meta,
             &request.decision,
@@ -803,7 +803,7 @@ fn enqueue_copy_fallback_frame(
             inputs.dynamic_neighbors,
         )
     } else {
-        crate::afxdp::frame::build_forwarded_frame_from_frame_with_commit_and_dynamic(
+        crate::afxdp::frame::build_forwarded_frame_from_frame(
             source_frame,
             request.meta,
             &request.decision,
@@ -1245,31 +1245,16 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
 
         // Fast path: prebuilt frame (e.g. ICMP error NAT reversal).
         // The frame is already fully rewritten — just enqueue for TX.
-        // #16603: normalize PrebuiltTransit into (wire, mirror) parts up
-        // front. `mirror_frame`/`mirror_meta` are the RECEIVED bytes and
-        // ingress identity for transit reversals (plan-1376: the analyzer
-        // gets the full original Ethernet frame); for plain Prebuilt
-        // (device-generated Time-Exceeded) they remain the generated wire
-        // frame and request meta, as before. The ingress copy is moved
-        // out here so the staging below never clones when no mirror row
-        // matches or the sample declines.
+        // #17718: retain the original ingress source without copying it.
+        // Mirror row resolution and sampling happen below, after the primary
+        // target is known, and `snapshot_staged_mirror_clone` makes the sole
+        // staged copy only for a selected sample.
         let mirror_sample_counter_pre = ingress_binding.mirror_sample_counter;
-        let mut prebuilt_mirror: Option<(Vec<u8>, ForwardPacketMeta)> = None;
-        if let PendingForwardFrame::PrebuiltTransit {
-            ingress_frame,
-            ingress_meta,
-            ..
-        } = &mut request.frame
-        {
-            prebuilt_mirror = Some((core::mem::take(ingress_frame), *ingress_meta));
-        }
-        let prebuilt_wire: Option<&mut crate::afxdp::cos::redirect_pool::PooledBuffer> =
-            match &mut request.frame {
-                PendingForwardFrame::Prebuilt(prebuilt) => Some(prebuilt),
-                PendingForwardFrame::PrebuiltTransit { frame, .. } => Some(frame),
-                _ => None,
-            };
-        if let Some(prebuilt) = prebuilt_wire {
+        let is_prebuilt = matches!(
+            &request.frame,
+            PendingForwardFrame::Prebuilt(_) | PendingForwardFrame::PrebuiltTransit { .. }
+        );
+        if is_prebuilt {
             // #1946: a Prebuilt frame (e.g. an embedded-ICMP NAT-reversed
             // error) can carry a FabricRedirect resolution
             // (`finalize_embedded_icmp_resolution`). When that frame is
@@ -1319,23 +1304,31 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 recycle_ingress_frame(ingress_binding, source_offset, now_ns);
                 continue;
             };
-            // #15947 (H26-02 arm 4) + #16603: stage the mirror selection
-            // BEFORE the enqueue consumes the wire Vec, but copy bytes
-            // only if the sample is actually selected. For PrebuiltTransit
-            // the staged bytes/meta are the RECEIVED frame and ingress
-            // meta (plan-1376 original-frame contract), not the translated
-            // egress frame; the ingress copy carried on the request is
-            // MOVED into the snapshot (no clone) and dropped uncloned when
-            // no mirror row matches or the sample declines. For plain
-            // Prebuilt the generated wire frame is staged as before.
-            // Oversize frames snapshot to None and commit records NoFrame
-            // from the (then empty) fallback, as before.
+            // #15947 (H26-02 arm 4) + #16603: decide whether this packet
+            // has a mirror row and is sampled BEFORE copying any bytes.
+            // PrebuiltTransit reads the received frame from its original
+            // descriptor (or already-owned GRE-decapsulated frame); plain
+            // Prebuilt continues to mirror its generated wire bytes.
             let (mirror_frame, mirror_meta): (&[u8], ForwardPacketMeta) =
-                match prebuilt_mirror.as_ref() {
-                    Some((ingress_frame, ingress_meta)) => {
-                        (ingress_frame.as_slice(), *ingress_meta)
+                match &request.frame {
+                    PendingForwardFrame::PrebuiltTransit {
+                        ingress_source,
+                        ingress_meta,
+                        ..
+                    } => {
+                        let ingress_frame = match ingress_source {
+                            PrebuiltTransitIngress::Descriptor => ingress_area
+                                .area()
+                                .slice(request.desc.addr as usize, request.desc.len as usize)
+                                .unwrap_or(&[]),
+                            PrebuiltTransitIngress::Owned(frame) => frame.as_slice(),
+                        };
+                        (ingress_frame, *ingress_meta)
                     }
-                    None => (prebuilt.as_slice(), request.meta),
+                    PendingForwardFrame::Prebuilt(prebuilt) => {
+                        (prebuilt.as_slice(), request.meta)
+                    }
+                    _ => unreachable!("prebuilt dispatch arm"),
                 };
             let mut staged_mirror = stage_sampled_mirror_clone(
                 forwarding,
@@ -1348,14 +1341,16 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
             );
             if let Some(staged) = staged_mirror.as_mut() {
                 if staged.is_selected() {
-                    match prebuilt_mirror.take() {
-                        Some((ingress_frame, _)) => {
-                            snapshot_staged_mirror_clone(staged, &ingress_frame);
-                        }
-                        None => snapshot_staged_mirror_clone(staged, prebuilt),
-                    }
+                    snapshot_staged_mirror_clone(staged, mirror_frame);
                 }
             }
+            let prebuilt = match &mut request.frame {
+                PendingForwardFrame::Prebuilt(prebuilt)
+                | PendingForwardFrame::PrebuiltTransit {
+                    frame: prebuilt, ..
+                } => prebuilt,
+                _ => unreachable!("prebuilt dispatch arm"),
+            };
             let frame_len = prebuilt.len();
             let req = TxRequest {
                 bytes: core::mem::take(prebuilt),
@@ -1421,12 +1416,10 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 dbg.tx_max_frame = frame_len as u32;
             }
             if let Some(staged) = staged_mirror {
-                // The staged snapshot carries the only copy; the
-                // fallback slice is consulted by commit only when the
-                // snapshot is absent (unselected — commit returns
-                // early — or oversize, where an empty fallback yields
-                // the same NoFrame outcome, since enqueue is skipped
-                // on length either way).
+                // A selected in-capacity snapshot owns the only copied
+                // bytes. Oversize selections have no snapshot; commit uses
+                // the staged length to record NoFrame before consulting this
+                // empty fallback. Unselected samples return before fallback.
                 commit_staged_mirror_clone(
                     left,
                     ingress_index,
@@ -1616,7 +1609,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                         );
                     }
                 } else if let Some(segmented) =
-                    segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
+                    segment_forwarded_tcp_frames_from_frame(
                         source_frame,
                         request.meta,
                         &request.decision,
@@ -2193,7 +2186,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
             } else {
                 build_failed = true;
             }
-            copied_source_frame = true;
+            let _ = &copied_source_frame;
         }
         if build_failed {
             handle_forward_build_failure(
@@ -2415,7 +2408,7 @@ fn nat64_v4_egress_mtu_with_dynamic(
     forwarding: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> usize {
-    crate::afxdp::icmp_ptb::post_transform_inner_mtu_with_dynamic(
+    crate::afxdp::icmp_ptb::post_transform_inner_mtu(
         decision,
         forwarding,
         true,
@@ -2455,7 +2448,7 @@ fn nat64_v6_egress_mtu_with_dynamic(
     forwarding: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> usize {
-    let mtu = crate::afxdp::icmp_ptb::post_transform_inner_mtu_with_dynamic(
+    let mtu = crate::afxdp::icmp_ptb::post_transform_inner_mtu(
         decision,
         forwarding,
         true,

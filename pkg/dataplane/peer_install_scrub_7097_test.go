@@ -468,11 +468,11 @@ func TestSessionValueFieldCountIsPinned7097(t *testing.T) {
 		// stable packet identity, not node-local resources, and must remain on
 		// the synced value.
 		// The #16880 primary-liveness marker adds one Go-only field per family:
-		// the base has 50/51 fields, so the current pin is 51/52. The older
-		// 47/48 count predates other sync-only fields and is not this delta.
-
-		{"SessionValue", reflect.TypeOf(SessionValue{}), 51},
-		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 52},
+		// the base has 50/51 fields, so its pin is 51/52.
+		// #17780 adds the sync-only app-timeout/log pair-presence marker, which
+		// is not node-local and therefore raises the pin to 52/53.
+		{"SessionValue", reflect.TypeOf(SessionValue{}), 52},
+		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 53},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.typ.NumField(); got != tc.want {

@@ -2,7 +2,6 @@
 
 use super::oracle::{EMITTER_SEED, GeneratedQuery, GeneratedSnapshot, seed_rows};
 use super::*;
-use proptest::prelude::*;
 use proptest::strategy::ValueTree;
 const IPV4: &[&str] = &[
     "10.0.1.5",

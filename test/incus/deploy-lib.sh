@@ -25,6 +25,11 @@
 # #2162: deploy_verify_pushed_sha generalizes the helper-only sha readback
 # (#1962/#1980) so xpfd and cli get the same HARD post-push verification.
 #
+# #18544: deploy_reconcile_unit_shadows is the one DEB-path reconcile. It runs
+# after the deb install and before the controlled cut. It removes the
+# raw-deploy /etc copies of xpfd.service and the two boot-barrier units, which
+# would otherwise shadow the packaged units.
+#
 # All functions take a FULLY-RESOLVED instance name (e.g. "loss:xpf-userspace-fw0"
 # or "xpf-fw") because the two callers compute that differently (cluster-setup.sh
 # r() remote prefix vs setup.sh INSTANCE_NAME). They depend on info()/warn()/die()
@@ -110,6 +115,212 @@ deploy_reconcile_dangling_sbin() {
 			incus exec "$rinst" -- rm -f "$p" 2>/dev/null \
 				|| die "failed to remove dangling symlink $p on $rinst"
 		fi
+	done
+}
+
+# ── Raw-deploy unit shadows on the deb path (#18544) ─────────────────
+# The raw deploy paths (cluster-setup.sh deploy_vm, setup.sh cmd_deploy) push
+# test/incus/xpfd.service and the two boot barriers
+# (scripts/image/xpf-{transit,input}-closed.service) into /etc/systemd/system.
+# The .deb ships its OWN copy of all three under /usr/lib/systemd/system
+# (debian/rules stages the same sources; xpfd.service also gains an
+# ExecStartPre verify-dataplane line). systemd prefers /etc, so on a node that
+# was raw-deployed even once, those copies SHADOW the packaged units through
+# every later deb deploy, however old they are. Measured 2026-10-30:
+# - the loss and tcp nodes ran xpfd with KillMode=control-group under debs
+#   that ship KillMode=mixed (#18213), so systemd SIGTERMed the helper
+#   alongside xpfd, and xpfd's orderly shutdown could not clear rg_active
+#   (#18540);
+# - loss fw0's barrier copies were older than the packaged barriers.
+# The #1917 drop-in still pins xpfd's ExecStart/ExecStartPre; every other
+# setting came from the /etc copy.
+#
+# A production install has no /etc copies. The deb path therefore removes
+# them, so the units shipped in the deb being deployed govern. It does not
+# re-sync them from the worktree: that would pair one tree's units with
+# binaries from a deb that may come from another tree (XPF_DEPLOY_DEB_PATH).
+# A later raw deploy pushes them again, which is that path's contract.
+deploy_shadowed_units=(xpfd.service xpf-transit-closed.service xpf-input-closed.service)
+DEPLOY_UNIT_ETC_DIR="/etc/systemd/system"
+# Where dh_installsystemd installs a packaged unit. On merged-/usr both
+# directories hold the same file. The loaded unit must be in one of them.
+deploy_packaged_unit_dirs=(/usr/lib/systemd/system /lib/systemd/system)
+# A removed /etc copy is parked here until the loaded unit has been verified,
+# so a failed verification can put it back. It is on persistent storage, so a
+# reboot between the move and the check cannot lose it (a /run stash could),
+# and it is outside every systemd unit search path.
+DEPLOY_UNIT_SHADOW_STASH="/var/lib/xpf-deploy-unit-shadow"
+# The units the deploy cannot do without. Their reconcile HARD FAILS when the
+# deb ships no packaged copy. Every other unit in deploy_shadowed_units is
+# skipped with a warning in that case: a deb pinned through
+# XPF_DEPLOY_DEB_PATH may predate the boot barriers (#9852, #10751), and its
+# raw-pushed /etc copies are then the only ones there are.
+deploy_required_units=(xpfd.service)
+
+# deploy_unit_path_is_packaged <unit> <path>: rc 0 iff <path> is the unit's
+# file in one of deploy_packaged_unit_dirs.
+deploy_unit_path_is_packaged() {
+	local d
+	for d in "${deploy_packaged_unit_dirs[@]}"; do
+		[[ "$2" == "$d/$1" ]] && return 0
+	done
+	return 1
+}
+
+# deploy_reconcile_unit_shadow <rinst> <unit>
+#
+# Make the packaged <unit> the one systemd has LOADED. The steps:
+# 0. With no packaged copy on disk, skip a unit that is not in
+#    deploy_required_units (warn, return 0). The deployed deb predates it.
+#    A copy parked by an interrupted earlier run is put back first, into a
+#    free /etc path only, since it is then the unit's only copy.
+# 1. Park a regular-file /etc/systemd/system/<unit> in the stash. Refuse
+#    (HARD FAIL, file kept) when a REQUIRED unit has no packaged copy.
+# 2. Run daemon-reload, also when the file is already gone but systemd still
+#    has it loaded.
+# 3. ASSERT the result positively: LoadState=loaded, and FragmentPath is the
+#    unit's file in a packaged dir. A unit that the /etc copy used to outrank
+#    (/run/systemd/system, /usr/local/lib/systemd/system, a runtime mask) or
+#    one systemd rejects fails the check. Any parked copy then goes back,
+#    whether this run parked it or an earlier interrupted run did, as long
+#    as the /etc path is free. systemd reloads, and the deploy dies. The
+#    error names the parked copy, and says whether the reload worked.
+# 4. Only then drop the stash, and re-point every install link
+#    (/etc/systemd/system/*/<unit>, i.e. the WantedBy=/RequiredBy= .wants and
+#    .requires links) that still targets the removed file. systemd adds those
+#    dependencies by link NAME, so enablement and RequiredBy= hold either way;
+#    re-pointing makes the links match a package install.
+#
+# A symlink at the /etc path is never removed, because this deploy did not
+# write it:
+# - a link to /dev/null is a mask (xpf-deploy.py's #7559 daemon hold). It
+#   governs deliberately, so the deploy leaves it alone, warns, and returns 0;
+# - any other link is an alias. It is not removed, and step 3 decides: an
+#   alias that systemd does not resolve to the packaged file fails the
+#   deploy.
+#
+# The function never starts, stops or restarts a unit. daemon-reload only
+# replaces what is loaded, and the new settings first apply at the unit's next
+# stop/start (for xpfd, the controlled cut; for the boot barriers, the next
+# boot). A second run changes nothing.
+deploy_reconcile_unit_shadow() {
+	local rinst="$1" unit="$2"
+	local shadow="$DEPLOY_UNIT_ETC_DIR/$unit" stash="$DEPLOY_UNIT_SHADOW_STASH/$unit"
+	local removed=0 have_packaged=0 required=0 d target frag state reason links l
+
+	for d in "${deploy_packaged_unit_dirs[@]}"; do
+		if incus exec "$rinst" -- test -f "$d/$unit" 2>/dev/null; then
+			have_packaged=1
+			break
+		fi
+	done
+	for d in "${deploy_required_units[@]}"; do
+		[[ "$d" == "$unit" ]] && required=1
+	done
+	if (( ! have_packaged && ! required )); then
+		# The raw-pushed copy is then the only copy of this unit. If an
+		# interrupted earlier run parked it, put it back (into a free /etc
+		# path only), or this node boots without the unit while its install
+		# links still name it.
+		if incus exec "$rinst" -- test -f "$stash" 2>/dev/null; then
+			if incus exec "$rinst" -- test -e "$shadow" 2>/dev/null ||
+				incus exec "$rinst" -- test -L "$shadow" 2>/dev/null; then
+				warn "No packaged $unit under ${deploy_packaged_unit_dirs[*]} on $rinst: the deployed deb predates it. A parked copy is at $stash, but $shadow is occupied, so it was NOT restored; inspect both by hand (#18544)."
+				return 0
+			fi
+			incus exec "$rinst" -- mv -f "$stash" "$shadow" 2>/dev/null \
+				|| die "no packaged $unit on $rinst and failed to put the parked $stash back at $shadow; restore it by hand, or the node boots without $unit"
+			if incus exec "$rinst" -- systemctl daemon-reload 2>/dev/null; then
+				warn "No packaged $unit under ${deploy_packaged_unit_dirs[*]} on $rinst: the deployed deb predates it. Put the parked $stash back at $shadow and reloaded (#18544)."
+			else
+				warn "No packaged $unit under ${deploy_packaged_unit_dirs[*]} on $rinst: the deployed deb predates it. Put the parked $stash back at $shadow, but daemon-reload FAILED; it loads at the next boot or reload (#18544)."
+			fi
+			return 0
+		fi
+		warn "No packaged $unit under ${deploy_packaged_unit_dirs[*]} on $rinst: the deployed deb predates it. Leaving $shadow as it is (#18544)."
+		return 0
+	fi
+
+	if incus exec "$rinst" -- test -L "$shadow" 2>/dev/null; then
+		target=$(incus exec "$rinst" -- readlink "$shadow" 2>/dev/null || true)
+		if [[ "$target" == /dev/null ]]; then
+			warn "$shadow on $rinst is masked (-> /dev/null): a deliberate hold, not a raw-deploy copy. Leaving it; the mask, not the packaged unit, governs $unit."
+			return 0
+		fi
+		warn "$shadow on $rinst is a symlink to '${target:-?}', not a raw-deploy copy. Not removing it; checking that systemd resolves $unit to the packaged file."
+	elif incus exec "$rinst" -- test -f "$shadow" 2>/dev/null; then
+		if (( ! have_packaged )); then
+			die "refusing to remove $shadow on $rinst: no packaged $unit under ${deploy_packaged_unit_dirs[*]} to fall back to; is the xpf deb installed?"
+		fi
+		warn "Removing stale raw-deploy unit $shadow on $rinst: it shadows the packaged $unit, so unit changes shipped in the deb never took effect here (#18544)."
+		incus exec "$rinst" -- mkdir -p "$DEPLOY_UNIT_SHADOW_STASH" 2>/dev/null \
+			|| die "failed to create $DEPLOY_UNIT_SHADOW_STASH on $rinst"
+		incus exec "$rinst" -- mv -f "$shadow" "$stash" 2>/dev/null \
+			|| die "failed to move $shadow aside on $rinst"
+		removed=1
+	fi
+
+	# Reload after changing the disk, AND whenever systemd still has the /etc
+	# copy LOADED: an earlier removal whose daemon-reload never ran leaves no
+	# file to find, but the stale unit still governs the next stop.
+	frag=$(incus exec "$rinst" -- systemctl show -p FragmentPath --value "$unit" 2>/dev/null || true)
+	if (( removed )) || [[ "$frag" == "$shadow" ]]; then
+		incus exec "$rinst" -- systemctl daemon-reload \
+			|| die "systemctl daemon-reload failed on $rinst after reconciling $shadow"
+		frag=$(incus exec "$rinst" -- systemctl show -p FragmentPath --value "$unit" 2>/dev/null || true)
+	fi
+	state=$(incus exec "$rinst" -- systemctl show -p LoadState --value "$unit" 2>/dev/null || true)
+
+	# Verify the LOADED unit, positively. What governs the next stop is what
+	# systemd loaded, and neither "the rm succeeded" nor "it is not the /etc
+	# path" says that is the packaged file.
+	reason=""
+	if [[ "$state" != loaded ]]; then
+		reason="$unit on $rinst has LoadState='${state:-unknown}' (FragmentPath='${frag}'), not loaded"
+	elif ! deploy_unit_path_is_packaged "$unit" "$frag"; then
+		reason="$unit on $rinst loads '${frag:-nothing}', not the packaged file under ${deploy_packaged_unit_dirs[*]} (#18544)"
+	fi
+	if [[ -n "$reason" ]]; then
+		# Restore ANY parked copy, not only one this run made: an earlier run
+		# interrupted after its move leaves one behind, and it is the last
+		# unit that governed before the deploy. Restore it only into a free
+		# /etc path; an occupied one (an alias, or a copy that never moved)
+		# is never overwritten.
+		if incus exec "$rinst" -- test -f "$stash" 2>/dev/null; then
+			if incus exec "$rinst" -- test -e "$shadow" 2>/dev/null ||
+				incus exec "$rinst" -- test -L "$shadow" 2>/dev/null; then
+				die "$reason; a parked copy is at $stash on $rinst, but $shadow is occupied, so it was NOT restored. Inspect both by hand"
+			fi
+			incus exec "$rinst" -- mv -f "$stash" "$shadow" 2>/dev/null \
+				|| die "$reason; ALSO failed to put $shadow back from $stash on $rinst; restore it by hand"
+			if incus exec "$rinst" -- systemctl daemon-reload 2>/dev/null; then
+				die "$reason; put the parked $stash back at $shadow and reloaded, so $rinst is as it was before the deploy"
+			fi
+			die "$reason; put the parked $stash back at $shadow, but daemon-reload FAILED, so systemd on $rinst may still have '$frag' loaded. Run systemctl daemon-reload there"
+		fi
+		die "$reason"
+	fi
+
+	# Verified. The parked copy is no longer needed (this also clears a stash
+	# left by an interrupted earlier run).
+	incus exec "$rinst" -- rm -rf "$stash" 2>/dev/null || true
+
+	links=$(incus exec "$rinst" -- find "$DEPLOY_UNIT_ETC_DIR" -mindepth 2 -maxdepth 2 -type l -name "$unit" 2>/dev/null || true)
+	for l in $links; do
+		if [[ "$(incus exec "$rinst" -- readlink "$l" 2>/dev/null || true)" == "$shadow" ]]; then
+			incus exec "$rinst" -- ln -sfn "$frag" "$l" \
+				|| die "failed to re-point $l at $frag on $rinst"
+		fi
+	done
+	info "$unit on $rinst loads the packaged unit ($frag)."
+}
+
+# deploy_reconcile_unit_shadows <rinst>: deploy_reconcile_unit_shadow for
+# every unit the raw deploy pushes into /etc and the deb also ships.
+deploy_reconcile_unit_shadows() {
+	local rinst="$1" u
+	for u in "${deploy_shadowed_units[@]}"; do
+		deploy_reconcile_unit_shadow "$rinst" "$u"
 	done
 }
 
@@ -851,6 +1062,213 @@ deploy_node_rg_role() {
 	'
 }
 
+# deploy_rg_local_forwarding reads `show chassis cluster status` on stdin and
+# prints the LOCAL node's `rg-active=` value (active / inactive) for
+# redundancy group <rg> (#18523). Each node prints one
+# `Forwarding: rg-active=<v> vrrp-master=<v>` line under its own row for every
+# RG that has a state machine, in private-RG AND legacy VRRP-backed mode
+# (pkg/cluster/status.go FormatStatus, pkg/daemon/rg_forwarding_status_7367.go).
+# That line is the dataplane's view, not the node's ownership claim.
+#
+# When ownership and forwarding disagree, the daemon appends
+# ` -- DIVERGENCE: ...` (pkg/cluster/rg_forwarding.go FormatRGForwarding).
+#
+# Exit status:
+#   0  exactly one line in the exact `Redundancy group: <rg>` block, value
+#      active or inactive, no suffix; prints the value.
+#   2  the same, but the line carries a suffix (any token other than
+#      rg-active= / vrrp-master=); prints `<value> -- <suffix>`, so a caller
+#      comparing against a bare `active`/`inactive` FAILs and names it.
+#   1  missing, duplicated, or not active/inactive; prints nothing.
+deploy_rg_local_forwarding() {
+	local want="${1:?deploy_rg_local_forwarding: rg required}"
+	awk -v want="$want" '
+		/^Redundancy group:[[:space:]]/ { rg = $3; next }
+		rg != "" && ("x" rg) == ("x" want) && $1 == "Forwarding:" {
+			n++
+			v = ""
+			extra = ""
+			for (i = 2; i <= NF; i++) {
+				if ($i ~ /^rg-active=/) { v = substr($i, 11) }
+				else if ($i !~ /^vrrp-master=/) { extra = extra (extra == "" ? "" : " ") $i }
+			}
+		}
+		END {
+			if (n != 1 || (v != "active" && v != "inactive")) exit 1
+			if (extra != "") {
+				sub(/^--[[:space:]]*/, "", extra)
+				print v " -- " extra
+				exit 2
+			}
+			print v
+		}
+	'
+}
+
+# deploy_active_active_split_verdict <fw0-status> <fw1-status> scores the
+# test-active-active.sh split: RG1 (WAN) moved to node1 and RG2 (LAN) stayed
+# on node0 (#18523). Arguments are each node's own
+# `show chassis cluster status`. The caller defines pass() and fail(); this
+# records exactly four verdicts and never aborts under `set -euo pipefail`.
+#
+# Ownership is read from BOTH nodes' own views, the ha_rg_owner_verdict rule
+# (#18503). The untargeted yield parks the old owner in `secondary-hold`, so
+# a non-owner is `secondary` or `secondary-hold`. fw0's view alone would
+# score a dual-primary RG as healthy.
+#
+# Forwarding is each node's own `Forwarding: rg-active=` line, in both
+# election modes: the owner `active`, the peer `inactive`, and no
+# DIVERGENCE suffix. A missing line is a FAIL, never a skip.
+deploy_active_active_split_verdict() {
+	local s0="$1" s1="$2"
+	local rg1_n0 rg1_n1 rg1_fw1 rg2_n0 rg2_fw1
+	local f1_fw0 f1_fw1 f2_fw0 f2_fw1
+	rg1_n0=$(deploy_node_rg_role node0 1 <<<"$s0" || true)
+	rg1_n1=$(deploy_node_rg_role node1 1 <<<"$s0" || true)
+	rg1_fw1=$(deploy_node_rg_role node1 1 <<<"$s1" || true)
+	rg2_n0=$(deploy_node_rg_role node0 2 <<<"$s0" || true)
+	rg2_fw1=$(deploy_node_rg_role node1 2 <<<"$s1" || true)
+	if [[ "$rg1_n0" =~ ^secondary(-hold)?$ && "$rg1_n1" == primary && "$rg1_fw1" == primary ]]; then
+		pass "RG1 (WAN) moved to fw1"
+	else
+		fail "RG1 did not move to fw1 (fw0 view: node0=${rg1_n0:-missing} node1=${rg1_n1:-missing}; fw1 view: node1=${rg1_fw1:-missing})"
+	fi
+	if [[ "$rg2_n0" == primary && "$rg2_fw1" =~ ^secondary(-hold)?$ ]]; then
+		pass "RG2 (LAN) stayed on fw0"
+	else
+		fail "RG2 not owned by fw0 alone (fw0 view: node0=${rg2_n0:-missing}; fw1 view: node1=${rg2_fw1:-missing})"
+	fi
+	f1_fw0=$(deploy_rg_local_forwarding 1 <<<"$s0" || true)
+	f1_fw1=$(deploy_rg_local_forwarding 1 <<<"$s1" || true)
+	f2_fw0=$(deploy_rg_local_forwarding 2 <<<"$s0" || true)
+	f2_fw1=$(deploy_rg_local_forwarding 2 <<<"$s1" || true)
+	if [[ "$f1_fw0" == inactive && "$f1_fw1" == active ]]; then
+		pass "RG1 (WAN) forwarding moved to fw1 (fw0 rg-active=inactive, fw1 rg-active=active)"
+	else
+		fail "RG1 (WAN) forwarding not on fw1 alone (fw0 rg-active=${f1_fw0:-missing}, fw1 rg-active=${f1_fw1:-missing})"
+	fi
+	if [[ "$f2_fw0" == active && "$f2_fw1" == inactive ]]; then
+		pass "RG2 (LAN) forwarding stayed on fw0 (fw0 rg-active=active, fw1 rg-active=inactive)"
+	else
+		fail "RG2 (LAN) forwarding not on fw0 alone (fw0 rg-active=${f2_fw0:-missing}, fw1 rg-active=${f2_fw1:-missing})"
+	fi
+	return 0
+}
+
+# ── #18523: put every RG back on fw0 between HA smoke phases ──────────
+# test-ha-crash.sh and test-restart-connectivity.sh both run this restore,
+# so the selftest drives the code they run. The caller defines FW0, FW1 and
+# pass()/fail()/info(). `incus` and `sleep` are the only commands with side
+# effects, which lets deploy-lib-selftest.sh drive the loop with both mocked.
+
+# deploy_restore_rg_on_fw0 <rg>: fw0 owns <rg> only when BOTH nodes' own
+# views agree: fw0's view has node0 primary, and fw1's view has node1
+# secondary or secondary-hold. fw0's view alone would score a dual-primary
+# split as restored (the ha_rg_owner_verdict rule, #18503). An unreadable
+# view is "not restored".
+deploy_restore_rg_on_fw0() {
+	local rg="${1:?deploy_restore_rg_on_fw0: rg required}" s0 s1
+	s0=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	[[ "$(deploy_node_rg_role node0 "$rg" <<<"$s0" || true)" == primary ]] || return 1
+	s1=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	[[ "$(deploy_node_rg_role node1 "$rg" <<<"$s1" || true)" =~ ^secondary(-hold)?$ ]]
+}
+
+# deploy_restore_rg_on_fw1 <rg>: fw1 still claims <rg> in its own view. The
+# restore re-requests a yield only then: re-requesting from a node that
+# already yielded re-arms its hold and bumps its failover count.
+deploy_restore_rg_on_fw1() {
+	local rg="${1:?deploy_restore_rg_on_fw1: rg required}" s1
+	s1=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	[[ "$(deploy_node_rg_role node1 "$rg" <<<"$s1" || true)" == primary ]]
+}
+
+# deploy_restore_fw0_owns_all: deploy_restore_rg_on_fw0 holds for RG0-2.
+deploy_restore_fw0_owns_all() {
+	local rg
+	for rg in 0 1 2; do
+		deploy_restore_rg_on_fw0 "$rg" || return 1
+	done
+	return 0
+}
+
+# deploy_restore_healthy <took-s> <budget-s> <refusals>: a COMPLETED restore
+# is healthy only with no refused request and within the budget. Healthy
+# restores took 9-16s with one request per RG and no refusal (integ5,
+# 2026-10-29). A refusal or a slow restore is the #18521 class (a half-open
+# sync, an undischarged fence), the deferral this restore waits out.
+deploy_restore_healthy() {
+	local took="$1" budget="$2" refusals="$3"
+	((refusals == 0 && took <= budget))
+}
+
+# deploy_restore_fw0_primary <label> moves RG0-2 back to fw0 one RG at a
+# time, polls, and re-requests the yield from fw1 until RESTORE_FW0_WAIT
+# (default 60s) runs out. A single fixed sleep after three blind requests was
+# shorter than one admission window plus a post-restart bulk (~50
+# sessions/s), and swallowed the refusal that said why.
+#
+# Verdicts (exactly one per call):
+#   PASS  fw0 already owned every RG, or the restore completed with no
+#         refusal within RESTORE_FW0_BUDGET (default 30s). Returns 0.
+#   FAIL  "restored only after": restored, but a request was refused or it
+#         took longer than the budget. Returns 0, so the run continues on a
+#         restored cluster, but the run is not healthy.
+#   FAIL  "could not restore": RESTORE_FW0_WAIT ran out. Returns 1.
+# Both FAILs name the last refusal.
+deploy_restore_fw0_primary() {
+	local label="$1" deadline rg out last_err="" started=$SECONDS requests=0 refusals=0
+	local wait_s="${RESTORE_FW0_WAIT:-60}" budget="${RESTORE_FW0_BUDGET:-30}" took
+	if deploy_restore_fw0_owns_all; then
+		pass "$label: fw0 already primary"
+		return 0
+	fi
+	if [[ ! "$wait_s" =~ ^[0-9]+$ ]]; then
+		info "RESTORE_FW0_WAIT=$wait_s is not a whole number of seconds; using 60"
+		wait_s=60
+	fi
+	if [[ ! "$budget" =~ ^[0-9]+$ ]]; then
+		info "RESTORE_FW0_BUDGET=$budget is not a whole number of seconds; using 30"
+		budget=30
+	fi
+	for rg in 0 1 2; do
+		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+	done
+	sleep 1
+	deadline=$((SECONDS + wait_s))
+	for rg in 0 1 2; do
+		while ! deploy_restore_rg_on_fw0 "$rg"; do
+			if ((SECONDS >= deadline)); then
+				break 2
+			fi
+			if deploy_restore_rg_on_fw1 "$rg"; then
+				out=$(incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 || true)
+				requests=$((requests + 1))
+				if grep -qiE "error|refus|not connected|failed" <<<"$out"; then
+					refusals=$((refusals + 1))
+					last_err="RG$rg: $(head -1 <<<"$out")"
+				fi
+			fi
+			for _ in 1 2 3 4 5; do
+				deploy_restore_rg_on_fw0 "$rg" && break
+				sleep 1
+			done
+		done
+	done
+	if ! deploy_restore_fw0_owns_all; then
+		fail "$label: could not restore fw0 as primary within ${wait_s}s${last_err:+ (last refusal: $last_err)}"
+		return 1
+	fi
+	took=$((SECONDS - started))
+	if ! deploy_restore_healthy "$took" "$budget" "$refusals"; then
+		fail "$label: fw0 restored only after ${took}s (budget ${budget}s; ${requests} request(s), ${refusals} refused${last_err:+; last refusal: $last_err})"
+		return 0
+	fi
+	pass "$label: fw0 restored as primary in ${took}s (${requests} request(s), ${refusals} refused)"
+	return 0
+}
+
 # failover_ownership_verdict cross-references the two independent checks
 # test-failover.sh already performs, and is the #7368 half of the #6591 fix.
 #
@@ -1215,14 +1633,27 @@ deploy_verify_dataplane_preflight() {
 	if (( verify_rc != 0 )); then
 		deploy_preflight_cleanup "$rinst"
 		# #9558: verify-dataplane exits 3 ONLY for the #1864 kernel-verifier
-		# reject (dataplane.ErrUserspaceShimVerifierReject). Every other refusal
-		# exits 1, including a live pinned-map ABI mismatch, and rebuilding the
-		# shim cannot fix those. Print the #1864 remediation for exit 3 only;
-		# for anything else, point at verify-dataplane's own message.
+		# reject (dataplane.ErrUserspaceShimVerifierReject). The legacy other
+		# refusal class exits 1, including a live pinned-map ABI mismatch.
+		# Print the #1864 remediation for exit 3 only; for anything else,
+		# point at verify-dataplane's own message.
 		if (( verify_rc == 3 )); then
 			die "verify-dataplane REJECTED the new binary's embedded shim on $rinst — deploy aborted, old daemon untouched.
   This is the #1864 failure mode. Rebuild with the pinned toolchain (make generate) or restore the tracked object:
     git checkout -- pkg/dataplane/userspace_xdp_bpfel.o && make build"
+		fi
+		# #17769: route both #16701 headroom refusal codes to remediation
+		# matching their distinct meanings. Neither is a kernel REJECT or a
+		# pinned-map ABI mismatch, and neither honors a guest-side override.
+		if (( verify_rc == 4 )); then
+			die "verify-dataplane refused the new binary on $rinst (exit 4) — deploy aborted, old daemon untouched.
+  LOW-HEADROOM: the shim LOADS on this kernel but measured verifier headroom is below the 15% floor (see verify-dataplane's counts, kernel and floor above).
+  Free verifier headroom by reducing the shim's verifier cost (for example, trim the hot parsing paths described in pkg/dataplane/README.md), then rebuild and rerun the pre-flight. Alternatively, use a kernel with sufficient measured headroom; retry deployment only after this check passes. No guest-side override is honored."
+		fi
+		if (( verify_rc == 5 )); then
+			die "verify-dataplane refused the new binary on $rinst (exit 5) — deploy aborted, old daemon untouched.
+  UNMEASURED-HEADROOM: the shim LOADS on this kernel, but its processed-instruction count was unavailable, so the 15% floor could not be applied (see verify-dataplane's message above).
+  Do not treat this as measured headroom or clear live pins. Resolve the verifier-stat reporting incompatibility or use a kernel that reports processed-instruction counts, then rerun the pre-flight and deploy only after it passes. No guest-side override is honored."
 		fi
 		die "verify-dataplane refused the new binary on $rinst (exit $verify_rc) — deploy aborted, old daemon untouched.
   This is NOT the #1864 kernel-verifier reject (that exits 3), so rebuilding the shim will not help.

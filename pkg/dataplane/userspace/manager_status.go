@@ -30,11 +30,9 @@ func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 	status.BindingsWatchdogRepairs = m.mapsSyncTelemetry.bindingsWatchdogRepairs.Load()
 	status.BindingsWatchdogErrors = m.mapsSyncTelemetry.bindingsWatchdogErrors.Load()
 	status.LocalAddrPruneSkipped = m.mapsSyncTelemetry.localAddrPruneSkipped.Load()
-	// #3261: stamp the manager-owned snapshot-reject diagnostic onto the status
-	// the helper round-trip cannot carry (the helper has no PolicyContentRejected
-	// field and strips it on decode). This keeps the rejected-snapshot state
-	// observable in `show`/metrics even though the helper reports the
-	// previous-good capabilities.
+	// Stamp manager-owned policy-content diagnostics the helper does not carry
+	// on round-trip. Entries include whole-snapshot refusals and DNS rules
+	// quarantined to deny while sibling rules remain active.
 	status.LastSnapshotRejectReasons = append([]string(nil), m.lastSnapshotRejectReasons...)
 	// #3719: stamp the manager-owned zone-id-collision diagnostic (the helper
 	// cannot carry it — the colliding zone was dropped before the wire) so the

@@ -558,7 +558,8 @@ test-race-dp:
 # is what gates these cells, and a second release-feature build
 # would double the cold cost for no additional oracle.
 DEBUG_LOG_CELLS_16439 := afxdp::worker::loop_body::debug_report::policy_revoked_sessions_fold_tests::accumulate_carries_policy_revoked_sessions_10021 afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_tuple_mismatch_recycles_frame_exactly_once afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_pat_translation_is_not_a_tuple_mismatch_9782 afxdp::tx::dispatch::tests::segmentation::segmentation_pat_translation_survives_expected_ports_9782
-test-rust: check-userspace-dt-needed
+test-rust: lint-rust-baseline check-userspace-dt-needed
+
 	# Leg 0: compile bench invariants only; benches are never executed.
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned check --manifest-path userspace-dp/Cargo.toml --benches
 	# Leg 1: full release suite; overflow checks remain off by design.
@@ -570,6 +571,7 @@ test-rust: check-userspace-dt-needed
 		--bins --tests -- --test-threads=1 --exact $$(cut -f2 userspace-dp/debug-leg.tests | tr '\n' ' ')
 	# Leg 3 (#16439): debug-log-only cells, exact-named and listed first.
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp sh -c 'set -eu; listed="$$("$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --list)"; for cell in $(DEBUG_LOG_CELLS_16439); do count=$$(printf "%s\n" "$$listed" | grep -c -F -x "$$cell: test" || true); if [ "$$count" != "1" ]; then echo "test-rust Leg 3 (#16439): expected exactly one listed debug-log cell $$cell, found $$count" >&2; exit 1; fi; done; "$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --test-threads=1 --exact $(DEBUG_LOG_CELLS_16439)' "$(CARGO)" "$$pinned"
+
 
 # #17200: clippy gate for the userspace dataplane. Clippy could not
 # complete on this crate until #17200 (deny-by-default
@@ -594,6 +596,15 @@ test-rust: check-userspace-dt-needed
 clippy-rust:
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D unfulfilled_lint_expectations
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious -A clippy::duplicate_mod
+# #17190: rustc warning ratchet — fail on any new/increased (profile,lint,file) warning
+# vs userspace-dp/lint-baseline.tsv. Mechanical lints are also #![deny] in
+# src/main.rs and src/bin/fairness-eval.rs. Runs the pinned toolchain via
+# RUSTUP_TOOLCHAIN (the census script invokes cargo in argv form, so a
+# `cargo +<pinned>` string would not survive as an executable name).
+.PHONY: lint-rust-baseline
+lint-rust-baseline:
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp CARGO=$(CARGO) RUSTUP_TOOLCHAIN=$$pinned python3 scripts/rust-lint-baseline.py
+
 
 # #10204: prove the release helper's static snapshot provenance and dynamic
 # dependency boundary on every Rust gate. The map must come from a fresh
@@ -864,6 +875,49 @@ harness-census:
 test-harness-census-lib:
 	bash ./test/incus/harness-census-selftest.sh
 
+# #18645: the instruction census. A temporary instruction carries an expiry
+# marker (an `Expires-when:` line naming `#NNNN closed`, or a free-text
+# condition plus a `Review-by:` date at most 180 days ahead; grammar in
+# scripts/instructions-census.py and the campaign skill). Scope: docs/,
+# .claude/skills/, test/incus/, scripts/, this Makefile, CLAUDE.md (read, never
+# written), README.md, AGENTS.md and pkg/**/README.md.
+# - `instructions-census` (also CI, against the PR's base, and `make selftest`)
+#   fails bad marker syntax everywhere, and a past Review-by date ONLY in files
+#   the change touches (merge-base with origin/master, plus uncommitted and
+#   untracked files), so a calendar day cannot red every open PR at once.
+# - `instructions-census-online` is the campaign keeper's hourly SWEEP
+#   (--online --all): every marker, expired dates and CLOSED issues, plus a
+#   14-day lead-time warning. It exits 77 (SKIP) without `gh`, which make
+#   reports as a failure: a skipped check is not a pass.
+.PHONY: instructions-census instructions-census-online test-instructions-census-lib
+instructions-census:
+	python3 scripts/instructions-census.py --base origin/master
+
+instructions-census-online:
+	python3 scripts/instructions-census.py --online --all
+
+test-instructions-census-lib:
+	bash ./test/incus/instructions-census-selftest.sh
+
+# #18645: the mirror census. Text deliberately copied into several Markdown
+# files sits between `<!-- mirror:<id> n=<copies> -->` and
+# `<!-- /mirror:<id> -->`; the census fails when same-id blocks differ after
+# whitespace normalisation, when the block count is not the declared n, or when
+# a block has no partner. Hermetic; runs in CI and in `make selftest`.
+.PHONY: mirror-census test-mirror-census-lib
+mirror-census:
+	python3 scripts/mirror-census.py
+
+test-mirror-census-lib:
+	bash ./test/incus/mirror-census-selftest.sh
+
+# #18645: self-test the shared deb version allocator (scripts/next-deb-version.sh,
+# see the DEB_VERSION comment below). Hermetic: a private counter, never the
+# shared one.
+.PHONY: test-next-deb-version-lib
+test-next-deb-version-lib:
+	bash ./scripts/next-deb-version-selftest.sh
+
 # Bake the distributable appliance image (#1879 Path C): one
 # offline-built bootable root disk (REVIEWED-PIN Ubuntu server cloudimg
 # base — PINNED_BASE_RELEASE + PINNED_BASE_SHA256 in bake.py, not
@@ -966,7 +1020,8 @@ test-deploy: build build-ctl
 test-deploy-lib:
 	bash ./test/incus/deploy-lib-selftest.sh
 
-# Hermetically test failover clock resync after a crash reboot (#11872).
+# Hermetically test the crash smokes' NTP-convergence precondition and its
+# recorded XPF_FAILOVER_CLOCK_RESYNC=1 escape (#18614; was the #11872 resync).
 test-failover-clock-lib:
 	bash ./test/incus/failover-clock-selftest.sh
 
@@ -1163,7 +1218,7 @@ test-daemon-kernel:
 			echo "test-daemon-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the forcing prerequisites are unavailable."; \
 			exit 1; \
 		fi; \
-		echo "make test: NOT-EXAMINED — daemon-kernel (27 cells: #9637 ingress, #11409 unzoned-ingress, #9637 reinject, #12034 shared-VRF, #12229 lifeline, #12087 secure-tunnel, plus the 21 #16470 mgmt-VRF/RI-VRF/DHCP/#9506 cells)."; \
+		echo "make test: NOT-EXAMINED — daemon-kernel (30 cells: #9637 ingress, #11409 unzoned-ingress, #9637 reinject, #12034 shared-VRF, #12229 lifeline, #12087 secure-tunnel, the 21 #16470 mgmt-VRF/RI-VRF/DHCP/#9506 cells, plus the 3 #18573 direct-VIP stamp cells)."; \
 		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
 		echo "  Run where unprivileged user namespaces are available, or set XPF_REQUIRE_NETNS=1 to fail instead."; \
 		exit 0; \
@@ -1528,10 +1583,13 @@ test-v6-na-recovery-lib:
 # tagged into VLAN 80, running target-services.sh's own grid (iperf3 5200-5211,
 # echo 6200-6211, port 7).
 #
-# Idempotent, and touches NO existing instance: it creates and reconciles one
-# container. It does not need the cluster lock for that reason, and does not
-# take it — a `mouse-target-up` running beside somebody's smoke changes nothing
-# the smoke reads.
+# Idempotent: it creates and reconciles one container. That container is the
+# v4 iperf target every loss gate measures, and `up` rewrites and restarts its
+# address unit, so `up` and `destroy` take the cluster lock themselves
+# (cluster-cell.sh, like a deploy; #18576). Before it pins a NEW v4 address,
+# `up` claim-probes it and refuses if another MAC answers. `status` stays
+# lock-free. They nest inside a with-cluster.sh cell; never wrap them in a raw
+# `flock` on the lock path, which hangs (the inner acquire cannot see it).
 mouse-target-up:
 	bash ./test/incus/mouse-target-setup.sh up
 
@@ -1603,6 +1661,25 @@ test-connectivity:
 		--require-helper-attestation \
 		-- ./test/incus/test-connectivity.sh $(MODE)
 
+# Throughput and stall matrix, docs/regression-test-matrix.md rows F2/F6:
+# v4/v6 x push/reverse x -P1/-P8/-P12 from the LAN host, held inside one lock
+# cell. Records throughput beside loadavg; FAILS on any connect error or any
+# 1 s interval where the aggregate or a single stream stalls ("the iperf
+# stops"). For tcp/udp export the cluster's lock tuple first (CLAUDE.md).
+PERF_MATRIX_OUT ?= /var/tmp/perf-matrix/$(HARNESS_ENV)
+PERF_MATRIX_DUR ?= 20
+PERF_MATRIX_REPS ?= 2
+.PHONY: perf-matrix perf-matrix-lib
+perf-matrix:
+	./test/incus/with-cluster.sh "perf-matrix" -- \
+		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/iperf-matrix.sh \
+		$(PERF_MATRIX_OUT) $(PERF_MATRIX_DUR) $(PERF_MATRIX_REPS)
+
+# Hermetic: the stall verdict on fixture iperf3 JSON (a stalled aggregate, a
+# single dead stream, an error, an empty and an unparseable result all FAIL).
+perf-matrix-lib:
+	./test/incus/iperf-matrix.sh --selftest
+
 # Hermetic unit fixtures for the IPv4 RETH MTR path checker.
 test-connectivity-mtr-selftest:
 	./test/incus/connectivity-mtr-selftest.sh
@@ -1642,6 +1719,26 @@ test-active-active:
 		--gate test-active-active --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
 		--require-helper-attestation \
 		-- ./test/incus/test-active-active.sh
+
+# #18583 (matrix row H11): the operator's RG-move loop, scored per move. Issues
+# `request chassis cluster failover redundancy-group <rg> node 0|1` from ONE
+# node, alternating, every SOAK_SLEEP s for SOAK_MOVES moves, under iperf3 -P8
+# and ping -i 0.01 from the LAN host, and never fixes clocks (the preflight
+# reports inter-node skew instead). Knobs: SOAK_MOVES SOAK_SLEEP SOAK_RG
+# SOAK_FROM, see the script header and docs/ha-rg-move-correctness.md.
+# Self-locks the cluster. Wrapped like the other HA gates so a run writes a
+# ledger row with build attestation (smoke-cells: the soak's last line is
+# "rg-move-soak: <n> passed, <m> failed"; a void run exits 2 with a FATAL).
+.PHONY: test-rg-move-soak test-rg-move-soak-lib
+test-rg-move-soak:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate test-rg-move-soak --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
+		-- ./test/incus/rg-move-soak.sh
+
+# Hermetic verdict + orchestration cells for the soak (fake cluster, no incus).
+test-rg-move-soak-lib:
+	cd test/incus && python3 -m unittest rg_move_soak_test
 
 # Rapid failover stress test (repeated failover cycles — requires cluster + iperf3 server)
 test-stress-failover:
@@ -1895,6 +1992,19 @@ loss-cluster-restart:
 # project's git tags are non-numeric (e.g. userspace-forwarding-ok-*),
 # so synthesize 0.0.<commit-count>+g<short-sha>[.dirty] — monotonic in
 # commit count, carries the exact source sha, and is policy-valid.
+#
+# An EXPLICIT version for a cluster deploy (`make deb DEB_VERSION=...`) comes
+# from scripts/next-deb-version.sh (#18645), never from a hand-picked number:
+#   make deb DEB_VERSION="$(scripts/next-deb-version.sh --git .)+g$(git rev-parse --short=12 HEAD)"
+# It allocates from the shared counter /var/worktrees/.cache/deb-version-counter
+# under flock. The floor is what the six lab nodes RUN (read-only
+# `dpkg-query -W xpf`, plus a margin of 100 when the counter is created), an
+# explicit --floor / XPF_DEB_VERSION_FLOOR, and the --git commit counts. A
+# stray deb on disk is only a warning, never a floor, and a jump of more than
+# 1000 above the floor needs --force-jump. Hand-picked numbers collided across
+# lanes, and a number below the one a node runs is an apt downgrade the deploy
+# refuses; `--claim <version>` registers a hand-picked build and refuses one at
+# or below the counter. The stock default below is unchanged.
 # The shared probe compares tracked files with HEAD, scans untracked package/
 # image inputs, and asks Go for the compiled inputs of `build`/`build-ctl` so
 # ignored sources consumed by the compiler are included. Unattestable GOFLAGS

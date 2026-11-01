@@ -8,7 +8,9 @@ use rustc_hash::FxHashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-pub(super) use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
+pub(super) use crate::ip_proto::PROTO_TCP;
+#[cfg(test)]
+pub(super) use crate::ip_proto::PROTO_UDP;
 
 /// #2396: protocol-wildcard sentinel for an IP-only / any-protocol DNAT rule
 /// (Junos `match destination-address <ip>` with no application and no port).

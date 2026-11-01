@@ -1279,6 +1279,30 @@ fn nat64_v6_frag_frame(
     f.extend_from_slice(&tcp);
     f
 }
+
+/// NAT64 three-fragment packet with fragmentable data ranges [0,24), [24,40),
+/// and [40,48); the first range contains a complete TCP header.
+fn nat64_v6_frag_range_frame_17720(
+    frag_off: u16,
+    ident: u32,
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    payload_len: usize,
+) -> Vec<u8> {
+    let mut frame = nat64_v6_frag_frame(frag_off, ident, src, dst, 12345, 443);
+    frame.truncate(62); // Ethernet + IPv6 header + Fragment header.
+    frame[18..20].copy_from_slice(&((8 + payload_len) as u16).to_be_bytes());
+    let mut payload = vec![0u8; payload_len];
+    if frag_off & 0xFFF8 == 0 {
+        payload[0..2].copy_from_slice(&12345u16.to_be_bytes());
+        payload[2..4].copy_from_slice(&443u16.to_be_bytes());
+        payload[12] = 0x50;
+        payload[13] = TCP_FLAG_SYN;
+        payload[14..16].copy_from_slice(&0xfaf0u16.to_be_bytes());
+    }
+    frame.extend_from_slice(&payload);
+    frame
+}
 /// Ethernet + IPv4 + TCP fragment for the reverse NAT64 reachability pin.
 /// `frag_off` uses the IPv4 flags/offset word: `0x2000` is the first fragment
 /// (MF=1), and a nonzero offset with MF=0 is a non-first fragment. The
@@ -1634,6 +1658,68 @@ fn nat64_committed_first_fragment_publishes_frag_assoc_and_nonfirst_inherits_514
         "#5146: the inherited non-first fragment must be NAT64-translated (the #2562 feature)"
     );
 }
+// #17720: packet-level coverage of NAT64's real non-first consult path.
+// RED on revert: an MF=0 tail cannot evict the association before the middle.
+#[test]
+fn nat64_fragment_coverage_is_arrival_order_independent_17720() {
+    let run = |ident: u32, tail_first: bool| {
+        let forwarding = build_forwarding_state(&nat64_frag_snapshot());
+        let ha_state = txn_ha_state();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+        sessions.set_max_sessions_for_test(16);
+        let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
+        let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
+
+        let first = nat64_v6_frag_range_frame_17720(0x0001, ident, src, dst, 24);
+        let (batch, dbg) = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &first,
+            nat64_v6_frag_meta(first.len(), src, dst),
+            true,
+        );
+        assert_eq!(dbg.tx, 1, "the admitted head must forward");
+        assert_eq!(batch.nat64_translations, 1, "the head must be NAT64-translated");
+        assert_eq!(forwarding.nat64.frag_assoc.len(), 1);
+
+        let order = if tail_first {
+            [("tail", 0x0028, 8, 1), ("middle", 0x0019, 16, 0)]
+        } else {
+            [("middle", 0x0019, 16, 1), ("tail", 0x0028, 8, 0)]
+        };
+        for (name, frag_off, payload_len, expected_len) in order {
+            let fragment =
+                nat64_v6_frag_range_frame_17720(frag_off, ident, src, dst, payload_len);
+            let (batch, dbg) = txn_run_descriptor_checked(
+                &mut binding,
+                &mut sessions,
+                &forwarding,
+                &ha_state,
+                &fragment,
+                nat64_v6_frag_meta(fragment.len(), src, dst),
+                true,
+            );
+            assert_eq!(dbg.tx, 1, "the {name} fragment must inherit NAT64 and forward");
+            assert_eq!(
+                batch.nat64_translations, 1,
+                "the {name} fragment must be NAT64-translated"
+            );
+            assert_eq!(
+                forwarding.nat64.frag_assoc.len(),
+                expected_len,
+                "association state after {name} in tail_first={tail_first}"
+            );
+        }
+    };
+
+    run(0x1772_0001, true); // head, tail, middle retains then releases
+    run(0x1772_0002, false); // head, middle, tail releases on completion
+}
+
 #[test]
 fn nat64_nonfirst_fragment_drops_after_admitting_session_close_11058() {
     let forwarding = build_forwarding_state(&nat64_frag_snapshot());
@@ -2906,7 +2992,7 @@ fn nat64_frag_assoc_hit_reenforces_owner_rg_6927() {
     // One helper run: install an association from a first fragment under the
     // ACTIVE runtime, then replay a non-first fragment under `ha` and report
     // whether it forwarded.
-    let mut run = |ha: &BTreeMap<i32, HAGroupRuntime>, ident: u32| -> u64 {
+    let run = |ha: &BTreeMap<i32, HAGroupRuntime>, ident: u32| -> u64 {
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
         binding.interface = Arc::<str>::from("reth1.0");
         let mut sessions = SessionTable::new();

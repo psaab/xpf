@@ -40,6 +40,31 @@ func TestNewManager(t *testing.T) {
 	}
 }
 
+func TestPeerGroupPrimaryRequiresLiveHeartbeat17784(t *testing.T) {
+	m := NewManager(0, 1)
+	m.SetPeerGroupStateForTesting(0, StatePrimary)
+	if primary, known := m.PeerGroupPrimary(0); !primary || !known {
+		t.Fatalf("live peer RG0 = (%v, %v), want (true, true)", primary, known)
+	}
+
+	m.SetPeerGroupStateForTesting(0, StateSecondary)
+	if primary, known := m.PeerGroupPrimary(0); primary || !known {
+		t.Fatalf("live secondary peer RG0 = (%v, %v), want (false, true)", primary, known)
+	}
+
+	m.ClearPeerHeartbeatLiveness()
+	if primary, known := m.PeerGroupPrimary(0); primary || known {
+		t.Fatalf("stale retained peer RG0 = (%v, %v), want (false, false)", primary, known)
+	}
+
+	// Pruning RG0 from the otherwise live peer snapshot also removes the fence.
+	m.SetPeerGroupStateForTesting(1, StatePrimary)
+	m.ClearPeerGroupStateForTesting(0)
+	if primary, known := m.PeerGroupPrimary(0); primary || known {
+		t.Fatalf("pruned peer RG0 = (%v, %v), want (false, false)", primary, known)
+	}
+}
+
 func TestUpdateConfig_CreatesRGs(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(

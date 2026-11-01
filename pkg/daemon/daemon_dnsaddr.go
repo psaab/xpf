@@ -14,18 +14,27 @@ import (
 // the normal apply path when an answer changes.
 var dnsAddressRefreshInterval = 5 * time.Minute
 
-// markDNSResolved records cfg as already resolved outside applySem
-// (#16601) so resolveDNSBeforeApply does not resolve it again.
-func (d *Daemon) markDNSResolved(cfg *config.Config) {
+// markDNSResolved records cfg as already resolved from base outside
+// applySem (#16601) so resolveDNSBeforeApply does not resolve it again.
+func (d *Daemon) markDNSResolved(cfg, base *config.Config) {
 	if cfg == nil {
 		return
 	}
 	d.dnsRefreshMu.Lock()
 	defer d.dnsRefreshMu.Unlock()
 	if d.dnsResolvedConfigs == nil {
-		d.dnsResolvedConfigs = make(map[*config.Config]struct{})
+		d.dnsResolvedConfigs = make(map[*config.Config]*config.Config)
 	}
-	d.dnsResolvedConfigs[cfg] = struct{}{}
+	d.dnsResolvedConfigs[cfg] = base
+}
+
+func (d *Daemon) resolvedDNSBase(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+	d.dnsRefreshMu.Lock()
+	defer d.dnsRefreshMu.Unlock()
+	return d.dnsResolvedConfigs[cfg]
 }
 
 func (d *Daemon) isDNSResolved(cfg *config.Config) bool {
@@ -65,18 +74,18 @@ func (d *Daemon) consumeDNSResolved(cfg *config.Config) bool {
 // no-write-through-published-pointer contract hold by construction,
 // independent of caller provenance. Callers that need the caller's
 // pointer identity (digest/stamp keying) already tolerate a DNS clone:
-// recordAppliedDNSBaseline re-keys a clone of the active config onto
-// the active pointer, and text digests hash the tree, not the pointer.
+// recordAppliedDNSBaseline uses the recorded source pointer to determine
+// whether the clone belongs to the currently published generation.
 func (d *Daemon) resolveDNSBeforeApply(cfg *config.Config) *config.Config {
 	if cfg == nil || !config.HasDNSNames(cfg) {
 		return cfg
 	}
-	if d.consumeDNSResolved(cfg) {
+	if d.isDNSResolved(cfg) {
 		return cfg
 	}
 	clone := cfg.CloneForDNSRefresh()
 	config.RefreshDNSAddressBooks(clone)
-	d.markDNSResolved(clone)
+	d.markDNSResolved(clone, cfg)
 	return clone
 }
 
@@ -141,27 +150,27 @@ func dnsBookHasNames(cfg *config.Config) bool {
 	return has
 }
 
-// snapshotDNSAnswers captures identity->prefixes for every dns-name entry,
-// for change detection across a refresh (#15933, #15962 fold). Published
-// configs are immutable (#16687): their DNS fields change only by
-// publishing a new generation, so readers need no applySem. The
-// enumeration itself lives in config.DNSAnswersSnapshot so the
-// userspace hybrid guard compares exactly the same identities (#16606).
-func snapshotDNSAnswers(cfg *config.Config) map[string][]string {
+// snapshotDNSAnswers captures scoped DNS state (prefixes and failure flag)
+// for every dns-name entry (#17723). Published configs are immutable
+// (#16687): their DNS fields change only by publishing a new generation, so
+// readers need no applySem. The enumeration itself lives in
+// config.DNSAnswersSnapshot so the userspace hybrid guard compares exactly
+// the same identities and enforcement-relevant fields (#16606).
+func snapshotDNSAnswers(cfg *config.Config) map[string]config.DNSAnswerState {
 	return config.DNSAnswersSnapshot(cfg)
 }
 
-func dnsAnswersEqual(a, b map[string][]string) bool {
+func dnsAnswersEqual(a, b map[string]config.DNSAnswerState) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for k, va := range a {
 		vb, ok := b[k]
-		if !ok || len(va) != len(vb) {
+		if !ok || va.DNSLookupFailed != vb.DNSLookupFailed || len(va.Prefixes) != len(vb.Prefixes) {
 			return false
 		}
-		for i := range va {
-			if va[i] != vb[i] {
+		for i := range va.Prefixes {
+			if va.Prefixes[i] != vb.Prefixes[i] {
 				return false
 			}
 		}
@@ -170,10 +179,11 @@ func dnsAnswersEqual(a, b map[string][]string) bool {
 }
 
 // cloneDNSAnswers deep-copies an answer snapshot for baseline storage.
-func cloneDNSAnswers(in map[string][]string) map[string][]string {
-	out := make(map[string][]string, len(in))
+func cloneDNSAnswers(in map[string]config.DNSAnswerState) map[string]config.DNSAnswerState {
+	out := make(map[string]config.DNSAnswerState, len(in))
 	for k, v := range in {
-		out[k] = append([]string(nil), v...)
+		v.Prefixes = append([]string(nil), v.Prefixes...)
+		out[k] = v
 	}
 	return out
 }
@@ -212,6 +222,7 @@ func (d *Daemon) refreshDNSOnce() {
 		d.applySem.Release(1)
 		return
 	}
+	baseGeneration := d.store.ActiveConfigGeneration()
 	before := snapshotDNSAnswers(cfg)
 	if baseline := d.dnsBaselineFor(cfg); baseline != nil {
 		before = baseline
@@ -220,7 +231,7 @@ func (d *Daemon) refreshDNSOnce() {
 	d.applySem.Release(1)
 
 	config.RefreshDNSAddressBooks(refreshed)
-	d.markDNSResolved(refreshed)
+	d.markDNSResolved(refreshed, cfg)
 	if dnsAnswersEqual(before, snapshotDNSAnswers(refreshed)) {
 		// No change: drop the marker; the clone is discarded.
 		d.consumeDNSResolved(refreshed)
@@ -232,7 +243,7 @@ func (d *Daemon) refreshDNSOnce() {
 	// unconditionally — inside the single hold the read-back IS the
 	// newest applied state, so no CAS is needed or correct). There is
 	// NO baseline write after the semaphore is released.
-	if _, err := d.applyDNSRefreshedConfig(cfg, refreshed); err != nil {
+	if _, err := d.applyDNSRefreshedConfig(cfg, refreshed, baseGeneration); err != nil {
 		slog.Warn("dns-name refresh re-apply failed", "err", err)
 	}
 }
@@ -245,7 +256,7 @@ func (d *Daemon) refreshDNSOnce() {
 // but a baseline exists. Generation changes record a new baseline or
 // clear it, so the fallback cannot cross generations in practice
 // (commits record/clear under applySem before the next tick reads).
-func (d *Daemon) dnsBaselineFor(cfg *config.Config) map[string][]string {
+func (d *Daemon) dnsBaselineFor(cfg *config.Config) map[string]config.DNSAnswerState {
 	d.dnsRefreshMu.Lock()
 	defer d.dnsRefreshMu.Unlock()
 	if d.lastDNSRefreshAnswers == nil {
@@ -270,6 +281,27 @@ func (d *Daemon) clearDNSBaseline() {
 // is invalidated; on success of the active generation it is replaced by
 // what that apply actually resolved. This closes the flap-back desync
 // (#15962 B2) without refreshing on every apply.
+//
+// #17744: a successful ordinary apply whose cfg is a DNS-resolved clone
+// of the still-active generation must PUBLISH that clone
+// (Store.PublishRefreshedDNS, the same base-CAS the #16606 refresher
+// uses) before recording the baseline, and the baseline is keyed to the
+// clone actually published — never to the stale active pointer the clone
+// was resolved from. Recording the clone's answers against the old
+// pointer left store.ActiveConfig() (and every reader keyed to it: the
+// scheduler, the userspace manager compile guard, the policymatch query
+// cache) on the stale answers while the baseline already claimed the
+// fresh ones, so the next refresh tick compared equal against the
+// baseline and never repaired the store. Publishing first is safe
+// because PublishRefreshedDNS never touches the persisted operator tree
+// (DNS answers are runtime state) and refuses the swap when base is no
+// longer active, so a newer promoted generation is never overwritten.
+// When the applied clone carries the SAME answers as the active
+// generation there is nothing to publish: the baseline is recorded
+// against the active pointer and the store generation does not churn.
+// The periodic refresher clone is explicitly excluded from this
+// ordinary-apply path: applyDNSRefreshedConfig owns its base-CAS
+// publication and baseline record.
 func (d *Daemon) recordAppliedDNSBaseline(cfg *config.Config, applyErr error) {
 	if cfg == nil {
 		return
@@ -277,19 +309,18 @@ func (d *Daemon) recordAppliedDNSBaseline(cfg *config.Config, applyErr error) {
 	if d.applyBodyForTest != nil {
 		return
 	}
-	// #16601: cfg may be a DNS-resolved clone of the active config
-	// (resolveDNSBeforeApply) or the marked refresher clone. Its answers
-	// are the actually-applied state. The refresher publish path
-	// (applyDNSRefreshedConfig) records its own baseline keyed on the
-	// published clone and returns before this defer matters; for the
-	// background-apply clone, key the baseline on the ACTIVE pointer
-	// but re-key it if the store later publishes a refreshed clone —
-	// dnsBaselineFor falls back to any recorded baseline when the
-	// pointer moved to a published clone with identical authored names.
+	if cfg == d.dnsRefreshApplying {
+		if applyErr != nil {
+			d.clearDNSBaseline()
+		}
+		return
+	}
 	base := cfg
 	isCloneOfActive := false
 	if d.store != nil {
-		if active := d.store.ActiveConfig(); active != nil && active != cfg && dnsBookHasNames(cfg) {
+		active := d.store.ActiveConfig()
+		if active != nil && active != cfg && dnsBookHasNames(cfg) &&
+			d.resolvedDNSBase(cfg) == active {
 			base = active
 			isCloneOfActive = true
 		}
@@ -306,37 +337,75 @@ func (d *Daemon) recordAppliedDNSBaseline(cfg *config.Config, applyErr error) {
 	if !isCloneOfActive && d.store.ActiveConfig() != cfg {
 		return
 	}
+	if isCloneOfActive {
+		answers := snapshotDNSAnswers(cfg)
+		if dnsAnswersEqual(answers, snapshotDNSAnswers(base)) {
+			// Unchanged answers: the applied clone adds nothing over
+			// the published generation; skip the republish so the
+			// store generation does not churn on every ordinary apply.
+			d.recordDNSBaselineForce(base, answers)
+			return
+		}
+		if !d.store.PublishRefreshedDNS(base, cfg) {
+			// The base stopped being active, so this resolved clone
+			// was superseded and must not become a baseline for the
+			// newly active config.
+			d.clearDNSBaseline()
+			return
+		}
+		d.recordDNSBaselineForce(cfg, answers)
+		return
+	}
 	d.recordDNSBaselineForce(base, snapshotDNSAnswers(cfg))
 }
 
 // recordDNSBaselineForce unconditionally sets the baseline (under
 // applySem at a real apply exit, where the writer IS the newest).
-func (d *Daemon) recordDNSBaselineForce(cfg *config.Config, answers map[string][]string) {
+func (d *Daemon) recordDNSBaselineForce(cfg *config.Config, answers map[string]config.DNSAnswerState) {
 	d.dnsRefreshMu.Lock()
 	d.lastDNSRefreshBase = cfg
 	d.lastDNSRefreshAnswers = cloneDNSAnswers(answers)
 	d.dnsRefreshMu.Unlock()
 }
 
-// applyDNSRefreshedConfig publishes a privately refreshed DNS copy of
-// base under applySem ONLY if base is still active, and records the
-// actually-applied baseline UNCONDITIONALLY in the same hold: inside
-// the single hold the read-back is by construction the newest applied
-// state (any competing record was written before this hold began and
-// has just been superseded on the dataplane), so a CAS would only ever
-// drop the newest record (round-4 B1). Returns (true,nil) only when
-// actually applied.
+// applyDNSRefreshedConfig applies a privately refreshed DNS copy for the
+// captured active operator generation under applySem and records the
+// actually-applied baseline UNCONDITIONALLY in the same hold: the read-back
+// is by construction the newest applied state (any competing record was
+// written before this hold began and has just been superseded on the
+// dataplane), so a CAS would only ever drop the newest record
+// (round-4 B1). Returns (true,nil) only when actually applied.
 //
-// #16606: on success the refreshed clone is ALSO published as the
-// store's compiled active config (Store.PublishRefreshedDNS, still
-// under this same applySem hold and only if base is still active).
-// Before this, the clone lived only in the dataplane's lastSnapshot:
-// store.ActiveConfig() kept the stale answers, so the next scheduler
-// edge or route-overlay republish rebuilt address-book rows from the
-// stale generation and silently re-shipped the old answer. Publishing
-// the applied clone keeps the store, the baseline, and the helper on
-// exactly the same answers. The baseline is keyed to the published clone.
-func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, error) {
+// #16606: on success, the refreshed clone is published as the store's
+// compiled active config (Store.PublishRefreshedDNSForGeneration) under
+// this same applySem hold. Before this, the clone lived only in the
+// dataplane's lastSnapshot: store.ActiveConfig() kept the stale
+// answers, so the next scheduler edge or route-overlay republish
+// rebuilt address-book rows from the stale generation and silently
+// re-shipped the old answer. Publishing the applied clone keeps the
+// store, the baseline, and the helper on exactly the same answers. The
+// baseline is keyed to the published clone.
+//
+// #17744: the pre-apply base check is deliberately NOT retained here.
+// A same-generation ordinary apply may have published a newer
+// same-authored clone (carrying the dataplane's current answers) while
+// this tick's resolution was in flight; this tick's apply lands LAST
+// under applySem, so the store must converge to the just-applied clone.
+// Publication is gated on the clone's authored generation (the
+// operator-tree hash) matching the current active generation, so a
+// newer operator generation promoted in the window is never
+// overwritten: only the runtime DNS answers of THIS generation are
+// replaced, and the baseline is keyed to the published clone.
+// The no-baseline-on-failure contract is unchanged: publication happens
+// only after a successful apply.
+// baseGeneration is captured with the refresh snapshot. When omitted, the
+// helper retains the exact-base pointer guard for direct callers.
+func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config, baseGeneration ...string) (bool, error) {
+	generationBound := len(baseGeneration) == 1
+	if len(baseGeneration) > 1 {
+		d.consumeDNSResolved(refreshed)
+		return false, nil
+	}
 	if !d.beginBackgroundApply(d.backgroundApplyCtx(), "dnsAddressRefresh") {
 		// The refresh clone is marked before this call; admission refusal
 		// must not retain that marker.
@@ -349,13 +418,31 @@ func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, 
 		d.consumeDNSResolved(refreshed)
 		d.applySem.Release(1)
 	}()
-	if d.store == nil || d.store.ActiveConfig() != base {
+	// #17744: publication is gated on the authored-generation match
+	// below rather than the base pointer, because a same-generation
+	// ordinary apply may have published a newer same-authored clone
+	// while this tick's resolution was in flight.
+	if d.store == nil || base == nil {
 		return false, nil
+	}
+	generation := ""
+	if generationBound {
+		generation = baseGeneration[0]
+		if generation == "" || d.store.ActiveConfigGeneration() != generation {
+			return false, nil
+		}
+	} else {
+		// Preserve the exact-base guard for direct callers that did not
+		// capture an operator generation with their snapshot.
+		if d.store.ActiveConfig() != base {
+			return false, nil
+		}
+		generation = d.store.ActiveConfigGeneration()
 	}
 	if d.applyBodyForTest != nil {
 		d.applyBodyForTest(refreshed)
 		d.policyInvalidationPublishLanded = true
-		if !d.store.PublishRefreshedDNS(base, refreshed) {
+		if !d.store.PublishRefreshedDNSForGeneration(generation, refreshed) {
 			return false, nil
 		}
 		d.recordDNSBaselineForce(refreshed, snapshotDNSAnswers(refreshed))
@@ -366,22 +453,24 @@ func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, 
 		return true, nil
 	}
 	// #16601: consume the refresher marker BEFORE the apply so
-	// applyConfigLocked's deferred baseline (which keys clones on the
-	// active pointer) does not overwrite the published-clone baseline
-	// recorded below with the pre-publish pointer.
+	// the resolve stage does not repeat DNS I/O. The apply-deferred
+	// baseline recognizes this clone via dnsRefreshApplying and
+	// leaves publication + baseline to this helper.
 	d.consumeDNSResolved(refreshed)
+	d.dnsRefreshApplying = refreshed
+	defer func() { d.dnsRefreshApplying = nil }()
 	err := d.applyConfigLocked(context.Background(), refreshed)
 	if err != nil {
 		return false, err
 	}
-	// Publish AFTER the real apply: applyConfigLocked's deferred
-	// recordAppliedDNSBaseline(refreshed) ran during the apply (its
-	// store-active check fails pre-publish, so it correctly did not
-	// record); the applied clone's answers are what the baseline and
-	// the store must both reflect.
-	if !d.store.PublishRefreshedDNS(base, refreshed) {
-		// A newer generation was promoted concurrently; the refreshed
-		// apply was superseded. Do not claim this generation's baseline.
+	// Publish AFTER the real apply: recordAppliedDNSBaseline recognized
+	// dnsRefreshApplying and did not record or publish the refresher clone;
+	// these answers are stored only after the generation-CAS succeeds below.
+	if !d.store.PublishRefreshedDNSForGeneration(generation, refreshed) {
+		// The published generation is a different authored generation
+		// now: a newer operator generation was promoted concurrently
+		// and the refreshed apply was superseded. Do not claim this
+		// generation's baseline.
 		return false, nil
 	}
 	d.recordDNSBaselineForce(refreshed, snapshotDNSAnswers(refreshed))

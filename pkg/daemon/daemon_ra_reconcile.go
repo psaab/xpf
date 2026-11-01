@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
@@ -47,6 +48,13 @@ import (
 func (d *Daemon) reconcileClusterRAServices(reason string) {
 	d.raReconcileMu.Lock()
 	defer d.raReconcileMu.Unlock()
+	// #17693: a retained refused rollback target is not authorized to publish
+	// RA while the daemon is in bootstrap. Entry sets this gate before taking
+	// the same mutex to withdraw, so an in-flight reconcile finishes before
+	// the final withdrawal and no later periodic pass can recreate its senders.
+	if d.inBootstrap() {
+		return
+	}
 
 	if d.store == nil {
 		return
@@ -137,20 +145,27 @@ func (d *Daemon) syncStandaloneRAHash(desired []*config.RAInterfaceConfig) {
 // The standalone hash is kept separate so a standalone apply never poisons
 // the cluster digest (and vice versa) across a mode transition.
 // lastStandaloneRAHash is guarded by raReconcileMu, like lastRAReconcileHash.
-func (d *Daemon) reconcileStandaloneRAServices(reason string) {
+// The bool is scoped to this standalone renewal retry owner: true means it
+// owes no further work, including a cluster-mode no-op. It is not a live-sender
+// health report; a digest match can coexist with an asynchronous sender failure,
+// which raDeadSenderReassertLoop owns (#6793).
+func (d *Daemon) reconcileStandaloneRAServices(reason string) bool {
 	d.raReconcileMu.Lock()
 	defer d.raReconcileMu.Unlock()
 	if d.store == nil {
-		return
+		return false
 	}
 	cfg := d.store.ActiveConfig()
-	if cfg == nil || cfg.Chassis.Cluster != nil {
-		return
+	if cfg == nil {
+		return false
+	}
+	if cfg.Chassis.Cluster != nil {
+		return true
 	}
 	apply := d.raApplyFn
 	if apply == nil {
 		if d.ra == nil {
-			return
+			return false
 		}
 		apply = d.ra.Apply
 	}
@@ -165,28 +180,29 @@ func (d *Daemon) reconcileStandaloneRAServices(reason string) {
 	}
 	newHash := raDesiredHash(desired)
 	if newHash == d.lastStandaloneRAHash && !d.raHasDeadSenders() {
-		return
+		return true
 	}
 	if len(desired) == 0 {
 		// No RA desired: withdraw through the applier seam so a test spy
 		// sees the same shape as the cluster empty case. ra.Apply(nil)
 		// retires every sender with a goodbye (#5092).
 		if err := apply(nil); err != nil {
-			slog.Warn("ra: standalone RA renew reconcile failed; will retry on next renewal",
+			slog.Warn("ra: standalone RA renew reconcile failed; retrying periodically",
 				"reason", reason, "err", err)
-			return
+			return false
 		}
 		d.lastStandaloneRAHash = newHash
-		return
+		return true
 	}
 	if err := apply(desired); err != nil {
-		slog.Warn("ra: standalone RA renew reconcile failed; will retry on next renewal",
+		slog.Warn("ra: standalone RA renew reconcile failed; retrying periodically",
 			"reason", reason, "err", err)
-		return
+		return false
 	}
 	slog.Info("ra: standalone RA reconciled after PD renewal",
 		"reason", reason, "interfaces", len(desired))
 	d.lastStandaloneRAHash = newHash
+	return true
 }
 
 // raHasDeadSenders reports whether the RA manager holds a sender whose
@@ -303,23 +319,52 @@ func (d *Daemon) reassertDeadRASendersOnce(ctx context.Context) {
 	}
 }
 
+// standaloneRARenewRetryInterval is the cadence for retrying an unconverged
+// standalone PD-renew reconcile. The loop arms this ticker only while a retry
+// is owed and stops it as soon as a later reconcile converges.
+const standaloneRARenewRetryInterval = 30 * time.Second
+
 // standaloneRARenewLoop is the #16773 owner for the standalone PD-renewal
 // RA refresh. It wakes promptly on nudgeStandaloneRARenew (fired by every
-// content-identical lease renewal) and otherwise does no periodic work:
-// a renewal is the only event that moves Obtained without a recompile, so
-// no ticker is needed and a healthy box pays nothing between renewals.
-// Each wake runs one digest-gated reconcileStandaloneRAOnce; a v4 or
-// non-PD renewal leaves the digest unchanged, so the wake costs one
-// buildRAConfigs and no sender restart (preserving #15057's no-churn rule
-// and #1777's quiet-renewal rule for the full-compile path). Joined by
-// Run's WaitGroup on shutdown.
+// content-identical lease renewal) and otherwise does no periodic work while
+// converged: a renewal is the only event that moves Obtained without a
+// recompile. After an apply failure or an unavailable prerequisite, a periodic
+// retry is armed until the desired set converges. Joined by Run's WaitGroup on
+// shutdown.
 func (d *Daemon) standaloneRARenewLoop(ctx context.Context) {
+	d.standaloneRARenewLoopWithRetryInterval(ctx, standaloneRARenewRetryInterval, nil)
+}
+
+// standaloneRARenewLoopWithRetryInterval is the retry loop with an injected
+// cadence and optional retry-armed signal for deterministic owner tests.
+func (d *Daemon) standaloneRARenewLoopWithRetryInterval(ctx context.Context, retryInterval time.Duration, retryArmed chan<- struct{}) {
+	var retryTicker *time.Ticker
+	var retryC <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
+			if retryTicker != nil {
+				retryTicker.Stop()
+			}
 			return
 		case <-d.raRenewWakeCh:
-			d.reconcileStandaloneRAOnce(ctx)
+		case <-retryC:
+		}
+		if !d.reconcileStandaloneRAOnce(ctx) {
+			if retryTicker == nil {
+				retryTicker = time.NewTicker(retryInterval)
+				retryC = retryTicker.C
+			}
+			if retryArmed != nil {
+				select {
+				case retryArmed <- struct{}{}:
+				default:
+				}
+			}
+		} else if retryTicker != nil {
+			retryTicker.Stop()
+			retryTicker = nil
+			retryC = nil
 		}
 	}
 }
@@ -332,15 +377,18 @@ func (d *Daemon) standaloneRARenewLoop(ctx context.Context) {
 // landing while this pass waits already applied the fresh RA state via
 // applyServicesReconcile and synced lastStandaloneRAHash, so the pass then
 // finds a matching digest and does nothing (no gratuitous restart).
-func (d *Daemon) reconcileStandaloneRAOnce(ctx context.Context) {
+// The return value is scoped to this retry owner: a cluster-mode no-op or
+// matching digest is settled here, not an assertion that an asynchronous
+// sender remains alive (#6793's dead-sender loop owns that independent retry).
+func (d *Daemon) reconcileStandaloneRAOnce(ctx context.Context) bool {
 	if d.applySem == nil {
-		return
+		return false
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
-		return
+		return ctx.Err() != nil
 	}
 	defer d.applySem.Release(1)
-	d.reconcileStandaloneRAServices("pd-renewal")
+	return d.reconcileStandaloneRAServices("pd-renewal")
 }
 
 // desiredClusterRA returns the desired cluster RA set: buildRAConfigs entries
@@ -399,8 +447,8 @@ func (d *Daemon) clusterRAConfigSets(cfg *config.Config) ([]*config.RAInterfaceC
 	// would otherwise miss an unopened shared-identity sender and let Apply
 	// withdraw the peer's router with a goodbye.
 	peerCfgOnce16624, _ := d.peerRAConfig(cfg)
-	sharedCheck := func(rgID int, source string) bool {
-		return isSharedRASourceBothViews(cfg, peerCfgOnce16624, rgID, source)
+	sharedCheck := func(rgID int, iface, source string) bool {
+		return isSharedRASourceBothViews(cfg, peerCfgOnce16624, rgID, iface, source)
 	}
 	allRA := d.buildRAConfigs(cfg)
 	byIface := make(map[string]*config.RAInterfaceConfig, len(allRA))
@@ -445,7 +493,7 @@ func (d *Daemon) clusterRAConfigSets(cfg *config.Config) ([]*config.RAInterfaceC
 		if cfgRA := byIface[sender.Interface]; cfgRA != nil && cfgRA.SourceLinkLocal != "" {
 			source = cfgRA.SourceLinkLocal
 		}
-		if sharedCheck(rgByIface[sender.Interface], source) {
+		if sharedCheck(rgByIface[sender.Interface], sender.Interface, source) {
 			silentStop = append(silentStop, sender.Interface)
 		}
 	}
@@ -459,7 +507,7 @@ func (d *Daemon) clusterRAConfigSets(cfg *config.Config) ([]*config.RAInterfaceC
 		}
 		if inactiveIfaces[cfgRA.Interface] &&
 			!ownedIfaces[cfgRA.Interface] &&
-			sharedCheck(rgByIface[cfgRA.Interface], cfgRA.SourceLinkLocal) {
+			sharedCheck(rgByIface[cfgRA.Interface], cfgRA.Interface, cfgRA.SourceLinkLocal) {
 			silentStop = append(silentStop, cfgRA.Interface)
 		}
 	}
@@ -497,8 +545,8 @@ func (d *Daemon) raSenderStatuses() []ra.SenderInfo {
 	return d.ra.Status()
 }
 
-func isSharedStableRASource(source string) bool {
-	return cluster.IsStableRethLinkLocal(net.ParseIP(source))
+func isSharedStableRASource(source net.IP) bool {
+	return cluster.IsStableRethLinkLocal(source)
 }
 
 // rgIDsForIfaces returns the distinct redundancy-group ids (>0) that own
@@ -530,51 +578,80 @@ func ipInVIPSet(cidrs []string, srcIP net.IP) bool {
 }
 
 // isSharedRASource reports whether source is a shared router identity for
-// the given RG in cfg's own effective view: either the auto stable
-// pattern, or an address installed as an RG VIP for that group
-// (cfg.RethVIPsForRG). A shared-section RETH-unit link-local such as
-// fe80::1/64 is VIP-managed on the primary, so a demoted or cold-boot
-// standby must never goodbye it (#16624). VIPs are compared as canonical
-// IPs (CIDR-stripped). A source with no RG (rgID <= 0) can only match the
-// stable pattern. This is the single-view predicate; the production
-// paths use isSharedRASourceBothViews, which additionally requires the
-// peer node's effective view to install the same address — the fact that
-// distinguishes a shared-section address (identical on both nodes) from
-// a `groups nodeN` per-node address (different on each node).
-func isSharedRASource(cfg *config.Config, rgID int, source string) bool {
+// the given RG on iface in cfg's effective view: either the auto stable
+// pattern, or an address installed as an RG VIP on that same Linux
+// interface (cfg.RethVIPsForRG). Link-local identity is (link, address):
+// an address installed on a different VLAN does not make this link's
+// source shared. VIPs are compared as canonical IPs (CIDR-stripped). A
+// source with no RG or interface can only match the stable pattern.
+func isSharedRASource(cfg *config.Config, rgID int, iface, source string) bool {
+	return isSharedRASourceIP(cfg, rgID, iface, net.ParseIP(source))
+}
+
+func isSharedRASourceIP(cfg *config.Config, rgID int, iface string, source net.IP) bool {
 	if isSharedStableRASource(source) {
 		return true
 	}
-	if cfg == nil || rgID <= 0 || source == "" {
+	if cfg == nil || rgID <= 0 || iface == "" || source == nil {
 		return false
 	}
-	srcIP := net.ParseIP(source)
-	if srcIP == nil {
+	return ipInVIPSet(cfg.RethVIPsForRG(rgID)[iface], source)
+}
+
+// peerHasRethVIPOnSameLink maps a local Linux member interface back to its
+// logical RETH unit, then checks the corresponding peer-node member. RETH
+// VIP maps are keyed by node-local Linux names, so comparing their raw keys
+// would reject a shared identity simply because the nodes use different
+// physical member names.
+func peerHasRethVIPOnSameLink(local, peer *config.Config, rgID int, localIface string, source net.IP) bool {
+	if local == nil || peer == nil || rgID <= 0 || localIface == "" || source == nil {
 		return false
 	}
-	for _, cidrs := range cfg.RethVIPsForRG(rgID) {
-		if ipInVIPSet(cidrs, srcIP) {
-			return true
+	peerVIPs := peer.RethVIPsForRG(rgID)
+	for reth, owner := range local.RethRGOwners() {
+		if owner != rgID {
+			continue
+		}
+		ifc := local.Interfaces.Interfaces[reth]
+		if ifc == nil || ifc.Disable {
+			continue
+		}
+		for unitID, unit := range ifc.Units {
+			if unit == nil || unit.Disable {
+				continue
+			}
+			ref := reth
+			if ifc.TaggingEnabled() && unit.VlanID > 0 {
+				ref += "." + strconv.Itoa(unitID)
+			}
+			if local.ResolveKernelIfName(ref) != localIface {
+				continue
+			}
+			peerIface := peer.ResolveKernelIfName(ref)
+			if ipInVIPSet(peerVIPs[peerIface], source) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
 // isSharedRASourceBothViews is the production predicate. local must
-// classify the source as shared; when peer is non-nil the peer's
-// effective view must also install the source as a VIP of the same RG.
-// A nil peer (view unavailable) keeps the local verdict — fail-safe
-// toward silent clear for a locally VIP-managed source, preserving
-// #16624 when no tree is at hand (the clearRethRASendersWithoutGoodbye
-// synthetic-config tests).
-func isSharedRASourceBothViews(local, peer *config.Config, rgID int, source string) bool {
-	if !isSharedRASource(local, rgID, source) {
+// classify the source as shared on iface; when peer is non-nil the peer's
+// effective view must also install the same address on the corresponding
+// logical RETH-unit link. A nil peer (view unavailable) keeps the local
+// verdict — fail-safe toward silent clear for a locally VIP-managed
+// source, preserving #16624 when no tree is at hand (the
+// clearRethRASendersWithoutGoodbye synthetic-config tests).
+func isSharedRASourceBothViews(local, peer *config.Config, rgID int, iface, source string) bool {
+	sourceIP := net.ParseIP(source)
+	if !isSharedRASourceIP(local, rgID, iface, sourceIP) {
 		return false
 	}
-	if isSharedStableRASource(source) || peer == nil {
+	if isSharedStableRASource(sourceIP) || peer == nil {
 		return true
 	}
-	return isSharedRASource(peer, rgID, source)
+	return peerHasRethVIPOnSameLink(local, peer, rgID, iface, sourceIP)
 }
 
 // peerRAConfig derives the peer node's effective compiled config from

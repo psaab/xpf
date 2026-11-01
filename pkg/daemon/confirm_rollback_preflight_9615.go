@@ -85,15 +85,11 @@ func (d *Daemon) rollbackTargetFeedProducersAbsent(target *config.Config) bool {
 // rollbackTargetRefusedOnlyForDNS reports whether target's refusal is
 // attributable to dns-name entries whose resolution failed or had not yet
 // run when the target was compiled at Store.Load (#16612/#17782). It
-// re-resolves a private clone with current DNS. When DNS has recovered, the
-// refreshed clone carries usable answers; when DNS is still failing, the
-// refreshed clone still carries DNSLookupFailed entries. Either way the
-// refusal is tied to the frozen answer — but ONLY if the refreshed clone's
-// refusal is itself DNS-caused. A refreshed clone that carries a refusal
-// while its dns-name entries resolved successfully (or that still refuses
-// for an unrelated static reason, e.g. a lenient-dropped constraint that
-// fresh DNS does not repair) is NOT DNS-only, so a genuinely refused target
-// whose dns-name happens to have failed is not smuggled past the gate.
+// re-resolves a private clone with current DNS. An unavailable DNS name is
+// DNS-only only when the refreshed clone has no whole-snapshot rejection.
+// PolicyContentRejectionReasons deliberately omits per-rule fail-closed
+// refusals caused solely by unavailable DNS, so any remaining rejection is
+// independent and must take the refused-target safe state.
 func rollbackTargetRefusedOnlyForDNS(target *config.Config) bool {
 	if target == nil || !targetHasUnavailableDNSResolution(target) {
 		return false
@@ -111,15 +107,9 @@ func rollbackTargetRefusedOnlyForDNSRefreshed(target, refreshed *config.Config) 
 	if len(dpuserspace.PolicyContentRejectionReasons(refreshed, nil)) == 0 {
 		return true
 	}
-	// Still refused after refresh. DNS-only iff the refreshed refusal is
-	// itself attributable to a still-failing lookup: the refreshed clone
-	// still carries a failed lookup. When DNS is still down this cannot
-	// distinguish a co-incident static refusal, so the caller defers
-	// (bounded) and, at the cap, proceeds so the apply path's own
-	// re-resolution renders each entry fail-closed (#16595) rather than
-	// entering bootstrap on the frozen answer. A target whose refreshed
-	// clone resolved successfully but still refuses never reaches here.
-	return targetHasUnavailableDNSResolution(refreshed)
+	// Any reason that remains is an independent policy/snapshot refusal;
+	// do not let an unrelated failed dns-name defer this target.
+	return false
 }
 
 // targetHasUnavailableDNSResolution reports whether cfg carries a dns-name
@@ -194,6 +184,7 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(
 ) bool {
 	target, _, ok := d.store.PendingRollbackTarget(gen)
 	if !ok || target == nil {
+		d.confirmTargetFeedInstallPending.CompareAndSwap(gen, 0)
 		return false
 	}
 	if target != sampledTarget {
@@ -203,6 +194,7 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(
 	}
 	rerr := rollbackTargetAppliablePreflight(target, d.feedSnapshotsForConfig(target))
 	if rerr == nil {
+		d.confirmTargetFeedInstallPending.CompareAndSwap(gen, 0)
 		delete(d.confirmFeedDeferrals, gen)
 		return false
 	}
@@ -211,7 +203,7 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(
 	if dnsOnly && len(dpuserspace.PolicyContentRejectionReasons(refreshedTarget, nil)) == 0 {
 		// DNS is healthy now. The frozen compiled target is stale, but the
 		// refreshed clone is appliable; proceed with rollback immediately
-		// and use this same clone for the apply.
+		d.confirmTargetFeedInstallPending.CompareAndSwap(gen, 0)
 		delete(d.confirmFeedDeferrals, gen)
 		return false
 	}
@@ -220,15 +212,21 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(
 		// producer (feed removed or renamed by C2). Deferring would wait
 		// forever on a producer only this rollback's own apply would restart,
 		// then enter bootstrap at the cap. Reconcile the producers FOR THE
-		// TARGET (as a normal apply of the target would) so its feed fetch
-		// starts now; then defer this fire — the restarted fetch installs
-		// asynchronously and its onUpdate / the next deferred fire re-checks
-		// the pre-flight with a live producer. Never reach bootstrap for a
-		// feed-only refusal whose producer was absent. The deferral counter
-		// is reset: the restarted producer gets its own bounded window, so a
-		// feed that never installs (server down) still converges to the
-		// #9615 safe state two minutes after its producer restarts rather
-		// than having burned the whole budget while no producer existed.
+		// TARGET (as a normal target apply would) so its feed fetch starts
+		// now; then defer this fire. A successful fetch invokes onFeedUpdate
+		// before the next timer. That callback sees the marker and defers
+		// re-applying active C2, preserving the target producer and snapshot
+		// until the timer re-checks and applies C1 (#17741). Its rejected
+		// publication remains debt until a later retry callback successfully
+		// applies that snapshot with C1 active.
+		// deferral counter restarts so a producer that never installs (for
+		// example, because the server is down) still reaches the bounded
+		// #9615 safe state after its own retry window.
+		//
+		// The marker must be set BEFORE starting the async fetch: its callback
+		// can race this function's semaphore release, and a C2 apply would
+		// cancel the producer and drop its just-installed snapshot (#17741).
+		d.confirmTargetFeedInstallPending.Store(gen)
 		d.reconcileFeeds(target)
 		slog.Warn("commit confirmed timed out and its rollback target binds a dynamic-address "+
 			"feed whose producer the abandoned config removed; reconciled the feed producers "+
@@ -271,9 +269,11 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(
 			"because dns-name resolution failed at load; proceeding with the rollback — the "+
 			"apply path re-resolves dns-name entries — rather than entering bootstrap on a "+
 			"frozen answer", "err", rerr, "issue", "#16612")
+		d.confirmTargetFeedInstallPending.CompareAndSwap(gen, 0)
 		delete(d.confirmFeedDeferrals, gen)
 		return false
 	}
+	d.confirmTargetFeedInstallPending.CompareAndSwap(gen, 0)
 	delete(d.confirmFeedDeferrals, gen)
 	d.pendingRenameMu.Lock()
 	_, ok = d.store.PromoteRollback(gen)

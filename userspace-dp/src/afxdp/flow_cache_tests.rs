@@ -133,6 +133,7 @@ fn make_entry(
         // exercise MAC-change eviction set `neighbor_shard` explicitly.
         neighbor_shard: NEIGHBOR_SHARD_NONE,
         fabric_established: false,
+        dest_owner_memo: Default::default(),
     }
 }
 
@@ -3969,7 +3970,7 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
     let mut zones = rustc_hash::FxHashMap::default();
     zones.insert("trust".to_string(), TEST_TRUST_ZONE_ID);
     zones.insert("untrust".to_string(), TEST_UNTRUST_ZONE_ID);
-    let mut policy = crate::policy::parse_policy_state(
+    let policy = crate::policy::parse_policy_state(
         "deny",
         &[
             crate::PolicyRuleSnapshot {

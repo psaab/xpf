@@ -2931,6 +2931,7 @@ fn wire_invariant_default_specimens() {
             policy_counter_idx: 17142015,
             policy_rule_id: "policy-rule-17142".into(),
             app_timeout: 17142016,
+            app_timeout_log_stated: true,
             nat64: true,
             nat64_snat_v4: "10.171.42.6".into(),
             source_nat_icmp_valid: true,
@@ -5580,7 +5581,7 @@ fn wire_fixture_completeness_16132() {
             i = j + 1;
         }
     }
-    let total_fields: usize = census.values().map(|v| v.len()).sum();
+    let _total_fields: usize = census.values().map(|v| v.len()).sum();
     // --- Fixture specimens, grouped by Rust type ------------------------
     let fixture_path = proto_dir
         .parent()

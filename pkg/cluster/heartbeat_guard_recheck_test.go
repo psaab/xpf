@@ -424,3 +424,34 @@ func TestHBSuppressCapExceeded17056(t *testing.T) {
 		}
 	}
 }
+
+// TestClearPeerSyncSourceIfCurrentPreservesSuccessor17060 makes delayed
+// teardown conditional on the exact source it published. A stale clear must
+// not unpublish the successor's heartbeat-suppression source.
+func TestClearPeerSyncSourceIfCurrentPreservesSuccessor17060(t *testing.T) {
+	m := NewManager(0, 1)
+	old := NewSessionSync("127.0.0.1:4785", "127.0.0.1:4785", nil)
+	successor := NewSessionSync("127.0.0.1:4785", "127.0.0.1:4785", nil)
+	m.SetPeerSyncSource(old)
+	m.SetPeerSyncSource(successor)
+
+	if m.ClearPeerSyncSourceIfCurrent(old) {
+		t.Fatal("stale teardown cleared a successor's sync source")
+	}
+	if !m.SyncSourceInstalled() {
+		t.Fatal("stale teardown removed the successor's sync source")
+	}
+	if successor.OnPeerReconnected == nil || successor.peerReconnectOwner != m {
+		t.Fatal("stale teardown cleared the successor's reconnect binding")
+	}
+
+	if !m.ClearPeerSyncSourceIfCurrent(successor) {
+		t.Fatal("current teardown did not clear its sync source")
+	}
+	if m.SyncSourceInstalled() {
+		t.Fatal("current teardown left a sync source installed")
+	}
+	if successor.OnPeerReconnected != nil || successor.peerReconnectOwner != nil {
+		t.Fatal("current teardown left the reconnect binding installed")
+	}
+}
