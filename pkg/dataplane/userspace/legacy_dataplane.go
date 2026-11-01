@@ -194,6 +194,37 @@ func (a *LegacyDataPlaneAdapter) HelperSupervisorState() (bool, bool) {
 	return m.HelperSupervisorState()
 }
 
+// HelperElectionNotReady forwards the #18697/#18685 readiness verdict. The
+// daemon's transit gate asserts this method on the RUNTIME dataplane, which is
+// this adapter, not the Manager, so it must be forwarded here or the gate never
+// sees it (the first tcp SIGSTOP cell caught exactly that: the helper was
+// killed on time but the RGs never moved). Lock-free, like the Manager's.
+func (a *LegacyDataPlaneAdapter) HelperElectionNotReady() bool {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false
+	}
+	return m.HelperElectionNotReady()
+}
+
+// HelperAnswerAge forwards the #18685 answer age for /metrics.
+func (a *LegacyDataPlaneAdapter) HelperAnswerAge() time.Duration {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return 0
+	}
+	return m.HelperAnswerAge()
+}
+
+// HelperWedgeKills forwards the #18685 wedge-kill count for /metrics.
+func (a *LegacyDataPlaneAdapter) HelperWedgeKills() uint64 {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return 0
+	}
+	return m.HelperWedgeKills()
+}
+
 // SetHelperSupervisorObserver forwards the daemon's wake-only supervisor
 // state observer to the retained userspace Manager.
 func (a *LegacyDataPlaneAdapter) SetHelperSupervisorObserver(fn func()) {

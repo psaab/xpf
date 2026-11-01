@@ -845,9 +845,17 @@ would blackhole every flow handed to it.
   after more than 120s without another unexpected exit. `HelperSupervisorState`
   treats it as election debt only while the helper is down and the retry is
   still fenced to the current generation; an intentional stop does not resign.
-- **HA response (#12159).** Supervisor death wakes the daemon transit gate,
-  which closes while the helper is down even though the xpfd-owned XDP shim is
-  still attached. A fast restart reopens transit without changing RG weight.
+- **HA response (#12159, #18697).** Supervisor death wakes the daemon transit
+  gate, which closes while the helper is down even though the xpfd-owned XDP
+  shim is still attached. Since #18697 an UNEXPECTED exit (a crash or a #18685
+  wedge kill) also installs arm debt (weight 1), so a healthy peer takes the
+  data RGs (#12164). The debt is held through the respawn and clears only when
+  the new helper has reported `ForwardingArmed` and then looked healthy for
+  `helperWedgeClearAfter` (5 s). Before #18697 a single restart kept weight 255
+  on the premise that it is short. On tcp one post-kill restart took 227 s with
+  node0 primary and transit dead (#18696). An intentional stop or respawn (a
+  plan-key change, an operator stop) keeps the F2 pass-through: it neither
+  installs nor wipes arm debt, so a config commit does not move the RGs.
   When restart backoff reaches its cap, a dedicated full-cost monitor debt
   takes a DATA RG's local weight to 0 so even a non-preempt incumbent yields.
   RG0 is excluded: it is the config-authority group with no data VIP, and
@@ -927,37 +935,79 @@ failed restart attempts remain represented in the helper's restart state.
 These are separate operator views: the ring provides recent episode details;
 the counter provides the monotonic alert signal.
 
-### A helper that answers nothing is restarted from the Go side (#9651)
+### A helper that answers nothing, or stops forwarding, is demoted and then restarted (#9651, #18685)
 
 The supervisor above acts on an EXIT, and a wedged helper does not exit. Since
 #9172 (V031) the helper's control-socket accept loop retries resource errors,
 so transient fd or memory pressure no longer drops forwarding. A genuine
-descriptor leak at `RLIMIT_NOFILE` therefore leaves the helper alive and
-forwarding on its last state, with a control socket that accepts nothing, and
-before #9651 the only trace was a status-poll warning.
+descriptor leak at `RLIMIT_NOFILE`, or a lock-order deadlock in the workers
+(#18658), therefore leaves the helper alive with a dataplane that forwards
+nothing.
 
-The helper cannot recover this itself: an accept result does not distinguish a
-leak from recovering pressure (#9651 records three designs that failed on
-that). The daemon's 1/s status poll observes the condition directly, so
-`helper_liveness_9651.go` counts consecutive polls that got **no answer at
-all**:
+#9651 counted 30 consecutive unanswered STATUS polls, assuming one a second.
+They do not arrive once a second when it matters. Every control round trip
+serialises on `controlReqMu` with at least a 3 s deadline, and when the helper
+stops answering, each queued caller burns its deadline before the status poll
+gets a turn. On loss (#18658) polls landed about every 90 s: 26 failures in 37
+minutes, no kill, node still primary. `helper_liveness_18685.go` replaces the
+count with time and adds a worker-progress input:
 
-- an answered poll resets the count, and so does an in-band refusal, because a
-  refusal is an answer. So a helper under recovering pressure, which gets any
-  poll through, is never restarted;
-- a helper is wedged only after `helperWedgeFailedPolls` (30) unanswered polls
-  **and** `helperWedgeMinSpan` (30 s) since the first. The count binds when
-  polls fail slowly, at their deadline; the span binds when they fail fast;
-- within `helperWedgeRGGrace` (10 s) of an `update_ha_state` the kill waits,
-  so a failover's own control-socket load does not become a restart mid-flight;
-- a wedged helper is **killed** with SIGKILL, and recovery belongs to the
-  supervisor: the unexpected-exit path above disarms the shim, records the
-  crash and restarts it with the bounded backoff. Nothing in #9651 restarts a
-  helper itself.
+- **Evidence.**
+  - Every control round trip of every verb is recorded at the single site
+    `requestDetailedAtSocket`.
+  - An answer or an in-band refusal clears the silence.
+  - An undecodable or over-cap reply (#18293) neither advances nor clears it.
+  - A deadline, an EOF (even after a partial prefix), or any other failure
+    without a reply is silence.
+  - The silence starts at the START of the first silent round trip after the
+    last answer, measured after `controlReqMu`, so queueing behind other
+    callers is never charged to the helper.
+  - Each answered status also carries the workers' heartbeats.
+- **Suspected (cheap, reversible).** The verdict is raised by either of:
+  - a worker whose heartbeat has not moved for `helperWorkerFrozenAfter`
+    (10 s) across answered statuses. This is the primary input. On tcp the
+    #18655 busy convoy froze heartbeats for 16-22 s while the control thread
+    answered in about 2 ms and transit was dead.
+  - two silent round trips spanning `helperWedgeDemoteSpan` (5 s).
 
-Bound by `helper_liveness_9651_test.go`. The kill cell drives the real
-supervisor (crash recorded, restart scheduled, takeover not ready), and a
-source cell binds `statusLoop`'s wiring.
+  The daemon's transit gate reads it lock-free (`HelperElectionNotReady`) and
+  installs arm debt, so the data RGs yield to a healthy peer. It clears after
+  `helperWedgeClearAfter` (5 s) and `helperWedgeClearTrips` (3) answers of
+  healthy behaviour, so a helper that answers every other request cannot flap
+  the RGs. Freeze is judged against the time of the latest answered status,
+  never the wall clock, so a RETH MAC link cycle (no polls, parked workers)
+  never ages a worker into frozen.
+- **Kill (irreversible).** The kill fires on either of:
+  - `helperWedgeMinSpan` (30 s) of silence across at least two round trips;
+  - a worker frozen for `helperWorkerFrozenKillAfter` (2 min), which is
+    several times the longest convoy measured.
+
+  It waits out `helperWedgeRGGrace` (10 s) after an `update_ha_state`. A
+  per-generation watchdog goroutine checks once a second and SIGKILLs the
+  generation's own process handle. It takes neither `m.mu` nor `controlReqMu`,
+  because callers hold `m.mu` across round trips. The status loop asks the
+  same tracker as a second path; a generation is killed at most once. Recovery
+  belongs to the supervisor, and the next generation inherits the not-ready
+  verdict until it arms (#18697 above).
+- **Bounds** come from the measured healthy population (#18658 cells): the
+  status round trip stayed under 31 ms on udp and tcp through 16k-session
+  bursts on every build, including during the #18655 convoy.
+- **Metrics:**
+  - `xpf_userspace_helper_answer_age_seconds`, which keeps growing while the
+    helper is silent, unlike the cached status behind the other families;
+  - `xpf_userspace_helper_election_not_ready`;
+  - `xpf_userspace_helper_wedge_kills_total`.
+
+Bound by `helper_liveness_18685_test.go` (the 90 s-cadence kill, the sparse
+kill, demote before kill, slow-but-answering, frozen worker demote and clear,
+the frozen-worker kill, no status means no freeze, the inherited not-ready
+verdict, stale-generation evidence, the watchdog killing while `m.mu` is held,
+and the round-trip wiring), `helper_liveness_9651_test.go` (the kill through
+the real supervisor, recovering pressure, refusals, the minimum span, the RG
+grace, #18293 decode handling and the `statusLoop` wiring), and
+`pkg/daemon/transit_helper_readiness_18697_test.go` (debt on an unexpected
+exit, debt held until re-arm, F2 kept for an intentional stop, debt on a
+wedge, and unrelated arm debt surviving).
 
 ## Armed-state admission contract (#2114 A3)
 

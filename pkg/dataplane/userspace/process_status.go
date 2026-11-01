@@ -532,7 +532,11 @@ func (m *Manager) statusLoop(ctx context.Context) {
 			var pollErr error
 			if requestHook != nil {
 				m.controlReqMu.Lock()
+				hookStart, hookGen := time.Now(), m.liveTrack.generation()
 				pollErr = requestHook(ControlRequest{Type: "status"}, &status)
+				// #18685: the hook stands in for the socket round trip (tests),
+				// so it records the same liveness evidence at the same point.
+				m.liveTrack.noteRoundTrip(hookGen, hookStart, time.Now(), pollErr, errors.Is(pollErr, errStatusDecode))
 				m.controlReqMu.Unlock()
 			} else {
 				var response ControlResponse
@@ -576,6 +580,9 @@ func (m *Manager) statusLoop(ctx context.Context) {
 			pollResultTime := time.Now()
 			if pollErr == nil {
 				m.noteStatusPollResultLocked(nil, pollResultTime)
+				// #18685: worker heartbeats and the arm state feed the
+				// frozen-worker and post-kill parts of the wedge verdict.
+				m.liveTrack.noteStatus(pollProcGen, pollResultTime, status.WorkerHeartbeats, status.ForwardingArmed)
 			} else if errors.Is(pollErr, errStatusDecode) {
 				// #18293: answered but undecodable. Surface it as a decode
 				// error and never kill: the helper provably answered.
@@ -583,8 +590,10 @@ func (m *Manager) statusLoop(ctx context.Context) {
 				_ = m.noteStatusPollResultLocked(pollErr, pollResultTime)
 			} else {
 				slog.Warn("userspace dataplane status poll failed", "err", pollErr)
-				// #9651: a helper that answers nothing for long enough is killed,
-				// and the supervisor fails closed and restarts it.
+				// #9651/#18685: a helper that answers nothing for long enough is
+				// killed, and the supervisor fails closed and restarts it. The
+				// per-generation watchdog normally gets there first; this is the
+				// same decision from the poll path.
 				if m.noteStatusPollResultLocked(pollErr, pollResultTime) {
 					m.killWedgedHelperLocked(pollResultTime)
 				}
