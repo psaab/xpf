@@ -1535,15 +1535,27 @@ constraint reminder in the #18719 sense (`docs/config-schema.md`,
     armed fabric parent (armed once the peer fabric MAC has resolved). A
     kernel cBPF filter drops the two fabric MACs and the synthetic
     namespace, and userspace re-checks the namespace as a second layer.
-  - **What it can see.** The tap never touches the AF_XDP fast path, and on
-    a fabric parent the XDP shim runs BEFORE every AF_PACKET tap, so only
-    what the shim passes to the kernel can be seen. The shim XDP_PASSes
-    untagged non-IP frames (ARP, LLDP, any other ethertype) and hands IP
-    frames to the adjudicated path. So a third host's ARP is visible, while
-    an IP frame the shim redirects to AF_XDP (a unicast transit packet) is
-    not. The detector sees incidental third-host chatter, not traffic that
-    goes through the userspace dataplane. The loss gate's positive control
-    measures that boundary with the shim attached.
+  - **What it can see** (measured on the loss cluster with the shim
+    attached, #18751 gate). The tap never touches the AF_XDP fast path, and
+    on a fabric parent the XDP shim runs BEFORE every AF_PACKET tap, so only
+    what the shim passes to the kernel can be seen.
+    - VISIBLE:
+      - untagged non-IP frames (ARP probe, 0x88b5), which the shim
+        XDP_PASSes;
+      - IPv4 limited broadcast and multicast (DHCPDISCOVER, mDNS) and IPv6
+        multicast (NS to a solicited-node group, MLDv2 with a hop-by-hop
+        Router Alert), which take the shim's early kernel-pass arm.
+    - INVISIBLE:
+      - unicast IPv4, whether transit or addressed to the node's OWN fabric
+        address. The shim redirects it to the helper, which drops a frame
+        from a non-peer source as unstamped fabric ingress.
+    - In every class the gate checked, the driver's `rx_packets` (counted
+      before generic XDP) equals frames sent. For the invisible classes,
+      `xpf_userspace_fabric_unstamped_ingress_drops_total` rose by exactly
+      the frames sent. That counter is therefore the complementary signal for
+      unicast IP from a third speaker.
+    - So the detector sees a third host's ARP/ND/DHCP/mDNS/MLD chatter, not
+      unicast traffic aimed at the cluster.
   - **Not evidence.** Frames to the IEEE 802.1 link-constrained groups
     (`01:80:c2:00:00:00`-`0f`: STP/RSTP, LACP, 802.1X, LLDP). A bridge never
     relays them, so they prove only the adjacent switch port, and a fabric on
