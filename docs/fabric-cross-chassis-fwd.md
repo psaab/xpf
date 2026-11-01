@@ -1689,13 +1689,17 @@ behind the gateway) does too. #18659 never sends either case over the fabric
 (`rehome_or_retain_missing_neighbor_table_18659`,
 `reverse_departed_destination_converts_missing_neighbor_18659`).
 
-The treatment is not yet symmetric when the owner is active locally (#18672).
-There, a `ForwardCandidate` whose egress misses the destination's connected
-interface keeps the stored redirect (the transient-FIB-lag retain). A
-`MissingNeighbor` on that egress is still returned as-is, the #18659 row
-shape. Reaching it needs the LAN RG's activation refresh to run before the
-LAN connected row is republished; #16270 and #18563 order against that, and
-the next FIB bump heals the row. The #1913
+#18672 extended the same treatment to a locally active owner. That case
+needs the LAN RG's activation refresh to run before the LAN connected row is
+republished, which #16270 and #18563 order against, and the next FIB bump
+heals the row. Before #18672, a `ForwardCandidate` whose egress missed the
+destination's connected interface kept the stored redirect (the
+transient-FIB-lag retain), while a `MissingNeighbor` on the same egress was
+returned as-is, the #18659 row shape. A `MissingNeighbor` now takes the
+`ForwardCandidate` keep tests. It is kept when it names the destination's
+connected egress, or when the owner is unknown (#16524). Otherwise it
+retains the redirect (`rehome_or_retain_owner_active_missing_neighbor_18672`).
+A fabric or zero egress is still returned verbatim. The #1913
 gate is unchanged. It still judges every `MissingNeighbor` disposition that
 reaches it. What changed is that an established reverse row whose owner is
 the peer no longer reaches it.
