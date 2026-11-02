@@ -248,8 +248,8 @@ func TestMgmtRouteRetryWiring11450(t *testing.T) {
 				len(assign.Rhs) != 1 || assign.Pos() <= rebind["mgmtVRFRouteReconcileFn"][0] {
 				return true
 			}
-			lhs, ok := assign.Lhs[0].(*ast.Ident)
-			if !ok || lhs.Name != "networkdErr" {
+			lhs, ok := assign.Lhs[0].(*ast.SelectorExpr)
+			if !ok || lhs.Sel.Name != "Networkd" {
 				return true
 			}
 			ast.Inspect(assign.Rhs[0], func(n ast.Node) bool {
