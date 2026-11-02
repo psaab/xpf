@@ -3067,8 +3067,8 @@ does not arise.
 Confirm the state with `show chassis cluster statistics`, whose
 `Authentication:` line (`controlLinkAuthStatus`) covers both heartbeat and
 session-sync authentication. While a pre-key session-sync connection remains
-inside its upgrade grace, the line names it and reports that its frames are
-with only heartbeat and the upgrade exchange accepted (#16016); while a retired-key connection remains inside its
+inside its upgrade grace, the line names it and reports that only
+heartbeat and the upgrade exchange are accepted (#16016); while a retired-key connection remains inside its
 grace, the line names it distinctly as authenticated under a RETIRED key; after
 authentication, rekey, or eviction, it returns to the normal `engaged` line.
 
