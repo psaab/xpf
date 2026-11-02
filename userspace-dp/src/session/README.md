@@ -2402,7 +2402,7 @@ A TCP session that closed on the node that owns it used to stay OPEN on the peer
 Every hop is length-gated or `serde(default)`, so an old peer sends and reads `0`,
 which is today's behaviour. The #9412 acceptance lives in
 `close_state_sync_9412_acceptance_tests.rs` and the Go
-`close_state_sync_9412_acceptance_test.go` files. The #18537 two-node cell lives
+`close_state_sync_9412_acceptance_test.go` files. The #18537 two-table cell (three in-process tables, production import leg) lives
 in `replica_rst_announce_18537_tests.rs`. A golden UPDATE frame, shared by the
 Rust encoder and the Go decoder, pins the byte in both languages.
 
