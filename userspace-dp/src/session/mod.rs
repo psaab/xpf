@@ -290,6 +290,11 @@ mod wheel;
 use wheel::SessionWheel;
 
 const SESSION_GC_INTERVAL_NS: u64 = 1_000_000_000;
+/// #18742: default shared-evidence cadence bound at the default per-worker
+/// session cap and its 2x HA-import population (12.8 s, rounded up). Production
+/// expiry contexts compute the bound from their actual session-table slab so
+/// larger imported populations cannot age out a live replica before restamping.
+pub(crate) const NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS: u64 = 13_000_000_000;
 /// #10591: test-only names for the production cadence constants. The window
 /// harness must derive its MAX values from the same values that gate the real
 /// worker sweep and advance the real timer wheel; a copied literal can make a
@@ -1521,6 +1526,16 @@ struct SessionEntry {
     /// pre-close volume must not retain it. Forward entry only
     /// (counters fold there); 0 for a not-yet-closing entry.
     closing_counters_seen: u64,
+    /// #18722/#18742: per-row baselines for the node-level retention arm,
+    /// one per evidence contributor. A PRESENT contributor whose count or
+    /// shared-row incarnation changed is recent service; an absent contributor
+    /// is neither activity nor silence. The last-change clock is not advanced
+    /// by the bounded cadence grace, so a frozen source still ages out.
+    node_served_seen_local: u64,
+    node_served_seen_shared: u64,
+    node_served_seen_shared_session_id: u64,
+    node_served_seen_shared_generation: u64,
+    node_served_last_change_ns: u64,
     /// #2749: the IP ToS byte observed on the FORWARD direction of this
     /// session (DSCP in the high 6 bits, ECN cleared — the shim meta carries
     /// only the 6-bit DSCP). Stamped from `meta.dscp << 2` on every forward
@@ -4002,6 +4017,13 @@ impl SessionTable {
         // held an orphan record from a partial cleanup path.
         self.key_to_handle.len()
     }
+    /// #18742: live slot extent used by the budgeted ct-refresh walk. Match
+    /// `iter_with_idle_budgeted`'s bound so the shared-evidence cadence scales
+    /// with imported sessions even when their count exceeds `max_sessions`.
+    pub(crate) fn ct_refresh_slab_len(&self) -> usize {
+        self.slot_high_watermark.min(self.entries.capacity())
+    }
+
 
     pub fn max_sessions(&self) -> usize {
         self.max_sessions
@@ -6108,6 +6130,10 @@ impl SessionTable {
         self.handshake_progress_probes
             .fetch_add(1, AtomicOrdering::Relaxed);
         let mut evidence = NodeServedEvidence::default();
+        let mut local_packets = 0u64;
+        let mut stamp_packets = 0u64;
+        let mut forward_found = false;
+        let mut stamp_found = false;
         // Local serving pair, either orientation: an established,
         // non-pending, non-closing forward/reverse entry for the same
         // bare tuple whose forward counters prove reverse service.
@@ -6142,6 +6168,12 @@ impl SessionTable {
                 };
                 if let Some(fwd) = fwd {
                     evidence.rev_packets = evidence.rev_packets.max(fwd.counters.rev_packets);
+                    forward_found = true;
+                    local_packets = local_packets.max(
+                        fwd.counters
+                            .fwd_packets
+                            .saturating_add(fwd.counters.rev_packets),
+                    );
                 }
             }
         }
@@ -6150,6 +6182,8 @@ impl SessionTable {
                 evidence.handshake_wire = wire;
             }
             evidence.rev_packets = evidence.rev_packets.max(rev);
+            stamp_packets = stamp_packets.max(rev);
+            stamp_found = true;
         }
         // The stamp is keyed by the canonical forward key; a reverse
         // hit names its companion.
@@ -6160,8 +6194,17 @@ impl SessionTable {
                     evidence.handshake_wire = wire;
                 }
                 evidence.rev_packets = evidence.rev_packets.max(rev);
+                stamp_packets = stamp_packets.max(rev);
+                stamp_found = true;
             }
         }
+        // #18722: this table's contributor exists while the pair's forward
+        // row or its node-served stamp does (the stamp is dropped with the
+        // forward row; a split replica can hold a stamp with no forward row,
+        // #16223 B1). Absent, it is `None`, never 0: a reaped companion is
+        // not a drop to compare.
+        evidence.local_served = (forward_found || stamp_found)
+            .then(|| local_packets.saturating_add(stamp_packets));
         evidence
     }
 
@@ -8251,6 +8294,13 @@ mod probe_hit_14945_tests;
 #[cfg(test)]
 #[path = "split_handshake_16223_tests.rs"]
 mod split_handshake_16223_tests;
+
+// #18722: the #16223 node-level GC arm must keep only OPENING rows and only
+// on RECENT (advancing) serving evidence; an idle established flow reaps
+// with its Close.
+#[cfg(test)]
+#[path = "idle_served_keepalive_18722_tests.rs"]
+mod idle_served_keepalive_18722_tests;
 
 // #15087 (A62-01): L3 reverse bucket must stay O(1) under same-destination
 // SNAT fan-in (hashed membership + per-protocol counts, bounded probe).

@@ -727,6 +727,12 @@ impl SessionTable {
                 // expiry check. Pairs that become CLOSING later are
                 // seeded at that transition instead.
                 closing_counters_seen: 0,
+                // #18722/#18742: no node-level evidence baseline has run yet.
+                node_served_seen_local: 0,
+                node_served_seen_shared: 0,
+                node_served_seen_shared_session_id: 0,
+                node_served_seen_shared_generation: 0,
+                node_served_last_change_ns: 0,
                 // #2749: seed the cumulative TCP control bits with the trigger
                 // packet's flags (typically the SYN) so even a flow that closes
                 // before any further forward packet is accounted reports a
@@ -1264,6 +1270,12 @@ impl SessionTable {
                 } else {
                     0
                 },
+                // #18722/#18742: no node-level evidence baseline has run yet.
+                node_served_seen_local: 0,
+                node_served_seen_shared: 0,
+                node_served_seen_shared_session_id: 0,
+                node_served_seen_shared_generation: 0,
+                node_served_last_change_ns: 0,
                 // #2749: a re-imported synced entry observes its own ToS / TCP
                 // flags once local traffic forwards through it (the peer's
                 // observed values are not carried on the HA session-sync delta).

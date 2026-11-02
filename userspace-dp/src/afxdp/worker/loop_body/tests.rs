@@ -238,6 +238,416 @@ mod flow_cache_invalidation_tests {
         tcp_close_class: 0, tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(), rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, }
     }
 
+    // #18742 F1 (seat L): a LIVE flow's established SyncImport replica on a
+    // worker that serves neither direction must never reach the replica
+    // teardown, which (unfenced for SyncImport) deletes the conntrack mirror
+    // row (`delete_session_map_entry_for_removed_session_with_origin_and_id`)
+    // and evicts the flow-cache descriptor under the live flow. Asserted
+    // DIRECTLY on the mirror row through the hermetic conntrack test map
+    // (`CONNTRACK_TEST_MAP_FD`: publish inserts, the teardown's delete
+    // removes), and on the descriptor as a second observable. The serving
+    // worker's ct-slice restamps the shared row (production
+    // `restamp_shared_packet_counts_batch`) and the expiry pass reads it
+    // through the production closure (`shared_node_served_evidence`).
+    // Control in the same cell: once the restamps stop, the dead replica
+    // expires and the teardown DOES delete the mirror row and evict the
+    // descriptor, so both observables can see a teardown. RED at 1981f3299e
+    // (the replica reaps at window 1 while live).
+    #[test]
+    fn live_flow_replica_never_reaches_teardown_18722() {
+        const SEC: u64 = 1_000_000_000;
+        let rg_epochs = reap_rg_epochs();
+        let forwarding = ForwardingState::default();
+        let key = reap_key(40100);
+        let reverse = crate::session::reverse_session_key(&key, NatDecision::default());
+        let t0 = 1_000 * SEC;
+        let mut table = crate::session::SessionTable::new();
+        for (k, is_reverse, id) in [(&key, false, 0x4_8722u64), (&reverse, true, 0x5_8722u64)] {
+            let mut metadata = reap_metadata();
+            metadata.is_reverse = is_reverse;
+            assert!(table.upsert_synced_with_origin(
+                crate::session::SessionInstall {
+                    key: k.clone(),
+                    decision: reap_decision(None),
+                    metadata,
+                    source_nat_static: None,
+                    origin: SessionOrigin::SyncImport,
+                    now_ns: t0,
+                    protocol: PROTO_TCP,
+                    tcp_flags: 0,
+                    session_id: id,
+                    tcp_close_class: 0,
+                    tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
+                    persistent_lease_hold: None,
+                    fwd_packets: 0,
+                    rev_packets: 0,
+                },
+                false,
+            ));
+        }
+        let window = 1_800 * SEC;
+        assert_eq!(table.timeout_secs_for(&key), 1_800, "premise: established replica");
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+        insert_cache_entry(&mut binding, &key, None);
+        assert!(cache_hits(&mut binding, &key, &rg_epochs), "premise: descriptor cached");
+        // The replica's conntrack mirror row, as its import publishes it.
+        let ct = crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD;
+        crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+        assert_eq!(
+            crate::afxdp::bpf_map::publish_bpf_conntrack_entry_with_source_nat(
+                ct,
+                ct,
+                &key,
+                reap_decision(None),
+                &reap_metadata(),
+                &FastMap::default(),
+                0,
+                0,
+                0x4_8722,
+                1_800,
+                SessionOrigin::SyncImport,
+                None,
+            ),
+            crate::afxdp::bpf_map::ConntrackPublishResult::Written,
+            "premise: the replica's mirror row is published"
+        );
+        let mirror_row = || crate::afxdp::bpf_map::conntrack_row_for_test(&key).is_some();
+        assert!(mirror_row(), "premise: the mirror row exists");
+        let shared = std::sync::Arc::new(std::sync::Mutex::new({
+            let mut map = FastMap::default();
+            map.insert(key.clone(), serving_shared_entry(&key, 0x4_8722));
+            map
+        }));
+        let wires = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let node_served = |k: &SessionKey| {
+            crate::afxdp::shared_ops::shared_node_served_evidence(&shared, k)
+        };
+        let forwards = |_: i32| true;
+        let epoch = |_: i32| 0u32;
+        let ha = crate::session::ExpireHaContext {
+            node_active: true,
+            forwards_rg: &forwards,
+            epoch_of: &epoch,
+            ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
+            ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
+            node_served: &node_served,
+        };
+        let gc = |table: &mut crate::session::SessionTable,
+                      binding: &mut BindingWorker,
+                      now: u64|
+         -> bool {
+            let expired = table.expire_stale_entries_ha(now, Some(&ha));
+            let hit = expired.iter().any(|e| e.key == key || e.key == reverse);
+            reap_expired_sessions(
+                std::slice::from_mut(binding),
+                &expired,
+                &forwarding,
+                SteeringMap::unshared_for_test(-1),
+                ct,
+                ct,
+                now,
+                0,
+                &shared,
+            );
+            hit
+        };
+        // Live: the serving worker forwards; its ct-slice restamps every 10 s.
+        let live_until = t0 + 3 * window;
+        let mut now = t0;
+        while now < live_until {
+            now += SEC;
+            if (now - t0) % (10 * SEC) == 0 {
+                let n = (now - t0) / SEC;
+                crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+                    &shared,
+                    &wires,
+                    &[(key.clone(), NatDecision::default(), 10 * n, 10 * n)],
+                );
+            }
+            assert!(
+                !gc(&mut table, &mut binding, now),
+                "#18742 F1: the live flow's replica reached teardown at +{} s",
+                (now - t0) / SEC
+            );
+        }
+        assert!(
+            mirror_row(),
+            "#18742 F1: the live flow's conntrack mirror row must survive (show security flow session)"
+        );
+        assert!(
+            cache_hits(&mut binding, &key, &rg_epochs),
+            "#18742 F1: the live flow's flow-cache descriptor must survive"
+        );
+        // Control: the flow dies (no more restamps); the replica now expires
+        // and the teardown evicts the descriptor.
+        let mut reaped = false;
+        while now < live_until + 3 * window && !reaped {
+            now += SEC;
+            reaped = gc(&mut table, &mut binding, now);
+        }
+        assert!(reaped, "control: the dead replica must expire");
+        assert!(
+            !mirror_row(),
+            "control: the replica teardown deletes the mirror row, so the live half above can see one"
+        );
+        assert!(
+            !cache_hits(&mut binding, &key, &rg_epochs),
+            "control: the replica teardown evicts the descriptor"
+        );
+    }
+
+    /// #18742 Cycle 2 follow-up: A's completed local pair has a 5 s window;
+    /// RSS moves service to B, whose shared evidence restamps every modeled
+    /// 30 s cycle. A must survive multiple crossed checks on the same recent
+    /// count, then retain on B's next restamp. When restamps stop, the frozen
+    /// evidence ages out and A's GC reaps its rows and mirror.
+    /// RED without cadence grace: check 2 reaped A while B remained live.
+    #[test]
+    fn rss_moved_completed_local_row_preserves_sibling_mirror_18722() {
+        const SEC: u64 = 1_000_000_000;
+        let rg_epochs = reap_rg_epochs();
+        let forwarding = ForwardingState::default();
+        let key = reap_key(40101);
+        let reverse = crate::session::reverse_session_key(&key, NatDecision::default());
+        let t0 = 1_000 * SEC;
+
+        // Worker A authored the completed pair. Its session id is the
+        // incarnation B adopts when RSS starts delivering the flow there.
+        let mut table_a = crate::session::SessionTable::new();
+        let mut short_timeouts = crate::session::SessionTimeouts::default();
+        short_timeouts.tcp_established_ns = 5 * SEC;
+        table_a.set_timeouts(short_timeouts);
+        assert!(table_a.install_with_protocol_with_origin(
+            key.clone(),
+            reap_decision(None),
+            reap_metadata(),
+            SessionOrigin::ForwardFlow,
+            t0,
+            PROTO_TCP,
+            crate::tcp_flags::TCP_ACK,
+        ));
+        let mut reverse_metadata = reap_metadata();
+        reverse_metadata.is_reverse = true;
+        assert!(table_a.install_with_protocol_with_origin(
+            reverse.clone(),
+            reap_decision(None),
+            reverse_metadata.clone(),
+            SessionOrigin::ReverseFlow,
+            t0,
+            PROTO_TCP,
+            crate::tcp_flags::TCP_ACK,
+        ));
+        let session_id = table_a.session_id_for(&key);
+        let reverse_id = table_a.session_id_for(&reverse);
+        assert_ne!(session_id, 0, "premise: A owns a stable session id");
+
+        // Worker B adopts the same forward incarnation and serves packets.
+        let mut table_b = crate::session::SessionTable::new();
+        for (k, metadata, id) in [
+            (&key, reap_metadata(), session_id),
+            (&reverse, reverse_metadata, reverse_id),
+        ] {
+            assert!(table_b.upsert_synced_with_origin(
+                crate::session::SessionInstall {
+                    key: k.clone(),
+                    decision: reap_decision(None),
+                    metadata,
+                    source_nat_static: None,
+                    origin: SessionOrigin::SyncImport,
+                    now_ns: t0,
+                    protocol: PROTO_TCP,
+                    tcp_flags: crate::tcp_flags::TCP_ACK,
+                    session_id: id,
+                    tcp_close_class: 0,
+                    tcp_handshake_state: crate::session::TcpHandshakeState::Established
+                        .to_wire(),
+                    persistent_lease_hold: None,
+                    fwd_packets: 0,
+                    rev_packets: 0,
+                },
+                false,
+            ));
+        }
+        table_b.account_packet(&key, 64, crate::tcp_flags::TCP_ACK, 0);
+        let shared = std::sync::Arc::new(std::sync::Mutex::new({
+            let mut map = FastMap::default();
+            map.insert(key.clone(), serving_shared_entry(&key, session_id));
+            map
+        }));
+        let wires = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+            &shared,
+            &wires,
+            &[(
+                key.clone(),
+                NatDecision::default(),
+                table_b.fwd_packets_for(&key),
+                table_b.rev_packets_for(&key),
+            )],
+        );
+        assert!(
+            crate::afxdp::shared_ops::shared_node_served_evidence(&shared, &key)
+                .shared_served
+                .is_some_and(|count| count > 0),
+            "premise: B's serving counters are visible in shared evidence"
+        );
+
+        let node_served = |k: &SessionKey| {
+            let mut evidence = crate::afxdp::shared_ops::shared_node_served_evidence(&shared, k);
+            evidence.shared_evidence_max_cadence_ns = Some(30 * SEC);
+            evidence
+        };
+        let forwards = |_: i32| true;
+        let epoch = |_: i32| 0u32;
+        let ha = crate::session::ExpireHaContext {
+            node_active: true,
+            forwards_rg: &forwards,
+            epoch_of: &epoch,
+            ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
+            ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
+            node_served: &node_served,
+        };
+
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+        insert_cache_entry(&mut binding, &key, None);
+        assert!(cache_hits(&mut binding, &key, &rg_epochs), "premise: A has a cached descriptor");
+        let ct = crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD;
+        crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+        assert_eq!(
+            crate::afxdp::bpf_map::publish_bpf_conntrack_entry_with_source_nat(
+                ct,
+                ct,
+                &key,
+                reap_decision(None),
+                &reap_metadata(),
+                &FastMap::default(),
+                0,
+                0,
+                session_id,
+                1_800,
+                SessionOrigin::ForwardFlow,
+                None,
+            ),
+            crate::afxdp::bpf_map::ConntrackPublishResult::Written,
+            "premise: the sibling's live mirror row is published"
+        );
+        let mirror_row = || crate::afxdp::bpf_map::conntrack_row_for_test(&key).is_some();
+        assert!(mirror_row(), "premise: B's mirror row exists");
+
+        let window = table_a.timeout_secs_for(&key) as u64 * SEC;
+        assert_eq!(window, 5 * SEC, "premise: A uses the short configured window");
+        let check_step = window + SEC;
+        let mut now = t0 + check_step;
+        for check in 1..=3 {
+            // Shared evidence remains at B's first restamp for three crossed
+            // checks while B continues to account packets locally.
+            let expired = table_a.expire_stale_entries_ha(now, Some(&ha));
+            let reaped_flow = expired.iter().any(|entry| entry.key == key || entry.key == reverse);
+            reap_expired_sessions(
+                std::slice::from_mut(&mut binding),
+                &expired,
+                &forwarding,
+                SteeringMap::unshared_for_test(-1),
+                ct,
+                ct,
+                now,
+                0,
+                &shared,
+            );
+            let descriptor_live = cache_hits(&mut binding, &key, &rg_epochs);
+            assert!(
+                !reaped_flow
+                    && table_a.session_id_for(&key) == session_id
+                    && table_a.session_id_for(&reverse) == reverse_id
+                    && mirror_row()
+                    && descriptor_live
+                    && table_b.session_id_for(&key) == session_id,
+                "#18742: check={check} reaped={reaped_flow}, mirror={}, descriptor={descriptor_live}, \
+                 B-live={}; matching shared activity must cover crossed checks within its cadence",
+                mirror_row(),
+                table_b.session_id_for(&key) == session_id
+            );
+            if check < 3 {
+                table_b.account_packet(&key, 64, crate::tcp_flags::TCP_ACK, 0);
+            }
+            now += check_step;
+        }
+
+        // B's next production-style restamp advances the shared count after
+        // the intervening expiry checks; A must observe and retain on it.
+        crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+            &shared,
+            &wires,
+            &[(
+                key.clone(),
+                NatDecision::default(),
+                table_b.fwd_packets_for(&key),
+                table_b.rev_packets_for(&key),
+            )],
+        );
+        let expired = table_a.expire_stale_entries_ha(now, Some(&ha));
+        let reaped_flow = expired.iter().any(|entry| entry.key == key || entry.key == reverse);
+        reap_expired_sessions(
+            std::slice::from_mut(&mut binding),
+            &expired,
+            &forwarding,
+            SteeringMap::unshared_for_test(-1),
+            ct,
+            ct,
+            now,
+            0,
+            &shared,
+        );
+        let descriptor_live = cache_hits(&mut binding, &key, &rg_epochs);
+        assert!(
+            !reaped_flow
+                && table_a.session_id_for(&key) == session_id
+                && table_a.session_id_for(&reverse) == reverse_id
+                && mirror_row()
+                && descriptor_live
+                && table_b.session_id_for(&key) == session_id,
+            "#18742: restamped sibling count reaped={reaped_flow}, mirror={}, \
+             descriptor={descriptor_live}, B-live={}; the next shared advance must retain A's row",
+            mirror_row(),
+            table_b.session_id_for(&key) == session_id
+        );
+
+        // Once B stops restamping, the frozen matching evidence is bounded by
+        // its cadence. A eventually reaps and its GC removes the stale mirror.
+        let cadence = 30 * SEC;
+        let idle_checks = (cadence / check_step + 2) as usize;
+        let mut reaped_when_idle = false;
+        for _ in 0..idle_checks {
+            now += check_step;
+            let expired = table_a.expire_stale_entries_ha(now, Some(&ha));
+            let reaped_flow = expired.iter().any(|entry| entry.key == key || entry.key == reverse);
+            reap_expired_sessions(
+                std::slice::from_mut(&mut binding),
+                &expired,
+                &forwarding,
+                SteeringMap::unshared_for_test(-1),
+                ct,
+                ct,
+                now,
+                0,
+                &shared,
+            );
+            if reaped_flow {
+                reaped_when_idle = true;
+                break;
+            }
+        }
+        assert!(
+            reaped_when_idle
+                && table_a.session_id_for(&key) == 0
+                && table_a.session_id_for(&reverse) == 0
+                && !mirror_row()
+                && !cache_hits(&mut binding, &key, &rg_epochs),
+            "#18742: frozen sibling evidence must eventually reap A's rows and mirror"
+        );
+
+
+    }
     // #16223/#17683: a WorkerLocalImport replica's expiry must NOT evict
     // the serving pair's cache or release its NAT state. Its own exact
     // persistent lease reference is still released while the serving entry's

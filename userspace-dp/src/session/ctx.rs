@@ -212,6 +212,35 @@ pub(crate) struct NodeServedEvidence {
     /// an Established row. Input evidence only — never set from a
     /// shared row's Established wire.
     pub(crate) served_completed: bool,
+    /// #18722: the recency proof, kept PER CONTRIBUTOR. Each contributor
+    /// is `Some(count)` only while its source row exists, and its count
+    /// moves only when the serving pair forwards (or the row is replaced by
+    /// a new incarnation). The expiry pass's node-level retention arm keeps
+    /// a row only when a PRESENT contributor's count changed from that
+    /// row's baseline for it (`SessionEntry::node_served_seen_*`). A
+    /// contributor that disappeared (its row was reaped or removed) is
+    /// neither activity nor silence. That is why these are not one sum: a
+    /// sum drops when a dead flow's companion is reaped first (a false
+    /// "change") and also drops when a live flow's source is replaced (a
+    /// false "silence"). Read ONLY by that arm. Never a completion input:
+    /// the other fields are cumulative.
+    ///
+    /// This table's contributor: the pair's FORWARD row `fwd+rev` counters
+    /// plus its node-served stamps, `Some` while that forward row exists.
+    pub(crate) local_served: Option<u64>,
+    /// The serving row's stable session identity and HA generation. The
+    /// expiry pass treats a changed nonzero identity as activity even when
+    /// replacement reuses the prior packet total (the 300 -> removed -> 300
+    /// ABA); both zero is the legacy/unknown sentinel.
+    pub(crate) shared_incarnation: Option<(u64, u64)>,
+    /// The current worker's computed maximum shared-evidence restamp cadence.
+    /// Production fills this from its live session-table slab; `None` uses the
+    /// default-cap bound for isolated expiry contexts and model tests.
+    pub(crate) shared_evidence_max_cadence_ns: Option<u64>,
+    /// The shared synced row's contributor: the matched Established row's
+    /// `fwd_packets + rev_packets`, restamped from the serving worker's live
+    /// counters by the ct-slice. `Some` while that row exists.
+    pub(crate) shared_served: Option<u64>,
     /// The Established wire came from the node's SHARED synced map:
     /// a serving worker published/restamped it only after its own
     /// pair completed the handshake. Trusted as completion proof on

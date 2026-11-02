@@ -814,6 +814,12 @@ mod tests_txn_flow_cache;
 #[cfg(test)]
 #[path = "tests_late_synced_publish_18550.rs"]
 mod tests_late_synced_publish_18550;
+
+// #18722: the opening-replica GC retention reads the shared row's
+// ct-slice-restamped counts as its recency proof.
+#[cfg(test)]
+#[path = "tests_idle_served_keepalive_18722.rs"]
+mod tests_idle_served_keepalive_18722;
 // #7541: the same bound with an IPv6 OUTER. Separate module rather than added to
 // the file above so the v4 cells' file-level docstring stays true about itself.
 #[cfg(test)]

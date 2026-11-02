@@ -459,6 +459,10 @@ impl SessionTable {
                             }
                             ev.shared_established |= shared.shared_established;
                             ev.rev_packets = ev.rev_packets.max(shared.rev_packets);
+                            // #18722/#18742: keep count and source identity separate.
+                            ev.shared_served = shared.shared_served;
+                            ev.shared_incarnation = shared.shared_incarnation;
+                            ev.shared_evidence_max_cadence_ns = shared.shared_evidence_max_cadence_ns;
                         }
                         ev
                     };
@@ -913,6 +917,28 @@ impl SessionTable {
     /// the opening window; a flow that goes quiet fails the window
     /// check once the companion crosses, so both halves then reap
     /// within one window of last activity (bounded, terminating).
+    ///
+    /// #18722: two bounds.
+    /// - A completed row authored/promoted here normally ages on its own
+    ///   packet timestamp. After RSS moves service to a sibling, it can use
+    ///   the node-level arm only when the exact canonical shared identity has
+    ///   a packet total above this node's forward-row counters. That proof can
+    ///   bridge unchanged counts only until the computed evidence cadence
+    ///   expires; the row's own static mirror count or another identity cannot
+    ///   protect it. Peer-synced replicas still use matching node evidence
+    ///   because they may serve neither direction locally.
+    /// - The node-level arm needs RECENT service, not the cumulative proof
+    ///   alone: it keeps the row only when a PRESENT evidence contributor
+    ///   (`local_served`, `shared_served`) changed from the row's baseline
+    ///   for it since its last crossed check. Per contributor, not summed:
+    ///   a dead flow's companion reaped first removes the local contributor
+    ///   (absent is not a change, so no extra window), and a live flow's
+    ///   source replaced by a new incarnation moves that contributor (a
+    ///   change, so no false reap).
+    /// Before #18722 both were missing, so an idle established flow that
+    /// had ever been answered re-stamped to `now_ns` on every pass and
+    /// never reaped (no Close, no RT_FLOW close, session and NAT binding
+    /// held for ever).
     fn opening_companion_keeps_alive(
         &mut self,
         key: &SessionKey,
@@ -926,26 +952,126 @@ impl SessionTable {
         if key.protocol != PROTO_TCP || entry.closing {
             return false;
         }
+        // #18722: completed rows this node authored/promoted normally age on
+        // their own packet timestamps. #18742 Cycle 2 admits the node-level
+        // arm only for a same-incarnation shared count that is ahead of this
+        // node's canonical forward counters. This rejects the static copy of
+        // the row's own mirror baseline while allowing an RSS sibling's
+        // advancing service to retain the local row.
+        let completed_local_row =
+            entry.established && !entry.handshake_pending && !entry.origin.is_peer_synced();
+        let shared_evidence_max_cadence_ns = node_evidence
+            .shared_evidence_max_cadence_ns
+            .unwrap_or(NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS);
+        let (expected_session_id, local_forward_packets) = if entry.metadata.is_reverse {
+            let forward = reverse_session_key(key, entry_nat);
+            self.entry_by_key(&forward)
+                .map(|forward_entry| {
+                    (
+                        forward_entry.session_id,
+                        forward_entry
+                            .counters
+                            .fwd_packets
+                            .saturating_add(forward_entry.counters.rev_packets),
+                    )
+                })
+                .unwrap_or((0, 0))
+        } else {
+            (
+                entry.session_id,
+                entry
+                    .counters
+                    .fwd_packets
+                    .saturating_add(entry.counters.rev_packets),
+            )
+        };
+        let matching_local_shared_activity = if completed_local_row {
+            expected_session_id != 0
+                && node_evidence.shared_established
+                && node_evidence.shared_incarnation == Some((expected_session_id, 0))
+                && node_evidence
+                    .shared_served
+                    .is_some_and(|shared| {
+                        shared > local_forward_packets
+                            && (shared > entry.node_served_seen_shared
+                                || (entry.node_served_last_change_ns != 0
+                                    && now_ns.saturating_sub(entry.node_served_last_change_ns)
+                                        <= shared_evidence_max_cadence_ns))
+                    })
+        } else {
+            false
+        };
+        if completed_local_row && !matching_local_shared_activity {
+            return false;
+        }
         // #16223 (node-level first): a promoted serving companion for
         // this tuple on this node (shared-map Established +
         // admitted reverse counters) retains the replica/opening row
         // BEFORE the local `syn_ack_first` / `handshake_pending`
         // refusals below — the live fw1 row is `syn_ack_first=true`
         // with no local companion, and the fw0 replicas are pure
-        // Opening. Retain on the SERVING pair's activity: re-stamp
-        // from `now_ns` (this GC pass is the retention event; the
-        // serving pair's own hits keep its stamp fresh, so a flow
-        // that goes quiet still crosses one window later when the
-        // shared/serving proof stops advancing — production merges
-        // the serving last-activity through the same evidence).
+        // Opening.
+        //
+        // #18722: a shared count can remain unchanged for one full ct-slice
+        // evidence cadence: 10 s by default and longer when HA imports grow
+        // the live session-table slab. Shorter configured idle windows use
+        // that computed cycle as evidence-age grace; frozen evidence never
+        // renews its own timestamp. Completed local rows additionally require
+        // an exact identity and a shared total ahead of their local forward
+        // counters. Their timestamp advances only on shared changes, so the
+        // static own-mirror baseline and local-only count changes cannot
+        // renew sibling proof.
         if node_evidence.promoted_and_served() {
             let Some(em) = self.entry_by_key_mut(key) else {
                 return false;
             };
-            em.last_seen_ns = now_ns;
-            self.rebucket_alive_entry(key, now_ns);
-            return true;
+            let mut advanced = false;
+            let mut shared_advanced = false;
+            if let Some(local) = node_evidence.local_served {
+                advanced |= local != em.node_served_seen_local;
+                em.node_served_seen_local = local;
+            }
+            if let Some(shared) = node_evidence.shared_served {
+                let incarnation_changed = node_evidence
+                    .shared_incarnation
+                    .is_some_and(|(session_id, generation)| {
+                        (session_id != 0 || generation != 0)
+                            && (session_id != em.node_served_seen_shared_session_id
+                                || generation != em.node_served_seen_shared_generation)
+                    });
+                let shared_changed =
+                    shared != em.node_served_seen_shared || incarnation_changed;
+                advanced |= shared_changed;
+                shared_advanced |= shared_changed;
+                em.node_served_seen_shared = shared;
+                if let Some((session_id, generation)) = node_evidence.shared_incarnation
+                    && (session_id != 0 || generation != 0)
+                {
+                    em.node_served_seen_shared_session_id = session_id;
+                    em.node_served_seen_shared_generation = generation;
+                }
+            }
+            if if completed_local_row {
+                shared_advanced
+            } else {
+                advanced
+            } {
+                em.node_served_last_change_ns = now_ns;
+            }
+            let shared_evidence_recent = node_evidence.shared_served.is_some()
+                && em.node_served_last_change_ns != 0
+                && now_ns.saturating_sub(em.node_served_last_change_ns)
+                    <= shared_evidence_max_cadence_ns;
+            if advanced || shared_evidence_recent {
+                em.last_seen_ns = now_ns;
+                self.rebucket_alive_entry(key, now_ns);
+                self.align_node_kept_companion(key, entry_nat, now_ns);
+                return true;
+            }
         }
+        let Some(entry) = self.entry_by_key(key) else {
+            return false;
+        };
         // Classic arm: only SYN-ACK-observed pending halves whose
         // completing segment was consumed elsewhere. Pure Opening and
         // SYN-ACK-first pairs keep the #6752/#13679/#4109 refusals.
@@ -982,6 +1108,67 @@ impl SessionTable {
         self.rebucket_alive_entry(key, now_ns);
         true
     }
+    /// #18722 (#18742 review): the node-level arm decides for the TUPLE, so
+    /// a keep applies to the pair. The companion is re-stamped with this
+    /// half and takes the same contributor baselines, so the two halves age
+    /// together from here. Without this, two artefacts appear:
+    /// - `companion_keeps_alive` read this half's `now_ns` re-stamp as
+    ///   companion activity and kept the other half on manufactured
+    ///   freshness, without updating its baselines.
+    /// - A companion crossing later re-read the same evidence as a change
+    ///   against its zero baseline.
+    /// Either way a dead flow's second half got a third window.
+    ///
+    /// A CLOSING companion is not aligned: it keeps its own close fuse
+    /// (#10885/#14630). A completed companion this node serves is aligned
+    /// like any other: it never takes the node-level arm itself (the gate
+    /// above), so its baselines are never read, and when it crosses,
+    /// `companion_keeps_alive` keeps it from this half's re-stamp anyway (the
+    /// whole-flow rule).
+    fn align_node_kept_companion(
+        &mut self,
+        key: &SessionKey,
+        entry_nat: NatDecision,
+        now_ns: u64,
+    ) {
+        let companion_key = reverse_session_key(key, entry_nat);
+        if companion_key == *key {
+            return;
+        }
+        let Some((
+            seen_local,
+            seen_shared,
+            seen_shared_session_id,
+            seen_shared_generation,
+            last_change_ns,
+        )) = self.entry_by_key(key).map(|entry| {
+            (
+                entry.node_served_seen_local,
+                entry.node_served_seen_shared,
+                entry.node_served_seen_shared_session_id,
+                entry.node_served_seen_shared_generation,
+                entry.node_served_last_change_ns,
+            )
+        }) else {
+            return;
+        };
+        let Some(cm) = self.entry_by_key_mut(&companion_key) else {
+            return;
+        };
+        if cm.closing {
+            return;
+        }
+        cm.node_served_seen_local = seen_local;
+        cm.node_served_seen_shared = seen_shared;
+        cm.node_served_seen_shared_session_id = seen_shared_session_id;
+        cm.node_served_seen_shared_generation = seen_shared_generation;
+        cm.node_served_last_change_ns = last_change_ns;
+        if cm.last_seen_ns < now_ns {
+            cm.last_seen_ns = now_ns;
+            self.rebucket_alive_entry(&companion_key, now_ns);
+        }
+    }
+
     /// #2120: the standby retention decision for an idle-crossed entry.
     /// Pure (reads only the passed snapshot + the HA context closures),
     /// so it can be unit-tested in isolation and called from the expire
