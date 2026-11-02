@@ -541,6 +541,9 @@ type Manager struct {
 	// controlAuthKeyConfiguredAt was anchored for (#15262). A different set
 	// (new/rotated key) re-anchors; the identical set does not.
 	controlAuthKeySetDigest string
+	// controlLinkUnkeyedAlarmLogged bounds the #16016 missing-key alarm to
+	// one emission per continuous unkeyed posture. Guarded by m.mu.
+	controlLinkUnkeyedAlarmLogged bool
 
 	// peerEpochReconcileMu serializes the full #16022 reconcile cycle
 	// (mark/load/install) across UpdateConfig, StartHeartbeat and tests.
@@ -1159,6 +1162,14 @@ func (m *Manager) ControlLinkAcceptedKeys() [][]byte {
 // be mutated, and must never be logged.
 func (m *Manager) ControlLinkAuthKey() []byte {
 	return m.controlLinkAuthKey()
+}
+
+// ControlLinkAuthConfigured reports whether any accepted control-link PSK is
+// configured without returning or copying secret material.
+func (m *Manager) ControlLinkAuthConfigured() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
 }
 
 // ControlLinkAuthKeyConfiguredAt reports when the current accepted

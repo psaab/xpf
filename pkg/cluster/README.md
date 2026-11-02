@@ -2593,16 +2593,18 @@ peer liveness (`lastSeen`) or drive election.
   must key both nodes before enabling the cluster. `peerAuthSeen` remains a
   process-lifetime signal for the separate gRPC fabric downgrade guard, not a
   heartbeat admission input.
-- **Operator surface (#4484 L-9).** `FormatControlPlaneStatistics`
+- **Operator surface (#4484 L-9, #16016).** `FormatControlPlaneStatistics`
   (`show chassis cluster control-plane-statistics`) renders an
-  `Authentication:` line derived from `controlLinkAuthStatus()`, so an
-  operator can tell whether the control link's HMAC auth is actually
-  **engaged** (`engaged (local key configured; unauthenticated heartbeat frames
-  rejected)`) or running in **dual-accept** mode
-  (`dual-accept (no control-link key configured)`). A session-sync connection
-  established before keying is called out separately when the provider reports
-  it as still unauthenticated. The status inspects only `len(key)`, so the
-  secret is never rendered.
+  `Authentication:` line derived from `controlLinkAuthStatus()`. An operator
+  can tell whether HMAC auth is **engaged** (`engaged (local key configured;
+  unauthenticated heartbeat frames rejected)`) or running in **dual-accept**
+  mode (`dual-accept (no control-link key configured; ALARM:
+  unauthenticated control authority remains enabled)`). The unkeyed alarm
+  remains visible until an accepted key is configured; `UpdateConfig` emits
+  one error-level alarm per continuous unkeyed posture. A session-sync
+  connection established before keying is called out separately when the
+  provider reports it as still unauthenticated. The status inspects only key
+  presence, so the secret is never rendered.
 - **Secret hygiene.** The key is `config.Secret`, redacted on every
   JSON/YAML/`String()` path and masked as `##SECRET-DATA##` in raw-AST
   renders (`authentication-key` is already in `ast_redact.go`'s secret

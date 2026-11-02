@@ -210,6 +210,10 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 // (noteSlowHandler). Nothing here logs per message. Timed on s.nowMono, the
 // clock the watchdog reads the in-flight marker with.
 func (s *SessionSync) handleFrame(conn net.Conn, diag *syncConnDiag, msgType uint8, payload []byte) bool {
+	if s.rejectUnauthenticatedAuthorityFrame(conn, msgType) {
+		s.stats.Errors.Add(1)
+		return false
+	}
 	if diag == nil {
 		return s.handleMessage(conn, msgType, payload)
 	}
@@ -224,6 +228,28 @@ func (s *SessionSync) handleFrame(conn net.Conn, diag *syncConnDiag, msgType uin
 		s.noteSlowHandler(conn, diag, msgType, elapsed, false, stallWarned)
 	}
 	return accepted
+}
+
+// rejectUnauthenticatedAuthorityFrame keeps established pre-key connections
+// from exercising sync authority after local keying. A plain sync heartbeat is
+// liveness-only; the in-place upgrade exchange remains available during the
+// existing grace. Configuration, session/bulk, failover, capability, clock,
+// and acknowledgment frames require verified per-frame authentication.
+func (s *SessionSync) rejectUnauthenticatedAuthorityFrame(conn net.Conn, msgType uint8) bool {
+	if !s.authConfigured() {
+		return false
+	}
+	if ac, ok := conn.(*authConn); ok && ac.readAuthed() {
+		return false
+	}
+	switch msgType {
+	case syncMsgHeartbeat,
+		syncMsgAuthUpgradeRequest, syncMsgAuthUpgradeHello,
+		syncMsgAuthUpgradeProof, syncMsgAuthUpgradeConfirm:
+		return false
+	default:
+		return true
+	}
 }
 
 // bulkReceiveProgress reports whether this session record is bulk

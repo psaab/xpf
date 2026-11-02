@@ -899,6 +899,9 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 	// the decision's use, so the surviving connection could DROP cold-prime (see
 	// installConn / the needColdPrime doc in sync.go).
 	d := s.installConn(fabricIdx, conn)
+	if !d.installed {
+		return
+	}
 	slog.Info("cluster sync: handling new connection", "fabric", fabricIdx, "remote", connRemoteAddrString(conn), "was_disconnected", d.wasDisconnected, "active_before", d.activeBefore, "active_after", d.activeAfter, "became_active", d.becameActive, "should_cold_prime", d.shouldColdPrime, "had_conn0", d.hadConn0, "had_conn1", d.hadConn1)
 	s.wg.Add(1)
 	go func() {
@@ -1015,6 +1018,7 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 // with the conn0/conn1 install so the decision is consistent with the registry
 // state it was computed from — a racing supersession cannot invalidate it.
 type connColdPrimeDecision struct {
+	installed       bool
 	wasDisconnected bool
 	becameActive    bool
 	shouldColdPrime bool
@@ -1038,12 +1042,17 @@ type connColdPrimeDecision struct {
 // the pre-#4962 code read wasDisconnected under the lock but USED it after
 // unlock, where a concurrent accept could already have changed the registry.
 func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDecision {
+	if s.peerIPPinRequired() && !s.isPeerRemote(conn) {
+		conn.Close()
+		return connColdPrimeDecision{activeBefore: -1, activeAfter: -1}
+	}
 	s.retirePeerClosedSlot(fabricIdx, conn)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
 	defer s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
 	d := connColdPrimeDecision{activeBefore: -1, activeAfter: -1}
+	d.installed = true
 	d.wasDisconnected = s.conn0 == nil && s.conn1 == nil
 	d.activeBefore = s.preferredFabricLocked()
 	d.hadConn0 = s.conn0 != nil

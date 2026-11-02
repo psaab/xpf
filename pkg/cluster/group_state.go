@@ -230,6 +230,8 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 		m.controlLinkRotationAltDigest = altDigest
 	}
 
+	keyConfigured := len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
+
 	// #15262: anchor the fabric rollout grace at the FIRST keying of the
 	// current accepted-key set, persisted in node state, not at this
 	// process's in-memory no-key -> key transition. A restart under an
@@ -240,8 +242,11 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	// persisted record (#16027), so reinstalling the same key is a fresh
 	// first keying (a stale record would otherwise be restored by digest
 	// match and deny the reinstall any grace).
-	keyConfigured := len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
 	if !keyConfigured {
+		if !m.controlLinkUnkeyedAlarmLogged {
+			slog.Error("cluster: control-link PSK absent; unauthenticated heartbeat and session-sync authority remains accepted (legacy dual-accept, #16016)")
+			m.controlLinkUnkeyedAlarmLogged = true
+		}
 		m.controlAuthKeyConfiguredAt = time.Time{}
 		m.controlAuthKeySetDigest = ""
 		deleteFabricAuthGraceAnchor(fabricAuthGraceStatePath)
@@ -258,6 +263,7 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 		m.hbAuth.mu.Unlock()
 		clearPeerEpochState(peerEpochStatePath)
 	} else {
+		m.controlLinkUnkeyedAlarmLogged = false
 		digest := controlAuthKeySetDigest(m.controlAuthKey, m.controlAuthKeyAlt)
 		// Bump the reconcile generation whenever the accepted set textual
 		// digest changes, before reconcile can run. A concurrent
