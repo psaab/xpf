@@ -14,6 +14,18 @@
 set -uo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+COS_GATE_EMITTED=0
+cos_gate_exit() {
+    local status=$?
+    trap - EXIT
+    if [[ "$COS_GATE_EMITTED" != "1" ]]; then
+        local reason=harness-aborted
+        ((status == 0)) && reason=harness-incomplete
+        printf 'COS_GATE cos-be-contention-harness VOID reason=%s\n' "$reason"
+    fi
+    exit "$status"
+}
+trap cos_gate_exit EXIT
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/test/incus/loss-userspace-cluster.env}"
 # #13070 (D10-15): the incus CLI wrapper comes from the shared CoS
 # schedule + wrapper library instead of a harness-local copy.
@@ -22,16 +34,6 @@ source "$ROOT_DIR/test/incus/cos-apply-lib.sh"
 APPLY_COS_CONFIG="${APPLY_COS_CONFIG:-$ROOT_DIR/test/incus/apply-cos-config.sh}"
 VALIDATOR="${VALIDATOR:-$ROOT_DIR/test/incus/cos_be_contention_validate.py}"
 
-TARGET_IP="${TARGET_IP:-172.16.80.200}"
-# #8040: fail on the target-service contract BEFORE the CoS fixture is applied
-# and the lock is spent. Scoped to the four ports this smoke actually uses, so
-# an unrelated class being down does not block it — but the report on failure
-# is the whole 24-port grid, because a runner wants every hole at once.
-SKIP_TARGET_PRECHECK="${SKIP_TARGET_PRECHECK:-0}"
-if [[ "$SKIP_TARGET_PRECHECK" != "1" ]]; then
-    TARGET_V4="$TARGET_IP" "$ROOT_DIR/test/incus/target-services.sh" \
-        check 5200 5202 5210 5211 || exit 1
-fi
 DURATION="${DURATION:-8}"
 EXACT_PARALLEL="${EXACT_PARALLEL:-4}"
 CONTENDER_PARALLEL="${CONTENDER_PARALLEL:-4}"
@@ -53,6 +55,7 @@ MIN_EXACT_BASELINE_CAP_RATIO="${MIN_EXACT_BASELINE_CAP_RATIO:-0.70}"
 MIN_CONTENDED_ROOT_PRESSURE_RATIO="${MIN_CONTENDED_ROOT_PRESSURE_RATIO:-0.90}"
 ROOT_SHAPE_BPS="${ROOT_SHAPE_BPS:-25000000000}"
 IPERF_EXTRA_ARGS="${IPERF_EXTRA_ARGS:-}"
+SKIP_TARGET_PRECHECK="${SKIP_TARGET_PRECHECK:-0}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
     echo "cos-be-contention-harness: env file not found: $ENV_FILE" >&2
@@ -60,6 +63,19 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 # shellcheck disable=SC1090
 source "$ENV_FILE"
+# shellcheck source=cluster-env.sh
+source "$ROOT_DIR/test/incus/cluster-env.sh"
+TARGET_IP="${TARGET_IP:-$IPERF_TARGET4}"
+if [[ "${COS_GATE_SELFTEST:-0}" == "1" ]]; then
+    echo "COS_GATE cos-be-contention-harness PASS reason=-- cells_failed=0"
+    COS_GATE_EMITTED=1
+    exit 0
+fi
+if [[ "$SKIP_TARGET_PRECHECK" != "1" ]]; then
+    TARGET_V4="$TARGET_IP" "$ROOT_DIR/test/incus/target-services.sh" \
+        check 5200 5202 5210 5211 || exit 1
+fi
+
 
 REMOTE_PREFIX="${INCUS_REMOTE:+${INCUS_REMOTE}:}"
 FW0="${REMOTE_PREFIX}${VM0}"
@@ -101,6 +117,7 @@ if [[ -z "$ARTIFACT_ROOT" ]]; then
 else
     mkdir -p "$ARTIFACT_ROOT"
 fi
+printf 'target_v4=%s\nlan_generator=%s\n' "$TARGET_IP" "$HOST" > "$ARTIFACT_ROOT/measurement-environment.txt"
 
 log() {
     printf '==> %s\n' "$*"
@@ -372,4 +389,48 @@ validator_status=$?
 
 log "summary: $ARTIFACT_ROOT/summary.tsv"
 log "drain shape: $ARTIFACT_ROOT/drain-shape.tsv"
-exit "$validator_status"
+gate_status=0
+gate_output=$(python3 - "$ARTIFACT_ROOT/summary.json" "$validator_status" "${#selected_cells[@]}" <<'PY'
+import json
+import sys
+
+path, rc, expected_cells = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+if rc == 2:
+    print("COS_GATE cos-be-contention-harness VOID reason=validator-invalid")
+    raise SystemExit(2)
+try:
+    with open(path, encoding="utf-8") as fh:
+        summary = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    print("COS_GATE cos-be-contention-harness VOID reason=summary-unavailable")
+    raise SystemExit(2)
+if rc not in (0, 1) or summary.get("verdict") not in ("PASS", "FAIL"):
+    print("COS_GATE cos-be-contention-harness VOID reason=validator-verdict-invalid")
+    raise SystemExit(2)
+cells = summary.get("cells")
+if not isinstance(cells, list) or len(cells) != expected_cells or not cells:
+    print("COS_GATE cos-be-contention-harness VOID reason=summary-metrics-missing")
+    raise SystemExit(2)
+failed = 0
+for cell in cells:
+    if not isinstance(cell, dict) or cell.get("verdict") not in ("PASS", "FAIL"):
+        print("COS_GATE cos-be-contention-harness VOID reason=summary-metrics-invalid")
+        raise SystemExit(2)
+    failed += cell["verdict"] == "FAIL"
+verdict = "PASS" if summary["verdict"] == "PASS" and rc == 0 else "FAIL"
+if (rc == 0 and summary["verdict"] != "PASS") or (rc == 1 and summary["verdict"] != "FAIL"):
+    print("COS_GATE cos-be-contention-harness VOID reason=validator-summary-disagree")
+    raise SystemExit(2)
+if (verdict == "PASS" and failed != 0) or (verdict == "FAIL" and failed == 0):
+    print("COS_GATE cos-be-contention-harness VOID reason=validator-summary-disagree")
+    raise SystemExit(2)
+print(f"COS_GATE cos-be-contention-harness {verdict} reason=-- cells_failed={failed}")
+raise SystemExit(rc)
+PY
+)
+gate_status=$?
+if grep -q '^COS_GATE cos-be-contention-harness ' <<<"$gate_output"; then
+    COS_GATE_EMITTED=1
+fi
+printf '%s\n' "$gate_output"
+exit "$gate_status"

@@ -1680,10 +1680,9 @@ done <<<"$helper_gate_inventory"
 hermetic_target=$(sed -n '/^test-wire-properties:/,/^$/p' "$makefile")
 if [[ -z "$hermetic_target" ]]; then
 	bad "#12140: hermetic gate lookup swept ZERO lines for test-wire-properties — the target was renamed or removed (empty sweep)"
-# The pin counts every cluster --gate invocation in the Makefile. 25 on master
-# at 5e3655d536 (the pin still said 24: a gate landed without bumping it);
-# 26 with #18583's test-rg-move-soak.
-elif [[ "$helper_gate_count" == "26" && "${#missing_helper_gates[@]}" == "0" &&
+# The pin counts every cluster --gate invocation in the Makefile: 25 on master
+# at 5e3655d536, 26 with #18583's test-rg-move-soak, and 31 with five #11769 CoS gates.
+elif [[ "$helper_gate_count" == "31" && "${#missing_helper_gates[@]}" == "0" &&
 	"$hermetic_target" != *"--require-helper-attestation"* ]]; then
 	ok "#12140: all $helper_gate_count cluster gate invocations require helper provenance; hermetic gate is excluded"
 else
@@ -2040,6 +2039,164 @@ wire_field_has "arm-b VOID keeps measured stage flags" 0 5 "mid_fwd_ok=1"
 wire_log 'WIRE_GATE cc-rollback-arm-a FAIL reason=-- mid_blocked=1 post_present=1 post_fwd_ok=0\n'
 wire_field_is "arm-a FAIL transcribes" 0 1 "FAIL"
 wire_field_is "arm-a headline is post_fwd_ok" 0 3 "post_fwd_ok"
+# ── #11769: CoS gate adapter ─────────────────────────────────────────
+#
+# The five harnesses transcribe their native verdict into a single terminal
+# COS_GATE line. These fixtures pin each headline and all fail-closed refusal
+# cases without a cluster.
+cos_log() { printf '%b' "$1" >"$LOG"; }
+cos_field_is() {
+	local label="$1" rc="$2" n="$3" want="$4" got
+	got=$(adapt_field cos-gate "$rc" "$n")
+	if [[ "$got" == "$want" ]]; then
+		ok "cos-gate: $label"
+	else
+		bad "cos-gate: $label (field $n: want '$want', got '$got')"
+	fi
+}
+cos_field_has() {
+	local label="$1" rc="$2" n="$3" want="$4" got
+	got=$(adapt_field cos-gate "$rc" "$n")
+	if [[ "$got" == *"$want"* ]]; then
+		ok "cos-gate: $label"
+	else
+		bad "cos-gate: $label (field $n missing '$want': '$got')"
+	fi
+}
+COS_HEADROOM_METRICS='classes_failed_total=0 strict_sum_class_avg_mbps=3000 surplus_sum_class_avg_mbps=3100 paired_sum_class_avg_delta_mbps=100 paired_sum_class_avg_delta_pct=3.333 classes_failed_strict=0 classes_failed_surplus=0 max_gap_strict=0.01 max_gap_surplus=0.02'
+cos_log 'COS_GATE cos-simul-load-smoke PASS reason=-- aggregate_gbps=22.375\n'
+cos_field_is "simul-load PASS and headline" 0 1 PASS
+cos_field_is "simul-load aggregate headline" 0 3 aggregate_gbps
+cos_log 'COS_GATE cos-simul-load-smoke FAIL reason=-- aggregate_gbps=18.5\n'
+cos_field_is "simul-load measured FAIL" 1 1 FAIL
+cos_log 'COS_GATE cos-simul-load-smoke VOID reason=generator-evidence-invalid\n'
+cos_field_is "simul-load missing generator evidence VOID" 2 1 VOID
+
+cos_log 'COS_GATE cos-gate1-small-four-alone PASS reason=-- min_shape_pct=96.2\n'
+cos_field_is "Gate 1 PASS headline" 0 3 min_shape_pct
+cos_log 'COS_GATE cos-gate1-small-four-alone FAIL reason=-- min_shape_pct=94.9\n'
+cos_field_is "Gate 1 measured FAIL" 1 1 FAIL
+cos_log 'COS_GATE cos-gate1-small-four-alone VOID reason=generator-evidence-invalid\n'
+cos_field_is "Gate 1 missing evidence VOID" 2 1 VOID
+
+cos_log 'COS_GATE cos-be-contention-harness PASS reason=-- cells_failed=0\n'
+cos_field_is "BE contention PASS headline" 0 3 cells_failed
+cos_log 'COS_GATE cos-be-contention-harness FAIL reason=-- cells_failed=2\n'
+cos_field_is "BE contention measured FAIL" 1 1 FAIL
+cos_log 'COS_GATE cos-be-contention-harness VOID reason=validator-invalid\n'
+cos_field_is "validator rc 2 is VOID" 2 1 VOID
+
+cos_log 'COS_GATE fairness-cos-class-sweep PASS reason=-- max_gap=0.043\n'
+cos_field_is "class sweep PASS headline" 0 3 max_gap
+cos_log 'COS_GATE fairness-cos-class-sweep FAIL reason=-- max_gap=0.071\n'
+cos_field_is "class sweep measured FAIL" 1 1 FAIL
+cos_log 'COS_GATE fairness-cos-class-sweep VOID reason=error-row\n'
+cos_field_is "sweep ERROR row is VOID" 2 1 VOID
+
+cos_log "COS_GATE fairness-cos-throughput-headroom PASS reason=-- $COS_HEADROOM_METRICS\n"
+cos_field_is "headroom PASS headline" 0 3 classes_failed_total
+cos_field_has "headroom keeps paired delta diagnostic" 0 5 paired_sum_class_avg_delta_mbps=100
+cos_log "COS_GATE fairness-cos-throughput-headroom FAIL reason=-- classes_failed_total=1 strict_sum_class_avg_mbps=3000 surplus_sum_class_avg_mbps=3100 paired_sum_class_avg_delta_mbps=100 paired_sum_class_avg_delta_pct=3.333 classes_failed_strict=1 classes_failed_surplus=0 max_gap_strict=0.06 max_gap_surplus=0.02\n"
+cos_field_is "headroom fairness failure is FAIL" 1 1 FAIL
+cos_log 'COS_GATE fairness-cos-throughput-headroom VOID reason=unpaired-rows\n'
+cos_field_is "headroom unpaired rows are VOID" 2 1 VOID
+cos_log 'COS_GATE fairness-cos-throughput-headroom VOID reason=scenarios-incomplete\n'
+cos_field_is "headroom missing scenario is VOID" 2 1 VOID
+
+cos_log 'no verdict line\n'
+cos_field_is "missing verdict line is VOID" 0 1 VOID
+cos_field_has "missing verdict names absent line" 0 2 "no COS_GATE"
+cos_log 'COS_GATE nope PASS reason=-- metric=1\n'
+cos_field_is "unknown gate is VOID" 0 1 VOID
+cos_field_has "unknown gate refusal is explicit" 0 2 "unknown gate nope"
+cos_log 'COS_GATE cos-simul-load-smoke PASS reason=-- aggregate_gbps=1\nCOS_GATE cos-simul-load-smoke FAIL reason=-- aggregate_gbps=0\n'
+cos_field_is "conflicting verdict lines are VOID" 1 1 VOID
+cos_log 'COS_GATE cos-simul-load-smoke PASS reason=-- aggregate_gbps=bad\n'
+cos_field_is "malformed metric is VOID" 0 1 VOID
+cos_log 'COS_GATE cos-simul-load-smoke PASS reason=--\n'
+cos_field_is "missing headline is VOID" 0 1 VOID
+cos_field_has "missing headline names required metric" 0 2 aggregate_gbps
+cos_log 'COS_GATE cos-simul-load-smoke PASS reason=-- aggregate_gbps=1\n'
+cos_field_is "PASS with nonzero rc is VOID" 1 1 VOID
+cos_field_has "PASS rc disagreement is explicit" 1 2 disagree
+cos_log 'COS_GATE cos-simul-load-smoke VOID reason=--\n'
+cos_field_is "VOID without a reason slug remains VOID" 0 1 VOID
+
+# Exercise each runnable harness' explicit no-cluster selftest path, not just
+# a hand-authored adapter line. The mode exits before traffic or config changes.
+for harness_gate in \
+	"cos-simul-load-smoke.sh cos-simul-load-smoke" \
+	"cos-gate1-small-four-alone.sh cos-gate1-small-four-alone" \
+	"cos-be-contention-harness.sh cos-be-contention-harness" \
+	"fairness-cos-class-sweep.sh fairness-cos-class-sweep" \
+	"fairness-cos-throughput-headroom.sh fairness-cos-throughput-headroom"; do
+	read -r harness gate <<<"$harness_gate"
+	out=$(COS_GATE_SELFTEST=1 "$SCRIPT_DIR/$harness" 2>&1)
+	rc=$?
+	if [[ "$rc" == 0 && "$out" == *"COS_GATE $gate PASS reason=--"* ]] &&
+		[[ $(grep -c '^COS_GATE ' <<<"$out") == 1 ]]; then
+		ok "$harness emits one well-formed COS_GATE selftest line"
+	else
+		bad "$harness selftest output/rc invalid: rc=$rc output='$out'"
+	fi
+done
+
+# Exercise the native simul-load reducer with generator JSON/.rc artifacts.
+# This bypasses only generator launch, not the reducer or its gate evaluation.
+sim_reducer_root="$WORK/simul-reducer"
+python3 - "$sim_reducer_root" <<'PY'
+import json
+import os
+import sys
+
+root = sys.argv[1]
+base = {
+    5201: 0.08, 5202: 0.5, 5203: 1.0, 5204: 2.0,
+    5205: 0.1, 5206: 0.1, 5207: 0.1, 5208: 0.1,
+    5209: 0.1, 5210: 0.1, 5211: 1.0,
+}
+for scenario in ("pass", "fail", "void"):
+    directory = os.path.join(root, scenario)
+    os.makedirs(directory)
+    values = dict(base)
+    if scenario == "fail":
+        values[5201] = 0.05
+    for port, gbps in values.items():
+        if scenario == "void" and port == 5211:
+            continue
+        bps = round(gbps * 1_000_000_000)
+        payload = {
+            "end": {
+                "streams": [
+                    {"sender": {"bits_per_second": bps // 12}}
+                    for _ in range(12)
+                ],
+                "sum_received": {"bits_per_second": bps},
+                "sum_sent": {"bits_per_second": bps, "retransmits": 0},
+            }
+        }
+        with open(os.path.join(directory, f"sim_{port}.json"), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        with open(os.path.join(directory, f"sim_{port}.rc"), "w", encoding="utf-8") as fh:
+            fh.write("0\n")
+PY
+for scenario_rc in "pass 0 PASS" "fail 1 FAIL" "void 2 VOID"; do
+	read -r scenario want_rc want_verdict <<<"$scenario_rc"
+	out=$(env -u COS_GATE_SELFTEST COS_GATE_REDUCER_SELFTEST=1 \
+		ART="$sim_reducer_root/$scenario" \
+		"$SCRIPT_DIR/cos-simul-load-smoke.sh" 2>&1)
+	rc=$?
+	line=$(grep '^COS_GATE cos-simul-load-smoke ' <<<"$out" || true)
+	cos_log "$line"$'\n'
+	got_verdict=$(adapt_field cos-gate "$rc" 1)
+	if [[ "$rc" == "$want_rc" && "$got_verdict" == "$want_verdict" &&
+		$(grep -c '^COS_GATE ' <<<"$out") == 1 ]]; then
+		ok "simul-load native reducer $scenario fixture => $want_verdict"
+	else
+		bad "simul-load native reducer $scenario fixture: rc=$rc verdict=$got_verdict line='$line'"
+	fi
+done
+
 # ── #18772: the deployed deb version vs the deploying checkout ───────
 dbm_fails=""
 for row in "0.0.29598+g36a70dfd0253|36a70dfd0253aaaaaaaaaaaaaaaaaaaaaaaaaaaa|match" \

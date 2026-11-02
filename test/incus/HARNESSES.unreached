@@ -34,11 +34,6 @@
 #   test/incus/test-mouse-latency.sh — single live latency measurement.
 #   test/incus/test-mouse-latency-same-class.sh — same-class live control.
 #   test/incus/reverse-key-collision-probe.sh — live SNAT collision injection.
-#   test/incus/cos-simul-load-smoke.sh — all-11-class live CoS acceptance.
-#   test/incus/cos-gate1-small-four-alone.sh — live Gate 1 shape check.
-#   test/incus/cos-be-contention-harness.sh — live exact-vs-best-effort load.
-#   test/incus/fairness-cos-throughput-headroom.sh — live strict/surplus A/B.
-#   test/incus/fairness-cos-class-sweep.sh — per-class live fairness sweep.
 
 # ── GATE — built, tested, documented, invoked by nothing ──
 test/incus/newflow-ceiling-harness.sh        GATE: #4800 connection-rate ceiling; docs/userspace-newflow-ceiling.md opens "the code ships; the measurement is OWED". Makefile names it only under `bash -n` — lint-reachable, run-unreachable. #9053 ATTEMPTED it and found the committed pool rule matches 10.0.61.240/28 while the LAN host is 10.0.61.102, and the pool holds 1000 ports against a 5000-80000 sweep. The newflow-gen client and harness now support explicit source binding; a run still needs an authorized pool-prefix host address plus the shared-cluster capacity/baseline blockers resolved. See the "Running it on the loss userspace cluster" section before re-attempting.
@@ -46,11 +41,6 @@ test/incus/test-mouse-latency-matrix.sh      GATE: the full 12-cell #905 mouse-l
 test/incus/test-mouse-latency.sh             GATE: one #905 mouse-latency rep. Makefile:524 names it only in a COMMENT ("Run it after touching test-mouse-latency.sh"); the target beside that comment runs the hermetic selftest.
 test/incus/test-mouse-latency-same-class.sh  GATE: same-class 1 Gbps variant of the #905 rep — the control for the cross-class default.
 test/incus/reverse-key-collision-probe.sh    GATE: #1760 W2 live-fire NAT reverse-key collision watch.
-test/incus/cos-simul-load-smoke.sh           GATE: #1614 all-11-class simul-load acceptance gates. Calls cos-gate1-small-four-alone.sh, and the pair is collectively unreached.
-test/incus/cos-gate1-small-four-alone.sh     GATE: #1630 Gate 1 solo >=95% shape check. Only caller is cos-simul-load-smoke.sh, itself unreached.
-test/incus/cos-be-contention-harness.sh      GATE: exact-queue behaviour under best-effort contention; docs/cos-best-effort-contention-harness.md.
-test/incus/fairness-cos-throughput-headroom.sh GATE: strict-exact vs surplus-sharing headroom comparison; calls fairness-cos-class-sweep.sh.
-test/incus/fairness-cos-class-sweep.sh       GATE: per-class multi-sample fairness gap contract, non-zero on any class failing. Only caller is fairness-cos-throughput-headroom.sh, itself unreached.
 
 # ── COMPOSED — reached for free once the caller above gets a recipe ──
 test/incus/fairness-harness.sh               COMPOSED: the per-class run driver invoked by fairness-cos-class-sweep.sh; docs/fairness-regimes.md.
@@ -93,6 +83,5 @@ scripts/userspace-perf-compare.sh            DIAGNOSTIC: ad-hoc perf A/B between
 scripts/userspace-phase-cycle.sh             DIAGNOSTIC: wrapper that re-runs userspace-ha-validation.sh across phases.
 
 test/incus/screen-probe.sh	DIAGNOSTIC — #8336 crafted-frame screen probe; arms a screen profile on a LIVE cluster, sends crafted frames and reads the per-reason drop counters, so it needs the shared cluster lock (taken via the #1875 cell since #12911) and has no hermetic recipe. Its analysis layer is reached: `make test-screen-probe-lib` drives screen-probe-selftest.sh over synthetic transcripts, which is where the three-valued DROPPED/PASSED/VOID verdict, the #6440 marker gate, the #12910 label-aware metric extractor and the #12911 exit-status contract are bound.
-test/incus/active-fw.sh	LIBRARY — sourced library (active_fw_detect, #13069) for CoS/fairness harnesses (fairness-cos-class-sweep.sh, fairness-cos-throughput-headroom.sh); not a standalone runnable harness.
 test/incus/test-v6-na-recovery-12495.sh	LAB-ONLY — #12495 cluster leg: RG failover + IPv6 NA-burst attribution on the live loss cluster via the #1875 cell; no hermetic recipe. Its analysis layer is reached: `make test-v6-na-recovery-lib` drives the lib selftests.
 test/incus/v6-na-recovery-lib-12495.sh	LIBRARY — sourced analysis layer for test-v6-na-recovery-12495.sh (#12495); exercised via `make test-v6-na-recovery-lib`, not a standalone harness.
