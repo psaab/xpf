@@ -309,11 +309,19 @@ FAKE_LOG="${DOWN_TMP}/fake.log"
 cat > "${DOWN_TMP}/bin/ss" <<'FAKE'
 #!/usr/bin/env bash
 port=""
+has_pid_info=0
 for arg in "$@"; do
     candidate="${arg##*:}"
     [[ "$candidate" =~ ^[0-9]+$ ]] && port="$candidate"
+    if [[ "$arg" == -* && "$arg" == *p* ]]; then
+        has_pid_info=1
+    fi
 done
 echo "ss ${port}" >> "${FAKE_LOG:?}"
+if [[ "$has_pid_info" != 1 ]]; then
+    echo "LISTEN 0 4096 0.0.0.0:${port} 0.0.0.0:*"
+    exit 0
+fi
 case "$port" in
   5201)
     if [[ "${FAKE_FAILED_IPERF:-0}" == 1 ]]; then
@@ -329,6 +337,13 @@ cat > "${DOWN_TMP}/bin/systemctl" <<'FAKE'
 echo "systemctl $*" >> "${FAKE_LOG:?}"
 case "$*" in
   *show*)
+    if [[ "${FAKE_METADATA_FAIL:-0}" == 1 && "$*" == *mouse-iperf3@5201* ]]; then
+      case "$*" in
+        *MainPID*) echo 2002 ;;
+        *ControlGroup*) echo /system.slice/mouse-iperf3@5201.service ;;
+      esac
+      exit 1
+    fi
     if [[ "${FAKE_SYSTEMD:-1}" == 0 ]]; then
       [[ "$*" == *MainPID* ]] && echo 0
       exit 0
@@ -382,6 +397,7 @@ case "$1" in
       FAKE_LOG="$FAKE_LOG" FAKE_SYSTEMD="${FAKE_SYSTEMD:-1}" \
         FAKE_CGROUP_MISSING="${FAKE_CGROUP_MISSING:-0}" \
         FAKE_FAILED_IPERF="${FAKE_FAILED_IPERF:-0}" \
+        FAKE_METADATA_FAIL="${FAKE_METADATA_FAIL:-0}" \
         BASH_ENV="${FAKE_KILL_ENV}" PATH="${FAKE_BIN}:${PATH}" bash -c "$script"
       exit $?
     fi
@@ -393,7 +409,7 @@ chmod +x "${DOWN_TMP}/incus"
 cp "$SUBJECT" "${DOWN_TMP}/target-services.sh"
 run_down() {
     local target="$1" alias="$2" systemd="$3" \
-        cgroup_missing="${4:-0}" failed_iperf="${5:-0}"
+        cgroup_missing="${4:-0}" failed_iperf="${5:-0}" metadata_fail="${6:-0}"
     : > "$FAKE_LOG"
     env PATH="${DOWN_TMP}:${PATH}" FAKE_BIN="${DOWN_TMP}/bin" \
         FAKE_KILL_ENV="${DOWN_TMP}/bin/kill" FAKE_PROC_ROOT="${DOWN_TMP}/proc" \
@@ -401,6 +417,7 @@ run_down() {
         FAKE_TARGET_IP="$target" FAKE_SYSTEMD="$systemd" \
         FAKE_CGROUP_MISSING="$cgroup_missing" \
         FAKE_FAILED_IPERF="$failed_iperf" \
+        FAKE_METADATA_FAIL="$metadata_fail" \
         TARGET_V4="$target" TARGET_ALIAS_V4="$alias" \
         MOUSE_TARGET_V4=172.16.80.201 INCUS_REMOTE=loss \
         bash "${DOWN_TMP}/target-services.sh" down 2>&1
@@ -448,6 +465,22 @@ if ! awk '
 ' "$FAKE_LOG"; then
     fail "#18626: failed-unit systemd stop ran before the echo sweep: $(cat "$FAKE_LOG")"
 fi
+
+# A failed systemd metadata query cannot establish who owns an active unit's
+# socket. Preserve every iperf socket PID while still completing the echo sweep.
+down_out="$(run_down 172.16.80.202 172.16.80.202 1 0 0 1)"; down_rc=$?
+[[ $down_rc -eq 0 ]] || fail "#18626: metadata-failure down rc=$down_rc: $down_out"
+grep -q '^ss 5201$' "$FAKE_LOG" \
+    || fail "#18626: metadata-failure case did not inspect the active iperf socket: $(cat "$FAKE_LOG")"
+grep -Fq 'systemctl show -p MainPID --value mouse-iperf3@5201.service' "$FAKE_LOG" \
+    || fail "#18626: metadata-failure case skipped the MainPID query: $(cat "$FAKE_LOG")"
+grep -Fq 'systemctl show -p ControlGroup --value mouse-iperf3@5201.service' "$FAKE_LOG" \
+    || fail "#18626: metadata-failure case skipped the ControlGroup query: $(cat "$FAKE_LOG")"
+if grep -Eq '^kill .* (146115|2002|2003)$' "$FAKE_LOG"; then
+    fail "#18626: killed an iperf socket PID after systemd metadata failed: $(cat "$FAKE_LOG")"
+fi
+grep -q '^kill .*3101$' "$FAKE_LOG" \
+    || fail "#18626: metadata-failure case skipped the independently classified echo orphan: $(cat "$FAKE_LOG")"
 
 # An active unit with no reported ControlGroup cannot safely classify any
 # other socket PID on that port. Leave those PIDs alone, while continuing the

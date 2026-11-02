@@ -327,6 +327,10 @@ cmd_down() {
         echo "no incus handle for ${TARGET_V4}; nothing to stop from here" >&2
         return 2
     fi
+    local managed_units=0
+    if [[ "$TARGET_V4" == "$TARGET_ALIAS_V4" || "$TARGET_V4" == "$MOUSE_TARGET_V4" ]]; then
+        managed_units=1
+    fi
 
     local remote_script
     remote_script="$(cat <<'REMOTE'
@@ -341,14 +345,37 @@ pid_in_unit_cgroup() {
 }
 
 sweep_socket_orphans() {
-    local port="$1" unit="$2" main_pid unit_cgroup pid in_unit
-    main_pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)"
-    [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || main_pid=""
-    unit_cgroup="$(systemctl show -p ControlGroup --value "$unit" 2>/dev/null || true)"
-    if [[ -n "$main_pid" && -z "$unit_cgroup" ]]; then
-        # A live unit without a reported cgroup cannot safely classify any
-        # other socket PID on this port.
-        return 0
+    local port="$1" unit="$2" unit_managed="$3"
+    local socket_pids main_pid="" unit_cgroup="" metadata_ok=1 pid in_unit
+    socket_pids="$(
+        ss -tlnpH "sport = :${port}" 2>/dev/null |
+            awk '{ line = $0; while (match(line, /pid=[0-9]+/)) {
+                print substr(line, RSTART + 4, RLENGTH - 4)
+                line = substr(line, RSTART + RLENGTH)
+            } }' | sort -u
+    )"
+    [[ -n "$socket_pids" ]] || return 0
+    if [[ "$unit_managed" == 1 ]]; then
+        if main_pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null)"; then
+            :
+        else
+            metadata_ok=0
+        fi
+        if unit_cgroup="$(systemctl show -p ControlGroup --value "$unit" 2>/dev/null)"; then
+            :
+        else
+            metadata_ok=0
+        fi
+        # A failed metadata query cannot establish process ownership. Leave
+        # every socket PID alone rather than risking a kill of a live unit.
+        [[ "$metadata_ok" -eq 1 ]] || return 0
+        [[ "$main_pid" =~ ^[0-9]+$ ]] || return 0
+        [[ "$main_pid" == 0 ]] && main_pid=""
+        if [[ -n "$main_pid" && -z "$unit_cgroup" ]]; then
+            # A live unit without a reported cgroup cannot safely classify
+            # any other socket PID on this port.
+            return 0
+        fi
     fi
     while IFS= read -r pid; do
         [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
@@ -364,26 +391,22 @@ sweep_socket_orphans() {
             fi
         fi
         kill -TERM "$pid" 2>/dev/null || true
-    done < <(
-        ss -tlnpH "sport = :${port}" 2>/dev/null |
-            awk '{ line = $0; while (match(line, /pid=[0-9]+/)) {
-                print substr(line, RSTART + 4, RLENGTH - 4)
-                line = substr(line, RSTART + RLENGTH)
-            } }' | sort -u
-    )
+    done <<< "$socket_pids"
 }
 
 for p in __IPERF_PORTS__; do
-    sweep_socket_orphans "$p" "mouse-iperf3@${p}.service"
+    sweep_socket_orphans "$p" "mouse-iperf3@${p}.service" __UNIT_MANAGED__
 done
 for p in __ECHO_PORTS__; do
-    sweep_socket_orphans "$p" mouse-echo.service
+    sweep_socket_orphans "$p" mouse-echo.service __UNIT_MANAGED__
 done
+
 REMOTE
 )"
     remote_script="${remote_script/__IPERF_PORTS__/${IPERF_PORTS[*]}}"
     remote_script="${remote_script/__ECHO_PORTS__/${ECHO_PORTS[*]}}"
-    if [[ "$TARGET_V4" == "$TARGET_ALIAS_V4" || "$TARGET_V4" == "$MOUSE_TARGET_V4" ]]; then
+    remote_script="${remote_script//__UNIT_MANAGED__/${managed_units}}"
+    if [[ "$managed_units" == 1 ]]; then
         remote_script+=$'\nsystemctl stop \'mouse-iperf3@*\' mouse-echo 2>/dev/null || true'
         incus_run exec "${INCUS_REMOTE}:${inst}" -- bash -c "$remote_script"
         echo "stopped target services (systemd units + orphans) on ${INCUS_REMOTE}:${inst}"
