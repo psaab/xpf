@@ -728,13 +728,19 @@ same-session/internal concurrent callers.
 
 ## When a commit takes effect in the userspace dataplane (#18560)
 
-A commit applies to the packets that arrive after its view is installed in the
-dataplane. Packets already queued in a binding's receive ring when a worker
-adopts the new view may be processed under the PREVIOUS configuration: they
-are served by the flow-cache decision their own view cached, or dropped. That
-includes a just-committed deny: a queued packet of an established flow can
-still be forwarded by its cached accept. The window is the ring's drain time,
-bounded by 200 ms (`MATCHED_VIEW_GRACE_NS`). See the matched-view grace in
+A commit applies to packets that arrive after its view is installed in the
+dataplane. Ordinary forwarding packets already queued in a binding's receive
+ring when a worker adopts the new view may be handled by the matched-view
+flow-cache path: they use the cached decision from their own view or are
+dropped. That includes a just-committed deny: an established flow's queued
+packet can still be forwarded by its cached accept.
+
+This does not cover every pre-cache arm. An admitted IPsec passthrough can
+reinject before the flow cache; a pending reverse PMech packet can be deferred
+before it and later replayed under current validation. These paths are outside
+the flow-cache hit/miss witnesses. The retained-view window for the ordinary
+path is the ring's drain time, bounded by 200 ms
+(`MATCHED_VIEW_GRACE_NS`). See the matched-view grace in
 `userspace-dp/src/afxdp/README.md`.
 
 ## Authority-bound commit: holder turnover (#6808)

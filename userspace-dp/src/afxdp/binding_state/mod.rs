@@ -181,10 +181,10 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) exception_packets: AtomicU64,
     pub(super) config_gen_mismatches: AtomicU64,
     pub(super) fib_gen_mismatches: AtomicU64,
-    // #18560: matched-view grace witnesses. A held packet served from the
-    // flow cache under its own left view (hit) or dropped because it missed
-    // (miss); and every generation-mismatch DROP split by the stamp's
-    // direction against the worker's validation.
+    // #18560: matched-view grace witnesses. A held hit is a flow-cache hit;
+    // a held miss is a packet dropped by the post-cache no-slow-path guard
+    // (including cache-ineligible packets). Pre-cache reinject/deferral arms
+    // bypass both. AHEAD/BEHIND count actual metadata-mismatch drops.
     pub(super) generation_held_hits: AtomicU64,
     pub(super) generation_held_misses: AtomicU64,
     pub(super) generation_mismatch_ahead: AtomicU64,

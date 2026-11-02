@@ -472,10 +472,9 @@ fn packet_stamped_with_left_view_is_processed_under_it_18560() {
     );
 }
 
-/// A held packet that misses the flow cache is dropped as a generation
-/// mismatch: the held pass never reaches the session slow path, whose
-/// side effects (re-resolution, synced-session purge/promotion) left
-/// established flows without a session on a demoting node.
+/// A held packet that misses the flow cache is dropped by the no-slow-path
+/// guard. Its metadata is valid against its retained view, so this is not a
+/// config/FIB generation mismatch and must not increment those witnesses.
 #[test]
 fn held_pass_serves_only_flow_cache_hits_18560() {
     let mut fx = transit_syn_fixture();
@@ -535,8 +534,16 @@ fn held_pass_serves_only_flow_cache_hits_18560() {
             .live
             .config_gen_mismatches
             .load(Ordering::Relaxed),
-        1,
-        "dropped as the generation mismatch it is"
+        0,
+        "a held-view cache miss is not a config metadata mismatch"
+    );
+    assert_eq!(
+        fx.binding
+            .live
+            .fib_gen_mismatches
+            .load(Ordering::Relaxed),
+        0,
+        "a held-view cache miss is not a FIB metadata mismatch"
     );
     assert_eq!(
         fx.binding
@@ -544,7 +551,23 @@ fn held_pass_serves_only_flow_cache_hits_18560() {
             .generation_held_misses
             .load(Ordering::Relaxed),
         1,
-        "witnessed as a held miss"
+        "the no-slow-path guard records a held miss"
+    );
+    assert_eq!(
+        fx.binding
+            .live
+            .generation_mismatch_ahead
+            .load(Ordering::Relaxed),
+        0,
+        "a held-view miss is not an AHEAD metadata mismatch"
+    );
+    assert_eq!(
+        fx.binding
+            .live
+            .generation_mismatch_behind
+            .load(Ordering::Relaxed),
+        0,
+        "a held-view miss is not a BEHIND metadata mismatch"
     );
     assert_eq!(
         fx.binding.live.generation_held_hits.load(Ordering::Relaxed),
@@ -779,10 +802,9 @@ fn transit_syn_fixture() -> GreFixture {
 }
 
 /// A held pass creates no session: a new flow admitted under a left view's
-/// tables would carry the current stamps and never be re-judged. It is
-/// dropped as a generation mismatch, as before the grace. The positive
-/// control shows the same SYN installs a session under its own (current)
-/// view. RED on revert of the held-pass miss guard.
+/// tables would carry the current stamps and never be re-judged. It is dropped
+/// by the held no-slow-path guard; the positive control shows the same SYN
+/// installs a session under its own (current) view. RED on guard removal.
 #[test]
 fn held_pass_creates_no_session_18560() {
     let mut control = transit_syn_fixture();
@@ -830,8 +852,8 @@ fn held_pass_creates_no_session_18560() {
             .live
             .config_gen_mismatches
             .load(Ordering::Relaxed),
-        1,
-        "dropped as the generation mismatch it is"
+        0,
+        "a held-view cache miss is not a config metadata mismatch"
     );
     assert_eq!(
         fx.binding

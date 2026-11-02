@@ -2404,9 +2404,11 @@ own view's flow-cache entry:
     socket RX lock. For a few us an older-stamped packet can then land
     behind a current one. If the views were already released it is dropped
     as a mismatch, exactly as before this change, and never processed under
-    the wrong view. With traffic on every binding a view lives for the
-    ring's drain time (milliseconds); only a worker with an idle binding
-    keeps it for the full 200 ms.
+    the wrong tables.
+    With traffic on every binding a view lives for the ring's drain time
+    (milliseconds); only a worker with an idle binding keeps it until the
+    200 ms expiry. Every worker tick expires views before any adoption,
+    including a neighbor-only publish.
 
     The RPS path, read in a v6.19-4683-gb7ef56a07672 tree (the 7.0 merge
     window; the lab runs 7.0.0-rc7+):
@@ -2452,20 +2454,26 @@ own view's flow-cache entry:
   - A parked packet of yet another retained view is re-parked.
   - If the view expired, the pass runs under the current view, which drops
     the packet as a mismatch.
-- **Flow-cache hits only, compare-only.** A held packet is served only by a
-  flow-cache entry seeded under its own view.
+- **Flow-cache hit path, compare-only.** For ordinary forwarding traffic
+  that reaches the flow-cache stage, a held packet is served only by an
+  entry seeded under its own view.
   - The held pass's lookups compare without evicting
     (`FlowCache::held_compare_only`). The cache keeps one entry per key, and a
-    lookup with other generations evicts it. So in the one batch per binding
-    that straddles the stamp switch, where the flow's current packet has
-    already re-seeded the entry, the held packet misses and LEAVES the
-    current entry in place.
+    lookup with other generations leaves the current entry in place.
   - A miss, or any hit-stage fall-through (an epoch or lease fence,
     egress/owner departed, stale neighbor MAC, a superseded decision), is
-    dropped as the generation mismatch it is. It never reaches the session
-    slow path: no install, no re-resolution, no synced-session purge,
-    promotion or adoption, no NAT allocation.
-  - Letting held packets into the slow path is what regressed the first
+    dropped as a held-view miss. It is not a metadata-generation mismatch:
+    the packet is valid against the retained view, so this drop does not
+    increment `config_gen_mismatches`, `fib_gen_mismatches`, or the
+    AHEAD/BEHIND mismatch witnesses.
+  - This describes the ordinary flow-cache route, not every pre-cache arm.
+    An admitted IPsec passthrough can reinject before the cache, and a
+    pending reverse PMech packet can be deferred before it; those paths are
+    outside the `generation_held_hits` / `generation_held_misses` witnesses.
+  - Any held packet that reaches the no-slow-path guard without being
+    consumed by the cache is dropped there: no session lookup, install,
+    re-resolution, synced-session purge/promotion/adoption, or NAT allocation.
+    Letting held packets into the slow path is what regressed the first
     version: old tables against the current HA state left established flows
     with no session on a node demoting an RG.
 - **What a held hit writes, and why that is safe.** The hit accounts the
@@ -2501,21 +2509,29 @@ own view's flow-cache entry:
 - **#6592.** No packet is processed under tables newer or older than its own
   stamp: AHEAD stays a drop, and BEHIND runs only under the exact view whose
   pair it carries.
-- **Operator semantic.** A commit applies to the packets that arrive after
-  its view is installed. A packet already queued in a receive ring when the
-  worker adopts the new view is forwarded by the decision its own (previous)
-  view cached, or dropped; it is never re-judged by the new configuration.
-  That includes a just-committed deny: a queued packet of an established flow
-  that the new policy denies can still be forwarded by its cached accept.
-  The window is one ring backlog per binding: the ring's drain time, and at
-  most 200 ms. The same statement is in `pkg/configstore/README.md` ("When a
-  commit takes effect in the userspace dataplane").
+- **Operator semantic (ordinary flow-cache path).** A commit applies to
+  packets arriving after its view is installed. An ordinary forwarding packet
+  already queued in a receive ring when the worker adopts the new view uses
+  its own view's cached decision or is dropped; it is not re-evaluated under
+  the new policy. A just-committed deny therefore does not revoke a queued
+  established flow's cached accept.
+  - The IPsec passthrough reinject and pending reverse PMech deferral arms are
+    pre-cache exceptions, as described above. A PMech replay is later checked
+    under current validation and may be dropped as a mismatch.
+  - The retained-view window for the ordinary path is the ring's drain time,
+    bounded by 200 ms (`MATCHED_VIEW_GRACE_NS`). The same scoped statement is
+    in `pkg/configstore/README.md`.
 - **Witnesses** (per binding, in the status reply):
-  - `generation_held_hits`: a held packet served from its own view's entry.
-  - `generation_held_misses`: a held packet dropped (no entry, a fence, or a
-    fall-through).
-  - `generation_mismatch_ahead` / `generation_mismatch_behind`: every
-    generation-mismatch drop, split by the stamp's direction.
+  - `generation_held_hits`: a held packet consumed by a flow-cache hit under
+    its own view.
+  - `generation_held_misses`: a held packet dropped at the post-cache
+    no-slow-path guard (including no-flow/cache-ineligible packets, misses,
+    and hit-stage fall-throughs); pre-cache IPsec reinject and PMech deferral
+    are outside these witnesses.
+  - `generation_mismatch_ahead` / `generation_mismatch_behind`: metadata
+    generation-mismatch drops classified against the pass's validation pair,
+    split by direction. A valid held-view miss is not a metadata mismatch
+    and does not increment either counter.
 
   So the saving is measurable and so is what remains: AHEAD stays, by design.
 - **Cost** (seat AE: stated, not "nothing").

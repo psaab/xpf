@@ -2566,28 +2566,26 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         FlowCacheOutcome::FallThrough => {}
                     }
                 }
-                // #18560: a held pass serves only flow-cache hits. Anything
-                // that falls to the slow path (session lookup, re-resolution,
-                // synced-session purge/promotion/adoption, new flows) is
-                // dropped as the generation mismatch it is, exactly as before
-                // the grace. Letting held packets reach the slow path on a node
-                // demoting an RG left established flows with no session there
-                // afterwards: loss test-failover 0.0.26111/0.0.26114, +1-3.4k
-                // session misses and strict-syn drops on the demoting node per
-                // move (none without the grace).
+                // #18560: packets reaching this held-pass guard were not
+                // consumed by the cache, so drop them instead of entering the
+                // slow path. A miss or hit-stage fall-through is not a
+                // metadata generation mismatch: the packet is valid against
+                // this retained view, so do not inflate config/FIB mismatch
+                // or AHEAD/BEHIND counters with a synthetic disposition.
                 if pass.held_pass {
                     binding
                         .live
                         .generation_held_misses
                         .fetch_add(1, Ordering::Relaxed);
-                    record_disposition(
+                    telemetry.counters.touched = true;
+                    telemetry.counters.exception_packets += 1;
+                    record_exception(
+                        worker_ctx.recent_exceptions,
                         &worker_ctx.ident,
-                        &binding.live,
-                        DispositionCounters::Hot(telemetry.counters),
-                        PacketDisposition::ConfigGenerationMismatch,
+                        "generation_held_miss",
                         desc.len as u32,
                         Some(meta),
-                        worker_ctx.recent_exceptions,
+                        None,
                         worker_ctx.forwarding,
                     );
                     binding.scratch.scratch_recycle.push(desc.addr);
