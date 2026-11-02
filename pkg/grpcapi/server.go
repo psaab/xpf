@@ -341,8 +341,8 @@ type Server struct {
 	// cluster.Manager.HeartbeatPeerAuthSeen(); a unit test wires it to drive the
 	// heartbeat-armed state without a live heartbeat receiver.
 	heartbeatAuthSeenFn func() bool
-	// fabricAuthNowFn is a test seam for the bounded rollout-grace clock.
-	// Production leaves it nil and fabricAuthNow uses time.Now.
+	// fabricAuthNowFn is a test seam for fabric token verification, replay
+	// window handling, and bounded rollout grace. Production uses time.Now.
 	fabricAuthNowFn func() time.Time
 	// fabricAuthGraceMu guards the configured-key unarmed rollout timer.
 	fabricAuthGraceMu         sync.Mutex
@@ -353,6 +353,9 @@ type Server struct {
 	// tokenless fabric RPC is rejected (a downgrade to cleartext once both
 	// nodes are keyed is an attack), not treated as a key-rollout grace case.
 	fabricPeerAuthSeen atomic.Bool
+	// fabricMutationReplay makes HMAC tokens for fabric mutations single-use
+	// on this receiving Server instance (#16020).
+	fabricMutationReplay fabricMutationReplayCache
 	// fabricSkew holds the #6708 measured peer wall-clock skew: a token that
 	// verifies under an accepted key but at a window outside the accept band
 	// is an AUTHENTICATED statement of how far the peer's clock is out.

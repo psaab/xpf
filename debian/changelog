@@ -1,4 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Fabric gRPC mutating-RPC replay: a valid token for `ClearSessions` or a
+    fabric-safe `SystemAction` is now accepted once per receiving daemon
+    process. A monotone replay-window high-water mark prevents replay after
+    wall-clock rollback. Read-only RPCs remain unchanged; the bounded replay
+    cache fails closed at capacity. Fabric transport remains plaintext; mTLS
+    is still deferred (#16020).
   * Lab stack address collision (#18574): move standalone and legacy-local
     NAT64/SNAT pools off foreign-held VLAN 50 addresses and document the
     same-day RFC 5227 probe results for the replacement addresses.

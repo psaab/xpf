@@ -107,7 +107,8 @@ func TestMeasureFabricAuthSkewOnlyReportsAnAuthenticatedWindow6708(t *testing.T)
 // TestSkewScanDoesNotWidenTheAcceptBand6708 is the security cell.
 //
 // The scan must be diagnosis ONLY. If adding it also admitted the RPC, #6708
-// would have been "fixed" by multiplying the replay horizon of ClearSessions
+// would have been "fixed" by widening the remaining read-only/stream replay
+// horizons and extending #16020's mutation-cache retention for ClearSessions
 // and cross-node failover by 240 — the outcome the PR explicitly refuses.
 func TestSkewScanDoesNotWidenTheAcceptBand6708(t *testing.T) {
 	key := skewTestKey()
@@ -303,13 +304,14 @@ func TestClusterStatusWarnsOnlyWhenSkewed6708(t *testing.T) {
 // #6708's scan proves the token verified under an accepted key at some window.
 // That makes the PSK certainly correct, and the clock only PROBABLY skewed:
 // producing the token requires the key, but PRESENTING it does not. Unary
-// tokens ride the control link and bind method plus deterministic request
-// digest; stream tokens bind only the method because no request body exists
-// when auth is checked. Neither includes a nonce, so a captured unary token can
-// replay the identical request, and a captured stream token can replay any
-// stream arguments inside the accepted window. Replayed from outside the
-// accept band but inside the scan band, either fails verification — correctly —
-// and arrives here indistinguishable from a drifting clock.
+// tokens bind the method plus deterministic request digest. #16020's receiver
+// cache makes ClearSessions and fabric-safe SystemAction tokens single-use,
+// but a captured read-only unary token can still replay the identical request.
+// Stream connection tokens bind only the method; the separate args-bound token
+// rejects changed arguments, while an identical captured stream request can
+// replay inside the accepted window. Replayed from outside the accept band but
+// inside the scan band, either still fails verification — correctly — and
+// arrives here indistinguishable from a drifting clock.
 //
 // This test is the guard on the WORDING, because that is where the defect would
 // be: an unhedged "peer wall clock is Ns behind ours" is a confident wrong
