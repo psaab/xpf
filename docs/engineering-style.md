@@ -1858,6 +1858,52 @@ they repeatedly bite:
     target test in an optional 5th TAB column, refines the verdict with
     `mutation_verdict_for_target`.
 
+    **A timed-out package is VOID, not red (#18778).** test-go and
+    test-race-dp pass an explicit `-timeout $(GOTEST_TIMEOUT)` (default 60m).
+    go test's 10m default is reachable by pkg/daemon (and by -race legs) at high
+    host load, and a timeout aborts the package mid-run exactly as a panic does:
+    every later test never runs.
+
+    `scripts/go-timeout-watch.awk` is the ONE timeout predicate, used by
+    `go-test-json.sh`, the race legs' `go-test-watch.sh` and mutate-lib's
+    `mutation_timed_out`. It recognises three shapes; a printed panic and
+    adjacent `running tests:` line alone are not enough. For alarm timeouts,
+    the alarm goroutine's first frame confirms the package really timed out:
+
+    | shape | required output sequence |
+    |---|---|
+    | alarm, tests running | column-0 `panic: test timed out after`, the indented `running tests:` list, then a blank line, `goroutine N [running]:`, and the first-frame `testing.(*M).startAlarm.func1()` |
+    | alarm, no test running (a hung Example) | the same panic line, then a blank line, `goroutine N [running]:`, and the first-frame `testing.(*M).startAlarm.func1()` |
+    | binary hung outside `m.Run` (a hung TestMain) | cmd/go's SIGQUIT dump begins `SIGQUIT: quit`, `PC=`, then a goroutine header; cmd/go then prints `*** Test killed with quit: ran too long` at `-timeout` + 1m | the kill marker is immediately followed by the package's `FAIL<TAB><pkg>` line |
+
+    If cmd/go cannot produce the SIGQUIT dump, its kill marker plus package
+    FAIL is indistinguishable from test-printed text and is not classified as
+    VOID; the run remains an ordinary failure rather than a false timeout.
+
+    The default text paths pin `-json=false` at the go command line, and the
+    side-file path explicitly requests `-json`, so inherited `GOFLAGS` cannot
+    change the stream format under the watcher. `go test -json` interleaves
+    packages line by line, so the side-file path runs the predicate afterwards
+    over that leg's events, tagged by package, not over the reconstructed
+    stream. On a hit, the script prints a VOID banner on stderr naming every
+    timed-out package and its shape, and exits 3.
+
+    The mutation scorer trusts this wrapper banner before rescanning a merged
+    `make` log: package interleaving can break textual adjacency, but make's
+    rc=2 normalization does not erase the wrapper's exit-3 evidence from the
+    log.
+
+    What a **make** consumer observes:
+
+    - make itself exits **2** on any recipe failure.
+    - The recipe ends **`Error 3`**. `keep()` makes VOID sticky, so a later
+      failing leg cannot turn it into `Error 1`.
+    - The **stderr banner** names the timed-out package.
+
+    Failures reported for OTHER packages in any leg are still real. Treat
+    the named package as unmeasured, and rerun with a longer `GOTEST_TIMEOUT`
+    or on a quieter host. Do not attribute over it.
+
     **A name is not a reason (#9564).** A guard with a LIVENESS fatal ("the
     parser found no anchors") and a violation branch scores KILLED by name
     whichever branch fired, so a mutant that merely broke the fixture reads as
