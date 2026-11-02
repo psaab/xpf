@@ -786,16 +786,21 @@ type Manager struct {
 	liveTrack      helperLivenessTracker
 	wedgeKilledGen atomic.Uint64
 	// #18697: set when the helper exits unexpectedly (a crash or a wedge
-	// kill), cleared when the next generation starts; that generation then
-	// inherits a not-ready verdict until it arms and looks healthy.
+	// kill), and retained through replacement spawn until ForwardingArmed.
+	// The tracker then carries any remaining not-ready verdict through health
+	// hysteresis.
 	helperDownUnexpected atomic.Bool
 	// #18791: the unexpected-exit grace (helper_exit_grace_18791.go): the
-	// deadline of the current exit's grace in UnixNano (0 = none: debt at
-	// once), why it was waived, and when the last unexpected exit was
-	// observed (the crash-loop window). Lock-free.
-	exitGraceDeadlineNs  atomic.Int64
+	// monotonic deadline of the current exit's grace (nil = none: debt at
+	// once), why it was waived, and the monotonic time of the last unexpected
+	// exit (the crash-loop window). Lock-free.
+	exitGraceDeadlineAt  atomic.Pointer[time.Time]
 	exitGraceWaiveReason atomic.Pointer[string]
-	lastUnexpectedExitNs atomic.Int64
+	lastUnexpectedExit   atomic.Pointer[time.Time]
+	// #18794: distinguishes an unarmed replacement (VIP-first demotion) from a
+	// control socket that is still silent. Per-generation so late replies from
+	// a departed child cannot report the replacement's control socket healthy.
+	helperControlGeneration atomic.Pointer[helperControlGeneration]
 	// exitGraceAfterFunc arms the grace-expiry wake; nil is time.AfterFunc
 	// (cells inject a recorder). testAfterExitFlagRead runs between the exit
 	// flag's read and the tracker reset at a generation start (cells only).

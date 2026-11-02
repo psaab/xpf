@@ -504,21 +504,29 @@ func (m *Manager) HelperElectionReason() string {
 	}
 	if m.helperDownUnexpected.Load() && !m.exitGraceOpen(time.Now()) {
 		if why := m.exitGraceWaiveReason.Load(); why != nil {
-			return "helper exited unexpectedly and has not been respawned yet (no restart grace: " + *why + ")"
+			return "helper exited unexpectedly and its replacement has not armed yet (no restart grace: " + *why + ")"
 		}
-		return "helper exited unexpectedly and was not respawned and armed within the " + helperExitGrace.String() + " restart grace"
+		return "helper exited unexpectedly and its replacement did not arm within the " + helperExitGrace.String() + " restart grace"
 	}
 	return m.liveTrack.currentReason(time.Now())
 }
 
 // HelperControlUnresponsive reports that the helper's control socket is not
-// answering: it exited unexpectedly and is not back, or control requests have
-// gone unanswered for the demote span. Never takes m.mu.
+// answering: the unexpected-exit generation is absent or has not answered yet,
+// or control requests have gone unanswered for the demote span. An unarmed but
+// responsive replacement still takes the VIP-first path without being mistaken
+// for a silent control socket. Never takes m.mu.
 func (m *Manager) HelperControlUnresponsive() bool {
 	if m == nil {
 		return false
 	}
-	return m.helperDownUnexpected.Load() || m.liveTrack.controlSilent(time.Now())
+	if m.helperDownUnexpected.Load() {
+		g := m.helperControlGeneration.Load()
+		if g == nil || g.departed.Load() || !g.answered.Load() {
+			return true
+		}
+	}
+	return m.liveTrack.controlSilent(time.Now())
 }
 
 // controlSilent is the silence half of the verdict on its own.

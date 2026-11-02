@@ -89,3 +89,30 @@ func TestGraceKeepsTheElectionWeight18791(t *testing.T) {
 		t.Fatalf("weight after the grace ended without an arm = %d, want 1 (arm debt)", got)
 	}
 }
+
+// TestSpawnedUnarmedResponsiveHelperUsesVIPFirstButNormalControlPathFold18794
+// pins the spawned-but-unarmed state at helperDownForDemotion, which is shared
+// by daemon_ha.go's event demotion (line 857) and reconcile (line 1653) paths.
+// The source must choose VIP-first even though election debt is still inside
+// grace, while a control answer remains responsive for prep and the real
+// rg_active result (not the silent-socket bounded/ack path).
+func TestSpawnedUnarmedResponsiveHelperUsesVIPFirstButNormalControlPathFold18794(t *testing.T) {
+	d, _ := newDemotion18701(t, false, 0)
+	if !d.isNoRethVRRP() {
+		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+	}
+	base := d.dataplane().(*readinessDP18701)
+	base.controlAnswers.Store(true)
+	dp := &exitedDP18791{readinessDP18701: base}
+	dp.exited.Store(true) // spawned replacement, not yet armed
+	d.setDataplane(dp)
+	if d.helperElectionNotReady() {
+		t.Fatal("setup: election debt must stay suppressed inside the restart grace")
+	}
+	if !d.helperDownForDemotion() {
+		t.Fatal("spawned-but-unarmed replacement did not select VIP-first demotion")
+	}
+	if d.helperControlSilentForPrep() {
+		t.Fatal("a responsive spawned replacement was misclassified as control-silent")
+	}
+}

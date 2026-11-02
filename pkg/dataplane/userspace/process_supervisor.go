@@ -368,6 +368,9 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	// grace is decided and published BEFORE the flag, so a reader that sees
 	// the flag also sees this exit's deadline.
 	m.noteUnexpectedExitGraceLocked(now)
+	if control := m.helperControlGeneration.Load(); control != nil && control.gen == g.gen {
+		control.departed.Store(true)
+	}
 	m.helperDownUnexpected.Store(true)
 	// The Prometheus counter is per unexpected exit, not per completed
 	// episode; otherwise a persistent loop inside the quiet window is silent.

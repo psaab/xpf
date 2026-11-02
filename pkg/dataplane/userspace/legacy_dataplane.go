@@ -216,8 +216,9 @@ func (a *LegacyDataPlaneAdapter) HelperControlUnresponsive() bool {
 	return m.HelperControlUnresponsive()
 }
 
-// HelperExitedUnexpectedly forwards the #18791 "no helper running after an
-// unexpected exit" check, which the daemon's VIP-first demotion keys on.
+// HelperExitedUnexpectedly forwards the #18791 "replacement not yet armed
+// after an unexpected exit" signal, including after spawn. The daemon's
+// VIP-first demotion keys on this separate from control-socket responsiveness.
 func (a *LegacyDataPlaneAdapter) HelperExitedUnexpectedly() bool {
 	m, err := a.managerOrErr()
 	if err != nil {

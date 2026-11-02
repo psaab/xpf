@@ -1,8 +1,35 @@
 package userspace
 
 import (
+	"sync/atomic"
 	"time"
 )
+
+type helperControlGeneration struct {
+	gen      uint64
+	answered atomic.Bool
+	departed atomic.Bool
+}
+
+func (g *helperControlGeneration) noteAnswered() {
+	if g != nil && !g.departed.Load() {
+		g.answered.Store(true)
+	}
+}
+
+func (m *Manager) noteHelperControlAnswered(gen uint64) {
+	if g := m.helperControlGeneration.Load(); g != nil && g.gen == gen {
+		g.noteAnswered()
+	}
+}
+
+func (m *Manager) noteHelperStatus(gen uint64, now time.Time, heartbeats []time.Time, forwardingArmed bool) {
+	m.liveTrack.noteStatus(gen, now, heartbeats, forwardingArmed)
+	m.noteHelperControlAnswered(gen)
+	if forwardingArmed {
+		m.helperDownUnexpected.Store(false)
+	}
+}
 
 // #18791: a bounded grace before the #18697 unexpected-exit election debt.
 //
@@ -59,22 +86,23 @@ const helperExitGraceWakeSlack = 50 * time.Millisecond
 // that sees the flag also sees this exit's deadline. Called with m.mu held, by
 // handleUnexpectedHelperExitLocked.
 func (m *Manager) noteUnexpectedExitGraceLocked(now time.Time) {
-	prev := m.lastUnexpectedExitNs.Swap(now.UnixNano())
+	prev := m.lastUnexpectedExit.Swap(&now)
 	waive, why := false, ""
 	switch {
 	case m.helperDownUnexpected.Load() || m.liveTrack.exitEpisodeOpen():
 		waive, why = true, "the previous exit's replacement died before arming"
-	case prev != 0 && now.Sub(time.Unix(0, prev)) < helperExitCrashLoopWindow:
+	case prev != nil && now.Sub(*prev) < helperExitCrashLoopWindow:
 		waive, why = true, "another unexpected exit within "+helperExitCrashLoopWindow.String()
 	case m.liveTrack.suspectedNow():
 		waive, why = true, "the helper was already judged wedged"
 	}
 	if waive {
-		m.exitGraceDeadlineNs.Store(0)
+		m.exitGraceDeadlineAt.Store(nil)
 		m.exitGraceWaiveReason.Store(&why)
 		return
 	}
-	m.exitGraceDeadlineNs.Store(now.Add(helperExitGrace).UnixNano())
+	deadline := now.Add(helperExitGrace)
+	m.exitGraceDeadlineAt.Store(&deadline)
 	m.exitGraceWaiveReason.Store(nil)
 	// Wake the daemon's transit gate when the grace ends, so a replacement
 	// that has not armed by then raises the debt at the deadline and not at
@@ -91,45 +119,41 @@ func (m *Manager) noteUnexpectedExitGraceLocked(now time.Time) {
 }
 
 // handOffExitVerdictLocked starts generation gen's liveness tracking and
-// carries an unexpected exit's verdict into it, in the order load, reset, then
-// clear (seat AE on #18717). The old form passed helperDownUnexpected.Swap
-// (false) as an ARGUMENT, which cleared the flag before reset took the tracker
-// lock. A lock-free reader in between saw the flag false AND the dead
-// generation's healthy verdict, so HelperElectionNotReady read false for one
-// sample. With the #18717 restart about 25 ms after the exit, that sample
-// lands inside the daemon's reaction to the exit. In this order every reader
-// sees the raised flag or the inherited tracker. #18791: the inherited verdict
-// runs under the exit's grace deadline. Called with m.mu held.
+// carries an unexpected exit's verdict into it. The helper-down flag is
+// deliberately retained until a status reports ForwardingArmed: a spawned but
+// not-yet-serving generation still needs VIP-first demotion (#18794). This
+// preserves the load, reset, then clear ordering (seat AE on #18717); only the
+// later arm observation clears the flag, after the tracker has inherited the
+// verdict. Called with m.mu held.
 func (m *Manager) handOffExitVerdictLocked(gen uint64, now time.Time) {
 	inherit := m.helperDownUnexpected.Load()
 	if hook := m.testAfterExitFlagRead; hook != nil {
 		hook()
 	}
 	m.liveTrack.resetWithGrace(gen, now, inherit, m.exitGraceDeadline())
-	m.helperDownUnexpected.Store(false)
+	m.helperControlGeneration.Store(&helperControlGeneration{gen: gen})
 }
 
 // exitGraceOpen reports whether the current unexpected-exit episode is still
 // inside its grace at now. Lock-free.
 func (m *Manager) exitGraceOpen(now time.Time) bool {
-	d := m.exitGraceDeadlineNs.Load()
-	return d != 0 && now.UnixNano() < d
+	d := m.exitGraceDeadlineAt.Load()
+	return d != nil && now.Before(*d)
 }
 
 // exitGraceDeadline is the current episode's grace deadline, or zero for none.
 func (m *Manager) exitGraceDeadline() time.Time {
-	if d := m.exitGraceDeadlineNs.Load(); d != 0 {
-		return time.Unix(0, d)
+	if d := m.exitGraceDeadlineAt.Load(); d != nil {
+		return *d
 	}
 	return time.Time{}
 }
 
-// HelperExitedUnexpectedly reports that the helper exited unexpectedly and its
-// replacement has not started yet, so no helper is running to answer control
-// requests. It holds inside the grace too, unlike HelperElectionNotReady: the
-// daemon's VIP-first demotion keys on it, so a peer-requested transfer during
-// the grace releases the VIPs first instead of blocking on the restarting
-// helper (#18791). Never takes m.mu.
+// HelperExitedUnexpectedly reports that an unexpected-exit replacement has not
+// yet armed. It stays true after spawn until ForwardingArmed is reported, so
+// the daemon's VIP-first demotion also covers the spawned-but-unarmed window.
+// It does not report whether that process's control socket currently answers;
+// HelperControlUnresponsive provides that separate signal. Never takes m.mu.
 func (m *Manager) HelperExitedUnexpectedly() bool {
 	if m == nil {
 		return false
@@ -154,22 +178,22 @@ func (t *helperLivenessTracker) suspectedNow() bool {
 }
 
 // evaluateExitGraceLocked advances a generation's unexpected-exit grace: an
-// arm inside it ends the episode with no debt, and its expiry without an arm
-// raises the debt (from then on the #18697 rule, "clear once armed and
-// healthy", applies). Caller holds t.mu.
+// arm inside it ends the episode with no debt, and expiry without an arm raises
+// debt (from then on the #18697 rule, "clear once armed and healthy", applies).
+// If the first arm is observed only after the deadline, it is late and cannot
+// erase the episode. Caller holds t.mu.
 func (t *helperLivenessTracker) evaluateExitGraceLocked(now time.Time) {
 	if !t.inherited || t.suspected || t.graceUntil.IsZero() {
 		return
 	}
-	if t.armedSeen {
-		t.pendingLogs = append(t.pendingLogs, trackerLog{
-			msg:  "userspace: helper recovered locally within the restart grace after an unexpected exit; no failover (#18791)",
-			args: []any{"generation", t.gen, "grace_left", t.graceUntil.Sub(now).Round(10 * time.Millisecond).String()}})
-		t.inherited = false
-		t.graceUntil = time.Time{}
-		return
-	}
 	if now.Before(t.graceUntil) {
+		if t.armedSeen {
+			t.pendingLogs = append(t.pendingLogs, trackerLog{
+				msg:  "userspace: helper recovered locally within the restart grace after an unexpected exit; no failover (#18791)",
+				args: []any{"generation", t.gen, "grace_left", t.graceUntil.Sub(now).Round(10 * time.Millisecond).String()}})
+			t.inherited = false
+			t.graceUntil = time.Time{}
+		}
 		return
 	}
 	t.suspected = true

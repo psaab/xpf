@@ -946,14 +946,22 @@ would blackhole every flow handed to it.
   - **Cost:** a helper that is truly dead or slow to arm keeps its traffic
     black-holed on this node for up to 2.5 s longer than before, and only
     then does the RG move begin.
-  - **Hand-off:** at a generation start the exit flag is read, the tracker
-    reset inherits the verdict, and only then is the flag cleared (seat AE on
-    #18717). The old form, `Swap(false)` passed as an argument, cleared the
-    flag before the reset took the tracker lock, and a reader in between saw
-    ready for one sample.
-  - **During the grace the daemon's VIP-first demotion still applies:** it
-    keys on `HelperExitedUnexpectedly` (no helper running) as well as on the
-    verdict.
+  - **Hand-off:** the exit flag is read and inherited by the new generation's
+    tracker. It remains set through spawn and is cleared only after the
+    tracker processes a status reporting `ForwardingArmed`, closing both the
+    ready gap and spawned-but-unarmed demotion window.
+  - **Late arm:** a first arm observed after the deadline does not erase the
+    episode. It raises debt, which then clears only through the existing
+    armed-and-healthy hysteresis.
+  - **Clock:** grace and crash-loop deadlines retain Go's monotonic `time.Time`
+    readings, so a wall-clock step cannot extend or shorten either interval.
+  - **During the grace and until arm, VIP-first demotion applies:** it keys on
+    `HelperExitedUnexpectedly` separately from actual control-socket
+    responsiveness, so an answering but unarmed replacement is not mistaken
+    for a silent socket.
+  - A replacement that never answers or arms and is stopped by readiness
+    timeout retains the original exit flag, so debt still rises at the grace
+    deadline.
   - **Cells:** `helper_exit_grace_18791_test.go` (userspace and daemon) and
     `pkg/cluster/exit_grace_election_18791_test.go`.
   When restart backoff reaches its cap, a dedicated full-cost monitor debt
