@@ -2,16 +2,16 @@ package daemon
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
-	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fabricsegment"
 )
 
-// TestClusterFabricRemovalStopsWatcher18719 exercises the daemon's config
-// reconcile path, not SyncFabricState: removing the last configured fabric
-// must retire the process-wide watcher even when no peer resolution follows.
+// TestClusterFabricRemovalStopsWatcher18719 exercises the real daemon apply
+// path: removing the last configured fabric must retire the process-wide
+// watcher before any transport-reconcile early return or peer resolution.
 func TestClusterFabricRemovalStopsWatcher18719(t *testing.T) {
 	mon := fabricsegment.NewMonitor(nil)
 	prev := fabricsegment.SwapDefault(mon)
@@ -29,22 +29,11 @@ func TestClusterFabricRemovalStopsWatcher18719(t *testing.T) {
 		t.Fatalf("fixture watcher links = %v, want one armed fabric", got)
 	}
 
-	ctx := context.Background()
-	d := &Daemon{
-		cluster:            cluster.NewManager(0, 1),
-		daemonCtx:          ctx,
-		startClusterCommsFn: func(context.Context) {},
+	d := &Daemon{store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
+	d.applyBodyForTest = func(*config.Config) {}
+	if err := d.applyConfigLocked(context.Background(), &config.Config{}); err != nil {
+		t.Fatalf("applyConfigLocked after last-fabric removal: %v", err)
 	}
-	_, gen, _ := d.beginClusterCommsEpoch(ctx)
-	if !d.setActiveTransportIfCurrent(gen, clusterTransportKey{
-		ControlInterface: "em0", PeerAddress: "10.99.0.2", FabricInterface: "fab0",
-	}) {
-		t.Fatal("fixture failed to publish the active cluster transport")
-	}
-
-	// This is the daemon's normal apply-tail transport reconciliation for the
-	// newly committed config after the last fabric is removed.
-	d.reconcileClusterTransportBinding(&config.Config{}, false)
 	if got := mon.Watched(); len(got) != 0 {
 		t.Fatalf("last-fabric removal left watcher armed: %v", got)
 	}

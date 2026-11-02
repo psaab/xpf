@@ -395,7 +395,16 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	if err != nil {
 		return nil, err
 	}
-	return d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
+	applied, applyErr := d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
+	// The event engine promotes configuration autonomously; unlike an
+	// operator commit it has no caller to present compiler warnings. Keep
+	// any scoped reminders visible to the next operator commit. Do this
+	// before releasing applySem so another commit cannot pass the stale
+	// baseline in the gap.
+	if compiled != nil && authority.IsInternal() && authority.JournalPrincipal() == "system:event-engine" {
+		d.store.InvalidateScopedAdvisoryBaseline()
+	}
+	return applied, applyErr
 }
 
 // applyAndSyncCommittedWithPeerSnapshotAuthorization runs the reconcile
