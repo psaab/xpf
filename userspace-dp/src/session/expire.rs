@@ -919,14 +919,13 @@ impl SessionTable {
     /// within one window of last activity (bounded, terminating).
     ///
     /// #18722: two bounds.
-    /// - A completed (established, non-pending) row that THIS node
-    ///   authored or promoted (`!origin.is_peer_synced()`) is the serving
-    ///   pair itself: node-level evidence for its tuple is evidence about
-    ///   ITSELF, so its retention is `companion_keeps_alive`'s alone, keyed
-    ///   on the companion's real timestamp. A peer-synced or worker-local
-    ///   REPLICA is not: on a worker that serves neither direction both of
-    ///   its halves are never refreshed while the flow is live elsewhere,
-    ///   so it still takes the node-level arm (#18742 review, seat L).
+    /// - A completed row authored/promoted here normally ages on its own
+    ///   packet timestamp. After RSS moves the flow to a sibling, however,
+    ///   that local row must survive a GC pass when the sibling's shared
+    ///   forward-row counters advance under this row's exact session identity.
+    ///   A different or unknown shared identity cannot protect it. A
+    ///   peer-synced replica still uses the node-level arm for all matching
+    ///   shared evidence, because it may serve neither direction locally.
     /// - The node-level arm needs RECENT service, not the cumulative proof
     ///   alone: it keeps the row only when a PRESENT evidence contributor
     ///   (`local_served`, `shared_served`) changed from the row's baseline
@@ -952,9 +951,30 @@ impl SessionTable {
         if key.protocol != PROTO_TCP || entry.closing {
             return false;
         }
-        // #18722: a completed row this node serves is not an opening
-        // half; a completed REPLICA still needs node-level proof. See above.
-        if entry.established && !entry.handshake_pending && !entry.origin.is_peer_synced() {
+        // #18722: completed rows this node authored/promoted normally age on
+        // their own packet timestamps. #18742 Cycle 2 admits only an advancing
+        // shared count from this flow's exact canonical forward identity; this
+        // protects a locally-authored row after RSS moves service to a sibling
+        // without letting unrelated shared evidence retain local sessions.
+        let completed_local_row =
+            entry.established && !entry.handshake_pending && !entry.origin.is_peer_synced();
+        let matching_local_shared_advance = if completed_local_row {
+            let expected_session_id = if entry.metadata.is_reverse {
+                let forward = reverse_session_key(key, entry_nat);
+                self.session_id_for(&forward)
+            } else {
+                entry.session_id
+            };
+            expected_session_id != 0
+                && node_evidence.shared_established
+                && node_evidence.shared_incarnation == Some((expected_session_id, 0))
+                && node_evidence.shared_served.is_some_and(|shared| {
+                    shared > entry.node_served_seen_shared
+                })
+        } else {
+            false
+        };
+        if completed_local_row && !matching_local_shared_advance {
             return false;
         }
         // #16223 (node-level first): a promoted serving companion for

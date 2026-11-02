@@ -1006,15 +1006,14 @@ fn pair_exception_non_tcp_never_takes_the_arm_18722() {
     );
 }
 
-/// PAIR-MODEL EXCEPTION 3: a COMPLETED row this node serves never takes the
-/// node-level arm, even when the node evidence for its tuple is LIVE and
-/// advancing (here: the shared counts rise every second, as a mirror of some
-/// other service would). Its retention is `companion_keeps_alive`'s alone,
-/// so with no packets on either of its own halves it reaps one window after
-/// its last packet. RED with the gate removed (the advancing evidence keeps
-/// it for ever).
+/// PAIR-MODEL EXCEPTION 3: a completed local row rejects shared evidence
+/// without its matching canonical session identity. Even if shared packet
+/// counts are live and advancing, unknown identity cannot protect this
+/// session. Its retention remains `companion_keeps_alive`'s alone, so with
+/// no packets on either of its own halves it reaps one window after its last
+/// packet.
 #[test]
-fn pair_exception_completed_local_row_never_takes_the_arm_18722() {
+fn pair_exception_completed_local_row_rejects_unrelated_shared_identity_18722() {
     let t0 = 1_000 * SEC;
     let mut table = SessionTable::new();
     let forward = key_v4();
@@ -1033,7 +1032,12 @@ fn pair_exception_completed_local_row_never_takes_the_arm_18722() {
         .expect("forward")
         .expires_after_ns;
     let served = Cell::new(80u64);
-    let node_served = |_: &SessionKey| shared_established(served.get());
+    let other_session_id = table.session_id_for(&forward).wrapping_add(1);
+    let node_served = |_: &SessionKey| {
+        let mut evidence = shared_established(served.get());
+        evidence.shared_incarnation = Some((other_session_id, 0));
+        evidence
+    };
     let forwards = |_: i32| true;
     let epoch = |_: i32| 0u32;
     let ha = ha_with(&node_served, &forwards, &epoch);
@@ -1048,7 +1052,7 @@ fn pair_exception_completed_local_row_never_takes_the_arm_18722() {
     assert_eq!(
         table.last_pop_stats().kept_alive_by_companion,
         0,
-        "#18722: advancing node evidence must not keep a completed row this node serves"
+        "#18722: unidentified advancing evidence must not keep a completed local row"
     );
     assert!(
         table.entry_by_key(&forward).is_none() && table.entry_by_key(&reverse).is_none(),
