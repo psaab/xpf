@@ -687,6 +687,47 @@ func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
 		for _, mgmt := range fz.FindChildren("management") {
 			out = append(out, functionalZoneManagementBody15668(mgmt))
 		}
+		// #18788: the braced functional-zone header can itself carry the
+		// packed management tail as its Keys (`functional-zone { management
+		// host-inbound-traffic ...; }` parses to one leaf node). Rebuild it
+		// through the same declared HIB path as the two-level form below.
+		if len(fz.Children) == 1 && len(fz.Children[0].Keys) > 1 &&
+			fz.Children[0].Keys[0] == "management" && fz.Children[0].Keys[1] == "host-inbound-traffic" &&
+			hostInboundSchema != nil {
+			packed := fz.Children[0]
+			hostInbound := *packed
+			hostInbound.Keys = packed.Keys[1:]
+			hostInbound.setKeysQuoted(maskSlice8921(packed.KeysQuoted, 1, len(packed.Keys)))
+			hostInbound.setKeysBracketed(
+				maskSlice8921(packed.KeysBracketed, 1, len(packed.Keys)), packed.BracketedClosed)
+			if children := packedBodyChildren(&hostInbound, hostInboundSchema); len(children) > 0 {
+				mgmt := *packed
+				mgmt.Keys = packed.Keys[:1]
+				mgmt.setKeysQuoted(maskSlice8921(packed.KeysQuoted, 0, 1))
+				mgmt.setKeysBracketed(
+					maskSlice8921(packed.KeysBracketed, 0, 1), packed.BracketedClosed)
+				mgmt.Children = []*Node{
+					functionalZoneHostInboundBody15668(&hostInbound, children),
+				}
+				mgmt.IsLeaf = false
+				out = append(out, &mgmt)
+				continue
+			}
+			// #18788: unexpanded declared HIB tail - surface it (see the
+			// two-level arm below) instead of swallowing the tokens.
+			hostInbound.Keys = packed.Keys[1:]
+			mgmt := *packed
+			mgmt.Keys = packed.Keys[:1]
+			mgmt.setKeysQuoted(maskSlice8921(packed.KeysQuoted, 0, 1))
+			mgmt.setKeysBracketed(
+				maskSlice8921(packed.KeysBracketed, 0, 1), packed.BracketedClosed)
+			mgmt.Children = []*Node{
+				functionalZoneHostInboundBody15668(&hostInbound, nil),
+			}
+			mgmt.IsLeaf = false
+			out = append(out, &mgmt)
+			continue
+		}
 		if len(fz.Keys) <= 1 || fz.Keys[1] != "management" {
 			continue
 		}
@@ -713,9 +754,26 @@ func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
 				out = append(out, &mgmt)
 				continue
 			}
+			// #18788: expansion produced nothing for a declared HIB tail
+			// (e.g. a misspelled child keyword). Do NOT fall through to the
+			// compact-header reader, which swallows the tokens silently;
+			// surface the tail as the management body's HIB child (keeping
+			// its packed Keys) so parseHostInboundNode records the unknown
+			// keyword and the strict gate rejects it like the ordinary path.
+			hostInbound.Keys = fz.Keys[2:]
+			mgmt := *fz
+			mgmt.Keys = fz.Keys[1:2]
+			mgmt.setKeysQuoted(maskSlice8921(fz.KeysQuoted, 1, 2))
+			mgmt.setKeysBracketed(
+				maskSlice8921(fz.KeysBracketed, 1, 2), fz.BracketedClosed)
+			mgmt.Children = []*Node{
+				functionalZoneHostInboundBody15668(&hostInbound, nil),
+			}
+			mgmt.IsLeaf = false
+			out = append(out, &mgmt)
+			continue
 		}
-		// Keep the existing compact-header reader for non-HIB or malformed
-		// tails; the schema/strict gates own those shapes.
+		// Keep the existing compact-header reader for non-HIB tails.
 		out = append(out, functionalZoneManagementBody15668(fz))
 	}
 	return out
@@ -726,7 +784,42 @@ func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
 // reaches the same form through the compact normalizer's scope entry, but this
 // separate functional-zone AST path must supply the HIB child body itself.
 func functionalZoneManagementBody15668(mgmt *Node) *Node {
-	if mgmt == nil || len(mgmt.Children) == 0 {
+	if mgmt == nil {
+		return mgmt
+	}
+	// #18788: a packed management statement (`management host-inbound-traffic
+	// ...;` inside a braced functional-zone) arrives as ONE leaf node whose
+	// Children are empty but whose Keys carry the HIB tail. Expand it here;
+	// an unexpandable tail keeps its packed Keys so the unknown-child gate
+	// sees it instead of the tokens vanishing.
+	if len(mgmt.Children) == 0 && len(mgmt.Keys) > 1 && mgmt.Keys[0] == "management" &&
+		mgmt.Keys[1] == "host-inbound-traffic" {
+		schema := functionalZoneManagementSchema15668()
+		if schema == nil {
+			return mgmt
+		}
+		hibSchema := schema.children["host-inbound-traffic"]
+		if hibSchema == nil {
+			return mgmt
+		}
+		hostInbound := *mgmt
+		hostInbound.Keys = mgmt.Keys[1:]
+		hostInbound.setKeysQuoted(maskSlice8921(mgmt.KeysQuoted, 1, len(mgmt.Keys)))
+		hostInbound.setKeysBracketed(
+			maskSlice8921(mgmt.KeysBracketed, 1, len(mgmt.Keys)), mgmt.BracketedClosed)
+		children := packedBodyChildren(&hostInbound, hibSchema)
+		out := *mgmt
+		out.Keys = mgmt.Keys[:1]
+		out.setKeysQuoted(maskSlice8921(mgmt.KeysQuoted, 0, 1))
+		out.setKeysBracketed(
+			maskSlice8921(mgmt.KeysBracketed, 0, 1), mgmt.BracketedClosed)
+		out.Children = []*Node{
+			functionalZoneHostInboundBody15668(&hostInbound, children),
+		}
+		out.IsLeaf = false
+		return &out
+	}
+	if len(mgmt.Children) == 0 {
 		return mgmt
 	}
 	managementSchema := functionalZoneManagementSchema15668()
@@ -773,7 +866,10 @@ func functionalZoneManagementBody15668(mgmt *Node) *Node {
 // Keep the per-key quote/bracket provenance aligned with the remaining key.
 func functionalZoneHostInboundBody15668(node *Node, children []*Node) *Node {
 	copy := *node
-	if len(node.Keys) > 1 {
+	// Only truncate the packed Keys when expansion consumed them into
+	// children; an unexpanded tail must keep Keys[1:] so
+	// parseHostInboundNode records the unknown keyword (#18788).
+	if len(children) > 0 && len(node.Keys) > 1 {
 		copy.Keys = node.Keys[:1]
 		copy.setKeysQuoted(maskSlice8921(node.KeysQuoted, 0, 1))
 		copy.setKeysBracketed(maskSlice8921(node.KeysBracketed, 0, 1), node.BracketedClosed)

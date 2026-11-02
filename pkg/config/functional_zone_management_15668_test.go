@@ -253,6 +253,26 @@ security { zones { functional-zone management { interfaces { fxp0.0; }
 } }`,
 			wantSvc: []string{"ssh"}, wantProto: []string{"ospf"},
 		},
+		{
+			name: "braced functional-zone packed multi-value",
+			text: `security { zones { functional-zone { management host-inbound-traffic system-services ssh telnet; } } }`,
+			wantSvc: []string{"ssh", "telnet"},
+		},
+		{
+			name: "one-level multi-value",
+			text: `security { zones { functional-zone management { host-inbound-traffic system-services ssh telnet; } } }`,
+			wantSvc: []string{"ssh", "telnet"},
+		},
+		{
+			name: "two-level multi-value",
+			text: `security { zones { functional-zone management host-inbound-traffic system-services ssh telnet; } }`,
+			wantSvc: []string{"ssh", "telnet"},
+		},
+		{
+			name: "braced functional-zone packed single",
+			text: `security { zones { functional-zone { management host-inbound-traffic system-services ssh; } } }`,
+			wantSvc: []string{"ssh"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -269,6 +289,21 @@ security { zones { functional-zone management { interfaces { fxp0.0; }
 			}
 			if !reflect.DeepEqual(z.HostInboundTraffic.Protocols, tc.wantProto) {
 				t.Errorf("Protocols = %v, want %v", z.HostInboundTraffic.Protocols, tc.wantProto)
+			}
+		})
+	}
+}
+
+func TestFunctionalZoneManagementElidedHostInboundUnknownRejected18788(t *testing.T) {
+	for _, tc := range []struct{ name, text string }{
+		{"two-level typo", `security { zones { functional-zone management host-inbound-traffic system-servics ssh; } }`},
+		{"braced functional-zone typo", `security { zones { functional-zone { management host-inbound-traffic system-servics ssh; } } }`},
+		{"one-level typo", `security { zones { functional-zone management { host-inbound-traffic system-servics ssh; } } }`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := parseHierText(t, tc.text)
+			if _, err := CompileConfig(tree); err == nil {
+				t.Fatalf("strict CompileConfig accepted unknown HIB child in %q", tc.text)
 			}
 		})
 	}
