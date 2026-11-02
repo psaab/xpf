@@ -252,6 +252,15 @@ func TestMgmtRouteRetryWiring11450(t *testing.T) {
 			if !ok || lhs.Sel.Name != "Networkd" {
 				return true
 			}
+			// The assignment must target result.Phase.Networkd exactly; an
+			// unrelated *.Networkd field must not satisfy this cell (#17474).
+			phase, ok := lhs.X.(*ast.SelectorExpr)
+			if !ok || phase.Sel.Name != "Phase" {
+				return true
+			}
+			if ident, ok := phase.X.(*ast.Ident); !ok || ident.Name != "result" {
+				return true
+			}
 			ast.Inspect(assign.Rhs[0], func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
