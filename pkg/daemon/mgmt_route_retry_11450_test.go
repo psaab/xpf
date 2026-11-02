@@ -267,8 +267,15 @@ func TestMgmtRouteRetryWiring11450(t *testing.T) {
 					return true
 				}
 				selector, ok := call.Fun.(*ast.SelectorExpr)
-				if ok && selector.Sel.Name == "Errorf" {
-					postRebindRouteErrorReturned = true
+				if !ok || selector.Sel.Name != "Errorf" {
+					return true
+				}
+				// The Errorf must wrap the reconcile err itself, not an
+				// unrelated static error (#17474).
+				for _, arg := range call.Args {
+					if ident, ok := arg.(*ast.Ident); ok && ident.Name == "err" {
+						postRebindRouteErrorReturned = true
+					}
 				}
 				return true
 			})
