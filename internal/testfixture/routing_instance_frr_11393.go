@@ -3,8 +3,8 @@ package testfixture
 import "github.com/psaab/xpf/pkg/config"
 
 // RoutingInstanceFRR11393 returns the shared config exercised by both FRR
-// assembly paths for the legacy CLI regression.
-
+// assembly paths for the legacy CLI regression. #17735 keeps RIP out of the
+// tenant table because its default preference outranks FRR's fixed IS-IS distance.
 func RoutingInstanceFRR11393() *config.Config {
 	return &config.Config{
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
@@ -14,7 +14,6 @@ func RoutingInstanceFRR11393() *config.Config {
 			Name:         "tenant",
 			InstanceType: "virtual-router",
 			Interfaces:   []string{"ge-0/0/1.0"},
-			RIP:          &config.RIPConfig{Interfaces: []string{"ge-0/0/1.0"}},
 			ISIS: &config.ISISConfig{
 				NET:        "49.0001.0100.0000.0001.00",
 				Interfaces: []*config.ISISInterface{{Name: "ge-0/0/1.0"}},
@@ -38,12 +37,8 @@ const ExpectedFRRInstanceConfig11393 = `log syslog informational
 ! BEGIN BPFRX MANAGED CONFIG - do not edit this section
 ! xpf managed config - do not edit
 !
-ip route 10.20.0.0/16 192.0.2.1 vrf vrf-tenant
-ipv6 route 2001:db8:1::/48 2001:db8::1 vrf vrf-tenant
-!
-router rip vrf vrf-tenant
- network ge-0-0-1
-exit
+ip route 10.20.0.0/16 192.0.2.1 5 vrf vrf-tenant
+ipv6 route 2001:db8:1::/48 2001:db8::1 5 vrf vrf-tenant
 !
 router isis xpf vrf vrf-tenant
  net 49.0001.0100.0000.0001.00
