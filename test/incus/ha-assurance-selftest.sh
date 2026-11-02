@@ -2485,22 +2485,50 @@ report_output=$(
 	(
 		info() { printf 'INFO %s\n' "$*"; }
 		void() { printf 'VOID %s\n' "$*"; }
-		ha_rg1_report_sample_max "Pending TX local" node0 "Kernel RX dropped" \
+		ha_rg1_report_sample_max "Kernel RX dropped" node0 "Kernel RX dropped" \
 			"$MONOTONIC_PRE_STATS" "${SAMPLE_STATS[@]}"
 	)
 )
-assert_contains "$report_output" 'INFO RG1 Group 8 report-only Pending TX local max (node0): 110' \
+assert_contains "$report_output" 'INFO RG1 Group 8 report-only Kernel RX dropped max (node0): 110' \
 	'report-only sampled maximum uses phase-pre baseline'
+GAUGE_PRE_STATS="${RG1_DIR}/gauge-phase-pre-node0.stats"
+write_ha_status_snapshot "$GAUGE_PRE_STATS" phase-pre node0 1 0 0 0 0 100 0 10 10
+GAUGE_VALUES=(14 6 8 9 11 7 8 8 4 5)
+GAUGE_STATS=()
+for gauge_index in "${!GAUGE_VALUES[@]}"; do
+	gauge_phase=$(printf 'sample-%02d' "$((gauge_index + 1))")
+	gauge_stats="${RG1_DIR}/gauge-${gauge_phase}-node0.stats"
+	gauge_value="${GAUGE_VALUES[$gauge_index]}"
+	write_ha_status_snapshot "$gauge_stats" "$gauge_phase" node0 1 0 0 0 0 100 0 \
+		"$gauge_value" "$gauge_value"
+	GAUGE_STATS+=("$gauge_stats")
+done
+assert_helper_value 14 ha_sample_window_gauge_max manual-rg1-failback 1 node0 \
+	'Pending TX local' "${GAUGE_STATS[@]}" 10
+for gauge_metric in 'Pending TX local' 'Outstanding TX'; do
+	report_output=$(
+		(
+			info() { printf 'INFO %s\n' "$*"; }
+			void() { printf 'VOID %s\n' "$*"; }
+			ha_rg1_report_sample_max "$gauge_metric" node0 "$gauge_metric" \
+				"$GAUGE_PRE_STATS" "${GAUGE_STATS[@]}"
+		)
+	)
+	assert_contains "$report_output" "INFO RG1 Group 8 report-only ${gauge_metric} max (node0): 14" \
+		"falling ${gauge_metric} gauge reports its window maximum"
+	assert_not_contains "$report_output" 'VOID ' \
+		"falling ${gauge_metric} gauge does not increment VOID"
+done
 report_output=$(
 	(
 		info() { printf 'INFO %s\n' "$*"; }
 		void() { printf 'VOID %s\n' "$*"; }
-		ha_rg1_report_sample_max "Pending TX local" node0 "Kernel RX dropped" \
+		ha_rg1_report_sample_max "Kernel RX dropped" node0 "Kernel RX dropped" \
 			"$rewind_pre_stats" "${rewind_stats[@]}"
 	)
 )
-assert_contains "$report_output" 'VOID RG1 Group 8 report-only Pending TX local max unavailable (node0):' \
-	'report-only sampled maximum rejects sample-window rewind'
+assert_contains "$report_output" 'VOID RG1 Group 8 report-only Kernel RX dropped max unavailable (node0):' \
+	'report-only sampled counter rewind remains VOID'
 assert_contains "$report_output" 'rewound from 500 to 50 at sample-03' \
 	'report-only sampled maximum identifies intermediate rewind'
 SAMPLE_STATS[9]="${RG1_DIR}/missing-sample.stats"
