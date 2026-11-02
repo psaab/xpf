@@ -1809,3 +1809,43 @@ fn close_relay_carries_a_fin_recorded_only_on_the_companion_18520() {
         "#18520: the reverse FIN recorded only on A's forward half must ride the relay"
     );
 }
+
+/// #18528: the reverse-direction twin — DATA on the REVERSE key with an
+/// ACK beyond the client's SYN end must not complete the pair either,
+/// including for a seed-only forward entry (initial SYN without WSOPT,
+/// so tcp_syn_seen was never set on the forward/companion row).
+#[test]
+fn reverse_wrong_ack_data_does_not_complete_18528() {
+    let mut node = syn_on_a();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = node.t0;
+    slow_hit(
+        &mut node.b.table,
+        &rev,
+        t0 + MS,
+        TCP_FLAG_SYN | TCP_FLAG_ACK,
+        0,
+        SERVER_ISN,
+        CLIENT_ISN + 1,
+    );
+    pump(&mut node);
+    assert_eq!(
+        node.a.table.handshake_state_wire_for(&fwd),
+        TcpHandshakeState::HandshakePending.to_wire(),
+        "premise: pending before reverse data"
+    );
+    slow_hit(
+        &mut node.a.table,
+        &rev,
+        t0 + 2 * MS,
+        TCP_FLAG_ACK | TCP_FLAG_PSH,
+        MSS,
+        SERVER_ISN + 1,
+        CLIENT_ISN + 999,
+    );
+    assert_eq!(
+        node.a.table.handshake_state_wire_for(&fwd),
+        TcpHandshakeState::HandshakePending.to_wire(),
+        "#18528: reverse wrong-ack data must not complete the pair"
+    );
+}

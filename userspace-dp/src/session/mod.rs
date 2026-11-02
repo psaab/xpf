@@ -6223,17 +6223,22 @@ impl SessionTable {
         let hit_nat = hit.decision.nat;
         let hit_is_reverse = hit.metadata.is_reverse;
         let companion_key = reverse_session_key(hit_key, hit_nat);
-        let companion = self.entry_by_key(&companion_key);
+        // Quiet lookup: a speculative companion miss is not a #7919
+        // lookup failure (see record_by_key_quiet's contract).
+        let companion = self
+            .record_by_key_quiet(&companion_key)
+            .map(|record| &record.entry);
         // #18528: before either local or node-level evidence can complete,
         // constrain a parsed ACK to the peer's known send interval. The
         // relay records the validated SYN end; until local peer sequence
         // evidence advances the send end, only that exact ACK is admissible.
-        // Unknown bounds fail open.
+        // The bound applies whenever the SYN end is known - including
+        // seed-only state (an initial SYN without WSOPT seeds
+        // tcp_peer_ack_end without tcp_syn_seen); requiring syn_seen
+        // would skip the check for exactly the common no-WSOPT pair.
         if has_ack(tcp_flags) && companion_key != *hit_key {
             if let (Some(ack), Some(companion)) = (ack, companion) {
-                if let Some(expected) = companion.tcp_peer_ack_end
-                    && companion.tcp_syn_seen
-                {
+                if let Some(expected) = companion.tcp_peer_ack_end {
                     if companion.tcp_seq_seen {
                         let send_end = companion.tcp_rcv_nxt;
                         if tcp_seq_after(expected, send_end)
