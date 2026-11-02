@@ -1,4 +1,35 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Firewall filters: a packet that matches no term of a stateless firewall
+    filter (interface input/output, inet and inet6, and the lo0 input
+    filter) is now DISCARDED, as on Junos, instead of accepted. Each such
+    filter ends in a synthetic `implicit-discard` term with its own counter,
+    shown by `show firewall` and exported as
+    xpf_filter_hits_total{term="implicit-discard"}; a filter with no terms
+    discards everything. A filter with a terminal catch-all term (an
+    unconstrained accept/discard/reject, modifier-only or routing-instance
+    term) is unchanged, as are interfaces and families with no filter
+    bound. The kernel lo0 chain ends each family with a counted drop that
+    exempts loopback, the cluster control link and fabric, and IPv4 the box
+    sends to its own address inside a VRF; fxp0 is NOT exempt, nor is IPv6
+    the box sends to its own in-VRF address (indistinguishable from
+    spoofed fxp0 ingress; a term accepting the box's own source address
+    admits that spoofed traffic too). MANAGEMENT LOCKOUT RISK: the lo0 chain is stateless, so a lo0
+    filter without a catch-all drops all unmatched host traffic (the
+    control-link/fabric exemption matches VRF slaves by sdifname, and the
+    lo0 table is refused if that exemption is incomplete) -- SSH and
+    other management on fxp0, IPv6 ND/RA, DHCPv6 replies, IKE/ESP (VPNs
+    and the transit they carry), BGP/OSPF/BFD, RPM and ip-monitoring
+    probe replies (WAN failover), and the return traffic of every
+    connection the box opens -- in every routing instance. Use `commit
+    confirmed` for lo0 changes. UPGRADE: add a final `term <name> { then
+    accept; }` to every filter meant to permit by default BEFORE
+    upgrading. The package's preinst refuses the upgrade when the running
+    build reports such a filter (`show system alarms`, #3295 warning);
+    override with XPF_UPGRADE_ACCEPT_IMPLICIT_DISCARD=1. Image upgrades
+    are not gated. During a rolling cluster upgrade the two nodes treat
+    unmatched traffic differently until both run this build. New metric
+    xpf_lo0_implicit_discard_hits_total{family}; the term name
+    `implicit-discard` is reserved (commit warning) (#18728).
   * IPsec host-input fence: the live readback of the fence overlay accepts
     the #16841 zero-hop-limit DROP ahead of it again. Since #16841 every
     host-inbound install carrying an overlay failed its readback and the

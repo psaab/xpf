@@ -173,6 +173,7 @@ var collectorDescHostInbound = []int{
 	xpfCollectorDescFieldIndex("vrfOverlapPBRAdmitted"),
 	xpfCollectorDescFieldIndex("riMemberDeviceConflicts"),
 	xpfCollectorDescFieldIndex("lo0CounterHits"),
+	xpfCollectorDescFieldIndex("lo0ImplicitDiscardHits"),
 }
 
 // initForwardingDescriptors (metrics_descriptors_forwarding.go).

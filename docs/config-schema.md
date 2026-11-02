@@ -8880,7 +8880,7 @@ tolerant path the Rust filter compiler dropped an unresolvable port token (or
 a malformed literal address token) PER-TOKEN, so a PARTIALLY-bad list still
 built a matcher over the surviving subset — a `then discard`/`reject` term
 silently enforced a NARROWER set than the operator wrote (the rest fell
-through to the implicit accept). The all-unresolvable case already failed
+through to a later accept, or before #18728 to the implicit accept). The all-unresolvable case already failed
 closed at match-time (#2400/#3205); the partial case now carries fail-closed
 wire markers, same shape as the #3406 ICMP/DSCP family: the snapshot builder
 sets `ports_unrepresentable` from `UnknownPorts` and
@@ -8921,7 +8921,8 @@ fails its install the same way (netlink `FromUnrepresentable` plan refusal,
 oracle `__xpf_refuse_unrepresentable_from__`), and the PBR classifier drops
 the term's steering. Whole-snapshot refusal — not term poisoning — because
 poisoning a `discard`/`reject` term to match-nothing would let its traffic
-fall through to the implicit accept (fail-OPEN). The strict gates
+fall through to a later accept (before #18728, also the implicit accept) —
+fail-OPEN. The strict gates
 (`validateFilterFromMatchStrict`, `validateFirewallFilterValuelessFromStrict`)
 remain the primary defense; the marker guards the lenient / peer-synced /
 hand-built / version-drifted snapshot. Bumped `ProtocolVersion` 19 -> 20
@@ -8957,10 +8958,11 @@ builder).
 A firewall-filter `from` block can combine a `protocol` (or the inet6
 `next-header`) with an L4 predicate the dataplane matcher can never satisfy for
 that protocol. Such a term compiled cleanly but became a **never-match** at
-runtime, and because an xpf filter falls through to an implicit **ACCEPT** on
-no-match, a `then discard` / `then reject` written over such a pair was silently
-dead — the traffic it was meant to drop was admitted by a later permit or the
-implicit accept (a **fail-OPEN**). Junos rejects these combinations at commit,
+runtime, and because an xpf filter then fell through to an implicit **ACCEPT** on
+no-match (before #18728; a filter without a terminal catch-all now ends in the
+Junos implicit discard), a `then discard` / `then reject` written over such a
+pair was silently dead — the traffic it was meant to drop was admitted by a
+later permit or the implicit accept (a **fail-OPEN**). Junos rejects these combinations at commit,
 so accepting them was also a config-language parity gap. This is the
 stateless-filter mirror of the application cross-field gate (#3373 port /
 #3348 icmp).
@@ -10079,8 +10081,9 @@ pools, so the copy in the "wrong" pool can never match. A v4/v6
 `icmp-type`/`icmp-code` (`echo-request` resolves to ICMPv4 type 8 for
 `af=="any"`, which never matches an IPv6 ICMP packet whose echo-request is
 type 128) leaves the inet6 (or inet) arm with a never-matching predicate — the
-term falls through to the implicit ACCEPT for that family, an imperfect v6
-UNDER-block (it degrades to the pre-#4287 state for that term; never an
+term falls through to the later terms for that family (before #18728 the
+implicit ACCEPT; since #18728 a later accept, or the implicit discard when the
+filter has no catch-all), an imperfect v6 UNDER-block (it degrades to the pre-#4287 state for that term; never an
 over-block, so no legitimate v6 traffic is broken). These configs are also
 non-Junos (Junos disallows family-specific matches under `family any`).
 
@@ -10111,8 +10114,9 @@ its family content is not knowable from the leaf keyword. But a reference whose
 **resolved** prefixes cover only ONE family reproduces the exact same
 under-block (audit codex-164 C164-H04): `from source-prefix-list v4-only then
 discard` under `family any` dual-compiles the v4-only list into the inet6 pool,
-where the v6 arm has zero v6 prefixes, matches nothing, and falls through to the
-implicit ACCEPT — a silent v6 under-block.
+where the v6 arm has zero v6 prefixes, matches nothing, and falls through to a
+later accept (before #18728, also the implicit ACCEPT) — a silent v6
+under-block.
 
 `validateFirewallFilterFamilyAnyMatchesAST` therefore also resolves every
 prefix-list reference against the candidate tree's `policy-options prefix-list`
@@ -10126,7 +10130,8 @@ in **opposite** ways under `family any`, mirroring `resolvePrefixListAddrs`
 
 - A single-family **positive** list (`from source-prefix-list v4-only`) leaves
   the missing-family arm with no matching prefixes → matches **nothing** → falls
-  through to the implicit ACCEPT → a silent **under-block**.
+  through to a later accept (before #18728, also the implicit ACCEPT) → a
+  silent **under-block**.
 - A single-family **`except`** list (`from source-prefix-list v4-only except`)
   is the clean-except case: the missing-family arm evaluates `except` over a set
   with no entries for that family = **match ALL** → an **over-block** on `then

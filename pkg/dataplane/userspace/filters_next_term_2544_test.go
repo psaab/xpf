@@ -31,7 +31,7 @@ func TestFilterSnapshotExplicitNextTermFallsThrough(t *testing.T) {
 			Count: "hits", Action: ""},
 		{Name: "drop", Protocols: []string{"tcp"}, Action: config.FilterActionDiscard},
 	})
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 2 {
 		t.Fatalf("expected 1 filter with 2 terms, got %#v", snaps)
 	}
@@ -52,7 +52,7 @@ func TestFilterSnapshotModifierOnlyTermFallsThrough(t *testing.T) {
 		{Name: "count-only", Protocols: []string{"tcp"}, Count: "hits",
 			Action: ""},
 	})
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("expected 1 filter with 1 term, got %#v", snaps)
 	}
@@ -68,7 +68,7 @@ func TestFilterSnapshotRoutingInstanceTermIsNotFallThrough(t *testing.T) {
 		{Name: "pbr", Protocols: []string{"tcp"}, RoutingInstance: "vrf-a",
 			Action: ""},
 	})
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("expected 1 filter with 1 term, got %#v", snaps)
 	}
@@ -81,7 +81,7 @@ func TestFilterSnapshotTerminatingTermNotFallThrough(t *testing.T) {
 	cfg := nextTermCfg([]*config.FirewallFilterTerm{
 		{Name: "accept-web", Protocols: []string{"tcp"}, Action: config.FilterActionAccept},
 	})
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if snaps[0].Terms[0].NextTerm {
 		t.Error("a terminating accept term must NOT be marked fall-through")
 	}

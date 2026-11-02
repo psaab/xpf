@@ -294,3 +294,29 @@ func AggregateThreeColorPolicerCountersByName(status *ProcessStatus) []ThreeColo
 	}
 	return out
 }
+
+// ImplicitDiscardCounterForFilter returns the helper's counter row for the
+// filter's synthetic implicit-discard term (#18728) from an index built by
+// BuildFirewallFilterTermCounterIndexForConfig. The synthetic term is the last
+// snapshot term, so its ordinal is the number of non-nil authored terms; the
+// row is accepted only if it also carries ImplicitDiscardTermName, so an
+// older helper (which never published such a row) or a reordered index is
+// reported as no reading rather than misattributing an authored term's hits.
+// ok is false for a filter with a terminal catch-all term, which carries no
+// synthetic term.
+func ImplicitDiscardCounterForFilter(index map[FirewallFilterTermCounterKey]FirewallFilterTermCounterStatus, family, filterName string, filter *config.FirewallFilter) (FirewallFilterTermCounterStatus, bool) {
+	if filter == nil || config.FirewallFilterHasCatchAll(filter) {
+		return FirewallFilterTermCounterStatus{}, false
+	}
+	ordinal := uint32(0)
+	for _, t := range filter.Terms {
+		if t != nil {
+			ordinal++
+		}
+	}
+	row, ok := index[FirewallFilterTermCounterKey{Family: family, FilterName: filterName, TermOrdinal: ordinal}]
+	if !ok || row.TermName != ImplicitDiscardTermName {
+		return FirewallFilterTermCounterStatus{}, false
+	}
+	return row, true
+}

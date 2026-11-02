@@ -134,6 +134,14 @@ func (c *xpfCollector) collectLo0Counters(ch chan<- prometheus.Metric) {
 		return
 	}
 	for _, ctr := range counts {
+		// #18728: the per-family implicit-discard counter is not a `then
+		// count` counter; emitting it under the counter label would collide
+		// with an authored count of the same name. It has its own series.
+		if ctr.ImplicitDiscardFamily != "" {
+			c.emitConstMetric(ch, c.lo0ImplicitDiscardHits,
+				prometheus.CounterValue, float64(ctr.Packets), ctr.ImplicitDiscardFamily)
+			continue
+		}
 		c.emitConstMetric(ch, c.lo0CounterHits,
 			prometheus.CounterValue, float64(ctr.Packets), ctr.Counter)
 	}
@@ -939,6 +947,11 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 	userspaceCounters := dpuserspace.AggregateFirewallFilterTermCountersByNameForConfig(userspaceStatus, cfg)
 	cloneFold16464 := dpuserspace.BuildCloneCounterFold16464(cfg)
 
+	// Keep the ordinal index lazy: ordinary authored series need the name
+	// aggregate above, while the synthetic fallback must distinguish its
+	// own final row from an uncounted authored term of the same name.
+	var userspaceCountersByOrdinal map[dpuserspace.FirewallFilterTermCounterKey]dpuserspace.FirewallFilterTermCounterStatus
+
 	// The retired-eBPF/map counter path is gated on a compile result carrying
 	// filter IDs; it may be absent (a pure userspace dataplane) without
 	// suppressing the userspace merge above.
@@ -1104,6 +1117,26 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 				}
 				c.emitConstMetric(ch, c.filterHitsTotal, prometheus.CounterValue,
 					float64(agg.totalPkts), name, family, termName)
+			}
+			// #18728: the synthetic implicit-discard term is not in
+			// filter.Terms, so its helper counter gets its own series. An
+			// authored term of the same name that EMITTED already owns that
+			// labelset (the by-name aggregate folded the synthetic row into
+			// it), so do not emit a duplicate (#15192). If the authored
+			// aggregate did not emit, select the synthetic row by its
+			// ordinal: using the by-name total here would also include an
+			// uncounted authored row, or could invent a synthetic series
+			// from an authored-only status row.
+			authoredAgg := aggs[dpuserspace.ImplicitDiscardTermName]
+			if (authoredAgg == nil || !authoredAgg.emit) && !config.FirewallFilterHasCatchAll(filter) {
+				if userspaceCountersByOrdinal == nil {
+					userspaceCountersByOrdinal = dpuserspace.BuildFirewallFilterTermCounterIndexForConfig(userspaceStatus, cfg)
+				}
+				if ctr, ok := dpuserspace.ImplicitDiscardCounterForFilter(
+					userspaceCountersByOrdinal, family, name, filter); ok {
+					c.emitConstMetric(ch, c.filterHitsTotal, prometheus.CounterValue,
+						float64(ctr.Packets), name, family, dpuserspace.ImplicitDiscardTermName)
+				}
 			}
 		}
 	}

@@ -56,7 +56,7 @@ func TestFilterSnapshotLiteralAnyIsUnconstrained(t *testing.T) {
 			},
 		},
 	}
-	term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]
+	term := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0]
 	if term.SourceConstrained {
 		t.Error("literal `any` must NOT make the direction constrained (#3433 H01: any = match ALL)")
 	}
@@ -65,7 +65,7 @@ func TestFilterSnapshotLiteralAnyIsUnconstrained(t *testing.T) {
 	}
 	// A real address ALONGSIDE `any` keeps its scope (the `any` is ignored).
 	cfg.Firewall.FiltersInet["edge"].Terms[0].SourceAddresses = []string{"any", "10.0.0.0/8"}
-	term = buildFirewallFilterSnapshots(cfg)[0].Terms[0]
+	term = authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0]
 	if !term.SourceConstrained {
 		t.Error("a real address alongside `any` must stay constrained")
 	}
@@ -82,7 +82,7 @@ func TestFilterSnapshotSourcePrefixListResolved(t *testing.T) {
 		nil,
 		map[string][]string{"mgmt": {"10.0.0.0/24", "10.0.1.0/24"}},
 	)
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("expected 1 filter with 1 term, got %#v", snaps)
 	}
@@ -107,7 +107,7 @@ func TestFilterSnapshotLiteralPlusPositivePrefixList(t *testing.T) {
 		map[string][]string{"mgmt": {"10.0.0.0/24"}},
 	)
 	cfg.Firewall.FiltersInet["edge"].Terms[0].SourceAddresses = []string{"192.168.0.0/16"}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	term := snaps[0].Terms[0]
 	want := []string{"192.168.0.0/16", "10.0.0.0/24"}
 	if !reflect.DeepEqual(term.SourceAddresses, want) {
@@ -126,7 +126,7 @@ func TestFilterSnapshotDestPrefixListExcept(t *testing.T) {
 		[]config.PrefixListRef{{Name: "internal", Except: true}},
 		map[string][]string{"internal": {"10.0.0.0/8"}},
 	)
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	term := snaps[0].Terms[0]
 	want := []string{"10.0.0.0/8"}
 	if !reflect.DeepEqual(term.DestAddresses, want) {
@@ -159,7 +159,7 @@ func TestFilterSnapshotMixedLiteralAndExceptPositiveWins(t *testing.T) {
 		map[string][]string{"internal": {"10.0.0.0/8"}},
 	)
 	cfg.Firewall.FiltersInet["edge"].Terms[0].SourceAddresses = []string{"192.168.0.0/16"}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	term := snaps[0].Terms[0]
 	if term.SourceExcept {
 		t.Fatal("mixed literal+except must NOT set source_except (ambiguous, scoped out)")
@@ -184,7 +184,7 @@ func TestFilterSnapshotUndefinedPrefixListContributesNothing(t *testing.T) {
 		nil,
 		map[string][]string{},
 	)
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	term := snaps[0].Terms[0]
 	if len(term.SourceAddresses) != 0 {
 		t.Fatalf("undefined prefix-list contributed %v, want none", term.SourceAddresses)
@@ -210,7 +210,7 @@ func TestFilterSnapshotEmptyPositivePrefixListStaysConstrained(t *testing.T) {
 		nil,
 		map[string][]string{"empty-list": {}}, // defined, no prefixes
 	)
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	term := snaps[0].Terms[0]
 	if len(term.SourceAddresses) != 0 {
 		t.Fatalf("empty prefix-list contributed %v, want none", term.SourceAddresses)
@@ -234,7 +234,7 @@ func TestFilterSnapshotEmptyExceptPrefixListStaysConstrainedAndExcept(t *testing
 		nil,
 		map[string][]string{"empty-except": {}},
 	)
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	term := snaps[0].Terms[0]
 	if len(term.SourceAddresses) != 0 {
 		t.Fatalf("empty except prefix-list contributed %v, want none", term.SourceAddresses)

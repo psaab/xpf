@@ -21,8 +21,9 @@ func hasNoCatchAllWarn(warnings []string, filterName string) string {
 // TestFilterNoCatchAllWarnsOnAttachedAllowlist proves #3295: a firewall filter
 // ATTACHED to an interface input hook that has no terminal catch-all term (a
 // pure allowlist of accept terms) commits successfully but emits a commit
-// WARNING — xpf accepts unmatched traffic (implicit-accept) where Junos
-// stateless filters imply a final discard.
+// WARNING. Since #18728 that filter DISCARDS unmatched traffic (the Junos
+// implicit final discard); the warning names it so an operator who meant
+// permit-by-default adds a final `then accept`.
 //
 // Fail-on-revert: deleting the validateFilterNoCatchAllWarnings call (or its
 // per-hook append) removes the warning and this test fails.

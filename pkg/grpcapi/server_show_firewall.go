@@ -240,7 +240,15 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 					}
 				}
 			}
-			firewallshow.WriteLo0KernelCounters(buf, filter, lo0For(family, name))
+			// #18728: the synthetic implicit-discard term the dataplane
+			// appends to a filter with no terminal catch-all.
+			implicit, implicitOk := dpuserspace.ImplicitDiscardCounterForFilter(userspaceCounters, family, name, filter)
+			firewallshow.WriteImplicitDiscard(buf, filter, firewallshow.ImplicitDiscardCounter{
+				Packets: implicit.Packets, Bytes: implicit.Bytes, Have: implicitOk,
+			}, false)
+			lo0Counts := lo0For(family, name)
+			firewallshow.WriteLo0KernelCounters(buf, filter, lo0Counts)
+			firewallshow.WriteLo0ImplicitDiscardCounter(buf, filter, family, lo0Counts)
 			buf.WriteString("\n")
 		}
 	}
@@ -725,9 +733,15 @@ func (s *Server) showFirewallFilter(req *pb.ShowTextRequest, cfg *config.Config,
 					}
 				}
 			}
+			// #18728: the synthetic implicit-discard term.
+			implicit, implicitOk := dpuserspace.ImplicitDiscardCounterForFilter(userspaceCounters, family, filterName, filter)
+			firewallshow.WriteImplicitDiscard(buf, filter, firewallshow.ImplicitDiscardCounter{
+				Packets: implicit.Packets, Bytes: implicit.Bytes, Have: implicitOk,
+			}, true)
 			// #16457: kernel lo0 chain counts beside the helper counts.
 			lo0Counts, lo0Err := firewallshow.Lo0CountersForFilter(cfg, family, filterName, readLo0CountersGRPC)
 			firewallshow.WriteLo0KernelCounters(buf, filter, lo0Counts)
+			firewallshow.WriteLo0ImplicitDiscardCounter(buf, filter, family, lo0Counts)
 			buf.WriteString("\n")
 			if readErr != nil {
 				fmt.Fprintf(buf, "warning: filter counter read failed (hit counts may be incomplete): %v\n", readErr)

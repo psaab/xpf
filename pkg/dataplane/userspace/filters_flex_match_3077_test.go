@@ -35,7 +35,7 @@ func TestFilterSnapshotFlexMatchSerialized(t *testing.T) {
 			},
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("expected 1 filter with 1 term, got %#v", snaps)
 	}
@@ -89,7 +89,7 @@ func TestFilterSnapshotFlexMatchStart(t *testing.T) {
 				},
 			}}},
 		}
-		fm := buildFirewallFilterSnapshots(cfg)[0].Terms[0].FlexMatch
+		fm := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0].FlexMatch
 		if fm == nil {
 			t.Fatalf("match-start %q: flex dropped", tc.start)
 		}
@@ -120,7 +120,7 @@ func TestFilterSnapshotFlexMatchValuePreMasked(t *testing.T) {
 			},
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	fm := snaps[0].Terms[0].FlexMatch
 	if fm == nil {
 		t.Fatal("flexible-match-range dropped (#3077)")
@@ -144,7 +144,7 @@ func TestFilterSnapshotNoFlexMatchStaysNil(t *testing.T) {
 			Name: "t", Protocols: []string{"tcp"}, Action: config.FilterActionAccept,
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if snaps[0].Terms[0].FlexMatch != nil {
 		t.Errorf("term without flexible-match-range must have nil FlexMatch, got %#v",
 			snaps[0].Terms[0].FlexMatch)
@@ -171,7 +171,7 @@ func TestFilterSnapshotFlexMatchDefaultLength(t *testing.T) {
 			},
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	fm := snaps[0].Terms[0].FlexMatch
 	if fm == nil {
 		t.Fatal("flexible-match-range dropped (#3077)")
@@ -220,7 +220,7 @@ func TestFilterSnapshotFlexMatchCeilByteLength(t *testing.T) {
 				},
 			}}},
 		}
-		snaps := buildFirewallFilterSnapshots(cfg)
+		snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 		fm := snaps[0].Terms[0].FlexMatch
 		if fm == nil {
 			t.Fatalf("bit-length %d: flexible-match-range dropped", tc.bits)
@@ -297,7 +297,7 @@ func TestFilterSnapshotFlexMatchSubByteMSBAligned14634(t *testing.T) {
 					},
 				}}},
 			}
-			fm := buildFirewallFilterSnapshots(cfg)[0].Terms[0].FlexMatch
+			fm := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0].FlexMatch
 			if fm == nil {
 				t.Fatalf("bit-length %d: flexible-match-range dropped", tc.bits)
 			}

@@ -210,6 +210,8 @@ func toNftLo0Spec(cfg *config.Config, filterV4, filterV6 string) xnft.Lo0FilterS
 			for _, term := range f.Terms {
 				spec.V4Terms = append(spec.V4Terms, toNftLo0Term(term, pl))
 			}
+			// #18728: Junos implicit final discard (see lo0ImplicitDiscardRule).
+			spec.ImplicitDiscardV4 = !config.FirewallFilterHasCatchAll(f)
 		}
 	}
 	if filterV6 != "" {
@@ -217,7 +219,13 @@ func toNftLo0Spec(cfg *config.Config, filterV4, filterV6 string) xnft.Lo0FilterS
 			for _, term := range f.Terms {
 				spec.V6Terms = append(spec.V6Terms, toNftLo0Term(term, pl))
 			}
+			spec.ImplicitDiscardV6 = !config.FirewallFilterHasCatchAll(f)
 		}
+	}
+	if spec.ImplicitDiscardV4 || spec.ImplicitDiscardV6 {
+		spec.ImplicitDiscardExemptNetdevs = config.Lo0ImplicitDiscardExemptNetdevs(cfg)
+		spec.ImplicitDiscardRequiredNetdevs = config.Lo0ImplicitDiscardRequiredNetdevs(cfg)
+		spec.ImplicitDiscardVRFMasters = config.Lo0ImplicitDiscardVRFMasters(cfg)
 	}
 	return spec
 }

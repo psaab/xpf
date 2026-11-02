@@ -318,9 +318,13 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 	// installs the #6476 fence before returning the commit-visible error.
 	//
 	// #9940's preflight below applies the same fail-closed rule to DEFINED filters
-	// whose lowering produces zero rules (no terms or match-nothing terms). It
-	// runs BEFORE InstallLo0, so existing-state keeps its real table and cold-start
-	// installs the #6476 fence; no empty policy-accept shell is ever installed.
+	// whose lowering produces zero rules. It runs BEFORE InstallLo0, so
+	// existing-state keeps its real table and cold-start installs the #6476
+	// fence; no empty policy-accept shell is ever installed. Since #18728 a
+	// filter with no terminal catch-all (including one with no terms or only
+	// match-nothing terms) renders its family's implicit final discard, so it
+	// is NOT zero-rule: it installs and drops all host-bound traffic of that
+	// family except the exempt netdevs (the Junos empty-filter semantic).
 	//
 	// The rendered-rule count remains a defensive post-install drift guard only:
 	// if the installer reports zero after a non-empty preflight, the atomic
@@ -499,12 +503,27 @@ func lo0RenderedRuleCount(cfg *config.Config, filterV4, filterV6 string) int {
 		return count
 	}
 
+	// #18728: a defined filter with no terminal catch-all also renders its
+	// family's implicit final discard, so an empty or match-nothing filter now
+	// enforces (drop all but the exempt netdevs, the Junos empty-filter
+	// semantic) instead of rendering an empty policy-accept shell.
+	implicit := func(f *config.FirewallFilter, v4 bool) int {
+		if f == nil || config.FirewallFilterHasCatchAll(f) {
+			return 0
+		}
+		if v4 && len(config.Lo0ImplicitDiscardVRFMasters(cfg)) > 0 {
+			return 2 // the IPv4 VRF-local accept + the drop
+		}
+		return 1
+	}
 	count := 0
 	if filterV4 != "" {
-		count += countFilter(cfg.Firewall.FiltersInet[filterV4], "ip")
+		f := cfg.Firewall.FiltersInet[filterV4]
+		count += countFilter(f, "ip") + implicit(f, true)
 	}
 	if filterV6 != "" {
-		count += countFilter(cfg.Firewall.FiltersInet6[filterV6], "ip6")
+		f := cfg.Firewall.FiltersInet6[filterV6]
+		count += countFilter(f, "ip6") + implicit(f, false)
 	}
 	return count
 }
@@ -654,16 +673,42 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 			}
 		}
 	}
+	// #18728: each family's authored rules are followed by that family's
+	// implicit final discard when its filter has no terminal catch-all.
+	var implicitCounters []string
+	exempt := config.Lo0ImplicitDiscardExemptNetdevs(cfg)
+	exemptErr := config.ValidateLo0ImplicitDiscardExempt(exempt, config.Lo0ImplicitDiscardRequiredNetdevs(cfg))
+	emitImplicit := func(f *config.FirewallFilter, family, cfgFamily string) {
+		if config.FirewallFilterHasCatchAll(f) {
+			return
+		}
+		if exemptErr != nil {
+			// Fail closed (#18728 incident): an unvalidated exemption must
+			// never be installed. The refusal bareword makes `nft -f`
+			// reject the whole payload, exactly like the netlink builder's
+			// plan failure.
+			ruleLines = append(ruleLines, "    "+nftRefuseLo0ImplicitExempt)
+			return
+		}
+		implicitCounters = append(implicitCounters, xnft.Lo0ImplicitDiscardCounterName(cfgFamily))
+		if masters := config.Lo0ImplicitDiscardVRFMasters(cfg); family == "ip" && len(masters) > 0 {
+			ruleLines = append(ruleLines, "    "+lo0VRFLocalAcceptRule(masters))
+		}
+		ruleLines = append(ruleLines, "    "+lo0ImplicitDiscardRule(family, cfgFamily, exempt))
+	}
 	if filterV4 != "" {
 		if f, ok := cfg.Firewall.FiltersInet[filterV4]; ok {
 			emit(f, "ip")
+			emitImplicit(f, "ip", "inet")
 		}
 	}
 	if filterV6 != "" {
 		if f, ok := cfg.Firewall.FiltersInet6[filterV6]; ok {
 			emit(f, "ip6")
+			emitImplicit(f, "ip6", "inet6")
 		}
 	}
+	counters = append(counters, implicitCounters...)
 
 	var rules []string
 	rules = append(rules, "add table inet xpf_lo0")
@@ -690,6 +735,50 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 	rules = append(rules, "}")
 
 	return strings.Join(rules, "\n") + "\n"
+}
+
+// lo0ImplicitDiscardRule renders the Junos implicit final discard for one
+// family's lo0 filter (#18728): the rule after that family's authored rules,
+// reached only by a packet no authored term terminated. family is the oracle
+// pass ("ip" / "ip6"), cfgFamily the config family that names the counter
+// ("inet" / "inet6"). The nfproto guard keeps it to its family (the chain is
+// inet, and the other family's filter may be absent or permit-by-default);
+// the iifname exemption (config.Lo0ImplicitDiscardExemptNetdevs: loopback,
+// cluster control link, fabric) keeps internal traffic off this drop. It is
+// matched on iifname AND sdifname: a VRF slave (xpfd puts fxp/em/fab in
+// vrf-mgmt) shows the VRF master as iifname and itself only as sdifname, so
+// iifname alone missed the control link and fabric (#18728 loss incident).
+// The netlink mirror is buildLo0ImplicitDiscardNetlink.
+// nftRefuseLo0ImplicitExempt is the constant refusal line the lo0 oracle
+// emits when the implicit discard's exemption fails
+// config.ValidateLo0ImplicitDiscardExempt: not valid nft, so the atomic load
+// fails and the prior table stays.
+const nftRefuseLo0ImplicitExempt = `comment "lo0 implicit-discard exemption invalid" __xpf_refuse_lo0_implicit_exempt__`
+
+// lo0VRFLocalAcceptRule renders the accept that precedes the IPv4 implicit
+// discard for IPv4 traffic the box generates inside a VRF: the input hook
+// reports the VRF MASTER as both iifname and sdifname for it (measured; sdif
+// is not 0). A packet received on a VRF slave carries the slave as sdifname,
+// so fxp0 traffic is not exempted. The VRF analogue of the `lo` exemption;
+// netlink mirror buildLo0VRFLocalAccept. IPv4 only: see
+// config.Lo0ImplicitDiscardVRFMasters for why IPv6 has no such exemption,
+// and for the invariant the rule rests on: only a frame transmitted INTO the
+// VRF device (local transmit, a raw AF_PACKET send on the master, a tc/XDP
+// redirect to it, a VRF as a bridge port) shows iif = sdif = the master, and
+// xpf builds none but the first.
+func lo0VRFLocalAcceptRule(masters []string) string {
+	return "meta nfproto ipv4 iifname " + nftIifnameSet(masters) +
+		" meta sdifname " + nftIifnameSet(masters) + " accept"
+}
+
+func lo0ImplicitDiscardRule(family, cfgFamily string, exempt []string) string {
+	nfproto := "ipv4"
+	if family == "ip6" {
+		nfproto = "ipv6"
+	}
+	return "meta nfproto " + nfproto + " iifname != " + nftIifnameSet(exempt) +
+		" meta sdifname != " + nftIifnameSet(exempt) +
+		` counter name "` + xnft.Lo0ImplicitDiscardCounterName(cfgFamily) + `" drop`
 }
 
 // applyHostInboundFilter is the KERNEL-nftables PRIMARY enforcement of

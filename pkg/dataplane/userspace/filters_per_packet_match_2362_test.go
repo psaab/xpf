@@ -36,7 +36,7 @@ func perPacketMatchCfg() *config.Config {
 }
 
 func TestFilterSnapshotTCPFlagsSerialized(t *testing.T) {
-	snaps := buildFirewallFilterSnapshots(perPacketMatchCfg())
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(perPacketMatchCfg()))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("expected 1 filter with 1 term, got %#v", snaps)
 	}
@@ -69,7 +69,7 @@ func TestFilterSnapshotTCPFlagsUnparseableSetsMarker(t *testing.T) {
 			Action:    config.FilterActionDiscard,
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("expected 1 filter with 1 term, got %#v", snaps)
 	}
@@ -87,7 +87,7 @@ func TestFilterSnapshotTCPFlagsUnparseableSetsMarker(t *testing.T) {
 
 // A representable tcp-flags expression must NOT set the unparseable marker.
 func TestFilterSnapshotTCPFlagsRepresentableLeavesMarkerClear(t *testing.T) {
-	snaps := buildFirewallFilterSnapshots(perPacketMatchCfg())
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(perPacketMatchCfg()))
 	if snaps[0].Terms[0].TCPFlagsUnparseable {
 		t.Error("a representable tcp-flags expression must not set TCPFlagsUnparseable")
 	}
@@ -101,7 +101,7 @@ func TestFilterSnapshotTCPFlagsMultipleAreAnded(t *testing.T) {
 			Action: config.FilterActionDiscard,
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	term := snaps[0].Terms[0]
 	if term.TCPFlags == nil {
 		t.Fatal("tcp-flags dropped")
@@ -128,7 +128,7 @@ func TestFilterSnapshotTCPFlagsExpressionParsed(t *testing.T) {
 			Action: config.FilterActionDiscard,
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	term := snaps[0].Terms[0]
 	if term.TCPFlags == nil {
 		t.Fatal("required tcp-flags mask was dropped for \"(syn & !ack)\" (#3076 fail-open)")
@@ -154,7 +154,7 @@ func TestFilterSnapshotTCPFlagsNegationOnly(t *testing.T) {
 			Action: config.FilterActionDiscard,
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	term := snaps[0].Terms[0]
 	if term.TCPFlags != nil {
 		t.Errorf("required mask should be nil for \"!rst\", got 0x%02x", *term.TCPFlags)
@@ -171,7 +171,7 @@ func TestFilterSnapshotIsFragmentSerialized(t *testing.T) {
 			Name: "t", IsFragment: true, Action: config.FilterActionDiscard,
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if !snaps[0].Terms[0].IsFragment {
 		t.Error("is-fragment was dropped from the snapshot (#2362)")
 	}
@@ -184,7 +184,7 @@ func TestFilterSnapshotICMPTypeCodeSerialized(t *testing.T) {
 			Name: "t", Protocols: []string{"icmp"}, ICMPTypes: []int{8}, ICMPCodes: []int{0}, Action: config.FilterActionDiscard,
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	term := snaps[0].Terms[0]
 	if len(term.ICMPTypes) != 1 || term.ICMPTypes[0] != 8 {
 		t.Errorf("icmp-types = %v, want [8] (echo-request) (#2362)", term.ICMPTypes)
@@ -203,7 +203,7 @@ func TestFilterSnapshotICMPUnsetStaysNil(t *testing.T) {
 			Name: "t", Protocols: []string{"tcp"}, Action: config.FilterActionAccept,
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	term := snaps[0].Terms[0]
 	if len(term.ICMPTypes) != 0 {
 		t.Errorf("unset icmp-type should be empty, got %v", term.ICMPTypes)

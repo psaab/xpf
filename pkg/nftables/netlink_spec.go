@@ -231,6 +231,27 @@ type Lo0FilterSpec struct {
 	// NoIPv6RejectZeroHopLimit (#16841): when false the chain drops
 	// hop-limit-0 IPv6 before any term; when true it is admitted.
 	NoIPv6RejectZeroHopLimit bool
+	// ImplicitDiscardV4 / ImplicitDiscardV6 (#18728): the family's lo0
+	// filter has no terminal catch-all term (config.FirewallFilterHasCatchAll
+	// false), so the chain ends that family's terms with the Junos implicit
+	// final discard: `meta nfproto <f> iifname != { exempt } counter name
+	// "<Lo0ImplicitDiscardCounterName(f)>" drop`.
+	ImplicitDiscardV4 bool
+	ImplicitDiscardV6 bool
+	// ImplicitDiscardExemptNetdevs is that drop's iifname exemption
+	// (config.Lo0ImplicitDiscardExemptNetdevs: "lo", the cluster control
+	// link and fabric). It never empties: "lo" is always present.
+	ImplicitDiscardExemptNetdevs []string
+	// ImplicitDiscardRequiredNetdevs (#18728 incident) are the netdevs the
+	// exemption MUST contain, resolved independently from the cluster roles
+	// (config.Lo0ImplicitDiscardRequiredNetdevs). The builder refuses the
+	// plan if one is missing or any exemption name is empty.
+	ImplicitDiscardRequiredNetdevs []string
+	// ImplicitDiscardVRFMasters are the VRF master devices whose LOCALLY
+	// GENERATED IPv4 traffic (iifname = sdifname = the master) the implicit
+	// discard exempts (config.Lo0ImplicitDiscardVRFMasters), rendered as an
+	// accept immediately ahead of the IPv4 drop. IPv6 has no such accept.
+	ImplicitDiscardVRFMasters []string
 }
 
 // HostInputFencePair binds one VRF master to one enslaved tunnel slave.

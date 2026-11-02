@@ -2241,6 +2241,24 @@ Prometheus (`xpf_filter_hits_total`) surfaces render no numeric hit count
 for one, so a counted-but-idle `Hit count: 0` is distinguishable from
 not-counted.
 
+A filter with no terminal catch-all term ends in the Junos implicit final
+discard (#18728). Both views list it after the authored terms as `Term:
+implicit-discard (Junos implicit final discard: no term above matched)` /
+`then discard`, with the helper's hit count when one is published (it is
+always counted), and Prometheus exports it as
+`xpf_filter_hits_total{term="implicit-discard"}`. A lo0 filter also shows
+`Kernel lo0 implicit-discard: …` — the kernel chain's per-family counted
+drop, which exempts loopback, the cluster control/fabric links and IPv4 the
+box sends to its own address inside a VRF (not IPv6: see
+`docs/feature-coverage.md`, "Locally generated traffic"), and Prometheus
+exports that one as `xpf_lo0_implicit_discard_hits_total{family}`.
+The kernel lo0 counters (named and implicit) reset to zero on every commit
+and every DHCP/DHCPv6 re-render, because the `inet xpf_lo0` table is
+recreated each time; use `rate()`. The helper's `implicit-discard` counter
+carries over a commit only while the term keeps its ordinal and shape
+(#15108), so adding or removing an authored term above it resets it. The
+EFFECTIVE view shows the same synthetic term, labelled the same way.
+
 The EFFECTIVE view (`… effective`, #4422) rebuilds and prints the
 `FirewallFilterSnapshot` the userspace dataplane actually receives — the exact
 match/action the matcher enforces. It is read-only and derives entirely from
