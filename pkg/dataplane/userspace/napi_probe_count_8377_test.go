@@ -160,7 +160,7 @@ func TestNAPIBootstrapDerivesTheProbeCountFromTheInterface8377(t *testing.T) {
 			if !ok {
 				continue
 			}
-			if fid, ok := inner.Fun.(*ast.Ident); ok && fid.Name == "userspaceRXQueueCount" {
+			if fid, ok := inner.Fun.(*ast.Ident); ok && (fid.Name == "userspaceRXQueueCount" || fid.Name == "userspaceRXQueueCountFn") {
 				sawQueueCountArg = true
 			}
 		}

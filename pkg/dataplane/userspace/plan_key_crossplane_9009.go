@@ -84,7 +84,7 @@ func planKeyEffectiveRXQueues(snapshotRXQueues int, linuxName string) int {
 	if snapshotRXQueues > 0 {
 		return snapshotRXQueues
 	}
-	return userspaceRXQueueCount(linuxName)
+	return userspaceRXQueueCountFn(linuxName)
 }
 
 // planKeyRXQueues is Rust's `plan_key_rx_queues` (#9009 D1).
@@ -104,7 +104,7 @@ func planKeyEffectiveRXQueues(snapshotRXQueues int, linuxName string) int {
 func planKeyRXQueues(snap *ConfigSnapshot, iface InterfaceSnapshot, resolvedLinux string) int {
 	if parent := planKeyVLANChildParent(iface, resolvedLinux); parent != "" {
 		if !planKeySnapshotHasParentCandidate(snap, parent) {
-			return userspaceRXQueueCount(parent)
+			return userspaceRXQueueCountFn(parent)
 		}
 	}
 	return planKeyEffectiveRXQueues(iface.RXQueues, resolvedLinux)
