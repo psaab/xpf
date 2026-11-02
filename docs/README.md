@@ -83,6 +83,10 @@ docs.
   code → review → merge.
 - [`engineering-style.md`](engineering-style.md) — coding/review
   discipline, hot-path rules, review severity.
+- [`close-all-issues-plan.md`](close-all-issues-plan.md) — the active
+  drive-to-zero plan for the open-issue backlog: triple hostile
+  review (GPT-6.1 Sol, GLM-5.3, Kimi K3.1 Pro), parallel builds, and
+  blocking loss/tcp/udp cluster gates for every merge.
 - [`ci-gate-contract.md`](ci-gate-contract.md) — what ordinary CI runs and
   which packet-level gates remain manual.
 - [`testing-procedures.md`](testing-procedures.md) /
