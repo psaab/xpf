@@ -107,12 +107,26 @@ func TestUnconfirmedTakeoverAlarm16024_AbortedFenceIsSilent(t *testing.T) {
 }
 
 func TestUnconfirmedTakeoverAlarm16024_ColdStartIsAlarmed(t *testing.T) {
-	m := NewManager(0, 1)
+	m := coldBootManager(t)
+	m.SetRGReady(0, true, nil)
+	if m.IsLocalPrimary(0) {
+		t.Fatal("cold-start non-preempt RG must remain secondary before absence is confirmed")
+	}
+	if status := m.FormatStatus(); strings.Contains(status, "ALARM: dual-primary risk") {
+		t.Fatalf("cold-start RG must not alarm before peer absence is confirmed:\n%s", status)
+	}
+	if alarm := m.UnconfirmedTakeoverAlarm(); alarm != "" {
+		t.Fatalf("unconfirmed-takeover alarm before absence confirmation = %q, want empty", alarm)
+	}
+
 	m.handlePeerNeverSeen()
+	if !m.IsLocalPrimary(0) {
+		t.Fatal("ready cold-start RG must promote after never-seen peer absence is confirmed")
+	}
 	status := m.FormatStatus()
 	if !strings.Contains(status, "ALARM: dual-primary risk") ||
 		!strings.Contains(status, "peer never seen; no fence possible") {
-		t.Fatalf("unconfirmed cold-start takeover must report the split-brain risk:\n%s", status)
+		t.Fatalf("cold-start promotion must report the split-brain risk:\n%s", status)
 	}
 	if alarm := m.UnconfirmedTakeoverAlarm(); !strings.Contains(alarm, "peer never seen; no fence possible") {
 		t.Fatalf("cold-start takeover alarm = %q, want the no-fence reason", alarm)
