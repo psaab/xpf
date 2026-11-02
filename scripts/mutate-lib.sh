@@ -164,26 +164,28 @@ mutation_infra_broken() {
 
 # mutation_timed_out LOG -> 0 when the run did not FINISH.
 #
-# Two spellings, and a harness needs both because they arrive from different
-# places:
+# The wrapper's VOID banner is authoritative: it emits the banner only after
+# the shared timeout watcher recognizes a timeout and exits 3. In a merged
+# make log the fallback text rescan can miss a real timeout when go test -json
+# interleaves package output.
 #
-#   - go's own `-timeout` fires INSIDE the run and prints `panic: test timed out
-#     after 10m0s` followed by a goroutine dump naming the stuck test. That dump
-#     is the only thing that identifies the subject, which is why a cell should
-#     always be run under an explicit -timeout rather than left to an external
-#     kill: without it you know a cell did not finish and nothing else.
-#   - an EXTERNAL kill (the runner's own budget, a CI step limit) leaves no
-#     marker at all. The caller detects that from the exit status or the elapsed
-#     time and passes timedout=yes to mutation_verdict directly; this function
-#     cannot see it, and pretending otherwise would be the same "absence read as
-#     evidence" mistake the whole library exists to avoid.
+# An EXTERNAL kill (the runner's own budget, a CI step limit) leaves no marker
+# at all. The caller detects that from the exit status or elapsed time and
+# passes timedout=yes to mutation_verdict directly; this function cannot see
+# it.
 #
 # Deliberately NOT keyed on the word "timeout" alone: `--- FAIL` bodies say
 # "timeout" constantly (context deadlines, dial timeouts, an assertion message
 # about a configured timeout), and matching those would score healthy kills as
 # void.
 mutation_timed_out() {
-	grep -qE '^panic: test timed out after ' "$1"
+	# Trust the wrapper's exit-3 banner before falling back to a DETECTONLY
+	# rescan. The rescan can miss a real timeout in an interleaved make log.
+	grep -q '^go-test VOID: go test hit its -timeout in ' "$1" && return 0
+	local d
+	d=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+	awk -v DETECTONLY=1 -f "$d/go-timeout-watch.awk" "$1" 2>/dev/null
+	[ $? -eq 3 ]
 }
 
 # mutation_go_build_broken / mutation_rust_build_broken LOG
@@ -357,8 +359,8 @@ mutation_verdict_for_message() {
 # mutation_score_log LANG LOG APPLIED [TIMEDOUT] -> "BUILT COLLECTED FAILED VERDICT"
 #
 # TIMEDOUT lets a caller report an EXTERNAL kill, which leaves no marker in the
-# log for this function to find. Omitted, the log is still checked for go's own
-# in-run timeout panic.
+# log for this function to find. Omitted, the log is checked first for a go-test
+# wrapper VOID banner, then by the shared timeout-shape fallback.
 mutation_score_log() {
 	local lang="$1" log="$2" applied="$3" ext_timedout="${4:-no}" built collected failed infra timedout
 	infra=no
