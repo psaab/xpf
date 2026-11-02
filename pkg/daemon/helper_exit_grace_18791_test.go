@@ -115,4 +115,10 @@ func TestSpawnedUnarmedResponsiveHelperUsesVIPFirstButNormalControlPathFold18794
 	if d.helperControlSilentForPrep() {
 		t.Fatal("a responsive spawned replacement was misclassified as control-silent")
 	}
+	if d.helperControlConfirmedSilent() {
+		t.Fatal("a responsive spawned replacement was accepted as silent fence evidence")
+	}
+	if err := d.helperDownFenceSilentAck(1, true); err == nil {
+		t.Fatal("a failed rg_active write could be acknowledged while the spawned replacement answers control")
+	}
 }
