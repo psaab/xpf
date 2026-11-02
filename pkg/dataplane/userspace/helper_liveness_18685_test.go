@@ -215,6 +215,7 @@ func TestUnexpectedExitInheritsNotReadyUntilArmed18685(t *testing.T) {
 		now := t0.Add(time.Duration(sec) * time.Second)
 		tr.noteAnswered(2, now)
 		tr.noteStatus(2, now, heartbeats18685(6, now), true)
+		tr.noteAppliedForwardingReady(2, now)
 	}
 	if tr.wedgeSuspected(t0.Add(30 * time.Second)) {
 		t.Fatal("still not ready after the new helper armed and looked healthy")
@@ -582,6 +583,7 @@ func TestTransitionLogsAreEmittedOutsideTheTrackerLock18704(t *testing.T) {
 		now := t0.Add(time.Duration(sec) * time.Second)
 		tr.noteAnswered(1, now)
 		tr.noteStatus(1, now, heartbeats18685(2, now), true) // armed + healthy: clear
+		tr.noteAppliedForwardingReady(1, now)
 	}
 	tr.wedgeSuspected(t0.Add(21 * time.Second))
 	h.mu.Lock()

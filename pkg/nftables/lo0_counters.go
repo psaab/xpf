@@ -61,12 +61,39 @@ func ParseLo0CounterName(name string) (counter string, ok bool) {
 	return rest, true
 }
 
-// Lo0Count is one lo0 input-filter `then count` counter read from the
-// `inet xpf_lo0` table.
+// lo0ImplicitDiscardCounterPrefix namespaces the per-family counter of the
+// lo0 mirror's implicit final discard (#18728). It is deliberately NOT under
+// lo0CounterPrefix: every byte string after that prefix is a possible
+// operator `then count` name, so an implicit counter there could merge with
+// (or, in the Prometheus series, duplicate) an authored one.
+const lo0ImplicitDiscardCounterPrefix = "xpflo0implicit_"
+
+// Lo0ImplicitDiscardCounterName returns the counter object of the lo0
+// implicit final discard for family "inet" or "inet6" (#18728).
+func Lo0ImplicitDiscardCounterName(family string) string {
+	return lo0ImplicitDiscardCounterPrefix + family
+}
+
+// ParseLo0ImplicitDiscardCounterName reverses Lo0ImplicitDiscardCounterName,
+// returning the family ("inet" / "inet6") or ok=false.
+func ParseLo0ImplicitDiscardCounterName(name string) (family string, ok bool) {
+	rest, found := strings.CutPrefix(name, lo0ImplicitDiscardCounterPrefix)
+	if !found || (rest != "inet" && rest != "inet6") {
+		return "", false
+	}
+	return rest, true
+}
+
+// Lo0Count is one lo0 input-filter counter read from the `inet xpf_lo0`
+// table: a `then count` counter (Counter set) or the per-family implicit
+// final discard counter (#18728; ImplicitDiscardFamily set, Counter empty).
 type Lo0Count struct {
 	Counter string // the (sanitized) Junos `then count <name>`
-	Packets uint64
-	Bytes   uint64
+	// ImplicitDiscardFamily is "inet" or "inet6" for the implicit-discard
+	// counter of that family's lo0 filter, "" for a `then count` counter.
+	ImplicitDiscardFamily string
+	Packets               uint64
+	Bytes                 uint64
 }
 
 // ReadLo0Counters reads the named `then count` counters from the kernel
@@ -117,6 +144,14 @@ func ReadLo0Counters() ([]Lo0Count, error) {
 	for _, o := range objs {
 		co, ok := o.(*nftables.CounterObj)
 		if !ok {
+			continue
+		}
+		if family, ok := ParseLo0ImplicitDiscardCounterName(co.Name); ok {
+			out = append(out, Lo0Count{
+				ImplicitDiscardFamily: family,
+				Packets:               co.Packets,
+				Bytes:                 co.Bytes,
+			})
 			continue
 		}
 		counter, ok := ParseLo0CounterName(co.Name)

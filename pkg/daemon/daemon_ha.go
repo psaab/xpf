@@ -821,8 +821,8 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// so traffic is already on the fabric path before
 		// the VRRP BACKUP transition removes VIPs.
 		// #18701: when this node is losing the RG and its own helper is not
-		// answering (dead, restarting, not yet armed, or wedged: the
-		// #18697/#18685 verdict), nothing on this node forwards for the RG,
+		// answering (dead, restarting, not yet forwarding-ready, or wedged:
+		// the #18697/#18685 verdict), nothing on this node forwards for the RG,
 		// so there is nothing for make-before-break to protect. Every helper
 		// round trip below would burn its deadline first while both nodes
 		// hold the VIPs: on tcp the old primary kept the LAN VIP ~26 s after
@@ -854,7 +854,7 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// below is bounded, so the two cannot disagree. The fence ack after
 		// the write re-samples it fresh (helperDownFenceSilentAck), because
 		// by then the entry sample may be seconds old.
-		helperDownDemotion := clusterDemotionEdge && noRethVRRP && d.helperElectionNotReady()
+		helperDownDemotion := clusterDemotionEdge && noRethVRRP && d.helperDownForDemotion()
 		controlSilentAtEntry := helperDownDemotion && d.helperControlSilentForPrep()
 		if helperDownDemotion {
 			slog.Warn("cluster: demoting with an unresponsive helper; releasing VIPs before helper-side demotion (#18701)",
@@ -1650,7 +1650,7 @@ func (d *Daemon) reconcileRGState() {
 	// this, an RG that still needs its demotion applied runs the 5 s prep and
 	// an unbounded write before its own VIP reconcile, and a later RG waits
 	// behind both.
-	reconcileHelperDown := noRethVRRP && d.helperElectionNotReady()
+	reconcileHelperDown := noRethVRRP && d.helperDownForDemotion()
 	if reconcileHelperDown {
 		d.releaseDirectVIPsHelperDown("reconcile-helper-down")
 	}

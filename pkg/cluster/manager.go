@@ -724,6 +724,9 @@ type Manager struct {
 	// the rgStateMachine; nil in tests and before wiring, in which case the
 	// forwarding sub-line is omitted entirely rather than rendered as a guess.
 	rgForwardingFn func(rgID int) (RGForwarding, bool)
+	// fabricSegmentAlarmsFn returns the #18719 fabric-segment watcher's raised
+	// alarm lines (pkg/fabricsegment). Nil until the daemon wires it.
+	fabricSegmentAlarmsFn func() []string
 	// localTransferCommitReadyFn runs on the requesting node after local
 	// ownership has been committed but before the final peer-demotion
 	// commit is sent. The daemon uses this to ensure the target node has

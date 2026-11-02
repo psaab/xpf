@@ -914,6 +914,72 @@ would blackhole every flow handed to it.
   node0 primary and transit dead (#18696). An intentional stop or respawn (a
   plan-key change, an operator stop) keeps the F2 pass-through: it neither
   installs nor wipes arm debt, so a config commit does not move the RGs.
+- **Restart grace on the exit debt (#18791).** The exit raises debt at the end
+  of `helperExitGrace` (2.5 s) if the replacement has not become
+  forwarding-ready by then. Readiness requires `ForwardingArmed`, successful
+  application of `ctrl=1`, proven XSK liveness, and every addressable binding
+  BPF READY.
+  - **Why:** with the #18717 zero-delay restart a crashed helper recovers
+    locally (first forwarded ping 1.58-1.77 s after SIGKILL, 7 samples on
+    udp, `docs/log/18707.md`). That is FASTER than the RG move the immediate
+    debt caused: 1.8-2.9 s of loss, with the debt held about 0.09 s after the
+    exit.
+  - **The grace value:** the exit is observed about 0.5 s after the SIGKILL,
+    so the replacement became forwarding-ready within about 1.3 s of where the
+    grace is measured from. 2.5 s gives about 1.9x headroom for a loaded host;
+    with 2 s, a restart slowed by load would both pay the grace and move.
+  - **Inside the grace:** the node keeps the RGs at full weight; the transit
+    gate sees the F2 pass-through.
+    - A replacement that becomes forwarding-ready inside it ends the episode
+      with no debt and no move, and logs `helper recovered locally within the
+      restart grace ... no failover`.
+    - Without forwarding readiness, the debt is raised at the deadline and
+      logs `helper not forwarding-ready within the restart grace ... raising
+      election debt`. From then the clear-after-forwarding-ready-and-healthy
+      rule above applies.
+    - The deadline wakes the transit gate through the supervisor observer, so
+      the move starts at the deadline and not at the next 1 s tick.
+    - **Deadline responsiveness:** `HelperSupervisorState` reads one
+      generation-fenced atomic snapshot, published at spawn before the
+      readiness wait. The transit gate never waits on `Manager.mu`, which
+      startup holds while it polls for a non-serving helper.
+  - **No grace (debt at once):**
+    - a second unexpected exit while the first episode is open (the
+      replacement died before becoming forwarding-ready);
+    - an exit within `helperExitCrashLoopWindow` (30 s) of the previous one;
+    - the exit of a generation the wedge verdict had already raised (the
+      wedge kill).
+  - **The wedge verdict (#18685) is unchanged,** inside the grace too.
+  - **Cost:** a helper that is truly dead or slow to become forwarding-ready
+    keeps its traffic black-holed on this node for up to 2.5 s longer than
+    before, and only then does the RG move begin.
+  - **Hand-off:** the exit flag is read and inherited by the new generation's
+    tracker. It remains set through spawn and is cleared only after an armed
+    status successfully applies `ctrl.Enabled=1`, XSK liveness is proven, and
+    every addressable binding is BPF READY, closing the ready and demotion
+    windows.
+  - **Late forwarding readiness:** a first applied forwarding-ready state
+    after the deadline does not erase the episode. It raises debt, which then
+    clears only through the existing forwarding-ready-and-healthy hysteresis.
+  - **Clock:** grace and crash-loop deadlines retain Go's monotonic `time.Time`
+    readings, so a wall-clock step cannot extend or shorten either interval.
+  - **During the grace and until forwarding-ready, VIP-first demotion applies:**
+    it keys on `HelperExitedUnexpectedly` separately from control-socket
+    responsiveness, so an answering but unarmed, ctrl-disabled, XSK-unproven,
+    or registered-but-unbound replacement is not mistaken for ready.
+  - A replacement that never answers or becomes forwarding-ready and is stopped
+    by readiness timeout retains the original exit flag, so debt still rises
+    at the grace deadline.
+  - **Cells:** `TestExitGraceNeedsAppliedForwardingReadyFold18794` proves
+    disabled ctrl retains debt and a fully ready applied status closes grace;
+    `TestExitGraceRequiresBoundAndProvenXSKFold18794` proves an unbound
+    registered binding cannot close grace even when ctrl=1 starts the probe;
+    `TestExitGraceRequiresProvenXSKFold18794` proves BPF READY and probe ctrl
+    still cannot close grace without XSK liveness proof;
+    `TestTransitGateReadsGraceDebtWhileManagerMutexHeldFold18794` pins deadline
+    debt while readiness holds `Manager.mu`; `helper_exit_grace_18791_test.go`
+    also covers the userspace/daemon cells, and
+    `pkg/cluster/exit_grace_election_18791_test.go` covers election behavior.
   When restart backoff reaches its cap, a dedicated full-cost monitor debt
   takes a DATA RG's local weight to 0 so even a non-preempt incumbent yields.
   RG0 is excluded: it is the config-authority group with no data VIP, and
@@ -1082,7 +1148,17 @@ count with time and adds a worker-progress input:
   - `reason="no control request answered for Xs over N round trips"`, the
     silence input;
   - `helper restarted after an unexpected exit; holding election debt until
-    it is armed and healthy (#18697)`.
+    it is forwarding-ready and healthy (#18697)`, when the exit got no restart
+    grace;
+  - `helper not forwarding-ready within the restart grace after an unexpected
+    exit; raising election debt ... (#18791)`.
+
+  An exit inside its grace logs `keeping the RGs locally while the replacement
+  becomes forwarding-ready, up to the restart grace (#18791)`. Then either
+  `recovered locally within the restart grace ... no failover`, which raises no
+  debt, or the line above.
+  The exit's own ERROR line names the decision in `election_grace` (`2.5s`,
+  or `none (election debt at once): <why>`).
 
   The debt itself lands on the shared dataplane-arm monitor. So in `show
   chassis cluster status` it looks like any other arm failure

@@ -216,6 +216,17 @@ func (a *LegacyDataPlaneAdapter) HelperControlUnresponsive() bool {
 	return m.HelperControlUnresponsive()
 }
 
+// HelperExitedUnexpectedly forwards the #18791 signal that an unexpected-exit
+// replacement has not yet become forwarding-ready, including after spawn. The
+// daemon's VIP-first demotion keys on it separately from control responsiveness.
+func (a *LegacyDataPlaneAdapter) HelperExitedUnexpectedly() bool {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false
+	}
+	return m.HelperExitedUnexpectedly()
+}
+
 // HelperElectionReason forwards the #18701 verdict explanation.
 func (a *LegacyDataPlaneAdapter) HelperElectionReason() string {
 	m, err := a.managerOrErr()

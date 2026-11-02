@@ -34,6 +34,7 @@ func (m *Manager) FormatStatus() string {
 		kernelHold = m.kernelUpgradeHoldReason
 	}
 	rgForwardingFn := m.rgForwardingFn
+	fabricSegmentAlarmsFn := m.fabricSegmentAlarmsFn
 	peerGroups := make(map[int]PeerGroupState, len(m.peerGroups))
 	for k, v := range m.peerGroups {
 		peerGroups[k] = v
@@ -102,6 +103,15 @@ func (m *Manager) FormatStatus() string {
 		// admitted heartbeat carried the peer's clock.
 		if line := m.formatPeerClockLine(); line != "" {
 			fmt.Fprintln(&b, line)
+		}
+	}
+	// #18719: evidence that the fabric is not a private two-peer segment.
+	// Rendered above every "Redundancy group:" block with a non-node first
+	// field, like "Held secondary" (#4009: deploy-lib's awk reads node rows
+	// inside RG blocks).
+	if fabricSegmentAlarmsFn != nil {
+		for _, line := range fabricSegmentAlarmsFn() {
+			fmt.Fprintf(&b, "Warning: %s\n", line)
 		}
 	}
 	fmt.Fprintln(&b)

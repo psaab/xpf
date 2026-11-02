@@ -644,7 +644,7 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 				m.noteStatusPollResultLocked(nil, pollResultTime)
 				// #18685: worker heartbeats and the arm state feed the
 				// frozen-worker and post-kill parts of the wedge verdict.
-				m.liveTrack.noteStatus(pollProcGen, pollReturnedAt, status.WorkerHeartbeats, status.ForwardingArmed)
+				m.noteHelperStatus(pollProcGen, pollReturnedAt, status.WorkerHeartbeats, status.ForwardingArmed)
 			} else if errors.Is(pollErr, errStatusDecode) {
 				// #18293: answered but undecodable. Surface it as a decode
 				// error and never kill: the helper provably answered.

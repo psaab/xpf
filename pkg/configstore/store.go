@@ -124,6 +124,16 @@ type Store struct {
 	configDir bool // true if in configuration mode
 	filePath  string
 
+	// advisoryBaselineTree is the active tree whose change-scoped reminders
+	// were presented to the operator (or whose commit emitted none). A
+	// promoted commit whose reminders were not shown invalidates it so the
+	// next operator commit reports them again (#18719, #18751 review).
+	// Reminders are dropped only while s.active is still exactly that tree:
+	// boot load, config-sync apply, auto-rollback and every other writer of
+	// s.active install a different tree. A DNS refresh swaps s.compiled but
+	// not s.active, so it does not reset the baseline. Nil until presentation.
+	advisoryBaselineTree *config.ConfigTree
+
 	// candidateGen is a MONOTONIC token that changes whenever the candidate
 	// tree changes identity or content — every set/delete/load/rename/copy/
 	// insert/annotate/(de)activate mutation, every rollback, every

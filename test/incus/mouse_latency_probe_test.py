@@ -246,8 +246,21 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
         duration,
         min_interval_ms,
         connection_mode="persistent",
+        close_after_echo=False,
+        delayed_coroutines=(),
+        coroutine_delay=0.0,
     ):
         connection_count = 0
+        connections_per_coroutine = [0] * concurrency
+        coroutine_indices = {}
+        task_indices = {}
+        original_open_connection = probe.asyncio.open_connection
+        probe_coro_name = (
+            "_run_persistent_probe_coro"
+            if connection_mode == "persistent"
+            else "_run_per_attempt_probe_coro"
+        )
+        original_probe_coro = getattr(probe, probe_coro_name)
 
         async def handle_echo(reader, writer):
             nonlocal connection_count
@@ -259,13 +272,35 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
                         break
                     writer.write(data)
                     await writer.drain()
+                    if close_after_echo:
+                        await asyncio.sleep(0.001)
+                        break
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
             finally:
                 writer.close()
 
+        async def counted_open_connection(*args, **kwargs):
+            task_index = task_indices.get(asyncio.current_task())
+            reader, writer = await original_open_connection(*args, **kwargs)
+            if task_index is not None:
+                connections_per_coroutine[task_index] += 1
+            return reader, writer
+
+        async def delayed_probe_coro(*args, **kwargs):
+            attempt_counter = args[6]
+            index = coroutine_indices.setdefault(
+                id(attempt_counter), len(coroutine_indices)
+            )
+            task_indices[asyncio.current_task()] = index
+            if index in delayed_coroutines:
+                await asyncio.sleep(coroutine_delay)
+            return await original_probe_coro(*args, **kwargs)
+
         server = await asyncio.start_server(handle_echo, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
+        setattr(probe, probe_coro_name, delayed_probe_coro)
+        probe.asyncio.open_connection = counted_open_connection
         try:
             args = SimpleNamespace(
                 target="127.0.0.1",
@@ -278,19 +313,44 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
             )
             result = await _run(args)
         finally:
+            probe.asyncio.open_connection = original_open_connection
+            setattr(probe, probe_coro_name, original_probe_coro)
             server.close()
             await server.wait_closed()
-        return result, connection_count
+        return result, connection_count, connections_per_coroutine
+
+    def _assert_same_coroutine_reused_connection(
+        self, result, connections_per_coroutine
+    ):
+        attempts_per_coroutine = result["totals"]["attempts_per_coroutine"]
+        self.assertTrue(
+            any(
+                attempts >= 2 and connections == 1
+                for attempts, connections in zip(
+                    attempts_per_coroutine, connections_per_coroutine
+                )
+            ),
+            "no coroutine made at least two attempts on its single connection",
+        )
 
     async def test_persistent_mode_reuses_one_connection_per_coroutine(self):
-        result, connection_count = await self._run_local_echo_probe(
-            concurrency=3,
-            duration=0.2,
-            min_interval_ms=0.0,
+        # G10 (#18737 triage): judge REUSE directly, not a completion count. At
+        # loadavg ~30, 0.2 s gave fewer than 4 completions and the cell failed
+        # with reuse intact. The property is that one coroutine made at least
+        # two attempts over its single connection.
+        # 0.5 s keeps that observable under load.
+        result, connection_count, connections_per_coroutine = (
+            await self._run_local_echo_probe(
+                concurrency=3,
+                duration=0.5,
+                min_interval_ms=0.0,
+            )
         )
         self.assertEqual(result["config"]["connection_mode"], "persistent")
         self.assertEqual(result["config"]["min_interval_ms"], 0.0)
-        self.assertGreater(result["totals"]["completed"], 3)
+        self._assert_same_coroutine_reused_connection(
+            result, connections_per_coroutine
+        )
         self.assertEqual(
             result["totals"]["attempted"],
             result["totals"]["completed"] + result["totals"]["errors"],
@@ -302,35 +362,101 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(result["phase_us"]["drain_us"]["count"], 0)
         self.assertIn("max_start_gap_us", result["coroutines"][0])
 
-    async def test_min_interval_bounds_persistent_attempt_rate(self):
-        result, connection_count = await self._run_local_echo_probe(
-            concurrency=1,
-            duration=0.12,
-            min_interval_ms=20.0,
+    async def test_reuse_assertion_rejects_skewed_progress_without_reuse(self):
+        # Two coroutines start after the probe deadline. The active one makes
+        # successful per-attempt connections to a server that closes after each
+        # echo: the old aggregate predicate (attempts >= 2, connections <= 3)
+        # says reuse happened, although each attempt uses a distinct connection.
+        result, connection_count, connections_per_coroutine = (
+            await self._run_local_echo_probe(
+                concurrency=3,
+                duration=0.6,
+                min_interval_ms=250.0,
+                connection_mode="per-attempt",
+                close_after_echo=True,
+                delayed_coroutines=(0, 1),
+                coroutine_delay=0.7,
+            )
         )
-        self.assertEqual(result["config"]["min_interval_ms"], 20.0)
-        self.assertGreaterEqual(result["totals"]["completed"], 3)
-        self.assertLessEqual(result["totals"]["attempted"], 8)
+        attempts_per_coroutine = result["totals"]["attempts_per_coroutine"]
+        self.assertEqual(attempts_per_coroutine[:2], [0, 0])
+        active_attempts = attempts_per_coroutine[2]
+        self.assertGreaterEqual(active_attempts, 2)
+        self.assertEqual(connections_per_coroutine[:2], [0, 0])
+        self.assertEqual(connections_per_coroutine[2], active_attempts)
+        self.assertEqual(result["coroutines"][2]["completed"], active_attempts)
+        self.assertEqual(connection_count, active_attempts)
+        self.assertLessEqual(connection_count, 3)
+        self.assertLessEqual(result["totals"]["error_rate"], 0.05)
+        with self.assertRaisesRegex(AssertionError, "single connection"):
+            self._assert_same_coroutine_reused_connection(
+                result, connections_per_coroutine
+            )
+
+    async def test_min_interval_bounds_persistent_attempt_rate(self):
+        # G10 (#18737 triage): judge the INTERVAL bound, not a completion count.
+        # Load can only stretch the gaps and cut attempts. It cannot shorten a
+        # gap or add an attempt, so the upper bound on attempts and the lower
+        # bound on the start gap stay sound under load. The old ">= 3 completed
+        # in 0.12 s" failed at loadavg ~30 with the bound intact. 0.3 s keeps
+        # at least one gap observable.
+        duration, interval_ms = 0.3, 20.0
+        result, connection_count, _ = await self._run_local_echo_probe(
+            concurrency=1,
+            duration=duration,
+            min_interval_ms=interval_ms,
+        )
+        self.assertEqual(result["config"]["min_interval_ms"], interval_ms)
+        self.assertGreaterEqual(
+            result["totals"]["completed"], 2, "no start gap was observable"
+        )
+        self.assertLessEqual(
+            result["totals"]["attempted"],
+            int(duration * 1000 / interval_ms) + 2,
+        )
         self.assertLessEqual(connection_count, 1)
         self.assertGreater(result["phase_us"]["sleep_overshoot_us"]["count"], 0)
         self.assertGreaterEqual(result["phase_us"]["start_gap_us"]["max"], 15_000)
+        self.assertGreaterEqual(
+            result["phase_us"]["start_gap_us"]["p50"],
+            15_000,
+            "the median start gap is under the 20 ms min interval",
+        )
 
     async def test_min_interval_bounds_per_attempt_rate(self):
-        result, connection_count = await self._run_local_echo_probe(
+        duration, interval_ms = 0.3, 20.0
+        result, connection_count, _ = await self._run_local_echo_probe(
             concurrency=1,
-            duration=0.12,
-            min_interval_ms=20.0,
+            duration=duration,
+            min_interval_ms=interval_ms,
             connection_mode="per-attempt",
         )
         self.assertEqual(result["config"]["connection_mode"], "per-attempt")
-        self.assertEqual(result["config"]["min_interval_ms"], 20.0)
-        self.assertGreaterEqual(result["totals"]["completed"], 3)
-        self.assertLessEqual(result["totals"]["attempted"], 8)
+        self.assertEqual(result["config"]["min_interval_ms"], interval_ms)
+        self.assertGreaterEqual(
+            result["totals"]["completed"], 1, "no successful echo completed"
+        )
+        self.assertLessEqual(
+            result["totals"]["attempted"],
+            int(duration * 1000 / interval_ms) + 2,
+        )
         self.assertEqual(
             result["totals"]["attempted"],
             result["totals"]["completed"] + result["totals"]["errors"],
         )
         self.assertGreaterEqual(connection_count, result["totals"]["completed"])
+        self.assertGreater(result["phase_us"]["sleep_overshoot_us"]["count"], 0)
+        self.assertGreater(
+            result["phase_us"]["start_gap_us"]["count"],
+            0,
+            "no inter-attempt gap was observable",
+        )
+        self.assertGreaterEqual(result["phase_us"]["start_gap_us"]["max"], 15_000)
+        self.assertGreaterEqual(
+            result["phase_us"]["start_gap_us"]["p50"],
+            15_000,
+            "the median per-attempt start gap is under the 20 ms min interval",
+        )
 
     async def _run_with_forced_drain_timeout(self, *, connection_mode):
         async def handle_echo(reader, writer):
