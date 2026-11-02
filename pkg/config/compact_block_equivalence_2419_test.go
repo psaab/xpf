@@ -741,7 +741,7 @@ var filedFixed = map[string]string{
 	// #18762 repaired these value-bearing tcp-session leaves whose compact
 	// spellings committed while dropping the configured values. Keep the
 	// sites anchored so a census/parser regression cannot make them look fixed.
-	"security flow tcp-session maximum-window":    "#18762",
+	"security flow tcp-session maximum-window":     "#18762",
 	"security flow tcp-session rst-sequence-check": "#18762",
 	"security flow tcp-session strict-syn-check":   "#18762",
 }
@@ -937,13 +937,13 @@ type censusResult struct {
 	// checked population is ratcheted in the two-level inventory. Every
 	// security-flow skip has an exact reasoned entry, so a failed compile
 	// cannot disappear from the measured population.
-	twoLevelDivergent []string
-	twoLevelEligible  int
-	twoLevelChecked   int
-	twoLevelSkipped   int
-	securityFlowTwoLevelEligible int
-	securityFlowTwoLevelChecked  int
-	securityFlowTwoLevelSkipped  int
+	twoLevelDivergent              []string
+	twoLevelEligible               int
+	twoLevelChecked                int
+	twoLevelSkipped                int
+	securityFlowTwoLevelEligible   int
+	securityFlowTwoLevelChecked    int
+	securityFlowTwoLevelSkipped    int
 	securityFlowTwoLevelSkipReason map[string]string
 	// twoLevelShape is each divergent two-level site's DROP SHAPE on the
 	// STRICT commit path (see twoLevelDropShape18771), inventoried in
@@ -1163,7 +1163,7 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 	res := censusResult{
 		skipped: map[string]int{}, state: map[string]string{},
 		dropShape: map[string]string{}, unobservedClass: map[string]int{},
-		twoLevelShape: map[string]string{},
+		twoLevelShape:                  map[string]string{},
 		securityFlowTwoLevelSkipReason: map[string]string{},
 	}
 	emptyCfg := compileText(t, "")
