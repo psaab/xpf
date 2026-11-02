@@ -129,45 +129,38 @@ func TestMultiPipeDispatchDoesNotHideLaterStages14714(t *testing.T) {
 }
 
 func TestMultiPipeDispatchFullChainOrder14714(t *testing.T) {
-	// Allow anchored on the FULL chain in original order. Only the
-	// exact chain `show version | no-more | count` may run: the gate
-	// must receive every stage, in the order typed. A gate that saw
-	// only the innermost stage (`no-more`), only the outermost
-	// (`count`), the pipe-less command, or the stages reordered
-	// would decide differently on at least one row below — each row
-	// is the control for one of those truncations. (The pipe-less
-	// form is also measured by design, #9628, so this pattern —
-	// which requires the pipes — matches no pipe-less form.)
-	c := &CLI{store: multiPipeStore14714(t, `^show version \| no-more \| count$`, ""), userClass: "piped", version: "14714-test"}
+	// A pipe-bearing allow alone cannot satisfy the allowlist (#14686):
+	// the operator must also be allowed to run the pipe-less command. Use a
+	// deny-only rule here to isolate whether the complete ordered chain
+	// reaches the authorization gate.
+	c := &CLI{store: multiPipeStore14714(t, "", `^show version \| no-more \| count$`), userClass: "piped", version: "14714-test"}
 
 	out := captureStdout(t, func() {
-		if err := c.dispatch("show version | no-more | count"); err != nil {
-			t.Errorf("the exact allowed chain must run: %v", err)
+		if err := c.dispatch("show version | no-more | count"); err == nil {
+			t.Error("the exact denied chain must be refused")
+		} else if !strings.Contains(err.Error(), "denies") {
+			t.Errorf("full-chain refusal must come from the command regex: %v", err)
 		}
 	})
-	if !strings.Contains(out, "Count:") {
-		t.Errorf("allowed chain output = %q, want a Count line", out)
+	if strings.Contains(out, "14714-test") {
+		t.Errorf("the denied chain leaked version output %q", out)
 	}
 
+	// Only the exact chain is denied. Each alternate spelling is a
+	// control: truncation or reordering must not be mistaken for the
+	// configured deny form.
 	for _, line := range []string{
-		"show version",                             // pipe-less: requires the pipes
-		"show version | no-more",                   // truncated chain
-		"show version | count",                     // innermost stage only
-		"show version | count | no-more",           // reversed order
-		"show version | no-more | count | no-more", // extended chain
+		"show version",
+		"show version | no-more",
+		"show version | count",
+		"show version | count | no-more",
+		"show version | no-more | count | no-more",
 	} {
 		out = captureStdout(t, func() {
-			if err := c.dispatch(line); err == nil {
-				t.Errorf("%q was ALLOWED under allow ^show version \\| no-more \\| count$; the full pipe chain must reach the gate in original order", line)
+			if err := c.dispatch(line); err != nil {
+				t.Errorf("%q unexpectedly denied by the exact-chain rule: %v", line, err)
 			}
 		})
-		// A denied command produces no command output; a `count`
-		// filter over the empty denied stream legitimately prints
-		// "Count: 0 lines" (it ran, its input was empty). Anything
-		// carrying the version banner is a leak.
-		if strings.Contains(out, "14714-test") {
-			t.Errorf("%q leaked version output %q despite allowlist refusal", line, out)
-		}
 	}
 }
 
