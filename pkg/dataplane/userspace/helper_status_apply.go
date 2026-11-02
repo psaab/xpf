@@ -185,6 +185,8 @@ func (m *Manager) bindingReadinessLocked(status *ProcessStatus) (bool, bool) {
 	// shim and the userspace_bindings map exposes the binding slots.
 	// Requiring Bound here deadlocks startup: ctrl stays off, the shim
 	// keeps passing packets away from XSK, and Bound never flips true.
+	// These predicates allow a probe; exit-grace forwarding readiness is
+	// stricter and requires proven XSK liveness plus every binding BPF READY.
 	probeBindingsReady := len(status.Bindings) > 0
 	allBindingsBound := len(status.Bindings) > 0
 	for _, b := range status.Bindings {

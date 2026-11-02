@@ -289,9 +289,12 @@ func (m *Manager) startHelperSupervisorLocked(cmd *exec.Cmd) {
 	g := &helperGeneration{gen: m.procGen, cmd: cmd, exited: make(chan struct{})}
 	m.procSup = g
 	// #18697/#18685: a generation started right after an unexpected exit (a
-	// crash or a wedge kill) keeps a not-ready verdict, and so the election
-	// debt, until it reports ForwardingArmed and then looks healthy.
-	m.liveTrack.reset(m.procGen, time.Now(), m.helperDownUnexpected.Swap(false))
+	// crash or a wedge kill) keeps a not-ready verdict, and so the election debt,
+	// until Go has applied an armed status to ctrl and then the helper looks
+	// healthy. #18791: the hand-off carries the verdict and grace without a gap.
+	m.handOffExitVerdictLocked(m.procGen, time.Now())
+	// Publish the live generation before readiness polling can block m.mu.
+	m.publishHelperSupervisorStateLocked()
 	go m.superviseHelper(g)
 	go m.watchHelperLiveness(g, helperWatchdogTick)
 }
@@ -362,6 +365,13 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	now := time.Now()
 	// #18697: the node must not keep the RGs while this helper is gone. The
 	// daemon's transit tick reads this lock-free and raises election debt.
+	// #18791: unless the replacement arms within the restart grace. The
+	// grace is decided and published BEFORE the flag, so a reader that sees
+	// the flag also sees this exit's deadline.
+	m.noteUnexpectedExitGraceLocked(now)
+	if control := m.helperControlGeneration.Load(); control != nil && control.gen == g.gen {
+		control.departed.Store(true)
+	}
 	m.helperDownUnexpected.Store(true)
 	// The Prometheus counter is per unexpected exit, not per completed
 	// episode; otherwise a persistent loop inside the quiet window is silent.
@@ -377,8 +387,14 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	if g.cmd.Process != nil {
 		pid = g.cmd.Process.Pid
 	}
+	grace := "none (election debt at once)"
+	if d := m.exitGraceDeadline(); !d.IsZero() {
+		grace = helperExitGrace.String()
+	} else if why := m.exitGraceWaiveReason.Load(); why != nil {
+		grace += ": " + *why
+	}
 	slog.Error("userspace dataplane helper exited unexpectedly; failing closed and scheduling restart (#5838)",
-		"pid", pid, "disposition", detail, "generation", g.gen)
+		"pid", pid, "disposition", detail, "generation", g.gen, "election_grace", grace)
 
 	// Retire the independent helper-session epoch immediately, but keep the
 	// explicit fail-closed disarm FIRST. The restart timer must continue to use
@@ -534,25 +550,44 @@ func (m *Manager) HelperCrashState() HelperCrashRecord {
 	return rec
 }
 
+// helperSupervisorSnapshot is one generation's immutable HA view. Publishing
+// the pair atomically prevents the transit gate from observing a running bit
+// and crash-loop bit from different lifecycle transactions.
+type helperSupervisorSnapshot struct {
+	generation   uint64
+	running      bool
+	crashLooping bool
+}
+
+// publishHelperSupervisorStateLocked publishes the state consumed by the
+// transit gate. The generation fence and both booleans are captured in one
+// manager-lock transaction.
+func (m *Manager) publishHelperSupervisorStateLocked() {
+	state := &helperSupervisorSnapshot{
+		generation: m.procGen,
+		running:    m.proc != nil && m.proc.Process != nil,
+	}
+	if !state.running {
+		state.crashLooping = m.procGen == m.helperCrash.restartGen && m.helperCrash.CrashLooping()
+	}
+	m.helperSupervisorState.Store(state)
+}
+
 // HelperSupervisorState reports whether a helper process is currently
 // supervised and whether an armed retry for its unexpected-exit episode has
 // reached the restart-backoff cap. An intentional stop or cancelled retry is
 // not a crash loop even though the crash record remains available for status.
+// It reads one immutable snapshot so a transit-gate pass never waits for a
+// startup or teardown operation holding m.mu.
 func (m *Manager) HelperSupervisorState() (running, crashLooping bool) {
 	if m == nil {
 		return false, false
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	running = m.proc != nil && m.proc.Process != nil
-	if running {
-		return running, false
+	state := m.helperSupervisorState.Load()
+	if state == nil {
+		return false, false
 	}
-	// Only the retry count arm contributes to the HA verdict. It is fenced
-	// to the generation whose retry is armed, so an intentional stop cannot
-	// turn a stale crash record into current election debt.
-	crashLooping = m.procGen == m.helperCrash.restartGen && m.helperCrash.CrashLooping()
-	return running, crashLooping
+	return state.running, state.crashLooping
 }
 
 // SetHelperSupervisorObserver installs a wake-only state-change observer.
@@ -564,9 +599,11 @@ func (m *Manager) SetHelperSupervisorObserver(fn func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.helperSupervisorObserver = fn
+	m.publishHelperSupervisorStateLocked()
 }
 
 func (m *Manager) notifyHelperSupervisorLocked() {
+	m.publishHelperSupervisorStateLocked()
 	if m.helperSupervisorObserver != nil {
 		m.helperSupervisorObserver()
 	}

@@ -183,7 +183,13 @@ func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket stri
 	// here, after controlReqMu, so time spent queued behind other callers is
 	// never charged to the helper.
 	rtStart, rtGen, received := time.Now(), m.liveTrack.generation(), false
-	defer func() { m.liveTrack.noteRoundTrip(rtGen, rtStart, time.Now(), retErr, received) }()
+	defer func() {
+		end := time.Now()
+		m.liveTrack.noteRoundTrip(rtGen, rtStart, end, retErr, received)
+		if answered, _ := classifyControlRoundTrip(retErr, received); answered {
+			m.noteHelperControlAnswered(rtGen)
+		}
+	}()
 	if controlSocket == "" {
 		return ControlResponse{}, &knownUnsentError{msg: errControlSocketNotConfigured.Error(), cause: errControlSocketNotConfigured}
 	}
