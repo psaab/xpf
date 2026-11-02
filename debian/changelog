@@ -1,4 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Lab stack address collision (#18574): move standalone and legacy-local
+    NAT64/SNAT pools off foreign-held VLAN 50 addresses and document the
+    same-day RFC 5227 probe results for the replacement addresses.
   * Firewall filters: a packet that matches no term of a stateless firewall
     filter (interface input/output, inet and inet6, and the lo0 input
     filter) is now DISCARDED, as on Junos, instead of accepted. Each such
