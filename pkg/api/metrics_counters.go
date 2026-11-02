@@ -1115,11 +1115,16 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 			}
 			// #18728: the synthetic implicit-discard term is not in
 			// filter.Terms, so its helper counter gets its own series. An
-			// authored term of the same name already owns that labelset
-			// (and the by-name aggregate folded the synthetic row into it),
-			// so it is not emitted twice: a duplicate labelset fails Gather
-			// (#15192).
-			if _, authored := aggs[dpuserspace.ImplicitDiscardTermName]; !authored && !config.FirewallFilterHasCatchAll(filter) {
+			// authored term of the same name that EMITTED already owns that
+			// labelset (the by-name aggregate folded the synthetic row into
+			// it), so it is not emitted twice: a duplicate labelset fails
+			// Gather (#15192). But an authored same-name term that did not
+			// emit — e.g. one without `then count`, which #16454 leaves
+			// uninstrumented — owns no series, so the synthetic hits must
+			// still surface here; suppressing them by name existence alone
+			// would hide the filter's implicit-discard counter entirely.
+			authoredAgg := aggs[dpuserspace.ImplicitDiscardTermName]
+			if (authoredAgg == nil || !authoredAgg.emit) && !config.FirewallFilterHasCatchAll(filter) {
 				if ctr, ok := userspaceCounters[dpuserspace.FirewallFilterTermCounterNameKey{
 					Family: family, FilterName: name, TermName: dpuserspace.ImplicitDiscardTermName,
 				}]; ok {

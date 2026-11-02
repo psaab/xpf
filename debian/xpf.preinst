@@ -247,6 +247,10 @@ implicit_discard_gate() {
     fi
     cli_bin="$SBIN/cli"
     if [ ! -x "$cli_bin" ]; then
+        echo "xpf: #18728 could not find the running daemon CLI; cannot" \
+             "check for filters without a terminal catch-all. Proceeding. After" \
+             "the upgrade, unmatched traffic is DISCARDED (Junos implicit final" \
+             "discard): check 'show system alarms' for such filters." >&2
         return 0
     fi
     if ! alarms=$(timeout 20 "$cli_bin" -c "show system alarms" 2>/dev/null); then

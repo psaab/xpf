@@ -73,3 +73,61 @@ func TestCollectFilterCountersImplicitDiscardSeries18728(t *testing.T) {
 		t.Fatalf("catch-all filter C must not export an implicit-discard series: %v", got)
 	}
 }
+
+// #18728 fold: an AUTHORed term named implicit-discard WITHOUT `then count`
+// is not instrumented (#16454), so its aggregate never emits. The synthetic
+// row for that (family, filter, name) must still surface as the synthetic
+// series — suppressing it by name existence alone leaves the filter's
+// implicit-discard hits invisible. The authored term is constrained
+// (destination-port) and non-terminal, so the filter has no catch-all and
+// the synthetic term exists.
+//
+// FAIL-ON-REVERT: restoring the `!authored` name-existence guard in
+// collectFilterCounters drops the D/implicit-discard series and this
+// assertion goes RED.
+func TestCollectFilterCountersImplicitDiscardUncountedAuthored18728(t *testing.T) {
+	store := newFilterStore(t, []string{
+		"set firewall family inet filter D term implicit-discard from destination-port 23",
+		"set firewall family inet filter D term implicit-discard then discard",
+		"set firewall family inet filter D term ssh from destination-port 22",
+		"set firewall family inet filter D term ssh then count cS",
+		"set firewall family inet filter D term ssh then accept",
+	})
+	c := newCollector(&Server{store: store})
+	dp := &dupTermDP15192{
+		Manager: dataplane.New(),
+		status: dpuserspace.ProcessStatus{FilterTermCounters: []dpuserspace.FirewallFilterTermCounterStatus{
+			{Family: "inet", FilterName: "D", TermName: "ssh", TermOrdinal: 1, Packets: 5},
+			// The uncounted authored row has the same name and labelset as
+			// the synthetic row, but must not itself cause a series to emit.
+			{Family: "inet", FilterName: "D", TermName: "implicit-discard", TermOrdinal: 0, Packets: 2},
+			// The synthetic row: ordinal after every authored term.
+			{Family: "inet", FilterName: "D", TermName: "implicit-discard", TermOrdinal: 2, Packets: 11},
+		}},
+	}
+	ch := make(chan prometheus.Metric, 64)
+	c.collectFilterCounters(ch, dp, fetchUserspaceStatus(dp))
+	close(ch)
+	got := map[string]float64{}
+	for m := range ch {
+		var pb dto.Metric
+		if err := m.Write(&pb); err != nil {
+			t.Fatalf("metric write: %v", err)
+		}
+		labels := map[string]string{}
+		for _, l := range pb.GetLabel() {
+			labels[l.GetName()] = l.GetValue()
+		}
+		key := labels["filter"] + "/" + labels["term"]
+		if _, dup := got[key]; dup {
+			t.Fatalf("duplicate series %s — Gather would fail (#15192)", key)
+		}
+		got[key] = pb.GetCounter().GetValue()
+	}
+	if got["D/implicit-discard"] != 13 {
+		t.Fatalf("filter D series = %v, want one implicit-discard=13 series (2 authored uncounted + 11 synthetic hits must surface together)", got)
+	}
+	if got["D/ssh"] != 5 {
+		t.Fatalf("filter D series = %v, want ssh=5", got)
+	}
+}

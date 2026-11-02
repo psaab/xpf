@@ -72,6 +72,11 @@ $NEW_WARN" ;;
         # Refused BEFORE the #1964 snapshot: nothing created under versions/.
         [ ! -e "$ROOT/var/lib/xpf/versions" ] || ok=0
     fi
+    if [ "$name" = no_cli_proceeds ]; then
+        grep -q 'could not find the running daemon CLI' "$ROOT/out" || ok=0
+        grep -q 'Proceeding' "$ROOT/out" || ok=0
+        grep -q "check 'show system alarms' for such filters" "$ROOT/out" || ok=0
+    fi
     if [ "$ok" = 1 ]; then
         echo "PASS $name"
     else

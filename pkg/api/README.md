@@ -2472,9 +2472,11 @@ the drop fails loudly instead of going quietly vacuous.
     `config.FilterTermExpansionCount` SSOT (#3459). The synthetic
     `implicit-discard` term of a filter with no terminal catch-all (#18728)
     is not a config term, so its helper row is emitted after the authored
-    terms as its own `term="implicit-discard"` series — unless an authored
-    term already owns that name (the by-name aggregate then folds both into
-    that one series; never a duplicate labelset, #15192). The kernel lo0
+    terms as a `term="implicit-discard"` series. If an authored term with
+    that name is counted, the by-name aggregate folds both counters into
+    its one series; if it is uncounted, the synthetic series still emits
+    without an authored duplicate. Either way there is no duplicate labelset
+    (#15192). The kernel lo0
     implicit-discard counters (`xpflo0implicit_<family>`) are not `then
     count` counters: they are kept out of `xpf_lo0_counter_hits_total` and
     exported as `xpf_lo0_implicit_discard_hits_total{family}` (control-plane
