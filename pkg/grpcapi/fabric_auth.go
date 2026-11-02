@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/psaab/xpf/pkg/denyaudit"
@@ -78,24 +79,20 @@ import (
 // Independently, an unkeyed listener remains GetStatus-only and never opens
 // that grace for other RPCs.
 //
-// Residual 1 (same-args replay): the token is HMAC(PSK, domain ||
+// Residual 1 (read-only replay and plaintext): the token is HMAC(PSK, domain ||
 // method-length || method || request-digest || window), where window =
 // unix_time / fabricAuthWindowSeconds and request-digest is SHA-256 over the
 // deterministic protobuf encoding of the request (#10709). Binding the
-// canonical gRPC method AND the request arguments into the digest means a
-// captured GetStatus token cannot be replayed on ClearSessions or failover,
-// and a captured ClearSessions{filter A} / failover rg1 token cannot be
-// replayed with a different filter or RG. A byte-identical retry remains
-// stateless and succeeds while its window is accepted (the current window
-// plus one adjacent window for clock skew). Streaming RPCs (MonitorInterface)
-// bind the method only: no request body exists where a stream token is minted
-// or verified, so a captured stream token stays replayable with any stream
-// arguments inside the window. mTLS with per-node certs would remove those
-// bounded horizons entirely and is the deferred stronger posture (#4047
-// convergence); this PSK layer closes the "no auth at all" HIGH hole with
-// zero cert-lifecycle machinery, reusing the key the operator already
-// provisions for the heartbeat.
-//
+// canonical gRPC method AND request arguments prevents cross-method and
+// changed-argument substitution. #16020 additionally makes verified mutating
+// unary calls single-use per receiving Server process: ClearSessions and the
+// two fabric-safe SystemAction classes consume the token before the handler
+// runs, and a repeat is rejected. Read-only calls and MonitorInterface streams
+// remain replayable inside the window; the cache is process-local and is lost
+// on restart, and a token replayed to another receiver has a separate cache.
+// The fabric gRPC transport still has no TLS, so session tuples/NAT/status
+// remain plaintext on the control segment; mTLS with per-node certs is the
+// deferred stronger posture (#4047 convergence).
 // Residual 2 (clock skew): because the token is time-windowed, a wall-clock skew
 // between the two nodes larger than the tolerance (window ± 1 = ~60–90s across a
 // boundary) makes the peer's token verify against no accepted window, so
@@ -109,12 +106,12 @@ import (
 // and the operator-visible symptom named sessions ("fw0 has only 1 established
 // sessions") while the cause was the clock.
 //
-// The accept band is still ±1 and deliberately so — it bounds replay of the
-// identical unary request and any arguments on a method-bound stream. Widening
-// it to tolerate a drifting clock would extend those replay horizons for the
-// allowlisted ClearSessions and cross-node failover RPCs, to buy tolerance for
-// an operational fault the operator can fix in seconds once it is named. What
-// changed in #6708 is diagnosis: fabric_auth_skew_6708.go scans a bounded band
+// The accept band remains ±1 and deliberately so. It bounds the remaining
+// replay horizon for read-only unary and stream calls; the mutating-token
+// cache retains entries for this same maximum window horizon. Widening the
+// accept band would extend those replay horizons and MUST be paired with a
+// matching cache-retention change. What changed in #6708 is diagnosis:
+// fabric_auth_skew_6708.go scans a bounded band
 // around the local window on the REJECT path and, when the token verifies under
 // an accepted key at some other window, reports that offset — an AUTHENTICATED
 // measurement, since only a key holder can produce such a token. The rejection
@@ -138,6 +135,9 @@ const (
 	// ~2×window across a clock-skew boundary. Small enough to bound replay,
 	// large enough to tolerate NTP skew between cluster nodes.
 	fabricAuthWindowSeconds = 30
+	// A mutation token is retained through the monotone high-water window
+	// required to ensure wall-clock rollback cannot reopen an expired token.
+	fabricMutationReplayCacheCapacity = 4096
 	// fabricAuthUnarmedGrace bounds tokenless read-only access to the period in
 	// which a keyed peer is being rolled out but has not authenticated yet.
 	fabricAuthUnarmedGrace = 5 * time.Minute
@@ -147,6 +147,117 @@ const (
 	// different byte layout under the same key.
 	fabricAuthDomain = "xpf-fabric-grpc-auth\x00"
 )
+
+type fabricReplayCacheResult uint8
+
+const (
+	fabricReplayAccepted fabricReplayCacheResult = iota
+	fabricReplayDuplicate
+	fabricReplayCacheFull
+)
+
+// fabricMutationReplayCache makes a verified mutating token single-use on one
+// receiving Server. Its high-water auth window never moves backward; tokens
+// older than the high-water window's accepted skew band stay rejected even if
+// the wall clock rolls back after their entries are purged.
+type fabricMutationReplayCache struct {
+	mu sync.Mutex
+
+	// nowFn is a test seam for deterministic wall-clock rollback coverage.
+	// Production leaves it nil, so consume samples time.Now under mu.
+	nowFn func() time.Time
+
+	seen            map[[sha256.Size]byte]struct{}
+	byWindow        map[int64][][sha256.Size]byte
+	highWaterWindow int64
+	highWaterSet    bool
+}
+
+func (c *fabricMutationReplayCache) consume(token [sha256.Size]byte, tokenWindow int64) fabricReplayCacheResult {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	if c.nowFn != nil {
+		now = c.nowFn()
+	}
+	return c.consumeLocked(token, tokenWindow, fabricAuthWindow(now))
+}
+
+func (c *fabricMutationReplayCache) consumeAt(token [sha256.Size]byte, tokenWindow, currentWindow int64) fabricReplayCacheResult {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.consumeLocked(token, tokenWindow, currentWindow)
+}
+
+func (c *fabricMutationReplayCache) consumeLocked(token [sha256.Size]byte, tokenWindow, currentWindow int64) fabricReplayCacheResult {
+	if !c.highWaterSet || currentWindow > c.highWaterWindow {
+		c.highWaterWindow = currentWindow
+		c.highWaterSet = true
+	}
+	oldestAcceptedWindow := c.highWaterWindow - 1
+	for window, tokens := range c.byWindow {
+		if window >= oldestAcceptedWindow {
+			continue
+		}
+		for _, expired := range tokens {
+			delete(c.seen, expired)
+		}
+		delete(c.byWindow, window)
+	}
+
+	// A stale token remains rejected even after its digest is removed to free
+	// capacity. This is what makes replay protection safe across wall rollback.
+	if tokenWindow < oldestAcceptedWindow {
+		return fabricReplayDuplicate
+	}
+	if _, exists := c.seen[token]; exists {
+		return fabricReplayDuplicate
+	}
+	if len(c.seen) >= fabricMutationReplayCacheCapacity {
+		return fabricReplayCacheFull
+	}
+	if c.seen == nil {
+		c.seen = make(map[[sha256.Size]byte]struct{})
+	}
+	if c.byWindow == nil {
+		c.byWindow = make(map[int64][][sha256.Size]byte)
+	}
+	c.seen[token] = struct{}{}
+	c.byWindow[tokenWindow] = append(c.byWindow[tokenWindow], token)
+	return fabricReplayAccepted
+}
+
+func decodeFabricAuthToken(tokenHex string) ([sha256.Size]byte, bool) {
+	var token [sha256.Size]byte
+	if len(tokenHex) != hex.EncodedLen(len(token)) {
+		return token, false
+	}
+	decoded, err := hex.DecodeString(tokenHex)
+	if err != nil || len(decoded) != len(token) {
+		return token, false
+	}
+	copy(token[:], decoded)
+	return token, true
+}
+
+func verifyFabricAuthTokenBytesForDigest(key []byte, got [sha256.Size]byte, method string, reqDigest []byte) (int64, bool) {
+	return verifyFabricAuthTokenBytesForDigestAt(key, got, method, reqDigest, time.Now())
+}
+
+func verifyFabricAuthTokenBytesForDigestAt(key []byte, got [sha256.Size]byte, method string, reqDigest []byte, now time.Time) (int64, bool) {
+	if len(key) == 0 || len(reqDigest) != sha256.Size {
+		return 0, false
+	}
+	currentWindow := fabricAuthWindow(now)
+	// Accept the current window plus one on each side (clock skew / boundary).
+	for _, w := range []int64{currentWindow, currentWindow - 1, currentWindow + 1} {
+		if hmac.Equal(got[:], computeFabricAuthTokenForDigest(key, w, method, reqDigest)) {
+			return w, true
+		}
+	}
+	return 0, false
+}
 
 // fabricAuthWindow returns the token window index for a wall-clock time.
 func fabricAuthWindow(t time.Time) int64 {
@@ -235,21 +346,15 @@ func verifyFabricAuthToken(key []byte, tokenHex string, method string) bool {
 }
 
 func verifyFabricAuthTokenForDigest(key []byte, tokenHex string, method string, reqDigest []byte) bool {
-	if len(key) == 0 || tokenHex == "" || len(reqDigest) != sha256.Size {
+	if len(key) == 0 || len(reqDigest) != sha256.Size {
 		return false
 	}
-	got, err := hex.DecodeString(tokenHex)
-	if err != nil || len(got) != sha256.Size {
+	got, ok := decodeFabricAuthToken(tokenHex)
+	if !ok {
 		return false
 	}
-	now := fabricAuthWindow(time.Now())
-	// Accept the current window plus one on each side (clock skew / boundary).
-	for _, w := range []int64{now, now - 1, now + 1} {
-		if hmac.Equal(got, computeFabricAuthTokenForDigest(key, w, method, reqDigest)) {
-			return true
-		}
-	}
-	return false
+	_, ok = verifyFabricAuthTokenBytesForDigest(key, got, method, reqDigest)
+	return ok
 }
 
 // fabricAuthTokenFromMetadata extracts the token header from an inbound context.
@@ -625,7 +730,8 @@ func (s *Server) FabricAuthUnarmedAlarm() string {
 // token. Unary production calls use checkFabricAuthRequest to verify the actual
 // protobuf arguments.
 func (s *Server) checkFabricAuth(ctx context.Context, method string) error {
-	return s.checkFabricAuthRequest(ctx, method, nil)
+	_, _, _, err := s.checkFabricAuthRequest(ctx, method, nil)
+	return err
 }
 
 // checkFabricAuthRequest authenticates one inbound RPC by its metadata token.
@@ -634,7 +740,7 @@ func (s *Server) checkFabricAuth(ctx context.Context, method string) error {
 // #10698: with no PSK configured only GetStatus is admitted; every other
 // method is rejected Unauthenticated (counted under the fabric-auth
 // denyaudit surface) until a key is committed.
-func (s *Server) checkFabricAuthRequest(ctx context.Context, method string, req interface{}) error {
+func (s *Server) checkFabricAuthRequest(ctx context.Context, method string, req interface{}) ([sha256.Size]byte, int64, bool, error) {
 	// #6630: verify against every ACCEPTED key so a PSK rotation does not turn
 	// every peer-proxied RPC into codes.Unauthenticated for the window between
 	// the two nodes' commits. keyConfigured below is the accepted SET being
@@ -643,14 +749,22 @@ func (s *Server) checkFabricAuthRequest(ctx context.Context, method string, req 
 	token, present := fabricAuthTokenFromMetadata(ctx)
 	reqDigest, err := fabricRequestDigest(req)
 	if err != nil {
-		return status.Error(codes.Unauthenticated, "fabric RPC authentication failed: request arguments cannot be bound")
+		return [sha256.Size]byte{}, 0, false, status.Error(codes.Unauthenticated, "fabric RPC authentication failed: request arguments cannot be bound")
 	}
+	var tokenBytes [sha256.Size]byte
+	var tokenWindow int64
 	tokenOK := false
 	if present {
-		for _, k := range keys {
-			if verifyFabricAuthTokenForDigest(k, token, method, reqDigest) {
-				tokenOK = true
-				break
+		var tokenDecoded bool
+		tokenBytes, tokenDecoded = decodeFabricAuthToken(token)
+		if tokenDecoded {
+			authNow := s.fabricAuthNow()
+			for _, k := range keys {
+				if matchedWindow, ok := verifyFabricAuthTokenBytesForDigestAt(k, tokenBytes, method, reqDigest, authNow); ok {
+					tokenWindow = matchedWindow
+					tokenOK = true
+					break
+				}
 			}
 		}
 	}
@@ -708,9 +822,9 @@ func (s *Server) checkFabricAuthRequest(ctx context.Context, method string, req 
 			slog.Debug("fabric gRPC listener rejected call: authentication failed",
 				"method", method, "reason", reason)
 		}
-		return status.Errorf(codes.Unauthenticated, "fabric RPC authentication failed: %s", reason)
+		return [sha256.Size]byte{}, 0, false, status.Errorf(codes.Unauthenticated, "fabric RPC authentication failed: %s", reason)
 	}
-	return nil
+	return tokenBytes, tokenWindow, tokenOK, nil
 }
 
 // fabricAuthUnaryInterceptor authenticates unary RPCs on the fabric listener
@@ -718,10 +832,48 @@ func (s *Server) checkFabricAuthRequest(ctx context.Context, method string, req 
 // interceptor, so an unauthenticated caller is rejected before authorization is
 // even consulted. The loopback listener does NOT install this interceptor.
 func (s *Server) fabricAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	if err := s.checkFabricAuthRequest(ctx, info.FullMethod, req); err != nil {
+	token, tokenWindow, tokenOK, err := s.checkFabricAuthRequest(ctx, info.FullMethod, req)
+	if err != nil {
 		return nil, err
 	}
+	if tokenOK && fabricMutationReplayProtected(info.FullMethod, req) {
+		switch s.fabricMutationReplay.consume(token, tokenWindow) {
+		case fabricReplayDuplicate:
+			if emit, suppressed := denyaudit.Note(denyaudit.SurfaceFabricAuth, "mutating request token was already used"); emit {
+				slog.Warn("fabric gRPC listener rejected call: authentication failed",
+					"method", info.FullMethod, "reason", "mutating request token was already used",
+					"suppressed_since_last", suppressed,
+					"denials_total", denyaudit.Total(denyaudit.SurfaceFabricAuth))
+			} else {
+				slog.Debug("fabric gRPC listener rejected call: authentication failed",
+					"method", info.FullMethod, "reason", "mutating request token was already used")
+			}
+			return nil, status.Error(codes.Unauthenticated, "fabric RPC authentication failed: mutating request token was already used")
+		case fabricReplayCacheFull:
+			if emit, suppressed := denyaudit.Note(denyaudit.SurfaceFabricAuth, "fabric RPC replay cache is full; mutating request refused"); emit {
+				slog.Warn("fabric gRPC listener rejected call: authentication failed",
+					"method", info.FullMethod, "reason", "fabric RPC replay cache is full; mutating request refused",
+					"suppressed_since_last", suppressed,
+					"denials_total", denyaudit.Total(denyaudit.SurfaceFabricAuth))
+			} else {
+				slog.Debug("fabric gRPC listener rejected call: authentication failed",
+					"method", info.FullMethod, "reason", "fabric RPC replay cache is full; mutating request refused")
+			}
+			return nil, status.Error(codes.ResourceExhausted, "fabric RPC replay cache is full; mutating request refused")
+		}
+	}
 	return handler(ctx, req)
+}
+
+func fabricMutationReplayProtected(method string, req interface{}) bool {
+	switch method {
+	case pb.BpfrxService_ClearSessions_FullMethodName:
+		return true
+	case pb.BpfrxService_SystemAction_FullMethodName:
+		return isFabricSafeSystemAction(req)
+	default:
+		return false
+	}
 }
 
 // fabricAuthStreamInterceptor authenticates streaming RPCs on the fabric

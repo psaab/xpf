@@ -24,19 +24,20 @@ import (
 // sessions"); the cause was the clock, and finding that cost an investigation.
 //
 // WHAT THIS DOES NOT DO, and why. #6708's first suggested fix is to widen
-// acceptance to ±N windows. That is not implemented here: the accept band is
-// the replay horizon for byte-identical unary requests and for any stream
-// arguments. A captured ClearSessions{filter A} token cannot authenticate
-// filter B after #10709, but can still replay filter A while the verifier
-// honours its window; a captured stream token remains method-only. The
-// allowlisted fabric RPCs include ClearSessions and cross-node redundancy-group
-// failover, so widening to cover the measured 141s would multiply those replay
-// horizons to buy tolerance for an operational fault that the operator can see
-// and fix in seconds once it is NAMED. The accept band is therefore unchanged
-// at ±1 and this file only adds diagnosis. Making fabric RPC genuinely
-// skew-independent (a monotonic window floor per peer, or a peer-clock offset
-// carried over the authenticated heartbeat) is a design change with its own HA
-// gate, tracked separately.
+// acceptance to ±N windows. That is not implemented here: the verifier band
+// determines replay lifetime for read-only unary and stream tokens and the
+// retention interval required by #16020's mutating-token cache. At the same
+// receiver, #16020 rejects a second use of ClearSessions and fabric-safe
+// SystemAction tokens; a copied token may still replay the same read-only
+// unary request. Stream auth remains replayable too: its connection token is
+// method-bound, while the separate args-bound token blocks changed stream
+// arguments. Widening to 141s would multiply those residual horizons and
+// require a longer mutation-cache retention, to buy tolerance for an
+// operational fault that the operator can see and fix in seconds once it is
+// NAMED. The accept band is therefore unchanged at ±1 and this file only adds
+// diagnosis. Making fabric RPC genuinely skew-independent (a monotonic window
+// floor per peer, or a peer-clock offset carried over the authenticated
+// heartbeat) is a design change with its own HA gate, tracked separately.
 //
 // WHAT THE MEASUREMENT PROVES, AND WHAT IT DOES NOT. The scan below reports an
 // offset only when the presented token matches a window under an ACCEPTED KEY.
@@ -50,13 +51,15 @@ import (
 //
 //   - NOT CERTAIN: that the peer's clock is skewed. Producing the token needs
 //     the key; PRESENTING it does not. Unary tokens ride the control link and
-//     bind the method plus deterministic request digest; stream tokens bind
-//     only the method because no request body exists when auth is checked.
-//     Neither includes a nonce, so an on-segment attacker can CAPTURE a unary
-//     token and replay the identical request, or replay a stream token within
-//     the accepted window. Replayed from outside the accept band but inside the
-//     scan band, either fails verification — correctly — and lands here
-//     indistinguishable from a drifting clock.
+//     bind method plus deterministic request digest. #16020's cache makes
+//     ClearSessions and fabric-safe SystemAction tokens single-use per
+//     receiving process, but read-only unary tokens remain replayable. Stream
+//     connection tokens bind only the method because no request body exists
+//     when auth is checked; the separate args-bound token prevents changed
+//     stream arguments, but an identical captured stream request is replayable.
+//     A replay presented outside the accept band but inside the scan band
+//     fails verification — correctly — and lands here indistinguishable from a
+//     drifting clock.
 //
 // The truth condition for "the peer's clock is skewed" is therefore production
 // under the key AND arrival within that window's lifetime, and this scan can

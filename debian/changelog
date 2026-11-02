@@ -1,4 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Fabric gRPC mutating-RPC replay: a valid token for `ClearSessions` or a
+    fabric-safe `SystemAction` is now accepted once per receiving daemon
+    process. A monotone replay-window high-water mark prevents replay after
+    wall-clock rollback. Read-only RPCs remain unchanged; the bounded replay
+    cache fails closed at capacity. Fabric transport remains plaintext; mTLS
+    is still deferred (#16020).
   * Dataplane: assign admitted fabric-parent ingress the unique routing domain
     of its fab* overlay so host-bound ICMP to fabric peers reaches local
     delivery instead of the unresolved-domain path (#18212).

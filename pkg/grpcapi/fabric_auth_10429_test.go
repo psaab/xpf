@@ -60,20 +60,26 @@ func TestFabricAuth10429_CrossMethodReplayRejected(t *testing.T) {
 	}
 }
 
-func TestFabricAuth10429_SameMethodRetryAccepted(t *testing.T) {
+func TestFabricAuth10429_SameMethodReplayRejected(t *testing.T) {
 	s := keyedServer(fabricTestKey)
 	method := pb.BpfrxService_ClearSessions_FullMethodName
 	info := &grpc.UnaryServerInfo{FullMethod: method}
 	token := fabricAuthTokenHex([]byte(fabricTestKey), time.Now(), method)
+	first := &unaryCallProbe{}
+	if _, err := s.fabricAuthUnaryInterceptor(ctxWithToken(token), nil, info, first.handler); err != nil {
+		t.Fatalf("first same-method call rejected: %v", err)
+	}
+	if !first.called {
+		t.Fatal("first same-method handler was not reached")
+	}
 
-	for attempt := 1; attempt <= 2; attempt++ {
-		probe := &unaryCallProbe{}
-		if _, err := s.fabricAuthUnaryInterceptor(ctxWithToken(token), nil, info, probe.handler); err != nil {
-			t.Fatalf("same-method retry %d rejected: %v", attempt, err)
-		}
-		if !probe.called {
-			t.Fatalf("same-method retry %d did not reach handler", attempt)
-		}
+	replay := &unaryCallProbe{}
+	_, err := s.fabricAuthUnaryInterceptor(ctxWithToken(token), nil, info, replay.handler)
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("same-method mutating replay status = %s, err=%v; want Unauthenticated", status.Code(err), err)
+	}
+	if replay.called {
+		t.Fatal("same-method mutating replay reached the handler")
 	}
 }
 
