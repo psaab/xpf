@@ -1,6 +1,7 @@
 package dhcpserver
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -94,16 +95,33 @@ func FilterKeaInterfaces15206(cfg *config.DHCPServerConfig, active *config.Confi
 	return &out, true
 }
 
-// usableKeaDevices15206 is the set of kernel device names the active
-// config's declared interfaces resolve to. Both spellings of every
-// declared name are resolved (the config key and its Linux form, #8829),
-// because a group ref authored in either spelling resolves from either.
+// usableKeaDevices15206 is the set of kernel device names the active config's
+// declared interfaces and units resolve to. Both spellings of each authored
+// interface are resolved (the config key and its Linux form, #8829), because
+// a group ref authored in either spelling resolves from either.
 func usableKeaDevices15206(active *config.Config) map[string]bool {
 	usable := make(map[string]bool)
-	for name := range active.Interfaces.Interfaces {
+	for name, ifc := range active.Interfaces.Interfaces {
+		// #17474: a present-but-nil interface still declares its name: the
+		// pre-belt name-only loop counted it usable, and skipping it could
+		// leave usable empty, which disables filtering entirely (fail-open).
 		usable[active.ResolveKernelIfName(name)] = true
-		if linux := config.LinuxIfName(name); linux != name {
+		linux := config.LinuxIfName(name)
+		if linux != name {
 			usable[active.ResolveKernelIfName(linux)] = true
+		}
+		if ifc == nil {
+			continue
+		}
+		for unitNum, unit := range ifc.Units {
+			if unit == nil {
+				continue
+			}
+			suffix := "." + strconv.Itoa(unitNum)
+			usable[active.ResolveKernelIfName(name+suffix)] = true
+			if linux != name {
+				usable[active.ResolveKernelIfName(linux+suffix)] = true
+			}
 		}
 	}
 	return usable

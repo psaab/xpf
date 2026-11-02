@@ -1,62 +1,37 @@
 package daemon
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/networkd"
-	"github.com/psaab/xpf/pkg/vrrp"
 )
 
-// TestApplyTailReconcilesSurfacesVRRPIdentityCollision drives the real commit
-// tail with two configured units that resolve to the same kernel interface,
-// VRID, and family. The manager rejects that non-deterministic last-wins
-// identity before mutating its live set; the apply tail must propagate the
-// rejection so the operator never receives a successful commit for VRRP
-// coverage that was not installed.
-func TestApplyTailReconcilesSurfacesVRRPIdentityCollision(t *testing.T) {
-	installFakeNetworkctl(t)
-
-	origApply, origDelete := nftApplyPayload, nftDeleteTable
-	nftApplyPayload = func(string) ([]byte, error) { return nil, nil }
-	nftDeleteTable = func(string, string) ([]byte, error) { return nil, nil }
-	defer func() { nftApplyPayload, nftDeleteTable = origApply, origDelete }()
-
-	d := &Daemon{
-		networkd: networkd.NewInDir(t.TempDir()),
-		store:    newConfigStore(t, filepath.Join(t.TempDir(), "config.db")),
-		vrrpMgr:  vrrp.NewManager(),
-		opts:     Options{NoDataplane: true},
-	}
-	d.setDataplane(&runtimeOnlyApplyTestDP{}) // #2114: publish through the cell
-
-	group := func(vip string) map[string]*config.VRRPGroup {
-		return map[string]*config.VRRPGroup{
-			vip + "_grp5": {ID: 5, VirtualAddresses: []string{vip}},
+// #15856 moved duplicate VRRP identity rejection to strict config compilation.
+// Two IPv4 addresses on the same unit with the same VRID produce duplicate
+// (kernel interface, VRID, family) instances without an earlier device-collision
+// gate masking the identity check.
+func TestDuplicateVRRPIdentityRejectedAtStrictCompile5083(t *testing.T) {
+	tree := &config.ConfigTree{}
+	for _, line := range []string{
+		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24 vrrp-group 5 virtual-address 10.0.0.10/24",
+		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24 vrrp-group 5 virtual-address 10.0.1.10/24",
+	} {
+		path, err := config.ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
 		}
 	}
-	cfg := &config.Config{}
-	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
-		"ge-0/0/0": {
-			Name: "ge-0/0/0",
-			Units: map[int]*config.InterfaceUnit{
-				100: {Number: 100, VlanID: 100, VRRPGroups: group("10.0.0.1/24")},
-				200: {Number: 200, VlanID: 100, VRRPGroups: group("10.0.1.1/24")},
-			},
-		},
-	}
 
-	err := d.applyTailReconciles(cfg, applyPhaseErrors{})
+	_, err := config.CompileConfig(tree)
 	if err == nil {
-		t.Fatal("VRRP identity collision must fail the commit, got nil")
+		t.Fatal("strict compile accepted two VRRP groups resolving to ge-0-0-0 with VRID 5")
 	}
-	if got := err.Error(); !strings.Contains(got, "duplicate VRRP instance identity") ||
-		!strings.Contains(got, `interface="ge-0-0-0.100" VRID=5 family="inet"`) {
-		t.Fatalf("commit error does not preserve the VRRP identity rejection: %v", err)
-	}
-	if states := d.vrrpMgr.States(); len(states) != 0 {
-		t.Fatalf("rejected reconcile partially installed runtime state: %v", states)
+	if !strings.Contains(err.Error(), "duplicate VRRP instance identity") ||
+		!strings.Contains(err.Error(), `interface="ge-0-0-0" VRID=5 family="inet"`) {
+		t.Fatalf("commit-time refusal did not identify the colliding kernel instance: %v", err)
 	}
 }

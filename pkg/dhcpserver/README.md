@@ -315,9 +315,13 @@ for the unknown interface, so every pool of the family stops; the
   recompute-from-active alarm surfaces.
 - **Render belt:** `FilterKeaInterfaces15206`
   (`kea_phantom_interface_15206.go`), applied by the daemon on the
-  resolved standalone and cluster copies, drops any interface name no
-  declared interface of the active config resolves to, with a warning;
-  the generators render no subnets for a group left with no interfaces.
+  resolved standalone and cluster copies, drops any interface name for which no
+  declared interface or unit of the active config resolves to that kernel
+  device, with a warning; the generators render no subnets for a group left
+  with no interfaces. The allowlist includes unit kernel names as well as
+  parent names: otherwise a valid RETH VLAN unit (e.g. unit 80 with VLAN ID 180)
+  resolves to `ge-0-0-1.180` and is incorrectly dropped because only
+  `ge-0-0-1` was allowlisted (#18853).
 
 ## Duplicate group interfaces resolving to one device — #15028
 

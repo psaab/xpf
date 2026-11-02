@@ -67,7 +67,7 @@ func assertFlatJoin16170(t *testing.T, err error, want []error) {
 // the #16232 review: join must be the single flat errors.Join, not nested
 // subgroup joins (errors.Join does not flatten nested joins). With zero
 // tail-locals the children are exactly the phase sentinels in field order;
-// with tail-locals the full 20-operand interleave is pinned by
+// with tail-locals the full 21-operand interleave is pinned by
 // TestApplyTailProductionInterleaveOrder16170 below.
 func TestApplyPhaseErrorsJoinIsFlat16170(t *testing.T) {
 	sentinels, phase := phaseSentinels16170()
@@ -464,7 +464,8 @@ func productionApplyFixture16170(t *testing.T) (*Daemon, *config.Config, *produc
 // TestApplyTailProductionInterleaveOrder16170 drives the real tail with every
 // phase field and every tail-local producer failing simultaneously. The exact
 // string and the flat top-level child sequence pin hostInbound/lo0/DNS, all
-// five credential owners, and VRRP between their neighbouring phase fields.
+// five credential owners, VRRP between its neighboring phases, and DHCP relay
+// after FRR.
 func TestApplyTailProductionInterleaveOrder16170(t *testing.T) {
 	f := newCredentialTailFixture6790(t)
 	_, phase := phaseSentinels16170()
@@ -538,6 +539,7 @@ func TestApplyTailProductionInterleaveOrder16170(t *testing.T) {
 		"sentinel-16170-fabric",
 		"update VRRP instances: VRRP manager not initialized (apply reached the VRRP reconcile before daemon startup constructed it)",
 		"sentinel-16170-frr",
+		"sentinel-16170-dhcprelay",
 	}
 	if got := err.Error(); got != strings.Join(want, "\n") {
 		t.Fatalf("exact local/phase join order changed:\n got: %q\nwant: %q", got, strings.Join(want, "\n"))
