@@ -472,7 +472,18 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
     );
 }
 
-
+/// #10612 T5: the coordinator replay filter drops stale-zone forwards
+/// (plus their derived reverse companions by key) while tunnel-purge
+/// semantics stay byte-identical and live-zone entries survive — with
+/// the fence ENABLED (validated set), which the pre-existing cells do
+/// not cover (they pass an unvalidated default).
+///
+/// RED-on-revert: removing the zone clause from
+/// `filter_replayed_synced_sessions` leaves the stale pair in the replay vec.
+///
+/// #17229 deleted this doc comment and the `#[test]` attribute along with
+/// the dead dnat_table cells above it, so the cell stopped running.
+#[test]
 fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
     use crate::afxdp::coordinator::filter_replayed_synced_sessions;
 

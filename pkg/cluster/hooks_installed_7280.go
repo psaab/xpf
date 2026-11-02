@@ -50,6 +50,9 @@ const (
 	HookHeartbeatRestartNotify  = "HeartbeatRestartNotifyFunc"
 	HookPeerFence               = "PeerFenceFunc"
 	HookPeerFenceConfirm        = "PeerFenceConfirmFunc"
+	// #18719: the fabric-segment watcher's alarm lines for FormatStatus,
+	// wired at cluster-manager construction (constructClusterManager).
+	HookFabricSegmentAlarms = "FabricSegmentAlarmsFn"
 )
 
 // InstalledHooks reports, per hook, whether a non-nil callback is installed.
@@ -81,6 +84,7 @@ func (m *Manager) InstalledHooks() map[string]bool {
 		HookHeartbeatRestartNotify:  m.hbRestartNotifyFn != nil,
 		HookPeerFence:               m.peerFenceFn != nil,
 		HookPeerFenceConfirm:        m.peerFenceConfirmFn != nil,
+		HookFabricSegmentAlarms:     m.fabricSegmentAlarmsFn != nil,
 	}
 }
 

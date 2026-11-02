@@ -183,6 +183,24 @@ the other two and changes nothing in the shipped product.
 | `packedStatements: true` on the container | **how** the folded tail splits | the tail becomes a CHAIN — each statement nested under the previous — so everything after the first is lost |
 | `args: N` on each leaf | where each statement **ends** | the split cannot find the boundary and declines to guess |
 
+**Elision is per level (#18762).** Each packed level is its own `(container,
+head)` pair. `tcp-session time-wait-state session-ageout;` needs
+`(tcp-session, time-wait-state)` admitted. time-wait-state's own `packedTail`
+only covers `time-wait-state session-ageout;` inside tcp-session's braces. The
+#2419 census has a third, **two-level** arm that packs `outer inner leaf
+value;` and compares it with the braced twin:
+
+- Every eligible cell is counted as checked or skipped. Under `security flow`,
+  the exact skipped-site set and reason are part of the gate, and checked
+  coverage has a minimum ratchet.
+- Everywhere else the measured divergent sites and strict drop shapes must
+  equal the inventory in #18771. Its checked-cell floor prevents sites from
+  vanishing by failing to compile.
+
+Losing a single admission line is enough to drop a security flag:
+`(tcp-session, strict-syn-check)` disappeared in #16581, and the only signal was
+that census.
+
 **Which of the three needs the same-keyword collision check, and which cannot.**
 `compactNormalizeInScope` is keyed on a **(container, head) PAIR**, so an
 admission reaches *every* container with that keyword: firewall filter terms
@@ -1996,6 +2014,48 @@ only supplies the description-only config-mode TOP-LEVEL keywords
 those keywords resolve from `setSchema` via `config.DescribeSetPath`
 (#16161 deleted the last cmdtree overlay, the retained
 `set system dataplane` map).
+
+### Constraint reminders are acknowledgeable or change-scoped (#18719)
+
+A commit warning is either a FINDING ("this config has a problem", silenced by
+fixing the config) or a constraint REMINDER ("this config is only safe if
+something outside xpf's view holds"). A reminder that fires on every commit
+whatever the commit touched cannot be satisfied or silenced, and it trains
+operators to skip the warning block, so the next real finding is missed. The
+rule for a reminder:
+
+- **It is acknowledgeable.** A config knob records the operator's
+  acknowledgement and silences it. The knob must assert EXACTLY what the
+  reminder is about and nothing stronger.
+  - For #10105, `chassis cluster fabric-interface-private` /
+    `fabric1-interface-private` say "an isolated two-peer segment" and feed
+    nothing else.
+  - The #16023 `fabric-interface-authenticated` pair also acknowledges it,
+    but it means MACsec/802.1X and makes stamps trusted under
+    `require-authenticated-fabric-stamps`. A reminder must never steer an
+    operator into a stronger attestation than the one it needs (#18751
+    review).
+- **And/or it is change-scoped.** Register its exact text and the
+  fingerprint of the config region it is about in
+  `changeScopedAdvisories18719` (`pkg/config/advisory_scope_18719.go`).
+  - The operator commit paths (`Store.Commit*` and `CommitConfirmed*`) call
+    `config.DropUnchangedScopedAdvisories(baseline, next)`, which drops a
+    registered reminder when its region is unchanged.
+  - The baseline is the config the last operator commit in THIS process
+    installed (`scopedAdvisoryBaselineLocked`). After a boot load, a
+    config-sync apply or an auto-rollback the operator has not seen the
+    reminder, so the next operator commit shows it once. A DNS refresh does
+    not reset the baseline.
+  - `commit check` is not scoped and reports every reminder whose condition
+    holds.
+- **It fires only when the config can make it matter.** #13967 needs a BA
+  classifier binding on a data interface. That predicate is deliberately
+  broad, because under-reporting is the failure #18719 fixes.
+
+`TestChangeScopedAdvisoryRegistryMatchesEmitters18719` pins that every
+registered text is emitted verbatim, so rewording a constant cannot silently
+take it out of scoping. The census of the remaining unconditional advisories
+is on #18719.
 
 ### RETH `redundancy-group` token fail-open (#6782)
 
@@ -8880,7 +8940,7 @@ tolerant path the Rust filter compiler dropped an unresolvable port token (or
 a malformed literal address token) PER-TOKEN, so a PARTIALLY-bad list still
 built a matcher over the surviving subset — a `then discard`/`reject` term
 silently enforced a NARROWER set than the operator wrote (the rest fell
-through to the implicit accept). The all-unresolvable case already failed
+through to a later accept, or before #18728 to the implicit accept). The all-unresolvable case already failed
 closed at match-time (#2400/#3205); the partial case now carries fail-closed
 wire markers, same shape as the #3406 ICMP/DSCP family: the snapshot builder
 sets `ports_unrepresentable` from `UnknownPorts` and
@@ -8921,7 +8981,8 @@ fails its install the same way (netlink `FromUnrepresentable` plan refusal,
 oracle `__xpf_refuse_unrepresentable_from__`), and the PBR classifier drops
 the term's steering. Whole-snapshot refusal — not term poisoning — because
 poisoning a `discard`/`reject` term to match-nothing would let its traffic
-fall through to the implicit accept (fail-OPEN). The strict gates
+fall through to a later accept (before #18728, also the implicit accept) —
+fail-OPEN. The strict gates
 (`validateFilterFromMatchStrict`, `validateFirewallFilterValuelessFromStrict`)
 remain the primary defense; the marker guards the lenient / peer-synced /
 hand-built / version-drifted snapshot. Bumped `ProtocolVersion` 19 -> 20
@@ -8957,10 +9018,11 @@ builder).
 A firewall-filter `from` block can combine a `protocol` (or the inet6
 `next-header`) with an L4 predicate the dataplane matcher can never satisfy for
 that protocol. Such a term compiled cleanly but became a **never-match** at
-runtime, and because an xpf filter falls through to an implicit **ACCEPT** on
-no-match, a `then discard` / `then reject` written over such a pair was silently
-dead — the traffic it was meant to drop was admitted by a later permit or the
-implicit accept (a **fail-OPEN**). Junos rejects these combinations at commit,
+runtime, and because an xpf filter then fell through to an implicit **ACCEPT** on
+no-match (before #18728; a filter without a terminal catch-all now ends in the
+Junos implicit discard), a `then discard` / `then reject` written over such a
+pair was silently dead — the traffic it was meant to drop was admitted by a
+later permit or the implicit accept (a **fail-OPEN**). Junos rejects these combinations at commit,
 so accepting them was also a config-language parity gap. This is the
 stateless-filter mirror of the application cross-field gate (#3373 port /
 #3348 icmp).
@@ -10079,8 +10141,9 @@ pools, so the copy in the "wrong" pool can never match. A v4/v6
 `icmp-type`/`icmp-code` (`echo-request` resolves to ICMPv4 type 8 for
 `af=="any"`, which never matches an IPv6 ICMP packet whose echo-request is
 type 128) leaves the inet6 (or inet) arm with a never-matching predicate — the
-term falls through to the implicit ACCEPT for that family, an imperfect v6
-UNDER-block (it degrades to the pre-#4287 state for that term; never an
+term falls through to the later terms for that family (before #18728 the
+implicit ACCEPT; since #18728 a later accept, or the implicit discard when the
+filter has no catch-all), an imperfect v6 UNDER-block (it degrades to the pre-#4287 state for that term; never an
 over-block, so no legitimate v6 traffic is broken). These configs are also
 non-Junos (Junos disallows family-specific matches under `family any`).
 
@@ -10111,8 +10174,9 @@ its family content is not knowable from the leaf keyword. But a reference whose
 **resolved** prefixes cover only ONE family reproduces the exact same
 under-block (audit codex-164 C164-H04): `from source-prefix-list v4-only then
 discard` under `family any` dual-compiles the v4-only list into the inet6 pool,
-where the v6 arm has zero v6 prefixes, matches nothing, and falls through to the
-implicit ACCEPT — a silent v6 under-block.
+where the v6 arm has zero v6 prefixes, matches nothing, and falls through to a
+later accept (before #18728, also the implicit ACCEPT) — a silent v6
+under-block.
 
 `validateFirewallFilterFamilyAnyMatchesAST` therefore also resolves every
 prefix-list reference against the candidate tree's `policy-options prefix-list`
@@ -10126,7 +10190,8 @@ in **opposite** ways under `family any`, mirroring `resolvePrefixListAddrs`
 
 - A single-family **positive** list (`from source-prefix-list v4-only`) leaves
   the missing-family arm with no matching prefixes → matches **nothing** → falls
-  through to the implicit ACCEPT → a silent **under-block**.
+  through to a later accept (before #18728, also the implicit ACCEPT) → a
+  silent **under-block**.
 - A single-family **`except`** list (`from source-prefix-list v4-only except`)
   is the clean-except case: the missing-family arm evaluates `except` over a set
   with no entries for that family = **match ALL** → an **over-block** on `then
@@ -15496,7 +15561,15 @@ the value sits in a single typed slot:
     ACK pass, and a handshake-incomplete session is never served data from
     the flow cache), and commit rejects `strict-syn-check` together with
     `no-syn-check` / `no-syn-check-in-tunnel` (the lenient load path warns
-    and the dataplane keeps strict-wins precedence there). Missing selector
+    and the dataplane keeps strict-wins precedence there). **Upgrade note
+    (#18762):** from #16581 until #18762, the brace-elided spelling
+    `tcp-session strict-syn-check;` was silently dropped before this gate
+    ran. A config committed in that window with elided `strict-syn-check`
+    beside `no-syn-check` therefore BOOTS after upgrade with a warning and
+    strict-syn-check ENFORCED (strict wins), and its next commit is REFUSED
+    until one of the two leaves is removed. The same window also dropped
+    elided `rst-sequence-check`, `maximum-window` and two-level
+    `time-wait-state` children, which now take effect as written. Missing selector
     keys decode false, and
     the protocol-v34 exact-version gate rejects a v33 helper that would ignore
     an explicitly configured selector. #15753 enforces the remaining

@@ -7,6 +7,9 @@ package userspace
 
 import (
 	"log/slog"
+	"net"
+
+	"github.com/psaab/xpf/pkg/fabricsegment"
 )
 
 // SyncFabricState pushes current fabric snapshots (with fresh peer MACs)
@@ -24,6 +27,9 @@ func (m *Manager) SyncFabricState() {
 	// still the applied ones, on two planes that neither replan on this path.
 	// alignFabricVerdicts (fabric.go) holds the reasoning.
 	fabrics := m.sampleFabricsLocked()
+	// #18719: re-arm the fabric-segment watcher on every refresh, before the
+	// empty-set return, so removing the fabric also stops its tap.
+	fabricsegment.Default().Update(fabricSegmentLinks(fabrics))
 	if len(fabrics) == 0 {
 		return
 	}
@@ -103,4 +109,23 @@ func fabricSnapshotsEqual(a, b []FabricSnapshot) bool {
 		}
 	}
 	return true
+}
+
+// fabricSegmentLinks projects the resolved fabric snapshots onto the
+// #18719 fabric-segment watcher's links. A snapshot whose MACs do not parse
+// yields a link the watcher declines to arm (fabricsegment.Armable).
+func fabricSegmentLinks(fabrics []FabricSnapshot) []fabricsegment.Link {
+	links := make([]fabricsegment.Link, 0, len(fabrics))
+	for _, fab := range fabrics {
+		local, _ := net.ParseMAC(fab.LocalMAC)
+		peer, _ := net.ParseMAC(fab.PeerMAC)
+		links = append(links, fabricsegment.Link{
+			Name:          fab.Name,
+			Parent:        fab.ParentLinuxName,
+			ParentIfindex: fab.ParentIfindex,
+			LocalMAC:      local,
+			PeerMAC:       peer,
+		})
+	}
+	return links
 }

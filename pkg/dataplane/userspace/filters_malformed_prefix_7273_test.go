@@ -69,7 +69,7 @@ func TestFilterSnapshotMalformedReferencedPrefix7273(t *testing.T) {
 		t.Fatalf("prefix-list provenance must not masquerade as a literal record, got UnknownAddresses=%v", term.UnknownAddresses)
 	}
 
-	snaps := BuildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, BuildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("snapshots = %+v, want one filter with one term", snaps)
 	}
@@ -107,7 +107,7 @@ func TestFilterSnapshotMalformedReferencedPrefixDest6_7273(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lenient compile must remain bootable: %v", err)
 	}
-	snaps := BuildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, BuildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("snapshots = %+v, want one filter with one term", snaps)
 	}
@@ -139,7 +139,7 @@ func TestFilterSnapshotCleanReferencedPrefixNotMarked7273(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
 	}
-	got := BuildFirewallFilterSnapshots(cfg)[0].Terms[0]
+	got := authoredFilterSnapshots18728(t, BuildFirewallFilterSnapshots(cfg))[0].Terms[0]
 	if got.AddressUnrepresentable {
 		t.Fatalf("clean referenced prefix-list must not set AddressUnrepresentable, got %+v", got)
 	}

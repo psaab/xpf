@@ -51,7 +51,7 @@ func TestUnknownFilterThenActionFailsClosedInSnapshot11357(t *testing.T) {
 				t.Fatalf("unknown then action compiled as %q, want fail-closed discard", got)
 			}
 
-			snapshots := buildFirewallFilterSnapshots(cfg)
+			snapshots := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 			if len(snapshots) != 1 || len(snapshots[0].Terms) != 1 {
 				t.Fatalf("expected one filter snapshot term, got %+v", snapshots)
 			}
@@ -80,7 +80,7 @@ func TestUnknownFilterThenActionDoesNotChangeModifierFallThrough11357(t *testing
 	if term.Action != "" || len(term.UnknownActions) != 0 {
 		t.Fatalf("valid modifier-only term changed unexpectedly: %+v", term)
 	}
-	snap := buildFirewallFilterSnapshots(cfg)[0].Terms[0]
+	snap := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0]
 	if snap.NextTerm {
 		t.Fatalf("valid modifier-only term must NOT fall through (#14632 implicit accept): %+v", snap)
 	}

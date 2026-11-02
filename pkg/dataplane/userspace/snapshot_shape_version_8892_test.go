@@ -260,7 +260,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "9f1e98f40a45a87f20988483f6106cffdb45704d479f3f6b98830a159d5db341"
+	snapshotShapeGolden8892 = "3efa3788059188e138eae337a69e433f4116b0029f286d7dd1270daa4ccfaf68"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -687,6 +687,15 @@ const (
 	// config_snapshot_config_stays_opaque_to_helper17244 Rust cell pins that
 	// boundary. Re-pinned on the #18326 v77 baseline; ProtocolVersion remains 77.
 	// Digest: 9f1e98f40a45a87f20988483f6106cffdb45704d479f3f6b98830a159d5db341.
+	// v77 STANDS (#18728): FirewallFilterSnapshot.ImplicitDiscard is
+	// in-process show-surface metadata tagged `json:"-"`: it marks a filter
+	// whose Terms end in the synthetic implicit-discard term. Nothing
+	// serializes it, so the helper-parsed `filters` wire is unchanged; the
+	// synthetic term itself is an ordinary FirewallTermSnapshot VALUE, which
+	// every helper of this protocol already parses. The walk records the `-`
+	// tag, so the digest moves by exactly that one line (measured against the
+	// 3966cff11f base, which passes with 9f1e98f4...). ProtocolVersion stays
+	// at 77. Digest: 3efa3788059188e138eae337a69e433f4116b0029f286d7dd1270daa4ccfaf68.
 	snapshotShapeVersion8892 = 77
 )
 
