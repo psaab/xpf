@@ -651,9 +651,8 @@ func (m *Manager) sessionSyncEgressLocked(fibIfindex int, fibVlanID uint16, egre
 		return fibIfindex, fibIfindex, 0
 	}
 	if fibIfindex <= 0 {
-		// FibIfindex is unresolved but we can still derive owner_rg_id
-		// from the session's egress zone so the sync peer doesn't have
-		// to fall back to the imprecise any_rg_active heuristic.
+		// A zone with a single positive RG can still identify ownership;
+		// conflicting or absent RGs leave it unknown.
 		return fibIfindex, fibIfindex, resolveOwnerRGFromZone(snapshot, egressZone)
 	}
 	if iface, ok := findUserspaceEgressInterfaceSnapshot(snapshot, fibIfindex, fibVlanID); ok {
@@ -670,19 +669,25 @@ func (m *Manager) sessionSyncEgressLocked(fibIfindex int, fibVlanID uint16, egre
 	return fibIfindex, fibIfindex, 0
 }
 
-// resolveOwnerRGFromZone returns the RedundancyGroup for the first interface
-// in the given egress zone. This is used as a fallback when FibIfindex is 0
-// so the sync sender can still propagate a meaningful owner_rg_id to the peer.
+// resolveOwnerRGFromZone returns the only positive RedundancyGroup found on
+// interfaces in the given egress zone. Conflicting RGs are ambiguous and
+// return 0, as does a zone with no positive RG. This is a fallback when the
+// session's egress interface is unresolved.
 func resolveOwnerRGFromZone(snapshot *ConfigSnapshot, egressZone string) int {
 	if snapshot == nil || egressZone == "" {
 		return 0
 	}
+	ownerRG := 0
 	for _, iface := range snapshot.Interfaces {
-		if iface.Zone == egressZone && iface.RedundancyGroup > 0 {
-			return iface.RedundancyGroup
+		if iface.Zone != egressZone || iface.RedundancyGroup <= 0 {
+			continue
 		}
+		if ownerRG != 0 && ownerRG != iface.RedundancyGroup {
+			return 0
+		}
+		ownerRG = iface.RedundancyGroup
 	}
-	return 0
+	return ownerRG
 }
 
 func findUserspaceEgressInterfaceSnapshot(snapshot *ConfigSnapshot, fibIfindex int, fibVlanID uint16) (InterfaceSnapshot, bool) {

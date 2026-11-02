@@ -282,9 +282,9 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			CoSOversubscriptionGuaranteeFraction: coSUnitOversubscriptionFraction(cosUnit),
 			CoSPriorityLowMinShareBytes:          coSUnitPriorityLowMinShare(cosUnit),
 			// RedundancyGroup stays 0: a stanza-less tunnel authors no
-			// `redundancy-group` and has no RETH parent, so it cannot win
-			// resolveOwnerRGFromZone's `RedundancyGroup > 0` race. That is a
-			// DECISION — the tunnel does not own its zone's RG — and
+			// `redundancy-group` and has no RETH parent, so it cannot provide
+			// an owner-RG candidate for its zone. That is a DECISION — the
+			// tunnel does not own its zone's RG — and
 			// TestBindOnlyTunnelDoesNotOwnTheZoneRG7949 pins it.
 		})
 		idents = append(idents, egressRowIdentity{
