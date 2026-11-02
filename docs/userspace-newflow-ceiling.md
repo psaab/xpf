@@ -388,7 +388,9 @@ cargo build --release --manifest-path test/incus/newflow-gen/Cargo.toml
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 run_dir="artifacts/newflow-ceiling/$run_id"
 mkdir -p "$run_dir"
-sink_target=loss:xpf-mouse-target
+source ./test/incus/cluster-env.sh
+source ./test/incus/ha-assurance-lib.sh
+sink_target="$MOUSE_TARGET_REF"
 sink_log="/tmp/newflow-gen-sink-$run_id.json"
 
 # Record same-run target ownership before traffic; do not call the separate
@@ -399,6 +401,20 @@ if ! grep -qE '(^|[[:space:]])inet 172\.16\.80\.202/' <<<"$target_addr"; then
     echo "newflow-ceiling: $sink_target does not own 172.16.80.202" >&2
     exit 2
 fi
+
+ha_target_claim_check "$MOUSE_TARGET_REF" "$IPERF_TARGET4" "$WAN_GW80_4" \
+    "${IPERF_TARGET4_KNOWN_HOLDERS:-}" "$FW0" "$FW1"
+claim_status="$HA_TARGET_CLAIM_STATUS"
+claim_reason="$HA_TARGET_CLAIM_REASON"
+printf 'status=%s\nreason=%s\n' "$claim_status" "$claim_reason" \
+    > "$run_dir/target-claim-preflight.txt"
+if [[ "$claim_status" != 0 ]]; then
+    echo "newflow-ceiling: target claim is not PASS (status=$claim_status): $claim_reason" >&2
+    exit 2
+fi
+printf 'PASS target claim: exactly one holder and stable firewall neighbor identity (%s)\n' \
+    "$claim_reason" >> "$run_dir/target-claim-preflight.txt"
+
 
 sink_started="$(incus exec "$sink_target" -- date +%s)"
 incus exec "$sink_target" -- rm -f "$sink_log"
@@ -454,12 +470,17 @@ CELL
 
 The run records `target-address-preflight.txt` proving that
 `loss:xpf-mouse-target` owned `172.16.80.202` in the same lock-held run before
-traffic. It starts the sink with
-`newflow-gen --mode sink --bind 172.16.80.202 --ports 5300-5363`, checks the
-launched PID is alive, verifies a fresh run-specific log by mtime and exact
-`bound_ports:64` JSON, and records that startup evidence before traffic. The
-trap stops the sink and removes its remote log. The harness refuses a missing
-pool-mode rule and does not change NAT config.
+traffic. It then calls `ha_target_claim_check` directly (not the separate
+`test-connectivity.sh` gate, which requires an idle lock), recording the
+checker status and reason in `target-claim-preflight.txt`. Only status `0`
+passes: the evidence includes the `PASS` line for exactly one holder and a
+stable firewall-neighbor identity. Every nonzero status—including an excused
+duplicate-holder result or an unavailable probe—aborts before traffic. The run
+starts the sink with `newflow-gen --mode sink --bind 172.16.80.202 --ports
+5300-5363`, checks the launched PID is alive, verifies a fresh run-specific log
+by mtime and exact `bound_ports:64` JSON, and records that startup evidence.
+The trap stops the sink and removes its remote log. The harness refuses a
+missing pool-mode rule and does not change NAT config.
 
 ### Which node it measures, and when it refuses to run (#6962)
 

@@ -445,6 +445,52 @@ else
 	printf 'FAIL %-32s -> %s\n' LOCK_WIRING "$wiring_detail"
 fi
 
+# The runbook must claim-probe target ownership inside the locked cell, record
+# the helper verdict, and refuse before invoking the traffic harness.
+RUNBOOK="${SCRIPT_DIR}/../../docs/userspace-newflow-ceiling.md"
+RUNBOOK_CELL_CODE="$(
+	awk '
+		/^\.\/test\/incus\/with-cluster\.sh "10988 newflow ceiling run" --/ { capture=1 }
+		capture { print }
+		capture && /^CELL$/ { exit }
+	' "$RUNBOOK" | sed -e 's/[[:space:]]#.*$//' -e '/^[[:space:]]*#/d'
+)"
+runbook_line() {
+	local matches
+	matches="$(grep -nE "$1" <<<"$RUNBOOK_CELL_CODE" || true)"
+	printf '%s\n' "${matches%%$'\n'*}" | cut -d: -f1
+}
+rb_line_cluster_env="$(runbook_line '^source \./test/incus/cluster-env\.sh$')"
+rb_line_claim_lib="$(runbook_line '^source \./test/incus/ha-assurance-lib\.sh$')"
+rb_line_claim_call="$(runbook_line '^ha_target_claim_check ')"
+rb_line_claim_status="$(runbook_line '^claim_status="\$HA_TARGET_CLAIM_STATUS"$')"
+rb_line_claim_reason="$(runbook_line '^claim_reason="\$HA_TARGET_CLAIM_REASON"$')"
+rb_line_claim_record="$(runbook_line 'target-claim-preflight\.txt')"
+rb_line_claim_guard="$(runbook_line '^if \[\[ "\$claim_status" != 0 \]\]; then$')"
+rb_line_claim_pass="$(runbook_line "^printf 'PASS target claim: exactly one holder")"
+rb_line_traffic="$(runbook_line '^./test/incus/newflow-ceiling-harness\.sh .*--pool')"
+if [[ -z "$RUNBOOK_CELL_CODE" || -z "$rb_line_cluster_env" || -z "$rb_line_claim_lib" \
+	|| -z "$rb_line_claim_call" || -z "$rb_line_claim_status" || -z "$rb_line_claim_reason" \
+	|| -z "$rb_line_claim_record" || -z "$rb_line_claim_guard" || -z "$rb_line_claim_pass" \
+	|| -z "$rb_line_traffic" ]]; then
+	fail=$((fail + 1))
+	printf 'FAIL %-32s -> locked runbook cell is missing claim sources, recorded verdict/PASS guard, or traffic step\n' RUNBOOK_TARGET_CLAIM
+elif ! (( rb_line_cluster_env < rb_line_claim_lib && rb_line_claim_lib < rb_line_claim_call \
+	&& rb_line_claim_call < rb_line_claim_status && rb_line_claim_status < rb_line_claim_reason \
+	&& rb_line_claim_reason < rb_line_claim_record && rb_line_claim_record < rb_line_claim_guard \
+	&& rb_line_claim_guard < rb_line_claim_pass && rb_line_claim_pass < rb_line_traffic )); then
+	fail=$((fail + 1))
+	printf 'FAIL %-32s -> claim verdict must be recorded and PASS-gated before traffic (env=%s lib=%s claim=%s record=%s guard=%s pass=%s traffic=%s)\n' \
+		RUNBOOK_TARGET_CLAIM "$rb_line_cluster_env" "$rb_line_claim_lib" "$rb_line_claim_call" \
+		"$rb_line_claim_record" "$rb_line_claim_guard" "$rb_line_claim_pass" "$rb_line_traffic"
+elif grep -q 'test-connectivity\.sh' <<<"$RUNBOOK_CELL_CODE"; then
+	fail=$((fail + 1))
+	printf 'FAIL %-32s -> runbook must call the standalone claim checker, not the idle-lock test-connectivity gate\n' RUNBOOK_TARGET_CLAIM
+else
+	pass=$((pass + 1))
+	printf 'ok   %-32s -> standalone target claim is recorded and PASS-gated before traffic in one lock cell\n' RUNBOOK_TARGET_CLAIM
+fi
+
 # Explicit empty address flags must not silently fall back to environment
 # values or the env-file target.
 for flag in --src-bind --target-ip; do
