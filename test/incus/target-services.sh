@@ -350,12 +350,23 @@ sweep_socket_orphans() {
     socket_pids="$(
         ss -tlnpH "sport = :${port}" 2>/dev/null |
             awk '{
+                # Parse the users:((...)) spec per owner tuple: split on
+                # `),(` boundaries and take only the LEADING "name",pid=N
+                # fields of each tuple, so pid-shaped text inside a quoted
+                # process name can never be read as an owner PID (#18626).
                 users = index($0, "users:(")
                 if (!users) next
-                line = substr($0, users + length("users:("))
-                while (match(line, /",pid=[0-9]+/)) {
-                    print substr(line, RSTART + 6, RLENGTH - 6)
-                    line = substr(line, RSTART + RLENGTH)
+                spec = substr($0, users + length("users:("))
+                sub(/\)\)+.*$/, "", spec)
+                n = split(spec, owners, "\\),\\(")
+                for (i = 1; i <= n; i++) {
+                    o = owners[i]
+                    sub(/^\(+/, "", o)
+                    if (match(o, /^"[^"]*",pid=[0-9]+/)) {
+                        p = substr(o, RSTART, RLENGTH)
+                        sub(/^"[^"]*",pid=/, "", p)
+                        print p
+                    }
                 }
             }' | sort -u
     )"

@@ -329,7 +329,7 @@ case "$port" in
     else
       echo 'LISTEN 0 4096 0.0.0.0:5201 0.0.0.0:* users:(("iperf3",pid=146115,fd=3),("iperf3",pid=2002,fd=3),("iperf3",pid=2003,fd=4))'
     fi ;;
-  6201) echo 'LISTEN 0 4096 0.0.0.0:6201 0.0.0.0:* users:(("python3",pid=3000,fd=3),("python3",pid=3001,fd=4),("socat",pid=3101,fd=5))' ;;
+  6201) echo 'LISTEN 0 4096 0.0.0.0:6201 0.0.0.0:* users:(("python3",pid=3000,fd=3),("python3",pid=3001,fd=4),("evil pid=3000",pid=3101,fd=5))' ;;
 esac
 FAKE
 cat > "${DOWN_TMP}/bin/systemctl" <<'FAKE'
