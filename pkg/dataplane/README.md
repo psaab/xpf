@@ -914,10 +914,11 @@ would blackhole every flow handed to it.
   node0 primary and transit dead (#18696). An intentional stop or respawn (a
   plan-key change, an operator stop) keeps the F2 pass-through: it neither
   installs nor wipes arm debt, so a config commit does not move the RGs.
-- **Restart grace on the exit debt (#18791).** The exit raises debt only if
-  the replacement becomes forwarding-ready within `helperExitGrace` (2.5 s):
-  it reports `ForwardingArmed`, ctrl=1 is successfully applied, XSK liveness
-  is proven, and every addressable binding is BPF READY.
+- **Restart grace on the exit debt (#18791).** The exit raises debt at the end
+  of `helperExitGrace` (2.5 s) if the replacement has not become
+  forwarding-ready by then. Readiness requires `ForwardingArmed`, successful
+  application of `ctrl=1`, proven XSK liveness, and every addressable binding
+  BPF READY.
   - **Why:** with the #18717 zero-delay restart a crashed helper recovers
     locally (first forwarded ping 1.58-1.77 s after SIGKILL, 7 samples on
     udp, `docs/log/18707.md`). That is FASTER than the RG move the immediate
