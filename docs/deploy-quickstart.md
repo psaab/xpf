@@ -241,7 +241,7 @@ topology (3 candidates × 6 queues = 18 bindings) needs `1440`; a
 sysctl --system          # or reboot
 systemctl restart xpfd
 grep HugePages_ /proc/meminfo   # HugePages_Total must cover the sum
-cli -c "show dataplane status"  # Hugepage-backed bindings: N/N
+cli -c "show chassis cluster data-plane statistics"  # Hugepage-backed bindings: N/N
 ```
 
 The `.deb` installs **no** hugepage sysctl (#16455): a
