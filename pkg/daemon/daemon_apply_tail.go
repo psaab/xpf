@@ -14,6 +14,7 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/eventengine"
+	"github.com/psaab/xpf/pkg/fabricsegment"
 	"github.com/psaab/xpf/pkg/lldp"
 	"github.com/psaab/xpf/pkg/vrrp"
 )
@@ -577,14 +578,39 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 // not a working epoch. Keeping it here would discard the only
 // recovery request and leave comms down until an unrelated change.
 func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwed bool) {
+	removingFabric := cfg == nil || cfg.Chassis.Cluster == nil ||
+		(cfg.Chassis.Cluster.FabricInterface == "" && cfg.Chassis.Cluster.Fabric1Interface == "")
 	if d.cluster == nil || d.daemonCtx == nil {
+		if removingFabric {
+			if d.clusterCommsEpochActive() {
+				d.stopClusterComms()
+			}
+			d.retireFabricSegmentWatcherAfterCommsStop()
+		}
 		return
 	}
-	newTransport := d.clusterTransportForConfig(cfg)
+	var newTransport clusterTransportKey
+	if cfg != nil {
+		newTransport = d.clusterTransportForConfig(cfg)
+	}
 	// #6290: ONE guarded snapshot. Boot startup writes this field without
 	// applySem, so the snapshot must remain protected by clusterCommsMu.
 	active := d.activeTransport()
 	if active == (clusterTransportKey{}) {
+		if removingFabric {
+			if d.clusterCommsEpochActive() {
+				// Startup can publish an epoch before its transport key. Join
+				// that old epoch too, or its populate loop could re-arm the
+				// watcher from a stale config snapshot after this apply.
+				d.stopClusterComms()
+				d.retireFabricSegmentWatcherAfterCommsStop()
+				if newTransport != (clusterTransportKey{}) {
+					d.startClusterCommsForCurrentConfig()
+				}
+			} else {
+				d.retireFabricSegmentWatcherAfterCommsStop()
+			}
+		}
 		return
 	}
 	fab1Only := active
@@ -594,9 +620,15 @@ func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwe
 	if fab1DebtShape && !fab1Ready && !restartOwed {
 		// #16842: fab1-debt epoch, fab1 still unaddressed, nothing owed —
 		// keep the working single-fabric epoch; do not churn it.
+		if removingFabric {
+			d.retireFabricSegmentWatcherAfterCommsStop()
+		}
 		return
 	}
 	if newTransport == active && !restartOwed {
+		if removingFabric {
+			d.retireFabricSegmentWatcherAfterCommsStop()
+		}
 		return
 	}
 	fab1Upgrade := fab1DebtShape && fab1Ready
@@ -611,6 +643,29 @@ func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwe
 			"restart them (#7901)", transportChangeLogArgs(active, newTransport)...)
 	}
 	d.stopClusterComms()
+	if removingFabric {
+		// stopClusterComms has joined the old populate loops. The lifecycle
+		// lock also orders this empty update with any in-flight SyncFabricState.
+		d.retireFabricSegmentWatcherAfterCommsStop()
+	}
+	d.startClusterCommsForCurrentConfig()
+}
+
+func (d *Daemon) clusterCommsEpochActive() bool {
+	d.clusterCommsMu.Lock()
+	active := d.clusterCommsCtx != nil || d.clusterCommsCancel != nil ||
+		d.clusterCommsEpoch != nil || d.sessionSync != nil
+	d.clusterCommsMu.Unlock()
+	return active
+}
+
+func (d *Daemon) retireFabricSegmentWatcherAfterCommsStop() {
+	d.clusterCommsLifecycleMu.Lock()
+	fabricsegment.Default().Update(nil)
+	d.clusterCommsLifecycleMu.Unlock()
+}
+
+func (d *Daemon) startClusterCommsForCurrentConfig() {
 	start := d.startClusterCommsFn
 	if start == nil {
 		start = d.startClusterComms

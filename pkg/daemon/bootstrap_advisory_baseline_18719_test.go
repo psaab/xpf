@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sync/semaphore"
 
@@ -94,6 +96,89 @@ func TestEventEnginePromotionDoesNotHideFabricReminder18719(t *testing.T) {
 	}
 	if !hasWarningText18719(operatorCommit.Warnings) {
 		t.Fatalf("event-engine promotion hid the next operator reminder: %v", operatorCommit.Warnings)
+	}
+}
+
+func TestApplyErrorInvalidatesBeforeConcurrentCommit18719(t *testing.T) {
+	s, err := configstore.New(filepath.Join(t.TempDir(), "config"))
+	if err != nil {
+		t.Fatalf("configstore.New: %v", err)
+	}
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	for _, command := range []string{
+		"chassis cluster cluster-id 1",
+		"chassis cluster node 0",
+		"chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"chassis cluster fabric-interface fab0",
+		"interfaces fab0 fabric-options member-interfaces ge-0/0/0",
+	} {
+		if err := s.SetFromInput(command); err != nil {
+			t.Fatalf("stage %q: %v", command, err)
+		}
+	}
+	seed, err := s.Commit()
+	if err != nil || !hasWarningText18719(seed.Warnings) {
+		t.Fatalf("baseline commit = (%v, %v), want #10105 reminder", seed, err)
+	}
+	if err := s.SetFromInput("interfaces fab0 fabric-options member-interfaces ge-0/0/1"); err != nil {
+		t.Fatalf("stage first commit's fabric change: %v", err)
+	}
+
+	d := &Daemon{
+		applySem: semaphore.NewWeighted(1),
+		store:    s,
+		cluster:  cluster.NewManager(0, 1),
+	}
+	applyStarted := make(chan struct{})
+	releaseApply := make(chan struct{})
+	applyErr := errors.New("simulated post-promotion apply error")
+	applyCalls := 0
+	d.applyBodyForTest = func(*config.Config) {
+		applyCalls++
+		if applyCalls == 1 {
+			d.applyErrForTest = applyErr
+			close(applyStarted)
+			<-releaseApply
+			return
+		}
+		d.applyErrForTest = nil
+	}
+	type result struct {
+		compiled *config.Config
+		err      error
+	}
+	firstDone := make(chan result, 1)
+	go func() {
+		compiled, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "first", peerSyncNever)
+		firstDone <- result{compiled: compiled, err: err}
+	}()
+	<-applyStarted
+	if err := s.SetFromInput("system domain-name concurrent-operator"); err != nil {
+		t.Fatalf("stage concurrent operator change: %v", err)
+	}
+	secondStarted := make(chan struct{})
+	secondDone := make(chan result, 1)
+	go func() {
+		close(secondStarted)
+		compiled, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "second", peerSyncNever)
+		secondDone <- result{compiled: compiled, err: err}
+	}()
+	<-secondStarted
+	time.Sleep(10 * time.Millisecond)
+	close(releaseApply)
+
+	first := <-firstDone
+	if first.compiled == nil || !errors.Is(first.err, applyErr) || !hasWarningText18719(first.compiled.Warnings) {
+		t.Fatalf("first post-promotion apply result = (%v, %v), want warning plus apply error", first.compiled, first.err)
+	}
+	second := <-secondDone
+	if second.err != nil || second.compiled == nil {
+		t.Fatalf("concurrent operator commit = (%v, %v), want success", second.compiled, second.err)
+	}
+	if !hasWarningText18719(second.compiled.Warnings) {
+		t.Fatalf("concurrent commit scoped against the failed apply's unseen baseline: %v", second.compiled.Warnings)
 	}
 }
 

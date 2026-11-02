@@ -61,9 +61,11 @@ type sourceRecord struct {
 type Tracker struct {
 	link Link
 
-	mu       sync.Mutex
-	sources  map[string]*sourceRecord
-	overflow uint64 // frames from sources beyond maxTrackedMACs
+	// transitionMu keeps each state change paired with its callback in order.
+	transitionMu sync.Mutex
+	mu           sync.Mutex
+	sources      map[string]*sourceRecord
+	overflow     uint64 // frames from sources beyond maxTrackedMACs
 	// overflowLast is the last frame from an untracked (overflow) source.
 	// The alarm holds until it too is AlarmHold old, so a ninth source that
 	// keeps sending after the eight tracked ones went quiet does not clear
@@ -71,9 +73,9 @@ type Tracker struct {
 	overflowLast time.Time
 	raised       bool
 	retired      bool // sealed by Retire; a canceled sampler may still deliver one final packet
-	// onTransition is called (outside the lock) when the alarm raises or
-	// clears. detail is the alarm summary on a raise, and the reason on a
-	// clear. Nil means no callback.
+	// onTransition runs outside mu but while transitionMu serializes callbacks.
+	// detail is the alarm summary on a raise, and the reason on a clear.
+	// Nil means no callback.
 	onTransition func(link Link, raised bool, detail string)
 }
 
@@ -145,6 +147,9 @@ func (t *Tracker) Observe(src net.HardwareAddr, now time.Time) {
 	if !t.IsForeignSource(src) {
 		return
 	}
+	t.transitionMu.Lock()
+	defer t.transitionMu.Unlock()
+
 	key := src.String()
 	t.mu.Lock()
 	if t.retired {
@@ -177,6 +182,9 @@ func (t *Tracker) Tick(now time.Time) { t.tick(now, ClearHoldExpired) }
 
 // tick is Tick with the clear reason the caller can vouch for.
 func (t *Tracker) tick(now time.Time, reason string) {
+	t.transitionMu.Lock()
+	defer t.transitionMu.Unlock()
+
 	t.mu.Lock()
 	if t.retired {
 		t.mu.Unlock()
@@ -205,6 +213,9 @@ func (t *Tracker) tick(now time.Time, reason string) {
 // changed identity (#18751 review). A raised alarm reports its clear with
 // reason, so every raise is matched by exactly one clear in the log.
 func (t *Tracker) Retire(reason string) {
+	t.transitionMu.Lock()
+	defer t.transitionMu.Unlock()
+
 	t.mu.Lock()
 	t.retired = true
 	fire := t.raised

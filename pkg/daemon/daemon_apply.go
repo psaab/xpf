@@ -9,7 +9,6 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
-	"github.com/psaab/xpf/pkg/fabricsegment"
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
@@ -508,13 +507,6 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// is not driven from inside this function.
 	d.resetVIPWarnings()
 
-	// A config with no fabric cannot receive the peer-resolution callback
-	// that normally refreshes the link watcher. Retire it in the apply path,
-	// before the test seam and any later cluster-runtime early returns.
-	if cfg == nil || cfg.Chassis.Cluster == nil ||
-		(cfg.Chassis.Cluster.FabricInterface == "" && cfg.Chassis.Cluster.Fabric1Interface == "") {
-		fabricsegment.Default().Update(nil)
-	}
 	d.policyInvalidationPublishLanded = false
 	d.policyInvalidationDebtAdopted = false
 

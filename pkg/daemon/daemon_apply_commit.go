@@ -396,12 +396,12 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 		return nil, err
 	}
 	applied, applyErr := d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
-	// The event engine promotes configuration autonomously; unlike an
-	// operator commit it has no caller to present compiler warnings. Keep
-	// any scoped reminders visible to the next operator commit. Do this
-	// before releasing applySem so another commit cannot pass the stale
-	// baseline in the gap.
-	if compiled != nil && authority.IsInternal() && authority.JournalPrincipal() == "system:event-engine" {
+	// The event engine promotes configuration autonomously and has no caller
+	// to present its warnings. Also preserve reminders after any promoted
+	// apply error: response handlers may return before presenting warnings,
+	// and the next commit can start as soon as this semaphore is released.
+	if compiled != nil && (applyErr != nil ||
+		(authority.IsInternal() && authority.JournalPrincipal() == "system:event-engine")) {
 		d.store.InvalidateScopedAdvisoryBaseline()
 	}
 	return applied, applyErr
@@ -1135,7 +1135,14 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	if err != nil {
 		return nil, err
 	}
-	return d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
+	applied, applyErr := d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
+	if compiled != nil && applyErr != nil {
+		// A promoted commit-confirmed apply error is returned to callers
+		// before warning presentation. Re-open scoped reminders before
+		// releasing applySem so a queued commit cannot consume them.
+		d.store.InvalidateScopedAdvisoryBaseline()
+	}
+	return applied, applyErr
 }
 
 // commitAndApplyOperator is the peer-sync-aware entry point for an
