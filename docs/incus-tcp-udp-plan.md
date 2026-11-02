@@ -1072,8 +1072,8 @@ holders of addresses the shipped configs used:
 `ge-0-0-2.50`, three RFC 5227 probe rounds (sender IP `0.0.0.0`) were
 sent to the four old claims and candidates `.44`-`.47` at 18:32 UTC.
 The old `.9`, `.12`, `.14`, and `.15` each had a non-xpf reply (MACs
-above); `.44`-`.47` had no replies in any round. `.43` answered only
-from tcp's peer RETH vMAC; `.51` had a foreign reply. The new allocations
+above); `.44`-`.47` had no replies in any round. `.43` answered from the
+udp RETH vMAC; `.51` had a foreign reply. The new allocations
 are legacy-local NAT64 `.44`, SNAT `.45`; standalone NAT64 `.46`, SNAT
 `.47`. These candidates do not overlap any other stack claim in the
 #16473 census. A lab-owner DHCP/IPAM reservation is still recommended

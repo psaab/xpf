@@ -122,8 +122,8 @@ var foreignClaimed18558 = map[string]string{
 }
 
 func TestSharedSegmentForeignClaims18558(t *testing.T) {
-	// Compile every stack's configs before any subtest runs so selecting one
-	// subtest cannot hide a foreign-held claim in another config.
+	// Compile and group all stack configs before running their per-stack
+	// foreign-claim checks below.
 	type stackClaims struct {
 		name   string
 		rel    string
