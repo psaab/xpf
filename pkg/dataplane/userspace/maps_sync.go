@@ -190,10 +190,14 @@ const userspaceIngressDomainMapCapacity = 8192
 // failing closed (domain u32::MAX) unless an untagged owner exists. Each
 // VLAN unit additionally nominates (parent ifindex, VID) with its own
 // RoutingDomain; a native-VLAN unit owns the parent's untagged arrivals,
-// mirroring buildUserspaceTaggedOnlyIngressIfindexes. A key claimed by
-// two different domains is poisoned to the fail-closed sentinel rather
-// than letting map iteration order pick a winner. Disabled rows own
-// nothing. Keys beyond the shim capacity are NOT trimmed — the sync
+// mirroring buildUserspaceTaggedOnlyIngressIfindexes. Fabric parents are
+// another XDP bind target without necessarily having an interface row:
+// their untagged domain comes from the unique domain of the fab* overlay
+// row, whose address is the local destination on that path. If that row
+// does not identify a unique domain, leave the parent unmapped (fail closed).
+// A key claimed by two different domains is poisoned to the fail-closed
+// sentinel rather than letting map iteration order pick a winner. Disabled
+// rows own nothing. Keys beyond the shim capacity are NOT trimmed — the sync
 // refuses the oversized set before writing (checkIngressDomainCapacity).
 func buildUserspaceIngressDomainEntries(snapshot *ConfigSnapshot) map[userspaceIngressDomainKey]uint32 {
 	entries := make(map[userspaceIngressDomainKey]uint32)
@@ -240,6 +244,18 @@ func buildUserspaceIngressDomainEntries(snapshot *ConfigSnapshot) map[userspaceI
 			if _, ambiguous := ambiguousNativeParents[iface.ParentIfindex]; !ambiguous {
 				put(userspaceIngressDomainKey{Ifindex: parent, VLANID: userspaceIngressDomainUntaggedVLANID}, iface.RoutingDomain)
 			}
+		}
+	}
+	for _, fab := range snapshot.Fabrics {
+		if fab.ParentIfindex <= 0 || fab.OverlayIfindex <= 0 {
+			continue
+		}
+		parent := uint32(fab.ParentIfindex)
+		if _, managed := ingress[parent]; !managed {
+			continue
+		}
+		if domain, ok := localAddressRoutingDomain(snapshot, fab.OverlayIfindex); ok {
+			put(userspaceIngressDomainKey{Ifindex: parent, VLANID: userspaceIngressDomainUntaggedVLANID}, domain)
 		}
 	}
 	// #18322: priority-tagged VID 0 stays a distinct wire key in the shim,

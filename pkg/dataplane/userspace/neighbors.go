@@ -101,6 +101,13 @@ func neighborSnapshotPublishable(n NeighborSnapshot) bool {
 // #1197: previously the daemon's listener filter was inferred
 // independently, which risks publishing snapshot entries the
 // listener can't see updates for.
+// neighborLinkByNameFn and neighborListFn are the kernel-observation seams
+// for the snapshot neighbour walk; tests fixture them so a snapshot build
+// never reaches the host netlink/sysfs state.
+var neighborLinkByNameFn = netlink.LinkByName
+
+var neighborListFn = netlink.NeighList
+
 func MonitoredInterfaceLinkIndexes(cfg *config.Config) map[int]struct{} {
 	out := make(map[int]struct{})
 	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
@@ -132,7 +139,7 @@ func MonitoredInterfaceLinkIndexes(cfg *config.Config) map[int]struct{} {
 			}
 		}
 		for _, linuxName := range linuxNames {
-			link, err := netlink.LinkByName(linuxName)
+			link, err := neighborLinkByNameFn(linuxName)
 			if err != nil || link == nil {
 				continue
 			}
@@ -174,12 +181,12 @@ func buildNeighborSnapshots(cfg *config.Config) []NeighborSnapshot {
 			}
 		}
 		for _, linuxName := range linuxNames {
-			link, err := netlink.LinkByName(linuxName)
+			link, err := neighborLinkByNameFn(linuxName)
 			if err != nil || link == nil {
 				continue
 			}
 			for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
-				neighs, err := netlink.NeighList(link.Attrs().Index, family)
+				neighs, err := neighborListFn(link.Attrs().Index, family)
 				if err != nil {
 					continue
 				}
