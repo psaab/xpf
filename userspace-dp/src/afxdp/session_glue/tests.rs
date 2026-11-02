@@ -21253,10 +21253,10 @@ fn synthesized_reverse_companion_converges_session_id_across_workers_14667() {
             "#14667: synthesized companion must carry a non-zero identity \
              every worker can adopt verbatim"
         );
-        assert_ne!(
+        assert_eq!(
             reverse.session_id, forward_id,
-            "#14667: companion identity must be its own, not the forward's \
-             (the shared conditional remove checks it independently)"
+            "#18718: both halves carry the exact full forward incarnation ID; \
+             their distinct tuple keys keep scoped deletes independent"
         );
         let reverse_key = reverse.key.clone();
         let companion_id = reverse.session_id;
@@ -21521,10 +21521,12 @@ fn scoped_worker_delete_matched_removes_both_halves_10512() {
         PROTO_TCP,
         TCP_FLAG_ACK,
     ));
+    let forward_id = sessions.session_id_for(&key);
     let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+    let companion_id = forward_id;
     let mut companion_metadata = test_metadata();
     companion_metadata.is_reverse = true;
-    assert!(sessions.install_with_protocol_with_origin(
+    assert!(sessions.install_with_protocol_with_origin_and_source_nat_with_session_id(
         companion.clone(),
         test_decision(),
         companion_metadata,
@@ -21532,11 +21534,16 @@ fn scoped_worker_delete_matched_removes_both_halves_10512() {
         now_ns,
         PROTO_TCP,
         TCP_FLAG_ACK,
+        None,
+        companion_id,
     ));
-    let forward_id = sessions.session_id_for(&key);
-    // #15784: a scoped delete names its captured companion incarnation;
-    // companion_expected_id == 0 would now preserve the live companion.
-    let companion_id = sessions.session_id_for(&companion);
+    assert_eq!(
+        sessions.session_id_for(&companion),
+        companion_id,
+        "the local reverse uses the forward's full incarnation ID"
+    );
+    // #15784/#18718: the scoped delete captures the identity published for
+    // this local reverse companion and must remove that exact incarnation.
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     commands.lock().expect("commands lock").push_back(
         crate::afxdp::WorkerCommand::DeleteSyncedConditional {

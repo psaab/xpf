@@ -3614,6 +3614,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // #18691: decline a non-owner's
                                 // gateway-route fallback line.
                                 Some((worker_ctx.ha_state, now_secs)),
+                                // #18710: judge a not-yet-materialized
+                                // forward companion from the shared map.
+                                Some(worker_ctx.shared_sessions),
                             );
                         let owner_icmp_verdict =
                             if session_hit_revocation.is_none() && foreign_arrival_zone.is_none() {
@@ -8015,15 +8018,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     let reverse_installed = forward_installed
                                         && install_local_reverse
                                         && reverse_install_permit.is_some()
-                                        && sessions.install_with_protocol_with_origin(
-                                            reverse_key.clone(),
-                                            reverse_decision,
-                                            reverse_metadata.clone(),
-                                            SessionOrigin::ReverseFlow,
-                                            now_ns,
-                                            meta.protocol,
-                                            meta.tcp_flags,
-                                        );
+                                        && sessions
+                                            .install_with_protocol_with_origin_and_source_nat_with_session_id(
+                                                reverse_key.clone(),
+                                                reverse_decision,
+                                                reverse_metadata.clone(),
+                                                SessionOrigin::ReverseFlow,
+                                                now_ns,
+                                                meta.protocol,
+                                                meta.tcp_flags,
+                                                None,
+                                                forward_install_info
+                                                    .expect("installed forward session info")
+                                                    .session_id,
+                                            );
                                     if forward_installed
                                         && install_local_reverse
                                         && !reverse_installed
@@ -8149,32 +8157,36 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             }
                                         }
                                         created += 1;
-                                            let reverse_entry = SyncedSessionEntry {
-                                                key: reverse_key,
-                                        decision: reverse_decision,
-                                        metadata: reverse_metadata,
-                                                leak_incarnation: reverse_leak_incarnation
-                                                    .unwrap_or(0),
-                                        origin: SessionOrigin::ReverseFlow,
-                                        protocol: meta.protocol,
-                                        tcp_flags: meta.tcp_flags,
-                                        // Local reverse-flow learn (#2170): no peer gen.
-                                        generation: 0,
-                                        // #5212: a reverse companion never emits
-                                        // RT_FLOW (is_reverse skip) and gets its own
-                                        // fresh id at install — no carried id.
-                                        session_id: 0,
-                                                tcp_close_class: 0,
-                                                tcp_handshake_state: forward_install_info
-                                            .expect("installed forward session info")
-                                                    .handshake_state_wire,
-                                                rev_packets: sessions
-                                                    .rev_packets_for(&flow.forward_key),
-                                                fwd_packets: 0,
-                                                pptp_call_ids: 0,
-                                        persistent_lease_hold: None,
-                                                source_nat_static: None,
-                                            };
+                                        let reverse_session_id =
+                                            sessions.session_id_for(&reverse_key);
+                                        let reverse_entry = SyncedSessionEntry {
+                                            key: reverse_key,
+                                            decision: reverse_decision,
+                                            metadata: reverse_metadata,
+                                            leak_incarnation: reverse_leak_incarnation
+                                                .unwrap_or(0),
+                                            origin: SessionOrigin::ReverseFlow,
+                                            protocol: meta.protocol,
+                                            tcp_flags: meta.tcp_flags,
+                                            // Local reverse-flow learn (#2170): no peer gen.
+                                            generation: 0,
+                                            // #18718: publish the reverse row
+                                            // with the forward's full stable
+                                            // session ID, including its worker
+                                            // namespace, so a same-tuple
+                                            // replacement cannot match an old
+                                            // reverse incarnation.
+                                            session_id: reverse_session_id,
+                                            tcp_close_class: 0,
+                                            tcp_handshake_state: forward_install_info
+                                                .expect("installed forward session info")
+                                                .handshake_state_wire,
+                                            rev_packets: sessions.rev_packets_for(&flow.forward_key),
+                                            fwd_packets: 0,
+                                            pptp_call_ids: 0,
+                                            persistent_lease_hold: None,
+                                            source_nat_static: None,
+                                        };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,

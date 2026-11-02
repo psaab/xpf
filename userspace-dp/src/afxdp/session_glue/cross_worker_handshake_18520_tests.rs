@@ -607,7 +607,7 @@ fn imported_opening_session_served_mid_stream_survives_opening_window_18520() {
         &node,
         SessionOrigin::SyncImport,
         TcpHandshakeState::Opening.to_wire(),
-        crate::session::synthesized_companion_session_id(peer_id),
+        peer_id,
     );
     let queues = [Arc::clone(&node.a.queue), Arc::clone(&node.b.queue)];
     for entry in [&forward_entry, &reverse_entry] {
@@ -689,7 +689,7 @@ fn imported_opening_session_held_on_standby_survives_takeover_service_18520() {
             rev.clone(),
             node.reverse_decision,
             reverse_metadata(),
-            crate::session::synthesized_companion_session_id(peer_id),
+            peer_id,
         ),
     ];
     let mut a = SessionTable::new();
@@ -1491,7 +1491,7 @@ fn ha_pending_import_completes_on_the_cache_served_sibling_18520() {
     let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
     let t0 = 1_000 * SEC;
     let peer_id = (1u64 << 63) | 0x48;
-    let companion_id = crate::session::synthesized_companion_session_id(peer_id);
+    let companion_id = peer_id;
     let mut x = SessionTable::new();
     x.set_session_id_namespace(0, 0);
     let mut y = SessionTable::new();
@@ -1601,7 +1601,7 @@ fn promoted_relay_for_a_peer_node_id_reaches_every_sibling_18520() {
         false,
         SessionOrigin::SyncImport,
         TcpHandshakeState::Opening,
-        crate::session::synthesized_companion_session_id(peer_id),
+        peer_id,
         t0,
     );
     slow_hit(&mut b, &rev, t0 + MS, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, SERVER_ISN, CLIENT_ISN + 1);
@@ -1733,7 +1733,7 @@ fn served_here_is_stored_once_per_row_not_per_packet_18520() {
     let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
     let t0 = 1_000 * SEC;
     let peer_id = (1u64 << 63) | 0x48;
-    let companion_id = crate::session::synthesized_companion_session_id(peer_id);
+    let companion_id = peer_id;
     let mut y = SessionTable::new();
     y.set_session_id_namespace(0, 1);
     install_replica(&mut y, &node, true, SessionOrigin::SyncImport, TcpHandshakeState::Established, peer_id, t0);

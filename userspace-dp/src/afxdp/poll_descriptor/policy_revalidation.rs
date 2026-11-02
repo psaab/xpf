@@ -1019,6 +1019,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
         packet_icmp,
         false,
         None,
+        None,
     )
 }
 
@@ -1075,6 +1076,99 @@ fn selector_provenance_absent(
         )
 }
 
+/// The judged forward pair, as `source_nat_revocation_on_session_hit_with_ingress`
+/// builds it: key, decision, metadata, origin, the local canonical key to
+/// tear down (`None` when there is no local row), stored static provenance.
+type JudgedForward = (
+    SessionKey,
+    SessionDecision,
+    crate::session::SessionMetadata,
+    SessionOrigin,
+    Option<SessionKey>,
+    Option<bool>,
+);
+
+/// #18710: the forward companion of a reverse hit that this worker has not
+/// materialized yet, taken from the SHARED map.
+///
+/// A fresh flow's first reply can reach a worker before that worker has
+/// drained the creating worker's replica command: the forward row is in the
+/// shared map but not in this table, `source_nat_revalidation_target` answers
+/// `NoLocalEntry`, and the sessionless arm fails closed (a locally created
+/// reverse row carries no forward VLAN provenance) and drops the reply. For
+/// TCP that is the SYN-ACK, so the connection waits a 1 s SYN retransmit.
+/// Judge the shared forward row instead, exactly as a local companion is
+/// judged, only when ALL of these hold; otherwise the sessionless arm decides,
+/// as before:
+/// - it is a FORWARD row (`!metadata.is_reverse`);
+/// - it is THIS reply's flow: its own translation maps back to the reply's
+///   reverse key. A shared row at the original tuple can belong to a newer
+///   flow with a different translation (the same client tuple reused); a
+///   stale reverse row of the older flow must not be validated by it;
+/// - it is THIS reverse row's incarnation: any shared reverse row at the reply
+///   key and any reverse row already held locally must carry the full session
+///   ID of this forward. The worker namespace is part of that ID, so distinct
+///   workers' same-counter flows cannot alias. A reply with no reverse row yet
+///   has no old incarnation to confuse with the shared forward row.
+///   Tuple equality alone would let a new static forward row validate an old
+///   dynamic reverse row at the same translated tuple, bypassing the
+///   stored-provenance guard in `source_nat_translation_still_valid`;
+/// - this node created it: origin `ForwardFlow` (the slow-path create) or
+///   `MissingNeighborSeed` (the same create committed before the neighbor
+///   resolved, published to the shared map by #14661 so a reply on another
+///   queue finds it). Both carry the flow's own translation and this node's
+///   line. Every other origin keeps the old arm: the peer-synced set
+///   (`SyncImport`/`SyncLiveness`/`SharedMaterialize`/`WorkerLocalImport`)
+///   and `SharedPromote` carry a line imported from the peer;
+///   `FabricPuntSeed` is a local note of a flow whose authoritative session
+///   is the peer's; `LocalMiss`, `ReverseFlow` and `TunOrigin` are not a
+///   transit flow this node translated.
+/// There is no local row to tear down, so a failed judgment drops only this
+/// packet (`canonical_key: None`).
+fn shared_forward_companion_for_reverse_hit(
+    shared_sessions: Option<&Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>>,
+    reverse_key: &SessionKey,
+    local_reverse_session_id: Option<u64>,
+    forward_query: &SessionKey,
+) -> Option<JudgedForward> {
+    let shared_sessions = shared_sessions?;
+    let shared = crate::afxdp::shared_ops::lock_shared_recover(shared_sessions);
+    let entry = shared.get(forward_query)?;
+    if entry.metadata.is_reverse
+        || !matches!(
+            entry.origin,
+            SessionOrigin::ForwardFlow | SessionOrigin::MissingNeighborSeed
+        )
+    {
+        return None;
+    }
+    if crate::session::reverse_session_key(&entry.key, entry.decision.nat) != *reverse_key {
+        return None;
+    }
+    if entry.session_id == 0 {
+        return None;
+    }
+    let expected_reverse_id = entry.session_id;
+    if local_reverse_session_id.is_some_and(|id| id != expected_reverse_id) {
+        return None;
+    }
+    if let Some(shared_reverse) = shared.get(reverse_key)
+        && (!shared_reverse.metadata.is_reverse
+            || shared_reverse.key != *reverse_key
+            || shared_reverse.session_id != expected_reverse_id)
+    {
+        return None;
+    }
+    Some((
+        entry.key.clone(),
+        entry.decision,
+        entry.metadata.clone(),
+        entry.origin,
+        None,
+        entry.source_nat_static,
+    ))
+}
+
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     forwarding: &ForwardingState,
@@ -1099,7 +1193,54 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // (standalone wrappers, unit fixtures) keeps every judgment exactly as
     // before.
     ha: Option<(&BTreeMap<i32, HAGroupRuntime>, u64)>,
+    // #18710: the worker's shared session map, consulted only when a reverse
+    // hit finds no local forward companion. `None` keeps the sessionless
+    // arm exactly as before.
+    shared_sessions: Option<&Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>>,
 ) -> Option<PolicyRevocation> {
+    // Derive the reverse key, forward query, and local target once. Common
+    // reverse hits are Fresh/Stale and never consult the shared map; only the
+    // NoLocalEntry population may use the first-reply shared-row judgment.
+    let reverse_context = if metadata.is_reverse {
+        let reverse_key = sessions
+            .revalidation_canonical_key(session_key)
+            .unwrap_or_else(|| session_key.clone());
+        let (reverse_decision, has_local_reverse_entry) =
+            if let Some((reverse_decision, _, _)) = sessions.entry_with_origin(&reverse_key) {
+                (reverse_decision, true)
+            } else {
+                (decision, false)
+            };
+        let forward_query = crate::session::reverse_session_key(&reverse_key, reverse_decision.nat);
+        let target = sessions.source_nat_revalidation_target(&forward_query);
+        Some((
+            reverse_key,
+            reverse_decision,
+            has_local_reverse_entry,
+            forward_query,
+            target,
+        ))
+    } else {
+        None
+    };
+    let shared_companion = reverse_context.as_ref().and_then(
+        |(reverse_key, _, has_local_reverse_entry, forward_query, target)| {
+            if !matches!(target, SourceNatRevalidationTarget::NoLocalEntry) {
+                return None;
+            }
+            let local_reverse_session_id = if *has_local_reverse_entry {
+                Some(sessions.session_id_for(reverse_key))
+            } else {
+                None
+            };
+            shared_forward_companion_for_reverse_hit(
+                shared_sessions,
+                reverse_key,
+                local_reverse_session_id,
+                forward_query,
+            )
+        },
+    );
     let (
         forward_key,
         forward_decision,
@@ -1107,29 +1248,26 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         forward_origin,
         canonical_key,
         stored_static,
-    ) = if metadata.is_reverse {
-        let reverse_key = sessions
-            .revalidation_canonical_key(session_key)
-            .unwrap_or_else(|| session_key.clone());
-        let reverse_decision = sessions
-            .entry_with_origin(&reverse_key)
-            .map(|(decision, _, _)| decision)
-            .unwrap_or(decision);
-        let forward_query = crate::session::reverse_session_key(&reverse_key, reverse_decision.nat);
-        let (forward_key, static_nat) =
-            match sessions.source_nat_revalidation_target(&forward_query) {
-                SourceNatRevalidationTarget::Fresh => return None,
-                SourceNatRevalidationTarget::Stale { key, static_nat } => (key, static_nat),
-                SourceNatRevalidationTarget::NoLocalEntry => {
-                    // Reverse hits do not own the forward translation. When the
-                    // companion is not materialized locally, reconstruct its
-                    // decision and tuple from the reverse row and run the same
-                    // sessionless validation as a forward peer-synced hit. A
-                    // failed check drops this packet but claims no session to
-                    // tear down; absent NAT provenance deliberately fails closed
-                    // for translated source-NAT state.
-                    // Normalize the interface pair into forward direction:
-                    // the reverse decision's egress predicts the original LAN
+    ) = if let Some(companion) = shared_companion {
+        companion
+    } else if metadata.is_reverse {
+        let (reverse_key, reverse_decision, _, forward_query, target) =
+            reverse_context.expect("reverse hit has its revalidation context");
+        let (forward_key, static_nat) = match target {
+            SourceNatRevalidationTarget::Fresh => return None,
+            SourceNatRevalidationTarget::Stale { key, static_nat } => (key, static_nat),
+            SourceNatRevalidationTarget::NoLocalEntry => {
+                // Reverse hits do not own the forward translation. When the
+                // companion is not materialized locally, reconstruct its
+                // decision and tuple from the reverse row and run the same
+                // sessionless validation as a forward peer-synced hit. A
+                // failed check drops this packet but claims no session to
+                // tear down; absent NAT provenance deliberately fails closed
+                // for translated source-NAT state.
+                // Reconstruct the forward view and judge it before returning
+                // without claiming a local row.
+                {
+                    // The reverse decision's egress predicts the original LAN
                     // ingress, while this packet's observed ingress is the
                     // original WAN egress. Reverse metadata intentionally stores
                     // no predicted ingress (see SessionMetadata), so use the
@@ -1329,6 +1467,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         reason: PolicyRevocationReason::StaleSourceNat,
                     });
                 }
+                    }
             };
         let (forward_decision, forward_metadata, forward_origin) =
             sessions.entry_with_origin(&forward_key)?;
