@@ -1849,7 +1849,11 @@ they repeatedly bite:
     |---|---|
     | alarm, tests running | column-0 `panic: test timed out after`, the indented `running tests:` list, then a blank line, `goroutine N [running]:`, and the first-frame `testing.(*M).startAlarm.func1()` |
     | alarm, no test running (a hung Example) | the same panic line, then a blank line, `goroutine N [running]:`, and the first-frame `testing.(*M).startAlarm.func1()` |
-    | binary hung outside `m.Run` (a hung TestMain) | cmd/go's `*** Test killed with quit: ran too long` (at `-timeout` + 1m), immediately followed by the package's `FAIL<TAB><pkg>` line |
+    | binary hung outside `m.Run` (a hung TestMain) | cmd/go's SIGQUIT dump begins `SIGQUIT: quit`, `PC=`, then a goroutine header; cmd/go then prints `*** Test killed with quit: ran too long` at `-timeout` + 1m | the kill marker is immediately followed by the package's `FAIL<TAB><pkg>` line |
+
+    If cmd/go cannot produce the SIGQUIT dump, its kill marker plus package
+    FAIL is indistinguishable from test-printed text and is not classified as
+    VOID; the run remains an ordinary failure rather than a false timeout.
 
     The default text paths pin `-json=false` at the go command line, and the
     side-file path explicitly requests `-json`, so inherited `GOFLAGS` cannot

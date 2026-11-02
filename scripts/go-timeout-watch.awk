@@ -16,10 +16,11 @@
 #      prints the panic and an adjacent "running tests:" line has no alarm
 #      goroutine, so it does not pair.
 #   C  the binary hung outside m.Run (a TestMain), so the alarm was never
-#      armed: cmd/go kills it at -timeout + 1m and prints "*** Test killed with
-#      quit: ran too long (1m1s)." (or "*** Test killed: ran too long" when the
-#      signal could not be delivered), immediately followed by that package's
-#      "FAIL<TAB><pkg>" line.
+#      armed. cmd/go sends SIGQUIT and its real diagnostic dump begins with
+#      "SIGQUIT: quit", a "PC=" line and a goroutine header, then prints
+#      "*** Test killed with quit: ran too long (1m1s)." before the package
+#      "FAIL<TAB><pkg>" line. The marker+FAIL alone can be printed by a test,
+#      so without the dump this shape is not trusted as a timeout.
 #
 # Input modes:
 #   default        a text stream. Every line passes through to stdout
@@ -70,7 +71,18 @@ function record(k, name) {
 		st[k] = 1
 		running[k] = 0
 	}
-	if (line ~ /^\*\*\* Test killed( with [A-Za-z]+)?: ran too long /) armedC[k] = 1
+	# Shape C requires the SIGQUIT dump emitted when cmd/go kills the test
+	# process. A TestMain can print the later cmd/go marker and return an
+	# ordinary failure, so marker+package FAIL is not sufficient.
+	if (line == "SIGQUIT: quit") c_sigquit[k] = 1
+	if (c_sigquit[k] && line ~ /^PC=/) c_pc[k] = 1
+	if (c_pc[k] && line ~ /^goroutine [0-9]+([ \t]|$)/) c_dump[k] = 1
+	if (line ~ /^\*\*\* Test killed( with [A-Za-z]+)?: ran too long /) {
+		if (c_dump[k]) armedC[k] = 1
+		c_sigquit[k] = 0
+		c_pc[k] = 0
+		c_dump[k] = 0
+	}
 	# A package's terminal line: "FAIL<TAB><pkg>..." or "ok  <TAB><pkg>...".
 	# Name a pending timeout from it, then reset the stream state so one
 	# package's panic line can never pair with the next package's output.
@@ -80,6 +92,9 @@ function record(k, name) {
 		st[k] = 0
 		running[k] = 0
 		armedC[k] = 0
+		c_sigquit[k] = 0
+		c_pc[k] = 0
+		c_dump[k] = 0
 	}
 }
 END {

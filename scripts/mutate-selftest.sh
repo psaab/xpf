@@ -217,9 +217,15 @@ printf '%s\n' \
 	'FAIL	example.com/ex	2.010s' > "$W/timeout-example.log"
 ck "a hung Example (no running tests) is VOID" "yes 1 1 VOID(run did not finish: timeout)" \
 	"$(mutation_score_log go "$W/timeout-example.log" yes)"
+# #18779 shape-C positive uses the SIGQUIT diagnostic prefix observed from a
+# real TestMain timeout. The kill marker and package FAIL alone are printable
+# by an ordinary TestMain and do not establish a timeout.
 printf '%s\n' \
 	'--- FAIL: TestUnrelated (0.01s)' \
 	'SIGQUIT: quit' \
+	'PC=0x40ee0e m=0 sigcode=0' \
+	'goroutine 0 gp=0x6fe6e0 m=0 mp=0x6ff6e0 [idle]:' \
+	'runtime.goexit()' \
 	'*** Test killed with quit: ran too long (1m1s).' \
 	'FAIL	example.com/tm	61.061s' > "$W/timeout-testmain.log"
 ck "a hung TestMain killed by go test is VOID" "yes 1 1 VOID(run did not finish: timeout)" \

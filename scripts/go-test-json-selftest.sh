@@ -344,9 +344,9 @@ EJ="$WORK/ex.json"; : > "$EJ"
 check "timeout, hung Example, side-file path: the leg is VOID (exit 3)" "$exj_rc" "3"
 
 # (3) a hung TestMain: the alarm is armed inside m.Run, so it never fires;
-# cmd/go kills the binary at -timeout + 1m and prints "*** Test killed with
-# quit: ran too long (1m1s)." then the package FAIL line. This row costs
-# about 62 s, so the text and side-file paths run concurrently.
+# cmd/go kills the binary at -timeout + 1m. Its SIGQUIT dump starts
+# `SIGQUIT: quit`, `PC=`, then a goroutine header before the kill marker and
+# package FAIL. This row costs about 62 s, so both paths run concurrently.
 mkdir -p "$WORK/tm"
 printf 'module example.com/tm\n\ngo 1.21\n' > "$WORK/tm/go.mod"
 cat > "$WORK/tm/tm_test.go" <<'EOT'
@@ -371,6 +371,33 @@ grep -q "example.com/tm: binary killed by go test" "$WORK/tm.err" &&
 	ok "timeout, hung TestMain: the banner names the package and the shape" ||
 	bad "timeout, hung TestMain: banner wrong: $(head -2 "$WORK/tm.err")"
 
+# A test can print cmd/go's shape-C kill marker and exit 1 without timing out.
+# Marker+package FAIL alone are therefore insufficient; a real shape C first
+# contains the SIGQUIT stack dump. Keep the printed marker an ordinary failure
+# on both text and side-file paths.
+mkdir -p "$WORK/fp3"
+printf 'module example.com/fp3\n\ngo 1.21\n' > "$WORK/fp3/go.mod"
+cat > "$WORK/fp3/fp3_test.go" <<'EOT'
+package fp3
+
+import (
+	"fmt"
+	"os"
+	"testing"
+)
+
+func TestMain(m *testing.M) {
+	fmt.Println("*** Test killed with quit: ran too long (1m1s).")
+	os.Exit(1)
+}
+
+func TestX(t *testing.T) {}
+EOT
+( cd "$WORK/fp3" && bash "$here/go-test-json.sh" "" go -timeout 60s ./... >/dev/null 2>&1 ); fp3_rc=$?
+check "false positive: TestMain printing the cmd/go kill marker stays an ordinary failure (exit 1)" "$fp3_rc" "1"
+FP3J="$WORK/fp3.json"; : > "$FP3J"
+( cd "$WORK/fp3" && bash "$here/go-test-json.sh" "$FP3J" go -timeout 60s ./... >/dev/null 2>&1 ); fp3j_rc=$?
+check "false positive, side-file path: TestMain printing the cmd/go kill marker stays an ordinary failure (exit 1)" "$fp3j_rc" "1"
 # Control: a fast package under the same flag must NOT be voided.
 ( cd "$WORK/m" && bash "$here/go-test-json.sh" "" go -timeout 60s ./... >/dev/null 2>&1 ); ctl_rc=$?
 if [ "$ctl_rc" -ne 3 ]; then
