@@ -262,6 +262,9 @@ wait_for_agent() {
 # ── Init ─────────────────────────────────────────────────────────────
 
 cmd_init() {
+	if [[ -n "$SRIOV_FABRIC_PARENT" && -z "$VF_FABRIC_VLAN" ]]; then
+		die "SRIOV_FABRIC_PARENT requires VF_FABRIC_VLAN for fabric VF access"
+	fi
 	create_networks
 	create_profile
 	info "Init complete. Run '$0 create' next."
@@ -332,12 +335,8 @@ devices:
   eth2:
     name: enp7s0
     nictype: sriov
-    parent: ${SRIOV_FABRIC_PARENT}"
-		if [[ -n "$VF_FABRIC_VLAN" ]]; then
-			yaml+="
-    vlan: \"${VF_FABRIC_VLAN}\""
-		fi
-		yaml+="
+    parent: ${SRIOV_FABRIC_PARENT}
+    vlan: \"${VF_FABRIC_VLAN}\"
     mtu: \"9000\"
     security.mac_filtering: \"false\"
     type: nic"

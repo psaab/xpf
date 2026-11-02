@@ -296,4 +296,47 @@ if grep -q '^FAIL' <<<"$census_out"; then
 fi
 ok "env-name census: ${census_out#OK }"
 
+# #12655: an SR-IOV fabric parent without its access VLAN must fail before init
+# creates any networks or profile, rather than silently becoming an untagged VF.
+FABRIC_TEST_DIR="${SEQ_TMP}/fabric-vlan-required"
+mkdir -p "${FABRIC_TEST_DIR}/bin"
+cat >"${FABRIC_TEST_DIR}/empty-vlan.env" <<'ENV'
+SRIOV_FABRIC_PARENT="ix0"
+VF_FABRIC_VLAN=""
+NET_FABRIC=""
+NET_HEARTBEAT="xpf-12655-hb"
+NET_CLAN=""
+PROFILE="xpf-12655"
+ENV
+cat >"${FABRIC_TEST_DIR}/bin/incus" <<'INCUS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${INCUS_CALLS:?}"
+[[ "${1:-}" == "list" ]]
+INCUS
+chmod +x "${FABRIC_TEST_DIR}/bin/incus"
+FABRIC_LOCK="${FABRIC_TEST_DIR}/cluster.lock"
+: >"$FABRIC_LOCK"
+exec 9>"$FABRIC_LOCK"
+flock 9
+export XPF_CLUSTER_LOCK="$FABRIC_LOCK"
+export XPF_CLUSTER_OWNER="${FABRIC_TEST_DIR}/cluster.owner"
+export XPF_CLUSTER_EPOCH_STATE_DIR="${FABRIC_TEST_DIR}/state"
+export XPF_CLUSTER_EPOCH="${FABRIC_TEST_DIR}/epoch"
+export XPF_CLUSTER_LOCK_HELD="${FABRIC_LOCK}:$$"
+FABRIC_CALLS="${FABRIC_TEST_DIR}/incus-calls.log"
+FABRIC_OUTPUT="${FABRIC_TEST_DIR}/setup-output.log"
+set +e
+BPFRX_CLUSTER_ENV="${FABRIC_TEST_DIR}/empty-vlan.env" \
+	PATH="${FABRIC_TEST_DIR}/bin:${PATH}" INCUS_CALLS="$FABRIC_CALLS" \
+	bash "${SCRIPT_DIR}/cluster-setup.sh" init >"$FABRIC_OUTPUT" 2>&1
+fabric_rc=$?
+set -e
+[[ "$fabric_rc" -ne 0 ]] \
+	|| fail "SR-IOV fabric without VF_FABRIC_VLAN unexpectedly passed init"
+grep -Fq "SRIOV_FABRIC_PARENT requires VF_FABRIC_VLAN" "$FABRIC_OUTPUT" \
+	|| fail "missing-VLAN init failed without naming VF_FABRIC_VLAN"
+[[ "$(cat "$FABRIC_CALLS")" == "list" ]] \
+	|| fail "missing-VLAN init called Incus after its harmless availability probe"
+ok "SR-IOV fabric without VF_FABRIC_VLAN fails before Incus mutations"
+
 echo "ALL ${PASS} CASES PASS"
