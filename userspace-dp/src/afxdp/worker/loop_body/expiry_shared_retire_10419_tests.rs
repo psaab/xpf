@@ -99,7 +99,9 @@ fn metadata() -> SessionMetadata {
 }
 
 fn entry(key: SessionKey, origin: SessionOrigin, session_id: u64) -> SyncedSessionEntry {
-    SyncedSessionEntry { sibling_last_seen_ns: 0, key, decision: decision(),
+    sibling_last_seen_ns: 0,
+    SyncedSessionEntry { sibling_last_seen_ns: 0, key,
+    decision: decision(),
     metadata: metadata(),
     leak_incarnation: 0,
     origin,

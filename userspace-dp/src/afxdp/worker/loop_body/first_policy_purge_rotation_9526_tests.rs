@@ -179,7 +179,11 @@ fn entry(
     is_reverse: bool,
     counter: Option<Arc<PolicyRuleCounter>>,
 ) -> SyncedSessionEntry {
-    SyncedSessionEntry { sibling_last_seen_ns: 0, key, decision: SessionDecision {
+    sibling_last_seen_ns: 0,
+    SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key,
+    decision: SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -232,7 +236,8 @@ fn entry(
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 /// Waits until the worker has completed `n` more loop iterations (the loop

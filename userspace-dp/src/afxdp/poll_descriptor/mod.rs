@@ -8149,29 +8149,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             }
                                         }
                                         created += 1;
-                                            let reverse_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: reverse_key, decision: reverse_decision,
-                                            metadata: reverse_metadata,
-                                                    leak_incarnation: reverse_leak_incarnation
-                                                        .unwrap_or(0),
-                                            origin: SessionOrigin::ReverseFlow,
-                                            protocol: meta.protocol,
-                                            tcp_flags: meta.tcp_flags,
-                                            // Local reverse-flow learn (#2170): no peer gen.
-                                            generation: 0,
-                                            // #5212: a reverse companion never emits
-                                            // RT_FLOW (is_reverse skip) and gets its own
-                                            // fresh id at install — no carried id.
-                                            session_id: 0,
-                                                    tcp_close_class: 0,
-                                                    tcp_handshake_state: forward_install_info
-                                                .expect("installed forward session info")
-                                                        .handshake_state_wire,
-                                                    rev_packets: sessions
-                                                        .rev_packets_for(&flow.forward_key),
-                                                    fwd_packets: 0,
-                                                    pptp_call_ids: 0,
-                                            persistent_lease_hold: None,
-                                                    source_nat_static: None, };
+                                            let reverse_entry = SyncedSessionEntry {
+                                                sibling_last_seen_ns: 0,
+                                                key: reverse_key,
+                                        decision: reverse_decision,
+                                        metadata: reverse_metadata,
+                                                leak_incarnation: reverse_leak_incarnation
+                                                    .unwrap_or(0),
+                                        origin: SessionOrigin::ReverseFlow,
+                                        protocol: meta.protocol,
+                                        tcp_flags: meta.tcp_flags,
+                                        // Local reverse-flow learn (#2170): no peer gen.
+                                        generation: 0,
+                                        // #5212: a reverse companion never emits
+                                        // RT_FLOW (is_reverse skip) and gets its own
+                                        // fresh id at install — no carried id.
+                                        session_id: 0,
+                                                tcp_close_class: 0,
+                                                tcp_handshake_state: forward_install_info
+                                            .expect("installed forward session info")
+                                                    .handshake_state_wire,
+                                                rev_packets: sessions
+                                                    .rev_packets_for(&flow.forward_key),
+                                                fwd_packets: 0,
+                                                pptp_call_ids: 0,
+                                        persistent_lease_hold: None,
+                                                source_nat_static: None,
+                                            };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,

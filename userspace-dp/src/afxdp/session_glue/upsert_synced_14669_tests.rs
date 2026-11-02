@@ -186,7 +186,9 @@ fn synced_entry(
     resolution: ForwardingResolution,
     nat: NatDecision,
 ) -> SyncedSessionEntry {
-    SyncedSessionEntry { sibling_last_seen_ns: 0, key, decision: SessionDecision {
+    sibling_last_seen_ns: 0,
+    SyncedSessionEntry { sibling_last_seen_ns: 0, key,
+    decision: SessionDecision {
         resolution,
         nat,
         install_table_domain: 0,

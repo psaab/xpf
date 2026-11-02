@@ -213,7 +213,10 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
         ..tunnel_resolution
     };
     let make =
-        |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: SessionDecision {
+        |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
+            key: key.clone(),
+        decision: SessionDecision {
             resolution,
             nat,
             install_table_domain: 0,
@@ -252,7 +255,8 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
             fwd_packets: 0,
             pptp_call_ids: 0,
             persistent_lease_hold: None,
-            source_nat_static: None, };
+            source_nat_static: None,
+        };
     let unrelated_key = SessionKey {
         src_port: 23456,
         ..forward_key.clone()
@@ -345,7 +349,10 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
         transport_route_mtu: 0,
     };
     let make =
-        |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: SessionDecision {
+        |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
+            key: key.clone(),
+        decision: SessionDecision {
             resolution,
             nat,
             install_table_domain: 0,
@@ -383,7 +390,8 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
             fwd_packets: 0,
             pptp_call_ids: 0,
             persistent_lease_hold: None,
-            source_nat_static: None, };
+            source_nat_static: None,
+        };
 
     // Purge ids 100..=131 (a large drop set). Build many purged forward
     // entries interleaved with survivors. One survivor (`survivor_shares_ip`)
@@ -503,7 +511,10 @@ fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
                 tunnel_endpoint_id: u16,
                 ingress_zone: u32,
                 egress_zone: u32,
-                is_reverse: bool| SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: SessionDecision {
+                is_reverse: bool| SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: key.clone(),
+                decision: SessionDecision {
                     resolution: resolution(tunnel_endpoint_id),
                     nat,
                     install_table_domain: 0,
@@ -535,13 +546,14 @@ fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
                 tcp_flags: 0,
                 generation: 0,
                 session_id: 0,
-                        tcp_close_class: 0,
-                        tcp_handshake_state: 0,
-                        rev_packets: 0u64,
-                        fwd_packets: 0,
-                        pptp_call_ids: 0,
-                            persistent_lease_hold: None,
-                        source_nat_static: None, };
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+            persistent_lease_hold: None,
+        source_nat_static: None,
+    };
 
     let mut forwarding = ForwardingState::default();
     forwarding.zone_id_to_name.insert(1, "lan".to_string());

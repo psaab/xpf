@@ -486,21 +486,25 @@ fn adoption_candidate_for_wire(
     }
     let canonical = sessions.local_established_for_wire_at(wire_key, now_ns)?;
     let (decision, metadata, origin) = sessions.entry_with_origin(&canonical)?;
-    Some(SyncedSessionEntry { sibling_last_seen_ns: 0, key: canonical.clone(), decision,
-    metadata,
-    persistent_lease_hold: sessions.persistent_lease_hold_for(&canonical),
-    source_nat_static: None,
-    leak_incarnation: 0,
-    origin,
-    protocol: canonical.protocol,
-    tcp_flags: 0,
-    generation: 0,
-    session_id: 0,
-    tcp_close_class: 0,
-    tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
-    rev_packets: 0,
-    fwd_packets: 0,
-    pptp_call_ids: 0, })
+    Some(SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: canonical.clone(),
+        decision,
+        metadata,
+        persistent_lease_hold: sessions.persistent_lease_hold_for(&canonical),
+        source_nat_static: None,
+        leak_incarnation: 0,
+        origin,
+        protocol: canonical.protocol,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
+        rev_packets: 0,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+    })
 }
 /// #16217: INPUT evidence for the ct-slice collector and the export
 /// stamp — reverse service observed for the canonical key anywhere

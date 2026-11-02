@@ -379,6 +379,7 @@ pub(in crate::afxdp) fn demote_shared_owner_rgs(
 }
 
 pub(in crate::afxdp) fn synced_replica_entry(entry: &SyncedSessionEntry) -> SyncedSessionEntry {
+    sibling_last_seen_ns: 0,
     let mut replica = entry.clone();
     replica.origin = entry.origin.worker_replica_origin();
     replica
@@ -1622,6 +1623,7 @@ mod handshake_monotonic_16223_tests {
     }
 
     fn entry(key: &SessionKey, wire: u8, session_id: u64, reverse: bool) -> SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         let mut metadata = crate::session::SessionMetadata {
             ingress_zone: 1,
             egress_zone: 2,
@@ -1643,7 +1645,8 @@ mod handshake_monotonic_16223_tests {
             nat_scope_ifindex: None,
         };
         metadata.is_reverse = reverse;
-        SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: crate::session::SessionDecision {
+        SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
+        decision: crate::session::SessionDecision {
             resolution: crate::afxdp::ForwardingResolution {
                 disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
                 local_ifindex: 0,

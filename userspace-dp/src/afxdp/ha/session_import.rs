@@ -3041,7 +3041,10 @@ impl crate::afxdp::ha::SessionDomain {
             policy_counter: None,
             nat_scope_ifindex: None,
         };
-        let _ = self.upsert_synced_session(SyncedSessionEntry { sibling_last_seen_ns: 0, key, decision: SessionDecision {
+        let _ = self.upsert_synced_session(SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
+            key,
+        decision: SessionDecision {
             resolution,
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -3060,7 +3063,8 @@ impl crate::afxdp::ha::SessionDomain {
             fwd_packets: 0,
             pptp_call_ids: 0,
             persistent_lease_hold: None,
-            source_nat_static: None, });
+            source_nat_static: None,
+        });
     }
 }
 
@@ -3168,7 +3172,11 @@ mod rejected_mirror_reservation_10790_tests {
         generation: u64,
         session_id: u64,
     ) -> SyncedSessionEntry {
-        SyncedSessionEntry { sibling_last_seen_ns: 0, key, decision: SessionDecision {
+        sibling_last_seen_ns: 0,
+        SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
+            key,
+        decision: SessionDecision {
             resolution: ForwardingResolution {
                 disposition: ForwardingDisposition::ForwardCandidate,
                 local_ifindex: 0,
@@ -3219,7 +3227,8 @@ mod rejected_mirror_reservation_10790_tests {
             fwd_packets: 0,
             pptp_call_ids: 0,
             persistent_lease_hold: None,
-            source_nat_static: None, }
+            source_nat_static: None,
+        }
     }
 
     fn reserve_nat64_translation(coordinator: &Coordinator, entry: &SyncedSessionEntry) {
@@ -3301,7 +3310,10 @@ mod rejected_mirror_reservation_10790_tests {
             routing_domain: 0,
         };
         let pool_port = 23_090;
-        let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: SessionDecision {
+        let entry = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
+            key: key.clone(),
+        decision: SessionDecision {
             resolution: ForwardingResolution {
                 disposition: ForwardingDisposition::ForwardCandidate,
                 local_ifindex: 0,
@@ -3356,7 +3368,8 @@ mod rejected_mirror_reservation_10790_tests {
             fwd_packets: 0,
             pptp_call_ids: 0,
             persistent_lease_hold: None,
-            source_nat_static: None, };
+            source_nat_static: None,
+        };
         let allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
         assert!(
             !allocator.debug_is_port_occupied(0, pool_port),

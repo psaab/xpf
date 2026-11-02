@@ -134,66 +134,71 @@ pub(super) fn imported_pair_entry(
     key: crate::session::SessionKey,
     rewrite_src: IpAddr,
 ) -> SyncedSessionEntry {
+    sibling_last_seen_ns: 0,
     let next_hop = key.dst_ip;
-    SyncedSessionEntry { sibling_last_seen_ns: 0, key, decision: SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: WAN_UNIT_IFINDEX,
-            tx_ifindex: WAN_PARENT_IFINDEX,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(next_hop),
-            neighbor_mac: Some([0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x01]),
-            tx_vlan_id: 80,
-            source_ifindex: 0,
-            route_mtu: 0,
-            transport_route_mtu: 0,
+    SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key,
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: WAN_UNIT_IFINDEX,
+                tx_ifindex: WAN_PARENT_IFINDEX,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(next_hop),
+                neighbor_mac: Some([0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x01]),
+                tx_vlan_id: 80,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision {
+                rewrite_src: Some(rewrite_src),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
-        nat: NatDecision {
-            rewrite_src: Some(rewrite_src),
-            ..NatDecision::default()
+        metadata: SessionMetadata {
+            ingress_zone: forwarding.zone_name_to_id["lan"],
+            egress_zone: forwarding.zone_name_to_id["wan"],
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            // #7095: the import carries THIS node's resolved ingress identity.
+            ingress_ifindex: LAN_IFINDEX as u32,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            // The HA wire carries the admitting NAT scope as a cluster-stable
+            // fold that the importer resolves to its own ifindex (reth1.0).
+            nat_scope_ifindex: Some(LAN_IFINDEX),
         },
-        install_table_domain: 0,
-        install_table_check: 0,
-    },
-    metadata: SessionMetadata {
-        ingress_zone: forwarding.zone_name_to_id["lan"],
-        egress_zone: forwarding.zone_name_to_id["wan"],
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        // #7095: the import carries THIS node's resolved ingress identity.
-        ingress_ifindex: LAN_IFINDEX as u32,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        // The HA wire carries the admitting NAT scope as a cluster-stable
-        // fold that the importer resolves to its own ifindex (reth1.0).
-        nat_scope_ifindex: Some(LAN_IFINDEX),
-    },
-    persistent_lease_hold: None,
-    // Interface SNAT mints dynamic provenance; it rides the HA wire.
-    source_nat_static: Some(false),
-    leak_incarnation: 0,
-    origin: SessionOrigin::SyncImport,
-    protocol: PROTO_TCP,
-    tcp_flags: TCP_ACK,
-    generation: 0,
-    session_id: (1u64 << 48) | 12,
-    tcp_close_class: 0,
-    tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
-    rev_packets: 100,
-    fwd_packets: 100,
-    pptp_call_ids: 0, }
+        persistent_lease_hold: None,
+        // Interface SNAT mints dynamic provenance; it rides the HA wire.
+        source_nat_static: Some(false),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_ACK,
+        generation: 0,
+        session_id: (1u64 << 48) | 12,
+        tcp_close_class: 0,
+        tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
+        rev_packets: 100,
+        fwd_packets: 100,
+        pptp_call_ids: 0,
+    }
 }
 
 /// The fw0-originated established flow as fw1 imported it (SyncImport pair:
@@ -870,6 +875,7 @@ fn window_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
 
 /// The forward row as fw1 (owner of both RGs) exports it.
 pub(super) fn exported_forward(forwarding: &ForwardingState, family: Family) -> SyncedSessionEntry {
+    sibling_last_seen_ns: 0,
     let (lan, wan, snat) = addrs(family);
     let neighbor_mac = match family {
         Family::V4 => [0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4],
@@ -1116,6 +1122,7 @@ fn reverse_reply_case(served: bool) {
 /// (`userspaceForwardWireAliasV4/V6`): the same value, keyed by the
 /// translated forward tuple.
 fn alias_of(entry: &SyncedSessionEntry) -> SyncedSessionEntry {
+    sibling_last_seen_ns: 0,
     let mut alias = entry.clone();
     alias.key = crate::session::forward_wire_key(&entry.key, entry.decision.nat);
     alias
@@ -2214,26 +2221,30 @@ fn worker_alias_import_books_no_translation_18531() {
     };
     let canonical_key = crate::afxdp::testfx::test_key();
     let alias_key = crate::session::forward_wire_key(&canonical_key, nat);
-    let entry = |key: crate::session::SessionKey| SyncedSessionEntry { sibling_last_seen_ns: 0, key, decision: SessionDecision {
-        resolution: crate::afxdp::testfx::test_resolution(),
-        nat,
-        install_table_domain: 0,
-        install_table_check: 0,
-    },
-    metadata: crate::afxdp::testfx::test_metadata(),
-    leak_incarnation: 0,
-    origin: SessionOrigin::SyncImport,
-    protocol: PROTO_TCP,
-    tcp_flags: TCP_ACK,
-    generation: 0,
-    session_id: 4242,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    rev_packets: 0,
-    fwd_packets: 0,
-    pptp_call_ids: 0,
-    source_nat_static: None,
-    persistent_lease_hold: None, };
+    let entry = |key: crate::session::SessionKey| SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key,
+        decision: SessionDecision {
+            resolution: crate::afxdp::testfx::test_resolution(),
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: crate::afxdp::testfx::test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_ACK,
+        generation: 0,
+        session_id: 4242,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+        persistent_lease_hold: None,
+    };
     let mut sessions = SessionTable::new();
     let ha = BTreeMap::new();
     apply_commands(

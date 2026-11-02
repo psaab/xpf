@@ -1548,7 +1548,11 @@ fn synced_entry_for(
     decision: SessionDecision,
     metadata: SessionMetadata,
 ) -> SyncedSessionEntry {
-    SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision,
+    sibling_last_seen_ns: 0,
+    SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: key.clone(),
+    decision,
     metadata,
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -1562,7 +1566,8 @@ fn synced_entry_for(
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 fn flush_deltas_for_test(

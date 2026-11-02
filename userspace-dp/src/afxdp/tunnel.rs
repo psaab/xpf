@@ -129,58 +129,63 @@ pub(super) fn tun_origin_session_entry(
     protocol: u8,
     tcp_flags_frame: &[u8],
 ) -> SyncedSessionEntry {
-    SyncedSessionEntry { sibling_last_seen_ns: 0, key, decision,
-    metadata: SessionMetadata {
-        ingress_zone: zone_id,
-        egress_zone: zone_id,
-        ingress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            zone_id,
-        ),
-        egress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            zone_id,
-        ),
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        // Self-originated: no admitting policy/application (Junos runs no
-        // security policy on firewall-self-originated traffic, #6224), so
-        // zeroed policy fields + the global per-protocol idle timeout
-        // (`None`). `TunOrigin` below is POSITIVE provenance — stamped only
-        // by the GRE and WG builders via this helper — never a peer wire
-        // import.
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    },
-    leak_incarnation: 0,
-    origin: SessionOrigin::TunOrigin,
-    protocol,
-    tcp_flags: if protocol == PROTO_TCP {
-        extract_tcp_flags_and_window(tcp_flags_frame)
-            .map(|(flags, _)| flags)
-            .unwrap_or_default()
-    } else {
-        0
-    },
-    generation: 0,
-    session_id: 0,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    rev_packets: 0u64,
-    fwd_packets: 0,
-    pptp_call_ids: 0,
-    persistent_lease_hold: None,
-    source_nat_static: None, }
+    sibling_last_seen_ns: 0,
+    SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key,
+        decision,
+        metadata: SessionMetadata {
+            ingress_zone: zone_id,
+            egress_zone: zone_id,
+            ingress_zone_check: crate::session::zone_vintage_check_for_id(
+                &forwarding.zone_id_to_name,
+                zone_id,
+            ),
+            egress_zone_check: crate::session::zone_vintage_check_for_id(
+                &forwarding.zone_id_to_name,
+                zone_id,
+            ),
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            // Self-originated: no admitting policy/application (Junos runs no
+            // security policy on firewall-self-originated traffic, #6224), so
+            // zeroed policy fields + the global per-protocol idle timeout
+            // (`None`). `TunOrigin` below is POSITIVE provenance — stamped only
+            // by the GRE and WG builders via this helper — never a peer wire
+            // import.
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        },
+        leak_incarnation: 0,
+        origin: SessionOrigin::TunOrigin,
+        protocol,
+        tcp_flags: if protocol == PROTO_TCP {
+            extract_tcp_flags_and_window(tcp_flags_frame)
+                .map(|(flags, _)| flags)
+                .unwrap_or_default()
+        } else {
+            0
+        },
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+        persistent_lease_hold: None,
+        source_nat_static: None,
+    }
 }
 
 fn local_tunnel_io_error_is_fatal(err: &io::Error) -> bool {

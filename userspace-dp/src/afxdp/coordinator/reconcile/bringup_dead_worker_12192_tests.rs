@@ -3,14 +3,20 @@ use super::*;
 use std::sync::atomic::Ordering;
 
 fn session_entry() -> SyncedSessionEntry {
-    SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey { addr_family: libc::AF_INET as u8,
-    protocol: PROTO_TCP,
-    src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
-    dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-    src_port: 12345,
-    dst_port: 5201,
-    discriminator: Default::default(),
-    routing_domain: 0, }, decision: SessionDecision {
+    sibling_last_seen_ns: 0,
+    SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 12345,
+        dst_port: 5201,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    },
+    decision: SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -61,7 +67,8 @@ fn session_entry() -> SyncedSessionEntry {
         fwd_packets: 0,
         pptp_call_ids: 0,
     persistent_lease_hold: None,
-        source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 fn launch(coord: &mut Coordinator, ids: &[u32]) -> Arc<WorkerCommandQueues> {

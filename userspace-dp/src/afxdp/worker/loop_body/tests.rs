@@ -224,6 +224,7 @@ mod flow_cache_invalidation_tests {
     }
 
     fn serving_shared_entry(key: &SessionKey, session_id: u64) -> SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: reap_decision(None),
         metadata: reap_metadata(),

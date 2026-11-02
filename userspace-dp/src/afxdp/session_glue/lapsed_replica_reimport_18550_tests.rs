@@ -92,6 +92,7 @@ fn wan_v6() -> Ipv6Addr {
 /// Client -> iperf3 server, interface-SNAT'd to the WAN address, Established,
 /// carrying a peer session id so the #16043 same-incarnation rule applies.
 fn peer_forward(v6: bool, origin: SessionOrigin) -> SyncedSessionEntry {
+    sibling_last_seen_ns: 0,
     let (family, src, dst, snat) = if v6 {
         (
             libc::AF_INET6 as u8,
@@ -109,37 +110,43 @@ fn peer_forward(v6: bool, origin: SessionOrigin) -> SyncedSessionEntry {
     };
     let mut metadata = crate::afxdp::testfx::test_metadata();
     metadata.owner_rg_id = RG;
-    SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey { addr_family: family,
-    protocol: PROTO_TCP,
-    src_ip: src,
-    dst_ip: dst,
-    src_port: 55_068,
-    dst_port: 5201,
-    discriminator: Default::default(),
-    routing_domain: 0, }, decision: SessionDecision {
-        resolution: crate::afxdp::testfx::test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(snat),
-            rewrite_src_port: Some(40_001),
-            ..NatDecision::default()
+    SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: SessionKey {
+            addr_family: family,
+            protocol: PROTO_TCP,
+            src_ip: src,
+            dst_ip: dst,
+            src_port: 55_068,
+            dst_port: 5201,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
-        install_table_domain: 0,
-        install_table_check: 0,
-    },
-    metadata,
-    leak_incarnation: 0,
-    origin,
-    protocol: PROTO_TCP,
-    tcp_flags: 0x10,
-    generation: 0,
-    session_id: SESSION_ID,
-    tcp_close_class: 0,
-    tcp_handshake_state: ESTABLISHED_WIRE,
-    rev_packets: 0,
-    fwd_packets: 0,
-    pptp_call_ids: 0,
-    persistent_lease_hold: None,
-    source_nat_static: None, }
+        decision: SessionDecision {
+            resolution: crate::afxdp::testfx::test_resolution(),
+            nat: NatDecision {
+                rewrite_src: Some(snat),
+                rewrite_src_port: Some(40_001),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata,
+        leak_incarnation: 0,
+        origin,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: SESSION_ID,
+        tcp_close_class: 0,
+        tcp_handshake_state: ESTABLISHED_WIRE,
+        rev_packets: 0,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+        persistent_lease_hold: None,
+        source_nat_static: None,
+    }
 }
 
 struct Fixture {

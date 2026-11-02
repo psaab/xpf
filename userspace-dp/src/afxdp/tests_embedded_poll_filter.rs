@@ -842,14 +842,19 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
-    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey { addr_family: libc::AF_INET as u8,
-    protocol: PROTO_TCP,
-    src_ip: IpAddr::V4(client_ip),
-    dst_ip: IpAddr::V4(server_ip),
-    src_port: client_port,
-    dst_port: 80,
-    discriminator: Default::default(),
-    routing_domain: 0, }, decision: SessionDecision {
+    let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(server_ip),
+        src_port: client_port,
+        dst_port: 80,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    },
+    decision: SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -909,7 +914,8 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, };
+        source_nat_static: None,
+    };
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     publish_shared_session(
@@ -8585,7 +8591,10 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         PROTO_TCP,
         TCP_FLAG_SYN,
     ));
-    let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: flow_key.clone(), decision: local_decision,
+    let shared_entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: flow_key.clone(),
+    decision: local_decision,
     metadata: local_metadata,
     leak_incarnation: 0,
     origin: SessionOrigin::LocalMiss,
@@ -8600,7 +8609,8 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, };
+        source_nat_static: None,
+    };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -10233,17 +10243,22 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
-    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey { addr_family: libc::AF_INET as u8,
-    protocol: PROTO_GRE,
-    src_ip: IpAddr::V4(client_ip),
-    dst_ip: IpAddr::V4(server_ip),
-    src_port: 0,
-    dst_port: 0,
-    // The live session carries the tunnel's real identity. Before
-    // #9031 the embedded lookup key hard-coded None, and SessionKey's
-    // Eq includes this field, so the probe could never equal this.
-    discriminator: TunnelDiscriminator::Keyed(gre_key as u32),
-    routing_domain: 0, }, decision: SessionDecision {
+    let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_GRE,
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(server_ip),
+        src_port: 0,
+        dst_port: 0,
+        // The live session carries the tunnel's real identity. Before
+        // #9031 the embedded lookup key hard-coded None, and SessionKey's
+        // Eq includes this field, so the probe could never equal this.
+        discriminator: TunnelDiscriminator::Keyed(gre_key as u32),
+        routing_domain: 0,
+    },
+    decision: SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -10306,7 +10321,8 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, };
+        source_nat_static: None,
+    };
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     publish_shared_session(
@@ -10402,14 +10418,19 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
-    let mut entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey { addr_family: libc::AF_INET as u8,
-    protocol: PROTO_GRE,
-    src_ip: IpAddr::V4(client_ip),
-    dst_ip: IpAddr::V4(server_ip),
-    src_port: 0,
-    dst_port: 0,
-    discriminator: TunnelDiscriminator::Keyed(session_key_value as u32),
-    routing_domain: 0, }, decision: SessionDecision {
+    let mut entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_GRE,
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(server_ip),
+        src_port: 0,
+        dst_port: 0,
+        discriminator: TunnelDiscriminator::Keyed(session_key_value as u32),
+        routing_domain: 0,
+    },
+    decision: SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -10468,7 +10489,8 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, };
+        source_nat_static: None,
+    };
     entry.key.discriminator = TunnelDiscriminator::Keyed(session_key_value as u32);
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
@@ -10799,21 +10821,26 @@ fn publish_pptp_gre_session_9298(
     handle: u32,
     egress_ifindex: i32,
 ) -> SharedSessionOwnerRgIndexes {
-    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey { addr_family: if client.is_ipv4() {
-        libc::AF_INET as u8
-    } else {
-        libc::AF_INET6 as u8
+    let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: SessionKey {
+        addr_family: if client.is_ipv4() {
+            libc::AF_INET as u8
+        } else {
+            libc::AF_INET6 as u8
+        },
+        protocol: PROTO_GRE,
+        src_ip: client,
+        dst_ip: server,
+        src_port: 0,
+        dst_port: 0,
+        // The live PPTP session carries the LOCALLY DERIVED handle
+        // (#7188 decision 6 / #7699), never a wire call id — the two
+        // directions of one call carry different wire values.
+        discriminator: TunnelDiscriminator::Pptp(handle),
+        routing_domain: 0,
     },
-    protocol: PROTO_GRE,
-    src_ip: client,
-    dst_ip: server,
-    src_port: 0,
-    dst_port: 0,
-    // The live PPTP session carries the LOCALLY DERIVED handle
-    // (#7188 decision 6 / #7699), never a wire call id — the two
-    // directions of one call carry different wire values.
-    discriminator: TunnelDiscriminator::Pptp(handle),
-    routing_domain: 0, }, decision: SessionDecision {
+    decision: SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -10875,7 +10902,8 @@ fn publish_pptp_gre_session_9298(
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, };
+        source_nat_static: None,
+    };
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     publish_shared_session(
         shared_sessions,

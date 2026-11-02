@@ -158,21 +158,26 @@ fn pump(node: &mut Node) {
 }
 
 fn reverse_synced_entry(node: &Node, origin: SessionOrigin, handshake: u8, session_id: u64) -> SyncedSessionEntry {
-    SyncedSessionEntry { sibling_last_seen_ns: 0, key: node.reverse_key.clone(), decision: node.reverse_decision,
-    metadata: reverse_metadata(),
-    leak_incarnation: 0,
-    origin,
-    protocol: PROTO_TCP,
-    tcp_flags: 0,
-    generation: 0,
-    session_id,
-    tcp_close_class: 0,
-    tcp_handshake_state: handshake,
-    rev_packets: 0,
-    fwd_packets: 0,
-    pptp_call_ids: 0,
-    persistent_lease_hold: None,
-    source_nat_static: None, }
+    sibling_last_seen_ns: 0,
+    SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: node.reverse_key.clone(),
+        decision: node.reverse_decision,
+        metadata: reverse_metadata(),
+        leak_incarnation: 0,
+        origin,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id,
+        tcp_close_class: 0,
+        tcp_handshake_state: handshake,
+        rev_packets: 0,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+        persistent_lease_hold: None,
+        source_nat_static: None,
+    }
 }
 
 /// The SYN on worker A: the poll new-flow install (forward, ISN seed,
@@ -592,11 +597,15 @@ fn imported_opening_session_served_mid_stream_survives_opening_window_18520() {
     // HA import as the coordinator applies it: shared authority + a
     // SyncImport replica on every worker, both halves Opening.
     let peer_id = (1u64 << 63) | 0x42;
-    let forward_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: fwd.clone(), decision: node.decision,
-    metadata: test_metadata(),
-    tcp_handshake_state: TcpHandshakeState::Opening.to_wire(),
-    session_id: peer_id,
-    ..reverse_synced_entry(&node, SessionOrigin::SyncImport, 0, 0) };
+    let forward_entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: fwd.clone(),
+        decision: node.decision,
+        metadata: test_metadata(),
+        tcp_handshake_state: TcpHandshakeState::Opening.to_wire(),
+        session_id: peer_id,
+        ..reverse_synced_entry(&node, SessionOrigin::SyncImport, 0, 0)
+    };
     let reverse_entry = reverse_synced_entry(
         &node,
         SessionOrigin::SyncImport,

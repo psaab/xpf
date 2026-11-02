@@ -112,30 +112,34 @@ fn lease_fixture(now_ns: u64) -> LeaseFixture {
     let mut metadata = test_metadata();
     metadata.is_reverse = false;
     metadata.owner_rg_id = 1;
-    let shared_entry = crate::afxdp::SyncedSessionEntry { sibling_last_seen_ns: 0, key: inbound_key, decision: SessionDecision {
-        resolution: test_resolution(),
-        nat: crate::nat::NatDecision {
-            rewrite_dst: Some(INTERNAL_IP),
-            rewrite_dst_port: Some(INTERNAL_PORT),
-            ..crate::nat::NatDecision::default()
+    let shared_entry = crate::afxdp::SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: inbound_key,
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: crate::nat::NatDecision {
+                rewrite_dst: Some(INTERNAL_IP),
+                rewrite_dst_port: Some(INTERNAL_PORT),
+                ..crate::nat::NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
-        install_table_domain: 0,
-        install_table_check: 0,
-    },
-    metadata,
-    source_nat_static: None,
-    leak_incarnation: 0,
-    origin: SessionOrigin::SyncImport,
-    protocol: PROTO_TCP,
-    tcp_flags: crate::tcp_flags::TCP_ACK,
-    generation: 0,
-    session_id: 17_683,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    rev_packets: 0,
-    fwd_packets: 0,
-    pptp_call_ids: 0,
-    persistent_lease_hold: None, };
+        metadata,
+        source_nat_static: None,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: crate::tcp_flags::TCP_ACK,
+        generation: 0,
+        session_id: 17_683,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+        persistent_lease_hold: None,
+    };
 
     LeaseFixture {
         forwarding,
@@ -158,6 +162,7 @@ fn shared_entry_with_owner_hold(
     fixture: &LeaseFixture,
     hold: PersistentLeaseHold,
 ) -> crate::afxdp::SyncedSessionEntry {
+    sibling_last_seen_ns: 0,
     let mut entry = fixture.shared_entry.clone();
     entry.persistent_lease_hold = Some(hold);
     entry

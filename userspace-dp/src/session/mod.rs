@@ -3640,21 +3640,25 @@ impl SessionTable {
         key: &SessionKey,
     ) -> Option<crate::afxdp::SyncedSessionEntry> {
         let entry = self.entry_by_key(key)?;
-        Some(crate::afxdp::SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: entry.decision,
-        metadata: entry.metadata.clone(),
-        source_nat_static: entry.source_nat_static,
-        leak_incarnation: self.leak_incarnations.get(key).copied().unwrap_or(0),
-        origin: entry.origin,
-        protocol: key.protocol,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: entry.session_id,
-        tcp_close_class: entry.tcp_close_class_wire(),
-        tcp_handshake_state: entry.tcp_handshake_state_wire(key.protocol),
-        rev_packets: entry.counters.rev_packets,
-        fwd_packets: entry.counters.fwd_packets,
-        pptp_call_ids: self.pptp_call_ids_wire_for(key),
-        persistent_lease_hold: entry.persistent_lease_hold, })
+        Some(crate::afxdp::SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
+            key: key.clone(),
+            decision: entry.decision,
+            metadata: entry.metadata.clone(),
+            source_nat_static: entry.source_nat_static,
+            leak_incarnation: self.leak_incarnations.get(key).copied().unwrap_or(0),
+            origin: entry.origin,
+            protocol: key.protocol,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: entry.session_id,
+            tcp_close_class: entry.tcp_close_class_wire(),
+            tcp_handshake_state: entry.tcp_handshake_state_wire(key.protocol),
+            rev_packets: entry.counters.rev_packets,
+            fwd_packets: entry.counters.fwd_packets,
+            pptp_call_ids: self.pptp_call_ids_wire_for(key),
+            persistent_lease_hold: entry.persistent_lease_hold,
+        })
     }
 
     /// #10507: the receiver-local provenance paired with the zone policy

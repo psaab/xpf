@@ -38,21 +38,26 @@ fn decision() -> SessionDecision {
 /// The serving pair's canonical shared row: Established, counts as the
 /// ct-slice last restamped them (0 until the first restamp).
 fn serving_row(key: &SessionKey) -> SyncedSessionEntry {
-    SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: decision(),
-    metadata: test_metadata(),
-    source_nat_static: None,
-    leak_incarnation: 0,
-    origin: crate::session::SessionOrigin::ForwardFlow,
-    protocol: PROTO_TCP,
-    tcp_flags: 0,
-    generation: 0,
-    session_id: 0x18722,
-    tcp_close_class: 0,
-    tcp_handshake_state: TcpHandshakeState::Established.to_wire(),
-    rev_packets: 0,
-    fwd_packets: 0,
-    pptp_call_ids: 0,
-    persistent_lease_hold: None, }
+    sibling_last_seen_ns: 0,
+    SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key: key.clone(),
+        decision: decision(),
+        metadata: test_metadata(),
+        source_nat_static: None,
+        leak_incarnation: 0,
+        origin: crate::session::SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0x18722,
+        tcp_close_class: 0,
+        tcp_handshake_state: TcpHandshakeState::Established.to_wire(),
+        rev_packets: 0,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+        persistent_lease_hold: None,
+    }
 }
 
 #[test]
