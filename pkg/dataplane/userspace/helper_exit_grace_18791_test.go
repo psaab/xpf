@@ -412,7 +412,7 @@ func TestStopInProgressKeepsAnsweredHelperAvailableUntilExitFold18794(t *testing
 // stopLocked then retires the tracker that had raised debt at the deadline.
 func TestFailedReplacementStopRetainsDebtFold18794(t *testing.T) {
 	old := helperExitGrace
-	helperExitGrace = 50 * time.Millisecond
+	helperExitGrace = time.Second
 	t.Cleanup(func() { helperExitGrace = old })
 	m := newGraceManager18791(t)
 	m.disableCtrlMapHook = &fakeCtrlMap{stored: userspaceCtrlValue{Enabled: 1}, haveStored: true}
@@ -434,11 +434,12 @@ func TestFailedReplacementStopRetainsDebtFold18794(t *testing.T) {
 	m.startHelperSupervisorLocked(cmd)
 	gen := m.procGen
 	m.mu.Unlock()
-	time.Sleep(25 * time.Millisecond)
+	// Check immediately: the one-second grace leaves ample subprocess-setup
+	// margin without sleeping near the deadline.
 	if m.HelperElectionNotReady() {
 		t.Fatal("the non-serving replacement raised debt inside the grace")
 	}
-	time.Sleep(80 * time.Millisecond)
+	time.Sleep(time.Until(m.exitGraceDeadline()) + 25*time.Millisecond)
 	if !m.HelperElectionNotReady() {
 		t.Fatal("a non-serving replacement did not raise debt at the grace deadline")
 	}
