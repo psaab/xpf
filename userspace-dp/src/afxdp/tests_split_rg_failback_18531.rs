@@ -2531,3 +2531,82 @@ fn alias_reverse_reply_keeps_its_cached_redirect_18566() {
         assert_eq!(fc.hits, 3, "{family:?}: replies 2-4 are served from the cache");
     }
 }
+
+/// #18535: a pool-SNAT alias's reverse must ALSO hand its replies to the
+/// peer after an RG activation refresh, not only at synthesis. The synthesis
+/// arm is ungated, but `reresolve_stored_session` replaces only a
+/// `LocalDelivery` answer; a pool address is answered by proxy ARP and is not
+/// local, so its lookup answers the WAN neighbor path and the refresh leaves
+/// the row on `MissingNeighbor` toward the pool address — the alias-only
+/// owner then loses every reply. v4 and v6, on the node that took RG1.
+#[test]
+fn pool_alias_reverse_stays_with_peer_after_refresh_18535() {
+    let window_fwd = rg_taking_node_forwarding();
+    let mut owner_fwd = fw1_owner_forwarding();
+    // The captured snapshot includes only the v4 pool; give the v6 twin an
+    // equivalent configured pool so the membership gate is exercised twice.
+    owner_fwd.source_nat_rules.extend(crate::nat::parse_source_nat_rules(&[
+        crate::SourceNATRuleSnapshot {
+            name: "pool-snat-v6".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["::/0".to_string()],
+            pool_name: "pool-snat-v6".to_string(),
+            pool_addresses: vec![format!("{}/128", pool_addr(Family::V6))],
+            port_low: 30000,
+            port_high: 49999,
+            ..crate::SourceNATRuleSnapshot::default()
+        },
+    ]));
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let activated = BTreeMap::from([
+        (0, rg(true, now_secs)),
+        (1, rg(true, now_secs)),
+        (2, rg(false, now_secs)),
+    ]);
+    for family in [Family::V4, Family::V6] {
+        assert!(
+            owner_fwd
+                .source_nat_rules
+                .iter()
+                .any(|rule| rule.pool_contains_address(pool_addr(family))),
+            "fixture: a source-NAT pool holds the target address ({family:?})"
+        );
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(7, 9);
+        let mut canonical = exported_forward(&window_fwd, family);
+        canonical.decision.nat.rewrite_src = Some(pool_addr(family));
+        import_alias_only_of(&mut sessions, &window_fwd, &window_ha(now_secs), &canonical);
+        let alias = alias_of(&canonical);
+        let reverse_key = crate::session::reverse_session_key(&alias.key, alias.decision.nat);
+        let (before, _, _) = sessions
+            .entry_with_origin(&reverse_key)
+            .expect("fixture: the pool alias's reverse is held");
+        assert_eq!(
+            before.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "the pool alias's reverse is handed to the peer at synthesis ({family:?})"
+        );
+        crate::afxdp::session_glue::handle_refresh_owner_rgs_for_test(
+            &mut sessions,
+            crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+            &owner_fwd,
+            &activated,
+            &Arc::new(ShardedNeighborMap::default()),
+            vec![1],
+            now_ns + 2,
+            now_secs,
+        );
+        let (stored, _, _) = sessions
+            .entry_with_origin(&reverse_key)
+            .expect("reverse present after the refresh");
+        assert_eq!(
+            stored.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "after RefreshOwnerRGS the pool alias's reverse must stay with the \
+             peer, not strand on the WAN neighbor path ({family:?})"
+        );
+        assert_eq!(sessions.len(), 2, "the pair is held ({family:?})");
+    }
+}

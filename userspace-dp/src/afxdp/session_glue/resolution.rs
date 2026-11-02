@@ -746,18 +746,25 @@ pub(in crate::afxdp) fn reresolve_stored_session(
     looked_up: ForwardingResolution,
     fabric: FabricArrival<'_>,
 ) -> ForwardingResolution {
-    // #18531 (third failback teardown): an alias-synthesized reverse cannot
-    // reach its client; see `alias_reverse_return_resolution`. Before this,
-    // the RG-taking node's activation refresh re-resolved such a row onto the
-    // now-local SNAT address (`LocalDelivery`), and the next WAN reply was
-    // torn down by the host-inbound gate. Only that answer is replaced: the
-    // same self-targeting NAT shape is also what the reverse-synthesis arm
-    // installs for a reply that ARRIVES already un-NATed (the peer un-NATed
-    // it and handed it over the fabric), keyed by the client tuple. Its
-    // target is the real client, the lookup answers a real egress, and it
-    // must forward (loss diag8: replacing that answer dropped every reply on
-    // the LAN node after a FIB generation bump).
-    if looked_up.disposition == ForwardingDisposition::LocalDelivery
+    // #18531 (third failback teardown): a self-targeting reverse generated
+    // from a forward-wire alias belongs to the peer's canonical row, not to
+    // the host or the raw WAN route. After RG activation, interface-SNAT
+    // aliases resolve to `LocalDelivery`, while pool-SNAT aliases can resolve
+    // as a WAN `ForwardCandidate` or `MissingNeighbor`; both must retain the
+    // peer redirect. Restrict the pool case to non-fabric-ingress rows: an
+    // already-unNATed reply arriving over the fabric targets its real client
+    // and must keep the local FIB egress (loss diag8).
+    // LocalDelivery stays ungated exactly as on master (a fabric-marked
+    // self-targeting reverse must still hold HAInactive, never deliver
+    // locally); only the two added WAN answers are restricted to
+    // non-fabric arrivals (either flag spelling).
+    if (looked_up.disposition == ForwardingDisposition::LocalDelivery
+        || (!fabric.fabric_ingress()
+            && !fabric.redirect_fabric_flag()
+            && matches!(
+                looked_up.disposition,
+                ForwardingDisposition::MissingNeighbor | ForwardingDisposition::ForwardCandidate
+            )))
         && reverse_un_nat_targets_itself(wire_key, stored.nat, stored_metadata)
     {
         return alias_reverse_return_resolution(

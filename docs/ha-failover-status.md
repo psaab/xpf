@@ -587,8 +587,11 @@ The rules now:
   destination (`reverse_un_nat_targets_itself`) now resolves to the fabric
   redirect toward the peer that holds the canonical row: at synthesis from
   an alias, and in the one re-resolution pipeline (`reresolve_stored_session`:
-  session hit, `RefreshOwnerRGS`, `DemoteOwnerRGS`) only when the target
-  lookup answers `LocalDelivery`. That gate matters: the reverse-synthesis
+  session hit, `RefreshOwnerRGS`, `DemoteOwnerRGS`) when the target lookup
+  answers `LocalDelivery`, or — for a self-targeting reverse of any NAT
+  shape (identity translations included; the gate is the NAT shape, not
+  pool membership) — a WAN `MissingNeighbor`/`ForwardCandidate` on a
+  non-fabric arrival. That gate matters: the reverse-synthesis
   arm also installs a self-targeting row for a reply that arrives already
   un-NATed (the peer un-NATed it and handed it over the fabric), keyed by
   the client tuple. Its target is the real client and it must forward; the
@@ -599,19 +602,19 @@ The rules now:
   reply is dropped, never bounced, delivered locally, or forwarded on a raw
   FIB answer. The match is on NAT shape: an identity translation (the
   original source is the SNAT address and the port is unchanged) looks the
-  same and is handed to the peer too. The synthesis arm is not gated, so a
-  pool alias's reverse (its target, the pool address, answered by proxy
-  ARP, is not local, so the lookup answers the WAN neighbor path) is
-  handed to the peer at import (pinned by
-  `pool_alias_reverse_is_handed_to_peer_at_synthesis_18531`). Gap: the
-  gated re-resolution leaves that row on the WAN neighbor path
-  (`MissingNeighbor` toward the pool address after `RefreshOwnerRGS`),
-  so an alias-only pool-SNAT flow still loses its replies on the node
-  that took the WAN RG. The DNAT-only and port-only alias reverses
-  (pre-existing) are not covered either; see #18535. A reverse that un-NATs to a genuinely
-  local address other than its wire destination is still host-bound and
-  still gated. The LAN node's own reverse rows un-NAT to the client and are
-  unaffected.
+  same and is handed to the peer too. A pool alias's reverse (its target,
+  the pool address, is not local and the lookup answers the WAN neighbor
+  path) is handed to the peer at import (pinned by
+  `pool_alias_reverse_is_handed_to_peer_at_synthesis_18531`). The activation
+  refresh now retains that peer redirect for a non-fabric-ingress
+  self-targeting reverse, even when the local
+  lookup returns `MissingNeighbor` or `ForwardCandidate`; this is pinned by
+  `pool_alias_reverse_stays_with_peer_after_refresh_18535`. The already-
+  un-NATed fabric reply still forwards toward its real client. DNAT-only and
+  port-only alias reverses (pre-existing) are not covered either; see #18535.
+  A reverse that un-NATs to a genuinely local address other than its wire
+  destination is still host-bound and still gated. The LAN node's own reverse
+  rows un-NAT to the client and are unaffected.
 
 A withdrawn translation is revoked by the node that owns the egress, on
 its next slow-path hit with a stale stamp. That is not every redirected
@@ -641,9 +644,11 @@ The daemon-side routing of the owner's Close is the existing owner-RG gate
 and is not covered by those cells; the two-node cell
 `alias_only_owner_revocation_removes_lan_row_18531` feeds the owner's
 Close keys to the LAN node's coordinator as the peer deletes the daemon
-sends (the Go legs were read, not run). Residuals are tracked in #18535:
+sends (the Go legs were read, not run). Residuals are tracked in #18927:
 - a translated alias row removed in the RG gap, so an alias-only copy
   loses the flow (fixed here);
+- a pool-SNAT alias reverse left on the WAN neighbor path after activation
+  refresh (fixed here; `pool_alias_reverse_stays_with_peer_after_refresh_18535`);
 - activation before the connected-RG FIB republish (open);
 - scope-less imports not judged by the owner (open);
 - the reverse-side window above (open, pinned);
