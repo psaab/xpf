@@ -183,6 +183,24 @@ the other two and changes nothing in the shipped product.
 | `packedStatements: true` on the container | **how** the folded tail splits | the tail becomes a CHAIN — each statement nested under the previous — so everything after the first is lost |
 | `args: N` on each leaf | where each statement **ends** | the split cannot find the boundary and declines to guess |
 
+**Elision is per level (#18762).** Each packed level is its own `(container,
+head)` pair. `tcp-session time-wait-state session-ageout;` needs
+`(tcp-session, time-wait-state)` admitted. time-wait-state's own `packedTail`
+only covers `time-wait-state session-ageout;` inside tcp-session's braces. The
+#2419 census has a third, **two-level** arm that packs `outer inner leaf
+value;` and compares it with the braced twin:
+
+- Every eligible cell is counted as checked or skipped. Under `security flow`,
+  the exact skipped-site set and reason are part of the gate, and checked
+  coverage has a minimum ratchet.
+- Everywhere else the measured divergent sites and strict drop shapes must
+  equal the inventory in #18771. Its checked-cell floor prevents sites from
+  vanishing by failing to compile.
+
+Losing a single admission line is enough to drop a security flag:
+`(tcp-session, strict-syn-check)` disappeared in #16581, and the only signal was
+that census.
+
 **Which of the three needs the same-keyword collision check, and which cannot.**
 `compactNormalizeInScope` is keyed on a **(container, head) PAIR**, so an
 admission reaches *every* container with that keyword: firewall filter terms
@@ -15496,7 +15514,15 @@ the value sits in a single typed slot:
     ACK pass, and a handshake-incomplete session is never served data from
     the flow cache), and commit rejects `strict-syn-check` together with
     `no-syn-check` / `no-syn-check-in-tunnel` (the lenient load path warns
-    and the dataplane keeps strict-wins precedence there). Missing selector
+    and the dataplane keeps strict-wins precedence there). **Upgrade note
+    (#18762):** from #16581 until #18762, the brace-elided spelling
+    `tcp-session strict-syn-check;` was silently dropped before this gate
+    ran. A config committed in that window with elided `strict-syn-check`
+    beside `no-syn-check` therefore BOOTS after upgrade with a warning and
+    strict-syn-check ENFORCED (strict wins), and its next commit is REFUSED
+    until one of the two leaves is removed. The same window also dropped
+    elided `rst-sequence-check`, `maximum-window` and two-level
+    `time-wait-state` children, which now take effect as written. Missing selector
     keys decode false, and
     the protocol-v34 exact-version gate rejects a v33 helper that would ignore
     an explicitly configured selector. #15753 enforces the remaining
