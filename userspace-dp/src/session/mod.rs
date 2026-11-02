@@ -5100,7 +5100,7 @@ impl SessionTable {
         // with no progressed companion stays refused, exactly as
         // before (the caller falls through to the slow path / GC).
         if companion_crossed {
-            if self.cache_hit_handshake_progress(key).is_none() {
+            if self.cache_hit_handshake_progress(key, tcp_flags, ack).is_none() {
                 return ProbeHitVerdict::IdleCrossed;
             }
             companion_progress = true;
@@ -5113,7 +5113,8 @@ impl SessionTable {
         // `cache_hit_handshake_progress`). Runs before the refresh arm
         // so the completing hit re-stamps `last_seen` itself.
         if completing.is_none() && companion_progress {
-            if let Some((matched_key, nat)) = self.cache_hit_handshake_progress(key) {
+            if let Some((matched_key, nat)) =
+                self.cache_hit_handshake_progress(key, tcp_flags, ack) {
                 if let Some(entry) = self.entry_by_key(&matched_key) {
                     handshake_state_before =
                         entry.tcp_handshake_state_wire(matched_key.protocol);
@@ -5512,7 +5513,8 @@ impl SessionTable {
         };
         // #16223: companion-aware completion (see probe_hit_inner).
         if completing.is_none() && companion_progress {
-            if let Some((matched_key, nat)) = self.cache_hit_handshake_progress(key) {
+            if let Some((matched_key, nat)) =
+                self.cache_hit_handshake_progress(key, tcp_flags, ack) {
                 if let Some(entry) = self.entry_by_key(&matched_key) {
                     handshake_state_before =
                         entry.tcp_handshake_state_wire(matched_key.protocol);
@@ -6208,6 +6210,8 @@ impl SessionTable {
     fn cache_hit_handshake_progress(
         &self,
         hit_key: &SessionKey,
+        tcp_flags: u8,
+        ack: Option<u32>,
     ) -> Option<(SessionKey, crate::nat::NatDecision)> {
         #[cfg(test)]
         self.handshake_progress_probes
@@ -6215,6 +6219,34 @@ impl SessionTable {
         let hit = self.entry_by_key(hit_key)?;
         if hit.closing || (hit.established && !hit.handshake_pending) {
             return None;
+        }
+        let hit_nat = hit.decision.nat;
+        let hit_is_reverse = hit.metadata.is_reverse;
+        let companion_key = reverse_session_key(hit_key, hit_nat);
+        let companion = self.entry_by_key(&companion_key);
+        // #18528: before either local or node-level evidence can complete,
+        // constrain a parsed ACK to the peer's known send interval. The
+        // relay records the validated SYN end; until local peer sequence
+        // evidence advances the send end, only that exact ACK is admissible.
+        // Unknown bounds fail open.
+        if has_ack(tcp_flags) && companion_key != *hit_key {
+            if let (Some(ack), Some(companion)) = (ack, companion) {
+                if let Some(expected) = companion.tcp_peer_ack_end
+                    && companion.tcp_syn_seen
+                {
+                    if companion.tcp_seq_seen {
+                        let send_end = companion.tcp_rcv_nxt;
+                        if tcp_seq_after(expected, send_end)
+                            || tcp_seq_after(expected, ack)
+                            || tcp_seq_after(ack, send_end)
+                        {
+                            return None;
+                        }
+                    } else if ack != expected {
+                        return None;
+                    }
+                }
+            }
         }
         // #16223 (node-level first): a promoted serving companion for
         // this tuple on this node — shared-map Established wire plus
@@ -6228,9 +6260,8 @@ impl SessionTable {
         // apply unchanged (#4109/#6752/#13679).
         let node_evidence = self.node_served_evidence(hit_key);
         if node_evidence.promoted_and_served() {
-            let hit_nat = hit.decision.nat;
-            return if hit.metadata.is_reverse {
-                Some((reverse_session_key(hit_key, hit_nat), hit_nat))
+            return if hit_is_reverse {
+                Some((companion_key, hit_nat))
             } else {
                 Some((hit_key.clone(), hit_nat))
             };
@@ -6251,10 +6282,7 @@ impl SessionTable {
         if !hit.handshake_pending {
             return None;
         }
-        let hit_nat = hit.decision.nat;
-        let hit_is_reverse = hit.metadata.is_reverse;
-        let companion_key = reverse_session_key(hit_key, hit_nat);
-        let Some(companion) = self.entry_by_key(&companion_key) else {
+        let Some(companion) = companion else {
             // No local companion: the fabric peer forwarded this
             // payload, which proves the handshake progressed.
             return if hit_is_reverse {

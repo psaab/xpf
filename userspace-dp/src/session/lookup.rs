@@ -1183,7 +1183,7 @@ impl SessionTable {
         if !state_transition {
             if let Some(progress_key) = &progress_key {
                 if let Some((matched_key, nat)) =
-                    self.cache_hit_handshake_progress(progress_key)
+                    self.cache_hit_handshake_progress(progress_key, tcp_flags, query.ack)
                 {
                     if let Some(entry) = self.entry_by_key_mut(&matched_key) {
                         entry.established = true;

@@ -984,12 +984,13 @@ fn split_handshake_cache_served_completing_ack_publishes_update_18520() {
     assert_pair_established(&node.b.table, &node, "worker B");
 }
 
-/// #16042 scope, with payload: a DATA segment with a wrong ack completes a
-/// handshake-pending pair through the #16223 companion arm, which checks no
-/// ack (#18528; the same gap reds the three master `bad_ack_*` cells). The
-/// relay must be neither weaker nor stronger than a single worker: a relayed
-/// pair and a pair whose SYN-ACK landed on the same worker end in the same
-/// state on the same wrong-ack data segment, on the cache-hit and slow paths.
+/// #16042 scope, with payload: before #18528 a DATA segment with a wrong
+/// ack could complete through the #16223 companion arm, bypassing the
+/// classic exact-ack gate. The validated server SYN end is the only upper
+/// bound on A until it observes later peer sequence progress; the relay seeds
+/// that expectation, and the same-worker path notes it locally. Both pairs
+/// must stay pending for this out-of-window segment; the relay must not weaken
+/// or strengthen the single-worker result.
 #[test]
 fn relayed_pair_matches_single_worker_on_wrong_ack_data_16042_18520() {
     let wrong = SERVER_ISN + 999;
@@ -1015,6 +1016,11 @@ fn relayed_pair_matches_single_worker_on_wrong_ack_data_16042_18520() {
             } else {
                 slow_hit(table, &fwd, now, TCP_FLAG_ACK | TCP_PSH, MSS, CLIENT_ISN + 1, wrong);
             }
+            assert_eq!(
+                table.handshake_state_wire_for(&fwd),
+                TcpHandshakeState::HandshakePending.to_wire(),
+                "#18528: wrong-ack data must not complete either pair (cached={cached})"
+            );
         }
         assert_eq!(
             node.a.table.handshake_state_wire_for(&fwd),
