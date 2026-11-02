@@ -295,3 +295,57 @@ func TestAuthorityAcceptsPeerAfterGuardedPush18636(t *testing.T) {
 			authority.authorityConfigEpochThreshold(), authority.configGenCounter.Load())
 	}
 }
+
+// #18526: a guarded reservation can be withdrawn after preparation when the
+// peer's advertised protocol changes. That reservation was never written and
+// must not make a peer epoch from the newest config actually sent stale.
+func TestAuthorityAcceptsPeerAfterWithdrawnReservation18526(t *testing.T) {
+	const sentGen = uint64(5088897125605)
+	authority, dp := newAuthority18636(t, sentGen-1)
+	conn := drainPipe18636(t)
+	var boot [bootIncarnationLen]byte
+	boot[0] = 4
+	authority.PrimePeerSnapshotIncarnationForTesting(conn, 1, boot, boot, nil)
+	setConfigEpochPeerTagCapability11055(authority, true)
+
+	pushed := authority.ReserveConfigGen()
+	if pushed != sentGen || !authority.queueConfig("system { host-name fw0; }", nil, pushed) {
+		t.Fatalf("fixture: config generation %d was not sent", pushed)
+	}
+	expected := authority.SnapshotPeerSnapshotProtocol()
+	if !expected.Connected || expected.Version != 1 {
+		t.Fatalf("fixture peer snapshot state = %+v, want connected version 1", expected)
+	}
+
+	withdrawn := authority.ReserveConfigGen()
+	authority.testBeforePeerSnapshotConfigWrite = func() {
+		authority.SetPeerSnapshotProtocolVersionForTesting(2)
+	}
+	if authority.QueueConfigWithPeerSnapshotProtocolAtGeneration(
+		"system { host-name fw0; }", nil, withdrawn, expected, 1, 0, nil) {
+		t.Fatal("guarded config reservation was accepted after the peer capability changed")
+	}
+	if got := authority.authorityConfigEpochThreshold(); got != pushed {
+		t.Fatalf("withdrawn reservation advanced authority threshold to %d, want last sent generation %d",
+			got, pushed)
+	}
+
+	peer := newConvergedPeer18636(t, pushed)
+	key, val := stampedV4FromPeer18636(t, peer, 61852, pushed)
+	if !authority.installClusterSyncedV4(key, val) {
+		t.Fatalf("authority refused a peer session stamped with the last delivered generation after reservation %d was withdrawn (threshold %d)",
+			withdrawn, authority.authorityConfigEpochThreshold())
+	}
+
+	stalePeer := newConvergedPeer18636(t, pushed-1)
+	staleKey, staleVal := stampedV4FromPeer18636(t, stalePeer, 61853, pushed-1)
+	if authority.installClusterSyncedV4(staleKey, staleVal) {
+		t.Fatal("authority admitted a session stamped under a generation older than the last delivered config")
+	}
+	if got := len(dp.v4sessions); got != 1 {
+		t.Fatalf("installed v4 sessions = %d, want only the current-generation session", got)
+	}
+	if got := authority.stats.SessionsStaleConfigIgnored.Load(); got != 1 {
+		t.Fatalf("SessionsStaleConfigIgnored = %d, want 1 for the genuinely stale session", got)
+	}
+}
