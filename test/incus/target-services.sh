@@ -349,10 +349,15 @@ sweep_socket_orphans() {
     local socket_pids main_pid="" unit_cgroup="" metadata_ok=1 pid in_unit
     socket_pids="$(
         ss -tlnpH "sport = :${port}" 2>/dev/null |
-            awk '{ line = $0; while (match(line, /pid=[0-9]+/)) {
-                print substr(line, RSTART + 4, RLENGTH - 4)
-                line = substr(line, RSTART + RLENGTH)
-            } }' | sort -u
+            awk '{
+                users = index($0, "users:(")
+                if (!users) next
+                line = substr($0, users + length("users:("))
+                while (match(line, /",pid=[0-9]+/)) {
+                    print substr(line, RSTART + 6, RLENGTH - 6)
+                    line = substr(line, RSTART + RLENGTH)
+                }
+            }' | sort -u
     )"
     [[ -n "$socket_pids" ]] || return 0
     if [[ "$unit_managed" == 1 ]]; then
