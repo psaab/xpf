@@ -462,6 +462,7 @@ impl SessionTable {
                             // #18722/#18742: keep count and source identity separate.
                             ev.shared_served = shared.shared_served;
                             ev.shared_incarnation = shared.shared_incarnation;
+                            ev.shared_evidence_max_cadence_ns = shared.shared_evidence_max_cadence_ns;
                         }
                         ev
                     };
@@ -966,11 +967,12 @@ impl SessionTable {
         //
         // #18722: retain on the serving pair's RECENT activity. A count or
         // incarnation change is activity. A shared count can remain unchanged
-        // for one full ct-slice evidence cadence (up to 13 s at the supported
-        // population), so a shorter configured idle window gets a bounded
-        // evidence-age grace rather than reaping just before the next stamp.
-        // The grace never advances node_served_last_change_ns: frozen evidence
-        // therefore expires after the cadence and the next crossed check.
+        // for one full ct-slice evidence cadence: 10 s by default and longer
+        // when HA imports grow the live session-table slab. Shorter configured
+        // idle windows therefore use the current worker's computed cycle bound
+        // as evidence-age grace. The grace never advances
+        // node_served_last_change_ns: frozen evidence expires after its cycle
+        // and the next crossed check.
         if node_evidence.promoted_and_served() {
             let Some(em) = self.entry_by_key_mut(key) else {
                 return false;
@@ -1000,10 +1002,13 @@ impl SessionTable {
             if advanced {
                 em.node_served_last_change_ns = now_ns;
             }
+            let shared_evidence_max_cadence_ns = node_evidence
+                .shared_evidence_max_cadence_ns
+                .unwrap_or(NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS);
             let shared_evidence_recent = node_evidence.shared_served.is_some()
                 && em.node_served_last_change_ns != 0
                 && now_ns.saturating_sub(em.node_served_last_change_ns)
-                    <= NODE_SERVED_EVIDENCE_MAX_CADENCE_NS;
+                    <= shared_evidence_max_cadence_ns;
             if advanced || shared_evidence_recent {
                 em.last_seen_ns = now_ns;
                 self.rebucket_alive_entry(key, now_ns);

@@ -1263,11 +1263,57 @@ fn small_window_replica_survives_on_production_cadence_restamps_18722() {
         }
     }
     let idle_bound_secs =
-        NODE_SERVED_EVIDENCE_MAX_CADENCE_NS / SEC + 2 * (window / SEC) + 2;
+        NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS / SEC + 2 * (window / SEC) + 2;
     assert!(
         gone_at.is_some_and(|s| s <= idle_bound_secs),
         "#18742: an idle {window:?}ns-window replica must reap within the cadence + window bound ({idle_bound_secs} s), gone_at={gone_at:?}"
     );
+}
+
+/// #18742 follow-up: HA imports can exceed the default 2x session cap, so
+/// production evidence cadence is computed from the live slab. Model a 30 s
+/// over-cap cycle, hold a live 5 s replica through the intermediate crossed
+/// checks, then publish the next count restamp before the cycle expires.
+#[test]
+fn overcap_ct_cycle_keeps_short_window_replica_until_restamp_18722() {
+    let t0 = 1_000 * SEC;
+    let window = 5 * SEC;
+    let cadence = 30 * SEC;
+    let (mut table, forward, reverse) = opening_replica_with_window(window);
+    let served = Cell::new(300u64);
+    let node_served = |_: &SessionKey| NodeServedEvidence {
+        handshake_wire: TcpHandshakeState::Established.to_wire(),
+        shared_established: true,
+        shared_incarnation: Some((0xA_8730, 0)),
+        shared_evidence_max_cadence_ns: Some(cadence),
+        shared_served: Some(served.get()),
+        ..NodeServedEvidence::default()
+    };
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    let mut now = t0;
+    while now < t0 + window + SEC {
+        now += SEC;
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+    }
+    assert!(
+        table.entry_by_key(&forward).is_some(),
+        "premise: the initial source count was observed"
+    );
+
+    while now < t0 + 65 * SEC {
+        now += SEC;
+        if (now - t0) % cadence == 0 {
+            served.set(served.get() + 25);
+        }
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+        assert!(
+            table.entry_by_key(&forward).is_some() && table.entry_by_key(&reverse).is_some(),
+            "#18742: the live replica was reaped at +{} s before its {cadence:?} restamp",
+            (now - t0) / SEC
+        );
+    }
 }
 
 /// #18742 ABA cell helper: import a replica pair under an explicit

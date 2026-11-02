@@ -633,24 +633,26 @@ Two conditions bound it (#18722):
   - `NodeServedEvidence::shared_served`: the matched Established shared row's
     canonical forward-row `fwd_packets + rev_packets`, restamped from live
     counters by the serving worker's ct-slice once per evidence cycle
-    (10-13 s). The baseline is `node_served_seen_shared`; its
-    `shared_incarnation` (stable session id + generation) makes equal-count
-    replacement visible.
+    (`max(10 s, ceil(live table slab / 2048) * 100 ms)`). The baseline is
+    `node_served_seen_shared`; its `shared_incarnation` (stable session id +
+    generation) makes equal-count replacement visible.
 
   A count or source-identity change is activity and re-stamps the row to
-  `now_ns`. Because the maximum supported shared-evidence cadence can exceed a
-  configured 1-5 s idle window, an unchanged but present shared contributor
-  also receives a bounded grace until `NODE_SERVED_EVIDENCE_MAX_CADENCE_NS`
-  after its last observed change. The grace does not advance that change clock:
-  frozen evidence still expires after the cadence and the next crossed check.
+  `now_ns`. Because the ct-slice cycle can exceed a configured 1-5 s idle
+  window, an unchanged but present shared contributor receives a bounded grace
+  until the worker's computed `shared_evidence_max_cadence_ns` after its last
+  observed change. Production computes this bound from the live session-table
+  slab on each housekeeping pass; the grace does not advance that change clock,
+  so frozen evidence still expires after the cycle and the next crossed check.
   Without recent shared evidence the row falls through to the classic pending
   arm and otherwise reaps.
 
-  The 13 s maximum is tied to the ct-slice's 10 s cycle and 2x default
-  `max_sessions` population in `worker/loop_body/slice_pacing.rs`; it is
-  const-asserted there. An idle source is therefore bounded, while a live
-  source cannot be reaped only because its next production restamp falls after
-  a shorter configured window.
+  The default bound is 13 s, covering the ct-slice's 10 s target and the 2x
+  default `max_sessions` population (12.8 s, rounded up); it is const-asserted
+  in `worker/loop_body/slice_pacing.rs`. Larger HA-import populations compute a
+  longer bound from their actual slab size. An idle source is therefore
+  bounded by the current cycle, while a live source cannot be reaped only
+  because its next production restamp falls after a shorter configured window.
 
   They are compared per contributor, not as one sum (#18742), because a sum
   is not monotonic in either direction:
@@ -717,15 +719,16 @@ failover (#131), and #18722 does not change it.
   at the first crossed check after its window, so ONE window after its last
   packet in either direction, and emits its Close.
 - An idle OPENING row or completed REPLICA remains bounded. For windows longer
-  than the 13 s maximum shared-evidence cadence, the first crossed check after
-  the last activity can still observe the initial count change and keeps it;
-  the next crossed check reaps it (two windows plus restamp/sweep lag). For
+  than the worker's computed shared-evidence cycle, the first crossed check
+  after the last activity can still observe the initial count change and keeps
+  it; the next crossed check reaps it (two windows plus restamp/sweep lag). For
   shorter configured windows, a present shared count remains eligible only
-  until `NODE_SERVED_EVIDENCE_MAX_CADENCE_NS` after its last observed change;
-  the row then reaps at its next crossed check. This can extend idle retention
-  by at most one cadence after the last observed evidence change, plus the row's
-  next idle-window crossing; a quiet row still reaps. A live replica survives
-  when its next production restamp would otherwise arrive after a short window.
+  until the current `shared_evidence_max_cadence_ns` after its last observed
+  change; the row then reaps at its next crossed check. This can extend idle
+  retention by at most one cycle after the last observed evidence change, plus
+  the row's next idle-window crossing; a quiet row still reaps. A live replica
+  survives when its next production restamp would otherwise arrive after a
+  short window.
 - A node-level KEEP aligns both halves' timestamp and evidence baselines, but
   does not replace their configured idle windows. Matching windows make both
   halves reap in the same pass; different per-zone OPENING windows may reap in

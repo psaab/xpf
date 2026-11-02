@@ -233,9 +233,13 @@ pub(crate) struct NodeServedEvidence {
     /// replacement reuses the prior packet total (the 300 -> removed -> 300
     /// ABA); both zero is the legacy/unknown sentinel.
     pub(crate) shared_incarnation: Option<(u64, u64)>,
+    /// The current worker's computed maximum shared-evidence restamp cadence.
+    /// Production fills this from its live session-table slab; `None` uses the
+    /// default-cap bound for isolated expiry contexts and model tests.
+    pub(crate) shared_evidence_max_cadence_ns: Option<u64>,
     /// The shared synced row's contributor: the matched Established row's
-    /// `fwd_packets + rev_packets`, restamped from the serving worker's
-    /// live counters by the ct-slice. `Some` while that row exists.
+    /// `fwd_packets + rev_packets`, restamped from the serving worker's live
+    /// counters by the ct-slice. `Some` while that row exists.
     pub(crate) shared_served: Option<u64>,
     /// The Established wire came from the node's SHARED synced map:
     /// a serving worker published/restamped it only after its own

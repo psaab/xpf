@@ -290,13 +290,11 @@ mod wheel;
 use wheel::SessionWheel;
 
 const SESSION_GC_INTERVAL_NS: u64 = 1_000_000_000;
-/// #18742: maximum observed ct-slice gap for an Established shared-row
-/// evidence restamp at the default per-worker cap and its 2x HA-import
-/// population (12.8 s, rounded up). Shorter configured idle windows use this
-/// as a bounded stale-evidence grace, so a live replica cannot reap before
-/// the next production restamp; a frozen source still expires after this
-/// interval plus its next crossed check.
-pub(crate) const NODE_SERVED_EVIDENCE_MAX_CADENCE_NS: u64 = 13_000_000_000;
+/// #18742: default shared-evidence cadence bound at the default per-worker
+/// session cap and its 2x HA-import population (12.8 s, rounded up). Production
+/// expiry contexts compute the bound from their actual session-table slab so
+/// larger imported populations cannot age out a live replica before restamping.
+pub(crate) const NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS: u64 = 13_000_000_000;
 /// #10591: test-only names for the production cadence constants. The window
 /// harness must derive its MAX values from the same values that gate the real
 /// worker sweep and advance the real timer wheel; a copied literal can make a
@@ -4019,6 +4017,13 @@ impl SessionTable {
         // held an orphan record from a partial cleanup path.
         self.key_to_handle.len()
     }
+    /// #18742: live slot extent used by the budgeted ct-refresh walk. Match
+    /// `iter_with_idle_budgeted`'s bound so the shared-evidence cadence scales
+    /// with imported sessions even when their count exceeds `max_sessions`.
+    pub(crate) fn ct_refresh_slab_len(&self) -> usize {
+        self.slot_high_watermark.min(self.entries.capacity())
+    }
+
 
     pub fn max_sessions(&self) -> usize {
         self.max_sessions
