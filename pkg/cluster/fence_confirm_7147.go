@@ -66,6 +66,10 @@ const FenceConfirmTimeout = 1 * time.Second
 func (m *Manager) markFenceUnconfirmedLocked(reason string) {
 	m.fenceUnconfirmedReason = reason
 	m.fenceUnconfirmedAt = time.Now()
+	if m.peerEverSeen && !m.peerAlive {
+		slog.Warn("cluster: dual-primary risk: peer-loss takeover proceeded without confirmed fencing",
+			"reason", reason)
+	}
 }
 
 func (m *Manager) clearFenceUnconfirmedLocked() {
@@ -76,6 +80,31 @@ func (m *Manager) clearFenceUnconfirmedLocked() {
 func formatFenceUnconfirmedStatus(reason string, at time.Time) string {
 	return fmt.Sprintf("Peer-loss takeover: DEGRADED (peer fence unconfirmed: %s, since %s)",
 		reason, at.Format("Jan 02 15:04:05"))
+}
+
+// formatFenceUnconfirmedAlarm reports the active split-brain risk when a
+// previously observed peer is lost and this node takes over without a
+// confirmation that the peer relinquished its redundancy groups.
+func formatFenceUnconfirmedAlarm(reason string, at time.Time) string {
+	return fmt.Sprintf("dual-primary risk: Peer-loss takeover: DEGRADED (peer fence unconfirmed: %s, since %s)",
+		reason, at.Format("Jan 02 15:04:05"))
+}
+
+// PeerLossTakeoverAlarm returns the active dual-primary-risk alarm for an
+// unconfirmed takeover. A cold-start single-node election is not an alarm:
+// there was no previously observed peer to split-brain with. A heartbeat that
+// arrives during an unsuccessful fence wait also suppresses the alarm because
+// that takeover is aborted.
+func (m *Manager) PeerLossTakeoverAlarm() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if !m.peerEverSeen || m.peerAlive || m.fenceUnconfirmedReason == "" {
+		return ""
+	}
+	return formatFenceUnconfirmedAlarm(m.fenceUnconfirmedReason, m.fenceUnconfirmedAt)
 }
 
 // awaitPeerFenceLocked runs the confirmed peer fence.

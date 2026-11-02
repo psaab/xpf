@@ -20,6 +20,17 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
+// SetPeerUnconfirmedTakeoverForTesting arms the peer-loss alarm state without
+// driving the heartbeat timeout path. It lets external-package CLI and gRPC
+// cells pin their alarm rendering against the Manager's live status.
+func (m *Manager) SetPeerUnconfirmedTakeoverForTesting(reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.peerEverSeen = true
+	m.peerAlive = false
+	m.markFenceUnconfirmedLocked(reason)
+}
+
 // SetPeerIPsecSAsForTesting installs the peer's advertised IPsec
 // connection-name set without a wire round trip, mirroring
 // SetPeerDHCPLeasesForTesting.

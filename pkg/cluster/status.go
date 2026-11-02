@@ -23,6 +23,7 @@ func (m *Manager) FormatStatus() string {
 	configSyncFailing := m.configSyncFailing // #6387: node-global CF annotation
 	takeoverHold := m.takeoverHoldTime       // #103: hold is part of eligibility
 	fenceUnconfirmedReason := m.fenceUnconfirmedReason
+	peerEverSeen := m.peerEverSeen
 	fenceUnconfirmedAt := m.fenceUnconfirmedAt
 	// #6495: read the REASON, not just the flag. The daemon sets this one flag
 	// for two materially different conditions (an armed candidate, and the
@@ -51,7 +52,11 @@ func (m *Manager) FormatStatus() string {
 	fmt.Fprintf(&b, "Cluster ID: %d\n", m.clusterID)
 	fmt.Fprintf(&b, "Node name: node%d\n", m.nodeID)
 	if fenceUnconfirmedReason != "" {
-		fmt.Fprintln(&b, formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		if peerEverSeen && !peerAlive {
+			fmt.Fprintf(&b, "ALARM: %s\n", formatFenceUnconfirmedAlarm(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		} else {
+			fmt.Fprintln(&b, formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		}
 	}
 	// #6495: a node parked SECONDARY by the kernel-candidate promotion gate is
 	// otherwise INDISTINGUISHABLE from one demoted by a monitor failure or a
@@ -340,6 +345,7 @@ func (m *Manager) FormatInformation() string {
 	takeoverHold := m.takeoverHoldTime         // #103
 	syncBulkPrimed := m.syncBulkPrimed         // #10261
 	fenceUnconfirmedReason := m.fenceUnconfirmedReason
+	peerEverSeen := m.peerEverSeen
 	fenceUnconfirmedAt := m.fenceUnconfirmedAt
 	// #6495: the hold REASON, not just the flag (see FormatStatus).
 	kernelHold := ""
@@ -431,7 +437,11 @@ func (m *Manager) FormatInformation() string {
 	fmt.Fprintf(&b, "  Local node: %s\n", localHealth)
 	fmt.Fprintf(&b, "  Remote node: %s\n", remoteHealth)
 	if fenceUnconfirmedReason != "" {
-		fmt.Fprintf(&b, "  %s\n", formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		if peerEverSeen && !peerAlive {
+			fmt.Fprintf(&b, "  ALARM: %s\n", formatFenceUnconfirmedAlarm(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		} else {
+			fmt.Fprintf(&b, "  %s\n", formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		}
 	}
 	// #6495: name the kernel-upgrade election hold here too. It does NOT
 	// degrade node health — the node is fine, it is deliberately not eligible —

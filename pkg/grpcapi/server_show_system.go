@@ -132,6 +132,10 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 	if s.peerSnapshotProtocolAlarmFn != nil {
 		peerSnapshotAlarm = s.peerSnapshotProtocolAlarmFn()
 	}
+	var peerLossTakeoverAlarm string
+	if s.cluster != nil {
+		peerLossTakeoverAlarm = s.cluster.PeerLossTakeoverAlarm()
+	}
 	n := len(warnings) + len(clockAlarms)
 	if divergence != "" {
 		n++
@@ -141,6 +145,9 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 	}
 	fabricAuthAlarm := s.fabricAuthUnarmedAlarm()
 	if fabricAuthAlarm != "" {
+		n++
+	}
+	if peerLossTakeoverAlarm != "" {
 		n++
 	}
 	if n == 0 {
@@ -157,6 +164,9 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 	}
 	if peerSnapshotAlarm != "" {
 		fmt.Fprintf(buf, "  CRITICAL: %s\n", peerSnapshotAlarm)
+	}
+	if peerLossTakeoverAlarm != "" {
+		fmt.Fprintf(buf, "  CRITICAL: %s\n", peerLossTakeoverAlarm)
 	}
 	if fabricAuthAlarm != "" {
 		fmt.Fprintf(buf, "  %s\n", fabricAuthAlarm)

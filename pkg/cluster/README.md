@@ -3839,10 +3839,14 @@ operator-facing table.
 No fencing is configured by default. Both the default and `disable-rg` leave
 dual-primary ownership possible; `disable-rg-confirmed` only waits for a
 point-in-time dataplane-suppression acknowledgement and also does not demote
-the peer or release its VIPs. `FormatStatus` and `FormatInformation` render any
-takeover without peer confirmation as `Peer-loss takeover: DEGRADED`; the
-information view marks local health degraded. This is diagnostic, not a
-takeover gate, and the marker clears when a peer heartbeat returns.
+the peer or release its VIPs. `FormatStatus` and `FormatInformation` mark an
+unconfirmed takeover as degraded. When the lost peer had previously been
+observed, the status views raise an explicit `ALARM: dual-primary risk`, and
+local and gRPC `show system alarms` report it as CRITICAL. A `slog.Warn`
+records the risk once per takeover. The alarm clears when a peer heartbeat
+returns. A cold-start single-node election is still marked degraded but does
+not claim dual-primary risk, because no peer was previously observed. This
+remains diagnostic and does not change the fail-open takeover behavior.
 
 - **Wire** — one additive message type `syncMsgFenceAck = 35` carries
   `{seq u64, status u8, rgs_fenced u16, rgs_total u16}` LE. `syncMsgFence`
