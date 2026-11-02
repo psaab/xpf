@@ -744,8 +744,13 @@ func functionalZoneManagementBody15668(mgmt *Node) *Node {
 		}
 		children := packedBodyChildren(prop, hostInboundSchema)
 		same := len(children) == len(prop.Children)
-		if same && len(children) > 0 {
-			same = &children[0] == &prop.Children[0]
+		if same {
+			for j := range children {
+				if children[j] != prop.Children[j] {
+					same = false
+					break
+				}
+			}
 		}
 		if same {
 			continue
