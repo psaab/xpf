@@ -254,23 +254,23 @@ security { zones { functional-zone management { interfaces { fxp0.0; }
 			wantSvc: []string{"ssh"}, wantProto: []string{"ospf"},
 		},
 		{
-			name: "braced functional-zone packed multi-value",
-			text: `security { zones { functional-zone { management host-inbound-traffic system-services ssh telnet; } } }`,
+			name:    "braced functional-zone packed multi-value",
+			text:    `security { zones { functional-zone { management host-inbound-traffic system-services ssh telnet; } } }`,
 			wantSvc: []string{"ssh", "telnet"},
 		},
 		{
-			name: "one-level multi-value",
-			text: `security { zones { functional-zone management { host-inbound-traffic system-services ssh telnet; } } }`,
+			name:    "one-level multi-value",
+			text:    `security { zones { functional-zone management { host-inbound-traffic system-services ssh telnet; } } }`,
 			wantSvc: []string{"ssh", "telnet"},
 		},
 		{
-			name: "two-level multi-value",
-			text: `security { zones { functional-zone management host-inbound-traffic system-services ssh telnet; } }`,
+			name:    "two-level multi-value",
+			text:    `security { zones { functional-zone management host-inbound-traffic system-services ssh telnet; } }`,
 			wantSvc: []string{"ssh", "telnet"},
 		},
 		{
-			name: "braced functional-zone packed single",
-			text: `security { zones { functional-zone { management host-inbound-traffic system-services ssh; } } }`,
+			name:    "braced functional-zone packed single",
+			text:    `security { zones { functional-zone { management host-inbound-traffic system-services ssh; } } }`,
 			wantSvc: []string{"ssh"},
 		},
 	}
