@@ -83,7 +83,7 @@ CAPTURE_DATAPLANE=${CAPTURE_DATAPLANE:-1}
 # counter deltas come from the node actually forwarding the traffic,
 # never from a standby after a failover.
 DATAPLANE_VM=${DATAPLANE_VM:-}
-read -r -a DATAPLANE_VM_CANDIDATES <<< "${DATAPLANE_VM_CANDIDATES:-loss:xpf-userspace-fw0 loss:xpf-userspace-fw1}"
+read -r -a DATAPLANE_VM_CANDIDATES <<< "${DATAPLANE_VM_CANDIDATES:-$FW0 $FW1}"
 DATAPLANE_STATUS_PATH=${DATAPLANE_STATUS_PATH:-/run/xpf/userspace-dp.json}
 DATAPLANE_STATS_CMD=${DATAPLANE_STATS_CMD:-"cli -c 'show chassis cluster data-plane statistics'"}
 DATAPLANE_CAPTURE_TIMEOUT_SEC=${DATAPLANE_CAPTURE_TIMEOUT_SEC:-20}

@@ -229,9 +229,45 @@ class TargetSplitWiringTests(unittest.TestCase):
     permanently true and the gate is permanently void.
     """
 
-    def test_both_targets_are_overridable_and_default_together(self):
-        self.assertIn('MOUSE_TARGET_V4="${MOUSE_TARGET_V4:-$TARGET_V4}"', SCRIPT)
-        self.assertIn('ELEPHANT_TARGET_V4="${ELEPHANT_TARGET_V4:-$TARGET_V4}"', SCRIPT)
+    def resolve_targets(self, **overrides):
+        # Execute the resolution fragment from the production shell script,
+        # with only its selected env file and the caller's explicit overrides.
+        match = re.search(
+            r"(?ms)^_MOUSE_TARGET_V4_OVERRIDE=.*?^unset _MOUSE_TARGET_V4_OVERRIDE$",
+            SCRIPT,
+        )
+        self.assertIsNotNone(match, "target resolution block must remain wired")
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "SCRIPT_DIR": str(pathlib.Path(__file__).resolve().parent),
+            **overrides,
+        }
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                match.group(0)
+                + '\nprintf "%s|%s|%s\\n" "$TARGET_V4" "$MOUSE_TARGET_V4" "$ELEPHANT_TARGET_V4"',
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return tuple(result.stdout.strip().split("|"))
+
+    def test_targets_default_to_iperf_target_and_preserve_overrides(self):
+        self.assertEqual(
+            self.resolve_targets(),
+            ("172.16.80.202", "172.16.80.202", "172.16.80.202"),
+        )
+        self.assertEqual(
+            self.resolve_targets(
+                MOUSE_TARGET_V4="192.0.2.10",
+                ELEPHANT_TARGET_V4="192.0.2.11",
+            ),
+            ("172.16.80.202", "192.0.2.10", "192.0.2.11"),
+        )
 
     def test_the_mouse_probe_uses_the_mouse_target(self):
         self.assertIn('--target "$MOUSE_TARGET_V4" --port "$MOUSE_PORT"', SCRIPT)
