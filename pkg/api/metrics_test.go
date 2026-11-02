@@ -1360,6 +1360,30 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspaceHandshakeRelayOutboxDrops: prometheus.NewDesc(
+			"xpf_userspace_handshake_relay_outbox_drops_total",
+			"handshake relay outbox drops",
+			nil,
+			nil,
+		),
+		userspaceHandshakeRelayRefused: prometheus.NewDesc(
+			"xpf_userspace_handshake_relay_refused_total",
+			"handshake relay refused",
+			nil,
+			nil,
+		),
+		userspaceHandshakeRelayLockAttempts: prometheus.NewDesc(
+			"xpf_userspace_handshake_relay_lock_attempts_total",
+			"handshake relay lock attempts",
+			nil,
+			nil,
+		),
+		userspaceHandshakeRelayLockContended: prometheus.NewDesc(
+			"xpf_userspace_handshake_relay_lock_contended_total",
+			"handshake relay lock contended",
+			nil,
+			nil,
+		),
 		// #5674: synced-import aggregate admission-bound drops.
 		userspaceSyncedImportCapDrops: prometheus.NewDesc(
 			"xpf_userspace_synced_import_cap_drops_total",
@@ -1773,6 +1797,11 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		SessionReplicationLockContendedTotal:      127,
 		SessionReplicationQueueDepthSum:           137,
 		SessionReplicationQueueDepthMax:           131,
+		// #18529: unique values pin each relay counter's status-to-metric wire.
+		HandshakeRelayOutboxDropsTotal:   1000001,
+		HandshakeRelayRefusedTotal:       1000003,
+		HandshakeRelayLockAttemptsTotal:  1000033,
+		HandshakeRelayLockContendedTotal: 1000037,
 		// #9169: the FOURTH #4800 site. Two more distinct primes, for the
 		// same reason as the seven above — a collector that crossed the
 		// denominator and the contended wire would otherwise pass.
@@ -2031,14 +2060,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// want 109, got 111 there.) #15249 adds the GRE transport-egress
 	// refusal counter, for 113. #16215 adds the SNAT-revoked-sessions
 	// counter, for 114. #16593 adds the frag-quota-refusals counter, for 115.
-	// #17218 adds the ipsec-inner no-route counter and #17123 adds the
-	// reinject-handler-panics counter, for 117.
+	// #17218 adds the ipsec-inner no-route counter and #17123 adds
+	// reinject-handler panics. #18529 adds four relay counters: 120 total.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 117 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 117 metrics, got %d", len(got))
+	if len(got) != 120 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 120 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -2110,6 +2139,12 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// replication backlog.
 	assertCounterClose(t, got, c.userspaceSessionReplicationQueueDepthSum, nil, 137)
 	assertGaugeClose(t, got, c.userspaceSessionReplicationQueueDepthMax, nil, 131)
+	// #18529: each handshake-relay loss counter and each member of the
+	// relay-only lock pair is independently visible on Prometheus.
+	assertCounterClose(t, got, c.userspaceHandshakeRelayOutboxDrops, nil, 1000001)
+	assertCounterClose(t, got, c.userspaceHandshakeRelayRefused, nil, 1000003)
+	assertCounterClose(t, got, c.userspaceHandshakeRelayLockAttempts, nil, 1000033)
+	assertCounterClose(t, got, c.userspaceHandshakeRelayLockContended, nil, 1000037)
 	// #9169: site 4's pair. Emitted unconditionally and together, like the
 	// three above — the connection-rate analyzer refuses a ratio whose
 	// denominator is missing, so half a pair is a site that reports "never

@@ -859,10 +859,12 @@ drains it once per pass after the binding sweep
 (`WorkerCommand::HandshakeRelay`), one counted lock per recipient
 (`HANDSHAKE_RELAY_LOCK_ATTEMPTS`/`_CONTENDED`, kept apart from the #4800
 replication pair so its fan-out ratio stays exact; a refused push counts in
-`HANDSHAKE_RELAY_REFUSED`; none of the four is exported yet, #18529). The
-receiver applies it in `apply_worker_commands`. Nothing runs per packet: an
-empty outbox costs one `is_empty` per loop pass, and only split pairs relay (a
-flow whose SYN and SYN-ACK land on one worker relays nothing). A relayed
+`HANDSHAKE_RELAY_REFUSED`). All four counters are exported as
+`xpf_userspace_handshake_relay_*_total` Prometheus counters and included in
+the status RPC (#18529). The receiver applies it in `apply_worker_commands`.
+Nothing runs per packet: an empty outbox costs one `is_empty` per loop pass,
+and only split pairs relay (a flow whose SYN and SYN-ACK land on one worker
+relays nothing). A relayed
 transition is never relayed back, and the receiver publishes no HA Update for
 it — the sender already published the same transition for the same session id
 from its own row (a replica announces with the installer's carried id, #9582;
@@ -919,8 +921,10 @@ Limits (the relay narrows the split gap, it does not erase it):
     by default) until it idles out, pinning its SNAT port, slot and
     limit-session count. Before #18520 the same flow reaped on the 20 s
     opening window.
-  - Only `HANDSHAKE_RELAY_OUTBOX_DROPS` and `HANDSHAKE_RELAY_REFUSED` show
-    it, and neither is exported yet (#18529).
+  - Outbox drops and queue refusals (`HANDSHAKE_RELAY_OUTBOX_DROPS` and
+    `HANDSHAKE_RELAY_REFUSED`) now have separate Prometheus counters, as do
+    lock attempts and contention (`HANDSHAKE_RELAY_LOCK_ATTEMPTS` and
+    `HANDSHAKE_RELAY_LOCK_CONTENDED`) (#18529).
   - `Closed` is deliberately not exempt from the watermark. Under a
     teardown storm it would crowd the HA headroom that the watermark keeps.
 

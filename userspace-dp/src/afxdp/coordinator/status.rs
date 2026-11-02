@@ -408,6 +408,25 @@ impl super::Coordinator {
         crate::afxdp::session_glue::SESSION_REPLICATION_QUEUE_DEPTH_MAX.load(Ordering::Relaxed)
     }
 
+    /// #18529: process-global handshake-relay loss and fan-out lock counters.
+    /// The lock pair is deliberately separate from #4800 session-replication
+    /// counters so that relay fan-out does not alter its enqueued/upserts ratio.
+    pub fn handshake_relay_outbox_drops_total(&self) -> u64 {
+        crate::session::HANDSHAKE_RELAY_OUTBOX_DROPS.load(Ordering::Relaxed)
+    }
+
+    pub fn handshake_relay_refused_total(&self) -> u64 {
+        crate::afxdp::session_glue::HANDSHAKE_RELAY_REFUSED.load(Ordering::Relaxed)
+    }
+
+    pub fn handshake_relay_lock_attempts_total(&self) -> u64 {
+        crate::afxdp::session_glue::HANDSHAKE_RELAY_LOCK_ATTEMPTS.load(Ordering::Relaxed)
+    }
+
+    pub fn handshake_relay_lock_contended_total(&self) -> u64 {
+        crate::afxdp::session_glue::HANDSHAKE_RELAY_LOCK_CONTENDED.load(Ordering::Relaxed)
+    }
+
     /// #2170: total stale-generation installs refused by the helper's
     /// in-memory SyncedSessionEntry guard (the delayed-stale-install
     /// variant). The authoritative guard is in the Go cluster apply layer;

@@ -579,6 +579,54 @@ fn process_status_worker_command_queue_drops_roundtrip_6929() {
     assert_eq!(legacy.worker_command_queue_drops, 0);
 }
 
+// #18529: handshake-relay status fields retain the exact Go wire keys,
+// round-trip their counters, and default when omitted by an older helper.
+#[test]
+fn process_status_handshake_relay_counters_roundtrip_18529() {
+    let status = ProcessStatus {
+        handshake_relay_outbox_drops_total: 11,
+        handshake_relay_refused_total: 13,
+        handshake_relay_lock_attempts_total: 17,
+        handshake_relay_lock_contended_total: 19,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    for (key, want) in [
+        ("handshake_relay_outbox_drops_total", 11),
+        ("handshake_relay_refused_total", 13),
+        ("handshake_relay_lock_attempts_total", 17),
+        ("handshake_relay_lock_contended_total", 19),
+    ] {
+        assert_eq!(value[key], want);
+    }
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+    assert_eq!(back.handshake_relay_outbox_drops_total, 11);
+    assert_eq!(back.handshake_relay_refused_total, 13);
+    assert_eq!(back.handshake_relay_lock_attempts_total, 17);
+    assert_eq!(back.handshake_relay_lock_contended_total, 19);
+
+    let mut legacy_value =
+        serde_json::to_value(ProcessStatus::default()).expect("serialize default ProcessStatus");
+    let object = legacy_value
+        .as_object_mut()
+        .expect("ProcessStatus serializes to an object");
+    for key in [
+        "handshake_relay_outbox_drops_total",
+        "handshake_relay_refused_total",
+        "handshake_relay_lock_attempts_total",
+        "handshake_relay_lock_contended_total",
+    ] {
+        object.remove(key).expect("new key present before strip");
+    }
+    let legacy: ProcessStatus =
+        serde_json::from_value(legacy_value).expect("pre-#18529 payload decodes");
+    assert_eq!(legacy.handshake_relay_outbox_drops_total, 0);
+    assert_eq!(legacy.handshake_relay_refused_total, 0);
+    assert_eq!(legacy.handshake_relay_lock_attempts_total, 0);
+    assert_eq!(legacy.handshake_relay_lock_contended_total, 0);
+}
+
 #[test]
 fn process_status_tx_completion_counters_roundtrip_9900() {
     let status = ProcessStatus {
@@ -2642,6 +2690,11 @@ fn wire_invariant_default_specimens() {
             linked_libelf_version: "10203-elf-sentinel".into(),
             linked_zlib_version: "10203-zlib-sentinel".into(),
             linked_zstd_version: "10203-zstd-sentinel".into(),
+            // #18529: distinguish the relay delivery-loss and lock counters.
+            handshake_relay_outbox_drops_total: 307,
+            handshake_relay_refused_total: 311,
+            handshake_relay_lock_attempts_total: 313,
+            handshake_relay_lock_contended_total: 317,
             ..Default::default()
         }),
     );
@@ -2652,6 +2705,11 @@ fn wire_invariant_default_specimens() {
         dump(&ProcessStatus {
             unzoned_ingress_denied_total: 107,
             unzoned_egress_denied_total: 211,
+            // #18529: distinct sentinels pin all four helper status keys.
+            handshake_relay_outbox_drops_total: 401,
+            handshake_relay_refused_total: 409,
+            handshake_relay_lock_attempts_total: 419,
+            handshake_relay_lock_contended_total: 421,
             policy_rule_counters: vec![
                 crate::protocol::PolicyRuleCounterStatus {
                     rule_id: crate::policy::UNZONED_INGRESS_DENIED_RULE_ID.into(),
@@ -3550,6 +3608,11 @@ fn wire_invariant_default_specimens() {
             neighbor_replace_applied: Some(true),
             unzoned_ingress_denied_total: 107,
             unzoned_egress_denied_total: 211,
+            // #18529: distinct sentinels pin all four helper status keys.
+            handshake_relay_outbox_drops_total: 431,
+            handshake_relay_refused_total: 433,
+            handshake_relay_lock_attempts_total: 439,
+            handshake_relay_lock_contended_total: 443,
             dynamic_neighbor_keys: vec!["16132-key".into()],
             wg_tunnels: vec![WgTunnelStatus {
                 tunnel: "st0.1".into(),
