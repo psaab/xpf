@@ -142,6 +142,68 @@ fn encrypted_frames_15102() -> (ForwardingState, Vec<u8>, Vec<u8>, Vec<u8>) {
     (forwarding, control_frame, frame, inner)
 }
 
+/// #18560: the shared reassembly pool must not splice a CURRENT-view WG tail
+/// into a HELD-view head. The reverse FIB stamp is intentionally the only
+/// generation change here; GRE coverage pins the config-generation case.
+#[test]
+fn wg_fragments_from_different_fib_generations_do_not_reassemble_18560() {
+    let _lock = gre_outer_frag_counter_test_lock();
+    let (forwarding, _control, frag_whole, inner) = encrypted_frames_15102();
+    let scratch = WgWorkerScratch::new(4096);
+    let (head, tail) = split_v4_outer_wg(&frag_whole, 16);
+    let old_head_meta = frag_meta_wg(&head, true);
+    let mut current_tail_meta = frag_meta_wg(&tail, false);
+    current_tail_meta.fib_generation = current_tail_meta.fib_generation.wrapping_add(1);
+    let old_tail_meta = frag_meta_wg(&tail, false);
+    let mut pool = GreReassembler::new();
+    let mut allows = |_: &[u8], _: UserspaceDpMeta| true;
+
+    assert!(matches!(
+        stage_wg_decap(
+            &head,
+            old_head_meta,
+            &forwarding,
+            &scratch,
+            &mut pool,
+            10,
+            &mut allows,
+        ),
+        WgDecapStage::Buffered
+    ));
+    assert_eq!(pool.buffered_len(), 1, "the old-view WG head is buffered");
+    assert!(matches!(
+        stage_wg_decap(
+            &tail,
+            current_tail_meta,
+            &forwarding,
+            &scratch,
+            &mut pool,
+            11,
+            &mut allows,
+        ),
+        WgDecapStage::NotWg(_)
+    ));
+    assert_eq!(
+        pool.buffered_len(),
+        1,
+        "the current-view tail must not consume the old-view head"
+    );
+    match stage_wg_decap(
+        &tail,
+        old_tail_meta,
+        &forwarding,
+        &scratch,
+        &mut pool,
+        12,
+        &mut allows,
+    ) {
+        WgDecapStage::Decapped(_, frame) => {
+            assert_eq!(&frame[14..], &inner[..], "same-view fragments still decap");
+        }
+        _ => panic!("same-generation WG fragments must complete"),
+    }
+    assert_eq!(pool.buffered_len(), 0);
+}
 #[test]
 fn wg_outer_fragment_v4_reassembles_and_decaps_exactly_once_15102() {
     let _lock = gre_outer_frag_counter_test_lock();

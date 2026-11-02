@@ -3954,6 +3954,159 @@ fn expired_scheduler_lease_evicts_scheduled_deny_cache_entries() {
     );
 }
 
+/// #18560 (triple-review fold): a HELD (compare-only) lookup must be a pure
+/// comparison. It carries the HELD view's policy, whose scheduler lease may
+/// already be expired while the CURRENT view's is not. The phase-transition
+/// flush in `lookup_counted_with_scheduler_expiry` walks the whole cache
+/// BEFORE the generation guard, so running it on a held lookup would evict
+/// entries the CURRENT view seeded (here: an unrelated current flow, below a
+/// newly-eligible scheduled DENY under the held view's expired lease).
+/// RED pre-fix: the held lookup flushes `current_key`'s entry.
+#[test]
+fn held_lookup_suppresses_scheduler_phase_flush_18560() {
+    let mut zones = rustc_hash::FxHashMap::default();
+    zones.insert("trust".to_string(), TEST_TRUST_ZONE_ID);
+    zones.insert("untrust".to_string(), TEST_UNTRUST_ZONE_ID);
+    // The HELD view's policy: a scheduled DENY exists and its lease is expired.
+    let held_policy = crate::policy::parse_policy_state(
+        "deny",
+        &[crate::PolicyRuleSnapshot {
+            name: "scheduled-deny".to_string(),
+            from_zone: "trust".to_string(),
+            to_zone: "untrust".to_string(),
+            scheduler_name: "workhours".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "deny".to_string(),
+            policy_id: 1,
+            ..Default::default()
+        }],
+        &zones,
+    );
+    assert!(held_policy.has_scheduled_deny_or_reject());
+    assert!(held_policy.scheduler_lease.apply(1, 100));
+    let held_expired =
+        held_policy.scheduler_rules_expired_at(100 + crate::policy::SCHEDULER_HEARTBEAT_LEASE_NS + 1);
+    assert!(held_expired, "the held view's scheduler lease is expired");
+    // The CURRENT view's policy: the same publish without the scheduled rule
+    // (unscheduled), so a current-phase lookup does not flush.
+    let current_policy = crate::policy::parse_policy_state(
+        "deny",
+        &[crate::PolicyRuleSnapshot {
+            name: "plain-permit".to_string(),
+            from_zone: "trust".to_string(),
+            to_zone: "untrust".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "permit".to_string(),
+            policy_id: 2,
+            ..Default::default()
+        }],
+        &zones,
+    );
+    assert!(!current_policy.has_scheduled_deny_or_reject());
+    assert!(!current_policy.scheduler_rules_expired_at(100));
+
+    let rg_epochs = default_rg_epochs();
+    let stamp = FlowCacheStamp {
+        config_generation: 8,
+        fib_generation: 9,
+        owner_rg_id: 1,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let current_key = make_key();
+    let current_entry = make_entry(current_key.clone(), stamp, 1);
+    let mut cache = FlowCache::new();
+    cache.insert(current_entry);
+    // Premise: the current view's own lookup hits the unrelated current entry.
+    let current_lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        logical_ingress_ifindex: 7,
+        config_generation: 8,
+        fib_generation: 9,
+    };
+    assert!(
+        cache
+            .lookup_counted_with_scheduler_expiry(
+                &current_key,
+                current_lookup,
+                0,
+                &rg_epochs,
+                64,
+                &current_policy,
+                false,
+                &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
+            )
+            .is_some(),
+        "premise: the current entry hits under the current view"
+    );
+    let evictions_before = cache.evictions;
+    // A held (compare-only) lookup for a DIFFERENT key, carrying the held
+    // view's expired-scheduler policy snapshot, as flow_cache_hit.rs does.
+    let held_key = {
+        let mut k = current_key.clone();
+        k.src_port += 7;
+        k
+    };
+    let held_lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        logical_ingress_ifindex: 7,
+        config_generation: 7,
+        fib_generation: 9,
+    };
+    cache.held_compare_only = true;
+    assert!(
+        cache
+            .lookup_counted_with_scheduler_expiry(
+                &held_key,
+                held_lookup,
+                0,
+                &rg_epochs,
+                64,
+                &held_policy,
+                held_expired,
+                &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
+            )
+            .is_none(),
+        "a held lookup for an absent key misses"
+    );
+    assert!(
+        !cache.scheduler_expired,
+        "a held lookup must not update the cache's current scheduler phase"
+    );
+    cache.held_compare_only = false;
+    assert_eq!(
+        cache.evictions, evictions_before,
+        "a held compare-only lookup must not run the scheduler phase flush"
+    );
+    assert_eq!(
+        cache.evictions_for(FlowCacheEvictionArm::SchedulerPhaseFlush),
+        0,
+        "no entry may be attributed to a phase flush caused by a held lookup"
+    );
+    assert!(
+        cache
+            .lookup_counted_with_scheduler_expiry(
+                &current_key,
+                current_lookup,
+                0,
+                &rg_epochs,
+                64,
+                &current_policy,
+                false,
+                &std::collections::BTreeMap::new(),
+                &ForwardingState::default(),
+            )
+            .is_some(),
+        "the unrelated CURRENT entry must survive the held lookup"
+    );
+}
+
 // #13639 (D3-07): the inverse phase edge. While the scheduler lease is
 // expired, a scheduled PERMIT is ineligible (fail-closed), so traffic falls
 // through to an unscheduled DENY and is cached as a PolicyDenied entry whose

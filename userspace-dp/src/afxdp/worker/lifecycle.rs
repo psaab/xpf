@@ -9,11 +9,30 @@
 // no production logic touched.
 
 use super::*;
-use crate::afxdp::poll_descriptor::poll_binding_process_descriptor_with_injection;
+use crate::afxdp::poll_descriptor::poll_binding_process_descriptor_in_view;
 
 // Pins the invariant that `poll_binding` relies on: the RX batch loop
 // must run at least once. Cheap compile-time guard.
 const _: () = assert!(MAX_RX_BATCHES_PER_POLL >= 1);
+
+/// #18560: the view a batch runs under. With parked packets it is the
+/// retained view matching the first parked stamp (its tables and its
+/// validation); with none, or when that view has expired, the current pair.
+pub(in crate::afxdp) fn held_pass_view<'a>(
+    view_held: &[(XdpDesc, UserspaceDpMeta)],
+    prev_views: &'a crate::afxdp::PrevViews,
+    now_ns: u64,
+    forwarding: &'a ForwardingState,
+    validation: ValidationState,
+) -> (Option<usize>, &'a ForwardingState, ValidationState) {
+    let held_view = view_held.first().and_then(|(_, meta)| {
+        prev_views.find(meta.config_generation, meta.fib_generation, now_ns)
+    });
+    match held_view.and_then(|index| prev_views.get(index)) {
+        Some(view) => (held_view, view.forwarding.as_ref(), view.validation),
+        None => (None, forwarding, validation),
+    }
+}
 
 pub(super) fn poll_binding(
     binding_index: usize,
@@ -53,6 +72,8 @@ pub(super) fn poll_binding(
     rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
     cold_path_sample_mask: u64,
     injected_packet: Option<(Vec<u8>, UserspaceDpMeta)>,
+    // #18560: the forwarding views this worker has left (matched-view grace).
+    prev_views: &crate::afxdp::PrevViews,
 ) -> bool {
     let (left, rest) = bindings.split_at_mut(binding_index);
     let Some((binding, right)) = rest.split_first_mut() else {
@@ -139,6 +160,12 @@ pub(super) fn poll_binding(
         if raw_avail > 0 && !binding.bind_meta.xsk_rx_confirmed {
             binding.bind_meta.xsk_rx_confirmed = true;
         }
+        // #18560: packets an earlier batch parked (stamped with a forwarding
+        // view this worker has left) run first, in a held pass under that
+        // view's tables and validation. No RX is read in that batch.
+        let shape = crate::afxdp::BatchShape::for_binding(binding.view_held.len(), available);
+        let held_pass = shape.held_pass;
+        let available = shape.available;
         if cfg!(feature = "debug-log") {
             if raw_avail > 0 {
                 binding.telemetry.dbg_rx_avail_nonzero += 1;
@@ -150,7 +177,11 @@ pub(super) fn poll_binding(
             binding.telemetry.dbg_fill_pending = binding.xsk.device.pending();
             binding.telemetry.dbg_device_avail = binding.xsk.device.available();
         }
-        if available == 0 && injected_packet.is_none() && binding.pending_pmech_reverse.is_empty() {
+        if available == 0
+            && !held_pass
+            && injected_packet.is_none()
+            && binding.pending_pmech_reverse.is_empty()
+        {
             binding.telemetry.dbg_rx_empty += 1;
             maybe_wake_rx(binding, false, now_ns);
             // Check pending neighbor buffer even when RX is empty.
@@ -195,11 +226,21 @@ pub(super) fn poll_binding(
         // ensures the compiler verifies field name == local-variable
         // name; any swap of two shared-typed fields would require
         // renaming a local elsewhere and break compilation.
+        // #18560: the held pass's view. An expired view (or a parked packet
+        // whose view is gone) falls back to the current one, which then drops
+        // the packet as a generation mismatch, as before.
+        let (held_view, pass_forwarding, pass_validation) =
+            held_pass_view(&binding.view_held, prev_views, now_ns, forwarding, validation);
+        let pass = crate::afxdp::PassView {
+            prev_views: (!prev_views.is_empty()).then_some(prev_views),
+            held_pass,
+            view: held_view,
+        };
         let worker_ctx = WorkerContext {
             ident,
             binding_lookup,
             mirror_targets,
-            forwarding,
+            forwarding: pass_forwarding,
             ha_state,
             forwarding_active_rgs: &forwarding_active_rgs,
             dynamic_neighbors,
@@ -227,17 +268,17 @@ pub(super) fn poll_binding(
         // #14945 (3): hand the stage the split sibling bindings so a
         // cross-binding cache hit that shares this UMEM can take the
         // inline TX path. `binding` is disjoint from `left`/`right`.
-        poll_binding_process_descriptor_with_injection(
+        poll_binding_process_descriptor_in_view(
             binding,
             binding_index,
             left,
             right,
             &area,
             available,
-            injected_packet.take(),
+            if shape.take_injected { injected_packet.take() } else { None },
             sessions,
             screen,
-            validation,
+            pass_validation,
             now_ns,
             now_secs,
             ha_startup_grace_until_secs,
@@ -246,6 +287,7 @@ pub(super) fn poll_binding(
             conntrack_v6_fd,
             &worker_ctx,
             &mut telemetry,
+            pass,
         );
         if available == 0 {
             did_work |= binding.pending_pmech_reverse.len() < pending_pmech_before;
@@ -349,11 +391,14 @@ pub(super) fn poll_binding(
                 .extend(binding.scratch.scratch_recycle.drain(..));
         }
         let _ = drain_pending_fill(binding, now_ns);
-        counters.rx_batches += 1;
+        if !held_pass {
+            counters.rx_batches += 1;
+        }
         did_work |= available > 0
+            || held_pass
             || had_injected_packet
             || binding.pending_pmech_reverse.len() < pending_pmech_before;
-        if available == 0 {
+        if !shape.loop_continues() {
             break;
         }
     }

@@ -124,10 +124,15 @@ type BindingStatus struct {
 	ExceptionPackets            uint64 `json:"exception_packets,omitempty"`
 	ConfigGenMismatches         uint64 `json:"config_gen_mismatches,omitempty"`
 	FIBGenMismatches            uint64 `json:"fib_gen_mismatches,omitempty"`
-	UnsupportedPackets          uint64 `json:"unsupported_packets,omitempty"`
-	FlowCacheHits               uint64 `json:"flow_cache_hits,omitempty"`
-	FlowCacheMisses             uint64 `json:"flow_cache_misses,omitempty"`
-	FlowCacheEvictions          uint64 `json:"flow_cache_evictions,omitempty"`
+	// #18560: matched-view grace witnesses and mismatch-drop direction.
+	GenerationHeldHits       uint64 `json:"generation_held_hits,omitempty"`
+	GenerationHeldMisses     uint64 `json:"generation_held_misses,omitempty"`
+	GenerationMismatchAhead  uint64 `json:"generation_mismatch_ahead,omitempty"`
+	GenerationMismatchBehind uint64 `json:"generation_mismatch_behind,omitempty"`
+	UnsupportedPackets       uint64 `json:"unsupported_packets,omitempty"`
+	FlowCacheHits            uint64 `json:"flow_cache_hits,omitempty"`
+	FlowCacheMisses          uint64 `json:"flow_cache_misses,omitempty"`
+	FlowCacheEvictions       uint64 `json:"flow_cache_evictions,omitempty"`
 	// #16220: per-arm breakdown of FlowCacheEvictions, indexed by the
 	// Rust FlowCacheEvictionArm ordinal (see flowCacheEvictionArmLabels).
 	FlowCacheEvictionsByArm []uint64 `json:"flow_cache_evictions_by_arm,omitempty"`

@@ -2351,6 +2351,217 @@ learn; removal, a new source MAC, a new snapshot, interval expiry and an
 unpublished snapshot all take it); and the ignored full-poll `MEASUREMENT`
 `tests_hit_path_cost_18533.rs` (numbers in `docs/log/18534.md`).
 
+## Matched-view grace for lagging shim stamps (#18560)
+
+The shim stamps every packet with the config/FIB generations in
+`userspace_ctrl`, and `classify_metadata` drops a packet whose stamp differs
+from the worker's validation (`config_generation_mismatch` /
+`fib_generation_mismatch`). Since #18598 the helper advances the stamp 28-48
+us after its view store, so packets arriving after a publish carry the new
+stamp. What is left is the packets ALREADY QUEUED in a binding's RX ring when
+its worker adopts the new view. They are stamped with the view the worker just
+left, and before this change they were dropped.
+
+On loss (two diag probes, 0.0.29554 and 0.0.29557, 6 operator moves each under
+8-stream load) that was 7-18k packets per move on the node gaining the RGs:
+- 97-99.9% were BEHIND (stamp older than the worker); the rest were AHEAD.
+- The last one fell within about 1 ms of the slowest worker's adoption, which
+  was 5-26 ms after the store.
+- For 100% of them the flow-cache entry seeded under their own view was still
+  present when they were dropped.
+
+The adoption delay is not the defect: a worker keeps draining its ring under
+the old view (legally) until its tick ends. The workers on the gaining node
+fall that far behind because a poll tick costs tens of us per packet after a
+move (#18714).
+
+The worker now keeps the views it leaves and serves such a packet from its
+own view's flow-cache entry:
+
+- **Retention** (`PrevViews`, `types/runtime.rs`). On every adoption the
+  worker loop records the view it is leaving: the validation pair plus the
+  `Arc<ForwardingState>` it was published with.
+  - It keeps up to `MATCHED_VIEW_SLOTS` (2) views, each for at most
+    `MATCHED_VIEW_GRACE_NS` (200 ms). Both constants carry their derivation
+    from the probes.
+  - **Early release** (`PrevViews::release_if_drained`). The views are
+    dropped as soon as every binding of the worker has validated a native
+    packet with the CURRENT stamp since the adoption and holds no parked
+    packet. In native mode each ring has one producer (the queue's XDP
+    execution stamps and enqueues together, and generations only go up), so
+    nothing older can follow. A generic-mode ring can have several producer
+    CPUs only under one of two conditions: RPS is on for its queue, or it
+    belongs to a software device whose receive runs on the sender's CPU.
+    With per-queue NAPI and RPS off, a generic-mode queue is fed from one
+    CPU.
+    - The fabric's xdpgeneric parent `ge-x-0-0` is the virtio NIC (`enp7s0`)
+      that the `fab0` ipvlan sits on, not a software device.
+    - On the loss cluster RPS is on for all six of its RX queues on both
+      nodes (`rps_cpus` = `3f`, read 2026-11-01). The several-producer case
+      therefore applies to the fabric there.
+
+    When either condition holds, each CPU reads the stamp before taking the
+    socket RX lock. For a few us an older-stamped packet can then land
+    behind a current one. If the views were already released it is dropped
+    as a mismatch, exactly as before this change, and never processed under
+    the wrong tables.
+    With traffic on every binding a view lives for the ring's drain time
+    (milliseconds); only a worker with an idle binding keeps it until the
+    200 ms expiry. Every worker tick expires views before any adoption,
+    including a neighbor-only publish.
+
+    The RPS path, read in a v6.19-4683-gb7ef56a07672 tree (the 7.0 merge
+    window; the lab runs 7.0.0-rc7+):
+    1. virtio_net's `receive_buf` records the RX queue
+       (`drivers/net/virtio_net.c:2603`), then calls `napi_gro_receive`
+       (`:2608`).
+    2. `gro_normal_list` (`include/net/gro.h:524`) calls
+       `netif_receive_skb_list_internal`. With RPS on, that function sends
+       each skb to `get_rps_cpu`'s CPU via `enqueue_to_backlog`
+       (`net/core/dev.c:6375-6380`).
+    3. That CPU's `process_backlog` (`:6617`) calls
+       `__netif_receive_skb_core`, where `do_xdp_generic` runs the program
+       (`:5958-5962`). The stamp is read here.
+    4. The program's rxq is the recorded queue (`netif_get_rxqueue`,
+       `:5368-5376`). So every CPU passes `xsk_rcv_check` for the same
+       queue's socket.
+    5. Delivery is serialized only by `xsk_generic_rcv`'s `pool->rx_lock`
+       (`net/xdp/xsk.c:357`), taken after the stamp was read.
+  - **Memory.** A retained view pins the publisher's deep-cloned
+    `ForwardingState`, routes included: on the order of 100-150 MB per copy
+    with a full IPv4 table. Under BGP churn faster than the grace both slots
+    of a worker can stay full, and a lagging worker can pin a different
+    older pair than its siblings. So the bound is two copies per worker for
+    at most 200 ms each, which the early release usually cuts to the drain
+    time.
+  - Only a forward move with both views installed earns a slot.
+  - A generation that goes down (a reset) clears the list. A publish that
+    changes the CoS runtime config clears it too, because the binding's
+    queues are rebuilt for the new tables. A neighbor-only republish changes
+    no stamp.
+- **Park** (`poll_descriptor/mod.rs`, the non-Valid branch). A native RX
+  descriptor whose stamp is a generation mismatch AND exactly matches a
+  retained view (`PassView::parks`) is pushed onto `BindingWorker::view_held`
+  instead of being dropped. It is not recycled.
+  - AHEAD stamps never match: retained views are older than the current one.
+  - A BEHIND stamp of a view the worker never held does not match either.
+  - Both stay drops.
+- **Held pass** (`worker/lifecycle.rs`, `poll_binding`). A binding with parked
+  descriptors runs its next RX batch as a held pass: no RX read, no injected
+  packet, no PMech replays.
+  - The `WorkerContext` and validation are built from the retained view that
+    matches the first parked stamp (`held_pass_view`).
+  - A parked packet of yet another retained view is re-parked.
+  - If the view expired, the pass runs under the current view, which drops
+    the packet as a mismatch.
+- **Flow-cache hit path, compare-only.** For ordinary forwarding traffic
+  that reaches the flow-cache stage, a held packet is served only by an
+  entry seeded under its own view.
+  - The held pass's lookups compare without evicting
+    (`FlowCache::held_compare_only`). The cache keeps one entry per key, and a
+    lookup with other generations leaves the current entry in place.
+  - A miss, or any hit-stage fall-through (an epoch or lease fence,
+    egress/owner departed, stale neighbor MAC, a superseded decision), is
+    dropped as a held-view miss. It is not a metadata-generation mismatch:
+    the packet is valid against the retained view, so this drop does not
+    increment `config_gen_mismatches`, `fib_gen_mismatches`, or the
+    AHEAD/BEHIND mismatch witnesses.
+  - This describes the ordinary flow-cache route, not every pre-cache arm.
+    An admitted IPsec passthrough can reinject before the cache, and a
+    pending reverse PMech packet can be deferred before it; those paths are
+    outside the `generation_held_hits` / `generation_held_misses` witnesses.
+  - Any held packet that reaches the no-slow-path guard without being
+    consumed by the cache is dropped there: no session lookup, install,
+    re-resolution, synced-session purge/promotion/adoption, or NAT allocation.
+    Letting held packets into the slow path is what regressed the first
+    version: old tables against the current HA state left established flows
+    with no session on a node demoting an RG.
+- **What a held hit writes, and why that is safe.** The hit accounts the
+  packet on its existing session: counters, idle refresh, the TCP probe-hit
+  state update and its HA delta.
+  - That is what a worker that had drained its ring before adopting would
+    have written: same session, same per-flow order (the ring is FIFO and the
+    queued packets precede every new one).
+  - The cached translation is replayed, so nothing is allocated.
+  - "No install" is literal for this worker's session table and flow
+    cache, but not for the node's shared alias rows. A held hit whose packet
+    completes a TCP handshake (`take_probe_stage_transition_forward`) runs
+    the same #16217 shared restamps an ordinary hit runs, in
+    `poll_descriptor/flow_cache_hit.rs`.
+    `restamp_shared_forward_wire_established` among them can INSERT a
+    forward-wire alias row when none exists. That row is cloned from the
+    CURRENT shared canonical row (`shared_ops/lookup.rs`), as an ordinary
+    pass would do, never from the held view's tables.
+  - The hit path judges the entry against the LIVE state: the RG epochs, the
+    HA lease in the batch's live HA snapshot, and the session's presence in
+    THIS worker's session table. A session the current state has demoted or
+    deleted is a miss and is dropped, so no held packet forwards for it or
+    advertises it.
+  - "Live" is per worker. A sibling worker's table is not consulted, so a
+    sibling that has not yet applied a DeleteSynced cannot lend its entry to
+    this one.
+- **Session-table stamps.** A held pass does not run the prologue that
+  stamps the session table's live revalidation generations. They stay on the
+  current view: the filter, forwarding, policy and app-catalog generations.
+  That includes the `policy_revalidation_gen` that `refresh_for_ha_transition`'s
+  #10507 A2 reset compares rows against, which can run in
+  `apply_worker_commands` (RG2's `RefreshOwnerRGS`) while views are retained.
+- **#6592.** No packet is processed under tables newer or older than its own
+  stamp: AHEAD stays a drop, and BEHIND runs only under the exact view whose
+  pair it carries.
+- **Operator semantic (ordinary flow-cache path).** A commit applies to
+  packets arriving after its view is installed. An ordinary forwarding packet
+  already queued in a receive ring when the worker adopts the new view uses
+  its own view's cached decision or is dropped; it is not re-evaluated under
+  the new policy. A just-committed deny therefore does not revoke a queued
+  established flow's cached accept.
+  - The IPsec passthrough reinject and pending reverse PMech deferral arms are
+    pre-cache exceptions, as described above. A PMech replay is later checked
+    under current validation and may be dropped as a mismatch.
+  - The retained-view window for the ordinary path is the ring's drain time,
+    bounded by 200 ms (`MATCHED_VIEW_GRACE_NS`). The same scoped statement is
+    in `pkg/configstore/README.md`.
+- **Witnesses** (per binding, in the status reply):
+  - `generation_held_hits`: a held packet consumed by a flow-cache hit under
+    its own view.
+  - `generation_held_misses`: a held packet dropped at the post-cache
+    no-slow-path guard (including no-flow/cache-ineligible packets, misses,
+    and hit-stage fall-throughs); pre-cache IPsec reinject and PMech deferral
+    are outside these witnesses.
+  - `generation_mismatch_ahead` / `generation_mismatch_behind`: metadata
+    generation-mismatch drops classified against the pass's validation pair,
+    split by direction. A valid held-view miss is not a metadata mismatch
+    and does not increment either counter.
+
+  So the saving is measurable and so is what remains: AHEAD stays, by design.
+- **Cost** (seat AE: stated, not "nothing").
+  - Per packet of ordinary (Valid) traffic, the descriptor pass carries four
+    well-predicted branches: `held_next < held_len`, the `!pass.held_pass`
+    guard before the PMech pop, the `metadata_packets` guard, and the
+    `pass.held_pass` test on the flow-cache `Consumed` arm. It also carries
+    one branch-free flag store, `seen_current_stamp`. The iperf3 A/B against
+    master is the measurement (`docs/log/18560.md`).
+  - The park check itself sits in the mismatch branch.
+  - Per RX batch, the poll adds one `view_held.is_empty()` test and a
+    two-slot `PrevViews::is_empty()` test.
+  - Per worker tick, while views are retained, it adds one two-slot expiry
+    check and the early-release scan over the worker's bindings. At an
+    adoption it adds one flag reset per binding.
+  - Parking never allocates: `view_held` is pre-sized to `2 * RX_BATCH_SIZE`,
+    and a held pass appends re-parked packets before it drains its consumed
+    prefix in place.
+  - A held batch does not end the poll's batch loop (`BatchShape`).
+- **What runs under the current view.** Only the descriptor pass (flow-cache
+  lookup and replay, filters, zones) uses the left view's tables. The TX
+  enqueue, its CoS queue selection and fences, and the zone/flood counter
+  flush run under the current `forwarding`. A held packet's egress was decided
+  by its flow-cache entry, and a CoS runtime change clears the retained views.
+  A publish that renumbers zones can attribute one window of held packets'
+  zone counters to the new slot map (counters only).
+- **Ordering.** Inside the one RX batch per binding that straddles the stamp
+  switch, parked (older) packets are transmitted after the batch's
+  current-stamped ones.
+
 ## First-hit source-NAT revalidation on a non-owner (#16215, #18531, #18691)
 
 `poll_descriptor/policy_revalidation.rs::source_nat_revocation_on_session_hit_with_ingress`

@@ -85,6 +85,11 @@ struct FragKey {
     vlan: u16,
     vlan_present: u8,
     upper_protocol: u8,
+    // The reassembly pool is per worker and survives forwarding-view
+    // adoption. Never splice fragments whose metadata belongs to different
+    // config/FIB views into one tunnel datagram.
+    config_generation: u64,
+    fib_generation: u32,
 }
 
 struct FragEntry {
@@ -175,6 +180,8 @@ fn parse_fragment_with_protocol(
                     vlan: meta.ingress_vlan_id,
                     vlan_present: meta.ingress_vlan_present,
                     upper_protocol,
+                    config_generation: meta.config_generation,
+                    fib_generation: meta.fib_generation,
                 },
                 offset,
                 more,
@@ -224,6 +231,8 @@ fn parse_fragment_with_protocol(
                                 vlan: meta.ingress_vlan_id,
                                 vlan_present: meta.ingress_vlan_present,
                                 upper_protocol,
+                                config_generation: meta.config_generation,
+                                fib_generation: meta.fib_generation,
                             },
                             offset: frag_offset,
                             more,
