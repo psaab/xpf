@@ -1182,7 +1182,7 @@ func (c *CLI) handleShowSystem(args []string) error {
 		}
 		var peerLossTakeoverAlarm string
 		if c.cluster != nil {
-			peerLossTakeoverAlarm = c.cluster.PeerLossTakeoverAlarm()
+			peerLossTakeoverAlarm = c.cluster.UnconfirmedTakeoverAlarm()
 		}
 		n := len(warnings) + len(clockAlarms)
 		if divergence != "" {

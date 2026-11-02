@@ -10,7 +10,7 @@ import (
 
 func TestShowSystemAlarmsIncludesPeerLossTakeover16024(t *testing.T) {
 	m := cluster.NewManager(0, 1)
-	m.SetPeerUnconfirmedTakeoverForTesting("peer fencing is disabled")
+	m.SetUnconfirmedTakeoverForTesting("peer fencing is disabled")
 	s := &Server{
 		store:   newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf")),
 		cluster: m,

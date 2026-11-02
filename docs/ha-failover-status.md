@@ -1547,17 +1547,17 @@ attempts were recorded under, because the event history outlives a config
 change. Each attempt line is one `handlePeerTimeout` fence decision and its
 outcome.
 
-The absent `peer-fencing` leaf is the default and sends **no fence**. After a
-peer-loss takeover without a peer confirmation, both `show chassis cluster
-status` and `show chassis cluster information` mark it `Peer-loss takeover:
+The absent `peer-fencing` leaf is the default and sends **no fence**. After any
+takeover without a peer-fence confirmation, both `show chassis cluster status`
+and `show chassis cluster information` mark it `Peer-loss takeover:
 DEGRADED`, with the reason and time; the information view also reports local
-node health as degraded. If this node had previously observed the lost peer,
-the status views additionally show `ALARM: dual-primary risk`, local and gRPC
-`show system alarms` report it as CRITICAL, and the log records a warning.
-A cold-start single-node election remains degraded but is not called a
-dual-primary risk because no peer was previously observed. This is an
-operator warning, not a gate: the node still takes over. A later peer
-heartbeat clears the alarm and marker.
+node health as degraded. Every unconfirmed takeover, including a never-seen
+single-node promotion, raises `ALARM: dual-primary risk` in the status views,
+CRITICAL in local and gRPC `show system alarms`, and a warning in the log.
+Not hearing from a peer does not prove it absent: both nodes can miss their
+initial heartbeats during simultaneous startup. This is an operator warning,
+not a gate: the node still takes over. A later peer heartbeat clears the alarm
+and marker.
 
 ### `disable-rg` — best-effort, unacknowledged
 
@@ -1653,12 +1653,12 @@ released the VIPs, or will remain dataplane-inactive.
 The configured action does not reveal the result. `EventFence` records the
 attempt outcome, while `Peer-loss takeover: DEGRADED` in both status views
 records that the latest peer-loss takeover proceeded without confirmation.
-For a previously observed peer, this includes the explicit dual-primary-risk
-alarm on the cluster status and system-alarm surfaces. The marker gives the
-reason (for example, fencing disabled, a best-effort unacknowledged send,
-timeout, disconnect, or incomplete peer fence), and the information view
-marks local node health degraded. The marker clears on a returning peer
-heartbeat.
+Every unconfirmed takeover, including a never-seen single-node promotion,
+raises the explicit dual-primary-risk alarm on the cluster status and
+system-alarm surfaces. The marker gives the reason (for example, fencing
+disabled, a best-effort unacknowledged send, timeout, disconnect, incomplete
+peer fence, or no peer ever seen), and the information view marks local node
+health degraded. The marker clears on a returning peer heartbeat.
 
 ### What a CONFIRMED fence does and does not give you (#9120)
 

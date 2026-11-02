@@ -748,13 +748,14 @@ type Manager struct {
 	// peerFencing holds the configured fencing action (e.g. "disable-rg").
 	peerFencing string
 
-	// fenceUnconfirmedReason records WHY the last peer-loss takeover proceeded
-	// WITHOUT peer confirmation (#10701). Empty means no unconfirmed takeover
-	// is outstanding: either the configured confirmed fence succeeded, or the
-	// peer has since been heard from again and cleared the mark. The default
-	// (disabled) and `disable-rg` policies mark every takeover; the confirmed
-	// policy marks only its fail-open paths. FormatStatus/FormatInformation
-	// expose the degraded result. Guarded by mu.
+	// fenceUnconfirmedReason records why peer-fence confirmation was absent
+	// on the latest peer-loss decision (#10701/#14158). Empty means no
+	// unconfirmed result is outstanding: a confirmed fence succeeded or a
+	// peer heartbeat cleared the mark. Default/disable mark every takeover;
+	// confirmed policy marks fail-open paths and aborted waits.
+	// Never-seen single-node promotion is unconfirmed too: silence is not
+	// proof that the other node is absent. Status views expose degraded state
+	// and raise dual-primary risk while the peer is not alive. Guarded by mu.
 	fenceUnconfirmedReason string
 	// fenceUnconfirmedAt is when the outstanding unconfirmed takeover ran.
 	// Meaningless while fenceUnconfirmedReason is empty. Guarded by mu.

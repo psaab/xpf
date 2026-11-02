@@ -134,7 +134,7 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 	}
 	var peerLossTakeoverAlarm string
 	if s.cluster != nil {
-		peerLossTakeoverAlarm = s.cluster.PeerLossTakeoverAlarm()
+		peerLossTakeoverAlarm = s.cluster.UnconfirmedTakeoverAlarm()
 	}
 	n := len(warnings) + len(clockAlarms)
 	if divergence != "" {

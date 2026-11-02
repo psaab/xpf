@@ -23,7 +23,6 @@ func (m *Manager) FormatStatus() string {
 	configSyncFailing := m.configSyncFailing // #6387: node-global CF annotation
 	takeoverHold := m.takeoverHoldTime       // #103: hold is part of eligibility
 	fenceUnconfirmedReason := m.fenceUnconfirmedReason
-	peerEverSeen := m.peerEverSeen
 	fenceUnconfirmedAt := m.fenceUnconfirmedAt
 	// #6495: read the REASON, not just the flag. The daemon sets this one flag
 	// for two materially different conditions (an armed candidate, and the
@@ -52,7 +51,7 @@ func (m *Manager) FormatStatus() string {
 	fmt.Fprintf(&b, "Cluster ID: %d\n", m.clusterID)
 	fmt.Fprintf(&b, "Node name: node%d\n", m.nodeID)
 	if fenceUnconfirmedReason != "" {
-		if peerEverSeen && !peerAlive {
+		if !peerAlive {
 			fmt.Fprintf(&b, "ALARM: %s\n", formatFenceUnconfirmedAlarm(fenceUnconfirmedReason, fenceUnconfirmedAt))
 		} else {
 			fmt.Fprintln(&b, formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
@@ -345,7 +344,6 @@ func (m *Manager) FormatInformation() string {
 	takeoverHold := m.takeoverHoldTime         // #103
 	syncBulkPrimed := m.syncBulkPrimed         // #10261
 	fenceUnconfirmedReason := m.fenceUnconfirmedReason
-	peerEverSeen := m.peerEverSeen
 	fenceUnconfirmedAt := m.fenceUnconfirmedAt
 	// #6495: the hold REASON, not just the flag (see FormatStatus).
 	kernelHold := ""
@@ -437,7 +435,7 @@ func (m *Manager) FormatInformation() string {
 	fmt.Fprintf(&b, "  Local node: %s\n", localHealth)
 	fmt.Fprintf(&b, "  Remote node: %s\n", remoteHealth)
 	if fenceUnconfirmedReason != "" {
-		if peerEverSeen && !peerAlive {
+		if !peerAlive {
 			fmt.Fprintf(&b, "  ALARM: %s\n", formatFenceUnconfirmedAlarm(fenceUnconfirmedReason, fenceUnconfirmedAt))
 		} else {
 			fmt.Fprintf(&b, "  %s\n", formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
