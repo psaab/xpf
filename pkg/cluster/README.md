@@ -5324,6 +5324,9 @@ it.
   `recordLastSentConfigGen` just before the socket write and held in
   `peerIncarnationState`, so a new peer incarnation is never compared against
   a generation sent to its predecessor. One exception is a standby OS reboot.
+  A reservation withdrawn before its guarded write does not raise that mark.
+  The #18526 regression cell proves that an epoch at the newest actually sent
+  generation remains admissible, while an older one is refused.
   The authority's peer-connect push lands on the rebooted peer's new
   connection BEFORE that connection's BulkStart reports the new boot id (the
   #18521 ordering), and the boot-id switch then retires the incarnation.
