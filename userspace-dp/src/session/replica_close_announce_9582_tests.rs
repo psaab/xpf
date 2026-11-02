@@ -120,9 +120,9 @@ fn a_close_seen_only_by_a_local_replica_is_announced_with_the_installer_id_9582(
     );
     assert_eq!(
         updates,
-        vec![(3, INSTALLER_ID)],
-        "#9582: a server RST seen only by a replica of a LOCAL session must be announced once, \
-         as class 3 carrying the installer's id"
+        vec![(TcpCloseClass::Closing.to_wire(), INSTALLER_ID)],
+        "#9582/#18537: a server RST seen only by a replica must be announced once as \
+         CLOSING with the installer's id"
     );
 }
 
