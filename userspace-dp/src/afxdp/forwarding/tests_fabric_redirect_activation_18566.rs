@@ -135,11 +135,9 @@ fn cached_redirect_kept_while_destination_rg_is_peer_owned_18566() {
     assert_eq!(judge(&state, &expired, now_secs, 1, false, LAN_CLIENT, redirect), None);
 }
 
-/// Scope guards. A routed destination (no connected owner) and a standalone
-/// node never fire, and a fabric arrival stays with the arms that already own
-/// it. RED if the `dest_rg > 0` or `fabric_ingress` guard is removed (the
-/// standalone assertion documents the shape; with an empty HA map the
-/// destination RG can never be active, so it is not a separate guard cell).
+/// Scope guards for the connected-owner predicate. Routed destinations still
+/// have no connected owner, but the validator now judges them by the fresh
+/// candidate's egress RG (#18588).
 #[test]
 fn arm_scope_guards_18566() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
@@ -154,10 +152,10 @@ fn arm_scope_guards_18566() {
         0,
         "premise: a routed destination has no connected owner"
     );
-    assert_ne!(
-        judge(&state, &ha_both, now_secs, 1, false, routed, redirect),
-        Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal),
-        "unknown destination owner"
+    assert_eq!(
+        fabric_redirect_destination_now_local(&ha_both, now_secs, false, redirect, || 0),
+        false,
+        "the connected-owner predicate does not classify a routed destination"
     );
     assert_eq!(
         fabric_redirect_destination_now_local(&BTreeMap::new(), now_secs, false, redirect, || 2),
@@ -310,7 +308,7 @@ fn arm_agrees_with_slow_path_rehome_18566() {
 /// Seat W (#16222 option B, connected destination). On the node that holds
 /// only the WAN RG, a direct-ingress `lan -> wan` flow owned by the LAN RG
 /// (the peer's) keeps its redirect to the owner. The #16222 cells judge a
-/// routed destination (8.8.8.8), where this arm cannot fire; the live target
+/// routed destination (8.8.8.8), judged by the retained #16222 block; the live target
 /// 172.16.80.200 is CONNECTED on the now-local RG1. Without the stamp-owner
 /// guard the arm fires there, the slow path re-homes onto reth0.80, and
 /// `forward_candidate_owner_departed` evicts that candidate on the next hit
@@ -386,5 +384,206 @@ fn option_b_redirect_to_connected_destination_is_kept_18566() {
         verdict,
         Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal),
         "an option-B redirect owned by the peer's RG must be served, not re-homed into a churn loop"
+    );
+}
+
+/// #18588: the routed twin of `arm_agrees_with_slow_path_rehome_18566`. The
+/// destination has NO connected owner (8.8.8.8, reached via the default
+/// gateway on the WAN RG), so the #18566 arm keyed on the connected owner
+/// can never fire. The slow path re-homes the stored redirect once the fresh
+/// candidate is a local, non-fabric ForwardCandidate through the
+/// just-activated egress RG (#16524 unknown-owner arm): before activation
+/// the egress RG was peer-owned, so the HA-enforced fresh answer was
+/// HAInactive and the redirect was seeded; after RG1 activates here the same
+/// lookup answers a ForwardCandidate via reth0.80 and the slow path replaces
+/// the redirect with it. The cache arm must agree and evict, or the flow
+/// keeps being redirected to the peer that no longer owns the egress RG
+/// until an unrelated generation bump evicts the entry (the 20 s per-RG
+/// stall mechanism). RED on unmodified code: the arm returns None.
+#[test]
+fn routed_arm_agrees_with_slow_path_rehome_18588() {
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let state = build_forwarding_state(&nat_snapshot_with_fabric());
+    let redirect = resolve_fabric_redirect(&state).expect("premise: fabric redirect resolves");
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let routed = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(&state, routed, None),
+        0,
+        "premise: a routed destination has no connected owner"
+    );
+    // Forward lan -> wan key for the routed destination (the cache validator
+    // judges with the flow's own key, as the hit path does).
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: LAN_CLIENT,
+        dst_ip: routed,
+        src_port: 52490,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    // RG1 (WAN) and RG2 (LAN) both local: the egress RG was just activated.
+    let ha_both = BTreeMap::from([(1, active(now_secs)), (2, active(now_secs))]);
+    // Premise: the fresh HA-enforced answer is a local ForwardCandidate via
+    // the WAN RG (the default gateway), not the fabric.
+    let looked_up =
+        lookup_forwarding_resolution_with_dynamic_for_flow(&state, &neighbors, routed, &key)
+            .resolution;
+    let candidate = enforce_ha_resolution_snapshot(&state, &ha_both, now_secs, looked_up);
+    assert_eq!(
+        candidate.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "premise: the fresh answer forwards locally ({candidate:?})"
+    );
+    assert_eq!(
+        owner_rg_for_resolution(&state, candidate),
+        1,
+        "premise: the fresh candidate egresses via the just-activated RG1"
+    );
+    assert!(
+        !ingress_is_fabric(&state, candidate.egress_ifindex),
+        "premise: the fresh candidate does not egress the fabric"
+    );
+    // Slow path: the stored-session re-resolution re-homes the redirect.
+    let stored = crate::session::SessionDecision {
+        resolution: redirect,
+        nat: crate::nat::NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let metadata = crate::session::SessionMetadata {
+        ingress_zone: state.egress_zone_id(24),
+        egress_zone: state.egress_zone_id(12),
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 24,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 2,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None,
+    };
+    let slow = crate::afxdp::session_glue::reresolve_stored_session(
+        &state,
+        &ha_both,
+        &neighbors,
+        now_secs,
+        &stored,
+        &metadata,
+        &key,
+        routed,
+        looked_up,
+        crate::afxdp::session_glue::FabricArrival::Packet {
+            fabric_ingress: false,
+            fabric_link_ingress: false,
+            ingress_ifindex: 24,
+            ha_startup_grace_until_secs: 0,
+            fabric_adopted: false,
+            adopted_recovery: None,
+        },
+    );
+    assert_eq!(
+        slow.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "premise: the slow path re-homes the routed destination ({slow:?})"
+    );
+    // Cache arm: must evict the stale redirect, agreeing with the slow path.
+    // Stamp owner RG2 is the session's LAN owner, locally active, so the
+    // re-homed entry survives its next hit (no #16222 churn).
+    let validate = |ha_state: &BTreeMap<i32, HAGroupRuntime>, fabric_ingress| {
+        cached_flow_decision_invalid_reason_for_cached_flow(
+            &state,
+            ha_state,
+            &neighbors,
+            now_secs,
+            2,
+            fabric_ingress,
+            false,
+            Some(&key),
+            routed,
+            None,
+            redirect,
+            || {
+                crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+                    &state, routed, None,
+                )
+            },
+        )
+    };
+    assert_eq!(
+        validate(&ha_both, false),
+        Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal),
+        "a routed redirect whose fresh local egress RG is now active must re-resolve, agreeing with the slow path"
+    );
+    assert_ne!(
+        validate(&ha_both, true),
+        Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal),
+        "fabric ingress stays with the existing owner-active arm"
+    );
+    let rg1_inactive = BTreeMap::from([(1, inactive(now_secs)), (2, active(now_secs))]);
+    assert_eq!(
+        validate(&rg1_inactive, false),
+        None,
+        "a routed redirect remains while its fresh egress RG is not active here"
+    );
+}
+
+/// #18588: a retained routed redirect pays exactly ONE fresh per-flow
+/// lookup per validator hit (the re-home arm's candidate is shared with
+/// the #16222 block; re-duplicating the resolution reds this cell).
+#[test]
+fn routed_retained_redirect_resolves_once_per_hit_18588() {
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let state = build_forwarding_state(&nat_snapshot_with_fabric());
+    let redirect = resolve_fabric_redirect(&state).expect("premise: fabric redirect resolves");
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let routed = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: LAN_CLIENT,
+        dst_ip: routed,
+        src_port: 52490,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let rg1_inactive = BTreeMap::from([(1, inactive(now_secs)), (2, active(now_secs))]);
+    super::fib::FORWARDING_LOOKUP_COUNT_FOR_TEST
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    let verdict = cached_flow_decision_invalid_reason_for_cached_flow(
+        &state,
+        &rg1_inactive,
+        &neighbors,
+        now_secs,
+        2,
+        false,
+        false,
+        Some(&key),
+        routed,
+        None,
+        redirect,
+        || {
+            crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+                &state, routed, None,
+            )
+        },
+    );
+    assert_eq!(verdict, None, "premise: the routed redirect is retained");
+    assert_eq!(
+        super::fib::FORWARDING_LOOKUP_COUNT_FOR_TEST
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "a retained routed redirect must resolve exactly once per hit"
     );
 }

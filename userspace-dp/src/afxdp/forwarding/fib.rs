@@ -230,11 +230,20 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution(
     lookup_forwarding_resolution_inner(state, None, dst, None)
 }
 
+/// #18588: test-only count of fresh-resolution lookups, so a cell can pin
+/// that the cached-redirect validator resolves once per hit (the arm and
+/// the #16222 block share one computed candidate).
+#[cfg(test)]
+pub(in crate::afxdp) static FORWARDING_LOOKUP_COUNT_FOR_TEST: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic(
     state: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     dst: IpAddr,
 ) -> ForwardingLookupResult {
+    #[cfg(test)]
+    FORWARDING_LOOKUP_COUNT_FOR_TEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     lookup_forwarding_resolution_inner(state, Some(dynamic_neighbors), dst, None)
 }
 
@@ -248,6 +257,8 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic_for_flow(
     dst: IpAddr,
     flow_key: &crate::session::SessionKey,
 ) -> ForwardingLookupResult {
+    #[cfg(test)]
+    FORWARDING_LOOKUP_COUNT_FOR_TEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     lookup_forwarding_resolution_inner_ecmp(
         state,
         Some(dynamic_neighbors),
@@ -268,6 +279,8 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic_for_flow_in_ta
     flow_key: &crate::session::SessionKey,
     table: &str,
 ) -> ForwardingLookupResult {
+    #[cfg(test)]
+    FORWARDING_LOOKUP_COUNT_FOR_TEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     lookup_forwarding_resolution_inner_ecmp(
         state,
         Some(dynamic_neighbors),
@@ -568,6 +581,8 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_in_table_with_dynamic(
     dst: IpAddr,
     table: Option<&str>,
 ) -> ForwardingLookupResult {
+    #[cfg(test)]
+    FORWARDING_LOOKUP_COUNT_FOR_TEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     lookup_forwarding_resolution_inner(state, Some(dynamic_neighbors), dst, table)
 }
 
