@@ -713,6 +713,7 @@ pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
     // #16019 fold 3: capture the forward key before the match is consumed —
     // the reverse row's rev stamp reads the FORWARD entry's counters.
     let _forward_key_for_rev = forward_match.key.clone();
+    let forward_session_id = forward_match.aux.session_id;
     let reverse = build_reverse_session_from_forward_match(
         forwarding,
         ha_state,
@@ -733,15 +734,18 @@ pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
     // flow-cache eligibility gate both key off it. Caching a decision
     // with no backing session would suppress this repair until cache
     // invalidation (Codex #1861 r1 C1).
-    let installed = sessions.install_with_protocol_with_origin(
-        reverse_key.clone(),
-        reverse.decision,
-        reverse.metadata.clone(),
-        SessionOrigin::ReverseFlow,
-        now_ns,
-        protocol,
-        tcp_flags,
-    );
+    let installed = sessions
+        .install_with_protocol_with_origin_and_source_nat_with_session_id(
+            reverse_key.clone(),
+            reverse.decision,
+            reverse.metadata.clone(),
+            SessionOrigin::ReverseFlow,
+            now_ns,
+            protocol,
+            tcp_flags,
+            None,
+            forward_session_id,
+        );
     if installed {
         sessions.set_source_nat_static(reverse_key, reverse.aux.source_nat_static);
         if reverse_leak_incarnation != 0 {
@@ -762,10 +766,9 @@ pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
         tcp_flags,
         // Local reverse-flow learning: no peer install generation (#2170).
         generation: 0,
-        // #14667: publish the id this worker just minted for the
-        // companion, not 0. With 0 every sibling minted its own
-        // worker-namespaced id and the identity-captured
-        // DeletePolicyBatch companion check missed on W-1 workers.
+        // #14667/#18718: preserve the matched forward's complete session
+        // identity. A worker-local allocation would lose the owner's
+        // namespace and fail the shared reverse-incarnation guard.
         session_id: sessions.session_id_for(reverse_key),
         tcp_close_class: 0, tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key), rev_packets: sessions.rev_packets_for(&crate::session::reverse_session_key(reverse_key, reverse.decision.nat)), fwd_packets: sessions.fwd_packets_for(&crate::session::reverse_session_key(reverse_key, reverse.decision.nat)), pptp_call_ids: 0,
         persistent_lease_hold: None,

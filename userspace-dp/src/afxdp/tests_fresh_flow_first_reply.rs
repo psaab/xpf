@@ -258,6 +258,74 @@ fn first_reply_on_another_worker_is_not_revoked_18710() {
     }
 }
 
+/// The live reply resolver can synthesize a missing reverse row from a shared
+/// forward NAT match. That row must retain the owner's complete session ID,
+/// not allocate in the replying worker's namespace.
+#[test]
+fn live_reply_reverse_synthesis_preserves_full_forward_id_18718() {
+    let mut forwarding = fw1_owner_forwarding();
+    forwarding
+        .neighbors
+        .entry((LAN_IFINDEX, IpAddr::V4(POOL_CLIENT)))
+        .or_insert(NeighborEntry {
+            mac: [0x10, 0x66, 0x6a, 0xfd, 0x4b, 0x5c],
+        });
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha = owner_ha(now_secs);
+    let shared = Shared::new();
+    let mut a = SessionTable::new();
+    a.set_session_id_namespace(0, 0);
+    a.set_forwarding_revalidation_gen(7, 9);
+    let (frame, meta) = lan_syn(POOL_CLIENT);
+    let created = poll(&mut a, &shared, &forwarding, &ha, LAN, &frame, meta);
+    assert_eq!(created.session_miss, 1, "A creates the pool-SNAT forward");
+
+    let mut forward_key = forward_key();
+    forward_key.src_ip = IpAddr::V4(POOL_CLIENT);
+    forward_key.dst_port = 5210;
+    let (decision, _, _) = a
+        .entry_with_origin(&forward_key)
+        .expect("fixture: A owns the forward row");
+    let forward_id = a.session_id_for(&forward_key);
+    assert_ne!(forward_id, 0, "fixture: owner forward has a stable ID");
+    let IpAddr::V4(translated) = decision.nat.rewrite_src.expect("pool SNAT address") else {
+        panic!("fixture: IPv4 pool SNAT")
+    };
+    let translated_port = decision.nat.rewrite_src_port.unwrap_or(SPORT);
+    let reverse_key = crate::session::reverse_session_key(&forward_key, decision.nat);
+    let removed = shared
+        .sessions
+        .lock()
+        .expect("shared sessions")
+        .remove(&reverse_key)
+        .expect("fixture: remove only the published reverse row");
+    assert_eq!(
+        removed.session_id, forward_id,
+        "owner reverse already carries the full forward identity"
+    );
+
+    let mut b = SessionTable::new();
+    b.set_session_id_namespace(0, 1);
+    b.set_forwarding_revalidation_gen(7, 9);
+    let (frame, meta) = wan_syn_ack(translated, translated_port);
+    let reply = poll(&mut b, &shared, &forwarding, &ha, WAN, &frame, meta);
+    assert_eq!(reply.tx, [0, 0, 1], "B serves the real reply");
+    assert_eq!((reply.snat_revoked, reply.closes), (0, 0));
+    assert_eq!(
+        b.session_id_for(&reverse_key),
+        forward_id,
+        "B's live-synthesized reverse adopts the owner's full ID"
+    );
+    let shared_reverse_id = shared
+        .sessions
+        .lock()
+        .expect("shared sessions")
+        .get(&reverse_key)
+        .map(|entry| entry.session_id)
+        .expect("B republishes the synthesized reverse");
+    assert_eq!(shared_reverse_id, forward_id);
+}
+
 /// Control: a reply whose forward companion is genuinely absent (no local
 /// row and no shared row) still fails closed, as before.
 #[test]
