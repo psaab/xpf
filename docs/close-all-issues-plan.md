@@ -9,10 +9,17 @@ issues plus #18897, 0 open PRs (search `total_count`, authoritative).
 The 326 are the campaign backlog; #18897 is the publication vehicle.
 Goal: every campaign issue reaches **MERGED** or **PLAN-KILLED**
 (three-seat reviewed), and no landed change regresses. This document
-is the single plan lanes execute against; the campaign skill
+is the single plan lanes execute against. The campaign skill
 (`.claude/skills/campaign/SKILL.md`) remains the orchestration
-authority where the two overlap — this plan adds the build/gate
-pipeline and incorporates the goal updates below.
+authority for matters this plan does not specify. **Where the two
+conflict on the three goal updates below — fixed named reviewer
+seats, gates on all three machines for every PR (including
+docs/test-only PRs), and `GOTMPDIR=/wtgt` — this plan controls.**
+Those conflicts are explicit supersessions, not optional readings:
+lanes must not follow the skill's one-cluster assignment, five-model
+pool rotation, docs/test-only gate exemption, or scratch rule's
+`/var/worktrees/.cache/go-tmp` value where they contradict the
+corresponding plan section. All other skill rules remain in force.
 
 Goal updates incorporated:
 
