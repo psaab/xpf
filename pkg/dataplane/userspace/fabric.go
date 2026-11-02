@@ -124,7 +124,7 @@ func buildFabricSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) []Fa
 		overlayIfindex, _, _, _ := buildLinkSnapshot(overlayLinux)
 		rxQueues := 0
 		if parentLinux != "" {
-			rxQueues = userspaceRXQueueCount(parentLinux)
+			rxQueues = userspaceRXQueueCountFn(parentLinux)
 		}
 		peerMAC := buildFabricPeerMAC(overlayIfindex, parentIfindex, in.peer, parseMACOrNil(parentMAC), fabricPeerMACConstraint(in.peer))
 		out = append(out, FabricSnapshot{

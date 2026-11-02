@@ -166,7 +166,7 @@ func (m *Manager) bootstrapNAPIQueuesLocked() {
 			// #8377: the count is DERIVED from the interface's RX queue
 			// count, not pinned. See napiProbeCount for the rule and for
 			// what these probes are and are not responsible for.
-			probes := napiProbeCount(userspaceRXQueueCount(linuxName))
+			probes := napiProbeCount(userspaceRXQueueCountFn(linuxName))
 			for i := 0; i < probes; i++ {
 				sendUDPProbeForNAPI(linuxName, targetIP, uint16(napiProbeBasePort+i))
 				if i%6 == 5 {

@@ -565,7 +565,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			Ifindex:         ifindex,
 			AdminDisabled:   iface.Disable || (unit0Disabled && snapshotLinuxName(cfg, name, iface, iface.Units[0]) == linuxName),
 			ParentIfindex:   0,
-			RXQueues:        userspaceRXQueueCount(linuxName),
+			RXQueues:        userspaceRXQueueCountFn(linuxName),
 			VLANID:          0,
 			LocalFabric:     iface.LocalFabricMember,
 			RedundancyGroup: rg,
@@ -600,11 +600,11 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			unitName := fmt.Sprintf("%s.%d", name, unitNum)
 			parentLinux := snapshotLinuxName(cfg, name, iface, nil)
 			parentIfindex, parentMTU, parentHardwareAddr, _ := buildLinkSnapshot(parentLinux)
-			parentRXQueues := userspaceRXQueueCount(parentLinux)
+			parentRXQueues := userspaceRXQueueCountFn(parentLinux)
 			linuxUnit := snapshotLinuxName(cfg, name, iface, unit)
 			ifindex, mtu, hardwareAddr, addresses := buildLinkSnapshot(linuxUnit)
 			addresses = leftovers.filterLive(ifindex, linuxUnit, addresses)
-			rxQueues := userspaceRXQueueCount(linuxUnit)
+			rxQueues := userspaceRXQueueCountFn(linuxUnit)
 			logicalOnly := false
 			// Bondless RETH VLAN units can transmit through the parent
 			// AF_XDP netdev without a Linux VLAN child. Keep a unique
@@ -1839,6 +1839,10 @@ func buildInterfaceAddressSnapshots(link netlink.Link) []InterfaceAddressSnapsho
 	})
 	return out
 }
+
+// userspaceRXQueueCountFn is the sysfs queue-count seam; snapshot tests
+// fixture it so no host /sys state leaks into a hermetic build.
+var userspaceRXQueueCountFn = userspaceRXQueueCount
 
 func userspaceRXQueueCount(linuxName string) int {
 	if linuxName == "" {

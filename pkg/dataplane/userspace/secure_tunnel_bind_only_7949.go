@@ -260,7 +260,7 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			ParentLinuxName: parentLinux,
 			Ifindex:         ifindex,
 			ParentIfindex:   parentIfindex,
-			RXQueues:        userspaceRXQueueCount(dev),
+			RXQueues:        userspaceRXQueueCountFn(dev),
 			// Tunnel is the STANZA-derived flag (`iface.Tunnel != nil ||
 			// unit.Tunnel != nil`) and this shape has no stanza, so false is
 			// the honest value — matching what Shape A stamps on the same
