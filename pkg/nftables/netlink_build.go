@@ -83,6 +83,10 @@ type nlPlan struct {
 	// ruleChains records the target chain for each corresponding rules entry so
 	// an uncertain Flush can verify the complete installed table by readback.
 	ruleChains []string
+	// zeroHopRules counts the #16841 zero-hop rules among rules. They head every
+	// input chain and enforce no operator policy, so operatorRules excludes them
+	// (#18746).
+	zeroHopRules int
 	// counters records every declared counter-object name (in order) for the
 	// counter-declaration parity check.
 	counters []string
@@ -342,19 +346,34 @@ func (a *ruleAsm) sdifnameExcept(names []string) *ruleAsm {
 // FIB results are host-order RTN values; hton converts them to the typed set
 // key order.
 func (a *ruleAsm) fibLocalOrAnycast() *ruleAsm {
-	elements := []nftables.SetElement{
-		{Key: binaryutil.BigEndian.PutUint32(uint32(unix.RTN_LOCAL))},
-		{Key: binaryutil.BigEndian.PutUint32(uint32(unix.RTN_ANYCAST))},
-	}
-	set := a.p.addAnonSet(nftables.TypeFIBAddr, false, elements)
+	set := a.p.addAnonSet(nftables.TypeFIBAddr, false, fibLocalOrAnycastElements())
 	if set == nil {
 		return a
 	}
 	return a.add(
-		&expr.Fib{Register: 1, ResultADDRTYPE: true, FlagDADDR: true},
-		&expr.Byteorder{SourceRegister: 1, DestRegister: 1, Op: expr.ByteorderHton, Len: 4, Size: 4},
+		fibDaddrAddrType(),
+		fibAddrTypeHton(),
 		&expr.Lookup{SourceRegister: 1, SetName: set.Name, SetID: set.ID},
 	)
+}
+
+// fibLocalOrAnycastElements, fibDaddrAddrType and fibAddrTypeHton are the
+// pieces of `fib daddr type { local, anycast }`. They are shared with the
+// #18746 zero-hop rule matcher (isZeroHopLimitLocalDropRule), so the builder
+// and the matcher cannot drift apart.
+func fibLocalOrAnycastElements() []nftables.SetElement {
+	return []nftables.SetElement{
+		{Key: binaryutil.BigEndian.PutUint32(uint32(unix.RTN_LOCAL))},
+		{Key: binaryutil.BigEndian.PutUint32(uint32(unix.RTN_ANYCAST))},
+	}
+}
+
+func fibDaddrAddrType() *expr.Fib {
+	return &expr.Fib{Register: 1, ResultADDRTYPE: true, FlagDADDR: true}
+}
+
+func fibAddrTypeHton() *expr.Byteorder {
+	return &expr.Byteorder{SourceRegister: 1, DestRegister: 1, Op: expr.ByteorderHton, Len: 4, Size: 4}
 }
 
 // hopLimitZero appends `ip6 hoplimit 0` (network-header offset 7), the
@@ -362,10 +381,16 @@ func (a *ruleAsm) fibLocalOrAnycast() *ruleAsm {
 // destination test; alone it would match transit too.
 func (a *ruleAsm) hopLimitZero() *ruleAsm {
 	a.needNfproto(famV6)
-	return a.add(
+	return a.add(hopLimitZeroExprs()...)
+}
+
+// hopLimitZeroExprs is `ip6 hoplimit 0` without its nfproto guard. It is shared
+// with the #18746 zero-hop rule matcher.
+func hopLimitZeroExprs() []expr.Any {
+	return []expr.Any{
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 7, Len: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0}},
-	)
+	}
 }
 
 // EmitZeroHopLimitLocalDrop queues the #16841 default rejection
@@ -376,7 +401,19 @@ func EmitZeroHopLimitLocalDrop(p *nlPlan, admit bool) {
 	if admit {
 		return
 	}
+	before := len(p.rules)
 	p.rule().hopLimitZero().fibLocalOrAnycast().emit(verdictDrop()...)
+	if len(p.rules) > before {
+		p.zeroHopRules++
+	}
+}
+
+// operatorRules is the number of planned rules that carry operator policy:
+// every rule except the #16841 zero-hop rules (#18746). InstallLo0 reports it,
+// so a match-nothing render reads 0 and the daemon's empty-shell guard can
+// fire.
+func (p *nlPlan) operatorRules() int {
+	return len(p.rules) - p.zeroHopRules
 }
 
 // iifnameExcept appends `iifname != "<n>"` / `iifname != { .. }` — the

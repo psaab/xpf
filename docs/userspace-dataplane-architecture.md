@@ -516,8 +516,44 @@ while tracing #8377 and left for their own issues rather than folded in:
   only (`netlink.FAMILY_V4`), and `continue`s when it finds none. An interface
   with no v4 gateway and no usable v4 neighbour — an IPv6-only segment — gets
   **zero** probes, which is a larger hole than any probe-count arithmetic.
-- The 2 s debounce in `bootstrapNAPIQueuesAsyncLocked` silently drops the
-  "startup-prewarm" invocation when it lands within 2 s of "startup".
+- The 2 s debounce in `bootstrapNAPIQueuesAsyncLocked` silently dropped the
+  "startup-prewarm" invocation when it landed within 2 s of "startup" — and,
+  the other way round, a fixed-delay "startup" bootstrap inside 2 s of a
+  prewarm that fired while some bindings were still unbound left exactly the
+  late-bound queues unprobed. Closed by #18707 (below).
+
+**When the probes fire (#18707).** Each helper generation's bootstrap fires
+from the status path the first time that generation reports every
+registered binding bound (`ensureXSKBoundNAPIBootstrapLocked`,
+`pkg/dataplane/userspace/process.go`), not on a timer fixed at 3 s after
+spawn. A probe is useful only once its queue is bound (the fill ring is primed
+before bind, so the RX event is what lets NAPI consume it), so "all bound" is
+the earliest moment every probe counts, which a fixed delay could only
+approximate: on a crash restart the 3 s timer expired well after the sockets
+were bound, and on a slow bind it could fire before them. The trigger is once
+per generation and is NOT debounced, so a ctrl-enable prewarm that fired a
+moment earlier (while a binding was still unbound) cannot swallow it; in a
+pass that fires it, the prewarm skips its own debounced bootstrap, so the two
+do not double up. The callback carries the #10436 generation fence. Rebind
+paths inside a generation (`link-cycle`, `busy-xsk-wedge`) keep their own
+explicit bootstraps.
+
+**The partial-bind floor.** "All bound" never happens for a generation in
+which one binding stays registered-but-unbound (an EBUSY fail-closed
+shared-owner group, a queue that never binds). Ctrl still enables, because it
+gates on registered+armed, and the one-shot prewarm usually fires before the
+healthy queues bind. Without a floor, those bound queues would never get a
+post-bind probe: a per-queue black hole that the box-wide RX liveness total
+cannot see among live queues. The old 3 s spawn timer was that floor.
+`ensurePartialBindNAPIBootstrapFloorLocked` keeps it: the first status pass
+that sees some but not all bindings bound opens a window, and the first pass
+`napiPartialBindFloor` (2 s) later fires the probes, once per generation. That
+is no later than the old timer, since the first bind lands within a second of
+spawn. An all-bound bootstrap retires the floor, and a binding that binds
+after the floor fired still gets the all-bound bootstrap. Probing each
+interface as its own bindings finish would spare healthy interfaces even that
+delay. It would need a mapping from the probe path's configured names (RETH,
+VLAN units) to binding ifindexes, which the probe path does not have.
 - With `defer_workers` (RETH/HA bringup) the helper skips the worker spawn, so
   there are no XSK sockets at all during the probe window.
 

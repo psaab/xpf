@@ -865,10 +865,28 @@ would blackhole every flow handed to it.
   `resetAfterHelperGoneLocked` — shared with `stopLocked` precisely so
   the crash path and the stop path cannot drift about which state a
   departed helper invalidates. `TakeoverReady()` goes false.
-- **Bounded restart.** Exponential backoff from
-  `helperRestartBackoffBase` to `helperRestartBackoffMax`, re-armed on
-  each failure so a helper that cannot start retries forever at a fixed
-  low rate instead of fork-storming. The restart calls the ORDINARY
+- **Bounded restart.** The first unexpected exit of a crash episode is
+  retried immediately (#18707); every further exit in the same episode
+  backs off exponentially from `helperRestartBackoffBase` to
+  `helperRestartBackoffMax` (0, 1s, 2s, ... 60s), re-armed on each
+  failure so a helper that cannot start retries forever at a fixed low
+  rate instead of fork-storming. The first retry used to wait the 1s base
+  as well, and that second was pure outage: the child is already reaped
+  and the shim already disarmed when the retry is scheduled, and the
+  bring-up readiness gates still run before forwarding is re-armed. The
+  immediate retry adds one attempt, not one earlier verdict: the
+  cumulative wait before the cap is still 63s (0+1+...+32 instead of
+  1+2+...+32). A Compile bring-up failure that re-arms a pending attempt-1
+  retry (`rearmHelperRestartLocked`) therefore re-arms it immediately too;
+  if that retry fails, it is charged as attempt 2 and waits the base.
+  The restart's status loop runs its first reconcile pass at once rather
+  than one `statusLoopInterval` later (`ensureStatusLoopFirstPassNowLocked`),
+  because that pass is what republishes the snapshot the replacement's
+  workers bind from. If the body discards that pass — most often the
+  #16653 stale-poll fence, when the daemon's own reaction to the restart
+  applies a status while the poll is off-lock — it is retried 100 ms later,
+  at most 10 times, instead of a whole tick later; once a pass runs to the
+  end the loop is back on its 1 s ticker. The restart calls the ORDINARY
   `ensureProcessLocked` against the CURRENT `m.cfg`, not the dead
   generation's argv, so a config replacement that landed while the
   helper was down is what starts, and the binding / XSK-liveness /
@@ -880,7 +898,8 @@ would blackhole every flow handed to it.
   read as "this helper is not coming back". It is **backoff at the cap** within
   one crash episode, not a lifetime restart count: a quiet interval longer than
   twice the maximum backoff resets the consecutive-attempt count. With the
-  shipped 1s base and 60s cap it trips at seven consecutive attempts and clears
+  shipped 1s base and 60s cap it trips at eight consecutive attempts (seven
+  before #18707's immediate first retry; the same 63s of cumulative backoff) and clears
   after more than 120s without another unexpected exit. `HelperSupervisorState`
   treats it as election debt only while the helper is down and the retry is
   still fenced to the current generation; an intentional stop does not resign.
@@ -1380,6 +1399,32 @@ publish. The ordering is load-bearing, not incidental:
    ifindex the accepted snapshot no longer adjudicates. It runs at the
    ACCEPTANCE POINTS ONLY, immediately after each `m.lastSnapshot = snap`.
 
+**Control-plane netdevs never enter the attach set (#18740).** The
+userspace dataplane never adjudicates `fxp*` (management) or `em*` (the
+cluster control link). Its ingress exclusion names them, and the shim's
+verdict for an ifindex outside the ingress set is `cpumap_or_pass`.
+
+Until #18740, `compileZones` still queued them like any zoned netdev:
+- Step 1 attached the shim to `fxp0` and `em0` FRESH on every apply,
+  because step 3 of the previous apply had detached and unpinned them.
+- Step 3 then detached it again 25-142 ms later.
+
+That is two XDP program changes per commit, per node, on the HA control
+link. One heartbeat frame that arrived at the instant of an `em0` attach was
+lost on a lab cluster.
+
+`compileZones` now leaves them, and VLAN children of them, out of
+`pendingXDP` and `pendingTC`. It records them as SKIPPED unarmed surfaces,
+so the arm-coverage proof still lists them and does not count them toward
+WouldGate. The name classes are single-sourced:
+`dataplane.ControlPlaneNetdevNameClass` backs both this exclusion and the
+userspace ingress classes "fxp name" and "em name", so a name the compile
+leaves unshimmed is always one the ingress set excludes.
+
+`fab*` is deliberately not in the list: `fab0` resolves to its local member's
+parent netdev, which carries the fabric redirect path. An unchanged commit
+now makes no XDP transition on any link.
+
 **Why the detach is last.** Until #5485 it ran before step 2, so any
 failure in between left the kernel on the new interface set while the
 control plane still reported the old one. That divergence is a policy
@@ -1458,7 +1503,8 @@ the separately documented unadjudicated-forward window.
 >
 > It mattered because **the attach set is strictly larger than the ingress
 > set**: `compiler_iface.go` puts every zoned netdev into
-> `st.xdpIfindexes`, tunnels included ("Tunnels need XDP for ingress"),
+> `st.xdpIfindexes` (since #18740, every one except `fxp*`/`em*`), tunnels
+> included ("Tunnels need XDP for ingress"),
 > and `syncInterfaceAttachments` reconciles the difference away only at
 > the two post-acceptance points. A tunnel netdev on a userspace-dataplane
 > box is an anchor TUN — ARPHRD_NONE, raw L3, **no Ethernet header** — so

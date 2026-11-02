@@ -290,7 +290,7 @@ func TestDeferredPolicySnapshotAuthorityRefusalBlocksStatusPublish12072(t *testi
 		<-loopDone
 	})
 	go func() {
-		m.statusLoop(ctx)
+		m.statusLoop(ctx, false)
 		close(loopDone)
 	}()
 	select {
