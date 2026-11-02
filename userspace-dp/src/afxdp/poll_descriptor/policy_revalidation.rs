@@ -1205,18 +1205,18 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         let reverse_key = sessions
             .revalidation_canonical_key(session_key)
             .unwrap_or_else(|| session_key.clone());
-        let (reverse_decision, local_reverse_session_id) =
+        let (reverse_decision, has_local_reverse_entry) =
             if let Some((reverse_decision, _, _)) = sessions.entry_with_origin(&reverse_key) {
-                (reverse_decision, Some(sessions.session_id_for(&reverse_key)))
+                (reverse_decision, true)
             } else {
-                (decision, None)
+                (decision, false)
             };
         let forward_query = crate::session::reverse_session_key(&reverse_key, reverse_decision.nat);
         let target = sessions.source_nat_revalidation_target(&forward_query);
         Some((
             reverse_key,
             reverse_decision,
-            local_reverse_session_id,
+            has_local_reverse_entry,
             forward_query,
             target,
         ))
@@ -1224,14 +1224,19 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         None
     };
     let shared_companion = reverse_context.as_ref().and_then(
-        |(reverse_key, _, local_reverse_session_id, forward_query, target)| {
+        |(reverse_key, _, has_local_reverse_entry, forward_query, target)| {
             if !matches!(target, SourceNatRevalidationTarget::NoLocalEntry) {
                 return None;
             }
+            let local_reverse_session_id = if *has_local_reverse_entry {
+                Some(sessions.session_id_for(reverse_key))
+            } else {
+                None
+            };
             shared_forward_companion_for_reverse_hit(
                 shared_sessions,
                 reverse_key,
-                *local_reverse_session_id,
+                local_reverse_session_id,
                 forward_query,
             )
         },
