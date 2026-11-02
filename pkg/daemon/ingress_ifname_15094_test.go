@@ -82,6 +82,7 @@ func rawEvent15094(ifindex uint32) []byte {
 	binary.BigEndian.PutUint16(data[42:44], 443)
 	data[52] = 1 // SESSION_OPEN (eventTypeSessionOpen)
 	data[53] = 6 // TCP
+	data[55] = 2 // addrFamilyInet; #16127 drops unknown family 0
 	// Keep the per-policy syslog gate open on the source==nil path:
 	// logEvent suppresses SESSION_OPEN records whose trailing log byte
 	// is 0. Set it so the record reaches the buffer.
