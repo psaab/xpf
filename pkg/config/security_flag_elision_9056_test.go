@@ -142,8 +142,8 @@ func securityFlagElisionCases9056() []securityFlagElisionCase {
 				return g != nil && g.NoNATTraversal
 			}},
 		{"vpn-monitor optimized",
-			`security { ipsec { vpn v1 { bind-interface st0; vpn-monitor { optimized; } } } }`,
-			`security { ipsec { vpn v1 { bind-interface st0; vpn-monitor optimized; } } }`,
+			`security { ike { proposal p1 { authentication-method pre-shared-keys; dh-group group14; authentication-algorithm sha-256; encryption-algorithm aes-256-cbc; } policy ip1 { proposals p1; pre-shared-key ascii-text "fixture-psk"; } gateway gw { ike-policy ip1; address 192.0.2.1; } } ipsec { vpn v1 { bind-interface st0; ike { gateway gw; } vpn-monitor { optimized; } } } }`,
+			`security { ike { proposal p1 { authentication-method pre-shared-keys; dh-group group14; authentication-algorithm sha-256; encryption-algorithm aes-256-cbc; } policy ip1 { proposals p1; pre-shared-key ascii-text "fixture-psk"; } gateway gw { ike-policy ip1; address 192.0.2.1; } } ipsec { vpn v1 { bind-interface st0; ike { gateway gw; } vpn-monitor optimized; } } }`,
 			func(c *Config) bool {
 				v := c.Security.IPsec.VPNs["v1"]
 				return v != nil && v.VPNMonitorOptimized
