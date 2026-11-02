@@ -34,6 +34,22 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/wire-gate-lib.sh"
 
+# wire_hostinbound_verdict_from_capture <capture> <port_a> <port_b> <ctrl_port>
+#   <offer_a> <offer_b> <ctrl_offered>
+# Reduce the shared capture at the gate boundary, keeping the one verdict
+# path used by live measurement and selftest.
+wire_hostinbound_verdict_from_capture() {
+    local caplog="$1" port_a="$2" port_b="$3" ctrl_port="$4"
+    local offer_a="$5" offer_b="$6" ctrl_offered="$7"
+    local comp_a ref_a comp_b ref_b ctrl_comp ctrl_ref ck
+    comp_a="$(wire_count_flag_replies "$caplog" "$port_a" 'S\.')"; ref_a="$(wire_count_flag_replies "$caplog" "$port_a" 'R')"
+    comp_b="$(wire_count_flag_replies "$caplog" "$port_b" 'S\.')"; ref_b="$(wire_count_flag_replies "$caplog" "$port_b" 'R')"
+    ctrl_comp="$(wire_count_flag_replies "$caplog" "$ctrl_port" 'S\.')"; ctrl_ref="$(wire_count_flag_replies "$caplog" "$ctrl_port" 'R')"
+    ck="$(wire_count_bad_cksum "$caplog" 'tcp|ip')"
+    wire_hostinbound_verdict "$((10#$comp_a + 10#$ref_a + 10#$comp_b + 10#$ref_b))" "$ctrl_offered" "$((10#$ctrl_comp + 10#$ctrl_ref))" "$ck" 2 "$offer_a" "$comp_a" "$ref_a" "$offer_b" "$comp_b" "$ref_b"
+}
+
+
 if [[ "$MODE" == selftest ]]; then
     pass=0
     fail=0
@@ -49,6 +65,22 @@ if [[ "$MODE" == selftest ]]; then
             echo "  FAIL  $label (got '$out' rc=$rc)"; fail=$((fail + 1))
         fi
     }
+    check_capture() {
+        local label="$1" fixture="$2" want_v="$3" want_rc="$4" want_reason="$5" want_replies="$6" want_observed="$7"
+        local out rc v
+        out="$(wire_hostinbound_verdict_from_capture "$fixture" 22 443 830 1000 1000 1500)"
+        rc=$?
+        v="$(awk '{print $3}' <<<"$out")"
+        if [[ "$v" == "$want_v" && "$rc" == "$want_rc" && "$out" == *"reason=$want_reason"* && "$out" == *"reply_frames=$want_replies"* && "$out" == *"ctrl_observed=$want_observed"* ]]; then
+            echo "  PASS  $label"; pass=$((pass + 1))
+        else
+            echo "  FAIL  $label (got '$out' rc=$rc)"; fail=$((fail + 1))
+        fi
+    }
+    FIXTURE_DIR="${SCRIPT_DIR}/../../test/fixtures/wire"
+    check_capture "deny capture is measured but control excerpt is capture-blind" "${FIXTURE_DIR}/capture-tcp-replies-deny.txt" VOID 2 capture-blind 0 15
+    check_capture "exposed capture fails on reply frames" "${FIXTURE_DIR}/capture-tcp-replies-exposed.txt" FAIL 1 -- 30 15
+
     if wire_gate_finalizer_selftest; then
         echo "  PASS  cleanup finalizer shields restore"; pass=$((pass + 1))
     else
@@ -221,10 +253,6 @@ extract_leg() {
 }
 OFFER_A="$(extract_leg "$PROBE_PORT_A")"; OFFER_B="$(extract_leg "$PROBE_PORT_B")"; CONTROL_OFFERED="$(extract_leg "$CONTROL_PORT")"
 for v in OFFER_A OFFER_B CONTROL_OFFERED; do [[ "${!v}" =~ ^[0-9]+$ ]] || printf -v "$v" '0'; done
-COMP_A="$(wire_count_flag_replies "$CAPLOG" "$PROBE_PORT_A" 'S\.')"; REF_A="$(wire_count_flag_replies "$CAPLOG" "$PROBE_PORT_A" 'R')"
-COMP_B="$(wire_count_flag_replies "$CAPLOG" "$PROBE_PORT_B" 'S\.')"; REF_B="$(wire_count_flag_replies "$CAPLOG" "$PROBE_PORT_B" 'R')"
-CTRL_COMP="$(wire_count_flag_replies "$CAPLOG" "$CONTROL_PORT" 'S\.')"; CTRL_REF="$(wire_count_flag_replies "$CAPLOG" "$CONTROL_PORT" 'R')"
-CK="$(wire_count_bad_cksum "$CAPLOG" 'tcp|ip')"
-WIRE_GATE_FINAL_OUT="$(wire_hostinbound_verdict "$REPLIES" "$CONTROL_OFFERED" "$CONTROL_OBS" "$CK" 2 "$OFFER_A" "$COMP_A" "$REF_A" "$OFFER_B" "$COMP_B" "$REF_B")"
+WIRE_GATE_FINAL_OUT="$(wire_hostinbound_verdict_from_capture "$CAPLOG" "$PROBE_PORT_A" "$PROBE_PORT_B" "$CONTROL_PORT" "$OFFER_A" "$OFFER_B" "$CONTROL_OFFERED")"
 WIRE_GATE_FINAL_RC=$?
 exit "$WIRE_GATE_FINAL_RC"
