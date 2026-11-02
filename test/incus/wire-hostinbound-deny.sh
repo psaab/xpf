@@ -71,7 +71,7 @@ if [[ "$MODE" == selftest ]]; then
         out="$(wire_hostinbound_verdict_from_capture "$fixture" 22 443 830 1000 1000 1500)"
         rc=$?
         v="$(awk '{print $3}' <<<"$out")"
-        if [[ "$v" == "$want_v" && "$rc" == "$want_rc" && "$out" == *"reason=$want_reason"* && "$out" == *"reply_frames=$want_replies"* && "$out" == *"ctrl_observed=$want_observed"* ]]; then
+        if [[ "$v" == "$want_v" && "$rc" == "$want_rc" && " $out " == *" reason=$want_reason "* && " $out " == *" reply_frames=$want_replies "* && " $out " == *" ctrl_observed=$want_observed "* ]]; then
             echo "  PASS  $label"; pass=$((pass + 1))
         else
             echo "  FAIL  $label (got '$out' rc=$rc)"; fail=$((fail + 1))
