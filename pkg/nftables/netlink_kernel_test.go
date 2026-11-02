@@ -137,10 +137,10 @@ func TestCounterReadbackThroughExistingReaders(t *testing.T) {
 	// catch-all drop. Since 7c1459c40d (#11574), WireGuard listener admission
 	// is scoped to the matching underlay zone. The scenario's WGListenPorts
 	// {51820, 51821} are served only by trust/mgmt, so admin's addresses get
-	// the WG mismatch DROP, counted under admin's deny counter (#18745). The
-	// contract this cell now encodes: admin's deny counters ARE read back
-	// through the existing reader, and every rule they count is that WG
-	// mismatch drop (udp dport), never a catch-all.
+	// the WG mismatch DROP, counted under each admin family deny counter
+	// (#18745). The contract this cell now encodes: both admin family counters
+	// are read back through the existing reader, and each counts a matching
+	// UDP-dport DROP rule, never a catch-all.
 	for _, want := range []string{"admin/ip", "admin/ip6"} {
 		if !denySet[want] {
 			t.Errorf("admin WG-mismatch deny counter %q not read back through ReadHostInboundDenyCounters; got %v", want, denySet)
@@ -148,13 +148,19 @@ func TestCounterReadbackThroughExistingReaders(t *testing.T) {
 	}
 	plan := newBuildPlan(t, HostInboundTableName, hostInboundPriority)
 	buildHostInboundNetlink(plan, hostInboundScenario())
-	adminCounted := 0
+	adminCounted := map[string]int{"ip": 0, "ip6": 0}
 	for _, rule := range plan.rules {
-		counted, udp, dport := false, false, false
+		countedFamilies := map[string]bool{}
+		udp, dport, drop := false, false, false
 		for i, e := range rule {
 			switch x := e.(type) {
 			case *expr.Objref:
-				counted = counted || x.Name == HostInboundDenyCounterName("admin", "ip") || x.Name == HostInboundDenyCounterName("admin", "ip6")
+				switch x.Name {
+				case HostInboundDenyCounterName("admin", "ip"):
+					countedFamilies["ip"] = true
+				case HostInboundDenyCounterName("admin", "ip6"):
+					countedFamilies["ip6"] = true
+				}
 			case *expr.Meta:
 				if x.Key == expr.MetaKeyL4PROTO && i+1 < len(rule) {
 					if c, ok := rule[i+1].(*expr.Cmp); ok && len(c.Data) == 1 && c.Data[0] == unix.IPPROTO_UDP {
@@ -163,18 +169,21 @@ func TestCounterReadbackThroughExistingReaders(t *testing.T) {
 				}
 			case *expr.Payload:
 				dport = dport || (x.Base == expr.PayloadBaseTransportHeader && x.Offset == 2 && x.Len == 2)
+			case *expr.Verdict:
+				drop = drop || x.Kind == expr.VerdictDrop
 			}
 		}
-		if !counted {
-			continue
-		}
-		adminCounted++
-		if !udp || !dport {
-			t.Errorf("admin (any-service) deny counter counts a rule that is not the WG mismatch udp-dport drop (a catch-all?): %#v", rule)
+		for family := range countedFamilies {
+			adminCounted[family]++
+			if !udp || !dport || !drop {
+				t.Errorf("admin/%s (any-service) deny counter counts a rule that is not the WG mismatch udp-dport DROP (a catch-all?): %#v", family, rule)
+			}
 		}
 	}
-	if adminCounted == 0 {
-		t.Error("fixture: no rule counts under admin's deny counter, so the WG-mismatch contract is not exercised")
+	for _, family := range []string{"ip", "ip6"} {
+		if adminCounted[family] == 0 {
+			t.Errorf("fixture: no rule counts under admin/%s deny counter, so the WG-mismatch contract is not exercised", family)
+		}
 	}
 
 	// Global ICMP-accept counters (aggregate).

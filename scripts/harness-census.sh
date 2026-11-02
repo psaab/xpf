@@ -115,7 +115,7 @@ POSITIVE_CONTROL=${CENSUS_POSITIVE_CONTROL:-test/incus/test-failover.sh}
 
 # Files classified as runnable harnesses (minus the named libraries and the
 # *-selftest.sh files).
-HARNESS_GLOBS=${CENSUS_HARNESS_GLOBS:-"test/incus/*.sh scripts/userspace-*.sh"}
+HARNESS_GLOBS=${CENSUS_HARNESS_GLOBS:-"test/incus/*.sh test/nftables/*.sh scripts/userspace-*.sh"}
 
 # Files whose bodies are scanned for transitive invocations. A superset of the
 # harnesses: a library or a plain script can be the link in the chain.

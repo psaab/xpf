@@ -434,7 +434,10 @@ run_shell test/routing/selftest-routing-probes_9812.sh
 # user namespaces are unavailable.
 run_shell test/daemon/selftest-daemon-kernel_15241.sh
 run_shell test/nftables/selftest-nftables-kernel_18745.sh
-# The probes pin missing-tool behavior and the -json=false argv contract.
+# #18745: GOFLAGS=-run and -skip filters must not turn the whole-package
+# kernel leg into a green partial run. Fake Go/unshare tools; no kernel needed.
+run_shell test/nftables/nftables-kernel-probes_18745-selftest.sh
+# The daemon probes pin missing-tool behavior and the -json=false argv contract.
 # Fifteen hermetic fixture cells: no Go build or netns.
 run_shell test/daemon/selftest-daemon-probes_15241.sh
 # #10771: prove the BPF leg's privilege contract with fake tools: without
