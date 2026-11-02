@@ -405,6 +405,173 @@ fn first_reply_for_another_flows_translation_keeps_the_old_arm_18710() {
     }
 }
 
+/// #18718: B retains the reverse half of a dynamic flow while A replaces the
+/// same original tuple with a static mapping to the exact same translated
+/// tuple. B must not validate its old reverse incarnation using the new
+/// forward row's static provenance.
+#[test]
+fn old_dynamic_reverse_does_not_borrow_same_tuple_static_forward_18710() {
+    let mut dynamic_forwarding = fw1_owner_forwarding();
+    dynamic_forwarding
+        .neighbors
+        .entry((LAN_IFINDEX, IpAddr::V4(POOL_CLIENT)))
+        .or_insert(NeighborEntry {
+            mac: [0x10, 0x66, 0x6a, 0xfd, 0x4b, 0x5c],
+        });
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha = owner_ha(now_secs);
+    let shared = Shared::new();
+    let mut a = SessionTable::new();
+    a.set_forwarding_revalidation_gen(7, 9);
+    let (frame, meta) = lan_syn(POOL_CLIENT);
+    let old_create = poll(&mut a, &shared, &dynamic_forwarding, &ha, LAN, &frame, meta);
+    assert_eq!(old_create.session_miss, 1, "old dynamic flow is polled");
+
+    let mut key = forward_key();
+    key.src_ip = IpAddr::V4(POOL_CLIENT);
+    key.dst_port = 5210;
+    let (old_decision, _, _) = a
+        .entry_with_origin(&key)
+        .expect("fixture: worker A created the old dynamic forward row");
+    let old_nat = old_decision.nat;
+    let old_reverse_key = crate::session::reverse_session_key(&key, old_nat);
+    let (old_reverse, old_forward_id, old_forward_static) = {
+        let map = shared.sessions.lock().expect("shared sessions");
+        let old_forward = map.get(&key).expect("old forward row is shared");
+        (
+            map.get(&old_reverse_key)
+                .cloned()
+                .expect("old reverse row is shared"),
+            old_forward.session_id,
+            old_forward.source_nat_static,
+        )
+    };
+    assert_eq!(old_reverse.origin, SessionOrigin::ReverseFlow);
+    assert_eq!(old_forward_static, Some(false), "old flow is dynamic SNAT");
+    // B has drained the old reverse replica, but not the old forward row.
+    let mut b = SessionTable::new();
+    b.set_forwarding_revalidation_gen(7, 9);
+    apply_commands(
+        &mut b,
+        &dynamic_forwarding,
+        &ha,
+        vec![WorkerCommand::UpsertSynced(
+            crate::afxdp::shared_ops::synced_replica_entry(&old_reverse),
+        )],
+    );
+    let old_b_reverse_id = b.session_id_for(&old_reverse_key);
+    assert_ne!(old_b_reverse_id, 0, "B materialized the old reverse row");
+
+    // Retire A's old pair and its shared rows, preserving B's already-drained
+    // reverse. The next real poll creates a replacement with the exact same
+    // original tuple.
+    a.delete(&key);
+    a.delete(&old_reverse_key);
+    let _ = crate::afxdp::shared_ops::remove_shared_session_if(
+        &shared.sessions,
+        &shared.nat,
+        &shared.wire,
+        &shared.owner_rg,
+        &key,
+        |entry| entry.session_id == old_forward_id,
+    );
+    let _ = crate::afxdp::shared_ops::remove_shared_session_if(
+        &shared.sessions,
+        &shared.nat,
+        &shared.wire,
+        &shared.owner_rg,
+        &old_reverse_key,
+        |entry| entry.session_id == old_reverse.session_id,
+    );
+
+    let IpAddr::V4(translated) = old_nat.rewrite_src.expect("dynamic SNAT address") else {
+        panic!("fixture: IPv4 dynamic SNAT")
+    };
+    let translated_port = old_nat.rewrite_src_port.unwrap_or(SPORT);
+    let mut static_forwarding = dynamic_forwarding.clone();
+    static_forwarding.static_nat = crate::nat::StaticNatTable::from_snapshots(
+        &[crate::StaticNATRuleSnapshot {
+            name: "same-tuple-static-replacement".to_string(),
+            from_zone: "wan".to_string(),
+            external_ip: translated.to_string(),
+            internal_ip: POOL_CLIENT.to_string(),
+            match_destination_port: translated_port,
+            mapped_port: SPORT,
+            ..Default::default()
+        }],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let scope = crate::afxdp::forwarding::nat_scope_ctx_for_flow(
+        &static_forwarding,
+        LAN_IFINDEX,
+        0,
+        None,
+        WAN_UNIT_IFINDEX,
+        key.routing_domain,
+    );
+    let (static_nat, _) = static_forwarding
+        .static_nat
+        .match_snat_with_counter_scoped(
+            key.src_ip,
+            key.src_port,
+            Some(key.protocol),
+            Some(key.dst_ip),
+            "wan",
+            scope.egress_ifname,
+            scope.egress_routing_instance,
+        )
+        .expect("fixture: static SNAT matches the same original tuple");
+    assert_eq!(static_nat.rewrite_src, Some(IpAddr::V4(translated)));
+    assert_eq!(
+        static_nat.rewrite_src_port,
+        old_nat.rewrite_src_port,
+        "fixture: static SNAT preserves the dynamic translated port"
+    );
+    a.set_forwarding_revalidation_gen(8, 9);
+    let (frame, meta) = lan_syn(POOL_CLIENT);
+    let new_create = poll_at(
+        &mut a,
+        &shared,
+        &static_forwarding,
+        &ha,
+        LAN,
+        &frame,
+        meta,
+        8,
+    );
+    assert_eq!(new_create.session_miss, 1, "replacement is created by the poll path");
+    let new_forward = shared
+        .sessions
+        .lock()
+        .expect("shared sessions")
+        .get(&key)
+        .cloned()
+        .expect("static replacement is shared");
+    assert_ne!(new_forward.session_id, old_forward_id, "the forward incarnation changed");
+    assert_eq!(new_forward.source_nat_static, Some(true), "the replacement is static SNAT");
+    assert_eq!(new_forward.decision.nat.rewrite_src, Some(IpAddr::V4(translated)));
+    assert_eq!(
+        new_forward.decision.nat.rewrite_src_port.unwrap_or(SPORT),
+        translated_port,
+        "the replacement has the exact old translated tuple"
+    );
+
+    let (frame, meta) = wan_syn_ack(translated, translated_port);
+    let reply = poll_at(
+        &mut b,
+        &shared,
+        &static_forwarding,
+        &ha,
+        WAN,
+        &frame,
+        meta,
+        8,
+    );
+    assert_eq!(reply.session_hit, 1, "B's retained old reverse row is hit");
+    assert_eq!(reply.snat_revoked, 1, "the new static row cannot authorize old dynamic state");
+    assert_eq!(reply.tx, [0, 0, 0], "B drops the stale reply");
+}
+
 /// Review fold (AC #2, predicate breadth): only a forward row this node
 /// CREATED is judged from the shared map — `ForwardFlow` or
 /// `MissingNeighborSeed`. Every other origin, and a reverse row, keeps the

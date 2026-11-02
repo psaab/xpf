@@ -8163,21 +8163,26 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         tcp_flags: meta.tcp_flags,
                                         // Local reverse-flow learn (#2170): no peer gen.
                                         generation: 0,
-                                        // #5212: a reverse companion never emits
-                                        // RT_FLOW (is_reverse skip) and gets its own
-                                        // fresh id at install — no carried id.
-                                        session_id: 0,
-                                                tcp_close_class: 0,
-                                                tcp_handshake_state: forward_install_info
+                                        // #18718: publish the reverse row with
+                                        // the forward incarnation's derived
+                                        // companion id. A sibling that retained
+                                        // an older reverse row can then reject a
+                                        // same-tuple forward replacement.
+                                        session_id: crate::session::synthesized_companion_session_id(
+                                            forward_install_info
+                                                .expect("installed forward session info")
+                                                .session_id,
+                                        ),
+                                        tcp_close_class: 0,
+                                        tcp_handshake_state: forward_install_info
                                             .expect("installed forward session info")
-                                                    .handshake_state_wire,
-                                                rev_packets: sessions
-                                                    .rev_packets_for(&flow.forward_key),
-                                                fwd_packets: 0,
-                                                pptp_call_ids: 0,
+                                            .handshake_state_wire,
+                                        rev_packets: sessions.rev_packets_for(&flow.forward_key),
+                                        fwd_packets: 0,
+                                        pptp_call_ids: 0,
                                         persistent_lease_hold: None,
-                                                source_nat_static: None,
-                                            };
+                                        source_nat_static: None,
+                                    };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,

@@ -30,23 +30,20 @@ pub(crate) struct SyncedSessionEntry {
     /// when BOTH the stored and incoming generations are non-zero, so
     /// local-origin entries fall back to today's unconditional behavior.
     pub(crate) generation: u64,
-    /// #5212: the originating node's STABLE RT_FLOW session id (`alloc_session_id`
-    /// namespace) carried across the HA session-sync wire. Populated (non-zero)
-    /// only on a peer-synced FORWARD import off the wire (`build_synced_session_entry`),
-    /// where it is threaded onto the imported entry so the standby ADOPTS the
-    /// peer's id instead of minting a fresh local one — the standby's
-    /// SESSION_CLOSE RT_FLOW then correlates with the primary's SESSION_CREATE
-    /// across HA nodes. Local-origin publishes (forwarding learn, tunnel,
-    /// promote) leave this 0: the incremental Open delta carries the real id
-    /// straight off the live entry
-    /// (`install_with_protocol_with_origin`), and a 0 here on any import path
-    /// falls back to `alloc_session_id()` (rolling-upgrade safe). #14667:
-    /// synthesized reverse companions are the exception — the HA-import
-    /// synthesizer derives one deterministic companion id from the
-    /// forward's stable id (`synthesized_companion_session_id`, reserved
-    /// `0xFFFE` namespace) and the live-reply synthesizer publishes the id
-    /// it just minted, so every worker adopts ONE companion identity and
-    /// the identity-captured policy delete cannot miss on siblings.
+    /// #5212: the stable RT_FLOW session id (`alloc_session_id` namespace)
+    /// belonging to a forward entry, carried in its HA sync record. Local
+    /// FORWARD publishes copy it from the installed entry
+    /// (`forward_synced_entry`); a peer-synced import
+    /// (`build_synced_session_entry`) adopts it instead of minting a fresh id,
+    /// so the standby's SESSION_CLOSE RT_FLOW correlates with the primary's
+    /// SESSION_CREATE across HA nodes. A legacy import carrying 0 falls back
+    /// to `alloc_session_id()` (rolling-upgrade safe). #14667/#18718:
+    /// reverse companions carry a stable id derived from their forward
+    /// incarnation (`synthesized_companion_session_id`, reserved `0xFFFE`
+    /// namespace): the HA reverse synthesizer, the local `ReverseFlow` publish,
+    /// and the live-reply synthesizer all publish that companion identity, so
+    /// every worker adopts the same reverse incarnation and identity-captured
+    /// deletes cannot miss on siblings.
     pub(crate) session_id: u64,
     /// #9412: the session's TCP close class on the HA wire (`0` = open or not
     /// carried), from `SessionSyncRequest.tcp_close_class` on a peer import.
