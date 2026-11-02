@@ -128,6 +128,7 @@ pub(in crate::afxdp) fn row(
         nat_scope_ifindex: None,
     };
     SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
         decision: crate::session::SessionDecision {
             resolution: crate::afxdp::ForwardingResolution {
@@ -422,19 +423,19 @@ fn batched_count_restamp_equals_per_pair_restamp_18655() {
     let (shared_a, wire_a, queries) = mixed_state();
     let (shared_b, wire_b, _) = mixed_state();
     let mut rng = Lcg(55018);
-    let pairs: Vec<(SessionKey, crate::nat::NatDecision, u64, u64)> = queries
+    let pairs: Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64)> = queries
         .iter()
         .map(|(k, n)| {
             let fwd = if rng.pick(3) == 0 { 0 } else { rng.pick(200) };
             let rev = if rng.pick(3) == 0 { 0 } else { rng.pick(200) };
-            (k.clone(), *n, fwd, rev)
+            (k.clone(), *n, fwd, rev, 0)
         })
         .collect();
     assert!(pairs.iter().any(|p| p.2 == 0 && p.3 == 0), "fixture: include zero-count pairs");
-    for (k, n, f, r) in &pairs {
-        restamp_shared_packet_counts(&shared_a, &wire_a, k, *n, *f, *r);
+    for (k, n, f, r, last_seen_ns) in &pairs {
+        restamp_shared_packet_counts(&shared_a, &wire_a, k, *n, 0, *last_seen_ns, *f, *r);
     }
-    restamp_shared_packet_counts_batch(&shared_b, &wire_b, &pairs);
+    restamp_shared_packet_counts_batch(&shared_b, &wire_b, 0, &pairs);
     assert_eq!(snapshot(&shared_a), snapshot(&shared_b), "#18655: batched shared restamp diverged");
     assert_eq!(snapshot(&wire_a), snapshot(&wire_b), "#18655: batched wire restamp diverged");
     assert_ne!(snapshot(&shared_a), snapshot(&mixed_state().0), "fixture: the restamp must change something");

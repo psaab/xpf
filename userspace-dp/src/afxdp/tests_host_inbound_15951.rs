@@ -280,6 +280,7 @@ fn full_of_embryos_admits_host_udp_and_releases_shed_shared_row_16532() {
             shared.insert(
                 k.clone(),
                 SyncedSessionEntry {
+                    sibling_last_seen_ns: 0,
                     key: k.clone(),
                     decision: entry.decision,
                     metadata: entry.metadata.clone(),

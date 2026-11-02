@@ -270,6 +270,14 @@ impl SessionTable {
                     // just below. Snapshot it (Copy) before the immutable
                     // `entry` borrow is dropped.
                     let e_nat = entry.decision.nat;
+                    let e_session_id = if e_is_reverse {
+                        let forward = reverse_session_key(&key, e_nat);
+                        self.entry_by_key(&forward)
+                            .map(|forward_entry| forward_entry.session_id)
+                            .unwrap_or(0)
+                    } else {
+                        entry.session_id
+                    };
                     let e_reset = entry.reset;
                     let e_closing = entry.closing;
                     let e_fin_own = entry.fin_own;
@@ -440,6 +448,38 @@ impl SessionTable {
                         self.last_pop_stats.kept_alive_by_companion += 1;
                         continue;
                     }
+                    // #18742: a short configured timeout must not physically
+                    // erase an eligible row before its exact Established
+                    // sibling can publish the next packet-evidence pass. This
+                    // floor affects wheel retention only; lookup liveness
+                    // continues to use the configured expires_after_ns.
+                    let mut shared_node_evidence = None;
+                    if companion_eligible
+                        && key.protocol == PROTO_TCP
+                        && !e_closing
+                        && e_session_id != 0
+                        && let Some(ha) = ha
+                    {
+                        let shared = (ha.node_served)(&key);
+                        shared_node_evidence = Some(shared);
+                        if shared.shared_established
+                            && shared.shared_incarnation == Some((e_session_id, 0))
+                        {
+                            let cadence_ns = shared
+                                .shared_evidence_max_cadence_ns
+                                .unwrap_or(NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS);
+                            let retention_floor_ns = e_expires_after_ns
+                                .max(cadence_ns.saturating_add(SESSION_GC_INTERVAL_NS));
+                            if now_ns.saturating_sub(e_last_seen_ns) < retention_floor_ns {
+                                self.defer_expiry_until(
+                                    &key,
+                                    now_ns,
+                                    e_last_seen_ns.saturating_add(retention_floor_ns),
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     // #16223: node-level evidence is consulted BEFORE
                     // the local refusals inside
                     // `opening_companion_keeps_alive`: the HA context's
@@ -451,7 +491,8 @@ impl SessionTable {
                     let node_evidence = {
                         let mut ev = self.node_served_evidence(&key);
                         if let Some(ha) = ha {
-                            let shared = (ha.node_served)(&key);
+                            let shared = shared_node_evidence
+                                .unwrap_or_else(|| (ha.node_served)(&key));
                             if shared.handshake_wire
                                 == TcpHandshakeState::Established.to_wire()
                             {
@@ -459,6 +500,12 @@ impl SessionTable {
                             }
                             ev.shared_established |= shared.shared_established;
                             ev.rev_packets = ev.rev_packets.max(shared.rev_packets);
+                            // #18722/#18742: keep count, source identity,
+                            // sibling packet recency separate.
+                            ev.shared_served = shared.shared_served;
+                            ev.shared_incarnation = shared.shared_incarnation;
+                            ev.shared_sibling_last_seen_ns = shared.shared_sibling_last_seen_ns;
+                            ev.shared_evidence_max_cadence_ns = shared.shared_evidence_max_cadence_ns;
                         }
                         ev
                     };
@@ -659,6 +706,27 @@ impl SessionTable {
         self.wheel.buckets[new_bucket].push_back(WheelEntry {
             key: key.clone(),
             scheduled_tick: new_target_tick,
+        });
+        self.last_pop_stats.re_bucketed += 1;
+    }
+
+    /// Recheck an idle-crossed row at a retention-only deadline. Unlike
+    /// `rebucket_alive_entry`, this leaves the configured idle window and
+    /// packet-activity anchor unchanged.
+    fn defer_expiry_until(&mut self, key: &SessionKey, now_ns: u64, deadline_ns: u64) {
+        let scheduled_tick = target_tick_for(now_ns, deadline_ns);
+        let bucket = bucket_for_tick(scheduled_tick);
+        let entry = self
+            .entry_by_key_mut(key)
+            .expect("retention defer: entry was just read from the expiry wheel");
+        entry.wheel_tick = scheduled_tick;
+        entry.held_wheel_tick = 0;
+        entry.held_wheel_last_seen_ns = 0;
+        entry.held_wheel_expires_after_ns = 0;
+        entry.held_wheel_first_held_ns = 0;
+        self.wheel.buckets[bucket].push_back(WheelEntry {
+            key: key.clone(),
+            scheduled_tick,
         });
         self.last_pop_stats.re_bucketed += 1;
     }
@@ -913,6 +981,28 @@ impl SessionTable {
     /// the opening window; a flow that goes quiet fails the window
     /// check once the companion crosses, so both halves then reap
     /// within one window of last activity (bounded, terminating).
+    ///
+    /// #18722/#18742: two evidence paths bound retention.
+    /// - A completed row authored/promoted here normally ages on its own
+    ///   packet timestamp. After RSS moves service to a sibling, it can use
+    ///   the node-level arm only when the exact canonical shared identity has
+    ///   a recent sibling packet timestamp. The shared count may stay frozen
+    ///   below or at this node's max; it is not the sibling's recency proof.
+    ///   Peer-synced replicas still use node evidence because they may serve
+    ///   neither direction locally.
+    /// - Opening rows and replicas need RECENT service, not cumulative proof
+    ///   alone: a present local/shared count or shared incarnation change is
+    ///   activity; an unchanged shared count is bounded by the computed
+    ///   evidence cadence. A recent sibling packet timestamp also keeps a
+    ///   row when max-only counts do not advance. Per contributor, not
+    ///   summed: a dead flow's companion reaped first removes the local
+    ///   contributor (absent is not a change, so no extra window), and a live
+    ///   source replaced by a new incarnation moves that contributor (a
+    ///   change, so no false reap).
+    /// Before #18722 both were missing, so an idle established flow that
+    /// had ever been answered re-stamped to `now_ns` on every pass and
+    /// never reaped (no Close, no RT_FLOW close, session and NAT binding
+    /// held for ever).
     fn opening_companion_keeps_alive(
         &mut self,
         key: &SessionKey,
@@ -926,26 +1016,117 @@ impl SessionTable {
         if key.protocol != PROTO_TCP || entry.closing {
             return false;
         }
+        // #18722: completed rows this node authored/promoted normally age on
+        // their own packet timestamps. #18742 Cycle 3 admits the node-level
+        // arm only for an exact shared incarnation with a fresh packet
+        // timestamp observed from a different worker namespace. Cumulative
+        // counters are max-only and cannot detect a serving sibling whose
+        // totals trail the owning worker's prior high-water mark.
+        let completed_local_row =
+            entry.established && !entry.handshake_pending && !entry.origin.is_peer_synced();
+        let shared_evidence_max_cadence_ns = node_evidence
+            .shared_evidence_max_cadence_ns
+            .unwrap_or(NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS);
+        // The expiry wheel and shared-evidence cycle are asynchronous. The
+        // GC interval covers pass ordering; one wheel tick covers quantized
+        // scheduling when the retention deadline falls between tick edges.
+        let shared_evidence_freshness_ns = shared_evidence_max_cadence_ns
+            .saturating_add(SESSION_GC_INTERVAL_NS)
+            .saturating_add(WHEEL_TICK_NS);
+        let expected_session_id = if entry.metadata.is_reverse {
+            let forward = reverse_session_key(key, entry_nat);
+            self.entry_by_key(&forward)
+                .map(|forward_entry| forward_entry.session_id)
+                .unwrap_or(0)
+        } else {
+            entry.session_id
+        };
+        let matching_local_shared_activity = if completed_local_row {
+            expected_session_id != 0
+                && node_evidence.shared_established
+                && node_evidence.shared_incarnation == Some((expected_session_id, 0))
+                && node_evidence
+                    .shared_sibling_last_seen_ns
+                    .is_some_and(|sibling_last_seen_ns| {
+                        now_ns.saturating_sub(sibling_last_seen_ns)
+                            <= shared_evidence_freshness_ns
+                    })
+        } else {
+            false
+        };
+        if completed_local_row && !matching_local_shared_activity {
+            return false;
+        }
         // #16223 (node-level first): a promoted serving companion for
         // this tuple on this node (shared-map Established +
         // admitted reverse counters) retains the replica/opening row
         // BEFORE the local `syn_ack_first` / `handshake_pending`
         // refusals below — the live fw1 row is `syn_ack_first=true`
         // with no local companion, and the fw0 replicas are pure
-        // Opening. Retain on the SERVING pair's activity: re-stamp
-        // from `now_ns` (this GC pass is the retention event; the
-        // serving pair's own hits keep its stamp fresh, so a flow
-        // that goes quiet still crosses one window later when the
-        // shared/serving proof stops advancing — production merges
-        // the serving last-activity through the same evidence).
+        // Opening.
+        //
+        // #18722: the shared sibling timestamp is a packet timestamp, not a
+        // restamp timestamp. #18742 gives exact established identities a
+        // retention-only wheel floor through the current evidence cadence;
+        // the configured idle timeout still governs packet lookups. Once the
+        // evidence cycle has run, a frozen timestamp ages out. Completed local
+        // rows still require the exact shared incarnation and recent packet
+        // timestamp, so owner-only mirror counts cannot renew them.
         if node_evidence.promoted_and_served() {
             let Some(em) = self.entry_by_key_mut(key) else {
                 return false;
             };
-            em.last_seen_ns = now_ns;
-            self.rebucket_alive_entry(key, now_ns);
-            return true;
+            let mut advanced = false;
+            let mut shared_advanced = false;
+            if let Some(local) = node_evidence.local_served {
+                advanced |= local != em.node_served_seen_local;
+                em.node_served_seen_local = local;
+            }
+            if let Some(shared) = node_evidence.shared_served {
+                let incarnation_changed = node_evidence
+                    .shared_incarnation
+                    .is_some_and(|(session_id, generation)| {
+                        (session_id != 0 || generation != 0)
+                            && (session_id != em.node_served_seen_shared_session_id
+                                || generation != em.node_served_seen_shared_generation)
+                    });
+                let shared_changed =
+                    shared != em.node_served_seen_shared || incarnation_changed;
+                advanced |= shared_changed;
+                shared_advanced |= shared_changed;
+                em.node_served_seen_shared = shared;
+                if let Some((session_id, generation)) = node_evidence.shared_incarnation
+                    && (session_id != 0 || generation != 0)
+                {
+                    em.node_served_seen_shared_session_id = session_id;
+                    em.node_served_seen_shared_generation = generation;
+                }
+            }
+            if if completed_local_row {
+                shared_advanced
+            } else {
+                advanced
+            } {
+                em.node_served_last_change_ns = now_ns;
+            }
+            let shared_evidence_recent = node_evidence.shared_served.is_some()
+                && em.node_served_last_change_ns != 0
+                && now_ns.saturating_sub(em.node_served_last_change_ns)
+                    <= shared_evidence_freshness_ns;
+            let sibling_evidence_recent = node_evidence.shared_sibling_last_seen_ns
+                .is_some_and(|last_seen_ns| {
+                    now_ns.saturating_sub(last_seen_ns) <= shared_evidence_freshness_ns
+                });
+            if advanced || shared_evidence_recent || sibling_evidence_recent {
+                em.last_seen_ns = now_ns;
+                self.rebucket_alive_entry(key, now_ns);
+                self.align_node_kept_companion(key, entry_nat, now_ns);
+                return true;
+            }
         }
+        let Some(entry) = self.entry_by_key(key) else {
+            return false;
+        };
         // Classic arm: only SYN-ACK-observed pending halves whose
         // completing segment was consumed elsewhere. Pure Opening and
         // SYN-ACK-first pairs keep the #6752/#13679/#4109 refusals.
@@ -982,6 +1163,67 @@ impl SessionTable {
         self.rebucket_alive_entry(key, now_ns);
         true
     }
+    /// #18722 (#18742 review): the node-level arm decides for the TUPLE, so
+    /// a keep applies to the pair. The companion is re-stamped with this
+    /// half and takes the same contributor baselines, so the two halves age
+    /// together from here. Without this, two artefacts appear:
+    /// - `companion_keeps_alive` read this half's `now_ns` re-stamp as
+    ///   companion activity and kept the other half on manufactured
+    ///   freshness, without updating its baselines.
+    /// - A companion crossing later re-read the same evidence as a change
+    ///   against its zero baseline.
+    /// Either way a dead flow's second half got a third window.
+    ///
+    /// A CLOSING companion is not aligned: it keeps its own close fuse
+    /// (#10885/#14630). A completed companion this node serves is aligned
+    /// like any other: it never takes the node-level arm itself (the gate
+    /// above), so its baselines are never read, and when it crosses,
+    /// `companion_keeps_alive` keeps it from this half's re-stamp anyway (the
+    /// whole-flow rule).
+    fn align_node_kept_companion(
+        &mut self,
+        key: &SessionKey,
+        entry_nat: NatDecision,
+        now_ns: u64,
+    ) {
+        let companion_key = reverse_session_key(key, entry_nat);
+        if companion_key == *key {
+            return;
+        }
+        let Some((
+            seen_local,
+            seen_shared,
+            seen_shared_session_id,
+            seen_shared_generation,
+            last_change_ns,
+        )) = self.entry_by_key(key).map(|entry| {
+            (
+                entry.node_served_seen_local,
+                entry.node_served_seen_shared,
+                entry.node_served_seen_shared_session_id,
+                entry.node_served_seen_shared_generation,
+                entry.node_served_last_change_ns,
+            )
+        }) else {
+            return;
+        };
+        let Some(cm) = self.entry_by_key_mut(&companion_key) else {
+            return;
+        };
+        if cm.closing {
+            return;
+        }
+        cm.node_served_seen_local = seen_local;
+        cm.node_served_seen_shared = seen_shared;
+        cm.node_served_seen_shared_session_id = seen_shared_session_id;
+        cm.node_served_seen_shared_generation = seen_shared_generation;
+        cm.node_served_last_change_ns = last_change_ns;
+        if cm.last_seen_ns < now_ns {
+            cm.last_seen_ns = now_ns;
+            self.rebucket_alive_entry(&companion_key, now_ns);
+        }
+    }
+
     /// #2120: the standby retention decision for an idle-crossed entry.
     /// Pure (reads only the passed snapshot + the HA context closures),
     /// so it can be unit-tested in isolation and called from the expire

@@ -795,6 +795,7 @@ fn exported_forward_row(sessions: &SessionTable, key: &SessionKey) -> SyncedSess
     let (decision, metadata, _origin) = sessions.entry_with_origin(key).expect("premise: forward row installed");
     assert!(!metadata.is_reverse, "premise: the forward row");
     SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
         decision,
         metadata,

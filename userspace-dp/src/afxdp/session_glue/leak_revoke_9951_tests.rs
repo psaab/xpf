@@ -158,7 +158,7 @@ fn reverse_worker_entry_fixture(
         dst_ip: reverse_key.dst_ip,
         forward_key: reverse_key.clone(),
     };
-    let entry = SyncedSessionEntry { key: reverse_key,
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: reverse_key,
     decision: reverse.decision,
     metadata: reverse.metadata,
     leak_incarnation: incarnation,
@@ -629,7 +629,7 @@ fn peer_shared_materialize_promote_rechecks_removed_leak_9951() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
-    let peer_entry = SyncedSessionEntry { key: flow.forward_key.clone(),
+    let peer_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: flow.forward_key.clone(),
     decision,
     metadata: leak_metadata(),
     leak_incarnation: 0,
@@ -759,7 +759,7 @@ fn demoted_shared_leak_rematerialization_rechecks_removed_leak_9951() {
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let mut metadata = leak_metadata();
     metadata.owner_rg_id = 1;
-    let shared_entry = SyncedSessionEntry { key: flow.forward_key.clone(),
+    let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: flow.forward_key.clone(),
     decision,
     metadata,
     leak_incarnation: incarnation,
@@ -1390,7 +1390,7 @@ fn peer_upsert_recomputes_ri_reverse_leak_stamp_10312() {
         reverse.metadata.is_reverse,
         "premise broken: the synthesized companion must be a reverse entry"
     );
-    let entry = SyncedSessionEntry { key: reverse_key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: reverse_key.clone(),
     decision: reverse.decision,
     metadata: reverse.metadata,
     leak_incarnation: 0,
@@ -1445,7 +1445,7 @@ fn shared_materialize_recomputes_ri_reverse_leak_stamp_10312() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
-    let peer_entry = SyncedSessionEntry { key: reverse_key.clone(),
+    let peer_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: reverse_key.clone(),
     decision: reverse.decision,
     metadata: reverse.metadata,
     leak_incarnation: 0,

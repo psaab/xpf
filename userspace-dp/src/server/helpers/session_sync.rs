@@ -416,7 +416,7 @@ pub(crate) fn build_synced_session_entry(
         ),
         None => (false, nat_src, nat_dst, None),
     };
-    Ok(SyncedSessionEntry { protocol: req.protocol,
+    Ok(SyncedSessionEntry { sibling_last_seen_ns: 0, protocol: req.protocol,
     tcp_flags: 0,
     // #9412: the owning node's close class. Applied on install, where the
     // copy gets its close bits and its close window.

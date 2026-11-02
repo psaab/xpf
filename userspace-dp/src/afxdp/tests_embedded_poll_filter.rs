@@ -843,6 +843,7 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
@@ -8591,6 +8592,7 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         TCP_FLAG_SYN,
     ));
     let shared_entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: flow_key.clone(),
     decision: local_decision,
     metadata: local_metadata,
@@ -10242,6 +10244,7 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_GRE,
@@ -10416,6 +10419,7 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
     let mut entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_GRE,
@@ -10818,6 +10822,7 @@ fn publish_pptp_gre_session_9298(
     egress_ifindex: i32,
 ) -> SharedSessionOwnerRgIndexes {
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: SessionKey {
         addr_family: if client.is_ipv4() {
             libc::AF_INET as u8

@@ -1286,11 +1286,11 @@ fn ct_slice_pairs_include_pending_sync_import_with_live_rev_16217() {
     // (any origin, any stage), and must not include the reverse row.
     let pairs = table.ct_slice_forward_pairs();
     assert!(
-        pairs.iter().any(|(k, _)| k == &forward),
+        pairs.iter().any(|(k, _, _, _, _)| k == &forward),
         "#16217 fw1 leg: pending SyncImport forward with live rev must be in ct-slice pairs"
     );
     assert!(
-        !pairs.iter().any(|(k, _)| k == &reverse),
+        !pairs.iter().any(|(k, _, _, _, _)| k == &reverse),
         "#16217 fw1 leg: reverse row must not be a ct-slice forward pair"
     );
     // Strict-established set still excludes it (premise for why the

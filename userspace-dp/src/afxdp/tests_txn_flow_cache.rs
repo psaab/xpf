@@ -492,6 +492,7 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         shared_sessions.lock().expect("shared sessions").insert(
                 key.clone(),
             SyncedSessionEntry {
+                sibling_last_seen_ns: 0,
                 key: key.clone(),
                 decision: stored_decision,
                 metadata: metadata(false),
@@ -855,6 +856,7 @@ fn txn_missing_neighbor_pressure_shed_gate_failure_retries_nat64_cleanup_13764()
     shared_sessions.lock().expect("shared sessions").insert(
         victim_key.clone(),
         SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: victim_key.clone(),
         decision: victim_entry.decision,
         metadata: victim_entry.metadata,
@@ -1053,6 +1055,7 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
     shared_sessions.lock().expect("shared sessions").insert(
             victim_key.clone(),
         SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: victim_key.clone(),
             decision: victim_entry.decision,
             metadata: victim_entry.metadata,
@@ -6083,6 +6086,7 @@ fn cross_worker_reply_evidence_retains_victim_16019() {
         }
     };
     let reverse_entry = |rev_packets: u64| SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: reverse_key.clone(),
         decision,
         metadata: meta.clone(),

@@ -136,6 +136,7 @@ pub(super) fn imported_pair_entry(
 ) -> SyncedSessionEntry {
     let next_hop = key.dst_ip;
     SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key,
         decision: SessionDecision {
             resolution: ForwardingResolution {
@@ -2218,6 +2219,7 @@ fn worker_alias_import_books_no_translation_18531() {
     let canonical_key = crate::afxdp::testfx::test_key();
     let alias_key = crate::session::forward_wire_key(&canonical_key, nat);
     let entry = |key: crate::session::SessionKey| SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key,
         decision: SessionDecision {
             resolution: crate::afxdp::testfx::test_resolution(),

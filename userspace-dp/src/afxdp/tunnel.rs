@@ -130,6 +130,7 @@ pub(super) fn tun_origin_session_entry(
     tcp_flags_frame: &[u8],
 ) -> SyncedSessionEntry {
     SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key,
         decision,
         metadata: SessionMetadata {

@@ -508,6 +508,7 @@ fn established_ri_snat_forward_11061(
     sessions.mark_source_nat_revalidated(&forward_key, Some(false));
 
     let shared_entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: forward_key,
     decision,
     metadata,
@@ -2996,6 +2997,7 @@ mod pressure_shed_matrix_17012 {
         shared_sessions.lock().expect("shared sessions").insert(
             victim_key.clone(),
             crate::afxdp::SyncedSessionEntry {
+                sibling_last_seen_ns: 0,
                 key: victim_key.clone(),
                 decision: victim_entry.decision,
                 metadata: victim_entry.metadata.clone(),
@@ -3214,6 +3216,7 @@ mod pressure_shed_matrix_17012 {
         shared_sessions.lock().expect("shared sessions").insert(
             victim_key.clone(),
             crate::afxdp::SyncedSessionEntry {
+                sibling_last_seen_ns: 0,
                 key: victim_key.clone(),
                 decision: victim_entry.decision,
                 metadata: victim_entry.metadata.clone(),
@@ -6081,6 +6084,7 @@ fn ha_synced_reverse_sessions_impl_15958(
         (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
     ] {
         let entry = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: crate::session::SessionKey {
             addr_family: libc::AF_INET as u8,
             protocol,
@@ -6400,6 +6404,7 @@ fn fw0_both_halves_sessions_15958b(forwarding: &ForwardingState, now_ns: u64) ->
         (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
     ] {
         let entry = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: crate::session::SessionKey {
             addr_family: libc::AF_INET as u8,
             protocol,
@@ -7195,6 +7200,7 @@ fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64)
         (PROTO_ICMPV6, 0x1234u16, 0u16, 0u8),
     ] {
         let entry = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: crate::session::SessionKey {
             addr_family: libc::AF_INET6 as u8,
             protocol,
@@ -7775,6 +7781,7 @@ fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(
         (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
     ] {
         let entry = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: crate::session::SessionKey {
             addr_family: libc::AF_INET as u8,
             protocol,

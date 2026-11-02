@@ -272,6 +272,7 @@ fn shared_refs_conntrack_v4_reaches_purge_16185() {
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
         &SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: wire_key.clone(),
             decision,
             metadata: metadata.clone(),

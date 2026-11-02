@@ -170,7 +170,7 @@ fn probe_publish(
     decision: SessionDecision,
     metadata: SessionMetadata,
 ) {
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata,
     leak_incarnation: 0,

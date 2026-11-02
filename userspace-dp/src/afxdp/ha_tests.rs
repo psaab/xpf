@@ -318,6 +318,7 @@ fn update_ha_state_prewarms_split_rg_reverse_sessions_on_activation() {
     );
 
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -436,6 +437,7 @@ fn update_ha_state_demotion_recovers_from_poisoned_worker_command_mutex() {
     // demotion must flip its origin to a peer-synced one via
     // demote_shared_owner_rgs.
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -564,6 +566,7 @@ fn prewarm_recovers_from_poisoned_shared_session_mutex() {
     let worker_commands = Arc::new(Mutex::new(VecDeque::new()));
 
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -732,6 +735,7 @@ fn merge_owner_rg_candidate_keys_scales_linearly_not_quadratically() {
 
 fn synced_entry_with_generation(generation: u64) -> SyncedSessionEntry {
     SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -1043,6 +1047,7 @@ fn upsert_peer_against_local_arriving_during_snapshot_window_keeps_local_13709()
 // clean assertions. Target-count = 1 gate site.
 fn synced_entry_port(port: u16, generation: u64) -> SyncedSessionEntry {
     SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: SessionKey {
         src_port: port,
         ..test_key()
@@ -1751,6 +1756,7 @@ fn coordinator_with_tunnel_session(tunnel_endpoint_id: u16) -> (Coordinator, Ses
     decision.resolution.tunnel_endpoint_id = tunnel_endpoint_id;
     let key = test_key();
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
     decision,
     metadata: test_metadata(), // is_reverse = false -> emits a close delta
@@ -2002,6 +2008,7 @@ fn bulk_export_stamps_established_on_shared_reverse_count_16217() {
 
     let mk = |port: u16, rev_packets: u64, reverse: bool| {
         let mut entry = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: test_key(),
         decision: test_decision(),
         metadata: test_metadata(),
@@ -2107,6 +2114,7 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
     coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
 
     let base = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -2294,6 +2302,7 @@ fn from_shared_carries_every_shared_field_on_bulk_open_and_purge_close_17122() {
     let handshake = crate::session::TcpHandshakeState::HandshakePending.to_wire();
 
     let mut entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
         decision: test_decision(),
         metadata: test_metadata(),
@@ -3064,6 +3073,7 @@ fn synced_import_zone_unresolved_counts_only_real_degradation_7209() {
 
 fn reserve6600_entry(src_port: u16, pool_port: u16) -> SyncedSessionEntry {
     SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: SessionKey {
         src_port,
         ..test_key()
@@ -3289,6 +3299,7 @@ fn upsert_synced_session_rolls_back_source_nat_when_nat64_refuses_6600() {
     // A NAT64 decision naming pool port 51000 on 203.0.113.1.
     let nat64_port: u16 = 51000;
     let mk = |src_port: u16| SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: SessionKey {
         src_port,
         ..test_key()
@@ -4700,6 +4711,7 @@ fn a_deleted_synced_session_leaves_no_reverse_prewarm_key_after_a_route_moves_72
     // is what makes the asymmetry observable at all.
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -4797,6 +4809,7 @@ fn deleting_one_synced_session_leaves_its_neighbours_in_the_reverse_prewarm_inde
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
 
     let doomed = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -4902,6 +4915,7 @@ fn a_route_move_adds_the_new_prewarm_filing_and_delete_clears_all_of_them_7209()
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -4995,6 +5009,7 @@ fn a_removal_outside_the_delete_verb_still_unfiles_the_prewarm_key_7209() {
         let mut coordinator = Coordinator::new();
         coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
         let entry = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: test_key(),
         decision: test_decision(),
         metadata: test_metadata(),
@@ -5080,6 +5095,7 @@ fn a_promoted_then_deleted_synced_session_leaves_no_prewarm_key_7209() {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -5181,6 +5197,7 @@ fn a_refresh_never_drops_a_prewarm_filing_the_current_fib_cannot_rederive_7209()
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -5318,6 +5335,7 @@ fn reverse_prewarm_owner_rg_candidates_for_test(
 #[test]
 fn an_import_under_an_emptied_forwarding_table_publishes_a_dead_reverse_companion_7209() {
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -5477,6 +5495,7 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
         },
     ]);
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -5649,6 +5668,7 @@ fn stop_inner_empties_the_forwarding_table_that_a_released_lock_would_expose_720
          is what empties it"
     );
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -5963,6 +5983,7 @@ fn both_purge_call_sites_release_against_new_forwarding_8138() {
 
 fn purge14961_nat64_entry(src_port: u16, pool_port: u16, tunnel_id: u16) -> SyncedSessionEntry {
     let mut e = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: SessionKey {
         addr_family: libc::AF_INET6 as u8,
         protocol: PROTO_TCP,
@@ -9014,6 +9035,7 @@ fn queued_stale_reverse_upsert_healed_by_positioned_refresh_9720() {
     let forward_key = test_key();
     let reverse_key = reverse_session_key(&forward_key, test_decision().nat);
     let stale_reverse = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: reverse_key.clone(),
     decision: SessionDecision {
         resolution: ForwardingResolution {
@@ -9208,6 +9230,7 @@ fn queued_forward_upsert_demoted_by_positioned_demote_9720() {
         "fixture: inactive HA enforcement must turn the live candidate into a FabricRedirect",
     );
     let forward_upsert = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
     decision: test_decision(),
         metadata: SessionMetadata {
@@ -9908,6 +9931,7 @@ fn fixture_10512_lease(
         routing_domain: 0,
     };
     let mut forward = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
     decision: SessionDecision {
         resolution: test_resolution(),
@@ -10185,6 +10209,7 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
             routing_domain: 0,
         };
         let forward = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: key.clone(),
         decision: SessionDecision {
             resolution: test_resolution(),
@@ -10307,6 +10332,7 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
         let mut metadata = test_metadata();
         metadata.is_reverse = false;
         let forward = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: key.clone(),
         decision: SessionDecision {
             resolution: test_resolution(),
@@ -11398,6 +11424,7 @@ fn coord_list_bound_shared_only_row_reports_incomplete_12072() {
         "lan->wan/tmp",
     )));
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key,
     decision: test_decision(),
     metadata,
@@ -11485,6 +11512,7 @@ fn coord_list_bound_sync_import_resolves_current_policy_id_12072() {
     let session_id = table.session_id_for(&key);
     assert_ne!(session_id, 0, "fixture must mint a live session identity");
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
     decision: test_decision(),
     metadata,
@@ -11611,6 +11639,7 @@ fn coord_list_unbound_peer_row_excluded_from_prepublish_12072() {
         let mut metadata = test_metadata();
         metadata.policy_id = policy_id;
         let entry = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key,
         decision: test_decision(),
         metadata,
@@ -11834,6 +11863,7 @@ fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
         let mut key = base.clone();
         key.routing_domain = domain;
         let entry = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key,
         decision: test_decision(),
         metadata: test_metadata(),
@@ -11899,6 +11929,7 @@ fn clear_mirror_bpf_failure_retains_authority_10512() {
     let coordinator = Coordinator::new();
     let key = test_key();
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -11975,6 +12006,7 @@ fn clear_mirror_over_old_cap_pages_to_empty_16649() {
         let mut key = test_key();
         key.src_port = 40000 + i;
         let entry = SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key,
         decision: test_decision(),
         metadata: test_metadata(),
@@ -12043,6 +12075,7 @@ fn clear_mirror_zero_batch_refused_untouched_16649() {
     let coordinator = Coordinator::new();
     let key = test_key();
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -12091,6 +12124,7 @@ fn clear_mirror_refuses_no_progress_batch_17682() {
     let coordinator = Coordinator::new();
     let key = test_key();
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
         decision: test_decision(),
         metadata: test_metadata(),
@@ -12377,6 +12411,7 @@ fn pbr_stamped_split_rg_reverse_prewarm_uses_native_table_12086() {
     let mut metadata = test_metadata();
     metadata.fabric_ingress = false;
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: test_key(),
     decision,
     metadata,
@@ -12492,6 +12527,7 @@ fn reverse_prewarm_uses_native_table_instead_of_default_12086() {
     let mut key = test_key();
     key.routing_domain = domain;
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -12544,6 +12580,7 @@ fn reverse_prewarm_unresolvable_domain_keeps_default_reply_rg_12086() {
     let mut key = test_key();
     key.routing_domain = 0x00d0_1208;
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -12711,6 +12748,7 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
     let egress = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
     let remote = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: SessionKey {
         protocol: crate::ip_proto::PROTO_UDP,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 101)),
@@ -12808,6 +12846,7 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
 
     // Control: a non-aliasing interface identity (egress:5000) still imports.
     let ok = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: SessionKey {
             src_port: 5001,
             ..key.clone()
@@ -12823,6 +12862,7 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
             install_table_check: 0,
         },
         ..SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: key.clone(),
         decision: test_decision(),
         metadata: test_metadata(),

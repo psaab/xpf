@@ -113,6 +113,7 @@ fn lease_fixture(now_ns: u64) -> LeaseFixture {
     metadata.is_reverse = false;
     metadata.owner_rg_id = 1;
     let shared_entry = crate::afxdp::SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: inbound_key,
         decision: SessionDecision {
             resolution: test_resolution(),

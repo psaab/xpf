@@ -98,8 +98,15 @@ pub(super) fn run_session_housekeeping(
     // the shared synced map's Established wire for the tuple (the
     // counter half is merged from this table's own serving stamps
     // inside the expire pass).
+    let shared_evidence_max_cadence_ns =
+        crate::session::NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS.max(
+            super::slice_pacing::shared_evidence_max_cadence_ns(sessions.ct_refresh_slab_len()),
+        );
     let node_served = |key: &crate::session::SessionKey| {
-        crate::afxdp::shared_ops::shared_node_served_evidence(shared_sessions, key)
+        let mut evidence =
+            crate::afxdp::shared_ops::shared_node_served_evidence(shared_sessions, key);
+        evidence.shared_evidence_max_cadence_ns = Some(shared_evidence_max_cadence_ns);
+        evidence
     };
     let ha_ctx = crate::session::ExpireHaContext {
         node_active,

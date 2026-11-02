@@ -8325,6 +8325,7 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                         let reverse_session_id =
                                             sessions.session_id_for(&reverse_key);
                                         let reverse_entry = SyncedSessionEntry {
+                                            sibling_last_seen_ns: 0,
                                             key: reverse_key,
                                             decision: reverse_decision,
                                             metadata: reverse_metadata,
@@ -10728,11 +10729,12 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                     if let Some(flow) = flow.as_ref() {
                         // #2749: observe TCP control bits + DSCP alongside the
                         // volume (see flow_cache_hit.rs).
-                        sessions.account_packet(
+                        sessions.account_packet_at(
                             &flow.forward_key,
                             meta.pkt_len as u64,
                             meta.tcp_flags,
                             meta.dscp,
+                            now_ns,
                         );
                     }
                     // Direction-specific tracking

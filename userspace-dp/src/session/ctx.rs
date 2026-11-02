@@ -212,6 +212,37 @@ pub(crate) struct NodeServedEvidence {
     /// an Established row. Input evidence only — never set from a
     /// shared row's Established wire.
     pub(crate) served_completed: bool,
+    /// #18722: recency is tracked PER CONTRIBUTOR, not as one sum. Local and
+    /// shared packet counts are `Some(count)` only while their source rows
+    /// exist; a count or shared incarnation change is activity for Opening
+    /// rows and completed replicas. Completed local rows additionally use
+    /// `shared_sibling_last_seen_ns`: their own frozen max count is not proof
+    /// that a different worker is serving this flow. A contributor that
+    /// disappears is neither activity nor silence. Sums can rise falsely when
+    /// a dead companion disappears, or hide live replacement when its count
+    /// falls. Read ONLY by the expiry retention arm, never as completion input.
+    ///
+    /// This table's contributor: the pair's FORWARD row `fwd+rev` counters
+    /// plus its node-served stamps, `Some` while that forward row exists.
+    pub(crate) local_served: Option<u64>,
+    /// The serving row's stable session identity and HA generation. The
+    /// expiry pass treats a changed nonzero identity as activity even when
+    /// replacement reuses the prior packet total (the 300 -> removed -> 300
+    /// ABA); both zero is the legacy/unknown sentinel.
+    pub(crate) shared_incarnation: Option<(u64, u64)>,
+    /// The current worker's computed maximum shared-evidence restamp cadence.
+    /// Production fills this from its live session-table slab; `None` uses the
+    /// default-cap bound for isolated expiry contexts and model tests.
+    pub(crate) shared_evidence_max_cadence_ns: Option<u64>,
+    /// The shared synced row's contributor: the matched Established row's
+    /// `fwd_packets + rev_packets`, restamped from the serving worker's live
+    /// counters by the ct-slice. `Some` while that row exists.
+    pub(crate) shared_served: Option<u64>,
+    /// #18742 Cycle 3: newest last-seen packet timestamp published by any
+    /// sibling worker for this canonical shared row. Unlike cumulative
+    /// counters, this advances even when the sibling's totals trail the
+    /// owner worker's max.
+    pub(crate) shared_sibling_last_seen_ns: Option<u64>,
     /// The Established wire came from the node's SHARED synced map:
     /// a serving worker published/restamped it only after its own
     /// pair completed the handshake. Trusted as completion proof on

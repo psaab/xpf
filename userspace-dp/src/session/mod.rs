@@ -290,6 +290,11 @@ mod wheel;
 use wheel::SessionWheel;
 
 const SESSION_GC_INTERVAL_NS: u64 = 1_000_000_000;
+/// #18742: default shared-evidence cadence bound at the default per-worker
+/// session cap and its 2x HA-import population (12.8 s, rounded up). Production
+/// expiry contexts compute the bound from their actual session-table slab so
+/// larger imported populations cannot age out a live replica before restamping.
+pub(crate) const NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS: u64 = 13_000_000_000;
 /// #10591: test-only names for the production cadence constants. The window
 /// harness must derive its MAX values from the same values that gate the real
 /// worker sweep and advance the real timer wheel; a copied literal can make a
@@ -1231,6 +1236,9 @@ struct SessionEntry {
     origin: SessionOrigin,
     install_epoch: u64,
     last_seen_ns: u64,
+    /// Latest admitted packet time, kept distinct from `last_seen_ns`, which
+    /// expiry and HA maintenance may re-stamp without packet activity.
+    last_packet_seen_ns: u64,
     /// #2465: monotonic (`CLOCK_MONOTONIC`) nanosecond timestamp at which this
     /// entry was first installed. Unlike `last_seen_ns` it is write-once: it is
     /// NOT re-stamped by `touch`/`update_session`/`refresh_for_ha_transition`,
@@ -1521,6 +1529,16 @@ struct SessionEntry {
     /// pre-close volume must not retain it. Forward entry only
     /// (counters fold there); 0 for a not-yet-closing entry.
     closing_counters_seen: u64,
+    /// #18722/#18742: per-row baselines for the node-level retention arm,
+    /// one per evidence contributor. A PRESENT contributor whose count or
+    /// shared-row incarnation changed is recent service; an absent contributor
+    /// is neither activity nor silence. The last-change clock is not advanced
+    /// by the bounded cadence grace, so a frozen source still ages out.
+    node_served_seen_local: u64,
+    node_served_seen_shared: u64,
+    node_served_seen_shared_session_id: u64,
+    node_served_seen_shared_generation: u64,
+    node_served_last_change_ns: u64,
     /// #2749: the IP ToS byte observed on the FORWARD direction of this
     /// session (DSCP in the high 6 bits, ECN cleared — the shim meta carries
     /// only the 6-bit DSCP). Stamped from `meta.dscp << 2` on every forward
@@ -1882,6 +1900,7 @@ struct ProbeHalfUndo {
     handshake_pending: bool,
     syn_ack_first: bool,
     last_seen_ns: u64,
+    last_packet_seen_ns: u64,
     expires_after_ns: u64,
 }
 
@@ -1896,6 +1915,7 @@ impl ProbeHalfUndo {
             handshake_pending: entry.handshake_pending,
             syn_ack_first: entry.syn_ack_first,
             last_seen_ns: entry.last_seen_ns,
+            last_packet_seen_ns: entry.last_packet_seen_ns,
             expires_after_ns: entry.expires_after_ns,
         }
     }
@@ -2842,6 +2862,11 @@ impl SessionTable {
         );
         self.session_id_worker_hi = namespace << 48;
     }
+    /// Namespace of session ids minted by this worker. Shared restamp
+    /// evidence uses it to distinguish the owning worker from siblings.
+    pub(crate) fn session_id_namespace(&self) -> u16 {
+        (self.session_id_worker_hi >> 48) as u16
+    }
 
     /// #4915 + #6311: allocate the next STABLE session id for a freshly-installed
     /// entry. Node bit + worker id in the high 16 bits, per-worker monotonic
@@ -3581,6 +3606,9 @@ impl SessionTable {
     ) -> Option<crate::afxdp::SyncedSessionEntry> {
         let entry = self.entry_by_key(key)?;
         Some(crate::afxdp::SyncedSessionEntry {
+            // This local snapshot has no sibling-owned packet timestamp;
+            // publish_shared_session preserves the prior same-ID value.
+            sibling_last_seen_ns: 0,
             key: key.clone(),
             decision: entry.decision,
             metadata: entry.metadata.clone(),
@@ -3962,6 +3990,13 @@ impl SessionTable {
         // held an orphan record from a partial cleanup path.
         self.key_to_handle.len()
     }
+    /// #18742: live slot extent used by the budgeted ct-refresh walk. Match
+    /// `iter_with_idle_budgeted`'s bound so the shared-evidence cadence scales
+    /// with imported sessions even when their count exceeds `max_sessions`.
+    pub(crate) fn ct_refresh_slab_len(&self) -> usize {
+        self.slot_high_watermark.min(self.entries.capacity())
+    }
+
 
     pub fn max_sessions(&self) -> usize {
         self.max_sessions
@@ -4760,6 +4795,7 @@ impl SessionTable {
             let mut seen = snap.last_seen_ns;
             if let Some(entry) = table.entry_by_key_mut(half_key) {
                 entry.counters = snap.counters;
+                entry.last_packet_seen_ns = snap.last_packet_seen_ns;
                 entry.observed_tcp_flags = snap.observed_tcp_flags;
                 entry.observed_tos = snap.observed_tos;
                 entry.established = snap.established;
@@ -4921,6 +4957,9 @@ impl SessionTable {
                     // check after the borrow instead of refusing.
                     companion_crossed = true;
                 } else {
+                // The cache probe precedes optional output admission; its undo
+                // snapshot restores this stamp if a later filter/policer drops.
+                entry.last_packet_seen_ns = now_ns;
                 // #18520: a live cache hit on this table. Stored only on
                 // change: a steady-state hit on a reverse row is otherwise
                 // read-only (accounting folds onto the forward row), and an
@@ -5567,7 +5606,26 @@ impl SessionTable {
     /// FORWARD entry, exactly like the reverse counters, so a single close
     /// harvest sees the whole flow.
     #[inline]
+    #[cfg(test)]
     pub fn account_packet(&mut self, key: &SessionKey, len: u64, tcp_flags: u8, dscp: u8) {
+        let packet_seen_ns = self
+            .record_by_key(key)
+            .map_or(0, |record| record.entry.last_seen_ns);
+        self.account_packet_at(key, len, tcp_flags, dscp, packet_seen_ns);
+    }
+
+    /// #18742: record an admitted packet with its monotonic packet time. This
+    /// field is the sibling recency evidence exported by ct-slice; unlike
+    /// `last_seen_ns`, it is never advanced by GC or HA maintenance.
+    #[inline]
+    pub fn account_packet_at(
+        &mut self,
+        key: &SessionKey,
+        len: u64,
+        tcp_flags: u8,
+        dscp: u8,
+        packet_seen_ns: u64,
+    ) {
         // Single resolve. For the dominant FORWARD case this is the only
         // session probe `account_packet` does — read the direction and mutate
         // the `fwd` counters under this one `&mut record` borrow. For the
@@ -5575,6 +5633,7 @@ impl SessionTable {
         // tuple and fall out of this borrow before the second resolve.
         let (record_key, nat) = match self.record_by_key_mut(key) {
             Some(record) => {
+                record.entry.last_packet_seen_ns = packet_seen_ns;
                 if !record.entry.metadata.is_reverse {
                     // Forward packet → forward entry. Bump `fwd` in place and
                     // stamp the forward-direction ToS + OR the TCP flags.
@@ -6068,6 +6127,10 @@ impl SessionTable {
         self.handshake_progress_probes
             .fetch_add(1, AtomicOrdering::Relaxed);
         let mut evidence = NodeServedEvidence::default();
+        let mut local_packets = 0u64;
+        let mut stamp_packets = 0u64;
+        let mut forward_found = false;
+        let mut stamp_found = false;
         // Local serving pair, either orientation: an established,
         // non-pending, non-closing forward/reverse entry for the same
         // bare tuple whose forward counters prove reverse service.
@@ -6102,6 +6165,12 @@ impl SessionTable {
                 };
                 if let Some(fwd) = fwd {
                     evidence.rev_packets = evidence.rev_packets.max(fwd.counters.rev_packets);
+                    forward_found = true;
+                    local_packets = local_packets.max(
+                        fwd.counters
+                            .fwd_packets
+                            .saturating_add(fwd.counters.rev_packets),
+                    );
                 }
             }
         }
@@ -6110,6 +6179,8 @@ impl SessionTable {
                 evidence.handshake_wire = wire;
             }
             evidence.rev_packets = evidence.rev_packets.max(rev);
+            stamp_packets = stamp_packets.max(rev);
+            stamp_found = true;
         }
         // The stamp is keyed by the canonical forward key; a reverse
         // hit names its companion.
@@ -6120,8 +6191,17 @@ impl SessionTable {
                     evidence.handshake_wire = wire;
                 }
                 evidence.rev_packets = evidence.rev_packets.max(rev);
+                stamp_packets = stamp_packets.max(rev);
+                stamp_found = true;
             }
         }
+        // #18722: this table's contributor exists while the pair's forward
+        // row or its node-served stamp does (the stamp is dropped with the
+        // forward row; a split replica can hold a stamp with no forward row,
+        // #16223 B1). Absent, it is `None`, never 0: a reaped companion is
+        // not a drop to compare.
+        evidence.local_served = (forward_found || stamp_found)
+            .then(|| local_packets.saturating_add(stamp_packets));
         evidence
     }
 
@@ -8211,6 +8291,13 @@ mod probe_hit_14945_tests;
 #[cfg(test)]
 #[path = "split_handshake_16223_tests.rs"]
 mod split_handshake_16223_tests;
+
+// #18722: the #16223 node-level GC arm must keep only OPENING rows and only
+// on RECENT (advancing) serving evidence; an idle established flow reaps
+// with its Close.
+#[cfg(test)]
+#[path = "idle_served_keepalive_18722_tests.rs"]
+mod idle_served_keepalive_18722_tests;
 
 // #15087 (A62-01): L3 reverse bucket must stay O(1) under same-destination
 // SNAT fan-in (hashed membership + per-protocol counts, bounded probe).

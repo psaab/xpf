@@ -75,6 +75,7 @@ fn forward_entry(v6: bool, snat_port: u16, origin: SessionOrigin) -> SyncedSessi
     let mut metadata = test_metadata();
     metadata.owner_rg_id = RG;
     SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: SessionKey {
             addr_family: family,
             protocol: PROTO_TCP,

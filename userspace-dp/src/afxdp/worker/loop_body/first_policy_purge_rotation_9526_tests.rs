@@ -180,6 +180,7 @@ fn entry(
     counter: Option<Arc<PolicyRuleCounter>>,
 ) -> SyncedSessionEntry {
     SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key,
     decision: SessionDecision {
         resolution: ForwardingResolution {

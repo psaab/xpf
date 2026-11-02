@@ -11416,6 +11416,7 @@ fn f4_seed_shared_only(
     // fixture seeded only the allocator and the binding cell failed with the
     // fix applied.
     let entry = crate::afxdp::worker::SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
     decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
@@ -11644,6 +11645,7 @@ fn nat64_14961_seed(coordinator: &mut Coordinator, worker_id: u32, port: u16) {
     );
     // Shared authority entry (the delete's NAT decision source).
     let entry = crate::afxdp::worker::SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
     decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
@@ -11987,6 +11989,7 @@ fn import_entry_9718(
     pool_port: u16,
 ) -> crate::afxdp::worker::SyncedSessionEntry {
     crate::afxdp::worker::SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: key.clone(),
     decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
@@ -14480,6 +14483,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
     }
     fn seed(coordinator: &Coordinator, key: &crate::session::SessionKey) {
         let entry = crate::afxdp::worker::SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: key.clone(),
         decision: crate::afxdp::SessionDecision {
             resolution: crate::afxdp::ForwardingResolution {
@@ -14588,6 +14592,7 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
         routing_domain: 0,
     };
     let entry = crate::afxdp::worker::SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: target.clone(),
     decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
@@ -14690,6 +14695,7 @@ fn synced_delete_mode_parity_exact_vs_tunnel_variants_17133() {
     }
     fn seed(coordinator: &Coordinator, key: &crate::session::SessionKey) {
         let entry = crate::afxdp::worker::SyncedSessionEntry {
+            sibling_last_seen_ns: 0,
             key: key.clone(),
             decision: crate::afxdp::SessionDecision {
                 resolution: crate::afxdp::ForwardingResolution {

@@ -1111,7 +1111,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
 
-    let shared_entry = SyncedSessionEntry { key: key.clone(),
+    let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision: SessionDecision {
         resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"),
         nat: NatDecision {
@@ -1292,7 +1292,7 @@ fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
         let mut ha_state = BTreeMap::new();
         ha_state.insert(1, active_ha_runtime(1));
 
-        let shared_entry = SyncedSessionEntry { key: key.clone(),
+        let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: SessionDecision {
             resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"),
             nat: NatDecision {
@@ -1401,7 +1401,7 @@ fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
-        &SyncedSessionEntry { key: forward_key.clone(),
+        &SyncedSessionEntry { sibling_last_seen_ns: 0, key: forward_key.clone(),
         decision,
         metadata,
         leak_incarnation: 0,
@@ -1550,7 +1550,7 @@ fn cached_session_resolution_skips_fabric_redirect() {
 fn lookup_session_across_scopes_returns_shared_entry() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision: test_decision(),
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -1695,7 +1695,7 @@ fn syn_on_closing_tuple_preserves_shared_close_before_authority_10886() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     shared_sessions.lock().expect("shared lock").insert(
         forward.clone(),
-        SyncedSessionEntry { key: forward.clone(),
+        SyncedSessionEntry { sibling_last_seen_ns: 0, key: forward.clone(),
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -1999,7 +1999,7 @@ fn lookup_session_across_scopes_returns_shared_forward_wire_entry() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -2116,7 +2116,7 @@ fn lookup_session_across_scopes_prefers_shared_entry_over_fabric_wire_placeholde
         PROTO_TCP,
         0,
     ));
-    let shared_entry = SyncedSessionEntry { key: key.clone(),
+    let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -2186,7 +2186,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -2266,6 +2266,7 @@ fn ambiguous_local_reverse_lookup_blocks_shared_fallback_16014() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let owner_indexes = SharedSessionOwnerRgIndexes::default();
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: forward1.clone(),
         decision,
         metadata: test_metadata(),
@@ -2433,7 +2434,7 @@ fn zone_matching_shared_reverse_reply_uses_forward_egress_domain_11298() {
     forward.routing_domain = DOMAIN_A;
     let decision = test_decision();
     let metadata = test_metadata();
-    let entry = SyncedSessionEntry { key: forward.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: forward.clone(),
     decision,
     metadata,
     leak_incarnation: 0,
@@ -2498,7 +2499,7 @@ fn zone_matching_shared_reverse_reply_uses_forward_egress_domain_11298() {
     forward_zero.routing_domain = 0;
     let mut default_egress_decision = decision;
     default_egress_decision.resolution.egress_ifindex += 1;
-    let zero_entry = SyncedSessionEntry { key: forward_zero.clone(),
+    let zero_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: forward_zero.clone(),
     decision: default_egress_decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -2607,7 +2608,7 @@ fn embedded_quote_reverse_lookup_allows_off_path_domain_11298() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let owner_indexes = SharedSessionOwnerRgIndexes::default();
-    let entry = SyncedSessionEntry { key: forward.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: forward.clone(),
     decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -2691,7 +2692,7 @@ fn embedded_quote_reverse_lookup_rejects_cross_domain_collision_11298() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let owner_indexes = SharedSessionOwnerRgIndexes::default();
     for forward in [&forward_a, &forward_b] {
-        let entry = SyncedSessionEntry { key: forward.clone(),
+        let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: forward.clone(),
         decision,
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -2738,7 +2739,7 @@ fn embedded_quote_reverse_lookup_rejects_cross_domain_collision_11298() {
     let mixed_shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let mixed_shared_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let mixed_owner_indexes = SharedSessionOwnerRgIndexes::default();
-    let mixed_entry = SyncedSessionEntry { key: forward_a.clone(),
+    let mixed_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: forward_a.clone(),
     decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -2821,7 +2822,7 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
         PROTO_TCP,
         0,
     ));
-    let shared_entry = SyncedSessionEntry { key: key.clone(),
+    let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -2930,7 +2931,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -2992,7 +2993,7 @@ fn lookup_forward_nat_across_scopes_returns_nonzero_domain_canonical_reverse_ent
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -3057,7 +3058,7 @@ fn shared_nat_nonzero_canonical_alias_refuses_other_wire_owner() {
         rewrite_src_port: Some(key_a.src_port),
         ..NatDecision::default()
     };
-    let entry = |key, nat| SyncedSessionEntry { key,
+    let entry = |key, nat| SyncedSessionEntry { sibling_last_seen_ns: 0, key,
     decision: SessionDecision {
         resolution: test_resolution(),
         nat,
@@ -3140,7 +3141,7 @@ fn shared_nat_fallback_does_not_borrow_main_for_quarantined_domain_11061() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -3200,7 +3201,7 @@ fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -3256,7 +3257,7 @@ fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
 // The wire lookup must fail closed while W is ambiguous, and must resolve
 // again to the survivor once the displacing owner is removed.
 fn wire_ambiguity_entry(vip: Ipv4Addr, backend: Ipv4Addr) -> SyncedSessionEntry {
-    SyncedSessionEntry { key: SessionKey {
+    SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 50)),
@@ -3437,7 +3438,7 @@ fn remove_shared_session_if_resolves_wire_survivor_from_owner_index_15106() {
             install_table_domain: 0,
             install_table_check: 0,
         };
-        let entry = SyncedSessionEntry { key,
+        let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key,
         decision,
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -3647,7 +3648,7 @@ fn remove_shared_session_if_nat_removal_cost_15106() {
                 &shared_nat_sessions,
                 &shared_forward_wire_sessions,
                 &shared_owner_rg_indexes,
-                &SyncedSessionEntry { key,
+                &SyncedSessionEntry { sibling_last_seen_ns: 0, key,
                 decision,
                 metadata: test_metadata(),
                 leak_incarnation: 0,
@@ -3716,7 +3717,7 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -3815,7 +3816,7 @@ fn assert_shared_nat_mixed_zero_reverse_matches_worker_local_11361(
         key
     );
 
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -3878,7 +3879,7 @@ fn shared_nat_mixed_zero_refuses_ambiguous_tenant_alias_11361() {
     key_b.routing_domain = DOMAIN_B;
     key_b.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 103));
 
-    let entry = |key: SessionKey| SyncedSessionEntry { key,
+    let entry = |key: SessionKey| SyncedSessionEntry { sibling_last_seen_ns: 0, key,
     decision: SessionDecision {
         resolution: test_resolution(),
         nat,
@@ -3972,7 +3973,7 @@ fn shared_nat_exact_hit_refuses_ambiguous_same_domain_owner_14384() {
     key2.routing_domain = DOMAIN_D;
     key2.dst_ip = IpAddr::V4(Ipv4Addr::new(172, 16, 84, 2));
 
-    let entry = |key: SessionKey| SyncedSessionEntry { key,
+    let entry = |key: SessionKey| SyncedSessionEntry { sibling_last_seen_ns: 0, key,
     decision: SessionDecision {
         resolution: test_resolution(),
         nat,
@@ -4081,7 +4082,7 @@ fn publish_and_remove_shared_session_tracks_owner_rg_indexes() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -4176,7 +4177,7 @@ fn publish_shared_session_reindexes_owner_rg_on_replace() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    let mut entry = SyncedSessionEntry { key: test_key(),
+    let mut entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -4231,7 +4232,7 @@ fn publish_shared_session_heals_missing_owner_rg_index_on_same_owner_update() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -4292,7 +4293,7 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
         install_table_check: 0,
     };
     let translated_key = forward_wire_key(&key, decision.nat);
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -4382,7 +4383,7 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
         install_table_check: 0,
     };
     let translated_key = forward_wire_key(&key, decision.nat);
-    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -4505,7 +4506,7 @@ fn fabric_ingress_adopts_established_synced_wire_session_16217() {
     };
     let translated_key = forward_wire_key(&key, decision.nat);
     let established = crate::session::TcpHandshakeState::Established.to_wire();
-    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -4596,6 +4597,8 @@ fn fabric_ingress_adopts_established_synced_wire_session_16217() {
         &shared_forward_wire_sessions,
         &pending.key,
         pending.decision.nat,
+        0,
+        0,
         6,
         3,
     );
@@ -4688,7 +4691,7 @@ fn fabric_gate_adopts_on_local_established_when_shared_pending_16217() {
     let now = 1_000_000u64;
     // Shared maps: ONLY a w=2 forward SyncImport replica (the fw0-import
     // shape) — the pre-existing shared gate must decline on it alone.
-    let shared_entry = SyncedSessionEntry { key: key.clone(),
+    let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -4927,7 +4930,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
     };
     let translated_key = forward_wire_key(&key, decision.nat);
     let established = crate::session::TcpHandshakeState::Established.to_wire();
-    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -5200,7 +5203,7 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
     };
     let translated_key = forward_wire_key(&key, decision.nat);
     let established = crate::session::TcpHandshakeState::Established.to_wire();
-    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -5461,7 +5464,7 @@ fn adopted_cluster_terminal_recomputes_from_fib_16217() {
         };
         let translated_key = forward_wire_key(&key, decision.nat);
         let established = crate::session::TcpHandshakeState::Established.to_wire();
-        let entry = SyncedSessionEntry { key: translated_key.clone(),
+        let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
         decision,
         metadata: SessionMetadata { forward_ingress_vlan_id: None,
         nat_scope_ifindex: None, ..test_metadata() },
@@ -5850,7 +5853,7 @@ fn adopted_cluster_terminal_live_fib_shape_16217() {
         };
         let translated_key = forward_wire_key(&key, decision.nat);
         let established = crate::session::TcpHandshakeState::Established.to_wire();
-        let entry = SyncedSessionEntry { key: translated_key.clone(),
+        let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
         decision,
         metadata: SessionMetadata { forward_ingress_vlan_id: None,
         nat_scope_ifindex: None, ..test_metadata() },
@@ -6035,7 +6038,7 @@ fn gate_falls_back_to_stored_forward_candidate_on_standby_fib_16217() {
             install_table_check: 0,
         };
         let established = crate::session::TcpHandshakeState::Established.to_wire();
-        let entry = SyncedSessionEntry { key: wire_key.clone(),
+        let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: wire_key.clone(),
         decision,
         metadata: SessionMetadata { forward_ingress_vlan_id: None,
         nat_scope_ifindex: None, ..test_metadata() },
@@ -6567,7 +6570,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         install_table_check: 0,
     };
     let translated_key = forward_wire_key(&key, decision.nat);
-    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -6683,7 +6686,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         install_table_check: 0,
     };
     let translated_key = forward_wire_key(&key, decision.nat);
-    let entry = SyncedSessionEntry { key: translated_key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
@@ -6929,7 +6932,7 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
     commands
         .lock()
         .expect("commands lock")
-        .push_back(WorkerCommand::UpsertSynced(SyncedSessionEntry { key: key.clone(),
+        .push_back(WorkerCommand::UpsertSynced(SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: synced_decision,
         metadata: synced_metadata.clone(),
         leak_incarnation: 0,
@@ -7001,7 +7004,7 @@ fn apply_worker_commands_preserves_local_session_for_active_owner_rg() {
     commands
         .lock()
         .expect("commands lock")
-        .push_back(WorkerCommand::UpsertSynced(SyncedSessionEntry { key: key.clone(),
+        .push_back(WorkerCommand::UpsertSynced(SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: synced_decision,
         metadata: SessionMetadata { forward_ingress_vlan_id: None,
         nat_scope_ifindex: None, ..test_metadata() },
@@ -8444,7 +8447,7 @@ fn demote_shared_owner_rgs_preserves_reverse_entries_and_marks_all_synced() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    let forward = SyncedSessionEntry { key: test_key(),
+    let forward = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -8457,7 +8460,7 @@ fn demote_shared_owner_rgs_preserves_reverse_entries_and_marks_all_synced() {
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
             persistent_lease_hold: None,
     source_nat_static: None, };
-    let reverse = SyncedSessionEntry { key: reverse_session_key(&forward.key, forward.decision.nat),
+    let reverse = SyncedSessionEntry { sibling_last_seen_ns: 0, key: reverse_session_key(&forward.key, forward.decision.nat),
     decision: test_decision(),
     metadata: SessionMetadata { ingress_ifindex: 0,
     ingress_vlan_id: 0,
@@ -8533,7 +8536,7 @@ fn demote_shared_owner_rgs_preserves_tun_origin_10402() {
         rewrite_src_port: Some(40_001),
         ..NatDecision::default()
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -8612,7 +8615,7 @@ fn demote_shared_owner_rgs_preserves_transient_seed_aliases_10402() {
         rewrite_src_port: Some(40_001),
         ..NatDecision::default()
     };
-    let seed = SyncedSessionEntry { key: seed_key.clone(),
+    let seed = SyncedSessionEntry { sibling_last_seen_ns: 0, key: seed_key.clone(),
     decision: seed_decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -8632,7 +8635,7 @@ fn demote_shared_owner_rgs_preserves_transient_seed_aliases_10402() {
         rewrite_src_port: Some(40_002),
         ..NatDecision::default()
     };
-    let control = SyncedSessionEntry { key: control_key.clone(),
+    let control = SyncedSessionEntry { sibling_last_seen_ns: 0, key: control_key.clone(),
     decision: control_decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -8736,7 +8739,7 @@ fn demote_reactivate_preserves_tun_origin_across_shared_aliases_10405() {
         rewrite_src_port: Some(44_101),
         ..NatDecision::default()
     };
-    let tun = SyncedSessionEntry { key: tun_key.clone(),
+    let tun = SyncedSessionEntry { sibling_last_seen_ns: 0, key: tun_key.clone(),
     decision: tun_decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -8756,7 +8759,7 @@ fn demote_reactivate_preserves_tun_origin_across_shared_aliases_10405() {
         rewrite_src_port: Some(44_102),
         ..NatDecision::default()
     };
-    let control = SyncedSessionEntry { key: control_key.clone(),
+    let control = SyncedSessionEntry { sibling_last_seen_ns: 0, key: control_key.clone(),
     decision: control_decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -8918,7 +8921,7 @@ fn demoted_shared_local_forward_session_enters_reverse_prewarm_index() {
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let forwarding = test_forwarding_state_split_rgs();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let mut entry = SyncedSessionEntry { key: test_key(),
+    let mut entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: SessionMetadata { ingress_ifindex: 0,
     ingress_vlan_id: 0,
@@ -8974,7 +8977,7 @@ fn prewarm_reverse_synced_sessions_after_demotion_recomputes_split_owner_reverse
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let mut ha_state = BTreeMap::new();
     ha_state.insert(2, active_ha_runtime(1));
-    let mut entry = SyncedSessionEntry { key: test_key(),
+    let mut entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: SessionMetadata { ingress_ifindex: 0,
     ingress_vlan_id: 0,
@@ -9985,7 +9988,7 @@ fn synthesized_synced_reverse_entry_preserves_fabric_ingress_and_reverse_flag() 
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let mut metadata = test_metadata();
     metadata.fabric_ingress = true;
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata,
     leak_incarnation: 0,
@@ -10049,7 +10052,7 @@ fn synthesized_synced_reverse_entry_carries_no_ingress_identity_7917() {
     let mut metadata = test_metadata();
     metadata.ingress_ifindex = 4242;
     metadata.ingress_vlan_id = 80;
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata,
     leak_incarnation: 0,
@@ -10116,7 +10119,7 @@ fn synthesized_synced_reverse_entry_inherits_nat64_reverse_4565() {
 
     // NAT64 forward flow keyed on the original IPv6 5-tuple; the decision
     // rewrites to an IPv4 pool source + IPv4 destination (nat64 = true).
-    let entry = SyncedSessionEntry { key: SessionKey {
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey {
         addr_family: libc::AF_INET6 as u8,
         protocol: PROTO_TCP,
         src_ip: IpAddr::V6(orig_src_v6),
@@ -10204,7 +10207,7 @@ fn reverse_companion_inherits_forward_inactivity_timeout_5153() {
     let mut metadata = test_metadata();
     metadata.inactivity_timeout_ns = Some(APP_TIMEOUT_NS);
 
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata,
     leak_incarnation: 0,
@@ -10248,7 +10251,7 @@ fn reverse_companion_inherits_forward_close_class_9412() {
     let forwarding = test_forwarding_state();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     for class in [0u8, 1, 2, 3] {
-        let entry = SyncedSessionEntry { key: test_key(),
+        let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -10344,7 +10347,7 @@ fn synthesized_synced_reverse_entry_tracks_local_client_when_owner_rg_active() {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let mut metadata = test_metadata();
     metadata.fabric_ingress = true;
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata,
     leak_incarnation: 0,
@@ -10379,7 +10382,7 @@ fn synthesized_synced_reverse_entry_uses_fabric_redirect_when_client_rg_inactive
     metadata.ingress_zone = TEST_LAN_ZONE_ID;
     metadata.egress_zone = TEST_WAN_ZONE_ID;
     metadata.fabric_ingress = false;
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata,
     leak_incarnation: 0,
@@ -10633,7 +10636,7 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_adds_reverse_companion() {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: SessionMetadata { ingress_ifindex: 0,
     ingress_vlan_id: 0,
@@ -10709,7 +10712,7 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_restores_shared_promote_forward
     metadata.egress_zone = 2;
     metadata.fabric_ingress = false;
     metadata.owner_rg_id = 1;
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata,
     leak_incarnation: 0,
@@ -10786,7 +10789,7 @@ fn prewarm_reverse_synced_sessions_recomputes_when_reverse_owner_rg_activates() 
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let mut ha_state = BTreeMap::new();
     ha_state.insert(2, active_ha_runtime(1));
-    let mut entry = SyncedSessionEntry { key: test_key(),
+    let mut entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: SessionMetadata { ingress_ifindex: 0,
     ingress_vlan_id: 0,
@@ -10854,7 +10857,7 @@ fn reverse_prewarm_index_tracks_split_reverse_owner_rg_candidate() {
     let forwarding = test_forwarding_state_split_rgs();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    let mut entry = SyncedSessionEntry { key: test_key(),
+    let mut entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: SessionMetadata { ingress_ifindex: 0,
     ingress_vlan_id: 0,
@@ -10976,7 +10979,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
 
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: SessionMetadata { ingress_ifindex: 0,
     ingress_vlan_id: 0,
@@ -11091,7 +11094,7 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
-        &SyncedSessionEntry { key: key.clone(),
+        &SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: stale_fabric_decision,
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -11223,7 +11226,7 @@ fn reverse_materialized_shared_hit_adopts_replica_session_id_6313() {
             &shared_nat_sessions,
             &shared_forward_wire_sessions,
             &shared_owner_rg_indexes,
-            &SyncedSessionEntry { key,
+            &SyncedSessionEntry { sibling_last_seen_ns: 0, key,
             decision: test_decision(),
             metadata: reverse_metadata.clone(),
             leak_incarnation: 0,
@@ -11378,7 +11381,7 @@ fn apply_worker_commands_dispatch_order_pin_with_demote_dedup() {
     ));
 
     // Synced entry for the UpsertSynced step.
-    let synced_entry = SyncedSessionEntry { key: SessionKey {
+    let synced_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey {
         src_port: 44444,
         ..test_key()
     },
@@ -11643,7 +11646,7 @@ fn poison_command_queue(queue: &Arc<Mutex<VecDeque<WorkerCommand>>>) {
 }
 
 fn test_synced_entry() -> SyncedSessionEntry {
-    SyncedSessionEntry { key: test_key(),
+    SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -11772,7 +11775,7 @@ fn replicate_session_delete_delivers_to_poisoned_queue() {
 fn w3_forward_entry(src_host: u8, src_port: u16, snat_ip: Ipv4Addr) -> SyncedSessionEntry {
     // Interface-mode SNAT shape: rewrite_src set, NO source-port rewrite —
     // the portless mode that makes the reverse key collide (#1760 §2.7).
-    SyncedSessionEntry { key: SessionKey {
+    SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, src_host)),
@@ -11959,7 +11962,7 @@ fn shared_nat_displacement_counter_counts_collisions_not_republishes() {
     // swallow it (their NatDecisions differ).
     let backend = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 90));
     let client = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 120));
-    let dnat = SyncedSessionEntry { key: SessionKey {
+    let dnat = SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         src_ip: client,
@@ -12140,7 +12143,7 @@ fn capped_shared_hit_fixture_10582(
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
-        &SyncedSessionEntry { key: key.clone(),
+        &SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -12306,7 +12309,7 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::unknown(),
         },
-        shared_entry: Some(SyncedSessionEntry { key: key.clone(),
+        shared_entry: Some(SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 99,
@@ -12365,7 +12368,7 @@ fn adopted_materialize_replaces_local_incumbent_16217() {
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::unknown(),
         },
-        shared_entry: Some(SyncedSessionEntry { key: key.clone(),
+        shared_entry: Some(SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -12549,7 +12552,7 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
         .expect("shared forward-wire lock")
         .insert(
             wire_key.clone(),
-            SyncedSessionEntry { key: key.clone(),
+            SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
             decision: shared_decision,
             metadata: test_metadata(),
             leak_incarnation: 99,
@@ -12807,7 +12810,7 @@ fn resolve_shared_hit_no_incumbent_fixture_10613()
         .expect("shared forward-wire lock")
         .insert(
             wire_key.clone(),
-            SyncedSessionEntry { key: key.clone(),
+            SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
             decision: shared_decision,
             metadata: test_metadata(),
             leak_incarnation: 99,
@@ -12969,7 +12972,7 @@ fn shared_hit_materialization_marks_stale_before_policy_revalidation_10582_t5() 
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::unknown(),
         },
-        shared_entry: Some(SyncedSessionEntry { key: key.clone(),
+        shared_entry: Some(SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -13015,7 +13018,7 @@ fn shared_hit_materialization_marks_stale_before_policy_revalidation_10582_t5() 
 fn local_tunnel_pair() -> (SyncedSessionEntry, SyncedSessionEntry) {
     let forwarding = test_forwarding_state();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let forward = SyncedSessionEntry { key: test_key(),
+    let forward = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -13283,7 +13286,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    let shared_entry = SyncedSessionEntry { key: key.clone(),
+    let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: metadata.clone(),
     leak_incarnation: 0,
@@ -13458,7 +13461,7 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
             &shared_nat_sessions,
             &shared_forward_wire_sessions,
             &shared_owner_rg_indexes,
-            &SyncedSessionEntry { key: delta.key.clone(),
+            &SyncedSessionEntry { sibling_last_seen_ns: 0, key: delta.key.clone(),
             decision: delta.decision,
             metadata: delta.metadata.clone(),
             leak_incarnation: 0,
@@ -15707,7 +15710,7 @@ fn purge_translated_synced_hit_full_teardown_13674() {
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
-        &SyncedSessionEntry { key: wire_key.clone(),
+        &SyncedSessionEntry { sibling_last_seen_ns: 0, key: wire_key.clone(),
         decision,
         metadata: metadata.clone(),
         origin: SessionOrigin::SyncImport,
@@ -15823,7 +15826,7 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
     let metadata = test_metadata();
     let mut sessions = SessionTable::new();
     // Materialize as UpsertSynced does (peer-synced local row, session_id 42).
-    let entry = SyncedSessionEntry { key: wire_key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: wire_key.clone(),
     decision,
     metadata: metadata.clone(),
     leak_incarnation: 0,
@@ -15962,7 +15965,7 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
     };
     let metadata = test_metadata();
     let mut sessions = SessionTable::new();
-    let entry = SyncedSessionEntry { key: wire_key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: wire_key.clone(),
     decision,
     metadata: metadata.clone(),
     leak_incarnation: 0,
@@ -16765,7 +16768,7 @@ fn handle_upsert_synced_resolves_active_zone_pair_for_snat_reserve_6211() {
         rewrite_src_port: Some(20000),
         ..NatDecision::default()
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     // ingress_zone 1 = "lan", egress_zone 2 = "wan" — the ACTIVE's pair,
     // as carried by SessionSyncRequest's ingress_zone_id/egress_zone_id.
@@ -16883,7 +16886,7 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
         rewrite_src_port: Some(20000),
         ..NatDecision::default()
     };
-    let make_entry = || SyncedSessionEntry { key: key.clone(),
+    let make_entry = || SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     ingress_zone: 1,
@@ -17003,7 +17006,7 @@ fn nat_reverse_fixture_7169() -> (
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -17519,7 +17522,7 @@ fn f3_key_6979() -> crate::session::SessionKey {
 fn f3_entry_6979(nat: NatDecision) -> SyncedSessionEntry {
     let mut decision = test_decision();
     decision.nat = nat;
-    SyncedSessionEntry { key: f3_key_6979(),
+    SyncedSessionEntry { sibling_last_seen_ns: 0, key: f3_key_6979(),
     decision,
     metadata: SessionMetadata { forward_ingress_vlan_id: None,
     ingress_zone: 1,
@@ -18878,7 +18881,7 @@ fn install8586(sessions: &mut SessionTable, key: &SessionKey, origin: SessionOri
 fn publish8586(shared: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>, key: &SessionKey) {
     shared.lock().expect("shared sessions").insert(
         key.clone(),
-        SyncedSessionEntry { key: key.clone(),
+        SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -19040,7 +19043,7 @@ fn only_a_refused_delete_moves_the_worker_epoch_8586() {
         let mut pending = worker_queue::lock_recover(&peers[0]);
         let queued = worker_queue::push_bounded(
             &mut pending,
-            WorkerCommand::UpsertSynced(SyncedSessionEntry { key: key8586(4001),
+            WorkerCommand::UpsertSynced(SyncedSessionEntry { sibling_last_seen_ns: 0, key: key8586(4001),
             decision: test_decision(),
             metadata: test_metadata(),
             leak_incarnation: 0,
@@ -21228,7 +21231,7 @@ fn synthesized_reverse_companion_converges_session_id_across_workers_14667() {
         let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
         // A peer forward import carrying the originating node's stable id.
         let forward_id: u64 = (7u64 << 48) | 0x14667;
-        let forward_entry = SyncedSessionEntry { key: test_key(),
+        let forward_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -22366,7 +22369,7 @@ fn prewarm_skips_stale_zone_entries_10612() {
     stale_metadata.ingress_zone = 9;
     stale_metadata.egress_zone = 10;
     stale_metadata.owner_rg_id = 1;
-    let stale = SyncedSessionEntry { key: stale_key.clone(),
+    let stale = SyncedSessionEntry { sibling_last_seen_ns: 0, key: stale_key.clone(),
     decision: test_decision(),
     metadata: stale_metadata,
     leak_incarnation: 0,
@@ -22384,7 +22387,7 @@ fn prewarm_skips_stale_zone_entries_10612() {
     live_metadata.ingress_zone = 1;
     live_metadata.egress_zone = 2;
     live_metadata.owner_rg_id = 1;
-    let live = SyncedSessionEntry { key: live_key.clone(),
+    let live = SyncedSessionEntry { sibling_last_seen_ns: 0, key: live_key.clone(),
     decision: test_decision(),
     metadata: live_metadata,
     leak_incarnation: 0,
@@ -22552,7 +22555,7 @@ fn republish_bpf_skips_stale_zone_rows_10612() {
     stale_metadata.ingress_zone = 9;
     stale_metadata.egress_zone = 10;
     stale_metadata.owner_rg_id = 1;
-    let stale = SyncedSessionEntry { key: stale_key.clone(),
+    let stale = SyncedSessionEntry { sibling_last_seen_ns: 0, key: stale_key.clone(),
     decision: test_decision(),
     metadata: stale_metadata,
     leak_incarnation: 0,
@@ -22613,7 +22616,7 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::unknown(),
         },
-        shared_entry: Some(SyncedSessionEntry { key: key.clone(),
+        shared_entry: Some(SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: test_decision(),
         metadata: stale_metadata,
         leak_incarnation: 0,
@@ -25630,7 +25633,7 @@ fn prewarm_sharedpromote_nat_reservation_survives_15966r() {
     let wire_key = forward_wire_key(&orig_key, nat);
     let decision = SessionDecision { resolution: test_local_delivery_decision().resolution, nat, install_table_domain: 0, install_table_check: 0 };
     let metadata = test_metadata();
-    let mk = |origin: SessionOrigin| SyncedSessionEntry { key: wire_key.clone(), decision, metadata: metadata.clone(), leak_incarnation: 0, origin, protocol: PROTO_TCP, tcp_flags: 0x10, generation: 0, session_id: 4242, tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, source_nat_static: None, persistent_lease_hold: None
+    let mk = |origin: SessionOrigin| SyncedSessionEntry { sibling_last_seen_ns: 0, key: wire_key.clone(), decision, metadata: metadata.clone(), leak_incarnation: 0, origin, protocol: PROTO_TCP, tcp_flags: 0x10, generation: 0, session_id: 4242, tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, source_nat_static: None, persistent_lease_hold: None
 };
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();

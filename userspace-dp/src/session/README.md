@@ -600,6 +600,139 @@ per idle-crossed entry, in the GC pass only — the per-packet forwarding path i
 unchanged (the alternative, refreshing the companion on every reverse packet,
 would add a hot-path re-bucket).
 
+**Opening-replica retention on node-level evidence (#16223, recency #18722).**
+`companion_keeps_alive` refuses an Opening or handshake-pending companion by
+design (#6752/#13679), so a split-posture replica pair that never sees its
+completing segment (it is consumed on another worker or the fabric peer) would
+reap on the 20 s opening window while the flow is served elsewhere on the node.
+`opening_companion_keeps_alive` (`expire.rs`, called after
+`companion_keeps_alive` on the same `companion_eligible` path) covers that case
+from `NodeServedEvidence`: this table's serving rows and node-served stamps,
+merged in the expire pass with the HA context's `node_served` probe
+(`shared_node_served_evidence`, the shared synced row for the tuple).
+
+The evidence is scoped and bounded (#18722/#18742):
+- **Completed local rows need a real sibling.** A completed row this worker
+  authored/promoted (`established && !handshake_pending &&
+  !origin.is_peer_synced()`) normally ages on its own packet timestamp. RSS
+  may move service to a sibling worker while this row remains installed; it
+  may then use node-level evidence only when the canonical shared
+  `(session_id, generation)` exactly matches this row and the shared row carries
+  a recent sibling packet timestamp. Its own unchanged mirror, an unrelated
+  flow, or a stale timestamp cannot retain it. Completed replicas and Opening
+  rows continue to use the node-level arm for service observed elsewhere.
+- **Recent service, not cumulative proof.** `promoted_and_served()` (an
+  Established wire plus reverse counters) only ever becomes true; it never
+  becomes false again. The arm observes these separate pieces of evidence:
+  - `local_served`: this table's pair forward-row `fwd+rev` counters plus its
+    node-served stamps; the baseline is `node_served_seen_local`.
+  - `shared_served`: the matched Established shared row's canonical forward
+    `fwd+rev` count, plus stable `(session_id, generation)` identity. The
+    identity makes equal-count replacement visible; `node_served_seen_shared`
+    tracks both.
+- `shared_sibling_last_seen_ns`: the serving worker's latest admitted packet
+  time, carried by ct-slice even when its cumulative count is below an existing
+  shared max. It is exported from a dedicated packet timestamp, not the
+  expiry/HA `last_seen_ns` field that GC can re-stamp. Completed local rows
+  require this time from a different worker namespace and the exact canonical
+  identity; only its age proves sibling activity for these rows.
+
+  Counts and identities are compared per contributor, never as a sum: a
+  vanished contributor is neither activity nor silence, and a lower-count
+  replacement is activity when its identity changes. For Opening rows and
+  completed replicas, a present shared count change is activity; an unchanged
+  count remains eligible only through the computed
+  `shared_evidence_max_cadence_ns`. For completed local rows, the sibling
+  packet timestamp—not the max-only shared count—is the relevant recency proof.
+  The timestamp remains the packet's time, not the restamp's time: GC-only
+  retention cannot manufacture sibling evidence, and a quiet source still
+  ages out. Production computes the cadence bound from the live
+  session-table slab on each housekeeping pass; the default is 13 s, covering
+  the 10 s ct-slice target and the 2x default `max_sessions` population
+  (12.8 s, rounded up), while larger HA-import populations compute a longer
+  bound from their actual slab size. A live source therefore cannot be reaped
+  only because its next production restamp falls after a shorter configured
+  window.
+
+For physical GC, an idle-crossed nonclosing TCP row with a matching
+Established shared incarnation receives a retention-only deadline of
+`max(expires_after_ns, shared_evidence_max_cadence_ns + SESSION_GC_INTERVAL_NS)`.
+The expiry wheel uses the live cadence supplied by housekeeping from the same
+refresh-walk slab bound; this does not change the configured timeout used by
+packet lookups or re-stamp packet activity. The next wheel check can observe
+the sibling's packet timestamp within one additional wheel tick. If the shared
+packet time remains frozen, the row is reaped after that evidence ages out.
+
+**Decision model: one decision per PAIR (#18722/#18742).** Read this model,
+not the patch history: per-half gates and baselines produced false reaps and
+false activity, so a tuple-level KEEP aligns both halves.
+- **Unit.** The node-level arm runs when either half crosses its window. Its
+  evidence describes the tuple, so a KEEP applies to both halves
+  (`align_node_kept_companion`): this half and its companion are re-stamped to
+  `now_ns` and take the same evidence baselines; the companion's pending wheel
+  hint goes stale. If both halves have the same idle window, they then cross
+  together.
+- **Evidence.** `local_served` (this table's forward-row `fwd+rev` counters
+  plus node-served stamps), `shared_served` (the matched Established shared
+  row's canonical forward-row count and stable session identity), and
+  `shared_sibling_last_seen_ns` (the sibling worker's latest packet time).
+  Counts/identity retain Opening rows and completed replicas, including equal
+  count replacement; the sibling timestamp lets a completed local row follow
+  another worker without mistaking its own frozen max for activity. An ABSENT
+  contributor is neither activity nor silence.
+- **Both halves reap** at the first crossed check where no present contributor
+  changed or remains within cadence grace, if their idle windows match: the
+  half being checked falls through and reaps, and its companion, aligned to the
+  same instant and baselines, reaps in the same pass. With different per-zone
+  windows, each half remains on its own deadline and can reap in a different
+  pass; alignment copies the KEEP's timestamp and evidence baselines but does
+  not replace either timeout.
+- **Where the halves diverge** (each has a cell in
+  `session/idle_served_keepalive_18722_tests.rs`):
+  - a CLOSING companion is never aligned: it keeps its own close fuse
+    (#10885/#14630) and reaps on it while the other half may be kept;
+  - NON-TCP pairs never take the arm: they age on the classic rules
+    (`companion_keeps_alive`) regardless of node evidence;
+  - a COMPLETED row this node serves (`!origin.is_peer_synced()`) normally ages
+    on its own packet timestamp. If RSS moves service to another worker, it
+    may take the node-level arm only with an exact shared incarnation and a
+    recent sibling packet timestamp. As a companion of a kept half it is
+    aligned like any other row; its own baselines are not an activity source.
+  - the #16223 split REPLICA that holds only a node-served stamp and no
+    companion is decided alone, on the stamp as its local contributor.
+
+**Contract.** These bounds hold on a node that FORWARDS the session's RG, or
+on a standalone node: the HA `Age` path, where `companion_eligible` is set. On
+a node that does not forward the RG, the #2120 standby gate
+(`standby_gate_decision`, the `Hold` arm) keeps peer-synced replicas regardless
+of activity until the owner's Close/delete arrives or the stale ceiling
+(`stale_ceiling_ns`) passes. That is what keeps a long-lived flow alive across a
+failover (#131), and #18722 does not change it.
+- A completed local row with no live sibling evidence, and an idle OPENING or
+  completed replica, reaps at the first crossed check after its applicable
+  evidence becomes stale; a completed local row with no sibling activity
+  reaps one window after its last local packet and emits its Close.
+- For rows using shared count evidence, windows longer than the worker's
+  computed cycle can observe the initial count change and keep once; the next
+  crossed check reaps. For shorter configured windows, an unchanged present
+  shared count receives only the bounded cadence grace and then reaps at the
+  next crossing. Completed local rows instead follow the sibling packet time:
+  a live sibling advances it even if max-only counts do not, and a frozen
+  timestamp expires after its packet-age bound. A node-level KEEP aligns both
+  halves' timestamp and evidence baselines but does not replace their
+  configured idle windows; different per-zone windows may reap in different
+  passes (cell: `mixed_zone_windows_may_reap_pair_halves_in_different_passes_18722`).
+
+Before #18722
+the arm re-stamped every row with cumulative proof to `now_ns` on every pass. An
+idle ESTABLISHED flow (a client gone without FIN or RST) was its own proof and
+never reaped: no Close delta, no RT_FLOW close, and the session and its NAT
+binding were held until admission or the pool refused new flows. Cells:
+`session/idle_served_keepalive_18722_tests.rs` (closure-modelled HA context) and
+`afxdp/tests_idle_served_keepalive_18722.rs` (the production
+`shared_node_served_evidence` closure driven by
+`restamp_shared_packet_counts_batch`).
+
 **Reverse companion honors the app idle window (#5153).** Because the probe
 compares the companion against `companion.expires_after_ns`, the reverse
 companion built by `build_reverse_session_from_forward_match`
@@ -1448,20 +1581,25 @@ unknown-zone decline).
 Each `SessionEntry` carries a `SessionCounters` (`fwd_packets`, `fwd_bytes`,
 `rev_packets`, `rev_bytes`) — plain `u64`s, not atomics, because the
 `SessionTable` is worker-owned and single-threaded (same precedent as
-`create_drops`). Every forwarded packet is accounted via
-`SessionTable::account_packet(key, len)` on the AF_XDP forwarding hot path:
+`create_drops`). Packet counters and the admitted packet time are updated on
+the AF_XDP forwarding hot path:
 
-- the flow-cache fast path (`poll_descriptor/flow_cache_hit.rs`) accounts
-  every packet of an established flow;
+- the flow-cache fast path (`poll_descriptor/flow_cache_hit.rs`) uses the fused
+  `probe_hit_inner` accounting path; its undo snapshot restores packet time if
+  a later output filter or policer drops the hit;
 - the slow-path forward-build chokepoint (`poll_descriptor/mod.rs`, the
-  `ForwardCandidate | FabricRedirect` branch) accounts the packets that
-  reach the full forward-build — the first packet(s) of a flow before its
-  cache entry warms, and any non-cacheable flow (NAT64/NPTv6).
+  `ForwardCandidate | FabricRedirect` branch) uses
+  `SessionTable::account_packet_at(key, len, tcp_flags, dscp, packet_seen_ns)`
+  after admission — the first packets before the cache warms, and any
+  non-cacheable flow (NAT64/NPTv6).
 
-`account_packet` derives the direction from the resolved entry rather than
-trusting the flow-cache `metadata.is_reverse` (which is always `false` —
-every cache entry is built from a forward-build decision). Both directions
-are folded onto the **single canonical forward entry**: a forward packet
+The packet timestamp is independent of expiry's `last_seen_ns`, which HA and
+GC maintenance may update without packet activity. The test-only
+`account_packet` helper uses the row's current time for existing fixtures.
+`probe_hit_inner` and `account_packet_at` derive direction from the resolved
+entry, not `metadata.is_reverse` (always `false` on flow-cache entries because
+they are built from a forward decision). Both paths fold both directions onto
+the **single canonical forward entry**: a forward packet
 keys directly to it (`fwd`); a reverse packet keys to the reverse entry,
 whose `reverse_session_key(rev.key, nat)` recovers the forward tuple, and
 the volume lands on the forward entry's `rev`. This keeps the

@@ -6824,6 +6824,7 @@ fn adopted_flow_survives_subsequent_packet_revalidation_16217() {
         install_table_check: 0,
     };
     let entry = SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
         key: wire_key.clone(),
         decision: synced_decision,
         metadata: SessionMetadata {
