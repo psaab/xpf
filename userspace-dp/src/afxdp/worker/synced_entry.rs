@@ -38,12 +38,11 @@ pub(crate) struct SyncedSessionEntry {
     /// so the standby's SESSION_CLOSE RT_FLOW correlates with the primary's
     /// SESSION_CREATE across HA nodes. A legacy import carrying 0 falls back
     /// to `alloc_session_id()` (rolling-upgrade safe). #14667/#18718:
-    /// reverse companions carry a stable id derived from their forward
-    /// incarnation (`synthesized_companion_session_id`, reserved `0xFFFE`
-    /// namespace): the HA reverse synthesizer, the local `ReverseFlow` publish,
-    /// and the live-reply synthesizer all publish that companion identity, so
-    /// every worker adopts the same reverse incarnation and identity-captured
-    /// deletes cannot miss on siblings.
+    /// reverse companions carry their forward's exact full ID, including
+    /// the worker namespace. The HA reverse synthesizer, local `ReverseFlow`
+    /// publisher, and live-reply synthesizer all preserve that identity, so
+    /// distinct worker counters cannot alias and identity-captured deletes
+    /// remain stable across siblings.
     pub(crate) session_id: u64,
     /// #9412: the session's TCP close class on the HA wire (`0` = open or not
     /// carried), from `SessionSyncRequest.tcp_close_class` on a peer import.

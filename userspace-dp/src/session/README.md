@@ -2115,17 +2115,18 @@ A TCP session that closed on the node that owns it used to stay OPEN on the peer
     the established window. `companion_keeps_alive` does not read `closing`, so
     that companion can hold the closing forward alive. This is read from the code:
     the live probe could not observe the reverse half.
-  - #14667: `synthesized_synced_reverse_entry` also gives the companion ONE
-    session identity every worker adopts: `synthesized_companion_session_id`
-    derives it from the forward's stable id into the reserved `0xFFFE`
-    namespace (below the Go control plane's `0xFFFF`, #6198, and disjoint
-    from every worker namespace). With the old `session_id: 0`, each worker
+  - #14667/#18718: `synthesized_synced_reverse_entry` gives the reverse
+    companion the forward's exact full session ID, including its worker
+    namespace. The old low-48-only derivation aliased equal counters from
+    different workers and let a new forward validate an older reverse row.
+    The direction keys distinguish the halves, while sharing the ID preserves
+    the full flow incarnation. With the old `session_id: 0`, each sibling
     minted its own id in `upsert_synced_with_origin`, so the
     identity-captured `DeletePolicyBatch` companion check missed on W-1
     workers and the revoked companion survived. The live-reply synthesizer
-    (`install_reverse_session_from_forward_match`) instead publishes the id
-    it just minted locally. A forward with no stable id (0) still derives
-    0 and keeps the legacy per-worker fallback.
+    (`install_reverse_session_from_forward_match`) now uses the same full
+    forward ID. A forward with no stable ID (0) retains the legacy per-worker
+    fallback.
   - `maybe_promote_synced_session` republishes the session's LIVE class
     (`close_class_wire_for`) into the shared maps and to peer workers.
   - The Go sender never resends a lower class for the same incarnation. The sweep

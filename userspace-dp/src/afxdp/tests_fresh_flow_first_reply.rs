@@ -405,10 +405,11 @@ fn first_reply_for_another_flows_translation_keeps_the_old_arm_18710() {
     }
 }
 
-/// #18718: B retains the reverse half of a dynamic flow while A replaces the
-/// same original tuple with a static mapping to the exact same translated
-/// tuple. B must not validate its old reverse incarnation using the new
-/// forward row's static provenance.
+/// #18718: B retains worker 0's reverse half of a dynamic flow while A's
+/// worker 1 replaces the same original tuple with a static mapping to the
+/// exact same translated tuple. B must not validate its old reverse
+/// incarnation using the new forward row's static provenance, even when
+/// both workers' counters start at the same value.
 #[test]
 fn old_dynamic_reverse_does_not_borrow_same_tuple_static_forward_18710() {
     let mut dynamic_forwarding = fw1_owner_forwarding();
@@ -421,18 +422,19 @@ fn old_dynamic_reverse_does_not_borrow_same_tuple_static_forward_18710() {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha = owner_ha(now_secs);
     let shared = Shared::new();
-    let mut a = SessionTable::new();
-    a.set_forwarding_revalidation_gen(7, 9);
+    let mut a0 = SessionTable::new();
+    a0.set_session_id_namespace(0, 0);
+    a0.set_forwarding_revalidation_gen(7, 9);
     let (frame, meta) = lan_syn(POOL_CLIENT);
-    let old_create = poll(&mut a, &shared, &dynamic_forwarding, &ha, LAN, &frame, meta);
+    let old_create = poll(&mut a0, &shared, &dynamic_forwarding, &ha, LAN, &frame, meta);
     assert_eq!(old_create.session_miss, 1, "old dynamic flow is polled");
 
     let mut key = forward_key();
     key.src_ip = IpAddr::V4(POOL_CLIENT);
     key.dst_port = 5210;
-    let (old_decision, _, _) = a
+    let (old_decision, _, _) = a0
         .entry_with_origin(&key)
-        .expect("fixture: worker A created the old dynamic forward row");
+        .expect("fixture: worker 0 created the old dynamic forward row");
     let old_nat = old_decision.nat;
     let old_reverse_key = crate::session::reverse_session_key(&key, old_nat);
     let (old_reverse, old_forward_id, old_forward_static) = {
@@ -448,9 +450,13 @@ fn old_dynamic_reverse_does_not_borrow_same_tuple_static_forward_18710() {
     };
     assert_eq!(old_reverse.origin, SessionOrigin::ReverseFlow);
     assert_eq!(
-        a.session_id_for(&old_reverse_key),
+        a0.session_id_for(&old_reverse_key),
         old_reverse.session_id,
-        "A's local and published reverse identities agree"
+        "worker 0's local and published reverse identities agree"
+    );
+    assert_eq!(
+        old_reverse.session_id, old_forward_id,
+        "the old reverse carries worker 0's full forward incarnation"
     );
     assert_eq!(old_forward_static, Some(false), "old flow is dynamic SNAT");
     // B has drained the old reverse replica, but not the old forward row.
@@ -475,8 +481,8 @@ fn old_dynamic_reverse_does_not_borrow_same_tuple_static_forward_18710() {
     // Retire A's old pair and its shared rows, preserving B's already-drained
     // reverse. The next real poll creates a replacement with the exact same
     // original tuple.
-    a.delete(&key);
-    a.delete(&old_reverse_key);
+    a0.delete(&key);
+    a0.delete(&old_reverse_key);
     let _ = crate::afxdp::shared_ops::remove_shared_session_if(
         &shared.sessions,
         &shared.nat,
@@ -537,10 +543,12 @@ fn old_dynamic_reverse_does_not_borrow_same_tuple_static_forward_18710() {
         old_nat.rewrite_src_port,
         "fixture: static SNAT preserves the dynamic translated port"
     );
-    a.set_forwarding_revalidation_gen(8, 9);
+    let mut a1 = SessionTable::new();
+    a1.set_session_id_namespace(0, 1);
+    a1.set_forwarding_revalidation_gen(8, 9);
     let (frame, meta) = lan_syn(POOL_CLIENT);
     let new_create = poll_at(
-        &mut a,
+        &mut a1,
         &shared,
         &static_forwarding,
         &ha,
@@ -558,6 +566,16 @@ fn old_dynamic_reverse_does_not_borrow_same_tuple_static_forward_18710() {
         .cloned()
         .expect("static replacement is shared");
     assert_ne!(new_forward.session_id, old_forward_id, "the forward incarnation changed");
+    assert_eq!(
+        old_forward_id & 0x0000_FFFF_FFFF_FFFF,
+        new_forward.session_id & 0x0000_FFFF_FFFF_FFFF,
+        "fixture: worker counters overlap"
+    );
+    assert_ne!(
+        old_forward_id >> 48,
+        new_forward.session_id >> 48,
+        "fixture: forward IDs differ only by worker namespace"
+    );
     assert_eq!(new_forward.source_nat_static, Some(true), "the replacement is static SNAT");
     let new_reverse_key =
         crate::session::reverse_session_key(&key, new_forward.decision.nat);
@@ -569,9 +587,17 @@ fn old_dynamic_reverse_does_not_borrow_same_tuple_static_forward_18710() {
         .cloned()
         .expect("static replacement reverse is shared");
     assert_eq!(
-        a.session_id_for(&new_reverse_key),
+        new_reverse.session_id, new_forward.session_id,
+        "the new reverse carries worker 1's full forward incarnation"
+    );
+    assert_ne!(
+        new_reverse.session_id, old_reverse.session_id,
+        "same low counter with a different worker namespace is a new incarnation"
+    );
+    assert_eq!(
+        a1.session_id_for(&new_reverse_key),
         new_reverse.session_id,
-        "A's local and shared replacement reverse identities agree"
+        "worker 1's local and shared replacement reverse identities agree"
     );
     assert_eq!(new_forward.decision.nat.rewrite_src, Some(IpAddr::V4(translated)));
     assert_eq!(

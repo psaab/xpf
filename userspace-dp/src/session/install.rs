@@ -641,11 +641,11 @@ impl SessionTable {
         // self.key_to_handle.insert(...) overwrites it cleanly.
         let _previous = self.remove_entry(&key, RemovalKind::Replace);
         let epoch = self.next_epoch();
-        // #4915/#18718: select the STABLE identity for this fresh install.
-        // Ordinary sessions allocate a node-unique id; a reverse companion
-        // may supply the deterministic id derived from its forward entry.
-        // Thread it onto the entry and Open delta once so create/close RT_FLOW
-        // records share one correlatable id.
+        // #4915/#18718: select the STABLE identity for this entry. Ordinary
+        // sessions allocate a node-unique id; a reverse companion adopts the
+        // exact full ID of its forward entry, including its worker namespace.
+        // Direction keys distinguish the halves. Thread it onto the entry and
+        // Open delta once so create/close RT_FLOW records share one ID.
         let session_id = session_id
             .filter(|id| *id != 0)
             .unwrap_or_else(|| self.alloc_session_id());

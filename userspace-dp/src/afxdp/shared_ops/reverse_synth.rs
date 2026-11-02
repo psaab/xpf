@@ -368,13 +368,11 @@ pub(in crate::afxdp) fn synthesized_synced_reverse_entry_in_table(
         // #2170: the reverse companion inherits the forward entry's install
         // generation so a delete refusal is consistent across both halves.
         generation: entry.generation,
-        // #14667: derive ONE companion identity from the forward's stable
-        // id so every worker adopts the same id verbatim. Publishing 0
-        // made each sibling mint a worker-local id, and the
-        // identity-captured DeletePolicyBatch companion check then
-        // missed on W-1 workers. A forward with no stable id (0)
-        // derives 0 and keeps the legacy per-worker fallback.
-        session_id: crate::session::synthesized_companion_session_id(entry.session_id),
+        // #14667/#18718: use the forward's complete stable ID as the
+        // companion identity. Truncating its worker namespace let distinct
+        // forward incarnations alias; the tuple key distinguishes directions
+        // while the shared ID identifies their flow incarnation.
+        session_id: entry.session_id,
         // #9412: the reverse half carries the SAME close class as the forward
         // import. With 0, every close-state Update (and the takeover prewarm)
         // re-installed the reverse copy on the established window, and

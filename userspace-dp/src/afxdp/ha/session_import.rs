@@ -2335,17 +2335,10 @@ impl crate::afxdp::ha::SessionDomain {
             None,
             false,
             0,
-            // #14667: the companion's expected identity is the one the
-            // synthesizer derived from the OWNER forward's stable id, not
-            // the legacy 0 sentinel. With 0 here the under-lock check
-            // required the live companion to still carry 0, which the
-            // derived-id publish no longer does, so a same-key NAT
-            // replacement would never retire its orphaned companion.
-            Some((
-                owner.key.clone(),
-                owner.generation,
-                crate::session::synthesized_companion_session_id(owner.session_id),
-            )),
+            // #14667/#18718: the reverse companion shares the owner's full
+            // forward session ID. This preserves the worker namespace so a
+            // same-low-counter flow from another worker cannot match it.
+            Some((owner.key.clone(), owner.generation, owner.session_id)),
             Some(lease),
         )
     }

@@ -8028,11 +8028,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.protocol,
                                                 meta.tcp_flags,
                                                 None,
-                                                crate::session::synthesized_companion_session_id(
-                                                    forward_install_info
-                                                        .expect("installed forward session info")
-                                                        .session_id,
-                                                ),
+                                                forward_install_info
+                                                    .expect("installed forward session info")
+                                                    .session_id,
                                             );
                                     if forward_installed
                                         && install_local_reverse
@@ -8172,11 +8170,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             tcp_flags: meta.tcp_flags,
                                             // Local reverse-flow learn (#2170): no peer gen.
                                             generation: 0,
-                                            // #18718: publish the reverse row with
-                                            // the forward incarnation's derived
-                                            // companion id. A sibling that retained
-                                            // an older reverse row can then reject a
-                                            // same-tuple forward replacement.
+                                            // #18718: publish the reverse row
+                                            // with the forward's full stable
+                                            // session ID, including its worker
+                                            // namespace, so a same-tuple
+                                            // replacement cannot match an old
+                                            // reverse incarnation.
                                             session_id: reverse_session_id,
                                             tcp_close_class: 0,
                                             tcp_handshake_state: forward_install_info

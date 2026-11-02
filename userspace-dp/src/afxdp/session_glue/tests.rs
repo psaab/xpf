@@ -21186,10 +21186,10 @@ fn synthesized_reverse_companion_converges_session_id_across_workers_14667() {
             "#14667: synthesized companion must carry a non-zero identity \
              every worker can adopt verbatim"
         );
-        assert_ne!(
+        assert_eq!(
             reverse.session_id, forward_id,
-            "#14667: companion identity must be its own, not the forward's \
-             (the shared conditional remove checks it independently)"
+            "#18718: both halves carry the exact full forward incarnation ID; \
+             their distinct tuple keys keep scoped deletes independent"
         );
         let reverse_key = reverse.key.clone();
         let companion_id = reverse.session_id;
@@ -21456,7 +21456,7 @@ fn scoped_worker_delete_matched_removes_both_halves_10512() {
     ));
     let forward_id = sessions.session_id_for(&key);
     let companion = crate::session::reverse_session_key(&key, NatDecision::default());
-    let companion_id = crate::session::synthesized_companion_session_id(forward_id);
+    let companion_id = forward_id;
     let mut companion_metadata = test_metadata();
     companion_metadata.is_reverse = true;
     assert!(sessions.install_with_protocol_with_origin_and_source_nat_with_session_id(
@@ -21473,7 +21473,7 @@ fn scoped_worker_delete_matched_removes_both_halves_10512() {
     assert_eq!(
         sessions.session_id_for(&companion),
         companion_id,
-        "#18718: the local reverse adopts its synthesized companion identity"
+        "the local reverse uses the forward's full incarnation ID"
     );
     // #15784/#18718: the scoped delete captures the identity published for
     // this local reverse companion and must remove that exact incarnation.

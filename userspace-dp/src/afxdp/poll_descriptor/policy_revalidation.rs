@@ -1106,9 +1106,10 @@ type JudgedForward = (
 ///   flow with a different translation (the same client tuple reused); a
 ///   stale reverse row of the older flow must not be validated by it;
 /// - it is THIS reverse row's incarnation: any shared reverse row at the reply
-///   key must be this forward row's companion, and any reverse row already
-///   held locally must carry that same companion id. A reply with no reverse
-///   row yet has no old incarnation to confuse with the shared forward row.
+///   key and any reverse row already held locally must carry the full session
+///   ID of this forward. The worker namespace is part of that ID, so distinct
+///   workers' same-counter flows cannot alias. A reply with no reverse row yet
+///   has no old incarnation to confuse with the shared forward row.
 ///   Tuple equality alone would let a new static forward row validate an old
 ///   dynamic reverse row at the same translated tuple, bypassing the
 ///   stored-provenance guard in `source_nat_translation_still_valid`;
@@ -1144,11 +1145,10 @@ fn shared_forward_companion_for_reverse_hit(
     if crate::session::reverse_session_key(&entry.key, entry.decision.nat) != *reverse_key {
         return None;
     }
-    let expected_reverse_id =
-        crate::session::synthesized_companion_session_id(entry.session_id);
-    if entry.session_id == 0 || expected_reverse_id == 0 {
+    if entry.session_id == 0 {
         return None;
     }
+    let expected_reverse_id = entry.session_id;
     if local_reverse_session_id.is_some_and(|id| id != expected_reverse_id) {
         return None;
     }
