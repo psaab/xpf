@@ -50,7 +50,10 @@ func apiUserClass16074(t *testing.T, auth *APIAuthConfig, name string) string {
 	t.Helper()
 	for _, u := range auth.Users {
 		if u != nil && u.Username == name {
-			return u.Class
+			if u.Class != "" {
+				return u.Class
+			}
+			return auth.DefaultClass
 		}
 	}
 	t.Fatalf("api-auth user %q not found in %+v", name, auth.Users)
@@ -61,7 +64,10 @@ func apiKeyClass16074(t *testing.T, auth *APIAuthConfig, name string) string {
 	t.Helper()
 	for _, k := range auth.Keys {
 		if k != nil && k.Name == name {
-			return k.Class
+			if k.Class != "" {
+				return k.Class
+			}
+			return auth.DefaultClass
 		}
 	}
 	t.Fatalf("api-auth key %q not found in %+v", name, auth.Keys)

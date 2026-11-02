@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const sharedUMEMPhase0ArtifactMaxBytes = 16 << 20
@@ -1430,24 +1431,31 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts,
 			}
 		}
 		// Web management
-		if wmNode := svcNode.FindChild("web-management"); wmNode != nil {
+		// #18787: EVERY web-management sibling, not FindChild's first. Two
+		// braced blocks -- or a two-level packed `web-management api-auth
+		// ...;` line beside the braced stanza, which the brace-elision pass
+		// folds into a second block -- silently lost whichever block came
+		// second: HTTPS or the whole api-auth stanza, on a clean commit.
+		// Junos merges repeated stanzas; so does #13216 for the other
+		// service containers.
+		for _, wmNode := range svcNode.FindChildren("web-management") {
 			if sys.Services == nil {
 				sys.Services = &SystemServicesConfig{}
 			}
-			// #15018 census: allocate ONCE. A second `system` root
-			// re-enters here and must merge (flags set, scalars
-			// overwritten when authored), not reset the first root's
-			// web-management stanza.
+			// #15018 census: allocate ONCE. A second `system` root -- or a
+			// second web-management block (#18787) -- re-enters here and
+			// must merge (flags set, scalars overwritten when authored),
+			// not reset the first block's web-management stanza.
 			if sys.Services.WebManagement == nil {
 				sys.Services.WebManagement = &WebManagementConfig{}
 			}
-			if httpNode := wmNode.FindChild("http"); httpNode != nil {
+			for _, httpNode := range wmNode.FindChildren("http") {
 				sys.Services.WebManagement.HTTP = true
 				if ifNode := httpNode.FindChild("interface"); ifNode != nil {
 					sys.Services.WebManagement.HTTPInterface = nodeVal(ifNode)
 				}
 			}
-			if httpsNode := wmNode.FindChild("https"); httpsNode != nil {
+			for _, httpsNode := range wmNode.FindChildren("https") {
 				sys.Services.WebManagement.HTTPS = true
 				httpsSchema := refWebMgmtHTTPS.resolve()
 				for _, prop := range expandFlatRun(packedBodyChildren(httpsNode, httpsSchema), httpsSchema) {
@@ -1464,10 +1472,11 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts,
 				}
 			}
 			// #14448: class/expires are single-valued restrictions read
-			// last-wins (Junos semantics); the AST gate
-			// validateAPIAuthDuplicateScalarAST rejects conflicting
-			// duplicates at strict commit and warns on the tolerant path,
-			// so the last sibling is the value both paths install.
+			// last-wins (Junos semantics); the AST gate compares values
+			// across the merged api-auth sibling scope and rejects conflicting
+			// values at strict commit (warning on tolerant load). Credential
+			// overrides remain explicit-only so inherited defaults resolve
+			// from the final merged api-auth values.
 			for _, authNode := range wmNode.FindChildren("api-auth") {
 				auth := sys.Services.WebManagement.APIAuth
 				if auth == nil {
@@ -1485,11 +1494,8 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts,
 				}
 				for _, inst := range namedInstances(authNode.FindChildren("user")) {
 					if pwNode := inst.node.FindChild("password"); pwNode != nil {
-						class := auth.DefaultClass
-						if v := lastAPIAuthClass(inst.node); v != "" {
-							class = v
-						}
-						expires := auth.DefaultExpiresAt
+						class := lastAPIAuthClass(inst.node)
+						var expires time.Time
 						if raw, present := lastAPIAuthExpires(inst.node); present {
 							expires, _ = ParseAPIAuthExpiry(raw)
 						}
@@ -1515,11 +1521,8 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts,
 					if secretNode == nil {
 						continue
 					}
-					class := auth.DefaultClass
-					if v := lastAPIAuthClass(inst.node); v != "" {
-						class = v
-					}
-					expires := auth.DefaultExpiresAt
+					class := lastAPIAuthClass(inst.node)
+					var expires time.Time
 					if raw, present := lastAPIAuthExpires(inst.node); present {
 						expires, _ = ParseAPIAuthExpiry(raw)
 					}
