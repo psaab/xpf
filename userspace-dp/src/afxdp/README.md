@@ -2404,12 +2404,13 @@ The shared row is judged only when all four of these hold:
   (the same client tuple reused), and a stale reverse row of the older flow
   must not be validated by it;
 - any shared reverse row and any local reverse row name this forward
-  incarnation. The published reverse row carries the forward session's
-  synthesized companion id; a stale local reverse row with a different id
-  keeps the sessionless arm even when the translated tuple is unchanged. An
-  initial reply with no reverse row yet has no older incarnation to confuse
-  with the forward row. This prevents a new static-SNAT row from validating an
-  old dynamic-SNAT reply;
+  incarnation. The owner installs the reverse row with the forward's
+  synthesized companion id and publishes that same id for sibling replicas,
+  so a stale local reverse row with a different id keeps the sessionless arm
+  even when the translated tuple is unchanged. A scoped delete also names the
+  local companion's exact id. An initial reply with no reverse row yet has no
+  older incarnation to confuse with the forward row. This prevents a new
+  static-SNAT row from validating an old dynamic-SNAT reply;
 - this node created it. That means origin `ForwardFlow`, the slow-path
   create, or `MissingNeighborSeed`, the same create committed before the
   neighbor resolved and published to the shared map by #14661.

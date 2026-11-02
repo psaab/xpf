@@ -447,6 +447,11 @@ fn old_dynamic_reverse_does_not_borrow_same_tuple_static_forward_18710() {
         )
     };
     assert_eq!(old_reverse.origin, SessionOrigin::ReverseFlow);
+    assert_eq!(
+        a.session_id_for(&old_reverse_key),
+        old_reverse.session_id,
+        "A's local and published reverse identities agree"
+    );
     assert_eq!(old_forward_static, Some(false), "old flow is dynamic SNAT");
     // B has drained the old reverse replica, but not the old forward row.
     let mut b = SessionTable::new();
@@ -461,6 +466,11 @@ fn old_dynamic_reverse_does_not_borrow_same_tuple_static_forward_18710() {
     );
     let old_b_reverse_id = b.session_id_for(&old_reverse_key);
     assert_ne!(old_b_reverse_id, 0, "B materialized the old reverse row");
+    assert_eq!(
+        old_b_reverse_id,
+        old_reverse.session_id,
+        "B adopts the published reverse identity"
+    );
 
     // Retire A's old pair and its shared rows, preserving B's already-drained
     // reverse. The next real poll creates a replacement with the exact same
@@ -549,6 +559,20 @@ fn old_dynamic_reverse_does_not_borrow_same_tuple_static_forward_18710() {
         .expect("static replacement is shared");
     assert_ne!(new_forward.session_id, old_forward_id, "the forward incarnation changed");
     assert_eq!(new_forward.source_nat_static, Some(true), "the replacement is static SNAT");
+    let new_reverse_key =
+        crate::session::reverse_session_key(&key, new_forward.decision.nat);
+    let new_reverse = shared
+        .sessions
+        .lock()
+        .expect("shared sessions")
+        .get(&new_reverse_key)
+        .cloned()
+        .expect("static replacement reverse is shared");
+    assert_eq!(
+        a.session_id_for(&new_reverse_key),
+        new_reverse.session_id,
+        "A's local and shared replacement reverse identities agree"
+    );
     assert_eq!(new_forward.decision.nat.rewrite_src, Some(IpAddr::V4(translated)));
     assert_eq!(
         new_forward.decision.nat.rewrite_src_port.unwrap_or(SPORT),

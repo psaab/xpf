@@ -556,6 +556,50 @@ impl SessionTable {
         tcp_flags: u8,
         source_nat_static: Option<bool>,
     ) -> bool {
+        self.install_with_protocol_with_origin_and_source_nat_inner(
+            key, decision, metadata, origin, now_ns, protocol, tcp_flags, source_nat_static, None,
+        )
+    }
+
+    /// Install a local companion with an identity captured from its forward
+    /// incarnation. 0 retains the ordinary allocator fallback for legacy rows.
+    pub(crate) fn install_with_protocol_with_origin_and_source_nat_with_session_id(
+        &mut self,
+        key: SessionKey,
+        decision: SessionDecision,
+        metadata: SessionMetadata,
+        origin: SessionOrigin,
+        now_ns: u64,
+        protocol: u8,
+        tcp_flags: u8,
+        source_nat_static: Option<bool>,
+        session_id: u64,
+    ) -> bool {
+        self.install_with_protocol_with_origin_and_source_nat_inner(
+            key,
+            decision,
+            metadata,
+            origin,
+            now_ns,
+            protocol,
+            tcp_flags,
+            source_nat_static,
+            Some(session_id),
+        )
+    }
+
+    fn install_with_protocol_with_origin_and_source_nat_inner(
+        &mut self,
+        key: SessionKey,
+        decision: SessionDecision,
+        metadata: SessionMetadata,
+        origin: SessionOrigin,
+        now_ns: u64,
+        protocol: u8,
+        tcp_flags: u8,
+        source_nat_static: Option<bool>,
+        session_id: Option<u64>,
+    ) -> bool {
         if self
             .len()
             .saturating_add(self.reserved_session_slots)
@@ -597,11 +641,14 @@ impl SessionTable {
         // self.key_to_handle.insert(...) overwrites it cleanly.
         let _previous = self.remove_entry(&key, RemovalKind::Replace);
         let epoch = self.next_epoch();
-        // #4915: allocate the STABLE, node-unique session id for this fresh
-        // install. Threaded onto the entry (write-once) and the Open delta so a
-        // session's SESSION_CREATE and SESSION_CLOSE RT_FLOW records share one
-        // correlatable id, and a reused 5-tuple gets a distinct id.
-        let session_id = self.alloc_session_id();
+        // #4915/#18718: select the STABLE identity for this fresh install.
+        // Ordinary sessions allocate a node-unique id; a reverse companion
+        // may supply the deterministic id derived from its forward entry.
+        // Thread it onto the entry and Open delta once so create/close RT_FLOW
+        // records share one correlatable id.
+        let session_id = session_id
+            .filter(|id| *id != 0)
+            .unwrap_or_else(|| self.alloc_session_id());
         // #3152/#10889/#10891: TCP bare-SYN and SYN-ACK-first pickups start
         // OPENING; other TCP midstream pickups stay established. Non-TCP
         // sessions with a custom app timeout use the global window until reply.
