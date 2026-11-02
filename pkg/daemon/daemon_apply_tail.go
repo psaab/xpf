@@ -585,7 +585,7 @@ func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwe
 			if d.clusterCommsEpochActive() {
 				d.stopClusterComms()
 			}
-			d.retireFabricSegmentWatcherAfterCommsStop()
+			d.clearFabricSegmentWatcher()
 		}
 		return
 	}
@@ -603,12 +603,12 @@ func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwe
 				// that old epoch too, or its populate loop could re-arm the
 				// watcher from a stale config snapshot after this apply.
 				d.stopClusterComms()
-				d.retireFabricSegmentWatcherAfterCommsStop()
+				d.clearFabricSegmentWatcher()
 				if newTransport != (clusterTransportKey{}) {
 					d.startClusterCommsForCurrentConfig()
 				}
 			} else {
-				d.retireFabricSegmentWatcherAfterCommsStop()
+				d.clearFabricSegmentWatcher()
 			}
 		}
 		return
@@ -621,13 +621,13 @@ func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwe
 		// #16842: fab1-debt epoch, fab1 still unaddressed, nothing owed —
 		// keep the working single-fabric epoch; do not churn it.
 		if removingFabric {
-			d.retireFabricSegmentWatcherAfterCommsStop()
+			d.clearFabricSegmentWatcher()
 		}
 		return
 	}
 	if newTransport == active && !restartOwed {
 		if removingFabric {
-			d.retireFabricSegmentWatcherAfterCommsStop()
+			d.clearFabricSegmentWatcher()
 		}
 		return
 	}
@@ -646,7 +646,7 @@ func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwe
 	if removingFabric {
 		// stopClusterComms has joined the old populate loops. The lifecycle
 		// lock also orders this empty update with any in-flight SyncFabricState.
-		d.retireFabricSegmentWatcherAfterCommsStop()
+		d.clearFabricSegmentWatcher()
 	}
 	d.startClusterCommsForCurrentConfig()
 }
@@ -659,7 +659,7 @@ func (d *Daemon) clusterCommsEpochActive() bool {
 	return active
 }
 
-func (d *Daemon) retireFabricSegmentWatcherAfterCommsStop() {
+func (d *Daemon) clearFabricSegmentWatcher() {
 	d.clusterCommsLifecycleMu.Lock()
 	fabricsegment.Default().Update(nil)
 	d.clusterCommsLifecycleMu.Unlock()
