@@ -708,6 +708,11 @@ pub(crate) fn handle_stream(
                 deferred = export::owner_rg_kick(&mut guard, request.session_export, &mut response)
                     .map(Deferred::OwnerRgExport);
             }
+            "abandon_owner_rg_export" => {
+                // #18752: close a window the Go pager abandoned. Locked
+                // phase only, no deferred wait.
+                export::owner_rg_abandon(&mut guard, request.session_export, &mut response);
+            }
             "export_all_sessions" => {
                 // #4054: locked phase only — snapshot + capture the push
                 // handle. The blocking push loop runs after the lock drops.

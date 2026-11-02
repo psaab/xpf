@@ -224,7 +224,10 @@ func (d *Daemon) prepareUserspaceRGDemotionWithTimeoutStrict(rgID int, barrierTi
 	// The cold-prime-specific wrapper rechecks its gate atomically with marker
 	// admission; generic ordered barriers remain policy-neutral.
 	if ss.ColdPrimeOwedWithoutPendingBulk() {
-		return fmt.Errorf("demotion peer barrier failed: cold prime owed without pending outbound bulk")
+		// #18752: name how long the debt has been owed and why the re-drives
+		// keep failing; the operator sees this on every refused failover.
+		return fmt.Errorf("demotion peer barrier failed: cold prime owed without pending outbound bulk (%s)",
+			ss.ColdPrimeDebtDetail())
 	}
 	if err := ss.WaitForPeerBarrierAfterColdPrimeGate(barrierTimeout); err != nil {
 		return fmt.Errorf("demotion peer barrier failed: %w", err)

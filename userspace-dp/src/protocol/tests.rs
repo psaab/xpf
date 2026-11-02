@@ -3306,6 +3306,9 @@ fn wire_invariant_default_specimens() {
             }],
             lease_export_more: true,
             lease_export_continuation: "16132-next".into(),
+            // #18752: omitted when false, so only a populated specimen
+            // carries it to the Go completeness oracle.
+            session_export_abandoned: true,
             policy_delete_errors: vec!["16132-delete".into()],
             fib_routes: vec![populated_fib_route.clone()],
             ..Default::default()

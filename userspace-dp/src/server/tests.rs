@@ -6485,6 +6485,7 @@ fn export_owner_rg_does_not_hold_state_lock_during_ack_wait() {
             continuation: false,
             continuation_incarnation: 0,
             continuation_sequence: 0,
+            client_window: 0,
         });
         run_request(export_state, r)
     });
@@ -6543,6 +6544,7 @@ fn export_owner_rg_sessions_reports_more_and_a_continuation_pages_the_window() {
         continuation: false,
         continuation_incarnation: 0,
         continuation_sequence: 0,
+        client_window: 0,
     });
     let page1 = run_request(state.clone(), page1_req);
     assert!(page1.ok, "page 1 failed: {}", page1.error);
@@ -6567,6 +6569,7 @@ fn export_owner_rg_sessions_reports_more_and_a_continuation_pages_the_window() {
         continuation: true,
         continuation_incarnation: page1.session_export_incarnation,
         continuation_sequence: page1.session_export_seq,
+        client_window: 0,
     });
     let page2 = run_request(state.clone(), page2_req);
     assert!(page2.ok, "page 2 failed: {}", page2.error);
@@ -6584,6 +6587,145 @@ fn export_owner_rg_sessions_reports_more_and_a_continuation_pages_the_window() {
         page1.session_deltas.len() + page2.session_deltas.len(),
         5,
         "the two pages must partition the window exactly"
+    );
+}
+
+/// #18752: the abandon verb is reachable over the control socket, and a window
+/// the client abandoned no longer blocks the next fresh kick. Before it, the
+/// second page-1 kick below was refused "owner-RG export busy" until the 60 s
+/// idle expiry.
+#[test]
+fn abandon_owner_rg_export_closes_the_window_over_the_wire_18752() {
+    use std::sync::atomic::Ordering;
+
+    let state = new_state(ProcessStatus::default());
+    let ack = {
+        let mut guard = state.lock().expect("lock state");
+        let ack = guard.afxdp.test_install_export_worker(0);
+        guard.afxdp.test_seed_export_buffer_deltas(0, 5);
+        ack
+    };
+    ack.store(u64::MAX, Ordering::Release);
+    let page1_request = || {
+        let mut r = req("export_owner_rg_sessions");
+        r.session_export = Some(SessionExportRequest {
+            owner_rgs: vec![1],
+            max: 3,
+            protocol_version: crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            continuation: false,
+            continuation_incarnation: 0,
+            continuation_sequence: 0,
+            client_window: 0,
+        });
+        r
+    };
+    let page1 = run_request(state.clone(), page1_request());
+    assert!(
+        page1.ok && page1.session_export_more,
+        "fixture: page 1 must leave the window open: {}",
+        page1.error
+    );
+
+    let busy = run_request(state.clone(), page1_request());
+    assert!(
+        !busy.ok && busy.error.contains("busy"),
+        "premise: a fresh kick while the abandoned window is open is BUSY, got ok={} err={}",
+        busy.ok,
+        busy.error
+    );
+
+    let mut abandon = req("abandon_owner_rg_export");
+    abandon.session_export = Some(SessionExportRequest {
+        protocol_version: crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+        continuation_incarnation: page1.session_export_incarnation,
+        continuation_sequence: page1.session_export_seq,
+        ..SessionExportRequest::default()
+    });
+    let abandoned = run_request(state.clone(), abandon);
+    assert!(abandoned.ok, "abandon failed: {}", abandoned.error);
+    assert!(
+        abandoned.session_export_abandoned,
+        "an abandon that closed the open window must say so (the Go side logs Info only then)"
+    );
+
+    let again = run_request(state.clone(), page1_request());
+    assert!(
+        again.ok,
+        "the fresh kick after the abandon must proceed: {}",
+        again.error
+    );
+
+    // Lost page 1 (#18752 review): the client named the window itself, so
+    // an abandon carrying ONLY that id — no helper token — closes it. Seed a
+    // fresh remainder so the next page-1 kick leaves a window open again.
+    {
+        let mut guard = state.lock().expect("lock state");
+        guard.afxdp.test_seed_export_buffer_deltas(0, 5);
+    }
+    let mut named = page1_request();
+    named
+        .session_export
+        .as_mut()
+        .expect("export request")
+        .client_window = 0x5eed_18752;
+    let opened = run_request(state.clone(), named);
+    assert!(
+        opened.ok && opened.session_export_more,
+        "fixture: client-named page 1 must leave the window open: {}",
+        opened.error
+    );
+    let still_busy = run_request(state.clone(), page1_request());
+    assert!(
+        !still_busy.ok && still_busy.error.contains("busy"),
+        "premise: the client-named window blocks a fresh kick, got ok={} err={}",
+        still_busy.ok,
+        still_busy.error
+    );
+    let mut by_client = req("abandon_owner_rg_export");
+    by_client.session_export = Some(SessionExportRequest {
+        protocol_version: crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+        client_window: 0x5eed_18752,
+        ..SessionExportRequest::default()
+    });
+    let closed = run_request(state.clone(), by_client.clone());
+    assert!(
+        closed.ok,
+        "abandon by client window failed: {}",
+        closed.error
+    );
+    assert!(
+        closed.session_export_abandoned,
+        "a client-window abandon that closed the window must say so"
+    );
+    let after = run_request(state.clone(), page1_request());
+    assert!(
+        after.ok,
+        "the fresh kick after a client-window abandon must proceed: {}",
+        after.error
+    );
+
+    // A late duplicate names a window that is gone: it succeeds, closes
+    // nothing, and says so — routine, so the Go side keeps it at Debug.
+    let duplicate = run_request(state.clone(), by_client);
+    assert!(
+        duplicate.ok && !duplicate.session_export_abandoned,
+        "a duplicate abandon must succeed without claiming a close: ok={} abandoned={} err={}",
+        duplicate.ok,
+        duplicate.session_export_abandoned,
+        duplicate.error
+    );
+
+    // The Go side reads this exact key (ControlResponse.SessionExportAbandoned,
+    // json "session_export_abandoned"), and false is omitted.
+    let wire = serde_json::to_value(&closed).expect("serialize response");
+    assert_eq!(
+        wire["session_export_abandoned"],
+        serde_json::Value::Bool(true)
+    );
+    let wire = serde_json::to_value(&duplicate).expect("serialize response");
+    assert!(
+        wire.get("session_export_abandoned").is_none(),
+        "a false abandon answer must be omitted from the wire: {wire}"
     );
 }
 
@@ -6615,6 +6757,7 @@ fn export_owner_rg_sessions_uncapped_reports_no_more() {
         continuation: false,
         continuation_incarnation: 0,
         continuation_sequence: 0,
+        client_window: 0,
     });
     let resp = run_request(state, r);
     assert!(resp.ok, "export failed: {}", resp.error);
@@ -8063,6 +8206,7 @@ fn owner_rg_collect_write_failure_arms_delta_loss_16584() {
         continuation: false,
         continuation_incarnation: 0,
         continuation_sequence: 0,
+        client_window: 0,
     });
     let (mut client, server) =
         std::os::unix::net::UnixStream::pair().expect("control socket pair");

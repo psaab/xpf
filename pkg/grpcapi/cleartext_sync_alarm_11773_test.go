@@ -23,6 +23,7 @@ func (cleartextSyncStats11773) IsConnected() bool                     { return t
 func (cleartextSyncStats11773) PeerSessionSyncWireVersion() uint16    { return 0 }
 func (cleartextSyncStats11773) UnauthenticatedSessionConns() []string { return nil }
 func (cleartextSyncStats11773) RetiredKeySessionConns() []string      { return nil }
+func (cleartextSyncStats11773) ColdPrimeDebtStatus() (bool, string)   { return false, "" }
 
 // TestGRPCClusterShowReportsLatchedCleartextSync11773 exercises the remote
 // ShowText routes that carry the same cluster alarm and counters as the console.

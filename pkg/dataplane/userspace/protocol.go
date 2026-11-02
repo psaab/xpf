@@ -864,6 +864,9 @@ type ControlResponse struct {
 	// supports paging; ExportOwnerRGSessionsPaged handles that by asking for
 	// the unbounded set on the first page when it has no evidence either way.
 	SessionExportMore bool `json:"session_export_more,omitempty"`
+	// #18752: abandon_owner_rg_export answer — true only when the named
+	// window was still open and the helper closed it.
+	SessionExportAbandoned bool `json:"session_export_abandoned,omitempty"`
 	// #9856: v2 export completeness metadata. The helper emits these on
 	// every owner-RG export page; a nonzero dropped count is never
 	// publishable by the authoritative FullResync caller.

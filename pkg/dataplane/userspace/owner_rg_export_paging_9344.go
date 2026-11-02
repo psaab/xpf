@@ -1,9 +1,13 @@
 package userspace
 
 import (
+	crand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 )
 
 // #9344: the owner-RG session export had no terminating bound.
@@ -115,13 +119,34 @@ func (f OwnerRGExportPageFunc) OnOwnerRGExportPage(deltas []SessionDeltaInfo) er
 // earlier pages, so callers must discard/abort any derived state and must
 // not frame or acknowledge a window. ExportOwnerRGSessionsPaged wraps this
 // for callers that still need the whole slice.
-func (m *Manager) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExportPageSink) (ProcessStatus, int, error) {
+func (m *Manager) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExportPageSink) (_ ProcessStatus, _ int, retErr error) {
 	if sink == nil {
 		return ProcessStatus{}, 0, fmt.Errorf("%w: nil page sink", ErrOwnerRGExportIncomplete)
 	}
 	ownerRGExportLease.Lock()
 	defer ownerRGExportLease.Unlock()
-
+	// #18752: a window this call opened and then abandoned on an error must be
+	// closed on the helper NOW. Otherwise the helper keeps it open until its
+	// 60 s idle expiry and answers every fresh kick BUSY in the meantime: the
+	// HA cold prime then cannot be paid, ColdPrimeOwedWithoutPendingBulk stays
+	// true, and every manual failback in that minute is refused. The helper
+	// closes a window itself on a terminal page and on its own error paths,
+	// so this only matters when the abort is decided HERE (a helper/config
+	// generation change between pages, a dropped-delta or token report, a
+	// sink error, an oversized page) or when page 1's response never arrived
+	// (lost or timed out) although the helper opened the window. The window is
+	// named by the client's own id, chosen before page 1 is sent, plus the
+	// helper's token once known. Best effort and lease-held, so no new window
+	// can start before it lands; the idle expiry stays the backstop.
+	clientWindow := nextOwnerRGExportClientWindow()
+	var windowMayBeOpen bool
+	var openIncarnation, openSequence uint64
+	var openSocket string
+	defer func() {
+		if retErr != nil && windowMayBeOpen {
+			m.abandonOwnerRGExportWindow(openSocket, clientWindow, openIncarnation, openSequence, retErr)
+		}
+	}()
 	m.mu.Lock()
 	if m.proc == nil {
 		status := m.lastStatus
@@ -160,6 +185,8 @@ func (m *Manager) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExpo
 		if page > 0 {
 			req.ContinuationIncarnation = incarnation
 			req.ContinuationSequence = sequence
+		} else {
+			req.ClientWindow = clientWindow
 		}
 		m.mu.Lock()
 		if m.proc == nil ||
@@ -183,6 +210,23 @@ func (m *Manager) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExpo
 			SuppressStatus: true,
 			SessionExport:  &req,
 		}, controlSocket)
+		// #18752: record whether the helper may now hold a window open,
+		// BEFORE any check below can abort. Page 1 was sent, so unless a
+		// response proves otherwise the helper may have opened it — even if
+		// the response was lost (err != nil). A page that reports more keeps
+		// it open; a terminal page closed it.
+		if page == 0 {
+			windowMayBeOpen, openSocket = true, controlSocket
+		}
+		if err == nil {
+			if resp.SessionExportMore && resp.SessionExportSeq != 0 {
+				if page == 0 {
+					openIncarnation, openSequence = resp.SessionExportIncarnation, resp.SessionExportSeq
+				}
+			} else {
+				windowMayBeOpen = false
+			}
+		}
 		m.mu.Lock()
 		if m.proc == nil ||
 			m.procGen != exportProcGen ||
@@ -273,6 +317,80 @@ func (m *Manager) ExportOwnerRGSessionsPagedStream(rgIDs []int, sink OwnerRGExpo
 		ownerRGExportPageDeltas,
 		collected,
 	)
+}
+
+// abandonOwnerRGExportWindow asks the helper to close the owner-RG export
+// window (incarnation, sequence) that an aborted paged export left open
+// (#18752). The helper clears it only if that token still names its open
+// window, so a late or duplicate abandon can never close a newer window. A
+// helper without the verb answers "unknown request type"; the window then
+// stays until the helper's idle expiry, which is the pre-#18752 behaviour.
+// Called with ownerRGExportLease held and m.mu NOT held.
+func (m *Manager) abandonOwnerRGExportWindow(controlSocket string, clientWindow, incarnation, sequence uint64, cause error) {
+	resp, err := m.requestDetailedAtSocket(ControlRequest{
+		Type:           "abandon_owner_rg_export",
+		SuppressStatus: true,
+		SessionExport: &SessionExportRequest{
+			ProtocolVersion:         MinProtocolOwnerRGExportPaging,
+			ClientWindow:            clientWindow,
+			ContinuationIncarnation: incarnation,
+			ContinuationSequence:    sequence,
+		},
+	}, controlSocket)
+	if err != nil {
+		if isUnknownVerbError(err) {
+			// A helper without the verb (older build). Say so once per helper
+			// generation, then quietly: every abort would otherwise repeat it,
+			// and the idle expiry still closes the window.
+			m.mu.Lock()
+			first := !m.abandonUnsupportedWarned || m.abandonUnsupportedGen != m.procGen
+			m.abandonUnsupportedWarned, m.abandonUnsupportedGen = true, m.procGen
+			m.mu.Unlock()
+			if first {
+				slog.Warn("userspace: helper does not support abandon_owner_rg_export; aborted owner-RG export windows stay open until the helper's 60 s idle expiry (#18752)",
+					"client_window", clientWindow, "sequence", sequence, "cause", cause)
+			} else {
+				slog.Debug("userspace: helper does not support abandon_owner_rg_export (#18752)",
+					"client_window", clientWindow, "sequence", sequence)
+			}
+			return
+		}
+		slog.Warn("userspace: could not abandon the aborted owner-RG export window; the helper keeps it until its idle expiry (#18752)",
+			"client_window", clientWindow, "sequence", sequence, "cause", cause, "err", err)
+		return
+	}
+	if resp.SessionExportAbandoned {
+		slog.Info("userspace: abandoned aborted owner-RG export window (#18752)",
+			"client_window", clientWindow, "sequence", sequence, "cause", cause)
+		return
+	}
+	// Nothing matched: the window had already closed (a helper-side error
+	// path, or page 1 was refused BUSY and never opened ours). Routine on
+	// every re-drive after a BUSY, so not at Info.
+	slog.Debug("userspace: owner-RG export abandon matched no open window (#18752)",
+		"client_window", clientWindow, "sequence", sequence, "cause", cause)
+}
+
+// ownerRGExportClientWindowSeq numbers the pager's export windows (#18752).
+// Seeded at random so a restarted daemon does not reuse a live helper's ids
+// (the helper outlives nothing here, but a seed costs nothing and keeps ids
+// distinct across Manager instances in one process too).
+var ownerRGExportClientWindowSeq = func() *atomic.Uint64 {
+	var v atomic.Uint64
+	var b [8]byte
+	if _, err := crand.Read(b[:]); err == nil {
+		v.Store(binary.LittleEndian.Uint64(b[:]) >> 1)
+	}
+	return &v
+}()
+
+// nextOwnerRGExportClientWindow returns a nonzero client window id.
+func nextOwnerRGExportClientWindow() uint64 {
+	for {
+		if id := ownerRGExportClientWindowSeq.Add(1); id != 0 {
+			return id
+		}
+	}
 }
 
 // ExportOwnerRGSessionsPaged collects ONE complete window into a slice.

@@ -2365,6 +2365,83 @@ survivor re-drive so the two cannot stack. The daemon also now wires the runtime
 BEFORE `ss.Start()`, which removes the trigger and gives the `SetRuntime` writes
 a happens-before edge over the goroutines `Start` spawns.
 
+**An aborted paged export must close its helper window (#18752).** The
+re-drive above only helps if the next attempt can start. The owner-RG export
+the bulk is built from is paged (#9344/#9856), and the helper keeps ONE export
+window open from page 1 until a terminal page or one of its own error paths;
+while a window is open, every fresh kick is refused `owner-RG export busy
+(window N open)` until `EXPORT_WINDOW_IDLE_EXPIRY_NS` (60 s) of inactivity.
+The Go pager can also decide to abort between pages — most often
+`helper/config generation changed during export window`, which any snapshot or
+FIB publish causes, plus a dropped-delta or token report, a sink error or an
+oversized page. Before #18752 that abort left the window open on the helper.
+On udp, after fw0's crash reboot, fw1's first cold-prime bulk to it aborted
+that way. For the next minute every 7 s re-drive failed BUSY,
+`ColdPrimeOwedWithoutPendingBulk` stayed true, and every manual failback to
+fw0 was refused `demotion peer barrier failed: cold prime owed without pending
+outbound bulk`. That stall needs a multi-page window (more than 8192 owner-RG
+deltas) and a generation change inside it; a small session table exports in
+one terminal page and never holds a window open.
+
+The fix names each window from BOTH ends. Before sending page 1, the pager
+picks a nonzero client window id (`session_export_client_window`), and the
+helper records it on the window. On any error return after page 1 was sent,
+`ExportOwnerRGSessionsPagedStream` sends `abandon_owner_rg_export` with that id
+and with the helper's token if a page-1 response delivered one. It does this
+while still holding the export lease, so no new window can start first. The
+client id matters because a lost or timed-out page-1 response — likely under
+exactly the load that causes the generation churn — would otherwise leave the
+pager with no token to name the window. The helper clears the window iff the id
+or the token still names it (`open_export_abandon_client_if` /
+`open_export_abandon_if`), so a late or duplicate abandon cannot close a newer
+window. Workers need nothing: the next fresh kick supersedes the abandoned
+sequence and skips its buffered entries as foreign, exactly as after the idle
+expiry. The idle expiry stays the backstop for a helper without the verb.
+
+The helper answers the verb with `session_export_abandoned: true` only when it
+closed a window. The pager logs Info for that case and Debug when nothing
+matched, which is routine after a page 1 refused BUSY: that page names a window
+that never opened. A helper built before #18752 refuses the verb with the
+dispatcher's `unknown request type` wording. The pager classifies that with
+`isUnknownVerbError`, the same check the session-counter capability probe uses.
+It logs one Warn per helper process generation (`procGen`) and Debug after
+that, not the generic could-not-abandon Warn on every aborted export.
+
+The debt itself has no automatic bound, and that is deliberate. Admitting a
+demotion before the peer is primed is what the barrier exists to prevent
+(#10387), because the peer would then delete sessions missing from its
+unprimed table. What #18752 adds is the debt's state, visible in three places,
+so an operator can see why every failback fails:
+
+- **The barrier refusal.** It appends `ColdPrimeDebtDetail`: how long the
+  prime has been owed (stamped at the first arm of an episode and kept across
+  re-arms), that it clears when a bulk re-drive is acked, and the last bulk
+  failure. `doBulkSyncWithBulkSend` records that failure through a deferred
+  `noteBulkResult`. A success does not clear it; only the peer's ack
+  (`dischargeColdPrime`) clears the stamp and the failure.
+- **`show chassis cluster information`.** The Cold synchronization block shows
+  `Cold prime owed to peer (no bulk pending): …` and the line `Blocks: manual
+  failover/failback and ISSU drain of this node's RGs` while
+  `ColdPrimeDebtStatus` is true. That is the barrier's own predicate,
+  `coldPrimeOwedWithoutPendingBulk`, so a debt whose paying bulk is still in
+  flight is not shown as refusing. It reaches the Manager through
+  `SyncStatsProvider.ColdPrimeDebtStatus`, on the interface rather than a type
+  assertion: a failed assertion would show no line, which looks exactly like
+  no debt.
+- **One latched Warn per episode.** The sync sweep calls
+  `maybeWarnLongOwedColdPrime` every tick. Once the debt has been owed with no
+  bulk pending for `coldPrimeLongOwedAfter` (60 s), it logs Warn once. 60 s is
+  the helper's idle expiry, so it is the longest stall a single abandoned
+  window can cause even without the verb, and it is about eight re-drives. A
+  debt still owed past it is failing for a reason that will not go away by
+  itself. The latch resets when a new episode is armed. The sweep's
+  own early returns (no primary predicate, incremental sync paused,
+  disconnected) skip it too, so a disconnect does not raise it.
+
+The other re-drive failures (`tombstone dropped` under churn, a generation
+change) still cost one sweep re-drive (~7 s) each. They no longer hold a window
+open.
+
 ## Incremental Sweep and Delete Journal
 
 ### Background Sweep

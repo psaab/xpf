@@ -521,6 +521,9 @@ func (s *SessionSync) syncSweep() int {
 	// independent of the kernel session iteration below and runs even when
 	// s.sessions is nil.
 	s.flushDeleteJournal()
+	// #18752: one latched Warn per episode for a cold prime owed too long with
+	// no bulk pending (it blocks failback and ISSU drain); display only.
+	s.maybeWarnLongOwedColdPrime(time.Now())
 	if s.sessions == nil {
 		return 0
 	}

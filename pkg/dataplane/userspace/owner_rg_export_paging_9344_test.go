@@ -459,9 +459,29 @@ func TestOwnerRGExportStreamSinkErrorAborts16515(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want sink sentinel", err)
 	}
-	if len(h.got) != 1 {
-		t.Fatalf("helper saw %d requests, want 1 (sink error must abort paging)", len(h.got))
+	// #18752: the abort is followed by one abandon of the window page 1
+	// opened; what must not follow is another PAGE request.
+	pages, abandons := exportRequestKinds18752(h.got)
+	if pages != 1 {
+		t.Fatalf("helper saw %d page requests, want 1 (sink error must abort paging)", pages)
 	}
+	if abandons != 1 {
+		t.Fatalf("helper saw %d abandon requests after the abort, want 1 (#18752)", abandons)
+	}
+}
+
+// exportRequestKinds18752 splits a fake helper's request log into export page
+// requests and #18752 window abandons.
+func exportRequestKinds18752(got []ControlRequest) (pages, abandons int) {
+	for _, req := range got {
+		switch req.Type {
+		case "export_owner_rg_sessions":
+			pages++
+		case "abandon_owner_rg_export":
+			abandons++
+		}
+	}
+	return pages, abandons
 }
 
 // TestOwnerRGExportFailsClosedWhenTheHelperNeverStops9344 pins the bound.
@@ -489,9 +509,14 @@ func TestOwnerRGExportFailsClosedWhenTheHelperNeverStops9344(t *testing.T) {
 			"escape, because the receiver would DELETE every session missing from it",
 			len(deltas))
 	}
-	if len(h.got) != maxOwnerRGExportPages {
-		t.Errorf("helper saw %d requests, want exactly %d — the loop must stop AT the "+
-			"bound, not one past it or short of it", len(h.got), maxOwnerRGExportPages)
+	pageReqs, abandons := exportRequestKinds18752(h.got)
+	if pageReqs != maxOwnerRGExportPages {
+		t.Errorf("helper saw %d page requests, want exactly %d — the loop must stop AT the "+
+			"bound, not one past it or short of it", pageReqs, maxOwnerRGExportPages)
+	}
+	// #18752: the unterminated window is still open on the helper.
+	if abandons != 1 {
+		t.Errorf("helper saw %d abandon requests after the unterminated window, want 1", abandons)
 	}
 }
 
