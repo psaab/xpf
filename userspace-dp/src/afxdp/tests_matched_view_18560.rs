@@ -1144,6 +1144,31 @@ fn worker_loop_view_steps_18560() {
     );
 }
 
+/// A neighbor-only publish changes ValidationState equality without changing
+/// either generation. It must not postpone expiry of retained forwarding
+/// views beyond their 200 ms deadline.
+#[test]
+fn retained_views_expire_during_neighbor_only_publish_18560() {
+    let fwd = Arc::new(ForwardingState::default());
+    let mut views = PrevViews::default();
+    views.on_tick(STAMPED, &fwd, NEWER, NOW_NS);
+    assert_eq!(views.find(7, 9, NOW_NS), Some(0), "premise: view retained");
+    let neighbor_only = ValidationState {
+        neighbor_generation: NEWER.neighbor_generation + 1,
+        ..NEWER
+    };
+    views.on_tick(
+        NEWER,
+        &fwd,
+        neighbor_only,
+        NOW_NS + MATCHED_VIEW_GRACE_NS,
+    );
+    assert!(
+        views.is_empty(),
+        "a neighbor-only publish must not skip deadline expiry"
+    );
+}
+
 /// Early release (seat AE): views go as soon as every binding has passed the
 /// stamp switch, not only at the grace. RED if `release_if_drained` never
 /// releases, or releases while a binding has not drained.

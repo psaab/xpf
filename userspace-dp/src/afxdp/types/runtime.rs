@@ -727,9 +727,10 @@ impl PrevViews {
         self.slots = Default::default();
     }
 
-    /// The worker loop's per-tick step (#18560): on an adoption keep the
-    /// view being left (`current`, whose tables are `current_forwarding`
-    /// until the swap), otherwise drop expired views.
+    /// The worker loop's per-tick step (#18560): expire every view against
+    /// its deadline, regardless of neighbor-only validation publishes; on
+    /// an adoption also keep the view being left (`current`, whose tables
+    /// are `current_forwarding` until the swap).
     pub(in crate::afxdp) fn on_tick(
         &mut self,
         current: ValidationState,
@@ -737,10 +738,11 @@ impl PrevViews {
         live: ValidationState,
         now_ns: u64,
     ) {
+        if !self.is_empty() {
+            self.expire(now_ns);
+        }
         if live != current {
             self.retain(current, current_forwarding, live, now_ns);
-        } else if !self.is_empty() {
-            self.expire(now_ns);
         }
     }
 
