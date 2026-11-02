@@ -141,8 +141,9 @@ var knownBlindScopePairs8852 = map[string]string{
 	// #18787: the two-level security pairs. Each head is a plain container
 	// that arm 2 emits no site for, so their fold rests on
 	// TestTwoLevelSecuritySpellingsCompileLikeBraced18787 /
-	// TestWebManagementCrossSiblingAPIAuthConflicts18787 and
-	// TestWebManagementCrossSiblingAPIAuthDefaultsLateBound18787 (strict)
+	// TestWebManagementSiblingsCompileLikeBraced18787 and
+	// TestWebManagementCrossSiblingAPIAuthConflicts18787 /
+	// TestWebManagementCrossSiblingAPIAuthDefaultsLateBound18787 (strict),
 	// and pkg/ipsec TestTwoLevelIPsecSpellingsRenderLikeBraced18787 (render).
 	"vpn ike":                        "plain-container",
 	"vpn vpn-monitor":                "plain-container",

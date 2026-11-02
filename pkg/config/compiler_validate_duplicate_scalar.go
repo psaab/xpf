@@ -87,9 +87,8 @@ func validateAPIAuthDuplicateScalarAST(tree *ConfigTree, lenient bool) ([]string
 		}
 		conflicts = append(conflicts, fmt.Sprintf(
 			"system services web-management api-auth %s: conflicting duplicate %q values %q and %q — "+
-				"a single-valued api-auth leaf may be set only once; the later value is the "+
-				"restriction the config authors, so keeping the first silently installs the "+
-				"permissive class / stale expiry (#14448)",
+				"a single-valued api-auth leaf cannot have conflicting values; the merged "+
+				"scope has no safe effective restriction (#14448)",
 			key.scope, key.leaf, distinct[0], distinct[len(distinct)-1]))
 	}
 
