@@ -2,18 +2,19 @@
 # scripts/go-test-watch.sh and mutate-lib.sh's mutation_timed_out.
 #
 # go test's -timeout aborts a package mid-run, so every later test in it never
-# runs. Three output shapes mean that, and each needs TWO signals so that a test
-# which merely PRINTS the text is never mistaken for one:
+# runs. Three output shapes mean that, and each needs the real timeout
+# sequence so a test which merely PRINTS the text is never mistaken for one:
 #
 #   A  the alarm fired with tests running: column-0 "panic: test timed out
-#      after" and, as that package's next line, go's indented "running tests:".
+#      after", go's indented "running tests:" list, then the goroutine dump.
+#      The second signal is the alarm's own frame as the FIRST frame of the
+#      first goroutine after the panic, in go's exact sequence: blank line,
+#      "goroutine N [running]:", "testing.(*M).startAlarm.func1()".
 #   B  the alarm fired with NO test running (a hung Example; testing tracks only
 #      t.Run tests in its running list): the same column-0 panic line, then a
-#      blank line and the goroutine dump. The second signal is the alarm's own
-#      frame as the FIRST frame of the first goroutine after the panic, in
-#      exactly go's sequence: panic line, [running list], blank line,
-#      "goroutine N [running]:", "testing.(*M).startAlarm.func1()". A test
-#      that prints the frame text anywhere else does not pair.
+#      blank line and the same goroutine dump/alarm-frame sequence. A test that
+#      prints the panic and an adjacent "running tests:" line has no alarm
+#      goroutine, so it does not pair.
 #   C  the binary hung outside m.Run (a TestMain), so the alarm was never
 #      armed: cmd/go kills it at -timeout + 1m and prints "*** Test killed with
 #      quit: ran too long (1m1s)." (or "*** Test killed: ran too long" when the
@@ -49,23 +50,25 @@ function record(k, name) {
 		line = $0
 		if (!DETECTONLY) { print; fflush() }
 	}
-	if (armedA[k]) { armedA[k] = 0; if (line ~ /^[ \t]+running tests:/) hit(k, "A") }
 	if (armedC[k]) { armedC[k] = 0; if (line ~ /^FAIL\t/) hit(k, "C") }
-	# Shape B's sequence: st 1 after the panic line (the running list's
-	# indented lines keep it there), 2 after the blank line, 3 after the
-	# goroutine header; the alarm frame on the next line is the hit.
+	# Alarm shapes A and B share the dump sequence; only A has the running-test
+	# list. An adjacent printed panic+list pair is not enough: a failing test
+	# can print both. Keep the candidate until the alarm goroutine's first frame,
+	# after the blank line and goroutine header, and retain the list's presence
+	# so the banner still distinguishes A from B.
 	if (st[k] == 3) {
-		if (line ~ /^testing\.\(\*M\)\.startAlarm\.func1\(\)/) hit(k, "B")
+		if (line ~ /^testing\.\(\*M\)\.startAlarm\.func1\(\)/) hit(k, running[k] ? "A" : "B")
 		st[k] = 0
 	} else if (st[k] == 2) {
 		st[k] = (line ~ /^goroutine [0-9]+ \[running\]:$/) ? 3 : 0
 	} else if (st[k] == 1) {
-		if (line == "") st[k] = 2
-		else if (line !~ /^\t/) st[k] = 0
+		if (line ~ /^[ \t]+running tests:/) running[k] = 1
+		else if (line == "") st[k] = 2
+		else if (line !~ /^[ \t]/) st[k] = 0
 	}
 	if (line ~ /^panic: test timed out after /) {
-		armedA[k] = 1
 		st[k] = 1
+		running[k] = 0
 	}
 	if (line ~ /^\*\*\* Test killed( with [A-Za-z]+)?: ran too long /) armedC[k] = 1
 	# A package's terminal line: "FAIL<TAB><pkg>..." or "ok  <TAB><pkg>...".
@@ -75,7 +78,8 @@ function record(k, name) {
 		split(line, f, /[ \t]+/)
 		if (pending[k]) record(k, TAGGED ? k : f[2])
 		st[k] = 0
-		armedA[k] = 0
+		running[k] = 0
+		armedC[k] = 0
 	}
 }
 END {

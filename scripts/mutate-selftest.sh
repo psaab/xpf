@@ -190,9 +190,9 @@ echo "== the HANG (#7611) =="
 # even FAILED real tests, so both numbers look scoreable and are not — they
 # describe the prefix of a run that never finished.
 # #18778: the fixture is go's REAL shape (go 1.27): "running tests:" is
-# tab-indented under the panic, and the alarm goroutine follows a blank line.
-# mutation_timed_out now shares the gate legs' two-signal predicate, which an
-# unindented "running tests:" would not satisfy -- no go release prints that.
+# tab-indented under the panic, then a blank line and the alarm goroutine's
+# first frame follow. mutation_timed_out shares the gate legs' full timeout
+# shape; a printed panic+running-tests pair without that dump is still a kill.
 printf '%s\n' \
 	'ok  	github.com/psaab/xpf/pkg/cli	6.409s' \
 	'--- FAIL: TestUnrelated (0.01s)' \
@@ -231,6 +231,47 @@ printf '%s\n' \
 	'FAIL	example.com/fp	0.010s' > "$W/timeout-printed.log"
 ck "a panic line a test printed itself is still a kill" "yes 1 1 KILLED" \
 	"$(mutation_score_log go "$W/timeout-printed.log" yes)"
+# #18779 F1 (Sol+Kimi): the scorer RESCANS a merged `make test-go` log with
+# DETECTONLY. With -json interleaving, the textual tail of a timed-out
+# package can lose its own alarm line entirely (only its reconstructed
+# Output survives, spliced against other packages), so the rescan found no
+# two-signal pair and a VOID leg scored KILLED on OTHER packages' failures.
+# The wrapper already knew: it exited 3 and printed its banner into this
+# same merged log (make echoes it, then "Error 3"). The banner in the log
+# is authoritative -- it came from the wrapper's exit, not from a text
+# rescan -- and must win over the count verdict.
+cat > "$W/merged-banner.log" <<'EOF'
+=== RUN   TestOther
+--- FAIL: TestOther (0.01s)
+{"Action":"output","Package":"example.com/a","Output":"--- FAIL: TestHang (2s)\n"}
+go-test VOID: go test hit its -timeout in example.com/a.
+FAIL	example.com/a	2.01s
+make: *** [Makefile:123: test-go] Error 3
+EOF
+ck "a merged wrapper-VOID log (banner present, alarm text spliced away) is VOID, not KILLED" \
+	"yes 1 2 VOID(run did not finish: timeout)" \
+	"$(mutation_score_log go "$W/merged-banner.log" yes)"
+# Control: without the banner the same failures are a real kill.
+grep -v '^go-test VOID:' "$W/merged-banner.log" > "$W/merged-no-banner.log"
+ck "the same merged log WITHOUT the wrapper banner is still a kill" \
+	"yes 1 2 KILLED" \
+	"$(mutation_score_log go "$W/merged-no-banner.log" yes)"
+
+# #18779 F3 (Kimi): shape A alone is forgeable. A failing test that PRINTS
+# both lines adjacently -- go's panic text, then its own indented
+# "running tests:" -- currently voids a real failure. Real shape A
+# continues with the goroutine dump and ends at the package terminal
+# FAIL<TAB> line; the print ends at a `--- FAIL` line instead. Require the
+# dump to follow before the package line before shape A counts.
+printf '%s\n' \
+	'--- FAIL: TestPrintsTimeout (0.01s)' \
+	'panic: test timed out after 5s' \
+	'	running tests:' \
+	'		TestPrintsTimeout (5s)' \
+	'FAIL	example.com/fp	0.010s' > "$W/adjacent-print.log"
+ck "a test printing the panic line AND running tests: adjacently is still a kill, not VOID" \
+	"yes 1 1 KILLED" \
+	"$(mutation_score_log go "$W/adjacent-print.log" yes)"
 
 # The discriminator that keeps the detector honest: "timeout" appears in
 # ordinary failure text constantly. Matching the bare word would score real

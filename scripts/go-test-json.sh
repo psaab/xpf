@@ -18,11 +18,12 @@
 #
 # usage: go-test-json.sh <jsonfile-or-empty> <go> [go test args...]
 #
-# With an EMPTY first argument this runs `<go> test <args>` with no `-json`
-# and no `jq`; its stdout passes through the #18778 timeout watcher (awk),
+# With an EMPTY first argument this runs `<go> test <args> -json=false` with
+# text output and no `jq`; the explicit false defeats an inherited
+# `GOFLAGS=-json`. Its stdout passes through the #18778 timeout watcher (awk),
 # which changes no line. That is deliberate: `make test-go` is the shared gate
 # and its default path must not acquire a jq dependency. The selftest asserts
-# the default path's stdout and exit code match a direct `go test`, except
+# the default path's stdout and exit code match a direct text `go test`, except
 # that a go-test timeout exits 3 (VOID).
 #
 # With a jsonfile it runs `<go> test -json <args>`, APPENDS the raw event stream
@@ -51,7 +52,11 @@ here=$(cd "$(dirname "$0")" && pwd)
 timeout_watch() { awk -f "$here/go-timeout-watch.awk"; }
 
 if [ -z "$json" ]; then
-	"$go_bin" test "$@" | timeout_watch
+	# -json in GOFLAGS silently switches this path to JSON, which the
+	# text-mode timeout watcher cannot recognize. Pin the gate's intended
+	# human-readable output at the command line; Go flags are valid after
+	# package arguments too.
+	"$go_bin" test "$@" -json=false | timeout_watch
 	rc=("${PIPESTATUS[@]}")
 	if [ "${rc[1]}" -eq 3 ]; then
 		exit 3
