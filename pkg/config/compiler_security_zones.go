@@ -685,6 +685,13 @@ func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
 		// Preserve the existing nested management bodies even when this
 		// functional-zone node also carries a compact management header.
 		for _, mgmt := range fz.FindChildren("management") {
+			// #18788: a packed management leaf (Keys carry the HIB tail) is
+			// rebuilt by the special arm below; emitting it here too would
+			// compile the same body twice and dedup-collapse its tokens.
+			if len(mgmt.Children) == 0 && len(mgmt.Keys) > 1 &&
+				mgmt.Keys[1] == "host-inbound-traffic" {
+				continue
+			}
 			out = append(out, functionalZoneManagementBody15668(mgmt))
 		}
 		// #18788: the braced functional-zone header can itself carry the
