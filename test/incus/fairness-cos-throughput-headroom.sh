@@ -9,6 +9,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 source "$ROOT_DIR/test/incus/active-fw.sh"
 # shellcheck source=cluster-env.sh
 source "$ROOT_DIR/test/incus/cluster-env.sh"
+TARGET=${TARGET:-$IPERF_TARGET4}
 
 APPLY_CONFIG=${APPLY_CONFIG:-1}
 # D10-14 (#13069): do not hardcode a cluster node. Only the RG primary
@@ -25,13 +26,19 @@ COMPARE_SURPLUS_SHARING=${COMPARE_SURPLUS_SHARING:-1}
 CLASS_FILTER=${CLASS_FILTER:-q8,q9,q10}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-}
 SWEEP=${SWEEP:-$ROOT_DIR/test/incus/fairness-cos-class-sweep.sh}
-APPLY_COS_CONFIG=${APPLY_COS_CONFIG:-$ROOT_DIR/test/incus/apply-cos-config.sh}
+if [[ -z "${APPLY_COS_CONFIG:-}" ]]; then
+    APPLY_COS_CONFIG="$ROOT_DIR/test/incus/apply-cos-config.sh"
+fi
 COS_GATE_EMITTED=0
 cos_gate_fallback() {
     [[ "$COS_GATE_EMITTED" == "1" ]] && return 0
     printf 'COS_GATE fairness-cos-throughput-headroom VOID reason=%s\n' "$1"
     COS_GATE_EMITTED=1
 }
+if [[ "${_XPF_CLUSTER_ENV_FILE:-}" != "$ROOT_DIR/test/incus/loss-userspace-cluster.env" ]]; then
+    cos_gate_fallback unsupported-cluster-env
+    exit 2
+fi
 if [[ "${COS_GATE_SELFTEST:-0}" == "1" ]]; then
     echo "COS_GATE fairness-cos-throughput-headroom PASS reason=-- classes_failed_total=0 strict_sum_class_avg_mbps=3000 surplus_sum_class_avg_mbps=3100 paired_sum_class_avg_delta_mbps=100 paired_sum_class_avg_delta_pct=3.333 classes_failed_strict=0 classes_failed_surplus=0 max_gap_strict=0.01 max_gap_surplus=0.02"
     COS_GATE_EMITTED=1
@@ -204,7 +211,7 @@ run_scenario() {
         return "$apply_status"
     fi
 
-    env CLASS_FILTER="$CLASS_FILTER" ARTIFACT_ROOT="$out/sweep" \
+    env TARGET="$TARGET" CLASS_FILTER="$CLASS_FILTER" ARTIFACT_ROOT="$out/sweep" \
         METRICS_URL="$METRICS_URL" COS_IFINDEX="$COS_IFINDEX" FAIRNESS_EVAL="${FAIRNESS_EVAL:-$ROOT_DIR/userspace-dp/target/release/fairness-eval}" \
         "$SWEEP" > "$out/sweep.stdout" 2> "$out/sweep.stderr"
     status=$?
@@ -340,7 +347,7 @@ if ! {
     printf '# CoS Throughput Headroom Comparison\n\n'
     printf 'Artifacts: `%s`\n\n' "$ARTIFACT_ROOT"
     printf 'Class filter: `%s`\n\n' "$CLASS_FILTER"
-    printf 'Metrics URL: `%s`; CoS ifindex: `%s`; target: `%s`\n\n' "$METRICS_URL" "$COS_IFINDEX" "$IPERF_TARGET4"
+    printf 'Metrics URL: `%s`; CoS ifindex: `%s`; target: `%s`\n\n' "$METRICS_URL" "$COS_IFINDEX" "$TARGET"
     printf 'Strict/surplus sums are diagnostic sums of per-class `avg_mbps` from separate sequential trials; they are not simultaneous aggregate bandwidth and are not pass thresholds.\n\n'
     printf '| Scenario | Class | Queue | Verdict | Avg Mbps | Avg rate utilization | Mean CoV | Max CoV | Mean Gap | Max Gap | Starved |\n'
     printf '|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|\n'

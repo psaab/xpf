@@ -43,8 +43,6 @@ test/incus/test-mouse-latency-same-class.sh  GATE: same-class 1 Gbps variant of 
 test/incus/reverse-key-collision-probe.sh    GATE: #1760 W2 live-fire NAT reverse-key collision watch.
 
 # ── COMPOSED — reached for free once the caller above gets a recipe ──
-test/incus/fairness-harness.sh               COMPOSED: the per-class run driver invoked by fairness-cos-class-sweep.sh; docs/fairness-regimes.md.
-test/incus/apply-cos-config.sh               COMPOSED: re-applies the CoS fixture a deploy wipes; invoked by test-mouse-latency.sh, step1-capture.sh, cos-be-contention-harness.sh and fairness-cos-throughput-headroom.sh — all unreached. Also named in a with-cluster.sh COMMENT, which is not an invocation.
 test/incus/step1-capture.sh                  COMPOSED: #816 per-cell capture driver, invoked by step1-baseline-and-matrix.sh and step2-sched-switch-capture.sh.
 
 # ── DIAGNOSTIC — operator tools with no verdict; hand-invoked by design ──

@@ -36,7 +36,9 @@ SAMPLES=${SAMPLES:-3}
 SAMPLE_COOLDOWN_SEC=${SAMPLE_COOLDOWN_SEC:-10}
 PER_RUN_TIMEOUT_SEC=${PER_RUN_TIMEOUT_SEC:-180}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-}
-HARNESS=${HARNESS:-$ROOT_DIR/test/incus/fairness-harness.sh}
+if [[ -z "${HARNESS:-}" ]]; then
+    HARNESS="$ROOT_DIR/test/incus/fairness-harness.sh"
+fi
 WRAPPER=${WRAPPER:-$ROOT_DIR/test/incus/fairness_multi_sample.py}
 FAIRNESS_EVAL=${FAIRNESS_EVAL:-$ROOT_DIR/userspace-dp/target/release/fairness-eval}
 EQUAL_FLOW_CAPTURE=${EQUAL_FLOW_CAPTURE:-$ROOT_DIR/test/incus/fairness_equal_flow_capture.py}
@@ -56,6 +58,10 @@ cos_gate_exit() {
     exit "$status"
 }
 trap cos_gate_exit EXIT
+if [[ "${_XPF_CLUSTER_ENV_FILE:-}" != "$ROOT_DIR/test/incus/loss-userspace-cluster.env" ]]; then
+    cos_gate_void unsupported-cluster-env
+    exit 2
+fi
 if [[ "${COS_GATE_SELFTEST:-0}" == "1" ]]; then
     echo "COS_GATE fairness-cos-class-sweep PASS reason=-- max_gap=0.01"
     COS_GATE_EMITTED=1
@@ -147,7 +153,7 @@ else
     mkdir -p "$ARTIFACT_ROOT"
 fi
 {
-    printf 'target_v4=%s\n' "$IPERF_TARGET4"
+    printf 'target_v4=%s\n' "$TARGET"
     printf 'metrics_url=%s\ncos_ifindex=%s\n' "$METRICS_URL" "$COS_IFINDEX"
     printf 'lan_generator=%s\n' "$CLUSTER_LAN_HOST"
     printf 'iperf_launch_args=%s %s %s %s\n' \

@@ -181,7 +181,7 @@ class CoSBEContentionValidateTests(unittest.TestCase):
             1_000_000_000.0,
         )
 
-    def test_fails_nonzero_iperf_exit(self) -> None:
+    def test_nonzero_iperf_exit_is_validation_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_manifest(root)
@@ -202,11 +202,8 @@ class CoSBEContentionValidateTests(unittest.TestCase):
                 contender_bps=1_000_000_000,
             )
 
-            summary = _validate(root)
-
-            self.assertEqual(summary["verdict"], "FAIL")
-            self.assertTrue(any("iperf exited 1" in reason for reason in summary["failure_reasons"]))
-
+            with self.assertRaises(cos_validate.ValidationError):
+                _validate(root)
     def test_fails_when_expected_queue_does_not_drain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -480,8 +477,12 @@ class CoSBEContentionValidateTests(unittest.TestCase):
         }
         self.assertEqual(cos_validate.iperf_bps(artifact), 123)
 
-    def test_fails_missing_status_json_without_aborting_cell(self) -> None:
-        """Missing status-before.json should produce a per-cell FAIL, not a global abort."""
+    def test_iperf_parser_accepts_zero_throughput_measurement(self) -> None:
+        artifact = {"end": {"sum_received": {"bits_per_second": 0}}}
+        self.assertEqual(cos_validate.iperf_bps(artifact), 0)
+
+    def test_missing_status_json_is_validation_error(self) -> None:
+        """A run without complete dataplane status evidence is VOID."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_manifest(root)
@@ -503,13 +504,57 @@ class CoSBEContentionValidateTests(unittest.TestCase):
                 contender_bps=24_000_000_000,
             )
 
-            # Must not raise — missing JSON is a per-cell FAIL, not a global abort.
-            summary = _validate(root)
+            with self.assertRaisesRegex(cos_validate.ValidationError, "missing JSON artifact"):
+                _validate(root)
 
-            self.assertEqual(summary["verdict"], "FAIL")
-            self.assertTrue(
-                any("missing JSON artifact" in reason for reason in summary["failure_reasons"])
+    def test_missing_iperf_json_is_validation_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(root)
+            _write_phase(
+                root / "cell" / "baseline",
+                before=_status(q2=0),
+                during=_status(q2=100),
+                after=_status(q2=200),
+                exact_bps=1_000_000_000,
             )
+            (root / "cell" / "baseline" / "exact-iperf.json").unlink()
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status(q0=0, q2=200),
+                during=_status(q0=100, q2=300),
+                after=_status(q0=200, q2=400),
+                exact_bps=920_000_000,
+                contender_bps=24_000_000_000,
+            )
+
+            with self.assertRaisesRegex(cos_validate.ValidationError, "missing JSON artifact"):
+                _validate(root)
+
+    def test_nonzero_status_capture_is_validation_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(root)
+            baseline = root / "cell" / "baseline"
+            _write_phase(
+                baseline,
+                before=_status(q2=0),
+                during=_status(q2=100),
+                after=_status(q2=200),
+                exact_bps=1_000_000_000,
+            )
+            (baseline / "status-during.rc").write_text("1\n", encoding="utf-8")
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status(q0=0, q2=200),
+                during=_status(q0=100, q2=300),
+                after=_status(q0=200, q2=400),
+                exact_bps=920_000_000,
+                contender_bps=24_000_000_000,
+            )
+
+            with self.assertRaises(cos_validate.ValidationError):
+                _validate(root)
 
     def test_fails_during_snapshot_shows_no_traffic_in_expected_queue(self) -> None:
         """During snapshot that matches before (zero delta) triggers the during gate."""

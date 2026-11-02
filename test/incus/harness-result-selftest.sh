@@ -1272,6 +1272,38 @@ if [[ "$(last_row_field running_exe_sha256)" == "$fake_sha" ]]; then
 else
 	bad "run wrapper: running_exe_sha256 is '$(last_row_field running_exe_sha256)', expected $fake_sha"
 fi
+# A CoS harness' local selftest mode is not a cluster measurement. Even when
+# inherited by the wrapper, it must be refused before running the child,
+# touching Incus, or writing a ledger row. The Incus function is an offline
+# sentinel in case the refusal regresses.
+selftest_wrapper_incus="$WORK/cos-selftest-wrapper-incus.marker"
+rm -f "$selftest_wrapper_incus"
+incus() { touch "$selftest_wrapper_incus"; return 1; }
+before_cos_selftest_rows=$(ledger_rows)
+cos_selftest_wrapper_bad=""
+for harness_gate in \
+	"cos-simul-load-smoke.sh cos-simul-load-smoke" \
+	"cos-gate1-small-four-alone.sh cos-gate1-small-four-alone" \
+	"cos-be-contention-harness.sh cos-be-contention-harness" \
+	"fairness-cos-class-sweep.sh fairness-cos-class-sweep" \
+	"fairness-cos-throughput-headroom.sh fairness-cos-throughput-headroom"; do
+	read -r harness gate <<<"$harness_gate"
+	COS_GATE_SELFTEST=1 BPFRX_CLUSTER_ENV="$SCRIPT_DIR/loss-userspace-cluster.env" \
+		harness_result_run --ledger "$LEDGER" --cluster --env testenv \
+		--gate "$gate" --adapter cos-gate --node fake:node \
+		--build-exe "$WORK/xpfd" -- "$SCRIPT_DIR/$harness" \
+		>/dev/null 2>&1
+	rc=$?
+	[[ "$rc" == 2 ]] || cos_selftest_wrapper_bad+="$harness rc=$rc "
+done
+after_cos_selftest_rows=$(ledger_rows)
+if [[ -z "$cos_selftest_wrapper_bad" && ! -e "$selftest_wrapper_incus" &&
+	"$before_cos_selftest_rows" == "$after_cos_selftest_rows" ]]; then
+	ok "cluster wrapper refuses inherited COS_GATE_SELFTEST for all five CoS gates"
+else
+	bad "cluster selftest refusal failed: rc=$cos_selftest_wrapper_bad incus=$([[ -e "$selftest_wrapper_incus" ]] && echo called || echo untouched) rows=$before_cos_selftest_rows->$after_cos_selftest_rows"
+fi
+incus() { echo "$fake_sha  /proc/1234/exe"; }
 
 # 10c. The readback succeeds but names a DIFFERENT binary: MISMATCH, the
 #      stale-code condition deploy-lib.sh dies on (#2176).
@@ -2131,7 +2163,8 @@ for harness_gate in \
 	"fairness-cos-class-sweep.sh fairness-cos-class-sweep" \
 	"fairness-cos-throughput-headroom.sh fairness-cos-throughput-headroom"; do
 	read -r harness gate <<<"$harness_gate"
-	out=$(COS_GATE_SELFTEST=1 "$SCRIPT_DIR/$harness" 2>&1)
+	out=$(BPFRX_CLUSTER_ENV="$SCRIPT_DIR/loss-userspace-cluster.env" COS_GATE_SELFTEST=1 \
+		"$SCRIPT_DIR/$harness" 2>&1)
 	rc=$?
 	if [[ "$rc" == 0 && "$out" == *"COS_GATE $gate PASS reason=--"* ]] &&
 		[[ $(grep -c '^COS_GATE ' <<<"$out") == 1 ]]; then
@@ -2140,6 +2173,46 @@ for harness_gate in \
 		bad "$harness selftest output/rc invalid: rc=$rc output='$out'"
 	fi
 done
+headroom_env_out=$(BPFRX_CLUSTER_ENV="$SCRIPT_DIR/tcp-userspace-cluster.env" \
+	COS_GATE_SELFTEST=1 "$SCRIPT_DIR/fairness-cos-throughput-headroom.sh" 2>&1)
+headroom_env_rc=$?
+if [[ "$headroom_env_rc" == 2 &&
+	"$headroom_env_out" == "COS_GATE fairness-cos-throughput-headroom VOID reason=unsupported-cluster-env" ]]; then
+	ok "headroom refuses non-loss cluster env before selftest or config changes"
+else
+	bad "headroom accepted non-loss cluster env: rc=$headroom_env_rc output='$headroom_env_out'"
+fi
+
+sweep_env_out=$(BPFRX_CLUSTER_ENV="$SCRIPT_DIR/tcp-userspace-cluster.env" \
+	COS_GATE_SELFTEST=1 "$SCRIPT_DIR/fairness-cos-class-sweep.sh" 2>&1)
+sweep_env_rc=$?
+if [[ "$sweep_env_rc" == 2 &&
+	"$sweep_env_out" == "COS_GATE fairness-cos-class-sweep VOID reason=unsupported-cluster-env" ]]; then
+	ok "class sweep refuses non-loss cluster env before selftest or telemetry"
+else
+	bad "class sweep accepted non-loss cluster env: rc=$sweep_env_rc output='$sweep_env_out'"
+fi
+
+sweep_target_line=$(grep -F 'target_v4=%s' "$SCRIPT_DIR/fairness-cos-class-sweep.sh" || :)
+if [[ "$sweep_target_line" == *'"$TARGET"'* ]]; then
+	ok "class sweep records the actual TARGET override in measurement provenance"
+else
+	bad "class sweep provenance does not use actual TARGET: $sweep_target_line"
+fi
+headroom_target_line=$(grep -F 'target: `%s`' "$SCRIPT_DIR/fairness-cos-throughput-headroom.sh" || :)
+if [[ "$headroom_target_line" == *'"$TARGET"'* ]] &&
+	grep -Fq 'env TARGET="$TARGET"' "$SCRIPT_DIR/fairness-cos-throughput-headroom.sh"; then
+	ok "headroom passes and records its actual TARGET override"
+else
+	bad "headroom does not pass and record actual TARGET: $headroom_target_line"
+fi
+if grep -Fq 'source "${SCRIPT_DIR}/cluster-env.sh"' "$SCRIPT_DIR/fairness-harness.sh" &&
+	grep -Fq 'TARGET=${1:-${IPERF_TARGET4:-}}' "$SCRIPT_DIR/fairness-harness.sh" &&
+	! grep -Fq '172.16.80.200' "$SCRIPT_DIR/fairness-harness.sh"; then
+	ok "standalone fairness harness defaults to cluster-env IPERF_TARGET4"
+else
+	bad "standalone fairness harness retains a stale target default"
+fi
 
 # Exercise the native simul-load reducer with generator JSON/.rc artifacts.
 # This bypasses only generator launch, not the reducer or its gate evaluation.

@@ -77,46 +77,53 @@ is right and this table needs an edit in the same change.
 | Rust crates | `cold-path-flooder/` (`Cargo.toml`, `Cargo.lock`, `src/main.rs`, `.gitignore`), `newflow-gen/` (same four) |
 | Declarations | `GO_BUILDTAG_REVIEWED`, `HARNESSES.unreached`, `LEDGER_COVERAGE.unreached`, `ledger-expected-red.txt` (counted in Non-code files above) |
 
-### Runnable shell (58 harnesses + the envelope)
+### Runnable shell census (69)
 
-Reached by a Makefile recipe today (35, per `harness-census.sh`,
-which also counts the 5 `scripts/userspace-*.sh`): `cc-rollback-functional.sh`,
-`cluster-build-identity.sh`, `cluster-setup.sh`, `dhcp-lease-failover.sh`,
-`harness-result.sh`, `ipsec-9506-fixture.sh`,
-`ipsec-content-change-10878.sh`, `mouse-target-setup.sh`,
-`persistent-nat-failover.sh`, `setup.sh`, `t12-g2-9506.sh`,
-`test-active-active.sh`, `test-chained-crash.sh`,
-`test-connectivity.sh`, `test-double-failover.sh`, `test-failover.sh`,
-`test-fbf-steering.sh`, `test-ha-crash.sh`, `test-host-inbound.sh`,
-`test-private-rg.sh`, `test-restart-connectivity.sh`, `rg-move-soak.sh`,
+Reached by a Makefile recipe today (44, per `harness-census.sh`; the
+census's total also includes five `scripts/userspace-*.sh` paths declared
+unreached below):
+`active-fw.sh`, `apply-cos-config.sh`, `cc-rollback-functional.sh`,
+`cluster-build-identity.sh`, `cluster-setup.sh`,
+`cos-be-contention-harness.sh`, `cos-gate1-small-four-alone.sh`,
+`cos-simul-load-smoke.sh`, `dhcp-lease-failover.sh`,
+`fairness-cos-class-sweep.sh`, `fairness-cos-throughput-headroom.sh`,
+`fairness-harness.sh`, `harness-result.sh`, `iperf-matrix.sh`,
+`ipsec-9506-fixture.sh`, `ipsec-content-change-10878.sh`,
+`mouse-target-setup.sh`, `persistent-nat-failover.sh`, `rg-move-soak.sh`,
+`setup.sh`, `t12-g2-9506.sh`, `test-active-active.sh`,
+`test-chained-crash.sh`, `test-connectivity.sh`, `test-double-failover.sh`,
+`test-failover.sh`, `test-fbf-steering.sh`, `test-ha-crash.sh`,
+`test-host-inbound.sh`, `test-private-rg.sh`, `test-restart-connectivity.sh`,
 `test-rolling-upgrade.sh`, `test-stress-failover.sh`,
 `test-wire-properties.sh`, `wg-interop.sh`, `wire-appmatch-twins.sh`,
 `wire-conntrack-lifecycle.sh`, `wire-hostinbound-deny.sh`,
 `wire-nat-frag-needed.sh`, `wire-policy-deny.sh`,
-`wire-routing-separation.sh`, `wire-zone-matrix.sh`, `with-cluster.sh`.
+`wire-routing-separation.sh`, `wire-zone-matrix.sh`, `with-cluster.sh`,
+`test/nftables/selftest-nftables-kernel_18745.sh`.
 
-Declared unreached in `HARNESSES.unreached` (28 here; +5 in `scripts/`):
-GATE — `cos-be-contention-harness.sh`, `cos-gate1-small-four-alone.sh`,
-`cos-simul-load-smoke.sh`, `fairness-cos-class-sweep.sh`,
-`fairness-cos-throughput-headroom.sh`, `newflow-ceiling-harness.sh`,
-`reverse-key-collision-probe.sh`, `test-mouse-latency-matrix.sh`,
-`test-mouse-latency-same-class.sh`, `test-mouse-latency.sh`;
-COMPOSED — `apply-cos-config.sh`, `fairness-harness.sh`,
-`step1-capture.sh`;
+Declared unreached in `HARNESSES.unreached` (20 under `test/incus/`, plus
+five under `scripts/`):
+GATE — `newflow-ceiling-harness.sh`, `reverse-key-collision-probe.sh`,
+`test-mouse-latency-matrix.sh`, `test-mouse-latency-same-class.sh`,
+`test-mouse-latency.sh`;
+COMPOSED — `step1-capture.sh`;
 DIAGNOSTIC — `analyze-userspace-traces.sh`, `capture-cold-stall.sh`,
 `pnat-catchall-outage-check-8341.sh`, `pnat-counter-read-8447.sh`,
 `pnat-mint-observability-8341.sh`, `pnat-rule-shape-8447.sh`,
 `pnat-upstream-stage-8447.sh`, `pnat-wedge-recovery-8447.sh`,
 `screen-probe.sh`, `step1-baseline-and-matrix.sh`, `step1-classify.sh`,
 `step2-sched-switch-capture.sh`, `test-v6-na-recovery-12495.sh`;
-LIBRARY — `active-fw.sh`, `v6-na-recovery-lib-12495.sh`.
+LIBRARY — `v6-na-recovery-lib-12495.sh`;
+SCRIPTS — `userspace-ha-validation.sh`,
+`userspace-ha-failover-validation.sh`, `userspace-native-gre-validation.sh`,
+`userspace-perf-compare.sh`, `userspace-phase-cycle.sh`.
 
-That is every `*.sh` here, in the census's arithmetic: 33 reached +
-28 declared + 21 census libraries + 33 self-tests = 115. The two
-`LIBRARY` declarations are semantic libraries that the census
-deliberately keeps in its runnable set (they are not in its named
-`LIBRARIES` list), so the semantic split at the top of this section is
-59 runnable / 23 libraries; both add to 115.
+That is every `*.sh` here, in census arithmetic: 44 reached + 25 declared
++ 21 named census libraries + 33 self-tests = 123. The two semantic
+libraries `active-fw.sh` and `v6-na-recovery-lib-12495.sh` remain in the
+census runnable set because they are not in its named `LIBRARIES` list; the
+semantic split is 67 runnable / 23 libraries / 33 self-tests, also totaling
+123.
 
 ### Hermetic shell self-tests (33)
 

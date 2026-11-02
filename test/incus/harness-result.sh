@@ -1349,6 +1349,14 @@ harness_result_run() {
 		fi
 	done
 
+	# COS_GATE_SELFTEST is a local fixture mode, not a live measurement. A
+	# cluster wrapper must refuse it before running the child or attesting
+	# nodes, otherwise a synthetic PASS could enter coverage.
+	if [[ "$adapter" == "cos-gate" && "$mode" == "cluster" && "${COS_GATE_SELFTEST:-0}" == "1" ]]; then
+		_hr_warn "run: refusing cluster cos-gate with COS_GATE_SELFTEST=1 (test-only mode cannot produce measurements)"
+		return 2
+	fi
+
 	local root log t0 t1 rc
 	root="$(harness_result_root)"
 	log=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-harness-log.XXXXXX")

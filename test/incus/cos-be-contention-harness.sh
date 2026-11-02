@@ -31,7 +31,9 @@ ENV_FILE="${ENV_FILE:-$ROOT_DIR/test/incus/loss-userspace-cluster.env}"
 # schedule + wrapper library instead of a harness-local copy.
 # shellcheck source=cos-apply-lib.sh
 source "$ROOT_DIR/test/incus/cos-apply-lib.sh"
-APPLY_COS_CONFIG="${APPLY_COS_CONFIG:-$ROOT_DIR/test/incus/apply-cos-config.sh}"
+if [[ -z "${APPLY_COS_CONFIG:-}" ]]; then
+    APPLY_COS_CONFIG="$ROOT_DIR/test/incus/apply-cos-config.sh"
+fi
 VALIDATOR="${VALIDATOR:-$ROOT_DIR/test/incus/cos_be_contention_validate.py}"
 
 DURATION="${DURATION:-8}"

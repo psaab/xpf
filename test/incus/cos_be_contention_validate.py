@@ -134,6 +134,8 @@ def load_json(path: Path) -> dict[str, Any]:
             value = json.load(f)
     except FileNotFoundError as exc:
         raise ValidationError(f"missing JSON artifact: {path}") from exc
+    except OSError as exc:
+        raise ValidationError(f"could not read JSON artifact {path}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ValidationError(f"invalid JSON artifact {path}: {exc}") from exc
     if not isinstance(value, dict):
@@ -146,6 +148,8 @@ def read_exit_code(path: Path) -> int:
         raw = path.read_text(encoding="utf-8").strip()
     except FileNotFoundError as exc:
         raise ValidationError(f"missing exit-code artifact: {path}") from exc
+    except OSError as exc:
+        raise ValidationError(f"could not read exit-code artifact {path}: {exc}") from exc
     try:
         code = int(raw)
     except ValueError as exc:
@@ -170,9 +174,8 @@ def iperf_bps(artifact: dict[str, Any]) -> float:
         value = end.get(section)
         if isinstance(value, dict) and field in value:
             bps = _finite_nonnegative_number(value[field], f"iperf.{section}.{field}")
-            if bps > 0:
-                return bps
-    raise ValidationError("iperf JSON has no positive end summary bits_per_second")
+            return bps
+    raise ValidationError("iperf JSON has no end summary bits_per_second")
 
 
 def _status_object(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -280,7 +283,7 @@ def _phase_status_paths(phase_dir: Path) -> tuple[Path, Path, Path]:
     )
 
 
-def _validate_status_capture(phase_dir: Path) -> list[str]:
+def _validate_status_capture(phase_dir: Path) -> None:
     failures: list[str] = []
     for phase in ("before", "during", "after"):
         rc_path = phase_dir / f"status-{phase}.rc"
@@ -294,7 +297,8 @@ def _validate_status_capture(phase_dir: Path) -> list[str]:
             continue
         if rc != 0:
             failures.append(f"{phase_dir.name}: status-{phase} capture exited {rc}")
-    return failures
+    if failures:
+        raise ValidationError("; ".join(failures))
 
 
 def analyze_phase(
@@ -306,27 +310,12 @@ def analyze_phase(
     wrong_queue_sent_bytes_tolerance: int,
     min_expected_sent_bytes: int,
 ) -> dict[str, Any]:
-    failures = _validate_status_capture(phase_dir)
+    _validate_status_capture(phase_dir)
     before_path, during_path, after_path = _phase_status_paths(phase_dir)
-    try:
-        before_json = load_json(before_path)
-    except ValidationError as exc:
-        failures.append(str(exc))
-        return {"verdict": "FAIL", "failure_reasons": failures, "queue_deltas": [], "drain_shape": []}
-    try:
-        during_json = load_json(during_path)
-    except ValidationError as exc:
-        failures.append(str(exc))
-        # Fall back to before_json so during_deltas are zero; the during gate
-        # below will then fail for every expected queue (zero < min_expected_sent_bytes).
-        during_json = before_json
-    try:
-        after_json = load_json(after_path)
-    except ValidationError as exc:
-        failures.append(str(exc))
-        # Fall back to before_json so deltas are zero; expected-queue sent-bytes
-        # checks below will then FAIL for each expected queue.
-        after_json = before_json
+    before_json = load_json(before_path)
+    during_json = load_json(during_path)
+    after_json = load_json(after_path)
+    failures: list[str] = []
     before_shapes = queue_shapes(before_json, interface_name=interface_name, ifindex=ifindex)
     during_shapes = queue_shapes(during_json, interface_name=interface_name, ifindex=ifindex)
     after_shapes = queue_shapes(after_json, interface_name=interface_name, ifindex=ifindex)
@@ -414,28 +403,24 @@ def analyze_phase(
     }
 
 
-def analyze_iperf(phase_dir: Path, roles: tuple[str, ...]) -> tuple[dict[str, Any], list[str]]:
+def analyze_iperf(phase_dir: Path, roles: tuple[str, ...]) -> dict[str, Any]:
     summaries: dict[str, Any] = {}
-    failures: list[str] = []
     for role in roles:
-        try:
-            rc = read_exit_code(phase_dir / f"{role}-iperf.rc")
-            if rc != 0:
-                failures.append(f"{phase_dir.name}: {role} iperf exited {rc}")
-        except ValidationError as exc:
-            failures.append(f"{phase_dir.name}: failed to read {role} iperf exit code: {exc}")
-            rc = 1
-        try:
-            bps = iperf_bps(load_json(phase_dir / f"{role}-iperf.json"))
-        except ValidationError as exc:
-            failures.append(f"{phase_dir.name}: {role} {exc}")
-            bps = 0.0
+        rc = read_exit_code(phase_dir / f"{role}-iperf.rc")
+        if rc != 0:
+            raise ValidationError(f"{phase_dir.name}: {role} iperf exited {rc}")
+        artifact = load_json(phase_dir / f"{role}-iperf.json")
+        if artifact.get("error"):
+            raise ValidationError(
+                f"{phase_dir.name}: {role} iperf JSON reports error: {artifact['error']}"
+            )
+        bps = iperf_bps(artifact)
         summaries[role] = {
             "bps": bps,
             "mbps": bps / 1_000_000.0,
             "exit_code": rc,
         }
-    return summaries, failures
+    return summaries
 
 
 def _resolve_phase_dir(root: Path, raw: Any, field: str) -> Path:
@@ -526,8 +511,8 @@ def validate_artifacts(
         baseline_dir = _resolve_phase_dir(root, cell.get("baseline_dir"), f"{label}.baseline_dir")
         contended_dir = _resolve_phase_dir(root, cell.get("contended_dir"), f"{label}.contended_dir")
 
-        baseline_iperf, baseline_iperf_failures = analyze_iperf(baseline_dir, ("exact",))
-        contended_iperf, contended_iperf_failures = analyze_iperf(contended_dir, ("exact", "contender"))
+        baseline_iperf = analyze_iperf(baseline_dir, ("exact",))
+        contended_iperf = analyze_iperf(contended_dir, ("exact", "contender"))
         baseline_phase = analyze_phase(
             baseline_dir,
             expected_queues={exact_queue: exact_forwarding_class},
@@ -548,12 +533,7 @@ def validate_artifacts(
             min_expected_sent_bytes=min_expected_sent_bytes,
         )
 
-        cell_failures = (
-            baseline_iperf_failures
-            + contended_iperf_failures
-            + baseline_phase["failure_reasons"]
-            + contended_phase["failure_reasons"]
-        )
+        cell_failures = baseline_phase["failure_reasons"] + contended_phase["failure_reasons"]
         baseline_bps = baseline_iperf["exact"]["bps"]
         contended_exact_bps = contended_iperf["exact"]["bps"]
         contender_bps = contended_iperf["contender"]["bps"]

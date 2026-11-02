@@ -69,6 +69,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shared CoS schedule library instead of a harness-local copy.
 # shellcheck source=cos-apply-lib.sh
 source "${SCRIPT_DIR}/cos-apply-lib.sh"
+# shellcheck source=cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
 
 MIXED_COS=${MIXED_COS:-0}
 ISOLATED_GENERATORS=${ISOLATED_GENERATORS:-0}
@@ -81,7 +83,11 @@ while [[ "${1:-}" == --* ]]; do
     esac
 done
 
-TARGET=${1:-172.16.80.200}
+TARGET=${1:-${IPERF_TARGET4:-}}
+if [[ -z "$TARGET" ]]; then
+    echo "fairness-harness: pass a target or define IPERF_TARGET4 via cluster-env.sh" >&2
+    exit 2
+fi
 if [[ "$MIXED_COS" -eq 1 ]]; then
     DEFAULT_PORT=5202
 else
