@@ -351,9 +351,9 @@ sweep_socket_orphans() {
         ss -tlnpH "sport = :${port}" 2>/dev/null |
             awk '{
                 # Parse the users:((...)) spec per owner tuple: split on
-                # `),(` boundaries and take only the LEADING "name",pid=N
-                # fields of each tuple, so pid-shaped text inside a quoted
-                # process name can never be read as an owner PID (#18626).
+                # `),(` boundaries and take the LAST pid field of each
+                # tuple, so pid-shaped text inside a quoted process name
+                # can never be read as an owner PID (#18626).
                 users = index($0, "users:(")
                 if (!users) next
                 spec = substr($0, users + length("users:("))

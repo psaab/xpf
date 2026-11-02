@@ -329,7 +329,7 @@ case "$port" in
     else
       echo 'LISTEN 0 4096 0.0.0.0:5201 0.0.0.0:* users:(("iperf3",pid=146115,fd=3),("iperf3",pid=2002,fd=3),("iperf3",pid=2003,fd=4))'
     fi ;;
-  6201) echo 'LISTEN 0 4096 0.0.0.0:6201 0.0.0.0:* users:(("python3",pid=3000,fd=3),("python3",pid=3001,fd=4),("evil pid=3000",pid=3101,fd=5),("x",pid=3000",pid=3201,fd=6))' ;;
+  6201) echo 'LISTEN 0 4096 0.0.0.0:6201 0.0.0.0:* users:(("python3",pid=3000,fd=3),("python3",pid=3001,fd=4),("evil pid=3999",pid=3101,fd=5),("x",pid=3999",pid=3201,fd=6))' ;;
 esac
 FAKE
 cat > "${DOWN_TMP}/bin/systemctl" <<'FAKE'
@@ -506,6 +506,11 @@ grep -q '^kill .*146115$' "$FAKE_LOG" \
     || fail "#18626: generic down missed the default-port iperf orphan: $(cat "$FAKE_LOG")"
 grep -q '^kill .*3101$' "$FAKE_LOG" \
     || fail "#18626: generic down missed the echo orphan / second sweep: $(cat "$FAKE_LOG")"
+grep -q '^kill .*3201$' "$FAKE_LOG" \
+    || fail "#18626: generic down missed the quote-comma comm owner 3201: $(cat "$FAKE_LOG")"
+if grep -Eq '^kill .* 3999$' "$FAKE_LOG"; then
+    fail "#18626: generic down signalled the name-carried decoy PID 3999: $(cat "$FAKE_LOG")"
+fi
 grep -q '^ss 6201$' "$FAKE_LOG" \
     || fail "#18626: generic down did not inspect echo listener port: $(cat "$FAKE_LOG")"
 if grep -Eq '^[[:space:]]*pkill([[:space:]]|$)' "${DOWN_TMP}/target-services.sh"; then
