@@ -189,7 +189,7 @@ From [incus-tcp-udp-plan.md](incus-tcp-udp-plan.md) §6; `ENV=test/incus/<stack>
 | --- | --- |
 | `make test` / `test-go` / `test-race-dp` | Go unit + race suites (incl. dataplane-adjacent packages) |
 | `make test-rust` | `userspace-dp` cargo suite (the 60k-line `*_tests.rs` estate beside the sources) |
-| `make test-root` | `test-shim-run`, memlock guards, xfrm lifecycle (root-required legs) |
+| `make vm-test-root` | `test-shim-run`, memlock guards, xfrm lifecycle (VM-only privileged legs) |
 | `make test-miri` | Miri UB checks for the Rust dataplane |
 
 These do not touch the clusters; listed because dataplane fixes from

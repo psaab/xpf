@@ -37,10 +37,10 @@ import (
 // HARNESS. Same BPF_PROG_TEST_RUN surface as xdp_shim_decouple_test.go
 // (loadUserspaceXDPTestCollection + name-based degraded-path stat asserts),
 // which these cells reuse. Memlock-gated like those cells: they SKIP under
-// `make test-go` and execute under `make test-memlock-guards` / `make
-// test-root`. They are additionally wired into `make test-shim-run` by name
-// (predicate + census over this file), so a rename that orphaned them from
-// the gate reds instead of going silently invisible (#9052 shape). No new
+// `make test-go` and execute under `make test-memlock-guards` /
+// `make vm-test-root`. They are additionally wired into `make test-shim-run`
+// by name (predicate + census over this file), so a rename that orphaned them
+// from the gate reds instead of going silently invisible (#9052 shape). No new
 // memlockcensus row is needed: the RemoveMemlock call site is the shared
 // loadUserspaceXDPTestCollection helper, already registered; the census
 // scans call sites, not callers.

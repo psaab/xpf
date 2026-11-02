@@ -307,4 +307,5 @@ fi
 # Package import paths cannot contain shell whitespace.
 # shellcheck disable=SC2086
 set -- $PKGS
-exec go test -count=1 "$@"
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+exec "$script_dir/testguard-run.sh" go test -count=1 "$@"

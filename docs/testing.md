@@ -136,14 +136,25 @@ no leg passes `-v`. So:
 
 | Command | What it examines that nothing else does |
 |---|---|
-| `sudo make test-root` | the XDP shim's behavioural cells. They SKIP unprivileged, and the #1864 verifier gate does **not** substitute — two distinct WRONG fixes of the #7494 fragment bug both pass it. `make test` now prints a line saying it did not examine them. |
+| `make vm-test-root` | the XDP shim's behavioural cells in the disposable VM leg. They SKIP without the required privilege, and the #1864 verifier gate does **not** substitute — two distinct WRONG fixes of the #7494 fragment bug both pass it. `make test` now prints a line saying it did not examine them. |
+| `make host-mutation-census` | mutation class, namespace boundary, and isolation proof for every kernel-mutating Go test in the guarded packages (#18038) |
 | `make go-skip-census` | every Go `t.Skip` in the tree, counted per bucket and ratcheted |
 | `make ignored-cell-census` | every Rust `#[ignore]`, including the third crate outside both workspaces |
 | `make test-cold-path-flooder` | 44 `#[test]`s in `test/incus/cold-path-flooder`, which was reached by nothing |
 | `make harness-census` | every runnable shell harness under `test/incus/` |
 | `make instructions-census` | every expiry marker on a temporary instruction (#18645): bad syntax anywhere (malformed, misplaced, free text without a `Review-by` date, a date more than 180 days out), and a date before today in the files your change touches. `make instructions-census-online` is the keeper's sweep: every marker, expired dates and CLOSED issues |
 | `make mirror-census` | every `<!-- mirror:<id> n=<copies> -->` block: same-id copies must match after whitespace normalisation, their number must equal the declared n, and none may lack a partner (#18645) |
-| `make selftest` | all self-tests, including image/distribution legs requiring libguestfs (~13 min), plus the censuses (go-skip, harness, ignored-cell, go-buildtag, miri, interpreter, selftest, instruction, mirror) and the ledger legs |
+| `make selftest` | all self-tests, including image/distribution legs requiring libguestfs (~13 min), plus the censuses (host-mutation, go-skip, harness, ignored-cell, go-buildtag, miri, interpreter, selftest, instruction, mirror) and the ledger legs |
+
+### Kernel-mutating Go tests are isolated by default (#18038)
+
+The daemon, dataplane, userspace dataplane, flow-export, LLDP, nftables, router-advertisement, routing, and SNMP Go test packages fail closed in `TestMain` unless the current OS thread is in both a private network and mount namespace, distinct from PID 1. `internal/testguard` locks the calling thread while comparing `/proc/thread-self/ns/{net,mnt}` with `/proc/1/ns/{net,mnt}`; an unreadable identity is also a hard failure. `XPF_SACRIFICIAL_HOST` is advisory only and cannot make an unsafe namespace pass.
+
+The Makefile's Go-command shim and the repository Go-test wrappers run tests through `scripts/testguard-run.sh`, which creates a private PID namespace and then private network and mount namespaces before executing the command. The runner records a read-only host-residue snapshot before and after, reports differences, and never attempts cleanup of host state. `apt`, `apt-get`, `dpkg`, and `systemctl` are also fail-closed PATH shims: they refuse execution unless a root-owned proof file matches the current boot ID.
+
+Privileged kernel tests belong only in `make vm-test-root` inside a disposable VM. That target first runs `scripts/mark-test-vm.sh`, which requires root and a positive `systemd-detect-virt --vm` result, then records the current boot ID. The test runner independently checks that proof before using the VM's capabilities for BPF/XFRM legs; setting the environment sentinel by hand is not sufficient. Do not run privileged test legs on the workstation.
+
+Incus cluster cells pass through `test/incus/with-cluster.sh`, which checks both firewall targets are virtual machines before invoking the cell. Direct provisioning paths use the shared `vm-target-guard.sh`; it checks Incus's instance type before installing the guest-side shims and boot-ID proof. The census registry `test/host-mutation-census.tsv` records each discovered source's mutation class, namespace boundary, and proof. The scanner rejects unregistered or stale paths and enforces the class floors; update the registry and floors whenever a mutation-bearing test source is intentionally added or removed.
 
 ### The go-skip census, and the thing it found
 

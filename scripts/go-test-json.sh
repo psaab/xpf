@@ -56,7 +56,7 @@ if [ -z "$json" ]; then
 	# text-mode timeout watcher cannot recognize. Pin the gate's intended
 	# human-readable output at the command line; Go flags are valid after
 	# package arguments too.
-	"$go_bin" test "$@" -json=false | timeout_watch
+	"$here/testguard-run.sh" "$go_bin" test "$@" -json=false | timeout_watch
 	rc=("${PIPESTATUS[@]}")
 	if [ "${rc[1]}" -eq 3 ]; then
 		exit 3
@@ -82,7 +82,7 @@ off=$(stat -c %s "$json" 2>/dev/null || echo 0)
 # stderr is deliberately NOT piped. `go test -json` reports build and setup
 # failures on stderr as plain text, not as JSON events, so folding it into the
 # pipe would both corrupt the event stream and hide the message.
-"$go_bin" test -json "$@" | tee -a "$json" | jq -j 'select(.Output != null) | .Output'
+"$here/testguard-run.sh" "$go_bin" test -json "$@" | tee -a "$json" | jq -j 'select(.Output != null) | .Output'
 rc=("${PIPESTATUS[@]}")
 
 # rc[0] is the verdict. tee and jq are reported separately because a failure in

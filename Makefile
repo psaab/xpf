@@ -49,6 +49,12 @@ GOTMPDIR ?= /wtgt
 CARGO_TARGET_DIR_SHARED := /var/worktrees/.cache/cargo
 CARGO_TARGET_DIR ?= $(CARGO_TARGET_DIR_SHARED)
 export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
+
+# #18038: package-manager/service tools used by tests resolve to fail-closed
+# shims unless a live VM target boot-ID proof is present. The Go shim runs all
+# test commands in private network+mount namespaces with a PID-1 baseline.
+HOST_BIN_SHIMS := $(CURDIR)/test/support/host-bin-shims
+export PATH := $(HOST_BIN_SHIMS):$(PATH)
 $(shell mkdir -p $(TMPDIR) $(GOCACHE) $(GOTMPDIR) $(CARGO_TARGET_DIR))
 # #18839: what `make clean` may do with CARGO_TARGET_DIR, decided here by make
 # on the resolved path (realpath when it exists, so a symlink or a trailing
@@ -204,16 +210,16 @@ test:
 	echo "  coverage (pkg/dataplane/userspace/fragment_disposition_7494_test.go)"; \
 	echo "  SKIPS unprivileged. It is the ONLY behavioural coverage of the shim's"; \
 	echo "  control flow, and the #1864 verifier gate does not substitute: two"; \
-	echo "  distinct WRONG fixes both pass it. Run 'sudo make test-root' (#9052)."; \
+	echo "  distinct WRONG fixes both pass it. Run 'make vm-test-root' in the disposable VM leg (#9052)."; \
 	echo "  XFRM lifecycle tests also SKIP if NETLINK_XFRM is unavailable;"; \
-	echo "  test-root runs them with XPF_REQUIRE_XFRM_LIFECYCLE=1 (#10868)."; \
+	echo "  vm-test-root runs them with XPF_REQUIRE_XFRM_LIFECYCLE=1 (#10868)."; \
 	exit $$status
 
 rust-source-census-13961:
 	python3 scripts/rust-source-census-13961.py --self-test
 	python3 scripts/rust-source-census-13961.py userspace-dp/src
 
-# #9052 item 1: the root-capable aggregate. `test-shim-run` was a prerequisite
+# #9052 item 1: the VM-only aggregate. `test-shim-run` was a prerequisite
 # of NOTHING — not of `test`, not of `selftest`, not of any ledger row — so the
 # only behavioural coverage of the shim was reachable solely by someone
 # remembering its name. That is the #7766 shape (a harness wired into no gate),
@@ -221,10 +227,10 @@ rust-source-census-13961:
 # identical whether the shim was covered or not.
 #
 # It is NOT a prerequisite of `test`, deliberately: `make test` must stay
-# runnable unprivileged, and a target that fails without root would make the
-# ordinary gate unusable. The remedy is the ANNOUNCEMENT above plus this named
-# aggregate — the gate now says what it did not examine instead of implying it
-# examined everything.
+# runnable unprivileged, and a target that requires VM-only privileges would
+# make the ordinary gate unusable. The remedy is the ANNOUNCEMENT above plus
+# this named aggregate — the gate now says what it did not examine instead of
+# implying it examined everything.
 
 # #10868: unprivileged `make test` deliberately preserves SKIP=PASS for the
 # XFRM-dependent lifecycle cells. This root-capable gate sets the must-run
@@ -236,9 +242,14 @@ test-xfrm-lifecycle:
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp XPF_REQUIRE_XFRM_LIFECYCLE=1 $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
 		--bins --tests -- --test-threads=1
 
-.PHONY: test-root
-test-root: test-shim-run test-memlock-guards test-xfrm-lifecycle test-ctrl-row-root
-	@echo "make test-root: the privilege-gated legs ran."
+.PHONY: vm-test-root
+vm-test-root:
+	@scripts/mark-test-vm.sh
+	@XPF_SACRIFICIAL_HOST=1 $(MAKE) --no-print-directory test-shim-run
+	@XPF_SACRIFICIAL_HOST=1 $(MAKE) --no-print-directory test-memlock-guards
+	@XPF_SACRIFICIAL_HOST=1 $(MAKE) --no-print-directory test-xfrm-lifecycle
+	@XPF_SACRIFICIAL_HOST=1 $(MAKE) --no-print-directory test-ctrl-row-root
+	@echo "make vm-test-root: the privilege-gated VM legs ran."
 	@echo "  NOTE: some cells skip BECAUSE you are root (10 at last census)."
 	@echo "  No single run examines every cell; see 'make go-skip-census'."
 
@@ -922,6 +933,17 @@ harness-census:
 # mutation that does not flip is an ESCAPE and fails this target.
 test-harness-census-lib:
 	bash ./test/incus/harness-census-selftest.sh
+
+# #18038: every kernel-mutating Go test source in the guarded packages is
+# registered with its mutation class, isolation boundary, and proof. The
+# scanner checks registry entries in both directions and class floors; the
+# test fixture mutates each failure direction so a blind census cannot pass.
+.PHONY: host-mutation-census test-host-mutation-census-lib
+host-mutation-census:
+	sh scripts/host-mutation-census.sh
+
+test-host-mutation-census-lib:
+	python3 test/incus/test_host_mutation_census.py
 
 # #18645: the instruction census. A temporary instruction carries an expiry
 # marker (an `Expires-when:` line naming `#NNNN closed`, or a free-text

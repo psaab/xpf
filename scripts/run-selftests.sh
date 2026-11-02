@@ -27,6 +27,8 @@ set -u
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck disable=SC1007
 ROOT=$(CDPATH= cd -- "$HERE/.." && pwd)
+PATH="$ROOT/test/support/host-bin-shims:$PATH"
+export PATH
 cd "$ROOT" || { echo "FATAL: cannot cd to repo root $ROOT" >&2; exit 1; }
 # Scratch pin (#14833): defaults only — an explicit caller env wins.
 # Children (python tempfile, shell mktemp, go test) inherit these, so
@@ -40,6 +42,20 @@ GOTMPDIR="${GOTMPDIR:-/wtgt}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/var/worktrees/.cache/cargo}"
 export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
 mkdir -p "$TMPDIR" "$GOCACHE" "$GOTMPDIR" "$CARGO_TARGET_DIR"
+RESIDUE_DIR=$(mktemp -d "$TMPDIR/run-selftests-residue.XXXXXX")
+"$HERE/host-residue-snapshot.sh" "$RESIDUE_DIR/before.txt"
+report_residue() {
+	rc=$?
+	trap - EXIT
+	"$HERE/host-residue-snapshot.sh" "$RESIDUE_DIR/after.txt"
+	if ! cmp -s "$RESIDUE_DIR/before.txt" "$RESIDUE_DIR/after.txt"; then
+		echo "HOST RESIDUE DIFFERENCE (report-only; no cleanup performed):"
+		diff -u "$RESIDUE_DIR/before.txt" "$RESIDUE_DIR/after.txt" || true
+	fi
+	rm -rf "$RESIDUE_DIR"
+	exit "$rc"
+}
+trap report_residue EXIT
 
 PASS=0
 FAIL=0
@@ -706,6 +722,11 @@ run_shell scripts/go-buildtag-census.sh
 # 77 itself, so this leg SKIPs on a minimal host.
 hdr "go-skip census"
 run_bash scripts/go-skip-census.sh
+
+# #18038: kernel-mutating Go tests must keep their isolation class and proof
+# registered. The census fails on both unregistered candidates and stale rows.
+hdr "host mutation census"
+run_shell scripts/host-mutation-census.sh
 
 # -- interpreter census (#8153) --
 #

@@ -30,7 +30,7 @@ import (
 // HARNESS. Same BPF_PROG_TEST_RUN surface as qinq_disposition_9888_test.go
 // (loadUserspaceXDPTestCollection + name-based degraded-path stat asserts).
 // Memlock-gated like those cells: SKIP under `make test-go`, execute under
-// `make test-memlock-guards` / `make test-root`, and wired into `make
+// `make test-memlock-guards` / `make vm-test-root`, and wired into `make
 // test-shim-run` by name. No new memlockcensus row: the RemoveMemlock call
 // site is the shared loadUserspaceXDPTestCollection helper, already
 // registered; the census scans call sites, not callers.

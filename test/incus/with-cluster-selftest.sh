@@ -15,6 +15,18 @@ WC="${SCRIPT_DIR}/with-cluster.sh"
 
 T=$(mktemp -d /tmp/xpf-lock-selftest.XXXXXX)
 trap 'rm -rf "$T"' EXIT
+mkdir -p "$T/bin"
+cat >"$T/bin/incus" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+	*"--format json"*) printf '{"type":"virtual-machine"}\n' ;;
+	*"/proc/sys/kernel/random/boot_id"*) printf '00000000-0000-0000-0000-000000000001\n' ;;
+esac
+exit 0
+STUB
+chmod +x "$T/bin/incus"
+PATH="$T/bin:$PATH"
+export PATH
 export XPF_CLUSTER_LOCK="$T/lock"
 # #10126 keeps the persistent epoch sidecar separate from the lock
 # inode so legacy `9>` probes cannot erase it.

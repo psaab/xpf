@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/psaab/xpf/internal/testguard"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/frr"
 )
@@ -19,6 +20,7 @@ import (
 // Per-test overrides save/restore these values. Tests touching package-global
 // apply seams do not run in parallel.
 func TestMain(m *testing.M) {
+	testguard.ExitIfUnsafe()
 	dir, err := os.MkdirTemp("", "daemon-reset-handoff")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "reset handoff test seam: %v\n", err)

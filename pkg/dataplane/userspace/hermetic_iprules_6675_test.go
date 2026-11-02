@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/psaab/xpf/internal/testguard"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/vishvananda/netlink"
@@ -40,6 +41,7 @@ import (
 // still work — they capture the current ruleListFn and restore it on cleanup,
 // which now restores to this stub rather than to netlink.RuleList.
 func TestMain(m *testing.M) {
+	testguard.ExitIfUnsafe()
 	dir, err := os.MkdirTemp("", "userspace-nat-generation")
 	if err != nil {
 		panic(err)

@@ -30,6 +30,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# shellcheck source=test/incus/vm-target-guard.sh
+source "${SCRIPT_DIR}/vm-target-guard.sh"
+
 # #1875: shared-cluster lock protocol (marker validation + owner
 # reporting). Mutating verbs serialize through with-cluster.sh — see
 # require_cluster_cell below and the protocol header in cluster-lock.sh.
@@ -431,6 +434,7 @@ provision_vm() {
 	local idx="$2"
 	local rinst
 	rinst=$(r "$vm")
+	xpf_assert_vm_target "$rinst"
 
 	# Wait for systemd to be ready
 	info "Waiting for system to be ready ($vm)..."
