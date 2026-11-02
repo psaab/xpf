@@ -914,10 +914,10 @@ would blackhole every flow handed to it.
   node0 primary and transit dead (#18696). An intentional stop or respawn (a
   plan-key change, an operator stop) keeps the F2 pass-through: it neither
   installs nor wipes arm debt, so a config commit does not move the RGs.
-- **Restart grace on the exit debt (#18791).** The exit raises the debt only
-  if the replacement has not become forwarding-ready—reports
-  `ForwardingArmed` and the shared Go apply successfully writes
-  `userspace_ctrl.Enabled=1`—within `helperExitGrace` (2.5 s) of the exit.
+- **Restart grace on the exit debt (#18791).** The exit raises debt only if
+  the replacement becomes forwarding-ready within `helperExitGrace` (2.5 s):
+  it reports `ForwardingArmed`, ctrl=1 is successfully applied, XSK liveness
+  is proven, and every addressable binding is BPF READY.
   - **Why:** with the #18717 zero-delay restart a crashed helper recovers
     locally (first forwarded ping 1.58-1.77 s after SIGKILL, 7 samples on
     udp, `docs/log/18707.md`). That is FASTER than the RG move the immediate
@@ -953,24 +953,28 @@ would blackhole every flow handed to it.
     keeps its traffic black-holed on this node for up to 2.5 s longer than
     before, and only then does the RG move begin.
   - **Hand-off:** the exit flag is read and inherited by the new generation's
-    tracker. It remains set through spawn and is cleared only after a status
-    reporting `ForwardingArmed` is successfully applied with
-    `ctrl.Enabled=1`, closing both the ready gap and spawned-but-unarmed
-    demotion window.
+    tracker. It remains set through spawn and is cleared only after an armed
+    status successfully applies `ctrl.Enabled=1`, XSK liveness is proven, and
+    every addressable binding is BPF READY, closing the ready and demotion
+    windows.
   - **Late forwarding readiness:** a first applied forwarding-ready state
     after the deadline does not erase the episode. It raises debt, which then
     clears only through the existing forwarding-ready-and-healthy hysteresis.
   - **Clock:** grace and crash-loop deadlines retain Go's monotonic `time.Time`
     readings, so a wall-clock step cannot extend or shorten either interval.
   - **During the grace and until forwarding-ready, VIP-first demotion applies:**
-    it keys on `HelperExitedUnexpectedly` separately from actual control-socket
-    responsiveness, so an answering but unarmed or ctrl-disabled replacement
-    is not mistaken for a silent socket.
+    it keys on `HelperExitedUnexpectedly` separately from control-socket
+    responsiveness, so an answering but unarmed, ctrl-disabled, XSK-unproven,
+    or registered-but-unbound replacement is not mistaken for ready.
   - A replacement that never answers or becomes forwarding-ready and is stopped
     by readiness timeout retains the original exit flag, so debt still rises
     at the grace deadline.
   - **Cells:** `TestExitGraceNeedsAppliedForwardingReadyFold18794` proves
-    disabled ctrl retains debt and successful ctrl enable closes the grace;
+    disabled ctrl retains debt and a fully ready applied status closes grace;
+    `TestExitGraceRequiresBoundAndProvenXSKFold18794` proves an unbound
+    registered binding cannot close grace even when ctrl=1 starts the probe;
+    `TestExitGraceRequiresProvenXSKFold18794` proves BPF READY and probe ctrl
+    still cannot close grace without XSK liveness proof;
     `TestTransitGateReadsGraceDebtWhileManagerMutexHeldFold18794` pins deadline
     debt while readiness holds `Manager.mu`; `helper_exit_grace_18791_test.go`
     also covers the userspace/daemon cells, and

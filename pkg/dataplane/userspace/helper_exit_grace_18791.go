@@ -28,10 +28,16 @@ func (m *Manager) noteHelperStatus(gen uint64, now time.Time, heartbeats []time.
 	m.noteHelperControlAnswered(gen)
 }
 
-// noteHelperForwardingReady is called only after an armed status has
-// successfully written ctrl.Enabled=1. That applied state, not the helper's
-// report alone, ends an unexpected-exit grace and clears its demotion signal.
-func (m *Manager) noteHelperForwardingReady(gen uint64, now time.Time) bool {
+// noteHelperForwardingReady is called only after an armed status successfully
+// writes ctrl.Enabled=1, XSK liveness is proven, and every live binding has
+// been applied BPF-ready. The tracker records readiness only then; if grace
+// already expired, the debt still clears through ordinary healthy hysteresis.
+// The helper-down demotion signal clears at this transition.
+func (m *Manager) noteHelperForwardingReady(gen uint64, now time.Time, status *ProcessStatus, deadWorkers map[uint32]bool) bool {
+	if status == nil || !status.ForwardingArmed || !m.xskLivenessProven ||
+		!allBindingsForwardingReady(status.Bindings, deadWorkers) {
+		return false
+	}
 	if !m.liveTrack.noteAppliedForwardingReady(gen, now) {
 		return false
 	}
@@ -50,7 +56,8 @@ func (m *Manager) noteHelperForwardingReady(gen uint64, now time.Time) bool {
 // after SIGKILL over 7 samples.
 //
 // So the exit raises debt only if the replacement is not forwarding-ready
-// (reports ForwardingArmed and Go successfully applies ctrl.Enabled=1) within
+// (reports ForwardingArmed, Go successfully applies ctrl.Enabled=1, XSK
+// liveness is proven, and all addressable binding rows are BPF READY) within
 // helperExitGrace of the exit. Inside the grace the node keeps the RGs at full
 // weight. A replacement that becomes forwarding-ready inside it ends the
 // episode with no debt and no move. One that has not by the end raises debt,
@@ -71,12 +78,12 @@ func (m *Manager) noteHelperForwardingReady(gen uint64, now time.Time) bool {
 // helperExitGrace longer than before, and the move then starts.
 
 // helperExitGrace is how long an unexpectedly exited helper's replacement may
-// take to report ForwardingArmed and get ctrl.Enabled=1 applied before the exit
-// raises election debt. The measured local recovery (first forwarded ping) was
-// 1.58-1.77 s after the SIGKILL, and the exit is observed about 0.47-0.51 s
-// after it. The replacement is therefore forwarding-ready within about 1.3 s
-// of the point this grace is measured from. 2.5 s gives that about 1.9x
-// headroom for a loaded host (the samples were taken at host loadavg 15-28).
+// take to report ForwardingArmed, apply ctrl.Enabled=1, prove XSK liveness, and
+// make every addressable binding BPF READY before the exit raises election debt.
+// The measured local recovery (first forwarded ping) was 1.58-1.77 s after
+// SIGKILL; the exit is observed about 0.47-0.51 s after it. The replacement
+// is therefore forwarding-ready within about 1.3 s of the point this grace
+// is measured from. 2.5 s gives that about 1.9x headroom at loadavg 15-28.
 // With 2 s, a restart slowed by load would move AND pay the grace, the worst
 // of both.
 //
@@ -158,10 +165,10 @@ func (m *Manager) exitGraceDeadline() time.Time {
 }
 
 // HelperExitedUnexpectedly reports that an unexpected-exit replacement has
-// not yet become forwarding-ready: it stays true from spawn until a status
-// reporting ForwardingArmed is successfully applied with ctrl.Enabled=1. It
-// does not report whether the control socket answers; HelperControlUnresponsive
-// provides that separate signal. Never takes m.mu.
+// not yet become forwarding-ready: it stays true from spawn until an armed
+// status is applied with ctrl.Enabled=1, XSK liveness is proven, and all live
+// bindings are BPF READY. It does not report whether the control socket answers;
+// HelperControlUnresponsive provides that separate signal. Never takes m.mu.
 func (m *Manager) HelperExitedUnexpectedly() bool {
 	if m == nil {
 		return false

@@ -116,11 +116,12 @@ type helperLivenessTracker struct {
 	healthyTrips   int
 	// inherited is set on a generation started after an UNEXPECTED exit (a
 	// crash, or a wedge kill): the verdict stays raised until the Go ctrl gate
-	// successfully applies a helper status reporting ForwardingArmed, and the
-	// replacement then looks healthy (#18697/#18794).
+	// successfully applies an armed helper status, all live bindings have
+	// BPF READY, and XSK liveness is proven (#18697/#18794).
 	inherited bool
 	// forwardingReadySeen separates the helper's report from the dataplane
-	// being allowed to forward. It is set only after ctrl.Enabled=1 is applied.
+	// being allowed to forward. It is set only after ctrl=1, XSK proof, and
+	// BPF-ready binding rows have all been applied.
 	forwardingReadySeen bool
 	// graceUntil (#18791) is the unexpected-exit grace deadline an inherited
 	// generation still runs under: until then the verdict is NOT raised, and
@@ -275,7 +276,7 @@ func (t *helperLivenessTracker) noteRoundTrip(gen uint64, start, end time.Time, 
 }
 
 // noteStatus records an answered status and its worker heartbeats. A raw
-// ForwardingArmed report does not prove that the Go ctrl gate is enabled.
+// ForwardingArmed report does not prove dataplane forwarding readiness.
 func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats []time.Time, forwardingArmed bool) {
 	t.mu.Lock()
 	defer t.unlockAndFlush()
@@ -283,8 +284,8 @@ func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats
 		return
 	}
 	// Raw ForwardingArmed is not enough to end the inherited exit episode:
-	// applyHelperStatusLocked records forwarding readiness only after the
-	// ctrl.Enabled=1 map write succeeds.
+	// applyHelperStatusLocked records readiness only after ctrl.Enabled=1 is
+	// written, XSK liveness is proven, and all addressable rows are BPF READY.
 	t.lastStatusAt = now
 	t.hbOldest, t.hbOldestIdx = 0, -1
 	// Worker heartbeats only mean "this worker is looping" while forwarding
@@ -314,9 +315,10 @@ func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats
 	t.evaluateLocked(now)
 }
 
-// noteAppliedForwardingReady records that an armed status successfully passed
-// the Go-owned ctrl gate. The inherited healthy hysteresis starts here, not
-// when the helper merely reports itself armed.
+// noteAppliedForwardingReady records that an armed status has passed all
+// dataplane-forwarding gates at apply time: ctrl.Enabled=1 was written,
+// XSK liveness was proven, and each live binding was BPF-ready. The inherited
+// healthy hysteresis starts here, not when the helper merely reports armed.
 func (t *helperLivenessTracker) noteAppliedForwardingReady(gen uint64, now time.Time) bool {
 	t.mu.Lock()
 	defer t.unlockAndFlush()

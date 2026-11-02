@@ -110,6 +110,23 @@ func bindingForwardingLive(b BindingStatus, deadWorkers map[uint32]bool) bool {
 	return b.Registered && b.Armed && b.Ready && !deadWorkers[b.WorkerID]
 }
 
+// allBindingsForwardingReady mirrors the row gate used by status apply. At
+// least one addressable binding must be bound, armed, helper-ready, and backed
+// by a live worker; ctrl=1 alone may only be running the XSK probe.
+func allBindingsForwardingReady(bindings []BindingStatus, deadWorkers map[uint32]bool) bool {
+	found := false
+	for _, binding := range bindings {
+		if binding.Ifindex <= 0 {
+			continue
+		}
+		found = true
+		if !binding.Bound || !bindingForwardingLive(binding, deadWorkers) {
+			return false
+		}
+	}
+	return found
+}
+
 type userspaceBindingKey struct {
 	Ifindex uint32
 	QueueID uint32
@@ -877,7 +894,7 @@ func (m *Manager) applyHelperStatusLocked(status *ProcessStatus) error {
 		}
 		m.ctrlWasEnabled = true
 		if status.ForwardingArmed {
-			m.noteHelperForwardingReady(m.procGen, time.Now())
+			m.noteHelperForwardingReady(m.procGen, time.Now(), status, deadWorkers)
 		}
 	}
 

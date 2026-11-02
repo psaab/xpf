@@ -6,6 +6,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cilium/ebpf"
 )
 
 // #18791: an unexpected helper exit raises election debt only if the
@@ -31,7 +33,10 @@ func respawn18791(m *Manager, gen uint64, now time.Time) {
 func armed18791(m *Manager, gen uint64, now time.Time) {
 	m.liveTrack.noteAnswered(gen, now)
 	m.noteHelperStatus(gen, now, heartbeats18685(4, now), true)
-	m.noteHelperForwardingReady(gen, now)
+	m.xskLivenessProven = true
+	status := readyHelperStatus()
+	status.ForwardingArmed = true
+	m.noteHelperForwardingReady(gen, now, status, nil)
 }
 
 func newGraceManager18791(t *testing.T) *Manager {
@@ -471,9 +476,9 @@ func TestExitGraceDeadlineRetainsMonotonicClockFold18794(t *testing.T) {
 }
 
 // TestExitGraceNeedsAppliedForwardingReadyFold18794 catches the status-vs-
-// dataplane readiness gap: an armed helper status is not serving when the Go
-// ctrl gate remains disabled. The exit debt must remain until ctrl.Enabled=1
-// was successfully written; raw ForwardingArmed alone cannot close the grace.
+// dataplane readiness gap: an armed helper status is not serving when ctrl
+// remains disabled, XSK liveness is unproven, or a live binding is not BPF
+// READY. Grace ends only after all forwarding-readiness gates have passed.
 func TestExitGraceNeedsAppliedForwardingReadyFold18794(t *testing.T) {
 	oldGrace := helperExitGrace
 	helperExitGrace = 100 * time.Millisecond
@@ -515,7 +520,7 @@ func TestExitGraceNeedsAppliedForwardingReadyFold18794(t *testing.T) {
 		}
 	})
 
-	t.Run("armed and ctrl applied", func(t *testing.T) {
+	t.Run("armed and fully forwarding-ready", func(t *testing.T) {
 		m, ctrl := seamedManager(t)
 		now := time.Now()
 		exit18791(m, now)
@@ -546,9 +551,142 @@ func TestExitGraceNeedsAppliedForwardingReadyFold18794(t *testing.T) {
 		}
 		time.Sleep(time.Until(m.exitGraceDeadline()) + 10*time.Millisecond)
 		if m.HelperElectionNotReady() {
-			t.Fatal("grace expiry raised debt after ctrl was successfully enabled")
+			t.Fatal("grace expiry raised debt after full forwarding readiness was applied")
 		}
 	})
+}
+
+type forwardingReadyBindingsMap18794 struct {
+	rows map[uint32]userspaceBindingValue
+}
+
+func (f *forwardingReadyBindingsMap18794) Lookup(_, _ interface{}) error {
+	return ebpf.ErrKeyNotExist
+}
+
+func (f *forwardingReadyBindingsMap18794) Update(key, value interface{}, _ ebpf.MapUpdateFlags) error {
+	f.rows[key.(uint32)] = value.(userspaceBindingValue)
+	return nil
+}
+
+// TestExitGraceRequiresBoundAndProvenXSKFold18794 covers a successful ctrl=1
+// write that only starts the liveness probe. A registered+armed but unbound
+// binding is not BPF-ready, so it must not close inherited exit grace.
+// RED on the pre-fix path: ctrl=1 plus ForwardingArmed ended grace while the
+// userspace_bindings READY flag was still clear.
+func TestExitGraceRequiresBoundAndProvenXSKFold18794(t *testing.T) {
+	oldGrace := helperExitGrace
+	helperExitGrace = 100 * time.Millisecond
+	t.Cleanup(func() { helperExitGrace = oldGrace })
+
+	m, ctrl := seamedManager(t)
+	bindings := &forwardingReadyBindingsMap18794{rows: make(map[uint32]userspaceBindingValue)}
+	m.helperStatusBindingsMapHook = bindings
+	m.xskLivenessProven = false
+	m.neighborsPrewarmed = true
+
+	now := time.Now()
+	exit18791(m, now)
+	m.mu.Lock()
+	m.procGen = 2
+	m.mu.Unlock()
+	respawn18791(m, 2, time.Now())
+
+	status := readyHelperStatus()
+	status.ForwardingArmed = true
+	status.Bindings = []BindingStatus{{
+		Slot: 0, QueueID: 0, WorkerID: 0,
+		Interface: "ge-0-0-1", Ifindex: 7,
+		Registered: true, Armed: true, Ready: false, Bound: false,
+	}}
+	observedAt := time.Now()
+	m.noteHelperStatus(2, observedAt, heartbeats18685(1, observedAt), true)
+	m.mu.Lock()
+	err := m.applyHelperStatusLocked(status)
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatalf("apply armed, registered-but-unbound status: %v", err)
+	}
+	if !ctrl.haveStored || ctrl.stored.Enabled != 1 {
+		t.Fatalf("non-vacuous probe premise failed: stored=%v ctrl=%+v, want successful ctrl.Enabled=1",
+			ctrl.haveStored, ctrl.stored)
+	}
+	if m.xskLivenessProven || m.xskProbeStart.IsZero() {
+		t.Fatalf("non-vacuous XSK probe premise failed: proven=%v probeStart=%v, want unproven probe running",
+			m.xskLivenessProven, m.xskProbeStart)
+	}
+	index := uint32(status.Bindings[0].Ifindex)*bindingQueuesPerIface + status.Bindings[0].QueueID
+	row, ok := bindings.rows[index]
+	if !ok || row.Flags != 0 {
+		t.Fatalf("registered-but-unbound binding row = %+v present=%v, want BPF READY clear", row, ok)
+	}
+	if m.HelperElectionNotReady() {
+		t.Fatal("registered-but-unbound helper raised election debt before the grace deadline")
+	}
+	time.Sleep(time.Until(m.exitGraceDeadline()) + 10*time.Millisecond)
+	if !m.HelperElectionNotReady() {
+		t.Fatal("ctrl=1 only started the XSK probe, but unbound/non-READY status ended grace; RG kept full weight after the deadline")
+	}
+	if !m.HelperExitedUnexpectedly() {
+		t.Fatal("the unbound replacement cleared the helper-down demotion signal")
+	}
+}
+
+// TestExitGraceRequiresProvenXSKFold18794 makes the complementary proof
+// explicit: even a BPF-READY binding and ctrl=1 are only a probe until the
+// manager has established XSK liveness.
+func TestExitGraceRequiresProvenXSKFold18794(t *testing.T) {
+	oldGrace := helperExitGrace
+	helperExitGrace = 100 * time.Millisecond
+	t.Cleanup(func() { helperExitGrace = oldGrace })
+
+	m, ctrl := seamedManager(t)
+	bindings := &forwardingReadyBindingsMap18794{rows: make(map[uint32]userspaceBindingValue)}
+	m.helperStatusBindingsMapHook = bindings
+	m.xskLivenessProven = false
+	m.neighborsPrewarmed = true
+
+	now := time.Now()
+	exit18791(m, now)
+	m.mu.Lock()
+	m.procGen = 2
+	m.mu.Unlock()
+	respawn18791(m, 2, time.Now())
+
+	status := readyHelperStatus()
+	status.ForwardingArmed = true
+	status.Bindings[0].RXPackets = 0
+	observedAt := time.Now()
+	m.noteHelperStatus(2, observedAt, heartbeats18685(1, observedAt), true)
+	m.mu.Lock()
+	err := m.applyHelperStatusLocked(status)
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatalf("apply armed, BPF-ready but XSK-unproven status: %v", err)
+	}
+	if !ctrl.haveStored || ctrl.stored.Enabled != 1 {
+		t.Fatalf("non-vacuous probe premise failed: stored=%v ctrl=%+v, want successful ctrl.Enabled=1",
+			ctrl.haveStored, ctrl.stored)
+	}
+	if m.xskLivenessProven || m.xskProbeStart.IsZero() {
+		t.Fatalf("non-vacuous XSK proof premise failed: proven=%v probeStart=%v, want unproven probe running",
+			m.xskLivenessProven, m.xskProbeStart)
+	}
+	index := uint32(status.Bindings[0].Ifindex)*bindingQueuesPerIface + status.Bindings[0].QueueID
+	row, ok := bindings.rows[index]
+	if !ok || row.Flags != userspaceBindingReady {
+		t.Fatalf("bound+ready binding row = %+v present=%v, want BPF READY set during liveness probe", row, ok)
+	}
+	if m.HelperElectionNotReady() {
+		t.Fatal("XSK-unproven helper raised election debt before the grace deadline")
+	}
+	time.Sleep(time.Until(m.exitGraceDeadline()) + 10*time.Millisecond)
+	if !m.HelperElectionNotReady() {
+		t.Fatal("BPF READY and ctrl=1 without XSK proof ended grace; RG kept full weight after the deadline")
+	}
+	if !m.HelperExitedUnexpectedly() {
+		t.Fatal("the XSK-unproven replacement cleared the helper-down demotion signal")
+	}
 }
 
 // TestTransitGateReadsGraceDebtWhileManagerMutexHeldFold18794 reproduces the
