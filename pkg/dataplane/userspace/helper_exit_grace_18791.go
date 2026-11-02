@@ -26,9 +26,17 @@ func (m *Manager) noteHelperControlAnswered(gen uint64) {
 func (m *Manager) noteHelperStatus(gen uint64, now time.Time, heartbeats []time.Time, forwardingArmed bool) {
 	m.liveTrack.noteStatus(gen, now, heartbeats, forwardingArmed)
 	m.noteHelperControlAnswered(gen)
-	if forwardingArmed {
-		m.helperDownUnexpected.Store(false)
+}
+
+// noteHelperForwardingReady is called only after an armed status has
+// successfully written ctrl.Enabled=1. That applied state, not the helper's
+// report alone, ends an unexpected-exit grace and clears its demotion signal.
+func (m *Manager) noteHelperForwardingReady(gen uint64, now time.Time) bool {
+	if !m.liveTrack.noteAppliedForwardingReady(gen, now) {
+		return false
 	}
+	m.helperDownUnexpected.Store(false)
+	return true
 }
 
 // #18791: a bounded grace before the #18697 unexpected-exit election debt.
@@ -41,34 +49,36 @@ func (m *Manager) noteHelperStatus(gen uint64, now time.Time, heartbeats []time.
 // 1.8-2.9 s of loss (0 TCP resets), and a local-only recovery took 1.58-1.77 s
 // after SIGKILL over 7 samples.
 //
-// So the exit raises debt only if the replacement is not ARMED within
+// So the exit raises debt only if the replacement is not forwarding-ready
+// (reports ForwardingArmed and Go successfully applies ctrl.Enabled=1) within
 // helperExitGrace of the exit. Inside the grace the node keeps the RGs at full
-// weight. A replacement that arms inside it ends the episode with no debt and
-// no move. One that has not armed by the end raises the debt then, which moves
-// the RGs exactly as before.
+// weight. A replacement that becomes forwarding-ready inside it ends the
+// episode with no debt and no move. One that has not by the end raises debt,
+// which moves the RGs exactly as before.
 //
 // No grace (debt at once, the #18697 behaviour) when:
 //   - another unexpected exit was observed within helperExitCrashLoopWindow,
-//     or the previous exit's episode is still open (the replacement died
-//     before arming): a crash loop must move promptly;
+//     or the previous episode is still open because the replacement died
+//     before becoming forwarding-ready: a crash loop must move promptly;
 //   - the dying generation already carried a raised verdict (a wedge, or the
 //     wedge kill itself): the RGs were already leaving.
 //
 // The wedge verdict (#18685) is unchanged: it is a separate, silence-based
 // signal and raises debt at once, also during the grace.
 //
-// The cost is paid by a helper that is truly dead or slow to arm. Its traffic
-// stays black-holed on this node for up to helperExitGrace longer than before,
-// and the move then starts.
+// The cost is paid by a helper that is truly dead or slow to become
+// forwarding-ready. Its traffic stays black-holed on this node for up to
+// helperExitGrace longer than before, and the move then starts.
 
 // helperExitGrace is how long an unexpectedly exited helper's replacement may
-// take to report ForwardingArmed before the exit raises election debt. The
-// measured local recovery (first forwarded ping) was 1.58-1.77 s after the
-// SIGKILL, and the exit is observed about 0.47-0.51 s after it. The
-// replacement is therefore armed within about 1.3 s of the point this grace
-// is measured from. 2.5 s gives that about 1.9x headroom for a loaded host
-// (the samples were taken at host loadavg 15-28). With 2 s, a restart slowed
-// by load would move AND pay the grace, the worst of both.
+// take to report ForwardingArmed and get ctrl.Enabled=1 applied before the exit
+// raises election debt. The measured local recovery (first forwarded ping) was
+// 1.58-1.77 s after the SIGKILL, and the exit is observed about 0.47-0.51 s
+// after it. The replacement is therefore forwarding-ready within about 1.3 s
+// of the point this grace is measured from. 2.5 s gives that about 1.9x
+// headroom for a loaded host (the samples were taken at host loadavg 15-28).
+// With 2 s, a restart slowed by load would move AND pay the grace, the worst
+// of both.
 //
 // A var only so a cell can shrink it; production never changes it.
 var helperExitGrace = 2500 * time.Millisecond
@@ -90,7 +100,7 @@ func (m *Manager) noteUnexpectedExitGraceLocked(now time.Time) {
 	waive, why := false, ""
 	switch {
 	case m.helperDownUnexpected.Load() || m.liveTrack.exitEpisodeOpen():
-		waive, why = true, "the previous exit's replacement died before arming"
+		waive, why = true, "the previous exit's replacement died before forwarding readiness"
 	case prev != nil && now.Sub(*prev) < helperExitCrashLoopWindow:
 		waive, why = true, "another unexpected exit within "+helperExitCrashLoopWindow.String()
 	case m.liveTrack.suspectedNow():
@@ -104,9 +114,9 @@ func (m *Manager) noteUnexpectedExitGraceLocked(now time.Time) {
 	deadline := now.Add(helperExitGrace)
 	m.exitGraceDeadlineAt.Store(&deadline)
 	m.exitGraceWaiveReason.Store(nil)
-	// Wake the daemon's transit gate when the grace ends, so a replacement
-	// that has not armed by then raises the debt at the deadline and not at
-	// the next 1 s transit tick. The observer is the daemon's non-blocking,
+	// Wake the daemon's transit gate when the grace ends, so a replacement that
+	// has not become forwarding-ready by then raises debt at the deadline and not
+	// at the next 1 s transit tick. The observer is the daemon's non-blocking,
 	// Manager-free wake (SetHelperSupervisorObserver), so firing it from the
 	// timer goroutine without m.mu is safe.
 	if wake := m.helperSupervisorObserver; wake != nil {
@@ -120,11 +130,9 @@ func (m *Manager) noteUnexpectedExitGraceLocked(now time.Time) {
 
 // handOffExitVerdictLocked starts generation gen's liveness tracking and
 // carries an unexpected exit's verdict into it. The helper-down flag is
-// deliberately retained until a status reports ForwardingArmed: a spawned but
-// not-yet-serving generation still needs VIP-first demotion (#18794). This
-// preserves the load, reset, then clear ordering (seat AE on #18717); only the
-// later arm observation clears the flag, after the tracker has inherited the
-// verdict. Called with m.mu held.
+// deliberately retained until an armed status is successfully applied to the
+// ctrl gate: a spawned but not-yet-serving generation still needs VIP-first
+// demotion (#18794). Called with m.mu held.
 func (m *Manager) handOffExitVerdictLocked(gen uint64, now time.Time) {
 	inherit := m.helperDownUnexpected.Load()
 	if hook := m.testAfterExitFlagRead; hook != nil {
@@ -149,11 +157,11 @@ func (m *Manager) exitGraceDeadline() time.Time {
 	return time.Time{}
 }
 
-// HelperExitedUnexpectedly reports that an unexpected-exit replacement has not
-// yet armed. It stays true after spawn until ForwardingArmed is reported, so
-// the daemon's VIP-first demotion also covers the spawned-but-unarmed window.
-// It does not report whether that process's control socket currently answers;
-// HelperControlUnresponsive provides that separate signal. Never takes m.mu.
+// HelperExitedUnexpectedly reports that an unexpected-exit replacement has
+// not yet become forwarding-ready: it stays true from spawn until a status
+// reporting ForwardingArmed is successfully applied with ctrl.Enabled=1. It
+// does not report whether the control socket answers; HelperControlUnresponsive
+// provides that separate signal. Never takes m.mu.
 func (m *Manager) HelperExitedUnexpectedly() bool {
 	if m == nil {
 		return false
@@ -167,7 +175,7 @@ func (m *Manager) HelperExitedUnexpectedly() bool {
 func (t *helperLivenessTracker) exitEpisodeOpen() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.inherited && !t.suspected && !t.graceUntil.IsZero() && !t.armedSeen
+	return t.inherited && !t.suspected && !t.graceUntil.IsZero() && !t.forwardingReadySeen
 }
 
 // suspectedNow reports the raised verdict without re-evaluating it.
@@ -178,16 +186,16 @@ func (t *helperLivenessTracker) suspectedNow() bool {
 }
 
 // evaluateExitGraceLocked advances a generation's unexpected-exit grace: an
-// arm inside it ends the episode with no debt, and expiry without an arm raises
-// debt (from then on the #18697 rule, "clear once armed and healthy", applies).
-// If the first arm is observed only after the deadline, it is late and cannot
-// erase the episode. Caller holds t.mu.
+// applied forwarding-ready state inside it ends the episode with no debt, and
+// expiry without that state raises debt (from then on the #18697 rule, clear
+// only after forwarding readiness and healthy hysteresis, applies). Caller
+// holds t.mu.
 func (t *helperLivenessTracker) evaluateExitGraceLocked(now time.Time) {
 	if !t.inherited || t.suspected || t.graceUntil.IsZero() {
 		return
 	}
 	if now.Before(t.graceUntil) {
-		if t.armedSeen {
+		if t.forwardingReadySeen {
 			t.pendingLogs = append(t.pendingLogs, trackerLog{
 				msg:  "userspace: helper recovered locally within the restart grace after an unexpected exit; no failover (#18791)",
 				args: []any{"generation", t.gen, "grace_left", t.graceUntil.Sub(now).Round(10 * time.Millisecond).String()}})
@@ -198,9 +206,9 @@ func (t *helperLivenessTracker) evaluateExitGraceLocked(now time.Time) {
 	}
 	t.suspected = true
 	t.suspectedSince = now
-	t.reason = "replacement helper not armed within the " + helperExitGrace.String() + " restart grace after an unexpected exit"
+	t.reason = "replacement helper not forwarding-ready within the " + helperExitGrace.String() + " restart grace after an unexpected exit"
 	t.graceUntil = time.Time{}
 	t.pendingLogs = append(t.pendingLogs, trackerLog{warn: true,
-		msg:  "userspace: helper not armed within the restart grace after an unexpected exit; raising election debt so a healthy peer takes the data RGs (#18791)",
+		msg:  "userspace: helper not forwarding-ready within the restart grace after an unexpected exit; raising election debt so a healthy peer takes the data RGs (#18791)",
 		args: []any{"generation", t.gen, "grace", helperExitGrace.String()}})
 }

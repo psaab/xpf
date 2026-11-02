@@ -1054,9 +1054,9 @@ func (m *Manager) stopLocked() {
 	// verdict while a planned stop-to-respawn runs.
 	m.liveTrack.retire()
 	// #18794: this retires the tracker's generation-local evidence, but the
-	// unexpected-exit flag is intentionally retained until a replacement reports
-	// ForwardingArmed. A spawned child that never answers and is stopped after
-	// its readiness timeout must not erase the original grace debt.
+	// unexpected-exit flag is intentionally retained until an armed status is
+	// successfully applied with ctrl.Enabled=1. A spawned child that never
+	// answers and is stopped after its readiness timeout must not erase the debt.
 	// This record bit describes a currently running supervisor retry, not
 	// durable episode history; an intentional stop makes that claim stale.
 	m.helperCrash.RecoveredSinceCrash = false

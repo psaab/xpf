@@ -876,6 +876,9 @@ func (m *Manager) applyHelperStatusLocked(status *ProcessStatus) error {
 			return m.failClosedUserspaceCtrlLocked(ctrlMap, ctrl, fmt.Errorf("enable userspace_ctrl from helper status: %w", err))
 		}
 		m.ctrlWasEnabled = true
+		if status.ForwardingArmed {
+			m.noteHelperForwardingReady(m.procGen, time.Now())
+		}
 	}
 
 	m.recordHelperStatusLocked(status)

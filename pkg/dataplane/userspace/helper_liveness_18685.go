@@ -115,14 +115,17 @@ type helperLivenessTracker struct {
 	healthySince   time.Time
 	healthyTrips   int
 	// inherited is set on a generation started after an UNEXPECTED exit (a
-	// crash, or a wedge kill): the verdict stays raised until the new helper
-	// reports ForwardingArmed and then looks healthy, so the RGs do not come
-	// back to a helper that is not yet forwarding (#18697).
+	// crash, or a wedge kill): the verdict stays raised until the Go ctrl gate
+	// successfully applies a helper status reporting ForwardingArmed, and the
+	// replacement then looks healthy (#18697/#18794).
 	inherited bool
-	armedSeen bool
+	// forwardingReadySeen separates the helper's report from the dataplane
+	// being allowed to forward. It is set only after ctrl.Enabled=1 is applied.
+	forwardingReadySeen bool
 	// graceUntil (#18791) is the unexpected-exit grace deadline an inherited
 	// generation still runs under: until then the verdict is NOT raised, and
-	// an arm before it ends the episode with no debt. Zero once decided.
+	// applied forwarding readiness before it ends the episode with no debt.
+	// Zero once decided.
 	graceUntil time.Time
 
 	kills atomic.Uint64
@@ -163,8 +166,9 @@ func (t *helperLivenessTracker) reset(gen uint64, now time.Time, inheritNotReady
 
 // resetWithGrace is reset with the #18791 unexpected-exit grace: when
 // inheritNotReady and graceUntil is still ahead, the inherited verdict is held
-// back until graceUntil, and an arm before it ends the episode with no debt.
-// A zero or past graceUntil raises it at once, as reset does.
+// back until graceUntil, and applied forwarding readiness before it ends the
+// episode with no debt. A zero or past graceUntil raises it at once, as reset
+// does.
 func (t *helperLivenessTracker) resetWithGrace(gen uint64, now time.Time, inheritNotReady bool, graceUntil time.Time) {
 	t.mu.Lock()
 	defer t.unlockAndFlush()
@@ -175,7 +179,7 @@ func (t *helperLivenessTracker) resetWithGrace(gen uint64, now time.Time, inheri
 	t.silentTrips = 0
 	t.hbOldest, t.hbOldestIdx, t.frozenStreak, t.lastStatusAt = 0, -1, 0, time.Time{}
 	t.inherited = inheritNotReady
-	t.armedSeen = false
+	t.forwardingReadySeen = false
 	t.suspected = inheritNotReady
 	t.suspectedSince = time.Time{}
 	t.reason = ""
@@ -184,13 +188,13 @@ func (t *helperLivenessTracker) resetWithGrace(gen uint64, now time.Time, inheri
 		t.suspected = false
 		t.graceUntil = graceUntil
 		t.pendingLogs = append(t.pendingLogs, trackerLog{warn: true,
-			msg:  "userspace: helper restarted after an unexpected exit; keeping the RGs locally while it arms, up to the restart grace (#18791)",
+			msg:  "userspace: helper restarted after an unexpected exit; keeping the RGs locally while it becomes forwarding-ready, up to the restart grace (#18791)",
 			args: []any{"generation", gen, "grace_left", graceUntil.Sub(now).Round(10 * time.Millisecond).String()}})
 	} else if inheritNotReady {
 		t.suspectedSince = now
-		t.reason = "first helper generation after an unexpected exit, not yet armed and healthy"
+		t.reason = "first helper generation after an unexpected exit, not yet forwarding-ready and healthy"
 		t.pendingLogs = append(t.pendingLogs, trackerLog{warn: true,
-			msg:  "userspace: helper restarted after an unexpected exit; holding election debt until it is armed and healthy (#18697)",
+			msg:  "userspace: helper restarted after an unexpected exit; holding election debt until it is forwarding-ready and healthy (#18697)",
 			args: []any{"generation", gen}})
 	}
 	t.healthySince, t.healthyTrips = time.Time{}, 0
@@ -270,21 +274,17 @@ func (t *helperLivenessTracker) noteRoundTrip(gen uint64, start, end time.Time, 
 	}
 }
 
-// noteStatus records an answered status: worker heartbeats and arm state.
+// noteStatus records an answered status and its worker heartbeats. A raw
+// ForwardingArmed report does not prove that the Go ctrl gate is enabled.
 func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats []time.Time, forwardingArmed bool) {
 	t.mu.Lock()
 	defer t.unlockAndFlush()
 	if gen != t.gen || t.retired {
 		return
 	}
-	if forwardingArmed && !t.armedSeen {
-		t.armedSeen = true
-		if t.inherited {
-			// The hysteresis for an inherited verdict is measured from the
-			// arm, not from answers the unarmed helper gave before it.
-			t.healthySince, t.healthyTrips = now, 0
-		}
-	}
+	// Raw ForwardingArmed is not enough to end the inherited exit episode:
+	// applyHelperStatusLocked records forwarding readiness only after the
+	// ctrl.Enabled=1 map write succeeds.
 	t.lastStatusAt = now
 	t.hbOldest, t.hbOldestIdx = 0, -1
 	// Worker heartbeats only mean "this worker is looping" while forwarding
@@ -312,6 +312,25 @@ func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats
 		t.healthySince, t.healthyTrips = time.Time{}, 0
 	}
 	t.evaluateLocked(now)
+}
+
+// noteAppliedForwardingReady records that an armed status successfully passed
+// the Go-owned ctrl gate. The inherited healthy hysteresis starts here, not
+// when the helper merely reports itself armed.
+func (t *helperLivenessTracker) noteAppliedForwardingReady(gen uint64, now time.Time) bool {
+	t.mu.Lock()
+	defer t.unlockAndFlush()
+	if gen != t.gen || t.retired {
+		return false
+	}
+	if !t.forwardingReadySeen {
+		t.forwardingReadySeen = true
+		if t.inherited {
+			t.healthySince, t.healthyTrips = now, 0
+		}
+	}
+	t.evaluateLocked(now)
+	return true
 }
 
 // helperWorkerFrozenAfter is how old a worker heartbeat may be at an answered
@@ -366,7 +385,7 @@ func (t *helperLivenessTracker) evaluateLocked(now time.Time) {
 	if !t.suspected {
 		return
 	}
-	if t.inherited && !t.armedSeen {
+	if t.inherited && !t.forwardingReadySeen {
 		return
 	}
 	if !t.silentSince.IsZero() || t.healthySince.IsZero() {
@@ -471,7 +490,7 @@ func classifyControlRoundTrip(err error, receivedBytes bool) (answered, silent b
 
 // HelperWedgeSuspected reports whether the current helper looks wedged or not
 // forwarding (#18685), or is the first generation after an unexpected exit and
-// has not yet armed and looked healthy (#18697). It never takes m.mu.
+// has not become forwarding-ready and healthy (#18697). It never takes m.mu.
 func (m *Manager) HelperWedgeSuspected() bool {
 	if m == nil {
 		return false
@@ -481,7 +500,8 @@ func (m *Manager) HelperWedgeSuspected() bool {
 
 // HelperElectionNotReady reports that this node's helper must not hold the RGs
 // at full weight (#18697, #18685): it exited unexpectedly and has not come back,
-// or it is back but not yet armed and healthy, or it is running but wedged.
+// or it is back but not yet forwarding-ready and healthy, or it is running but
+// wedged.
 // An intentional stop or respawn (a plan-key change, an operator stop) is NOT
 // reported: that keeps the F2 rule, so a config commit does not move the RGs.
 // It never takes m.mu, so the daemon's transit tick can read it while a caller
@@ -492,7 +512,8 @@ func (m *Manager) HelperElectionNotReady() bool {
 	}
 	now := time.Now()
 	// #18791: inside the unexpected-exit grace the exit alone raises nothing;
-	// the replacement may still arm in time. The wedge verdict is unchanged.
+	// the replacement may still become forwarding-ready in time. The wedge
+	// verdict is unchanged.
 	return (m.helperDownUnexpected.Load() && !m.exitGraceOpen(now)) || m.liveTrack.wedgeSuspected(now)
 }
 
@@ -504,9 +525,9 @@ func (m *Manager) HelperElectionReason() string {
 	}
 	if m.helperDownUnexpected.Load() && !m.exitGraceOpen(time.Now()) {
 		if why := m.exitGraceWaiveReason.Load(); why != nil {
-			return "helper exited unexpectedly and its replacement has not armed yet (no restart grace: " + *why + ")"
+			return "helper exited unexpectedly and its replacement has not become forwarding-ready yet (no restart grace: " + *why + ")"
 		}
-		return "helper exited unexpectedly and its replacement did not arm within the " + helperExitGrace.String() + " restart grace"
+		return "helper exited unexpectedly and its replacement did not become forwarding-ready within the " + helperExitGrace.String() + " restart grace"
 	}
 	return m.liveTrack.currentReason(time.Now())
 }

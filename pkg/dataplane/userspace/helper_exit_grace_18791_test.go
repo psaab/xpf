@@ -9,8 +9,8 @@ import (
 )
 
 // #18791: an unexpected helper exit raises election debt only if the
-// replacement is not armed within helperExitGrace. A crash loop or an already
-// wedged helper gets no grace. The wedge verdict is unchanged.
+// replacement becomes forwarding-ready within helperExitGrace. A crash loop
+// or an already-wedged helper gets no grace. The wedge verdict is unchanged.
 
 // exit18791 emulates handleUnexpectedHelperExitLocked's verdict steps: the
 // grace decision, then the flag.
@@ -31,6 +31,7 @@ func respawn18791(m *Manager, gen uint64, now time.Time) {
 func armed18791(m *Manager, gen uint64, now time.Time) {
 	m.liveTrack.noteAnswered(gen, now)
 	m.noteHelperStatus(gen, now, heartbeats18685(4, now), true)
+	m.noteHelperForwardingReady(gen, now)
 }
 
 func newGraceManager18791(t *testing.T) *Manager {
@@ -90,6 +91,7 @@ func TestReplacementNotArmedRaisesDebtAtTheGrace18791(t *testing.T) {
 	late := t0.Add(helperExitGrace + time.Second)
 	tr.noteAnswered(2, late)
 	tr.noteStatus(2, late, heartbeats18685(4, late), true)
+	tr.noteAppliedForwardingReady(2, late)
 	if !tr.wedgeSuspected(late) {
 		t.Fatal("a late arm cleared the post-grace debt without the healthy period")
 	}
@@ -97,6 +99,7 @@ func TestReplacementNotArmedRaisesDebtAtTheGrace18791(t *testing.T) {
 		now := late.Add(time.Duration(s) * time.Second)
 		tr.noteAnswered(2, now)
 		tr.noteStatus(2, now, heartbeats18685(4, now), true)
+		tr.noteAppliedForwardingReady(2, now)
 	}
 	if tr.wedgeSuspected(late.Add(8 * time.Second)) {
 		t.Fatal("the post-grace debt never cleared once the replacement was armed and healthy")
@@ -264,12 +267,12 @@ func TestGraceExpiryWakesTheTransitGate18791(t *testing.T) {
 }
 
 // TestLateArmAfterTheGraceRaisesDebtThenClearsByHysteresisFold18794 (F1 fold):
-// the grace is a BOUND, not a suggestion. An arm first observed AFTER the
-// deadline must raise the debt (the deadline passed unarmed), and the debt
-// then clears only via the normal armed-and-healthy hysteresis — it must not
-// erase the episode as if the arm had been in time. RED on head:
-// evaluateExitGraceLocked checked armedSeen before the deadline, so a first
-// late arm cleared `inherited` with no debt at all.
+// the grace is a BOUND, not a suggestion. A first ForwardingArmed report after
+// the deadline must raise debt (the deadline passed without applied readiness),
+// and the debt then clears only via normal forwarding-ready-and-healthy
+// hysteresis. It must not erase the episode as if readiness had been in time.
+// RED on head: evaluateExitGraceLocked checked raw arm state before the deadline,
+// so a late arm cleared `inherited` with no debt at all.
 func TestLateArmAfterTheGraceRaisesDebtThenClearsByHysteresisFold18794(t *testing.T) {
 	t0 := time.Now()
 	tr := &helperLivenessTracker{}
@@ -280,6 +283,7 @@ func TestLateArmAfterTheGraceRaisesDebtThenClearsByHysteresisFold18794(t *testin
 	// noteStatus is the first observation of this generation; no earlier
 	// round-trip evaluation has had a chance to raise debt at the deadline.
 	tr.noteStatus(2, late, heartbeats18685(4, late), true)
+	tr.noteAppliedForwardingReady(2, late)
 	if !tr.wedgeSuspected(late) {
 		t.Fatal("a first arm observed after the grace deadline erased the episode: no debt was raised")
 	}
@@ -289,6 +293,7 @@ func TestLateArmAfterTheGraceRaisesDebtThenClearsByHysteresisFold18794(t *testin
 		now := late.Add(time.Duration(s) * time.Second)
 		tr.noteAnswered(2, now)
 		tr.noteStatus(2, now, heartbeats18685(4, now), true)
+		tr.noteAppliedForwardingReady(2, now)
 	}
 	if tr.wedgeSuspected(late.Add(8 * time.Second)) {
 		t.Fatal("the post-grace debt never cleared once the replacement was armed and healthy")
@@ -462,5 +467,158 @@ func TestExitGraceDeadlineRetainsMonotonicClockFold18794(t *testing.T) {
 	want := now.Add(helperExitGrace)
 	if got := m.exitGraceDeadline(); got != want {
 		t.Fatalf("stored grace deadline %v lost the monotonic reading; want original monotonic deadline %v", got, want)
+	}
+}
+
+// TestExitGraceNeedsAppliedForwardingReadyFold18794 catches the status-vs-
+// dataplane readiness gap: an armed helper status is not serving when the Go
+// ctrl gate remains disabled. The exit debt must remain until ctrl.Enabled=1
+// was successfully written; raw ForwardingArmed alone cannot close the grace.
+func TestExitGraceNeedsAppliedForwardingReadyFold18794(t *testing.T) {
+	oldGrace := helperExitGrace
+	helperExitGrace = 100 * time.Millisecond
+	t.Cleanup(func() { helperExitGrace = oldGrace })
+
+	t.Run("armed but ctrl disabled", func(t *testing.T) {
+		m, ctrl := seamedManager(t)
+		now := time.Now()
+		exit18791(m, now)
+		m.mu.Lock()
+		m.procGen = 2
+		m.xskLivenessFailed = true
+		m.mu.Unlock()
+		respawn18791(m, 2, time.Now())
+
+		status := readyHelperStatus()
+		status.ForwardingArmed = true
+		observedAt := time.Now()
+		m.noteHelperStatus(2, observedAt, heartbeats18685(1, observedAt), true)
+		m.mu.Lock()
+		err := m.applyHelperStatusLocked(status)
+		m.mu.Unlock()
+		if err != nil {
+			t.Fatalf("apply armed status with broken XSK: %v", err)
+		}
+		if !ctrl.haveStored || ctrl.stored.Enabled != 0 {
+			t.Fatalf("non-vacuous disabled-gate premise failed: stored=%v ctrl=%+v, want ctrl.Enabled=0",
+				ctrl.haveStored, ctrl.stored)
+		}
+		if m.HelperElectionNotReady() {
+			t.Fatal("an armed report with ctrl still disabled raised debt inside the grace")
+		}
+		time.Sleep(time.Until(m.exitGraceDeadline()) + 10*time.Millisecond)
+		if !m.HelperElectionNotReady() {
+			t.Fatal("ForwardingArmed with persistently disabled ctrl erased the exit episode; debt did not rise at grace")
+		}
+		if !m.HelperExitedUnexpectedly() {
+			t.Fatal("disabled ctrl cleared the unexpected-exit signal before dataplane forwarding was ready")
+		}
+	})
+
+	t.Run("armed and ctrl applied", func(t *testing.T) {
+		m, ctrl := seamedManager(t)
+		now := time.Now()
+		exit18791(m, now)
+		m.mu.Lock()
+		m.procGen = 2
+		m.mu.Unlock()
+		respawn18791(m, 2, time.Now())
+
+		status := readyHelperStatus()
+		status.ForwardingArmed = true
+		observedAt := time.Now()
+		m.noteHelperStatus(2, observedAt, heartbeats18685(1, observedAt), true)
+		if !m.HelperExitedUnexpectedly() {
+			t.Fatal("raw ForwardingArmed status cleared the exit signal before ctrl application")
+		}
+		m.mu.Lock()
+		err := m.applyHelperStatusLocked(status)
+		m.mu.Unlock()
+		if err != nil {
+			t.Fatalf("apply ready helper status: %v", err)
+		}
+		if !ctrl.haveStored || ctrl.stored.Enabled != 1 {
+			t.Fatalf("positive control: stored=%v ctrl=%+v, want ctrl.Enabled=1",
+				ctrl.haveStored, ctrl.stored)
+		}
+		if m.HelperExitedUnexpectedly() || m.HelperElectionNotReady() {
+			t.Fatal("successfully applied forwarding-ready status did not close the in-grace exit episode")
+		}
+		time.Sleep(time.Until(m.exitGraceDeadline()) + 10*time.Millisecond)
+		if m.HelperElectionNotReady() {
+			t.Fatal("grace expiry raised debt after ctrl was successfully enabled")
+		}
+	})
+}
+
+// TestTransitGateReadsGraceDebtWhileManagerMutexHeldFold18794 reproduces the
+// transit-gate call order: HelperSupervisorState first, then
+// HelperElectionNotReady. A non-serving spawned helper may hold m.mu through
+// its readiness wait, but the gate must still observe the grace deadline in
+// time instead of waiting for that 5 s startup timeout.
+func TestTransitGateReadsGraceDebtWhileManagerMutexHeldFold18794(t *testing.T) {
+	oldGrace := helperExitGrace
+	helperExitGrace = 100 * time.Millisecond
+	t.Cleanup(func() { helperExitGrace = oldGrace })
+
+	m := newGraceManager18791(t)
+	wake := make(chan struct{}, 1)
+	m.SetHelperSupervisorObserver(func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	})
+	exit18791(m, time.Now())
+	dir := t.TempDir()
+	m.cfg.ControlSocket = filepath.Join(dir, "no-listener.sock")
+	cmd := exec.Command("sleep", "300")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start non-serving replacement: %v", err)
+	}
+	m.disableCtrlMapHook = &fakeCtrlMap{stored: userspaceCtrlValue{Enabled: 1}, haveStored: true}
+	m.mu.Lock()
+	m.proc = cmd
+	m.startHelperSupervisorLocked(cmd)
+	t.Cleanup(func() {
+		m.mu.Lock()
+		m.stopLocked()
+		m.mu.Unlock()
+	})
+	published := m.helperSupervisorState.Load()
+	if published == nil || published.generation != m.procGen || !published.running {
+		m.mu.Unlock()
+		t.Fatalf("spawn snapshot = %+v, want generation %d running", published, m.procGen)
+	}
+	// The grace observer fires while m.mu is still held, matching the startup
+	// readiness wait; the following query reproduces the gate's call order.
+	select {
+	case <-wake:
+	case <-time.After(helperExitGrace + helperExitGraceWakeSlack + 100*time.Millisecond):
+		m.mu.Unlock()
+		t.Fatal("grace deadline did not wake the gate while readiness held m.mu")
+	}
+
+	type gateState struct {
+		running, looping, notReady bool
+	}
+	done := make(chan gateState, 1)
+	go func() {
+		running, looping := m.HelperSupervisorState()
+		done <- gateState{running: running, looping: looping, notReady: m.HelperElectionNotReady()}
+	}()
+	select {
+	case state := <-done:
+		m.mu.Unlock()
+		if !state.running || state.looping {
+			t.Fatalf("supervisor state = (running=%v, crashLooping=%v), want (true,false)", state.running, state.looping)
+		}
+		if !state.notReady {
+			t.Fatal("the transit gate did not observe exit debt at the grace deadline while readiness held m.mu")
+		}
+	case <-time.After(100 * time.Millisecond):
+		m.mu.Unlock()
+		<-done
+		t.Fatal("HelperSupervisorState blocked behind the replacement's readiness-held m.mu past the grace deadline")
 	}
 }

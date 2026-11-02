@@ -5047,15 +5047,18 @@ second outage.
 
 So on a demotion edge in direct (no-RETH-VRRP) mode, when
 `HelperElectionNotReady()` reports that the local helper is dead, restarting,
-not yet armed, or wedged (#18697/#18685), OR an unexpected-exit replacement
-has not yet armed (`HelperExitedUnexpectedly`; #18791):
+not yet forwarding-ready, or wedged (#18697/#18685), OR an unexpected-exit
+replacement has not yet become forwarding-ready
+(`HelperExitedUnexpectedly`; #18791):
 
-- The second covers the #18791 restart grace and the spawned-but-unarmed
-  window, when the exit has not raised election debt yet.
+- The second covers the #18791 restart grace and the spawned-but-unarmed or
+  armed-but-ctrl-disabled window, when the exit has not raised election debt
+  yet.
 - A peer-requested transfer in either window therefore releases the VIPs
-  first instead of waiting for the replacement to arm.
+  first instead of waiting for the replacement to become forwarding-ready.
 - VIP-first selection is separate from control-socket silence: a replacement
-  that answers control still runs prep and uses its real `rg_active` result.
+  that answers control but is not forwarding-ready still runs prep and uses
+  its real `rg_active` result.
 - Pinned by `TestPeerRequestDuringTheGraceTakesTheVIPFirstPath18791`.
 
 The steps:

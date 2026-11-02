@@ -343,10 +343,10 @@ type helperExitSource interface {
 
 // helperDownForDemotion decides whether a demotion takes the helper-down
 // (VIP-first) path. That is the #18697/#18685 verdict, or an unexpected-exit
-// replacement that has not armed yet. The latter covers the #18791 grace and
-// the spawned-but-unarmed window: a peer-requested transfer releases VIPs
-// first, while the separate control-silence signal decides whether prep and
-// the helper-side write can be bounded or acknowledged.
+// replacement that has not become forwarding-ready yet. The latter covers the
+// #18791 grace and the spawned-but-unarmed/ctrl-disabled window: a peer-requested
+// transfer releases VIPs first, while the separate control-silence signal
+// decides whether prep and the helper-side write can be bounded or acknowledged.
 func (d *Daemon) helperDownForDemotion() bool {
 	if d.helperElectionNotReady() {
 		return true

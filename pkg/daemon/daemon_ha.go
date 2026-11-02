@@ -821,8 +821,8 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// so traffic is already on the fabric path before
 		// the VRRP BACKUP transition removes VIPs.
 		// #18701: when this node is losing the RG and its own helper is not
-		// answering (dead, restarting, not yet armed, or wedged: the
-		// #18697/#18685 verdict), nothing on this node forwards for the RG,
+		// answering (dead, restarting, not yet forwarding-ready, or wedged:
+		// the #18697/#18685 verdict), nothing on this node forwards for the RG,
 		// so there is nothing for make-before-break to protect. Every helper
 		// round trip below would burn its deadline first while both nodes
 		// hold the VIPs: on tcp the old primary kept the LAN VIP ~26 s after
