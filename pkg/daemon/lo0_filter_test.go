@@ -550,16 +550,17 @@ func TestNftRuleFromTermAddressSemantics3433(t *testing.T) {
 			want: "meta l4proto 6 th dport 22 drop",
 		},
 		{
-			// H04: a lenient/peer-sync UNRESOLVED positive prefix-list resolves to
-			// zero prefixes but stays constrained -> match NOTHING (skip). The
-			// pre-fix code emitted no predicate -> unconstrained accept (fail-open).
-			name: "unresolved positive prefix-list -> match nothing (skip)",
+			// #14132: an unresolved positive prefix-list is no longer lowered
+			// as a zero-address match-nothing term. Refuse the whole nft load
+			// (the prior generation stays active), matching the userspace
+			// snapshot's fail-closed disposition.
+			name: "unresolved positive prefix-list -> refuse mirror load",
 			term: &config.FirewallFilterTerm{
 				Name: "typo", SourcePrefixLists: []config.PrefixListRef{{Name: "does-not-exist"}},
 				Action: config.FilterActionAccept,
 			},
 			fam:  "ip",
-			want: "",
+			want: `comment "unrepresentable from" __xpf_refuse_unrepresentable_from__`,
 		},
 		{
 			// H05: mixed positive literal + except prefix-list (lenient path).
