@@ -433,6 +433,9 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["config"]["connection_mode"], "per-attempt")
         self.assertEqual(result["config"]["min_interval_ms"], interval_ms)
+        self.assertGreaterEqual(
+            result["totals"]["completed"], 1, "no successful echo completed"
+        )
         self.assertLessEqual(
             result["totals"]["attempted"],
             int(duration * 1000 / interval_ms) + 2,
