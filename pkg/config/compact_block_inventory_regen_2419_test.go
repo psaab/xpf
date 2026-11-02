@@ -313,6 +313,13 @@ const inventoryNotes = `#
 # apply-to-half-closed-state' compile identically to the braced form;
 # their register lines are removed with them and the sites are anchored
 # in filedFixed instead.
+# #18762 review fold: 'security flow tcp-session maximum-window' and
+# 'security flow tcp-session rst-sequence-check' left the divergence inventory
+# when their admissions landed; their permanent-exclusion entries were stale.
+# Both sites, plus the already-fixed strict-syn-check flag, are retained in
+# filedFixed so the one-level census continues to assert an observed equivalent.
+# The independent #18771 two-level artifact is an equals-gate; its checked-cell
+# floor is stored in that file rather than inferred from the divergence count.
 #`
 
 func TestRegenerateCompactBlockInventory2419(t *testing.T) {

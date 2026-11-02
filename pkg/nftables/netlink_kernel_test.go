@@ -9,6 +9,7 @@ import (
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
 	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 )
 
 // netlink_kernel_test.go exercises the netlink installer against the REAL kernel
@@ -133,10 +134,55 @@ func TestCounterReadbackThroughExistingReaders(t *testing.T) {
 		}
 	}
 	// `any-service` remains the lone full-admit token: a bare accept with no
-	// catch-all drop, and therefore no deny counter on either family.
-	for _, notWant := range []string{"admin/ip", "admin/ip6"} {
-		if denySet[notWant] {
-			t.Errorf("admin zone (system-services any-service) must NOT have a deny counter; got %v", denySet)
+	// catch-all drop. Since 7c1459c40d (#11574), WireGuard listener admission
+	// is scoped to the matching underlay zone. The scenario's WGListenPorts
+	// {51820, 51821} are served only by trust/mgmt, so admin's addresses get
+	// the WG mismatch DROP, counted under each admin family deny counter
+	// (#18745). The contract this cell now encodes: both admin family counters
+	// are read back through the existing reader, and each counts a matching
+	// UDP-dport DROP rule, never a catch-all.
+	for _, want := range []string{"admin/ip", "admin/ip6"} {
+		if !denySet[want] {
+			t.Errorf("admin WG-mismatch deny counter %q not read back through ReadHostInboundDenyCounters; got %v", want, denySet)
+		}
+	}
+	plan := newBuildPlan(t, HostInboundTableName, hostInboundPriority)
+	buildHostInboundNetlink(plan, hostInboundScenario())
+	adminCounted := map[string]int{"ip": 0, "ip6": 0}
+	for _, rule := range plan.rules {
+		countedFamilies := map[string]bool{}
+		udp, dport, drop := false, false, false
+		for i, e := range rule {
+			switch x := e.(type) {
+			case *expr.Objref:
+				switch x.Name {
+				case HostInboundDenyCounterName("admin", "ip"):
+					countedFamilies["ip"] = true
+				case HostInboundDenyCounterName("admin", "ip6"):
+					countedFamilies["ip6"] = true
+				}
+			case *expr.Meta:
+				if x.Key == expr.MetaKeyL4PROTO && i+1 < len(rule) {
+					if c, ok := rule[i+1].(*expr.Cmp); ok && len(c.Data) == 1 && c.Data[0] == unix.IPPROTO_UDP {
+						udp = true
+					}
+				}
+			case *expr.Payload:
+				dport = dport || (x.Base == expr.PayloadBaseTransportHeader && x.Offset == 2 && x.Len == 2)
+			case *expr.Verdict:
+				drop = drop || x.Kind == expr.VerdictDrop
+			}
+		}
+		for family := range countedFamilies {
+			adminCounted[family]++
+			if !udp || !dport || !drop {
+				t.Errorf("admin/%s (any-service) deny counter counts a rule that is not the WG mismatch udp-dport DROP (a catch-all?): %#v", family, rule)
+			}
+		}
+	}
+	for _, family := range []string{"ip", "ip6"} {
+		if adminCounted[family] == 0 {
+			t.Errorf("fixture: no rule counts under admin/%s deny counter, so the WG-mismatch contract is not exercised", family)
 		}
 	}
 
