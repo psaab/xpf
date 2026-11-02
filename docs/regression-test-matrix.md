@@ -272,9 +272,11 @@ failure.
     unique before use. It is not `.201`, the separate #8259 mouse
     address, and not `.174`, the container's DHCPv4 lease, which nothing
     pins. Whether `.202` lies outside the lab DHCP server's pool is not
-    shown; this cell bounds that risk in every run. Operational callers use
-    `IPERF_TARGET4` from the selected cluster env; remaining `.200` literals
-    are history, test fixtures, or the external gRPC capture endpoint.
+    shown; this cell bounds that risk in every run. The follow-up shell
+    harnesses use `IPERF_TARGET4`/`IPERF_TARGET6` from the selected cluster
+    env. The dedicated loss WireGuard profile retains `WG_IPERF_TARGET4=.202`;
+    the flooder accepts `IPERF_TARGET4` and falls back to `.202`. Remaining
+    `.200` literals are history, test fixtures, or the external gRPC endpoint.
   - **Dual-holder cleanup (`.200`).** The v4 smoke target is `.202`;
     `.200` is the external v6 target box's address and is not a test target.
     Removing the unit pin does not remove an address already assigned on the

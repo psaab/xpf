@@ -40,8 +40,8 @@ SECONDARY="xpf-userspace-fw1"
 SOURCE="cluster-userspace-host"
 TARGET_V4="${IPERF_TARGET4}"
 # #8259: mouse and elephant targets are separate knobs. This standalone
-# loss harness defaults both to IPERF_TARGET4; callers may point the two
-# flows at separate service hosts when measuring attributable target load.
+# loss harness defaults both to IPERF_TARGET4 (the same host), so the
+# aggregate remains VOID for attribution unless callers select different hosts.
 MOUSE_TARGET_V4="${_MOUSE_TARGET_V4_OVERRIDE:-$TARGET_V4}"
 ELEPHANT_TARGET_V4="${ELEPHANT_TARGET_V4:-$TARGET_V4}"
 unset _MOUSE_TARGET_V4_OVERRIDE

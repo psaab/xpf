@@ -130,15 +130,23 @@ struct Args {
     allow_oversubscribe: bool,
 }
 
+fn default_dst_ip(env_target: Option<&str>) -> Result<Ipv4Addr, String> {
+    match env_target {
+        Some(value) => value
+            .parse::<Ipv4Addr>()
+            .map_err(|error| format!("invalid IPERF_TARGET4 `{value}`: {error}")),
+        None => Ok(Ipv4Addr::new(172, 16, 80, 202)),
+    }
+}
+
 impl Args {
     fn parse() -> Result<Self, String> {
-        let dst_ip = match std::env::var("IPERF_TARGET4") {
-            Ok(value) => value
-                .parse()
-                .map_err(|error| format!("invalid IPERF_TARGET4 `{value}`: {error}"))?,
-            Err(std::env::VarError::NotPresent) => Ipv4Addr::new(172, 16, 80, 202),
+        let env_target = match std::env::var("IPERF_TARGET4") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
             Err(error) => return Err(format!("cannot read IPERF_TARGET4: {error}")),
         };
+        let dst_ip = default_dst_ip(env_target.as_deref())?;
         let mut args = Args {
             iface: "ge-0-0-1".to_string(),
             dst_mac: [0xff; 6],
@@ -1753,6 +1761,21 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_dst_ip_uses_cluster_target_or_loss_fallback() {
+        assert_eq!(
+            default_dst_ip(Some("192.0.2.44")).unwrap(),
+            Ipv4Addr::new(192, 0, 2, 44)
+        );
+        assert_eq!(
+            default_dst_ip(None).unwrap(),
+            Ipv4Addr::new(172, 16, 80, 202)
+        );
+        assert!(default_dst_ip(Some("not-an-ip"))
+            .unwrap_err()
+            .contains("invalid IPERF_TARGET4"));
+    }
 
     fn build_default_args() -> Args {
         Args {

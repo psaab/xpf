@@ -13,9 +13,10 @@
 #
 # It could not be made to differ at the time: the standing target was
 # then believed to be external lab hardware with no handle from here.
-# #16213 corrected that record — 172.16.80.200 lives on THIS host (see
-# the #16213 header below); only the v6 ::200 is external. What was
-# missing was a second incus-managed host to move a flow to.
+# #16213 corrected that record — the container carried v4 .200, while v6
+# ::200 was external. #18576 later found the external v6 box also answers
+# ARP for v4 .200, making it dual-held. The second incus-managed host this
+# script creates is the safe destination; .200 is not a measurement target.
 #
 # There is now. This script creates one.
 #
