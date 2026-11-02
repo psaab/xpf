@@ -77,10 +77,12 @@ the smallest.
 1. **Harness concurrency (hard):** at most **32 subagents** may be
    live at once in this harness; excess dispatches queue. This
    counts every `task` job — engineers, reviewers, scouts, gate
-   runners. Measured 2026-11-02: a `proc://` snapshot showed 45
-   task jobs live simultaneously at peak (waves overlapped) —
-   that exceeded ceilings 2 and 3 below and is recorded as a
-   breach the caps exist to prevent, not as compliant evidence.
+   runners. Measured 2026-11-02: a `proc://` snapshot listed 45
+   `task` jobs without distinguishing running from queued entries.
+   The snapshot proves 45 dispatched jobs existed, not that 45 were
+   simultaneously executing, so it is not used as evidence that any
+   ceiling was breached; the enforceable measurement is the parent's
+   count of executing campaign agents under ceilings 2 and 3.
 2. **Box ceiling (campaign standing order):** `2×nproc − 6` live
    campaign agents. On this 16-core workstation: ceiling 32,
    campaign cap **26**. The 6 reserved slots stay free for ad-hoc
@@ -437,6 +439,7 @@ not a baseline recapture, and does not violate the no-redeploy rule.
   A wave is not landed until all three machine records
   exist or an env failure is recorded and dispositioned in the same
   wave. Due gate slots dispatch before new engineer work and consume
+  implementor slots under the spend cap.
 
 ### 6.7 Gate incidents
 
