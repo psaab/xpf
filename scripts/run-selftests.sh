@@ -434,6 +434,9 @@ run_shell test/routing/selftest-routing-probes_9812.sh
 # go/unshare/ip/bash/nsenter/timeout/sleep/nft or where unprivileged
 # user namespaces are unavailable.
 run_shell test/daemon/selftest-daemon-kernel_15241.sh
+# #18719: the fabric-segment watcher's AF_PACKET tap cells (filter counted
+# with PACKET_STATISTICS, parent down/up), forced by name the same way.
+run_shell test/fabricsegment/selftest-fabricsegment-kernel_18719.sh
 run_shell test/nftables/selftest-nftables-kernel_18745.sh
 # #18745: GOFLAGS=-run and -skip filters must not turn the whole-package
 # Real Go test against the generated fixture package; fake unshare only.
