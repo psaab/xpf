@@ -379,23 +379,44 @@ cargo build --release --manifest-path test/incus/newflow-gen/Cargo.toml
 ./test/incus/newflow-ceiling-harness.sh --pool <pool> --rule <rule> \
     --src-bind 10.0.61.241 --target-ip 172.16.80.202 --dry-run
 
-# One outer cell owns every shared-cluster operation; stage the already-built
-# generator, do any authorized temporary setup, and start/check the sink here
-# before the harness sweep. The sink must report bound_ports:64.
+# One outer cell owns every shared-cluster operation. Stage the prebuilt
+# artifacts and do any authorized temporary setup in this same cell.
 ./test/incus/with-cluster.sh "10988 newflow ceiling run" -- \
-    bash -euo pipefail -c '
-        # Deploy/stage the prebuilt artifacts and prepare the authorized
-        # source address and sink here, under this same lock.
-        ./test/incus/newflow-ceiling-harness.sh --pool <pool> --rule <rule> \
-            --src-bind 10.0.61.241 --target-ip 172.16.80.202 \
-            --rates 5000,10000,20000,40000,80000 --duration 30 --threads 32
-    '
+    bash -euo pipefail -c "$(cat <<'CELL'
+# Deploy/stage the prebuilt artifacts and prepare the authorized source
+# address and confirmed pool-mode rule here, under this same lock.
+sink_log=/tmp/newflow-gen-sink-10988.json
+sink_pid="$(incus exec loss:xpf-mouse-target -- sh -c \
+    'nohup /usr/local/bin/newflow-gen --mode sink --bind 172.16.80.202 --ports 5300-5363 > /tmp/newflow-gen-sink-10988.json 2>&1 < /dev/null & echo $!')"
+cleanup_sink() {
+    [[ -z "${sink_pid:-}" ]] && return 0
+    incus exec loss:xpf-mouse-target -- kill "$sink_pid" 2>/dev/null || true
+    incus exec loss:xpf-mouse-target -- rm -f "$sink_log" 2>/dev/null || true
+}
+trap cleanup_sink EXIT
+
+sink_json=""
+for _ in {1..10}; do
+    sink_json="$(incus exec loss:xpf-mouse-target -- cat "$sink_log" 2>/dev/null || true)"
+    [[ "$sink_json" == *'"bound_ports":64'* ]] && break
+    sleep 1
+done
+if [[ "$sink_json" != *'"bound_ports":64'* ]]; then
+    echo "newflow-ceiling: WAN sink did not bind all 64 ports" >&2
+    exit 2
+fi
+
+./test/incus/newflow-ceiling-harness.sh --pool <pool> --rule <rule> \
+    --src-bind 10.0.61.241 --target-ip 172.16.80.202 \
+    --rates 5000,10000,20000,40000,80000 --duration 30 --threads 32
+CELL
+)"
 ```
 
-Start the sink on `loss:xpf-mouse-target` with
-`newflow-gen --mode sink --bind 172.16.80.202 --ports 5300-5363`; confirm its
-startup JSON contains `bound_ports:64` before the sweep. The harness refuses
-a missing pool-mode rule and does not change NAT config.
+The sink runs on `loss:xpf-mouse-target`, bound at `172.16.80.202` on ports
+`5300-5363`; the outer cell checks the startup JSON for `bound_ports:64`
+before launching traffic. The harness refuses a missing pool-mode rule and
+does not change NAT config.
 
 ### Which node it measures, and when it refuses to run (#6962)
 

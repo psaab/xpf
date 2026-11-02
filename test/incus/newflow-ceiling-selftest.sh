@@ -401,8 +401,8 @@ wiring_line() { # <extended-regex> -> first matching line in $HARNESS_CODE
 	grep -nE "$1" <<<"$HARNESS_CODE" | head -1 | cut -d: -f1
 }
 w_line_orig="$(wiring_line '^ORIGINAL_ARGS=\(')"
-w_line_lock_src="$(wiring_line '^source .*cluster-cell\.sh')"
-w_line_lock_call="$(wiring_line '^xpf_enter_destructive_cluster_cell ')"
+w_line_lock_src="$(wiring_line '^source .*cluster-cell\.sh" \|\| exit 2$')"
+w_line_lock_call="$(wiring_line '^xpf_enter_destructive_cluster_cell .*"\$\{ORIGINAL_ARGS\[@\]\}" \|\| exit 2$')"
 w_line_parse="$(wiring_line '^while \[\[ \$# -gt 0 \]\]')"
 w_line_first_exec="$(wiring_line 'incus_cmd exec|incus exec')"
 wiring_ok=1
@@ -426,10 +426,6 @@ fi
 if [[ "$wiring_ok" -eq 1 ]] && ! grep -q -- '--target-ip' <<<"$HARNESS_CODE"; then
 	wiring_ok=0
 	wiring_detail="harness must accept --target-ip (harness TARGET_IP override)"
-fi
-if [[ "$wiring_ok" -eq 1 ]] && ! grep -qF '"${ORIGINAL_ARGS[@]}"' <<<"$HARNESS_CODE"; then
-	wiring_ok=0
-	wiring_detail="lock entry must expand the ORIGINAL_ARGS captured before parsing"
 fi
 w_line_dryrun="$(wiring_line '^if \[\[ "\$DRY_RUN" == "1" \]\]; then')"
 w_line_dryexit="$(wiring_line '^    exit 0$')"

@@ -139,8 +139,8 @@ fi
 # dry-run never take the lock. Preserve the caller's unparsed argv: the lock
 # helper re-execs this whole script through with-cluster.sh when run standalone.
 # shellcheck source=cluster-cell.sh
-source "${_CELL_DIR}/cluster-cell.sh"
-xpf_enter_destructive_cluster_cell "newflow-ceiling-harness" "$0" "${ORIGINAL_ARGS[@]}"
+source "${_CELL_DIR}/cluster-cell.sh" || exit 2
+xpf_enter_destructive_cluster_cell "newflow-ceiling-harness" "$0" "${ORIGINAL_ARGS[@]}" || exit 2
 
 incus_cmd() {
     if [[ "$USE_SG_INCUS_ADMIN" == "1" ]] && ! incus list >/dev/null 2>&1; then
