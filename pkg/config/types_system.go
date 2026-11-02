@@ -607,14 +607,14 @@ type WebManagementConfig struct {
 }
 
 // APIAuthConfig holds REST API authentication settings. Basic users and named
-// keys each carry a login class and an expiry. Legacy repeated api-key leaves
-// inherit these defaults so their identity is still least-privilege by default.
+// keys may override the default login class and expiry; empty / zero overrides
+// inherit those defaults. Legacy repeated api-key leaves always inherit them.
 type APIAuthConfig struct {
 	Users            []*APIAuthUser // basic auth users
 	APIKeys          []Secret       // legacy bearer/X-API-Key tokens
 	Keys             []*APIAuthKey  // named bearer/X-API-Key identities
-	DefaultClass     string
-	DefaultExpiresAt time.Time
+	DefaultClass     string    // used when a user/key Class is empty and for legacy APIKeys
+	DefaultExpiresAt time.Time // used when a user/key ExpiresAt is zero and for legacy APIKeys
 	// MetricsRequireAuth opts loopback /metrics into api-auth credential
 	// gating (#16072): `web-management api-auth metrics-require-auth`.
 	MetricsRequireAuth bool
@@ -632,16 +632,16 @@ func (c *APIAuthConfig) APIKeyCount() int {
 type APIAuthUser struct {
 	Username  string
 	Password  Secret // bcrypt verifier after compilation; redacted on marshal
-	Class     string
-	ExpiresAt time.Time
+	Class     string    // explicit override; empty inherits APIAuthConfig.DefaultClass
+	ExpiresAt time.Time // explicit override; zero inherits APIAuthConfig.DefaultExpiresAt
 }
 
 // APIAuthKey defines a named, scoped, expiring Bearer/X-API-Key identity.
 type APIAuthKey struct {
 	Name      string
 	Secret    Secret // bcrypt verifier after compilation; redacted on marshal
-	Class     string
-	ExpiresAt time.Time
+	Class     string    // explicit override; empty inherits APIAuthConfig.DefaultClass
+	ExpiresAt time.Time // explicit override; zero inherits APIAuthConfig.DefaultExpiresAt
 }
 
 // SystemSyslogConfig holds traditional Junos system syslog config.

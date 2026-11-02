@@ -197,6 +197,33 @@ Losing a single admission line is enough to drop a security flag:
 `(tcp-session, strict-syn-check)` disappeared in #16581, and the only signal was
 that census.
 
+**Two-level security spellings (#18787).** The record-only arm of that census
+was hiding four more drops of the same kind. Each `(outer, inner)` pair below
+was never admitted, so the packed line committed clean and compiled weaker than
+its braced twin:
+
+| two-level spelling | compiled before #18787 |
+|---|---|
+| `policy <p> perfect-forward-secrecy keys <g>;` | PFS group 0 |
+| `vpn <v> ike ipsec-policy <p>;` | the VPN has no ipsec-policy |
+| `vpn <v> vpn-monitor optimized` / `destination-ip` / `source-interface` | VPN monitoring off |
+| `web-management api-auth metrics-require-auth;` | api-auth and HTTPS dropped |
+
+`(policy, perfect-forward-secrecy)`, `(vpn, ike)`, `(vpn, vpn-monitor)` and
+`(web-management, api-auth)` are now admitted, each measured empty and silent
+per #8690. The web-management line folds into a SECOND web-management block, so
+it also needed the sibling merge described under "system services
+web-management siblings merge (#18787)". Cells:
+
+- `TestTwoLevelSecuritySpellingsCompileLikeBraced18787` and pkg/ipsec
+  `TestTwoLevelIPsecSpellingsRenderLikeBraced18787` (the rendered strongSwan
+  config is byte-identical);
+- `TestWebManagementSiblingsCompileLikeBraced18787`.
+
+`api-auth expires` and `api-auth class` packed onto api-auth are still not
+admitted. Both are open under #11544, and both fail safe: the class falls back
+to read-only, and a credential left without an expiry is refused at commit.
+
 **Which of the three needs the same-keyword collision check, and which cannot.**
 `compactNormalizeInScope` is keyed on a **(container, head) PAIR**, so an
 admission reaches *every* container with that keyword: firewall filter terms
@@ -3103,6 +3130,46 @@ the shape `groups` / `interfaces` / `screen ids-option` are already handled
 with, so the gate alone is the matching remedy. Strict rejects on commit /
 commit-check; the tolerant load / peer-sync path warns and boots (#1960), where
 the historical result is preserved unchanged.
+
+#### `system services web-management` siblings merge (#18787)
+
+The compiler read `web-management` with `FindChild`, so a second block under one
+`system services` was dropped on a clean commit, with zero warnings:
+
+- two braced `web-management { }` blocks;
+- a two-level `web-management api-auth ...;` line beside the braced stanza, which
+  the brace-elision pass folds into a second block.
+
+Which half was lost depended only on order. A block after the stanza lost
+api-auth, including its credentials and metrics-require-auth. A block before the
+stanza lost HTTPS. Sibling `http` and `https` nodes inside one block were read
+the same way.
+
+The compiler now reads every `web-management`, `http` and `https` sibling. It
+merges them the way it already merged a second `system` root (#15018) and the
+way #13216 merged the other service containers: flags are set, a scalar is
+overwritten only when it is authored, and api-auth siblings accumulate. The
+#14448 last-wins rule for `class` and `expires` applies across those siblings;
+conflicting values are refused at strict commit by
+`validateAPIAuthDuplicateScalarAST`. Junos repeated containers still merge:
+only a genuine conflict in a single-valued api-auth restriction is gated.
+
+Credential inheritance across the merged blocks:
+
+- `class` and `expires` are late-bound. A user or named key with no explicit
+  override keeps its class/expiry unset, and credential validation and the
+  daemon resolve it against the final merged `DefaultClass` /
+  `DefaultExpiresAt`. A default written in a later sibling therefore applies
+  to earlier credentials too.
+- The `#14448` AST gate compares non-empty `class` and `expires` values across
+  every api-auth sibling in the merged scope. Strict commit refuses conflicting
+  values; identical repeats and complementary blocks remain valid. Tolerant
+  load warns and keeps the last default for existing persisted configs.
+
+An http `interface` never strict-commits: with api-auth HTTP is refused as
+cleartext (#10826), and without it the off-loopback bind is refused (#4047). The
+http sibling read is therefore pinned on the tolerant load path:
+`TestWebManagementHTTPSiblingsMergeOnTolerantLoad18787`.
 
 ### Duplicate NAT rule name (#5649, C181-M18)
 

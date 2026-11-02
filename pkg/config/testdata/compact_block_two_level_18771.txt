@@ -146,12 +146,6 @@ security ipsec gateway xpfarg dead-peer-detection optimized	COMMITS-DIFFERENT
 security ipsec gateway xpfarg dead-peer-detection probe-idle-tunnel	COMMITS-DIFFERENT
 security ipsec gateway xpfarg dead-peer-detection threshold	COMMITS-DIFFERENT
 security ipsec gateway xpfarg dynamic hostname	UNCLASSIFIED
-security ipsec policy xpfarg perfect-forward-secrecy keys	UNCLASSIFIED
-security ipsec vpn xpfarg ike gateway	UNCLASSIFIED
-security ipsec vpn xpfarg ike ipsec-policy	UNCLASSIFIED
-security ipsec vpn xpfarg vpn-monitor destination-ip	UNCLASSIFIED
-security ipsec vpn xpfarg vpn-monitor optimized	UNCLASSIFIED
-security ipsec vpn xpfarg vpn-monitor source-interface	UNCLASSIFIED
 security log report	COMMITS-DIFFERENT
 security log source-address	COMMITS-DIFFERENT
 security nat destination pool xpfarg port	UNCLASSIFIED
@@ -304,7 +298,6 @@ system services dynamic-dns provider xpfarg username	COMMITS-DIFFERENT
 system services dynamic-dns provider xpfarg zone	COMMITS-DIFFERENT
 system services web-management api-auth class	COMMITS-DIFFERENT
 system services web-management api-auth expires	COMMITS-DIFFERENT
-system services web-management api-auth metrics-require-auth	UNCLASSIFIED
 system services web-management http interface	UNCLASSIFIED
 system services web-management https certificate	UNCLASSIFIED
 system services web-management https interface	UNCLASSIFIED
