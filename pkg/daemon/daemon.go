@@ -1670,6 +1670,10 @@ type Daemon struct {
 	// nil selects the real method; production never sets it.
 	startClusterCommsFn func(context.Context)
 
+	// clusterCommsStopMu serializes stop-and-join operations. A stop detaches
+	// its epoch before joining it; another stop must not mistake that detached
+	// epoch for idle while its populate callbacks can still update fabric state.
+	clusterCommsStopMu sync.Mutex
 	// clusterCommsLifecycleMu serializes epoch creation and successor
 	// preparation with final teardown side effects. It is acquired before
 	// clusterCommsMu when both are needed. Stop joins its captured per-epoch

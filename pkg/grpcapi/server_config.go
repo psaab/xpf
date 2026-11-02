@@ -361,9 +361,6 @@ func (s *Server) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitR
 	}
 	compiled, err := s.commitFn(ctx, authority, req.Comment)
 	if err != nil {
-		if compiled != nil {
-			s.store.InvalidateScopedAdvisoryBaseline()
-		}
 		// #5742: classify structurally — a non-fatal tail-reconcile / ordinary
 		// apply error (the daemon returns the committed config alongside it) is
 		// transient/retryable (Unavailable), NOT a config reject (InvalidArgument).
@@ -414,9 +411,6 @@ func (s *Server) CommitConfirmed(ctx context.Context, req *pb.CommitConfirmedReq
 	}
 	compiled, err := s.commitConfirmedFn(ctx, authority, int(req.Minutes))
 	if err != nil {
-		if compiled != nil {
-			s.store.InvalidateScopedAdvisoryBaseline()
-		}
 		// #5742: same structural classification as Commit — commitConfirmedAndApply
 		// shares applyAndSyncCommitted, so a non-fatal tail error carries the
 		// committed config (Unavailable/retryable) vs a nil-config config reject.
