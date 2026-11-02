@@ -614,6 +614,30 @@ deploy_manifest_clear_failure() {
 	rm -f -- "$marker"
 }
 
+# deploy_exit_guard_on_exit <status>: restore a lab-downgrade floor before
+# recording the failed deploy. The same handler serves direct deploy_vm_deb
+# calls (floor-only) and cmd_deploy (floor + attestation), with state held in
+# globals because EXIT runs after function locals are gone.
+deploy_exit_guard_on_exit() {
+	local rc="$1"
+	if (( ${_deploy_floor_guard_pending:-0} )); then
+		if ! deploy_binary_floor_guard_restore_on_exit; then
+			warn "deploy floor guard: could not restore the saved binary floor; it remains at ${DEPLOY_BINARY_FLOOR_SAVED} on ${_deploy_floor_guard_rinst:-unknown}"
+			((rc != 0)) || rc=1
+		fi
+	fi
+	if (( ${_deploy_guard_pending:-0} )); then
+		deploy_manifest_record_failure "$_deploy_guard_root" "$_deploy_guard_target" "attestation manifest absent because deploy ${_deploy_guard_step} failed (rc=${rc}); no new build was attested" || true
+		warn "deploy attestation: manifest absent because deploy ${_deploy_guard_step} failed (rc=${rc}); later gates will VOID naming this deploy (#16290)"
+	fi
+	trap - EXIT
+	exit "$rc"
+}
+
+deploy_exit_guard_install() {
+	trap 'deploy_exit_guard_on_exit "$?"' EXIT
+}
+
 # deploy_manifest_arm_failure_guard <project_root> <0|1|all>
 # Arm the EXIT-trap guard cmd_deploy installs right after invalidation
 # (#16290). ALL guard state lives in globals: the EXIT trap fires after
@@ -622,9 +646,7 @@ deploy_manifest_clear_failure() {
 # `set -u` and record nothing (the Opus fold on PR #16338). The target
 # in particular is captured into the global _deploy_guard_target here —
 # a caller's `local target` is exactly what must not be trapped over.
-# The first trap action captures the pending exit status before any
-# other command can clobber $?. Split out of cluster-setup.sh so the
-# hermetic selftest can drive the REAL trap (arm, abort a subshell,
+# The hermetic selftest drives the REAL trap (arm, abort a subshell,
 # observe the marker) instead of hand-calling the recorder.
 deploy_manifest_arm_failure_guard() {
 	local root="$1" scope="${2:-all}"
@@ -635,10 +657,7 @@ deploy_manifest_arm_failure_guard() {
 	_deploy_guard_step="deploy dispatch"
 	_deploy_guard_rc=0
 	_deploy_guard_pending=1
-	trap '_deploy_guard_rc=$?; if (( _deploy_guard_pending )); then
-		deploy_manifest_record_failure "$_deploy_guard_root" "$_deploy_guard_target" "attestation manifest absent because deploy ${_deploy_guard_step} failed (rc=${_deploy_guard_rc}); no new build was attested" || true
-		warn "deploy attestation: manifest absent because deploy ${_deploy_guard_step} failed (rc=${_deploy_guard_rc}); later gates will VOID naming this deploy (#16290)"
-	fi' EXIT
+	deploy_exit_guard_install
 }
 
 # deploy_manifest_guard_step <step label>
@@ -654,6 +673,10 @@ deploy_manifest_guard_step() {
 deploy_manifest_guard_disarm() {
 	_deploy_guard_pending=0
 }
+
+# deploy_manifest_invalidate <project_root> [0|1|all]
+#
+
 
 deploy_manifest_invalidate() {
 	local manifest scope="${2:-all}"
@@ -795,7 +818,10 @@ deploy_write_manifest() {
 		# below describes the deploying checkout; in an A/B cell that deploys
 		# another checkout's deb, or a deliberate downgrade, only this names
 		# the build the nodes run.
-		deb_version=$(deploy_deb_version "$deb" 2>/dev/null || true)
+		if ! deb_version=$(deploy_deb_version "$deb"); then
+			warn "deploy manifest: refusing $deb because filename version and package metadata Version disagree or cannot be read"
+			return 1
+		fi
 		xpfd_sha=$(deploy_manifest_sha_from_deb "$deb" xpfd || true)
 		cli_sha=$(deploy_manifest_sha_from_deb "$deb" cli || true)
 		helper_sha=$(deploy_manifest_sha_from_deb "$deb" xpf-userspace-dp || true)
@@ -1779,11 +1805,26 @@ deploy_install_deb() {
 #                       config-envelope bump is still refused by the cut's
 #                       envelope check (the older binary cannot read the DB).
 
-# deploy_running_deb_state <rinst>: "<dpkg status abbrev> <version>" for the
-# xpf package on a node, e.g. "ii 0.0.29598+g...", or "" with no record.
+# deploy_running_deb_state <rinst>: "<dpkg status abbrev> <version>" for xpf,
+# or empty on a confirmed package-absent result. A transport/query failure is
+# a nonzero status so it can never be mistaken for a fresh node.
 deploy_running_deb_state() {
-	local rinst="$1"
-	incus exec -n "$rinst" -- dpkg-query -W -f='${db:Status-Abbrev} ${Version}' xpf 2>/dev/null || true
+	local rinst="$1" output rc
+	if output=$(incus exec -n "$rinst" -- env LC_ALL=C dpkg-query -W -f='${db:Status-Abbrev} ${Version}' xpf 2>&1); then
+		[[ -n "$output" ]] || {
+			warn "deb deploy preflight: could not query xpf dpkg state on $rinst (empty successful response)"
+			return 1
+		}
+		printf '%s\n' "$output"
+		return 0
+	else
+		rc=$?
+	fi
+	if [[ "$output" == *"dpkg-query: no packages found matching xpf"* ]]; then
+		return 0
+	fi
+	warn "deb deploy preflight: could not query xpf dpkg state on $rinst (rc=$rc): ${output:-no response}"
+	return 1
 }
 
 # deploy_running_deb_version <rinst>: the xpf version a node has fully
@@ -1793,8 +1834,7 @@ deploy_running_deb_state() {
 # dpkg-query prints a Version for those too, and it is not a running build.
 deploy_running_deb_version() {
 	local rinst="$1" state abbrev ver
-	state=$(deploy_running_deb_state "$rinst")
-	# ${db:Status-Abbrev} is three columns wide ("ii "), so dpkg prints two
+	state=$(deploy_running_deb_state "$rinst") || return 1
 	# spaces before the version; read splits on any run of them.
 	read -r abbrev ver <<<"$state"
 	case "$abbrev" in
@@ -1867,10 +1907,13 @@ deploy_node_runs_deb() {
 deploy_deb_node_action() {
 	local rinst="$1" deb="$2" deb_ver run_ver plan
 	deb_ver=$(deploy_deb_version "$deb") || {
-		printf 'refusing: %s is not a parseable xpf_<version>_<arch>.deb\n' "$deb" >&2
+		printf 'refusing: cannot validate the xpf package filename against its metadata Version: %s\n' "$deb" >&2
 		return 1
 	}
-	run_ver=$(deploy_running_deb_version "$rinst")
+	run_ver=$(deploy_running_deb_version "$rinst") || {
+		printf 'refusing: could not query xpf dpkg state on %s; not assuming a fresh install\n' "$rinst" >&2
+		return 1
+	}
 	if [[ "$run_ver" == '!'* ]]; then
 		printf 'refusing: xpf on %s is in dpkg state %s, not installed (ii); repair it (dpkg --configure -a, or reinstall) before deploying\n' \
 			"$rinst" "${run_ver#!}" >&2
@@ -1921,23 +1964,51 @@ deploy_deb_preflight() {
 
 # deploy_reset_binary_floor <rinst>: the opted-in downgrade's floor reset,
 # loudly. Only deploy_vm_deb's install-downgrade branch calls it. The floor is
-# MOVED aside, not deleted, so a failed install, publish or cut can put it
-# back (deploy_restore_binary_floor); a committed cut re-enrolls a new one and
+# MOVED aside, not deleted, and armed with an EXIT guard before the move. Any
+# exit before a committed cut—including install, publish, reconcile, and remote
+# mktemp failures—tries to restore it; a committed cut re-enrolls a new one and
 # deploy_drop_saved_binary_floor discards the old.
 DEPLOY_BINARY_FLOOR=/var/lib/xpf/binary-floor
 DEPLOY_BINARY_FLOOR_SAVED=/var/lib/xpf/binary-floor.lab-downgrade-saved
+
+# A downgrade's moved-aside floor is guarded for the entire remaining deploy,
+# including `die`, set -e, reconcile, and mktemp failures. The EXIT handler is
+# shared with the attestation guard when cmd_deploy has already armed it.
+deploy_binary_floor_guard_arm() {
+	_deploy_floor_guard_rinst="$1"
+	_deploy_floor_guard_pending=1
+	deploy_exit_guard_install
+}
+
+deploy_binary_floor_guard_disarm() {
+	_deploy_floor_guard_pending=0
+}
+
+deploy_binary_floor_guard_restore_on_exit() {
+	(( ${_deploy_floor_guard_pending:-0} )) || return 0
+	local rinst="${_deploy_floor_guard_rinst:-}"
+	[[ -n "$rinst" ]] || return 1
+	if deploy_restore_binary_floor "$rinst"; then
+		_deploy_floor_guard_pending=0
+		return 0
+	fi
+	return 1
+}
+
 deploy_reset_binary_floor() {
 	local rinst="$1"
 	warn "LAB DOWNGRADE (XPF_DEPLOY_ALLOW_DOWNGRADE=${XPF_DEPLOY_ALLOW_DOWNGRADE:-}): moving the binary anti-rollback floor $DEPLOY_BINARY_FLOOR aside on $rinst so the older build can publish and cut; a committed cut re-enrolls it at the deployed version, and any failure before that restores it"
+	deploy_binary_floor_guard_arm "$rinst"
 	incus exec -n "$rinst" -- bash -c "if [ -e $DEPLOY_BINARY_FLOOR ]; then mv -f $DEPLOY_BINARY_FLOOR $DEPLOY_BINARY_FLOOR_SAVED; fi"
 }
 
 # deploy_restore_binary_floor <rinst>: undo deploy_reset_binary_floor after a
-# failure. A floor the failed attempt already re-enrolled is kept.
+# failure. A floor the failed attempt already re-enrolled is kept; a failed
+# move preserves the saved copy and propagates its status.
 deploy_restore_binary_floor() {
 	local rinst="$1"
 	warn "LAB DOWNGRADE did not commit on $rinst; restoring its anti-rollback floor"
-	incus exec -n "$rinst" -- bash -c "if [ ! -e $DEPLOY_BINARY_FLOOR ] && [ -e $DEPLOY_BINARY_FLOOR_SAVED ]; then mv -f $DEPLOY_BINARY_FLOOR_SAVED $DEPLOY_BINARY_FLOOR; fi; rm -f $DEPLOY_BINARY_FLOOR_SAVED"
+	incus exec -n "$rinst" -- bash -c "if [ -e $DEPLOY_BINARY_FLOOR ]; then rm -f $DEPLOY_BINARY_FLOOR_SAVED; elif [ -e $DEPLOY_BINARY_FLOOR_SAVED ]; then mv -f $DEPLOY_BINARY_FLOOR_SAVED $DEPLOY_BINARY_FLOOR || exit \$?; fi"
 }
 
 # deploy_drop_saved_binary_floor <rinst>: the cut committed and re-enrolled
@@ -1955,12 +2026,11 @@ deploy_drop_saved_binary_floor() {
 # downgrade. Selection here is by Debian VERSION (dpkg --compare-versions),
 # never mtime: mtime is what the just-rebuilt stock deb always wins.
 #
-# deploy_deb_version <deb_path> -> echo the version parsed from the
-# package filename (xpf_<version>_<arch>.deb), or nothing (rc 1) when the
-# name does not parse. Filename, not `dpkg-deb -f`: every deb the Makefile
-# stages is named for the DEB_VERSION it was built with, and the parse
-# must also work on fixture files in the hermetic selftest.
-deploy_deb_version() {
+# deploy_deb_filename_version <deb_path> -> echo the version in the filename
+# xpf_<version>_<arch>.deb, or return 1 when the name does not parse. Used
+# only for candidate selection; deployed plans and attestations use package
+# metadata and verify it agrees with this name.
+deploy_deb_filename_version() {
 	local base ver
 	base=$(basename "$1")
 	case "$base" in
@@ -1973,6 +2043,24 @@ deploy_deb_version() {
 	printf '%s\n' "$ver"
 }
 
+# deploy_deb_version <deb_path> -> echo dpkg-deb's Version field only when it
+# matches the xpf_<version>_<arch>.deb filename. Plans and attestations must
+# refuse a renamed or malformed package rather than naming its wrong build.
+deploy_deb_version() {
+	local filename_ver metadata_ver
+	filename_ver=$(deploy_deb_filename_version "$1") || return 1
+	metadata_ver=$(dpkg-deb -f "$1" Version 2>/dev/null) || {
+		printf 'refusing: cannot read dpkg-deb Version metadata from %s\n' "$1" >&2
+		return 1
+	}
+	if [[ -z "$metadata_ver" || "$filename_ver" != "$metadata_ver" ]]; then
+		printf "refusing: filename version '%s' for %s does not match package metadata Version '%s'\n" \
+			"$filename_ver" "$1" "$metadata_ver" >&2
+		return 1
+	fi
+	printf '%s\n' "$metadata_ver"
+}
+
 # deploy_deb_newest <dir> -> echo the path of the highest-version
 # xpf_*.deb in <dir> by dpkg version ordering, or nothing (rc 1) when the
 # dir holds no parseable deb. Ties (same version, different arch/build)
@@ -1983,7 +2071,7 @@ deploy_deb_newest() {
 	[[ -d "$dir" ]] || return 1
 	for deb in "$dir"/xpf_*.deb; do
 		[[ -f "$deb" ]] || continue
-		ver=$(deploy_deb_version "$deb") || continue
+		ver=$(deploy_deb_filename_version "$deb") || continue
 		if [[ -z "$best" ]]; then
 			best="$deb"; best_ver="$ver"; continue
 		fi
@@ -2017,7 +2105,7 @@ deploy_select_deb() {
 		[[ "$cand" = /* ]] || cand="$dir/$cand"
 		[[ -f "$cand" ]] ||
 			die "XPF_DEPLOY_DEB_PATH=$pin does not name an existing .deb (looked for $cand)"
-		deploy_deb_version "$cand" >/dev/null ||
+		deploy_deb_filename_version "$cand" >/dev/null ||
 			die "XPF_DEPLOY_DEB_PATH=$pin is not a parseable xpf_<version>_<arch>.deb"
 		printf '%s\n' "$cand"
 		return 0

@@ -836,7 +836,10 @@ deploy_vm_deb() {
 		deploy_reset_binary_floor "$rinst" || die "could not move the anti-rollback floor aside on $vm"
 		floor_saved=1
 		if ! deploy_install_deb "$rinst" "$deb" allow-downgrade; then
-			deploy_restore_binary_floor "$rinst"
+			if ! deploy_restore_binary_floor "$rinst"; then
+				die "downgrade install failed on $vm; the saved anti-rollback floor could not be restored and will be retried by the EXIT guard"
+			fi
+			deploy_binary_floor_guard_disarm
 			die "downgrade install failed on $vm; its anti-rollback floor was restored"
 		fi
 		;;
@@ -860,10 +863,20 @@ deploy_vm_deb() {
 	info "Cutting over node${idx} via 'xpfd upgrade --rolling'..."
 	rolling_upgrade_trace cut_start "$idx"
 	if ! incus exec "$rinst" -- /usr/local/share/xpf/staged/xpfd upgrade --rolling; then
-		((floor_saved)) && deploy_restore_binary_floor "$rinst"
+		if ((floor_saved)); then
+			if deploy_restore_binary_floor "$rinst"; then
+				deploy_binary_floor_guard_disarm
+			else
+				die "'xpfd upgrade --rolling' failed on $vm; its saved anti-rollback floor could not be restored and will be retried by the EXIT guard"
+			fi
+		fi
 		die "'xpfd upgrade --rolling' failed on $vm"
 	fi
-	((floor_saved)) && deploy_drop_saved_binary_floor "$rinst"
+	if ((floor_saved)); then
+		deploy_drop_saved_binary_floor "$rinst" ||
+			die "cut committed on $vm but its saved anti-rollback floor could not be discarded"
+		deploy_binary_floor_guard_disarm
+	fi
 	rolling_upgrade_trace cut_end "$idx"
 	info "Cut-over complete for $vm."
 }

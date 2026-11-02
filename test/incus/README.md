@@ -310,10 +310,12 @@ must fail closed rather than fall back to a hardcoded node.
 The default `make cluster-deploy` (deb path) installs the selected `.deb` on
 each node, then cuts it with `xpfd upgrade --rolling`. Before it pushes
 anything or touches `dist-deb/xpf-deploy-manifest.json`, it decides each
-target node's action. It compares the deb's version with the version the node
-has installed: only a `dpkg-query` status of `ii` counts as installed, and
-`rc` or no record counts as nothing installed. The logic is in
-`deploy_deb_node_action` and `deploy_deb_preflight` (`deploy-lib.sh`):
+target node's action. It compares the deb's package metadata version with the
+version the node has installed: only a `dpkg-query` status of `ii` counts as
+installed, and `rc` or an explicit “no packages found” response counts as
+nothing installed. A failed `dpkg-query`/Incus query is refused, not treated
+as fresh. The logic is in `deploy_deb_node_action` and `deploy_deb_preflight`
+(`deploy-lib.sh`):
 
 | deb vs installed | action |
 |---|---|
@@ -322,6 +324,7 @@ has installed: only a `dpkg-query` status of `ii` counts as installed, and
 | same version, other bytes (or unreadable) | **refused**: a re-staged same version cannot be cut (#16219); build a new version |
 | older | **refused** up front, naming both versions and the fix, unless `XPF_DEPLOY_ALLOW_DOWNGRADE` is set to **that deb's exact version** |
 | half-installed (any dpkg state other than `ii` or `rc`) | **refused**: repair the package first |
+| package query/transport failure | **refused**: the node is not assumed fresh |
 
 "Byte-identical" means all of these match the deb:
 - the running `xpfd` process;
@@ -346,20 +349,24 @@ swallowed.
 **What the opt-in does.** For each downgrading node:
 - It logs `LAB DOWNGRADE`.
 - It moves the binary anti-rollback floor `/var/lib/xpf/binary-floor` (#10848)
-  aside. That is what `dpkg --purge` does to it.
+  to `/var/lib/xpf/binary-floor.lab-downgrade-saved`, rather than deleting it.
 - It installs with `apt-get install --allow-downgrades`, then cuts as usual.
 
 The floor exists to refuse a validly-signed OLD build as a replay, and it
 refuses both the postinst publish and the cut. A committed cut re-enrolls it
-at the deployed version and the saved floor is discarded. If the install,
-publish or cut fails, the saved floor is put back, so a node is never left
-without one. The product code is unchanged; production nodes keep refusing
-downgrades. The opt-in does not bypass the cut's config-envelope check, so an
-older binary that cannot read the config DB a newer one wrote is still
-refused.
+at the deployed version and the saved floor is discarded. Every exit after
+the floor is moved—including install, publish, reconcile, remote `mktemp`,
+and cut failures—restores the saved floor, or keeps the saved copy and reports
+failure if restoration cannot be completed. A floor already re-enrolled by a
+failed attempt is kept. The product code is unchanged; production nodes keep
+refusing downgrades. The opt-in does not bypass the cut's config-envelope
+check, so an older binary that cannot read the config DB a newer one wrote is
+still refused.
 
 **Attestation.** The manifest records the selected deb's payload hashes, its
-file name, and `deb_version`, the deployed package version. `version` and
+file name, and `deb_version`, the package's `dpkg-deb` `Version` field. The
+package metadata version must match the version encoded in the deb filename;
+planning and manifest writing both refuse a mismatch. `version` and
 `build_git_sha` still describe the deploying checkout, because the ledger's
 checkout match keys on them. Each harness-result row carries:
 - `deb_version`;

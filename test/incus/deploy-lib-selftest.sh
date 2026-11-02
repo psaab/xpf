@@ -738,6 +738,7 @@ _plan_action() {
 	d=$(mktemp -d)
 	: >"$d/xpf_0.0.29580+gaaaaaaaaaaaa_amd64.deb"
 	(
+		deploy_deb_version() { deploy_deb_filename_version "$1"; }
 		deploy_running_deb_version() { printf '%s\n' "$run"; }
 		deploy_node_runs_deb() { [[ "$same_bytes" == 1 ]]; }
 		if [[ -n "$allow" ]]; then export XPF_DEPLOY_ALLOW_DOWNGRADE="$allow"; else unset XPF_DEPLOY_ALLOW_DOWNGRADE; fi
@@ -746,6 +747,100 @@ _plan_action() {
 	rc=$?
 	printf '%s|%s|%s' "$rc" "$(<"$d/out")" "$(<"$d/err")"
 	rm -rf "$d"
+}
+
+test_deb_query_failure_refuses_but_absence_is_fresh() {
+	local d deploy_cmd failed failed_rc absent absent_rc
+	d=$(mktemp -d)
+	printf 'previous attestation\n' >"$d/manifest.json"
+	deploy_cmd=$(awk '/^cmd_deploy\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$SCRIPT_DIR/cluster-setup.sh")
+	failed=$(
+		exec 2>&1
+		PROJECT_ROOT="$d/root"
+		XPF_CLUSTER_SKIP_BUILD=1
+		xpf_cluster_lock_held() { return 0; }
+		deploy_select_deb() { printf '/tmp/xpf_1.2_amd64.deb\n'; }
+		deploy_deb_version() { printf '1.2\n'; }
+		vm_name() { printf 'vm%s\n' "$1"; }
+		r() { printf 'inst:%s\n' "$1"; }
+		incus() { return 1; }
+		deploy_manifest_invalidate() {
+			rm -f "$d/manifest.json"
+			: >"$d/invalidated"
+		}
+		die() { echo "$*" >&2; exit 1; }
+		eval "$deploy_cmd"
+		cmd_deploy 0
+	)
+	failed_rc=$?
+	absent=$(
+		incus() { echo "dpkg-query: no packages found matching xpf" >&2; return 1; }
+		deploy_deb_version() { printf '1.2\n'; }
+		deploy_deb_node_action inst:vm /tmp/xpf_1.2_amd64.deb
+	) 2>&1
+	absent_rc=$?
+	if ((failed_rc != 0 && absent_rc == 0)) &&
+		[[ "$failed" == *"could not query"* &&
+			"$failed" == *"previous attestation manifest is untouched"* &&
+			"$(<"$d/manifest.json")" == "previous attestation" &&
+			! -e "$d/invalidated" &&
+			"$absent" == "install" ]]; then
+		ok "deb plan: dpkg-query failure refuses before manifest invalidation; confirmed package absence remains fresh"
+	else
+		bad "deb plan: query failure/absence handling wrong (failure rc=$failed_rc out=$failed; absent rc=$absent_rc out=$absent; invalidated=$([[ -e "$d/invalidated" ]] && echo yes || echo no); manifest=$(cat "$d/manifest.json" 2>/dev/null))"
+	fi
+	rm -rf "$d"
+}
+
+test_deb_filename_metadata_version_mismatch_refused() {
+	local fixture pkg deb manifest old action action_rc write_rc
+	if ! command -v dpkg-deb >/dev/null 2>&1; then
+		bad "deb plan: dpkg-deb is required to validate package metadata"
+		return
+	fi
+	fixture=$(mktemp -d)
+	pkg="$fixture/pkg"
+	deb="$fixture/xpf_2.0_amd64.deb"
+	manifest="$fixture/manifest.json"
+	mkdir -p "$pkg/DEBIAN" "$pkg/usr/local/share/xpf/staged" "$fixture/root"
+	chmod 0755 "$pkg/DEBIAN"
+	cat >"$pkg/DEBIAN/control" <<'CONTROL'
+Package: xpf
+Version: 1.0
+Architecture: all
+Maintainer: test <test@example.com>
+Description: mismatched deploy fixture
+CONTROL
+	printf 'xpfd\n' >"$pkg/usr/local/share/xpf/staged/xpfd"
+	printf 'cli\n' >"$pkg/usr/local/share/xpf/staged/cli"
+	printf 'helper\n' >"$pkg/usr/local/share/xpf/staged/xpf-userspace-dp"
+	if ! dpkg-deb --build "$pkg" "$deb" >/dev/null 2>&1; then
+		bad "deb plan: could not build filename/metadata mismatch fixture"
+		rm -rf "$fixture"
+		return
+	fi
+	action=$(
+		deploy_running_deb_version() { printf '0.5\n'; }
+		deploy_node_runs_deb() { return 1; }
+		unset XPF_DEPLOY_ALLOW_DOWNGRADE
+		deploy_deb_node_action inst:vm "$deb" 2>"$fixture/action.err"
+	)
+	action_rc=$?
+	old='previous attestation'
+	printf '%s\n' "$old" >"$manifest"
+	XPF_DEPLOY_MANIFEST="$manifest" deploy_write_manifest "$fixture/root" "$deb" \
+		0123456789abcdef0123456789abcdef01234567 0 >/dev/null 2>"$fixture/write.err"
+	write_rc=$?
+	if ((action_rc != 0 && write_rc != 0)) &&
+		[[ "$action" == "" &&
+			"$(<"$fixture/action.err")" == *"metadata Version"* &&
+			"$(<"$fixture/write.err")" == *"metadata Version"* &&
+			"$(<"$manifest")" == "$old" ]]; then
+		ok "deb plan and attestation: filename/metadata version mismatch is refused without replacing the prior manifest"
+	else
+		bad "deb plan and attestation: mismatched version accepted or wrong refusal (action rc=$action_rc out=$action err=$(<"$fixture/action.err"); write rc=$write_rc err=$(<"$fixture/write.err"); manifest=$(<"$manifest"))"
+	fi
+	rm -rf "$fixture"
 }
 
 test_deb_node_action_upgrade_installs() {
@@ -853,7 +948,14 @@ _ck_floor_run() {
 			"${argv[@]}"
 		}
 		warn() { :; }
+		local rc
 		"$fn" inst:vm
+		rc=$?
+		if [[ "$fn" == deploy_reset_binary_floor ]]; then
+			deploy_binary_floor_guard_disarm
+			trap - EXIT
+		fi
+		exit "$rc"
 	)
 }
 
@@ -884,11 +986,122 @@ test_deb_floor_moved_aside_and_restored() {
 	fi
 }
 
+# Run the real deploy_vm_deb body with only its remote effects mocked. The
+# fake Incus implementation maps the production floor path into <floor_dir>.
+_ck_deploy_vm_deb_with_failure() {
+	local floor_dir="$1" failure="$2" mutate="${3:-0}" vmdeb
+	vmdeb=$(awk '/^deploy_vm_deb\(\) \{/{f=1} f{print} f&&/^}/{exit}' "$SCRIPT_DIR/cluster-setup.sh")
+	(
+		PROJECT_ROOT="$SCRIPT_DIR/../.."
+		eval "$vmdeb"
+		if [[ "$mutate" == 1 ]]; then deploy_binary_floor_guard_arm() { :; }; fi
+		vm_name() { printf 'node%s\n' "$1"; }
+		r() { printf 'remote:%s\n' "$1"; }
+		deploy_select_deb() { printf '/tmp/xpf_1.0_amd64.deb\n'; }
+		deploy_deb_version() { printf '1.0\n'; }
+		deploy_deb_node_action() { printf 'install-downgrade\n'; }
+		deploy_running_deb_version() { printf '2.0\n'; }
+		deploy_reconcile_unit_shadows() {
+			[[ -e "$floor_dir/binary-floor.lab-downgrade-saved" ]] || : >"$floor_dir/floor-move-missed"
+			: >"$floor_dir/failure-reached"
+			[[ "$failure" != reconcile ]] || die "injected reconcile failure"
+		}
+		if [[ "$failure" == reconcile ]]; then deploy_install_deb() { :; }; fi
+		incus() {
+			local verb="$1"
+			shift
+			[[ "$verb" == info ]] && return 0
+			[[ "$verb" == exec ]] || return 0
+			while [[ "${1:-}" == -n || "${1:-}" == --disable-stdin ]]; do shift; done
+			shift # instance
+			[[ "${1:-}" == -- ]] && shift
+			if [[ "${1:-}" == bash && "${2:-}" == -c ]]; then
+				shift 2
+				local body="${1//\/var\/lib\/xpf/$floor_dir}"
+				bash -c "$body"
+				return $?
+			fi
+			if [[ "${1:-}" == mktemp ]]; then
+				if [[ "$failure" == mktemp ]]; then
+					[[ -e "$floor_dir/binary-floor.lab-downgrade-saved" ]] || : >"$floor_dir/floor-move-missed"
+					: >"$floor_dir/failure-reached"
+					return 1
+				fi
+				printf '/tmp/xpf-deb.injected\n'
+				return 0
+			fi
+			return 0
+		}
+		export XPF_DEPLOY_ALLOW_DOWNGRADE=1.0
+		deploy_vm_deb 0
+	) >/dev/null 2>&1
+}
+
+test_deb_floor_restored_after_late_die_paths() {
+	local failure d rc fails=""
+	for failure in reconcile mktemp; do
+		# Mutation control: without the floor guard, the same real late failure
+		# leaves only the saved copy. This proves the injected cell distinguishes
+		# the missing guard from the production EXIT restoration.
+		d=$(mktemp -d)
+		printf '2.0\n' >"$d/binary-floor"
+		_ck_deploy_vm_deb_with_failure "$d" "$failure" 1
+		rc=$?
+		if ((rc == 0)) || [[ ! -e "$d/failure-reached" || -e "$d/binary-floor" ||
+			! -e "$d/binary-floor.lab-downgrade-saved" ]]; then
+			fails+=" [$failure guard mutation was not killed]"
+		fi
+		rm -rf "$d"
+
+		d=$(mktemp -d)
+		printf '2.0\n' >"$d/binary-floor"
+		_ck_deploy_vm_deb_with_failure "$d" "$failure"
+		rc=$?
+		[[ -e "$d/failure-reached" ]] || fails+=" [$failure injection was not reached]"
+		[[ ! -e "$d/floor-move-missed" ]] || fails+=" [$failure ran without moving the floor]"
+		[[ "$(cat "$d/binary-floor" 2>/dev/null)" == 2.0 ]] ||
+			fails+=" [$failure left the floor absent]"
+		[[ ! -e "$d/binary-floor.lab-downgrade-saved" ]] ||
+			fails+=" [$failure left only the saved floor]"
+		rm -rf "$d"
+	done
+	if [[ -z "$fails" ]]; then
+		ok "deb plan: reconcile and remote-mktemp failures kill a missing guard and restore the floor with the EXIT guard"
+	else
+		bad "deb plan: late failure floor guard:$fails"
+	fi
+}
+
+test_deb_floor_restore_keeps_saved_copy_when_move_fails() {
+	local d rc
+	d=$(mktemp -d)
+	printf '2.0\n' >"$d/binary-floor.lab-downgrade-saved"
+	mkdir -p "$d/bin"
+	cat >"$d/bin/mv" <<'MV'
+#!/usr/bin/env bash
+case "$*" in
+	*binary-floor.lab-downgrade-saved*) exit 1 ;;
+	*) exec /bin/mv "$@" ;;
+esac
+MV
+	chmod +x "$d/bin/mv"
+	PATH="$d/bin:$PATH" _ck_floor_run "$d" deploy_restore_binary_floor
+	rc=$?
+	if ((rc != 0)) && [[ ! -e "$d/binary-floor" &&
+		"$(cat "$d/binary-floor.lab-downgrade-saved" 2>/dev/null)" == 2.0 ]]; then
+		ok "deb plan: failed floor restore reports failure and preserves the saved floor"
+	else
+		bad "deb plan: failed floor restore was swallowed or discarded its saved copy (rc=$rc)"
+	fi
+	rm -rf "$d"
+}
+
 test_deb_preflight_refuses_before_any_change() {
 	local d out rc
 	d=$(mktemp -d)
 	: >"$d/xpf_0.0.29580+gaaaaaaaaaaaa_amd64.deb"
 	out=$(
+		deploy_deb_version() { deploy_deb_filename_version "$1"; }
 		deploy_running_deb_version() { case "$1" in a:fw0) echo 0.0.29570+gbbbbbbbbbbbb ;; *) echo 0.0.29590+gcccccccccccc ;; esac; }
 		deploy_node_runs_deb() { return 1; }
 		incus() { echo "UNEXPECTED incus $*"; }
@@ -937,9 +1150,11 @@ test_deb_plan_wiring() {
 		fails+=" floor-reset-or-allow-outside-the-branch"
 	awk '/install-downgrade\)/{b=1} b&&/deploy_reset_binary_floor/{r=1} b&&/allow-downgrade; then/{a=1} b&&/deploy_restore_binary_floor/{x=1} b&&/;;/{exit} END{exit !(r && a && x)}' <<<"$vmdeb" ||
 		fails+=" branch-incomplete"
-	# The cut restores the floor on failure and drops the saved one on commit.
-	grep -Fq '((floor_saved)) && deploy_restore_binary_floor "$rinst"' <<<"$vmdeb" &&
-		grep -Fq '((floor_saved)) && deploy_drop_saved_binary_floor "$rinst"' <<<"$vmdeb" || fails+=" cut-floor-handling"
+	# A failed install or cut restores the floor; a committed cut drops the
+	# saved floor and disarms the EXIT restoration.
+	grep -Fq 'deploy_restore_binary_floor "$rinst"' <<<"$vmdeb" &&
+		grep -Fq 'deploy_drop_saved_binary_floor "$rinst"' <<<"$vmdeb" &&
+		grep -Fq 'deploy_binary_floor_guard_disarm' <<<"$vmdeb" || fails+=" cut-floor-handling"
 	if [[ -z "$fails" ]]; then
 		ok "deb plan wiring: cmd_deploy preflights before invalidating; deploy_vm_deb acts on the plan, and only install-downgrade resets the floor"
 	else
@@ -2881,7 +3096,7 @@ test_manifest_deb_hashes_package_payload() {
 	printf 'packaged helper artifact\n' >"$pkg/usr/local/share/xpf/staged/xpf-userspace-dp"
 	cat >"$pkg/DEBIAN/control" <<'CONTROL'
 Package: xpf-fixture
-Version: 1.0
+Version: 0.0.29580+gaaaaaaaaaaaa
 Architecture: all
 Maintainer: test <test@example.com>
 Description: deploy manifest fixture
@@ -3837,9 +4052,9 @@ mkdeb() {
 
 test_deb_version_parses_filename() {
 	local v
-	v=$(deploy_deb_version "/x/dist-deb/xpf_99.0.16308+601c5462a991_amd64.deb") || { bad "deb version: 99 filename did not parse"; return; }
+	v=$(deploy_deb_filename_version "/x/dist-deb/xpf_99.0.16308+601c5462a991_amd64.deb") || { bad "deb version: 99 filename did not parse"; return; }
 	[[ "$v" == "99.0.16308+601c5462a991" ]] && ok "deb version: parses xpf_<ver>_<arch>.deb" || bad "deb version: got '$v'"
-	if deploy_deb_version "/x/xpf-appliance_1.2.3_amd64.deb" >/dev/null 2>&1; then
+	if deploy_deb_filename_version "/x/xpf-appliance_1.2.3_amd64.deb" >/dev/null 2>&1; then
 		bad "deb version: appliance meta must not parse as runtime deb"
 	else
 		ok "deb version: appliance meta rejected"
@@ -4483,6 +4698,10 @@ test_deb_node_action_same_version
 test_deb_node_runs_deb_compares_both_binaries
 test_deb_running_version_reads_dpkg_state
 test_deb_floor_moved_aside_and_restored
+test_deb_query_failure_refuses_but_absence_is_fresh
+test_deb_filename_metadata_version_mismatch_refused
+test_deb_floor_restored_after_late_die_paths
+test_deb_floor_restore_keeps_saved_copy_when_move_fails
 test_deb_preflight_refuses_before_any_change
 test_deb_install_downgrade_flag
 test_deb_plan_wiring
