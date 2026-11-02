@@ -339,6 +339,9 @@ func (c *CLI) handleCommit(args []string) error {
 
 		compiled, err := c.runCommit(desc)
 		if err != nil {
+			if compiled != nil {
+				c.store.InvalidateScopedAdvisoryBaseline()
+			}
 			return fmt.Errorf("commit failed: %w", err)
 		}
 
@@ -378,6 +381,9 @@ func (c *CLI) handleCommit(args []string) error {
 
 		compiled, err := c.runCommitConfirmed(minutes)
 		if err != nil {
+			if compiled != nil {
+				c.store.InvalidateScopedAdvisoryBaseline()
+			}
 			return fmt.Errorf("commit confirmed failed: %w", err)
 		}
 
@@ -419,6 +425,9 @@ func (c *CLI) handleCommit(args []string) error {
 
 	compiled, err := c.runCommit("")
 	if err != nil {
+		if compiled != nil {
+			c.store.InvalidateScopedAdvisoryBaseline()
+		}
 		return fmt.Errorf("commit failed: %w", err)
 	}
 

@@ -1549,11 +1549,13 @@ constraint reminder in the #18719 sense (`docs/config-schema.md`,
       - unicast IPv4, whether transit or addressed to the node's OWN fabric
         address. The shim redirects it to the helper, which drops a frame
         from a non-peer source as unstamped fabric ingress.
-    - In every class the gate checked, the driver's `rx_packets` (counted
-      before generic XDP) equals frames sent. For the invisible classes,
-      `xpf_userspace_fabric_unstamped_ingress_drops_total` rose by exactly
-      the frames sent. That counter is therefore the complementary signal for
-      unicast IP from a third speaker. Surfacing it in the alarm is #18775.
+    - The gate's `rx_packets` measurements (counted before generic XDP)
+      tracked the delivery bursts, with reported rows one above frames sent.
+      For invisible classes, `xpf_userspace_fabric_unstamped_ingress_drops_total`
+      rose with the burst and had the same one-row offset. Treat these as
+      aggregate gate evidence, not exact per-frame counts; the drop counter is
+      still the complementary signal for unicast IP from a third speaker.
+      Surfacing it in the alarm is #18775.
     - So the detector sees a third host's ARP/ND/DHCP/mDNS/MLD chatter, not
       unicast traffic aimed at the cluster.
   - **Not evidence.** Frames to the IEEE 802.1 link-constrained groups

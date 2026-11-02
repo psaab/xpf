@@ -159,6 +159,11 @@ func TestFabricBAFallbackAdvisoryNeedsFabricReachableClassifier18719(t *testing.
 		{"classifier bound only on the fabric member parent", append(append([]string(nil), fabricBAClassifier18719...),
 			"set interfaces fab0 fabric-options member-interfaces ge-0/0/0",
 			"set class-of-service interfaces ge-0/0/0 unit 0 classifiers dscp cls"), false},
+		{"classifier bound only on fab2's member parent", append(append([]string(nil), fabricBAClassifier18719...),
+			"set chassis cluster fabric-interface fab2",
+			"set interfaces fab2 fabric-options member-interfaces ge-0/0/0",
+			"set class-of-service interfaces ge-0/0/0 unit 0 classifiers dscp cls"), false},
+
 		{"classifier bound on a data unit beside the fabric member", append(append([]string(nil), fabricBAClassifier18719...),
 			"set interfaces fab0 fabric-options member-interfaces ge-0/0/0",
 			"set class-of-service interfaces ge-0/0/0 unit 0 classifiers dscp cls",

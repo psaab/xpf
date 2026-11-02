@@ -132,8 +132,7 @@ func TestTapSamplerSurvivesParentDownUp18719(t *testing.T) {
 	defer func() { cancel(); <-done }()
 
 	before := mac(t, "18:e8:29:00:01:a1")
-	sendFrame(t, fabWire.Attrs().Index, bcastMAC, before)
-	awaitTracked(t, tracker, before)
+	sendUntilTracked(t, fabWire.Attrs().Index, tracker, before)
 
 	if err := netlink.LinkSetDown(fab); err != nil {
 		t.Fatalf("link down: %v", err)
@@ -149,8 +148,7 @@ func TestTapSamplerSurvivesParentDownUp18719(t *testing.T) {
 	default:
 	}
 	after := mac(t, "18:e8:29:00:01:b1")
-	sendFrame(t, fabWire.Attrs().Index, bcastMAC, after)
-	awaitTracked(t, tracker, after)
+	sendUntilTracked(t, fabWire.Attrs().Index, tracker, after)
 }
 
 // TestTapSamplerBoundWhileParentDown18719 (#18751 review BLOCKING 1): a tap
@@ -174,8 +172,7 @@ func TestTapSamplerBoundWhileParentDown18719(t *testing.T) {
 	}
 	awaitOperUp(t, fab.Attrs().Name)
 	src := mac(t, "18:e8:29:00:02:a1")
-	sendFrame(t, fabWire.Attrs().Index, bcastMAC, src)
-	awaitTracked(t, tracker, src)
+	sendUntilTracked(t, fabWire.Attrs().Index, tracker, src)
 }
 
 // TestTapSamplerParentRecreated18719 (#18751 review): an UNREGISTERED parent
@@ -294,6 +291,23 @@ func awaitTracked(t *testing.T, tracker *Tracker, src net.HardwareAddr) {
 	for {
 		for _, s := range trackedSources(tracker) {
 			if s == src.String() {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a foreign frame from %s was never counted (tracked: %v)", src, trackedSources(tracker))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func sendUntilTracked(t *testing.T, ifindex int, tracker *Tracker, src net.HardwareAddr) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sendFrame(t, ifindex, bcastMAC, src)
+		for _, got := range trackedSources(tracker) {
+			if got == src.String() {
 				return
 			}
 		}

@@ -400,7 +400,7 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 
 	// Promote candidate to active
 	s.active = committedTree
-	s.advisoryBaselineTree = committedTree // #18719: an operator commit showed its reminders
+	s.advisoryBaselineTree = committedTree // #18719: callers invalidate if reminders were not presented
 	s.candidate = s.active.Clone()
 	s.bumpCandidatePromotionLocked() // #5848: fresh candidate retains apply lineage
 	s.compiled = compiled
@@ -895,7 +895,7 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 
 	// Promote candidate to active
 	s.active = committedTree
-	s.advisoryBaselineTree = committedTree // #18719: an operator commit showed its reminders
+	s.advisoryBaselineTree = committedTree // #18719: callers invalidate if reminders were not presented
 	s.candidate = s.active.Clone()
 	s.bumpCandidatePromotionLocked() // #5848: fresh candidate retains apply lineage
 	s.compiled = compiled

@@ -140,15 +140,15 @@ func unitBABindings18719(iface, unit string, u *CoSInterfaceUnit) []string {
 	return out
 }
 
-// fabricMemberNames18719 is the set of fabric member parents (fab0/fab1
-// `fabric-options member-interfaces` and the resolved local member), keyed by
-// normalizeFabricMemberName18719.
+// fabricMemberNames18719 is the set of fabric member parents declared by
+// configured cluster fabric interfaces and their resolved local members,
+// keyed by normalizeFabricMemberName18719.
 func fabricMemberNames18719(cfg *Config) map[string]bool {
 	out := map[string]bool{}
-	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+	if cfg == nil {
 		return out
 	}
-	for _, fab := range []string{"fab0", "fab1"} {
+	for _, fab := range configuredFabricInterfaceNames18719(cfg) {
 		ifc := cfg.Interfaces.Interfaces[fab]
 		if ifc == nil {
 			continue
@@ -160,6 +160,53 @@ func fabricMemberNames18719(cfg *Config) map[string]bool {
 			out[normalizeFabricMemberName18719(ifc.LocalFabricMember)] = true
 		}
 	}
+	return out
+}
+
+// clusterFabricInterfaceNames18719 returns only the fabric links selected by
+// chassis cluster, which are the links whose members and addresses scope
+// #10105.
+func clusterFabricInterfaceNames18719(cfg *Config) []string {
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return nil
+	}
+	names := map[string]bool{}
+	cc := cfg.Chassis.Cluster
+	if cc.FabricInterface != "" {
+		names[cc.FabricInterface] = true
+	}
+	if cc.Fabric1Interface != "" {
+		names[cc.Fabric1Interface] = true
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// configuredFabricInterfaceNames18719 includes selected links plus every
+// interface stanza declaring fabric members, for excluding their parents
+// from the fabric-reachable BA classifier set.
+func configuredFabricInterfaceNames18719(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	names := map[string]bool{}
+	for _, name := range clusterFabricInterfaceNames18719(cfg) {
+		names[name] = true
+	}
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc != nil && (len(ifc.FabricMembers) != 0 || ifc.LocalFabricMember != "") {
+			names[name] = true
+		}
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
 	return out
 }
 

@@ -63,9 +63,9 @@ func DropUnchangedScopedAdvisories(prev, next *Config) {
 
 // fabricAdvisoryScope18719 fingerprints everything the #10105 reminder is
 // about: whether a cluster fabric exists, which links it uses, their peers,
-// their #16023 attestations, and the fab0/fab1 member and address config.
-// Removing an attestation is a change, so the reminder returns on that
-// commit.
+// their #16023 attestations, and the configured fabric interfaces' members
+// and addresses. Removing an attestation is a change, so the reminder returns
+// on that commit.
 func fabricAdvisoryScope18719(cfg *Config) string {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return "no-cluster"
@@ -77,7 +77,7 @@ func fabricAdvisoryScope18719(cfg *Config) string {
 		cc.FabricPeerAddress, cc.Fabric1PeerAddress,
 		cc.FabricLinkAuthenticated, cc.Fabric1LinkAuthenticated,
 		cc.FabricLinkPrivate, cc.Fabric1LinkPrivate)
-	for _, fab := range []string{"fab0", "fab1"} {
+	for _, fab := range clusterFabricInterfaceNames18719(cfg) {
 		var ifc *InterfaceConfig
 		if cfg.Interfaces.Interfaces != nil {
 			ifc = cfg.Interfaces.Interfaces[fab]

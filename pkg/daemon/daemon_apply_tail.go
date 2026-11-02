@@ -14,6 +14,7 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/eventengine"
+	"github.com/psaab/xpf/pkg/fabricsegment"
 	"github.com/psaab/xpf/pkg/lldp"
 	"github.com/psaab/xpf/pkg/vrrp"
 )
@@ -577,6 +578,13 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 // not a working epoch. Keeping it here would discard the only
 // recovery request and leave comms down until an unrelated change.
 func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwed bool) {
+	// The watcher is refreshed after a peer resolves, but removal of the last
+	// fabric has no such successful-resolution callback. Retire it from the
+	// config apply path instead.
+	if cfg == nil || cfg.Chassis.Cluster == nil ||
+		(cfg.Chassis.Cluster.FabricInterface == "" && cfg.Chassis.Cluster.Fabric1Interface == "") {
+		fabricsegment.Default().Update(nil)
+	}
 	if d.cluster == nil || d.daemonCtx == nil {
 		return
 	}

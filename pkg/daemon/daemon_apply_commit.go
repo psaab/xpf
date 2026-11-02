@@ -81,6 +81,9 @@ func (d *Daemon) bootstrapFromFile() error {
 		d.store.ExitConfigure()
 		return fmt.Errorf("commit: %w", err)
 	}
+	// Bootstrap does not present compiler reminders to an operator. Do not let
+	// this unattended promotion hide them from the first operator commit.
+	d.store.InvalidateScopedAdvisoryBaseline()
 	d.store.ExitConfigure()
 	slog.Info("configuration bootstrapped from file", "file", d.opts.ConfigFile)
 	return nil

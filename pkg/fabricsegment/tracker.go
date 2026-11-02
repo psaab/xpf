@@ -70,6 +70,7 @@ type Tracker struct {
 	// and immediately re-raise the alarm.
 	overflowLast time.Time
 	raised       bool
+	retired      bool // sealed by Retire; a canceled sampler may still deliver one final packet
 	// onTransition is called (outside the lock) when the alarm raises or
 	// clears. detail is the alarm summary on a raise, and the reason on a
 	// clear. Nil means no callback.
@@ -146,6 +147,10 @@ func (t *Tracker) Observe(src net.HardwareAddr, now time.Time) {
 	}
 	key := src.String()
 	t.mu.Lock()
+	if t.retired {
+		t.mu.Unlock()
+		return
+	}
 	rec, ok := t.sources[key]
 	switch {
 	case ok:
@@ -173,6 +178,10 @@ func (t *Tracker) Tick(now time.Time) { t.tick(now, ClearHoldExpired) }
 // tick is Tick with the clear reason the caller can vouch for.
 func (t *Tracker) tick(now time.Time, reason string) {
 	t.mu.Lock()
+	if t.retired {
+		t.mu.Unlock()
+		return
+	}
 	for key, rec := range t.sources {
 		if now.Sub(rec.lastSeen) > AlarmHold {
 			delete(t.sources, key)
@@ -197,6 +206,7 @@ func (t *Tracker) tick(now time.Time, reason string) {
 // reason, so every raise is matched by exactly one clear in the log.
 func (t *Tracker) Retire(reason string) {
 	t.mu.Lock()
+	t.retired = true
 	fire := t.raised
 	t.raised = false
 	t.mu.Unlock()

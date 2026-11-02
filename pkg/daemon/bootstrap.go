@@ -28,6 +28,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/fabricsegment"
 )
 
 // loadErrorClass categorizes a Store.Load error for the boot path (#1917 D1
@@ -761,6 +762,9 @@ func (d *Daemon) relinquishClusterForBootstrap() []bootstrapTeardownStep {
 	// runs the peer keeps seeing a healthy node and keeps syncing sessions to
 	// one whose dataplane is about to be detached.
 	d.stopClusterComms()
+	// Bootstrap teardown removes this node from the cluster; a last successful
+	// peer resolution is not guaranteed to reconfigure the fabric watcher.
+	fabricsegment.Default().Update(nil)
 	// #7901: this teardown does NOT restart. Without the mark, recovery depends
 	// on the corrected commit happening to move a transport endpoint.
 	d.markClusterCommsRestartNeeded()
