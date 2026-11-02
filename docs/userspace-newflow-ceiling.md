@@ -385,38 +385,81 @@ cargo build --release --manifest-path test/incus/newflow-gen/Cargo.toml
     bash -euo pipefail -c "$(cat <<'CELL'
 # Deploy/stage the prebuilt artifacts and prepare the authorized source
 # address and confirmed pool-mode rule here, under this same lock.
-sink_log=/tmp/newflow-gen-sink-10988.json
-sink_pid="$(incus exec loss:xpf-mouse-target -- sh -c \
-    'nohup /usr/local/bin/newflow-gen --mode sink --bind 172.16.80.202 --ports 5300-5363 > /tmp/newflow-gen-sink-10988.json 2>&1 < /dev/null & echo $!')"
-cleanup_sink() {
-    [[ -z "${sink_pid:-}" ]] && return 0
-    incus exec loss:xpf-mouse-target -- kill "$sink_pid" 2>/dev/null || true
-    incus exec loss:xpf-mouse-target -- rm -f "$sink_log" 2>/dev/null || true
-}
-trap cleanup_sink EXIT
+run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+run_dir="artifacts/newflow-ceiling/$run_id"
+mkdir -p "$run_dir"
+sink_target=loss:xpf-mouse-target
+sink_log="/tmp/newflow-gen-sink-$run_id.json"
 
-sink_json=""
-for _ in {1..10}; do
-    sink_json="$(incus exec loss:xpf-mouse-target -- cat "$sink_log" 2>/dev/null || true)"
-    [[ "$sink_json" == *'"bound_ports":64'* ]] && break
-    sleep 1
-done
-if [[ "$sink_json" != *'"bound_ports":64'* ]]; then
-    echo "newflow-ceiling: WAN sink did not bind all 64 ports" >&2
+# Record same-run target ownership before traffic; do not call the separate
+# test-connectivity gate from inside this lock cell.
+target_addr="$(incus exec "$sink_target" -- ip -o -4 addr show)"
+printf '%s\n' "$target_addr" > "$run_dir/target-address-preflight.txt"
+if ! grep -qE '(^|[[:space:]])inet 172\.16\.80\.202/' <<<"$target_addr"; then
+    echo "newflow-ceiling: $sink_target does not own 172.16.80.202" >&2
     exit 2
 fi
 
+sink_started="$(incus exec "$sink_target" -- date +%s)"
+incus exec "$sink_target" -- rm -f "$sink_log"
+sink_pid=""
+cleanup_sink() {
+    if [[ "${sink_pid:-}" =~ ^[0-9]+$ ]]; then
+        incus exec "$sink_target" -- kill "$sink_pid" 2>/dev/null || true
+    fi
+    incus exec "$sink_target" -- rm -f "$sink_log" 2>/dev/null || true
+}
+trap cleanup_sink EXIT
+sink_pid="$(incus exec "$sink_target" -- sh -c \
+    'nohup /usr/local/bin/newflow-gen --mode sink --bind 172.16.80.202 --ports 5300-5363 > "$1" 2>&1 < /dev/null & echo $!' \
+    sh "$sink_log")"
+if [[ ! "$sink_pid" =~ ^[0-9]+$ ]]; then
+    echo "newflow-ceiling: could not obtain the started sink PID" >&2
+    exit 2
+fi
+
+sink_ready=0
+sink_json=""
+sink_mtime=""
+for _ in {1..10}; do
+    if incus exec "$sink_target" -- sh -c 'kill -0 "$1" 2>/dev/null' sh "$sink_pid" >/dev/null 2>&1; then
+        sink_mtime="$(incus exec "$sink_target" -- stat -c %Y "$sink_log" 2>/dev/null || true)"
+        sink_json="$(incus exec "$sink_target" -- cat "$sink_log" 2>/dev/null || true)"
+        if [[ "$sink_mtime" =~ ^[0-9]+$ ]] &&
+            (( sink_mtime >= sink_started )) &&
+            python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("bound_ports") == 64 else 1)' \
+                <<<"$sink_json" 2>/dev/null; then
+            sink_ready=1
+            break
+        fi
+    fi
+    sleep 1
+done
+if [[ "$sink_ready" -ne 1 ]]; then
+    echo "newflow-ceiling: fresh sink process did not bind all 64 ports" >&2
+    exit 2
+fi
+printf '%s\n' "$sink_json" > "$run_dir/sink-startup.json"
+printf 'target=%s\npid=%s\nstart_epoch=%s\nlog_mtime=%s\n' \
+    "$sink_target" "$sink_pid" "$sink_started" "$sink_mtime" \
+    > "$run_dir/sink-preflight.txt"
+
 ./test/incus/newflow-ceiling-harness.sh --pool <pool> --rule <rule> \
     --src-bind 10.0.61.241 --target-ip 172.16.80.202 \
+    --artifacts "$run_dir" \
     --rates 5000,10000,20000,40000,80000 --duration 30 --threads 32
 CELL
 )"
 ```
 
-The sink runs on `loss:xpf-mouse-target`, bound at `172.16.80.202` on ports
-`5300-5363`; the outer cell checks the startup JSON for `bound_ports:64`
-before launching traffic. The harness refuses a missing pool-mode rule and
-does not change NAT config.
+The run records `target-address-preflight.txt` proving that
+`loss:xpf-mouse-target` owned `172.16.80.202` in the same lock-held run before
+traffic. It starts the sink with
+`newflow-gen --mode sink --bind 172.16.80.202 --ports 5300-5363`, checks the
+launched PID is alive, verifies a fresh run-specific log by mtime and exact
+`bound_ports:64` JSON, and records that startup evidence before traffic. The
+trap stops the sink and removes its remote log. The harness refuses a missing
+pool-mode rule and does not change NAT config.
 
 ### Which node it measures, and when it refuses to run (#6962)
 

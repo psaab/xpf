@@ -88,8 +88,18 @@ while [[ $# -gt 0 ]]; do
         --duration) DURATION="$2"; shift 2 ;;
         --threads) THREADS="$2"; shift 2 ;;
         --dst-ports) DST_PORTS="$2"; shift 2 ;;
-        --src-bind) CLI_SRC_BIND="$2"; shift 2 ;;
-        --target-ip) CLI_TARGET_IP="$2"; shift 2 ;;
+        --src-bind)
+            if [[ $# -lt 2 || -z "${2-}" ]]; then
+                echo "newflow-ceiling: --src-bind requires a non-empty IP." >&2
+                exit 2
+            fi
+            CLI_SRC_BIND="$2"; shift 2 ;;
+        --target-ip)
+            if [[ $# -lt 2 || -z "${2-}" ]]; then
+                echo "newflow-ceiling: --target-ip requires a non-empty IP." >&2
+                exit 2
+            fi
+            CLI_TARGET_IP="$2"; shift 2 ;;
         --close) CLOSE_MODE="$2"; shift 2 ;;
         --artifacts) ARTIFACT_ROOT="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;

@@ -400,7 +400,7 @@ fi
 wiring_line() { # <extended-regex> -> first matching line in $HARNESS_CODE
 	grep -nE "$1" <<<"$HARNESS_CODE" | head -1 | cut -d: -f1
 }
-w_line_orig="$(wiring_line '^ORIGINAL_ARGS=\(')"
+w_line_orig="$(wiring_line '^ORIGINAL_ARGS=\("\$@"\)$')"
 w_line_lock_src="$(wiring_line '^source .*cluster-cell\.sh" \|\| exit 2$')"
 w_line_lock_call="$(wiring_line '^xpf_enter_destructive_cluster_cell .*"\$\{ORIGINAL_ARGS\[@\]\}" \|\| exit 2$')"
 w_line_parse="$(wiring_line '^while \[\[ \$# -gt 0 \]\]')"
@@ -444,6 +444,20 @@ else
 	fail=$((fail + 1))
 	printf 'FAIL %-32s -> %s\n' LOCK_WIRING "$wiring_detail"
 fi
+
+# Explicit empty address flags must not silently fall back to environment
+# values or the env-file target.
+for flag in --src-bind --target-ip; do
+	empty_output="$(bash "$HARNESS" --pool selftest --rule selftest "$flag" "" --dry-run 2>&1)"
+	empty_rc=$?
+	if [[ "$empty_rc" -eq 2 && "$empty_output" == *"$flag requires a non-empty IP"* ]]; then
+		pass=$((pass + 1))
+		printf 'ok   %-32s -> rejected empty %s value\n' "EMPTY_${flag#--}" "$flag"
+	else
+		fail=$((fail + 1))
+		printf 'FAIL %-32s -> empty %s was not rejected (rc=%s): %s\n' "EMPTY_${flag#--}" "$flag" "$empty_rc" "$empty_output"
+	fi
+done
 
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
