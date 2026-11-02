@@ -38,7 +38,7 @@ n=0
 stamp_clean() {
 	local fix="$1"
 	mkdir -p "$fix/test/incus" "$fix/test/xsk-repro" "$fix/test/routing" \
-		"$fix/test/mutation" "$fix/test/daemon" "$fix/scripts/docs" "$fix/scripts/image" \
+		"$fix/test/mutation" "$fix/test/daemon" "$fix/test/nftables" "$fix/scripts/docs" "$fix/scripts/image" \
 		"$fix/scripts/dist" "$fix/scripts/deploy" "$fix/scripts/lib" "$fix/test/image" \
 		"$fix/test/debian"
 	echo '#!/bin/sh' >"$fix/test/incus/a-selftest.sh"
@@ -61,6 +61,8 @@ stamp_clean() {
 		printf '#!/usr/bin/env bash\ncase "$1" in\n%s exit 0 ;;\nesac\n' "$arm" >"$fix/test/incus/$w.sh"
 	done
 	echo '#!/bin/sh' >"$fix/test/daemon/selftest-a.sh"
+	echo '#!/bin/sh' >"$fix/test/nftables/selftest-kernel-leg.sh"
+	echo '#!/bin/sh' >"$fix/test/nftables/kernel-probes-selftest.sh"
 	for d in image dist deploy; do
 		printf 'x = 1\nif __name__ == "__main__":\n    pass\n' >"$fix/scripts/$d/test_a.py"
 	done
@@ -94,6 +96,8 @@ run_bash test/incus/wire-routing-separation.sh --selftest
 run_bash test/incus/wire-nat-frag-needed.sh --selftest
 run_bash test/incus/t12-g2-9506.sh --selftest
 run_bash test/incus/iperf-matrix.sh --selftest
+run_shell test/nftables/selftest-kernel-leg.sh
+run_shell test/nftables/kernel-probes-selftest.sh
 # -- harness reachability census (#8302) --
 RUNNER
 }
