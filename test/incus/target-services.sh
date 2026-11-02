@@ -345,6 +345,11 @@ sweep_socket_orphans() {
     main_pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)"
     [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || main_pid=""
     unit_cgroup="$(systemctl show -p ControlGroup --value "$unit" 2>/dev/null || true)"
+    if [[ -n "$main_pid" && -z "$unit_cgroup" ]]; then
+        # A live unit without a reported cgroup cannot safely classify any
+        # other socket PID on this port.
+        return 0
+    fi
     while IFS= read -r pid; do
         [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
         [[ "$pid" == "$main_pid" ]] && continue

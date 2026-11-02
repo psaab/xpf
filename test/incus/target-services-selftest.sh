@@ -330,7 +330,9 @@ case "$*" in
     fi
     case "$*" in
       *MainPID*mouse-iperf3@5201*) echo 2002 ;;
-      *ControlGroup*mouse-iperf3@5201*) echo /system.slice/mouse-iperf3@5201.service ;;
+      *ControlGroup*mouse-iperf3@5201*)
+        [[ "${FAKE_CGROUP_MISSING:-0}" == 1 ]] || echo /system.slice/mouse-iperf3@5201.service
+        ;;
       *MainPID*mouse-echo*) echo 3000 ;;
       *ControlGroup*mouse-echo*) echo /system.slice/mouse-echo.service ;;
       *MainPID*) echo 0 ;;
@@ -369,6 +371,7 @@ case "$1" in
       script="${3:-}"
       script="${script//\/proc\//${FAKE_PROC_ROOT}/}"
       FAKE_LOG="$FAKE_LOG" FAKE_SYSTEMD="${FAKE_SYSTEMD:-1}" \
+        FAKE_CGROUP_MISSING="${FAKE_CGROUP_MISSING:-0}" \
         BASH_ENV="${FAKE_KILL_ENV}" PATH="${FAKE_BIN}:${PATH}" bash -c "$script"
       exit $?
     fi
@@ -379,12 +382,13 @@ STUB3
 chmod +x "${DOWN_TMP}/incus"
 cp "$SUBJECT" "${DOWN_TMP}/target-services.sh"
 run_down() {
-    local target="$1" alias="$2" systemd="$3"
+    local target="$1" alias="$2" systemd="$3" cgroup_missing="${4:-0}"
     : > "$FAKE_LOG"
     env PATH="${DOWN_TMP}:${PATH}" FAKE_BIN="${DOWN_TMP}/bin" \
         FAKE_KILL_ENV="${DOWN_TMP}/bin/kill" FAKE_PROC_ROOT="${DOWN_TMP}/proc" \
         FAKE_LOG="$FAKE_LOG" \
         FAKE_TARGET_IP="$target" FAKE_SYSTEMD="$systemd" \
+        FAKE_CGROUP_MISSING="$cgroup_missing" \
         TARGET_V4="$target" TARGET_ALIAS_V4="$alias" \
         MOUSE_TARGET_V4=172.16.80.201 INCUS_REMOTE=loss \
         bash "${DOWN_TMP}/target-services.sh" down 2>&1
@@ -408,6 +412,19 @@ grep -q '^systemctl stop ' "$FAKE_LOG" \
 if grep -Eq '^kill .* (2002|2003|3000|3001)$' "$FAKE_LOG"; then
     fail "#18626: killed a listener in its unit MainPID/cgroup: $(cat "$FAKE_LOG")"
 fi
+
+# An active unit with no reported ControlGroup cannot safely classify any
+# other socket PID on that port. Leave those PIDs alone, while continuing the
+# echo sweep whose unit cgroup is available.
+down_out="$(run_down 172.16.80.202 172.16.80.202 1 1)"; down_rc=$?
+[[ $down_rc -eq 0 ]] || fail "#18626: missing-cgroup down rc=$down_rc: $down_out"
+if grep -Eq '^kill .* (146115|2003)$' "$FAKE_LOG"; then
+    fail "#18626: killed an iperf listener while its active unit cgroup was unavailable: $(cat "$FAKE_LOG")"
+fi
+grep -q '^kill .*3101$' "$FAKE_LOG" \
+    || fail "#18626: missing-cgroup case skipped the independently classifiable echo orphan: $(cat "$FAKE_LOG")"
+grep -q '^systemctl stop ' "$FAKE_LOG" \
+    || fail "#18626: missing-cgroup case did not finish the unit stop: $(cat "$FAKE_LOG")"
 
 # The non-alias target is provisioned without mouse systemd units; socket
 # ownership still finds both orphan forms and the second sweep completes.
