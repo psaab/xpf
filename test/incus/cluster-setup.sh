@@ -672,6 +672,21 @@ cmd_deploy() {
 			-- env XPF_CLUSTER_SKIP_BUILD=1 \
 			"${SCRIPT_DIR}/cluster-setup.sh" deploy "$target"
 	fi
+	# #18772: on the deb path, decide every target node's action (upgrade,
+	# byte-identical same version, refused or opted-in downgrade) BEFORE the
+	# manifest is invalidated or anything is pushed. A refused cell then costs
+	# nothing and the previous attestation survives.
+	if [[ "${XPF_DEPLOY_FAST:-}" != "1" ]]; then
+		local preflight_deb preflight_idx preflight_nodes=()
+		preflight_deb=$(deploy_select_deb "$PROJECT_ROOT/dist-deb" || true)
+		[[ -n "$preflight_deb" ]] || die "no xpf_*.deb found in dist-deb/ — run 'make deb' first (the default deploy build)"
+		case "$target" in
+		all) for preflight_idx in 0 1; do preflight_nodes+=("$(r "$(vm_name "$preflight_idx")")"); done ;;
+		*) preflight_nodes+=("$(r "$(vm_name "$target")")") ;;
+		esac
+		deploy_deb_preflight "$preflight_deb" "${preflight_nodes[@]}" ||
+			die "deb deploy refused before any change (see above); the previous attestation manifest is untouched"
+	fi
 	deploy_manifest_invalidate "$PROJECT_ROOT" "$target" ||
 		die "cannot invalidate prior executable attestation manifest"
 	# #16290: from here the prior attestation is gone, so ANY abort before
@@ -741,7 +756,7 @@ cmd_deploy() {
 		}
 	else
 		local attestation_deb
-		attestation_deb=$(deploy_select_deb "$PROJECT_ROOT/dist-deb" 2>/dev/null || true)
+		attestation_deb=$(deploy_select_deb "$PROJECT_ROOT/dist-deb" || true)
 		[[ -n "$attestation_deb" ]] || {
 			deploy_manifest_record_failure "$PROJECT_ROOT" "$target" "attestation manifest absent because deploy found no xpf .deb to attest; no new build was attested" || true
 			deploy_manifest_guard_disarm
@@ -794,7 +809,7 @@ deploy_vm_deb() {
 	# dir; install the runtime xpf_*.deb, NOT the xpf-appliance meta).
 	# Version, not mtime (#16308): a prebuilt 99.0.x deb must win over a
 	# just-rebuilt stock deb regardless of which is newer on disk.
-	deb=$(deploy_select_deb "$PROJECT_ROOT/dist-deb" 2>/dev/null || true)
+	deb=$(deploy_select_deb "$PROJECT_ROOT/dist-deb" || true)
 	[[ -n "$deb" ]] || die "no xpf_*.deb found in dist-deb/ — run 'make deb' first (the default deploy build)"
 	info "Deploying deb: $deb (version $(deploy_deb_version "$deb"))"
 
@@ -806,7 +821,32 @@ deploy_vm_deb() {
 
 	# Unique-slot deb install (#10026): push+install+cleanup through the
 	# tested helper, so a same-name re-push cannot collide in a fixed slot.
-	deploy_install_deb "$rinst" "$deb"
+	# #18772/#18764: the node's action was already vetted by cmd_deploy's
+	# preflight; re-derive it here against the node as it is now.
+	local action floor_saved=0
+	action=$(deploy_deb_node_action "$rinst" "$deb") ||
+		die "deb deploy of $vm refused (see above)"
+	case "$action" in
+	skip-same)
+		info "$vm already runs $(basename "$deb") byte for byte; skipping the install and the cut (#18764)"
+		return 0
+		;;
+	install-downgrade)
+		warn "LAB DOWNGRADE (XPF_DEPLOY_ALLOW_DOWNGRADE=${XPF_DEPLOY_ALLOW_DOWNGRADE:-}): deploying $(basename "$deb") over $(deploy_running_deb_version "$rinst") on $vm"
+		deploy_reset_binary_floor "$rinst" || die "could not move the anti-rollback floor aside on $vm"
+		floor_saved=1
+		if ! deploy_install_deb "$rinst" "$deb" allow-downgrade; then
+			if ! deploy_restore_binary_floor "$rinst"; then
+				die "downgrade install failed on $vm; the saved anti-rollback floor could not be restored and will be retried by the EXIT guard"
+			fi
+			deploy_binary_floor_guard_disarm
+			die "downgrade install failed on $vm; its anti-rollback floor was restored"
+		fi
+		;;
+	*)
+		deploy_install_deb "$rinst" "$deb"
+		;;
+	esac
 
 	# #18544: a raw deploy leaves /etc/systemd/system copies of xpfd.service
 	# and the two boot barriers behind, and they shadow the units this deb
@@ -822,7 +862,23 @@ deploy_vm_deb() {
 	# local cluster state.
 	info "Cutting over node${idx} via 'xpfd upgrade --rolling'..."
 	rolling_upgrade_trace cut_start "$idx"
-	incus exec "$rinst" -- /usr/local/share/xpf/staged/xpfd upgrade --rolling
+	if ! incus exec "$rinst" -- /usr/local/share/xpf/staged/xpfd upgrade --rolling; then
+		if ((floor_saved)); then
+			if deploy_restore_binary_floor "$rinst"; then
+				deploy_binary_floor_guard_disarm
+			else
+				die "'xpfd upgrade --rolling' failed on $vm; its saved anti-rollback floor could not be restored and will be retried by the EXIT guard"
+			fi
+		fi
+		die "'xpfd upgrade --rolling' failed on $vm"
+	fi
+	if ((floor_saved)); then
+		# The cut committed, so the re-enrolled floor is now authoritative.
+		# Disarm restoration before deleting the saved pre-downgrade floor.
+		deploy_binary_floor_guard_disarm
+		deploy_drop_saved_binary_floor "$rinst" ||
+			die "cut committed on $vm but its saved anti-rollback floor could not be discarded"
+	fi
 	rolling_upgrade_trace cut_end "$idx"
 	info "Cut-over complete for $vm."
 }

@@ -305,6 +305,82 @@ measurement, resolve the active node with `active_fw_detect` from
 `active-fw.sh`; it returns 1 when no candidate is primary, and callers
 must fail closed rather than fall back to a hardcoded node.
 
+## Deb deploys in A/B gate cells (#18772, #18764)
+
+The default `make cluster-deploy` (deb path) installs the selected `.deb` on
+each node, then cuts it with `xpfd upgrade --rolling`. Before it pushes
+anything or touches `dist-deb/xpf-deploy-manifest.json`, it decides each
+target node's action. It compares the deb's package metadata version with the
+version the node has installed: only a `dpkg-query` status of `ii` counts as
+installed. `rc`, `un`, `pn`, or an explicit “no packages found” response
+counts as nothing installed. A failed `dpkg-query`/Incus query is refused,
+not treated as fresh. The logic is in `deploy_deb_node_action` and
+`deploy_deb_preflight` (`deploy-lib.sh`):
+
+| deb vs installed | action |
+|---|---|
+| newer, or nothing installed | install and cut, as always |
+| same version, byte-identical | **skip** the install and the cut; the manifest is still written from the deb, so the attestation is kept (#18764) |
+| same version, other bytes (or unreadable) | **refused**: a re-staged same version cannot be cut (#16219); build a new version |
+| older | **refused** up front, naming both versions and the fix, unless `XPF_DEPLOY_ALLOW_DOWNGRADE` is set to **that deb's exact version** |
+| half-installed (state other than `ii`, `rc`, `un`, or `pn`) | **refused**: repair the package first |
+| package query/transport failure | **refused**: the node is not assumed fresh |
+
+"Byte-identical" means all of these match the deb:
+- the running `xpfd` process;
+- the running userspace helper process;
+- all four managed binaries in `/var/lib/xpf/versions/current` (`xpfd`, `cli`,
+  `xpf-userspace-dp`, `xpf-day0-config`).
+
+A refusal costs the cell nothing: no node is touched, and the previous
+attestation manifest survives. A bad `XPF_DEPLOY_DEB_PATH` is reported, not
+swallowed.
+
+**Putting master back (A→B→A).** Two ways:
+- Allocate a fresh, higher version for every deploy in the cell's order,
+  including a rebuild of A for the final step:
+  `make deb DEB_VERSION="$(scripts/next-deb-version.sh --git .)+g$(git rev-parse --short=12 HEAD)"`.
+  This keeps every deploy a real upgrade, which is what production does.
+- Deploy the older A deliberately:
+  `XPF_DEPLOY_DEB_PATH=<A.deb> XPF_DEPLOY_ALLOW_DOWNGRADE=<A's exact version>`.
+  The opt-in is bound to the version, so an export left in a shell cannot
+  authorize an unrelated later downgrade.
+
+**What the opt-in does.** For each downgrading node:
+- It logs `LAB DOWNGRADE`.
+- It moves the binary anti-rollback floor `/var/lib/xpf/binary-floor` (#10848)
+  to `/var/lib/xpf/binary-floor.lab-downgrade-saved`, rather than deleting it.
+- It installs with `apt-get install --allow-downgrades`, then cuts as usual.
+
+The floor exists to refuse a validly-signed OLD build as a replay, and it
+refuses both the postinst publish and the cut. A committed cut re-enrolls it
+at the deployed version and the saved floor is discarded. Every exit after
+the floor is moved—including install, publish, reconcile, remote `mktemp`,
+and cut failures—restores the saved floor, or keeps the saved copy and reports
+failure if restoration cannot be completed. A floor already re-enrolled by a
+failed attempt is kept. The product code is unchanged; production nodes keep
+refusing downgrades. The opt-in does not bypass the cut's config-envelope
+check, so an older binary that cannot read the config DB a newer one wrote is
+still refused.
+
+**Attestation.** The manifest records the selected deb's payload hashes, its
+file name, and `deb_version`, the package's `dpkg-deb` `Version` field. Its
+control identity must be `Package: xpf` and `Architecture: amd64`; the
+metadata Version must match the version encoded in the filename. Planning and
+manifest writing refuse packages that fail either check. `version` and
+`build_git_sha` still describe the deploying checkout, because the ledger's
+checkout match keys on them. Each harness-result row carries:
+- `deb_version`;
+- `deb_build_match`: `match`, `mismatch` (the deb's `+g<sha>` is not this
+  checkout's commit, the cross-checkout A/B case; harness-result also warns),
+  or `unknown`.
+
+A `mismatch` row measured the other arm's build. Read it as that build, or
+run the gate from the checkout that built the deb.
+
+Self-tests: `make test-deploy-lib` ("deb plan" cells) and
+`make test-harness-ledger-lib` (#18772 cell).
+
 ## How to add a harness
 
 1. Name it: `test-*.sh` / `wire-*.sh` for a gate, `*-lib.sh` for a sourced
