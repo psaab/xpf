@@ -121,40 +121,19 @@ var foreignClaimed18558 = map[string]string{
 	"172.16.80.253": "a4:ae:11:1e:3d:af",
 }
 
-// knownForeignCollisions18558 are shipped claims on a foreign-held address
-// that this change does not move: the standalone VM and the legacy local
-// cluster are not among the three gate clusters and cannot be re-validated
-// live here. EXPIRY: #18574 re-addresses them. Delete each entry when its
-// claim moves. An entry whose claim is already gone fails the test, so
-// the list cannot outlive its reason.
-var knownForeignCollisions18558 = map[string]string{
-	"172.16.50.9":  "legacy local (ha-cluster.conf)",
-	"172.16.50.12": "legacy local (ha-cluster.conf)",
-	"172.16.50.14": "standalone (xpf-test.conf)",
-	"172.16.50.15": "standalone (xpf-test.conf)",
-}
-
 func TestSharedSegmentForeignClaims18558(t *testing.T) {
-	// Every stack's claims are collected BEFORE any subtest runs, and the
-	// exemption audit below reads that collection. Running a single subtest
-	// (`-run TestSharedSegmentForeignClaims18558/tcp`) therefore cannot make
-	// an exemption look unused.
+	// Compile and group all stack configs before running their per-stack
+	// foreign-claim checks below.
 	type stackClaims struct {
 		name   string
 		rel    string
 		claims map[string][]claim16473
 	}
 	var all []stackClaims
-	used := map[string]bool{}
 	for _, st := range labStacks16473 {
 		for _, rel := range st.files {
 			claims := claimsForFile16473(t, rel)
 			all = append(all, stackClaims{st.name, rel, claims})
-			for addr := range claims {
-				if knownForeignCollisions18558[addr] == st.name {
-					used[addr] = true
-				}
-			}
 		}
 	}
 	byStack := map[string][]stackClaims{}
@@ -175,10 +154,6 @@ func TestSharedSegmentForeignClaims18558(t *testing.T) {
 					if !foreign {
 						continue
 					}
-					if knownForeignCollisions18558[addr] == st.name {
-						t.Logf("KNOWN %s (%s) is held by non-xpf %s; tracked by #18574", addr, sc.rel, macs)
-						continue
-					}
 					kinds := make([]string, 0, len(sc.claims[addr]))
 					for _, c := range sc.claims[addr] {
 						kinds = append(kinds, c.kind)
@@ -191,13 +166,5 @@ func TestSharedSegmentForeignClaims18558(t *testing.T) {
 				}
 			}
 		})
-	}
-	for addr, stack := range knownForeignCollisions18558 {
-		if _, ok := foreignClaimed18558[addr]; !ok {
-			t.Errorf("knownForeignCollisions18558[%s] (%s) is not in the measured foreign list", addr, stack)
-		}
-		if !used[addr] {
-			t.Errorf("knownForeignCollisions18558[%s]: %s no longer claims it; delete the exemption (#18574)", addr, stack)
-		}
 	}
 }
