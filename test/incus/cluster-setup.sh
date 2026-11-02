@@ -873,9 +873,11 @@ deploy_vm_deb() {
 		die "'xpfd upgrade --rolling' failed on $vm"
 	fi
 	if ((floor_saved)); then
+		# The cut committed, so the re-enrolled floor is now authoritative.
+		# Disarm restoration before deleting the saved pre-downgrade floor.
+		deploy_binary_floor_guard_disarm
 		deploy_drop_saved_binary_floor "$rinst" ||
 			die "cut committed on $vm but its saved anti-rollback floor could not be discarded"
-		deploy_binary_floor_guard_disarm
 	fi
 	rolling_upgrade_trace cut_end "$idx"
 	info "Cut-over complete for $vm."

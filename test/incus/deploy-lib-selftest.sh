@@ -1151,11 +1151,13 @@ test_deb_plan_wiring() {
 		fails+=" floor-reset-or-allow-outside-the-branch"
 	awk '/install-downgrade\)/{b=1} b&&/deploy_reset_binary_floor/{r=1} b&&/allow-downgrade; then/{a=1} b&&/deploy_restore_binary_floor/{x=1} b&&/;;/{exit} END{exit !(r && a && x)}' <<<"$vmdeb" ||
 		fails+=" branch-incomplete"
-	# A failed install or cut restores the floor; a committed cut drops the
-	# saved floor and disarms the EXIT restoration.
+	# A failed install or cut restores the floor. After a committed cut,
+	# disarm restoration before dropping the old saved floor.
 	grep -Fq 'deploy_restore_binary_floor "$rinst"' <<<"$vmdeb" &&
 		grep -Fq 'deploy_drop_saved_binary_floor "$rinst"' <<<"$vmdeb" &&
 		grep -Fq 'deploy_binary_floor_guard_disarm' <<<"$vmdeb" || fails+=" cut-floor-handling"
+	awk '/if \(\(floor_saved\)\); then/{branch++; if(branch==2)committed=1; next} committed&&/deploy_binary_floor_guard_disarm/{disarm=NR} committed&&/deploy_drop_saved_binary_floor/{drop=NR} committed&&/^[[:space:]]*fi$/{committed=0} END{exit !(disarm && drop && disarm < drop)}' <<<"$vmdeb" ||
+		fails+=" disarm-after-committed-cut"
 	if [[ -z "$fails" ]]; then
 		ok "deb plan wiring: cmd_deploy preflights before invalidating; deploy_vm_deb acts on the plan, and only install-downgrade resets the floor"
 	else
