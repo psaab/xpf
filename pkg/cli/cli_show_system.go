@@ -1180,9 +1180,9 @@ func (c *CLI) handleShowSystem(args []string) error {
 		if c.fabricAuthUnarmedAlarmFn != nil {
 			fabricAuthAlarm = c.fabricAuthUnarmedAlarmFn()
 		}
-		var peerLossTakeoverAlarm string
+		var peerLossDecisionAlarm string
 		if c.cluster != nil {
-			peerLossTakeoverAlarm = c.cluster.UnconfirmedTakeoverAlarm()
+			peerLossDecisionAlarm = c.cluster.UnconfirmedTakeoverAlarm()
 		}
 		n := len(warnings) + len(clockAlarms)
 		if divergence != "" {
@@ -1191,7 +1191,7 @@ func (c *CLI) handleShowSystem(args []string) error {
 		if peerSnapshotAlarm != "" {
 			n++
 		}
-		if peerLossTakeoverAlarm != "" {
+		if peerLossDecisionAlarm != "" {
 			n++
 		}
 		if fabricAuthAlarm != "" {
@@ -1211,8 +1211,8 @@ func (c *CLI) handleShowSystem(args []string) error {
 			if peerSnapshotAlarm != "" {
 				fmt.Printf("  CRITICAL: %s\n", peerSnapshotAlarm)
 			}
-			if peerLossTakeoverAlarm != "" {
-				fmt.Printf("  CRITICAL: %s\n", peerLossTakeoverAlarm)
+			if peerLossDecisionAlarm != "" {
+				fmt.Printf("  CRITICAL: %s\n", peerLossDecisionAlarm)
 			}
 			if fabricAuthAlarm != "" {
 				fmt.Printf("  %s\n", fabricAuthAlarm)

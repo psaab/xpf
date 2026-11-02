@@ -751,13 +751,13 @@ type Manager struct {
 	// fenceUnconfirmedReason records why peer-fence confirmation was absent
 	// on the latest peer-loss decision (#10701/#14158). Empty means no
 	// unconfirmed result is outstanding: a confirmed fence succeeded or a
-	// peer heartbeat cleared the mark. Default/disable mark every takeover;
-	// confirmed policy marks fail-open paths and aborted waits.
-	// Never-seen single-node promotion is unconfirmed too: silence is not
-	// proof that the other node is absent. Status views expose degraded state
-	// and raise dual-primary risk while the peer is not alive. Guarded by mu.
+	// peer heartbeat cleared the mark. Default/disable mark each peer-loss
+	// decision; confirmed policy marks fail-open paths and aborted waits.
+	// A never-seen peer-loss decision is unconfirmed too: silence is not proof
+	// the other node is absent. Status views expose degraded state and raise
+	// dual-primary risk while the peer is not alive. Guarded by mu.
 	fenceUnconfirmedReason string
-	// fenceUnconfirmedAt is when the outstanding unconfirmed takeover ran.
+	// fenceUnconfirmedAt is when the unconfirmed peer-loss decision was recorded.
 	// Meaningless while fenceUnconfirmedReason is empty. Guarded by mu.
 	fenceUnconfirmedAt time.Time
 

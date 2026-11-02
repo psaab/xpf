@@ -125,10 +125,41 @@ func TestUnconfirmedTakeoverAlarm16024_ColdStartIsAlarmed(t *testing.T) {
 	}
 	status := m.FormatStatus()
 	if !strings.Contains(status, "ALARM: dual-primary risk") ||
+		!strings.Contains(status, "Peer-loss decision: UNCONFIRMED") ||
 		!strings.Contains(status, "peer never seen; no fence possible") {
-		t.Fatalf("cold-start promotion must report the split-brain risk:\n%s", status)
+		t.Fatalf("cold-start peer-loss decision must report its split-brain risk:\n%s", status)
 	}
-	if alarm := m.UnconfirmedTakeoverAlarm(); !strings.Contains(alarm, "peer never seen; no fence possible") {
-		t.Fatalf("cold-start takeover alarm = %q, want the no-fence reason", alarm)
+	if alarm := m.UnconfirmedTakeoverAlarm(); !strings.Contains(alarm, "Peer-loss decision: UNCONFIRMED") ||
+		!strings.Contains(alarm, "peer never seen; no fence possible") {
+		t.Fatalf("cold-start peer-loss decision alarm = %q, want the unconfirmed no-fence reason", alarm)
+	}
+}
+
+func TestUnconfirmedTakeoverAlarm16024_ColdStartNotReadyRemainsSecondary(t *testing.T) {
+	m := coldBootManager(t)
+	m.SetRGReady(0, false, []string{"test dataplane not ready"})
+	if m.IsLocalPrimary(0) {
+		t.Fatal("not-ready cold-start RG must remain secondary before peer absence confirmation")
+	}
+	if status := m.FormatStatus(); strings.Contains(status, "ALARM: dual-primary risk") {
+		t.Fatalf("not-ready cold-start RG must not alarm before peer absence confirmation:\n%s", status)
+	}
+	if alarm := m.UnconfirmedTakeoverAlarm(); alarm != "" {
+		t.Fatalf("not-ready cold-start decision alarm before absence confirmation = %q, want empty", alarm)
+	}
+	m.handlePeerNeverSeen()
+	if m.IsLocalPrimary(0) {
+		t.Fatal("readiness gate must keep the not-ready cold-start RG secondary")
+	}
+	status := m.FormatStatus()
+	if !strings.Contains(status, "ALARM: dual-primary risk") ||
+		!strings.Contains(status, "Peer-loss decision: UNCONFIRMED") ||
+		!strings.Contains(status, "peer never seen; no fence possible") {
+		t.Fatalf("unconfirmed peer-loss decision should remain alarmed while readiness blocks promotion:\n%s", status)
+	}
+	alarm := m.UnconfirmedTakeoverAlarm()
+	if !strings.Contains(alarm, "Peer-loss decision: UNCONFIRMED") ||
+		!strings.Contains(alarm, "peer never seen; no fence possible") {
+		t.Fatalf("not-ready peer-loss decision alarm = %q, want unconfirmed no-fence risk", alarm)
 	}
 }

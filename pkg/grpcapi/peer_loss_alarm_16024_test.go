@@ -19,7 +19,7 @@ func TestShowSystemAlarmsIncludesPeerLossTakeover16024(t *testing.T) {
 	s.showAlarms(&out)
 	for _, want := range []string{
 		"1 active alarm(s):",
-		"CRITICAL: dual-primary risk: Peer-loss takeover: DEGRADED",
+		"CRITICAL: dual-primary risk: Peer-loss decision: UNCONFIRMED",
 		"peer fencing is disabled",
 	} {
 		if !strings.Contains(out.String(), want) {

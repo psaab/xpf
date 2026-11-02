@@ -3840,13 +3840,16 @@ No fencing is configured by default. Both the default and `disable-rg` leave
 dual-primary ownership possible; `disable-rg-confirmed` only waits for a
 point-in-time dataplane-suppression acknowledgement and also does not demote
 the peer or release its VIPs. `FormatStatus` and `FormatInformation` mark an
-unconfirmed takeover as degraded. Each unconfirmed takeover, including a
-never-seen single-node promotion, raises `ALARM: dual-primary risk` in the
-status views, CRITICAL in local and gRPC `show system alarms`, and one
-`slog.Warn`. Not hearing from a peer does not prove it absent: both nodes can
-miss their initial heartbeats during simultaneous startup. The alarm clears
-when a peer heartbeat returns. This remains diagnostic and does not change
-the fail-open takeover behavior.
+unconfirmed peer-loss decision as degraded. While the peer is not alive, each
+such decision, including a never-seen cold-start decision, raises
+`ALARM: dual-primary risk` in the status views, CRITICAL in local and gRPC
+`show system alarms`, and one `slog.Warn`. The alarm records an unconfirmed
+fencing/peer-loss decision, not proof that local ownership changed: readiness
+may keep a cold-start RG secondary while the alarm is active. Not hearing from
+a peer does not prove it absent; both nodes can miss their initial heartbeats
+during simultaneous startup. A live peer aborting an unsuccessful fence wait
+stays silent in the active alarm list. A returning peer heartbeat clears the
+alarm. This remains diagnostic and does not change election behavior.
 
 - **Wire** — one additive message type `syncMsgFenceAck = 35` carries
   `{seq u64, status u8, rgs_fenced u16, rgs_total u16}` LE. `syncMsgFence`

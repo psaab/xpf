@@ -67,7 +67,7 @@ func (m *Manager) markFenceUnconfirmedLocked(reason string) {
 	m.fenceUnconfirmedReason = reason
 	m.fenceUnconfirmedAt = time.Now()
 	if !m.peerAlive {
-		slog.Warn("cluster: dual-primary risk: takeover proceeded without confirmed fencing",
+		slog.Warn("cluster: dual-primary risk: peer-loss decision lacks confirmed fencing",
 			"reason", reason)
 	}
 }
@@ -78,21 +78,21 @@ func (m *Manager) clearFenceUnconfirmedLocked() {
 }
 
 func formatFenceUnconfirmedStatus(reason string, at time.Time) string {
-	return fmt.Sprintf("Peer-loss takeover: DEGRADED (peer fence unconfirmed: %s, since %s)",
+	return fmt.Sprintf("Peer-loss decision: UNCONFIRMED (peer fence unconfirmed: %s, since %s)",
 		reason, at.Format("Jan 02 15:04:05"))
 }
 
-// formatFenceUnconfirmedAlarm reports the active split-brain risk whenever a
-// takeover proceeds without peer-fence confirmation, including never-seen
-// single-node promotion where first-heartbeat loss does not prove absence.
+// formatFenceUnconfirmedAlarm reports active risk when a peer-loss decision is
+// not backed by peer-fence confirmation. Readiness may keep an RG secondary:
+// this alarm describes unresolved peer ownership, not a local promotion.
 func formatFenceUnconfirmedAlarm(reason string, at time.Time) string {
-	return fmt.Sprintf("dual-primary risk: Peer-loss takeover: DEGRADED (peer fence unconfirmed: %s, since %s)",
+	return fmt.Sprintf("dual-primary risk: Peer-loss decision: UNCONFIRMED (peer fence unconfirmed: %s, since %s)",
 		reason, at.Format("Jan 02 15:04:05"))
 }
 
 // UnconfirmedTakeoverAlarm returns the active dual-primary-risk alarm when a
-// takeover proceeded without peer-fence confirmation. An unsuccessful fence
-// wait that receives a peer heartbeat aborts takeover and stays silent.
+// peer-loss decision lacks fence confirmation, regardless of whether local
+// readiness permits promotion. A live-peer abort remains silent.
 func (m *Manager) UnconfirmedTakeoverAlarm() string {
 	if m == nil {
 		return ""
