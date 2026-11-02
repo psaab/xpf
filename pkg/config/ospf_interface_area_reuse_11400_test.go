@@ -264,16 +264,32 @@ func TestOSPFCompilerKeepsSameInterfaceMD5Rollover12186(t *testing.T) {
 		t.Fatalf("same authored interface compiled to %d model entries, want one", len(ifaces))
 	}
 	iface := ifaces[0]
-	wantKeys := map[int]Secret{7: NewSecret("same-seven"), 8: NewSecret("same-eight")}
+	wantKeys := map[int]string{7: "same-seven", 8: "same-eight"}
 	if len(iface.AuthMD5Keys) != len(wantKeys) {
 		t.Fatalf("same-interface MD5 rollover retained %d keys, want %d: %+v", len(iface.AuthMD5Keys), len(wantKeys), iface.AuthMD5Keys)
 	}
+	seenIDs := make(map[int]bool, len(wantKeys))
 	for _, key := range iface.AuthMD5Keys {
-		if want, ok := wantKeys[key.ID]; !ok || key.Key != want {
+		if _, ok := wantKeys[key.ID]; !ok {
+			t.Fatalf("same-interface MD5 rollover retained unexpected key ID %d", key.ID)
+		}
+		if seenIDs[key.ID] {
+			t.Fatalf("same-interface MD5 rollover retained key ID %d more than once", key.ID)
+		}
+		if key.Key.Reveal() != wantKeys[key.ID] {
+			// Compile-time Junos9 adjudication stamps Secret provenance,
+			// so compare the retained cleartext, not Secret's provenance-
+			// aware struct identity.
 			t.Fatalf("same-interface MD5 rollover key ID %d has unexpected secret", key.ID)
 		}
+		seenIDs[key.ID] = true
 	}
-	if iface.AuthKeyID != 8 || iface.AuthKey != NewSecret("same-eight") {
+	for id := range wantKeys {
+		if !seenIDs[id] {
+			t.Fatalf("same-interface MD5 rollover did not retain key ID %d", id)
+		}
+	}
+	if iface.AuthKeyID != 8 || iface.AuthKey.Reveal() != "same-eight" {
 		t.Fatalf("legacy MD5 fields no longer expose the last configured key: ID=%d", iface.AuthKeyID)
 	}
 }

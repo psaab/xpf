@@ -21,11 +21,12 @@ import (
 //
 // Decisive fixture (issue): class allow `^show version` + deny
 // `.*match.*`. `show version | match …` is denied (control), so
-// `show version | no-more | match …` must be denied too, with no
-// version output. Also covers the reverse order and, in the sibling
-// test, an allow anchored on the exact full chain: the gate must
-// receive every stage in original order, so a fix that passed only
-// the pipe-less form or only one stage decides differently there.
+// `show version | no-more | match …` must be denied too; prepending an
+// allowed stage must not hide a later denied stage.
+//
+// A separate deny-only fixture anchors the complete ordered chain,
+// including its `count` stage. On refusal, that stage must report zero
+// input lines; the pure gate also pins the reversed spelling.
 
 func multiPipeStore14714(t *testing.T, allow, deny string) *configstore.Store {
 	t.Helper()
@@ -129,45 +130,38 @@ func TestMultiPipeDispatchDoesNotHideLaterStages14714(t *testing.T) {
 }
 
 func TestMultiPipeDispatchFullChainOrder14714(t *testing.T) {
-	// Allow anchored on the FULL chain in original order. Only the
-	// exact chain `show version | no-more | count` may run: the gate
-	// must receive every stage, in the order typed. A gate that saw
-	// only the innermost stage (`no-more`), only the outermost
-	// (`count`), the pipe-less command, or the stages reordered
-	// would decide differently on at least one row below — each row
-	// is the control for one of those truncations. (The pipe-less
-	// form is also measured by design, #9628, so this pattern —
-	// which requires the pipes — matches no pipe-less form.)
-	c := &CLI{store: multiPipeStore14714(t, `^show version \| no-more \| count$`, ""), userClass: "piped", version: "14714-test"}
+	// A pipe-bearing allow alone cannot satisfy the allowlist (#14686):
+	// the operator must also be allowed to run the pipe-less command. Use a
+	// deny-only rule here to isolate whether the complete ordered chain
+	// reaches the authorization gate.
+	c := &CLI{store: multiPipeStore14714(t, "", `^show version \| no-more \| count$`), userClass: "piped", version: "14714-test"}
 
 	out := captureStdout(t, func() {
-		if err := c.dispatch("show version | no-more | count"); err != nil {
-			t.Errorf("the exact allowed chain must run: %v", err)
+		if err := c.dispatch("show version | no-more | count"); err == nil {
+			t.Error("the exact denied chain must be refused")
+		} else if !strings.Contains(err.Error(), "denies") {
+			t.Errorf("full-chain refusal must come from the command regex: %v", err)
 		}
 	})
-	if !strings.Contains(out, "Count:") {
-		t.Errorf("allowed chain output = %q, want a Count line", out)
+	if !strings.Contains(out, "Count: 0 lines") {
+		t.Errorf("denied exact chain output = %q, want Count: 0 lines", out)
 	}
 
+	// Only the exact chain is denied. Each alternate spelling is a
+	// control: truncation or reordering must not be mistaken for the
+	// configured deny form.
 	for _, line := range []string{
-		"show version",                             // pipe-less: requires the pipes
-		"show version | no-more",                   // truncated chain
-		"show version | count",                     // innermost stage only
-		"show version | count | no-more",           // reversed order
-		"show version | no-more | count | no-more", // extended chain
+		"show version",
+		"show version | no-more",
+		"show version | count",
+		"show version | count | no-more",
+		"show version | no-more | count | no-more",
 	} {
-		out = captureStdout(t, func() {
-			if err := c.dispatch(line); err == nil {
-				t.Errorf("%q was ALLOWED under allow ^show version \\| no-more \\| count$; the full pipe chain must reach the gate in original order", line)
+		captureStdout(t, func() {
+			if err := c.dispatch(line); err != nil {
+				t.Errorf("%q unexpectedly denied by the exact-chain rule: %v", line, err)
 			}
 		})
-		// A denied command produces no command output; a `count`
-		// filter over the empty denied stream legitimately prints
-		// "Count: 0 lines" (it ran, its input was empty). Anything
-		// carrying the version banner is a leak.
-		if strings.Contains(out, "14714-test") {
-			t.Errorf("%q leaked version output %q despite allowlist refusal", line, out)
-		}
 	}
 }
 
@@ -181,19 +175,13 @@ func TestEvaluateSeesMultiStagePipeSuffix14714(t *testing.T) {
 		t.Fatal("evaluateCommandRegex allowed suffix `no-more | match xpf` against deny .*match.*; " +
 			"the full chain must be part of the matched string")
 	}
-	// In-order assertion: a deny anchored on the original chain order
-	// matches, the reversed spelling does not produce a *different*
-	// command — both must be judged as typed.
+	// An order-anchored deny matches the original full chain but not its
+	// reversed spelling.
 	rules = denyRules(t, `show version \| no-more \| match`)
 	if err := evaluateCommandRegex(rules, "ops", "show version", "no-more | match xpf"); err == nil {
 		t.Fatal("deny on the in-order chain `show version | no-more | match` must match")
 	}
 	if err := evaluateCommandRegex(rules, "ops", "show version", "match xpf | no-more"); err != nil {
-		// Reversed chain does not match that deny and there is no
-		// other rule, so it is allowed — proving order is preserved
-		// rather than stages being sorted or collapsed.
-		t.Logf("reversed chain allowed as expected (order preserved): %v", err)
-	} else {
-		// allowed — expected
+		t.Fatalf("reversed chain unexpectedly matched the in-order deny: %v", err)
 	}
 }
