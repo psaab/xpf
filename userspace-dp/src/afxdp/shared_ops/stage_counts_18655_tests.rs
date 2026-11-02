@@ -127,42 +127,39 @@ pub(in crate::afxdp) fn row(
         policy_counter: None,
         nat_scope_ifindex: None,
     };
-    SyncedSessionEntry {
-        key: key.clone(),
-        decision: crate::session::SessionDecision {
-            resolution: crate::afxdp::ForwardingResolution {
-                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: None,
-                neighbor_mac: None,
-                src_mac: None,
-                tx_vlan_id: 0,
-                source_ifindex: 0,
-                route_mtu: 0,
-                transport_route_mtu: 0,
-            },
-            nat,
-            install_table_domain: 0,
-            install_table_check: 0,
+    SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: crate::session::SessionDecision {
+        resolution: crate::afxdp::ForwardingResolution {
+            disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
-        metadata,
-        persistent_lease_hold: None,
-        source_nat_static: None,
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: key.protocol,
-        tcp_flags: 0,
-        generation: 0,
-        session_id,
-        tcp_close_class: 0,
-        tcp_handshake_state: stage,
-        rev_packets: rev,
-        fwd_packets: fwd,
-        pptp_call_ids: 0,
-    }
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata,
+    persistent_lease_hold: None,
+    source_nat_static: None,
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: key.protocol,
+    tcp_flags: 0,
+    generation: 0,
+    session_id,
+    tcp_close_class: 0,
+    tcp_handshake_state: stage,
+    rev_packets: rev,
+    fwd_packets: fwd,
+    pptp_call_ids: 0, }
 }
 
 fn maps() -> (Map, Map, Map, SharedSessionOwnerRgIndexes) {
@@ -422,19 +419,19 @@ fn batched_count_restamp_equals_per_pair_restamp_18655() {
     let (shared_a, wire_a, queries) = mixed_state();
     let (shared_b, wire_b, _) = mixed_state();
     let mut rng = Lcg(55018);
-    let pairs: Vec<(SessionKey, crate::nat::NatDecision, u64, u64)> = queries
+    let pairs: Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64)> = queries
         .iter()
         .map(|(k, n)| {
             let fwd = if rng.pick(3) == 0 { 0 } else { rng.pick(200) };
             let rev = if rng.pick(3) == 0 { 0 } else { rng.pick(200) };
-            (k.clone(), *n, fwd, rev)
+            (k.clone(), *n, fwd, rev, 0)
         })
         .collect();
     assert!(pairs.iter().any(|p| p.2 == 0 && p.3 == 0), "fixture: include zero-count pairs");
-    for (k, n, f, r) in &pairs {
-        restamp_shared_packet_counts(&shared_a, &wire_a, k, *n, *f, *r);
+    for (k, n, f, r, last_seen_ns) in &pairs {
+        restamp_shared_packet_counts(&shared_a, &wire_a, k, *n, 0, *last_seen_ns, *f, *r);
     }
-    restamp_shared_packet_counts_batch(&shared_b, &wire_b, &pairs);
+    restamp_shared_packet_counts_batch(&shared_b, &wire_b, 0, &pairs);
     assert_eq!(snapshot(&shared_a), snapshot(&shared_b), "#18655: batched shared restamp diverged");
     assert_eq!(snapshot(&wire_a), snapshot(&wire_b), "#18655: batched wire restamp diverged");
     assert_ne!(snapshot(&shared_a), snapshot(&mixed_state().0), "fixture: the restamp must change something");

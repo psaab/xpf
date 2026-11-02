@@ -74,6 +74,10 @@ pub(crate) struct SyncedSessionEntry {
     /// zero-traffic pending row never qualifies. Monotonic per
     /// incarnation at publish, exactly like `rev_packets`.
     pub(crate) fwd_packets: u64,
+    /// #18742 Cycle 3: greatest packet timestamp observed from a worker
+    /// outside this row's owning session-id namespace. Node-local shared
+    /// evidence only; never part of SessionDelta / HA wire data.
+    pub(crate) sibling_last_seen_ns: u64,
     /// #14303: the PPTP call-id pair (`PptpCall::to_wire_call_ids`) for a
     /// `Pptp(handle)` forward session, `PPTP_CALL_IDS_ABSENT` (0) otherwise.
     /// Carried on the shared entry so the coordinator bulk export and the

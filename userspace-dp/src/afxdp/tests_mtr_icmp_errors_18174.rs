@@ -794,24 +794,21 @@ fn split_rg_live_shape_time_exceeded_reaches_lan_host_18174() {
 fn exported_forward_row(sessions: &SessionTable, key: &SessionKey) -> SyncedSessionEntry {
     let (decision, metadata, _origin) = sessions.entry_with_origin(key).expect("premise: forward row installed");
     assert!(!metadata.is_reverse, "premise: the forward row");
-    SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata,
-        source_nat_static: Some(false),
-        leak_incarnation: 0,
-        origin: crate::session::SessionOrigin::SyncImport,
-        protocol: key.protocol,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: (1u64 << 48) | 18174,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        rev_packets: 1,
-        fwd_packets: 1,
-        pptp_call_ids: 0,
-        persistent_lease_hold: None,
-    }
+    SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision,
+    metadata,
+    source_nat_static: Some(false),
+    leak_incarnation: 0,
+    origin: crate::session::SessionOrigin::SyncImport,
+    protocol: key.protocol,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: (1u64 << 48) | 18174,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0,
+    rev_packets: 1,
+    fwd_packets: 1,
+    pptp_call_ids: 0,
+    persistent_lease_hold: None, }
 }
 
 /// Split AFTER the flow was established — RG2 moves to node1 while mtr runs.

@@ -224,7 +224,7 @@ mod flow_cache_invalidation_tests {
     }
 
     fn serving_shared_entry(key: &SessionKey, session_id: u64) -> SyncedSessionEntry {
-        SyncedSessionEntry { key: key.clone(),
+        SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: reap_decision(None),
         metadata: reap_metadata(),
         persistent_lease_hold: None,
@@ -361,7 +361,14 @@ mod flow_cache_invalidation_tests {
                 crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
                     &shared,
                     &wires,
-                    &[(key.clone(), NatDecision::default(), 10 * n, 10 * n)],
+                    table.session_id_namespace(),
+                    &[(
+                        key.clone(),
+                        NatDecision::default(),
+                        10 * n,
+                        10 * n,
+                        now,
+                    )],
                 );
             }
             assert!(
@@ -396,12 +403,11 @@ mod flow_cache_invalidation_tests {
         );
     }
 
-    /// #18742 Cycle 2 follow-up: A's completed local pair has a 5 s window;
-    /// RSS moves service to B, whose shared evidence restamps every modeled
-    /// 30 s cycle. A must survive multiple crossed checks on the same recent
-    /// count, then retain on B's next restamp. When restamps stop, the frozen
-    /// evidence ages out and A's GC reaps its rows and mirror.
-    /// RED without cadence grace: check 2 reaped A while B remained live.
+    /// #18742 Cycle 3: A's local pair has a 5 s window and a high counter
+    /// baseline; RSS moves service to B, whose shared counters stay max-only
+    /// below A's baseline. B's packet timestamp must retain A through multiple
+    /// crossed checks, then a frozen timestamp must age out and reap A.
+    /// RED without sibling packet-timestamp evidence: check 1 reaped A.
     #[test]
     fn rss_moved_completed_local_row_preserves_sibling_mirror_18722() {
         const SEC: u64 = 1_000_000_000;
@@ -411,9 +417,11 @@ mod flow_cache_invalidation_tests {
         let reverse = crate::session::reverse_session_key(&key, NatDecision::default());
         let t0 = 1_000 * SEC;
 
-        // Worker A authored the completed pair. Its session id is the
-        // incarnation B adopts when RSS starts delivering the flow there.
+        // Worker A owns a high local baseline. Worker B can serve packets
+        // without catching that cumulative max, so liveness must follow the
+        // serving worker's source timestamp rather than the shared total.
         let mut table_a = crate::session::SessionTable::new();
+        table_a.set_session_id_namespace(0, 0);
         let mut short_timeouts = crate::session::SessionTimeouts::default();
         short_timeouts.tcp_established_ns = 5 * SEC;
         table_a.set_timeouts(short_timeouts);
@@ -437,12 +445,17 @@ mod flow_cache_invalidation_tests {
             PROTO_TCP,
             crate::tcp_flags::TCP_ACK,
         ));
+        for _ in 0..100 {
+            table_a.account_packet(&key, 64, crate::tcp_flags::TCP_ACK, 0);
+            table_a.account_packet(&reverse, 64, crate::tcp_flags::TCP_ACK, 0);
+        }
         let session_id = table_a.session_id_for(&key);
         let reverse_id = table_a.session_id_for(&reverse);
         assert_ne!(session_id, 0, "premise: A owns a stable session id");
 
         // Worker B adopts the same forward incarnation and serves packets.
         let mut table_b = crate::session::SessionTable::new();
+        table_b.set_session_id_namespace(0, 1);
         for (k, metadata, id) in [
             (&key, reap_metadata(), session_id),
             (&reverse, reverse_metadata, reverse_id),
@@ -468,7 +481,20 @@ mod flow_cache_invalidation_tests {
                 false,
             ));
         }
+        assert!(
+            table_b
+                .lookup(&key, t0 + SEC, crate::tcp_flags::TCP_ACK)
+                .is_some(),
+            "premise: B serves the active row"
+        );
         table_b.account_packet(&key, 64, crate::tcp_flags::TCP_ACK, 0);
+        assert!(
+            table_b
+                .lookup(&reverse, t0 + 2 * SEC, crate::tcp_flags::TCP_ACK)
+                .is_some(),
+            "premise: B serves the reverse direction too"
+        );
+        table_b.account_packet(&reverse, 64, crate::tcp_flags::TCP_ACK, 0);
         let shared = std::sync::Arc::new(std::sync::Mutex::new({
             let mut map = FastMap::default();
             map.insert(key.clone(), serving_shared_entry(&key, session_id));
@@ -478,11 +504,25 @@ mod flow_cache_invalidation_tests {
         crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
             &shared,
             &wires,
+            table_a.session_id_namespace(),
+            &[(
+                key.clone(),
+                NatDecision::default(),
+                table_a.fwd_packets_for(&key),
+                table_a.rev_packets_for(&key),
+                table_a.packet_counts_and_last_seen_for(&key).2,
+            )],
+        );
+        crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+            &shared,
+            &wires,
+            table_b.session_id_namespace(),
             &[(
                 key.clone(),
                 NatDecision::default(),
                 table_b.fwd_packets_for(&key),
                 table_b.rev_packets_for(&key),
+                table_b.packet_counts_and_last_seen_for(&key).2,
             )],
         );
         assert!(
@@ -490,6 +530,29 @@ mod flow_cache_invalidation_tests {
                 .shared_served
                 .is_some_and(|count| count > 0),
             "premise: B's serving counters are visible in shared evidence"
+        );
+        let served = crate::afxdp::shared_ops::shared_node_served_evidence(&shared, &key);
+        assert_eq!(
+            served.shared_incarnation,
+            Some((session_id, 0)),
+            "premise: shared row names A's exact incarnation"
+        );
+        assert_eq!(
+            served.shared_sibling_last_seen_ns,
+            Some(t0 + 2 * SEC),
+            "premise: the latest packet timestamp from either half is exposed in shared evidence"
+        );
+        let shared_total = {
+            let sessions = shared.lock().unwrap();
+            let entry = sessions.get(&key).expect("premise: shared forward row");
+            entry.fwd_packets.saturating_add(entry.rev_packets)
+        };
+        let b_total = table_b
+            .fwd_packets_for(&key)
+            .saturating_add(table_b.rev_packets_for(&key));
+        assert!(
+            shared_total > b_total,
+            "premise: shared high-water count {shared_total} exceeds B's {b_total}"
         );
 
         let node_served = |k: &SessionKey| {
@@ -538,9 +601,9 @@ mod flow_cache_invalidation_tests {
         assert_eq!(window, 5 * SEC, "premise: A uses the short configured window");
         let check_step = window + SEC;
         let mut now = t0 + check_step;
-        for check in 1..=3 {
-            // Shared evidence remains at B's first restamp for three crossed
-            // checks while B continues to account packets locally.
+        for check in 1..=4 {
+            // Shared evidence remains at B's first restamp for four crossed
+            // checks while B continues to serve locally.
             let expired = table_a.expire_stale_entries_ha(now, Some(&ha));
             let reaped_flow = expired.iter().any(|entry| entry.key == key || entry.key == reverse);
             reap_expired_sessions(
@@ -567,9 +630,13 @@ mod flow_cache_invalidation_tests {
                 mirror_row(),
                 table_b.session_id_for(&key) == session_id
             );
-            if check < 3 {
-                table_b.account_packet(&key, 64, crate::tcp_flags::TCP_ACK, 0);
-            }
+            assert!(
+                table_b
+                    .lookup(&key, now, crate::tcp_flags::TCP_ACK)
+                    .is_some(),
+                "premise: B continues serving"
+            );
+            table_b.account_packet(&key, 64, crate::tcp_flags::TCP_ACK, 0);
             now += check_step;
         }
 
@@ -578,11 +645,13 @@ mod flow_cache_invalidation_tests {
         crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
             &shared,
             &wires,
+            table_b.session_id_namespace(),
             &[(
                 key.clone(),
                 NatDecision::default(),
                 table_b.fwd_packets_for(&key),
                 table_b.rev_packets_for(&key),
+                table_b.packet_counts_and_last_seen_for(&key).2,
             )],
         );
         let expired = table_a.expire_stale_entries_ha(now, Some(&ha));
@@ -1211,7 +1280,7 @@ mod flow_cache_invalidation_tests {
             let mut shared_sessions_map = FastMap::default();
             shared_sessions_map.insert(
                 key.clone(),
-                SyncedSessionEntry { key: key.clone(),
+                SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
                 decision: reap_decision(None),
                 metadata: reap_metadata(),
                 persistent_lease_hold: None,
@@ -1377,7 +1446,7 @@ mod flow_cache_invalidation_tests {
             let mut map = FastMap::default();
             map.insert(
                 other_scope_key.clone(),
-                SyncedSessionEntry { key: other_scope_key.clone(),
+                SyncedSessionEntry { sibling_last_seen_ns: 0, key: other_scope_key.clone(),
                 decision: reap_decision(None),
                 metadata: reap_metadata(),
                 persistent_lease_hold: None,
@@ -1477,7 +1546,7 @@ mod flow_cache_invalidation_tests {
                 let filler = reap_key(40000u16.wrapping_add(i));
                 map.insert(
                     filler.clone(),
-                    SyncedSessionEntry { key: filler.clone(),
+                    SyncedSessionEntry { sibling_last_seen_ns: 0, key: filler.clone(),
                     decision: reap_decision(None),
                     metadata: reap_metadata(),
                     persistent_lease_hold: None,
@@ -1493,7 +1562,7 @@ mod flow_cache_invalidation_tests {
             }
             map.insert(
                 key.clone(),
-                SyncedSessionEntry { key: key.clone(),
+                SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
                 decision: reap_decision(None),
                 metadata: reap_metadata(),
                 persistent_lease_hold: None,

@@ -728,8 +728,7 @@ fn drive_shared_hit_10582_t1_t2(
     let shared_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
     shared_sessions.lock().expect("shared sessions").insert(
         key.clone(),
-        SyncedSessionEntry { key: key.clone(),
-        decision: decision(WAN_IFINDEX),
+        SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: decision(WAN_IFINDEX),
         metadata: metadata(false),
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,

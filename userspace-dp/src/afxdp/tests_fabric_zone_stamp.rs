@@ -507,9 +507,7 @@ fn established_ri_snat_forward_11061(
     sessions.set_forwarding_revalidation_gen(7, 9);
     sessions.mark_source_nat_revalidated(&forward_key, Some(false));
 
-    let shared_entry = SyncedSessionEntry {
-        key: forward_key,
-    decision,
+    let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: forward_key, decision,
     metadata,
     leak_incarnation: 0,
     origin: SessionOrigin::ForwardFlow,
@@ -523,8 +521,7 @@ fn established_ri_snat_forward_11061(
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None,
-    };
+        source_nat_static: None, };
     (forwarding, sessions, shared_entry)
 }
 
@@ -2995,24 +2992,21 @@ mod pressure_shed_matrix_17012 {
             .expect("local victim session");
         shared_sessions.lock().expect("shared sessions").insert(
             victim_key.clone(),
-            crate::afxdp::SyncedSessionEntry {
-                key: victim_key.clone(),
-                decision: victim_entry.decision,
-                metadata: victim_entry.metadata.clone(),
-                persistent_lease_hold: None,
-                source_nat_static: None,
-                leak_incarnation: 0,
-                origin: victim_origin,
-                protocol: PROTO_UDP,
-                tcp_flags: 0,
-                generation: 0,
-                session_id: sessions.session_id_for(&victim_key),
-                tcp_close_class: 0,
-                tcp_handshake_state: 0,
-                rev_packets: 0,
-                fwd_packets: 0,
-                pptp_call_ids: 0,
-            },
+            crate::afxdp::SyncedSessionEntry { sibling_last_seen_ns: 0, key: victim_key.clone(), decision: victim_entry.decision,
+            metadata: victim_entry.metadata.clone(),
+            persistent_lease_hold: None,
+            source_nat_static: None,
+            leak_incarnation: 0,
+            origin: victim_origin,
+            protocol: PROTO_UDP,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: sessions.session_id_for(&victim_key),
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0,
+            fwd_packets: 0,
+            pptp_call_ids: 0, },
         );
         for port in 31_002..31_011 {
             let mut metadata = victim_metadata.clone();
@@ -3213,24 +3207,21 @@ mod pressure_shed_matrix_17012 {
             .expect("local opening victim");
         shared_sessions.lock().expect("shared sessions").insert(
             victim_key.clone(),
-            crate::afxdp::SyncedSessionEntry {
-                key: victim_key.clone(),
-                decision: victim_entry.decision,
-                metadata: victim_entry.metadata.clone(),
-                persistent_lease_hold: None,
-                source_nat_static: None,
-                leak_incarnation: 0,
-                origin: victim_origin,
-                protocol: PROTO_TCP,
-                tcp_flags: TCP_FLAG_SYN,
-                generation: 0,
-                session_id: sessions.session_id_for(&victim_key),
-                tcp_close_class: 0,
-                tcp_handshake_state: 1,
-                rev_packets: 0,
-                fwd_packets: 0,
-                pptp_call_ids: 0,
-            },
+            crate::afxdp::SyncedSessionEntry { sibling_last_seen_ns: 0, key: victim_key.clone(), decision: victim_entry.decision,
+            metadata: victim_entry.metadata.clone(),
+            persistent_lease_hold: None,
+            source_nat_static: None,
+            leak_incarnation: 0,
+            origin: victim_origin,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_SYN,
+            generation: 0,
+            session_id: sessions.session_id_for(&victim_key),
+            tcp_close_class: 0,
+            tcp_handshake_state: 1,
+            rev_packets: 0,
+            fwd_packets: 0,
+            pptp_call_ids: 0, },
         );
         let mut ingress = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
         ingress.interface = Arc::<str>::from("reth1.0");
@@ -6080,18 +6071,16 @@ fn ha_synced_reverse_sessions_impl_15958(
         (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
         (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
     ] {
-        let entry = SyncedSessionEntry {
-            key: crate::session::SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol,
-            src_ip: IpAddr::V4(lan_host),
-            dst_ip: IpAddr::V4(wan_host),
-            src_port,
-            dst_port,
-            discriminator: Default::default(),
-            routing_domain: 0,
-        },
-        decision: SessionDecision {
+        let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol,
+        src_ip: IpAddr::V4(lan_host),
+        dst_ip: IpAddr::V4(wan_host),
+        src_port,
+        dst_port,
+        discriminator: Default::default(),
+        routing_domain: 0,
+                }, decision: SessionDecision {
             resolution: forward_resolution,
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -6138,8 +6127,7 @@ fn ha_synced_reverse_sessions_impl_15958(
             tcp_handshake_state: 0,
             rev_packets: 0u64,
             fwd_packets: 0,
-            pptp_call_ids: 0,
-        };
+            pptp_call_ids: 0, };
                 let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )
@@ -6399,18 +6387,16 @@ fn fw0_both_halves_sessions_15958b(forwarding: &ForwardingState, now_ns: u64) ->
         (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
         (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
     ] {
-        let entry = SyncedSessionEntry {
-            key: crate::session::SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol,
-            src_ip: IpAddr::V4(lan_host),
-            dst_ip: IpAddr::V4(wan_host),
-            src_port,
-            dst_port,
-            discriminator: Default::default(),
-            routing_domain: 0,
-        },
-        decision: SessionDecision {
+        let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol,
+        src_ip: IpAddr::V4(lan_host),
+        dst_ip: IpAddr::V4(wan_host),
+        src_port,
+        dst_port,
+        discriminator: Default::default(),
+        routing_domain: 0,
+                }, decision: SessionDecision {
             resolution: forward_resolution,
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -6453,8 +6439,7 @@ fn fw0_both_halves_sessions_15958b(forwarding: &ForwardingState, now_ns: u64) ->
             tcp_handshake_state: 0,
             rev_packets: 0u64,
             fwd_packets: 0,
-            pptp_call_ids: 0,
-        };
+            pptp_call_ids: 0, };
         let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )
@@ -7194,18 +7179,16 @@ fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64)
         (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
         (PROTO_ICMPV6, 0x1234u16, 0u16, 0u8),
     ] {
-        let entry = SyncedSessionEntry {
-            key: crate::session::SessionKey {
-            addr_family: libc::AF_INET6 as u8,
-            protocol,
-            src_ip: IpAddr::V6(lan_host),
-            dst_ip: IpAddr::V6(wan_host),
-            src_port,
-            dst_port,
-            discriminator: Default::default(),
-            routing_domain: 0,
-        },
-        decision: SessionDecision {
+        let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: crate::session::SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol,
+        src_ip: IpAddr::V6(lan_host),
+        dst_ip: IpAddr::V6(wan_host),
+        src_port,
+        dst_port,
+        discriminator: Default::default(),
+        routing_domain: 0,
+                }, decision: SessionDecision {
             resolution: forward_resolution,
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V6(snat_ip)),
@@ -7248,8 +7231,7 @@ fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64)
             tcp_handshake_state: 0,
             rev_packets: 0u64,
             fwd_packets: 0,
-            pptp_call_ids: 0,
-        };
+            pptp_call_ids: 0, };
         let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )
@@ -7774,18 +7756,16 @@ fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(
         (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
         (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
     ] {
-        let entry = SyncedSessionEntry {
-            key: crate::session::SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol,
-            src_ip: IpAddr::V4(lan_host),
-            dst_ip: IpAddr::V4(wan_host),
-            src_port,
-            dst_port,
-            discriminator: Default::default(),
-            routing_domain: 0,
-        },
-        decision: SessionDecision {
+        let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol,
+        src_ip: IpAddr::V4(lan_host),
+        dst_ip: IpAddr::V4(wan_host),
+        src_port,
+        dst_port,
+        discriminator: Default::default(),
+        routing_domain: 0,
+                }, decision: SessionDecision {
             resolution: forward_resolution,
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -7828,8 +7808,7 @@ fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(
             tcp_handshake_state: 0,
             rev_packets: 0u64,
             fwd_packets: 0,
-            pptp_call_ids: 0,
-        };
+            pptp_call_ids: 0, };
         let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )

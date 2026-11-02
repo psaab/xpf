@@ -38,24 +38,21 @@ fn decision() -> SessionDecision {
 /// The serving pair's canonical shared row: Established, counts as the
 /// ct-slice last restamped them (0 until the first restamp).
 fn serving_row(key: &SessionKey) -> SyncedSessionEntry {
-    SyncedSessionEntry {
-        key: key.clone(),
-        decision: decision(),
-        metadata: test_metadata(),
-        source_nat_static: None,
-        leak_incarnation: 0,
-        origin: crate::session::SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0x18722,
-        tcp_close_class: 0,
-        tcp_handshake_state: TcpHandshakeState::Established.to_wire(),
-        rev_packets: 0,
-        fwd_packets: 0,
-        pptp_call_ids: 0,
-        persistent_lease_hold: None,
-    }
+    SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: decision(),
+    metadata: test_metadata(),
+    source_nat_static: None,
+    leak_incarnation: 0,
+    origin: crate::session::SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0x18722,
+    tcp_close_class: 0,
+    tcp_handshake_state: TcpHandshakeState::Established.to_wire(),
+    rev_packets: 0,
+    fwd_packets: 0,
+    pptp_call_ids: 0,
+    persistent_lease_hold: None, }
 }
 
 #[test]
@@ -115,16 +112,19 @@ fn shared_restamps_keep_an_opening_replica_only_while_they_advance_18722() {
 
     // The serving worker forwards 100 packets each way per second; its
     // ct-slice restamps the live counts every refresh cycle.
+    let source_namespace = table.session_id_namespace();
     let restamp = |now: u64| {
         let elapsed = (now - t0) / SEC;
         crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
             &shared_sessions,
             &shared_forward_wire_sessions,
+            source_namespace,
             &[(
                 forward.clone(),
                 crate::nat::NatDecision::default(),
                 100 * elapsed,
                 100 * elapsed,
+                now,
             )],
         );
     };

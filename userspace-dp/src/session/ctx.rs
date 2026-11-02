@@ -212,18 +212,15 @@ pub(crate) struct NodeServedEvidence {
     /// an Established row. Input evidence only — never set from a
     /// shared row's Established wire.
     pub(crate) served_completed: bool,
-    /// #18722: the recency proof, kept PER CONTRIBUTOR. Each contributor
-    /// is `Some(count)` only while its source row exists, and its count
-    /// moves only when the serving pair forwards (or the row is replaced by
-    /// a new incarnation). The expiry pass's node-level retention arm keeps
-    /// a row only when a PRESENT contributor's count changed from that
-    /// row's baseline for it (`SessionEntry::node_served_seen_*`). A
-    /// contributor that disappeared (its row was reaped or removed) is
-    /// neither activity nor silence. That is why these are not one sum: a
-    /// sum drops when a dead flow's companion is reaped first (a false
-    /// "change") and also drops when a live flow's source is replaced (a
-    /// false "silence"). Read ONLY by that arm. Never a completion input:
-    /// the other fields are cumulative.
+    /// #18722: recency is tracked PER CONTRIBUTOR, not as one sum. Local and
+    /// shared packet counts are `Some(count)` only while their source rows
+    /// exist; a count or shared incarnation change is activity for Opening
+    /// rows and completed replicas. Completed local rows additionally use
+    /// `shared_sibling_last_seen_ns`: their own frozen max count is not proof
+    /// that a different worker is serving this flow. A contributor that
+    /// disappears is neither activity nor silence. Sums can rise falsely when
+    /// a dead companion disappears, or hide live replacement when its count
+    /// falls. Read ONLY by the expiry retention arm, never as completion input.
     ///
     /// This table's contributor: the pair's FORWARD row `fwd+rev` counters
     /// plus its node-served stamps, `Some` while that forward row exists.
@@ -241,6 +238,11 @@ pub(crate) struct NodeServedEvidence {
     /// `fwd_packets + rev_packets`, restamped from the serving worker's live
     /// counters by the ct-slice. `Some` while that row exists.
     pub(crate) shared_served: Option<u64>,
+    /// #18742 Cycle 3: newest last-seen packet timestamp published by any
+    /// sibling worker for this canonical shared row. Unlike cumulative
+    /// counters, this advances even when the sibling's totals trail the
+    /// owner worker's max.
+    pub(crate) shared_sibling_last_seen_ns: Option<u64>,
     /// The Established wire came from the node's SHARED synced map:
     /// a serving worker published/restamped it only after its own
     /// pair completed the handshake. Trusted as completion proof on

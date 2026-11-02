@@ -459,9 +459,11 @@ impl SessionTable {
                             }
                             ev.shared_established |= shared.shared_established;
                             ev.rev_packets = ev.rev_packets.max(shared.rev_packets);
-                            // #18722/#18742: keep count and source identity separate.
+                            // #18722/#18742: keep count, source identity,
+                            // sibling packet recency separate.
                             ev.shared_served = shared.shared_served;
                             ev.shared_incarnation = shared.shared_incarnation;
+                            ev.shared_sibling_last_seen_ns = shared.shared_sibling_last_seen_ns;
                             ev.shared_evidence_max_cadence_ns = shared.shared_evidence_max_cadence_ns;
                         }
                         ev
@@ -918,21 +920,21 @@ impl SessionTable {
     /// check once the companion crosses, so both halves then reap
     /// within one window of last activity (bounded, terminating).
     ///
-    /// #18722: two bounds.
+    /// #18722/#18742: two evidence paths bound retention.
     /// - A completed row authored/promoted here normally ages on its own
     ///   packet timestamp. After RSS moves service to a sibling, it can use
     ///   the node-level arm only when the exact canonical shared identity has
-    ///   a packet total above this node's forward-row counters. That proof can
-    ///   bridge unchanged counts only until the computed evidence cadence
-    ///   expires; the row's own static mirror count or another identity cannot
-    ///   protect it. Peer-synced replicas still use matching node evidence
-    ///   because they may serve neither direction locally.
-    /// - The node-level arm needs RECENT service, not the cumulative proof
-    ///   alone: it keeps the row only when a PRESENT evidence contributor
-    ///   (`local_served`, `shared_served`) changed from the row's baseline
-    ///   for it since its last crossed check. Per contributor, not summed:
-    ///   a dead flow's companion reaped first removes the local contributor
-    ///   (absent is not a change, so no extra window), and a live flow's
+    ///   a recent sibling packet timestamp. The shared count may stay frozen
+    ///   below or at this node's max; it is not the sibling's recency proof.
+    ///   Peer-synced replicas still use node evidence because they may serve
+    ///   neither direction locally.
+    /// - Opening rows and replicas need RECENT service, not cumulative proof
+    ///   alone: a present local/shared count or shared incarnation change is
+    ///   activity; an unchanged shared count is bounded by the computed
+    ///   evidence cadence. A recent sibling packet timestamp also keeps a
+    ///   row when max-only counts do not advance. Per contributor, not
+    ///   summed: a dead flow's companion reaped first removes the local
+    ///   contributor (absent is not a change, so no extra window), and a live
     ///   source replaced by a new incarnation moves that contributor (a
     ///   change, so no false reap).
     /// Before #18722 both were missing, so an idle established flow that
@@ -953,50 +955,33 @@ impl SessionTable {
             return false;
         }
         // #18722: completed rows this node authored/promoted normally age on
-        // their own packet timestamps. #18742 Cycle 2 admits the node-level
-        // arm only for a same-incarnation shared count that is ahead of this
-        // node's canonical forward counters. This rejects the static copy of
-        // the row's own mirror baseline while allowing an RSS sibling's
-        // advancing service to retain the local row.
+        // their own packet timestamps. #18742 Cycle 3 admits the node-level
+        // arm only for an exact shared incarnation with a fresh packet
+        // timestamp observed from a different worker namespace. Cumulative
+        // counters are max-only and cannot detect a serving sibling whose
+        // totals trail the owning worker's prior high-water mark.
         let completed_local_row =
             entry.established && !entry.handshake_pending && !entry.origin.is_peer_synced();
         let shared_evidence_max_cadence_ns = node_evidence
             .shared_evidence_max_cadence_ns
             .unwrap_or(NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS);
-        let (expected_session_id, local_forward_packets) = if entry.metadata.is_reverse {
+        let expected_session_id = if entry.metadata.is_reverse {
             let forward = reverse_session_key(key, entry_nat);
             self.entry_by_key(&forward)
-                .map(|forward_entry| {
-                    (
-                        forward_entry.session_id,
-                        forward_entry
-                            .counters
-                            .fwd_packets
-                            .saturating_add(forward_entry.counters.rev_packets),
-                    )
-                })
-                .unwrap_or((0, 0))
+                .map(|forward_entry| forward_entry.session_id)
+                .unwrap_or(0)
         } else {
-            (
-                entry.session_id,
-                entry
-                    .counters
-                    .fwd_packets
-                    .saturating_add(entry.counters.rev_packets),
-            )
+            entry.session_id
         };
         let matching_local_shared_activity = if completed_local_row {
             expected_session_id != 0
                 && node_evidence.shared_established
                 && node_evidence.shared_incarnation == Some((expected_session_id, 0))
                 && node_evidence
-                    .shared_served
-                    .is_some_and(|shared| {
-                        shared > local_forward_packets
-                            && (shared > entry.node_served_seen_shared
-                                || (entry.node_served_last_change_ns != 0
-                                    && now_ns.saturating_sub(entry.node_served_last_change_ns)
-                                        <= shared_evidence_max_cadence_ns))
+                    .shared_sibling_last_seen_ns
+                    .is_some_and(|sibling_last_seen_ns| {
+                        now_ns.saturating_sub(sibling_last_seen_ns)
+                            <= shared_evidence_max_cadence_ns
                     })
         } else {
             false
@@ -1012,15 +997,12 @@ impl SessionTable {
         // with no local companion, and the fw0 replicas are pure
         // Opening.
         //
-        // #18722: a shared count can remain unchanged for one full ct-slice
-        // evidence cadence: 10 s by default and longer when HA imports grow
-        // the live session-table slab. Shorter configured idle windows use
-        // that computed cycle as evidence-age grace; frozen evidence never
-        // renews its own timestamp. Completed local rows additionally require
-        // an exact identity and a shared total ahead of their local forward
-        // counters. Their timestamp advances only on shared changes, so the
-        // static own-mirror baseline and local-only count changes cannot
-        // renew sibling proof.
+        // #18722: the shared sibling timestamp is a packet timestamp, not a
+        // restamp timestamp. Shorter configured idle windows use the computed
+        // ct-slice cadence as evidence-age grace; a frozen timestamp still
+        // ages out. Completed local rows require the exact shared incarnation
+        // and a recent sibling timestamp, so owner-only mirror counts cannot
+        // renew them.
         if node_evidence.promoted_and_served() {
             let Some(em) = self.entry_by_key_mut(key) else {
                 return false;
@@ -1062,7 +1044,11 @@ impl SessionTable {
                 && em.node_served_last_change_ns != 0
                 && now_ns.saturating_sub(em.node_served_last_change_ns)
                     <= shared_evidence_max_cadence_ns;
-            if advanced || shared_evidence_recent {
+            let sibling_evidence_recent = node_evidence.shared_sibling_last_seen_ns
+                .is_some_and(|last_seen_ns| {
+                    now_ns.saturating_sub(last_seen_ns) <= shared_evidence_max_cadence_ns
+                });
+            if advanced || shared_evidence_recent || sibling_evidence_recent {
                 em.last_seen_ns = now_ns;
                 self.rebucket_alive_entry(key, now_ns);
                 self.align_node_kept_companion(key, entry_nat, now_ns);

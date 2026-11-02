@@ -113,8 +113,7 @@ fn resolution() -> ForwardingResolution {
 }
 
 fn entry(src_port: u16) -> SyncedSessionEntry {
-    SyncedSessionEntry { key: key(src_port),
-    decision: SessionDecision {
+    SyncedSessionEntry { sibling_last_seen_ns: 0, key: key(src_port), decision: SessionDecision {
         resolution: resolution(),
         nat: NatDecision::default(),
         install_table_domain: 0,

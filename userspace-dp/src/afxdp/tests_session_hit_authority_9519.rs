@@ -304,8 +304,7 @@ fn shared_closing_copies(
     sessions.iter_with_origin(|key, decision, metadata, origin| {
         entries.insert(
             key.clone(),
-            crate::afxdp::SyncedSessionEntry { key: key.clone(),
-            decision,
+            crate::afxdp::SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision,
             metadata: metadata.clone(),
             leak_incarnation: 0,
             origin,

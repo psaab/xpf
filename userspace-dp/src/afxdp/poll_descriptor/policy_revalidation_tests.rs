@@ -161,8 +161,7 @@ fn tun_origin_reverse_exempt_lookup_10038() {
                 "local forward must install"
             );
         };
-    let shared_entry = |origin: SessionOrigin| SyncedSessionEntry { key: fwd_key.clone(),
-    decision,
+    let shared_entry = |origin: SessionOrigin| SyncedSessionEntry { sibling_last_seen_ns: 0, key: fwd_key.clone(), decision,
     metadata: metadata.clone(),
     leak_incarnation: 0,
     origin,
@@ -324,8 +323,7 @@ fn tun_origin_legacy_ha_transit_import_does_not_match_10038() {
     let shared = Arc::new(Mutex::new(FastMap::default()));
     shared.lock().expect("shared map").insert(
         fwd_key.clone(),
-        SyncedSessionEntry { key: fwd_key.clone(),
-        decision,
+        SyncedSessionEntry { sibling_last_seen_ns: 0, key: fwd_key.clone(), decision,
         metadata,
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -664,10 +662,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
     assert!(synced.metadata.fabric_ingress);
     let key = synced.key.clone();
     let translated_key = crate::session::forward_wire_key(&key, synced.decision.nat);
-    let alias = SyncedSessionEntry {
-        key: translated_key.clone(),
-        ..synced.clone()
-};
+    let alias = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(), ..synced.clone() };
     let flow = SessionFlow {
         src_ip: translated_key.src_ip,
         dst_ip: translated_key.dst_ip,
@@ -883,10 +878,7 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
         .expect("dynamic SNAT session imports from non-fabric HA wire");
     let key = synced.key.clone();
     let translated_key = crate::session::forward_wire_key(&key, synced.decision.nat);
-    let alias = SyncedSessionEntry {
-        key: translated_key.clone(),
-        ..synced.clone()
-};
+    let alias = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(), ..synced.clone() };
     let flow = SessionFlow {
         src_ip: translated_key.src_ip,
         dst_ip: translated_key.dst_ip,
@@ -1073,10 +1065,7 @@ fn ha_imported_transient_dynamic_snat_local_alias_keeps_shared_canonical_12187()
     assert!(!synced.metadata.fabric_ingress);
     let key = synced.key.clone();
     let translated_key = crate::session::forward_wire_key(&key, synced.decision.nat);
-    let alias = SyncedSessionEntry {
-        key: translated_key.clone(),
-        ..synced.clone()
-};
+    let alias = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(), ..synced.clone() };
     let flow = SessionFlow {
         src_ip: translated_key.src_ip,
         dst_ip: translated_key.dst_ip,
@@ -5879,8 +5868,7 @@ fn nat64_deterministic_stale_geometry_revokes_15178() {
         forward_ingress_vlan_id: None,
         nat_scope_ifindex: None,
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
-    decision,
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision,
     metadata: metadata.clone(),
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -6084,8 +6072,7 @@ fn nat64_scoped_cross_generation_revalidation_15932() {
             .insert(21, "ge-0/0/0.0".to_string());
         forwarding
     };
-    let entry = SyncedSessionEntry { key: key.clone(),
-    decision,
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision,
     metadata: metadata.clone(),
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -6137,8 +6124,7 @@ fn nat64_scoped_cross_generation_revalidation_15932() {
     metadata.nat_scope_ifindex = None;
     metadata.ingress_ifindex = 0;
     metadata.ingress_zone = 0;
-    let legacy_entry = SyncedSessionEntry { metadata: metadata.clone(),
-    key: entry.key.clone(),
+    let legacy_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, metadata: metadata.clone(), key: entry.key.clone(),
     decision: entry.decision,
     leak_incarnation: entry.leak_incarnation,
     origin: entry.origin,

@@ -1106,9 +1106,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         PROTO_TCP,
         TCP_FLAG_SYN,
     ));
-    let shared_entry = SyncedSessionEntry {
-        key: flow_key.clone(),
-    decision: local_decision,
+    let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: flow_key.clone(), decision: local_decision,
     metadata: local_metadata,
     leak_incarnation: 0,
     origin: SessionOrigin::LocalMiss,
@@ -1122,8 +1120,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None,
-    };
+        source_nat_static: None, };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,

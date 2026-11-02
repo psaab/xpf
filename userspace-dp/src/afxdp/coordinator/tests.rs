@@ -11415,9 +11415,7 @@ fn f4_seed_shared_only(
     // would red for the wrong reason — measured while writing this: the first
     // fixture seeded only the allocator and the binding cell failed with the
     // fix applied.
-    let entry = crate::afxdp::worker::SyncedSessionEntry {
-        key: key.clone(),
-    decision: crate::afxdp::SessionDecision {
+    let entry = crate::afxdp::worker::SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
             disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -11472,8 +11470,7 @@ fn f4_seed_shared_only(
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None,
-    };
+        source_nat_static: None, };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(key.clone(), entry);
     assert!(
@@ -11643,9 +11640,7 @@ fn nat64_14961_seed(coordinator: &mut Coordinator, worker_id: u32, port: u16) {
         "fixture precondition: the NAT64 port is occupied before the delete"
     );
     // Shared authority entry (the delete's NAT decision source).
-    let entry = crate::afxdp::worker::SyncedSessionEntry {
-        key: key.clone(),
-    decision: crate::afxdp::SessionDecision {
+    let entry = crate::afxdp::worker::SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
             disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -11696,8 +11691,7 @@ fn nat64_14961_seed(coordinator: &mut Coordinator, worker_id: u32, port: u16) {
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None,
-    };
+        source_nat_static: None, };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(key.clone(), entry);
 }
@@ -11986,9 +11980,7 @@ fn import_entry_9718(
     key: &crate::session::SessionKey,
     pool_port: u16,
 ) -> crate::afxdp::worker::SyncedSessionEntry {
-    crate::afxdp::worker::SyncedSessionEntry {
-        key: key.clone(),
-    decision: crate::afxdp::SessionDecision {
+    crate::afxdp::worker::SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
             disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -12043,8 +12035,7 @@ fn import_entry_9718(
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None,
-    }
+        source_nat_static: None, }
 }
 
 /// #9718: a peer import landing between the bring-up replay read and worker
@@ -14479,9 +14470,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
         }
     }
     fn seed(coordinator: &Coordinator, key: &crate::session::SessionKey) {
-        let entry = crate::afxdp::worker::SyncedSessionEntry {
-            key: key.clone(),
-        decision: crate::afxdp::SessionDecision {
+        let entry = crate::afxdp::worker::SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: crate::afxdp::SessionDecision {
             resolution: crate::afxdp::ForwardingResolution {
                 disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
                 local_ifindex: 0,
@@ -14532,8 +14521,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
             fwd_packets: 0,
             pptp_call_ids: 0,
             persistent_lease_hold: None,
-            source_nat_static: None,
-        };
+            source_nat_static: None, };
         crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
             .insert(key.clone(), entry);
     }
@@ -14587,9 +14575,7 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
         discriminator: crate::session::TunnelDiscriminator::Keyed(1),
         routing_domain: 0,
     };
-    let entry = crate::afxdp::worker::SyncedSessionEntry {
-        key: target.clone(),
-    decision: crate::afxdp::SessionDecision {
+    let entry = crate::afxdp::worker::SyncedSessionEntry { sibling_last_seen_ns: 0, key: target.clone(), decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
             disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -14640,8 +14626,7 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
         fwd_packets: 0,
         pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None,
-    };
+        source_nat_static: None, };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(target.clone(), entry);
     let outcome = coordinator
@@ -14689,61 +14674,58 @@ fn synced_delete_mode_parity_exact_vs_tunnel_variants_17133() {
         }
     }
     fn seed(coordinator: &Coordinator, key: &crate::session::SessionKey) {
-        let entry = crate::afxdp::worker::SyncedSessionEntry {
-            key: key.clone(),
-            decision: crate::afxdp::SessionDecision {
-                resolution: crate::afxdp::ForwardingResolution {
-                    disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
-                    local_ifindex: 0,
-                    egress_ifindex: 12,
-                    tx_ifindex: 12,
-                    tunnel_endpoint_id: 0,
-                    next_hop: None,
-                    neighbor_mac: None,
-                    src_mac: None,
-                    tx_vlan_id: 0,
-                    source_ifindex: 0,
-                    route_mtu: 0,
-                    transport_route_mtu: 0,
-                },
-                nat: crate::nat::NatDecision::default(),
-                install_table_domain: 0,
-                install_table_check: 0,
+        let entry = crate::afxdp::worker::SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: crate::afxdp::SessionDecision {
+            resolution: crate::afxdp::ForwardingResolution {
+                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
-            metadata: crate::session::SessionMetadata {
-                ingress_zone: 1,
-                egress_zone: 2,
-                ingress_zone_check: 0,
-                egress_zone_check: 0,
-                ingress_ifindex: 0,
-                ingress_vlan_id: 0,
-                forward_ingress_vlan_id: None,
-                owner_rg_id: 1,
-                fabric_ingress: false,
-                is_reverse: false,
-                nat64_reverse: None,
-                log_session_init: false,
-                log_session_close: false,
-                policy_id: 0,
-                inactivity_timeout_ns: None,
-                policy_counter_idx: 0,
-                policy_counter: None,
-                nat_scope_ifindex: None,
-            },
-            leak_incarnation: 0,
-            origin: crate::afxdp::SessionOrigin::SyncImport,
-            protocol: key.protocol,
-            tcp_flags: 0,
-            generation: 0,
-            session_id: 4242,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            rev_packets: 0,
-            fwd_packets: 0,
-            pptp_call_ids: 0,
-            persistent_lease_hold: None,
-            source_nat_static: None,
-        };
+            nat: crate::nat::NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: crate::session::SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        },
+        leak_incarnation: 0,
+        origin: crate::afxdp::SessionOrigin::SyncImport,
+        protocol: key.protocol,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 4242,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+        persistent_lease_hold: None,
+        source_nat_static: None, };
         crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
             .insert(key.clone(), entry);
     }

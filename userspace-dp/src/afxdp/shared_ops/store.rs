@@ -1643,8 +1643,7 @@ mod handshake_monotonic_16223_tests {
             nat_scope_ifindex: None,
         };
         metadata.is_reverse = reverse;
-        SyncedSessionEntry { key: key.clone(),
-        decision: crate::session::SessionDecision {
+        SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(), decision: crate::session::SessionDecision {
             resolution: crate::afxdp::ForwardingResolution {
                 disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
                 local_ifindex: 0,
@@ -1947,7 +1946,7 @@ mod handshake_monotonic_16223_tests {
         );
         // Forward traffic alone (no reverse service) must not adopt.
         crate::afxdp::shared_ops::restamp_shared_packet_counts(
-            &shared, &wire_map, &forward, nat_decision(), 12, 0,
+            &shared, &wire_map, &forward, nat_decision(), 0, 0, 12, 0,
         );
         assert!(
             lookup(&shared, &wire_map, &indexes, &wire_key).is_none(),
@@ -1956,7 +1955,7 @@ mod handshake_monotonic_16223_tests {
         // Completed-handshake evidence: reverse count lands on the
         // reverse companion row; forward count already > 0.
         crate::afxdp::shared_ops::restamp_shared_packet_counts(
-            &shared, &wire_map, &forward, nat_decision(), 12, 5,
+            &shared, &wire_map, &forward, nat_decision(), 0, 0, 12, 5,
         );
         let found = lookup(&shared, &wire_map, &indexes, &wire_key)
             .expect("pending + rev>0 + fwd>0 must adopt as Established-for-adoption");
@@ -1999,7 +1998,7 @@ mod handshake_monotonic_16223_tests {
             &[(forward.clone(), nat_decision())],
         );
         crate::afxdp::shared_ops::restamp_shared_packet_counts(
-            &shared, &wire_map, &forward, nat_decision(), 12, 5,
+            &shared, &wire_map, &forward, nat_decision(), 0, 0, 12, 5,
         );
         crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
             &shared,
@@ -2053,7 +2052,7 @@ mod handshake_monotonic_16223_tests {
         );
         // Same-scope evidence (restamp keys on the exact key) qualifies.
         crate::afxdp::shared_ops::restamp_shared_packet_counts(
-            &shared, &wire_map, &forward, nat_decision(), 3, 2,
+            &shared, &wire_map, &forward, nat_decision(), 0, 0, 3, 2,
         );
         assert!(
             lookup(&shared, &wire_map, &indexes, &wire_key).is_some(),
@@ -2089,7 +2088,7 @@ mod handshake_monotonic_16223_tests {
             &[(forward.clone(), nat)],
         );
         crate::afxdp::shared_ops::restamp_shared_packet_counts(
-            &shared, &wire_map, &forward, nat, 8, 4,
+            &shared, &wire_map, &forward, nat, 0, 0, 8, 4,
         );
         assert_eq!(wire(&wire_map, &wire_key), established, "premise: alias Established");
         // Stale republication of the same incarnation must not regress.
