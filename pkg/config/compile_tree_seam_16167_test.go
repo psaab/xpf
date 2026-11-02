@@ -258,6 +258,11 @@ func TestCompileTreeWarningOrderBaseHead16167(t *testing.T) {
 		"set interfaces ge-0/0/1 mtu 1500",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.61.1/24",
 		"set security zones security-zone mgmt interfaces ge-0/0/1.0",
+		// #18719: the #13967 reminder needs a BA classifier on a
+		// fabric-reachable unit, or it is not emitted.
+		"set class-of-service forwarding-classes queue 0 best-effort",
+		"set class-of-service classifiers dscp cls forwarding-class best-effort loss-priority low code-points 0",
+		"set class-of-service interfaces ge-0/0/1 unit 0 classifiers dscp cls",
 	}
 	indexOf := func(cfg *Config, marker string) int {
 		for i, w := range cfg.Warnings {

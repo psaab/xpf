@@ -34,10 +34,12 @@ func (m *Manager) FormatStatus() string {
 		kernelHold = m.kernelUpgradeHoldReason
 	}
 	rgForwardingFn := m.rgForwardingFn
+	fabricSegmentAlarmsFn := m.fabricSegmentAlarmsFn
 	peerGroups := make(map[int]PeerGroupState, len(m.peerGroups))
 	for k, v := range m.peerGroups {
 		peerGroups[k] = v
 	}
+	transferRetries := m.abortedTransferRetryStatusLocked(time.Now()) // #18715
 	m.mu.RUnlock()
 
 	var b strings.Builder
@@ -103,6 +105,15 @@ func (m *Manager) FormatStatus() string {
 			fmt.Fprintln(&b, line)
 		}
 	}
+	// #18719: evidence that the fabric is not a private two-peer segment.
+	// Rendered above every "Redundancy group:" block with a non-node first
+	// field, like "Held secondary" (#4009: deploy-lib's awk reads node rows
+	// inside RG blocks).
+	if fabricSegmentAlarmsFn != nil {
+		for _, line := range fabricSegmentAlarmsFn() {
+			fmt.Fprintf(&b, "Warning: %s\n", line)
+		}
+	}
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "%-6s %-8s %-14s %-8s %-8s %s\n",
 		"Node", "Priority", "Status", "Preempt", "Manual", "Monitor-failures")
@@ -164,6 +175,12 @@ func (m *Manager) FormatStatus() string {
 			rg.LocalPriority, rg.State, preempt, manual, monFails)
 		fmt.Fprintf(&b, "  Takeover ready: %s\n", readyStr)
 		fmt.Fprintf(&b, "  Transfer ready: %s\n", transferReadyStr)
+		// #18715: a requester retrying an aborted transfer says so, because
+		// the operator's request returned an error and the group will then
+		// move later on its own. Indented sub-line below the node row (#8206).
+		if retry, ok := transferRetries[rg.GroupID]; ok {
+			fmt.Fprintf(&b, "  Transfer retry: %s\n", retry)
+		}
 		// #7367: the forwarding sub-line. Placed AFTER the local node row and
 		// the two existing sub-lines, and indented, because the render is parsed
 		// by whole-line regexes: test-failover.sh does

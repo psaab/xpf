@@ -44,9 +44,30 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime
 TMPDIR ?= /var/worktrees/.cache/tmpdir
 GOCACHE ?= /var/worktrees/.cache/go-build
 GOTMPDIR ?= /wtgt
-CARGO_TARGET_DIR ?= /var/worktrees/.cache/cargo
+# #18839: the default CARGO_TARGET_DIR is BOX-WIDE, shared by every worktree
+# and lane on this host. `make clean` must never delete it (see `clean:`).
+CARGO_TARGET_DIR_SHARED := /var/worktrees/.cache/cargo
+CARGO_TARGET_DIR ?= $(CARGO_TARGET_DIR_SHARED)
 export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
 $(shell mkdir -p $(TMPDIR) $(GOCACHE) $(GOTMPDIR) $(CARGO_TARGET_DIR))
+# #18839: what `make clean` may do with CARGO_TARGET_DIR, decided here by make
+# on the resolved path (realpath when it exists, so a symlink or a trailing
+# slash cannot hide the shared dir). One verdict, used by `clean:`:
+#   remove        a per-worktree dir with no overlap with the shared dir
+#   shared        exactly the shared dir: kept unless CLEAN_SHARED_CARGO=1
+#   empty         set but empty: nothing names a dir, refuse
+#   words         more than one word: rm would delete each word, refuse
+#   root          `/`: the parent of everything, refuse
+#   overlap       a parent or a child of the shared dir, refuse
+clean_cargo_abs := $(or $(realpath $(CARGO_TARGET_DIR)),$(abspath $(CARGO_TARGET_DIR)))
+clean_shared_abs := $(or $(realpath $(CARGO_TARGET_DIR_SHARED)),$(abspath $(CARGO_TARGET_DIR_SHARED)))
+clean_cargo_verdict := $(strip \
+  $(if $(strip $(CARGO_TARGET_DIR)),,empty) \
+  $(if $(filter-out 0 1,$(words $(CARGO_TARGET_DIR))),words) \
+  $(if $(filter /,$(clean_cargo_abs)),root) \
+  $(if $(filter $(clean_shared_abs),$(clean_cargo_abs)),shared) \
+  $(if $(filter $(clean_shared_abs)/%,$(clean_cargo_abs))$(if $(clean_cargo_abs),$(filter $(clean_cargo_abs)/%,$(clean_shared_abs))),overlap))
+clean_cargo_verdict := $(or $(firstword $(clean_cargo_verdict)),remove)
 
 # eBPF compilation flags
 .PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-connectivity-mtr-selftest test-wire-properties test-failover test-rolling-upgrade test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib clippy-rust
@@ -175,6 +196,8 @@ test:
 	$(MAKE) harness-census || status=$$?; \
 	$(MAKE) test-routing-kernel || status=$$?; \
 	$(MAKE) test-daemon-kernel || status=$$?; \
+	$(MAKE) test-fabricsegment-kernel || status=$$?; \
+	$(MAKE) test-nftables-kernel || status=$$?; \
 	$(MAKE) go-skip-census || status=$$?; \
 	echo ""; \
 	echo "make test: NOT EXAMINED by this run — the XDP shim's behavioural"; \
@@ -411,13 +434,21 @@ GOTESTJSON ?=
 # derives the set (every package whose tests exec git) and fails until
 # the leg matches; #18642 added pkg/upgrade/manifest (its drift canary
 # runs `git ls-files`).
+# #18778: an explicit, generous per-package -timeout, on the test-go legs and
+# the test-race-dp legs alike. go test's 10m default is reached by pkg/daemon
+# at high host load, and a timeout aborts the package mid-run exactly like a
+# panic; scripts/go-test-json.sh / go-test-watch.sh VOID such a leg (exit 3).
+# `keep` makes VOID sticky: a later failing leg cannot overwrite status 3, so
+# the recipe ends "Error 3" (make itself exits 2 on any recipe failure).
+GOTEST_TIMEOUT ?= 60m
 test-go: test-race-dp
 	@status=0; \
-	$(GO) vet ./... || status=$$?; \
+	keep() { [ "$$status" -eq 3 ] || status=$$1; }; \
+	$(GO) vet ./... || keep $$?; \
 	[ -z "$(GOTESTJSON)" ] || : > "$(GOTESTJSON)"; \
-	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" ./... || status=$$?; \
-	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/upgrade/manifest/ || status=$$?; \
-	sh scripts/go-buildtag-census.sh || status=$$?; \
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -timeout $(GOTEST_TIMEOUT) ./... || keep $$?; \
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -timeout $(GOTEST_TIMEOUT) -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/upgrade/manifest/ || keep $$?; \
+	sh scripts/go-buildtag-census.sh || keep $$?; \
 	sh scripts/go-deadcode-gate.sh; dc=$$?; if [ $$dc -eq 77 ]; then echo "test-go: go-deadcode-gate SKIPPED (no go1.26 toolchain; see script header)"; elif [ $$dc -ne 0 ] && [ $$status -eq 0 ]; then status=$$dc; fi; \
 	exit $$status
 
@@ -467,16 +498,20 @@ test-race-dp:
 	@for alt in DataplaneCell NATPoolAlarm ForwardingStatus BootstrapExit RuntimeDataplaneNeverBareRootManager EventStreamFallbackLoop RunUserspaceEventStream LiveDataPlane_ GRPCShowBuffers_ SystemAction_ GRPCServer_ RESTServer_ ManagementProbe ConsoleCLIProbeWiring FullResync ReconcilePassUsesOneDataplaneSnapshot ReconcileBlackholeWrappersStillReloadPerCall MTUWarningsCrossCommitRace; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/daemon/ | grep -q '^Test' || { echo "test-race-dp: pkg/daemon -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
-	$(GO) test -race ./pkg/daemon/ -run 'DataplaneCell|NATPoolAlarm|ForwardingStatus|BootstrapExit|RuntimeDataplaneNeverBareRootManager|EventStreamFallbackLoop|RunUserspaceEventStream|LiveDataPlane_|GRPCShowBuffers_|SystemAction_|GRPCServer_|RESTServer_|ManagementProbe|ConsoleCLIProbeWiring|FullResync|ReconcilePassUsesOneDataplaneSnapshot|ReconcileBlackholeWrappersStillReloadPerCall|MTUWarningsCrossCommitRace' -count=2
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/daemon/ -run 'DataplaneCell|NATPoolAlarm|ForwardingStatus|BootstrapExit|RuntimeDataplaneNeverBareRootManager|EventStreamFallbackLoop|RunUserspaceEventStream|LiveDataPlane_|GRPCShowBuffers_|SystemAction_|GRPCServer_|RESTServer_|ManagementProbe|ConsoleCLIProbeWiring|FullResync|ReconcilePassUsesOneDataplaneSnapshot|ReconcileBlackholeWrappersStillReloadPerCall|MTUWarningsCrossCommitRace' -count=2
 	@for alt in ArmedGate PreArm AllConcurrentSaveNoRace StatusPathReadRacesCompileWrite DetachXDPIsSerializedWithFenceLease; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/dataplane/ | grep -q '^Test' || { echo "test-race-dp: pkg/dataplane -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
-	$(GO) test -race ./pkg/dataplane/ -run 'ArmedGate|PreArm|AllConcurrentSaveNoRace|StatusPathReadRacesCompileWrite|DetachXDPIsSerializedWithFenceLease' -count=2
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/dataplane/ -run 'ArmedGate|PreArm|AllConcurrentSaveNoRace|StatusPathReadRacesCompileWrite|DetachXDPIsSerializedWithFenceLease' -count=2
 	@for alt in DoesNotRaceUpdateGroups6550 DoesNotHoldMuAcrossManagerCallback6550 DoesNotRaceStopHeartbeat7257 StartHeartbeatSupersededByStopDoesNotPublish7257; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/cluster/ | grep -q '^Test' || { echo "test-race-dp: pkg/cluster -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
-	$(GO) test -race ./pkg/cluster/ -run 'DoesNotRaceUpdateGroups6550|DoesNotHoldMuAcrossManagerCallback6550|DoesNotRaceStopHeartbeat7257|StartHeartbeatSupersededByStopDoesNotPublish7257' -count=2
-	$(GO) test -race -run 'Race|Concurrent' -count=1 $$($(GO) list ./pkg/... ./cmd/...)
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/cluster/ -run 'DoesNotRaceUpdateGroups6550|DoesNotHoldMuAcrossManagerCallback6550|DoesNotRaceStopHeartbeat7257|StartHeartbeatSupersededByStopDoesNotPublish7257' -count=2
+	@for alt in 17175 18760 9051; do \
+		$(GO) test -list "^Test.*($$alt)" ./pkg/grpcapi/ | grep -q '^Test' || { echo "test-race-dp: pkg/grpcapi -run alternative $$alt matches no test" >&2; exit 1; }; \
+	done
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/grpcapi/ -run '17175|18760|9051' -count=2
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) -run 'Race|Concurrent' -count=1 $$($(GO) list ./pkg/... ./cmd/...)
 
 # #16715: the property leg above races every Race/Concurrent-named test
 # in pkg/ and cmd/ by property, not by a hand-kept package list, so the
@@ -1005,7 +1040,51 @@ clean:
 	# re-introduction by a future PR.
 	rm -f pkg/dataplane/xpf*_bpfel.go pkg/dataplane/xpf*_bpfeb.go
 	rm -f pkg/dataplane/xpf*_bpfel.o pkg/dataplane/xpf*_bpfeb.o
-	rm -rf $(CARGO_TARGET_DIR) userspace-dp/target
+	rm -rf userspace-dp/target
+# #18839: CARGO_TARGET_DIR defaults to the SHARED box-wide target dir, so an
+# unconditional `rm -rf $(CARGO_TARGET_DIR)` here emptied every other lane's
+# in-flight cargo build (observed 2026-11-01: a concurrent `make deb` died
+# with "could not write output ... No such file or directory"). The decision
+# is made by make, not the shell, so `make -n clean` does not even NAME the
+# shared dir unless it would delete it.
+# `dh clean` reaches this too: dh_auto_clean runs `make clean`, and
+# dpkg-buildpackage runs dh clean, so before #18839 EVERY `make deb` emptied
+# the shared dir. debian/rules now overrides dh_auto_clean as well.
+#   - a per-worktree CARGO_TARGET_DIR (no overlap with the shared dir): removed;
+#   - exactly the shared dir: kept, unless CLEAN_SHARED_CARGO=1 (loud);
+#   - a parent or child of the shared dir, `/`, an empty value, or a value with
+#     whitespace: refused, opt-in or not.
+ifeq ($(clean_cargo_verdict),remove)
+	rm -rf $(CARGO_TARGET_DIR)
+else ifeq ($(clean_cargo_verdict),shared)
+ifeq ($(CLEAN_SHARED_CARGO),1)
+	@echo "make clean: WARNING: CLEAN_SHARED_CARGO=1 deletes the box-wide SHARED cargo target dir; every other lane's in-flight cargo build on this host will fail (#18839)" >&2
+	rm -rf $(CARGO_TARGET_DIR_SHARED)
+else
+	@echo "make clean: kept the box-wide shared cargo target dir (the CARGO_TARGET_DIR default); removed only userspace-dp/target. A per-worktree CARGO_TARGET_DIR is removed; CLEAN_SHARED_CARGO=1 forces the shared one (#18839)"
+endif
+else ifeq ($(clean_cargo_verdict),empty)
+	@echo "make clean: REFUSING: CARGO_TARGET_DIR is set but empty, so it names no directory to remove (#18839)" >&2
+	@false
+else ifeq ($(clean_cargo_verdict),words)
+	@echo "make clean: REFUSING: CARGO_TARGET_DIR contains whitespace; rm would delete each word as a separate path (#18839)" >&2
+	@false
+else ifeq ($(clean_cargo_verdict),root)
+	@echo "make clean: REFUSING: CARGO_TARGET_DIR resolves to / (#18839)" >&2
+	@false
+else
+	@echo "make clean: REFUSING to delete CARGO_TARGET_DIR: it contains, or lies inside, the box-wide shared cargo target dir (#18839)" >&2
+	@false
+endif
+
+# #18839: hermetic selftest of the `clean` guard above. Dry runs only
+# (`make -n clean`): the default env must not even NAME the shared cargo dir,
+# a per-worktree dir is removed, a parent or child of the shared dir is refused,
+# and CLEAN_SHARED_CARGO=1 is the only way to delete the shared one. A positive
+# control rebuilds the pre-#18839 recipe and requires the detector to fire.
+.PHONY: test-clean-shared-cargo-lib
+test-clean-shared-cargo-lib:
+	sh ./scripts/clean-shared-cargo-selftest.sh
 
 # Legacy standalone test environment management (single Incus VM/container).
 # The standalone instance name defaults to xpf-fw; override it for an
@@ -1115,9 +1194,10 @@ test-close-keyword-lint-lib:
 	python3 -m unittest scripts/test_close_keyword_lint.py
 
 test-cos-apply-lib:
-	bash ./test/incus/cos-apply-lib-selftest.sh
+	bash ./test/incus/cos-apply-lib-selftest.sh </dev/null
 	python3 -m unittest discover -s test/incus -p 'test_cos_apply_lib.py'
 	go test -count=1 -run 6440 ./cmd/cli/
+	go test -count=1 -run 18730 ./pkg/config/
 
 # Self-test the #7159 mouse-latency elephant lifecycle. The defect it guards is
 # a CORRUPT MEASUREMENT rather than an error: the rep script stopped its
@@ -1191,14 +1271,15 @@ test-routing-kernel:
 	exit $$rc
 
 # Self-test the #9637/#11409/#12034/#12229/#12087 daemon real-kernel
-# cells (#15241 A58-06) plus the 21 enterPrivateNetns9813 cells
-# (#16470).
+# cells (#15241 A58-06), the 27 registry cells (21 #16470 + 3 #18573
+# direct-VIP + 3 #18746 zero-hop), and the #18728 lo0 VRF-slave cell.
+#
 # They SKIP under plain `go test` without a usable netns; a skipped cell
 # reads like a pass, so this target runs them under `unshare -rn` with
 # XPF_REQUIRE_NETNS=1, where (since A58-06, extended by #16470) a
 # missing tool or a skipped setup step is a failure.
 # It SKIPS as a whole (not fails) where user namespaces are unavailable,
-# matching the other tool-gated legs. All six kernel cells are pinned BY
+# matching the other tool-gated legs. All 34 kernel cells are pinned BY
 # NAME inside the script, so a rotted -run predicate cannot report a
 # clean pass over nothing.
 # Single-sourced with the `make selftest` legs: each script here is the
@@ -1209,10 +1290,10 @@ test-daemon-kernel-lib:
 	sh ./test/daemon/selftest-daemon-kernel_15241.sh
 	sh ./test/daemon/selftest-daemon-probes_15241.sh
 
-# #15241 (A58-06) + #16470: the daemon real-kernel cells (9637 x2,
-# 11409, 12034, 12229, 12087, plus the 21 enterPrivateNetns9813 cells)
-# are part of `make test`, not only the opt-in
-# `make selftest` / `test-daemon-kernel-lib`. They exercise kernel
+# #15241 (A58-06) + #16470 + #18573 + #18746 + #18728: the daemon
+# real-kernel cells (6 #15241 cells, 27 enterPrivateNetns9813 registry
+# cells, and the #18728 lo0 VRF-slave cell) are part of `make test`, not
+# only the opt-in `make selftest` / `test-daemon-kernel-lib`. They exercise
 # host-inbound behaviour that ordinary Go tests cannot observe. The
 # forcing leg's by-name check catches an empty or stale `-run` selection.
 #
@@ -1222,6 +1303,31 @@ test-daemon-kernel-lib:
 # requiring these cells can set XPF_REQUIRE_NETNS=1; in that mode a
 # missing forcing prerequisite fails instead of being reported as
 # unexamined.
+# #18745: every pkg/nftables test under a forced netns. The pkg/nftables
+# real-kernel cells SKIP without a netns, so under a plain `go test` they
+# read as passes. Six of them sat red for weeks that way (#16841, #13955,
+# #10483, #11574). The runner fails on any SKIP under XPF_REQUIRE_NETNS=1,
+# and like test-daemon-kernel it reports NOT-EXAMINED on a host that cannot
+# create a netns.
+.PHONY: test-nftables-kernel-lib test-nftables-kernel
+test-nftables-kernel-lib:
+	sh ./test/nftables/selftest-nftables-kernel_18745.sh
+
+test-nftables-kernel:
+	@out=$$(sh ./test/nftables/selftest-nftables-kernel_18745.sh 2>&1); rc=$$?; \
+	echo "$$out"; \
+	if [ $$rc -eq 77 ]; then \
+		if [ -n "$${XPF_REQUIRE_NETNS:-}" ]; then \
+			echo "test-nftables-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the forcing prerequisites are unavailable."; \
+			exit 1; \
+		fi; \
+		echo "make test: NOT-EXAMINED — nftables-kernel (every pkg/nftables test under a private netns, #18745)."; \
+		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
+		echo "  Run where unprivileged user namespaces are available, or set XPF_REQUIRE_NETNS=1 to fail instead."; \
+		exit 0; \
+	fi; \
+	exit $$rc
+
 .PHONY: test-daemon-kernel
 test-daemon-kernel:
 	@out=$$(sh ./test/daemon/selftest-daemon-kernel_15241.sh 2>&1); rc=$$?; \
@@ -1231,12 +1337,35 @@ test-daemon-kernel:
 			echo "test-daemon-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the forcing prerequisites are unavailable."; \
 			exit 1; \
 		fi; \
-		echo "make test: NOT-EXAMINED — daemon-kernel (30 cells: #9637 ingress, #11409 unzoned-ingress, #9637 reinject, #12034 shared-VRF, #12229 lifeline, #12087 secure-tunnel, the 21 #16470 mgmt-VRF/RI-VRF/DHCP/#9506 cells, plus the 3 #18573 direct-VIP stamp cells)."; \
+		echo "make test: NOT-EXAMINED — daemon-kernel (34 cells: #9637 ingress, #11409 unzoned-ingress, #9637 reinject, #12034 shared-VRF, #12229 lifeline, #12087 secure-tunnel, the 21 #16470 mgmt-VRF/RI-VRF/DHCP/#9506 cells, plus the 3 #18573 direct-VIP stamp cells, the 3 #18746 zero-hop cells and the #18728 lo0 implicit-discard cell)."; \
 		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
 		echo "  Run where unprivileged user namespaces are available, or set XPF_REQUIRE_NETNS=1 to fail instead."; \
 		exit 0; \
 	fi; \
 	exit $$rc
+
+# #18719 (#18751 review): the fabric-segment watcher's real-kernel cells
+# (AF_PACKET tap, cBPF filter counted with PACKET_STATISTICS, parent
+# down/up). Same contract as test-daemon-kernel: 77 from the leg is
+# NOT-EXAMINED unless XPF_REQUIRE_NETNS=1, which makes it a failure.
+.PHONY: test-fabricsegment-kernel test-fabricsegment-kernel-lib
+test-fabricsegment-kernel:
+	@out=$$(sh ./test/fabricsegment/selftest-fabricsegment-kernel_18719.sh 2>&1); rc=$$?; \
+	echo "$$out"; \
+	if [ $$rc -eq 77 ]; then \
+		if [ -n "$${XPF_REQUIRE_NETNS:-}" ]; then \
+			echo "test-fabricsegment-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the leg skipped: $$(printf '%s\n' "$$out" | sed -n 's/^SKIP: //p' | head -1)"; \
+			exit 1; \
+		fi; \
+		cause=$$(printf '%s\n' "$$out" | sed -n 's/^SKIP: //p' | head -1); \
+		echo "make test: NOT-EXAMINED — fabric-segment kernel cells (4 cells: #18719 tap/filter, parent down/up, bind while down, parent re-created)."; \
+		echo "  Cause: $${cause:-unknown (the leg returned 77 without a SKIP line)}. The real-kernel cells did not run."; \
+		exit 0; \
+	fi; \
+	exit $$rc
+
+test-fabricsegment-kernel-lib:
+	sh ./test/fabricsegment/selftest-fabricsegment-kernel_18719.sh
 
 # Self-tests for the #6936/#11306 FBF steering verdicts. The helper cells pin
 # fail-closed route parsing (including errors and ECMP). Healthy steering is
@@ -1303,6 +1432,15 @@ test-host-inbound-lib:
 # Run it when ipv6_ext_walk.rs or the parity guards change.
 test-shim-ext-parity-lib:
 	bash ./test/mutation/shim-ext-parity-acceptance.sh
+
+# #18738: hermetic selftest of the acceptance harness's own control flow
+# (a stub cargo, a throwaway checkout, seconds not hours). TERM mid-row must
+# restore the walker and END the run (exit 143, no next row), with a
+# positive control on the pre-#18738 trap, and ROWS= must run only the named
+# rows and refuse an undeclared one. Also in `make selftest`.
+.PHONY: test-shim-ext-parity-selftest
+test-shim-ext-parity-selftest:
+	sh ./test/mutation/selftest-shim-ext-parity-acceptance.sh
 
 # #8136: the WHOLE test/incus Python suite. Before this, the only target that
 # ran any of it passed a LITERAL filename as the discovery pattern, so 1 of 21

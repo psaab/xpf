@@ -67,6 +67,13 @@ func validatePeerStrictPipeline(peerTree *config.ConfigTree, nodeID int) error {
 // persisted state pass nil, keeping the exception closed for the peer
 // exactly as fold 2 keeps it closed locally.
 func validatePeerStrictPipelineWithCurrent(peerTree *config.ConfigTree, nodeID int, peerCurrent *config.Config) error {
+	return validatePeerStrictPipelineJudged(peerTree, nodeID, peerCurrent, peerCurrent != nil)
+}
+
+// validatePeerStrictPipelineJudged runs the peer view with the same #18744
+// placeholder decision as the local view, so a shared commit cannot pass on
+// one node's view and be refused on the other's.
+func validatePeerStrictPipelineJudged(peerTree *config.ConfigTree, nodeID int, peerCurrent *config.Config, judgePlaceholders bool) error {
 	peerID, ok := config.PeerNodeID(nodeID)
 	if peerTree == nil || !ok {
 		return nil
@@ -74,7 +81,7 @@ func validatePeerStrictPipelineWithCurrent(peerTree *config.ConfigTree, nodeID i
 	if err := schemaValidateExpandedTreeForNode(peerTree, peerID); err != nil {
 		return peerStrictError(peerID, err)
 	}
-	peerCompiled, err := config.CompileConfigForNodeWithCurrentClusterPrimary(peerTree, peerID, peerCurrent)
+	peerCompiled, err := config.CompileConfigForNodeJudgingPlaceholders(peerTree, peerID, peerCurrent, judgePlaceholders)
 	if err != nil {
 		return peerStrictError(peerID, err)
 	}

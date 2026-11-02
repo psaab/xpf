@@ -797,6 +797,7 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	m.peerAlive = true
 	m.peerEverSeen = true
 	m.peerConfirmedAbsent = false
+	m.lastPeerHeartbeatAt = now
 	// #18549: extend the gap-free admitted-heartbeat run that, together with
 	// a completed inbound bulk, ends the cold-boot floor early.
 	m.notePeerHeartbeatAdmittedLocked(MonotonicNanos())
@@ -937,6 +938,9 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	}
 
 	m.runElection()
+	// #18715: after the election has applied this frame, so the retry
+	// condition reads the post-election roles.
+	m.evaluateAbortedTransferRetriesLocked(now)
 }
 
 // handlePeerTimeout is called when the peer heartbeat timeout expires.
@@ -972,6 +976,7 @@ func (m *Manager) handlePeerTimeout() {
 
 	m.peerAlive = false
 	m.peerGroups = make(map[int]PeerGroupState)
+	m.lastPeerHeartbeatAt = time.Time{}
 	// #18549: a lost peer's heartbeat run proves nothing about the next.
 	m.resetPeerHeartbeatRunLocked()
 	// #14163: a timed-out peer's identity must no longer be echoed; the
@@ -1496,6 +1501,11 @@ type HeartbeatStats struct {
 // reason ("peer lost" / "peer restarted") only labels the log lines.
 // Caller must hold m.mu.
 func (m *Manager) clearPeerIncarnationAuthorityLocked(reason string) {
+	// #18715: a retry belongs to the peer incarnation whose transfer aborted.
+	// Peer loss also ends every hold below, the drain pin included, so no
+	// ownerless prior hold is left to restore.
+	m.cancelAllAbortedTransferRetriesLocked(reason)
+	clear(m.ownerlessPriorHolds)
 	for _, rg := range m.groups {
 		if rg.ManualFailover {
 			slog.Info("cluster: clearing manual failover ("+reason+")", "rg", rg.GroupID)

@@ -203,7 +203,15 @@ func TestCompileRecoveryStartsFreshCrashEpisode12159(t *testing.T) {
 	awaitSupervisor(t, m, exited2)
 	_, looping := m.HelperSupervisorState()
 	delays := rec.snapshot()[before:]
-	if looping || len(delays) != 1 || delays[0] != helperRestartBackoffBase {
+	// #18707: attempt 1 of a fresh episode is the immediate retry, so the
+	// fresh-episode delay is helperRestartDelay(1). The premise keeps the
+	// cell discriminating: an inherited Restarts:3 episode would schedule
+	// attempt 4, whose delay must differ from attempt 1's.
+	if helperRestartDelay(1) == helperRestartDelay(4) {
+		t.Fatalf("premise: attempt 1 and attempt 4 share delay %v, so a fresh and an inherited episode are indistinguishable",
+			helperRestartDelay(1))
+	}
+	if looping || len(delays) != 1 || delays[0] != helperRestartDelay(1) {
 		t.Fatalf("first crash after successful Compile inherited old episode: looping=%v delays=%v",
 			looping, delays)
 	}

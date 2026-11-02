@@ -462,6 +462,8 @@ func monitorProxyStore9891(t *testing.T) *Server {
 		t.Fatalf("EnterConfigure: %v", err)
 	}
 	if _, err := store.LoadSet("set chassis cluster cluster-id 1\n" +
+		"set chassis cluster control-interface em0\n" + // #16746 control link
+		"set chassis cluster peer-address 10.99.0.2\n" +
 		"set chassis cluster authentication-key test-psk-9891-test-psk-9891\n" +
 		"set chassis cluster redundancy-group 1 node 0 priority 200\n" +
 		"set chassis cluster redundancy-group 1 interface-monitor ge-7/0/1 weight 100\n" +

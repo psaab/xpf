@@ -724,6 +724,9 @@ type Manager struct {
 	// the rgStateMachine; nil in tests and before wiring, in which case the
 	// forwarding sub-line is omitted entirely rather than rendered as a guess.
 	rgForwardingFn func(rgID int) (RGForwarding, bool)
+	// fabricSegmentAlarmsFn returns the #18719 fabric-segment watcher's raised
+	// alarm lines (pkg/fabricsegment). Nil until the daemon wires it.
+	fabricSegmentAlarmsFn func() []string
 	// localTransferCommitReadyFn runs on the requesting node after local
 	// ownership has been committed but before the final peer-demotion
 	// commit is sent. The daemon uses this to ensure the target node has
@@ -848,6 +851,25 @@ type Manager struct {
 	// operator's reset is not silently clobbered. Guarded by m.mu.
 	failoverGen map[int]uint64
 
+	// abortedTransferRetries is the requester-side retry of an aborted
+	// transfer whose old owner never re-promoted (#18715), one chain per RG.
+	// operatorEpoch is bumped by every operator failover/reset entry point
+	// for an RG; a chain started under an older epoch never fires.
+	// lastPeerHeartbeatAt is when the last peer heartbeat was admitted (the
+	// freshness the owner-side ownerless accept needs). All under m.mu.
+	abortedTransferRetries map[int]*abortedTransferRetry
+	operatorEpoch          map[int]uint64
+	lastPeerHeartbeatAt    time.Time
+	// ownerlessPriorHolds is the hold (operator Manual, or the ISSU drain
+	// pin) an ownerless accept found in place, given back when that transfer
+	// ends without a commit; a commit keeps only the drain pin (#18715). Any
+	// newer decision (a failover, reset or drain), the dual-resign rescue,
+	// peer loss and RG removal drop it. Under m.mu.
+	ownerlessPriorHolds map[int]ownerlessPriorHold
+	// abortedTransferRetryLaunchFn starts one retry attempt; nil runs it on
+	// its own goroutine. Tests capture it to run attempts deterministically.
+	abortedTransferRetryLaunchFn func(func())
+
 	// stopped is set by Stop() to mark the manager quiesced. It guards the
 	// per-RG hold-timer closure (readiness.go) so a takeover-hold timer that
 	// had already fired and is blocked on m.mu when Stop() runs cannot run an
@@ -971,6 +993,9 @@ func NewManager(nodeID, clusterID int) *Manager {
 		preManualFailoverRetryInterval: DefaultPreManualFailoverRetryInterval,
 		failoverInProgress:             make(map[int]uint64),
 		failoverGen:                    make(map[int]uint64),
+		abortedTransferRetries:         make(map[int]*abortedTransferRetry),
+		operatorEpoch:                  make(map[int]uint64),
+		ownerlessPriorHolds:            make(map[int]ownerlessPriorHold),
 		bootEpochReady:                 make(chan struct{}),
 	}
 }

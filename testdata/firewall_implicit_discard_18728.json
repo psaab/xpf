@@ -1,0 +1,158 @@
+[
+  {
+    "name": "allow-ssh-v4",
+    "family": "inet",
+    "terms": [
+      {
+        "name": "ssh",
+        "protocols": [
+          "tcp"
+        ],
+        "destination_ports": [
+          "22"
+        ],
+        "action": "accept",
+        "count": "ssh-v4"
+      },
+      {
+        "name": "implicit-discard",
+        "action": "discard",
+        "count": "implicit-discard"
+      }
+    ]
+  },
+  {
+    "name": "allow-web-v4",
+    "family": "inet",
+    "terms": [
+      {
+        "name": "web",
+        "protocols": [
+          "tcp"
+        ],
+        "destination_ports": [
+          "443"
+        ],
+        "action": "accept"
+      },
+      {
+        "name": "implicit-discard",
+        "action": "discard",
+        "count": "implicit-discard"
+      }
+    ]
+  },
+  {
+    "name": "count-next",
+    "family": "inet",
+    "terms": [
+      {
+        "name": "mark",
+        "action": "",
+        "next_term": true,
+        "count": "mark"
+      },
+      {
+        "name": "implicit-discard",
+        "action": "discard",
+        "count": "implicit-discard"
+      }
+    ]
+  },
+  {
+    "name": "empty",
+    "family": "inet",
+    "terms": [
+      {
+        "name": "implicit-discard",
+        "action": "discard",
+        "count": "implicit-discard"
+      }
+    ]
+  },
+  {
+    "name": "modifier-catch",
+    "family": "inet",
+    "terms": [
+      {
+        "name": "count-all",
+        "action": "",
+        "count": "all"
+      }
+    ]
+  },
+  {
+    "name": "permit-explicit",
+    "family": "inet",
+    "terms": [
+      {
+        "name": "ssh",
+        "protocols": [
+          "tcp"
+        ],
+        "destination_ports": [
+          "22"
+        ],
+        "action": "accept",
+        "count": "ssh-v4"
+      },
+      {
+        "name": "default",
+        "action": "accept"
+      }
+    ]
+  },
+  {
+    "name": "ri-catch",
+    "family": "inet",
+    "terms": [
+      {
+        "name": "steer-all",
+        "action": "",
+        "routing_instance": "blue"
+      }
+    ]
+  },
+  {
+    "name": "ri-steer",
+    "family": "inet",
+    "terms": [
+      {
+        "name": "steer",
+        "source_addresses": [
+          "10.0.0.0/8"
+        ],
+        "source_constrained": true,
+        "action": "",
+        "routing_instance": "blue"
+      },
+      {
+        "name": "implicit-discard",
+        "action": "discard",
+        "count": "implicit-discard"
+      }
+    ]
+  },
+  {
+    "name": "allow-ssh-v6",
+    "family": "inet6",
+    "terms": [
+      {
+        "name": "ssh",
+        "protocols": [
+          "tcp"
+        ],
+        "destination_ports": [
+          "22"
+        ],
+        "action": "accept",
+        "count": "ssh-v6"
+      },
+      {
+        "name": "implicit-discard",
+        "action": "discard",
+        "count": "implicit-discard"
+      }
+    ]
+  }
+]

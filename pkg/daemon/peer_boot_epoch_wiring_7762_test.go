@@ -35,6 +35,11 @@ func TestStartClusterCommsWiresPeerBootEpochFn_7762(t *testing.T) {
 	// same wiring block without touching the pre-existing StartHeartbeat race.
 	for _, line := range []string{
 		"chassis cluster cluster-id 1",
+		// #16746: a complete control link is required. Use the loopback
+		// (as the fabric does) so the comms start does not depend on a
+		// host interface named em0.
+		"chassis cluster control-interface lo",
+		"chassis cluster peer-address 127.0.0.3",
 		"chassis cluster node 0",
 		"chassis cluster fabric-interface lo",
 		"chassis cluster fabric-peer-address 127.0.0.2",

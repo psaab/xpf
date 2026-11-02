@@ -75,6 +75,8 @@ func TestFullResyncResolvesTheExporterPerCall(t *testing.T) {
 		store: testStoreWithSetConfig(t, []string{
 			"set system dataplane-type userspace",
 			"set chassis cluster cluster-id 1",
+			"set chassis cluster control-interface em0",
+			"set chassis cluster peer-address 10.99.0.2",
 			"set chassis cluster authentication-key test-cluster-psk-6743",
 			"set chassis cluster node 0",
 			"set chassis cluster redundancy-group 0 node 0 priority 200",
@@ -154,6 +156,8 @@ func TestFullResyncDeclinesOnADisownedCell(t *testing.T) {
 		store: testStoreWithSetConfig(t, []string{
 			"set system dataplane-type userspace",
 			"set chassis cluster cluster-id 1",
+			"set chassis cluster control-interface em0",
+			"set chassis cluster peer-address 10.99.0.2",
 			"set chassis cluster authentication-key test-cluster-psk-6743",
 			"set chassis cluster node 0",
 			"set chassis cluster redundancy-group 0 node 0 priority 200",

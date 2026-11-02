@@ -69,6 +69,7 @@ func buildFirewallFilterSnapshots(cfg *config.Config) []FirewallFilterSnapshot {
 			Family: "inet",
 			Terms:  buildFilterTermSnapshots(name, filter, cfg),
 		}
+		appendImplicitDiscard(&snap, filter)
 		out = append(out, snap)
 	}
 	// inet6 filters
@@ -87,9 +88,28 @@ func buildFirewallFilterSnapshots(cfg *config.Config) []FirewallFilterSnapshot {
 			Family: "inet6",
 			Terms:  buildFilterTermSnapshots(name, filter, cfg),
 		}
+		appendImplicitDiscard(&snap, filter)
 		out = append(out, snap)
 	}
 	return out
+}
+
+// appendImplicitDiscard ends a filter with no terminal catch-all term in the
+// Junos implicit final discard (#18728). A packet that matches no authored
+// term is dropped, as if the filter ended with `term t { then discard; }`, and
+// counted under ImplicitDiscardTermName. The decision is
+// config.FirewallFilterHasCatchAll, the predicate of the commit warning, so
+// `commit check` names exactly the filters that get this term. It is
+// materialized here as an ordinary term, so every helper evaluator (input,
+// output TX selection live and cached, lo0, the #7212 static verdict, the
+// #2620 count replay) treats it like an authored final discard, and the #6835
+// routing-instance defer returns before reaching it.
+func appendImplicitDiscard(snap *FirewallFilterSnapshot, filter *config.FirewallFilter) {
+	if config.FirewallFilterHasCatchAll(filter) {
+		return
+	}
+	snap.ImplicitDiscard = true
+	snap.Terms = append(snap.Terms, implicitDiscardTermSnapshot())
 }
 
 func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, cfg *config.Config) []FirewallTermSnapshot {

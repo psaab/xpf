@@ -175,10 +175,18 @@ func (c *CLI) showFirewallFilters() error {
 					fmt.Printf("    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 				}
 			}
+			// #18728: the synthetic implicit-discard term the dataplane
+			// appends to a filter with no terminal catch-all.
+			var lo0Buf strings.Builder
+			implicit, implicitOk := dpuserspace.ImplicitDiscardCounterForFilter(userspaceCounters, family, name, f)
+			firewallshow.WriteImplicitDiscard(&lo0Buf, f, firewallshow.ImplicitDiscardCounter{
+				Packets: implicit.Packets, Bytes: implicit.Bytes, Have: implicitOk,
+			}, false)
 			// #16457: kernel lo0 chain counts (fxp0/host-stack traffic the
 			// helper never sees), labelled by count name.
-			var lo0Buf strings.Builder
-			firewallshow.WriteLo0KernelCounters(&lo0Buf, f, lo0For(family, name))
+			lo0Counts := lo0For(family, name)
+			firewallshow.WriteLo0KernelCounters(&lo0Buf, f, lo0Counts)
+			firewallshow.WriteLo0ImplicitDiscardCounter(&lo0Buf, f, family, lo0Counts)
 			fmt.Print(lo0Buf.String())
 			fmt.Println()
 		}
@@ -376,10 +384,16 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 			fmt.Printf("    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 		}
 	}
+	// #18728: the synthetic implicit-discard term.
+	var lo0Buf strings.Builder
+	implicit, implicitOk := dpuserspace.ImplicitDiscardCounterForFilter(userspaceCounters, family, name, filter)
+	firewallshow.WriteImplicitDiscard(&lo0Buf, filter, firewallshow.ImplicitDiscardCounter{
+		Packets: implicit.Packets, Bytes: implicit.Bytes, Have: implicitOk,
+	}, true)
 	// #16457: kernel lo0 chain counts beside the helper counts.
 	lo0Counts, lo0Err := firewallshow.Lo0CountersForFilter(cfg, family, name, readLo0CountersCLI)
-	var lo0Buf strings.Builder
 	firewallshow.WriteLo0KernelCounters(&lo0Buf, filter, lo0Counts)
+	firewallshow.WriteLo0ImplicitDiscardCounter(&lo0Buf, filter, family, lo0Counts)
 	fmt.Print(lo0Buf.String())
 	fmt.Println()
 	if readErr != nil {

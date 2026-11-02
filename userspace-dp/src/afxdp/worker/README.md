@@ -113,6 +113,7 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
 | `loop_body/reconcile.rs` | #13075 forwarding-snapshot rotation reconciliation and the `#[inline]` `refresh_runtime_view` seam carrying the #15151 IPsec-inner drain. |
 | `loop_body/screen_status.rs` | Publishes cumulative worker ScreenState status through a live binding on the report tick. |
 | `loop_body/setup.rs` | #1776 one-shot worker setup: thread pinning, TSC calibration, binding construction, and BPF-map-FD cache. |
+| `loop_body/slice_pacing.rs` | #13075 shared pacing limits for the extracted slices: the #9856 CommandExport scan budget, emit cap and deadline (`EXPORT_SLICE_*`), and the #333/#5287 conntrack-refresh window, slice interval and slice budget (`CT_REFRESH_WINDOW_NS`, `CT_SLICE_INTERVAL_NS`, `CT_REFRESH_SLICE_BUDGET`). Two const asserts fail the build if the export emit cap exceeds the scan budget, or if the default session cap or the windows would break the #18655 shared-evidence latency bound described under `loop_body/ct_slice.rs`. |
 | `mod.rs` | `BindingWorker` and shared-binding helpers; re-exports `worker_loop` and the worker-launch bundle types. |
 | `scratch.rs` | `WorkerScratch` (#959 Phase 2) — pre-allocated per-poll reusable buffers. |
 | `synced_entry.rs` | `SyncedSessionEntry` — HA/shared-map session state and its mapping to an install request (#9412). |

@@ -13,6 +13,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -66,8 +68,10 @@ type Installer interface {
 	InstallEarlyInputBarrierWithLifelineAdmit(lifelines []string) error
 	// InstallHostInbound installs the real host-inbound table (#3070/#3333).
 	InstallHostInbound(spec HostInboundSpec) error
-	// VerifyHostInboundOverlay reads back the exact marker and leading DROP
-	// rule for a candidate overlay before publication.
+	// VerifyHostInboundOverlay reads back the exact marker and the overlay's
+	// DROP rules for a candidate overlay before publication; only DROP-only
+	// rules, judged by an expression-kind allowlist over both the decoded
+	// rules and the kernel's own expression names, may precede them (#18721).
 	VerifyHostInboundOverlay(overlay HostInputFenceOverlay) error
 	// InstallColdBootFence installs the #5644 cold-boot fail-closed fence
 	// (the xpf_hostinbound table reduced to mandatory admits + address drops).
@@ -81,8 +85,10 @@ type Installer interface {
 	// InstallGapFence installs the #5789 additive coverage-gap fence.
 	InstallGapFence(spec GapFenceSpec) error
 	// InstallLo0 installs the lo0 loopback input filter (#3445/#3392) and
-	// reports how many kernel rules the spec lowered to. ZERO rules means the
-	// installed table is an empty `policy accept` shell that enforces NOTHING —
+	// reports how many OPERATOR rules the spec lowered to. The #16841 zero-hop
+	// rule, which every input chain carries, is not counted (#18746). ZERO
+	// rules means the installed table is an empty `policy accept` shell that
+	// enforces NOTHING —
 	// a filter name that resolves to no filter, a filter with no terms, or one
 	// whose every term lowers to zero rules (a Junos match-nothing scope). The
 	// caller must not record such an install as a real operator filter being
@@ -95,7 +101,9 @@ type Installer interface {
 	DeleteTable(name string) error
 	// TableEnforcing reports whether the named inet-family table currently
 	// ENFORCES an input hook: the table exists with a type-filter
-	// input-hook chain carrying at least one rule. A present-but-empty
+	// input-hook chain carrying at least one rule other than the exact
+	// #16841 zero-hop-limit DROP (#18746), which every xpf input chain
+	// carries and which is no evidence of host-inbound policy. A present-but-empty
 	// (flushed shell) table is NOT enforcing — with no input hook it
 	// filters nothing. The `ensure` command and the handoff tripwire
 	// prove liveness through this instead of bare presence (#10751
@@ -103,7 +111,8 @@ type Installer interface {
 	TableEnforcing(name string) (bool, error)
 	// TableDropsInput reports whether the named inet-family table
 	// currently DROPS on its input hook: enforcing shape (see above)
-	// PLUS at least one rule carrying a DROP verdict. An admits-only
+	// PLUS at least one rule carrying a DROP verdict, not counting the exact
+	// #16841 zero-hop-limit DROP (#18746). An admits-only
 	// table (mandatory accepts, zero DROP — e.g. a zero-drop fence
 	// shell, or a stale restore that lost its drops) under the
 	// tables' `policy accept` admits everything it does not
@@ -165,6 +174,10 @@ type netlinkInstaller struct {
 	// skip/reinstall decision without manufacturing netlink dump messages.
 	forwardFenceLiveEqualFn func(ForwardFenceSpec) (bool, error)
 	forwardFenceReplaceFn   func(ForwardFenceSpec) error
+	// overlayReadbackBetweenReadsFn is nil in production. A kernel cell sets it
+	// to commit a change between the overlay readback's GetRules and its
+	// expression-name dump: the window readAtStableNftGeneration narrows (#18721).
+	overlayReadbackBetweenReadsFn func()
 }
 
 // NewNetlinkInstaller returns an Installer that talks to the host's default
@@ -186,15 +199,36 @@ func (in *netlinkInstaller) InstallHostInbound(spec HostInboundSpec) error {
 	return err
 }
 
-// counter proves all authority fields and canonical masters were committed;
-// for a nonempty set the first input rule is decoded and compared to the exact
-// master set plus the marker object and DROP verdict.
+// VerifyHostInboundOverlay reads the installed host-input table back: the
+// named marker counter proves all authority fields and canonical masters were
+// committed; for a nonempty set the input chain's overlay DROP rules are decoded
+// and compared to the exact master set plus the marker object and DROP verdict
+// (verifyHostOverlayRuleChain states which rules may precede them).
 func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverlay) error {
 	overlay = CanonicalHostInputFenceOverlay(overlay)
 	c, err := in.newConn()
 	if err != nil {
 		return fmt.Errorf("nftables conn: %w", err)
 	}
+	// #18721: every read below must see ONE ruleset, so the whole readback is
+	// bracketed by the nf_tables generation (readAtStableNftGeneration).
+	err = readAtStableNftGeneration(
+		func() (uint32, error) { return readNftGeneration(c) },
+		func() error { return in.verifyHostInboundOverlayOnce(c, overlay) })
+	// The bracket does not log (#18746); this caller labels its own failure.
+	// A moved generation fails this readback closed, with no re-read: it runs
+	// inside reconcileIpsecHostInputFence's short applySem hold (#18721).
+	var moved *GenerationChangedError
+	if errors.As(err, &moved) {
+		slog.Warn("host overlay readback: generation changed during readback; failing closed",
+			"commits_observed", moved.CommitsObserved, "generation_before", moved.Before, "generation_after", moved.After)
+		return fmt.Errorf("host overlay readback: %w; failing closed", err)
+	}
+	return err
+}
+
+// verifyHostInboundOverlayOnce is one unbracketed pass of the overlay readback.
+func (in *netlinkInstaller) verifyHostInboundOverlayOnce(c *nftables.Conn, overlay HostInputFenceOverlay) error {
 	tbl := &nftables.Table{Family: nftables.TableFamilyINet, Name: HostInboundTableName}
 	objs, err := c.GetNamedObjects(tbl)
 	if err != nil {
@@ -215,34 +249,106 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	if len(overlay.MasterSet) == 0 && len(overlay.MasterSlavePairs) == 0 {
 		return nil
 	}
-	sets, err := c.GetSets(tbl)
+	rules, err := c.GetRules(tbl, &nftables.Chain{Name: "input", Table: tbl})
 	if err != nil {
-		return fmt.Errorf("read host overlay sets: %w", err)
+		return fmt.Errorf("read host overlay rules: %w", err)
 	}
+	if in.overlayReadbackBetweenReadsFn != nil {
+		in.overlayReadbackBetweenReadsFn()
+	}
+	// #18721: GetRules drops every expression google/nftables has no type for,
+	// so the rules are judged against the kernel's own expression names too.
+	namesByHandle, err := readRuleExprNames(c, tbl, "input")
+	if err != nil {
+		return fmt.Errorf("read host overlay rule expressions: %w", err)
+	}
+	kernelExprs := make([][]string, len(rules))
+	for i, rule := range rules {
+		names, ok := namesByHandle[rule.Handle]
+		if !ok {
+			return fmt.Errorf("host overlay rule handle %d absent from the expression dump (chain changed during readback)", rule.Handle)
+		}
+		kernelExprs[i] = names
+	}
+	// Read only the ifname sets the overlay rules (the marker-carrying rules)
+	// reference. A full table has dozens of ifname sets, and reading all of them
+	// made each readback pass several times slower (#18723 fold 6). This cannot
+	// produce a false pass: a set the decode needs but did not read leaves its
+	// masters unresolved, and that is a mismatch.
 	setNames := map[string][]string{}
-	for _, set := range sets {
+	for _, name := range hostOverlayReferencedSets(rules, marker) {
+		set, err := c.GetSetByName(tbl, name)
+		if err != nil {
+			return fmt.Errorf("read host overlay set %q: %w", name, err)
+		}
 		if set.KeyType.Name != "ifname" {
 			continue
 		}
 		elements, err := c.GetSetElements(set)
 		if err != nil {
-			return fmt.Errorf("read host overlay set %q: %w", set.Name, err)
+			return fmt.Errorf("read host overlay set %q: %w", name, err)
 		}
 		for _, element := range elements {
-			setNames[set.Name] = append(setNames[set.Name], string(bytes.TrimRight(element.Key, "\x00")))
+			setNames[name] = append(setNames[name], string(bytes.TrimRight(element.Key, "\x00")))
 		}
 	}
-	rules, err := c.GetRules(tbl, &nftables.Chain{Name: "input", Table: tbl})
-	if err != nil {
-		return fmt.Errorf("read host overlay rules: %w", err)
+	return verifyHostOverlayRuleChain(rules, kernelExprs, setNames, marker, overlay)
+}
+
+// hostOverlayReferencedSets returns, in first-seen order, the set names the
+// lookups of the marker-carrying (overlay) rules reference.
+func hostOverlayReferencedSets(rules []*nftables.Rule, marker string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, rule := range rules {
+		marked := false
+		for _, e := range rule.Exprs {
+			if o, ok := e.(*expr.Objref); ok && o.Name == marker {
+				marked = true
+				break
+			}
+		}
+		if !marked {
+			continue
+		}
+		for _, e := range rule.Exprs {
+			if l, ok := e.(*expr.Lookup); ok && !seen[l.SetName] {
+				seen[l.SetName] = true
+				out = append(out, l.SetName)
+			}
+		}
 	}
+	return out
+}
+
+// verifyHostOverlayRuleChain judges the input chain's rules, in kernel order,
+// against an overlay (#9506 readback, #18721).
+//
+// The overlay exists so that no established/related ACCEPT can admit traffic
+// from a revoked master (HostInputFenceOverlay): the property is "no rule that
+// can admit a packet runs before the fence DROP", not "the fence DROP has
+// handle 1". So the chain may open with a prefix of DROP-only rules
+// (hostInputRuleIsDropOnly) — today the #16841 `ip6 hoplimit 0 fib daddr type
+// { local, anycast } drop`, which #16841 deliberately places first in every
+// host-input chain. A DROP-only rule admits nothing, so a packet from a fenced
+// master that it does not drop still reaches the fence DROP. Any other rule
+// ahead of the overlay fails the readback exactly as before.
+//
+// After that prefix come the overlay drops: paired slave-scoped rules first,
+// then the bare-master rule. All must carry the marker + DROP and pass the same
+// allowlist (plus the marker's objref), the union of iifname scopes must equal
+// MasterSet plus pair masters, and the union of sdifname scopes must equal the
+// paired slaves (#14974).
+//
+// kernelExprs[i] is rules[i]'s expression names as the kernel listed them
+// (readRuleExprNames); it must be the same length as rules.
+func verifyHostOverlayRuleChain(rules []*nftables.Rule, kernelExprs [][]string, setNames map[string][]string, marker string, overlay HostInputFenceOverlay) error {
 	if len(rules) == 0 {
 		return fmt.Errorf("host overlay leading rule absent")
 	}
-	// Collect every leading overlay drop: paired slave-scoped rules first,
-	// then the bare-master rule. All must carry the marker + DROP, the union
-	// of iifname scopes must equal MasterSet plus pair masters, and the union
-	// of sdifname scopes must equal the paired slaves (#14974).
+	if len(kernelExprs) != len(rules) {
+		return fmt.Errorf("host overlay readback: %d rules but %d expression lists", len(rules), len(kernelExprs))
+	}
 	wantMasters := append([]string(nil), overlay.MasterSet...)
 	var wantSlaves []string
 	for _, pair := range overlay.MasterSlavePairs {
@@ -251,13 +357,22 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	}
 	var gotMasters, gotSlaves []string
 	overlayRules := 0
-	for _, rule := range rules {
-		masters, slaves, markerSeen, dropSeen := decodeHostOverlayRule(rule, setNames, marker)
+	for i, rule := range rules {
+		masters, slaves, markerSeen, dropSeen, negated := decodeHostOverlayRule(rule, setNames, marker)
 		if !markerSeen {
+			if overlayRules == 0 && hostInputRuleIsDropOnly(rule, kernelExprs[i]) {
+				continue // a DROP-only rule ahead of the fence admits nothing
+			}
 			break
+		}
+		if negated {
+			return fmt.Errorf("host overlay rule negates its interface scope (a != comparison or an inverted lookup)")
 		}
 		if !dropSeen {
 			return fmt.Errorf("host overlay rule lacks DROP verdict")
+		}
+		if !hostOverlayRuleFitsTemplate(rule, kernelExprs[i], marker) {
+			return fmt.Errorf("host overlay rule carries an expression outside the fence shape: %v", kernelExprs[i])
 		}
 		overlayRules++
 		gotMasters = append(gotMasters, masters...)
@@ -281,7 +396,155 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	return nil
 }
 
-func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, marker string) (masters, slaves []string, markerSeen, dropSeen bool) {
+// hostInputHeadExprKinds is the allowlist of kernel expression kinds a rule
+// may use ahead of the #9506 fence overlay (#18721): the kinds the
+// production head rules are built from (`meta nfproto`, `ip6 hoplimit`,
+// `fib daddr type` + byteorder + an anonymous-set lookup, a counter) and the
+// immediate that carries a verdict. An allowlist rather than a denylist: an
+// xt-compat target (NFQUEUE), queue, dup, tproxy or any kind added later is
+// refused because it is not named here, not because someone remembered it.
+var hostInputHeadExprKinds = map[string]bool{
+	"meta": true, "payload": true, "cmp": true, "bitwise": true,
+	"byteorder": true, "fib": true, "lookup": true, "counter": true,
+	"immediate": true,
+}
+
+// hostInputRuleIsDropOnly reports whether a rule ahead of the overlay can only
+// drop. Such a rule can run ahead of the #9506 fence overlay without weakening
+// it. It judges one rule two ways and requires both:
+//
+//   - kernelExprs, the kernel's own expression names for the rule: every name
+//     must be in hostInputHeadExprKinds. This is the decoder-independent view:
+//     google/nftables v0.3.0 SKIPS every expression it has no type for
+//     (expr.exprsFromBytes), so rule.Exprs alone cannot show a byteorder, rt,
+//     socket, dup or tproxy expression at all;
+//   - rule.Exprs, the typed decode: only the allowlisted types, a lookup
+//     that writes no register (a verdict map can jump or accept), and exactly
+//     one verdict, which is DROP.
+//
+// The two views must describe the same rule: they must agree on how many
+// expressions there are, not counting byteorder. The kernel decode never
+// yields one, while a build plan carries it typed. A mismatch means
+// an expression the decoder could not type, or a rule that changed between the
+// two reads. Either way the readback fails closed.
+func hostInputRuleIsDropOnly(rule *nftables.Rule, kernelExprs []string) bool {
+	kernelCounted := 0
+	for _, name := range kernelExprs {
+		if !hostInputHeadExprKinds[name] {
+			return false
+		}
+		if name != "byteorder" {
+			kernelCounted++
+		}
+	}
+	drops, decodedCounted := 0, 0
+	for _, anyExpr := range rule.Exprs {
+		switch x := anyExpr.(type) {
+		case *expr.Byteorder:
+			continue // present only in build plans; see the count note above
+		case *expr.Meta, *expr.Payload, *expr.Cmp, *expr.Bitwise, *expr.Fib, *expr.Counter:
+		case *expr.Lookup:
+			if x.IsDestRegSet {
+				return false // a map lookup can write the verdict register
+			}
+		case *expr.Verdict:
+			if x.Kind != expr.VerdictDrop {
+				return false
+			}
+			drops++
+		default:
+			return false
+		}
+		decodedCounted++
+	}
+	return drops == 1 && decodedCounted == kernelCounted
+}
+
+// hostOverlayRuleFitsTemplate reports whether a marked (overlay) rule has
+// EXACTLY the shape the builder emits (#18721 fold 8):
+//
+//	meta iifname (== name | in anonymous set)
+//	[meta sdifname (== name | in anonymous set)]
+//	[counter]
+//	objref <marker counter>
+//	drop
+//
+// It is a positive template, not a list of refused kinds. An EXTRA match
+// narrows the fence and must not pass: `meta l4proto tcp`, `ip saddr ...` or
+// `meta mark 0x99` (which makes the fence a no-op). So must a negated or
+// inverted scope, a map lookup, or any second verdict. kernelExprs must name
+// exactly the typed expressions, in order, so a kind the decoder dropped cannot
+// hide inside a rule that otherwise fits.
+func hostOverlayRuleFitsTemplate(rule *nftables.Rule, kernelExprs []string, marker string) bool {
+	e := rule.Exprs
+	var names []string
+	i := 0
+	scope := func(key expr.MetaKey) bool {
+		if i+1 >= len(e) {
+			return false
+		}
+		m, ok := e[i].(*expr.Meta)
+		if !ok || m.Key != key || m.SourceRegister || m.Register != 1 {
+			return false
+		}
+		switch x := e[i+1].(type) {
+		case *expr.Cmp:
+			if x.Op != expr.CmpOpEq || x.Register != 1 || len(x.Data) != unix.IFNAMSIZ {
+				return false
+			}
+			names = append(names, "meta", "cmp")
+		case *expr.Lookup:
+			if x.SourceRegister != 1 || x.IsDestRegSet || x.DestRegister != 0 || x.Invert {
+				return false
+			}
+			names = append(names, "meta", "lookup")
+		default:
+			return false
+		}
+		i += 2
+		return true
+	}
+	if !scope(expr.MetaKeyIIFNAME) {
+		return false
+	}
+	if i < len(e) {
+		if m, ok := e[i].(*expr.Meta); ok && m.Key == expr.MetaKey(metaKeySDIFNAME) {
+			if !scope(expr.MetaKey(metaKeySDIFNAME)) {
+				return false
+			}
+		}
+	}
+	if i < len(e) {
+		if _, ok := e[i].(*expr.Counter); ok {
+			names = append(names, "counter")
+			i++
+		}
+	}
+	if i >= len(e) {
+		return false
+	}
+	if o, ok := e[i].(*expr.Objref); !ok || o.Type != nftObjTypeCounter || o.Name != marker {
+		return false
+	}
+	names = append(names, "objref")
+	i++
+	if i != len(e)-1 {
+		return false
+	}
+	if v, ok := e[i].(*expr.Verdict); !ok || v.Kind != expr.VerdictDrop || v.Chain != "" {
+		return false
+	}
+	names = append(names, "immediate")
+	return slices.Equal(kernelExprs, names)
+}
+
+// decodeHostOverlayRule reads one input-chain rule as a fence overlay rule: its
+// iifname (master) and sdifname (slave) scopes, whether it carries the marker,
+// and whether it carries a DROP verdict. negated reports an interface scope
+// that is NOT a plain equality: a Cmp other than CmpOpEq, or an inverted
+// lookup. `iifname != "st0" ... drop` drops everything EXCEPT the revoked
+// master, so such a rule must never decode as a fence on st0 (#18721 fold 7).
+func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, marker string) (masters, slaves []string, markerSeen, dropSeen, negated bool) {
 	pending := 0 // 1=iifname, 2=sdifname
 	var reg uint32
 	for _, anyExpr := range rule.Exprs {
@@ -296,6 +559,9 @@ func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, ma
 			reg = x.Register
 		case *expr.Cmp:
 			if pending != 0 && x.Register == reg {
+				if x.Op != expr.CmpOpEq {
+					negated = true
+				}
 				name := string(bytes.TrimRight(x.Data, "\x00"))
 				if pending == 1 {
 					masters = append(masters, name)
@@ -306,6 +572,9 @@ func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, ma
 			pending = 0
 		case *expr.Lookup:
 			if pending != 0 && x.SourceRegister == reg {
+				if x.Invert {
+					negated = true
+				}
 				if pending == 1 {
 					masters = append(masters, setNames[x.SetName]...)
 				} else {
@@ -322,7 +591,7 @@ func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, ma
 			pending = 0
 		}
 	}
-	return masters, slaves, markerSeen, dropSeen
+	return masters, slaves, markerSeen, dropSeen, negated
 }
 
 func (in *netlinkInstaller) InstallColdBootFence(spec FenceSpec) error {
@@ -354,8 +623,10 @@ func (in *netlinkInstaller) InstallGapFence(spec GapFenceSpec) error {
 	return err
 }
 
-// InstallLo0 returns the rendered rule count alongside the error so the caller
-// can tell a real operator filter from an empty `policy accept` shell (#6529).
+// InstallLo0 returns the rendered operator-rule count (nlPlan.operatorRules:
+// every rule but the #16841 zero-hop rule, #18746) alongside the error, so the
+// caller can tell a real operator filter from an empty `policy accept` shell
+// (#6529).
 // The count comes from the ACTUAL build — nlPlan.rules, populated as each rule
 // is batched — so it can never drift from the lowering the way a second,
 // daemon-side "does this spec enforce anything?" predicate would.
@@ -408,11 +679,15 @@ func (in *netlinkInstaller) replaceTable(name string, priority nftables.ChainPri
 			return 0, errors.Join(flushErr, fmt.Errorf("nftables readback %s: %w", name, readbackErr))
 		}
 		if installed {
-			return len(p.rules), nil
+			// #18746: recovery used to be silent, so a lost ACK left no trace.
+			// It is rare (a large replace with an overflowed ACK socket), and
+			// it fires once per affected install.
+			slog.Info("nftables flush ACK lost; kernel readback matches the plan", "table", name, "flush_err", err)
+			return p.operatorRules(), nil
 		}
 		return 0, flushErr
 	}
-	return len(p.rules), nil
+	return p.operatorRules(), nil
 }
 
 func (in *netlinkInstaller) DeleteTable(name string) error {
@@ -468,14 +743,13 @@ func (in *netlinkInstaller) TableEnforcing(name string) (bool, error) {
 	if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookInput || chain.Type != nftables.ChainTypeFilter {
 		return false, nil
 	}
-	rules, err := c.GetRules(tbl, chain)
+	// #18746: the #16841 zero-hop rule heads every input chain xpf installs,
+	// so a table holding only that rule is still an empty shell.
+	operator, err := inputRulesBeyondZeroHop(c, tbl, chain)
 	if err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return false, nil
-		}
 		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
 	}
-	return len(rules) > 0, nil
+	return len(operator) > 0, nil
 }
 
 // TableDropsInput reports whether the named inet-family table currently
@@ -516,14 +790,14 @@ func (in *netlinkInstaller) TableDropsInput(name string) (bool, error) {
 	if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookInput || chain.Type != nftables.ChainTypeFilter {
 		return false, nil
 	}
-	rules, err := c.GetRules(tbl, chain)
+	// #18746: the #16841 zero-hop rule's DROP is not host-inbound enforcement.
+	// Since #16841 it sits in every xpf input chain, so counting it made an
+	// admits-only table read as dropping.
+	operator, err := inputRulesBeyondZeroHop(c, tbl, chain)
 	if err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return false, nil
-		}
 		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
 	}
-	for _, rule := range rules {
+	for _, rule := range operator {
 		for _, anyExpr := range rule.Exprs {
 			if verdict, ok := anyExpr.(*expr.Verdict); ok && verdict.Kind == expr.VerdictDrop {
 				return true, nil

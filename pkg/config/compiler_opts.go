@@ -3938,6 +3938,15 @@ type compileOpts struct {
 	// direct CompileConfig and every tolerant compile) keeps both protections
 	// closed. Held only for equality checks and never logged or rendered.
 	currentClusterAccepted16858 *clusterAcceptedKeys16858
+	// judgePlaceholders18744 turns on the #18744 placeholder gate: refuse a
+	// published key that is not in currentClusterAccepted16858 (an empty set
+	// when that is nil). It is set only by the strict candidate pipeline
+	// through CompileConfigJudgingPlaceholders. configstore judges every
+	// commit except the bootstrap import on a never-committed store, and it
+	// stops judging once a committed config no longer compiles (#1960),
+	// because its accepted set is then unknown. check-config, day-0, direct
+	// CompileConfig and every tolerant compile leave it false.
+	judgePlaceholders18744 bool
 }
 
 // strictCompileOpts returns the compileOpts for the strict commit /

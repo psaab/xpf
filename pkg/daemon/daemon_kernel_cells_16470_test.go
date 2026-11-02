@@ -40,10 +40,15 @@ var daemonKernelCells16470 = []string{
 	"TestDirectVIPPrefixOnlyRenumberOnKernel18573",
 	"TestDirectVIPRenumberOnKernel18573",
 	"TestDirectVIPStampRoundTripsThroughTheKernel18573",
+	// #18746: the zero-hop-only table must read as drift (kernel-truth
+	// recheck) and refuse the early-barrier handoff.
+	"TestHandoffReverifyRefusesAZeroHopOnlyTable18746",
 	"TestHostInboundDHCPManagementVRFColdBootProductionFence12127",
 	"TestHostInboundDHCPManagementVRFDelivery12127",
 	"TestHostInboundDHCPManagementVRFGapDelivery12127",
 	"TestHostInputFenceLiveReadbackAndRestore9506",
+	"TestKernelTruthDeclaresDriftOnAZeroHopOnlyTable18746",
+	"TestLo0EmptyShellGuardFiresOnTheRealInstaller18746",
 	"TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385",
 	"TestMgmtStaticECMPLifecycleInKernel12539",
 	"TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084",

@@ -98,7 +98,10 @@ MUTATE_CELL_TIMEOUT="${MUTATE_CELL_TIMEOUT:-2400}"
 # would attribute this cell's verdict to the previous cell's failures.
 gate_go() {
 	: > "$GOTESTJSON_LOG"
-	(cd "$REPO" && GOTESTJSON="$GOTESTJSON_LOG" timeout --kill-after=30s "$MUTATE_CELL_TIMEOUT" make test-go) 2>&1
+	# #18778: go's own -timeout must fire BEFORE the external kill, so the
+	# goroutine dump naming the stuck test survives (mutate-lib.sh's VOID
+	# reading depends on it); 3/4 of the cell budget leaves room for build.
+	(cd "$REPO" && GOTESTJSON="$GOTESTJSON_LOG" GOTEST_TIMEOUT="$((MUTATE_CELL_TIMEOUT * 3 / 4))s" timeout --kill-after=30s "$MUTATE_CELL_TIMEOUT" make test-go) 2>&1
 }
 gate_rust() { (cd "$REPO" && timeout --kill-after=30s "$MUTATE_CELL_TIMEOUT" make test-rust) 2>&1; }
 

@@ -90,6 +90,8 @@ var clusterStatements = map[string]int{
 	"dhcp-lease-synchronization":      0,
 	"fabric-interface-authenticated":  0,
 	"fabric1-interface-authenticated": 0,
+	"fabric-interface-private":        0,
+	"fabric1-interface-private":       0,
 	"hitless-restart":                 0,
 	"no-reth-vrrp":                    0,
 	"private-rg-election":             0,
