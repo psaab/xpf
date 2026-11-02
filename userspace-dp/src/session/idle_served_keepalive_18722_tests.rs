@@ -959,6 +959,38 @@ fn pair_exception_closing_companion_is_not_aligned_18722() {
         "#18722: a closing companion does not take the pair baselines"
     );
 }
+/// A GC-only keep advances `last_seen_ns` to schedule the next expiry pass,
+/// but it is not a packet served by this worker and must not refresh the
+/// sibling timestamp exported by ct-slice.
+#[test]
+fn gc_keep_retimestamp_is_not_sibling_packet_evidence_18742() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let t0 = 1_000 * SEC;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&forward, t0 + SEC, TCP_ACK)
+        .is_some());
+    table.account_packet(&forward, 64, TCP_ACK, 0);
+    assert!(table
+        .lookup_with_origin(&reverse, t0 + 2 * SEC, TCP_ACK)
+        .is_some());
+    table.account_packet(&reverse, 64, TCP_ACK, 0);
+
+    let packet_time = table.packet_counts_and_last_packet_seen_for(&forward).2;
+    assert_eq!(packet_time, t0 + 2 * SEC);
+    // `opening_companion_keeps_alive` and pair alignment use this same
+    // now-stamp to schedule a GC-only retention. No packet lands at this time.
+    let synthetic_gc_time = t0 + 20 * SEC;
+    table.entry_by_key_mut(&forward).unwrap().last_seen_ns = synthetic_gc_time;
+    table.entry_by_key_mut(&reverse).unwrap().last_seen_ns = synthetic_gc_time;
+
+    let exported_packet_time = table.packet_counts_and_last_packet_seen_for(&forward).2;
+    assert_eq!(
+        exported_packet_time, packet_time,
+        "GC-only last_seen refreshes must not become sibling packet evidence"
+    );
+}
 
 /// PAIR-MODEL EXCEPTION 2: NON-TCP pairs never take the node-level arm.
 /// A UDP replica pair with served, advancing node evidence still ages on
@@ -1139,6 +1171,10 @@ fn session_entry_size_is_pinned_18722() {
     let hot = [
         ("last_seen_ns", offset_of!(SessionEntry, last_seen_ns)),
         (
+            "last_packet_seen_ns",
+            offset_of!(SessionEntry, last_packet_seen_ns),
+        ),
+        (
             "expires_after_ns",
             offset_of!(SessionEntry, expires_after_ns),
         ),
@@ -1186,13 +1222,14 @@ fn session_entry_size_is_pinned_18722() {
     assert_eq!(
         size_of::<SessionEntry>(),
         SESSION_ENTRY_SIZE_18722,
-        "SessionEntry changed size: re-pin with a cited reason (640 B at #18722/#18742)"
+        "SessionEntry changed size: re-pin with a cited reason (648 B after the #18742 packet-time stamp)"
     );
 }
 
 /// Master `SessionEntry` (600 B at 218c320230) plus the two #18722 count
-/// baselines and #18742 shared-incarnation identity / last-change clock.
-const SESSION_ENTRY_SIZE_18722: usize = 640;
+/// baselines, #18742 shared-incarnation identity / last-change clock, and the
+/// #18742 packet-only sibling timestamp (8 B).
+const SESSION_ENTRY_SIZE_18722: usize = 648;
 /// #18742 small-window cell helper: force a pure-Opening replica pair onto a
 /// `window` idle window. `session_timeout_ns` never applies an app override to
 /// an Opening row, so stamp the window directly on both halves and re-bucket;

@@ -734,7 +734,6 @@ fn merge_owner_rg_candidate_keys_scales_linearly_not_quadratically() {
 // --- #2170 install-generation guard (helper-side belt-and-suspenders) -----
 
 fn synced_entry_with_generation(generation: u64) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
         key: test_key(),
@@ -1047,7 +1046,6 @@ fn upsert_peer_against_local_arriving_during_snapshot_window_keeps_local_13709()
 // queue, so the `is_none()` / not-enqueued reject assertions below fail as
 // clean assertions. Target-count = 1 gate site.
 fn synced_entry_port(port: u16, generation: u64) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
         key: SessionKey {
@@ -3074,7 +3072,6 @@ fn synced_import_zone_unresolved_counts_only_real_degradation_7209() {
 }
 
 fn reserve6600_entry(src_port: u16, pool_port: u16) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
         key: SessionKey {
@@ -5755,7 +5752,6 @@ fn purge8138_snapshot(with_tunnel: bool) -> ConfigSnapshot {
 }
 
 fn purge8138_entry(src_port: u16, pool_port: u16, tunnel_id: u16) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let mut e = reserve6600_entry(src_port, pool_port);
     e.decision.resolution.tunnel_endpoint_id = tunnel_id;
     e
@@ -5986,7 +5982,6 @@ fn both_purge_call_sites_release_against_new_forwarding_8138() {
 // ---------------------------------------------------------------------------
 
 fn purge14961_nat64_entry(src_port: u16, pool_port: u16, tunnel_id: u16) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let mut e = SyncedSessionEntry {
         sibling_last_seen_ns: 0,
         key: SessionKey {
@@ -6937,7 +6932,6 @@ fn snat_row_9514(port: u16) -> NatDecision {
 }
 
 fn synced_with_nat_9514(key: SessionKey, nat: NatDecision, generation: u64) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let mut e = synced_entry_with_generation(generation);
     e.key = key;
     e.decision.nat = nat;
@@ -7068,7 +7062,6 @@ fn port_is_free_9678(coordinator: &Coordinator, probe_src_port: u16, pool_port: 
 }
 
 fn peer_entry_9678() -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let mut entry = reserve6600_entry(FLOW_SRC_PORT_9678, PEER_PORT_9678);
     entry.metadata.owner_rg_id = RG_9678;
     entry

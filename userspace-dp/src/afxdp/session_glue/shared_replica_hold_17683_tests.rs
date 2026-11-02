@@ -162,7 +162,6 @@ fn shared_entry_with_owner_hold(
     fixture: &LeaseFixture,
     hold: PersistentLeaseHold,
 ) -> crate::afxdp::SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let mut entry = fixture.shared_entry.clone();
     entry.persistent_lease_hold = Some(hold);
     entry

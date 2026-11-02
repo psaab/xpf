@@ -57,7 +57,6 @@ fn wan_v6() -> Ipv6Addr {
 /// Client -> iperf3 server, interface-SNAT'd to the WAN address on
 /// `snat_port`.
 fn forward_entry(v6: bool, snat_port: u16, origin: SessionOrigin) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let (family, src, dst, snat) = if v6 {
         (
             libc::AF_INET6 as u8,

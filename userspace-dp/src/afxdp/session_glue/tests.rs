@@ -3257,7 +3257,6 @@ fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
 // The wire lookup must fail closed while W is ambiguous, and must resolve
 // again to the survivor once the displacing owner is removed.
 fn wire_ambiguity_entry(vip: Ipv4Addr, backend: Ipv4Addr) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
@@ -11647,7 +11646,6 @@ fn poison_command_queue(queue: &Arc<Mutex<VecDeque<WorkerCommand>>>) {
 }
 
 fn test_synced_entry() -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
@@ -11775,7 +11773,6 @@ fn replicate_session_delete_delivers_to_poisoned_queue() {
 // negative cases are kept in ONE test to avoid cross-test ordering effects.
 
 fn w3_forward_entry(src_host: u8, src_port: u16, snat_ip: Ipv4Addr) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     // Interface-mode SNAT shape: rewrite_src set, NO source-port rewrite —
     // the portless mode that makes the reverse key collide (#1760 §2.7).
     SyncedSessionEntry { sibling_last_seen_ns: 0, key: SessionKey {
@@ -17523,7 +17520,6 @@ fn f3_key_6979() -> crate::session::SessionKey {
 }
 
 fn f3_entry_6979(nat: NatDecision) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let mut decision = test_decision();
     decision.nat = nat;
     SyncedSessionEntry { sibling_last_seen_ns: 0, key: f3_key_6979(),

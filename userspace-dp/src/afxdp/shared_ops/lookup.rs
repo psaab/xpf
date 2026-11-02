@@ -742,7 +742,7 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts(
     forward_key: &SessionKey,
     nat: crate::nat::NatDecision,
     source_namespace: u16,
-    source_last_seen_ns: u64,
+    source_packet_seen_ns: u64,
     fwd_packets: u64,
     rev_packets: u64,
 ) {
@@ -760,7 +760,7 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts(
                     && source_namespace != (entry.session_id >> 48) as u16
                 {
                     entry.sibling_last_seen_ns =
-                        entry.sibling_last_seen_ns.max(source_last_seen_ns);
+                        entry.sibling_last_seen_ns.max(source_packet_seen_ns);
                 }
             }
         }
@@ -780,7 +780,7 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts(
 /// `shared_forward_wire_sessions`, taken one after the other and never
 /// nested). Every row is updated max-only, including its latest sibling
 /// packet timestamp; the final state matches calling the single-pair helper
-/// for each `(key, nat, fwd, rev, last_seen)` in turn.
+/// for each `(key, nat, fwd, rev, packet_seen_ns)` in turn.
 /// Pairs with zero counts are skipped, as before.
 pub(in crate::afxdp) fn restamp_shared_packet_counts_batch(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -793,7 +793,7 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts_batch(
     }
     {
         let mut sessions = lock_shared_recover(shared_sessions);
-        for (forward_key, nat, fwd_packets, rev_packets, source_last_seen_ns) in pairs {
+        for (forward_key, nat, fwd_packets, rev_packets, source_packet_seen_ns) in pairs {
             if *fwd_packets == 0 && *rev_packets == 0 {
                 continue;
             }
@@ -806,7 +806,7 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts_batch(
                         && source_namespace != (entry.session_id >> 48) as u16
                     {
                         entry.sibling_last_seen_ns =
-                            entry.sibling_last_seen_ns.max(*source_last_seen_ns);
+                            entry.sibling_last_seen_ns.max(*source_packet_seen_ns);
                     }
                 }
             }

@@ -958,15 +958,15 @@ pub(super) fn stage_flow_cache_hit(
             // adoption gate's completed-handshake evidence for a
             // HandshakePending canonical row. Only admitted traffic
             // raises these counts; synthesized companions carry 0.
-            let (fwd, rev, last_seen_ns) =
-                sessions.packet_counts_and_last_seen_for(&stage_forward_key);
+            let (fwd, rev, packet_seen_ns) =
+                sessions.packet_counts_and_last_packet_seen_for(&stage_forward_key);
             crate::afxdp::shared_ops::restamp_shared_packet_counts(
                 worker_ctx.shared_sessions,
                 worker_ctx.shared_forward_wire_sessions,
                 &stage_forward_key,
                 stage_forward_nat,
                 sessions.session_id_namespace(),
-                last_seen_ns,
+                packet_seen_ns,
                 fwd,
                 rev,
             );

@@ -1548,7 +1548,6 @@ fn synced_entry_for(
     decision: SessionDecision,
     metadata: SessionMetadata,
 ) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
         key: key.clone(),

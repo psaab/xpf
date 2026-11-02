@@ -3,7 +3,6 @@ use super::*;
 use std::sync::atomic::Ordering;
 
 fn session_entry() -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
         key: SessionKey {

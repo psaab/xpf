@@ -137,7 +137,6 @@ fn entry(
     is_reverse: bool,
     counter: Option<Arc<crate::policy::PolicyRuleCounter>>,
 ) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
         key,

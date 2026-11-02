@@ -214,7 +214,6 @@ fn snat(port: u16) -> crate::nat::NatDecision {
 }
 
 fn row(key: &SessionKey, nat: crate::nat::NatDecision, session_id: u64) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let metadata = crate::session::SessionMetadata {
         ingress_zone: 1,
         egress_zone: 2,

@@ -792,7 +792,6 @@ fn split_rg_live_shape_time_exceeded_reaches_lan_host_18174() {
 /// hand it to the peer: ForwardCandidate out the WAN unit, the same NAT
 /// decision and zones, SyncImport origin.
 fn exported_forward_row(sessions: &SessionTable, key: &SessionKey) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let (decision, metadata, _origin) = sessions.entry_with_origin(key).expect("premise: forward row installed");
     assert!(!metadata.is_reverse, "premise: the forward row");
     SyncedSessionEntry {

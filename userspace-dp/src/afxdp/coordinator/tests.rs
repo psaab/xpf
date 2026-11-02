@@ -11988,7 +11988,6 @@ fn import_entry_9718(
     key: &crate::session::SessionKey,
     pool_port: u16,
 ) -> crate::afxdp::worker::SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     crate::afxdp::worker::SyncedSessionEntry {
         sibling_last_seen_ns: 0,
         key: key.clone(),

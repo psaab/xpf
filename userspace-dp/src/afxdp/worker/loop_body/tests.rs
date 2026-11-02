@@ -224,7 +224,6 @@ mod flow_cache_invalidation_tests {
     }
 
     fn serving_shared_entry(key: &SessionKey, session_id: u64) -> SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
         SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: reap_decision(None),
         metadata: reap_metadata(),
@@ -511,7 +510,7 @@ mod flow_cache_invalidation_tests {
                 NatDecision::default(),
                 table_a.fwd_packets_for(&key),
                 table_a.rev_packets_for(&key),
-                table_a.packet_counts_and_last_seen_for(&key).2,
+                table_a.packet_counts_and_last_packet_seen_for(&key).2,
             )],
         );
         crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
@@ -523,7 +522,7 @@ mod flow_cache_invalidation_tests {
                 NatDecision::default(),
                 table_b.fwd_packets_for(&key),
                 table_b.rev_packets_for(&key),
-                table_b.packet_counts_and_last_seen_for(&key).2,
+                table_b.packet_counts_and_last_packet_seen_for(&key).2,
             )],
         );
         assert!(
@@ -652,7 +651,7 @@ mod flow_cache_invalidation_tests {
                 NatDecision::default(),
                 table_b.fwd_packets_for(&key),
                 table_b.rev_packets_for(&key),
-                table_b.packet_counts_and_last_seen_for(&key).2,
+                table_b.packet_counts_and_last_packet_seen_for(&key).2,
             )],
         );
         let expired = table_a.expire_stale_entries_ha(now, Some(&ha));

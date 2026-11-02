@@ -38,7 +38,6 @@ fn decision() -> SessionDecision {
 /// The serving pair's canonical shared row: Established, counts as the
 /// ct-slice last restamped them (0 until the first restamp).
 fn serving_row(key: &SessionKey) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
         key: key.clone(),

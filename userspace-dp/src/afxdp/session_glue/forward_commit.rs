@@ -238,7 +238,6 @@ pub(in crate::afxdp) fn forward_synced_entry(
     session_id: u64,
     handshake_state_wire: u8,
 ) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
         key: key.clone(),

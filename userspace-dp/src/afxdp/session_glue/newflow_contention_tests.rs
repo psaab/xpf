@@ -113,7 +113,6 @@ fn resolution() -> ForwardingResolution {
 }
 
 fn entry(src_port: u16) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry { sibling_last_seen_ns: 0, key: key(src_port),
     decision: SessionDecision {
         resolution: resolution(),
@@ -208,7 +207,6 @@ fn replication_counters() -> ReplicationCounters {
 }
 
 fn nat_entry(routing_domain: u32, translated_src: Ipv4Addr) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let mut e = entry(41001);
     e.key.routing_domain = routing_domain;
     e.decision.nat.rewrite_src = Some(IpAddr::V4(translated_src));
@@ -917,7 +915,6 @@ fn replication_contention_denominator_counts_only_attempted_acquisitions() {
 // last-owner assertions fail where removal never touched the index.
 
 fn nat_entry_15104(src_port: u16, translated_port: u16) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let mut e = entry(src_port);
     e.decision.nat.rewrite_src = Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
     e.decision.nat.rewrite_src_port = Some(translated_port);
@@ -1130,7 +1127,6 @@ fn shared_nat_ambiguity_survivor_controls_15104() {
 // share one wire key are covered by the #15106 mechanism cell.
 
 fn snat_distinct_wire_entry_16561(i: u32) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let mut e = entry(10_000 + (i % 1000) as u16);
     e.key.dst_ip = IpAddr::V4(Ipv4Addr::new(172, 16, (i / 256) as u8, (i % 256) as u8));
     e.key.dst_port = 5201 + (i % 500) as u16;

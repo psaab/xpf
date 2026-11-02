@@ -92,7 +92,6 @@ fn wan_v6() -> Ipv6Addr {
 /// Client -> iperf3 server, interface-SNAT'd to the WAN address, Established,
 /// carrying a peer session id so the #16043 same-incarnation rule applies.
 fn peer_forward(v6: bool, origin: SessionOrigin) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let (family, src, dst, snat) = if v6 {
         (
             libc::AF_INET6 as u8,

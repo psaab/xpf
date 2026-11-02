@@ -249,9 +249,9 @@ fn run_shared_evidence_leg(
     // #18655: one batch, so each map's mutex is taken once per
     // slice instead of once (or twice) per counted pair.
     let mut counted: Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64)> = Vec::new();
-    for (key, nat, fwd, rev, last_seen_ns) in sessions.ct_slice_forward_pairs() {
+    for (key, nat, fwd, rev, packet_seen_ns) in sessions.ct_slice_forward_pairs() {
         if fwd > 0 || rev > 0 {
-            counted.push((key, nat, fwd, rev, last_seen_ns));
+            counted.push((key, nat, fwd, rev, packet_seen_ns));
         }
     }
     let source_namespace = sessions.session_id_namespace();
@@ -290,9 +290,10 @@ fn run_shared_evidence_leg(
     // max-idempotent no-cost overlap.)
     counted.clear();
     for (key, nat) in &collected {
-        let (fwd, rev, last_seen_ns) = sessions.packet_counts_and_last_seen_for(key);
+        let (fwd, rev, packet_seen_ns) =
+            sessions.packet_counts_and_last_packet_seen_for(key);
         if fwd > 0 || rev > 0 {
-            counted.push((key.clone(), *nat, fwd, rev, last_seen_ns));
+            counted.push((key.clone(), *nat, fwd, rev, packet_seen_ns));
         }
     }
     crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(

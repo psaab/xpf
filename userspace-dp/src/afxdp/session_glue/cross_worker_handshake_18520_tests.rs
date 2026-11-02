@@ -158,7 +158,6 @@ fn pump(node: &mut Node) {
 }
 
 fn reverse_synced_entry(node: &Node, origin: SessionOrigin, handshake: u8, session_id: u64) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
         key: node.reverse_key.clone(),

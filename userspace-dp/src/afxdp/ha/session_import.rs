@@ -3172,7 +3172,6 @@ mod rejected_mirror_reservation_10790_tests {
         generation: u64,
         session_id: u64,
     ) -> SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
         SyncedSessionEntry {
             sibling_last_seen_ns: 0,
             key,

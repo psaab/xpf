@@ -1236,6 +1236,9 @@ struct SessionEntry {
     origin: SessionOrigin,
     install_epoch: u64,
     last_seen_ns: u64,
+    /// Latest admitted packet time, kept distinct from `last_seen_ns`, which
+    /// expiry and HA maintenance may re-stamp without packet activity.
+    last_packet_seen_ns: u64,
     /// #2465: monotonic (`CLOCK_MONOTONIC`) nanosecond timestamp at which this
     /// entry was first installed. Unlike `last_seen_ns` it is write-once: it is
     /// NOT re-stamped by `touch`/`update_session`/`refresh_for_ha_transition`,
@@ -1937,6 +1940,7 @@ struct ProbeHalfUndo {
     handshake_pending: bool,
     syn_ack_first: bool,
     last_seen_ns: u64,
+    last_packet_seen_ns: u64,
     expires_after_ns: u64,
 }
 
@@ -1951,6 +1955,7 @@ impl ProbeHalfUndo {
             handshake_pending: entry.handshake_pending,
             syn_ack_first: entry.syn_ack_first,
             last_seen_ns: entry.last_seen_ns,
+            last_packet_seen_ns: entry.last_packet_seen_ns,
             expires_after_ns: entry.expires_after_ns,
         }
     }
@@ -4828,6 +4833,7 @@ impl SessionTable {
             let mut seen = snap.last_seen_ns;
             if let Some(entry) = table.entry_by_key_mut(half_key) {
                 entry.counters = snap.counters;
+                entry.last_packet_seen_ns = snap.last_packet_seen_ns;
                 entry.observed_tcp_flags = snap.observed_tcp_flags;
                 entry.observed_tos = snap.observed_tos;
                 entry.established = snap.established;
@@ -4989,6 +4995,9 @@ impl SessionTable {
                     // check after the borrow instead of refusing.
                     companion_crossed = true;
                 } else {
+                // The cache probe precedes optional output admission; its undo
+                // snapshot restores this stamp if a later filter/policer drops.
+                entry.last_packet_seen_ns = now_ns;
                 // #18520: a live cache hit on this table. Stored only on
                 // change: a steady-state hit on a reverse row is otherwise
                 // read-only (accounting folds onto the forward row), and an
@@ -5635,7 +5644,26 @@ impl SessionTable {
     /// FORWARD entry, exactly like the reverse counters, so a single close
     /// harvest sees the whole flow.
     #[inline]
+    #[cfg(test)]
     pub fn account_packet(&mut self, key: &SessionKey, len: u64, tcp_flags: u8, dscp: u8) {
+        let packet_seen_ns = self
+            .record_by_key(key)
+            .map_or(0, |record| record.entry.last_seen_ns);
+        self.account_packet_at(key, len, tcp_flags, dscp, packet_seen_ns);
+    }
+
+    /// #18742: record an admitted packet with its monotonic packet time. This
+    /// field is the sibling recency evidence exported by ct-slice; unlike
+    /// `last_seen_ns`, it is never advanced by GC or HA maintenance.
+    #[inline]
+    pub fn account_packet_at(
+        &mut self,
+        key: &SessionKey,
+        len: u64,
+        tcp_flags: u8,
+        dscp: u8,
+        packet_seen_ns: u64,
+    ) {
         // Single resolve. For the dominant FORWARD case this is the only
         // session probe `account_packet` does — read the direction and mutate
         // the `fwd` counters under this one `&mut record` borrow. For the
@@ -5643,6 +5671,7 @@ impl SessionTable {
         // tuple and fall out of this borrow before the second resolve.
         let (record_key, nat) = match self.record_by_key_mut(key) {
             Some(record) => {
+                record.entry.last_packet_seen_ns = packet_seen_ns;
                 if !record.entry.metadata.is_reverse {
                     // Forward packet → forward entry. Bump `fwd` in place and
                     // stamp the forward-direction ToS + OR the TCP flags.

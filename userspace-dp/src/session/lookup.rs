@@ -2347,12 +2347,13 @@ impl SessionTable {
     /// #16217 (fw1 rev=0 leg): every non-reverse, non-closing forward
     /// pair this table holds, regardless of origin or stage. The
     /// ct-slice stamps each such pair's OWN live counters (folded by
-    /// `account_packet` where packets land, including onto `SyncImport`
-    /// replicas that serve reverse traffic on the backup) and its packet
-    /// `last_seen_ns` onto the shared rows BEFORE the evidence read. The
-    /// timestamp distinguishes a live sibling with a lower counter total from
-    /// an idle owner row whose shared count is already at its max. Bounded by
-    /// table size, one walk per slice.
+    /// `account_packet_at` on slow paths and `probe_hit_inner` on cache hits,
+    /// including onto `SyncImport` replicas that serve reverse traffic on the
+    /// backup) and its latest admitted packet timestamp onto shared rows before
+    /// the evidence read.
+    /// The timestamp distinguishes a live sibling with a lower counter total
+    /// from an idle owner row whose shared count is already at its max.
+    /// Bounded by table size, one walk per slice.
     pub(crate) fn ct_slice_forward_pairs(
         &self,
     ) -> Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64)> {
@@ -2361,47 +2362,47 @@ impl SessionTable {
         for idx in 0..cap {
             if let Some(record) = self.entries.get(idx) {
                 if !record.entry.metadata.is_reverse && !record.entry.closing {
-                    let forward_last_seen_ns = record.entry.last_seen_ns;
+                    let forward_packet_seen_ns = record.entry.last_packet_seen_ns;
                     let reverse_key =
                         reverse_session_key(&record.key, record.entry.decision.nat);
-                    let last_seen_ns = self
+                    let packet_seen_ns = self
                         .entry_by_key(&reverse_key)
-                        .map_or(forward_last_seen_ns, |reverse| {
-                            reverse.last_seen_ns.max(forward_last_seen_ns)
+                        .map_or(forward_packet_seen_ns, |reverse| {
+                            reverse.last_packet_seen_ns.max(forward_packet_seen_ns)
                         });
                     out.push((
                         record.key.clone(),
                         record.entry.decision.nat,
                         record.entry.counters.fwd_packets,
                         record.entry.counters.rev_packets,
-                        last_seen_ns,
+                        packet_seen_ns,
                     ));
                 }
             }
         }
         out
     }
-    /// Return forward-pair counters and the newest packet timestamp from
-    /// either half. Directional lookup stamps its own row, while ct-slice
+    /// Return forward-pair counters and the newest admitted packet timestamp
+    /// from either half. Directional lookup stamps its own row, while ct-slice
     /// publishes one canonical forward-row record.
-    pub(crate) fn packet_counts_and_last_seen_for(
+    pub(crate) fn packet_counts_and_last_packet_seen_for(
         &self,
         key: &SessionKey,
     ) -> (u64, u64, u64) {
         let Some(entry) = self.entry_by_key(key) else {
             return (0, 0, 0);
         };
-        let forward_last_seen_ns = entry.last_seen_ns;
+        let forward_packet_seen_ns = entry.last_packet_seen_ns;
         let reverse_key = reverse_session_key(key, entry.decision.nat);
-        let last_seen_ns = self
+        let packet_seen_ns = self
             .entry_by_key(&reverse_key)
-            .map_or(forward_last_seen_ns, |reverse| {
-                reverse.last_seen_ns.max(forward_last_seen_ns)
+            .map_or(forward_packet_seen_ns, |reverse| {
+                reverse.last_packet_seen_ns.max(forward_packet_seen_ns)
             });
         (
             entry.counters.fwd_packets,
             entry.counters.rev_packets,
-            last_seen_ns,
+            packet_seen_ns,
         )
     }
     pub(crate) fn node_served_forward_slice(

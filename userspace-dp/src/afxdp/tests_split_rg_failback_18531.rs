@@ -134,7 +134,6 @@ pub(super) fn imported_pair_entry(
     key: crate::session::SessionKey,
     rewrite_src: IpAddr,
 ) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let next_hop = key.dst_ip;
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
@@ -875,7 +874,6 @@ fn window_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
 
 /// The forward row as fw1 (owner of both RGs) exports it.
 pub(super) fn exported_forward(forwarding: &ForwardingState, family: Family) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let (lan, wan, snat) = addrs(family);
     let neighbor_mac = match family {
         Family::V4 => [0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4],
@@ -1122,7 +1120,6 @@ fn reverse_reply_case(served: bool) {
 /// (`userspaceForwardWireAliasV4/V6`): the same value, keyed by the
 /// translated forward tuple.
 fn alias_of(entry: &SyncedSessionEntry) -> SyncedSessionEntry {
-    sibling_last_seen_ns: 0,
     let mut alias = entry.clone();
     alias.key = crate::session::forward_wire_key(&entry.key, entry.decision.nat);
     alias

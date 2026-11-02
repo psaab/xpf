@@ -630,6 +630,7 @@ impl SessionTable {
                 origin,
                 install_epoch: epoch,
                 last_seen_ns: now_ns,
+                last_packet_seen_ns: 0,
                 // #2465: stamp the creation instant once at install. Never
                 // re-stamped, so the close delta reports the true session age.
                 created_ns: now_ns,
@@ -1011,6 +1012,7 @@ impl SessionTable {
         // also anchors fresh.
         let (
             preserved_last_seen_ns,
+            preserved_last_packet_seen_ns,
             mut preserved_first_held_ns,
             preserved_wheel_tick,
             preserved_held_wheel_tick,
@@ -1043,6 +1045,7 @@ impl SessionTable {
                         // the old tick and schedules a current check.
                         (
                             Some(existing.last_seen_ns),
+                            Some(existing.last_packet_seen_ns),
                             existing.first_held_ns,
                             Some(existing.wheel_tick),
                             Some(existing.held_wheel_tick),
@@ -1051,13 +1054,13 @@ impl SessionTable {
                             Some(existing.held_wheel_first_held_ns),
                         )
                     } else {
-                        (None, 0, None, None, None, None, None)
+                        (None, None, 0, None, None, None, None, None)
                     }
                 }
-                None => (None, 0, None, None, None, None, None),
+                None => (None, None, 0, None, None, None, None, None),
             }
         } else {
-            (None, 0, None, None, None, None, None)
+            (None, None, 0, None, None, None, None, None)
         };
         // A primary-liveness frame renews the HOLD ceiling without changing
         // the preserved inactivity anchor above.
@@ -1151,6 +1154,7 @@ impl SessionTable {
                 origin,
                 install_epoch: epoch,
                 last_seen_ns: preserved_last_seen_ns.unwrap_or(now_ns),
+                last_packet_seen_ns: preserved_last_packet_seen_ns.unwrap_or(0),
                 // #2465: a re-imported synced entry stamps its creation instant
                 // to the import time. The peer's original creation time is not
                 // carried on the HA session-sync delta, so this best-effort

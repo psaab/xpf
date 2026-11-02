@@ -630,11 +630,12 @@ The evidence is scoped and bounded (#18722/#18742):
     `fwd+rev` count, plus stable `(session_id, generation)` identity. The
     identity makes equal-count replacement visible; `node_served_seen_shared`
     tracks both.
-  - `shared_sibling_last_seen_ns`: the serving worker's packet timestamp,
-    carried by the ct-slice restamp even when its cumulative count is below an
-    existing shared max. Completed local rows require this timestamp from a
-    different worker namespace and the exact canonical identity; only its age
-    proves sibling activity for these rows.
+- `shared_sibling_last_seen_ns`: the serving worker's latest admitted packet
+  time, carried by ct-slice even when its cumulative count is below an existing
+  shared max. It is exported from a dedicated packet timestamp, not the
+  expiry/HA `last_seen_ns` field that GC can re-stamp. Completed local rows
+  require this time from a different worker namespace and the exact canonical
+  identity; only its age proves sibling activity for these rows.
 
   Counts and identities are compared per contributor, never as a sum: a
   vanished contributor is neither activity nor silence, and a lower-count
@@ -643,8 +644,9 @@ The evidence is scoped and bounded (#18722/#18742):
   count remains eligible only through the computed
   `shared_evidence_max_cadence_ns`. For completed local rows, the sibling
   packet timestamp—not the max-only shared count—is the relevant recency proof.
-  The timestamp is the packet's time, not the restamp's time, so a quiet source
-  still ages out. Production computes the cadence bound from the live
+  The timestamp remains the packet's time, not the restamp's time: GC-only
+  retention cannot manufacture sibling evidence, and a quiet source still
+  ages out. Production computes the cadence bound from the live
   session-table slab on each housekeeping pass; the default is 13 s, covering
   the 10 s ct-slice target and the 2x default `max_sessions` population
   (12.8 s, rounded up), while larger HA-import populations compute a longer
@@ -1570,20 +1572,25 @@ unknown-zone decline).
 Each `SessionEntry` carries a `SessionCounters` (`fwd_packets`, `fwd_bytes`,
 `rev_packets`, `rev_bytes`) — plain `u64`s, not atomics, because the
 `SessionTable` is worker-owned and single-threaded (same precedent as
-`create_drops`). Every forwarded packet is accounted via
-`SessionTable::account_packet(key, len)` on the AF_XDP forwarding hot path:
+`create_drops`). Packet counters and the admitted packet time are updated on
+the AF_XDP forwarding hot path:
 
-- the flow-cache fast path (`poll_descriptor/flow_cache_hit.rs`) accounts
-  every packet of an established flow;
+- the flow-cache fast path (`poll_descriptor/flow_cache_hit.rs`) uses the fused
+  `probe_hit_inner` accounting path; its undo snapshot restores packet time if
+  a later output filter or policer drops the hit;
 - the slow-path forward-build chokepoint (`poll_descriptor/mod.rs`, the
-  `ForwardCandidate | FabricRedirect` branch) accounts the packets that
-  reach the full forward-build — the first packet(s) of a flow before its
-  cache entry warms, and any non-cacheable flow (NAT64/NPTv6).
+  `ForwardCandidate | FabricRedirect` branch) uses
+  `SessionTable::account_packet_at(key, len, tcp_flags, dscp, packet_seen_ns)`
+  after admission — the first packets before the cache warms, and any
+  non-cacheable flow (NAT64/NPTv6).
 
-`account_packet` derives the direction from the resolved entry rather than
-trusting the flow-cache `metadata.is_reverse` (which is always `false` —
-every cache entry is built from a forward-build decision). Both directions
-are folded onto the **single canonical forward entry**: a forward packet
+The packet timestamp is independent of expiry's `last_seen_ns`, which HA and
+GC maintenance may update without packet activity. The test-only
+`account_packet` helper uses the row's current time for existing fixtures.
+`probe_hit_inner` and `account_packet_at` derive direction from the resolved
+entry, not `metadata.is_reverse` (always `false` on flow-cache entries because
+they are built from a forward decision). Both paths fold both directions onto
+the **single canonical forward entry**: a forward packet
 keys directly to it (`fwd`); a reverse packet keys to the reverse entry,
 whose `reverse_session_key(rev.key, nat)` recovers the forward tuple, and
 the volume lands on the forward entry's `rev`. This keeps the
