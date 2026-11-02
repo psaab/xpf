@@ -455,6 +455,13 @@ type ProcessStatus struct {
 	SessionReplicationLockContendedTotal      uint64 `json:"session_replication_lock_contended_total,omitempty"`
 	SessionReplicationQueueDepthSum           uint64 `json:"session_replication_queue_depth_sum,omitempty"`
 	SessionReplicationQueueDepthMax           uint64 `json:"session_replication_queue_depth_max,omitempty"`
+	// #18520/#18529: the cross-worker TCP handshake relay's delivery-loss
+	// counters and separate sibling-queue lock attempt/contended pair.
+	// Omitempty for compatibility with older helpers.
+	HandshakeRelayOutboxDropsTotal   uint64 `json:"handshake_relay_outbox_drops_total,omitempty"`
+	HandshakeRelayRefusedTotal       uint64 `json:"handshake_relay_refused_total,omitempty"`
+	HandshakeRelayLockAttemptsTotal  uint64 `json:"handshake_relay_lock_attempts_total,omitempty"`
+	HandshakeRelayLockContendedTotal uint64 `json:"handshake_relay_lock_contended_total,omitempty"`
 	// #9169: the FOURTH #4800 site. Every session delta -- Open as well as
 	// Close -- allocates its wire sequence number and encodes its frame inside
 	// the helper's process-global producer_seq_lock, because #3878 F-152

@@ -537,6 +537,18 @@ pub(crate) struct ProcessStatus {
     pub session_replication_queue_depth_sum: u64,
     #[serde(rename = "session_replication_queue_depth_max", default)]
     pub session_replication_queue_depth_max: u64,
+    /// #18520/#18529: counters for the best-effort cross-worker TCP
+    /// handshake relay. Outbox drops and sibling-queue refusals are separate
+    /// delivery failures; the lock counters are attempts and the blocked
+    /// subset. Kept separate from #4800 session-replication accounting.
+    #[serde(rename = "handshake_relay_outbox_drops_total", default)]
+    pub handshake_relay_outbox_drops_total: u64,
+    #[serde(rename = "handshake_relay_refused_total", default)]
+    pub handshake_relay_refused_total: u64,
+    #[serde(rename = "handshake_relay_lock_attempts_total", default)]
+    pub handshake_relay_lock_attempts_total: u64,
+    #[serde(rename = "handshake_relay_lock_contended_total", default)]
+    pub handshake_relay_lock_contended_total: u64,
     /// #5674: peer-synced session imports rejected by the coordinator's
     /// aggregate admission bound (`upsert_synced_session`). Locally-created
     /// sessions are capped per worker at `max_sessions`; peer-synced imports

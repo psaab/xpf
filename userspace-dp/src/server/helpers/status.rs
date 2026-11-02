@@ -173,6 +173,15 @@ pub(crate) fn project_status(state: &mut ServerState) {
         state.afxdp.session_replication_queue_depth_sum();
     state.status.session_replication_queue_depth_max =
         state.afxdp.session_replication_queue_depth_max();
+    // #18529: the outbox/queue delivery failures and the relay-only
+    // sibling-queue lock pair, kept separate from session replication.
+    state.status.handshake_relay_outbox_drops_total =
+        state.afxdp.handshake_relay_outbox_drops_total();
+    state.status.handshake_relay_refused_total = state.afxdp.handshake_relay_refused_total();
+    state.status.handshake_relay_lock_attempts_total =
+        state.afxdp.handshake_relay_lock_attempts_total();
+    state.status.handshake_relay_lock_contended_total =
+        state.afxdp.handshake_relay_lock_contended_total();
     // #5674: peer-synced session imports rejected by the coordinator's
     // aggregate admission bound — the availability/DoS ceiling that keeps a
     // peer under session-table pressure (or a compromised peer) from driving

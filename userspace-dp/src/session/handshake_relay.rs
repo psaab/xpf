@@ -69,7 +69,7 @@ use super::*;
 pub(crate) const HANDSHAKE_RELAY_OUTBOX_CAP: usize = 256;
 
 /// Relays refused by a full outbox, process-wide (cold path: one relaxed
-/// add per refused relay). Not yet on the status/metrics surface (#18529).
+/// add per refused relay); exported on the status/metrics surface (#18529).
 pub(crate) static HANDSHAKE_RELAY_OUTBOX_DROPS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]

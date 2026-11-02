@@ -487,6 +487,10 @@ pub(crate) fn run() -> Result<(), String> {
             session_replication_lock_contended_total: 0,
             session_replication_queue_depth_sum: 0,
             session_replication_queue_depth_max: 0,
+            handshake_relay_outbox_drops_total: 0,
+            handshake_relay_refused_total: 0,
+            handshake_relay_lock_attempts_total: 0,
+            handshake_relay_lock_contended_total: 0,
             synced_import_cap_drops_total: 0,
             nat_reverse_key_shared_displacements_total: 0,
             // #6751 PR 2/3: interface-mode SNAT identity registry counters.

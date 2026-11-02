@@ -1044,7 +1044,7 @@ mod lookup;
 // another). Producers queue into the table's bounded outbox; the worker loop
 // fans it out to sibling command queues once per pass.
 mod handshake_relay;
-pub(crate) use handshake_relay::HandshakeRelay;
+pub(crate) use handshake_relay::{HANDSHAKE_RELAY_OUTBOX_DROPS, HandshakeRelay};
 // Only the cross-worker tests name the stage (and the per-thread drop
 // mirror) outside this module.
 #[cfg(test)]
