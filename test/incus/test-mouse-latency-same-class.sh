@@ -12,7 +12,7 @@
 # as iperf 5200..5211.
 #
 # Prerequisites (see docs/pr/929-same-class-harness/plan.md §3.3):
-#   - Echo daemon running on 172.16.80.200:6202 (TCP)
+#   - Echo daemon running on MOUSE_TARGET_V4:6202 (default from loss env)
 #   - apply-cos-config.sh loads the canonical 520x/620x CoS map
 #
 # CONCURRENCY: this wrapper and the cross-class matrix MUST NOT run

@@ -667,9 +667,14 @@ loss:xpf-userspace-fw{0,1} — node-id 0 / 1, /etc/xpf/node-id present:
                          reth0.50  172.16.50.8/24      —   transit
                          reth0.80  172.16.80.8/24      —   data path target VLAN
 
-Smoke iperf3 target: 172.16.80.200 / 2001:559:8585:80::200 (on reth0.80
-WAN path, AF_XDP zero-copy fast path). Per-class iperf3 servers live on
-ports 5200-5211 matching `test/incus/cos-iperf-config.set`. Do NOT use
-172.16.100.x — that reaches a different `loss:` uplink path capped at
-~9-10 Gb/s and was the misdiagnosed "cluster ceiling" in #1578.
+Smoke iperf3 targets: 172.16.80.202 / 2001:559:8585:80::200 (on reth0.80
+WAN path, AF_XDP zero-copy fast path). Read `IPERF_TARGET4/6` from
+`test/incus/loss-userspace-cluster.env` via `test/incus/cluster-env.sh`;
+v4 .202 is the `loss:xpf-mouse-target` container and v6 ::200 is external
+lab hardware. Do NOT measure v4 172.16.80.200: the external v6 box also
+answers ARP for it, so a node can resolve it to the wrong host (#18576).
+Per-class iperf3 servers live on ports 5200-5211 matching
+`test/incus/cos-iperf-config.set`. Do NOT use 172.16.100.x — that reaches a
+different `loss:` uplink path capped at ~9-10 Gb/s and was the misdiagnosed
+"cluster ceiling" in #1578.
 ```

@@ -131,7 +131,6 @@ LAN_ADDR="10.0.61.102/24"  LAN_GW/LAN_VIP4="10.0.61.1"  LAN_VIP6="2001:559:8585:
 WAN_GW4="172.16.50.1"  WAN_VIP4="172.16.50.8"   # fixed #16468: was .6, stale vs conf (.8)
 IPERF_TARGET4="172.16.80.202"  IPERF_TARGET6="2001:559:8585:80::200"   # v4 was .200 until #18576 (dual-held)
 MOUSE_TARGET_V4="172.16.80.201"  MOUSE_TARGET_V6="2001:559:8585:80::201"
-TARGET_ALIAS_V4_DEPRECATED="172.16.80.200"   # #18576: kept only while held; expiry in the env
 DMZ_ADDR="172.16.50.201"  DMZ_TARGET_V6="2001:559:8585:50::201"   # #18576: pinned, no longer iperf octet + 1
 ```
 
@@ -1496,13 +1495,15 @@ address — same expectation.
   loss, not the external box. The plan's dedicated `.210/.211` targets
   eliminate this for the new stacks; do not "reuse the existing target to
   save time" without deciding which `.200` you mean.
-  **Resolved for loss (#18576):** loss's v4 target is now `.202`, a static
+  **Resolved for loss (#18576):** loss's v4 target is `.202`, a static
   alias only the container holds (claim-probed 2026-10-31), so loss
   measures the container in v4 and the external box in v6, each through an
-  address with one holder. `.200` remains dual-held. It stays pinned on
-  the container only as a deprecated alias until its expiry (see the loss
-  env), and nothing should target it.
-  <!-- Expires-when: #18576 closed -->
+  address with one holder. `.200` must not be measured. The cleanup PR
+  removes the deprecated pin from the generated unit, but does not remove
+  the already assigned live address. After merge, run
+  `mouse-target-setup.sh up` under the loss lock, then delete
+  `172.16.80.200/24` from the container's `eth0`. Keep #18576 open until
+  that live address is gone.
 - **R6 — UDP load realism.** `iperf3 -u` at high rates is host-bound and its
   loss numbers conflate generator/target CPU with dataplane loss. The V4
   knee-finding + fw counter reconciliation is the guard; dedicated UDP

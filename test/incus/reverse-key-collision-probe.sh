@@ -50,6 +50,9 @@
 #   ./test/incus/with-cluster.sh "reverse-key probe" -- \
 #     sg incus-admin -c "./test/incus/reverse-key-collision-probe.sh warm"
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
 
 VARIANT="${1:-warm}"
 REMOTE="${INCUS_REMOTE:-loss}"
@@ -62,7 +65,7 @@ PROBE_IP2="${PROBE_IP2:-10.0.61.177}"
 # Target on the WAN VLAN-80 path (the AF_XDP fast path). Any listening
 # TCP port works; the iperf3 control port is always listening during
 # cluster operation. Override TARGET/TPORT for other listeners.
-TARGET="${TARGET:-172.16.80.200}"
+TARGET="${TARGET:-$IPERF_TARGET4}"
 TPORT="${TPORT:-5201}"
 # Probe source port. Default is a per-invocation random pick verified
 # session-free below — a FIXED port made back-to-back variant runs ride

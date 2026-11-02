@@ -32,6 +32,7 @@ class UserspaceHASmokeMatrixTests(unittest.TestCase):
                     INCUS_REMOTE=loss
                     VM0=xpf-userspace-fw0
                     VM1=xpf-userspace-fw1
+                    IPERF_TARGET4=192.0.2.44
                     LAN_HOST=cluster-userspace-host
                     """
                 ),
@@ -91,17 +92,17 @@ class UserspaceHASmokeMatrixTests(unittest.TestCase):
             plan,
             [
                 "matrix plan: cos-off-ipv4-push cos=off family=ipv4 direction=push "
-                "target=172.16.80.200 port=5201 min_gbps=1.0",
+                "target=192.0.2.44 port=5201 min_gbps=1.0",
                 "matrix plan: cos-off-ipv4-reverse cos=off family=ipv4 direction=reverse "
-                "target=172.16.80.200 port=5201 min_gbps=1.0",
+                "target=192.0.2.44 port=5201 min_gbps=1.0",
                 "matrix plan: cos-off-ipv6-push cos=off family=ipv6 direction=push "
                 "target=2001:559:8585:80::200 port=5201 min_gbps=1.0",
                 "matrix plan: cos-off-ipv6-reverse cos=off family=ipv6 direction=reverse "
                 "target=2001:559:8585:80::200 port=5201 min_gbps=1.0",
                 "matrix plan: cos-on-ipv4-push cos=on family=ipv4 direction=push "
-                "target=172.16.80.200 port=5211 min_gbps=1.0",
+                "target=192.0.2.44 port=5211 min_gbps=1.0",
                 "matrix plan: cos-on-ipv4-reverse cos=on family=ipv4 direction=reverse "
-                "target=172.16.80.200 port=5211 min_gbps=1.0",
+                "target=192.0.2.44 port=5211 min_gbps=1.0",
                 "matrix plan: cos-on-ipv6-push cos=on family=ipv6 direction=push "
                 "target=2001:559:8585:80::200 port=5211 min_gbps=1.0",
                 "matrix plan: cos-on-ipv6-reverse cos=on family=ipv6 direction=reverse "
@@ -121,7 +122,7 @@ class UserspaceHASmokeMatrixTests(unittest.TestCase):
             plan,
             [
                 "matrix plan: fast-current-cos-ipv4-push cos=current-cos family=ipv4 "
-                "direction=push target=172.16.80.200 port=5201 min_gbps=1.0",
+                "direction=push target=192.0.2.44 port=5201 min_gbps=1.0",
                 "matrix plan: fast-current-cos-ipv6-push cos=current-cos family=ipv6 "
                 "direction=push target=2001:559:8585:80::200 port=5201 min_gbps=1.0",
             ],
@@ -192,12 +193,12 @@ class UserspaceHASmokeMatrixTests(unittest.TestCase):
         )
         self.assertIn(
             "matrix plan: cos-off-ipv4-push cos=off family=ipv4 direction=push "
-            "target=172.16.80.200 port=5202 min_gbps=1.0",
+            "target=192.0.2.44 port=5202 min_gbps=1.0",
             result.stdout,
         )
         self.assertIn(
             "matrix plan: cos-on-ipv4-push cos=on family=ipv4 direction=push "
-            "target=172.16.80.200 port=5210 min_gbps=1.0",
+            "target=192.0.2.44 port=5210 min_gbps=1.0",
             result.stdout,
         )
 

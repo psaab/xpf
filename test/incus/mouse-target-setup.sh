@@ -86,12 +86,6 @@ MOUSE_TARGET_IMAGE="${MOUSE_TARGET_IMAGE:-images:debian/trixie}"
 # disables the alias everywhere, so the default uses `-`, not `:-`
 # (cluster-env.sh does the same, #18576).
 TARGET_ALIAS_V4="${TARGET_ALIAS_V4-172.16.80.202}"
-# #18576: a DEPRECATED alias (loss: .200, which the external v6 box also
-# answers ARP for). `up` keeps its pin only while this host ALREADY holds it,
-# so a container restart does not strand consumers that still name it, and
-# never claims it anew. Empty (the default) means none. The expiry is in the
-# loss env.
-TARGET_ALIAS_V4_DEPRECATED="${TARGET_ALIAS_V4_DEPRECATED-}"
 
 IPERF_PORTS=(5200 5201 5202 5203 5204 5205 5206 5207 5208 5209 5210 5211)
 
@@ -109,7 +103,6 @@ ${0##*/} — provision the #8259 second VLAN-80 target
 Environment: MOUSE_TARGET_NAME MOUSE_TARGET_V4 MOUSE_TARGET_V6
              MOUSE_TARGET_PF MOUSE_TARGET_VLAN MOUSE_TARGET_IMAGE INCUS_REMOTE
              TARGET_ALIAS_V4 (default 172.16.80.202; empty disables)
-             TARGET_ALIAS_V4_DEPRECATED (kept only while held; default none)
              MOUSE_TARGET_CLAIM_PROBE=skip (skip the #18576 claim probe;
              use only when no control address can answer, and say why;
              recorded in mouse-addr.service and shown by \`status\`)
@@ -220,7 +213,7 @@ do_up() {
     # duplicate, and non-VLAN-80 hosts (the VLAN-50 DMZ prober reusing
     # this script) never claim a VLAN-80 address. The v6 ::200 is
     # external (DAD duplicate) and is never emitted (see header).
-    local alias_line="" dep_line="" held pins=("$MOUSE_TARGET_V4")
+    local alias_line="" held pins=("$MOUSE_TARGET_V4")
     if [[ -n "$TARGET_ALIAS_V4" && "$TARGET_ALIAS_V4" != "$MOUSE_TARGET_V4" \
           && "$MOUSE_TARGET_VLAN" == "80" ]]; then
         alias_line="ExecStart=/sbin/ip addr replace ${TARGET_ALIAS_V4}/24 dev eth0"
@@ -228,17 +221,6 @@ do_up() {
     fi
     held="$(inc exec "$ref" -- ip -4 addr show dev eth0 2>/dev/null \
         | awk '$1 == "inet" { split($2, a, "/"); print a[1] }')"
-    # #18576: the deprecated alias is kept (pinned) only while held, and is
-    # never probed or claimed anew: it is dual-held by design until it expires.
-    if [[ -n "$TARGET_ALIAS_V4_DEPRECATED" && "$TARGET_ALIAS_V4_DEPRECATED" != "$MOUSE_TARGET_V4" \
-          && "$TARGET_ALIAS_V4_DEPRECATED" != "$TARGET_ALIAS_V4" && "$MOUSE_TARGET_VLAN" == "80" ]]; then
-        if grep -qxF -- "$TARGET_ALIAS_V4_DEPRECATED" <<<"$held"; then
-            dep_line="ExecStart=/sbin/ip addr replace ${TARGET_ALIAS_V4_DEPRECATED}/24 dev eth0"
-            echo "deprecated alias ${TARGET_ALIAS_V4_DEPRECATED}: held, pin kept until its expiry (#18576)"
-        else
-            echo "deprecated alias ${TARGET_ALIAS_V4_DEPRECATED}: not held, not claimed (#18576)"
-        fi
-    fi
     # Carry forward skip markers for addresses the new unit still pins: a
     # held address is never re-probed, so its skip stays the only record.
     local prev_marker pinned
@@ -262,7 +244,6 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/sbin/ip addr replace ${MOUSE_TARGET_V4}/24 dev eth0
 ${alias_line:+${alias_line}
-}${dep_line:+${dep_line}
 }ExecStart=/sbin/ip -6 addr replace ${MOUSE_TARGET_V6}/64 dev eth0
 ExecStart=/sbin/ip link set eth0 up
 
@@ -351,17 +332,8 @@ do_status() {
         while IFS= read -r line; do echo "claim:    ${line#\# }"; done <<<"$skips"
     else
         # Say only what was checked: `up` probes NEW addresses only, so an
-        # address held when `up` ran (and the deprecated alias) was never
-        # probed by it.
+        # address held when `up` ran was never probed by it.
         echo "claim:    no claim-probe skip recorded (addresses already held when \`up\` ran are not probed; test-connectivity's claim cell checks IPERF_TARGET4 every run)"
-    fi
-    # #18576: the deprecated alias, reported as `up` reports it.
-    if [[ -n "$TARGET_ALIAS_V4_DEPRECATED" && "$TARGET_ALIAS_V4_DEPRECATED" != "$MOUSE_TARGET_V4" \
-          && "$TARGET_ALIAS_V4_DEPRECATED" != "$TARGET_ALIAS_V4" && "$MOUSE_TARGET_VLAN" == "80" ]]; then
-        local dep_held=no dep_pinned=no
-        inc exec "$ref" -- ip -4 addr show eth0 2>/dev/null | grep -q "inet ${TARGET_ALIAS_V4_DEPRECATED}/" && dep_held=yes
-        inc exec "$ref" -- sh -c "grep -q 'addr replace ${TARGET_ALIAS_V4_DEPRECATED}/' /etc/systemd/system/mouse-addr.service" 2>/dev/null && dep_pinned=yes
-        echo "deprecated: ${TARGET_ALIAS_V4_DEPRECATED} held=${dep_held} pinned=${dep_pinned}; kept only while held, never claimed anew, never to be measured (dual-held); EXPIRY in the env file: delete once the hard-coded follow-ups are retargeted and no open branch predates #18619 (#18576)"
     fi
     echo
     echo "Point a harness at it with:  MOUSE_TARGET_V4=${MOUSE_TARGET_V4}"

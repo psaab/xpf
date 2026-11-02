@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${PROJECT_ROOT}/test/incus/cluster-env.sh"
 
 usage() {
   cat <<'EOF'
@@ -10,7 +14,7 @@ Options:
   --parallel N              iperf3 parallel streams. Default: 1
   --duration SEC            iperf3 duration / server capture duration. Default: 5
   --cport PORT              Optional fixed client port for iperf3.
-  --target IP               Override target. Default: 172.16.80.200 or 2001:559:8585:80::200
+  --target IP               Override target. Default: IPERF_TARGET4 or IPERF_TARGET6 from the cluster env
   --bpf-filter EXPR         Capture filter. Default: port 5201
   --artifact-dir DIR        Output directory. Default: /tmp/iperf-grpc-tcpdump-<timestamp>
   --capture-server HOST:PORT
@@ -145,9 +149,9 @@ require_cmd python3
 
 if [[ -z "$TARGET" ]]; then
   if [[ "$FAMILY" == "4" ]]; then
-    TARGET="172.16.80.200"
+    TARGET="$IPERF_TARGET4"
   else
-    TARGET="2001:559:8585:80::200"
+    TARGET="$IPERF_TARGET6"
   fi
 fi
 

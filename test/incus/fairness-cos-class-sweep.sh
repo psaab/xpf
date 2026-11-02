@@ -18,6 +18,8 @@ source "$ROOT_DIR/test/incus/cluster-env.sh"
 
 # shellcheck source=active-fw.sh
 source "$ROOT_DIR/test/incus/active-fw.sh"
+# shellcheck source=cluster-env.sh
+source "$ROOT_DIR/test/incus/cluster-env.sh"
 
 TARGET=${TARGET:-$IPERF_TARGET4}
 N=${N:-12}

@@ -40,12 +40,11 @@
 #   ./test/incus/capture-cold-stall.sh --monitor-only  # arm ip monitor, exit
 #   ART=/tmp/cold-stall-X ./test/incus/capture-cold-stall.sh --connect
 #
-# Env knobs (defaults match the loss userspace cluster topology in
-# CLAUDE.md / docs/ha-cluster-userspace.conf):
-#   FW          firewall node            (default loss:xpf-userspace-fw0)
-#   HOST        client/generator node    (default loss:cluster-userspace-host)
-#   TARGET_V4   cold-connect v4 target   (default 172.16.80.200)
-#   TARGET_V6   cold-connect v6 target   (default 2001:559:8585:80::200)
+# Env knobs (defaults come from the selected cluster env; normally loss):
+#   FW          firewall node            (default INCUS_REMOTE:VM0)
+#   HOST        client/generator node    (default INCUS_REMOTE:LAN_HOST)
+#   TARGET_V4   cold-connect v4 target   (default from cluster env IPERF_TARGET4)
+#   TARGET_V6   cold-connect v6 target   (default from cluster env IPERF_TARGET6)
 #   PORT        iperf3 port              (default 5201)
 #   SIBLINGS    parallel sibling streams (default 4 — exercises H5)
 #   NEXTHOP_V4  next-hop to grep for     (default = TARGET_V4, directly connected)
@@ -57,11 +56,15 @@
 #   ART         artifact dir             (default /tmp/cold-stall-<ts>)
 #
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${PROJECT_ROOT}/test/incus/cluster-env.sh"
 
-FW="${FW:-loss:xpf-userspace-fw0}"
-HOST="${HOST:-loss:cluster-userspace-host}"
-TARGET_V4="${TARGET_V4:-172.16.80.200}"
-TARGET_V6="${TARGET_V6:-2001:559:8585:80::200}"
+FW="${FW:-${INCUS_REMOTE}:${VM0}}"
+HOST="${HOST:-${INCUS_REMOTE}:${LAN_HOST}}"
+TARGET_V4="${TARGET_V4:-$IPERF_TARGET4}"
+TARGET_V6="${TARGET_V6:-$IPERF_TARGET6}"
 PORT="${PORT:-5201}"
 SIBLINGS="${SIBLINGS:-4}"
 NEXTHOP_V4="${NEXTHOP_V4:-$TARGET_V4}"

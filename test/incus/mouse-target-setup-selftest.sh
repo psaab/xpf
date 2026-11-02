@@ -112,19 +112,10 @@ unit="$(run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env)"
     || fail "#18576: the loss env does not yield a unit pinning .201 + .202:
 $unit"
 [[ "$unit" != *"172.16.80.200"* ]] \
-    || fail "#18576: the loss env claims the deprecated .200 on a host that does not hold it:
+    || fail "#18576: the loss env still pins the dual-held .200:
 $unit"
-[[ "$unit" == *"addr replace 172.16.80.202/24"* && "$unit" != *"172.16.80.200"* ]] \
-    && pass "loss env derives the .202 alias and never claims the dual-held .200 anew"
+pass "loss env pins .201 + .202 and never pins the dual-held .200"
 
-# --- 1d. the deprecated .200 pin is KEPT while held (#18576) --------------
-# A container restart must not strand the consumers that still name .200
-# until its expiry, so a host that holds it keeps its pin beside .202.
-unit="$(run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_HELD="172.16.80.201 172.16.80.202 172.16.80.200")"
-[[ "$unit" == *"addr replace 172.16.80.202/24"* && "$unit" == *"addr replace 172.16.80.200/24"* ]] \
-    && pass "loss env keeps the held deprecated .200 pinned beside .202" \
-    || fail "#18576: a held deprecated .200 is dropped from the unit (a restart strands its consumers):
-$unit"
 
 # --- 1c. `up` re-runs the address unit (#18576) ---------------------------
 # mouse-addr is a RemainAfterExit oneshot: `enable --now` does not re-run it
@@ -239,17 +230,6 @@ st="$(run_status)"
    && "$st" != *"was claim-probed"* ]] \
     && pass "status says no skip is recorded, without claiming every address was probed" \
     || fail "#18576: status has no claim line without a skip, or overclaims:
-${st}"
-# The deprecated alias is reported by status, with its expiry, as up reports it.
-st="$(run_status BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_HELD="172.16.80.201 172.16.80.202 172.16.80.200")"
-[[ "$st" == *"deprecated: 172.16.80.200 held=yes pinned=yes; kept only while held"*"EXPIRY"* ]] \
-    && pass "status reports the held deprecated .200 pin with its expiry" \
-    || fail "#18576: status does not report the held deprecated pin:
-${st}"
-st="$(run_status BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env)"
-[[ "$st" == *"deprecated: 172.16.80.200 held=no"* ]] \
-    && pass "status reports a deprecated alias that is not held" \
-    || fail "#18576: status does not report an unheld deprecated alias:
 ${st}"
 # A held address is not re-probed: the loss shape (.201 + .202 held) with a
 # foreign reply staged for .202 still pins, since .202 is not new.

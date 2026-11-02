@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 # #10023: non-mutating fine-grained cut recorder.
 #
-# The script only starts temporary recorders in /tmp on the loss cluster and
-# pulls their output back. It does not deploy binaries, change configuration,
-# move an RG, or stop xpfd. To observe a cut, run it under the #1875 lock in
-# one cell and invoke the cut driver from the same cell or a coordinated
-# second terminal; the journal/tcpdump/ss files share one run directory.
+# The script only starts temporary recorders in the selected cluster env
+# (loss by default) and pulls their output back. It does not deploy binaries,
+# change configuration, move an RG, or stop xpfd. To observe a cut, run it
+# under the #1875 lock in one cell and invoke the cut driver from the same
+# cell or a coordinated second terminal; the journal/tcpdump/ss files share
+# one run directory.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${PROJECT_ROOT}/test/incus/cluster-env.sh"
 
-REMOTE="${XPF_INCUS_REMOTE:-loss}"
-FW0_VM="${XPF_FW0_VM:-xpf-userspace-fw0}"
-FW1_VM="${XPF_FW1_VM:-xpf-userspace-fw1}"
-HOST_VM="${XPF_LAN_HOST_VM:-cluster-userspace-host}"
-TARGET="${XPF_IPERF_TARGET:-172.16.80.200}"
+REMOTE="${XPF_INCUS_REMOTE:-${INCUS_REMOTE:-loss}}"
+FW0_VM="${XPF_FW0_VM:-${VM0:-xpf-userspace-fw0}}"
+FW1_VM="${XPF_FW1_VM:-${VM1:-xpf-userspace-fw1}}"
+HOST_VM="${XPF_LAN_HOST_VM:-${LAN_HOST:-cluster-userspace-host}}"
+TARGET="${XPF_IPERF_TARGET:-$IPERF_TARGET4}"
 DURATION=60
 INTERVAL=0.1
 PARALLEL=4
@@ -26,14 +31,14 @@ Usage: cut_stall_sampler.sh [options]
 
 Starts an iperf3 -P4 -J --json-stream recorder at 100ms, a
 100ms timestamped ping, client ss -tin snapshots, and journal/tcpdump
-recorders on both loss firewalls. It never deploys or changes cluster state.
+recorders on both selected-cluster firewalls. It never deploys or changes cluster state.
 
   --duration SEC       iperf duration (default: 60)
   --interval SEC       sample interval, must be < 0.2 (default: 0.1)
   --parallel N         iperf parallel streams (default: 4)
   --bitrate RATE       per-stream TCP pacing (default: 25M; ~100M SUM)
   --tcpdump-count N    optional max packets per firewall pcap (default: 0 = time-bound)
-  --target IPV4        target (default: 172.16.80.200)
+  --target IPV4        target (default from cluster env IPERF_TARGET4)
   --out DIR            local artifact directory
   --help               show this help
 EOF
