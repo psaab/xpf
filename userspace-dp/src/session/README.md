@@ -2384,6 +2384,12 @@ A TCP session that closed on the node that owns it used to stay OPEN on the peer
       #9412 memo a foreign id, which drops the installer's record, and the next
       sweep would resend class 0.
     - Peer imports (`SyncImport`, `SharedMaterialize`) never announce.
+  - **RST announces as CLOSING (#18537).** A worker replica still records a received
+    RST as local Reset and keeps its local 2 s fuse. Its HA Update carries CLOSING,
+    however: the sibling relay also maps an unvalidated split-pair RST to CLOSING,
+    so the standby must not receive a Reset that the local authoritative pair does
+    not hold. A non-replica authoritative row that takes a valid RST still announces
+    Reset. The peer's CLOSING copy remains refreshable while the flow carries traffic.
   - **Bounds that remain.**
     - Several workers may announce the same class for one session. The memo is
       monotone per (tuple, id), and the peer import is idempotent.
@@ -2394,10 +2400,11 @@ A TCP session that closed on the node that owns it used to stay OPEN on the peer
       the memo for the same id.
 
 Every hop is length-gated or `serde(default)`, so an old peer sends and reads `0`,
-which is today's behaviour. Acceptance lives in
+which is today's behaviour. The #9412 acceptance lives in
 `close_state_sync_9412_acceptance_tests.rs` and the Go
-`close_state_sync_9412_acceptance_test.go` files. A golden UPDATE frame, shared by
-the Rust encoder and the Go decoder, pins the byte in both languages.
+`close_state_sync_9412_acceptance_test.go` files. The #18537 two-table cell (three in-process tables, production import leg) lives
+in `replica_rst_announce_18537_tests.rs`. A golden UPDATE frame, shared by the
+Rust encoder and the Go decoder, pins the byte in both languages.
 
 ### Policy attribution is single-sourced across both session-delta legs (#6949)
 

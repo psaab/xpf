@@ -5997,6 +5997,18 @@ impl SessionTable {
         // acceptable here only because this runs on a class transition, never
         // on the per-packet path.
         let pptp_call_ids = self.pptp_call_ids_wire_for(&forward_key);
+        let local_close_class_wire = forward.tcp_close_class_wire();
+        let announced_close_class_wire =
+            if forward.origin == SessionOrigin::WorkerLocalImport
+                && local_close_class_wire == TcpCloseClass::Reset.to_wire()
+            {
+                // #18537: the worker-local copy keeps its fixed Reset fuse,
+                // but its HA peer must receive the refreshable CLOSING state
+                // the authoritative sibling takes from the close relay.
+                TcpCloseClass::Closing.to_wire()
+            } else {
+                local_close_class_wire
+            };
         let delta = SessionDelta {
             provenance: crate::session::ExportProvenance::Incremental,
             kind: SessionDeltaKind::Update,
@@ -6017,7 +6029,7 @@ impl SessionTable {
             session_id: forward.session_id,
             bulk_resync: false,
             is_admission: false,
-            tcp_close_class: forward.tcp_close_class_wire(),
+            tcp_close_class: announced_close_class_wire,
             purge_retirement: false,
             // #16217 (export stamp): Established when node-wide
             // completion evidence holds for the forward tuple — the
@@ -8203,6 +8215,11 @@ mod promoted_opening_gc_16218_tests;
 #[cfg(test)]
 #[path = "replica_close_announce_9582_tests.rs"]
 mod replica_close_announce_9582_tests;
+// #18537: a RST seen only by a worker replica announces CLOSING, not Reset.
+#[cfg(test)]
+#[path = "replica_rst_announce_18537_tests.rs"]
+mod replica_rst_announce_18537_tests;
+
 
 // #7212: the static input-filter revalidation stamp lifecycle. Its own file
 // rather than another block in the 8k-line `tests.rs`, per the modularity rule
