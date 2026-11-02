@@ -21,11 +21,12 @@ import (
 //
 // Decisive fixture (issue): class allow `^show version` + deny
 // `.*match.*`. `show version | match …` is denied (control), so
-// `show version | no-more | match …` must be denied too, with no
-// version output. Also covers the reverse order and, in the sibling
-// test, an allow anchored on the exact full chain: the gate must
-// receive every stage in original order, so a fix that passed only
-// the pipe-less form or only one stage decides differently there.
+// `show version | no-more | match …` must be denied too; prepending an
+// allowed stage must not hide a later denied stage.
+//
+// A separate deny-only fixture anchors the complete ordered chain,
+// including its `count` stage. On refusal, that stage must report zero
+// input lines; the pure gate also pins the reversed spelling.
 
 func multiPipeStore14714(t *testing.T, allow, deny string) *configstore.Store {
 	t.Helper()
@@ -142,8 +143,8 @@ func TestMultiPipeDispatchFullChainOrder14714(t *testing.T) {
 			t.Errorf("full-chain refusal must come from the command regex: %v", err)
 		}
 	})
-	if strings.Contains(out, "14714-test") {
-		t.Errorf("the denied chain leaked version output %q", out)
+	if !strings.Contains(out, "Count: 0 lines") {
+		t.Errorf("denied exact chain output = %q, want Count: 0 lines", out)
 	}
 
 	// Only the exact chain is denied. Each alternate spelling is a
@@ -156,7 +157,7 @@ func TestMultiPipeDispatchFullChainOrder14714(t *testing.T) {
 		"show version | count | no-more",
 		"show version | no-more | count | no-more",
 	} {
-		out = captureStdout(t, func() {
+		captureStdout(t, func() {
 			if err := c.dispatch(line); err != nil {
 				t.Errorf("%q unexpectedly denied by the exact-chain rule: %v", line, err)
 			}
@@ -174,19 +175,13 @@ func TestEvaluateSeesMultiStagePipeSuffix14714(t *testing.T) {
 		t.Fatal("evaluateCommandRegex allowed suffix `no-more | match xpf` against deny .*match.*; " +
 			"the full chain must be part of the matched string")
 	}
-	// In-order assertion: a deny anchored on the original chain order
-	// matches, the reversed spelling does not produce a *different*
-	// command — both must be judged as typed.
+	// An order-anchored deny matches the original full chain but not its
+	// reversed spelling.
 	rules = denyRules(t, `show version \| no-more \| match`)
 	if err := evaluateCommandRegex(rules, "ops", "show version", "no-more | match xpf"); err == nil {
 		t.Fatal("deny on the in-order chain `show version | no-more | match` must match")
 	}
 	if err := evaluateCommandRegex(rules, "ops", "show version", "match xpf | no-more"); err != nil {
-		// Reversed chain does not match that deny and there is no
-		// other rule, so it is allowed — proving order is preserved
-		// rather than stages being sorted or collapsed.
-		t.Logf("reversed chain allowed as expected (order preserved): %v", err)
-	} else {
-		// allowed — expected
+		t.Fatalf("reversed chain unexpectedly matched the in-order deny: %v", err)
 	}
 }
