@@ -3054,7 +3054,7 @@ an old-key connection is not part of this population.
 
 This grace preserves the in-place-upgrade path for a peer that can authenticate,
 while bounding how long a silent or incompatible pre-key stream can continue
-to pass frames without HMAC. A peer that cannot complete the upgrade loses this
+to pass heartbeat and the in-place upgrade exchange only (#16016: every authority frame is rejected once locally keyed). A peer that cannot complete the upgrade loses this
 session-sync connection after the grace; a later connection must complete
 `performSyncHandshake` with the configured PSK. The legacy node-local
 `strict-session-auth` leaf remains accepted for configuration compatibility,
@@ -3068,7 +3068,7 @@ Confirm the state with `show chassis cluster statistics`, whose
 `Authentication:` line (`controlLinkAuthStatus`) covers both heartbeat and
 session-sync authentication. While a pre-key session-sync connection remains
 inside its upgrade grace, the line names it and reports that its frames are
-still accepted without HMAC; while a retired-key connection remains inside its
+with only heartbeat and the upgrade exchange accepted (#16016); while a retired-key connection remains inside its
 grace, the line names it distinctly as authenticated under a RETIRED key; after
 authentication, rekey, or eviction, it returns to the normal `engaged` line.
 

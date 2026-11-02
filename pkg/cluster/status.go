@@ -923,7 +923,7 @@ func (m *Manager) controlLinkAuthStatus() string {
 	var clauses []string
 	if len(neverAuth) > 0 {
 		clauses = append(clauses, fmt.Sprintf("%d session-sync connection(s) "+
-			"NOT authenticated, frames still accepted without HMAC: %s",
+			"NOT authenticated; only heartbeat and the in-place upgrade exchange are accepted: %s",
 			len(neverAuth), strings.Join(neverAuth, ", ")))
 	}
 	if len(retired) > 0 {

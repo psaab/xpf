@@ -1042,7 +1042,11 @@ type connColdPrimeDecision struct {
 // the pre-#4962 code read wasDisconnected under the lock but USED it after
 // unlock, where a concurrent accept could already have changed the registry.
 func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDecision {
-	if s.peerIPPinRequired() && !s.isPeerRemote(conn) {
+	// #16016: refuse only a remote that PROVABLY is not the peer (a valid
+	// IP outside the configured set). A non-IP remote (pipe/in-memory
+	// transports in tests) is not evidence of a foreign host; refusing it
+	// would break every hermetic fixture without any security gain.
+	if s.peerIPPinRequired() && remoteIPOf(conn).IsValid() && !s.isPeerRemote(conn) {
 		conn.Close()
 		return connColdPrimeDecision{activeBefore: -1, activeAfter: -1}
 	}

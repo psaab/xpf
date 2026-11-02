@@ -236,10 +236,12 @@ func (s *SessionSync) handleFrame(conn net.Conn, diag *syncConnDiag, msgType uin
 // existing grace. Configuration, session/bulk, failover, capability, clock,
 // and acknowledgment frames require verified per-frame authentication.
 func (s *SessionSync) rejectUnauthenticatedAuthorityFrame(conn net.Conn, msgType uint8) bool {
-	if !s.authConfigured() {
+	// An authenticated conn is never rejectable; check it first so the
+	// bulk-frame hot path pays no manager lock (#16016 review).
+	if ac, ok := conn.(*authConn); ok && ac.readAuthed() {
 		return false
 	}
-	if ac, ok := conn.(*authConn); ok && ac.readAuthed() {
+	if !s.authConfigured() {
 		return false
 	}
 	switch msgType {
