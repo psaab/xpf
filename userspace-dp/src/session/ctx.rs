@@ -228,6 +228,11 @@ pub(crate) struct NodeServedEvidence {
     /// This table's contributor: the pair's FORWARD row `fwd+rev` counters
     /// plus its node-served stamps, `Some` while that forward row exists.
     pub(crate) local_served: Option<u64>,
+    /// The serving row's stable session identity and HA generation. The
+    /// expiry pass treats a changed nonzero identity as activity even when
+    /// replacement reuses the prior packet total (the 300 -> removed -> 300
+    /// ABA); both zero is the legacy/unknown sentinel.
+    pub(crate) shared_incarnation: Option<(u64, u64)>,
     /// The shared synced row's contributor: the matched Established row's
     /// `fwd_packets + rev_packets`, restamped from the serving worker's
     /// live counters by the ct-slice. `Some` while that row exists.

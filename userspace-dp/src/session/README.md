@@ -626,21 +626,31 @@ Two conditions bound it (#18722):
 - **Recent service, not cumulative proof.** `promoted_and_served()` (an
   Established wire plus reverse counters) only ever becomes true; it never
   becomes false again. The arm also needs a PRESENT evidence contributor to
-  have CHANGED from the row's baseline for it since its last crossed check.
-  There are two contributors, each `Some(count)` only while its source row
-  exists:
+  change from the row's baseline, or a recently changed shared contributor:
   - `NodeServedEvidence::local_served`: this table's pair forward row
     `fwd+rev` counters plus its node-served stamps. The baseline is
     `node_served_seen_local`.
   - `NodeServedEvidence::shared_served`: the matched Established shared row's
-    `fwd_packets + rev_packets`, which the serving worker's ct-slice restamps
-    from live counters once per refresh cycle (10-13 s, const-asserted inside
-    the opening window, `slice_pacing.rs`). The baseline is
-    `node_served_seen_shared`.
+    canonical forward-row `fwd_packets + rev_packets`, restamped from live
+    counters by the serving worker's ct-slice once per evidence cycle
+    (10-13 s). The baseline is `node_served_seen_shared`; its
+    `shared_incarnation` (stable session id + generation) makes equal-count
+    replacement visible.
 
-  On a change the row is re-stamped to `now_ns` and re-bucketed, bounded by
-  that proof like `closing_counters_keep_alive`. Without one, the row falls
-  through to the classic pending arm and otherwise reaps.
+  A count or source-identity change is activity and re-stamps the row to
+  `now_ns`. Because the maximum supported shared-evidence cadence can exceed a
+  configured 1-5 s idle window, an unchanged but present shared contributor
+  also receives a bounded grace until `NODE_SERVED_EVIDENCE_MAX_CADENCE_NS`
+  after its last observed change. The grace does not advance that change clock:
+  frozen evidence still expires after the cadence and the next crossed check.
+  Without recent shared evidence the row falls through to the classic pending
+  arm and otherwise reaps.
+
+  The 13 s maximum is tied to the ct-slice's 10 s cycle and 2x default
+  `max_sessions` population in `worker/loop_body/slice_pacing.rs`; it is
+  const-asserted there. An idle source is therefore bounded, while a live
+  source cannot be reaped only because its next production restamp falls after
+  a shorter configured window.
 
   They are compared per contributor, not as one sum (#18742), because a sum
   is not monotonic in either direction:
@@ -651,8 +661,8 @@ Two conditions bound it (#18722):
   - A LIVE flow whose source is replaced also drops: the local pair is
     removed, or the shared row is republished by a new incarnation with lower
     counts. A sum compared with `>` reads that as silence and reaps a live
-    flow. Per contributor, a present count that moved in either direction is
-    a change.
+    flow. Per contributor, a present count change in either direction or a
+    different shared session identity is activity.
 
 **Decision model: one decision per PAIR (#18722, #18742 review).** Read this
 model, not the patch history; three review rounds found three per-HALF
@@ -663,17 +673,24 @@ treating the (forward, reverse) pair as the decision unit.
   window. Its evidence describes the TUPLE, so a KEEP applies to both halves
   (`align_node_kept_companion`): this half and its companion are re-stamped to
   `now_ns` and take the same contributor baselines, and the companion's pending
-  wheel hint goes stale. The two halves then cross together.
+  wheel hint goes stale. If both halves have the same idle window, they then
+  cross together.
 - **Evidence.** Two contributors, each `Some(count)` only while its source exists:
   `local_served` (this table's forward-row `fwd+rev` counters plus node-served
   stamps; present while that forward row or its stamp exists) and
-  `shared_served` (the matched Established shared row's counts; present while
-  that row exists). A PRESENT contributor whose count differs from the half's
-  baseline for it is activity (up: packets; down: a replaced incarnation). An
-  ABSENT contributor is neither activity nor silence.
+  `shared_served` (the matched Established shared row's canonical forward-row
+  counts; present while that row exists). A PRESENT count change in either
+  direction is activity; a different known shared session identity is also
+  activity even when the count is equal. An ABSENT contributor is neither
+  activity nor silence. A shared count may remain unchanged inside the bounded
+  ct-slice cadence grace.
 - **Both halves reap** at the first crossed check at which no present
-  contributor changed: the half being checked falls through and reaps, and its
+  contributor changed or remains within that cadence grace, if their idle
+  windows match: the half being checked falls through and reaps, and its
   companion, aligned to the same instant and baselines, reaps in the same pass.
+  With different per-zone windows, each half remains on its own deadline and
+  can reap in a different pass; alignment copies the KEEP's timestamp and
+  evidence baselines but does not replace either timeout.
 - **Where the halves diverge** (each has a cell in
   `session/idle_served_keepalive_18722_tests.rs`):
   - a CLOSING companion is never aligned: it keeps its own close fuse
@@ -689,26 +706,30 @@ treating the (forward, reverse) pair as the decision unit.
   - the #16223 split REPLICA that holds only a node-served stamp and no
     companion is decided alone, on the stamp as its local contributor.
 
-**Contract (the cells pin both bounds exactly).** These bounds hold on a node
-that FORWARDS the session's RG, or on a standalone node: the HA `Age` path,
-where `companion_eligible` is set. On a node that does not forward the RG, the
-#2120 standby gate (`standby_gate_decision`, the `Hold` arm) keeps peer-synced
-replicas regardless of activity until the owner's Close/delete arrives or the
-stale ceiling (`stale_ceiling_ns`) passes. That is what keeps a long-lived flow
-alive across a failover (#131), and #18722 does not change it.
+**Contract.** These bounds hold on a node that FORWARDS the session's RG, or
+on a standalone node: the HA `Age` path, where `companion_eligible` is set. On
+a node that does not forward the RG, the #2120 standby gate
+(`standby_gate_decision`, the `Hold` arm) keeps peer-synced replicas regardless
+of activity until the owner's Close/delete arrives or the stale ceiling
+(`stale_ceiling_ns`) passes. That is what keeps a long-lived flow alive across a
+failover (#131), and #18722 does not change it.
 - An idle COMPLETED row this node serves (`!origin.is_peer_synced()`) reaps
   at the first crossed check after its window, so ONE window after its last
   packet in either direction, and emits its Close.
-- An idle OPENING row, or an idle completed REPLICA, whose serving pair
-  stopped forwarding is KEPT by the first crossed check after the last change
-  and REAPED by the next one: TWO of its windows after that change (plus the
-  ct-slice restamp lag). A replica keeps living for as long as the serving
-  pair's counts move.
-  The reason is that the `node_served_seen_*` baselines start at 0 at install, so the first
-  check after the session goes quiet still sees the last activity as an
-  advance.
-  Expires-when: #18739 closed (that issue seeds the baseline at install,
-  which makes this bound one window).
+- An idle OPENING row or completed REPLICA remains bounded. For windows longer
+  than the 13 s maximum shared-evidence cadence, the first crossed check after
+  the last activity can still observe the initial count change and keeps it;
+  the next crossed check reaps it (two windows plus restamp/sweep lag). For
+  shorter configured windows, a present shared count remains eligible only
+  until `NODE_SERVED_EVIDENCE_MAX_CADENCE_NS` after its last observed change;
+  the row then reaps at its next crossed check. This can extend idle retention
+  by at most one cadence after the last observed evidence change, plus the row's
+  next idle-window crossing; a quiet row still reaps. A live replica survives
+  when its next production restamp would otherwise arrive after a short window.
+- A node-level KEEP aligns both halves' timestamp and evidence baselines, but
+  does not replace their configured idle windows. Matching windows make both
+  halves reap in the same pass; different per-zone OPENING windows may reap in
+  different passes (cell: `mixed_zone_windows_may_reap_pair_halves_in_different_passes_18722`).
 
 Before #18722
 the arm re-stamped every row with cumulative proof to `now_ns` on every pass. An

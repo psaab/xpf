@@ -290,6 +290,13 @@ mod wheel;
 use wheel::SessionWheel;
 
 const SESSION_GC_INTERVAL_NS: u64 = 1_000_000_000;
+/// #18742: maximum observed ct-slice gap for an Established shared-row
+/// evidence restamp at the default per-worker cap and its 2x HA-import
+/// population (12.8 s, rounded up). Shorter configured idle windows use this
+/// as a bounded stale-evidence grace, so a live replica cannot reap before
+/// the next production restamp; a frozen source still expires after this
+/// interval plus its next crossed check.
+pub(crate) const NODE_SERVED_EVIDENCE_MAX_CADENCE_NS: u64 = 13_000_000_000;
 /// #10591: test-only names for the production cadence constants. The window
 /// harness must derive its MAX values from the same values that gate the real
 /// worker sweep and advance the real timer wheel; a copied literal can make a
@@ -1521,19 +1528,16 @@ struct SessionEntry {
     /// pre-close volume must not retain it. Forward entry only
     /// (counters fold there); 0 for a not-yet-closing entry.
     closing_counters_seen: u64,
-    /// #18722: this row's baselines for the node-level retention arm
-    /// (`opening_companion_keeps_alive`), one per evidence contributor
-    /// (`NodeServedEvidence::local_served` / `shared_served`), as the
-    /// expiry pass last saw them. The arm keeps an idle-crossed opening row
-    /// or completed replica only when a PRESENT contributor changed from its
-    /// baseline, so a quiet flow's frozen counters stop retaining it and a
-    /// reaped companion's vanished counters do not read as activity. 0 at
-    /// install, so the first crossed check retains on any served count: a
-    /// dead flow's row reaps within two of its windows (plus the ct-slice
-    /// restamp lag) of the serving pair's last packet. #18739 tracks
-    /// seeding them at install so that bound becomes one window.
+    /// #18722/#18742: per-row baselines for the node-level retention arm,
+    /// one per evidence contributor. A PRESENT contributor whose count or
+    /// shared-row incarnation changed is recent service; an absent contributor
+    /// is neither activity nor silence. The last-change clock is not advanced
+    /// by the bounded cadence grace, so a frozen source still ages out.
     node_served_seen_local: u64,
     node_served_seen_shared: u64,
+    node_served_seen_shared_session_id: u64,
+    node_served_seen_shared_generation: u64,
+    node_served_last_change_ns: u64,
     /// #2749: the IP ToS byte observed on the FORWARD direction of this
     /// session (DSCP in the high 6 bits, ECN cleared — the shim meta carries
     /// only the 6-bit DSCP). Stamped from `meta.dscp << 2` on every forward

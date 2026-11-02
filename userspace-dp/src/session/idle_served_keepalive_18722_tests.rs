@@ -1172,10 +1172,284 @@ fn session_entry_size_is_pinned_18722() {
     assert_eq!(
         size_of::<SessionEntry>(),
         SESSION_ENTRY_SIZE_18722,
-        "SessionEntry changed size: re-pin with a cited reason (master + 16 B at #18722)"
+        "SessionEntry changed size: re-pin with a cited reason (640 B at #18722/#18742)"
     );
 }
 
-/// Master `SessionEntry` (600 B at 218c320230) plus the two 8 B baselines
-/// `node_served_seen_local` / `node_served_seen_shared` (#18722).
-const SESSION_ENTRY_SIZE_18722: usize = 616;
+/// Master `SessionEntry` (600 B at 218c320230) plus the two #18722 count
+/// baselines and #18742 shared-incarnation identity / last-change clock.
+const SESSION_ENTRY_SIZE_18722: usize = 640;
+/// #18742 small-window cell helper: force a pure-Opening replica pair onto a
+/// `window` idle window. `session_timeout_ns` never applies an app override to
+/// an Opening row, so stamp the window directly on both halves and re-bucket;
+/// `push_to_wheel` re-derives the wheel target from `last_seen + expires_after`.
+fn opening_replica_with_window(
+    window: u64,
+) -> (SessionTable, SessionKey, SessionKey) {
+    let t0 = 1_000 * SEC;
+    let (mut table, forward, reverse, _) = opening_replica(t0);
+    for key in [&forward, &reverse] {
+        table
+            .entry_by_key_mut(key)
+            .expect("half")
+            .expires_after_ns = window;
+        table.push_to_wheel(key, t0);
+    }
+    (table, forward, reverse)
+}
+
+/// #18742 (Sol+Kimi MAJOR, convergent): the configured window can be smaller
+/// than the shared restamp cadence. The per-app idle schema allows 1 s
+/// (`app_inactivity_timeout_ns`, seconds > 0) and a per-zone syn-flood override
+/// can push an Opening replica to 5 s, while the serving worker's ct-slice
+/// restamps the shared counts only once per 10-13 s cycle
+/// (`CT_REFRESH_WINDOW_NS`, const-asserted inside the 20 s OPENING window but
+/// not inside a 1-5 s configured window). The pre-fold arm required a count
+/// CHANGE at every crossed check: with a 5 s window the crossed checks fall at
+/// +6 s and +12 s with no restamp between them, so a LIVE flow's replica reaps
+/// at the second check solely because the evidence cadence exceeds its window.
+///
+/// Contract pinned here: with continuous serving (counts advancing at the
+/// production cadence) the replica SURVIVES; once serving stops it still reaps
+/// (proven by the frozen-counts guard below). RED pre-fix: the +12 s check sees
+/// an unchanged total and reaps the live replica.
+#[test]
+fn small_window_replica_survives_on_production_cadence_restamps_18722() {
+    let t0 = 1_000 * SEC;
+    let window = 5 * SEC;
+    let (mut table, forward, reverse) = opening_replica_with_window(window);
+    let served = Cell::new(10u64);
+    let node_served = |_: &SessionKey| shared_established(served.get());
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    let mut kept = 0usize;
+    let mut now = t0;
+    // Continuous serving: +25 packets at the 10 s production cadence.
+    while now < t0 + 45 * SEC {
+        now += SEC;
+        if (now - t0) % (10 * SEC) == 0 {
+            served.set(served.get() + 25);
+        }
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+        kept += table.last_pop_stats().kept_alive_by_companion;
+        assert!(
+            table.entry_by_key(&forward).is_some() && table.entry_by_key(&reverse).is_some(),
+            "#18742: a live flow's {window:?}ns-window replica was reaped at +{} s solely \
+             because the 10-13 s restamp cadence exceeds its window",
+            (now - t0) / SEC
+        );
+    }
+    assert!(
+        kept >= 2,
+        "anti-vacuity: retention must have come from the node-level arm (kept {kept} times)"
+    );
+    // Idle twin: serving stopped at t0 (counts frozen). It must still reap:
+    // the initial count is observed at the first crossed check, then the
+    // bounded cadence grace expires. The guard below allows that grace plus
+    // the next configured-window crossing.
+    let (mut idle, idle_f, idle_r) = opening_replica_with_window(window);
+    let frozen = shared_established(10);
+    let idle_served = move |_: &SessionKey| frozen;
+    let idle_ha = ha_with(&idle_served, &forwards, &epoch);
+    let mut gone_at = None;
+    let mut now = t0;
+    while now < t0 + 30 * SEC {
+        now += SEC;
+        let _ = idle.expire_stale_entries_ha(now, Some(&idle_ha));
+        if idle.entry_by_key(&idle_f).is_none() && idle.entry_by_key(&idle_r).is_none() {
+            gone_at = Some((now - t0) / SEC);
+            break;
+        }
+    }
+    let idle_bound_secs =
+        NODE_SERVED_EVIDENCE_MAX_CADENCE_NS / SEC + 2 * (window / SEC) + 2;
+    assert!(
+        gone_at.is_some_and(|s| s <= idle_bound_secs),
+        "#18742: an idle {window:?}ns-window replica must reap within the cadence + window bound ({idle_bound_secs} s), gone_at={gone_at:?}"
+    );
+}
+
+/// #18742 ABA cell helper: import a replica pair under an explicit
+/// `session_id` so the test can distinguish the source incarnation from the
+/// replica's own stable identity.
+fn import_replica_pair_with_id(
+    table: &mut SessionTable,
+    session_id: u64,
+    wire: u8,
+    now_ns: u64,
+) -> (SessionKey, SessionKey) {
+    let forward = key_v4();
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+    for (key, is_reverse) in [(&forward, false), (&reverse, true)] {
+        let mut metadata = super::tests::metadata();
+        metadata.is_reverse = is_reverse;
+        assert!(
+            table.upsert_synced_with_origin(
+                SessionInstall {
+                    key: key.clone(),
+                    decision: super::tests::decision(),
+                    metadata,
+                    source_nat_static: None,
+                    origin: SessionOrigin::SyncImport,
+                    now_ns,
+                    protocol: crate::ip_proto::PROTO_TCP,
+                    tcp_flags: 0,
+                    session_id,
+                    tcp_close_class: 0,
+                    tcp_handshake_state: wire,
+                    persistent_lease_hold: None,
+                    fwd_packets: 40,
+                    rev_packets: 40,
+                },
+                false,
+            ),
+            "premise: the replica import must install"
+        );
+    }
+    (forward, reverse)
+}
+
+/// #18742 (Kimi ABA): an equal-count source replacement is invisible to a
+/// values-only comparison. The shared evidence source serves 300 packets, is
+/// REMOVED, then a NEW incarnation republishes exactly 300. The first crossed
+/// check after replacement must recognize the new identity as activity even
+/// though the count is unchanged; the next production-cadence count increase
+/// then proves the replacement continues to serve.
+///
+/// RED pre-fix: the cadence grace alone keeps the row at the first crossed
+/// check, but `node_served_last_change_ns` remains at the old source's check
+/// time because the equal-count replacement was not recognized.
+#[test]
+fn equal_count_source_replacement_is_activity_18722() {
+    let t0 = 1_000 * SEC;
+    let window = 5 * SEC;
+    let mut table = SessionTable::new();
+    let (forward, reverse) = import_replica_pair_with_id(
+        &mut table,
+        0xA_8722,
+        TcpHandshakeState::Established.to_wire(),
+        t0,
+    );
+    for key in [&forward, &reverse] {
+        table.entry_by_key_mut(key).expect("half").expires_after_ns = window;
+        table.push_to_wheel(key, t0);
+    }
+    let shared = Cell::new(Some((100u64, 300u64)));
+    let node_served = |_: &SessionKey| match shared.get() {
+        Some((session_id, served)) => NodeServedEvidence {
+            handshake_wire: TcpHandshakeState::Established.to_wire(),
+            shared_established: true,
+            shared_incarnation: Some((session_id, 0)),
+            shared_served: Some(served),
+            ..NodeServedEvidence::default()
+        },
+        None => NodeServedEvidence::default(),
+    };
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    let mut now = t0;
+    while now < t0 + window + SEC {
+        now += SEC;
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+    }
+    let old_change_at = table
+        .entry_by_key(&forward)
+        .expect("forward survived source's first check")
+        .node_served_last_change_ns;
+    assert_eq!(old_change_at, now, "premise: the original 300 count was observed");
+
+    // The source disappears briefly, then a new source republishes the same
+    // count under a distinct stable session identity.
+    shared.set(None);
+    now += SEC;
+    let _ = table.expire_stale_entries_ha(now, Some(&ha));
+    shared.set(Some((101, 300)));
+    let replacement_at = now + window;
+    while now < replacement_at {
+        now += SEC;
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+    }
+    assert!(
+        table.entry_by_key(&forward).is_some() && table.entry_by_key(&reverse).is_some(),
+        "the cadence grace must retain the pair at the replacement's first crossed check"
+    );
+    assert_eq!(
+        table
+            .entry_by_key(&forward)
+            .expect("forward")
+            .node_served_last_change_ns,
+        now,
+        "#18742 ABA: same count (300) with a new incarnation must refresh the activity \
+         timestamp at the replacement's first crossed check; old timestamp was {}",
+        old_change_at
+    );
+
+    // Count changes resume on the production 10 s restamp cadence. The live
+    // replacement must continue to survive later crossings.
+    while now < t0 + 45 * SEC {
+        now += SEC;
+        if (now - t0) % (10 * SEC) == 0 && now >= t0 + 20 * SEC {
+            shared.set(shared.get().map(|(session_id, served)| (session_id, served + 25)));
+        }
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+        assert!(
+            table.entry_by_key(&forward).is_some() && table.entry_by_key(&reverse).is_some(),
+            "#18742 ABA: the live replacement was reaped at +{} s",
+            (now - t0) / SEC
+        );
+    }
+}
+
+/// #18742 Sol: the pair decision is aligned when a KEEP occurs, but
+/// per-zone OPENING windows remain independent. With 5 s / 9 s windows,
+/// the shorter half can expire on an earlier wheel pass than its companion.
+/// This cell protects the README scope: the "both halves reap in one pass"
+/// statement applies only when their idle windows match (the normal completed
+/// application-timeout case), not when zones deliberately configure different
+/// half-open windows.
+#[test]
+fn mixed_zone_windows_may_reap_pair_halves_in_different_passes_18722() {
+    let t0 = 1_000 * SEC;
+    let mut table = SessionTable::new();
+    let (forward, reverse) = import_replica_pair(
+        &mut table,
+        SessionOrigin::SyncImport,
+        TcpHandshakeState::Opening.to_wire(),
+        t0,
+    );
+    let forward_window = 5 * SEC;
+    let reverse_window = 9 * SEC;
+    for (key, window) in [(&forward, forward_window), (&reverse, reverse_window)] {
+        table.entry_by_key_mut(key).expect("half").expires_after_ns = window;
+        table.push_to_wheel(key, t0);
+    }
+    let frozen = shared_established(80);
+    let node_served = move |_: &SessionKey| frozen;
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+    let mut forward_reaped_at = None;
+    let mut reverse_reaped_at = None;
+    let mut now = t0;
+    while now < t0 + 60 * SEC && (forward_reaped_at.is_none() || reverse_reaped_at.is_none()) {
+        now += SEC;
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+        if table.entry_by_key(&forward).is_none() && forward_reaped_at.is_none() {
+            forward_reaped_at = Some(now);
+        }
+        if table.entry_by_key(&reverse).is_none() && reverse_reaped_at.is_none() {
+            reverse_reaped_at = Some(now);
+        }
+    }
+    let forward_reaped_at = forward_reaped_at.expect("forward half reaped");
+    let reverse_reaped_at = reverse_reaped_at.expect("reverse half reaped");
+    assert!(
+        forward_reaped_at < reverse_reaped_at,
+        "#18742: different configured idle windows mean halves may reap on different passes; \
+         forward={:?} s, reverse={:?} s after install",
+        (forward_reaped_at - t0) / SEC,
+        (reverse_reaped_at - t0) / SEC
+    );
+}

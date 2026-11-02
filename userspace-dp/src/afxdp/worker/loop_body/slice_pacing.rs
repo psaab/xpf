@@ -45,3 +45,9 @@ const _: () = assert!(
         <= CT_REFRESH_WINDOW_NS
         && CT_REFRESH_WINDOW_NS < crate::session::DEFAULT_TCP_OPENING_TIMEOUT_NS
 );
+const _: () = assert!(
+    CT_REFRESH_WINDOW_NS <= crate::session::NODE_SERVED_EVIDENCE_MAX_CADENCE_NS
+        && 2 * (crate::session::DEFAULT_MAX_SESSIONS.div_ceil(CT_REFRESH_SLICE_BUDGET) as u64)
+            * CT_SLICE_INTERVAL_NS
+            <= crate::session::NODE_SERVED_EVIDENCE_MAX_CADENCE_NS
+);

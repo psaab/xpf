@@ -576,29 +576,42 @@ pub(in crate::afxdp) fn shared_completion_evidence(
 /// read from the shared entry; production merges this wire with the
 /// serving worker's admitted-counter stamp (`SessionTable` node-served
 /// stamps, surfaced through the expiry context). Either half's key
-/// may name the entry, and a reverse key also probes its derived
-/// forward companion, so a SNAT-translated reverse replica still
-/// finds the serving forward row.
-/// #18722: the matched entry's ct-slice-restamped live counts ride out
-/// as `shared_served`, the expiry pass's per-contributor recency proof.
+/// may name the entry, and the exact reverse/SNAT-translated companion
+/// is matched without borrowing evidence from another flow.
+/// #18722/#18742: the matched canonical forward row's ct-slice-restamped
+/// counts and stable `(session_id, generation)` identity ride out as
+/// `shared_served` / `shared_incarnation`, the expiry pass's per-contributor
+/// recency proof.
 pub(in crate::afxdp) fn shared_node_served_evidence(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     key: &SessionKey,
 ) -> crate::session::NodeServedEvidence {
     let mut evidence = crate::session::NodeServedEvidence::default();
     let sessions = lock_shared_recover(shared_sessions);
-    let mut probe = |candidate: &SessionKey| {
-        if let Some(entry) = sessions.get(candidate) {
-            if entry.tcp_handshake_state
-                == crate::session::TcpHandshakeState::Established.to_wire()
-            {
-                evidence.handshake_wire = entry.tcp_handshake_state;
-                evidence.shared_established = true;
-                evidence.shared_served = Some(entry.fwd_packets.saturating_add(entry.rev_packets));
-            }
+    let record = |entry: &SyncedSessionEntry, evidence: &mut crate::session::NodeServedEvidence| {
+        if entry.tcp_handshake_state
+            != crate::session::TcpHandshakeState::Established.to_wire()
+        {
+            return;
         }
+        // A pair publishes a distinct session id for its reverse row. Use
+        // its canonical forward row as the shared evidence identity so both
+        // replica halves compare against the same incarnation baseline.
+        let canonical = if entry.metadata.is_reverse {
+            let forward = crate::session::reverse_session_key(&entry.key, entry.decision.nat);
+            sessions.get(&forward).unwrap_or(entry)
+        } else {
+            entry
+        };
+        evidence.handshake_wire = entry.tcp_handshake_state;
+        evidence.shared_established = true;
+        evidence.shared_served =
+            Some(canonical.fwd_packets.saturating_add(canonical.rev_packets));
+        evidence.shared_incarnation = Some((canonical.session_id, canonical.generation));
     };
-    probe(key);
+    if let Some(entry) = sessions.get(key) {
+        record(entry, &mut evidence);
+    }
     if evidence.handshake_wire == 0 {
         for entry in sessions.values() {
             if entry.tcp_handshake_state
@@ -607,29 +620,24 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
                 continue;
             }
             let ek = &entry.key;
-            let same = ek.bare_tuple() == key.bare_tuple();
-            let swapped = ek.src_ip == key.dst_ip
-                && ek.dst_ip == key.src_ip
-                && ek.src_port == key.dst_port
-                && ek.dst_port == key.src_port
-                && ek.protocol == key.protocol;
+            let same = ek == key;
+            let swapped = crate::session::reverse_session_key(
+                ek,
+                crate::nat::NatDecision::default(),
+            ) == *key;
             let derived_reverse = crate::session::reverse_session_key(ek, entry.decision.nat);
-            let snat_reverse = derived_reverse.src_ip == key.src_ip
-                && derived_reverse.src_port == key.src_port
-                && ek.dst_port == key.src_port;
+            let snat_reverse = derived_reverse == *key;
             if same || swapped || snat_reverse {
-                evidence.handshake_wire = entry.tcp_handshake_state;
-                evidence.shared_established = true;
-                evidence.shared_served = Some(entry.fwd_packets.saturating_add(entry.rev_packets));
+                record(entry, &mut evidence);
                 break;
             }
         }
     }
     evidence
 }
-// (The scan in `shared_node_served_evidence` matches the serving
-// pair under the opposite orientation or a SNAT-translated reverse
-// key; it runs only on idle-crossed GC candidates, never per packet.)
+// (The scan in `shared_node_served_evidence` uses full-key equality for
+// either tuple orientation, including the exact NAT-derived reverse key; it
+// runs only on idle-crossed GC candidates, never per packet.)
 
 /// #16223: restamp the shared synced entries for `forward_key` (and
 /// its derived reverse companion) to the Established handshake wire

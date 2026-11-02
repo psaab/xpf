@@ -459,8 +459,9 @@ impl SessionTable {
                             }
                             ev.shared_established |= shared.shared_established;
                             ev.rev_packets = ev.rev_packets.max(shared.rev_packets);
-                            // #18722: the shared contributor, kept separate.
+                            // #18722/#18742: keep count and source identity separate.
                             ev.shared_served = shared.shared_served;
+                            ev.shared_incarnation = shared.shared_incarnation;
                         }
                         ev
                     };
@@ -963,16 +964,13 @@ impl SessionTable {
         // with no local companion, and the fw0 replicas are pure
         // Opening.
         //
-        // #18722: retain on the serving pair's RECENT activity. The
-        // promoted proof is cumulative, so on its own it would hold a
-        // dead flow for ever. Require the node-wide served packet total
-        // to have changed since this row's last check, then re-stamp
-        // from `now_ns`: this pass is the retention event, bounded by
-        // that advance exactly as `closing_counters_keep_alive` is.
-        // The serving worker's ct-slice restamps the shared counts
-        // within one refresh cycle (10-13 s, const-asserted inside the
-        // 20 s opening window, `slice_pacing.rs`), so a live flow
-        // advances between two crossings and a quiet one stops.
+        // #18722: retain on the serving pair's RECENT activity. A count or
+        // incarnation change is activity. A shared count can remain unchanged
+        // for one full ct-slice evidence cadence (up to 13 s at the supported
+        // population), so a shorter configured idle window gets a bounded
+        // evidence-age grace rather than reaping just before the next stamp.
+        // The grace never advances node_served_last_change_ns: frozen evidence
+        // therefore expires after the cadence and the next crossed check.
         if node_evidence.promoted_and_served() {
             let Some(em) = self.entry_by_key_mut(key) else {
                 return false;
@@ -983,13 +981,33 @@ impl SessionTable {
                 em.node_served_seen_local = local;
             }
             if let Some(shared) = node_evidence.shared_served {
-                advanced |= shared != em.node_served_seen_shared;
+                let incarnation_changed = node_evidence
+                    .shared_incarnation
+                    .is_some_and(|(session_id, generation)| {
+                        (session_id != 0 || generation != 0)
+                            && (session_id != em.node_served_seen_shared_session_id
+                                || generation != em.node_served_seen_shared_generation)
+                    });
+                advanced |= shared != em.node_served_seen_shared || incarnation_changed;
                 em.node_served_seen_shared = shared;
+                if let Some((session_id, generation)) = node_evidence.shared_incarnation
+                    && (session_id != 0 || generation != 0)
+                {
+                    em.node_served_seen_shared_session_id = session_id;
+                    em.node_served_seen_shared_generation = generation;
+                }
             }
             if advanced {
+                em.node_served_last_change_ns = now_ns;
+            }
+            let shared_evidence_recent = node_evidence.shared_served.is_some()
+                && em.node_served_last_change_ns != 0
+                && now_ns.saturating_sub(em.node_served_last_change_ns)
+                    <= NODE_SERVED_EVIDENCE_MAX_CADENCE_NS;
+            if advanced || shared_evidence_recent {
                 em.last_seen_ns = now_ns;
                 self.rebucket_alive_entry(key, now_ns);
-                self.align_node_kept_companion(key, entry_nat, now_ns, node_evidence);
+                self.align_node_kept_companion(key, entry_nat, now_ns);
                 return true;
             }
         }
@@ -1054,24 +1072,39 @@ impl SessionTable {
         key: &SessionKey,
         entry_nat: NatDecision,
         now_ns: u64,
-        node_evidence: NodeServedEvidence,
     ) {
         let companion_key = reverse_session_key(key, entry_nat);
         if companion_key == *key {
             return;
         }
+        let Some((
+            seen_local,
+            seen_shared,
+            seen_shared_session_id,
+            seen_shared_generation,
+            last_change_ns,
+        )) = self.entry_by_key(key).map(|entry| {
+            (
+                entry.node_served_seen_local,
+                entry.node_served_seen_shared,
+                entry.node_served_seen_shared_session_id,
+                entry.node_served_seen_shared_generation,
+                entry.node_served_last_change_ns,
+            )
+        }) else {
+            return;
+        };
         let Some(cm) = self.entry_by_key_mut(&companion_key) else {
             return;
         };
         if cm.closing {
             return;
         }
-        if let Some(local) = node_evidence.local_served {
-            cm.node_served_seen_local = local;
-        }
-        if let Some(shared) = node_evidence.shared_served {
-            cm.node_served_seen_shared = shared;
-        }
+        cm.node_served_seen_local = seen_local;
+        cm.node_served_seen_shared = seen_shared;
+        cm.node_served_seen_shared_session_id = seen_shared_session_id;
+        cm.node_served_seen_shared_generation = seen_shared_generation;
+        cm.node_served_last_change_ns = last_change_ns;
         if cm.last_seen_ns < now_ns {
             cm.last_seen_ns = now_ns;
             self.rebucket_alive_entry(&companion_key, now_ns);

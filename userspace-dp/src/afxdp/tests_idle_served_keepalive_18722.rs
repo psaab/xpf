@@ -193,3 +193,65 @@ fn shared_restamps_keep_an_opening_replica_only_while_they_advance_18722() {
         "#18722: the reap must be the next crossed check, one window after the keep, got {rel:?}"
     );
 }
+
+/// #18742 Sol: reverse replicas on two SNAT flows to the SAME server port
+/// must not borrow one another's shared liveness evidence. The old
+/// `snat_reverse` predicate compared only the derived source endpoint and
+/// server port, so flow A could falsely mark flow B's reverse key Established
+/// and served whenever their server port matched.
+#[test]
+fn shared_evidence_does_not_cross_snat_flows_sharing_server_port_18722() {
+    let mut flow_a = test_key();
+    flow_a.dst_ip = "198.51.100.80".parse().expect("server");
+    flow_a.dst_port = 443;
+    let mut flow_b = flow_a.clone();
+    flow_b.src_ip = "10.0.61.103".parse().expect("client B");
+    flow_b.src_port = 55069;
+    let nat_a = crate::nat::NatDecision {
+        rewrite_src: Some("203.0.113.9".parse().expect("public address")),
+        rewrite_src_port: Some(40_000),
+        ..crate::nat::NatDecision::default()
+    };
+    let nat_b = crate::nat::NatDecision {
+        rewrite_src: Some("203.0.113.9".parse().expect("public address")),
+        rewrite_src_port: Some(40_001),
+        ..crate::nat::NatDecision::default()
+    };
+    let reverse_b = crate::session::reverse_session_key(&flow_b, nat_b);
+    assert_eq!(flow_a.dst_port, flow_b.dst_port, "premise: same server port");
+    assert_ne!(flow_a, flow_b, "premise: distinct client tuples");
+    assert_ne!(
+        crate::session::reverse_session_key(&flow_a, nat_a),
+        reverse_b,
+        "premise: the translated reverse tuples differ"
+    );
+
+    let mut a = serving_row(&flow_a);
+    a.decision.nat = nat_a;
+    a.session_id = 0x18722_A;
+    a.fwd_packets = 100;
+    a.rev_packets = 200;
+    let mut b = serving_row(&flow_b);
+    b.decision.nat = nat_b;
+    b.session_id = 0x18722_B;
+    b.tcp_handshake_state = TcpHandshakeState::Opening.to_wire();
+    b.fwd_packets = 500;
+    let shared: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
+        Arc::new(Mutex::new(FastMap::default()));
+    {
+        let mut sessions = shared.lock().expect("shared");
+        sessions.insert(flow_a.clone(), a);
+        sessions.insert(flow_b.clone(), b);
+    }
+
+    let reverse_a = crate::session::reverse_session_key(&flow_a, nat_a);
+    let own_evidence = crate::afxdp::shared_ops::shared_node_served_evidence(&shared, &reverse_a);
+    assert_eq!(own_evidence.shared_served, Some(300));
+    assert_eq!(own_evidence.shared_incarnation, Some((0x18722_A, 0)));
+    let evidence = crate::afxdp::shared_ops::shared_node_served_evidence(&shared, &reverse_b);
+    assert!(
+        !evidence.shared_established && evidence.shared_served.is_none(),
+        "#18742: flow A must not supply Established/served evidence for flow B's same-server-port \
+         reverse tuple, got {evidence:?}"
+    );
+}
