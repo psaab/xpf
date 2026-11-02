@@ -15,10 +15,12 @@
 # -skip) previously filtered the leg down to one passing non-kernel cell
 # and reported a whole-package PASS (#18841 review). A name filter that
 # comes from the caller rots exactly the way a hand-maintained one does
-# (#6743 r2-N3). The kernel-cell pin below is derived from the test
-# sources — every top-level test whose first statement enters a netns —
-# so it cannot rot independently of the package: a new kernel cell is
-# forced or both the leg and the census flag it.
+# (#6743 r2-N3).
+# The expected 216-test package count and the 36 kernel-cell names below are
+# manual pins. A changed package test count or a missing named kernel cell
+# fails closed; any new or renamed kernel cell requires a deliberate review
+# and update of the list and count. The shell censuses prove runner discovery
+# and reachability, not coverage of Go test source names.
 #
 # A SKIP line, top-level or subtest, is a failure here, because under
 # XPF_REQUIRE_NETNS=1 every skip arm these cells have means the forcing
