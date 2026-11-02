@@ -1544,7 +1544,11 @@ impl FlowCache {
         ha_state: &BTreeMap<i32, HAGroupRuntime>,
         forwarding: &ForwardingState,
     ) -> Option<&FlowCacheEntry> {
-        if scheduler_expired != self.scheduler_expired {
+        // A held pass carries an older policy snapshot, so its scheduler
+        // phase is not the binding cache's current phase. Keep this lookup
+        // compare-only: do not scan/flush entries (or change the remembered
+        // phase) based on the held view before checking the held generation.
+        if !self.held_compare_only && scheduler_expired != self.scheduler_expired {
             let phase_can_change_verdict = if scheduler_expired {
                 // Preserve the original expiry behavior: a scheduled
                 // DENY/REJECT becomes eligible independently of the
