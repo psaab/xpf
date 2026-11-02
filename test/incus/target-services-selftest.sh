@@ -295,6 +295,135 @@ grep -q "mouse-setup:up TARGET_ALIAS_V4=172.16.80.202 MOUSE_TARGET_V4=172.16.80.
 $(cat "$SETUP_LOG")"
 [[ -s "$SETUP_LOG" ]] && pass "#16213 up delegates to the systemd-pinned mouse setup"
 
+# --- 6. the #18626 down orphan sweep -------------------------------------
+#
+# Listener argv is not a reliable identity: default-port iperf3 has no -p,
+# and pkill -f can match the bash -c process carrying its own pattern. Model
+# socket owners and their cgroups hermetically, execute the exact remote
+# script emitted by down, and verify it kills only orphan socket owners while
+# completing both the iperf and echo sweeps.
+DOWN_TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP" "$ALIAS_TMP" "$DOWN_TMP"' EXIT
+mkdir -p "${DOWN_TMP}/bin" "${DOWN_TMP}/proc/"{146115,2002,2003,3000,3001,3101}
+FAKE_LOG="${DOWN_TMP}/fake.log"
+cat > "${DOWN_TMP}/bin/ss" <<'FAKE'
+#!/usr/bin/env bash
+port=""
+for arg in "$@"; do
+    candidate="${arg##*:}"
+    [[ "$candidate" =~ ^[0-9]+$ ]] && port="$candidate"
+done
+echo "ss ${port}" >> "${FAKE_LOG:?}"
+case "$port" in
+  5201) echo 'LISTEN 0 4096 0.0.0.0:5201 0.0.0.0:* users:(("iperf3",pid=146115,fd=3),("iperf3",pid=2002,fd=3),("iperf3",pid=2003,fd=4))' ;;
+  6201) echo 'LISTEN 0 4096 0.0.0.0:6201 0.0.0.0:* users:(("python3",pid=3000,fd=3),("python3",pid=3001,fd=4),("socat",pid=3101,fd=5))' ;;
+esac
+FAKE
+cat > "${DOWN_TMP}/bin/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+echo "systemctl $*" >> "${FAKE_LOG:?}"
+case "$*" in
+  *show*)
+    if [[ "${FAKE_SYSTEMD:-1}" == 0 ]]; then
+      [[ "$*" == *MainPID* ]] && echo 0
+      exit 0
+    fi
+    case "$*" in
+      *MainPID*mouse-iperf3@5201*) echo 2002 ;;
+      *ControlGroup*mouse-iperf3@5201*) echo /system.slice/mouse-iperf3@5201.service ;;
+      *MainPID*mouse-echo*) echo 3000 ;;
+      *ControlGroup*mouse-echo*) echo /system.slice/mouse-echo.service ;;
+      *MainPID*) echo 0 ;;
+    esac
+    ;;
+esac
+exit 0
+FAKE
+cat > "${DOWN_TMP}/bin/kill" <<'FAKE'
+#!/usr/bin/env bash
+kill() { echo "kill $*" >> "${FAKE_LOG:?}"; }
+FAKE
+cat > "${DOWN_TMP}/bin/pkill" <<'FAKE'
+#!/usr/bin/env bash
+# Model pkill -f's self-match: terminate the remote bash -c that contains the
+# pattern, so the following (echo-listener) sweep is never reached.
+echo "pkill $*" >> "${FAKE_LOG:?}"
+/bin/kill -TERM "$PPID"
+FAKE
+chmod +x "${DOWN_TMP}/bin/"*
+echo '0::/.lxc' > "${DOWN_TMP}/proc/146115/cgroup"
+echo '0::/system.slice/mouse-iperf3@5201.service' > "${DOWN_TMP}/proc/2002/cgroup"
+echo '0::/system.slice/mouse-iperf3@5201.service/child' > "${DOWN_TMP}/proc/2003/cgroup"
+echo '0::/system.slice/mouse-echo.service' > "${DOWN_TMP}/proc/3000/cgroup"
+echo '0::/system.slice/mouse-echo.service/child' > "${DOWN_TMP}/proc/3001/cgroup"
+echo '0::/.lxc' > "${DOWN_TMP}/proc/3101/cgroup"
+cat > "${DOWN_TMP}/incus" <<'STUB3'
+#!/usr/bin/env bash
+case "$1" in
+  list) echo "xpf-mouse-target,${FAKE_TARGET_IP:?}"; exit 0 ;;
+  exec)
+    shift 2
+    while [[ "${1:-}" != "--" && $# -gt 0 ]]; do shift; done
+    shift
+    if [[ "${1:-}" == bash && "${2:-}" == -c ]]; then
+      script="${3:-}"
+      script="${script//\/proc\//${FAKE_PROC_ROOT}/}"
+      FAKE_LOG="$FAKE_LOG" FAKE_SYSTEMD="${FAKE_SYSTEMD:-1}" \
+        BASH_ENV="${FAKE_KILL_ENV}" PATH="${FAKE_BIN}:${PATH}" bash -c "$script"
+      exit $?
+    fi
+    exit 0 ;;
+esac
+exit 0
+STUB3
+chmod +x "${DOWN_TMP}/incus"
+cp "$SUBJECT" "${DOWN_TMP}/target-services.sh"
+run_down() {
+    local target="$1" alias="$2" systemd="$3"
+    : > "$FAKE_LOG"
+    env PATH="${DOWN_TMP}:${PATH}" FAKE_BIN="${DOWN_TMP}/bin" \
+        FAKE_KILL_ENV="${DOWN_TMP}/bin/kill" FAKE_PROC_ROOT="${DOWN_TMP}/proc" \
+        FAKE_LOG="$FAKE_LOG" \
+        FAKE_TARGET_IP="$target" FAKE_SYSTEMD="$systemd" \
+        TARGET_V4="$target" TARGET_ALIAS_V4="$alias" \
+        MOUSE_TARGET_V4=172.16.80.201 INCUS_REMOTE=loss \
+        bash "${DOWN_TMP}/target-services.sh" down 2>&1
+}
+
+# The alias-owned target has systemd units. An iperf3 -s -D orphan and an
+# orphan TCP echo owner are killed; each service's MainPID and cgroup child
+# are spared. A self-matched shell would fail to reach ss on 6201 or the stop.
+down_out="$(run_down 172.16.80.202 172.16.80.202 1)"; down_rc=$?
+[[ $down_rc -eq 0 ]] || fail "#18626: alias down rc=$down_rc (possible pkill self-match): $down_out"
+grep -q "stopped target services" <<< "$down_out" \
+    || fail "#18626: alias down did not finish after orphan sweep: $down_out"
+grep -q '^kill .*146115$' "$FAKE_LOG" \
+    || fail "#18626: default-port iperf3 -s -D orphan 146115 was not killed: $(cat "$FAKE_LOG")"
+grep -q '^kill .*3101$' "$FAKE_LOG" \
+    || fail "#18626: echo listener orphan 3101 was not killed / second sweep did not run: $(cat "$FAKE_LOG")"
+grep -q '^ss 6201$' "$FAKE_LOG" \
+    || fail "#18626: echo listener port was not inspected (self-matched shell?): $(cat "$FAKE_LOG")"
+grep -q '^systemctl stop ' "$FAKE_LOG" \
+    || fail "#18626: systemd units were not stopped: $(cat "$FAKE_LOG")"
+if grep -Eq '^kill .* (2002|2003|3000|3001)$' "$FAKE_LOG"; then
+    fail "#18626: killed a listener in its unit MainPID/cgroup: $(cat "$FAKE_LOG")"
+fi
+
+# The non-alias target is provisioned without mouse systemd units; socket
+# ownership still finds both orphan forms and the second sweep completes.
+down_out="$(run_down 172.16.80.203 172.16.80.202 0)"; down_rc=$?
+[[ $down_rc -eq 0 ]] || fail "#18626: generic down rc=$down_rc: $down_out"
+grep -q '^kill .*146115$' "$FAKE_LOG" \
+    || fail "#18626: generic down missed the default-port iperf orphan: $(cat "$FAKE_LOG")"
+grep -q '^kill .*3101$' "$FAKE_LOG" \
+    || fail "#18626: generic down missed the echo orphan / second sweep: $(cat "$FAKE_LOG")"
+grep -q '^ss 6201$' "$FAKE_LOG" \
+    || fail "#18626: generic down did not inspect echo listener port: $(cat "$FAKE_LOG")"
+if grep -Eq '^[[:space:]]*pkill([[:space:]]|$)' "${DOWN_TMP}/target-services.sh"; then
+    fail "#18626: down still invokes pkill -f and retains the self-match hazard"
+fi
+[[ $fails -eq 0 ]] && pass "#18626 down kills socket orphans, spares unit pids, completes"
+
 # --- summary ------------------------------------------------------------
 if [[ $fails -eq 0 ]]; then
     echo "target-services selftest: all checks passed"

@@ -21,7 +21,7 @@
 #   ./test/incus/target-services.sh check           # exit 1 if ANY of the 24 is down
 #   ./test/incus/target-services.sh check 5202 6200 # exit 1 only if THESE are down
 #   ./test/incus/target-services.sh up       # start what is missing
-#   ./test/incus/target-services.sh down     # stop what this script started
+#   ./test/incus/target-services.sh down     # stop target listeners and units
 #
 # #8259 UPDATE — THERE IS NOW A SECOND TARGET, and it is an incus instance.
 # `test/incus/mouse-target-setup.sh` provisions `xpf-mouse-target` at
@@ -315,10 +315,10 @@ cmd_up() {
 }
 
 cmd_down() {
-    # #16213: on the systemd-pinned mouse host, stop the UNITS (and kill
-    # any detached orphan still holding a port, the pre-#16213 spawn this
-    # replaces) so a later `up` starts from a clean socket table and a
-    # unit failure is visible instead of masked by the orphan.
+    # #16213: stop the systemd-pinned services after removing any detached
+    # orphan that may still hold one of their sockets. Discover holders by
+    # socket ownership rather than argv: besides missing default-port and
+    # long-option iperf3 forms, pkill -f can match its own bash -c caller.
     local inst; inst="$(target_instance)"
     if [[ -z "$inst" && -n "$(alias_owner)" ]]; then
         inst="$(alias_owner)"
@@ -327,17 +327,64 @@ cmd_down() {
         echo "no incus handle for ${TARGET_V4}; nothing to stop from here" >&2
         return 2
     fi
+
+    local remote_script
+    remote_script="$(cat <<'REMOTE'
+pid_in_unit_cgroup() {
+    local pid="$1" unit_cgroup="$2" line path
+    [[ -r "/proc/${pid}/cgroup" ]] || return 2
+    while IFS= read -r line; do
+        path="${line##*:}"
+        [[ "$path" == "$unit_cgroup" || "$path" == "$unit_cgroup/"* ]] && return 0
+    done < "/proc/${pid}/cgroup"
+    return 1
+}
+
+sweep_socket_orphans() {
+    local port="$1" unit="$2" main_pid unit_cgroup pid in_unit
+    main_pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)"
+    [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || main_pid=""
+    unit_cgroup="$(systemctl show -p ControlGroup --value "$unit" 2>/dev/null || true)"
+    while IFS= read -r pid; do
+        [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+        [[ "$pid" == "$main_pid" ]] && continue
+        if [[ -n "$unit_cgroup" ]]; then
+            if pid_in_unit_cgroup "$pid" "$unit_cgroup"; then
+                continue
+            else
+                in_unit=$?
+                # If /proc cannot establish ownership, leave the process
+                # alone rather than risking a kill of a unit-owned listener.
+                [[ "$in_unit" -eq 1 ]] || continue
+            fi
+        fi
+        kill -TERM "$pid" 2>/dev/null || true
+    done < <(
+        ss -tlnpH "sport = :${port}" 2>/dev/null |
+            awk '{ line = $0; while (match(line, /pid=[0-9]+/)) {
+                print substr(line, RSTART + 4, RLENGTH - 4)
+                line = substr(line, RSTART + RLENGTH)
+            } }' | sort -u
+    )
+}
+
+for p in __IPERF_PORTS__; do
+    sweep_socket_orphans "$p" "mouse-iperf3@${p}.service"
+done
+for p in __ECHO_PORTS__; do
+    sweep_socket_orphans "$p" mouse-echo.service
+done
+REMOTE
+)"
+    remote_script="${remote_script/__IPERF_PORTS__/${IPERF_PORTS[*]}}"
+    remote_script="${remote_script/__ECHO_PORTS__/${ECHO_PORTS[*]}}"
     if [[ "$TARGET_V4" == "$TARGET_ALIAS_V4" || "$TARGET_V4" == "$MOUSE_TARGET_V4" ]]; then
-        incus_run exec "${INCUS_REMOTE}:${inst}" -- bash -c "
-            systemctl stop 'mouse-iperf3@*' mouse-echo 2>/dev/null || true
-            pkill -f 'iperf3 -s -p 52' || true
-            pkill -f 'TCP-LISTEN:62'   || true"
+        remote_script+=$'\nsystemctl stop \'mouse-iperf3@*\' mouse-echo 2>/dev/null || true'
+        incus_run exec "${INCUS_REMOTE}:${inst}" -- bash -c "$remote_script"
         echo "stopped target services (systemd units + orphans) on ${INCUS_REMOTE}:${inst}"
         return 0
     fi
-    incus_run exec "${INCUS_REMOTE}:${inst}" -- bash -c "
-        pkill -f 'iperf3 -s -p 52' || true
-        pkill -f 'TCP-LISTEN:62'   || true"
+    incus_run exec "${INCUS_REMOTE}:${inst}" -- bash -c "$remote_script"
     echo "stopped target services on ${INCUS_REMOTE}:${inst}"
 }
 
