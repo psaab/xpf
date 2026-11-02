@@ -190,11 +190,11 @@ func gatewaySchemaNode() *schemaNode {
 func hostInboundSchemaChildren() map[string]*schemaNode {
 	return map[string]*schemaNode{
 		"system-services": {
-			desc: "System services", args: 1, multi: true, placeholder: "<service>",
+			desc: "System services", args: 1, multi: true, absorbBareValues: true, placeholder: "<service>",
 			children: nil, nodeValidator: validateHostInboundNestedValueChildren13106,
 		},
 		"protocols": {
-			desc: "Protocols", args: 1, multi: true, placeholder: "<protocol>",
+			desc: "Protocols", args: 1, multi: true, absorbBareValues: true, placeholder: "<protocol>",
 			children: nil, nodeValidator: validateHostInboundNestedValueChildren13106,
 		},
 	}

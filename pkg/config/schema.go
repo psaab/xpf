@@ -104,6 +104,15 @@ type schemaNode struct {
 	// TestPackedTailContainersValidateBothSpellings6821 holds the pairing.
 	packedTail bool
 
+	// absorbBareValues opts a `multi && children == nil` leaf into owning
+	// bare (unquoted, unbracketed) trailing tokens in a packed run when
+	// they name no sibling statement. Only leaves whose values are an
+	// open token set validated downstream (host-inbound services and
+	// protocols) set it: for every other multi leaf, bare trailing tokens
+	// stay outside the modelled grammar and the conservative bailout
+	// stands (#18414 command lists, #9855 inline-wins merge).
+	absorbBareValues bool
+
 	// packedStatements opts a CONTAINER into having its packed tail split into
 	// one child per STATEMENT by the brace-elision fold (#8768), instead of the
 	// whole run becoming a single child.

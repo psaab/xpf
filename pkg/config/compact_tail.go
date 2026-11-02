@@ -218,7 +218,7 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 		// two values, so the elided tail must not strand bare values past
 		// the leaf's single declared arg. A following token that resolves
 		// as a sibling at any open level still ends the statement.
-		if childSchema.multi && childSchema.children == nil && n >= 1 {
+		if childSchema.multi && childSchema.absorbBareValues && childSchema.children == nil && n >= 1 {
 			for n < len(tail) {
 				sibling := false
 				for _, lv := range levels {
