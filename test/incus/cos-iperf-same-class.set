@@ -155,6 +155,11 @@ set firewall family inet filter bandwidth-output term 12 then forwarding-class i
 set firewall family inet filter bandwidth-output term 12 then count iperf-1g-legacy-mouse
 set firewall family inet filter bandwidth-output term 12 then accept
 
+# #18728: Junos stateless filters end in an implicit final discard. Traffic
+# that matches no class term above (other ports, ICMP, mice) must keep
+# passing as best-effort, so the permit-by-default is explicit. Keep LAST.
+set firewall family inet filter bandwidth-output term default then accept
+
 set interfaces reth0 unit 80 family inet filter output bandwidth-output
 
 set firewall family inet6 filter bandwidth-output term 0 from destination-port 5200
@@ -234,5 +239,10 @@ set firewall family inet6 filter bandwidth-output term 12 from destination-port 
 set firewall family inet6 filter bandwidth-output term 12 then forwarding-class iperf-1g
 set firewall family inet6 filter bandwidth-output term 12 then count iperf-1g-legacy-mouse
 set firewall family inet6 filter bandwidth-output term 12 then accept
+
+# #18728: Junos stateless filters end in an implicit final discard. Traffic
+# that matches no class term above (other ports, ICMP, mice) must keep
+# passing as best-effort, so the permit-by-default is explicit. Keep LAST.
+set firewall family inet6 filter bandwidth-output term default then accept
 
 set interfaces reth0 unit 80 family inet6 filter output bandwidth-output

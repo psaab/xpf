@@ -1,3 +1,8 @@
+# HISTORICAL EVIDENCE (line-rate investigation). It predates #18728, which
+# makes xpf drop traffic that matches no firewall filter term (the Junos
+# implicit final discard). `bandwidth-output` below has no catch-all, so if
+# you re-use this file, append `term default { then accept; }` LAST:
+#   set firewall family inet filter bandwidth-output term default then accept
 delete class-of-service
 delete firewall family inet filter bandwidth-output
 delete interfaces reth0 unit 80 family inet filter output

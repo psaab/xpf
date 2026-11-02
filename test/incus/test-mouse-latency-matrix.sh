@@ -47,10 +47,11 @@ fi
 # fixture and silently corrupt both datasets. flock -n fails fast
 # instead of waiting.
 #
-# Copilot D.1: hard-code /tmp rather than ${TMPDIR:-/tmp} — two
-# invocations with different TMPDIR env values would lock
-# different files and bypass the mutex. The CoS state being
-# protected is per-host, so the lock must be per-host.
+# Copilot D.1: hard-code the lock path rather than derive it from
+# ${TMPDIR} — two invocations with different TMPDIR env values would
+# lock different files and bypass the mutex. The CoS state being
+# protected is per-host, so the lock must be per-host. #14837 moved the
+# fixed path from /tmp to the /var/worktrees scratch root.
 # #8244: OUT_ROOT and SCRIPT_DIR are resolved BEFORE the mutex so that a
 # lock-contention abort can write its artifact too. A run that never started
 # because another holds the lock is precisely the "never ran" case that used

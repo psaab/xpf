@@ -34,7 +34,7 @@ func TestFilterSnapshotICMPUnrepresentableSetsMarker(t *testing.T) {
 			UnknownICMPCodes: []string{"300"},   // out-of-range code
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("expected 1 filter with 1 term, got %#v", snaps)
 	}
@@ -60,7 +60,7 @@ func TestFilterSnapshotICMPResolvableNoMarker(t *testing.T) {
 			ICMPCodes: []int{0},
 		}}},
 	}
-	term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]
+	term := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0]
 	if term.ICMPTypeUnrepresentable || term.ICMPCodeUnrepresentable {
 		t.Errorf("a fully-resolvable ICMP term must carry no unrepresentable marker, got type=%v code=%v",
 			term.ICMPTypeUnrepresentable, term.ICMPCodeUnrepresentable)
@@ -85,7 +85,7 @@ func TestFilterSnapshotDSCPMatchUnrepresentableSetsMarker(t *testing.T) {
 			DSCPs:  []string{"not-a-code-point"},
 		}}},
 	}
-	term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]
+	term := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0]
 	if !term.DSCPMatchUnrepresentable {
 		t.Error("an unresolvable from-dscp match token must set DSCPMatchUnrepresentable (#3406 fail-open)")
 	}
@@ -105,7 +105,7 @@ func TestFilterSnapshotDSCPMatchResolvableNoMarker(t *testing.T) {
 			DSCPs:  []string{"ef", "10"},
 		}}},
 	}
-	term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]
+	term := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0]
 	if term.DSCPMatchUnrepresentable {
 		t.Error("a resolvable from-dscp match must carry no unrepresentable marker")
 	}
@@ -128,7 +128,7 @@ func TestFilterSnapshotDSCPRewriteUnrepresentableNoMarkerNoValue(t *testing.T) {
 			DSCPRewrite: "not-a-code-point",
 		}}},
 	}
-	term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]
+	term := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0]
 	if term.DSCPMatchUnrepresentable {
 		t.Error("an unrepresentable then-dscp REWRITE must not set the match marker (CoS-only, no security widening)")
 	}
@@ -162,7 +162,7 @@ func TestFilterSnapshotFlexMatchOversizedWidthNotCapped(t *testing.T) {
 			},
 		}}},
 	}
-	fm := buildFirewallFilterSnapshots(cfg)[0].Terms[0].FlexMatch
+	fm := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))[0].Terms[0].FlexMatch
 	if fm == nil {
 		t.Fatal("flex-match dropped")
 	}
@@ -195,7 +195,7 @@ func TestFilterSnapshotMixedPortExceptWarns(t *testing.T) {
 			DestPortsExcept:   []string{"23"},
 		}}},
 	}
-	buildFirewallFilterSnapshots(cfg)
+	authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	out := buf.String()
 	if !strings.Contains(out, "positive source-port list") {
 		t.Errorf("mixed source positive + except ports must warn (positive-wins drops the except set), got: %q", out)
@@ -222,7 +222,7 @@ func TestFilterSnapshotPureExceptPortNoWarn(t *testing.T) {
 			SourcePortsExcept: []string{"443"},
 		}}},
 	}
-	buildFirewallFilterSnapshots(cfg)
+	authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if strings.Contains(buf.String(), "positive source-port list") {
 		t.Errorf("a pure source-port-except term must not warn, got: %q", buf.String())
 	}

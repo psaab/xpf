@@ -66,7 +66,11 @@ func (d *Daemon) bootstrapFromFile() error {
 	// candidate edit can occur and the generation always matches — this is
 	// belt-and-suspenders that keeps the examined-equals-promoted invariant
 	// uniform with the operator commit paths (commitWithGenBinding).
-	cand, gen, cerr := d.store.CompileCandidateGen()
+	//
+	// #18744: compile and commit as the bootstrap authority, so the pre-flight
+	// sees the same placeholder decision as the commit below.
+	bootstrap := configstore.InternalCommitterAs(configstore.BootstrapPrincipal)
+	cand, gen, cerr := d.store.CompileCandidateGenAs(bootstrap)
 	if cerr == nil {
 		if perr := d.deviceMapCommitPreflight(cand, nil); perr != nil {
 			d.store.ExitConfigure()
@@ -76,8 +80,7 @@ func (d *Daemon) bootstrapFromFile() error {
 			return fmt.Errorf("bootstrap device-map preflight: %w", perr)
 		}
 	}
-	if _, err := d.store.CommitWithDescriptionGenAs(
-		configstore.InternalCommitterAs("system:bootstrap"), "", gen); err != nil {
+	if _, err := d.store.CommitWithDescriptionGenAs(bootstrap, "", gen); err != nil {
 		d.store.ExitConfigure()
 		return fmt.Errorf("commit: %w", err)
 	}

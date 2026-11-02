@@ -89,6 +89,42 @@ apply (with a warning) — the residual is a wiped `/var/lib/xpf`.
 recovery, and clearing the key deletes the record so reinstalling the same key
 is a fresh first keying.
 
+**Primary-listener stream authorization (#17175, #9051, #18760).**
+`principalStreamInterceptor` prices a server-streaming method in up to three
+places:
+
+- **At open**, `authorizeStreamOpenContext`. A request-dependent method gets
+  only the coarse `methodPermission` floor and identity, because no message has
+  been read yet.
+- **On the first `RecvMsg`**, `authzRecvStream`. Every stream gets the full
+  `authorizeRPCContext` on the decoded message: command regexes, argument
+  forms, config gates. The message is retained.
+- **On each re-auth tick**, which re-prices that retained message.
+
+`streamRequestSpec17175` (`authz_stream_spec_17175.go`) declares which streams
+are request-dependent. A `false` (request-independent) entry additionally runs
+the full decision at open on the method's typed empty request
+(`emptyStreamRequest17175`). That is never a bypass, because the first-message
+verdict still applies, but it is at least as strict as the true verdict.
+
+So `false` is valid only when `rpcArgumentForms` does not read the request.
+Otherwise the open-time bare charge cannot match an argument-scoped
+`allow-commands`, and the stream is refused before its message is read.
+`MonitorPacketDrop` was in that state from #17175 until #18760 (#17184 had
+given it an argument arm). No served stream is request-independent today.
+
+Two censuses keep the declaration honest:
+
+- `TestStreamRequestSpecCoversEveryStream17175` (F3): a `false` entry has no
+  request-priced arm.
+- `TestStreamWithArgumentFormsIsRequestDependent18760`: every stream's named
+  row differs from its typed-empty request unless the method is argument-free,
+  and a request-dependent stream is declared `true`.
+
+The per-stream allow and deny cells sit beside the second census.
+`authorizeStreamContinuously` waits, with a bound, for its re-auth watcher to
+exit before returning, so no tick outlives its stream.
+
 **Fabric stream args-binding and continuous re-auth (#16031, #11524 Phase 2).**
 Fabric `MonitorInterface` streams must carry the #11082 args-bound token
 matching the request; the legacy method-only fallback (previously counted by

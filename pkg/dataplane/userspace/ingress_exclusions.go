@@ -1,6 +1,10 @@
 package userspace
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/psaab/xpf/pkg/dataplane"
+)
 
 // Which interfaces the userspace dataplane does NOT adjudicate.
 //
@@ -122,15 +126,25 @@ func exclusionBaseName(iface InterfaceSnapshot) string {
 	return base
 }
 
+// controlPlaneNameClass is the dataplane's control-plane name class for this
+// row's base name, or "" when it has none.
+func controlPlaneNameClass(iface InterfaceSnapshot) string {
+	class, _ := dataplane.ControlPlaneNetdevNameClass(exclusionBaseName(iface))
+	return class
+}
+
 // netdevExclusionClasses is evaluated in order. Order affects only WHICH name is
 // reported, never the boolean, so it is free to read as the switch did.
 var netdevExclusionClasses = []netdevExclusionClass{
 	{name: "Tunnel", match: func(iface InterfaceSnapshot) bool { return iface.Tunnel }},
+	// #18740: the fxp/em name classes are single-sourced with the shim's
+	// attach set (dataplane.ControlPlaneNetdevNameClass), so a name this
+	// dataplane never adjudicates is also never shimmed.
 	{name: "fxp name", match: func(iface InterfaceSnapshot) bool {
-		return strings.HasPrefix(exclusionBaseName(iface), "fxp")
+		return controlPlaneNameClass(iface) == "fxp name"
 	}},
 	{name: "em name", match: func(iface InterfaceSnapshot) bool {
-		return strings.HasPrefix(exclusionBaseName(iface), "em")
+		return controlPlaneNameClass(iface) == "em name"
 	}},
 	{name: "fab name", match: func(iface InterfaceSnapshot) bool {
 		return strings.HasPrefix(exclusionBaseName(iface), "fab")

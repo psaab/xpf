@@ -44,12 +44,20 @@ sent while exact queues were still backlogged.
 
 `userspace-xdp/src/ipv6_ext_walk.rs` is guarded by
 `test/mutation/shim-ext-parity-acceptance.sh`, not by `make test` alone. The
-script mutates the walk across 16 mutation rows plus one negative control,
+script mutates the walk across 19 mutation rows plus one negative control,
 bracketed by a green baseline (row 0) and a post-restore recheck, and requires
 the parity guards in
 `userspace-dp/src/afxdp/frame/tests_shim_ext_parity.rs` to red on each edit. It
 prints per-row accounting at the end, so the evidence quoted in a PR body is
 checkable against the matrix rather than against a bare `PASS`.
+
+Each row is a full release rebuild (5-10 min), so `ROWS=4-20` (or `ROWS=7,19`)
+runs a subset; the verdict then says it is not a full matrix, and a row number
+that names no declared row is refused before anything is touched. INT and TERM
+restore the walker and END the run (exit 130/143). Signal the process group to
+stop at once: bash runs the trap only after the current cargo step returns.
+`make test-shim-ext-parity-selftest` (also in `make selftest`) pins both
+behaviours against a stub cargo in seconds (#18738).
 
 One mutation per row, and one ARM per row where an edit applies to several: a
 row that mutated the GENERIC and AUTH revalidation bases together scored RED on
@@ -857,10 +865,28 @@ would blackhole every flow handed to it.
   `resetAfterHelperGoneLocked` — shared with `stopLocked` precisely so
   the crash path and the stop path cannot drift about which state a
   departed helper invalidates. `TakeoverReady()` goes false.
-- **Bounded restart.** Exponential backoff from
-  `helperRestartBackoffBase` to `helperRestartBackoffMax`, re-armed on
-  each failure so a helper that cannot start retries forever at a fixed
-  low rate instead of fork-storming. The restart calls the ORDINARY
+- **Bounded restart.** The first unexpected exit of a crash episode is
+  retried immediately (#18707); every further exit in the same episode
+  backs off exponentially from `helperRestartBackoffBase` to
+  `helperRestartBackoffMax` (0, 1s, 2s, ... 60s), re-armed on each
+  failure so a helper that cannot start retries forever at a fixed low
+  rate instead of fork-storming. The first retry used to wait the 1s base
+  as well, and that second was pure outage: the child is already reaped
+  and the shim already disarmed when the retry is scheduled, and the
+  bring-up readiness gates still run before forwarding is re-armed. The
+  immediate retry adds one attempt, not one earlier verdict: the
+  cumulative wait before the cap is still 63s (0+1+...+32 instead of
+  1+2+...+32). A Compile bring-up failure that re-arms a pending attempt-1
+  retry (`rearmHelperRestartLocked`) therefore re-arms it immediately too;
+  if that retry fails, it is charged as attempt 2 and waits the base.
+  The restart's status loop runs its first reconcile pass at once rather
+  than one `statusLoopInterval` later (`ensureStatusLoopFirstPassNowLocked`),
+  because that pass is what republishes the snapshot the replacement's
+  workers bind from. If the body discards that pass — most often the
+  #16653 stale-poll fence, when the daemon's own reaction to the restart
+  applies a status while the poll is off-lock — it is retried 100 ms later,
+  at most 10 times, instead of a whole tick later; once a pass runs to the
+  end the loop is back on its 1 s ticker. The restart calls the ORDINARY
   `ensureProcessLocked` against the CURRENT `m.cfg`, not the dead
   generation's argv, so a config replacement that landed while the
   helper was down is what starts, and the binding / XSK-liveness /
@@ -872,13 +898,22 @@ would blackhole every flow handed to it.
   read as "this helper is not coming back". It is **backoff at the cap** within
   one crash episode, not a lifetime restart count: a quiet interval longer than
   twice the maximum backoff resets the consecutive-attempt count. With the
-  shipped 1s base and 60s cap it trips at seven consecutive attempts and clears
+  shipped 1s base and 60s cap it trips at eight consecutive attempts (seven
+  before #18707's immediate first retry; the same 63s of cumulative backoff) and clears
   after more than 120s without another unexpected exit. `HelperSupervisorState`
   treats it as election debt only while the helper is down and the retry is
   still fenced to the current generation; an intentional stop does not resign.
-- **HA response (#12159).** Supervisor death wakes the daemon transit gate,
-  which closes while the helper is down even though the xpfd-owned XDP shim is
-  still attached. A fast restart reopens transit without changing RG weight.
+- **HA response (#12159, #18697).** Supervisor death wakes the daemon transit
+  gate, which closes while the helper is down even though the xpfd-owned XDP
+  shim is still attached. Since #18697 an UNEXPECTED exit (a crash or a #18685
+  wedge kill) also installs arm debt (weight 1), so a healthy peer takes the
+  data RGs (#12164). The debt is held through the respawn and clears only when
+  the new helper has reported `ForwardingArmed` and then looked healthy for
+  `helperWedgeClearAfter` (5 s). Before #18697 a single restart kept weight 255
+  on the premise that it is short. On tcp one post-kill restart took 227 s with
+  node0 primary and transit dead (#18696). An intentional stop or respawn (a
+  plan-key change, an operator stop) keeps the F2 pass-through: it neither
+  installs nor wipes arm debt, so a config commit does not move the RGs.
   When restart backoff reaches its cap, a dedicated full-cost monitor debt
   takes a DATA RG's local weight to 0 so even a non-preempt incumbent yields.
   RG0 is excluded: it is the config-authority group with no data VIP, and
@@ -958,37 +993,133 @@ failed restart attempts remain represented in the helper's restart state.
 These are separate operator views: the ring provides recent episode details;
 the counter provides the monotonic alert signal.
 
-### A helper that answers nothing is restarted from the Go side (#9651)
+### A helper that answers nothing, or stops forwarding, is demoted and then restarted (#9651, #18685)
 
 The supervisor above acts on an EXIT, and a wedged helper does not exit. Since
 #9172 (V031) the helper's control-socket accept loop retries resource errors,
 so transient fd or memory pressure no longer drops forwarding. A genuine
-descriptor leak at `RLIMIT_NOFILE` therefore leaves the helper alive and
-forwarding on its last state, with a control socket that accepts nothing, and
-before #9651 the only trace was a status-poll warning.
+descriptor leak at `RLIMIT_NOFILE`, or a lock-order deadlock in the workers
+(#18658), therefore leaves the helper alive with a dataplane that forwards
+nothing.
 
-The helper cannot recover this itself: an accept result does not distinguish a
-leak from recovering pressure (#9651 records three designs that failed on
-that). The daemon's 1/s status poll observes the condition directly, so
-`helper_liveness_9651.go` counts consecutive polls that got **no answer at
-all**:
+#9651 counted 30 consecutive unanswered STATUS polls, assuming one a second.
+They do not arrive once a second when it matters. Every control round trip
+serialises on `controlReqMu` with at least a 3 s deadline, and when the helper
+stops answering, each queued caller burns its deadline before the status poll
+gets a turn. On loss (#18658) polls landed about every 90 s: 26 failures in 37
+minutes, no kill, node still primary. `helper_liveness_18685.go` replaces the
+count with time and adds a worker-progress input:
 
-- an answered poll resets the count, and so does an in-band refusal, because a
-  refusal is an answer. So a helper under recovering pressure, which gets any
-  poll through, is never restarted;
-- a helper is wedged only after `helperWedgeFailedPolls` (30) unanswered polls
-  **and** `helperWedgeMinSpan` (30 s) since the first. The count binds when
-  polls fail slowly, at their deadline; the span binds when they fail fast;
-- within `helperWedgeRGGrace` (10 s) of an `update_ha_state` the kill waits,
-  so a failover's own control-socket load does not become a restart mid-flight;
-- a wedged helper is **killed** with SIGKILL, and recovery belongs to the
-  supervisor: the unexpected-exit path above disarms the shim, records the
-  crash and restarts it with the bounded backoff. Nothing in #9651 restarts a
-  helper itself.
+- **Evidence.**
+  - Every control round trip of every verb is recorded at the single site
+    `requestDetailedAtSocket`.
+  - An answer or an in-band refusal clears the silence.
+  - An undecodable or over-cap reply (#18293) neither advances nor clears it.
+  - A deadline, an EOF (even after a partial prefix), or any other failure
+    without a reply is silence.
+  - The silence starts at the START of the first silent round trip after the
+    last answer, measured after `controlReqMu`, so queueing behind other
+    callers is never charged to the helper.
+  - Each answered status also carries the workers' heartbeats.
+- **Suspected (cheap, reversible).** The verdict is raised by either of:
+  - a worker whose heartbeat is at least `helperWorkerFrozenAfter` (10 s)
+    OLD at an answered status (status time minus heartbeat, the quantity
+    `fwdstatus.heartbeatsHealthy` reads from the same field), on
+    `helperWorkerFrozenStatuses` (2) consecutive statuses, while forwarding
+    is armed. This is the primary input. On tcp the #18655 busy convoy aged
+    heartbeats to 16-22 s while the control thread answered in about 2 ms and
+    transit was dead.
+    - The verdict is judged by AGE, not by whether the value changed. The
+      helper re-derives every heartbeat on every status call from two fresh
+      clock reads (`coordinator/status.rs` `worker_heartbeats`), so a frozen
+      worker's heartbeat still wobbles by microseconds from poll to poll, and
+      change detection never fires (#18704 review).
+  - two silent round trips spanning `helperWedgeDemoteSpan` (5 s).
 
-Bound by `helper_liveness_9651_test.go`. The kill cell drives the real
-supervisor (crash recorded, restart scheduled, takeover not ready), and a
-source cell binds `statusLoop`'s wiring.
+  The daemon's transit gate reads it lock-free (`HelperElectionNotReady`) and
+  installs arm debt, so the data RGs yield to a healthy peer. It clears after
+  `helperWedgeClearAfter` (5 s) and `helperWedgeClearTrips` (3) answers of
+  healthy behaviour, so a helper that answers every other request cannot flap
+  the RGs. Freeze is judged against the time of the latest answered status,
+  never the wall clock, so a RETH MAC link cycle (no polls, parked workers)
+  never ages a worker into frozen.
+- **Kill (irreversible).** The kill fires on either of:
+  - `helperWedgeMinSpan` (30 s) of silence across at least two round trips;
+  - a worker frozen for `helperWorkerFrozenKillAfter` (2 min), which is
+    several times the longest convoy measured.
+
+  It waits out `helperWedgeRGGrace` (10 s) after an `update_ha_state`. A
+  per-generation watchdog goroutine checks once a second and SIGKILLs the
+  generation's own process handle. It takes neither `m.mu` nor `controlReqMu`,
+  because callers hold `m.mu` across round trips. The status loop asks the
+  same tracker as a second path; a generation is killed at most once. Recovery
+  belongs to the supervisor, and the next generation inherits the not-ready
+  verdict until it arms (#18697 above).
+- **Heartbeat reference time.** Ages are measured against the moment the
+  status round trip RETURNED, taken before the status loop re-acquires
+  `m.mu`. Waiting on `m.mu` after a healthy reply is therefore never charged
+  to the workers (#18704 review).
+- **Intentional stop.** `stopLocked` retires the tracker's generation. Silence
+  recorded against a stopped helper therefore cannot accrue into a verdict
+  during a planned stop-to-respawn, and a late answer from an older generation
+  never clears the current one's silence.
+- **Bounds** come from the measured healthy population (#18658 cells): the
+  status round trip stayed under 31 ms on udp and tcp through 16k-session
+  bursts on every build, including during the #18655 convoy.
+- **Metrics:**
+  - `xpf_userspace_helper_answer_age_seconds`, which keeps growing while the
+    helper is silent, unlike the cached status behind the other families;
+  - `xpf_userspace_helper_election_not_ready`;
+  - `xpf_userspace_helper_wedge_kills_total`.
+
+#### Reading the verdict (operators)
+
+- **What raises it.** `xpf_userspace_helper_election_not_ready` is 1 while
+  this node's helper must not hold the data RGs. Each raise logs one WARN
+  that names its input:
+  - `helper looks wedged; raising election debt ... reason="worker N
+    heartbeat Xs old"`, the frozen-worker input;
+  - `reason="no control request answered for Xs over N round trips"`, the
+    silence input;
+  - `helper restarted after an unexpected exit; holding election debt until
+    it is armed and healthy (#18697)`.
+
+  The debt itself lands on the shared dataplane-arm monitor. So in `show
+  chassis cluster status` it looks like any other arm failure
+  (`__dataplane-arm__`), and the WARN line above is what tells them apart.
+  A distinct monitor key was not added: the #12164 arm-debt yield keys on
+  that one monitor.
+- **Automatic clear.** The verdict clears by itself after
+  `helperWedgeClearAfter` (5 s) and `helperWedgeClearTrips` (3) answers of
+  healthy behaviour, which means no silence and no frozen worker. After an
+  unexpected exit it also needs the new helper to report `ForwardingArmed`
+  first. Each clear logs one INFO, `helper healthy again; clearing the wedge
+  election debt`, carrying the original reason and how long it was raised.
+  Under non-preempt the RGs stay on the peer after the clear.
+- **Automatic kill.** If the verdict persists, the helper is killed after
+  30 s of silence or 2 min of a frozen worker, logged as `... killing it so
+  the supervisor fails closed and restarts it (#18685)`. The supervisor
+  restarts it, and #18696 bounds how long that takes.
+- **If it never clears.** A helper that keeps answering with a frozen worker
+  for under 2 min at a time, over and over, would hold the debt without
+  being killed. `systemctl restart xpfd` on that node recovers it; the peer
+  is already carrying the RGs.
+- **`xpf_userspace_helper_answer_age_seconds`** is the age of the last
+  answer to ANY control request, from the live generation. It is NaN when
+  no generation is live (before the first helper, or after an intentional
+  stop), so it never reads 0 for "never answered". The per-status staleness
+  flag on `/metrics` and the status summary is #18689.
+
+Bound by `helper_liveness_18685_test.go` (the 90 s-cadence kill, the sparse
+kill, demote before kill, slow-but-answering, frozen worker demote and clear,
+the frozen-worker kill, no status means no freeze, the inherited not-ready
+verdict, stale-generation evidence, the watchdog killing while `m.mu` is held,
+and the round-trip wiring), `helper_liveness_9651_test.go` (the kill through
+the real supervisor, recovering pressure, refusals, the minimum span, the RG
+grace, #18293 decode handling and the `statusLoop` wiring), and
+`pkg/daemon/transit_helper_readiness_18697_test.go` (debt on an unexpected
+exit, debt held until re-arm, F2 kept for an intentional stop, debt on a
+wedge, and unrelated arm debt surviving).
 
 ## Armed-state admission contract (#2114 A3)
 
@@ -1268,6 +1399,32 @@ publish. The ordering is load-bearing, not incidental:
    ifindex the accepted snapshot no longer adjudicates. It runs at the
    ACCEPTANCE POINTS ONLY, immediately after each `m.lastSnapshot = snap`.
 
+**Control-plane netdevs never enter the attach set (#18740).** The
+userspace dataplane never adjudicates `fxp*` (management) or `em*` (the
+cluster control link). Its ingress exclusion names them, and the shim's
+verdict for an ifindex outside the ingress set is `cpumap_or_pass`.
+
+Until #18740, `compileZones` still queued them like any zoned netdev:
+- Step 1 attached the shim to `fxp0` and `em0` FRESH on every apply,
+  because step 3 of the previous apply had detached and unpinned them.
+- Step 3 then detached it again 25-142 ms later.
+
+That is two XDP program changes per commit, per node, on the HA control
+link. One heartbeat frame that arrived at the instant of an `em0` attach was
+lost on a lab cluster.
+
+`compileZones` now leaves them, and VLAN children of them, out of
+`pendingXDP` and `pendingTC`. It records them as SKIPPED unarmed surfaces,
+so the arm-coverage proof still lists them and does not count them toward
+WouldGate. The name classes are single-sourced:
+`dataplane.ControlPlaneNetdevNameClass` backs both this exclusion and the
+userspace ingress classes "fxp name" and "em name", so a name the compile
+leaves unshimmed is always one the ingress set excludes.
+
+`fab*` is deliberately not in the list: `fab0` resolves to its local member's
+parent netdev, which carries the fabric redirect path. An unchanged commit
+now makes no XDP transition on any link.
+
 **Why the detach is last.** Until #5485 it ran before step 2, so any
 failure in between left the kernel on the new interface set while the
 control plane still reported the old one. That divergence is a policy
@@ -1346,7 +1503,8 @@ the separately documented unadjudicated-forward window.
 >
 > It mattered because **the attach set is strictly larger than the ingress
 > set**: `compiler_iface.go` puts every zoned netdev into
-> `st.xdpIfindexes`, tunnels included ("Tunnels need XDP for ingress"),
+> `st.xdpIfindexes` (since #18740, every one except `fxp*`/`em*`), tunnels
+> included ("Tunnels need XDP for ingress"),
 > and `syncInterfaceAttachments` reconciles the difference away only at
 > the two post-acceptance points. A tunnel netdev on a userspace-dataplane
 > box is an anchor TUN — ARPHRD_NONE, raw L3, **no Ethernet header** — so
@@ -2027,11 +2185,12 @@ walk stepped over carried non-zero offset bits (`& 0xFFF8`, RFC 8200
 §4.5), which is field-for-field the semantics of
 `ExtChainWalk::non_first_fragment_offset_seen` on this side — so the
 corpus compares them for EQUALITY at every L3 offset, and
-`shim_is_not_more_permissive` pins that a first and a non-first fragment
-move that field in both walkers together. Before #6704 the shim returned a
-bare `(offset, protocol)` and the fragment dimension could not be compared
-from the test side at all; an earlier attempt to compare it hand-wrote a
-second walk loop in the test and asserted `X == X`.
+`shim_walk_is_not_more_permissive` (renamed in #14056) pins that a first
+and a non-first fragment move that field in both walkers together. Before
+#6704 the shim returned a bare `(offset, protocol)` and the fragment
+dimension could not be compared from the test side at all; an earlier
+attempt to compare it hand-wrote a second walk loop in the test and
+asserted `X == X`.
 
 Since #16038 the last field reports walk exhaustion: true iff the loop
 spent all `MAX_EXT_HDRS` iterations and still holds a traversable

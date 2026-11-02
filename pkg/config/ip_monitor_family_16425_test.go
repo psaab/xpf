@@ -22,6 +22,8 @@ import (
 
 const ipMon16425Head = `chassis {
 	cluster {
+	    control-interface em0;
+	    peer-address 10.99.0.2;
 		cluster-id 1;
 		node 0;
 		authentication-key aaaaaaaaaaaaaaaa;

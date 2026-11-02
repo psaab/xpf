@@ -1354,6 +1354,7 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 		m.rgTransitionInFlight.Store(false)
 	}
 	m.lastRGActivateTime = time.Now()
+	m.liveTrack.noteRGActivate(m.lastRGActivateTime)
 	// UpdateRGActive is the authoritative active-change publish. Record the
 	// throttle baseline so the watchdog heartbeat path (UpdateHAWatchdog) does
 	// not immediately re-fire a redundant update_ha_state right after a failover,

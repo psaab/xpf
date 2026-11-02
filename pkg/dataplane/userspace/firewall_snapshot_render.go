@@ -31,7 +31,13 @@ func RenderFirewallFilterSnapshot(snap *FirewallFilterSnapshot) string {
 	}
 	for i := range snap.Terms {
 		term := &snap.Terms[i]
-		fmt.Fprintf(&b, "  Term: %s\n", term.Name)
+		if snap.ImplicitDiscard && i == len(snap.Terms)-1 {
+			// #18728: the synthetic last term appendImplicitDiscard
+			// materialized; label it so it is not read as authored.
+			fmt.Fprintf(&b, "  Term: %s (Junos implicit final discard: no term above matched)\n", term.Name)
+		} else {
+			fmt.Fprintf(&b, "  Term: %s\n", term.Name)
+		}
 
 		// --- from (match conditions, as lowered for the matcher) ---
 		if s := effectiveAddrMatchLine("source", term.SourceAddresses, term.SourceExcept, term.SourceConstrained); s != "" {

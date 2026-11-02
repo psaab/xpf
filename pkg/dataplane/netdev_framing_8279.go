@@ -40,7 +40,9 @@ import "github.com/vishvananda/netlink"
 //
 // WHICH NETDEVS THIS ACTUALLY REACHES. The shim's attach set is strictly
 // LARGER than the userspace-ingress set: every zoned netdev enters
-// `st.xdpIfindexes` below, tunnels included, and only the userspace manager's
+// `st.xdpIfindexes` below, tunnels included (the fxp*/em* control-plane
+// netdevs excepted since #18740, controlplane_netdev_18740.go), and only the
+// userspace manager's
 // `syncInterfaceAttachments` reconciles the difference away — at the two
 // POST-acceptance points, deliberately (#5485). On a userspace-dataplane box a
 // tunnel is an anchor TUN (ARPHRD_NONE), and the base row of a canonically

@@ -828,6 +828,21 @@ harness_build_git_sha() {
 	fi
 }
 
+# harness_deb_build_match <deb_version> <build_git_sha>: "match" when the
+# deb's +g<sha> suffix is a prefix of build_git_sha ("-dirty" ignored),
+# "mismatch" when it is not, "unknown" with no deb version or no +g suffix
+# (#18772).
+harness_deb_build_match() {
+	local deb_version="$1" git_sha="${2%-dirty}" deb_sha
+	[[ "$deb_version" =~ \+g([0-9a-f]{7,40}) ]] || { printf 'unknown\n'; return 0; }
+	deb_sha="${BASH_REMATCH[1]}"
+	if [[ "$git_sha" =~ ^[0-9a-f]{7,40}$ && "$git_sha" == "$deb_sha"* ]]; then
+		printf 'match\n'
+	else
+		printf 'mismatch\n'
+	fi
+}
+
 # harness_exe_check <build_exe_sha> <running_exe_sha> <mode>
 # mode: cluster | hermetic
 harness_exe_check() {
@@ -900,6 +915,7 @@ harness_result_emit() {
 	local running_helper_exe_peer="" helper_exe_scope=""
 	local duration_s="" artifacts="" adapter="" ledger="" node="" ts=""
 	local node_peer="" running_exe_peer="" exe_scope="" measurement_scope=""
+	local deb_version="" deb_build_match=""
 	while (($#)); do
 		case "$1" in
 		--gate) gate="$2"; shift 2 ;;
@@ -925,6 +941,8 @@ harness_result_emit() {
 		--adapter) adapter="$2"; shift 2 ;;
 		--node) node="$2"; shift 2 ;;
 		--node-peer) node_peer="$2"; shift 2 ;;
+		--deb-version) deb_version="$2"; shift 2 ;;
+		--deb-build-match) deb_build_match="$2"; shift 2 ;;
 		--running-exe-sha256-peer) running_exe_peer="$2"; shift 2 ;;
 		--exe-scope) exe_scope="$2"; shift 2 ;;
 		--measurement-scope) measurement_scope="$2"; shift 2 ;;
@@ -1013,6 +1031,7 @@ harness_result_emit() {
 			HR_VERDICT="$verdict" HR_VOID_REASON="$void_reason" HR_HEADLINE="$headline" \
 			HR_DIRECTION="$direction" HR_METRICS="$metrics" HR_GITSHA="$build_git_sha" \
 			HR_BUILD_EXE="$build_exe" HR_BUILD_EXE_PEER="$build_exe_peer" \
+			HR_DEB_VERSION="$deb_version" HR_DEB_BUILD_MATCH="$deb_build_match" \
 			HR_RUN_EXE="$running_exe" HR_EXE_CHECK="$exe_check" \
 			HR_BUILD_HELPER_EXE="$build_helper_exe" \
 			HR_BUILD_HELPER_EXE_PEER="$build_helper_exe_peer" \
@@ -1089,6 +1108,12 @@ row = {
     "build_git_sha": os.environ["HR_GITSHA"],
     "build_exe_sha256": os.environ.get("HR_BUILD_EXE", ""),
     "build_exe_sha256_peer": opt("HR_BUILD_EXE_PEER"),
+    # #18772: the deployed package version from the deploy manifest, and
+    # whether its +g<sha> names the same commit as build_git_sha. A cell that
+    # deploys another checkout's deb attests that deb's binaries under the
+    # deploying checkout's SHA; "mismatch" says so on the row. Additive.
+    "deb_version": opt("HR_DEB_VERSION"),
+    "deb_build_match": opt("HR_DEB_BUILD_MATCH"),
     "exe_check": os.environ["HR_EXE_CHECK"],
     # Optional userspace-helper provenance, required by helper-attested cluster
     # gates and additive for older rows.
@@ -1249,6 +1274,7 @@ harness_result_run() {
 	direction=$(cut -f4 <<<"$adapted")
 	metrics=$(cut -f5 <<<"$adapted")
 	local build_git_sha build_exe_sha="" build_exe_peer_sha=""
+	local deb_version="" deb_build_match=""
 	local running_exe_sha="" exe_check
 	local build_helper_exe_sha="" build_helper_exe_peer_sha="" running_helper_exe_sha=""
 	# Initialised explicitly: the run wrapper executes under `set -u`, and a
@@ -1301,6 +1327,14 @@ harness_result_run() {
 				if [[ -n "$manifest_node" ]] &&
 					manifest_sha=$(deploy_manifest_sha xpfd "$root" "$build_git_sha" "$manifest_node" 2>/dev/null); then
 					build_exe_sha="$manifest_sha"
+					# #18772: name the deployed package, and say when it was
+					# built from a different commit than this checkout.
+					if declare -F deploy_manifest_deb_version >/dev/null; then
+						deb_version=$(deploy_manifest_deb_version "$root" "$manifest_node" 2>/dev/null || true)
+						deb_build_match=$(harness_deb_build_match "$deb_version" "$build_git_sha")
+						[[ "$deb_build_match" == mismatch ]] &&
+							_hr_warn "deploy manifest attests deb $deb_version, built from a different commit than this checkout ($build_git_sha); the row records deb_build_match=mismatch"
+					fi
 				else
 					manifest_rc=$?
 					case "$manifest_rc" in
@@ -1519,6 +1553,7 @@ harness_result_run() {
 		--helper-exe-scope "${helper_exe_scope:-}" \
 		--duration-s "$((t1 - t0))" --artifacts "$artifacts" --adapter "$adapter" \
 		--node "$node" --node-peer "${peer_node:-}" \
+		--deb-version "${deb_version:-}" --deb-build-match "${deb_build_match:-}" \
 		--running-exe-sha256-peer "${peer_running_exe_sha:-}" \
 		--exe-scope "$exe_scope" --measurement-scope "$measurement_scope" "${ledger_arg[@]}"; then
 		_hr_warn "NO ROW WRITTEN for gate '$gate' (verdict was $verdict)"

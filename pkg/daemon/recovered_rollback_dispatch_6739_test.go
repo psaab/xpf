@@ -54,8 +54,9 @@ system {
 }
 chassis {
     cluster {
+        peer-address 10.99.0.2;
         cluster-id 22;
-        authentication-key "test-psk-6739";
+        authentication-key "test-cluster-psk-6739"; /* #16025: >= 16 chars */
         reth-count 2;
         heartbeat-interval 200;
         heartbeat-threshold 5;

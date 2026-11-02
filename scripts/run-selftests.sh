@@ -340,6 +340,7 @@ run_shell test/debian/postrm-test.sh
 run_shell test/debian/preinst-besteffort-test.sh
 run_shell test/debian/preinst-migrate-test.sh
 run_shell test/debian/preinst-safe-segment-test.sh
+run_shell test/debian/preinst-implicit-discard-test.sh
 # #7423: the mutation harness's scoring library. Hermetic (fixture logs). The
 # refusal cell is the one that matters -- a runner that gates in one language
 # scores every cross-language mutation as an ESCAPE, which is a claim that the
@@ -436,13 +437,23 @@ run_shell test/daemon/selftest-daemon-kernel_15241.sh
 # #18719: the fabric-segment watcher's AF_PACKET tap cells (filter counted
 # with PACKET_STATISTICS, parent down/up), forced by name the same way.
 run_shell test/fabricsegment/selftest-fabricsegment-kernel_18719.sh
-# The probes pin missing-tool behavior and the -json=false argv contract.
+run_shell test/nftables/selftest-nftables-kernel_18745.sh
+# #18745: GOFLAGS=-run and -skip filters must not turn the whole-package
+# Real Go test against the generated fixture package; fake unshare only.
+run_shell test/nftables/nftables-kernel-probes_18745-selftest.sh
+# The daemon probes pin missing-tool behavior and the -json=false argv contract.
 # Fifteen hermetic fixture cells: no Go build or netns.
 run_shell test/daemon/selftest-daemon-probes_15241.sh
 # #10771: prove the BPF leg's privilege contract with fake tools: without
 # passwordless sudo it SKIPs; when available, the compiled probe is invoked as
 # `sudo -n`. The fixture never creates a BPF map or uses host sudo.
 run_shell test/mutation/selftest-bpf-exist-cannot-create_6923.sh --selftest
+# #18839: `make clean` must never delete the box-wide shared cargo target dir.
+# Dry runs (`make -n clean`) only, with a positive control on the old recipe.
+run_shell scripts/clean-shared-cargo-selftest.sh
+# #18738: the shim-ext-parity acceptance harness's signal handling and ROWS
+# filter, against a stub cargo in a throwaway checkout. Seconds; no Rust build.
+run_shell test/mutation/selftest-shim-ext-parity-acceptance.sh
 # #6923: the chokepoint argument for the v6 conntrack publish path rests on
 # `refresh_bpf_conntrack_last_seen` being unable to CREATE a key, because it
 # updates with BPF_EXIST. "The flag is named EXIST" and "the kernel refuses

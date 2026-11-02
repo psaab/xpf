@@ -113,8 +113,10 @@ func (d *Daemon) reassertHostInboundGapOnce(ctx context.Context) {
 		return
 	}
 	// #16785: an expired pre-handoff pending hold also owes a re-apply
-	// so the bounded handoff fires without a commit or a lease.
-	barrierOwed := !d.earlyInputHandoffDone.Load() && d.earlyInputPendingExpired()
+	// so the bounded handoff fires without a commit or a lease. #18746: so
+	// does a refused handoff (noteEarlyInputHandoffRefused18746).
+	barrierOwed := !d.earlyInputHandoffDone.Load() &&
+		(d.earlyInputPendingExpired() || d.earlyInputHandoffRetryOwed18746.Load())
 	if !d.hostInboundGapOwed() && !barrierOwed {
 		return
 	}

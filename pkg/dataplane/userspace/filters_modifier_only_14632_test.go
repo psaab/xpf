@@ -26,7 +26,7 @@ func TestFilterSnapshotModifierOnlyDoesNotFallThrough14632(t *testing.T) {
 		{Name: "count-bgp", Protocols: []string{"tcp"}, DestinationPorts: []string{"179"}, Count: "bgp"},
 		{Name: "drop-rest", Protocols: []string{"tcp"}, Action: config.FilterActionDiscard},
 	})
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 2 {
 		t.Fatalf("expected 1 filter with 2 terms, got %#v", snaps)
 	}
@@ -44,7 +44,7 @@ func TestFilterSnapshotExplicitNextTermStillFallsThrough14632(t *testing.T) {
 		{Name: "count-next", Protocols: []string{"tcp"}, Count: "hits", NextTerm: true},
 		{Name: "drop", Protocols: []string{"tcp"}, Action: config.FilterActionDiscard},
 	})
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if !snaps[0].Terms[0].NextTerm {
 		t.Error("authored `then next term` must still be marked fall-through")
 	}
@@ -56,7 +56,7 @@ func TestFilterSnapshotRoutingInstanceAuthoredBitPreserved14632(t *testing.T) {
 	cfg := nextTermCfg([]*config.FirewallFilterTerm{
 		{Name: "steer", Protocols: []string{"tcp"}, RoutingInstance: "mgmt-vrf", NextTerm: true},
 	})
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if !snaps[0].Terms[0].NextTerm {
 		t.Error("authored NextTerm on a routing-instance term must be preserved for disclosure")
 	}
@@ -64,7 +64,7 @@ func TestFilterSnapshotRoutingInstanceAuthoredBitPreserved14632(t *testing.T) {
 	cfg2 := nextTermCfg([]*config.FirewallFilterTerm{
 		{Name: "steer", Protocols: []string{"tcp"}, RoutingInstance: "mgmt-vrf"},
 	})
-	snaps2 := buildFirewallFilterSnapshots(cfg2)
+	snaps2 := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg2))
 	if snaps2[0].Terms[0].NextTerm {
 		t.Error("routing-instance term without authored `next term` must NOT be marked fall-through")
 	}

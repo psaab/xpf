@@ -39,6 +39,15 @@ type helperSupervisorNotifier interface {
 	SetHelperSupervisorObserver(func())
 }
 
+// helperElectionReadinessSource reports that the helper must not hold the RGs
+// at full weight: it exited unexpectedly and is not back, or is back but not
+// yet armed and healthy (#18697), or is running but wedged (#18685). It must
+// not block: the userspace Manager answers it from atomics and a leaf-locked
+// tracker, never from m.mu.
+type helperElectionReadinessSource interface {
+	HelperElectionNotReady() bool
+}
+
 func (d *Daemon) ensureTransitGateWake() chan struct{} {
 	d.transitGateWakeOnce.Do(func() {
 		d.transitGateWake = make(chan struct{}, 1)
@@ -71,6 +80,16 @@ func (d *Daemon) helperSupervisorState() (running, crashLooping bool) {
 		return true, false
 	}
 	return src.HelperSupervisorState()
+}
+
+// helperElectionNotReady reports the #18697/#18685 verdict for the helper. A
+// runtime without the method (legacy adapter, test fakes) is never not-ready.
+func (d *Daemon) helperElectionNotReady() bool {
+	if d == nil {
+		return false
+	}
+	src, ok := d.dataplane().(helperElectionReadinessSource)
+	return ok && src.HelperElectionNotReady()
 }
 
 func (d *Daemon) transitKernelReady() bool {
@@ -126,24 +145,37 @@ func (d *Daemon) reassertTransitGate(stage string) {
 	defer d.transitGateMu.Unlock()
 	kernelReady := d.transitKernelReady()
 	helperRunning, crashLooping := d.helperSupervisorState()
+	// #18697/#18685: a helper that died unexpectedly, is back but not yet
+	// armed and healthy, or is running but wedged forwards nothing. It must not
+	// hold the RGs at full weight, so it counts as not ready for ELECTION DEBT
+	// (arm debt yields the data RGs to a healthy peer, #12164; RG0 stays). The
+	// kernel transit gate itself is unchanged. Read after helperSupervisorState
+	// so the verdict is as fresh as possible when the debt is written.
+	notReady := d.helperElectionNotReady()
 	opened := d.writeTransitGateLocked(stage, kernelReady && helperRunning)
-	// F2: a dead helper must neither INSTALL arm debt (a short restart is
-	// not a kernel failure — weight stays 255) nor WIPE unrelated arm debt
-	// (a fence/kernel failure predating the death must survive it: the old
+	// F2: a dead helper must not WIPE unrelated arm debt (a fence/kernel
+	// failure predating the death must survive it: the old
 	// `(!helperRunning || opened)` disjunct reported dataplaneReady=true
 	// whenever the helper was down, flipping a fenced 1 → 255, fail-open).
-	// So when the helper is down and NOT looping, leave the arm-debt bit
-	// exactly as it is (pass through the current state); otherwise follow
-	// kernel readiness. Persistent loops carry their own full election debt
-	// via crashLooping regardless.
-	if !helperRunning && !crashLooping {
+	// F2 also used to say a dead helper must not INSTALL debt, on the premise
+	// that "a short restart is not a kernel failure — weight stays 255". On
+	// tcp (#18697) a single post-kill restart took 227 s with node0 primary
+	// and transit dead, and even a fast one is seconds of dead transit while
+	// the peer holds the synced sessions. So since #18697 an UNEXPECTED exit
+	// installs arm debt, and it is held until the next helper is armed and
+	// healthy; only an intentional stop or respawn keeps the pass-through.
+	// Persistent loops carry their own full election debt via crashLooping.
+	// F2, narrowed by #18697: only an INTENTIONAL stop or respawn (the helper
+	// is down, not looping, and did not exit unexpectedly) leaves the arm bit
+	// exactly as it is. An unexpected exit falls through and installs debt.
+	if !helperRunning && !crashLooping && !notReady {
 		d.applyTransitElectionDebtKeepArm(false, false, true)
 	} else {
 		// Helper running (or looping): dataplaneReady follows whether the
 		// gate actually OPENED. A fence-install failure with the helper up
 		// reports not-ready (arm debt at weight 1); only a live opened
 		// gate reports ready.
-		d.applyTransitElectionDebt(kernelReady && opened, crashLooping)
+		d.applyTransitElectionDebt(kernelReady && opened && !notReady, crashLooping)
 	}
 }
 

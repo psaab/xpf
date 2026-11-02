@@ -17,16 +17,19 @@ var testGoLegs16467 = []struct {
 	name  string
 	match func(line string) bool
 }{
-	{"vet", func(l string) bool { return l == "$(GO) vet ./... || status=$$?; \\" }},
+	{"vet", func(l string) bool { return l == "$(GO) vet ./... || keep $$?; \\" }},
 	{"test ./...", func(l string) bool {
-		return l == `bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" ./... || status=$$?; \`
+		// #18778: an explicit -timeout, so a package cut off at go test's
+		// 10m default cannot read as an ordinary failure.
+		return l == `bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -timeout $(GOTEST_TIMEOUT) ./... || keep $$?; \`
 	}},
 	{"uncached census packages", func(l string) bool {
 		return strings.Contains(l, "-count=1") && strings.Contains(l, "./pkg/docsref/") &&
-			strings.HasSuffix(l, "|| status=$$?; \\")
+			strings.Contains(l, "-timeout $(GOTEST_TIMEOUT)") &&
+			strings.HasSuffix(l, "|| keep $$?; \\")
 	}},
 	{"build-tag census", func(l string) bool {
-		return l == "sh scripts/go-buildtag-census.sh || status=$$?; \\"
+		return l == "sh scripts/go-buildtag-census.sh || keep $$?; \\"
 	}},
 }
 
@@ -34,7 +37,7 @@ var testGoLegs16467 = []struct {
 // prerequisite-anchored target (test-race-dp stays a prerequisite — it
 // is a separate earlier gate, not one of the legs this issue reorders)
 // whose recipe is ONE continued shell invocation: a status initializer,
-// the GOTESTJSON truncate, every leg with contiguous `|| status=$$?`
+// the GOTESTJSON truncate, every leg with contiguous `|| keep $$?`
 // capture in the declared order, and a trailing `exit $$status`. Any
 // leg on its own recipe line, or without capture, or out of order,
 // restores the defect: make stops the recipe at that leg and the
@@ -95,7 +98,20 @@ func validateTestGoAggregate16467(mk string) error {
 	if truncate < 0 {
 		return fmt.Errorf("test-go recipe lost the one-time GOTESTJSON truncate")
 	}
-	prev := 0
+	// #18778: VOID (exit 3) is sticky. Every leg reports through keep(),
+	// which never overwrites a status of 3, so a timed-out leg followed by
+	// another failing leg still ends the recipe "Error 3".
+	keepIdx := -1
+	for i, line := range recipe {
+		if line == `keep() { [ "$$status" -eq 3 ] || status=$$1; }; \` {
+			keepIdx = i
+			break
+		}
+	}
+	if keepIdx < 0 {
+		return fmt.Errorf("test-go recipe lost the sticky-VOID keep() helper (#18778)")
+	}
+	prev := keepIdx
 	for _, leg := range testGoLegs16467 {
 		idx := -1
 		for i, line := range recipe {
@@ -130,7 +146,7 @@ func validateTestGoAggregate16467(mk string) error {
 // whole Go suite's signal.
 //
 // FAIL-ON-REVERT: move the census back above the test legs, drop a
-// leg's `|| status=$$?` capture, or give a leg its own recipe line.
+// leg's `|| keep $$?` capture, or give a leg its own recipe line.
 func TestMakefileTestGoRunsAllLegs16467(t *testing.T) {
 	root := repoRoot(t)
 	b, err := os.ReadFile(filepath.Join(root, "Makefile"))
@@ -156,10 +172,11 @@ func TestMakefileTestGoRunsAllLegs16467(t *testing.T) {
 	// is still missing, so a red vet would abort before the tests.
 	ownLine := "test-go: test-race-dp\n" +
 		"\t@status=0; \\\n" +
-		"\t$(GO) vet ./... || status=$$?; \\\n" +
+		"\tkeep() { [ \"$$status\" -eq 3 ] || status=$$1; }; \\\n" +
+		"\t$(GO) vet ./... || keep $$?; \\\n" +
 		"\t[ -z \"$(GOTESTJSON)\" ] || : > \"$(GOTESTJSON)\"; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" ./... || status=$$?; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -count=1 ./pkg/docsref/ || status=$$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) ./... || keep $$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) -count=1 ./pkg/docsref/ || keep $$?; \\\n" +
 		"\texit $$status\n" +
 		"\tsh scripts/go-buildtag-census.sh\n"
 	if err := validateTestGoAggregate16467(ownLine); err == nil {
@@ -169,11 +186,12 @@ func TestMakefileTestGoRunsAllLegs16467(t *testing.T) {
 	// A leg without contiguous capture swallows its failure.
 	droppedCapture := "test-go: test-race-dp\n" +
 		"\t@status=0; \\\n" +
+		"\tkeep() { [ \"$$status\" -eq 3 ] || status=$$1; }; \\\n" +
 		"\t$(GO) vet ./...; \\\n" +
 		"\t[ -z \"$(GOTESTJSON)\" ] || : > \"$(GOTESTJSON)\"; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" ./... || status=$$?; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -count=1 ./pkg/docsref/ || status=$$?; \\\n" +
-		"\tsh scripts/go-buildtag-census.sh || status=$$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) ./... || keep $$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) -count=1 ./pkg/docsref/ || keep $$?; \\\n" +
+		"\tsh scripts/go-buildtag-census.sh || keep $$?; \\\n" +
 		"\texit $$status\n"
 	if err := validateTestGoAggregate16467(droppedCapture); err == nil ||
 		!strings.Contains(err.Error(), "vet") {
@@ -184,11 +202,12 @@ func TestMakefileTestGoRunsAllLegs16467(t *testing.T) {
 	// trip, because that is the exact #16467 suppression.
 	censusFirst := "test-go: test-race-dp\n" +
 		"\t@status=0; \\\n" +
-		"\t$(GO) vet ./... || status=$$?; \\\n" +
+		"\tkeep() { [ \"$$status\" -eq 3 ] || status=$$1; }; \\\n" +
+		"\t$(GO) vet ./... || keep $$?; \\\n" +
 		"\t[ -z \"$(GOTESTJSON)\" ] || : > \"$(GOTESTJSON)\"; \\\n" +
-		"\tsh scripts/go-buildtag-census.sh || status=$$?; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" ./... || status=$$?; \\\n" +
-		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -count=1 ./pkg/docsref/ || status=$$?; \\\n" +
+		"\tsh scripts/go-buildtag-census.sh || keep $$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) ./... || keep $$?; \\\n" +
+		"\tbash ./scripts/go-test-json.sh \"$(GOTESTJSON)\" \"$(GO)\" -timeout $(GOTEST_TIMEOUT) -count=1 ./pkg/docsref/ || keep $$?; \\\n" +
 		"\texit $$status\n"
 	if err := validateTestGoAggregate16467(censusFirst); err == nil ||
 		!strings.Contains(err.Error(), "out of order") {

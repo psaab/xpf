@@ -68,6 +68,8 @@ func TestGratuitousARPCountCommitWarning_5695(t *testing.T) {
 	over := flatTreeFromSets(t,
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster authentication-key test-cluster-psk-6611",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set chassis cluster redundancy-group 1 gratuitous-arp-count 100000")
 	cfg, err := CompileConfig(over)
@@ -92,6 +94,8 @@ func TestGratuitousARPCountCommitWarning_5695(t *testing.T) {
 		ok := flatTreeFromSets(t,
 			"set chassis cluster redundancy-group 1 node 0 priority 200",
 			"set chassis cluster authentication-key test-cluster-psk-6611",
+			"set chassis cluster control-interface em0",
+			"set chassis cluster peer-address 10.99.0.2",
 			"set chassis cluster redundancy-group 1 node 1 priority 100",
 			"set chassis cluster redundancy-group 1 gratuitous-arp-count "+n)
 		cfg, err := CompileConfig(ok)

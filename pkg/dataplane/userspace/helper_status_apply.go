@@ -83,12 +83,20 @@ func (m *Manager) resolveCtrlEnableLocked(status *ProcessStatus, ctrl *userspace
 		// ctrl is disabled, only proven local/control traffic reaches the
 		// kernel; transit remains fail-closed.
 		//
-		// Also delay by 3s for fill ring bootstrap: mlx5 zero-copy
-		// needs NAPI to post fill ring WQEs, and NAPI only runs on
-		// hardware RX events.  Background traffic (VRRP, ARP) during
-		// the delay generates these events.
-		m.ensureCtrlEnablePrewarmLocked()
+		// Fill-ring bootstrap: mlx5 zero-copy needs NAPI to post fill
+		// ring WQEs, and NAPI only runs on hardware RX events, so the
+		// NAPI probes fire once every binding is bound — readiness, not
+		// a fixed delay after spawn (#18707). In the pass that fires
+		// them, the prewarm skips its own (debounced) bootstrap.
 		probeBindingsReady, allBindingsBound := m.bindingReadinessLocked(status)
+		if allBindingsBound {
+			m.ensureXSKBoundNAPIBootstrapLocked()
+		} else {
+			// A generation that binds only SOME bindings still gets a
+			// post-bind probe for those (partial-bind floor).
+			m.ensurePartialBindNAPIBootstrapFloorLocked(anyBindingBound(status), time.Now())
+		}
+		m.ensureCtrlEnablePrewarmLocked(!allBindingsBound)
 		// Fire OnXSKBound callback once when all bindings are bound.
 		// This lets the daemon create fabric IPVLAN overlays after XSK
 		// has bound in zerocopy mode on the parent interface.
@@ -122,8 +130,12 @@ func (m *Manager) resolveCtrlEnableLocked(status *ProcessStatus, ctrl *userspace
 
 // ensureCtrlEnablePrewarmLocked runs the one-shot ctrl-enable prewarm: it
 // arms the hard-timeout deadline on the FIRST prewarm only, kicks the NAPI
-// fill-ring bootstrap, and starts proactive neighbor resolution.
-func (m *Manager) ensureCtrlEnablePrewarmLocked() {
+// fill-ring bootstrap when bootstrapNAPI is set, and starts proactive
+// neighbor resolution. The caller clears bootstrapNAPI when every binding is
+// already bound: that pass fires the generation's xsk-bound bootstrap
+// (#18707) or, after an in-generation rebind, the rebind path's own
+// bootstrap follows, so a debounced prewarm probe would only duplicate it.
+func (m *Manager) ensureCtrlEnablePrewarmLocked(bootstrapNAPI bool) {
 	if !m.neighborsPrewarmed {
 		m.neighborsPrewarmed = true
 		// Hard timeout fallback — ctrl enables after this even if
@@ -142,9 +154,22 @@ func (m *Manager) ensureCtrlEnablePrewarmLocked() {
 			slog.Info("userspace: delaying ctrl enable for readiness",
 				"hard_timeout", delay, "cluster_ha", m.clusterHA)
 		}
-		m.bootstrapNAPIQueuesAsyncLocked("startup-prewarm")
+		if bootstrapNAPI {
+			m.bootstrapNAPIQueuesAsyncLocked("startup-prewarm")
+		}
 		m.proactiveNeighborResolveLocked()
 	}
+}
+
+// anyBindingBound reports whether at least one registered binding with a real
+// ifindex is bound — the start of the partial-bind floor's window (#18707).
+func anyBindingBound(status *ProcessStatus) bool {
+	for _, b := range status.Bindings {
+		if b.Ifindex > 0 && b.Registered && b.Bound {
+			return true
+		}
+	}
+	return false
 }
 
 // bindingReadinessLocked folds the helper's per-binding flags into the two

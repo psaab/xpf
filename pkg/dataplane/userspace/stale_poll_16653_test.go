@@ -108,7 +108,7 @@ func TestStalePollDoesNotOverwriteNewerDisarm16653(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			m.statusLoop(ctx)
+			m.statusLoop(ctx, false)
 		}()
 		var gateOnce atomic.Bool
 		t.Cleanup(func() {
@@ -221,7 +221,7 @@ func TestStalePollDoesNotOverwriteNewerDisarm16653(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			m.statusLoop(ctx)
+			m.statusLoop(ctx, false)
 		}()
 		var gateOnce atomic.Bool
 		t.Cleanup(func() {

@@ -476,6 +476,14 @@ func assertDivertChains(t *testing.T, chains []*gnft.Chain, family gnft.TableFam
 			continue
 		}
 		seen[chain.Name] = true
+		// b71c52d609 (#10483) added the regular identity-witness chain
+		// xpf_ipsec_divert_meta_s<seq> (addIpsecDivertMetadata,
+		// ipsec_divert_identity_9506.go). It has no hook and no priority by
+		// design. Every OTHER chain must still be a base chain at the divert
+		// priority (#18745).
+		if chain.Hooknum == nil && strings.HasPrefix(chain.Name, ipsecDivertMetaChainPrefix9506) {
+			continue
+		}
 		if chain.Priority == nil || *chain.Priority != IpsecDivertPriority {
 			t.Fatalf("%v %s priority = %v, want %d", family, chain.Name, chain.Priority, IpsecDivertPriority)
 		}
@@ -487,6 +495,13 @@ func assertDivertChains(t *testing.T, chains []*gnft.Chain, family gnft.TableFam
 		if !seen[name] {
 			t.Fatalf("%v divert chain %q missing", family, name)
 		}
+	}
+	meta := false
+	for name := range seen {
+		meta = meta || strings.HasPrefix(name, ipsecDivertMetaChainPrefix9506)
+	}
+	if !meta {
+		t.Fatalf("%v divert table lacks its %s<seq> identity-witness chain", family, ipsecDivertMetaChainPrefix9506)
 	}
 }
 

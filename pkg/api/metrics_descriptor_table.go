@@ -133,6 +133,9 @@ var collectorDescGlobal = []int{
 	xpfCollectorDescFieldIndex("napiProbeTargetSkipsTotal"),
 	xpfCollectorDescFieldIndex("bindingWedgeGiveupsTotal"),
 	xpfCollectorDescFieldIndex("statusPollDecodeErrorsTotal"),
+	xpfCollectorDescFieldIndex("helperAnswerAgeSeconds"),
+	xpfCollectorDescFieldIndex("helperElectionNotReady"),
+	xpfCollectorDescFieldIndex("helperWedgeKillsTotal"),
 	xpfCollectorDescFieldIndex("learnedRouteCapHitsTotal"),
 	xpfCollectorDescFieldIndex("learnedRouteImportCapped"),
 	xpfCollectorDescFieldIndex("degradedPathTotal"),
@@ -170,6 +173,7 @@ var collectorDescHostInbound = []int{
 	xpfCollectorDescFieldIndex("vrfOverlapPBRAdmitted"),
 	xpfCollectorDescFieldIndex("riMemberDeviceConflicts"),
 	xpfCollectorDescFieldIndex("lo0CounterHits"),
+	xpfCollectorDescFieldIndex("lo0ImplicitDiscardHits"),
 }
 
 // initForwardingDescriptors (metrics_descriptors_forwarding.go).

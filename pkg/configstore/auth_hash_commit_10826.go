@@ -9,7 +9,10 @@ import (
 // compileAuthSafeCandidate validates authored cleartext against the schema,
 // then compiles and persists only a private tree whose api-auth secrets have
 // been replaced with salted verifiers.
-func (s *Store) compileAuthSafeCandidate(candidate *config.ConfigTree) (*config.ConfigTree, *config.Config, error) {
+//
+// bootstrapImport is true only for the daemon's bootstrap import; it feeds
+// the #18744 placeholder decision (placeholderJudgedLocked).
+func (s *Store) compileAuthSafeCandidate(candidate *config.ConfigTree, bootstrapImport bool) (*config.ConfigTree, *config.Config, error) {
 	if err := s.schemaValidateExpandedTree(candidate); err != nil {
 		return nil, nil, err
 	}
@@ -18,7 +21,7 @@ func (s *Store) compileAuthSafeCandidate(candidate *config.ConfigTree) (*config.
 	if err != nil {
 		return nil, nil, fmt.Errorf("hashing api-auth secrets failed")
 	}
-	compiled, err := s.compileTree(hashed)
+	compiled, err := s.compileTreeAs(hashed, bootstrapImport)
 	if err != nil {
 		return nil, nil, err
 	}
