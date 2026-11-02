@@ -247,9 +247,13 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 		if err := d.applyHostInboundFilter(&config.Config{}); err != nil {
 			t.Fatalf("empty host-inbound teardown: %v", err)
 		}
+		// bf48be32cc (#14012/#14033) added the separate pre-activation
+		// address-fence table. Teardown retires it with the main and gap
+		// tables, before the barrier handoff.
 		want := []string{
 			"delete:" + xnft.HostInboundTableName,
 			"delete:" + xnft.HostInboundGapTableName,
+			"delete:" + xnft.HostInboundPreActivationTableName,
 			"remove-input-barrier",
 		}
 		if got := strings.Join(events, ","); got != strings.Join(want, ",") {
