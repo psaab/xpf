@@ -312,10 +312,10 @@ each node, then cuts it with `xpfd upgrade --rolling`. Before it pushes
 anything or touches `dist-deb/xpf-deploy-manifest.json`, it decides each
 target node's action. It compares the deb's package metadata version with the
 version the node has installed: only a `dpkg-query` status of `ii` counts as
-installed, and `rc` or an explicit “no packages found” response counts as
-nothing installed. A failed `dpkg-query`/Incus query is refused, not treated
-as fresh. The logic is in `deploy_deb_node_action` and `deploy_deb_preflight`
-(`deploy-lib.sh`):
+installed. `rc`, `un`, `pn`, or an explicit “no packages found” response
+counts as nothing installed. A failed `dpkg-query`/Incus query is refused,
+not treated as fresh. The logic is in `deploy_deb_node_action` and
+`deploy_deb_preflight` (`deploy-lib.sh`):
 
 | deb vs installed | action |
 |---|---|
@@ -323,7 +323,7 @@ as fresh. The logic is in `deploy_deb_node_action` and `deploy_deb_preflight`
 | same version, byte-identical | **skip** the install and the cut; the manifest is still written from the deb, so the attestation is kept (#18764) |
 | same version, other bytes (or unreadable) | **refused**: a re-staged same version cannot be cut (#16219); build a new version |
 | older | **refused** up front, naming both versions and the fix, unless `XPF_DEPLOY_ALLOW_DOWNGRADE` is set to **that deb's exact version** |
-| half-installed (any dpkg state other than `ii` or `rc`) | **refused**: repair the package first |
+| half-installed (state other than `ii`, `rc`, `un`, or `pn`) | **refused**: repair the package first |
 | package query/transport failure | **refused**: the node is not assumed fresh |
 
 "Byte-identical" means all of these match the deb:

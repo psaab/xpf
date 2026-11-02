@@ -1057,6 +1057,7 @@ test_deb_floor_restored_after_late_die_paths() {
 		printf '2.0\n' >"$d/binary-floor"
 		_ck_deploy_vm_deb_with_failure "$d" "$failure"
 		rc=$?
+		((rc != 0)) || fails+=" [$failure injection returned success]"
 		[[ -e "$d/failure-reached" ]] || fails+=" [$failure injection was not reached]"
 		[[ ! -e "$d/floor-move-missed" ]] || fails+=" [$failure ran without moving the floor]"
 		[[ "$(cat "$d/binary-floor" 2>/dev/null)" == 2.0 ]] ||
