@@ -819,7 +819,7 @@ deploy_write_manifest() {
 		# another checkout's deb, or a deliberate downgrade, only this names
 		# the build the nodes run.
 		if ! deb_version=$(deploy_deb_version "$deb"); then
-			warn "deploy manifest: refusing $deb because filename version and package metadata Version disagree or cannot be read"
+			warn "deploy manifest: refusing $deb because it must be Package: xpf, Architecture: amd64, and its filename version must match package metadata Version"
 			return 1
 		fi
 		xpfd_sha=$(deploy_manifest_sha_from_deb "$deb" xpfd || true)
@@ -1907,7 +1907,7 @@ deploy_node_runs_deb() {
 deploy_deb_node_action() {
 	local rinst="$1" deb="$2" deb_ver run_ver plan
 	deb_ver=$(deploy_deb_version "$deb") || {
-		printf 'refusing: cannot validate the xpf package filename against its metadata Version: %s\n' "$deb" >&2
+		printf 'refusing: cannot validate xpf Package/Architecture/Version metadata and filename identity: %s\n' "$deb" >&2
 		return 1
 	}
 	run_ver=$(deploy_running_deb_version "$rinst") || {
@@ -2044,15 +2044,28 @@ deploy_deb_filename_version() {
 }
 
 # deploy_deb_version <deb_path> -> echo dpkg-deb's Version field only when it
-# matches the xpf_<version>_<arch>.deb filename. Plans and attestations must
-# refuse a renamed or malformed package rather than naming its wrong build.
+# is the xpf:amd64 package and matches the xpf_<version>_amd64.deb filename.
+# Plans and attestations refuse a renamed or wrong-identity package.
 deploy_deb_version() {
-	local filename_ver metadata_ver
+	local filename_ver metadata_package metadata_arch metadata_ver
 	filename_ver=$(deploy_deb_filename_version "$1") || return 1
-	metadata_ver=$(dpkg-deb -f "$1" Version 2>/dev/null) || {
-		printf 'refusing: cannot read dpkg-deb Version metadata from %s\n' "$1" >&2
+	metadata_package=$(dpkg-deb -f "$1" Package 2>/dev/null) || {
+		printf 'refusing: cannot read Package metadata from %s\n' "$1" >&2
 		return 1
 	}
+	metadata_arch=$(dpkg-deb -f "$1" Architecture 2>/dev/null) || {
+		printf 'refusing: cannot read Architecture metadata from %s\n' "$1" >&2
+		return 1
+	}
+	metadata_ver=$(dpkg-deb -f "$1" Version 2>/dev/null) || {
+		printf 'refusing: cannot read Version metadata from %s\n' "$1" >&2
+		return 1
+	}
+	if [[ "$metadata_package" != xpf || "$metadata_arch" != amd64 ]]; then
+		printf "refusing: xpf package identity mismatch for %s: Package='%s' Architecture='%s' (expected Package='xpf' Architecture='amd64')\n" \
+			"$1" "$metadata_package" "$metadata_arch" >&2
+		return 1
+	fi
 	if [[ -z "$metadata_ver" || "$filename_ver" != "$metadata_ver" ]]; then
 		printf "refusing: filename version '%s' for %s does not match package metadata Version '%s'\n" \
 			"$filename_ver" "$1" "$metadata_ver" >&2

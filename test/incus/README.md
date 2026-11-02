@@ -364,9 +364,10 @@ check, so an older binary that cannot read the config DB a newer one wrote is
 still refused.
 
 **Attestation.** The manifest records the selected deb's payload hashes, its
-file name, and `deb_version`, the package's `dpkg-deb` `Version` field. The
-package metadata version must match the version encoded in the deb filename;
-planning and manifest writing both refuse a mismatch. `version` and
+file name, and `deb_version`, the package's `dpkg-deb` `Version` field. Its
+control identity must be `Package: xpf` and `Architecture: amd64`; the
+metadata Version must match the version encoded in the filename. Planning and
+manifest writing refuse packages that fail either check. `version` and
 `build_git_sha` still describe the deploying checkout, because the ledger's
 checkout match keys on them. Each harness-result row carries:
 - `deb_version`;

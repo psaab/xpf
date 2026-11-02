@@ -807,7 +807,7 @@ test_deb_filename_metadata_version_mismatch_refused() {
 	cat >"$pkg/DEBIAN/control" <<'CONTROL'
 Package: xpf
 Version: 1.0
-Architecture: all
+Architecture: amd64
 Maintainer: test <test@example.com>
 Description: mismatched deploy fixture
 CONTROL
@@ -841,6 +841,68 @@ CONTROL
 		bad "deb plan and attestation: mismatched version accepted or wrong refusal (action rc=$action_rc out=$action err=$(<"$fixture/action.err"); write rc=$write_rc err=$(<"$fixture/write.err"); manifest=$(<"$manifest"))"
 	fi
 	rm -rf "$fixture"
+}
+
+test_deb_package_identity_refused_before_invalidation() {
+	local fixture pkg deb package architecture case_ expected deploy_cmd out rc fails=""
+	if ! command -v dpkg-deb >/dev/null 2>&1; then
+		bad "deb plan: dpkg-deb is required to validate package identity"
+		return
+	fi
+	deploy_cmd=$(awk '/^cmd_deploy\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$SCRIPT_DIR/cluster-setup.sh")
+	for case_ in package architecture; do
+		fixture=$(mktemp -d)
+		pkg="$fixture/pkg"
+		deb="$fixture/xpf_1.2_amd64.deb"
+		mkdir -p "$pkg/DEBIAN" "$fixture/root"
+		chmod 0755 "$pkg/DEBIAN"
+		case "$case_" in
+			package) package=xpf-fixture; architecture=amd64; expected="Package='xpf-fixture'" ;;
+			architecture) package=xpf; architecture=all; expected="Architecture='all'" ;;
+		esac
+		printf 'Package: %s\nVersion: 1.2\nArchitecture: %s\nMaintainer: test <test@example.com>\nDescription: wrong identity fixture\n' \
+			"$package" "$architecture" >"$pkg/DEBIAN/control"
+		if ! dpkg-deb --build "$pkg" "$deb" >/dev/null 2>&1; then
+			bad "deb plan: could not build $case_ identity fixture"
+			rm -rf "$fixture"
+			return
+		fi
+		printf 'previous attestation\n' >"$fixture/manifest.json"
+		out=$(
+			exec 2>&1
+			PROJECT_ROOT="$fixture/root"
+			XPF_CLUSTER_SKIP_BUILD=1
+			xpf_cluster_lock_held() { return 0; }
+			deploy_select_deb() { printf '%s\n' "$deb"; }
+			vm_name() { printf 'vm%s\n' "$1"; }
+			r() { printf 'inst:%s\n' "$1"; }
+			incus() {
+				: >"$fixture/incus-touched"
+				echo "dpkg-query: no packages found matching xpf" >&2
+				return 1
+			}
+			deploy_manifest_invalidate() {
+				rm -f "$fixture/manifest.json"
+				: >"$fixture/invalidated"
+			}
+			die() { echo "$*" >&2; exit 1; }
+			eval "$deploy_cmd"
+			cmd_deploy 0
+		)
+		rc=$?
+		if ((rc == 0)) || [[ "$out" != *"$expected"* ||
+			"$out" != *"expected Package='xpf' Architecture='amd64'"* ||
+			"$(<"$fixture/manifest.json")" != "previous attestation" ||
+			-e "$fixture/invalidated" || -e "$fixture/incus-touched" ]]; then
+			fails+=" [$case_ rc=$rc out=$out]"
+		fi
+		rm -rf "$fixture"
+	done
+	if [[ -z "$fails" ]]; then
+		ok "deb plan: wrong Package and Architecture are refused before manifest invalidation"
+	else
+		bad "deb plan: package identity preflight:$fails"
+	fi
 }
 
 test_deb_node_action_upgrade_installs() {
@@ -3098,9 +3160,9 @@ test_manifest_deb_hashes_package_payload() {
 	printf 'packaged cli artifact\n' >"$pkg/usr/local/share/xpf/staged/cli"
 	printf 'packaged helper artifact\n' >"$pkg/usr/local/share/xpf/staged/xpf-userspace-dp"
 	cat >"$pkg/DEBIAN/control" <<'CONTROL'
-Package: xpf-fixture
+Package: xpf
 Version: 0.0.29580+gaaaaaaaaaaaa
-Architecture: all
+Architecture: amd64
 Maintainer: test <test@example.com>
 Description: deploy manifest fixture
 CONTROL
@@ -4703,6 +4765,7 @@ test_deb_running_version_reads_dpkg_state
 test_deb_floor_moved_aside_and_restored
 test_deb_query_failure_refuses_but_absence_is_fresh
 test_deb_filename_metadata_version_mismatch_refused
+test_deb_package_identity_refused_before_invalidation
 test_deb_floor_restored_after_late_die_paths
 test_deb_floor_restore_keeps_saved_copy_when_move_fails
 test_deb_preflight_refuses_before_any_change
