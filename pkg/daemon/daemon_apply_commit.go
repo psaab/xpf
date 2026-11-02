@@ -66,7 +66,11 @@ func (d *Daemon) bootstrapFromFile() error {
 	// candidate edit can occur and the generation always matches — this is
 	// belt-and-suspenders that keeps the examined-equals-promoted invariant
 	// uniform with the operator commit paths (commitWithGenBinding).
-	cand, gen, cerr := d.store.CompileCandidateGen()
+	//
+	// #18744: compile and commit as the bootstrap authority, so the pre-flight
+	// sees the same placeholder decision as the commit below.
+	bootstrap := configstore.InternalCommitterAs(configstore.BootstrapPrincipal)
+	cand, gen, cerr := d.store.CompileCandidateGenAs(bootstrap)
 	if cerr == nil {
 		if perr := d.deviceMapCommitPreflight(cand, nil); perr != nil {
 			d.store.ExitConfigure()
@@ -76,11 +80,13 @@ func (d *Daemon) bootstrapFromFile() error {
 			return fmt.Errorf("bootstrap device-map preflight: %w", perr)
 		}
 	}
-	if _, err := d.store.CommitWithDescriptionGenAs(
-		configstore.InternalCommitterAs("system:bootstrap"), "", gen); err != nil {
+	if _, err := d.store.CommitWithDescriptionGenAs(bootstrap, "", gen); err != nil {
 		d.store.ExitConfigure()
 		return fmt.Errorf("commit: %w", err)
 	}
+	// Bootstrap does not present compiler reminders to an operator. Do not let
+	// this unattended promotion hide them from the first operator commit.
+	d.store.InvalidateScopedAdvisoryBaseline()
 	d.store.ExitConfigure()
 	slog.Info("configuration bootstrapped from file", "file", d.opts.ConfigFile)
 	return nil
@@ -392,7 +398,16 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	if err != nil {
 		return nil, err
 	}
-	return d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
+	applied, applyErr := d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
+	// The event engine promotes configuration autonomously and has no caller
+	// to present its warnings. Also preserve reminders after any promoted
+	// apply error: response handlers may return before presenting warnings,
+	// and the next commit can start as soon as this semaphore is released.
+	if compiled != nil && (applyErr != nil ||
+		(authority.IsInternal() && authority.JournalPrincipal() == "system:event-engine")) {
+		d.store.InvalidateScopedAdvisoryBaseline()
+	}
+	return applied, applyErr
 }
 
 // applyAndSyncCommittedWithPeerSnapshotAuthorization runs the reconcile
@@ -1123,7 +1138,14 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	if err != nil {
 		return nil, err
 	}
-	return d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
+	applied, applyErr := d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
+	if compiled != nil && applyErr != nil {
+		// A promoted commit-confirmed apply error is returned to callers
+		// before warning presentation. Re-open scoped reminders before
+		// releasing applySem so a queued commit cannot consume them.
+		d.store.InvalidateScopedAdvisoryBaseline()
+	}
+	return applied, applyErr
 }
 
 // commitAndApplyOperator is the peer-sync-aware entry point for an

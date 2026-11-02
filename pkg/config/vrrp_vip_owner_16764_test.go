@@ -144,6 +144,8 @@ func TestVIPOwnerLenientWarns16764(t *testing.T) {
 func TestRethUnitAddressesNotOwnerRejected16764(t *testing.T) {
 	lines := []string{
 		"set chassis cluster cluster-id 1",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster authentication-key test-cluster-psk-16764",
 		"set chassis cluster reth-count 1",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",

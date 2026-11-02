@@ -6,6 +6,32 @@ type FirewallFilterSnapshot struct {
 	Name   string                 `json:"name"`
 	Family string                 `json:"family"` // "inet" or "inet6"
 	Terms  []FirewallTermSnapshot `json:"terms"`
+	// ImplicitDiscard marks a filter with no terminal catch-all term
+	// (!config.FirewallFilterHasCatchAll, #18728). Such a filter's Terms END
+	// with the synthetic term ImplicitDiscardTermName (no `from`, `then count
+	// implicit-discard; then discard;`): the Junos implicit final discard for
+	// a packet that matches no authored term. The helper compiles that term
+	// like any authored term. This marker is in-process metadata for the Go
+	// show surfaces (which label the last term) and is NOT on the wire: the
+	// config-snapshot shape, and so the #8892 protocol version, is unchanged.
+	ImplicitDiscard bool `json:"-"`
+}
+
+// ImplicitDiscardTermName is the term and counter name of the synthetic
+// Junos implicit final discard (#18728). It is always the LAST term of a
+// marked filter, at the ordinal after every authored term, so the show
+// surfaces key it by (name, ordinal) and an authored term of the same name
+// is never mistaken for it.
+const ImplicitDiscardTermName = config.ImplicitDiscardTermName
+
+// implicitDiscardTermSnapshot is the synthetic final term: unconstrained,
+// counted, discard.
+func implicitDiscardTermSnapshot() FirewallTermSnapshot {
+	return FirewallTermSnapshot{
+		Name:   ImplicitDiscardTermName,
+		Action: string(config.FilterActionDiscard),
+		Count:  ImplicitDiscardTermName,
+	}
 }
 
 type FirewallTermSnapshot struct {

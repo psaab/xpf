@@ -146,11 +146,11 @@ func (d *Daemon) reassertTransitGate(stage string) {
 	kernelReady := d.transitKernelReady()
 	helperRunning, crashLooping := d.helperSupervisorState()
 	// #18697/#18685: a helper that died unexpectedly, is back but not yet
-	// armed and healthy, or is running but wedged forwards nothing. It must not
-	// hold the RGs at full weight, so it counts as not ready for ELECTION DEBT
-	// (arm debt yields the data RGs to a healthy peer, #12164; RG0 stays). The
-	// kernel transit gate itself is unchanged. Read after helperSupervisorState
-	// so the verdict is as fresh as possible when the debt is written.
+	// forwarding-ready and healthy, or is running but wedged forwards nothing.
+	// It must not hold the RGs at full weight, so it counts as not ready for
+	// ELECTION DEBT (arm debt yields the data RGs to a healthy peer, #12164; RG0
+	// stays). The kernel transit gate itself is unchanged. Read after the lock-
+	// free helperSupervisorState snapshot so the verdict is as fresh as possible.
 	notReady := d.helperElectionNotReady()
 	opened := d.writeTransitGateLocked(stage, kernelReady && helperRunning)
 	// F2: a dead helper must not WIPE unrelated arm debt (a fence/kernel

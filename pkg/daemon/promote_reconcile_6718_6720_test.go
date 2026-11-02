@@ -267,6 +267,8 @@ func TestPeerSyncIdentityBackstopStillReconcilesManagement6720(t *testing.T) {
 
 	clusterLines := func(clusterID int) string {
 		return "set chassis cluster cluster-id " + strconv.Itoa(clusterID) + "\n" +
+			"set chassis cluster control-interface em0\n" + // #16746 control link
+			"set chassis cluster peer-address 10.99.0.2\n" +
 			"set chassis cluster node 0\n" +
 			"set chassis cluster authentication-key identity-6720-psk\n" +
 			"set chassis cluster redundancy-group 1 node 0 priority 200\n"

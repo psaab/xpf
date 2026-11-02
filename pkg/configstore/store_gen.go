@@ -220,13 +220,22 @@ func (s *Store) ActiveSnapshot() (uint64, *config.Config) {
 // generation-bound commit then recompiles under the lock and surfaces the SAME
 // compile/mode error when the candidate is unchanged.
 func (s *Store) CompileCandidateGen() (*config.Config, uint64, error) {
+	return s.CompileCandidateGenAs(CommitAuthority{})
+}
+
+// CompileCandidateGenAs is CompileCandidateGen for the committer that will
+// promote the candidate, so a pre-flight sees the same #18744 placeholder
+// decision as the commit. The bootstrap import passes its own authority, so
+// its device-map pre-flight is not skipped by a refusal its commit would not
+// make.
+func (s *Store) CompileCandidateGenAs(authority CommitAuthority) (*config.Config, uint64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	gen := s.candidateGen
 	if s.candidate == nil {
 		return nil, gen, fmt.Errorf("not in configuration mode")
 	}
-	compiled, err := s.compileTree(s.candidate)
+	compiled, err := s.compileTreeAs(s.candidate, authority.isBootstrapImport())
 	if err != nil {
 		return nil, gen, err
 	}

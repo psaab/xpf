@@ -62,11 +62,17 @@ var clusterOracleValues = map[string]string{
 	"nat-state-synchronization":     "",
 	"ipsec-session-synchronization": "",
 	"dhcp-lease-synchronization":    "",
-	"hitless-restart":               "",
-	"no-reth-vrrp":                  "",
-	"private-rg-election":           "",
-	"no-private-rg-election":        "",
-	"control-ports":                 "",
+	// #16023 added the two attestation leaves without oracle rows, which
+	// left both cells here red; #18719 adds them with its private pair.
+	"fabric-interface-authenticated":  "",
+	"fabric1-interface-authenticated": "",
+	"fabric-interface-private":        "",
+	"fabric1-interface-private":       "",
+	"hitless-restart":                 "",
+	"no-reth-vrrp":                    "",
+	"private-rg-election":             "",
+	"no-private-rg-election":          "",
+	"control-ports":                   "",
 }
 
 // clusterCompilerOnlyStatements are compiled by compileChassis but NOT declared

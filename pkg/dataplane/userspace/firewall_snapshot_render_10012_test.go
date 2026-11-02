@@ -39,7 +39,7 @@ func snapshotTerms10012(t *testing.T, filterName string, terms []*config.Firewal
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		filterName: {Name: filterName, Terms: terms},
 	}
-	for _, s := range BuildFirewallFilterSnapshots(cfg) {
+	for _, s := range authoredFilterSnapshots18728(t, BuildFirewallFilterSnapshots(cfg)) {
 		if s.Name == filterName {
 			return s.Terms
 		}
@@ -128,7 +128,7 @@ func compileLenientRoutingInstance10012(t *testing.T) *config.Config {
 
 func snapshotTermsFromConfig10012(t *testing.T, cfg *config.Config, filterName string) []FirewallTermSnapshot {
 	t.Helper()
-	for _, s := range BuildFirewallFilterSnapshots(cfg) {
+	for _, s := range authoredFilterSnapshots18728(t, BuildFirewallFilterSnapshots(cfg)) {
 		if s.Name == filterName {
 			return s.Terms
 		}

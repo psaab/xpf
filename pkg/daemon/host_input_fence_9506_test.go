@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	gnft "github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sync/semaphore"
@@ -120,6 +122,55 @@ func TestHostInputFenceLiveReadbackAndRestore9506(t *testing.T) {
 	wrongAuthority.PermitEpoch++
 	if err := installer.VerifyHostInboundOverlay(wrongAuthority); err == nil {
 		t.Fatal("live overlay readback accepted a different permit epoch")
+	}
+
+	// #18721: rules ahead of the overlay are judged against the kernel's own
+	// expression names, not only the google/nftables decode, which drops every
+	// expression it has no type for. Each case inserts one rule at the head of
+	// the live chain (ahead of the zero-hop DROP and the overlay), reads back,
+	// then reinstalls the fenced table.
+	tbl := &gnft.Table{Family: gnft.TableFamilyINet, Name: xnft.HostInboundTableName}
+	hopLimitZero := []expr.Any{
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 7, Len: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0}},
+	}
+	for _, tc := range []struct {
+		name   string
+		head   []expr.Any
+		passes bool
+	}{
+		// Control: a plain DROP-only head passes, so a failure below is
+		// caused by the extra kind, not by inserting a rule.
+		{"drop-only head", append(append([]expr.Any(nil), hopLimitZero...), &expr.Verdict{Kind: expr.VerdictDrop}), true},
+		// rt is invisible to GetRules: this decodes as [cmp drop].
+		{"head with an rt expression the decoder skips", []expr.Any{
+			&expr.Rt{Register: 1, Key: expr.RtClassid},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: make([]byte, 4)},
+			&expr.Verdict{Kind: expr.VerdictDrop},
+		}, false},
+		{"accept head", []expr.Any{&expr.Verdict{Kind: expr.VerdictAccept}}, false},
+	} {
+		c, err := gnft.New()
+		if err != nil {
+			t.Fatalf("%s: nftables conn: %v", tc.name, err)
+		}
+		c.InsertRule(&gnft.Rule{Table: tbl, Chain: &gnft.Chain{Name: "input", Table: tbl}, Exprs: tc.head})
+		if err := c.Flush(); err != nil {
+			t.Fatalf("%s: insert head rule: %v", tc.name, err)
+		}
+		err = installer.VerifyHostInboundOverlay(overlay)
+		if tc.passes && err != nil {
+			t.Errorf("%s: live readback failed: %v", tc.name, err)
+		}
+		if !tc.passes && err == nil {
+			t.Errorf("%s: live readback passed with that rule ahead of the overlay", tc.name)
+		}
+		if err := installer.InstallHostInbound(xnft.HostInboundSpec{Overlay: &overlay}); err != nil {
+			t.Fatalf("%s: reinstall the fenced table: %v", tc.name, err)
+		}
+	}
+	if err := installer.VerifyHostInboundOverlay(overlay); err != nil {
+		t.Fatalf("reinstalled overlay readback: %v", err)
 	}
 
 	if err := installer.InstallHostInbound(xnft.HostInboundSpec{}); err != nil {

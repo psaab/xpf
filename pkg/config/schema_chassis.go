@@ -153,8 +153,10 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 		// TestChassisClusterSchemaAndSplitterAgree_7448 now binds the two sets.
 		"fabric1-interface":               {desc: "Second fabric link interface for session sync and cross-chassis forwarding", args: 1, placeholder: "<interface>", children: nil},
 		"fabric1-peer-address":            {desc: "Cluster peer IP address on the second fabric link", args: 1, placeholder: "<address>", children: nil},
-		"fabric-interface-authenticated":  {desc: "Attest the fabric link is link-authenticated by the operator plant (MACsec/802.1X); with security flow require-authenticated-fabric-stamps, stamps on this link may be honoured (#16023)", children: nil},
-		"fabric1-interface-authenticated": {desc: "Attest the second fabric link is link-authenticated by the operator plant (MACsec/802.1X) (#16023)", children: nil},
+		"fabric-interface-authenticated":  {desc: "Attest that MACsec/802.1X link authentication is actually configured on the fabric link by the operator plant (xpf implements neither). Under security flow require-authenticated-fabric-stamps, stamps on this link are then TRUSTED (#16023). Never set it for a link that is merely direct-attached or dedicated: use fabric-interface-private (#18719)", children: nil},
+		"fabric1-interface-authenticated": {desc: "Attest that MACsec/802.1X link authentication is actually configured on the second fabric link (#16023); stamps on it are then trusted under require-authenticated-fabric-stamps. For a merely direct-attached or dedicated link use fabric1-interface-private (#18719)", children: nil},
+		"fabric-interface-private":        {desc: "Acknowledge that the fabric link is an isolated two-peer L2 domain (direct-attached, or a dedicated VLAN/bridge). Silences only the #10105 zone-stamp commit reminder; it is NOT authentication and never makes stamps trusted (#18719)", children: nil},
+		"fabric1-interface-private":       {desc: "Acknowledge that the second fabric link is an isolated two-peer L2 domain. Silences only the #10105 commit reminder for that link; NOT authentication (#18719)", children: nil},
 		"configuration-synchronize":       {desc: "Synchronize committed configuration from primary to secondary", children: nil},
 		"nat-state-synchronization":       {desc: "NAT state synchronization (accepted for Junos compatibility; no runtime effect)", children: nil},
 		"ipsec-session-synchronization":   {desc: "Synchronize IPsec SAs to the cluster peer", children: nil},

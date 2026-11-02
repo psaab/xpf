@@ -98,6 +98,7 @@ func allWiredHooks7280() []string {
 		cluster.HookHeartbeatRestartNotify,
 		cluster.HookPeerFence,
 		cluster.HookPeerFenceConfirm,
+		cluster.HookFabricSegmentAlarms,
 	}
 }
 

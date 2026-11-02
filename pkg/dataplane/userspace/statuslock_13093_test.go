@@ -68,7 +68,7 @@ func TestStatusLoopDoesNotHoldManagerLockAcrossStatusRPC13093(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		m.statusLoop(ctx)
+		m.statusLoop(ctx, false)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -188,7 +188,7 @@ func TestStatusPollDoesNotRearmWorkersAfterLinkCycleStarts13093(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		m.statusLoop(ctx)
+		m.statusLoop(ctx, false)
 	}()
 	t.Cleanup(func() {
 		cancel()

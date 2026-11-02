@@ -24,7 +24,7 @@ func TestFilterSnapshotLiteralAddressExceptFailsClosed11334(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}
-	terms := buildFirewallFilterSnapshots(cfg)
+	terms := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(terms) != 1 || len(terms[0].Terms) != 1 {
 		t.Fatalf("snapshots = %#v, want one filter with one term", terms)
 	}

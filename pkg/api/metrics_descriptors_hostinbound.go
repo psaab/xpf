@@ -180,4 +180,18 @@ func (c *xpfCollector) initHostInboundDescriptors() {
 			"userspace-dp xpf_filter_hits_total fast-path counters).",
 		[]string{"counter"}, nil,
 	)
+	// #18728: the kernel lo0 chain's per-family IMPLICIT final discard (a lo0
+	// filter with no terminal catch-all ends in a counted drop exempting lo
+	// and the cluster control/fabric links). Its counter object lives
+	// outside the operator `then count` namespace, so it is a separate
+	// series labeled by family; without it a lo0 filter silently dropping
+	// fxp0 management traffic had no metric. Resets on every table rebuild
+	// (commit / DHCP re-render) like the counters above.
+	c.lo0ImplicitDiscardHits = prometheus.NewDesc(
+		"xpf_lo0_implicit_discard_hits_total",
+		"Total host-bound packets dropped by the kernel lo0 input chain's "+
+			"implicit final discard (no lo0 filter term matched), by family; "+
+			"loopback and the cluster control/fabric links are exempt.",
+		[]string{"family"}, nil,
+	)
 }

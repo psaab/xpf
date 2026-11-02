@@ -55,13 +55,97 @@ func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
 	}
 	declareCounters(spec.V4Terms)
 	declareCounters(spec.V6Terms)
+	// #18728: the implicit-discard counters, after the authored ones (the
+	// oracle's declaration order).
+	if spec.ImplicitDiscardV4 {
+		p.counterObj(Lo0ImplicitDiscardCounterName("inet"))
+	}
+	if spec.ImplicitDiscardV6 {
+		p.counterObj(Lo0ImplicitDiscardCounterName("inet6"))
+	}
 
 	for _, t := range spec.V4Terms {
 		buildLo0TermNetlink(p, t, famV4)
 	}
+	if spec.ImplicitDiscardV4 || spec.ImplicitDiscardV6 {
+		if err := config.ValidateLo0ImplicitDiscardExempt(spec.ImplicitDiscardExemptNetdevs,
+			spec.ImplicitDiscardRequiredNetdevs); err != nil {
+			p.fail(err)
+			return
+		}
+	}
+	if spec.ImplicitDiscardV4 {
+		buildLo0VRFLocalAccept(p, famV4, spec.ImplicitDiscardVRFMasters)
+		buildLo0ImplicitDiscardNetlink(p, famV4, "inet", spec.ImplicitDiscardExemptNetdevs)
+	}
 	for _, t := range spec.V6Terms {
 		buildLo0TermNetlink(p, t, famV6)
 	}
+	if spec.ImplicitDiscardV6 {
+		buildLo0ImplicitDiscardNetlink(p, famV6, "inet6", spec.ImplicitDiscardExemptNetdevs)
+	}
+}
+
+// buildLo0VRFLocalAccept queues `meta nfproto ipv4 iifname {VRF masters} meta
+// sdifname {VRF masters} accept` ahead of the IPv4 implicit discard,
+// mirroring the oracle's lo0VRFLocalAcceptRule: IPv4 traffic the box
+// generates inside a VRF loops through the VRF master, and the input hook
+// then reports the MASTER as both iifname and sdifname (measured in a netns:
+// `ping -I vrf-mgmt <own fxp0 address>` matches iifname "vrf-mgmt" and
+// sdifname "vrf-mgmt"; sdif is not 0). It is the VRF analogue of `lo`. The
+// sdifname guard is load-bearing: a packet RECEIVED on a VRF slave (fxp0 in
+// vrf-mgmt) shows the same master as iifname but carries the SLAVE as
+// sdifname, and must stay subject to the drop. It runs after every authored
+// rule, so it only changes the implicit discard's verdict. The caller emits
+// it for IPv4 only: IPv6 VRF-local traffic carries the address-owning slave
+// as sdifname and cannot be told apart from fxp0 ingress (see
+// config.Lo0ImplicitDiscardVRFMasters). Invariant: only a frame transmitted
+// INTO the VRF device (local transmit, a raw AF_PACKET send on the master, a
+// tc/XDP redirect to it, a VRF as a bridge port) shows iif = sdif = the
+// master; xpf builds none but the first, and the helper reinjects through a
+// TUN.
+func buildLo0VRFLocalAccept(p *nlPlan, f nlFamily, masters []string) {
+	if len(masters) == 0 {
+		return
+	}
+	a := p.rule()
+	a.needNfproto(f)
+	a.iifname(masters)
+	a.sdifname(masters)
+	a.emit(verdictAccept()...)
+}
+
+// buildLo0ImplicitDiscardNetlink queues the Junos implicit final discard for
+// one family's lo0 filter (#18728), mirroring lo0ImplicitDiscardRule in the
+// oracle: `meta nfproto <f> iifname != { X } meta sdifname != { X } counter
+// name "<n>" drop`. It follows that family's authored rules, so only a packet
+// no authored term terminated reaches it. The nfproto guard keeps it to its
+// own family (the chain is inet).
+//
+// The exemption is matched on BOTH iifname and sdifname. For an l3mdev
+// (VRF) slave the input hook's iifname is the VRF MASTER, and the slave is
+// only visible as sdifname; xpfd enslaves fxp/em/fab to vrf-mgmt, so an
+// iifname-only exemption never matched the control link or the fabric and
+// the implicit drop cut them (#18728 loss incident). sdifname is empty for
+// non-VRF ingress, so the second compare is a no-op there. The iifname leg
+// still matters for VRF slaves: IPv6 neighbor discovery on a slave reaches
+// the input hook with the SLAVE as iifname and sdif 0 (the VRF code keeps
+// the ingress device for NDISC), so only `iifname != X` exempts the control
+// link's and fabric's ND. The VRF master is
+// deliberately NOT exempted: fxp0 is a slave of the same VRF and must stay
+// subject to the drop. A nil/empty list, an empty name, or a missing required
+// role netdev refuses the plan (checked by the caller).
+func buildLo0ImplicitDiscardNetlink(p *nlPlan, f nlFamily, family string, exempt []string) {
+	if len(exempt) == 0 {
+		p.fail(fmt.Errorf("lo0 implicit discard (%s): empty iifname exemption (refusing an unscoped drop that would include loopback)", family))
+		return
+	}
+	a := p.rule()
+	a.needNfproto(f)
+	a.iifnameExcept(exempt)
+	a.sdifnameExcept(exempt)
+	a.counterRef(Lo0ImplicitDiscardCounterName(family))
+	a.emit(verdictDrop()...)
 }
 
 // buildLo0TermNetlink lowers one filter term to 0, 1, or 2 kernel rules,

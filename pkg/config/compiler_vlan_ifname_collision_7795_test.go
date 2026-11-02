@@ -183,6 +183,8 @@ func TestRethUnitCollapseStillCompiles7795(t *testing.T) {
 		// this one runs, which would make these cells pass or fail for the
 		// wrong reason.
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 node 1 priority 100",
@@ -217,6 +219,8 @@ func TestRethVlanAliasOfAuthoredNameStillCompiles7795(t *testing.T) {
 		"set interfaces reth0 unit 50 family inet address 172.16.50.8/24",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/2 gigether-options redundant-parent reth0",

@@ -200,7 +200,10 @@ driveable work remains.
   worktrees continuously, not in a final sweep. NEVER prune mid-campaign:
   `/var/worktrees/.cache/keeper/`, `/var/worktrees/.cache/tmpdir/` (lock/
   owner/epoch state), or open gate cell scripts — that is the campaign's
-  live memory, not scratch. The gate-baselines directory is protected
+  live memory, not scratch. NEVER prune `/var/worktrees/.cache/cluster-keys/`
+  at all: it holds the live lab clusters' control-link keys (#18724), and
+  losing it strands every raw deploy until the keys are recovered or the
+  clusters are re-keyed. The gate-baselines directory is protected
   except for indexed captures that have expired under the rule below.
 - **Host isolation — tests NEVER mutate the workstation (2026-10-26)**:
   the workstation is a long-lived host, not a sacrificial test box.

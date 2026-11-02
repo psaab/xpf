@@ -523,9 +523,17 @@ func (d *Daemon) wireSessionSyncFailoverCallbacks(ss *cluster.SessionSync) {
 	// already transitioned to secondary — blindly calling
 	// ManualFailover would cause dual-resign (both nodes secondary)
 	// and a 30-second traffic blackhole.
+	//
+	// #18715: the one exception is an RG that NEITHER node owns, which an
+	// aborted transfer leaves behind when this node (the old owner) does not
+	// re-promote. acceptOwnerlessTransferOut accepts that request only when
+	// the ownerless view is fresh, and acks it only after confirming this
+	// node's dataplane inactive for the RG, so the requester can commit. A
+	// request for an RG the peer owns is still rejected: that is the stale
+	// request the guard above exists for.
 	ss.OnRemoteFailover = func(rgID int, reqID uint64) error {
 		if !d.cluster.IsLocalPrimary(rgID) {
-			return fmt.Errorf("%w: redundancy group %d", cluster.ErrRemoteFailoverRejected, rgID)
+			return d.acceptOwnerlessTransferOut(rgID, reqID)
 		}
 		slog.Info("cluster: remote failover request from peer", "rg", rgID, "req_id", reqID)
 		// #5640: arm the fence-completion barrier BEFORE ManualFailover
