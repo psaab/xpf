@@ -506,6 +506,7 @@ EOF'
 			break
 		fi
 	done
+	xpf_assert_vm_target "$rinst"
 	incus exec "$rinst" -- uname -r
 
 	incus exec "$rinst" -- systemctl enable frr

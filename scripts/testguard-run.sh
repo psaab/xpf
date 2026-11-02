@@ -9,8 +9,31 @@ if (($# == 0)); then
 	exit 2
 fi
 root=$(cd "$(dirname "$0")/.." && pwd)
-PATH="$root/test/support/host-bin-shims:$PATH"
+shim_dir="$root/test/support/host-bin-shims"
+real_path=
+IFS=: read -r -a path_entries <<<"$PATH"
+for entry in "${path_entries[@]}"; do
+	[[ -n "$entry" && "$entry" != "$shim_dir" ]] || continue
+	real_path="${real_path:+$real_path:}$entry"
+done
+if [[ -n "$real_path" ]]; then
+	PATH="$shim_dir:$real_path"
+else
+	PATH="$shim_dir"
+fi
 export PATH
+
+command=$1
+shift
+if [[ "$command" == go || "$command" == "$shim_dir/go" ]]; then
+	go_bin=$(PATH="$real_path" command -v go) || {
+		echo "testguard-run: real Go binary not found" >&2
+		exit 127
+	}
+	set -- "$go_bin" "$@"
+else
+	set -- "$command" "$@"
+fi
 scratch=${TMPDIR:-/var/worktrees/.cache/tmpdir}
 mkdir -p "$scratch"
 work=$(mktemp -d "$scratch/testguard-run.XXXXXX")
@@ -29,12 +52,12 @@ if [[ $(id -u) == 0 && -n "$current_boot" && "$proof_boot" == "$current_boot" ]]
 	# The VM proof permits the privileged lane to retain its VM capabilities
 	# (for BPF/memlock tests); namespace identity is still independently
 	# checked by testguard in the child.
-	XPF_SACRIFICIAL_HOST=1 XPF_TESTGUARD_ACTIVE=1 \
+	XPF_SACRIFICIAL_HOST=1 \
 		unshare -pf --fork --mount-proc sh -c '(unshare -nm "$@")' testguard-run "$@"
 else
 	# A caller-supplied intent sentinel is not proof; do not propagate it on
 	# the workstation path.
-	env -u XPF_SACRIFICIAL_HOST XPF_TESTGUARD_ACTIVE=1 \
+	env -u XPF_SACRIFICIAL_HOST \
 		unshare -Urp --fork --mount-proc sh -c '(unshare -nm "$@")' testguard-run "$@"
 fi
 rc=$?

@@ -36,6 +36,10 @@ MARKERS = {
 }
 
 
+TESTMAIN = re.compile(
+    r"(?ms)^func\s+TestMain\s*\([^)]*\)\s*\{(?P<body>.*?)^\}"
+)
+
 def package_candidates(root: Path) -> tuple[dict[str, tuple[str, ...]], list[str]]:
     candidates: dict[str, tuple[str, ...]] = {}
     errors: list[str] = []
@@ -47,21 +51,23 @@ def package_candidates(root: Path) -> tuple[dict[str, tuple[str, ...]], list[str
         sources = sorted(directory.glob("*_test.go"))
         if not sources:
             errors.append(f"no Go test sources in guarded package: {package}")
-        mains = []
-        guarded = False
+        main_bodies = []
         for source in sources:
             text = source.read_text(encoding="utf-8")
-            if re.search(r"\bfunc\s+TestMain\s*\(", text):
-                mains.append(source)
-            if "testguard.ExitIfUnsafe()" in text:
-                guarded = True
+            main_bodies.extend(match.group("body") for match in TESTMAIN.finditer(text))
             classes = tuple(name for name, marker in MARKERS.items() if marker.search(text))
             if classes:
                 candidates[source.relative_to(root).as_posix()] = classes
-        if not mains or not guarded:
+        if len(main_bodies) != 1:
             errors.append(
-                f"{package}: TestMain must call testguard.ExitIfUnsafe() before tests"
+                f"{package}: expected one package TestMain, found {len(main_bodies)}"
             )
+        else:
+            body = re.sub(r"(?m)^\s*//.*$", "", main_bodies[0]).lstrip()
+            if not body.startswith("testguard.ExitIfUnsafe()"):
+                errors.append(
+                    f"{package}: TestMain must begin with testguard.ExitIfUnsafe()"
+                )
     return candidates, errors
 
 

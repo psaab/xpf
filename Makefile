@@ -50,11 +50,11 @@ CARGO_TARGET_DIR_SHARED := /var/worktrees/.cache/cargo
 CARGO_TARGET_DIR ?= $(CARGO_TARGET_DIR_SHARED)
 export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
 
-# #18038: package-manager/service tools used by tests resolve to fail-closed
-# shims unless a live VM target boot-ID proof is present. The Go shim runs all
-# test commands in private network+mount namespaces with a PID-1 baseline.
+# #18038: test recipes that invoke Go get the fail-closed shims without
+# changing PATH for packaging/build targets such as `make deb`.
 HOST_BIN_SHIMS := $(CURDIR)/test/support/host-bin-shims
-export PATH := $(HOST_BIN_SHIMS):$(PATH)
+TEST_COMMAND_TARGETS := test-go test-race-dp test-shim-run test-memlock-guards
+$(TEST_COMMAND_TARGETS): export PATH := $(HOST_BIN_SHIMS):$(PATH)
 $(shell mkdir -p $(TMPDIR) $(GOCACHE) $(GOTMPDIR) $(CARGO_TARGET_DIR))
 # #18839: what `make clean` may do with CARGO_TARGET_DIR, decided here by make
 # on the resolved path (realpath when it exists, so a symlink or a trailing

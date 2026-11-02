@@ -8,7 +8,7 @@ case "$PATH" in
 esac
 export PATH
 go_bin=$(command -v go) || { echo "go-test-shim: real go binary not found" >&2; exit 127; }
-if [ "${1:-}" = test ] && [ "${XPF_TESTGUARD_ACTIVE:-}" != 1 ]; then
+if [ "${1:-}" = test ]; then
 	exec "$root/scripts/testguard-run.sh" "$go_bin" "$@"
 fi
 exec "$go_bin" "$@"

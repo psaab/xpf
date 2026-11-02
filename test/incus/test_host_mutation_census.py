@@ -32,7 +32,11 @@ class HostMutationCensusTest(unittest.TestCase):
             directory = self.root / package
             directory.mkdir(parents=True)
             (directory / "guard_test.go").write_text(
-                "package fixture\nfunc TestMain(m *testing.M) { testguard.ExitIfUnsafe(); os.Exit(m.Run()) }\n",
+                "package fixture\n"
+                "func TestMain(m *testing.M) {\n"
+                "\ttestguard.ExitIfUnsafe()\n"
+                "\tos.Exit(m.Run())\n"
+                "}\n",
                 encoding="utf-8",
             )
         (self.root / "scripts").mkdir()
@@ -108,12 +112,19 @@ class HostMutationCensusTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("netlink census below floor", result.stderr)
 
-    def test_missing_package_guard_is_rejected(self):
+    def test_guard_outside_testmain_is_rejected(self):
         guard = self.root / "pkg/nftables/guard_test.go"
-        guard.write_text("package fixture\nfunc TestMain(m *testing.M) { os.Exit(m.Run()) }\n", encoding="utf-8")
+        guard.write_text(
+            "package fixture\n"
+            "func TestMain(m *testing.M) {\n"
+            "\tos.Exit(m.Run())\n"
+            "}\n"
+            "func helper() { testguard.ExitIfUnsafe() }\n",
+            encoding="utf-8",
+        )
         result = self.run_census()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("TestMain must call testguard.ExitIfUnsafe", result.stderr)
+        self.assertIn("TestMain must begin with testguard.ExitIfUnsafe()", result.stderr)
 
 
 if __name__ == "__main__":
