@@ -202,6 +202,14 @@ of that term, so keep it LAST when editing a fixture. The fixture parsers
 (`cos_fixture_spec.py`, `cos-apply-lib.sh`) read only the numbered class
 terms and ignore it.
 
+`apply-cos-config.sh` refuses a set whose filters have no terminal catch-all
+(exit 8, nothing committed, "this CoS set predates #18730; merge master"). It
+keys on the TARGET's own `commit check` warnings for the filters the set
+defines (`cos_refuse_catchall_less` in `cos-apply-lib.sh`), so a stale branch
+re-applying an old set cannot start dropping reth0.80 egress once #18728 is
+deployed. Cells: `make test-cos-apply-lib` (shell guard + the Go cells that
+pin the warning shape and that every current fixture is clean).
+
 ## Exit codes are not verdicts
 
 `harness-result.sh:12-39` is the canonical statement; summary:

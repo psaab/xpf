@@ -119,6 +119,66 @@ cos_require_markers() {
 	return 0
 }
 
+# cos_refuse_catchall_less <commit-check-transcript> <sets-file>
+#
+# #18728/#18730: refuse a CoS set whose firewall filters have no terminal
+# catch-all term. Since #18728 a packet that matches no term of a stateless
+# filter is DISCARDED (the Junos implicit final discard), so a pre-#18730 set
+# (`bandwidth-output` = ports 5200-5211/6200-6211 with no `term default then
+# accept`) bound as `reth0 unit 80 ... filter output` drops every other egress
+# packet on that unit, ICMP to the iperf target included. Lanes re-apply CoS
+# from their own worktrees, some older than #18730, so the apply path itself
+# must refuse such a set.
+#
+# The predicate is NOT restated here. It is the target's own commit check:
+# the daemon emits `filter <dir> "<name>" has no terminal catch-all term` for
+# every attached filter without a catch-all (pkg/config
+# validateFilterNoCatchAllWarnings, the same FirewallFilterHasCatchAll the
+# dataplane uses), and the remote CLI prints each as `warning: <text>`
+# (cmd/cli printRemoteConfigWarnings). A pre-#18728 build emits the older
+# #3295 wording, which contains the same `"<name>" has no terminal catch-all
+# term` phrase and flags a superset, so the guard also holds against a stale
+# CoS set on an old build. pkg/config TestCoSApplyCatchAllWarningShape18730
+# pins the phrase this matcher keys on.
+#
+# Only filters the SET FILE defines are judged (`set firewall family
+# inet|inet6 filter <name> ...`): a catch-all-less filter elsewhere in the
+# node's config is not this set's doing and must not block a CoS apply. The
+# name match is exact (quoted), so `bandwidth-output` never matches a warning
+# about `bandwidth-output-reverse`.
+#
+# Returns 0 when no filter of the set is flagged; otherwise prints the
+# flagged filters and the remedy and returns 1. Callers refuse BEFORE the
+# commit phase, so nothing live changes.
+cos_refuse_catchall_less() {
+	local transcript="$1" sets="$2"
+	[[ -f "$transcript" && -f "$sets" ]] || return 1
+	local names name flagged=()
+	names=$(awk '$1 == "set" && $2 == "firewall" && $3 == "family" &&
+		($4 == "inet" || $4 == "inet6") && $5 == "filter" && $6 != "" {
+			gsub(/"/, "", $6); print $6 }' \
+		"$sets" | sort -u)
+	for name in $names; do
+		if grep -E -q "^warning: .*filter [A-Za-z0-9-]+ \"${name}\" has no terminal catch-all term" \
+			"$transcript"; then
+			flagged+=("$name")
+		fi
+	done
+	if [[ "${#flagged[@]}" -eq 0 ]]; then
+		return 0
+	fi
+	echo "error: this CoS set predates #18730; merge master." >&2
+	echo "  The target's commit check reports no terminal catch-all term for:" \
+		"${flagged[*]}" >&2
+	echo "  Since #18728 such a filter DISCARDS every packet that matches no term" >&2
+	echo "  (Junos implicit final discard), so applying it would drop traffic." >&2
+	echo "  Master's sets end each filter in \`term default then accept\`." >&2
+	echo "---- commit check warnings ----" >&2
+	grep -E '^warning: .*has no terminal catch-all term' "$transcript" >&2 || true
+	echo "---- end commit check warnings ----" >&2
+	return 1
+}
+
 # cos_wait_daemon_ready <target> [timeout-seconds]
 #
 # Block until xpfd's gRPC endpoint answers on <target>, or the timeout

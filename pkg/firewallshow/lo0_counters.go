@@ -71,3 +71,24 @@ func WriteLo0KernelCounters(buf *strings.Builder, filter *config.FirewallFilter,
 		fmt.Fprintf(buf, "    Kernel lo0 counter %s: %d packets, %d bytes (inet xpf_lo0 chain; includes host-stack traffic such as fxp0 that bypasses the helper)\n", ctr.Counter, ctr.Packets, ctr.Bytes)
 	}
 }
+
+// WriteLo0ImplicitDiscardCounter renders the kernel lo0 chain's implicit
+// final discard counter for a lo0 filter with no terminal catch-all (#18728).
+// It writes nothing for a filter with a catch-all (no such rule is
+// installed) or when the read returned no row for this family. The kernel
+// drop exempts loopback and the cluster control/fabric links
+// (config.Lo0ImplicitDiscardExemptNetdevs), which the line says so the count
+// is not read as all unmatched host-bound traffic. Callers invoke this only
+// for a lo0-referenced filter (see Lo0CountersForFilter).
+func WriteLo0ImplicitDiscardCounter(buf *strings.Builder, filter *config.FirewallFilter, family string, counts []xnft.Lo0Count) {
+	if filter == nil || config.FirewallFilterHasCatchAll(filter) {
+		return
+	}
+	for _, ctr := range counts {
+		if ctr.ImplicitDiscardFamily != family {
+			continue
+		}
+		fmt.Fprintf(buf, "    Kernel lo0 implicit-discard: %d packets, %d bytes (inet xpf_lo0 chain; unmatched host-bound %s traffic, except loopback and the cluster control/fabric links)\n", ctr.Packets, ctr.Bytes, family)
+		return
+	}
+}

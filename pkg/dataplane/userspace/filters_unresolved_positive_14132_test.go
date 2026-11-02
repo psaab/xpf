@@ -84,7 +84,7 @@ func TestBuildFirewallFilterSnapshotsUnresolvedPositiveFailsClosed14132(t *testi
 			cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 				"edge": {Name: "edge", Terms: []*config.FirewallFilterTerm{tc.term}},
 			}
-			snaps := BuildFirewallFilterSnapshots(cfg)
+			snaps := authoredFilterSnapshots18728(t, BuildFirewallFilterSnapshots(cfg))
 			if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 				t.Fatalf("snapshot terms = %+v, want one filter term", snaps)
 			}
@@ -123,7 +123,7 @@ func TestBuildFirewallFilterSnapshotsDefinedPositiveKeepsRepresentable14132(t *t
 					}},
 				},
 			}
-			snaps := BuildFirewallFilterSnapshots(cfg)
+			snaps := authoredFilterSnapshots18728(t, BuildFirewallFilterSnapshots(cfg))
 			term := snaps[0].Terms[0]
 			if term.FromUnrepresentable {
 				t.Fatal("a defined positive prefix-list is representable and must not refuse the snapshot (#14132)")

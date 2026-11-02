@@ -311,6 +311,25 @@ func runNftNetlinkParityInner(t *testing.T) {
 		parityCheck(t, xnft.Lo0TableName, oracle, func() error { _, err := inst.InstallLo0(spec); return err })
 	})
 
+	// #18728: both families' implicit final discard with a MULTI-name
+	// exemption (cluster control link + fabric), the anonymous-set `iifname
+	// != { .. }` form; lo0_filter above covers the single-name ("lo") form
+	// on its catch-all-less v6 filter.
+	t.Run("lo0_implicit_discard_cluster_18728", func(t *testing.T) {
+		cfg := lo0AllowlistCfg18728()
+		cfg.Chassis.Cluster = &config.ClusterConfig{ControlInterface: "em0"}
+		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+			"em0":  {Name: "em0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+			"fab0": {Name: "fab0", FabricMembers: []string{"ge-0/0/0"}},
+		}
+		oracle := buildLo0FilterPayload(cfg, "protect-re", "protect-re6")
+		if !strings.Contains(oracle, `iifname != { "lo", "em0", "fab0", "ge-0-0-0" } meta sdifname != { "lo", "em0", "fab0", "ge-0-0-0" }`) {
+			t.Fatalf("oracle lacks the multi-name exemption; the diff below would not cover it:\n%s", oracle)
+		}
+		spec := toNftLo0Spec(cfg, "protect-re", "protect-re6")
+		parityCheck(t, xnft.Lo0TableName, oracle, func() error { _, err := inst.InstallLo0(spec); return err })
+	})
+
 	// #13955: IPv4 is-fragment cannot be represented at lo0's input hook.
 	// The text mirror must reject the atomic load; the netlink builder's
 	// fail-closed refusal is pinned in pkg/nftables.

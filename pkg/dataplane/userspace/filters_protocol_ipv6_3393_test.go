@@ -42,7 +42,7 @@ func TestFilterSnapshotIPv6ProtocolEmittedAndResolvable(t *testing.T) {
 			Action:    config.FilterActionDiscard,
 		}}},
 	}
-	snaps := buildFirewallFilterSnapshots(cfg)
+	snaps := authoredFilterSnapshots18728(t, buildFirewallFilterSnapshots(cfg))
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("expected 1 filter with 1 term, got %#v", snaps)
 	}

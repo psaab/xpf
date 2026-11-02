@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -340,4 +342,162 @@ func HostInboundLifelineInterface(name string, lifelines map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// Lo0ImplicitDiscardExemptNetdevs returns the kernel netdevs whose host-bound
+// traffic the kernel lo0 mirror's IMPLICIT final discard (#18728) does not
+// drop: the loopback device "lo", plus the explicitly configured
+// chassis-cluster control link and fabric interfaces (the positive,
+// non-fxp0 entries of HostInboundLifelineSet: control-interface,
+// fabric-interface/fabric1-interface, fabric-options member-interfaces and
+// the fabric interfaces themselves), resolved to their Linux device names.
+//
+// The exemption covers the implicit drop only. An authored lo0 term that
+// discards still applies to these netdevs (that gap is #18729). fxp0 is NOT
+// exempt: on Junos the lo0 filter governs management traffic too, so a lo0
+// filter with no terminal catch-all must accept the management services it
+// needs. The list is sorted after the leading "lo" so the rendered rule is
+// deterministic.
+func Lo0ImplicitDiscardExemptNetdevs(cfg *Config) []string {
+	out := []string{"lo"}
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return out
+	}
+	seen := map[string]bool{"lo": true}
+	var rest []string
+	for key, isLifeline := range HostInboundLifelineSet(cfg) {
+		if !isLifeline || LifelineBaseName(key) == "fxp0" {
+			continue
+		}
+		netdev := LogicalUnitDeviceKeyForRef(cfg, key)
+		if netdev == "" || seen[netdev] {
+			continue
+		}
+		seen[netdev] = true
+		rest = append(rest, netdev)
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
+}
+
+// Lo0ImplicitDiscardRequiredNetdevs returns the netdevs the lo0 implicit
+// discard's exemption MUST contain, resolved straight from the cluster ROLES
+// rather than through HostInboundLifelineSet: "lo", the control-interface,
+// the fabric-interface/fabric1-interface, every interface carrying
+// fabric-options member-interfaces, and those members. It is the
+// independent check ValidateLo0ImplicitDiscardExempt holds the rendered set
+// to, so a drift in the lifeline walk cannot silently drop a role from the
+// exemption (#18728 incident: the exemption must never leave the control
+// link or the fabric exposed to the implicit drop).
+func Lo0ImplicitDiscardRequiredNetdevs(cfg *Config) []string {
+	seen := map[string]bool{"lo": true}
+	out := []string{"lo"}
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			return
+		}
+		netdev := LogicalUnitDeviceKeyForRef(cfg, ref)
+		if netdev != "" && !seen[netdev] {
+			seen[netdev] = true
+			out = append(out, netdev)
+		}
+	}
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return out
+	}
+	cc := cfg.Chassis.Cluster
+	add(cc.ControlInterface)
+	add(cc.FabricInterface)
+	add(cc.Fabric1Interface)
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil || len(ifc.FabricMembers) == 0 {
+			continue
+		}
+		add(name)
+		for _, m := range ifc.FabricMembers {
+			add(m)
+		}
+	}
+	sort.Strings(out[1:])
+	return out
+}
+
+// Lo0ImplicitDiscardVRFMasters returns the l3mdev (VRF) master devices xpfd
+// creates: the management VRF (ManagementVRFDeviceName) and "vrf-<name>" for
+// every non-forwarding routing instance. The lo0 implicit discard exempts
+// LOCALLY GENERATED IPv4 traffic inside a VRF, which the input hook reports
+// with the VRF master as BOTH iifname and sdifname (measured in a netns; sdif
+// is not 0): the VRF analogue of the `lo` exemption (Junos lo0 filters do not
+// see the box talking to itself). A packet RECEIVED on a VRF slave carries
+// the slave as sdifname, and only local transmit delivers a packet on the
+// master device itself, so `iifname {masters} meta sdifname {masters}` cannot
+// match wire traffic (fxp0 ingress stays subject to the drop).
+//
+// Invariant (kernel source, review seat AE): a RECEIVED packet always carries
+// the slave as sdif, because ip_rcv records IPCB->iif before vrf_ip_rcv
+// switches skb->dev to the master. Only a frame transmitted INTO the VRF
+// device shows iif = sdif = the master: vrf_local_xmit (the box's own
+// traffic), a local CAP_NET_RAW AF_PACKET send on the master, a tc or XDP
+// redirect to the VRF device, or a VRF enslaved as a bridge port. xpf builds
+// none of the last three (nested VRFs are refused, and the userspace helper
+// reinjects host-bound packets through a TUN, not the VRF device). A change
+// that adds one of them must revisit this exemption.
+//
+// IPv6 has NO such exemption. IPv6 traffic the box sends to its own address
+// inside a VRF reaches the input hook as iifname = the master and sdifname =
+// the slave that owns the address (fxp0), exactly like a packet received on
+// fxp0. Measured in a netns (#18728): a spoofed packet injected on fxp0 with
+// the box's own IPv6 address as source matched every candidate selector the
+// local packet matched (iifname, sdifname, `fib saddr type local`, pkttype
+// host, ct status), and the kernel does not drop own-source IPv6 from the
+// wire the way it drops an IPv4 martian. Exempting it would let anyone on a
+// VRF slave's segment bypass the lo0 filter's implicit discard, so IPv6
+// VRF-local traffic stays subject to it: a lo0 inet6 filter without a
+// catch-all needs a term for it. #18786 tracks a safe discriminator (an
+// output-hook skb mark survives vrf_local_xmit and cannot arrive from the
+// wire).
+func Lo0ImplicitDiscardVRFMasters(cfg *Config) []string {
+	seen := map[string]bool{ManagementVRFDeviceName: true}
+	out := []string{ManagementVRFDeviceName}
+	if cfg != nil {
+		for _, ri := range cfg.RoutingInstances {
+			if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" || IsReservedRoutingInstanceName(ri.Name) {
+				continue
+			}
+			m := LinuxIfName("vrf-" + ri.Name)
+			if !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ValidateLo0ImplicitDiscardExempt fails closed on an exemption set the lo0
+// implicit discard must not be installed with: any empty name (an exemption
+// that can never match), or a missing required role netdev
+// (Lo0ImplicitDiscardRequiredNetdevs). Both the text renderer and the netlink
+// installer refuse on a non-nil error, so a broken exemption keeps the prior
+// table (or the cold-boot fence) instead of cutting the control link.
+func ValidateLo0ImplicitDiscardExempt(exempt, required []string) error {
+	have := make(map[string]bool, len(exempt))
+	for _, n := range exempt {
+		if strings.TrimSpace(n) == "" {
+			return fmt.Errorf("lo0 implicit discard: exemption list %q contains an empty interface name", exempt)
+		}
+		have[n] = true
+	}
+	var missing []string
+	for _, n := range required {
+		if !have[n] {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("lo0 implicit discard: exemption list %q is missing required control/fabric netdevs %q", exempt, missing)
+	}
+	return nil
 }
