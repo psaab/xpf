@@ -285,7 +285,7 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			// `redundancy-group` and has no RETH parent, so it cannot provide
 			// an owner-RG candidate for its zone. That is a DECISION — the
 			// tunnel does not own its zone's RG — and
-			// TestBindOnlyTunnelDoesNotOwnTheZoneRG7949 pins it.
+			// TestBindOnlyTunnelConsumerDispositions7949 pins it.
 		})
 		idents = append(idents, egressRowIdentity{
 			owner:    base,
