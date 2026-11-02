@@ -182,9 +182,8 @@ func synthPair(n *schemaNode) (string, string, bool) {
 	return "", "", false
 }
 
-// compactCensusPair supplies validator-shaped values for the login SSH-key
-// sites. Their schema validator now requires a complete quoted OpenSSH key;
-// generic identifiers no longer make the census fixture observable.
+// compactCensusPair supplies validator-shaped values where generic identifier
+// synthesis is not accepted: SSH keys and functional-zone host-inbound lists.
 func compactCensusPair(site compactSite) (string, string, bool) {
 	if strings.Join(site.container, " ") == "system login user xpfarg authentication" {
 		switch site.leaf {
@@ -194,6 +193,14 @@ func compactCensusPair(site compactSite) (string, string, bool) {
 			return `"ssh-ed25519 AAAA"`, `"ssh-ed25519 BBBB"`, true
 		case "ssh-rsa":
 			return `"ssh-rsa AAAA"`, `"ssh-rsa BBBB"`, true
+		}
+	}
+	if strings.Join(site.container, " ") == "security zones functional-zone management host-inbound-traffic" {
+		switch site.leaf {
+		case "system-services":
+			return "ssh", "telnet", true
+		case "protocols":
+			return "ospf", "bgp", true
 		}
 	}
 	return synthPair(site.node)
