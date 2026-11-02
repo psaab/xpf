@@ -82,6 +82,10 @@ pkg/nftables/unleased_dhcp_packet_10751_test.go	netlink+nft	private-net+mount	pa
 pkg/nftables/zerohop_predicates_18746_test.go	nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/nftables/zoned_dhcp_lease_window_11577_test.go	netlink+nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/ra/sender_linklocal_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/routing/next_table_carveout_kernel_17971_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/routing/next_table_kernel_16614_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/routing/tunnel_keepalive_vrf_12083_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/routing/vrf_miss_terminator_9819_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/snmp/agent_inband_16781_linux_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/snmp/agent_usp_tun_17832_linux_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/snmp/agent_vrf_11427_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run

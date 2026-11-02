@@ -12,7 +12,7 @@
 # create a private netns, so under a plain `go test` they SKIP — and a skipped
 # cell is indistinguishable from a passing one in aggregate output. That is the
 # exact shape that lets an apply-leg regression sit green forever. This leg runs
-# them under `unshare -rn` where they actually execute.
+# them through scripts/testguard-run.sh where they actually execute.
 #
 # Exit codes follow the selftest contract: 0 = PASS, 77 = SKIP (a tool or
 # capability this host does not have), anything else = FAIL.

@@ -29,6 +29,15 @@ MARKERS = {
         r"(?:exec\.)?Command(?:Context)?\([^\n]*\"nft\"|"
         r"\.Install(?:HostInbound|Lo0|TransitBarrier|ArmedTransitFence)\s*\("
     ),
+    # iproute2 CLI mutations: `ip link/addr/route/rule ... add|set|del|replace`
+    # driven through exec.Command, directly or via an `ip` variable.
+    # An `ip` exec anywhere in the file counts: argument vectors are built
+    # indirectly (run helpers, [][]string tables), so the mutation verbs are
+    # matched on their own anywhere in the same source.
+    "ip": re.compile(
+        r"(?:exec\.)?Command(?:Context)?\(\s*\"ip\"|"
+        r"\"ip\"\s*,\s*args\.\.\."
+    ),
     "bpf": re.compile(
         r"\b(?:ebpf\.(?:NewMap|NewMapWithOptions|NewProgram|"
         r"LoadCollection|LoadAndAssign)|unix\.SYS_BPF|BPF_MAP_CREATE)\b"
