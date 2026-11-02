@@ -304,7 +304,7 @@ $(cat "$SETUP_LOG")"
 # completing both the iperf and echo sweeps.
 DOWN_TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP" "$ALIAS_TMP" "$DOWN_TMP"' EXIT
-mkdir -p "${DOWN_TMP}/bin" "${DOWN_TMP}/proc/"{146115,2002,2003,3000,3001,3101}
+mkdir -p "${DOWN_TMP}/bin" "${DOWN_TMP}/proc/"{146115,2002,2003,3000,3001,3101,3201}
 FAKE_LOG="${DOWN_TMP}/fake.log"
 cat > "${DOWN_TMP}/bin/ss" <<'FAKE'
 #!/usr/bin/env bash
@@ -329,7 +329,7 @@ case "$port" in
     else
       echo 'LISTEN 0 4096 0.0.0.0:5201 0.0.0.0:* users:(("iperf3",pid=146115,fd=3),("iperf3",pid=2002,fd=3),("iperf3",pid=2003,fd=4))'
     fi ;;
-  6201) echo 'LISTEN 0 4096 0.0.0.0:6201 0.0.0.0:* users:(("python3",pid=3000,fd=3),("python3",pid=3001,fd=4),("evil pid=3000",pid=3101,fd=5))' ;;
+  6201) echo 'LISTEN 0 4096 0.0.0.0:6201 0.0.0.0:* users:(("python3",pid=3000,fd=3),("python3",pid=3001,fd=4),("evil pid=3000",pid=3101,fd=5),("x",pid=3000",pid=3201,fd=6))' ;;
 esac
 FAKE
 cat > "${DOWN_TMP}/bin/systemctl" <<'FAKE'
@@ -383,6 +383,7 @@ echo '0::/system.slice/mouse-iperf3@5201.service/child' > "${DOWN_TMP}/proc/2003
 echo '0::/system.slice/mouse-echo.service' > "${DOWN_TMP}/proc/3000/cgroup"
 echo '0::/system.slice/mouse-echo.service/child' > "${DOWN_TMP}/proc/3001/cgroup"
 echo '0::/.lxc' > "${DOWN_TMP}/proc/3101/cgroup"
+echo '0::/.lxc' > "${DOWN_TMP}/proc/3201/cgroup"
 cat > "${DOWN_TMP}/incus" <<'STUB3'
 #!/usr/bin/env bash
 case "$1" in
@@ -434,6 +435,8 @@ grep -q '^kill .*146115$' "$FAKE_LOG" \
     || fail "#18626: default-port iperf3 -s -D orphan 146115 was not killed: $(cat "$FAKE_LOG")"
 grep -q '^kill .*3101$' "$FAKE_LOG" \
     || fail "#18626: echo listener orphan 3101 was not killed / second sweep did not run: $(cat "$FAKE_LOG")"
+grep -q '^kill .*3201$' "$FAKE_LOG" \
+    || fail "#18626: quote-comma comm owner 3201 was not killed (name-carried pid text must not hide the owner): $(cat "$FAKE_LOG")"
 grep -q '^ss 6201$' "$FAKE_LOG" \
     || fail "#18626: echo listener port was not inspected (self-matched shell?): $(cat "$FAKE_LOG")"
 grep -q '^systemctl stop ' "$FAKE_LOG" \

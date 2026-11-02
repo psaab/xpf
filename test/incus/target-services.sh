@@ -362,10 +362,17 @@ sweep_socket_orphans() {
                 for (i = 1; i <= n; i++) {
                     o = owners[i]
                     sub(/^\(+/, "", o)
-                    if (match(o, /^"[^"]*",pid=[0-9]+/)) {
-                        p = substr(o, RSTART, RLENGTH)
-                        sub(/^"[^"]*",pid=/, "", p)
-                        print p
+                    # The owner pid is the LAST pid field of the tuple:
+                    # ss appends the real pid after the comm, so pid-shaped
+                    # text inside the comm (even a quote-comma) loses.
+                    rest = o
+                    pid = ""
+                    while (match(rest, /,pid=[0-9]+/)) {
+                        pid = substr(rest, RSTART + 5, RLENGTH - 5)
+                        rest = substr(rest, RSTART + RLENGTH)
+                    }
+                    if (pid != "") {
+                        print pid
                     }
                 }
             }' | sort -u
