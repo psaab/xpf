@@ -201,7 +201,7 @@ Losing a single admission line is enough to drop a security flag:
 `(tcp-session, strict-syn-check)` disappeared in #16581, and the only signal was
 that census.
 
-**Two-level security spellings (#18787).** The record-only arm of that census
+**Two-level security spellings (#18787).** The two-level arm of that census (now an equals-gate, #18762)
 was hiding four more drops of the same kind. Each `(outer, inner)` pair below
 was never admitted, so the packed line committed clean and compiled weaker than
 its braced twin:
