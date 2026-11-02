@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const sharedUMEMPhase0ArtifactMaxBytes = 16 << 20
@@ -1471,10 +1472,11 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts,
 				}
 			}
 			// #14448: class/expires are single-valued restrictions read
-			// last-wins (Junos semantics); the AST gate
-			// validateAPIAuthDuplicateScalarAST rejects conflicting
-			// duplicates at strict commit and warns on the tolerant path,
-			// so the last sibling is the value both paths install.
+			// last-wins (Junos semantics); the AST gate compares values
+			// across the merged api-auth sibling scope and rejects conflicting
+			// values at strict commit (warning on tolerant load). Credential
+			// overrides remain explicit-only so inherited defaults resolve
+			// from the final merged api-auth values.
 			for _, authNode := range wmNode.FindChildren("api-auth") {
 				auth := sys.Services.WebManagement.APIAuth
 				if auth == nil {
@@ -1492,11 +1494,8 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts,
 				}
 				for _, inst := range namedInstances(authNode.FindChildren("user")) {
 					if pwNode := inst.node.FindChild("password"); pwNode != nil {
-						class := auth.DefaultClass
-						if v := lastAPIAuthClass(inst.node); v != "" {
-							class = v
-						}
-						expires := auth.DefaultExpiresAt
+						class := lastAPIAuthClass(inst.node)
+						var expires time.Time
 						if raw, present := lastAPIAuthExpires(inst.node); present {
 							expires, _ = ParseAPIAuthExpiry(raw)
 						}
@@ -1522,11 +1521,8 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts,
 					if secretNode == nil {
 						continue
 					}
-					class := auth.DefaultClass
-					if v := lastAPIAuthClass(inst.node); v != "" {
-						class = v
-					}
-					expires := auth.DefaultExpiresAt
+					class := lastAPIAuthClass(inst.node)
+					var expires time.Time
 					if raw, present := lastAPIAuthExpires(inst.node); present {
 						expires, _ = ParseAPIAuthExpiry(raw)
 					}

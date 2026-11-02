@@ -3149,22 +3149,22 @@ The compiler now reads every `web-management`, `http` and `https` sibling. It
 merges them the way it already merged a second `system` root (#15018) and the
 way #13216 merged the other service containers: flags are set, a scalar is
 overwritten only when it is authored, and api-auth siblings accumulate. The
-#14448 last-wins rule for `class` and `expires` still applies, and conflicting
-values are still refused at strict commit by
-`validateAPIAuthDuplicateScalarAST`. This is a merge, not a gate: Junos merges
-repeated stanzas, and the merged result is the config the operator wrote.
+#14448 last-wins rule for `class` and `expires` applies across those siblings;
+conflicting values are refused at strict commit by
+`validateAPIAuthDuplicateScalarAST`. Junos repeated containers still merge:
+only a genuine conflict in a single-valued api-auth restriction is gated.
 
 Credential inheritance across the merged blocks:
 
-- `expires` is late-bound. A user or named key with no `expires` of its own
-  inherits `api-auth expires` at use time: `validateAPIAuthCredentialsStrict`
-  and the daemon (`daemon_run_servers.go`) both resolve a zero `ExpiresAt` to
-  `DefaultExpiresAt`. So a default written in a later block still bounds an
-  earlier block's credentials.
-- `class` is bound at read time. A user read before the block that sets the
-  default class keeps `read-only`, the least-privilege default. This was already
-  true of two api-auth blocks in one web-management. The direction is safe: the
-  credential gets less authority than written, never more.
+- `class` and `expires` are late-bound. A user or named key with no explicit
+  override keeps its class/expiry unset, and credential validation and the
+  daemon resolve it against the final merged `DefaultClass` /
+  `DefaultExpiresAt`. A default written in a later sibling therefore applies
+  to earlier credentials too.
+- The `#14448` AST gate compares non-empty `class` and `expires` values across
+  every api-auth sibling in the merged scope. Strict commit refuses conflicting
+  values; identical repeats and complementary blocks remain valid. Tolerant
+  load warns and keeps the last default for existing persisted configs.
 
 An http `interface` never strict-commits: with api-auth HTTP is refused as
 cleartext (#10826), and without it the off-loopback bind is refused (#4047). The

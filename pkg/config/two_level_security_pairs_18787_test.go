@@ -176,3 +176,114 @@ func TestWebManagementHTTPSiblingsMergeOnTolerantLoad18787(t *testing.T) {
 		}
 	}
 }
+
+// Cross-block class/expires defaults participate in the same effective
+// api-auth scope as duplicates inside one block. A later restrictive default
+// must not leave an earlier credential with a copied permissive value.
+func TestWebManagementCrossSiblingAPIAuthConflicts18787(t *testing.T) {
+	user := `user admin { password "correct-horse-battery"; }`
+	for _, tc := range []struct {
+		name, text string
+		want       []string
+	}{
+		{
+			name: "three-block class and expiry conflict",
+			text: `web-management { }
+web-management { api-auth { class super-user; expires 2099-01-01; ` + user + ` } }
+web-management { api-auth { class read-only; expires 2020-01-01; } }`,
+			want: []string{"class", "super-user", "read-only", "#14448"},
+		},
+		{
+			name: "expiry conflict across sibling api-auth blocks",
+			text: `web-management { api-auth { class read-only; expires 2099-01-01; ` + user + ` } }
+web-management { api-auth { class read-only; expires 2020-01-01; } }`,
+			want: []string{"expires", "2099-01-01", "2020-01-01", "#14448"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree, perrs := NewParser(`system { services { ` + tc.text + ` } }`).Parse()
+			if len(perrs) > 0 {
+				t.Fatalf("parse: %v\n%s", perrs, tc.text)
+			}
+			if _, err := CompileConfig(tree); err == nil {
+				t.Fatal("strict compile accepted conflicting api-auth defaults across web-management siblings")
+			} else {
+				for _, want := range tc.want {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("cross-sibling error %q does not name %q", err, want)
+					}
+				}
+			}
+		})
+	}
+
+	t.Run("identical defaults remain allowed", func(t *testing.T) {
+		text := `web-management { api-auth { class read-only; expires 2099-01-01; ` + user + ` } }
+web-management { api-auth { class read-only; expires 2099-01-01; } }`
+		tree, perrs := NewParser(`system { services { ` + text + ` } }`).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("parse: %v\n%s", perrs, text)
+		}
+		if _, err := CompileConfig(tree); err != nil {
+			t.Fatalf("strict compile rejected identical api-auth defaults across siblings: %v", err)
+		}
+	})
+}
+
+func TestWebManagementCrossSiblingAPIAuthDefaultsLateBound18787(t *testing.T) {
+	text := `web-management { api-auth { class super-user; expires 2099-01-01; user admin { password "correct-horse-battery"; } key k1 { secret "machine-generated-key-for-api-auth"; } } }
+web-management { api-auth { class read-only; expires 2020-01-01; } }`
+	tree, perrs := NewParser(`system { services { ` + text + ` } }`).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("parse: %v\n%s", perrs, text)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	auth := cfg.System.Services.WebManagement.APIAuth
+	if auth.DefaultClass != "read-only" {
+		t.Fatalf("later api-auth class = %q, want final last-wins class read-only", auth.DefaultClass)
+	}
+	if got := auth.DefaultExpiresAt.Format("2006-01-02"); got != "2020-01-02" {
+		t.Fatalf("later api-auth expiry = %q, want final last-wins expiry 2020-01-02", got)
+	}
+	if len(auth.Users) != 1 {
+		t.Fatalf("users = %+v, want one user", auth.Users)
+	}
+	if auth.Users[0].Class != "" {
+		t.Fatalf("user copied earlier default class %q; missing per-user class must stay unset for late binding", auth.Users[0].Class)
+	}
+	if !auth.Users[0].ExpiresAt.IsZero() {
+		t.Fatalf("user copied earlier default expiry %v; missing per-user expiry must stay zero for late binding", auth.Users[0].ExpiresAt)
+	}
+
+	if len(auth.Keys) != 1 {
+		t.Fatalf("keys = %+v, want one key", auth.Keys)
+	}
+	if auth.Keys[0].Class != "" || !auth.Keys[0].ExpiresAt.IsZero() {
+		t.Fatalf("key copied earlier api-auth defaults: class %q, expiry %v; absent overrides must remain unset/zero", auth.Keys[0].Class, auth.Keys[0].ExpiresAt)
+	}
+	keyClass := auth.Keys[0].Class
+	if keyClass == "" {
+		keyClass = auth.DefaultClass
+	}
+	keyExpires := auth.Keys[0].ExpiresAt
+	if keyExpires.IsZero() {
+		keyExpires = auth.DefaultExpiresAt
+	}
+	if keyClass != "read-only" || keyExpires.Format("2006-01-02") != "2020-01-02" {
+		t.Fatalf("effective named-key defaults = class %q, expiry %v; want read-only / 2020-01-02", keyClass, keyExpires)
+	}
+	effectiveClass := auth.Users[0].Class
+	if effectiveClass == "" {
+		effectiveClass = auth.DefaultClass
+	}
+	effectiveExpires := auth.Users[0].ExpiresAt
+	if effectiveExpires.IsZero() {
+		effectiveExpires = auth.DefaultExpiresAt
+	}
+	if effectiveClass != "read-only" || effectiveExpires.Format("2006-01-02") != "2020-01-02" {
+		t.Fatalf("effective user defaults = class %q, expiry %v; want read-only / 2020-01-02", effectiveClass, effectiveExpires)
+	}
+}

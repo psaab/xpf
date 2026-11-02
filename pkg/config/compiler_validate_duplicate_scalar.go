@@ -43,18 +43,18 @@ func validateAPIAuthDuplicateScalarAST(tree *ConfigTree, lenient bool) ([]string
 	if tree == nil {
 		return nil, nil
 	}
-	var conflicts []string
+	type scalarKey struct {
+		scope string
+		leaf  string
+	}
+	valuesByScope := make(map[scalarKey][]string)
+	var scalarOrder []scalarKey
 	add := func(scope, leaf string, values []string) {
-		distinct := distinctNonEmptyAPIAuthValues(values)
-		if len(distinct) < 2 {
-			return
+		key := scalarKey{scope: scope, leaf: leaf}
+		if _, ok := valuesByScope[key]; !ok {
+			scalarOrder = append(scalarOrder, key)
 		}
-		conflicts = append(conflicts, fmt.Sprintf(
-			"system services web-management api-auth %s: conflicting duplicate %q values %q and %q — "+
-				"a single-valued api-auth leaf may be set only once; the later value is the "+
-				"restriction the config authors, so keeping the first silently installs the "+
-				"permissive class / stale expiry (#14448)",
-			scope, leaf, distinct[0], distinct[len(distinct)-1]))
+		valuesByScope[key] = append(valuesByScope[key], values...)
 	}
 
 	_ = forEachChild(tree.Children, "system", func(systemNode *Node) error {
@@ -78,6 +78,20 @@ func validateAPIAuthDuplicateScalarAST(tree *ConfigTree, lenient bool) ([]string
 			})
 		})
 	})
+
+	var conflicts []string
+	for _, key := range scalarOrder {
+		distinct := distinctNonEmptyAPIAuthValues(valuesByScope[key])
+		if len(distinct) < 2 {
+			continue
+		}
+		conflicts = append(conflicts, fmt.Sprintf(
+			"system services web-management api-auth %s: conflicting duplicate %q values %q and %q — "+
+				"a single-valued api-auth leaf may be set only once; the later value is the "+
+				"restriction the config authors, so keeping the first silently installs the "+
+				"permissive class / stale expiry (#14448)",
+			key.scope, key.leaf, distinct[0], distinct[len(distinct)-1]))
+	}
 
 	if len(conflicts) == 0 {
 		return nil, nil
@@ -151,3 +165,4 @@ func lastAPIAuthExpires(node *Node) (string, bool) {
 	}
 	return raw, present
 }
+

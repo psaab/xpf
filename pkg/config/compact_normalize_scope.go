@@ -1669,11 +1669,12 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"security alg",
 		"security flow",
 		// #18787: `web-management api-auth metrics-require-auth;` beside a
-		// braced web-management block committed clean and dropped the whole
-		// compiled api-auth (credentials, metrics-require-auth) and HTTPS.
-		// Measured empty+silent per #8690. With the pair admitted the spelling
-		// is folded into a second web-management block, which is REFUSED
-		// loudly exactly like two duplicate braced web-management blocks.
+		// braced web-management block committed clean and dropped api-auth
+		// and HTTPS. Measured empty+silent per #8690. With the pair admitted
+		// the packed spelling is folded into a second web-management block;
+		// compileSystem merges every web-management sibling, while the
+		// #14448 AST gate refuses conflicting api-auth class/expires values
+		// across the merged scope at strict commit.
 		"web-management api-auth",
 
 		// issue 8875: the TOP-LEVEL security containers. `security` itself had
