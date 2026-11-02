@@ -2474,8 +2474,9 @@ the drop fails loudly instead of going quietly vacuous.
     is not a config term, so its helper row is emitted after the authored
     terms as a `term="implicit-discard"` series. If an authored term with
     that name is counted, the by-name aggregate folds both counters into
-    its one series; if it is uncounted, the synthetic series still emits
-    without an authored duplicate. Either way there is no duplicate labelset
+    its one series; if it is uncounted, the synthetic series emits only
+    from its own final-ordinal row—an authored-only row creates no
+    implicit-discard series. Either way there is no duplicate labelset
     (#15192). The kernel lo0
     implicit-discard counters (`xpflo0implicit_<family>`) are not `then
     count` counters: they are kept out of `xpf_lo0_counter_hits_total` and

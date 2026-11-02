@@ -75,16 +75,14 @@ func TestCollectFilterCountersImplicitDiscardSeries18728(t *testing.T) {
 }
 
 // #18728 fold: an AUTHORed term named implicit-discard WITHOUT `then count`
-// is not instrumented (#16454), so its aggregate never emits. The synthetic
-// row for that (family, filter, name) must still surface as the synthetic
-// series — suppressing it by name existence alone leaves the filter's
-// implicit-discard hits invisible. The authored term is constrained
-// (destination-port) and non-terminal, so the filter has no catch-all and
-// the synthetic term exists.
+// is not instrumented (#16454), so its counter row must not be mistaken for
+// the synthetic term's row. The synthetic row at the ordinal after all
+// authored terms must still surface as one series; suppressing it by name
+// existence alone leaves the filter's implicit-discard hits invisible.
 //
-// FAIL-ON-REVERT: restoring the `!authored` name-existence guard in
-// collectFilterCounters drops the D/implicit-discard series and this
-// assertion goes RED.
+// FAIL-ON-REVERT: the old `!authored` guard drops this series; using the
+// by-name counter total instead of the synthetic ordinal yields 13 rather
+// than 11. Either regression makes this assertion go RED.
 func TestCollectFilterCountersImplicitDiscardUncountedAuthored18728(t *testing.T) {
 	store := newFilterStore(t, []string{
 		"set firewall family inet filter D term implicit-discard from destination-port 23",
@@ -124,10 +122,37 @@ func TestCollectFilterCountersImplicitDiscardUncountedAuthored18728(t *testing.T
 		}
 		got[key] = pb.GetCounter().GetValue()
 	}
-	if got["D/implicit-discard"] != 13 {
-		t.Fatalf("filter D series = %v, want one implicit-discard=13 series (2 authored uncounted + 11 synthetic hits must surface together)", got)
+	if got["D/implicit-discard"] != 11 {
+		t.Fatalf("filter D series = %v, want synthetic implicit-discard=11 only (not the uncounted authored term's 2 hits)", got)
 	}
 	if got["D/ssh"] != 5 {
 		t.Fatalf("filter D series = %v, want ssh=5", got)
+	}
+}
+
+// If an uncounted authored term has the reserved name but the helper has no
+// synthetic-ordinal row, the authored row alone must not create an implicit-
+// discard series. This also pins the synthetic row's identity to its ordinal.
+func TestCollectFilterCountersOmitsAuthoredOnlyImplicitDiscard18728(t *testing.T) {
+	store := newFilterStore(t, []string{
+		"set firewall family inet filter D term implicit-discard from destination-port 23",
+		"set firewall family inet filter D term implicit-discard then discard",
+		"set firewall family inet filter D term ssh from destination-port 22",
+		"set firewall family inet filter D term ssh then count cS",
+		"set firewall family inet filter D term ssh then accept",
+	})
+	c := newCollector(&Server{store: store})
+	dp := &dupTermDP15192{
+		Manager: dataplane.New(),
+		status: dpuserspace.ProcessStatus{FilterTermCounters: []dpuserspace.FirewallFilterTermCounterStatus{
+			{Family: "inet", FilterName: "D", TermName: "implicit-discard", TermOrdinal: 0, Packets: 2},
+		}},
+	}
+	got := filterHitsByTerm(t, c, dp)
+	if _, ok := got["implicit-discard"]; ok {
+		t.Fatalf(
+			"authored-only implicit-discard row emitted %g hits; only the synthetic ordinal may produce that series",
+			got["implicit-discard"],
+		)
 	}
 }
