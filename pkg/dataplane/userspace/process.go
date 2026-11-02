@@ -1053,6 +1053,10 @@ func (m *Manager) stopLocked() {
 	// silence recorded against the stopped helper cannot accrue into a wedge
 	// verdict while a planned stop-to-respawn runs.
 	m.liveTrack.retire()
+	// #18794: this retires the tracker's generation-local evidence, but the
+	// unexpected-exit flag is intentionally retained until an armed status is
+	// successfully applied with ctrl.Enabled=1. A spawned child that never
+	// answers and is stopped after its readiness timeout must not erase the debt.
 	// This record bit describes a currently running supervisor retry, not
 	// durable episode history; an intentional stop makes that claim stale.
 	m.helperCrash.RecoveredSinceCrash = false
@@ -1085,6 +1089,11 @@ func (m *Manager) stopLocked() {
 		m.haDegradedHaveLastSent = false
 		m.haDegradedMu.Unlock()
 		m.publishHAWatchdogSnapshotLocked()
+		// The process is already absent here. Do not publish this before a live
+		// child has actually exited: control unavailability can fence demotion.
+		if control := m.helperControlGeneration.Load(); control != nil {
+			control.departed.Store(true)
+		}
 		m.notifyHelperSupervisorLocked()
 		return
 	}
@@ -1123,6 +1132,12 @@ func (m *Manager) stopLocked() {
 	}
 	m.proc = nil
 	m.procSup = nil
+	// The child has now exited and been reaped, so its control channel is
+	// unavailable. Publishing earlier could acknowledge a failed demotion write
+	// while this generation is still alive.
+	if control := m.helperControlGeneration.Load(); control != nil {
+		control.departed.Store(true)
+	}
 	m.resetAfterHelperGoneLocked()
 	m.notifyHelperSupervisorLocked()
 }
