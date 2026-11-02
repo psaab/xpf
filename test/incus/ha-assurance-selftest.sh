@@ -2519,6 +2519,29 @@ for gauge_metric in 'Pending TX local' 'Outstanding TX'; do
 	assert_not_contains "$report_output" 'VOID ' \
 		"falling ${gauge_metric} gauge does not increment VOID"
 done
+GAUGE_ZERO_PRE_STATS="${RG1_DIR}/gauge-zero-phase-pre-node0.stats"
+write_ha_status_snapshot "$GAUGE_ZERO_PRE_STATS" phase-pre node0 1 0 0 0 0 100 0 20 20
+for gauge_index in "${!GAUGE_STATS[@]}"; do
+	gauge_phase=$(printf 'sample-%02d' "$((gauge_index + 1))")
+	write_ha_status_snapshot "${GAUGE_STATS[$gauge_index]}" "$gauge_phase" node0 1 \
+		0 0 0 0 100 0 0 0
+done
+assert_helper_value 0 ha_sample_window_gauge_max manual-rg1-failback 1 node0 \
+	'Pending TX local' "${GAUGE_STATS[@]}" 20
+for gauge_metric in 'Pending TX local' 'Outstanding TX'; do
+	report_output=$(
+		(
+			info() { printf 'INFO %s\n' "$*"; }
+			void() { printf 'VOID %s\n' "$*"; }
+			ha_rg1_report_sample_max "$gauge_metric" node0 "$gauge_metric" \
+				"$GAUGE_ZERO_PRE_STATS" "${GAUGE_STATS[@]}"
+		)
+	)
+	assert_contains "$report_output" "INFO RG1 Group 8 report-only ${gauge_metric} max (node0): 0" \
+		"all-zero ${gauge_metric} samples ignore the higher pre baseline"
+	assert_not_contains "$report_output" 'VOID ' \
+		"all-zero ${gauge_metric} gauge does not increment VOID"
+done
 report_output=$(
 	(
 		info() { printf 'INFO %s\n' "$*"; }
