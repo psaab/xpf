@@ -63,7 +63,7 @@ impl crate::afxdp::Coordinator {
         owner_rgs: &[i32],
         max: usize,
     ) -> Result<OwnerRgExportWait, String> {
-        self.kick_owner_rg_export_inner(owner_rgs, max, ExportKick::Fresh)
+        self.kick_owner_rg_export_inner(owner_rgs, max, ExportKick::Fresh, 0)
     }
 
     /// #9856: v2 control-socket entry point. Every request carries the
@@ -81,6 +81,31 @@ impl crate::afxdp::Coordinator {
         protocol_version: i32,
         continuation_incarnation: u64,
         continuation_sequence: u64,
+    ) -> Result<OwnerRgExportWait, String> {
+        self.kick_owner_rg_export_v2_client(
+            owner_rgs,
+            max,
+            continuation,
+            protocol_version,
+            continuation_incarnation,
+            continuation_sequence,
+            0,
+        )
+    }
+
+    /// #18752: `kick_owner_rg_export_v2` carrying the client's own window id,
+    /// recorded on the window a fresh kick opens (ignored on a continuation).
+    /// The control-socket handler uses this form.
+    #[allow(clippy::too_many_arguments)]
+    pub fn kick_owner_rg_export_v2_client(
+        &self,
+        owner_rgs: &[i32],
+        max: usize,
+        continuation: bool,
+        protocol_version: i32,
+        continuation_incarnation: u64,
+        continuation_sequence: u64,
+        client_window: u64,
     ) -> Result<OwnerRgExportWait, String> {
         if protocol_version != crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION {
             return Err(format!(
@@ -107,7 +132,45 @@ impl crate::afxdp::Coordinator {
             }
             ExportKick::Fresh
         };
-        self.kick_owner_rg_export_inner(owner_rgs, max, kick)
+        self.kick_owner_rg_export_inner(owner_rgs, max, kick, client_window)
+    }
+
+    /// #18752: close the open window its client abandoned. The window is named
+    /// by the client's own id (`client_window`, known even when page 1's
+    /// response was lost) and/or by the helper's v2 token. The paging marker
+    /// and at least one nonzero name are required. A name that matches no open
+    /// window (another helper incarnation, an already-closed window) names
+    /// nothing here: `Ok(false)`.
+    /// Workers need nothing: the next fresh kick supersedes the abandoned
+    /// sequence at the worker and its buffered entries are skipped as foreign,
+    /// exactly as after an idle expiry. Called under the `ServerState` lock.
+    pub fn abandon_owner_rg_export(
+        &self,
+        protocol_version: i32,
+        incarnation: u64,
+        sequence: u64,
+        client_window: u64,
+    ) -> Result<bool, String> {
+        if protocol_version != crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION {
+            return Err(format!(
+                "owner-RG export protocol version {protocol_version} is unsupported; want {}",
+                crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION
+            ));
+        }
+        let token = incarnation != 0 && sequence != 0;
+        if !token && client_window == 0 {
+            return Err(
+                "owner-RG export abandon requires a client window id or a nonzero incarnation and sequence"
+                    .to_string(),
+            );
+        }
+        if self.sessions.open_export_abandon_client_if(client_window) {
+            return Ok(true);
+        }
+        if !token || incarnation != self.sessions.export_incarnation() {
+            return Ok(false);
+        }
+        Ok(self.sessions.open_export_abandon_if(sequence))
     }
 
     fn kick_owner_rg_export_inner(
@@ -115,6 +178,7 @@ impl crate::afxdp::Coordinator {
         owner_rgs: &[i32],
         max: usize,
         kick: ExportKick,
+        client_window: u64,
     ) -> Result<OwnerRgExportWait, String> {
         // Per-worker export buffers (same Arcs the workers produce into).
         // Worker-keyed, not binding-keyed: binding-less workers still
@@ -237,6 +301,7 @@ impl crate::afxdp::Coordinator {
             &export_worker_ids,
             &ack_atomics,
             shed,
+            client_window,
         );
         Ok(OwnerRgExportWait {
             sequence,

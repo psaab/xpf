@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 // to keep this file under the modularity floor). `ControlResponse` still
 // embeds it, so name it directly rather than through the crate re-export.
 use super::status::ProcessStatus;
+use super::session_export::SessionExportRequest;
 
 use super::binding::{
     HAGroupStatus,
@@ -385,23 +386,6 @@ pub(crate) fn snapshot_post_teardown_refusal(verb: &str, stage: &impl std::fmt::
     )
 }
 
-/// #9344/#9856: the owner-RG session export paging contract this helper
-/// implements.
-///
-/// Version 2 adds an explicit request marker, a nonzero helper incarnation,
-/// a sequence echo, and a per-window dropped count. Both sides fail closed
-/// when any of those fields are absent or inconsistent; v1 helpers are not
-/// safe to page because they silently truncate at `max`.
-pub(crate) const SESSION_EXPORT_PAGING_PROTOCOL_VERSION: i32 = 2;
-static SESSION_EXPORT_INCAR: std::sync::LazyLock<u64> =
-    std::sync::LazyLock::new(crate::hot_hash_seed::os_random_seed_u64);
-
-/// #9856: one nonzero incarnation for this helper process. The status
-/// advertisement and every export response must use the same value, while a
-/// helper restart gets a fresh value before sequence numbers can be reused.
-pub(crate) fn session_export_incarnation() -> u64 {
-    *SESSION_EXPORT_INCAR
-}
 pub(crate) const INJECT_PACKET_TUPLE_PROTOCOL_VERSION: i32 = 1;
 
 /// #3651: one per-zone traffic-volume row inside the `ProcessStatus`-level
@@ -1092,6 +1076,17 @@ pub(crate) struct ControlResponse {
     /// the helper still holds entries from the same tokenized window.
     #[serde(rename = "session_export_more", default)]
     pub session_export_more: bool,
+    /// #18752: `abandon_owner_rg_export` answer — `true` only when the named
+    /// window was still open and is now closed. `false` means nothing
+    /// matched (the window had already closed, belonged to another client,
+    /// or another helper incarnation), which is routine on every re-drive
+    /// after a page-1 BUSY.
+    #[serde(
+        rename = "session_export_abandoned",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub session_export_abandoned: bool,
     /// #9856: terminal completeness metadata for the active export window.
     /// These are emitted on every control response; non-export verbs carry
     /// zero values.
@@ -1924,25 +1919,6 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub(crate) struct SessionExportRequest {
-    #[serde(rename = "owner_rgs", default)]
-    pub owner_rgs: Vec<i32>,
-    #[serde(default)]
-    pub max: u32,
-    /// #9856: v2 marker required on every export request, including page 1.
-    #[serde(rename = "session_export_paging_protocol_version", default)]
-    pub protocol_version: i32,
-    /// #9344/#9856: drain the remainder of the open tokenized window.
-    #[serde(default)]
-    pub continuation: bool,
-    /// #9856: opaque helper-incarnation component of the continuation token.
-    #[serde(rename = "session_export_incarnation", default)]
-    pub continuation_incarnation: u64,
-    /// #9856: opaque sequence component of the continuation token.
-    #[serde(rename = "session_export_seq", default)]
-    pub continuation_sequence: u64,
-}
 
 /// #7919: the 5-tuple a `session_counters` query names.
 ///

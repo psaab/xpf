@@ -1137,6 +1137,7 @@
         "worker_id": 0
       }
     ],
+    "session_export_abandoned": true,
     "session_export_dropped": 0,
     "session_export_incarnation": 0,
     "session_export_more": false,
@@ -4489,6 +4490,7 @@
     "continuation": false,
     "max": 0,
     "owner_rgs": [],
+    "session_export_client_window": 0,
     "session_export_incarnation": 0,
     "session_export_paging_protocol_version": 0,
     "session_export_seq": 0

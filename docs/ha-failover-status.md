@@ -1181,6 +1181,58 @@ independent reasons:
 Both are covered by hermetic cells; neither has been through `make
 test-ha-crash` on a cluster yet.
 
+### Failback refused for a minute after a peer reboot: an aborted export held the helper BUSY (#18752) — FIXED IN SOURCE, LIVE TREATMENT PENDING
+
+After a peer reboot the survivor owes it a cold-prime bulk. While no paying
+bulk is in flight, the survivor's demotion barrier refuses demotion of its
+primary RGs, including manual failover/failback of those groups and the ISSU
+drain (`request system software in-service-upgrade`, through `ForceSecondary`).
+The bulk is built from a paged owner-RG export. When the Go pager aborted
+between pages, most often on `generation changed during export window` under
+commit or FIB churn, the helper kept the window open for its 60 s idle expiry
+and refused every re-drive `owner-RG export busy (window N open)`. On udp the
+refusal read only `cold prime owed without pending outbound bulk`. Reproduced on
+the control build 0.0.29586: 20k long-lived flows, a peer `xpfd` restart and
+back-to-back commits during the first cold-prime bulk gave BUSY re-drives at
++5/+15/+25 s and a refused RG1 failback 12 s after the churn stopped. The pager
+now abandons the window it opened (by client window id and by token). The
+treatment arm of the same cell is pending. Mechanism and cells:
+`docs/session-sync-architecture.md`, "An aborted paged export must close its
+helper window".
+
+**What the operator sees.** While the debt is unpaid and no bulk that could
+pay it is in flight:
+
+- `show chassis cluster information`, Cold synchronization block:
+  `Cold prime owed to peer (no bulk pending): owed for <age>; it clears when a
+  bulk re-drive (every sweep tick) is acked by the peer; last bulk error:
+  <error> (<age> ago)`, followed by `Blocks: demotion of this node's primary
+  RGs (manual failover/failback and ISSU drain)`. The error reads `none recorded`
+  before the first failed re-drive in this cold-prime episode.
+- The refused failover's error ends with the same detail.
+- One Warn per episode in the journal once the debt has been owed for 60 s:
+  `cluster sync: cold prime owed to peer past the long-owed threshold with no
+  bulk pending; ...`.
+
+**How it clears.** Only on its own. The sync sweep re-drives the bulk about
+every 7 s. The debt is paid when the peer acks one, and the line disappears.
+There is no CLI force-override, by design: admitting a demotion to an unprimed
+peer makes it delete every session missing from its table (#10387).
+
+**If it does not clear,** the `last bulk error` names the cause:
+
+- `owner-RG export busy (window N open)` past 60 s means the helper is not
+  honouring the abandon. Check for one `helper does not support
+  abandon_owner_rg_export` Warn, which means a mixed-version upgrade with an old
+  helper: the idle expiry still frees it within 60 s.
+- `generation changed during export window` or `tombstone dropped` repeating on
+  every re-drive means sustained churn during the export. Stop the commit or
+  route churn and the next re-drive pays it.
+- Last resort: `systemctl restart xpfd` on the owing node. That moves its RGs
+  to the peer without the barrier, so the peer takes ownership with the
+  unprimed table the barrier was protecting. Sessions it never received are
+  lost, and those RGs' traffic is interrupted while they move.
+
 ### A RETH address removed by commit stayed on the RG owner (#18573) — FIXED IN SOURCE
 
 In direct-VIP mode (private-RG election, the compiler default) the add and

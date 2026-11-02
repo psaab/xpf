@@ -1038,6 +1038,18 @@ partial drop, or when the preferred fabric connects with no fault.
   with a caller-read snapshot captures nothing. The capture is stored after
   `pendingBulkAckEpoch` and loaded before it, so an ACK never pairs one bulk's
   epoch with a newer bulk's capture.
+- **Unpaid cold prime is visible (#18752).** While
+  `coldPrimeOwedWithoutPendingBulk` holds, the barrier refuses demotion of this
+  node's primary RGs, including the ISSU drain (`ForceSecondary` runs the same
+  pre-hook). `ColdPrimeDebtDetail` (owed-since stamp kept across re-arms, plus
+  the last `doBulkSync` failure via `noteBulkResult`; cleared on peer ack or
+  when a new debt episode is armed) is appended to the refusal and rendered in
+  the Cold synchronization block of `FormatInformation`. The text reaches the
+  Manager through `SyncStatsProvider.ColdPrimeDebtStatus`, not a type
+  assertion. The sweep's `maybeWarnLongOwedColdPrime` logs one Warn per episode
+  past `coldPrimeLongOwedAfter` (60 s); `armColdPrimeLocked` resets the latch
+  and prior failure when a new episode starts. Display only: none of it changes
+  what the barrier admits. Operator view: `docs/ha-failover-status.md` (#18752).
 - Full reasoning and the stated non-claim: `docs/session-sync-architecture.md`,
   Graceful Demotion.
 

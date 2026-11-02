@@ -13165,3 +13165,168 @@ fn synced_delete_outcome_contract_table_17138() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #18752: an abandoned window used to block every fresh kick BUSY until its
+// 60 s idle expiry, which stranded the HA cold prime after a peer reboot.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn owner_rg_export_abandon_unblocks_the_next_fresh_kick_18752() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, _export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let (incarnation, sequence) = wait.token();
+
+    // Premise: the stuck state. The client gave up after page 1, and a fresh
+    // kick (the cold-prime re-drive) is refused BUSY.
+    let err = coordinator
+        .kick_owner_rg_export_unpaged(&[1], 3)
+        .err()
+        .expect("fresh kick while the abandoned window is open must be BUSY");
+    assert!(err.contains("busy"), "{err}");
+
+    let cleared = coordinator
+        .abandon_owner_rg_export(
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            incarnation,
+            sequence,
+            0,
+        )
+        .expect("abandon with the window's own token");
+    assert!(cleared, "the abandon must clear the window it names");
+    coordinator
+        .kick_owner_rg_export_unpaged(&[1], 3)
+        .expect("fresh kick after the abandon must proceed");
+}
+
+#[test]
+fn owner_rg_export_abandon_with_a_stale_token_leaves_the_window_open_18752() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    let (incarnation, sequence) = wait.token();
+
+    for (bad_incarnation, bad_sequence) in
+        [(incarnation + 1, sequence), (incarnation, sequence + 1)]
+    {
+        let cleared = coordinator
+            .abandon_owner_rg_export(
+                crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+                bad_incarnation,
+                bad_sequence,
+                0,
+            )
+            .expect("a well-formed token naming another window is not an error");
+        assert!(
+            !cleared,
+            "({bad_incarnation},{bad_sequence}) does not name the open window ({incarnation},{sequence})"
+        );
+    }
+    for (version, inc, seq) in [
+        (
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION + 1,
+            incarnation,
+            sequence,
+        ),
+        (
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            0,
+            sequence,
+        ),
+        (
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            incarnation,
+            0,
+        ),
+    ] {
+        assert!(
+            coordinator
+                .abandon_owner_rg_export(version, inc, seq, 0)
+                .is_err(),
+            "malformed abandon ({version},{inc},{seq}) must be refused"
+        );
+    }
+    // A client window id that names no open window is not the open one.
+    assert!(
+        !coordinator
+            .abandon_owner_rg_export(
+                crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+                0,
+                0,
+                0x5eed
+            )
+            .expect("a well-formed client id naming no window is not an error"),
+        "the fixture window was opened without a client id"
+    );
+    assert_window_untouched_17127(&coordinator, seq_before, wait.token(), &export_buffer);
+}
+
+/// #18752 (review, lost page 1): the client chose `client_window` before it
+/// sent the kick, so it can close the window even when page 1's response —
+/// and with it the helper's token — never reached it. The cell opens the
+/// window and never collects page 1 at all.
+#[test]
+fn owner_rg_export_abandon_by_client_window_when_page1_was_lost_18752() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let _lost = coordinator
+        .kick_owner_rg_export_v2_client(
+            &[1],
+            3,
+            false,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            0,
+            0,
+            0xc11e47,
+        )
+        .expect("kick page 1");
+    let err = coordinator
+        .kick_owner_rg_export_unpaged(&[1], 3)
+        .err()
+        .expect("premise: the unanswered window blocks a fresh kick");
+    assert!(err.contains("busy"), "{err}");
+
+    let wrong = coordinator
+        .abandon_owner_rg_export(
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            0,
+            0,
+            0xc11e48,
+        )
+        .expect("well-formed");
+    assert!(!wrong, "another client id must not close this window");
+    assert!(
+        coordinator.kick_owner_rg_export_unpaged(&[1], 3).is_err(),
+        "the window must still be open after a non-matching abandon"
+    );
+
+    let cleared = coordinator
+        .abandon_owner_rg_export(
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            0,
+            0,
+            0xc11e47,
+        )
+        .expect("abandon by client window");
+    assert!(
+        cleared,
+        "the client's own id must close the window it opened"
+    );
+    coordinator
+        .kick_owner_rg_export_unpaged(&[1], 3)
+        .expect("fresh kick after the abandon must proceed");
+}

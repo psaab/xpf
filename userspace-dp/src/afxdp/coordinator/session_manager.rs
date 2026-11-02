@@ -38,6 +38,8 @@ const EXPORT_WINDOW_IDLE_EXPIRY_NS: u64 = 60_000_000_000;
 /// torn-down workers' buffers nor add a new worker into this window).
 pub(in crate::afxdp) struct OpenExportWindow {
     sequence: u64,
+    /// #18752: the client's own id for this window (0 = none supplied).
+    client_window: u64,
     incarnation: u64,
     since_ns: u64,
     buffers: Vec<Arc<crate::afxdp::binding_state::ExportBufferState>>,
@@ -326,10 +328,12 @@ impl SessionManager {
         worker_ids: &[u32],
         acks: &[Arc<AtomicU64>],
         shed: u32,
+        client_window: u64,
     ) {
         let dropped_at_begin = buffers.iter().map(|b| b.export_dropped()).collect();
         *self.open_export.lock().unwrap_or_else(|e| e.into_inner()) = Some(OpenExportWindow {
             sequence,
+            client_window,
             incarnation: self.export_incarnation,
             since_ns: now_ns,
             buffers: buffers.to_vec(),
@@ -395,6 +399,36 @@ impl SessionManager {
         if matches!(open.as_ref(), Some(w) if w.sequence == sequence) {
             *open = None;
         }
+    }
+
+    /// #18752: the explicit form of the idle expiry. A client that abandoned
+    /// a window mid-way (the Go pager aborting between pages) closes it now
+    /// instead of leaving every fresh kick BUSY for EXPORT_WINDOW_IDLE_EXPIRY_NS.
+    /// Clears iff `sequence` is still the open window, so a late or duplicate
+    /// abandon can never close a newer one; returns whether it cleared.
+    pub(in crate::afxdp) fn open_export_abandon_if(&self, sequence: u64) -> bool {
+        let mut open = self.open_export.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(open.as_ref(), Some(w) if w.sequence == sequence) {
+            *open = None;
+            return true;
+        }
+        false
+    }
+
+    /// #18752: as `open_export_abandon_if`, keyed on the client's own window
+    /// id. A client that never saw page 1's response has no helper token,
+    /// but it chose this id before it sent the kick. Clears iff the open
+    /// window was opened with that nonzero id.
+    pub(in crate::afxdp) fn open_export_abandon_client_if(&self, client_window: u64) -> bool {
+        if client_window == 0 {
+            return false;
+        }
+        let mut open = self.open_export.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(open.as_ref(), Some(w) if w.client_window == client_window) {
+            *open = None;
+            return true;
+        }
+        false
     }
 
     /// Test seam for the idle-expiry path: overwrite the activity stamp of

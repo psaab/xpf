@@ -27,6 +27,13 @@ type SyncStatsProvider interface {
 	// the status must distinguish a retired-key connection (frames still
 	// verify under retired-key-derived keys) from a never-authenticated one.
 	RetiredKeySessionConns() []string
+	// ColdPrimeDebtStatus reports whether the demotion barrier is refusing
+	// for an unpaid cold prime (owed with no qualifying bulk pending) and the
+	// text that explains it (#18752). On THIS interface for the reason above:
+	// an assertion that silently failed would render no debt line, which
+	// reads exactly like the debt-free state while every failback and ISSU
+	// drain of this node's RGs is being refused.
+	ColdPrimeDebtStatus() (owedWithoutBulk bool, detail string)
 }
 
 // SetSyncReady marks session sync as ready (bulk sync received, or the
@@ -186,6 +193,23 @@ func (m *Manager) PeerSessionSyncWireVersion() uint16 {
 		return 0
 	}
 	return p.PeerSessionSyncWireVersion()
+}
+
+// coldPrimeDebtStatus reports, through the sync-stats provider, whether this
+// node owes the peer an unpaid cold prime with no bulk pending (#18752), or
+// false when no provider is set. A Manager with no provider has no session
+// sync and so no cold-prime debt.
+func (m *Manager) coldPrimeDebtStatus() (bool, string) {
+	if m == nil {
+		return false, ""
+	}
+	m.mu.RLock()
+	p := m.syncStats
+	m.mu.RUnlock()
+	if p == nil {
+		return false, ""
+	}
+	return p.ColdPrimeDebtStatus()
 }
 
 // unauthenticatedSessionConns reports, through the sync-stats provider, the

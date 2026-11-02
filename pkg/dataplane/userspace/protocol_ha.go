@@ -38,6 +38,11 @@ type SessionExportRequest struct {
 	// #9856: opaque helper-incarnation and sequence token echoed by page 1.
 	ContinuationIncarnation uint64 `json:"session_export_incarnation,omitempty"`
 	ContinuationSequence    uint64 `json:"session_export_seq,omitempty"`
+	// #18752: the client's own nonzero id for the window a page-1 kick
+	// opens. The pager knows it BEFORE it sends page 1, so it can abandon
+	// the window even when page 1's response (and the helper's token) is
+	// lost or times out. A helper that predates it ignores the field.
+	ClientWindow uint64 `json:"session_export_client_window,omitempty"`
 }
 
 type SessionPolicyListRequest struct {

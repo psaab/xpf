@@ -29,13 +29,14 @@ pub(super) fn owner_rg_kick(
             export_req.max as usize,
         )
     } else {
-        guard.afxdp.kick_owner_rg_export_v2(
+        guard.afxdp.kick_owner_rg_export_v2_client(
             &export_req.owner_rgs,
             export_req.max as usize,
             export_req.continuation,
             export_req.protocol_version,
             export_req.continuation_incarnation,
             export_req.continuation_sequence,
+            export_req.client_window,
         )
     };
     match kick {
@@ -46,6 +47,40 @@ pub(super) fn owner_rg_kick(
             response.ok = false;
             response.error = err;
             None
+        }
+    }
+}
+
+/// #18752: close an owner-RG export window its client abandoned (the Go pager
+/// aborts between pages on a generation change, a dropped-delta report or a
+/// sink error). Without it the window stays open until its idle expiry and
+/// every fresh kick in the meantime is refused BUSY — which stranded the HA
+/// cold prime and refused every failback for a minute on udp. Locked phase
+/// only; no worker command is sent.
+pub(super) fn owner_rg_abandon(
+    guard: &mut ServerState,
+    session_export: Option<SessionExportRequest>,
+    response: &mut ControlResponse,
+) {
+    let req = session_export.unwrap_or_default();
+    match guard.afxdp.abandon_owner_rg_export(
+        req.protocol_version,
+        req.continuation_incarnation,
+        req.continuation_sequence,
+        req.client_window,
+    ) {
+        Ok(cleared) => {
+            response.session_export_abandoned = cleared;
+            if cleared {
+                eprintln!(
+                    "xpf-userspace-dp: owner-RG export window abandoned by its client (seq={} client_window={}) (#18752)",
+                    req.continuation_sequence, req.client_window
+                );
+            }
+        }
+        Err(err) => {
+            response.ok = false;
+            response.error = err;
         }
     }
 }

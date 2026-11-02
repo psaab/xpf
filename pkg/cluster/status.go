@@ -571,6 +571,12 @@ func (m *Manager) FormatInformation() string {
 			}
 		}
 		fmt.Fprintf(&b, "  Bulk syncs completed: %d\n", bulkCount)
+		if owed, detail := m.coldPrimeDebtStatus(); owed {
+			// #18752: while this node's primary-RG demotion barrier refuses,
+			// explain the reason where an operator looks before a demotion.
+			fmt.Fprintf(&b, "  Cold prime owed to peer (no bulk pending): %s\n", detail)
+			fmt.Fprintln(&b, "    Blocks: demotion of this node's primary RGs (manual failover/failback and ISSU drain)")
+		}
 	} else {
 		fmt.Fprintln(&b, "  Not configured")
 	}

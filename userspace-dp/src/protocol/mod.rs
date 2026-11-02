@@ -20,6 +20,8 @@
 //!   - pmech: route-based IPsec P-MECH authority snapshot DTOs
 //!   - `control`: control socket request/response, ProcessStatus,
 //!     session-sync wire shapes, protocol-version consts
+//!   - `session_export`: owner-RG export paging request and helper-incarnation
+//!     contract
 //!   - `binding`: BindingStatus + BindingCountersSnapshot, HAGroupStatus,
 //!     QueueStatus, WorkerRuntimeStatus, ExceptionStatus,
 //!     SessionDeltaInfo, plus the `u64_is_zero` skip-serializing helper
@@ -37,6 +39,7 @@ mod pmech;
 mod resolution;
 mod security;
 pub(crate) mod session_delta_schema;
+mod session_export;
 // #7160: `ProcessStatus`, split out of `control.rs` to keep it under the
 // modularity floor. Re-exported below, so every existing path is unchanged.
 pub(crate) mod snapshot;
@@ -54,6 +57,7 @@ mod tests;
 mod unsafe_ratchet_16187;
 
 pub(crate) use binding::*;
+pub(crate) use session_export::*;
 pub(crate) use control::*;
 pub(crate) use cos::*;
 pub(crate) use nat::*;
