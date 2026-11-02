@@ -87,6 +87,72 @@ fn native_gre_outer_fragment_v4_reassembles_and_decaps_14645() {
     assert!(pool.offer(&tail, frag_meta(&tail, false), now + 3, OfferAdmission::Tail).is_none());
 }
 
+/// #18560: the per-binding GRE/WG reassembly pool survives a view adoption.
+/// A tail from the CURRENT generation must not finish a datagram whose head
+/// was accepted under the HELD generation, even when the outer IPv4 identity
+/// is otherwise identical. The ordinary stage path reaches the shared pool
+/// before downstream held-pass flow-cache handling.
+#[test]
+fn gre_fragments_from_different_generations_do_not_reassemble_18560() {
+    let _lock = gre_outer_frag_counter_test_lock();
+    let forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let inner = build_gre_inner_icmp_packet_v4();
+    let whole = build_gre_to_self_outer_frame_v4(0, &inner);
+    let (head, tail) = split_v4_outer(&whole, 16);
+    let mut old_head_meta = frag_meta(&head, true);
+    old_head_meta.config_generation = 7;
+    old_head_meta.fib_generation = 9;
+    let mut current_tail_meta = frag_meta(&tail, false);
+    current_tail_meta.config_generation = 8;
+    current_tail_meta.fib_generation = 9;
+    let mut old_tail_meta = frag_meta(&tail, false);
+    old_tail_meta.config_generation = 7;
+    old_tail_meta.fib_generation = 9;
+
+    let mut pool = GreReassembler::new();
+    let mut allows = |_: &[u8], _: UserspaceDpMeta| true;
+    assert!(matches!(
+        crate::afxdp::poll_stages::stage_native_gre_decap(
+            &head,
+            old_head_meta,
+            &forwarding,
+            &mut pool,
+            10,
+            &mut allows,
+        ),
+        crate::afxdp::poll_stages::GreDecapStage::Buffered
+    ));
+    assert_eq!(pool.buffered_len(), 1, "the old-view head is buffered");
+    assert!(matches!(
+        crate::afxdp::poll_stages::stage_native_gre_decap(
+            &tail,
+            current_tail_meta,
+            &forwarding,
+            &mut pool,
+            11,
+            &mut allows,
+        ),
+        crate::afxdp::poll_stages::GreDecapStage::Buffered
+    ));
+    assert_eq!(
+        pool.buffered_len(),
+        1,
+        "the current-view tail must not consume the old-view head"
+    );
+    assert!(matches!(
+        crate::afxdp::poll_stages::stage_native_gre_decap(
+            &tail,
+            old_tail_meta,
+            &forwarding,
+            &mut pool,
+            12,
+            &mut allows,
+        ),
+        crate::afxdp::poll_stages::GreDecapStage::Decapped(_, _)
+    ));
+    assert_eq!(pool.buffered_len(), 0, "same-view fragments still complete");
+}
+
 fn build_v6_outer_fragmented(inner: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let whole = build_gre_to_self_outer_frame_v6(0, inner);
     let l3 = 14usize;

@@ -1190,6 +1190,12 @@ pub(super) struct FlowCache {
     /// into expiry, entries from the prior phase cannot be trusted when a
     /// scheduled DENY/REJECT may become eligible.
     scheduler_expired: bool,
+    /// #18560: set for the length of a held pass (packets stamped with a view
+    /// this worker has left). A key match with OTHER generations is then the
+    /// entry the CURRENT view seeded, not a stale one: the lookup reports a
+    /// miss without evicting it, so a held packet never costs the next
+    /// current packet a slow-path trip (seat W).
+    pub(super) held_compare_only: bool,
 }
 
 impl FlowCache {
@@ -1209,6 +1215,7 @@ impl FlowCache {
             collision_evictions: 0,
             current_epoch: 1,
             scheduler_expired: false,
+            held_compare_only: false,
         }
     }
 
@@ -1537,7 +1544,11 @@ impl FlowCache {
         ha_state: &BTreeMap<i32, HAGroupRuntime>,
         forwarding: &ForwardingState,
     ) -> Option<&FlowCacheEntry> {
-        if scheduler_expired != self.scheduler_expired {
+        // A held pass carries an older policy snapshot, so its scheduler
+        // phase is not the binding cache's current phase. Keep this lookup
+        // compare-only: do not scan/flush entries (or change the remembered
+        // phase) based on the held view before checking the held generation.
+        if !self.held_compare_only && scheduler_expired != self.scheduler_expired {
             let phase_can_change_verdict = if scheduler_expired {
                 // Preserve the original expiry behavior: a scheduled
                 // DENY/REJECT becomes eligible independently of the
@@ -1633,6 +1644,12 @@ impl FlowCache {
                 if entry.stamp.config_generation != lookup.config_generation
                     || entry.stamp.fib_generation != lookup.fib_generation
                 {
+                    // #18560: a held lookup compares only (see
+                    // `held_compare_only`).
+                    if self.held_compare_only {
+                        self.misses += 1;
+                        return None;
+                    }
                     self.entries[entry_idx] = None;
                     self.note_eviction(FlowCacheEvictionArm::LookupGeneration);
                     self.demote_lru(set, way as u8);

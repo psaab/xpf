@@ -1115,6 +1115,9 @@ struct StageSeed {
     /// row (Established SYN-ACK observed, completing ACK outstanding)
     /// instead of a local install, so a cache hit can complete it.
     install_handshake_pending: bool,
+    /// #18560: run the stage as a held pass does, with the flow cache in
+    /// compare-only mode (`FlowCache::held_compare_only`).
+    held_compare_only: bool,
 }
 
 impl Default for StageSeed {
@@ -1133,6 +1136,7 @@ impl Default for StageSeed {
             now_ns: 1_000_000,
             fabric_arrival_zone: None,
             install_handshake_pending: false,
+            held_compare_only: false,
         }
     }
 }
@@ -1186,6 +1190,7 @@ fn run_stage_seeded(
         flow_cache: FlowCache::new(),
     };
     flow_state.flow_cache.insert(entry);
+    flow_state.flow_cache.held_compare_only = seed.held_compare_only;
 
     // #14945 (3): the ingress UMEM identity the inline gate compares
     // against; a bare mmap area suffices for the hairpin arm, while a
@@ -8437,6 +8442,77 @@ fn wire_keyed_entry_18656() -> (FlowCacheEntry, crate::session::SessionKey) {
     let mut entry = cached_entry();
     entry.decision.nat = nat;
     (entry, canonical)
+}
+
+/// #18560 x #18656: a held pass (compare-only flow cache, its left view's
+/// generations) still serves a moved session's wire-keyed hit through the
+/// forward-wire scope, accounted on the canonical record. #18656's re-probe
+/// reads only the current session table, so nothing view-dependent is
+/// involved. The twin: the same lookup against an entry the CURRENT view
+/// re-seeded (other generations) misses WITHOUT evicting it.
+#[test]
+fn held_compare_only_lookup_serves_a_moved_wire_keyed_hit_18560() {
+    use crate::afxdp::flow_cache::FlowCacheEvictionArm as Arm;
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let (mut entry, canonical) = wire_keyed_entry_18656();
+    entry.metadata.fabric_ingress = true;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        entry.clone(),
+        0,
+        StageSeed {
+            install_key: Some(canonical.clone()),
+            held_compare_only: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "a held pass must serve the moved session's wire-keyed hit"
+    );
+    assert_eq!(
+        run.flow_cache_tallies,
+        (1, 0, 0),
+        "one served hit, no eviction"
+    );
+    for arm in [
+        Arm::PostHitSessionDead,
+        Arm::PostHitSessionDeadNoRecord,
+        Arm::PostHitSessionDeadIdleCrossed,
+    ] {
+        assert_eq!(run.flow_cache_evictions_by_arm[arm as usize], 0, "{arm:?}");
+    }
+    assert_eq!(
+        run.sessions.fwd_packets_for(&canonical),
+        1,
+        "accounted on the canonical record"
+    );
+
+    entry.stamp.config_generation += 1;
+    let twin = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            install_key: Some(canonical.clone()),
+            held_compare_only: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(twin.outcome, FlowCacheOutcome::FallThrough),
+        "other generations: a held miss"
+    );
+    assert_eq!(
+        twin.flow_cache_evictions_by_arm[Arm::LookupGeneration as usize],
+        0,
+        "the held lookup must not evict the current view's entry"
+    );
 }
 
 /// #18656 (review): the likely live shape, a fabric-ingress SNAT-only row

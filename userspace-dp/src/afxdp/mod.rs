@@ -699,6 +699,10 @@ mod tests_named_pre_l3_10498;
 #[cfg(test)]
 #[path = "tests_support.rs"]
 mod tests_support;
+// #18560: matched-view grace (park + held pass).
+#[cfg(test)]
+#[path = "tests_matched_view_18560.rs"]
+mod tests_matched_view_18560;
 // #8486: the peer-supplied owner_rg_id filing bound.
 #[cfg(test)]
 #[path = "owner_rg_bound_8486_tests.rs"]

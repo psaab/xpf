@@ -181,6 +181,14 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) exception_packets: AtomicU64,
     pub(super) config_gen_mismatches: AtomicU64,
     pub(super) fib_gen_mismatches: AtomicU64,
+    // #18560: matched-view grace witnesses. A held hit is a flow-cache hit;
+    // a held miss is a packet dropped by the post-cache no-slow-path guard
+    // (including cache-ineligible packets). Pre-cache reinject/deferral arms
+    // bypass both. AHEAD/BEHIND count actual metadata-mismatch drops.
+    pub(super) generation_held_hits: AtomicU64,
+    pub(super) generation_held_misses: AtomicU64,
+    pub(super) generation_mismatch_ahead: AtomicU64,
+    pub(super) generation_mismatch_behind: AtomicU64,
     pub(super) unsupported_packets: AtomicU64,
     pub(super) flow_cache_hits: AtomicU64,
     pub(super) flow_cache_misses: AtomicU64,
@@ -1085,9 +1093,15 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // `PostHitSessionDead` sub-arms `NoRecord` / `IdleCrossed`, arm count
 // 20 -> 22) before both sentinels; offsets advance by 16 bytes, size
 // unchanged.
-const _: [(); 3072] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2912] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 3041] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+// #18560 adds four unconditional u64 matched-view counters
+// (`generation_held_hits`/`_misses`, `generation_mismatch_ahead`/`_behind`)
+// before both sentinels; offsets advance by 32 bytes (merged with #18656:
+// 48 bytes over the pre-#18656 values). The size grows by one 64-byte
+// alignment unit, 3072 -> 3136: the 48 bytes no longer fit the tail slack
+// (compiler-reported).
+const _: [(); 3136] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2944] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 3073] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1138,6 +1152,10 @@ impl BindingLiveState {
             exception_packets: AtomicU64::new(0),
             config_gen_mismatches: AtomicU64::new(0),
             fib_gen_mismatches: AtomicU64::new(0),
+            generation_held_hits: AtomicU64::new(0),
+            generation_held_misses: AtomicU64::new(0),
+            generation_mismatch_ahead: AtomicU64::new(0),
+            generation_mismatch_behind: AtomicU64::new(0),
             unsupported_packets: AtomicU64::new(0),
             flow_cache_hits: AtomicU64::new(0),
             flow_cache_misses: AtomicU64::new(0),

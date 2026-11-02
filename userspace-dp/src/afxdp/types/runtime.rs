@@ -605,6 +605,241 @@ pub(in crate::afxdp) struct ValidationState {
     pub(in crate::afxdp) neighbor_generation: u64,
 }
 
+/// #18560: how long a worker keeps a forwarding view it has left, so packets
+/// the shim stamped with that view's generations are processed under it.
+/// Since #18598 the helper advances `userspace_ctrl` 28-48 us after its view
+/// store, so the packets left stamped with an old view are the ones already
+/// queued in the RX ring when the worker adopts. The loss diag probe
+/// (docs/log/18560.md, 0.0.29554, 6 operator moves under 8-stream load)
+/// measured the slowest worker adopting at most 15.7 ms after the store and
+/// the last such packet 15 ms after it. 200 ms is about 12x that. It is the
+/// upper bound on how long a left `ForwardingState` stays pinned; the early
+/// release (`release_if_drained`) usually ends it within the drain time.
+pub(in crate::afxdp) const MATCHED_VIEW_GRACE_NS: u64 = 200_000_000;
+
+/// #18560: how many left views a worker keeps. With the helper advancing the
+/// stamp at its store, the dropped packets in the same probe were stamped
+/// one publish behind (config +2 or FIB +1) in all but a handful: stamps two
+/// or three publishes behind were 4-16 packets per publish. Two slots cover
+/// the previous view and the one before it.
+///
+/// Memory, stated plainly (seats W, AE): each retained view pins a
+/// deep-cloned `ForwardingState` (`publish_runtime_view`), routes included:
+/// on the order of 100-150 MB per copy with a full IPv4 table. Under BGP
+/// churn faster than the grace, both slots of a worker stay full, and a
+/// lagging worker can pin a different older pair than its siblings, so the
+/// bound is two copies per worker, not two process-wide. What keeps that
+/// benign is `PrevViews::release_if_drained`: a worker drops its views as
+/// soon as every binding has passed the stamp switch, so with traffic on
+/// every binding a view lives for the ring's drain time (milliseconds), and
+/// only a worker with an idle binding holds them for the full grace.
+pub(in crate::afxdp) const MATCHED_VIEW_SLOTS: usize = 2;
+
+/// #18560: one forwarding view (tables plus the generation pair they were
+/// published with) a worker has moved past.
+#[derive(Clone)]
+pub(in crate::afxdp) struct RetainedView {
+    pub(in crate::afxdp) validation: ValidationState,
+    pub(in crate::afxdp) forwarding: Arc<ForwardingState>,
+    pub(in crate::afxdp) until_ns: u64,
+}
+
+/// #18560: the matched-view grace. The shim stamps every packet with the
+/// generations in `userspace_ctrl`, which Go rewrites from the helper's reply,
+/// i.e. after the worker has adopted the new view. A packet stamped with a view
+/// the worker has left used to be dropped (`config_generation_mismatch` /
+/// `fib_generation_mismatch`): 10-11k packets per node per planned RG move.
+///
+/// Such a packet is now processed under the view it was stamped with: the
+/// worker keeps the views it leaves (newest first) and the poll loop runs a
+/// held packet in a pass built from that view's tables AND validation. So
+/// #6592 holds in both directions: no packet is processed under tables older
+/// or newer than its stamp. A stamp AHEAD of the worker matches no retained
+/// view and stays a drop.
+#[derive(Clone, Default)]
+pub(in crate::afxdp) struct PrevViews {
+    slots: [Option<RetainedView>; MATCHED_VIEW_SLOTS],
+}
+
+impl PrevViews {
+    /// Record the view a worker is leaving for `next`. Only a forward move
+    /// with both views installed earns a slot: a first install has no stamp to
+    /// match, a generation that went DOWN (a reset) keeps the strict fence,
+    /// and a neighbor-only republish changes neither stamp.
+    pub(in crate::afxdp) fn retain(
+        &mut self,
+        prev: ValidationState,
+        prev_forwarding: &Arc<ForwardingState>,
+        next: ValidationState,
+        now_ns: u64,
+    ) {
+        let forward = next.config_generation >= prev.config_generation
+            && next.fib_generation >= prev.fib_generation
+            && (next.config_generation, next.fib_generation)
+                != (prev.config_generation, prev.fib_generation);
+        if !prev.snapshot_installed || !next.snapshot_installed || !forward {
+            if next.config_generation < prev.config_generation
+                || next.fib_generation < prev.fib_generation
+            {
+                self.clear();
+            }
+            return;
+        }
+        self.slots.rotate_right(1);
+        self.slots[0] = Some(RetainedView {
+            validation: prev,
+            forwarding: Arc::clone(prev_forwarding),
+            until_ns: now_ns.saturating_add(MATCHED_VIEW_GRACE_NS),
+        });
+    }
+
+    /// The retained view a packet stamped `(config, fib)` belongs to: an
+    /// exact pair match, inside its deadline.
+    #[inline]
+    pub(in crate::afxdp) fn find(&self, config: u64, fib: u32, now_ns: u64) -> Option<usize> {
+        self.slots.iter().position(|slot| {
+            slot.as_ref().is_some_and(|view| {
+                now_ns < view.until_ns
+                    && view.validation.config_generation == config
+                    && view.validation.fib_generation == fib
+            })
+        })
+    }
+
+    pub(in crate::afxdp) fn get(&self, index: usize) -> Option<&RetainedView> {
+        self.slots.get(index).and_then(Option::as_ref)
+    }
+
+    pub(in crate::afxdp) fn is_empty(&self) -> bool {
+        self.slots.iter().all(Option::is_none)
+    }
+
+    /// Release expired views (their tables are dropped with the Arc).
+    pub(in crate::afxdp) fn expire(&mut self, now_ns: u64) {
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|view| now_ns >= view.until_ns) {
+                *slot = None;
+            }
+        }
+    }
+
+    pub(in crate::afxdp) fn clear(&mut self) {
+        self.slots = Default::default();
+    }
+
+    /// The worker loop's per-tick step (#18560): expire every view against
+    /// its deadline, regardless of neighbor-only validation publishes; on
+    /// an adoption also keep the view being left (`current`, whose tables
+    /// are `current_forwarding` until the swap).
+    pub(in crate::afxdp) fn on_tick(
+        &mut self,
+        current: ValidationState,
+        current_forwarding: &Arc<ForwardingState>,
+        live: ValidationState,
+        now_ns: u64,
+    ) {
+        if !self.is_empty() {
+            self.expire(now_ns);
+        }
+        if live != current {
+            self.retain(current, current_forwarding, live, now_ns);
+        }
+    }
+
+    /// Early release (#18560, seat AE). `drained` is true once every binding
+    /// of the worker has validated a native packet with the current stamp
+    /// since the adoption and holds no parked packet. In native mode a
+    /// binding's RX ring has one producer, so no packet stamped with a left
+    /// view can still arrive on it; keeping the views would only pin their
+    /// table copies until the grace. A generic-mode ring has several producer
+    /// CPUs only with RPS on, or on a software device whose receive runs on
+    /// the sender's CPU. Then a few-us reorder window can deliver an
+    /// older-stamped straggler after a current one. Released views drop it
+    /// as a mismatch, exactly as before the grace (seat AE).
+    /// This bounds the pinning to the drain time (milliseconds) whenever
+    /// every binding carries traffic. An idle binding never proves its ring
+    /// drained, so its worker falls back to the grace.
+    pub(in crate::afxdp) fn release_if_drained(&mut self, drained: bool) -> bool {
+        if drained && !self.is_empty() {
+            self.clear();
+            return true;
+        }
+        false
+    }
+
+    /// The worker loop's forwarding swap (#18560): a publish that changes the
+    /// CoS runtime config clears every retained view, because the binding's
+    /// queues are rebuilt for the new tables.
+    pub(in crate::afxdp) fn on_forwarding_swap(&mut self, cos_changed: bool) {
+        if cos_changed {
+            self.clear();
+        }
+    }
+}
+
+/// #18560: the shape of one RX batch of `poll_binding`. A binding with parked
+/// packets runs a held pass: it reads no RX descriptor (those carry current
+/// stamps and would be judged against the left view's validation) and takes
+/// no injected packet (stamped with the current validation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) struct BatchShape {
+    pub(in crate::afxdp) held_pass: bool,
+    pub(in crate::afxdp) available: u32,
+    pub(in crate::afxdp) take_injected: bool,
+}
+
+impl BatchShape {
+    pub(in crate::afxdp) fn for_binding(view_held_len: usize, ring_available: u32) -> Self {
+        let held_pass = view_held_len > 0;
+        Self {
+            held_pass,
+            available: if held_pass { 0 } else { ring_available },
+            take_injected: !held_pass,
+        }
+    }
+
+    /// Whether the batch loop polls another batch after this one. A held
+    /// pass reads no RX but must not end the poll: the ring still holds the
+    /// batch the next iteration reads (seat V: a parking poll used to read
+    /// at most one batch, turning mismatch drops into RX-ring overflow).
+    pub(in crate::afxdp) fn loop_continues(&self) -> bool {
+        self.held_pass || self.available > 0
+    }
+}
+
+/// #18560: what a descriptor pass runs under. `current()` is the ordinary
+/// pass. A held pass processes only the packets an earlier pass parked on
+/// `BindingWorker::view_held`, under retained view `view` (None when that
+/// view has expired: the packets are then judged, and dropped, against the
+/// current one).
+#[derive(Clone, Copy, Default)]
+pub(in crate::afxdp) struct PassView<'a> {
+    pub(in crate::afxdp) prev_views: Option<&'a PrevViews>,
+    pub(in crate::afxdp) held_pass: bool,
+    pub(in crate::afxdp) view: Option<usize>,
+}
+
+impl PassView<'_> {
+    #[cfg_attr(not(test), expect(dead_code, reason = "#18560: used by the test-harness wrapper only"))]
+    pub(in crate::afxdp) fn current() -> Self {
+        Self::default()
+    }
+
+    /// Whether a packet the classifier rejected belongs to a retained view
+    /// other than this pass's own, i.e. must be parked for a held pass.
+    #[inline]
+    pub(in crate::afxdp) fn parks(&self, meta: &UserspaceDpMeta, disposition: PacketDisposition, now_ns: u64) -> bool {
+        matches!(
+            disposition,
+            PacketDisposition::ConfigGenerationMismatch | PacketDisposition::FibGenerationMismatch
+        ) && self.prev_views.is_some_and(|views| {
+            views
+                .find(meta.config_generation, meta.fib_generation, now_ns)
+                .is_some_and(|index| Some(index) != self.view)
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(in crate::afxdp) enum HAForwardingLease {
     #[default]

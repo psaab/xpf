@@ -552,6 +552,16 @@ pub(crate) struct BindingStatus {
     pub config_gen_mismatches: u64,
     #[serde(rename = "fib_gen_mismatches", default)]
     pub fib_gen_mismatches: u64,
+    // #18560: matched-view grace witnesses (held hit / held miss) and the
+    // direction of every generation-mismatch drop.
+    #[serde(rename = "generation_held_hits", default)]
+    pub generation_held_hits: u64,
+    #[serde(rename = "generation_held_misses", default)]
+    pub generation_held_misses: u64,
+    #[serde(rename = "generation_mismatch_ahead", default)]
+    pub generation_mismatch_ahead: u64,
+    #[serde(rename = "generation_mismatch_behind", default)]
+    pub generation_mismatch_behind: u64,
     #[serde(rename = "unsupported_packets", default)]
     pub unsupported_packets: u64,
     #[serde(rename = "flow_cache_hits", default)]
