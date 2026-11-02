@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 	"strings"
@@ -84,8 +85,10 @@ type Installer interface {
 	// InstallGapFence installs the #5789 additive coverage-gap fence.
 	InstallGapFence(spec GapFenceSpec) error
 	// InstallLo0 installs the lo0 loopback input filter (#3445/#3392) and
-	// reports how many kernel rules the spec lowered to. ZERO rules means the
-	// installed table is an empty `policy accept` shell that enforces NOTHING —
+	// reports how many OPERATOR rules the spec lowered to. The #16841 zero-hop
+	// rule, which every input chain carries, is not counted (#18746). ZERO
+	// rules means the installed table is an empty `policy accept` shell that
+	// enforces NOTHING —
 	// a filter name that resolves to no filter, a filter with no terms, or one
 	// whose every term lowers to zero rules (a Junos match-nothing scope). The
 	// caller must not record such an install as a real operator filter being
@@ -98,7 +101,9 @@ type Installer interface {
 	DeleteTable(name string) error
 	// TableEnforcing reports whether the named inet-family table currently
 	// ENFORCES an input hook: the table exists with a type-filter
-	// input-hook chain carrying at least one rule. A present-but-empty
+	// input-hook chain carrying at least one rule other than the exact
+	// #16841 zero-hop-limit DROP (#18746), which every xpf input chain
+	// carries and which is no evidence of host-inbound policy. A present-but-empty
 	// (flushed shell) table is NOT enforcing — with no input hook it
 	// filters nothing. The `ensure` command and the handoff tripwire
 	// prove liveness through this instead of bare presence (#10751
@@ -106,7 +111,8 @@ type Installer interface {
 	TableEnforcing(name string) (bool, error)
 	// TableDropsInput reports whether the named inet-family table
 	// currently DROPS on its input hook: enforcing shape (see above)
-	// PLUS at least one rule carrying a DROP verdict. An admits-only
+	// PLUS at least one rule carrying a DROP verdict, not counting the exact
+	// #16841 zero-hop-limit DROP (#18746). An admits-only
 	// table (mandatory accepts, zero DROP — e.g. a zero-drop fence
 	// shell, or a stale restore that lost its drops) under the
 	// tables' `policy accept` admits everything it does not
@@ -206,9 +212,19 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	}
 	// #18721: every read below must see ONE ruleset, so the whole readback is
 	// bracketed by the nf_tables generation (readAtStableNftGeneration).
-	return readAtStableNftGeneration(
+	err = readAtStableNftGeneration(
 		func() (uint32, error) { return readNftGeneration(c) },
 		func() error { return in.verifyHostInboundOverlayOnce(c, overlay) })
+	// The bracket does not log (#18746); this caller labels its own failure.
+	// A moved generation fails this readback closed, with no re-read: it runs
+	// inside reconcileIpsecHostInputFence's short applySem hold (#18721).
+	var moved *GenerationChangedError
+	if errors.As(err, &moved) {
+		slog.Warn("host overlay readback: generation changed during readback; failing closed",
+			"commits_observed", moved.CommitsObserved, "generation_before", moved.Before, "generation_after", moved.After)
+		return fmt.Errorf("host overlay readback: %w; failing closed", err)
+	}
+	return err
 }
 
 // verifyHostInboundOverlayOnce is one unbracketed pass of the overlay readback.
@@ -607,8 +623,10 @@ func (in *netlinkInstaller) InstallGapFence(spec GapFenceSpec) error {
 	return err
 }
 
-// InstallLo0 returns the rendered rule count alongside the error so the caller
-// can tell a real operator filter from an empty `policy accept` shell (#6529).
+// InstallLo0 returns the rendered operator-rule count (nlPlan.operatorRules:
+// every rule but the #16841 zero-hop rule, #18746) alongside the error, so the
+// caller can tell a real operator filter from an empty `policy accept` shell
+// (#6529).
 // The count comes from the ACTUAL build — nlPlan.rules, populated as each rule
 // is batched — so it can never drift from the lowering the way a second,
 // daemon-side "does this spec enforce anything?" predicate would.
@@ -661,11 +679,15 @@ func (in *netlinkInstaller) replaceTable(name string, priority nftables.ChainPri
 			return 0, errors.Join(flushErr, fmt.Errorf("nftables readback %s: %w", name, readbackErr))
 		}
 		if installed {
-			return len(p.rules), nil
+			// #18746: recovery used to be silent, so a lost ACK left no trace.
+			// It is rare (a large replace with an overflowed ACK socket), and
+			// it fires once per affected install.
+			slog.Info("nftables flush ACK lost; kernel readback matches the plan", "table", name, "flush_err", err)
+			return p.operatorRules(), nil
 		}
 		return 0, flushErr
 	}
-	return len(p.rules), nil
+	return p.operatorRules(), nil
 }
 
 func (in *netlinkInstaller) DeleteTable(name string) error {
@@ -721,14 +743,13 @@ func (in *netlinkInstaller) TableEnforcing(name string) (bool, error) {
 	if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookInput || chain.Type != nftables.ChainTypeFilter {
 		return false, nil
 	}
-	rules, err := c.GetRules(tbl, chain)
+	// #18746: the #16841 zero-hop rule heads every input chain xpf installs,
+	// so a table holding only that rule is still an empty shell.
+	operator, err := inputRulesBeyondZeroHop(c, tbl, chain)
 	if err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return false, nil
-		}
 		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
 	}
-	return len(rules) > 0, nil
+	return len(operator) > 0, nil
 }
 
 // TableDropsInput reports whether the named inet-family table currently
@@ -769,14 +790,14 @@ func (in *netlinkInstaller) TableDropsInput(name string) (bool, error) {
 	if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookInput || chain.Type != nftables.ChainTypeFilter {
 		return false, nil
 	}
-	rules, err := c.GetRules(tbl, chain)
+	// #18746: the #16841 zero-hop rule's DROP is not host-inbound enforcement.
+	// Since #16841 it sits in every xpf input chain, so counting it made an
+	// admits-only table read as dropping.
+	operator, err := inputRulesBeyondZeroHop(c, tbl, chain)
 	if err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return false, nil
-		}
 		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
 	}
-	for _, rule := range rules {
+	for _, rule := range operator {
 		for _, anyExpr := range rule.Exprs {
 			if verdict, ok := anyExpr.(*expr.Verdict); ok && verdict.Kind == expr.VerdictDrop {
 				return true, nil

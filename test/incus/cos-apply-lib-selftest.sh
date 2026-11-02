@@ -477,6 +477,91 @@ else
 	bad "apply-cos-config.sh waits for xpfd readiness before the first commit"
 fi
 
+# ── #18730: refuse a CoS set whose filters lack a catch-all ─────────────
+# The guard judges only filters the SET defines, by exact quoted name, from
+# the target's own commit-check warnings (both the #18728 wording and the
+# older #3295 wording carry `"<name>" has no terminal catch-all term`).
+CA_SETS=$(mktemp)
+cat >"$CA_SETS" <<'EOF'
+set firewall family inet filter bandwidth-output term 0 from destination-port 5200
+set firewall family inet filter bandwidth-output term 0 then accept
+set firewall family inet6 filter bandwidth-output term 0 then accept
+set interfaces reth0 unit 80 family inet filter output bandwidth-output
+EOF
+CA_SETS_BOTH=$(mktemp)
+cat "$CA_SETS" >"$CA_SETS_BOTH"
+echo 'set firewall family inet filter bandwidth-output-reverse term 0 then accept' >>"$CA_SETS_BOTH"
+W18728='warning: interface reth0 unit 80: filter output "bandwidth-output" has no terminal catch-all term; unmatched traffic is discarded (Junos default) and counted as implicit-discard; add a final `term <name> { then accept; }` if you intended permit-by-default (#18728)'
+W18728_V6='warning: interface reth0 unit 80: filter output-v6 "bandwidth-output" has no terminal catch-all term; unmatched traffic is discarded (Junos default) and counted as implicit-discard; add a final `term <name> { then accept; }` if you intended permit-by-default (#18728)'
+W3295='warning: interface reth0 unit 80: filter output "bandwidth-output" has no terminal catch-all term; xpf accepts traffic matching no term (Junos stateless filters imply a final discard) — append an explicit final `term <name> { then discard; }` for Junos-style deny-by-default, or `then accept` to make permit-by-default explicit'
+W_OTHER='warning: interface reth1 unit 0: filter input "sfmix-pbr" has no terminal catch-all term; unmatched traffic is discarded (Junos default) and counted as implicit-discard; add a final `term <name> { then accept; }` if you intended permit-by-default (#18728)'
+W_REVERSE='warning: interface reth1 unit 0: filter output "bandwidth-output-reverse" has no terminal catch-all term; unmatched traffic is discarded (Junos default) and counted as implicit-discard; add a final `term <name> { then accept; }` if you intended permit-by-default (#18728)'
+
+# catchall_case <label> <want-rc> <sets-file> <warning-line or "">
+catchall_case() {
+	local label="$1" want="$2" sets="$3" warning="$4" tr err rc
+	tr=$(mktemp)
+	err=$(mktemp)
+	{
+		printf '%s\n' "$BENIGN_NOISE" "load merge complete"
+		[[ -n "$warning" ]] && printf '%s\n' "$warning"
+		printf '%s\n' "configuration check succeeds"
+	} >"$tr"
+	cos_refuse_catchall_less "$tr" "$sets" 2>"$err"
+	rc=$?
+	if [[ "$rc" -eq "$want" ]]; then
+		if [[ "$want" -ne 0 ]] && ! grep -q 'predates #18730; merge master' "$err"; then
+			bad "$label (refused without the #18730 remedy message)"
+		else
+			ok "$label"
+		fi
+	else
+		bad "$label (rc=$rc want=$want): $(cat "$err")"
+	fi
+	rm -f "$tr" "$err"
+}
+
+catchall_case "#18730 refuses a set filter flagged by the #18728 warning" 1 "$CA_SETS" "$W18728"
+catchall_case "#18730 refuses a set filter flagged on inet6 (output-v6)" 1 "$CA_SETS" "$W18728_V6"
+catchall_case "#18730 refuses on the older #3295 wording (pre-#18728 target)" 1 "$CA_SETS" "$W3295"
+catchall_case "#18730 accepts a clean commit check" 0 "$CA_SETS" ""
+catchall_case "#18730 ignores a flagged filter the set does not define" 0 "$CA_SETS" "$W_OTHER"
+catchall_case "#18730 name match is exact: bandwidth-output is not bandwidth-output-reverse" 0 "$CA_SETS" "$W_REVERSE"
+catchall_case "#18730 refuses bandwidth-output-reverse when the set defines it" 1 "$CA_SETS_BOTH" "$W_REVERSE"
+# A missing transcript must fail closed, not pass.
+if cos_refuse_catchall_less /nonexistent-18730 "$CA_SETS" 2>/dev/null; then
+	bad "#18730 a missing transcript fails closed"
+else
+	ok "#18730 a missing transcript fails closed"
+fi
+# Every lab CoS fixture defines its filters with a catch-all; the Go cell
+# TestCoSApplyLabSetsHaveCatchAll18730 proves that with the real compiler.
+# Here: the guard reads the real fixtures' filter names (positive control
+# that the awk extraction sees them).
+for fixture in cos-iperf-config.set cos-iperf-symmetric.set cos-iperf-same-class.set; do
+	tr=$(mktemp)
+	printf '%s\n' 'load merge complete' \
+		'warning: interface reth0 unit 80: filter output "bandwidth-output" has no terminal catch-all term; x' \
+		'configuration check succeeds' >"$tr"
+	if cos_refuse_catchall_less "$tr" "${SCRIPT_DIR}/${fixture}" 2>/dev/null; then
+		bad "#18730 guard extracts bandwidth-output from ${fixture}"
+	else
+		ok "#18730 guard extracts bandwidth-output from ${fixture}"
+	fi
+	rm -f "$tr"
+done
+rm -f "$CA_SETS" "$CA_SETS_BOTH"
+
+# Wiring: apply-cos-config.sh calls the guard on the phase-1 transcript and
+# the pushed set, BEFORE the phase-2 commit session.
+guard_line=$(grep -n 'cos_refuse_catchall_less "\$CHECK_OUT" "\$SETS_TMP"' "$APPLY" | head -1 | cut -d: -f1)
+commit_line=$(grep -n '^# ---- Phase 2: atomic commit ----' "$APPLY" | head -1 | cut -d: -f1)
+if [[ -n "$guard_line" && -n "$commit_line" && "$guard_line" -lt "$commit_line" ]]; then
+	ok "#18730 apply-cos-config.sh runs the catch-all guard before the phase-2 commit"
+else
+	bad "#18730 apply-cos-config.sh runs the catch-all guard before the phase-2 commit (guard=${guard_line:-none} commit=${commit_line:-none})"
+fi
+
 echo
 echo "cos-apply-lib-selftest: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

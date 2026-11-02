@@ -454,6 +454,10 @@ type Manager struct {
 	// one atomic load observes a consistent group-set generation. Nil until
 	// the first publish (bare Manager literals remain valid test fixtures).
 	haWatchdogSnapshot atomic.Pointer[haWatchdogSnapshot]
+	// helperSupervisorState is the generation-fenced, lock-free pair consumed by
+	// the transit gate. Startup may hold m.mu for the full readiness wait, so the
+	// gate must not acquire it to decide whether to keep or drop the RGs.
+	helperSupervisorState atomic.Pointer[helperSupervisorSnapshot]
 	// haWatchdogProcessGen is the lock-free current helper-session epoch paired
 	// with haWatchdogSnapshot.processGen. It advances independently of procGen:
 	// crash teardown must retire the epoch before reset publishes its
@@ -610,6 +614,17 @@ type Manager struct {
 	// cannot prove this row converged, so it independently gates takeover until
 	// this Manager is rebuilt and the cluster session inventory is replayed.
 	sessionRepairOverflowErr string
+
+	// napiBoundBootstrapGen is the helper generation whose all-bindings-bound
+	// NAPI bootstrap has fired (#18707, ensureXSKBoundNAPIBootstrapLocked).
+	napiBoundBootstrapGen uint64
+	// napiFloorBootstrapGen / napiFirstBoundGen / napiFirstBoundAt drive the
+	// partial-bind floor (ensurePartialBindNAPIBootstrapFloorLocked): the
+	// generation whose floor bootstrap fired (or was retired by all-bound),
+	// and when the generation was first seen with a bound binding.
+	napiFloorBootstrapGen uint64
+	napiFirstBoundGen     uint64
+	napiFirstBoundAt      time.Time
 
 	// syncedImportRefusals counts HA synced-session imports the helper REFUSED
 	// on semantic grounds (#6785) — a stale install generation, the aggregate
@@ -775,9 +790,26 @@ type Manager struct {
 	liveTrack      helperLivenessTracker
 	wedgeKilledGen atomic.Uint64
 	// #18697: set when the helper exits unexpectedly (a crash or a wedge
-	// kill), cleared when the next generation starts; that generation then
-	// inherits a not-ready verdict until it arms and looks healthy.
+	// kill), and retained through replacement spawn until an armed status is
+	// successfully applied with ctrl.Enabled=1. The tracker then carries any
+	// remaining not-ready verdict through health hysteresis.
 	helperDownUnexpected atomic.Bool
+	// #18791: the unexpected-exit grace (helper_exit_grace_18791.go): the
+	// monotonic deadline of the current exit's grace (nil = none: debt at
+	// once), why it was waived, and the monotonic time of the last unexpected
+	// exit (the crash-loop window). Lock-free.
+	exitGraceDeadlineAt  atomic.Pointer[time.Time]
+	exitGraceWaiveReason atomic.Pointer[string]
+	lastUnexpectedExit   atomic.Pointer[time.Time]
+	// #18794: distinguishes an unarmed replacement (VIP-first demotion) from a
+	// control socket that is still silent. Per-generation so late replies from
+	// a departed child cannot report the replacement's control socket healthy.
+	helperControlGeneration atomic.Pointer[helperControlGeneration]
+	// exitGraceAfterFunc arms the grace-expiry wake; nil is time.AfterFunc
+	// (cells inject a recorder). testAfterExitFlagRead runs between the exit
+	// flag's read and the tracker reset at a generation start (cells only).
+	exitGraceAfterFunc    func(time.Duration, func())
+	testAfterExitFlagRead func()
 
 	rgTransitionInFlight atomic.Bool // set before syncHAStateLocked, cleared on completion
 

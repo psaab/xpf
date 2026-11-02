@@ -18,11 +18,13 @@
 #
 # usage: go-test-json.sh <jsonfile-or-empty> <go> [go test args...]
 #
-# With an EMPTY first argument this execs `<go> test <args>` unchanged — no
-# `-json`, no `jq`, no pipeline. That is deliberate: `make test-go` is the shared
-# gate and its default path must not acquire a jq dependency or a new failure
-# mode. The selftest asserts the default path's stdout and exit code are
-# identical to a direct `go test`.
+# With an EMPTY first argument this runs `<go> test <args> -json=false` with
+# text output and no `jq`; the explicit false defeats an inherited
+# `GOFLAGS=-json`. Its stdout passes through the #18778 timeout watcher (awk),
+# which changes no line. That is deliberate: `make test-go` is the shared gate
+# and its default path must not acquire a jq dependency. The selftest asserts
+# the default path's stdout and exit code match a direct text `go test`, except
+# that a go-test timeout exits 3 (VOID).
 #
 # With a jsonfile it runs `<go> test -json <args>`, APPENDS the raw event stream
 # to that file, and reconstructs the human-readable stream on stdout from the
@@ -39,8 +41,27 @@ fi
 go_bin=$1
 shift
 
+# #18778: both paths run the shared timeout predicate
+# (scripts/go-timeout-watch.awk). The default path pipes the human stream
+# through it (it changes no line); the side-file path runs it afterwards over
+# this leg's events tagged by package, because -json interleaves packages.
+# go test's timeout aborts a package mid-run, so every later test in it never
+# runs; the watcher prints a VOID banner naming the package(s) and the script
+# exits 3, so a cut-off package reads as neither a pass nor an ordinary FAIL.
+here=$(cd "$(dirname "$0")" && pwd)
+timeout_watch() { awk -f "$here/go-timeout-watch.awk"; }
+
 if [ -z "$json" ]; then
-	exec "$go_bin" test "$@"
+	# -json in GOFLAGS silently switches this path to JSON, which the
+	# text-mode timeout watcher cannot recognize. Pin the gate's intended
+	# human-readable output at the command line; Go flags are valid after
+	# package arguments too.
+	"$go_bin" test "$@" -json=false | timeout_watch
+	rc=("${PIPESTATUS[@]}")
+	if [ "${rc[1]}" -eq 3 ]; then
+		exit 3
+	fi
+	exit "${rc[0]}"
 fi
 
 if ! command -v jq >/dev/null 2>&1; then
@@ -53,6 +74,10 @@ if ! command -v jq >/dev/null 2>&1; then
 	echo "  a stream it cannot attribute over." >&2
 	exit 2
 fi
+
+# #18778 (seat AC): this leg's events start at the side file's current size.
+# The file is APPENDED to, so an earlier leg's timeout must not void this one.
+off=$(stat -c %s "$json" 2>/dev/null || echo 0)
 
 # stderr is deliberately NOT piped. `go test -json` reports build and setup
 # failures on stderr as plain text, not as JSON events, so folding it into the
@@ -71,5 +96,23 @@ fi
 if [ "${rc[2]}" -ne 0 ]; then
 	echo "go-test-json.sh: jq failed (rc=${rc[2]}); the reconstructed output above is truncated" >&2
 	exit 2
+fi
+# The timeout check runs over THIS leg's events, tagged by package. -json
+# interleaves packages line by line, so the watcher's "next line" pairing is
+# only sound within one package's Output; the reconstructed human stream above
+# cannot be used for it. Every Output chunk is split on newline so each line
+# keeps its package tag. An empty chunk stays ONE empty line: jq's
+# `"" | split("\n")` is [], and losing the blank line after a hung Example's
+# panic breaks shape B's sequence (measured).
+tail -c +"$((off + 1))" "$json" |
+	jq -r 'select(.Output != null) | (.Package // "") as $p | (.Output | rtrimstr("\n")) as $o | (if $o == "" then [""] else ($o | split("\n")) end)[] | $p + "\t" + .' |
+	awk -v TAGGED=1 -f "$here/go-timeout-watch.awk"
+wrc=("${PIPESTATUS[@]}")
+if [ "${wrc[1]}" -ne 0 ]; then
+	echo "go-test-json.sh: jq failed reading $json for the timeout check (rc=${wrc[1]}); cannot tell whether a package timed out" >&2
+	exit 2
+fi
+if [ "${wrc[2]}" -eq 3 ]; then
+	exit 3
 fi
 exit "${rc[0]}"

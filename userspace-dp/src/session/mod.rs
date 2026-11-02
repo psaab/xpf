@@ -1535,17 +1535,16 @@ struct SessionEntry {
     /// forwarded packet). Yields the cumulative `tcpControlBits` a collector
     /// expects (SYN|ACK|FIN|RST|… over the flow). 0 for non-TCP flows.
     observed_tcp_flags: u8,
-    /// #4915: the STABLE, node-unique session id assigned at install
-    /// (`SessionTable::alloc_session_id`). Write-once — never re-stamped over the
-    /// entry's life — so a session's SESSION_CREATE and SESSION_CLOSE RT_FLOW
-    /// records carry the SAME id, and a reused 5-tuple (same worker, later
-    /// install) gets a DISTINCT id. Harvested onto the Open/Close `SessionDelta`
-    /// and encoded at RT_FLOW [152:160]. The high 16 bits namespace the id by
-    /// worker so it is unique across the node's shared-nothing worker tables; the
-    /// low 48 bits are a per-worker monotonic counter starting at 1, so a real id
-    /// is never 0 (0 is the "unknown/legacy" wire sentinel). A peer-synced import
-    /// (`upsert_synced`) is assigned a FRESH node-local id — cross-node id
-    /// identity is a documented follow-up (see docs).
+    /// #4915: the STABLE, node-unique flow identity carried by this entry.
+    /// Ordinary sessions allocate it; a reverse companion adopts the exact
+    /// full ID of its forward entry. The two direction keys distinguish the
+    /// halves, while sharing the ID preserves the flow incarnation including
+    /// its worker namespace. Write-once — never re-stamped — so a reused tuple
+    /// gets a distinct ID and both halves' RT_FLOW records remain correlatable.
+    /// Harvested onto Open/Close `SessionDelta` and encoded at RT_FLOW
+    /// [152:160]. The high 16 bits namespace the ID by worker and the low 48
+    /// bits are that worker's monotonic counter. 0 remains the unknown/legacy
+    /// sentinel; only an import without a carried ID allocates locally.
     session_id: u64,
     /// #9901 (F-077): GCRA theoretical-arrival-time gating embedded ICMP
     /// error delivery FOR this session (burst 64 / rate 64/s — see
@@ -1723,45 +1722,6 @@ pub(crate) const SESSION_ID_NODE_BIT_SHIFT: u32 = 15;
 /// than masking it away.
 pub(crate) const SESSION_ID_MAX_WORKER: u64 = (1u64 << SESSION_ID_NODE_BIT_SHIFT) - 1;
 
-/// #14667: the session-id namespace RESERVED for synthesized reverse
-/// companions. A companion synthesized on the coordinator (or on one
-/// worker and fanned out to its siblings) must carry ONE identity that
-/// every worker adopts verbatim: publishing `session_id: 0` made each
-/// sibling mint its own worker-namespaced id in
-/// `upsert_synced_with_origin`, so the identity-captured
-/// `DeletePolicyBatch` companion check missed on W-1 workers and the
-/// revoked companion (and its conntrack republication) survived.
-///
-/// The companion id is therefore DERIVED, deterministically and
-/// node-locally, from the forward entry's stable id: the reserved
-/// namespace `0xFFFE` in the high 16 bits (one below the Go control
-/// plane's `0xFFFF`, #6198 — disjoint from every worker namespace,
-/// whose maximum is node-bit 1 | worker `0x7FFF` = `0xFFFF` only for
-/// the reserved control-plane value itself, refused in
-/// `set_session_id_namespace`) plus the forward id's low 48 bits with
-/// the 0 sentinel corrected to 1. Two distinct forwards never share a
-/// low-48 counter within a namespace in practice (48-bit monotonic
-/// counters, #4915), so distinct forwards derive distinct companions;
-/// the same forward re-derived on any worker, on either node (the
-/// forward id already carries the originating node's bit), or after a
-/// restart yields the SAME companion id. A forward with no stable id
-/// (0, a legacy/local publish) derives 0: there is no cross-worker
-/// identity to converge on, and the import fallback in
-/// `upsert_synced_with_origin` keeps its pre-#14667 behavior.
-pub(crate) const SYNTHESIZED_COMPANION_SESSION_ID_WORKER_HI: u64 = 0xFFFE;
-
-/// #14667: derive the ONE session id every worker must adopt for the
-/// reverse companion of `forward_session_id`. See
-/// `SYNTHESIZED_COMPANION_SESSION_ID_WORKER_HI`. Returns 0 when the
-/// forward carries no stable id to derive from.
-pub(crate) fn synthesized_companion_session_id(forward_session_id: u64) -> u64 {
-    if forward_session_id == 0 {
-        return 0;
-    }
-    let low = forward_session_id & 0x0000_FFFF_FFFF_FFFF;
-    let low = if low == 0 { 1 } else { low };
-    (SYNTHESIZED_COMPANION_SESSION_ID_WORKER_HI << 48) | low
-}
 
 /// #9901 (F-077): per-session embedded-ICMP-error budget — burst 64 at rate
 /// 64/s. Sized for mtr (30 same-session probes/second all pass) and

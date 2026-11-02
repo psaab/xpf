@@ -33,6 +33,8 @@ interfaces {
 }
 chassis {
     cluster {
+        control-interface em0;
+        peer-address 10.99.0.2;
         authentication-key test-cluster-psk-6611;
         cluster-id 1;
         redundancy-group 1 {

@@ -11,6 +11,7 @@ func TestHelperSupervisorStateUsesArmedCrashLoopDebt12159(t *testing.T) {
 		Restarts:         1,
 		restartGen:       m.procGen,
 	}
+	m.publishHelperSupervisorStateLocked()
 	m.mu.Unlock()
 	if running, looping := m.HelperSupervisorState(); running || looping {
 		t.Fatalf("one fast restart state = (running=%v, looping=%v), want (false,false)", running, looping)
@@ -22,6 +23,7 @@ func TestHelperSupervisorStateUsesArmedCrashLoopDebt12159(t *testing.T) {
 	}
 	m.mu.Lock()
 	m.helperCrash.Restarts = attempt
+	m.publishHelperSupervisorStateLocked()
 	m.mu.Unlock()
 	if running, looping := m.HelperSupervisorState(); running || !looping {
 		t.Fatalf("armed capped retry state = (running=%v, looping=%v), want (false,true)", running, looping)
@@ -32,6 +34,7 @@ func TestHelperSupervisorStateUsesArmedCrashLoopDebt12159(t *testing.T) {
 	// election debt.
 	m.mu.Lock()
 	m.procGen++
+	m.publishHelperSupervisorStateLocked()
 	m.mu.Unlock()
 	if running, looping := m.HelperSupervisorState(); running || looping {
 		t.Fatalf("cancelled retry state = (running=%v, looping=%v), want (false,false)", running, looping)

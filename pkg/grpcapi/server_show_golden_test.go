@@ -95,6 +95,8 @@ var goldenShowTopics = []string{
 	"policies-hit-count",
 	"firewall-filter:bandwidth-output",
 	"firewall-filter:bandwidth-output:inet",
+	// #18728: the all-filters view also lists the implicit-discard term.
+	"firewall",
 	// switch cases (cfg-rendered)
 	"alg",
 	"dynamic-address",
@@ -245,6 +247,9 @@ func newShowGoldenServer(t *testing.T) *Server {
 				},
 				FilterTermCounters: []dpuserspace.FirewallFilterTermCounterStatus{
 					{Family: "inet", FilterName: "bandwidth-output", TermName: "0", Packets: 7, Bytes: 1024},
+					// #18728: the synthetic implicit-discard term's counter
+					// sits at the ordinal after the one authored term.
+					{Family: "inet", FilterName: "bandwidth-output", TermName: "implicit-discard", TermOrdinal: 1, Packets: 3, Bytes: 180},
 				},
 			},
 		},

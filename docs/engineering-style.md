@@ -224,6 +224,31 @@ stack, where the next bare `pop` can take it.
   32 are plausibly real. Tidying the stack is the destructive move it already
   documents.
 
+### The box-wide build caches are SHARED. Never clean them from one worktree.
+
+`GOCACHE` (`/var/worktrees/.cache/go-build`) and the default `CARGO_TARGET_DIR`
+(`/var/worktrees/.cache/cargo`) serve every worktree and lane on the host.
+`go clean -cache` cold-rebuilds every other session. Deleting the cargo dir
+breaks every in-flight cargo build: on 2026-11-01, `make clean` emptied it and
+a concurrent `make deb` died with "could not write output ... No such file or
+directory" (#18839).
+
+- `make deb` was a deleter too. `dpkg-buildpackage` runs `dh clean`, and its
+  default `dh_auto_clean` runs `make clean`, so every deb build in any worktree
+  emptied the shared dir and forced the next cargo build cold.
+  `debian/rules` now overrides `dh_auto_clean` to remove only the three
+  top-level binaries.
+- `make clean` keeps the shared cargo dir. It removes `userspace-dp/target`
+  and a per-worktree `CARGO_TARGET_DIR` you set explicitly. It refuses a
+  parent or child of the shared dir, `/`, an empty value, and a value with
+  whitespace. Only `CLEAN_SHARED_CARGO=1` deletes the shared dir, with a
+  WARNING, and only when nothing else is building.
+  `make test-clean-shared-cargo-lib` pins both paths, the dh one included.
+- With one shared target dir, `$(CARGO_TARGET_DIR)/release/xpf-userspace-dp`
+  is last-writer-wins across worktrees. `make deb` builds and installs it
+  inside one heavy-cargo flock hold, which is safe. Run any other cargo build
+  under the same flock, or a copied binary can be the other checkout's.
+
 
 ## First principles
 
@@ -1832,6 +1857,52 @@ they repeatedly bite:
     written). `scripts/mutate.sh` sets it per cell and, when a spec row names a
     target test in an optional 5th TAB column, refines the verdict with
     `mutation_verdict_for_target`.
+
+    **A timed-out package is VOID, not red (#18778).** test-go and
+    test-race-dp pass an explicit `-timeout $(GOTEST_TIMEOUT)` (default 60m).
+    go test's 10m default is reachable by pkg/daemon (and by -race legs) at high
+    host load, and a timeout aborts the package mid-run exactly as a panic does:
+    every later test never runs.
+
+    `scripts/go-timeout-watch.awk` is the ONE timeout predicate, used by
+    `go-test-json.sh`, the race legs' `go-test-watch.sh` and mutate-lib's
+    `mutation_timed_out`. It recognises three shapes; a printed panic and
+    adjacent `running tests:` line alone are not enough. For alarm timeouts,
+    the alarm goroutine's first frame confirms the package really timed out:
+
+    | shape | required output sequence |
+    |---|---|
+    | alarm, tests running | column-0 `panic: test timed out after`, the indented `running tests:` list, then a blank line, `goroutine N [running]:`, and the first-frame `testing.(*M).startAlarm.func1()` |
+    | alarm, no test running (a hung Example) | the same panic line, then a blank line, `goroutine N [running]:`, and the first-frame `testing.(*M).startAlarm.func1()` |
+    | binary hung outside `m.Run` (a hung TestMain) | cmd/go's SIGQUIT dump begins `SIGQUIT: quit`, `PC=`, then a goroutine header; cmd/go then prints `*** Test killed with quit: ran too long` at `-timeout` + 1m | the kill marker is immediately followed by the package's `FAIL<TAB><pkg>` line |
+
+    If cmd/go cannot produce the SIGQUIT dump, its kill marker plus package
+    FAIL is indistinguishable from test-printed text and is not classified as
+    VOID; the run remains an ordinary failure rather than a false timeout.
+
+    The default text paths pin `-json=false` at the go command line, and the
+    side-file path explicitly requests `-json`, so inherited `GOFLAGS` cannot
+    change the stream format under the watcher. `go test -json` interleaves
+    packages line by line, so the side-file path runs the predicate afterwards
+    over that leg's events, tagged by package, not over the reconstructed
+    stream. On a hit, the script prints a VOID banner on stderr naming every
+    timed-out package and its shape, and exits 3.
+
+    The mutation scorer trusts this wrapper banner before rescanning a merged
+    `make` log: package interleaving can break textual adjacency, but make's
+    rc=2 normalization does not erase the wrapper's exit-3 evidence from the
+    log.
+
+    What a **make** consumer observes:
+
+    - make itself exits **2** on any recipe failure.
+    - The recipe ends **`Error 3`**. `keep()` makes VOID sticky, so a later
+      failing leg cannot turn it into `Error 1`.
+    - The **stderr banner** names the timed-out package.
+
+    Failures reported for OTHER packages in any leg are still real. Treat
+    the named package as unmeasured, and rerun with a longer `GOTEST_TIMEOUT`
+    or on a quieter host. Do not attribute over it.
 
     **A name is not a reason (#9564).** A guard with a LIVENESS fatal ("the
     parser found no anchors") and a violation branch scores KILLED by name

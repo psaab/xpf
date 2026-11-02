@@ -96,7 +96,7 @@ func TestStaleSeqFencePreservesPollHealthAccounting17728(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				m.statusLoop(ctx)
+				m.statusLoop(ctx, false)
 			}()
 			defer func() {
 				cancel()

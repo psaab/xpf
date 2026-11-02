@@ -22,7 +22,7 @@ func TestTCPSessionEveryLeafEverySpelling18762(t *testing.T) {
 	if ts == nil || len(ts.children) < 10 {
 		t.Fatalf("schema walk: security flow tcp-session has %v children; the enumeration source is broken", ts)
 	}
-	type row struct{ name, braced, elided, twoLevel string }
+	type row struct{ name, braced, elided, twoLevel, fullyElided string }
 	var rows []row
 	val := func(n *schemaNode) (string, bool) {
 		if n.args == 0 {
@@ -53,10 +53,11 @@ func TestTCPSessionEveryLeafEverySpelling18762(t *testing.T) {
 					continue
 				}
 				rows = append(rows, row{
-					name:     name + " " + k,
-					braced:   `security { flow { tcp-session { ` + name + ` { ` + k + v + `; } } } }`,
-					elided:   `security { flow { tcp-session { ` + name + ` ` + k + v + `; } } }`,
-					twoLevel: `security { flow { tcp-session ` + name + ` ` + k + v + `; } }`,
+					name:         name + " " + k,
+					braced:       `security { flow { tcp-session { ` + name + ` { ` + k + v + `; } } } }`,
+					elided:       `security { flow { tcp-session { ` + name + ` ` + k + v + `; } } }`,
+					twoLevel:     `security { flow { tcp-session ` + name + ` ` + k + v + `; } }`,
+					fullyElided:  `security flow tcp-session ` + name + ` ` + k + v + `;`,
 				})
 			}
 			continue
@@ -67,10 +68,11 @@ func TestTCPSessionEveryLeafEverySpelling18762(t *testing.T) {
 			continue
 		}
 		rows = append(rows, row{
-			name:     name,
-			braced:   `security { flow { tcp-session { ` + name + v + `; } } }`,
-			elided:   `security { flow { tcp-session ` + name + v + `; } }`,
-			twoLevel: `security { flow tcp-session ` + name + v + `; }`,
+			name:        name,
+			braced:      `security { flow { tcp-session { ` + name + v + `; } } }`,
+			elided:      `security { flow { tcp-session ` + name + v + `; } }`,
+			twoLevel:    `security { flow tcp-session ` + name + v + `; }`,
+			fullyElided: `security flow tcp-session ` + name + v + `;`,
 		})
 	}
 	// The positive control compares against an EMPTY tcp-session stanza,
@@ -90,7 +92,9 @@ func TestTCPSessionEveryLeafEverySpelling18762(t *testing.T) {
 			if reflect.DeepEqual(b.Security.Flow.TCPSession, empty.Security.Flow.TCPSession) {
 				t.Fatalf("POSITIVE CONTROL: the braced spelling compiles to the same TCPSession as an empty stanza, so this row cannot observe a drop: %s", r.braced)
 			}
-			for spelling, text := range map[string]string{"elided": r.elided, "two-level": r.twoLevel} {
+			for spelling, text := range map[string]string{
+				"elided": r.elided, "two-level": r.twoLevel, "fully-elided-root": r.fullyElided,
+			} {
 				c := compileText(t, text)
 				if c == nil {
 					t.Errorf("%s spelling did not compile: %s", spelling, text)

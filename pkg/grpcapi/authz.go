@@ -393,8 +393,8 @@ func (s *Server) principalUnaryInterceptor(ctx context.Context, req any, info *g
 // at open — the #17175 regression. They run on the first RecvMsg
 // (authzRecvStream) with the decoded message instead.
 //
-// For a request-independent stream (streamNeedsRequest17175 false,
-// today MonitorPacketDrop) the full decision IS request-independent,
+// For a request-independent stream (streamNeedsRequest17175 false; no
+// served stream today, see #18760) the full decision IS request-independent,
 // so this runs the whole authorizeRPCContext at open with the typed
 // empty request the generated handler will decode — preserving the
 // pre-#17175 open-time verdict exactly.
@@ -421,12 +421,12 @@ func (s *Server) authorizeStreamOpenContext(ctx context.Context, fullMethod stri
 
 // emptyStreamRequest17175 returns the typed empty request for a
 // request-independent streaming method, matching what its generated
-// handler decodes. Only MonitorPacketDrop qualifies today.
+// handler decodes. No served stream is request-independent today
+// (#18760 moved MonitorPacketDrop to request-dependent), so it returns
+// nil and authorizeStreamOpenContext prices the coarse floor; a future
+// `false` entry must add its typed empty request here, which
+// TestStreamRequestSpecCoversEveryStream17175 enforces.
 func emptyStreamRequest17175(fullMethod string) any {
-	switch fullMethod {
-	case pb.BpfrxService_MonitorPacketDrop_FullMethodName:
-		return &pb.MonitorPacketDropRequest{}
-	}
 	return nil
 }
 

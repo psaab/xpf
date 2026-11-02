@@ -1356,7 +1356,19 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		// itself; packets can ingress via ge-*.VID without ever running
 		// the parent's driver XDP hook. VLAN children do not support the
 		// fast path reliably here, so keep them on generic XDP only.
-		if !st.attachedXDP[subIfindex] {
+		//
+		// #18740: a VLAN child of a control-plane parent (fxp0.N, em0.N)
+		// stays out too. The parent is no longer shimmed, so the child has
+		// nothing to delegate to, and the userspace dataplane never
+		// adjudicates it either (its ingress exclusion keys on the base
+		// name).
+		if class, ok := ControlPlaneNetdevNameClass(physName); ok {
+			if !st.attachedXDP[subIfindex] {
+				st.attachedXDP[subIfindex] = true
+				result.recordUnarmedSurface(
+					controlPlaneSurfaceRecord(subName, subIfindex, class))
+			}
+		} else if !st.attachedXDP[subIfindex] {
 			st.xdpIfindexes = append(st.xdpIfindexes, subIfindex)
 			result.genericXDPIfindexes[subIfindex] = true
 			st.attachedXDP[subIfindex] = true
@@ -1600,6 +1612,16 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 				"name", physName, "ifindex", physIface.Index, "encap", encap)
 			result.recordUnarmedSurface(
 				nonEthernetSurfaceRecord(physName, physIface.Index, encap))
+		} else if class, ok := ControlPlaneNetdevNameClass(physName); ok {
+			// #18740: the userspace dataplane never adjudicates fxp*/em*, so
+			// a shim attached here was only detached again at acceptance —
+			// two XDP program changes per commit on the HA control link.
+			// Keep them out of the attach set (XDP and TC) and record the
+			// skip; see controlplane_netdev_18740.go.
+			slog.Debug("keeping control-plane netdev out of the XDP attach set",
+				"name", physName, "ifindex", physIface.Index, "class", class)
+			result.recordUnarmedSurface(
+				controlPlaneSurfaceRecord(physName, physIface.Index, class))
 		} else {
 			// #14680: the #10915 S-tag gate fires above, before
 			// MTU/LinkSetUp; no second check here.

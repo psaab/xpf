@@ -2040,6 +2040,30 @@ wire_field_has "arm-b VOID keeps measured stage flags" 0 5 "mid_fwd_ok=1"
 wire_log 'WIRE_GATE cc-rollback-arm-a FAIL reason=-- mid_blocked=1 post_present=1 post_fwd_ok=0\n'
 wire_field_is "arm-a FAIL transcribes" 0 1 "FAIL"
 wire_field_is "arm-a headline is post_fwd_ok" 0 3 "post_fwd_ok"
+# ── #18772: the deployed deb version vs the deploying checkout ───────
+dbm_fails=""
+for row in "0.0.29598+g36a70dfd0253|36a70dfd0253aaaaaaaaaaaaaaaaaaaaaaaaaaaa|match" \
+	"0.0.29598+g36a70dfd0253|36a70dfd0253aaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty|match" \
+	"0.0.29598+g36a70dfd0253|1b3c89ceb8a4aaaaaaaaaaaaaaaaaaaaaaaaaaaa|mismatch" \
+	"0.0.29596|36a70dfd0253aaaaaaaaaaaaaaaaaaaaaaaaaaaa|unknown" \
+	"|36a70dfd0253aaaaaaaaaaaaaaaaaaaaaaaaaaaa|unknown" \
+	"0.0.29598+g36a70dfd0253|unknown|mismatch"; do
+	IFS='|' read -r dv gs want <<<"$row"
+	got=$(harness_deb_build_match "$dv" "$gs")
+	[[ "$got" == "$want" ]] || dbm_fails+=" [$dv vs $gs: $got, want $want]"
+done
+rm -rf "$LEDGER"
+harness_result_emit "${emit_base[@]}" --gate g --env e --verdict PASS \
+	--headline-metric m --headline-direction higher-better --metrics "m=1" \
+	--deb-version 0.0.29598+g36a70dfd0253 --deb-build-match mismatch >/dev/null 2>&1
+[[ "$(last_row_field deb_version)" == 0.0.29598+g36a70dfd0253 && "$(last_row_field deb_build_match)" == mismatch ]] ||
+	dbm_fails+=" [row fields: $(last_row_field deb_version)/$(last_row_field deb_build_match)]"
+if [[ -z "$dbm_fails" ]]; then
+	ok "#18772: deb_build_match compares the deb's +g<sha> with build_git_sha, and the row carries deb_version and the verdict"
+else
+	bad "#18772: deb version attestation wrong:$dbm_fails"
+fi
+
 # ── summary ──────────────────────────────────────────────────────────
 echo
 echo "  harness-result selftest: $PASS passed, $FAIL failed"

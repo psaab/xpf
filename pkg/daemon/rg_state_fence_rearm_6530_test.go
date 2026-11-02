@@ -32,7 +32,6 @@ func (h *rearmRecorderHA) SetRGActive(_ context.Context, rgID int, active bool) 
 
 func (h *rearmRecorderHA) SetHAWatchdog(_ context.Context, _ int, _ uint64) error { return nil }
 
-
 func (h *rearmRecorderHA) SyncFabricState(_ context.Context) error { return nil }
 
 func (h *rearmRecorderHA) take() []rgActiveWrite {
@@ -90,6 +89,8 @@ func TestFenceRearmsReconcileRetry(t *testing.T) {
 	store := testStoreWithSetConfig(t, []string{
 		"set system dataplane-type userspace",
 		"set chassis cluster cluster-id 1",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-6530",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
@@ -100,6 +101,12 @@ func TestFenceRearmsReconcileRetry(t *testing.T) {
 
 	cm := cluster.NewManager(0, 1)
 	cm.UpdateConfig(store.ActiveConfig().Chassis.Cluster)
+	// #16746: a complete control link is now required, and with one the
+	// private-RG election waits for the peer instead of electing a lone
+	// node primary (the dual-primary shape the gate forbids). This cell
+	// tests the daemon's fence/rg_active handling, not the election, so
+	// it states the precondition directly.
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
 
 	rec := &rearmRecorderHA{}
 	d := &Daemon{

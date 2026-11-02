@@ -45,6 +45,12 @@ import (
 // it. Tests must restore it with t.Cleanup.
 var streamReauthInterval9051 = 5 * time.Second
 
+// streamWatcherExitBound18761 bounds how long authorizeStreamContinuously
+// waits for its re-auth watcher to exit after the stream ends. A tick is
+// one in-memory authorization, so the wait is normally microseconds; the
+// bound exists only so a wedged decision cannot hold the RPC open.
+var streamWatcherExitBound18761 = 2 * time.Second
+
 // authzRecvStream defers the request-dependent half of stream
 // authorization to the first RecvMsg (#17175).
 //
@@ -163,6 +169,23 @@ func (s *Server) authorizeStreamContinuously(
 
 	revoked := make(chan error, 1)
 	done := make(chan struct{})
+	// #18761: the watcher below may be mid-tick (inside authorizeRPCContext)
+	// when the handler returns. Closing done only asks it to stop; without a
+	// join it can outlive the stream and the interceptor that owns it, still
+	// reading the principal's config and passwd. Deferred before close(done)
+	// so it runs AFTER it (defers are LIFO): signal, then wait, bounded so a
+	// wedged authorization can never hold the RPC open.
+	watcherExited := make(chan struct{})
+	defer func() {
+		t := time.NewTimer(streamWatcherExitBound18761)
+		defer t.Stop()
+		select {
+		case <-watcherExited:
+		case <-t.C:
+			slog.Warn("gRPC stream re-auth watcher did not exit within its bound after the stream ended",
+				"method", fullMethod, "bound", streamWatcherExitBound18761)
+		}
+	}()
 	defer close(done)
 
 	// Buffered so the watcher never blocks on send if the handler returned
@@ -190,6 +213,7 @@ func (s *Server) authorizeStreamContinuously(
 	}
 
 	go func() {
+		defer close(watcherExited)
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {

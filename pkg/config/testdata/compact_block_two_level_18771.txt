@@ -16,6 +16,15 @@
 # shrinks), and on any shape change. Sites under `security flow` are not
 # allowed here at all (asserted divergence-free). Seeded 2026-11-01 from
 # origin/master d199fe64b6 + #18763; triage in #18771.
+# checked: 1326
+# security-flow checked: 42
+# security-flow-skip comments record every eligible security-flow fixture the
+# census cannot observe; the exact site/reason set is asserted by the gate.
+# security-flow-skip: security flow syn-flood-protection-mode	no two distinct synthesizable values
+# security-flow-skip: security flow tcp-mss all-tcp	leaf value not observable in the typed config
+# security-flow-skip: security flow tcp-mss gre-in	leaf value not observable in the typed config
+# security-flow-skip: security flow tcp-mss gre-out	leaf value not observable in the typed config
+# security-flow-skip: security flow tcp-mss ipsec-vpn	leaf value not observable in the typed config
 bridge-domains xpfname domain-type	COMMITS-DIFFERENT
 bridge-domains xpfname interface	UNCLASSIFIED
 bridge-domains xpfname routing-interface	COMMITS-DIFFERENT

@@ -195,10 +195,10 @@ type HelperCrashRecord struct {
 //
 // Restarts advances for consecutive failed retry attempts. A quiet interval
 // longer than twice the maximum backoff resets that count, so isolated crashes
-// do not accumulate into a false loop. The backoff doubles from
-// helperRestartBackoffBase and saturates at helperRestartBackoffMax; reaching
-// the cap means the supervisor exhausted its escalation and is retrying at its
-// slowest rate.
+// do not accumulate into a false loop. The first retry is immediate; after it
+// the backoff doubles from helperRestartBackoffBase and saturates at
+// helperRestartBackoffMax (#18707); reaching the cap means the supervisor
+// exhausted its escalation and is retrying at its slowest rate.
 //
 // Derived, never stored, for the same reason RestartPending is: a stored
 // judgement about the present is the thing that goes stale.
@@ -206,10 +206,24 @@ func (r HelperCrashRecord) CrashLooping() bool {
 	return r.LastExitWasCrash && helperRestartDelay(r.Restarts) >= helperRestartBackoffMax
 }
 
-// Helper restart backoff. Bounded exponential from base to max, so a helper
-// that cannot start (a corrupt binary, a NIC that will not bind) retries
-// forever at a fixed low rate instead of fork-storming, and a one-off crash
-// recovers in about a second.
+// Helper restart backoff. The FIRST unexpected exit of a crash episode is
+// retried immediately; every further exit in the same episode backs off
+// exponentially from base to max, so a helper that cannot start (a corrupt
+// binary, a NIC that will not bind) retries forever at a fixed low rate
+// instead of fork-storming.
+//
+// #18707: the first retry used to wait helperRestartBackoffBase (1s) too.
+// That second bought nothing an isolated crash needs: the dead child is
+// already reaped when the supervisor schedules the retry, the shim was
+// disarmed fail-closed before it, and bring-up's own readiness gates (ready
+// ping, event stream, binding / XSK liveness) still run before forwarding is
+// re-armed. It was pure outage on the node that crashed. An immediate first
+// retry adds exactly ONE fast attempt to an episode: the schedule becomes
+// 0, base, 2*base, ... instead of base, 2*base, ..., so a helper that dies
+// on every start still reaches the cap after the same cumulative wait
+// (0+1+2+4+8+16+32 = 63s, the same as 1+2+4+8+16+32 before) and the
+// CrashLooping verdict is not reached any sooner in wall-clock terms — it
+// just takes one more attempt to get there (helperCrashLoopAttempt).
 //
 // They are vars rather than consts purely so a test can drive many real
 // restarts without spending wall-clock seconds; production never reassigns
@@ -228,13 +242,15 @@ func helperCrashLoopAttempt() int {
 	}
 }
 
-// helperRestartDelay is the backoff for attempt n (1-based).
+// helperRestartDelay is the backoff for attempt n (1-based): zero for the
+// first attempt of an episode (#18707), then helperRestartBackoffBase doubling
+// per attempt up to helperRestartBackoffMax.
 func helperRestartDelay(attempt int) time.Duration {
-	if attempt < 1 {
-		attempt = 1
+	if attempt <= 1 {
+		return 0
 	}
 	d := helperRestartBackoffBase
-	for i := 1; i < attempt; i++ {
+	for i := 2; i < attempt; i++ {
 		d *= 2
 		if d >= helperRestartBackoffMax {
 			return helperRestartBackoffMax
@@ -273,9 +289,12 @@ func (m *Manager) startHelperSupervisorLocked(cmd *exec.Cmd) {
 	g := &helperGeneration{gen: m.procGen, cmd: cmd, exited: make(chan struct{})}
 	m.procSup = g
 	// #18697/#18685: a generation started right after an unexpected exit (a
-	// crash or a wedge kill) keeps a not-ready verdict, and so the election
-	// debt, until it reports ForwardingArmed and then looks healthy.
-	m.liveTrack.reset(m.procGen, time.Now(), m.helperDownUnexpected.Swap(false))
+	// crash or a wedge kill) keeps a not-ready verdict, and so the election debt,
+	// until Go has applied an armed status to ctrl and then the helper looks
+	// healthy. #18791: the hand-off carries the verdict and grace without a gap.
+	m.handOffExitVerdictLocked(m.procGen, time.Now())
+	// Publish the live generation before readiness polling can block m.mu.
+	m.publishHelperSupervisorStateLocked()
 	go m.superviseHelper(g)
 	go m.watchHelperLiveness(g, helperWatchdogTick)
 }
@@ -346,6 +365,13 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	now := time.Now()
 	// #18697: the node must not keep the RGs while this helper is gone. The
 	// daemon's transit tick reads this lock-free and raises election debt.
+	// #18791: unless the replacement arms within the restart grace. The
+	// grace is decided and published BEFORE the flag, so a reader that sees
+	// the flag also sees this exit's deadline.
+	m.noteUnexpectedExitGraceLocked(now)
+	if control := m.helperControlGeneration.Load(); control != nil && control.gen == g.gen {
+		control.departed.Store(true)
+	}
 	m.helperDownUnexpected.Store(true)
 	// The Prometheus counter is per unexpected exit, not per completed
 	// episode; otherwise a persistent loop inside the quiet window is silent.
@@ -361,8 +387,14 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	if g.cmd.Process != nil {
 		pid = g.cmd.Process.Pid
 	}
+	grace := "none (election debt at once)"
+	if d := m.exitGraceDeadline(); !d.IsZero() {
+		grace = helperExitGrace.String()
+	} else if why := m.exitGraceWaiveReason.Load(); why != nil {
+		grace += ": " + *why
+	}
 	slog.Error("userspace dataplane helper exited unexpectedly; failing closed and scheduling restart (#5838)",
-		"pid", pid, "disposition", detail, "generation", g.gen)
+		"pid", pid, "disposition", detail, "generation", g.gen, "election_grace", grace)
 
 	// Retire the independent helper-session epoch immediately, but keep the
 	// explicit fail-closed disarm FIRST. The restart timer must continue to use
@@ -494,8 +526,10 @@ func (m *Manager) restartHelperAfterCrash(gen uint64) {
 	m.helperCrash.RecoveredAt = time.Now()
 	m.notifyHelperSupervisorLocked()
 	// The crash tore the 1 Hz reconcile loop down with the generation it was
-	// polling; the replacement needs its own.
-	m.ensureStatusLoopLocked()
+	// polling; the replacement needs its own, and its first pass — the one
+	// that republishes the snapshot the workers bind from — runs now rather
+	// than a tick from now (#18707).
+	m.ensureStatusLoopFirstPassNowLocked()
 }
 
 // HelperCrashState returns the last unexpected-exit record, for status
@@ -516,25 +550,44 @@ func (m *Manager) HelperCrashState() HelperCrashRecord {
 	return rec
 }
 
+// helperSupervisorSnapshot is one generation's immutable HA view. Publishing
+// the pair atomically prevents the transit gate from observing a running bit
+// and crash-loop bit from different lifecycle transactions.
+type helperSupervisorSnapshot struct {
+	generation   uint64
+	running      bool
+	crashLooping bool
+}
+
+// publishHelperSupervisorStateLocked publishes the state consumed by the
+// transit gate. The generation fence and both booleans are captured in one
+// manager-lock transaction.
+func (m *Manager) publishHelperSupervisorStateLocked() {
+	state := &helperSupervisorSnapshot{
+		generation: m.procGen,
+		running:    m.proc != nil && m.proc.Process != nil,
+	}
+	if !state.running {
+		state.crashLooping = m.procGen == m.helperCrash.restartGen && m.helperCrash.CrashLooping()
+	}
+	m.helperSupervisorState.Store(state)
+}
+
 // HelperSupervisorState reports whether a helper process is currently
 // supervised and whether an armed retry for its unexpected-exit episode has
 // reached the restart-backoff cap. An intentional stop or cancelled retry is
 // not a crash loop even though the crash record remains available for status.
+// It reads one immutable snapshot so a transit-gate pass never waits for a
+// startup or teardown operation holding m.mu.
 func (m *Manager) HelperSupervisorState() (running, crashLooping bool) {
 	if m == nil {
 		return false, false
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	running = m.proc != nil && m.proc.Process != nil
-	if running {
-		return running, false
+	state := m.helperSupervisorState.Load()
+	if state == nil {
+		return false, false
 	}
-	// Only the retry count arm contributes to the HA verdict. It is fenced
-	// to the generation whose retry is armed, so an intentional stop cannot
-	// turn a stale crash record into current election debt.
-	crashLooping = m.procGen == m.helperCrash.restartGen && m.helperCrash.CrashLooping()
-	return running, crashLooping
+	return state.running, state.crashLooping
 }
 
 // SetHelperSupervisorObserver installs a wake-only state-change observer.
@@ -546,9 +599,11 @@ func (m *Manager) SetHelperSupervisorObserver(fn func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.helperSupervisorObserver = fn
+	m.publishHelperSupervisorStateLocked()
 }
 
 func (m *Manager) notifyHelperSupervisorLocked() {
+	m.publishHelperSupervisorStateLocked()
 	if m.helperSupervisorObserver != nil {
 		m.helperSupervisorObserver()
 	}

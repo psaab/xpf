@@ -1441,3 +1441,7 @@ mod tests;
 #[cfg(test)]
 #[path = "static_verdict_7212_tests.rs"]
 mod static_verdict_7212_tests;
+
+#[cfg(test)]
+#[path = "implicit_discard_18728_tests.rs"]
+mod implicit_discard_18728_tests;
