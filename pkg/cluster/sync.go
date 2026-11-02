@@ -1801,8 +1801,9 @@ type SessionSync struct {
 
 	// coldPrimeOwedSince (#18752) is when the current cold-prime debt was
 	// first armed (UnixNano; 0 = none owed), and lastBulkFailure the most
-	// recent doBulkSync failure. Both are display-only: they let the demotion
-	// barrier's refusal say for how long, and why, the debt is unpaid.
+	// recent doBulkSync failure since that episode began. Both are display-only:
+	// they let the demotion barrier's refusal say for how long, and why, the
+	// debt is unpaid.
 	coldPrimeOwedSince atomic.Int64
 	lastBulkFailure    atomic.Pointer[bulkFailure]
 	// coldPrimeLongOwedWarned latches the one long-owed Warn per debt episode.

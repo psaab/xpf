@@ -726,6 +726,7 @@ func (s *SessionSync) clearPendingBulkAck() {
 func (s *SessionSync) armColdPrimeLocked() {
 	if !s.needColdPrime.Load() {
 		s.coldPrimeOwedSince.Store(time.Now().UnixNano())
+		s.lastBulkFailure.Store(nil)
 		s.coldPrimeLongOwedWarned.Store(false)
 	}
 	s.needColdPrime.Store(true)
@@ -738,11 +739,12 @@ type bulkFailure struct {
 	at  time.Time
 }
 
-// noteBulkResult records a failed bulk for the cold-prime debt display (the
+// noteBulkResult records failed bulks for the cold-prime debt display (the
 // demotion barrier's refusal, `show chassis cluster information`, and the
-// latched long-owed Warn). A success leaves the last failure in place: the
-// debt it explains is only paid by the peer's ack (dischargeColdPrime clears
-// both).
+// latched long-owed Warn). It also records debt-free bulk failures; arming a
+// new debt episode clears those so the display cannot inherit stale history.
+// A success leaves the last failure in place while debt is owed: only the
+// peer's ack discharges the debt and clears its failure.
 func (s *SessionSync) noteBulkResult(err error) {
 	if err != nil {
 		s.lastBulkFailure.Store(&bulkFailure{err: err.Error(), at: time.Now()})
@@ -908,7 +910,7 @@ func (s *SessionSync) maybeWarnLongOwedColdPrime(now time.Time) bool {
 	if !owed || !s.coldPrimeLongOwedWarned.CompareAndSwap(false, true) {
 		return false
 	}
-	slog.Warn("cluster sync: cold prime owed to peer past the long-owed threshold with no bulk pending; manual failover/failback and ISSU drain (ForceSecondary) of this node's RGs are refused until a re-driven bulk is acked (#18752)",
+	slog.Warn("cluster sync: cold prime owed to peer past the long-owed threshold with no bulk pending; demotion of this node's primary RGs (manual failover/failback and ISSU drain via ForceSecondary) is refused until a re-driven bulk is acked (#18752)",
 		"threshold", coldPrimeLongOwedAfter, "debt", detail)
 	return true
 }

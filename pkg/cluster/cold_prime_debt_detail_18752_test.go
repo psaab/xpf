@@ -1,6 +1,6 @@
 package cluster
 
-// #18752: an unpaid cold prime refuses every demotion of this node's RGs, and
+// #18752: an unpaid cold prime refuses demotion of this node's primary RGs, and
 // before this the refusal said only "cold prime owed without pending outbound
 // bulk" — for three and a half minutes on udp, with no sign of how long it had
 // been owed or why every re-drive failed. ColdPrimeDebtDetail names both. It is
@@ -82,6 +82,28 @@ func TestDoBulkSyncFailureIsRecordedForTheDebtDetail18752(t *testing.T) {
 	}
 }
 
+// A failed sync can happen with no cold-prime debt owed; it must not leak into
+// the detail for a later, separate episode.
+func TestFreshColdPrimeArmClearsDebtFreeBulkFailure18752(t *testing.T) {
+	ss := dualSync9508(t)
+	ss.BulkSnapshotSource = func() (BulkSnapshot, error) {
+		return BulkSnapshot{}, errors.New("stale debt-free export failure")
+	}
+	if err := ss.doBulkSync(); err == nil {
+		t.Fatal("FIXTURE: the debt-free bulk must fail")
+	}
+	if ss.needColdPrime.Load() || ss.lastBulkFailure.Load() == nil {
+		t.Fatal("FIXTURE: failed bulk must be recorded before any cold-prime debt")
+	}
+
+	ss.installConn(0, newHeldConn9508("fab0"))
+	detail := ss.ColdPrimeDebtDetail()
+	if !ss.needColdPrime.Load() || !strings.Contains(detail, "last bulk error: none recorded") ||
+		strings.Contains(detail, "stale debt-free export failure") {
+		t.Fatalf("fresh cold-prime episode inherited a debt-free failure: %q", detail)
+	}
+}
+
 // logSink18752 is a goroutine-safe slog sink: the sync fixtures run reader
 // goroutines that may log while a cell inspects the buffer.
 type logSink18752 struct {
@@ -109,11 +131,11 @@ func (b *logSink18752) count(level, substr string) int {
 
 const longOwedMsg18752 = "cold prime owed to peer past the long-owed threshold"
 
-// The long-owed Warn is the only unprompted sign that every failback and ISSU
-// drain of this node's RGs is being refused. It must fire once per debt
-// episode past the threshold — not before it, not on every sweep tick after
-// it, not while a bulk that could pay the debt is still in flight — and fire
-// again for a new episode.
+// The long-owed Warn is the only unprompted sign that demotion of this node's
+// primary RGs is being refused. It must fire once per debt episode past the
+// threshold — not before it, not on every sweep tick after it, not while a
+// bulk that could pay the debt is still in flight — and fire again for a new
+// episode.
 func TestLongOwedColdPrimeWarnsOncePerEpisode18752(t *testing.T) {
 	logs := &logSink18752{}
 	prev := slog.Default()
@@ -180,7 +202,7 @@ func TestClusterInformationShowsColdPrimeDebt18752(t *testing.T) {
 	m := NewManager(0, 22)
 	m.SetSyncStats(ss)
 	const owedLine = "Cold prime owed to peer (no bulk pending): owed for "
-	const blocksLine = "Blocks: manual failover/failback and ISSU drain of this node's RGs"
+	const blocksLine = "Blocks: demotion of this node's primary RGs (manual failover/failback and ISSU drain)"
 	if info := m.FormatInformation(); strings.Contains(info, owedLine) || strings.Contains(info, blocksLine) {
 		t.Fatalf("no debt owed, but the information output reports one:\n%s", info)
 	}
