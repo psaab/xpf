@@ -25,7 +25,7 @@ func activeCfg15206() *config.Config {
 	return &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
 		"ge-0/0/1": {Name: "ge-0/0/1", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
 		"ge-0/0/2": {Name: "ge-0/0/2", RedundantParent: "reth1"},
-		"reth1":    {Name: "reth1", RedundancyGroup: 1, Units: map[int]*config.InterfaceUnit{0: {Number: 0}, 80: {Number: 80, VlanID: 180}}},
+		"reth1":    {Name: "reth1", RedundancyGroup: 1, VlanTagging: true, Units: map[int]*config.InterfaceUnit{0: {Number: 0}, 80: {Number: 80, VlanID: 180}}},
 	}}}
 }
 
@@ -172,5 +172,28 @@ func TestKeaBeltNoPhantomIsNoop15206(t *testing.T) {
 	}
 	if len(*warned) != 0 {
 		t.Fatalf("no warnings expected, got %v", *warned)
+	}
+}
+
+// #18853: a declared RETH VLAN sub-interface is a usable Kea device even
+// though its parent resolves to a different kernel name. The same belt still
+// drops an undeclared unit in the input group.
+func TestKeaBeltKeepsDeclaredTaggedUnit15206(t *testing.T) {
+	m, _ := testManager(t, map[string]bool{}, "")
+	warned := recordWarnings9785(m)
+	cfg := &config.DHCPServerConfig{DHCPLocalServer: &config.DHCPLocalServerConfig{Groups: map[string]*config.DHCPServerGroup{
+		"tagged": {Name: "tagged", Interfaces: []string{"ge-0-0-2.180", "reth1.7"}},
+	}}}
+	warn := func(msg string, args ...any) { m.warn(msg, args...) }
+	out, changed := FilterKeaInterfaces15206(cfg, activeCfg15206(), "4", warn)
+	if !changed {
+		t.Fatal("belt must remove the undeclared unit")
+	}
+	got := out.DHCPLocalServer.Groups["tagged"]
+	if got == nil || len(got.Interfaces) != 1 || got.Interfaces[0] != "ge-0-0-2.180" {
+		t.Fatalf("declared VLAN device was not retained alongside phantom removal: %+v", got)
+	}
+	if drops := interfaceWarnings15206(*warned, "reth1.7"); len(drops) != 1 {
+		t.Fatalf("want one phantom-drop warning, got %v", *warned)
 	}
 }
