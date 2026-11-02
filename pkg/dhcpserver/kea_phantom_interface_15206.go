@@ -102,13 +102,16 @@ func FilterKeaInterfaces15206(cfg *config.DHCPServerConfig, active *config.Confi
 func usableKeaDevices15206(active *config.Config) map[string]bool {
 	usable := make(map[string]bool)
 	for name, ifc := range active.Interfaces.Interfaces {
-		if ifc == nil {
-			continue
-		}
+		// #17474: a present-but-nil interface still declares its name: the
+		// pre-belt name-only loop counted it usable, and skipping it could
+		// leave usable empty, which disables filtering entirely (fail-open).
 		usable[active.ResolveKernelIfName(name)] = true
 		linux := config.LinuxIfName(name)
 		if linux != name {
 			usable[active.ResolveKernelIfName(linux)] = true
+		}
+		if ifc == nil {
+			continue
 		}
 		for unitNum, unit := range ifc.Units {
 			if unit == nil {

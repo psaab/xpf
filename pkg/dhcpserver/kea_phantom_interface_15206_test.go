@@ -197,3 +197,23 @@ func TestKeaBeltKeepsDeclaredTaggedUnit15206(t *testing.T) {
 		t.Fatalf("want one phantom-drop warning, got %v", *warned)
 	}
 }
+
+func TestKeaBeltArmedByPresentButNilInterface15206(t *testing.T) {
+	// #17474: a present-but-nil interface (tolerant load / HA sync admits
+	// nil slots, pkg/config README) still declares its name. If nil entries
+	// stopped counting, usable would be empty and the belt would disarm,
+	// letting phantom refs render into the Kea file.
+	active := &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+		"zz-nil-ifc": nil,
+	}}}
+	cfg := &config.DHCPServerConfig{DHCPLocalServer: &config.DHCPLocalServerConfig{Groups: map[string]*config.DHCPServerGroup{
+		"z-broken": {Name: "z-broken", Interfaces: []string{"reth9.0"}},
+	}}}
+	out, changed := FilterKeaInterfaces15206(cfg, active, "4", func(string, ...any) {})
+	if !changed {
+		t.Fatal("belt disarmed by a present-but-nil-only interface map; phantom kept")
+	}
+	if got := out.DHCPLocalServer.Groups["z-broken"]; got != nil && len(got.Interfaces) != 0 {
+		t.Fatalf("phantom interface retained under nil-only active config: %+v", got.Interfaces)
+	}
+}
