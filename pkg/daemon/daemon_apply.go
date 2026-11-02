@@ -506,6 +506,7 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// suppresses are emitted by directAddVIPs on the VRRP reconcile path, which
 	// is not driven from inside this function.
 	d.resetVIPWarnings()
+
 	d.policyInvalidationPublishLanded = false
 	d.policyInvalidationDebtAdopted = false
 

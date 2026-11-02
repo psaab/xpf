@@ -50,7 +50,12 @@ func hasFabricIngressBaTrustAdvisory13967(cfg *Config) bool {
 }
 
 func TestFabricIngressBaTrustAdvisoryOnConfiguredFabric13967(t *testing.T) {
-	cfg := compileFabricStamp10105(t, fabricStampCluster10105, CompileConfig)
+	// #18719: the reminder needs a BA classifier on a fabric-reachable unit;
+	// a fabric with no classifier has no peer classification to lose
+	// (TestFabricBAFallbackAdvisoryNeedsFabricReachableClassifier18719).
+	commands := append(append(append([]string(nil), fabricStampCluster10105...), fabricBAClassifier18719...),
+		"set class-of-service interfaces reth0 unit 80 classifiers dscp cls")
+	cfg := compileFabricStamp10105(t, commands, CompileConfig)
 	if !hasFabricIngressBaTrustAdvisory13967(cfg) {
 		t.Fatalf("configured fabric must warn that BA markings are untrusted; warnings=%v", cfg.Warnings)
 	}

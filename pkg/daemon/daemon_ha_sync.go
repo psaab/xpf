@@ -2086,6 +2086,16 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // separate group. Wait runs outside the lock because both constructors and
 // populate loops may need it to finish publishing or updating fabric state.
 func (d *Daemon) stopClusterComms() {
+	d.stopClusterCommsWithFinalizer(nil)
+}
+
+// stopClusterCommsWithFinalizer joins the detached epoch and, if it still
+// owns teardown under clusterCommsLifecycleMu, runs finalize before a successor
+// can create an epoch or publish fabric state.
+func (d *Daemon) stopClusterCommsWithFinalizer(finalize func()) bool {
+	d.clusterCommsStopMu.Lock()
+	defer d.clusterCommsStopMu.Unlock()
+
 	d.clusterCommsMu.Lock()
 	d.clusterCommsGen++
 	stopGen := d.clusterCommsGen
@@ -2119,7 +2129,7 @@ func (d *Daemon) stopClusterComms() {
 	if !current {
 		d.retirePredecessorSessionSync(stoppingSession)
 		d.clusterCommsLifecycleMu.Unlock()
-		return
+		return false
 	}
 
 	stopStillCurrent := func() bool {
@@ -2131,19 +2141,19 @@ func (d *Daemon) stopClusterComms() {
 	if !stopStillCurrent() {
 		d.retirePredecessorSessionSync(stoppingSession)
 		d.clusterCommsLifecycleMu.Unlock()
-		return
+		return false
 	}
 	d.resetDHCPLeaseSyncLoop()
 	if !stopStillCurrent() {
 		d.retirePredecessorSessionSync(stoppingSession)
 		d.clusterCommsLifecycleMu.Unlock()
-		return
+		return false
 	}
 	d.resetIPsecSASyncLoop()
 	if !stopStillCurrent() {
 		d.retirePredecessorSessionSync(stoppingSession)
 		d.clusterCommsLifecycleMu.Unlock()
-		return
+		return false
 	}
 	if d.cluster != nil {
 		d.cluster.StopHeartbeat()
@@ -2154,7 +2164,7 @@ func (d *Daemon) stopClusterComms() {
 		d.clusterCommsMu.Unlock()
 		d.retirePredecessorSessionSync(stoppingSession)
 		d.clusterCommsLifecycleMu.Unlock()
-		return
+		return false
 	}
 	d.sessionSync = nil
 	for slot := range d.fabricSlots {
@@ -2209,7 +2219,18 @@ func (d *Daemon) stopClusterComms() {
 	if d.cluster != nil && ss != nil {
 		d.cluster.ClearPeerSyncSourceIfCurrent(ss)
 	}
+	if finalize != nil {
+		d.clusterCommsMu.Lock()
+		stillCurrent := d.clusterCommsGen == stopGen && d.sessionSync == ss
+		d.clusterCommsMu.Unlock()
+		if !stillCurrent {
+			d.clusterCommsLifecycleMu.Unlock()
+			return false
+		}
+		finalize()
+	}
 	d.clusterCommsLifecycleMu.Unlock()
+	return true
 }
 
 // noteSessionSyncRetired records the peer as disconnected when the published

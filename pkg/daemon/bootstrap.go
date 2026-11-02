@@ -760,7 +760,7 @@ func (d *Daemon) relinquishClusterForBootstrap() []bootstrapTeardownStep {
 	// Stop heartbeats, session sync and the fabric refresh loops. Until this
 	// runs the peer keeps seeing a healthy node and keeps syncing sessions to
 	// one whose dataplane is about to be detached.
-	d.stopClusterComms()
+	d.stopClusterCommsAndClearFabricWatcher()
 	// #7901: this teardown does NOT restart. Without the mark, recovery depends
 	// on the corrected commit happening to move a transport endpoint.
 	d.markClusterCommsRestartNeeded()
