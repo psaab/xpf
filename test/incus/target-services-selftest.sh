@@ -315,7 +315,12 @@ for arg in "$@"; do
 done
 echo "ss ${port}" >> "${FAKE_LOG:?}"
 case "$port" in
-  5201) echo 'LISTEN 0 4096 0.0.0.0:5201 0.0.0.0:* users:(("iperf3",pid=146115,fd=3),("iperf3",pid=2002,fd=3),("iperf3",pid=2003,fd=4))' ;;
+  5201)
+    if [[ "${FAKE_FAILED_IPERF:-0}" == 1 ]]; then
+      echo 'LISTEN 0 4096 0.0.0.0:5201 0.0.0.0:* users:(("iperf3",pid=146115,fd=3))'
+    else
+      echo 'LISTEN 0 4096 0.0.0.0:5201 0.0.0.0:* users:(("iperf3",pid=146115,fd=3),("iperf3",pid=2002,fd=3),("iperf3",pid=2003,fd=4))'
+    fi ;;
   6201) echo 'LISTEN 0 4096 0.0.0.0:6201 0.0.0.0:* users:(("python3",pid=3000,fd=3),("python3",pid=3001,fd=4),("socat",pid=3101,fd=5))' ;;
 esac
 FAKE
@@ -329,9 +334,13 @@ case "$*" in
       exit 0
     fi
     case "$*" in
-      *MainPID*mouse-iperf3@5201*) echo 2002 ;;
+      *MainPID*mouse-iperf3@5201*)
+        [[ "${FAKE_FAILED_IPERF:-0}" == 1 ]] && echo 0 || echo 2002
+        ;;
       *ControlGroup*mouse-iperf3@5201*)
-        [[ "${FAKE_CGROUP_MISSING:-0}" == 1 ]] || echo /system.slice/mouse-iperf3@5201.service
+        if [[ "${FAKE_CGROUP_MISSING:-0}" != 1 && "${FAKE_FAILED_IPERF:-0}" != 1 ]]; then
+          echo /system.slice/mouse-iperf3@5201.service
+        fi
         ;;
       *MainPID*mouse-echo*) echo 3000 ;;
       *ControlGroup*mouse-echo*) echo /system.slice/mouse-echo.service ;;
@@ -372,6 +381,7 @@ case "$1" in
       script="${script//\/proc\//${FAKE_PROC_ROOT}/}"
       FAKE_LOG="$FAKE_LOG" FAKE_SYSTEMD="${FAKE_SYSTEMD:-1}" \
         FAKE_CGROUP_MISSING="${FAKE_CGROUP_MISSING:-0}" \
+        FAKE_FAILED_IPERF="${FAKE_FAILED_IPERF:-0}" \
         BASH_ENV="${FAKE_KILL_ENV}" PATH="${FAKE_BIN}:${PATH}" bash -c "$script"
       exit $?
     fi
@@ -382,13 +392,15 @@ STUB3
 chmod +x "${DOWN_TMP}/incus"
 cp "$SUBJECT" "${DOWN_TMP}/target-services.sh"
 run_down() {
-    local target="$1" alias="$2" systemd="$3" cgroup_missing="${4:-0}"
+    local target="$1" alias="$2" systemd="$3" \
+        cgroup_missing="${4:-0}" failed_iperf="${5:-0}"
     : > "$FAKE_LOG"
     env PATH="${DOWN_TMP}:${PATH}" FAKE_BIN="${DOWN_TMP}/bin" \
         FAKE_KILL_ENV="${DOWN_TMP}/bin/kill" FAKE_PROC_ROOT="${DOWN_TMP}/proc" \
         FAKE_LOG="$FAKE_LOG" \
         FAKE_TARGET_IP="$target" FAKE_SYSTEMD="$systemd" \
         FAKE_CGROUP_MISSING="$cgroup_missing" \
+        FAKE_FAILED_IPERF="$failed_iperf" \
         TARGET_V4="$target" TARGET_ALIAS_V4="$alias" \
         MOUSE_TARGET_V4=172.16.80.201 INCUS_REMOTE=loss \
         bash "${DOWN_TMP}/target-services.sh" down 2>&1
@@ -409,8 +421,32 @@ grep -q '^ss 6201$' "$FAKE_LOG" \
     || fail "#18626: echo listener port was not inspected (self-matched shell?): $(cat "$FAKE_LOG")"
 grep -q '^systemctl stop ' "$FAKE_LOG" \
     || fail "#18626: systemd units were not stopped: $(cat "$FAKE_LOG")"
+
+if ! awk '
+    /^ss 6201$/ { echo_sweep = NR }
+    /^systemctl stop / { stop_units = NR }
+    END { exit !(echo_sweep && stop_units > echo_sweep) }
+' "$FAKE_LOG"; then
+    fail "#18626: systemd stop ran before the echo orphan sweep: $(cat "$FAKE_LOG")"
+fi
+
 if grep -Eq '^kill .* (2002|2003|3000|3001)$' "$FAKE_LOG"; then
     fail "#18626: killed a listener in its unit MainPID/cgroup: $(cat "$FAKE_LOG")"
+fi
+# A failed mouse unit reports MainPID=0 and no ControlGroup. Its detached
+# default-port iperf3 orphan must still be removed by the alias branch.
+down_out="$(run_down 172.16.80.202 172.16.80.202 1 0 1)"; down_rc=$?
+[[ $down_rc -eq 0 ]] || fail "#18626: failed-unit alias down rc=$down_rc: $down_out"
+grep -q '^kill .*146115$' "$FAKE_LOG" \
+    || fail "#18626: failed mouse-iperf3 unit left default-port orphan 146115: $(cat "$FAKE_LOG")"
+grep -q '^kill .*3101$' "$FAKE_LOG" \
+    || fail "#18626: failed-unit alias down skipped the echo orphan: $(cat "$FAKE_LOG")"
+if ! awk '
+    /^ss 6201$/ { echo_sweep = NR }
+    /^systemctl stop / { stop_units = NR }
+    END { exit !(echo_sweep && stop_units > echo_sweep) }
+' "$FAKE_LOG"; then
+    fail "#18626: failed-unit systemd stop ran before the echo sweep: $(cat "$FAKE_LOG")"
 fi
 
 # An active unit with no reported ControlGroup cannot safely classify any
