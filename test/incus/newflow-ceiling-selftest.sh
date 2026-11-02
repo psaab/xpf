@@ -393,6 +393,62 @@ else
 	pass=$((pass + 1))
 	printf 'ok   %-32s -> no unanchored primary/secondary match left in the harness\n' NO_UNANCHORED_GREP
 fi
+# --- WIRING: the harness must take the #1875 cluster lock ----------------
+# The lib cells above cannot see whether the harness itself enters the
+# destructive-cluster cell. Reverting the lock entry, or capturing the
+# original args only after --pool/--rule shifted them away, must fail here.
+wiring_line() { # <extended-regex> -> first matching line in $HARNESS_CODE
+	grep -nE "$1" <<<"$HARNESS_CODE" | head -1 | cut -d: -f1
+}
+w_line_orig="$(wiring_line '^ORIGINAL_ARGS=\(')"
+w_line_lock_src="$(wiring_line '^source .*cluster-cell\.sh')"
+w_line_lock_call="$(wiring_line '^xpf_enter_destructive_cluster_cell ')"
+w_line_parse="$(wiring_line '^while \[\[ \$# -gt 0 \]\]')"
+w_line_first_exec="$(wiring_line 'incus_cmd exec|incus exec')"
+wiring_ok=1
+wiring_detail=""
+if [[ -z "$w_line_orig" || -z "$w_line_parse" ]] || (( w_line_orig >= w_line_parse )); then
+	wiring_ok=0
+	wiring_detail="ORIGINAL_ARGS must be captured before the argument parser shifts \$@ (orig=${w_line_orig:-missing} parse=${w_line_parse:-missing})"
+fi
+if [[ "$wiring_ok" -eq 1 && ( -z "$w_line_lock_src" || -z "$w_line_lock_call" || -z "$w_line_first_exec" ) ]]; then
+	wiring_ok=0
+	wiring_detail="harness must source cluster-cell.sh and call xpf_enter_destructive_cluster_cell before its first incus exec (source=${w_line_lock_src:-missing} call=${w_line_lock_call:-missing} first-exec=${w_line_first_exec:-missing})"
+fi
+if [[ "$wiring_ok" -eq 1 ]] && ! (( w_line_lock_src < w_line_lock_call && w_line_lock_call < w_line_first_exec )); then
+	wiring_ok=0
+	wiring_detail="lock order must be source < call < first incus exec (source=$w_line_lock_src call=$w_line_lock_call first-exec=$w_line_first_exec)"
+fi
+if [[ "$wiring_ok" -eq 1 ]] && ! grep -q -- '--src-bind' <<<"$HARNESS_CODE"; then
+	wiring_ok=0
+	wiring_detail="harness must accept --src-bind (harness SRC_BIND override)"
+fi
+if [[ "$wiring_ok" -eq 1 ]] && ! grep -q -- '--target-ip' <<<"$HARNESS_CODE"; then
+	wiring_ok=0
+	wiring_detail="harness must accept --target-ip (harness TARGET_IP override)"
+fi
+if [[ "$wiring_ok" -eq 1 ]] && ! grep -qF '"${ORIGINAL_ARGS[@]}"' <<<"$HARNESS_CODE"; then
+	wiring_ok=0
+	wiring_detail="lock entry must expand the ORIGINAL_ARGS captured before parsing"
+fi
+w_line_dryrun="$(wiring_line '^if \[\[ "\$DRY_RUN" == "1" \]\]; then')"
+w_line_dryexit="$(wiring_line '^    exit 0$')"
+if [[ "$wiring_ok" -eq 1 && ( -z "$w_line_dryrun" || -z "$w_line_dryexit" ) ]]; then
+	wiring_ok=0
+	wiring_detail="dry-run must have an early exit before the lock preamble (dry-run=${w_line_dryrun:-missing} exit=${w_line_dryexit:-missing})"
+fi
+if [[ "$wiring_ok" -eq 1 ]] && ! (( w_line_dryrun < w_line_dryexit && w_line_dryexit < w_line_lock_src )); then
+	wiring_ok=0
+	wiring_detail="dry-run exit must precede cluster-cell.sh source (dry-run=$w_line_dryrun exit=$w_line_dryexit source=$w_line_lock_src)"
+fi
+if [[ "$wiring_ok" -eq 1 ]]; then
+	pass=$((pass + 1))
+	printf 'ok   %-32s -> harness captures ORIGINAL_ARGS before parsing, enters the cluster lock (source < call < first incus exec) with those args, and accepts --src-bind/--target-ip\n' LOCK_WIRING
+else
+	fail=$((fail + 1))
+	printf 'FAIL %-32s -> %s\n' LOCK_WIRING "$wiring_detail"
+fi
+
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
