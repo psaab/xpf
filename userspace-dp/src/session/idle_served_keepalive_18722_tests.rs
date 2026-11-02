@@ -9,13 +9,15 @@
 //! held until the table or the pool filled.
 //!
 //! The contract these cells pin:
-//! 1. A completed row is its own serving pair, so node-level evidence
-//!    cannot retain it. It reaps one window after its last packet in
-//!    either direction (`companion_keeps_alive`) and emits its Close.
+//! 1. A completed row normally reaps from its own packet timestamp. A static
+//!    own-mirror baseline or unrelated identity cannot keep it; a matching
+//!    sibling total ahead of local counters may bridge only its evidence
+//!    cadence, after which frozen evidence reaps with a Close.
 //! 2. An OPENING row (the #16223 split-posture replica) is kept only
-//!    while the node-wide served packet total ADVANCES between checks.
-//! 3. Once that total stops, the opening row reaps within two of its
-//!    windows: the first crossed check may still see the last advance.
+//!    while matching node-wide served evidence advances or remains within its
+//!    bounded cadence grace.
+//! 3. Once that evidence ages out, the replica reaps within its cadence +
+//!    configured window bound.
 //!
 //! Time is simulated (explicit `now_ns`), never the wall clock (#8218).
 
@@ -55,17 +57,15 @@ fn shared_established(served: u64) -> NodeServedEvidence {
 
 /// THE #18722 SHAPE: a locally authored TCP flow, handshake complete and
 /// answered (forward SYN, reverse SYN-ACK, forward ACK, then data both
-/// ways, all accounted), then silent. The HA context reports what
-/// production reports for it: its own shared row, Established, with the
-/// counts the ct-slice last restamped (frozen, because nothing moves).
-/// Idle past the established window, BOTH halves must reap and the
-/// forward half must emit its Close (the RT_FLOW close and the HA Close
-/// both ride that delta).
+/// ways, all accounted), then silent. The HA context reports the production
+/// shared row with this flow's exact canonical identity and the same packet
+/// total as the local forward row: this is a static own-mirror baseline, not
+/// evidence that an RSS sibling has advanced it. Idle past the established
+/// window, BOTH halves must reap and the forward half must emit its Close.
 ///
-/// RED pre-fix: both halves are re-stamped to `now_ns` by the node-level
-/// arm and nothing expires. Also red with only the advance check (no
-/// opening gate): the first crossed check reads the frozen total as an
-/// advance over the zero baseline and keeps the pair one more window.
+/// RED with the #18742 Cycle 2 count gate: the nonzero own-mirror count was
+/// compared with the row's initially-zero evidence baseline and mistaken for
+/// fresh sibling service, so both halves missed their Close.
 #[test]
 fn idle_established_served_flow_reaps_with_its_close_18722() {
     let mut table = SessionTable::new();
@@ -119,7 +119,19 @@ fn idle_established_served_flow_reaps_with_its_close_18722() {
     );
     let _ = table.drain_deltas(64);
 
-    let frozen = shared_established(4);
+    let local_forward = table.entry_by_key(&forward).expect("forward");
+    let shared_count = local_forward
+        .counters
+        .fwd_packets
+        .saturating_add(local_forward.counters.rev_packets);
+    let frozen = NodeServedEvidence {
+        handshake_wire: TcpHandshakeState::Established.to_wire(),
+        shared_established: true,
+        shared_incarnation: Some((table.session_id_for(&forward), 0)),
+        shared_served: Some(shared_count),
+        shared_evidence_max_cadence_ns: Some(NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS),
+        ..NodeServedEvidence::default()
+    };
     let node_served = move |_: &SessionKey| frozen;
     let forwards = |_: i32| true;
     let epoch = |_: i32| 0u32;
@@ -1007,11 +1019,9 @@ fn pair_exception_non_tcp_never_takes_the_arm_18722() {
 }
 
 /// PAIR-MODEL EXCEPTION 3: a completed local row rejects shared evidence
-/// without its matching canonical session identity. Even if shared packet
-/// counts are live and advancing, unknown identity cannot protect this
-/// session. Its retention remains `companion_keeps_alive`'s alone, so with
-/// no packets on either of its own halves it reaps one window after its last
-/// packet.
+/// from an unrelated canonical session identity. Even if the other session's
+/// shared packet count is live and advancing, it cannot protect this row.
+/// Without packets on either local half, the pair reaps on its own window.
 #[test]
 fn pair_exception_completed_local_row_rejects_unrelated_shared_identity_18722() {
     let t0 = 1_000 * SEC;
@@ -1052,7 +1062,7 @@ fn pair_exception_completed_local_row_rejects_unrelated_shared_identity_18722() 
     assert_eq!(
         table.last_pop_stats().kept_alive_by_companion,
         0,
-        "#18722: unidentified advancing evidence must not keep a completed local row"
+        "#18722: advancing evidence from another session must not keep a completed local row"
     );
     assert!(
         table.entry_by_key(&forward).is_none() && table.entry_by_key(&reverse).is_none(),

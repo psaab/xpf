@@ -396,12 +396,12 @@ mod flow_cache_invalidation_tests {
         );
     }
 
-    /// #18742 Cycle 2: RSS moved a locally-authored completed row from A to B.
-    /// B still serves the same session incarnation and restamps its shared
-    /// counters; A's expiry/teardown must preserve B's live conntrack mirror.
-    /// RED before the same-incarnation local-row exception: the completed-local
-    /// gate discards B's advancing evidence and A's unfenced teardown deletes
-    /// the mirror.
+    /// #18742 Cycle 2 follow-up: A's completed local pair has a 5 s window;
+    /// RSS moves service to B, whose shared evidence restamps every modeled
+    /// 30 s cycle. A must survive multiple crossed checks on the same recent
+    /// count, then retain on B's next restamp. When restamps stop, the frozen
+    /// evidence ages out and A's GC reaps its rows and mirror.
+    /// RED without cadence grace: check 2 reaped A while B remained live.
     #[test]
     fn rss_moved_completed_local_row_preserves_sibling_mirror_18722() {
         const SEC: u64 = 1_000_000_000;
@@ -414,6 +414,9 @@ mod flow_cache_invalidation_tests {
         // Worker A authored the completed pair. Its session id is the
         // incarnation B adopts when RSS starts delivering the flow there.
         let mut table_a = crate::session::SessionTable::new();
+        let mut short_timeouts = crate::session::SessionTimeouts::default();
+        short_timeouts.tcp_established_ns = 5 * SEC;
+        table_a.set_timeouts(short_timeouts);
         assert!(table_a.install_with_protocol_with_origin(
             key.clone(),
             reap_decision(None),
@@ -490,7 +493,9 @@ mod flow_cache_invalidation_tests {
         );
 
         let node_served = |k: &SessionKey| {
-            crate::afxdp::shared_ops::shared_node_served_evidence(&shared, k)
+            let mut evidence = crate::afxdp::shared_ops::shared_node_served_evidence(&shared, k);
+            evidence.shared_evidence_max_cadence_ns = Some(30 * SEC);
+            evidence
         };
         let forwards = |_: i32| true;
         let epoch = |_: i32| 0u32;
@@ -530,7 +535,56 @@ mod flow_cache_invalidation_tests {
         assert!(mirror_row(), "premise: B's mirror row exists");
 
         let window = table_a.timeout_secs_for(&key) as u64 * SEC;
-        let now = t0 + window + 2 * SEC;
+        assert_eq!(window, 5 * SEC, "premise: A uses the short configured window");
+        let check_step = window + SEC;
+        let mut now = t0 + check_step;
+        for check in 1..=3 {
+            // Shared evidence remains at B's first restamp for three crossed
+            // checks while B continues to account packets locally.
+            let expired = table_a.expire_stale_entries_ha(now, Some(&ha));
+            let reaped_flow = expired.iter().any(|entry| entry.key == key || entry.key == reverse);
+            reap_expired_sessions(
+                std::slice::from_mut(&mut binding),
+                &expired,
+                &forwarding,
+                SteeringMap::unshared_for_test(-1),
+                ct,
+                ct,
+                now,
+                0,
+                &shared,
+            );
+            let descriptor_live = cache_hits(&mut binding, &key, &rg_epochs);
+            assert!(
+                !reaped_flow
+                    && table_a.session_id_for(&key) == session_id
+                    && table_a.session_id_for(&reverse) == reverse_id
+                    && mirror_row()
+                    && descriptor_live
+                    && table_b.session_id_for(&key) == session_id,
+                "#18742: check={check} reaped={reaped_flow}, mirror={}, descriptor={descriptor_live}, \
+                 B-live={}; matching shared activity must cover crossed checks within its cadence",
+                mirror_row(),
+                table_b.session_id_for(&key) == session_id
+            );
+            if check < 3 {
+                table_b.account_packet(&key, 64, crate::tcp_flags::TCP_ACK, 0);
+            }
+            now += check_step;
+        }
+
+        // B's next production-style restamp advances the shared count after
+        // the intervening expiry checks; A must observe and retain on it.
+        crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+            &shared,
+            &wires,
+            &[(
+                key.clone(),
+                NatDecision::default(),
+                table_b.fwd_packets_for(&key),
+                table_b.rev_packets_for(&key),
+            )],
+        );
         let expired = table_a.expire_stale_entries_ha(now, Some(&ha));
         let reaped_flow = expired.iter().any(|entry| entry.key == key || entry.key == reverse);
         reap_expired_sessions(
@@ -544,21 +598,56 @@ mod flow_cache_invalidation_tests {
             0,
             &shared,
         );
+        let descriptor_live = cache_hits(&mut binding, &key, &rg_epochs);
         assert!(
             !reaped_flow
                 && table_a.session_id_for(&key) == session_id
                 && table_a.session_id_for(&reverse) == reverse_id
                 && mirror_row()
-                && cache_hits(&mut binding, &key, &rg_epochs)
+                && descriptor_live
                 && table_b.session_id_for(&key) == session_id,
-            "#18742: A's GC reaped={reaped_flow}, mirror={}, descriptor={}, B-live={}; \
-             advancing same-incarnation service on B must protect its mirror",
+            "#18742: restamped sibling count reaped={reaped_flow}, mirror={}, \
+             descriptor={descriptor_live}, B-live={}; the next shared advance must retain A's row",
             mirror_row(),
-            cache_hits(&mut binding, &key, &rg_epochs),
             table_b.session_id_for(&key) == session_id
         );
-    }
 
+        // Once B stops restamping, the frozen matching evidence is bounded by
+        // its cadence. A eventually reaps and its GC removes the stale mirror.
+        let cadence = 30 * SEC;
+        let idle_checks = (cadence / check_step + 2) as usize;
+        let mut reaped_when_idle = false;
+        for _ in 0..idle_checks {
+            now += check_step;
+            let expired = table_a.expire_stale_entries_ha(now, Some(&ha));
+            let reaped_flow = expired.iter().any(|entry| entry.key == key || entry.key == reverse);
+            reap_expired_sessions(
+                std::slice::from_mut(&mut binding),
+                &expired,
+                &forwarding,
+                SteeringMap::unshared_for_test(-1),
+                ct,
+                ct,
+                now,
+                0,
+                &shared,
+            );
+            if reaped_flow {
+                reaped_when_idle = true;
+                break;
+            }
+        }
+        assert!(
+            reaped_when_idle
+                && table_a.session_id_for(&key) == 0
+                && table_a.session_id_for(&reverse) == 0
+                && !mirror_row()
+                && !cache_hits(&mut binding, &key, &rg_epochs),
+            "#18742: frozen sibling evidence must eventually reap A's rows and mirror"
+        );
+
+
+    }
     // #16223/#17683: a WorkerLocalImport replica's expiry must NOT evict
     // the serving pair's cache or release its NAT state. Its own exact
     // persistent lease reference is still released while the serving entry's

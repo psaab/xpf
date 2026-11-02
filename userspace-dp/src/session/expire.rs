@@ -920,12 +920,13 @@ impl SessionTable {
     ///
     /// #18722: two bounds.
     /// - A completed row authored/promoted here normally ages on its own
-    ///   packet timestamp. After RSS moves the flow to a sibling, however,
-    ///   that local row must survive a GC pass when the sibling's shared
-    ///   forward-row counters advance under this row's exact session identity.
-    ///   A different or unknown shared identity cannot protect it. A
-    ///   peer-synced replica still uses the node-level arm for all matching
-    ///   shared evidence, because it may serve neither direction locally.
+    ///   packet timestamp. After RSS moves service to a sibling, it can use
+    ///   the node-level arm only when the exact canonical shared identity has
+    ///   a packet total above this node's forward-row counters. That proof can
+    ///   bridge unchanged counts only until the computed evidence cadence
+    ///   expires; the row's own static mirror count or another identity cannot
+    ///   protect it. Peer-synced replicas still use matching node evidence
+    ///   because they may serve neither direction locally.
     /// - The node-level arm needs RECENT service, not the cumulative proof
     ///   alone: it keeps the row only when a PRESENT evidence contributor
     ///   (`local_served`, `shared_served`) changed from the row's baseline
@@ -952,29 +953,55 @@ impl SessionTable {
             return false;
         }
         // #18722: completed rows this node authored/promoted normally age on
-        // their own packet timestamps. #18742 Cycle 2 admits only an advancing
-        // shared count from this flow's exact canonical forward identity; this
-        // protects a locally-authored row after RSS moves service to a sibling
-        // without letting unrelated shared evidence retain local sessions.
+        // their own packet timestamps. #18742 Cycle 2 admits the node-level
+        // arm only for a same-incarnation shared count that is ahead of this
+        // node's canonical forward counters. This rejects the static copy of
+        // the row's own mirror baseline while allowing an RSS sibling's
+        // advancing service to retain the local row.
         let completed_local_row =
             entry.established && !entry.handshake_pending && !entry.origin.is_peer_synced();
-        let matching_local_shared_advance = if completed_local_row {
-            let expected_session_id = if entry.metadata.is_reverse {
-                let forward = reverse_session_key(key, entry_nat);
-                self.session_id_for(&forward)
-            } else {
-                entry.session_id
-            };
+        let shared_evidence_max_cadence_ns = node_evidence
+            .shared_evidence_max_cadence_ns
+            .unwrap_or(NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS);
+        let (expected_session_id, local_forward_packets) = if entry.metadata.is_reverse {
+            let forward = reverse_session_key(key, entry_nat);
+            self.entry_by_key(&forward)
+                .map(|forward_entry| {
+                    (
+                        forward_entry.session_id,
+                        forward_entry
+                            .counters
+                            .fwd_packets
+                            .saturating_add(forward_entry.counters.rev_packets),
+                    )
+                })
+                .unwrap_or((0, 0))
+        } else {
+            (
+                entry.session_id,
+                entry
+                    .counters
+                    .fwd_packets
+                    .saturating_add(entry.counters.rev_packets),
+            )
+        };
+        let matching_local_shared_activity = if completed_local_row {
             expected_session_id != 0
                 && node_evidence.shared_established
                 && node_evidence.shared_incarnation == Some((expected_session_id, 0))
-                && node_evidence.shared_served.is_some_and(|shared| {
-                    shared > entry.node_served_seen_shared
-                })
+                && node_evidence
+                    .shared_served
+                    .is_some_and(|shared| {
+                        shared > local_forward_packets
+                            && (shared > entry.node_served_seen_shared
+                                || (entry.node_served_last_change_ns != 0
+                                    && now_ns.saturating_sub(entry.node_served_last_change_ns)
+                                        <= shared_evidence_max_cadence_ns))
+                    })
         } else {
             false
         };
-        if completed_local_row && !matching_local_shared_advance {
+        if completed_local_row && !matching_local_shared_activity {
             return false;
         }
         // #16223 (node-level first): a promoted serving companion for
@@ -985,19 +1012,21 @@ impl SessionTable {
         // with no local companion, and the fw0 replicas are pure
         // Opening.
         //
-        // #18722: retain on the serving pair's RECENT activity. A count or
-        // incarnation change is activity. A shared count can remain unchanged
-        // for one full ct-slice evidence cadence: 10 s by default and longer
-        // when HA imports grow the live session-table slab. Shorter configured
-        // idle windows therefore use the current worker's computed cycle bound
-        // as evidence-age grace. The grace never advances
-        // node_served_last_change_ns: frozen evidence expires after its cycle
-        // and the next crossed check.
+        // #18722: a shared count can remain unchanged for one full ct-slice
+        // evidence cadence: 10 s by default and longer when HA imports grow
+        // the live session-table slab. Shorter configured idle windows use
+        // that computed cycle as evidence-age grace; frozen evidence never
+        // renews its own timestamp. Completed local rows additionally require
+        // an exact identity and a shared total ahead of their local forward
+        // counters. Their timestamp advances only on shared changes, so the
+        // static own-mirror baseline and local-only count changes cannot
+        // renew sibling proof.
         if node_evidence.promoted_and_served() {
             let Some(em) = self.entry_by_key_mut(key) else {
                 return false;
             };
             let mut advanced = false;
+            let mut shared_advanced = false;
             if let Some(local) = node_evidence.local_served {
                 advanced |= local != em.node_served_seen_local;
                 em.node_served_seen_local = local;
@@ -1010,7 +1039,10 @@ impl SessionTable {
                             && (session_id != em.node_served_seen_shared_session_id
                                 || generation != em.node_served_seen_shared_generation)
                     });
-                advanced |= shared != em.node_served_seen_shared || incarnation_changed;
+                let shared_changed =
+                    shared != em.node_served_seen_shared || incarnation_changed;
+                advanced |= shared_changed;
+                shared_advanced |= shared_changed;
                 em.node_served_seen_shared = shared;
                 if let Some((session_id, generation)) = node_evidence.shared_incarnation
                     && (session_id != 0 || generation != 0)
@@ -1019,12 +1051,13 @@ impl SessionTable {
                     em.node_served_seen_shared_generation = generation;
                 }
             }
-            if advanced {
+            if if completed_local_row {
+                shared_advanced
+            } else {
+                advanced
+            } {
                 em.node_served_last_change_ns = now_ns;
             }
-            let shared_evidence_max_cadence_ns = node_evidence
-                .shared_evidence_max_cadence_ns
-                .unwrap_or(NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS);
             let shared_evidence_recent = node_evidence.shared_served.is_some()
                 && em.node_served_last_change_ns != 0
                 && now_ns.saturating_sub(em.node_served_last_change_ns)
