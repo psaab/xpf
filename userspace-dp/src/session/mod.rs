@@ -3646,6 +3646,8 @@ impl SessionTable {
     ) -> Option<crate::afxdp::SyncedSessionEntry> {
         let entry = self.entry_by_key(key)?;
         Some(crate::afxdp::SyncedSessionEntry {
+            // This local snapshot has no sibling-owned packet timestamp;
+            // publish_shared_session preserves the prior same-ID value.
             sibling_last_seen_ns: 0,
             key: key.clone(),
             decision: entry.decision,

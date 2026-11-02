@@ -270,6 +270,14 @@ impl SessionTable {
                     // just below. Snapshot it (Copy) before the immutable
                     // `entry` borrow is dropped.
                     let e_nat = entry.decision.nat;
+                    let e_session_id = if e_is_reverse {
+                        let forward = reverse_session_key(&key, e_nat);
+                        self.entry_by_key(&forward)
+                            .map(|forward_entry| forward_entry.session_id)
+                            .unwrap_or(0)
+                    } else {
+                        entry.session_id
+                    };
                     let e_reset = entry.reset;
                     let e_closing = entry.closing;
                     let e_fin_own = entry.fin_own;
@@ -440,6 +448,38 @@ impl SessionTable {
                         self.last_pop_stats.kept_alive_by_companion += 1;
                         continue;
                     }
+                    // #18742: a short configured timeout must not physically
+                    // erase an eligible row before its exact Established
+                    // sibling can publish the next packet-evidence pass. This
+                    // floor affects wheel retention only; lookup liveness
+                    // continues to use the configured expires_after_ns.
+                    let mut shared_node_evidence = None;
+                    if companion_eligible
+                        && key.protocol == PROTO_TCP
+                        && !e_closing
+                        && e_session_id != 0
+                        && let Some(ha) = ha
+                    {
+                        let shared = (ha.node_served)(&key);
+                        shared_node_evidence = Some(shared);
+                        if shared.shared_established
+                            && shared.shared_incarnation == Some((e_session_id, 0))
+                        {
+                            let cadence_ns = shared
+                                .shared_evidence_max_cadence_ns
+                                .unwrap_or(NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS);
+                            let retention_floor_ns = e_expires_after_ns
+                                .max(cadence_ns.saturating_add(SESSION_GC_INTERVAL_NS));
+                            if now_ns.saturating_sub(e_last_seen_ns) < retention_floor_ns {
+                                self.defer_expiry_until(
+                                    &key,
+                                    now_ns,
+                                    e_last_seen_ns.saturating_add(retention_floor_ns),
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     // #16223: node-level evidence is consulted BEFORE
                     // the local refusals inside
                     // `opening_companion_keeps_alive`: the HA context's
@@ -451,7 +491,8 @@ impl SessionTable {
                     let node_evidence = {
                         let mut ev = self.node_served_evidence(&key);
                         if let Some(ha) = ha {
-                            let shared = (ha.node_served)(&key);
+                            let shared = shared_node_evidence
+                                .unwrap_or_else(|| (ha.node_served)(&key));
                             if shared.handshake_wire
                                 == TcpHandshakeState::Established.to_wire()
                             {
@@ -665,6 +706,27 @@ impl SessionTable {
         self.wheel.buckets[new_bucket].push_back(WheelEntry {
             key: key.clone(),
             scheduled_tick: new_target_tick,
+        });
+        self.last_pop_stats.re_bucketed += 1;
+    }
+
+    /// Recheck an idle-crossed row at a retention-only deadline. Unlike
+    /// `rebucket_alive_entry`, this leaves the configured idle window and
+    /// packet-activity anchor unchanged.
+    fn defer_expiry_until(&mut self, key: &SessionKey, now_ns: u64, deadline_ns: u64) {
+        let scheduled_tick = target_tick_for(now_ns, deadline_ns);
+        let bucket = bucket_for_tick(scheduled_tick);
+        let entry = self
+            .entry_by_key_mut(key)
+            .expect("retention defer: entry was just read from the expiry wheel");
+        entry.wheel_tick = scheduled_tick;
+        entry.held_wheel_tick = 0;
+        entry.held_wheel_last_seen_ns = 0;
+        entry.held_wheel_expires_after_ns = 0;
+        entry.held_wheel_first_held_ns = 0;
+        self.wheel.buckets[bucket].push_back(WheelEntry {
+            key: key.clone(),
+            scheduled_tick,
         });
         self.last_pop_stats.re_bucketed += 1;
     }
@@ -965,6 +1027,12 @@ impl SessionTable {
         let shared_evidence_max_cadence_ns = node_evidence
             .shared_evidence_max_cadence_ns
             .unwrap_or(NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS);
+        // The expiry wheel and shared-evidence cycle are asynchronous. The
+        // GC interval covers pass ordering; one wheel tick covers quantized
+        // scheduling when the retention deadline falls between tick edges.
+        let shared_evidence_freshness_ns = shared_evidence_max_cadence_ns
+            .saturating_add(SESSION_GC_INTERVAL_NS)
+            .saturating_add(WHEEL_TICK_NS);
         let expected_session_id = if entry.metadata.is_reverse {
             let forward = reverse_session_key(key, entry_nat);
             self.entry_by_key(&forward)
@@ -981,7 +1049,7 @@ impl SessionTable {
                     .shared_sibling_last_seen_ns
                     .is_some_and(|sibling_last_seen_ns| {
                         now_ns.saturating_sub(sibling_last_seen_ns)
-                            <= shared_evidence_max_cadence_ns
+                            <= shared_evidence_freshness_ns
                     })
         } else {
             false
@@ -998,11 +1066,12 @@ impl SessionTable {
         // Opening.
         //
         // #18722: the shared sibling timestamp is a packet timestamp, not a
-        // restamp timestamp. Shorter configured idle windows use the computed
-        // ct-slice cadence as evidence-age grace; a frozen timestamp still
-        // ages out. Completed local rows require the exact shared incarnation
-        // and a recent sibling timestamp, so owner-only mirror counts cannot
-        // renew them.
+        // restamp timestamp. #18742 gives exact established identities a
+        // retention-only wheel floor through the current evidence cadence;
+        // the configured idle timeout still governs packet lookups. Once the
+        // evidence cycle has run, a frozen timestamp ages out. Completed local
+        // rows still require the exact shared incarnation and recent packet
+        // timestamp, so owner-only mirror counts cannot renew them.
         if node_evidence.promoted_and_served() {
             let Some(em) = self.entry_by_key_mut(key) else {
                 return false;
@@ -1043,10 +1112,10 @@ impl SessionTable {
             let shared_evidence_recent = node_evidence.shared_served.is_some()
                 && em.node_served_last_change_ns != 0
                 && now_ns.saturating_sub(em.node_served_last_change_ns)
-                    <= shared_evidence_max_cadence_ns;
+                    <= shared_evidence_freshness_ns;
             let sibling_evidence_recent = node_evidence.shared_sibling_last_seen_ns
                 .is_some_and(|last_seen_ns| {
-                    now_ns.saturating_sub(last_seen_ns) <= shared_evidence_max_cadence_ns
+                    now_ns.saturating_sub(last_seen_ns) <= shared_evidence_freshness_ns
                 });
             if advanced || shared_evidence_recent || sibling_evidence_recent {
                 em.last_seen_ns = now_ns;

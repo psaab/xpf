@@ -654,6 +654,15 @@ The evidence is scoped and bounded (#18722/#18742):
   only because its next production restamp falls after a shorter configured
   window.
 
+For physical GC, an idle-crossed nonclosing TCP row with a matching
+Established shared incarnation receives a retention-only deadline of
+`max(expires_after_ns, shared_evidence_max_cadence_ns + SESSION_GC_INTERVAL_NS)`.
+The expiry wheel uses the live cadence supplied by housekeeping from the same
+refresh-walk slab bound; this does not change the configured timeout used by
+packet lookups or re-stamp packet activity. The next wheel check can observe
+the sibling's packet timestamp within one additional wheel tick. If the shared
+packet time remains frozen, the row is reaped after that evidence ages out.
+
 **Decision model: one decision per PAIR (#18722/#18742).** Read this model,
 not the patch history: per-half gates and baselines produced false reaps and
 false activity, so a tuple-level KEEP aligns both halves.

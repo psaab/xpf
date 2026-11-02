@@ -1550,3 +1550,73 @@ fn mixed_zone_windows_may_reap_pair_halves_in_different_passes_18722() {
         (reverse_reaped_at - t0) / SEC
     );
 }
+/// #18742 escalation: a completed local row's sibling packet arrives just
+/// after a shared evidence pass. Its configured 5 s idle window is shorter
+/// than the modeled 30 s refresh-walk cadence for an oversized live slab.
+#[test]
+fn completed_local_waits_for_dynamic_sibling_evidence_cycle_18742() {
+    let t0 = 1_000 * SEC;
+    let cadence = 30 * SEC;
+    let window = 5 * SEC;
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&reverse, t0 + MS, TCP_SYN | TCP_ACK)
+        .is_some());
+    table.account_packet(&reverse, 60, TCP_SYN | TCP_ACK, 0);
+    let last = t0 + 2 * MS;
+    assert!(table
+        .lookup_with_origin(&forward, last, TCP_ACK)
+        .is_some());
+    table.account_packet(&forward, 52, TCP_ACK, 0);
+    let session_id = table.session_id_for(&forward);
+    for key in [&forward, &reverse] {
+        table
+            .entry_by_key_mut(key)
+            .expect("half")
+            .expires_after_ns = window;
+        table.push_to_wheel(key, last);
+    }
+
+    let served = Cell::new(100u64);
+    let sibling_last_seen = Cell::new(None::<u64>);
+    let node_served = |_: &SessionKey| NodeServedEvidence {
+        handshake_wire: TcpHandshakeState::Established.to_wire(),
+        shared_established: true,
+        shared_incarnation: Some((session_id, 0)),
+        shared_served: Some(served.get()),
+        shared_evidence_max_cadence_ns: Some(cadence),
+        shared_sibling_last_seen_ns: sibling_last_seen.get(),
+        ..NodeServedEvidence::default()
+    };
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ha_with(&node_served, &forwards, &epoch);
+
+    // B serves just after the previous pass; A cannot see that packet until
+    // B's next pass at t0 + cadence.
+    let sibling_packet_seen = last;
+    let _ = table.expire_stale_entries_ha(last + window + SEC, Some(&ha));
+    assert!(
+        table.entry_by_key(&forward).is_some() && table.entry_by_key(&reverse).is_some(),
+        "#18742: A must retain its 5 s pair before B's next evidence pass"
+    );
+
+    for second in 7..=32 {
+        let now = last + second * SEC;
+        if second == 30 {
+            served.set(101);
+            sibling_last_seen.set(Some(sibling_packet_seen));
+        }
+        let _ = table.expire_stale_entries_ha(now, Some(&ha));
+        assert!(
+            table.entry_by_key(&forward).is_some() && table.entry_by_key(&reverse).is_some(),
+            "#18742: a live sibling's {cadence:?} evidence cycle was not observed at +{second} s"
+        );
+    }
+    assert!(
+        table.last_pop_stats().kept_alive_by_companion > 0,
+        "anti-vacuity: the post-pass keep must come from shared sibling evidence"
+    );
+}

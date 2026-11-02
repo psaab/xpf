@@ -764,7 +764,11 @@ pub(in crate::afxdp) fn publish_shared_session(
                 same && rank(entry.tcp_handshake_state) < rank(previous.tcp_handshake_state);
             let keep_rev = same && entry.rev_packets < previous.rev_packets;
             let keep_fwd = same && entry.fwd_packets < previous.fwd_packets;
-            if keep_stage || keep_rev || keep_fwd {
+            // #18742: same-incarnation republication must not erase packet
+            // recency advanced by the serving sibling's ct-slice.
+            let keep_sibling_last_seen =
+                same && entry.sibling_last_seen_ns < previous.sibling_last_seen_ns;
+            if keep_stage || keep_rev || keep_fwd || keep_sibling_last_seen {
                 entry_owned = entry.clone();
                 if keep_stage {
                     entry_owned.tcp_handshake_state = previous.tcp_handshake_state;
@@ -774,6 +778,9 @@ pub(in crate::afxdp) fn publish_shared_session(
                 }
                 if keep_fwd {
                     entry_owned.fwd_packets = previous.fwd_packets;
+                }
+                if keep_sibling_last_seen {
+                    entry_owned.sibling_last_seen_ns = previous.sibling_last_seen_ns;
                 }
                 &entry_owned
             } else {
@@ -2187,5 +2194,127 @@ mod handshake_monotonic_16223_tests {
         );
         assert_eq!(ev.rev_packets, 6, "#16217 B5: wire-keyed rev count must be found by keyed get");
         assert_eq!(ev.fwd_packets, 11, "#16217 B5: wire-keyed fwd count must be found by keyed get");
+    }
+
+    /// #18742 escalation: a serving sibling's packet timestamp must survive
+    /// an ordinary same-incarnation republication, then remain visible when
+    /// the completed local row crosses its short idle window.
+    #[test]
+    fn same_id_republication_preserves_sibling_stamp_for_crossed_expiry_18742() {
+        use crate::session::{
+            ExpireHaContext, NodeServedEvidence, SessionInstall, SessionOrigin, SessionTable,
+            TcpHandshakeState,
+        };
+
+        const SEC: u64 = 1_000_000_000;
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let key = key(43313);
+        let t0 = 1_000 * SEC;
+        let wire = TcpHandshakeState::Established.to_wire();
+        let template = entry(&key, wire, 0, false);
+        let mut table = SessionTable::new();
+        let mut metadata = template.metadata.clone();
+        metadata.inactivity_timeout_ns = Some(5 * SEC);
+        assert!(table.upsert_synced_with_origin(
+            SessionInstall {
+                key: key.clone(),
+                decision: template.decision,
+                metadata: metadata.clone(),
+                source_nat_static: None,
+                origin: SessionOrigin::ForwardFlow,
+                now_ns: t0,
+                protocol: template.protocol,
+                tcp_flags: 0,
+                session_id: 0,
+                tcp_close_class: 0,
+                tcp_handshake_state: wire,
+                persistent_lease_hold: None,
+                fwd_packets: 0,
+                rev_packets: 0,
+            },
+            false,
+        ));
+        let session_id = table.session_id_for(&key);
+        assert_ne!(session_id, 0, "premise: A has a stable local incarnation");
+        assert_eq!(
+            table.timeout_secs_for(&key),
+            5,
+            "premise: A has the configured 5 s established window"
+        );
+
+        let mut source = entry(&key, wire, session_id, false);
+        source.fwd_packets = 50;
+        source.rev_packets = 50;
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &source);
+
+        // B serves a packet after the previous evidence pass; its next
+        // production pass stamps the packet timestamp onto the shared row.
+        let sibling_packet_seen = t0 + 1_000_000;
+        let source_namespace = ((session_id >> 48) as u16).wrapping_add(1);
+        crate::afxdp::shared_ops::restamp_shared_packet_counts(
+            &shared,
+            &wire_map,
+            &key,
+            source.decision.nat,
+            source_namespace,
+            sibling_packet_seen,
+            51,
+            50,
+        );
+        let stamped = lock_shared_recover(&shared)
+            .get(&key)
+            .expect("shared row")
+            .sibling_last_seen_ns;
+        assert_eq!(stamped, sibling_packet_seen, "premise: B's packet was stamped");
+
+        // `synced_entry_for` intentionally constructs a fresh publication with
+        // sibling_last_seen_ns=0. The same-ID publish must retain B's stamp.
+        let republished = entry(&key, wire, session_id, false);
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &republished);
+        let after_republication = lock_shared_recover(&shared)
+            .get(&key)
+            .expect("republished shared row")
+            .sibling_last_seen_ns;
+        assert_eq!(
+            after_republication, sibling_packet_seen,
+            "#18742: same-incarnation publication erased B's sibling packet timestamp"
+        );
+
+        let node_served = |candidate: &SessionKey| {
+            let sessions = lock_shared_recover(&shared);
+            let Some(row) = sessions.get(candidate) else {
+                return NodeServedEvidence::default();
+            };
+            NodeServedEvidence {
+                handshake_wire: row.tcp_handshake_state,
+                shared_established: row.tcp_handshake_state == wire,
+                shared_incarnation: Some((row.session_id, row.generation)),
+                shared_evidence_max_cadence_ns: Some(10 * SEC),
+                shared_served: Some(row.fwd_packets.saturating_add(row.rev_packets)),
+                shared_sibling_last_seen_ns: (row.sibling_last_seen_ns != 0)
+                    .then_some(row.sibling_last_seen_ns),
+                ..NodeServedEvidence::default()
+            }
+        };
+        let forwards = |_: i32| true;
+        let epoch = |_: i32| 0u32;
+        let ha = ExpireHaContext {
+            node_active: true,
+            forwards_rg: &forwards,
+            epoch_of: &epoch,
+            ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
+            ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
+            node_served: &node_served,
+        };
+        let _ = table.expire_stale_entries_ha(t0 + 12 * SEC, Some(&ha));
+        assert_eq!(
+            table.timeout_secs_for(&key),
+            5,
+            "#18742: A must retain its crossed row after B's stamp is re-published"
+        );
+        assert!(
+            table.last_pop_stats().kept_alive_by_companion > 0,
+            "anti-vacuity: A's retention must use the republished sibling stamp"
+        );
     }
 }

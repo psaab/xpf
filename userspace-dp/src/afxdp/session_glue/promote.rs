@@ -274,6 +274,8 @@ fn promote_synced_session_with_conntrack(
         // wire field (session_id, close/handshake state, counters,
         // PPTP pair, lease hold, SNAT provenance, leak incarnation) is
         // the live value `synced_entry_for` read in one lookup.
+        // `synced_entry_for` leaves sibling recency empty; the shared
+        // same-incarnation publish merge preserves the serving sibling's stamp.
         let Some(mut promoted_entry) = sessions.synced_entry_for(key) else {
             return promoted;
         };
