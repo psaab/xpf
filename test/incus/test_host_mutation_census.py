@@ -112,6 +112,27 @@ class HostMutationCensusTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("netlink census below floor", result.stderr)
 
+    def test_ip_helper_form_requires_registry_row(self):
+        (self.root / "pkg/routing/ip_helper_test.go").write_text(
+            "package fixture\n"
+            "func run(args ...string) { exec.Command(\"ip\", args...) }\n"
+            "func test() { run(\"ip\", \"link\", \"add\") }\n",
+            encoding="utf-8",
+        )
+        (self.root / "pkg/routing").mkdir(exist_ok=True)
+        (self.root / "pkg/routing/main_test.go").write_text(
+            "package fixture\n"
+            "func TestMain(m *testing.M) {\n"
+            "\ttestguard.ExitIfUnsafe()\n"
+            "\tos.Exit(m.Run())\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        result = self.run_census()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unregistered host-mutation test source", result.stderr)
+        self.assertIn("pkg/routing/ip_helper_test.go", result.stderr)
+
     def test_guard_outside_testmain_is_rejected(self):
         guard = self.root / "pkg/nftables/guard_test.go"
         guard.write_text(

@@ -7,12 +7,15 @@ pkg/daemon/daemon_rpm_test.go	netlink	private-net+mount	package-TestMain:testgua
 pkg/daemon/dhcp_vrf_backstop_12127_test.go	netlink+nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/direct_vip_kernel_18573_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/fabric_overlay_vrf_9813_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
-pkg/daemon/host_inbound_lifeline_ingress_deny_12229_test.go	nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/daemon/host_inbound_ingress_9637_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/daemon/host_inbound_lifeline_ingress_deny_12229_test.go	nft+ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/daemon/host_inbound_reinject_verdict_9637_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/daemon/host_inbound_shared_vrf_12034_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/host_inbound_stale_reply_10752_test.go	netlink+nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/host_input_fence_9506_test.go	nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/hostauth_fence_15539_test.go	nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/lo0_addr_failclosed_6512_test.go	nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
-pkg/daemon/lo0_implicit_discard_vrf_slave_18728_test.go	nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/daemon/lo0_implicit_discard_vrf_slave_18728_test.go	nft+ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/mgmt_vrf_reassert_11448_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/mgmtvrf_backup_linkindex_kernel_12583_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/mgmtvrf_static_ecmp_kernel_12539_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
@@ -25,6 +28,7 @@ pkg/daemon/ri_member_secure_tunnel_unit_12087_test.go	netlink	private-net+mount	
 pkg/daemon/ri_member_spelling_9815_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/ri_member_vrf_reassert_9813_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/transit_barrier_9852_test.go	nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/daemon/webmgmt_vrf_bind_16709_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/zerohop_kernel_truth_18746_test.go	nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/dataplane/armed_gate_legs_test.go	bpf	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run;vm-test-root-for-privileged-map-cells
 pkg/dataplane/armproof_5275_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
@@ -84,6 +88,7 @@ pkg/nftables/zoned_dhcp_lease_window_11577_test.go	netlink+nft	private-net+mount
 pkg/ra/sender_linklocal_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/routing/next_table_carveout_kernel_17971_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/routing/next_table_kernel_16614_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/routing/rule_dscp_kernel_7796_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/routing/tunnel_keepalive_vrf_12083_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/routing/vrf_miss_terminator_9819_test.go	ip	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/snmp/agent_inband_16781_linux_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run

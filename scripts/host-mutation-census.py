@@ -29,14 +29,16 @@ MARKERS = {
         r"(?:exec\.)?Command(?:Context)?\([^\n]*\"nft\"|"
         r"\.Install(?:HostInbound|Lo0|TransitBarrier|ArmedTransitFence)\s*\("
     ),
-    # iproute2 CLI mutations: `ip link/addr/route/rule ... add|set|del|replace`
-    # driven through exec.Command, directly or via an `ip` variable.
-    # An `ip` exec anywhere in the file counts: argument vectors are built
-    # indirectly (run helpers, [][]string tables), so the mutation verbs are
-    # matched on their own anywhere in the same source.
+    # iproute2 CLI mutations, in every in-tree dispatch shape:
+    # exec.Command("ip", ...) / CommandContext(..., "ip", ...), the
+    # run-helper form run("ip", "link"|"addr"|"route"|"rule", ...), the
+    # table form exec.Command("ip", args...), and the LookPath-variable
+    # form exec.Command(ip, ...).
     "ip": re.compile(
         r"(?:exec\.)?Command(?:Context)?\(\s*\"ip\"|"
-        r"\"ip\"\s*,\s*args\.\.\."
+        r"\b\w+\(\s*\"ip\"\s*,\s*\"(?:link|addr|route|rule)\"|"
+        r"\"ip\"\s*,\s*args\.\.\.|"
+        r"(?:exec\.)?Command(?:Context)?\(\s*(?:ctx\s*,\s*)?ip\b"
     ),
     "bpf": re.compile(
         r"\b(?:ebpf\.(?:NewMap|NewMapWithOptions|NewProgram|"
