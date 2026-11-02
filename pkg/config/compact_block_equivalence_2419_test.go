@@ -731,6 +731,12 @@ var filedFixed = map[string]string{
 	"security flow tcp-session time-wait-state session-timeout":            "#16662",
 	"security flow tcp-session time-wait-state session-ageout":             "#16662",
 	"security flow tcp-session time-wait-state apply-to-half-closed-state": "#16662",
+	// #18762 repaired these value-bearing tcp-session leaves whose compact
+	// spellings committed while dropping the configured values. Keep the
+	// sites anchored so a census/parser regression cannot make them look fixed.
+	"security flow tcp-session maximum-window":    "#18762",
+	"security flow tcp-session rst-sequence-check": "#18762",
+	"security flow tcp-session strict-syn-check":   "#18762",
 }
 
 // filedByDesign is the category the inventory did not previously distinguish:
@@ -920,13 +926,18 @@ type censusResult struct {
 	// twoLevelDivergent / twoLevelChecked record the THIRD arm (#18762):
 	// the leaf packed onto the GRANDPARENT line, eliding the immediate
 	// container too -- `outer inner leaf value;` against the fully braced
-	// twin. The original arm only ever elides ONE level, so a container
-	// whose own packed tail is handled but whose (outer, inner) pair is not
-	// admitted (`tcp-session time-wait-state session-ageout;`) compiled to
-	// nothing and appeared in no inventory. Like the braced-packed arm it
-	// is kept OUT of `divergent`, so it can only add a failure.
+	// twin. Eligible sites are accounted as checked or skipped, and the
+	// checked population is ratcheted in the two-level inventory. Every
+	// security-flow skip has an exact reasoned entry, so a failed compile
+	// cannot disappear from the measured population.
 	twoLevelDivergent []string
+	twoLevelEligible  int
 	twoLevelChecked   int
+	twoLevelSkipped   int
+	securityFlowTwoLevelEligible int
+	securityFlowTwoLevelChecked  int
+	securityFlowTwoLevelSkipped  int
+	securityFlowTwoLevelSkipReason map[string]string
 	// twoLevelShape is each divergent two-level site's DROP SHAPE on the
 	// STRICT commit path (see twoLevelDropShape18771), inventoried in
 	// twoLevelInventoryPath so the list can only shrink.
@@ -1109,22 +1120,35 @@ func twoLevelDropShape18771(braced, twoLevel string) string {
 	return twoLevelCommitsDifferent
 }
 
-func readTwoLevelInventory(t *testing.T) map[string]string {
+func readTwoLevelInventory(t *testing.T) (map[string]string, int, int, map[string]string) {
 	t.Helper()
 	raw, err := os.ReadFile(twoLevelInventoryPath)
 	if err != nil {
 		t.Fatalf("read two-level inventory: %v", err)
 	}
 	out := map[string]string{}
+	var wantChecked, wantSecurityFlowChecked int
+	wantSecurityFlowSkipped := map[string]string{}
+	const skipPrefix = "# security-flow-skip: "
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, skipPrefix) {
+			site, reason := splitInventoryLine(strings.TrimPrefix(line, skipPrefix))
+			wantSecurityFlowSkipped[site] = reason
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			_, _ = fmt.Sscanf(line, "# checked: %d", &wantChecked)
+			_, _ = fmt.Sscanf(line, "# security-flow checked: %d", &wantSecurityFlowChecked)
 			continue
 		}
 		site, shape := splitInventoryLine(line)
 		out[site] = shape
 	}
-	return out
+	return out, wantChecked, wantSecurityFlowChecked, wantSecurityFlowSkipped
 }
 
 func runCompactBlockCensus(t *testing.T) censusResult {
@@ -1133,6 +1157,7 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 		skipped: map[string]int{}, state: map[string]string{},
 		dropShape: map[string]string{}, unobservedClass: map[string]int{},
 		twoLevelShape: map[string]string{},
+		securityFlowTwoLevelSkipReason: map[string]string{},
 	}
 	emptyCfg := compileText(t, "")
 	for _, s := range collectCompactSites() {
@@ -1141,16 +1166,6 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 			res.skipped["under groups (schema re-host, duplicate coverage)"]++
 			res.state[siteKey] = "skipped: under groups"
 			continue
-		}
-		var v1, v2 string
-		if !s.flag {
-			var ok bool
-			v1, v2, ok = compactCensusPair(s)
-			if !ok {
-				res.skipped["no two distinct synthesizable values"]++
-				res.state[siteKey] = "skipped: no two distinct synthesizable values"
-				continue
-			}
 		}
 		// contextForStanza / preambleFor are keyed on the CANONICAL path (the
 		// one carrying "xpfarg"), so existing scaffold entries keep matching;
@@ -1164,6 +1179,31 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 		pre = renderScaffold(pre, s.container, rendered)
 		parent = rendered[:len(rendered)-1]
 		stanza = rendered[len(rendered)-1]
+		twoLevelEligible := len(rendered) >= 2 && strings.TrimSpace(ctx) == ""
+		securityFlowTwoLevel := twoLevelEligible && strings.HasPrefix(siteKey, "security flow ")
+		if twoLevelEligible {
+			res.twoLevelEligible++
+			if securityFlowTwoLevel {
+				res.securityFlowTwoLevelEligible++
+			}
+		}
+		var v1, v2 string
+		if !s.flag {
+			var ok bool
+			v1, v2, ok = compactCensusPair(s)
+			if !ok {
+				res.skipped["no two distinct synthesizable values"]++
+				res.state[siteKey] = "skipped: no two distinct synthesizable values"
+				if twoLevelEligible {
+					res.twoLevelSkipped++
+					if securityFlowTwoLevel {
+						res.securityFlowTwoLevelSkipped++
+						res.securityFlowTwoLevelSkipReason[siteKey] = "no two distinct synthesizable values"
+					}
+				}
+				continue
+			}
+		}
 		blockV1 := pre + nest(parent, ctx+stanza+" { "+s.leaf+" "+v1+"; }")
 		blockV2 := pre + nest(parent, ctx+stanza+" { "+s.leaf+" "+v2+"; }")
 		compact := pre + nest(parent, ctx+stanza+" "+s.leaf+" "+v1+";")
@@ -1182,6 +1222,13 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 		if cb1 == nil || cb2 == nil || cc == nil {
 			res.skipped["a spelling did not parse or compile"]++
 			res.state[siteKey] = "skipped: a spelling did not parse or compile"
+			if twoLevelEligible {
+				res.twoLevelSkipped++
+				if securityFlowTwoLevel {
+					res.securityFlowTwoLevelSkipped++
+					res.securityFlowTwoLevelSkipReason[siteKey] = "a spelling did not parse or compile"
+				}
+			}
 			continue
 		}
 		// VACUITY GUARD. If changing the VALUE does not change the compiled
@@ -1192,6 +1239,13 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 		if cfgEqual(cb1, cb2) {
 			res.skipped["leaf value not observable in the typed config"]++
 			res.state[siteKey] = "skipped: leaf value not observable"
+			if twoLevelEligible {
+				res.twoLevelSkipped++
+				if securityFlowTwoLevel {
+					res.securityFlowTwoLevelSkipped++
+					res.securityFlowTwoLevelSkipReason[siteKey] = "leaf value not observable in the typed config"
+				}
+			}
 			// #8690: say WHICH of the three it is, so the bucket stops reading
 			// as one backlog.
 			switch skel := compileText(t, pre+nest(parent, ctx+stanza+" { }")); {
@@ -1221,7 +1275,7 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 				}
 			}
 		}
-		if len(rendered) >= 2 && strings.TrimSpace(ctx) == "" {
+		if twoLevelEligible {
 			outerParent := rendered[:len(rendered)-2]
 			outer := rendered[len(rendered)-2]
 			ctx2 := renderScaffold(contextForStanza(s.container[:len(s.container)-2], s.container[len(s.container)-2]), s.container, rendered)
@@ -1231,9 +1285,19 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 			}
 			if c2 := compileTextPanicsafe15064(t, twoLevel); c2 != nil {
 				res.twoLevelChecked++
+				if securityFlowTwoLevel {
+					res.securityFlowTwoLevelChecked++
+				}
 				if !cfgEqual(cb1, c2) {
 					res.twoLevelDivergent = append(res.twoLevelDivergent, siteKey)
 					res.twoLevelShape[siteKey] = twoLevelDropShape18771(blockV1, twoLevel)
+				}
+			} else {
+				res.twoLevelSkipped++
+				res.skipped["two-level spelling did not parse or compile"]++
+				if securityFlowTwoLevel {
+					res.securityFlowTwoLevelSkipped++
+					res.securityFlowTwoLevelSkipReason[siteKey] = "two-level spelling did not parse or compile"
 				}
 			}
 		}
@@ -1459,10 +1523,11 @@ func TestCompactBlockEquivalenceInventory2419(t *testing.T) {
 		t.Errorf("#15064: braced-packed arm checked ZERO cells — the instance-site population vanished, so the arm above measures nothing")
 	}
 
-	// #18762: the two-level arm is ASSERTED under `security flow`, where a
-	// dropped value is a dropped security or session-handling knob that
-	// commits clean; elsewhere it RECORDS (TestCompactBlockCensusReport2419)
-	// and the measured list is filed as its own issue.
+	inv, wantTwoLevelChecked, wantSecurityFlowChecked, wantSecurityFlowSkipped := readTwoLevelInventory(t)
+	// #18762: the two-level arm forbids divergence under `security flow`.
+	// Eligible sites are counted as checked or skipped; the checked floor and
+	// exact security-flow skip manifest make coverage loss visible. Elsewhere
+	// the arm is an equals-gate against #18771's divergent-site inventory.
 	var flowTwoLevelDivergent []string
 	for _, site := range res.twoLevelDivergent {
 		if strings.HasPrefix(site, "security flow ") {
@@ -1473,6 +1538,46 @@ func TestCompactBlockEquivalenceInventory2419(t *testing.T) {
 		t.Errorf("#18762: two-level-elided `security flow` site(s) drop their value (`outer inner leaf value;` compiles differently from the braced twin): %v\n"+
 			"    Admit the (outer, inner) pair in compactNormalizeInScope, or fix the reader.", flowTwoLevelDivergent)
 	}
+	if res.twoLevelEligible != res.twoLevelChecked+res.twoLevelSkipped {
+		t.Errorf("#18762: two-level census accounting is incomplete: eligible=%d checked=%d skipped=%d",
+			res.twoLevelEligible, res.twoLevelChecked, res.twoLevelSkipped)
+	}
+	if res.securityFlowTwoLevelEligible != res.securityFlowTwoLevelChecked+res.securityFlowTwoLevelSkipped {
+		t.Errorf("#18762: security-flow two-level accounting is incomplete: eligible=%d checked=%d skipped=%d",
+			res.securityFlowTwoLevelEligible, res.securityFlowTwoLevelChecked, res.securityFlowTwoLevelSkipped)
+	}
+	if res.securityFlowTwoLevelSkipped != len(res.securityFlowTwoLevelSkipReason) {
+		t.Errorf("#18762: security-flow skipped-cell count=%d but only %d sites have recorded reasons",
+			res.securityFlowTwoLevelSkipped, len(res.securityFlowTwoLevelSkipReason))
+	}
+	if wantTwoLevelChecked <= 0 || res.twoLevelChecked < wantTwoLevelChecked {
+		t.Errorf("#18762: two-level checked-cell coverage DROPPED from %d to %d; sites may not silently leave the measured population",
+			wantTwoLevelChecked, res.twoLevelChecked)
+	}
+	if wantSecurityFlowChecked <= 0 || res.securityFlowTwoLevelChecked < wantSecurityFlowChecked {
+		t.Errorf("#18762: security-flow two-level checked-cell coverage DROPPED from %d to %d",
+			wantSecurityFlowChecked, res.securityFlowTwoLevelChecked)
+	}
+	if res.securityFlowTwoLevelEligible == 0 {
+		t.Errorf("#18762: security-flow two-level arm had no eligible sites, so its assertion measures nothing")
+	}
+	if len(res.securityFlowTwoLevelSkipReason) != len(wantSecurityFlowSkipped) {
+		t.Errorf("#18762: security-flow two-level skipped-site inventory has %d sites; measured %d: expected=%v measured=%v",
+			len(wantSecurityFlowSkipped), len(res.securityFlowTwoLevelSkipReason),
+			wantSecurityFlowSkipped, res.securityFlowTwoLevelSkipReason)
+	}
+	for site, reason := range res.securityFlowTwoLevelSkipReason {
+		if wantSecurityFlowSkipped[site] != reason {
+			t.Errorf("#18762: security-flow two-level skipped site %q reason=%q, want %q in %s",
+				site, reason, wantSecurityFlowSkipped[site], twoLevelInventoryPath)
+		}
+	}
+	for site, reason := range wantSecurityFlowSkipped {
+		if got := res.securityFlowTwoLevelSkipReason[site]; got != reason {
+			t.Errorf("#18762: %s records security-flow site %q skipped for %q, census reports %q",
+				twoLevelInventoryPath, site, reason, got)
+		}
+	}
 	if res.twoLevelChecked == 0 {
 		t.Errorf("#18762: two-level arm checked ZERO cells, so the assertion above measures nothing")
 	}
@@ -1482,7 +1587,6 @@ func TestCompactBlockEquivalenceInventory2419(t *testing.T) {
 	// equivalently must leave the file (the list only shrinks); and a shape
 	// change reds too, because REFUSED -> COMMITS-DIFFERENT is a loud
 	// rejection turning into a silent drop.
-	inv := readTwoLevelInventory(t)
 	for _, site := range res.twoLevelDivergent {
 		want, listed := inv[site]
 		got := res.twoLevelShape[site]
@@ -1571,8 +1675,12 @@ func TestCompactBlockCensusReport2419(t *testing.T) {
 	t.Logf("  cells DIVERGENT:                 %d", len(res.divergent))
 	t.Logf("  braced-packed cells CHECKED (#15064):   %d", res.bracedPackedChecked)
 	t.Logf("  braced-packed cells DIVERGENT (#15064): %d", len(res.bracedPackedDivergent))
-	t.Logf("  two-level cells CHECKED (#18762):       %d", res.twoLevelChecked)
-	t.Logf("  two-level cells DIVERGENT (#18762):     %d", len(res.twoLevelDivergent))
+	t.Logf("  two-level cells ELIGIBLE (#18762):       %d", res.twoLevelEligible)
+	t.Logf("  two-level cells CHECKED (#18762):         %d", res.twoLevelChecked)
+	t.Logf("  two-level cells SKIPPED (#18762):         %d", res.twoLevelSkipped)
+	t.Logf("  security-flow two-level cells ELIGIBLE:   %d", res.securityFlowTwoLevelEligible)
+	t.Logf("  security-flow two-level cells CHECKED:     %d", res.securityFlowTwoLevelChecked)
+	t.Logf("  security-flow two-level cells SKIPPED:     %d", res.securityFlowTwoLevelSkipped)
 	for _, site := range res.twoLevelDivergent {
 		t.Logf("    two-level divergent: %s\t%s", site, res.twoLevelShape[site])
 	}

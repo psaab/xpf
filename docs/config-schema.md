@@ -190,8 +190,12 @@ only covers `time-wait-state session-ageout;` inside tcp-session's braces. The
 #2419 census has a third, **two-level** arm that packs `outer inner leaf
 value;` and compares it with the braced twin:
 
-- It asserts no divergence under `security flow`.
-- Everywhere else it records; the measured sites are filed in #18771.
+- Every eligible cell is counted as checked or skipped. Under `security flow`,
+  the exact skipped-site set and reason are part of the gate, and checked
+  coverage has a minimum ratchet.
+- Everywhere else the measured divergent sites and strict drop shapes must
+  equal the inventory in #18771. Its checked-cell floor prevents sites from
+  vanishing by failing to compile.
 
 Losing a single admission line is enough to drop a security flag:
 `(tcp-session, strict-syn-check)` disappeared in #16581, and the only signal was
