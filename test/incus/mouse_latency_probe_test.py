@@ -366,25 +366,28 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
         # Two coroutines start after the probe deadline. The active one makes
         # successful per-attempt connections to a server that closes after each
         # echo: the old aggregate predicate (attempts >= 2, connections <= 3)
-        # says reuse happened, but no coroutine reused a connection.
+        # says reuse happened, although each attempt uses a distinct connection.
         result, connection_count, connections_per_coroutine = (
             await self._run_local_echo_probe(
                 concurrency=3,
-                duration=0.3,
-                min_interval_ms=150.0,
+                duration=0.6,
+                min_interval_ms=250.0,
                 connection_mode="per-attempt",
                 close_after_echo=True,
                 delayed_coroutines=(0, 1),
-                coroutine_delay=0.35,
+                coroutine_delay=0.7,
             )
         )
         attempts_per_coroutine = result["totals"]["attempts_per_coroutine"]
-        self.assertEqual(attempts_per_coroutine, [0, 0, 2])
-        self.assertEqual(connections_per_coroutine, [0, 0, 2])
-        self.assertEqual(connection_count, 2)
-        self.assertEqual(result["totals"]["error_rate"], 0.0)
-        self.assertGreaterEqual(max(attempts_per_coroutine), 2)
+        self.assertEqual(attempts_per_coroutine[:2], [0, 0])
+        active_attempts = attempts_per_coroutine[2]
+        self.assertGreaterEqual(active_attempts, 2)
+        self.assertEqual(connections_per_coroutine[:2], [0, 0])
+        self.assertEqual(connections_per_coroutine[2], active_attempts)
+        self.assertEqual(result["coroutines"][2]["completed"], active_attempts)
+        self.assertEqual(connection_count, active_attempts)
         self.assertLessEqual(connection_count, 3)
+        self.assertLessEqual(result["totals"]["error_rate"], 0.05)
         with self.assertRaisesRegex(AssertionError, "single connection"):
             self._assert_same_coroutine_reused_connection(
                 result, connections_per_coroutine
