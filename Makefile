@@ -297,9 +297,7 @@ test-ctrl-row-root:
 .PHONY: test-memlock-guards
 test-memlock-guards:
 	@if [ "$$(id -u)" != "0" ]; then \
-		echo "test-memlock-guards: needs CAP_BPF (BPF map creation). Re-run with sudo."; \
-		echo "  CAP_SYS_RESOURCE alone is NOT enough — it raises the memlock rlimit,"; \
-		echo "  so the guards stop skipping and start failing at map creation."; \
+		echo "test-memlock-guards: runs only in the disposable VM lane (make vm-test-root); the workstation lane strips privileges via unshare and sudo cannot substitute."; \
 		exit 1; \
 	fi
 # This leg scans plain-text RUN records; pin text output against GOFLAGS=-json.
@@ -336,7 +334,7 @@ test-memlock-guards:
 # both pass it, and nothing else in the tree can tell them apart.
 test-shim-run:
 	@if [ "$$(id -u)" != "0" ]; then \
-		echo "test-shim-run: needs root (BPF program load). Re-run with sudo."; \
+		echo "test-shim-run: runs only in the disposable VM lane (make vm-test-root); sudo cannot substitute."; \
 		exit 1; \
 	fi
 	# #7494/#6743-r2-N3: a `-run` predicate is a claim about the names of tests

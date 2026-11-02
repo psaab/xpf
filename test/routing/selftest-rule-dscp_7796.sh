@@ -57,7 +57,8 @@ fi
 # over an empty set. The two hermetic 7796 cells still run; they cannot skip.
 # -json=false: the named scan below parses plain-text RUN records, so an
 # inherited GOFLAGS=-json must not flip the stream to JSON.
-out=$(unshare -rn "$GO" test -json=false -count=1 -v -run 7796 ./pkg/routing/ 2>&1)
+runner="$(cd "$(dirname "$0")/../.." && pwd)/scripts/testguard-run.sh"
+out=$(XPF_REQUIRE_NETNS=1 "$runner" "$GO" test -json=false -count=1 -v -run 7796 ./pkg/routing/ 2>&1)
 rc=$?
 
 # A real test failure always wins over missing `ip`: the non-readback cells
