@@ -1,4 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Build: capture the shimverify attestation directory before the sudo hop
+    and pass it to mktemp explicitly, so `make generate-userspace-xdp` no
+    longer writes its gate attestation into a possibly-full /tmp (#18966).
   * Fabric gRPC mutating-RPC replay: a valid token for `ClearSessions` or a
     fabric-safe `SystemAction` is now accepted once per receiving daemon
     process. A monotone replay-window high-water mark prevents replay after
