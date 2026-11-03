@@ -230,8 +230,10 @@ At any point during either cycle — plan execution OR code
 implementation — forwarding must stay healthy on the test cluster.
 Specifically (on the userspace cluster):
 
-- `iperf3 -c 172.16.80.200 -P 4 -t 5 -p 5203` passes with 0
-  retransmits after any daemon restart.
+- `source test/incus/cluster-env.sh` first, then
+  `iperf3 -c "$IPERF_TARGET4" -P 4 -t 5 -p 5203` (env-selected target;
+  `loss` today 172.16.80.202, #18576)
+  passes with 0 retransmits after any daemon restart.
 - The 12-flow baseline (`iperf3 -P 12 -t 20 -p 5203`) does not
   regress past the plan's rollback threshold.
 - Under CoS: the 8-matrix doesn't regress on the forward-shaped

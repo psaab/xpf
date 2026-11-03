@@ -74,10 +74,13 @@ BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
   ./test/incus/cluster-setup.sh refresh-vfs
 ```
 
-- The `.200` / `::200` throughput targets are not local Incus containers. When
-  you need captures from the remote endpoint, use the gRPC capture service
-  documented in `~/README.md` (`capture-client` / `grpcurl`), not ad-hoc
-  `tcpdump` assumptions on unrelated lab hosts.
+- Throughput targets come from the cluster env (`IPERF_TARGET4` /
+  `IPERF_TARGET6`; loss today 172.16.80.202 / `::200`, #18576 — never
+  v4 `.200`, which the external box also answers). The v6 target is
+  external hardware; the v4 target is the `MOUSE_TARGET_NAME` container.
+  For remote-endpoint captures use the gRPC capture service documented in
+  `~/README.md` (`capture-client` / `grpcurl`), not ad-hoc `tcpdump`
+  assumptions on unrelated lab hosts.
 - For userspace split-RG failover, `monitor interface <fabric-parent>` is now a
   required live-debug tool, not just a convenience command. It exposes the
   userspace binding state, queue readiness, direct/copy/in-place TX, misses,
@@ -105,5 +108,6 @@ See [CLAUDE.md](../CLAUDE.md) for full network topology details.
 - On remote `loss` host with Mellanox SR-IOV VFs (zero-copy AF_XDP)
 - `cluster-userspace-host` container
 - Config: `docs/ha-cluster-userspace.conf`
-- Test targets: 172.16.80.200 (IPv4), 2001:559:8585:80::200 (IPv6)
+- Test targets: `IPERF_TARGET4` (loss 172.16.80.202) / `IPERF_TARGET6`
+  (`2001:559:8585:80::200`) via `test/incus/cluster-env.sh` (#18576)
 - Native GRE target: 10.255.192.41

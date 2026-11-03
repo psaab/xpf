@@ -1750,8 +1750,9 @@ removed or bypassed:
 # Hardened RG move under load (the primary validator).
 # Keep the run long enough to expose late collapses, move RG1 quickly in both
 # directions, and keep all eight stream lines visible during the run.
+# The iperf target self-selects from the sourced cluster env
+# (IPERF_TARGET4, loss 172.16.80.202 since #18576); do not pin .200.
 BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
-IPERF_TARGET=172.16.80.200 \
 TOTAL_CYCLES=12 CYCLE_INTERVAL=5 \
 scripts/userspace-ha-failover-validation.sh --duration 600 --parallel 8
 ```
@@ -1762,21 +1763,22 @@ scripts/userspace-ha-failover-validation.sh --duration 600 --parallel 8
 # NO zero intervals. Expect this to FAIL until the HA-inactive leg
 # named in "The #16217 aged-failover chain" is closed.
 BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
-IPERF_TARGET=172.16.80.200 \
 scripts/userspace-ha-failover-validation.sh --aged-failover --duration 60 --parallel 4
 ```
 
 ```bash
 # Reverse-path coverage is also required. The validator currently exercises the
 # source-sending path, so run a matching reverse iperf after the forward pass.
-iperf3 -c 172.16.80.200 -P 8 -t 600 -R
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
+iperf3 -c "$IPERF_TARGET4" -P 8 -t 600 -R
 ```
 
 ### Manual CLI test
 
 ```bash
 # Start long-running forward traffic and keep all per-stream lines visible.
-iperf3 -c 172.16.80.200 -P 8 -t 600
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
+iperf3 -c "$IPERF_TARGET4" -P 8 -t 600
 
 # Rapidly move RG1 between fw0 and fw1 while traffic is active.
 cli -c "request chassis cluster failover redundancy-group 1 node 1"
@@ -1795,7 +1797,8 @@ cli -c "show chassis cluster data-plane statistics" | grep SNAT
 ```bash
 # Repeat the same RG movement under reverse traffic. This exercises the return
 # path ownership and catches failovers that only work when the host is sending.
-iperf3 -c 172.16.80.200 -P 8 -t 600 -R
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
+iperf3 -c "$IPERF_TARGET4" -P 8 -t 600 -R
 
 cli -c "request chassis cluster failover redundancy-group 1 node 1"
 sleep 5

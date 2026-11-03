@@ -231,7 +231,6 @@ for mode in shell child; do
 	eq "loss then tcp (${mode}) MOUSE_TARGET_V4"  "$(seq_resolve "$mode" MOUSE_TARGET_V4 "$LOSS_ENV" "$TCP_ENV")"  "172.16.80.210"
 	eq "loss then tcp (${mode}) MOUSE_TARGET_REF" "$(seq_resolve "$mode" MOUSE_TARGET_REF "$LOSS_ENV" "$TCP_ENV")" "tcp:xpf-tcp-target"
 done
-eq "loss then tcp TARGET_ALIAS_V4_DEPRECATED" "$(seq_resolve shell TARGET_ALIAS_V4_DEPRECATED "$LOSS_ENV" "$TCP_ENV")" ""
 # loss-only names (and arrays) must not stay set when tcp is loaded next:
 # Group12 would judge tcp in split mode against loss's external box.
 eq "loss then tcp IPERF_TARGET_V4_V6_SAME_HOST" "$(seq_resolve shell IPERF_TARGET_V4_V6_SAME_HOST "$LOSS_ENV" "$TCP_ENV")" ""

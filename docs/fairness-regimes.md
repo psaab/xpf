@@ -355,9 +355,9 @@ retransmits over the run. Read it as:
 
 **Every per-class harness in this document needs live listeners on the
 VLAN-80 target that none of them can create.** Traffic runs from the LAN-side
-source container, through the firewall, to `172.16.80.200`
-(`IPERF_TARGET4` in `test/incus/loss-userspace-cluster.env`), which must be
-running:
+source container, through the firewall, to `172.16.80.202`
+(`IPERF_TARGET4` in `test/incus/loss-userspace-cluster.env`, #18576), which
+must be running:
 
 | ports | service | mapped by |
 |---|---|---|

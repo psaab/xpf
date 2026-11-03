@@ -42,9 +42,10 @@ It does not cover:
   - `xpf-userspace-fw1`
 - Host:
   - `cluster-userspace-host`
-- Main targets:
-  - IPv4: `172.16.80.200`
-  - IPv6: `2001:559:8585:80::200`
+- Main targets (`source test/incus/cluster-env.sh`):
+  - IPv4: `IPERF_TARGET4` (loss today `172.16.80.202`, #18576 — never
+    the dual-held `172.16.80.200`)
+  - IPv6: `IPERF_TARGET6` (`2001:559:8585:80::200`)
 
 ### Legacy eBPF HA cluster
 
@@ -115,7 +116,7 @@ Required:
 From the test host:
 
 ```bash
-ping -c 3 172.16.80.200
+ping -c 3 "$IPERF_TARGET4"
 ping6 -c 3 2001:559:8585:80::200
 ```
 
@@ -249,7 +250,7 @@ scripts/userspace-ha-validation.sh
 
 Pass:
 
-- `.200` and `::200` reachability pass
+- v4 (`IPERF_TARGET4`) and v6 (`::200`) reachability pass
 - no immediate collapse in the steady-state iperf checks
 - the intended active node owns the intended RGs
 
@@ -266,7 +267,6 @@ Baseline command:
 
 ```bash
 BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
-IPERF_TARGET=172.16.80.200 \
 TOTAL_CYCLES=3 CYCLE_INTERVAL=10 \
 scripts/userspace-ha-failover-validation.sh --duration 90 --parallel 4
 ```
@@ -276,8 +276,9 @@ Reverse-path follow-up:
 ```bash
 # The validator currently exercises the source-sending path. Run a matching
 # reverse iperf after the forward pass so failover is validated in both
-# ownership directions.
-iperf3 -c 172.16.80.200 -P 4 -t 90 -R
+# ownership directions (run it on the LAN host against the same
+# env-selected IPERF_TARGET4).
+iperf3 -c "$IPERF_TARGET4" -P 4 -t 90 -R
 ```
 
 Useful knobs:
@@ -320,13 +321,13 @@ Purpose:
 Start traffic from the host:
 
 ```bash
-iperf3 -c 172.16.80.200 -P 8 -t 120
+iperf3 -c "$IPERF_TARGET4" -P 8 -t 120
 ```
 
 Then repeat the same test in reverse mode:
 
 ```bash
-iperf3 -c 172.16.80.200 -P 8 -t 120 -R
+iperf3 -c "$IPERF_TARGET4" -P 8 -t 120 -R
 ```
 
 Move the RG from the current primary:
@@ -354,7 +355,7 @@ Required live checks during manual RG move:
 cli -c "monitor interface <fabric-parent>"
 cli -c "monitor interface <wan-parent>"
 cli -c "show chassis cluster data-plane statistics"
-cli -c "show security flow session destination-prefix 172.16.80.200/32"
+cli -c "show security flow session destination-prefix ${IPERF_TARGET4}/32"
 ```
 
 ### 4. Hard crash / power-cut failover

@@ -2,8 +2,8 @@
 # Run one rep of the #905 mouse-latency cell.
 #
 # Usage: test-mouse-latency.sh <N> <M> <duration_s> <out_dir>
-#   N: elephant streams against 172.16.80.200:5202 (1 Gbps exact)
-#   M: concurrent mouse coroutines against 172.16.80.200:6200 (best-effort)
+#   N: elephant streams against IPERF_TARGET4:5202 (1 Gbps exact)
+#   M: concurrent mouse coroutines against MOUSE_TARGET_V4:6200 (best-effort)
 #   duration_s: probe duration in seconds (≥ 60 recommended)
 #   out_dir: per-rep output directory (created if missing)
 #
@@ -29,33 +29,22 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # same tolerant fallback doctrine); they are defined there now.
 # shellcheck source=cos-apply-lib.sh
 . "${SCRIPT_DIR}/cos-apply-lib.sh"
+_MOUSE_TARGET_V4_OVERRIDE="${MOUSE_TARGET_V4:-}"
+# shellcheck source=test/incus/loss-userspace-cluster.env
+source "${SCRIPT_DIR}/loss-userspace-cluster.env"
 
 # Constants from plan §3.1.
 INCUS_REMOTE="loss"
 PRIMARY="xpf-userspace-fw0"
 SECONDARY="xpf-userspace-fw1"
 SOURCE="cluster-userspace-host"
-TARGET_V4="172.16.80.200"
-# #8259: the mouse and elephant targets are SEPARATE knobs that happen to
-# default to the same address, because on the standing loss cluster there is
-# only one host on VLAN 80 to point them at.
-#
-# They used to be one variable, and that is the whole defect: the gate ratios a
-# loaded cell against an idle cell, and when both flows terminate on one host
-# the loaded cell adds ~8.6 Gbit/s of receive load to the very machine whose
-# service time is inside every mouse sample. The verdict then attributes that
-# difference entirely to firewall queueing. `mouse_latency_aggregate.decide()`
-# now refuses to emit PASS/FAIL when these two are equal.
-#
-# Splitting them here is what makes that check meaningful rather than
-# permanently true: stand up a second host on VLAN 80, set
-# ELEPHANT_TARGET_V4 to it, and the gate starts producing attributable numbers
-# with no further change. The second host exists (#8259,
-# mouse-target-setup.sh); on loss the .200 primary is a declarative alias
-# of that same host (#16213), so attributability still needs the two
-# knobs pointed at DIFFERENT addresses (.200 vs .201).
-MOUSE_TARGET_V4="${MOUSE_TARGET_V4:-$TARGET_V4}"
+TARGET_V4="${IPERF_TARGET4}"
+# #8259: mouse and elephant targets are separate knobs. This standalone
+# loss harness defaults both to IPERF_TARGET4 (the same host), so the
+# aggregate remains VOID for attribution unless callers select different hosts.
+MOUSE_TARGET_V4="${_MOUSE_TARGET_V4_OVERRIDE:-$TARGET_V4}"
 ELEPHANT_TARGET_V4="${ELEPHANT_TARGET_V4:-$TARGET_V4}"
+unset _MOUSE_TARGET_V4_OVERRIDE
 # Env-var overridable so test-mouse-latency-same-class.sh can run a
 # same-class variant by selecting the matching 520x elephant port and
 # 620x TCP echo port. The canonical CoS fixture maps 6200..6211 to the

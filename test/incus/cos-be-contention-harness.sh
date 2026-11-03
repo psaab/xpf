@@ -27,6 +27,13 @@ cos_gate_exit() {
 }
 trap cos_gate_exit EXIT
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/test/incus/loss-userspace-cluster.env}"
+if [[ ! -f "$ENV_FILE" ]]; then
+    echo "cos-be-contention-harness: env file not found: $ENV_FILE" >&2
+    exit 2
+fi
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+TARGET_IP="${TARGET_IP:-${IPERF_TARGET4:-172.16.80.202}}"
 # #13070 (D10-15): the incus CLI wrapper comes from the shared CoS
 # schedule + wrapper library instead of a harness-local copy.
 # shellcheck source=cos-apply-lib.sh
@@ -35,6 +42,7 @@ if [[ -z "${APPLY_COS_CONFIG:-}" ]]; then
     APPLY_COS_CONFIG="$ROOT_DIR/test/incus/apply-cos-config.sh"
 fi
 VALIDATOR="${VALIDATOR:-$ROOT_DIR/test/incus/cos_be_contention_validate.py}"
+
 
 DURATION="${DURATION:-8}"
 EXACT_PARALLEL="${EXACT_PARALLEL:-4}"
@@ -59,15 +67,8 @@ ROOT_SHAPE_BPS="${ROOT_SHAPE_BPS:-25000000000}"
 IPERF_EXTRA_ARGS="${IPERF_EXTRA_ARGS:-}"
 SKIP_TARGET_PRECHECK="${SKIP_TARGET_PRECHECK:-0}"
 
-if [[ ! -f "$ENV_FILE" ]]; then
-    echo "cos-be-contention-harness: env file not found: $ENV_FILE" >&2
-    exit 2
-fi
-# shellcheck disable=SC1090
-source "$ENV_FILE"
 # shellcheck source=cluster-env.sh
 source "$ROOT_DIR/test/incus/cluster-env.sh"
-TARGET_IP="${TARGET_IP:-$IPERF_TARGET4}"
 if [[ "${COS_GATE_SELFTEST:-0}" == "1" ]]; then
     echo "COS_GATE cos-be-contention-harness PASS reason=-- cells_failed=0"
     COS_GATE_EMITTED=1
@@ -77,7 +78,6 @@ if [[ "$SKIP_TARGET_PRECHECK" != "1" ]]; then
     TARGET_V4="$TARGET_IP" "$ROOT_DIR/test/incus/target-services.sh" \
         check 5200 5202 5210 5211 || exit 1
 fi
-
 
 REMOTE_PREFIX="${INCUS_REMOTE:+${INCUS_REMOTE}:}"
 FW0="${REMOTE_PREFIX}${VM0}"

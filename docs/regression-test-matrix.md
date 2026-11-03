@@ -272,18 +272,18 @@ failure.
     unique before use. It is not `.201`, the separate #8259 mouse
     address, and not `.174`, the container's DHCPv4 lease, which nothing
     pins. Whether `.202` lies outside the lab DHCP server's pool is not
-    shown; this cell bounds that risk in every run. Harnesses that still
-    hard-code `.200` are listed in `docs/log/18576.md`.
-  - **The deprecated `.200`.** `.200` stays pinned on the container as a
-    DEPRECATED alias (`TARGET_ALIAS_V4_DEPRECATED` in the loss env), so
-    a container restart does not strand those harnesses and older
-    checkouts. `mouse-target-setup.sh` keeps it only while it is held,
-    and never claims it anew. It is still dual-held, so nothing may
-    measure it, and this cell never probes it. **Expiry** (tracked on
-    #18576): once the hard-coded follow-ups are retargeted and no open
-    branch predates #18619, delete the env line, then run
-    `ip addr del 172.16.80.200/24 dev eth0` on the container.
-    <!-- Expires-when: #18576 closed -->
+    shown; this cell bounds that risk in every run. The follow-up shell
+    harnesses use `IPERF_TARGET4`/`IPERF_TARGET6` from the selected cluster
+    env. The dedicated loss WireGuard profile retains `WG_IPERF_TARGET4=.202`;
+    the flooder accepts `IPERF_TARGET4` and falls back to `.202`. Remaining
+    `.200` literals are history, test fixtures, or the external gRPC endpoint.
+  - **Dual-holder cleanup (`.200`).** The v4 smoke target is `.202`;
+    `.200` is the external v6 target box's address and is not a test target.
+    Removing the unit pin does not remove an address already assigned on the
+    live container. After the cleanup PR merges, run
+    `mouse-target-setup.sh up` under the loss lock, then delete
+    `172.16.80.200/24` from the container's `eth0`. Keep #18576 open until
+    the live address is gone and the census shows only the external holder.
   - **`mouse-target-setup.sh up`** probes each NEW v4 address from the
     container before it writes the unit, and refuses if another MAC
     answers or the control is silent. It runs under the cluster lock.

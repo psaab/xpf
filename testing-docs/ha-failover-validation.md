@@ -545,7 +545,6 @@ Run the hardened failover validator:
 
 ```bash
 BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
-IPERF_TARGET=172.16.80.200 \
 TOTAL_CYCLES=3 CYCLE_INTERVAL=10 \
 scripts/userspace-ha-failover-validation.sh --duration 90 --parallel 4
 ```

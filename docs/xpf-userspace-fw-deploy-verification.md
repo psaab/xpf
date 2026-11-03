@@ -33,7 +33,9 @@ the same procedure.
   priority 200, node1 at 100.
 - `loss:cluster-userspace-host` is up with address `10.0.61.102/24`
   and default route `10.0.61.1` (the RG1 VIP on xpf-userspace-fw).
-- iperf3 server listens on `172.16.80.200` ports 5200..5211. The
+- iperf3 server listens on the env-selected `IPERF_TARGET4` (`source
+  test/incus/cluster-env.sh`; loss today `172.16.80.202`, #18576 — never
+  the dual-held 172.16.80.200) on ports 5200..5211. The
   canonical 1 Gbps exact class is port 5202 (`iperf-1g`, queue 2);
   ports 5200 and 5211 are non-exact/root-shaped.
 - TCP echo listeners for mouse-latency tests listen on ports 6200..6211
@@ -61,7 +63,7 @@ verification. Then re-apply the CoS config (see Prerequisites).
 ### 1. Sanity ping
 
 ```bash
-sg incus-admin -c "incus exec loss:cluster-userspace-host -- ping -c 5 -W 2 172.16.80.200"
+sg incus-admin -c "incus exec loss:cluster-userspace-host -- ping -c 5 -W 2 $IPERF_TARGET4"
 ```
 
 **Pass**: 0% loss, RTT ≤ 1 ms (typical 0.3–0.5 ms on this topology).
@@ -75,7 +77,7 @@ sg incus-admin -c "incus exec loss:cluster-userspace-host -- ping -c 5 -W 2 172.
 ### 2. Single-flow throughput (`-P 1`)
 
 ```bash
-sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 1 -t 30 -p 5202 -i 3"
+sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c $IPERF_TARGET4 -P 1 -t 30 -p 5202 -i 3"
 ```
 
 **Pass**: every 3-second interval reports non-zero throughput. The
@@ -94,7 +96,7 @@ flow should settle somewhere around 1.5–1.7 Gb/s on current master
 ### 3. Parallel fair-share throughput (`-P 16`)
 
 ```bash
-sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 16 -t 30 -p 5202 -i 3"
+sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c $IPERF_TARGET4 -P 16 -t 30 -p 5202 -i 3"
 ```
 
 This is the workload #754 was measured on. Per-stream distribution
