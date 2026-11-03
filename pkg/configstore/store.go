@@ -1041,8 +1041,11 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 	// Every other typed-leaf violation retains the #1733/#1798/#1814 lenient
 	// policy; see freetext.go.
 	// #18962: the tolerant ingress walk selects the lenient commit-outcome
-	// wording; its errors are logged and downgraded below, never returned as
-	// refusals.
+	// wording; its ordinary valueless/typed-leaf findings are logged and
+	// downgraded below. Two hard exceptions are still returned as refusals:
+	// the #18744 redaction-placeholder ingest error and the #17241/#18325
+	// nested-list-content refusal (promoted below whether the first-error
+	// walk or the collect scan finds it).
 	schemaErr := schemaValidateExpandedTreeForNode(tree, s.nodeID, true)
 	// #16012: collect every independent typed-leaf violation for the
 	// tolerant log + persisted warnings. The first-error schemaErr above
