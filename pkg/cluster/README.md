@@ -2593,16 +2593,18 @@ peer liveness (`lastSeen`) or drive election.
   must key both nodes before enabling the cluster. `peerAuthSeen` remains a
   process-lifetime signal for the separate gRPC fabric downgrade guard, not a
   heartbeat admission input.
-- **Operator surface (#4484 L-9).** `FormatControlPlaneStatistics`
+- **Operator surface (#4484 L-9, #16016).** `FormatControlPlaneStatistics`
   (`show chassis cluster control-plane-statistics`) renders an
-  `Authentication:` line derived from `controlLinkAuthStatus()`, so an
-  operator can tell whether the control link's HMAC auth is actually
-  **engaged** (`engaged (local key configured; unauthenticated heartbeat frames
-  rejected)`) or running in **dual-accept** mode
-  (`dual-accept (no control-link key configured)`). A session-sync connection
-  established before keying is called out separately when the provider reports
-  it as still unauthenticated. The status inspects only `len(key)`, so the
-  secret is never rendered.
+  `Authentication:` line derived from `controlLinkAuthStatus()`. An operator
+  can tell whether HMAC auth is **engaged** (`engaged (local key configured;
+  unauthenticated heartbeat frames rejected)`) or running in **dual-accept**
+  mode (`dual-accept (no control-link key configured; ALARM:
+  unauthenticated control authority remains enabled)`). The unkeyed alarm
+  remains visible until an accepted key is configured; `UpdateConfig` emits
+  one error-level alarm per continuous unkeyed posture. A session-sync
+  connection established before keying is called out separately when the
+  provider reports it as still unauthenticated. The status inspects only key
+  presence, so the secret is never rendered.
 - **Secret hygiene.** The key is `config.Secret`, redacted on every
   JSON/YAML/`String()` path and masked as `##SECRET-DATA##` in raw-AST
   renders (`authentication-key` is already in `ast_redact.go`'s secret
@@ -3052,7 +3054,7 @@ an old-key connection is not part of this population.
 
 This grace preserves the in-place-upgrade path for a peer that can authenticate,
 while bounding how long a silent or incompatible pre-key stream can continue
-to pass frames without HMAC. A peer that cannot complete the upgrade loses this
+to pass heartbeat and the in-place upgrade exchange only (#16016: every authority frame is rejected once locally keyed). A peer that cannot complete the upgrade loses this
 session-sync connection after the grace; a later connection must complete
 `performSyncHandshake` with the configured PSK. The legacy node-local
 `strict-session-auth` leaf remains accepted for configuration compatibility,
@@ -3065,8 +3067,8 @@ does not arise.
 Confirm the state with `show chassis cluster statistics`, whose
 `Authentication:` line (`controlLinkAuthStatus`) covers both heartbeat and
 session-sync authentication. While a pre-key session-sync connection remains
-inside its upgrade grace, the line names it and reports that its frames are
-still accepted without HMAC; while a retired-key connection remains inside its
+inside its upgrade grace, the line names it and reports that only
+heartbeat and the upgrade exchange are accepted (#16016); while a retired-key connection remains inside its
 grace, the line names it distinctly as authenticated under a RETIRED key; after
 authentication, rekey, or eviction, it returns to the normal `engaged` line.
 

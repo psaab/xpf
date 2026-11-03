@@ -893,12 +893,13 @@ func (m *Manager) FormatControlPlaneStatistics() string {
 // verify under retired-key-derived keys, not "without HMAC" — until it
 // rekeys or is evicted at grace expiry.
 //
-// It only inspects len(key) and never renders the secret.
+// It reports only accepted-key presence and never renders the secret.
 func (m *Manager) controlLinkAuthStatus() string {
-	if len(m.ControlLinkAuthKey()) == 0 {
-		// No local key: this node cannot verify a peer and may be the
-		// not-yet-keyed side of a rolling upgrade — dual-accept.
-		return "dual-accept (no control-link key configured)"
+	if !m.ControlLinkAuthConfigured() {
+		// No local key: this node cannot verify a peer and accepts legacy
+		// unauthenticated control authority. Keep the alarm in the status
+		// string until an accepted key is configured.
+		return "dual-accept (no control-link key configured; ALARM: unauthenticated control authority remains enabled)"
 	}
 	// A local key is sufficient for heartbeat enforcement. An established
 	// session-sync connection that predates keying may still be unauthenticated,
@@ -922,7 +923,7 @@ func (m *Manager) controlLinkAuthStatus() string {
 	var clauses []string
 	if len(neverAuth) > 0 {
 		clauses = append(clauses, fmt.Sprintf("%d session-sync connection(s) "+
-			"NOT authenticated, frames still accepted without HMAC: %s",
+			"NOT authenticated; only heartbeat and the in-place upgrade exchange are accepted: %s",
 			len(neverAuth), strings.Join(neverAuth, ", ")))
 	}
 	if len(retired) > 0 {
