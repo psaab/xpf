@@ -226,10 +226,26 @@ fn distinct_shard_allocations_publish_owners_under_live_read_15956() {
             (flow, translated)
         }));
     }
+    let contended_before = alloc.debug_live_lock_contended_total();
     barrier.wait();
     // The allocations cannot publish owners while this read guard is held;
-    // dropping it lets the serialized fallback finish. Joining before the
-    // assertions also proves neither worker deadlocked on the other's shard.
+    // poll until both workers have actually attempted the contended live
+    // write (sibling deadline pattern) before dropping the guard —
+    // otherwise, on an idle host, both usually take the fast path after
+    // the drop and the fallback this cell is named for is never entered.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while alloc.debug_live_lock_contended_total() < contended_before + 2
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        alloc.debug_live_lock_contended_total() >= contended_before + 2,
+        "both allocations must attempt the contended live write while the read is held"
+    );
+    // Dropping the guard lets the serialized fallback finish. Joining
+    // before the assertions also proves neither worker deadlocked on the
+    // other's shard.
     drop(_guard);
     let mut completed = Vec::new();
     for handle in handles {
