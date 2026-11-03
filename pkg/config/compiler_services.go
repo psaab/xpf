@@ -2022,11 +2022,21 @@ func compileForwardingOptions(node *Node, fo *ForwardingOptionsConfig) error {
 
 // forwardingFamilyKnown17196 / samplingFamilyKnown17196 are the declared
 // family token sets for the #17196 unknown-family diagnostic at the two
-// forwarding-options tops: `forwarding-options family` declares only
-// inet6 (schemaForwardingOptions), and a sampling instance's `family`
-// declares inet/inet6. A token outside the caller's set — or an
-// undeclared residue token on a structured member — is unknown.
-var forwardingFamilyKnown17196 = map[string]bool{"inet6": true}
+// forwarding-options tops. `forwarding-options family` declares the
+// canonical Junos AF token set — the same thirteen tokens as
+// interfaceFamilyKnown17196 (compiler_interfaces.go): only inet6 is
+// consumed here (the #8797 `mode` leaf); the rest are known-but-unconsumed,
+// accepted inert with a #18881 advisory instead of rejected, because bare
+// `forwarding-options family mpls|ccc|…` is valid Junos that #12090 kept
+// accepted and #17196's `{inet6}`-only set made a strict-commit error
+// (#18881). A sampling instance's `family` declares inet/inet6. A token
+// outside the caller's set — or an undeclared residue token on a
+// structured member — is unknown.
+var forwardingFamilyKnown17196 = map[string]bool{
+	"inet": true, "inet6": true, "inet-vpn": true, "inet6-vpn": true,
+	"iso": true, "mpls": true, "ccc": true, "tcc": true, "bridge": true,
+	"vpls": true, "ethernet-switching": true, "evpn": true, "any": true,
+}
 
 var forwardingFamilyKnownSorted17196 = sortedFamilyKeys17196(forwardingFamilyKnown17196)
 
@@ -2111,8 +2121,17 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 	// undeclared residue — e.g. `family { bogus inet6 { mode … } }`,
 	// which the old Keys[1] preference silently discarded to install
 	// inet6) is reported through the #9017-style diagnostic: strict
-	// rejects, lenient warns and installs nothing for that member. Only
-	// inet6 is declared under `forwarding-options family`.
+	// rejects, lenient warns and installs nothing for that member. The
+	// declared set is the canonical Junos AF token set; a genuinely
+	// unknown token still rejects.
+	//
+	// #18881: the other declared families are known-but-unconsumed. They
+	// commit INERT with an advisory (the settled accepted-only shape, cf.
+	// the #8797 mode advisory in compiler_validate_warn.go) — bare
+	// `forwarding-options family mpls|ccc|…` is valid Junos that #12090
+	// kept accepted, and #17196's {inet6}-only set turned it into a
+	// strict-commit error. Their filter/simple-filter content stays
+	// owned by the #12090 gate.
 	for _, famNode := range node.FindChildren("family") {
 		for _, m := range familyMembers(famNode) {
 			afNode, afName := m.AfNode, m.Af
@@ -2128,6 +2147,12 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 				return fmt.Errorf("%s", msg)
 			}
 			if afName != "inet6" {
+				if warnings != nil {
+					*warnings = append(*warnings, fmt.Sprintf(
+						"forwarding-options family %s is accepted-only — xpf has no consumer "+
+							"for forwarding-options under this family, so the configuration under it "+
+							"has no runtime effect (#18881)", afName))
+				}
 				continue
 			}
 			if modeNode := afNode.FindChild("mode"); modeNode != nil {
