@@ -412,8 +412,8 @@ func TestBindOnlyTunnelConsumerDispositions7949(t *testing.T) {
 		t.Errorf("tunnel row RedundancyGroup = %d, want 0", row.RedundancyGroup)
 	}
 	if rg := resolveOwnerRGFromZone(snap, "vpn"); rg != 0 {
-		t.Errorf("resolveOwnerRGFromZone(vpn) = %d, want 0 — the tunnel must not win the "+
-			"first-wins owner-RG race for its zone", rg)
+		t.Errorf("resolveOwnerRGFromZone(vpn) = %d, want 0 — an RG-less tunnel must not supply "+
+			"an owner-RG candidate for its zone", rg)
 	}
 }
 
