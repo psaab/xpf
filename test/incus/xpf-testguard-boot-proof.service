@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh the xpf disposable-VM test boot-ID proof
+After=local-fs.target
+Before=multi-user.target
+ConditionVirtualization=vm
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/xpf-testguard-mark-vm.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

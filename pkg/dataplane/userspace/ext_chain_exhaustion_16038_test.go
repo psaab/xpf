@@ -20,7 +20,7 @@ import (
 //
 // These cells run the REAL retained object via BPF_PROG_TEST_RUN (shared
 // harness in xdp_shim_decouple_test.go); they skip unprivileged and execute
-// under `make test-shim-run` / `make test-root`. RED on the pre-fix object:
+// under `make test-shim-run` / `make vm-test-root`. RED on the pre-fix object:
 // the local/multicast/link-local exhausted rows return XDP_PASS instead of
 // XDP_DROP. The at-limit and terminal controls pass on both objects.
 //

@@ -61,11 +61,19 @@ cat >"$WORK/bin/unshare" <<'UNSHARE'
 if [ "$#" -eq 3 ] && [ "$1" = "-rn" ] && [ "$2" = "true" ]; then
 	exit 0
 fi
-if [ "$#" -lt 2 ] || [ "$1" != "-rn" ]; then
-	echo "stub unshare: unexpected arguments: $*" >&2
+# Accept the legacy -rn probe pair and the guarded runner's real
+# invocation (-Urp ... / nested -nm): drop every flag token, then exec
+# the first non-flag command exactly as the runner would.
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	-*) shift ;;
+	*) break ;;
+	esac
+done
+if [ "$#" -lt 1 ]; then
+	echo "stub unshare: no command after flags: $*" >&2
 	exit 97
 fi
-shift
 exec "$@"
 UNSHARE
 

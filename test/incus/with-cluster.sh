@@ -34,6 +34,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PATH="${PROJECT_ROOT}/test/support/host-bin-shims:$PATH"
+export PATH
 # shellcheck source=cluster-lock.sh
 source "${SCRIPT_DIR}/cluster-lock.sh"
 # Build identity: the lock says who may touch the cluster, not what is
@@ -198,6 +201,15 @@ xpf_cluster_build_record "$XPF_CLUSTER_BUILD_BASELINE"
 trap 'rm -f "$XPF_CLUSTER_OWNER" "$XPF_CLUSTER_BUILD_BASELINE" 2>/dev/null || true' EXIT
 
 echo "[with-cluster $(date +%H:%M:%S)] lock acquired (pid $$, purpose: ${PURPOSE})" >&2
+# A cluster cell is a V-class harness. Resolve its firewall targets and
+# prove both are VMs before the cell can run apt/systemctl or deploy code.
+# shellcheck source=cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=vm-target-guard.sh
+source "${SCRIPT_DIR}/vm-target-guard.sh"
+xpf_assert_vm_target "$FW0"
+xpf_assert_vm_target "$FW1"
+
 
 # Run the cell with the lock fd closed: children never inherit fd 9,
 # so killing the cell's tree releases the lock the instant this

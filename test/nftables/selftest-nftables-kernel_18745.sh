@@ -95,7 +95,8 @@ TestZonedDHCPLeaseAppearanceWindow11577
 # flags, so these values override inherited -run and -skip selections.
 # -count=1: a cached PASS must never stand in for a run that did not happen.
 # -json=false pins text output for the line scans below.
-out=$(XPF_REQUIRE_NETNS=1 unshare -rn "$GO" test -json=false -count=1 -v -run '^Test' -skip '' ./pkg/nftables/ 2>&1)
+runner="$(cd "$(dirname "$0")/../.." && pwd)/scripts/testguard-run.sh"
+out=$(XPF_REQUIRE_NETNS=1 "$runner" "$GO" test -json=false -count=1 -v -run '^Test' -skip '' ./pkg/nftables/ 2>&1)
 rc=$?
 
 fail=0

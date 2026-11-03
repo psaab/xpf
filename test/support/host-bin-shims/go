@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+shim_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+root=$(CDPATH= cd -- "$shim_dir/../../.." && pwd)
+case "$PATH" in
+	"$shim_dir":*) PATH=${PATH#"$shim_dir":} ;;
+	*) echo "go-test-shim: host-bin-shims is not the first PATH entry" >&2; exit 125 ;;
+esac
+export PATH
+go_bin=$(command -v go) || { echo "go-test-shim: real go binary not found" >&2; exit 127; }
+if [ "${1:-}" = test ]; then
+	exec "$root/scripts/testguard-run.sh" "$go_bin" "$@"
+fi
+exec "$go_bin" "$@"

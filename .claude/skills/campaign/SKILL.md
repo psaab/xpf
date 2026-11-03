@@ -222,7 +222,7 @@ driveable work remains.
   shell harnesses (`test/incus/*.sh`, apt/systemctl/deploy) —
   Incus only, under `with-cluster.sh`; NEVER run them directly
   on the workstation. Rules: (1) no lane runs `go test`/`cargo
-  test` as root on the workstation, and `sudo make test-root`
+  test` as root on the workstation, and `make vm-test-root`
   locally is PROHIBITED (privileged legs run in the standalone
   VM leg); (2) kernel cells assert isolation in-test on a
   LOCKED thread (`runtime.LockOSThread` + netns Get): initial

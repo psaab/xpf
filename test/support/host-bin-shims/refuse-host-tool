@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+name=${1:?missing command name}
+shift
+case "$name" in
+	apt|apt-get|systemctl|dpkg) ;;
+	*) echo "host-tool-shim: unsupported command: $name" >&2; exit 125 ;;
+esac
+proof=/run/xpf-testguard-vm-boot-id
+actual=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+expected=$(cat "$proof" 2>/dev/null || true)
+owner_mode=$(stat -c '%u %a' "$proof" 2>/dev/null || true)
+if [ ! -f "$proof" ] || [ -L "$proof" ] || [ "$owner_mode" != "0 444" ] ||
+	[ -z "$actual" ] || [ "$actual" != "$expected" ]; then
+	echo "host-tool-shim: refusing $name without a current root-owned VM boot-ID proof ($proof)" >&2
+	exit 125
+fi
+exec "/usr/bin/$name" "$@"

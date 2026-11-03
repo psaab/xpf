@@ -67,6 +67,9 @@ IMAGE_CT="${IMAGE_CT:-images:ubuntu/${XPF_BASE_RELEASE}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# shellcheck source=test/incus/vm-target-guard.sh
+source "${SCRIPT_DIR}/vm-target-guard.sh"
+
 # Network definitions: name:subnet:nat
 # Dataplane networks use none — DHCP comes from the firewall VM, not the bridge.
 NETWORKS=(
@@ -398,6 +401,9 @@ cmd_create_vm() {
 
 provision_instance() {
 	local type="$1"  # "vm" or "ct"
+	if [[ "$type" == "vm" ]]; then
+		xpf_assert_vm_target "$INSTANCE_NAME"
+	fi
 
 	# Wait for systemd to be ready (VM agent may respond before systemd is up)
 	info "Waiting for system to be ready..."
@@ -567,6 +573,7 @@ cmd_deploy() {
 	if ! incus info "$INSTANCE_NAME" &>/dev/null 2>&1; then
 		die "Instance $INSTANCE_NAME does not exist. Run '$0 create-vm' or '$0 create-ct' first."
 	fi
+	xpf_assert_vm_target "$INSTANCE_NAME"
 	assert_sole_dataplane_owner deploy
 
 	info "Building xpfd and cli..."
@@ -703,16 +710,19 @@ cmd_ssh() {
 }
 
 cmd_start() {
+	xpf_assert_vm_target "$INSTANCE_NAME"
 	incus exec "$INSTANCE_NAME" -- systemctl start xpfd
 	info "xpfd started"
 }
 
 cmd_stop() {
+	xpf_assert_vm_target "$INSTANCE_NAME"
 	incus exec "$INSTANCE_NAME" -- systemctl stop xpfd
 	info "xpfd stopped"
 }
 
 cmd_restart() {
+	xpf_assert_vm_target "$INSTANCE_NAME"
 	incus exec "$INSTANCE_NAME" -- systemctl restart xpfd
 	info "xpfd restarted"
 }

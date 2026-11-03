@@ -53,7 +53,7 @@
 // workflows under `.github/workflows/`; the privileged leg still runs only
 // locally — GitHub-hosted runners have no CAP_BPF.)
 // `make test-memlock-guards` is now that leg (and a prerequisite of
-// `make test-root`): it derives the package set FROM the registry, runs it
+// `make vm-test-root`): it derives the package set FROM the registry, runs it
 // under the required privilege, and verifies BY NAME that every registered
 // Test... function actually produced a `=== RUN` line — a `-run` predicate is
 // a claim about names and fails silently in the only direction that matters.
