@@ -4,12 +4,28 @@
 set -eu
 
 LIST_ONLY=0
-if [ "${1:-}" = "--list" ]; then
-  LIST_ONLY=1
-  shift
-fi
+PACKAGE_FILE=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --list)
+      LIST_ONLY=1
+      shift
+      ;;
+    --packages-file)
+      if [ "$#" -lt 2 ]; then
+        echo "usage: $0 [--list] [--packages-file FILE] BASE_SHA HEAD_SHA" >&2
+        exit 2
+      fi
+      PACKAGE_FILE=$2
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 if [ "$#" -ne 2 ]; then
-  echo "usage: $0 [--list] BASE_SHA HEAD_SHA" >&2
+  echo "usage: $0 [--list] [--packages-file FILE] BASE_SHA HEAD_SHA" >&2
   exit 2
 fi
 BASE=$1
@@ -19,7 +35,7 @@ if ! CHANGED=$(git diff --name-only --no-renames "$BASE" "$HEAD"); then
   echo "unable to diff repository paths between $BASE and $HEAD" >&2
   exit 1
 fi
-if [ -z "$CHANGED" ]; then
+if [ -z "$CHANGED" ] && [ -z "$PACKAGE_FILE" ]; then
   echo "No files changed; skipping affected Go tests."
   exit 0
 fi
@@ -41,7 +57,12 @@ fi
 # graph has no edge for those reads (#14647). The allowlist is only for
 # paths no Go test reads; when in doubt, do not allowlist -- seeding all
 # is the safe fallback, never seeding nothing.
-PKGS=$(printf '%s\n' "$CHANGED" | python3 -c '
+# Explicit package lists run directly; path-to-package selection is not needed
+# for a bounded cohort or a differential-runner self-test.
+if [ -n "$PACKAGE_FILE" ]; then
+  PKGS=
+else
+  PKGS=$(printf '%s\n' "$CHANGED" | python3 -c '
 import json
 import os
 import re
@@ -296,6 +317,34 @@ while queue:
 
 print(" ".join(sorted(selected)))
 ')
+fi
+
+if [ -n "$PACKAGE_FILE" ]; then
+  if [ ! -f "$PACKAGE_FILE" ]; then
+    printf 'package list does not exist: %s\n' "$PACKAGE_FILE" >&2
+    exit 2
+  fi
+  PKGS=$(python3 - "$PACKAGE_FILE" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+packages = [
+    line.strip()
+    for line in path.read_text(encoding="utf-8").splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+]
+if not packages:
+    raise SystemExit(f"{path}: package list is empty")
+if len(packages) != len(set(packages)):
+    raise SystemExit(f"{path}: duplicate package path")
+if any(not package.startswith("github.com/psaab/xpf/") or
+       any(char.isspace() for char in package) for package in packages):
+    raise SystemExit(f"{path}: expected one in-repository import path per line")
+print(" ".join(packages))
+PY
+)
+fi
 
 if [ -z "$PKGS" ]; then
   exit 0
@@ -304,7 +353,145 @@ printf 'Affected Go packages: %s\n' "$PKGS"
 if [ "$LIST_ONLY" -eq 1 ]; then
   exit 0
 fi
-# Package import paths cannot contain shell whitespace.
-# shellcheck disable=SC2086
+if [ -z "${TMPDIR:-}" ]; then
+  TMPDIR=/var/worktrees/.cache/tmpdir
+fi
+mkdir -p "$TMPDIR"
+repo_root=$(git rev-parse --show-toplevel)
+script_dir=$(cd "$(dirname "$0")" && pwd)
+test_runner="$script_dir/go-test-json.sh"
+head_log=$(mktemp "$TMPDIR/affected-go-head.XXXXXX")
+base_log=
+base_tree=
+cleanup_base_tree() {
+  if [ -n "$head_log" ]; then
+    rm -f "$head_log"
+  fi
+  if [ -n "$base_log" ]; then
+    rm -f "$base_log"
+  fi
+  if [ -n "$base_tree" ]; then
+    if ! git -C "$repo_root" worktree remove "$base_tree" >/dev/null 2>&1; then
+      printf 'warning: unable to remove base test worktree %s\n' "$base_tree" >&2
+    fi
+  fi
+}
+trap cleanup_base_tree EXIT
+
+failed_packages() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+
+failed = set()
+with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        match = re.match(r"^FAIL[ \t]+(\S+)(?:[ \t]|$)", line)
+        if match and match.group(1).startswith("github.com/psaab/xpf/"):
+            failed.add(match.group(1))
+print(" ".join(sorted(failed)))
+PY
+}
+run_logged_tests() {
+  runner=$1
+  log=$2
+  shift 2
+  bash -o pipefail -c '
+    runner=$1
+    log=$2
+    shift 2
+    bash "$runner" "" "$@" 2>&1 | tee "$log"
+  ' affected-go-tests "$runner" "$log" "$@"
+}
+
 set -- $PKGS
-exec go test -count=1 "$@"
+# Run HEAD once across the selected set. The shared runner preserves text
+# output and returns 3 on a timeout, which is VOID rather than a red package.
+if run_logged_tests "$test_runner" "$head_log" go -count=1 "$@"; then
+  head_rc=0
+else
+  head_rc=$?
+fi
+if [ "$head_rc" -eq 0 ]; then
+  exit 0
+fi
+if [ "$head_rc" -eq 3 ]; then
+  printf 'VOID: selected Go package tests timed out at head %s\n' "$HEAD" >&2
+  exit 3
+fi
+if [ "$head_rc" -ne 1 ]; then
+  printf 'VOID: unable to run selected Go packages at head %s (runner rc=%s)\n' \
+    "$HEAD" "$head_rc" >&2
+  exit 2
+fi
+head_failed=$(failed_packages "$head_log")
+if [ -z "$head_failed" ]; then
+  printf 'VOID: head %s failed without package-level test results\n' "$HEAD" >&2
+  exit 2
+fi
+
+base_tree=$(mktemp -d "$TMPDIR/affected-go-base.XXXXXX")
+rmdir "$base_tree"
+if ! git -C "$repo_root" worktree add --detach "$base_tree" "$BASE"; then
+  rmdir "$base_tree" 2>/dev/null || :
+  base_tree=
+  printf 'unable to create base test worktree for %s\n' "$BASE" >&2
+  exit 2
+fi
+
+# A base package must exist and compile before a test failure there can be
+# called a known-red baseline. Missing/build-broken packages are VOID.
+set -- $head_failed
+for package in "$@"; do
+  if ! (cd "$base_tree" && go list "$package" >/dev/null 2>&1); then
+    printf 'VOID: %s did not exist or was not listable at base %s\n' \
+      "$package" "$BASE" >&2
+    exit 2
+  fi
+  base_binary=$(mktemp "$TMPDIR/affected-go-base-test.XXXXXX")
+  if ! (cd "$base_tree" && go test -c -o "$base_binary" "$package"); then
+    rm -f "$base_binary"
+    printf 'VOID: %s did not compile at base %s; cannot compare test verdicts\n' \
+      "$package" "$BASE" >&2
+    exit 2
+  fi
+  rm -f "$base_binary"
+done
+
+base_log=$(mktemp "$TMPDIR/affected-go-base.XXXXXX")
+if (cd "$base_tree" && run_logged_tests "$test_runner" "$base_log" \
+  go -count=1 "$@"); then
+  base_rc=0
+else
+  base_rc=$?
+fi
+if [ "$base_rc" -eq 3 ]; then
+  printf 'VOID: base Go package tests timed out at %s\n' "$BASE" >&2
+  exit 3
+fi
+if [ "$base_rc" -gt 1 ]; then
+  printf 'VOID: unable to run base Go packages at %s (runner rc=%s)\n' \
+    "$BASE" "$base_rc" >&2
+  exit 2
+fi
+base_failed=$(failed_packages "$base_log")
+if [ "$base_rc" -eq 1 ] && [ -z "$base_failed" ]; then
+  printf 'VOID: base %s failed without package-level test results\n' "$BASE" >&2
+  exit 2
+fi
+
+regression=0
+for package in $head_failed; do
+  case " $base_failed " in
+    *" $package "*)
+      printf 'BASELINE-RED: %s fails at both base %s and head %s\n' \
+        "$package" "$BASE" "$HEAD" >&2
+      ;;
+    *)
+      printf 'REGRESSION: %s passed at base %s but fails at head %s\n' \
+        "$package" "$BASE" "$HEAD" >&2
+      regression=1
+      ;;
+  esac
+done
+exit "$regression"

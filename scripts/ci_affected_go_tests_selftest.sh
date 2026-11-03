@@ -71,7 +71,9 @@ contains "$sel" "github.com/psaab/xpf/pkg/memlockcensus" \
 # ── 3+4. Synthetic repo: always-append vs never-read allowlist ──
 # A throwaway clone at HEAD with two synthetic commits, so the legs do
 # not depend on finding suitable real commits for these shapes.
-tmp=$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp -d)
+scratch_root=${TMPDIR:-/var/worktrees/.cache/tmpdir}
+mkdir -p "$scratch_root" || exit 1
+tmp=$(TMPDIR="$scratch_root" mktemp -d) || exit 1
 trap 'rm -rf "$tmp"' EXIT
 git clone --quiet --no-hardlinks "$root" "$tmp/clone" 2>/dev/null
 git -C "$tmp/clone" checkout --quiet -B selftest HEAD
@@ -191,6 +193,83 @@ for tgt in pkg/grpcapi/runtime.go pkg/api/authz.go; do
     "root-anchored ($tgt): pkg/diagcmd selected via repo-root-anchored edge (#16461)"
   git -C "$tmp/clone" reset --quiet --hard HEAD^
 done
+
+# 4f. #16723: one fixture-only commit changes a testdata file in every cohort
+#     package and must select every owner. Batch the canary into one selector
+#     run; the selector's path-to-package mapping is the property under test.
+cohort_file="$root/scripts/go-16723-packages.txt"
+cohort_count=0
+while IFS= read -r package; do
+  [ -n "$package" ] || continue
+  relative=${package#github.com/psaab/xpf/}
+  fixture="$relative/testdata/selector_canary_16723.txt"
+  mkdir -p "$tmp/clone/$relative/testdata"
+  printf 'committed fixture-only selector canary\n' > "$tmp/clone/$fixture"
+  git -C "$tmp/clone" add "$fixture"
+  cohort_count=$((cohort_count+1))
+done < "$cohort_file"
+[ "$cohort_count" -eq 16 ] && ok "fixture canary covers all 16 #16723 packages" || bad "fixture canary covered $cohort_count packages, want 16"
+git -C "$tmp/clone" commit --quiet -m "selftest: #16723 fixture-only cohort canary"
+out=$(cd "$tmp/clone" && bash "$selector" --list HEAD^ HEAD 2>&1); rc=$?
+[ "$rc" -eq 0 ] && ok "fixture-only cohort commit: selector exits 0" || bad "fixture-only cohort commit: rc=$rc out=$out"
+sel=${out#Affected Go packages: }
+while IFS= read -r package; do
+  [ -n "$package" ] || continue
+  contains "$sel" "$package" "fixture-only cohort commit: owner $package selected"
+done < "$cohort_file"
+git -C "$tmp/clone" reset --quiet --hard HEAD^
+fixture_base=$(git -C "$tmp/clone" rev-parse HEAD)
+guard_packages="$tmp/policymatch-packages.txt"
+printf '%s\n' "github.com/psaab/xpf/pkg/policymatch" > "$guard_packages"
+
+# This cohort package is green at fixture_base. A committed failing test in
+# the next revision must make the selector's base-green guard reject the change.
+git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
+cat > "$tmp/clone/pkg/policymatch/zz_base_green_16723_test.go" <<'EOF'
+package policymatch
+
+import "testing"
+
+func TestBaseGreenGuardCanary16723(t *testing.T) {
+	t.Fatal("synthetic head-only failure")
+}
+EOF
+git -C "$tmp/clone" add pkg/policymatch/zz_base_green_16723_test.go
+git -C "$tmp/clone" commit --quiet -m "selftest: create head-only Go test failure"
+green_head=$(git -C "$tmp/clone" rev-parse HEAD)
+out=$(cd "$tmp/clone" && bash "$selector" --packages-file "$guard_packages" "$fixture_base" "$green_head" 2>&1); rc=$?
+case "$out" in
+  *"REGRESSION: github.com/psaab/xpf/pkg/policymatch passed at base"*)
+    [ "$rc" -ne 0 ] && ok "base-green guard rejects a committed head-only failure" || bad "base-green guard reported a regression but exited 0" ;;
+  *) bad "base-green guard did not identify the synthetic regression: rc=$rc out=$out" ;;
+esac
+
+# A package that is already red on base is reported, not reclassified as a
+# new regression; known cohort baseline reds remain tracked separately.
+git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
+cat > "$tmp/clone/pkg/policymatch/zz_base_red_16723_test.go" <<'EOF'
+package policymatch
+
+import "testing"
+
+func TestBaseRedGuardCanary16723(t *testing.T) {
+	t.Fatal("synthetic baseline failure")
+}
+EOF
+git -C "$tmp/clone" add pkg/policymatch/zz_base_red_16723_test.go
+git -C "$tmp/clone" commit --quiet -m "selftest: create base-red Go test"
+red_base=$(git -C "$tmp/clone" rev-parse HEAD)
+printf '\n// further change after the baseline failure\n' >> "$tmp/clone/pkg/policymatch/zz_base_red_16723_test.go"
+git -C "$tmp/clone" add pkg/policymatch/zz_base_red_16723_test.go
+git -C "$tmp/clone" commit --quiet -m "selftest: change base-red package"
+red_head=$(git -C "$tmp/clone" rev-parse HEAD)
+out=$(cd "$tmp/clone" && bash "$selector" --packages-file "$guard_packages" "$red_base" "$red_head" 2>&1); rc=$?
+case "$out" in
+  *"BASELINE-RED: github.com/psaab/xpf/pkg/policymatch fails at both base"*)
+    [ "$rc" -eq 0 ] && ok "base-red package is reported without failing" || bad "base-red package guard rc=$rc out=$out" ;;
+  *) bad "base-red package was not explicitly attributed: rc=$rc out=$out" ;;
+esac
+git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
 
 # ── 5. census_packages matches the live census packages ──
 # The selector's census list must equal the pkg/ packages that declare
