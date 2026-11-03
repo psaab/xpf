@@ -1768,8 +1768,8 @@ scripts/userspace-ha-failover-validation.sh --aged-failover --duration 60 --para
 
 ```bash
 # Reverse-path coverage is also required. The validator currently exercises the
-# source-sending path, so run a matching reverse iperf after the forward pass
-# (IPERF_TARGET4 from test/incus/cluster-env.sh; loss 172.16.80.202, #18576).
+# source-sending path, so run a matching reverse iperf after the forward pass.
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
 iperf3 -c "$IPERF_TARGET4" -P 8 -t 600 -R
 ```
 
@@ -1777,6 +1777,7 @@ iperf3 -c "$IPERF_TARGET4" -P 8 -t 600 -R
 
 ```bash
 # Start long-running forward traffic and keep all per-stream lines visible.
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
 iperf3 -c "$IPERF_TARGET4" -P 8 -t 600
 
 # Rapidly move RG1 between fw0 and fw1 while traffic is active.
@@ -1796,6 +1797,7 @@ cli -c "show chassis cluster data-plane statistics" | grep SNAT
 ```bash
 # Repeat the same RG movement under reverse traffic. This exercises the return
 # path ownership and catches failovers that only work when the host is sending.
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
 iperf3 -c "$IPERF_TARGET4" -P 8 -t 600 -R
 
 cli -c "request chassis cluster failover redundancy-group 1 node 1"

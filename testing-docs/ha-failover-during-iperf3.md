@@ -20,6 +20,10 @@ This test exercises:
 
 ## Prerequisites
 
+- Source the cluster env in your shell first
+  (`source test/incus/cluster-env.sh`; `IPERF_TARGET4` is loss
+  `172.16.80.202` today, #18576) so the `$IPERF_TARGET4` commands below
+  resolve
 - Both `xpf-userspace-fw0` and `xpf-userspace-fw1` running with latest code
 - Cluster healthy: `show chassis cluster status` shows primary + secondary for all RGs
 - Takeover ready: yes on both nodes

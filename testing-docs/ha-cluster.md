@@ -170,6 +170,9 @@ around one RG move and one traffic run.
 Example:
 
 ```bash
+# Source the cluster env first so $IPERF_TARGET4 resolves (loss: .202, #18576).
+source test/incus/cluster-env.sh
+
 # Put RG1 on node0 so node1 becomes the stale owner for LAN ingress.
 incus exec loss:xpf-userspace-fw1 -- \
   bash -lc 'cli -c "request chassis cluster failover redundancy-group 1 node 0"'
