@@ -2118,7 +2118,8 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 			afNode, afName := m.AfNode, m.Af
 			if unknownFamilyMember17196(m, forwardingFamilyKnown17196) {
 				msg := unknownFamilyMsg17196("forwarding-options family",
-					m, forwardingFamilyKnown17196, forwardingFamilyKnownSorted17196)
+					m, forwardingFamilyKnown17196, forwardingFamilyKnownSorted17196,
+					opts.lenientFamilyMembers17196)
 				if opts.lenientFamilyMembers17196 {
 					if warnings != nil {
 						*warnings = append(*warnings, msg+"; skipping that family member")
@@ -2401,7 +2402,8 @@ func compileSampling(node *Node, fo *ForwardingOptionsConfig, opts compileOpts, 
 				if unknownFamilyMember17196(m, samplingFamilyKnown17196) {
 					msg := unknownFamilyMsg17196(
 						fmt.Sprintf("forwarding-options sampling instance %q family", sampInst.name),
-						m, samplingFamilyKnown17196, samplingFamilyKnownSorted17196)
+						m, samplingFamilyKnown17196, samplingFamilyKnownSorted17196,
+						opts.lenientFamilyMembers17196)
 					if opts.lenientFamilyMembers17196 {
 						if warnings != nil {
 							*warnings = append(*warnings, msg+"; skipping that family member")
