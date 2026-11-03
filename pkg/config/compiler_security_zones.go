@@ -490,9 +490,10 @@ func hostInboundTokenMatchesAny(token string, excluded map[string][]L4Match, pro
 //
 // dst is nil for the first block, in which case src is returned UNCHANGED so a
 // SINGLE block stays byte-identical to the pre-#4544 behaviour (no dedup, no
-// copy — a single block preserves its exact token multiset). Only when a second
-// block is actually merged are the unioned slices deduplicated (first-seen
-// order preserved). src nil (no stanza) is a no-op. Exclusion provenance is
+// copy — a single block preserves its exact token multiset). Only dimensions
+// receiving values from a second block are deduplicated (first-seen order
+// preserved); an empty source positive list does not deduplicate existing tokens.
+// src nil (no stanza) is a no-op. Exclusion provenance is
 // merged with the positive lists so a restrictive sibling block cannot be
 // erased by the positive-list union.
 func mergeHostInbound(dst, src *HostInboundTraffic) *HostInboundTraffic {
@@ -502,8 +503,12 @@ func mergeHostInbound(dst, src *HostInboundTraffic) *HostInboundTraffic {
 	if dst == nil {
 		return src
 	}
-	dst.SystemServices = dedupHostInboundTokens(append(dst.SystemServices, src.SystemServices...))
-	dst.Protocols = dedupHostInboundTokens(append(dst.Protocols, src.Protocols...))
+	if len(src.SystemServices) > 0 {
+		dst.SystemServices = dedupHostInboundTokens(append(dst.SystemServices, src.SystemServices...))
+	}
+	if len(src.Protocols) > 0 {
+		dst.Protocols = dedupHostInboundTokens(append(dst.Protocols, src.Protocols...))
+	}
 	dst.systemServicesExcept = append(dst.systemServicesExcept, src.systemServicesExcept...)
 	dst.protocolsExcept = append(dst.protocolsExcept, src.protocolsExcept...)
 	dst.systemServicesHasAll = dst.systemServicesHasAll || src.systemServicesHasAll
@@ -670,23 +675,222 @@ func functionalZoneManagementSchema15668() *schemaNode {
 	return refFunctionalZoneMgmt.resolve()
 }
 
-// managementFunctionalZoneInstances15668 returns every `functional-zone
-// management` body under zones, across the AST shapes the stanza reaches
-// the compiler in: the braced block (`functional-zone { management {
-// ... } }`), the compact header (`functional-zone management { ... }`,
-// whose body rides as children of the management-keyed node), and the
-// flat-set descent (one management container reused per `set` line).
-// Anything else under functional-zone is not Junos's management zone and
-// is ignored here; the closed-world schema rejects it at commit.
+// managementFunctionalZoneInstances15668 returns every functional-zone
+// management body under zones. It keeps the reader's existing handling of
+// compact headers and expands only packed host-inbound-traffic tails; other
+// functional-zone packed properties remain unchanged.
 func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
 	var out []*Node
+	managementSchema := functionalZoneManagementSchema15668()
+	var hostInboundSchema *schemaNode
+	if managementSchema != nil {
+		hostInboundSchema = managementSchema.children["host-inbound-traffic"]
+	}
 	for _, fz := range zonesNode.FindChildren("functional-zone") {
-		out = append(out, fz.FindChildren("management")...)
-		if len(fz.Keys) > 1 && fz.Keys[1] == "management" {
-			out = append(out, fz)
+		var packed *Node
+		if len(fz.Children) == 1 && len(fz.Children[0].Keys) > 1 &&
+			fz.Children[0].Keys[0] == "management" && fz.Children[0].Keys[1] == "host-inbound-traffic" &&
+			hostInboundSchema != nil {
+			packed = fz.Children[0]
 		}
+		// Preserve the existing nested management bodies even when this
+		// functional-zone node also carries a compact management header.
+		for _, mgmt := range fz.FindChildren("management") {
+			// #18788: skip only the single packed management leaf rebuilt by
+			// the special arm below. Packed leaves with siblings must still be
+			// emitted through the generic path.
+			if mgmt == packed {
+				continue
+			}
+			out = append(out, functionalZoneManagementBody15668(mgmt))
+		}
+		// #18788: the braced functional-zone header can itself carry the
+		// packed management tail as its Keys (`functional-zone { management
+		// host-inbound-traffic ...; }` parses to one leaf node). Rebuild it
+		// through the same declared HIB path as the two-level form below.
+		if packed != nil {
+			hostInbound := *packed
+			hostInbound.Keys = packed.Keys[1:]
+			hostInbound.setKeysQuoted(maskSlice8921(packed.KeysQuoted, 1, len(packed.Keys)))
+			hostInbound.setKeysBracketed(
+				maskSlice8921(packed.KeysBracketed, 1, len(packed.Keys)), packed.BracketedClosed)
+			if children := packedBodyChildren(&hostInbound, hostInboundSchema); len(children) > 0 {
+				mgmt := *packed
+				mgmt.Keys = packed.Keys[:1]
+				mgmt.setKeysQuoted(maskSlice8921(packed.KeysQuoted, 0, 1))
+				mgmt.setKeysBracketed(
+					maskSlice8921(packed.KeysBracketed, 0, 1), packed.BracketedClosed)
+				mgmt.Children = []*Node{
+					functionalZoneHostInboundBody15668(&hostInbound, children),
+				}
+				mgmt.IsLeaf = false
+				out = append(out, &mgmt)
+				continue
+			}
+			// #18788: unexpanded declared HIB tail - surface it (see the
+			// two-level arm below) instead of swallowing the tokens.
+			hostInbound.Keys = packed.Keys[1:]
+			mgmt := *packed
+			mgmt.Keys = packed.Keys[:1]
+			mgmt.setKeysQuoted(maskSlice8921(packed.KeysQuoted, 0, 1))
+			mgmt.setKeysBracketed(
+				maskSlice8921(packed.KeysBracketed, 0, 1), packed.BracketedClosed)
+			mgmt.Children = []*Node{
+				functionalZoneHostInboundBody15668(&hostInbound, nil),
+			}
+			mgmt.IsLeaf = false
+			out = append(out, &mgmt)
+			continue
+		}
+		if len(fz.Keys) <= 1 || fz.Keys[1] != "management" {
+			continue
+		}
+		if len(fz.Keys) > 2 && fz.Keys[2] == "host-inbound-traffic" &&
+			len(fz.Children) == 0 && hostInboundSchema != nil {
+			// The two-level packed form stores HIB and its values on the
+			// functional-zone node's Keys. Rebuild only this declared path.
+			hostInbound := *fz
+			hostInbound.Keys = fz.Keys[2:]
+			hostInbound.setKeysQuoted(maskSlice8921(fz.KeysQuoted, 2, len(fz.Keys)))
+			hostInbound.setKeysBracketed(
+				maskSlice8921(fz.KeysBracketed, 2, len(fz.Keys)), fz.BracketedClosed)
+			children := packedBodyChildren(&hostInbound, hostInboundSchema)
+			if len(children) > 0 {
+				mgmt := *fz
+				mgmt.Keys = fz.Keys[1:2]
+				mgmt.setKeysQuoted(maskSlice8921(fz.KeysQuoted, 1, 2))
+				mgmt.setKeysBracketed(
+					maskSlice8921(fz.KeysBracketed, 1, 2), fz.BracketedClosed)
+				mgmt.Children = []*Node{
+					functionalZoneHostInboundBody15668(&hostInbound, children),
+				}
+				mgmt.IsLeaf = false
+				out = append(out, &mgmt)
+				continue
+			}
+			// #18788: expansion produced nothing for a declared HIB tail
+			// (e.g. a misspelled child keyword). Do NOT fall through to the
+			// compact-header reader, which swallows the tokens silently;
+			// surface the tail as the management body's HIB child (keeping
+			// its packed Keys) so parseHostInboundNode records the unknown
+			// keyword and the strict gate rejects it like the ordinary path.
+			hostInbound.Keys = fz.Keys[2:]
+			mgmt := *fz
+			mgmt.Keys = fz.Keys[1:2]
+			mgmt.setKeysQuoted(maskSlice8921(fz.KeysQuoted, 1, 2))
+			mgmt.setKeysBracketed(
+				maskSlice8921(fz.KeysBracketed, 1, 2), fz.BracketedClosed)
+			mgmt.Children = []*Node{
+				functionalZoneHostInboundBody15668(&hostInbound, nil),
+			}
+			mgmt.IsLeaf = false
+			out = append(out, &mgmt)
+			continue
+		}
+		// Keep the existing compact-header reader for non-HIB tails.
+		out = append(out, functionalZoneManagementBody15668(fz))
 	}
 	return out
+}
+
+// functionalZoneManagementBody15668 expands packed host-inbound-traffic
+// children inside a functional-zone body. The regular security-zone reader
+// reaches the same form through the compact normalizer's scope entry, but this
+// separate functional-zone AST path must supply the HIB child body itself.
+func functionalZoneManagementBody15668(mgmt *Node) *Node {
+	if mgmt == nil {
+		return mgmt
+	}
+	// #18788: a packed management statement (`management host-inbound-traffic
+	// ...;` inside a braced functional-zone) arrives as ONE leaf node whose
+	// Children are empty but whose Keys carry the HIB tail. Expand it here;
+	// an unexpandable tail keeps its packed Keys so the unknown-child gate
+	// sees it instead of the tokens vanishing.
+	if len(mgmt.Children) == 0 && len(mgmt.Keys) > 1 && mgmt.Keys[0] == "management" &&
+		mgmt.Keys[1] == "host-inbound-traffic" {
+		schema := functionalZoneManagementSchema15668()
+		if schema == nil {
+			return mgmt
+		}
+		hibSchema := schema.children["host-inbound-traffic"]
+		if hibSchema == nil {
+			return mgmt
+		}
+		hostInbound := *mgmt
+		hostInbound.Keys = mgmt.Keys[1:]
+		hostInbound.setKeysQuoted(maskSlice8921(mgmt.KeysQuoted, 1, len(mgmt.Keys)))
+		hostInbound.setKeysBracketed(
+			maskSlice8921(mgmt.KeysBracketed, 1, len(mgmt.Keys)), mgmt.BracketedClosed)
+		children := packedBodyChildren(&hostInbound, hibSchema)
+		out := *mgmt
+		out.Keys = mgmt.Keys[:1]
+		out.setKeysQuoted(maskSlice8921(mgmt.KeysQuoted, 0, 1))
+		out.setKeysBracketed(
+			maskSlice8921(mgmt.KeysBracketed, 0, 1), mgmt.BracketedClosed)
+		out.Children = []*Node{
+			functionalZoneHostInboundBody15668(&hostInbound, children),
+		}
+		out.IsLeaf = false
+		return &out
+	}
+	if len(mgmt.Children) == 0 {
+		return mgmt
+	}
+	managementSchema := functionalZoneManagementSchema15668()
+	if managementSchema == nil {
+		return mgmt
+	}
+	hostInboundSchema := managementSchema.children["host-inbound-traffic"]
+	if hostInboundSchema == nil {
+		return mgmt
+	}
+	var expanded []*Node
+	for i, prop := range mgmt.Children {
+		if prop == nil || prop.Name() != "host-inbound-traffic" {
+			continue
+		}
+		children := packedBodyChildren(prop, hostInboundSchema)
+		same := len(children) == len(prop.Children)
+		if same {
+			for j := range children {
+				if children[j] != prop.Children[j] {
+					same = false
+					break
+				}
+			}
+		}
+		if same {
+			continue
+		}
+		if expanded == nil {
+			expanded = append([]*Node(nil), mgmt.Children...)
+		}
+		expanded[i] = functionalZoneHostInboundBody15668(prop, children)
+	}
+	if expanded == nil {
+		return mgmt
+	}
+	copy := *mgmt
+	copy.Children = expanded
+	return &copy
+}
+
+// functionalZoneHostInboundBody15668 returns the braced-equivalent HIB node
+// after packedBodyChildren has moved its declared tail into child nodes.
+// Keep the per-key quote/bracket provenance aligned with the remaining key.
+func functionalZoneHostInboundBody15668(node *Node, children []*Node) *Node {
+	copy := *node
+	// Only truncate the packed Keys when expansion consumed them into
+	// children; an unexpanded tail must keep Keys[1:] so
+	// parseHostInboundNode records the unknown keyword (#18788).
+	if len(children) > 0 && len(node.Keys) > 1 {
+		copy.Keys = node.Keys[:1]
+		copy.setKeysQuoted(maskSlice8921(node.KeysQuoted, 0, 1))
+		copy.setKeysBracketed(maskSlice8921(node.KeysBracketed, 0, 1), node.BracketedClosed)
+	}
+	copy.Children = children
+	copy.IsLeaf = false
+	return &copy
 }
 
 func compileZones(node *Node, sec *SecurityConfig) error {

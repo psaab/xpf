@@ -199,8 +199,6 @@ security policies global policy xpfarg then deny log	UNCLASSIFIED
 security policies global policy xpfarg then permit	UNCLASSIFIED
 security policies global policy xpfarg then reject	UNCLASSIFIED
 security zones functional-zone management description	COMMITS-DIFFERENT
-security zones functional-zone management host-inbound-traffic protocols	UNCLASSIFIED
-security zones functional-zone management host-inbound-traffic system-services	UNCLASSIFIED
 security zones functional-zone management interfaces	UNCLASSIFIED
 security zones functional-zone management interfaces xpfname host-inbound-traffic protocols	UNCLASSIFIED
 security zones functional-zone management interfaces xpfname host-inbound-traffic system-services	UNCLASSIFIED
