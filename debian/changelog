@@ -11,6 +11,9 @@ xpf (0.0.0) unstable; urgency=medium
   * userspace-dp: keep pool-SNAT alias replies directed to their canonical
     peer row after RefreshOwnerRGS, including when the pool target resolves
     as a WAN MissingNeighbor or ForwardCandidate (#18535).
+  * A cached FabricRedirect for a routed destination is re-resolved when its
+    fresh local egress RG is active after RG activation, instead of continuing
+    to send the flow to the peer that no longer owns the route (#18588).
   * Lab stack address collision (#18574): move standalone and legacy-local
     NAT64/SNAT pools off foreign-held VLAN 50 addresses and document the
     same-day RFC 5227 probe results for the replacement addresses.
