@@ -19,14 +19,14 @@
 //
 // * `Promoted` — B admitted a SYN-ACK on a replica pair. Carries the SYN-ACK's
 //   ack (the receiver validates it against ITS client SYN end, #16042) and the
-//   server SYN end, seeded on the receiver's reverse half so a bare completing
-//   ACK is validated exactly as on a single worker. Applied only to a pure
-//   Opening SYN-first pair; the receiver moves to `established &&
-//   handshake_pending` — the #6752 opening-class gap — so a client segment,
-//   not the relay, completes it. Scope of the #16042 claim: a DATA segment
-//   completes a pending pair through the #16223 companion arm
-//   (`cache_hit_handshake_progress`), which checks no ack — on a relayed pair
-//   exactly as on a single worker (#18528).
+//   server SYN end, seeded as the receiver's validated expected ACK. Until this
+//   table observes later server sequence progress, it admits only that exact
+//   SYN-end ACK; #18528 widens the #16223 companion-arm window only as the
+//   observed peer send end advances. The classic completing-ACK gate remains
+//   exact. Applied only to a pure Opening SYN-first pair; the receiver moves to
+//   `established && handshake_pending` — the #6752 opening-class gap — so a
+//   client segment, not the relay, completes it. An out-of-window DATA ACK
+//   stays pending on relayed and single-worker pairs alike.
 // * `Completed` — a worker completed a split pair. Applied only to a pair the
 //   receiver already holds as handshake-pending (a SYN-ACK was seen on it:
 //   validated for a SYN-first pair, or the installing segment of a
@@ -410,8 +410,14 @@ impl SessionTable {
                     entry.handshake_relayed = true;
                     // The SYN-ACK was never noted on this table: replace the
                     // install-time expectation with the real server SYN end
-                    // so the completing ACK is validated exactly (#16042).
+                    // for the later classic ACK check and companion window.
                     entry.tcp_peer_ack_end = relay.server_ack_end;
+                    // #18528: mark the direction's SYN end as validated
+                    // evidence. Until this table observes later server
+                    // segments, it permits only the exact SYN-end ACK.
+                    if relay.server_ack_end.is_some() {
+                        entry.tcp_syn_seen = true;
+                    }
                 }
             }
             HandshakeRelayStage::Completed => {

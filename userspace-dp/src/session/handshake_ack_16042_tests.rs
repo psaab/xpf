@@ -1,13 +1,13 @@
-//! #16042: handshake promotion/completion must validate the segment's
-//! ack number (ack == companion ISN + 1, wrapping) at EVERY completion
-//! gate — lookup SYN-ACK, lookup completing-ACK, cached-hit
-//! (`probe_hit` / keepalive), and the `update_session` / promote twin.
+//! #16042: classic handshake promotion/completion validates the segment's
+//! ack exactly against the companion SYN end. The #16223 companion-progress
+//! completion added by #18528 uses the bounded window from that SYN end
+//! through the observed companion send end, allowing legitimate ACK advance
+//! only over bytes actually sent.
 //!
-//! A wrong-ack segment must never promote a pair off the opening
-//! window; the correct ack must. Unknown evidence (HA import with no
-//! observed SYN, unparsed ack) fails OPEN — flags-only, bounded by the
-//! opening window — never fail-closed, so a failover import's first
-//! completing segment still completes.
+//! An ACK outside its accepted window must never promote a pair off the
+//! opening window; unknown evidence (HA import with no observed SYN/send end,
+//! unparsed ack) fails OPEN, still bounded by the opening window — never
+//! fail-closed, so a failover import's first completing segment can complete.
 //!
 //! NAT: the companion is resolved through `reverse_session_key`, so a
 //! translated pair validates against the alias companion's ISN.
@@ -217,6 +217,163 @@ fn bad_ack_does_not_complete_keepalive_16042() {
         assert_opening(&table, key, label);
     }
     assert!(table.touch_if_stale_with_ack(&forward, now + 3 * SEC, TCP_ACK | TCP_PSH, 100, Some(SERVER_ISN + 1)));
+    assert_established(&table, &forward, "forward");
+    assert_established(&table, &reverse, "reverse");
+}
+
+/// #18528: a valid client ACK may advance past the server SYN end when
+/// server data has already been observed on this table. The companion
+/// arm accepts that ACK only up through the observed server send end.
+#[test]
+fn companion_completion_accepts_ack_through_observed_send_end_18528() {
+    let (mut table, forward, reverse, now) = syn_pair();
+    syn_ack_via_lookup(&mut table, &reverse, now + SEC, CLIENT_ISN + 1);
+    // Server data advances its observed send end to SERVER_ISN + 101.
+    table.note_tcp_seq(
+        &reverse,
+        SERVER_ISN + 1,
+        CLIENT_ISN + 1,
+        4096,
+        100,
+        TCP_ACK,
+        0,
+    );
+    assert!(
+        table
+            .lookup_with_origin_with_ack(
+                &forward,
+                now + 2 * SEC,
+                TCP_ACK | TCP_PSH,
+                100,
+                Some(SERVER_ISN + 50),
+            )
+            .is_some()
+    );
+    assert_established(&table, &forward, "forward");
+    assert_established(&table, &reverse, "reverse");
+}
+
+#[test]
+fn companion_ack_window_rejects_outside_observed_send_end_18528() {
+    let (mut table, forward, reverse, now) = syn_pair();
+    syn_ack_via_lookup(&mut table, &reverse, now + SEC, CLIENT_ISN + 1);
+    table.note_tcp_seq(
+        &reverse,
+        SERVER_ISN + 1,
+        CLIENT_ISN + 1,
+        4096,
+        100,
+        TCP_ACK,
+        0,
+    );
+
+    // The inclusive window is [SERVER_ISN + 1, SERVER_ISN + 101].
+    for bad_ack in [SERVER_ISN, SERVER_ISN + 102] {
+        assert!(table
+            .lookup_with_origin_with_ack(
+                &forward,
+                now + 2 * SEC,
+                TCP_ACK | TCP_PSH,
+                100,
+                Some(bad_ack),
+            )
+            .is_some());
+        assert_opening(&table, &forward, "out-of-window companion DATA ACK");
+    }
+    assert!(table
+        .lookup_with_origin_with_ack(
+            &forward,
+            now + 3 * SEC,
+            TCP_ACK | TCP_PSH,
+            100,
+            Some(SERVER_ISN + 101),
+        )
+        .is_some());
+    assert_established(&table, &forward, "forward");
+    assert_established(&table, &reverse, "reverse");
+}
+
+
+#[test]
+fn companion_window_accepts_advanced_ack_on_cache_and_keepalive_18528() {
+    for cached in [true, false] {
+        let (mut table, forward, reverse, now) = syn_pair();
+        syn_ack_via_lookup(&mut table, &reverse, now + SEC, CLIENT_ISN + 1);
+        table.note_tcp_seq(
+            &reverse,
+            SERVER_ISN + 1,
+            CLIENT_ISN + 1,
+            4096,
+            100,
+            TCP_ACK,
+            0,
+        );
+        let now = now + 2 * SEC;
+        let completed = if cached {
+            table.probe_hit_with_ack(
+                &forward,
+                now,
+                100,
+                TCP_ACK | TCP_PSH,
+                100,
+                0,
+                Some(SERVER_ISN + 50),
+            )
+        } else {
+            table.touch_if_stale_with_ack(
+                &forward,
+                now,
+                TCP_ACK | TCP_PSH,
+                100,
+                Some(SERVER_ISN + 50),
+            )
+        };
+        assert!(completed, "cache={cached}: live pair must be served");
+        assert_established(&table, &forward, "forward");
+        assert_established(&table, &reverse, "reverse");
+    }
+}
+
+#[test]
+fn companion_ack_window_wraps_tcp_serial_space_18528() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    table.note_tcp_seq(&forward, CLIENT_ISN, 0, 4096, 0, TCP_SYN, 0);
+    // The server SYN end wraps from u32::MAX to zero.
+    table.note_tcp_seq(&reverse, u32::MAX, CLIENT_ISN + 1, 4096, 0, TCP_SYN | TCP_ACK, 0);
+    assert!(table
+        .lookup_with_origin_with_ack(
+            &reverse,
+            now + SEC,
+            TCP_SYN | TCP_ACK,
+            0,
+            Some(CLIENT_ISN + 1),
+        )
+        .is_some());
+    table.note_tcp_seq(&reverse, 0, CLIENT_ISN + 1, 4096, 10, TCP_ACK, 0);
+    // The ACK immediately before zero is outside the lower edge.
+    assert!(table
+        .lookup_with_origin_with_ack(
+            &forward,
+            now + 2 * SEC,
+            TCP_ACK | TCP_PSH,
+            10,
+            Some(u32::MAX),
+        )
+        .is_some());
+    assert_opening(&table, &forward, "forward");
+    // ACK 5 is within the wrapped [0, 10] interval.
+    assert!(table
+        .lookup_with_origin_with_ack(
+            &forward,
+            now + 3 * SEC,
+            TCP_ACK | TCP_PSH,
+            10,
+            Some(5),
+        )
+        .is_some());
     assert_established(&table, &forward, "forward");
     assert_established(&table, &reverse, "reverse");
 }

@@ -330,29 +330,44 @@ the synced-replica shape completes here too because a materialized
 HandshakePending import is a local entry whose hits are cache hits.
 Steady state costs one `handshake_pending` bool check per cache hit.
 
-**Handshake segments must ack the peer ISN (#16042).** Every promotion /
-completion gate above — the `lookup.rs` SYN-ACK and completing-ACK arms,
-the cached-hit `probe_hit` and keepalive arms, and the `update_session` /
-promote twin — additionally requires, when both are known, that the
-segment's ack equal the COMPANION direction's SYN ack END (wrapping):
+**Classic handshake segments must ack the peer SYN end (#16042).** The
+lookup SYN-ACK/completion gates, cached-hit classic arm, and update/promote
+twin require, when both are known, exact equality between the segment ACK
+and the COMPANION direction's SYN ack END (wrapping):
 ISN + 1 + SYN payload, because a SYN consumes itself and any payload it
 carries (TFO-style SYN data must be acked too). Each direction's ack end
 (`tcp_peer_ack_end`) is learned from its SYN/SYN-ACK (`note_tcp_seq`,
 Owner-admitted segments only — a gate-rejected SYN-ACK is never noted,
 so it cannot launder the evidence) or seeded at install (`seed_tcp_isn`,
 both halves, companion resolved through `reverse_session_key` so NAT
-alias pairs validate the same way). A wrong-ack SYN-ACK never promotes
-and a wrong-ack completing segment never clears `handshake_pending`:
-the pair stays on the opening window. Companion resolution runs ONLY
-for `handshake_pending` pairs — established hot-path hits skip it. (Since
-#18533 the cached-hit probe also skips the record lookup that used to
-decide this: `handshake_expected_ack` is called only for a segment that
-already matches every other classic-completion conjunct.)
-Unknown evidence fails OPEN, never closed: when the companion end was
-never observed (mid-stream pickup, HA import — imports carry no ISN) or
-the caller parsed no ack, the gate is flags-only exactly as before, so
-a failover import's first completing segment still completes; the
-opening window bounds that residual.
+alias pairs validate the same way). The classic gates reject a known wrong
+ACK. Companion resolution runs only for handshake-incomplete pairs
+(`!established || handshake_pending`) — established hot-path hits skip it.
+#18533 the cached-hit probe skips the record lookup for established packets.
+For a classic completion candidate, `handshake_expected_ack` is called only
+after every classic-completion conjunct holds. #18528 separately resolves
+the ACK bounds for an actual companion-progress payload before #16223 can
+complete.
+Unknown evidence fails OPEN, never closed: when the companion end was never
+observed (mid-stream pickup, HA import — imports carry no ISN) or the caller
+parsed no ACK, classic gating remains flags-only and the companion window
+cannot be bounded. Companion completion still requires served evidence;
+without that evidence the pair remains on the opening timeout.
+
+**Companion-arm completion uses the bounded ACK window (#18528).** Unlike
+the classic completion predicates above, the #16223 companion arm may see a
+client segment after server data has already advanced the ACK beyond the SYN
+end. When both edges are known, it accepts only the inclusive serial-number
+interval from the peer SYN ack end through that peer's observed send end
+(`tcp_rcv_nxt`); an ACK below the SYN end or beyond bytes the peer has sent
+cannot complete the pair. The relay seeds the validated SYN-ACK end. Until
+later peer sequence progress is observed locally, only an exact SYN-end ACK
+is admissible; Owner-admitted peer segments advance `tcp_rcv_nxt` and widen
+the upper edge. If the validated SYN end or parsed ACK is unavailable, the
+gate retains the existing fail-open behavior; without served evidence, the
+pair remains on the opening timeout. The bound is applied before both
+local-companion and node-level evidence can complete, and is not used by
+expiry retention, which has no segment ACK to validate.
 
 **A closing entry never completes the handshake (#14630).** `stamp_tcp_close`
 stamps `closing`/`reset` but deliberately leaves `handshake_pending` set, so
@@ -848,7 +863,7 @@ The relay carries the two transitions a single worker would have made itself:
 
 | Stage | Produced where | Applied by the receiver when |
 |---|---|---|
-| `Promoted` | `note_tcp_seq_scaled` on an admitted SYN-ACK that just promoted a pair split across workers (replica origin or relayed marker); targets the author worker named by the forward session id when it is on this node | the receiver's pair is pure Opening, the relayed SYN-ACK ack equals ITS client SYN end (`tcp_peer_ack_end`, #16042), same forward session id, and the pair serves traffic here. Sets `established && handshake_pending` (the #6752 opening-class gap) and seeds the reverse half's `tcp_peer_ack_end` with the server SYN end, so a bare completing ACK is validated exactly as on a single worker. A DATA segment completes a pending pair through the #16223 companion arm, which checks no ack — on a relayed pair exactly as on a single worker (#18528). |
+| `Promoted` | `note_tcp_seq_scaled` on an admitted SYN-ACK that just promoted a pair split across workers (replica origin or relayed marker); targets the author worker named by the forward session id when it is on this node | the receiver's pair is pure Opening, the relayed SYN-ACK ack equals ITS client SYN end (`tcp_peer_ack_end`, #16042), same forward session id, and the pair serves traffic here. Sets `established && handshake_pending` (the #6752 opening-class gap) and seeds the reverse half's `tcp_peer_ack_end` with the server SYN end, so a bare completing ACK is validated exactly as on a single worker. A DATA segment completes a pending pair through the #16223 companion arm, which constrains a parsed ACK to the validated server SYN end through the locally observed server send end; on a relay with no later local server progress it permits only the exact SYN-end ACK. Unknown ACK evidence retains fail-open behavior (#18528). |
 | `Completed` | `emit_session_state_update_inner` on a transition INTO Established of a split pair — the single choke point every packet-driven completion publishes through, so a deferred cache-hit completion relays only after TX admission, exactly like its HA Update; fans out to every sibling | the receiver's pair is already handshake-pending — a SYN-ACK was seen on it (validated, for a SYN-first pair; the installing segment itself, for a SYN-ACK-first pickup) — same session id, serving. Never applied to a pure Opening pair (#6752/#13679). |
 | `Closed` | the same choke point on a close-CLASS transition (first FIN, second FIN, RST) of a split pair, carrying the pair's close bits (RST, FIN forward, FIN reverse). The reverse FIN is also read from the forward half's `fin_peer`, so a sender whose reverse half is gone still relays it (the forward half is always present and carries every forward FIN as `fin_own`). Fans out to every sibling | same session id, serving. ORs the FIN bits into both halves exactly as a local FIN stamps them. A RST bit makes the pair CLOSING and never sets the sticky `reset` fuse (see "Blind RST" under Limits). The pair then goes on the shared close window (`tcp_close_window_for_entry`: 30 s closing, TIME_WAIT once one FIN per direction has been seen on ANY worker) and is re-stamped from now (close progress, #10885). A relay that adds nothing changes nothing. Whatever a relay can establish, a relay can close: before this stage, a server RST that RSS delivered only to B left A's relay-established authoritative row Established for 1800 s, pinning its SNAT port, slot and limit-session count (a replica's close announces only to the HA peer, #9582, and replica expiry sends no Close). |
 
@@ -903,11 +918,11 @@ Limits (the relay narrows the split gap, it does not erase it):
 - **Ordering race.** The relay crosses on the next loop pass of each worker.
   If the client's completing ACK reaches A before B's `Promoted` relay is
   applied, A cannot complete on it; A then completes on a later client
-  segment (a bare ACK whose ack still equals the server SYN end, or any data
-  segment through the companion arm) or on B's `Completed` relay when B
-  completes. A connection that goes idle right after its handshake with that
-  race lost (no further segment in either direction) still reaps on the 20 s
-  opening window, as it did before #18520.
+  segment (a bare ACK whose ack still equals the server SYN end, or data
+  whose parsed ACK is within the #18528 companion window) or on B's
+  `Completed` relay when B completes. A connection that goes idle right after
+  its handshake with that race lost (no further segment in either direction)
+  still reaps on the 20 s opening window, as it did before #18520.
 - **Missing forward replica.** The `Promoted` producer reads the session id
   from B's forward replica. A SYN-ACK that B serves before applying the
   `UpsertSynced` replica (materialized from the shared map) or from the flow
@@ -1103,11 +1118,13 @@ forward packet, each needed by some transition but paid on every packet:
   The deferred HA Update and stage marker are unchanged; their admission key
   is then resolved on the completing packet itself (the resolution the
   admission emit applies) instead of read from the undo.
-- **The #16042 expected ack is resolved only for a completion candidate.**
+- **The #16042 expected ack is resolved only for completion candidates.**
   The probe judges every classic-completion conjunct under its borrow and
-  calls `handshake_expected_ack` (record + companion lookups) only when all
-  of them hold; a known-but-wrong ack still refuses the classic arm, and a
-  refused candidate still arms the #16223 progress check as before.
+  calls `handshake_expected_ack` only when all of them hold. #18528 also
+  resolves the expected end for a payload-progress candidate that reaches
+  the #16223 arm, so that arm can constrain the ACK through the observed
+  peer send end. Established hits and non-progress packets do not take this
+  extra lookup.
 - **The admission emit resolves nothing in the steady state.** With no
   withheld HA Update and exactly one undo, recorded under the packet's own
   canonical key (every non-alias hit), the emit consumes it directly. An
