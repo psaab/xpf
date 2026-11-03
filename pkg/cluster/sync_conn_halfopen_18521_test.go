@@ -78,6 +78,9 @@ func captureSyncLogs18521(t *testing.T) *lockedBuffer18521 {
 // buffer sizing (configureSessionSyncConn) on the session-sync side.
 func tcpPair18521(t *testing.T) (local, peer *net.TCPConn) {
 	t.Helper()
+	// #18038: the pair's dial needs a routable 127.0.0.1 under the testguard
+	// runner's lo-down namespace. No-op wherever loopback already routes.
+	ensureLoopbackRoutable18038(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1288,6 +1291,10 @@ func TestPeerEventsRunInDispatchOrder18525(t *testing.T) {
 // gives the misordered callback its chance; the correct dispatcher never takes
 // it however long the window is.
 func TestRedialCallbacksRunInOrderThroughCallSites18525(t *testing.T) {
+	// #18038: this cell constructs its own loopback pair (not via
+	// tcpPair18521), so it needs the same routable-loopback preflight —
+	// no-op wherever loopback already routes.
+	ensureLoopbackRoutable18038(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
