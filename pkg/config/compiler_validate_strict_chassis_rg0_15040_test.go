@@ -5,6 +5,15 @@ import (
 	"testing"
 )
 
+// #18964: literal head and per-arm tail pins, independent of the builder,
+// so swapping the strict refusal and tolerant commit-succeeds outcomes reds
+// both arms rather than moving the expectations with the implementation.
+const (
+	configSyncHead18964        = "chassis cluster: configuration-synchronize requires redundancy-group 0"
+	configSyncStrictTail18964  = "without it the commit is refused) — add `redundancy-group 0` or remove `configuration-synchronize`"
+	configSyncLenientTail18964 = "without it a commit succeeds but is never pushed to the peer and both nodes stay writable) — add `redundancy-group 0` or remove `configuration-synchronize`"
+)
+
 // #15040 (A24-01): configuration-synchronize with no redundancy-group 0
 // committed cleanly and then never pushed. rg0ConfigSyncAuthority requires
 // IsLocalPrimary(0); with no RG0 that is never true, reconcileRG0ConfigOwnership
@@ -36,15 +45,18 @@ func TestConfigSyncWithoutRG0FailsCommit15040(t *testing.T) {
 		t.Fatal("expected commit to reject configuration-synchronize without " +
 			"redundancy-group 0 (no RG0 primary can ever own config sync, so the " +
 			"commit would succeed and never push), got nil error")
-	} else if !strings.Contains(err.Error(), "redundancy-group 0") ||
-		!strings.Contains(err.Error(), "configuration-synchronize") {
-		t.Fatalf("error %q does not name RG0 / configuration-synchronize", err.Error())
+	} else if !strings.Contains(err.Error(), configSyncHead18964) ||
+		!strings.Contains(err.Error(), configSyncStrictTail18964) {
+		t.Fatalf("error %q lacks the literal #18964 head/refused tail", err.Error())
 	}
 
 	// No redundancy groups at all + configuration-synchronize: same hole.
 	tree = buildTree(t, rg0SyncLines15040())
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatal("expected commit to reject configuration-synchronize with no redundancy-groups, got nil")
+	} else if !strings.Contains(err.Error(), configSyncHead18964) ||
+		!strings.Contains(err.Error(), configSyncStrictTail18964) {
+		t.Fatalf("error %q lacks the literal #18964 head/refused tail", err.Error())
 	}
 }
 
@@ -56,8 +68,16 @@ func TestConfigSyncWithoutRG0TolerantWarns15040(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lenient compile must not brick a persisted RG1-only config-sync config: %v", err)
 	}
-	if !warningsContain(cfg.Warnings, "redundancy-group 0") {
-		t.Fatalf("lenient compile should warn about missing RG0; warnings=%v", cfg.Warnings)
+	found := false
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, configSyncHead18964) &&
+			strings.Contains(warning, configSyncLenientTail18964) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("lenient compile should warn with the literal #18964 head/commit-succeeds tail; warnings=%v", cfg.Warnings)
 	}
 }
 

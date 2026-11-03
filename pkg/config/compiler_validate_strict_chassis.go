@@ -437,7 +437,7 @@ func isClusterKeywordName(name string) bool {
 // limit (pkg/cluster/heartbeat.go marshalHeartbeatBody, maxHeartbeatGroups),
 // so a leniently-loaded over-size config is bounded on the wire, not a
 // panic.
-func validateChassisClusterStrict(cfg *Config) error {
+func validateChassisClusterStrict(cfg *Config, lenient bool) error {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
 	}
@@ -482,11 +482,18 @@ func validateChassisClusterStrict(cfg *Config) error {
 			}
 		}
 		if !hasRG0 {
-			return fmt.Errorf("chassis cluster: configuration-synchronize requires " +
-				"redundancy-group 0 (RG0 is the config-sync authority and owns the " +
-				"standby read-only gate; without it a commit succeeds but is never " +
-				"pushed to the peer and both nodes stay writable) — add " +
-				"`redundancy-group 0` or remove `configuration-synchronize`")
+			// #18964: the caller returns this error unchanged on the strict
+			// arm and downgrades it on the tolerant arm. Select the outcome
+			// here so the strict refusal never claims the commit succeeded.
+			outcome := "the commit is refused"
+			if lenient {
+				outcome = "a commit succeeds but is never pushed to the peer " +
+					"and both nodes stay writable"
+			}
+			return fmt.Errorf("chassis cluster: configuration-synchronize requires "+
+				"redundancy-group 0 (RG0 is the config-sync authority and owns the "+
+				"standby read-only gate; without it %s) — add "+
+				"`redundancy-group 0` or remove `configuration-synchronize`", outcome)
 		}
 	}
 

@@ -5,6 +5,15 @@ import (
 	"testing"
 )
 
+// #18964: literal pins for the shared diagnostic head and each arm's
+// outcome. Keeping these independent of the builder makes an outcome swap
+// fail instead of redefining the expectations along with the message.
+const (
+	bindIfaceHead18964        = "is not a valid secure-tunnel interface: it must be st<N> or st<N>.<unit>"
+	bindIfaceStrictTail18964  = "so the route-based VPN commit is refused (#5297)"
+	bindIfaceLenientTail18964 = "so the route-based VPN commits successfully but carries no traffic (silent tunnel down) (#5297)"
+)
+
 // Tests for #5297: an invalid IPsec `bind-interface` name (anything but the
 // canonical secure-tunnel st<N> / st<N>.<unit>) committed successfully but
 // resolved to if_id 0 via XFRMIfNameAndID — the reconciler created NO XFRM
@@ -65,7 +74,7 @@ func TestSecureTunnelBindIfaceInvalidRejectedAtCommit(t *testing.T) {
 			cmds: []string{
 				"set security ipsec vpn V bind-interface ge-0/0/0",
 			},
-			want: []string{`bind-interface "ge-0/0/0"`, "carries no traffic"},
+			want: []string{`bind-interface "ge-0/0/0"`, "st<N> or st<N>.<unit>"},
 		},
 	}
 	for _, tc := range cases {
@@ -79,6 +88,10 @@ func TestSecureTunnelBindIfaceInvalidRejectedAtCommit(t *testing.T) {
 				if !strings.Contains(err.Error(), sub) {
 					t.Errorf("error %q missing substring %q", err.Error(), sub)
 				}
+			}
+			if !strings.Contains(err.Error(), bindIfaceHead18964) ||
+				!strings.Contains(err.Error(), bindIfaceStrictTail18964) {
+				t.Errorf("strict error %q lacks the literal #18964 head/refused tail", err.Error())
 			}
 		})
 	}
@@ -134,13 +147,15 @@ func TestSecureTunnelBindIfaceInvalidLenientWarns(t *testing.T) {
 	}
 	var found bool
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, `bind-interface "secure0"`) && strings.Contains(w, "#5297") {
+		if strings.Contains(w, `bind-interface "secure0"`) &&
+			strings.Contains(w, bindIfaceHead18964) &&
+			strings.Contains(w, bindIfaceLenientTail18964) {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("lenient compile produced no invalid bind-interface warning; got %v", cfg.Warnings)
+		t.Fatalf("lenient compile produced no invalid bind-interface warning with the literal #18964 head/commit-succeeds tail; got %v", cfg.Warnings)
 	}
 }
 

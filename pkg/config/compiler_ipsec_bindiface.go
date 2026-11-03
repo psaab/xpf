@@ -220,14 +220,21 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 		}
 		return invalid[i].vpn < invalid[j].vpn
 	})
+	// #18964: the outcome is arm-dependent. Strict returns this message as
+	// the commit refusal; only the lenient warning can truthfully say the
+	// config commits and then carries no traffic.
+	outcome := "so the route-based VPN commit is refused (#5297)"
+	if lenient {
+		outcome = "so the route-based VPN commits successfully but " +
+			"carries no traffic (silent tunnel down) (#5297)"
+	}
 	for _, bad := range invalid {
 		if err := emit(
 			"secure-tunnel bind-interface %q (security ipsec vpn %s) is not a "+
 				"valid secure-tunnel interface: it must be st<N> or st<N>.<unit> "+
 				"(e.g. st0 or st0.1). Any other name resolves to no XFRM "+
-				"interface, so the route-based VPN commits successfully but "+
-				"carries no traffic (silent tunnel down) (#5297)",
-			bad.iface, bad.vpn); err != nil {
+				"interface, %s",
+			bad.iface, bad.vpn, outcome); err != nil {
 			return nil, err
 		}
 	}

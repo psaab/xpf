@@ -100,7 +100,7 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 	// weight — ClampInterfaceMonitorWeight / rgWeightFromDebt — so it cannot
 	// diverge the two nodes' views). Runs on the fully-compiled *Config
 	// (RedundancyGroups populated by compileChassis).
-	if err := validateChassisClusterStrict(cfg); err != nil {
+	if err := validateChassisClusterStrict(cfg, opts.lenientChassisRG); err != nil {
 		if opts.lenientChassisRG {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("chassis cluster redundancy-group (downgraded to warning on tolerant path): %v", err))
