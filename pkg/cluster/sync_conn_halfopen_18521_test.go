@@ -78,6 +78,9 @@ func captureSyncLogs18521(t *testing.T) *lockedBuffer18521 {
 // buffer sizing (configureSessionSyncConn) on the session-sync side.
 func tcpPair18521(t *testing.T) (local, peer *net.TCPConn) {
 	t.Helper()
+	// #18038: the pair's dial needs a routable 127.0.0.1 under the testguard
+	// runner's lo-down namespace. No-op wherever loopback already routes.
+	ensureLoopbackRoutable18038(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
