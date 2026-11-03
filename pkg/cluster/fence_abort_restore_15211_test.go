@@ -253,7 +253,7 @@ func failOpenManager15211(t *testing.T) *Manager {
 
 // #15211 A22-02: handlePeerNeverSeen decision must be marked UNCONFIRMED under
 // every fencing policy (no fence possible for a never-seen peer).
-func TestNeverSeenTakeoverMarkedDegraded15211(t *testing.T) {
+func TestNeverSeenTakeoverMarkedUnconfirmed15211(t *testing.T) {
 	for _, policy := range []string{"", PeerFencingDisableRG, PeerFencingDisableRGConfirmed} {
 		t.Run("policy="+policy, func(t *testing.T) {
 			m := coldBootManager(t)

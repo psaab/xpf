@@ -3899,7 +3899,7 @@ alarm. This remains diagnostic and does not change election behavior.
   unlocked fence wait bumps `failoverGen` and the restore abandons, so
   the reset is honoured instead of silently undone.
   `TestFenceAbortResetDuringFenceWaitIsHonoured17117` pins that cell.
-- **A never-seen takeover is marked DEGRADED (#15211 A22-02).**
+- **A never-seen takeover is marked UNCONFIRMED (#15211 A22-02, #16024).**
   `handlePeerNeverSeen` cannot fence a peer that was never seen under any
   policy, so it marks the single-node takeover
   `peer never seen; no fence possible` via `markFenceUnconfirmedLocked`
