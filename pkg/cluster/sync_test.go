@@ -4706,6 +4706,7 @@ func TestBulkEverCompletedSurvivesDisconnect(t *testing.T) {
 }
 
 func TestReceiveLoopClosesSilentConnection(t *testing.T) {
+	ensureLoopbackRoutable18038(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -4820,6 +4821,7 @@ func TestReceiveLoopClosesSilentConnection(t *testing.T) {
 }
 
 func TestReceiveLoopKeepsConnectionAliveWithoutHeartbeatAckSupport(t *testing.T) {
+	ensureLoopbackRoutable18038(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -4925,6 +4927,7 @@ func TestReceiveLoopKeepsConnectionAliveWithoutHeartbeatAckSupport(t *testing.T)
 }
 
 func TestReceiveLoopDisconnectsSilentConnectionAfterAckCapableReconnect(t *testing.T) {
+	ensureLoopbackRoutable18038(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
