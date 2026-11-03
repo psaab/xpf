@@ -4,7 +4,7 @@
     "path": "pkg/dataplane/userspace_xdp_bpfel.o",
     "sha256": "51e4b644cd52a0163227d2ae798e4dc61a8dabc4b6dabb2672c73181c438a191"
   },
-  "build_digest": "42c45f926ec7dc8158cf18b5dbb9db80b9c25e7ec9ff31aefde403d3f44e0780",
+  "build_digest": "b1dab8d81986e7098279c994158cb2c0a144b729169eec94db860c8be9ebc548",
   "shim_facts": {
     "max_ext_hdrs": 7,
     "frag_hdr_size": 8,
@@ -21,7 +21,7 @@
     },
     {
       "path": "pkg/dataplane/build-userspace-xdp.sh",
-      "sha256": "c149e76946e0a524cb83c27a495cad5c534a753bcc8fdfa8c1c6ef6a6ba32097"
+      "sha256": "f2058e4f88135c4510fbf9da0243ca4685519c14bac78b8a26b0979b3633f75b"
     },
     {
       "path": "userspace-xdp/.cargo/config.toml",
