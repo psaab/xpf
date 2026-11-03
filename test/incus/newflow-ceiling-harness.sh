@@ -39,6 +39,7 @@
 #
 # USAGE
 #   ./test/incus/newflow-ceiling-harness.sh --pool <name> --rule <name> \
+#       [--src-bind <IP>] [--target-ip <IP>] \
 #       [--rates 5000,10000,20000,40000] [--duration 30] [--threads 32]
 #
 # Runs under the shared-cluster lock: the loss cluster is not yours alone.
@@ -47,6 +48,7 @@ set -uo pipefail
 
 _CELL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${_CELL_DIR}/../.." && pwd)"
+ORIGINAL_ARGS=("$@")
 
 # Node-selection verdict (#6962). Pure bash+awk, no side effects, sourced
 # before the --dry-run early exit so a syntax error in it cannot hide until a
@@ -71,6 +73,8 @@ METRICS_URL="${METRICS_URL:-http://127.0.0.1:8080/metrics}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-}"
 USE_SG_INCUS_ADMIN="${USE_SG_INCUS_ADMIN:-1}"
 DRY_RUN="${DRY_RUN:-0}"
+CLI_SRC_BIND=""
+CLI_TARGET_IP=""
 
 usage() {
     sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -84,6 +88,18 @@ while [[ $# -gt 0 ]]; do
         --duration) DURATION="$2"; shift 2 ;;
         --threads) THREADS="$2"; shift 2 ;;
         --dst-ports) DST_PORTS="$2"; shift 2 ;;
+        --src-bind)
+            if [[ $# -lt 2 || -z "${2-}" ]]; then
+                echo "newflow-ceiling: --src-bind requires a non-empty IP." >&2
+                exit 2
+            fi
+            CLI_SRC_BIND="$2"; shift 2 ;;
+        --target-ip)
+            if [[ $# -lt 2 || -z "${2-}" ]]; then
+                echo "newflow-ceiling: --target-ip requires a non-empty IP." >&2
+                exit 2
+            fi
+            CLI_TARGET_IP="$2"; shift 2 ;;
         --close) CLOSE_MODE="$2"; shift 2 ;;
         --artifacts) ARTIFACT_ROOT="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -106,12 +122,13 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 # shellcheck disable=SC1090
 source "$ENV_FILE"
+SRC_BIND="${CLI_SRC_BIND:-${SRC_BIND:-}}"
+TARGET_IP="${CLI_TARGET_IP:-${TARGET_IP:-${IPERF_TARGET4}}}"
 
 REMOTE_PREFIX="${INCUS_REMOTE:+${INCUS_REMOTE}:}"
 FW0="${REMOTE_PREFIX}${VM0}"
 FW1="${REMOTE_PREFIX}${VM1}"
 HOST="${REMOTE_PREFIX}${LAN_HOST}"
-TARGET_IP="${TARGET_IP:-${IPERF_TARGET4}}"
 
 if [[ "$DRY_RUN" == "1" ]]; then
     echo "newflow-ceiling: DRY RUN — configuration only, no cluster access."
@@ -128,10 +145,12 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 # Serialize against every other agent's deploy / smoke on the SHARED loss
-# cluster (#1875 / #4020). Sourced AFTER argument parsing so --help and
-# --dry-run never take the lock.
+# cluster (#1875 / #4020). Sourced AFTER the --dry-run early exit so help and
+# dry-run never take the lock. Preserve the caller's unparsed argv: the lock
+# helper re-execs this whole script through with-cluster.sh when run standalone.
 # shellcheck source=cluster-cell.sh
-source "${_CELL_DIR}/cluster-cell.sh"
+source "${_CELL_DIR}/cluster-cell.sh" || exit 2
+xpf_enter_destructive_cluster_cell "newflow-ceiling-harness" "$0" "${ORIGINAL_ARGS[@]}" || exit 2
 
 incus_cmd() {
     if [[ "$USE_SG_INCUS_ADMIN" == "1" ]] && ! incus list >/dev/null 2>&1; then

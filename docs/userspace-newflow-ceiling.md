@@ -261,44 +261,46 @@ dataplane builds).
 
 ## Running it on the loss userspace cluster
 
-**Attempted 2026-09-06 and BLOCKED.** The historical attempt had three
-preconditions unsatisfied on the loss cluster. The client source-bind gap is
-fixed by `--src-bind` / harness `SRC_BIND`; the pool capacity and operator
-baseline blockers remain. The measurement is still owed.
+**Status: no valid ceiling measurement exists; issue #10988 remains OPEN.**
+The 2026-10-16 attempts produced only `INCONCLUSIVE` cells (500/s: 443/s
+installed; 1000/s: 317/s; 5000/s: 1705/s, each below the analyzer's 95%
+acceptance gate) or no traffic. None attributes a dataplane ceiling.
 
-Off-cluster, everything passes: `newflow_ceiling_analyze_test` OK,
-`newflow-gen` 13/13, and the harness `--dry-run` resolves every host, the target
-and the analyzer. The blockers are all in the cluster's committed state.
+The harness and source-binding support are code-complete, but the lab run is
+still gated on operator acceptance:
 
-**1. Client source binding is available; the operator must assign a pool-prefix
-address for the run.** The committed `pool-snat` rule in rule-set `lan-to-wan`
-matches `source-address 10.0.61.240/28`. The LAN host's normal address,
-`10.0.61.102`, is outside that prefix, so unbound traffic takes the sibling
-interface-mode `rule snat` instead and yields zero pool allocations. The
-generator client now supports `--src-bind <IP>` and the harness accepts
-`SRC_BIND=<IP>`; after an authorized operator temporarily assigns (for example)
-`10.0.61.241/28` to the LAN host, run the harness with `SRC_BIND=10.0.61.241`.
-Without both the temporary address and explicit bind, the pool still sees no
-traffic and the analyzer refuses the cell. The harness does not mutate host
-addresses itself.
+1. **Authorized baseline and health:** designate and durably record the
+   known-good fw0/fw1 baseline, restore both peers to it, and verify health
+   before measuring. The original `/tmp/xpf-10716-newflow.*` snapshots were
+   lost; the later run notes do not replace an operator-approved restore
+   baseline.
+2. **Pool capacity:** confirm the intended live pool range. The old runbook
+   described 1000 ports (`30000-30999`), while the latest recorded live
+   preflight saw 20000 available and the rendered configuration showed both
+   `30000-30999` and `30000-49999`. Do not assume either count until the
+   operator resolves the discrepancy. With the RST close mode's roughly
+   2-second hold, the 80000/s top sweep cell needs about 160000 concurrent
+   ports; a 20000-port pool cannot support the full documented sweep without
+   exhaustion. Choose a confirmed capacity/rate plan before running.
+3. **Clock and fabric health:** the latest recorded qualification still had
+   chrony at Stratum 0 / unsynchronized with no reachable source in its normal
+   VRF. Establish a durable time source and requalify peer-clock/fabric health;
+   a one-time clock step or close offset sample is not a substitute.
+4. **Generator and target qualification:** previous accepted rates fell below
+   95% of requested, and a separate retry failed its metrics scrape. Verify the
+   target, metrics endpoint, and generator can sustain the requested rate;
+   under-driven cells remain `INCONCLUSIVE`, not a ceiling.
 
-**2. The pool holds 1000 ports.** `pool-snat-pool` is `172.16.80.7/32` with
-`port range 30000 to 30999`. The documented sweep is 5000–80000 flows/sec; a
-sustained rate R with hold time H needs R x H concurrent ports, so this pool
-caps out roughly two orders of magnitude below the interesting range. The
-harness names port exhaustion explicitly as a refusal ("a capacity ceiling, not
-a lock ceiling"), so this would not silently corrupt a number — it would refuse
-every cell. **That is the failure mode to want**, and it is why no figure is
-quoted here.
-
-**3. The default WAN target is not an instance on this cluster.**
-`IPERF_TARGET4=172.16.80.200` answers from the wire (fw0 pings it, neighbour
-`f6:f0:06:10:77:d5`) but is not an incus instance on `loss:`, so the sink cannot
-be started on it. This one is surmountable: `loss:xpf-mouse-target` holds
-`172.16.80.201` on the same VLAN-80 subnet and `TARGET_IP` is overridable.
-
-The pool-capacity blocker still needs a cluster-owner decision and any
-configuration change must not be made by the measurement run itself.
+**Source binding is available, but still requires operator setup.** The
+committed `pool-snat` rule in `lan-to-wan` matches `10.0.61.240/28`, while the
+LAN host's normal `10.0.61.102` address is outside that prefix. After the
+operator temporarily assigns (for example) `10.0.61.241/28` to the LAN host,
+pass `--src-bind 10.0.61.241` (or use `SRC_BIND` as the environment fallback).
+The harness never changes host addresses. The target is
+`loss:xpf-mouse-target` at `172.16.80.202`; pass `--target-ip
+172.16.80.202` (or use `TARGET_IP` as the environment fallback). Start the
+sink on that instance for all 64 destination ports, `5300-5363`, and require
+its startup report to show `bound_ports:64` before launching traffic.
 
 ### What this harness can and cannot attribute
 
@@ -362,36 +364,123 @@ mutexes. The leg remains O(n + N) per cycle per worker, so it is still a
 table-size-driven cost, but a linear one, and this harness does not
 cover it.
 
-The loss cluster is shared and lock-protected. The harness sources the
-`cluster-cell.sh` preamble, so it queues behind another agent's deploy or
-smoke rather than colliding. Never kill another holder; never `rm` the lock.
+The loss cluster is shared and lock-protected. A non-dry harness run sources
+`cluster-cell.sh` and calls `xpf_enter_destructive_cluster_cell` with its
+original argv; a standalone run re-execs through `with-cluster.sh`. For the lab
+procedure, use **one outer** `with-cluster.sh` cell for deployment, staging,
+temporary host setup, sink startup, and the sweep. The harness's own lock entry
+is reentrant inside that cell. Never kill another holder; never `rm` the lock.
 
 ```bash
-# 0. Build + unit-test everything off-cluster first.
+# Build and test off-cluster, before acquiring the lock.
 cargo test --release --manifest-path test/incus/newflow-gen/Cargo.toml
-(cd test/incus && python3 -m unittest newflow_ceiling_analyze_test)
-./test/incus/newflow-ceiling-harness.sh --pool <pool> --rule <rule> --dry-run
-
-# 1. Deploy the dataplane build carrying the #4800 counters.
-make cluster-deploy
-
-# 2. Push the generator to the LAN host and the WAN target.
 cargo build --release --manifest-path test/incus/newflow-gen/Cargo.toml
-#    ...then `incus file push` the binary to both, as /usr/local/bin/newflow-gen.
-
-# 3. Start the sink on the WAN target over the destination port range.
-newflow-gen --mode sink --bind 172.16.80.200 --ports 5300-5363
-
-# 4. Commit a pool-mode source-NAT rule on the WAN egress path and CONFIRM
-#    it: `show security nat source pool <pool>` must list it. The harness
-#    refuses to run without it and deliberately does NOT mutate the NAT
-#    config itself — a half-applied rewrite must never be mistaken for a
-#    dataplane result.
-
-# 5. Sweep.
+(cd test/incus && python3 -m unittest newflow_ceiling_analyze_test)
 ./test/incus/newflow-ceiling-harness.sh --pool <pool> --rule <rule> \
+    --src-bind 10.0.61.241 --target-ip 172.16.80.202 --dry-run
+
+# One outer cell owns every shared-cluster operation. Stage the prebuilt
+# artifacts and do any authorized temporary setup in this same cell.
+./test/incus/with-cluster.sh "10988 newflow ceiling run" -- \
+    bash -euo pipefail -c "$(cat <<'CELL'
+# Deploy/stage the prebuilt artifacts and prepare the authorized source
+# address and confirmed pool-mode rule here, under this same lock.
+run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+run_dir="artifacts/newflow-ceiling/$run_id"
+mkdir -p "$run_dir"
+source ./test/incus/cluster-env.sh
+source ./test/incus/ha-assurance-lib.sh
+sink_target="$MOUSE_TARGET_REF"
+sink_log="/tmp/newflow-gen-sink-$run_id.json"
+
+# Record same-run target ownership before traffic; do not call the separate
+# test-connectivity gate from inside this lock cell.
+target_addr="$(incus exec "$sink_target" -- ip -o -4 addr show)"
+printf '%s\n' "$target_addr" > "$run_dir/target-address-preflight.txt"
+if ! grep -qE '(^|[[:space:]])inet 172\.16\.80\.202/' <<<"$target_addr"; then
+    echo "newflow-ceiling: $sink_target does not own 172.16.80.202" >&2
+    exit 2
+fi
+
+ha_target_claim_check "$MOUSE_TARGET_REF" "$IPERF_TARGET4" "$WAN_GW80_4" \
+    "${IPERF_TARGET4_KNOWN_HOLDERS:-}" "$FW0" "$FW1"
+claim_status="$HA_TARGET_CLAIM_STATUS"
+claim_reason="$HA_TARGET_CLAIM_REASON"
+printf 'status=%s\nreason=%s\n' "$claim_status" "$claim_reason" \
+    > "$run_dir/target-claim-preflight.txt"
+if [[ "$claim_status" != 0 ]]; then
+    echo "newflow-ceiling: target claim is not PASS (status=$claim_status): $claim_reason" >&2
+    exit 2
+fi
+printf 'PASS target claim: exactly one holder and stable firewall neighbor identity (%s)\n' \
+    "$claim_reason" >> "$run_dir/target-claim-preflight.txt"
+
+
+sink_started="$(incus exec "$sink_target" -- date +%s)"
+incus exec "$sink_target" -- rm -f "$sink_log"
+sink_pid=""
+cleanup_sink() {
+    if [[ "${sink_pid:-}" =~ ^[0-9]+$ ]]; then
+        incus exec "$sink_target" -- kill "$sink_pid" 2>/dev/null || true
+    fi
+    incus exec "$sink_target" -- rm -f "$sink_log" 2>/dev/null || true
+}
+trap cleanup_sink EXIT
+sink_pid="$(incus exec "$sink_target" -- sh -c \
+    'nohup /usr/local/bin/newflow-gen --mode sink --bind 172.16.80.202 --ports 5300-5363 > "$1" 2>&1 < /dev/null & echo $!' \
+    sh "$sink_log")"
+if [[ ! "$sink_pid" =~ ^[0-9]+$ ]]; then
+    echo "newflow-ceiling: could not obtain the started sink PID" >&2
+    exit 2
+fi
+
+sink_ready=0
+sink_json=""
+sink_mtime=""
+for _ in {1..10}; do
+    if incus exec "$sink_target" -- sh -c 'kill -0 "$1" 2>/dev/null' sh "$sink_pid" >/dev/null 2>&1; then
+        sink_mtime="$(incus exec "$sink_target" -- stat -c %Y "$sink_log" 2>/dev/null || true)"
+        sink_json="$(incus exec "$sink_target" -- cat "$sink_log" 2>/dev/null || true)"
+        if [[ "$sink_mtime" =~ ^[0-9]+$ ]] &&
+            (( sink_mtime >= sink_started )) &&
+            python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("bound_ports") == 64 else 1)' \
+                <<<"$sink_json" 2>/dev/null; then
+            sink_ready=1
+            break
+        fi
+    fi
+    sleep 1
+done
+if [[ "$sink_ready" -ne 1 ]]; then
+    echo "newflow-ceiling: fresh sink process did not bind all 64 ports" >&2
+    exit 2
+fi
+printf '%s\n' "$sink_json" > "$run_dir/sink-startup.json"
+printf 'target=%s\npid=%s\nstart_epoch=%s\nlog_mtime=%s\n' \
+    "$sink_target" "$sink_pid" "$sink_started" "$sink_mtime" \
+    > "$run_dir/sink-preflight.txt"
+
+./test/incus/newflow-ceiling-harness.sh --pool <pool> --rule <rule> \
+    --src-bind 10.0.61.241 --target-ip 172.16.80.202 \
+    --artifacts "$run_dir" \
     --rates 5000,10000,20000,40000,80000 --duration 30 --threads 32
+CELL
+)"
 ```
+
+The run records `target-address-preflight.txt` proving that
+`loss:xpf-mouse-target` owned `172.16.80.202` in the same lock-held run before
+traffic. It then calls `ha_target_claim_check` directly (not the separate
+`test-connectivity.sh` gate, which requires an idle lock), recording the
+checker status and reason in `target-claim-preflight.txt`. Only status `0`
+passes: the evidence includes the `PASS` line for exactly one holder and a
+stable firewall-neighbor identity. Every nonzero status—including an excused
+duplicate-holder result or an unavailable probe—aborts before traffic. The run
+starts the sink with `newflow-gen --mode sink --bind 172.16.80.202 --ports
+5300-5363`, checks the launched PID is alive, verifies a fresh run-specific log
+by mtime and exact `bound_ports:64` JSON, and records that startup evidence.
+The trap stops the sink and removes its remote log. The harness refuses a
+missing pool-mode rule and does not change NAT config.
 
 ### Which node it measures, and when it refuses to run (#6962)
 
