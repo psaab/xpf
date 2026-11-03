@@ -3841,10 +3841,17 @@ operator-facing table.
 No fencing is configured by default. Both the default and `disable-rg` leave
 dual-primary ownership possible; `disable-rg-confirmed` only waits for a
 point-in-time dataplane-suppression acknowledgement and also does not demote
-the peer or release its VIPs. `FormatStatus` and `FormatInformation` render any
-takeover without peer confirmation as `Peer-loss takeover: DEGRADED`; the
-information view marks local health degraded. This is diagnostic, not a
-takeover gate, and the marker clears when a peer heartbeat returns.
+the peer or release its VIPs. `FormatStatus` and `FormatInformation` mark an
+unconfirmed peer-loss decision as degraded. While the peer is not alive, each
+such decision, including a never-seen cold-start decision, raises
+`ALARM: dual-primary risk` in the status views, CRITICAL in local and gRPC
+`show system alarms`, and one `slog.Warn`. The alarm records an unconfirmed
+fencing/peer-loss decision, not proof that local ownership changed: readiness
+may keep a cold-start RG secondary while the alarm is active. Not hearing from
+a peer does not prove it absent; both nodes can miss their initial heartbeats
+during simultaneous startup. A live peer aborting an unsuccessful fence wait
+stays silent in the active alarm list. A returning peer heartbeat clears the
+alarm. This remains diagnostic and does not change election behavior.
 
 - **Wire** — one additive message type `syncMsgFenceAck = 35` carries
   `{seq u64, status u8, rgs_fenced u16, rgs_total u16}` LE. `syncMsgFence`
@@ -3894,7 +3901,7 @@ takeover gate, and the marker clears when a peer heartbeat returns.
   unlocked fence wait bumps `failoverGen` and the restore abandons, so
   the reset is honoured instead of silently undone.
   `TestFenceAbortResetDuringFenceWaitIsHonoured17117` pins that cell.
-- **A never-seen takeover is marked DEGRADED (#15211 A22-02).**
+- **A never-seen takeover is marked UNCONFIRMED (#15211 A22-02, #16024).**
   `handlePeerNeverSeen` cannot fence a peer that was never seen under any
   policy, so it marks the single-node takeover
   `peer never seen; no fence possible` via `markFenceUnconfirmedLocked`

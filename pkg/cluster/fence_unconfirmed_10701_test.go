@@ -13,8 +13,8 @@ func assertUnconfirmedTakeoverStatus10701(t *testing.T, m *Manager, reason strin
 		"status":      m.FormatStatus(),
 		"information": m.FormatInformation(),
 	} {
-		if !strings.Contains(render, "Peer-loss takeover: DEGRADED") {
-			t.Errorf("%s does not mark the takeover degraded after no peer fence confirmation:\n%s", name, render)
+		if !strings.Contains(render, "Peer-loss decision: UNCONFIRMED") {
+			t.Errorf("%s does not mark the peer-loss decision unconfirmed after no peer fence confirmation:\n%s", name, render)
 		}
 		if !strings.Contains(render, reason) {
 			t.Errorf("%s does not state why peer fencing was unconfirmed (%q):\n%s", name, reason, render)
@@ -65,8 +65,8 @@ func TestConfirmedPeerFenceSuccessDoesNotMarkTakeoverDegraded10701(t *testing.T)
 		"status":      m.FormatStatus(),
 		"information": m.FormatInformation(),
 	} {
-		if strings.Contains(render, "Peer-loss takeover: DEGRADED") {
-			t.Errorf("%s marked a confirmed peer fence as degraded:\n%s", name, render)
+		if strings.Contains(render, "Peer-loss decision: UNCONFIRMED") {
+			t.Errorf("%s marked a confirmed peer fence as unconfirmed:\n%s", name, render)
 		}
 	}
 }
@@ -79,8 +79,8 @@ func TestPeerHeartbeatClearsUnconfirmedTakeoverDegradation10701(t *testing.T) {
 		"status":      m.FormatStatus(),
 		"information": m.FormatInformation(),
 	} {
-		if strings.Contains(render, "Peer-loss takeover: DEGRADED") {
-			t.Errorf("%s retained stale takeover degradation after the peer heartbeat returned:\n%s", name, render)
+		if strings.Contains(render, "Peer-loss decision: UNCONFIRMED") {
+			t.Errorf("%s retained stale peer-loss decision status after the peer heartbeat returned:\n%s", name, render)
 		}
 	}
 }

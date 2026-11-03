@@ -1547,12 +1547,21 @@ attempts were recorded under, because the event history outlives a config
 change. Each attempt line is one `handlePeerTimeout` fence decision and its
 outcome.
 
-The absent `peer-fencing` leaf is the default and sends **no fence**. After any
-peer-loss takeover without a peer confirmation, both `show chassis cluster
-status` and `show chassis cluster information` render `Peer-loss takeover:
-DEGRADED`, with the reason and time; the information view also reports local
-node health as degraded. This is an operator warning, not a gate: the node
-still takes over. A later peer heartbeat clears the marker.
+The absent `peer-fencing` leaf is the default and sends **no fence**. After a
+peer-loss decision without fence confirmation, both status views render
+`Peer-loss decision: UNCONFIRMED` with its reason and time; the information
+view also reports local node health as degraded. While the peer is not alive,
+each unconfirmed decision, including a never-seen cold-start decision, raises
+`ALARM: dual-primary risk` in status and information, CRITICAL in local and
+gRPC `show system alarms`, and a warning in the log.
+
+This marker and alarm record an unconfirmed peer-loss/fencing decision, not an
+assertion that local ownership changed. A readiness gate can leave a
+not-ready cold-start RG secondary while the alarm is active. Not hearing from
+a peer does not prove it absent: both nodes can miss their initial heartbeats
+during simultaneous startup. The alarm does not change election behavior. A
+live peer heartbeat that aborts an unsuccessful fence wait stays silent in the
+active alarm list; a returning peer heartbeat clears the alarm and marker.
 
 ### `disable-rg` — best-effort, unacknowledged
 
@@ -1646,12 +1655,16 @@ released the VIPs, or will remain dataplane-inactive.
 ### Telling a confirmed fence from a fail-open
 
 The configured action does not reveal the result. `EventFence` records the
-attempt outcome, while `Peer-loss takeover: DEGRADED` in both status views
-records that the latest peer-loss takeover proceeded without confirmation.
-The marker gives the reason (for example, fencing disabled, a best-effort
-unacknowledged send, timeout, disconnect, or incomplete peer fence), and the
-information view marks local node health degraded. The marker clears on a
-returning peer heartbeat.
+attempt outcome, while `Peer-loss decision: UNCONFIRMED` in both status views
+records that the latest peer-loss decision lacked fence confirmation. It does
+not assert that local ownership changed: readiness can leave an unready
+cold-start RG secondary while the alarm remains active. Each unconfirmed
+decision while the peer is not alive, including a never-seen cold-start
+decision, raises the explicit dual-primary-risk alarm on the cluster status
+and system-alarm surfaces. The marker gives the reason (for example, fencing
+disabled, a best-effort unacknowledged send, timeout, disconnect, incomplete
+peer fence, or no peer ever seen), and the information view marks local node
+health degraded. The marker clears on a returning peer heartbeat.
 
 ### What a CONFIRMED fence does and does not give you (#9120)
 
