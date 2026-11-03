@@ -359,10 +359,19 @@ fi
 # must not weaken it (a base-red package must not mask a head red, or a
 # true-positive detector like pkg/cli would go report-only), so it runs
 # only for an explicit --packages-file cohort.
+# shellcheck disable=SC1007  # `CDPATH= cd` clears CDPATH for this command only
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 if [ -z "$PACKAGE_FILE" ]; then
   # Package import paths cannot contain shell whitespace.
   # shellcheck disable=SC2086
   set -- $PKGS
+  # Master (#18038) wraps this exec in testguard-run.sh for host-state
+  # isolation. Keep that wrap whenever the wrapper exists so a landing
+  # rebase cannot revert it; the plain form runs only where the wrapper
+  # is absent (this branch's base predates #18038).
+  if [ -x "$script_dir/testguard-run.sh" ]; then
+    exec "$script_dir/testguard-run.sh" go test -count=1 "$@"
+  fi
   exec go test -count=1 "$@"
 fi
 if [ -z "${TMPDIR:-}" ]; then
@@ -370,7 +379,6 @@ if [ -z "${TMPDIR:-}" ]; then
 fi
 mkdir -p "$TMPDIR"
 repo_root=$(git rev-parse --show-toplevel)
-script_dir=$(cd "$(dirname "$0")" && pwd)
 test_runner="$script_dir/go-test-json.sh"
 head_log=$(mktemp "$TMPDIR/affected-go-head.XXXXXX")
 base_log=

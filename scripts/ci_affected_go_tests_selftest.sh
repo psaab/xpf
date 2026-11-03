@@ -309,6 +309,14 @@ case "$out" in
 esac
 git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
 
+# 4h. Fold-2 shape pin: master (#18038) wraps the default-mode exec in
+#     testguard-run.sh; the selector must keep that wrap whenever the
+#     wrapper exists, so a landing rebase cannot silently revert
+#     host-state isolation. Pin the exact exec line textually.
+grep -qF 'exec "$script_dir/testguard-run.sh" go test -count=1 "$@"' "$selector" \
+  && ok "default two-SHA mode keeps the testguard wrap (master #18038 tail)" \
+  || bad "default-mode exec lost the testguard wrap"
+
 # ── 5. census_packages matches the live census packages ──
 # The selector's census list must equal the pkg/ packages that declare
 # a repo-wide census (doc.go or census test header) and that no package
