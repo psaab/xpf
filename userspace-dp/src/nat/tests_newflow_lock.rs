@@ -52,6 +52,201 @@ fn allocate(alloc: &PortAllocator, addrs: &[Ipv4Addr], src_port: u16, now_ns: u6
         .expect("free range must allocate");
 }
 
+/// #15956: local production-allocator churn cell. Each worker owns a
+/// disjoint source-port window, so every allocation is a fresh flow and every
+/// release is that worker's own last-holder release. The cell deliberately
+/// does not turn host-dependent latency into a pass/fail threshold: it
+/// records the p50/p99 distribution for M=1 and M=8 and asserts the
+/// production invariants that must hold at either concurrency (all fresh
+/// allocations publish a PAT owner, no flow or port remains live, telemetry
+/// remains internally consistent, and shard/live contention stays bounded by
+/// acquisitions). Run it explicitly with `--ignored --nocapture` when a
+/// before/after latency table is needed.
+#[test]
+#[ignore = "MEASUREMENT: production PortAllocator alloc/release churn; prints p50/p99 for M=1 and M=8"]
+fn production_allocator_churn_reports_m1_and_m8_15956() {
+    use std::time::Instant;
+
+    fn percentile(sorted: &[u64], numerator: usize, denominator: usize) -> u64 {
+        if sorted.is_empty() {
+            return 0;
+        }
+        let rank = sorted
+            .len()
+            .saturating_mul(numerator)
+            .div_ceil(denominator)
+            .max(1);
+        sorted[rank - 1]
+    }
+
+    fn run(workers: usize) -> (u64, u64, std::time::Duration) {
+        const OPS_PER_WORKER: usize = 2_048;
+        const NOW_NS: u64 = 1_000;
+        let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+        let addrs = [pool_ip];
+        let alloc = Arc::new(PortAllocator::new(1, 20_000, 60_000));
+        let start = Arc::new(std::sync::Barrier::new(workers + 1));
+        let mut handles = Vec::with_capacity(workers);
+        for worker in 0..workers {
+            let alloc = Arc::clone(&alloc);
+            let start = Arc::clone(&start);
+            handles.push(std::thread::spawn(move || {
+                let mut latencies = Vec::with_capacity(OPS_PER_WORKER);
+                let base_port = 30_000u32 + worker as u32 * OPS_PER_WORKER as u32;
+                start.wait();
+                for i in 0..OPS_PER_WORKER {
+                    let flow = pool_flow((base_port + i as u32) as u16);
+                    let began = Instant::now();
+                    let translated = alloc
+                        .allocate_translation(
+                            flow,
+                            PoolAddressFamily::V4(&addrs),
+                            0,
+                            false,
+                            false,
+                            PersistentNatPermit::TargetHostPort,
+                            0,
+                            0,
+                            NOW_NS,
+                            crate::nat::NatHolder::Untracked,
+                            0,
+                        )
+                        .expect("fresh production allocation must succeed");
+                    assert!(
+                        alloc.debug_pat_owns_wire_identity(&flow, translated),
+                        "fresh allocation must publish its PAT reverse owner"
+                    );
+                    assert!(
+                        alloc.release_flow(
+                            flow,
+                            translated,
+                            NOW_NS,
+                            crate::nat::NatHolder::Untracked,
+                        ),
+                        "own last-holder release must succeed"
+                    );
+                    latencies.push(began.elapsed().as_nanos() as u64);
+                }
+                latencies
+            }));
+        }
+
+        let began = Instant::now();
+        start.wait();
+        let mut latencies = Vec::with_capacity(workers * OPS_PER_WORKER);
+        for handle in handles {
+            latencies.extend(handle.join().expect("churn worker must not panic"));
+        }
+        let elapsed = began.elapsed();
+        latencies.sort_unstable();
+
+        assert_eq!(alloc.live_flow_count(), 0, "churn must drain every flow");
+        let snap = alloc.snapshot();
+        assert_eq!(snap.live_flows, 0);
+        assert_eq!(snap.used_ports, 0, "churn must release every port bit");
+        assert_eq!(
+            snap.allocations_total,
+            (workers * OPS_PER_WORKER) as u64,
+            "every fresh churn allocation must be counted"
+        );
+        assert!(
+            snap.flow_shard_lock_contended_total <= snap.flow_shard_lock_acquisitions_total,
+            "flow-shard contention cannot exceed acquisitions"
+        );
+        assert!(
+            snap.live_write_lock_contended_total <= snap.live_write_lock_acquisitions_total,
+            "live-write contention cannot exceed acquisitions"
+        );
+        (
+            percentile(&latencies, 50, 100),
+            percentile(&latencies, 99, 100),
+            elapsed,
+        )
+    }
+
+    for workers in [1usize, 8] {
+        let (p50, p99, elapsed) = run(workers);
+        eprintln!(
+            "15956-CHURN workers={workers} p50_ns={p50} p99_ns={p99} elapsed_ms={:.3}",
+            elapsed.as_secs_f64() * 1_000.0
+        );
+    }
+}
+
+/// #15956 fail-on-revert cell: while one thread holds the retained `live`
+/// read guard (which excludes the PAT-owner write publication on the old
+/// shape), two allocations on DIFFERENT flow shards must still make
+/// progress through the existing contention fallback after the guard is
+/// released, and neither may lose its owner publication or its port. The
+/// important regression this pins is not a wall-clock bound; it is that the
+/// sharded flow map remains the ownership authority under a held owner-index
+/// reader: both distinct flows are tracked, both reverse owners are visible,
+/// and both releases drain completely.
+#[test]
+fn distinct_shard_allocations_publish_owners_under_live_read_15956() {
+    use super::allocator::live_shard_index_for_test;
+
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let alloc = Arc::new(PortAllocator::new(1, 20_000, 60_000));
+    let first_flow = pool_flow(30_000);
+    let mut second_flow = None;
+    for port in 30_001..31_000u16 {
+        let candidate = pool_flow(port);
+        if live_shard_index_for_test(&candidate) != live_shard_index_for_test(&first_flow) {
+            second_flow = Some(candidate);
+            break;
+        }
+    }
+    let second_flow = second_flow.expect("fixture must span two flow shards");
+
+    let _guard = alloc.debug_hold_live_read();
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let mut handles = Vec::new();
+    for flow in [first_flow, second_flow] {
+        let alloc = Arc::clone(&alloc);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            let addrs = [pool_ip];
+            let translated = alloc
+                .allocate_translation(
+                    flow,
+                    PoolAddressFamily::V4(&addrs),
+                    0,
+                    false,
+                    false,
+                    PersistentNatPermit::TargetHostPort,
+                    0,
+                    0,
+                    2_000,
+                    crate::nat::NatHolder::Untracked,
+                    0,
+                )
+                .expect("allocation must complete through the contention fallback");
+            (flow, translated)
+        }));
+    }
+    barrier.wait();
+    // The allocations cannot publish owners while this read guard is held;
+    // dropping it lets the serialized fallback finish. Joining before the
+    // assertions also proves neither worker deadlocked on the other's shard.
+    drop(_guard);
+    let mut completed = Vec::new();
+    for handle in handles {
+        completed.push(handle.join().expect("allocation worker must not panic"));
+    }
+    assert_eq!(alloc.live_flow_count(), 2);
+    for (flow, translated) in completed {
+        assert!(
+            alloc.debug_pat_owns_wire_identity(&flow, translated),
+            "contended allocation must publish its PAT owner"
+        );
+        assert!(alloc.release_flow(flow, translated, 3_000, crate::nat::NatHolder::Untracked));
+    }
+    assert_eq!(alloc.live_flow_count(), 0);
+    assert_eq!(alloc.snapshot().used_ports, 0);
+}
+
 /// The acquisition counter is the DENOMINATOR half of the pair. Without it a
 /// contention count is uninterpretable: 500 blocked acquisitions out of 600
 /// is a saturated mutex, out of 60,000,000 it is noise. This binds that the
