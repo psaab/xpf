@@ -34,23 +34,121 @@ MARKERS = {
     # run-helper form with its object immediately after "ip" (flag-between
     # forms such as run("ip", "-6", "addr", ...) are not matched), the
     # table form exec.Command("ip", args...), the LookPath-variable form
-    # exec.Command(ip, ...), and embedded-shell mutation verbs. Sources using
-    # self-isolating `unshare -rn bash -c` stay registered; package TestMain
-    # and testguard-run remain the isolation backstop.
+    # exec.Command(ip, ...), and embedded-shell mutation verbs (see
+    # EMBEDDED_SHELL below). Sources using self-isolating
+    # `unshare -rn bash -c` stay registered; package TestMain and
+    # testguard-run remain the isolation backstop.
     "ip": re.compile(
         r"(?:exec\.)?Command(?:Context)?\(\s*\"ip\"|"
         r"\b\w+\(\s*\"ip\"\s*,\s*\"(?:link|addr|route|rule)\"|"
         r"\"ip\"\s*,\s*args\.\.\.|"
-        r"(?:exec\.)?Command(?:Context)?\(\s*(?:ctx\s*,\s*)?ip\b|"
-        # Embedded-shell form: an `ip link/addr/route/rule add|set|del|replace`
-        # verb inside a shell script string in the same source.
-        r"\bip\s+(?:link|addr|route|rule)\s+(?:add|set|del|replace|change)\b"
+        r"(?:exec\.)?Command(?:Context)?\(\s*(?:ctx\s*,\s*)?ip\b"
     ),
     "bpf": re.compile(
         r"\b(?:ebpf\.(?:NewMap|NewMapWithOptions|NewProgram|"
         r"LoadCollection|LoadAndAssign)|unix\.SYS_BPF|BPF_MAP_CREATE)\b"
     ),
 }
+
+# Embedded-shell form: an `ip link/addr/route/rule add|set|del|replace|change`
+# command anchored at a payload line start, but only inside a shell payload.
+# A payload is a Go string literal whose decoded content contains a line
+# starting with `set -e`, `set -eux`, or `set -x` — the shell-script opener
+# used by the `bash -c` / `sh -c` cells in this tree. Comments, interpreted
+# string literals (error substrings, `t.Fatalf` labels, single commands such
+# as the operator-command expectation in linksetup tests), and prose never
+# satisfy both conditions, so they do not create census rows on their own.
+# Deliberately unmatched and relied on the TestMain/testguard-run backstop:
+# flag-prefixed forms (`ip -6 route add`), long verbs (`delete`, `flush`),
+# and other objects (`neigh`, `xfrm`, ...).
+EMBEDDED_VERB = re.compile(
+    r"(?m)^[ \t]*ip[ \t]+(?:link|addr|route|rule)[ \t]+"
+    r"(?:add|set|del|replace|change)\b"
+)
+SHELL_OPENER = re.compile(r"(?m)^[ \t]*set[ \t]+-[a-zA-Z]*[ex][a-zA-Z]*(?:[ \t]|$)")
+
+
+def _go_string_literals(text: str) -> list[str]:
+    """Decoded contents of every Go string literal in *text*.
+
+    Comments and rune literals are skipped so a backtick or quote inside
+    them cannot open a phantom literal. Interpreted literals are returned
+    with common escapes decoded; raw literals verbatim.
+    """
+    literals: list[str] = []
+    i, n = 0, len(text)
+    state = "code"
+    buf: list[str] = []
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if state == "code":
+            if c == "/" and nxt == "/":
+                state = "line_comment"
+                i += 2
+            elif c == "/" and nxt == "*":
+                state = "block_comment"
+                i += 2
+            elif c == "`":
+                state = "raw"
+                buf = []
+                i += 1
+            elif c == '"':
+                state = "interpreted"
+                buf = []
+                i += 1
+            elif c == "'":
+                state = "rune"
+                i += 1
+            else:
+                i += 1
+        elif state == "line_comment":
+            if c == "\n":
+                state = "code"
+            i += 1
+        elif state == "block_comment":
+            if c == "*" and nxt == "/":
+                state = "code"
+                i += 2
+            else:
+                i += 1
+        elif state == "raw":
+            if c == "`":
+                literals.append("".join(buf))
+                state = "code"
+            else:
+                buf.append(c)
+            i += 1
+        elif state == "interpreted":
+            if c == "\\" and nxt:
+                buf.append({"n": "\n", "t": "\t", "r": "\r"}.get(nxt, nxt))
+                i += 2
+            elif c == '"':
+                literals.append("".join(buf))
+                state = "code"
+                i += 1
+            else:
+                buf.append(c)
+                i += 1
+        else:  # rune literal
+            if c == "\\":
+                i += 2
+            elif c == "'":
+                state = "code"
+                i += 1
+            else:
+                i += 1
+    if state in ("raw", "interpreted"):
+        literals.append("".join(buf))
+    return literals
+
+
+def has_embedded_shell_ip(text: str) -> bool:
+    """True iff a shell payload literal in *text* runs an ip mutation."""
+    return any(
+        SHELL_OPENER.search(literal) and EMBEDDED_VERB.search(literal)
+        for literal in _go_string_literals(text)
+    )
 
 
 TESTMAIN = re.compile(
@@ -72,7 +170,10 @@ def package_candidates(root: Path) -> tuple[dict[str, tuple[str, ...]], list[str
         for source in sources:
             text = source.read_text(encoding="utf-8")
             main_bodies.extend(match.group("body") for match in TESTMAIN.finditer(text))
-            classes = tuple(name for name, marker in MARKERS.items() if marker.search(text))
+            classes = [name for name, marker in MARKERS.items() if marker.search(text)]
+            if "ip" not in classes and has_embedded_shell_ip(text):
+                classes.append("ip")
+            classes = tuple(name for name in MARKERS if name in classes)
             if classes:
                 candidates[source.relative_to(root).as_posix()] = classes
         if len(main_bodies) != 1:

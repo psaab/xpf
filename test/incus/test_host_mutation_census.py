@@ -124,6 +124,22 @@ class HostMutationCensusTest(unittest.TestCase):
         self.assertIn("unregistered host-mutation test source", result.stderr)
         self.assertIn("pkg/routing/ip_helper_test.go", result.stderr)
 
+    def test_embedded_shell_ip_form_requires_registry_row(self):
+        (self.root / "pkg/routing/embedded_shell_test.go").write_text(
+            "package fixture\n"
+            "func test() {\n"
+            "\tscript := `set -e\n"
+            "ip link add dum0 type dummy\n"
+            "`\n"
+            "\t_ = exec.Command(\"unshare\", \"-rn\", \"bash\", \"-c\", script)\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        result = self.run_census()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unregistered host-mutation test source", result.stderr)
+        self.assertIn("pkg/routing/embedded_shell_test.go", result.stderr)
+
     def test_guard_outside_testmain_is_rejected(self):
         guard = self.root / "pkg/nftables/guard_test.go"
         guard.write_text(
