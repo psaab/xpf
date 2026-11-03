@@ -13,7 +13,7 @@ import (
 // bootstrapImport is true only for the daemon's bootstrap import; it feeds
 // the #18744 placeholder decision (placeholderJudgedLocked).
 func (s *Store) compileAuthSafeCandidate(candidate *config.ConfigTree, bootstrapImport bool) (*config.ConfigTree, *config.Config, error) {
-	if err := s.schemaValidateExpandedTree(candidate); err != nil {
+	if err := schemaValidateExpandedTreeForNode(candidate, s.nodeID, false); err != nil {
 		return nil, nil, err
 	}
 	hashed := candidate.Clone()

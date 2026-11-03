@@ -806,7 +806,7 @@ func compileTreeStrictWithCurrent(tree *config.ConfigTree, nodeID int, current *
 }
 
 func compileTreeStrictJudged(tree *config.ConfigTree, nodeID int, current *config.Config, judgePlaceholders bool) (*config.Config, error) {
-	if err := schemaValidateExpandedTreeForNode(tree, nodeID); err != nil {
+	if err := schemaValidateExpandedTreeForNode(tree, nodeID, false); err != nil {
 		return nil, err
 	}
 	var compiled *config.Config
@@ -1040,7 +1040,10 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 	// be promoted as a secret, so preserve that specific guard error below.
 	// Every other typed-leaf violation retains the #1733/#1798/#1814 lenient
 	// policy; see freetext.go.
-	schemaErr := s.schemaValidateExpandedTree(tree)
+	// #18962: the tolerant ingress walk selects the lenient commit-outcome
+	// wording; its errors are logged and downgraded below, never returned as
+	// refusals.
+	schemaErr := schemaValidateExpandedTreeForNode(tree, s.nodeID, true)
 	// #16012: collect every independent typed-leaf violation for the
 	// tolerant log + persisted warnings. The first-error schemaErr above
 	// still drives the normal classification; the collect error is retained
@@ -1172,10 +1175,6 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 	return compiled, err
 }
 
-func (s *Store) schemaValidateExpandedTree(tree *config.ConfigTree) error {
-	return schemaValidateExpandedTreeForNode(tree, s.nodeID)
-}
-
 // schemaValidateExpandedTreeCollect16012 mirrors schemaValidateExpandedTree
 // but collects independent typed-leaf findings. Its second return carries
 // non-typed schema errors separately from those findings. A #17241 nested-list
@@ -1200,7 +1199,11 @@ func (s *Store) schemaValidateExpandedTreeCollect16012(tree *config.ConfigTree) 
 	return config.SchemaValidateCollectTypedLeaves(expanded, stripped)
 }
 
-func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) error {
+// The lenient flag (#18962) selects the walk's commit-outcome wording: the
+// tolerant Load / peer-sync ingress keeps the drop wording that is true where
+// the error is logged-and-continued; every commit, commit-check, auth-safe
+// and peer-strict caller passes false and its errors refuse the commit.
+func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int, lenient bool) error {
 	if tree == nil {
 		return nil
 	}
@@ -1240,6 +1243,11 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 	// performs, and the same override failed to merge again.
 	stripped := config.NormalizeCompactForScan(tree.WithoutInactive())
 	expanded := stripped.Clone()
+	// #18962: the walk entry fixes the commit-outcome wording arm.
+	validate := config.SchemaValidateWithDefinitions
+	if lenient {
+		validate = config.SchemaValidateWithDefinitionsLenient
+	}
 	if nodeID >= 0 {
 		vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
 		if err := expanded.ExpandGroupsWithVars(vars); err != nil {
@@ -1249,7 +1257,7 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 		// definitions source: expansion removes the groups stanza, and
 		// definitions living only in un-applied peer-node groups must
 		// keep satisfying shared-section references (#1319 PR 3).
-		return config.SchemaValidateWithDefinitions(expanded, stripped)
+		return validate(expanded, stripped)
 	}
 	// #15031: expand exactly once — a failed plain pass has already
 	// partially merged `expanded`, and retrying with node0 vars on that
@@ -1258,7 +1266,7 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 	if _, err := expanded.ExpandGroupsNodeFallback15031(false); err != nil {
 		return fmt.Errorf("apply-groups: %w", err)
 	}
-	return config.SchemaValidateWithDefinitions(expanded, stripped)
+	return validate(expanded, stripped)
 }
 
 // SyncApply applies a config received from the cluster primary.

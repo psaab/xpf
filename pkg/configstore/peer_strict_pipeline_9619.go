@@ -78,7 +78,7 @@ func validatePeerStrictPipelineJudged(peerTree *config.ConfigTree, nodeID int, p
 	if peerTree == nil || !ok {
 		return nil
 	}
-	if err := schemaValidateExpandedTreeForNode(peerTree, peerID); err != nil {
+	if err := schemaValidateExpandedTreeForNode(peerTree, peerID, false); err != nil {
 		return peerStrictError(peerID, err)
 	}
 	peerCompiled, err := config.CompileConfigForNodeJudgingPlaceholders(peerTree, peerID, peerCurrent, judgePlaceholders)
