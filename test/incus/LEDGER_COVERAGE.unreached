@@ -13,15 +13,19 @@ cc-rollback-arm-a no rows in the tracked ledger; needs a recorded run of the #19
 cc-rollback-arm-b no rows in the tracked ledger; needs a recorded run of the #1922 rollback gate arm B on the loss cluster
 test-active-active no rows in the tracked ledger; needs a recorded per-RG failover run (cluster + iperf3 server)
 test-chained-crash no rows in the tracked ledger; needs a recorded chained-crash run (cluster + iperf3 server)
-test-connectivity no rows in the tracked ledger; needs a recorded run (read gate; F-158 lock-idle probe lands in #9922)
 test-double-failover no rows in the tracked ledger; needs a recorded double-failover run (cluster + iperf3 server)
 test-fbf-steering no rows in the tracked ledger; needs an operator-authorized live IPv4 fallback transition and correlated peer-capture run on the loss cluster
 test-private-rg no rows in the tracked ledger; needs a recorded private-RG election run on the loss cluster
 test-restart-connectivity no rows in the tracked ledger; needs a recorded daemon-restart run (cluster + iperf3 server)
-test-rg-move-soak no rows in the tracked ledger; needs a recorded one-node RG-move soak (#18583, matrix H11) on the loss cluster
 test-rolling-upgrade no rows in the tracked ledger; needs a recorded two-cut rolling-upgrade run with per-stream traffic and both running-version transitions on the loss cluster
 test-stress-failover no rows in the tracked ledger; needs a recorded stress-failover run (cluster + iperf3 server)
 test-wire-properties no rows in the tracked ledger; needs a recorded run (read gate, hermetic wrap)
 wire_appmatch_twins no rows in the tracked ledger; #11056 proved every code leg hermetically (test-wire-gate-hermetic-lib, the policymatch fixture tests) but a PASS/FAIL row still needs a recorded run of the #9531 appmatch-twins gate on the loss cluster (operator-held; plan-deferred-lab)
 wire_policy_deny no rows in the tracked ledger; #11056 proved every code leg hermetically (test-wire-gate-hermetic-lib, the policymatch fixture tests) but a PASS/FAIL row still needs a recorded run of the #9531 wire-deny gate on the loss cluster (operator-held; plan-deferred-lab)
 wire_hostinbound_deny no rows in the tracked ledger; #11056 proved every code leg hermetically (test-wire-gate-hermetic-lib, the policymatch fixture tests) but a PASS/FAIL row still needs a recorded run of the #10029 host-inbound deny gate on the loss cluster (operator-held; plan-deferred-lab)
+wire_nat_frag_needed no measured ledger row; live wire NAT fragmentation-needed acceptance remains deferred to a recorded cluster run
+cos-simul-load-smoke no measured ledger row; live all-11-class CoS acceptance remains deferred to the qualified loss userspace cluster
+cos-gate1-small-four-alone no measured ledger row; live Gate 1 solo shape measurement remains deferred to the qualified loss userspace cluster
+cos-be-contention-harness no measured ledger row; live exact-vs-best-effort contention remains deferred to the qualified loss userspace cluster
+fairness-cos-class-sweep no measured ledger row; live per-class fairness sweep remains deferred to the qualified loss userspace cluster
+fairness-cos-throughput-headroom no measured ledger row; paired strict/surplus fairness measurement remains deferred to the qualified loss userspace cluster

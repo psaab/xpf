@@ -21,15 +21,14 @@
 #   reverse-key collision, and the CoS/fairness sweeps). This is the #7296
 #   shape one layer up.
 #
-#   The 28 is measured by this script, not asserted: the design that specified
-#   it counted 19 of 33 and credited apply-cos-config.sh, fairness-harness.sh,
-#   fairness-cos-class-sweep.sh and cos-be-contention-harness.sh as reached
-#   transitively. None of them is. apply-cos-config.sh's only appearance in a
-#   REACHED file is a `#` comment in with-cluster.sh; the other three are named
-#   only from callers that are themselves unreached, or inside an `echo` string
-#   in target-services.sh. That is the census's own subject matter arriving in
-#   its specification, which is why the four shapes below are cells and not
-#   prose.
+# The original 28 was measured by this script, not asserted: the design that
+# specified it counted 19 of 33 and credited apply-cos-config.sh,
+# fairness-harness.sh, fairness-cos-class-sweep.sh and
+# cos-be-contention-harness.sh as reached transitively; none of them was then.
+# The CoS Make recipes now reach the sweep and contention harnesses, and their
+# explicit default-path assignments make the composed fairness/apply helpers
+# visible too. The four false-positive matcher shapes below remain cells, not
+# prose, so future reachability changes are checked against the same contract.
 #
 # FALSIFIABILITY — what this reports when the property is FALSE
 #

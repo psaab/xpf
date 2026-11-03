@@ -66,7 +66,7 @@ HARNESS_RESULT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_RESULT_SCHEMA=2
 
 # The adapter table. A source not listed here is REFUSED, never defaulted.
-HARNESS_ADAPTERS="ha-smoke smoke-cells newflow-ceiling mouse-latency selftest iperf-throughput wire-gate"
+HARNESS_ADAPTERS="ha-smoke smoke-cells newflow-ceiling mouse-latency selftest iperf-throughput wire-gate cos-gate"
 
 harness_result_root() {
 	if [[ -n "${XPF_REPO_ROOT:-}" ]]; then
@@ -760,6 +760,114 @@ harness_adapt_wire_gate() {
 	fi
 }
 
+# ── cos-gate ─────────────────────────────────────────────────────────
+#
+# The five CoS measurement harnesses emit one terminal COS_GATE line. This
+# adapter accepts only that declared contract; exit codes are not used to
+# invent a verdict. The line is intentionally separate from WIRE_GATE because
+# its gate IDs, VOID reasons, and metric sets are different.
+harness_adapt_cos_gate() {
+	local rc="$1" log="$2"
+	local lines line gate verdict reason tok key value metrics="" badpair=""
+	local headline direction required missing="" rk
+	local -a metric_tokens=()
+	lines=$(grep -E '^COS_GATE([[:space:]]|$)' "$log" || true)
+	if [[ -z "$lines" ]]; then
+		printf 'VOID\tcos-gate: no COS_GATE verdict line in output (rc=%s)\t\t\t\n' "$rc"
+		return 0
+	fi
+	if [[ $(printf '%s\n' "$lines" | wc -l) -ne 1 ]]; then
+		printf 'VOID\tcos-gate: multiple COS_GATE lines in one run; refusing ambiguous verdicts\t\t\t\n'
+		return 0
+	fi
+	line="$lines"
+	if [[ ! "$line" =~ ^COS_GATE[[:space:]]+([A-Za-z0-9_.-]+)[[:space:]]+(PASS|FAIL|VOID)[[:space:]]+reason=([^[:space:]]+)([[:space:]].*)?$ ]]; then
+		printf 'VOID\tcos-gate: malformed COS_GATE line\t\t\t\n'
+		return 0
+	fi
+	gate="${BASH_REMATCH[1]}"
+	verdict="${BASH_REMATCH[2]}"
+	reason="${BASH_REMATCH[3]}"
+	case "$gate" in
+	cos-simul-load-smoke)
+		headline=aggregate_gbps; direction=higher-better; required=aggregate_gbps
+		;;
+	cos-gate1-small-four-alone)
+		headline=min_shape_pct; direction=higher-better; required=min_shape_pct
+		;;
+	cos-be-contention-harness)
+		headline=cells_failed; direction=lower-better; required=cells_failed
+		;;
+	fairness-cos-class-sweep)
+		headline=max_gap; direction=lower-better; required=max_gap
+		;;
+	fairness-cos-throughput-headroom)
+		headline=classes_failed_total; direction=lower-better
+		required="classes_failed_total strict_sum_class_avg_mbps surplus_sum_class_avg_mbps paired_sum_class_avg_delta_mbps paired_sum_class_avg_delta_pct classes_failed_strict classes_failed_surplus max_gap_strict max_gap_surplus"
+		;;
+	*)
+		printf 'VOID\tcos-gate: unknown gate %s; refusing to guess its headline\t\t\t\n' "$gate"
+		return 0
+		;;
+	esac
+	if [[ "$verdict" == VOID ]]; then
+		if [[ ! "$reason" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+			printf 'VOID\tcos-gate: VOID for %s lacks a valid reason slug\t\t\t\n' "$gate"
+			return 0
+		fi
+	else
+		if [[ "$reason" != -- ]]; then
+			printf 'VOID\tcos-gate: %s %s must carry reason=--\t\t\t\n' "$gate" "$verdict"
+			return 0
+		fi
+	fi
+	read -r -a metric_tokens <<< "${line#*reason=$reason}"
+	for tok in "${metric_tokens[@]}"; do
+		[[ -n "$tok" ]] || continue
+		if [[ ! "$tok" =~ ^([a-z][a-z0-9_]{0,63})=(-?[0-9]+([.][0-9]+)?)$ ]]; then
+			badpair="$tok"
+			break
+		fi
+		key="${BASH_REMATCH[1]}"
+		value="${BASH_REMATCH[2]}"
+		case " $metrics " in
+		*" $key="*) badpair="$tok"; break ;;
+		esac
+		metrics="${metrics:+$metrics }$key=$value"
+	done
+	if [[ -n "$badpair" ]]; then
+		if [[ "$verdict" == VOID ]]; then
+			printf 'VOID\t%s\t\t\t\n' "$reason"
+		else
+			printf 'VOID\tcos-gate: %s has malformed or duplicate metric %s\t\t\t\n' "$gate" "$badpair"
+		fi
+		return 0
+	fi
+	for rk in $required; do
+		case " $metrics " in
+		*" $rk="*) ;;
+		*) missing="${missing:+$missing,}$rk" ;;
+		esac
+	done
+	if [[ -n "$missing" ]]; then
+		if [[ "$verdict" == VOID ]]; then
+			printf 'VOID\t%s\t\t\t\n' "$reason"
+		else
+			printf 'VOID\tcos-gate: %s %s is missing required metrics: %s\t\t\t\n' "$gate" "$verdict" "$missing"
+		fi
+		return 0
+	fi
+	if [[ "$verdict" == PASS && "$rc" != 0 ]]; then
+		printf 'VOID\tcos-gate: %s reports PASS but exited rc=%s; summary and exit status disagree\t\t\t\n' "$gate" "$rc"
+		return 0
+	fi
+	case "$verdict" in
+	VOID) printf 'VOID\t%s\t\t\t%s\n' "$reason" "$metrics" ;;
+	PASS) printf 'PASS\t\t%s\t%s\t%s\n' "$headline" "$direction" "$metrics" ;;
+	FAIL) printf 'FAIL\t\t%s\t%s\t%s\n' "$headline" "$direction" "$metrics" ;;
+	esac
+}
+
 # ─────────────────────────────────────────────────────────────────────
 # Provenance: which build actually produced this measurement
 # ─────────────────────────────────────────────────────────────────────
@@ -1240,6 +1348,14 @@ harness_result_run() {
 			break
 		fi
 	done
+
+	# COS_GATE_SELFTEST is a local fixture mode, not a live measurement. A
+	# cluster wrapper must refuse it before running the child or attesting
+	# nodes, otherwise a synthetic PASS could enter coverage.
+	if [[ "$adapter" == "cos-gate" && "$mode" == "cluster" && "${COS_GATE_SELFTEST:-0}" == "1" ]]; then
+		_hr_warn "run: refusing cluster cos-gate with COS_GATE_SELFTEST=1 (test-only mode cannot produce measurements)"
+		return 2
+	fi
 
 	local root log t0 t1 rc
 	root="$(harness_result_root)"

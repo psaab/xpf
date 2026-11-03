@@ -12,11 +12,14 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # schedule library instead of a sweep-local copy of cos-iperf-config.set.
 # shellcheck source=cos-apply-lib.sh
 source "$ROOT_DIR/test/incus/cos-apply-lib.sh"
+# shellcheck source=cluster-env.sh
+source "$ROOT_DIR/test/incus/cluster-env.sh"
+
 
 # shellcheck source=active-fw.sh
 source "$ROOT_DIR/test/incus/active-fw.sh"
 
-TARGET=${TARGET:-172.16.80.200}
+TARGET=${TARGET:-$IPERF_TARGET4}
 N=${N:-12}
 DURATION=${DURATION:-75}
 WARMUP=${WARMUP:-5}
@@ -33,10 +36,44 @@ SAMPLES=${SAMPLES:-3}
 SAMPLE_COOLDOWN_SEC=${SAMPLE_COOLDOWN_SEC:-10}
 PER_RUN_TIMEOUT_SEC=${PER_RUN_TIMEOUT_SEC:-180}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-}
-HARNESS=${HARNESS:-$ROOT_DIR/test/incus/fairness-harness.sh}
+if [[ -z "${HARNESS:-}" ]]; then
+    HARNESS="$ROOT_DIR/test/incus/fairness-harness.sh"
+fi
 WRAPPER=${WRAPPER:-$ROOT_DIR/test/incus/fairness_multi_sample.py}
 FAIRNESS_EVAL=${FAIRNESS_EVAL:-$ROOT_DIR/userspace-dp/target/release/fairness-eval}
 EQUAL_FLOW_CAPTURE=${EQUAL_FLOW_CAPTURE:-$ROOT_DIR/test/incus/fairness_equal_flow_capture.py}
+COS_GATE_EMITTED=0
+cos_gate_void() {
+    printf 'COS_GATE fairness-cos-class-sweep VOID reason=%s\n' "$1"
+    COS_GATE_EMITTED=1
+}
+cos_gate_exit() {
+    local status=$?
+    trap - EXIT
+    if [[ "$COS_GATE_EMITTED" != "1" ]]; then
+        local reason=harness-aborted
+        ((status == 0)) && reason=harness-incomplete
+        cos_gate_void "$reason"
+    fi
+    exit "$status"
+}
+trap cos_gate_exit EXIT
+if [[ "${_XPF_CLUSTER_ENV_FILE:-}" != "$ROOT_DIR/test/incus/loss-userspace-cluster.env" ]]; then
+    cos_gate_void unsupported-cluster-env
+    exit 2
+fi
+if [[ "${COS_GATE_SELFTEST:-0}" == "1" ]]; then
+    echo "COS_GATE fairness-cos-class-sweep PASS reason=-- max_gap=0.01"
+    COS_GATE_EMITTED=1
+    exit 0
+fi
+if [[ "${IPERF_LAUNCH_ARG_2:-}" != "$CLUSTER_LAN_HOST" ]]; then
+    echo "fairness-cos-class-sweep: IPERF_LAUNCH_ARG_2 must name sourced CLUSTER_LAN_HOST ($CLUSTER_LAN_HOST)" >&2
+    cos_gate_void generator-host-invalid
+    exit 2
+fi
+
+
 CAPTURE_DATAPLANE=${CAPTURE_DATAPLANE:-1}
 # D10-14 (#13069): do not hardcode a cluster node for dataplane
 # telemetry. When DATAPLANE_VM is unset the sweep resolves the active
@@ -83,6 +120,17 @@ if ! command -v jq >/dev/null 2>&1; then
     echo "fairness-cos-class-sweep: jq is required to build the aggregate summary" >&2
     exit 2
 fi
+if ! metrics_probe=$(curl -fsS --max-time 1 "$METRICS_URL" 2>/dev/null); then
+    echo "fairness-cos-class-sweep: metrics endpoint unavailable: $METRICS_URL" >&2
+    cos_gate_void metrics-unavailable
+    exit 2
+fi
+if ! grep -q '^xpf_userspace_cos_active_flow_count{' <<<"$metrics_probe"; then
+    echo "fairness-cos-class-sweep: no active-flow metric rows from $METRICS_URL" >&2
+    cos_gate_void metrics-unavailable
+    exit 2
+fi
+
 
 require_nonnegative_integer_seconds() {
     local name=$1
@@ -104,6 +152,15 @@ if [[ -z "$ARTIFACT_ROOT" ]]; then
 else
     mkdir -p "$ARTIFACT_ROOT"
 fi
+{
+    printf 'target_v4=%s\n' "$TARGET"
+    printf 'metrics_url=%s\ncos_ifindex=%s\n' "$METRICS_URL" "$COS_IFINDEX"
+    printf 'lan_generator=%s\n' "$CLUSTER_LAN_HOST"
+    printf 'iperf_launch_args=%s %s %s %s\n' \
+        "${IPERF_LAUNCH_ARG_0:-}" "${IPERF_LAUNCH_ARG_1:-}" \
+        "${IPERF_LAUNCH_ARG_2:-}" "${IPERF_LAUNCH_ARG_3:-}"
+} > "$ARTIFACT_ROOT/measurement-environment.txt"
+
 SUMMARY_TSV="$ARTIFACT_ROOT/summary.tsv"
 SUMMARY_MD="$ARTIFACT_ROOT/summary.md"
 DATAPLANE_SUMMARY_TSV="$ARTIFACT_ROOT/dataplane-summary.tsv"
@@ -760,6 +817,9 @@ fi
     printf 'Artifacts: `%s`\n\n' "$ARTIFACT_ROOT"
     printf 'Target: `%s`, streams: `%s`, duration: `%s`, reverse: `%s`, metrics: `%s`, cos_ifindex: `%s`\n\n' \
         "$TARGET" "$N" "$DURATION" "$REVERSE" "$METRICS_URL" "$COS_IFINDEX"
+    printf 'LAN generator host: `%s` (launch args `%s %s %s %s`)\n\n' \
+        "$CLUSTER_LAN_HOST" "${IPERF_LAUNCH_ARG_0:-}" "${IPERF_LAUNCH_ARG_1:-}" \
+        "${IPERF_LAUNCH_ARG_2:-}" "${IPERF_LAUNCH_ARG_3:-}"
     printf 'Steady-state window per sample: warmup `%s`s, final-burst `%s`s.\n\n' \
         "$WARMUP" "$FINAL_BURST"
     printf 'Equal-flow reduction additionally skips `%s`s after warmup for rolling-estimator flush.\n\n' \
@@ -822,4 +882,60 @@ fi
 
 echo "fairness-cos-class-sweep: wrote $SUMMARY_TSV"
 echo "fairness-cos-class-sweep: wrote $SUMMARY_MD"
-exit "$overall_status"
+gate_status=0
+gate_output=$(python3 - "$SUMMARY_TSV" "$overall_status" "${#selected_classes[@]}" <<'PY'
+import csv
+import math
+import sys
+
+path, status, expected = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+try:
+    with open(path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+except OSError:
+    print("COS_GATE fairness-cos-class-sweep VOID reason=summary-unavailable")
+    raise SystemExit(2)
+if status == 2 or len(rows) != expected or not rows:
+    print("COS_GATE fairness-cos-class-sweep VOID reason=summary-incomplete")
+    raise SystemExit(2)
+gaps = []
+failed = False
+for row in rows:
+    if row.get("verdict") == "ERROR":
+        print("COS_GATE fairness-cos-class-sweep VOID reason=error-row")
+        raise SystemExit(2)
+    if row.get("verdict") not in ("PASS", "FAIL"):
+        print("COS_GATE fairness-cos-class-sweep VOID reason=summary-verdict-invalid")
+        raise SystemExit(2)
+    try:
+        mean_gap = float(row["mean_gap"])
+        max_gap = float(row["max_gap"])
+        avg_mbps = float(row["avg_mbps"])
+    except (KeyError, TypeError, ValueError):
+        print("COS_GATE fairness-cos-class-sweep VOID reason=summary-metric-invalid")
+        raise SystemExit(2)
+    if not all(math.isfinite(value) for value in (mean_gap, max_gap, avg_mbps)):
+        print("COS_GATE fairness-cos-class-sweep VOID reason=summary-metric-invalid")
+        raise SystemExit(2)
+    gaps.append(max_gap)
+    failed |= row["verdict"] == "FAIL"
+if status == 0 and not failed:
+    verdict = "PASS"
+elif status == 1 and failed:
+    verdict = "FAIL"
+else:
+    print("COS_GATE fairness-cos-class-sweep VOID reason=summary-exit-disagree")
+    raise SystemExit(2)
+print(f"COS_GATE fairness-cos-class-sweep {verdict} reason=-- max_gap={max(gaps):.6f}")
+raise SystemExit(status)
+PY
+)
+gate_status=$?
+if grep -q '^COS_GATE fairness-cos-class-sweep ' <<<"$gate_output"; then
+    COS_GATE_EMITTED=1
+else
+    gate_output="COS_GATE fairness-cos-class-sweep VOID reason=aggregation-failed"
+    gate_status=2
+fi
+printf '%s\n' "$gate_output"
+exit "$gate_status"
