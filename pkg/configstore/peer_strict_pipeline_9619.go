@@ -74,6 +74,10 @@ func validatePeerStrictPipelineWithCurrent(peerTree *config.ConfigTree, nodeID i
 // placeholder decision as the local view, so a shared commit cannot pass on
 // one node's view and be refused on the other's.
 func validatePeerStrictPipelineJudged(peerTree *config.ConfigTree, nodeID int, peerCurrent *config.Config, judgePlaceholders bool) error {
+	return validatePeerStrictPipelineJudgedWithPackedTailGate18771(peerTree, nodeID, peerCurrent, judgePlaceholders, false)
+}
+
+func validatePeerStrictPipelineJudgedWithPackedTailGate18771(peerTree *config.ConfigTree, nodeID int, peerCurrent *config.Config, judgePlaceholders, eligible bool) error {
 	peerID, ok := config.PeerNodeID(nodeID)
 	if peerTree == nil || !ok {
 		return nil
@@ -81,7 +85,7 @@ func validatePeerStrictPipelineJudged(peerTree *config.ConfigTree, nodeID int, p
 	if err := schemaValidateExpandedTreeForNode(peerTree, peerID); err != nil {
 		return peerStrictError(peerID, err)
 	}
-	peerCompiled, err := config.CompileConfigForNodeJudgingPlaceholders(peerTree, peerID, peerCurrent, judgePlaceholders)
+	peerCompiled, err := config.CompileConfigForNodeJudgingPlaceholdersWithPackedTailGate18771(peerTree, peerID, peerCurrent, judgePlaceholders, eligible)
 	if err != nil {
 		return peerStrictError(peerID, err)
 	}

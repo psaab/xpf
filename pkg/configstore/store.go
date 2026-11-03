@@ -755,14 +755,22 @@ func (s *Store) SetNodeID(id int) {
 // (#1319 PR 2 boot safety). cfg is nil at this point because we haven't
 // compiled yet; the typed-leaf validators shipped so far don't need it.
 func (s *Store) compileTree(tree *config.ConfigTree) (*config.Config, error) {
-	return s.compileTreeAs(tree, false)
+	return s.compileTreeWithPackedTailGate18771(tree, false)
+}
+
+func (s *Store) compileTreeWithPackedTailGate18771(tree *config.ConfigTree, eligible bool) (*config.Config, error) {
+	return s.compileTreeAsWithPackedTailGate18771(tree, false, eligible)
 }
 
 // compileTreeAs is compileTree for a commit whose committer is known.
 // bootstrapImport is true only for the daemon's bootstrap import (an internal
 // authority named BootstrapPrincipal); see placeholderJudgedLocked.
 func (s *Store) compileTreeAs(tree *config.ConfigTree, bootstrapImport bool) (*config.Config, error) {
-	return compileTreeStrictJudged(tree, s.nodeID, s.compiled, s.placeholderJudgedLocked(bootstrapImport))
+	return s.compileTreeAsWithPackedTailGate18771(tree, bootstrapImport, false)
+}
+
+func (s *Store) compileTreeAsWithPackedTailGate18771(tree *config.ConfigTree, bootstrapImport, eligible bool) (*config.Config, error) {
+	return compileTreeStrictJudgedWithPackedTailGate18771(tree, s.nodeID, s.compiled, s.placeholderJudgedLocked(bootstrapImport), eligible)
 }
 
 // placeholderJudgedLocked decides whether a strict compile judges the #18744
@@ -795,26 +803,38 @@ func (s *Store) placeholderJudgedLocked(bootstrapImport bool) bool {
 // non-nil current; CheckText/day-0 callers use compileTreeStrict (nil),
 // so a fresh candidate cannot claim the migration exception.
 func compileTreeStrict(tree *config.ConfigTree, nodeID int) (*config.Config, error) {
-	return compileTreeStrictWithCurrent(tree, nodeID, nil)
+	return compileTreeStrictWithPackedTailGate18771(tree, nodeID, false)
+}
+
+func compileTreeStrictWithPackedTailGate18771(tree *config.ConfigTree, nodeID int, eligible bool) (*config.Config, error) {
+	return compileTreeStrictWithCurrentAndPackedTailGate18771(tree, nodeID, nil, eligible)
 }
 
 // compileTreeStrictWithCurrent judges the #18744 placeholder gate iff
 // current is non-nil, the config package's default. Store commit paths use
 // compileTreeStrictJudged with the store's own decision.
 func compileTreeStrictWithCurrent(tree *config.ConfigTree, nodeID int, current *config.Config) (*config.Config, error) {
-	return compileTreeStrictJudged(tree, nodeID, current, current != nil)
+	return compileTreeStrictWithCurrentAndPackedTailGate18771(tree, nodeID, current, false)
+}
+
+func compileTreeStrictWithCurrentAndPackedTailGate18771(tree *config.ConfigTree, nodeID int, current *config.Config, eligible bool) (*config.Config, error) {
+	return compileTreeStrictJudgedWithPackedTailGate18771(tree, nodeID, current, current != nil, eligible)
 }
 
 func compileTreeStrictJudged(tree *config.ConfigTree, nodeID int, current *config.Config, judgePlaceholders bool) (*config.Config, error) {
+	return compileTreeStrictJudgedWithPackedTailGate18771(tree, nodeID, current, judgePlaceholders, false)
+}
+
+func compileTreeStrictJudgedWithPackedTailGate18771(tree *config.ConfigTree, nodeID int, current *config.Config, judgePlaceholders, eligible bool) (*config.Config, error) {
 	if err := schemaValidateExpandedTreeForNode(tree, nodeID); err != nil {
 		return nil, err
 	}
 	var compiled *config.Config
 	var err error
 	if nodeID >= 0 {
-		compiled, err = config.CompileConfigForNodeJudgingPlaceholders(tree, nodeID, current, judgePlaceholders)
+		compiled, err = config.CompileConfigForNodeJudgingPlaceholdersWithPackedTailGate18771(tree, nodeID, current, judgePlaceholders, eligible)
 	} else {
-		compiled, err = config.CompileConfigJudgingPlaceholders(tree, current, judgePlaceholders)
+		compiled, err = config.CompileConfigJudgingPlaceholdersWithPackedTailGate18771(tree, current, judgePlaceholders, eligible)
 	}
 	if err != nil {
 		return nil, err
@@ -870,7 +890,7 @@ func compileTreeStrictJudged(tree *config.ConfigTree, nodeID int, current *confi
 	// tolerance is what handles it.
 	peerTree := tree.Clone()
 	rewriteRetiredDataplaneType(peerTree, SyncCaller)
-	if err := config.ValidatePeerEffectiveStrict(peerTree, nodeID); err != nil {
+	if err := config.ValidatePeerEffectiveStrictWithPackedTailGate18771(peerTree, nodeID, eligible); err != nil {
 		return nil, err
 	}
 	// #9619: the registry above runs FIRST so its two subjects keep their
@@ -883,7 +903,7 @@ func compileTreeStrictJudged(tree *config.ConfigTree, nodeID int, current *confi
 	// judged against the peer's own persisted primary derived from that
 	// active config, not left nil (which rejected every clustered staged
 	// migration at the peer gate even when the local gate admitted it).
-	if err := validatePeerStrictPipelineJudged(peerTree, nodeID, current, judgePlaceholders); err != nil {
+	if err := validatePeerStrictPipelineJudgedWithPackedTailGate18771(peerTree, nodeID, current, judgePlaceholders, eligible); err != nil {
 		return nil, err
 	}
 	return compiled, nil
