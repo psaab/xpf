@@ -38,7 +38,7 @@ func CheckText(content string, nodeID int) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	compiled, err := compileTreeStrict(tree, nodeID)
+	compiled, err := compileTreeStrictWithPackedTailGate18771(tree, nodeID, false)
 	if err != nil {
 		return nil, fmt.Errorf("commit check failed: %w", err)
 	}
