@@ -9,9 +9,11 @@ import (
 // outcome. Keeping these independent of the builder makes an outcome swap
 // fail instead of redefining the expectations along with the message.
 const (
-	bindIfaceHead18964        = "is not a valid secure-tunnel interface: it must be st<N> or st<N>.<unit>"
-	bindIfaceStrictTail18964  = "so the route-based VPN commit is refused (#5297)"
-	bindIfaceLenientTail18964 = "so the route-based VPN commits successfully but carries no traffic (silent tunnel down) (#5297)"
+	bindIfaceHead18964          = "is not a valid secure-tunnel interface: it must be st<N> or st<N>.<unit>"
+	bindIfaceStrictTail18964    = "so the route-based VPN commit is refused (#5297)"
+	bindIfaceLenientTail18964   = "so the route-based VPN commits successfully but carries no traffic (silent tunnel down) (#5297)"
+	bindIfaceSchemaHead18964    = `invalid bind-interface "secure0": must be a secure-tunnel interface st<N> or st<N>.<unit>`
+	bindIfaceSchemaOutcome18964 = "resolves to no XFRM interface; the route-based VPN would carry no traffic (silent tunnel down)"
 )
 
 // Tests for #5297: an invalid IPsec `bind-interface` name (anything but the
@@ -162,14 +164,22 @@ func TestSecureTunnelBindIfaceInvalidLenientWarns(t *testing.T) {
 // TestSecureTunnelBindIfaceInvalidSchemaRejected proves the #1319 typed-leaf
 // commit-check layer (SchemaValidate) independently rejects a non-canonical
 // bind-interface naming the offending value, and accepts every canonical form.
+// #18964 also pins the literal head and arm-neutral outcome HERE because this
+// schema gate runs before CompileConfig and is the diagnostic an ordinary
+// strict rejection actually surfaces.
 //
 // FAIL-ON-REVERT: dropping the valueType/validator from the `bind-interface`
-// schema leaf makes SchemaValidate return nil for "secure0" → RED.
+// schema leaf makes SchemaValidate return nil for "secure0" → RED. Restoring
+// the old "commits but carries no traffic" outcome also reds the literal pin.
 func TestSecureTunnelBindIfaceInvalidSchemaRejected(t *testing.T) {
 	bad := flatTreeFromSets(t, "set security ipsec vpn V bind-interface secure0")
 	err := SchemaValidate(bad)
-	if err == nil || !strings.Contains(err.Error(), "secure0") {
-		t.Fatalf("SchemaValidate must reject invalid bind-interface naming the value, got: %v", err)
+	if err == nil {
+		t.Fatal("SchemaValidate must reject an invalid bind-interface")
+	}
+	if !strings.Contains(err.Error(), bindIfaceSchemaHead18964) ||
+		!strings.Contains(err.Error(), bindIfaceSchemaOutcome18964) {
+		t.Fatalf("SchemaValidate error %q lacks the literal #18964 head/neutral outcome", err)
 	}
 	for _, good := range []string{"st0", "st0.1", "st1.5"} {
 		ok := flatTreeFromSets(t, "set security ipsec vpn V bind-interface "+good)

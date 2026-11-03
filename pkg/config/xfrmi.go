@@ -486,13 +486,15 @@ func (c *Config) secureTunnelBindingSiblingUnit(base string) bool {
 // only shape the route-based-VPN datapath can bind. The accepted lexical form
 // is st<N> or st<N>.<unit> (e.g. st0, st0.1); XFRMIfNameAndID resolves every
 // other name to if_id 0, which the pkg/routing reconciler treats as "invalid
-// bind-interface name" and creates NO XFRM device for. Such a config commits
-// successfully yet the VPN is silently DOWN (#5297).
+// bind-interface name" and creates NO XFRM device for; without that device the
+// route-based VPN would carry no traffic (#5297).
 //
 // The if_id-0 sentinel from XFRMIfNameAndID is the authoritative
 // "creates no XFRM device" signal; the message states the canonical lexical
 // requirement so the operator sees an actionable error rather than an opaque
-// id reference.
+// id reference. Its consequence is deliberately commit-outcome-neutral
+// (#18964): schema callers use the same error as a strict refusal or a
+// tolerant warning, and the error/warning envelope already carries the arm.
 //
 // Used both as the #1319 typed-leaf commit-check validator on the
 // `bind-interface` schema leaf (schema_security.go) and — mirrored via
@@ -510,8 +512,8 @@ func ValidateSecureTunnelBindInterface(raw string) error {
 		return fmt.Errorf(
 			"invalid bind-interface %q: must be a secure-tunnel interface "+
 				"st<N> or st<N>.<unit> (e.g. st0 or st0.1); any other name "+
-				"resolves to no XFRM interface, so the route-based VPN commits "+
-				"but carries no traffic (silent tunnel down)",
+				"resolves to no XFRM interface; the route-based VPN would "+
+				"carry no traffic (silent tunnel down)",
 			raw)
 	}
 	return nil
