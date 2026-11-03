@@ -78,7 +78,7 @@ import (
 // Deterministic: interfaces and units are visited in sorted order
 // (RETH spellings first, mirroring the operator preference for the
 // redundant name over its member), so the table is stable across runs.
-// The tunnel-name map is hoisted once (resolveKernelIfNameWith,
+// The tunnel-name map is hoisted once (ResolveKernelIfNameWith,
 // #8862) so building the table is not quadratic in the unit count.
 
 // SessionIfaceKey identifies a session row's interface identity: an
@@ -131,7 +131,7 @@ func sessionUnitDisplay(ifName string, num int, unit *InterfaceUnit) string {
 // stamp {parentIfindex, wire VID}, so the name table registers that
 // pair alongside the unit's own-device pair.
 func (c *Config) sessionParentDevice(ifName string, tunMap map[string]string) string {
-	return c.resolveKernelIfNameWith(ifName, tunMap)
+	return c.ResolveKernelIfNameWith(ifName, tunMap)
 }
 
 // SessionIfaceTableFor builds the {ifindex, VID} -> Junos unit-name
@@ -209,7 +209,7 @@ func SessionIfaceTableFor(cfg *Config, lookupIfindex func(string) (int, error)) 
 				}
 				// Own-device form: {child/tunnel ifindex, wire VID}.
 				ref := fmt.Sprintf("%s.%d", ifName, num)
-				device := cfg.resolveKernelIfNameWith(ref, tunMap)
+				device := cfg.ResolveKernelIfNameWith(ref, tunMap)
 				if device == "" {
 					continue
 				}
