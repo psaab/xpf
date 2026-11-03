@@ -8,15 +8,20 @@ The userspace AF_XDP dataplane processes transit packets in a Rust helper proces
 
 - Cluster: `loss:xpf-userspace-fw0` / `loss:xpf-userspace-fw1`
 - Host: `loss:cluster-userspace-host`
-- Test targets: 172.16.80.200 (IPv4), 2001:559:8585:80::200 (IPv6)
+- Test targets: `IPERF_TARGET4` / `IPERF_TARGET6` from `test/incus/cluster-env.sh` (loss today 172.16.80.202 / 2001:559:8585:80::200, #18576)
 
 Important:
 
-- `172.16.80.200` and `2001:559:8585:80::200` live on a separate host. They are
-  not `userspace-wan80-host`.
-- When you need a packet capture on the real `.200` / `::200` endpoint, use the
-  gRPC capture service described in `~/README.md` (`capture-client` or
-  `grpcurl`), not assumptions about a local container.
+- Source `test/incus/cluster-env.sh` first so the commands below use the
+  env-selected targets (`IPERF_TARGET4` / `IPERF_TARGET6`).
+- The IPv6 target lives on the external lab host; the IPv4 target is the
+  `MOUSE_TARGET_NAME` container (`loss:xpf-mouse-target`). Neither is
+  `userspace-wan80-host`. Do not measure v4 `172.16.80.200`: the external
+  box also answers it (#18576).
+- For a packet capture on the v6 endpoint use the gRPC capture service
+  described in `~/README.md` (`capture-client` or `grpcurl`); for the v4
+  target, capture inside the container (see
+  `.codex/skills/iperf-grpc-tcpdump/`).
 - After a reboot of the remote `loss` host, repair VF trust/VLAN state first:
 
 ```bash
@@ -46,7 +51,7 @@ incus exec loss:xpf-userspace-fw0 -- systemctl restart xpfd
 sleep 40  # Wait for VRRP election + ctrl enable (15s HA delay)
 
 # Test IPv4
-incus exec loss:cluster-userspace-host -- ping -c 2 -W 3 172.16.80.200
+incus exec loss:cluster-userspace-host -- ping -c 2 -W 3 "$IPERF_TARGET4"
 # Test IPv6
 incus exec loss:cluster-userspace-host -- ping6 -c 2 -W 3 2001:559:8585:80::200
 ```
@@ -58,7 +63,7 @@ incus exec loss:cluster-userspace-host -- ping6 -c 2 -W 3 2001:559:8585:80::200
 for i in $(seq 1 20); do
   incus exec loss:xpf-userspace-fw0 -- systemctl restart xpfd
   sleep 40
-  v4=$(incus exec loss:cluster-userspace-host -- timeout 5 ping -c 2 -W 3 172.16.80.200 2>&1 | grep -oP '\d+(?= received)')
+  v4=$(incus exec loss:cluster-userspace-host -- timeout 5 ping -c 2 -W 3 "$IPERF_TARGET4" 2>&1 | grep -oP '\d+(?= received)')
   v6=$(incus exec loss:cluster-userspace-host -- timeout 5 ping6 -c 2 -W 3 2001:559:8585:80::200 2>&1 | grep -oP '\d+(?= received)')
   echo "[$i] v4=$v4 v6=$v6"
 done
@@ -80,7 +85,7 @@ incus exec loss:xpf-userspace-fw0 -- \
   bash -c 'ip neigh flush dev ge-0-0-2.80; ip -6 neigh flush dev ge-0-0-2.80'
 
 # Test (should succeed within 2ms via buffer-and-retry)
-incus exec loss:cluster-userspace-host -- ping -c 1 -W 3 172.16.80.200
+incus exec loss:cluster-userspace-host -- ping -c 1 -W 3 "$IPERF_TARGET4"
 incus exec loss:cluster-userspace-host -- ping6 -c 1 -W 3 2001:559:8585:80::200
 ```
 
@@ -92,7 +97,7 @@ incus exec loss:cluster-userspace-host -- ping6 -c 1 -W 3 2001:559:8585:80::200
 
 ```bash
 # IPv4: 50 pings at 100ms interval
-incus exec loss:cluster-userspace-host -- ping -c 50 -i 0.1 172.16.80.200
+incus exec loss:cluster-userspace-host -- ping -c 50 -i 0.1 "$IPERF_TARGET4"
 # IPv6: 50 pings
 incus exec loss:cluster-userspace-host -- ping6 -c 50 -i 0.1 2001:559:8585:80::200
 ```
@@ -108,7 +113,7 @@ incus exec loss:cluster-userspace-host -- ping6 -c 50 -i 0.1 2001:559:8585:80::2
 
 ```bash
 # IPv4 TCP
-incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 8 -t 10
+incus exec loss:cluster-userspace-host -- iperf3 -c "$IPERF_TARGET4" -P 8 -t 10
 # IPv6 TCP
 incus exec loss:cluster-userspace-host -- iperf3 -c 2001:559:8585:80::200 -P 8 -t 10
 ```
@@ -124,7 +129,7 @@ Before treating a low number as a regression, verify:
 
 - RG ownership is where you expect it
 - the active userspace firewall is settled
-- neighbors for `.200` / `::200` are warm
+- neighbors for both targets are warm
 - the post-deploy path is not still in cold-start convergence
 
 ## Test 5: Embedded ICMP (mtr/traceroute)
@@ -185,7 +190,7 @@ incus exec loss:cluster-userspace-host -- ping6 -c 3 2001:559:8585:ef00::1
 
 ```bash
 # After failover (fw1 was recently primary, some sessions route through fabric)
-incus exec loss:cluster-userspace-host -- ping -c 20 -i 0.2 172.16.80.200 2>&1 | grep "ttl="
+incus exec loss:cluster-userspace-host -- ping -c 20 -i 0.2 "$IPERF_TARGET4" 2>&1 | grep "ttl="
 ```
 
 **Pass criteria**: ALL packets have TTL=63 (not 62). No TTL=62 in the output.
@@ -196,7 +201,7 @@ Native GRE validation has its own test plan:
 
 - [native-gre.md](native-gre.md)
 
-Keep this document focused on the normal `.200` / `::200` userspace dataplane
+Keep this document focused on the normal v4/v6 userspace dataplane
 path. Use the native GRE doc when the change affects:
 
 - tunnel handoff

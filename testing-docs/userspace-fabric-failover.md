@@ -42,17 +42,19 @@ Primary script:
 scripts/userspace-ha-failover-validation.sh
 ```
 
-Baseline command:
+Baseline command (the validator self-selects `IPERF_TARGET4` from the
+default `test/incus/loss-userspace-cluster.env`; loss today 172.16.80.202,
+#18576 — do not pin `IPERF_TARGET=172.16.80.200`, which the external box
+still answers):
 
 ```bash
-IPERF_TARGET=172.16.80.200 \
 TOTAL_CYCLES=3 CYCLE_INTERVAL=10 \
 scripts/userspace-ha-failover-validation.sh --duration 90 --parallel 4
 ```
 
 What it now checks:
 
-1. steady-state `.200` reachability before failover
+1. steady-state target reachability before failover
 2. continuous `iperf3` health through RG move and failback
 3. external IPv4 and IPv6 reachability immediately after each phase and after
    the post-phase observe window
@@ -452,7 +454,7 @@ Use `monitor interface ge-*-0-0` on the stale owner and check:
 If WAN egress on the standby stays flat while fabric TX rises, treat this as a
 performance issue, not a missing-redirect issue.
 
-### external IPv4 or IPv6 fails while `.200` survives
+### external IPv4 or IPv6 fails while the test target survives
 
 Meaning:
 
@@ -518,7 +520,7 @@ incus exec loss:xpf-userspace-fw1 -- \
 
 # 3. Drive traffic from the LAN host.
 incus exec loss:cluster-userspace-host -- \
-  bash -lc 'ping -c 5 172.16.80.200 >/dev/null && iperf3 -J -c 172.16.80.200 -P 4 -t 5'
+  bash -lc "ping -c 5 $IPERF_TARGET4 >/dev/null && iperf3 -J -c $IPERF_TARGET4 -P 4 -t 5"
 ```
 
 Read the result like this:

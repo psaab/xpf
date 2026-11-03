@@ -19,7 +19,7 @@ Options:
   --artifact-dir DIR        Output directory. Default: /tmp/iperf-grpc-tcpdump-<timestamp>
   --capture-server HOST:PORT
                             gRPC endpoint. Default for family 6: 172.16.80.200:50051; family 4 captures on the target.
-  --capture-interface IFACE Server-side capture interface. Default: eth0
+  --capture-interface IFACE Capture interface (family 6: gRPC server, family 4: target instance). Default: eth0
   --target-instance VM      IPv4 target capture instance. Default: MOUSE_TARGET_NAME from the cluster env
   --client INSTANCE         Client instance. Default: cluster-userspace-host
   --fw0 INSTANCE            Firewall node0 instance. Default: xpf-userspace-fw0
@@ -188,6 +188,14 @@ cleanup() {
     kill "$pid" 2>/dev/null || true
   done
 }
+
+wait_bg() {
+  # Guarded wait: capture lanes skipped for the other family never set a PID.
+  local pid="${1:-}"
+  [[ -n "$pid" ]] || return 0
+  wait "$pid" || true
+}
+
 trap cleanup EXIT
 
 incus exec "${PROJECT}:${ACTIVE_FW}" -- cli -c 'show chassis cluster data-plane statistics' >"$FW_STATS_BEFORE"
@@ -205,7 +213,7 @@ if [[ -n "$CAPTURE_SERVER" ]]; then
   ) >"$SERVER_OUT" 2>&1 &
   CAP_PID=$!
 else
-  printf 'not started: IPv4 target-side capture is in target-tcpdump.txt\\n' >"$SERVER_OUT"
+  printf 'not started: IPv4 target-side capture is in target-tcpdump.txt\n' >"$SERVER_OUT"
 fi
 
 if [[ "$FAMILY" == "4" ]]; then
@@ -215,8 +223,8 @@ if [[ "$FAMILY" == "4" ]]; then
   fi
   TARGET_FILTER="(${BPF_FILTER}) and host ${TARGET} and tcp port 5201"
   (
-    incus exec "${PROJECT}:${TARGET_VM}" -- timeout "$((DURATION + 2))" \\
-      tcpdump -ni eth0 -nn -tttt "$TARGET_FILTER"
+    incus exec "${PROJECT}:${TARGET_VM}" -- timeout "$((DURATION + 2))" \
+      tcpdump -ni "${CAPTURE_INTERFACE}" -nn -tttt "$TARGET_FILTER"
   ) >"$TARGET_OUT" 2>&1 &
   TARGET_PID=$!
   TARGET_CAPTURE_READY=0
@@ -233,7 +241,7 @@ if [[ "$FAMILY" == "4" ]]; then
     exit 1
   fi
 else
-  printf 'not started: IPv6 target capture is in server-grpc.txt\\n' >"$TARGET_OUT"
+  printf 'not started: IPv6 target capture is in server-grpc.txt\n' >"$TARGET_OUT"
 fi
 
 (
@@ -259,18 +267,25 @@ if ! incus exec "${PROJECT}:${CLIENT_VM}" -- "${IPERF_CMD[@]}" >"$IPERF_JSON" 2>
   true
 fi
 
-wait "$CAP_PID" || true
-wait "$LAN_PID" || true
-wait "$WAN_PID" || true
+wait_bg "${CAP_PID:-}"
+wait_bg "${TARGET_PID:-}"
+wait_bg "$LAN_PID"
+wait_bg "$WAN_PID"
 
 incus exec "${PROJECT}:${ACTIVE_FW}" -- cli -c 'show chassis cluster data-plane statistics' >"$FW_STATS_AFTER"
+
+if [[ "$FAMILY" == "4" ]]; then
+  WIRE_CAPTURE="target-tcpdump.txt"
+else
+  WIRE_CAPTURE="server-grpc.txt"
+fi
 
 {
   echo "artifacts=$ARTIFACT_DIR"
   echo "active_firewall=$ACTIVE_FW"
   echo "firewall_lan_if=$FW_LAN_IF"
   echo "firewall_wan_if=$FW_WAN_IF"
-  echo "firewall_tcpdump_note=fw-lan.txt/fw-wan.txt are in-VM tcpdump and blind to AF_XDP fast-path flows (#16111); empty files do not prove the flow was absent - use server-grpc.txt plus fw-stats deltas"
+  echo "firewall_tcpdump_note=fw-lan.txt/fw-wan.txt are in-VM tcpdump and blind to AF_XDP fast-path flows (#16111); empty files do not prove the flow was absent - use ${WIRE_CAPTURE} plus fw-stats deltas"
   echo "client=${PROJECT}:${CLIENT_VM}"
   echo "target=$TARGET"
   echo "family=$FAMILY"

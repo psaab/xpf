@@ -125,7 +125,7 @@ scripts/userspace-ha-validation.sh
 
 Tests:
 - active-node settle and userspace arm
-- IPv4/IPv6 reachability to `.200` / `::200`
+- IPv4/IPv6 reachability to the env-selected targets (`IPERF_TARGET4` / `IPERF_TARGET6`)
 - TTL / hop-limit time-exceeded behavior
 - `mtr` embedded-ICMP NAT reversal
 - `iperf3` collapse detection via JSON metrics
@@ -134,7 +134,6 @@ Tests:
 ### Failover Validation
 
 ```bash
-IPERF_TARGET=172.16.80.200 \
 TOTAL_CYCLES=3 CYCLE_INTERVAL=10 \
 scripts/userspace-ha-failover-validation.sh --duration 90 --parallel 4
 ```
@@ -143,7 +142,7 @@ Tests:
 - RG ownership move and userspace arm on the new owner
 - pre-failover and post-failover `iperf3` continuity
 - external IPv4/IPv6 reachability during steady state and after each failover/failback phase
-- immediate `.200` target reachability after each phase
+- immediate target reachability after each phase
 - proof that the old owner actually transmitted on the fabric path
 - proof that standby WAN egress stayed flat while the stale-owner redirect was active
 - bounded session/neighbor/route/policy deltas during each move
@@ -183,7 +182,7 @@ incus exec loss:xpf-userspace-fw1 -- \
 
 # Then run the stale-owner load from cluster-userspace-host.
 incus exec loss:cluster-userspace-host -- \
-  bash -lc 'iperf3 -J -c 172.16.80.200 -P 4 -t 5'
+  bash -lc "iperf3 -J -c $IPERF_TARGET4 -P 4 -t 5"
 ```
 
 Interpretation:
@@ -233,7 +232,7 @@ After any HA code change, verify:
 - [ ] Fabric forwarding path ready on both nodes
 - [ ] VIPs present on primary only
 - [ ] Session sync count > 0 after establishing flows
-- [ ] Ping 172.16.80.200 / 2001:559:8585:80::200 from host — 0% loss
+- [ ] Ping `"$IPERF_TARGET4"` / `2001:559:8585:80::200` from host — 0% loss
 - [ ] `scripts/userspace-ha-validation.sh` passes with current thresholds
 - [ ] `scripts/userspace-ha-failover-validation.sh` shows positive fabric TX delta on the old owner for each RG move
 - [ ] Standby WAN TX stays flat during the stale-owner phase when fabric redirect is expected

@@ -13,8 +13,9 @@ This test exercises:
 
 ## Test Targets
 
-- IPv4: `172.16.80.200` (WAN host on ge-0-0-2.80 / VLAN 80)
-- IPv6: `2001:559:8585:80::200` (same host, dual-stack)
+- IPv4: `IPERF_TARGET4` from `test/incus/cluster-env.sh` (loss today
+  `172.16.80.202`, #18576; WAN target on ge-0-0-2.80 / VLAN 80)
+- IPv6: `2001:559:8585:80::200` (external lab host on the same VLAN)
 - Host: `cluster-userspace-host` (LAN, 10.0.61.102)
 
 ## Prerequisites
@@ -22,7 +23,7 @@ This test exercises:
 - Both `xpf-userspace-fw0` and `xpf-userspace-fw1` running with latest code
 - Cluster healthy: `show chassis cluster status` shows primary + secondary for all RGs
 - Takeover ready: yes on both nodes
-- Warm traffic: `ping -c 3 172.16.80.200 && ping6 -c 3 2001:559:8585:80::200` passes
+- Warm traffic: `ping -c 3 "$IPERF_TARGET4" && ping6 -c 3 2001:559:8585:80::200` passes
 
 ## Test A: IPv6 iperf3 + RG2 failover
 
@@ -74,7 +75,7 @@ iperf3 -c 2001:559:8585:80::200 -t 10 -P 8
 ### Step 1 — Start long iperf3
 
 ```bash
-iperf3 -c 172.16.80.200 -t 60 -P 8
+iperf3 -c "$IPERF_TARGET4" -t 60 -P 8
 ```
 
 ### Step 2 — Failover RG1 (WAN) to the other node
@@ -92,7 +93,7 @@ Same criteria as Test A but for IPv4.
 
 **Pass criteria:**
 - Brief dip during transition, then recovery
-- New `iperf3 -c 172.16.80.200 -t 10 -P 8` connects immediately
+- New `iperf3 -c "$IPERF_TARGET4" -t 10 -P 8` connects immediately
 
 ## Test C: Repeated failover stress
 
@@ -102,7 +103,7 @@ Run Tests A and B back-to-back for 5 cycles:
 for i in $(seq 1 5); do
   echo "=== Cycle $i ==="
   # Start iperf3 in background
-  timeout 20 iperf3 -c 172.16.80.200 -t 15 -P 8 &
+  timeout 20 iperf3 -c "$IPERF_TARGET4" -t 15 -P 8 &
   sleep 5
   # Failover RG1
   echo "request chassis cluster failover redundancy-group 1 node 1" | cli

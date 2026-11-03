@@ -13,7 +13,7 @@ For userspace HA on `loss`:
 1. Make sure VF trust/VLAN state survived the last host reboot.
 2. Deploy or restart the exact tree you want to measure.
 3. Pin the intended RG ownership and wait for the active node to settle.
-4. Warm neighbors for the `.200` / `::200` targets.
+4. Warm neighbors for the `IPERF_TARGET4` / `IPERF_TARGET6` targets.
 5. Only then run throughput or `perf`.
 
 The easiest way to re-establish a clean userspace baseline is:
@@ -44,8 +44,9 @@ BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
 # Userspace cluster (mlx5 AF_XDP)
 scripts/userspace-perf-compare.sh --duration 10 --parallel 8
 
-# Or manually from cluster-userspace-host:
-incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 8 -t 10
+# Or manually from cluster-userspace-host (source test/incus/cluster-env.sh
+# first; IPERF_TARGET4 is loss 172.16.80.202 today, #18576):
+incus exec loss:cluster-userspace-host -- iperf3 -c "$IPERF_TARGET4" -P 8 -t 10
 incus exec loss:cluster-userspace-host -- iperf3 -6 -c 2001:559:8585:80::200 -P 8 -t 10
 ```
 
@@ -153,10 +154,10 @@ and keep the `perf` artifacts from both states.
 
 ```bash
 # Start background load
-incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 4 -t 30 &
+incus exec loss:cluster-userspace-host -- iperf3 -c "$IPERF_TARGET4" -P 4 -t 30 &
 
 # Measure latency
-incus exec loss:cluster-userspace-host -- ping -c 20 -i 0.1 172.16.80.200
+incus exec loss:cluster-userspace-host -- ping -c 20 -i 0.1 "$IPERF_TARGET4"
 ```
 
 **Pass criteria**: P99 latency < 5ms under load (no stalls from lock contention).
@@ -164,7 +165,7 @@ incus exec loss:cluster-userspace-host -- ping -c 20 -i 0.1 172.16.80.200
 ## Test 7: Native GRE Throughput
 
 If the change touches native GRE or tunnel handoff, validate GRE throughput
-separately from the normal `.200` / `::200` path:
+separately from the normal v4/v6 iperf path:
 
 ```bash
 scripts/userspace-native-gre-validation.sh --iperf --udp --traceroute
@@ -188,7 +189,7 @@ incus exec loss:xpf-userspace-fw1 -- \
 
 # Warm the target, then measure from cluster-userspace-host.
 incus exec loss:cluster-userspace-host -- \
-  bash -lc 'ping -c 5 172.16.80.200 >/dev/null && iperf3 -J -c 172.16.80.200 -P 4 -t 5'
+  bash -lc "ping -c 5 $IPERF_TARGET4 >/dev/null && iperf3 -J -c $IPERF_TARGET4 -P 4 -t 5"
 ```
 
 At the same time, inspect the standby old owner:
@@ -215,4 +216,4 @@ Current lab reality:
   `mlx5` dataplane path
 
 Treat this as a separate benchmark class. Do not compare stale-owner fabric
-numbers directly to normal `.200` / `::200` steady-state throughput.
+numbers directly to normal v4/v6 steady-state throughput.
