@@ -154,7 +154,7 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 				if permitted[tok] {
 					continue
 				}
-				msg := routingInstanceUnknownKeywordMessage9323(instName, tok, declared)
+				msg := routingInstanceUnknownKeywordMessage9323(instName, tok, declared, lenient)
 				if lenient {
 					warnings = append(warnings, msg)
 					continue
@@ -169,7 +169,7 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 			// properties (braced, flat and elided/packed alike) and apply
 			// the same strict/lenient split.
 			for _, kw := range routingInstanceNestedImportExport15778(inst) {
-				msg := routingInstanceUnknownKeywordMessage9323(instName, kw, declared)
+				msg := routingInstanceUnknownKeywordMessage9323(instName, kw, declared, lenient)
 				if lenient {
 					warnings = append(warnings, msg)
 					continue
@@ -325,7 +325,15 @@ func routingInstanceApplyMetaKeyword9323(tok string) bool {
 
 // routingInstanceUnknownKeywordMessage9323 keeps unsupported per-instance
 // policy-leak statements actionable without making them schema keywords.
-func routingInstanceUnknownKeywordMessage9323(instName, tok string, declared []string) string {
+//
+// #18958: the unknown-keyword tail is per-arm. Strict returns the
+// message as the commit-refusing error, so its tail describes the
+// refusal itself — the compiles-to-NOTHING wording is only true on the
+// lenient arm, where the keyword is warned about and skipped and the
+// committed config silently lacks the subtree (same fix shape as
+// #16580's dhcp-relay wording). The instance-import/export branch
+// carries no commit-outcome claim and stays arm-independent.
+func routingInstanceUnknownKeywordMessage9323(instName, tok string, declared []string, lenient bool) string {
 	if tok == "instance-import" || tok == "instance-export" {
 		return fmt.Sprintf("routing-instances %s: %q is unsupported: xpf has no cross-RIB "+
 			"policy-leak engine for per-instance instance-import/instance-export policy. "+
@@ -333,12 +341,16 @@ func routingInstanceUnknownKeywordMessage9323(instName, tok string, declared []s
 			"leaks connected prefixes only; it is not instance-import/export policy (#11314)",
 			instName, tok)
 	}
+	tail := "the commit is refused."
+	if lenient {
+		tail = "the subtree under it compiles to NOTHING: it commits " +
+			"clean, renders in `show configuration`, and takes effect " +
+			"nowhere."
+	}
 	return fmt.Sprintf("routing-instances %s: %q is not a routing-instance "+
-		"keyword (known: %s) — the subtree under it compiles to NOTHING: it "+
-		"commits clean, renders in `show configuration`, and takes effect "+
-		"nowhere. There is no supported way to scope NAT or a firewall "+
+		"keyword (known: %s) — %s There is no supported way to scope NAT or a firewall "+
 		"filter to a routing instance; configure it globally instead (#9323)",
-		instName, tok, strings.Join(declared, ", "))
+		instName, tok, strings.Join(declared, ", "), tail)
 }
 
 // routingInstanceNestedImportExport15778 returns instance-import/export
