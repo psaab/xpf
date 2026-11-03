@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // #8797: `forwarding-options family inet6 mode` compiled to nothing in every
 // spelling an operator can produce.
@@ -128,18 +131,24 @@ func TestCompoundFamilyLookupIsNotTwoLevel8797(t *testing.T) {
 	}
 }
 
-// The `afName != "inet6"` filter is UNREACHABLE against today's schema:
-// `schemaForwardingOptions` declares exactly one address family under `family`,
-// so no validated commit can produce a `family inet` sibling and a mutation
-// deleting the filter survives every other cell here. Correct-and-unobservable
-// is a claim about the TEST, not a reason to delete the check -- so this builds
-// the tree that reaches the branch.
+// Only the inet6 family's `mode` may set FamilyInet6Mode. A `mode` leaf
+// under any OTHER family — declared or not — must never reach the IPv6
+// mode slot, or two nodes get different IPv6 forwarding behaviour from
+// the same payload.
 //
-// Such a tree is not hypothetical in the way a schema-only argument suggests:
-// pkg/configstore/db.go unmarshals a persisted AST with no Node validator, and
-// the tolerant load / peer-sync path (#1960) accepts what the strict path would
-// refuse. A compiler that takes any family's `mode` as the inet6 mode would give
-// two nodes different IPv6 forwarding behaviour from the same payload.
+// #18881: the canonical Junos AF tokens (inet, mpls, ccc, …) are now
+// DECLARED for `forwarding-options family` (forwardingFamilyKnown17196),
+// so a validated commit CAN produce a `family inet` sibling and this cell
+// no longer needs the "unreachable against today's schema" argument to
+// justify its hand-built trees. The contract per family class, re-pinned
+// from #17196's {inet6}-only rejection (first-bad c4e12aafc3, which also
+// broke #12090's bare mpls/ccc acceptance):
+//
+//	inet6        consumed: `mode` sets FamilyInet6Mode
+//	other known  accepted INERT with the #18881 accepted-only advisory;
+//	             the `mode` is not taken (#8797)
+//	unknown      strict-reject with the #17196 diagnostic — #18881 keeps
+//	             genuinely unknown tokens rejected
 func TestOnlyTheInet6FamilySetsTheInet6Mode8797(t *testing.T) {
 	// inet6 sets it (strict seam, unchanged).
 	{
@@ -156,38 +165,54 @@ func TestOnlyTheInet6FamilySetsTheInet6Mode8797(t *testing.T) {
 			t.Errorf("inet6 sets it: FamilyInet6Mode = %q, want %q (#8797)", fo.FamilyInet6Mode, "packet-based")
 		}
 	}
-	// #17196: a different family must NOT set the inet6 mode. Strict now
-	// rejects the unknown family outright (it is undeclared under
-	// `forwarding-options family`); the lenient seam pins the original
-	// #8797 invariant — the mode is not taken — without the rejection.
+	// #18881: a known-but-unconsumed family commits INERT — not the
+	// #17196 rejection this arm pinned before #18881 — carrying the
+	// accepted-only advisory on BOTH paths, and its `mode` is NEVER
+	// taken as the IPv6 forwarding mode (#8797).
 	for _, tc := range []struct {
 		name   string
 		family []string
 	}{
 		{"inet must NOT set it", []string{"family", "inet"}},
-		{"an unmodelled family must NOT set it", []string{"family", "mpls"}},
+		{"an unconsumed family must NOT set it", []string{"family", "mpls"}},
 	} {
 		node := &Node{Keys: []string{"forwarding-options"}, Children: []*Node{
 			{Keys: tc.family, Children: []*Node{
 				{Keys: []string{"mode", "packet-based"}, IsLeaf: true},
 			}},
 		}}
+		advised := func(ws []string) bool {
+			for _, w := range ws {
+				if strings.Contains(w, "family "+tc.family[1]) &&
+					strings.Contains(w, "accepted-only") && strings.Contains(w, "#18881") {
+					return true
+				}
+			}
+			return false
+		}
 		fo := &ForwardingOptionsConfig{}
-		if err := compileForwardingOptions(node, fo); err == nil {
-			t.Errorf("%s: strict compile accepted an undeclared forwarding-options family, want rejection (#17196)", tc.name)
+		var warnings []string
+		if err := compileForwardingOptionsWithOpts(node, fo, strictCompileOpts(), &warnings); err != nil {
+			t.Fatalf("%s: strict compile rejected a known Junos forwarding-options family, "+
+				"want inert acceptance (#18881): %v", tc.name, err)
 		}
 		if fo.FamilyInet6Mode != "" {
 			t.Errorf("%s: FamilyInet6Mode = %q, want %q -- a `mode` under a DIFFERENT address family "+
 				"is being taken as the IPv6 forwarding mode (#8797)", tc.name, fo.FamilyInet6Mode, "")
 		}
+		if !advised(warnings) {
+			t.Errorf("%s: strict acceptance carries no #18881 advisory, warnings=%v", tc.name, warnings)
+		}
 		foLenient := &ForwardingOptionsConfig{}
-		var warnings []string
-		opts := lenientCompileOpts()
-		if err := compileForwardingOptionsWithOpts(node, foLenient, opts, &warnings); err != nil {
+		var lenientWarnings []string
+		if err := compileForwardingOptionsWithOpts(node, foLenient, lenientCompileOpts(), &lenientWarnings); err != nil {
 			t.Fatalf("%s lenient: %v", tc.name, err)
 		}
 		if foLenient.FamilyInet6Mode != "" {
 			t.Errorf("%s lenient: FamilyInet6Mode = %q, want %q (#8797)", tc.name, foLenient.FamilyInet6Mode, "")
+		}
+		if !advised(lenientWarnings) {
+			t.Errorf("%s lenient carries no #18881 advisory, warnings=%v", tc.name, lenientWarnings)
 		}
 	}
 	// The same, one level down, so the split shape is covered by the filter too.
@@ -196,21 +221,35 @@ func TestOnlyTheInet6FamilySetsTheInet6Mode8797(t *testing.T) {
 			{Keys: []string{"inet"}, Children: []*Node{{Keys: []string{"mode", "packet-based"}, IsLeaf: true}}},
 		}},
 	}}
-	// Strict rejects the undeclared split family (#17196); lenient pins
-	// the #8797 invariant that its mode is not taken as the inet6 mode.
-	fo := &ForwardingOptionsConfig{}
-	if err := compileForwardingOptions(split, fo); err == nil {
-		t.Error("split shape: strict accepted undeclared family inet, want rejection (#17196)")
+	foSplit := &ForwardingOptionsConfig{}
+	var splitWarnings []string
+	if err := compileForwardingOptionsWithOpts(split, foSplit, strictCompileOpts(), &splitWarnings); err != nil {
+		t.Fatalf("split shape: strict rejected a known family, want inert acceptance (#18881): %v", err)
 	}
-	if fo.FamilyInet6Mode != "" {
-		t.Errorf("split shape: an `inet` mode set FamilyInet6Mode = %q (#8797)", fo.FamilyInet6Mode)
+	if foSplit.FamilyInet6Mode != "" {
+		t.Errorf("split shape: an `inet` mode set FamilyInet6Mode = %q (#8797)", foSplit.FamilyInet6Mode)
 	}
 	foSplitLenient := &ForwardingOptionsConfig{}
-	var splitWarnings []string
-	if err := compileForwardingOptionsWithOpts(split, foSplitLenient, lenientCompileOpts(), &splitWarnings); err != nil {
+	var splitLenientWarnings []string
+	if err := compileForwardingOptionsWithOpts(split, foSplitLenient, lenientCompileOpts(), &splitLenientWarnings); err != nil {
 		t.Fatalf("split lenient: %v", err)
 	}
 	if foSplitLenient.FamilyInet6Mode != "" {
 		t.Errorf("split lenient: an `inet` mode set FamilyInet6Mode = %q (#8797)", foSplitLenient.FamilyInet6Mode)
+	}
+	// #18881 negative control: the widening must not open the world. An
+	// unknown token still strict-rejects with the #17196 diagnostic.
+	unknown := &Node{Keys: []string{"forwarding-options"}, Children: []*Node{
+		{Keys: []string{"family", "bogus-af-18881"}, Children: []*Node{
+			{Keys: []string{"mode", "packet-based"}, IsLeaf: true},
+		}},
+	}}
+	foUnknown := &ForwardingOptionsConfig{}
+	if err := compileForwardingOptions(unknown, foUnknown); err == nil ||
+		!strings.Contains(err.Error(), "bogus-af-18881") || !strings.Contains(err.Error(), "#17196") {
+		t.Errorf("unknown forwarding-options family must strict-reject with the #17196 diagnostic (#18881), got %v", err)
+	}
+	if foUnknown.FamilyInet6Mode != "" {
+		t.Errorf("unknown family: FamilyInet6Mode = %q, want empty (#8797)", foUnknown.FamilyInet6Mode)
 	}
 }
