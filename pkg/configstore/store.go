@@ -1043,7 +1043,7 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 	// #18962: the tolerant ingress walk selects the lenient commit-outcome
 	// wording; its ordinary valueless/typed-leaf findings are logged and
 	// downgraded below. Two hard exceptions are still returned as refusals:
-	// the #18744 redaction-placeholder ingest error and the #17241/#18325
+	// the #4060 redaction-placeholder ingest error (extended by #15209) and the #17241/#18325
 	// nested-list-content refusal (promoted below whether the first-error
 	// walk or the collect scan finds it).
 	schemaErr := schemaValidateExpandedTreeForNode(tree, s.nodeID, true)
