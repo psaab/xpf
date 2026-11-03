@@ -273,6 +273,22 @@ security { zones { functional-zone management { interfaces { fxp0.0; }
 			text:    `security { zones { functional-zone { management host-inbound-traffic system-services ssh; } } }`,
 			wantSvc: []string{"ssh"},
 		},
+		{
+			name: "packed and braced management siblings",
+			text: `security { zones { functional-zone {
+    management host-inbound-traffic system-services ssh ssh;
+    management { host-inbound-traffic { protocols { ospf; } } }
+} } }`,
+			wantSvc: []string{"ssh", "ssh"}, wantProto: []string{"ospf"},
+		},
+		{
+			name: "packed management siblings",
+			text: `security { zones { functional-zone {
+    management host-inbound-traffic system-services ssh;
+    management host-inbound-traffic protocols ospf;
+} } }`,
+			wantSvc: []string{"ssh"}, wantProto: []string{"ospf"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -490,9 +490,10 @@ func hostInboundTokenMatchesAny(token string, excluded map[string][]L4Match, pro
 //
 // dst is nil for the first block, in which case src is returned UNCHANGED so a
 // SINGLE block stays byte-identical to the pre-#4544 behaviour (no dedup, no
-// copy — a single block preserves its exact token multiset). Only when a second
-// block is actually merged are the unioned slices deduplicated (first-seen
-// order preserved). src nil (no stanza) is a no-op. Exclusion provenance is
+// copy — a single block preserves its exact token multiset). Only dimensions
+// receiving values from a second block are deduplicated (first-seen order
+// preserved); an empty source positive list does not deduplicate existing tokens.
+// src nil (no stanza) is a no-op. Exclusion provenance is
 // merged with the positive lists so a restrictive sibling block cannot be
 // erased by the positive-list union.
 func mergeHostInbound(dst, src *HostInboundTraffic) *HostInboundTraffic {
@@ -502,8 +503,12 @@ func mergeHostInbound(dst, src *HostInboundTraffic) *HostInboundTraffic {
 	if dst == nil {
 		return src
 	}
-	dst.SystemServices = dedupHostInboundTokens(append(dst.SystemServices, src.SystemServices...))
-	dst.Protocols = dedupHostInboundTokens(append(dst.Protocols, src.Protocols...))
+	if len(src.SystemServices) > 0 {
+		dst.SystemServices = dedupHostInboundTokens(append(dst.SystemServices, src.SystemServices...))
+	}
+	if len(src.Protocols) > 0 {
+		dst.Protocols = dedupHostInboundTokens(append(dst.Protocols, src.Protocols...))
+	}
 	dst.systemServicesExcept = append(dst.systemServicesExcept, src.systemServicesExcept...)
 	dst.protocolsExcept = append(dst.protocolsExcept, src.protocolsExcept...)
 	dst.systemServicesHasAll = dst.systemServicesHasAll || src.systemServicesHasAll
@@ -682,14 +687,19 @@ func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
 		hostInboundSchema = managementSchema.children["host-inbound-traffic"]
 	}
 	for _, fz := range zonesNode.FindChildren("functional-zone") {
+		var packed *Node
+		if len(fz.Children) == 1 && len(fz.Children[0].Keys) > 1 &&
+			fz.Children[0].Keys[0] == "management" && fz.Children[0].Keys[1] == "host-inbound-traffic" &&
+			hostInboundSchema != nil {
+			packed = fz.Children[0]
+		}
 		// Preserve the existing nested management bodies even when this
 		// functional-zone node also carries a compact management header.
 		for _, mgmt := range fz.FindChildren("management") {
-			// #18788: a packed management leaf (Keys carry the HIB tail) is
-			// rebuilt by the special arm below; emitting it here too would
-			// compile the same body twice and dedup-collapse its tokens.
-			if len(mgmt.Children) == 0 && len(mgmt.Keys) > 1 &&
-				mgmt.Keys[1] == "host-inbound-traffic" {
+			// #18788: skip only the single packed management leaf rebuilt by
+			// the special arm below. Packed leaves with siblings must still be
+			// emitted through the generic path.
+			if mgmt == packed {
 				continue
 			}
 			out = append(out, functionalZoneManagementBody15668(mgmt))
@@ -698,10 +708,7 @@ func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
 		// packed management tail as its Keys (`functional-zone { management
 		// host-inbound-traffic ...; }` parses to one leaf node). Rebuild it
 		// through the same declared HIB path as the two-level form below.
-		if len(fz.Children) == 1 && len(fz.Children[0].Keys) > 1 &&
-			fz.Children[0].Keys[0] == "management" && fz.Children[0].Keys[1] == "host-inbound-traffic" &&
-			hostInboundSchema != nil {
-			packed := fz.Children[0]
+		if packed != nil {
 			hostInbound := *packed
 			hostInbound.Keys = packed.Keys[1:]
 			hostInbound.setKeysQuoted(maskSlice8921(packed.KeysQuoted, 1, len(packed.Keys)))
