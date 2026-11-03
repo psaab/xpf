@@ -68,10 +68,10 @@ is right and this table needs an edit in the same change.
 
 | Layer | Files |
 |---|---|
-| Shell, total | 115 `*.sh` = 59 runnable + 23 libraries + 33 self-tests (next rows; the harness census's own arithmetic is 61 + 21 + 33 — see the note under the reached/declared lists, where two semantic libraries sit in its runnable set by design) |
-| Runnable shell | 59 = 58 harnesses + `harness-result.sh` (the envelope) |
+| Shell, total | 121 `*.sh` = 61 runnable + 23 libraries + 37 self-tests (next rows; the harness census's own arithmetic over this directory is 63 + 21 + 37 — it counts the two semantic libraries named below as runnable — and its runnable set also sweeps in `test/nftables/*.sh` and `scripts/userspace-*.sh`: 69 runnable = 44 reached + 25 declared; see the note under the reached/declared lists) |
+| Runnable shell | 61 = 60 harnesses + `harness-result.sh` (the envelope) |
 | Sourced shell libraries | 23 = the 21 named in `scripts/harness-census.sh` (`cluster-cell.sh`, `cluster-env.sh`, `cluster-lock.sh`, `cos-apply-lib.sh`, `deploy-lib.sh`, `fbf-steering-lib.sh`, `failover-client-lib.sh`, `failover-clock-lib.sh`, `failover-journal-lib.sh`, `ha-assurance-lib.sh`, `ha-smoke-iperf-lib.sh`, `host-inbound-lib.sh`, `iperf-throughput-lib.sh`, `mouse-elephant-lib.sh`, `newflow-ceiling-lib.sh`, `private-rg-lib.sh`, `screen-probe-lib.sh`, `stress-failover-lib.sh`, `target-services.sh`, `wire-config-snapshot-lib.sh`, `wire-gate-lib.sh`) + `active-fw.sh` + `v6-na-recovery-lib-12495.sh` (both declared in `HARNESSES.unreached` as `LIBRARY`) |
-| Hermetic shell self-tests | 33 `*-selftest.sh`, listed below |
+| Hermetic shell self-tests | 37 `*-selftest.sh`, listed below |
 | Python | 59 = 27 tests (`*_test.py`, `test_*.py`) + 32 modules/helpers (incl. `unittest_shim.py`, `wire-routing-separation-temporal-selftest.py`) |
 | Cluster defs & fixtures | 26 tracked files that are neither `*.sh` nor `*.py` outside the Rust crates (listed under Non-code files) |
 | Rust crates | `cold-path-flooder/` (`Cargo.toml`, `Cargo.lock`, `src/main.rs`, `.gitignore`), `newflow-gen/` (same four) |
@@ -118,17 +118,14 @@ SCRIPTS — `userspace-ha-validation.sh`,
 `userspace-ha-failover-validation.sh`, `userspace-native-gre-validation.sh`,
 `userspace-perf-compare.sh`, `userspace-phase-cycle.sh`.
 
-That is every `*.sh` here, in census arithmetic: 44 reached + 25 declared
-+ 21 named census libraries + 33 self-tests = 123. The two semantic
-libraries `active-fw.sh` and `v6-na-recovery-lib-12495.sh` remain in the
-census runnable set because they are not in its named `LIBRARIES` list; the
-semantic split is 67 runnable / 23 libraries / 33 self-tests, also totaling
-123.
+That is every `*.sh` here, counted the census way: 44 reached + 25 declared + 21 named census libraries + 37 self-tests = 127 — six more than the 121 on disk here, because the census runnable set also sweeps in `test/nftables/*.sh` (1 reached) and `scripts/userspace-*.sh` (5 declared) from outside this directory.
+The two semantic libraries `active-fw.sh` and `v6-na-recovery-lib-12495.sh` remain in the census runnable set because they are not in its named `LIBRARIES` list; the semantic split is 61 runnable / 23 libraries / 37 self-tests, also totaling 121.
 
-### Hermetic shell self-tests (33)
+### Hermetic shell self-tests (37)
 
 `cluster-build-identity-selftest.sh`, `cluster-cell-selftest.sh`,
-`cluster-env-selftest.sh`, `cos-apply-lib-selftest.sh`,
+`cluster-env-selftest.sh`, `connectivity-mtr-selftest.sh`,
+`cos-apply-lib-selftest.sh`,
 `deploy-lib-selftest.sh`, `failover-client-selftest.sh`,
 `failover-clock-selftest.sh`, `failover-journal-selftest.sh`,
 `fbf-steering-harness-selftest.sh`, `fbf-steering-selftest.sh`,
@@ -136,8 +133,10 @@ semantic split is 67 runnable / 23 libraries / 33 self-tests, also totaling
 `ha-assurance-selftest.sh`, `harness-census-selftest.sh`,
 `harness-ledger-mutation-selftest.sh`, `harness-result-selftest.sh`,
 `host-inbound-selftest.sh`, `ignored-cell-census-selftest.sh`,
+`instructions-census-selftest.sh`,
 `iperf-throughput-selftest.sh`, `make-guard-probes-selftest.sh`,
-`miri-census-selftest.sh`, `mouse-elephant-selftest.sh`,
+`miri-census-selftest.sh`, `mirror-census-selftest.sh`,
+`mouse-elephant-selftest.sh`, `mouse-target-setup-selftest.sh`,
 `newflow-ceiling-selftest.sh`, `private-rg-fullcycle-selftest.sh`,
 `private-rg-selftest.sh`, `screen-probe-selftest.sh`,
 `selftest-census-selftest.sh`, `stress-failover-selftest.sh`,
