@@ -271,6 +271,44 @@ case "$out" in
 esac
 git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
 
+# 4g. #16723 fold: the default two-SHA invocation (no --packages-file)
+#     keeps the strict pre-#16723 gate — the base differential must not
+#     run there. Same shape as the base-red canary above, but through the
+#     default path and on an import-less census package, so the selection
+#     stays the bounded census set: docsref is red at both ends of the
+#     range, and the run must exit nonzero with go test's own FAIL
+#     attribution and no BASELINE-RED/REGRESSION line.
+git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
+cat > "$tmp/clone/pkg/docsref/zz_default_strict_16723_test.go" <<'EOF'
+package docsref
+
+import "testing"
+
+func TestDefaultModeStaysStrict16723(t *testing.T) {
+	t.Fatal("synthetic strict-mode failure")
+}
+EOF
+git -C "$tmp/clone" add pkg/docsref/zz_default_strict_16723_test.go
+git -C "$tmp/clone" commit --quiet -m "selftest: create strict-mode base-red"
+strict_base=$(git -C "$tmp/clone" rev-parse HEAD)
+printf '\n// further change after the strict-mode baseline failure\n' >> "$tmp/clone/pkg/docsref/zz_default_strict_16723_test.go"
+git -C "$tmp/clone" add pkg/docsref/zz_default_strict_16723_test.go
+git -C "$tmp/clone" commit --quiet -m "selftest: change strict-mode base-red package"
+strict_head=$(git -C "$tmp/clone" rev-parse HEAD)
+out=$(cd "$tmp/clone" && bash "$selector" "$strict_base" "$strict_head" 2>&1); rc=$?
+case "$out" in
+  *"BASELINE-RED"*|*"REGRESSION:"*)
+    bad "default two-SHA mode ran the base differential: rc=$rc out=$out" ;;
+  *)
+    [ "$rc" -ne 0 ] && ok "default two-SHA mode: base-red head-red docsref still fails the build" || bad "default two-SHA mode exited 0 on a head-red package: rc=$rc out=$out" ;;
+esac
+case "$out" in
+  *FAIL$'\t'github.com/psaab/xpf/pkg/docsref*)
+    ok "default two-SHA mode: head-red docsref reported by go test itself" ;;
+  *) bad "default two-SHA mode missing docsref FAIL attribution: rc=$rc out=$out" ;;
+esac
+git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
+
 # ── 5. census_packages matches the live census packages ──
 # The selector's census list must equal the pkg/ packages that declare
 # a repo-wide census (doc.go or census test header) and that no package

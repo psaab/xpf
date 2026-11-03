@@ -353,6 +353,18 @@ printf 'Affected Go packages: %s\n' "$PKGS"
 if [ "$LIST_ONLY" -eq 1 ]; then
   exit 0
 fi
+
+# Default two-SHA mode keeps the strict pre-#16723 gate: any HEAD failure
+# fails the build, with no base comparison. The base differential below
+# must not weaken it (a base-red package must not mask a head red, or a
+# true-positive detector like pkg/cli would go report-only), so it runs
+# only for an explicit --packages-file cohort.
+if [ -z "$PACKAGE_FILE" ]; then
+  # Package import paths cannot contain shell whitespace.
+  # shellcheck disable=SC2086
+  set -- $PKGS
+  exec go test -count=1 "$@"
+fi
 if [ -z "${TMPDIR:-}" ]; then
   TMPDIR=/var/worktrees/.cache/tmpdir
 fi
