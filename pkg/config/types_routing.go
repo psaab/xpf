@@ -179,7 +179,9 @@ type PolicyTerm struct {
 	// This compiler-only state is excluded from JSON so it stays out of the
 	// REST GET /api/v1/config response (pkg/api configHandler); the helper
 	// treats the snapshot payload's config blob as opaque and reads none of
-	// its fields.
+	// its fields. ConfigFingerprint still includes it (the walk ignores
+	// JSON tags): a failed lookup omits the rendered `set community`
+	// clause, so two configs differing only in this bit are not identical.
 	CommunityResolutionFailed bool `json:"-"`
 	// CommunityAddResolutionFailed is the add-action counterpart of
 	// CommunityResolutionFailed (#15665): with delete decoupled, a term can

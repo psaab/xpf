@@ -57,7 +57,10 @@ type InterfaceConfig struct {
 	// (pkg/api configHandler) marshals the typed Config verbatim, so an
 	// exported field here would become REST schema surface. The snapshot
 	// payload carries the config as an opaque serde_json::Value the helper
-	// never reads by field name.
+	// never reads by field name. ConfigFingerprint still includes it (the
+	// walk ignores JSON tags): an all-units-quarantined interface must not
+	// gain the tunnel emitter's unitless fallback, so two configs differing
+	// only in this bit are not identical.
 	// The bit is compiler-internal — the emitter's fallback decision is already
 	// encoded in the emitted endpoint rows, and no Rust consumer reads the bit
 	// itself. Nothing is lost by not persisting it: the config DB stores the
