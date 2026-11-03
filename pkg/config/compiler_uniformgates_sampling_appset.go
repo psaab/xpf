@@ -152,7 +152,7 @@ func runUniformGatesSamplingAppSet(tree *ConfigTree, cfg *Config, opts compileOp
 	// DEFINED set still wins the first-error slot; this gate catches a wholly
 	// undefined top-level reference that #2217's ExpandApplicationSet never
 	// sees.
-	if err := validatePolicyMatchApplicationsStrict(cfg); err != nil {
+	if err := validatePolicyMatchApplicationsStrict(cfg, opts.lenientPolicyMatchApplications); err != nil {
 		if opts.lenientPolicyMatchApplications {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("policy match application (downgraded to warning on tolerant path): %v", err))
@@ -175,7 +175,7 @@ func runUniformGatesSamplingAppSet(tree *ConfigTree, cfg *Config, opts compileOp
 	// the EXACT name set the SNAT/DNAT snapshot builders use — so commit and
 	// runtime cannot diverge. Covers source and destination NAT rule-sets
 	// (static NAT carries no application match).
-	if err := validateNATMatchApplicationsStrict(cfg); err != nil {
+	if err := validateNATMatchApplicationsStrict(cfg, opts.lenientNATMatchApplications); err != nil {
 		if opts.lenientNATMatchApplications {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("NAT match application (downgraded to warning on tolerant path): %v", err))
@@ -197,7 +197,7 @@ func runUniformGatesSamplingAppSet(tree *ConfigTree, cfg *Config, opts compileOp
 	// config is no worse off, now flagged). Runs AFTER the #2008 token gate
 	// (which catches a wholly-undefined token) so a defined-name resolution
 	// failure is this gate's first-error.
-	if err := validatePolicyMatchAddressSetMembersStrict(cfg); err != nil {
+	if err := validatePolicyMatchAddressSetMembersStrict(cfg, opts.lenientPolicyMatchAddressSetMembers); err != nil {
 		if opts.lenientPolicyMatchAddressSetMembers {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("policy match address-set members (downgraded to warning on tolerant path): %v", err))

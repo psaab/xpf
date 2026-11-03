@@ -447,7 +447,7 @@ func canonicalizeNATInterfaceScopes(cfg *Config) {
 // dataplane independently fails the rule closed, so a leniently-loaded bad
 // config is no worse off, now flagged). Same doctrine as
 // lenientPolicyMatchApplications.
-func validateNATMatchApplicationsStrict(cfg *Config) error {
+func validateNATMatchApplicationsStrict(cfg *Config, lenient bool) error {
 	if cfg == nil {
 		return nil
 	}
@@ -468,7 +468,7 @@ func validateNATMatchApplicationsStrict(cfg *Config) error {
 		if _, ok := ResolveApplicationSet(name, cfg.Applications.ApplicationSets); ok {
 			expanded, err := ExpandApplicationSet(name, &cfg.Applications)
 			if err == nil && len(expanded) == 0 {
-				return natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name)
+				return natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name, lenient)
 			}
 			return nil
 		}
@@ -526,15 +526,18 @@ func natMatchApplicationError(natKind, ruleSet, ruleName, app string) error {
 // referencing a DEFINED but EMPTY application-set. The set exists by name but
 // expands to zero members, so the snapshot builder produces a never-match term
 // and the rule quietly matches nothing — the NAT sibling of #3146.
-func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
+func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string, lenient bool) error {
+	outcome := "the commit is refused"
+	if lenient {
+		outcome = "the rule commits but the dataplane installs a never-match term " +
+			"so the translation never fires"
+	}
 	return fmt.Errorf(
 		"%s NAT rule-set %q rule %q match application %q is a defined but "+
-			"EMPTY application-set (it expands to zero applications) — the rule "+
-			"commits but the dataplane installs a never-match term so the "+
-			"translation never fires — add at least one `applications "+
+			"EMPTY application-set (it expands to zero applications) — %s — add at least one `applications "+
 			"application-set %q application <name>` member or remove the "+
 			"reference (#3434)",
-		natKind, ruleSet, ruleName, name, name)
+		natKind, ruleSet, ruleName, name, outcome, name)
 }
 
 // validateDestinationNATAddressesStrict (#2396(c)) hard-rejects a
@@ -1586,7 +1589,7 @@ func validateSourceNATPoolUnknownLeavesStrict(cfg *Config) error {
 // pool-value gates). Rule-sets are walked in sorted name order (source-first,
 // then destination) for a deterministic first-reported offender. Mirrors
 // validateSourceNATPoolStrict / validateNATSourceAddressNameReferencesStrict.
-func validateNATPoolReferencesStrict(cfg *Config) error {
+func validateNATPoolReferencesStrict(cfg *Config, lenient bool) error {
 	if cfg == nil {
 		return nil
 	}
@@ -1607,15 +1610,17 @@ func validateNATPoolReferencesStrict(cfg *Config) error {
 					continue
 				}
 				if _, ok := pools[rule.Then.PoolName]; !ok {
+					outcome := "the commit is refused"
+					if lenient {
+						outcome = "otherwise the rule commits but the dataplane fails the " +
+							"translation closed (the pool lookup misses, so the rule is " +
+							"dropped / marked unusable) and matching traffic is silently " +
+							"left untranslated, falling through to a later rule or the no-NAT default"
+					}
 					return fmt.Errorf(
 						"%s-nat rule-set %q rule %q references undefined pool %q; "+
-							"define `security nat %s pool %s ...` in the same commit — "+
-							"otherwise the rule commits but the dataplane fails the "+
-							"translation closed (the pool lookup misses, so the rule is "+
-							"dropped / marked unusable) and matching traffic is silently "+
-							"left untranslated, falling through to a later rule or the "+
-							"no-NAT default",
-						kind, rs.Name, rule.Name, rule.Then.PoolName, kind, rule.Then.PoolName)
+							"define `security nat %s pool %s ...` in the same commit — %s",
+						kind, rs.Name, rule.Name, rule.Then.PoolName, kind, rule.Then.PoolName, outcome)
 				}
 			}
 		}
@@ -1776,7 +1781,7 @@ func sourceNATPoolAddressReason(addr string) (string, bool) {
 // config carrying such a pool still BOOTS (#1960 no-brick) — the snapshot
 // builder independently marks the pool unusable, installing nothing rather
 // than translating wrongly. Mirrors validateSourceNATPoolStrict.
-func validateSourceNATPoolAddressGrammarStrict(cfg *Config) error {
+func validateSourceNATPoolAddressGrammarStrict(cfg *Config, lenient bool) error {
 	if cfg == nil {
 		return nil
 	}
@@ -1816,22 +1821,28 @@ func validateSourceNATPoolAddressGrammarStrict(cfg *Config) error {
 			}
 			addrs = append(addrs, pool.Addresses...)
 			if len(addrs) == 0 {
+				outcome := "the commit is refused"
+				if lenient {
+					outcome = "the rule commits but the dataplane marks the pool " +
+						"unusable (EmptyPool) and drops it at runtime, silently stopping translation"
+				}
 				return fmt.Errorf(
 					"source-nat pool %q (referenced by rule-set %q rule %q) has no "+
-						"pool addresses; the rule commits but the dataplane marks the "+
-						"pool unusable (EmptyPool) and drops it at runtime, silently "+
-						"stopping translation",
-					name, rs.Name, rule.Name)
+						"pool addresses; %s",
+					name, rs.Name, rule.Name, outcome)
 			}
 			for _, a := range addrs {
 				if reason, ok := sourceNATPoolAddressReason(a); !ok {
+					outcome := "the commit is refused"
+					if lenient {
+						outcome = "the rule commits but the dataplane marks the pool " +
+							"unusable (InvalidPool) and drops it at runtime, silently stopping translation"
+					}
 					return fmt.Errorf(
 						"source-nat pool %q (referenced by rule-set %q rule %q): "+
 							"address %q %s; a single malformed or over-capacity member "+
-							"poisons the whole pool — the rule commits but the dataplane "+
-							"marks the pool unusable (InvalidPool) and drops it at runtime, "+
-							"silently stopping translation",
-						name, rs.Name, rule.Name, a, reason)
+							"poisons the whole pool — %s",
+						name, rs.Name, rule.Name, a, reason, outcome)
 				}
 			}
 		}
@@ -1889,7 +1900,7 @@ func PoolAddressHasZoneScope(addr string) bool {
 // unusable (reason "zone_scoped_pool_address"), installing nothing rather than
 // shipping the unparseable string. Because it is registered in the SNAT strict
 // set, the #5876 peer-effective SNAT gate runs it against the peer view too.
-func validateSourceNATPoolAddressScopeStrict(cfg *Config) error {
+func validateSourceNATPoolAddressScopeStrict(cfg *Config, lenient bool) error {
 	if cfg == nil {
 		return nil
 	}
@@ -1927,15 +1938,18 @@ func validateSourceNATPoolAddressScopeStrict(cfg *Config) error {
 			addrs = append(addrs, pool.Addresses...)
 			for _, a := range addrs {
 				if PoolAddressHasZoneScope(a) {
+					outcome := "the commit is refused"
+					if lenient {
+						outcome = "the rule commits but the dataplane marks the pool " +
+							"unusable (InvalidPool) and drops it at runtime, silently stopping translation"
+					}
 					return fmt.Errorf(
 						"source-nat pool %q (referenced by rule-set %q rule %q): "+
 							"address %q carries an IPv6 zone/scope qualifier (%%zone), "+
 							"which the dataplane cannot represent — Rust parses pool "+
-							"members as an unscoped IP address, so the rule commits but "+
-							"the dataplane marks the pool unusable (InvalidPool) and "+
-							"drops it at runtime, silently stopping translation; remove "+
+							"members as an unscoped IP address, so %s; remove "+
 							"the %%zone suffix (a global SNAT pool address needs no scope)",
-						name, rs.Name, rule.Name, a)
+						name, rs.Name, rule.Name, a, outcome)
 				}
 			}
 		}

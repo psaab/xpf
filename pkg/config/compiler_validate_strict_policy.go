@@ -173,7 +173,7 @@ func validatePolicyMatchAddressesStrict(cfg *Config) error {
 // accepted still BOOTS — #1960 no-brick; the dataplane independently refuses to
 // arm such a policy, so a leniently-loaded bad config is no worse off than
 // before, now flagged).
-func validatePolicyMatchApplicationsStrict(cfg *Config) error {
+func validatePolicyMatchApplicationsStrict(cfg *Config, lenient bool) error {
 	if cfg == nil {
 		return nil
 	}
@@ -209,11 +209,11 @@ func validatePolicyMatchApplicationsStrict(cfg *Config) error {
 			// empty-set fail-open (#3146).
 			expanded, err := expandAppSetMemo(name, &cfg.Applications, 0, appSetExpansions)
 			if err == nil && len(expanded) == 0 {
-				return policyMatchEmptyAppSetError(scope, policyName, name)
+				return policyMatchEmptyAppSetError(scope, policyName, name, lenient)
 			}
 			return nil
 		}
-		return policyMatchApplicationError(scope, policyName, name)
+		return policyMatchApplicationError(scope, policyName, name, lenient)
 	}
 	check := func(scope string, pol *Policy) error {
 		if pol == nil {
@@ -257,19 +257,24 @@ func validatePolicyMatchApplicationsStrict(cfg *Config) error {
 
 // policyMatchApplicationError formats the #3144 undefined-application reject,
 // naming the policy scope, the policy, and the unresolved application token.
-func policyMatchApplicationError(scope, policyName, app string) error {
+// lenient selects the truthful commit outcome (#18971): strict refuses the
+// commit, while the tolerant path warns and continues to the runtime refusal.
+func policyMatchApplicationError(scope, policyName, app string, lenient bool) error {
 	where := fmt.Sprintf("policy %q", policyName)
 	if scope != "" {
 		where = fmt.Sprintf("%s policy %q", scope, policyName)
 	}
+	outcome := "the commit is refused"
+	if lenient {
+		outcome = "an undefined application reference commits but the userspace " +
+			"dataplane then REFUSES to arm security policies (commit/apply split, fail-open)"
+	}
 	return fmt.Errorf(
 		"security policies %s match application %q is not defined "+
 			"(no predefined junos-* application, no `applications application "+
-			"%q`, and no `applications application-set %q`) — an undefined "+
-			"application reference commits but the userspace dataplane then "+
-			"REFUSES to arm security policies (commit/apply split, fail-open) "+
+			"%q`, and no `applications application-set %q`) — %s "+
 			"— define the application/application-set or fix the name (#3144)",
-		where, app, app, app)
+		where, app, app, app, outcome)
 }
 
 // policyMatchEmptyAppSetError formats the #3146 reject for a policy
@@ -277,19 +282,22 @@ func policyMatchApplicationError(scope, policyName, app string) error {
 // expands to zero members, so the runtime resolveUserspaceApplicationNames
 // returns false (ExpandApplicationSet len==0) and the dataplane refuses to arm
 // security policies — the same commit/apply fail-open class as #3144.
-func policyMatchEmptyAppSetError(scope, policyName, name string) error {
+func policyMatchEmptyAppSetError(scope, policyName, name string, lenient bool) error {
 	where := fmt.Sprintf("policy %q", policyName)
 	if scope != "" {
 		where = fmt.Sprintf("%s policy %q", scope, policyName)
 	}
+	outcome := "the commit is refused"
+	if lenient {
+		outcome = "the policy commits but the userspace dataplane then REFUSES to " +
+			"arm security policies (commit/apply split, fail-open)"
+	}
 	return fmt.Errorf(
 		"security policies %s match application %q is a defined but EMPTY "+
-			"application-set (it expands to zero applications) — the policy "+
-			"commits but the userspace dataplane then REFUSES to arm security "+
-			"policies (commit/apply split, fail-open) — add at least one "+
+			"application-set (it expands to zero applications) — %s — add at least one "+
 			"`applications application-set %q application <name>` member or "+
 			"remove the reference (#3146)",
-		where, name, name)
+		where, name, outcome, name)
 }
 
 // policyMatchAddressBookResolves mirrors the runtime address resolver
@@ -454,7 +462,7 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 // peer-synced config an older binary accepted still BOOTS — #1960; the dataplane
 // independently refuses to arm such a policy, so a leniently-loaded bad config
 // is no worse off, now flagged). Same doctrine as lenientPolicyMatchApplications.
-func validatePolicyMatchAddressSetMembersStrict(cfg *Config) error {
+func validatePolicyMatchAddressSetMembersStrict(cfg *Config, lenient bool) error {
 	if cfg == nil {
 		return nil
 	}
@@ -489,7 +497,7 @@ func validatePolicyMatchAddressSetMembersStrict(cfg *Config) error {
 			if ab.DNSEntryResolutionUnavailable(tok) {
 				return nil
 			}
-			return policyMatchAddressSetError(scope, policyName, field, displayPolicyAddressBookName(tok), err)
+			return policyMatchAddressSetError(scope, policyName, field, displayPolicyAddressBookName(tok), err, lenient)
 		}
 		return nil
 	}
@@ -547,17 +555,20 @@ func displayPolicyAddressBookName(name string) string {
 // policyMatchAddressSetError formats the #3149 / #3147 reject, naming the policy
 // scope, the policy, the match field, the unresolved book name, and the inner
 // resolution failure.
-func policyMatchAddressSetError(scope, policyName, field, name string, cause error) error {
+func policyMatchAddressSetError(scope, policyName, field, name string, cause error, lenient bool) error {
 	where := fmt.Sprintf("policy %q", policyName)
 	if scope != "" {
 		where = fmt.Sprintf("%s policy %q", scope, policyName)
 	}
+	outcome := "the commit is refused"
+	if lenient {
+		outcome = "the policy commits but the userspace dataplane then REFUSES to " +
+			"arm security policies (commit/apply split, fail-open)"
+	}
 	return fmt.Errorf(
-		"security policies %s match %s %q does not fully resolve: %w — the "+
-			"policy commits but the userspace dataplane then REFUSES to arm "+
-			"security policies (commit/apply split, fail-open) — define the "+
+		"security policies %s match %s %q does not fully resolve: %w — %s — define the "+
 			"missing address/address-set or fix the member (#3149)",
-		where, field, name, cause)
+		where, field, name, cause, outcome)
 }
 
 // validatePolicyZoneReferencesStrict hard-rejects a security policy zone-pair
