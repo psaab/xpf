@@ -82,7 +82,7 @@ func TestUnknownFamilyMessageAndPoolsAgree9883(t *testing.T) {
 			}
 			var warned bool
 			for _, w := range cfg.Warnings {
-				if strings.Contains(w, "inett") && strings.Contains(w, lenientTail9017) {
+				if strings.Contains(w, "inett") && strings.Contains(w, "is not a known address family") && strings.Contains(w, lenientTail9017) {
 					warned = true
 				}
 			}
@@ -320,8 +320,10 @@ func TestMultiKeyFamilyChildCannotSplitGateAndCompiler9883(t *testing.T) {
 			if err == nil {
 				t.Fatalf("strict compile accepted multi-key child %q with no diagnostic", tc.keys)
 			}
-			if !strings.Contains(err.Error(), "inett") {
-				t.Fatalf("strict refusal must name the undeclared token: %v", err)
+			if !strings.Contains(err.Error(), "inett") ||
+				!strings.Contains(err.Error(), "is not a known address family") ||
+				!strings.Contains(err.Error(), strictTail9017) {
+				t.Fatalf("strict refusal must name the undeclared token with the unknown-family head and refused tail (#18954): %v", err)
 			}
 		})
 		t.Run(tc.name+"/lenient-warns-and-installs-nothing", func(t *testing.T) {
@@ -331,7 +333,7 @@ func TestMultiKeyFamilyChildCannotSplitGateAndCompiler9883(t *testing.T) {
 			}
 			var warned bool
 			for _, w := range cfg.Warnings {
-				if strings.Contains(w, "inett") && strings.Contains(w, lenientTail9017) {
+				if strings.Contains(w, "inett") && strings.Contains(w, "is not a known address family") && strings.Contains(w, lenientTail9017) {
 					warned = true
 				}
 			}
@@ -362,8 +364,10 @@ func TestMultiKeyFamilyChildCannotSplitGateAndCompiler9883(t *testing.T) {
 		}}
 		if _, err := CompileConfig(tree); err == nil {
 			t.Fatal("strict compile accepted packed residue [family inet inett] with no diagnostic")
-		} else if !strings.Contains(err.Error(), "inett") {
-			t.Fatalf("strict refusal must name the undeclared trailing token: %v", err)
+		} else if !strings.Contains(err.Error(), "inett") ||
+			!strings.Contains(err.Error(), "is not a known address family") ||
+			!strings.Contains(err.Error(), strictTail9017) {
+			t.Fatalf("strict refusal must name the undeclared trailing token with the unknown-family head and refused tail (#18954): %v", err)
 		}
 		cfg, err := CompileConfigLenient(tree)
 		if err != nil {
@@ -371,7 +375,7 @@ func TestMultiKeyFamilyChildCannotSplitGateAndCompiler9883(t *testing.T) {
 		}
 		var warned bool
 		for _, w := range cfg.Warnings {
-			if strings.Contains(w, "inett") {
+			if strings.Contains(w, "inett") && strings.Contains(w, "is not a known address family") && strings.Contains(w, lenientTail9017) {
 				warned = true
 			}
 		}

@@ -233,7 +233,7 @@ func TestVRRPUnknownChild15046(t *testing.T) {
 			}
 			var warned bool
 			for _, w := range cfg.Warnings {
-				if strings.Contains(w, "zzbogus") && strings.Contains(w, lenientTail15046) {
+				if strings.Contains(w, "zzbogus") && strings.Contains(w, "is not a vrrp-group statement") && strings.Contains(w, lenientTail15046) {
 					warned = true
 				}
 			}
@@ -250,8 +250,9 @@ func TestVRRPUnknownChild15046(t *testing.T) {
 		if _, err := CompileConfig(tree); err == nil {
 			t.Fatal("strict flat-set must reject zzbogus")
 		} else if !strings.Contains(err.Error(), "zzbogus") ||
+			!strings.Contains(err.Error(), "is not a vrrp-group statement") ||
 			!strings.Contains(err.Error(), strictTail15046) {
-			t.Fatalf("strict flat-set refusal must name zzbogus and say the commit is refused (#18955): %v", err)
+			t.Fatalf("strict flat-set refusal must name zzbogus with the unknown-statement head and refused tail (#18955): %v", err)
 		}
 		cfg, err := CompileConfigLenient(tree)
 		if err != nil {
@@ -259,7 +260,7 @@ func TestVRRPUnknownChild15046(t *testing.T) {
 		}
 		var warned bool
 		for _, w := range cfg.Warnings {
-			if strings.Contains(w, "zzbogus") && strings.Contains(w, lenientTail15046) {
+			if strings.Contains(w, "zzbogus") && strings.Contains(w, "is not a vrrp-group statement") && strings.Contains(w, lenientTail15046) {
 				warned = true
 			}
 		}

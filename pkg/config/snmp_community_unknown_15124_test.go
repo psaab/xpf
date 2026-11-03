@@ -21,14 +21,16 @@ import (
 
 // #18955: the unknown-community-child diagnostic's arm-selected clause
 // is pinned literally per arm. The strict arm refuses the commit, so its
-// clause says so; the compiles-to-NOTHING wording stays on the lenient
-// arm, where the token is dropped with a warning and the community is
-// quarantined. Literals, not builder references, so a clause swap cannot
-// satisfy them tautologically; the head ("is not a community statement")
-// is shared and unchanged.
+// clause says so. On the lenient arm the clause scopes the nothing to
+// the STATEMENT — the token is dropped, but the community is then
+// quarantined to deny-all, which IS an effect — and the quarantine note
+// is pinned in the same warning so the two statements cannot drift
+// apart again. Literals, not builder references, so a clause swap
+// cannot satisfy them tautologically; the head ("is not a community
+// statement") is shared and unchanged.
 const (
 	strictTail15124  = "— the commit is refused;"
-	lenientTail15124 = "— it compiles to NOTHING: it commits clean, renders in `show configuration`, and has no effect;"
+	lenientTail15124 = "— it compiles to NOTHING: it commits clean, renders in `show configuration`, and the statement itself is ignored;"
 )
 
 // TestSNMPCommunityUnknownChildStrictRejects15124 pins the strict arm:
@@ -130,12 +132,13 @@ func TestSNMPCommunityUnknownChildLenientQuarantines15124(t *testing.T) {
 	}
 	var warned bool
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, `"client"`) && strings.Contains(w, lenientTail15124) {
+		if strings.Contains(w, `"client"`) && strings.Contains(w, "is not a community statement") &&
+			strings.Contains(w, lenientTail15124) && strings.Contains(w, "quarantined to deny-all") {
 			warned = true
 		}
 	}
 	if !warned {
-		t.Fatalf("expected a lenient warning naming the unknown token 'client' with the compiles-to-NOTHING tail (#18955), warnings=%v", cfg.Warnings)
+		t.Fatalf("expected a lenient warning naming the unknown token 'client' with the head, the statement-scoped NOTHING clause, and the deny-all quarantine note (#18955), warnings=%v", cfg.Warnings)
 	}
 	mon := cfg.System.SNMP.Communities["mon"]
 	if mon == nil {
