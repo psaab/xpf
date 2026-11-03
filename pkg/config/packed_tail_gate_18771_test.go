@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -26,6 +27,34 @@ const (
 	packedTailMixedPartial18771 = `interfaces { ge-0/0/1 { unit 0 { family inet { address 192.0.2.2/24 vrrp-group 1 authentication-type simple; } } } }`
 	packedTailMixedClean18771   = `interfaces { ge-0/0/2 { unit 0 { family inet { address 192.0.2.3/24 vrrp-group 1 priority 100; address 192.0.2.3/24 { vrrp-group 1 { priority 100; } } } } } }`
 )
+
+const packedTailIGP18771 = `groups {
+ node0 { protocols { ospf { router-id 10.0.0.1; } } }
+ node1 { protocols { ospf { router-id 10.0.0.2; } } }
+}
+apply-groups "${node}";
+` + packedTailDrop18771
+
+const packedTailIGPProbe18771 = `groups {
+ node0 { protocols { ospf { router-id 10.0.0.1; } } }
+ node1 { protocols { ospf { router-id 10.0.0.2; } } }
+}
+apply-groups "${node}";
+chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16810-long; node 0; reth-count 2; no-private-rg-election;
+ redundancy-group 0 { node 0 priority 200; node 1 priority 100; }
+ redundancy-group 1 { node 0 priority 200; node 1 priority 100; }
+ redundancy-group 2 { node 0 priority 100; node 1 priority 200; } } }
+interfaces {
+ ge-0/0/1 { gigether-options { redundant-parent reth0; } }
+ ge-7/0/1 { gigether-options { redundant-parent reth0; } }
+ reth0 { redundant-ether-options { redundancy-group 1; } unit 0 { family inet { address 198.51.100.1/24; } } }
+ ge-0/0/2 { gigether-options { redundant-parent reth1; } }
+ ge-7/0/2 { gigether-options { redundant-parent reth1; } }
+ reth1 { redundant-ether-options { redundancy-group 2; } unit 0 { family inet { address 203.0.113.1/24; } } }
+ ge-0/0/9 { unit 0 { family inet6 dad-disable; } }
+}
+protocols { ospf { area 0.0.0.0 { interface reth0.0; interface reth1.0; } } }
+`
 
 func packedTailCompile18771(t *testing.T, text string, opts compileOpts, nodeID *int) (*Config, error) {
 	t.Helper()
@@ -119,8 +148,10 @@ func packedTailPrepare18771(t *testing.T, text string, opts compileOpts, nodeID 
 		}
 	}
 	observePackedTailGateEffective18771(working, run)
-	original := parseHierText(t, text)
-	cfg, err := compileTree(original, packedTailGateTwinOpts18771(opts), nodeID)
+	original := run.snapshot18771.Clone()
+	cfg, err := compileTreeWithDerivedObserver18771(original, packedTailGateTwinOpts18771(opts), nodeID, func(post compileOpts) {
+		run.originalIGPIdentityExcused18771 = post.igpIdentityExcused16810
+	})
 	if err != nil {
 		t.Fatalf("baseline compile: %v", err)
 	}
@@ -283,6 +314,22 @@ system { apply-groups-except UNDEFINED18771; }
 		}
 	}
 
+	igpOriginal, igpRun := packedTailPrepare18771(t, packedTailIGPProbe18771, strictCompileOpts(), nil)
+	igpFindings := igpRun.adjudicate18771(igpOriginal)
+	if !igpRun.originalIGPIdentityExcused18771 || !igpRun.twinIGPIdentityExcused18771 {
+		t.Fatalf("#16810 probe did not recompute the exemption on both original and twin: original=%v twin=%v", igpRun.originalIGPIdentityExcused18771, igpRun.twinIGPIdentityExcused18771)
+	}
+	drop := false
+	for _, finding := range igpFindings {
+		drop = drop || finding.verdict18771 == "DROP"
+	}
+	if !drop {
+		t.Fatal("matching recomputed IGP exemption prevented the independent DROP control")
+	}
+	if packedTailGateDerivedEqual18771(igpOriginal, igpOriginal, true, false) {
+		t.Fatal("IGP exemption mismatch was not rejected")
+	}
+
 	const nested = `system { domain-search { example.com { x; } } }`
 	_, nestedRun := packedTailPrepare18771(t, packedTailDrop18771, strictCompileOpts(), nil)
 	for id := range nestedRun.sources18771 {
@@ -364,6 +411,24 @@ interfaces { ge-0/0/0 { unit 0 { family inet6 dad-disable; } } }
 `
 	cfg := packedTailMustCompile18771(t, ha, lenientCompileOpts(), nil)
 	packedTailAssertVerdicts18771(t, cfg, "CLEAN", "CLEAN", "CLEAN", "CLEAN", "DROP")
+	original, run := packedTailPrepare18771(t, ha, lenientCompileOpts(), nil)
+	removals := 0
+	for id, source := range run.sources18771 {
+		if source.container18771 != "node" || source.head18771 != "priority" {
+			continue
+		}
+		removed, err := run.compileTwin18771(run.snapshot18771, id, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ConfigFingerprint(original) == ConfigFingerprint(removed) {
+			t.Fatal("HA node/priority removal twin was a no-op")
+		}
+		removals++
+	}
+	if removals == 0 {
+		t.Fatal("no HA node/priority removal twin was measured")
+	}
 
 	const two = `interfaces { ge-0/0/0 { unit 0 { family inet6 dad-disable; } } ge-0/0/1 { unit 0 { family inet6 dad-disable; } } }`
 	packedTailAssertVerdicts18771(t, packedTailMustCompile18771(t, two, strictCompileOpts(), nil), "DROP", "DROP")
@@ -373,6 +438,9 @@ interfaces { ge-0/0/0 { unit 0 { family inet6 dad-disable; } } }
 }
 
 func TestPackedTailGate18771Cell05Determinism(t *testing.T) {
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
 	paths := []string{"../../docs/ha-cluster-userspace.conf"}
 	matches, err := filepath.Glob("../../test/incus/*.conf")
 	if err != nil {
@@ -400,6 +468,27 @@ func TestPackedTailGate18771Cell05Determinism(t *testing.T) {
 		}
 	}
 
+	censusStart := time.Now()
+	census := packedTailAllCensusSources18771(t)
+	for name, text := range census {
+		var first *Config
+		var firstErr string
+		for range 2 {
+			cfg, err := packedTailCompile18771(t, text, lenientCompileOpts(), nil)
+			if firstErr == "" && first == nil {
+				first, firstErr = cfg, fmt.Sprint(err)
+				continue
+			}
+			if fmt.Sprint(err) != firstErr {
+				t.Fatalf("census fixture %s changed compile error across repeated compiles: %q vs %q", name, firstErr, fmt.Sprint(err))
+			}
+			if cfg != nil && !reflect.DeepEqual(packedTailVerdicts18771(first), packedTailVerdicts18771(cfg)) {
+				t.Fatalf("census fixture %s changed packed-tail verdicts across repeated compiles: %v vs %v", name, packedTailVerdicts18771(first), packedTailVerdicts18771(cfg))
+			}
+		}
+	}
+	t.Logf("census fixture determinism: %d fixtures, two gate compiles each, verdict-only comparison, %s", len(census), time.Since(censusStart))
+
 	const secret = "DISTINCTIVE-18771-SECRET"
 	api := `system { services { web-management { api-auth { expires 2099-01-01; user admin { password "` + secret + `"; } api-key machine-generated-key-alpha; } } } }
 ` + packedTailDrop18771
@@ -407,18 +496,39 @@ func TestPackedTailGate18771Cell05Determinism(t *testing.T) {
 	if !run.snapshotIdempotent18771 {
 		t.Fatal("lenient three-pass snapshot was not idempotent")
 	}
+	originalVerifiers := packedTailCompiledVerifiers18771(o)
+	if len(originalVerifiers) == 0 {
+		t.Fatal("API-auth verifier collector is empty; comparison would be vacuous")
+	}
+	perturbed := false
 	for id := range run.sources18771 {
 		for _, brace := range []bool{true, false} {
-			tree, err := packedTailGateRewriteTwin18771(run.snapshot18771, id, brace)
+			cfg, err := run.compileTwin18771(run.snapshot18771, id, brace)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(packedTailVerifiers18771(run.snapshot18771), packedTailVerifiers18771(tree)) {
-				t.Fatal("pre-hashed API-auth verifier changed across twin")
+			if !reflect.DeepEqual(originalVerifiers, packedTailCompiledVerifiers18771(cfg)) {
+				t.Fatal("compiled API-auth verifier changed across O/B_i/R_i")
+			}
+			if brace && !perturbed {
+				restore := packedTailPerturbVerifier18771(cfg)
+				if reflect.DeepEqual(originalVerifiers, packedTailCompiledVerifiers18771(cfg)) {
+					t.Fatal("perturbed-verifier mutant did not red")
+				}
+				restore()
+				if !reflect.DeepEqual(originalVerifiers, packedTailCompiledVerifiers18771(cfg)) {
+					t.Fatal("reverted verifier perturbation did not restore equality")
+				}
+				perturbed = true
 			}
 		}
 	}
+	if !perturbed {
+		t.Fatal("no B_i verifier was available for the perturbation control")
+	}
+	t.Logf("compiled API-auth verifier control: %d verifier(s) stable across O/B_i/R_i; perturbed B_i mismatched and restored matched", len(originalVerifiers))
 	start := time.Now()
+	run.twinCompilations18771 = 0
 	findings := run.adjudicate18771(o)
 	if len(findings) == 0 || run.twinCompilations18771 != 2 {
 		t.Fatalf("findings=%d twins=%d, want 1/2", len(findings), run.twinCompilations18771)
@@ -445,20 +555,34 @@ func TestPackedTailGate18771Cell05Determinism(t *testing.T) {
 	}
 }
 
-func packedTailVerifiers18771(tree *ConfigTree) (out []string) {
-	var walk func([]*Node)
-	walk = func(ns []*Node) {
-		for _, n := range ns {
-			for _, k := range n.Keys {
-				if strings.HasPrefix(k, "$2") {
-					out = append(out, k)
-				}
-			}
-			walk(n.Children)
+func packedTailCompiledVerifiers18771(cfg *Config) (out []string) {
+	if cfg == nil || cfg.System.Services == nil || cfg.System.Services.WebManagement == nil || cfg.System.Services.WebManagement.APIAuth == nil {
+		return nil
+	}
+	auth := cfg.System.Services.WebManagement.APIAuth
+	for _, user := range auth.Users {
+		if user != nil && strings.HasPrefix(user.Password.Reveal(), apiAuthBcryptPrefix) {
+			out = append(out, user.Password.Reveal())
 		}
 	}
-	walk(tree.Children)
+	for _, secret := range auth.APIKeys {
+		if strings.HasPrefix(secret.Reveal(), apiAuthBcryptPrefix) {
+			out = append(out, secret.Reveal())
+		}
+	}
+	for _, key := range auth.Keys {
+		if key != nil && strings.HasPrefix(key.Secret.Reveal(), apiAuthBcryptPrefix) {
+			out = append(out, key.Secret.Reveal())
+		}
+	}
 	return out
+}
+
+func packedTailPerturbVerifier18771(cfg *Config) func() {
+	auth := cfg.System.Services.WebManagement.APIAuth
+	original := auth.Users[0].Password
+	auth.Users[0].Password = NewSecret(original.Reveal() + "-perturbed")
+	return func() { auth.Users[0].Password = original }
 }
 
 func packedTailCensusSource18771(s compactSite) (string, string, bool) {
@@ -644,17 +768,16 @@ func TestPackedTailGate18771Cell08PhaseEligibilityAndReentrancy(t *testing.T) {
 		})
 	}
 
-	const igp = `groups {
- node0 { protocols { ospf { router-id 10.0.0.1; } } }
- node1 { protocols { ospf { router-id 10.0.0.2; } } }
-}
-apply-groups "${node}";
-` + packedTailDrop18771
 	logs := packedTailCaptureLogs18771(t)
-	cfg := packedTailMustCompile18771(t, igp, strictCompileOpts(), nil)
+	cfg := packedTailMustCompile18771(t, packedTailIGP18771, strictCompileOpts(), nil)
 	packedTailAssertVerdicts18771(t, cfg, "DROP")
 	if got := strings.Count(logs.String(), "packedTailGate18771"); got != 1 {
 		t.Fatalf("gated log lines = %d, want 1 (nested IGP added twins/logs)", got)
+	}
+	probeOriginal, probeRun := packedTailPrepare18771(t, packedTailIGPProbe18771, strictCompileOpts(), nil)
+	probeRun.adjudicate18771(probeOriginal)
+	if !probeRun.originalIGPIdentityExcused18771 || !probeRun.twinIGPIdentityExcused18771 {
+		t.Fatal("#16810 probe did not run and recompute on the original and twin paths")
 	}
 
 	logs = packedTailCaptureLogs18771(t)
@@ -708,6 +831,16 @@ func TestPackedTailGate18771Cell10BoundsAndMutants(t *testing.T) {
 	}
 	cfg = packedTailMustCompile18771(t, makeSites(33), strictCompileOpts(), nil)
 	packedTailAssertVerdicts18771(t, cfg, "SKIPPED-CAP")
+
+	const fanout = `groups { g { interfaces { <*> { unit 0 { family inet6 mtu 1500; } } } } } apply-groups g; `
+	mixed := packedTailMustCompile18771(t, makeSites(33)+fanout, strictCompileOpts(), nil)
+	counts := map[string]int{}
+	for _, verdict := range packedTailVerdicts18771(mixed) {
+		counts[verdict]++
+	}
+	if counts["SKIPPED-CAP"] != 1 || counts["SKIPPED-PROVENANCE"] != 33 || len(packedTailVerdicts18771(mixed)) != 34 {
+		t.Fatalf("over-cap mixed shape = %v, want one aggregate cap plus 33 provenance labels", packedTailVerdicts18771(mixed))
+	}
 
 	run := newPackedTailGateRun18771(strictCompileOpts(), nil)
 	run.snapshot18771 = &ConfigTree{}

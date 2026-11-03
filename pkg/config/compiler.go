@@ -486,6 +486,10 @@ func validateAPIAuthCredentialsStrict(cfg *Config) error {
 // differently (#8662/#8752). Never re-add a second orchestrator or a
 // boolean node-scope flag: presence is carried by the pointer alone.
 func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, error) {
+	return compileTreeWithDerivedObserver18771(tree, opts, nodeID, nil)
+}
+
+func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nodeID *int, observer func(compileOpts)) (*Config, error) {
 	var gate *packedTailGateRun18771
 	if opts.packedTailGateEligible18771 && !opts.skipPackedTailGate18771 {
 		gate = newPackedTailGateRun18771(opts, nodeID)
@@ -993,6 +997,12 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// for the short prefixes, and those are precisely the ones whose packed and
 	// nested spellings disagree about whether the CLI denies or permits.
 	cfg.System.LoginDroppedByPacking = loginPathPackedAnywhere(tree)
+	if gate != nil {
+		gate.originalIGPIdentityExcused18771 = opts.igpIdentityExcused16810
+	}
+	if observer != nil {
+		observer(opts)
+	}
 	if gate != nil {
 		gate.adjudicate18771(cfg)
 	}

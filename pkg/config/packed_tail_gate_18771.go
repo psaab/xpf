@@ -33,17 +33,19 @@ type packedTailGateFinding18771 struct {
 }
 
 type packedTailGateRun18771 struct {
-	initialOpts18771        compileOpts
-	nodeID18771             *int
-	nextID18771             uint64
-	sources18771            map[uint64]*packedTailGateSource18771
-	effective18771          map[uint64]int
-	effectiveOrder18771     []uint64
-	effectiveNodes18771     map[*Node]bool
-	snapshot18771           *ConfigTree
-	snapshotCount18771      int
-	snapshotIdempotent18771 bool
-	twinCompilations18771   int
+	initialOpts18771                compileOpts
+	nodeID18771                     *int
+	nextID18771                     uint64
+	sources18771                    map[uint64]*packedTailGateSource18771
+	effective18771                  map[uint64]int
+	effectiveOrder18771             []uint64
+	effectiveNodes18771             map[*Node]bool
+	snapshot18771                   *ConfigTree
+	snapshotCount18771              int
+	snapshotIdempotent18771         bool
+	twinCompilations18771           int
+	originalIGPIdentityExcused18771 bool
+	twinIGPIdentityExcused18771     bool
 }
 
 func newPackedTailGateRun18771(opts compileOpts, nodeID *int) *packedTailGateRun18771 {
@@ -74,6 +76,11 @@ func (r *packedTailGateRun18771) recordPackedTail18771(node *Node, container, he
 			}
 			if len(node.fromGroups) > 0 {
 				source.fromGroups18771 = append([]string(nil), node.fromGroups...)
+			}
+			groupOrigin := source.inheritedFrom18771 != "" || len(source.fromGroups18771) > 0 ||
+				(len(source.groupLocalPath18771) > 0 && source.groupLocalPath18771[0] == "groups")
+			if !groupOrigin && r.effective18771[id] > 0 {
+				return
 			}
 		}
 		r.effectiveOrder18771 = append(r.effectiveOrder18771, id)
@@ -240,7 +247,10 @@ func classifyPackedTailGate18771(original, braced, removed *Config) string {
 	}
 }
 
-func packedTailGateDerivedEqual18771(a, b *Config) bool {
+func packedTailGateDerivedEqual18771(a, b *Config, originalIGP, twinIGP bool) bool {
+	if originalIGP != twinIGP {
+		return false
+	}
 	if a == nil || b == nil ||
 		!reflect.DeepEqual(a.PhysicalInterfaces, b.PhysicalInterfaces) ||
 		!reflect.DeepEqual(a.ZoneQuarantineNames, b.ZoneQuarantineNames) {
@@ -269,7 +279,12 @@ func (r *packedTailGateRun18771) compileTwin18771(snapshot *ConfigTree, siteID u
 	if opts.packedTailGateEligible18771 || !opts.skipPackedTailGate18771 {
 		return nil, fmt.Errorf("packed-tail twin entry tuple is invalid")
 	}
-	return compileTree(tree, opts, r.nodeID18771)
+	var twinIGP bool
+	cfg, err = compileTreeWithDerivedObserver18771(tree, opts, r.nodeID18771, func(post compileOpts) {
+		twinIGP = post.igpIdentityExcused16810
+	})
+	r.twinIGPIdentityExcused18771 = twinIGP
+	return cfg, err
 }
 
 func (r *packedTailGateRun18771) nodeLabel18771() string {
@@ -295,11 +310,11 @@ func (r *packedTailGateRun18771) adjudicateSite18771(original *Config, source *p
 		return r.finding18771(source, "INDETERMINATE")
 	}
 	braced, err := r.compileTwin18771(r.snapshot18771, source.id18771, true)
-	if err != nil || !packedTailGateDerivedEqual18771(original, braced) {
+	if err != nil || !packedTailGateDerivedEqual18771(original, braced, r.originalIGPIdentityExcused18771, r.twinIGPIdentityExcused18771) {
 		return r.finding18771(source, "INDETERMINATE")
 	}
 	removed, err := r.compileTwin18771(r.snapshot18771, source.id18771, false)
-	if err != nil || !packedTailGateDerivedEqual18771(original, removed) {
+	if err != nil || !packedTailGateDerivedEqual18771(original, removed, r.originalIGPIdentityExcused18771, r.twinIGPIdentityExcused18771) {
 		return r.finding18771(source, "INDETERMINATE")
 	}
 	return r.finding18771(source, classifyPackedTailGate18771(original, braced, removed))
