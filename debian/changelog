@@ -8,6 +8,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Dataplane: assign admitted fabric-parent ingress the unique routing domain
     of its fab* overlay so host-bound ICMP to fabric peers reaches local
     delivery instead of the unresolved-domain path (#18212).
+  * userspace-dp: keep pool-SNAT alias replies directed to their canonical
+    peer row after RefreshOwnerRGS, including when the pool target resolves
+    as a WAN MissingNeighbor or ForwardCandidate (#18535).
   * Lab stack address collision (#18574): move standalone and legacy-local
     NAT64/SNAT pools off foreign-held VLAN 50 addresses and document the
     same-day RFC 5227 probe results for the replacement addresses.
