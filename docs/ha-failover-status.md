@@ -611,7 +611,7 @@ The rules now:
   lookup returns `MissingNeighbor` or `ForwardCandidate`; this is pinned by
   `pool_alias_reverse_stays_with_peer_after_refresh_18535`. The already-
   un-NATed fabric reply still forwards toward its real client. DNAT-only and
-  port-only alias reverses (pre-existing) are not covered either; see #18535.
+  port-only alias reverses (pre-existing) are not covered either; see #18927.
   A reverse that un-NATs to a genuinely local address other than its wire
   destination is still host-bound and still gated. The LAN node's own reverse
   rows un-NAT to the client and are unaffected.
@@ -635,7 +635,7 @@ judges the real egress and revokes the pair. An inbound-only flow (for
 example UDP pushed from the server) can therefore keep reaching the
 client through the withdrawn binding until a forward packet arrives.
 Pinned by `rg_return_reply_first_window_closes_at_forward_hit_18531`;
-tracked in #18535.
+tracked in #18927.
 
 Pinned by `afxdp::tests_split_rg_failback_18531`, which drives the
 production poll pipeline on the captured split snapshots, and by the

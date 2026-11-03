@@ -2544,7 +2544,7 @@ fn pool_alias_reverse_stays_with_peer_after_refresh_18535() {
     let window_fwd = rg_taking_node_forwarding();
     let mut owner_fwd = fw1_owner_forwarding();
     // The captured snapshot includes only the v4 pool; give the v6 twin an
-    // equivalent configured pool so the membership gate is exercised twice.
+    // equivalent configured pool so the pool-SNAT shape is exercised twice.
     owner_fwd.source_nat_rules.extend(crate::nat::parse_source_nat_rules(&[
         crate::SourceNATRuleSnapshot {
             name: "pool-snat-v6".to_string(),
