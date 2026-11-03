@@ -12,6 +12,18 @@ import (
 // true on every route. Each cell below asserts the message text and the pool
 // membership AGREE (the issue's acceptance), on both ingress routes.
 
+// #18954: the unknown-family diagnostic's tail is per-arm. The strict
+// arm refuses the commit, so its tail says so; the compiles-to-NOTHING
+// wording stays on the lenient arm, where the family is warned and
+// skipped and the committed config silently lacks the filter. The
+// constants pin each arm's wording literally (not by builder reference,
+// so a tail swap cannot satisfy them tautologically); the head ("is not
+// a known address family") is shared and unchanged.
+const (
+	strictTail9017  = "— the commit is refused (#9017)"
+	lenientTail9017 = "— the filter under it compiles to NOTHING: it commits clean, renders in `show configuration`, and enforces no rule at all (#9017)"
+)
+
 func hier9883(t *testing.T, text string) *ConfigTree {
 	t.Helper()
 	root, perrs := NewParser(text).Parse()
@@ -58,8 +70,9 @@ func TestUnknownFamilyMessageAndPoolsAgree9883(t *testing.T) {
 				t.Fatalf("strict compile accepted family %q", "inett")
 			}
 			if !strings.Contains(err.Error(), "inett") ||
-				!strings.Contains(err.Error(), "compiles to NOTHING") {
-				t.Fatalf("strict refusal must name the token and say NOTHING: %v", err)
+				!strings.Contains(err.Error(), "is not a known address family") ||
+				!strings.Contains(err.Error(), strictTail9017) {
+				t.Fatalf("strict refusal must name the token and say the commit is refused (#18954): %v", err)
 			}
 		})
 		t.Run(r.name+"/lenient-warns-and-installs-nothing", func(t *testing.T) {
@@ -69,7 +82,7 @@ func TestUnknownFamilyMessageAndPoolsAgree9883(t *testing.T) {
 			}
 			var warned bool
 			for _, w := range cfg.Warnings {
-				if strings.Contains(w, "inett") && strings.Contains(w, "compiles to NOTHING") {
+				if strings.Contains(w, "inett") && strings.Contains(w, lenientTail9017) {
 					warned = true
 				}
 			}
@@ -318,7 +331,7 @@ func TestMultiKeyFamilyChildCannotSplitGateAndCompiler9883(t *testing.T) {
 			}
 			var warned bool
 			for _, w := range cfg.Warnings {
-				if strings.Contains(w, "inett") && strings.Contains(w, "compiles to NOTHING") {
+				if strings.Contains(w, "inett") && strings.Contains(w, lenientTail9017) {
 					warned = true
 				}
 			}
