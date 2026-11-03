@@ -1,8 +1,8 @@
 {
   "schema_version": 3,
-  "verified_at": "2026-11-03T16:35:28.19669405Z",
+  "verified_at": "2026-11-03T18:39:43.014627545Z",
   "object_sha256": "51e4b644cd52a0163227d2ae798e4dc61a8dabc4b6dabb2672c73181c438a191",
-  "build_digest": "b1dab8d81986e7098279c994158cb2c0a144b729169eec94db860c8be9ebc548",
+  "build_digest": "0a966e305cafa917d750a7120114be91116393ad3dc5c7b2430e37c7ad456cef",
   "verdict": "PASS",
   "override_consumed": false,
   "reason": "measured headroom 22.08% meets the 15.0% floor",
