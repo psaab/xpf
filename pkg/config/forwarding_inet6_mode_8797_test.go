@@ -253,3 +253,65 @@ func TestOnlyTheInet6FamilySetsTheInet6Mode8797(t *testing.T) {
 		t.Errorf("unknown family: FamilyInet6Mode = %q, want empty (#8797)", foUnknown.FamilyInet6Mode)
 	}
 }
+
+// #18881 review fold (MF-1): a structured `forwarding-options family`
+// member carrying RESIDUE — a second token after the family name, e.g.
+// `family { inet6 mpls { mode … } }` — is malformed Junos (a member names
+// ONE address family). The canonical-set widening let it commit and
+// install the residue member as inet6 (FamilyInet6Mode flipped); at THIS
+// top only, any structured residue is treated as unknown regardless of
+// token set membership — restoring the pre-widening #17196 rejection —
+// while the interfaces/sampling callsites keep the set-membership rule.
+func TestForwardingOptionsFamilyResidueMemberIsRejected18881(t *testing.T) {
+	// Authored spelling through the full strict compile path.
+	text := "forwarding-options { family { inet6 mpls { mode packet-based; } } }"
+	tree, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	if _, err := CompileConfig(tree); err == nil ||
+		!strings.Contains(err.Error(), "mpls") || !strings.Contains(err.Error(), "#18881") {
+		t.Fatalf("structured residue member must strict-reject naming the residue token (#18881), got %v", err)
+	}
+	// Strict seam: rejection AND nothing installed even on the error path.
+	node := &Node{Keys: []string{"forwarding-options"}, Children: []*Node{
+		{Keys: []string{"family"}, Children: []*Node{
+			{Keys: []string{"inet6", "mpls"}, Children: []*Node{
+				{Keys: []string{"mode", "packet-based"}, IsLeaf: true},
+			}},
+		}},
+	}}
+	fo := &ForwardingOptionsConfig{}
+	if err := compileForwardingOptions(node, fo); err == nil || !strings.Contains(err.Error(), "mpls") {
+		t.Fatalf("strict seam: residue member must reject naming the residue token, got %v", err)
+	}
+	if fo.FamilyInet6Mode != "" {
+		t.Fatalf("residue member installed FamilyInet6Mode = %q behind a second token", fo.FamilyInet6Mode)
+	}
+	// Lenient: boots (#1960), warns + skips the member, installs nothing.
+	foLenient := &ForwardingOptionsConfig{}
+	var warnings []string
+	if err := compileForwardingOptionsWithOpts(node, foLenient, lenientCompileOpts(), &warnings); err != nil {
+		t.Fatalf("lenient must not brick (#1960): %v", err)
+	}
+	if foLenient.FamilyInet6Mode != "" {
+		t.Errorf("lenient installed the mode behind residue: FamilyInet6Mode = %q", foLenient.FamilyInet6Mode)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "mpls") ||
+		!strings.Contains(strings.Join(warnings, "\n"), "skipping that family member") {
+		t.Errorf("lenient must warn naming the residue token and skip the member, warnings=%v", warnings)
+	}
+	// CLEAN CONTROL: the same member with no residue still installs the mode.
+	ctl := &Node{Keys: []string{"forwarding-options"}, Children: []*Node{
+		{Keys: []string{"family", "inet6"}, Children: []*Node{
+			{Keys: []string{"mode", "packet-based"}, IsLeaf: true},
+		}},
+	}}
+	foCtl := &ForwardingOptionsConfig{}
+	if err := compileForwardingOptions(ctl, foCtl); err != nil {
+		t.Fatalf("clean control: %v", err)
+	}
+	if foCtl.FamilyInet6Mode != "packet-based" {
+		t.Fatalf("clean control must still install the mode (#8797), got %q", foCtl.FamilyInet6Mode)
+	}
+}

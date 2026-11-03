@@ -2135,9 +2135,28 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 	for _, famNode := range node.FindChildren("family") {
 		for _, m := range familyMembers(famNode) {
 			afNode, afName := m.AfNode, m.Af
-			if unknownFamilyMember17196(m, forwardingFamilyKnown17196) {
+			// #18881 fold: at THIS top only, a structured member carrying
+			// ANY residue (a second token after the family name, e.g.
+			// `family { inet6 mpls { mode … } }`) is unknown regardless of
+			// set membership — a `forwarding-options family` member names
+			// ONE address family, and the canonical-set widening otherwise
+			// let the malformed member commit and install as inet6. The
+			// interfaces/sampling callsites keep the set-membership rule.
+			// An unknown effective token keeps the #17196 diagnostic (it
+			// names the effective token); the residue message below is for
+			// members whose every token IS declared yet malformed.
+			unknown18881 := unknownFamilyMember17196(m, forwardingFamilyKnown17196)
+			residue18881 := !unknown18881 && len(m.Residue) > 0
+			if unknown18881 || residue18881 {
 				msg := unknownFamilyMsg17196("forwarding-options family",
 					m, forwardingFamilyKnown17196, forwardingFamilyKnownSorted17196)
+				if residue18881 {
+					msg = fmt.Sprintf("forwarding-options family %q carries a trailing %q token "+
+						"— a member names one address family (known: %s): the configuration "+
+						"under it compiles to NOTHING: it commits clean, renders in "+
+						"`show configuration`, and takes no effect at all (#18881)",
+						m.Af, m.Residue[0], strings.Join(forwardingFamilyKnownSorted17196, ", "))
+				}
 				if opts.lenientFamilyMembers17196 {
 					if warnings != nil {
 						*warnings = append(*warnings, msg+"; skipping that family member")
