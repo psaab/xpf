@@ -211,6 +211,13 @@ type syncAcceptedKeysProvider interface {
 	ControlLinkAcceptedKeys() [][]byte
 }
 
+// syncAuthConfiguredProvider avoids materializing accepted-key slices on the
+// per-frame authority gate. Providers without this optional method retain the
+// generic accepted-key check.
+type syncAuthConfiguredProvider interface {
+	ControlLinkAuthConfigured() bool
+}
+
 // authAcceptedKeys returns every PSK this node VERIFIES a session-sync peer
 // against (#14703): the signing key first, then the additional rotation key
 // while a #6630 window is open. Empty when unkeyed. Nothing is ever SIGNED
@@ -233,6 +240,20 @@ func (s *SessionSync) authAcceptedKeys() [][]byte {
 		return [][]byte{k}
 	}
 	return nil
+}
+
+func (s *SessionSync) authConfigured() bool {
+	box := s.authProvider.Load()
+	if box == nil || box.p == nil {
+		return false
+	}
+	if configured, ok := box.p.(syncAuthConfiguredProvider); ok {
+		return configured.ControlLinkAuthConfigured()
+	}
+	if ring, ok := box.p.(syncAcceptedKeysProvider); ok {
+		return len(ring.ControlLinkAcceptedKeys()) > 0
+	}
+	return len(box.p.ControlLinkAuthKey()) > 0
 }
 
 // syncNoiseKeysWithPSK pairs the directional keys a completed Noise

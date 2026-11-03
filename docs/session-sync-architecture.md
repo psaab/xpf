@@ -1823,11 +1823,17 @@ to the peer under the installer's id.
   is a replica of a session this node owns, and only when its id was carried from
   another worker. Carried means non-zero, with high 16 bits unlike this table's own
   namespace. Peer-import replicas stay silent.
+- **RST stays local Reset but announces CLOSING (#18537).** A replica's own rows
+  still take an RST on the fixed 2 s fuse. The HA Update carries CLOSING, matching
+  the sibling's close relay: no worker of a split pair can validate the RST's
+  sequence on the cache-served path, and its local authoritative pair holds the
+  refreshable CLOSING state, not the replica's Reset. An authoritative non-replica
+  row that takes a valid RST still announces Reset.
 
 | Close seen by | Announced? | Effect on the peer |
 |---|---|---|
 | installer (the client's FIN or RST) | yes | the close window |
-| replica only: server RST | yes, class 3, installer's id | the RST window |
+| replica only: server RST | yes, CLOSING with installer's id | CLOSING window; the replica itself retains its local 2 s fuse |
 | replica only: server FIN | yes, CLOSING | CLOSING's window |
 | client FIN on one worker, server FIN on another | each announces CLOSING; nobody announces TIME_WAIT | CLOSING's window, which shares TIME_WAIT's 30 s default |
 | a replica holding an id minted locally | no (guard) | whatever the installer announced |

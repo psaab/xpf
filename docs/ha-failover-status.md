@@ -587,8 +587,11 @@ The rules now:
   destination (`reverse_un_nat_targets_itself`) now resolves to the fabric
   redirect toward the peer that holds the canonical row: at synthesis from
   an alias, and in the one re-resolution pipeline (`reresolve_stored_session`:
-  session hit, `RefreshOwnerRGS`, `DemoteOwnerRGS`) only when the target
-  lookup answers `LocalDelivery`. That gate matters: the reverse-synthesis
+  session hit, `RefreshOwnerRGS`, `DemoteOwnerRGS`) when the target lookup
+  answers `LocalDelivery`, or — for a self-targeting reverse of any NAT
+  shape (identity translations included; the gate is the NAT shape, not
+  pool membership) — a WAN `MissingNeighbor`/`ForwardCandidate` on a
+  non-fabric arrival. That gate matters: the reverse-synthesis
   arm also installs a self-targeting row for a reply that arrives already
   un-NATed (the peer un-NATed it and handed it over the fabric), keyed by
   the client tuple. Its target is the real client and it must forward; the
@@ -599,19 +602,19 @@ The rules now:
   reply is dropped, never bounced, delivered locally, or forwarded on a raw
   FIB answer. The match is on NAT shape: an identity translation (the
   original source is the SNAT address and the port is unchanged) looks the
-  same and is handed to the peer too. The synthesis arm is not gated, so a
-  pool alias's reverse (its target, the pool address, answered by proxy
-  ARP, is not local, so the lookup answers the WAN neighbor path) is
-  handed to the peer at import (pinned by
-  `pool_alias_reverse_is_handed_to_peer_at_synthesis_18531`). Gap: the
-  gated re-resolution leaves that row on the WAN neighbor path
-  (`MissingNeighbor` toward the pool address after `RefreshOwnerRGS`),
-  so an alias-only pool-SNAT flow still loses its replies on the node
-  that took the WAN RG. The DNAT-only and port-only alias reverses
-  (pre-existing) are not covered either; see #18535. A reverse that un-NATs to a genuinely
-  local address other than its wire destination is still host-bound and
-  still gated. The LAN node's own reverse rows un-NAT to the client and are
-  unaffected.
+  same and is handed to the peer too. A pool alias's reverse (its target,
+  the pool address, is not local and the lookup answers the WAN neighbor
+  path) is handed to the peer at import (pinned by
+  `pool_alias_reverse_is_handed_to_peer_at_synthesis_18531`). The activation
+  refresh now retains that peer redirect for a non-fabric-ingress
+  self-targeting reverse, even when the local
+  lookup returns `MissingNeighbor` or `ForwardCandidate`; this is pinned by
+  `pool_alias_reverse_stays_with_peer_after_refresh_18535`. The already-
+  un-NATed fabric reply still forwards toward its real client. DNAT-only and
+  port-only alias reverses (pre-existing) are not covered either; see #18927.
+  A reverse that un-NATs to a genuinely local address other than its wire
+  destination is still host-bound and still gated. The LAN node's own reverse
+  rows un-NAT to the client and are unaffected.
 
 A withdrawn translation is revoked by the node that owns the egress, on
 its next slow-path hit with a stale stamp. That is not every redirected
@@ -632,7 +635,7 @@ judges the real egress and revokes the pair. An inbound-only flow (for
 example UDP pushed from the server) can therefore keep reaching the
 client through the withdrawn binding until a forward packet arrives.
 Pinned by `rg_return_reply_first_window_closes_at_forward_hit_18531`;
-tracked in #18535.
+tracked in #18927.
 
 Pinned by `afxdp::tests_split_rg_failback_18531`, which drives the
 production poll pipeline on the captured split snapshots, and by the
@@ -641,9 +644,11 @@ The daemon-side routing of the owner's Close is the existing owner-RG gate
 and is not covered by those cells; the two-node cell
 `alias_only_owner_revocation_removes_lan_row_18531` feeds the owner's
 Close keys to the LAN node's coordinator as the peer deletes the daemon
-sends (the Go legs were read, not run). Residuals are tracked in #18535:
+sends (the Go legs were read, not run). Residuals are tracked in #18927:
 - a translated alias row removed in the RG gap, so an alias-only copy
   loses the flow (fixed here);
+- a pool-SNAT alias reverse left on the WAN neighbor path after activation
+  refresh (fixed here; `pool_alias_reverse_stays_with_peer_after_refresh_18535`);
 - activation before the connected-RG FIB republish (open);
 - scope-less imports not judged by the owner (open);
 - the reverse-side window above (open, pinned);
@@ -1547,12 +1552,21 @@ attempts were recorded under, because the event history outlives a config
 change. Each attempt line is one `handlePeerTimeout` fence decision and its
 outcome.
 
-The absent `peer-fencing` leaf is the default and sends **no fence**. After any
-peer-loss takeover without a peer confirmation, both `show chassis cluster
-status` and `show chassis cluster information` render `Peer-loss takeover:
-DEGRADED`, with the reason and time; the information view also reports local
-node health as degraded. This is an operator warning, not a gate: the node
-still takes over. A later peer heartbeat clears the marker.
+The absent `peer-fencing` leaf is the default and sends **no fence**. After a
+peer-loss decision without fence confirmation, both status views render
+`Peer-loss decision: UNCONFIRMED` with its reason and time; the information
+view also reports local node health as degraded. While the peer is not alive,
+each unconfirmed decision, including a never-seen cold-start decision, raises
+`ALARM: dual-primary risk` in status and information, CRITICAL in local and
+gRPC `show system alarms`, and a warning in the log.
+
+This marker and alarm record an unconfirmed peer-loss/fencing decision, not an
+assertion that local ownership changed. A readiness gate can leave a
+not-ready cold-start RG secondary while the alarm is active. Not hearing from
+a peer does not prove it absent: both nodes can miss their initial heartbeats
+during simultaneous startup. The alarm does not change election behavior. A
+live peer heartbeat that aborts an unsuccessful fence wait stays silent in the
+active alarm list; a returning peer heartbeat clears the alarm and marker.
 
 ### `disable-rg` — best-effort, unacknowledged
 
@@ -1646,12 +1660,16 @@ released the VIPs, or will remain dataplane-inactive.
 ### Telling a confirmed fence from a fail-open
 
 The configured action does not reveal the result. `EventFence` records the
-attempt outcome, while `Peer-loss takeover: DEGRADED` in both status views
-records that the latest peer-loss takeover proceeded without confirmation.
-The marker gives the reason (for example, fencing disabled, a best-effort
-unacknowledged send, timeout, disconnect, or incomplete peer fence), and the
-information view marks local node health degraded. The marker clears on a
-returning peer heartbeat.
+attempt outcome, while `Peer-loss decision: UNCONFIRMED` in both status views
+records that the latest peer-loss decision lacked fence confirmation. It does
+not assert that local ownership changed: readiness can leave an unready
+cold-start RG secondary while the alarm remains active. Each unconfirmed
+decision while the peer is not alive, including a never-seen cold-start
+decision, raises the explicit dual-primary-risk alarm on the cluster status
+and system-alarm surfaces. The marker gives the reason (for example, fencing
+disabled, a best-effort unacknowledged send, timeout, disconnect, incomplete
+peer fence, or no peer ever seen), and the information view marks local node
+health degraded. The marker clears on a returning peer heartbeat.
 
 ### What a CONFIRMED fence does and does not give you (#9120)
 
@@ -1732,8 +1750,9 @@ removed or bypassed:
 # Hardened RG move under load (the primary validator).
 # Keep the run long enough to expose late collapses, move RG1 quickly in both
 # directions, and keep all eight stream lines visible during the run.
+# The iperf target self-selects from the sourced cluster env
+# (IPERF_TARGET4, loss 172.16.80.202 since #18576); do not pin .200.
 BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
-IPERF_TARGET=172.16.80.200 \
 TOTAL_CYCLES=12 CYCLE_INTERVAL=5 \
 scripts/userspace-ha-failover-validation.sh --duration 600 --parallel 8
 ```
@@ -1744,21 +1763,22 @@ scripts/userspace-ha-failover-validation.sh --duration 600 --parallel 8
 # NO zero intervals. Expect this to FAIL until the HA-inactive leg
 # named in "The #16217 aged-failover chain" is closed.
 BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
-IPERF_TARGET=172.16.80.200 \
 scripts/userspace-ha-failover-validation.sh --aged-failover --duration 60 --parallel 4
 ```
 
 ```bash
 # Reverse-path coverage is also required. The validator currently exercises the
 # source-sending path, so run a matching reverse iperf after the forward pass.
-iperf3 -c 172.16.80.200 -P 8 -t 600 -R
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
+iperf3 -c "$IPERF_TARGET4" -P 8 -t 600 -R
 ```
 
 ### Manual CLI test
 
 ```bash
 # Start long-running forward traffic and keep all per-stream lines visible.
-iperf3 -c 172.16.80.200 -P 8 -t 600
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
+iperf3 -c "$IPERF_TARGET4" -P 8 -t 600
 
 # Rapidly move RG1 between fw0 and fw1 while traffic is active.
 cli -c "request chassis cluster failover redundancy-group 1 node 1"
@@ -1777,7 +1797,8 @@ cli -c "show chassis cluster data-plane statistics" | grep SNAT
 ```bash
 # Repeat the same RG movement under reverse traffic. This exercises the return
 # path ownership and catches failovers that only work when the host is sending.
-iperf3 -c 172.16.80.200 -P 8 -t 600 -R
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
+iperf3 -c "$IPERF_TARGET4" -P 8 -t 600 -R
 
 cli -c "request chassis cluster failover redundancy-group 1 node 1"
 sleep 5

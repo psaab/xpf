@@ -2485,22 +2485,113 @@ report_output=$(
 	(
 		info() { printf 'INFO %s\n' "$*"; }
 		void() { printf 'VOID %s\n' "$*"; }
-		ha_rg1_report_sample_max "Pending TX local" node0 "Kernel RX dropped" \
+		ha_rg1_report_sample_max "Kernel RX dropped" node0 "Kernel RX dropped" \
 			"$MONOTONIC_PRE_STATS" "${SAMPLE_STATS[@]}"
 	)
 )
-assert_contains "$report_output" 'INFO RG1 Group 8 report-only Pending TX local max (node0): 110' \
+assert_contains "$report_output" 'INFO RG1 Group 8 report-only Kernel RX dropped max (node0): 110' \
 	'report-only sampled maximum uses phase-pre baseline'
+printf 'RG1 Group 8 report-only maxima use the production gauge mapping\n'
+python3 - "${ROOT}/test/incus/test-failover.sh" <<'PY' || fail_test 'RG1 report-only maxima are not wired to the expected reducers and samples'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+calls = re.findall(
+    r'ha_rg1_report_sample_max "([^"]+)" (node[01]) "([^"]+)" \\\n'
+    r'\s*"\$\{RG1_STATS\[phase-pre:(node[01])\]\}" "\$\{(node[01])_stats\[@\]\}"',
+    text,
+)
+want = [
+    ("Pending TX local", "node0", "Pending TX local", "node0", "node0"),
+    ("Pending TX local", "node1", "Pending TX local", "node1", "node1"),
+    ("Outstanding TX", "node0", "Outstanding TX", "node0", "node0"),
+    ("Outstanding TX", "node1", "Outstanding TX", "node1", "node1"),
+]
+if calls != want:
+    raise SystemExit(f"report-only call mapping is {calls}, want {want}")
+wrapper = re.search(r"^ha_rg1_report_sample_max\(\) \{\n.*?^\}\n", text, re.M | re.S)
+if not wrapper:
+    raise SystemExit("ha_rg1_report_sample_max wrapper is missing")
+body = wrapper.group(0)
+if "sample_max_fn=ha_sample_window_max" not in body or not re.search(
+    r'case "\$metric" in\n\s*"Pending TX local"\|"Outstanding TX"\) '
+    r'sample_max_fn=ha_sample_window_gauge_max ;;\n\s*esac\n\s*'
+    r'if result=\$\("\$sample_max_fn"',
+    body,
+):
+    raise SystemExit("report-only metrics do not route gauges to the max-only reducer")
+PY
+GAUGE_PRE_STATS="${RG1_DIR}/gauge-phase-pre-node0.stats"
+write_ha_status_snapshot "$GAUGE_PRE_STATS" phase-pre node0 1 0 0 0 0 100 0 20 30
+PENDING_GAUGE_VALUES=(14 6 8 9 11 7 8 8 4 5)
+OUTSTANDING_GAUGE_VALUES=(23 4 18 9 2 11 7 5 8 0)
+GAUGE_STATS=()
+for gauge_index in "${!PENDING_GAUGE_VALUES[@]}"; do
+	gauge_phase=$(printf 'sample-%02d' "$((gauge_index + 1))")
+	gauge_stats="${RG1_DIR}/gauge-${gauge_phase}-node0.stats"
+	pending_value="${PENDING_GAUGE_VALUES[$gauge_index]}"
+	outstanding_value="${OUTSTANDING_GAUGE_VALUES[$gauge_index]}"
+	write_ha_status_snapshot "$gauge_stats" "$gauge_phase" node0 1 0 0 0 0 100 0 \
+		"$pending_value" "$outstanding_value"
+	GAUGE_STATS+=("$gauge_stats")
+done
+assert_helper_value 14 ha_sample_window_gauge_max manual-rg1-failback 1 node0 \
+	'Pending TX local' "${GAUGE_STATS[@]}" 20
+assert_helper_value 23 ha_sample_window_gauge_max manual-rg1-failback 1 node0 \
+	'Outstanding TX' "${GAUGE_STATS[@]}" 30
+for gauge_metric in 'Pending TX local' 'Outstanding TX'; do
+	case "$gauge_metric" in
+	'Pending TX local') gauge_expected=14 ;;
+	'Outstanding TX') gauge_expected=23 ;;
+	esac
+	report_output=$(
+		(
+			info() { printf 'INFO %s\n' "$*"; }
+			void() { printf 'VOID %s\n' "$*"; }
+			ha_rg1_report_sample_max "$gauge_metric" node0 "$gauge_metric" \
+				"$GAUGE_PRE_STATS" "${GAUGE_STATS[@]}"
+		)
+	)
+	assert_contains "$report_output" "INFO RG1 Group 8 report-only ${gauge_metric} max (node0): ${gauge_expected}" \
+		"falling ${gauge_metric} gauge reports its distinct sample maximum"
+	assert_not_contains "$report_output" 'VOID ' \
+		"falling ${gauge_metric} gauge does not increment VOID"
+done
+GAUGE_ZERO_PRE_STATS="${RG1_DIR}/gauge-zero-phase-pre-node0.stats"
+write_ha_status_snapshot "$GAUGE_ZERO_PRE_STATS" phase-pre node0 1 0 0 0 0 100 0 20 20
+for gauge_index in "${!GAUGE_STATS[@]}"; do
+	gauge_phase=$(printf 'sample-%02d' "$((gauge_index + 1))")
+	write_ha_status_snapshot "${GAUGE_STATS[$gauge_index]}" "$gauge_phase" node0 1 \
+		0 0 0 0 100 0 0 0
+done
+assert_helper_value 0 ha_sample_window_gauge_max manual-rg1-failback 1 node0 \
+	'Pending TX local' "${GAUGE_STATS[@]}" 20
+for gauge_metric in 'Pending TX local' 'Outstanding TX'; do
+	report_output=$(
+		(
+			info() { printf 'INFO %s\n' "$*"; }
+			void() { printf 'VOID %s\n' "$*"; }
+			ha_rg1_report_sample_max "$gauge_metric" node0 "$gauge_metric" \
+				"$GAUGE_ZERO_PRE_STATS" "${GAUGE_STATS[@]}"
+		)
+	)
+	assert_contains "$report_output" "INFO RG1 Group 8 report-only ${gauge_metric} max (node0): 0" \
+		"all-zero ${gauge_metric} samples ignore the higher pre baseline"
+	assert_not_contains "$report_output" 'VOID ' \
+		"all-zero ${gauge_metric} gauge does not increment VOID"
+done
 report_output=$(
 	(
 		info() { printf 'INFO %s\n' "$*"; }
 		void() { printf 'VOID %s\n' "$*"; }
-		ha_rg1_report_sample_max "Pending TX local" node0 "Kernel RX dropped" \
+		ha_rg1_report_sample_max "Kernel RX dropped" node0 "Kernel RX dropped" \
 			"$rewind_pre_stats" "${rewind_stats[@]}"
 	)
 )
-assert_contains "$report_output" 'VOID RG1 Group 8 report-only Pending TX local max unavailable (node0):' \
-	'report-only sampled maximum rejects sample-window rewind'
+assert_contains "$report_output" 'VOID RG1 Group 8 report-only Kernel RX dropped max unavailable (node0):' \
+	'report-only sampled counter rewind remains VOID'
 assert_contains "$report_output" 'rewound from 500 to 50 at sample-03' \
 	'report-only sampled maximum identifies intermediate rewind'
 SAMPLE_STATS[9]="${RG1_DIR}/missing-sample.stats"

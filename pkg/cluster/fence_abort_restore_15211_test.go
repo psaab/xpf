@@ -251,9 +251,9 @@ func failOpenManager15211(t *testing.T) *Manager {
 	return m
 }
 
-// #15211 A22-02: handlePeerNeverSeen takeover must be marked DEGRADED under
+// #15211 A22-02: handlePeerNeverSeen decision must be marked UNCONFIRMED under
 // every fencing policy (no fence possible for a never-seen peer).
-func TestNeverSeenTakeoverMarkedDegraded15211(t *testing.T) {
+func TestNeverSeenTakeoverMarkedUnconfirmed15211(t *testing.T) {
 	for _, policy := range []string{"", PeerFencingDisableRG, PeerFencingDisableRGConfirmed} {
 		t.Run("policy="+policy, func(t *testing.T) {
 			m := coldBootManager(t)
@@ -272,8 +272,8 @@ func TestNeverSeenTakeoverMarkedDegraded15211(t *testing.T) {
 				"status":      m.FormatStatus(),
 				"information": m.FormatInformation(),
 			} {
-				if !strings.Contains(render, "Peer-loss takeover: DEGRADED") {
-					t.Errorf("policy %q: %s does not mark never-seen takeover degraded:\n%s", policy, name, render)
+				if !strings.Contains(render, "Peer-loss decision: UNCONFIRMED") {
+					t.Errorf("policy %q: %s does not mark never-seen peer-loss decision unconfirmed:\n%s", policy, name, render)
 				}
 				if !strings.Contains(render, "peer never seen; no fence possible") {
 					t.Errorf("policy %q: %s missing never-seen reason:\n%s", policy, name, render)
@@ -295,7 +295,7 @@ func TestNeverSeenSyncFreshDoesNotMarkDegraded15211(t *testing.T) {
 	if peerConfirmedAbsent(m) {
 		t.Fatal("sync-fresh must suppress confirmation")
 	}
-	if strings.Contains(m.FormatStatus(), "Peer-loss takeover: DEGRADED") {
-		t.Errorf("suppressed never-seen marked degraded:\n%s", m.FormatStatus())
+	if strings.Contains(m.FormatStatus(), "Peer-loss decision: UNCONFIRMED") {
+		t.Errorf("suppressed never-seen decision marked unconfirmed:\n%s", m.FormatStatus())
 	}
 }

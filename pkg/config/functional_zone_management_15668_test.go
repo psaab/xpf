@@ -208,3 +208,119 @@ security { zones {
 		t.Fatalf("lenient CompileConfig: %v", err)
 	}
 }
+func TestFunctionalZoneManagementElidedHostInbound18788(t *testing.T) {
+	cases := []struct {
+		name      string
+		text      string
+		wantSvc   []string
+		wantProto []string
+	}{
+		{
+			name: "braced control",
+			text: `interfaces { fxp0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
+security { zones { functional-zone { management { interfaces { fxp0.0; }
+    host-inbound-traffic { system-services { ssh; } protocols { ospf; } }
+} } } }`,
+			wantSvc: []string{"ssh"}, wantProto: []string{"ospf"},
+		},
+		{
+			name: "duplicate braced control",
+			text: `interfaces { fxp0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
+security { zones {
+    functional-zone { management { interfaces { fxp0.0; }
+        host-inbound-traffic { system-services { ssh; } }
+    } }
+    functional-zone { management {
+        host-inbound-traffic { protocols { ospf; } }
+    } }
+} }`,
+			wantSvc: []string{"ssh"}, wantProto: []string{"ospf"},
+		},
+		{
+			name: "one-level elision",
+			text: `interfaces { fxp0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
+security { zones { functional-zone management { interfaces { fxp0.0; }
+    host-inbound-traffic system-services ssh;
+    host-inbound-traffic protocols ospf;
+} } }`,
+			wantSvc: []string{"ssh"}, wantProto: []string{"ospf"},
+		},
+		{
+			name: "two-level elision",
+			text: `security { zones {
+    functional-zone management host-inbound-traffic system-services ssh;
+    functional-zone management host-inbound-traffic protocols ospf;
+} }`,
+			wantSvc: []string{"ssh"}, wantProto: []string{"ospf"},
+		},
+		{
+			name:    "braced functional-zone packed multi-value",
+			text:    `security { zones { functional-zone { management host-inbound-traffic system-services ssh telnet; } } }`,
+			wantSvc: []string{"ssh", "telnet"},
+		},
+		{
+			name:    "one-level multi-value",
+			text:    `security { zones { functional-zone management { host-inbound-traffic system-services ssh telnet; } } }`,
+			wantSvc: []string{"ssh", "telnet"},
+		},
+		{
+			name:    "two-level multi-value",
+			text:    `security { zones { functional-zone management host-inbound-traffic system-services ssh telnet; } }`,
+			wantSvc: []string{"ssh", "telnet"},
+		},
+		{
+			name:    "braced functional-zone packed single",
+			text:    `security { zones { functional-zone { management host-inbound-traffic system-services ssh; } } }`,
+			wantSvc: []string{"ssh"},
+		},
+		{
+			name: "packed and braced management siblings",
+			text: `security { zones { functional-zone {
+    management host-inbound-traffic system-services ssh ssh;
+    management { host-inbound-traffic { protocols { ospf; } } }
+} } }`,
+			wantSvc: []string{"ssh", "ssh"}, wantProto: []string{"ospf"},
+		},
+		{
+			name: "packed management siblings",
+			text: `security { zones { functional-zone {
+    management host-inbound-traffic system-services ssh;
+    management host-inbound-traffic protocols ospf;
+} } }`,
+			wantSvc: []string{"ssh"}, wantProto: []string{"ospf"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := compileHierStrict(t, tc.text)
+			z := cfg.Security.Zones["management"]
+			if z == nil {
+				t.Fatalf("management zone missing for %q", tc.text)
+			}
+			if z.HostInboundTraffic == nil {
+				t.Fatalf("HostInboundTraffic nil, want svc %v proto %v", tc.wantSvc, tc.wantProto)
+			}
+			if !reflect.DeepEqual(z.HostInboundTraffic.SystemServices, tc.wantSvc) {
+				t.Errorf("SystemServices = %v, want %v", z.HostInboundTraffic.SystemServices, tc.wantSvc)
+			}
+			if !reflect.DeepEqual(z.HostInboundTraffic.Protocols, tc.wantProto) {
+				t.Errorf("Protocols = %v, want %v", z.HostInboundTraffic.Protocols, tc.wantProto)
+			}
+		})
+	}
+}
+
+func TestFunctionalZoneManagementElidedHostInboundUnknownRejected18788(t *testing.T) {
+	for _, tc := range []struct{ name, text string }{
+		{"two-level typo", `security { zones { functional-zone management host-inbound-traffic system-servics ssh; } }`},
+		{"braced functional-zone typo", `security { zones { functional-zone { management host-inbound-traffic system-servics ssh; } } }`},
+		{"one-level typo", `security { zones { functional-zone management { host-inbound-traffic system-servics ssh; } } }`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := parseHierText(t, tc.text)
+			if _, err := CompileConfig(tree); err == nil {
+				t.Fatalf("strict CompileConfig accepted unknown HIB child in %q", tc.text)
+			}
+		})
+	}
+}

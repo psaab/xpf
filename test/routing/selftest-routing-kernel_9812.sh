@@ -67,7 +67,8 @@ fi
 # The scoped loopback round trip is capability-gated independently and skips
 # when this fresh netns denies ICMP datagrams. The VRF acceptance cell widens
 # ping_group_range itself and remains forced below.
-out=$(XPF_REQUIRE_NETNS=1 unshare -rn "$GO" test -json=false -count=1 -v -run '9420|9819|11319|12083' ./pkg/routing/ 2>&1)
+runner="$(cd "$(dirname "$0")/../.." && pwd)/scripts/testguard-run.sh"
+out=$(XPF_REQUIRE_NETNS=1 "$runner" "$GO" test -json=false -count=1 -v -run '9420|9819|11319|12083' ./pkg/routing/ 2>&1)
 rc=$?
 
 fail=0

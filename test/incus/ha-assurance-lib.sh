@@ -953,6 +953,32 @@ ha_sample_window_max() {
 	printf '%s\n' "$maximum"
 }
 
+ha_sample_window_gauge_max() {
+	if (( $# < 15 )); then
+		printf 'sample gauge maximum: expected <slice> <rg> <node> <label>, ten statistics files, and <phase-pre baseline>\n' >&2
+		return 2
+	fi
+	local slice="$1" rg="$2" node="$3" label="$4" index phase path value maximum="" baseline
+	local -a args=("$@")
+	baseline="${args[14]}"
+	if [[ ! "$baseline" =~ ^[0-9]+$ ]]; then
+		printf 'sample gauge maximum: baseline is not an unsigned gauge\n' >&2
+		return 2
+	fi
+	for ((index = 0; index < 10; index++)); do
+		phase=$(printf 'sample-%02d' "$((index + 1))")
+		path="${args[index + 4]}"
+		if ! ha_snapshot_identity_verdict "$path" "$slice" "$phase" "$node" "$rg"; then return 2; fi
+		if ! value="$(ha_status_summary_value "$path" "$label")"; then return 2; fi
+		if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+			printf 'sample gauge maximum: %s is not an unsigned gauge in %s\n' "$label" "$path" >&2
+			return 2
+		fi
+		if [[ -z "$maximum" ]] || (( value > maximum )); then maximum="$value"; fi
+	done
+	printf '%s\n' "$maximum"
+}
+
 ha_sample_window_interface_max() {
 	if (( $# < 16 )); then
 		printf 'sample interface maximum: expected <slice> <rg> <node> <regex> <direction>, ten interface files, and <phase-pre baseline>\n' >&2

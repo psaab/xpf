@@ -2593,16 +2593,18 @@ peer liveness (`lastSeen`) or drive election.
   must key both nodes before enabling the cluster. `peerAuthSeen` remains a
   process-lifetime signal for the separate gRPC fabric downgrade guard, not a
   heartbeat admission input.
-- **Operator surface (#4484 L-9).** `FormatControlPlaneStatistics`
+- **Operator surface (#4484 L-9, #16016).** `FormatControlPlaneStatistics`
   (`show chassis cluster control-plane-statistics`) renders an
-  `Authentication:` line derived from `controlLinkAuthStatus()`, so an
-  operator can tell whether the control link's HMAC auth is actually
-  **engaged** (`engaged (local key configured; unauthenticated heartbeat frames
-  rejected)`) or running in **dual-accept** mode
-  (`dual-accept (no control-link key configured)`). A session-sync connection
-  established before keying is called out separately when the provider reports
-  it as still unauthenticated. The status inspects only `len(key)`, so the
-  secret is never rendered.
+  `Authentication:` line derived from `controlLinkAuthStatus()`. An operator
+  can tell whether HMAC auth is **engaged** (`engaged (local key configured;
+  unauthenticated heartbeat frames rejected)`) or running in **dual-accept**
+  mode (`dual-accept (no control-link key configured; ALARM:
+  unauthenticated control authority remains enabled)`). The unkeyed alarm
+  remains visible until an accepted key is configured; `UpdateConfig` emits
+  one error-level alarm per continuous unkeyed posture. A session-sync
+  connection established before keying is called out separately when the
+  provider reports it as still unauthenticated. The status inspects only key
+  presence, so the secret is never rendered.
 - **Secret hygiene.** The key is `config.Secret`, redacted on every
   JSON/YAML/`String()` path and masked as `##SECRET-DATA##` in raw-AST
   renders (`authentication-key` is already in `ast_redact.go`'s secret
@@ -3052,7 +3054,7 @@ an old-key connection is not part of this population.
 
 This grace preserves the in-place-upgrade path for a peer that can authenticate,
 while bounding how long a silent or incompatible pre-key stream can continue
-to pass frames without HMAC. A peer that cannot complete the upgrade loses this
+to pass heartbeat and the in-place upgrade exchange only (#16016: every authority frame is rejected once locally keyed). A peer that cannot complete the upgrade loses this
 session-sync connection after the grace; a later connection must complete
 `performSyncHandshake` with the configured PSK. The legacy node-local
 `strict-session-auth` leaf remains accepted for configuration compatibility,
@@ -3065,8 +3067,8 @@ does not arise.
 Confirm the state with `show chassis cluster statistics`, whose
 `Authentication:` line (`controlLinkAuthStatus`) covers both heartbeat and
 session-sync authentication. While a pre-key session-sync connection remains
-inside its upgrade grace, the line names it and reports that its frames are
-still accepted without HMAC; while a retired-key connection remains inside its
+inside its upgrade grace, the line names it and reports that only
+heartbeat and the upgrade exchange are accepted (#16016); while a retired-key connection remains inside its
 grace, the line names it distinctly as authenticated under a RETIRED key; after
 authentication, rekey, or eviction, it returns to the normal `engaged` line.
 
@@ -3839,10 +3841,17 @@ operator-facing table.
 No fencing is configured by default. Both the default and `disable-rg` leave
 dual-primary ownership possible; `disable-rg-confirmed` only waits for a
 point-in-time dataplane-suppression acknowledgement and also does not demote
-the peer or release its VIPs. `FormatStatus` and `FormatInformation` render any
-takeover without peer confirmation as `Peer-loss takeover: DEGRADED`; the
-information view marks local health degraded. This is diagnostic, not a
-takeover gate, and the marker clears when a peer heartbeat returns.
+the peer or release its VIPs. `FormatStatus` and `FormatInformation` mark an
+unconfirmed peer-loss decision as degraded. While the peer is not alive, each
+such decision, including a never-seen cold-start decision, raises
+`ALARM: dual-primary risk` in the status views, CRITICAL in local and gRPC
+`show system alarms`, and one `slog.Warn`. The alarm records an unconfirmed
+fencing/peer-loss decision, not proof that local ownership changed: readiness
+may keep a cold-start RG secondary while the alarm is active. Not hearing from
+a peer does not prove it absent; both nodes can miss their initial heartbeats
+during simultaneous startup. A live peer aborting an unsuccessful fence wait
+stays silent in the active alarm list. A returning peer heartbeat clears the
+alarm. This remains diagnostic and does not change election behavior.
 
 - **Wire** — one additive message type `syncMsgFenceAck = 35` carries
   `{seq u64, status u8, rgs_fenced u16, rgs_total u16}` LE. `syncMsgFence`
@@ -3892,7 +3901,7 @@ takeover gate, and the marker clears when a peer heartbeat returns.
   unlocked fence wait bumps `failoverGen` and the restore abandons, so
   the reset is honoured instead of silently undone.
   `TestFenceAbortResetDuringFenceWaitIsHonoured17117` pins that cell.
-- **A never-seen takeover is marked DEGRADED (#15211 A22-02).**
+- **A never-seen takeover is marked UNCONFIRMED (#15211 A22-02, #16024).**
   `handlePeerNeverSeen` cannot fence a peer that was never seen under any
   policy, so it marks the single-node takeover
   `peer never seen; no fence possible` via `markFenceUnconfirmedLocked`
@@ -5324,6 +5333,9 @@ it.
   `recordLastSentConfigGen` just before the socket write and held in
   `peerIncarnationState`, so a new peer incarnation is never compared against
   a generation sent to its predecessor. One exception is a standby OS reboot.
+  A reservation withdrawn before its guarded write does not raise that mark.
+  The #18526 regression cell proves that an epoch at the newest actually sent
+  generation remains admissible, while an older one is refused.
   The authority's peer-connect push lands on the rebooted peer's new
   connection BEFORE that connection's BulkStart reports the new boot id (the
   #18521 ordering), and the boot-id switch then retires the incarnation.

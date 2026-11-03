@@ -137,6 +137,17 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.GaugeValue,
 		float64(status.SessionReplicationQueueDepthMax))
 
+	// #18529: relay-loss counters and the relay-only lock pair are emitted
+	// unconditionally; zero means the helper observed no relay loss/contention.
+	c.emitConstMetric(ch, c.userspaceHandshakeRelayOutboxDrops,
+		prometheus.CounterValue, float64(status.HandshakeRelayOutboxDropsTotal))
+	c.emitConstMetric(ch, c.userspaceHandshakeRelayRefused,
+		prometheus.CounterValue, float64(status.HandshakeRelayRefusedTotal))
+	c.emitConstMetric(ch, c.userspaceHandshakeRelayLockAttempts,
+		prometheus.CounterValue, float64(status.HandshakeRelayLockAttemptsTotal))
+	c.emitConstMetric(ch, c.userspaceHandshakeRelayLockContended,
+		prometheus.CounterValue, float64(status.HandshakeRelayLockContendedTotal))
+
 	// #5674: peer-synced session imports rejected by the coordinator's
 	// aggregate admission bound. Also emitted unconditionally so a 0 is a real
 	// "no over-ceiling synced imports rejected" signal rather than an absent

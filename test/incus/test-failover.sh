@@ -863,7 +863,7 @@ ha_rg1_sampled_interface_delta() {
 }
 
 ha_rg1_report_sample_max() {
-	local label="$1" node="$2" metric="$3" pre_file="$4" result reason baseline
+	local label="$1" node="$2" metric="$3" pre_file="$4" result reason baseline sample_max_fn=ha_sample_window_max
 	shift 4
 	if [[ $# -ne 10 ]]; then
 		void "RG1 Group 8 report-only ${label} max unavailable (${node}): expected ten sample files"
@@ -877,7 +877,10 @@ ha_rg1_report_sample_max() {
 		void "RG1 Group 8 report-only ${label} max unavailable (${node}): ${baseline:-phase-pre baseline unavailable}"
 		return
 	fi
-	if result=$(ha_sample_window_max manual-rg1-failback 1 "$node" "$metric" "$@" "$baseline" 2>&1); then
+	case "$metric" in
+	"Pending TX local"|"Outstanding TX") sample_max_fn=ha_sample_window_gauge_max ;;
+	esac
+	if result=$("$sample_max_fn" manual-rg1-failback 1 "$node" "$metric" "$@" "$baseline" 2>&1); then
 		info "RG1 Group 8 report-only ${label} max (${node}): ${result}"
 	else
 		reason="$result"

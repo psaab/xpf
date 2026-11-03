@@ -393,6 +393,118 @@ else
 	pass=$((pass + 1))
 	printf 'ok   %-32s -> no unanchored primary/secondary match left in the harness\n' NO_UNANCHORED_GREP
 fi
+# --- WIRING: the harness must take the #1875 cluster lock ----------------
+# The lib cells above cannot see whether the harness itself enters the
+# destructive-cluster cell. Reverting the lock entry, or capturing the
+# original args only after --pool/--rule shifted them away, must fail here.
+wiring_line() { # <extended-regex> -> first matching line in $HARNESS_CODE
+	grep -nE "$1" <<<"$HARNESS_CODE" | head -1 | cut -d: -f1
+}
+w_line_orig="$(wiring_line '^ORIGINAL_ARGS=\("\$@"\)$')"
+w_line_lock_src="$(wiring_line '^source .*cluster-cell\.sh" \|\| exit 2$')"
+w_line_lock_call="$(wiring_line '^xpf_enter_destructive_cluster_cell .*"\$\{ORIGINAL_ARGS\[@\]\}" \|\| exit 2$')"
+w_line_parse="$(wiring_line '^while \[\[ \$# -gt 0 \]\]')"
+w_line_first_exec="$(wiring_line 'incus_cmd exec|incus exec')"
+wiring_ok=1
+wiring_detail=""
+if [[ -z "$w_line_orig" || -z "$w_line_parse" ]] || (( w_line_orig >= w_line_parse )); then
+	wiring_ok=0
+	wiring_detail="ORIGINAL_ARGS must be captured before the argument parser shifts \$@ (orig=${w_line_orig:-missing} parse=${w_line_parse:-missing})"
+fi
+if [[ "$wiring_ok" -eq 1 && ( -z "$w_line_lock_src" || -z "$w_line_lock_call" || -z "$w_line_first_exec" ) ]]; then
+	wiring_ok=0
+	wiring_detail="harness must source cluster-cell.sh and call xpf_enter_destructive_cluster_cell before its first incus exec (source=${w_line_lock_src:-missing} call=${w_line_lock_call:-missing} first-exec=${w_line_first_exec:-missing})"
+fi
+if [[ "$wiring_ok" -eq 1 ]] && ! (( w_line_lock_src < w_line_lock_call && w_line_lock_call < w_line_first_exec )); then
+	wiring_ok=0
+	wiring_detail="lock order must be source < call < first incus exec (source=$w_line_lock_src call=$w_line_lock_call first-exec=$w_line_first_exec)"
+fi
+if [[ "$wiring_ok" -eq 1 ]] && ! grep -q -- '--src-bind' <<<"$HARNESS_CODE"; then
+	wiring_ok=0
+	wiring_detail="harness must accept --src-bind (harness SRC_BIND override)"
+fi
+if [[ "$wiring_ok" -eq 1 ]] && ! grep -q -- '--target-ip' <<<"$HARNESS_CODE"; then
+	wiring_ok=0
+	wiring_detail="harness must accept --target-ip (harness TARGET_IP override)"
+fi
+w_line_dryrun="$(wiring_line '^if \[\[ "\$DRY_RUN" == "1" \]\]; then')"
+w_line_dryexit="$(wiring_line '^    exit 0$')"
+if [[ "$wiring_ok" -eq 1 && ( -z "$w_line_dryrun" || -z "$w_line_dryexit" ) ]]; then
+	wiring_ok=0
+	wiring_detail="dry-run must have an early exit before the lock preamble (dry-run=${w_line_dryrun:-missing} exit=${w_line_dryexit:-missing})"
+fi
+if [[ "$wiring_ok" -eq 1 ]] && ! (( w_line_dryrun < w_line_dryexit && w_line_dryexit < w_line_lock_src )); then
+	wiring_ok=0
+	wiring_detail="dry-run exit must precede cluster-cell.sh source (dry-run=$w_line_dryrun exit=$w_line_dryexit source=$w_line_lock_src)"
+fi
+if [[ "$wiring_ok" -eq 1 ]]; then
+	pass=$((pass + 1))
+	printf 'ok   %-32s -> harness captures ORIGINAL_ARGS before parsing, enters the cluster lock (source < call < first incus exec) with those args, and accepts --src-bind/--target-ip\n' LOCK_WIRING
+else
+	fail=$((fail + 1))
+	printf 'FAIL %-32s -> %s\n' LOCK_WIRING "$wiring_detail"
+fi
+
+# The runbook must claim-probe target ownership inside the locked cell, record
+# the helper verdict, and refuse before invoking the traffic harness.
+RUNBOOK="${SCRIPT_DIR}/../../docs/userspace-newflow-ceiling.md"
+RUNBOOK_CELL_CODE="$(
+	awk '
+		/^\.\/test\/incus\/with-cluster\.sh "10988 newflow ceiling run" --/ { capture=1 }
+		capture { print }
+		capture && /^CELL$/ { exit }
+	' "$RUNBOOK" | sed -e 's/[[:space:]]#.*$//' -e '/^[[:space:]]*#/d'
+)"
+runbook_line() {
+	local matches
+	matches="$(grep -nE "$1" <<<"$RUNBOOK_CELL_CODE" || true)"
+	printf '%s\n' "${matches%%$'\n'*}" | cut -d: -f1
+}
+rb_line_cluster_env="$(runbook_line '^source \./test/incus/cluster-env\.sh$')"
+rb_line_claim_lib="$(runbook_line '^source \./test/incus/ha-assurance-lib\.sh$')"
+rb_line_claim_call="$(runbook_line '^ha_target_claim_check ')"
+rb_line_claim_status="$(runbook_line '^claim_status="\$HA_TARGET_CLAIM_STATUS"$')"
+rb_line_claim_reason="$(runbook_line '^claim_reason="\$HA_TARGET_CLAIM_REASON"$')"
+rb_line_claim_record="$(runbook_line 'target-claim-preflight\.txt')"
+rb_line_claim_guard="$(runbook_line '^if \[\[ "\$claim_status" != 0 \]\]; then$')"
+rb_line_claim_pass="$(runbook_line "^printf 'PASS target claim: exactly one holder")"
+rb_line_traffic="$(runbook_line '^./test/incus/newflow-ceiling-harness\.sh .*--pool')"
+if [[ -z "$RUNBOOK_CELL_CODE" || -z "$rb_line_cluster_env" || -z "$rb_line_claim_lib" \
+	|| -z "$rb_line_claim_call" || -z "$rb_line_claim_status" || -z "$rb_line_claim_reason" \
+	|| -z "$rb_line_claim_record" || -z "$rb_line_claim_guard" || -z "$rb_line_claim_pass" \
+	|| -z "$rb_line_traffic" ]]; then
+	fail=$((fail + 1))
+	printf 'FAIL %-32s -> locked runbook cell is missing claim sources, recorded verdict/PASS guard, or traffic step\n' RUNBOOK_TARGET_CLAIM
+elif ! (( rb_line_cluster_env < rb_line_claim_lib && rb_line_claim_lib < rb_line_claim_call \
+	&& rb_line_claim_call < rb_line_claim_status && rb_line_claim_status < rb_line_claim_reason \
+	&& rb_line_claim_reason < rb_line_claim_record && rb_line_claim_record < rb_line_claim_guard \
+	&& rb_line_claim_guard < rb_line_claim_pass && rb_line_claim_pass < rb_line_traffic )); then
+	fail=$((fail + 1))
+	printf 'FAIL %-32s -> claim verdict must be recorded and PASS-gated before traffic (env=%s lib=%s claim=%s record=%s guard=%s pass=%s traffic=%s)\n' \
+		RUNBOOK_TARGET_CLAIM "$rb_line_cluster_env" "$rb_line_claim_lib" "$rb_line_claim_call" \
+		"$rb_line_claim_record" "$rb_line_claim_guard" "$rb_line_claim_pass" "$rb_line_traffic"
+elif grep -q 'test-connectivity\.sh' <<<"$RUNBOOK_CELL_CODE"; then
+	fail=$((fail + 1))
+	printf 'FAIL %-32s -> runbook must call the standalone claim checker, not the idle-lock test-connectivity gate\n' RUNBOOK_TARGET_CLAIM
+else
+	pass=$((pass + 1))
+	printf 'ok   %-32s -> standalone target claim is recorded and PASS-gated before traffic in one lock cell\n' RUNBOOK_TARGET_CLAIM
+fi
+
+# Explicit empty address flags must not silently fall back to environment
+# values or the env-file target.
+for flag in --src-bind --target-ip; do
+	empty_output="$(bash "$HARNESS" --pool selftest --rule selftest "$flag" "" --dry-run 2>&1)"
+	empty_rc=$?
+	if [[ "$empty_rc" -eq 2 && "$empty_output" == *"$flag requires a non-empty IP"* ]]; then
+		pass=$((pass + 1))
+		printf 'ok   %-32s -> rejected empty %s value\n' "EMPTY_${flag#--}" "$flag"
+	else
+		fail=$((fail + 1))
+		printf 'FAIL %-32s -> empty %s was not rejected (rc=%s): %s\n' "EMPTY_${flag#--}" "$flag" "$empty_rc" "$empty_output"
+	fi
+done
+
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

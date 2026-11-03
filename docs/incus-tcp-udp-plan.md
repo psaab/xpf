@@ -131,7 +131,6 @@ LAN_ADDR="10.0.61.102/24"  LAN_GW/LAN_VIP4="10.0.61.1"  LAN_VIP6="2001:559:8585:
 WAN_GW4="172.16.50.1"  WAN_VIP4="172.16.50.8"   # fixed #16468: was .6, stale vs conf (.8)
 IPERF_TARGET4="172.16.80.202"  IPERF_TARGET6="2001:559:8585:80::200"   # v4 was .200 until #18576 (dual-held)
 MOUSE_TARGET_V4="172.16.80.201"  MOUSE_TARGET_V6="2001:559:8585:80::201"
-TARGET_ALIAS_V4_DEPRECATED="172.16.80.200"   # #18576: kept only while held; expiry in the env
 DMZ_ADDR="172.16.50.201"  DMZ_TARGET_V6="2001:559:8585:50::201"   # #18576: pinned, no longer iperf octet + 1
 ```
 
@@ -1040,7 +1039,7 @@ VLAN and the FAB-VLAN change (U-LAN / 3991 for T-LAN / 3990).
 
 | Block | Owner today | New clusters must |
 |---|---|---|
-| `2001:559:8585:50::/64`, `172.16.50.0/24` | loss legacy RETH `.7/::7`, userspace `.8/::8`, gw `.1/::1`, standalone VM `xpf-fw` (`test/incus/xpf-test.conf`, pushed by `test/incus/setup.sh`) iface `.5/::5` + NAT64 pool `.14` + SNAT pool `.15` (both proxy-ARPed, #16473), legacy local cluster (`docs/ha-cluster.conf`, `xpf-cluster-fw{0,1}.conf`) RETH `.6/::6` + its fw0 NAT64 pool `.9` + SNAT pool / proxy-ARP `.12` (both proxy-ARPed, #16473) | add `.42/::a` (tcp), `.43/::b` (udp). They were `.10/.11` until #18558: a live ARP probe showed both v4 addresses held by **non-xpf** lab devices (see the note below this table), so v4 moved while v6 kept `::a/::b`. **Every address on this segment has exactly one stack owner (#16473): `.14`/`.15` are the standalone's alone and `.9`/`.12` the legacy local cluster's alone — never allocate them (or `.5`/`.6`) to another stack, and never move a pool back onto another stack's RETH (`.6`/`.7`/`.8`/`.42`/`.43`), or onto a foreign-held address (note below)** |
+| `2001:559:8585:50::/64`, `172.16.50.0/24` | loss legacy RETH `.7/::7`, userspace `.8/::8`, gw `.1/::1`, standalone VM `xpf-fw` iface `.5/::5` + NAT64 pool `.46` + SNAT pool `.47` (both proxy-ARPed); legacy local cluster RETH `.6/::6` + NAT64 pool `.44` + SNAT pool `.45` (both proxy-ARPed) | tcp/udp RETH `.42/::a`, `.43/::b` (moved from foreign-held `.10/.11`, #18558); before allocating any other address, use a same-day RFC 5227 sweep and request lab-owner DHCP/IPAM reservation. Keep pools distinct from interface addresses and each other. |
 | `2001:559:8585:80::/64`, `172.16.80.0/24` | RETH `.7/.8`, targets `.200/.201` (+`::200/::201`), pool-SNAT `172.16.80.7` (userspace proxy-arp; also legacy-loss RETH `.7` — the documented, accepted overlap: the loss pair's RETH and its own SNAT pool are the same stack, and no second stack claims `.7` on VLAN 80) | add `.210/::210`, `.211/::211`; ⚠ do **not** reuse `172.16.80.7` pool — if pool-SNAT exercise is copied, allocate per stack (candidates `.12` tcp / `.13` udp — Q7) |
 | `2001:559:8585:ef00::/64` + `10.0.61.0/24` | loss userspace LAN | untouched |
 | `2001:559:8585:df01::/64` + `10.0.89.0/24` | loss legacy LAN | untouched |
@@ -1060,13 +1059,24 @@ it as well: the segment's DHCP/IPAM is not under this repo's control.
 The 2026-10-31 sweep (tcp fw1, 3 rounds over each /24) found these foreign
 holders of addresses the shipped configs used:
 
-| address | used by | foreign holder |
+| address | claim / disposition | foreign holder |
 |---|---|---|
+| `172.16.50.9`, `.12` | legacy-local NAT64 / SNAT pools → `.44` / `.45` | `2a:dd:35:a2:96:97`, `ac:8b:a9:df:fd:f3` |
+| `172.16.50.14`, `.15` | standalone NAT64 / SNAT pools → `.46` / `.47` | `f4:e2:c6:ea:d7:80`, `9c:05:d6:e1:f2:0f` |
 | `172.16.50.10` | tcp WAN RETH (moved to `.42`) | `18:e8:29:2c:13:7a` |
 | `172.16.50.11` | udp WAN RETH (moved to `.43`) | `d8:b3:70:8c:f8:44` |
-| `172.16.50.9`, `.12` | legacy local NAT64 / SNAT pools (#18574) | `2a:dd:35:a2:96:97`, `ac:8b:a9:df:fd:f3` |
-| `172.16.50.14`, `.15` | standalone NAT64 / SNAT pools (#18574) | `f4:e2:c6:ea:d7:80`, `9c:05:d6:e1:f2:0f` |
 | `172.16.80.200` | loss's v4 iperf target until #18576 moved it to `.202` (not a stack claim) | answered by **both** `loss:xpf-mouse-target` (`10:66:6a:8b:91:a4`) and the external v6 target box (`f6:f0:06:10:77:d5`) (#18576) |
+
+**#18574 re-addressing (2026-11-02).** From tcp `xpf-tcp-fw0`'s
+`ge-0-0-2.50`, three RFC 5227 probe rounds (sender IP `0.0.0.0`) were
+sent to the four old claims and candidates `.44`-`.47` at 18:32 UTC.
+The old `.9`, `.12`, `.14`, and `.15` each had a non-xpf reply (MACs
+above); `.44`-`.47` had no replies in any round. `.43` answered from the
+udp RETH vMAC; `.51` had a foreign reply. The new allocations
+are legacy-local NAT64 `.44`, SNAT `.45`; standalone NAT64 `.46`, SNAT
+`.47`. These candidates do not overlap any other stack claim in the
+#16473 census. A lab-owner DHCP/IPAM reservation is still recommended
+and is not evidenced by this repository change.
 
 The full measured list is `foreignClaimed18558` in
 `pkg/configstore/shared_segment_foreign_claim_18558_test.go`. That test fails
@@ -1485,13 +1495,15 @@ address — same expectation.
   loss, not the external box. The plan's dedicated `.210/.211` targets
   eliminate this for the new stacks; do not "reuse the existing target to
   save time" without deciding which `.200` you mean.
-  **Resolved for loss (#18576):** loss's v4 target is now `.202`, a static
+  **Resolved for loss (#18576):** loss's v4 target is `.202`, a static
   alias only the container holds (claim-probed 2026-10-31), so loss
   measures the container in v4 and the external box in v6, each through an
-  address with one holder. `.200` remains dual-held. It stays pinned on
-  the container only as a deprecated alias until its expiry (see the loss
-  env), and nothing should target it.
-  <!-- Expires-when: #18576 closed -->
+  address with one holder. `.200` must not be measured. The cleanup PR
+  removes the deprecated pin from the generated unit, but does not remove
+  the already assigned live address. After merge, run
+  `mouse-target-setup.sh up` under the loss lock, then delete
+  `172.16.80.200/24` from the container's `eth0`. Keep #18576 open until
+  that live address is gone.
 - **R6 — UDP load realism.** `iperf3 -u` at high rates is host-bound and its
   loss numbers conflate generator/target CPU with dataplane loss. The V4
   knee-finding + fw counter reconciliation is the guard; dedicated UDP

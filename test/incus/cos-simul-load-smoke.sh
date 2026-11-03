@@ -27,28 +27,55 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # schedule library instead of script-local copies of cos-iperf-config.set.
 # shellcheck source=cos-apply-lib.sh
 source "${SCRIPT_DIR}/cos-apply-lib.sh"
+# shellcheck source=cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
+
 
 DIRECTION="${1:-push}"
 DURATION="${DURATION:-30}"
 STREAMS="${STREAMS:-12}"
-TARGET_V4="${TARGET_V4:-172.16.80.200}"
-HOST="${HOST:-loss:cluster-userspace-host}"
+TARGET_V4="${TARGET_V4:-$IPERF_TARGET4}"
+HOST="${HOST:-$CLUSTER_LAN_HOST}"
 ART="${ART:-/tmp/cos-simul-load-$(date +%s)}"
+COS_GATE_EMITTED=0
+cos_gate_exit() {
+  local status=$?
+  trap - EXIT
+  if [[ "$COS_GATE_EMITTED" != "1" ]]; then
+    local reason=harness-aborted
+    ((status == 0)) && reason=harness-incomplete
+    printf 'COS_GATE cos-simul-load-smoke VOID reason=%s\n' "$reason"
+  fi
+  exit "$status"
+}
+trap cos_gate_exit EXIT
+if [[ "${COS_GATE_SELFTEST:-0}" == "1" ]]; then
+  echo "COS_GATE cos-simul-load-smoke PASS reason=-- aggregate_gbps=1"
+  COS_GATE_EMITTED=1
+  exit 0
+fi
 
 # All 11 shaped/priority classes: the canonical grid minus best-effort
 # (#13070 / D10-15 — this list used to be a hand-maintained copy of
 # cos-iperf-config.set; class names and shapes live only in the shared
 # spec now, so there is nothing here to drift).
 declare -a PORTS=("${COS_SCHEDULE_PORTS[@]:1}")
+if [[ "${COS_GATE_REDUCER_SELFTEST:-0}" == "1" && ! -d "$ART" ]]; then
+  echo "COS_GATE cos-simul-load-smoke VOID reason=generator-evidence-invalid"
+  COS_GATE_EMITTED=1
+  exit 2
+fi
 
 mkdir -p "$ART"
-echo "#1614 simul-load smoke: direction=$DIRECTION duration=${DURATION}s streams=$STREAMS host=$HOST art=$ART"
+printf 'target_v4=%s\nlan_generator=%s\n' "$TARGET_V4" "$HOST" > "$ART/measurement-environment.txt"
+echo "#1614 simul-load smoke: direction=$DIRECTION duration=${DURATION}s streams=$STREAMS target=$TARGET_V4 host=$HOST art=$ART"
 
 REV_FLAG=""
 if [ "$DIRECTION" = "reverse" ]; then
   REV_FLAG="-R"
 fi
 
+if [[ "${COS_GATE_REDUCER_SELFTEST:-0}" != "1" ]]; then
 # Launch generator-side mpstat in parallel for the R8 check; we always
 # capture it because generator CPU evidence is cheap and useful.
 incus_exec "$HOST" mpstat -P ALL 1 "$DURATION" > "$ART/mpstat.txt" 2>&1 &
@@ -74,10 +101,12 @@ for pid in "${IPERF_PIDS[@]}"; do
   wait "$pid"
 done
 wait "$MPSTAT_PID" 2>/dev/null || true
+fi
 
 # Reduce verdict.
-python3 - <<'PYEOF' "$ART" "$DIRECTION" "$SCRIPT_DIR"
-import json, os, sys
+reducer_rc=0
+reducer_output=$(python3 - "$ART" "$DIRECTION" "$SCRIPT_DIR" <<'PYEOF'
+import json, math, os, sys
 
 art_dir = sys.argv[1]
 direction = sys.argv[2]
@@ -109,49 +138,42 @@ for port in ports:
     try:
         with open(f) as fh:
             d = json.load(fh)
+        if not isinstance(d, dict) or d.get("error"):
+            raise ValueError("iperf-error")
+        end = d.get("end")
+        if not isinstance(end, dict):
+            raise ValueError("missing-end")
+        streams = end.get("streams")
+        if not isinstance(streams, list) or not streams:
+            raise ValueError("missing-streams")
+        rates = []
+        for stream in streams:
+            sender = stream.get("sender") if isinstance(stream, dict) else None
+            bps = sender.get("bits_per_second") if isinstance(sender, dict) else None
+            if isinstance(bps, bool) or not isinstance(bps, (int, float)) or not math.isfinite(bps) or bps < 0:
+                raise ValueError("invalid-stream-rate")
+            rates.append(bps / 1e9)
+        sum_received = end.get("sum_received") or {}
+        sum_sent = end.get("sum_sent") or {}
+        if not isinstance(sum_received, dict) or not isinstance(sum_sent, dict):
+            raise ValueError("invalid-summary")
+        if "bits_per_second" in sum_received:
+            recv_bps = sum_received["bits_per_second"]
+        elif "bits_per_second" in sum_sent:
+            recv_bps = sum_sent["bits_per_second"]
+        else:
+            raise ValueError("truncated")
+        retr = sum_sent.get("retransmits")
+        if isinstance(recv_bps, bool) or not isinstance(recv_bps, (int, float)) or not math.isfinite(recv_bps) or recv_bps < 0:
+            raise ValueError("invalid-throughput")
+        if isinstance(retr, bool) or not isinstance(retr, int) or retr < 0:
+            raise ValueError("invalid-retransmits")
+        recv_gbps = recv_bps / 1e9
     except Exception as e:
         rows.append({"port": port, "class": class_names[port], "error": str(e)})
         continue
-    streams = d.get("end", {}).get("streams", [])
-    # Build the FULL per-flow rate vector including starved (0 bps)
-    # streams. The CoV must match the Rust SSOT
-    # (fairness.rs::compute_observed_cov), which never filters zeros: a
-    # starved flow is maximally unfair and must RAISE CoV, not vanish
-    # (#4239 V-10). Filtering zeros previously let a fully starved class
-    # print CoV 0 — the "perfectly fair" value — inverting the signal.
-    rates = []
-    for s in streams:
-        ss = s.get("sender", {})
-        bps = ss.get("bits_per_second", 0) or 0
-        rates.append(bps / 1e9)
-    # Codex code-r1 #5 fix: read throughput from sum_received
-    # (the actual landed bytes) but retransmits from sum_sent
-    # (where the sender-side retransmit counter lives — sum_received
-    # is always zero for the retransmit field in iperf3 JSON).
-    sum_received = d.get("end", {}).get("sum_received") or {}
-    sum_sent = d.get("end", {}).get("sum_sent") or {}
-    # gate_0 readability: an iperf3 run can exit rc==0 yet emit a payload
-    # that is useless to the gates — a top-level {"error": ...} object, or
-    # a result truncated before the end/sum row was written. Flag it here,
-    # reusing this single parse, so gate_0 can fail on it even for a class
-    # no throughput floor reads. A legitimately starved-to-zero class still
-    # carries bits_per_second (value 0), so key MEMBERSHIP — not truthiness
-    # — distinguishes "0 Gbps" from "no result row" (#4239 V-1 Copilot
-    # row-readability follow-up).
-    gen_error = None
-    if d.get("error"):
-        gen_error = "iperf-error"
-    elif not (("bits_per_second" in sum_received) or ("bits_per_second" in sum_sent)):
-        gen_error = "truncated"
-    recv_gbps = (sum_received.get("bits_per_second") or
-                 sum_sent.get("bits_per_second") or 0) / 1e9
-    retr = sum_sent.get("retransmits", 0) or 0
     # Whole-run population CoV via the shared Rust-SSOT mirror. This is a
-    # whole-run figure (warmup included) — fairness.rs computes the same
-    # estimator over the steady-state window, so the number is comparable
-    # in FORM but is labelled "whole-run" to flag the window difference
-    # (#4239 V-10). CoV is decorative here (printed, not gated) per the
-    # #1614 re-scope; aligning the estimator prevents misdiagnosis.
+    # whole-run figure (warmup included); CoV is decorative here, not gated.
     cov = population_cov(rates) * 100
     spread = (max(rates) / min(rates)) if rates and min(rates) > 0 else float("inf")
     shape = shape_gbps[port]
@@ -163,7 +185,7 @@ for port in ports:
         "whole_run_cov_pct": round(cov, 1),
         "spread": round(spread, 2) if spread != float("inf") else None,
         "retransmits": retr,
-        "gen_error": gen_error,
+        "gen_error": None,
     })
     total_recv += recv_gbps
     total_retr += retr
@@ -302,12 +324,21 @@ print(json.dumps(gates, indent=2))
 # becomes the script's exit status with no extra bash wiring (#4239 V-1).
 def _ok(v):
     return v["pass"] if isinstance(v, dict) else bool(v)
+failed = [name for name, gate in gates.items() if not _ok(gate)]
 
 
-failed = [name for name, v in gates.items() if not _ok(v)]
+if gen_failures:
+    print("COS_GATE cos-simul-load-smoke VOID reason=generator-evidence-invalid")
+    sys.exit(2)
 if failed:
-    print(f"\nFAIL: gates not satisfied: {', '.join(failed)}")
+    print(f"COS_GATE cos-simul-load-smoke FAIL reason=-- aggregate_gbps={round(total_recv, 3)}")
     sys.exit(1)
-print("\nPASS: all gates satisfied")
+print(f"COS_GATE cos-simul-load-smoke PASS reason=-- aggregate_gbps={round(total_recv, 3)}")
 sys.exit(0)
 PYEOF
+) || reducer_rc=$?
+if grep -q '^COS_GATE cos-simul-load-smoke ' <<<"$reducer_output"; then
+  COS_GATE_EMITTED=1
+fi
+printf '%s\n' "$reducer_output"
+exit "$reducer_rc"

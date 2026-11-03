@@ -79,16 +79,18 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
 # #13070 (D10-15): the port -> filter-term map comes from the shared CoS
 # schedule library (matching the cos-iperf-config.set this cell's cluster
 # actually applies) instead of a step1-local table.
 # shellcheck source=cos-apply-lib.sh
 source "${SCRIPT_DIR}/cos-apply-lib.sh"
 
-FW="loss:xpf-userspace-fw0"
-FW_PEER="loss:xpf-userspace-fw1"
-HOST="loss:cluster-userspace-host"
-IPERF_SERVER="172.16.80.200"
+FW="${INCUS_REMOTE}:${VM0}"
+FW_PEER="${INCUS_REMOTE}:${VM1}"
+HOST="${INCUS_REMOTE}:${LAN_HOST}"
+IPERF_SERVER="$IPERF_TARGET4"
 SOCK="/run/xpf/userspace-dp.sock"
 APPLY_COS_SH="${SCRIPT_DIR}/apply-cos-config.sh"
 

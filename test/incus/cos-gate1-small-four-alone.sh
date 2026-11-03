@@ -16,15 +16,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # library instead of script-local copies of cos-iperf-config.set.
 # shellcheck source=cos-apply-lib.sh
 source "${SCRIPT_DIR}/cos-apply-lib.sh"
+# shellcheck source=cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
+
 
 DIRECTION="${1:-push}"
 AF="${2:-v4}"
 DURATION="${DURATION:-20}"
 STREAMS="${STREAMS:-12}"
-TARGET_V4="${TARGET_V4:-172.16.80.200}"
-TARGET_V6="${TARGET_V6:-2001:559:8585:80::200}"
-HOST="${HOST:-loss:cluster-userspace-host}"
+TARGET_V4="${TARGET_V4:-$IPERF_TARGET4}"
+TARGET_V6="${TARGET_V6:-$IPERF_TARGET6}"
+HOST="${HOST:-$CLUSTER_LAN_HOST}"
 ART="${ART:-/tmp/cos-gate1-$(date +%s)}"
+COS_GATE_EMITTED=0
+cos_gate_exit() {
+  local status=$?
+  trap - EXIT
+  if [[ "$COS_GATE_EMITTED" != "1" ]]; then
+    local reason=harness-aborted
+    ((status == 0)) && reason=harness-incomplete
+    printf 'COS_GATE cos-gate1-small-four-alone VOID reason=%s\n' "$reason"
+  fi
+  exit "$status"
+}
+trap cos_gate_exit EXIT
+if [[ "${COS_GATE_SELFTEST:-0}" == "1" ]]; then
+  echo "COS_GATE cos-gate1-small-four-alone PASS reason=-- min_shape_pct=95"
+  COS_GATE_EMITTED=1
+  exit 0
+fi
 
 TARGET="$TARGET_V4"
 [ "$AF" = "v6" ] && TARGET="$TARGET_V6"
@@ -36,6 +56,7 @@ REV_FLAG=""
 [ "$DIRECTION" = "reverse" ] && REV_FLAG="-R"
 
 mkdir -p "$ART"
+printf 'target=%s\ntarget_v4=%s\nlan_generator=%s\n' "$TARGET" "$TARGET_V4" "$HOST" > "$ART/measurement-environment.txt"
 echo "#1630 Gate1 small-four-alone: dir=$DIRECTION af=$AF target=$TARGET dur=${DURATION}s streams=$STREAMS art=$ART"
 
 declare -a PIDS=()
@@ -50,8 +71,9 @@ for port in "${PORTS[@]}"; do
 done
 for pid in "${PIDS[@]}"; do wait "$pid"; done
 
-python3 - "$ART" "$DIRECTION" "$AF" "$SCRIPT_DIR" <<'PYEOF'
-import json, os, sys
+reducer_rc=0
+reducer_output=$(python3 - "$ART" "$DIRECTION" "$AF" "$SCRIPT_DIR" <<'PYEOF'
+import json, math, os, sys
 art, direction, af = sys.argv[1], sys.argv[2], sys.argv[3]
 # #13070 (D10-15): ports/classes/shapes are DERIVED from the fixture via
 # cos_fixture_spec (this heredoc used to carry its own copy of the grid).
@@ -63,32 +85,38 @@ names = {p: schedule[p]["forwarding_class"] for p in ports}
 shape = {p: schedule[p]["cap_bps"] / 1e9 for p in ports}
 rows = []
 all_pass = True
+invalid = False
+measured_pct = []
 for p in ports:
-    # Generator health: a crashed or unlaunched iperf3 sender leaves a
-    # nonzero (or missing) .rc sidecar. Treat it as a hard failure — do
-    # not read a stale/partial JSON as a pass (#4240 V-2).
     rcf = os.path.join(art, f"g1_{p}.rc")
     try:
         rc = int(open(rcf).read().strip())
     except Exception:
-        rc = 1  # missing/unreadable .rc == generator never completed
+        invalid = True
+        rows.append((p, names[p], shape[p], None, None, "VOID missing or invalid generator rc"))
+        continue
     if rc != 0:
-        rows.append((p, names[p], shape[p], None, None, f"ERR generator rc={rc}"))
-        all_pass = False
+        invalid = True
+        rows.append((p, names[p], shape[p], None, None, f"VOID generator rc={rc}"))
         continue
     f = os.path.join(art, f"g1_{p}.json")
     try:
-        d = json.load(open(f))
+        with open(f) as fh:
+            d = json.load(fh)
+        sr = d.get("end", {}).get("sum_received") or {}
+        ss = d.get("end", {}).get("sum_sent") or {}
+        raw_bps = sr.get("bits_per_second", ss.get("bits_per_second"))
+        if d.get("error") or isinstance(raw_bps, bool) or not isinstance(raw_bps, (int, float)) or not math.isfinite(raw_bps) or raw_bps < 0:
+            raise ValueError("iperf result has no valid receiver measurement")
+        recv = raw_bps / 1e9
     except Exception as e:
-        rows.append((p, names[p], shape[p], None, None, f"ERR {e}"))
-        all_pass = False
+        invalid = True
+        rows.append((p, names[p], shape[p], None, None, f"VOID {e}"))
         continue
-    sr = d.get("end", {}).get("sum_received") or {}
-    ss = d.get("end", {}).get("sum_sent") or {}
-    recv = (sr.get("bits_per_second") or ss.get("bits_per_second") or 0) / 1e9
     pct = recv / shape[p] * 100
     ok = pct >= 95.0
     all_pass = all_pass and ok
+    measured_pct.append(pct)
     rows.append((p, names[p], shape[p], round(recv, 3), round(pct, 1), "PASS" if ok else "FAIL"))
 print(f"\n#1630 Gate1 ({direction}/{af})")
 print(f"{'port':<6}{'class':<14}{'shape':>7}{'recv_G':>8}{'%shape':>8}  verdict")
@@ -97,11 +125,19 @@ for p, n, sh, recv, pct, v in rows:
         print(f"{p:<6}{n:<14}{sh:>6.2f}G {v}")
     else:
         print(f"{p:<6}{n:<14}{sh:>6.2f}G {recv:>7.2f}G {pct:>7.1f}%  {v}")
-print(f"\nGATE1 {'PASS' if all_pass else 'FAIL'} (all four >= 95% of shape)")
-# Propagate the verdict as the process exit status. Under `set -euo
-# pipefail` this heredoc is the last command, so a nonzero exit here
-# becomes the script's exit status. A JSON parse error or a nonzero
-# generator rc already flips all_pass, so malformed/missing output
-# correctly yields exit 1 (#4240 V-2).
-sys.exit(0 if all_pass else 1)
+if invalid or len(measured_pct) != len(ports):
+    print("COS_GATE cos-gate1-small-four-alone VOID reason=generator-evidence-invalid")
+    sys.exit(2)
+min_shape_pct = min(measured_pct)
+if all_pass:
+    print(f"COS_GATE cos-gate1-small-four-alone PASS reason=-- min_shape_pct={min_shape_pct:.1f}")
+    sys.exit(0)
+print(f"COS_GATE cos-gate1-small-four-alone FAIL reason=-- min_shape_pct={min_shape_pct:.1f}")
+sys.exit(1)
 PYEOF
+) || reducer_rc=$?
+if grep -q '^COS_GATE cos-gate1-small-four-alone ' <<<"$reducer_output"; then
+  COS_GATE_EMITTED=1
+fi
+printf '%s\n' "$reducer_output"
+exit "$reducer_rc"

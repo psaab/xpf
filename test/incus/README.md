@@ -68,60 +68,64 @@ is right and this table needs an edit in the same change.
 
 | Layer | Files |
 |---|---|
-| Shell, total | 115 `*.sh` = 59 runnable + 23 libraries + 33 self-tests (next rows; the harness census's own arithmetic is 61 + 21 + 33 — see the note under the reached/declared lists, where two semantic libraries sit in its runnable set by design) |
-| Runnable shell | 59 = 58 harnesses + `harness-result.sh` (the envelope) |
-| Sourced shell libraries | 23 = the 21 named in `scripts/harness-census.sh` (`cluster-cell.sh`, `cluster-env.sh`, `cluster-lock.sh`, `cos-apply-lib.sh`, `deploy-lib.sh`, `fbf-steering-lib.sh`, `failover-client-lib.sh`, `failover-clock-lib.sh`, `failover-journal-lib.sh`, `ha-assurance-lib.sh`, `ha-smoke-iperf-lib.sh`, `host-inbound-lib.sh`, `iperf-throughput-lib.sh`, `mouse-elephant-lib.sh`, `newflow-ceiling-lib.sh`, `private-rg-lib.sh`, `screen-probe-lib.sh`, `stress-failover-lib.sh`, `target-services.sh`, `wire-config-snapshot-lib.sh`, `wire-gate-lib.sh`) + `active-fw.sh` + `v6-na-recovery-lib-12495.sh` (both declared in `HARNESSES.unreached` as `LIBRARY`) |
-| Hermetic shell self-tests | 33 `*-selftest.sh`, listed below |
+| Shell, total | 121 `*.sh` = 61 runnable + 23 libraries + 37 self-tests (next rows; the harness census's own arithmetic over this directory is 63 + 21 + 37 — it counts the two semantic libraries named below as runnable — and its runnable set also sweeps in `test/nftables/*.sh` and `scripts/userspace-*.sh`: 69 runnable = 44 reached + 25 declared; see the note under the reached/declared lists) |
+| Runnable shell | 61 = 60 harnesses + `harness-result.sh` (the envelope) |
+| Sourced shell libraries | 23 = the 21 named in `scripts/harness-census.sh` (`cluster-cell.sh`, `cluster-env.sh`, `cluster-lock.sh`, `cos-apply-lib.sh`, `deploy-lib.sh`, `fbf-steering-lib.sh`, `failover-client-lib.sh`, `failover-clock-lib.sh`, `failover-journal-lib.sh`, `ha-assurance-lib.sh`, `ha-smoke-iperf-lib.sh`, `host-inbound-lib.sh`, `iperf-throughput-lib.sh`, `mouse-elephant-lib.sh`, `newflow-ceiling-lib.sh`, `private-rg-lib.sh`, `screen-probe-lib.sh`, `stress-failover-lib.sh`, `target-services.sh`, `wire-config-snapshot-lib.sh`, `wire-gate-lib.sh`) + `active-fw.sh` (census-REACHED) + `v6-na-recovery-lib-12495.sh` (declared in `HARNESSES.unreached` as `LIBRARY`) |
+| Hermetic shell self-tests | 37 `*-selftest.sh`, listed below |
 | Python | 59 = 27 tests (`*_test.py`, `test_*.py`) + 32 modules/helpers (incl. `unittest_shim.py`, `wire-routing-separation-temporal-selftest.py`) |
 | Cluster defs & fixtures | 26 tracked files that are neither `*.sh` nor `*.py` outside the Rust crates (listed under Non-code files) |
 | Rust crates | `cold-path-flooder/` (`Cargo.toml`, `Cargo.lock`, `src/main.rs`, `.gitignore`), `newflow-gen/` (same four) |
 | Declarations | `GO_BUILDTAG_REVIEWED`, `HARNESSES.unreached`, `LEDGER_COVERAGE.unreached`, `ledger-expected-red.txt` (counted in Non-code files above) |
 
-### Runnable shell (58 harnesses + the envelope)
+### Runnable shell census (69)
 
-Reached by a Makefile recipe today (35, per `harness-census.sh`,
-which also counts the 5 `scripts/userspace-*.sh`): `cc-rollback-functional.sh`,
-`cluster-build-identity.sh`, `cluster-setup.sh`, `dhcp-lease-failover.sh`,
-`harness-result.sh`, `ipsec-9506-fixture.sh`,
-`ipsec-content-change-10878.sh`, `mouse-target-setup.sh`,
-`persistent-nat-failover.sh`, `setup.sh`, `t12-g2-9506.sh`,
-`test-active-active.sh`, `test-chained-crash.sh`,
-`test-connectivity.sh`, `test-double-failover.sh`, `test-failover.sh`,
-`test-fbf-steering.sh`, `test-ha-crash.sh`, `test-host-inbound.sh`,
-`test-private-rg.sh`, `test-restart-connectivity.sh`, `rg-move-soak.sh`,
+Reached by a Makefile recipe today (44, per `harness-census.sh`; the
+census's total also includes five `scripts/userspace-*.sh` paths declared
+unreached below):
+`active-fw.sh`, `apply-cos-config.sh`, `cc-rollback-functional.sh`,
+`cluster-build-identity.sh`, `cluster-setup.sh`,
+`cos-be-contention-harness.sh`, `cos-gate1-small-four-alone.sh`,
+`cos-simul-load-smoke.sh`, `dhcp-lease-failover.sh`,
+`fairness-cos-class-sweep.sh`, `fairness-cos-throughput-headroom.sh`,
+`fairness-harness.sh`, `harness-result.sh`, `iperf-matrix.sh`,
+`ipsec-9506-fixture.sh`, `ipsec-content-change-10878.sh`,
+`mouse-target-setup.sh`, `persistent-nat-failover.sh`, `rg-move-soak.sh`,
+`setup.sh`, `t12-g2-9506.sh`, `test-active-active.sh`,
+`test-chained-crash.sh`, `test-connectivity.sh`, `test-double-failover.sh`,
+`test-failover.sh`, `test-fbf-steering.sh`, `test-ha-crash.sh`,
+`test-host-inbound.sh`, `test-private-rg.sh`, `test-restart-connectivity.sh`,
 `test-rolling-upgrade.sh`, `test-stress-failover.sh`,
 `test-wire-properties.sh`, `wg-interop.sh`, `wire-appmatch-twins.sh`,
 `wire-conntrack-lifecycle.sh`, `wire-hostinbound-deny.sh`,
 `wire-nat-frag-needed.sh`, `wire-policy-deny.sh`,
-`wire-routing-separation.sh`, `wire-zone-matrix.sh`, `with-cluster.sh`.
+`wire-routing-separation.sh`, `wire-zone-matrix.sh`, `with-cluster.sh`,
+`test/nftables/selftest-nftables-kernel_18745.sh`.
 
-Declared unreached in `HARNESSES.unreached` (28 here; +5 in `scripts/`):
-GATE — `cos-be-contention-harness.sh`, `cos-gate1-small-four-alone.sh`,
-`cos-simul-load-smoke.sh`, `fairness-cos-class-sweep.sh`,
-`fairness-cos-throughput-headroom.sh`, `newflow-ceiling-harness.sh`,
-`reverse-key-collision-probe.sh`, `test-mouse-latency-matrix.sh`,
-`test-mouse-latency-same-class.sh`, `test-mouse-latency.sh`;
-COMPOSED — `apply-cos-config.sh`, `fairness-harness.sh`,
-`step1-capture.sh`;
+Declared unreached in `HARNESSES.unreached` (20 under `test/incus/`, plus
+five under `scripts/`):
+GATE — `newflow-ceiling-harness.sh`, `reverse-key-collision-probe.sh`,
+`test-mouse-latency-matrix.sh`, `test-mouse-latency-same-class.sh`,
+`test-mouse-latency.sh`;
+COMPOSED — `step1-capture.sh`;
 DIAGNOSTIC — `analyze-userspace-traces.sh`, `capture-cold-stall.sh`,
 `pnat-catchall-outage-check-8341.sh`, `pnat-counter-read-8447.sh`,
 `pnat-mint-observability-8341.sh`, `pnat-rule-shape-8447.sh`,
 `pnat-upstream-stage-8447.sh`, `pnat-wedge-recovery-8447.sh`,
 `screen-probe.sh`, `step1-baseline-and-matrix.sh`, `step1-classify.sh`,
 `step2-sched-switch-capture.sh`, `test-v6-na-recovery-12495.sh`;
-LIBRARY — `active-fw.sh`, `v6-na-recovery-lib-12495.sh`.
+LIBRARY — `v6-na-recovery-lib-12495.sh`;
+SCRIPTS — `userspace-ha-validation.sh`,
+`userspace-ha-failover-validation.sh`, `userspace-native-gre-validation.sh`,
+`userspace-perf-compare.sh`, `userspace-phase-cycle.sh`.
 
-That is every `*.sh` here, in the census's arithmetic: 33 reached +
-28 declared + 21 census libraries + 33 self-tests = 115. The two
-`LIBRARY` declarations are semantic libraries that the census
-deliberately keeps in its runnable set (they are not in its named
-`LIBRARIES` list), so the semantic split at the top of this section is
-59 runnable / 23 libraries; both add to 115.
+That is every `*.sh` here, counted the census way: 44 reached + 25 declared + 21 named census libraries + 37 self-tests = 127 — six more than the 121 on disk here, because the census runnable set also sweeps in `test/nftables/*.sh` (1 reached) and `scripts/userspace-*.sh` (5 declared) from outside this directory.
+The two semantic libraries `active-fw.sh` and `v6-na-recovery-lib-12495.sh` remain in the census runnable set because they are not in its named `LIBRARIES` list; the semantic split is 61 runnable / 23 libraries / 37 self-tests, also totaling 121.
 
-### Hermetic shell self-tests (33)
+### Hermetic shell self-tests (37)
 
 `cluster-build-identity-selftest.sh`, `cluster-cell-selftest.sh`,
-`cluster-env-selftest.sh`, `cos-apply-lib-selftest.sh`,
+`cluster-env-selftest.sh`, `connectivity-mtr-selftest.sh`,
+`cos-apply-lib-selftest.sh`,
 `deploy-lib-selftest.sh`, `failover-client-selftest.sh`,
 `failover-clock-selftest.sh`, `failover-journal-selftest.sh`,
 `fbf-steering-harness-selftest.sh`, `fbf-steering-selftest.sh`,
@@ -129,8 +133,10 @@ deliberately keeps in its runnable set (they are not in its named
 `ha-assurance-selftest.sh`, `harness-census-selftest.sh`,
 `harness-ledger-mutation-selftest.sh`, `harness-result-selftest.sh`,
 `host-inbound-selftest.sh`, `ignored-cell-census-selftest.sh`,
+`instructions-census-selftest.sh`,
 `iperf-throughput-selftest.sh`, `make-guard-probes-selftest.sh`,
-`miri-census-selftest.sh`, `mouse-elephant-selftest.sh`,
+`miri-census-selftest.sh`, `mirror-census-selftest.sh`,
+`mouse-elephant-selftest.sh`, `mouse-target-setup-selftest.sh`,
 `newflow-ceiling-selftest.sh`, `private-rg-fullcycle-selftest.sh`,
 `private-rg-selftest.sh`, `screen-probe-selftest.sh`,
 `selftest-census-selftest.sh`, `stress-failover-selftest.sh`,
@@ -241,7 +247,7 @@ Cluster selection (highest precedence first):
 | `XPF_CLUSTER_LOCK` / `XPF_CLUSTER_LOCK_TIMEOUT` | Lock file (default under `/var/worktrees/.cache/tmpdir/`) / wait timeout in seconds for `with-cluster.sh`; `XPF_CLUSTER_LOCK_HELD` is set inside a live cell and makes nested cells reentrant |
 | `XPF_LEDGER`, `XPF_REPO_ROOT` | Ledger directory override / repo-root override for `harness-result.sh`; defaults `test/results/ledger.d/` and the git toplevel |
 | `TMPDIR`, `GOCACHE`, `GOTMPDIR`, `CARGO_TARGET_DIR` | Scratch pins for self-tests; `run-selftests.sh` defaults them under `/var/worktrees/.cache` and an explicit caller value wins |
-| Sourced env files | Set `INCUS_REMOTE`, `VM0`/`VM1` or `FW0`/`FW1`, `LAN_HOST`, `PROFILE`, `CLUSTER_CONF`, `CLUSTER_AUTH_KEY_FILE` (#18724; see below), `LAN_*`, `WAN_*`, `IPERF_TARGET4/6`, `MOUSE_TARGET_*`, `DMZ_*`, and loss's `TARGET_ALIAS_V4_DEPRECATED` (`.200`; `mouse-target-setup.sh` keeps that pin only while held, and the expiry is in the env file). `cluster-env.sh` derives the rest. An explicit caller override of any derived name wins. Exception, the #18576 leak guard: loading a DIFFERENT env first unsets every name still equal to the value the previous env resolved, and the census in `cluster-env-selftest.sh` keeps that guard list complete. Run knob, not set by env files: `MOUSE_TARGET_CLAIM_PROBE=skip` skips `mouse-target-setup.sh up`'s claim probe of a new address. The skip is recorded in `mouse-addr.service` and shown by `status` |
+| Sourced env files | Set `INCUS_REMOTE`, `VM0`/`VM1` or `FW0`/`FW1`, `LAN_HOST`, `PROFILE`, `CLUSTER_CONF`, `CLUSTER_AUTH_KEY_FILE` (#18724; see below), `LAN_*`, `WAN_*`, `IPERF_TARGET4/6`, `MOUSE_TARGET_*`, and `DMZ_*`. `cluster-env.sh` derives the rest. An explicit caller override of any derived name wins. Exception, the #18576 leak guard: loading a DIFFERENT env first unsets every name still equal to the value the previous env resolved, and the census in `cluster-env-selftest.sh` keeps that guard list complete. Run knob, not set by env files: `MOUSE_TARGET_CLAIM_PROBE=skip` skips `mouse-target-setup.sh up`'s claim probe of a new address. The skip is recorded in `mouse-addr.service` and shown by `status` |
 
 
 **The cluster authentication key is not in the repository (#18724).** The

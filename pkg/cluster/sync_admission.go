@@ -240,6 +240,14 @@ func (s *SessionSync) refreshPeerIPs() {
 	s.peerIPs = resolveConfiguredPeerIPs(s.peerAddr, s.peerAddr1)
 }
 
+// peerIPPinRequired reports whether any configured peer endpoint is an IP
+// literal. Literal deployments can enforce the peer-IP boundary at install
+// time rather than merely reserving pre-auth admission slots for that host.
+// Hostname-only deployments retain the existing DNS/reconnect behavior.
+func (s *SessionSync) peerIPPinRequired() bool {
+	return peerIPOf(s.peerAddr).IsValid() || peerIPOf(s.peerAddr1).IsValid()
+}
+
 // isPeerRemote reports whether conn's remote IP matches a configured peer fabric
 // address. The reservation matches on IP only — the peer dials from an ephemeral
 // source port — so a flood from any other host cannot consume the peer's

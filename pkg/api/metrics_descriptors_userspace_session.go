@@ -376,6 +376,30 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"backlog question (#4800).",
 		nil, nil,
 	)
+	c.userspaceHandshakeRelayOutboxDrops = prometheus.NewDesc(
+		"xpf_userspace_handshake_relay_outbox_drops_total",
+		"Cross-worker TCP handshake relays refused by the sender's bounded "+
+			"per-worker outbox (drop-newest, #18520/#18529).",
+		nil, nil,
+	)
+	c.userspaceHandshakeRelayRefused = prometheus.NewDesc(
+		"xpf_userspace_handshake_relay_refused_total",
+		"Cross-worker TCP handshake relays refused by a sibling command "+
+			"queue at its relay watermark (#18520/#18529).",
+		nil, nil,
+	)
+	c.userspaceHandshakeRelayLockAttempts = prometheus.NewDesc(
+		"xpf_userspace_handshake_relay_lock_attempts_total",
+		"Sibling command-queue lock acquisitions attempted by handshake-relay "+
+			"fan-out; denominator for the relay lock contended fraction (#18529).",
+		nil, nil,
+	)
+	c.userspaceHandshakeRelayLockContended = prometheus.NewDesc(
+		"xpf_userspace_handshake_relay_lock_contended_total",
+		"Subset of handshake-relay sibling command-queue lock attempts that "+
+			"found the queue mutex already held and had to block (#18529).",
+		nil, nil,
+	)
 	c.userspaceSessionPublishErrors = prometheus.NewDesc(
 		"xpf_userspace_session_publish_errors_total",
 		"Failed USERSPACE_SESSIONS BPF-map publishes across all helper "+

@@ -29,7 +29,7 @@ set -uo pipefail
 
 NODE="${NODE:-loss:xpf-userspace-fw0}"
 HOST="${HOST:-loss:cluster-userspace-host}"   # lan-side container, 10.0.61.102
-TARGET="${TARGET:-172.16.80.200}"        # wan-side ping target
+TARGET="${TARGET:-}"
 SG="sg incus-admin -c"
 
 run_cli() { $SG "incus exec $NODE -- bash -lc 'cli'" 2>&1; }
@@ -73,6 +73,7 @@ xpf_enter_destructive_cluster_cell "cc-rollback-functional --arm $ARM" "$0" "$@"
 # tcp xpf-tcp-target, udp xpf-udp-target), not a hardcoded loss name.
 # shellcheck source=test/incus/cluster-env.sh
 source "${_CELL_DIR}/cluster-env.sh"
+TARGET="${TARGET:-$IPERF_TARGET4}"
 NODE="${NODE:-$FW0}"
 HOST="${HOST:-$CLUSTER_LAN_HOST}"
 # ── Arm B diagnostic-preserving helpers (#9531 §5d) ──────────────────

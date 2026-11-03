@@ -8,7 +8,7 @@ set -u
 here=$(cd "$(dirname "$0")" && pwd)
 # -json in GOFLAGS changes go's stdout format, so pin the text output this
 # watcher consumes. `go test` accepts this flag after packages and args.
-"$@" -json=false | awk -f "$here/go-timeout-watch.awk"
+"$here/testguard-run.sh" "$@" -json=false | awk -f "$here/go-timeout-watch.awk"
 rc=("${PIPESTATUS[@]}")
 if [ "${rc[1]}" -eq 3 ]; then
 	exit 3

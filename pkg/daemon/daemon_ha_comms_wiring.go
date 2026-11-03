@@ -291,6 +291,10 @@ func (d *Daemon) handleConfigSyncWithProvenance(
 	ancestry []configstore.RenameDescriptor,
 	peerAuthenticated bool,
 ) error {
+	if !peerAuthenticated && d.cluster != nil && d.cluster.ControlLinkAuthConfigured() {
+		return fmt.Errorf("cluster: refusing unauthenticated config sync after local control-link keying (#16016)")
+	}
+
 	if !peerAuthenticated {
 		tree, errs := config.NewParser(configText).Parse()
 		if len(errs) != 0 {

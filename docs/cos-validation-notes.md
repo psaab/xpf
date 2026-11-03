@@ -349,9 +349,11 @@ the higher-severity transmit-path question.
 ### Reading them during an iperf3 run
 
 ```bash
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
+
 # 16-flow iperf3 in background
 incus exec loss:cluster-userspace-host -- \
-  iperf3 -c 172.16.80.200 -P 16 -t 30 -p 5201 -i 0 >/dev/null 2>&1 &
+  iperf3 -c "$IPERF_TARGET4" -P 16 -t 30 -p 5201 -i 0 >/dev/null 2>&1 &
 
 sleep 10   # let the queue fill and the counters move
 

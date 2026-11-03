@@ -1,4 +1,22 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Fabric gRPC mutating-RPC replay: a valid token for `ClearSessions` or a
+    fabric-safe `SystemAction` is now accepted once per receiving daemon
+    process. A monotone replay-window high-water mark prevents replay after
+    wall-clock rollback. Read-only RPCs remain unchanged; the bounded replay
+    cache fails closed at capacity. Fabric transport remains plaintext; mTLS
+    is still deferred (#16020).
+  * Dataplane: assign admitted fabric-parent ingress the unique routing domain
+    of its fab* overlay so host-bound ICMP to fabric peers reaches local
+    delivery instead of the unresolved-domain path (#18212).
+  * userspace-dp: keep pool-SNAT alias replies directed to their canonical
+    peer row after RefreshOwnerRGS, including when the pool target resolves
+    as a WAN MissingNeighbor or ForwardCandidate (#18535).
+  * A cached FabricRedirect for a routed destination is re-resolved when its
+    fresh local egress RG is active after RG activation, instead of continuing
+    to send the flow to the peer that no longer owns the route (#18588).
+  * Lab stack address collision (#18574): move standalone and legacy-local
+    NAT64/SNAT pools off foreign-held VLAN 50 addresses and document the
+    same-day RFC 5227 probe results for the replacement addresses.
   * Firewall filters: a packet that matches no term of a stateless firewall
     filter (interface input/output, inet and inet6, and the lo0 input
     filter) is now DISCARDED, as on Junos, instead of accepted. Each such

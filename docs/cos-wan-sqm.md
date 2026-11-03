@@ -252,8 +252,11 @@ the reth0.80 / 172.16.80.0/24 path). A compile guard
 parses and compiles on the production flat-set path.
 
 Remember the standing gotchas: **deploy wipes CoS** (re-apply after
-every deploy), and the iperf3 target is **172.16.80.200** (never
-172.16.100.x). Run on the RG0 primary (`loss:xpf-userspace-fw0`).
+every deploy), and the iperf3 target is the env-selected
+`IPERF_TARGET4` (**172.16.80.202** on `loss` today, #18576 — never
+172.16.100.x and never the dual-held 172.16.80.200; `source
+test/incus/cluster-env.sh` first). Run on the RG0 primary
+(`loss:xpf-userspace-fw0`).
 
 ```bash
 # 1. Apply the fixture atomically (same pattern as apply-cos-config.sh:
@@ -284,7 +287,7 @@ incus exec loss:xpf-userspace-fw0 -- /usr/local/sbin/cli -c \
 #    active_flow_count 1, assertion (b) empty). 8 flows over 6 queues
 #    pigeonhole at least one worker into >=2 flows, making (b)
 #    deterministic.
-iperf3 -c 172.16.80.200 -P 8 -t 20
+iperf3 -c "$IPERF_TARGET4" -P 8 -t 20
 
 # 4. Pinned assertions.
 #    (a) Shape held: iperf3 aggregate ~= the fixture's shaping-rate
@@ -310,7 +313,7 @@ commit
 exit
 quit
 EOF
-iperf3 -c 172.16.80.200 -P 2 -t 10   # expect unshaped line rate again
+iperf3 -c "$IPERF_TARGET4" -P 2 -t 10   # expect unshaped line rate again
 ```
 
 Note the fixture deliberately uses `shaping-rate 3g` (not the

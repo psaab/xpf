@@ -26,41 +26,25 @@ import (
 // entries and RETH (resolved to the local physical member's ifindex,
 // rendered under the reth unit name).
 //
-// #16065: the map is now config.SessionIfNamesByIfindex, the session
-// tables' shared derivation. A device claimed by two DIFFERENT unit
-// names (this fixture's lo device, claimed by lo.0 as "lo" and by
-// reth0.0 as "reth0") is refused rather than first-wins named, so the
-// Junos-spelling test below pins the refusal and the uniquely-claimed
-// kernel control keeps the #15094 resolution assertion.
+// #16065: SessionIfNamesByIfindex refuses a kernel ifindex claimed by
+// different displayed unit names rather than first-wins. The ambiguous
+// `lo` / `reth0` fixture is kept in a separate test; the #15094 cell below
+// uses a unique RETH-to-loopback claim so its Junos-name resolution remains
+// a positive control.
 //
 // RED-on-revert: restoring LinkByName(ifName) with the authored name
-// reds every Junos-spelled cell below — only the kernel-spelled control
-// ("lo") stays green, which is exactly the pre-fix behaviour.
+// leaves unique `reth0` unmapped and reds TestIngressIfNamesJunosSpelling15094;
+// the kernel-spelled control still passes, proving the old gap.
 
 func ingressCfg15094() *config.Config {
 	return &config.Config{
 		Chassis: config.ChassisConfig{Cluster: &config.ClusterConfig{NodeID: 0}},
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
-			// Kernel-spelled control: authored name == kernel name,
-			// the one shape that already worked pre-fix.
-			"lo": {
-				Name:  "lo",
-				Units: map[int]*config.InterfaceUnit{0: {Number: 0}},
-			},
-			// RETH whose local member's kernel device is loopback:
-			// the member stanza is keyed "lo-member" with Name "lo",
-			// so cfg.ResolveKernelIfName("reth0") == "lo" — a device
-			// that exists on every test host — while the authored
-			// "reth0" itself names no kernel device. This is the
-			// Junos-spelling gap in miniature (cf. ge-0/0/1 ->
-			// ge-0-0-1 on the lab config).
+			// Junos RETH name uniquely resolves to the loopback kernel device.
 			"reth0": {
 				Name:            "reth0",
 				RedundancyGroup: 1,
-				Units: map[int]*config.InterfaceUnit{
-					0:  {Number: 0},
-					50: {Number: 50, VlanID: 50},
-				},
+				Units:           map[int]*config.InterfaceUnit{0: {Number: 0}},
 			},
 			"lo-member": {
 				Name:            "lo",
@@ -68,6 +52,15 @@ func ingressCfg15094() *config.Config {
 			},
 		}},
 	}
+}
+
+func ambiguousIngressCfg15094() *config.Config {
+	cfg := ingressCfg15094()
+	cfg.Interfaces.Interfaces["lo"] = &config.InterfaceConfig{
+		Name:  "lo",
+		Units: map[int]*config.InterfaceUnit{0: {Number: 0}},
+	}
+	return cfg
 }
 
 // rawEvent15094 builds a minimal SESSION_OPEN wire frame carrying the
@@ -82,6 +75,7 @@ func rawEvent15094(ifindex uint32) []byte {
 	binary.BigEndian.PutUint16(data[42:44], 443)
 	data[52] = 1 // SESSION_OPEN (eventTypeSessionOpen)
 	data[53] = 6 // TCP
+	data[55] = 2 // addrFamilyInet; #16127 drops unknown family 0
 	// Keep the per-policy syslog gate open on the source==nil path:
 	// logEvent suppresses SESSION_OPEN records whose trailing log byte
 	// is 0. Set it so the record reaches the buffer.
@@ -98,40 +92,49 @@ func TestIngressIfNamesJunosSpelling15094(t *testing.T) {
 	loIdx := uint32(lo.Index)
 
 	cfg := ingressCfg15094()
-	// Premise: the Junos-spelled RETH ref resolves to the loopback
-	// kernel device, while the authored name itself is NOT a kernel
-	// device — the exact gap the old LinkByName(ifName) fell into.
 	if got := cfg.ResolveKernelIfName("reth0"); got != "lo" {
 		t.Fatalf("premise: ResolveKernelIfName(reth0) = %q, want %q", got, "lo")
 	}
 	if _, err := net.InterfaceByName("reth0"); err == nil {
 		t.Skip("host unexpectedly has a reth0 device; premise cannot be exercised")
 	}
+	if got, ok := buildIfNames(cfg)[loIdx]; !ok || got != "reth0" {
+		t.Fatalf("unique RETH ifindex mapping = %q (present=%v), want %q", got, ok, "reth0")
+	}
 
 	buf := logging.NewEventBuffer(16)
 	er := logging.NewEventReader(nil, buf)
 	d := &Daemon{}
 	d.applySyslogConfig(er, cfg)
-
-	// An event arriving on the loopback ifindex (the RETH's local
-	// member device) must render under the operator-facing name.
-	// #16065: the table is the session table's projection — reth0
-	// unit 0 and lo unit 0 both claim {loIdx, 0} under DIFFERENT
-	// display names ("reth0" vs "lo"), so the shared key is REFUSED
-	// and neither name is stored. The pre-#16065 first-wins builder
-	// named it "reth0"; the refusal is the honest answer (the device
-	// is claimed by two units the event cannot distinguish), and it
-	// is pinned directly in TestBuildIfNamesRefusesSharedWireGuard16065
-	// for the TUN shape. Here the surviving assertion is the one the
-	// #15094 fix actually owns: a unit that UNIQUELY claims its
-	// device still resolves. That is the kernel-spelled control in
-	// the next test; this fixture's RETH claim is now ambiguous, so
-	// assert the refusal explicitly rather than the old winner.
-	names := buildIfNames(cfg)
-	if name, ok := names[loIdx]; ok {
-		t.Fatalf("#16065: loopback ifindex %d is claimed by both reth0.0 (as \"reth0\") "+
-			"and lo.0 (as \"lo\") — the shared key must be refused, got %q", loIdx, name)
+	if !er.ProcessRawEvent(rawEvent15094(loIdx)) {
+		t.Fatal("ProcessRawEvent rejected the fixture frame")
 	}
+	recs := buf.Latest(1)
+	if len(recs) != 1 {
+		t.Fatalf("buffer holds %d records, want 1 (syslog-gate offset wrong?)", len(recs))
+	}
+	if recs[0].IngressIface != "reth0" {
+		t.Fatalf("Junos-spelled RETH event ingress = %q, want %q", recs[0].IngressIface, "reth0")
+	}
+}
+func TestIngressIfNamesRejectsAmbiguousRethLoopback16065(t *testing.T) {
+	lo, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skipf("loopback unavailable: %v", err)
+	}
+	loIdx := uint32(lo.Index)
+	cfg := ambiguousIngressCfg15094()
+
+	if got := cfg.ResolveKernelIfName("reth0"); got != "lo" {
+		t.Fatalf("premise: ResolveKernelIfName(reth0) = %q, want %q", got, "lo")
+	}
+	if name, ok := buildIfNames(cfg)[loIdx]; ok {
+		t.Fatalf("#16065: loopback ifindex %d is claimed by both lo.0 and reth0.0; got first-wins name %q", loIdx, name)
+	}
+
+	buf := logging.NewEventBuffer(16)
+	er := logging.NewEventReader(nil, buf)
+	(&Daemon{}).applySyslogConfig(er, cfg)
 	if !er.ProcessRawEvent(rawEvent15094(loIdx)) {
 		t.Fatal("ProcessRawEvent rejected the fixture frame")
 	}
@@ -140,8 +143,7 @@ func TestIngressIfNamesJunosSpelling15094(t *testing.T) {
 		t.Fatalf("buffer holds %d records, want 1 (syslog-gate offset wrong?)", len(recs))
 	}
 	if recs[0].IngressIface != "" {
-		t.Fatalf("ambiguous ifindex must resolve nameless, got %q — a first-wins sibling "+
-			"name is the #16065 defect", recs[0].IngressIface)
+		t.Fatalf("ambiguous ifindex must resolve nameless, got %q", recs[0].IngressIface)
 	}
 }
 

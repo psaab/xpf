@@ -652,15 +652,20 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_worker_command_queue_poison_recoveries_total",       // #1807 poison recoveries
 		"xpf_userspace_worker_command_queue_drops_total",                   // #6929 per-worker command-queue capacity drops
 		"xpf_userspace_shared_session_poison_recoveries_total",             // #2402/#6641 shared-session poison recoveries
-		"xpf_userspace_gre_decap_ecn_illegal_drops_total",                  // #2315 RFC 6040 4.2 decap illegal-combo drops
-		"xpf_userspace_wg_decap_ecn_illegal_drops_total",                   // #2317 WG RFC 6040 4.2 decap illegal-combo drops
-		"xpf_userspace_gre_encap_df_oversize_drops_total",                  // #2331 GRE encap local-MTU oversized datagram drops
-		"xpf_userspace_gre_decap_checksum_invalid_drops_total",             // #2782 GRE decap checksum-present invalid drops
-		"xpf_userspace_gre_decap_unsupported_version_refusals_total",       // #6842 GRE decap refused: non-zero GRE version (PPTP) at a configured endpoint
-		"xpf_userspace_gre_decap_pt_nibble_mismatch_refusals_total",        // #10865 GRE decap refused: configured endpoint PT/nibble mismatch
-		"xpf_userspace_gre_outer_frag_drops_total",                         // #14645 GRE outer-fragment reassembly drops
-		"xpf_userspace_gre_reassembled_decap_refusals_total",               // #15095 reassembled GRE datagrams refused by decap
-		"xpf_userspace_gre_decap_transport_egress_refusals_total",          // #15249 GRE decap refused: ingress not a live transport ECMP member
+		// #18529: handshake-relay loss and separate lock-contention pair.
+		"xpf_userspace_handshake_relay_outbox_drops_total",
+		"xpf_userspace_handshake_relay_refused_total",
+		"xpf_userspace_handshake_relay_lock_attempts_total",
+		"xpf_userspace_handshake_relay_lock_contended_total",
+		"xpf_userspace_gre_decap_ecn_illegal_drops_total",            // #2315 RFC 6040 4.2 decap illegal-combo drops
+		"xpf_userspace_wg_decap_ecn_illegal_drops_total",             // #2317 WG RFC 6040 4.2 decap illegal-combo drops
+		"xpf_userspace_gre_encap_df_oversize_drops_total",            // #2331 GRE encap local-MTU oversized datagram drops
+		"xpf_userspace_gre_decap_checksum_invalid_drops_total",       // #2782 GRE decap checksum-present invalid drops
+		"xpf_userspace_gre_decap_unsupported_version_refusals_total", // #6842 GRE decap refused: non-zero GRE version (PPTP) at a configured endpoint
+		"xpf_userspace_gre_decap_pt_nibble_mismatch_refusals_total",  // #10865 GRE decap refused: configured endpoint PT/nibble mismatch
+		"xpf_userspace_gre_outer_frag_drops_total",                   // #14645 GRE outer-fragment reassembly drops
+		"xpf_userspace_gre_reassembled_decap_refusals_total",         // #15095 reassembled GRE datagrams refused by decap
+		"xpf_userspace_gre_decap_transport_egress_refusals_total",    // #15249 GRE decap refused: ingress not a live transport ECMP member
 		// #10695 (#9506): IPsec-inner Rust status counter census.
 		"xpf_userspace_zone_gate_unzoned_total",
 		"xpf_userspace_zone_gate_ambiguous_total",

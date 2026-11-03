@@ -618,6 +618,11 @@ type xpfCollector struct {
 	userspaceSessionReplicationLockBlocked    *prometheus.Desc
 	userspaceSessionReplicationQueueDepthSum  *prometheus.Desc
 	userspaceSessionReplicationQueueDepthMax  *prometheus.Desc
+	// #18529: best-effort handshake-relay delivery losses and lock pair.
+	userspaceHandshakeRelayOutboxDrops   *prometheus.Desc
+	userspaceHandshakeRelayRefused       *prometheus.Desc
+	userspaceHandshakeRelayLockAttempts  *prometheus.Desc
+	userspaceHandshakeRelayLockContended *prometheus.Desc
 	// #9169: the FOURTH #4800 site — the helper's process-global
 	// producer_seq_lock, held across frame encode for every session delta.
 	userspaceEventStreamProducerSeqLockAcquired *prometheus.Desc

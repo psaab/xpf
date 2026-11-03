@@ -260,7 +260,7 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			ParentLinuxName: parentLinux,
 			Ifindex:         ifindex,
 			ParentIfindex:   parentIfindex,
-			RXQueues:        userspaceRXQueueCount(dev),
+			RXQueues:        userspaceRXQueueCountFn(dev),
 			// Tunnel is the STANZA-derived flag (`iface.Tunnel != nil ||
 			// unit.Tunnel != nil`) and this shape has no stanza, so false is
 			// the honest value — matching what Shape A stamps on the same
@@ -282,10 +282,10 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			CoSOversubscriptionGuaranteeFraction: coSUnitOversubscriptionFraction(cosUnit),
 			CoSPriorityLowMinShareBytes:          coSUnitPriorityLowMinShare(cosUnit),
 			// RedundancyGroup stays 0: a stanza-less tunnel authors no
-			// `redundancy-group` and has no RETH parent, so it cannot win
-			// resolveOwnerRGFromZone's `RedundancyGroup > 0` race. That is a
-			// DECISION — the tunnel does not own its zone's RG — and
-			// TestBindOnlyTunnelDoesNotOwnTheZoneRG7949 pins it.
+			// `redundancy-group` and has no RETH parent, so it cannot provide
+			// an owner-RG candidate for its zone. That is a DECISION — the
+			// tunnel does not own its zone's RG — and
+			// TestBindOnlyTunnelConsumerDispositions7949 pins it.
 		})
 		idents = append(idents, egressRowIdentity{
 			owner:    base,

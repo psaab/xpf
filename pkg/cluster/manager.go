@@ -541,6 +541,9 @@ type Manager struct {
 	// controlAuthKeyConfiguredAt was anchored for (#15262). A different set
 	// (new/rotated key) re-anchors; the identical set does not.
 	controlAuthKeySetDigest string
+	// controlLinkUnkeyedAlarmLogged bounds the #16016 missing-key alarm to
+	// one emission per continuous unkeyed posture. Guarded by m.mu.
+	controlLinkUnkeyedAlarmLogged bool
 
 	// peerEpochReconcileMu serializes the full #16022 reconcile cycle
 	// (mark/load/install) across UpdateConfig, StartHeartbeat and tests.
@@ -748,15 +751,16 @@ type Manager struct {
 	// peerFencing holds the configured fencing action (e.g. "disable-rg").
 	peerFencing string
 
-	// fenceUnconfirmedReason records WHY the last peer-loss takeover proceeded
-	// WITHOUT peer confirmation (#10701). Empty means no unconfirmed takeover
-	// is outstanding: either the configured confirmed fence succeeded, or the
-	// peer has since been heard from again and cleared the mark. The default
-	// (disabled) and `disable-rg` policies mark every takeover; the confirmed
-	// policy marks only its fail-open paths. FormatStatus/FormatInformation
-	// expose the degraded result. Guarded by mu.
+	// fenceUnconfirmedReason records why peer-fence confirmation was absent
+	// on the latest peer-loss decision (#10701/#14158). Empty means no
+	// unconfirmed result is outstanding: a confirmed fence succeeded or a
+	// peer heartbeat cleared the mark. Default/disable mark each peer-loss
+	// decision; confirmed policy marks fail-open paths and aborted waits.
+	// A never-seen peer-loss decision is unconfirmed too: silence is not proof
+	// the other node is absent. Status views expose degraded state and raise
+	// dual-primary risk while the peer is not alive. Guarded by mu.
 	fenceUnconfirmedReason string
-	// fenceUnconfirmedAt is when the outstanding unconfirmed takeover ran.
+	// fenceUnconfirmedAt is when the unconfirmed peer-loss decision was recorded.
 	// Meaningless while fenceUnconfirmedReason is empty. Guarded by mu.
 	fenceUnconfirmedAt time.Time
 
@@ -1159,6 +1163,14 @@ func (m *Manager) ControlLinkAcceptedKeys() [][]byte {
 // be mutated, and must never be logged.
 func (m *Manager) ControlLinkAuthKey() []byte {
 	return m.controlLinkAuthKey()
+}
+
+// ControlLinkAuthConfigured reports whether any accepted control-link PSK is
+// configured without returning or copying secret material.
+func (m *Manager) ControlLinkAuthConfigured() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
 }
 
 // ControlLinkAuthKeyConfiguredAt reports when the current accepted

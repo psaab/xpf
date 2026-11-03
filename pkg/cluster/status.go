@@ -51,7 +51,11 @@ func (m *Manager) FormatStatus() string {
 	fmt.Fprintf(&b, "Cluster ID: %d\n", m.clusterID)
 	fmt.Fprintf(&b, "Node name: node%d\n", m.nodeID)
 	if fenceUnconfirmedReason != "" {
-		fmt.Fprintln(&b, formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		if !peerAlive {
+			fmt.Fprintf(&b, "ALARM: %s\n", formatFenceUnconfirmedAlarm(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		} else {
+			fmt.Fprintln(&b, formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		}
 	}
 	// #6495: a node parked SECONDARY by the kernel-candidate promotion gate is
 	// otherwise INDISTINGUISHABLE from one demoted by a monitor failure or a
@@ -431,7 +435,11 @@ func (m *Manager) FormatInformation() string {
 	fmt.Fprintf(&b, "  Local node: %s\n", localHealth)
 	fmt.Fprintf(&b, "  Remote node: %s\n", remoteHealth)
 	if fenceUnconfirmedReason != "" {
-		fmt.Fprintf(&b, "  %s\n", formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		if !peerAlive {
+			fmt.Fprintf(&b, "  ALARM: %s\n", formatFenceUnconfirmedAlarm(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		} else {
+			fmt.Fprintf(&b, "  %s\n", formatFenceUnconfirmedStatus(fenceUnconfirmedReason, fenceUnconfirmedAt))
+		}
 	}
 	// #6495: name the kernel-upgrade election hold here too. It does NOT
 	// degrade node health — the node is fine, it is deliberately not eligible —
@@ -893,12 +901,13 @@ func (m *Manager) FormatControlPlaneStatistics() string {
 // verify under retired-key-derived keys, not "without HMAC" — until it
 // rekeys or is evicted at grace expiry.
 //
-// It only inspects len(key) and never renders the secret.
+// It reports only accepted-key presence and never renders the secret.
 func (m *Manager) controlLinkAuthStatus() string {
-	if len(m.ControlLinkAuthKey()) == 0 {
-		// No local key: this node cannot verify a peer and may be the
-		// not-yet-keyed side of a rolling upgrade — dual-accept.
-		return "dual-accept (no control-link key configured)"
+	if !m.ControlLinkAuthConfigured() {
+		// No local key: this node cannot verify a peer and accepts legacy
+		// unauthenticated control authority. Keep the alarm in the status
+		// string until an accepted key is configured.
+		return "dual-accept (no control-link key configured; ALARM: unauthenticated control authority remains enabled)"
 	}
 	// A local key is sufficient for heartbeat enforcement. An established
 	// session-sync connection that predates keying may still be unauthenticated,
@@ -922,7 +931,7 @@ func (m *Manager) controlLinkAuthStatus() string {
 	var clauses []string
 	if len(neverAuth) > 0 {
 		clauses = append(clauses, fmt.Sprintf("%d session-sync connection(s) "+
-			"NOT authenticated, frames still accepted without HMAC: %s",
+			"NOT authenticated; only heartbeat and the in-place upgrade exchange are accepted: %s",
 			len(neverAuth), strings.Join(neverAuth, ", ")))
 	}
 	if len(retired) > 0 {

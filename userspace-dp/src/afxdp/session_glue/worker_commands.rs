@@ -443,7 +443,8 @@ pub(crate) static HANDSHAKE_RELAY_REFUSED: AtomicU64 = AtomicU64::new(0);
 /// that found the queue held. The same contended/attempted shape as the
 /// #4800 replication pair, kept SEPARATE from it: folding relay locks into
 /// `SESSION_REPLICATION_ENQUEUED` would break that analyzer's
-/// `enqueued / upserts` fan-out ratio. Not yet exported (#18529).
+/// `enqueued / upserts` fan-out ratio. Exported separately on status/metrics
+/// (#18529).
 pub(crate) static HANDSHAKE_RELAY_LOCK_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HANDSHAKE_RELAY_LOCK_CONTENDED: AtomicU64 = AtomicU64::new(0);
 

@@ -212,6 +212,27 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 				n++
 			}
 		}
+		// #18788: a multi-value leaf whose following tokens name NO sibling
+		// statement owns them as additional values: braced spelling
+		// `system-services { ssh; telnet; }` compiles to the same leaf with
+		// two values, so the elided tail must not strand bare values past
+		// the leaf's single declared arg. A following token that resolves
+		// as a sibling at any open level still ends the statement.
+		if childSchema.multi && childSchema.absorbBareValues && childSchema.children == nil && n >= 1 {
+			for n < len(tail) {
+				sibling := false
+				for _, lv := range levels {
+					if resolveSchemaChild(lv.schema, tail[n]) != nil {
+						sibling = true
+						break
+					}
+				}
+				if sibling {
+					break
+				}
+				n++
+			}
+		}
 		if n <= 0 {
 			return node.Children
 		}

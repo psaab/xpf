@@ -49,6 +49,12 @@ GOTMPDIR ?= /wtgt
 CARGO_TARGET_DIR_SHARED := /var/worktrees/.cache/cargo
 CARGO_TARGET_DIR ?= $(CARGO_TARGET_DIR_SHARED)
 export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
+
+# #18038: test recipes that invoke Go get the fail-closed shims without
+# changing PATH for packaging/build targets such as `make deb`.
+HOST_BIN_SHIMS := $(CURDIR)/test/support/host-bin-shims
+TEST_COMMAND_TARGETS := test-go test-race-dp test-shim-run test-memlock-guards
+$(TEST_COMMAND_TARGETS): export PATH := $(HOST_BIN_SHIMS):$(PATH)
 $(shell mkdir -p $(TMPDIR) $(GOCACHE) $(GOTMPDIR) $(CARGO_TARGET_DIR))
 # #18839: what `make clean` may do with CARGO_TARGET_DIR, decided here by make
 # on the resolved path (realpath when it exists, so a symlink or a trailing
@@ -204,16 +210,16 @@ test:
 	echo "  coverage (pkg/dataplane/userspace/fragment_disposition_7494_test.go)"; \
 	echo "  SKIPS unprivileged. It is the ONLY behavioural coverage of the shim's"; \
 	echo "  control flow, and the #1864 verifier gate does not substitute: two"; \
-	echo "  distinct WRONG fixes both pass it. Run 'sudo make test-root' (#9052)."; \
+	echo "  distinct WRONG fixes both pass it. Run 'make vm-test-root' in the disposable VM leg (#9052)."; \
 	echo "  XFRM lifecycle tests also SKIP if NETLINK_XFRM is unavailable;"; \
-	echo "  test-root runs them with XPF_REQUIRE_XFRM_LIFECYCLE=1 (#10868)."; \
+	echo "  vm-test-root runs them with XPF_REQUIRE_XFRM_LIFECYCLE=1 (#10868)."; \
 	exit $$status
 
 rust-source-census-13961:
 	python3 scripts/rust-source-census-13961.py --self-test
 	python3 scripts/rust-source-census-13961.py userspace-dp/src
 
-# #9052 item 1: the root-capable aggregate. `test-shim-run` was a prerequisite
+# #9052 item 1: the VM-only aggregate. `test-shim-run` was a prerequisite
 # of NOTHING — not of `test`, not of `selftest`, not of any ledger row — so the
 # only behavioural coverage of the shim was reachable solely by someone
 # remembering its name. That is the #7766 shape (a harness wired into no gate),
@@ -221,10 +227,10 @@ rust-source-census-13961:
 # identical whether the shim was covered or not.
 #
 # It is NOT a prerequisite of `test`, deliberately: `make test` must stay
-# runnable unprivileged, and a target that fails without root would make the
-# ordinary gate unusable. The remedy is the ANNOUNCEMENT above plus this named
-# aggregate — the gate now says what it did not examine instead of implying it
-# examined everything.
+# runnable unprivileged, and a target that requires VM-only privileges would
+# make the ordinary gate unusable. The remedy is the ANNOUNCEMENT above plus
+# this named aggregate — the gate now says what it did not examine instead of
+# implying it examined everything.
 
 # #10868: unprivileged `make test` deliberately preserves SKIP=PASS for the
 # XFRM-dependent lifecycle cells. This root-capable gate sets the must-run
@@ -236,9 +242,14 @@ test-xfrm-lifecycle:
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp XPF_REQUIRE_XFRM_LIFECYCLE=1 $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
 		--bins --tests -- --test-threads=1
 
-.PHONY: test-root
-test-root: test-shim-run test-memlock-guards test-xfrm-lifecycle test-ctrl-row-root
-	@echo "make test-root: the privilege-gated legs ran."
+.PHONY: vm-test-root
+vm-test-root:
+	@scripts/mark-test-vm.sh
+	@XPF_SACRIFICIAL_HOST=1 $(MAKE) --no-print-directory test-shim-run
+	@XPF_SACRIFICIAL_HOST=1 $(MAKE) --no-print-directory test-memlock-guards
+	@XPF_SACRIFICIAL_HOST=1 $(MAKE) --no-print-directory test-xfrm-lifecycle
+	@XPF_SACRIFICIAL_HOST=1 $(MAKE) --no-print-directory test-ctrl-row-root
+	@echo "make vm-test-root: the privilege-gated VM legs ran."
 	@echo "  NOTE: some cells skip BECAUSE you are root (10 at last census)."
 	@echo "  No single run examines every cell; see 'make go-skip-census'."
 
@@ -286,9 +297,7 @@ test-ctrl-row-root:
 .PHONY: test-memlock-guards
 test-memlock-guards:
 	@if [ "$$(id -u)" != "0" ]; then \
-		echo "test-memlock-guards: needs CAP_BPF (BPF map creation). Re-run with sudo."; \
-		echo "  CAP_SYS_RESOURCE alone is NOT enough — it raises the memlock rlimit,"; \
-		echo "  so the guards stop skipping and start failing at map creation."; \
+		echo "test-memlock-guards: runs only in the disposable VM lane (make vm-test-root); the workstation lane strips privileges via unshare and sudo cannot substitute."; \
 		exit 1; \
 	fi
 # This leg scans plain-text RUN records; pin text output against GOFLAGS=-json.
@@ -325,7 +334,7 @@ test-memlock-guards:
 # both pass it, and nothing else in the tree can tell them apart.
 test-shim-run:
 	@if [ "$$(id -u)" != "0" ]; then \
-		echo "test-shim-run: needs root (BPF program load). Re-run with sudo."; \
+		echo "test-shim-run: runs only in the disposable VM lane (make vm-test-root); sudo cannot substitute."; \
 		exit 1; \
 	fi
 	# #7494/#6743-r2-N3: a `-run` predicate is a claim about the names of tests
@@ -922,6 +931,17 @@ harness-census:
 # mutation that does not flip is an ESCAPE and fails this target.
 test-harness-census-lib:
 	bash ./test/incus/harness-census-selftest.sh
+
+# #18038: every kernel-mutating Go test source in the guarded packages is
+# registered with its mutation class, isolation boundary, and proof. The
+# scanner checks registry entries in both directions and class floors; the
+# test fixture mutates each failure direction so a blind census cannot pass.
+.PHONY: host-mutation-census test-host-mutation-census-lib
+host-mutation-census:
+	sh scripts/host-mutation-census.sh
+
+test-host-mutation-census-lib:
+	python3 test/incus/test_host_mutation_census.py
 
 # #18645: the instruction census. A temporary instruction carries an expiry
 # marker (an `Expires-when:` line naming `#NNNN closed`, or a free-text
@@ -1978,6 +1998,75 @@ test-restart-connectivity:
 		--gate test-restart-connectivity --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		--require-helper-attestation \
 		-- ./test/incus/test-restart-connectivity.sh
+
+# #11769: CoS and fairness gates keep the measurement and executable
+# attestation inside one #1875 cell. Live fairness runs require an explicitly
+# reachable active-primary metrics proxy; no workstation default is valid.
+COS_FAIRNESS_CARGO_TARGET := /var/worktrees/.cache/cargo-11769
+FAIRNESS_EVAL ?= $(COS_FAIRNESS_CARGO_TARGET)/release/fairness-eval
+METRICS_URL ?=
+COS_IFINDEX ?= 5
+
+.PHONY: test-cos-simul-load test-cos-gate1 test-cos-be-contention \
+	test-fairness-cos-class-sweep test-fairness-cos-throughput-headroom cos-fairness-eval
+test-cos-simul-load:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/with-cluster.sh "test-cos-simul-load #11769" -- \
+		bash -c 'art=$$(mktemp -d /tmp/cos-simul-load.XXXXXX); export ART="$$art"; exec ./test/incus/harness-result.sh run \
+		--gate cos-simul-load-smoke --adapter cos-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
+		--artifacts "$$art" -- ./test/incus/cos-simul-load-smoke.sh'
+
+test-cos-gate1:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/with-cluster.sh "test-cos-gate1 #11769" -- \
+		bash -c 'art=$$(mktemp -d /tmp/cos-gate1.XXXXXX); export ART="$$art"; exec ./test/incus/harness-result.sh run \
+		--gate cos-gate1-small-four-alone --adapter cos-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
+		--artifacts "$$art" -- ./test/incus/cos-gate1-small-four-alone.sh'
+
+test-cos-be-contention:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/with-cluster.sh "test-cos-be-contention #11769" -- \
+		bash -c 'art=$$(mktemp -d /tmp/cos-be-contention.XXXXXX); export ARTIFACT_ROOT="$$art"; exec ./test/incus/harness-result.sh run \
+		--gate cos-be-contention-harness --adapter cos-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
+		--artifacts "$$art" -- ./test/incus/cos-be-contention-harness.sh'
+
+cos-fairness-eval:
+	@set -eu; \
+	mkdir -p /var/worktrees/.cache/tmpdir; \
+	if [ ! -x "$(FAIRNESS_EVAL)" ]; then \
+		if [ "$(FAIRNESS_EVAL)" != "$(COS_FAIRNESS_CARGO_TARGET)/release/fairness-eval" ]; then \
+			echo "FAIRNESS_EVAL is not executable: $(FAIRNESS_EVAL)" >&2; exit 2; \
+		fi; \
+		pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)"); \
+		stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh); \
+		CARGO_TARGET_DIR=$(COS_FAIRNESS_CARGO_TARGET) TMPDIR=/var/worktrees/.cache/tmpdir \
+			XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned build \
+			--manifest-path userspace-dp/Cargo.toml --release --bin fairness-eval; \
+	fi
+
+test-fairness-cos-class-sweep: cos-fairness-eval
+	@test -n "$(METRICS_URL)" || { echo "set METRICS_URL to a reachable active-primary metrics proxy" >&2; exit 2; }
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/with-cluster.sh "test-fairness-cos-class-sweep #11769" -- \
+		bash -c 'source ./test/incus/cluster-env.sh; art=$$(mktemp -d /tmp/fairness-cos-sweep.XXXXXX); exec env \
+		COS_IFINDEX="$(COS_IFINDEX)" METRICS_URL="$(METRICS_URL)" FAIRNESS_EVAL="$(FAIRNESS_EVAL)" ARTIFACT_ROOT="$$art" \
+		IPERF_LAUNCH_ARG_0=/usr/bin/incus IPERF_LAUNCH_ARG_1=exec \
+		IPERF_LAUNCH_ARG_2="$$CLUSTER_LAN_HOST" IPERF_LAUNCH_ARG_3=-- \
+		./test/incus/harness-result.sh run \
+		--gate fairness-cos-class-sweep --adapter cos-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
+		--artifacts "$$art" -- ./test/incus/fairness-cos-class-sweep.sh'
+
+test-fairness-cos-throughput-headroom: cos-fairness-eval
+	@test -n "$(METRICS_URL)" || { echo "set METRICS_URL to a reachable active-primary metrics proxy" >&2; exit 2; }
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/with-cluster.sh "test-fairness-cos-throughput-headroom #11769" -- \
+		bash -c 'source ./test/incus/cluster-env.sh; art=$$(mktemp -d /tmp/fairness-cos-headroom.XXXXXX); exec env \
+		COS_IFINDEX="$(COS_IFINDEX)" METRICS_URL="$(METRICS_URL)" FAIRNESS_EVAL="$(FAIRNESS_EVAL)" ARTIFACT_ROOT="$$art" \
+		IPERF_LAUNCH_ARG_0=/usr/bin/incus IPERF_LAUNCH_ARG_1=exec \
+		IPERF_LAUNCH_ARG_2="$$CLUSTER_LAN_HOST" IPERF_LAUNCH_ARG_3=-- \
+		./test/incus/harness-result.sh run \
+		--gate fairness-cos-throughput-headroom --adapter cos-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
+		--artifacts "$$art" -- ./test/incus/fairness-cos-throughput-headroom.sh'
 
 # Canonical cluster HA test environment (isolated loss userspace cluster).
 # Override CLUSTER_ENV= to use cluster-setup.sh local xpf-fw0/xpf-fw1 defaults.

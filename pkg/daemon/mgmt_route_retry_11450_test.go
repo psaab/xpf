@@ -248,8 +248,17 @@ func TestMgmtRouteRetryWiring11450(t *testing.T) {
 				len(assign.Rhs) != 1 || assign.Pos() <= rebind["mgmtVRFRouteReconcileFn"][0] {
 				return true
 			}
-			lhs, ok := assign.Lhs[0].(*ast.Ident)
-			if !ok || lhs.Name != "networkdErr" {
+			lhs, ok := assign.Lhs[0].(*ast.SelectorExpr)
+			if !ok || lhs.Sel.Name != "Networkd" {
+				return true
+			}
+			// The assignment must target result.Phase.Networkd exactly; an
+			// unrelated *.Networkd field must not satisfy this cell (#17474).
+			phase, ok := lhs.X.(*ast.SelectorExpr)
+			if !ok || phase.Sel.Name != "Phase" {
+				return true
+			}
+			if ident, ok := phase.X.(*ast.Ident); !ok || ident.Name != "result" {
 				return true
 			}
 			ast.Inspect(assign.Rhs[0], func(n ast.Node) bool {
@@ -258,8 +267,15 @@ func TestMgmtRouteRetryWiring11450(t *testing.T) {
 					return true
 				}
 				selector, ok := call.Fun.(*ast.SelectorExpr)
-				if ok && selector.Sel.Name == "Errorf" {
-					postRebindRouteErrorReturned = true
+				if !ok || selector.Sel.Name != "Errorf" {
+					return true
+				}
+				// The Errorf must wrap the reconcile err itself, not an
+				// unrelated static error (#17474).
+				for _, arg := range call.Args {
+					if ident, ok := arg.(*ast.Ident); ok && ident.Name == "err" {
+						postRebindRouteErrorReturned = true
+					}
 				}
 				return true
 			})

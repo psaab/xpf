@@ -1143,7 +1143,7 @@ impl SessionTable {
         if now_ns.saturating_sub(companion.last_seen_ns) > companion.expires_after_ns {
             return false;
         }
-        if self.cache_hit_handshake_progress(key).is_none() {
+        if self.cache_hit_handshake_progress(key, 0, None).is_none() {
             return false;
         }
         let fwd = if companion.metadata.is_reverse {

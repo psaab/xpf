@@ -50,8 +50,10 @@ What the script enforces:
 - for IPv6, an unresolved final public internet hop is a warning after the
   deterministic IPv6 TTL-expired probe has passed
 - one unmeasured warm-up `iperf3` pass is run for each address family
-- repeated IPv4 `iperf3` to `172.16.80.200` must stay above threshold
-- repeated IPv6 `iperf3` to `2001:559:8585:80::200` must stay above threshold
+- repeated IPv4 `iperf3` to the loss env's `IPERF_TARGET4` (currently
+  `172.16.80.202`) must stay above threshold
+- repeated IPv6 `iperf3` to the loss env's `IPERF_TARGET6` (currently
+  `2001:559:8585:80::200`) must stay above threshold
 - per-interval `iperf3 -J` output is copied back to the repo host, parsed
   locally, and a run fails if it starts fast and then collapses
 - one marginal near-threshold miss is retried once before the run is treated as failed

@@ -86,6 +86,42 @@ func TestSessionSyncEgressLockedResolvesOwnerRGFromZone(t *testing.T) {
 	}
 }
 
+func TestResolveOwnerRGFromZoneMultiRGZoneReturnsUnknown18522(t *testing.T) {
+	iface := func(name string, rg int) InterfaceSnapshot {
+		return InterfaceSnapshot{Name: name, Zone: "mixed", Ifindex: rg + 10, RedundancyGroup: rg}
+	}
+	orders := map[string][]InterfaceSnapshot{
+		"rg1-first": {iface("reth0", 1), iface("reth1", 2)},
+		"rg2-first": {iface("reth1", 2), iface("reth0", 1)},
+	}
+	for name, ifaces := range orders {
+		snap := &ConfigSnapshot{Interfaces: ifaces}
+		if rg := resolveOwnerRGFromZone(snap, "mixed"); rg != 0 {
+			t.Errorf("%s: resolveOwnerRGFromZone(mixed) = %d, want 0 (unknown): "+
+				"a zone spanning two RGs has no single owner RG", name, rg)
+		}
+		m := &Manager{lastSnapshot: snap}
+		if _, _, owner := m.sessionSyncEgressLocked(0, 0, "mixed"); owner != 0 {
+			t.Errorf("%s: unresolved egress owner = %d, want 0 (unknown) for a multi-RG zone", name, owner)
+		}
+		// A known interface identity disambiguates the zone: use that
+		// interface's RG rather than the zone-level fallback.
+		for _, egressIface := range ifaces {
+			if _, _, owner := m.sessionSyncEgressLocked(egressIface.Ifindex, 0, "mixed"); owner != egressIface.RedundancyGroup {
+				t.Errorf("%s: known egress %s owner = %d, want interface RG %d",
+					name, egressIface.Name, owner, egressIface.RedundancyGroup)
+			}
+		}
+	}
+	// Control: multiple interfaces agreeing on one RG still resolve to it.
+	agree := &ConfigSnapshot{Interfaces: []InterfaceSnapshot{
+		iface("reth0", 1), iface("ge-0-0-2", 0), iface("reth0.0", 1),
+	}}
+	if rg := resolveOwnerRGFromZone(agree, "mixed"); rg != 1 {
+		t.Errorf("resolveOwnerRGFromZone(single-RG zone) = %d, want 1", rg)
+	}
+}
+
 func TestSessionSyncTunnelEndpointIDLockedMatchesLogicalTunnelIfindex(t *testing.T) {
 	m := &Manager{
 		lastSnapshot: &ConfigSnapshot{

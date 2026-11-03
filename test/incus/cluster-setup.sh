@@ -30,6 +30,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# shellcheck source=test/incus/vm-target-guard.sh
+source "${SCRIPT_DIR}/vm-target-guard.sh"
+
 # #1875: shared-cluster lock protocol (marker validation + owner
 # reporting). Mutating verbs serialize through with-cluster.sh — see
 # require_cluster_cell below and the protocol header in cluster-lock.sh.
@@ -104,6 +107,12 @@ LAN_GW="${LAN_GW:-}"
 # incus re-apply vlan=/mac_filtering on every VM start — durable + native.
 SRIOV_PARENT="${SRIOV_PARENT:-eno6np1}"      # WAN SR-IOV parent (nictype:sriov)
 SRIOV_LAN_PARENT="${SRIOV_LAN_PARENT:-}"     # LAN SR-IOV parent (nictype:sriov)
+# #12655 (docs/incus-tcp-udp-plan.md §4 item 6): SR-IOV fabric, default-off.
+# Setting SRIOV_FABRIC_PARENT selects an Incus-managed VF for eth2 instead of
+# a bridge; VF_FABRIC_VLAN is its PF-private access VLAN. Keeping name enp7s0
+# preserves the guest PCI slot and xpf's ge-*/0/0 rename.
+SRIOV_FABRIC_PARENT="${SRIOV_FABRIC_PARENT:-}"
+VF_FABRIC_VLAN="${VF_FABRIC_VLAN:-}"
 
 # WAN VF PCI addresses per VM (VF_PCI is legacy alias for VF_WAN_PCI)
 if [[ -z "${VF_WAN_PCI+x}" ]]; then
@@ -132,9 +141,12 @@ SHARED_UMEM_PHASE0_ARTIFACT_NODE1="${SHARED_UMEM_PHASE0_ARTIFACT_NODE1:-${PROJEC
 
 # Network definitions: name:subnet:nat (only for networks we manage)
 NETWORKS=()
-# Always manage heartbeat and fabric
+# Always manage heartbeat. Manage the fabric bridge only when SR-IOV fabric
+# is disabled; NET_FABRIC may be empty when SRIOV_FABRIC_PARENT is set.
 NETWORKS+=("${NET_HEARTBEAT}:none:false")
-NETWORKS+=("${NET_FABRIC}:none:false")
+if [[ -z "$SRIOV_FABRIC_PARENT" ]]; then
+	NETWORKS+=("${NET_FABRIC}:none:false")
+fi
 # Only manage cluster LAN bridge if it's set (not for SR-IOV LAN)
 if [[ -n "$NET_CLAN" && "$NET_CLAN" != "none" ]]; then
 	NETWORKS+=("${NET_CLAN}:none:false")
@@ -253,6 +265,9 @@ wait_for_agent() {
 # ── Init ─────────────────────────────────────────────────────────────
 
 cmd_init() {
+	if [[ -n "$SRIOV_FABRIC_PARENT" && -z "$VF_FABRIC_VLAN" ]]; then
+		die "SRIOV_FABRIC_PARENT requires VF_FABRIC_VLAN for fabric VF access"
+	fi
 	create_networks
 	create_profile
 	info "Init complete. Run '$0 create' next."
@@ -315,11 +330,26 @@ devices:
   eth1:
     name: enp6s0
     network: ${NET_HEARTBEAT}
-    type: nic
+    type: nic"
+	if [[ -n "$SRIOV_FABRIC_PARENT" ]]; then
+		# Incus manages the fabric VF/VLAN durably on VM starts. Keep eth2's
+		# enp7s0 guest name (and thus PCI slot) stable vs the bridge profile.
+		yaml+="
+  eth2:
+    name: enp7s0
+    nictype: sriov
+    parent: ${SRIOV_FABRIC_PARENT}
+    vlan: \"${VF_FABRIC_VLAN}\"
+    mtu: \"9000\"
+    security.mac_filtering: \"false\"
+    type: nic"
+	else
+		yaml+="
   eth2:
     name: enp7s0
     network: ${NET_FABRIC}
     type: nic"
+	fi
 
 	# Only add LAN bridge NIC if NET_CLAN is set (not SR-IOV LAN)
 	if [[ -n "$NET_CLAN" && "$NET_CLAN" != "none" ]]; then
@@ -431,6 +461,7 @@ provision_vm() {
 	local idx="$2"
 	local rinst
 	rinst=$(r "$vm")
+	xpf_assert_vm_target "$rinst"
 
 	# Wait for systemd to be ready
 	info "Waiting for system to be ready ($vm)..."
@@ -502,6 +533,7 @@ EOF'
 			break
 		fi
 	done
+	xpf_assert_vm_target "$rinst"
 	incus exec "$rinst" -- uname -r
 
 	incus exec "$rinst" -- systemctl enable frr
