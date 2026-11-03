@@ -105,29 +105,119 @@ func TestPolicyMatchAddressSetOutcome18971(t *testing.T) {
 }
 
 func TestNATMatchEmptyAppSetOutcome18971(t *testing.T) {
-	tree := flatTreeFromSets(t,
-		"set applications application-set EMPTYSET description foo",
-		"set security nat source rule-set rs1 from zone trust",
-		"set security nat source rule-set rs1 to zone untrust",
-		"set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/8",
-		"set security nat source rule-set rs1 rule r1 match application EMPTYSET",
-		"set security nat source rule-set rs1 rule r1 then source-nat interface",
+	const (
+		loneOutcome  = "the rule commits but the dataplane installs a never-match term so the translation never fires"
+		offOutcome   = "the rule commits but the off exemption's application axis widens to match all (over-exemption)"
+		mixedOutcome = "the rule commits but the empty reference contributes no terms; sibling application terms remain in the match union"
 	)
-	requireCompileOutcomes18971(t, tree,
-		`source NAT rule-set "rs1" rule "r1" match application "EMPTYSET" is a defined but EMPTY application-set (it expands to zero applications)`,
-		"the rule commits but the dataplane installs a never-match term so the translation never fires")
+	cases := []struct {
+		name           string
+		cmds           []string
+		head           string
+		lenientOutcome string
+	}{
+		{
+			name: "lone-source-translate",
+			cmds: []string{
+				"set security nat source rule-set rs1 from zone trust",
+				"set security nat source rule-set rs1 to zone untrust",
+				"set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/8",
+				"set security nat source rule-set rs1 rule r1 match application EMPTYSET",
+				"set security nat source rule-set rs1 rule r1 then source-nat interface",
+			},
+			head:           `source NAT rule-set "rs1" rule "r1" match application "EMPTYSET" is a defined but EMPTY application-set (it expands to zero applications)`,
+			lenientOutcome: loneOutcome,
+		},
+		{
+			name: "source-off-mixed-empty-first",
+			cmds: []string{
+				"set security nat source rule-set rs1 from zone trust",
+				"set security nat source rule-set rs1 to zone untrust",
+				"set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/8",
+				"set security nat source rule-set rs1 rule r1 match application [ EMPTYSET junos-http ]",
+				"set security nat source rule-set rs1 rule r1 then source-nat off",
+			},
+			head:           `source NAT rule-set "rs1" rule "r1" match application "EMPTYSET" is a defined but EMPTY application-set`,
+			lenientOutcome: offOutcome,
+		},
+		{
+			name: "destination-off-lone",
+			cmds: []string{
+				"set security nat destination rule-set rs1 from zone untrust",
+				"set security nat destination rule-set rs1 rule r1 match destination-address 50.0.0.1/32",
+				"set security nat destination rule-set rs1 rule r1 match application EMPTYSET",
+				"set security nat destination rule-set rs1 rule r1 then destination-nat off",
+			},
+			head:           `destination NAT rule-set "rs1" rule "r1" match application "EMPTYSET" is a defined but EMPTY application-set`,
+			lenientOutcome: offOutcome,
+		},
+		{
+			name: "source-translate-mixed-empty-first",
+			cmds: []string{
+				"set security nat source rule-set rs1 from zone trust",
+				"set security nat source rule-set rs1 to zone untrust",
+				"set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/8",
+				"set security nat source rule-set rs1 rule r1 match application [ EMPTYSET junos-http ]",
+				"set security nat source rule-set rs1 rule r1 then source-nat interface",
+			},
+			head:           `source NAT rule-set "rs1" rule "r1" match application "EMPTYSET" is a defined but EMPTY application-set`,
+			lenientOutcome: mixedOutcome,
+		},
+		{
+			name: "destination-translate-mixed-valid-first",
+			cmds: []string{
+				"set security nat destination pool web1 address 10.0.30.100",
+				"set security nat destination rule-set rs1 from zone untrust",
+				"set security nat destination rule-set rs1 rule r1 match destination-address 50.0.0.1/32",
+				"set security nat destination rule-set rs1 rule r1 match application [ junos-http EMPTYSET ]",
+				"set security nat destination rule-set rs1 rule r1 then destination-nat pool web1",
+			},
+			head:           `destination NAT rule-set "rs1" rule "r1" match application "EMPTYSET" is a defined but EMPTY application-set`,
+			lenientOutcome: mixedOutcome,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmds := append([]string{"set applications application-set EMPTYSET description foo"}, tc.cmds...)
+			requireCompileOutcomes18971(t, flatTreeFromSets(t, cmds...), tc.head, tc.lenientOutcome)
+		})
+	}
 }
 
 func TestNATPoolReferenceOutcome18971(t *testing.T) {
-	tree := flatTreeFromSets(t,
-		"set security nat source rule-set rs1 from zone trust",
-		"set security nat source rule-set rs1 to zone untrust",
-		"set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/24",
-		"set security nat source rule-set rs1 rule r1 then source-nat pool ghost-pool",
-	)
-	requireCompileOutcomes18971(t, tree,
-		`source-nat rule-set "rs1" rule "r1" references undefined pool "ghost-pool"`,
-		"otherwise the rule commits but the dataplane fails the translation closed (the pool lookup misses, so the rule is dropped / marked unusable) and matching traffic is silently left untranslated, falling through to a later rule or the no-NAT default")
+	cases := []struct {
+		name           string
+		cmds           []string
+		head           string
+		lenientOutcome string
+	}{
+		{
+			name: "source-drops-without-fallthrough",
+			cmds: []string{
+				"set security nat source rule-set rs1 from zone trust",
+				"set security nat source rule-set rs1 to zone untrust",
+				"set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/24",
+				"set security nat source rule-set rs1 rule r1 then source-nat pool ghost-pool",
+			},
+			head:           `source-nat rule-set "rs1" rule "r1" references undefined pool "ghost-pool"`,
+			lenientOutcome: "otherwise the rule commits but the dataplane marks the rule unusable (missing_pool) and drops matching traffic (fail closed; no later-rule or no-NAT fallthrough)",
+		},
+		{
+			name: "destination-falls-through-untranslated",
+			cmds: []string{
+				"set security nat destination rule-set rs1 from zone untrust",
+				"set security nat destination rule-set rs1 rule r1 match destination-address 203.0.113.10/32",
+				"set security nat destination rule-set rs1 rule r1 then destination-nat pool ghost-pool",
+			},
+			head:           `destination-nat rule-set "rs1" rule "r1" references undefined pool "ghost-pool"`,
+			lenientOutcome: "otherwise the rule commits but the dataplane fails the translation closed (the pool lookup misses, so the rule is dropped / marked unusable) and matching traffic is silently left untranslated, falling through to a later rule or the no-NAT default",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			requireCompileOutcomes18971(t, flatTreeFromSets(t, tc.cmds...), tc.head, tc.lenientOutcome)
+		})
+	}
 }
 
 func TestSourceNATPoolAddressGrammarOutcomes18971(t *testing.T) {
@@ -199,7 +289,7 @@ func TestNATPeerEffectiveStrictOutcomes18971(t *testing.T) {
 				`set apply-groups "${node}"`,
 			},
 			head:           `source-nat rule-set "RS" rule "R1" references undefined pool "OnlyNode0"`,
-			lenientOutcome: "otherwise the rule commits but the dataplane fails the translation closed",
+			lenientOutcome: "otherwise the rule commits but the dataplane marks the rule unusable (missing_pool)",
 		},
 		{
 			name: "invalid-pool-member",

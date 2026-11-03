@@ -392,14 +392,14 @@ var natGates = []natGate{
 			// #5626 source/destination-NAT pool-REFERENCE definedness gate. A NAT rule
 			// whose `then ... pool <name>` names a pool NOT defined under `security nat
 			// source/destination pool` committed cleanly (warn-only) and then failed the
-			// translation closed at runtime in an order-dependent way: the SNAT snapshot
-			// builder marks the rule unusable (missing_pool) and the DNAT builder drops
-			// it (pool lookup misses), so matching traffic is silently left untranslated
-			// and falls through to a later rule or the no-NAT default. Strict on commit /
+			// translation closed at runtime in an order-dependent way: SNAT marks the
+			// rule unusable (missing_pool) and drops matching packets without
+			// fallthrough; DNAT drops the rule, leaving traffic untranslated to fall
+			// through to a later rule or the no-NAT default. Strict on commit /
 			// commit-check (hard-reject so the dangling reference is operator-visible);
 			// lenient on load / peer-sync (downgrade to a warning so a config persisted
 			// before this gate existed still boots — #1960 no-brick; the snapshot
-			// builders independently fail CLOSED, installing nothing). Shares the
+			// builders independently fail CLOSED rather than mis-translating). Shares the
 			// lenientDestNATAddresses flag (same NAT silent-drop doctrine). This gate
 			// subsumes the warn-only pool-reference loop that previously lived in
 			// ValidateConfig (it would otherwise emit a duplicate warning alongside the
