@@ -494,21 +494,12 @@ pub(super) fn flowless_nat_wire_info(frame: &[u8], meta: UserspaceDpMeta) -> Flo
                     _ => None,
                 }
             };
-            // #15117: NDP (133-137) with hop limit 255 must not be
-            // destination-translated. Hop limit is byte 7 of the IPv6
-            // header; the ICMPv6 type is the first byte at the L4 offset.
-            let ndp_type_hop255 =
-                if protocol == Some(crate::ip_proto::PROTO_ICMPV6) && packet.get(7) == Some(&255) {
-                    match walk.outcome {
-                        crate::afxdp::frame::ExtChainOutcome::L4(l4_off, _) => frame
-                            .get(l4_off)
-                            .copied()
-                            .filter(|t| (133..=137).contains(t)),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
+            // #15117 (#17254): on-link NDP (133-137, hop 255) must not
+            // be destination-translated. The admission rule lives in one
+            // place — `frame::ndp_hop255_type`, reading this walk and the
+            // hop byte — so the flowless and session-miss sites cannot
+            // diverge on the shim's 255 unknown-sentinel stamp.
+            let ndp_type_hop255 = crate::afxdp::frame::ndp_hop255_type(frame, l3, &walk);
             FlowlessNatWireInfo {
                 family: meta.addr_family,
                 protocol,

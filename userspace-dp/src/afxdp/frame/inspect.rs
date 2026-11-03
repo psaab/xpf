@@ -101,33 +101,60 @@ pub(crate) enum ExtChainOutcome {
     OverLimit,
 }
 
+/// #15117: the on-link Neighbor Discovery ICMPv6 types (133-137:
+/// RS/RA/NS/NA/Redirect, RFC 4861). Deliberately distinct from
+/// `host_inbound`'s `is_ndp_type` set (133..=136, #15671), which answers
+/// a different question (host-inbound control admission) and excludes
+/// Redirect.
+const ND_ONLINK_TYPES: std::ops::RangeInclusive<u8> = 133..=137;
+
+/// #15117 (#17254): the single owner of the on-link NDP admission rule —
+/// the ICMPv6 type when the packet is an on-link Neighbor Discovery
+/// message: wire terminal ICMPv6 with type in [`ND_ONLINK_TYPES`] and
+/// IPv6 hop limit 255 (byte 7 of the header at `l3`). Wire-only by
+/// construction: `UserspaceDpMeta::protocol` is the shim's stamp, and its
+/// 255 (`SHIM_PROTO_FRAGMENT_NO_L4`, stamped whenever the shim's per-CPU
+/// v6-fragment scratch write/read fails) is an unknown sentinel, never
+/// proof of a non-ICMPv6 terminal — so admission is read from `walk`
+/// (the shared ext-chain walk both call sites already hold, keeping the
+/// predicate a fold-in with no second walk), never the sideband.
+/// Callers gate the family (`AF_INET6`) before walking. A non-first
+/// fragment, truncated or over-limit chain, or hop != 255 fails closed
+/// (None — the packet keeps its ordinary translation/policy path).
+#[inline(always)]
+pub(in crate::afxdp) fn ndp_hop255_type(frame: &[u8], l3: usize, walk: &ExtChainWalk) -> Option<u8> {
+    let packet = frame.get(l3..)?;
+    if packet.get(7) != Some(&255) {
+        return None;
+    }
+    match walk.outcome {
+        ExtChainOutcome::L4(l4_off, protocol) if protocol == crate::ip_proto::PROTO_ICMPV6 => {
+            frame
+                .get(l4_off)
+                .copied()
+                .filter(|t| ND_ONLINK_TYPES.contains(t))
+        }
+        _ => None,
+    }
+}
+
 /// #15117: true for an on-link Neighbor Discovery message: ICMPv6 type
 /// 133-137 with IPv6 hop limit 255. Read from the frame bytes (verified
-/// L3, shared ext-chain walk) so session-miss and flowless callers agree.
-/// A non-first fragment, truncated chain, or hop != 255 fails closed
-/// (false — the packet keeps its ordinary translation/policy path).
+/// L3, shared ext-chain walk) via [`ndp_hop255_type`] so session-miss and
+/// flowless callers agree — `meta.protocol` is deliberately not consulted
+/// (#17254): the shim's 255 stamp is an unknown sentinel that can sit on
+/// a wire-ICMPv6 NDP frame, and a sideband pre-filter made this site
+/// translate a packet the flowless site left alone. A non-first
+/// fragment, truncated chain, or hop != 255 fails closed (false — the
+/// packet keeps its ordinary translation/policy path).
 #[inline]
 pub(in crate::afxdp) fn is_ndp_hop255_frame(frame: &[u8], meta: UserspaceDpMeta) -> bool {
-    if meta.addr_family != libc::AF_INET6 as u8 || meta.protocol != crate::ip_proto::PROTO_ICMPV6 {
+    if meta.addr_family != libc::AF_INET6 as u8 {
         return false;
     }
     let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
-    let Some(packet) = frame.get(l3..) else {
-        return false;
-    };
-    if packet.get(7) != Some(&255) {
-        return false;
-    }
-    match walk_ipv6_ext_chain(frame, l3).outcome {
-        ExtChainOutcome::L4(l4_off, protocol) => {
-            protocol == crate::ip_proto::PROTO_ICMPV6
-                && frame
-                    .get(l4_off)
-                    .copied()
-                    .is_some_and(|t| (133..=137).contains(&t))
-        }
-        _ => false,
-    }
+    let walk = walk_ipv6_ext_chain(frame, l3);
+    ndp_hop255_type(frame, l3, &walk).is_some()
 }
 
 /// The FIRST Fragment (44) header a walked chain declared, recorded by
