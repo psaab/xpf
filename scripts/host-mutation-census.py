@@ -29,16 +29,22 @@ MARKERS = {
         r"(?:exec\.)?Command(?:Context)?\([^\n]*\"nft\"|"
         r"\.Install(?:HostInbound|Lo0|TransitBarrier|ArmedTransitFence)\s*\("
     ),
-    # iproute2 CLI mutations, in every in-tree dispatch shape:
+    # iproute2 CLI mutations in the textual dispatch shapes matched below:
     # exec.Command("ip", ...) / CommandContext(..., "ip", ...), the
-    # run-helper form run("ip", "link"|"addr"|"route"|"rule", ...), the
-    # table form exec.Command("ip", args...), and the LookPath-variable
-    # form exec.Command(ip, ...).
+    # run-helper form with its object immediately after "ip" (flag-between
+    # forms such as run("ip", "-6", "addr", ...) are not matched), the
+    # table form exec.Command("ip", args...), the LookPath-variable form
+    # exec.Command(ip, ...), and embedded-shell mutation verbs. Sources using
+    # self-isolating `unshare -rn bash -c` stay registered; package TestMain
+    # and testguard-run remain the isolation backstop.
     "ip": re.compile(
         r"(?:exec\.)?Command(?:Context)?\(\s*\"ip\"|"
         r"\b\w+\(\s*\"ip\"\s*,\s*\"(?:link|addr|route|rule)\"|"
         r"\"ip\"\s*,\s*args\.\.\.|"
-        r"(?:exec\.)?Command(?:Context)?\(\s*(?:ctx\s*,\s*)?ip\b"
+        r"(?:exec\.)?Command(?:Context)?\(\s*(?:ctx\s*,\s*)?ip\b|"
+        # Embedded-shell form: an `ip link/addr/route/rule add|set|del|replace`
+        # verb inside a shell script string in the same source.
+        r"\bip\s+(?:link|addr|route|rule)\s+(?:add|set|del|replace|change)\b"
     ),
     "bpf": re.compile(
         r"\b(?:ebpf\.(?:NewMap|NewMapWithOptions|NewProgram|"

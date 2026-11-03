@@ -115,17 +115,8 @@ class HostMutationCensusTest(unittest.TestCase):
     def test_ip_helper_form_requires_registry_row(self):
         (self.root / "pkg/routing/ip_helper_test.go").write_text(
             "package fixture\n"
-            "func run(args ...string) { exec.Command(\"ip\", args...) }\n"
+            "func run(args ...string) { exec.Command(args[0], args[1:]...) }\n"
             "func test() { run(\"ip\", \"link\", \"add\") }\n",
-            encoding="utf-8",
-        )
-        (self.root / "pkg/routing").mkdir(exist_ok=True)
-        (self.root / "pkg/routing/main_test.go").write_text(
-            "package fixture\n"
-            "func TestMain(m *testing.M) {\n"
-            "\ttestguard.ExitIfUnsafe()\n"
-            "\tos.Exit(m.Run())\n"
-            "}\n",
             encoding="utf-8",
         )
         result = self.run_census()
