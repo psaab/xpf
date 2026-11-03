@@ -21,7 +21,7 @@ func (s *Store) compileAuthSafeCandidate(candidate *config.ConfigTree, bootstrap
 	if err != nil {
 		return nil, nil, fmt.Errorf("hashing api-auth secrets failed")
 	}
-	compiled, err := s.compileTreeAs(hashed, bootstrapImport)
+	compiled, err := s.compileTreeAsWithPackedTailGate18771(hashed, bootstrapImport, true)
 	if err != nil {
 		return nil, nil, err
 	}

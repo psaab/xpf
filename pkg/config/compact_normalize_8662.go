@@ -66,6 +66,10 @@ func normalizeCompactStanzasWithScope(tree *ConfigTree, inScope func(containerKe
 }
 
 func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(containerKeyword, head string) bool) int {
+	return normalizeCompactNodesWithPackedTailGate18771(nodes, schema, inScope, nil, false, 0, false)
+}
+
+func normalizeCompactNodesWithPackedTailGate18771(nodes []*Node, schema *schemaNode, inScope func(containerKeyword, head string) bool, run *packedTailGateRun18771, readOnly bool, targetID uint64, removeTarget bool) int {
 	if schema == nil {
 		return 0
 	}
@@ -74,6 +78,9 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 		if node == nil || len(node.Keys) == 0 {
 			continue
 		}
+		if readOnly && run != nil && node.packedTailSite18771 != 0 {
+			run.recordPackedTail18771(node, "", "", 0, true)
+		}
 		kw := node.Keys[0]
 		child := schemaChildFor(schema, kw) // #9685
 		if child == nil {
@@ -81,7 +88,7 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 		}
 		// #9620: a brace-elided routing instance packs its statements onto the
 		// instance NAME's node, which no (container, head) scope pair can name.
-		if schema == schemaRoutingInstances && child == schema.wildcard {
+		if !readOnly && schema == schemaRoutingInstances && child == schema.wildcard {
 			n += normalizeElidedRoutingInstance9620(node, child)
 		}
 		// #15062 (A01-01): a top-level brace-elided interface packs the
@@ -97,7 +104,7 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 		// matching an unrelated `interfaces` container deeper in the tree
 		// (e.g. class-of-service, whose interfaces child is a different
 		// schema node).
-		if kw == "interfaces" && child == schemaInterfaces {
+		if !readOnly && kw == "interfaces" && child == schemaInterfaces {
 			n += normalizeElidedInterface15062(node)
 		}
 		// The node's own identity is its keyword plus its declared args.
@@ -157,7 +164,31 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 			if childSub != child && identity >= 2 {
 				ckw = node.Keys[identity-1]
 			}
-			if _, isBody := childSub.children[head]; isBody && inScope(ckw, head) {
+			fold18771, removed18771 := false, false
+			if _, isBody := childSub.children[head]; isBody {
+				fold18771 = inScope(ckw, head)
+				if targetID != 0 && node.packedTailSite18771 == targetID {
+					if removeTarget {
+						quoted := keyMask8921(node.KeysQuoted, len(node.Keys))
+						bracketed := keyMask8921(node.KeysBracketed, len(node.Keys))
+						closed := node.BracketedClosed
+						node.Keys = append([]string(nil), node.Keys[:identity]...)
+						node.setKeysQuoted(maskSlice8921(quoted, 0, identity))
+						node.setKeysBracketed(maskSlice8921(bracketed, 0, identity), closed)
+						node.IsLeaf = false
+						removed18771 = true
+						n++
+					} else {
+						fold18771 = true
+					}
+				}
+				if !fold18771 && !removed18771 && run != nil {
+					run.recordPackedTail18771(node, ckw, head, identity, readOnly)
+				}
+			}
+			if removed18771 {
+				// R_i keeps the bare-identity stub and its pre-existing children.
+			} else if fold18771 && !readOnly {
 				// #8880: DECLINE rather than STRAND. The parser splits a run of
 				// statements packed onto an elided container's line into
 				// SIBLINGS, and only the first carries the container keyword:
@@ -273,8 +304,10 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 				}
 			}
 		}
-		n += splitBracedPackedChildren8886(node, childSub)
-		n += normalizeCompactNodes(node.Children, childSub, inScope)
+		if !readOnly {
+			n += splitBracedPackedChildren8886(node, childSub)
+		}
+		n += normalizeCompactNodesWithPackedTailGate18771(node.Children, childSub, inScope, run, readOnly, targetID, removeTarget)
 	}
 	return n
 }

@@ -164,15 +164,29 @@ func CompileConfigForNodeWithCurrentClusterPrimary(tree *ConfigTree, nodeID int,
 // set is empty, so any placeholder is refused. judge false leaves the
 // placeholder warning-only.
 func CompileConfigJudgingPlaceholders(tree *ConfigTree, current *Config, judge bool) (*Config, error) {
+	return CompileConfigJudgingPlaceholdersWithPackedTailGate18771(tree, current, judge, false)
+}
+
+// CompileConfigJudgingPlaceholdersWithPackedTailGate18771 is the narrow
+// configstore promotion core. Existing public wrappers pin eligibility false.
+func CompileConfigJudgingPlaceholdersWithPackedTailGate18771(tree *ConfigTree, current *Config, judge, eligible bool) (*Config, error) {
 	opts := currentClusterOpts(current)
 	opts.judgePlaceholders18744 = judge
+	opts.packedTailGateEligible18771 = eligible
 	return compileTree(tree, opts, nil)
 }
 
 // CompileConfigForNodeJudgingPlaceholders is the node-aware form.
 func CompileConfigForNodeJudgingPlaceholders(tree *ConfigTree, nodeID int, current *Config, judge bool) (*Config, error) {
+	return CompileConfigForNodeJudgingPlaceholdersWithPackedTailGate18771(tree, nodeID, current, judge, false)
+}
+
+// CompileConfigForNodeJudgingPlaceholdersWithPackedTailGate18771 is the
+// node-aware configstore promotion core.
+func CompileConfigForNodeJudgingPlaceholdersWithPackedTailGate18771(tree *ConfigTree, nodeID int, current *Config, judge, eligible bool) (*Config, error) {
 	opts := currentClusterOpts(current)
 	opts.judgePlaceholders18744 = judge
+	opts.packedTailGateEligible18771 = eligible
 	return compileTree(tree, opts, &nodeID)
 }
 
@@ -472,6 +486,10 @@ func validateAPIAuthCredentialsStrict(cfg *Config) error {
 // differently (#8662/#8752). Never re-add a second orchestrator or a
 // boolean node-scope flag: presence is carried by the pointer alone.
 func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, error) {
+	var gate *packedTailGateRun18771
+	if opts.packedTailGateEligible18771 && !opts.skipPackedTailGate18771 {
+		gate = newPackedTailGateRun18771(opts, nodeID)
+	}
 	// #2008 H1: prune `inactive:`-marked subtrees BEFORE every other
 	// pre-expansion gate, group expansion, and compilation. Doing it first
 	// means the tunnel-id collision gate ignores inactive tunnel
@@ -504,7 +522,11 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// asymmetry #8597 K51 was. Scoped to the security-relevant subset for now;
 	// see compact_normalize_8662.go.
 	if !opts.skipCompactNormalize {
-		normalizeCompactStanzas(tree)
+		if gate != nil {
+			normalizeCompactStanzasWithPackedTailGate18771(tree, gate)
+		} else {
+			normalizeCompactStanzas(tree)
+		}
 	}
 	normalizeImplicitInetFilters9899(tree)
 	// #8752: fold a repeated named-instance statement into the first
@@ -561,6 +583,9 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 				dupMergeWarnings = append(dupMergeWarnings, foldWidenedWarning9571(w))
 			}
 		}
+	}
+	if gate != nil {
+		packedTailGateSnapshotPoint18771(tree, gate)
 	}
 
 	// #1873 R-B: tunnel-endpoint id collision gate. Runs on the
@@ -867,6 +892,10 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 			directActionConflicts, expandedConflicts)
 	}
 
+	if gate != nil {
+		observePackedTailGateEffective18771(tree, gate)
+	}
+
 	// #4329/#17157: thread the runtime cluster node identity into
 	// compileExpanded so it can stamp ClusterConfig.NodeID for a leaf-less
 	// flat vSRX config BEFORE any NodeID-dependent derivation runs (reth
@@ -964,6 +993,9 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// for the short prefixes, and those are precisely the ones whose packed and
 	// nested spellings disagree about whether the CLI denies or permits.
 	cfg.System.LoginDroppedByPacking = loginPathPackedAnywhere(tree)
+	if gate != nil {
+		gate.adjudicate18771(cfg)
+	}
 	return cfg, nil
 }
 
@@ -996,7 +1028,15 @@ func CompileConfigForNode(tree *ConfigTree, nodeID int) (*Config, error) {
 // must inspect, and a compile error there is swallowed by its
 // `err != nil -> return nil` arm.
 func CompileConfigForNodeLenient(tree *ConfigTree, nodeID int) (*Config, error) {
-	return compileTree(tree, lenientCompileOpts(), &nodeID)
+	return CompileConfigForNodeLenientWithPackedTailGate18771(tree, nodeID, false)
+}
+
+// CompileConfigForNodeLenientWithPackedTailGate18771 is the peer-model core
+// used only by an eligible configstore promotion.
+func CompileConfigForNodeLenientWithPackedTailGate18771(tree *ConfigTree, nodeID int, eligible bool) (*Config, error) {
+	opts := lenientCompileOpts()
+	opts.packedTailGateEligible18771 = eligible
+	return compileTree(tree, opts, &nodeID)
 }
 
 // compileExpanded compiles an already-expanded (groups resolved) ConfigTree

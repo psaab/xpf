@@ -656,13 +656,13 @@ type Config struct {
 	EventOptions       []*EventPolicy
 	BridgeDomains      []*BridgeDomainConfig
 	Warnings           []string // non-fatal validation warnings
-	// Diagnostics is the structured, additive record of tolerant-path
-	// findings from sub-runs converted to a gate registry (#16145,
-	// NAT first): each entry carries the same prose as the Warnings
-	// string that gate appended, plus the registry gate name. Only
-	// registry gates record Diagnostics — warnings appended outside a
-	// registry (including the trailing warning-only NAT potential-
-	// shadow appender) appear in Warnings only. Warnings remains the
+	// Diagnostics is the structured, additive record of findings from
+	// sub-runs converted to a gate registry (#16145, NAT first), plus the
+	// report-only #18771 packed-tail gate on eligible strict commit views:
+	// each entry carries the same prose as the Warnings string that gate
+	// appended, plus the gate name. Other warnings appended outside a
+	// registry (including the trailing warning-only NAT potential-shadow
+	// appender) appear in Warnings only. Warnings remains the
 	// prose surface every existing consumer reads. Compile-time only;
 	// never serialized or compared (fingerprintIgnore).
 	Diagnostics []Diagnostic `json:"-"`
