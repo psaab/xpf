@@ -1,6 +1,7 @@
 # source	class	isolation	proof
 pkg/cluster/sync_loopback_18038_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/cluster_vrf_retry_kernel_12168_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
+pkg/daemon/daemon_ha_userspace_stream_live_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/daemon_mgmt_dns_rules_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/daemon_nft_netlink_parity_test.go	nft	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
 pkg/daemon/daemon_proxyarp_test.go	netlink	private-net+mount	package-TestMain:testguard.ExitIfUnsafe;testguard-run
