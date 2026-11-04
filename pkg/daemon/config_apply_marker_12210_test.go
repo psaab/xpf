@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vishvananda/netlink"
+
 	"golang.org/x/sync/semaphore"
 
 	"github.com/psaab/xpf/pkg/cluster"
@@ -163,8 +165,64 @@ func TestBootRetryReconstructsZoneSnapshotAndReceivesBulkAck12210(t *testing.T) 
 	}
 }
 
+// loopbackDialable12210 reports whether a loopback TCP connect completes in
+// the current namespace. A bare net.Listen is NOT proof: the kernel accepts
+// a 127.0.0.1 bind in a namespace whose lo is still down, so only a dialed
+// connection separates "routable" from "bindable but unroutable" — the gap
+// that let both SessionSync listeners log green while the pair's bulk
+// transfer never crossed.
+func loopbackDialable12210() bool {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return false
+	}
+	defer ln.Close()
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// ensureLoopbackForSyncPair12210 makes 127.0.0.1 routable before the pair's
+// reserve-port dance. #18038's testguard runner executes named tests in a
+// private network namespace whose lo exists but is DOWN and unaddressed:
+// 127.0.0.1 binds still succeed there (both "cluster sync: listening" logs
+// print), while the pair's production dial (SessionSync.fabricConnectLoop)
+// fails with ENETUNREACH on every retry, so the peer's authoritative bulk
+// and the matching BulkAck never cross and the cell fails deterministically
+// at its BulkAck assertions. Bringing lo up installs 127.0.0.1/8 and its
+// local routes, restoring exactly the transport this fixture was built on.
+// On a runner whose loopback is already routable this is a no-op that
+// touches nothing. Deliberately file-local (12210-suffixed) so this fixture
+// does not depend on the unmerged #18933 helper in
+// daemon_ha_userspace_stream_live_test.go.
+func ensureLoopbackForSyncPair12210(t *testing.T) {
+	t.Helper()
+	if loopbackDialable12210() {
+		return
+	}
+	lo, err := netlink.LinkByName("lo")
+	if err != nil {
+		t.Fatalf("resolve lo to bring up loopback for the sync pair (127.0.0.1 not dialable): %v", err)
+	}
+	if err := netlink.LinkSetUp(lo); err != nil {
+		t.Fatalf("bring up lo for the sync pair (#18038 private namespace): %v", err)
+	}
+	if !loopbackDialable12210() {
+		t.Fatal("127.0.0.1 still not dialable after LinkSetUp(lo): the sync pair cannot connect")
+	}
+}
+
 func syncPairAddresses12210(t *testing.T) (string, string) {
 	t.Helper()
+
+	// #18038: the testguard runner's private namespace leaves lo down, which
+	// makes the pair's production dial fail ENETUNREACH forever — bring it
+	// up first (a no-op wherever loopback already routes).
+	ensureLoopbackForSyncPair12210(t)
+
 	lnA, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve session-sync address A: %v", err)

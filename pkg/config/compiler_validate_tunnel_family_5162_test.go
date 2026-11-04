@@ -5,6 +5,19 @@ import (
 	"testing"
 )
 
+// #18958 closing census: the mixed-family outcome clause is per-arm.
+// Strict returns the message as the commit refusal, so its outcome says
+// the commit is refused; "a mixed pair commits clean but the dataplane
+// silently drops every encapsulated packet" is only true on the lenient
+// arm, where the config boots and the Rust helper skips the mixed row.
+// Literals, not builder references, so an outcome swap cannot satisfy
+// them tautologically; the head ("different address families") is
+// shared, unchanged, and pinned by hasFamilyMismatch.
+const (
+	strictTail5162  = "(the commit is refused, #5162)"
+	lenientTail5162 = "(a mixed pair commits clean but the dataplane silently drops every encapsulated packet, #5162)"
+)
+
 // hasFamilyMismatch reports whether err carries the #5162 mixed-family
 // tunnel rejection message.
 func hasFamilyMismatch(err error) bool {
@@ -45,6 +58,8 @@ func TestTunnelOuterFamilyGate(t *testing.T) {
 	}
 	if _, err := validateTunnelOuterFamilyStrict(cfgA, false); !hasFamilyMismatch(err) {
 		t.Fatalf("(a) v4-src/v6-dst GRE must be rejected, got %v", err)
+	} else if !strings.Contains(err.Error(), strictTail5162) {
+		t.Fatalf("(a) strict rejection must carry the refused outcome (#18958), got %v", err)
 	}
 
 	// (b) reverse order: v6 source + v4 destination → strict reject.
@@ -55,6 +70,8 @@ func TestTunnelOuterFamilyGate(t *testing.T) {
 	}
 	if _, err := validateTunnelOuterFamilyStrict(cfgB, false); !hasFamilyMismatch(err) {
 		t.Fatalf("(b) v6-src/v4-dst GRE must be rejected, got %v", err)
+	} else if !strings.Contains(err.Error(), strictTail5162) {
+		t.Fatalf("(b) strict rejection must carry the refused outcome (#18958), got %v", err)
 	}
 
 	// (c) same-family v4/v4 → no error (over-reject guard).
@@ -86,6 +103,8 @@ func TestTunnelOuterFamilyGate(t *testing.T) {
 	}
 	if _, err := validateTunnelOuterFamilyStrict(cfgE, false); !hasFamilyMismatch(err) {
 		t.Fatalf("(e) unit-level mixed GRE must be rejected, got %v", err)
+	} else if !strings.Contains(err.Error(), strictTail5162) {
+		t.Fatalf("(e) strict rejection must carry the refused outcome (#18958), got %v", err)
 	}
 
 	// (f) WireGuard tunnel (no Source/Destination) → skipped, no error.
@@ -101,8 +120,9 @@ func TestTunnelOuterFamilyGate(t *testing.T) {
 	// (#1960 no-brick — the Rust helper skips the row independently).
 	if w, err := validateTunnelOuterFamilyStrict(cfgA, true); err != nil {
 		t.Fatalf("(g) lenient must not reject a mixed pair, got %v", err)
-	} else if len(w) == 0 || !strings.Contains(w[0], "different address families") {
-		t.Fatalf("(g) lenient must warn on a mixed pair, got %v", w)
+	} else if len(w) == 0 || !strings.Contains(w[0], "different address families") ||
+		!strings.Contains(w[0], lenientTail5162) {
+		t.Fatalf("(g) lenient must warn with the commits-clean outcome (#18958), got %v", w)
 	}
 }
 
@@ -119,6 +139,8 @@ func TestGRETunnelMixedOuterFamilyRejectedAtCommit(t *testing.T) {
 		"set interfaces gr-0/0/0 tunnel destination 2001:db8::1",
 	}); !hasFamilyMismatch(err) {
 		t.Fatalf("mixed v4/v6 GRE must be rejected at commit, got %v", err)
+	} else if !strings.Contains(err.Error(), strictTail5162) {
+		t.Fatalf("commit rejection must carry the refused outcome (#18958), got %v", err)
 	}
 
 	// Reverse: v6 source + v4 destination → rejected at strict commit.
@@ -127,6 +149,8 @@ func TestGRETunnelMixedOuterFamilyRejectedAtCommit(t *testing.T) {
 		"set interfaces gr-0/0/0 tunnel destination 192.0.2.1",
 	}); !hasFamilyMismatch(err) {
 		t.Fatalf("mixed v6/v4 GRE must be rejected at commit, got %v", err)
+	} else if !strings.Contains(err.Error(), strictTail5162) {
+		t.Fatalf("commit rejection must carry the refused outcome (#18958), got %v", err)
 	}
 
 	// Over-reject guard: a same-family v4/v4 GRE tunnel commits clean.
@@ -157,7 +181,8 @@ func TestGRETunnelMixedOuterFamilyRejectedAtCommit(t *testing.T) {
 	}
 	found := false
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "different address families") {
+		if strings.Contains(w, "different address families") &&
+			strings.Contains(w, lenientTail5162) {
 			found = true
 			break
 		}

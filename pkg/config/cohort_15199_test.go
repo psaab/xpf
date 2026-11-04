@@ -88,13 +88,18 @@ func TestRethUndefinedRG15199(t *testing.T) {
 // families with L2 content now fail closed instead of warn-only.
 // (Bare `family bridge` with no content stays warn-only: #15654
 // scopes its gate to authored L2/filter/policer content.)
+// #17196 (c4e12aafc3) moved unknown family TOKENS out of this table's
+// warn-only contract: strict now rejects them with the #9017-style
+// diagnostic and lenient warns + skips the member — pinned by the
+// dedicated block below (re-pinned by #18881, which restored the same
+// split — known-but-unconsumed accepted, unknown rejected — at the
+// forwarding-options top).
 func TestInterfacesOpenWorldWarn15199(t *testing.T) {
 	cases := []struct {
 		name, want string
 		lines      []string
 	}{
 		{"ether-options", "ether-options", []string{"set interfaces ge-0/0/1 ether-options 802.3ad ae0", "set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24"}},
-		{"family unknown-af", "unknown-af-15199", []string{"set interfaces ge-0/0/1 unit 0 family unknown-af-15199"}},
 		{"arbitrary", "zzbogus", []string{"set interfaces ge-0/0/1 unit 0 zzbogus 1"}},
 		{"filtr typo", "filtr", []string{"set interfaces ge-0/0/1 unit 0 family inet filtr input f1", "set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24"}},
 	}
@@ -119,6 +124,26 @@ func TestInterfacesOpenWorldWarn15199(t *testing.T) {
 				t.Fatalf("lenient must warn #10707; %v", lcfg.Warnings)
 			}
 		})
+	}
+	// #17196 contract for unknown family TOKENS (was this table's
+	// "family unknown-af" warn-only row; re-pinned by #18881): strict
+	// rejects with the #9017-style diagnostic naming the token; lenient
+	// still boots (#1960) and warns + skips the member instead of
+	// committing it silently.
+	{
+		lines := []string{"set interfaces ge-0/0/1 unit 0 family unknown-af-15199"}
+		_, err := CompileConfig(buildTree(t, lines))
+		if err == nil || !strings.Contains(err.Error(), "unknown-af-15199") ||
+			!strings.Contains(err.Error(), "#17196") {
+			t.Fatalf("unknown family token must strict-reject with the #17196 diagnostic, got %v", err)
+		}
+		lcfg, lerr := CompileConfigLenient(buildTree(t, lines))
+		if lerr != nil {
+			t.Fatalf("lenient unknown family must not brick (#1960): %v", lerr)
+		}
+		if !cohortWarningsContain15199(lcfg.Warnings, "unknown-af-15199", "#17196") {
+			t.Fatalf("lenient must warn naming the token with the #17196 diagnostic; warnings=%v", lcfg.Warnings)
+		}
 	}
 	// Hier spelling
 	hier := "interfaces { ge-0/0/1 { ether-options { 802.3ad ae0; } unit 0 { family inet { address 10.0.1.1/24; } } } }"

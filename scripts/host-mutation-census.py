@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 PACKAGES = (
+    "pkg/cluster",
     "pkg/daemon",
     "pkg/dataplane",
     "pkg/dataplane/userspace",

@@ -21,6 +21,21 @@ import (
 // is `closedWorld: true` for exactly this reason: "a silent drop here is a real
 // footgun".
 
+// #18958: the unknown-keyword diagnostic's tail is per-arm. The strict
+// arm refuses the commit, so its tail says so; the compiles-to-NOTHING
+// wording stays on the lenient arm, where the keyword is warned about
+// and skipped and the committed config silently lacks the subtree.
+// Literals, not builder references, so a tail swap cannot satisfy them
+// tautologically; the head ("is not a routing-instance keyword") is
+// shared and unchanged. The instance-import/export branch of the same
+// builder carries no commit-outcome claim and stays pinned by
+// TestInstancePolicyLeakKeywordsHaveSpecificDiagnostics9323.
+const (
+	head9323        = "is not a routing-instance keyword"
+	strictTail9323  = "— the commit is refused."
+	lenientTail9323 = "— the subtree under it compiles to NOTHING: it commits clean, renders in `show configuration`, and takes effect nowhere."
+)
+
 func tree9323(t *testing.T, lines ...string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
@@ -73,6 +88,12 @@ func TestNestedSubtreesUnderARoutingInstanceAreRefused9323(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.tok) {
 				t.Errorf("the rejection does not name the offending keyword %q: %v", tc.tok, err)
+			}
+			// #18958: strict refuses, so the tail must say the commit is
+			// refused — not claim the subtree "commits clean".
+			if !strings.Contains(err.Error(), head9323) ||
+				!strings.Contains(err.Error(), strictTail9323) {
+				t.Errorf("strict refusal must carry the unknown-keyword head and the refused tail (#18958): %v", err)
 			}
 			if !strings.Contains(err.Error(), "routing-instances") {
 				t.Errorf("the rejection does not name the container: %v", err)
@@ -310,8 +331,11 @@ func TestTheRoutingInstanceGateIsStrictOnCommitAndLenientOnLoad9323(t *testing.T
 		t.Fatalf("lenient compile returned no config")
 	}
 	var found bool
+	// #18958: the lenient warning must carry the compiles-to-NOTHING
+	// tail — the arm where that wording is true.
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "9323") && strings.Contains(w, "security") {
+		if strings.Contains(w, "9323") && strings.Contains(w, "security") &&
+			strings.Contains(w, head9323) && strings.Contains(w, lenientTail9323) {
 			found = true
 			break
 		}
@@ -480,6 +504,12 @@ func TestTheGateCoversAllThreeSpellings9323(t *testing.T) {
 			if !strings.Contains(err.Error(), `"`+tc.wantTok+`"`) {
 				t.Errorf("the rejection names the WRONG keyword.\n got: %v\nwant it to name %q\n%s",
 					err, tc.wantTok, tc.text)
+			}
+			// #18958: strict refuses, so the tail must say so on every
+			// spelling, not just the flat-set one.
+			if !strings.Contains(err.Error(), head9323) ||
+				!strings.Contains(err.Error(), strictTail9323) {
+				t.Errorf("strict refusal must carry the unknown-keyword head and the refused tail (#18958): %v", err)
 			}
 		})
 	}

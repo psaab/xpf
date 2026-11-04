@@ -1242,12 +1242,6 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // frame, and the entry frame is 80% of the 512-byte combined-stack budget
     // the GRE classification chain has to fit inside. See the function's own
     // header for the measurement.
-    // `pkt_len` is stored here rather than passed, so the call fits BPF's
-    // five-argument limit WITHOUT packing either interface coordinate into a
-    // wider word. #5173 exists because nothing rejects a REDUCTION of
-    // `ingress_ifindex` by type; a pack/unpack pair around it would be a new
-    // place for exactly that, so the coordinates travel as their own bare u32
-    // arguments and the cheap scalar is the one that moves.
     write_userspace_meta(meta_ptr, &parsed, ingress_ifindex, rx_queue_index, ctrl);
     // Stored AFTER the call, not passed into it, so the call fits BPF's
     // five-argument limit WITHOUT packing either interface coordinate into a
@@ -2845,9 +2839,9 @@ fn first_fragment_l4(
 /// performance hint.
 ///
 /// Without it LLVM emits `parse_l4` as a BPF SUBPROGRAM, and a BPF-to-BPF call
-/// is verified once per distinct calling state. `parse_l4` is reached from
-/// `parse_ipv4`, `parse_ipv6` and both GRE inner classifiers, so the callee's
-/// protocol dispatch was being walked from every one of them. Measured on the
+/// is verified once per distinct calling state. `parse_l4` has four source
+/// call sites: two in `parse_ipv4`, one in `parse_ipv6`, and one in
+/// `first_fragment_l4`; neither GRE inner classifier calls it. Measured on the
 /// real kernel verifier (`make generate` -> `shimverify`, no
 /// `XPF_SHIM_ALLOW_LOW_HEADROOM`):
 ///
@@ -2874,19 +2868,24 @@ fn first_fragment_l4(
 /// change puts back more than all of what step 3 spent.
 ///
 /// THE COST, so a later editor prices it before growing this function:
-/// `#[inline(always)]` on a fn reached from FOUR call sites multiplies its code
-/// by four. That is a large net win today only because the per-calling-state
-/// re-verification it removes is worth far more than the duplication it adds.
-/// Grow `parse_l4` and you pay 4x — re-measure before assuming the trade still
-/// holds.
+/// Four source call sites become EIGHT inlined copies: `parse_ipv4` and
+/// `parse_ipv6` are themselves `#[inline(always)]` at two callers each, and
+/// `first_fragment_l4` is inlined into `parse_ipv4`. Thus the two direct IPv4
+/// sites and the first-fragment site each duplicate twice, as does the IPv6
+/// site: (2 + 1 + 1) × 2 = 8. That is a large net win today only because the
+/// per-calling-state re-verification it removes is worth far more than the
+/// duplication it adds. Grow `parse_l4` and you pay 8x — re-measure before
+/// assuming the trade still holds.
 ///
-/// NOT IN TENSION with `classify_native_gre_inner*` two hundred lines up, which
-/// are deliberately `#[inline(never)]`. They are the opposite shape: LARGE
+/// NOT IN TENSION with `classify_native_gre_inner_ipv4` and
+/// `classify_native_gre_inner_ipv6` roughly 1,400–1,500 lines up. The IPv4
+/// classifier is deliberately `#[inline(never)]`; the IPv6 classifier has no
+/// forced inline attribute. They are the opposite shape: LARGE
 /// (1,848 and 2,160 bytes) and reached from ONE call site each, so outlining
 /// buys state isolation for a cold path and costs no repeated walk. `parse_l4`
-/// is small and reached from four, so outlining bought nothing and paid four
-/// walks. The lever is bidirectional; the shape decides the direction, and
-/// "make them consistent" would be a regression whichever way it was applied.
+/// is small and expands to eight copies, so outlining bought nothing and paid
+/// repeated walks. The lever is bidirectional; the shape decides the direction,
+/// and "make them consistent" would be a regression whichever way it was applied.
 ///
 /// A NOTE ON FIGURES HERE. Dated headroom measurements rot within days: this
 /// file has carried four successive control figures inside a single issue's
@@ -2903,8 +2902,8 @@ fn first_fragment_l4(
 /// may go — the IPv4 declared-datagram end, a pure scalar. Every arm below
 /// scalar-checks its span against it BEFORE reading; the reads themselves
 /// run against the real capture end, which is the only value the verifier
-/// proves packet bounds against. Callers with no declared bound (IPv6,
-/// GRE-inner) pass `data_end`, which makes every check vacuous.
+/// proves packet bounds against. `parse_ipv6` has no declared bound and passes
+/// `data_end`, which makes every check vacuous.
 #[inline(always)]
 fn parse_l4(
     data: usize,
