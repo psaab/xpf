@@ -176,8 +176,12 @@ type PolicyTerm struct {
 	// authored `then community add|set|<value>` operand. Community and
 	// CommunityAdd retain the authored spelling so strict diagnostics and
 	// tolerant warnings can name it; the renderer omits the failed action.
-	// This compiler-only state is excluded from JSON to keep it off both the
-	// helper wire and REST config response.
+	// This compiler-only state is excluded from JSON so it stays out of the
+	// REST GET /api/v1/config response (pkg/api configHandler); the helper
+	// treats the snapshot payload's config blob as opaque and reads none of
+	// its fields. ConfigFingerprint still includes it (the walk ignores
+	// JSON tags): a failed lookup omits the rendered `set community`
+	// clause, so two configs differing only in this bit are not identical.
 	CommunityResolutionFailed bool `json:"-"`
 	// CommunityAddResolutionFailed is the add-action counterpart of
 	// CommunityResolutionFailed (#15665): with delete decoupled, a term can
@@ -458,8 +462,9 @@ type NextHopEntry struct {
 	// (#12308, compiler_static_qnh_merge_12308.go). Compile-only and transient:
 	// finalizeQualifiedNextHops12308 clears it before any validator or consumer
 	// reads the route, so a compiled Config never carries it and NextHopEntry
-	// equality outside the compiler is unchanged. Unexported, so it is not on
-	// the helper wire (#8892).
+	// equality outside the compiler is unchanged. Unexported compiler
+	// bookkeeping: JSON encoders never serialize unexported fields, so no
+	// compiled-config rendering can carry it.
 	qualified bool
 }
 
@@ -468,7 +473,8 @@ type StaticRoute struct {
 	Destination string // CIDR: "10.0.0.0/8" or "::/0"
 	// destinationAliases retains alternate authored CIDR spellings for
 	// commit-time diagnostics after compileStaticRoutes folds them by masked
-	// prefix. It is compiler-only and deliberately omitted from the helper wire.
+	// prefix. It is compiler-only diagnostics state; unexported (and tagged
+	// `json:"-"`), so no compiled-config JSON rendering can carry it.
 	destinationAliases []string `json:"-"`
 	// competingNextTableTargets records competing targets found while folding
 	// routes with the same masked destination. The tolerant compiler retains
