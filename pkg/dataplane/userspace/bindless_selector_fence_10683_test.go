@@ -51,7 +51,7 @@ func TestBindlessSelectorFenceSnapshotSurvivesCaptureWindows10683(t *testing.T) 
 			initial.IpsecTunnelRows, initial.IpsecTunnelSnapshotGeneration)
 	}
 
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock, requests := overlayControlServer(t, dir)
 	manager := New()
 	manager.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
