@@ -362,7 +362,7 @@ func ipsecAddressUnitIndex12089(cfg *Config, tunnelNames map[string]string) map[
 			if unit == nil {
 				continue
 			}
-			device := cfg.resolveKernelIfNameWith(fmt.Sprintf("%s.%d", base, unitNum), tunnelNames)
+			device := cfg.ResolveKernelIfNameWith(fmt.Sprintf("%s.%d", base, unitNum), tunnelNames)
 			record(unit.PrimaryAddress, device)
 			record(unit.PrimaryAddressV6, device)
 			record(unit.PreferredAddress, device)
@@ -482,7 +482,7 @@ func ipsecGatewayExternalDevices12089(cfg *Config, tunnelNames map[string]string
 	devices := make([]string, 0, len(refs))
 	seen := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
-		device := cfg.resolveKernelIfNameWith(ref, tunnelNames)
+		device := cfg.ResolveKernelIfNameWith(ref, tunnelNames)
 		if device == "" {
 			continue
 		}

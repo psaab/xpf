@@ -7,6 +7,13 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+// keaTunnelNameMapFn is the dhcpserver-side twin of pkg/config's
+// tunnelNameMapFn seam (#8862): production always holds
+// (*config.Config).TunnelNameMap, and the #18923 built-once cell swaps it
+// to count builds, because "the belt builds the map once, not once per
+// ref" is a cost property no output assertion can observe.
+var keaTunnelNameMapFn = (*config.Config).TunnelNameMap
+
 // FilterKeaInterfaces15206 drops, from one DHCP family config, every
 // group interface name that remains unresolved after the daemon's
 // resolution pass — a device name no configured interface produces
@@ -99,16 +106,24 @@ func FilterKeaInterfaces15206(cfg *config.DHCPServerConfig, active *config.Confi
 // declared interfaces and units resolve to. Both spellings of each authored
 // interface are resolved (the config key and its Linux form, #8829), because
 // a group ref authored in either spelling resolves from either.
+//
+// #18923: the tunnel-name map is built ONCE per call, through the seam
+// above, and every ref is resolved through the exported hoisted twin
+// Config.ResolveKernelIfNameWith. ResolveKernelIfName rebuilds that map per
+// call — a walk of every interface and unit — so the per-ref form made this
+// loop O((I+U)^2) per DHCP family per standalone commit. The active config
+// is not mutated during a filter call, so one build is sound.
 func usableKeaDevices15206(active *config.Config) map[string]bool {
+	tunMap := keaTunnelNameMapFn(active)
 	usable := make(map[string]bool)
 	for name, ifc := range active.Interfaces.Interfaces {
 		// #17474: a present-but-nil interface still declares its name: the
 		// pre-belt name-only loop counted it usable, and skipping it could
 		// leave usable empty, which disables filtering entirely (fail-open).
-		usable[active.ResolveKernelIfName(name)] = true
+		usable[active.ResolveKernelIfNameWith(name, tunMap)] = true
 		linux := config.LinuxIfName(name)
 		if linux != name {
-			usable[active.ResolveKernelIfName(linux)] = true
+			usable[active.ResolveKernelIfNameWith(linux, tunMap)] = true
 		}
 		if ifc == nil {
 			continue
@@ -118,9 +133,9 @@ func usableKeaDevices15206(active *config.Config) map[string]bool {
 				continue
 			}
 			suffix := "." + strconv.Itoa(unitNum)
-			usable[active.ResolveKernelIfName(name+suffix)] = true
+			usable[active.ResolveKernelIfNameWith(name+suffix, tunMap)] = true
 			if linux != name {
-				usable[active.ResolveKernelIfName(linux+suffix)] = true
+				usable[active.ResolveKernelIfNameWith(linux+suffix, tunMap)] = true
 			}
 		}
 	}

@@ -64,13 +64,23 @@ func snmpCommunityKnownChildren15124() (permitted map[string]bool, declared []st
 }
 
 // snmpCommunityUnknownMessage renders the operator-facing text for an
-// unknown community child. `lenient` appends the quarantine note, so the
-// two paths cannot describe the same condition differently. Only the
-// offending TOKEN is named — never the community name (a secret).
+// unknown community child. `lenient` selects the arm's clause (#18955):
+// strict returns this message as the commit-refusing error, so its
+// clause says the commit is refused. On the lenient arm the statement
+// itself is dropped, but the community is then quarantined to deny-all
+// — which IS an effect — so the clause scopes the nothing to the
+// statement instead of claiming the configuration "has no effect"; the
+// quarantine note is appended so the two paths cannot describe the same
+// condition differently. Only the offending TOKEN is named — never the
+// community name (a secret).
 func snmpCommunityUnknownMessage15124(tok string, declared []string, lenient bool) string {
+	clause := "the commit is refused"
+	if lenient {
+		clause = "it compiles to NOTHING: it commits clean, renders in `show configuration`, and the statement itself is ignored"
+	}
 	msg := fmt.Sprintf(
-		"snmp community: %q is not a community statement xpf implements (known: %s) — it compiles to NOTHING: it commits clean, renders in `show configuration`, and has no effect; a mistyped source restriction (e.g. `client` for `clients`, `client-list-nam` for `client-list-name`) would leave the community answering every source (#15124)",
-		tok, strings.Join(declared, ", "))
+		"snmp community: %q is not a community statement xpf implements (known: %s) — %s; a mistyped source restriction (e.g. `client` for `clients`, `client-list-nam` for `client-list-name`) would leave the community answering every source (#15124)",
+		tok, strings.Join(declared, ", "), clause)
 	if lenient {
 		msg += "; the affected community is quarantined to deny-all until the statement is fixed"
 	}

@@ -135,6 +135,17 @@ func validateFirewallFilterFamilyTokensAST(nodes []*Node, lenient bool) ([]strin
 		return nil, nil
 	}
 
+	// #18954: the tail is per-arm. Strict returns the message below as
+	// the commit-refusing error, so its tail must say the commit is
+	// refused — the old tail claimed the filter "commits clean" and
+	// "renders in `show configuration`", which is only true on the
+	// lenient arm, where the family is warned about and skipped and the
+	// committed config silently lacks the filter.
+	tail := "the commit is refused"
+	if lenient {
+		tail = "the filter under it compiles to NOTHING: it commits " +
+			"clean, renders in `show configuration`, and enforces no rule at all"
+	}
 	var warnings []string
 	for _, fwNode := range nodes {
 		if fwNode == nil || fwNode.Name() != "firewall" {
@@ -154,9 +165,7 @@ func validateFirewallFilterFamilyTokensAST(nodes []*Node, lenient bool) ([]strin
 						continue
 					}
 					msg := fmt.Sprintf("firewall family %q is not a known address family "+
-						"(known: %s) — the filter under it compiles to NOTHING: it commits "+
-						"clean, renders in `show configuration`, and enforces no rule at all "+
-						"(#9017)", tok, strings.Join(firewallFamilyTokens9017(), ", "))
+						"(known: %s) — %s (#9017)", tok, strings.Join(firewallFamilyTokens9017(), ", "), tail)
 					if lenient {
 						warnings = append(warnings, msg)
 						continue
