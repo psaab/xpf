@@ -1,0 +1,19 @@
+# #18771 fixed runtime-observation manifest (intentional edits only)
+# KIND<TAB>FIXTURE<TAB>VIEW<TAB>EXPECTED
+# Covered rows name the exact eligible verdict multiset in deterministic source order.
+# OUT rows are independent exclusions; NONE means no packedTailGate18771 finding.
+# Census evidence: base-measured family inet6 dad-disable DROP; hand-measured
+# address/vrrp-group DROP/PARTIAL/CLEAN trio (priority, authentication-type,
+# duplicate priority); applied/unused/fan-out group provenance controls.
+COVERED	inline-drop	strict	DROP:1
+COVERED	same-pair-mixed	lenient	DROP:1,PARTIAL:1,CLEAN:1
+COVERED	applied-group	strict	DROP:1
+COVERED	fanout	lenient	SKIPPED-PROVENANCE:2
+OUT	already-admitted	strict	NONE
+OUT	strict-refused	strict	ERROR
+OUT	unclassified	strict	INDETERMINATE:1
+OUT	schema-unreached	lenient	NONE
+OUT	scope-true-declines	lenient	NONE
+OUT	scope-true-stranding	lenient	NONE
+OUT	scope-true-leaf-decline	lenient	NONE
+OUT	unused-group	strict	NONE

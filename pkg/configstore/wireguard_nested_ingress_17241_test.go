@@ -159,7 +159,7 @@ func TestSyncApplyDoesNotLetPriorSchemaErrorHideNestedRefusal17241(t *testing.T)
 	if len(parseErrs) > 0 {
 		t.Fatalf("combined fixture must parse: %v", parseErrs[0])
 	}
-	firstErr := s.schemaValidateExpandedTree(tree)
+	firstErr := schemaValidateExpandedTreeForNode(tree, s.nodeID, false)
 	if firstErr == nil || config.IsTypedLeafSchemaError(firstErr) ||
 		config.IsNestedListContentSchemaError(firstErr) || !strings.Contains(firstErr.Error(), "adress-set") {
 		t.Fatalf("fixture must begin with a non-typed schema error on adress-set, got: %v", firstErr)

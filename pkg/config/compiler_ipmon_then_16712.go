@@ -121,9 +121,17 @@ func validateIPMonThenChildrenAST16712(nodes []*Node, lenient bool) ([]string, e
 				"`then interface <if> enable|disable` compiles to NOTHING: the interface is never enabled or disabled on probe failure; "+
 				"remove it or keep only `then preferred-route`", policy)
 		} else {
+			// #18962: the unknown-token tail is per-arm. The strict arm
+			// returns this text as the commit-refusing error, so the
+			// renders-in-`show configuration` persistence claim lives only
+			// on the arm where the gate warns and the config still loads.
+			tail := "the commit is refused (#16712)"
+			if lenient {
+				tail = "it compiles to NOTHING: it renders in `show configuration` and no action is taken on probe failure (#16712)"
+			}
 			msg = fmt.Sprintf("services ip-monitoring policy %q then: %q is not a `then` statement "+
-				"xpf implements (known: %s) — it compiles to NOTHING: it renders in `show configuration` and no action is taken on probe failure (#16712)",
-				policy, tok, strings.Join(declared, ", "))
+				"xpf implements (known: %s) — %s",
+				policy, tok, strings.Join(declared, ", "), tail)
 		}
 		if !lenient {
 			return fmt.Errorf("%s", msg)
