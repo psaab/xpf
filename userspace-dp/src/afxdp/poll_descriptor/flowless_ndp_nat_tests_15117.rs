@@ -65,6 +65,13 @@ fn icmpv6_frame(hop: u8, ty: u8) -> Vec<u8> {
     f
 }
 
+/// eth + IPv6 (hop `hop`) + a non-ICMPv6 L4: next header UDP (17).
+fn udpv6_frame(hop: u8) -> Vec<u8> {
+    let mut f = icmpv6_frame(hop, 128);
+    f[20] = crate::ip_proto::PROTO_UDP;
+    f
+}
+
 fn static_nat_forwarding() -> ForwardingState {
     // Build through the real snapshot path so the FIB, egress and
     // interface-NAT ownership match production: the external lives on
@@ -193,5 +200,81 @@ fn shim_proxy_ndp_predicate_16660() {
     }
     for ty in [128u8, 129, 1, 4] {
         assert!(!shim_ndp_15117::is_proxy_ndp_ndp_control(ty, 255, true));
+    }
+}
+
+/// #17254: the shim stamps `meta.protocol = 255`
+/// (`SHIM_PROTO_FRAGMENT_NO_L4`) whenever its per-CPU v6-fragment scratch
+/// write/read fails — even when the walk resolved a plain ICMPv6 chain
+/// (userspace-xdp `parse_ipv6`). The stamp is an unknown sentinel, not a
+/// protocol, so both #15117 sites must take the NDP verdict from the wire
+/// and agree: pre-fix, the session-miss site's sideband pre-filter
+/// (`meta.protocol != PROTO_ICMPV6`) rejected exactly this frame and let
+/// the destination translation run.
+#[test]
+fn sentinel_sideband_ndp_admitted_at_both_sites_17254() {
+    for ty in [133u8, 134, 135, 136, 137] {
+        let frame = icmpv6_frame(255, ty);
+        let meta = v6_meta(crate::session::SHIM_PROTO_FRAGMENT_NO_L4);
+        let session_miss = is_ndp_hop255_frame(&frame, meta);
+        let flowless = is_ndp_hop255(flowless_nat_wire_info(&frame, meta));
+        assert!(
+            session_miss,
+            "session-miss site must admit wire NDP type {ty} under the 255 sentinel"
+        );
+        assert_eq!(
+            session_miss, flowless,
+            "the two #15117 sites disagree on sentinel-stamped NDP type {ty}"
+        );
+    }
+}
+
+/// #17254: the sentinel must not over-admit. A wire protocol that is not
+/// ICMPv6 (UDP) or an ICMPv6 type outside 133-137 (echo request 128) is
+/// rejected at both sites, under the sentinel and under the real stamps.
+#[test]
+fn non_ndp_wire_rejected_at_both_sites_17254() {
+    for protocol in [
+        crate::ip_proto::PROTO_ICMPV6,
+        crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        crate::ip_proto::PROTO_UDP,
+    ] {
+        let meta = v6_meta(protocol);
+        let echo = icmpv6_frame(255, 128);
+        assert!(
+            !is_ndp_hop255_frame(&echo, meta),
+            "ICMPv6 echo (128) is not NDP under meta.protocol {protocol}"
+        );
+        assert!(
+            !is_ndp_hop255(flowless_nat_wire_info(&echo, meta)),
+            "ICMPv6 echo (128) is not NDP under meta.protocol {protocol}"
+        );
+        let udp = udpv6_frame(255);
+        assert!(
+            !is_ndp_hop255_frame(&udp, meta),
+            "wire UDP is not NDP under meta.protocol {protocol}"
+        );
+        assert!(
+            !is_ndp_hop255(flowless_nat_wire_info(&udp, meta)),
+            "wire UDP is not NDP under meta.protocol {protocol}"
+        );
+    }
+}
+
+/// #17254: hop limit != 255 is not on-link NDP — rejected at both sites
+/// under the sentinel too (the wire hop byte governs, never the sideband).
+#[test]
+fn off_link_hop_rejected_at_both_sites_17254() {
+    for hop in [0u8, 1, 64, 254] {
+        let frame = icmpv6_frame(hop, 135);
+        let meta = v6_meta(crate::session::SHIM_PROTO_FRAGMENT_NO_L4);
+        assert!(
+            !is_ndp_hop255_frame(&frame, meta),
+            "hop {hop} NS is not on-link NDP (session-miss site)"
+        );
+        assert!(
+            !is_ndp_hop255(flowless_nat_wire_info(&frame, meta)),
+            "hop {hop} NS is not on-link NDP (flowless site)"
+        );
     }
 }
