@@ -33,7 +33,7 @@ func TestLoadQuarantinesUnknownPoliciesChild12217(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "config")
 	store := newTestStoreAt(t, path)
-	schemaErr := store.schemaValidateExpandedTree(tree)
+	schemaErr := schemaValidateExpandedTreeForNode(tree, store.nodeID, false)
 	if schemaErr == nil || !strings.Contains(schemaErr.Error(), "globel") {
 		t.Fatalf("strict commit control schema error = %v, want rejection naming globel", schemaErr)
 	}
