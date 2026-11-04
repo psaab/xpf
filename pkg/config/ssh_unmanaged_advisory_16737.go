@@ -172,8 +172,8 @@ func sshParentUnit0CarrierState16737(cfg *Config, base string, tunnelNames map[s
 	if _, ok := LookupUnit(iface, 0); !ok {
 		return false, false
 	}
-	parentDevice := cfg.resolveKernelIfNameWith(base, tunnelNames)
-	unit0Device := cfg.resolveKernelIfNameWith(base+".0", tunnelNames)
+	parentDevice := cfg.ResolveKernelIfNameWith(base, tunnelNames)
+	unit0Device := cfg.ResolveKernelIfNameWith(base+".0", tunnelNames)
 	return true, parentDevice == unit0Device
 }
 

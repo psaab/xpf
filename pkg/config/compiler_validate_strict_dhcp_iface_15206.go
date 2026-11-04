@@ -119,7 +119,7 @@ func validateDHCPServerInterfaceRefStrict(cfg *Config) error {
 		if reason == "" {
 			continue
 		}
-		device := cfg.resolveKernelIfNameWith(r.ref, tunMap)
+		device := cfg.ResolveKernelIfNameWith(r.ref, tunMap)
 		return fmt.Errorf("system services %s group %q interface %q %s — Kea will be given "+
 			"device name %q, which is not a configured device; Kea refuses to load the "+
 			"rendered file, so every pool of the %s family stops serving, not just this "+

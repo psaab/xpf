@@ -206,7 +206,9 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 				case leaf.tailValidator != nil:
 					leafErr = validateTailLeaf(prop, leaf, []string{"routing-instances", instName}, nil)
 				case leaf.isScalarValueLeaf():
-					leafErr = validateScalarValueLeaf(prop, leaf, []string{"routing-instances", instName})
+					// #18962: thread this gate's own arm so the valueless
+					// tail matches how the caller treats the error.
+					leafErr = validateScalarValueLeaf(prop, leaf, []string{"routing-instances", instName}, lenient)
 				default:
 					continue
 				}

@@ -335,7 +335,7 @@ func RoutingInstanceMemberDeviceOwnersForRefs(cfg *Config, refs []string) map[st
 			owners[ref] = ""
 			continue
 		}
-		device := cfg.resolveKernelIfNameWith(ref, tunnelNames)
+		device := cfg.ResolveKernelIfNameWith(ref, tunnelNames)
 		owners[ref] = deviceOwners[device]
 	}
 	return owners
