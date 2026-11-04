@@ -1415,11 +1415,24 @@ func TestRenameAncestryOwnershipTransfersAtBindTime10511(t *testing.T) {
 		t.Fatalf("bind left store-side lineage behind: %#v", got)
 	}
 	// Every apply outcome retains the daemon copy and resurrects nothing
-	// store-side: fatal (publication skipped), non-fatal tail error, success.
+	// store-side: fatal (publication skipped), non-fatal tail error,
+	// success — and every outcome returns a commit result.
+	// #18890: the fatal row once demanded a nil commit result — the
+	// pre-#16828 contract this test was born under (#10509). Since
+	// #16828 (5d2c52e53d) a fatal post-promotion abort returns the
+	// promoted config with the error wrapped in
+	// configstore.ErrCommittedNotApplied: the store already
+	// promoted+persisted it, and (nil, err) made the #5742/#15281
+	// classifiers report a persisted config as a plain reject (REST
+	// 400 / gRPC InvalidArgument). The wrap is additive, so the
+	// underlying gate sentinel must stay matchable, and ONLY the fatal
+	// row is wrapped: a non-fatal tail error stays bare (the config is
+	// committed AND live; ClassifyCommitError reports it as a tail
+	// error, not committed-not-applied).
 	for _, tc := range []struct {
 		name     string
 		applyErr error
-		wantNil  bool
+		wantCNA  bool // fatal post-promotion abort → committed-not-applied
 	}{
 		{"fatal", dpuserspace.ErrPolicySchedulerProtocolIncompatible, true},
 		{"non-fatal", errors.New("apply networkd config: simulated best-effort failure"), false},
@@ -1434,8 +1447,15 @@ func TestRenameAncestryOwnershipTransfersAtBindTime10511(t *testing.T) {
 			if tc.applyErr != nil && err == nil {
 				t.Fatal("failing apply returned nil; the retention below is untested")
 			}
-			if tc.wantNil && got != nil {
-				t.Fatal("fatal apply must fail without a commit result")
+			if got == nil {
+				t.Fatalf("%s apply returned no commit result", tc.name)
+			}
+			if errors.Is(err, configstore.ErrCommittedNotApplied) != tc.wantCNA {
+				t.Fatalf("%s apply committed-not-applied wrap = %v, want %v (err: %v)",
+					tc.name, !tc.wantCNA, tc.wantCNA, err)
+			}
+			if tc.applyErr != nil && !errors.Is(err, tc.applyErr) {
+				t.Fatalf("%s apply error lost the underlying sentinel %v: %v", tc.name, tc.applyErr, err)
 			}
 			if _, ok := d.pendingRenameApplies[activeGen]; !ok {
 				t.Fatalf("%s apply dropped the daemon-side descriptor copy", tc.name)
