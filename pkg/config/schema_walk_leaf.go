@@ -92,6 +92,25 @@ func validateModifierChild(node *Node, leafSchema *schemaNode, leafPath []string
 	return nil
 }
 
+// valuelessStatementTail18962 is the per-arm tail shared by every builder
+// of the valueless-statement refusal (#18962): the generic #8597 walk gate
+// (schema_walk.go), validateScalarValueLeaf's too-few half, and the #16571
+// screen missing-value gate (which appends its issue tag).
+//
+// The lenient arm keeps the original drop wording verbatim: the tolerant
+// Load / peer-sync ingress logs-and-continues, so the accepted config
+// really does silently lack the statement. The strict arm returns this
+// text as the commit-refusing error, so the drop is counterfactual there
+// — the tail states the refusal and keeps the drop as the reason
+// ("would ... so"), not as the outcome.
+func valuelessStatementTail18962(lenient bool) string {
+	if lenient {
+		return "the compiler drops a valueless statement, so this commits clean and the " +
+			"configuration silently does not carry it"
+	}
+	return "the compiler would silently drop a valueless statement, so the commit is refused"
+}
+
 // validateScalarValueLeaf enforces the fixed value-arity of a scalar value
 // leaf (#3332): the leaf legitimately carries its keyword plus exactly
 // leafSchema.args value token(s) on Keys and NO sub-statement. The compiler
@@ -104,8 +123,11 @@ func validateModifierChild(node *Node, leafSchema *schemaNode, leafPath []string
 //
 // Minimum arity is enforced for fixed-arity leaves; allowEmptyValue is the
 // explicit exception for a Junos leaf that also accepts a presence-only form.
-// The gate remains scoped to the same silent-drop bug class.
-func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []string) error {
+// The gate remains scoped to the same silent-drop bug class. The too-few
+// refusal's tail is per-arm (#18962): callers thread the arm they already
+// branch on — the walk threads its lenient context, the #9736 routing-
+// instance gate its own lenient flag.
+func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []string, lenient bool) error {
 	leafName := node.Keys[0]
 	leafPath := append(append([]string(nil), parentPath...), leafName)
 	allowed := 1 + leafSchema.args
@@ -116,8 +138,7 @@ func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []st
 	// the system carries no host-name. One arity check, both directions.
 	if len(node.Keys) < allowed && len(node.Children) == 0 && !leafSchema.allowEmptyValue {
 		return schemaPathErrorf(leafPath, "`%s` declares a value and none was given (this leaf takes %d value token(s)); "+
-			"the compiler drops a valueless statement, so this commits clean and the "+
-			"configuration silently does not carry it", leafName, leafSchema.args)
+			"%s", leafName, leafSchema.args, valuelessStatementTail18962(lenient))
 	}
 	if len(node.Keys) > allowed {
 		return schemaPathErrorf(append(append([]string(nil), leafPath...), node.Keys[allowed]), "unexpected trailing token %q (this leaf takes %d value token(s); the extra token would be silently dropped)", node.Keys[allowed], leafSchema.args)

@@ -132,7 +132,7 @@ func memberFBFKernelBandDiagnostics11321(cfg *Config, suppress bool) []string {
 			memberRef := cfg.SplitInterfaceUnitRef(unitRef).Literal
 			ownerRI, isMember := memberUnitToRI[memberRef]
 			if !isMember {
-				ownerRI, isMember = memberDeviceToRI[cfg.resolveKernelIfNameWith(unitRef, tunnelNames)]
+				ownerRI, isMember = memberDeviceToRI[cfg.ResolveKernelIfNameWith(unitRef, tunnelNames)]
 			}
 			if !isMember {
 				continue

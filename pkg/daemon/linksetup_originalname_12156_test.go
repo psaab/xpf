@@ -369,9 +369,14 @@ func TestRenamePositionalWritesGenuineKernelName12156(t *testing.T) {
 // kernel OriginalName= must rewrite a non-canonical chain to the canonical
 // rendering. This distinguishes honoring the recorded original from skipping
 // the write as though the original were unknown.
+// The non-canonical fixture is the exact body writeLinkFile wrote before
+// #17042 (4f45e4c6f3): no trailing newline. The canonical form is
+// networkd.RenderLink's output, which ends with the newline generateLink
+// always emitted, so the fixture is genuinely off-canonical.
 func TestRenamePositionalRecoversVerifiedOriginal12156(t *testing.T) {
 	dir := withTempLinkDir(t)
-	chained := "# Managed by xpfd — do not edit\n[Match]\nOriginalName=enp5s0\n\n[Link]\nName=fxp0\n"
+	// Pre-#17042 stripped body: lacks RenderLink's trailing newline.
+	chained := "# Managed by xpfd — do not edit\n[Match]\nOriginalName=enp5s0\n\n[Link]\nName=fxp0"
 	linkPath := filepath.Join(dir, linkPrefix+"fxp0.link")
 	if err := os.WriteFile(linkPath, []byte(chained), 0644); err != nil {
 		t.Fatalf("write non-canonical recorded-original fixture: %v", err)
@@ -388,12 +393,14 @@ func TestRenamePositionalRecoversVerifiedOriginal12156(t *testing.T) {
 	if !changed {
 		t.Fatal("a non-canonical verified .link must be rewritten, not skipped")
 	}
+	// renderLinkBody \n-terminates every line, including the last.
 	const canonical = `# Managed by xpfd — do not edit
 [Match]
 OriginalName=enp5s0
 
 [Link]
-Name=fxp0`
+Name=fxp0
+`
 	data, err := os.ReadFile(linkPath)
 	if err != nil || string(data) != canonical {
 		t.Fatalf("the verified .link must be normalized with the recorded original, got %q err=%v", data, err)

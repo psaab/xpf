@@ -49,7 +49,7 @@ func (h dhcpOverlapHit16694) message(issue string) string {
 // the segment's DHCP behaviour depends on start order.
 //
 // Resolution mirrors the daemon: both sides resolve every authored
-// ref through cfg.resolveKernelIfNameWith (one hoisted tunnel map,
+// ref through cfg.ResolveKernelIfNameWith (one hoisted tunnel map,
 // #8862) — the same resolver Kea's interface list (#9407) and the
 // relay's bind (#9406) use — and the comparison keys a trailing ".0"
 // onto the bare device (dhcpResolvedDevice15028), so a reth ref and
@@ -229,7 +229,7 @@ func dhcpFamilyOverlaps16694(cfg *Config, tunMap map[string]string, fam dhcpFami
 // nothing, so the gate stays silent rather than inventing devices.
 func dhcpRefDevices16694(cfg *Config, tunMap map[string]string, ref string) []string {
 	if !strings.Contains(ref, "*") {
-		return []string{dhcpResolvedDevice15028(cfg.resolveKernelIfNameWith(ref, tunMap))}
+		return []string{dhcpResolvedDevice15028(cfg.ResolveKernelIfNameWith(ref, tunMap))}
 	}
 	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil
@@ -245,7 +245,7 @@ func dhcpRefDevices16694(cfg *Config, tunMap map[string]string, ref string) []st
 		if !globMatch(ref, candidate) {
 			return
 		}
-		dev := dhcpResolvedDevice15028(cfg.resolveKernelIfNameWith(candidate, tunMap))
+		dev := dhcpResolvedDevice15028(cfg.ResolveKernelIfNameWith(candidate, tunMap))
 		if !seen[dev] {
 			seen[dev] = true
 			devices = append(devices, dev)
