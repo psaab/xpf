@@ -5,8 +5,9 @@ import (
 	"strings"
 )
 
-// validateClusterAuthKeyStrict hard-rejects, at commit / commit-check, a
-// `chassis cluster` stanza that configures no `authentication-key` (#6611).
+// validateClusterAuthKeyStrictWithCurrent hard-rejects, at commit /
+// commit-check, a `chassis cluster` stanza that configures no
+// `authentication-key` (#6611).
 //
 // Three independent control-channel authentication mechanisms exist — fabric
 // gRPC auth (#4357), heartbeat HMAC + anti-replay (#4326), and session-sync
@@ -65,17 +66,16 @@ import (
 // The key is compared only for emptiness and is never echoed into the error —
 // the whole point of Secret (compiler_system.go) is that it never reaches a log
 // or a CLI render.
-func validateClusterAuthKeyStrict(cfg *Config) error {
-	return validateClusterAuthKeyStrictWithCurrent(cfg, nil, nil)
-}
-
-// validateClusterAuthKeyStrictWithCurrent is validateClusterAuthKeyStrict
-// with the persisted/current signing primary and accepted-key state supplied
-// by the candidate pipeline (#16025/#17888). currentPrimary is the trimmed
-// primary of the config active immediately before the candidate, or nil when
-// there is no such state (fresh candidate, day-0 check, direct CompileConfig).
-// currentAccepted carries those same active keys byte-for-byte for the narrow
-// legacy whitespace-primary migration.
+//
+// currentPrimary and currentAccepted supply the persisted/current signing
+// primary and accepted-key state from the candidate pipeline (#16025/#17888).
+// currentPrimary is the trimmed primary of the config active immediately before
+// the candidate, or nil when there is no such state (fresh candidate, day-0
+// check, direct CompileConfig). currentAccepted carries those same active keys
+// byte-for-byte for the narrow legacy whitespace-primary migration. A caller
+// with no current state passes nil for both — the shape the gate had before
+// #16025/#17888 split the state out (docs and comments predating that split
+// still name it validateClusterAuthKeyStrict).
 func validateClusterAuthKeyStrictWithCurrent(
 	cfg *Config,
 	currentPrimary *string,

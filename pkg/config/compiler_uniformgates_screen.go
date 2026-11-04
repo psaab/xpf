@@ -75,7 +75,7 @@ func runUniformGatesScreen(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// *Config so the typed profile list (with MissingValue populated by
 	// compileScreen) is available, after the #3317/#3318 gates so their
 	// first-error precedence is unchanged.
-	if err := validateScreenMissingValueStrict(cfg); err != nil {
+	if err := validateScreenMissingValueStrict(cfg, opts.lenientScreenMissingValue); err != nil {
 		if opts.lenientScreenMissingValue {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("screen missing value (downgraded to warning on tolerant path): %v", err))
