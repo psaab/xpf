@@ -320,6 +320,21 @@ const inventoryNotes = `#
 # filedFixed so the one-level census continues to assert an observed equivalent.
 # The independent #18771 two-level artifact is an equals-gate; its checked-cell
 # floor is stored in that file rather than inferred from the divergence count.
+#
+# #18881: checked 1322 -> 1385; 6 rows moved shape partial -> empty, 2 rows
+# removed, 2 register rows added. The 6 shape moves are the #17196 effect
+# this regen records: the shared familyMembers extractor installs the family
+# member but reads no packed family TAIL, so the compact 'family <af>
+# <leaf> <value>;' spellings under 'interfaces ... unit' compile to nothing
+# again (they had been partial since #14442's packed-body routing). The 2
+# removed rows ('event-options policy xpfarg plant-class', 'system ntp
+# trusted-key') and the 2 register additions ('protocols bgp disable',
+# 'routing-instances xpfname protocols bgp disable') are pre-existing drift
+# at base from other lanes, reconciled by this regen because the census
+# cell and the register's both-direction equality gate demand one file that
+# matches the live census. No new divergent site was introduced by #18881
+# (the forwarding-options family widening is accepted-inert and adds no
+# census site).
 #`
 
 func TestRegenerateCompactBlockInventory2419(t *testing.T) {
