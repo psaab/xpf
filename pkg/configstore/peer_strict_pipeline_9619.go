@@ -82,7 +82,7 @@ func validatePeerStrictPipelineJudgedWithPackedTailGate18771(peerTree *config.Co
 	if peerTree == nil || !ok {
 		return nil
 	}
-	if err := schemaValidateExpandedTreeForNode(peerTree, peerID); err != nil {
+	if err := schemaValidateExpandedTreeForNode(peerTree, peerID, false); err != nil {
 		return peerStrictError(peerID, err)
 	}
 	peerCompiled, err := config.CompileConfigForNodeJudgingPlaceholdersWithPackedTailGate18771(peerTree, peerID, peerCurrent, judgePlaceholders, eligible)
