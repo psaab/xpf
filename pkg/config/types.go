@@ -50,7 +50,7 @@ func (c *Config) ConfiguredLinuxNames() map[string]struct{} {
 //	ResolveFab          raw copy onto LocalFabricMember
 //	DHCPLeaseKey        discard (unitNum arg supplies identity)
 //	resolveKernelIfName declared-name-wins (exact stanza match first,
-//	                    see resolveKernelIfNameWith) then
+//	                    see ResolveKernelIfNameWith) then
 //	                    SplitInterfaceUnitRef long-declared-prefix —
 //	                    NOT this first-dot split, and NOT adopted here:
 //	                    its base must outrank a parse (#8994/#9821), so
@@ -408,12 +408,12 @@ func (c *Config) resolveBareKernelIfName(name string) string {
 
 // ResolveKernelIfName resolves a Junos interface reference to the Linux device
 // name. It builds the tunnel-name map itself; a caller resolving MANY refs
-// should hoist that map once and use resolveKernelIfNameWith instead (#8862).
+// should hoist that map once and use ResolveKernelIfNameWith instead (#8862).
 func (c *Config) ResolveKernelIfName(ref string) string {
-	return c.resolveKernelIfNameWith(ref, tunnelNameMapFn(c))
+	return c.ResolveKernelIfNameWith(ref, tunnelNameMapFn(c))
 }
 
-// resolveKernelIfNameWith is ResolveKernelIfName with the tunnel-name map
+// ResolveKernelIfNameWith is ResolveKernelIfName with the tunnel-name map
 // supplied by the caller.
 //
 // TunnelNameMap walks every interface and every unit, so building it per
@@ -428,7 +428,13 @@ func (c *Config) ResolveKernelIfName(ref string) string {
 // The map is a REQUIRED parameter rather than an optional nil: TunnelNameMap
 // returns a non-nil EMPTY map for a config with no tunnels, so nil would be a
 // sentinel that collides with a legitimate value.
-func (c *Config) resolveKernelIfNameWith(ref string, tunMap map[string]string) string {
+//
+// Exported for cross-package hoisters (#18923): pkg/dhcpserver's Kea belt
+// (usableKeaDevices15206) resolves every declared interface and unit ref,
+// per family per standalone commit, so it builds the map exactly once per
+// filter call and passes it here. In-package hoisters have reached the same
+// twin through tunnelNameMapFn since #8862.
+func (c *Config) ResolveKernelIfNameWith(ref string, tunMap map[string]string) string {
 	// #8994: A REF THAT NAMES A DECLARED INTERFACE IS THAT INTERFACE, even when
 	// it contains a dot. This arm is placed FIRST because everything below
 	// decides what the ref MEANS by parsing it, and an explicit declaration
@@ -656,13 +662,13 @@ type Config struct {
 	EventOptions       []*EventPolicy
 	BridgeDomains      []*BridgeDomainConfig
 	Warnings           []string // non-fatal validation warnings
-	// Diagnostics is the structured, additive record of tolerant-path
-	// findings from sub-runs converted to a gate registry (#16145,
-	// NAT first): each entry carries the same prose as the Warnings
-	// string that gate appended, plus the registry gate name. Only
-	// registry gates record Diagnostics — warnings appended outside a
-	// registry (including the trailing warning-only NAT potential-
-	// shadow appender) appear in Warnings only. Warnings remains the
+	// Diagnostics is the structured, additive record of findings from
+	// sub-runs converted to a gate registry (#16145, NAT first), plus the
+	// report-only #18771 packed-tail gate on eligible strict commit views:
+	// each entry carries the same prose as the Warnings string that gate
+	// appended, plus the gate name. Other warnings appended outside a
+	// registry (including the trailing warning-only NAT potential-shadow
+	// appender) appear in Warnings only. Warnings remains the
 	// prose surface every existing consumer reads. Compile-time only;
 	// never serialized or compared (fingerprintIgnore).
 	Diagnostics []Diagnostic `json:"-"`

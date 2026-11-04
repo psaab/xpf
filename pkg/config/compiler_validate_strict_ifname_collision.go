@@ -310,7 +310,7 @@ func validateInterfaceNameCollisionStrict(cfg *Config) error {
 				continue
 			}
 			ref := fmt.Sprintf("%s.%d", name, unitNum)
-			dev := cfg.resolveKernelIfNameWith(ref, tunMapCollision)
+			dev := cfg.ResolveKernelIfNameWith(ref, tunMapCollision)
 			if dev == "" || dev == base {
 				// unit 0 with no vlan-id: shares the base device by design.
 				continue

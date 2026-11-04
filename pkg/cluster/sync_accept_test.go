@@ -34,6 +34,10 @@ func TestSyncHandshakeTimeoutIsShort(t *testing.T) {
 func TestAcceptLoopHandshakeDoesNotBlockOthers(t *testing.T) {
 	key := []byte("shared-control-link-secret-key")
 	s := newAuthSync(t, key)
+	// #18038: both fixture dials below need a routable 127.0.0.1 — under the
+	// testguard runner's lo-down namespace a bare listen succeeds while the
+	// dial fails ENETUNREACH. No-op wherever loopback already routes.
+	ensureLoopbackRoutable18038(t)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -141,6 +145,11 @@ func TestConnectDialerIsTheNoiseInitiator7163(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
+
+	// #18038: fabricConnectLoop's production dial must reach the listener
+	// above, or Accept parks until the test timeout while the dial retries
+	// silently. No-op wherever loopback already routes.
+	ensureLoopbackRoutable18038(t)
 
 	s := newAuthSyncNode(t, key, 0)
 	ctx, cancel := context.WithCancel(context.Background())

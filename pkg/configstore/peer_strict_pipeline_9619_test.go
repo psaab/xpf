@@ -311,7 +311,7 @@ func TestPeerOnlyCompileGateRejected_9619(t *testing.T) {
 	tree := parsePeerStrictText(t, peerStrictClusterText(
 		peerStrictGroup(0, "reth-advertise-interval 30", ""),
 		peerStrictGroup(1, "reth-advertise-interval 40955", "")))
-	if err := schemaValidateExpandedTreeForNode(tree, 1); err != nil {
+	if err := schemaValidateExpandedTreeForNode(tree, 1, false); err != nil {
 		t.Fatalf("precondition: the schema must admit 40955 on node1, or this cell "+
 			"does not isolate the compile step: %v", err)
 	}
@@ -356,7 +356,7 @@ func peerStrictRAGroup(node int, minInterval string) string {
 // max 12. node0's min 9 is exactly 0.75*12 and passes.
 func TestPeerOnlyRAIntervalRatioRejected_9619(t *testing.T) {
 	tree := parsePeerStrictText(t, peerStrictClusterText(peerStrictRAGroup(0, "9"), peerStrictRAGroup(1, "10")))
-	if err := schemaValidateExpandedTreeForNode(tree, 1); err != nil {
+	if err := schemaValidateExpandedTreeForNode(tree, 1, false); err != nil {
 		t.Fatalf("precondition: schema must admit node1's leaves: %v", err)
 	}
 	if _, err := config.CompileConfigForNode(tree, 1); err != nil {

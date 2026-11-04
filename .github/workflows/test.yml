@@ -146,7 +146,9 @@ jobs:
   go:
     name: Go build and affected tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
+    # The unowned-path fallback and #16723 base/head cohort can run the full
+    # Go package set; the per-package test timeout remains the inner limit.
     # #16477: use writable runner-local /tmp roots instead of the Makefile pins;
     # prepare Go scratch/cache directories before setup-go and direct Go commands.
     env:
@@ -174,6 +176,10 @@ jobs:
           command -v vtysh
       - name: Build all Go packages
         run: go build ./...
+      # The package selector is itself a gate: a fixture-only cohort commit must
+      # select every listed package, and a base-green package may not regress.
+      - name: Self-test affected Go selection and base-green guard
+        run: bash scripts/ci_affected_go_tests_selftest.sh
       - name: Check scoped nftables and daemon netlink deadcode
         run: make check-nft-deadcode
       - name: Test affected Go packages
@@ -181,6 +187,14 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash scripts/ci_affected_go_tests.sh "$BASE_SHA" "$HEAD_SHA"
+      # #16723: compare its full package cohort with the PR base. Existing
+      # baseline reds are reported; only a base-green package regression blocks.
+      - name: "Check #16723 cohort base-green rule"
+        if: ${{ !cancelled() && contains(github.event.pull_request.body, '#16723') }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci_affected_go_tests.sh --packages-file scripts/go-16723-packages.txt "$BASE_SHA" "$HEAD_SHA"
 
   rust:
     name: Rust workspace compile check

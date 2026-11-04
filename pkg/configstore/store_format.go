@@ -297,7 +297,7 @@ func (s *Store) CompileCandidate() (*config.Config, error) {
 	if s.candidate == nil {
 		return nil, fmt.Errorf("not in configuration mode")
 	}
-	return s.compileTree(s.candidate)
+	return s.compileTreeWithPackedTailGate18771(s.candidate, false)
 }
 
 // EverCommitted reports the #1922 step-0 marker: true once a config has

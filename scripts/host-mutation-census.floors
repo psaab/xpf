@@ -1,5 +1,5 @@
 # Minimum number of guarded Go test files containing each kernel mutation class.
-netlink	43
+netlink	44
 nft	32
 bpf	22
 ip	13

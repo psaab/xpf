@@ -1,0 +1,16 @@
+github.com/psaab/xpf/pkg/dhcpserver
+github.com/psaab/xpf/pkg/eventengine
+github.com/psaab/xpf/pkg/dhcprelay
+github.com/psaab/xpf/pkg/dataplane/userspace/format
+github.com/psaab/xpf/pkg/nfqueue
+github.com/psaab/xpf/pkg/policymatch
+github.com/psaab/xpf/pkg/frr
+github.com/psaab/xpf/pkg/vrrp
+github.com/psaab/xpf/cmd/cli
+github.com/psaab/xpf/pkg/fsatomic
+github.com/psaab/xpf/pkg/docsref
+github.com/psaab/xpf/pkg/configstore
+github.com/psaab/xpf/pkg/cli
+github.com/psaab/xpf/pkg/dataplane
+github.com/psaab/xpf/pkg/dataplane/userspace
+github.com/psaab/xpf/pkg/config
