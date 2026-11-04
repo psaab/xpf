@@ -770,7 +770,16 @@ func (s *Store) compileTreeAs(tree *config.ConfigTree, bootstrapImport bool) (*c
 }
 
 func (s *Store) compileTreeAsWithPackedTailGate18771(tree *config.ConfigTree, bootstrapImport, eligible bool) (*config.Config, error) {
-	return compileTreeStrictJudgedWithPackedTailGate18771(tree, s.nodeID, s.compiled, s.placeholderJudgedLocked(bootstrapImport), eligible)
+	compiled, _, err := s.compileTreeAsDrops18771(tree, bootstrapImport, eligible)
+	return compiled, err
+}
+
+// compileTreeAsDrops18771 additionally returns the packed-tail gate's
+// adjudicated findings from the LOCAL compile (peer views' findings
+// are computed separately inside the judged compile and discarded
+// there — peer findings never refuse).
+func (s *Store) compileTreeAsDrops18771(tree *config.ConfigTree, bootstrapImport, eligible bool) (*config.Config, []config.PackedTailGateFinding18771, error) {
+	return compileTreeStrictJudgedDrops18771(tree, s.nodeID, s.compiled, s.placeholderJudgedLocked(bootstrapImport), eligible)
 }
 
 // placeholderJudgedLocked decides whether a strict compile judges the #18744
@@ -826,27 +835,33 @@ func compileTreeStrictJudged(tree *config.ConfigTree, nodeID int, current *confi
 }
 
 func compileTreeStrictJudgedWithPackedTailGate18771(tree *config.ConfigTree, nodeID int, current *config.Config, judgePlaceholders, eligible bool) (*config.Config, error) {
+	compiled, _, err := compileTreeStrictJudgedDrops18771(tree, nodeID, current, judgePlaceholders, eligible)
+	return compiled, err
+}
+
+func compileTreeStrictJudgedDrops18771(tree *config.ConfigTree, nodeID int, current *config.Config, judgePlaceholders, eligible bool) (*config.Config, []config.PackedTailGateFinding18771, error) {
 	if err := schemaValidateExpandedTreeForNode(tree, nodeID, false); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var compiled *config.Config
+	var findings []config.PackedTailGateFinding18771
 	var err error
 	if nodeID >= 0 {
-		compiled, err = config.CompileConfigForNodeJudgingPlaceholdersWithPackedTailGate18771(tree, nodeID, current, judgePlaceholders, eligible)
+		compiled, findings, err = config.CompileConfigForNodeJudgingPlaceholdersDrops18771(tree, nodeID, current, judgePlaceholders, eligible)
 	} else {
-		compiled, err = config.CompileConfigJudgingPlaceholdersWithPackedTailGate18771(tree, current, judgePlaceholders, eligible)
+		compiled, findings, err = config.CompileConfigJudgingPlaceholdersDrops18771(tree, current, judgePlaceholders, eligible)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := crossCheckNodeID(compiled, nodeID); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := crossCheckRAIntervals(compiled); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := crossCheckLoginIdleTimeout10828(compiled); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// #5876 + #4785: a chassis-cluster commit must adjudicate the REGISTERED
 	// peer-effective concerns on BOTH node-effective views before promotion, not
@@ -891,7 +906,7 @@ func compileTreeStrictJudgedWithPackedTailGate18771(tree *config.ConfigTree, nod
 	peerTree := tree.Clone()
 	rewriteRetiredDataplaneType(peerTree, SyncCaller)
 	if err := config.ValidatePeerEffectiveStrictWithPackedTailGate18771(peerTree, nodeID, eligible); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// #9619: the registry above runs FIRST so its two subjects keep their
 	// specific messages; this then runs the whole strict pipeline on the same
@@ -904,9 +919,9 @@ func compileTreeStrictJudgedWithPackedTailGate18771(tree *config.ConfigTree, nod
 	// active config, not left nil (which rejected every clustered staged
 	// migration at the peer gate even when the local gate admitted it).
 	if err := validatePeerStrictPipelineJudgedWithPackedTailGate18771(peerTree, nodeID, current, judgePlaceholders, eligible); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return compiled, nil
+	return compiled, findings, nil
 }
 
 // crossCheckNodeID rejects a config whose compiled `chassis cluster node`

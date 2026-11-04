@@ -19,6 +19,11 @@ import (
 // node's expansion is strict-checked too (#9619), because a shared config
 // reaches the peer by config-sync.
 //
+// #18771: CheckText runs the packed-tail gate in diagnostic mode
+// (eligible=true) so a would-be-refused packed tail is REPORTED here
+// before commit; CheckText itself never refuses — enforcement lives
+// only in the promotion compile (compileAuthSafeCandidate).
+//
 // This is the validation gate behind `xpfd check-config` (#1879): the
 // first-boot config-drive loader validates an untrusted day-0 config
 // with it BEFORE installing the file, so an invalid config never
@@ -38,7 +43,7 @@ func CheckText(content string, nodeID int) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	compiled, err := compileTreeStrictWithPackedTailGate18771(tree, nodeID, false)
+	compiled, err := compileTreeStrictWithPackedTailGate18771(tree, nodeID, true)
 	if err != nil {
 		return nil, fmt.Errorf("commit check failed: %w", err)
 	}

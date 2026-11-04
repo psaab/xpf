@@ -48,14 +48,17 @@ func packedTailStage18771(t *testing.T, nodeID int) *Store {
 }
 
 func TestPackedTailGate18771Cell08PeerDeliveryAndCommitEligibility(t *testing.T) {
-	t.Run("check-config-and-preflight-are-zero-twin", func(t *testing.T) {
+	t.Run("check-config-diagnoses-preflight-is-zero-twin", func(t *testing.T) {
 		logs := packedTailStoreLogs18771(t)
+		// #18771 enforcement step (b): CheckText is diagnostic-eligible
+		// (reports the DROP, never refuses); the pre-flight snapshot,
+		// candidate and completion compiles stay zero-twin.
 		cfg, err := CheckText(packedTailStoreDrop18771, -1)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(packedTailStoreDiagnostics18771(cfg)) != 0 {
-			t.Fatal("CheckText ran the commit-only gate")
+		if len(packedTailStoreDiagnostics18771(cfg)) != 1 {
+			t.Fatalf("CheckText gate diagnostics = %d, want 1 (diagnostic mode)", len(packedTailStoreDiagnostics18771(cfg)))
 		}
 		s := packedTailStage18771(t, -1)
 		snapshot, gen, err := s.CompileCandidateGen()
@@ -85,8 +88,8 @@ func TestPackedTailGate18771Cell08PeerDeliveryAndCommitEligibility(t *testing.T)
 		if len(packedTailStoreDiagnostics18771(promoted)) != 1 {
 			t.Fatalf("promotion gate diagnostics = %d, want 1", len(packedTailStoreDiagnostics18771(promoted)))
 		}
-		if got := strings.Count(logs.String(), "packedTailGate18771"); got != 1 {
-			t.Fatalf("one standalone promotion produced %d gated views, want 1", got)
+		if got := strings.Count(logs.String(), "packedTailGate18771"); got != 3 {
+			t.Fatalf("standalone sequence produced %d gated views, want 3 (check-config + commit-check + promotion)", got)
 		}
 	})
 
@@ -180,4 +183,85 @@ func TestPackedTailGate18771Cell08PeerDeliveryAndCommitEligibility(t *testing.T)
 			t.Fatalf("tolerant/default peer paths emitted %d gate findings", got)
 		}
 	})
+}
+
+// #18771 enforcement cells (design v3 Q7). Production posture is read
+// via config.PackedTailGateEnforce18771(); with enforcement OFF every
+// commit below succeeds (these cells are the flip's RED-on-revert
+// suite: setting the constant false must turn the refusal cells red).
+
+func packedTailEnforcePosture18771(t *testing.T) {
+	t.Helper()
+	if !config.PackedTailGateEnforce18771() {
+		t.Skip("enforcement off (phase-1 posture): refusal cells arm at the flip")
+	}
+}
+
+func TestPackedTailEnforce18771StrictCommitRefuses(t *testing.T) {
+	packedTailEnforcePosture18771(t)
+	s := packedTailStage18771(t, -1)
+	_, gen, err := s.CompileCandidateGen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.CommitWithDescriptionGen("enforce", gen)
+	if err == nil {
+		t.Fatal("strict commit of a DROP packed tail succeeded under enforcement")
+	}
+	if !strings.Contains(err.Error(), "silently dropped") || !strings.Contains(err.Error(), "inet6/dad-disable") {
+		t.Fatalf("refusal error lacks site/pair: %v", err)
+	}
+	// Nothing persisted: a retry with the tail braced commits clean.
+	if err := s.LoadOverride(`interfaces { ge-0/0/0 { unit 0 { family { inet6 { dad-disable; } } } } }`); err != nil {
+		t.Fatal(err)
+	}
+	_, gen, err = s.CompileCandidateGen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitWithDescriptionGen("braced", gen); err != nil {
+		t.Fatalf("braced retry refused: %v", err)
+	}
+}
+
+func TestPackedTailEnforce18771BootstrapWarnOnly(t *testing.T) {
+	packedTailEnforcePosture18771(t)
+	s := newTestStore(t)
+	s.SetNodeID(-1)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	defer s.ExitConfigure()
+	if err := s.LoadOverride(packedTailStoreDrop18771); err != nil {
+		t.Fatal(err)
+	}
+	// compileAuthSafeCandidate with bootstrapImport=true must not refuse.
+	if _, _, err := s.compileAuthSafeCandidate(mustTree18771(t, packedTailStoreDrop18771), true); err != nil {
+		t.Fatalf("bootstrap import refused: %v", err)
+	}
+	// The same candidate as an operator commit refuses.
+	if _, _, err := s.compileAuthSafeCandidate(mustTree18771(t, packedTailStoreDrop18771), false); err == nil {
+		t.Fatal("operator compile of DROP candidate did not refuse")
+	}
+}
+
+func mustTree18771(t *testing.T, text string) *config.ConfigTree {
+	t.Helper()
+	tree, errs := config.NewParser(text).Parse()
+	if len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	return tree
+}
+
+func TestPackedTailEnforce18771CommitCheckDiagnosesNoRefuse(t *testing.T) {
+	// Diagnostic eligibility is live in BOTH postures (step b).
+	s := packedTailStage18771(t, -1)
+	cfg, err := s.CommitCheck()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packedTailStoreDiagnostics18771(cfg)) != 1 {
+		t.Fatalf("commit check diagnostics = %d, want 1", len(packedTailStoreDiagnostics18771(cfg)))
+	}
 }

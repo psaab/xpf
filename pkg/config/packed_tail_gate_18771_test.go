@@ -149,7 +149,7 @@ func packedTailPrepare18771(t *testing.T, text string, opts compileOpts, nodeID 
 	}
 	observePackedTailGateEffective18771(working, run)
 	original := run.snapshot18771.Clone()
-	cfg, err := compileTreeWithDerivedObserver18771(original, packedTailGateTwinOpts18771(opts), nodeID, func(post compileOpts) {
+	cfg, _, err := compileTreeWithDerivedObserver18771(original, packedTailGateTwinOpts18771(opts), nodeID, func(post compileOpts) {
 		run.originalIGPIdentityExcused18771 = post.igpIdentityExcused16810
 	})
 	if err != nil {
@@ -321,7 +321,7 @@ system { apply-groups-except UNDEFINED18771; }
 	}
 	drop := false
 	for _, finding := range igpFindings {
-		drop = drop || finding.verdict18771 == "DROP"
+		drop = drop || finding.Verdict == "DROP"
 	}
 	if !drop {
 		t.Fatal("matching recomputed IGP exemption prevented the independent DROP control")
@@ -544,8 +544,8 @@ func TestPackedTailGate18771Cell05Determinism(t *testing.T) {
 	dupRun.snapshotIdempotent18771 = false
 	got := dupRun.adjudicate18771(o)
 	for _, f := range got {
-		if f.verdict18771 != "INDETERMINATE" {
-			t.Fatalf("non-idempotent verdict = %s, want INDETERMINATE", f.verdict18771)
+		if f.Verdict != "INDETERMINATE" {
+			t.Fatalf("non-idempotent verdict = %s, want INDETERMINATE", f.Verdict)
 		}
 	}
 
