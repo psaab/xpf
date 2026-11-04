@@ -15,7 +15,19 @@ type walkContext struct {
 	// (bounded) and the walk continues; nil preserves first-error strict.
 	collectErrs *[]error
 	collectMax  int
+	// #18962: lenient selects the per-arm tail of commit-outcome messages
+	// (the #8597/#3332 valueless-statement refusal). The tolerant
+	// Store.Load / SyncApply ingress runs the same walk but logs-and-
+	// continues, where the drop wording is true; the strict commit walk
+	// returns the error and the commit is refused. Nil contexts (white-box
+	// walker tests) read as strict.
+	lenient bool
 }
+
+// lenientWording reports whether commit-outcome tails should use the
+// tolerant-ingress wording. Nil-receiver safe: a nil context is a direct
+// white-box walk and reads as the strict arm.
+func (vc *walkContext) lenientWording() bool { return vc != nil && vc.lenient }
 
 func (vc *walkContext) collecting() bool { return vc != nil && vc.collectErrs != nil }
 
@@ -41,9 +53,9 @@ func (vc *walkContext) collectedRefs() *schemaRefs {
 }
 
 // treeLeafValidator is the TREE-based counterpart of LeafValidator for
-// cross-reference leaves: it receives the definitions collected from
-// the candidate tree by collectSchemaRefs, so a definition and its
-// reference added in the same commit validate atomically.
+// cross-reference leaves: it receives the definitions collected from the
+// candidate tree by collectSchemaRefs, so a definition and a reference
+// added in the same commit validate atomically.
 type treeLeafValidator func(raw string, refs *schemaRefs) error
 
 // leafNodeValidator validates a complete leaf node, retaining AST provenance

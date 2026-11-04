@@ -755,7 +755,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// disabling the identity gate. TestNoSchemaNodeIsBothChildAndWildcard_6834
 	// walks the whole schema and keeps that true.
 	if childSchema.isScalarValueLeaf() && exactMatch {
-		return validateScalarValueLeaf(node, childSchema, path)
+		return validateScalarValueLeaf(node, childSchema, path, vc.lenientWording())
 	}
 	// #16749: a valueless flag (passive, remove-private, log-updown, ...)
 	// inside a BGP container whose compiler expands flat runs carries
@@ -1024,10 +1024,12 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// A small number of Junos leaves accept a presence-only form in
 		// addition to their value form. That capability is explicit on the
 		// schema node; every other value-taking leaf retains this refusal.
+		// #18962: the tail is per-arm (valuelessStatementTail18962) — the
+		// arm is the walk's own: strict entries refuse the commit, the
+		// lenient entry serves the tolerant logs-and-continues ingress.
 		if !childSchema.allowEmptyValue {
-			return schemaPathErrorf(newPath, "`%s` declares a value and none was given — the compiler "+
-				"drops a valueless statement, so this commits clean and the configuration "+
-				"silently does not carry it", keyword)
+			return schemaPathErrorf(newPath, "`%s` declares a value and none was given — %s",
+				keyword, valuelessStatementTail18962(vc.lenientWording()))
 		}
 	}
 	if missingArgs > 0 && !childSchema.compoundKey {

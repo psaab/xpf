@@ -235,7 +235,7 @@ func (s *Store) CompileCandidateGenAs(authority CommitAuthority) (*config.Config
 	if s.candidate == nil {
 		return nil, gen, fmt.Errorf("not in configuration mode")
 	}
-	compiled, err := s.compileTreeAs(s.candidate, authority.isBootstrapImport())
+	compiled, err := s.compileTreeAsWithPackedTailGate18771(s.candidate, authority.isBootstrapImport(), false)
 	if err != nil {
 		return nil, gen, err
 	}
@@ -269,7 +269,7 @@ func (s *Store) CandidateConfigForCompletion() (*config.Config, bool) {
 		return nil, false
 	}
 	s.completionMu.Unlock()
-	compiled, err := s.compileTree(s.candidate)
+	compiled, err := s.compileTreeWithPackedTailGate18771(s.candidate, false)
 	s.completionMu.Lock()
 	s.completionCache, s.completionCacheGen, s.completionCacheOK = compiled, gen, err == nil
 	s.completionMu.Unlock()

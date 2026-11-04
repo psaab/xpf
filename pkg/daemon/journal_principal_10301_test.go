@@ -83,8 +83,21 @@ func TestShellCommitCallbackJournalPrincipal10301(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) == 0 || entries[len(entries)-1].Principal != principal {
-		t.Fatalf("shell confirmed callback principal = %+v, want %q", entries, principal)
+	// #16721: ConfirmCommit() appends a commit_confirm journal row after the
+	// confirmed commit, so the commit_confirmed row is not the last entry.
+	// Select it by action; fail loudly rather than falling back to the last
+	// entry, which is the confirm record.
+	var confirmed *configstore.JournalEntry
+	for _, e := range entries {
+		if e.Action == "commit_confirmed" {
+			confirmed = e
+		}
+	}
+	if confirmed == nil {
+		t.Fatalf("no commit_confirmed journal entry, entries = %+v", entries)
+	}
+	if confirmed.Principal != principal {
+		t.Fatalf("shell confirmed callback principal = %+v, want %q", confirmed.Principal, principal)
 	}
 }
 
