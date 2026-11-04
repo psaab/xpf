@@ -19,6 +19,20 @@ import (
 // below compile clean (err == nil) and every lenient cell allow-all with
 // no warning, so the assertions fire RED.
 
+// #18955: the unknown-community-child diagnostic's arm-selected clause
+// is pinned literally per arm. The strict arm refuses the commit, so its
+// clause says so. On the lenient arm the clause scopes the nothing to
+// the STATEMENT — the token is dropped, but the community is then
+// quarantined to deny-all, which IS an effect — and the quarantine note
+// is pinned in the same warning so the two statements cannot drift
+// apart again. Literals, not builder references, so a clause swap
+// cannot satisfy them tautologically; the head ("is not a community
+// statement") is shared and unchanged.
+const (
+	strictTail15124  = "— the commit is refused;"
+	lenientTail15124 = "— it compiles to NOTHING: it commits clean, renders in `show configuration`, and the statement itself is ignored;"
+)
+
 // TestSNMPCommunityUnknownChildStrictRejects15124 pins the strict arm:
 // every unknown-child spelling is REJECTED at commit, naming the token.
 func TestSNMPCommunityUnknownChildStrictRejects15124(t *testing.T) {
@@ -40,6 +54,12 @@ func TestSNMPCommunityUnknownChildStrictRejects15124(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.tok) {
 				t.Fatalf("error %q does not name the offending token %q", err, tc.tok)
+			}
+			// #18955: strict refuses, so the message must say so — not
+			// claim the typo "commits clean".
+			if !strings.Contains(err.Error(), "is not a community statement") ||
+				!strings.Contains(err.Error(), strictTail15124) {
+				t.Fatalf("strict refusal must carry the unknown-statement head and the refused tail (#18955): %v", err)
 			}
 			// The community NAME is a secret and must never be echoed.
 			if strings.Contains(err.Error(), "mon") && !strings.Contains(tc.tok, "mon") {
@@ -77,6 +97,10 @@ func TestSNMPCommunityUnknownChildBracedStrictRejects15124(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.tok) {
 				t.Fatalf("error %q does not name the offending token %q", err, tc.tok)
 			}
+			if !strings.Contains(err.Error(), "is not a community statement") ||
+				!strings.Contains(err.Error(), strictTail15124) {
+				t.Fatalf("strict refusal must carry the unknown-statement head and the refused tail (#18955): %v", err)
+			}
 		})
 	}
 }
@@ -106,8 +130,15 @@ func TestSNMPCommunityUnknownChildLenientQuarantines15124(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileConfigLenient must not fail on an unknown community child (brick-on-restart): %v", err)
 	}
-	if !hasWarningSubstr(cfg.Warnings, `"client"`) {
-		t.Fatalf("expected a lenient warning naming the unknown token 'client', warnings=%v", cfg.Warnings)
+	var warned bool
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, `"client"`) && strings.Contains(w, "is not a community statement") &&
+			strings.Contains(w, lenientTail15124) && strings.Contains(w, "quarantined to deny-all") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("expected a lenient warning naming the unknown token 'client' with the head, the statement-scoped NOTHING clause, and the deny-all quarantine note (#18955), warnings=%v", cfg.Warnings)
 	}
 	mon := cfg.System.SNMP.Communities["mon"]
 	if mon == nil {

@@ -66,7 +66,9 @@ import (
 var lenientCompletenessAllowlist16166 = map[string]string{
 	// #8690 test seam: production and the tolerant path must run the
 	// compact normalizer; only measurement tests set this.
-	"skipCompactNormalize": "test seam (#8690); tolerant path must normalize",
+	"skipCompactNormalize":        "test seam (#8690); tolerant path must normalize",
+	"packedTailGateEligible18771": "per-invocation commit-gate plumbing; deliberately identical on strict and lenient hosts",
+	"skipPackedTailGate18771":     "per-invocation twin-recursion plumbing; deliberately identical on strict and lenient hosts",
 	// (no "nodeAware" entry, #17157: node identity derives from
 	// opts.nodeID != nil; a parallel bool must never re-enter the
 	// allowlist — TestCompileOptsShape17157 fails if one does.)

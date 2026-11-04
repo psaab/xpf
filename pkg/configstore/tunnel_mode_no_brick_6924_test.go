@@ -46,7 +46,7 @@ func TestUnknownTunnelModeIsRejectedAtCommit_6924(t *testing.T) {
 	}
 
 	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
-	if err := s.schemaValidateExpandedTree(tree); err == nil {
+	if err := schemaValidateExpandedTreeForNode(tree, s.nodeID, false); err == nil {
 		t.Fatal("the STRICT commit path accepted `tunnel mode banana`. It builds a kernel " +
 			"GRE device that carries no traffic — an interface the operator can see with " +
 			"nothing going through it, which is the #6924 defect")

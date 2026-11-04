@@ -34,7 +34,7 @@ func TestUnknownTopLevelStanzaIsRejectedAtCommit_8882(t *testing.T) {
 		t.Fatalf("precondition: the fixture must parse: %v", errs[0])
 	}
 	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
-	err := s.schemaValidateExpandedTree(tree)
+	err := schemaValidateExpandedTreeForNode(tree, s.nodeID, false)
 	if err == nil {
 		t.Fatal("the STRICT commit path accepted a typo'd top-level stanza. Everything " +
 			"under it is silently discarded, so the operator sees a clean commit and an " +

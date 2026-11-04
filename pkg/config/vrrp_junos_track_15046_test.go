@@ -16,6 +16,18 @@ import (
 // are strict-rejected / lenient-warned. RED on origin/master: the
 // Junos row compiled Track=""/0 and zzbogus committed clean.
 
+// #18955: the unknown-child diagnostic's tail is pinned literally per
+// arm. The strict arm refuses the commit, so its tail says so; the
+// compiles-to-NOTHING wording stays on the lenient arm, where the child
+// is dropped with a warning and the group compiles without it. Literals,
+// not builder references, so a tail swap cannot satisfy them
+// tautologically; the head ("is not a vrrp-group statement") is shared
+// and unchanged.
+const (
+	strictTail15046  = "— the commit is refused (#15046)"
+	lenientTail15046 = "— it compiles to NOTHING: it commits clean, renders in `show configuration`, and has no effect (#15046)"
+)
+
 // ge-0/0/1 is declared as an interface: since #15048 an undeclared
 // track target fails strict commit, so the fixture must declare it.
 const junosTrackHier15046 = `interfaces {
@@ -210,15 +222,23 @@ func TestVRRPUnknownChild15046(t *testing.T) {
 			if err == nil {
 				t.Fatal("strict must reject zzbogus")
 			}
-			if !strings.Contains(err.Error(), "zzbogus") {
-				t.Fatalf("err must name zzbogus: %v", err)
+			if !strings.Contains(err.Error(), "zzbogus") ||
+				!strings.Contains(err.Error(), "is not a vrrp-group statement") ||
+				!strings.Contains(err.Error(), strictTail15046) {
+				t.Fatalf("err must name zzbogus and say the commit is refused (#18955): %v", err)
 			}
 			cfg, err := CompileConfigLenient(parseHierText(t, text))
 			if err != nil {
 				t.Fatalf("lenient must boot (#1960): %v", err)
 			}
-			if !hasWarningContaining(cfg.Warnings, "zzbogus") {
-				t.Fatalf("lenient must warn zzbogus: %v", cfg.Warnings)
+			var warned bool
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "zzbogus") && strings.Contains(w, "is not a vrrp-group statement") && strings.Contains(w, lenientTail15046) {
+					warned = true
+				}
+			}
+			if !warned {
+				t.Fatalf("lenient must warn zzbogus with the compiles-to-NOTHING tail (#18955): %v", cfg.Warnings)
 			}
 		})
 	}
@@ -229,13 +249,23 @@ func TestVRRPUnknownChild15046(t *testing.T) {
 		})
 		if _, err := CompileConfig(tree); err == nil {
 			t.Fatal("strict flat-set must reject zzbogus")
+		} else if !strings.Contains(err.Error(), "zzbogus") ||
+			!strings.Contains(err.Error(), "is not a vrrp-group statement") ||
+			!strings.Contains(err.Error(), strictTail15046) {
+			t.Fatalf("strict flat-set refusal must name zzbogus with the unknown-statement head and refused tail (#18955): %v", err)
 		}
 		cfg, err := CompileConfigLenient(tree)
 		if err != nil {
 			t.Fatalf("lenient flat-set: %v", err)
 		}
-		if !hasWarningContaining(cfg.Warnings, "zzbogus") {
-			t.Fatalf("lenient flat-set must warn zzbogus: %v", cfg.Warnings)
+		var warned bool
+		for _, w := range cfg.Warnings {
+			if strings.Contains(w, "zzbogus") && strings.Contains(w, "is not a vrrp-group statement") && strings.Contains(w, lenientTail15046) {
+				warned = true
+			}
+		}
+		if !warned {
+			t.Fatalf("lenient flat-set must warn zzbogus with the compiles-to-NOTHING tail (#18955): %v", cfg.Warnings)
 		}
 	})
 }
