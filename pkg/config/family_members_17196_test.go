@@ -20,6 +20,17 @@ import (
 // unknown member (empty Af, undeclared token, undeclared residue) with
 // the #9017-style diagnostic: strict rejects, lenient warns and installs
 // nothing.
+// #18951: the diagnostic's tail is per-arm. The strict arm refuses the
+// commit, so its tail says so; the compiles-to-NOTHING wording stays on
+// the lenient arm, where the member is warned and skipped and the
+// committed config silently lacks it. The tail constants below pin each
+// arm's wording so a tail swap reds these cells; the head ("is not a
+// known address family") is shared and unchanged.
+
+const (
+	strictTail18951  = "— the commit is refused (#17196)"
+	lenientTail18951 = "— the configuration under it compiles to NOTHING: it commits clean, renders in `show configuration`, and takes no effect at all (#17196)"
+)
 
 // emptyKeysTree17196 builds a hand tree for one top whose `family` node
 // has a single child with NO keys (the malformed persisted shape).
@@ -60,7 +71,7 @@ func hasUnknownFamilyWarning17196(cfg *Config) bool {
 		return false
 	}
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "is not a known address family") {
+		if strings.Contains(w, "is not a known address family") && strings.Contains(w, lenientTail18951) {
 			return true
 		}
 	}
@@ -77,8 +88,9 @@ func TestFamilyMembersEmptyKeysNoPanic17196(t *testing.T) {
 			if err == nil {
 				t.Fatalf("strict compile accepted an empty-Keys family child under %s, want rejection (cfg=%v)", top, cfg != nil)
 			}
-			if !strings.Contains(err.Error(), "is not a known address family") {
-				t.Fatalf("strict error must carry the #9017-style unknown-family message, got: %v", err)
+			if !strings.Contains(err.Error(), "is not a known address family") ||
+				!strings.Contains(err.Error(), strictTail18951) {
+				t.Fatalf("strict error must carry the #9017-style unknown-family message with the refused tail (#18951), got: %v", err)
 			}
 		})
 		t.Run(top+"/lenient", func(t *testing.T) {
@@ -159,8 +171,9 @@ func TestFamilyMembersBogusSmuggleRejected17196(t *testing.T) {
 			if err == nil {
 				t.Fatalf("strict compile accepted %q, want rejection; installed=%v", tc.text, cfg != nil && tc.install(cfg))
 			}
-			if !strings.Contains(err.Error(), "bogus") || !strings.Contains(err.Error(), "is not a known address family") {
-				t.Fatalf("strict error must name the bogus token with the #9017-style message, got: %v", err)
+			if !strings.Contains(err.Error(), "bogus") || !strings.Contains(err.Error(), "is not a known address family") ||
+				!strings.Contains(err.Error(), strictTail18951) {
+				t.Fatalf("strict error must name the bogus token with the #9017-style message and the refused tail (#18951), got: %v", err)
 			}
 		})
 		t.Run(tc.name+"/lenient", func(t *testing.T) {
@@ -195,8 +208,9 @@ func TestFamilyMembersInterfaceResidueFixture17196(t *testing.T) {
 	}
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatal("strict compile accepted `inet mtu 1500 { … }` residue member, want rejection")
-	} else if !strings.Contains(err.Error(), "is not a known address family") {
-		t.Fatalf("strict error must carry the unknown-family message, got: %v", err)
+	} else if !strings.Contains(err.Error(), "is not a known address family") ||
+		!strings.Contains(err.Error(), strictTail18951) {
+		t.Fatalf("strict error must carry the unknown-family message with the refused tail (#18951), got: %v", err)
 	}
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {

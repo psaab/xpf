@@ -749,15 +749,45 @@ func TestNonAFChildOfBareFamilyIsNotInspectedAsPackedHead12090(t *testing.T) {
 		t.Fatalf("a non-AF value under bare family must not be scanned as a packed keyword: %v", err)
 	}
 }
+
+// #12090's bare non-inet family controls. #17196 (c4e12aafc3) broke this
+// contract at the forwarding-options top by declaring {inet6} only;
+// #18881 restored it: bare `family mpls|ccc` commits again — INERT at
+// forwarding-options, now with the accepted-only #18881 advisory — and
+// stays silently fall-through at interfaces, where the #12090/#12656
+// gates own any bindings.
 func TestNonInetFamilyWithoutFilterRemainsAccepted12090(t *testing.T) {
+	oneWarningWith := func(ws []string, subs ...string) bool {
+		for _, w := range ws {
+			ok := true
+			for _, s := range subs {
+				ok = ok && strings.Contains(w, s)
+			}
+			if ok {
+				return true
+			}
+		}
+		return false
+	}
 	for _, family := range []string{"mpls", "ccc"} {
 		t.Run(family, func(t *testing.T) {
 			for _, set := range []string{
 				fmt.Sprintf("set interfaces ge-0/0/0 unit 0 family %s", family),
 				fmt.Sprintf("set forwarding-options family %s", family),
 			} {
-				if _, err := CompileConfig(flatTreeFromSets(t, set)); err != nil {
+				cfg, err := CompileConfig(flatTreeFromSets(t, set))
+				if err != nil {
 					t.Errorf("bare non-inet family %q must remain accepted: %v", set, err)
+					continue
+				}
+				if strings.Contains(set, "forwarding-options") {
+					if !oneWarningWith(cfg.Warnings, "family "+family, "accepted-only", "#18881") {
+						t.Errorf("forwarding-options %s must carry the #18881 accepted-only advisory; warnings=%v", family, cfg.Warnings)
+					}
+					continue
+				}
+				if oneWarningWith(cfg.Warnings, family, "#17196") || oneWarningWith(cfg.Warnings, family, "#18881") {
+					t.Errorf("interfaces %s is fall-through (bindings owned by #12090/#12656), no family advisory; warnings=%v", family, cfg.Warnings)
 				}
 			}
 		})

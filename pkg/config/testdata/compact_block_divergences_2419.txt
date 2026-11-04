@@ -268,7 +268,6 @@
 # not recorded (the ratchet was red at base); each is classified in the
 # permanent-exclusion register before this note was written, per site,
 # not per family.
-#
 # #16662: 3 lines removed, nothing added or changed in shape. The
 # time-wait-state reader in compileFlow now expands the packed
 # hierarchical tail, so 'security flow tcp-session time-wait-state
@@ -284,16 +283,30 @@
 # The independent #18771 two-level artifact is an equals-gate; its checked-cell
 # floor is stored in that file rather than inferred from the divergence count.
 #
-# checked: 1322
+# #18881: checked 1322 -> 1385; 6 rows moved shape partial -> empty, 2 rows
+# removed, 2 register rows added. The 6 shape moves are the #17196 effect
+# this regen records: the shared familyMembers extractor installs the family
+# member but reads no packed family TAIL, so the compact 'family <af>
+# <leaf> <value>;' spellings under 'interfaces ... unit' compile to nothing
+# again (they had been partial since #14442's packed-body routing). The 2
+# removed rows ('event-options policy xpfarg plant-class', 'system ntp
+# trusted-key') and the 2 register additions ('protocols bgp disable',
+# 'routing-instances xpfname protocols bgp disable') are pre-existing drift
+# at base from other lanes, reconciled by this regen because the census
+# cell and the register's both-direction equality gate demand one file that
+# matches the live census. No new divergent site was introduced by #18881
+# (the forwarding-options family widening is accepted-inert and adds no
+# census site).
 #
-# skipped (leaf value not observable in the typed config): 297
+# checked: 1385
+#
+# skipped (leaf value not observable in the typed config): 309
 # skipped (a spelling did not parse or compile): 21
-# skipped (no two distinct synthesizable values): 40
-# skipped (under groups (schema re-host, duplicate coverage)): 1322
+# skipped (no two distinct synthesizable values): 55
+# skipped (under groups (schema re-host, duplicate coverage)): 1396
 #
 bridge-domains xpfname domain-type	partial
 bridge-domains xpfname routing-interface	partial
-event-options policy xpfarg plant-class	empty
 firewall family any filter xpfarg interface-specific	empty
 firewall family inet filter xpfarg interface-specific	empty
 firewall family inet6 filter xpfarg interface-specific	empty
@@ -306,16 +319,16 @@ interfaces xpfname aggregated-ether-options lacp passive	empty
 interfaces xpfname unit xpfarg family inet address xpfarg preferred	empty
 interfaces xpfname unit xpfarg family inet address xpfarg primary	empty
 interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group	empty
-interfaces xpfname unit xpfarg family inet mtu	partial
-interfaces xpfname unit xpfarg family inet targeted-broadcast	partial
-interfaces xpfname unit xpfarg family inet unnumbered-address	partial
+interfaces xpfname unit xpfarg family inet mtu	empty
+interfaces xpfname unit xpfarg family inet targeted-broadcast	empty
+interfaces xpfname unit xpfarg family inet unnumbered-address	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg preferred	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg primary	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group	empty
-interfaces xpfname unit xpfarg family inet6 dad-disable	partial
-interfaces xpfname unit xpfarg family inet6 dhcpv6	partial
-interfaces xpfname unit xpfarg family inet6 mtu	partial
+interfaces xpfname unit xpfarg family inet6 dad-disable	empty
+interfaces xpfname unit xpfarg family inet6 dhcpv6	empty
+interfaces xpfname unit xpfarg family inet6 mtu	empty
 protocols bgp disable	empty
 protocols bgp graceful-restart	empty
 protocols bgp log-updown	empty
@@ -381,7 +394,6 @@ system login user xpfarg authentication ssh-ed25519	empty
 system login user xpfarg authentication ssh-rsa	empty
 system login user xpfarg class	empty
 system login user xpfarg uid	empty
-system ntp trusted-key	empty
 system services dhcp-local-server group xpfarg pool xpfarg address-range xpfarg xpfarg xpfarg xpfarg high	empty
 system services dhcp-local-server group xpfarg pool xpfarg address-range xpfarg xpfarg xpfarg xpfarg low	empty
 system services dhcpv6-local-server group xpfarg pool xpfarg address-range xpfarg xpfarg xpfarg xpfarg high	empty

@@ -174,7 +174,7 @@ func (c *Config) AddressIdentitiesByNetdev() map[string]map[string]bool {
 			if unit == nil || unit.Disable || len(unit.Addresses) == 0 {
 				continue
 			}
-			netdev := c.resolveKernelIfNameWith(fmt.Sprintf("%s.%d", name, unitNum), tunMap)
+			netdev := c.ResolveKernelIfNameWith(fmt.Sprintf("%s.%d", name, unitNum), tunMap)
 			for _, addr := range unit.Addresses {
 				add(netdev, addr)
 			}

@@ -72,7 +72,7 @@ func validateDHCPGroupInterfacesUniqueStrict(cfg *Config) error {
 				if ref == "" {
 					continue
 				}
-				device := dhcpResolvedDevice15028(cfg.resolveKernelIfNameWith(ref, tunMap))
+				device := dhcpResolvedDevice15028(cfg.ResolveKernelIfNameWith(ref, tunMap))
 				where := fmt.Sprintf("group %q interface %q", gname, ref)
 				if prev, dup := seen[device]; dup {
 					return fmt.Errorf("%s %s resolves to kernel device %q, which duplicates %s: Kea refuses a duplicate interface and stops serving every pool of the family",

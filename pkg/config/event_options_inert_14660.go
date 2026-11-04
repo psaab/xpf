@@ -213,6 +213,17 @@ func validateEventOptionsInertAST(nodes []*Node, lenient bool) ([]string, error)
 	}
 	knownEvents := strings.Join(KnownEventNamesSorted(), ", ")
 
+	// #18955: the top-child diagnostic's tail is per-arm. Strict returns
+	// it as the commit-refusing error, so its tail says the commit is
+	// refused — the compiles-to-NOTHING wording is only true on the
+	// lenient arm, where the statement is dropped with a warning and no
+	// policy is created for it. Built once, shared by both top-level
+	// sites below (the policy-body sites carry their own wordings).
+	topTail := "the commit is refused"
+	if lenient {
+		topTail = "it compiles to NOTHING: it commits clean, renders in `show configuration`, and no event policy is created"
+	}
+
 	var warnings []string
 	seen := map[string]bool{}
 	emit := func(format string, args ...any) error {
@@ -234,9 +245,8 @@ func validateEventOptionsInertAST(nodes []*Node, lenient bool) ([]string, error)
 			tok := eo.Keys[1]
 			if tok != "" && !permittedTop[tok] && !routingInstanceApplyMetaKeyword9323(tok) {
 				if err := emit("event-options: %q is not an event-options statement "+
-					"xpf implements (known: %s) — it compiles to NOTHING: it commits clean, "+
-					"renders in `show configuration`, and no event policy is created (#14660)",
-					tok, strings.Join(topChildren, ", ")); err != nil {
+					"xpf implements (known: %s) — %s (#14660)",
+					tok, strings.Join(topChildren, ", "), topTail); err != nil {
 					return err
 				}
 			}
@@ -251,9 +261,8 @@ func validateEventOptionsInertAST(nodes []*Node, lenient bool) ([]string, error)
 			}
 			if !permittedTop[tok] {
 				if err := emit("event-options: %q is not an event-options statement "+
-					"xpf implements (known: %s) — it compiles to NOTHING: it commits clean, "+
-					"renders in `show configuration`, and no event policy is created (#14660)",
-					tok, strings.Join(topChildren, ", ")); err != nil {
+					"xpf implements (known: %s) — %s (#14660)",
+					tok, strings.Join(topChildren, ", "), topTail); err != nil {
 					return err
 				}
 			}
