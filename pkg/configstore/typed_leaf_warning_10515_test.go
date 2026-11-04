@@ -150,7 +150,7 @@ func TestToleratedNonTypedSchemaErrorsStayOutOfTypedLeafWarnings10515(t *testing
 			if len(errs) > 0 {
 				t.Fatalf("fixture parse failed: %v", errs[0])
 			}
-			schemaErr := newTestStore(t).schemaValidateExpandedTree(tree)
+			schemaErr := schemaValidateExpandedTreeForNode(tree, newTestStore(t).nodeID, false)
 			if schemaErr == nil {
 				t.Fatal("schema validation accepted non-typed negative-control fixture")
 			}

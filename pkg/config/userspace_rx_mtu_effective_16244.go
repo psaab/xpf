@@ -116,7 +116,7 @@ func userspaceRxMTUBoundParents(cfg *Config) map[string]userspaceRxMTUBoundParen
 			}
 		}
 
-		resolved := cfg.resolveKernelIfNameWith(key, tunMap)
+		resolved := cfg.ResolveKernelIfNameWith(key, tunMap)
 		if resolved == "" {
 			continue
 		}
