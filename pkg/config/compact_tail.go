@@ -240,6 +240,9 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 			Keys:          append([]string(nil), tail[:n]...),
 			InheritedFrom: node.InheritedFrom,
 		}
+		if last == nil {
+			next.packedTailSite18771 = node.packedTailSite18771
+		}
 		if len(tailQuoted) == len(tail) {
 			next.setKeysQuoted(append([]bool(nil), tailQuoted[:n]...))
 		}

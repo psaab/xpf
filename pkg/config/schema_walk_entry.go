@@ -49,7 +49,7 @@ import (
 // SchemaValidateWithDefinitions so definitions living only in un-applied
 // groups survive (expansion removes the groups stanza outright).
 func SchemaValidate(tree *ConfigTree) error {
-	_, err := schemaValidateCollect(tree, nil, false)
+	_, err := schemaValidateCollect(tree, nil, false, false)
 	return err
 }
 
@@ -65,13 +65,15 @@ const MaxCollectedTypedLeafViolations16012 = 16
 // is preserved alongside the hard refusal.
 // Strict callers keep SchemaValidate (first error, unchanged); the tolerant
 // configstore path uses this to persist ordinary typed-leaf warnings without
-// allowing a truncated nested list through.
+// allowing a truncated nested list through. The collect walk is itself
+// tolerant-ingress-only, so it always selects the lenient commit-outcome
+// wording (#18962).
 func SchemaValidateCollectTypedLeaves(tree, defsSource *ConfigTree) ([]error, error) {
-	return schemaValidateCollect(tree, defsSource, true)
+	return schemaValidateCollect(tree, defsSource, true, true)
 }
 
-func schemaValidateCollect(tree, defsSource *ConfigTree, collect bool) ([]error, error) {
-	return schemaValidateImpl(tree, defsSource, collect)
+func schemaValidateCollect(tree, defsSource *ConfigTree, collect, lenient bool) ([]error, error) {
+	return schemaValidateImpl(tree, defsSource, collect, lenient)
 }
 
 // SchemaValidateWithDefinitions is SchemaValidate with a separate
@@ -86,11 +88,22 @@ func schemaValidateCollect(tree, defsSource *ConfigTree, collect bool) ([]error,
 // the permissive union the schemaRefs contract documents. defsSource
 // may be nil (refs come from tree alone).
 func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree) error {
-	_, err := schemaValidateImpl(tree, defsSource, false)
+	_, err := schemaValidateImpl(tree, defsSource, false, false)
 	return err
 }
 
-func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, error) {
+// SchemaValidateWithDefinitionsLenient is SchemaValidateWithDefinitions on
+// the tolerant-ingress arm (#18962): the identical walk, but commit-outcome
+// message tails (the #8597/#3332 valueless-statement refusal) use the
+// wording that is true where the caller logs-and-continues instead of
+// refusing the commit. Store.Load / Store.SyncApply ingress uses this; every
+// commit / commit-check path keeps SchemaValidateWithDefinitions.
+func SchemaValidateWithDefinitionsLenient(tree, defsSource *ConfigTree) error {
+	_, err := schemaValidateImpl(tree, defsSource, false, true)
+	return err
+}
+
+func schemaValidateImpl(tree, defsSource *ConfigTree, collect, lenient bool) ([]error, error) {
 	if tree == nil {
 		return nil, nil
 	}
@@ -192,14 +205,14 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 		}
 		return nil, scrubSchemaErrorSecrets(tree, err)
 	}
-	vc := &walkContext{refs: refs}
+	vc := &walkContext{refs: refs, lenient: lenient}
 	// closed=false: the top-level walk is open-world. The per-subtree
 	// closed-world flag (#4313) is inherited from schemaNode.closedWorld as
 	// the walker descends. No count here — see the keyword-resolution gate
 	// below for why prose must not state how many subtrees are armed.
 	if collect {
 		var errs []error
-		cvc := &walkContext{refs: refs, collectErrs: &errs, collectMax: MaxCollectedTypedLeafViolations16012}
+		cvc := &walkContext{refs: refs, collectErrs: &errs, collectMax: MaxCollectedTypedLeafViolations16012, lenient: lenient}
 		walkErr := walkSchemaChildren(tree.Children, setSchema, nil, cvc, false)
 		// #17241: scan the schema-owned refusal leaves even when the ordinary
 		// walk succeeds. Compiler readers consume some packed tails that are

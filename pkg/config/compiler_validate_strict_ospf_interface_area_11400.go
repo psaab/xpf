@@ -48,7 +48,7 @@ func validateOSPFAreaInterfaceReuse11400(cfg *Config) error {
 	}
 	tunnelNames := cfg.TunnelNameMap()
 	check := func(scope, protocol string, seen map[string]ospfInterfaceArea11400, areaID, authoredName string, v2 *OSPFInterface, v3 *OSPFv3Interface) error {
-		resolvedName := cfg.resolveKernelIfNameWith(authoredName, tunnelNames)
+		resolvedName := cfg.ResolveKernelIfNameWith(authoredName, tunnelNames)
 		if resolvedName == "" {
 			return nil
 		}
