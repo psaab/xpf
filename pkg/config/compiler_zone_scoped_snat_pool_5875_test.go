@@ -22,7 +22,7 @@ import (
 // ("zone_scoped_pool_address"), installing nothing rather than shipping the
 // unparseable string.
 //
-// FAIL-ON-REVERT: dropping the `validateSourceNATPoolAddressScopeStrict(cfg)`
+// FAIL-ON-REVERT: dropping the `validateSourceNATPoolAddressScopeStrict(cfg, lenient)`
 // dispatch in compiler_uniformgates.go (or making the validator `return nil`)
 // turns every reject case GREEN and so RED here.
 

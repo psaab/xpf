@@ -392,20 +392,20 @@ var natGates = []natGate{
 			// #5626 source/destination-NAT pool-REFERENCE definedness gate. A NAT rule
 			// whose `then ... pool <name>` names a pool NOT defined under `security nat
 			// source/destination pool` committed cleanly (warn-only) and then failed the
-			// translation closed at runtime in an order-dependent way: the SNAT snapshot
-			// builder marks the rule unusable (missing_pool) and the DNAT builder drops
-			// it (pool lookup misses), so matching traffic is silently left untranslated
-			// and falls through to a later rule or the no-NAT default. Strict on commit /
+			// translation closed at runtime in an order-dependent way: SNAT marks the
+			// rule unusable (missing_pool) and drops matching packets without
+			// fallthrough; DNAT drops the rule, leaving traffic untranslated to fall
+			// through to a later rule or the no-NAT default. Strict on commit /
 			// commit-check (hard-reject so the dangling reference is operator-visible);
 			// lenient on load / peer-sync (downgrade to a warning so a config persisted
 			// before this gate existed still boots — #1960 no-brick; the snapshot
-			// builders independently fail CLOSED, installing nothing). Shares the
+			// builders independently fail CLOSED rather than mis-translating). Shares the
 			// lenientDestNATAddresses flag (same NAT silent-drop doctrine). This gate
 			// subsumes the warn-only pool-reference loop that previously lived in
 			// ValidateConfig (it would otherwise emit a duplicate warning alongside the
 			// downgraded gate warning on the lenient path). Runs after the pool-value
 			// gates so a bad pool DEFINITION still wins the first-error slot.
-			if err := validateNATPoolReferencesStrict(cfg); err != nil {
+			if err := validateNATPoolReferencesStrict(cfg, lenient); err != nil {
 				if lenient {
 					warnNATDiagnostic16145(cfg, "natPoolReferences",
 						fmt.Sprintf("nat pool reference (downgraded to warning on tolerant path): %v", err))
@@ -460,7 +460,7 @@ var natGates = []natGate{
 			// a generic invalid-CIDR message) gets the precise, actionable scope
 			// diagnostic. Registered in the SNAT strict set, so #5876's peer-effective
 			// SNAT gate covers it too.
-			if err := validateSourceNATPoolAddressScopeStrict(cfg); err != nil {
+			if err := validateSourceNATPoolAddressScopeStrict(cfg, lenient); err != nil {
 				if lenient {
 					warnNATDiagnostic16145(cfg, "sourceNATPoolAddressScope",
 						fmt.Sprintf("source-nat pool zone-scoped address (downgraded to warning on tolerant path): %v", err))
@@ -492,7 +492,7 @@ var natGates = []natGate{
 			// lenientDestNATAddresses flag (same NAT silent-drop / wrong-translate
 			// doctrine as validateNATPoolReferencesStrict). Runs AFTER the pool-reference
 			// gate so an UNDEFINED pool wins the first-error slot.
-			if err := validateSourceNATPoolAddressGrammarStrict(cfg); err != nil {
+			if err := validateSourceNATPoolAddressGrammarStrict(cfg, lenient); err != nil {
 				if lenient {
 					warnNATDiagnostic16145(cfg, "sourceNATPoolAddressGrammar",
 						fmt.Sprintf("source-nat pool address (downgraded to warning on tolerant path): %v", err))

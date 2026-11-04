@@ -424,15 +424,14 @@ func canonicalizeNATInterfaceScopes(cfg *Config) {
 // builders in pkg/dataplane/userspace/nat.go resolve it via
 // ResolveApplication / ExpandApplicationSet). When the token is a typo /
 // dangling reference (H07) or a defined-but-EMPTY application-set (H08), the
-// reference resolves to ZERO application terms — and the DNAT builder then
-// fell THROUGH to its explicit-match fallback (protocol="" + destination-port
-// 0), publishing the pool VIP for EVERY flow to the destination (a fail-open
-// wildcard translation). The dataplane backstop now substitutes a never-match
-// term on that path (the source-NAT buildSourceNATAppTerms natProtoNever term,
-// and the destination-NAT natNeverMatchPortRange source-port sentinel), but
-// the operator still got a green commit for a NAT rule that quietly fails
-// closed. Failing the unresolved reference at commit turns that silent break
-// into an operator-visible error.
+// reference resolves to ZERO application terms. On a translating rule with no
+// valid siblings, the dataplane backstop substitutes a never-match term (the
+// source-NAT buildSourceNATAppTerms natProtoNever term, and the destination-NAT
+// natNeverMatchPortRange source-port sentinel). Mixed translating lists retain
+// their valid sibling terms; off exemptions instead widen the broken
+// application axis to match all (#12631/#13547). Failing the unresolved
+// reference at commit turns those otherwise silent tolerant outcomes into an
+// operator-visible error.
 //
 // Resolution mirrors the snapshot builders EXACTLY (ResolveApplication, which
 // checks user apps then the predefined table, plus ResolveApplicationSet +
@@ -443,36 +442,13 @@ func canonicalizeNATInterfaceScopes(cfg *Config) {
 // are walked.
 //
 // Strict on commit / commit-check (hard reject naming the NAT kind, rule-set,
-// rule, and the undefined app); lenient on load / peer-sync (warn — #1960; the
-// dataplane independently fails the rule closed, so a leniently-loaded bad
-// config is no worse off, now flagged). Same doctrine as
+// rule, and the undefined app); lenient on load / peer-sync (warn — #1960).
+// The warning states the actual translating/off and lone/mixed outcome rather
+// than claiming every tolerated reference fails closed. Same doctrine as
 // lenientPolicyMatchApplications.
-func validateNATMatchApplicationsStrict(cfg *Config) error {
+func validateNATMatchApplicationsStrict(cfg *Config, lenient bool) error {
 	if cfg == nil {
 		return nil
-	}
-	// appRefError returns nil if the token resolves, or a tailored reject.
-	// Resolution mirrors the SNAT/DNAT snapshot builders: a name resolves only
-	// if it is a predefined / user application OR an application-set that
-	// EXPANDS to >= 1 member. A defined-but-EMPTY application-set resolves by
-	// NAME but expands to zero members -> the builder produces a never-match
-	// term (H08).
-	appRefError := func(natKind, ruleSet, ruleName, name string) error {
-		switch name {
-		case "", "any":
-			return nil
-		}
-		if _, ok := ResolveApplication(name, cfg.Applications.Applications); ok {
-			return nil
-		}
-		if _, ok := ResolveApplicationSet(name, cfg.Applications.ApplicationSets); ok {
-			expanded, err := ExpandApplicationSet(name, &cfg.Applications)
-			if err == nil && len(expanded) == 0 {
-				return natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name)
-			}
-			return nil
-		}
-		return natMatchApplicationError(natKind, ruleSet, ruleName, name)
 	}
 	checkRuleSet := func(natKind string, rs *NATRuleSet) error {
 		if rs == nil {
@@ -486,10 +462,53 @@ func validateNATMatchApplicationsStrict(cfg *Config) error {
 			// `match application [ a b ]`, not just the first. The parser used
 			// to collapse the list to one value, so a trailing typo was never
 			// reached by this gate.
-			for _, app := range rule.Match.ApplicationList() {
-				if err := appRefError(natKind, rs.Name, rule.Name, app); err != nil {
-					return err
+			//
+			// #18971: an empty-set diagnostic also needs the whole rule's runtime
+			// outcome. Evaluate every reference once, retaining the FIRST error
+			// while learning whether any sibling emits an application term. An
+			// undefined reference before the first empty set returns immediately
+			// as before; after an empty set it cannot displace that first error.
+			firstEmptySet := ""
+			anySiblingTerms := false
+			producesTerms := func(app *Application) bool {
+				// SNAT's addApp emits even a protocol-only/invalid term. DNAT
+				// suppresses protocol-less terms on translating rules (#12224),
+				// but retains them on off exemptions. Off selects its outcome
+				// independently; this fact matters only to the mixed-list arm.
+				return app != nil && (natKind == "source" || rule.Then.Off || app.Protocol != "")
+			}
+			for _, appName := range rule.Match.ApplicationList() {
+				if appName == "" || appName == "any" {
+					continue
 				}
+				if app, ok := ResolveApplication(appName, cfg.Applications.Applications); ok {
+					anySiblingTerms = anySiblingTerms || producesTerms(app)
+					continue
+				}
+				if _, ok := ResolveApplicationSet(appName, cfg.Applications.ApplicationSets); ok {
+					expanded, err := ExpandApplicationSet(appName, &cfg.Applications)
+					if err == nil && len(expanded) == 0 {
+						if firstEmptySet == "" {
+							firstEmptySet = appName
+						}
+						continue
+					}
+					if err == nil {
+						for _, termName := range expanded {
+							if app, ok := ResolveApplication(termName, cfg.Applications.Applications); ok {
+								anySiblingTerms = anySiblingTerms || producesTerms(app)
+							}
+						}
+					}
+					continue
+				}
+				if firstEmptySet == "" {
+					return natMatchApplicationError(natKind, rs.Name, rule.Name, appName)
+				}
+			}
+			if firstEmptySet != "" {
+				return natMatchEmptyAppSetError(natKind, rs.Name, rule.Name, firstEmptySet,
+					rule.Then.Off, anySiblingTerms, lenient)
 			}
 		}
 		return nil
@@ -523,18 +542,31 @@ func natMatchApplicationError(natKind, ruleSet, ruleName, app string) error {
 }
 
 // natMatchEmptyAppSetError formats the #3434 H08 reject for a NAT rule
-// referencing a DEFINED but EMPTY application-set. The set exists by name but
-// expands to zero members, so the snapshot builder produces a never-match term
-// and the rule quietly matches nothing — the NAT sibling of #3146.
-func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
+// referencing a DEFINED but EMPTY application-set. off and anySiblingTerms
+// select the tolerant runtime consequence (#18971): off exemptions widen the
+// application axis, mixed translating lists retain their sibling terms, and
+// only a lone zero-term translating reference installs a never-match term.
+func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string, off, anySiblingTerms, lenient bool) error {
+	outcome := "the commit is refused"
+	if lenient {
+		switch {
+		case off:
+			outcome = "the rule commits but the off exemption's application axis " +
+				"widens to match all (over-exemption)"
+		case anySiblingTerms:
+			outcome = "the rule commits but the empty reference contributes no terms; " +
+				"sibling application terms remain in the match union"
+		default:
+			outcome = "the rule commits but the dataplane installs a never-match term " +
+				"so the translation never fires"
+		}
+	}
 	return fmt.Errorf(
 		"%s NAT rule-set %q rule %q match application %q is a defined but "+
-			"EMPTY application-set (it expands to zero applications) — the rule "+
-			"commits but the dataplane installs a never-match term so the "+
-			"translation never fires — add at least one `applications "+
+			"EMPTY application-set (it expands to zero applications) — %s — add at least one `applications "+
 			"application-set %q application <name>` member or remove the "+
 			"reference (#3434)",
-		natKind, ruleSet, ruleName, name, name)
+		natKind, ruleSet, ruleName, name, outcome, name)
 }
 
 // validateDestinationNATAddressesStrict (#2396(c)) hard-rejects a
@@ -1563,11 +1595,11 @@ func validateSourceNATPoolUnknownLeavesStrict(cfg *Config) error {
 // was a warn-only advisory (formerly ValidateConfig, now subsumed by this
 // gate) — and then behaved incorrectly at runtime in an ORDER-DEPENDENT way.
 // The SNAT snapshot builder (pkg/dataplane/userspace/nat_source.go) marks the
-// rule poolUnusable with reason "missing_pool" and the DNAT builder
-// (nat_destination.go) drops the rule outright (the pool lookup misses), so
-// the requested translation silently never fires and matching traffic falls
-// through to whatever a later rule or the no-NAT default does. The operator
-// got a green commit for a NAT rule that quietly does nothing.
+// rule poolUnusable with reason "missing_pool"; SourceNatLookup::Unavailable
+// then drops matching traffic with no later-rule/no-NAT fallthrough. The DNAT
+// builder (nat_destination.go) drops the rule outright, so matching traffic is
+// left untranslated and can fall through to a later rule or the no-NAT default.
+// The tolerant diagnostic names the kind-specific outcome (#18971).
 //
 // Pool-reference resolution mirrors the snapshot builders EXACTLY: an SNAT
 // `then source-nat pool` name must key cfg.Security.NAT.SourcePools; a DNAT
@@ -1579,14 +1611,13 @@ func validateSourceNATPoolUnknownLeavesStrict(cfg *Config) error {
 //
 // Strict on commit / commit-check (hard reject naming the NAT kind, rule-set,
 // rule, and the undefined pool); lenient on load / peer-sync (warn — #1960
-// no-brick; the snapshot builders independently fail CLOSED — SNAT marks the
-// rule unusable, DNAT drops it — so a leniently-loaded config that references a
-// dangling pool installs nothing rather than mis-translating). Shares the
+// no-brick; the snapshot builders independently fail CLOSED — SNAT drops
+// matching packets, DNAT omits the rule — rather than mis-translating). Shares the
 // lenientDestNATAddresses flag (same NAT silent-drop doctrine as the sibling
 // pool-value gates). Rule-sets are walked in sorted name order (source-first,
 // then destination) for a deterministic first-reported offender. Mirrors
 // validateSourceNATPoolStrict / validateNATSourceAddressNameReferencesStrict.
-func validateNATPoolReferencesStrict(cfg *Config) error {
+func validateNATPoolReferencesStrict(cfg *Config, lenient bool) error {
 	if cfg == nil {
 		return nil
 	}
@@ -1607,15 +1638,24 @@ func validateNATPoolReferencesStrict(cfg *Config) error {
 					continue
 				}
 				if _, ok := pools[rule.Then.PoolName]; !ok {
+					outcome := "the commit is refused"
+					if lenient {
+						if kind == "source" {
+							outcome = "otherwise the rule commits but the dataplane marks the rule " +
+								"unusable (missing_pool) and drops matching traffic (fail closed; " +
+								"no later-rule or no-NAT fallthrough)"
+						} else {
+							outcome = "otherwise the rule commits but the dataplane fails the " +
+								"translation closed (the pool lookup misses, so the rule is " +
+								"dropped / marked unusable) and matching traffic is silently " +
+								"left untranslated, falling through to a later rule or the " +
+								"no-NAT default"
+						}
+					}
 					return fmt.Errorf(
 						"%s-nat rule-set %q rule %q references undefined pool %q; "+
-							"define `security nat %s pool %s ...` in the same commit — "+
-							"otherwise the rule commits but the dataplane fails the "+
-							"translation closed (the pool lookup misses, so the rule is "+
-							"dropped / marked unusable) and matching traffic is silently "+
-							"left untranslated, falling through to a later rule or the "+
-							"no-NAT default",
-						kind, rs.Name, rule.Name, rule.Then.PoolName, kind, rule.Then.PoolName)
+							"define `security nat %s pool %s ...` in the same commit — %s",
+						kind, rs.Name, rule.Name, rule.Then.PoolName, kind, rule.Then.PoolName, outcome)
 				}
 			}
 		}
@@ -1776,7 +1816,7 @@ func sourceNATPoolAddressReason(addr string) (string, bool) {
 // config carrying such a pool still BOOTS (#1960 no-brick) — the snapshot
 // builder independently marks the pool unusable, installing nothing rather
 // than translating wrongly. Mirrors validateSourceNATPoolStrict.
-func validateSourceNATPoolAddressGrammarStrict(cfg *Config) error {
+func validateSourceNATPoolAddressGrammarStrict(cfg *Config, lenient bool) error {
 	if cfg == nil {
 		return nil
 	}
@@ -1816,22 +1856,28 @@ func validateSourceNATPoolAddressGrammarStrict(cfg *Config) error {
 			}
 			addrs = append(addrs, pool.Addresses...)
 			if len(addrs) == 0 {
+				outcome := "the commit is refused"
+				if lenient {
+					outcome = "the rule commits but the dataplane marks the pool " +
+						"unusable (EmptyPool) and drops it at runtime, silently stopping translation"
+				}
 				return fmt.Errorf(
 					"source-nat pool %q (referenced by rule-set %q rule %q) has no "+
-						"pool addresses; the rule commits but the dataplane marks the "+
-						"pool unusable (EmptyPool) and drops it at runtime, silently "+
-						"stopping translation",
-					name, rs.Name, rule.Name)
+						"pool addresses; %s",
+					name, rs.Name, rule.Name, outcome)
 			}
 			for _, a := range addrs {
 				if reason, ok := sourceNATPoolAddressReason(a); !ok {
+					outcome := "the commit is refused"
+					if lenient {
+						outcome = "the rule commits but the dataplane marks the pool " +
+							"unusable (InvalidPool) and drops it at runtime, silently stopping translation"
+					}
 					return fmt.Errorf(
 						"source-nat pool %q (referenced by rule-set %q rule %q): "+
 							"address %q %s; a single malformed or over-capacity member "+
-							"poisons the whole pool — the rule commits but the dataplane "+
-							"marks the pool unusable (InvalidPool) and drops it at runtime, "+
-							"silently stopping translation",
-						name, rs.Name, rule.Name, a, reason)
+							"poisons the whole pool — %s",
+						name, rs.Name, rule.Name, a, reason, outcome)
 				}
 			}
 		}
@@ -1889,7 +1935,7 @@ func PoolAddressHasZoneScope(addr string) bool {
 // unusable (reason "zone_scoped_pool_address"), installing nothing rather than
 // shipping the unparseable string. Because it is registered in the SNAT strict
 // set, the #5876 peer-effective SNAT gate runs it against the peer view too.
-func validateSourceNATPoolAddressScopeStrict(cfg *Config) error {
+func validateSourceNATPoolAddressScopeStrict(cfg *Config, lenient bool) error {
 	if cfg == nil {
 		return nil
 	}
@@ -1927,15 +1973,18 @@ func validateSourceNATPoolAddressScopeStrict(cfg *Config) error {
 			addrs = append(addrs, pool.Addresses...)
 			for _, a := range addrs {
 				if PoolAddressHasZoneScope(a) {
+					outcome := "the commit is refused"
+					if lenient {
+						outcome = "the rule commits but the dataplane marks the pool " +
+							"unusable (InvalidPool) and drops it at runtime, silently stopping translation"
+					}
 					return fmt.Errorf(
 						"source-nat pool %q (referenced by rule-set %q rule %q): "+
 							"address %q carries an IPv6 zone/scope qualifier (%%zone), "+
 							"which the dataplane cannot represent — Rust parses pool "+
-							"members as an unscoped IP address, so the rule commits but "+
-							"the dataplane marks the pool unusable (InvalidPool) and "+
-							"drops it at runtime, silently stopping translation; remove "+
+							"members as an unscoped IP address, so %s; remove "+
 							"the %%zone suffix (a global SNAT pool address needs no scope)",
-						name, rs.Name, rule.Name, a)
+						name, rs.Name, rule.Name, a, outcome)
 				}
 			}
 		}

@@ -19,7 +19,7 @@ import (
 // no-brick), the snapshot builder independently marking the pool unusable.
 //
 // FAIL-ON-REVERT: dropping the `if err :=
-// validateSourceNATPoolAddressGrammarStrict(cfg); ...` dispatch in
+// validateSourceNATPoolAddressGrammarStrict(cfg, lenient); ...` dispatch in
 // compiler_uniformgates.go (or making the validator `return nil`) turns every
 // reject case GREEN and so RED here.
 

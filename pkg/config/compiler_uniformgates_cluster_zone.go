@@ -581,7 +581,7 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 	// #12054 full-admit-except gate below handles inert known exclusions without
 	// taking this gate's one-warning slot. Runs AFTER the zone gates so a
 	// structural/zone-reference error still wins the first-error slot.
-	if err := validateHostInboundTokensStrict(cfg); err != nil {
+	if err := validateHostInboundTokensStrict(cfg, opts.lenientHostInboundTokens); err != nil {
 		if opts.lenientHostInboundTokens {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("host-inbound-traffic token (downgraded to warning on tolerant path): %v", err))

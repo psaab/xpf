@@ -67,13 +67,13 @@ func validateSourceNATStrictView(cfg *Config) error {
 	if err := validateSourceNATPoolStrict(cfg); err != nil {
 		return err
 	}
-	if err := validateNATPoolReferencesStrict(cfg); err != nil {
+	if err := validateNATPoolReferencesStrict(cfg, false); err != nil {
 		return err
 	}
-	if err := validateSourceNATPoolAddressScopeStrict(cfg); err != nil {
+	if err := validateSourceNATPoolAddressScopeStrict(cfg, false); err != nil {
 		return err
 	}
-	if err := validateSourceNATPoolAddressGrammarStrict(cfg); err != nil {
+	if err := validateSourceNATPoolAddressGrammarStrict(cfg, false); err != nil {
 		return err
 	}
 	if err := validateSourceNATPoolFamilyStrict(cfg); err != nil {
@@ -94,7 +94,7 @@ func validateSourceNATStrictView(cfg *Config) error {
 	if err := validateNATTerminalActionCardinalityStrict(cfg); err != nil {
 		return err
 	}
-	if err := validateNATMatchApplicationsStrict(cfg); err != nil {
+	if err := validateNATMatchApplicationsStrict(cfg, false); err != nil {
 		return err
 	}
 	// #5144: source-NAT / NAT64 external-tuple overlap. A `${node}`/groups

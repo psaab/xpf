@@ -39,12 +39,12 @@ import (
 //
 // Method: parse every non-test .go file in the package, collect the set of
 // top-level functions whose name ends in "Strict" and whose signature is
-// exactly `(cfg *Config) error` (the gate shape — helpers with other
-// signatures, e.g. validateHostInboundStanzaStrict(zone, ifName string, hib
-// *HostInboundTraffic), are intentionally excluded; they are reached through a
-// (cfg *Config) wrapper that IS a gate), then collect every call expression to
-// a same-named function. A defined gate that is never called anywhere in the
-// production source is unwired.
+// exactly `(cfg *Config) error` (the gate shape — helpers and parameterized
+// gates with other signatures, e.g. validateHostInboundStanzaStrict(zone,
+// ifName string, hib *HostInboundTraffic, lenient bool), are intentionally
+// excluded and covered by their per-feature wiring tests), then collect every
+// call expression to a same-named function. A defined gate that is never
+// called anywhere in the production source is unwired.
 func TestEveryStrictCommitGateIsWired(t *testing.T) {
 	fset := token.NewFileSet()
 

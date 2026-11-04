@@ -889,7 +889,7 @@ func validateZoneInterfaceDefinedStrict(cfg *Config) error {
 // not a runtime split-brain; we reject it at commit for Junos-parity/typo-
 // hygiene (host-inbound keywords are lowercase-canonical). Zones are walked in
 // sorted order so the first-reported error is deterministic.
-func validateHostInboundTokensStrict(cfg *Config) error {
+func validateHostInboundTokensStrict(cfg *Config, lenient bool) error {
 	names := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		names = append(names, name)
@@ -901,7 +901,7 @@ func validateHostInboundTokensStrict(cfg *Config) error {
 			continue
 		}
 		if zone.HostInboundTraffic != nil {
-			if err := validateHostInboundStanzaStrict(name, "", zone.HostInboundTraffic); err != nil {
+			if err := validateHostInboundStanzaStrict(name, "", zone.HostInboundTraffic, lenient); err != nil {
 				return err
 			}
 		}
@@ -916,7 +916,7 @@ func validateHostInboundTokensStrict(cfg *Config) error {
 		}
 		sort.Strings(ifNames)
 		for _, ifName := range ifNames {
-			if err := validateHostInboundStanzaStrict(name, ifName, zone.InterfaceHostInbound[ifName]); err != nil {
+			if err := validateHostInboundStanzaStrict(name, ifName, zone.InterfaceHostInbound[ifName], lenient); err != nil {
 				return err
 			}
 		}
@@ -1375,8 +1375,9 @@ func knownHostInboundExceptTokens(tokens []string, known map[string]bool) []stri
 // validateHostInboundStanzaStrict validates one host-inbound-traffic stanza's
 // system-services / protocols tokens against the recognized SSOT sets. When
 // ifName is non-empty the error message names the per-interface scope (#3362);
-// when empty it names the zone-level stanza.
-func validateHostInboundStanzaStrict(zone, ifName string, hib *HostInboundTraffic) error {
+// when empty it names the zone-level stanza. lenient selects the truthful
+// commit outcome (#18971); the caller still owns return-versus-warning behavior.
+func validateHostInboundStanzaStrict(zone, ifName string, hib *HostInboundTraffic, lenient bool) error {
 	if hib == nil {
 		return nil
 	}
@@ -1384,42 +1385,39 @@ func validateHostInboundStanzaStrict(zone, ifName string, hib *HostInboundTraffi
 	if ifName != "" {
 		scope = fmt.Sprintf("interfaces %q host-inbound-traffic", ifName)
 	}
+	outcome := "the commit is refused"
+	if lenient {
+		outcome = "an unknown token commits but enforces inconsistently " +
+			"(kernel nft path vs Rust dataplane disagree)"
+	}
 	if len(hib.nonCanonicalSystemServices) > 0 {
 		svc := hib.nonCanonicalSystemServices[0]
 		return fmt.Errorf(
 			"security zone %q %s system-services %q "+
-				"is not a recognized system-service; an unknown token "+
-				"commits but enforces inconsistently (kernel nft path vs "+
-				"Rust dataplane disagree) — fix the typo or remove it",
-			zone, scope, svc)
+				"is not a recognized system-service; %s — fix the typo or remove it",
+			zone, scope, svc, outcome)
 	}
 	if len(hib.nonCanonicalProtocols) > 0 {
 		proto := hib.nonCanonicalProtocols[0]
 		return fmt.Errorf(
 			"security zone %q %s protocols %q is not a "+
-				"recognized protocol; an unknown token commits but "+
-				"enforces inconsistently (kernel nft path vs Rust "+
-				"dataplane disagree) — fix the typo or remove it",
-			zone, scope, proto)
+				"recognized protocol; %s — fix the typo or remove it",
+			zone, scope, proto, outcome)
 	}
 	for _, svc := range hib.SystemServices {
 		if !KnownHostInboundSystemServices[svc] {
 			return fmt.Errorf(
 				"security zone %q %s system-services %q "+
-					"is not a recognized system-service; an unknown token "+
-					"commits but enforces inconsistently (kernel nft path vs "+
-					"Rust dataplane disagree) — fix the typo or remove it",
-				zone, scope, svc)
+					"is not a recognized system-service; %s — fix the typo or remove it",
+				zone, scope, svc, outcome)
 		}
 	}
 	for _, proto := range hib.Protocols {
 		if !KnownHostInboundProtocols[proto] {
 			return fmt.Errorf(
 				"security zone %q %s protocols %q is not a "+
-					"recognized protocol; an unknown token commits but "+
-					"enforces inconsistently (kernel nft path vs Rust "+
-					"dataplane disagree) — fix the typo or remove it",
-				zone, scope, proto)
+					"recognized protocol; %s — fix the typo or remove it",
+				zone, scope, proto, outcome)
 		}
 	}
 	return nil
