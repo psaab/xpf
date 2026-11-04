@@ -149,7 +149,21 @@ func overlayControlServer(t *testing.T, dir string) (string, chan ControlRequest
 				return
 			}
 			var req ControlRequest
-			if err := json.NewDecoder(conn).Decode(&req); err == nil {
+			var wire struct {
+				*ControlRequest
+				Snapshot *struct {
+					*ConfigSnapshot
+					Config json.RawMessage `json:"config"`
+				} `json:"snapshot"`
+			}
+			wire.ControlRequest = &req
+			if err := json.NewDecoder(conn).Decode(&wire); err == nil {
+				// The helper ignores snapshot.config. Decode it as raw JSON too:
+				// Secret.MarshalJSON redacts secrets, and UnmarshalJSON refuses the
+				// redaction sentinel rather than recreating a live secret.
+				if wire.Snapshot != nil {
+					req.Snapshot = wire.Snapshot.ConfigSnapshot
+				}
 				reqCh <- req
 				gen := uint64(0)
 				fib := uint32(0)

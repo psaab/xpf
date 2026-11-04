@@ -926,7 +926,8 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 					if unknownFamilyMember17196(m, interfaceFamilyKnown17196) {
 						msg := unknownFamilyMsg17196(
 							fmt.Sprintf("interfaces %s unit %d family", ifName, unitNum),
-							m, interfaceFamilyKnown17196, interfaceFamilyKnownSorted17196)
+							m, interfaceFamilyKnown17196, interfaceFamilyKnownSorted17196,
+							opts.lenientFamilyMembers17196)
 						if opts.lenientFamilyMembers17196 {
 							if warnings != nil {
 								*warnings = append(*warnings, msg+"; skipping that family member")

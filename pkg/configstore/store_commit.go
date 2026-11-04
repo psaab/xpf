@@ -166,7 +166,7 @@ func (s *Store) CommitCheckAs(sessionID string) (*config.Config, error) {
 	defer func() { <-s.commitCheckSem }()
 	defer s.mu.RUnlock()
 
-	compiled, err := s.compileTree(s.candidate)
+	compiled, err := s.compileTreeWithPackedTailGate18771(s.candidate, false)
 	if err != nil {
 		return nil, err
 	}

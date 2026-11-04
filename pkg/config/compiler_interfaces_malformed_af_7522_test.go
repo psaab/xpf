@@ -153,7 +153,7 @@ func TestChildShapedFamilyStillCompiles7522(t *testing.T) {
 	}
 	var warned bool
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "is not a known address family") {
+		if strings.Contains(w, "is not a known address family") && strings.Contains(w, lenientTail18951) {
 			warned = true
 		}
 	}
