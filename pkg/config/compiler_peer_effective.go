@@ -152,6 +152,12 @@ var peerEffectiveStrictSubjects = []peerEffectiveStrictSubject{
 // inputs in sorted order, so the first-reported offender is stable across runs
 // and identical on both nodes.
 func ValidatePeerEffectiveStrict(tree *ConfigTree, localNodeID int) error {
+	return ValidatePeerEffectiveStrictWithPackedTailGate18771(tree, localNodeID, false)
+}
+
+// ValidatePeerEffectiveStrictWithPackedTailGate18771 forwards the host
+// promotion's eligibility to the peer-lenient modelling compile.
+func ValidatePeerEffectiveStrictWithPackedTailGate18771(tree *ConfigTree, localNodeID int, eligible bool) error {
 	if tree == nil || localNodeID < 0 {
 		return nil
 	}
@@ -162,7 +168,7 @@ func ValidatePeerEffectiveStrict(tree *ConfigTree, localNodeID int) error {
 	// Compile the peer view the SAME way the standby ingests a config-synced
 	// snapshot (Store.SyncApply -> compileTreeLenient -> CompileConfigForNodeLenient).
 	// ONE compile, shared by every subject below.
-	peerCfg, err := CompileConfigForNodeLenient(tree, peerID)
+	peerCfg, err := CompileConfigForNodeLenientWithPackedTailGate18771(tree, peerID, eligible)
 	if err != nil || peerCfg == nil {
 		return nil
 	}
