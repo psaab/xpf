@@ -2149,7 +2149,8 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 			residue18881 := !unknown18881 && len(m.Residue) > 0
 			if unknown18881 || residue18881 {
 				msg := unknownFamilyMsg17196("forwarding-options family",
-					m, forwardingFamilyKnown17196, forwardingFamilyKnownSorted17196)
+					m, forwardingFamilyKnown17196, forwardingFamilyKnownSorted17196,
+					opts.lenientFamilyMembers17196)
 				if residue18881 {
 					msg = fmt.Sprintf("forwarding-options family %q carries a trailing %q token "+
 						"— a member names one address family (known: %s): the configuration "+
@@ -2445,7 +2446,8 @@ func compileSampling(node *Node, fo *ForwardingOptionsConfig, opts compileOpts, 
 				if unknownFamilyMember17196(m, samplingFamilyKnown17196) {
 					msg := unknownFamilyMsg17196(
 						fmt.Sprintf("forwarding-options sampling instance %q family", sampInst.name),
-						m, samplingFamilyKnown17196, samplingFamilyKnownSorted17196)
+						m, samplingFamilyKnown17196, samplingFamilyKnownSorted17196,
+						opts.lenientFamilyMembers17196)
 					if opts.lenientFamilyMembers17196 {
 						if warnings != nil {
 							*warnings = append(*warnings, msg+"; skipping that family member")
