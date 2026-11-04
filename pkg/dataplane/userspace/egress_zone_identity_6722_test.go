@@ -1804,26 +1804,26 @@ func TestNilUnitSlotCastsNoTrunkZoneVote_6722(t *testing.T) {
 // W: a bare port that names a DIFFERENT reth does not defer to this one.
 //
 // `egressRethMemberOf` requires the member to name the reth as its
-// `gigether-options redundant-parent`. Cell C is the positive case — the authored
-// dotted name `ge-0/0/1.100` IS a member of `reth1`, aliases `reth1.100`, and the
-// reth unit's authored zone decides. This cell is the same config with ONE token
-// changed: the dotted member names `reth2` instead. It is then a port of another
-// redundant pair that merely happens to land on `reth1.100`'s netdev, the
+// `gigether-options redundant-parent`. Cell C is the positive case — an authored
+// dotted member of `reth1` aliases `reth1.100`, and the reth unit's authored zone
+// decides. This cell preserves that shape with the dotted member on node 1 so
+// `reth2` has one child per node, but names `reth2` instead. It is then a port of
+// another redundant pair that merely happens to land on `reth1.100`'s netdev, the
 // deference premise ("the reth owns the L3, the member is only a port of it") is
 // absent, and the ifindex must fail closed.
 //
 // Without the parent match, ANY bare port sharing a netdev with a reth is taken
-// for its member: `ge-0/0/1.100`, an interface the operator put in no zone at
+// for its member: `ge-7/0/1.100`, an interface the operator put in no zone at
 // all, would have its transit adjudicated as `lan`.
 func TestBarePortOfADifferentRethDoesNotDeferToThisOne_6722(t *testing.T) {
-	links := map[string]int{"ge-0-0-0": 30, "ge-0-0-1": 31, "ge-0-0-1.100": 32}
-	macs := map[string]string{"ge-0-0-1": "02:bf:72:01:00:01"}
+	links := map[string]int{"ge-0-0-0": 30, "ge-7-0-1": 31, "ge-7-0-1.100": 32}
+	macs := map[string]string{"ge-7-0-1": "02:bf:72:01:00:01"}
 	// Keep reth2's own netdev on an earlier, distinct member. Otherwise
 	// ResolveReth selects the foreign dotted member below, adding reth2 as a
 	// third identity on ifindex 32 instead of exercising two-identity deference.
 	base := []string{
 		"set interfaces ge-0/0/0 gigether-options redundant-parent reth2",
-		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
+		"set interfaces ge-7/0/1 gigether-options redundant-parent reth1",
 		"set interfaces reth1 redundant-ether-options redundancy-group 2",
 		"set interfaces reth1 vlan-tagging",
 		"set interfaces reth1 unit 100 vlan-id 100 family inet address 10.0.61.1/24",
@@ -1831,15 +1831,15 @@ func TestBarePortOfADifferentRethDoesNotDeferToThisOne_6722(t *testing.T) {
 		"set interfaces reth2 unit 0 family inet address 10.0.62.1/24",
 		"set security zones security-zone lan interfaces reth1.100",
 	}
-	foreign := append([]string{"set interfaces ge-0/0/1.100 gigether-options redundant-parent reth2"}, base...)
+	foreign := append([]string{"set interfaces ge-7/0/1.100 gigether-options redundant-parent reth2"}, base...)
 
 	cfg := compileWithStubbedLinks6722(t, foreign, links, macs, false)
 	snaps := buildInterfaceSnapshots(cfg)
 
-	dotted := snapByName6722(t, snaps, "ge-0/0/1.100")
+	dotted := snapByName6722(t, snaps, "ge-7/0/1.100")
 	rethUnit := snapByName6722(t, snaps, "reth1.100")
 	if dotted.Ifindex != 32 || rethUnit.Ifindex != 32 {
-		t.Fatalf("precondition: ge-0/0/1.100=%d reth1.100=%d, want 32/32 — the "+
+		t.Fatalf("precondition: ge-7/0/1.100=%d reth1.100=%d, want 32/32 — the "+
 			"foreign port and the reth's VLAN unit must share ONE netdev, or "+
 			"there is no deference question to answer",
 			dotted.Ifindex, rethUnit.Ifindex)
@@ -1849,26 +1849,26 @@ func TestBarePortOfADifferentRethDoesNotDeferToThisOne_6722(t *testing.T) {
 			"if it shares ifindex 32 the foreign port, reth1.100, and reth2 form three "+
 			"identities and this no longer exercises the two-identity deference test", got)
 	}
-	if ifc := cfg.Interfaces.Interfaces["ge-0/0/1.100"]; ifc == nil || ifc.RedundantParent != "reth2" {
-		t.Fatalf("precondition: ge-0/0/1.100 redundant-parent is not `reth2`; the " +
+	if ifc := cfg.Interfaces.Interfaces["ge-7/0/1.100"]; ifc == nil || ifc.RedundantParent != "reth2" {
+		t.Fatalf("precondition: ge-7/0/1.100 redundant-parent is not `reth2`; the " +
 			"whole cell is that the port names a DIFFERENT reth")
 	}
-	if egressRethMemberOf(cfg, "ge-0/0/1.100", "reth1") {
-		t.Errorf("egressRethMemberOf accepted ge-0/0/1.100 as a member of reth1, " +
+	if egressRethMemberOf(cfg, "ge-7/0/1.100", "reth1") {
+		t.Errorf("egressRethMemberOf accepted ge-7/0/1.100 as a member of reth1, " +
 			"which it does not name; every bare port sharing a netdev with a reth " +
 			"is then taken for its member")
 	}
 	assertEgressZone6722(t, snaps, 32, "",
-		"ge-0/0/1.100 is a port of reth2, not of reth1, so the two identities on "+
+		"ge-7/0/1.100 is a port of reth2, not of reth1, so the two identities on "+
 			"this netdev are independent claims and it identifies no single zone. "+
 			"Answering `lan` adjudicates a foreign redundant pair's port under the "+
 			"zone the operator wrote for reth1.100")
 
-	// CONTROL — cell C's config, reached by changing the SAME line to name
-	// `reth1`. One token, and the answer must flip to `lan`; that is what makes
-	// the failure above specific to the parent name rather than to the aliasing.
+	// CONTROL — the positive-parent config, reached by changing the SAME line to
+	// name `reth1`. One token, and the answer must flip to `lan`; that is what
+	// makes the failure above specific to the parent name rather than the aliasing.
 	ctl := compileWithStubbedLinks6722(t,
-		append([]string{"set interfaces ge-0/0/1.100 gigether-options redundant-parent reth1"}, base...),
+		append([]string{"set interfaces ge-7/0/1.100 gigether-options redundant-parent reth1"}, base...),
 		links, macs, false)
 	assertEgressZone6722(t, buildInterfaceSnapshots(ctl), 32, "lan",
 		"control: with the dotted port naming `reth1` it IS a member port of the "+

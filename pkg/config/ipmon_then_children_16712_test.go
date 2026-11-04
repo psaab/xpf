@@ -231,3 +231,39 @@ func TestIPMonThenDirectGate16712(t *testing.T) {
 		t.Fatalf("lenient direct gate = warnings %v err %v, want 1 #16712 warning", warnings, err)
 	}
 }
+
+// #18962: the unknown-`then` tail is per-arm. The `interface` arm above
+// carries no commit-outcome claim ("the interface is never enabled or
+// disabled on probe failure") and stays arm-independent; the unknown-token
+// arm's old tail claimed "it renders in `show configuration`" — a
+// persistence claim that is false on the strict arm, where this very text is
+// the commit-refusing error. Literal head+tail pins, both arms.
+func TestIPMonUnknownThenTailIsPerArm_18962(t *testing.T) {
+	tree := buildTree(t, ipMon16712Lines(
+		"set services ip-monitoring policy p then snmp-notification"))
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("strict compile accepted an unknown `then` statement")
+	}
+	if !strings.Contains(err.Error(),
+		"is not a `then` statement xpf implements (known: preferred-route) — "+
+			"the commit is refused (#16712)") {
+		t.Fatalf("strict tail must state the refusal: %v", err)
+	}
+	if strings.Contains(err.Error(), "show configuration") {
+		t.Fatalf("a strict refusal must not claim the statement renders anywhere: %v", err)
+	}
+	cfg, lerr := CompileConfigLenient(tree)
+	if lerr != nil {
+		t.Fatalf("lenient compile must boot (#1960): %v", lerr)
+	}
+	joined := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(joined,
+		"it compiles to NOTHING: it renders in `show configuration` and no action is taken "+
+			"on probe failure (#16712)") {
+		t.Fatalf("lenient warning must keep the true drop outcome verbatim: %q", joined)
+	}
+	if strings.Contains(joined, "the commit is refused") {
+		t.Fatalf("the lenient arm must not claim a refusal that did not happen: %q", joined)
+	}
+}
