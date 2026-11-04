@@ -73,7 +73,7 @@ func nativeIngressDisambiguatesParent(
 	unitRef := fmt.Sprintf("%s.0", base)
 	return zoneByIface[unitRef] != "" &&
 		snapshotUnitDevice(cfg, unitRef, tunnelNames) ==
-			cfg.resolveKernelIfNameWith(base, tunnelNames)
+			cfg.ResolveKernelIfNameWith(base, tunnelNames)
 }
 
 // snapshotUnitDevice follows the userspace snapshot's unit-device precedence:
@@ -91,7 +91,7 @@ func snapshotUnitDevice(
 	if device := tunnelNames[name]; device != "" {
 		return device
 	}
-	return cfg.resolveKernelIfNameWith(name, tunnelNames)
+	return cfg.ResolveKernelIfNameWith(name, tunnelNames)
 }
 
 // interfaceUnitCollapsesOnBase reports whether a unit reference counts toward
@@ -116,7 +116,7 @@ func interfaceUnitCollapsesOnBase(
 		return true
 	}
 	return snapshotUnitDevice(cfg, name, tunnelNames) ==
-		cfg.resolveKernelIfNameWith(base, tunnelNames)
+		cfg.ResolveKernelIfNameWith(base, tunnelNames)
 }
 
 // userspaceHostInboundLifeline is the config-aware host-inbound lifeline
@@ -210,7 +210,7 @@ func interfaceTunnelHasCollapsedUnits(
 	if ifc == nil || ifc.Tunnel == nil || len(ifc.Units) == 0 {
 		return false
 	}
-	baseDevice := cfg.resolveKernelIfNameWith(base, tunnelNames)
+	baseDevice := cfg.ResolveKernelIfNameWith(base, tunnelNames)
 	for num, unit := range ifc.Units {
 		if unit == nil {
 			continue
@@ -379,7 +379,7 @@ func sharedDeviceUnzonedUnitsWithMaps(
 			// has nothing that collapses onto it.
 			continue
 		}
-		baseDevice := cfg.resolveKernelIfNameWith(name, tunnelNames)
+		baseDevice := cfg.ResolveKernelIfNameWith(name, tunnelNames)
 		zoned, unzonedShared := false, []string(nil)
 		for num, unit := range ifc.Units {
 			if unit == nil {
