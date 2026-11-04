@@ -52,6 +52,10 @@ type Node struct {
 	// group-scoped duplicate-container diagnostics. It is never persisted or
 	// rendered as user annotation and is removed after group expansion.
 	duplicateBlockMergeMarkers9023 []string
+	// packedTailSite18771 is the compile-local source occurrence identity
+	// assigned by the #18771 recorder. Zero means unrecorded; clones preserve
+	// it so group expansion cannot collapse distinct source occurrences.
+	packedTailSite18771 uint64
 
 	// leafMemberGroups9862 carries per-member contributor provenance for a
 	// cross-group leaf-list union. It is aligned with leafListMembers9627's
@@ -760,6 +764,7 @@ func cloneNodes(nodes []*Node) []*Node {
 			// nodes allocate nothing.
 			fromGroups:                     append([]string(nil), n.fromGroups...),
 			duplicateBlockMergeMarkers9023: append([]string(nil), n.duplicateBlockMergeMarkers9023...),
+			packedTailSite18771:            n.packedTailSite18771,
 			leafMemberGroups9862:           cloneLeafMemberGroups9862(n.leafMemberGroups9862),
 			Inactive:                       n.Inactive,
 			Line:                           n.Line,

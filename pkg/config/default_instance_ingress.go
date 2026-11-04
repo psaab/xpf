@@ -55,7 +55,7 @@ func DefaultInstanceIngressIfaces(cfg *Config) []string {
 			// An instance may claim the base interface ("ge-0/0/0") or a unit
 			// ref ("ge-0/0/0.0"). Record the resolved kernel name too so a
 			// claim written in either spelling excludes the same device.
-			if k := cfg.resolveKernelIfNameWith(ref, tunMap); k != "" {
+			if k := cfg.ResolveKernelIfNameWith(ref, tunMap); k != "" {
 				claimed[k] = struct{}{}
 			}
 		}
@@ -93,7 +93,7 @@ func DefaultInstanceIngressIfaces(cfg *Config) []string {
 			if _, taken := claimed[ref]; taken {
 				continue
 			}
-			iif := cfg.resolveKernelIfNameWith(ref, tunMap)
+			iif := cfg.ResolveKernelIfNameWith(ref, tunMap)
 			if iif == "" {
 				continue
 			}
