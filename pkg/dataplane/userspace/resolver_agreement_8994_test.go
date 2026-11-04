@@ -42,7 +42,7 @@ import (
 // It landed first as a known-bad ratchet pinning that one row, deliberately
 // mutation-tested in BOTH directions -- and the mutant that APPLIED the fix
 // was what proved the fix worked before it was written for real. The fix
-// (resolveKernelIfNameWith: a ref naming a DECLARED interface takes the bare
+// (ResolveKernelIfNameWith: a ref naming a DECLARED interface takes the bare
 // arm) then shrank the set to empty, which reddened the ratchet exactly as it
 // was designed to, and the expectation moved rather than being loosened.
 //
@@ -105,7 +105,7 @@ func TestResolverAgreement8994(t *testing.T) {
 			"declared interface(s):\n  %s\n\n"+
 			"They must name the same kernel device for the same configured interface. "+
 			"A ref that NAMES a declared interface takes the bare arm in "+
-			"resolveKernelIfNameWith precisely so a dotted authored name is not re-read "+
+			"ResolveKernelIfNameWith precisely so a dotted authored name is not re-read "+
 			"as a unit ref and resolved onto some other device — reverting that arm "+
 			"reproduces exactly this. The NOTE in pkg/config/types.go asks for these to "+
 			"be kept in step and cannot detect it; this cell can.",

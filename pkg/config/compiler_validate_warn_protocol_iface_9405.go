@@ -110,7 +110,7 @@ func declaredInterfaceIndex(cfg *Config) map[string]*InterfaceConfig {
 // not share.
 func unresolvedInterfaceRef(declared map[string]*InterfaceConfig, ref string) string {
 	// An explicitly DECLARED name outranks a parse, even when it contains a
-	// dot — the same precedence resolveKernelIfNameWith applies (#8994).
+	// dot — the same precedence ResolveKernelIfNameWith applies (#8994).
 	if _, ok := declared[ref]; ok {
 		return ""
 	}

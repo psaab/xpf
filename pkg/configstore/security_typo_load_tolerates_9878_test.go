@@ -35,7 +35,7 @@ func TestLoadToleratesSecurityTypo_9878(t *testing.T) {
 		t.Fatalf("precondition: the fixture must parse: %v", errs[0])
 	}
 	path := filepath.Join(t.TempDir(), "config")
-	if err := newTestStoreAt(t, path).schemaValidateExpandedTree(tree); err == nil {
+	if err := schemaValidateExpandedTreeForNode(tree, newTestStoreAt(t, path).nodeID, false); err == nil {
 		t.Fatal("precondition: the STRICT commit path accepted `frum-zone` — the #9878 arm is not in effect")
 	} else if !strings.Contains(err.Error(), "frum-zone") {
 		t.Fatalf("strict rejected, but not for the typo token: %v", err)

@@ -214,8 +214,11 @@ func validateScreenUnknownStrict(cfg *Config) error {
 // default. On the tolerant path the caller downgrades to a warning
 // (#1960 no-brick); the profile keeps the default/disabled value
 // compileScreen produced. The walk is deterministic (profiles sorted
-// by name, MissingValue in config order).
-func validateScreenMissingValueStrict(cfg *Config) error {
+// by name, MissingValue in config order). The tail is per-arm (#18962):
+// the lenient arm keeps the drop wording verbatim (the tolerant caller
+// downgrades to a warning and the booted config really lacks the leaf);
+// the strict arm's text refuses the commit.
+func validateScreenMissingValueStrict(cfg *Config, lenient bool) error {
 	if cfg == nil {
 		return nil
 	}
@@ -226,9 +229,8 @@ func validateScreenMissingValueStrict(cfg *Config) error {
 		}
 		return fmt.Errorf(
 			"security screen ids-option %q: `%s` declares a value and none was given — "+
-				"the compiler drops a valueless statement, so this commits clean and the "+
-				"configuration silently does not carry it (#16571)",
-			name, profile.MissingValue[0])
+				"%s (#16571)",
+			name, profile.MissingValue[0], valuelessStatementTail18962(lenient))
 	}
 	return nil
 }

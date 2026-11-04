@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vishvananda/netlink"
+
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -45,12 +47,63 @@ func (c *countingDeltaDrainerDP) DrainSessionDeltas(uint32) ([]dpuserspace.Sessi
 	return nil, dpuserspace.ProcessStatus{}, nil
 }
 
+// loopbackDialable reports whether a loopback TCP connect completes in the
+// current namespace. A bare net.Listen is NOT proof: the kernel accepts a
+// 127.0.0.1 bind in a namespace whose lo is still down, so only a dialed
+// connection separates "routable" from "bindable but unroutable" — the exact
+// gap that hid this fixture's breakage behind two green listener logs.
+func loopbackDialable() bool {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return false
+	}
+	defer ln.Close()
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// ensureLoopbackForSyncPairTest makes 127.0.0.1 routable before the pair's
+// reserve-port dance. #18038's testguard runner executes named tests in a
+// private network namespace whose lo exists but is DOWN and unaddressed:
+// 127.0.0.1 binds still succeed there, while the pair's production dial
+// (SessionSync.fabricConnectLoop) fails with ENETUNREACH on every 1 s
+// retry, so the pair burns its whole 20 s connect deadline and the drain
+// gate never opens. Bringing lo up installs 127.0.0.1/8 and its local
+// routes, restoring exactly the transport this fixture was built on. On a
+// runner whose loopback is already routable this is a no-op that touches
+// nothing.
+func ensureLoopbackForSyncPairTest(t *testing.T) {
+	t.Helper()
+	if loopbackDialable() {
+		return
+	}
+	lo, err := netlink.LinkByName("lo")
+	if err != nil {
+		t.Fatalf("resolve lo to bring up loopback for the sync pair (127.0.0.1 not dialable): %v", err)
+	}
+	if err := netlink.LinkSetUp(lo); err != nil {
+		t.Fatalf("bring up lo for the sync pair (#18038 private namespace): %v", err)
+	}
+	if !loopbackDialable() {
+		t.Fatal("127.0.0.1 still not dialable after LinkSetUp(lo): the sync pair cannot connect")
+	}
+}
+
 // connectedSyncPairForDrainTest returns a SessionSync whose IsConnected()
 // is true, built from a real loopback peer. The fallback loop's drain is
 // gated on IsConnected(), so a disconnected stub would make the whole test
 // vacuous (it would never reach the drain in EITHER direction).
 func connectedSyncPairForDrainTest(t *testing.T, ctx context.Context) *cluster.SessionSync {
 	t.Helper()
+
+	// #18038: the testguard runner's private namespace leaves lo down, which
+	// makes the production dial below fail ENETUNREACH forever — bring it up
+	// first (a no-op wherever loopback already routes).
+	ensureLoopbackForSyncPairTest(t)
 
 	// Two free loopback ports; the pair dials each other.
 	lnA, err := net.Listen("tcp", "127.0.0.1:0")

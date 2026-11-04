@@ -64,13 +64,13 @@ func TestCommitValidationNormalizesBeforeGroupExpansion8921(t *testing.T) {
 				// is refused in this group spelling -- the validator sees the
 				// value, so an accepted override below is the merge working and
 				// not the value going unobserved.
-				err := schemaValidateExpandedTreeForNode(parse(t, pre+c.group+controlInline), nodeID)
+				err := schemaValidateExpandedTreeForNode(parse(t, pre+c.group+controlInline), nodeID, false)
 				if err == nil || !strings.Contains(err.Error(), "hold-time") {
 					t.Fatalf("CONTROL (node %d): the inherited invalid hold-time was not refused "+
 						"(err=%v), so this cell cannot observe the override", nodeID, err)
 				}
 				text := pre + c.group + c.inline
-				if err := schemaValidateExpandedTreeForNode(parse(t, text), nodeID); err != nil {
+				if err := schemaValidateExpandedTreeForNode(parse(t, text), nodeID, false); err != nil {
 					t.Errorf("node %d: commit-check refused the override: the inline hold-time 30 "+
 						"must override the group's 2, as it does in the compiler: %v", nodeID, err)
 				}

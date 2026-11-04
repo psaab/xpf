@@ -31,7 +31,7 @@ func TestPackedTypedLeafIsRejectedAtCommit_8867(t *testing.T) {
 		t.Fatalf("precondition: the fixture must parse: %v", errs[0])
 	}
 	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
-	err := s.schemaValidateExpandedTree(tree)
+	err := schemaValidateExpandedTreeForNode(tree, s.nodeID, false)
 	if err == nil {
 		t.Fatal("the STRICT commit path accepted a packed `transmit-rate asd`. The compiler " +
 			"COMPILES that packed tail, so the value reaches the dataplane while its " +
