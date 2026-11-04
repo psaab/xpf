@@ -202,16 +202,16 @@ func TestPackedTailCredentialValidPackedTails14412(t *testing.T) {
 
 // Fold (#16108 review): a credential-spelled token in a VALUE position of
 // a nested packed grammar is consumed, not a dropped head. The OSPF MD5
-// key may literally be the bare token `authentication-key`
-// (`authentication md5 1 key authentication-key`); the pre-fold predicate
+// key may literally be the bare token `api-key`
+// (`authentication md5 1 key api-key`); the pre-fold predicate
 // scanned every tail token against the interface grammar and rejected it
-// as a dropped refusal stub. Assert strict acceptance, no #10707 warning,
+// as a dropped credential head. Assert strict acceptance, no #10707 warning,
 // and that the compiled key is preserved verbatim. The reported dropped
 // head (`passive authentication-key SECRET`) stays rejected by
 // TestPackedTailCredentialStrictReject14412 above.
 func TestPackedTailCredentialValuePosition16108(t *testing.T) {
 	src := `protocols { ospf { area 0.0.0.0 {
-		interface ge-0/0/0.0 authentication md5 1 key authentication-key; } } }`
+		interface ge-0/0/0.0 authentication md5 1 key api-key; } } }`
 	if err := SchemaValidate(parseHierText(t, src)); err != nil {
 		t.Fatalf("SchemaValidate rejected credential value in value position: %v (#16108)", err)
 	}
@@ -219,7 +219,7 @@ func TestPackedTailCredentialValuePosition16108(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileConfig rejected credential value in value position: %v (#16108)", err)
 	}
-	if hasWarning14412(cfg, "authentication-key") {
+	if hasWarning14412(cfg, "api-key") {
 		t.Fatalf("credential value drew a #10707 warning; warnings=%v (#16108)", cfg.Warnings)
 	}
 	if cfg.Protocols.OSPF == nil || len(cfg.Protocols.OSPF.Areas) == 0 ||
@@ -227,13 +227,13 @@ func TestPackedTailCredentialValuePosition16108(t *testing.T) {
 		t.Fatalf("no ospf interface compiled: %+v", cfg.Protocols)
 	}
 	iface := cfg.Protocols.OSPF.Areas[0].Interfaces[0]
-	if iface.AuthType != "md5" || iface.AuthKey.Reveal() != "authentication-key" {
-		t.Fatalf("compiled AuthType=%q AuthKey=%q, want md5/authentication-key (#16108)",
+	if iface.AuthType != "md5" || iface.AuthKey.Reveal() != "api-key" {
+		t.Fatalf("compiled AuthType=%q AuthKey=%q, want md5/api-key (#16108)",
 			iface.AuthType, iface.AuthKey.Reveal())
 	}
 	// Same for the simple-password value position.
 	src2 := `protocols { ospf { area 0.0.0.0 {
-		interface ge-0/0/0.0 authentication simple-password authentication-key; } } }`
+		interface ge-0/0/0.0 authentication simple-password api-key; } } }`
 	if err := SchemaValidate(parseHierText(t, src2)); err != nil {
 		t.Fatalf("SchemaValidate rejected simple-password value: %v (#16108)", err)
 	}
@@ -241,8 +241,8 @@ func TestPackedTailCredentialValuePosition16108(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileConfig rejected simple-password value: %v (#16108)", err)
 	}
-	if cfg2.Protocols.OSPF.Areas[0].Interfaces[0].AuthKey.Reveal() != "authentication-key" {
-		t.Fatalf("simple-password AuthKey=%q, want authentication-key (#16108)",
+	if cfg2.Protocols.OSPF.Areas[0].Interfaces[0].AuthKey.Reveal() != "api-key" {
+		t.Fatalf("simple-password AuthKey=%q, want api-key (#16108)",
 			cfg2.Protocols.OSPF.Areas[0].Interfaces[0].AuthKey.Reveal())
 	}
 }
