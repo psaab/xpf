@@ -39,6 +39,7 @@ type upgEnd struct {
 // synchronously and the assertions see a settled state.
 func tcpPair(t *testing.T) (net.Conn, net.Conn) {
 	t.Helper()
+	ensureLoopbackRoutable18038(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

@@ -505,6 +505,7 @@ func TestPreAuthHandshakeFailureWarnRateLimited16748(t *testing.T) {
 // RED on revert: restoring slog.Info in acceptLoop yields one INFO
 // per accepted garbage connection.
 func TestPreAuthPeerConnectedNotInfo16748(t *testing.T) {
+	ensureLoopbackRoutable18038(t)
 	buf := withCapturedLog16748(t, slog.LevelInfo)
 	s := newAuthSync(t, []byte("psk-secret-key-for-16748-accept-test"))
 
