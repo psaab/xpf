@@ -98,7 +98,11 @@ func TestFilterValuelessFromRecordedLenient9875(t *testing.T) {
 // TestFilterValuelessFromControls9875 pins what must NOT record: every shape
 // the #8480 gate lets commit must compile with ValuelessFrom empty —
 // otherwise the marker would refuse snapshots for good configs on the
-// tolerant path (a boot/sync brick).
+// tolerant path (a boot/sync brick). The flexible-match-range control is a
+// fully-valued range: since #16849 (ece34d264f) a value-less range on a
+// discard/reject term is strict-refused, so a value-less control row would
+// test the #15943/#16849 value gate, not this boundary (#18882); the
+// bit-length/mask defaults finalisation substitutes must carry it.
 func TestFilterValuelessFromControls9875(t *testing.T) {
 	rows := []struct {
 		name string
@@ -109,7 +113,7 @@ func TestFilterValuelessFromControls9875(t *testing.T) {
 		{"omitted leaf", `term T { from { source-address 10.0.0.0/8; } then { discard; } }`},
 		{"empty from block", `term T { from { } then { discard; } }`},
 		{"is-fragment flag", `term T { from { is-fragment; } then { discard; } }`},
-		{"flexible-match-range with named range", `term T { from { flexible-match-range { range R { match-start layer-3; byte-offset 4; } } } then { discard; } }`},
+		{"flexible-match-range with named range", `term T { from { flexible-match-range { range R { match-start layer-3; byte-offset 4; match-value 0x11; } } } then { discard; } }`},
 		{"duplicated leaf valueless-then-valued", `term T { from { protocol; protocol tcp; } then { discard; } }`},
 		{"duplicated leaf valued-then-valueless", `term T { from { protocol tcp; protocol; } then { discard; } }`},
 		{"valued prefix-list ref", `term T { from { source-prefix-list PL; } then { discard; } }`},

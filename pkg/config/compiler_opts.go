@@ -27,6 +27,11 @@ type compileOpts struct {
 	// admits a tail somebody reads is caught rather than reasoned about.
 	// Production never sets it.
 	skipCompactNormalize bool
+	// packedTailGateEligible18771 is true only for the configstore promotion
+	// compile and its peer views. Both constructors deliberately leave it zero.
+	packedTailGateEligible18771 bool
+	// skipPackedTailGate18771 suppresses gate re-entry on a B_i/R_i twin.
+	skipPackedTailGate18771 bool
 	// igpIdentityExcused16810 is set by compileTree after the
 	// pre-expansion AST check finds distinct per-node IGP identities
 	// (the ${node} groups idiom, #16810); runUniformGates then skips
