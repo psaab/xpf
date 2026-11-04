@@ -170,7 +170,11 @@ func TestTCPSessionTimeoutWindowsMatchRust_6539(t *testing.T) {
 		"TCP_RST_TIMEOUT_NS":             DataplaneTCPRSTWindowSecs,
 	}
 	for name, wantSecs := range want {
-		re := regexp.MustCompile(`(?m)^const ` + name + `: u64 = ([0-9_]+);`)
+		// #18657 made DEFAULT_TCP_OPENING_TIMEOUT_NS pub(crate); allow any Rust
+		// visibility prefix. That prefix is the only slack — the line anchor, the
+		// const name, `: u64 = <digits>;` and the value comparison stay pinned, so
+		// a renamed const or a drifted value still fails this cell.
+		re := regexp.MustCompile(`(?m)^(?:pub(?:\((?:crate|super|self|in [^)]+)\))? )?const ` + name + `: u64 = ([0-9_]+);`)
 		m := re.FindSubmatch(src)
 		if m == nil {
 			t.Errorf("constant %s not found in %s (renamed or moved?)", name, rustPath)
