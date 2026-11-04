@@ -23,6 +23,19 @@ import (
 // runPreWalkGates (or its lenient flag) makes every Reject/Warn cell
 // below accept silently.
 
+// #18955: the top-level unknown-statement diagnostic's tail is pinned
+// literally per arm. The strict arm refuses the commit, so its tail says
+// so; the compiles-to-NOTHING wording stays on the lenient arm, where
+// the statement is dropped with a warning and no policy is created for
+// it. Literals, not builder references, so a tail swap cannot satisfy
+// them tautologically; the head ("is not an event-options statement") is
+// shared and unchanged. The policy-body diagnostics (events / then /
+// policy children) carry their own wordings and are unchanged.
+const (
+	strictTail14660  = "— the commit is refused (#14660)"
+	lenientTail14660 = "— it compiles to NOTHING: it commits clean, renders in `show configuration`, and no event policy is created (#14660)"
+)
+
 func hasWarningContaining14660(cfg *Config, subs ...string) bool {
 	for _, w := range cfg.Warnings {
 		ok := true
@@ -115,12 +128,12 @@ func TestEventOptionsInert14660StrictRejects(t *testing.T) {
 		{
 			name: "event-options bogus child hier",
 			tree: parseHierText(t, `event-options { generate-event FOO { time-of-day "2020-01-01"; } policy p { events ping_test_failed; } }`),
-			want: []string{"generate-event"},
+			want: []string{"generate-event", "is not an event-options statement", strictTail14660},
 		},
 		{
 			name: "event-options bogus child flat",
 			tree: setTree6659(t, `set event-options bogus-child foo`),
-			want: []string{"bogus-child"},
+			want: []string{"bogus-child", "is not an event-options statement", strictTail14660},
 		},
 		{
 			name: "policy bogus child hier",
@@ -381,7 +394,7 @@ func TestEventOptionsInert14660LenientWarns(t *testing.T) {
 		{
 			name: "event-options bogus child",
 			tree: setTree6659(t, `set event-options bogus-child foo`),
-			want: []string{"bogus-child", "#14660"},
+			want: []string{"bogus-child", "is not an event-options statement", lenientTail14660},
 		},
 		{
 			name: "policy bogus child",

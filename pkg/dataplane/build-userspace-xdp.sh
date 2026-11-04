@@ -196,16 +196,30 @@ SHIMVERIFY="$(mktemp -t shimverify.XXXXXX)"
 	"${GO_BIN}" build -o "${SHIMVERIFY}" ./cmd/shimverify
 ) || fail "failed to build cmd/shimverify"
 
+# #18966: capture the attestation directory BEFORE the sudo hop, the
+# same explicit threading the XPF_SHIM_* provenance vars use below.
+# sudo scrubs TMPDIR from the environment, so a bare `mktemp -t` in the
+# sudo arm always resolved the template against /tmp no matter what the
+# Makefile exported (#14833 pins TMPDIR to /var/worktrees/.cache/tmpdir
+# precisely so build scratch never lands on /tmp). On a /tmp-full box
+# the attestation was created there and shimverify's verdict write
+# failed with ENOSPC, so `make generate-userspace-xdp` died at the
+# verifier gate. Both arms now pass this directory to mktemp explicitly
+# (`-p` carries it across the sudo hop as argv, not env). Default to
+# /tmp per the old `mktemp -t` semantics only when the caller exports
+# no TMPDIR.
+ATTESTATION_TMPDIR="${TMPDIR:-/tmp}"
+
 run_verifier() {
 	# XPF_SHIM_ALLOW_LOW_HEADROOM (#4555) must survive the sudo hop —
 	# sudo scrubs the environment, so pass it explicitly via `env` or the
 	# documented override silently does nothing.
 	local allow_low="${XPF_SHIM_ALLOW_LOW_HEADROOM:-0}"
 	if [[ "$(id -u)" -eq 0 ]]; then
-		SHIMVERIFY_ATTESTATION="$(mktemp -t shimverify-attestation.XXXXXX)" || return 1
+		SHIMVERIFY_ATTESTATION="$(mktemp -p "${ATTESTATION_TMPDIR}" shimverify-attestation.XXXXXX)" || return 1
 		XPF_SHIM_ALLOW_LOW_HEADROOM="${allow_low}" XPF_SHIM_BUILD_DIGEST="${SHIM_BUILD_DIGEST}" XPF_SHIM_TOOLCHAIN="${TOOLCHAIN}" XPF_SHIM_PINNED="${PINNED_BIT}" XPF_SHIM_BPF_LINKER="${BPF_LINKER_VERSION}" XPF_SHIM_CODEGEN_ENV_DIGEST="${CODEGEN_ENV_DIGEST}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
 	elif sudo -n true 2>/dev/null; then
-		SHIMVERIFY_ATTESTATION="$(sudo -n mktemp -t shimverify-attestation.XXXXXX)" || return 99
+		SHIMVERIFY_ATTESTATION="$(sudo -n mktemp -p "${ATTESTATION_TMPDIR}" shimverify-attestation.XXXXXX)" || return 99
 		sudo -n chmod 0644 "${SHIMVERIFY_ATTESTATION}" || return 99
 		sudo -n env "XPF_SHIM_ALLOW_LOW_HEADROOM=${allow_low}" "XPF_SHIM_BUILD_DIGEST=${SHIM_BUILD_DIGEST}" "XPF_SHIM_TOOLCHAIN=${TOOLCHAIN}" "XPF_SHIM_PINNED=${PINNED_BIT}" "XPF_SHIM_BPF_LINKER=${BPF_LINKER_VERSION}" "XPF_SHIM_CODEGEN_ENV_DIGEST=${CODEGEN_ENV_DIGEST}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
 	else

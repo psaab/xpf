@@ -68,7 +68,7 @@ func validateTunnelOuterFamilyStrict(cfg *Config, lenient bool) ([]string, error
 		}
 		if ifc.Tunnel != nil {
 			label := tunnelLabel(ifName, -1, ifc.Tunnel)
-			if err := emit(label, validateOneTunnelOuterFamily(ifc.Tunnel)); err != nil {
+			if err := emit(label, validateOneTunnelOuterFamily(ifc.Tunnel, lenient)); err != nil {
 				return warnings, err
 			}
 		}
@@ -83,7 +83,7 @@ func validateTunnelOuterFamilyStrict(cfg *Config, lenient bool) ([]string, error
 				continue
 			}
 			label := tunnelLabel(ifName, n, unit.Tunnel)
-			if err := emit(label, validateOneTunnelOuterFamily(unit.Tunnel)); err != nil {
+			if err := emit(label, validateOneTunnelOuterFamily(unit.Tunnel, lenient)); err != nil {
 				return warnings, err
 			}
 		}
@@ -101,7 +101,14 @@ func validateTunnelOuterFamilyStrict(cfg *Config, lenient bool) ([]string, error
 // is a separate schema-level concern, not a cross-field family
 // mismatch). It rejects ONLY a pair where both endpoints parse to
 // concrete IPs of DIFFERENT families.
-func validateOneTunnelOuterFamily(tc *TunnelConfig) error {
+//
+// #18958 closing census: the parenthetical outcome is per-arm. Strict
+// returns this error as the commit refusal, so its outcome says the
+// commit is refused — "a mixed pair commits clean but the dataplane
+// silently drops every encapsulated packet" is only true on the lenient
+// arm, where the config boots and the Rust helper skips the mixed row
+// (#5162). Same fix shape as #16580's dhcp-relay wording.
+func validateOneTunnelOuterFamily(tc *TunnelConfig, lenient bool) error {
 	if tc == nil || tc.Mode == TunnelModeWireGuard {
 		return nil
 	}
@@ -116,12 +123,16 @@ func validateOneTunnelOuterFamily(tc *TunnelConfig) error {
 	srcV6 := src.To4() == nil
 	dstV6 := dst.To4() == nil
 	if srcV6 != dstV6 {
+		outcome := "the commit is refused, #5162"
+		if lenient {
+			outcome = "a mixed pair commits clean but the dataplane " +
+				"silently drops every encapsulated packet, #5162"
+		}
 		return fmt.Errorf(
 			"outer source %s (%s) and destination %s (%s) are different address families; "+
 				"a GRE/IPIP tunnel encapsulates in ONE outer IP family, so both endpoints "+
-				"must be IPv4 or both IPv6 (a mixed pair commits clean but the dataplane "+
-				"silently drops every encapsulated packet, #5162)",
-			tc.Source, familyName(srcV6), tc.Destination, familyName(dstV6))
+				"must be IPv4 or both IPv6 (%s)",
+			tc.Source, familyName(srcV6), tc.Destination, familyName(dstV6), outcome)
 	}
 	return nil
 }

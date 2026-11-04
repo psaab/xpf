@@ -1464,6 +1464,12 @@ func (s *SessionSync) acceptLoop(ctx context.Context, ln net.Listener, fabricIdx
 }
 
 func (s *SessionSync) fabricConnectLoop(ctx context.Context, fabricIdx int, peerAddr string) {
+	// #18939: dial failures are rate-limited news, not silence: this
+	// loop-local limiter (one goroutine per fabric — see
+	// sync_conn_dial_warn_18939.go) logs the first failure and then one
+	// summary per 30s carrying the current error, counting what it
+	// suppressed.
+	var dialWarn fabricDialWarnLimiter
 	for first := true; ; // fabricConnectLoop retries outbound connection on a single fabric link.
 	// Each fabric gets its own loop so fab0 reconnects independently of fab1.
 	first = false {
@@ -1495,6 +1501,17 @@ func (s *SessionSync) fabricConnectLoop(ctx context.Context, fabricIdx int, peer
 		}
 		conn, err := dialer.DialContext(ctx, "tcp", peerAddr)
 		if err != nil {
+			// #18939: this used to be a bare continue, so a peer that could
+			// never be dialed retried invisibly every second. Retry cadence
+			// and error-swallow semantics are otherwise unchanged. A dial
+			// failing because OUR context was cancelled (Stop/session
+			// restart) is not a peer failure and stays silent.
+			if ctx.Err() == nil {
+				if emit, suppressed := dialWarn.admit(); emit {
+					slog.Warn(fabricDialFailMsg18939, "addr", peerAddr, "fabric", fabricIdx,
+						"err", err, "suppressed_since_last", suppressed)
+				}
+			}
 			continue
 		}
 		slog.Info("cluster sync: connected to peer", "addr", peerAddr, "fabric", fabricIdx)

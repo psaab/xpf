@@ -120,8 +120,13 @@ func unknownFamilyMember17196(m familyMember, known map[string]bool) bool {
 // "forwarding-options sampling instance \"i1\" family"); known is sorted
 // for the message. The token named is the first unknown token (the
 // effective token if undeclared, else the first undeclared residue
-// token), matching validateFirewallFilterFamilyTokensAST.
-func unknownFamilyMsg17196(ctx string, m familyMember, known map[string]bool, knownSorted []string) string {
+// token), matching validateFirewallFilterFamilyTokensAST. lenient picks
+// the tail (#18951): the strict arm refuses the commit, so its tail says
+// so — the old tail claimed the configuration "commits clean" and
+// "renders in `show configuration`", which is only true on the lenient
+// arm, where the member is warned about and skipped and the committed
+// config silently lacks it.
+func unknownFamilyMsg17196(ctx string, m familyMember, known map[string]bool, knownSorted []string, lenient bool) string {
 	tok := m.Af
 	if known[tok] {
 		for _, t := range m.Residue {
@@ -131,10 +136,13 @@ func unknownFamilyMsg17196(ctx string, m familyMember, known map[string]bool, kn
 			}
 		}
 	}
+	tail := "the commit is refused"
+	if lenient {
+		tail = "the configuration under it compiles to NOTHING: it commits " +
+			"clean, renders in `show configuration`, and takes no effect at all"
+	}
 	return fmt.Sprintf("%s %q is not a known address family "+
-		"(known: %s) — the configuration under it compiles to NOTHING: it commits "+
-		"clean, renders in `show configuration`, and takes no effect at all "+
-		"(#17196)", ctx, tok, strings.Join(knownSorted, ", "))
+		"(known: %s) — %s (#17196)", ctx, tok, strings.Join(knownSorted, ", "), tail)
 }
 
 // sortedFamilyKeys17196 returns the keys of a known-family set, sorted,

@@ -107,8 +107,17 @@ func validateVRRPGroupChildrenAST15046(nodes []*Node, prefix string, lenient boo
 	var warnings []string
 	seen := map[string]bool{}
 	report := func(idPath, tok string, knownSet []string) error {
-		msg := fmt.Sprintf("%s: %q is not a vrrp-group statement xpf implements (known: %s) — it compiles to NOTHING: it commits clean, renders in `show configuration`, and has no effect (#15046)",
-			idPath, tok, strings.Join(knownSet, ", "))
+		// #18955: the tail is per-arm. Strict returns this message as
+		// the commit-refusing error, so its tail says the commit is
+		// refused — the compiles-to-NOTHING wording is only true on the
+		// lenient arm, where the child is dropped with a warning and
+		// the group compiles without it.
+		tail := "the commit is refused"
+		if lenient {
+			tail = "it compiles to NOTHING: it commits clean, renders in `show configuration`, and has no effect"
+		}
+		msg := fmt.Sprintf("%s: %q is not a vrrp-group statement xpf implements (known: %s) — %s (#15046)",
+			idPath, tok, strings.Join(knownSet, ", "), tail)
 		if !lenient {
 			return fmt.Errorf("%s", msg)
 		}
