@@ -51,6 +51,11 @@ import (
 	"time"
 )
 
+// frrTunnelNameMapFn is the FRR assembler's tunnel-map build seam. The
+// interface-hint walk resolves multiple interfaces and units, so tests count
+// the shared map build rather than inferring the cost from rendered names.
+var frrTunnelNameMapFn = (*config.Config).TunnelNameMap
+
 // routeOverlaySetter caches the overlay for full snapshot builds.
 type routeOverlaySetter interface {
 	SetRouteOverlay([]config.RouteOverlayEntry)
@@ -190,18 +195,27 @@ func (d *Daemon) assembleFRRConfigWithPeerIGPAndMgmtRouteInventory(
 	// secure-tunnel route refs are resolved there before rendering.
 	ipv6NextHopInterfaces := inferIPv6StaticNextHopInterfaces(cfg, overlay)
 	declaredNetdevs := frr.DeclaredNetdevsForConfig(cfg, ipv6NextHopInterfaces)
+	var tunnelNames map[string]string
+	tunnelNamesReady := false
+	tunnelNameMap := func() map[string]string {
+		if !tunnelNamesReady {
+			tunnelNames = frrTunnelNameMapFn(cfg)
+			tunnelNamesReady = true
+		}
+		return tunnelNames
+	}
 	for name, ifc := range cfg.Interfaces.Interfaces {
 		if ifc == nil {
 			continue
 		}
 		if ifc.Bandwidth > 0 {
-			ifaceBandwidths[cfg.ResolveKernelIfName(name)] = ifc.Bandwidth
+			ifaceBandwidths[cfg.ResolveKernelIfNameWith(name, tunnelNameMap())] = ifc.Bandwidth
 		}
 		for unitNum, unit := range ifc.Units {
 			if unit == nil || !unit.PointToPoint {
 				continue
 			}
-			ifaceP2P[cfg.ResolveKernelIfName(fmt.Sprintf("%s.%d", name, unitNum))] = true
+			ifaceP2P[cfg.ResolveKernelIfNameWith(fmt.Sprintf("%s.%d", name, unitNum), tunnelNameMap())] = true
 		}
 	}
 
