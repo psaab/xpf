@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/asn1"
 	"encoding/hex"
+	"errors"
 	"net/netip"
 	"sort"
 	"strconv"
@@ -800,7 +801,10 @@ whitespaceDone:
 	if index == digitsStart {
 		return 0
 	}
-	number, _ := strconv.ParseInt(value[numberStart:index], 10, 64)
+	number, err := strconv.ParseInt(value[numberStart:index], 10, 64)
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
+		return 0
+	}
 	return int32(number)
 }
 

@@ -283,13 +283,15 @@ func (p *asPathParser) parseTermWithOperator() (frag string, nullable bool, err 
 			return "", false, fmt.Errorf("unterminated '{' interval in AS-path regex %q", p.s)
 		}
 		op = p.s[p.pos : p.pos+end+1]
-		if err := validateInterval(op); err != nil {
-			return "", false, err
-		}
 		p.pos += end + 1
 	}
+
 	if op == "" {
 		return base, baseNullable, nil
+	}
+	lo, hi, exact, err := intervalBounds(op)
+	if err != nil {
+		return "", false, err
 	}
 	if base == "" {
 		return "", true, nil // "()" repeated still matches only the null path
@@ -315,7 +317,6 @@ func (p *asPathParser) parseTermWithOperator() (frag string, nullable bool, err 
 	oneToken := func(frag string) string {
 		return strings.ReplaceAll(frag, "^$|", "")
 	}
-	lo, hi, exact := intervalBounds(op)
 	switch {
 	case op == "*":
 		return "(" + wrapped + "( " + wrapped + ")*)", true, nil
@@ -390,48 +391,37 @@ func intervalSpan(lo, hi int) string {
 	return fmt.Sprintf("%d,%d", lo, hi)
 }
 
-// intervalBounds returns (lo, hi, exact); hi<0 means unbounded.
-func intervalBounds(op string) (lo, hi int, exact bool) {
+// intervalBounds returns (lo, hi, exact); hi<0 means unbounded. Invalid
+// numeric bounds return the Junos invalid-interval error.
+func intervalBounds(op string) (lo, hi int, exact bool, err error) {
 	switch op {
 	case "*":
-		return 0, -1, false
+		return 0, -1, false, nil
 	case "+":
-		return 1, -1, false
+		return 1, -1, false, nil
 	case "?":
-		return 0, 1, false
+		return 0, 1, false, nil
 	}
-	inner := op[1 : len(op)-1]
-	if !strings.Contains(inner, ",") {
-		n, _ := strconv.Atoi(strings.TrimSpace(inner))
-		return n, n, true
-	}
-	parts := strings.Split(inner, ",")
-	lo, _ = strconv.Atoi(strings.TrimSpace(parts[0]))
-	if strings.TrimSpace(parts[1]) == "" {
-		return lo, -1, false
-	}
-	hi, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
-	return lo, hi, false
-}
-
-func validateInterval(op string) error {
 	inner := op[1 : len(op)-1]
 	parts := strings.Split(inner, ",")
 	if len(parts) > 2 {
-		return fmt.Errorf("invalid interval %q in AS-path regex", op)
+		return 0, 0, false, fmt.Errorf("invalid interval %q in AS-path regex", op)
 	}
-	lo, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	lo, err = strconv.Atoi(strings.TrimSpace(parts[0]))
 	if err != nil || lo < 0 {
-		return fmt.Errorf("invalid interval %q in AS-path regex", op)
+		return 0, 0, false, fmt.Errorf("invalid interval %q in AS-path regex", op)
 	}
-	if len(parts) == 1 || strings.TrimSpace(parts[1]) == "" {
-		return nil
+	if len(parts) == 1 {
+		return lo, lo, true, nil
 	}
-	hi, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if strings.TrimSpace(parts[1]) == "" {
+		return lo, -1, false, nil
+	}
+	hi, err = strconv.Atoi(strings.TrimSpace(parts[1]))
 	if err != nil || hi < 0 || lo > hi {
-		return fmt.Errorf("invalid interval %q in AS-path regex (lower bound exceeds upper bound)", op)
+		return 0, 0, false, fmt.Errorf("invalid interval %q in AS-path regex (lower bound exceeds upper bound)", op)
 	}
-	return nil
+	return lo, hi, false, nil
 }
 
 // parseTerm parses one Junos term: an AS number (optionally a "-"-range),
@@ -492,7 +482,8 @@ func (p *asPathParser) parseTerm() (frag string, nullable bool, err error) {
 			p.pos++
 		}
 		num := p.s[start:p.pos]
-		if err := validateASN(num); err != nil {
+		lo, err := parseASN(num)
+		if err != nil {
 			return "", false, err
 		}
 		// A "-" (or en-dash) after an AS number is the Junos range
@@ -520,11 +511,10 @@ func (p *asPathParser) parseTerm() (frag string, nullable bool, err error) {
 			p.pos++
 		}
 		num2 := p.s[s2:p.pos]
-		if err := validateASN(num2); err != nil {
+		hi, err := parseASN(num2)
+		if err != nil {
 			return "", false, err
 		}
-		lo, _ := strconv.ParseUint(num, 10, 64)
-		hi, _ := strconv.ParseUint(num2, 10, 64)
 		if lo > hi {
 			return "", false, fmt.Errorf("AS range %s-%s is descending in AS-path regex %q", num, num2, p.s)
 		}
@@ -535,15 +525,15 @@ func (p *asPathParser) parseTerm() (frag string, nullable bool, err error) {
 	}
 }
 
-func validateASN(num string) error {
+func parseASN(num string) (uint64, error) {
 	v, err := strconv.ParseUint(num, 10, 64)
 	if err != nil || v < 1 || v > 4294967295 {
-		return fmt.Errorf("AS number %q out of range 1-4294967295 in AS-path regex", num)
+		return 0, fmt.Errorf("AS number %q out of range 1-4294967295 in AS-path regex", num)
 	}
 	if len(num) > 1 && num[0] == '0' {
-		return fmt.Errorf("AS number %q has a leading zero in AS-path regex", num)
+		return 0, fmt.Errorf("AS number %q has a leading zero in AS-path regex", num)
 	}
-	return nil
+	return v, nil
 }
 
 type asRange struct{ lo, hi uint64 }
@@ -603,24 +593,24 @@ func (p *asPathParser) parseASSet() (string, error) {
 			if len(parts) != 2 {
 				return "", fmt.Errorf("invalid AS set element %q in AS-path regex", f)
 			}
-			if err := validateASN(parts[0]); err != nil {
+			lo, err := parseASN(parts[0])
+			if err != nil {
 				return "", err
 			}
-			if err := validateASN(parts[1]); err != nil {
+			hi, err := parseASN(parts[1])
+			if err != nil {
 				return "", err
 			}
-			lo, _ := strconv.ParseUint(parts[0], 10, 64)
-			hi, _ := strconv.ParseUint(parts[1], 10, 64)
 			if lo > hi {
 				return "", fmt.Errorf("AS range %s is descending in AS-path regex", f)
 			}
 			ranges = append(ranges, asRange{lo, hi})
 			continue
 		}
-		if err := validateASN(f); err != nil {
+		v, err := parseASN(f)
+		if err != nil {
 			return "", err
 		}
-		v, _ := strconv.ParseUint(f, 10, 64)
 		ranges = append(ranges, asRange{v, v})
 	}
 	if len(ranges) == 0 {

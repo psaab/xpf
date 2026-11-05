@@ -287,6 +287,7 @@ var methodsWithoutArgumentForms = map[string]string{
 	"GetIPsecSA":               "no request fields; the bare charge is argument-complete",
 	"GetNATPoolStats":          "no request fields; the bare charge is argument-complete",
 	"GetVRRPStatus":            "no request fields; the bare charge is argument-complete",
+	"GetClusterHAState":        "no request fields; the bare charge is argument-complete",
 	"ClearCounters":            "no request fields; the bare charge is argument-complete",
 	"GetD11AttestationLedger":  "no request fields; privileged evidence read with no operator command",
 	"GetOSPFStatus":            "type selects a status view rpcCanonicalCommand cannot name; no canonical command exists in the tree",

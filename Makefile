@@ -504,10 +504,10 @@ check-nft-deadcode:
 # parses this line, and pkg/daemon's canary reads the FIRST -run line in
 # this recipe, so this leg must stay BELOW the pkg/daemon one.
 test-race-dp:
-	@for alt in DataplaneCell NATPoolAlarm ForwardingStatus BootstrapExit RuntimeDataplaneNeverBareRootManager EventStreamFallbackLoop RunUserspaceEventStream LiveDataPlane_ GRPCShowBuffers_ SystemAction_ GRPCServer_ RESTServer_ ManagementProbe ConsoleCLIProbeWiring FullResync ReconcilePassUsesOneDataplaneSnapshot ReconcileBlackholeWrappersStillReloadPerCall MTUWarningsCrossCommitRace; do \
+	@for alt in DataplaneCell NATPoolAlarm ForwardingStatus BootstrapExit RuntimeDataplaneNeverBareRootManager EventStreamFallbackLoop ConnectedDrain RunUserspaceEventStream LiveDataPlane_ GRPCShowBuffers_ SystemAction_ GRPCServer_ RESTServer_ ManagementProbe ConsoleCLIProbeWiring FullResync ReconcilePassUsesOneDataplaneSnapshot ReconcileBlackholeWrappersStillReloadPerCall MTUWarningsCrossCommitRace; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/daemon/ | grep -q '^Test' || { echo "test-race-dp: pkg/daemon -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
-	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/daemon/ -run 'DataplaneCell|NATPoolAlarm|ForwardingStatus|BootstrapExit|RuntimeDataplaneNeverBareRootManager|EventStreamFallbackLoop|RunUserspaceEventStream|LiveDataPlane_|GRPCShowBuffers_|SystemAction_|GRPCServer_|RESTServer_|ManagementProbe|ConsoleCLIProbeWiring|FullResync|ReconcilePassUsesOneDataplaneSnapshot|ReconcileBlackholeWrappersStillReloadPerCall|MTUWarningsCrossCommitRace' -count=2
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/daemon/ -run 'DataplaneCell|NATPoolAlarm|ForwardingStatus|BootstrapExit|RuntimeDataplaneNeverBareRootManager|EventStreamFallbackLoop|ConnectedDrain|RunUserspaceEventStream|LiveDataPlane_|GRPCShowBuffers_|SystemAction_|GRPCServer_|RESTServer_|ManagementProbe|ConsoleCLIProbeWiring|FullResync|ReconcilePassUsesOneDataplaneSnapshot|ReconcileBlackholeWrappersStillReloadPerCall|MTUWarningsCrossCommitRace' -count=2
 	@for alt in ArmedGate PreArm AllConcurrentSaveNoRace StatusPathReadRacesCompileWrite DetachXDPIsSerializedWithFenceLease; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/dataplane/ | grep -q '^Test' || { echo "test-race-dp: pkg/dataplane -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
