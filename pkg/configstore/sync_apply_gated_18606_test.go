@@ -139,16 +139,25 @@ func TestSyncApplyGatedCutoffPreservesPreparedState16016(t *testing.T) {
 			}
 
 			type historyState struct {
-				format    string
-				timestamp time.Time
+				entryPresent  bool
+				configPresent bool
+				format        string
+				timestamp     time.Time
+				comment       string
 			}
 			historyStateOf := func() []historyState {
 				entries := s.ListHistory()
 				got := make([]historyState, len(entries))
 				for i, entry := range entries {
-					if entry != nil && entry.Config != nil {
+					if entry == nil {
+						continue
+					}
+					got[i].entryPresent = true
+					got[i].timestamp = entry.Timestamp
+					got[i].comment = entry.Comment
+					if entry.Config != nil {
+						got[i].configPresent = true
 						got[i].format = entry.Config.Format()
-						got[i].timestamp = entry.Timestamp
 					}
 				}
 				return got
