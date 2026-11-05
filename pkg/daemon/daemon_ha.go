@@ -23,6 +23,14 @@ import (
 	"github.com/psaab/xpf/pkg/vrrp"
 )
 
+// dhcpTunnelNameMapFn is the daemon-side twin of dhcpserver's
+// keaTunnelNameMapFn (#15206/#18923): production always holds
+// (*config.Config).TunnelNameMap, and the #18941 built-once cell swaps
+// it to count builds, because "the resolver builds the map once across
+// both families, not once per ref" is a cost property no output
+// assertion can observe.
+var dhcpTunnelNameMapFn = (*config.Config).TunnelNameMap
+
 // getOrCreateRGState returns the rgStateMachine for the given RG, creating
 // one if it doesn't exist yet. A newly created state is seeded with the
 // current sync-hold (#15258) so a late-created RG cannot activate before
@@ -4053,6 +4061,16 @@ func desiredStandaloneDHCPConfig(cfg *config.Config) config.DHCPServerConfig {
 // shared because nothing here writes it, and only the Interfaces slices — the
 // only thing this function rewrites — are freshly allocated.
 func resolveDHCPRethInterfaces(dhcpCfg config.DHCPServerConfig, cfg *config.Config) config.DHCPServerConfig {
+	var tunMap map[string]string
+	tunMapReady := false
+	tunnelNameMap := func() map[string]string {
+		if !tunMapReady {
+			tunMap = dhcpTunnelNameMapFn(cfg)
+			tunMapReady = true
+		}
+		return tunMap
+	}
+
 	resolve := func(src *config.DHCPLocalServerConfig) *config.DHCPLocalServerConfig {
 		if src == nil {
 			return nil
@@ -4070,8 +4088,11 @@ func resolveDHCPRethInterfaces(dhcpCfg config.DHCPServerConfig, cfg *config.Conf
 			cp := *group
 			if group.Interfaces != nil {
 				ifaces := make([]string, len(group.Interfaces))
-				for i, iface := range group.Interfaces {
-					ifaces[i] = cfg.ResolveKernelIfName(iface)
+				if len(group.Interfaces) > 0 {
+					tunMap := tunnelNameMap()
+					for i, iface := range group.Interfaces {
+						ifaces[i] = cfg.ResolveKernelIfNameWith(iface, tunMap)
+					}
 				}
 				cp.Interfaces = ifaces
 			}
