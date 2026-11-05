@@ -495,18 +495,14 @@ func hasPackedTailVerdict18771(cfg *config.Config, want string) bool {
 }
 
 func TestPackedTailEnforce18771PartialCommitSucceeds(t *testing.T) {
-	// The config package measured this fixture as diagnostic-only
-	// PARTIAL only under lenient opts: under strict opts its braced
-	// twin is refused outright (VRRP authentication-type is not
-	// enforced on the RFC 5798 dataplane), so adjudicateSite returns
-	// INDETERMINATE. Store promotion compiles strict, so its verdict
-	// here is INDETERMINATE — warning-only, never DROP. A genuine
-	// strict-compilable PARTIAL-at-Store fixture does not exist in
-	// the measured corpus (the only measured PARTIAL is this one);
-	// PARTIAL non-refusal at the refusal seam is instead proven by
-	// the verdict filter (TestPackedTailGateDropsFilter18771: a
-	// PARTIAL finding yields no drop record) plus this commit-success
-	// cell for the warning-only class that reaches Store.
+	// The vrrp authentication-type fixture is diagnostic-only PARTIAL
+	// only under lenient opts: under strict opts its braced twin is
+	// refused outright (VRRP authentication-type is not enforced on
+	// the RFC 5798 dataplane), so on the strict Store path it degrades
+	// to INDETERMINATE. The strict-compilable PARTIAL witness is the
+	// derived-census `family iso address` site below: it classifies
+	// PARTIAL under strict compiles, and this cell pins that exact
+	// label through a real Store promotion.
 	partialText := packedTailStorePartialText18771()
 	s := packedTailStageText18771(t, -1, partialText)
 	_, gen, err := s.CompileCandidateGen()
@@ -519,7 +515,26 @@ func TestPackedTailEnforce18771PartialCommitSucceeds(t *testing.T) {
 	}
 	verdicts := packedTailStoreVerdicts18771(cfg)
 	if len(verdicts) != 1 || (verdicts[0] != "PARTIAL" && verdicts[0] != "INDETERMINATE") {
-		t.Fatalf("partial-path commit findings = %v, want PARTIAL or INDETERMINATE (never DROP)", verdicts)
+		t.Fatalf("degraded partial-path commit findings = %v, want INDETERMINATE (never DROP)", verdicts)
+	}
+
+	// Strict-compilable PARTIAL through a real Store promotion: the
+	// derived-census iso/address witness classifies PARTIAL under
+	// strict compiles, so the Store verdict is exactly PARTIAL and the
+	// commit succeeds. PARTIAL never yields a drop record
+	// (TestPackedTailGateDropsFilter18771 pins the filter).
+	witness := packedTailStageText18771(t, -1,
+		`interfaces { xpfname { unit 0 { family iso address xpfaaa; } } }`)
+	_, wgen, err := witness.CompileCandidateGen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wcfg, err := witness.CommitWithDescriptionGen("partial witness", wgen)
+	if err != nil {
+		t.Fatalf("strict PARTIAL commit refused: %v", err)
+	}
+	if verdicts := packedTailStoreVerdicts18771(wcfg); len(verdicts) != 1 || verdicts[0] != "PARTIAL" {
+		t.Fatalf("strict PARTIAL commit findings = %v, want exactly PARTIAL", verdicts)
 	}
 }
 

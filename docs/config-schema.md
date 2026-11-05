@@ -72,9 +72,7 @@ reported site before retrying. Likewise, `rollback N` only stages a historical
 configuration: committing a pre-upgrade packed `DROP` restored that way is
 refused until it is braced.
 
-Downgrading to a non-enforcing binary restores non-refusing promotion exactly. The `check-config`/`commit check` DROP diagnostics added
-with enforcement are compile-time only and remain in the enforcing binary's
-diagnostic output; there is no persisted state to roll back.
+Downgrading to a non-enforcing binary restores non-refusing promotion exactly; the `check-config`/`commit check` DROP diagnostics (added pre-flip with the diagnostic-eligibility step) remain in that binary's output — they are compile-time only, so there is no persisted state to roll back.
 
 `SKIPPED-CAP`, `SKIPPED-PROVENANCE`, `INDETERMINATE`, and `PARTIAL` never
 refuse. They remain diagnostic/warning-only, so a packed shape outside a proven
