@@ -538,7 +538,6 @@ func TestPersistentNatLeaseOldPeerGetsLegacyRefresh16877(t *testing.T) {
 	}
 }
 
-
 func TestPersistentNatLeaseMalformedSetDoesNotAdvanceSequence11486(t *testing.T) {
 	ss := &SessionSync{}
 	sets := 0
