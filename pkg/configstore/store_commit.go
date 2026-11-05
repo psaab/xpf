@@ -166,7 +166,11 @@ func (s *Store) CommitCheckAs(sessionID string) (*config.Config, error) {
 	defer func() { <-s.commitCheckSem }()
 	defer s.mu.RUnlock()
 
-	compiled, err := s.compileTreeWithPackedTailGate18771(s.candidate, false)
+	// #18771: commit check surfaces the packed-tail gate's DROP
+	// diagnostics (eligible=true) so it never reports clean on a
+	// candidate the commit will refuse; refusal itself stays at
+	// promotion (compileAuthSafeCandidate).
+	compiled, err := s.compileTreeWithPackedTailGate18771(s.candidate, true)
 	if err != nil {
 		return nil, err
 	}

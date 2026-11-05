@@ -170,10 +170,19 @@ func CompileConfigJudgingPlaceholders(tree *ConfigTree, current *Config, judge b
 // CompileConfigJudgingPlaceholdersWithPackedTailGate18771 is the narrow
 // configstore promotion core. Existing public wrappers pin eligibility false.
 func CompileConfigJudgingPlaceholdersWithPackedTailGate18771(tree *ConfigTree, current *Config, judge, eligible bool) (*Config, error) {
+	cfg, _, err := CompileConfigJudgingPlaceholdersDrops18771(tree, current, judge, eligible)
+	return cfg, err
+}
+
+// CompileConfigJudgingPlaceholdersDrops18771 is
+// CompileConfigJudgingPlaceholdersWithPackedTailGate18771 plus the
+// gate's adjudicated findings, for the enforcement refusal path.
+// Existing wrappers discard the findings.
+func CompileConfigJudgingPlaceholdersDrops18771(tree *ConfigTree, current *Config, judge, eligible bool) (*Config, []PackedTailGateFinding18771, error) {
 	opts := currentClusterOpts(current)
 	opts.judgePlaceholders18744 = judge
 	opts.packedTailGateEligible18771 = eligible
-	return compileTree(tree, opts, nil)
+	return compileTreeWithDerivedObserver18771(tree, opts, nil, nil)
 }
 
 // CompileConfigForNodeJudgingPlaceholders is the node-aware form.
@@ -184,10 +193,17 @@ func CompileConfigForNodeJudgingPlaceholders(tree *ConfigTree, nodeID int, curre
 // CompileConfigForNodeJudgingPlaceholdersWithPackedTailGate18771 is the
 // node-aware configstore promotion core.
 func CompileConfigForNodeJudgingPlaceholdersWithPackedTailGate18771(tree *ConfigTree, nodeID int, current *Config, judge, eligible bool) (*Config, error) {
+	cfg, _, err := CompileConfigForNodeJudgingPlaceholdersDrops18771(tree, nodeID, current, judge, eligible)
+	return cfg, err
+}
+
+// CompileConfigForNodeJudgingPlaceholdersDrops18771 is the node-aware
+// Drops form; see CompileConfigJudgingPlaceholdersDrops18771.
+func CompileConfigForNodeJudgingPlaceholdersDrops18771(tree *ConfigTree, nodeID int, current *Config, judge, eligible bool) (*Config, []PackedTailGateFinding18771, error) {
 	opts := currentClusterOpts(current)
 	opts.judgePlaceholders18744 = judge
 	opts.packedTailGateEligible18771 = eligible
-	return compileTree(tree, opts, &nodeID)
+	return compileTreeWithDerivedObserver18771(tree, opts, &nodeID, nil)
 }
 
 // currentClusterOpts builds the compileOpts carrying the active config's
@@ -486,10 +502,11 @@ func validateAPIAuthCredentialsStrict(cfg *Config) error {
 // differently (#8662/#8752). Never re-add a second orchestrator or a
 // boolean node-scope flag: presence is carried by the pointer alone.
 func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, error) {
-	return compileTreeWithDerivedObserver18771(tree, opts, nodeID, nil)
+	cfg, _, err := compileTreeWithDerivedObserver18771(tree, opts, nodeID, nil)
+	return cfg, err
 }
 
-func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nodeID *int, observer func(compileOpts)) (*Config, error) {
+func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nodeID *int, observer func(compileOpts)) (*Config, []PackedTailGateFinding18771, error) {
 	var gate *packedTailGateRun18771
 	if opts.packedTailGateEligible18771 && !opts.skipPackedTailGate18771 {
 		gate = newPackedTailGateRun18771(opts, nodeID)
@@ -514,7 +531,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	// interface declarations live in.
 	opts.physicalInterfaces = physicalInterfacesInTree(tree)
 	if _, err := HashAPIAuthSecrets(tree); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #8662: normalize brace-elided ("compact") statements into their braced
@@ -601,7 +618,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	tunnelIDWarnings, tunnelIDErr := validateTunnelEndpointIDCollisionAST(
 		tree, opts)
 	if tunnelIDErr != nil {
-		return nil, tunnelIDErr
+		return nil, nil, tunnelIDErr
 	}
 
 	// #16586: reth LAG gate. Like the tunnel gate above it runs on the
@@ -613,7 +630,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	rethLAGWarnings, rethLAGErr := validateRethMultiChildAST(
 		tree, opts.lenientRethMultiChild)
 	if rethLAGErr != nil {
-		return nil, rethLAGErr
+		return nil, nil, rethLAGErr
 	}
 
 	// #16810: ${node} distinct-IGP-identity excuse. Runs PRE-expansion
@@ -638,7 +655,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	zoneIDWarnings, zoneQuarantineNames, zoneIDErr := validateZoneIDCollisionAST(
 		tree, opts.lenientZoneIDCollision)
 	if zoneIDErr != nil {
-		return nil, zoneIDErr
+		return nil, nil, zoneIDErr
 	}
 	// #13095: thread the runtime zone-name union into compileExpanded so it
 	// stamps cfg.ZoneQuarantineNames BEFORE the zone gates read the
@@ -654,14 +671,14 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	riTableIDWarnings, riTableIDErr := validateRoutingInstanceTableIDCollisionAST(
 		tree, nodeID, opts.lenientRoutingInstanceTableIDCollision)
 	if riTableIDErr != nil {
-		return nil, riTableIDErr
+		return nil, nil, riTableIDErr
 	}
 	// #9622: reserved routing-instance name gate — same three-view name union
 	// as the table-id gate above. Strict only: the lenient paths skip it and
 	// compileRoutingInstances quarantines the instance with one warning.
 	if !opts.lenientReservedRoutingInstanceName {
 		if err := validateReservedRoutingInstanceNamesAST(tree, nodeID); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	// #11391: strict commit verifies that every VRF-based routing instance can
@@ -670,7 +687,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	// invalid VRF-based names in compileRoutingInstances.
 	if !opts.lenientRoutingInstanceKernelName {
 		if err := validateRoutingInstanceKernelNameAST(tree, nodeID); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	// #16792: strict commit verifies that every bridge domain can become its
@@ -679,7 +696,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	// invalid names in compileBridgeDomains.
 	if !opts.lenientBridgeDomainKernelName {
 		if err := validateBridgeDomainKernelNameAST(tree, nodeID); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
@@ -694,7 +711,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	dupBlockWarnings, dupBlockErr := validateDuplicateNamedBlockAST(
 		tree, opts.lenientDuplicateNamedBlock)
 	if dupBlockErr != nil {
-		return nil, dupBlockErr
+		return nil, nil, dupBlockErr
 	}
 
 	// #14448: duplicate api-auth class/expires gate — see
@@ -704,7 +721,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	apiAuthDupWarnings, apiAuthDupErr := validateAPIAuthDuplicateScalarAST(
 		tree, opts.lenientAPIAuthDuplicateScalar)
 	if apiAuthDupErr != nil {
-		return nil, apiAuthDupErr
+		return nil, nil, apiAuthDupErr
 	}
 
 	// #5649 (C181-M18): duplicate NAT rule-name gate — see
@@ -716,7 +733,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	dupNATRuleWarnings, dupNATRuleErr := validateDuplicateNATRuleNamesAST(
 		tree, opts.lenientDuplicateNATRuleName)
 	if dupNATRuleErr != nil {
-		return nil, dupNATRuleErr
+		return nil, nil, dupNATRuleErr
 	}
 
 	// #6454 (C181-M18 sibling): duplicate NAT rule-SET-name gate — see
@@ -732,7 +749,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	dupNATRuleSetWarnings, dupNATRuleSetErr := validateDuplicateNATRuleSetNamesAST(
 		tree, opts.lenientDuplicateNATRuleSetName)
 	if dupNATRuleSetErr != nil {
-		return nil, dupNATRuleSetErr
+		return nil, nil, dupNATRuleSetErr
 	}
 
 	// #6455 Finding 1: the POST-expansion half of the duplicate-name gate
@@ -751,7 +768,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 		tree, opts.lenientDuplicateNamesExpanded,
 		concatWarnings(dupBlockWarnings, dupNATRuleWarnings, dupNATRuleSetWarnings))
 	if dupExpandedErr != nil {
-		return nil, dupExpandedErr
+		return nil, nil, dupExpandedErr
 	}
 
 	// #17712: compare source-NAT duplicate contexts only after group inheritance.
@@ -761,7 +778,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	dupSNATCtxWarnings, dupSNATCtxErr := validateSourceNATDuplicateContextExpandedAST(
 		tree, opts.lenientSourceNATDuplicateContext)
 	if dupSNATCtxErr != nil {
-		return nil, dupSNATCtxErr
+		return nil, nil, dupSNATCtxErr
 	}
 
 	// #5878: numeric interface-unit alias gate (#5631) as a BOTH-NODE-effective
@@ -774,7 +791,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	unitAliasWarnings, unitAliasErr := validateInterfaceUnitAliasCollisionsAST(
 		tree, opts.lenientInterfaceUnitAliasCollisions)
 	if unitAliasErr != nil {
-		return nil, unitAliasErr
+		return nil, nil, unitAliasErr
 	}
 
 	// #5879: canonical per-physical-interface QinQ / stacked-VLAN honesty
@@ -786,7 +803,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	// unsupported inner tag; lenient warns (#1960).
 	qinqWarnings, qinqErr := validateQinQVLANStackAST(tree, opts.lenientQinQVLANStack)
 	if qinqErr != nil {
-		return nil, qinqErr
+		return nil, nil, qinqErr
 	}
 
 	// #6178: input-vlan-map / output-vlan-map (per-unit VLAN rewrite) honesty
@@ -797,7 +814,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	// warns (#1960).
 	vlanMapWarnings, vlanMapErr := validateVLANMapAST(tree, opts.lenientVLANMap)
 	if vlanMapErr != nil {
-		return nil, vlanMapErr
+		return nil, nil, vlanMapErr
 	}
 
 	// #14574: vlan-id without vlan-tagging/flexible-vlan-tagging gate — see
@@ -806,7 +823,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	// HA-symmetric. Strict hard-rejects; lenient warns (#1960).
 	vlanIDTaggingWarnings, vlanIDTaggingErr := validateVlanIDTaggingAST(tree, opts.lenientVlanIDTagging)
 	if vlanIDTaggingErr != nil {
-		return nil, vlanIDTaggingErr
+		return nil, nil, vlanIDTaggingErr
 	}
 
 	// #6662 / #6701 (#6706 review blocker): the `system login` packed-body and
@@ -819,12 +836,12 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	loginPackedWarnings, loginPackedErr := validateLoginPackedStatementsAST(
 		tree, opts.lenientLoginPackedStatements)
 	if loginPackedErr != nil {
-		return nil, loginPackedErr
+		return nil, nil, loginPackedErr
 	}
 	loginShadowWarnings, loginShadowErr := validateLoginClassShadowsBuiltinAST(
 		tree, opts.lenientLoginClassShadowsBuiltin)
 	if loginShadowErr != nil {
-		return nil, loginShadowErr
+		return nil, nil, loginShadowErr
 	}
 	// #11358/#12238: scheduler windows are checked across the node0 AND node1
 	// effective group expansions before this compiler chooses node0 fallback.
@@ -835,7 +852,7 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	schedulerWindowWarnings11358, schedulerUnresolvable16010, schedulerWindowErr11358 := validateSchedulerWindowPairs11358(
 		tree, opts.lenientSchedulerWindowPairs11358)
 	if schedulerWindowErr11358 != nil {
-		return nil, schedulerWindowErr11358
+		return nil, nil, schedulerWindowErr11358
 	}
 
 	// Expand groups before compilation — resolve all apply-groups references.
@@ -871,13 +888,13 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	if nodeID == nil {
 		fellBack, expandErr := tree.ExpandGroupsNodeFallback15031(true)
 		if expandErr != nil {
-			return nil, fmt.Errorf("apply-groups: %w", expandErr)
+			return nil, nil, fmt.Errorf("apply-groups: %w", expandErr)
 		}
 		usedNodeFallback = fellBack
 	} else {
 		vars = map[string]string{"node": fmt.Sprintf("node%d", *nodeID)}
 		if err := tree.ExpandGroupsWithVarsTagged(vars); err != nil {
-			return nil, fmt.Errorf("apply-groups: %w", err)
+			return nil, nil, fmt.Errorf("apply-groups: %w", err)
 		}
 	}
 	dupMergeWarnings = resolveDuplicateBlockMergeWarnings9023(tree, registeredMerges, dupMergeWarnings)
@@ -885,10 +902,10 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	if expandedPolicySourceTree != nil {
 		if nodeID == nil {
 			if _, err := expandedPolicySourceTree.ExpandGroupsNodeFallback15031(true); err != nil {
-				return nil, fmt.Errorf("apply-groups: %w", err)
+				return nil, nil, fmt.Errorf("apply-groups: %w", err)
 			}
 		} else if err := expandedPolicySourceTree.ExpandGroupsWithVarsTagged(vars); err != nil {
-			return nil, fmt.Errorf("apply-groups: %w", err)
+			return nil, nil, fmt.Errorf("apply-groups: %w", err)
 		}
 		expandedConflicts := collectDirectTerminalActionConflictsFromExpandedTree(
 			expandedPolicySourceTree)
@@ -915,11 +932,11 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	// cannot install a silently truncated list.
 	var nestedPath [64]string
 	if err := findNestedMultiValueContentError(tree.Children, setSchema, nestedPath[:0]); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cfg, err := compileExpanded(tree, opts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if usedNodeFallback {
 		cfg.Warnings = append(cfg.Warnings, `apply-groups "${node}" resolved using default node0 context during generic compile`)
@@ -1003,10 +1020,11 @@ func compileTreeWithDerivedObserver18771(tree *ConfigTree, opts compileOpts, nod
 	if observer != nil {
 		observer(opts)
 	}
+	var findings []PackedTailGateFinding18771
 	if gate != nil {
-		gate.adjudicate18771(cfg)
+		findings = gate.adjudicate18771(cfg)
 	}
-	return cfg, nil
+	return cfg, findings, nil
 }
 
 // CompileConfigForNode is like CompileConfig but resolves ${node} variables
@@ -1046,6 +1064,8 @@ func CompileConfigForNodeLenient(tree *ConfigTree, nodeID int) (*Config, error) 
 func CompileConfigForNodeLenientWithPackedTailGate18771(tree *ConfigTree, nodeID int, eligible bool) (*Config, error) {
 	opts := lenientCompileOpts()
 	opts.packedTailGateEligible18771 = eligible
+	// No Drops form here by design: peer findings remain slog-only
+	// and must never reach a refusal, so no caller is offered them.
 	return compileTree(tree, opts, &nodeID)
 }
 

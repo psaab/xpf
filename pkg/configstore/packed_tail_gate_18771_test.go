@@ -48,14 +48,17 @@ func packedTailStage18771(t *testing.T, nodeID int) *Store {
 }
 
 func TestPackedTailGate18771Cell08PeerDeliveryAndCommitEligibility(t *testing.T) {
-	t.Run("check-config-and-preflight-are-zero-twin", func(t *testing.T) {
+	t.Run("check-config-diagnoses-preflight-is-zero-twin", func(t *testing.T) {
 		logs := packedTailStoreLogs18771(t)
+		// #18771 enforcement step (b): CheckText is diagnostic-eligible
+		// (reports the DROP, never refuses); the pre-flight snapshot,
+		// candidate and completion compiles stay zero-twin.
 		cfg, err := CheckText(packedTailStoreDrop18771, -1)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(packedTailStoreDiagnostics18771(cfg)) != 0 {
-			t.Fatal("CheckText ran the commit-only gate")
+		if len(packedTailStoreDiagnostics18771(cfg)) != 1 {
+			t.Fatalf("CheckText gate diagnostics = %d, want 1 (diagnostic mode)", len(packedTailStoreDiagnostics18771(cfg)))
 		}
 		s := packedTailStage18771(t, -1)
 		snapshot, gen, err := s.CompileCandidateGen()
@@ -85,8 +88,8 @@ func TestPackedTailGate18771Cell08PeerDeliveryAndCommitEligibility(t *testing.T)
 		if len(packedTailStoreDiagnostics18771(promoted)) != 1 {
 			t.Fatalf("promotion gate diagnostics = %d, want 1", len(packedTailStoreDiagnostics18771(promoted)))
 		}
-		if got := strings.Count(logs.String(), "packedTailGate18771"); got != 1 {
-			t.Fatalf("one standalone promotion produced %d gated views, want 1", got)
+		if got := strings.Count(logs.String(), "packedTailGate18771"); got != 3 {
+			t.Fatalf("standalone sequence produced %d gated views, want 3 (check-config + commit-check + promotion)", got)
 		}
 	})
 
@@ -180,4 +183,22 @@ func TestPackedTailGate18771Cell08PeerDeliveryAndCommitEligibility(t *testing.T)
 			t.Fatalf("tolerant/default peer paths emitted %d gate findings", got)
 		}
 	})
+}
+
+// #18771 enforcement cells (design v3 Q7). Production posture is read
+// via config.PackedTailGateEnforce18771(). The refusal matrix lands
+// WITH the flip, unguarded, so reverting the const turns the armed
+// cells red; posture-guarded (skipping) cells are deliberately NOT
+// carried here — they would be skip-green on that revert.
+
+func TestPackedTailEnforce18771CommitCheckDiagnosesNoRefuse(t *testing.T) {
+	// Diagnostic eligibility is live in BOTH postures (step b).
+	s := packedTailStage18771(t, -1)
+	cfg, err := s.CommitCheck()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packedTailStoreDiagnostics18771(cfg)) != 1 {
+		t.Fatalf("commit check diagnostics = %d, want 1", len(packedTailStoreDiagnostics18771(cfg)))
+	}
 }

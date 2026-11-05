@@ -13,6 +13,41 @@ const (
 	packedTailGateEnforce18771  = false
 )
 
+// PackedTailGateEnforce18771 reports the production enforcement posture
+// for the #18771 packed-tail gate. Phase 1 is report-only (false). The
+// flip changes this constant plus the enforcement-posture test
+// migration (design v3 Q7.9: the phase-one guard in
+// packed_tail_gate_18771_test.go and Cell08's promotion subtests).
+// Production callers read this accessor; no caller may supply its own
+// enforcement bool.
+func PackedTailGateEnforce18771() bool { return packedTailGateEnforce18771 }
+
+// PackedTailGateDrop18771 is one adjudicated DROP site from the
+// packed-tail gate: a packed statement whose braced twin changes the
+// typed config while deleting the packed tail changes nothing — the
+// value is silently dropped today. Carries no raw tail text and no
+// secret material (site/pair/position only).
+type PackedTailGateDrop18771 struct {
+	Site      uint64
+	Container string
+	Head      string
+	Line      int
+	Column    int
+	NodeLabel string
+}
+
+// PackedTailGateDrops18771 filters findings to the DROP subset. It is
+// the ONLY input the enforcement refusal consumes: SKIPPED-CAP,
+// SKIPPED-PROVENANCE, INDETERMINATE, PARTIAL and CLEAN never refuse.
+func PackedTailGateDrops18771(findings []PackedTailGateFinding18771) (drops []PackedTailGateDrop18771) {
+	for _, f := range findings {
+		if f.Verdict == "DROP" {
+			drops = append(drops, f.Drop)
+		}
+	}
+	return drops
+}
+
 type packedTailGateSource18771 struct {
 	id18771             uint64
 	container18771      string
@@ -30,6 +65,21 @@ type packedTailGateSource18771 struct {
 type packedTailGateFinding18771 struct {
 	verdict18771 string
 	prose18771   string
+	drop18771    PackedTailGateDrop18771
+}
+
+// PackedTailGateFinding18771 is the exported form of one gate finding:
+// the verdict plus, for DROP findings, the typed drop record the
+// enforcement refusal consumes. Prose is the phase-1 warning text
+// (byte-identical to the Diagnostic/Warnings rendering).
+type PackedTailGateFinding18771 struct {
+	Verdict string
+	Prose   string
+	Drop    PackedTailGateDrop18771
+}
+
+func (f packedTailGateFinding18771) exported18771() PackedTailGateFinding18771 {
+	return PackedTailGateFinding18771{Verdict: f.verdict18771, Prose: f.prose18771}
 }
 
 type packedTailGateRun18771 struct {
@@ -280,7 +330,7 @@ func (r *packedTailGateRun18771) compileTwin18771(snapshot *ConfigTree, siteID u
 		return nil, fmt.Errorf("packed-tail twin entry tuple is invalid")
 	}
 	var twinIGP bool
-	cfg, err = compileTreeWithDerivedObserver18771(tree, opts, r.nodeID18771, func(post compileOpts) {
+	cfg, _, err = compileTreeWithDerivedObserver18771(tree, opts, r.nodeID18771, func(post compileOpts) {
 		twinIGP = post.igpIdentityExcused16810
 	})
 	r.twinIGPIdentityExcused18771 = twinIGP
@@ -299,10 +349,23 @@ func (r *packedTailGateRun18771) finding18771(source *packedTailGateSource18771,
 		return packedTailGateFinding18771{verdict18771: verdict,
 			prose18771: fmt.Sprintf("%s %s site unmapped node=%s", packedTailGateName18771, verdict, r.nodeLabel18771())}
 	}
-	return packedTailGateFinding18771{verdict18771: verdict,
+	f := packedTailGateFinding18771{verdict18771: verdict,
 		prose18771: fmt.Sprintf("%s %s site %d pair %s/%s source %d:%d node=%s",
 			packedTailGateName18771, verdict, source.id18771, source.container18771,
 			source.head18771, source.line18771, source.column18771, r.nodeLabel18771())}
+	return f
+}
+
+// dropRecord18771 builds the exported DROP record for a mapped source.
+// Only DROP findings consume it; the verdict travels on the finding.
+func (r *packedTailGateRun18771) dropRecord18771(source *packedTailGateSource18771) PackedTailGateDrop18771 {
+	if source == nil {
+		return PackedTailGateDrop18771{NodeLabel: r.nodeLabel18771()}
+	}
+	return PackedTailGateDrop18771{
+		Site: source.id18771, Container: source.container18771, Head: source.head18771,
+		Line: source.line18771, Column: source.column18771, NodeLabel: r.nodeLabel18771(),
+	}
 }
 
 func (r *packedTailGateRun18771) adjudicateSite18771(original *Config, source *packedTailGateSource18771) packedTailGateFinding18771 {
@@ -317,10 +380,14 @@ func (r *packedTailGateRun18771) adjudicateSite18771(original *Config, source *p
 	if err != nil || !packedTailGateDerivedEqual18771(original, removed, r.originalIGPIdentityExcused18771, r.twinIGPIdentityExcused18771) {
 		return r.finding18771(source, "INDETERMINATE")
 	}
-	return r.finding18771(source, classifyPackedTailGate18771(original, braced, removed))
+	f := r.finding18771(source, classifyPackedTailGate18771(original, braced, removed))
+	if f.verdict18771 == "DROP" {
+		f.drop18771 = r.dropRecord18771(source)
+	}
+	return f
 }
 
-func (r *packedTailGateRun18771) adjudicate18771(original *Config) []packedTailGateFinding18771 {
+func (r *packedTailGateRun18771) adjudicate18771(original *Config) []PackedTailGateFinding18771 {
 	if r == nil || original == nil {
 		return nil
 	}
@@ -355,10 +422,16 @@ func (r *packedTailGateRun18771) adjudicate18771(original *Config) []packedTailG
 			findings = append(findings, r.adjudicateSite18771(original, r.sources18771[id]))
 		}
 	}
+	out := make([]PackedTailGateFinding18771, 0, len(findings))
 	for _, finding := range findings {
 		original.Warnings = append(original.Warnings, finding.prose18771)
 		original.Diagnostics = append(original.Diagnostics, Diagnostic{Gate: packedTailGateName18771, Prose: finding.prose18771})
 		slog.Warn(finding.prose18771, "node", r.nodeLabel18771())
+		exp := finding.exported18771()
+		if exp.Verdict == "DROP" {
+			exp.Drop = finding.drop18771
+		}
+		out = append(out, exp)
 	}
-	return findings
+	return out
 }

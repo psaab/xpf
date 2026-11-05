@@ -149,7 +149,7 @@ func packedTailPrepare18771(t *testing.T, text string, opts compileOpts, nodeID 
 	}
 	observePackedTailGateEffective18771(working, run)
 	original := run.snapshot18771.Clone()
-	cfg, err := compileTreeWithDerivedObserver18771(original, packedTailGateTwinOpts18771(opts), nodeID, func(post compileOpts) {
+	cfg, _, err := compileTreeWithDerivedObserver18771(original, packedTailGateTwinOpts18771(opts), nodeID, func(post compileOpts) {
 		run.originalIGPIdentityExcused18771 = post.igpIdentityExcused16810
 	})
 	if err != nil {
@@ -321,7 +321,7 @@ system { apply-groups-except UNDEFINED18771; }
 	}
 	drop := false
 	for _, finding := range igpFindings {
-		drop = drop || finding.verdict18771 == "DROP"
+		drop = drop || finding.Verdict == "DROP"
 	}
 	if !drop {
 		t.Fatal("matching recomputed IGP exemption prevented the independent DROP control")
@@ -544,8 +544,8 @@ func TestPackedTailGate18771Cell05Determinism(t *testing.T) {
 	dupRun.snapshotIdempotent18771 = false
 	got := dupRun.adjudicate18771(o)
 	for _, f := range got {
-		if f.verdict18771 != "INDETERMINATE" {
-			t.Fatalf("non-idempotent verdict = %s, want INDETERMINATE", f.verdict18771)
+		if f.Verdict != "INDETERMINATE" {
+			t.Fatalf("non-idempotent verdict = %s, want INDETERMINATE", f.Verdict)
 		}
 	}
 
@@ -860,5 +860,21 @@ func TestPackedTailGate18771Cell10BoundsAndMutants(t *testing.T) {
 	warn := &Config{System: SystemConfig{HostName: "same"}, Warnings: []string{"diagnostic"}}
 	if classifyPackedTailGate18771(o, warn, r) != "PARTIAL" {
 		t.Fatal("typed-equality/diagnostic-equality conflation survives")
+	}
+}
+
+func TestPackedTailGateDropsFilter18771(t *testing.T) {
+	mk := func(v string) PackedTailGateFinding18771 {
+		return PackedTailGateFinding18771{Verdict: v, Prose: "packedTailGate18771 " + v + " prose mentions DROP", Drop: PackedTailGateDrop18771{Site: 7, Container: "interfaces", Head: "family", Line: 3, Column: 5, NodeLabel: "standalone"}}
+	}
+	findings := []PackedTailGateFinding18771{mk("DROP"), mk("CLEAN"), mk("PARTIAL"), mk("INDETERMINATE"),
+		{Verdict: "SKIPPED-CAP", Prose: "packedTailGate18771 SKIPPED-CAP sites 33 node=standalone"},
+		{Verdict: "SKIPPED-PROVENANCE", Prose: "packedTailGate18771 SKIPPED-PROVENANCE site 1"}}
+	drops := PackedTailGateDrops18771(findings)
+	if len(drops) != 1 || drops[0].Site != 7 {
+		t.Fatalf("drops = %v, want exactly the DROP finding's record", drops)
+	}
+	if got := PackedTailGateDrops18771(nil); len(got) != 0 {
+		t.Fatalf("nil findings produced %d drops", len(got))
 	}
 }
