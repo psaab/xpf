@@ -2,6 +2,8 @@
 # KIND<TAB>FIXTURE<TAB>VIEW<TAB>EXPECTED
 # Covered rows name the exact eligible verdict multiset in deterministic source order.
 # OUT rows are independent exclusions; NONE means no packedTailGate18771 finding.
+# Generated-corpus per-site DROP set pinned by
+# testdata/packed_tail_census_drops_18771.txt (Cell06 generated-census cell).
 # Census evidence: base-measured family inet6 dad-disable DROP; hand-measured
 # address/vrrp-group DROP/PARTIAL/CLEAN trio (priority, authentication-type,
 # duplicate priority); applied/unused/fan-out group provenance controls.

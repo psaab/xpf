@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -715,6 +716,53 @@ func TestPackedTailGate18771Cell06FixedCensusManifest(t *testing.T) {
 	}
 }
 
+func TestPackedTailGate18771Cell06GeneratedCensusDropPin(t *testing.T) {
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+	raw, err := os.ReadFile("testdata/packed_tail_census_drops_18771.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line != "" {
+			want[line] = true
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("generated-census DROP pin is empty")
+	}
+	got := map[string]bool{}
+	for name, text := range packedTailAllCensusSources18771(t) {
+		cfg, err := packedTailCompile18771(t, text, lenientCompileOpts(), nil)
+		if err != nil {
+			continue
+		}
+		for _, v := range packedTailVerdicts18771(cfg) {
+			if v == "DROP" {
+				got[name] = true
+			}
+		}
+	}
+	var extra, missing []string
+	for name := range got {
+		if !want[name] {
+			extra = append(extra, name)
+		}
+	}
+	for name := range want {
+		if !got[name] {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(extra)
+	sort.Strings(missing)
+	if len(extra) > 0 || len(missing) > 0 {
+		t.Fatalf("generated-census DROP set drifted: unexpected=%v missing=%v", extra, missing)
+	}
+}
+
 func TestPackedTailGate18771Cell07TypedDiagnosticClassification(t *testing.T) {
 	o := &Config{System: SystemConfig{HostName: "same"}}
 	b := &Config{System: SystemConfig{HostName: "different"}}
@@ -745,9 +793,9 @@ func TestPackedTailGate18771Cell07TypedDiagnosticClassification(t *testing.T) {
 	packedTailAssertVerdicts18771(t, packedTailMustCompile18771(t, packedTailMixedPartial18771, lenientCompileOpts(), nil), "PARTIAL")
 }
 
-func TestPackedTailGate18771Cell08PhaseEligibilityAndReentrancy(t *testing.T) {
-	if packedTailGateEnforce18771 {
-		t.Fatal("phase one must remain report-only")
+func TestPackedTailGate18771Cell08EnforcementPostureAndReentrancy(t *testing.T) {
+	if !PackedTailGateEnforce18771() {
+		t.Fatal("production enforcement must remain enabled")
 	}
 	strict := packedTailMustCompile18771(t, packedTailDrop18771, strictCompileOpts(), nil)
 	packedTailAssertVerdicts18771(t, strict, "DROP")
@@ -876,5 +924,51 @@ func TestPackedTailGateDropsFilter18771(t *testing.T) {
 	}
 	if got := PackedTailGateDrops18771(nil); len(got) != 0 {
 		t.Fatalf("nil findings produced %d drops", len(got))
+	}
+}
+
+func TestPackedTailGate18771Q3ShippedCorpusNoDrop(t *testing.T) {
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	paths, err := filepath.Glob("../../docs/ha-cluster-*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, err := filepath.Glob("../../test/incus/*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths = append(paths, matches...)
+	if len(paths) < 5 {
+		t.Fatalf("shipped corpus = %v, want HA cluster files plus test/incus configs", paths)
+	}
+	node0, node1 := 0, 1
+	views := []struct {
+		name   string
+		nodeID *int
+	}{
+		{name: "standalone", nodeID: nil},
+		{name: "node0", nodeID: &node0},
+		{name: "node1", nodeID: &node1},
+	}
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, view := range views {
+			cfg, err := packedTailCompile18771(t, string(raw), strictCompileOpts(), view.nodeID)
+			if err != nil {
+				t.Errorf("%s %s: strict compile: %v", path, view.name, err)
+				continue
+			}
+			for _, verdict := range packedTailVerdicts18771(cfg) {
+				if verdict == "DROP" {
+					t.Errorf("%s %s produced a DROP finding:\n%s", path, view.name, packedTailDiagnosticText18771(cfg))
+				}
+			}
+		}
 	}
 }
