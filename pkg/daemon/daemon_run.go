@@ -60,6 +60,56 @@ func buildRuntimeDataPlane(dpType string) (dataplane.RuntimeDataPlane, error) {
 	}
 }
 
+// bootAlarmNotice stores one #16016 unkeyed-authority notice until the
+// event reader can send it. The hook runs during manager construction, before
+// either event-reader startup path below has created its sink.
+type bootAlarmNotice struct {
+	severity int
+	message  string
+}
+
+// bootAlarmReplay serializes the nil-reader queue and the readiness handoff.
+// The queue exists only while a daemon is waiting for its event reader; the
+// normal live path forwards synchronously without creating goroutines.
+var bootAlarmReplay = struct {
+	sync.Mutex
+	pending map[*Daemon][]bootAlarmNotice
+}{pending: make(map[*Daemon][]bootAlarmNotice)}
+
+// setEventReader publishes the daemon's event sink and replays any boot-time
+// authority notices in generation order. Holding the same lock used by
+// forwardBootAlarm prevents a later notice from overtaking the queued prefix.
+func (d *Daemon) setEventReader(er *logging.EventReader) {
+	if d == nil || er == nil {
+		return
+	}
+	bootAlarmReplay.Lock()
+	d.eventReader = er
+	for _, notice := range bootAlarmReplay.pending[d] {
+		er.ForwardLogMsg(notice.severity, notice.message)
+	}
+	delete(bootAlarmReplay.pending, d)
+	bootAlarmReplay.Unlock()
+}
+
+// forwardBootAlarm queues a boot notice until setEventReader publishes the
+// sink, then forwards each notice synchronously. This avoids dropping or
+// reordering short-lived fire-and-forget callbacks during startup.
+func (d *Daemon) forwardBootAlarm(severity int, message string) {
+	if d == nil {
+		return
+	}
+	bootAlarmReplay.Lock()
+	if d.eventReader == nil {
+		bootAlarmReplay.pending[d] = append(bootAlarmReplay.pending[d],
+			bootAlarmNotice{severity: severity, message: message})
+		bootAlarmReplay.Unlock()
+		return
+	}
+	d.eventReader.ForwardLogMsg(severity, message)
+	bootAlarmReplay.Unlock()
+}
+
 // Run starts the daemon and blocks until shutdown.
 //
 // The singleton lease acquired by New is the process's first gate: a
@@ -347,7 +397,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		if evSrc != nil {
 			er = logging.NewEventReader(evSrc, eventBuf)
-			d.eventReader = er
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -411,10 +460,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 				})
 			}
 
-			// Set up syslog clients from active config
+			// Set up syslog clients before publishing readiness, so replayed
+			// boot alarms reach the configured sink rather than an empty reader.
 			if cfg := d.store.ActiveConfig(); cfg != nil {
 				d.applySyslogConfig(er, cfg)
 			}
+			d.setEventReader(er)
 
 			// Start NetFlow v9 + IPFIX exporters if configured (#2075).
 			// This post-EventReader block is load-bearing: the earlier
@@ -434,9 +485,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if er == nil {
 			if _, ok := rt.(userspaceEventStreamProvider); ok {
 				er = logging.NewEventReader(nil, eventBuf)
-				d.eventReader = er
-				if cfg := d.store.ActiveConfig(); cfg != nil {
+				cfg := d.store.ActiveConfig()
+				if cfg != nil {
 					d.applySyslogConfig(er, cfg)
+				}
+				d.setEventReader(er)
+				if cfg != nil {
 					d.reconcileFlowExporters(cfg)
 					d.applyFlowTrace(cfg, er)
 				}

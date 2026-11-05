@@ -127,6 +127,92 @@ func TestWriteFrameChokePointCensus16016(t *testing.T) {
 		}
 	}
 }
+func TestElectionCallerCensus16016(t *testing.T) {
+	want := map[string]map[string]int{
+		"election.go": {
+			"recalcWeight.runElection":               1,
+			"recalcWeight.electSingleNode":           1,
+			"armDegradedTimerLocked.runElection":     1,
+			"armDegradedTimerLocked.electSingleNode": 1,
+		},
+		"failover.go": {
+			"commitRequestedPeerFailoverWith.runElection":  1,
+			"abortRequestedPeerFailover.runElection":       1,
+			"AbortRemoteTransferOut.runElection":           1,
+			"commitRequestedPeerFailoverBatch.runElection": 1,
+			"abortRequestedPeerFailoverBatch.runElection":  1,
+		},
+		"group_state.go": {
+			"updateConfig.runElection":     1,
+			"updateConfig.electSingleNode": 1,
+		},
+		"heartbeat_manager.go": {
+			"handlePeerHeartbeat.runElection":     1,
+			"handlePeerTimeout.runElection":       1,
+			"handlePeerTimeout.electSingleNode":   1,
+			"handlePeerNeverSeen.electSingleNode": 1,
+		},
+		"kernel_selfrecover.go": {
+			"ClearKernelUpgradeHold.runElection":     1,
+			"ClearKernelUpgradeHold.electSingleNode": 1,
+		},
+		"readiness.go": {
+			"SetRGReady.runElection":     2,
+			"SetRGReady.electSingleNode": 2,
+		},
+		"unkeyed_authority_grace_16016.go": {
+			"publishFreshHeartbeatProof.runElection":     1,
+			"publishFreshHeartbeatProof.electSingleNode": 1,
+		},
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		got := make(map[string]int)
+		for _, decl := range parsed.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if ok && (selector.Sel.Name == "runElection" || selector.Sel.Name == "electSingleNode") {
+					got[fn.Name.Name+"."+selector.Sel.Name]++
+				}
+				return true
+			})
+		}
+		expected, enumerated := want[name]
+		if len(got) > 0 && !enumerated {
+			t.Errorf("unkeyed-election bypass found in %s: %v", name, got)
+			continue
+		}
+		for site, count := range expected {
+			if got[site] != count {
+				t.Errorf("%s has %d calls at %s, want %d", name, got[site], site, count)
+			}
+		}
+		for site, count := range got {
+			if expected[site] != count {
+				t.Errorf("%s has unenumerated election caller %s (%d)", name, site, count)
+			}
+		}
+	}
+}
 
 type authorityClock16016 struct {
 	mu   sync.Mutex
@@ -193,6 +279,101 @@ func groupConfig16016() *config.ClusterConfig {
 		}},
 	}
 }
+func TestUnkeyedGraceRollbackCannotRefundMonotonicElapsedAcrossRestarts16016(t *testing.T) {
+	m, clock, path := setupAuthorityManager16016(t)
+	t0 := clock.wallNow()
+	clock.advance(48 * time.Hour)
+	m.checkUnkeyedGraceNotices()
+
+	clock.setWall(t0.Add(time.Hour))
+	clock.setMono(int64(time.Second))
+	firstRestart := NewManager(0, 1)
+	firstRestart.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+	if got := firstRestart.UnkeyedGraceExpiry(); !got.Equal(t0.Add(72 * time.Hour)) {
+		t.Fatalf("first rollback restart expiry = %s, want %s", got, t0.Add(72*time.Hour))
+	}
+	clock.advance(23 * time.Hour)
+	firstRestart.checkUnkeyedGraceNotices()
+
+	clock.setWall(t0.Add(time.Hour))
+	clock.setMono(int64(time.Second))
+	secondRestart := NewManager(0, 1)
+	secondRestart.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+	if secondRestart.UnkeyedAuthorityExpired() {
+		t.Fatal("second rollback restart expired before cumulative monotonic time reached 72h")
+	}
+	clock.advance(time.Hour)
+	if !secondRestart.UnkeyedAuthorityExpired() {
+		t.Fatal("elapsed floor refunded the final hour after repeated rollback and restart")
+	}
+
+	clock.setWall(t0.Add(time.Hour))
+	clock.setMono(int64(time.Second))
+	thirdRestart := NewManager(0, 1)
+	thirdRestart.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+	if !thirdRestart.UnkeyedAuthorityExpired() {
+		t.Fatal("a further rollback/restart cycle reopened the expired grace")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version string
+	var earliest, highWater, elapsed int64
+	if _, err := fmt.Sscanf(string(data), "%s %d %d %d", &version, &earliest, &highWater, &elapsed); err != nil {
+		t.Fatalf("parse grace record %q: %v", data, err)
+	}
+	if version != "v2" || time.Duration(elapsed) < 72*time.Hour {
+		t.Fatalf("terminal record = %q, want v2 elapsed floor >=72h", data)
+	}
+}
+
+func TestUnkeyedGraceSweepAndConfigTouchPersistExpiryAcrossRollback16016(t *testing.T) {
+	for _, trigger := range []string{"sweep", "config-touch"} {
+		t.Run(trigger, func(t *testing.T) {
+			m, clock, path := setupAuthorityManager16016(t)
+			earliest := clock.wallNow()
+			expiry := m.UnkeyedGraceExpiry()
+			clock.advance(73 * time.Hour)
+
+			var expired bool
+			if trigger == "sweep" {
+				m.checkUnkeyedGraceNotices()
+				expired = m.UnkeyedAuthorityExpired()
+			} else {
+				bootManager := NewManager(0, 1)
+				bootManager.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+				expired = bootManager.UnkeyedAuthorityExpired()
+			}
+			if !expired {
+				t.Fatalf("%s did not observe the expired cutoff", trigger)
+			}
+
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var version string
+			var earliestNS, highWaterNS, elapsedNS int64
+			if _, err := fmt.Sscanf(string(data), "%s %d %d %d",
+				&version, &earliestNS, &highWaterNS, &elapsedNS); err != nil {
+				t.Fatalf("parse terminal grace record %q: %v", data, err)
+			}
+			if version != "v2" || !time.Unix(0, earliestNS).Add(72*time.Hour).Equal(expiry) ||
+				time.Unix(0, highWaterNS).Before(expiry) || time.Duration(elapsedNS) < 72*time.Hour {
+				t.Fatalf("terminal grace record = %q, want original cutoff %s and elapsed >=72h", data, expiry)
+			}
+
+			clock.setWall(earliest.Add(time.Hour))
+			clock.setMono(int64(time.Second))
+			restarted := NewManager(0, 1)
+			restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+			if !restarted.UnkeyedAuthorityExpired() {
+				t.Fatalf("%s-triggered terminal record reopened after wall rollback and restart", trigger)
+			}
+		})
+	}
+}
 
 func TestUnkeyedGraceHighWaterRestartAndNoReanchor16016(t *testing.T) {
 	m, clock, path := setupAuthorityManager16016(t)
@@ -204,15 +385,18 @@ func TestUnkeyedGraceHighWaterRestartAndNoReanchor16016(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version string
-	var earliest, highWater int64
-	if _, err := fmt.Sscanf(string(data), "%s %d %d", &version, &earliest, &highWater); err != nil {
+	var earliest, highWater, elapsed int64
+	if _, err := fmt.Sscanf(string(data), "%s %d %d %d", &version, &earliest, &highWater, &elapsed); err != nil {
 		t.Fatalf("parse grace record %q: %v", data, err)
 	}
-	if version != "v1" || time.Unix(0, earliest).UTC().Add(72*time.Hour) != firstExpiry {
+	if version != "v2" || time.Unix(0, earliest).UTC().Add(72*time.Hour) != firstExpiry {
 		t.Fatalf("record = %q, expiry %s; want original expiry %s", data, time.Unix(0, earliest).UTC().Add(72*time.Hour), firstExpiry)
 	}
 	if !time.Unix(0, highWater).UTC().Equal(clock.wallNow()) {
 		t.Fatalf("high-water = %s, want %s", time.Unix(0, highWater).UTC(), clock.wallNow())
+	}
+	if time.Duration(elapsed) != 24*time.Hour {
+		t.Fatalf("elapsed floor = %s, want 24h", time.Duration(elapsed))
 	}
 	clock.advance(49 * time.Hour)
 	if !m.UnkeyedAuthorityExpired() {
@@ -270,12 +454,21 @@ func TestUnkeyedGraceCorruptFailsClosedAndFutureClamps16016(t *testing.T) {
 	if !corrupt.UnkeyedAuthorityExpired() || !corrupt.UnkeyedGraceAnchorCorrupt() {
 		t.Fatal("present corrupt anchor did not fail closed at boot")
 	}
+	legacyEarliest := clock.wallNow().Add(-time.Hour)
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("v1 %d %d\n", legacyEarliest.UnixNano(), legacyEarliest.UnixNano())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := NewManager(0, 1)
+	legacy.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+	if !legacy.UnkeyedAuthorityExpired() || !legacy.UnkeyedGraceAnchorCorrupt() {
+		t.Fatal("legacy v1 anchor without monotonic history did not fail closed")
+	}
 
 	futurePath := filepath.Join(t.TempDir(), "future-anchor")
 	restore := SetUnkeyedAuthorityGraceStatePathForTesting(futurePath)
 	defer restore()
 	future := clock.wallNow().Add(24 * time.Hour)
-	if err := os.WriteFile(futurePath, []byte(fmt.Sprintf("v1 %d %d\n", future.UnixNano(), future.UnixNano())), 0o600); err != nil {
+	if err := os.WriteFile(futurePath, []byte(fmt.Sprintf("v2 %d %d 0\n", future.UnixNano(), future.UnixNano())), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	clamped := NewManager(0, 1)
@@ -305,7 +498,7 @@ func TestUnkeyedGraceWriteFailureExpiresInProcess16016(t *testing.T) {
 	defer restoreFabric()
 	restoreEpoch := SetPeerEpochStatePathForTesting(filepath.Join(tempDir, "peer-epoch"))
 	defer restoreEpoch()
-	restorePersist := SetUnkeyedAuthorityPersistForTesting(func(string, time.Time, time.Time) error {
+	restorePersist := SetUnkeyedAuthorityPersistForTesting(func(string, time.Time, time.Time, time.Duration) error {
 		return fmt.Errorf("injected persist failure")
 	})
 	defer restorePersist()
@@ -364,8 +557,11 @@ func TestUnkeyedGraceWireGateWritersAndKeyRearm16016(t *testing.T) {
 	if m.UnkeyedAuthorityExpired() {
 		t.Fatal("local key commit did not clear expired posture")
 	}
-	if _, err := os.Stat(unkeyedAuthorityGraceStatePath); !os.IsNotExist(err) {
-		t.Fatalf("local key commit did not delete anchor: %v", err)
+	if !m.RecoveryHoldActive() {
+		t.Fatal("expired local key commit did not arm recovery hold")
+	}
+	if _, err := os.Stat(unkeyedAuthorityGraceStatePath); err != nil {
+		t.Fatalf("expired local key commit did not retain recovery evidence: %v", err)
 	}
 	m.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if m.UnkeyedAuthorityExpired() || !m.UnkeyedGraceExpiry().After(clock.wallNow()) {
@@ -579,6 +775,69 @@ func TestProofGenerationAfterPeerStateAndNoSyncRelease16016(t *testing.T) {
 		t.Fatal("post-install authenticated heartbeat did not release recovery hold")
 	}
 }
+func TestExpiredRecoveryHoldSurvivesKeyedRestartUntilHeartbeatProof16016(t *testing.T) {
+	primary, clock, path := setupAuthorityManager16016(t)
+	groupConfig := groupConfig16016()
+	primary.UpdateConfig(groupConfig)
+	primary.mu.Lock()
+	primary.groups[0].State = StatePrimary
+	primary.peerAlive = false
+	primary.mu.Unlock()
+	clock.advance(73 * time.Hour)
+	if !primary.UnkeyedAuthorityExpired() {
+		t.Fatal("primary fixture did not expire unkeyed authority")
+	}
+	key := []byte("recovery-key-restart-16016")
+	keyedConfig := &config.ClusterConfig{
+		ControlInterface:   "em0",
+		RedundancyGroups:   groupConfig.RedundancyGroups,
+		ControlLinkAuthKey: config.NewSecret(string(key)),
+	}
+	primary.UpdateConfig(keyedConfig)
+	if !primary.RecoveryHoldActive() {
+		t.Fatal("expired-to-keyed primary did not arm recovery hold")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expired recovery evidence was not retained through keying: %v", err)
+	}
+
+	secondary := NewManager(1, 1)
+	secondary.UpdateConfigFromBoot(keyedConfig)
+	secondary.mu.Lock()
+	secondary.groups[0].State = StateSecondary
+	secondary.peerAlive = false
+	secondary.electSingleNode()
+	secondary.runElection()
+	state := secondary.groups[0].State
+	secondary.mu.Unlock()
+	if !secondary.RecoveryHoldActive() || state == StatePrimary {
+		t.Fatalf("keyed reboot took over before heartbeat proof: hold=%v state=%s",
+			secondary.RecoveryHoldActive(), state)
+	}
+
+	r := newHeartbeatReceiver(secondary, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
+	pkt := &HeartbeatPacket{
+		NodeID: 0, ClusterID: 1,
+		Groups: []HeartbeatGroup{{GroupID: 0, Priority: 100, Weight: 255, State: uint8(StatePrimary)}},
+	}
+	frame := MarshalHeartbeatAuth(pkt, key, 16016, 1)
+	decoded, err := UnmarshalHeartbeat(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.admitFrame(frame, decoded) {
+		t.Fatal("authenticated primary heartbeat proof was rejected")
+	}
+	if secondary.RecoveryHoldActive() {
+		t.Fatal("installed authenticated peer heartbeat did not release recovery hold")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("fresh peer proof did not delete recovery evidence: %v", err)
+	}
+	if secondary.IsLocalPrimary(0) {
+		t.Fatal("fresh peer-primary proof did not resume normal election against the local secondary")
+	}
+}
 
 func TestForcePrimaryRecoveryPinnedAndAudited16016(t *testing.T) {
 	m, clock, _ := setupAuthorityManager16016(t)
@@ -724,7 +983,7 @@ func TestPeerKeyTransitionsPreserveOriginalUnkeyedCutoff16016(t *testing.T) {
 	}
 
 	keyed := &config.ClusterConfig{
-		ControlInterface:  "em0",
+		ControlInterface:   "em0",
 		ControlLinkAuthKey: config.NewSecret("peer-key-16016"),
 	}
 	m.UpdateConfigFromPeer(keyed)
@@ -769,13 +1028,14 @@ func TestUnkeyedGraceSweepRatchetsHighWaterWithoutConfigTouch16016(t *testing.T)
 		t.Fatal(err)
 	}
 	var version string
-	var savedEarliest, highWater int64
-	if _, err := fmt.Sscanf(string(data), "%s %d %d", &version, &savedEarliest, &highWater); err != nil {
+	var savedEarliest, highWater, elapsed int64
+	if _, err := fmt.Sscanf(string(data), "%s %d %d %d", &version, &savedEarliest, &highWater, &elapsed); err != nil {
 		t.Fatalf("parse grace record %q: %v", data, err)
 	}
-	if version != "v1" || time.Unix(0, savedEarliest).UTC() != earliest ||
-		time.Unix(0, highWater).UTC() != earliest.Add(48*time.Hour) {
-		t.Fatalf("sweep record = %q, want earliest=%s high-water=%s", data, earliest, earliest.Add(48*time.Hour))
+	if version != "v2" || time.Unix(0, savedEarliest).UTC() != earliest ||
+		time.Unix(0, highWater).UTC() != earliest.Add(48*time.Hour) ||
+		time.Duration(elapsed) != 48*time.Hour {
+		t.Fatalf("sweep record = %q, want earliest=%s high-water=%s elapsed=48h", data, earliest, earliest.Add(48*time.Hour))
 	}
 
 	clock.setWall(earliest.Add(time.Hour))
@@ -807,8 +1067,42 @@ func TestUnkeyedGraceSweepRatchetsHighWaterWithoutConfigTouch16016(t *testing.T)
 		t.Fatal("repeated rollback restart reopened an expired grace window")
 	}
 }
+func TestUnkeyedGraceTerminalAndKeyedSweepsDoNotRewrite16016(t *testing.T) {
+	m, clock, path := setupAuthorityManager16016(t)
+	writes := 0
+	originalPersist := unkeyedAuthorityPersist
+	restorePersist := SetUnkeyedAuthorityPersistForTesting(func(path string, earliest, highWater time.Time, elapsed time.Duration) error {
+		writes++
+		return originalPersist(path, earliest, highWater, elapsed)
+	})
+	defer restorePersist()
 
-func TestUnkeyedGraceKeyedSweepPreservesCutoffAcrossRestart16016(t *testing.T) {
+	clock.advance(73 * time.Hour)
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("test precondition: grace did not expire")
+	}
+	terminalWrites := writes
+	if terminalWrites > 1 {
+		t.Fatalf("terminal expiry performed %d persistence writes, want at most one", terminalWrites)
+	}
+	for range 20 {
+		m.checkUnkeyedGraceNotices()
+	}
+	m.UpdateConfig(&config.ClusterConfig{
+		ControlInterface: "em0", ControlLinkAuthKey: config.NewSecret("terminal-key-16016"),
+	})
+	for range 20 {
+		m.checkUnkeyedGraceNotices()
+	}
+	if writes != terminalWrites {
+		t.Fatalf("terminal/keyed sweeps rewrote the anchor %d additional times", writes-terminalWrites)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expired recovery evidence was not retained after keying: %v", err)
+	}
+}
+
+func TestUnkeyedGraceKeyedSweepDoesNotRewriteAndPeerClearKeepsOriginalCutoff16016(t *testing.T) {
 	m, clock, path := setupAuthorityManager16016(t)
 	earliest := clock.wallNow()
 	expiry := m.UnkeyedGraceExpiry()
@@ -816,31 +1110,45 @@ func TestUnkeyedGraceKeyedSweepPreservesCutoffAcrossRestart16016(t *testing.T) {
 		ControlInterface:   "em0",
 		ControlLinkAuthKey: config.NewSecret("peer-key-16016"),
 	})
-	clock.setWall(earliest.Add(48 * time.Hour))
-	m.checkUnkeyedGraceNotices()
-	m.UpdateConfigFromPeer(&config.ClusterConfig{ControlInterface: "em0"})
-	data, err := os.ReadFile(path)
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var version string
-	var savedEarliest, highWater int64
-	if _, err := fmt.Sscanf(string(data), "%s %d %d", &version, &savedEarliest, &highWater); err != nil {
-		t.Fatalf("parse keyed grace record %q: %v", data, err)
+	clock.advance(48 * time.Hour)
+	for i := 0; i < 10; i++ {
+		m.checkUnkeyedGraceNotices()
 	}
-	if time.Unix(0, highWater).UTC() != earliest.Add(48*time.Hour) {
-		t.Fatalf("keyed sweep high-water = %s, want %s", time.Unix(0, highWater).UTC(), earliest.Add(48*time.Hour))
+	afterKeyedTicks, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if string(afterKeyedTicks) != string(before) {
+		t.Fatalf("keyed grace sweeps rewrote the retained anchor: before=%q after=%q", before, afterKeyedTicks)
+	}
+	m.UpdateConfigFromPeer(&config.ClusterConfig{ControlInterface: "em0"})
+	if m.UnkeyedAuthorityExpired() {
+		t.Fatal("peer key-clear expired before the original 72-hour cutoff")
+	}
+	if got := m.UnkeyedGraceExpiry(); !got.Equal(expiry) {
+		t.Fatalf("peer key-clear moved original cutoff to %s, want %s", got, expiry)
+	}
+
+	// A restart after a keyed interval and a wall rollback keeps only the
+	// unspent portion of the original cutoff; it must neither re-anchor nor
+	// prematurely expire.
 	clock.setWall(earliest.Add(time.Hour))
 	clock.setMono(int64(time.Second))
 	restarted := NewManager(0, 1)
 	restarted.UpdateConfigFromBoot(&config.ClusterConfig{ControlInterface: "em0"})
+	if restarted.UnkeyedAuthorityExpired() {
+		t.Fatal("restart expired before cumulative elapsed time reached 72h")
+	}
 	if got := restarted.UnkeyedGraceExpiry(); !got.Equal(expiry) {
-		t.Fatalf("keyed-period rollback restart expiry = %s, want original %s", got, expiry)
+		t.Fatalf("restart moved original cutoff to %s, want %s", got, expiry)
 	}
 	clock.advance(24 * time.Hour)
 	if !restarted.UnkeyedAuthorityExpired() {
-		t.Fatal("keyed-period high-water progress was refundable after restart")
+		t.Fatal("restart refunded the remaining 24-hour grace budget")
 	}
 }
 func TestForcePrimaryRecoveryPinSurvivesNonPrimaryProof16016(t *testing.T) {
@@ -1039,7 +1347,7 @@ func TestUnkeyedGraceRestartIsAuditedAndPersistsFreshCutoff16016(t *testing.T) {
 		t.Fatalf("RestartUnkeyedAuthorityGrace: %v", err)
 	}
 	now := clock.wallNow()
-	if !expiry.Equal(now.Add(72 * time.Hour)) || m.UnkeyedAuthorityExpired() {
+	if !expiry.Equal(now.Add(72*time.Hour)) || m.UnkeyedAuthorityExpired() {
 		t.Fatalf("re-armed expiry=%s expired=%v, want %s and active",
 			expiry, m.UnkeyedAuthorityExpired(), now.Add(72*time.Hour))
 	}
@@ -1054,13 +1362,13 @@ func TestUnkeyedGraceRestartIsAuditedAndPersistsFreshCutoff16016(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version string
-	var earliest, highWater int64
-	if _, err := fmt.Sscanf(string(data), "%s %d %d", &version, &earliest, &highWater); err != nil {
+	var earliest, highWater, elapsed int64
+	if _, err := fmt.Sscanf(string(data), "%s %d %d %d", &version, &earliest, &highWater, &elapsed); err != nil {
 		t.Fatalf("parse re-armed anchor %q: %v", data, err)
 	}
-	if version != "v1" || time.Unix(0, earliest).UTC() != now ||
-		time.Unix(0, highWater).UTC() != now {
-		t.Fatalf("re-armed anchor = %q, want fresh earliest/high-water %s", data, now)
+	if version != "v2" || time.Unix(0, earliest).UTC() != now ||
+		time.Unix(0, highWater).UTC() != now || elapsed != 0 {
+		t.Fatalf("re-armed anchor = %q, want fresh earliest/high-water %s and elapsed 0", data, now)
 	}
 }
 func TestLocalKeyThenPeerClearFailsClosedAcrossRestart16016(t *testing.T) {
@@ -1144,5 +1452,49 @@ func TestUnkeyedGraceExpiredStatusSurfacesLocalReArm16016(t *testing.T) {
 		if !strings.Contains(corruptStatus, want) {
 			t.Errorf("corrupt grace status %q missing %q", corruptStatus, want)
 		}
+	}
+}
+
+func TestUnkeyedGraceWithinGraceStatusRendersExpiry16016(t *testing.T) {
+	m, _, _ := setupAuthorityManager16016(t)
+	expiry := m.UnkeyedGraceExpiry()
+	status := m.FormatControlPlaneStatistics()
+	want := "Unkeyed authority grace:    active; expires at " + expiry.Format(time.RFC3339)
+	if !strings.Contains(status, want) {
+		t.Fatalf("control-plane status missing expiry line %q:\n%s", want, status)
+	}
+}
+
+func TestExpiredUnkeyedGraceSuppressesConfigAndReadinessElections16016(t *testing.T) {
+	m, clock, _ := setupAuthorityManager16016(t)
+	defer m.Stop()
+	m.UpdateConfig(groupConfig16016())
+	m.mu.Lock()
+	m.takeoverHoldTime = 10 * time.Millisecond
+	m.mu.Unlock()
+
+	clock.advance(73 * time.Hour)
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("test setup did not expire unkeyed authority")
+	}
+	m.mu.Lock()
+	m.peerEverSeen = true
+	m.peerConfirmedAbsent = true
+	m.groups[0].State = StateSecondary
+	m.mu.Unlock()
+
+	// Config replacement and both readiness election edges must retain the
+	// existing secondary role even when a single-node election could promote.
+	m.UpdateConfig(groupConfig16016())
+	if m.IsLocalPrimary(0) {
+		t.Fatal("expired grace allowed UpdateConfig election to claim primary")
+	}
+	m.SetRGReady(0, true, nil)
+	if m.IsLocalPrimary(0) {
+		t.Fatal("expired grace allowed readiness edge election to claim primary")
+	}
+	time.Sleep(40 * time.Millisecond)
+	if m.IsLocalPrimary(0) {
+		t.Fatal("expired grace allowed readiness hold-timer election to claim primary")
 	}
 }

@@ -180,7 +180,7 @@ func (d *Daemon) unkeyedAuthorityGraceAlarmSyslog(rung string, raised bool, expi
 	} else if !expiry.IsZero() {
 		detail = fmt.Sprintf("%s; expires=%s", detail, expiry.UTC().Format(time.RFC3339))
 	}
-	d.clockSkewAlarmEmitter()(severity, fmt.Sprintf("RT_SYSTEM - %s rung=%q detail=%q", transition, rung, detail))
+	d.forwardBootAlarm(severity, fmt.Sprintf("RT_SYSTEM - %s rung=%q detail=%q", transition, rung, detail))
 }
 
 // unkeyedAuthorityRecoveryAuditSyslog records the local operator's explicit

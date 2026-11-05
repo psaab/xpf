@@ -195,7 +195,7 @@ func TestApplyConfigLockedCapturesAndPassesFRRErr9947(t *testing.T) {
 			"a discarded return value means an FRR non-convergence is still " +
 			"reported as commit success (#9947 F-007)")
 	}
-	call := "d.applyTailReconciles("
+	call := "d.applyTailReconcilesWithContext("
 	i := strings.Index(src, call)
 	if i < 0 {
 		t.Fatal("could not find the applyTailReconciles call in daemon_apply.go")

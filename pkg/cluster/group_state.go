@@ -268,10 +268,9 @@ func (m *Manager) updateConfig(cfg *config.ClusterConfig, source clusterConfigUp
 				m.unkeyedGrace.keyConfigured.Store(true)
 			}
 		default:
-			// Boot and peer configuration establish the active key posture
-			// but do not constitute a local key commit that may erase the
-			// node's original unkeyed-authority cutoff.
-			m.unkeyedGrace.keyConfigured.Store(true)
+			// Boot and peer configuration cannot clear expired recovery debt:
+			// only a fresh authenticated heartbeat may release its hold.
+			m.restoreUnkeyedKeyedStateLocked()
 		}
 	} else {
 		switch source {
@@ -286,13 +285,12 @@ func (m *Manager) updateConfig(cfg *config.ClusterConfig, source clusterConfigUp
 			m.unkeyedGrace.keyConfigured.Store(false)
 			m.touchUnkeyedAuthorityLocked(transportConfigured)
 		case clusterConfigUpdatePeer:
-			// Peer key-clear cannot create or move a local grace anchor. If
-			// no original anchor remains (a local key commit deleted it),
-			// persist an expired cutoff rather than treating the peer clear
-			// as fresh day-zero provisioning.
+			// Peer key-clear cannot create or move a local grace anchor. It
+			// fails closed when no original cutoff remains or when clearing
+			// a previously keyed posture whose elapsed interval is unknowable.
 			m.unkeyedGrace.keyConfigured.Store(false)
-			m.closePeerKeyClearWithoutGraceLocked(transportConfigured)
-	}
+			m.closePeerKeyClearWithoutGraceLocked(transportConfigured, oldKeyConfigured)
+		}
 	}
 
 	// #15262: anchor the fabric rollout grace at the FIRST keying of the

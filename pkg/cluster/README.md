@@ -2581,8 +2581,13 @@ peer liveness (`lastSeen`) or drive election.
   window stays open until it returns — see the boot-epoch residuals above.
 - **Fail-closed keyed heartbeat, `heartbeatAuthDecision` (#10315).** The
   heartbeat gate mirrors the #5078 session-sync decision:
-  - No local key → accept everything (this node cannot verify; it may be the
-    not-yet-keyed side of an upgrade). No regression.
+  - No local key → accept unkeyed authority only while the bounded
+    unkeyed-authority grace (see "Bounded legacy-unkeyed authority grace"
+    below) is active; after it expires, unauthenticated authority is refused.
+    Key the nodes to keep the cluster running past the cutoff, or — for a
+    wrong RTC — correct the clock first, then run the local audited command
+    `request chassis cluster unkeyed-grace restart` on the affected node to
+    re-arm the grace.
   - Local key + auth trailer → enforce: reject a bad HMAC or a replayed nonce.
   - Local key + no trailer → reject unconditionally, including the peer's first
     contact after this process starts. There is no `peerAuthSeen` grace window:

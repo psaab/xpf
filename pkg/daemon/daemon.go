@@ -1090,6 +1090,9 @@ type Daemon struct {
 	// exercise the semaphore contract through the real applyConfig
 	// / commitAndApply paths without standing up the full dataplane.
 	applyBodyForTest func(*config.Config)
+	// testBeforeSyncApplySemAcquire marks the admitted config-sync path just
+	// before it can block on applySem; it is nil outside deterministic tests.
+	testBeforeSyncApplySemAcquire func()
 	// dnsRefreshMu guards the published-answer baseline.
 	// lastDNSRefreshAnswers holds the DNS state (prefixes and resolver failure
 	// flag) last actually APPLIED for lastDNSRefreshBase (store generation +

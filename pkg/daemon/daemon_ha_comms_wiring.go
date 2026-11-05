@@ -284,6 +284,8 @@ func (d *Daemon) startFabricGRPCListeners(commsCtx context.Context, syncIP, sync
 	}()
 }
 
+type configSyncApplyAdmissionContextKey struct{}
+
 // handleConfigSyncWithProvenance binds event-policy super-user attribution to
 // the authentication on the config frame that carried it.
 func (d *Daemon) handleConfigSyncWithProvenance(
@@ -308,7 +310,7 @@ func (d *Daemon) handleConfigSyncWithProvenance(
 		config.QuarantineUntrustedEventPlantClasses(tree)
 		configText = tree.Format()
 	}
-	return d.handleConfigSyncWithAncestry(configText, ancestry)
+	return d.handleConfigSyncWithAncestry(configText, ancestry, peerAuthenticated)
 }
 
 // wireSessionSyncConfigCallbacks wires the config-sync receive and

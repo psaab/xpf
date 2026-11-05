@@ -1018,9 +1018,28 @@ func (d *Daemon) handleConfigSync(configText string) error {
 	return d.handleConfigSyncWithAncestry(configText, nil)
 }
 
+func (d *Daemon) recheckConfigSyncAuthorityAtApply(ctx context.Context) error {
+	unauthenticated, ok := ctx.Value(configSyncApplyAdmissionContextKey{}).(bool)
+	if !ok || !unauthenticated || d.cluster == nil {
+		return nil
+	}
+	var err error
+	switch {
+	case d.cluster.UnkeyedAuthorityExpired():
+		err = fmt.Errorf("cluster: refusing config sync at apply after unkeyed-authority grace expired (#16016)")
+	case d.cluster.ControlLinkAuthConfigured():
+		err = fmt.Errorf("cluster: refusing unauthenticated config sync at apply after local control-link keying (#16016)")
+	default:
+		return nil
+	}
+	d.cluster.RecordEvent(cluster.EventConfigSync, -1, "Refused unauthenticated config sync at promotion: "+err.Error())
+	return err
+}
+
 func (d *Daemon) handleConfigSyncWithAncestry(
 	configText string,
 	ancestry []configstore.RenameDescriptor,
+	peerAuthenticated ...bool,
 ) error {
 	if d.cluster != nil && d.cluster.IsLocalPrimary(0) {
 		d.logConfigSyncRefusedAsAuthority(configText)
@@ -1093,7 +1112,11 @@ func (d *Daemon) handleConfigSyncWithAncestry(
 	// exists to evict it — #5078's "an admitted peer must not re-arm the
 	// window". The hook is shared with #6629's eventual node-local posture; see
 	// preserveNodeLocalChassis for the contract.
-	if _, err := d.syncAndApplyWithAncestry(context.Background(), configText,
+	applyCtx := context.Background()
+	if len(peerAuthenticated) != 0 {
+		applyCtx = context.WithValue(applyCtx, configSyncApplyAdmissionContextKey{}, !peerAuthenticated[0])
+	}
+	if _, err := d.syncAndApplyWithAncestry(applyCtx, configText,
 		preserveNodeLocalChassis(d.activeTreeForNodeLocal()), ancestry); err != nil {
 		var pending *cluster.ConfigApplyPendingError
 		if errors.As(err, &pending) {

@@ -10,17 +10,14 @@ package cluster
 //
 // Two clocks, by design:
 //
-//   - In-process authority is a set-once CLOCK_MONOTONIC deadline. The first
-//     observation of (cluster enabled ∧ accepted set empty) arms it; expiry
-//     fires at anchorMono+grace regardless of wall-clock steps, and no
-//     in-process event ever moves it.
 //   - The persisted record exists only for restart recovery:
-//     "v1 <earliestWallUnixNano> <highWaterWallUnixNano>". Every touch
-//     ratchets highWater = max(highWater, wallNow); expiry-by-wall is
-//     max(wallNow, highWater) >= earliest+grace, so a rollback+restart
-//     cannot refund observed time. A future-dated earliest is clamped down
-//     to now (shorten, never extend).
-//
+//     "v2 <earliestWallUnixNano> <highWaterWallUnixNano> <elapsedMonoNanos>".
+//     Every touch ratchets highWater = max(highWater, wallNow) and elapsed to
+//     the greatest wall-derived or in-process monotonic elapsed observation.
+//     Boot remaining is min(grace-elapsed, earliest+grace-max(now, highWater)).
+//     A rollback plus repeated restarts therefore cannot refund observed time.
+//     A legacy v1 record lacks monotonic history and fails closed at boot.
+//     A future-dated earliest is clamped down to now (shorten, never extend).
 // Postures: file absent -> fresh stamp (day-0/reimage; wiping /var/lib/xpf
 // is root-equivalent and indistinguishable from re-provisioning). File
 // present but corrupt/unparseable -> expired-at-boot (presence is evidence
@@ -95,7 +92,7 @@ var unkeyedAuthorityMonoNow = func() int64 { return MonotonicNanos() }
 var unkeyedAuthorityPersist = persistUnkeyedAuthorityRecord
 
 // SetUnkeyedAuthorityPersistForTesting injects an anchor write failure.
-func SetUnkeyedAuthorityPersistForTesting(fn func(string, time.Time, time.Time) error) func() {
+func SetUnkeyedAuthorityPersistForTesting(fn func(string, time.Time, time.Time, time.Duration) error) func() {
 	original := unkeyedAuthorityPersist
 	unkeyedAuthorityPersist = fn
 	return func() { unkeyedAuthorityPersist = original }
@@ -122,42 +119,48 @@ type unkeyedGraceState struct {
 	keyConfigured atomic.Bool
 
 	mu                    sync.Mutex
-	anchorMono            int64        // set-once monotonic anchor; 0 = unarmed
-	deadlineMono          atomic.Int64 // anchorMono + grace; 0 = unarmed
-	earliestWall          time.Time    // persisted earliest wall stamp
-	highWaterWall         time.Time    // persisted high-water wall stamp
-	corrupt               bool         // record present but unparseable at load
-	loaded                bool         // the persisted record has been read this process
-	notPersisted          bool         // a persist failed; status suffix names it
-	persistFailureLogged  bool         // suppress repeated errors in one failure episode
-	lastLogRung           int          // highest notice rung already logged (0..4)
+	anchorMono            int64         // process-local monotonic accounting origin
+	deadlineMono          atomic.Int64  // monotonic deadline; 0 = unarmed
+	elapsedBase           time.Duration // persisted elapsed floor at process start
+	elapsedFloor          time.Duration // greatest elapsed observation, persisted
+	earliestWall          time.Time     // persisted earliest wall stamp
+	highWaterWall         time.Time     // persisted high-water wall stamp
+	corrupt               bool          // record present but unparseable at load
+	loaded                bool          // the persisted record has been read this process
+	notPersisted          bool          // a persist failed; status suffix names it
+	persistFailureLogged  bool          // suppress repeated errors in one failure episode
+	lastLogRung           int           // highest notice rung already logged (0..4)
 	lastPostExpiryLogMono int64
 }
 
 // loadUnkeyedAuthorityRecord reads the persisted record. present=false means
 // the file is absent (fresh stamp). corrupt=true means present but
-// unparseable (expired-at-boot). A future-dated earliest is clamped down to
-// now here, and the clamped value is what later touches persist.
-func loadUnkeyedAuthorityRecord(path string, now time.Time) (earliest, highWater time.Time, present, corrupt, clamped bool) {
+// unparseable/legacy (expired-at-boot). A future-dated earliest is clamped
+// down to now, and the clamped value is what later touches persist.
+func loadUnkeyedAuthorityRecord(path string, now time.Time) (earliest, highWater time.Time, elapsed time.Duration, present, corrupt, clamped bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return time.Time{}, time.Time{}, false, false, false
+			return time.Time{}, time.Time{}, 0, false, false, false
 		}
 		// An unreadable-but-present file is not absence.
-		return time.Time{}, time.Time{}, true, true, false
+		return time.Time{}, time.Time{}, 0, true, true, false
 	}
 	fields := strings.Fields(strings.TrimSpace(string(data)))
-	if len(fields) != 3 || fields[0] != "v1" {
-		return time.Time{}, time.Time{}, true, true, false
+	if len(fields) != 4 || fields[0] != "v2" {
+		// v1 has no persisted monotonic history. Granting any wall-derived
+		// remainder could refund elapsed time hidden by a rollback/restart.
+		return time.Time{}, time.Time{}, 0, true, true, false
 	}
 	e, err1 := strconv.ParseInt(fields[1], 10, 64)
 	h, err2 := strconv.ParseInt(fields[2], 10, 64)
-	if err1 != nil || err2 != nil || e <= 0 || h < e {
-		return time.Time{}, time.Time{}, true, true, false
+	n, err3 := strconv.ParseInt(fields[3], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil || e <= 0 || h < e || n < 0 {
+		return time.Time{}, time.Time{}, 0, true, true, false
 	}
 	earliest = time.Unix(0, e).UTC()
 	highWater = time.Unix(0, h).UTC()
+	elapsed = time.Duration(n)
 	if earliest.After(now) {
 		earliest = now // clamp down: shorten, never extend
 		clamped = true
@@ -165,22 +168,25 @@ func loadUnkeyedAuthorityRecord(path string, now time.Time) (earliest, highWater
 	if highWater.Before(earliest) {
 		highWater = earliest
 	}
-	return earliest, highWater, true, false, clamped
+	return earliest, highWater, elapsed, true, false, clamped
 }
 
 // persistUnkeyedAuthorityRecord durably writes the record. Best-effort: the
 // caller records/report failures but never fails config apply or boot.
-func persistUnkeyedAuthorityRecord(path string, earliest, highWater time.Time) error {
+func persistUnkeyedAuthorityRecord(path string, earliest, highWater time.Time, elapsed time.Duration) error {
 	if earliest.IsZero() {
 		return errors.New("empty unkeyed-authority grace anchor")
 	}
 	if highWater.Before(earliest) {
 		highWater = earliest
 	}
+	if elapsed < 0 {
+		return errors.New("negative unkeyed-authority elapsed floor")
+	}
 	if err := fsatomic.MkdirAllDurable(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	body := fmt.Sprintf("v1 %d %d\n", earliest.UnixNano(), highWater.UnixNano())
+	body := fmt.Sprintf("v2 %d %d %d\n", earliest.UnixNano(), highWater.UnixNano(), elapsed.Nanoseconds())
 	if err := fsatomic.WriteFileDurable(path, []byte(body), 0o644); err != nil {
 		var postRename *fsatomic.PostRenameSyncError
 		if errors.As(err, &postRename) {
@@ -194,7 +200,7 @@ func persistUnkeyedAuthorityRecord(path string, earliest, highWater time.Time) e
 // persistUnkeyedAuthorityLocked is called with unkeyedGrace.mu held.
 func (m *Manager) persistUnkeyedAuthorityLocked() {
 	st := &m.unkeyedGrace
-	err := unkeyedAuthorityPersist(unkeyedAuthorityGraceStatePath, st.earliestWall, st.highWaterWall)
+	err := unkeyedAuthorityPersist(unkeyedAuthorityGraceStatePath, st.earliestWall, st.highWaterWall, st.elapsedFloor)
 	if err == nil {
 		st.notPersisted = false
 		st.persistFailureLogged = false
@@ -238,50 +244,44 @@ func (m *Manager) touchUnkeyedAuthorityLocked(clusterEnabled bool) {
 		return
 	}
 	st := &m.unkeyedGrace
-	now := unkeyedAuthorityNow()
+	now := unkeyedAuthorityNow().UTC()
 	mono := unkeyedAuthorityMonoNow()
 	loadedExpired := false
-	remainingOnBoot := unkeyedAuthorityGrace
-	clamped := false
+	stamped := false
+	changed := false
 	st.mu.Lock()
 	if !st.loaded {
 		st.loaded = true
-		earliest, highWater, present, corrupt, clampOnLoad := loadUnkeyedAuthorityRecord(unkeyedAuthorityGraceStatePath, now)
+		earliest, highWater, elapsed, present, corrupt, clamped := loadUnkeyedAuthorityRecord(
+			unkeyedAuthorityGraceStatePath, now)
 		switch {
 		case corrupt:
 			st.corrupt = true
 			loadedExpired = true
-			slog.Error("cluster: unkeyed-authority grace anchor is corrupt; "+
+			slog.Error("cluster: unkeyed-authority grace anchor is corrupt or legacy; "+
 				"treating the grace as expired at boot (#16016); key the cluster to recover",
 				"path", unkeyedAuthorityGraceStatePath)
 		case present:
 			st.earliestWall = earliest
-			if highWater.After(now) {
-				// Expiry-by-wall uses max(wallNow, highWater) across restarts.
-				now = highWater
-			}
 			st.highWaterWall = highWater
-			expiry := earliest.Add(unkeyedAuthorityGrace)
-			if !now.Before(expiry) {
-				loadedExpired = true
-				remainingOnBoot = 0
-			} else {
-				remainingOnBoot = expiry.Sub(now)
+			st.elapsedFloor = elapsed
+			effectiveWall := now
+			if highWater.After(effectiveWall) {
+				effectiveWall = highWater
 			}
-			clamped = clampOnLoad
-		}
-	}
-	if !st.earliestWall.IsZero() && st.anchorMono == 0 {
-		wall := unkeyedAuthorityNow()
-		if st.highWaterWall.After(wall) {
-			wall = st.highWaterWall
-		}
-		expiry := st.earliestWall.Add(unkeyedAuthorityGrace)
-		if !wall.Before(expiry) {
-			loadedExpired = true
-			remainingOnBoot = 0
-		} else {
-			remainingOnBoot = expiry.Sub(wall)
+			if wallElapsed := unkeyedElapsedFromWall(earliest, effectiveWall); wallElapsed > st.elapsedFloor {
+				st.elapsedFloor = wallElapsed
+				changed = true
+			}
+			st.elapsedBase = st.elapsedFloor
+			remaining := unkeyedAuthorityGrace - st.elapsedFloor
+			if wallRemaining := earliest.Add(unkeyedAuthorityGrace).Sub(effectiveWall); wallRemaining < remaining {
+				remaining = wallRemaining
+			}
+			if remaining <= 0 {
+				loadedExpired = true
+			}
+			changed = changed || clamped
 		}
 	}
 	if st.corrupt {
@@ -291,36 +291,61 @@ func (m *Manager) touchUnkeyedAuthorityLocked(clusterEnabled bool) {
 		}
 		return
 	}
-	// Set-once monotonic arm. A restored, already-expired wall record stays
-	// expired; the fresh monotonic deadline is irrelevant because the atomic
-	// expired word is sticky until a local key commit clears the record.
 	if st.anchorMono == 0 {
 		st.anchorMono = mono
-		st.deadlineMono.Store(mono + remainingOnBoot.Nanoseconds())
+		st.elapsedBase = st.elapsedFloor
+		remaining := unkeyedAuthorityGrace - st.elapsedFloor
+		if !st.earliestWall.IsZero() {
+			effectiveWall := now
+			if st.highWaterWall.After(effectiveWall) {
+				effectiveWall = st.highWaterWall
+			}
+			if wallRemaining := st.earliestWall.Add(unkeyedAuthorityGrace).Sub(effectiveWall); wallRemaining < remaining {
+				remaining = wallRemaining
+			}
+		}
+		if remaining < 0 {
+			remaining = 0
+		}
+		st.deadlineMono.Store(mono + remaining.Nanoseconds())
 		if st.earliestWall.IsZero() {
 			st.earliestWall = now
 			st.highWaterWall = now
+			st.elapsedBase = 0
+			st.elapsedFloor = 0
 			m.persistUnkeyedAuthorityLocked()
-			slog.Warn("cluster: unkeyed-authority grace stamped; unauthenticated control authority "+
-				"remains accepted until the grace expires (#16016)",
-				"expires", st.earliestWall.Add(unkeyedAuthorityGrace).Format(time.RFC3339))
+			stamped = true
 		}
 	}
-	if clamped {
-		m.persistUnkeyedAuthorityLocked()
-	}
-	// High-water ratchet on every touch. In-process expiry is MONOTONIC only:
-	// a forward wall step cannot accelerate it, and a backward step cannot
-	// extend it. The wall record is consulted only when a process starts.
-	if wallNow := unkeyedAuthorityNow(); wallNow.After(st.highWaterWall) {
-		st.highWaterWall = wallNow
-		m.persistUnkeyedAuthorityLocked()
+	if !st.earliestWall.IsZero() {
+		wallNow := unkeyedAuthorityNow().UTC()
+		if wallNow.After(st.highWaterWall) {
+			st.highWaterWall = wallNow
+			changed = true
+		}
+		monotonicElapsed := st.elapsedBase + time.Duration(mono-st.anchorMono)
+		wallElapsed := unkeyedElapsedFromWall(st.earliestWall, maxAuthorityWall(wallNow, st.highWaterWall))
+		nextElapsed := st.elapsedFloor
+		if monotonicElapsed > nextElapsed {
+			nextElapsed = monotonicElapsed
+		}
+		if wallElapsed > nextElapsed {
+			nextElapsed = wallElapsed
+		}
+		nextElapsed = capUnkeyedElapsed(nextElapsed)
+		if nextElapsed > st.elapsedFloor {
+			st.elapsedFloor = nextElapsed
+			changed = true
+		}
 	}
 	if deadline := st.deadlineMono.Load(); deadline != 0 && mono >= deadline {
 		loadedExpired = true
 	}
 	var noticeRung int
 	var noticeExpiry time.Time
+	if changed {
+		m.persistUnkeyedAuthorityLocked()
+	}
 	if !loadedExpired {
 		noticeRung, noticeExpiry = m.logUnkeyedGraceLadderLocked()
 	}
@@ -329,13 +354,42 @@ func (m *Manager) touchUnkeyedAuthorityLocked(clusterEnabled bool) {
 		expiry = st.earliestWall.Add(unkeyedAuthorityGrace)
 	}
 	st.mu.Unlock()
+	if stamped {
+		slog.Warn("cluster: unkeyed-authority grace stamped; unauthenticated control authority "+
+			"remains accepted until the grace expires (#16016)", "expires", expiry.Format(time.RFC3339))
+		m.notifyUnkeyedGraceAlarm("stamped", true, expiry)
+	}
 	if loadedExpired {
 		m.markUnkeyedAuthorityExpired(expiry)
-	} else if noticeRung != 0 {
+	} else if noticeRung != 0 && !stamped {
 		m.notifyUnkeyedGraceAlarm(unkeyedGraceNoticeName(noticeRung), true, noticeExpiry)
 	}
-
 }
+
+func maxAuthorityWall(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+func capUnkeyedElapsed(elapsed time.Duration) time.Duration {
+	if elapsed < 0 {
+		return 0
+	}
+	if elapsed > unkeyedAuthorityGrace {
+		return unkeyedAuthorityGrace
+	}
+	return elapsed
+}
+
+func unkeyedElapsedFromWall(earliest, effectiveWall time.Time) time.Duration {
+	if earliest.IsZero() || !effectiveWall.After(earliest) {
+		return 0
+	}
+	return capUnkeyedElapsed(effectiveWall.Sub(earliest))
+}
+
 // logUnkeyedGraceLadderLocked emits the once-per-rung notice ladder using the
 // monotonic deadline, so a wall-clock step cannot move an in-process notice.
 // Caller holds st.mu.
@@ -404,43 +458,58 @@ func unkeyedGraceNoticeName(rung int) string {
 
 func (m *Manager) notifyUnkeyedGraceAlarm(rung string, raised bool, expiry time.Time) {
 	if hook := m.unkeyedGraceAlarmHookFn(); hook != nil {
-		go hook(rung, raised, expiry)
+		// Keep the transition ordered and synchronous. Boot rungs can be
+		// generated before the daemon's event reader exists, and the daemon
+		// hook latches them until its sink is ready; a goroutine per rung could
+		// reorder the FIFO or be lost during shutdown.
+		hook(rung, raised, expiry)
 	}
 }
 
-// noteUnkeyedKeyedLocked handles the accepted-set-nonempty transition:
-// delete the persisted record, clear the in-process anchor, and — only when
-// transitioning out of the expired posture — arm the recovery hold at the
-// current proof generation. Caller holds m.mu.
+// noteUnkeyedKeyedLocked handles a local accepted-set transition. A normal
+// in-grace key commit removes the obsolete anchor. Expired debt is retained
+// until an authenticated heartbeat has installed peer state.
+// Caller holds m.mu.
 func (m *Manager) noteUnkeyedKeyedLocked() {
 	st := &m.unkeyedGrace
 	wasKeyed := st.keyConfigured.Swap(true)
-	wasExpired := false
-	if !wasKeyed {
-		wasExpired = st.expired.Load()
-		if deadline := st.deadlineMono.Load(); deadline != 0 && unkeyedAuthorityMonoNow() >= deadline {
-			wasExpired = true
+	if wasKeyed && st.recoveryHold.Load() {
+		return
+	}
+	wasExpired := m.loadUnkeyedAnchorForKeyedStateLocked()
+	st.mu.Lock()
+	if wasExpired {
+		if st.earliestWall.IsZero() && !st.corrupt {
+			now := unkeyedAuthorityNow().UTC()
+			st.earliestWall = now.Add(-unkeyedAuthorityGrace)
+			st.highWaterWall = now
 		}
-		if !wasExpired && st.deadlineMono.Load() == 0 {
-			earliest, highWater, present, corrupt, _ := loadUnkeyedAuthorityRecord(
-				unkeyedAuthorityGraceStatePath, unkeyedAuthorityNow())
-			if present && corrupt {
-				wasExpired = true
-			} else if present {
-				now := unkeyedAuthorityNow()
-				if highWater.After(now) {
-					now = highWater
-				}
-				wasExpired = !now.Before(earliest.Add(unkeyedAuthorityGrace))
+		if !st.earliestWall.IsZero() {
+			expiry := st.earliestWall.Add(unkeyedAuthorityGrace)
+			changed := st.highWaterWall.Before(expiry) || st.elapsedFloor < unkeyedAuthorityGrace
+			st.highWaterWall = maxAuthorityWall(st.highWaterWall, expiry)
+			st.elapsedFloor = unkeyedAuthorityGrace
+			if changed || st.notPersisted {
+				m.persistUnkeyedAuthorityLocked()
 			}
 		}
+		st.anchorMono = 0
+		st.deadlineMono.Store(0)
+		st.mu.Unlock()
+		st.expired.Store(true)
+		st.armedGen.Store(m.peerProofGen.Load())
+		st.recoveryHold.Store(true)
+		slog.Warn("cluster: recovery hold armed after keying an expired unkeyed cluster (#16016); " +
+			"takeover stays suppressed until the first authenticated peer heartbeat")
+		if !wasKeyed {
+			m.notifyUnkeyedGraceAlarm("cleared", false, time.Time{})
+		}
+		return
 	}
-
-	// Serialize deletion with the one-second high-water sweep: a write that
-	// started before this transition must finish before the anchor is removed.
-	st.mu.Lock()
 	st.anchorMono = 0
 	st.deadlineMono.Store(0)
+	st.elapsedBase = 0
+	st.elapsedFloor = 0
 	st.earliestWall = time.Time{}
 	st.highWaterWall = time.Time{}
 	st.corrupt = false
@@ -451,15 +520,96 @@ func (m *Manager) noteUnkeyedKeyedLocked() {
 	deleteUnkeyedAuthorityRecord(unkeyedAuthorityGraceStatePath)
 	st.mu.Unlock()
 	st.expired.Store(false)
-	if !wasKeyed && wasExpired {
-		st.armedGen.Store(m.peerProofGen.Load())
-		st.recoveryHold.Store(true)
-		slog.Warn("cluster: recovery hold armed after keying an expired unkeyed cluster (#16016); " +
-			"takeover stays suppressed until the first authenticated peer heartbeat")
-		m.notifyUnkeyedGraceAlarm("cleared", false, time.Time{})
-	} else if !wasKeyed {
+	if !wasKeyed {
 		st.recoveryHold.Store(false)
 	}
+}
+
+// restoreUnkeyedKeyedStateLocked preserves expired-anchor recovery debt when
+// boot or peer configuration establishes a key without a local key commit.
+// Caller holds m.mu.
+func (m *Manager) restoreUnkeyedKeyedStateLocked() {
+	st := &m.unkeyedGrace
+	st.keyConfigured.Store(true)
+	if m.loadUnkeyedAnchorForKeyedStateLocked() {
+		st.expired.Store(true)
+		st.recoveryHold.Store(true)
+		st.armedGen.Store(m.peerProofGen.Load())
+		slog.Warn("cluster: restored unkeyed-authority recovery hold from expired anchor (#16016); " +
+			"takeover stays suppressed until the first authenticated peer heartbeat")
+	}
+}
+
+// loadUnkeyedAnchorForKeyedStateLocked loads the on-disk evidence if needed
+// and reports whether its wall/elapsed cutoff or the in-process deadline has
+// expired. Caller holds m.mu.
+func (m *Manager) loadUnkeyedAnchorForKeyedStateLocked() bool {
+	st := &m.unkeyedGrace
+	now := unkeyedAuthorityNow().UTC()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.expired.Load() {
+		if st.notPersisted && !st.earliestWall.IsZero() {
+			m.persistUnkeyedAuthorityLocked()
+		}
+		return true
+	}
+	expired := st.expired.Load()
+	changed := false
+	if deadline := st.deadlineMono.Load(); deadline != 0 && unkeyedAuthorityMonoNow() >= deadline {
+		expired = true
+	}
+	if !st.loaded {
+		st.loaded = true
+		earliest, highWater, elapsed, present, corrupt, _ := loadUnkeyedAuthorityRecord(
+			unkeyedAuthorityGraceStatePath, now)
+		if corrupt {
+			st.corrupt = true
+			expired = true
+		} else if present {
+			st.earliestWall = earliest
+			st.highWaterWall = highWater
+			st.elapsedFloor = elapsed
+			st.elapsedBase = elapsed
+		}
+	}
+	if st.corrupt {
+		return true
+	}
+	if !st.earliestWall.IsZero() {
+		effectiveWall := maxAuthorityWall(now, st.highWaterWall)
+		wallElapsed := unkeyedElapsedFromWall(st.earliestWall, effectiveWall)
+		if wallElapsed > st.elapsedFloor {
+			st.elapsedFloor = wallElapsed
+			changed = true
+		}
+		if effectiveWall.After(st.highWaterWall) {
+			st.highWaterWall = effectiveWall
+			changed = true
+		}
+		if st.elapsedFloor >= unkeyedAuthorityGrace ||
+			!effectiveWall.Before(st.earliestWall.Add(unkeyedAuthorityGrace)) {
+			expired = true
+		}
+	}
+	if expired {
+		if !st.earliestWall.IsZero() {
+			expiry := st.earliestWall.Add(unkeyedAuthorityGrace)
+			if st.highWaterWall.Before(expiry) {
+				st.highWaterWall = expiry
+				changed = true
+			}
+			if st.elapsedFloor < unkeyedAuthorityGrace {
+				st.elapsedFloor = unkeyedAuthorityGrace
+				changed = true
+			}
+			if changed || st.notPersisted {
+				m.persistUnkeyedAuthorityLocked()
+			}
+		}
+		st.expired.Store(true)
+	}
+	return expired
 }
 
 // noteUnkeyedKeyClearedLocked is the only transition that may deliberately
@@ -471,6 +621,8 @@ func (m *Manager) noteUnkeyedKeyClearedLocked() {
 	st.mu.Lock()
 	st.anchorMono = 0
 	st.deadlineMono.Store(0)
+	st.elapsedBase = 0
+	st.elapsedFloor = 0
 	st.earliestWall = time.Time{}
 	st.highWaterWall = time.Time{}
 	st.corrupt = false
@@ -488,10 +640,10 @@ func (m *Manager) noteUnkeyedKeyClearedLocked() {
 }
 
 // closePeerKeyClearWithoutGraceLocked restores an existing anchor without
-// creating one. If a peer key-clear leaves no local cutoff (for example, a
-// local key commit deleted it earlier), it persists an already-expired
-// sentinel instead of reopening unauthenticated authority. Caller holds m.mu.
-func (m *Manager) closePeerKeyClearWithoutGraceLocked(clusterEnabled bool) {
+// creating one. Clearing a key that was previously configured after restart is
+// fail-closed because the keyed interval is not measured by the grace clocks.
+// Caller holds m.mu.
+func (m *Manager) closePeerKeyClearWithoutGraceLocked(clusterEnabled, wasKeyConfigured bool) {
 	if m == nil || !clusterEnabled {
 		return
 	}
@@ -504,21 +656,48 @@ func (m *Manager) closePeerKeyClearWithoutGraceLocked(clusterEnabled bool) {
 	changed := false
 	if !st.loaded {
 		st.loaded = true
-		earliest, highWater, present, corrupt, clamped := loadUnkeyedAuthorityRecord(
+		earliest, highWater, elapsed, present, corrupt, clamped := loadUnkeyedAuthorityRecord(
 			unkeyedAuthorityGraceStatePath, now)
 		switch {
 		case corrupt:
 			st.corrupt = true
 			expired = true
-			slog.Error("cluster: peer key-clear found a corrupt unkeyed-authority anchor; "+
+			slog.Error("cluster: peer key-clear found a corrupt or legacy unkeyed-authority anchor; "+
 				"failing closed (#16016)", "path", unkeyedAuthorityGraceStatePath)
 		case present:
 			st.earliestWall = earliest
 			st.highWaterWall = highWater
+			st.elapsedFloor = elapsed
+			st.elapsedBase = elapsed
 			changed = clamped
 		}
 	}
-	if st.corrupt {
+	if wasKeyConfigured && st.deadlineMono.Load() == 0 {
+		if st.corrupt {
+			expired = true
+		} else if st.earliestWall.IsZero() {
+			st.earliestWall = now.Add(-unkeyedAuthorityGrace)
+			st.highWaterWall = now
+			st.elapsedBase = unkeyedAuthorityGrace
+			st.elapsedFloor = unkeyedAuthorityGrace
+			st.anchorMono = mono
+			st.deadlineMono.Store(mono)
+			expiry = now
+			changed = true
+			expired = true
+		} else {
+			expiry = st.earliestWall.Add(unkeyedAuthorityGrace)
+			if st.highWaterWall.Before(expiry) {
+				st.highWaterWall = expiry
+				changed = true
+			}
+			if st.elapsedFloor < unkeyedAuthorityGrace {
+				st.elapsedFloor = unkeyedAuthorityGrace
+				changed = true
+			}
+			expired = true
+		}
+	} else if st.corrupt {
 		expired = true
 	} else if st.earliestWall.IsZero() {
 		// No anchor means a peer frame cannot establish a fresh provisioning
@@ -526,6 +705,8 @@ func (m *Manager) closePeerKeyClearWithoutGraceLocked(clusterEnabled bool) {
 		// missing file as day-zero provisioning.
 		st.earliestWall = now.Add(-unkeyedAuthorityGrace)
 		st.highWaterWall = now
+		st.elapsedBase = unkeyedAuthorityGrace
+		st.elapsedFloor = unkeyedAuthorityGrace
 		st.anchorMono = mono
 		st.deadlineMono.Store(mono)
 		expiry = now
@@ -533,31 +714,38 @@ func (m *Manager) closePeerKeyClearWithoutGraceLocked(clusterEnabled bool) {
 		expired = true
 	} else {
 		expiry = st.earliestWall.Add(unkeyedAuthorityGrace)
+		effectiveWall := maxAuthorityWall(now, st.highWaterWall)
+		wallElapsed := unkeyedElapsedFromWall(st.earliestWall, effectiveWall)
+		if wallElapsed > st.elapsedFloor {
+			st.elapsedFloor = wallElapsed
+			changed = true
+		}
 		deadline := st.deadlineMono.Load()
 		if deadline == 0 {
-			effectiveWall := now
-			if st.highWaterWall.After(effectiveWall) {
-				effectiveWall = st.highWaterWall
+			st.anchorMono = mono
+			st.elapsedBase = st.elapsedFloor
+			remaining := unkeyedAuthorityGrace - st.elapsedFloor
+			if wallRemaining := expiry.Sub(effectiveWall); wallRemaining < remaining {
+				remaining = wallRemaining
 			}
-			remaining := expiry.Sub(effectiveWall)
 			if remaining < 0 {
 				remaining = 0
 			}
-			st.anchorMono = mono
 			deadline = mono + remaining.Nanoseconds()
 			st.deadlineMono.Store(deadline)
-		}
-		if mono >= deadline {
-			expired = true
 		}
 		if now.After(st.highWaterWall) {
 			st.highWaterWall = now
 			changed = true
 		}
+		if st.elapsedFloor >= unkeyedAuthorityGrace || !effectiveWall.Before(expiry) || mono >= deadline {
+			expired = true
+		}
 	}
 	if changed {
 		m.persistUnkeyedAuthorityLocked()
 	}
+
 	st.mu.Unlock()
 	if expired {
 		m.markUnkeyedAuthorityExpired(expiry)
@@ -599,10 +787,16 @@ func (m *Manager) markUnkeyedAuthorityExpired(expiry time.Time) {
 		expiry = st.earliestWall.Add(unkeyedAuthorityGrace)
 	}
 	if !expiry.IsZero() {
+		changed := st.highWaterWall.Before(expiry) || st.elapsedFloor < unkeyedAuthorityGrace
 		if st.highWaterWall.Before(expiry) {
 			st.highWaterWall = expiry
 		}
-		m.persistUnkeyedAuthorityLocked()
+		if st.elapsedFloor < unkeyedAuthorityGrace {
+			st.elapsedFloor = unkeyedAuthorityGrace
+		}
+		if changed || st.notPersisted {
+			m.persistUnkeyedAuthorityLocked()
+		}
 	}
 	st.lastLogRung = 4
 	st.lastPostExpiryLogMono = unkeyedAuthorityMonoNow()
@@ -623,59 +817,98 @@ func (m *Manager) checkUnkeyedGraceNotices() {
 		return
 	}
 	st := &m.unkeyedGrace
+	now := unkeyedAuthorityNow().UTC()
+	mono := unkeyedAuthorityMonoNow()
+	expired := false
+	changed := false
 	st.mu.Lock()
+	if st.keyConfigured.Load() {
+		st.mu.Unlock()
+		return
+	}
+	if st.expired.Load() {
+		rung, expiry := m.logUnkeyedGraceLadderLocked()
+		st.mu.Unlock()
+		if rung != 0 {
+			m.notifyUnkeyedGraceAlarm(unkeyedGraceNoticeName(rung), true, expiry)
+		}
+		return
+	}
 	if !st.loaded {
 		st.loaded = true
-		earliest, highWater, present, corrupt, clamped := loadUnkeyedAuthorityRecord(
-			unkeyedAuthorityGraceStatePath, unkeyedAuthorityNow())
+		earliest, highWater, elapsed, present, corrupt, clamped := loadUnkeyedAuthorityRecord(
+			unkeyedAuthorityGraceStatePath, now)
 		if corrupt {
 			st.corrupt = true
-			st.expired.Store(true)
+			expired = true
 		} else if present {
 			st.earliestWall = earliest
 			st.highWaterWall = highWater
-			effectiveWall := unkeyedAuthorityNow()
-			if highWater.After(effectiveWall) {
-				effectiveWall = highWater
+			st.elapsedFloor = elapsed
+			effectiveWall := maxAuthorityWall(now, highWater)
+			if wallElapsed := unkeyedElapsedFromWall(earliest, effectiveWall); wallElapsed > st.elapsedFloor {
+				st.elapsedFloor = wallElapsed
+				changed = true
 			}
-			if !effectiveWall.Before(earliest.Add(unkeyedAuthorityGrace)) {
-				st.expired.Store(true)
-			}
-			if clamped {
-				m.persistUnkeyedAuthorityLocked()
-			}
+			st.elapsedBase = st.elapsedFloor
+			changed = changed || clamped
 		}
 	}
 	if !st.earliestWall.IsZero() {
-		if now := unkeyedAuthorityNow(); now.After(st.highWaterWall) {
-			st.highWaterWall = now
-			m.persistUnkeyedAuthorityLocked()
+		if st.anchorMono == 0 {
+			st.anchorMono = mono
+			st.elapsedBase = st.elapsedFloor
+			effectiveWall := maxAuthorityWall(now, st.highWaterWall)
+			remaining := unkeyedAuthorityGrace - st.elapsedFloor
+			if wallRemaining := st.earliestWall.Add(unkeyedAuthorityGrace).Sub(effectiveWall); wallRemaining < remaining {
+				remaining = wallRemaining
+			}
+			if remaining < 0 {
+				remaining = 0
+			}
+			st.deadlineMono.Store(mono + remaining.Nanoseconds())
+		}
+		wallNow := unkeyedAuthorityNow().UTC()
+		if wallNow.After(st.highWaterWall) {
+			st.highWaterWall = wallNow
+			changed = true
+		}
+		monotonicElapsed := st.elapsedBase + time.Duration(mono-st.anchorMono)
+		wallElapsed := unkeyedElapsedFromWall(st.earliestWall, maxAuthorityWall(wallNow, st.highWaterWall))
+		nextElapsed := st.elapsedFloor
+		if monotonicElapsed > nextElapsed {
+			nextElapsed = monotonicElapsed
+		}
+		if wallElapsed > nextElapsed {
+			nextElapsed = wallElapsed
+		}
+		nextElapsed = capUnkeyedElapsed(nextElapsed)
+		if nextElapsed > st.elapsedFloor {
+			st.elapsedFloor = nextElapsed
+			changed = true
+		}
+		if deadline := st.deadlineMono.Load(); deadline != 0 && mono >= deadline {
+			expired = true
 		}
 	}
-	keyConfigured := st.keyConfigured.Load()
-	if !keyConfigured && st.anchorMono == 0 && !st.earliestWall.IsZero() {
-		mono := unkeyedAuthorityMonoNow()
-		effectiveWall := unkeyedAuthorityNow()
-		if st.highWaterWall.After(effectiveWall) {
-			effectiveWall = st.highWaterWall
-		}
-		remaining := st.earliestWall.Add(unkeyedAuthorityGrace).Sub(effectiveWall)
-		if remaining < 0 {
-			remaining = 0
-		}
-		st.anchorMono = mono
-		st.deadlineMono.Store(mono + remaining.Nanoseconds())
+	expiry := time.Time{}
+	if !st.earliestWall.IsZero() {
+		expiry = st.earliestWall.Add(unkeyedAuthorityGrace)
+	}
+	if changed {
+		m.persistUnkeyedAuthorityLocked()
 	}
 	st.mu.Unlock()
-	if keyConfigured {
+	if expired {
+		m.markUnkeyedAuthorityExpired(expiry)
 		return
 	}
 	m.UnkeyedAuthorityExpired()
 	st.mu.Lock()
-	rung, expiry := m.logUnkeyedGraceLadderLocked()
+	rung, rungExpiry := m.logUnkeyedGraceLadderLocked()
 	st.mu.Unlock()
 	if rung != 0 {
-		m.notifyUnkeyedGraceAlarm(unkeyedGraceNoticeName(rung), true, expiry)
+		m.notifyUnkeyedGraceAlarm(unkeyedGraceNoticeName(rung), true, rungExpiry)
 	}
 }
 
@@ -714,6 +947,8 @@ func (m *Manager) RestartUnkeyedAuthorityGrace(operator string) (time.Time, erro
 	deleteUnkeyedAuthorityRecord(unkeyedAuthorityGraceStatePath)
 	st.anchorMono = mono
 	st.deadlineMono.Store(mono + unkeyedAuthorityGrace.Nanoseconds())
+	st.elapsedBase = 0
+	st.elapsedFloor = 0
 	st.earliestWall = now
 	st.highWaterWall = now
 	st.corrupt = false
@@ -813,18 +1048,20 @@ func (m *Manager) PeerProofGeneration() uint64 {
 }
 
 // publishFreshHeartbeatProof runs only after an authenticated heartbeat has
-// committed its peer state. Clearing the recovery hold and reevaluating under
-// one manager lock prevents election from observing an empty peer posture.
+// committed its peer state. The hold is released for election under Manager.mu;
+// the persisted evidence is removed only after normal election is reevaluated.
 func (m *Manager) publishFreshHeartbeatProof() {
 	if m == nil {
 		return
 	}
 	gen := m.peerProofGen.Add(1)
 	st := &m.unkeyedGrace
-	if !st.recoveryHold.Load() || gen <= st.armedGen.Load() || !st.recoveryHold.CompareAndSwap(true, false) {
+	m.mu.Lock()
+	if !st.keyConfigured.Load() || !st.recoveryHold.Load() || gen <= st.armedGen.Load() ||
+		!st.recoveryHold.CompareAndSwap(true, false) {
+		m.mu.Unlock()
 		return
 	}
-	m.mu.Lock()
 	for rgID, rg := range m.groups {
 		// A fresh authenticated peer-primary claim supersedes the local
 		// break-glass pin before normal election resolves the two claims. A
@@ -838,6 +1075,21 @@ func (m *Manager) publishFreshHeartbeatProof() {
 	} else {
 		m.electSingleNode()
 	}
+	st.mu.Lock()
+	deleteUnkeyedAuthorityRecord(unkeyedAuthorityGraceStatePath)
+	st.anchorMono = 0
+	st.deadlineMono.Store(0)
+	st.elapsedBase = 0
+	st.elapsedFloor = 0
+	st.earliestWall = time.Time{}
+	st.highWaterWall = time.Time{}
+	st.corrupt = false
+	st.notPersisted = false
+	st.persistFailureLogged = false
+	st.lastLogRung = 0
+	st.lastPostExpiryLogMono = 0
+	st.mu.Unlock()
+	st.expired.Store(false)
 	m.mu.Unlock()
 }
 

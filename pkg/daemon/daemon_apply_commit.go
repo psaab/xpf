@@ -660,6 +660,9 @@ func (d *Daemon) syncAndApplyWithAncestry(
 			}
 		}
 	}
+	if d.testBeforeSyncApplySemAcquire != nil {
+		d.testBeforeSyncApplySemAcquire()
+	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return nil, err
 	}
@@ -688,6 +691,10 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	// primary's delete-sync).
 	d.pendingRenameMu.Lock()
 	oldActive := d.store.ActiveConfig()
+	if err := d.recheckConfigSyncAuthorityAtApply(ctx); err != nil {
+		d.pendingRenameMu.Unlock()
+		return nil, err
+	}
 	var syncErr error
 	// #18606: the local control-address gate runs INSIDE SyncApply, on the
 	// compiled peer text and BEFORE anything is promoted. Refusing after

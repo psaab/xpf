@@ -387,7 +387,7 @@ func TestApplyConfigLockedCapturesAndPassesFabricErr_6791(t *testing.T) {
 			"a discarded return value means a terminal fabric failure is still " +
 			"reported as commit success (#6791)")
 	}
-	call := "d.applyTailReconciles("
+	call := "d.applyTailReconcilesWithContext("
 	i := strings.Index(src, call)
 	if i < 0 {
 		t.Fatal("could not find the applyTailReconciles call in daemon_apply.go")
