@@ -360,9 +360,9 @@ interfaces { ge-0/0/0 { description first; } ge-0/0/1 { description second; } }
 	})
 
 	t.Run("indeterminate-is-warning-only", func(t *testing.T) {
-		// Fixture is the config package's measured PARTIAL text; on the
-		// Store path the strict schema prewalk degrades it to
-		// INDETERMINATE (twin compile fails), which is what this cell pins.
+		// Fixture is the config package's lenient-measured PARTIAL text;
+		// under strict Store compiles it degrades to INDETERMINATE (its
+		// braced twin is refused), which is what this cell pins.
 		const partial = `interfaces { ge-0/0/1 { unit 0 { family inet { address 192.0.2.2/24 vrrp-group 1 authentication-type simple; } } } }`
 		s := packedTailStageText18771(t, -1, partial)
 		_, gen, err := s.CompileCandidateGen()
@@ -495,12 +495,18 @@ func hasPackedTailVerdict18771(cfg *config.Config, want string) bool {
 }
 
 func TestPackedTailEnforce18771PartialCommitSucceeds(t *testing.T) {
-	// The config package independently measured this fixture as
-	// diagnostic-only PARTIAL through its eligible compile harness.
-	// Store promotion adds the strict schema prewalk before the gate;
-	// that can make a twin compile fail and degrade the verdict to
-	// INDETERMINATE. Both are warning-only and never refuse, so the
-	// store-level contract is: commits, and never yields DROP.
+	// The config package measured this fixture as diagnostic-only
+	// PARTIAL only under lenient opts: under strict opts its braced
+	// twin is refused outright (VRRP authentication-type is not
+	// enforced on the RFC 5798 dataplane), so adjudicateSite returns
+	// INDETERMINATE. Store promotion compiles strict, so its verdict
+	// here is INDETERMINATE — warning-only, never DROP. A genuine
+	// strict-compilable PARTIAL-at-Store fixture does not exist in
+	// the measured corpus (the only measured PARTIAL is this one);
+	// PARTIAL non-refusal at the refusal seam is instead proven by
+	// the verdict filter (TestPackedTailGateDropsFilter18771: a
+	// PARTIAL finding yields no drop record) plus this commit-success
+	// cell for the warning-only class that reaches Store.
 	partialText := packedTailStorePartialText18771()
 	s := packedTailStageText18771(t, -1, partialText)
 	_, gen, err := s.CompileCandidateGen()

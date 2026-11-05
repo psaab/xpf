@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -712,6 +713,53 @@ func TestPackedTailGate18771Cell06FixedCensusManifest(t *testing.T) {
 	}
 	if len(seen) == 0 {
 		t.Fatal("fixed manifest has no runtime rows")
+	}
+}
+
+func TestPackedTailGate18771Cell06GeneratedCensusDropPin(t *testing.T) {
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+	raw, err := os.ReadFile("testdata/packed_tail_census_drops_18771.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line != "" {
+			want[line] = true
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("generated-census DROP pin is empty")
+	}
+	got := map[string]bool{}
+	for name, text := range packedTailAllCensusSources18771(t) {
+		cfg, err := packedTailCompile18771(t, text, lenientCompileOpts(), nil)
+		if err != nil {
+			continue
+		}
+		for _, v := range packedTailVerdicts18771(cfg) {
+			if v == "DROP" {
+				got[name] = true
+			}
+		}
+	}
+	var extra, missing []string
+	for name := range got {
+		if !want[name] {
+			extra = append(extra, name)
+		}
+	}
+	for name := range want {
+		if !got[name] {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(extra)
+	sort.Strings(missing)
+	if len(extra) > 0 || len(missing) > 0 {
+		t.Fatalf("generated-census DROP set drifted: unexpected=%v missing=%v", extra, missing)
 	}
 }
 

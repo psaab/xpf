@@ -1,0 +1,241 @@
+firewall family any filter xpfarg interface-specific
+firewall family inet filter xpfarg interface-specific
+firewall family inet6 filter xpfarg interface-specific
+firewall filter xpfarg interface-specific
+firewall policer xpfarg if-exceeding bandwidth-limit
+firewall policer xpfarg if-exceeding burst-size-limit
+firewall policer xpfarg logical-interface-policer
+firewall policer xpfarg then discard
+firewall policer xpfarg then forwarding-class
+firewall policer xpfarg then loss-priority
+forwarding-options port-mirroring instance xpfarg input ingress interface
+interfaces xpfname aggregated-ether-options lacp periodic
+interfaces xpfname tunnel routing-instance destination
+interfaces xpfname tunnel wireguard listen-port
+interfaces xpfname tunnel wireguard peer
+interfaces xpfname tunnel wireguard private-key
+interfaces xpfname unit xpfarg family inet address xpfarg preferred
+interfaces xpfname unit xpfarg family inet address xpfarg primary
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg accept-data
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg advertise-interval
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg no-preempt
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg priority
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg track-interface
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg track-priority-cost
+interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group xpfarg virtual-address
+interfaces xpfname unit xpfarg family inet mtu
+interfaces xpfname unit xpfarg family inet targeted-broadcast
+interfaces xpfname unit xpfarg family inet unnumbered-address
+interfaces xpfname unit xpfarg family inet6 address xpfarg preferred
+interfaces xpfname unit xpfarg family inet6 address xpfarg primary
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg accept-data
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg advertise-interval
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg inet6-advertise-interval
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg no-preempt
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg priority
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg track-interface
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg track-priority-cost
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg virtual-address
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg virtual-inet6-address
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group xpfarg virtual-link-local-address
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg accept-data
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg advertise-interval
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg inet6-advertise-interval
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg no-preempt
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg priority
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg track-interface
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg track-priority-cost
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg virtual-address
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg virtual-inet6-address
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group xpfarg virtual-link-local-address
+interfaces xpfname unit xpfarg family inet6 dad-disable
+interfaces xpfname unit xpfarg family inet6 dhcpv6
+interfaces xpfname unit xpfarg family inet6 mtu
+interfaces xpfname unit xpfarg tunnel routing-instance destination
+interfaces xpfname unit xpfarg tunnel wireguard listen-port
+interfaces xpfname unit xpfarg tunnel wireguard peer
+interfaces xpfname unit xpfarg tunnel wireguard private-key
+protocols bgp disable
+protocols bgp graceful-restart
+protocols bgp log-updown
+protocols bgp multipath ibgp
+protocols bgp multipath multiple-as
+routing-instances xpfname protocols bgp disable
+routing-instances xpfname protocols bgp graceful-restart
+routing-instances xpfname protocols bgp log-updown
+routing-instances xpfname protocols bgp multipath ibgp
+routing-instances xpfname protocols bgp multipath multiple-as
+schedulers scheduler xpfarg daily all-day
+schedulers scheduler xpfarg daily exclude
+schedulers scheduler xpfarg daily start-time
+schedulers scheduler xpfarg daily stop-time
+schedulers scheduler xpfarg friday all-day
+schedulers scheduler xpfarg friday exclude
+schedulers scheduler xpfarg friday start-time
+schedulers scheduler xpfarg friday stop-time
+schedulers scheduler xpfarg monday all-day
+schedulers scheduler xpfarg monday exclude
+schedulers scheduler xpfarg monday start-time
+schedulers scheduler xpfarg monday stop-time
+schedulers scheduler xpfarg saturday all-day
+schedulers scheduler xpfarg saturday exclude
+schedulers scheduler xpfarg saturday start-time
+schedulers scheduler xpfarg saturday stop-time
+schedulers scheduler xpfarg sunday all-day
+schedulers scheduler xpfarg sunday exclude
+schedulers scheduler xpfarg sunday start-time
+schedulers scheduler xpfarg sunday stop-time
+schedulers scheduler xpfarg thursday all-day
+schedulers scheduler xpfarg thursday exclude
+schedulers scheduler xpfarg thursday start-time
+schedulers scheduler xpfarg thursday stop-time
+schedulers scheduler xpfarg tuesday all-day
+schedulers scheduler xpfarg tuesday exclude
+schedulers scheduler xpfarg tuesday start-time
+schedulers scheduler xpfarg tuesday stop-time
+schedulers scheduler xpfarg wednesday all-day
+schedulers scheduler xpfarg wednesday exclude
+schedulers scheduler xpfarg wednesday start-time
+schedulers scheduler xpfarg wednesday stop-time
+security address-book global description
+security dynamic-address address-name xpfarg profile fail-mode
+security dynamic-address address-name xpfarg profile feed-name
+security ike gateway xpfarg dead-peer-detection always-send
+security ike gateway xpfarg dead-peer-detection interval
+security ike gateway xpfarg dead-peer-detection optimized
+security ike gateway xpfarg dead-peer-detection probe-idle-tunnel
+security ike gateway xpfarg dead-peer-detection threshold
+security ike gateway xpfarg dynamic hostname
+security ike policy xpfarg local-certificate
+security ipsec gateway xpfarg dead-peer-detection always-send
+security ipsec gateway xpfarg dead-peer-detection interval
+security ipsec gateway xpfarg dead-peer-detection optimized
+security ipsec gateway xpfarg dead-peer-detection probe-idle-tunnel
+security ipsec gateway xpfarg dead-peer-detection threshold
+security ipsec gateway xpfarg dynamic hostname
+security log report
+security log source-address
+security nat destination pool xpfarg port
+security nat nat64 rule-set xpfarg match source-address
+security nat nat64 rule-set xpfarg match source-address-name
+security nat source pool xpfarg persistent-nat inactivity-timeout
+security nat source pool xpfarg persistent-nat permit
+security nat source pool xpfarg port
+security nat source pool xpfarg port no-random-allocation
+security nat source pool xpfarg port no-translation
+security nat source pool xpfarg port random-allocation
+security nat source pool-utilization-alarm clear-threshold
+security nat source pool-utilization-alarm raise-threshold
+security pki ca-profile
+security pki ca-profile xpfarg ca-identity
+security pki ca-profile xpfarg enrollment url
+security pki ca-profile xpfarg revocation-check disable
+security pki ca-profile xpfarg revocation-check use-ocsp
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg match application
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg match destination-address
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg match destination-address-excluded
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg match source-address
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg match source-address-excluded
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg scheduler-name
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then deny count
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then deny log
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then permit
+security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then reject
+security policies global policy xpfarg match application
+security policies global policy xpfarg match destination-address
+security policies global policy xpfarg match destination-address-excluded
+security policies global policy xpfarg match from-zone
+security policies global policy xpfarg match source-address
+security policies global policy xpfarg match source-address-excluded
+security policies global policy xpfarg match to-zone
+security policies global policy xpfarg scheduler-name
+security policies global policy xpfarg then deny count
+security policies global policy xpfarg then deny log
+security policies global policy xpfarg then permit
+security policies global policy xpfarg then reject
+security zones security-zone xpfarg address-book description
+services flow-monitoring version-ipfix template xpfarg ipv4-template export-extension
+services flow-monitoring version-ipfix template xpfarg ipv6-template export-extension
+services flow-monitoring version-ipfix template xpfarg template-refresh-rate seconds
+services flow-monitoring version9 template xpfarg template-refresh-rate seconds
+services rpm probe xpfarg test xpfarg thresholds successive-loss
+system services dhcp-local-server dynamic-dns backend
+system services dhcp-local-server dynamic-dns conflict-policy
+system services dhcp-local-server dynamic-dns destination-interface
+system services dhcp-local-server dynamic-dns domain
+system services dhcp-local-server dynamic-dns enable
+system services dhcp-local-server dynamic-dns forward-zone
+system services dhcp-local-server dynamic-dns hostname-source
+system services dhcp-local-server dynamic-dns require-tsig
+system services dhcp-local-server dynamic-dns reverse-zone
+system services dhcp-local-server dynamic-dns routing-instance
+system services dhcp-local-server dynamic-dns source-address
+system services dhcp-local-server dynamic-dns tsig-algorithm
+system services dhcp-local-server dynamic-dns tsig-key
+system services dhcp-local-server dynamic-dns tsig-secret
+system services dhcp-local-server dynamic-dns ttl
+system services dhcp-local-server dynamic-dns update-server
+system services dhcp-local-server expired-leases-processing enable
+system services dhcp-local-server expired-leases-processing flush-timer
+system services dhcp-local-server expired-leases-processing hold-time
+system services dhcp-local-server expired-leases-processing max-leases
+system services dhcp-local-server expired-leases-processing max-time
+system services dhcp-local-server expired-leases-processing reclaim-timer
+system services dhcp-local-server expired-leases-processing unwarned-cycles
+system services dhcpv6-local-server dynamic-dns backend
+system services dhcpv6-local-server dynamic-dns conflict-policy
+system services dhcpv6-local-server dynamic-dns destination-interface
+system services dhcpv6-local-server dynamic-dns domain
+system services dhcpv6-local-server dynamic-dns enable
+system services dhcpv6-local-server dynamic-dns forward-zone
+system services dhcpv6-local-server dynamic-dns hostname-source
+system services dhcpv6-local-server dynamic-dns require-tsig
+system services dhcpv6-local-server dynamic-dns reverse-zone
+system services dhcpv6-local-server dynamic-dns routing-instance
+system services dhcpv6-local-server dynamic-dns source-address
+system services dhcpv6-local-server dynamic-dns tsig-algorithm
+system services dhcpv6-local-server dynamic-dns tsig-key
+system services dhcpv6-local-server dynamic-dns tsig-secret
+system services dhcpv6-local-server dynamic-dns ttl
+system services dhcpv6-local-server dynamic-dns update-server
+system services dhcpv6-local-server expired-leases-processing enable
+system services dhcpv6-local-server expired-leases-processing flush-timer
+system services dhcpv6-local-server expired-leases-processing hold-time
+system services dhcpv6-local-server expired-leases-processing max-leases
+system services dhcpv6-local-server expired-leases-processing max-time
+system services dhcpv6-local-server expired-leases-processing reclaim-timer
+system services dhcpv6-local-server expired-leases-processing unwarned-cycles
+system services dynamic-dns provider xpfarg api-token
+system services dynamic-dns provider xpfarg aws-access-key
+system services dynamic-dns provider xpfarg aws-region
+system services dynamic-dns provider xpfarg aws-secret-key
+system services dynamic-dns provider xpfarg backend
+system services dynamic-dns provider xpfarg checkip-allowlist
+system services dynamic-dns provider xpfarg checkip-url
+system services dynamic-dns provider xpfarg destination-interface
+system services dynamic-dns provider xpfarg forward-zone
+system services dynamic-dns provider xpfarg hosted-zone-id
+system services dynamic-dns provider xpfarg ok-response
+system services dynamic-dns provider xpfarg password
+system services dynamic-dns provider xpfarg require-tsig
+system services dynamic-dns provider xpfarg reverse-zone
+system services dynamic-dns provider xpfarg routing-instance
+system services dynamic-dns provider xpfarg server
+system services dynamic-dns provider xpfarg source-address
+system services dynamic-dns provider xpfarg tsig-algorithm
+system services dynamic-dns provider xpfarg tsig-key
+system services dynamic-dns provider xpfarg tsig-secret
+system services dynamic-dns provider xpfarg update-server
+system services dynamic-dns provider xpfarg url-template
+system services dynamic-dns provider xpfarg username
+system services dynamic-dns provider xpfarg zone
+system services web-management api-auth class
+system services web-management api-auth expires
+system services web-management http interface
+system services web-management https certificate
+system services web-management https interface
+system services web-management https private-key
+system services web-management https system-generated-certificate
