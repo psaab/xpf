@@ -274,18 +274,20 @@ func (d *Daemon) actuateLearnedRouteRefresh(ctx context.Context) bool {
 // the helper FIB already holds the /24 transit row and no arriving
 // retransmit can reach the pref-200 cluster-terminal and demote to
 // DiscardRoute. Returns true when the FIB moved (published or a
-// pending bump landed). The caller owns applySem.
+// pending bump landed), duplicate-skipped, or no attempt was needed
+// for a benign absent/resetting daemon shape. Returns false only when
+// a publish or FIB bump failed. The caller owns applySem.
 func (d *Daemon) republishConnectedRG(reason string) bool {
 	if d == nil || d.store == nil || d.isResetting() {
-		return false
+		return true
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
-		return false
+		return true
 	}
 	pub, ok := d.dataplane().(routeOverlayPublisher)
 	if !ok {
-		return false
+		return true
 	}
 	schedulerState, schedulerFailClosed := policySchedulerPublicationState(d.scheduler.Load(), time.Now())
 	published, err := pub.PublishRouteOverlaySnapshotWithLatch(cfg, d.ipmonActiveOverlay(), schedulerState, schedulerFailClosed)
@@ -358,17 +360,25 @@ func (d *Daemon) onHelperReleasedRGs(rgIDs []int) {
 // under applySem (#16270). Called from the cluster-primary
 // activation sequence before SetRGActive so the helper FIB holds
 // the connected row before the RG reports forwarding-active.
-func (d *Daemon) republishConnectedRGSync(ctx context.Context, reason string) {
+//
+// The bool is false only when the sync republish failed (a publish
+// or FIB bump error, or applySem could not be acquired). Benign
+// no-attempt shapes keep their existing skip behavior and return
+// true, so they do not newly block activation (#18927).
+func (d *Daemon) republishConnectedRGSync(ctx context.Context, reason string) bool {
 	if d == nil || d.store == nil || d.applySem == nil || d.isResetting() {
-		return
+		return true
+	}
+	if _, ok := d.dataplane().(routeOverlayPublisher); !ok {
+		return true
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		slog.Warn("HA connected-route sync republish skipped; apply semaphore unavailable",
 			"reason", reason, "err", err)
-		return
+		return false
 	}
 	defer d.applySem.Release(1)
-	d.republishConnectedRG(reason)
+	return d.republishConnectedRG(reason)
 }
 
 // RouteListenerMarks and RouteListenerRepublishes surface the #7437 pair for

@@ -98,7 +98,9 @@ func (d *Daemon) beginTransferPreActivation(rgIDs []int) error {
 		// helper FIB before its forwarding opens, or the first redirected
 		// packet resolves to the cluster terminal (#16270).
 		// republishConnectedRG reads the overlay just marked.
-		d.republishConnectedRG("transfer-preactivate")
+		if !d.republishConnectedRG("transfer-preactivate") {
+			return errors.New("connected-route republish failed; transfer pre-activation aborted")
+		}
 		return nil
 	}(); err != nil {
 		return err

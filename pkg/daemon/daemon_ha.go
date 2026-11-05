@@ -736,8 +736,9 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// applySem) closes the ordering window by construction;
 		// the async tail remains as the retry/duplicate-skip
 		// backstop for every other edge.
+		republishReady := true
 		if clusterOwnershipEdge {
-			d.republishConnectedRGSync(ctx, "cluster-state")
+			republishReady = d.republishConnectedRGSync(ctx, "cluster-state")
 		}
 		// Activation: enable forwarding first.
 		// Re-read desired state to guard against a
@@ -745,7 +746,10 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// already superseded this transition.
 		if rt := d.dataplane(); tr.Changed && rt != nil {
 			cur, _ := s.CurrentDesired()
-			if err := rt.HA().SetRGActive(ctx, ev.GroupID, cur); err != nil {
+			if cur && !republishReady {
+				slog.Warn("cluster: connected-route republish failed; skipping rg_active activation until a republish converges",
+					"rg", ev.GroupID)
+			} else if err := rt.HA().SetRGActive(ctx, ev.GroupID, cur); err != nil {
 				slog.Warn("failed to update rg_active from cluster event",
 					"rg", ev.GroupID, "active", cur, "err", err)
 			} else {
@@ -1308,14 +1312,15 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 			// the helper FIB holds the /24 transit row when
 			// the RG reports forwarding-active (see the
 			// cluster-event twin in handleClusterEvent).
-			d.republishConnectedRGSync(ctx, "vrrp-master")
-			// Activation order: set rg_active FIRST, then
-			// remove blackhole routes. Re-read desired state
-			// to guard against interleaved cluster goroutine.
-			// Only activate when ALL VRRP instances in the RG
-			// are MASTER — prevents partial ownership (#132).
+			// #18927: a republish that ran and failed must not
+			// be followed by the rg_active write; the retry
+			// stays armed for the next reconcile pass.
+			republishReady := d.republishConnectedRGSync(ctx, "vrrp-master")
 			cur, _ := s.CurrentDesired()
-			if err := rt.HA().SetRGActive(ctx, rgID, cur); err != nil {
+			if cur && !republishReady {
+				slog.Warn("vrrp: connected-route republish failed; skipping rg_active activation until a republish converges",
+					"rg", rgID)
+			} else if err := rt.HA().SetRGActive(ctx, rgID, cur); err != nil {
 				slog.Warn("failed to update rg_active", "rg", rgID, "err", err)
 			} else {
 				recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
@@ -1690,7 +1695,12 @@ func (d *Daemon) reconcileRGState() {
 			if tr.Active {
 				// Activation ordering: set rg_active FIRST, then
 				// remove blackholes.
-				if err := reconcileDP.HA().SetRGActive(context.Background(), rgID, true); err != nil {
+				if !d.republishConnectedRGSync(context.Background(), "rg-state-reconcile") {
+					if s.ShouldLogApplyError("connected-route republish failed") {
+						slog.Warn("reconcile: connected-route republish failed; leaving activation retry armed",
+							"rg", rgID)
+					}
+				} else if err := reconcileDP.HA().SetRGActive(context.Background(), rgID, true); err != nil {
 					if s.ShouldLogApplyError(err.Error()) {
 						slog.Warn("reconcile: failed to update rg_active",
 							"rg", rgID, "active", true, "err", err)
