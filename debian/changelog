@@ -1,4 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config: strict local operator commits now refuse a packed hierarchical
+    tail only when the gate proves it is silently dropped; `xpfd check-config`
+    and `commit check` report the site for bracing remediation. Bootstrap and
+    tolerant HA sync remain warn-only. See the #18771 upgrade note in
+    `docs/config-schema.md` for mixed-version, failover, rollback, skip, and
+    compile-cost effects.
   * Build: capture the shimverify attestation directory before the sudo hop
     and pass it to mktemp explicitly, so `make generate-userspace-xdp` no
     longer writes its gate attestation into a possibly-full /tmp (#18966).

@@ -49,6 +49,39 @@ children may see less than the braced spelling's actual children.
 | unmodelled leaf | present in the parsed children | raw token remains in `node.Keys`; caller sees no synthesized child |
 
 
+### Upgrade note: strict refusal for packed-tail drops (#18771)
+
+On a strict operator promotion, a hierarchical packed spelling of the shape
+`outer inner leaf value;` is now refused when the compiler proves that the
+braced twin changes typed configuration while removing the packed tail changes
+nothing. This is limited to typed `DROP` findings; it does not bulk-admit or
+rewrite the operator's configuration. Remediate each reported site by adding
+the braces, for example `outer { inner { leaf value; } }`.
+
+Pre-audit the candidate with `xpfd check-config [-node-id 0|1] <config-file>`
+or interactive `commit check`; both report the diagnostic without refusing.
+Bootstrap/day-0 import remains warn-only so the node can install its initial
+configuration. If a packed `DROP` remains, the first operator commit after
+bootstrap is refused until it is braced.
+
+HA synchronization remains tolerant on both old and new binaries and does not
+refuse a synced packed config. A local operator commit on a new binary can
+refuse it. A peer-view `DROP` can become a local-view `DROP` after failover, so
+the first unrelated commit on the new primary may be refused; brace the
+reported site before retrying. Likewise, `rollback N` only stages a historical
+configuration: committing a pre-upgrade packed `DROP` restored that way is
+refused until it is braced.
+
+`SKIPPED-CAP`, `SKIPPED-PROVENANCE`, `INDETERMINATE`, and `PARTIAL` never
+refuse. They remain diagnostic/warning-only, so a packed shape outside a proven
+`DROP` can still be silently incomplete.
+
+The gate computes braced/removed twins for eligible diagnostics. Check-config
+and `commit check` may therefore take longer on inputs with up to 32 eligible
+sites; the bound is at most 64 twin compiles for standalone and 192 across HA
+views. Above the 32-site cap the gate skips per-site adjudication rather than
+refusing. These are work bounds, not measured latency figures.
+
 #8773 is the worked example. `compileFilterFrom` handles `dscp` and
 `traffic-class` in one family-blind switch arm, but the schema declared `dscp`
 only under `family inet` and `traffic-class` only under `family inet6` — which is

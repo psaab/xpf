@@ -745,9 +745,9 @@ func TestPackedTailGate18771Cell07TypedDiagnosticClassification(t *testing.T) {
 	packedTailAssertVerdicts18771(t, packedTailMustCompile18771(t, packedTailMixedPartial18771, lenientCompileOpts(), nil), "PARTIAL")
 }
 
-func TestPackedTailGate18771Cell08PhaseEligibilityAndReentrancy(t *testing.T) {
-	if packedTailGateEnforce18771 {
-		t.Fatal("phase one must remain report-only")
+func TestPackedTailGate18771Cell08EnforcementPostureAndReentrancy(t *testing.T) {
+	if !PackedTailGateEnforce18771() {
+		t.Fatal("production enforcement must remain enabled")
 	}
 	strict := packedTailMustCompile18771(t, packedTailDrop18771, strictCompileOpts(), nil)
 	packedTailAssertVerdicts18771(t, strict, "DROP")
