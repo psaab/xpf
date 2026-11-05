@@ -722,30 +722,22 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 	clusterOwnershipEdge := ev.OldState != ev.NewState &&
 		(ev.OldState == cluster.StatePrimary || ev.NewState == cluster.StatePrimary)
 	if isPrimary {
-		// #16270 (option a): republish the connected RG prefixes
-		// SYNCHRONOUSLY, before SetRGActive reports the RG
-		// forwarding-active. The pre-fix activation ordered
-		// rg_active first and republished from a nonblocking
-		// goroutine (scheduleConnectedRGRepublish at the tail of
-		// this handler) that could duplicate-skip or lose the race
-		// to an arriving retransmit: the helper FIB still lacked
-		// the /24 connected row, the lookup reached the pref-200
-		// cluster-terminal, and HA enforcement demoted it to
-		// DiscardRoute — a permanent blackhole for aged flows.
-		// Running the same routes-only publisher inline (under
-		// applySem) closes the ordering window by construction;
-		// the async tail remains as the retry/duplicate-skip
-		// backstop for every other edge.
-		republishReady := true
-		if clusterOwnershipEdge {
-			republishReady = d.republishConnectedRGSync(ctx, "cluster-state")
-		}
+		// #16270 (option a): synchronously republish connected-RG
+		// prefixes before every true rg_active write from this
+		// handler, including a sync-hold-release transition merged
+		// with an otherwise unchanged cluster event. An ownership-edge
+		// async schedule cannot provide this guarantee: it can race
+		// forwarding through a stale helper FIB.
 		// Activation: enable forwarding first.
 		// Re-read desired state to guard against a
 		// concurrent VRRP goroutine that may have
 		// already superseded this transition.
 		if rt := d.dataplane(); tr.Changed && rt != nil {
 			cur, _ := s.CurrentDesired()
+			republishReady := true
+			if cur {
+				republishReady = d.republishConnectedRGSync(ctx, "cluster-state")
+			}
 			if cur && !republishReady {
 				slog.Warn("cluster: connected-route republish failed; skipping rg_active activation until a republish converges",
 					"rg", ev.GroupID)
@@ -897,45 +889,56 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		var actuateErr error
 		if rt := d.dataplane(); tr.Changed && rt != nil {
 			cur, _ := s.CurrentDesired()
-			if !cur && !clusterDemotionEdge {
-				d.tryPrepareUserspaceRGDemotion(ev.GroupID)
+			republishReady := true
+			if cur {
+				republishReady = d.republishConnectedRGSync(ctx, "cluster-state-recheck")
 			}
-			var err error
-			if helperDownDemotion {
-				// #18701/#18715: bounded only when the control socket was
-				// silent at entry, and even then the real result is awaited
-				// if the socket answers by the time the bound expires. A
-				// failed or abandoned write leaves the apply unrecorded, so
-				// the reconcile loop retries it, as for any failed apply.
-				err = d.helperDownRGActiveWrite(ctx, rt.HA(), ev.GroupID, cur, controlSilentAtEntry)
+			if cur && !republishReady {
+				slog.Warn("cluster: connected-route republish failed during demotion recheck; skipping rg_active activation",
+					"rg", ev.GroupID)
+				actuateErr = fmt.Errorf("redundancy group %d connected-route republish failed before rg_active=true",
+					ev.GroupID)
 			} else {
-				err = rt.HA().SetRGActive(ctx, ev.GroupID, cur)
-			}
-			var silentAck error = errors.New("not a helper-down demotion")
-			if err != nil && helperDownDemotion {
-				silentAck = d.helperDownFenceSilentAck(ev.GroupID, controlSilentAtEntry)
-			}
-			switch {
-			case err != nil && silentAck == nil:
-				// #18715 review: the control socket was silent at entry and
-				// is silent now (fresh sample), and every direct VIP of the
-				// RG is confirmed off the interfaces, so this node forwards
-				// nothing for the RG. Report the failover fence ACTUATED so a
-				// peer-requested evacuation of this sick node completes
-				// instead of aborting into an RG neither node owns (#16592).
-				// When the control thread answers (a frozen worker, a
-				// not-yet-armed helper, or one that recovered mid-write), the
-				// other workers may still forward until the write lands, so
-				// an error there is a refusal and keeps the #6371 abort.
-				slog.Warn("failed to update rg_active from cluster event; failover still reported actuated because the helper's control socket is silent and every VIP of the group is confirmed released (#18701)",
-					"rg", ev.GroupID, "active", cur, "err", err)
-			case err != nil:
-				slog.Warn("failed to update rg_active from cluster event",
-					"rg", ev.GroupID, "active", cur, "err", err, "fence_not_acked_because", silentAck)
-				actuateErr = fmt.Errorf("redundancy group %d rg_active=%v not applied on demotion: %w",
-					ev.GroupID, cur, err)
-			default:
-				recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
+				if !cur && !clusterDemotionEdge {
+					d.tryPrepareUserspaceRGDemotion(ev.GroupID)
+				}
+				var err error
+				if helperDownDemotion {
+					// #18701/#18715: bounded only when the control socket was
+					// silent at entry, and even then the real result is awaited
+					// if the socket answers by the time the bound expires. A
+					// failed or abandoned write leaves the apply unrecorded, so
+					// the reconcile loop retries it, as for any failed apply.
+					err = d.helperDownRGActiveWrite(ctx, rt.HA(), ev.GroupID, cur, controlSilentAtEntry)
+				} else {
+					err = rt.HA().SetRGActive(ctx, ev.GroupID, cur)
+				}
+				var silentAck error = errors.New("not a helper-down demotion")
+				if err != nil && helperDownDemotion {
+					silentAck = d.helperDownFenceSilentAck(ev.GroupID, controlSilentAtEntry)
+				}
+				switch {
+				case err != nil && silentAck == nil:
+					// #18715 review: the control socket was silent at entry and
+					// is silent now (fresh sample), and every direct VIP of the
+					// RG is confirmed off the interfaces, so this node forwards
+					// nothing for the RG. Report the failover fence ACTUATED so a
+					// peer-requested evacuation of this sick node completes
+					// instead of aborting into an RG neither node owns (#16592).
+					// When the control thread answers (a frozen worker, a
+					// not-yet-armed helper, or one that recovered mid-write), the
+					// other workers may still forward until the write lands, so
+					// an error there is a refusal and keeps the #6371 abort.
+					slog.Warn("failed to update rg_active from cluster event; failover still reported actuated because the helper's control socket is silent and every VIP of the group is confirmed released (#18701)",
+						"rg", ev.GroupID, "active", cur, "err", err)
+				case err != nil:
+					slog.Warn("failed to update rg_active from cluster event",
+						"rg", ev.GroupID, "active", cur, "err", err, "fence_not_acked_because", silentAck)
+					actuateErr = fmt.Errorf("redundancy group %d rg_active=%v not applied on demotion: %w",
+						ev.GroupID, cur, err)
+				default:
+					recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
+				}
 			}
 		}
 		// #18620: the demotion twin of #16270. The schedules that WITHDRAW this

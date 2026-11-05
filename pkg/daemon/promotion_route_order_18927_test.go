@@ -218,6 +218,52 @@ func TestPromotionRepublishesConnectedRGBeforeRGActive18927(t *testing.T) {
 	}
 }
 
+// A sync-hold release can make the merged transition active even on a
+// Primary->Primary reaffirmation, where there is no cluster ownership edge.
+func TestSyncHoldReleasePrimaryReaffirmRepublishes18927(t *testing.T) {
+	d, log, _ := newPromotionOrderDaemon18927(t)
+	d.store = testStoreWithSetConfig(t, []string{
+		"set system dataplane-type userspace",
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster node 0",
+		"set chassis cluster no-private-rg-election",
+		"set chassis cluster authentication-key test-cluster-psk-18927",
+		"set chassis cluster redundancy-group 0 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		"set interfaces reth1 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/0 gigether-options redundant-parent reth1",
+	})
+	d.cluster.UpdateConfig(d.store.ActiveConfig().Chassis.Cluster)
+	if d.isNoRethVRRP() {
+		t.Fatal("fixture: RETH VRRP must be enabled")
+	}
+	d.cluster.SetGroupStateForTesting(1, cluster.StatePrimary)
+	d.vrrpMgr.SetSyncHold(time.Hour)
+	s := d.getOrCreateRGState(1)
+	if !s.SyncHeld() {
+		t.Fatal("fixture: RG1 must mirror the armed sync hold")
+	}
+	if tr := s.SetCluster(true); tr.Active || s.IsActive() {
+		t.Fatalf("fixture: cluster-primary input must remain held inactive, got transition=%+v", tr)
+	}
+	d.vrrpMgr.ReleaseSyncHold()
+
+	timer := d.dispatchClusterEvent(context.Background(), cluster.ClusterEvent{
+		GroupID: 1, OldState: cluster.StatePrimary, NewState: cluster.StatePrimary, DualActiveWin: true,
+	}, nil)
+	if timer != nil {
+		timer.Stop()
+	}
+	events := log.snapshot()
+	active := slices.Index(events, "rg_active[1]=true")
+	if active < 2 || events[active-2] != "publish" || events[active-1] != "bump" {
+		t.Fatalf("sync-hold release activation order = %v; want publish -> bump -> rg_active[1]=true (#18927)", events)
+	}
+	if s.NeedsApply() {
+		t.Fatalf("successful hold-release activation left apply retry pending: events=%v", events)
+	}
+}
 
 // A failed VRRP MASTER republish leaves peer-commit readiness low. The
 // reconcile retry must restore readiness only after it republishes and
@@ -280,14 +326,14 @@ func TestPromotionRepublishRetryRestoresVRRPCommitReadiness18927(t *testing.T) {
 	}
 }
 
-// promotionBackupInterleaveDP18927 invokes a competing event at the BACKUP
-// handler's userspace-mode check, before it re-reads desired state.
-type promotionBackupInterleaveDP18927 struct {
+// promotionModeInterleaveDP18927 invokes a competing event at a userspace
+// mode check, providing a deterministic interleaving before a desired-state re-read.
+type promotionModeInterleaveDP18927 struct {
 	*promotionOrderDP18927
 	onMode func()
 }
 
-func (p *promotionBackupInterleaveDP18927) Mode() dpuserspace.DataplaneMode {
+func (p *promotionModeInterleaveDP18927) Mode() dpuserspace.DataplaneMode {
 	fn := p.onMode
 	p.onMode = nil
 	if fn != nil {
@@ -326,7 +372,7 @@ func TestVRRPBackupRecheckGatesInterleavedPromotion18927(t *testing.T) {
 	}
 	s.MarkApplied(true)
 	dp.setErrors(errors.New("connected-route publication refused"), nil)
-	p := &promotionBackupInterleaveDP18927{promotionOrderDP18927: dp}
+	p := &promotionModeInterleaveDP18927{promotionOrderDP18927: dp}
 	p.onMode = func() {
 		d.cluster.SetGroupStateForTesting(1, cluster.StatePrimary)
 		d.handleClusterEvent(context.Background(), cluster.ClusterEvent{
@@ -361,6 +407,58 @@ func TestVRRPBackupRecheckGatesInterleavedPromotion18927(t *testing.T) {
 	if !d.cluster.IsLocalPrimary(1) || !s.AllVRRPMaster() || !d.localFailoverCommitIsReady(1) {
 		t.Fatalf("successful reconcile did not restore primary/Master readiness: primary=%v allMaster=%v ready=%v",
 			d.cluster.IsLocalPrimary(1), s.AllVRRPMaster(), d.localFailoverCommitIsReady(1))
+	}
+}
+
+func TestClusterDemotionRecheckGatesInterleavedPromotion18927(t *testing.T) {
+	d, log, dp := newPromotionOrderDaemon18927(t)
+	d.store = testStoreWithSetConfig(t, []string{
+		"set system dataplane-type userspace",
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster node 0",
+		"set chassis cluster no-private-rg-election",
+		"set chassis cluster authentication-key test-cluster-psk-18927",
+		"set chassis cluster redundancy-group 0 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		"set interfaces reth1 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/0 gigether-options redundant-parent reth1",
+	})
+	d.cluster.UpdateConfig(d.store.ActiveConfig().Chassis.Cluster)
+	if d.isNoRethVRRP() {
+		t.Fatal("fixture: RETH VRRP must be enabled")
+	}
+	d.cluster.SetGroupStateForTesting(1, cluster.StatePrimary)
+	s := d.getOrCreateRGState(1)
+	if tr := s.SetCluster(true); !tr.Active {
+		t.Fatal("fixture: initial cluster PRIMARY must be active")
+	}
+	s.MarkApplied(true)
+	dp.setErrors(errors.New("connected-route publication refused"), nil)
+	p := &promotionModeInterleaveDP18927{promotionOrderDP18927: dp}
+	p.onMode = func() {
+		d.handleVRRPEvent(context.Background(), vrrp.VRRPEvent{
+			GroupID: rethVRIDBase + 1, Interface: "reth1", State: vrrp.StateMaster,
+		}, rgTransition{})
+	}
+	d.setDataplane(p)
+	d.cluster.SetGroupStateForTesting(1, cluster.StateSecondary)
+
+	timer := d.dispatchClusterEvent(context.Background(), cluster.ClusterEvent{
+		GroupID: 1, OldState: cluster.StatePrimary, NewState: cluster.StateSecondary,
+	}, nil)
+	if timer != nil {
+		timer.Stop()
+	}
+	events := log.snapshot()
+	if !slices.Contains(events, "publish") {
+		t.Fatalf("fixture did not exercise the interleaved MASTER republish failure: %v", events)
+	}
+	if countPromotionEvent18927(events, "rg_active[1]=true") != 0 {
+		t.Fatalf("cluster demotion re-read wrote rg_active=true after failed MASTER republish: %v", events)
+	}
+	if !s.NeedsApply() {
+		t.Fatalf("failed MASTER republish lost retry debt in cluster demotion recheck: %v", events)
 	}
 }
 
