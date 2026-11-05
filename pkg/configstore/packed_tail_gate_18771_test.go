@@ -130,6 +130,9 @@ func TestPackedTailGate18771Cell08PeerDeliveryAndCommitEligibility(t *testing.T)
 		if got := strings.Count(logText, "packedTailGate18771"); got != 2 {
 			t.Fatalf("peer promotion gated views = %d, want 2 peer-only views", got)
 		}
+		if got := strings.Count(logText, "packedTailGate18771 DROP"); got != 2 {
+			t.Fatalf("peer gate findings = %d DROP, want 2 (peer lenient + peer strict): %s", got, logText)
+		}
 		if !strings.Contains(logText, "node=node1") || strings.Contains(logText, "node=node0") {
 			t.Fatalf("peer-only gate logs are not node-labelled/local-only: %s", logText)
 		}
@@ -393,9 +396,14 @@ func TestPackedTailEnforce18771SecretAndRollbackSurfaces(t *testing.T) {
 			t.Fatalf("secret fixture commit = %v, want packed-tail refusal", err)
 		}
 		for surface, content := range map[string]string{"error": err.Error(), "logs": logs.String()} {
-			if strings.Contains(content, secret) || strings.Contains(content, strconv.Quote(secret)) ||
-				strings.Contains(content, "dad-disable;") {
-				t.Errorf("%s leaked the secret or raw packed tail: %s", surface, content)
+			if strings.Contains(content, secret) || strings.Contains(content, strconv.Quote(secret)) {
+				t.Errorf("%s leaked the distinctive secret: %s", surface, content)
+			}
+			// The refusal/findings may name the schema pair
+			// (inet6/dad-disable) but must never echo the raw packed
+			// statement or its value tokens beyond that pair.
+			if strings.Contains(content, "family inet6 dad-disable") || strings.Contains(content, "dad-disable;") {
+				t.Errorf("%s leaked the raw packed tail: %s", surface, content)
 			}
 		}
 	})
