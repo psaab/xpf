@@ -186,9 +186,10 @@ func TestPackedTailGate18771Cell08PeerDeliveryAndCommitEligibility(t *testing.T)
 }
 
 // #18771 enforcement cells (design v3 Q7). Production posture is read
-// via config.PackedTailGateEnforce18771(); with enforcement OFF every
-// commit below succeeds (these cells are the flip's RED-on-revert
-// suite: setting the constant false must turn the refusal cells red).
+// via config.PackedTailGateEnforce18771(). The refusal matrix lands
+// WITH the flip, unguarded, so reverting the const turns the armed
+// cells red; posture-guarded (skipping) cells are deliberately NOT
+// carried here — they would be skip-green on that revert.
 
 func TestPackedTailEnforce18771CommitCheckDiagnosesNoRefuse(t *testing.T) {
 	// Diagnostic eligibility is live in BOTH postures (step b).
