@@ -15,6 +15,7 @@ Use these roles whenever work is split across multiple Codex agents.
 - Owns the design for one workstream.
 - Keeps the plan, invariants, architecture, `README.md` updates, and system fit in sync with the implementation.
 - Defines the intended write scope for implementors and checks that the resulting code matches the documented invariants exactly.
+- Landing is by direct commit (user directive 2026-11-05): no pull requests, no merges; the parent cherry-picks cleared branch commits onto master. See docs/close-all-issues-plan.md Section 7.
 - Surfaces ambiguity, design risk, and missing validation quickly; does not stop at a rough plan if the implementation still needs direction.
 - May refine or clarify invariants, but any material invariant change must be signed off on by the user before it is treated as approved design.
 
@@ -42,10 +43,10 @@ Use these roles whenever work is split across multiple Codex agents.
 - For PR landing, the reviewer contract is the triple hostile review in
   `.claude/skills/campaign/SKILL.md` (Step 3) — that file is the single
   source for the current model pool, bench/credit-swap rules, and
-  merge/kill thresholds; do not restate the roster here or it will drift.
+  land/kill thresholds; do not restate the roster here or it will drift.
   Principles that hold regardless of roster: three independent hostile
   reviewers, parent-dispatched, findings verified at the reviewed SHA
-  before folding. Reviewers never merge and never review their own PR.
+  before folding. Reviewers never land and never review their own branch.
 
 ### Keeper/Monitor
 
@@ -54,8 +55,8 @@ Use these roles whenever work is split across multiple Codex agents.
   it observes and alerts only; the orchestrator dispatches.
 - Owns situational awareness for a campaign, nothing else: polls ground
   truth (`gh`/`git`, lock and disk state), publishes the board, and alerts
-  the orchestrator. Never dispatches, reaps, refills, reviews, or merges —
-  the orchestrator (parent) is the single dispatch and merge authority.
+  the orchestrator. Never dispatches, reaps, refills, reviews, or lands —
+  the orchestrator (parent) is the single dispatch and landing authority.
 - Watches issue parallelism AND PR parallelism separately, the oldest
   unactioned review verdict, per-cluster gate state, and the
   `/var/worktrees` disk guard (70% flag, 85% reap). See the campaign skill.
@@ -67,8 +68,8 @@ Use these roles whenever work is split across multiple Codex agents.
   growing open-issue count during research is normal; triage it as a flow.
 - Same-tick dedupe duty: already-fixed on master, duplicate of an open
   issue/PR, or dead premise closes immediately with evidence. Researchers
-  never block the PR landing queue and never implement their own issues'
-  PRs as sole reviewer.
+  never block the branch landing queue and never implement their own issues'
+  branches as sole reviewer.
 
 ### Gate Runner
 
@@ -76,18 +77,18 @@ Use these roles whenever work is split across multiple Codex agents.
   gates: builds the PR head outside the lock, runs deploy + all
   measurement in ONE lock cell with that cluster's distinct
   `XPF_CLUSTER_LOCK`/`XPF_CLUSTER_OWNER`/`XPF_CLUSTER_EPOCH`, verifies
-  deployed SHA equals PR head SHA, and records per-cell numbers.
+  deployed SHA equals branch head SHA, and records per-cell numbers.
   Baselines are per-cluster; never quote another cluster's throughput.
 
 ## Multi-Agent Rules
 
-- The main checkout is the control checkout. Use it for orchestration, stack inspection, final audits, amend/restack/publish work, and shared documentation updates unless the orchestrator assigns docs to a dedicated worker. Never resolve merge conflicts or edit lane code in the control checkout; its `git status --short` must be clean before every merge.
+- The main checkout is the control checkout. Use it for orchestration, stack inspection, final audits, amend/restack/publish work, and shared documentation updates unless the orchestrator assigns docs to a dedicated worker. Never resolve cherry-pick/rebase conflicts or edit lane code in the control checkout; its `git status --short` must be clean before every landing.
 - Before an implementor edits code, create a dedicated worktree for that agent from the main checkout and tell the agent its exact worktree path.
 - Worktrees live under `/var/worktrees/` (for example `/var/worktrees/campaign-pub/wt-<issue>`), NEVER inside the repo checkout. All scratch, temp files, probes, and caches live under `/var/worktrees/` too (`GOCACHE=/var/worktrees/.cache/go-build`, per-lane `CARGO_TARGET_DIR` under `/var/worktrees/.cache/`); obey the disk guard there (keeper flags at 70%, parent reaps at 85% — see the campaign skill).
 - Name worktrees so ownership is obvious, for example by role or agent name, and keep one active workstream per worktree.
 - Create worktrees from the main checkout with a clear branch or bookmark context, and verify the starting commit before handing them to workers.
-- The orchestrator (parent) is the single dispatch and merge authority. Monitors/keepers alert only; implementors and reviewers never merge, and no agent reviews its own PR.
-- Keep lanes full: never let engineer or reviewer lanes idle while driveable work exists. Reserve capacity for landing PRs and for researching new findings. Liveness is branch/PR commit-time plus live build/test procs, never output-mtime. Salvage a dead lane's uncommitted work in place; never re-dispatch over it or discard it. Before dispatching, check for in-flight work (open PRs, branches, existing worktrees) so finished or in-progress work is never redone.
+- The orchestrator (parent) is the single dispatch and landing authority. Monitors/keepers alert only; implementors and reviewers never land (no PRs, no merges — parent cherry-picks cleared branch commits onto master), and no agent reviews its own branch.
+- Keep lanes full: never let engineer or reviewer lanes idle while driveable work exists. Reserve capacity for landing branches and for researching new findings. Liveness is branch/PR commit-time plus live build/test procs, never output-mtime. Salvage a dead lane's uncommitted work in place; never re-dispatch over it or discard it. Before dispatching, check for in-flight work (open PRs, branches, existing worktrees) so finished or in-progress work is never redone.
 - Verify ground truth via `gh`/`git`. Agent completion notifications can be cross-wired or stale; never trust the notification body.
 - Dispatch agents only via internal task runners. Never use external CLI model tools to run other models.
 - After creating a worktree, confirm the agent can report `pwd`, current commit, and assigned write scope before implementation begins.

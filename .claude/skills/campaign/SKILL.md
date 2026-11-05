@@ -1,12 +1,12 @@
 ---
 name: campaign
-description: Drive ALL open issues and PRs to zero — the single campaign skill. Research keeps filing issues, engineers convert them to PRs, triple hostile review (any 3 of Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro) plus parallel forwarding/throughput gates on the loss, tcp, and udp clusters land or kill every item, a keeper monitor alerts the parent who alone dispatches to keep lanes full, and it stops only when both queues stay at zero.
+description: Drive ALL open issues and PRs to zero — the single campaign skill. Research keeps filing issues, engineers convert them to branches, triple hostile review (any 3 of Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro) plus parallel forwarding/throughput gates on the loss, tcp, and udp clusters land or kill every item, a keeper monitor alerts the parent who alone dispatches to keep lanes full, and it stops only when both queues stay at zero.
 user_invocable: true
 ---
 
 # /campaign — drive-to-zero backlog campaign
 
-Drive **every** open issue to a terminal state — `MERGED` or
+Drive **every** open issue to a terminal state — `LANDED` (direct-committed; formerly "MERGED") or
 `PLAN-KILLED` (all three independent `/research` reviewers converge on
 rejecting the final reviewed approach; `plan-deferred-*` is a work queue,
 never terminal — see Step 1) — and open new issues for real bugs/gaps
@@ -14,6 +14,17 @@ found along the way, then drive those too. Stop only when no
 driveable work remains.
 
 ## Standing user orders (2026-10-13, reaffirmed repeatedly — do not relitigate)
+
+- **Direct-commit landing (user directive 2026-11-05 — do not
+  relitigate)**: work lands on `master` as ordinary commits. NEVER
+  open a pull request, NEVER run `gh pr merge`, NEVER create a merge
+  commit. Lanes push `fix/<issue>-<slug>` off current `origin/master`
+  and stop; evidence posts to the issue; the PARENT cherry-picks the
+  branch's commits onto `master` in order and pushes (Step 4). An
+  experimental PR that already exists is closed without landing; its
+  branch tip carries the work. "PR/merge/MERGED" below = branch/head/
+  LANDED through this order. Edits belong ONLY in the assigned
+  worktree — never the control checkout.
 
 - **Bands first, lowest number within band**: rank into Step 1 bands,
   then pick lanes from the smallest/lowest open issue number upward
@@ -763,7 +774,7 @@ concurrency caps in the standing orders (the spend cap, bounded by
   commit or amend, lane's choice), never the parent. A PR classified
   `docs/test-only` still carries the log unless the diff IS the log
   file itself.
-- **Commit-message standard (lanes, enforced)** — state verbatim in every dispatch/fold brief (including: the PR TITLE MUST use the same `<area>: <summary> (#NNNN)` subject format — it becomes the merge-commit message); parent bounces non-conforming branches before review (`git log` shape check at PR intake, Step 3 item 1).
+- **Commit-message standard (lanes, enforced)** — state verbatim in every dispatch/fold brief (each branch commit stands alone on master after cherry-pick — there is no merge-commit message to carry it); parent bounces non-conforming branches before review (`git log` shape check at branch intake, Step 3 item 1).
   - Subject: `<area>: <imperative summary> (#NNNN)`, ≤72 cols. Area vocabulary: `docs:`, `test:`, `assurance:`, `forwarding:`, `config:`, `daemon:`, `cluster:`, `sessions:`, `audit:`, `show:`, `telemetry:`, `nftables:`, `ha:`, `frr:`, `process:`, `userspace-dp:`, `afxdp:`, `policy:`, `nat:`, `firewall:`, `grpcapi:`, `snmp:`, `ipsec:`, `xdp:`, `shim:`, `ci:`, `build:`, `metrics:` (new areas allowed when none fits, never bare). Summary names the BEHAVIOR change in imperative mood (`gate`, `drop`, `reject`, `refund`, `sync`, `bound`, `fence`), not the file (`update foo.rs`). Parent process commits without an issue cite the ruling (`(user-directive 2026-09-22)`).
   - Body (required, via `git commit -F -` heredoc, wrapped ~72 cols) has four sections:
     1. `Why:` the defect mechanism + consequence — what breaks, who/what is affected, under what config/traffic. 2–5 lines. Cite the path (`poll → session → TX`), not just "fixes bug".
@@ -811,7 +822,7 @@ manufacture merge conflicts.
 
 For each PR an agent opens:
 
-1. **Message-shape + log gate (BOUNCE before any code review)** — run `git log origin/master..origin/<branch> --format='%h %s%n%b'`, `gh pr view <n> --json title -q .title`, and the diff file list (`gh pr view <n> --json files --jq '.files[].path'`). EVERY branch commit MUST match `<area>: <imperative summary> (#NNNN)` + Why/What/Validation/Risk body (per the commit-message standard); the PR TITLE must match the same subject format (it becomes the merge-commit message). The diff MUST contain the per-change log `docs/log/<issue>.md` (or `docs/log/<pr>.md` when there is no issue) carrying the `docs/log/README.md` fields (Timestamp / Action / File(s)) plus Validation and Risk entries; a missing or stub log (any of those five entries absent) is the same class of violation as a malformed title. Exception, mirroring Step 2: a diff that consists solely of per-change log file(s) is its own log and passes this check. Bounce ANY violation back to the lane (amend + force-push) before reading a line of diff — title-only commits, bare `fix:`, missing refs, missing logs, and malformed PR titles are all merge-blockers. No exceptions, no parent-side repair (the lane owns its history).
+1. **Message-shape + log gate (BOUNCE before any code review)** — run `git log origin/master..origin/<branch> --format='%h %s%n%b'` and the branch diff file list (`git diff --name-only origin/master...origin/<branch>`). EVERY branch commit MUST match `<area>: <imperative summary> (#NNNN)` + Why/What/Validation/Risk body (per the commit-message standard) — after cherry-pick each commit stands alone on master. The diff MUST contain the per-change log `docs/log/<issue>.md` (or `docs/log/<pr>.md` when there is no issue) carrying the `docs/log/README.md` fields (Timestamp / Action / File(s)) plus Validation and Risk entries; a missing or stub log (any of those five entries absent) is the same class of violation as a malformed title. Exception, mirroring Step 2: a diff that consists solely of per-change log file(s) is its own log and passes this check. Bounce ANY violation back to the lane (amend + force-push) before reading a line of diff — title-only commits, bare `fix:`, missing refs, missing logs, and malformed PR titles are all merge-blockers. No exceptions, no parent-side repair (the lane owns its history).
 2. **Re-verify the FINAL head** — `gh pr view <n> --json headRefOid`.
    Always review and merge the head you just polled, never the head
    you saw when review started — heads move under folds and rebases.
@@ -1161,84 +1172,66 @@ Every gate must clear: all three hostile verdicts at the final
 head (or covered by Step 4 item 0's delta rule), the cluster gate (or docs/test-only classification), and the
 parent firsthand verification.
 
-## Step 4: Merge (PARENT)
+## Step 4: Land (PARENT)
 
-Per PR, in order:
+**Direct-commit landing (user directive 2026-11-05).** No PRs, no
+merges: never open a pull request, never run `gh pr merge`, never
+create a merge commit. A branch is review transport only — the parent
+lands its commits onto `master` one by one (`git cherry-pick`).
 
-0. **Gate checklist (hard stop):** confirm on the PR, for the head
-   you are about to merge:
-   - three reviewer records with full findings text (Step 3 item 3),
-     all MERGE-READY at this SHA, or at an earlier SHA whose delta to
-     this head is covered by the delta rule below (records at older
-     SHAs are otherwise history and never count toward the three);
+Per branch head `<branch>@<SHA>` for issue `#<n>`, in order:
+
+0. **Landing checklist (hard stop)** — confirm, for the exact
+   `<branch>@<SHA>` about to land:
+   - three reviewer records with full findings text (Step 3 item 3)
+     posted to the issue, all MERGE-READY at this SHA (or at an earlier
+     SHA covered by the delta rule below);
    - the cluster-gate record with numbers (Step 3 item 4) at the
-     GATED SHA, with the delta from the gated SHA to this head
-     classified by the rule below (the gated SHA is never this head
-     once the gate's ledger rows are committed), or the parent's
-     recorded `docs/test-only` classification with diff stat;
+     GATED SHA, delta `<gated>..<SHA>` classified below (the gated SHA
+     is never the landing head once ledger rows are committed), or the
+     parent's recorded `docs/test-only` classification with diff stat;
    - the parent firsthand verification (Step 3 item 5);
-   - the Step 3 item 1 log check: `docs/log/<issue>.md` (or
-     `docs/log/<pr>.md`) present in the head's diff with Timestamp /
-     Action / File(s) / Validation / Risk content;
-   - the instruction census in PR mode, online, from the PR worktree:
+   - the Step 3 item 1 log check: `docs/log/<issue>.md` present in the
+     branch diff with Timestamp / Action / File(s) / Validation / Risk;
+   - the instruction census, online, from the branch worktree:
      `python3 scripts/instructions-census.py --online --base origin/master`.
-     CI runs the hermetic half; only this run sees a CLOSED issue
-     named by a marker the PR touches.
-   If any item is missing, or recorded at a SHA the delta rule does
-   not cover, do NOT merge — return to Step 3.
-   **The merge record names the gated SHA and classifies the delta.**
-   The merge body states the GATED SHA (the head the cluster gate ran
-   at) and the class of `git diff --stat <gated>..<head>`. The classes
-   and what each needs:
-   - `ledger-only`: only `test/results/ledger.d/*.json` shards written
-     by that gate at the gated SHA. Needs nothing more: no re-gate, no
-     re-review, no seat. This is the delta the ledger rule (Step 3 item
-     4) always produces.
-   - `docs-only` or `comments-only` (comment lines in code files,
-     checked by reading the diff, not by the file list): ONE seat that
-     reviewed the PR confirms that delta (Step 3 item 6); no re-gate.
-   - `code`, NON-behavioural (tests, comments mixed with code-file
-     edits, logging levels): all three seats confirm that exact delta,
-     with the reason it changes no behaviour written in the record.
-     Code can hide behaviour, and a resumed seat's delta read is cheap.
-   - `code`, behaviour-changing (anything else): ALWAYS a re-gate and
-     a re-review at the new head (Step 3 item 4: "any
-     behavior-changing fold re-runs BOTH"). A seat confirmation never
-     substitutes for it.
-   **A master merge in the delta.** After `git merge origin/master`
-   (item 2), master's own changes are NOT the PR's delta for review:
-   they were reviewed when they landed, so the seats confirm only the
-   PR's own delta plus the conflict resolution at the new head Z. They
-   DO count for the gate: the build changed, so a gated PR re-gates at
-   Z (a `docs/test-only` PR does not). An empty delta says so. Without
-   this line a later reader cannot tell a gated merge from a merge of
-   something nobody measured. The
-   gate's ledger rows (Step 3 item 4) are in the head's diff, or the
-   record says why the gate wrote none.
-1. Re-poll `mergeable` THROUGH `UNKNOWN` (GitHub recomputes after every
-   push) until `MERGEABLE`/`CLEAN` or `CONFLICTING`.
-2. If `CONFLICTING`: in a FRESH worktree off the PR branch,
-   `git merge origin/master`, resolve conflicts keeping both sides'
-   intent (per-issue `docs/log/<issue>.md` files are separate files
-   and should not conflict; the root `_Log.md` is closed — if it
-   appears in a conflict, the branch is stale against the logging
-   migration, so drop the branch's `_Log.md` change, never union it),
-   build-check if a behavior-relevant file conflicted, push the
-   rebased branch via `git -C`. NEVER resolve in the main checkout.
-   The push is a NEW head: go back to item 0 and re-classify it (the
-   master-merge rule there) before item 3. Never merge on the
-   classification of the head before the merge.
-3. Set the PR title + body first: `gh pr edit <n> --title "<area>: <summary> (#NNNN)" --body-file /var/worktrees/.cache/pr<n>_body.md` (body with Why/What/Validation + gate evidence). Then merge with an explicit pair: `gh pr merge <n> --merge -t "<area>: <summary> (#NNNN)" -F - <<<"<same body>" --delete-branch`. Both flags REQUIRED together: `-t` alone yields a title-only merge whose body echoes the subject, and bare merge yields GitHub's `Merge pull request #N` template — both are log pollution (ruled 2026-09-22). `git fetch origin` first if the ref may be stale, then verify with `git log --format=%B -1 origin/master` after merging.
-4. Verify the issue auto-closed (`Closes #<n>` in the body). If not,
-   `gh issue close <n>` with a comment citing the merge SHA + smoke result.
-5. Fetch master; the NEXT PR now needs its own rebase vs the new
-   master — repeat.
-**Control-cleanliness gate (2026-09-22 incident: 24 lane-leaked files sat in the control tree and silently wedged every `merge --ff-only`, leaving control 15 merges behind; 2026-09-24: scratch trees moved out of the repo to `/var/worktrees/` so no in-repo wipe can take them):** before EVERY merge-prep, run `git status --short` in control — it MUST show nothing at all: zero M/A/D/R lines AND zero `??` lines (worktrees no longer live under the repo, so any untracked entry is unexpected). If dirty: STOP; `git stash push -m control-rescue-<date>` (tracked only, NEVER `-u`); confirm with `git stash list` BEFORE resetting; `git fetch origin` then `git reset --hard origin/master`; triage the stash per-file (duplicate-of-branch → drop after lane confirms; unique → rescue to the owning lane); triage unexpected `??` paths individually — `mv` each aside under
-`/var/worktrees/.cache/control-rescue-<date>/` (never `rm`), confirm
-`git status --short` is empty, and only then proceed with the merge.
+   Missing or uncovered item → do NOT land; return to Step 3.
+   Delta classes (unchanged): `ledger-only` (nothing more),
+   `docs/comments-only` (one seat confirms), `code` non-behavioural
+   (all three seats confirm that exact delta), `code`
+   behaviour-changing (full re-gate + re-review at the new head).
+1. Fetch first: `git fetch origin master`. If the branch is behind,
+   rebase the branch onto current `origin/master` in ITS worktree
+   (never the control checkout), re-run the affected cells, and
+   re-review the moved head before landing. Conflicts resolve in the
+   branch worktree keeping both sides' intent (per-issue logs are
+   separate files; the closed root `_Log.md` is dropped, never
+   unioned). A rebase is a NEW head — re-classify before landing.
+2. From the CLEAN, synced control checkout only:
+   `git cherry-pick <first>..<last>` in branch order, then
+   `git push origin master`. If a cherry-pick conflicts, stop, fix in
+   the branch worktree, and restart from the rebased head — never
+   resolve lane conflicts in the control tree.
+3. Verify landed: `git log --oneline -3 origin/master` shows the
+   commits; `git status --short` in control is empty.
+4. Close the issue: `gh issue close <n>` with a comment citing the
+   landed master SHA(s) + gate result. Delete the landed branch
+   (`git push origin --delete <branch>`, `git branch -D <branch>`);
+   no issue is left to close by keyword (no PR body exists).
+5. The NEXT branch now rebases onto the new master — repeat.
 
-**NEVER backticks in `git commit -m`** — use `git commit -F -` heredoc (PR
-bodies + commit messages contain backticked identifiers).
+**Control-cleanliness gate (2026-09-22 incident; 2026-11-05
+lane-leak repeat):** before EVERY landing, `git status --short` in
+control MUST be empty (zero M/A/D/R and zero `??` lines). If dirty:
+STOP (do not land on a wedged base); preserve stray work under
+`/var/worktrees/campaign-drive/rescue-<slug>-<date>/` (copy files +
+`git diff` patch, never `rm`), restore control with
+`git checkout -- <paths>` (tracked only), and hand the rescue to the
+owning lane. Lane edits belong ONLY in the lane's assigned worktree —
+a lane that writes into the control checkout reports it to the parent
+and stops.
+
+**NEVER backticks in `git commit -m`** — use `git commit -F -` heredoc.
 
 ## Step 5: File-new during audits
 

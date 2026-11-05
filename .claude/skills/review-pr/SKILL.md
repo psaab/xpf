@@ -4,6 +4,13 @@ description: Drive a hostile network-expert triple-review on a GitHub PR using o
 user_invocable: true
 ---
 
+
+> **Landing addendum (user directive 2026-11-05).** Reviews attach to
+> a branch head for an issue, not to a PR to be merged: never run or
+> advise `gh pr merge`; verdicts post to the issue; the parent lands
+> cleared branch commits by cherry-pick (`docs/close-all-issues-plan.md`
+> Section 7). Read "PR #<n>" below as "issue #<n>'s branch".
+
 # Review-PR Skill
 
 Drive a hostile network-expert triple-review of an existing

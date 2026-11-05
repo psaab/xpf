@@ -7,7 +7,7 @@ not completion of the backlog campaign defined below.
 (2026-11-02 05:17 -0800). **Measured backlog at writing:** 326 open
 issues plus #18897, 0 open PRs (search `total_count`, authoritative).
 The 326 are the campaign backlog; #18897 is the publication vehicle.
-Goal: every campaign issue reaches **MERGED** or **PLAN-KILLED**
+Goal: every campaign issue reaches **LANDED** (direct-committed; formerly "MERGED") or **PLAN-KILLED**
 (three-seat reviewed), and no landed change regresses. This document
 is the single plan lanes execute against. The campaign skill
 (`.claude/skills/campaign/SKILL.md`) remains the orchestration
@@ -160,8 +160,9 @@ else skipping a stage is a plan violation, not a shortcut.
    Pure code-motion and bounded fixes proceed directly.
 3. **Implement** in the lane worktree: fix + fail-on-revert cells
    (RED before, GREEN after), per-change log `docs/log/<issue>.md`,
-   commits per Section 7. Open the PR (`Closes #<n>`) and stop.
-4. **Triple hostile review** (Section 4) at the PR head.
+   commits per Section 7. Push the branch `fix/<issue>-<slug>`
+   and stop — no PR is opened.
+4. **Triple hostile review** (Section 4) at the branch head.
 5. **Fold** verified findings only (verify each cited line at the
    reviewed SHA first — reviewer claims are claims). Fold-loop cap:
    3 cycles, then escalate (split or re-research, recorded on the
@@ -169,9 +170,11 @@ else skipping a stage is a plan violation, not a shortcut.
 6. **Cluster gates** on loss, tcp and udp (Sections 5–6) at the head.
 7. **Parent firsthand verification:** re-run at least one load-bearing
    claim (RED/GREEN pair, focused cell, or re-derived invariant) at
-   the head being merged. Reviews and gates never substitute for it.
-8. **Merge** (Section 7), verify the issue auto-closed, fetch master;
-   the next PR rebases on the new master.
+   the head being landed. Reviews and gates never substitute for it.
+8. **Land** (Section 7): the parent cherry-picks the branch commits
+   onto current master, pushes, closes the issue citing the landed
+   SHA(s), and deletes the branch; the next branch rebases on the
+   new master.
 
 ## 4. Triple hostile review (blocking)
 
@@ -465,39 +468,58 @@ Each gate run through `test/incus/harness-result.sh` appends one row
 to tracked `test/results/ledger.d/` **in that machine's gate
 worktree**. After all three machine cells for a head complete, the
 parent collects the three worktrees' rows and commits them on the
-PR branch as a single ledger-only commit (Section 4 delta rule) —
+branch as a single ledger-only commit (Section 4 delta rule) —
 no gate worktree's HEAD moves while another cell is measuring.
 Never delete a row — deleting a FAIL row destroys the verdict a later
-comparison would have shown. The PR gate comment carries: machine,
+comparison would have shown. The issue gate comment carries: machine,
 gated SHA, master SHA + baseline age/drift, every checklist line,
 every cell's numbers with `loadavg`, pre-check vs measured cells
 labelled, directional result or `N/A`, and the verdict.
 "Smoke passed" without numbers is not a gate.
 
-## 7. Merge discipline
+## 7. Landing discipline (direct commits; no merges)
 
+**Supersession (user directive 2026-11-05).** This section replaces
+every merge-based landing rule in this plan and in the campaign
+skill. Work lands on `master` as ordinary commits:
+
+- **No PRs, no merges.** Never open a pull request, never run
+  `gh pr merge`, never create a merge commit. A lane pushes
+  `fix/<issue>-<slug>` off current `origin/master` and stops.
+- **Evidence on the issue.** Reviewer records and gate evidence are
+  posted to the issue (`Reviewer: <model> | Task: <task-id> | Head:
+  <SHA> | Verdict: <v>`); the branch head SHA is the reviewed/gated
+  SHA everywhere this plan says "PR head".
+- **Parent lands.** After the checklist (three named seats clear,
+  gates at the gated SHA, parent firsthand verification, per-change
+  log): `git fetch origin master`; rebase the branch in its own
+  worktree if behind (re-review the moved head); from the clean
+  control checkout `git cherry-pick <first>..<last>` in branch
+  order; `git push origin master`. Conflicts are fixed on the branch,
+  never resolved in the control tree.
+- **Close + clean up.** Verify `git log --oneline -3 origin/master`;
+  close the issue citing the landed master SHA(s) + gate result;
+  delete the landed branch. No `Closes #<n>` keyword is relied on.
+- **An experimental PR that already exists** is closed without
+  landing; its branch tip carries the work.
 - Control checkout clean (`git status --short` empty) before every
-  merge-prep; unexpected dirt is stashed as `control-rescue-<date>`
-  (tracked only) or moved aside under `/var/worktrees/.cache/`,
-  never `--hard`-reset away.
-- Commit standard: subject `<area>: <imperative summary> (#NNNN)`
-  ≤ 72 cols, body sections `Why:` / `What:` / `Validation:` /
-  `Risk:`, via `git commit -F -` (never backticks in `-m`). The PR
-  title is the same subject; it becomes the merge-commit message.
+  landing; unexpected dirt is preserved under
+  `/var/worktrees/campaign-drive/rescue-<slug>-<date>/` (copies +
+  patch) and the control tree restored — never edited around, never
+  `--hard`-reset with unexamined content. Lane edits belong ONLY in
+  the lane's assigned worktree.
+- Commit standard (unchanged): subject
+  `<area>: <imperative summary> (#NNNN)` ≤ 72 cols, body sections
+  `Why:` / `What:` / `Validation:` / `Risk:`, via `git commit -F -`
+  (never backticks in `-m`). Each branch commit stands alone on
+  master — there is no merge-commit message to carry it.
 - Per-change log `docs/log/<issue>.md` (Timestamp / Action / File(s)
-  / Validation / Risk) in the same diff. Missing log = incomplete PR.
-- Merge command: `gh pr merge <n> --merge -t "<title>" -F - <<<"<body>"
-  --delete-branch`, after re-polling `mergeable` through `UNKNOWN`.
-  Conflicts resolve in a fresh worktree off the PR branch
-  (`git merge origin/master`, keep both sides' intent; per-issue logs
-  should not conflict; the closed root `_Log.md` is dropped, never
-  unioned). A post-merge head is a new head: re-classify its delta
-  before merging.
-- Verify the linked issue closed (`Closes #<n>`); if not, close it
-  citing the merge SHA + gate result.
+  / Validation / Risk) in the same diff. Missing log = incomplete.
+- Terminal state is **LANDED** (issue closed citing landed SHA(s)) or
+  **PLAN-KILLED** (three-seat, labelled `plan-kill`).
 - Instruction expiry markers and mirrored text are checked by
   `make instructions-census` (hermetic, CI) and the parent-only
-  online census before merge (`--online --base origin/master`).
+  online census before landing (`--online --base origin/master`).
 
 ## 8. Host isolation and test execution
 
@@ -564,13 +586,13 @@ dirty worktree (salvage it instead), or a live lane's target dir.
    both sides (regenerate + diff `protocol_wire_v1.json`),
    composed-master build + cross-language contract test. A real bug
    found here re-enters Band 1 and defers termination.
-2. Terminate only when: every open issue is MERGED or PLAN-KILLED,
+2. Terminate only when: every open issue is LANDED or PLAN-KILLED,
    except (a) a maintainer-held issue that says so on the issue, or
-   (b) an issue whose code is merged and whose only remainder is a
-   recorded lab/hardware verify; `gh pr list --state open` is
-   empty, the integration audit is clean, and every merged PR's
-   record shows three seat verdicts + three machine gates (or
-   delta-rule coverage) at the merged head.
+   (b) an issue whose code is landed and whose only remainder is a
+   recorded lab/hardware verify; no campaign branch remains unlanded
+   without disposition, the integration audit is clean, and every
+   landed issue's record shows three seat verdicts + three machine
+   gates (or delta-rule coverage) at the landed head.
 3. Close-out: tracking record completed with merged/plan-killed
    lists and any held/lab-verify exceptions; campaign memory file +
    one-line index entry; final sweep removes campaign worktrees and

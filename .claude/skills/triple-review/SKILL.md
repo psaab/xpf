@@ -247,7 +247,7 @@ TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/cargo cargo build 2>&1 | tail -5
 ```
 
 **Commit in logical increments — never one monolithic `git add -A`.**
-This PR will land via a **merge commit** (Step 9), so the branch's
+This branch lands by **cherry-pick** (Step 9), so the branch's
 commit history is preserved on master verbatim — make it a history
 worth keeping. Commit each self-contained unit of work separately so a
 later `git log` / `git bisect` / `git blame` lands on a tight,
@@ -429,11 +429,11 @@ done
   *for unshaped classes*. Shaped classes (e.g. iperf-a at 1 Gb/s) should
   hit their shape rate cleanly with ECN marks but no buffer drops.
 
-## Step 7: Open PR
+## Step 7: Push the branch (no PR)
 
 You committed in logical increments during Step 5 — do NOT now collapse
 them with a single `git add -A`. Confirm the history is clean and push
-it as-is (the merge commit in Step 9 preserves these commits on
+it as-is (the cherry-pick in Step 9 preserves these commits on
 master):
 
 ```bash
@@ -510,45 +510,30 @@ What to verify:
 Verdict format: MERGE-READY / MERGE-NEEDS-MINOR / MERGE-NEEDS-MAJOR.
 ```
 
-## Step 9: Merge once all three agree
+## Step 9: Land once all three agree (direct commits)
 
-Required before merge:
+**Direct-commit landing (user directive 2026-11-05).** No PRs, no
+merges: never open a pull request, never run `gh pr merge`, never
+create a merge commit (no squash, no rebase-merge, no --no-ff). The
+reviewed branch is transport; the parent cherry-picks its commits
+onto current `master` in order and pushes.
 
-- **Pool reviewer 1** has returned MERGE-READY or MERGE-NEEDS-MINOR
-  with every minor finding addressed.
-- **Pool reviewer 2** has returned MERGE-READY or MERGE-NEEDS-MINOR
-  with every minor finding addressed.
-- **The third verdict is recorded**: the orchestrating Claude
-  (in-conversation, a declared-pool model distinct from the two
-  dispatched models) reviews the final head itself and records
-  its verdict on the PR (same MERGE-READY / MERGE-NEEDS-MINOR /
-  MERGE-NEEDS-MAJOR vocabulary, with findings). The implementer
-  never counts as this reviewer: if the orchestrator implemented
-  the change, dispatch a third distinct pool reviewer via the
-  task tool instead and record that verdict. All three verdicts
-  must be at the same final head.
+Required before landing:
+- All three verdicts (Step 8 + the third-seat rule above) are
+  MERGE-READY, or MERGE-NEEDS-MINOR with every minor addressed, at
+  the same final branch head.
+- If any seat returns NEEDS-MAJOR: fix on the branch, push the fix
+  commit, re-dispatch, re-review the new head — then land.
+- Parent: `git fetch origin master`; rebase the branch onto current
+  master in its worktree if behind (re-review the moved head);
+  from the clean control checkout `git cherry-pick <first>..<last>`;
+  `git push origin master`; verify `git log --oneline -3 origin/master`.
+- Close the issue citing the landed master SHA(s) + gate result;
+  delete the landed branch. No `Closes #<n>` keyword is relied on —
+  there is no PR body.
 
-If any of the three returns NEEDS-MAJOR, address the findings,
-push a fix commit, re-dispatch reviewers, wait for re-review,
-then re-merge-check.
-
-**Merge with `--merge` (a true merge commit), NOT `--squash`.** Squash
-collapses the branch's logical commits — which Step 5 deliberately kept
-separate — into one monolithic commit on master, destroying the
-bisectable history and the per-commit `why`. Use a merge commit so each
-implementation/refactor/review-fix commit lands on master intact:
-
-```bash
-gh pr merge <PR> --merge --auto
-# or `--merge` directly if --auto isn't enabled.
-# NEVER --squash — it produces the monolithic commits this skill avoids.
-# --rebase is acceptable only if the branch history is already linear
-# and you explicitly want no merge commit; default to --merge.
-```
-
-After merge, save findings to memory if anything non-obvious
+After landing, save findings to memory if anything non-obvious
 came up:
-
 - File: `/home/ps/.claude/projects/-home-ps-git-bpfrx/memory/project_<ISSUE>_<step>_<outcome>.md`
 - Index entry: append one line to `MEMORY.md`.
 
@@ -564,7 +549,7 @@ came up:
 - **Dismissing test failures as flakes.** Step 6's 5x flake
   check is non-negotiable.
 - **Monolithic commits.** Step 5 commits in logical increments;
-  Step 9 merges with `--merge`, never `--squash`. A squash-merge of a
+  Step 9 cherry-picks the branch onto master — never squash. A squash of a
   multi-commit branch collapses the history into one giant commit —
   exactly what this prevents. Preserve the per-commit `why` on master.
 - **#961 / #946 Phase 2 architectural mismatch.** Step 2's
@@ -574,9 +559,9 @@ came up:
 ## When to NOT use this skill
 
 - **Pure documentation fixes** — no code change, no need for
-  reviewer agreement. Just push and merge.
+  reviewer agreement. Just push the branch commits.
 - **Single-line bug fixes** with obvious correctness — open a
-  PR, run one pool review, merge after it. The full
+  branch, run one pool review, land after it. The full
   three-reviewer plan-review cycle is overkill.
 - **Hot fixes during outage** — speed > rigor. Use a different
   process.

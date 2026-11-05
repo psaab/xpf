@@ -1,96 +1,20 @@
 ---
 name: merge-prs
-description: Merge all open PRs (or specific ones) and close their associated issues
-user_invocable: true
+description: INVALID — do not use. PR merging is prohibited (user directive 2026-11-05); work lands by direct commit. See the campaign skill Step 4.
+user_invocable: false
 ---
 
-# Merge Open PRs and Close Associated Issues
+# INVALID — superseded by direct-commit landing (2026-11-05)
 
-Merge open pull requests and automatically close any issues they reference via "Fixes #N".
+Do NOT use this skill. Never run `gh pr merge`, never create merge
+commits, and do not open pull requests for campaign work.
 
-## Usage
+Current rule (`.claude/skills/campaign/SKILL.md`, Step 4 + standing
+orders): lanes push `fix/<issue>-<slug>` branches off current
+`origin/master`; reviewers post evidence to the issue; the parent
+cherry-picks the branch's commits onto `master` in order, pushes,
+closes the issue citing the landed SHA(s), and deletes the branch.
+An experimental PR that already exists is closed without landing.
 
-- `/merge-prs` — merge ALL open PRs
-- `/merge-prs 123 456 789` — merge specific PR numbers
-
-## Steps
-
-1. List open PRs (or use the provided numbers).
-2. Merge each PR with `--merge` strategy.
-3. For any that fail with merge conflicts, rebase on master and retry.
-4. Extract "Fixes #N" references from each merged PR body.
-5. Close the associated issues.
-6. Report results.
-
-## Implementation
-
-```bash
-# Get PR list — either from args or all open
-if [ -n "$ARGS" ]; then
-  PRS="$ARGS"
-else
-  PRS=$(gh pr list --state open --json number -q '.[].number' | sort -n)
-fi
-
-if [ -z "$PRS" ]; then
-  echo "No open PRs to merge."
-  exit 0
-fi
-
-MERGED=""
-FAILED=""
-ISSUES_CLOSED=""
-
-for pr in $PRS; do
-  if gh pr merge $pr --merge 2>/dev/null; then
-    MERGED="$MERGED $pr"
-    
-    # Extract and close associated issues
-    FIXES=$(gh pr view $pr --json body -q '.body' 2>/dev/null | grep -oP '[Ff]ixes #\d+' | grep -oP '\d+')
-    for issue in $FIXES; do
-      gh issue close $issue --reason completed --comment "Fixed by PR #$pr (merged)." 2>/dev/null && \
-        ISSUES_CLOSED="$ISSUES_CLOSED #$issue"
-    done
-  else
-    # Try rebase and retry
-    BRANCH=$(gh pr view $pr --json headRefName -q '.headRefName' 2>/dev/null)
-    if [ -n "$BRANCH" ]; then
-      git fetch origin $BRANCH 2>/dev/null
-      git checkout $BRANCH 2>/dev/null
-      if git merge origin/master --no-edit 2>/dev/null; then
-        git push 2>/dev/null
-        git checkout master 2>/dev/null
-        sleep 3
-        if gh pr merge $pr --merge 2>/dev/null; then
-          MERGED="$MERGED $pr"
-          FIXES=$(gh pr view $pr --json body -q '.body' 2>/dev/null | grep -oP '[Ff]ixes #\d+' | grep -oP '\d+')
-          for issue in $FIXES; do
-            gh issue close $issue --reason completed --comment "Fixed by PR #$pr (merged)." 2>/dev/null && \
-              ISSUES_CLOSED="$ISSUES_CLOSED #$issue"
-          done
-        else
-          FAILED="$FAILED $pr"
-        fi
-      else
-        # Conflicts, including stale root `_Log.md` edits, take the abort path;
-        # that log is closed and must never be forced with `--theirs` or union.
-        git merge --abort 2>/dev/null
-        git checkout master 2>/dev/null
-        FAILED="$FAILED $pr"
-      fi
-    else
-      FAILED="$FAILED $pr"
-    fi
-  fi
-done
-
-git checkout master 2>/dev/null
-git pull origin master 2>/dev/null
-
-echo ""
-echo "=== Results ==="
-[ -n "$MERGED" ] && echo "Merged:$MERGED"
-[ -n "$FAILED" ] && echo "Failed:$FAILED (need manual rebase)"
-[ -n "$ISSUES_CLOSED" ] && echo "Issues closed:$ISSUES_CLOSED"
-[ -z "$MERGED" ] && [ -z "$FAILED" ] && echo "Nothing to do."
-```
+This file is retained only so stale references fail loudly instead
+of silently resolving to the old merge procedure.

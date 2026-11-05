@@ -1,6 +1,6 @@
 ---
 name: engineer
-description: Alias for /triple-review — drive a refactor through the full triple-review methodology (three declared-pool reviewers: Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro) with plan-review, smoke, and 3-of-3 merge gate.
+description: Alias for /triple-review — drive a refactor through the full triple-review methodology (three declared-pool reviewers: Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro) with plan-review, smoke, and 3-of-3 landing gate.
 user_invocable: true
 ---
 
