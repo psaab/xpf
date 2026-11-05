@@ -107,9 +107,9 @@ func (t *ConfigTree) FormatPathInheritanceForNode(path []string, nodeID int) (st
 			fmt.Fprintf(&b, "/* %s */\n", n.Annotation)
 		}
 		if n.IsLeaf {
-			fmt.Fprintf(&b, "%s%s;\n", inactivePrefix(n), n.QuotedKeyPath())
+			fmt.Fprintf(&b, "%s%s;\n", inactivePrefix(n), formatNodeKeyPath(n))
 		} else {
-			fmt.Fprintf(&b, "%s%s {\n", inactivePrefix(n), n.QuotedKeyPath())
+			fmt.Fprintf(&b, "%s%s {\n", inactivePrefix(n), formatNodeKeyPath(n))
 			formatNodesInheritance(&b, n.Children, 1)
 			fmt.Fprintf(&b, "}\n")
 		}
@@ -132,9 +132,9 @@ func formatNodesInheritance(b *strings.Builder, nodes []*Node, indent int) {
 				prefix, prefix, displayKey, n.InheritedFrom, prefix)
 		}
 		if n.IsLeaf {
-			fmt.Fprintf(b, "%s%s%s;\n", prefix, inactivePrefix(n), n.QuotedKeyPath())
+			fmt.Fprintf(b, "%s%s%s;\n", prefix, inactivePrefix(n), formatNodeKeyPath(n))
 		} else {
-			fmt.Fprintf(b, "%s%s%s {\n", prefix, inactivePrefix(n), n.QuotedKeyPath())
+			fmt.Fprintf(b, "%s%s%s {\n", prefix, inactivePrefix(n), formatNodeKeyPath(n))
 			formatNodesInheritance(b, n.Children, indent+1)
 			fmt.Fprintf(b, "%s}\n", prefix)
 		}
@@ -191,6 +191,77 @@ func canonicalOrder(nodes []*Node) []*Node {
 	return result
 }
 
+// formatNodeKeyPath renders a node's hierarchical key path. A closed
+// `from prefix-list [ ... ]` run containing an authored-quoted policy keyword
+// can replay without its brackets: the quotes retain the keyword as a value,
+// while dropping the redundant list delimiters gives the canonical
+// `prefix-list PL2 "then"` spelling used by flat display-set output. Keep the
+// brackets for every other leaf, especially malformed unclosed lists whose
+// bracket provenance is needed to fail closed.
+func formatNodeKeyPath(n *Node) string {
+	if n == nil {
+		return ""
+	}
+	if !n.IsLeaf || !n.BracketedClosed || len(n.Keys) < 3 ||
+		n.Keys[0] != "from" || n.Keys[1] != "prefix-list" ||
+		len(n.KeysBracketed) != len(n.Keys) {
+		return n.QuotedKeyPath()
+	}
+	hasQuotedKeyword := false
+	for i := 2; i < len(n.Keys); i++ {
+		if n.KeyBracketed(i) && n.KeyQuoted(i) && policyTermInlineKeywords[n.Keys[i]] {
+			hasQuotedKeyword = true
+			break
+		}
+	}
+	if !hasQuotedKeyword {
+		return n.QuotedKeyPath()
+	}
+
+	parts := make([]string, 0, len(n.Keys)+2)
+	for i := 0; i < len(n.Keys); {
+		if !n.KeyBracketed(i) {
+			if keyNeedsAuthoredQuote(n, i) {
+				parts = append(parts, `"`+keyEscaper.Replace(n.Keys[i])+`"`)
+			} else {
+				parts = append(parts, quoteKey(n.Keys[i]))
+			}
+			i++
+			continue
+		}
+		run := i
+		for run < len(n.Keys) && n.KeyBracketed(run) {
+			run++
+		}
+		omitBrackets := false
+		for j := i; j < run; j++ {
+			if n.KeyQuoted(j) && policyTermInlineKeywords[n.Keys[j]] {
+				omitBrackets = true
+				break
+			}
+		}
+		if !omitBrackets {
+			parts = append(parts, "[")
+		}
+		for j := i; j < run; j++ {
+			if omitBrackets {
+				if keyNeedsAuthoredQuote(n, j) {
+					parts = append(parts, `"`+keyEscaper.Replace(n.Keys[j])+`"`)
+				} else {
+					parts = append(parts, quoteKey(n.Keys[j]))
+				}
+			} else {
+				parts = append(parts, bracketedLeafKey(n, j))
+			}
+		}
+		if !omitBrackets {
+			parts = append(parts, "]")
+		}
+		i = run
+	}
+	return strings.Join(parts, " ")
+}
+
 func formatNodes(b *strings.Builder, nodes []*Node, indent int) {
 	nodes = canonicalOrder(nodes)
 	prefix := strings.Repeat("    ", indent)
@@ -199,9 +270,9 @@ func formatNodes(b *strings.Builder, nodes []*Node, indent int) {
 			fmt.Fprintf(b, "%s/* %s */\n", prefix, n.Annotation)
 		}
 		if n.IsLeaf {
-			fmt.Fprintf(b, "%s%s%s;\n", prefix, inactivePrefix(n), n.QuotedKeyPath())
+			fmt.Fprintf(b, "%s%s%s;\n", prefix, inactivePrefix(n), formatNodeKeyPath(n))
 		} else {
-			fmt.Fprintf(b, "%s%s%s {\n", prefix, inactivePrefix(n), n.QuotedKeyPath())
+			fmt.Fprintf(b, "%s%s%s {\n", prefix, inactivePrefix(n), formatNodeKeyPath(n))
 			formatNodes(b, n.Children, indent+1)
 			fmt.Fprintf(b, "%s}\n", prefix)
 		}
@@ -226,9 +297,9 @@ func (t *ConfigTree) FormatPath(path []string) string {
 			fmt.Fprintf(&b, "/* %s */\n", n.Annotation)
 		}
 		if n.IsLeaf {
-			fmt.Fprintf(&b, "%s%s;\n", inactivePrefix(n), n.QuotedKeyPath())
+			fmt.Fprintf(&b, "%s%s;\n", inactivePrefix(n), formatNodeKeyPath(n))
 		} else {
-			fmt.Fprintf(&b, "%s%s {\n", inactivePrefix(n), n.QuotedKeyPath())
+			fmt.Fprintf(&b, "%s%s {\n", inactivePrefix(n), formatNodeKeyPath(n))
 			formatNodes(&b, n.Children, 1)
 			fmt.Fprintf(&b, "}\n")
 		}
@@ -1161,9 +1232,9 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 						fmt.Fprintf(sb, " %s/* %s */\n", indent, o.Annotation)
 					}
 					if o.IsLeaf {
-						fmt.Fprintf(sb, " %s%s%s;\n", indent, inactivePrefix(o), o.QuotedKeyPath())
+						fmt.Fprintf(sb, " %s%s%s;\n", indent, inactivePrefix(o), formatNodeKeyPath(o))
 					} else {
-						fmt.Fprintf(sb, " %s%s%s { ... }\n", indent, inactivePrefix(o), o.QuotedKeyPath())
+						fmt.Fprintf(sb, " %s%s%s { ... }\n", indent, inactivePrefix(o), formatNodeKeyPath(o))
 					}
 				})
 			case o.Annotation != n.Annotation && !o.IsLeaf && !n.IsLeaf && o.Inactive == n.Inactive:
@@ -1265,9 +1336,9 @@ func formatPrefixed(b *strings.Builder, prefix, indent string, n *Node) {
 		fmt.Fprintf(b, "%s%s/* %s */\n", prefix, indent, n.Annotation)
 	}
 	if n.IsLeaf {
-		fmt.Fprintf(b, "%s%s%s%s;\n", prefix, indent, inactivePrefix(n), n.QuotedKeyPath())
+		fmt.Fprintf(b, "%s%s%s%s;\n", prefix, indent, inactivePrefix(n), formatNodeKeyPath(n))
 	} else {
-		fmt.Fprintf(b, "%s%s%s%s {\n", prefix, indent, inactivePrefix(n), n.QuotedKeyPath())
+		fmt.Fprintf(b, "%s%s%s%s {\n", prefix, indent, inactivePrefix(n), formatNodeKeyPath(n))
 		formatPrefixedChildren(b, prefix, indent+"    ", n.Children)
 		fmt.Fprintf(b, "%s%s}\n", prefix, indent)
 	}
