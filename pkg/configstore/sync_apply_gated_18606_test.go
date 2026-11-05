@@ -118,13 +118,16 @@ func TestSyncApplyGatedRefusalKeepsUnsharedState16016(t *testing.T) {
 // cell fail even though the refusal still leaves the Store untouched.
 func TestSyncApplyGatedCutoffPreservesPreparedState16016(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		incoming func(string) string
+		name              string
+		incoming           func(string) string
+		wantClear          bool
+		wantDivergence     bool
+		wantHistory        bool
 	}{
-		{name: "matching-content", incoming: func(marked string) string { return marked }},
+		{name: "matching-content", incoming: func(marked string) string { return marked }, wantClear: true},
 		{name: "changed-content", incoming: func(string) string {
 			return "system { host-name peer-replacement-16016; }\n"
-		}},
+		}, wantDivergence: true, wantHistory: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t)
@@ -162,22 +165,33 @@ func TestSyncApplyGatedCutoffPreservesPreparedState16016(t *testing.T) {
 			beforeActiveGen := s.activeGen.Load()
 			beforeUnshared := *s.unshared
 			prepared := false
-			s.syncApplyPreparedForTesting = func() { prepared = true }
+			classificationAndHistoryPrepared := false
+			s.syncApplyPreparedForTesting = func(classification syncClassification, historyEntry *HistoryEntry) {
+				prepared = true
+				classificationAndHistoryPrepared =
+					classification.clearUnshared == tc.wantClear &&
+						(classification.divergence != nil) == tc.wantDivergence &&
+						(historyEntry != nil) == tc.wantHistory
+				if tc.wantHistory {
+					classificationAndHistoryPrepared = classificationAndHistoryPrepared &&
+						historyEntry.Config != nil && historyEntry.Config.Format() == beforeActive
+				}
+			}
 			refused := errors.New("authority expired at final gate")
 			expired := false
 			gateSawPrepared := false
 			gate := func(_ context.Context, _ *config.Config) error {
-				gateSawPrepared = prepared
+				gateSawPrepared = prepared && classificationAndHistoryPrepared
 				expired = true
 				return refused
 			}
-
 			_, err = s.SyncApplyGated(context.Background(), tc.incoming(markedText), nil, gate)
 			if !expired {
 				t.Fatal("promotion gate did not simulate authority expiry")
 			}
 			if !prepared || !gateSawPrepared {
-				t.Fatal("authority gate ran before classification/history preparation")
+				t.Fatalf("final gate did not observe prepared classification/history (observed=%t prepared=%t divergence=%t history=%t)",
+					prepared, classificationAndHistoryPrepared, tc.wantDivergence, tc.wantHistory)
 			}
 			if !errors.Is(err, refused) {
 				t.Fatalf("SyncApplyGated = %v, want final-gate refusal", err)
