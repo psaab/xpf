@@ -641,6 +641,12 @@ exports, searches, and control-character diagnostics. The generic keyword is
 recognized only below `api-auth key`, avoiding false redaction of unrelated
 identifiers.
 
+`config_secret_redaction_test.go` stages RIP and IS-IS authentication sentinels
+in separate virtual-router instances: #17735 rejects an active same-table pair
+because FRR fixes IS-IS distance at 115 while managed RIP renders at 100, and
+the RIP schema has no preference knob. Keep both protocol secrets in this
+fixture so its redaction coverage cannot go vacuous for either sentinel.
+
 REST authentication failures are throttled in three ways: five failures for a
 source/account pair in 10 minutes; five failures for a claimed Basic username
 across all source addresses in 10 minutes; and 20 failures from one source in

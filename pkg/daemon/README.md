@@ -2823,6 +2823,11 @@ never lock an operator out of a remote box it manages.
 
 ## Notable gotchas
 
+- **Junos 9 provenance fixture (#18857).** `junos9_daemon_copy_15990_test.go`
+  keeps active RIP and IS-IS auth sentinels in separate virtual-router
+  instances because #17735 rejects the same-table distance ordering (FRR
+  IS-IS 115, managed RIP 100; Junos prefers IS-IS). The RIP schema has no
+  preference knob; retain both `$9$` render/provenance assertions.
 - **An 802.1Q sub-interface's netdev is named for its VLAN ID, not its unit
   number — and BOTH sides of a lookup must agree (#8597 K84/K85).**
   `set interfaces ge-0-0-1 unit 10 vlan-id 100` is created by networkd as
