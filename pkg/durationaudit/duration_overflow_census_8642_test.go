@@ -269,6 +269,16 @@ var knownUnbounded = map[string]string{
 	// input (#5784), and store_commit carries its own written argument.
 	"pkg/daemon/daemon_archive_timer.go": "clamped to MaxDurationMinutes (#5784)",
 	"pkg/configstore/store_commit.go":    "carries a written non-overflow argument",
+	// Both multiplies in sync_conn_sweep.go use runtime-derived scan seconds,
+	// never a raw config value: primaryLivenessScanIntervalForTimeout clamps
+	// to [initialPrimaryLivenessScanIntervalSeconds=1,
+	// maxPrimaryLivenessScanIntervalSeconds=10]. requestedScanSeconds (:35)
+	// reaches sweepWakeScanIntervalSeconds only via wakeSyncSweepForInterval
+	// from that clamp or the 1s initial, and its CAS-min only ever lowers it;
+	// scanSeconds (:70) is stored only from that clamp, the 1s initial, or
+	// minimumLivenessScanInterval (min of 10, clamped per-session values, and
+	// pending, itself only ever clamped or initial). Max 10s cannot overflow.
+	"pkg/cluster/sync_conn_sweep.go": "scan seconds clamped to [1,10] by primaryLivenessScanIntervalForTimeout; CAS-min only lowers",
 }
 
 // THE CENSUS. A new `time.Duration(x) * time.<Unit>` on an unbounded operand
