@@ -1062,17 +1062,11 @@ func CompileConfigForNodeLenient(tree *ConfigTree, nodeID int) (*Config, error) 
 // CompileConfigForNodeLenientWithPackedTailGate18771 is the peer-model core
 // used only by an eligible configstore promotion.
 func CompileConfigForNodeLenientWithPackedTailGate18771(tree *ConfigTree, nodeID int, eligible bool) (*Config, error) {
-	cfg, _, err := CompileConfigForNodeLenientDrops18771(tree, nodeID, eligible)
-	return cfg, err
-}
-
-// CompileConfigForNodeLenientDrops18771 is the Drops form of the
-// peer-model lenient compile; peer callers discard the findings
-// (peer findings remain slog-only and never refuse).
-func CompileConfigForNodeLenientDrops18771(tree *ConfigTree, nodeID int, eligible bool) (*Config, []PackedTailGateFinding18771, error) {
 	opts := lenientCompileOpts()
 	opts.packedTailGateEligible18771 = eligible
-	return compileTreeWithDerivedObserver18771(tree, opts, &nodeID, nil)
+	// No Drops form here by design: peer findings remain slog-only
+	// and must never reach a refusal, so no caller is offered them.
+	return compileTree(tree, opts, &nodeID)
 }
 
 // compileExpanded compiles an already-expanded (groups resolved) ConfigTree

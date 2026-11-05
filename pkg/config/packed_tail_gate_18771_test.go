@@ -862,3 +862,19 @@ func TestPackedTailGate18771Cell10BoundsAndMutants(t *testing.T) {
 		t.Fatal("typed-equality/diagnostic-equality conflation survives")
 	}
 }
+
+func TestPackedTailGateDropsFilter18771(t *testing.T) {
+	mk := func(v string) PackedTailGateFinding18771 {
+		return PackedTailGateFinding18771{Verdict: v, Prose: "packedTailGate18771 " + v + " prose mentions DROP", Drop: PackedTailGateDrop18771{Site: 7, Container: "interfaces", Head: "family", Line: 3, Column: 5, NodeLabel: "standalone"}}
+	}
+	findings := []PackedTailGateFinding18771{mk("DROP"), mk("CLEAN"), mk("PARTIAL"), mk("INDETERMINATE"),
+		{Verdict: "SKIPPED-CAP", Prose: "packedTailGate18771 SKIPPED-CAP sites 33 node=standalone"},
+		{Verdict: "SKIPPED-PROVENANCE", Prose: "packedTailGate18771 SKIPPED-PROVENANCE site 1"}}
+	drops := PackedTailGateDrops18771(findings)
+	if len(drops) != 1 || drops[0].Site != 7 {
+		t.Fatalf("drops = %v, want exactly the DROP finding's record", drops)
+	}
+	if got := PackedTailGateDrops18771(nil); len(got) != 0 {
+		t.Fatalf("nil findings produced %d drops", len(got))
+	}
+}

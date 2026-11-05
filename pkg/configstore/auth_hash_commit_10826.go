@@ -54,7 +54,7 @@ func (s *Store) compileAuthSafeCandidate(candidate *config.ConfigTree, bootstrap
 func packedTailGateRefusal18771(drops []config.PackedTailGateDrop18771) error {
 	parts := make([]string, 0, len(drops))
 	for _, d := range drops {
-		parts = append(parts, fmt.Sprintf("%s/%s at %d:%d (%s)", d.Container, d.Head, d.Line, d.Column, d.NodeLabel))
+		parts = append(parts, fmt.Sprintf("site %d %s/%s at %d:%d (%s)", d.Site, d.Container, d.Head, d.Line, d.Column, d.NodeLabel))
 	}
 	return fmt.Errorf("packed-tail statement(s) would be silently dropped: %s; "+
 		"brace the statement (outer { inner { leaf value; } }) or admit the pair via the #8690 path (#18771)",

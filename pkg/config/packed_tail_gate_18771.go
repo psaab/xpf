@@ -14,9 +14,12 @@ const (
 )
 
 // PackedTailGateEnforce18771 reports the production enforcement posture
-// for the #18771 packed-tail gate. Phase 1 is report-only (false); the
-// enforcement flip changes only the constant above. Production callers
-// read this accessor; no caller may supply its own enforcement bool.
+// for the #18771 packed-tail gate. Phase 1 is report-only (false). The
+// flip changes this constant plus the enforcement-posture test
+// migration (design v3 Q7.9: the phase-one guard in
+// packed_tail_gate_18771_test.go and Cell08's promotion subtests).
+// Production callers read this accessor; no caller may supply its own
+// enforcement bool.
 func PackedTailGateEnforce18771() bool { return packedTailGateEnforce18771 }
 
 // PackedTailGateDrop18771 is one adjudicated DROP site from the
