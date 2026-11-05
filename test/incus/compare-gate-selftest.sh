@@ -19,6 +19,16 @@ trap 'rm -rf "$T"' EXIT
 PASS=0
 ok() { PASS=$((PASS + 1)); printf 'PASS (%d): %s\n' "$PASS" "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+PROJECT_ROOT="$PR_ROOT"
+BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env
+export PROJECT_ROOT BPFRX_CLUSTER_ENV
+source "$SCRIPT_DIR/cluster-env.sh"
+NODE0_REF="$FW0"
+NODE1_REF="$FW1"
+[[ -n "$NODE0_REF" && -n "$NODE1_REF" && "$NODE0_REF" != "$NODE1_REF" ]] || {
+	printf 'FAIL: cluster env did not provide two distinct node refs\n' >&2
+	exit 2
+}
 
 BUILD_SHA=1111111111111111111111111111111111111111
 VERSION="9.9.0+g${BUILD_SHA:0:12}"
@@ -41,6 +51,14 @@ XPFD_SHA="$(sha256sum "$T/pkg/usr/local/share/xpf/staged/xpfd" | cut -d' ' -f1)"
 HELPER_SHA="$(sha256sum "$T/pkg/usr/local/share/xpf/staged/xpf-userspace-dp" | cut -d' ' -f1)"
 dpkg-deb --build "$T/pkg" "$T/fixture.deb" >/dev/null
 
+write_identity_record() {
+	local idx="$1" host="$2"
+	local source_sha="${3:-$BUILD_SHA}" running_sha="${4:-$XPFD_SHA}"
+	local helper_sha="${5:-$HELPER_SHA}" deb_version="${6:-$VERSION}"
+	printf 'node%s=%s source_sha=%s manifest_sha=%s running_sha=%s cli_sha=%s helper_sha=%s deb_version=%s xpfd_version=%s\n' \
+		"$idx" "$host" "$source_sha" "$XPFD_SHA" "$running_sha" "$CLI_SHA" "$helper_sha" "$deb_version" "$RUNTIME_VERSION"
+}
+
 write_valid_identity() {
 	local out="$1" prefix="${2:-}"
 	{
@@ -55,10 +73,8 @@ write_valid_identity() {
 				"package_version=$VERSION" \
 				"runtime_VERSION=$RUNTIME_VERSION"
 		fi
-		printf 'node0=loss:xpf-userspace-fw0 source_sha=%s manifest_sha=%s running_sha=%s cli_sha=%s helper_sha=%s deb_version=%s xpfd_version=%s\n' \
-			"$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$CLI_SHA" "$HELPER_SHA" "$VERSION" "$RUNTIME_VERSION"
-		printf 'node1=loss:xpf-userspace-fw1 source_sha=%s manifest_sha=%s running_sha=%s cli_sha=%s helper_sha=%s deb_version=%s xpfd_version=%s\n' \
-			"$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$CLI_SHA" "$HELPER_SHA" "$VERSION" "$RUNTIME_VERSION"
+		write_identity_record 0 "$NODE0_REF"
+		write_identity_record 1 "$NODE1_REF"
 	} >"$out"
 }
 
@@ -80,36 +96,59 @@ write_identity_variant() {
 				"package=$T/fixture.deb" \
 				"package_version=$VERSION" \
 				"runtime_VERSION=$RUNTIME_VERSION"
-			printf 'node0=loss:xpf-userspace-fw0 source_sha=%s helper_sha=%s deb_version=%s xpfd_version=%s\n' "$BUILD_SHA" "$HELPER_SHA" "$VERSION" "$RUNTIME_VERSION"
-			printf 'node1=loss:xpf-userspace-fw1 source_sha=%s helper_sha=%s deb_version=%s xpfd_version=%s\n' "$BUILD_SHA" "$HELPER_SHA" "$VERSION" "$RUNTIME_VERSION"
+			printf 'node0=%s source_sha=%s helper_sha=%s deb_version=%s xpfd_version=%s\n' "$NODE0_REF" "$BUILD_SHA" "$HELPER_SHA" "$VERSION" "$RUNTIME_VERSION"
+			printf 'node1=%s source_sha=%s helper_sha=%s deb_version=%s xpfd_version=%s\n' "$NODE1_REF" "$BUILD_SHA" "$HELPER_SHA" "$VERSION" "$RUNTIME_VERSION"
 		} >"$out"
 		;;
 	missing-node)
-		printf 'node0=loss:xpf-userspace-fw0 source_sha=%s manifest_sha=%s running_sha=%s helper_sha=%s deb_version=%s\n' "$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$HELPER_SHA" "$VERSION" >"$out"
+		write_identity_record 0 "$NODE0_REF" >"$out"
 		;;
 	duplicate-node)
 		{
-			printf 'node0=loss:xpf-userspace-fw0 source_sha=%s manifest_sha=%s running_sha=%s helper_sha=%s deb_version=%s\n' "$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$HELPER_SHA" "$VERSION"
-			printf 'node0=loss:xpf-userspace-fw0 source_sha=%s manifest_sha=%s running_sha=%s helper_sha=%s deb_version=%s\n' "$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$HELPER_SHA" "$VERSION"
-			printf 'node1=loss:xpf-userspace-fw1 source_sha=%s manifest_sha=%s running_sha=%s helper_sha=%s deb_version=%s\n' "$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$HELPER_SHA" "$VERSION"
+			write_identity_record 0 "$NODE0_REF"
+			write_identity_record 0 "$NODE0_REF"
+			write_identity_record 1 "$NODE1_REF"
+		} >"$out"
+		;;
+	duplicate-key)
+		{
+			printf 'node0=%s source_sha=%s manifest_sha=%s running_sha=%s running_sha=%s cli_sha=%s helper_sha=%s deb_version=%s xpfd_version=%s\n' \
+				"$NODE0_REF" "$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$CLI_SHA" "$HELPER_SHA" "$VERSION" "$RUNTIME_VERSION"
+			write_identity_record 1 "$NODE1_REF"
+		} >"$out"
+		;;
+	wrong-node-host)
+		{
+			write_identity_record 0 "$NODE1_REF"
+			write_identity_record 1 "$NODE1_REF"
 		} >"$out"
 		;;
 	missing-key)
 		{
-			printf 'node0=loss:xpf-userspace-fw0 source_sha=%s manifest_sha=%s running_sha=%s deb_version=%s\n' "$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$VERSION"
-			printf 'node1=loss:xpf-userspace-fw1 source_sha=%s manifest_sha=%s running_sha=%s helper_sha=%s deb_version=%s\n' "$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$HELPER_SHA" "$VERSION"
+			printf 'node0=%s source_sha=%s manifest_sha=%s running_sha=%s deb_version=%s\n' "$NODE0_REF" "$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$VERSION"
+			write_identity_record 1 "$NODE1_REF"
 		} >"$out"
 		;;
 	bad-running-sha)
 		{
-			printf 'node0=loss:xpf-userspace-fw0 source_sha=%s manifest_sha=%s running_sha=%s helper_sha=%s deb_version=%s\n' "$BUILD_SHA" "$XPFD_SHA" 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' "$HELPER_SHA" "$VERSION"
-			printf 'node1=loss:xpf-userspace-fw1 source_sha=%s manifest_sha=%s running_sha=%s helper_sha=%s deb_version=%s\n' "$BUILD_SHA" "$XPFD_SHA" 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' "$HELPER_SHA" "$VERSION"
+			write_identity_record 0 "$NODE0_REF" "$BUILD_SHA" 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
+			write_identity_record 1 "$NODE1_REF" "$BUILD_SHA" 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
 		} >"$out"
 		;;
 	bad-helper-sha)
+		write_identity_record 0 "$NODE0_REF" "$BUILD_SHA" "$XPFD_SHA" 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' >"$out"
+		write_identity_record 1 "$NODE1_REF" >>"$out"
+		;;
+	bad-deb-version)
 		{
-			printf 'node0=loss:xpf-userspace-fw0 source_sha=%s manifest_sha=%s running_sha=%s helper_sha=%s deb_version=%s\n' "$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' "$VERSION"
-			printf 'node1=loss:xpf-userspace-fw1 source_sha=%s manifest_sha=%s running_sha=%s helper_sha=%s deb_version=%s\n' "$BUILD_SHA" "$XPFD_SHA" "$XPFD_SHA" "$HELPER_SHA" "$VERSION"
+			write_identity_record 0 "$NODE0_REF" "$BUILD_SHA" "$XPFD_SHA" "$HELPER_SHA" '9.9.1+g111111111111'
+			write_identity_record 1 "$NODE1_REF"
+		} >"$out"
+		;;
+	bad-source-sha)
+		{
+			write_identity_record 0 "$NODE0_REF" '2222222222222222222222222222222222222222'
+			write_identity_record 1 "$NODE1_REF"
 		} >"$out"
 		;;
 	empty) : >"$out" ;;
@@ -157,7 +196,18 @@ setup_window() {
 }
 
 run_gate() {
-	if XPF_LEDGER="$LEDGER" XPF_GATE_ID=xpf-compare-gate-selftest \
+	local gate_id="${1:-xpf-compare-gate-selftest}"
+	if XPF_LEDGER="$LEDGER" XPF_GATE_ID="$gate_id" \
+		bash "$COMPARE_GATE_SCRIPT" "$PR_ROOT" "$T/fixture.deb" "$VERSION" "$BUILD_SHA" \
+		"$RUNTIME_VERSION" "$BASE" "$PR" "$CONTROL" "$OUT" >"$RUN/stdout" 2>"$RUN/stderr"; then
+		GATE_RC=0
+	else
+		GATE_RC=$?
+	fi
+}
+
+run_gate_without_id() {
+	if env -u XPF_GATE_ID XPF_LEDGER="$LEDGER" \
 		bash "$COMPARE_GATE_SCRIPT" "$PR_ROOT" "$T/fixture.deb" "$VERSION" "$BUILD_SHA" \
 		"$RUNTIME_VERSION" "$BASE" "$PR" "$CONTROL" "$OUT" >"$RUN/stdout" 2>"$RUN/stderr"; then
 		GATE_RC=0
@@ -227,14 +277,25 @@ setup_window header-valid header fail
 run_gate
 assert_judged FAIL 'header-prefixed fully attested identity'
 ok 'header-prefixed identity selected by node record prefixes'
+setup_window missing-gate-id valid fail
+run_gate_without_id
+assert_rejected_before_verdict 'unset XPF_GATE_ID'
+grep -q 'XPF_GATE_ID is required' "$RUN/stderr" || fail 'unset gate ID did not fail with its required-name diagnostic'
 
-for malformed in missing-node duplicate-node missing-key empty; do
+setup_window emitter-refuses valid fail
+run_gate 'invalid gate id'
+assert_rejected_before_verdict 'emitter refusal for whitespace-bearing gate ID'
+grep -qx 'verdict=FAIL' "$OUT/gate-decision.txt" || fail 'emitter-refusal case did not compute the fixture FAIL'
+ok 'emitter refusal leaves computed FAIL off stdout and writes no shard'
+
+
+for malformed in missing-node duplicate-node duplicate-key wrong-node-host missing-key empty; do
 	setup_window "malformed-$malformed" "$malformed" fail
 	run_gate
 	assert_rejected_before_verdict "malformed identity ($malformed)"
 done
 
-for mismatch in bad-running-sha bad-helper-sha; do
+for mismatch in bad-running-sha bad-helper-sha bad-deb-version bad-source-sha; do
 	setup_window "mismatch-$mismatch" "$mismatch" fail
 	run_gate
 	assert_rejected_before_verdict "manifest mismatch ($mismatch)"
