@@ -878,3 +878,49 @@ func TestPackedTailGateDropsFilter18771(t *testing.T) {
 		t.Fatalf("nil findings produced %d drops", len(got))
 	}
 }
+
+func TestPackedTailGate18771Q3ShippedCorpusNoDrop(t *testing.T) {
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	paths, err := filepath.Glob("../../docs/ha-cluster-*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, err := filepath.Glob("../../test/incus/*.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths = append(paths, matches...)
+	if len(paths) < 5 {
+		t.Fatalf("shipped corpus = %v, want HA cluster files plus test/incus configs", paths)
+	}
+	node0, node1 := 0, 1
+	views := []struct {
+		name   string
+		nodeID *int
+	}{
+		{name: "standalone", nodeID: nil},
+		{name: "node0", nodeID: &node0},
+		{name: "node1", nodeID: &node1},
+	}
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, view := range views {
+			cfg, err := packedTailCompile18771(t, string(raw), strictCompileOpts(), view.nodeID)
+			if err != nil {
+				t.Errorf("%s %s: strict compile: %v", path, view.name, err)
+				continue
+			}
+			for _, verdict := range packedTailVerdicts18771(cfg) {
+				if verdict == "DROP" {
+					t.Errorf("%s %s produced a DROP finding:\n%s", path, view.name, packedTailDiagnosticText18771(cfg))
+				}
+			}
+		}
+	}
+}

@@ -357,6 +357,9 @@ interfaces { ge-0/0/0 { description first; } ge-0/0/1 { description second; } }
 	})
 
 	t.Run("indeterminate-is-warning-only", func(t *testing.T) {
+		// Fixture is the config package's measured PARTIAL text; on the
+		// Store path the strict schema prewalk degrades it to
+		// INDETERMINATE (twin compile fails), which is what this cell pins.
 		const partial = `interfaces { ge-0/0/1 { unit 0 { family inet { address 192.0.2.2/24 vrrp-group 1 authentication-type simple; } } } }`
 		s := packedTailStageText18771(t, -1, partial)
 		_, gen, err := s.CompileCandidateGen()
@@ -481,4 +484,41 @@ func hasPackedTailVerdict18771(cfg *config.Config, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestPackedTailEnforce18771PartialCommitSucceeds(t *testing.T) {
+	// The config package independently measured this fixture as
+	// diagnostic-only PARTIAL through its eligible compile harness.
+	// Store promotion adds the strict schema prewalk before the gate;
+	// that can make a twin compile fail and degrade the verdict to
+	// INDETERMINATE. Both are warning-only and never refuse, so the
+	// store-level contract is: commits, and never yields DROP.
+	partialText := packedTailStorePartialText18771()
+	s := packedTailStageText18771(t, -1, partialText)
+	_, gen, err := s.CompileCandidateGen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := s.CommitWithDescriptionGen("partial", gen)
+	if err != nil {
+		t.Fatalf("PARTIAL commit refused: %v", err)
+	}
+	verdicts := packedTailStoreVerdicts18771(cfg)
+	if len(verdicts) != 1 || (verdicts[0] != "PARTIAL" && verdicts[0] != "INDETERMINATE") {
+		t.Fatalf("partial-path commit findings = %v, want PARTIAL or INDETERMINATE (never DROP)", verdicts)
+	}
+}
+
+
+func packedTailStorePartialText18771() string {
+	return `interfaces { ge-0/0/1 { unit 0 { family inet { address 192.0.2.2/24 vrrp-group 1 authentication-type simple; } } } }`
+}
+
+func parseText18771(t *testing.T, text string) *config.ConfigTree {
+	t.Helper()
+	tree, errs := config.NewParser(text).Parse()
+	if len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	return tree
 }
