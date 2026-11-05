@@ -4,17 +4,18 @@
   reviews; ready for a fresh three-seat plan review. No production code is
   included. Implementation starts only after the plan seats converge.
 - **Source base:** claims below were checked against `origin/master` at
-  `6c27f54cf2`. Six earlier documentation-only commits are above that
+  `6c27f54cf2`. Eight earlier documentation-only commits are above that
   base on `research/16009-host-screen`: `476df53770`, `c8e39b6d26`,
-  `f2fcfcff85`, `7ddbb5c743`, `359cc7e348`, and `a5c8eed130`. Source
-  anchors refer to the base, not the candidate's older line numbers.
+  `f2fcfcff85`, `7ddbb5c743`, `359cc7e348`, `a5c8eed130`,
+  `be6568b46d`, and `cede165d35`. Source anchors refer to the base, not
+  the candidate's older line numbers.
 - **Input, not truth:** the prior-lane candidate `docs/log/16009.md` was
   checked claim by claim. Corrections include `land_gate` at
   `lib.rs:2605-2636`, ctrl-disabled LAND at `:1721-1723`, and the actual
   verifier override `XPF_SHIM_ALLOW_LOW_HEADROOM`
   (`cmd/shimverify/main.go:232ff`).
-- **History:** preserve those six pushed research commits; the seat records'
-  SHAs remain historical review references. This follow-up uses the
+- **History:** preserve those eight pushed research commits; the seat
+  records' SHAs remain historical review references. This fold uses the
   campaign `(#16009)` subject format; no prior commit is rewritten.
 
 ---
@@ -857,15 +858,24 @@ Use the packed word, not a widened packet struct. Cover v4/v6 geometry,
 source-route, atomic-fragment governing behavior, the v4 special
 screen-state errors, and every ordinary mask/alarm/unresolved-zone
 disposition, with C18/C19 and C22 explicitly marked as divergences below.
+- C6 host coverage also uses two builder-valid rows: (a) flood-only with a
+  zero ordinary mask and alarm off; (b) `BadNumericUnresolved` with the
+  full conservative mask and alarm on. Both tiny-error cases drop on row
+  presence; only case (a) has syn-frag off.
 
-- C20 tests malformed IPv4 TLV both before and after a valid LSRR, with
-  source-route OFF; malformed extraction error dominates either order;
+- C20 host coverage has two builder-valid row fixtures: (a) a present
+  flood-only zero-mask row with source-route OFF, for malformed-before/
+  after-LSRR independence; (b) a `BadNumericUnresolved` row with the full
+  conservative-default mask and alarm on, for error-before-alarm behavior.
+  Assert row-presence drops in both; source-route OFF is only case (a).
 - C21's exact pair is `[M=1, off=0][M=1, off=8]`, separate from C17.
   In `tests_shim_ext_parity.rs`, a recording observer must see the first
   non-atomic fact and exactly one duplicate notification before the second
   header's non-first break. Atomic-then-non-atomic has one first-fact
   callback but no duplicate notification. A failing observer makes the
-  walk return `None`; the BPF C21 below proves the scratch-to-gate path.
+  walk return `None`. BPF C21 uses actual builder-emitted rows: (a) a
+  present flood-only zero-mask row; (b) a `BadNumericUnresolved` row with
+  the full conservative-default mask and alarm on. Both must drop.
 - C22's short capture with lying-long IPv4 total length, including the
   worker no-flag-only vs syn-frag-only oracle and shim's safe suppression;
   this is a disclosed divergence, never parity coverage.
@@ -911,7 +921,7 @@ on the raw action alone.
 | C3 | IPv6 ICMPv6 non-first fragment, ICMP-fragment enabled | DROP + counter | IPv6 UDP non-first fragment: this check does not trip. |
 | C4 | IPv4 POD: offset `0x1FFF`, extent makes sum > 65535 | DROP + counter | Sum exactly 65535 passes (`>` not `>=`). |
 | C5 | IPv4 SYN first fragment, SYN-frag enabled | DROP + counter | Whole-packet SYN passes this check. |
-| C6 | IPv4 first fragment, declared L4 length 8 bytes, flags unavailable | Row present: DROP even with syn-frag off or alarm on, including a `BadNumericUnresolved` alarm-on row | Row absent or unresolved: no tiny-only drop; synfrag-on alone is not the trigger (§4.3). |
+| C6 | IPv4 first fragment, declared L4 length 8 bytes, flags unavailable | (a) Builder-emitted flood-only zero-mask row, alarm off: DROP with syn-frag off; (b) builder-emitted `BadNumericUnresolved` row with full conservative-default mask and alarm on: DROP before alarm handling | Row absent or unresolved: no tiny-only drop. The conservative row retains syn-frag and all other default checks (§4.3). |
 | C7 | IPv6 RH0, source-route enabled | DROP + counter | RH2 passes. |
 | C8 | IPv4 legal last fragment with 1–7 payload bytes | PASS | #9426 false-positive guard. |
 | C9 | Alarm profile with C1 geometry trip | PASS, `host_screen_alarm`+1, no drop count | Alarm is only for ordinary mask trips. |
@@ -925,8 +935,8 @@ on the raw action alone.
 | C17 | IPv6 `[atomic Fragment][non-atomic Fragment offset>0]` ICMPv6 | Drop under ICMP-fragment check because the later non-atomic header governs | This cell tests governing-header selection only; it makes **no duplicate-header assertion**. C16 is the single-atomic control. |
 | C18 | IPv6 tiny first fragment, M=1, declared TCP L4 8 bytes | Existing `L3 PARSE_FAIL`; no `host_screen_drop` | Explicitly no v6 tiny host-screen/parity claim; worker extractor behavior is only the host-twin control. |
 | C19 | IPv6 Fragment, wire Payload Length=0, captured TCP ACK bytes | Existing `L3 PARSE_FAIL`; no `host_screen_drop` | Worker treats zero as unbounded for its tiny check; this does not claim the BPF packet passes or parity. |
-| C20 | IPv4 options with valid LSRR then malformed `[0x44,0x01]` (also test malformed-before-LSRR); source-route OFF, `BadNumericUnresolved` row with alarm on | `TruncatedIpv4Header` equivalent: DROP + `host_screen_drop` | Malformed extraction error drops on row presence regardless of alarm and precedes any route sighting; absent row/unresolved zone has no special parse-error drop. |
-| C21 | IPv6 Fragment sequence `[M=1, off=0][M=1, off=8]`, `BadNumericUnresolved` row with alarm on, ordinary masks off | DROP + `host_screen_drop` from the duplicate-header bit | Separate from C17. Host recording observer sees the second non-atomic notification before the second-header break; absent row with ordinary checks off has no special parse-error drop. |
+| C20 | IPv4 options with valid LSRR then malformed `[0x44,0x01]` (also test malformed-before-LSRR) | (a) Builder-emitted flood-only zero-mask row, source-route OFF and alarm off: `TruncatedIpv4Header` equivalent DROP; (b) builder-emitted `BadNumericUnresolved` row with full conservative-default mask and alarm on: DROP before ordinary route/alarm handling | Both row-present fixtures increment `host_screen_drop`; absent row/unresolved zone has no special parse-error drop. Source-route-OFF independence is tested only with the valid zero-mask row. |
+| C21 | IPv6 Fragment sequence `[M=1, off=0][M=1, off=8]` | (a) Builder-emitted flood-only zero-mask row, alarm off: DROP; (b) builder-emitted `BadNumericUnresolved` row with full conservative-default mask and alarm on: DROP before alarm handling | Separate from C17. Host recording observer sees the second non-atomic notification before the break. Both rows are builder-representable; no BadNumeric ordinary-mask-off fixture is used. |
 | C22 | IPv4 IHL=5, MF=1/offset=0, `total_len=60`, capture ends at L4+8 (ports present, flags absent); run separate no-flag-only and syn-frag-only masks, other trips off; row at session-miss local | Shim passes both with no `host_screen_drop`; `tcp_flags_capture_unknown=1`, no ordinary trip, `tiny_declared_unknown=0` | Worker returns `Ok` with caller-stamped flags 0: no-flag-only drops `tcp-no-flag`, syn-frag-only passes. Shim safely suppresses both; disclosed divergence, never parity coverage. |
 | C23 | Four isolated TCP shapes for each of IPv4 and IPv6 across all 16 masks | For each family/shape, DROP iff its own bit is enabled; otherwise PASS; all 128 outcomes match worker oracle | No shared TCP-family bit. Shapes: SYN\|FIN\|ACK; flags 0; FIN without ACK; URG\|ACK to port 139. Separately pin selective known SYN-first-fragment behavior and whole-SYN / first-fragment-ACK / non-first-SYN / URG\|ACK to port 443 negative controls. |
 | C24 | WG handshake/cookie UDP type 1–3 to a steered destination port, exact-local or WG-owner-admitted listener, IPv4 LSRR, and no live session row | DROP at WG terminal pass; host counter +1 | Same shape with WG admission false and global transit destination redirects, no shim host-screen count. |
@@ -1222,8 +1232,13 @@ this narrowed plan. S1/S2/S3/S4/S5/S6 are separate successors, not hidden
 work inside this estimate.
 
 Landing sequence:
-Implementation and landing commits use the subject format
-`docs: <imperative summary> (#16009)`.
+Implementation and landing commits use subject format
+`<area>: <imperative summary> (#16009)`, selecting the actual owning area
+from `userspace-xdp:`, `xdp:`, `shim:`, `userspace-dp:`, `test:`, or
+`docs:` as applicable. Each commit body has **Why / What / Validation /
+Risk** sections. Each implementation/landing commit includes its
+relevant `docs/log/16009.md` update in the same diff. Research-document-
+only commits may use the `docs:` area; code changes use their owning area.
 
 1. Salvage `host_screen.rs` verdict arithmetic with the `u16` independent
    mask; add the packed-word host twin and C23's complete dual-stack TCP
