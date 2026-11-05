@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 func TestWriteFrameChokePointCensus16016(t *testing.T) {
@@ -518,6 +519,38 @@ func TestUnkeyedGraceWriteFailureExpiresInProcess16016(t *testing.T) {
 	}
 }
 
+func TestUnkeyedGracePostRenameSyncErrorVisibleAcrossRestart16016(t *testing.T) {
+	m, clock, path := setupAuthorityManager16016(t)
+	expiry := m.UnkeyedGraceExpiry()
+	restoreSync := fsatomic.SetAfterRenameSyncDirForTesting(func(string) error {
+		return fmt.Errorf("injected post-rename directory sync failure")
+	})
+	clock.advance(time.Second)
+	m.checkUnkeyedGraceNotices()
+	restoreSync()
+
+	record, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("post-rename anchor is not visible: %v", err)
+	}
+	if !strings.HasPrefix(string(record), "v2 ") {
+		t.Fatalf("post-rename anchor has unexpected content: %q", record)
+	}
+	if m.UnkeyedGraceNotPersisted() {
+		t.Fatal("visible post-rename record was incorrectly classified as not persisted")
+	}
+	if m.UnkeyedAuthorityExpired() || !m.UnkeyedGraceExpiry().Equal(expiry) {
+		t.Fatal("post-rename durability warning changed the in-process grace deadline")
+	}
+
+	restarted := NewManager(0, 1)
+	restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+	if restarted.UnkeyedAuthorityExpired() || !restarted.UnkeyedGraceExpiry().Equal(expiry) {
+		t.Fatalf("visible anchor did not preserve active expiry across restart: expired=%t expiry=%s want=%s",
+			restarted.UnkeyedAuthorityExpired(), restarted.UnkeyedGraceExpiry(), expiry)
+	}
+}
+
 func TestUnkeyedGraceWireGateWritersAndKeyRearm16016(t *testing.T) {
 	m, clock, _ := setupAuthorityManager16016(t)
 	s := NewSessionSync("127.0.0.1:0", "", nil)
@@ -775,7 +808,7 @@ func TestProofGenerationAfterPeerStateAndNoSyncRelease16016(t *testing.T) {
 		t.Fatal("post-install authenticated heartbeat did not release recovery hold")
 	}
 }
-func TestExpiredRecoveryHoldSurvivesKeyedRestartUntilHeartbeatProof16016(t *testing.T) {
+func TestKeyedSecondaryRestartConfirmedAbsentHoldsUntilHeartbeatProof16016(t *testing.T) {
 	primary, clock, path := setupAuthorityManager16016(t)
 	groupConfig := groupConfig16016()
 	primary.UpdateConfig(groupConfig)
@@ -787,34 +820,84 @@ func TestExpiredRecoveryHoldSurvivesKeyedRestartUntilHeartbeatProof16016(t *test
 	if !primary.UnkeyedAuthorityExpired() {
 		t.Fatal("primary fixture did not expire unkeyed authority")
 	}
+
 	key := []byte("recovery-key-restart-16016")
 	keyedConfig := &config.ClusterConfig{
 		ControlInterface:   "em0",
 		RedundancyGroups:   groupConfig.RedundancyGroups,
 		ControlLinkAuthKey: config.NewSecret(string(key)),
 	}
-	primary.UpdateConfig(keyedConfig)
-	if !primary.RecoveryHoldActive() {
-		t.Fatal("expired-to-keyed primary did not arm recovery hold")
+	keyingSecondary := NewManager(1, 1)
+	keyingSecondary.UpdateConfigFromBoot(groupConfig)
+	if !keyingSecondary.UnkeyedAuthorityExpired() {
+		t.Fatal("secondary did not load the expired unkeyed cutoff")
+	}
+	keyingSecondary.UpdateConfig(keyedConfig)
+	if !keyingSecondary.RecoveryHoldActive() {
+		t.Fatal("keying the secondary alone did not arm recovery hold")
+	}
+	if primary.ControlLinkAuthConfigured() {
+		t.Fatal("test setup keyed the still-unkeyed primary before secondary recovery")
 	}
 	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expired recovery evidence was not retained through keying: %v", err)
+		t.Fatalf("expired recovery evidence was not retained through secondary keying: %v", err)
 	}
 
+	// Restart S after its local key commit, before any authenticated proof.
 	secondary := NewManager(1, 1)
 	secondary.UpdateConfigFromBoot(keyedConfig)
+	if !secondary.RecoveryHoldActive() {
+		t.Fatal("keyed secondary restart did not restore the recovery hold")
+	}
 	secondary.mu.Lock()
-	secondary.groups[0].State = StateSecondary
+	rg := secondary.groups[0]
+	rg.State = StateSecondary
+	rg.Weight = 255
+	rg.Ready = true
+	rg.ReadySince = time.Now().Add(-time.Hour)
+	rg.NotReadySince = time.Time{}
+	secondary.takeoverHoldTime = 0
+	secondary.degradedPromoteTimeout = 0
+	// Simulate the completed peer-loss/confirmed-absence posture. These flags
+	// deliberately bypass the cold-boot mask in electSingleNode, so only the
+	// recovery hold can prevent this otherwise-ready secondary from promoting.
 	secondary.peerAlive = false
-	secondary.electSingleNode()
-	secondary.runElection()
-	state := secondary.groups[0].State
+	secondary.peerEverSeen = true
+	secondary.peerConfirmedAbsent = true
 	secondary.mu.Unlock()
-	if !secondary.RecoveryHoldActive() || state == StatePrimary {
-		t.Fatalf("keyed reboot took over before heartbeat proof: hold=%v state=%s",
-			secondary.RecoveryHoldActive(), state)
+
+	if !primary.IsLocalPrimary(0) || primary.ControlLinkAuthConfigured() {
+		t.Fatal("P must remain the unkeyed-expired primary while S is held")
+	}
+	secondary.mu.Lock()
+	secondary.electSingleNode()
+	singleNodeState := secondary.groups[0].State
+	secondary.runElection()
+	normalState := secondary.groups[0].State
+	confirmedAbsence := secondary.peerEverSeen && secondary.peerConfirmedAbsent && !secondary.peerAlive
+	secondary.mu.Unlock()
+	if !confirmedAbsence {
+		t.Fatal("test did not establish confirmed peer absence after restart")
+	}
+	primary.mu.RLock()
+	primaryState := primary.groups[0].State
+	primary.mu.RUnlock()
+	if singleNodeState == StatePrimary || normalState == StatePrimary ||
+		primaryState != StatePrimary || !secondary.RecoveryHoldActive() {
+		t.Fatalf("confirmed-absence recovery must keep P-only-primary: P=%s S-single=%s S-normal=%s hold=%t",
+			primaryState, singleNodeState, normalState, secondary.RecoveryHoldActive())
+	}
+	secondary.noteSyncPeerAuthenticated(key)
+	if !secondary.RecoveryHoldActive() || secondary.PeerProofGeneration() != 0 {
+		t.Fatal("session-sync authentication released the recovery hold")
 	}
 
+	// P can provide a genuine authenticated proof only after it is keyed too.
+	// Until this point P remained the unkeyed-expired primary.
+	primary.UpdateConfig(keyedConfig)
+	if !primary.IsLocalPrimary(0) {
+		t.Fatal("keying P changed its existing primary role before proof")
+	}
 	r := newHeartbeatReceiver(secondary, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
 	pkt := &HeartbeatPacket{
 		NodeID: 0, ClusterID: 1,
@@ -828,14 +911,101 @@ func TestExpiredRecoveryHoldSurvivesKeyedRestartUntilHeartbeatProof16016(t *test
 	if !r.admitFrame(frame, decoded) {
 		t.Fatal("authenticated primary heartbeat proof was rejected")
 	}
-	if secondary.RecoveryHoldActive() {
+	if secondary.RecoveryHoldActive() || secondary.PeerProofGeneration() != 1 {
 		t.Fatal("installed authenticated peer heartbeat did not release recovery hold")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("fresh peer proof did not delete recovery evidence: %v", err)
 	}
-	if secondary.IsLocalPrimary(0) {
-		t.Fatal("fresh peer-primary proof did not resume normal election against the local secondary")
+	if secondary.IsLocalPrimary(0) || !primary.IsLocalPrimary(0) {
+		t.Fatal("normal election did not resume with P as the sole primary")
+	}
+}
+
+func TestInterposedKeyClearRekeyDoesNotReleaseRecoveryHold16016(t *testing.T) {
+	m, clock, _ := setupAuthorityManager16016(t)
+	groupConfig := groupConfig16016()
+	m.UpdateConfig(groupConfig)
+	m.mu.Lock()
+	m.groups[0].State = StateSecondary
+	m.mu.Unlock()
+	clock.advance(73 * time.Hour)
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("test fixture did not expire unkeyed authority")
+	}
+
+	keyA := []byte("interposed-recovery-key-A-16016")
+	keyB := []byte("interposed-recovery-key-B-16016")
+	keyedA := &config.ClusterConfig{
+		ControlInterface:   "em0",
+		RedundancyGroups:   groupConfig.RedundancyGroups,
+		ControlLinkAuthKey: config.NewSecret(string(keyA)),
+	}
+	m.UpdateConfig(keyedA)
+	if !m.RecoveryHoldActive() {
+		t.Fatal("key A did not arm the expired-cluster recovery hold")
+	}
+
+	r := newHeartbeatReceiver(m, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
+	entered, release := make(chan struct{}), make(chan struct{})
+	r.testBeforeProofPublish = func() { close(entered); <-release }
+	pkt := &HeartbeatPacket{
+		NodeID: 1, ClusterID: 1,
+		Groups: []HeartbeatGroup{{GroupID: 0, Priority: 200, Weight: 255, State: uint8(StatePrimary)}},
+	}
+	frameA := MarshalHeartbeatAuth(pkt, keyA, 16016, 1)
+	decodedA, err := UnmarshalHeartbeat(frameA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedA := make(chan bool, 1)
+	go func() { acceptedA <- r.admitFrame(frameA, decodedA) }()
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		unblock()
+		t.Fatal("key-A heartbeat did not reach the proof-publication seam")
+	}
+
+	// A peer key-clear preserves expired debt; the following local re-key
+	// arms a new hold generation while the old A-verified frame is paused.
+	m.UpdateConfigFromPeer(&config.ClusterConfig{
+		ControlInterface: "em0",
+		RedundancyGroups: groupConfig.RedundancyGroups,
+	})
+	keyedB := &config.ClusterConfig{
+		ControlInterface:   "em0",
+		RedundancyGroups:   groupConfig.RedundancyGroups,
+		ControlLinkAuthKey: config.NewSecret(string(keyB)),
+	}
+	m.UpdateConfig(keyedB)
+	if !m.RecoveryHoldActive() || m.PeerProofGeneration() != 0 {
+		unblock()
+		t.Fatal("clear/re-key failed to leave a fresh recovery hold before stale proof publication")
+	}
+
+	unblock()
+	if !<-acceptedA {
+		t.Fatal("the already-admitted key-A heartbeat was not accepted")
+	}
+	r.testBeforeProofPublish = nil
+	if !m.RecoveryHoldActive() || m.PeerProofGeneration() != 0 {
+		t.Fatal("key-A proof released the recovery hold armed for key B")
+	}
+
+	frameB := MarshalHeartbeatAuth(pkt, keyB, 16016, 2)
+	decodedB, err := UnmarshalHeartbeat(frameB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.admitFrame(frameB, decodedB) {
+		t.Fatal("current-key authenticated heartbeat proof was rejected")
+	}
+	if m.RecoveryHoldActive() || m.PeerProofGeneration() != 1 {
+		t.Fatal("current key-B proof did not release the recovery hold")
 	}
 }
 
@@ -1172,7 +1342,8 @@ func TestForcePrimaryRecoveryPinSurvivesNonPrimaryProof16016(t *testing.T) {
 	m.peerGroups[0] = PeerGroupState{GroupID: 0, State: StateSecondary}
 	m.peerAlive = false
 	m.mu.Unlock()
-	m.publishFreshHeartbeatProof()
+	_, keyGeneration := m.controlLinkAcceptedKeysSnapshot()
+	m.publishFreshHeartbeatProof(keyGeneration)
 	m.mu.RLock()
 	pinned := m.groups[0].forcedPrimary
 	localPrimary := m.groups[0].State == StatePrimary

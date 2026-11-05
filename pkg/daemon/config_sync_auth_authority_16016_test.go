@@ -354,3 +354,85 @@ func TestUnauthenticatedConfigSyncRechecksAuthorityAfterApplySemaphoreWait16016(
 		t.Fatal("cutoff-racing config refusal was not recorded in cluster history")
 	}
 }
+
+func TestUnauthenticatedConfigSyncRechecksAuthorityAtStorePromotion16016(t *testing.T) {
+	isolateAuthorityAnchors16016(t)
+	var mono atomic.Int64
+	mono.Store(int64(time.Second))
+	restoreClocks := cluster.SetUnkeyedAuthorityClocksForTesting(time.Now, mono.Load)
+	t.Cleanup(restoreClocks)
+
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "config.db"))
+	initial := `chassis { cluster { cluster-id 1; control-interface control0; } }`
+	if _, err := store.SyncApply(initial, nil); err != nil {
+		t.Fatalf("seed unkeyed config: %v", err)
+	}
+	manager := newClusterManager(false)
+	if manager.UnkeyedAuthorityExpired() {
+		t.Fatal("test precondition: grace expired before admission")
+	}
+	d := &Daemon{
+		applySem: semaphore.NewWeighted(1),
+		cluster:  manager,
+		store:    store,
+	}
+	var applies int
+	d.applyBodyForTest = func(*config.Config) { applies++ }
+	waiting := make(chan struct{})
+	resume := make(chan struct{})
+	d.testBeforeConfigSyncPromotion = func() {
+		close(waiting)
+		<-resume
+	}
+	before := store.ShowActive()
+	result := make(chan error, 1)
+	incoming := renderSyncedConfigText(t,
+		"chassis cluster cluster-id 1",
+		"chassis cluster authentication-key first-key-16016-strong",
+		"chassis cluster control-interface control0",
+		"system host-name store-promotion-race-16016",
+	)
+	go func() {
+		result <- d.handleConfigSyncWithProvenance(incoming, nil, false)
+	}()
+
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case <-waiting:
+	case err := <-result:
+		close(resume)
+		t.Fatalf("unauthenticated config returned before the store promotion gate: %v", err)
+	case <-timer.C:
+		close(resume)
+		t.Fatal("unauthenticated config did not reach the store promotion gate")
+	}
+
+	mono.Store(int64(time.Second) + int64(73*time.Hour))
+	close(resume)
+	err := <-result
+	if err == nil || !strings.Contains(err.Error(), "after unkeyed-authority grace expired") {
+		t.Fatalf("config admitted at store promotion after the cutoff: %v", err)
+	}
+	if applies != 0 || store.ShowActive() != before {
+		t.Fatalf("expired apply changed config: applies=%d before=%q after=%q", applies, before, store.ShowActive())
+	}
+	active := store.ActiveConfig()
+	if active == nil || active.Chassis.Cluster == nil ||
+		active.Chassis.Cluster.ControlLinkAuthKey.Reveal() != "" {
+		t.Fatal("cutoff-racing unauthenticated config promoted its first PSK")
+	}
+	if manager.ControlLinkAuthConfigured() {
+		t.Fatal("cutoff-racing unauthenticated config installed the PSK in the manager")
+	}
+	foundRefusal := false
+	for _, event := range manager.EventHistoryFor(cluster.EventConfigSync) {
+		if strings.Contains(event.Message, "Refused unauthenticated config sync at promotion") {
+			foundRefusal = true
+			break
+		}
+	}
+	if !foundRefusal {
+		t.Fatal("store-promotion refusal was not recorded in cluster history")
+	}
+}

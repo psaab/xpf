@@ -1343,7 +1343,7 @@ func (r *heartbeatReceiver) admitFrame(frame []byte, pkt *HeartbeatPacket) bool 
 	// there while a frame verified under the additional one would read the
 	// epoch as garbage, drop it below the floor, and reject the frame the gate
 	// just accepted — reintroducing the outage inside the fix for it.
-	keys := r.mgr.controlLinkAcceptedKeys()
+	keys, keySnapshotGeneration := r.mgr.controlLinkAcceptedKeysSnapshot()
 	if len(keys) == 0 && r.mgr.UnkeyedAuthorityExpired() {
 		r.recvErrors.Add(1)
 		if emit, suppressed := r.auth.rejectWarn.admit(); emit {
@@ -1447,7 +1447,7 @@ func (r *heartbeatReceiver) admitFrame(frame []byte, pkt *HeartbeatPacket) bool 
 		if r.testBeforeProofPublish != nil {
 			r.testBeforeProofPublish()
 		}
-		r.mgr.publishFreshHeartbeatProof()
+		r.mgr.publishFreshHeartbeatProof(keySnapshotGeneration)
 	}
 	return true
 }

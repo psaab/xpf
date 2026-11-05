@@ -2630,6 +2630,14 @@ persistence fails, the current process still expires on its monotonic deadline
 but expiry across restart is not guaranteed; status names the restart
 limitation. Config apply and daemon startup continue.
 
+The strict-auth sweep calls the grace ratchet on its one-second tick, so the
+normal scheduled-write bound on unswept monotonic progress is one tick (at most
+one second). This is not a zero-gap crash-durability guarantee: a process or
+filesystem stall can delay a sweep, and an abnormal restart can lose progress
+since the last successful durable write. A directory-sync error after rename
+leaves the new record visible to an immediate restart, but its power-loss
+durability is unknown.
+
 Apart from the explicit re-arm below, local key-state changes are the only
 key-related events that alter grace state: a local key commit deletes the
 anchor; a local key-clear commit starts a new grace. This does not silently

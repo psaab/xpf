@@ -1093,6 +1093,9 @@ type Daemon struct {
 	// testBeforeSyncApplySemAcquire marks the admitted config-sync path just
 	// before it can block on applySem; it is nil outside deterministic tests.
 	testBeforeSyncApplySemAcquire func()
+	// testBeforeConfigSyncPromotion pauses in the Store's pre-promotion gate
+	// after admission-time checks, for deterministic authority-race tests.
+	testBeforeConfigSyncPromotion func()
 	// dnsRefreshMu guards the published-answer baseline.
 	// lastDNSRefreshAnswers holds the DNS state (prefixes and resolver failure
 	// flag) last actually APPLIED for lastDNSRefreshBase (store generation +

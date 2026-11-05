@@ -1312,18 +1312,17 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int, leni
 // lets the caller patch the parsed tree before compiling (e.g. to preserve
 // local chassis cluster settings).
 func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTree)) (*config.Config, error) {
-	return s.SyncApplyGated(content, chassisPreserve, nil)
+	return s.SyncApplyGated(context.Background(), content, chassisPreserve, nil)
 }
 
 // SyncApplyGated is SyncApply with a gate that sees the compiled peer config
-// BEFORE anything is promoted (#18606). A non-nil error from gate is returned
+// BEFORE anything is promoted (#18606). The context is carried from the
+// admission path so provenance-sensitive gates can recheck their authority at
+// this final promotion boundary. A non-nil error from gate is returned
 // unchanged and the store is left exactly as it was: no active swap, no
-// rollback-history push, nothing persisted. It exists for refusals that must
-// not leave the refused text active, because every background applier (the
-// DHCP callback, feeds, the config poll, the apply-debt retry) re-applies the
-// ACTIVE config with no preflight. gate runs under the store lock and must not
-// call back into the Store.
-func (s *Store) SyncApplyGated(content string, chassisPreserve func(*config.ConfigTree), gate func(*config.Config) error) (*config.Config, error) {
+// rollback-history push, nothing persisted. gate runs under the store lock and
+// must not call back into the Store.
+func (s *Store) SyncApplyGated(ctx context.Context, content string, chassisPreserve func(*config.ConfigTree), gate func(context.Context, *config.Config) error) (*config.Config, error) {
 	// H-2: the HA peer config-sync ingress is a network-reachable parse entry
 	// point (a hostile/corrupt peer config over the fabric). Reject an
 	// over-large payload before parsing so one bad peer cannot crash the
@@ -1384,7 +1383,7 @@ func (s *Store) SyncApplyGated(content string, chassisPreserve func(*config.Conf
 		return nil, fmt.Errorf("sync config compile error: %w", err)
 	}
 	if gate != nil {
-		if err := gate(compiled); err != nil {
+		if err := gate(ctx, compiled); err != nil {
 			return nil, err
 		}
 	}

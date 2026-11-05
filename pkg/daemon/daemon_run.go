@@ -524,6 +524,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 		// monitor starts here exactly as before.
 		d.maybeStartNATPoolAlarm()
 	}
+
+	// Even without a dataplane/event source, retain a sink-capable reader so
+	// manager-origin boot alarms buffered before this point reach local logs.
+	// No Run goroutine is needed: this reader has no source, and alarm delivery
+	// is an explicit Emit into its configured writers.
+	if er == nil {
+		er = logging.NewEventReader(nil, eventBuf)
+		if cfg := d.store.ActiveConfig(); cfg != nil {
+			d.applySyslogConfig(er, cfg)
+		}
+		d.setEventReader(er)
+	}
 	// #10025: start the daemon-resident clock monitor independently of the
 	// dataplane gate; it samples the local chrony reference before fabric auth
 	// can fail and remains useful in NoDataplane mode.

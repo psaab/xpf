@@ -706,10 +706,17 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	// silently within one reconcile cadence. Refused here, the standby keeps
 	// its config, nacks, and every re-push is refused the same way.
 	var localAddrRefused error
-	compiled, syncErr = d.store.SyncApplyGated(configText, chassisPreserve, func(c *config.Config) error {
-		localAddrRefused = clusterControlLocalAddressCommitPreflight(d.cluster, oldActive, c)
-		return localAddrRefused
-	})
+	compiled, syncErr = d.store.SyncApplyGated(ctx, configText, chassisPreserve,
+		func(gateCtx context.Context, c *config.Config) error {
+			if d.testBeforeConfigSyncPromotion != nil {
+				d.testBeforeConfigSyncPromotion()
+			}
+			if err := d.recheckConfigSyncAuthorityAtApply(gateCtx); err != nil {
+				return err
+			}
+			localAddrRefused = clusterControlLocalAddressCommitPreflight(d.cluster, oldActive, c)
+			return localAddrRefused
+		})
 	d.pendingRenameMu.Unlock()
 	if localAddrRefused != nil {
 		slog.Error("cluster: refusing a peer-synced change of this node's control-link address; "+

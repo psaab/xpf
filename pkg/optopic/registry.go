@@ -185,6 +185,7 @@ var systemActionEntries = []Entry{
 	{Key: "clear-persistent-nat", Permission: config.PermClear, Command: "clear security nat source persistent-nat-table", FabricAllowed: true},
 	{Key: "clear-policy-counters", Permission: config.PermClear, Command: "clear security policies hit-count", FabricAllowed: false},
 	{Key: "cluster-rejoin", Permission: config.PermMaint, Command: "request chassis cluster failover", FabricAllowed: false},
+	{Key: "cluster-unkeyed-grace-restart", Permission: config.PermMaint, Command: "request chassis cluster unkeyed-grace restart", FabricAllowed: false},
 	{Key: "dhcp-renew", Permission: config.PermControl, Command: "request dhcp renew", FabricAllowed: false},
 	{Key: "dynamic-address-shrink-ack", Permission: config.PermConfig, Command: "request security dynamic-address acknowledge-shrink", FabricAllowed: false},
 	{Key: "dynamic-dns-check", Permission: config.PermControl, Command: "request system dynamic-dns check", FabricAllowed: false},

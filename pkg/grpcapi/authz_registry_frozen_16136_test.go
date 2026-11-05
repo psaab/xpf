@@ -12,28 +12,30 @@ import "github.com/psaab/xpf/pkg/config"
 //   - ShowText prices: pkg/grpcapi/authz_methods.go
 //     (showTextViewTopics / showTextElevatedTopics at that commit);
 //   - SystemAction prices: pkg/grpcapi/authz_methods.go
-//     (systemActionPermissions, 23 verbs);
+//     (systemActionPermissions, 24 verbs);
 //   - SystemAction commands: pkg/authz/system_action_commands_9952.go
-//     (SystemActionVerbCommand, 23 verbs).
+//     (SystemActionVerbCommand, 24 verbs).
 //
 // It is a literal in this file on purpose: it MUST NOT be generated
 // from pkg/optopic at test runtime, or the census becomes the
 // registry grading itself. Changing a row here is a reviewed
 // migration-contract change, not a sync step: if a future topic or
 // verb is added, its row is added here by hand with its emitting
-// command as the justification, exactly as the sole delta below.
+// command as the justification, with reviewed additive rows below.
 //
-// SOLE DELTA from the captured tables: "applications:" (PermView,
-// `show security applications`). At the merge base the dispatcher
-// already served `applications:<name>` (server_show.go prefix arm,
-// #15207 filtered render) but no pre-registry table priced or
-// commanded it — that absence is the census hole #16136 exists to
-// close. Its price/command are pinned from the emitting surface,
-// not from the registry: the console `show security applications`
-// family (pkg/cli/cli_show_security_dispatch.go) is a `show`
-// command, which pkg/cli/permissions.go charges at PermView, and
-// the bare `applications` row captured above already maps that
-// family to `show security applications`.
+// Reviewed additive deltas from the captured tables:
+// - "applications:" (PermView, `show security applications`). At the
+//   merge base the dispatcher already served `applications:<name>`
+//   (server_show.go prefix arm, #15207 filtered render) but no
+//   pre-registry table priced or commanded it — that absence is the
+//   census hole #16136 exists to close. Its price/command are pinned
+//   from the emitting surface: the console `show security
+//   applications` family is a `show` command, charged at PermView.
+// - "cluster-unkeyed-grace-restart" (#16016) is the local audited
+//   recovery action. Its canonical CLI command is
+//   `request chassis cluster unkeyed-grace restart`, priced PermMaint
+//   like the CLI's destructive-maintenance gate. The remote gRPC
+//   surface rejects the action explicitly.
 
 type frozenOpExpectation16136 struct {
 	permission config.LoginClassPermission
@@ -182,27 +184,28 @@ var frozenShowText16136 = map[string]frozenOpExpectation16136{
 }
 
 var frozenSystemAction16136 = map[string]frozenOpExpectation16136{
-	"bgp-clear":                   {permission: config.PermControl, command: "request protocols bgp clear"},
-	"clear-arp":                   {permission: config.PermClear, command: "clear arp"},
-	"clear-config-lock":           {permission: config.PermClear, command: "clear system config-lock"},
-	"clear-firewall-counters":     {permission: config.PermClear, command: "clear firewall all"},
-	"clear-interfaces-statistics": {permission: config.PermClear, command: "clear interfaces statistics"},
-	"clear-ipv6-neighbors":        {permission: config.PermClear, command: "clear ipv6 neighbors"},
-	"clear-nat-counters":          {permission: config.PermClear, command: "clear security nat statistics"},
-	"clear-persistent-nat":        {permission: config.PermClear, command: "clear security nat source persistent-nat-table"},
-	"clear-policy-counters":       {permission: config.PermClear, command: "clear security policies hit-count"},
-	"cluster-rejoin":              {permission: config.PermMaint, command: "request chassis cluster failover"},
-	"dhcp-renew":                  {permission: config.PermControl, command: "request dhcp renew"},
-	"dynamic-address-shrink-ack":  {permission: config.PermConfig, command: "request security dynamic-address acknowledge-shrink"},
-	"dynamic-dns-check":           {permission: config.PermControl, command: "request system dynamic-dns check"},
-	"dynamic-dns-update":          {permission: config.PermControl, command: "request system dynamic-dns update"},
-	"halt":                        {permission: config.PermMaint, command: "request system halt"},
-	"in-service-upgrade":          {permission: config.PermMaint, command: "request system software in-service-upgrade"},
-	"ipsec-sa-clear":              {permission: config.PermControl, command: "request security ipsec sa clear"},
-	"ospf-clear":                  {permission: config.PermControl, command: "request protocols ospf clear"},
-	"power-off":                   {permission: config.PermMaint, command: "request system power-off"},
-	"reboot":                      {permission: config.PermMaint, command: "request system reboot"},
-	"rescue-delete":               {permission: config.PermControl, command: "request system configuration rescue delete"},
-	"rescue-save":                 {permission: config.PermControl, command: "request system configuration rescue save"},
-	"zeroize":                     {permission: config.PermMaint, command: "request system zeroize"},
+	"bgp-clear":                     {permission: config.PermControl, command: "request protocols bgp clear"},
+	"clear-arp":                     {permission: config.PermClear, command: "clear arp"},
+	"clear-config-lock":             {permission: config.PermClear, command: "clear system config-lock"},
+	"clear-firewall-counters":       {permission: config.PermClear, command: "clear firewall all"},
+	"clear-interfaces-statistics":   {permission: config.PermClear, command: "clear interfaces statistics"},
+	"clear-ipv6-neighbors":          {permission: config.PermClear, command: "clear ipv6 neighbors"},
+	"clear-nat-counters":            {permission: config.PermClear, command: "clear security nat statistics"},
+	"clear-persistent-nat":          {permission: config.PermClear, command: "clear security nat source persistent-nat-table"},
+	"clear-policy-counters":         {permission: config.PermClear, command: "clear security policies hit-count"},
+	"cluster-rejoin":                {permission: config.PermMaint, command: "request chassis cluster failover"},
+	"cluster-unkeyed-grace-restart": {permission: config.PermMaint, command: "request chassis cluster unkeyed-grace restart"},
+	"dhcp-renew":                    {permission: config.PermControl, command: "request dhcp renew"},
+	"dynamic-address-shrink-ack":    {permission: config.PermConfig, command: "request security dynamic-address acknowledge-shrink"},
+	"dynamic-dns-check":             {permission: config.PermControl, command: "request system dynamic-dns check"},
+	"dynamic-dns-update":            {permission: config.PermControl, command: "request system dynamic-dns update"},
+	"halt":                          {permission: config.PermMaint, command: "request system halt"},
+	"in-service-upgrade":            {permission: config.PermMaint, command: "request system software in-service-upgrade"},
+	"ipsec-sa-clear":                {permission: config.PermControl, command: "request security ipsec sa clear"},
+	"ospf-clear":                    {permission: config.PermControl, command: "request protocols ospf clear"},
+	"power-off":                     {permission: config.PermMaint, command: "request system power-off"},
+	"reboot":                        {permission: config.PermMaint, command: "request system reboot"},
+	"rescue-delete":                 {permission: config.PermControl, command: "request system configuration rescue delete"},
+	"rescue-save":                   {permission: config.PermControl, command: "request system configuration rescue save"},
+	"zeroize":                       {permission: config.PermMaint, command: "request system zeroize"},
 }

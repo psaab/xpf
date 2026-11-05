@@ -543,6 +543,10 @@ type Manager struct {
 	// SIGNED with it. Nil when no rotation is in progress. Replaced, never
 	// mutated in place, so the RLock read stays race-free.
 	controlAuthKeyAlt []byte
+	// controlLinkKeyGeneration changes with the accepted-key set and fences
+	// heartbeat proof snapshots from a key transition between verification
+	// and recovery-hold publication. Guarded by m.mu.
+	controlLinkKeyGeneration uint64
 	// controlAuthKeyConfiguredAt records the keyed transition time used by
 	// fabric's bounded rollout grace. Zero means no accepted key is set.
 	// #15262: it is anchored to the FIRST keying of the current accepted-key
@@ -1139,6 +1143,15 @@ func (m *Manager) controlLinkAcceptedKeys() [][]byte {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.controlLinkAcceptedKeysLocked()
+}
+
+// controlLinkAcceptedKeysSnapshot binds heartbeat verification to the
+// accepted-key generation it observed. A key transition before proof
+// publication invalidates the snapshot even if the same key is later restored.
+func (m *Manager) controlLinkAcceptedKeysSnapshot() ([][]byte, uint64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.controlLinkAcceptedKeysLocked(), m.controlLinkKeyGeneration
 }
 
 // controlLinkAcceptedKeysLocked is controlLinkAcceptedKeys for callers

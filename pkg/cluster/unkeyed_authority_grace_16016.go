@@ -1048,15 +1048,22 @@ func (m *Manager) PeerProofGeneration() uint64 {
 }
 
 // publishFreshHeartbeatProof runs only after an authenticated heartbeat has
-// committed its peer state. The hold is released for election under Manager.mu;
-// the persisted evidence is removed only after normal election is reevaluated.
-func (m *Manager) publishFreshHeartbeatProof() {
+// committed its peer state. The accepted-key generation captured before MAC
+// verification must still match while Manager.mu is held; otherwise an
+// interposed key transition makes this proof stale. The hold is released for
+// election under Manager.mu; persisted evidence is removed only after normal
+// election is reevaluated.
+func (m *Manager) publishFreshHeartbeatProof(keySnapshotGeneration uint64) {
 	if m == nil {
 		return
 	}
-	gen := m.peerProofGen.Add(1)
 	st := &m.unkeyedGrace
 	m.mu.Lock()
+	if m.controlLinkKeyGeneration != keySnapshotGeneration {
+		m.mu.Unlock()
+		return
+	}
+	gen := m.peerProofGen.Add(1)
 	if !st.keyConfigured.Load() || !st.recoveryHold.Load() || gen <= st.armedGen.Load() ||
 		!st.recoveryHold.CompareAndSwap(true, false) {
 		m.mu.Unlock()

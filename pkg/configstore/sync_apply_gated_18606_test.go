@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -22,10 +23,11 @@ func TestSyncApplyGatedRefusalPromotesNothing18606(t *testing.T) {
 	beforeHistory := len(s.history.entries)
 	refused := errors.New("refused by the gate")
 	var seen *config.Config
-	_, err := s.SyncApplyGated("system { host-name after; }\n", nil, func(c *config.Config) error {
-		seen = c
-		return refused
-	})
+	_, err := s.SyncApplyGated(context.Background(), "system { host-name after; }\n", nil,
+		func(_ context.Context, c *config.Config) error {
+			seen = c
+			return refused
+		})
 	if !errors.Is(err, refused) {
 		t.Fatalf("SyncApplyGated = %v, want the gate's error unchanged", err)
 	}
@@ -39,7 +41,8 @@ func TestSyncApplyGatedRefusalPromotesNothing18606(t *testing.T) {
 		t.Fatalf("a refusing gate pushed rollback history: %d -> %d entries", beforeHistory, got)
 	}
 	// A passing gate behaves exactly like SyncApply.
-	if _, err := s.SyncApplyGated("system { host-name after; }\n", nil, func(*config.Config) error { return nil }); err != nil {
+	if _, err := s.SyncApplyGated(context.Background(), "system { host-name after; }\n", nil,
+		func(_ context.Context, _ *config.Config) error { return nil }); err != nil {
 		t.Fatalf("SyncApplyGated with a passing gate: %v", err)
 	}
 	if got := s.ActiveConfig().System.HostName; got != "after" {

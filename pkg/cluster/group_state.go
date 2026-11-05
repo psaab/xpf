@@ -256,12 +256,15 @@ func (m *Manager) updateConfig(cfg *config.ClusterConfig, source clusterConfigUp
 		m.controlLinkRotationAltDigest = altDigest
 	}
 
+	newKeyDigest := controlAuthKeySetDigest(m.controlAuthKey, m.controlAuthKeyAlt)
+	if oldKeyDigest != newKeyDigest {
+		m.controlLinkKeyGeneration++
+	}
 	keyConfigured := len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
 	transportConfigured := clusterAuthorityTransportConfigured(cfg)
 	if keyConfigured {
 		switch source {
 		case clusterConfigUpdateLocal:
-			newKeyDigest := controlAuthKeySetDigest(m.controlAuthKey, m.controlAuthKeyAlt)
 			if !oldKeyConfigured || oldKeyDigest != newKeyDigest {
 				m.noteUnkeyedKeyedLocked()
 			} else {
