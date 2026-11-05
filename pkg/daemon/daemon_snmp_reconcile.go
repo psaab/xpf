@@ -133,6 +133,15 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 			for _, ref := range c.ClientListNames {
 				write(ref)
 			}
+			// #18844: lenient cross-root compilation can quarantine only the
+			// derived enforcement cache to deny-all while preserving Clients
+			// and ClientListNames exactly as authored. Those config-surface
+			// fields therefore still hash equal to the previous valid config;
+			// include this effective-policy marker so reconcile cannot no-op
+			// and leave the running agent serving the old allow policy.
+			if c.SourceRestrictionQuarantined() {
+				write("source-restriction-quarantined")
+			}
 		}
 	}
 

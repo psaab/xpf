@@ -5,6 +5,7 @@ import (
 	"net"
 	"strings"
 )
+
 // SNMP community `clients` source-IP restriction (#4289).
 //
 // Junos `snmp community <c> clients { <prefix> [restrict]; ... }` scopes a
@@ -135,6 +136,36 @@ func (c *SNMPCommunity) AllowsSource(srcIP net.IP) bool {
 		return false // clients configured, no match: default-deny
 	}
 	return bestAllow
+}
+
+// SourceRestrictionQuarantined reports whether this community's effective
+// source restriction is deny-all quarantine: clientNets is non-nil and every
+// compiled entry is a restrict entry — the shape snmpQuarantineClientNets
+// installs (an IPv4 /0 restrict plus an IPv6 /0 restrict). It is computed from
+// clientNets contents alone, with no new state, so it tracks enforcement even
+// though quarantine deliberately never touches comm.Clients or
+// comm.ClientListNames (the config surface): a malformed second `system`
+// root arriving via the lenient SyncApplyGated / tolerant-load path folds
+// ONLY clientNets to deny-all (#18844), and anything that gates on the config
+// surface alone — e.g. the daemon's SNMP reconcile idempotence gate — cannot
+// see the flip without this read.
+//
+// Edge: a legitimately-authored all-restrict list (e.g. `0.0.0.0/0 restrict`
+// plus `::/0 restrict`) also reads quarantined. That is acceptable for
+// consumers that only need the hash to MOVE when enforcement flips to
+// deny-all: an authored all-restrict list IS deny-all enforcement, identical
+// to quarantine, so a hash collision between the two is semantically sound
+// (the effective policy is the same).
+func (c *SNMPCommunity) SourceRestrictionQuarantined() bool {
+	if c == nil || c.clientNets == nil {
+		return false
+	}
+	for _, cn := range c.clientNets {
+		if !cn.restrict {
+			return false
+		}
+	}
+	return true
 }
 
 // clientPrefixContains applies the allowlist's address-family boundary before

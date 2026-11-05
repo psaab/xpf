@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -80,5 +81,75 @@ func TestSNMPConfigHashIncludesClientListNames9416(t *testing.T) {
 	// allowlist still moves the hash on its own, with no references present.
 	if h([]config.SNMPClient{{Prefix: "10.0.0.0/8"}}, nil) == h([]config.SNMPClient{{Prefix: "192.168.0.0/16"}}, nil) {
 		t.Fatal("CONTROL: #5105 regressed — changing the client prefix no longer changes the hash")
+	}
+}
+
+// TestSNMPConfigHashIncludesCrossRootQuarantine18844 pins the config-surface
+// blind spot from #18844: the lenient second-root compile keeps the authored
+// Clients and ClientListNames intact, but folds the effective clientNets
+// enforcement to deny-all. Both configs must compile from source text so the
+// root-local taint fold, rather than a hand-built cache, is exercised.
+//
+// Fail-on-revert: removing the source-restriction-quarantined marker from
+// snmpConfigHash makes these configs hash equal despite the assertions below
+// proving that their authored community fields are identical.
+func TestSNMPConfigHashIncludesCrossRootQuarantine18844(t *testing.T) {
+	const validRoot = `system {
+    host-name fw;
+    snmp {
+        client-list mgmt { 0.0.0.0/0; }
+        community scoped { authorization read-only; client-list-name mgmt; }
+    }
+}`
+	const malformedRoot = `system {
+    domain-name example.test;
+    snmp { client-list mgmt { 10.1.0.0/16 restrict extra; } }
+}`
+	compile := func(text string, lenient bool) *config.Config {
+		t.Helper()
+		tree, parseErrs := config.NewParser(text).Parse()
+		if len(parseErrs) != 0 {
+			t.Fatalf("parse SNMP config: %v", parseErrs)
+		}
+		var (
+			cfg *config.Config
+			err error
+		)
+		if lenient {
+			cfg, err = config.CompileConfigLenient(tree)
+		} else {
+			cfg, err = config.CompileConfig(tree)
+		}
+		if err != nil {
+			t.Fatalf("compile lenient=%v SNMP config: %v", lenient, err)
+		}
+		return cfg
+	}
+
+	valid := compile(validRoot, false)
+	quarantined := compile(validRoot+"\n"+malformedRoot, true)
+	validCommunity := valid.System.SNMP.Communities["scoped"]
+	quarantinedCommunity := quarantined.System.SNMP.Communities["scoped"]
+	if validCommunity == nil || quarantinedCommunity == nil {
+		t.Fatal("both compiled configs must contain community scoped")
+	}
+	if !reflect.DeepEqual(validCommunity.Clients, quarantinedCommunity.Clients) {
+		t.Fatalf("Clients differ before hash comparison: valid=%+v quarantined=%+v",
+			validCommunity.Clients, quarantinedCommunity.Clients)
+	}
+	if !reflect.DeepEqual(validCommunity.ClientListNames, quarantinedCommunity.ClientListNames) {
+		t.Fatalf("ClientListNames differ before hash comparison: valid=%+v quarantined=%+v",
+			validCommunity.ClientListNames, quarantinedCommunity.ClientListNames)
+	}
+	if validCommunity.SourceRestrictionQuarantined() {
+		t.Fatal("valid-only community must not be marked quarantined")
+	}
+	if !quarantinedCommunity.SourceRestrictionQuarantined() {
+		t.Fatal("two-root lenient community must expose its deny-all quarantine")
+	}
+
+	if gotValid, gotQuarantined := snmpConfigHash(valid), snmpConfigHash(quarantined); gotValid == gotQuarantined {
+		t.Fatalf("#18844: valid-only and cross-root-quarantined configs hash equal (%d) despite identical authored Clients/ClientListNames and opposite effective source enforcement",
+			gotValid)
 	}
 }

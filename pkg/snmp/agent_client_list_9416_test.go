@@ -3,6 +3,7 @@ package snmp
 import (
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
@@ -111,5 +112,58 @@ snmp { community open { authorization read-only; } }
 				"default with no restriction authored, and a fix that closed it would be an availability "+
 				"regression wearing the shape of a security fix", src)
 		}
+	}
+}
+
+// TestV2cCrossRootQuarantineUpdateConfig18844 proves the live-agent half of
+// #18844 without a daemon listener restart. A valid-only compiled config serves
+// 8.8.8.8; the second-root malformed list compiles leniently to a deny-all
+// enforcement cache while preserving the authored community fields. Swapping
+// that config into the same running Agent must drop the very next query.
+func TestV2cCrossRootQuarantineUpdateConfig18844(t *testing.T) {
+	const validRoot = `system {
+    host-name fw;
+    snmp {
+        client-list mgmt { 0.0.0.0/0; }
+        community scoped { authorization read-only; client-list-name mgmt; }
+    }
+}`
+	const malformedRoot = `system {
+    domain-name example.test;
+    snmp { client-list mgmt { 10.1.0.0/16 restrict extra; } }
+}`
+	compile := func(text string, lenient bool) *config.Config {
+		t.Helper()
+		tree, parseErrs := config.NewParser(text).Parse()
+		if len(parseErrs) != 0 {
+			t.Fatalf("parse SNMP config: %v", parseErrs)
+		}
+		var (
+			cfg *config.Config
+			err error
+		)
+		if lenient {
+			cfg, err = config.CompileConfigLenient(tree)
+		} else {
+			cfg, err = config.CompileConfig(tree)
+		}
+		if err != nil {
+			t.Fatalf("compile lenient=%v SNMP config: %v", lenient, err)
+		}
+		return cfg
+	}
+
+	valid := compile(validRoot, false)
+	quarantined := compile(validRoot+"\n"+malformedRoot, true)
+	agent := NewAgent(valid.System.SNMP)
+	packet := buildV2cGetRequest("scoped", 1, oidSysDescr)
+	source := snmpSource10687("8.8.8.8")
+	if resp := agent.handlePacketFrom(packet, source); resp == nil {
+		t.Fatal("control: valid-only config must serve 8.8.8.8 before the update")
+	}
+
+	agent.UpdateConfig(quarantined.System.SNMP)
+	if resp := agent.handlePacketFrom(packet, source); resp != nil {
+		t.Fatal("#18844: same running agent still served 8.8.8.8 after UpdateConfig applied the two-root lenient quarantine")
 	}
 }
