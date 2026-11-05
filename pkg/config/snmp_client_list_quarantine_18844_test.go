@@ -145,6 +145,23 @@ func TestSNMPRepeatedClientListQualifierQuarantines18844(t *testing.T) {
 	if community == nil {
 		t.Fatal("community scoped was not compiled")
 	}
+	if len(community.clientNets) != 2 {
+		t.Fatalf("repeated-qualifier cache = %+v, want explicit IPv4+IPv6 quarantine", community.clientNets)
+	}
+	hasIPv4, hasIPv6 := false, false
+	for _, entry := range community.clientNets {
+		if !entry.restrict || entry.ones != 0 || entry.net == nil {
+			t.Fatalf("repeated-qualifier cache = %+v, want deny-all quarantine entries", community.clientNets)
+		}
+		if entry.net.IP.To4() != nil {
+			hasIPv4 = true
+		} else {
+			hasIPv6 = true
+		}
+	}
+	if !hasIPv4 || !hasIPv6 {
+		t.Fatalf("repeated-qualifier cache = %+v, want both address families", community.clientNets)
+	}
 	for _, source := range []string{"8.8.8.8", "10.1.2.7"} {
 		if community.AllowsSource(snmpClientTestSource10687(source)) {
 			t.Errorf("repeated-qualifier community allowed %s instead of being quarantined", source)
