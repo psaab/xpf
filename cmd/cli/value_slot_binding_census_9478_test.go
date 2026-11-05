@@ -79,6 +79,7 @@ var valueSlotBindings = map[string]slotAdjudication{
 	"request chassis cluster data-plane userspace inject-packet slot": {bindSharedParser, "request.go handleRequestChassisClusterDataPlane: dpuserspace.ParseInjectPacketCommand"},
 	"request chassis cluster data-plane userspace queue":              {bindSharedParser, "request.go handleRequestChassisClusterDataPlane: dpuserspace.ParseQueueCommand"},
 	"request chassis cluster failover data node":                      {bindSharedParser, "request.go handleRequestChassisClusterFailover: clusterfailover.ParseCommand"},
+	"request chassis cluster failover force-primary redundancy-group": {bindSharedParser, "request.go handleRequestChassisClusterFailover: clusterfailover.ParseCommand"},
 	"request chassis cluster failover redundancy-group":               {bindSharedParser, "request.go handleRequestChassisClusterFailover: clusterfailover.ParseCommand"},
 	"request chassis cluster failover redundancy-group node":          {bindSharedParser, "request.go handleRequestChassisClusterFailover: clusterfailover.ParseCommand"},
 	"request chassis cluster failover reset redundancy-group":         {bindSharedParser, "request.go handleRequestChassisClusterFailover: clusterfailover.ParseCommand"},

@@ -917,7 +917,7 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 		slog.Warn("web-management listener re-reconcile after networkd did not converge; retrying via re-assert owner",
 			"err", err)
 	}
-	return d.applyTailReconciles(cfg, applyPhaseErrors{
+	return d.applyTailReconcilesWithContext(ctx, cfg, applyPhaseErrors{
 		Networkd:    core.Phase.Networkd,
 		Dataplane:   applyErr,
 		DHCPServer:  dhcpServerErr,

@@ -126,7 +126,28 @@ type applyCoreResult struct {
 // 11–13 (#6790). The returned errors.Join preserves the explicit operand
 // order (#1778/#2987/#4433/#5083/#5310/#5679/#5696/#5700/#6790/#6792/#9947) —
 // see applyPhaseErrors.join.
+type peerSyncClusterConfigApplyContextKey struct{}
+
+func withPeerSyncClusterConfigApply(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, peerSyncClusterConfigApplyContextKey{}, true)
+}
+
+func isPeerSyncClusterConfigApply(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	peerSync, _ := ctx.Value(peerSyncClusterConfigApplyContextKey{}).(bool)
+	return peerSync
+}
+
 func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors) error {
+	return d.applyTailReconcilesWithContext(context.Background(), cfg, phase)
+}
+
+func (d *Daemon) applyTailReconcilesWithContext(ctx context.Context, cfg *config.Config, phase applyPhaseErrors) error {
 	// 8. Apply VRRP config — merge user VRRP + RETH VRRP instances
 	var vrrpErr error
 	vrrpInstances := vrrp.CollectInstances(cfg)
@@ -401,7 +422,11 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 
 	// 19. Update chassis cluster state machine
 	if d.cluster != nil && cfg.Chassis.Cluster != nil {
-		d.cluster.UpdateConfig(cfg.Chassis.Cluster)
+		if isPeerSyncClusterConfigApply(ctx) {
+			d.cluster.UpdateConfigFromPeer(cfg.Chassis.Cluster)
+		} else {
+			d.cluster.UpdateConfig(cfg.Chassis.Cluster)
+		}
 		d.cluster.SetMonitorConfig(cfg)
 		// Re-evaluate immediately after RG creation: UpdateConfig initializes
 		// new groups at the non-winning dataplane-ready floor, and the same

@@ -192,6 +192,8 @@ func (c *ctl) handleRequestChassis(args []string) error {
 	switch args[0] {
 	case "failover":
 		return c.handleRequestChassisClusterFailover(args[1:])
+	case "unkeyed-grace":
+		return c.handleRequestChassisClusterUnkeyedGrace(args[1:])
 	case "data-plane":
 		return c.handleRequestChassisClusterDataPlane(args[1:])
 	default:
@@ -222,6 +224,17 @@ func (c *ctl) handleRequestChassisClusterFailover(args []string) error {
 	}
 	fmt.Println(resp.Message)
 	return nil
+}
+
+func (c *ctl) handleRequestChassisClusterUnkeyedGrace(args []string) error {
+	if len(args) == 0 {
+		printRemoteTreeHelp("request chassis cluster unkeyed-grace:", "request", "chassis", "cluster", "unkeyed-grace")
+		return nil
+	}
+	if len(args) != 1 || args[0] != "restart" {
+		return fmt.Errorf("usage: request chassis cluster unkeyed-grace restart")
+	}
+	return fmt.Errorf("unkeyed-grace restart is a local recovery action; run it on the node itself")
 }
 
 func (c *ctl) handleRequestChassisClusterDataPlane(args []string) error {

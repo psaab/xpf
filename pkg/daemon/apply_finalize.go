@@ -277,15 +277,19 @@ func (d *Daemon) finalizePromotedApplyLocked(p promotedApply) promotedApplyOutco
 		d.armPolicyInvalidationRollbackPlan(p.oldActive, newCfg)
 	}
 
+	applyCtx := p.applyCtx
+	if p.kind == promotedApplySync {
+		applyCtx = withPeerSyncClusterConfigApply(applyCtx)
+	}
 	var applyErr error
 	if p.commitOnly {
 		// #9841: the committing wrapper returns the response object
 		// projecting this attempt's unconverged-MTU records. Every
 		// other driver uses the bare apply: no response exists to
 		// carry warnings.
-		out.respCfg, applyErr = d.applyConfigLockedForCommit(p.applyCtx, newCfg)
+		out.respCfg, applyErr = d.applyConfigLockedForCommit(applyCtx, newCfg)
 	} else {
-		applyErr = d.applyConfigLocked(p.applyCtx, newCfg)
+		applyErr = d.applyConfigLocked(applyCtx, newCfg)
 	}
 	// #12072 surfaces the unpublished capture before the drivers make
 	// their fatal decision. The pre-consolidation commit path joined

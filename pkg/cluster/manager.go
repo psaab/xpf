@@ -203,8 +203,8 @@ type Manager struct {
 	// peer's RG/election claims have been installed.
 	peerProofGen     atomic.Uint64
 	unkeyedAlarmMu   sync.Mutex
-	unkeyedAlarmHook func(expired bool, expiry time.Time)
-	unkeyedAuditHook func(action string, rgID, nodeID int, at time.Time, reason string)
+	unkeyedAlarmHook func(rung string, raised bool, expiry time.Time)
+	unkeyedAuditHook func(action, operator string, rgID, nodeID int, at time.Time, reason string)
 
 	nodeID         int
 	clusterID      int

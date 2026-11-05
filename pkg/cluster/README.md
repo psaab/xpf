@@ -2609,30 +2609,66 @@ peer liveness (`lastSeen`) or drive election.
 ### Bounded legacy-unkeyed authority grace (#16016)
 
 An unkeyed cluster retains today's dual-accept first-keying path for **72
-hours** after its first observed unkeyed cluster posture. The deadline is
-set-once on `CLOCK_MONOTONIC` in-process and backed by
+hours** after its first observed unkeyed cluster posture — the unkeyed
+authority cutoff. The deadline is anchored on `CLOCK_MONOTONIC` in-process
+and persisted as a wall-clock high-water anchor at
 `/var/lib/xpf/unkeyed-authority-grace`: `v1 <earliest-wall-nanoseconds>
 <high-water-wall-nanoseconds>`. Every local config/HA-comms touch only
-ratchets the wall high-water mark; wire traffic cannot move or recreate the
-anchor. A normal restart restores the same earliest deadline and a backward
-wall-clock step cannot refund observed time. A future-dated earliest stamp is
-clamped down. A present but corrupt record is expired-at-boot, never fresh.
-If persistence fails, the current process still expires on its monotonic
-deadline and status names the restart limitation; config apply and daemon
-startup continue. Only a local key commit deletes the anchor. Clearing the key
-stamps a new grace; it does not silently preserve or restore a PSK.
+ratchets the persisted wall high-water mark forward; wire traffic cannot
+move or recreate the anchor. A normal daemon restart restores the same
+earliest stamp and high-water mark instead of starting a fresh window, so a
+backward wall-clock step cannot refund observed time. A future-dated earliest
+stamp is clamped down. A present but corrupt anchor fails closed: it is
+expired at boot, never fresh. If persistence fails, the current process
+still expires on its monotonic deadline and status names the restart
+limitation; config apply and daemon startup continue.
+
+Apart from the explicit re-arm below, local key-state changes are the only
+key-related events that alter grace state: a local key commit deletes the
+anchor; a local key-clear commit starts a new grace. This does not silently
+preserve or restore a PSK, and the existing strict commit rules on clearing
+a configured key still apply — clearing is not a way to return to dual-accept
+(#6630). Peer provenance never resets the original cutoff: a peer-pushed
+first key or key-clear does not delete, restamp, or reset the anchor, and
+cannot launder a fresh 72 hours. If a peer key-clear arrives after a local
+key commit removed the old anchor, the node persists an already-expired
+cutoff instead of opening a new window; local operator re-arm is then
+required. This governs grace state, not whether
+config-sync accepts the config: the existing tolerant SyncApply still
+installs peer-pushed config as required by #16858, including the mismatched-key
+boot case pinned by `TestStoreSyncApplyMismatchedKeyBoots16858`. Do not add a
+node-local/preserve-list exception for `authentication-key` or block that
+sync apply.
+
+**Wrong-RTC recovery is explicit, never a restart side effect.** Correct
+the time source first, then run `request chassis cluster unkeyed-grace restart`
+on the affected node itself. This audited request is local-only, must be run
+per node, and explicitly re-arms the grace for a wrong RTC; a routine daemon
+restart or peer config-sync never does. It changes no key and does not
+promote an RG. It is also not the separate force-primary recovery described
+below.
 
 While the grace is active, an unauthenticated peer-pushed config may still
-provision the read-only secondary's first key. For an existing pair, key the
-running primary first, verify it is signing authenticated heartbeats, then key
-the secondary; do not start by keying only the secondary. After expiry, every
-unauthenticated heartbeat and session-sync frame is rejected, including
-config, sessions/bulk, failover, acknowledgements, liveness and auth-upgrade
-frames. New unauthenticated connections are refused before handshake/install,
-and established unauthenticated connections are evicted by the existing
-one-second auth sweep. All direct session-sync writers share the expiry guard;
-a frame already inside the serialized write may finish (bounded by the
-existing write deadline). Routine restart never re-anchors an expired node.
+provision the read-only secondary's first key. For an existing unkeyed pair,
+follow the documented live-cluster procedure under "Rollout: a secondary
+whose gate is ARMED cannot be keyed locally": key the running primary first,
+verify it is signing authenticated heartbeats, then key the secondary; do
+not start by keying only the secondary. Keep sync connected while the primary
+commit applies and confirm the secondary receives the key. This peer-pushed
+first-key path remains bounded by the original cutoff; peer config-sync does
+not renew it. For a key rotation from an existing key, follow "Rotation"
+below: #16858 refuses a one-shot local signing-key change outside the active
+accepted set, and the staged additional-key procedure is what keeps rotation
+recoverable. Do not clear a key to try to reset grace.
+
+After expiry, unauthenticated heartbeat, session-sync, config and failover
+authority is refused. This includes config, sessions/bulk, failover,
+acknowledgements, liveness and auth-upgrade frames. New unauthenticated
+connections are refused before handshake/install, and established
+unauthenticated connections are evicted by the existing one-second auth
+sweep. All direct session-sync writers share the expiry guard; a frame
+already inside the serialized write may finish (bounded by the existing
+write deadline). Routine restart never re-anchors an expired node.
 Recovery after expiry is local keying or provisioning/console keying; the
 peer-pushed first-key path is no longer available after the deadline.
 
@@ -2641,12 +2677,14 @@ takeover from unverified liveness. Thus an unkeyed primary and secondary do
 not become dual-primary merely because the timer fired; if the primary later
 dies, the expired secondary remains held until keying or explicit local
 recovery. Keying after expiry arms a recovery hold until a fresh authenticated
-heartbeat has installed the peer's RG state. The local-only
+heartbeat has installed the peer's RG state. Force-primary remains a
+separate local-only recovery action, not a grace re-arm:
 `request chassis cluster failover force-primary redundancy-group <rg> override
-unkeyed-recovery` action is the audited break-glass for one stranded RG while
-that hold is active; remote CLI and gRPC dispatch refuse the action. A fresh
-authenticated peer heartbeat or `request chassis cluster failover reset
-redundancy-group <rg>` clears the force-primary pin.
+unkeyed-recovery` is the audited break-glass for one stranded RG while that
+hold is active; remote CLI and gRPC dispatch refuse the action. A fresh
+authenticated peer heartbeat that installs a peer-primary state clears the
+pin before normal election resolution; otherwise the pin remains. The local
+`request chassis cluster failover reset redundancy-group <rg>` also clears it.
 
 The `Unkeyed authority grace:` status line includes the expiry timestamp,
 corrupt/not-persisted posture, and recovery hold. The operator notice ladder

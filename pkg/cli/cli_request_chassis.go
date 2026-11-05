@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/clusterfailover"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
+	"github.com/psaab/xpf/pkg/osident"
 )
 
 func (c *CLI) handleRequestChassis(args []string) error {
@@ -26,6 +28,8 @@ func (c *CLI) handleRequestChassis(args []string) error {
 	switch args[0] {
 	case "failover":
 		return c.handleRequestChassisClusterFailover(args[1:])
+	case "unkeyed-grace":
+		return c.handleRequestChassisClusterUnkeyedGrace(args[1:])
 	case "data-plane":
 		return c.handleRequestChassisClusterDataPlane(args[1:])
 	default:
@@ -33,6 +37,30 @@ func (c *CLI) handleRequestChassis(args []string) error {
 		writeCompletionHelp(os.Stdout, treeHelpCandidates(operationalTree["request"].Children["chassis"].Children["cluster"].Children))
 		return nil
 	}
+}
+
+func (c *CLI) handleRequestChassisClusterUnkeyedGrace(args []string) error {
+	if len(args) == 0 {
+		fmt.Println("request chassis cluster unkeyed-grace:")
+		writeCompletionHelp(os.Stdout,
+			treeHelpCandidates(operationalTree["request"].Children["chassis"].Children["cluster"].Children["unkeyed-grace"].Children))
+		return nil
+	}
+	if len(args) != 1 || args[0] != "restart" {
+		return fmt.Errorf("usage: request chassis cluster unkeyed-grace restart")
+	}
+	if c.cluster == nil {
+		return fmt.Errorf("cluster not configured")
+	}
+
+	operator := osident.Current().String()
+	cutoff, err := c.cluster.RestartUnkeyedAuthorityGrace(operator)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Unkeyed authority grace restarted by operator %s on node %d; cutoff %s\n",
+		operator, c.cluster.NodeID(), cutoff.Format(time.RFC3339Nano))
+	return nil
 }
 
 func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
@@ -51,7 +79,7 @@ func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
 
 	switch op.Kind {
 	case clusterfailover.KindForcePrimary:
-		return c.cluster.ForcePrimaryRecovery(op.RG)
+		return c.cluster.ForcePrimaryRecovery(op.RG, osident.Current().String())
 
 	case clusterfailover.KindReset:
 		if err := c.cluster.ResetFailover(op.RG); err != nil {

@@ -189,14 +189,15 @@ func requiredPermission(parts []string) config.LoginClassPermission {
 		return config.PermControl
 	}
 
-	// `request system {reboot,halt,power-off,zeroize}` and `request chassis
-	// cluster failover` are DESTRUCTIVE maintenance verbs. On Junos the
-	// predefined `operator` class lacks the `maintenance` permission and so
-	// cannot reboot/zeroize; xpf mirrors that by gating them at the
-	// super-user-only PermMaint level instead of the plain PermControl the
-	// rest of the `request` family (request session, request security, etc.)
-	// keeps, so `operator` retains benign request verbs but not the ones that
-	// take the box down or wipe it (#4108 F21).
+	// `request system {reboot,halt,power-off,zeroize}`, `request chassis cluster
+	// failover`, and `request chassis cluster unkeyed-grace restart` are DESTRUCTIVE
+	// maintenance verbs. On Junos the predefined `operator` class lacks the
+	// `maintenance` permission and so cannot reboot/zeroize; xpf mirrors that by
+	// gating them at the super-user-only PermMaint level instead of the plain
+	// PermControl the rest of the `request` family (request session, request
+	// security, etc.) keeps, so `operator` retains benign request verbs but not
+	// the ones that take the box down, wipe it, or rearm authority grace (#4108 F21,
+	// #16016).
 	if action == "request" && requestSubcommandIsMaintenance(parts[1:]) {
 		return config.PermMaint
 	}
@@ -242,14 +243,13 @@ func requestSubcommandIsConfig(args []string) bool {
 
 // requestSubcommandIsMaintenance reports whether the `request` arguments
 // resolve to a destructive maintenance verb: `request system
-// {reboot,halt,power-off,zeroize}` or `request chassis cluster failover ...`.
-// It applies the same prefix resolution the CLI dispatcher uses (resolveCommand
-// over the cmdtree children), so an abbreviated `request system zero` or
-// `request sys reboot` is gated identically to the fully-spelled form and
-// cannot bypass the gate. Resolution errs toward the dispatcher: an
-// unresolvable/ambiguous token that would never actually run returns false
-// (plain control), while every token the dispatcher would execute as a
-// destructive verb resolves here and elevates to PermMaint (fail-closed).
+// {reboot,halt,power-off,zeroize}`, `request chassis cluster failover ...`, or
+// `request chassis cluster unkeyed-grace restart`. It applies the same prefix
+// resolution the CLI dispatcher uses (resolveCommand over the cmdtree children),
+// so abbreviated tokens are gated identically to their fully-spelled form.
+// An abbreviated `request sys reboot` is gated the same way. An unresolvable
+// or ambiguous token that cannot run returns false, while executable destructive
+// verbs resolve here and elevate to PermMaint (fail-closed).
 func requestSubcommandIsMaintenance(args []string) bool {
 	if len(args) == 0 {
 		return false
@@ -299,7 +299,7 @@ func requestSubcommandIsMaintenance(args []string) bool {
 		}
 		return false
 	case "chassis":
-		// request chassis cluster {failover ... | data-plane ...}
+		// request chassis cluster {failover ... | unkeyed-grace restart | data-plane ...}
 		if len(args) < 3 {
 			return false
 		}
@@ -320,7 +320,7 @@ func requestSubcommandIsMaintenance(args []string) bool {
 			return false
 		}
 		switch sub {
-		case "failover":
+		case "failover", "unkeyed-grace":
 			return true
 		case "data-plane":
 			return dataplaneVerbIsMaintenance(clNode.Children["data-plane"], args[3:])

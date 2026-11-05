@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // TestSystemActionJournalsDestructiveVerbs pins #4108 F8 at the RPC boundary:
@@ -83,5 +85,28 @@ func TestSystemActionJournalsDestructiveVerbs(t *testing.T) {
 				t.Errorf("journal missing system_action/%q entry; got:\n%s", tc.action, data)
 			}
 		})
+	}
+}
+
+func TestSystemActionUnkeyedGraceRestartRefusedWithoutJournal16016(t *testing.T) {
+	dir := t.TempDir()
+	store := newConfigStore(t, filepath.Join(dir, "xpf.conf"))
+	server := &Server{store: store}
+
+	_, err := server.SystemAction(context.Background(), &pb.SystemActionRequest{
+		Action: "cluster-unkeyed-grace-restart",
+	})
+	const refusal = "unkeyed-grace restart is a local recovery action; run it on the node itself"
+	if status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != refusal {
+		t.Fatalf("SystemAction(cluster-unkeyed-grace-restart) = %v, want FailedPrecondition %q", err, refusal)
+	}
+
+	journalPath := filepath.Join(dir, ".config.journal")
+	data, err := os.ReadFile(journalPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read action journal: %v", err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("refused unkeyed-grace restart wrote action journal records: %s", data)
 	}
 }

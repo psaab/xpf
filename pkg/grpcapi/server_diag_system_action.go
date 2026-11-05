@@ -416,6 +416,10 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 		return &pb.SystemActionResponse{Message: "D11 attestation authority armed"}, nil
 	}
 	switch req.Action {
+	case "cluster-unkeyed-grace-restart":
+		return nil, status.Error(codes.FailedPrecondition,
+			"unkeyed-grace restart is a local recovery action; run it on the node itself")
+
 	case "cluster-rejoin":
 		// #15239 (A56-01): the orchestrator node rejoin. ResetAllFailover
 		// clears every RG's manual failover AND the node-global

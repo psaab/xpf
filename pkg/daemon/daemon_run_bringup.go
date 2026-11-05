@@ -235,7 +235,7 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		// blackholing traffic (r2 AGY Critical). No-op on an ordinary boot.
 		d.holdSecondaryIfKernelCandidateArmed()
 
-		d.cluster.UpdateConfig(cc)
+		d.cluster.UpdateConfigFromBoot(cc)
 		d.cluster.Start(d.daemonCtx)
 		d.cluster.SetMonitorConfig(cfg)
 		// Wire event-drop callback: on dropped cluster events, trigger

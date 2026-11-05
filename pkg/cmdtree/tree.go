@@ -1216,11 +1216,23 @@ var OperationalTree = map[string]*Node{
 							return []string{"0", "1"}
 						}},
 					}},
+					"force-primary": {Desc: "Recover one redundancy group locally during the unkeyed recovery hold", Children: map[string]*Node{
+						"redundancy-group": {Desc: "Recover a specific redundancy group", DynamicFn: func(cfg *config.Config) []string {
+							return redundancyGroupIDs(cfg)
+						}, Children: map[string]*Node{
+							"override": {Desc: "Confirm the local force-primary recovery", Children: map[string]*Node{
+								"unkeyed-recovery": {Desc: "Confirm unkeyed recovery"},
+							}},
+						}},
+					}},
 					"reset": {Desc: "Reset manual failover", Children: map[string]*Node{
 						"redundancy-group": {Desc: "Reset failover for a redundancy group", DynamicFn: func(cfg *config.Config) []string {
 							return redundancyGroupIDs(cfg) // #4866: nil-skip tolerated RG entries
 						}},
 					}},
+				}},
+				"unkeyed-grace": {Desc: "Local unkeyed-authority grace controls", Children: map[string]*Node{
+					"restart": {Desc: "Restart the local unkeyed-authority grace cutoff"},
 				}},
 				"data-plane": {Desc: "Userspace dataplane operations", Children: map[string]*Node{
 					"userspace": {Desc: "Userspace dataplane helper operations", Children: map[string]*Node{

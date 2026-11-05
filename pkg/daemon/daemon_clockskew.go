@@ -149,27 +149,49 @@ func (d *Daemon) peerClockAlarmSyslog(raised bool, offset time.Duration) {
 	d.clockSkewAlarmEmitter()(severity, msg)
 }
 
-// unkeyedAuthorityGraceAlarmSyslog forwards the #16016 grace transition via
-// the same RT_SYSTEM syslog streams as clock-skew alarms.
-func (d *Daemon) unkeyedAuthorityGraceAlarmSyslog(expired bool, expiry time.Time) {
+// unkeyedAuthorityGraceAlarmSyslog forwards each #16016 notice rung and
+// posture transition to the same RT_SYSTEM syslog streams as clock-skew alarms.
+func (d *Daemon) unkeyedAuthorityGraceAlarmSyslog(rung string, raised bool, expiry time.Time) {
 	severity := clockskew.SeverityRaise
-	transition := "UNKEYED_AUTHORITY_GRACE_EXPIRED"
-	if !expired {
+	transition := "UNKEYED_AUTHORITY_GRACE_NOTICE"
+	if !raised {
 		severity = clockskew.SeverityClear
 		transition = "UNKEYED_AUTHORITY_GRACE_CLEARED"
+	} else {
+		switch rung {
+		case "stamped":
+			transition = "UNKEYED_AUTHORITY_GRACE_STAMPED"
+		case "t-24h":
+			transition = "UNKEYED_AUTHORITY_GRACE_T_MINUS_24H"
+		case "t-1h":
+			transition = "UNKEYED_AUTHORITY_GRACE_T_MINUS_1H"
+		case "expired":
+			transition = "UNKEYED_AUTHORITY_GRACE_EXPIRED"
+		case "daily-expired":
+			transition = "UNKEYED_AUTHORITY_GRACE_EXPIRED_REMINDER"
+		}
 	}
-	detail := "expired unkeyed control authority; key the cluster to recover"
-	if !expiry.IsZero() {
+	detail := "unkeyed control authority remains accepted; key the cluster before expiry"
+	if rung == "expired" || rung == "daily-expired" {
+		detail = "expired unkeyed control authority; a clock step can cause this — re-arm deliberately or key the cluster"
+		if !expiry.IsZero() {
+			detail = fmt.Sprintf("%s; expired_at=%s", detail, expiry.UTC().Format(time.RFC3339))
+		}
+	} else if !expiry.IsZero() {
 		detail = fmt.Sprintf("%s; expires=%s", detail, expiry.UTC().Format(time.RFC3339))
 	}
-	d.clockSkewAlarmEmitter()(severity, fmt.Sprintf("RT_SYSTEM - %s detail=%q", transition, detail))
+	d.clockSkewAlarmEmitter()(severity, fmt.Sprintf("RT_SYSTEM - %s rung=%q detail=%q", transition, rung, detail))
 }
 
 // unkeyedAuthorityRecoveryAuditSyslog records the local operator's explicit
 // break-glass ownership choice in the RT_SYSTEM stream.
-func (d *Daemon) unkeyedAuthorityRecoveryAuditSyslog(action string, rgID, nodeID int, at time.Time, reason string) {
-	msg := fmt.Sprintf("RT_SYSTEM - UNKEYED_AUTHORITY_RECOVERY action=%q rg=%d node=%d at=%s reason=%q",
-		action, rgID, nodeID, at.UTC().Format(time.RFC3339Nano), reason)
+func (d *Daemon) unkeyedAuthorityRecoveryAuditSyslog(action, operator string, rgID, nodeID int, at time.Time, reason string) {
+	rg := ""
+	if rgID >= 0 {
+		rg = fmt.Sprintf(" rg=%d", rgID)
+	}
+	msg := fmt.Sprintf("RT_SYSTEM - UNKEYED_AUTHORITY_RECOVERY action=%q operator=%q%s node=%d at=%s reason=%q",
+		action, operator, rg, nodeID, at.UTC().Format(time.RFC3339Nano), reason)
 	d.clockSkewAlarmEmitter()(clockskew.SeverityRaise, msg)
 }
 

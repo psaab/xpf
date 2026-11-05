@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -141,5 +142,34 @@ func TestUnauthenticatedConfigSyncRejectedAfterUnkeyedGrace16016(t *testing.T) {
 		active.Chassis.Cluster.ControlLinkAuthKey.Reveal() != "" ||
 		active.System.HostName != "" {
 		t.Fatal("expired unauthenticated config changed the local configuration")
+	}
+}
+func TestPeerSyncFirstKeyApplyPreservesGraceAnchor16016(t *testing.T) {
+	anchorPath := isolateAuthorityAnchors16016(t)
+	manager := newClusterManager(false)
+	manager.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+	expiry := manager.UnkeyedGraceExpiry()
+	if expiry.IsZero() {
+		t.Fatal("initial local unkeyed config did not stamp a grace anchor")
+	}
+
+	fixture := newCredentialTailFixture6790(t)
+	fixture.d.cluster = manager
+	fixture.cfg.Chassis.Cluster = &config.ClusterConfig{
+		ControlInterface:   "em0",
+		ControlLinkAuthKey: config.NewSecret("peer-first-key-16016"),
+	}
+	ctx := withPeerSyncClusterConfigApply(context.Background())
+	if err := fixture.d.applyTailReconcilesWithContext(ctx, fixture.cfg, applyPhaseErrors{}); err != nil {
+		t.Fatalf("peer-sync apply tail: %v", err)
+	}
+	if !manager.ControlLinkAuthConfigured() {
+		t.Fatal("peer first-key config was not installed")
+	}
+	if got := manager.UnkeyedGraceExpiry(); !got.Equal(expiry) {
+		t.Fatalf("peer provenance changed grace expiry to %s, want original %s", got, expiry)
+	}
+	if _, err := os.Stat(anchorPath); err != nil {
+		t.Fatalf("peer provenance deleted the original grace anchor: %v", err)
 	}
 }

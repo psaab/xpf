@@ -9,9 +9,33 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// UpdateConfig synchronizes redundancy group definitions from config.
-// Called during config apply. Preserves runtime state for existing groups.
+// UpdateConfig synchronizes redundancy group definitions from a local config
+// commit. Only this local path may clear or re-arm unkeyed grace state.
 func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
+	m.updateConfig(cfg, clusterConfigUpdateLocal)
+}
+
+// UpdateConfigFromPeer applies a peer-synchronized config without allowing
+// transport data to create, move, or delete the local grace anchor.
+func (m *Manager) UpdateConfigFromPeer(cfg *config.ClusterConfig) {
+	m.updateConfig(cfg, clusterConfigUpdatePeer)
+}
+
+// UpdateConfigFromBoot restores local runtime state without treating the
+// persisted config as a new operator key commit.
+func (m *Manager) UpdateConfigFromBoot(cfg *config.ClusterConfig) {
+	m.updateConfig(cfg, clusterConfigUpdateBoot)
+}
+
+type clusterConfigUpdateSource uint8
+
+const (
+	clusterConfigUpdateLocal clusterConfigUpdateSource = iota
+	clusterConfigUpdatePeer
+	clusterConfigUpdateBoot
+)
+
+func (m *Manager) updateConfig(cfg *config.ClusterConfig, source clusterConfigUpdateSource) {
 	if cfg == nil {
 		return
 	}
@@ -194,6 +218,8 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	// once the peer has been seen or absence is already confirmed.
 	m.armNeverSeenClockLocked()
 
+	oldKeyConfigured := len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
+	oldKeyDigest := controlAuthKeySetDigest(m.controlAuthKey, m.controlAuthKeyAlt)
 	// #4107: plumb the control-channel PSK. Reveal() reads the cleartext
 	// secret; it is stored as raw bytes and NEVER logged. Empty clears it
 	// (reverts to legacy dual-accept). The slice is replaced, not mutated, so
@@ -231,11 +257,42 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	}
 
 	keyConfigured := len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
-	clusterEnabled := cfg.ControlInterface != "" || cfg.PeerAddress != "" || len(cfg.RedundancyGroups) > 0
+	transportConfigured := clusterAuthorityTransportConfigured(cfg)
 	if keyConfigured {
-		m.noteUnkeyedKeyedLocked()
+		switch source {
+		case clusterConfigUpdateLocal:
+			newKeyDigest := controlAuthKeySetDigest(m.controlAuthKey, m.controlAuthKeyAlt)
+			if !oldKeyConfigured || oldKeyDigest != newKeyDigest {
+				m.noteUnkeyedKeyedLocked()
+			} else {
+				m.unkeyedGrace.keyConfigured.Store(true)
+			}
+		default:
+			// Boot and peer configuration establish the active key posture
+			// but do not constitute a local key commit that may erase the
+			// node's original unkeyed-authority cutoff.
+			m.unkeyedGrace.keyConfigured.Store(true)
+		}
 	} else {
-		m.touchUnkeyedAuthorityLocked(clusterEnabled)
+		switch source {
+		case clusterConfigUpdateLocal:
+			if oldKeyConfigured {
+				m.noteUnkeyedKeyClearedLocked()
+			} else {
+				m.unkeyedGrace.keyConfigured.Store(false)
+			}
+			m.touchUnkeyedAuthorityLocked(transportConfigured)
+		case clusterConfigUpdateBoot:
+			m.unkeyedGrace.keyConfigured.Store(false)
+			m.touchUnkeyedAuthorityLocked(transportConfigured)
+		case clusterConfigUpdatePeer:
+			// Peer key-clear cannot create or move a local grace anchor. If
+			// no original anchor remains (a local key commit deleted it),
+			// persist an expired cutoff rather than treating the peer clear
+			// as fresh day-zero provisioning.
+			m.unkeyedGrace.keyConfigured.Store(false)
+			m.closePeerKeyClearWithoutGraceLocked(transportConfigured)
+	}
 	}
 
 	// #15262: anchor the fabric rollout grace at the FIRST keying of the

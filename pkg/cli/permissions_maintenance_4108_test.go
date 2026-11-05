@@ -5,14 +5,13 @@ import (
 	"testing"
 )
 
-// TestCheckPermission_DestructiveMaintenanceRequiresMaint pins #4108 F21: the
-// destructive maintenance verbs — `request system {reboot,halt,power-off,
-// zeroize}` and `request chassis cluster failover` — are gated behind the
-// super-user-only PermMaint. `operator` (which holds PermControl) is DENIED,
-// matching Junos where the predefined operator class lacks `maintenance`; only
-// `super-user` is allowed. Reverting the gate (mapping these back to plain
-// PermControl) makes the operator subtests go RED (operator allowed to
-// zeroize/reboot the box).
+// TestCheckPermission_DestructiveMaintenanceRequiresMaint pins #4108 F21 and
+// #16016: the destructive `request system {reboot,halt,power-off,zeroize}`,
+// `request chassis cluster failover` (including force-primary), and local
+// `request chassis cluster unkeyed-grace restart` verbs require PermMaint.
+// `operator` (which holds PermControl) is DENIED, matching Junos where the
+// predefined operator class lacks `maintenance`; only `super-user` is allowed.
+// Reverting the gate to plain PermControl would allow the operator subtests.
 func TestCheckPermission_DestructiveMaintenanceRequiresMaint(t *testing.T) {
 	destructive := [][]string{
 		{"request", "system", "reboot"},
@@ -21,6 +20,8 @@ func TestCheckPermission_DestructiveMaintenanceRequiresMaint(t *testing.T) {
 		{"request", "system", "zeroize"},
 		{"request", "chassis", "cluster", "failover", "redundancy-group", "1", "node", "0"},
 		{"request", "chassis", "cluster", "failover", "data", "node", "0"},
+		{"request", "chassis", "cluster", "failover", "force-primary", "redundancy-group", "1", "override", "unkeyed-recovery"},
+		{"request", "chassis", "cluster", "unkeyed-grace", "restart"},
 	}
 
 	tests := []struct {
@@ -64,6 +65,7 @@ func TestCheckPermission_DestructiveMaintenanceAbbreviationCannotBypass(t *testi
 		{"request", "sys", "halt"},    // system halt
 		{"request", "sys", "power"},   // system power-off
 		{"request", "chassis", "cluster", "fail", "data", "node", "1"},
+		{"request", "chassis", "cluster", "unkeyed-g", "restart"},
 	}
 	for _, parts := range abbrev {
 		if err := op.checkPermission(parts); err == nil {

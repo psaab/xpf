@@ -1,10 +1,10 @@
 // #5810: the remote CLI shares ONE strict cluster-failover grammar with the
 // in-process CLI and the gRPC handler (pkg/clusterfailover). Every malformed
 // command form must be rejected BEFORE the privileged SystemAction RPC; normal
-// accepted forms emit their exact wire action, while local-only force-primary
-// is refused before any SystemAction call. These tables are the SAME
-// grammarvectors tables the in-process CLI and gRPC tests use, so the grammar
-// accept/reject verdicts cannot drift apart.
+// failover forms emit their exact wire action, while the local-only force-primary
+// and unkeyed-grace restart forms are refused before any SystemAction call.
+// The failover tables are the SAME grammarvectors tables the in-process CLI and
+// gRPC tests use, so their accept/reject verdicts cannot drift apart.
 //
 // RED on revert: restoring the old per-form ad-hoc parsing (e.g. the
 // `len(args) >= 3 && args[2] == "node"` gate that ignored a misspelled
@@ -68,5 +68,18 @@ func TestRequestFailoverForcePrimaryRefusedRemotely16016(t *testing.T) {
 	}
 	if fake.calls != 0 {
 		t.Fatalf("local-only force-primary issued SystemAction %d times (%v)", fake.calls, fake.actions)
+	}
+}
+
+func TestRequestUnkeyedGraceRestartRefusedRemotely16016(t *testing.T) {
+	fake := &failoverRecorder{}
+	c := &ctl{client: fake}
+	err := c.handleRequestChassis([]string{"cluster", "unkeyed-grace", "restart"})
+	const refusal = "unkeyed-grace restart is a local recovery action; run it on the node itself"
+	if err == nil || err.Error() != refusal {
+		t.Fatalf("handleRequestChassis(unkeyed-grace restart) error = %v, want %q", err, refusal)
+	}
+	if fake.calls != 0 {
+		t.Fatalf("local-only unkeyed-grace restart issued SystemAction %d times (%v)", fake.calls, fake.actions)
 	}
 }

@@ -52,6 +52,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
@@ -218,6 +219,16 @@ func deleteUnkeyedAuthorityRecord(path string) {
 	}
 }
 
+// clusterAuthorityTransportConfigured is shared by config updates and the
+// pre-listener boot belt. Fabric-only deployments carry session/config
+// authority too, even when they declare no redundancy groups.
+func clusterAuthorityTransportConfigured(cfg *config.ClusterConfig) bool {
+	return cfg != nil && (cfg.ControlInterface != "" || cfg.PeerAddress != "" ||
+		cfg.FabricInterface != "" || cfg.FabricPeerAddress != "" ||
+		cfg.Fabric1Interface != "" || cfg.Fabric1PeerAddress != "" ||
+		len(cfg.RedundancyGroups) > 0)
+}
+
 // touchUnkeyedAuthorityLocked observes the unkeyed posture once. Caller
 // holds m.mu (via UpdateConfig) or the construction path before publication.
 // clusterEnabled gates stamping: a standalone node with no cluster config
@@ -227,12 +238,6 @@ func (m *Manager) touchUnkeyedAuthorityLocked(clusterEnabled bool) {
 		return
 	}
 	st := &m.unkeyedGrace
-	if st.keyConfigured.Swap(false) {
-		st.recoveryHold.Store(false)
-		for _, rg := range m.groups {
-			rg.forcedPrimary = false
-		}
-	}
 	now := unkeyedAuthorityNow()
 	mono := unkeyedAuthorityMonoNow()
 	loadedExpired := false
@@ -264,6 +269,19 @@ func (m *Manager) touchUnkeyedAuthorityLocked(clusterEnabled bool) {
 				remainingOnBoot = expiry.Sub(now)
 			}
 			clamped = clampOnLoad
+		}
+	}
+	if !st.earliestWall.IsZero() && st.anchorMono == 0 {
+		wall := unkeyedAuthorityNow()
+		if st.highWaterWall.After(wall) {
+			wall = st.highWaterWall
+		}
+		expiry := st.earliestWall.Add(unkeyedAuthorityGrace)
+		if !wall.Before(expiry) {
+			loadedExpired = true
+			remainingOnBoot = 0
+		} else {
+			remainingOnBoot = expiry.Sub(wall)
 		}
 	}
 	if st.corrupt {
@@ -301,8 +319,10 @@ func (m *Manager) touchUnkeyedAuthorityLocked(clusterEnabled bool) {
 	if deadline := st.deadlineMono.Load(); deadline != 0 && mono >= deadline {
 		loadedExpired = true
 	}
+	var noticeRung int
+	var noticeExpiry time.Time
 	if !loadedExpired {
-		m.logUnkeyedGraceLadderLocked()
+		noticeRung, noticeExpiry = m.logUnkeyedGraceLadderLocked()
 	}
 	expiry := time.Time{}
 	if !st.earliestWall.IsZero() {
@@ -311,16 +331,18 @@ func (m *Manager) touchUnkeyedAuthorityLocked(clusterEnabled bool) {
 	st.mu.Unlock()
 	if loadedExpired {
 		m.markUnkeyedAuthorityExpired(expiry)
+	} else if noticeRung != 0 {
+		m.notifyUnkeyedGraceAlarm(unkeyedGraceNoticeName(noticeRung), true, noticeExpiry)
 	}
-}
 
+}
 // logUnkeyedGraceLadderLocked emits the once-per-rung notice ladder using the
 // monotonic deadline, so a wall-clock step cannot move an in-process notice.
 // Caller holds st.mu.
-func (m *Manager) logUnkeyedGraceLadderLocked() {
+func (m *Manager) logUnkeyedGraceLadderLocked() (int, time.Time) {
 	st := &m.unkeyedGrace
 	if st.earliestWall.IsZero() || st.corrupt {
-		return
+		return 0, time.Time{}
 	}
 	expiry := st.earliestWall.Add(unkeyedAuthorityGrace)
 	nowMono := unkeyedAuthorityMonoNow()
@@ -331,13 +353,16 @@ func (m *Manager) logUnkeyedGraceLadderLocked() {
 			st.lastLogRung = 4
 			st.lastPostExpiryLogMono = nowMono
 			slog.Error("cluster: unkeyed authority grace expired; unauthenticated control authority is refused (#16016); " +
-				"expired at " + expiry.Format(time.RFC3339) + "; a clock step can cause this — key the cluster to recover")
-		} else if nowMono-st.lastPostExpiryLogMono >= int64(24*time.Hour) {
+				"expired at " + expiry.Format(time.RFC3339) + "; a clock step can cause this — re-arm deliberately or key the cluster")
+			return 4, expiry
+		}
+		if nowMono-st.lastPostExpiryLogMono >= int64(24*time.Hour) {
 			st.lastPostExpiryLogMono = nowMono
 			slog.Error("cluster: unkeyed authority remains expired; unauthenticated control authority is refused (#16016)",
 				"expired_at", expiry.Format(time.RFC3339))
+			return 5, expiry
 		}
-		return
+		return 0, expiry
 	}
 	rung := 1
 	if remaining <= int64(time.Hour) {
@@ -346,7 +371,7 @@ func (m *Manager) logUnkeyedGraceLadderLocked() {
 		rung = 2
 	}
 	if rung <= st.lastLogRung {
-		return
+		return 0, expiry
 	}
 	st.lastLogRung = rung
 	switch rung {
@@ -357,6 +382,30 @@ func (m *Manager) logUnkeyedGraceLadderLocked() {
 		slog.Error("cluster: unkeyed-authority grace expires within 1h; key the cluster now (#16016)",
 			"expires", expiry.Format(time.RFC3339))
 	}
+	return rung, expiry
+}
+
+func unkeyedGraceNoticeName(rung int) string {
+	switch rung {
+	case 1:
+		return "stamped"
+	case 2:
+		return "t-24h"
+	case 3:
+		return "t-1h"
+	case 4:
+		return "expired"
+	case 5:
+		return "daily-expired"
+	default:
+		return ""
+	}
+}
+
+func (m *Manager) notifyUnkeyedGraceAlarm(rung string, raised bool, expiry time.Time) {
+	if hook := m.unkeyedGraceAlarmHookFn(); hook != nil {
+		go hook(rung, raised, expiry)
+	}
 }
 
 // noteUnkeyedKeyedLocked handles the accepted-set-nonempty transition:
@@ -366,27 +415,29 @@ func (m *Manager) logUnkeyedGraceLadderLocked() {
 func (m *Manager) noteUnkeyedKeyedLocked() {
 	st := &m.unkeyedGrace
 	wasKeyed := st.keyConfigured.Swap(true)
-	if wasKeyed {
-		return
-	}
-	wasExpired := st.expired.Load()
-	if deadline := st.deadlineMono.Load(); deadline != 0 && unkeyedAuthorityMonoNow() >= deadline {
-		wasExpired = true
-	}
-	if !wasExpired && st.deadlineMono.Load() == 0 {
-		earliest, highWater, present, corrupt, _ := loadUnkeyedAuthorityRecord(
-			unkeyedAuthorityGraceStatePath, unkeyedAuthorityNow())
-		if present && corrupt {
+	wasExpired := false
+	if !wasKeyed {
+		wasExpired = st.expired.Load()
+		if deadline := st.deadlineMono.Load(); deadline != 0 && unkeyedAuthorityMonoNow() >= deadline {
 			wasExpired = true
-		} else if present {
-			now := unkeyedAuthorityNow()
-			if highWater.After(now) {
-				now = highWater
+		}
+		if !wasExpired && st.deadlineMono.Load() == 0 {
+			earliest, highWater, present, corrupt, _ := loadUnkeyedAuthorityRecord(
+				unkeyedAuthorityGraceStatePath, unkeyedAuthorityNow())
+			if present && corrupt {
+				wasExpired = true
+			} else if present {
+				now := unkeyedAuthorityNow()
+				if highWater.After(now) {
+					now = highWater
+				}
+				wasExpired = !now.Before(earliest.Add(unkeyedAuthorityGrace))
 			}
-			wasExpired = !now.Before(earliest.Add(unkeyedAuthorityGrace))
 		}
 	}
-	deleteUnkeyedAuthorityRecord(unkeyedAuthorityGraceStatePath)
+
+	// Serialize deletion with the one-second high-water sweep: a write that
+	// started before this transition must finish before the anchor is removed.
 	st.mu.Lock()
 	st.anchorMono = 0
 	st.deadlineMono.Store(0)
@@ -396,18 +447,120 @@ func (m *Manager) noteUnkeyedKeyedLocked() {
 	st.notPersisted = false
 	st.persistFailureLogged = false
 	st.lastLogRung = 0
+	st.lastPostExpiryLogMono = 0
+	deleteUnkeyedAuthorityRecord(unkeyedAuthorityGraceStatePath)
 	st.mu.Unlock()
 	st.expired.Store(false)
-	if wasExpired {
+	if !wasKeyed && wasExpired {
 		st.armedGen.Store(m.peerProofGen.Load())
 		st.recoveryHold.Store(true)
 		slog.Warn("cluster: recovery hold armed after keying an expired unkeyed cluster (#16016); " +
 			"takeover stays suppressed until the first authenticated peer heartbeat")
-		if hook := m.unkeyedGraceAlarmHookFn(); hook != nil {
-			go hook(false, time.Time{})
-		}
-	} else {
+		m.notifyUnkeyedGraceAlarm("cleared", false, time.Time{})
+	} else if !wasKeyed {
 		st.recoveryHold.Store(false)
+	}
+}
+
+// noteUnkeyedKeyClearedLocked is the only transition that may deliberately
+// replace an existing anchor with a fresh local key-clear grace window.
+// Caller holds m.mu.
+func (m *Manager) noteUnkeyedKeyClearedLocked() {
+	st := &m.unkeyedGrace
+	st.keyConfigured.Store(false)
+	st.mu.Lock()
+	st.anchorMono = 0
+	st.deadlineMono.Store(0)
+	st.earliestWall = time.Time{}
+	st.highWaterWall = time.Time{}
+	st.corrupt = false
+	st.notPersisted = false
+	st.persistFailureLogged = false
+	st.lastLogRung = 0
+	st.lastPostExpiryLogMono = 0
+	deleteUnkeyedAuthorityRecord(unkeyedAuthorityGraceStatePath)
+	st.mu.Unlock()
+	st.expired.Store(false)
+	st.recoveryHold.Store(false)
+	for _, rg := range m.groups {
+		rg.forcedPrimary = false
+	}
+}
+
+// closePeerKeyClearWithoutGraceLocked restores an existing anchor without
+// creating one. If a peer key-clear leaves no local cutoff (for example, a
+// local key commit deleted it earlier), it persists an already-expired
+// sentinel instead of reopening unauthenticated authority. Caller holds m.mu.
+func (m *Manager) closePeerKeyClearWithoutGraceLocked(clusterEnabled bool) {
+	if m == nil || !clusterEnabled {
+		return
+	}
+	st := &m.unkeyedGrace
+	now := unkeyedAuthorityNow().UTC()
+	mono := unkeyedAuthorityMonoNow()
+	expired := st.expired.Load()
+	expiry := time.Time{}
+	st.mu.Lock()
+	changed := false
+	if !st.loaded {
+		st.loaded = true
+		earliest, highWater, present, corrupt, clamped := loadUnkeyedAuthorityRecord(
+			unkeyedAuthorityGraceStatePath, now)
+		switch {
+		case corrupt:
+			st.corrupt = true
+			expired = true
+			slog.Error("cluster: peer key-clear found a corrupt unkeyed-authority anchor; "+
+				"failing closed (#16016)", "path", unkeyedAuthorityGraceStatePath)
+		case present:
+			st.earliestWall = earliest
+			st.highWaterWall = highWater
+			changed = clamped
+		}
+	}
+	if st.corrupt {
+		expired = true
+	} else if st.earliestWall.IsZero() {
+		// No anchor means a peer frame cannot establish a fresh provisioning
+		// window. Persist a cutoff at "now", so a restart cannot interpret the
+		// missing file as day-zero provisioning.
+		st.earliestWall = now.Add(-unkeyedAuthorityGrace)
+		st.highWaterWall = now
+		st.anchorMono = mono
+		st.deadlineMono.Store(mono)
+		expiry = now
+		changed = true
+		expired = true
+	} else {
+		expiry = st.earliestWall.Add(unkeyedAuthorityGrace)
+		deadline := st.deadlineMono.Load()
+		if deadline == 0 {
+			effectiveWall := now
+			if st.highWaterWall.After(effectiveWall) {
+				effectiveWall = st.highWaterWall
+			}
+			remaining := expiry.Sub(effectiveWall)
+			if remaining < 0 {
+				remaining = 0
+			}
+			st.anchorMono = mono
+			deadline = mono + remaining.Nanoseconds()
+			st.deadlineMono.Store(deadline)
+		}
+		if mono >= deadline {
+			expired = true
+		}
+		if now.After(st.highWaterWall) {
+			st.highWaterWall = now
+			changed = true
+		}
+	}
+	if changed {
+		m.persistUnkeyedAuthorityLocked()
+	}
+	st.mu.Unlock()
+	if expired {
+		m.markUnkeyedAuthorityExpired(expiry)
 	}
 }
 
@@ -460,28 +613,146 @@ func (m *Manager) markUnkeyedAuthorityExpired(expiry time.Time) {
 	}
 	slog.Error("cluster: unkeyed authority grace expired; unauthenticated control authority is refused (#16016);" +
 		suffix + "; a clock step can cause this — key the cluster to recover")
-	if hook := m.unkeyedGraceAlarmHookFn(); hook != nil {
-		go hook(true, expiry)
-	}
+	m.notifyUnkeyedGraceAlarm("expired", true, expiry)
 }
 
 // checkUnkeyedGraceNotices runs from the existing one-second session-auth
 // sweep so the pre-expiry warning ladder does not add a timer or a goroutine.
 func (m *Manager) checkUnkeyedGraceNotices() {
-	if m == nil || m.unkeyedGrace.keyConfigured.Load() {
-		return
-	}
-	if m.UnkeyedAuthorityExpired() {
-		st := &m.unkeyedGrace
-		st.mu.Lock()
-		m.logUnkeyedGraceLadderLocked()
-		st.mu.Unlock()
+	if m == nil {
 		return
 	}
 	st := &m.unkeyedGrace
 	st.mu.Lock()
-	m.logUnkeyedGraceLadderLocked()
+	if !st.loaded {
+		st.loaded = true
+		earliest, highWater, present, corrupt, clamped := loadUnkeyedAuthorityRecord(
+			unkeyedAuthorityGraceStatePath, unkeyedAuthorityNow())
+		if corrupt {
+			st.corrupt = true
+			st.expired.Store(true)
+		} else if present {
+			st.earliestWall = earliest
+			st.highWaterWall = highWater
+			effectiveWall := unkeyedAuthorityNow()
+			if highWater.After(effectiveWall) {
+				effectiveWall = highWater
+			}
+			if !effectiveWall.Before(earliest.Add(unkeyedAuthorityGrace)) {
+				st.expired.Store(true)
+			}
+			if clamped {
+				m.persistUnkeyedAuthorityLocked()
+			}
+		}
+	}
+	if !st.earliestWall.IsZero() {
+		if now := unkeyedAuthorityNow(); now.After(st.highWaterWall) {
+			st.highWaterWall = now
+			m.persistUnkeyedAuthorityLocked()
+		}
+	}
+	keyConfigured := st.keyConfigured.Load()
+	if !keyConfigured && st.anchorMono == 0 && !st.earliestWall.IsZero() {
+		mono := unkeyedAuthorityMonoNow()
+		effectiveWall := unkeyedAuthorityNow()
+		if st.highWaterWall.After(effectiveWall) {
+			effectiveWall = st.highWaterWall
+		}
+		remaining := st.earliestWall.Add(unkeyedAuthorityGrace).Sub(effectiveWall)
+		if remaining < 0 {
+			remaining = 0
+		}
+		st.anchorMono = mono
+		st.deadlineMono.Store(mono + remaining.Nanoseconds())
+	}
 	st.mu.Unlock()
+	if keyConfigured {
+		return
+	}
+	m.UnkeyedAuthorityExpired()
+	st.mu.Lock()
+	rung, expiry := m.logUnkeyedGraceLadderLocked()
+	st.mu.Unlock()
+	if rung != 0 {
+		m.notifyUnkeyedGraceAlarm(unkeyedGraceNoticeName(rung), true, expiry)
+	}
+}
+
+// RestartUnkeyedAuthorityGrace is the audited local operator act for an
+// expired or corrupt wall-clock anchor. It cannot extend an active window,
+// and does not alter redundancy-group roles.
+func (m *Manager) RestartUnkeyedAuthorityGrace(operator string) (time.Time, error) {
+	if m == nil {
+		return time.Time{}, fmt.Errorf("cluster not configured")
+	}
+	operator = strings.TrimSpace(operator)
+	if operator == "" {
+		return time.Time{}, fmt.Errorf("unkeyed-grace restart requires a local operator identity")
+	}
+
+	m.mu.Lock()
+	if len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0 {
+		m.mu.Unlock()
+		return time.Time{}, fmt.Errorf("unkeyed-grace restart requires an unkeyed cluster")
+	}
+	if !m.UnkeyedAuthorityExpired() {
+		m.mu.Unlock()
+		return time.Time{}, fmt.Errorf("unkeyed-grace restart is available only after the grace expires (#16016)")
+	}
+
+	st := &m.unkeyedGrace
+	now := unkeyedAuthorityNow().UTC()
+	mono := unkeyedAuthorityMonoNow()
+	reason := "operator explicitly re-armed an expired or corrupt anchor after a clock step"
+	st.mu.Lock()
+	if st.earliestWall.IsZero() && !st.corrupt {
+		st.mu.Unlock()
+		m.mu.Unlock()
+		return time.Time{}, fmt.Errorf("unkeyed-grace restart requires an existing expired or corrupt anchor")
+	}
+	deleteUnkeyedAuthorityRecord(unkeyedAuthorityGraceStatePath)
+	st.anchorMono = mono
+	st.deadlineMono.Store(mono + unkeyedAuthorityGrace.Nanoseconds())
+	st.earliestWall = now
+	st.highWaterWall = now
+	st.corrupt = false
+	st.loaded = true
+	st.notPersisted = false
+	st.persistFailureLogged = false
+	st.lastLogRung = 0
+	st.lastPostExpiryLogMono = 0
+	m.persistUnkeyedAuthorityLocked()
+	st.expired.Store(false)
+	st.keyConfigured.Store(false)
+	st.recoveryHold.Store(false)
+	rung, expiry := m.logUnkeyedGraceLadderLocked()
+	st.mu.Unlock()
+	message := fmt.Sprintf(
+		"unkeyed-grace restart operator=%s node=%d at=%s reason=%q expires=%s",
+		operator, m.nodeID, now.Format(time.RFC3339Nano), reason,
+		expiry.UTC().Format(time.RFC3339))
+	if m.history != nil {
+		m.history.Record(EventRG, -1, message)
+	}
+	alarmHook := m.unkeyedGraceAlarmHookFn()
+	auditHook := m.unkeyedRecoveryAuditHook()
+	nodeID := m.nodeID
+	m.mu.Unlock()
+
+	if alarmHook != nil {
+		alarmHook("cleared", false, expiry)
+		if rung != 0 {
+			alarmHook(unkeyedGraceNoticeName(rung), true, expiry)
+		}
+	}
+	if auditHook != nil {
+		auditHook("unkeyed-grace-restart", operator, -1, nodeID, now, reason)
+	}
+	slog.Warn("cluster: operator restarted expired unkeyed-authority grace (#16016)",
+		"operator", operator, "node", nodeID, "time", now.Format(time.RFC3339Nano),
+		"expires", expiry.Format(time.RFC3339), "reason", reason)
+	return expiry, nil
 }
 
 // UnkeyedGraceExpiry returns the wall-clock expiry of the current anchor,
@@ -554,8 +825,13 @@ func (m *Manager) publishFreshHeartbeatProof() {
 		return
 	}
 	m.mu.Lock()
-	for _, rg := range m.groups {
-		rg.forcedPrimary = false
+	for rgID, rg := range m.groups {
+		// A fresh authenticated peer-primary claim supersedes the local
+		// break-glass pin before normal election resolves the two claims. A
+		// proof that the peer is not primary leaves the operator's pin active.
+		if peer, ok := m.peerGroups[rgID]; ok && peer.State == StatePrimary {
+			rg.forcedPrimary = false
+		}
 	}
 	if m.peerAlive {
 		m.runElection()
@@ -576,10 +852,9 @@ func (m *Manager) electionHoldActiveLocked() bool {
 }
 
 // StampUnkeyedAuthorityAnchor is the boot-pinning belt called by
-// Daemon.startClusterComms before listeners open: the same set-once touch
-// UpdateConfig performs, so a comms restart re-touches (ratchets highWater)
-// without ever moving the anchor.
-func (m *Manager) StampUnkeyedAuthorityAnchor() {
+// Daemon.startClusterComms before listeners open. It receives the same
+// compiled cluster config as UpdateConfig, including fabric-only transports.
+func (m *Manager) StampUnkeyedAuthorityAnchor(cfg *config.ClusterConfig) {
 	if m == nil {
 		return
 	}
@@ -588,14 +863,13 @@ func (m *Manager) StampUnkeyedAuthorityAnchor() {
 	if len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0 {
 		return
 	}
-	m.touchUnkeyedAuthorityLocked(m.controlInterface != "" || len(m.groups) > 0)
+	m.touchUnkeyedAuthorityLocked(clusterAuthorityTransportConfigured(cfg))
 }
 
-// SetUnkeyedGraceAlarmHook installs the expiry alarm callback, wired at
-// Manager construction exactly like SetPeerClockAlarmHook. The daemon
-// forwards it to syslog in the RT_SYSTEM shape. Called outside every lock,
-// once per expiry transition per process.
-func (m *Manager) SetUnkeyedGraceAlarmHook(fn func(expired bool, expiry time.Time)) {
+// SetUnkeyedGraceAlarmHook installs the per-rung notice and expiry transition
+// callback, wired at Manager construction like SetPeerClockAlarmHook. The
+// daemon forwards each event to syslog in the RT_SYSTEM shape.
+func (m *Manager) SetUnkeyedGraceAlarmHook(fn func(rung string, raised bool, expiry time.Time)) {
 	if m == nil {
 		return
 	}
@@ -604,7 +878,7 @@ func (m *Manager) SetUnkeyedGraceAlarmHook(fn func(expired bool, expiry time.Tim
 	m.unkeyedAlarmHook = fn
 }
 
-func (m *Manager) unkeyedGraceAlarmHookFn() func(bool, time.Time) {
+func (m *Manager) unkeyedGraceAlarmHookFn() func(string, bool, time.Time) {
 	if m == nil {
 		return nil
 	}
@@ -615,7 +889,7 @@ func (m *Manager) unkeyedGraceAlarmHookFn() func(bool, time.Time) {
 
 // SetUnkeyedRecoveryAuditHook installs the syslog audit sink for the
 // local-only force-primary break-glass action.
-func (m *Manager) SetUnkeyedRecoveryAuditHook(fn func(action string, rgID, nodeID int, at time.Time, reason string)) {
+func (m *Manager) SetUnkeyedRecoveryAuditHook(fn func(action, operator string, rgID, nodeID int, at time.Time, reason string)) {
 	if m == nil {
 		return
 	}
@@ -624,7 +898,7 @@ func (m *Manager) SetUnkeyedRecoveryAuditHook(fn func(action string, rgID, nodeI
 	m.unkeyedAuditHook = fn
 }
 
-func (m *Manager) unkeyedRecoveryAuditHook() func(string, int, int, time.Time, string) {
+func (m *Manager) unkeyedRecoveryAuditHook() func(string, string, int, int, time.Time, string) {
 	if m == nil {
 		return nil
 	}

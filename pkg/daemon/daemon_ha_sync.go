@@ -1490,7 +1490,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 	// idempotent touch; this boot belt also covers an already-published
 	// manager whose config has not changed during this process.
 	if d.cluster != nil {
-		d.cluster.StampUnkeyedAuthorityAnchor()
+		d.cluster.StampUnkeyedAuthorityAnchor(cc)
 	}
 	// Create an independently-cancellable sub-context so cluster comms can be
 	// restarted on config change (#87) without cancelling the daemon ctx.

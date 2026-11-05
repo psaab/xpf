@@ -590,11 +590,12 @@ func TestForcePrimaryRecoveryPinnedAndAudited16016(t *testing.T) {
 	m.UnkeyedAuthorityExpired()
 	m.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0", RedundancyGroups: groupConfig16016().RedundancyGroups, ControlLinkAuthKey: config.NewSecret("force-key-16016")})
 	var audited bool
-	m.SetUnkeyedRecoveryAuditHook(func(action string, rgID, nodeID int, at time.Time, reason string) {
-		audited = action == "force-primary" && rgID == 0 && nodeID == m.NodeID() &&
-			!at.IsZero() && strings.Contains(reason, "authenticated heartbeat proof")
+	m.SetUnkeyedRecoveryAuditHook(func(action, operator string, rgID, nodeID int, at time.Time, reason string) {
+		audited = action == "force-primary" && operator == "manual-operator-16016" &&
+			rgID == 0 && nodeID == m.NodeID() && !at.IsZero() &&
+			strings.Contains(reason, "authenticated heartbeat proof")
 	})
-	if err := m.ForcePrimaryRecovery(0); err != nil {
+	if err := m.ForcePrimaryRecovery(0, "manual-operator-16016"); err != nil {
 		t.Fatalf("ForcePrimaryRecovery: %v", err)
 	}
 	if !audited {
@@ -623,7 +624,7 @@ func TestForcePrimaryRecoveryPinnedAndAudited16016(t *testing.T) {
 func TestForcePrimaryRecoveryRefusedOutsideRecovery16016(t *testing.T) {
 	m, _, _ := setupAuthorityManager16016(t)
 	m.UpdateConfig(groupConfig16016())
-	if err := m.ForcePrimaryRecovery(0); err == nil {
+	if err := m.ForcePrimaryRecovery(0, "manual-operator-16016"); err == nil {
 		t.Fatal("force-primary recovery was accepted without recovery hold")
 	}
 }
@@ -643,10 +644,473 @@ func TestForcePrimaryRecoveryBlockedByKernelUpgradeHold16016(t *testing.T) {
 	m.mu.Lock()
 	m.kernelUpgradeHold = true
 	m.mu.Unlock()
-	if err := m.ForcePrimaryRecovery(0); err == nil {
+	if err := m.ForcePrimaryRecovery(0, "manual-operator-16016"); err == nil {
 		t.Fatal("force-primary recovery overrode the kernel-upgrade hold")
 	}
 	if m.IsLocalPrimary(0) {
 		t.Fatal("kernel-upgrade hold left the RG primary")
+	}
+}
+func setupBareAuthorityManager16016(t *testing.T) (*Manager, *authorityClock16016, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "unkeyed-authority-grace")
+	clock := &authorityClock16016{
+		wall: time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC),
+		mono: int64(time.Second),
+	}
+	oldGrace := unkeyedAuthorityGrace
+	unkeyedAuthorityGrace = 72 * time.Hour
+	t.Cleanup(func() { unkeyedAuthorityGrace = oldGrace })
+	restoreFabric := SetFabricAuthGraceStatePathForTesting(filepath.Join(t.TempDir(), "fabric-auth-grace"))
+	t.Cleanup(restoreFabric)
+	restoreEpoch := SetPeerEpochStatePathForTesting(filepath.Join(t.TempDir(), "peer-epoch"))
+	t.Cleanup(restoreEpoch)
+	restorePath := SetUnkeyedAuthorityGraceStatePathForTesting(path)
+	t.Cleanup(restorePath)
+	restoreClock := SetUnkeyedAuthorityClocksForTesting(clock.wallNow, clock.monoNow)
+	t.Cleanup(restoreClock)
+	return NewManager(0, 1), clock, path
+}
+
+func TestUnkeyedGraceFabricOnlyTransportAnchorsAndExpires16016(t *testing.T) {
+	m, clock, path := setupBareAuthorityManager16016(t)
+	cfg := &config.ClusterConfig{
+		FabricInterface:   "fab0",
+		FabricPeerAddress: "192.0.2.2",
+	}
+	m.UpdateConfig(cfg)
+	expiry := m.UnkeyedGraceExpiry()
+	if expiry.IsZero() || !expiry.Equal(clock.wallNow().Add(unkeyedAuthorityGrace)) {
+		t.Fatalf("fabric-only zero-RG expiry = %s, want %s", expiry, clock.wallNow().Add(unkeyedAuthorityGrace))
+	}
+	if len(m.GroupStates()) != 0 {
+		t.Fatalf("fabric-only zero-RG config created groups: %+v", m.GroupStates())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("fabric-only config did not persist a grace anchor: %v", err)
+	}
+
+	// The pre-listener belt sees the same compiled transport fields and
+	// restores, rather than moving, the persisted cutoff.
+	bootManager := NewManager(0, 1)
+	bootManager.StampUnkeyedAuthorityAnchor(cfg)
+	if got := bootManager.UnkeyedGraceExpiry(); !got.Equal(expiry) {
+		t.Fatalf("fabric-only boot belt expiry = %s, want original %s", got, expiry)
+	}
+	clock.advance(73 * time.Hour)
+	if !bootManager.UnkeyedAuthorityExpired() {
+		t.Fatal("fabric-only zero-RG cluster remained unexpired beyond 72h")
+	}
+
+	ss := NewSessionSync(":0", "192.0.2.2:4785", nil)
+	ss.SetAuthProvider(bootManager)
+	local, peer := net.Pipe()
+	defer local.Close()
+	defer peer.Close()
+	ss.writeMu.Lock()
+	err := ss.writeFrameLocked(local, syncMsgHeartbeat, nil, nil)
+	ss.writeMu.Unlock()
+	if err == nil || err != errUnkeyedAuthorityGraceEnded {
+		t.Fatalf("post-grace fabric-only direct frame write error = %v, want %v", err, errUnkeyedAuthorityGraceEnded)
+	}
+}
+
+func TestPeerKeyTransitionsPreserveOriginalUnkeyedCutoff16016(t *testing.T) {
+	m, clock, path := setupAuthorityManager16016(t)
+	firstExpiry := m.UnkeyedGraceExpiry()
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keyed := &config.ClusterConfig{
+		ControlInterface:  "em0",
+		ControlLinkAuthKey: config.NewSecret("peer-key-16016"),
+	}
+	m.UpdateConfigFromPeer(keyed)
+	if !m.ControlLinkAuthConfigured() {
+		t.Fatal("peer first-key config did not install the accepted key")
+	}
+	if m.RecoveryHoldActive() {
+		t.Fatal("peer first-key config armed a local expired-to-keyed recovery hold")
+	}
+	keyless := &config.ClusterConfig{ControlInterface: "em0"}
+	m.UpdateConfigFromPeer(keyless)
+	if m.ControlLinkAuthConfigured() {
+		t.Fatal("peer key-clear config did not remove the accepted key")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("peer key/clear sequence changed the local grace record: before=%q after=%q", before, after)
+	}
+	if got := m.UnkeyedGraceExpiry(); !got.Equal(firstExpiry) {
+		t.Fatalf("peer key/clear sequence moved cutoff to %s, want %s", got, firstExpiry)
+	}
+	clock.advance(73 * time.Hour)
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("peer key-clear reopened an expired original grace window")
+	}
+}
+
+func TestUnkeyedGraceSweepRatchetsHighWaterWithoutConfigTouch16016(t *testing.T) {
+	m, clock, path := setupAuthorityManager16016(t)
+	earliest := clock.wallNow()
+	expiry := m.UnkeyedGraceExpiry()
+
+	clock.setWall(earliest.Add(48 * time.Hour))
+	// No UpdateConfig or comms restart: the existing one-second sweep is the
+	// only owner that observes and persists this wall-clock progress.
+	m.checkUnkeyedGraceNotices()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version string
+	var savedEarliest, highWater int64
+	if _, err := fmt.Sscanf(string(data), "%s %d %d", &version, &savedEarliest, &highWater); err != nil {
+		t.Fatalf("parse grace record %q: %v", data, err)
+	}
+	if version != "v1" || time.Unix(0, savedEarliest).UTC() != earliest ||
+		time.Unix(0, highWater).UTC() != earliest.Add(48*time.Hour) {
+		t.Fatalf("sweep record = %q, want earliest=%s high-water=%s", data, earliest, earliest.Add(48*time.Hour))
+	}
+
+	clock.setWall(earliest.Add(time.Hour))
+	clock.setMono(int64(time.Second))
+	restarted := NewManager(0, 1)
+	restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+	if got := restarted.UnkeyedGraceExpiry(); !got.Equal(expiry) {
+		t.Fatalf("rollback restart moved cutoff to %s, want %s", got, expiry)
+	}
+	if restarted.UnkeyedAuthorityExpired() {
+		t.Fatal("high-water ratchet caused early expiry after rollback")
+	}
+	clock.advance(24*time.Hour - time.Nanosecond)
+	if restarted.UnkeyedAuthorityExpired() {
+		t.Fatal("rollback restart refunded or shortened the remaining 24-hour budget")
+	}
+	clock.advance(time.Nanosecond)
+	if !restarted.UnkeyedAuthorityExpired() {
+		t.Fatal("rollback restart extended the original cutoff")
+	}
+
+	// Expiry itself persists the cutoff as the high-water, so another routine
+	// restart remains expired rather than opening a third window.
+	clock.setWall(earliest.Add(25 * time.Hour))
+	clock.setMono(int64(time.Second))
+	restartedAgain := NewManager(0, 1)
+	restartedAgain.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+	if !restartedAgain.UnkeyedAuthorityExpired() {
+		t.Fatal("repeated rollback restart reopened an expired grace window")
+	}
+}
+
+func TestUnkeyedGraceKeyedSweepPreservesCutoffAcrossRestart16016(t *testing.T) {
+	m, clock, path := setupAuthorityManager16016(t)
+	earliest := clock.wallNow()
+	expiry := m.UnkeyedGraceExpiry()
+	m.UpdateConfigFromPeer(&config.ClusterConfig{
+		ControlInterface:   "em0",
+		ControlLinkAuthKey: config.NewSecret("peer-key-16016"),
+	})
+	clock.setWall(earliest.Add(48 * time.Hour))
+	m.checkUnkeyedGraceNotices()
+	m.UpdateConfigFromPeer(&config.ClusterConfig{ControlInterface: "em0"})
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version string
+	var savedEarliest, highWater int64
+	if _, err := fmt.Sscanf(string(data), "%s %d %d", &version, &savedEarliest, &highWater); err != nil {
+		t.Fatalf("parse keyed grace record %q: %v", data, err)
+	}
+	if time.Unix(0, highWater).UTC() != earliest.Add(48*time.Hour) {
+		t.Fatalf("keyed sweep high-water = %s, want %s", time.Unix(0, highWater).UTC(), earliest.Add(48*time.Hour))
+	}
+	clock.setWall(earliest.Add(time.Hour))
+	clock.setMono(int64(time.Second))
+	restarted := NewManager(0, 1)
+	restarted.UpdateConfigFromBoot(&config.ClusterConfig{ControlInterface: "em0"})
+	if got := restarted.UnkeyedGraceExpiry(); !got.Equal(expiry) {
+		t.Fatalf("keyed-period rollback restart expiry = %s, want original %s", got, expiry)
+	}
+	clock.advance(24 * time.Hour)
+	if !restarted.UnkeyedAuthorityExpired() {
+		t.Fatal("keyed-period high-water progress was refundable after restart")
+	}
+}
+func TestForcePrimaryRecoveryPinSurvivesNonPrimaryProof16016(t *testing.T) {
+	m, clock, _ := setupAuthorityManager16016(t)
+	m.UpdateConfig(groupConfig16016())
+	m.mu.Lock()
+	m.groups[0].State = StateSecondary
+	m.mu.Unlock()
+	clock.advance(73 * time.Hour)
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("test setup did not expire unkeyed grace")
+	}
+	m.UpdateConfig(&config.ClusterConfig{
+		ControlInterface: "em0", RedundancyGroups: groupConfig16016().RedundancyGroups,
+		ControlLinkAuthKey: config.NewSecret("force-key-16016"),
+	})
+	if err := m.ForcePrimaryRecovery(0, "manual-operator-16016"); err != nil {
+		t.Fatalf("ForcePrimaryRecovery: %v", err)
+	}
+	m.mu.Lock()
+	m.peerGroups[0] = PeerGroupState{GroupID: 0, State: StateSecondary}
+	m.peerAlive = false
+	m.mu.Unlock()
+	m.publishFreshHeartbeatProof()
+	m.mu.RLock()
+	pinned := m.groups[0].forcedPrimary
+	localPrimary := m.groups[0].State == StatePrimary
+	m.mu.RUnlock()
+	if m.RecoveryHoldActive() || !pinned || !localPrimary {
+		t.Fatalf("non-primary proof released pin incorrectly: hold=%v pinned=%v localPrimary=%v",
+			m.RecoveryHoldActive(), pinned, localPrimary)
+	}
+}
+
+func TestUnkeyedGraceNoticeLadderEscalates16016(t *testing.T) {
+	m, clock, _ := setupBareAuthorityManager16016(t)
+	type notice struct {
+		rung   string
+		raised bool
+		expiry time.Time
+	}
+	notices := make(chan notice, 8)
+	m.SetUnkeyedGraceAlarmHook(func(rung string, raised bool, expiry time.Time) {
+		notices <- notice{rung: rung, raised: raised, expiry: expiry}
+	})
+	m.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+	expiry := m.UnkeyedGraceExpiry()
+	expect := func(rung string, raised bool) {
+		t.Helper()
+		select {
+		case got := <-notices:
+			if got.rung != rung || got.raised != raised || !got.expiry.Equal(expiry) {
+				t.Fatalf("notice = %+v, want rung=%q raised=%v expiry=%s", got, rung, raised, expiry)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("missing %q notice", rung)
+		}
+	}
+	expect("stamped", true)
+	for _, tc := range []struct {
+		advance time.Duration
+		rung    string
+	}{
+		{48 * time.Hour, "t-24h"},
+		{23 * time.Hour, "t-1h"},
+		{time.Hour, "expired"},
+		{24 * time.Hour, "daily-expired"},
+	} {
+		clock.advance(tc.advance)
+		m.checkUnkeyedGraceNotices()
+		expect(tc.rung, true)
+	}
+	m.checkUnkeyedGraceNotices()
+	select {
+	case extra := <-notices:
+		t.Fatalf("duplicate notice after ladder completed: %+v", extra)
+	default:
+	}
+}
+
+func TestUnkeyedGraceRoutineRestartStaysExpired16016(t *testing.T) {
+	m, clock, _ := setupAuthorityManager16016(t)
+	cutoff := m.UnkeyedGraceExpiry()
+	clock.advance(73 * time.Hour)
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("grace did not expire")
+	}
+	clock.setWall(time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC))
+	clock.setMono(int64(time.Second))
+	restarted := NewManager(0, 1)
+	restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+	if !restarted.UnkeyedAuthorityExpired() {
+		t.Fatal("routine restart reopened expired grace")
+	}
+	if got := restarted.UnkeyedGraceExpiry(); !got.Equal(cutoff) {
+		t.Fatalf("routine restart moved cutoff to %s, want %s", got, cutoff)
+	}
+}
+
+func TestWrongRTCClockInstaExpiryHoldsAndAlarms16016(t *testing.T) {
+	m, clock, _ := setupAuthorityManager16016(t)
+	cutoff := m.UnkeyedGraceExpiry()
+	clock.setWall(cutoff.Add(time.Hour))
+	clock.setMono(int64(time.Second))
+	restarted := NewManager(0, 1)
+	notices := make(chan notice16016, 4)
+	restarted.SetUnkeyedGraceAlarmHook(func(rung string, raised bool, expiry time.Time) {
+		notices <- notice16016{rung: rung, raised: raised, expiry: expiry}
+	})
+	restarted.UpdateConfig(groupConfig16016())
+	if !restarted.UnkeyedAuthorityExpired() {
+		t.Fatal("forward RTC step did not expire the persisted cutoff at boot")
+	}
+	restarted.mu.RLock()
+	held := restarted.electionHoldActiveLocked()
+	restarted.mu.RUnlock()
+	if !held {
+		t.Fatal("expired RTC posture did not suppress election")
+	}
+	select {
+	case got := <-notices:
+		if got.rung != "expired" || !got.raised || !got.expiry.Equal(cutoff) {
+			t.Fatalf("expiry alarm = %+v, want expired raise at %s", got, cutoff)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("forward RTC expiry did not raise an alarm")
+	}
+	if got := restarted.UnkeyedGraceExpiry(); !got.Equal(cutoff) {
+		t.Fatalf("forward RTC step re-anchored cutoff to %s, want %s", got, cutoff)
+	}
+}
+
+type notice16016 struct {
+	rung   string
+	raised bool
+	expiry time.Time
+}
+
+func TestUnkeyedGraceCorruptAnchorFailsClosed16016(t *testing.T) {
+	_, clock, path := setupAuthorityManager16016(t)
+	if err := os.WriteFile(path, []byte("corrupt unkeyed authority anchor\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clock.setMono(int64(time.Second))
+	restarted := NewManager(0, 1)
+	notices := make(chan notice16016, 4)
+	restarted.SetUnkeyedGraceAlarmHook(func(rung string, raised bool, expiry time.Time) {
+		notices <- notice16016{rung: rung, raised: raised, expiry: expiry}
+	})
+	restarted.UpdateConfig(groupConfig16016())
+	if !restarted.UnkeyedGraceAnchorCorrupt() || !restarted.UnkeyedAuthorityExpired() {
+		t.Fatal("corrupt persisted anchor did not fail closed at boot")
+	}
+	select {
+	case got := <-notices:
+		if got.rung != "expired" || !got.raised {
+			t.Fatalf("corrupt-anchor alarm = %+v, want expired raise", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("corrupt anchor did not raise an expiry alarm")
+	}
+}
+
+func TestUnkeyedGraceRestartRequiresExpiredUnkeyedPosture16016(t *testing.T) {
+	m, clock, _ := setupAuthorityManager16016(t)
+	if _, err := m.RestartUnkeyedAuthorityGrace("operator-16016"); err == nil {
+		t.Fatal("operator re-armed an active grace window")
+	}
+	clock.advance(73 * time.Hour)
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("grace did not expire")
+	}
+	m.UpdateConfig(&config.ClusterConfig{
+		ControlInterface: "em0", ControlLinkAuthKey: config.NewSecret("key-16016"),
+	})
+	if _, err := m.RestartUnkeyedAuthorityGrace("operator-16016"); err == nil {
+		t.Fatal("operator re-armed grace while keyed")
+	}
+}
+
+func TestUnkeyedGraceRestartIsAuditedAndPersistsFreshCutoff16016(t *testing.T) {
+	m, clock, path := setupAuthorityManager16016(t)
+	clock.advance(73 * time.Hour)
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("grace did not expire")
+	}
+	var auditAction, auditOperator, auditReason string
+	var auditRG, auditNode int
+	var auditAt time.Time
+	m.SetUnkeyedRecoveryAuditHook(func(action, operator string, rgID, nodeID int, at time.Time, reason string) {
+		auditAction, auditOperator, auditRG, auditNode, auditAt, auditReason =
+			action, operator, rgID, nodeID, at, reason
+	})
+	expiry, err := m.RestartUnkeyedAuthorityGrace("rtc-operator-16016")
+	if err != nil {
+		t.Fatalf("RestartUnkeyedAuthorityGrace: %v", err)
+	}
+	now := clock.wallNow()
+	if !expiry.Equal(now.Add(72 * time.Hour)) || m.UnkeyedAuthorityExpired() {
+		t.Fatalf("re-armed expiry=%s expired=%v, want %s and active",
+			expiry, m.UnkeyedAuthorityExpired(), now.Add(72*time.Hour))
+	}
+	if auditAction != "unkeyed-grace-restart" || auditOperator != "rtc-operator-16016" ||
+		auditRG != -1 || auditNode != m.NodeID() || !auditAt.Equal(now) ||
+		!strings.Contains(auditReason, "clock step") {
+		t.Fatalf("re-arm audit = action=%q operator=%q rg=%d node=%d at=%s reason=%q",
+			auditAction, auditOperator, auditRG, auditNode, auditAt, auditReason)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version string
+	var earliest, highWater int64
+	if _, err := fmt.Sscanf(string(data), "%s %d %d", &version, &earliest, &highWater); err != nil {
+		t.Fatalf("parse re-armed anchor %q: %v", data, err)
+	}
+	if version != "v1" || time.Unix(0, earliest).UTC() != now ||
+		time.Unix(0, highWater).UTC() != now {
+		t.Fatalf("re-armed anchor = %q, want fresh earliest/high-water %s", data, now)
+	}
+}
+func TestLocalKeyThenPeerClearFailsClosedAcrossRestart16016(t *testing.T) {
+	m, clock, path := setupAuthorityManager16016(t)
+	m.UpdateConfig(&config.ClusterConfig{
+		ControlInterface: "em0", ControlLinkAuthKey: config.NewSecret("local-key-16016"),
+	})
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("local key commit did not delete the old grace anchor: %v", err)
+	}
+	m.UpdateConfigFromPeer(&config.ClusterConfig{ControlInterface: "em0"})
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("peer key-clear without a surviving local cutoff reopened unkeyed authority")
+	}
+	now := clock.wallNow()
+	if got := m.UnkeyedGraceExpiry(); !got.Equal(now) {
+		t.Fatalf("peer key-clear cutoff=%s, want fail-closed cutoff %s", got, now)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("peer key-clear did not persist its fail-closed cutoff: %v", err)
+	}
+
+	clock.setMono(int64(time.Second))
+	restarted := NewManager(0, 1)
+	restarted.UpdateConfigFromBoot(&config.ClusterConfig{ControlInterface: "em0"})
+	if !restarted.UnkeyedAuthorityExpired() {
+		t.Fatal("restart reopened the peer-cleared cluster without a local re-arm")
+	}
+	if got := restarted.UnkeyedGraceExpiry(); !got.Equal(now) {
+		t.Fatalf("restart moved fail-closed cutoff to %s, want %s", got, now)
+	}
+}
+func TestBootKeyedPeerClearWithoutAnchorStaysExpired16016(t *testing.T) {
+	m, clock, path := setupAuthorityManager16016(t)
+	m.UpdateConfig(&config.ClusterConfig{
+		ControlInterface: "em0", ControlLinkAuthKey: config.NewSecret("local-key-16016"),
+	})
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("local key commit did not delete the old grace anchor: %v", err)
+	}
+	clock.setMono(int64(time.Second))
+	keyedRestart := NewManager(0, 1)
+	keyedRestart.UpdateConfigFromBoot(&config.ClusterConfig{
+		ControlInterface: "em0", ControlLinkAuthKey: config.NewSecret("local-key-16016"),
+	})
+	keyedRestart.UpdateConfigFromPeer(&config.ClusterConfig{ControlInterface: "em0"})
+	if !keyedRestart.UnkeyedAuthorityExpired() {
+		t.Fatal("peer key-clear after keyed boot opened fresh unkeyed authority")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("keyed-boot peer clear did not persist its expired cutoff: %v", err)
 	}
 }

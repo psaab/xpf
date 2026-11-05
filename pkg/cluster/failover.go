@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -324,6 +323,10 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 // cleared and before the hold is written, so it sees the RG as it was.
 func (m *Manager) manualFailoverWith(rgID int, admit func(rg *RedundancyGroupState, now time.Time) error, beforeHold func(rg *RedundancyGroupState)) (FailoverOutcome, error) {
 	m.mu.Lock()
+	if m.UnkeyedAuthorityExpired() {
+		m.mu.Unlock()
+		return FailoverApplied, fmt.Errorf("%s", unkeyedAuthorityExpiredReason)
+	}
 	if admit != nil {
 		if rg, ok := m.groups[rgID]; ok {
 			if err := admit(rg, time.Now()); err != nil {
@@ -382,6 +385,13 @@ func (m *Manager) manualFailoverWith(rgID int, admit func(rg *RedundancyGroupSta
 		if err := admit(rg, time.Now()); err != nil {
 			return FailoverApplied, err
 		}
+	}
+	// M5 (#16016): recheck unkeyed grace at the locked mutation point,
+	// after the pre-hook barrier. The wrapper's early refusal cannot see
+	// expiry that lands while the barrier waits; keyed nodes never expire
+	// here, and force-primary is a separate path.
+	if m.UnkeyedAuthorityExpired() {
+		return FailoverApplied, fmt.Errorf("%s", unkeyedAuthorityExpiredReason)
 	}
 	oldState := rg.State
 	if beforeHold != nil {
@@ -499,9 +509,13 @@ func (m *Manager) ForceSecondary() error {
 // stranded by the #16016 recovery hold. It can promote exactly one enabled
 // redundancy group, only during expired->keyed recovery; it is not a general
 // ManualFailover mode and must never be reachable over session sync or gRPC.
-func (m *Manager) ForcePrimaryRecovery(rgID int) error {
+func (m *Manager) ForcePrimaryRecovery(rgID int, operator string) error {
 	if m == nil {
 		return fmt.Errorf("cluster not configured")
+	}
+	operator = strings.TrimSpace(operator)
+	if operator == "" {
+		return fmt.Errorf("force-primary recovery requires a local operator identity")
 	}
 	if m.UnkeyedAuthorityExpired() {
 		return fmt.Errorf("cannot force primary while unkeyed authority grace is expired; key this node first (#16016)")
@@ -538,7 +552,7 @@ func (m *Manager) ForcePrimaryRecovery(rgID int) error {
 		return nil
 	}
 	now := time.Now().UTC()
-	operator := fmt.Sprintf("uid:%d", os.Geteuid())
+	reason := "peer has not produced a fresh authenticated heartbeat proof"
 	oldState := rg.State
 	rg.forcedPrimary = true
 	rg.State = StatePrimary
@@ -549,12 +563,12 @@ func (m *Manager) ForcePrimaryRecovery(rgID int) error {
 	m.noteOperatorFailoverLocked(rgID)
 	slog.Warn("cluster: local force-primary recovery override (#16016)",
 		"operator", operator, "node", m.nodeID, "time", now.Format(time.RFC3339Nano),
-		"rg", rgID, "reason", "peer has not produced a fresh authenticated heartbeat proof")
+		"rg", rgID, "reason", reason)
 	hook := m.unkeyedRecoveryAuditHook()
+	nodeID := m.nodeID
 	m.mu.Unlock()
 	if hook != nil {
-		hook("force-primary", rgID, m.nodeID, now,
-			"peer has not produced a fresh authenticated heartbeat proof")
+		hook("force-primary", operator, rgID, nodeID, now, reason)
 	}
 	return nil
 }
@@ -1537,6 +1551,10 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 	}
 
 	m.mu.Lock()
+	if m.UnkeyedAuthorityExpired() {
+		m.mu.Unlock()
+		return res, fmt.Errorf("%s", unkeyedAuthorityExpiredReason)
+	}
 	resv, rerr := m.reserveLocked(ids, nil, false, false)
 	if rerr != nil {
 		m.mu.Unlock()
@@ -1579,6 +1597,11 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 	}
 
 	now := time.Now()
+	// M5 (#16016): same locked recheck as the single-RG path, before any
+	// member is mutated or reported applied.
+	if m.UnkeyedAuthorityExpired() {
+		return res, fmt.Errorf("%s", unkeyedAuthorityExpiredReason)
+	}
 	for _, rgID := range ids {
 		rg := m.groups[rgID]
 		if supersededSet[rgID] {

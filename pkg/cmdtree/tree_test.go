@@ -189,3 +189,31 @@ func TestCompleteFromTree_ShowClassOfServiceDynamicNames(t *testing.T) {
 		t.Fatalf("expected configured scheduler-map name, got %v", cands)
 	}
 }
+
+func TestRequestClusterLocalRecoveryCommandsCompleteAndCanonicalize16016(t *testing.T) {
+	clusterPath := []string{"request", "chassis", "cluster"}
+	clusterCommands := CompleteFromTree(OperationalTree, clusterPath, "", nil)
+	if !contains(clusterCommands, "unkeyed-grace") {
+		t.Fatalf("request chassis cluster completions = %v, missing unkeyed-grace", clusterCommands)
+	}
+	graceCommands := CompleteFromTree(OperationalTree,
+		[]string{"request", "chassis", "cluster", "unkeyed-grace"}, "", nil)
+	if !contains(graceCommands, "restart") {
+		t.Fatalf("unkeyed-grace completions = %v, missing restart", graceCommands)
+	}
+	failoverCommands := CompleteFromTree(OperationalTree,
+		[]string{"request", "chassis", "cluster", "failover"}, "", nil)
+	if !contains(failoverCommands, "force-primary") {
+		t.Fatalf("cluster failover completions = %v, missing force-primary", failoverCommands)
+	}
+
+	for _, command := range [][]string{
+		{"request", "chassis", "cluster", "unkeyed-grace", "restart"},
+		{"request", "chassis", "cluster", "failover", "force-primary",
+			"redundancy-group", "1", "override", "unkeyed-recovery"},
+	} {
+		if _, result := Canonicalize(OperationalTree, command); result != CanonicalOK {
+			t.Errorf("Canonicalize(%v) result = %v, want CanonicalOK", command, result)
+		}
+	}
+}
