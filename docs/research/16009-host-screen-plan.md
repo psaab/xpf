@@ -37,8 +37,8 @@ Only LAND is replicated at the shim: the outlined `land_gate`
 `:1721-1723`, host-compiled predicate `userspace-xdp/src/land.rs`
 (`is_land` `:46-48`, `land_disposition` `:71-80`: unresolved zone → Drop).
 
-Terminal host-bound (destination-qualified) kernel-pass arms, all verified
-at `6c27f54cf2`:
+The 11 parsed-IP terminal kernel-pass arms included in the gate, all
+verified at `6c27f54cf2`:
 
 | Arm | Anchor / insertion point for `host_screen_gate` |
 |---|---|
@@ -53,6 +53,11 @@ at `6c27f54cf2`:
 | GRE-inner `PASS_TO_KERNEL` | `lib.rs:1155-1175`; after typed predicate succeeds, before trace/counters / return `:1174` |
 | binding-not-ready degraded local/control | `binding_ready_slot` call `:854`; after `is_degraded_local_or_control` returns true, before `pass_local_control` `:891-894` |
 | ctrl-disabled local/control | `degraded_ctrl_disabled_action` `lib.rs:1671`; after `PassLocalControl` disposition, before branch counter / `pass_local_control` `:1726-1728` |
+
+Two earlier CPUMAP returns are deliberately outside this gate: L2 parse
+failure (`lib.rs:636-638`) and non-adjudicated ingress (`:714-717`) occur
+before a `ParsedPacket` exists, so neither has the scratch word or raw-zone
+context required here.
 
 The `land_gate` call sites (`lib.rs:791-794`, ctrl-disabled `:1721-1723`)
 remain exactly where they are. Do NOT put `host_screen_gate` beside
@@ -79,10 +84,11 @@ PerCpuArray sized by that MAX (`lib.rs:578-579`); Go mirror
 
 ## 2. The decision: narrow scope (option 1)
 
-**Chosen: option (1) — narrow #16009 to the worker-equivalent, per-packet
-stateless screen predicates on raw ingress state, plus one aggregate shim
-drop/alarm counter.** Also include the worker's screen-state-gated IPv4
-malformed-options and duplicate non-atomic IPv6-fragment parse errors.
+**Chosen: option (1) — narrow #16009 to worker stateless predicates on
+raw ingress state where required fields are actually available, with the
+explicit conservative capture-short divergence in C22, plus one aggregate
+shim drop/alarm counter.** Also include the worker's screen-state-gated
+IPv4 malformed-options and duplicate non-atomic IPv6-fragment parse errors.
 This does not include cross-packet state or per-reason observability. The
 early-filter multicast/limited-broadcast arm is an explicit policy
 extension, not worker parity: the worker does not run malformed screens
@@ -279,11 +285,12 @@ present, extractor errors are fail-closed before profile-mask or alarm
 evaluation:
 
 - IPv4 malformed TLVs return `ScreenParseError::TruncatedIpv4Header`
-  (`screen/extract.rs:224-241,258-299`), including a malformed option
-  before a later LSRR/SSRR. The worker drops this even when
-  `source_route` is disabled. The shim MUST carry a separate malformed-v4
-  bit and gate it on row presence; a source-route sighting bit alone is
-  insufficient.
+  (`screen/extract.rs:224-241,258-299`), including malformed TLVs both
+  before and after a valid LSRR/SSRR. In either order the worker returns
+  an extraction error, not a `ScreenPacketInfo` with a normal
+  source-route verdict, and drops even when `source_route` is disabled.
+  The shim MUST carry a separate malformed-v4 bit and gate it on row
+  presence; a source-route sighting bit alone is insufficient.
 - A second readable non-atomic IPv6 Fragment header returns
   `MultipleIpv6FragmentHeaders` (`extract.rs:357-365`); mirror it with
   the independent scratch bit from §4.2 and the same row-presence rule.
@@ -430,25 +437,39 @@ all-ones sentinel when `get_ptr_mut` returned no writable slot.
   bounded TLV walker in `ipv4_len_gate.rs`. It must produce both
   `saw_source_route` (LSRR 131 / SSRR 137) and `malformed_options`:
   missing length byte, length `< 2`, overrun, or LSRR/SSRR length `< 3`.
-  Do not early-return as a normal parse failure for this screen error;
-  preserve the distinct scratch bit so row presence controls the
-  disposition like the worker.
+  If any option is malformed, suppress the ordinary source-route sighting:
+  worker extraction returns `Err(TruncatedIpv4Header)` even when a valid
+  LSRR/SSRR preceded a malformed TLV, so no ordinary screen verdict runs.
+  Preserve the distinct malformed scratch bit; screen-state row presence
+  controls its disposition as specified in §5.5.
 - **TCP, in BOTH parser paths:** after `first_fragment_l4` or `parse_l4`
-  has supplied protocol, flags, and destination port, compute the
-  independent SYN+FIN, no-flag, FIN-without-ACK, WinNuke, and SYN-first-
-  fragment trip bits. The IPv4 first-fragment branch is at
+  has supplied validated protocol, flags, and destination port, compute the
+  independent SYN+FIN, no-flag, FIN-without-ACK, WinNuke, and known
+  SYN-first-fragment trip bits. The IPv4 first-fragment branch is at
   `lib.rs:2336-2347` (`first_fragment_l4` implementation `:2809-2835`);
-  the normal branch uses `parse_l4`. Computing only inside `parse_l4`
-  misses the first-fragment branch. Do not add packet reads for already
-  available locals.
-- **IPv4 tiny flags:** `first_fragment_l4` uses capture-clamped
-  `l4_end = min(declared_end, data_end)` (`lib.rs:2296,2353-2355`) for
-  safe reads, but the `tcp_flags_unknown` verdict must use the IP-
-  declared end, `l3_offset + total_len`, compared with `tcp_offset + 14`.
-  The worker uses declared length only (`screen/extract.rs:419-428`).
-  Thus a short capture with a lying-long `total_len` is NOT the tiny
-  declared-length error; C22 pins that distinction. Capture bounds still
-  guard every actual byte read.
+  the normal branch uses `parse_l4`. The common safe convergence point is
+  after `lib.rs:2355`, before `ParsedPacket` construction at `:2362`.
+  Use the actual wire TCP protocol (`iph[9]`), not placeholder tuple
+  fields; non-first fragments, sentinel fallback, and capture-unknown
+  flags must produce no ordinary TCP trips. Do not add packet reads for
+  already available locals.
+- **IPv4 tiny flags:** preserve two distinct facts. The worker's tiny
+  extraction error uses the IP-declared end,
+  `l3_offset + total_len < tcp_offset + 14`
+  (`screen/extract.rs:419-428`); set `tiny_declared_unknown` from that
+  condition, independently of capture length. `first_fragment_l4` uses
+  capture-clamped `l4_end = min(declared_end, data_end)`
+  (`lib.rs:2296,2353-2355`) for safe reads; set
+  `tcp_flags_capture_unknown` when the flags byte was not actually read.
+  Suppress all ordinary TCP trips when that capture-unknown bit is set,
+  rather than treating placeholder zero flags as a real no-flag packet.
+  Thus short capture with a lying-long `total_len` is not the worker tiny
+  error, but remains capture-unknown. In C22 the worker returns `Ok` with
+  caller-stamped flags 0 (`extract.rs:423-442`): `{no_flag}` alone drops
+  `tcp-no-flag`, while `{syn_frag}` alone passes. The shim safely
+  suppresses ordinary flag trips and passes both profiles; this bounded
+  divergence is explicit, not a parity claim. Capture bounds still guard
+  every actual byte read.
 - **IPv6** (`parse_ipv6`, `lib.rs:2388-2523`; `walk_ipv6_ext_headers`,
   `ipv6_ext_walk.rs:273-368`): initialize scratch before the walk and
   write fragment/Routing-header sightings from already-validated locals:
@@ -460,11 +481,13 @@ all-ones sentinel when `get_ptr_mut` returned no writable slot.
   through `ExtWalk`.
 - **No IPv6 tiny-flags finalization:** current `parse_ipv6` / `parse_l4`
   rejects declared-short or captured-short TCP headers before the host
-  gate (`lib.rs:2467-2482`). Keep that existing parse-fail behavior; do
-  not synthesize a v6 `host_screen_drop` bit. The worker's
+  gate (`lib.rs:2467-2482`). It returns `None` before constructing
+  `ParsedPacket`; even if `parse_l4` can read Ethernet padding, the
+  declared-end check rejects that parse. Keep the existing `L3 PARSE_FAIL`;
+  do not synthesize a v6 `host_screen_drop` bit. The worker's
   `ip_payload_len == 0` / `usize::MAX` tiny-check sentinel remains in the
   host-extractor oracle (`extract.rs:421-435`), but C18/C19 only pin the
-  shim's earlier `L3 PARSE_FAIL`, not v6 screen parity.
+  shim's earlier parse failure, not v6 screen parity.
 
 All parser changes remain scratch-only. `ParsedPacket` and `ExtWalk`
 definitions stay byte-for-byte unchanged; `MAX_EXT_HDRS`, walk
@@ -478,7 +501,7 @@ The parser-to-gate scratch word remains one `u64`:
 bits  0     is_fragment
       1     is_first_fragment
       2     more (IPv4 MF / IPv6 M)
-      3     tcp_flags_unknown (IPv4 declared-length rule only)
+      3     tiny_declared_unknown (IPv4; IP-declared-end rule)
       4     saw_source_route (v4 LSRR/SSRR or v6 RH0/RH1)
       5     is_ipv6
       6     wire_is_icmp (wire protocol ∈ {1, 58})
@@ -489,7 +512,8 @@ bits  0     is_fragment
      11     tcp_trip_winnuke
      12     malformed_ipv4_options
      13     multiple_ipv6_non_atomic
- 14-15     reserved
+     14     tcp_flags_capture_unknown (actual capture lacks flags byte)
+     15     reserved
  16-31     frag_offset_bytes (v4: (raw & 0x1FFF)<<3; v6: raw & 0xFFF8)
  32-47     frag_data_len (v4: total_len − ihl*4; v6: payload_len − frag_data_off)
  48-63     pod_extent (v4: total_len; v6: frag_data_len)
@@ -532,13 +556,14 @@ Add the one outlined gate in `userspace-xdp/src/lib.rs`, beside
    never treat a missing word as clean or reuse stale data. A packet with
    no fragment/source-route/TCP trip and no parse-error bit returns Pass
    after this one opaque map read.
-2. For `tcp_flags_unknown && is_first_fragment`,
+2. For `tiny_declared_unknown && is_first_fragment`,
    `malformed_ipv4_options`, or `multiple_ipv6_non_atomic`, resolve the
    raw ingress zone and inspect the screen row. Row present means
    immediate `host_screen_drop`, independent of ordinary mask and alarm;
    absent row or unresolved zone means no special parse-error verdict.
-   The v6 tiny case never reaches this gate; it remains `L3 PARSE_FAIL`
-   (§4.3/C18).
+   `tcp_flags_capture_unknown` is not this worker parse error: it suppresses
+   ordinary TCP trip creation only. The v6 tiny case never reaches this
+   gate; it remains `L3 PARSE_FAIL` (§4.3/C18).
 3. Build independent ordinary trip bits: POD, teardrop, ICMP-fragment,
    known-flags SYN-frag, source-route, SYN+FIN, no-flag, FIN-without-ACK,
    and WinNuke. If none tripped, return Pass.
@@ -642,28 +667,42 @@ const USERSPACE_FALLBACK_REASON_HOST_SCREEN_ALARM: u32 = 22;
 const USERSPACE_FALLBACK_REASON_MAX: u32 = 23;
 ```
 
-Update every mirror in one change:
+Exactly three production degraded-reason tables require updating: shim
+constants, Go `degradedPathReasonNames`, and Rust
+`DEGRADED_PATH_REASON_NAMES`. Update them in one change:
 
-- `userspace-xdp/src/lib.rs`: constants above and the fallback stats map
-  capacity.
+- `userspace-xdp/src/lib.rs`: append constants 21/22 and size the
+  reason-only `USERSPACE_FALLBACK_STATS` `PerCpuArray` to 23. Regenerate
+  the BPF object; an old 21-entry object cannot emit either new index.
 - `pkg/dataplane/userspace/maps_sync.go`: `degradedPathReasonNames`
   becomes `[23]string`, with indices 21/22 named
   `host_screen_drop`/`host_screen_alarm`; keep the reader bounded by
   `len(...)`.
 - `userspace-dp/src/afxdp/bpf_map/pin.rs`:
   `DEGRADED_PATH_REASON_NAMES` appends the same names at 21/22.
-- Tests: update the reason-length pin in
-  `userspace-dp/src/afxdp/bpf_map_tests.rs:394-408` to 23; its
-  self-enrolling Rust/shim agreement test at `:411-469` must compare the
-  two appended names. Update Go's
-  `degraded_reason_agreement_8258_test.go:93` and the Go reason-cap test
-  (`maps_sync_cap_test.go`) in the same change.
+- Agreement/reachability tests: the Go shim agreement test
+  (`degraded_reason_agreement_8258_test.go:93-143`) and Rust agreement
+  test (`bpf_map_tests.rs:411-472`) self-enroll and must see both names.
+  The Go reachability test
+  `TestEveryShimFallbackReasonIsActuallyReachable_8258` (`:173ff`) must
+  find both constants referenced by live gate/drop code.
+- Hard-coded pins: update the Rust reason-length/indices test
+  (`bpf_map_tests.rs:394-408`) to length 23 and assert both names at 21/22.
+  Update `maps_sync_cap_test.go:21-58`'s required-name list and literal to
+  23; its current length `if` has an empty body and is not a guard by
+  itself.
+- Dynamic degraded-status consumers resolve by name; do not hard-code
+  21/22 (`degraded_status_13294_test.go:18`,
+  `xdp_shim_decouple_test.go:692-743`). Branch-arm name tables are a
+  separate ABI and remain untouched.
 
 The shim counts one aggregate `host_screen_drop` per packet or one
 `host_screen_alarm` for an audited pass. It does NOT identify check reason
 or ingress zone and emits no worker-equivalent screen-drop event. Worker
-drop events and counters carry reason/zone information
-(`userspace-dp/src/afxdp/poll_stages.rs:1360-1374,1450-1504`); that gap is
+drop/alarm events carry tuple, zone, and screen reason
+(`userspace-dp/src/afxdp/event_emit.rs:313-407,621-643`); the event/drop
+paths are in
+`userspace-dp/src/afxdp/poll_stages.rs:1360-1374,1450-1504`. That gap is
 S4, not something the aggregate counter “localises.”
 
 ## 7. Verifier budget — proof strategy
@@ -727,23 +766,26 @@ the shim rejects that shape before the host gate (§4.3/C18).
 
 ## 8. RED/GREEN cells and execution lane
 
-**(a) Host twin parity.** Reuse
+**(a) Host-twin predicate/oracle cells.** Reuse
 `userspace-dp/src/afxdp/frame/tests_shim_host_screen_16009.rs` and the
 `worker_malformed_mask_for_test` oracle from `stateless.rs` (test-only).
 Use the packed word, not a widened packet struct. Cover v4/v6 geometry,
 source-route, atomic-fragment governing behavior, the v4 special
 screen-state errors, and every ordinary mask/alarm/unresolved-zone
-disposition. Include:
+disposition, with C18/C19 and C22 explicitly marked as divergences below.
 
-- C20's malformed IPv4 TLV before a later LSRR, with source-route OFF;
+- C20 tests malformed IPv4 TLV both before and after a valid LSRR, with
+  source-route OFF; malformed extraction error dominates either order;
 - C21's second readable non-atomic Fragment header, separate from C17;
-- C22's short capture with lying-long IPv4 total length, compared against
-  the worker's declared-end rule;
-- C23's **16 profiles × 4 isolated TCP packets**; each outcome must
-  match the worker oracle and only its own enabled check;
-- C18/C19 as a deliberate non-parity note: the worker extractor's v6
-  tiny/zero-length rules are tested, but the shim rejects those packets
-  before `host_screen_gate`.
+- C22's short capture with lying-long IPv4 total length, including the
+  worker no-flag-only vs syn-frag-only oracle and shim's safe suppression;
+- C23's **16 profiles × 4 isolated Q1 packets**; each outcome must match
+  the worker oracle and only its own enabled check. Also test known SYN
+  first-fragment with syn-frag-only and negative controls: whole SYN,
+  first-fragment ACK, non-first payload that resembles SYN, and URG|ACK
+  to port 443 (not WinNuke);
+- C18/C19 as deliberate non-parity cells: worker v6 tiny/zero-length
+  behavior is tested, but the shim rejects those packets before the gate.
 
 Also retain POD boundary, teardrop zero/short/MF-nonmultiple/legal-last,
 ICMP/ICMPv6 fragments, IPv4 tiny declared flags, LSRR/SSRR, RH0/RH1/RH2
@@ -761,6 +803,14 @@ must return XDP_DROP and increment `host_screen_drop`; a transit twin
 must retain the existing redirect and leave the shim host-screen counter
 unchanged. BPF_PROG_TEST_RUN proves only the shim result—it MUST NOT be
 used to claim a worker counter/event result.
+
+Unless a cell overrides it: ctrl is enabled, binding ready, ingress
+adjudicated, raw `(ifindex, VLAN)` resolves to a host-screen row with the
+relevant bit set and alarm off, LAND passes, and local/interface-NAT/
+proxy-NDP/session maps are mutually exclusive. For redirect controls an
+empty XSK map may surface as XDP_DROP; assert `redirect_err`, absence of
+`host_screen_drop`, and the expected degraded reason rather than relying
+on the raw action alone.
 
 | Cell | Selected packet / branch | Expected | Paired control / honest boundary |
 |---|---|---|---|
@@ -783,21 +833,21 @@ used to claim a worker counter/event result.
 | C17 | IPv6 `[atomic Fragment][non-atomic Fragment offset>0]` ICMPv6 | Drop under ICMP-fragment check because the later non-atomic header governs | This cell tests governing-header selection only; it makes **no duplicate-header assertion**. C16 is the single-atomic control. |
 | C18 | IPv6 tiny first fragment, M=1, declared TCP L4 8 bytes | Existing `L3 PARSE_FAIL`; no `host_screen_drop` | Explicitly no v6 tiny host-screen/parity claim; worker extractor behavior is only the host-twin control. |
 | C19 | IPv6 Fragment, wire Payload Length=0, captured TCP ACK bytes | Existing `L3 PARSE_FAIL`; no `host_screen_drop` | Worker treats zero as unbounded for its tiny check; this does not claim the BPF packet passes or parity. |
-| C20 | IPv4 options `[0x44,0x01]` then LSRR; source-route OFF; screen-state row present | `TruncatedIpv4Header` equivalent: DROP + `host_screen_drop` | Proves malformed-options error is independent of source-route; absent row/unresolved zone has no special parse-error drop. |
+| C20 | IPv4 options with valid LSRR then malformed `[0x44,0x01]` (also test malformed-before-LSRR); source-route OFF, screen-state row present | `TruncatedIpv4Header` equivalent: DROP + `host_screen_drop` | Proves malformed error dominates a preceding route sighting and is independent of source-route; absent row/unresolved zone has no special parse-error drop. |
 | C21 | Two readable non-atomic IPv6 Fragment headers, row present, ordinary masks off | DROP + `host_screen_drop` from the duplicate-header bit | Separate from C17. Row absent with all ordinary checks off has no special error-only host-screen drop. |
-| C22 | IPv4 MF=1 first fragment; capture ends after 8 L4 bytes; total length claims enough for flags; syn-frag only | PASS, no `host_screen_drop`; flags are not “unknown” under worker declared-end rule | Pins capture-clamped `l4_end` versus declared `total_len`; C6 remains the genuine tiny-declared-length case. |
-| C23 | Four isolated TCP shapes across all 16 masks for SYN+FIN/no-flag/FIN-no-ACK/WinNuke | For each shape, DROP iff its own bit is enabled; otherwise PASS; all 64 outcomes match worker oracle | No shared family bit. Shapes: SYN\|FIN\|ACK; flags 0; FIN without ACK; URG\|ACK to port 139. |
-| C24 | Healthy WG-steer UDP packet with IPv4 LSRR and local eligible tunnel/listener | DROP at WG terminal pass; host counter +1 | Same malformed shape with WG predicate false and transit destination redirects, no shim host-screen count. |
-| C25 | Early-filter suite: IPv4 limited broadcast, IPv4 multicast, IPv6 multicast, each malformed by its family-appropriate route/fragment trigger | Selected early pass is screened and drops; this is a disclosed **policy extension**, not worker parity | Link-local unicast is not an early-filter class after #14955; malformed transit/link-local control follows normal classification/redirect with no early-arm screen count. |
-| C26 | TCP SYN+FIN on a matching session-hit `PASS_TO_KERNEL` row | DROP at the session-hit terminal arm | Matching REDIRECT/transit control redirects without shim host-screen count; distinct from C15's double-count guard. |
-| C27 | Unicast IPv6 Neighbor Advertisement satisfying NAT-external NDP predicate, first fragment M=1, ICMP-fragment enabled | DROP at NAT-external NDP terminal pass | Same malformed packet with NAT-external predicate false redirects; no shim host-screen count. |
-| C28 | Unicast IPv6 Neighbor Advertisement satisfying proxy-NDP predicate, first fragment M=1, ICMP-fragment enabled | DROP at proxy-NDP terminal pass | Same malformed packet with proxy target predicate false redirects; no shim host-screen count. |
-| C29 | IPv4 ICMP echo with LSRR to interface-NAT local address, source-route enabled | DROP at ICMP-to-interface-NAT local pass | Same malformed packet with that local predicate false redirects; no shim host-screen count. |
-| C30 | C1 geometry packet on session miss to a local destination | DROP at session-miss local pass | Same packet to a transit destination follows existing XSK redirect; no shim host-screen count. |
-| C31 | IPv4 LSRR + ESP (protocol 50) to a configured interface-NAT destination | DROP at `interface_nat_tunnel_passes_to_kernel`'s terminal pass | Same malformed packet with no interface-NAT match follows existing redirect; no shim host-screen count. |
-| C32 | Outer IPv4 LSRR + GRE packet whose inner tuple selects `PASS_TO_KERNEL` | DROP at GRE-inner terminal pass on the outer LSRR | Inner REDIRECT/non-pass control stays on existing helper path; no shim host-screen count. Inner-screen parity remains S5. |
-| C33 | Binding-not-ready, true local/control fallback predicate, malformed C1 | DROP at binding-not-ready terminal pass | Transit-false control stays on existing branch; no gate. |
-| C34 | Ctrl-disabled, adjudicated ifindex, malformed C1 | DROP at ctrl-disabled `PassLocalControl` terminal pass | Non-adjudicated ifindex keeps existing ctrl-disabled drop, no screen counter. |
+| C22 | IPv4 IHL=5, MF=1/offset=0, `total_len=60`, capture ends at L4+8 (ports present, flags absent); run separate no-flag-only and syn-frag-only masks, other trips off; row at session-miss local | Shim passes both with no `host_screen_drop`; `tcp_flags_capture_unknown=1`, no ordinary trip, `tiny_declared_unknown=0` | Worker returns `Ok` with caller-stamped flags 0: no-flag-only drops `tcp-no-flag`, syn-frag-only passes. Shim safely suppresses both; explicit capture-short divergence. |
+| C23 | Four isolated TCP shapes across all 16 masks for SYN+FIN/no-flag/FIN-no-ACK/WinNuke | For each shape, DROP iff its own bit is enabled; otherwise PASS; all 64 outcomes match worker oracle | No shared family bit. Shapes: SYN\|FIN\|ACK; flags 0; FIN without ACK; URG\|ACK to port 139. Separately pin selective known SYN-first-fragment behavior and whole-SYN / first-fragment-ACK / non-first-SYN / URG\|ACK to port 443 negative controls. |
+| C24 | WG handshake/cookie UDP type 1–3 to a steered destination port, exact-local or WG-owner-admitted listener, IPv4 LSRR, and no live session row | DROP at WG terminal pass; host counter +1 | Same shape with WG admission false and global transit destination redirects, no shim host-screen count. |
+| C25 | Early-filter suite: IPv4 limited broadcast, IPv4 multicast, IPv6 multicast, each malformed by its family-appropriate route/fragment trigger | Selected early pass is screened and drops; disclosed **policy extension**, not worker parity | Non-owned IPv4/IPv6 link-local unicast and directed IPv4 broadcast are redirect/non-selected controls. Do not use exact-local link-local here: a later arm may screen it and the aggregate counter cannot identify the arm. |
+| C26 | TCP SYN+FIN matching an installed session-hit `PASS_TO_KERNEL` row, `syn_fin` bit enabled | DROP at the session-hit terminal arm | Matching REDIRECT row or transit destination redirects; non-first fragments cannot hit an ordinary session row. Distinct from C15's double-count guard. |
+| C27 | IPv6 NS/NA type 135/136, hop-limit 255, complete ICMPv6 header in first fragment (M=1, offset 0), unicast destination seeded only in interface-NAT map; ICMP-fragment enabled | DROP at NAT-external NDP terminal pass | Hop-limit 254 to same destination fails this predicate and redirects; map target is not also in proxy-NDP/local maps. |
+| C28 | Same complete first-fragment NS/NA predicates as C27, but unicast destination seeded only in proxy-NDP map | DROP at proxy-NDP terminal pass | Hop-limit 254 control redirects; NAT-external and proxy-NDP target maps remain disjoint because NAT NDP is checked first. |
+| C29 | IPv4 ICMP echo request/reply (type 8/0) with LSRR to interface-NAT-only local destination, source-route enabled | DROP at ICMP-to-interface-NAT local pass | Same packet to global transit redirects; no shim host-screen count. |
+| C30 | C1 geometry packet or LSRR on session miss to an exact local destination | DROP at session-miss local pass | Also pin `169.254.x.x`/`fe80::x`: seeded exact-local rows drop; same malformed non-owned link-local destinations redirect. |
+| C31 | Whole (non-fragmented) IPv4 LSRR + ESP (protocol 50) to configured interface-NAT destination | DROP at `interface_nat_tunnel_passes_to_kernel` terminal pass | Same whole ESP packet to global transit redirects; no shim host-screen count. |
+| C32 | Native GRE enabled; non-fragmented outer IPv4 LSRR GRE to exact-local outer destination; clean inner TCP/UDP tuple selects `PASS_TO_KERNEL` | DROP at GRE-inner terminal pass on outer LSRR | Outer transit destination or inner REDIRECT/miss follows helper redirect. Outer fragments cannot select this arm; inner-screen parity remains S5. |
+| C33 | Binding-not-ready; true local/control fallback predicate and malformed C1 | `XDP_DROP`; `host_screen_drop` + `transit_drop`, no binding fallback reason | Transit-false control is also `XDP_DROP`, but records binding fallback reason + `transit_drop` and no `host_screen_drop`; branch stat may appear in both. |
+| C34 | Ctrl-disabled, adjudicated ifindex, malformed C1 to exact-local destination | DROP at ctrl-disabled `PassLocalControl` terminal pass | Transit destination records `ctrl_disabled`/`transit_drop`, no host-screen count; non-adjudicated ingress keeps pre-parse ctrl-disabled drop. Scratch is initialized on the ctrl-disabled re-parse too. |
 
 C24-C34 are the required 11-arm matrix: every terminal pass site gets
 one selected malformed-pass cell and a transit/non-selected control.
@@ -805,15 +855,14 @@ The source anchors for all sites are in §1. C25's multicast behavior is
 deliberately labeled as an extension because the worker does not screen
 multicast; no link-local-unicast early-pass claim is allowed.
 
-**Worker-side assertion, separate from BPF_PROG_TEST_RUN:** feed the
-transit malformed twin through the `userspace-dp` stage-10
+**Worker-side assertion, separate from BPF_PROG_TEST_RUN:** feed an
+actually worker-bound malformed twin through the `userspace-dp` stage-10
 `txn_run_descriptor_with_screen_state` path. Assert the worker's
-`batch.screen_drops` and its existing per-reason event/counter for the
-screen that trips. This is a worker-stage assertion, not an inference
-from the shim BPF test. For a packet selected by session-hit
-`PASS_TO_KERNEL`, assert no worker counter only as an architectural
-statement that the worker is not invoked—not as a BPF_PROG_TEST_RUN
-measurement.
+`batch.screen_drops` and per-reason counter where the harness exposes it;
+assert a worker event only if the test observes the event stream. This is
+a worker-stage assertion, not an inference from the shim BPF test. For a
+packet selected by session-hit `PASS_TO_KERNEL`, the worker is not invoked;
+that architectural fact is not a BPF_PROG_TEST_RUN measurement.
 
 **(c) Go cells:** table-test
 `buildUserspaceHostScreenEntries` for full/audit/off/flood-only
@@ -860,11 +909,15 @@ is added.
 - **K2 (scratch completeness):** every parsed packet reaching a terminal
   gate must have a current word. Initialize before optional writes,
   including IPv4 after the validated IHL slice and IPv6 before
-  `:2410`; check every scratch read/write. Any write/finalization failure
-  returns `None` through the existing fail-closed parse path; gate-read
-  failure drops. IPv6 duplicate detection is written in-walk; there is no
-  v6 tiny-flags finalization. Any `Some` path with stale/incomplete
-  scratch is a bypass and KILL.
+  `:2410`; check every scratch read/write. Keep
+  `tiny_declared_unknown` (worker row-gated error) distinct from
+  `tcp_flags_capture_unknown` (suppress ordinary trips when flags were
+  not read); neither fact may be inferred from the other. All ordinary
+  TCP trip bits must be zero for capture-unknown flags. Any write/
+  finalization failure returns `None` through the existing fail-closed
+  parse path; gate-read failure drops. IPv6 duplicate detection is
+  written in-walk; there is no v6 tiny-flags finalization. Any `Some`
+  path with stale/incomplete scratch is a bypass and KILL.
 - **K3 (zone-key skew):** use the exact `(ifindex,
   vlan-or-u16::MAX)` resolver as `land_gate` (`lib.rs:2610-2624`). A
   second key convention can make zones unresolved (availability loss) or
@@ -938,11 +991,38 @@ overlap parity claim.
   The acceptance must distinguish a challenge from a stateless drop.
 - **S4 — title:** `shim: preserve zone/reason drop events and per-reason counter fidelity for host-bound kernel-PASS screens`
   **Owner:** shim map/counter and worker telemetry maintainers.
-  Acceptance adds zone+reason attribution/events alongside the aggregate
-  counters, matching the worker drop event paths at
-  `poll_stages.rs:1360-1374,1450-1504`; C6/C20/C21 and each ordinary
-  reason must identify its own zone/reason rather than only incrementing
-  one total.
+  Acceptance expands beyond the worker event paths at
+  `poll_stages.rs:1360-1374,1450-1504`:
+  1. Replace the gate's boolean result with first-tripped reason plus
+     disposition class. Preserve precedence: extractor attribution via
+     `ScreenParseError::screen_reason` (`screen/packet.rs:324-334`), then
+     SYN+FIN → no-flag → FIN-no-ACK → WinNuke → known SYN-frag
+     (`stateless.rs:53-84`), then POD → teardrop → ICMP-fragment →
+     source-route (`stateless.rs:317-329`).
+  2. Add per-reason drop and alarm indices in the shim, Go
+     `degradedPathReasonNames`, and Rust `DEGRADED_PATH_REASON_NAMES`;
+     keep #8258/#9888 agreement/reachability and both hard-coded pins
+     covered.
+  3. Add sparse `(zone, reason, disposition)` attribution; the current
+     reason-only `PerCpuArray` cannot carry a zone. Decide the Prometheus
+     label/cardinality contract explicitly (today the Prometheus metric
+     has only a `reason` label:
+     `pkg/api/metrics_degraded_path_9040.go:44-53`,
+     `metrics_descriptors_global.go:145-152`).
+  4. Decide arm attribution separately. Branch stats are TRACE-gated and
+     the host-screen gate normally pre-empts them; do not silently turn
+     diagnostics into accounting.
+  5. Event parity needs a real BPF-to-worker event channel and mapping to
+     the worker `ScreenDrop` frame
+     (`userspace-dp/src/afxdp/event_emit.rs:313-407,621-643`).
+     The existing `userspace_trace` hash is TRACE-gated and lacks zone/
+     screen reason while skipping ICMP (`lib.rs:412-428,2103-2133`); it
+     is not an event substitute.
+  6. Decide whether aggregate indices 21/22 remain totals or are retired
+     when per-reason counters land; avoid double-counting.
+  7. Distinguish profile trips, IPv4 tiny/malformed extraction, duplicate
+     IPv6 Fragment, unresolved-zone fail-closed, and scratch/map failure;
+     today all collapse into `host_screen_drop`.
 - **S5 — title:** `shim: GRE-inner / decapsulated inner packets are outer-screened only on the kernel-PASS arm`
   **Owner:** native-GRE classifier and shim terminal-arm maintainers.
   Acceptance uses an inner-only malformed trip on GRE-inner
@@ -988,24 +1068,27 @@ by explicit scope-out to S6**, not left as a plan-seat question.
 
 Questions for the three plan seats:
 
-1. **Arm/eligibility seat:** attack all 11 `lib.rs` insertion points and
-   C24-C34's selected-pass/transit-or-nonselected pairs. Is C25's early
-   multicast/broadcast behavior unambiguously labeled as a policy
-   extension, with link-local unicast excluded? Does C15 now avoid using
-   BPF_PROG_TEST_RUN to claim a worker counter?
+1. **Arm/eligibility seat:** attack all 11 parsed-IP `lib.rs` insertion
+   points and C24-C34's exact selected/control predicates. Are the WG/NDP/
+   NAT/GRE fixtures sufficiently isolated to select only the named arm?
+   Is C25's multicast/broadcast behavior clearly a policy extension, with
+   non-owned link-local as the redirect control and exact-local link-local
+   kept for C30? Does C15 avoid using BPF_PROG_TEST_RUN to claim a worker
+   counter, and do C33's two DROP actions distinguish by counters?
 2. **Parser/semantics seat:** attack B1-B5 and C20-C23: independent TCP
-   masks, common post-L4 placement across `first_fragment_l4` and
-   `parse_l4`, malformed IPv4 options even with source-route off,
-   duplicate readable non-atomic IPv6 headers, and the capture-short /
-   declared-long IPv4 case. Is C18/C19 honestly an earlier parse-fail
-   control rather than v6 host-screen parity? Are `ParsedPacket` and
-   `ExtWalk` genuinely untouched?
-3. **Budget/ABI/residue seat:** is the ≤850,000 complete-object K1 proof
-   (floor PASS, no override) sufficient, with the explicit Q1-to-S7
-   reassignment if scope must change? Are reasons 21/22 appended in all
-   three Rust/Go mirrors and agreement/cap tests? Does S1's LocalDelivery
-   two-fragment/reinject acceptance and S4's zone/reason-event residue
-   close the stated scope without claiming overlap or telemetry parity?
+   masks, common post-L4 placement, malformed IPv4 options before/after
+   LSRR, duplicate readable non-atomic IPv6 headers, and C22's capture-
+   unknown versus declared-tiny facts. Is safe shim suppression in C22
+   acceptable despite the worker's no-flag-only caller-stamped-zero
+   behavior? Are C18/C19 honestly earlier parse-fail controls, and are
+   `ParsedPacket`/`ExtWalk` genuinely untouched?
+3. **Budget/ABI/residue seat:** is ≤850,000 complete-object K1 proof
+   (floor PASS, no override) sufficient, including Q1-to-S7 only after
+   explicit re-plan? Are 21/22 reachable and pinned across all three
+   mirrors, including the Go reachability and cap tests? Does S4 resolve
+   disposition classes, arm attribution, Prometheus cardinality, event
+   transport, and aggregate retention without claiming that #16009
+   already provides telemetry parity?
 
 ## 12. Scope-size estimate and landing sequence
 
