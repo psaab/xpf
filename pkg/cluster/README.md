@@ -2615,6 +2615,7 @@ peer liveness (`lastSeen`) or drive election.
 
 An unkeyed cluster retains today's dual-accept first-keying path for **72
 hours** after its first observed unkeyed cluster posture — the unkeyed
+authority cutoff. Its deadline is anchored on `CLOCK_MONOTONIC` in-process
 and persisted as a versioned wall-clock high-water record at
 `/var/lib/xpf/unkeyed-authority-grace`: `v2 <earliest-wall-nanoseconds>
 <high-water-wall-nanoseconds> <elapsed-floor-nanoseconds>`. Local config/
