@@ -278,7 +278,100 @@ var knownUnbounded = map[string]string{
 	// scanSeconds (:70) is stored only from that clamp, the 1s initial, or
 	// minimumLivenessScanInterval (min of 10, clamped per-session values, and
 	// pending, itself only ever clamped or initial). Max 10s cannot overflow.
+	// The pinned count is 2: StartSyncSweep and capSweepIntervalForLiveness.
 	"pkg/cluster/sync_conn_sweep.go": "scan seconds clamped to [1,10] by primaryLivenessScanIntervalForTimeout; CAS-min only lowers",
+}
+
+// Counts measured from censusDurationSites. Keep zero-site verdicts pinned too:
+// a future multiply in one of those files is a new site, not old residue.
+var knownUnboundedSiteCounts = map[string]int{
+	"pkg/api/system.go":                           0,
+	"pkg/grpcapi/server_show_status.go":           0,
+	"pkg/cli/cli_show_system.go":                  0,
+	"pkg/dataplane/userspace/format/wireguard.go": 1,
+	"pkg/flowexport/netflow.go":                   1,
+	"pkg/lldp/lldp.go":                            1,
+	"pkg/dhcprelay/pending.go":                    1,
+	"pkg/ra/sender.go":                            7,
+	"pkg/daemon/daemon_archive_timer.go":          0,
+	"pkg/configstore/store_commit.go":             0,
+	"pkg/cluster/sync_conn_sweep.go":              2,
+}
+
+func durationSiteVerdictFindings(unbounded []site, verdicts map[string]string, pinnedCounts map[string]int) []string {
+	actualCounts := make(map[string]int)
+	var findings []string
+	for _, s := range unbounded {
+		actualCounts[s.file]++
+		if _, known := verdicts[s.file]; !known {
+			findings = append(findings, s.file+":"+itoa(s.line)+" in "+s.fn+"() has no recorded verdict")
+		}
+	}
+
+	files := make([]string, 0, len(verdicts))
+	for file := range verdicts {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+	for _, file := range files {
+		actual := actualCounts[file]
+		pinned, hasPinnedCount := pinnedCounts[file]
+		if !hasPinnedCount {
+			findings = append(findings, file+": pinned count missing, actual "+itoa(actual)+
+				"; bound the new site or re-argue the verdict and update the count")
+		} else if actual != pinned {
+			findings = append(findings, file+": pinned "+itoa(pinned)+", actual "+itoa(actual)+
+				"; bound the new site or re-argue the verdict and update the count")
+		}
+	}
+	return findings
+}
+
+func TestDurationSiteVerdictCounts8642(t *testing.T) {
+	const file = "pkg/fixture/verdict.go"
+	verdicts := map[string]string{file: "fixture verdict"}
+	pinnedCounts := map[string]int{file: 2}
+	makeSites := func(count int) []site {
+		sites := make([]site, count)
+		for i := range sites {
+			sites[i] = site{file: file, line: i + 1, fn: "f"}
+		}
+		return sites
+	}
+
+	for _, tc := range []struct {
+		name       string
+		sites      []site
+		wantFinding string
+	}{
+		{name: "exact count", sites: makeSites(2)},
+		{name: "gained site", sites: makeSites(3), wantFinding: file + ": pinned 2, actual 3"},
+		{name: "lost site", sites: makeSites(1), wantFinding: file + ": pinned 2, actual 1"},
+		{
+			name: "non-verdicted site",
+			sites: append(makeSites(2), site{file: "pkg/fixture/new.go", line: 9, fn: "newSite"}),
+			wantFinding: "pkg/fixture/new.go:9 in newSite() has no recorded verdict",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := durationSiteVerdictFindings(tc.sites, verdicts, pinnedCounts)
+			if tc.wantFinding == "" {
+				if len(findings) != 0 {
+					t.Fatalf("exact pinned count produced findings: %s", strings.Join(findings, "\n"))
+				}
+				return
+			}
+			joined := strings.Join(findings, "\n")
+			if !strings.Contains(joined, tc.wantFinding) {
+				t.Fatalf("findings %q do not contain %q", joined, tc.wantFinding)
+			}
+			if tc.name == "gained site" || tc.name == "lost site" {
+				if !strings.Contains(joined, "bound the new site or re-argue the verdict and update the count") {
+					t.Fatalf("count mismatch lacks remediation instruction: %s", joined)
+				}
+			}
+		})
+	}
 }
 
 // THE CENSUS. A new `time.Duration(x) * time.<Unit>` on an unbounded operand
@@ -297,14 +390,9 @@ func TestNoUnboundedConfigDurationMultiplies8642(t *testing.T) {
 			"blind scan and a clean tree produce identical output", boundedCount)
 	}
 
-	var unexpected []string
-	for _, s := range unbounded {
-		if _, known := knownUnbounded[s.file]; !known {
-			unexpected = append(unexpected, s.file+":"+itoa(s.line)+" in "+s.fn+"()")
-		}
-	}
-	if len(unexpected) > 0 {
-		t.Fatalf("unbounded time.Duration multiplies with no recorded verdict:\n  %s\n\n"+
+	findings := durationSiteVerdictFindings(unbounded, knownUnbounded, knownUnboundedSiteCounts)
+	if len(findings) > 0 {
+		t.Fatalf("unbounded time.Duration multiply verdict mismatch:\n  %s\n\n"+
 			"This is the #8642 family. A config seconds/milliseconds knob reaches\n"+
 			"`time.Duration(n) * time.<Unit>` with no ceiling, and past\n"+
 			"MaxDurationSeconds (or MaxDurationMillis) the multiply WRAPS to a\n"+
@@ -317,10 +405,11 @@ func TestNoUnboundedConfigDurationMultiplies8642(t *testing.T) {
 			"violation is downgraded to a warning on the tolerant Store.Load /\n"+
 			"peer-sync ingress, so a persisted or peer-pushed config never meets it.\n\n"+
 			"If the operand genuinely cannot come from config, add it to\n"+
-			"knownUnbounded with the reason — a verdict, not an exemption.",
-			strings.Join(unexpected, "\n  "))
+			"knownUnbounded with the reason and pin its site count.",
+			strings.Join(findings, "\n  "))
 	}
 }
+
 
 // DEGENERATE-FAILURE GUARD 2: the census must be able to SEE an unbounded site.
 // Guard 1 proves it recognises bounded ones; without this, a classifier that
