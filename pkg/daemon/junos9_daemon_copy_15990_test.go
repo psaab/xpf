@@ -63,14 +63,23 @@ func TestJunos9DaemonCopyPreservesProvenance15990(t *testing.T) {
 		`set protocols bgp group g1 neighbor 10.0.0.1 authentication-key "` + outer + `"`,
 		"set protocols ospf area 0.0.0.0 interface ge-0/0/0.0 authentication md5 1 key \"" + outer + "\"",
 		"set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication simple-password \"" + outer + "\"",
-		"set protocols rip authentication-type md5",
-		`set protocols rip authentication-key "` + outer + `"`,
-		"set protocols rip neighbor ge-0/0/3",
-		"set protocols isis net 49.0001.0100.0000.0001.00",
-		"set protocols isis authentication-type md5",
-		`set protocols isis authentication-key "` + outer + `"`,
-		"set protocols isis interface ge-0/0/2.0 authentication-type md5",
-		`set protocols isis interface ge-0/0/2.0 authentication-key "` + outer + `"`,
+		// Keep the active RIP and IS-IS adjacencies in separate routing
+		// instances: #17735 (ca712ef0e6) fixes IS-IS at distance 115 while
+		// RIP is rendered at 100, and the RIP schema has no preference knob.
+		"set interfaces ge-0/0/3 unit 0 family inet address 192.0.2.3/24",
+		"set routing-instances rip-vrf instance-type virtual-router",
+		"set routing-instances rip-vrf interface ge-0/0/3.0",
+		"set routing-instances rip-vrf protocols rip authentication-type md5",
+		`set routing-instances rip-vrf protocols rip authentication-key "` + outer + `"`,
+		"set routing-instances rip-vrf protocols rip neighbor ge-0/0/3.0",
+		"set interfaces ge-0/0/2 unit 0 family iso address 49.0001.0100.0000.0001.00",
+		"set routing-instances isis-vrf instance-type virtual-router",
+		"set routing-instances isis-vrf interface ge-0/0/2.0",
+		"set routing-instances isis-vrf protocols isis net 49.0001.0100.0000.0001.00",
+		"set routing-instances isis-vrf protocols isis authentication-type md5",
+		`set routing-instances isis-vrf protocols isis authentication-key "` + outer + `"`,
+		"set routing-instances isis-vrf protocols isis interface ge-0/0/2.0 authentication-type md5",
+		`set routing-instances isis-vrf protocols isis interface ge-0/0/2.0 authentication-key "` + outer + `"`,
 	}
 	for _, tc := range []struct {
 		name    string

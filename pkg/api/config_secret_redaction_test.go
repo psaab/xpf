@@ -55,28 +55,38 @@ var secretSetCommands = []string{
 	"set security ike policy pol1 pre-shared-key ascii-text LEAK-IKE-PSK",
 	"set security ike gateway gw1 address 10.0.0.1",
 	"set security ike gateway gw1 ike-policy pol1",
-	"set security ike gateway gw1 external-interface ge-0-0-0",
+	"set security ike gateway gw1 external-interface ge-0-0-3",
 	// IPsec VPN with a legacy vpn-level PSK.
 	"set security ipsec proposal aes256 protocol esp",
 	"set security ipsec proposal aes256 encryption-algorithm aes-256-cbc",
 	"set security ipsec proposal aes256 authentication-algorithm hmac-sha-256",
 	"set security ipsec proposal aes256 dh-group 14",
-	"set security ipsec vpn site-a gateway 10.0.0.1",
+	"set security ipsec vpn site-a gateway gw1",
+	"set security ipsec vpn site-a local-address 10.0.3.1",
 	"set security ipsec vpn site-a bind-interface st0",
 	"set security ipsec vpn site-a ipsec-policy aes256",
 	"set security ipsec vpn site-a pre-shared-key LEAK-IPSEC-VPN-PSK",
 	// OSPF interface auth key.
 	"set protocols ospf area 0.0.0.0 interface ge-0-0-1 authentication md5 1 key LEAK-OSPF-KEY",
-	// RIP auth key.
-	"set protocols rip neighbor ge-0-0-1",
-	"set protocols rip authentication-type md5",
-	"set protocols rip authentication-key LEAK-RIP-AUTHKEY",
+	// RIP auth key. #18857: RIP and IS-IS are separate routing instances
+	// because ca712ef0e6 (#17735) refuses an active same-table pair: FRR
+	// fixes IS-IS distance at 115 while RIP renders 100, and this schema
+	// has no RIP preference knob that could preserve Junos ordering.
+	"set routing-instances rip-vrf instance-type virtual-router",
+	"set interfaces ge-0-0-4 unit 0 family inet address 10.0.4.1/24",
+	"set routing-instances rip-vrf interface ge-0-0-4.0",
+	"set routing-instances rip-vrf protocols rip neighbor ge-0-0-4.0",
+	"set routing-instances rip-vrf protocols rip authentication-type md5",
+	"set routing-instances rip-vrf protocols rip authentication-key LEAK-RIP-AUTHKEY",
 	// IS-IS area + per-interface auth keys.
-	"set protocols isis net 49.0001.0100.0000.0001.00",
-	"set protocols isis authentication-type md5",
-	"set protocols isis authentication-key LEAK-ISIS-AREA-AUTHKEY",
-	"set protocols isis interface ge-0-0-2 authentication-type md5",
-	"set protocols isis interface ge-0-0-2 authentication-key LEAK-ISIS-IFACE-AUTHKEY",
+	"set routing-instances isis-vrf instance-type virtual-router",
+	"set interfaces ge-0-0-5 unit 0 family iso address 49.0001.0100.0000.0001.00",
+	"set routing-instances isis-vrf interface ge-0-0-5.0",
+	"set routing-instances isis-vrf protocols isis net 49.0001.0100.0000.0001.00",
+	"set routing-instances isis-vrf protocols isis authentication-type md5",
+	"set routing-instances isis-vrf protocols isis authentication-key LEAK-ISIS-AREA-AUTHKEY",
+	"set routing-instances isis-vrf protocols isis interface ge-0-0-5.0 authentication-type md5",
+	"set routing-instances isis-vrf protocols isis interface ge-0-0-5.0 authentication-key LEAK-ISIS-IFACE-AUTHKEY",
 	// BGP TCP-MD5 password (group-level).
 	"set protocols bgp local-as 65001",
 	"set protocols bgp group external peer-as 65002",
@@ -205,6 +215,35 @@ func TestConfigHandlerPreservesCleartextInMemory(t *testing.T) {
 	if got := cfg.System.Login.Users[0].EncryptedPassword.Reveal(); got != loginCryptSentinel {
 		t.Errorf("in-memory login encrypted-password = %q, want cleartext sentinel "+
 			"(secret never set -> leak test would falsely pass)", got)
+	}
+	ripSecret, isisSecret := false, false
+	for _, ri := range cfg.RoutingInstances {
+		switch ri.Name {
+		case "rip-vrf":
+			if ri.RIP == nil {
+				t.Fatal("RIP virtual-router protocol not compiled")
+			}
+			if got := ri.RIP.AuthKey.Reveal(); got != secretSentinels[3] {
+				t.Errorf("in-memory RIP authentication-key = %q, want cleartext RIP sentinel", got)
+			}
+			ripSecret = true
+		case "isis-vrf":
+			if ri.ISIS == nil {
+				t.Fatal("IS-IS virtual-router protocol not compiled")
+			}
+			if got := ri.ISIS.AuthKey.Reveal(); got != secretSentinels[4] {
+				t.Errorf("in-memory IS-IS area authentication-key = %q, want cleartext IS-IS area sentinel", got)
+			}
+			for _, iface := range ri.ISIS.Interfaces {
+				if iface.AuthKey.Reveal() == secretSentinels[5] {
+					isisSecret = true
+					break
+				}
+			}
+		}
+	}
+	if !ripSecret || !isisSecret {
+		t.Fatalf("RIP and IS-IS authentication fixture not fully compiled: RIP=%t IS-IS interface=%t", ripSecret, isisSecret)
 	}
 }
 
