@@ -401,9 +401,31 @@ func TestPackedTailEnforce18771SecretAndRollbackSurfaces(t *testing.T) {
 			}
 			// The refusal/findings may name the schema pair
 			// (inet6/dad-disable) but must never echo the raw packed
-			// statement or its value tokens beyond that pair.
+			// statement or its value tokens beyond that pair. A flag-only
+			// head carries no post-head value token; a fixture with a
+			// `priority 100` tail token rides the same refusal below.
 			if strings.Contains(content, "family inet6 dad-disable") || strings.Contains(content, "dad-disable;") {
 				t.Errorf("%s leaked the raw packed tail: %s", surface, content)
+			}
+		}
+
+		// Post-head value-token suppression: a mixed DROP commit whose
+		// findings include the `priority 100` site must refuse (via the
+		// dad-disable site) without echoing the value token `100`.
+		tailLogs := packedTailStoreLogs18771(t)
+		tail := packedTailStageText18771(t, -1, `interfaces { ge-0/0/0 { unit 0 { family inet { address 192.0.2.1/24 vrrp-group 1 priority 100; } } } }
+interfaces { ge-0/0/1 { unit 0 { family inet6 dad-disable; } } }`)
+		_, tgen, err := tail.CompileCandidateGen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = tail.CommitWithDescriptionGen("tail fixture", tgen)
+		if err == nil || !strings.Contains(err.Error(), "packed-tail statement(s) would be silently dropped") {
+			t.Fatalf("tail fixture commit = %v, want packed-tail refusal", err)
+		}
+		for surface, content := range map[string]string{"error": err.Error(), "logs": tailLogs.String()} {
+			if strings.Contains(content, "priority 100") || strings.Contains(content, "dad-disable;") {
+				t.Errorf("%s leaked the post-head tail value: %s", surface, content)
 			}
 		}
 	})
