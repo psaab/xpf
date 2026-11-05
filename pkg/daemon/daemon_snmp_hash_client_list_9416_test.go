@@ -148,8 +148,27 @@ func TestSNMPConfigHashIncludesCrossRootQuarantine18844(t *testing.T) {
 		t.Fatal("two-root lenient community must expose its deny-all quarantine")
 	}
 
-	if gotValid, gotQuarantined := snmpConfigHash(valid), snmpConfigHash(quarantined); gotValid == gotQuarantined {
+	validHash, quarantinedHash := snmpConfigHash(valid), snmpConfigHash(quarantined)
+	if validHash == quarantinedHash {
 		t.Fatalf("#18844: valid-only and cross-root-quarantined configs hash equal (%d) despite identical authored Clients/ClientListNames and opposite effective source enforcement",
-			gotValid)
+			validHash)
+	}
+
+	// A reference may have the same text as the marker. The tagged,
+	// unconditional boolean must prevent that authored value from
+	// impersonating quarantine when the other community fields are identical.
+	validWithMarkerReference := compile(validRoot, false)
+	markerReferenceCommunity := validWithMarkerReference.System.SNMP.Communities["scoped"]
+	markerReferenceCommunity.ClientListNames = append(markerReferenceCommunity.ClientListNames, "source-restriction-quarantined")
+	if !reflect.DeepEqual(markerReferenceCommunity.Clients, quarantinedCommunity.Clients) {
+		t.Fatalf("marker-reference control changed Clients: valid=%+v quarantined=%+v",
+			markerReferenceCommunity.Clients, quarantinedCommunity.Clients)
+	}
+	if markerReferenceCommunity.SourceRestrictionQuarantined() {
+		t.Fatal("marker-reference control must not be quarantined")
+	}
+	if markerReferenceHash := snmpConfigHash(validWithMarkerReference); markerReferenceHash == quarantinedHash {
+		t.Fatalf("#18844: authored reference text impersonated the quarantine marker; both configs hash to %d",
+			markerReferenceHash)
 	}
 }

@@ -139,8 +139,15 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 			// fields therefore still hash equal to the previous valid config;
 			// include this effective-policy marker so reconcile cannot no-op
 			// and leave the running agent serving the old allow policy.
+			//
+			// Encode policy as a tagged, unconditional boolean. The true/false
+			// value prevents an authored reference with the tag's text from
+			// impersonating the quarantine marker.
+			write("source-restriction-quarantined")
 			if c.SourceRestrictionQuarantined() {
-				write("source-restriction-quarantined")
+				write("true")
+			} else {
+				write("false")
 			}
 		}
 	}
