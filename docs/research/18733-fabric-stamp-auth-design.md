@@ -17,12 +17,12 @@
 | # | Fork | Decision |
 |---|---|---|
 | D1 | Wire placement | Fixed-tail 34-byte `XPF3` trailer plus a **distinct authenticated source marker** (`02:bf:74`/`02:bf:75`), required by the old-receiver rule in `docs/log/10105.md:124`. Legacy V1/V2 markers remain byte-identical only when no authenticated envelope is emitted (§4). |
-| D2 | Tag input | Post-NAT final wire bytes: MAC the final egress L2/VLAN/IP header plus the first 8 bytes after the final IP header, with resolved zone/scope/node/link/direction context. Punt-time tuple binding is disproved on NAT paths (§3/§5). |
+| D2 | Tag input | Post-NAT final wire bytes: MAC final egress L2/VLAN bytes plus the **entire IP-declared datagram** (header and all payload/fragment bytes), with resolved zone/scope/node/link/direction context. Exclude Ethernet padding/FCS; punt-time tuple binding is disproved on NAT paths (§3/§5). |
 | D3 | Verify placement | Verify **every marked frame at stage 9, before every claim consumer, hits and misses alike**. Several consumers act before session-miss policy; miss-only verification is unsound (§2). |
 | D4 | PRF | **Measurement-gated**: two domain-separated SipHash-2-4 64-bit outputs (in-tree primitive) vs AES-CMAC-128. No 128-bit SipHash implementation or workstation folklore selects the winner; §7.4 sets lab budgets and the decision rule. |
-| D5 | Freshness | Signed minute epoch, inclusive ±5-minute acceptance, cached/latching wall clock (the poll-loop `now_secs` is monotonic and invalid for this; §8.1). No sequence/nonce in PR-A; in-window replay is an accepted residual (§8.2). |
+| D5 | Freshness/replay | Signed minute epoch, inclusive ±5-minute acceptance, cached/latching wall clock (monotonic poll time is invalid here; §8.1). **Decision: accept exact in-window replay as a bounded residual; PR-A has no per-frame replay state.** (§8.2/§12.2) |
 | D6 | Key shape | Derived bases from `chassis cluster authentication-key`, Go→Rust snapshot secret field only; primary signs and additional is accept-only. Raw PSK never crosses to Rust; snapshot content digest uses salted HMAC fingerprints, not clear base bytes (§7.2). |
-| D7 | Modes | One leaf `security flow fabric-stamp-authentication { disabled | permissive | required }`, **default `disabled`**. Snapshot v77→v78 is exact lockstep (§9). |
+| D7 | Modes | One leaf `security flow fabric-stamp-authentication { disabled | permissive | required }`, default `disabled`. Terminal #16023 posture is explicit per-link `required` on each target link after compatible rollout and live proof; `disabled` is migration-safe, not protection (§9/§12). |
 | D8 | Sequencing | PR-A (#18733) authenticates identity with all class bytes zero and semantic class `0xffff=absent`. PR-B (#18734) carries class only after A; third-host live proof is separate and blocks #16023 closure until complete (§11–12). |
 
 PLAN-KILL alternatives are in §12.4 (accept private-L2/attestation as terminal,
@@ -46,21 +46,21 @@ or reject this trailer and continue research). Kill criteria K1–K8 are in §12
 | Snapshot ABI is exact-equality fenced: Rust `CONFIG_SNAPSHOT_PROTOCOL_VERSION = 77`, Go `ProtocolVersion = 77`; v69 was the #16023 fence | `userspace-dp/src/protocol/control.rs:343` (changelog `:305-343`); `pkg/dataplane/userspace/protocol.go:530`; refusal `userspace-dp/src/server/handlers/snapshot.rs:25-32`; lockstep pin `pkg/dataplane/userspace/scoped_global_zoneset_protocol_5488_test.go:378` (`TestSnapshotProtocolVersionLockstepWithRust`) + shape pin `snapshot_shape_version_8892_test.go:702` |
 | Poll-loop clock is **monotonic**: `loop_now_secs = loop_now_ns / 1e9`, `loop_now_ns` from `monotonic_nanos()` (`CLOCK_MONOTONIC`) | `userspace-dp/src/afxdp/worker/loop_body/mod.rs:715`; `userspace-dp/src/afxdp/bpf_map/mod.rs:1165` |
 | Fabric snapshot has a stable configured `name` but Rust `FabricLink` drops it and has no ordinal; Go sorts snapshot names, while runtime resolution can skip a link. Never derive an auth ordinal from the resolved `Vec` index. | `pkg/dataplane/userspace/fabric.go:91-149`; `userspace-dp/src/afxdp/forwarding/fabric.rs:114-124`; `types/forwarding/fabric.rs:10-25` |
-| Rust snapshot carries local `node_id: u8`, but `ForwardingState` has no sender identity; PR-A must plumb it and define the expected peer ID from the two-node 0/1 cluster contract. | `userspace-dp/src/protocol/snapshot.rs:966-974`; `userspace-dp/src/afxdp/types/forwarding/state.rs:64` |
+| Rust snapshot carries local `node_id: u8`, but `ForwardingState` has no sender identity; PR-A must plumb it and fail closed unless the local and expected peer IDs are exactly the distinct `{0,1}` pair. Values outside that pair are never truncated, wrapped or accepted for signing/verification. | `userspace-dp/src/protocol/snapshot.rs:966-974`; `userspace-dp/src/afxdp/types/forwarding/state.rs:64` |
 | Interim posture already landed (do not redo): opt-in `security flow require-authenticated-fabric-stamps` + `fabric-interface-authenticated` attestation (Rust V0 gate above), snapshot v69 fence; #10105 document-and-constrain advisory; #18719 acknowledgeable/change-scoped reminders; #18751 `pkg/fabricsegment` third-speaker detector | `pkg/config/compiler_security_flow.go:900-902`; `pkg/config/schema_security.go:1404`; `pkg/config/types_security.go:284-289`; `pkg/config/compiler_chassis.go:470-473`; `pkg/config/compiler_fabric_stamp_10105.go:14`; decisive cell `userspace-dp/src/afxdp/tests_fabric_zone_stamp.rs:177` |
 
 ---
 
 ## 2. Consumer census (re-derived; security consequence and required gate)
 
-Stage 9 parses the stamp into `FabricIngressOutcome` (`poll_stages.rs:844-888`)
-and the descriptor loop fans the claim into consumers. The older C1-C15 list
-was **not exhaustive**: routing-domain, martian, overlap, pre-routing NAT,
-PBR, IPsec scope, cache-hit and deferred paths read the claim outside the
-`transit_policy` gate chain. In `required`, stage 9 therefore verifies every
-prefix-matched stamp before any of these consumers run; invalid/missing/stale
-claims drop terminally. The existing owner-RG gates remain additional policy
-gates, not substitutes for authentication.
+Stage 9 classifies each frame that reaches the AF_XDP descriptor loop into
+`FabricIngressOutcome` (`poll_stages.rs:844-888`). For those frames, PR-A
+verifies every marked claim before all C1-C34 consumers; bad/missing/stale
+claims terminate before downstream session/cache/fragment/policy/log use. This
+does **not** cover shim/kernel-pass traffic or the deliberate Stage-5 ARP/NDP
+side effect that precedes Stage 9; those boundaries and their tests are
+explicit in §2.2. The existing owner-RG gates remain additional policy gates,
+not substitutes for keyed verification.
 
 All Rust paths in this census are relative to
 `userspace-dp/src/afxdp/`; tests use the same root unless fully qualified.
@@ -71,9 +71,9 @@ Callsites shown in `poll_descriptor/mod.rs` are in
 |---|---|---|---|---|
 | C1 | Stage-9 parse/disposition and terminal invalid drop | `stage_classify_fabric_ingress`, `poll_stages.rs:844-888`; terminal handling in `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:1416-1453` | Invalid, missing, malformed, bad-tag or stale claimed identity must not reach lookups. | **MUST-GATE** at stage 9; terminal drop before fan-out. |
 | C2 | Session-miss zone pair, transit policy/NAT and host-inbound | `admission_zone_override`, `poll_descriptor/transit_policy.rs:66-107`; `session_miss_zone_pair_ids`, `poll_descriptor/mod.rs:423-444`; `gate_fabric_zone_override_on_owner_rg` / `promote_ambiguous_fabric_zone`, `forwarding/fabric.rs:486-532`; callsites in `poll_binding_process_descriptor_in_view` | The claimed zone selects the from-zone and can change policy, NAT, host-service and owner-RG promotion outcomes. | **MUST-GATE** before claim use; preserve the owner-RG predicate. |
-| C3 | Session-hit authority | `session_hit_authority`, `poll_descriptor/session_hit_authority.rs:179-214,399-483`; callsite `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:1463-1473` | Forged arrival zone can turn a foreign hit into `Owner`, bypassing the arrival zone's policy and allowing owner-session revalidation/re-stamping. It is not inherited trust. | **MUST-GATE** before hit adjudication. |
-| C4 | Flow-cache seed | `stage_flow_cache_seed`, `poll_descriptor/flow_cache_seed.rs:32,254-260`; caller `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:11228-11231` | Claim can stamp a cached decision/session under the wrong zone. | **MUST-GATE** before seed. |
-| C5 | Flow-cache preflight, lookup and reclassification | `stage_flow_cache_hit`, `poll_descriptor/flow_cache_hit.rs:139-204`; cache preflight/reclassification `:293-307,586-630,1007-1038` | Claim fences a live session before cache lookup and influences cache validation, eviction, BA/LP selection and output handling; a forged owner claim can evade the foreign-hit path. | **MUST-GATE** before cache lookup or touching the entry. |
+| C3 | Session-hit authority | `session_hit_authority`, `poll_descriptor/session_hit_authority.rs:179-214,399-483`; caller `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:1463-1473` | The current arrival identity is compared with recorded session identity to classify Owner/Foreign; it does not inherit proof from the session. | **MUST-GATE** every hit on the current packet's auth verdict before adjudication. |
+| C4 | Flow-cache seed | `stage_flow_cache_seed`, `poll_descriptor/flow_cache_seed.rs:32,254-260`; caller `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:11228-11231` | Claim can stamp a cached decision/session under the wrong zone. Cache seed stores only stable `CacheResolution`, never per-packet verdict, provenance or tag. | **MUST-GATE** before seed; key by full claim identity. |
+| C5 | Flow-cache preflight, lookup and reclassification | `stage_flow_cache_hit`, `poll_descriptor/flow_cache_hit.rs:139-204`; cache preflight/reclassification `:293-307,586-630,1007-1038` | Claim fences a live session before cache lookup and influences cache validation, eviction, BA/LP selection and output handling; cached provenance could launder a later packet or alias V2 scopes. | **MUST-GATE** each packet before cache lookup/touch; current verdict and full current identity must match the stable cache resolution. |
 | C6 | Fragment-association lookup/install | `frag_ingress_authority_with_nat_scope`, `nat64_install_forward_fragment_assoc`, `nat64_consult_forward_fragment_assoc`, `same_family_or_plain_install_forward_fragment_assoc`, `same_family_or_plain_consult_forward_fragment_assoc`, `poll_descriptor/frag_assoc.rs:42-98,126-220,246-369`; callers `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:4497-4521,6795-6801,7893-7920,8920-8956` | `FragAuthority` includes the claimed zone/scope; non-first fragments can inherit a cached NAT/rewrite or delivery decision. | **MUST-GATE** before association key creation/lookup. |
 | C7 | Fragment-overlap membership/quota partition | `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:1778-1786`; `frag_ingress_zone`, `poll_descriptor/frag_assoc.rs:92-98`; deferred `retry_pending_neigh`, `neighbor_dispatch.rs:745-756` | Claim partitions overlap admission and quota state; a forged identity can separate or join fragment sets. | **MUST-GATE** before overlap key/accounting. |
 | C8 | Screen zone roles and SYN-cookie ACK screen | `screen_zone_roles`, `stage_screen_check_with_ambiguous`, `stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous`, `poll_stages.rs:1010,1100,1599`; flood/ACK callsites `:1133-1141` and `poll_descriptor/mod.rs:1693,4704` | Ambiguous claim contributes a stateless union-veto (extra drop, not extra admit); it can still DoS by naming a screened zone. | **MUST-GATE**; unverified claims never contribute a veto. |
@@ -85,11 +85,24 @@ Callsites shown in `poll_descriptor/mod.rs` are in
 | C14 | PBR / next-table / FBF selection | `ingress_route_table_override`, `forwarding/pbr.rs:89-233`; production callsites in `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:1887-1901,1978-1992,5277-5290,9099-9112,9371-9384` | Claimed zone and V2 scope choose a policy-routing table/filter, potentially changing destination reachability. Several calls bypass C2. | **MUST-GATE** before every PBR call. |
 | C15 | Pre-routing NAT scope | `prerouting_ingress_scope`, `poll_descriptor/prerouting_scope.rs:64-165`; caller `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:4815-4830` (before C2 shadow at `:5506`) | Claim/scope selects DNAT, static-NAT and NPTv6 source zone/interface/routing-instance matching. | **MUST-GATE** before scope resolution. |
 | C16 | Transit source/destination class (martian) checks | `transit_class_verdict`, `transit_source_class_drop`, `transit_destination_class_drop`, `poll_descriptor/session_admission.rs:361-410`; callers in `poll_descriptor/mod.rs:6047-6055,3003-3049,9908-9951,10507-10541`; cache `poll_descriptor/flow_cache_hit.rs:586-630`; retry `neighbor_dispatch.rs:498-506` | Arrival zone chooses the domain in which source/destination class checks run and can cause allow/drop. | **MUST-GATE** on miss/flowless; hit/cache/retry consume only an already verified claim. |
-| C17 | CoS BA trust and effective ingress interface | `ba_ingress_trust_for_packet`, `resolve_trusted_ba_class_queue_id`, `tx/cos_classify_ba.rs:33-47,88-129`; producer `stage_classify_fabric_ingress`, `poll_stages.rs:872`; cache hit `stage_flow_cache_hit`, `poll_descriptor/flow_cache_hit.rs:1007-1038` | V2 scope selects peer-unit classifier bindings and queue/LP; cache hits reclassify too. | **MUST-GATE** before setting/using `meta.fabric_ingress_ifindex`; PR-A authenticates scope, PR-B alone carries class. |
-| C18 | Pending-neighbor deferred provenance/retry | Store in `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:13473-13476`; consumer `retry_pending_neigh`, `neighbor_dispatch.rs:210,498-506,621-650,745-756`; fragment drop guard `poll_descriptor/frag_assoc.rs:1559-1562` | A parked packet re-derives routing domain, class, fragment/NAT/overlap decisions from its saved arrival zone. | **MUST-GATE** before parking; retain the verified identity with the request. |
+| C17 | CoS BA trust and effective ingress interface | `ba_ingress_trust_for_packet`, `resolve_trusted_ba_class_queue_id`, `tx/cos_classify_ba.rs:33-47,88-129`; `reclassify_cached_ba_queue_and_lp_rewrite`, `reclassify_cached_cos_lp_rewrite`, `tx/cos_classify.rs:922-1015`; producer `stage_classify_fabric_ingress`, `poll_stages.rs:872`; cache hit `stage_flow_cache_hit`, `poll_descriptor/flow_cache_hit.rs:1007-1038` | V2 scope selects peer-unit classifier bindings and queue/LP; queue/BA classification is a consumer, cache hits reclassify too. | **MUST-GATE** before setting/using peer ingress interface or classifier state; PR-A authenticates scope, PR-B alone carries class. |
+| C18 | Pending-neighbor deferred provenance/retry | Store in `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:13473-13476`; consumer `retry_pending_neigh`, `neighbor_dispatch.rs:210,498-506,621-650,745-756`; fragment drop guard `poll_descriptor/frag_assoc.rs:1559-1562` | `fabric_ingress_zone` saved in `PendingNeighPacket` is raw pre-gate provenance, not a verdict; retry reuses it for domain/class/fragment decisions. | **MUST-GATE** before parking and retry; purge claim-derived pending entries when arming `required`, and never infer auth from saved zone/MAC shape. |
 | C19 | Synthetic-source reply and neighbor-learn suppression | `is_synthetic_fabric_source_mac`, `forwarding/fabric.rs:194-210`; `ptb_reply_suppressed`, `icmp_ptb.rs:532-569`; `enqueue_reject_reply`, `poll_descriptor/reject_reply.rs:298`; `enqueue_syn_cookie_reply`, `poll_descriptor/cookie_reply.rs:262,289-295`; `learn_dynamic_neighbor_from_frame` / `learn_dynamic_neighbor_with_mac`, `neighbor_dispatch.rs:1394-1455` | Stamp **shape** suppresses generated replies/neighbor learning only; it cannot admit traffic. | Shape-only **SUPPRESS**. Required-mode stage-9 rejection prevents bad stamped claims reaching these paths; no independent zone verdict is needed. |
 | C20 | Fabric-arrival flag side effects | `stage_classify_fabric_ingress`, `poll_stages.rs:844-888`; flood skip `stage_screen_check_with_ambiguous`, `poll_stages.rs:1100-1141`; TTL expiry `packet_ttl_would_expire`, `icmp.rs:194-198`; TTL rewrite plan `rewrite_plan_eth_from_parts`, `frame/mod.rs:1153-1195` | Physical fabric/overlay provenance skips flood re-counting and peer-side TTL handling; this flag is not the claimed zone. | Not a stamp-auth gate. Preserve as transport behavior; explicitly residual for raw unstamped fabric traffic. |
 | C21 | Absent/unstamped fabric handling | `parse_zone_encoded_fabric_ingress_from_frame`, `frame/inspect.rs:2950-3042`; fallback in `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:1458-1462,1628-1656` | No stamp claim; `allow_unstamped_fabric_ingress` and the unique-established-NAT-match exception retain current behavior. | No tag verdict exists. Do not parse trailer-shaped bytes without a stamp prefix; existing policy remains authoritative. |
+| C22 | Input-filter/policer evaluation and source-zone attribution | `filter_log_ingress_zone_id`, `evaluate_non_pbr_input_filter`, `stage11_input_filter_terminal`, `evaluate_non_pbr_input_filter_policers_cached`, `policer_drop_action`, `poll_descriptor/filter.rs:149-170,203-337,344-350,754-773,2499-2528`; pre-gate PBR log `forwarding/pbr.rs:315-355` | Filter and input-policer verdicts are interface/filter/flow based; pre-gate raw/ambiguous identity can choose only the RT_FLOW source-zone attribution, not the filter/policer match. | **MUST-GATE** the per-packet audit zone separately: only verified and owner-RG-promoted identity may name a zone; otherwise use physical/logical fallback or 0. |
+| C23 | Cached input/output filter-log replay | `emit_cached_input_filter_log`, `emit_cached_output_filter_log`, `filter.rs:2305-2390`; callers `poll_descriptor/flow_cache_hit.rs:511,846,879`; `CachedInputFilterLog`, `flow_cache.rs:113-124` | Frozen log zones are replayed from cached descriptors/session metadata and contain no auth provenance. | **MUST-GATE** replay with current stage-9 evidence; derive current audit attribution anew, never treat cached zone as current authentication. |
+| C24 | Forward-request CoS/output-filter audit and deferred attribution | `apply_cos_drop_side_effects`, `forward_request.rs:459-469,572-704`; deferred retry `neighbor_dispatch.rs:896-907` | A CoS output drop logs its supplied `fabric_ingress_zone`; the normal path uses recorded session identity, while retry currently supplies `None` and under-attributes. | **MUST-GATE** audit attribution from current packet evidence; deferred retry retains verdict/generation or falls back, never reauthenticates from marker shape. |
+| C25 | RT_FLOW audit-sink provenance/width boundary | `emit_filter_log_event`, `event_emit.rs:505-560`; policy/host-inbound sinks `:168-238,245-312`; payload `event_stream/codec/rt_flow.rs:81-112` | Existing events have no stamp verdict/provenance field and truncate zone IDs to `u16`; filter events also set owner-RG to 0. Events cannot prove keyed authentication. | Not an admission gate. PR-A does not claim RT_FLOW is cryptographic evidence; unverified claims must not be named as authenticated source zones, and this truncation remains an explicit telemetry residual. |
+| C26 | Flowless pre-routing NAT ambiguous-provenance path | `flowless_base_resolution`, `poll_descriptor/flowless_verdict.rs:267-325`; `flowless_pre_routing_destination_nat`, `poll_descriptor/frag_assoc.rs:592-807`; caller `poll_descriptor/mod.rs:9791-9803` | Ambiguous identity is carried only as a fail-closed provenance flag; flowless NAT never promotes the withheld zone/scope into its match. | **MUST-GATE** the live marked claim at stage 9; a verified ambiguous claim still cannot scope flowless NAT, and later policy promotion does not retroactively translate. |
+| C27 | Flowless local-delivery/lo0 policy and log caller | `flowless_local_delivery_verdict`, `poll_descriptor/flowless_verdict.rs:77-208`; caller `poll_descriptor/mod.rs:10289-10310` | Host-inbound, junos-host policy and deny/log zones consume a caller-rebound `admission_zone_override`; the function signature itself cannot distinguish raw from gated input. | **MUST-GATE** at the call site with the current admitted shadow; never pass raw ambiguous identity. |
+| C28 | Session policy revalidation (recorded identity only) | `revalidate_zone_policy_on_session_hit`, `poll_descriptor/policy_revalidation.rs:1870-1923`; `FromZoneSource`, `:304-312`; sole call `poll_descriptor/mod.rs:3814-3845` | Revalidation consumes recorded `SessionMetadata.ingress_zone`/NAT scope and has no live stamp/verdict parameter; it cannot reverify the arriving claim. | Current packet's C3 verdict **MUST-GATE** before revalidation. Purge old claim-derived records on required-arm; never describe recorded-zone revalidation as stamp verification. |
+| C29 | Hit-authority raw-claim epoch | `session_hit_authority`, `poll_descriptor/session_hit_authority.rs:179-214`; callers `poll_descriptor/mod.rs:2823-2835,3086-3099` | The live input is `fabric_arrival_zone=ingress_zone_override.or(ambiguous_zone)`; ambiguous-equals-recorded can become Owner before promotion. | **MUST-GATE** on fresh current stage-9 auth and exact stored `FabricClaimIdentity` match; preserve Owner/Foreign policy, but never call it owner-RG promotion or stamp revalidation. |
+| C30 | ICMP quote match/promotion/queued-policy trust split | Match `try_reverse_embedded_icmp_error`, `embedded_icmp.rs:110-122`; promotion `:187-199`; queued gate `:599-606`; NAT64 `nat64_icmp_error.rs:55-72,130-151,262-274`; seed/builders `icmp_embed/mod.rs:153-160`, `icmp_embed/builders.rs:22,68,201,242,415,449,569,600,730-776` | Matchers use proved-only overrides; ambiguous promotion happens after finalization; queued policy is gated except peer-owned `FabricRedirect`; seed/builders use provenance flags and recorded expected zones. | **MUST-GATE** current full packet/claim before every match, reversal, promotion, queue and cache use; do not collapse these four trust stages. |
+| C31 | Shim/kernel PASS and cpumap boundary (explicit non-consumer) | `try_xdp_userspace`, `userspace-xdp/src/lib.rs:625-1174`; `kernel_pass.rs:126-197`; `uses_kernel_local_session_map_entry`, `bpf_map/mod.rs:76-140,2565-2600`; bare 5-tuple `lib.rs:2779-2790` | `PASS_TO_KERNEL`, shim local/control cpumap arms and non-IP XDP_PASS return before AF_XDP/stage 9. The PASS row has no ifindex/zone/domain/discriminator and is published only for single-zone, no-RI, peer-synced LocalDelivery state. | Not a stamp verdict path. Preserve/document this narrow state-based exception; test the exact demotions and never claim stage-9 auth covers a path that did not redirect. |
+| C32 | Stage-5 ARP/NDP before stage-9 verdict (explicit control exception) | `poll_binding_process_descriptor_in_view`, `poll_descriptor/mod.rs:1210-1228` | ARP recycles and NDP NA can learn/fall through before stage 9; this link-layer neighbor side effect does not consume a zone/scope verdict. | Not stage-9 gated today. Keep separate from zone-auth claims; C32 boundary cell must pin no claimed zone is installed and document any neighbor-learning residual. |
+| C33 | Generated-reply filter-log attribution | `emit_generated_reply_filter_log`, `poll_descriptor/filter.rs:2269-2302` | Locally generated reject/SYN-cookie/PTB records write egress zone in both fields and do not consume incoming stamp identity. | No claim gate; cell proves generated replies never borrow the ingress claim as source-zone attribution. |
+| C34 | Screen claimed-zone drop/alarm event | Claimed stateless veto `poll_stages.rs:1236-1260,1412-1445`; event sink `event_emit.rs:313-405` | A screened raw/ambiguous zone may cause an extra drop and screen event; it never adds admission, but the event does not carry stamp provenance. | **MUST-GATE** the current packet before screen use; no bad/missing claim may charge/log as a verified zone, and event reason is screening target, not authenticated ingress proof. |
 
 ### 2.1 Closing census for PR-A
 
@@ -100,13 +113,54 @@ grep -rn "ingress_zone_override\\|ambiguous_zone\\|ingress_nat_scope_ifindex\\|f
 grep -rn "ZoneEncodedFabricStamp\\|FabricIngressOutcome" userspace-dp/src --include='*.rs' | grep -v tests
 ```
 
-The only acceptable result is that every production use maps to C1-C21 or a
-new row. The central owner-RG helpers have production callers in
-`transit_policy.rs`; that centralization does **not** mean every raw claim
-consumer passes through those helpers.
+The only acceptable result is that every production use maps to C1-C34 or to
+an explicitly named boundary below. The central owner-RG helpers have
+production callers in `transit_policy.rs`; that centralization does **not**
+mean every raw claim consumer passes through those helpers.
+
+### 2.2 Explicit pre-stage-9 and audit boundaries
+
+The guarantee starts only for frames dispatched to the AF_XDP descriptor loop:
+
+- `userspace-xdp/src/lib.rs:625-1174` has `PASS_TO_KERNEL` session and
+  cpumap local/control arms plus non-IP `XDP_PASS` (ARP/LLDP); these return
+  before stage 9. `kernel_pass.rs:126-197` consumes no fabric stamp. The
+  session-map key is a bare 5-tuple (`lib.rs:2779-2790`); its map eligibility
+  (`bpf_map/mod.rs:76-140`) is deliberately restricted to a single zone,
+  domain 0, no routing instances/discriminator, peer-synced LocalDelivery
+  state. PR-A changes no shim/kernel code and does not claim stamp auth on
+  these bypasses. `C31`/`X14` must test exact allowed-row non-aliasing and
+  prove multi-zone, routing-domain, discriminator, reverse and unsynced rows
+  demote to AF_XDP, where required-mode stage 9 applies.
+- Stage-5 ARP/NDP runs before the stamp verdict at
+  `poll_descriptor/mod.rs:1210-1228`: ARP recycles; NDP NA can learn/fall
+  through. This is independent link-layer neighbor state, not a zone/scope
+  consumer; required mode does not authenticate it. No claimed zone may be
+  installed from this path. `C32` pins that exception and the residual.
+- RT_FLOW (`event_emit.rs:505-560`, `event_stream/codec/rt_flow.rs:81-112`)
+  has no auth-provenance field and truncates zones to `u16`. PR-A leaves that
+  schema unchanged. A per-packet `StampAuditContext` is separate from policy
+  authority: log a claimed zone only for a current `Verified` claim and, if
+  ambiguous, after existing owner-RG promotion; locally resolved config
+  identity may be logged as local. `disabled`, unverified `permissive`, and
+  unpromoted ambiguous claims use physical/logical fallback or 0 for audit
+  attribution even where legacy policy still consumes the claim. Cached and
+  deferred logs re-derive/use this current audit context, never a stored
+  verdict. Logs remain attribution only, not proof; per-link auth status and
+  counters are the proof. `C22-C25`, `C33` pin this rule.
+
+Re-run the census against all claim, logging and bypass spellings at PR-A
+implementation; every hit must map to C1-C34 or these explicit boundaries:
+
+```sh
+grep -rn "ingress_zone_override\\|ambiguous_zone\\|ingress_nat_scope_ifindex\\|fabric_arrival_zone\\|fabric_ingress_scope_ifindex\\|fabric_ingress_ifindex\\|fabric_ingress_zone\\|packet_fabric_ingress\\|fabric_link_ingress\\|FragAuthority\\|ingress_routing_domain\\|filter_log_ingress_zone_id\\|CachedInputFilterLog\\|emit_cached_.*filter_log\\|revalidate_zone_policy_on_session_hit" userspace-dp/src/afxdp --include='*.rs' | grep -v tests
+grep -rn "ZoneEncodedFabricStamp\\|FabricIngressOutcome" userspace-dp/src --include='*.rs' | grep -v tests
+grep -rn "PASS_TO_KERNEL\\|uses_kernel_local_session_map_entry\\|XDP_PASS" userspace-xdp/src --include='*.rs' | grep -v tests
+```
+
 ---
 
-## 3. TX seam proof — two late sinks, no single append seam
+## 3. TX seam proof — six submission seams, no single append seam
 
 ### 3.1 Stamp origins and all current egress paths
 
@@ -126,28 +180,46 @@ finalizer choose the outgoing authenticated marker. In `permissive`, it must
 also retain the incoming auth verdict so an invalid/missing claim is never
 re-signed (auth-laundered) on a repunt.
 
-The current TX architecture has **two distinct late sinks**, not one universal
-append site: `transmit_prepared_queue` (`tx/transmit/mod.rs:501-538`) applies
-the staged DSCP rewrite at `:525`, then verifies UMEM slices at `:526`; the
-owned-`TxRequest` `transmit_batch` (`:210-319`) applies DSCP at `:277-279`,
-checks capacity, then copies to UMEM. PR-A calls the same no-allocation
-finalizer after that last DSCP rewrite and before verification/copy at the
-appropriate sink. It must update `PreparedTxRequest.len` or `TxRequest.bytes`
-length and validate the additional 34 bytes. The output builders split across
-these two request types; an implementation that unifies them could replace
-the two hooks only if it proves every P1-P8 route passes the unified hook.
+There are **six descriptor-insertion seams**, not one common sink: the two
+generic transmitters plus four CoS exact-queue services that call
+`writer.insert` directly. Generic `transmit_batch` (`tx/transmit/mod.rs:210-464`,
+insert at `:375`) copies canonical owned bytes into UMEM after DSCP
+(`:277-319`); generic `transmit_prepared_queue`
+(`:501-537`, insert `tx/transmit/write.rs:26`) rewrites DSCP and verifies the
+existing UMEM frame. Exact CoS services insert separately at
+`cos/queue_service/service.rs:158,434,687,918`. A shared no-allocation
+finalizer core needs one late hook at each S1-S6 seam (§3.2); no single
+descriptor-insert hook covers them all.
 
+The owned `TxRequest.bytes` have no guaranteed 34-byte spare capacity, and
+their original length is the canonical request length. Finalize only the UMEM
+submission image: owned paths copy canonical bytes into a sufficiently large
+UMEM window then append there; prepared paths finalize the referenced UMEM
+frame and keep `PreparedTxRequest.len` canonical at rest. Use a fixed
+attempt-local effective-length sidecar for descriptors/accounting. Capacity
+must include the actual UMEM frame offset, not just `len + 34`.
 | # | Path and exact anchors | Current stamp/frame behavior | PR-A final-byte obligation |
 |---|---|---|---|
 | P0 | Request-level identity choice: `build_live_forward_request_from_frame_with_dynamic`, `forward_request.rs:207,287-333` | Preserves a validated V2 source MAC or resolves a fresh V1/V2 `src_mac`; no final bytes exist yet. | Carry full `StampContext`, provenance and verdict through the request. Do not tag here; never re-sign an unverified peer claim. |
-| P1 | Prepared/direct TCP segmentation: `segment_forwarded_tcp_frames_into_prepared`, `tx/tcp_segmentation.rs:4-19,348-371`; dispatcher `tx/dispatch/mod.rs` | Writes Ethernet, applies NAT/TTL/checksums, and makes a separate prepared UMEM frame per segment. | Carry one context per segment; finalize in `transmit_prepared_queue` after DSCP and before UMEM verification. Segment to fabric MTU minus 34. |
-| P2 | Copy TCP segmentation: `segment_forwarded_tcp_frames_from_frame`, `frame/tcp_segmentation.rs:122`; immediate dispatch caller `tx/dispatch/mod.rs:1611-1681`; deferred caller `neighbor_dispatch.rs:970-1010` | Builds an owned frame per segment, applies NAT, and enqueues `TxRequest`; deferred retry currently has no stamped fabric context (§3.2). | Finalize each stamped segment in `transmit_batch` after DSCP; reserve 34 bytes in each owned buffer. Keep the retry negative cell; never mint a claim there without a context. |
-| P3 | Dispatch in-place rewrite: `tx/dispatch/mod.rs:1778-1817`; `rewrite_forwarded_frame_in_place`, `frame/mod.rs:1536`; plan/commit `frame/mod.rs:1153,1215` | Rewrites ingress UMEM in place, including NAT and final Ethernet header, then queues prepared TX. | Carry context/space to the prepared sink; finalize after DSCP, update length and check the UMEM chunk bound before verification. |
-| P4 | Direct TX: `tx/dispatch/mod.rs:1924-2037` → `build_forwarded_frame_into_from_frame`, `frame/build/mod.rs:28` | Writes into a popped target UMEM frame; NAT is applied inside the builder; queues prepared TX. | Carry context to the prepared sink; finalize after DSCP, update length and include the tail in `tx_frame_capacity()`. |
-| P5 | Copy fallback: `enqueue_copy_fallback_frame`, `tx/dispatch/mod.rs:747-820` → `frame/mod.rs:959` / `frame/build/mod.rs` | Builds an owned pooled copy; optional wrappers can change it after the inner builder, then queues `TxRequest`. | Finalize in `transmit_batch` after DSCP; reserve 34 bytes in the pool/buffer up front, with no per-packet growth allocation. |
-| P6 | NAT64 forwarding: `build_nat64_forwarded_frames`, `frame/mod.rs:381`; caller `tx/dispatch/mod.rs:764-820`; owned enqueue `:908-930` | Rebuilds IP family/address/ports and may fragment; each translated frame becomes an owned `TxRequest`. | Finalize in `transmit_batch` after DSCP and after translation/final fragmentation; one tag per emitted frame, reduced MTU and 34-byte capacity. |
-| P7 | Flow-cache inline hit: `stage_flow_cache_hit`, `poll_descriptor/flow_cache_hit.rs:139,1233-1255`; descriptor writer `apply_rewrite_descriptor`, `frame/rewrite/mod.rs:52-77` | Bypasses `enqueue_pending_forwards`; descriptor and in-place fallback write final Ethernet/IP headers inline, then queue prepared TX. | Carry context in the cached decision/request; finalize at the prepared sink after DSCP. Never cache a per-packet tag. |
-| P8 | Prebuilt embedded ICMP: `build_nat_reversed_icmp_error_v4/v6` and `build_snat_outbound_icmp_error_v4/v6`, `icmp_embed/builders.rs:7,186,400,554`; `try_translate_nat64_icmp_error`, `poll_descriptor/nat64_icmp_error.rs:38`; common `queue_prebuilt_embedded_icmp_error`, `poll_descriptor/embedded_icmp.rs:355-513`; prebuilt dispatch `tx/dispatch/mod.rs:1246-1367` | Finished translated frames enter `PendingForwardRequest`, then dispatch as owned `TxRequest`; later egress DSCP rewrite still changes the wire header. | Carry context through queue and dispatch; finalize in `transmit_batch` after DSCP, not in the earlier common queue. Reserve space and append/MAC once per output. |
+| P1 | Prepared/direct TCP segmentation: `segment_forwarded_tcp_frames_into_prepared`, `tx/tcp_segmentation.rs:4-19,348-371`; dispatcher `tx/dispatch/mod.rs` | Writes Ethernet, applies NAT/TTL/checksums, and makes a separate prepared UMEM frame per segment. | Carry one context per segment; finalize at the actual prepared submission seam (S2/S5/S6) after its last DSCP rewrite. Segment to fabric MTU minus 34. |
+| P2 | Copy TCP segmentation: `segment_forwarded_tcp_frames_from_frame`, `frame/tcp_segmentation.rs:122`; immediate caller `tx/dispatch/mod.rs:1611-1681`; deferred caller `neighbor_dispatch.rs:970-1010` | Builds an owned frame per segment, applies NAT, and enqueues `TxRequest`; neighbor retry is an ordinary `ForwardCandidate`, not a stamp mint. | Finalize each stamped segment at the actual owned submission seam (S1/S3/S4); never mint/inherit stamp context on neighbor retry. |
+| P3 | Dispatch in-place rewrite: `tx/dispatch/mod.rs:1778-1817`; `rewrite_forwarded_frame_in_place`, `frame/mod.rs:1536`; plan/commit `frame/mod.rs:1153,1215` | Rewrites ingress UMEM in place, including NAT and final Ethernet header, then queues prepared TX. | Carry context to S2/S5/S6; finalize after DSCP, keep queued length canonical and check the UMEM frame-bound tail. |
+| P4 | Direct TX: `tx/dispatch/mod.rs:1924-2037` → `build_forwarded_frame_into_from_frame`, `frame/build/mod.rs:28` | Writes into a popped target UMEM frame; NAT is applied inside the builder; queues prepared TX. | Carry context to S2/S5/S6; finalize after DSCP with an attempt-local effective length and true in-frame bound. |
+| P5 | Copy fallback: `enqueue_copy_fallback_frame`, `tx/dispatch/mod.rs:747-820` → `frame/mod.rs:959` / `frame/build/mod.rs` | Builds an owned pooled copy; optional wrappers can change it after the inner builder, then queues `TxRequest`. | Finalize after all wrappers/DSCP at S1/S3/S4, only in the UMEM submission copy; no `PooledBuffer` growth or per-packet allocation. |
+| P6 | NAT64 forwarding: `build_nat64_forwarded_frames`, `frame/mod.rs:381`; caller `tx/dispatch/mod.rs:764-820`; owned enqueue `:908-930` | Rebuilds IP family/address/ports and may fragment; each translated frame becomes an owned `TxRequest`. | Finalize at actual owned S1/S3/S4 submit seam after translation/final fragmentation; one tag per output fragment, reduced MTU, and UMEM tail capacity. |
+| P7 | Flow-cache inline hit: `stage_flow_cache_hit`, `poll_descriptor/flow_cache_hit.rs:139,1233-1255`; descriptor writer `apply_rewrite_descriptor`, `frame/rewrite/mod.rs:52-77` | Bypasses `enqueue_pending_forwards`; descriptor and in-place fallback write final Ethernet/IP headers inline, then queue prepared TX. | Build an ephemeral `StampContext` only from this packet's current stage-9 evidence plus validated cache-stable resolution; never carry auth verdict/context in the cached entry. Finalize at actual S2/S5/S6 submit seam. |
+| P8 | Prebuilt embedded ICMP: `build_nat_reversed_icmp_error_v4/v6` and `build_snat_outbound_icmp_error_v4/v6`, `icmp_embed/builders.rs:7,186,400,554`; `try_translate_nat64_icmp_error`, `poll_descriptor/nat64_icmp_error.rs:38`; common `queue_prebuilt_embedded_icmp_error`, `poll_descriptor/embedded_icmp.rs:355-513`; prebuilt dispatch `tx/dispatch/mod.rs:1246-1367` | Finished translated frames enter `PendingForwardRequest`, then dispatch as owned `TxRequest`; later egress DSCP rewrite still changes the wire header. | Carry context through queue and dispatch; finalize at actual owned S1/S3/S4 submit seam after all rewrites; reserve UMEM tail, not owned-vector capacity. |
+
+### 3.1.1 Six descriptor-submission seams
+
+| Seam | Exact submit implementation | Finalization placement and retry obligation |
+|---|---|---|
+| S1 | Generic owned `transmit_batch`, `tx/transmit/mod.rs:210-464`, `writer.insert` `:375` | DSCP has mutated `req.bytes`; copy its canonical bytes to UMEM, finalize the copy, and use effective-length sidecar. Owned request stays canonical; on zero/partial insertion only unaccepted UMEM scratch is freed, requests restore unchanged. |
+| S2 | Generic prepared `transmit_prepared_queue`, `tx/transmit/mod.rs:501-537`, stage/rewrite/verify/write `tx/transmit/{stage,rewrite,verify,write}.rs:28-58,17-59,18-48,21-50` | Finalize after DSCP and before effective-length verification/descriptor write. On zero insertion or unaccepted partial tail, normalize retained UMEM marker and restore canonical request length; never rewrite accepted prefix. |
+| S3 | CoS exact local FIFO, drain `cos/queue_service/drain.rs:37-141`, service/insertion `cos/queue_service/service.rs:12-260` (`writer.insert` `:158`) | Peek/copy to UMEM scratch, then DSCP and finalization; queue item stays canonical. Zero insertion releases scratch; partial settle commits accepted queue prefix and discards unaccepted scratch. |
+| S4 | CoS exact local flow-fair, drain `cos/queue_service/drain.rs:144-337`, service/insertion `cos/queue_service/service.rs:291-568` (`writer.insert` `:434`) | DSCP is applied to the popped `TxRequest` before UMEM copy; finalize only the copy and use effective-length sidecar. Queue restore leaves canonical source marker/length; do not grow pooled bytes. |
+| S5 | CoS exact prepared FIFO, drain `cos/queue_service/drain.rs:339-443`, service/insertion `cos/queue_service/service.rs:571-802` (`writer.insert` `:687`) | Finalize the retained UMEM frame after DSCP. Normalize source marker and keep canonical length for every unaccepted request before clear/requeue. |
+| S6 | CoS exact prepared flow-fair, drain `cos/queue_service/drain.rs:446-620`, service/insertion `cos/queue_service/service.rs:805-1048` (`writer.insert` `:918`) | Finalize after DSCP; accepted prefix becomes kernel-owned and immutable, while every unaccepted tail request is normalized before queue restore. |
 
 **Explicit non-paths / deferred obligations:**
 
@@ -164,56 +236,93 @@ the two hooks only if it proves every P1-P8 route passes the unified hook.
   `tx/dispatch/mod.rs:596`). Mirror clones go to the analyzer binding, not
   the peer fabric.
 
-**Verdict:** P1-P8 are distinct assembly families split between two late TX
-sinks. A shared append/MAC helper is reusable, but it needs one hook per sink;
-there is no single current seam. Carry context through all listed request
-types and require exactly one post-DSCP finalization for every stamped output.
-The stale candidate's assumed “single fabric-redirect build chokepoint” is
-refuted. Each path's structural/output cell is required (§10).
+**Verdict:** P1-P8 are assembly/output paths; each reaches exactly one
+submission seam S1-S6, selected by generic or CoS queue routing. A shared
+finalizer core is reusable, but every actual descriptor insertion needs its
+own late hook; no current common hook covers the direct exact services. Keep
+request bytes canonical, finalize the UMEM submission image after final DSCP,
+and use effective lengths only in attempt scratch. The stale candidate's
+assumed “single fabric-redirect build chokepoint” is refuted (§13).
 
 ### 3.2 Carry metadata once; sign only the final assembled output
 
-At stamp mint, attach a small `StampContext` to the resolution/decision:
-`stamp_kind`, full resolved `zone_id_u32`, V2 `scope_id` (zero for V1),
-stable `fabric_ordinal`, local `sender_node_id`, direction, the PR-A
-absent-class marker, ingress auth verdict, and provenance (`LocallyResolved`,
-`VerifiedPeerClaim`, or `UnverifiedPeerClaim`). Propagate it through
-`PendingForwardRequest`, `RewriteDescriptor`, cache entries and prebuilt
-requests. Never put a punt-time tag in those objects: packet bytes, NAT,
-segmentation and NAT64 change later.
+At each packet's stamp mint, attach a small per-packet `StampContext` to its
+resolution/decision: `stamp_kind`, full resolved `zone_id_u32`, V2 `scope_id`
+(zero for V1), stable `fabric_ordinal`, local `sender_node_id`, direction,
+the PR-A absent-class marker, the current `auth_policy_generation`, stage-9
+auth verdict and provenance (`LocallyResolved`, `VerifiedPeerClaim`, or
+`UnverifiedPeerClaim`). Carry it through `PendingForwardRequest`,
+`RewriteDescriptor` and prebuilt requests; never put a punt-time tag in them.
+Derive a separate `StampAuditContext` for filter/policy log attribution.
+Neither verdict nor audit context enters a flow-cache entry.
 
-There are two late hooks, one for each current TX request type. On the prepared
-path, call a shared no-allocation
-`finalize_fabric_stamp(out, &mut len, context, current_mode,
-current_peer_capability, keyring, wall_minute)` after
-`rewrite::apply_dscp_rewrites_to_staged` and before
-`verify::verify_umem_slices_for_staged` in `transmit_prepared_queue`
-(`tx/transmit/mod.rs:525-526`). It appends in the staged UMEM slice, validates
-`offset + len + 34 <= chunk_end`, and updates `PreparedTxRequest.len` before
-verification/write. On the owned path, call that same core in
-`transmit_batch` after `apply_dscp_rewrite_to_frame` and before its capacity
-check/copy (`tx/transmit/mod.rs:277-319`); require 34 bytes of pre-reserved
-capacity in `TxRequest.bytes`, append without growth allocation, and update
-its length before capacity validation.
+The current code has a required cache-key gap: `stage_flow_cache_seed`
+(`poll_descriptor/flow_cache_seed.rs:32-282`) receives no V2 scope, and
+`flow_cache_hit.rs:139-432,585-1083` drops the scope before cache-hit
+authority. The current `SessionKey` plus physical/logical ingress ifindex and
+generation/RG fences (`flow_cache.rs:199-401,533-892`) do not distinguish two
+V2 scopes in the same lookup. PR-A **MUST** close that alias: add a compact
+stable `FabricClaimIdentity` to both session and flow-cache lookup identity,
+including stamp kind, full `zone_id_u32`, V2 `scope_id_u24` plus its resolved
+scope identity, stable ingress ordinal, sender node and direction (a distinct
+sentinel for unscoped traffic). The identity carries no verdict, key, epoch,
+trailer or per-packet evidence. An old unscoped session/cache record cannot
+satisfy a scoped lookup; treat it as a miss and build the scoped identity.
 
-At either hook the finalizer reads the **current** immutable mode/capability
-state, not a stale request copy. If it emits an authenticated stamp, it first
-rewrites the legacy source marker to the distinct authenticated V1/V2 marker
-(§4.1), then MACs the final bytes and appends exactly 34 bytes. `disabled`
-leaves today's marker/bytes unchanged. `permissive` can sign local claims and
-verified incoming claims, but MUST preserve an unverified incoming claim as
-legacy marker without a trailer; otherwise it launders an unauthenticated
-zone/scope into a valid signature. A capable peer in `required` then drops
-that legacy claim. `required` MUST drop a stamped output rather than emit a
-legacy claim if provenance is unverified or capability, primary key, clock,
-space or PRF is unavailable. No path may enqueue an auth marker without its
-trailer or lose `StampContext`.
+A cache entry may retain only `CacheResolution`: stable routing/egress rewrite
+data and the matching stable `FabricClaimIdentity`, never `StampContext`.
+Every packet still runs stage 9 first. Before session/cache lookup, validation,
+eviction, reclassification, hit use or P7 output, require the *current packet's*
+verdict and full current zone/scope/link identity to match the stable identity;
+cache evidence never substitutes for missing, bad, stale or unverified
+evidence. A hit constructs an ephemeral `StampContext` from current stage-9
+evidence plus the exact validated resolution. This prevents a verified seed
+from authorizing a later unmarked/differently-scoped packet and prevents a
+cached stamp from authorizing TX.
 
-Every P1-P8 path carries its context to exactly one of these hooks, after all
-NAT, family translation, segmentation, fragmentation, TTL/checksum, final
-Ethernet and egress-DSCP rewrites. This is one reusable finalizer core, but
-two distinct call sites and buffer-boundary contracts, not one common append
-seam.
+One shared no-allocation core runs at all six descriptor-insertion seams
+S1-S6. For each attempt, sample a coherent `StampAttemptEnv` from the current
+worker `ForwardingState`: current mode and `auth_policy_generation`, peer
+capability/incarnation, primary epoch key, wall minute, local node ID, and
+egress-ifindex→stable-ordinal mapping. Thread that environment through
+`drain_pending_tx` to both generic transmitters and through `drain_shaped_tx`
+to all four exact services; current TX sinks do not receive this state today.
+Never save mode, capability, keys, epoch, ordinal guess, or finalized decision
+in a queued request.
+
+At S1 generic-owned, DSCP has already changed `req.bytes`; copy its canonical
+bytes to the UMEM submission window and finalize there. `TxRequest.bytes`
+remains unchanged and need not have spare capacity. At S2 generic-prepared,
+finalize after staged DSCP and before UMEM verification. At S3-S6 exact CoS,
+finalize after each service's last DSCP mutation, before its direct
+`writer.insert`; the exact paths and restore rules are in S1-S6.
+On every path compute effective length in fixed scratch, check the true
+in-frame UMEM tail bound, and build the descriptor from that effective length.
+
+If a request carries a valid stamp context, signing uses the sampled current
+environment, not enqueue-time key/mode/capability/epoch. `disabled` emits the
+canonical legacy marker without trailer. `permissive` signs only local or
+currently verified peer claims and otherwise emits canonical legacy bytes;
+it never upgrades an unverified peer claim. `required` drops rather than
+downgrades if current provenance is unverified or peer capability, primary
+key, clock, identity, route/ordinal, space or PRF is unavailable. A
+`stamp: None` request is never reinterpreted as a claim by a TX sink.
+
+
+Before signing, finalize all address/family/port/fragment/TTL/checksum/Ethernet
+and egress-DSCP rewrites. No checksum/VLAN/DSCP hardware offload may change an
+authenticated byte after finalization; either finish that mutation in software
+first or disable it for stamped traffic. Normalize an exact stale
+authenticated marker back to its canonical legacy marker before each retry.
+The core MACs the final output bytes and writes exactly one 34-byte trailer in
+UMEM tail space, then exposes the attempt-local effective length. Never mutate
+`TxRequest.bytes` or an at-rest `PreparedTxRequest.len`. An authenticated
+marker is never visible without its matching trailer. If a context-bearing
+frame's source marker does not match that context, drop it in every mode.
+
+Every P1-P8 output reaches exactly one S1-S6 finalizer after all final
+transformations. These are six distinct callsites and buffer / restore
+contracts, not one common append seam.
 
 ### 3.3 Punt-time vs final wire tuple: punt-time equivalence is disproved
 
@@ -228,13 +337,13 @@ the prebuilt request is queued. The owned path then applies egress DSCP in
 and receiver must bind the bytes actually emitted, not a prediction of
 whether NAT will run.
 
-The tag therefore binds the **final wire L2/IP/L4 prefix** (§5), computed
-after all NAT, segmentation, family translation, fragmentation, TTL/checksum,
-Ethernet and egress-DSCP rewrites for that output frame. The receiver sees
-those same wire bytes. NAT-final-tuple cell X1 exercises every applicable
-path (including SNAT/DNAT/port rewrite, fabric-NAT suppression, NAT64,
-prebuilt embedded errors, egress DSCP and segments); a punt-time tuple design
-fails that cell.
+The tag therefore binds the **final egress L2/VLAN header and complete
+IP-declared datagram** (§5), computed after NAT, segmentation, family
+translation, fragmentation, TTL/checksum, Ethernet and egress-DSCP rewrites
+for that output frame. The receiver sees those same bytes. NAT-final-tuple
+cell X1 exercises every applicable path (including SNAT/DNAT/port rewrite,
+fabric-NAT suppression, NAT64, prebuilt embedded errors, egress DSCP and
+segments); punt-time tuple binding fails that cell.
 
 ### 3.4 Trailer size, MTU and buffer obligations
 
@@ -247,12 +356,74 @@ hit path (`flow_cache_hit_requires_pending_forward`) that can bypass dispatch
 PTB. This prevents frames legal at the old MTU from exceeding the peer's
 physical MTU.
 
-Every prepared UMEM chunk and owned buffer/pool must have 34 bytes of
-pre-reserved tail capacity; neither late hook may allocate per packet. Both
-hooks check `len + 34 <= tx_frame_capacity()` and the UMEM offset/chunk bound,
-then count/drop oversize rather than truncate. Oversize counters are per-link,
-aggregated by stable fabric ordinal. R9/X2 cover both hooks and every P1-P8
-route; X3 verifies every resulting segment.
+Every UMEM submission window must reserve the 34-byte tail; neither the
+finalizer nor `TxRequest.bytes` may allocate or grow a pooled buffer per
+packet. Check `(offset & (UMEM_FRAME_SIZE - 1)) + canonical_len + 34 <=
+UMEM_FRAME_SIZE` before mutation, then account for the effective trailer
+length in the descriptor and sent-wire bytes. Oversize counters are per-link,
+aggregated by stable fabric ordinal. R9/X2 cover all six seams and P1-P8;
+X3 verifies each resulting segment.
+
+### 3.5 Retry-state machine (canonical requests; per-attempt UMEM image)
+
+Queued requests retain canonical packet bytes/length plus the packet's small
+`StampContext`, including the auth-policy generation at stage-9 evaluation.
+`TxRequest.bytes` has no guaranteed 34-byte spare capacity, and
+`PreparedTxRequest.len` is not enlarged at rest. No mode, peer capability,
+key, epoch, finalized marker, trailer or effective length is stored as an
+at-rest decision. `StampAttemptEnv` is sampled from one coherent current
+snapshot at each S1-S6 submit attempt.
+
+For S1/S3/S4 owned requests, canonical source bytes and length remain
+unchanged; finalization mutates only the UMEM submission copy, whose scratch
+length is the effective descriptor length. For S2/S5/S6 prepared requests,
+the frame already resides in UMEM: `req.len` remains the canonical length,
+while effective length is attempt-local. Before every retry, normalize an
+exact authenticated source marker back to its legacy marker and ignore bytes
+beyond canonical length. Reapply the current environment; never append to or
+re-MAC an old trailer.
+
+```
+QueuedCanonical -> AttemptImage -> writer.insert(n)
+  n == 0: restore all requests; free owned scratch; normalize retained prepared UMEM
+  0 < n < staged: accepted prefix is committed/immutable; normalize only tail
+  n == staged: all descriptors committed/immutable
+```
+
+`WriteTx::insert` returns the accepted descriptor count; it does not return an
+error (`xsk_ffi.rs:1110-1148`). A partial count commits the prefix, which is
+kernel-owned and MUST NOT be rewritten even if completion has not been reaped.
+Only unaccepted prepared-frame tails are normalized before queue restore.
+Owned paths recycle their UMEM scratch and restore unchanged canonical
+`TxRequest`s. Exact local FIFO likewise discards unaccepted scratch; exact
+prepared FIFO/flow-fair must normalize each retained unaccepted UMEM frame.
+These are the six distinct contracts in S1-S6, not an assumed all-or-nothing
+sink.
+
+Preflight before any mutation: validate the exact source-marker/context pair,
+require the request generation to equal the current attempt environment
+(otherwise drop stale queued work; never revalidate/re-sign it), reject
+`required_arming`, and check current mode/provenance/capability/key/clock/
+ordinal plus `(offset & (UMEM_FRAME_SIZE - 1)) + canonical_len + 34 <=
+UMEM_FRAME_SIZE`. Acquire the full mutable window and compute the complete
+tag/trailer before writing either marker or trailer. Commit the authenticated
+marker and effective length only after the complete trailer is materialized.
+Generic and exact queue code must use effective length for descriptors and
+wire-byte accounting, but keep queue admission/CoS budget lengths canonical.
+
+Every retry re-samples mode, capability/incarnation, primary key, wall minute,
+node ID and egress ordinal. If any changes between attempts, discard/ignore
+the prior unaired trailer and either sign one current trailer, emit canonical
+legacy bytes in an eligible permissive/disabled outcome, or drop in required.
+Zero-insertion and partial-insertion fault injection at **all six seams** must
+prove exact output bytes, one current trailer at most, no mutation of committed
+prefix, and canonical restored tails. `TxRequest.bytes` remains unchanged;
+prepared lengths and source markers are canonical at every queue boundary.
+
+Pending-neighbor retry is distinct from TX-ring retry. It creates fresh
+ordinary requests with `stamp: None`, and cannot mint a peer stamp. The
+required-arm purge barrier (§9.1) must remove a parked legacy/unverified
+claim before retry; a racing retry must observe the new generation and drop.
 
 ---
 
@@ -309,8 +480,9 @@ a legacy identity.
 The trailer adds 34 B on the fabric hop only. **Sender MUST never truncate**:
 if `frame_len + 34 > egress binding frame capacity` (UMEM frame /
 `tx_frame_capacity()`, `tx/dispatch/mod.rs:84-90`), drop + count
-(`fabric_stamp_trailer_oversize_drops`, per-link, aggregated by stable fabric ordinal). Arming `required`
-strict-warns when fabric parent MTU − 34 < largest member MTU. Typical jumbo
+(`fabric_stamp_trailer_oversize_drops_total`, per-link, aggregated by stable
+fabric ordinal). Arming `required` strict-warns when fabric parent MTU − 34 <
+largest member MTU. Typical jumbo
 fabrics are unaffected; a 1500-B fabric pays visibly, in the counter, never
 silently.
 
@@ -329,10 +501,10 @@ not seamless interoperability.
 
 ---
 
-## 5. Tag input (canonical identity plus final wire tuple)
+## 5. Tag input (canonical identity plus complete final wire datagram)
 
 ```
-tag = PRF128(K_epoch, DOM || ctx || class_wire[8] || frame_prefix)
+tag = PRF128(K_epoch, DOM || ctx || class_wire[8] || authenticated_bytes)
 DOM        = "xpf-fabric-stamp-v3" (fixed)
 ctx        = version(1)=3 || flags(1) || stamp_kind(1: 1=V1, 2=V2)
              || sender_node_id(1: local ConfigSnapshot.node_id)
@@ -344,22 +516,39 @@ ctx        = version(1)=3 || flags(1) || stamp_kind(1: 1=V1, 2=V2)
              || scope_id_u24_be (V2 scope; 0 for V1)
              || minute_epoch_u32_be
              || class_semantic_u16_be (PR-A: 0xffff means absent)
-             || final_frame_prefix_len_u16_be
+             || authenticated_extent_len_u32_be
 class_wire = the exact eight bytes at trailer[26..34]; PR-A MUST send zeroes
              and include those zero bytes in the tag input
-frame_prefix = final egress bytes from frame[0 .. l3_offset+ip_header_len+8]:
+authenticated_bytes = frame[0 .. l3_offset + ip_declared_datagram_len]:
              destination || authenticated source marker || VLAN/EtherType ||
-             final IP header (including IPv6 extension/fragment headers) ||
-             first 8 bytes after the final IP header; for a non-first fragment
-             these are fragment-payload bytes
+             final IP header (including all IPv6 extension/fragment headers) ||
+             the entire IP-declared payload (all transport, ICMP quote,
+             GRE, and fragment bytes); excludes Ethernet pad, FCS and XPF3
 ```
 
-`ip_header_len` is parsed from the final output bytes through the validated
-IPv4 header or IPv6 extension chain to the transport/fragment payload; it is
-not copied from ingress metadata. Thus the bytes bind final source/destination
-addresses, protocol, available ports/ICMP identifiers, fragment identity,
-final L2/VLAN, and the direction/link context. This is the final wire tuple,
-not the punt-time tuple.
+`ip_declared_datagram_len` is derived from the final output bytes, not ingress
+metadata: IPv4 `total_length` or IPv6 40-byte base header plus payload length.
+IPv6 jumbograms are unsupported in PR-A: `required` treats a jumbogram as
+malformed/unsupported and drops; `permissive` counts but retains only legacy
+claim behavior without signing; `disabled` keeps the existing path. The
+finalizer authenticates exactly the L2/VLAN header plus the complete declared
+IP datagram; Ethernet padding and FCS are outside the contract. The XPF3
+trailer is appended after the IP datagram and remains outside IP length.
+
+This binds final source/destination addresses, protocol, all transport/ICMP
+bytes, fragment identity and full fragment payload, final L2/VLAN and the
+direction/link context. NAT, ICMP embedding/translation, DSCP, length fields
+and checksums must be final before the MAC is computed. No checksum offload or
+later device rewrite may mutate covered bytes after signing; where hardware
+would do so, finalize the same checksum in the signed UMEM image or disable
+that offload for the stamped frame.
+
+`authenticated_extent_len_u32_be` is the exact byte length above, with checked
+addition and no truncation. The receiver parses the final L2/VLAN and IP
+lengths from the wire image, requires the declared datagram to fit before the
+fixed-tail trailer, and verifies the exact same range. This includes the full
+IPv6 extension chain and payload, not merely the first eight payload bytes.
+
 
 `fabric_ordinal` is not the index of `ForwardingState.fabrics`: add an
 explicit 0/1 ordinal to Go `FabricSnapshot` from the primary/secondary
@@ -371,21 +560,21 @@ If the same low-16 V1 stamp resolves to different full zone IDs on the two
 nodes, the tag fails closed; PR-A requires zone-ID/scope-map parity for
 `required`, rather than treating a peer-only alias as authenticated.
 
-The final frame prefix includes the *authenticated* source marker, not the
-legacy V1/V2 marker. The exact `class_wire` bytes are MAC-bound even in PR-A;
-the absent semantic sentinel is not a claim that the zeroed wire bytes are
-`0xffff`. PR-B may populate them only after A; a modified class field then
-fails verification. Payload bytes beyond this prefix are deliberately not
-authenticated (§8.2).
-
+The authenticated byte range includes the *authenticated* source marker, not
+the legacy V1/V2 marker. The exact `class_wire` bytes are MAC-bound even in
+PR-A; `0xffff` is the semantic absent sentinel while trailer class bytes are
+zero. PR-B may populate them only after A; any class-byte change fails
+verification. The only intentionally unbound frame bytes are Ethernet
+padding/FCS and the separately stated replay/L2-access residuals (§8.2).
 The minute epoch is also clear in the trailer header so the receiver can
 reject stale frames before invoking the PRF; its signed copy in `ctx` makes
-editing the clear epoch fail. A sender must not emit if the final frame cannot
-provide the required validated header prefix. The receiver verifies every
-prefix-matched frame, including non-first fragments; each emitted fragment
-has its own tag over its final IP header and first eight fragment-payload
-bytes. Fragment association remains an additional stateful decision, not a
-substitute for per-frame tag verification.
+editing the clear epoch fail. A sender must not emit if it cannot parse and
+bound the final IP-declared extent. The receiver verifies every
+marker-matched frame, including each non-first fragment; each emitted
+fragment has its own tag over its final IP header and all declared fragment
+payload bytes. A terminal fragment with only 1–7 payload bytes is covered
+exactly like any other fragment. Fragment association remains an additional
+stateful decision, not a substitute for per-frame tag verification.
 
 ---
 
@@ -401,8 +590,9 @@ with no trailer is `Missing`, not `NoClaim`. It records
 `stamp_auth: Disabled | NoClaim | Verified | Missing | Malformed | BadTag |
 StaleEpoch | KeyUnavailable | ClockUnavailable`, plus the stable ingress
 ordinal in `FabricIngressOutcome`. Run the full PRF for every marked frame in
-`permissive`/`required`: C2-C18 consume claims on paths before the session-miss
-gate, so miss-only verification is unsound.
+`permissive`/`required`: C1-C34 consume claims, including hit/cache and log
+replay paths before the old session-miss gate, so miss-only verification is
+unsound.
 
 ### 6.2 Mode semantics at the verdict boundary
 
@@ -437,12 +627,14 @@ contribute the screen union-veto. No hit/cache/fragment path gets a bypass.
 ### 6.3 Failure accounting — per fabric link, never aggregate-only
 
 Add per-link counters carried through binding status and aggregated by the
-stable configured fabric ordinal, then exported with a bounded `fabric` label
-(at most the configured two links). `BindingStatus` itself is per binding,
-not per link; aggregation must preserve the ordinal and keep fab0/fab1
-independently visible. Add Prometheus descriptors beside
-`pkg/api/metrics_descriptors_userspace_drops.go:270-287` and extend the Go/Rust
-binding status schema beside `pkg/dataplane/userspace/protocol_binding.go:118-120`.
+stable configured fabric ordinal, never by the current slice/index of
+`ForwardingState.fabrics`. The ordinal remains fab0/fab1 through Go sorting,
+skipped/missing slots, link removal/re-addition and failover. `BindingStatus`
+itself is per binding, not per link; aggregation must preserve the ordinal and
+keep both configured links independently visible. Add Prometheus descriptors
+beside `pkg/api/metrics_descriptors_userspace_drops.go:270-287` and extend the
+Go/Rust binding status schema beside
+`pkg/dataplane/userspace/protocol_binding.go:118-120`.
 
 | Per-link counter/status | Meaning |
 |---|---|
@@ -460,7 +652,8 @@ binding status schema beside `pkg/dataplane/userspace/protocol_binding.go:118-12
 
 `show chassis cluster status` (`pkg/cluster/status.go:14` `FormatStatus`)
 adds one row per configured fabric ordinal above the node table (format
-position discipline at `:71-80`): local mode, peer capability
+position discipline at `:71-80`): configured/effective mode including
+`required_arming`, auth-policy generation/readiness, peer capability
 (`yes/no/unknown`), primary/key readiness without key material, and the
 verified/missing/malformed/bad/stale/clock/required-RX/required-TX/oversize
 counters. A single aggregate line is insufficient: a fab1-only failure must
@@ -476,10 +669,10 @@ Attacker: third L2 speaker on the fabric segment; observes frames, injects
 arbitrary Ethernet frames, and replays captured frames. It does **not** hold
 `chassis cluster authentication-key` or compromise either cluster node (a
 node compromise owns every channel that key protects — out of scope). Asset:
-the receiver's zone/scope adjudication and its binding to the final tuple
-prefix (§2, §5). The tag proves that a cluster peer holding the cluster key
-asserted that identity for this final egress tuple. It does **not** prove
-full-payload integrity or make the stamp a full-frame MAC (§8.2). Out of
+the receiver's zone/scope adjudication and its binding to the final egress
+L2/VLAN header and complete IP-declared datagram (§2, §5). The tag proves that
+a cluster peer holding the cluster key asserted that identity for those bytes;
+it authenticates all IP-declared payload, but not Ethernet padding/FCS. Out of
 scope: confidentiality; non-repudiation (signatures stay rejected,
 `docs/log/10105.md:77-109`); L2 DoS; replay inside the accepted window; raw
 unstamped-fabric behavior when `allow_unstamped_fabric_ingress` permits it.
@@ -567,6 +760,14 @@ do not turn a library or feature-detection unknown into an unmeasured
 performance assumption. The implementation/library choice is a spike gate,
 not an already-made algorithm decision.
 
+G-PRF is a performance gate, **not** a cryptographic acceptance review.
+Before either candidate is mergeable, an independent storage/crypto security
+review must assess the two-output SipHash domain separation and 128-bit
+construction, the epoch-key derivation, message framing/length binding and
+constant-time comparison (or the selected AES-CMAC implementation). A passing
+benchmark cannot waive that review; an unapproved SipHash construction is
+rejected even if it is the fastest candidate.
+
 ### 7.4 The measurement gate (implementation-blocking)
 
 No workstation estimate selects the algorithm. The existing source's
@@ -578,17 +779,21 @@ input. Record no present-day PRF result as measured.
 **G-PRF** must run in Rust on both the loss and TCP cluster nodes (with
 `loadavg` and CPU model recorded, per `docs/log/10105.md:143-219`):
 
-1. Benchmark sign and verify over the exact §5 input for V1/V2, IPv4/IPv6,
-   extension-header, fragment, NAT64 and maximum supported prefix shapes.
-   Verify both primary-only and primary+additional worst case. Include
-   output assembly, not just the primitive.
-2. Budgets: (a) median single-base verify and sign each ≤250 ns; two-base
-   verify ≤500 ns; (b) with authentication `required`, measured sustained
-   packet rate at the declared fabric load (64-byte and 1500-byte frames,
-   session hits and misses) loses no more than 5% vs `disabled` on either
-   cluster; (c) tag append/verify allocates nothing and reads no OS clock per
-   packet; (d) segmented output adds ≤250 ns per segment. Measure the real
-   full stage-9 path because authentication is per stamped packet, not at
+1. Benchmark sign and verify over the exact full §5 input for V1/V2, IPv4/
+   IPv6, extension-header, fragment, NAT64 and terminal 1–7-byte fragment
+   shapes. Measure minimum/64-byte, 1500-byte and maximum configured fabric
+   MTU inputs; IPv6 jumbograms are unsupported in PR-A. Verify both primary-
+   only and primary+additional worst case. Include assembly.
+2. Budgets (hard ceilings, not performance predictions): (a) median
+   single-base sign/verify each ≤250 ns at 64-byte input, ≤2 μs at 1500-byte
+   input and ≤12 μs at maximum configured MTU; two-base verify is ≤500 ns,
+   ≤4 μs and ≤24 μs respectively; (b) required-mode sustained packet rate at
+   declared fabric load (64-byte, 1500-byte and maximum-MTU frames, session
+   hits and misses) loses no more than 5% vs disabled on either cluster;
+   (c) authentication itself allocates/copies nothing and reads no OS clock
+   per packet (the existing owned-request copy into UMEM is assembly, not an
+   auth copy); (d) segmented output meets the same per-size ceilings. Measure
+   the real full stage-9 path because auth is per stamped packet, not at
    miss-only rates.
 3. **Decision rule**: use the two-pass SipHash candidate only if it meets
    every budget on both nodes. Choose AES-CMAC only if SipHash fails and
@@ -637,11 +842,11 @@ closed with a visible clock-unavailable verdict.
 **PR-A rejects stale replay after the ±5-minute window. It does not provide
 per-frame anti-replay within the window.** A captured valid trailer can be
 replayed while fresh, but it cannot be transplanted onto a different bound
-zone/scope, link, direction, or final tuple. The tag authenticates the
-claimed identity and the §5 header/tuple prefix, not every payload byte after
-that prefix; it is not a full-frame MAC. Duplicate/replayed packets and
-payload bytes outside the authenticated prefix are residuals, not silently
-claimed as protected.
+zone/scope, link, direction, or final IP datagram. The tag covers the complete
+IP-declared datagram, including all payload bytes; it excludes Ethernet
+padding/FCS and does not prevent exact in-window replay. Duplicate/replayed
+packets, physical L2 access and compromise of a peer remain residuals, not
+silently claimed as protected.
 
 Per-packet sequence/nonce, a sharded receiver replay window and failover
 high-water transfer are not in PR-A. If seats require them, K3 must re-cost
@@ -691,6 +896,11 @@ PR-A decision: make primary key, additional key, and
 contract used at `handleConfigSyncWithAncestry` to preserve their exact
 set/absent values in both directions; a tree with no local key must not adopt
 one from the peer. Provision both nodes locally before enabling stamp auth.
+
+Nil-local behavior is explicit: an absent local primary remains absent after
+every peer push; it is never adopted, even if the peer has a primary. A
+required node with no locally provisioned primary is key-unavailable and
+fails closed; a peer-pushed value cannot make it ready.
 Because `security flow` is outside the current chassis-only path, add its
 narrow preservation path explicitly rather than pretending the existing
 chassis list already covers it. Normalize the parsed peer tree through these
@@ -778,10 +988,33 @@ set security flow fabric-stamp-authentication disabled|permissive|required
   Lenient snapshot/config load with missing key remains fail-closed in
   `required` and visible as key-unavailable, never process-secret fallback.
   The leaf is node-local under §8.4.
-- Plumb `FlowSnapshot.fabric_stamp_auth_mode` (`u8` 0/1/2), derived bases
-  (only when mode is enabled), and peer capability to Rust
-  `ForwardingState`. Mode changes use the normal snapshot, no latch or durable
-  state.
+- Plumb `FlowSnapshot.fabric_stamp_auth_mode` (`u8` 0/1/2),
+  `auth_policy_generation` (`u64`), derived bases (only when enabled) and
+  peer capability to Rust `ForwardingState`. Generation advances on each
+  local auth-mode change; it is neither a replay latch nor durable anti-replay
+  state. Per-packet/queued context stores only this generation, never keys,
+  capability or a finalized auth decision. Mode changes use the normal
+  snapshot.
+
+#### Arming `required`: purge, never grandfather
+
+The transition from `disabled` or `permissive` to `required` has a purge
+barrier; state created under an unauthenticated/legacy verdict is never
+grandfathered. Advance `auth_policy_generation` and keep each worker in
+`required_arming`: pause/drop fabric claims on RX and TX until it purges all
+fabric-claim-derived session and policy-revalidation state, flow-cache entries,
+fragment/overlap associations and pending-neighbor requests, then acknowledges
+that generation. Only after every worker has acknowledged may status expose
+effective `required`. A worker must perform its purge before processing a
+packet under the new required snapshot; if it cannot complete, it remains
+fail-closed and reports not-ready. Track claim identity/generation for purge;
+if a table cannot separate it safely, flush that table's fabric-affine state
+rather than keeping ambiguous authority.
+
+There is no grandfather or silent lazy-revalidate path in PR-A. X13 pins this
+transition, including a bad/missing claim parked during `permissive` and
+retried after `required` is requested; an old-generation retry cannot revive.
+
 
 ### 9.2 Snapshot v77 → v78 exact lockstep
 
@@ -789,8 +1022,8 @@ set security flow fabric-stamp-authentication disabled|permissive|required
 |---|---|
 | `CONFIG_SNAPSHOT_PROTOCOL_VERSION = 78` + changelog | `userspace-dp/src/protocol/control.rs:343` |
 | Go `ProtocolVersion = 78` | `pkg/dataplane/userspace/protocol.go:530` |
-| Go `FlowSnapshot`: mode, derived-base ring, current peer-capability bit | `pkg/dataplane/userspace/protocol.go`: `FlowSnapshot` type starts `:1335`; existing attestation bool is `:1339`, keyed fields belong beside it. |
-| Rust mirrors: mode, secret ring, peer bit; redacted/deserialize-only bases | `userspace-dp/src/protocol/snapshot.rs`: `FlowSnapshot` starts `:385`; existing attestation field is `:398`, keyed fields belong beside it. |
+| Go `FlowSnapshot`: mode, auth-policy generation, derived-base ring, current peer-capability bit | `pkg/dataplane/userspace/protocol.go`: `FlowSnapshot` type starts `:1335`; existing attestation bool is `:1339`, keyed fields belong beside it. |
+| Rust mirrors: mode, auth-policy generation, secret ring, peer bit; redacted/deserialize-only bases | `userspace-dp/src/protocol/snapshot.rs`: `FlowSnapshot` starts `:385`; existing attestation field is `:398`, keyed fields belong beside it. |
 | Snapshot-shape and version golden | `snapshot_shape_version_8892_test.go:702` |
 | Lockstep pin | `scoped_global_zoneset_protocol_5488_test.go:378` |
 | Secret-wire census | `protocol_wire_fixture_completeness_16132_test.go`: Go-only key map, audit map and secret-key census |
@@ -857,14 +1090,14 @@ Classes: **U** hermetic (workstation/CI), **R** live-cluster only.
 | # | Cell / current anchor | Class | Decisive acceptance |
 |---|---|---|---|
 | R1 | `forged_stamp_drops_when_link_authentication_required_16023`, `tests_fabric_zone_stamp.rs:177-252` | U | Extend both existing split-RG/all-local placements to `required`: forged legacy V1/V2 marker and forged authenticated marker/no tag drop at stage 9 before session lookup/install/forward; forged tag transplanted across zone/scope drops `BadTag`. |
-| R2 | New `fabric_stamp_auth` parser/KAT module; source parser `frame/inspect.rs:2950-3042` | U | Flip every bound field (authenticated source marker, L2/VLAN bytes, resolved zone, scope, ordinal, direction, sender, final IP/ports/fragment tuple, epoch, flags, class bytes), truncate/misplace XPF3, or corrupt its tag: `required` drops. Control: changing only TCP payload beyond the authenticated prefix still verifies by design; pin this as the explicit non-full-frame-MAC residual (§8.2). |
+| R2 | New `fabric_stamp_auth` parser/KAT module; source parser `frame/inspect.rs:2950-3042` | U | Flip every bound field and every byte of the authenticated L2/VLAN + full IP datagram extent (including payload, ICMP quote, GRE and fragment data), resolved zone, scope, ordinal, direction, sender, epoch, flags and class bytes; truncate/misplace XPF3 or corrupt tag: `required` drops. Check parser-derived length, jumbogram rejection, and that Ethernet pad/FCS alone are excluded. |
 | R3 | Go derivation `syncookie_key_9173_test.go:200-223`; Rust epoch KAT `screen/tests.rs:9221-9225`; rotation model `control_key_rotation.go:20-33` | U | Exercise all five #6630 steps on each locally provisioned node: accept primary/additional during overlap, sign primary only, accept new primary after swap, reject retired additional after finalize; Go/Rust base, epoch and tag KATs match. |
 | R4 | `legitimate_fabric_punted_host_inbound_still_admitted_6458` (`tests_fabric_zone_stamp.rs:992-1026`); `legitimate_fabric_punted_flow_still_admitted_6458` (`:1138-1169`); `co_moved_punt_admitted_when_all_data_rgs_local_15916` (`:1184-1266`); `co_moved_v2_scoped_stamp_is_ambiguous_without_scope_15916` (`:1329-1371`) | U | Valid local V1/V2 claims in host-inbound, split-RG, all-local/co-moved, and scoped V2 placement verify then retain today's owner-RG result under `permissive` and `required`; authenticated markers preserve scope on repunt. |
-| R5 | `session_hit_authority.rs:180-214,399-483`; descriptor hit site `poll_descriptor/mod.rs:1463-1473` | U | Forged owner claim cannot turn a foreign session hit into `Owner`; in required it drops before hit adjudication. A valid tag still follows the existing foreign-hit rule; no unsigned hit exception. |
-| R6 | Fragment authority `frag_assoc.rs:42-98,126-402`; current fragment cells `tests_fabric_zone_stamp.rs:5482-5569` | U | A valid first fragment installs the association only after tag verification; bad/missing first or non-first fragment drops before lookup/install, even if a matching association exists. Every emitted fragment has its own verified tag. |
+| R5 | `session_hit_authority.rs:179-214,399-483`; descriptor hit site `poll_descriptor/mod.rs:1463-1473` | U | Forged owner claim cannot turn a foreign session hit into `Owner`; in required it drops before hit adjudication. Different V2 scope cannot alias the stored `FabricClaimIdentity`; a valid exact identity still follows the existing foreign-hit rule. |
+| R6 | Fragment authority `frag_assoc.rs:42-98,126-402`; current fragment cells `tests_fabric_zone_stamp.rs:5482-5569` | U | A valid first fragment installs association only after tag verification; bad/missing first or non-first fragment drops before lookup/install, even if a matching association exists. Every emitted fragment is signed independently over all fragment bytes. Include NAT64 receive/send terminal fragments with 1–7 payload bytes and verify exact full extent; no 8-byte minimum/prefix ambiguity. |
 | R7 | Wall clock precedent `screen/mod.rs:696-723`; PR-A clock cell | U | Inject ±5-minute inclusive boundaries, +6-minute stale, forward step then recovery, backward step (latch never decreases), unavailable clock, and restart with a backward wall clock. No per-packet OS clock; restart-reset residual is explicit. |
 | R8 | Capability `sync_fence_ack_7147.go:146-232`; incarnation `sync_peer_incarnation.go:167-211`; snapshot v77 fence `snapshot.rs:25-32` | U | Cover old→new legacy missing (permissive counts/required drops), new→old no emission, peer-incarnation revoke/downgrade/boot-switch forcing current snapshot publish, raced auth marker no-override at old parser, and v77 helper refusal by v78. |
-| R9 | Egress capacity `tx/dispatch/mod.rs:84-90`; MTU/segmentation obligations §3.4 | U | Near-capacity frame/segment at every P1-P8 output: include 34-byte tail in space and effective MTU; `required` drops/counts oversize, never truncates or emits a legacy fallback. |
+| R9 | Egress capacity `tx/dispatch/mod.rs:84-90`; MTU/segmentation obligations §3.4 | U | Near-capacity frame/segment at every P1-P8 output and S1-S6 seam: enforce the true UMEM `(offset & 4095)+canonical_len+34` bound plus reduced egress MTU; `required` drops/counts oversize, never truncates or emits a legacy fallback. |
 | R10 | Old parser `frame/inspect.rs:2950-3042`; legacy marker constants in `forwarding/fabric.rs` | U | Pre-#18733 parser sees `02:bf:74`/`02:bf:75` as absent/no zone override even with XPF3 tail; it never mistakes an armed frame for legacy V1/V2. New `disabled` maps those markers to the matching legacy claim without reading the tail. Reject actual configured local/peer fabric MACs in those prefixes. |
 
 ### 10.2 One decisive cell per census row (§2)
@@ -878,7 +1111,7 @@ the central session-miss test.
 | C2 session miss / policy / NAT / host-inbound | `c2_miss_policy_zone_is_gated`: forged claim that would change an allow/NAT/host-service result drops; verified claim retains existing policy and owner-RG result (`transit_policy.rs:54-107`). | U |
 | C3 session-hit authority | `c3_foreign_hit_cannot_be_forged_owner`: forged owner-zone marker cannot reclassify a foreign hit; valid tag retains existing hit policy (`session_hit_authority.rs:180-214,399-483`). | U |
 | C4 flow-cache seed | `c4_bad_claim_cannot_seed`: forged tuple matching a seedable flow installs no cache entry (`flow_cache_seed.rs:32-65,240-282`). | U |
-| C5 cache preflight/hit/reclassification | `c5_bad_claim_drops_before_cache_touch`: prove no lookup, validation, eviction, BA/LP reclass or output decision runs on bad tag (`flow_cache_hit.rs:139-204,586-630,1007-1038`). | U |
+| C5 cache preflight/hit/reclassification | `c5_cache_never_supplies_auth`: prove current stage-9 evidence gates before lookup, validation, eviction, BA/LP reclass or output. Verified seed → unmarked same tuple in `required` cannot reuse claim-derived cache identity or sign; verified seed → bad/missing/stale packet in `permissive` follows only legacy adjudication and cannot emit an auth tag; two valid V2 scopes on a shared lookup cannot alias. Exercise both inline P7 and fallback request construction (`flow_cache_hit.rs:139-204,586-630,1007-1038`). | U |
 | C6 fragment association | `c6_fragment_claim_is_per_frame`: bad/missing first and non-first tags drop before association creation/lookup; verified fragments use existing `FragAuthority` (`frag_assoc.rs:42-98,126-402`). | U |
 | C7 overlap/quota partition | `c7_bad_claim_cannot_partition_overlap`: invalid claim reaches neither overlap membership nor quota accounting (`poll_descriptor/mod.rs:1778-1786`; `frag_assoc.rs:92-98`). | U |
 | C8 screen zone roles / SYN-cookie ACK | `c8_unverified_claim_no_screen_veto`: invalid ambiguous claim cannot add #16051's union-veto drop or charge cookie screen state; valid claim retains today's screen behavior (`poll_stages.rs:1010,1100,1133-1141,1599`). | U |
@@ -890,28 +1123,46 @@ the central session-miss test.
 | C14 PBR/next-table/FBF | `c14_bad_claim_no_pbr`: forged V1/V2 claim cannot select any production `ingress_route_table_override` path; verified claim retains configured PBR (`forwarding/pbr.rs:89-233`; callers `poll_descriptor/mod.rs:1887-1901,1978-1992,5277-5290,9099-9112,9371-9384`). | U |
 | C15 prerouting NAT scope | `c15_bad_claim_no_prerouting_nat`: invalid claim cannot choose DNAT/static-NAT/NPTv6 source zone/interface/routing instance (`prerouting_scope.rs:64-165`; caller `poll_descriptor/mod.rs:4815-4830`). | U |
 | C16 transit martian/source-destination class | `c16_bad_claim_no_martian_override`: invalid zone cannot alter source/destination class result on miss/flowless admission; hits/retries use only previously verified provenance (`session_admission.rs:361-410`; `neighbor_dispatch.rs:498-506`). | U |
-| C17 CoS BA trust/effective ingress | `c17_only_verified_v2_sets_scope`: invalid V2 drops before assigning peer `fabric_ingress_ifindex`; valid tag preserves peer BA selection, while PR-A class remains absent/local fallback (`cos_classify_ba.rs:33-47`; `flow_cache_hit.rs:1007-1038`). | U |
+| C17 CoS BA trust/effective ingress | `c17_only_verified_v2_sets_scope`: invalid V2 drops before assigning peer `fabric_ingress_ifindex`; valid exact scope preserves peer BA selection in both miss and cache reclassification, while PR-A class remains absent/local fallback (`cos_classify_ba.rs:33-47`; `cos_classify.rs:922-1015`; `flow_cache_hit.rs:1007-1038`). | U |
 | C18 pending-neighbor provenance | `c18_unverified_never_parked`: invalid claim cannot enter `PendingForwardRequest`; verified zone/verdict survives a legitimate deferred retry and cannot be re-derived from raw bytes (`poll_descriptor/mod.rs:13473-13476`; `neighbor_dispatch.rs:498-506,621-650,745-756`). | U |
 | C19 reply/neighbor-learn suppression | `c19_shape_only_never_admits`: known stamp-shaped source still suppresses generated PTB/reject/cookie/neighbor-learn only; a bad marked packet is already terminally dropped and suppression never grants a zone (`fabric.rs:194-210`; `icmp_ptb.rs:532-569`; `neighbor_dispatch.rs:1416-1417,1453-1455`). | U |
 | C20 fabric-arrival flag side effects | `c20_transport_flag_not_auth`: invalid marked packet stops before later flood/TTL/reply effects; raw unmarked fabric arrival keeps existing physical-provenance behavior. The flag itself never becomes a claim verdict (`poll_stages.rs:877-879`; `icmp.rs:195-198`; `frame/mod.rs:1186-1189`). | U |
 | C21 absent/unstamped handling | `c21_absent_not_trailer`: unmarked frame with XPF3-shaped tail is `NoClaim`, never trailer-parsed; existing `allow_unstamped_fabric_ingress` and unique-established-NAT exception remain unchanged (`poll_descriptor/mod.rs:1458-1462,1628-1656`). | U |
+| C22 input-filter/policer log attribution | `c22_log_zone_is_auth_gated`: required invalid marked traffic terminates before Stage 11/PBR logs; permissive invalid legacy policy still meters the input policer exactly once but audit zone is physical/logical fallback or 0, never the claimed zone; verified/promoted claim logs exact zone. Include filter/policer attribution and PBR log paths (`filter.rs:149-170,203-337,344-350,754-773,2499-2528`; `forwarding/pbr.rs:315-355`). | U |
+| C23 cached filter-log replay | `c23_cached_log_uses_current_audit_context`: required invalid packet never replays cached log; permissive invalid packet cannot replay a seed's cached claimed zone; verified current packet may log its freshly gated audit zone (`filter.rs:2305-2390`; `flow_cache_hit.rs:511,846,879`). | U |
+| C24 forward-request CoS audit/deferred attribution | `c24_cos_audit_tracks_packet_verdict`: ordinary CoS drop uses current verified/promoted `StampAuditContext`; invalid/unverified permissive retry falls back, and an old request cannot outlive its auth-policy generation (`forward_request.rs:459-469,572-704`; `neighbor_dispatch.rs:896-907`). | U |
+| C25 RT_FLOW sink limits | `c25_event_is_attribution_not_proof`: keep event schema unchanged; confirm no auth field, owner-RG placeholder 0 and `u32→u16` zone truncation; status/counters remain separate proof and no test/operator treats RT_FLOW as a tag-verification record (`event_emit.rs:505-560`; `rt_flow.rs:81-112`). | U |
+| C26 flowless pre-routing NAT provenance | `c26_ambiguous_flowless_nat_stays_unscoped`: a verified but ambiguous claim remains provenance-only and cannot select flowless NAT scope; invalid marked input never reaches the function (`flowless_verdict.rs:267-325`; `frag_assoc.rs:592-807`; caller `mod.rs:9791-9803`). | U |
+| C27 flowless local-delivery caller gate | `c27_local_delivery_uses_admitted_shadow`: raw ambiguous input is never passed to local-delivery/lo0 policy; only current owner-RG-admitted shadow selects host-inbound/log zone (`flowless_verdict.rs:77-208`; caller `mod.rs:10289-10310`). | U |
+| C28 recorded-only policy revalidation | `c28_policy_revalidation_needs_live_verdict`: invalid current marked packet cannot reach hit revalidation; verified packet may revalidate from stored metadata but that function never manufactures a live auth verdict (`policy_revalidation.rs:1870-1923`; caller `mod.rs:3814-3845`). | U |
+| C29 hit authority raw claim/scope identity | `c29_hit_requires_exact_claim_identity`: forged or differently scoped current claim cannot become Owner of a session; exact verified `FabricClaimIdentity` preserves the existing Owner/Foreign rule, and recorded-only revalidation is not a second auth check (`session_hit_authority.rs:179-214,399-483`; `SessionKey` `session/key.rs:80-175`). | U |
+| C30 ICMP trust-stage split/full quote | `c30_icmp_quote_tamper_fails`: mutate any embedded ICMP quote/GRE-related payload byte after signing and verify `BadTag`; also pin proved-only match, post-finalization ambiguous promotion, queued policy gate, and NAT64 translation stages (`embedded_icmp.rs:110-199,536-660`; `nat64_icmp_error.rs:55-72,139-151,219-230,262-274,330-340`; `icmp_embed/builders.rs`). | U |
+| C31 shim/kernel PASS boundary | `c31_shim_bypass_is_narrow`: exercise permitted single-zone/domain-0/no-RI LocalDelivery PASS row without alias; multi-zone/RD/discriminator/reverse/unsynced rows demote to AF_XDP and required forged claims drop; ARP/LLDP non-IP XDP_PASS consumes no zone (`userspace-xdp/src/lib.rs:625-1174,1002-1028,2779-2790`; `bpf_map/mod.rs:76-140,2565-2600`; `kernel_pass.rs:126-197`). | U |
+| C32 Stage-5 neighbor side effect | `c32_pre_stage5_is_not_stamp_authority`: ARP recycles and NDP NA may learn before Stage 9; assert neither installs stamp-derived zone/scope context, and record this as a separate ND/L2 residual not covered by required stamp mode (`poll_descriptor/mod.rs:1210-1228`). | U |
+| C33 generated-reply logs | `c33_generated_reply_uses_egress_zone`: generated reject/SYN-cookie/PTB log fields are egress zone and never borrow current ingress claim or cached audit zone (`filter.rs:2269-2302`). | U |
+| C34 screen claimed-zone event | `c34_unverified_claim_no_screen_event`: bad/missing marked claim creates no claimed-zone screen drop/event; a verified screened zone can retain the existing extra-drop behavior, but event remains non-proof (`poll_stages.rs:1236-1260,1412-1445`; `event_emit.rs:313-405`). | U |
 
 ### 10.3 Cross-cutting cells
 
 | # | Cell / assertion | Class |
 |---|---|---|
 | X1 | **NAT-final-tuple**: receiver verifies the final bytes for SNAT, DNAT, port rewrite, fabric-NAT suppression, NAT64, prebuilt embedded ICMP, egress DSCP and every segment/fragment; punt-time tuple tags fail. | U |
-| X2 | **All TX paths**: exercise P1-P8 and prove each reaches exactly one of the two post-DSCP hooks; detect bypass/double-finalization, marker rewrite, length/capacity failure and per-path drops. | U |
+| X2 | **All TX paths**: exercise P1-P8 and prove each reaches exactly one of six post-DSCP hooks S1-S6; detect bypass/double-finalization, marker rewrite, exact offset/capacity failure and per-path drops. | U |
 | X3 | **TCP segmentation**: every direct/prepared and copy segment verifies independently; no segment uses a parent-frame tag. | U |
 | X4 | **Neighbor retry negative**: `retry_pending_neigh` does not accept a `FabricRedirect`/stamp context today; prove no stamped fabric frame emits on retry. Any future path must add a separate finalizer arm. | U |
-| X5 | **Capability/incarnation**: bit set enables auth marker only after snapshot publish; disconnect/downgrade/boot-switch clears it and required TX drops; stale capability cannot survive snapshot dedup. | U |
+| X5 | **Capability/incarnation**: bit set enables auth marker only after snapshot publish; disconnect/downgrade/boot-switch revokes it and required TX drops. Force a current snapshot publish on revocation even when `ActiveMatches`/`ForceUnchanged` would dedup; no stale bit survives. | U |
 | X6 | **Secret/digest hygiene**: raw PSK absent everywhere; derived bases only in Go→Rust secret carriage, redacted from fixture/status/echo; `snapshotContentHash` preimage contains only per-start-salted HMAC fingerprints, while internal `helperVisibleSecretDigest` follows the existing one-way SHA-256 derived-key precedent (§7.2). | U |
-| X7 | **Peer-push protection**: config sync cannot clear, set or replace either local auth key or mode; normalized duplicate push causes no repeated apply (§8.4). | U |
-| X8 | **Third-host live proof**: a physically separate third host on a switched fabric VLAN forges R1 in split-RG and all-RGs-local placements with `required`; DROP and per-link counters move, while legitimate split-RG traffic forwards. Record loss + TCP cluster, both placements and load. | **R — lab only** |
+| X7 | **Peer-push protection**: in both nil-local and provisioned-local cases, config sync cannot adopt, clear, set or replace either local auth key or mode; normalized duplicate push causes no repeated apply (§8.4). | U |
+| X8 | **Third-host live proof**: on a switched fabric VLAN, a physically separate third host sends the same forged zone claim in `disabled`, `permissive` and `required`: disabled uses legacy adjudication; permissive accepts/counts unverified legacy authority; required drops at stage 9 with per-link counters. Run both split-RG and all-RGs-local placements. Controls prove legitimate split-RG and all-RGs-local/co-moved traffic still forwards. Record loss + TCP cluster, placement and load. | **R — lab only** |
 | X9 | **G-PRF measurement**: record both candidates and full-path budgets on the loss/TCP cluster nodes (§7.4). | **R — lab only** |
 | X10 | **Observability/advisory**: fab0/fab1 failures remain separate in status/metrics; `required` acknowledges #10105, `permissive` does not, and changing/removing mode re-emits the #18719-scoped reminder. | U |
-| X11 | **No permissive auth laundering**: bad/missing/stale inbound claim repunted in permissive leaves legacy marker/no trailer; verified incoming or local claim may be signed; a required peer drops the unverified repunt. | U |
+| X11 | **No permissive auth laundering / cache provenance**: bad/missing/stale inbound claim repunted in permissive leaves legacy marker/no trailer; verified incoming or local claim may be signed only from current per-packet evidence. A cache hit's stored resolution never substitutes for current stage-9 verdict/full zone/scope, including P7 and fallback construction (C5); a required peer drops an unverified repunt. | U |
 | X12 | **Marker namespace reservation**: configuration rejects actual local/peer fabric MACs beginning `02:bf:74` or `02:bf:75`; legacy `02:bf:72`/`02:bf:73` and new authenticated markers remain distinct in parser and synthetic-source classification (§4.1). | U |
+| X13 | **Required-mode arming purge barrier**: seed session/cache/fragment/overlap/pending-neighbor state under permissive, including a bad-marked claim parked for neighbor retry; `required_arming` pauses/drops fabric claims until all workers acknowledge the new `auth_policy_generation` and claim-derived state is purged. A racing retry from the old generation cannot use or emit. | U |
+| X14 | **Shim / Stage-5 boundary**: exact allowed PASS_TO_KERNEL row is single-zone/domain-0/no-RI LocalDelivery only; all scope-ambiguous rows demote to AF_XDP; ARP/NDP and non-IP bypasses are called out as unprotected exceptions, not passed as stamp-auth proof (§2.2). | U |
+| X15 | **Short terminal fragments**: NAT64 send and receive paths sign/verify terminal fragments with exactly 1–7 payload bytes; full declared fragment payload and exact datagram extent are authenticated without an 8-byte prefix/minimum. | U |
+| X16 | **Node identity validity**: sender/receiver `node_id` outside `{0,1}` fails closed before direction calculation, tag sign/verify or snapshot capability use; never wrap, mask or truncate. | U |
+| X17 | **Stable per-link counters**: fab0/fab1 counter identity is configured ordinal, invariant through Go sorting, skipped/missing fabric slots, link removal/re-addition and failover; status never collapses to aggregate-only. | U |
 
 No clusters are run by this design lane; X8/X9 are implementation gates.
 
@@ -940,18 +1191,22 @@ No clusters are run by this design lane; X8/X9 are implementation gates.
 
 Only the keyed identity stamp is in scope:
 
-- Snapshot v78 lockstep (§9.2); Go derivation and secret/digest hygiene
-  (§7.2); Rust codec/PRF module; stage-9 parse/verdict before every C1-C21
-  consumer; local node ID/fabric ordinal; primary-only signing and
-  accept-only additional key.
+- Bump Go/Rust snapshot in lockstep to v78 (§9.2), including auth-policy
+  generation, derived bases, capability and mode; preserve raw-PSK/digest
+  hygiene (§7.2) and exact v77-helper refusal.
+- Add the Rust trailer codec/PRF spike and stage-9 verdict before every
+  C1-C34 consumer. Add stable `FabricClaimIdentity` to scoped session/cache
+  identity, and a separate `StampAuditContext`; never store a per-packet
+  verdict/tag/key/epoch in cache state.
 - Mint metadata at `forwarding/fabric.rs:758-760,819-826`, preserve validated
   V2 scope on repunt at `forward_request.rs:287-333`, then wire the shared
-  finalizer into P1-P8 (§3). Reserve distinct `02:bf:74`/`02:bf:75`
-  authenticated markers; never sign a permissive unverified peer claim.
-- Add config mode, local key/mode push-preservation, capability bit and
-  snapshot publication; per-link counters/status; wall-clock epoch and
-  required TX/RX fail-closed behavior.
-- R1-R10, each C1-C21, X1-X12 and G-PRF are acceptance gates. G-PRF lab
+  finalizer into P1-P8 assembly paths at every late S1-S6 insertion (§3).
+  Reserve distinct `02:bf:74`/`02:bf:75` authenticated markers; never sign a
+  permissive unverified peer claim.
+- Add node-local config mode/key preservation, capability advertisement,
+  worker generation/purge barrier, per-link counters/status, wall-clock epoch
+  and required TX/RX fail-closed behavior.
+- R1-R10, each C1-C34, X1-X17 and G-PRF are acceptance gates. G-PRF lab
   measurements precede merge. No PR-B class field behavior.
 
 Complexity cap: one Rust auth module plus plumbing; G-PRF alone selects the
@@ -966,10 +1221,11 @@ change.
 
 ### 12.2 Three plan-seat questions (each has a proposed decision)
 
-1. **Replay:** accept the minute epoch with ±5-minute window and no
-   per-frame replay state (including exact in-window replay), or require K3
-   sequence/transfer semantics before PR-A? Proposed decision: accept the
-   bounded replay residual; full-frame/payload integrity is not claimed.
+1. **Replay:** accept the minute epoch with ±5-minute window and no per-frame
+   replay state (including exact in-window replay), or require K3 sequence/
+   transfer semantics before PR-A? Proposed decision: accept the bounded
+   exact-replay residual; the complete IP-declared datagram is MAC-bound,
+   excluding Ethernet padding/FCS (§5/§8.2).
 2. **Node-local key posture:** accept primary/additional auth keys and
    `fabric-stamp-authentication` as locally provisioned/preserved leaves,
    rotated and mode-armed independently on both nodes (§8.4)? Proposed
@@ -1017,41 +1273,54 @@ change and neither substitutes for nor blocks the #18733 third-host proof.
 ### 12.5 Kill criteria (any one ⇒ stop and return to seats)
 
 - **K1 — census:** any additional production consumer of stage-9 identity
-  appears outside C1-C21 and cannot be gated before use; do not ship
-  miss-only verification.
-- **K2 — cost:** neither PRF meets G-PRF on both cluster nodes, or the full
-  stage-9 required path exceeds the 5% throughput budget.
+  appears outside C1-C34 (or the named shim/pre-stage-5 boundaries) and cannot
+  be gated before use; do not ship miss-only verification.
+- **K2 — cost:** neither PRF meets the full-input G-PRF budgets on both cluster
+  nodes, or the full stage-9 required path exceeds the 5% throughput budget.
 - **K3 — replay:** seats require per-packet anti-replay; re-cost sequence,
   shared state and failover high-water transfer before code.
-- **K4 — TX seam:** any stamped egress path exists outside P1-P8 or any path
-  can send after its finalizer; redesign rather than patching opportunistically.
+- **K4 — TX seam:** any stamped egress path exists outside P1-P8/S1-S6 or any
+  path can send after its finalizer; redesign rather than patch opportunistically.
 - **K5 — key plumbing:** raw PSK reaches Rust, a secret base appears in the
   digest preimage, or the v78 fence is skipped.
 - **K6 — old receiver:** R10 shows a pre-#18733 parser recognizes an
   authenticated marker as legacy V1/V2. Capability gating alone is not a
   substitute for the distinct-marker requirement.
-- **K7 — scope/provenance:** V2 `02:bf:75` repunt cannot preserve the validated
-  scope, or permissive mode can re-sign a missing/bad/stale peer claim.
+- **K7 — scope/provenance:** V2 `02:bf:75` repunt cannot preserve validated
+  scope, session/cache identity aliases two V2 scopes, or permissive mode can
+  re-sign a missing/bad/stale peer claim.
 - **K8 — peer push:** primary/additional key or mode can be cleared/replaced
   by sync after local provisioning; redesign the protection before required
   mode is allowed.
+- **K9 — mode barrier:** any old-generation session/cache/fragment/overlap/
+  pending-neighbor state can reach a consumer or TX after `required` is
+  exposed; do not grandfather or lazily revalidate.
+- **K10 — wire extent:** a marked frame with unparseable/ambiguous IP extent
+  can be signed or accepted in `required`, a covered byte can mutate after
+  finalization, or unsupported jumbograms bypass the fail-closed path.
+- **K11 — observability:** per-link counters/status collapse fab0/fab1 or
+  change identity under sorting/skip/failover; aggregate-only proof is not
+  acceptable.
 
 ### 12.6 Migration, rollback and residuals
 
-Migration is §9.4. Roll back a node's mode to `disabled` (or
-`permissive`) locally; the finalizer reads current snapshot state, so queued
-requests cannot keep an obsolete auth decision. `disabled` TX returns to
-legacy source markers/no trailer, and a new disabled receiver decodes an
-authenticated marker as the same legacy claim without verifying it. Required
-mode never silently falls back. For code downgrade, daemon/helper pairing
-must be compatible on each node; the v78 exact-equality fence rejects v77
-helper pairing. Keys/mode remain local across config sync.
+Migration is §9.4. Roll back a node's mode locally to `disabled` (or
+`permissive`); the finalizer reads the current attempt environment, so queued
+requests cannot retain an obsolete auth decision. A policy-generation change
+invalidates and drops stale queued retries. `disabled` TX returns to legacy
+source markers/no trailer; a new disabled receiver decodes an authenticated
+marker as the same legacy claim without verifying it. Required mode never
+silently falls back. For code downgrade, daemon/helper pairing must be
+compatible on each node; the exact v78 fence rejects v77 helper pairing.
+Authentication keys and mode remain node-local across config sync.
 
-Residuals after rollout are explicit: exact replay within ±5 minutes,
-payload bytes beyond the authenticated tuple prefix (not a full-frame MAC),
-raw unmarked fabric traffic under existing `allow_unstamped_fabric_ingress`,
-L2 denial of service, compromise of a node/cluster PSK, and a backward wall
-clock step across process restart. Required mode fails closed on capability,
+Residuals after rollout are explicit: exact replay within ±5 minutes;
+Ethernet padding/FCS; unsupported IPv6 jumbograms in PR-A; raw unmarked
+fabric traffic under existing `allow_unstamped_fabric_ingress`; pre-stage-9
+shim/kernel PASS and ARP/NDP neighbor behavior; L2 denial of service;
+compromise of a node/cluster PSK; and a backward wall-clock step across
+process restart. RT_FLOW lacks auth provenance and truncates zone IDs, so its
+events are attribution, not proof. Required mode fails closed on capability,
 key, clock, capacity or PRF failure, with availability loss visible by link.
 
 ---
@@ -1060,15 +1329,16 @@ key, clock, capacity or PRF failure, with availability loss visible by link.
 
 | Candidate claim / omission | Re-derived at `6c9098dcfb` |
 |---|---|
-| Snapshot v77 → v78 | Still exact: Rust `userspace-dp/src/protocol/control.rs:343`, Go `pkg/dataplane/userspace/protocol.go:530`; PR-A must bump both in lockstep. |
-| One fabric-redirect build chokepoint | Refuted: P1-P8 split across two TX sink hooks; invoke the shared finalizer once after DSCP at the appropriate sink (§3). |
-| Punt-time pre-NAT tuple is identical on wire | False: NAT, segmentation, NAT64 and embedded ICMP transform after request construction; sign final output bytes (§3.3/§5). |
+| Snapshot v77 → v78 | Rust `userspace-dp/src/protocol/control.rs:343`, Go `pkg/dataplane/userspace/protocol.go:530`; bump both exactly together and carry mode, auth-policy generation, derived-base ring and peer capability. |
+| One fabric-redirect build chokepoint | Refuted: P1-P8 assembly paths reach six distinct TX submission seams S1-S6; reusable finalizer core still needs one late hook per insertion (§3). |
+| Punt-time pre-NAT tuple is identical on wire | False: NAT, segmentation, NAT64 and embedded ICMP transform after request construction; sign full final L2/VLAN + IP-declared datagram (§3.3/§5). |
 | 26-byte trailer; class not on wire | Replaced by 34-byte XPF3 trailer with MAC-bound reserved class bytes (§4.1/§11). |
-| Preserve V1/V2 source MAC and append tag | Unsafe for mixed versions: `docs/log/10105.md:124` requires a distinct non-legacy marker for an armed sender. PR-A uses `02:bf:74`/`02:bf:75`; old parser recognizes only `02:bf:72`/`02:bf:73` (`inspect.rs:2960-3008`). |
-| `FabricIngressOutcome` is `(present, epoch, tag)` | Current six fields include override, NAT scope, fabric provenance, invalid, ambiguous zone and ambiguous scope (`poll_stages.rs:73-80`); PR-A adds an auth verdict/ordinal, not the stale tuple. |
-| Consumer list is complete after session-miss gate | False: C1-C21 includes hit/cache, fragments/overlap, screen/cookie, IKE/IPsec, ICMP, PPTP/domain, PBR, prerouting NAT, martian, CoS, deferred and shape/provenance rows. |
-| Single unauthed-drop counter | Replace with per-link verified/missing/malformed/bad/stale/clock/required-RX/required-TX/oversize counts and per-link status (§6.3). |
-| Current anchor examples | Parser `inspect.rs:2950-3042`; disposition `forwarding/fabric.rs:411-451`; stage 9 `poll_stages.rs:844-888`; Go key precedent `screens.go:594-683`; Rust SipHash `screen/syncookie.rs:624-741`; Rust KAT `screen/tests.rs:9221-9225`; Go KAT `syncookie_key_9173_test.go:200-223`. |
+| Preserve V1/V2 source MAC and append tag | Unsafe for mixed versions: `docs/log/10105.md:124` requires distinct non-legacy marker for an armed sender. PR-A uses `02:bf:74`/`02:bf:75`; old parser recognizes only `02:bf:72`/`02:bf:73` (`inspect.rs:2960-3008`). |
+| `FabricIngressOutcome` is `(present, epoch, tag)` | Current six fields include override, NAT scope, fabric provenance, invalid, ambiguous zone and ambiguous scope (`poll_stages.rs:73-80`); PR-A adds auth verdict/ordinal and separate `StampContext`, not the stale tuple. |
+| Consumer list is complete after session-miss gate | False: C1-C34 includes hit/cache, fragments/overlap, screen/cookie, IKE/IPsec, ICMP, PPTP/domain, PBR/NAT, CoS, deferred, filters/logs/policers, recorded revalidation, flowless paths and explicit bypass boundaries. |
+| Cache lookup already distinguishes V2 scopes | False at this head: flow-cache seed drops V2 scope and lookup identity is session/ifindex based; PR-A must add stable `FabricClaimIdentity` to session/cache lookup or fail the two-scope cell (§3.2/C5/C29). |
+| Single unauthed-drop counter | Replace with per-link verified/missing/malformed/bad/stale/clock/required-RX/required-TX/oversize counters and per-link status (§6.3). |
+| Current anchor examples | Re-derived at `6c9098dcfb`: parser `frame/inspect.rs:2950-3042`; stamp disposition `forwarding/fabric.rs:411-451`; stage 9 `poll_stages.rs:844-888`; Go derived-key precedent `screens.go:594-683`; Rust SipHash-2-4 `screen/syncookie.rs:624-741`; Rust KAT `screen/tests.rs:9221-9225`; Go KAT `syncookie_key_9173_test.go:200-223`. |
 
 ---
 
