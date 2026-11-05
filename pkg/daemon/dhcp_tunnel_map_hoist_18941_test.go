@@ -65,8 +65,12 @@ func TestResolveDHCPRethInterfacesBuildsTunnelNameMapOnce18941(t *testing.T) {
 
 	builds = 0
 	empty := config.DHCPServerConfig{
-		DHCPLocalServer:   &config.DHCPLocalServerConfig{Groups: map[string]*config.DHCPServerGroup{}},
-		DHCPv6LocalServer: &config.DHCPLocalServerConfig{},
+		DHCPLocalServer: &config.DHCPLocalServerConfig{Groups: map[string]*config.DHCPServerGroup{
+			"empty-interfaces": {Name: "empty-interfaces", Interfaces: []string{}},
+		}},
+		DHCPv6LocalServer: &config.DHCPLocalServerConfig{Groups: map[string]*config.DHCPServerGroup{
+			"nil-interfaces": {Name: "nil-interfaces"},
+		}},
 	}
 	resolveDHCPRethInterfaces(empty, &config.Config{})
 	if builds != 0 {
