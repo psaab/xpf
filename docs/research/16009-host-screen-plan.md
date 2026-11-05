@@ -424,16 +424,22 @@ returned. Thus the gate reads only a word written for the current packet.
   `frag_view_v6` input (`extract.rs:380-382`). Write-once at the first
   non-atomic sighting preserves the governing-header rule (§4.2).
   After the walk, `parse_ipv6` must also finalize the tiny-flags bit:
-  from the packed first-fragment fact + terminal TCP protocol, compute
-  `declared_end = l3_offset + 40 + payload_len` and set
-  `tcp_flags_unknown` iff `declared_end < walk.offset + 14`, matching
-  `extract.rs:423-442` for IPv6. This is required: current shim
-  `ParsedPacket.tcp_flags_unknown` is IPv4-only (IPv6 literal is false,
-  `lib.rs:2507`), while the worker fails closed for v6 tiny first
-  fragments too. Finalize by checked scratch read/modify/write beside
-  the existing `:2446-2462` dance; read/write failure returns `None`.
-  The scratch writer inside the shared walk does not change its return
-  shape or parity-visible advance/break behaviour.
+  from the packed first-fragment fact + terminal TCP protocol, set
+  `tcp_flags_unknown` only when `payload_len != 0 &&
+  ipv6_declared_end(l3_offset as usize, payload_len) <
+  (walk.offset as usize) + 14`.
+  This matches the worker's IPv6 zero-length sentinel:
+  `ip_payload_len == 0` means no declared bound (`usize::MAX`) and
+  must NOT manufacture a tiny-flags error (`extract.rs:421-435`).
+  The existing shim `l4_truncated` check (`lib.rs:2479-2482`) is
+  independent and may still reject a captured extension chain before any
+  host-screen gate; do not change or describe that as a screen verdict.
+  This is required because current `ParsedPacket.tcp_flags_unknown` is
+  IPv4-only (IPv6 literal is false, `lib.rs:2507`). Finalize by checked
+  scratch read/modify/write beside the existing `:2446-2462` dance;
+  read/write failure returns `None`. The scratch writer inside the walk
+  does not change its return shape or parity-visible advance/break
+  behaviour.
 
 ### 5.4 Packed word layout (u64)
 
@@ -693,10 +699,13 @@ teardrop zero-payload / MF+non-multiple-of-8 / legal 1–7 B LAST fragment
 SYN-on-first-fragment; tiny first fragment flags-unknown (drop with a
 screen-state row even when syn-frag is off or alarm is on; do NOT drop
 solely for tiny flags when the row is absent or the zone unresolved —
-§4.3); LSRR / SSRR / LSRR-after-malformed-option; RH0 / RH1 / RH2 (RH2
-must PASS); SYN+FIN; no-flag; FIN-no-ACK; winnuke port 139 vs 443; IPv6
-atomic fragment (must trip nothing, §4.1); clean packets. FAIL-ON-REVERT:
-deleting any verdict arm reds its row.
+§4.3); IPv6 zero `ip_payload_len` sentinel with captured TCP ACK:
+`extract_screen_info` must not yield `TinyFirstFragmentFlagsUnknown`,
+and the packed word must not set the tiny bit (teardrop mask off);
+LSRR-after-malformed-option; RH0 / RH1 / RH2 (RH2 must PASS); SYN+FIN;
+no-flag; FIN-no-ACK; winnuke port 139 vs 443; IPv6 atomic fragment (must
+trip nothing, §4.1); clean packets. FAIL-ON-REVERT: deleting any verdict
+arm reds its row.
 
 **(b) BPF decisive cells** — `BPF_PROG_TEST_RUN` harness, reuse the WIP's
 `host_screen_drop_16009_test.go` (harness:
@@ -726,13 +735,14 @@ to worker and no shim host-screen counter):
 | C16 (added) | v6 atomic fragment header (offset 0, M=0), all fragment checks on | PASS (not a fragment, §4.1) | — |
 | C17 (added) | v6 [atomic Frag][non-atomic Frag offset>0] ICMPv6, icmp-frag on | DROP + counter (governing-header rule, §4.2) | single atomic only: PASS (C16) |
 | C18 (added) | v6 tiny first fragment (M=1, declared TCP L4 = 8 B, flags unseen) | same as C6: drop with screen-state row even if syn-frag off/alarm on | row absent / unresolved: no tiny-only drop; pins v6 declared-length inference |
+| C19 (added) | v6 first Fragment (M=1), wire Payload Length=0, captured TCP ACK bytes; screen-state row, syn-frag on, teardrop off | worker extractor/packed-word twin: no tiny error; BPF: existing L3 `PARSE_FAIL` drop, no `host_screen_drop` | pins zero-as-unbounded tiny-flags rule; does NOT claim the BPF packet passes |
 
 Cells C1–C15 are the candidate's set, mapped onto the narrowed scope:
 all remain in the in-scope per-packet stateless class; the narrowing
 changes their LABELS and claims made from them (C1 above all), not their
-packets. C16–C18 are added because atomic/double-fragment handling and
-v6 tiny-flags inference are load-bearing worker rules the candidate
-corpus only implied.
+packets. C16–C19 are added because atomic/double-fragment handling,
+v6 tiny-flags inference, and the zero-payload-length sentinel are
+load-bearing worker rules the candidate corpus only implied.
 
 **(c) Go cells:** `buildUserspaceHostScreenEntries` table (WIP's
 `host_screen_16009_test.go`, reused: full / audit / off / flood-only
@@ -866,9 +876,10 @@ Questions the seats are asked to attack, in order of lethality:
 5. **Q-E (Q1 cost):** is precomputing TCP-flag trip bits in `parse_l4`
    register-cheap, or does it fork verifier states in the TCP arm as
    return-widening did? This is the first K1 fallback if wrong.
-6. **Q-F (§5.3 v6):** do in-walk scratch writes plus the post-walk
-   declared-length tiny-flags finalization preserve #4555 walk parity
-   without widening `ExtWalk` or creating stale partial words?
+6. **Q-F (§5.3 v6):** do in-walk scratch writes and post-walk tiny-flags
+   finalization preserve #4555 parity without widening `ExtWalk` or
+   creating stale partial words, including the worker's zero
+   `ip_payload_len` / `usize::MAX` declared-bound sentinel?
 7. **Q-G (§6.3):** is one aggregate `host_screen_drop` / `alarm`
    acceptable as landing observability, with S4 as fidelity follow-up,
    or is per-reason attribution a landing requirement?
@@ -885,10 +896,11 @@ production change (test-only oracle excepted).
 Sequence: (1) host verdict `host_screen.rs` + packed-word decode and
 source-include twin (§8a) green; (2) checked parser scratch writes,
 IPv4 TLV scan and IPv6 in-walk sightings plus post-walk tiny-flags
-finalization; `ParsedPacket`/`ExtWalk` diff EMPTY (§7.3); (3) regenerate
-and measure the object (§8d), stop at K1 (≤850,000 processed insns,
-floor PASS, no verifier override); (4) Go map wiring, builder/sync,
-counter mirror, §8c green, #8258 green again; (5) BPF cells §8b incl.
-C1–C18, docs `docs/afxdp-packet-processing.md` screen-parity paragraph
-(WIP hunk reused), and manifest/gate-verdict artifacts committed with
-the object.
+finalization; `ParsedPacket`/`ExtWalk` diff EMPTY (§7.3); (3) implement
+the outlined gate, all 11 terminal call sites, and append-only reason /
+counter constants (21/22); (4) regenerate and measure the COMPLETE shim
+object (§8d), stop at K1 (≤850,000 processed insns, floor PASS, no
+verifier override); (5) Go map wiring, builder/sync, counter mirror, §8c
+green, #8258 green again; (6) BPF cells §8b incl. C1–C19, docs
+`docs/afxdp-packet-processing.md` screen-parity paragraph (WIP hunk
+reused), and manifest/gate-verdict artifacts committed with the object.
