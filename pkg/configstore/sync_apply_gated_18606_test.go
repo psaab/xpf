@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -104,5 +106,79 @@ func TestSyncApplyGatedRefusalKeepsUnsharedState16016(t *testing.T) {
 	active := s.ActiveConfig()
 	if active == nil || active.Chassis.Cluster != nil {
 		t.Fatalf("refused promotion changed active cluster/PSK state: %+v", active)
+	}
+}
+
+func TestSyncApplyClearsUnsharedAfterActivePromotion16016(t *testing.T) {
+	restoreRollbackSeams(t)
+	s := newTestStore(t)
+	s.SetPeerReachableFn(func() bool { return true })
+	enter9530(t, s)
+	markedText := commit9530(t, s, "local-unshared-16016")
+	if s.unshared == nil {
+		t.Fatal("test setup did not create an unshared mark")
+	}
+	beforeGen, beforeCfg := s.ActiveSnapshot()
+	if beforeCfg == nil || beforeCfg.System.HostName != "local-unshared-16016" {
+		t.Fatalf("test setup active snapshot = (%d,%+v)", beforeGen, beforeCfg)
+	}
+
+	markPath := s.db.unsharedPath()
+	removeEntered := make(chan struct{})
+	releaseRemove := make(chan struct{})
+	var releaseOnce sync.Once
+	unblockRemove := func() {
+		releaseOnce.Do(func() { close(releaseRemove) })
+	}
+	originalRemove := rbRemove
+	rbRemove = func(path string) error {
+		if path == markPath {
+			close(removeEntered)
+			<-releaseRemove
+		}
+		return originalRemove(path)
+	}
+
+	done := make(chan struct{})
+	var applyErr error
+	go func() {
+		_, applyErr = s.SyncApplyGated(context.Background(), markedText, nil,
+			func(context.Context, *config.Config) error { return nil })
+		close(done)
+	}()
+	t.Cleanup(func() {
+		unblockRemove()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("SyncApplyGated did not finish after unshared deletion was released")
+		}
+	})
+
+	select {
+	case <-removeEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SyncApplyGated did not reach durable unshared deletion")
+	}
+	promotedGen, promotedCfg := s.ActiveSnapshot()
+	if promotedGen != beforeGen+1 || promotedCfg == nil || promotedCfg.System.HostName != "local-unshared-16016" {
+		t.Fatalf("active snapshot did not promote before unshared deletion: got (%d,%+v), want generation %d",
+			promotedGen, promotedCfg, beforeGen+1)
+	}
+
+	unblockRemove()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SyncApplyGated did not finish after unshared deletion was released")
+	}
+	if applyErr != nil {
+		t.Fatalf("SyncApplyGated: %v", applyErr)
+	}
+	if s.unshared != nil {
+		t.Fatalf("promoted peer config retained in-memory unshared mark: %+v", s.unshared)
+	}
+	if record, err := s.db.ReadUnshared(); err != nil || record != nil {
+		t.Fatalf("promoted peer config retained persisted unshared mark: record=%+v err=%v", record, err)
 	}
 }

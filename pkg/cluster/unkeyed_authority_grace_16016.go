@@ -109,8 +109,9 @@ type unkeyedGraceState struct {
 	// process has observed the grace expired (monotonic deadline passed,
 	// or a corrupt/expired record loaded at boot).
 	expired atomic.Bool
-	// peerKeyClearPending closes the publication gap while a peer key-clear
-	// persists its fail-closed cutoff. It is set before keyConfigured=false.
+	// peerKeyClearPending denies unauthenticated authority during a peer
+	// key-clear transition. Keyed transitions set it before publishing
+	// keyConfigured=false; a missing/expired anchor sets it before persistence.
 	peerKeyClearPending atomic.Bool
 	// armedGen mirrors Manager.peerProofGen at the anchor-delete
 	// (expired->keyed) transition; the recovery hold clears only when the
@@ -744,6 +745,13 @@ func (m *Manager) closePeerKeyClearWithoutGraceLocked(clusterEnabled, wasKeyConf
 		if st.elapsedFloor >= unkeyedAuthorityGrace || !effectiveWall.Before(expiry) || mono >= deadline {
 			expired = true
 		}
+	}
+	// A peer update that discovers a missing, corrupt, or expired cutoff must
+	// deny authority before the durable sentinel write. Key-clear transitions
+	// publish this earlier, before exposing the empty-key posture; this also
+	// covers already-unkeyed peers whose first observed config has no anchor.
+	if expired {
+		st.peerKeyClearPending.Store(true)
 	}
 	if changed {
 		m.persistUnkeyedAuthorityLocked()

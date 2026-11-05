@@ -296,8 +296,9 @@ func (s *Store) classifySyncLocked(incomingDigest, activeDigest string) syncClas
 }
 
 // applySyncClassificationLocked applies the state transition calculated
-// before the final gate. Callers hold s.mu and must call this only once that
-// gate has accepted the peer config.
+// before promotion. Callers hold s.mu and invoke it only after the active
+// snapshot is published: clearing an unshared mark performs durable I/O and
+// must not delay the swap after SyncApplyGated's final authority gate.
 func (s *Store) applySyncClassificationLocked(c syncClassification) {
 	if c.clearUnshared {
 		s.clearUnsharedLocked()

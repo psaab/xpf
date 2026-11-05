@@ -1421,7 +1421,6 @@ func (s *Store) SyncApplyGated(ctx context.Context, content string, chassisPrese
 		}
 	}
 
-	s.applySyncClassificationLocked(classification)
 	if historyEntry != nil {
 		s.history.Push(historyEntry)
 	}
@@ -1429,6 +1428,10 @@ func (s *Store) SyncApplyGated(ctx context.Context, content string, chassisPrese
 	s.active = tree
 	s.compiled = compiled
 	s.publishPreparedActiveLocked(nextSnapshot) // #9905: publish the prepared active snapshot
+	// Clearing an unshared mark durably removes its record. Do that only
+	// after the active snapshot is promoted so filesystem latency cannot
+	// leave a post-gate pause before authority-bearing state becomes active.
+	s.applySyncClassificationLocked(classification)
 	s.recordSyncDivergenceLocked(classification.divergence, incomingDigest)
 	s.dirty = false
 

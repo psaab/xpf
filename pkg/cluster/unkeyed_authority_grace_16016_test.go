@@ -1828,3 +1828,89 @@ func TestPeerKeyClearInterposedFrameRefuses16016(t *testing.T) {
 		t.Fatal("peer key-clear finished without retaining the fail-closed expired posture")
 	}
 }
+
+func TestPeerUnkeyedNoAnchorPublishesPendingBeforePersist16016(t *testing.T) {
+	m, _, path := setupBareAuthorityManager16016(t)
+	if m.UnkeyedAuthorityExpired() {
+		t.Fatal("bare manager unexpectedly began with expired authority")
+	}
+
+	persistStarted := make(chan struct{})
+	releasePersist := make(chan struct{})
+	var persistOnce sync.Once
+	var releaseOnce sync.Once
+	unblockPersist := func() {
+		releaseOnce.Do(func() { close(releasePersist) })
+	}
+	originalPersist := unkeyedAuthorityPersist
+	restorePersist := SetUnkeyedAuthorityPersistForTesting(func(path string, earliest, highWater time.Time, elapsed time.Duration) error {
+		persistOnce.Do(func() {
+			close(persistStarted)
+			<-releasePersist
+		})
+		return originalPersist(path, earliest, highWater, elapsed)
+	})
+	clearDone := make(chan struct{})
+	go func() {
+		m.UpdateConfigFromPeer(&config.ClusterConfig{ControlInterface: "em0"})
+		close(clearDone)
+	}()
+	t.Cleanup(func() {
+		unblockPersist()
+		select {
+		case <-clearDone:
+		case <-time.After(5 * time.Second):
+			t.Error("peer config update did not finish after persistence was released")
+		}
+		restorePersist()
+	})
+
+	select {
+	case <-persistStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unkeyed peer config did not reach expired-cutoff persistence")
+	}
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("missing-anchor sentinel persistence left unauthenticated authority open")
+	}
+
+	unblockPersist()
+	select {
+	case <-clearDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("peer config update did not finish after persistence was released")
+	}
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("unkeyed peer config finished without retaining the expired posture")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("peer config did not persist the fail-closed sentinel: %v", err)
+	}
+}
+
+func TestPeerUnkeyedUpdatePreservesActiveGrace16016(t *testing.T) {
+	m, _, path := setupAuthorityManager16016(t)
+	expiry := m.UnkeyedGraceExpiry()
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read active grace anchor: %v", err)
+	}
+
+	m.UpdateConfigFromPeer(&config.ClusterConfig{ControlInterface: "em0"})
+	if m.UnkeyedAuthorityExpired() {
+		t.Fatal("unkeyed peer update expired an active local grace window")
+	}
+	if m.unkeyedGrace.peerKeyClearPending.Load() {
+		t.Fatal("unkeyed peer update retained the temporary pending-deny posture")
+	}
+	if got := m.UnkeyedGraceExpiry(); !got.Equal(expiry) {
+		t.Fatalf("unkeyed peer update moved cutoff to %s, want %s", got, expiry)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read active grace anchor after peer update: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("unkeyed peer update rewrote active grace anchor: before=%q after=%q", before, after)
+	}
+}
