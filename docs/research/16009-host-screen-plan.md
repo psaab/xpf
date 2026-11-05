@@ -4,18 +4,18 @@
   reviews; ready for a fresh three-seat plan review. No production code is
   included. Implementation starts only after the plan seats converge.
 - **Source base:** claims below were checked against `origin/master` at
-  `6c27f54cf2`. Five earlier documentation-only commits are above that
+  `6c27f54cf2`. Six earlier documentation-only commits are above that
   base on `research/16009-host-screen`: `476df53770`, `c8e39b6d26`,
-  `f2fcfcff85`, `7ddbb5c743`, and `359cc7e348`. Source anchors refer to
-  the base, not the candidate's older line numbers.
+  `f2fcfcff85`, `7ddbb5c743`, `359cc7e348`, and `a5c8eed130`. Source
+  anchors refer to the base, not the candidate's older line numbers.
 - **Input, not truth:** the prior-lane candidate `docs/log/16009.md` was
   checked claim by claim. Corrections include `land_gate` at
   `lib.rs:2605-2636`, ctrl-disabled LAND at `:1721-1723`, and the actual
   verifier override `XPF_SHIM_ALLOW_LOW_HEADROOM`
   (`cmd/shimverify/main.go:232ff`).
-- **History:** preserve those five pushed research commits; the seat records'
-  SHAs remain historical review references. This fold adds a new commit
-  with the `(#16009)` subject; no prior commit is rewritten.
+- **History:** preserve those six pushed research commits; the seat records'
+  SHAs remain historical review references. This follow-up uses the
+  campaign `(#16009)` subject format; no prior commit is rewritten.
 
 ---
 
