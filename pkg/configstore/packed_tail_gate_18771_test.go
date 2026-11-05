@@ -514,7 +514,7 @@ func TestPackedTailEnforce18771PartialCommitSucceeds(t *testing.T) {
 		t.Fatalf("PARTIAL commit refused: %v", err)
 	}
 	verdicts := packedTailStoreVerdicts18771(cfg)
-	if len(verdicts) != 1 || (verdicts[0] != "PARTIAL" && verdicts[0] != "INDETERMINATE") {
+	if len(verdicts) != 1 || verdicts[0] != "INDETERMINATE" {
 		t.Fatalf("degraded partial-path commit findings = %v, want INDETERMINATE (never DROP)", verdicts)
 	}
 
