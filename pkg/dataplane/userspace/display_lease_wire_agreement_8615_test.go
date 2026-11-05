@@ -58,7 +58,9 @@ func TestDisplayLeaseWireAgreesWithTheHelperSpelling8615(t *testing.T) {
 	// Every field populated so nothing is elided by omitempty — the same reason
 	// the Rust specimen is populated rather than a ::default().
 	goJSON, err := json.Marshal(DisplayLeaseWire{
-		Pool: "p1", Protocol: 6,
+		Pool: "p1", PoolKind: 2, Nat64Prefix: "64:ff9b::",
+		Nat64Scope: "tenant-a|zones=trust|ris=|src=|constrained=0",
+		Protocol: 6,
 		SrcIP: "10.0.61.102", SrcPort: 40000,
 		RoutingScope: userspaceLeaseScope(7),
 		RemoteIP:     "8.8.8.8", RemotePort: 443,

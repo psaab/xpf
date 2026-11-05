@@ -1,8 +1,10 @@
 // #16168: census for the handleMessage switch after the verbatim
 // extraction of its case bodies into per-family handle* methods.
 //
-// The handled set is the 43 case clauses / 45 case labels in
-// handleMessage (sync_conn_read.go) — NOT "every syncMsg* 1..49":
+// The PersistentNatLeaseGeneration arm carries six labels (generation,
+// deterministic, provenance, deterministic provenance, typed-pool, and
+// deterministic typed-pool), and the DHCP chunk arm carries two, so the label
+// count (49) exceeds the clause count (43); pinning labels catches dropped labels.
 // AuthHello/AuthProof/AuthConfirm are handled pre-install, gaps and
 // retired numbers (19) exist, and 27/28/44 are phase-shared. A census
 // over the declaration space would red on day one; this one pins the
@@ -28,11 +30,9 @@ import (
 	"testing"
 )
 
-// wantHandleMessageLabels is the exact 45-label handled set, sorted.
-// Two clauses carry two labels each (PersistentNatLeaseGeneration /
-// PersistentNatLeaseDeterministic and DHCPLeaseV4Chunk /
-// DHCPLeaseV6Chunk), so the label count (45) exceeds the clause
-// count (43); pinning labels, not clauses, catches a dropped label.
+// wantHandleMessageLabels is the exact 49-label handled set, sorted.
+// The PersistentNatLeaseGeneration clause carries six labels and the DHCP
+// chunk clause carries two, so pinning labels catches a dropped label.
 var wantHandleMessageLabels = []string{
 	"syncMsgAuthUpgradeConfirm",
 	"syncMsgAuthUpgradeHello",
@@ -76,9 +76,11 @@ var wantHandleMessageLabels = []string{
 	"syncMsgPersistentNatLease",
 	"syncMsgPersistentNatLeaseDeterministic",
 	"syncMsgPersistentNatLeaseDeterministicProvenance",
+	"syncMsgPersistentNatLeaseDeterministicTypedPool",
 	"syncMsgPersistentNatLeaseGeneration",
 	"syncMsgPersistentNatLeaseProvenance",
 	"syncMsgPersistentNatLeaseScoped",
+	"syncMsgPersistentNatLeaseTypedPool",
 	"syncMsgSessionV4",
 	"syncMsgSessionV6",
 }
@@ -158,7 +160,7 @@ func TestHandleMessageCaseCensus16168(t *testing.T) {
 	if clauses != 43 {
 		t.Errorf("handleMessage has %d case clauses, want exactly 43", clauses)
 	}
-	if len(got) < 45 {
+	if len(got) < 49 {
 		t.Fatalf("the AST scan found only %d handleMessage case labels, which cannot be "+
 			"right — the scan is broken, and a broken scan reports a complete census", len(got))
 	}
@@ -192,7 +194,7 @@ func TestHandleMessageCaseCensus16168Mutations(t *testing.T) {
 	}
 	src := string(body)
 
-	// Dropping one label from a two-label arm keeps 43 clauses but
+	// Dropping one label from a multi-label arm keeps 43 clauses but
 	// must change the label set.
 	mut := strings.Replace(src,
 		"case syncMsgDHCPLeaseV4Chunk, syncMsgDHCPLeaseV6Chunk:",
@@ -201,8 +203,8 @@ func TestHandleMessageCaseCensus16168Mutations(t *testing.T) {
 		t.Fatalf("mutation setup failed: two-label DHCP chunk arm not found")
 	}
 	clauses, labels, _ := scanHandleMessageLabels(t, mut)
-	if clauses != 43 || len(labels) != 46 {
-		t.Errorf("label-drop mutation: got %d clauses / %d labels, want 43/46 — the census would not catch a dropped label", clauses, len(labels))
+	if clauses != 43 || len(labels) != 48 {
+		t.Errorf("label-drop mutation: got %d clauses / %d labels, want 43/48 — the census would not catch a dropped label", clauses, len(labels))
 	}
 
 	// Dropping a whole clause must change both counts.
@@ -211,8 +213,8 @@ func TestHandleMessageCaseCensus16168Mutations(t *testing.T) {
 		t.Fatalf("mutation setup failed: BarrierAck arm not found")
 	}
 	clauses, labels, _ = scanHandleMessageLabels(t, mut2)
-	if clauses != 42 || len(labels) != 46 {
-		t.Errorf("clause-drop mutation: got %d clauses / %d labels, want 42/46 — the census would not catch a dropped case", clauses, len(labels))
+	if clauses != 42 || len(labels) != 48 {
+		t.Errorf("clause-drop mutation: got %d clauses / %d labels, want 42/48 — the census would not catch a dropped case", clauses, len(labels))
 	}
 
 	// A case inside a /* */ block comment is not dispatch: it must
@@ -225,8 +227,8 @@ func TestHandleMessageCaseCensus16168Mutations(t *testing.T) {
 		t.Fatalf("mutation setup failed: BarrierAck arm not found for block-comment mutation")
 	}
 	clauses, labels, _ = scanHandleMessageLabels(t, mut3)
-	if clauses != 42 || len(labels) != 46 {
-		t.Errorf("block-comment mutation: got %d clauses / %d labels, want 42/46 — a commented-out case was counted as active dispatch", clauses, len(labels))
+	if clauses != 42 || len(labels) != 48 {
+		t.Errorf("block-comment mutation: got %d clauses / %d labels, want 42/48 — a commented-out case was counted as active dispatch", clauses, len(labels))
 	}
 
 	// Likewise, an extra case quoted inside a /* */ comment must not
@@ -238,8 +240,8 @@ func TestHandleMessageCaseCensus16168Mutations(t *testing.T) {
 		t.Fatalf("mutation setup failed: BarrierAck arm not found for quoted-case mutation")
 	}
 	clauses, labels, _ = scanHandleMessageLabels(t, mut4)
-	if clauses != 43 || len(labels) != 47 {
-		t.Errorf("quoted-case mutation: got %d clauses / %d labels, want 43/47 — a case inside a block comment was counted", clauses, len(labels))
+	if clauses != 43 || len(labels) != 49 {
+		t.Errorf("quoted-case mutation: got %d clauses / %d labels, want 43/49 — a case inside a block comment was counted", clauses, len(labels))
 	}
 
 	// A scan over an empty switch must hit the floor path (zero
