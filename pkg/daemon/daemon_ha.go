@@ -1370,10 +1370,26 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 				if !cur {
 					d.tryPrepareUserspaceRGDemotion(rgID)
 				}
-				if err := rt.HA().SetRGActive(ctx, rgID, cur); err != nil {
+				// The desired-state re-read can observe a concurrent
+				// promotion. In that race this BACKUP handler is also
+				// an activation writer, so it must preserve the same
+				// connected-route-before-rg_active ordering.
+				republishReady := true
+				if cur {
+					republishReady = d.republishConnectedRGSync(ctx, "vrrp-backup-recheck")
+				}
+				applied := false
+				if cur && !republishReady {
+					slog.Warn("vrrp: connected-route republish failed during BACKUP recheck; skipping rg_active activation",
+						"rg", rgID)
+				} else if err := rt.HA().SetRGActive(ctx, rgID, cur); err != nil {
 					slog.Warn("failed to update rg_active", "rg", rgID, "err", err)
 				} else {
-					recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
+					applied = recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
+				}
+				if cur && d.cluster != nil && d.cluster.IsLocalPrimary(rgID) {
+					ready := applied && s.AllVRRPMaster() && !s.NeedsApply()
+					d.setLocalFailoverCommitReady(rgID, ready)
 				}
 				d.RefreshFabricFwd()
 			}

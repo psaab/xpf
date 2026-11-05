@@ -280,6 +280,90 @@ func TestPromotionRepublishRetryRestoresVRRPCommitReadiness18927(t *testing.T) {
 	}
 }
 
+// promotionBackupInterleaveDP18927 invokes a competing event at the BACKUP
+// handler's userspace-mode check, before it re-reads desired state.
+type promotionBackupInterleaveDP18927 struct {
+	*promotionOrderDP18927
+	onMode func()
+}
+
+func (p *promotionBackupInterleaveDP18927) Mode() dpuserspace.DataplaneMode {
+	fn := p.onMode
+	p.onMode = nil
+	if fn != nil {
+		fn()
+	}
+	return dpuserspace.ModeUserspaceStrict
+}
+
+func TestVRRPBackupRecheckGatesInterleavedPromotion18927(t *testing.T) {
+	d, log, dp := newPromotionOrderDaemon18927(t)
+	d.store = testStoreWithSetConfig(t, []string{
+		"set system dataplane-type userspace",
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster node 0",
+		"set chassis cluster no-private-rg-election",
+		"set chassis cluster authentication-key test-cluster-psk-18927",
+		"set chassis cluster redundancy-group 0 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		"set interfaces reth1 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/0 gigether-options redundant-parent reth1",
+	})
+	d.cluster.UpdateConfig(d.store.ActiveConfig().Chassis.Cluster)
+	if d.isNoRethVRRP() {
+		t.Fatal("fixture: RETH VRRP must be enabled")
+	}
+	instances := vrrp.CollectRethInstances(d.store.ActiveConfig(), d.cluster.LocalPriorities())
+	if len(instances) != 1 {
+		t.Fatalf("fixture: want one RETH VRRP instance, got %d", len(instances))
+	}
+	d.vrrpMgr.SeedInstanceForTesting(*instances[0], vrrp.StateMaster)
+	d.cluster.SetGroupStateForTesting(1, cluster.StateSecondary)
+	s := d.getOrCreateRGState(1)
+	if tr := s.SetVRRP("reth1", true); !tr.Active {
+		t.Fatal("fixture: initial MASTER must be active")
+	}
+	s.MarkApplied(true)
+	dp.setErrors(errors.New("connected-route publication refused"), nil)
+	p := &promotionBackupInterleaveDP18927{promotionOrderDP18927: dp}
+	p.onMode = func() {
+		d.cluster.SetGroupStateForTesting(1, cluster.StatePrimary)
+		d.handleClusterEvent(context.Background(), cluster.ClusterEvent{
+			GroupID: 1, OldState: cluster.StateSecondary, NewState: cluster.StatePrimary,
+		}, nil)
+	}
+	d.setDataplane(p)
+
+	d.handleVRRPEvent(context.Background(), vrrp.VRRPEvent{
+		GroupID: rethVRIDBase + 1, Interface: "reth1", State: vrrp.StateBackup,
+	}, rgTransition{})
+	events := log.snapshot()
+	if !slices.Contains(events, "publish") {
+		t.Fatalf("fixture did not exercise failed connected-route republish: %v", events)
+	}
+	if countPromotionEvent18927(events, "rg_active[1]=true") != 0 {
+		t.Fatalf("BACKUP re-read wrote rg_active=true after failed concurrent PRIMARY republish: %v", events)
+	}
+	if !s.NeedsApply() {
+		t.Fatalf("failed concurrent PRIMARY republish lost retry debt: %v", events)
+	}
+	if d.localFailoverCommitIsReady(1) {
+		t.Fatal("failed concurrent PRIMARY republish opened peer-commit readiness")
+	}
+
+	dp.setErrors(nil, nil)
+	d.reconcileRGState()
+	if s.NeedsApply() || countPromotionEvent18927(log.snapshot(), "rg_active[1]=true") != 1 {
+		t.Fatalf("reconcile did not converge the pending promotion exactly once; needsApply=%v events=%v",
+			s.NeedsApply(), log.snapshot())
+	}
+	if !d.cluster.IsLocalPrimary(1) || !s.AllVRRPMaster() || !d.localFailoverCommitIsReady(1) {
+		t.Fatalf("successful reconcile did not restore primary/Master readiness: primary=%v allMaster=%v ready=%v",
+			d.cluster.IsLocalPrimary(1), s.AllVRRPMaster(), d.localFailoverCommitIsReady(1))
+	}
+}
+
 func TestTransferPreActivationSkipsHelperPublishAfterConnectedRouteFailure18927(t *testing.T) {
 	for _, failure := range []string{"publisher-error", "bump-error"} {
 		t.Run(failure, func(t *testing.T) {
