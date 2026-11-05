@@ -6020,6 +6020,7 @@ fn composed_dnat_dynamic_snat_empty_rules_reverse_revokes_18927() {
     case.5.nat_scope_ifindex = None;
     case.2.nat.rewrite_dst = Some("10.0.0.10".parse().expect("DNAT destination"));
     case.2.nat.rewrite_dst_port = Some(8443);
+    case.1 = crate::session::reverse_session_key(&case.0, case.2.nat);
     case.4 = SessionDecision {
         nat: case.2.nat.reverse(
             case.0.src_ip,
