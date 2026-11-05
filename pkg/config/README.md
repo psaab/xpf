@@ -515,6 +515,8 @@ Multi-value matches survive `Format` / `FormatSet` replay. List closure is
 tracked structurally: bare or quoted clause words are values inside a balanced
 list, while an unclosed bracketed `from` list fails closed.
 
+**Quoted bracketed `from prefix-list` keywords survive replay (#18850):** `Format` omits a closed list's brackets only when it contains an authored-quoted inline keyword and every inline-keyword member is quoted. A bare inline keyword such as `protocol` still needs bracket context to remain a value, so mixed bare/quoted keyword runs and unclosed lists retain their brackets. `FormatSet` retains the terminal quote in its flat command.
+
 **Routing-policy `from protocol` value domain (#7121, tolerant downgrade
 #16577):** `validateRoutingPolicyProtocolsStrict` checks every term token
 against the `FRRRoutingProtocolKeyword` SSOT. Junos `ospf3`/`ospf2` alias
