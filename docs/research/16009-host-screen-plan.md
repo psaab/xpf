@@ -4,17 +4,18 @@
   reviews; ready for a fresh three-seat plan review. No production code is
   included. Implementation starts only after the plan seats converge.
 - **Source base:** claims below were checked against `origin/master` at
-  `6c27f54cf2`. The `research/16009-host-screen` branch has two earlier
-  documentation-only research commits above that base; source anchors refer
-  to the base, not the candidate's older line numbers.
+  `6c27f54cf2`. Four earlier documentation-only commits are above that
+  base on `research/16009-host-screen`: `476df53770`, `c8e39b6d26`,
+  `f2fcfcff85`, and `7ddbb5c743`. Source anchors refer to the base, not the
+  candidate's older line numbers.
 - **Input, not truth:** the prior-lane candidate `docs/log/16009.md` was
   checked claim by claim. Corrections include `land_gate` at
   `lib.rs:2605-2636`, ctrl-disabled LAND at `:1721-1723`, and the actual
   verifier override `XPF_SHIM_ALLOW_LOW_HEADROOM`
   (`cmd/shimverify/main.go:232ff`).
-- **History:** retain already-pushed research commits `476df53770` and
-  `c8e39b6d26` as historical; do not rewrite or force-push them. This fold
-  is a new commit with the campaign's Why/What/Validation/Risk body.
+- **History:** preserve those already-pushed research commits as historical;
+  do not rewrite or force-push them. This header correction is a new commit
+  with the campaign's Why/What/Validation/Risk body.
 
 ---
 
