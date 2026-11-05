@@ -1622,6 +1622,54 @@ func TestBootKeyedPeerClearWithoutAnchorStaysExpired16016(t *testing.T) {
 		t.Fatalf("keyed-boot peer clear did not persist its expired cutoff: %v", err)
 	}
 }
+
+func TestKeyedRecoveryHoldStatusSurfacesPersistFailure16016(t *testing.T) {
+	const recoveryHoldStatus = "recovery hold active; takeover suppressed until a fresh authenticated peer heartbeat"
+
+	t.Run("failed-persist", func(t *testing.T) {
+		m, clock, _ := setupAuthorityManager16016(t)
+		restorePersist := SetUnkeyedAuthorityPersistForTesting(func(string, time.Time, time.Time, time.Duration) error {
+			return fmt.Errorf("injected persist failure")
+		})
+		t.Cleanup(restorePersist)
+		clock.advance(73 * time.Hour)
+		m.checkUnkeyedGraceNotices()
+		if !m.UnkeyedAuthorityExpired() {
+			t.Fatal("test setup did not expire unkeyed authority")
+		}
+		m.UpdateConfig(&config.ClusterConfig{
+			ControlInterface: "em0", ControlLinkAuthKey: config.NewSecret("status-local-key-16016"),
+		})
+		if !m.RecoveryHoldActive() {
+			t.Fatal("keying expired cluster did not arm recovery hold")
+		}
+		if !m.UnkeyedGraceNotPersisted() {
+			t.Fatal("injected anchor persist failure was not retained after keying")
+		}
+		want := recoveryHoldStatus + "; anchor not persisted; restart re-opens grace"
+		if got := m.unkeyedAuthorityGraceStatus(); got != want {
+			t.Fatalf("keyed recovery-hold status = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("healthy-persist", func(t *testing.T) {
+		m, clock, _ := setupAuthorityManager16016(t)
+		clock.advance(73 * time.Hour)
+		m.checkUnkeyedGraceNotices()
+		if !m.UnkeyedAuthorityExpired() {
+			t.Fatal("test setup did not expire unkeyed authority")
+		}
+		m.UpdateConfig(&config.ClusterConfig{
+			ControlInterface: "em0", ControlLinkAuthKey: config.NewSecret("status-local-key-16016"),
+		})
+		if !m.RecoveryHoldActive() {
+			t.Fatal("keying expired cluster did not arm recovery hold")
+		}
+		if got := m.unkeyedAuthorityGraceStatus(); got != recoveryHoldStatus {
+			t.Fatalf("healthy keyed recovery-hold status = %q, want exact %q", got, recoveryHoldStatus)
+		}
+	})
+}
 func TestUnkeyedGraceExpiredStatusSurfacesLocalReArm16016(t *testing.T) {
 	m, clock, path := setupAuthorityManager16016(t)
 	clock.advance(73 * time.Hour)

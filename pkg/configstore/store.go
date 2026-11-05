@@ -156,6 +156,11 @@ type Store struct {
 	// concurrency seam for commit-gate binding tests only.
 	afterCandidateGateSampleForTesting func()
 
+	// syncApplyPreparedForTesting runs after SyncApplyGated prepares the
+	// classification, history entry, and promotion values but before its final
+	// gate. It pins the authority-check ordering in deterministic tests only.
+	syncApplyPreparedForTesting func()
+
 	// pendingRenameAncestry records candidate Rename operations by the
 	// candidate generation that produced them. The daemon binds only the
 	// exact generation it compiled/promoted, so an old failed apply cannot be
@@ -1415,6 +1420,9 @@ func (s *Store) SyncApplyGated(ctx context.Context, content string, chassisPrese
 	// rollback history, candidate snapshots, and the unshared mark untouched.
 	nextJournalHash := journalConfigHash(tree)
 	nextGuardedHash := guardedConfigHash(tree)
+	if s.syncApplyPreparedForTesting != nil {
+		s.syncApplyPreparedForTesting()
+	}
 	if gate != nil {
 		if err := gate(ctx, compiled); err != nil {
 			return nil, err

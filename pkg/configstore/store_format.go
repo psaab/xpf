@@ -324,6 +324,23 @@ func (s *Store) ActiveConfigGeneration() string {
 	return guardedConfigHash(s.active)
 }
 
+// UnsharedMarkDigest reports whether a local-unshared commit mark (#9530)
+// exists and the digest of the content it names. It exposes only that
+// presence and identity — never the mark's bookkeeping — so callers outside
+// the package can assert the mark survived a refused promotion without
+// reaching into store internals.
+func (s *Store) UnsharedMarkDigest() (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.unshared == nil || s.unshared.Digest == "" {
+		return "", false
+	}
+	return s.unshared.Digest, true
+}
+
 // CandidateEqualsActive reports whether the candidate tree is identical to
 // the active tree under the canonical (post-persist-round-trip) hash. It is
 // the no-change gate the event engine consults before committing a

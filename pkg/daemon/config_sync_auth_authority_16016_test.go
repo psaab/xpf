@@ -392,10 +392,30 @@ func TestUnauthenticatedConfigSyncRechecksAuthorityAtStorePromotion16016(t *test
 	restoreClocks := cluster.SetUnkeyedAuthorityClocksForTesting(time.Now, mono.Load)
 	t.Cleanup(restoreClocks)
 
-	store := newConfigStore(t, filepath.Join(t.TempDir(), "config.db"))
-	initial := `chassis { cluster { cluster-id 1; control-interface control0; } }`
+	dbPath := filepath.Join(t.TempDir(), "config.db")
+	store := newConfigStore(t, dbPath)
+	initial := `system { host-name baseline-unkeyed-store-16016; }`
 	if _, err := store.SyncApply(initial, nil); err != nil {
 		t.Fatalf("seed unkeyed config: %v", err)
+	}
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure marked config: %v", err)
+	}
+	if err := store.SetFromInput("system host-name local-marked-before-cutoff-16016"); err != nil {
+		t.Fatalf("SetFromInput marked config: %v", err)
+	}
+	store.SetPeerReachableFn(func() bool { return true })
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit marked config: %v", err)
+	}
+	markDigest, hasMark := store.UnsharedMarkDigest()
+	if !hasMark || markDigest == "" {
+		t.Fatal("test precondition: local commit did not create an unshared mark")
+	}
+	markPath := filepath.Join(filepath.Dir(dbPath), ".configdb", "unshared.json")
+	beforeUnsharedBytes, err := os.ReadFile(markPath)
+	if err != nil {
+		t.Fatalf("read persisted unshared mark: %v", err)
 	}
 	manager := newClusterManager(false)
 	if manager.UnkeyedAuthorityExpired() {
@@ -415,6 +435,9 @@ func TestUnauthenticatedConfigSyncRechecksAuthorityAtStorePromotion16016(t *test
 		<-resume
 	}
 	before := store.ShowActive()
+	beforeHistory := len(store.ListHistory())
+	beforeCandidate := store.ShowCandidate()
+	beforeCandidateGen := store.CandidateGeneration()
 	result := make(chan error, 1)
 	incoming := renderSyncedConfigText(t,
 		"chassis cluster cluster-id 1",
@@ -440,16 +463,32 @@ func TestUnauthenticatedConfigSyncRechecksAuthorityAtStorePromotion16016(t *test
 
 	mono.Store(int64(time.Second) + int64(73*time.Hour))
 	close(resume)
-	err := <-result
+	err = <-result
 	if err == nil || !strings.Contains(err.Error(), "after unkeyed-authority grace expired") {
 		t.Fatalf("config admitted at store promotion after the cutoff: %v", err)
 	}
 	if applies != 0 || store.ShowActive() != before {
 		t.Fatalf("expired apply changed config: applies=%d before=%q after=%q", applies, before, store.ShowActive())
 	}
+	if got := len(store.ListHistory()); got != beforeHistory {
+		t.Fatalf("cutoff refusal changed rollback history: before=%d after=%d", beforeHistory, got)
+	}
+	if got, gen := store.ShowCandidate(), store.CandidateGeneration(); got != beforeCandidate || gen != beforeCandidateGen {
+		t.Fatalf("cutoff refusal changed candidate: before=(%q,%d) after=(%q,%d)",
+			beforeCandidate, beforeCandidateGen, got, gen)
+	}
+	if got, ok := store.UnsharedMarkDigest(); !ok || got != markDigest {
+		t.Fatalf("cutoff refusal changed unshared mark: before=%q present=%t after=%q present=%t",
+			markDigest, hasMark, got, ok)
+	}
+	afterUnsharedBytes, err := os.ReadFile(markPath)
+	if err != nil || string(afterUnsharedBytes) != string(beforeUnsharedBytes) {
+		t.Fatalf("cutoff refusal changed raw unshared.json: before=%q after=%q err=%v",
+			beforeUnsharedBytes, afterUnsharedBytes, err)
+	}
 	active := store.ActiveConfig()
-	if active == nil || active.Chassis.Cluster == nil ||
-		active.Chassis.Cluster.ControlLinkAuthKey.Reveal() != "" {
+	if active == nil || (active.Chassis.Cluster != nil &&
+		active.Chassis.Cluster.ControlLinkAuthKey.Reveal() != "") {
 		t.Fatal("cutoff-racing unauthenticated config promoted its first PSK")
 	}
 	if manager.ControlLinkAuthConfigured() {

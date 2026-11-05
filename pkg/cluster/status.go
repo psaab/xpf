@@ -954,12 +954,6 @@ func (m *Manager) controlLinkAuthStatus() string {
 	return "engaged (local key configured; unauthenticated heartbeat frames rejected)"
 }
 func (m *Manager) unkeyedAuthorityGraceStatus() string {
-	if m.ControlLinkAuthConfigured() {
-		if m.RecoveryHoldActive() {
-			return "recovery hold active; takeover suppressed until a fresh authenticated peer heartbeat"
-		}
-		return "inactive (local control-link key configured)"
-	}
 	notPersisted, postRenameDurabilityUnknown := m.unkeyedGracePersistenceState()
 	suffix := ""
 	activeSuffix := ""
@@ -970,6 +964,12 @@ func (m *Manager) unkeyedAuthorityGraceStatus() string {
 		}
 		suffix = "; " + detail
 		activeSuffix = " (" + detail + ")"
+	}
+	if m.ControlLinkAuthConfigured() {
+		if m.RecoveryHoldActive() {
+			return "recovery hold active; takeover suppressed until a fresh authenticated peer heartbeat" + suffix
+		}
+		return "inactive (local control-link key configured)"
 	}
 	if m.UnkeyedAuthorityExpired() {
 		rearmHint := "; if the RTC was wrong, correct the clock and run the local audited request chassis cluster unkeyed-grace restart"

@@ -1,8 +1,10 @@
 package configstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"sync"
 	"testing"
@@ -106,6 +108,104 @@ func TestSyncApplyGatedRefusalKeepsUnsharedState16016(t *testing.T) {
 	active := s.ActiveConfig()
 	if active == nil || active.Chassis.Cluster != nil {
 		t.Fatalf("refused promotion changed active cluster/PSK state: %+v", active)
+	}
+}
+
+// #16016: expiry at the last promotion gate rejects both branches of
+// classification without changing any observable or persisted store state.
+// FAIL-ON-REVERT: the prepared-state seam must run before the gate; moving
+// authority recheck ahead of classification/history preparation makes this
+// cell fail even though the refusal still leaves the Store untouched.
+func TestSyncApplyGatedCutoffPreservesPreparedState16016(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		incoming func(string) string
+	}{
+		{name: "matching-content", incoming: func(marked string) string { return marked }},
+		{name: "changed-content", incoming: func(string) string {
+			return "system { host-name peer-replacement-16016; }\n"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			enter9530(t, s)
+			s.SetPeerReachableFn(func() bool { return true })
+			markedText := commit9530(t, s, "local-unshared-cutoff-16016")
+			if s.unshared == nil {
+				t.Fatal("test precondition: local commit did not create an unshared mark")
+			}
+
+			type historyState struct {
+				format    string
+				timestamp time.Time
+			}
+			historyStateOf := func() []historyState {
+				entries := s.ListHistory()
+				got := make([]historyState, len(entries))
+				for i, entry := range entries {
+					if entry != nil && entry.Config != nil {
+						got[i].format = entry.Config.Format()
+						got[i].timestamp = entry.Timestamp
+					}
+				}
+				return got
+			}
+			markPath := s.db.unsharedPath()
+			beforeUnsharedBytes, err := os.ReadFile(markPath)
+			if err != nil {
+				t.Fatalf("read persisted unshared mark: %v", err)
+			}
+			beforeActive := s.ShowActive()
+			beforeHistory := historyStateOf()
+			beforeCandidate := s.ShowCandidate()
+			beforeCandidateGen := s.CandidateGeneration()
+			beforeActiveGen := s.activeGen.Load()
+			beforeUnshared := *s.unshared
+			prepared := false
+			s.syncApplyPreparedForTesting = func() { prepared = true }
+			refused := errors.New("authority expired at final gate")
+			expired := false
+			gateSawPrepared := false
+			gate := func(_ context.Context, _ *config.Config) error {
+				gateSawPrepared = prepared
+				expired = true
+				return refused
+			}
+
+			_, err = s.SyncApplyGated(context.Background(), tc.incoming(markedText), nil, gate)
+			if !expired {
+				t.Fatal("promotion gate did not simulate authority expiry")
+			}
+			if !prepared || !gateSawPrepared {
+				t.Fatal("authority gate ran before classification/history preparation")
+			}
+			if !errors.Is(err, refused) {
+				t.Fatalf("SyncApplyGated = %v, want final-gate refusal", err)
+			}
+			if got := s.ShowActive(); got != beforeActive {
+				t.Fatalf("refusal changed active text: before=%q after=%q", beforeActive, got)
+			}
+			if got := historyStateOf(); !reflect.DeepEqual(got, beforeHistory) {
+				t.Fatalf("refusal changed rollback history: before=%+v after=%+v", beforeHistory, got)
+			}
+			if got, gen := s.ShowCandidate(), s.CandidateGeneration(); got != beforeCandidate || gen != beforeCandidateGen {
+				t.Fatalf("refusal changed candidate: before=(%q,%d) after=(%q,%d)",
+					beforeCandidate, beforeCandidateGen, got, gen)
+			}
+			if got := s.activeGen.Load(); got != beforeActiveGen {
+				t.Fatalf("refusal changed active generation: before=%d after=%d", beforeActiveGen, got)
+			}
+			if s.unshared == nil || !reflect.DeepEqual(*s.unshared, beforeUnshared) {
+				t.Fatalf("refusal changed in-memory unshared mark: before=%+v after=%+v", beforeUnshared, s.unshared)
+			}
+			afterUnsharedBytes, err := os.ReadFile(markPath)
+			if err != nil {
+				t.Fatalf("read persisted unshared mark after refusal: %v", err)
+			}
+			if !bytes.Equal(afterUnsharedBytes, beforeUnsharedBytes) {
+				t.Fatalf("refusal changed raw unshared.json bytes: before=%q after=%q", beforeUnsharedBytes, afterUnsharedBytes)
+			}
+		})
 	}
 }
 
