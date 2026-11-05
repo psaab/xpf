@@ -248,8 +248,10 @@ starting templates.
 **Shape.** Retain the existing checked IHL slice. Implement the TLV state
 machine with a maximum of 40 byte positions, but no packet/slice access at
 a dynamic `pos`: each kind/length-byte access is a constant-offset arm
-selected by `pos` (e.g. `match pos { 0 => options[20], 1 => options[21], … }`),
-with the IHL-derived real option length checked before selecting an arm.
+selected by `pos`. If indexing the full validated IHL slice `header`, arms
+use `header[20]`, `header[21]`, …; if indexing the options-only subslice,
+they use `options[0]`, `options[1]`, …. Check the IHL-derived real option
+length before selecting an arm.
 Unroll the 40 positions or use a compiler-visible constant-dispatch helper;
 no hand-built pointer arithmetic. Maintain the worker's rules: EOOL ends
 scan, NOP advances one, other kinds require a length byte and length ≥2,
