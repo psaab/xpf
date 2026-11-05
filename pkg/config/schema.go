@@ -46,7 +46,16 @@ type schemaNode struct {
 	// only for leaves whose compiler reads just the child name; as-path-prepend
 	// sets this because firewallMatchValues consumes each child key.
 	allChildKeysAreValues bool
-	// refuseNonLeafBlockChildren opts a typed multi-value leaf into refusing any
+	// snmpClientRestrictionList admits a packed multi-token block child only
+	// for the three SNMP source-restriction leaves, whose shared reader
+	// parseSNMPClients consumes and pairs every child key (including a trailing
+	// `restrict`). This is deliberately narrower than allChildKeysAreValues:
+	// the #18844 census found 178 unique untyped multi leaves, including
+	// proxy-arp address whose reader keeps only Keys[0] of each child. Widening
+	// those leaves generically would bless a spelling whose trailing token is
+	// silently dropped. See docs/log/18844.md for the census and reader audit.
+	snmpClientRestrictionList bool
+	// refuseNonLeafBlockChildren opts a multi-value leaf into refusing any
 	// hierarchical block-list child that is not a plain leaf value. The leaf's
 	// reader consumes direct child keys but does not descend into child blocks,
 	// so nested content would be silently dropped. Set it only on value-list

@@ -1540,7 +1540,11 @@ var schemaSNMP = &schemaNode{desc: "SNMP configuration", children: map[string]*s
 		// bracketed list / repeated set lines collapse onto the leaf; the
 		// trailing optional `restrict` deny modifier rides on the same run and
 		// is paired to its prefix by parseSNMPClients.
-		"clients": {desc: "Source-IP allowlist for this community (<prefix> [restrict])", args: 1, multi: true, placeholder: "<prefix>", children: nil},
+		// #18844: parseSNMPClients consumes the entire child key run and treats
+		// a final `restrict` as the deny modifier for its immediately preceding
+		// prefix. This leaf may therefore admit packed block children; generic
+		// untyped multi leaves remain one-value-per-child.
+		"clients": {desc: "Source-IP allowlist for this community (<prefix> [restrict])", args: 1, multi: true, placeholder: "<prefix>", children: nil, snmpClientRestrictionList: true, refuseNonLeafBlockChildren: true},
 		// #9416: the NAMED spelling of the same source restriction. Junos
 		// expresses one allowlist two ways -- inline `clients`, or a reusable
 		// `snmp client-list <name>` referenced from here -- and only the inline
@@ -1564,7 +1568,7 @@ var schemaSNMP = &schemaNode{desc: "SNMP configuration", children: map[string]*s
 		// leave the community answering every source, which is the defect this
 		// whole change is about; a typo must be told to the operator instead.
 		"routing-instance": {desc: "Routing-instance scope for this community (the scoping is NOT enforced; its source restriction IS applied)", args: 1, placeholder: "<instance-name>", closedWorld: true, children: map[string]*schemaNode{
-			"clients":          {desc: "Source-IP allowlist for this community in this routing instance (<prefix> [restrict])", args: 1, multi: true, placeholder: "<prefix>", children: nil},
+			"clients":          {desc: "Source-IP allowlist for this community in this routing instance (<prefix> [restrict])", args: 1, multi: true, placeholder: "<prefix>", children: nil, snmpClientRestrictionList: true, refuseNonLeafBlockChildren: true},
 			"client-list-name": {desc: "Name of an `snmp client-list` whose prefixes restrict this community in this routing instance", args: 1, placeholder: "<client-list-name>", children: nil},
 		}},
 	}},
@@ -1574,7 +1578,7 @@ var schemaSNMP = &schemaNode{desc: "SNMP configuration", children: map[string]*s
 	// collapses its prefixes onto the node's Keys, matching how `clients` is
 	// declared; the braced body lands on Children. parseSNMPClientListPrefixes
 	// reads BOTH shapes (the #2419 dual-shape class).
-	"client-list": {desc: "Named source-IP client list (<prefix> [restrict])", args: 1, multi: true, placeholder: "<client-list-name>", children: nil},
+	"client-list": {desc: "Named source-IP client list (<prefix> [restrict])", args: 1, multi: true, placeholder: "<client-list-name>", children: nil, snmpClientRestrictionList: true, refuseNonLeafBlockChildren: true},
 	// packedStatements (#8768): compileSNMP reads `targets` and `version` as
 	// separate statements, and the packed spelling
 	// `trap-group tg1 targets 10.0.0.1 version v2;` used to collapse both into

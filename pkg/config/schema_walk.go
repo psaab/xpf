@@ -698,16 +698,19 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		return nil
 	}
 
-	// #16535: an UNTYPED multi leaf (no validator — e.g. proxy-arp
-	// `address`, whose values are checked by the compiler's own strict
-	// gate) never reaches validateMultiValueLeaf above, so the sixth
-	// spelling `leaf { v1 v2; }` would pass the walk unchecked and the
-	// compiler's Keys[0]-per-child read would silently drop v2. Refuse
-	// a multi-token block child here too: one value per statement.
-	// Typed leaves are handled inside validateMultiValueLeaf; scalar
-	// (non-multi) leaves keep their own arity handling below. The
-	// refusal is structural only — no token is value-validated here,
-	// because this leaf has no validator to validate it with.
+	// #16535: an untyped multi leaf (no token/tree validator — e.g.
+	// proxy-arp `address`, whose values are checked by the compiler's own
+	// strict gate) never reaches validateMultiValueLeaf above. Its compiler
+	// reader may consume only Keys[0] per block child, so refuse the sixth
+	// spelling `leaf { v1 v2; }` instead of blessing a trailing value the
+	// reader silently drops. The sole exception is the explicitly marked
+	// SNMP client-restriction family: parseSNMPClients consumes every child
+	// key and pairs `restrict` with its preceding prefix (#18844). This flag
+	// is intentionally not allChildKeysAreValues: the census found 178
+	// candidate leaves, including proxy-arp `address`, which keeps only the
+	// first key per block child.
+	// Nested block children remain refused where refuseNonLeafBlockChildren
+	// is set.
 	if childSchema.multi && childSchema.children == nil && exactMatch {
 		for _, c := range node.Children {
 			if c == nil || len(c.Keys) == 0 {
@@ -721,7 +724,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 				}
 				return err
 			}
-			if len(c.Keys) <= 1 {
+			if len(c.Keys) <= 1 || childSchema.snmpClientRestrictionList {
 				continue
 			}
 			leafPath := append(append([]string(nil), path...), keyword)
