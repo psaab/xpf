@@ -517,16 +517,6 @@ func TestPackedTailEnforce18771PartialCommitSucceeds(t *testing.T) {
 	}
 }
 
-
 func packedTailStorePartialText18771() string {
 	return `interfaces { ge-0/0/1 { unit 0 { family inet { address 192.0.2.2/24 vrrp-group 1 authentication-type simple; } } } }`
-}
-
-func parseText18771(t *testing.T, text string) *config.ConfigTree {
-	t.Helper()
-	tree, errs := config.NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatal(errs)
-	}
-	return tree
 }
