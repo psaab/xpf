@@ -749,6 +749,10 @@ type SNMPConfig struct {
 	// quarantinedComms is compilation-only sticky state: a malformed source
 	// restriction in any merged block must keep the community deny-all.
 	quarantinedComms map[string]bool
+	// quarantinedLists is compilation-only sticky state: a named client-list
+	// malformed in ANY merged fragment must keep every referencing community
+	// deny-all, even if a later fragment repopulates it (#18844).
+	quarantinedLists map[string]bool
 }
 
 // MarshalJSON redacts the SNMPv1/v2c community strings on the JSON surface

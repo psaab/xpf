@@ -4374,6 +4374,9 @@ are exempt: every token there is a value and every token is validated.
 The slot-escape sweep probes the form as `G-hier-one-child-multi-token`;
 the refusal itself is pinned by
 `TestOneChildMultiTokenBlockRefused16535`.
+SNMP source-restriction leaves are a narrow explicit exception (#18844): their
+packed values are consumed as prefix/optional-`restrict` runs, while malformed
+qualifier shapes still reject strict compilation and quarantine lenient loads.
 
 **A silent DROP can be closed by diagnosing it instead of widening the read
 (#6714, proxy-ARP).** `security nat proxy-arp … address` accepts one

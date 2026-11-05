@@ -225,6 +225,9 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 	if snmp.ClientLists == nil {
 		snmp.ClientLists = make(map[string][]SNMPClient)
 	}
+	if snmp.quarantinedLists == nil {
+		snmp.quarantinedLists = make(map[string]bool)
+	}
 	clientListMalformedStatements := make(map[string][]string)
 
 	// #9416: read the `snmp` stanza's own PACKED body, not `node.Children`.
@@ -312,7 +315,13 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 		if cfg != nil {
 			cfg.Warnings = append(cfg.Warnings, listWarnings...)
 		}
-		if listMalformed {
+		if listMalformed && lenient {
+			snmp.quarantinedLists[listName] = true
+		}
+		// A malformed fragment taints the named list for the rest of this
+		// compilation, even if a later same-name fragment contributes valid
+		// entries. Never allow that later fragment to reopen its references.
+		if snmp.quarantinedLists[listName] {
 			snmp.ClientLists[listName] = nil
 		}
 	}
@@ -806,6 +815,22 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 		}
 	}
 
+	// #18844: a malformed named list fragment can be encountered after an
+	// earlier system root has already resolved it into a community. Keep the
+	// list taint sticky across root-local compileSNMP calls, then quarantine all
+	// referencing communities after each root, regardless of their source order.
+	for commName, comm := range snmp.Communities {
+		if comm == nil {
+			continue
+		}
+		for _, listName := range comm.ClientListNames {
+			if snmp.quarantinedLists[listName] {
+				quarantinedComms[commName] = true
+				comm.clientNets = snmpQuarantineClientNets()
+				break
+			}
+		}
+	}
 	sys.SNMP = snmp
 	if cfg != nil {
 		cfg.Warnings = append(cfg.Warnings, snmpInertKnobWarnings(snmpChildren)...)
