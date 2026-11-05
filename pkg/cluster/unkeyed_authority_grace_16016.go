@@ -109,6 +109,9 @@ type unkeyedGraceState struct {
 	// process has observed the grace expired (monotonic deadline passed,
 	// or a corrupt/expired record loaded at boot).
 	expired atomic.Bool
+	// peerKeyClearPending closes the publication gap while a peer key-clear
+	// persists its fail-closed cutoff. It is set before keyConfigured=false.
+	peerKeyClearPending atomic.Bool
 	// armedGen mirrors Manager.peerProofGen at the anchor-delete
 	// (expired->keyed) transition; the recovery hold clears only when the
 	// generation advances past it.
@@ -118,19 +121,20 @@ type unkeyedGraceState struct {
 	recoveryHold  atomic.Bool
 	keyConfigured atomic.Bool
 
-	mu                    sync.Mutex
-	anchorMono            int64         // process-local monotonic accounting origin
-	deadlineMono          atomic.Int64  // monotonic deadline; 0 = unarmed
-	elapsedBase           time.Duration // persisted elapsed floor at process start
-	elapsedFloor          time.Duration // greatest elapsed observation, persisted
-	earliestWall          time.Time     // persisted earliest wall stamp
-	highWaterWall         time.Time     // persisted high-water wall stamp
-	corrupt               bool          // record present but unparseable at load
-	loaded                bool          // the persisted record has been read this process
-	notPersisted          bool          // a persist failed; status suffix names it
-	persistFailureLogged  bool          // suppress repeated errors in one failure episode
-	lastLogRung           int           // highest notice rung already logged (0..4)
-	lastPostExpiryLogMono int64
+	mu                          sync.Mutex
+	anchorMono                  int64         // process-local monotonic accounting origin
+	deadlineMono                atomic.Int64  // monotonic deadline; 0 = unarmed
+	elapsedBase                 time.Duration // persisted elapsed floor at process start
+	elapsedFloor                time.Duration // greatest elapsed observation, persisted
+	earliestWall                time.Time     // persisted earliest wall stamp
+	highWaterWall               time.Time     // persisted high-water wall stamp
+	corrupt                     bool          // record present but unparseable at load
+	loaded                      bool          // the persisted record has been read this process
+	notPersisted                bool          // a persist failed; status suffix names it
+	postRenameDurabilityUnknown bool          // replacement is visible but parent-dir durability was not confirmed
+	persistFailureLogged        bool          // suppress repeated errors in one failure episode
+	lastLogRung                 int           // highest notice rung already logged (0..4)
+	lastPostExpiryLogMono       int64
 }
 
 // loadUnkeyedAuthorityRecord reads the persisted record. present=false means
@@ -188,10 +192,6 @@ func persistUnkeyedAuthorityRecord(path string, earliest, highWater time.Time, e
 	}
 	body := fmt.Sprintf("v2 %d %d %d\n", earliest.UnixNano(), highWater.UnixNano(), elapsed.Nanoseconds())
 	if err := fsatomic.WriteFileDurable(path, []byte(body), 0o644); err != nil {
-		var postRename *fsatomic.PostRenameSyncError
-		if errors.As(err, &postRename) {
-			return nil // visible to the next read; durability unknown only
-		}
 		return err
 	}
 	return nil
@@ -203,14 +203,17 @@ func (m *Manager) persistUnkeyedAuthorityLocked() {
 	err := unkeyedAuthorityPersist(unkeyedAuthorityGraceStatePath, st.earliestWall, st.highWaterWall, st.elapsedFloor)
 	if err == nil {
 		st.notPersisted = false
+		st.postRenameDurabilityUnknown = false
 		st.persistFailureLogged = false
 		return
 	}
 	st.notPersisted = true
+	var postRename *fsatomic.PostRenameSyncError
+	st.postRenameDurabilityUnknown = errors.As(err, &postRename)
 	if !st.persistFailureLogged {
 		st.persistFailureLogged = true
 		slog.Error("cluster: unkeyed-authority grace anchor persist failed; "+
-			"the in-process deadline still expires but a restart re-opens grace (#16016)",
+			"the in-process deadline still expires but a restart may re-open grace (#16016)",
 			"path", unkeyedAuthorityGraceStatePath, "err", err)
 	}
 }
@@ -761,6 +764,9 @@ func (m *Manager) UnkeyedAuthorityExpired() bool {
 		return false
 	}
 	st := &m.unkeyedGrace
+	if st.peerKeyClearPending.Load() {
+		return true
+	}
 	if st.keyConfigured.Load() {
 		return false
 	}
@@ -1020,13 +1026,18 @@ func (m *Manager) UnkeyedGraceAnchorCorrupt() bool {
 // UnkeyedGraceNotPersisted reports whether the anchor could not be persisted
 // (in-process deadline still enforces; a restart re-opens grace).
 func (m *Manager) UnkeyedGraceNotPersisted() bool {
+	notPersisted, _ := m.unkeyedGracePersistenceState()
+	return notPersisted
+}
+
+func (m *Manager) unkeyedGracePersistenceState() (notPersisted, postRenameDurabilityUnknown bool) {
 	if m == nil {
-		return false
+		return false, false
 	}
 	st := &m.unkeyedGrace
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return st.notPersisted
+	return st.notPersisted, st.postRenameDurabilityUnknown
 }
 
 // RecoveryHoldActive reports whether takeover remains suppressed after

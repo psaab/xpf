@@ -299,6 +299,11 @@ func currentHostnameForFingerprint15231() string {
 // run applies in parallel.
 var newSystemSyslogClientFn = logging.NewSyslogClientWithSource
 
+// newSecuritySyslogUDPClientFn is the UDP security-stream constructor seam;
+// production uses the real dialing transport, while NoDataplane tests can
+// observe alarm delivery without relying on external networking.
+var newSecuritySyslogUDPClientFn = logging.NewSyslogClientTransport
+
 // systemSyslogHostPort resolves a host's effective UDP port.
 func systemSyslogHostPort(host *config.SyslogHostConfig) int {
 	if host == nil || host.Port <= 0 {
@@ -882,7 +887,7 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		var client *logging.SyslogClient
 		var err error
 		if protocol == "udp" {
-			client, err = logging.NewSyslogClientTransport(stream.Host, stream.Port, srcAddr, protocol, nil)
+			client, err = newSecuritySyslogUDPClientFn(stream.Host, stream.Port, srcAddr, protocol, nil)
 		} else {
 			client, err = logging.NewSyslogClientDeferred(stream.Host, stream.Port, srcAddr, protocol, nil)
 		}

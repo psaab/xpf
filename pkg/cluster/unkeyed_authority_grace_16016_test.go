@@ -1,11 +1,13 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -522,6 +524,11 @@ func TestUnkeyedGraceWriteFailureExpiresInProcess16016(t *testing.T) {
 func TestUnkeyedGracePostRenameSyncErrorVisibleAcrossRestart16016(t *testing.T) {
 	m, clock, path := setupAuthorityManager16016(t)
 	expiry := m.UnkeyedGraceExpiry()
+	var logs bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelError})))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
 	restoreSync := fsatomic.SetAfterRenameSyncDirForTesting(func(string) error {
 		return fmt.Errorf("injected post-rename directory sync failure")
 	})
@@ -533,11 +540,33 @@ func TestUnkeyedGracePostRenameSyncErrorVisibleAcrossRestart16016(t *testing.T) 
 	if err != nil {
 		t.Fatalf("post-rename anchor is not visible: %v", err)
 	}
-	if !strings.HasPrefix(string(record), "v2 ") {
-		t.Fatalf("post-rename anchor has unexpected content: %q", record)
+	m.unkeyedGrace.mu.Lock()
+	wantRecord := fmt.Sprintf("v2 %d %d %d\n",
+		m.unkeyedGrace.earliestWall.UnixNano(),
+		m.unkeyedGrace.highWaterWall.UnixNano(),
+		m.unkeyedGrace.elapsedFloor.Nanoseconds())
+	m.unkeyedGrace.mu.Unlock()
+	if string(record) != wantRecord {
+		t.Fatalf("post-rename anchor = %q, want new state %q", record, wantRecord)
 	}
-	if m.UnkeyedGraceNotPersisted() {
-		t.Fatal("visible post-rename record was incorrectly classified as not persisted")
+	notPersisted, durabilityUnknown := m.unkeyedGracePersistenceState()
+	if !notPersisted || !durabilityUnknown {
+		t.Fatalf("post-rename failure state = notPersisted:%t durabilityUnknown:%t, want both true",
+			notPersisted, durabilityUnknown)
+	}
+	logText := logs.String()
+	if got := strings.Count(logText, "cluster: unkeyed-authority grace anchor persist failed"); got != 1 {
+		t.Fatalf("post-rename anchor error logged %d times, want exactly once: %s", got, logText)
+	}
+	if !strings.Contains(logText, "new content is visible") ||
+		!strings.Contains(logText, "durability across power loss is unknown") {
+		t.Fatalf("typed post-rename durability detail missing from log: %s", logText)
+	}
+	status := m.unkeyedAuthorityGraceStatus()
+	for _, phrase := range []string{"anchor not persisted", "visible to an immediate restart", "durability across power loss is unknown"} {
+		if !strings.Contains(status, phrase) {
+			t.Fatalf("post-rename status omitted %q: %s", phrase, status)
+		}
 	}
 	if m.UnkeyedAuthorityExpired() || !m.UnkeyedGraceExpiry().Equal(expiry) {
 		t.Fatal("post-rename durability warning changed the in-process grace deadline")
@@ -546,7 +575,7 @@ func TestUnkeyedGracePostRenameSyncErrorVisibleAcrossRestart16016(t *testing.T) 
 	restarted := NewManager(0, 1)
 	restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if restarted.UnkeyedAuthorityExpired() || !restarted.UnkeyedGraceExpiry().Equal(expiry) {
-		t.Fatalf("visible anchor did not preserve active expiry across restart: expired=%t expiry=%s want=%s",
+		t.Fatalf("visible anchor did not preserve active expiry across immediate restart: expired=%t expiry=%s want=%s",
 			restarted.UnkeyedAuthorityExpired(), restarted.UnkeyedGraceExpiry(), expiry)
 	}
 }
@@ -1687,5 +1716,115 @@ func TestExpiredUnkeyedGraceSuppressesConfigAndReadinessElections16016(t *testin
 	m.mu.Unlock()
 	if m.IsLocalPrimary(0) {
 		t.Fatal("expired grace allowed the delayed readiness election to claim primary")
+	}
+}
+
+type interposedPeerClearAuthProvider16016 struct {
+	manager         *Manager
+	lookupStarted   chan struct{}
+	releaseLookup   chan struct{}
+	lookupStartedDo sync.Once
+}
+
+func (p *interposedPeerClearAuthProvider16016) ControlLinkAuthKey() []byte {
+	return p.manager.ControlLinkAuthKey()
+}
+
+func (p *interposedPeerClearAuthProvider16016) ControlLinkAuthConfigured() bool {
+	p.lookupStartedDo.Do(func() { close(p.lookupStarted) })
+	<-p.releaseLookup
+	return p.manager.ControlLinkAuthConfigured()
+}
+
+func (p *interposedPeerClearAuthProvider16016) UnkeyedAuthorityExpired() bool {
+	return p.manager.UnkeyedAuthorityExpired()
+}
+
+func TestPeerKeyClearInterposedFrameRefuses16016(t *testing.T) {
+	m, _, _ := setupAuthorityManager16016(t)
+	m.UpdateConfig(&config.ClusterConfig{
+		ControlInterface: "em0", ControlLinkAuthKey: config.NewSecret("local-key-16016"),
+	})
+	if !m.ControlLinkAuthConfigured() {
+		t.Fatal("test setup did not configure a control-link key")
+	}
+
+	persistStarted := make(chan struct{})
+	releasePersist := make(chan struct{})
+	var persistOnce sync.Once
+	var releasePersistOnce sync.Once
+	unblockPersist := func() {
+		releasePersistOnce.Do(func() { close(releasePersist) })
+	}
+	restorePersist := SetUnkeyedAuthorityPersistForTesting(func(string, time.Time, time.Time, time.Duration) error {
+		persistOnce.Do(func() {
+			close(persistStarted)
+			<-releasePersist
+		})
+		return nil
+	})
+	provider := &interposedPeerClearAuthProvider16016{
+		manager:       m,
+		lookupStarted: make(chan struct{}),
+		releaseLookup: make(chan struct{}),
+	}
+	var releaseLookupOnce sync.Once
+	unblockLookup := func() {
+		releaseLookupOnce.Do(func() { close(provider.releaseLookup) })
+	}
+	t.Cleanup(func() {
+		unblockLookup()
+		unblockPersist()
+		restorePersist()
+	})
+	ss := NewSessionSync(":0", ":0", nil)
+	ss.SetAuthProvider(provider)
+	local, peer := net.Pipe()
+	t.Cleanup(func() {
+		_ = local.Close()
+		_ = peer.Close()
+	})
+
+	frameDone := make(chan bool, 1)
+	go func() {
+		frameDone <- ss.rejectUnauthenticatedAuthorityFrame(local, syncMsgHeartbeat)
+	}()
+	select {
+	case <-provider.lookupStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("frame gate did not reach the auth-configured lookup")
+	}
+
+	clearDone := make(chan struct{})
+	go func() {
+		m.UpdateConfigFromPeer(&config.ClusterConfig{ControlInterface: "em0"})
+		close(clearDone)
+	}()
+	select {
+	case <-persistStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("peer key-clear did not reach the persistence interpose")
+	}
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("frame gate could observe an open posture while peer key-clear cutoff persistence was blocked")
+	}
+
+	unblockLookup()
+	unblockPersist()
+	select {
+	case <-clearDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("peer key-clear did not finish after persistence was released")
+	}
+	select {
+	case rejected := <-frameDone:
+		if !rejected {
+			t.Fatal("unauthenticated heartbeat passed after auth lookup waited out peer key-clear")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("frame gate did not finish after peer key-clear")
+	}
+	if !m.UnkeyedAuthorityExpired() {
+		t.Fatal("peer key-clear finished without retaining the fail-closed expired posture")
 	}
 }

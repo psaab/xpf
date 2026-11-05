@@ -960,10 +960,16 @@ func (m *Manager) unkeyedAuthorityGraceStatus() string {
 		}
 		return "inactive (local control-link key configured)"
 	}
-	notPersisted := m.UnkeyedGraceNotPersisted()
+	notPersisted, postRenameDurabilityUnknown := m.unkeyedGracePersistenceState()
 	suffix := ""
+	activeSuffix := ""
 	if notPersisted {
-		suffix = "; anchor not persisted, expiry is enforced only until restart"
+		detail := "anchor not persisted; restart re-opens grace"
+		if postRenameDurabilityUnknown {
+			detail = "anchor not persisted; replacement is visible to an immediate restart, but durability across power loss is unknown and a power-loss restart may re-open grace"
+		}
+		suffix = "; " + detail
+		activeSuffix = " (" + detail + ")"
 	}
 	if m.UnkeyedAuthorityExpired() {
 		rearmHint := "; if the RTC was wrong, correct the clock and run the local audited request chassis cluster unkeyed-grace restart"
@@ -983,7 +989,7 @@ func (m *Manager) unkeyedAuthorityGraceStatus() string {
 	}
 	status := fmt.Sprintf("active; expires at %s", expiry.Format(time.RFC3339))
 	if notPersisted {
-		status += " (anchor not persisted; expiry is enforced only until restart)"
+		status += activeSuffix
 	}
 	return status
 }

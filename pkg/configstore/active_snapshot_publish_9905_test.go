@@ -254,7 +254,7 @@ func TestActiveSnapshotConcurrentLoads9905(t *testing.T) {
 
 // TestActiveSnapshotPublishCoversEverySwap9905 is the structural backstop:
 // every `s.compiled =` assignment in production store files must be
-// immediately followed by a publishActiveLocked call. Verified by mutation
+// immediately followed by an active-snapshot publication. Verified by mutation
 // (removing any one publish line fails this test naming the file:line; a
 // comment merely mentioning the call does not satisfy it).
 func TestActiveSnapshotPublishCoversEverySwap9905(t *testing.T) {
@@ -324,7 +324,8 @@ func TestActiveSnapshotPublishCoversEverySwap9905(t *testing.T) {
 				// call must not satisfy the guard — only real code counts.
 				// (No `//` appears inside string literals on these lines.)
 				code, _, _ := strings.Cut(next, "//")
-				if !strings.Contains(code, "s.publishActiveLocked()") {
+				if !strings.Contains(code, "s.publishActiveLocked()") &&
+					!strings.Contains(code, "s.publishPreparedActiveLocked(") {
 					t.Errorf("%s:%d: compiled swap not followed by publish call (next code: %q)", name, i+1, strings.TrimSpace(code))
 				}
 				reported = true

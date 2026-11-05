@@ -87,6 +87,14 @@ func (s *Store) publishActiveLocked() {
 	s.activeSnap.Store(&activeSnapshot{gen: s.activeGen.Add(1), cfg: s.compiled})
 }
 
+// publishPreparedActiveLocked publishes a snapshot allocated before a
+// provenance gate. The caller holds s.mu, so its prepared generation remains
+// the next writer generation until this promotion is published.
+func (s *Store) publishPreparedActiveLocked(snapshot *activeSnapshot) {
+	s.activeGen.Store(snapshot.gen)
+	s.activeSnap.Store(snapshot)
+}
+
 // PublishRefreshedDNS swaps the compiled active config to refreshed ONLY
 // if base is still the compiled active config, and publishes the new
 // generation via publishActiveLocked (#16606). It deliberately does NOT

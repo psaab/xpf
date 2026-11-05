@@ -708,14 +708,14 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	var localAddrRefused error
 	compiled, syncErr = d.store.SyncApplyGated(ctx, configText, chassisPreserve,
 		func(gateCtx context.Context, c *config.Config) error {
+			localAddrRefused = clusterControlLocalAddressCommitPreflight(d.cluster, oldActive, c)
+			if localAddrRefused != nil {
+				return localAddrRefused
+			}
 			if d.testBeforeConfigSyncPromotion != nil {
 				d.testBeforeConfigSyncPromotion()
 			}
-			if err := d.recheckConfigSyncAuthorityAtApply(gateCtx); err != nil {
-				return err
-			}
-			localAddrRefused = clusterControlLocalAddressCommitPreflight(d.cluster, oldActive, c)
-			return localAddrRefused
+			return d.recheckConfigSyncAuthorityAtApply(gateCtx)
 		})
 	d.pendingRenameMu.Unlock()
 	if localAddrRefused != nil {

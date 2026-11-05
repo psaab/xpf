@@ -3,6 +3,7 @@ package configstore
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -47,5 +48,61 @@ func TestSyncApplyGatedRefusalPromotesNothing18606(t *testing.T) {
 	}
 	if got := s.ActiveConfig().System.HostName; got != "after" {
 		t.Fatalf("a passing gate did not promote: host-name %q", got)
+	}
+}
+
+// #16016: preparation must not clear a local-unshared mark or push rollback
+// history before the final authority gate. The matching-content case exercises
+// the deferred clear; the changed-content case exercises deferred history.
+func TestSyncApplyGatedRefusalKeepsUnsharedState16016(t *testing.T) {
+	s := newTestStore(t)
+	enter9530(t, s)
+	s.SetPeerReachableFn(func() bool { return true })
+	markedText := commit9530(t, s, "local-unshared-16016")
+	if s.unshared == nil {
+		t.Fatal("test precondition: local commit did not create an unshared mark")
+	}
+	beforeActive := s.active.Format()
+	beforeHistory := s.ListHistory()
+	beforeCandidate := s.candidate.Format()
+	beforeCandidateGen := s.candidateGen
+	beforeActiveGen := s.activeGen.Load()
+	beforeUnshared := *s.unshared
+	beforeDiskMark, err := s.db.ReadUnshared()
+	if err != nil || beforeDiskMark == nil {
+		t.Fatalf("read persisted unshared mark: record=%+v err=%v", beforeDiskMark, err)
+	}
+	refused := errors.New("authority expired during final recheck")
+	refuse := func(_ context.Context, _ *config.Config) error { return refused }
+
+	if _, err := s.SyncApplyGated(context.Background(), markedText, nil, refuse); !errors.Is(err, refused) {
+		t.Fatalf("matching-content SyncApplyGated = %v, want refusal", err)
+	}
+	if _, err := s.SyncApplyGated(context.Background(), "system { host-name peer-replacement-16016; }\n", nil, refuse); !errors.Is(err, refused) {
+		t.Fatalf("changed-content SyncApplyGated = %v, want refusal", err)
+	}
+	if got := s.active.Format(); got != beforeActive {
+		t.Fatalf("refused promotion changed active config:\n%s", got)
+	}
+	if !reflect.DeepEqual(s.ListHistory(), beforeHistory) {
+		t.Fatalf("refused promotion changed rollback history: before=%+v after=%+v", beforeHistory, s.ListHistory())
+	}
+	if got := s.candidate.Format(); got != beforeCandidate || s.candidateGen != beforeCandidateGen {
+		t.Fatalf("refused promotion changed candidate snapshot: text=%q gen=%d; want %q gen=%d",
+			got, s.candidateGen, beforeCandidate, beforeCandidateGen)
+	}
+	if got := s.activeGen.Load(); got != beforeActiveGen {
+		t.Fatalf("refused promotion published active generation %d; want unchanged %d", got, beforeActiveGen)
+	}
+	if s.unshared == nil || *s.unshared != beforeUnshared {
+		t.Fatalf("refused promotion changed in-memory unshared mark: before=%+v after=%+v", beforeUnshared, s.unshared)
+	}
+	afterDiskMark, err := s.db.ReadUnshared()
+	if err != nil || afterDiskMark == nil || !reflect.DeepEqual(afterDiskMark, beforeDiskMark) {
+		t.Fatalf("refused promotion changed persisted unshared mark: before=%+v after=%+v err=%v", beforeDiskMark, afterDiskMark, err)
+	}
+	active := s.ActiveConfig()
+	if active == nil || active.Chassis.Cluster != nil {
+		t.Fatalf("refused promotion changed active cluster/PSK state: %+v", active)
 	}
 }

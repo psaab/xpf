@@ -255,42 +255,58 @@ func (s *Store) NotePeerConfigApplyAck(gen uint64) {
 	s.clearUnsharedLocked()
 }
 
+// syncClassification is the pure result of comparing a peer config with the
+// active tree and any local-unshared mark. State changes are applied only
+// after SyncApplyGated's final authority gate accepts promotion.
+type syncClassification struct {
+	divergence    *SyncDivergence
+	clearUnshared bool
+}
+
 // classifySyncLocked decides, before a peer sync replaces the active config,
 // whether the replacement discards a local commit the peer never held. Callers
-// hold s.mu.
-func (s *Store) classifySyncLocked(incoming *config.ConfigTree) *SyncDivergence {
+// hold s.mu. It is deliberately side-effect free so a refusing promotion gate
+// cannot clear the local-unshared mark or its persisted record.
+func (s *Store) classifySyncLocked(incomingDigest, activeDigest string) syncClassification {
 	if s.unshared == nil {
-		return nil
+		return syncClassification{}
 	}
-	in := activeTreeDigest(incoming)
+	in := incomingDigest
 	switch {
 	case s.unshared.Discarded != nil && s.unshared.Digest == s.unshared.Discarded.AdoptedDigest:
 		// Bare discarded form (#15142): the marked commit was already
 		// discarded and its replacement is durable. No sync can discard
 		// it again; recordSyncDivergenceLocked(nil) clears the alarm
 		// when a different config arrives.
-		return nil
+		return syncClassification{}
 	case in == s.unshared.Digest:
 		// The peer holds exactly the marked content, so it was shared after all.
-		s.clearUnsharedLocked()
-		return nil
-	case activeTreeDigest(s.active) != s.unshared.Digest:
+		return syncClassification{clearUnshared: true}
+	case activeDigest != s.unshared.Digest:
 		// The mark describes content this node no longer runs, for example after
 		// a boot-time commit-confirmed revert. It names nothing the sync discards.
-		s.clearUnsharedLocked()
-		return nil
+		return syncClassification{clearUnshared: true}
 	}
-	return &SyncDivergence{
+	return syncClassification{divergence: &SyncDivergence{
 		DiscardedDigest: s.unshared.Digest,
 		DiscardedAt:     s.unshared.At,
 		AdoptedDigest:   in,
 		At:              time.Now().UTC(),
+	}}
+}
+
+// applySyncClassificationLocked applies the state transition calculated
+// before the final gate. Callers hold s.mu and must call this only once that
+// gate has accepted the peer config.
+func (s *Store) applySyncClassificationLocked(c syncClassification) {
+	if c.clearUnshared {
+		s.clearUnsharedLocked()
 	}
 }
 
 // recordSyncDivergenceLocked runs after a peer sync promoted its config. d is
 // classifySyncLocked's result for that sync. Callers hold s.mu.
-func (s *Store) recordSyncDivergenceLocked(d *SyncDivergence) {
+func (s *Store) recordSyncDivergenceLocked(d *SyncDivergence, activeDigest string) {
 	if d == nil {
 		// A different config arriving after an alarm means the operator acted on
 		// the winner; the same config re-pushed keeps the alarm. A pending
@@ -298,7 +314,7 @@ func (s *Store) recordSyncDivergenceLocked(d *SyncDivergence) {
 		if s.unsharedPendingDiscard() {
 			return
 		}
-		if s.divergence != nil && s.divergence.AdoptedDigest != activeTreeDigest(s.active) {
+		if s.divergence != nil && s.divergence.AdoptedDigest != activeDigest {
 			s.setUnsharedLocked(nil)
 			s.divergence = nil
 		}

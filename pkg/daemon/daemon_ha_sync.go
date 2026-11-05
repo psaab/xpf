@@ -1020,7 +1020,10 @@ func (d *Daemon) handleConfigSync(configText string) error {
 
 func (d *Daemon) recheckConfigSyncAuthorityAtApply(ctx context.Context) error {
 	unauthenticated, ok := ctx.Value(configSyncApplyAdmissionContextKey{}).(bool)
-	if !ok || !unauthenticated || d.cluster == nil {
+	if !ok {
+		unauthenticated = true
+	}
+	if !unauthenticated || d.cluster == nil {
 		return nil
 	}
 	var err error
@@ -1045,6 +1048,14 @@ func (d *Daemon) handleConfigSyncWithAncestry(
 		d.logConfigSyncRefusedAsAuthority(configText)
 		d.repushAfterAuthorityRefusal()
 		return errConfigSyncRejectedPrimary
+	}
+	// Missing provenance is unauthenticated on the peer path. Check it before
+	// convergence shortcuts, then carry the same classification through the
+	// final store-promotion gate.
+	unauthenticated := len(peerAuthenticated) == 0 || !peerAuthenticated[0]
+	applyCtx := context.WithValue(context.Background(), configSyncApplyAdmissionContextKey{}, unauthenticated)
+	if err := d.recheckConfigSyncAuthorityAtApply(applyCtx); err != nil {
+		return err
 	}
 	if d.store != nil {
 		activeText := strings.TrimSpace(d.store.ShowActive())
@@ -1112,10 +1123,8 @@ func (d *Daemon) handleConfigSyncWithAncestry(
 	// exists to evict it — #5078's "an admitted peer must not re-arm the
 	// window". The hook is shared with #6629's eventual node-local posture; see
 	// preserveNodeLocalChassis for the contract.
-	applyCtx := context.Background()
-	if len(peerAuthenticated) != 0 {
-		applyCtx = context.WithValue(applyCtx, configSyncApplyAdmissionContextKey{}, !peerAuthenticated[0])
-	}
+	// The context above carries default-deny provenance for both convergence
+	// shortcuts and the eventual promotion recheck.
 	if _, err := d.syncAndApplyWithAncestry(applyCtx, configText,
 		preserveNodeLocalChassis(d.activeTreeForNodeLocal()), ancestry); err != nil {
 		var pending *cluster.ConfigApplyPendingError

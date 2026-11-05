@@ -69,6 +69,36 @@ func TestUnauthenticatedConfigSyncRejectedOnceLocallyKeyed16016(t *testing.T) {
 	}
 }
 
+func TestMissingConfigSyncProvenanceFailsClosedBeforeConvergenceShortcut16016(t *testing.T) {
+	isolateAuthorityAnchors16016(t)
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "config.db"))
+	initial := `chassis { cluster { cluster-id 1; authentication-key local-key-16016; control-interface em0; } }`
+	if _, err := store.SyncApply(initial, nil); err != nil {
+		t.Fatalf("seed locally keyed config: %v", err)
+	}
+	store.MarkActiveApplied()
+	manager := newClusterManager(false)
+	manager.UpdateConfig(&config.ClusterConfig{
+		ControlLinkAuthKey: config.NewSecret("local-key-16016"),
+	})
+	d := &Daemon{cluster: manager, store: store}
+	before := store.ShowActive()
+	if !store.ActiveApplied() {
+		t.Fatal("test precondition: active config not marked applied")
+	}
+	if err := d.handleConfigSync(before); err == nil || !strings.Contains(err.Error(), "unauthenticated") {
+		t.Fatalf("legacy config callback with missing provenance returned %v, want fail-closed rejection", err)
+	}
+	if got := store.ShowActive(); got != before {
+		t.Fatalf("missing-provenance convergence shortcut changed active config:\n%s", got)
+	}
+	active := store.ActiveConfig()
+	if active == nil || active.Chassis.Cluster == nil ||
+		active.Chassis.Cluster.ControlLinkAuthKey.Reveal() != "local-key-16016" {
+		t.Fatal("missing-provenance callback changed the active control-link PSK")
+	}
+}
+
 func TestUnauthenticatedConfigCanProvisionFirstPeerKey16016(t *testing.T) {
 	isolateAuthorityAnchors16016(t)
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "config.db"))

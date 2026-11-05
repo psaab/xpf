@@ -245,17 +245,24 @@ func (s *SessionSync) rejectUnauthenticatedAuthorityFrame(conn net.Conn, msgType
 		s.noteUnkeyedAuthorityRefusal(conn, "frame")
 		return true
 	}
-	if !s.authConfigured() {
-		return false
+	if s.authConfigured() {
+		switch msgType {
+		case syncMsgHeartbeat,
+			syncMsgAuthUpgradeRequest, syncMsgAuthUpgradeHello,
+			syncMsgAuthUpgradeProof, syncMsgAuthUpgradeConfirm:
+			return false
+		default:
+			return true
+		}
 	}
-	switch msgType {
-	case syncMsgHeartbeat,
-		syncMsgAuthUpgradeRequest, syncMsgAuthUpgradeHello,
-		syncMsgAuthUpgradeProof, syncMsgAuthUpgradeConfirm:
-		return false
-	default:
+	// Auth configuration may have blocked behind a peer key-clear update.
+	// Recheck after that lookup so its just-published expired posture cannot
+	// be hidden by a stale pre-clear observation.
+	if s.unkeyedAuthorityExpired() {
+		s.noteUnkeyedAuthorityRefusal(conn, "frame")
 		return true
 	}
+	return false
 }
 
 // bulkReceiveProgress reports whether this session record is bulk

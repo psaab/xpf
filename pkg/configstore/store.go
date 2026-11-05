@@ -1382,39 +1382,59 @@ func (s *Store) SyncApplyGated(ctx context.Context, content string, chassisPrese
 	if err != nil {
 		return nil, fmt.Errorf("sync config compile error: %w", err)
 	}
-	if gate != nil {
-		if err := gate(ctx, compiled); err != nil {
-			return nil, err
-		}
-	}
-
 	// #9530: classify BEFORE the active config is replaced, while it can still
-	// be compared with the unshared-commit mark.
-	divergence := s.classifySyncLocked(tree)
+	// be compared with the unshared-commit mark. Classification itself is pure;
+	// its state transition is deferred until the final gate accepts promotion.
+	incomingFormat := tree.Format()
+	activeFormat := s.active.Format()
+	incomingDigest := configTextDigest(incomingFormat)
+	activeDigest := configTextDigest(activeFormat)
+	classification := s.classifySyncLocked(incomingDigest, activeDigest)
 
 	// #12163: a repeated peer sync carries no new rollback target. The digest
 	// handles canonical-identical retries; the pre-hash equivalence check
 	// handles legacy cleartext credentials whose fresh salts change the
 	// rendered digest. Real credential changes fail verification, and real
 	// non-credential changes fail structural equivalence, so both still push.
-	syncShiftedHistory := false
-	if configTextDigest(tree.Format()) != configTextDigest(s.active.Format()) && !syncEquivalentToActive {
-		s.history.Push(&HistoryEntry{
+	syncShiftedHistory := incomingDigest != activeDigest && !syncEquivalentToActive
+	var historyEntry *HistoryEntry
+	if syncShiftedHistory {
+		historyEntry = &HistoryEntry{
 			Config:    s.active.Clone(),
 			Timestamp: time.Now(),
-		})
-		syncShiftedHistory = true
+		}
+	}
+	var candidate *config.ConfigTree
+	if s.configDir {
+		candidate = tree.Clone()
+	}
+	nextSnapshot := &activeSnapshot{gen: s.activeGen.Load() + 1, cfg: compiled}
+
+	// Prepare every config-derived value used by promotion, journaling, and
+	// teardown before the final authority recheck. A refusal therefore leaves
+	// rollback history, candidate snapshots, and the unshared mark untouched.
+	nextJournalHash := journalConfigHash(tree)
+	nextGuardedHash := guardedConfigHash(tree)
+	if gate != nil {
+		if err := gate(ctx, compiled); err != nil {
+			return nil, err
+		}
+	}
+
+	s.applySyncClassificationLocked(classification)
+	if historyEntry != nil {
+		s.history.Push(historyEntry)
 	}
 
 	s.active = tree
 	s.compiled = compiled
-	s.publishActiveLocked() // #9905: publish the new active snapshot
-	s.recordSyncDivergenceLocked(divergence)
+	s.publishPreparedActiveLocked(nextSnapshot) // #9905: publish the prepared active snapshot
+	s.recordSyncDivergenceLocked(classification.divergence, incomingDigest)
 	s.dirty = false
 
 	// If in config mode, update candidate too.
-	if s.configDir {
-		s.candidate = s.active.Clone()
+	if candidate != nil {
+		s.candidate = candidate
 		s.bumpCandidateGenLocked() // #5848: candidate reset by authoritative load/sync
 	}
 
@@ -1446,7 +1466,7 @@ func (s *Store) SyncApplyGated(ctx context.Context, content string, chassisPrese
 		// confirmation path; journal it under the cluster-sync label.
 		s.journalLog(&JournalEntry{
 			Action:     "commit_confirm",
-			ConfigHash: journalConfigHash(s.active),
+			ConfigHash: nextJournalHash,
 			Principal:  "system:cluster-sync",
 		})
 		slog.Info("HA config-sync apply confirmed a pending commit-confirmed window")
@@ -1523,13 +1543,13 @@ func (s *Store) SyncApplyGated(ctx context.Context, content string, chassisPrese
 		// the retained confirm.json, so the discard below must not
 		// erase that fresh debt: skip it in that case.
 		if !s.confirmResolvePendingPersist {
-			s.discardSupersededFirstCommitTeardownLocked(guardedConfigHash(s.active))
+			s.discardSupersededFirstCommitTeardownLocked(nextGuardedHash)
 		}
 	}
 
 	s.journalLog(&JournalEntry{
 		Action:     "config_sync",
-		ConfigHash: journalConfigHash(s.active),
+		ConfigHash: nextJournalHash,
 		Principal:  "system:cluster-sync",
 	})
 

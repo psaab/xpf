@@ -291,8 +291,12 @@ func (m *Manager) updateConfig(cfg *config.ClusterConfig, source clusterConfigUp
 			// Peer key-clear cannot create or move a local grace anchor. It
 			// fails closed when no original cutoff remains or when clearing
 			// a previously keyed posture whose elapsed interval is unknowable.
+			if oldKeyConfigured && transportConfigured {
+				m.unkeyedGrace.peerKeyClearPending.Store(true)
+			}
 			m.unkeyedGrace.keyConfigured.Store(false)
 			m.closePeerKeyClearWithoutGraceLocked(transportConfigured, oldKeyConfigured)
+			m.unkeyedGrace.peerKeyClearPending.Store(false)
 		}
 	}
 
