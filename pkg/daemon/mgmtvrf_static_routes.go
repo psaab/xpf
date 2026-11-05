@@ -44,6 +44,28 @@ type mgmtStaticRouteTarget struct {
 	route  netlink.Route
 }
 
+// mgmtStaticTunnelNameMapFn is the management-static resolver's build seam.
+// The scoped route and desired-route walks resolve multiple interfaces, units,
+// and next-hops; tests count the shared map build rather than infer its cost
+// from unchanged route names.
+var mgmtStaticTunnelNameMapFn = (*config.Config).TunnelNameMap
+
+type mgmtStaticIfNameResolver func(string) string
+
+// mgmtStaticKernelIfNameResolver shares one lazy tunnel map across a management
+// static-route walk. No map is built until a reference actually needs resolving.
+func mgmtStaticKernelIfNameResolver(cfg *config.Config) mgmtStaticIfNameResolver {
+	var tunnelNames map[string]string
+	tunnelNamesReady := false
+	return func(ref string) string {
+		if !tunnelNamesReady {
+			tunnelNames = mgmtStaticTunnelNameMapFn(cfg)
+			tunnelNamesReady = true
+		}
+		return cfg.ResolveKernelIfNameWith(ref, tunnelNames)
+	}
+}
+
 // applyMgmtVRFStaticRoutesTo installs management-scoped configuration routes
 // and the system backup-router in table 999, then removes stale xpf-owned
 // entries (see mgmtStaticRouteRealm). Table 999 is dedicated to management
@@ -150,6 +172,7 @@ func mgmtStaticRoutesDesired(
 	if cfg == nil || len(mgmtSet) == 0 {
 		return desired
 	}
+	resolveIfName := mgmtStaticKernelIfNameResolver(cfg)
 
 	// #15780: one table-999 route PER explicit destination. Fall back to
 	// the scalar first destination for hand-built configs, and to the
@@ -198,7 +221,7 @@ func mgmtStaticRoutesDesired(
 		// unreachable one fails the apply and has its stale route deleted
 		// (#5867).
 		if linkIndex, ok := mgmtStaticImplicitLinkIndex(nlh, cfg, mgmtSet, backup.Gw, b.family,
-			connected[mgmtStaticFamilyIndex(b.family)], inferredV6[backupV6Gateway]); ok {
+			connected[mgmtStaticFamilyIndex(b.family)], inferredV6[backupV6Gateway], resolveIfName); ok {
 			backup.LinkIndex = linkIndex
 		}
 		mgmtAddStaticRoute(desired, backup, b.family)
@@ -244,7 +267,7 @@ func mgmtStaticRoutesDesired(
 
 					linkIndex := 0
 					if nextHop.Interface != "" {
-						linkName := cfg.ResolveKernelIfName(nextHop.Interface)
+						linkName := resolveIfName(nextHop.Interface)
 						if !config.IsManagementIfName(linkName) || !mgmtSet[linkName] {
 							routeScoped = false
 							break
@@ -259,7 +282,7 @@ func mgmtStaticRoutesDesired(
 						linkIndex = link.Attrs().Index
 					} else {
 						linkIndex, routeScoped = mgmtStaticImplicitLinkIndex(nlh, cfg, mgmtSet, gateway, family,
-							connected[mgmtStaticFamilyIndex(family)], inferredV6[nextHop.Address])
+							connected[mgmtStaticFamilyIndex(family)], inferredV6[nextHop.Address], resolveIfName)
 						if !routeScoped {
 							break
 						}
@@ -369,9 +392,10 @@ func mgmtStaticRoutesForFRR(
 	if len(mgmtSet) == 0 {
 		return cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes
 	}
+	resolveIfName := mgmtStaticKernelIfNameResolver(cfg)
 	exclusions := config.StaticRouteExclusions(cfg)
-	return filterMgmtStaticRoutesForFRR(cfg, cfg.RoutingOptions.StaticRoutes, mgmtSet, exclusions, inferredV6, current),
-		filterMgmtStaticRoutesForFRR(cfg, cfg.RoutingOptions.Inet6StaticRoutes, mgmtSet, exclusions, inferredV6, current)
+	return filterMgmtStaticRoutesForFRR(cfg, cfg.RoutingOptions.StaticRoutes, mgmtSet, exclusions, inferredV6, current, resolveIfName),
+		filterMgmtStaticRoutesForFRR(cfg, cfg.RoutingOptions.Inet6StaticRoutes, mgmtSet, exclusions, inferredV6, current, resolveIfName)
 }
 
 func filterMgmtStaticRoutesForFRR(
@@ -381,10 +405,11 @@ func filterMgmtStaticRoutesForFRR(
 	exclusions map[*config.StaticRoute]string,
 	inferredV6 map[string]string,
 	current [2][]netlink.Route,
+	resolveIfName mgmtStaticIfNameResolver,
 ) []*config.StaticRoute {
 	var filtered []*config.StaticRoute
 	for i, route := range routes {
-		if !mgmtStaticRouteIsManagementScoped(cfg, route, mgmtSet, exclusions, inferredV6, current) {
+		if !mgmtStaticRouteIsManagementScoped(cfg, route, mgmtSet, exclusions, inferredV6, current, resolveIfName) {
 			if filtered != nil {
 				filtered = append(filtered, route)
 			}
@@ -408,6 +433,7 @@ func mgmtStaticRouteIsManagementScoped(
 	exclusions map[*config.StaticRoute]string,
 	inferredV6 map[string]string,
 	current [2][]netlink.Route,
+	resolveIfName mgmtStaticIfNameResolver,
 ) bool {
 	if route == nil || exclusions[route] != "" || route.NoInstall ||
 		route.NextTable != "" || route.Discard || route.Reject || len(route.NextHops) == 0 {
@@ -422,7 +448,7 @@ func mgmtStaticRouteIsManagementScoped(
 			return false
 		}
 		if nextHop.Interface != "" {
-			linkName := cfg.ResolveKernelIfName(nextHop.Interface)
+			linkName := resolveIfName(nextHop.Interface)
 			if !config.IsManagementIfName(linkName) || !mgmtSet[linkName] {
 				return false
 			}
@@ -432,7 +458,7 @@ func mgmtStaticRouteIsManagementScoped(
 		if gateway == nil || mgmtStaticIPFamily(gateway) != family {
 			return false
 		}
-		linkName, found := mgmtStaticConfigConnectedInterface(cfg, gateway, mgmtSet)
+		linkName, found := mgmtStaticConfigConnectedInterface(cfg, gateway, mgmtSet, resolveIfName)
 		if !found {
 			if _, liveConnected := mgmtStaticConnectedLinkIndex(
 				gateway, current[mgmtStaticFamilyIndex(family)]); liveConnected {
@@ -440,7 +466,7 @@ func mgmtStaticRouteIsManagementScoped(
 			}
 		}
 		if !found && family == netlink.FAMILY_V6 {
-			linkName = cfg.ResolveKernelIfName(inferredV6[nextHop.Address])
+			linkName = resolveIfName(inferredV6[nextHop.Address])
 			found = config.IsManagementIfName(linkName) && mgmtSet[linkName]
 		}
 		if !found || !config.IsManagementIfName(linkName) || !mgmtSet[linkName] {
@@ -454,6 +480,7 @@ func mgmtStaticConfigConnectedInterface(
 	cfg *config.Config,
 	gateway net.IP,
 	mgmtSet map[string]bool,
+	resolveIfName mgmtStaticIfNameResolver,
 ) (string, bool) {
 	bestBits, bestIf, ambiguous := -1, "", false
 	for ifName, iface := range cfg.Interfaces.Interfaces {
@@ -465,7 +492,7 @@ func mgmtStaticConfigConnectedInterface(
 			if unit == nil {
 				continue
 			}
-			linkName := cfg.ResolveKernelIfName(config.LogicalUnitDeviceKey(base, unitNum, unit))
+			linkName := resolveIfName(config.LogicalUnitDeviceKey(base, unitNum, unit))
 			if !config.IsManagementIfName(linkName) || !mgmtSet[linkName] {
 				continue
 			}
@@ -594,6 +621,7 @@ func mgmtStaticImplicitLinkIndex(
 	family int,
 	connected []netlink.Route,
 	inferredIf string,
+	resolveIfName mgmtStaticIfNameResolver,
 ) (int, bool) {
 	if linkIndex, ok := mgmtStaticConnectedLinkIndex(gateway, connected); ok {
 		return linkIndex, true
@@ -601,7 +629,7 @@ func mgmtStaticImplicitLinkIndex(
 	if family != netlink.FAMILY_V6 || inferredIf == "" {
 		return 0, false
 	}
-	linkName := cfg.ResolveKernelIfName(inferredIf)
+	linkName := resolveIfName(inferredIf)
 	if !config.IsManagementIfName(linkName) || !mgmtSet[linkName] {
 		return 0, false
 	}
