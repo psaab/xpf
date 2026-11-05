@@ -329,17 +329,21 @@ the cause of the 528-byte report; the stack diagnostic decides.
 
 ### TCP-2 (rank 2): derive Q1 mask trips in the already-outlined terminal gate
 
-**Shape.** Keep parser-produced scratch facts for geometry, tiny/error
-states, and `tcp_trip_syn_frag` if that is needed for the existing word
-contract. Compute the four ordinary Q1 facts in `host_screen_gate` from
+**Shape.** Keep parser-produced scratch facts for geometry and tiny/error
+states. Compute the four ordinary Q1 facts in `host_screen_gate` from
 fields already in `ParsedPacket` (`protocol`, `tcp_flags`, destination
-port, `is_fragment`, and `tcp_flags_unknown`), before intersecting with
-the zone's independent mask. A first TCP fragment is recognizable from
+port, and `is_fragment`), before intersecting with the zone's independent
+mask. A first TCP fragment is recognizable from
 `is_fragment && protocol == PROTO_TCP`; a non-first fragment uses the
-existing no-L4 sentinel, and `tcp_flags_unknown` suppresses flags whose
-byte is unavailable. No struct field or packet read is added. Update the
-pure host twin so C23 still exercises all 16 masks × 4 shapes per family
-(128 results), and C22 remains the same documented divergence.
+existing no-L4 sentinel. Suppress all four Q1 trips when either checked
+scratch fact `SCRATCH_TINY_DECLARED_UNKNOWN` or
+`SCRATCH_TCP_FLAGS_CAPTURE_UNKNOWN` is set. They distinguish a declared
+IPv4 first-fragment end before the flags byte from a capture that lacks the
+byte, while preventing a zero placeholder from becoming a no-flag trip.
+The parse-error row-presence disposition still runs first. No struct field
+or packet read is added. Update the pure host twin so C23 still exercises
+all 16 masks × 4 shapes per family (128 results), and C22 remains the same
+documented divergence.
 
 **Why second.** It moves four comparisons out of the inlined parser chain
 and into a gate that the plan already outlines. It changes work placement,
