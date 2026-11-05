@@ -1590,9 +1590,16 @@ func (d *Daemon) installHostInboundGapFence(spec xnft.GapFenceSpec) error {
 	if !spec.PreActivation {
 		d.hostInboundGapFenceSpec = &spec
 	}
-	slog.Warn("host-inbound real install failed; retained generation does not cover newly-appeared "+
-		"local addresses — installed an additive gap fence denying them (retained accepts preserved)",
-		"gap_v4", len(spec.UncoveredV4), "gap_v6", len(spec.UncoveredV6))
+	if spec.PreActivation {
+		// This address fence is an anticipatory networkd handoff guard; no
+		// real host-inbound install failed to warrant the coverage-gap warning.
+		slog.Info("host-inbound pre-activation gap fence installed",
+			"gap_v4", len(spec.UncoveredV4), "gap_v6", len(spec.UncoveredV6))
+	} else {
+		slog.Warn("host-inbound real install failed; retained generation does not cover newly-appeared "+
+			"local addresses — installed an additive gap fence denying them (retained accepts preserved)",
+			"gap_v4", len(spec.UncoveredV4), "gap_v6", len(spec.UncoveredV6))
+	}
 	return nil
 }
 
