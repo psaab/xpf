@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -26,11 +27,11 @@ func (s *captureSyncedRows18927) PutClusterSyncedV4(key dataplane.SessionKey, va
 	return nil
 }
 
-// The matching userspace test byte-compares request-builder output to the
-// shared fixture. This cluster-side test verifies every relevant fixture field
-// against the captured, production-decoded sender value and receiver-local fold
-// resolution (including fabric LogFlags), establishing semantic equivalence
-// across the package-private paths without a production seam.
+// The matching userspace test byte-compares production request-builder output
+// to the shared fixture. This cluster-side test projects every request-effective
+// captured SessionValue field into the fixture comparison, including the
+// SessFlagSNAT-controlled NAT fields and zero-valued request fields, while
+// checking receiver-local fold resolution without a production seam.
 
 func TestSessionSyncScopeCohortSenderWireReceiver18927(t *testing.T) {
 	foldReth080 := config.StableIfaceID("reth0.80")
@@ -203,13 +204,17 @@ func TestSessionSyncScopeCohortSenderWireReceiver18927(t *testing.T) {
 			t.Fatalf("row %s: received install generation=%d, want %d", row.name, got.Generation, i+3)
 		}
 		if got.State != dataplane.SessStateEstablished ||
+			got.Flags&dataplane.SessFlagSNAT == 0 || got.Flags&dataplane.SessFlagDNAT != 0 ||
 			dataplane.SourceNatProvenanceFromFlags(got.Flags) != dataplane.SourceNatProvenanceDynamic ||
 			got.NATSrcIP != binary.NativeEndian.Uint32([]byte{10, 0, 0, 100}) ||
 			got.NATSrcPort != sessionSyncScopePort18927(40000) ||
-			got.IngressZone != 1 || got.EgressZone != 2 {
-			t.Fatalf("row %s: decoded state/NAT/zones=%d/%d/%d/%d/%d/%d, want established/dynamic/10.0.0.100/40000/1/2",
-				row.name, got.State, dataplane.SourceNatProvenanceFromFlags(got.Flags), got.NATSrcIP,
-				got.NATSrcPort, got.IngressZone, got.EgressZone)
+			got.NATDstIP != 0 || got.NATDstPort != 0 ||
+			got.IngressZone != 1 || got.EgressZone != 2 ||
+			got.FibIfindex != 20 || got.FibVlanID != 80 ||
+			got.FibDmac != ([6]byte{}) || got.FibSmac != ([6]byte{}) {
+			t.Fatalf("row %s: decoded state/flags/NAT/zones/FIB=%d/%#x/%#x/%d/%#x/%d/%d/%d/%d, want established/SNAT/dynamic/10.0.0.100:40000/no-DNAT/zones 1/2/FIB 20.80",
+				row.name, got.State, got.Flags, dataplane.SourceNatProvenanceFromFlags(got.Flags),
+				got.NATSrcIP, got.NATSrcPort, got.NATDstIP, got.IngressZone, got.EgressZone, got.FibIfindex)
 		}
 		wantIngressIfindex, wantIngressVLAN, wantScopeIfindex := 0, uint16(0), int32(0)
 		if got.IngressIfaceFold == foldReth080 {
@@ -218,24 +223,79 @@ func TestSessionSyncScopeCohortSenderWireReceiver18927(t *testing.T) {
 		if got.NatScopeFold == foldReth080 {
 			wantScopeIfindex = 22
 		}
-		if requests[i].Operation != "upsert" || requests[i].AddrFamily != dataplane.AFInet ||
-			requests[i].Protocol != key.Protocol ||
-			requests[i].SrcIP != net.IP(key.SrcIP[:]).String() ||
-			requests[i].DstIP != net.IP(key.DstIP[:]).String() ||
-			requests[i].SrcPort != 12345 || requests[i].DstPort != 80 ||
-			requests[i].IngressZoneID != uint32(got.IngressZone) ||
-			requests[i].EgressZoneID != uint32(got.EgressZone) ||
-			requests[i].IngressIfindex != wantIngressIfindex ||
-			requests[i].IngressVLANID != wantIngressVLAN ||
-			requests[i].NatScopeIfindex != wantScopeIfindex ||
-			requests[i].OwnerRGID != 1 || requests[i].EgressIfindex != 22 ||
-			requests[i].TXIfindex != 20 || requests[i].TXVLANID != 80 ||
-			requests[i].NATSrcIP != "10.0.0.100" || requests[i].NATSrcPort != 40000 ||
-			requests[i].SourceNatProvenance != dataplane.SourceNatProvenanceFromFlags(got.Flags) ||
-			requests[i].FabricIngress != (got.LogFlags&dataplane.LogFlagUserspaceFabricIngress != 0) ||
-			requests[i].Generation != got.Generation ||
-			requests[i].TCPHandshakeState != got.TCPHandshakeState {
-			t.Fatalf("row %s: fixture request does not describe decoded sender/receiver row: %+v", row.name, requests[i])
+
+		wantNATSrcIP, wantNATDstIP := "", ""
+		var wantNATSrcPort, wantNATDstPort uint16
+		if got.Flags&dataplane.SessFlagSNAT != 0 {
+			if got.NATSrcIP != 0 {
+				wantNATSrcIP = dataplane.SessionIPv4(got.NATSrcIP).String()
+			}
+			wantNATSrcPort = sessionSyncScopeHostPort18927(got.NATSrcPort)
+		}
+		if got.Flags&dataplane.SessFlagDNAT != 0 {
+			if got.NATDstIP != 0 {
+				wantNATDstIP = dataplane.SessionIPv4(got.NATDstIP).String()
+			}
+			wantNATDstPort = sessionSyncScopeHostPort18927(got.NATDstPort)
+		}
+		wantRTFlowSessionID := got.RTFlowSessionID
+		if wantRTFlowSessionID == 0 {
+			wantRTFlowSessionID = got.SessionID
+		}
+		wantTunnelEndpointID := uint16(0)
+		if got.LogFlags&dataplane.LogFlagUserspaceTunnelEndpoint != 0 && got.FibGen != 0 {
+			wantTunnelEndpointID = got.FibGen
+		}
+		wantRequest := userspace.SessionSyncRequest{
+			Operation:           "upsert",
+			AddrFamily:          dataplane.AFInet,
+			Protocol:            key.Protocol,
+			SrcIP:               net.IP(key.SrcIP[:]).String(),
+			DstIP:               net.IP(key.DstIP[:]).String(),
+			SrcPort:             sessionSyncScopeHostPort18927(key.SrcPort),
+			DstPort:             sessionSyncScopeHostPort18927(key.DstPort),
+			PrimaryLiveness:     got.PrimaryLiveness,
+			IngressZoneID:       uint32(got.IngressZone),
+			EgressZoneID:        uint32(got.EgressZone),
+			IngressIfindex:      wantIngressIfindex,
+			IngressVLANID:       wantIngressVLAN,
+			NatScopeIfindex:     wantScopeIfindex,
+			OwnerRGID:           1,
+			EgressIfindex:       22,
+			TXIfindex:           20,
+			TunnelEndpointID:    wantTunnelEndpointID,
+			TXVLANID:            80,
+			NATSrcIP:            wantNATSrcIP,
+			NATDstIP:            wantNATDstIP,
+			NATSrcPort:          wantNATSrcPort,
+			NATDstPort:          wantNATDstPort,
+			SourceNatICMPValid:  got.SourceNatICMPValid,
+			SourceNatICMPType:   got.SourceNatICMPType,
+			SourceNatICMPCode:   got.SourceNatICMPCode,
+			SourceNatProvenance: dataplane.SourceNatProvenanceFromFlags(got.Flags),
+			FabricIngress:       got.LogFlags&dataplane.LogFlagUserspaceFabricIngress != 0,
+			IsReverse:           got.IsReverse != 0,
+			LogSessionInit:      got.LogFlags&dataplane.LogFlagSessionInit != 0,
+			LogSessionClose:     got.LogFlags&dataplane.LogFlagSessionClose != 0,
+			Generation:          got.Generation,
+			PolicyID:            got.PolicyID,
+			PolicyCounterIdx:    got.PolicyCounterIdx,
+			PolicyRuleID:        got.PolicyRuleID,
+			InactivityTimeout:   got.AppTimeout,
+			RTFlowSessionID:     wantRTFlowSessionID,
+			TunnelDiscriminator: got.TunnelDiscriminator,
+			PptpCallIDs:         got.PptpCallIDs,
+			RoutingDomain:       got.RoutingDomain,
+			TCPCloseClass:       got.TCPCloseClass,
+			TCPHandshakeState:   dataplane.NormalizeTCPHandshakeState(got.TCPHandshakeState),
+			FwdPackets:          got.FwdPackets,
+			RevPackets:          got.RevPackets,
+			InstallTableDomain:  got.InstallTableDomain,
+			InstallTableCheck:   got.InstallTableCheck,
+		}
+		if !reflect.DeepEqual(requests[i], wantRequest) {
+			t.Fatalf("row %s: fixture request does not match every request-effective captured field:\n got: %+v\nwant: %+v",
+				row.name, requests[i], wantRequest)
 		}
 	}
 }
@@ -243,4 +303,9 @@ func sessionSyncScopePort18927(port uint16) uint16 {
 	var raw [2]byte
 	binary.BigEndian.PutUint16(raw[:], port)
 	return binary.NativeEndian.Uint16(raw[:])
+}
+func sessionSyncScopeHostPort18927(port uint16) uint16 {
+	var raw [2]byte
+	binary.NativeEndian.PutUint16(raw[:], port)
+	return binary.BigEndian.Uint16(raw[:])
 }

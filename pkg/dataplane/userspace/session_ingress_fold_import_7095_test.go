@@ -235,6 +235,21 @@ func TestSessionSyncScopeCohortRequestBuilder18927(t *testing.T) {
 			t.Fatalf("row %s is plan-defined scope-present but emitted no NAT scope", row.name)
 		}
 	}
+	// A value without SessFlagSNAT may retain stale NAT tuple slots internally;
+	// the request builder must clear both wire fields rather than publish them.
+	noSNAT := &dataplane.SessionValue{
+		NATSrcIP:   natU32("10.0.0.100"),
+		NATSrcPort: hostToNetwork16(40000),
+	}
+	noSNATRequest := m.buildSessionSyncRequestV4(
+		"upsert",
+		dataplane.SessionKey{Protocol: 6},
+		noSNAT,
+	)
+	if noSNATRequest.NATSrcIP != "" || noSNATRequest.NATSrcPort != 0 {
+		t.Fatalf("request without SessFlagSNAT leaked NAT source %q:%d", noSNATRequest.NATSrcIP, noSNATRequest.NATSrcPort)
+	}
+
 	wantClassCounts := [2][2]int{{3, 2}, {3, 1}}
 	if identityBearing != 4 || scopePresent != 3 || classCounts != wantClassCounts {
 		t.Fatalf("cohort identity-bearing=%d scope-present=%d class-counts=%v, want 4/3 and %v",
