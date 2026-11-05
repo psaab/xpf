@@ -175,8 +175,8 @@ func TestSessionSyncScopeCohortRequestBuilder18927(t *testing.T) {
 			SrcPort: hostToNetwork16(12345), DstPort: hostToNetwork16(80), Protocol: 6,
 		}
 		val := &dataplane.SessionValue{
-			State: dataplane.SessStateEstablished,
-			Flags: dataplane.SessFlagSNAT | dataplane.WithSourceNatProvenance(0, dataplane.SourceNatProvenanceDynamic),
+			State:    dataplane.SessStateEstablished,
+			Flags:    dataplane.SessFlagSNAT | dataplane.WithSourceNatProvenance(0, dataplane.SourceNatProvenanceDynamic),
 			NATSrcIP: natU32("10.0.0.100"), NATSrcPort: hostToNetwork16(40000),
 			IngressZone: 1, EgressZone: 2,
 			IngressIfaceFold: row.ingressFold, NatScopeFold: row.scopeFold,

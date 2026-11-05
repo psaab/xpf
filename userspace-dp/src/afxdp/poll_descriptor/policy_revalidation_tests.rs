@@ -5988,12 +5988,74 @@ fn composed_dnat_dynamic_snat_empty_rules_revokes_18927() {
         &[dnat],
         &crate::nat::NatCounterStore::default(),
     );
+    let (valid, static_nat, invalid_reason) = source_nat_translation_still_valid(
+        &forwarding,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+        None,
+        false,
+    );
+    assert!(!valid, "empty dynamic rules invalidate the source translation");
+    assert_eq!(static_nat, None);
+    assert_eq!(
+        invalid_reason,
+        Some(SourceNatInvalidReason::InvalidNoLiveDynamicRules),
+        "valid composed DNAT must retain the special empty-rule reason"
+    );
     let revocation = scoped_snat_hit_15176(&forwarding, decision, &metadata, &key)
         .expect("valid composed DNAT+SNAT with empty dynamic rules must revoke");
     assert!(matches!(
         revocation.reason,
         PolicyRevocationReason::StaleSourceNat
     ));
+}
+
+#[test]
+fn composed_dnat_dynamic_snat_empty_rules_reverse_revokes_18927() {
+    let mut case = reverse_snat_case_13652();
+    case.3.nat_scope_ifindex = None;
+    case.5.nat_scope_ifindex = None;
+    case.2.nat.rewrite_dst = Some("10.0.0.10".parse().expect("DNAT destination"));
+    case.2.nat.rewrite_dst_port = Some(8443);
+    case.4 = SessionDecision {
+        nat: case.2.nat.reverse(
+            case.0.src_ip,
+            case.0.dst_ip,
+            case.0.src_port,
+            case.0.dst_port,
+        ),
+        ..case.2
+    };
+    let mut forwarding = no_live_dynamic_snat_18927();
+    forwarding.dnat_table = crate::nat::DnatTable::from_snapshots(
+        &[crate::protocol::DestinationNATRuleSnapshot {
+            name: "web-forward-18927".to_string(),
+            destination_address: "198.51.100.1".to_string(),
+            destination_port: 443,
+            protocol: "tcp".to_string(),
+            pool_address: "10.0.0.10".to_string(),
+            pool_port: 8443,
+            ..Default::default()
+        }],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let mut sessions = install_unjudged_reverse_pair_18927(&case);
+    assert!(sessions.forward_established_with_traffic(&case.0));
+    let revocation = reverse_snat_hit_13652(&forwarding, &mut sessions, &case)
+        .expect("valid composed DNAT+SNAT must revoke the established reverse hit");
+    assert_eq!(revocation.canonical_key.as_ref(), Some(&case.0));
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+    assert_eq!(
+        sessions.source_nat_revalidated_config_generation(&case.0),
+        None,
+        "revocation must not stamp the unjudged forward row"
+    );
 }
 
 #[test]

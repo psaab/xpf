@@ -1483,8 +1483,8 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         reason: PolicyRevocationReason::StaleSourceNat,
                     });
                 }
-                    }
-            };
+            }
+        };
         let (forward_decision, forward_metadata, forward_origin) =
             sessions.entry_with_origin(&forward_key)?;
         (
@@ -1814,7 +1814,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         if live_epoch == 0 || judged_epoch.is_none_or(|judged| judged >= live_epoch) {
             return None;
         }
-        }
+    }
     Some(PolicyRevocation {
         canonical_key,
         decision: forward_decision,
