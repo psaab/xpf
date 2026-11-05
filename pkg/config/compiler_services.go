@@ -1126,7 +1126,14 @@ func compileServices(node *Node, svc *ServicesConfig, warnings *[]string) error 
 			return err
 		}
 	}
-	if node.FindChild("application-identification") != nil {
+	// #18849: the packed-presence form `services application-identification
+	// { … }` keeps "application-identification" on the services node's own
+	// Keys because its schema entry is a complete zero-argument flag leaf
+	// (`children: nil`) and the compact normalizer declines attaching an
+	// elided body to such a leaf (#15139), mirroring dhcpRelayV4Node9411's
+	// packed-tail read.
+	if node.FindChild("application-identification") != nil ||
+		(len(node.Keys) > 1 && node.Keys[1] == "application-identification") {
 		svc.ApplicationIdentification = true
 	}
 	if warnings != nil {
