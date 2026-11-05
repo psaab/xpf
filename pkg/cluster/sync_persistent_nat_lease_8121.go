@@ -885,7 +885,7 @@ func (s *SessionSync) QueuePersistentNatLeaseBatch(batch userspace.PersistentNat
 			}
 		}
 		s.writeMu.Lock()
-		err = writeMsg(conn, msgType, payload)
+		err = s.writeFrameLocked(conn, msgType, payload, nil)
 		s.writeMu.Unlock()
 		if err != nil {
 			slog.Warn("cluster sync: persistent-NAT lease send error", "err", err)

@@ -231,6 +231,12 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	}
 
 	keyConfigured := len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
+	clusterEnabled := cfg.ControlInterface != "" || cfg.PeerAddress != "" || len(cfg.RedundancyGroups) > 0
+	if keyConfigured {
+		m.noteUnkeyedKeyedLocked()
+	} else {
+		m.touchUnkeyedAuthorityLocked(clusterEnabled)
+	}
 
 	// #15262: anchor the fabric rollout grace at the FIRST keying of the
 	// current accepted-key set, persisted in node state, not at this

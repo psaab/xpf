@@ -28,6 +28,7 @@ var CommandAccepts = []CommandAccept{
 	{"data-node0", []string{"data", "node", "0"}, clusterfailover.DataFailover(0), "cluster-failover-data:node0"},
 	{"data-node1", []string{"data", "node", "1"}, clusterfailover.DataFailover(1), "cluster-failover-data:node1"},
 	{"reset", []string{"reset", "redundancy-group", "3"}, clusterfailover.ResetFailover(3), "cluster-failover-reset:3"},
+	{"force-primary", []string{"force-primary", "redundancy-group", "4", "override", "unkeyed-recovery"}, clusterfailover.ForcePrimary(4), "cluster-failover-force-primary:4"},
 }
 
 // CommandReject is a token vector that MUST be rejected before any side effect.
@@ -56,6 +57,12 @@ var CommandRejects = []CommandReject{
 	{"data-unsupported-node", []string{"data", "node", "2"}},
 	{"data-trailing", []string{"data", "node", "0", "extra"}},
 	{"data-wrong-keyword", []string{"data", "nod", "0"}},
+	{"force-primary-missing-rg", []string{"force-primary", "redundancy-group", "override", "unkeyed-recovery"}},
+	{"force-primary-nonnumeric-rg", []string{"force-primary", "redundancy-group", "bad", "override", "unkeyed-recovery"}},
+	{"force-primary-wrong-keyword", []string{"force-primary", "redundancy-group", "4", "unkeyed-recovery"}},
+	{"force-primary-wrong-override", []string{"force-primary", "redundancy-group", "4", "overide", "unkeyed-recovery"}},
+	{"force-primary-wrong-recovery-keyword", []string{"force-primary", "redundancy-group", "4", "override", "unkeyed"}},
+	{"force-primary-trailing", []string{"force-primary", "redundancy-group", "4", "override", "unkeyed-recovery", "extra"}},
 	{"unknown-verb", []string{"frobnicate"}},
 	{"bare-node", []string{"node", "0"}},
 	{"empty", []string{}},
@@ -78,6 +85,7 @@ var ActionAccepts = []ActionAccept{
 	{"data-0", "cluster-failover-data:node0", clusterfailover.DataFailover(0)},
 	{"data-1", "cluster-failover-data:node1", clusterfailover.DataFailover(1)},
 	{"reset", "cluster-failover-reset:1", clusterfailover.ResetFailover(1)},
+	{"force-primary", "cluster-failover-force-primary:4", clusterfailover.ForcePrimary(4)},
 }
 
 // ActionRejects enumerates the malformed / out-of-range / non-family wire
@@ -85,23 +93,29 @@ var ActionAccepts = []ActionAccept{
 // empty-node forms (`cluster-failover:1:node`, `cluster-failover-data:node`)
 // are the specific #5851 fall-through.
 var ActionRejects = []string{
-	"cluster-failover:1:node",        // empty node suffix (#5851)
-	"cluster-failover:1:node2",       // unsupported node
-	"cluster-failover:1:node99",      // out-of-range node
-	"cluster-failover:1:node0:node1", // duplicate / trailing node segment
-	"cluster-failover:1:nodeX",       // non-numeric node
-	"cluster-failover:1:nod0",        // misspelled selector -> non-numeric RG segment
-	"cluster-failover:garbage:node1", // non-numeric RG
-	"cluster-failover:-1",            // negative RG
-	"cluster-failover:+1",            // signed RG
-	"cluster-failover:1 ",            // trailing whitespace
-	"cluster-failover:",              // empty RG
-	"cluster-failover-data:node",     // empty node (#5851)
-	"cluster-failover-data:node2",    // unsupported node
-	"cluster-failover-data:nodeX",    // non-numeric node
-	"cluster-failover-data:node0:x",  // trailing garbage after node
-	"cluster-failover-data:bogus",    // malformed data suffix
-	"cluster-failover-reset:",        // empty RG
-	"cluster-failover-reset:1:extra", // trailing garbage
-	"cluster-failover-reset:-1",      // negative RG
+	"cluster-failover:1:node",                // empty node suffix (#5851)
+	"cluster-failover:1:node2",               // unsupported node
+	"cluster-failover:1:node99",              // out-of-range node
+	"cluster-failover:1:node0:node1",         // duplicate / trailing node segment
+	"cluster-failover:1:nodeX",               // non-numeric node
+	"cluster-failover:1:nod0",                // misspelled selector -> non-numeric RG segment
+	"cluster-failover:garbage:node1",         // non-numeric RG
+	"cluster-failover:-1",                    // negative RG
+	"cluster-failover:+1",                    // signed RG
+	"cluster-failover:1 ",                    // trailing whitespace
+	"cluster-failover:",                      // empty RG
+	"cluster-failover-data:node",             // empty node (#5851)
+	"cluster-failover-data:node2",            // unsupported node
+	"cluster-failover-data:nodeX",            // non-numeric node
+	"cluster-failover-data:node0:x",          // trailing garbage after node
+	"cluster-failover-data:bogus",            // malformed data suffix
+	"cluster-failover-reset:",                // empty RG
+	"cluster-failover-reset:1:extra",         // trailing garbage
+	"cluster-failover-reset:-1",              // negative RG
+	"cluster-failover-force-primary:",        // empty RG
+	"cluster-failover-force-primary:-1",      // negative RG
+	"cluster-failover-force-primary:+1",      // signed RG
+	"cluster-failover-force-primary:bad",     // non-numeric RG
+	"cluster-failover-force-primary:4 ",      // trailing whitespace
+	"cluster-failover-force-primary:4:extra", // trailing garbage
 }

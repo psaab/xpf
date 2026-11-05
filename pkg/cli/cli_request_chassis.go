@@ -50,6 +50,9 @@ func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
 	}
 
 	switch op.Kind {
+	case clusterfailover.KindForcePrimary:
+		return c.cluster.ForcePrimaryRecovery(op.RG)
+
 	case clusterfailover.KindReset:
 		if err := c.cluster.ResetFailover(op.RG); err != nil {
 			return err
@@ -132,7 +135,7 @@ func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
 		return nil
 	}
 
-	// ParseCommand only returns the four kinds above; this is unreachable.
+	// ParseCommand only returns the five kinds above; this is unreachable.
 	return fmt.Errorf("%s", clusterfailover.CommandUsage)
 }
 

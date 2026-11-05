@@ -345,7 +345,7 @@ func (s *SessionSync) writeConfigWithPeerSnapshotGuard(
 	s.recordLastSentConfigGen(gen)
 	noteConfigGenWrittenOnConn(conn, gen)
 	s.writeMu.Lock()
-	err := writeMsg(conn, msgType, payload)
+	err := s.writeFrameLocked(conn, msgType, payload, nil)
 	s.writeMu.Unlock()
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
 	return true, err
@@ -478,7 +478,7 @@ func (s *SessionSync) queueConfigOnConn(
 		s.writeMu.Lock()
 		s.recordLastSentConfigGen(gen)
 		noteConfigGenWrittenOnConn(conn, gen)
-		err = writeMsg(conn, msgType, payload)
+		err = s.writeFrameLocked(conn, msgType, payload, nil)
 		s.writeMu.Unlock()
 		s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
 	}
@@ -592,7 +592,7 @@ func (s *SessionSync) sendConfigApplyAck(conn net.Conn, gen uint64) {
 	var payload [8]byte
 	binary.LittleEndian.PutUint64(payload[:], gen)
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgConfigApplyAck, payload[:])
+	err := s.writeFrameLocked(conn, syncMsgConfigApplyAck, payload[:], nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Debug("cluster sync: config-apply ack send error", "gen", gen, "err", err)
@@ -626,7 +626,7 @@ func (s *SessionSync) sendConfigApplyNack(gen uint64) {
 	var payload [8]byte
 	binary.LittleEndian.PutUint64(payload[:], gen)
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgConfigApplyNack, payload[:])
+	err := s.writeFrameLocked(conn, syncMsgConfigApplyNack, payload[:], nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Debug("cluster sync: config-apply nack send error", "gen", gen, "err", err)

@@ -129,8 +129,9 @@ var (
 )
 
 var (
-	errSyncFrameAuth   = errors.New("cluster sync: frame HMAC verification failed")
-	errSyncFrameReplay = errors.New("cluster sync: frame sequence replay/regression")
+	errSyncFrameAuth              = errors.New("cluster sync: frame HMAC verification failed")
+	errSyncFrameReplay            = errors.New("cluster sync: frame sequence replay/regression")
+	errUnkeyedAuthorityGraceEnded = errors.New(unkeyedAuthorityExpiredReason)
 )
 
 // syncAuthMode is the negotiated auth posture for one sync connection.
@@ -155,6 +156,43 @@ const (
 // state instead (#10315).
 type SyncAuthProvider interface {
 	ControlLinkAuthKey() []byte
+}
+
+// syncUnkeyedAuthorityProvider optionally exposes the manager's expired
+// unkeyed-authority posture. Other SyncAuthProvider implementations retain
+// the legacy behaviour unless they explicitly provide the guard.
+type syncUnkeyedAuthorityProvider interface {
+	UnkeyedAuthorityExpired() bool
+}
+
+func (s *SessionSync) unkeyedAuthorityExpired() bool {
+	if box := s.authProvider.Load(); box != nil && box.p != nil {
+		if p, ok := box.p.(syncUnkeyedAuthorityProvider); ok {
+			return p.UnkeyedAuthorityExpired()
+		}
+	}
+	return false
+}
+
+func (s *SessionSync) noteUnkeyedAuthorityRefusal(conn net.Conn, stage string) {
+	now := MonotonicNanos()
+	last := s.unkeyedAuthorityRejectLogMono.Load()
+	if last != 0 && now-last < int64(time.Second) {
+		return
+	}
+	if !s.unkeyedAuthorityRejectLogMono.CompareAndSwap(last, now) {
+		return
+	}
+	slog.Warn("cluster sync: refusing unauthenticated control authority after grace expiry (#16016)",
+		"stage", stage, "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
+}
+
+func (s *SessionSync) checkUnkeyedGraceNotices() {
+	if box := s.authProvider.Load(); box != nil && box.p != nil {
+		if p, ok := box.p.(interface{ checkUnkeyedGraceNotices() }); ok {
+			p.checkUnkeyedGraceNotices()
+		}
+	}
 }
 
 // syncPeerAuthRecorder is an optional capability for auth providers that retain

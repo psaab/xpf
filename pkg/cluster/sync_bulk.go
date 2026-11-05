@@ -407,7 +407,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	if walk.readsDuringWindow {
 		walk.fence = s.fence.epoch.Load() + 1
 	}
-	err := writeMsg(conn, syncMsgBulkStart, startPayload)
+	err := s.writeFrameLocked(conn, syncMsgBulkStart, startPayload, nil)
 	s.writeMu.Unlock()
 	if moved {
 		s.onStreamMoved(false)
@@ -463,7 +463,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		}
 		msg := s.encodeSessionV4PayloadForPeer(key, val)
 		s.writeMu.Lock()
-		err := writeMsg(conn, syncMsgSessionV4, msg)
+		err := s.writeFrameLocked(conn, syncMsgSessionV4, msg, nil)
 		s.writeMu.Unlock()
 		if err != nil {
 			s.disconnectConn(conn, "bulk sync v4 session write failed", err)
@@ -528,7 +528,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		}
 		msg := s.encodeSessionV6PayloadForPeer(key, val)
 		s.writeMu.Lock()
-		err := writeMsg(conn, syncMsgSessionV6, msg)
+		err := s.writeFrameLocked(conn, syncMsgSessionV6, msg, nil)
 		s.writeMu.Unlock()
 		if err != nil {
 			s.disconnectConn(conn, "bulk sync v6 session write failed", err)
@@ -607,7 +607,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	endPayload := appendBootIncarnation(epochBuf[:], localBootIncarnation())
 	slog.Info("cluster sync: bulk sync writing end marker", "epoch", epoch, "source", walk.source, "sessions", count, "skipped", walk.skipped)
 	s.writeMu.Lock()
-	err = writeMsg(conn, syncMsgBulkEnd, endPayload)
+	err = s.writeFrameLocked(conn, syncMsgBulkEnd, endPayload, nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		s.clearPendingBulkAck()
@@ -973,7 +973,7 @@ func (s *SessionSync) sendBarrierAck(conn net.Conn, seq uint64) {
 	binary.LittleEndian.PutUint64(payload[8:16], stats.SessionsReceived)
 	binary.LittleEndian.PutUint64(payload[16:24], stats.SessionsInstalled)
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgBarrierAck, payload[:])
+	err := s.writeFrameLocked(conn, syncMsgBarrierAck, payload[:], nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		s.stats.Errors.Add(1)
@@ -1028,7 +1028,7 @@ func (s *SessionSync) sendBulkAck(conn net.Conn, epoch uint64) {
 	var payload [8]byte
 	binary.LittleEndian.PutUint64(payload[:], epoch)
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgBulkAck, payload[:])
+	err := s.writeFrameLocked(conn, syncMsgBulkAck, payload[:], nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		s.stats.Errors.Add(1)

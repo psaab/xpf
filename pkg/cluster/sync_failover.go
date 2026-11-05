@@ -224,7 +224,7 @@ func (s *SessionSync) failoverRoundTrip(msgType uint8, rgIDs []int, single bool,
 		payload = payloadFor(reqID)
 	}
 	s.writeMu.Lock()
-	err := writeMsg(conn, msgType, payload)
+	err := s.writeFrameLocked(conn, msgType, payload, nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		s.completeFailoverWait(key, reqID, failoverAck{status: failoverAckDisconnected, detail: "send failed"})
@@ -467,7 +467,7 @@ func (s *SessionSync) SendFence() error {
 		return fmt.Errorf("peer not connected")
 	}
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgFence, nil)
+	err := s.writeFrameLocked(conn, syncMsgFence, nil, nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Warn("cluster sync: fence send error", "err", err)
@@ -622,7 +622,7 @@ func (s *SessionSync) SendFailoverAbort(rgID int, reqID uint64) error {
 	}
 	payload := encodeFailoverSingleReqPayload(rgID, reqID)
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgFailoverAbort, payload)
+	err := s.writeFrameLocked(conn, syncMsgFailoverAbort, payload, nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Warn("cluster sync: failover abort send error", "err", err, "rg", rgID, "req_id", reqID)
@@ -655,7 +655,7 @@ func (s *SessionSync) SendFailoverAbortBatch(rgIDs []int, reqID uint64) error {
 	}
 	payload := encodeFailoverBatchRequestPayload(ids, reqID)
 	s.writeMu.Lock()
-	err = writeMsg(conn, syncMsgFailoverBatchAbort, payload)
+	err = s.writeFrameLocked(conn, syncMsgFailoverBatchAbort, payload, nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Warn("cluster sync: batch failover abort send error", "err", err, "rgs", ids, "req_id", reqID)
@@ -736,10 +736,10 @@ func (s *SessionSync) sendFailoverAckFrame(conn net.Conn, msgType uint8, rgIDs [
 		payload = encodeFailoverBatchAckPayload(rgIDs, status, reqID, detail)
 	}
 	s.writeMu.Lock()
-	err := writeMsg(ackConn, msgType, payload)
+	err := s.writeFrameLocked(ackConn, msgType, payload, nil)
 	firstErr := err
 	if err != nil && conn != nil && ackConn != conn {
-		err = writeMsg(conn, msgType, payload)
+		err = s.writeFrameLocked(conn, msgType, payload, nil)
 	}
 	s.writeMu.Unlock()
 	if firstErr != nil && ackConn != nil && ackConn != conn {

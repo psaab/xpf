@@ -726,11 +726,11 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 		return &pb.SystemActionResponse{Message: msg}, nil
 
 	default:
-		// All cluster-failover actions (plain RG / targeted RG / data / reset)
-		// share ONE strict grammar with the two CLIs and the fabric interceptor
-		// (pkg/clusterfailover). Parsing here rejects a malformed selector, an
-		// empty/duplicate/trailing node suffix, or an out-of-range node with
-		// InvalidArgument BEFORE any cluster call or peer dial — the old
+		// All cluster-failover actions (plain RG / targeted RG / data / reset /
+		// force-primary) share ONE strict grammar with the two CLIs and the fabric
+		// interceptor (pkg/clusterfailover). Parsing here rejects a malformed
+		// selector, an empty/duplicate/trailing node suffix, or an out-of-range
+		// node with InvalidArgument BEFORE any cluster call or peer dial — the old
 		// per-form ad-hoc parsing let `cluster-failover:1:node` (empty suffix)
 		// fall through to an untargeted ManualFailover (#5810, #5851).
 		if clusterfailover.IsFailoverAction(req.Action) {
@@ -859,10 +859,14 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 // re-validates the action string — they only ROUTE (local execution vs. peer
 // proxy). Because both CLIs, this loopback handler, and the fabric interceptor
 // share that one parser, any form reaching this method is one all layers agree
-// is well-formed; the fabric allowlist may still deny a valid local-only form
-// (plain RG failover / reset) by policy, but never by a divergent parse.
+// is well-formed; the fabric allowlist denies local-only forms and this handler
+// explicitly refuses force-primary, never by a divergent parse.
 func (s *Server) executeClusterFailover(ctx context.Context, req *pb.SystemActionRequest, op clusterfailover.Op) (*pb.SystemActionResponse, error) {
 	switch op.Kind {
+	case clusterfailover.KindForcePrimary:
+		return nil, status.Error(codes.FailedPrecondition,
+			"force-primary is a local recovery action; run it on the node itself")
+
 	case clusterfailover.KindReset:
 		if err := s.cluster.ResetFailover(op.RG); err != nil {
 			return nil, status.Errorf(codes.NotFound, "%v", err)
@@ -946,7 +950,7 @@ func (s *Server) executeClusterFailover(ctx context.Context, req *pb.SystemActio
 			Message: fmt.Sprintf("Manual failover triggered for redundancy group %d", op.RG),
 		}, nil
 	}
-	// ParseAction only yields the four kinds above; defensive fallthrough.
+	// ParseAction only yields the five kinds above; defensive fallthrough.
 	return nil, status.Errorf(codes.InvalidArgument, "unknown action: %s", req.Action)
 }
 

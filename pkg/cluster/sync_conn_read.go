@@ -104,7 +104,7 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 					return
 				}
 				s.writeMu.Lock()
-				err := writeMsg(conn, syncMsgHeartbeat, nil)
+				err := s.writeFrameLocked(conn, syncMsgHeartbeat, nil, nil)
 				s.writeMu.Unlock()
 				if err != nil {
 					exit = recvExit{reason: "heartbeat probe write failed", err: err}
@@ -240,6 +240,10 @@ func (s *SessionSync) rejectUnauthenticatedAuthorityFrame(conn net.Conn, msgType
 	// bulk-frame hot path pays no manager lock (#16016 review).
 	if ac, ok := conn.(*authConn); ok && ac.readAuthed() {
 		return false
+	}
+	if s.unkeyedAuthorityExpired() {
+		s.noteUnkeyedAuthorityRefusal(conn, "frame")
+		return true
 	}
 	if !s.authConfigured() {
 		return false

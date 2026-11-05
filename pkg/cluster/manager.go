@@ -66,9 +66,12 @@ type RedundancyGroupState struct {
 	// ForceSecondary inherits the pin (State becomes SecondaryHold, weight
 	// stays 0) until one of the clears above.
 	forcedSecondary bool
-	Weight          int // current effective weight (255 - sum of down monitor weights)
-	FailoverCount   int
-	MonitorFails    []string // names of currently-failed monitors
+	// forcedPrimary pins the break-glass #16016 recovery ownership until an
+	// explicit ResetFailover establishes a new operator decision.
+	forcedPrimary bool
+	Weight        int // current effective weight (255 - sum of down monitor weights)
+	FailoverCount int
+	MonitorFails  []string // names of currently-failed monitors
 	// transferCommitRolePinned preserves the role granted by the last completed
 	// transfer against ordinary election until peer state or operator action
 	// establishes a new ownership decision.
@@ -192,6 +195,16 @@ type Manager struct {
 	// peerClock is the #18585 peer wall-clock offset measured from admitted
 	// heartbeats (peer_clock_skew_18585.go). Its own mutex; never under mu.
 	peerClock peerClockState
+	// unkeyedGrace is the persisted #16016 authority window. Its atomic
+	// posture words are read by the frame gates and elections; record
+	// bookkeeping is internally locked by the state.
+	unkeyedGrace unkeyedGraceState
+	// peerProofGen publishes authenticated heartbeat evidence only after the
+	// peer's RG/election claims have been installed.
+	peerProofGen     atomic.Uint64
+	unkeyedAlarmMu   sync.Mutex
+	unkeyedAlarmHook func(expired bool, expiry time.Time)
+	unkeyedAuditHook func(action string, rgID, nodeID int, at time.Time, reason string)
 
 	nodeID         int
 	clusterID      int

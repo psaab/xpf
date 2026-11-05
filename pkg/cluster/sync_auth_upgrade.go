@@ -479,7 +479,7 @@ func (s *SessionSync) beginAuthUpgrade(conn net.Conn, fabricIdx int, key []byte,
 		if ac.upgrade.answeredAwaitingConfirm() {
 			return errUpgradeNotApplicable
 		}
-		if err := writeMsg(ac, syncMsgAuthUpgradeRequest, []byte{syncAuthUpgradeVersion}); err != nil {
+		if err := s.writeFrameLocked(ac, syncMsgAuthUpgradeRequest, []byte{syncAuthUpgradeVersion}, nil); err != nil {
 			return err
 		}
 		slog.Info("cluster sync: asking the peer to start the in-place authentication upgrade "+
@@ -541,7 +541,7 @@ func (s *SessionSync) emitUpgradeHelloLocked(ac *authConn, fabricIdx int, key []
 	// raw conn would emit an unsealed frame into a stream the peer expects to
 	// be sealed — a desync, on the one path where the connection was healthy to
 	// begin with.
-	if err := writeMsg(ac, syncMsgAuthUpgradeHello, payload); err != nil {
+	if err := s.writeFrameLocked(ac, syncMsgAuthUpgradeHello, payload, nil); err != nil {
 		// Leave no exchange recorded: nothing reached the peer, so a retry on
 		// the next reconcile is the correct outcome.
 		return err
@@ -626,7 +626,7 @@ func (s *SessionSync) handleAuthUpgradeRequest(conn net.Conn, payload []byte) bo
 	// residual named under NEVER DROPS in the file header.
 	if st := ac.upgrade; st != nil && st.initiator && !st.complete() &&
 		len(st.hello) > 0 && bytes.Equal(st.forPSK, key) {
-		if err := writeMsg(ac, syncMsgAuthUpgradeHello, st.hello); err != nil {
+		if err := s.writeFrameLocked(ac, syncMsgAuthUpgradeHello, st.hello, nil); err != nil {
 			slog.Warn("cluster sync: could not re-send the auth-upgrade hello the peer "+
 				"asked for; the connection stays as it is (#6628)", "err", err)
 		}
@@ -771,7 +771,7 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) bool
 	payloadOut = append(payloadOut, msg2...)
 
 	// Through ac, not ac.Conn — see emitUpgradeHelloLocked for why.
-	if err := writeMsg(ac, syncMsgAuthUpgradeProof, payloadOut); err != nil {
+	if err := s.writeFrameLocked(ac, syncMsgAuthUpgradeProof, payloadOut, nil); err != nil {
 		// The msg2 did not go out, so the initiator will not switch its read
 		// direction. Install nothing: a half-switched posture is the one state
 		// that could desync a survivor.
@@ -866,7 +866,7 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) bool
 	// Through ac, not ac.Conn — this frame must still be sealed under the OLD
 	// key on a rotation, because the responder's read side does not move until
 	// it has processed it.
-	if err := writeMsg(ac, syncMsgAuthUpgradeConfirm, confirm); err != nil {
+	if err := s.writeFrameLocked(ac, syncMsgAuthUpgradeConfirm, confirm, nil); err != nil {
 		// The Confirm did not go out, so the responder will not switch its
 		// read direction — and this node must therefore NOT switch its write.
 		// readKey stays installed: the responder has already switched its
@@ -964,7 +964,7 @@ func (s *SessionSync) handleAuthUpgradeConfirm(conn net.Conn, payload []byte) bo
 	// the initiator supersede a round this node has committed to. That is over
 	// now, so prompt.
 	if live := s.authKey(); len(live) > 0 && !bytes.Equal(ac.authPSK, live) {
-		if err := writeMsg(ac, syncMsgAuthUpgradeRequest, []byte{syncAuthUpgradeVersion}); err != nil {
+		if err := s.writeFrameLocked(ac, syncMsgAuthUpgradeRequest, []byte{syncAuthUpgradeVersion}, nil); err != nil {
 			slog.Warn("cluster sync: could not prompt for the rotation round deferred while "+
 				"this exchange was in flight (#6628)", "err", err)
 		}

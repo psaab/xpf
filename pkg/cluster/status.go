@@ -871,6 +871,7 @@ func (m *Manager) FormatControlPlaneStatistics() string {
 	fmt.Fprintf(&b, "    Epoch out-of-band rejected: %d\n", hbStats.EpochOutOfBandRejected)
 	fmt.Fprintf(&b, "    Epoch raises declined:      %d%s\n",
 		hbStats.EpochRaiseDeclinedAheadOfClock, epochRaiseDeclineNote(hbStats))
+	fmt.Fprintf(&b, "    Unkeyed authority grace:    %s\n", m.unkeyedAuthorityGraceStatus())
 	fmt.Fprintf(&b, "    Authentication:             %s\n", m.controlLinkAuthStatus())
 	// #6630: the rotation line appears ONLY while an additional key is
 	// configured. A permanent line reading "no rotation in progress" would be
@@ -904,10 +905,15 @@ func (m *Manager) FormatControlPlaneStatistics() string {
 // It reports only accepted-key presence and never renders the secret.
 func (m *Manager) controlLinkAuthStatus() string {
 	if !m.ControlLinkAuthConfigured() {
-		// No local key: this node cannot verify a peer and accepts legacy
-		// unauthenticated control authority. Keep the alarm in the status
-		// string until an accepted key is configured.
-		return "dual-accept (no control-link key configured; ALARM: unauthenticated control authority remains enabled)"
+		if m.UnkeyedAuthorityExpired() {
+			return "refused (no key configured; unkeyed-authority grace expired; ALARM: unauthenticated control authority is suppressed)"
+		}
+		expiry := m.UnkeyedGraceExpiry()
+		if expiry.IsZero() {
+			return "dual-accept (no control-link key configured; ALARM: unauthenticated control authority remains enabled; grace anchor pending)"
+		}
+		return fmt.Sprintf("dual-accept (no control-link key configured; ALARM: unauthenticated control authority remains enabled until %s)",
+			expiry.Format(time.RFC3339))
 	}
 	// A local key is sufficient for heartbeat enforcement. An established
 	// session-sync connection that predates keying may still be unauthenticated,
@@ -939,10 +945,46 @@ func (m *Manager) controlLinkAuthStatus() string {
 			"authenticated under a RETIRED key, frames still verify under retired-key-derived keys: %s",
 			len(retired), strings.Join(retired, ", ")))
 	}
+	if m.RecoveryHoldActive() {
+		clauses = append(clauses, "takeover suppressed until a fresh authenticated peer heartbeat")
+	}
 	if len(clauses) > 0 {
 		return fmt.Sprintf("heartbeat engaged (local key; %s", strings.Join(clauses, "; ")) + ")"
 	}
 	return "engaged (local key configured; unauthenticated heartbeat frames rejected)"
+}
+func (m *Manager) unkeyedAuthorityGraceStatus() string {
+	if m.ControlLinkAuthConfigured() {
+		if m.RecoveryHoldActive() {
+			return "recovery hold active; takeover suppressed until a fresh authenticated peer heartbeat"
+		}
+		return "inactive (local control-link key configured)"
+	}
+	notPersisted := m.UnkeyedGraceNotPersisted()
+	suffix := ""
+	if notPersisted {
+		suffix = "; anchor not persisted, expiry is enforced only until restart"
+	}
+	if m.UnkeyedAuthorityExpired() {
+		if m.UnkeyedGraceAnchorCorrupt() {
+			return "expired at boot (persisted grace anchor is corrupt; key the cluster to recover)"
+		}
+		expiry := m.UnkeyedGraceExpiry()
+		if expiry.IsZero() {
+			return "expired (unkeyed authority refused; key the cluster to recover)" + suffix
+		}
+		return fmt.Sprintf("expired at %s (unauthenticated authority refused; key the cluster to recover%s)",
+			expiry.Format(time.RFC3339), suffix)
+	}
+	expiry := m.UnkeyedGraceExpiry()
+	if expiry.IsZero() {
+		return "active; waiting for cluster grace anchor"
+	}
+	status := fmt.Sprintf("active; expires at %s", expiry.Format(time.RFC3339))
+	if notPersisted {
+		status += " (anchor not persisted; expiry is enforced only until restart)"
+	}
+	return status
 }
 
 // controlLinkRotationStatus renders the #6630 rotation line, or "" when no

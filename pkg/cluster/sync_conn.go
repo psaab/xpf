@@ -870,6 +870,15 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 	// until AFTER the handshake succeeds so a connection flood cannot pin socket
 	// memory before proving possession of the PSK.
 
+	// Reject before the handshake can establish a connection from an
+	// unauthenticated host after the set-once grace has expired.
+	if s.unkeyedAuthorityExpired() {
+		s.finishSetup(conn)
+		s.noteUnkeyedAuthorityRefusal(conn, "connection admission")
+		s.stats.Errors.Add(1)
+		_ = conn.Close()
+		return
+	}
 	// #4107 F23: authenticate the stream at connection setup before any session
 	// frame flows. A dropped handshake (bad PSK proof / downgrade attempt / I/O)
 	// closes the connection; the accept/connect loops retry, so this never
@@ -892,6 +901,9 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 	// Wrap so writeFull seals and receiveLoop verifies per-frame auth when the
 	// connection authenticated; an unauthenticated wrapper is a pass-through.
 	conn = s.wrapSyncConn(fabricIdx, conn, mode, keys)
+	if s.testBeforeInstallConn != nil {
+		s.testBeforeInstallConn()
+	}
 	s.markPeerCapabilitiesInFlight(conn)
 	// #4962: install the connection and DECIDE cold-prime atomically under
 	// s.mu. Computing the decision after unlock (the pre-#4962 shape) let a
@@ -1052,6 +1064,13 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	}
 	s.retirePeerClosedSlot(fabricIdx, conn)
 	s.mu.Lock()
+	if s.unkeyedAuthorityExpired() {
+		s.mu.Unlock()
+		s.noteUnkeyedAuthorityRefusal(conn, "connection install")
+		s.stats.Errors.Add(1)
+		_ = conn.Close()
+		return connColdPrimeDecision{activeBefore: -1, activeAfter: -1}
+	}
 	defer s.mu.Unlock()
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
 	defer s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()

@@ -204,6 +204,9 @@ func connAuthStaleLocked(ac *authConn, accepted [][]byte) bool {
 // data race. authPSK carries the same fact — it is set only by a completed
 // exchange, which requires the PSK — and is race-safe.
 func (s *SessionSync) enforceStrictSessionAuth() int {
+	if s.unkeyedAuthorityExpired() {
+		return s.evictExpiredUnkeyedSessionConns()
+	}
 	if len(s.authKey()) == 0 {
 		// Unkeyed: the rule is inert by design. Evicting here would drop
 		// session sync on a cluster that never asked for authentication.
@@ -269,6 +272,39 @@ func (s *SessionSync) enforceStrictSessionAuth() int {
 		s.disconnectConnNow(c, reason, nil)
 	}
 	return len(doomed)
+}
+func (s *SessionSync) evictExpiredUnkeyedSessionConns() int {
+	if !s.unkeyedAuthorityExpired() {
+		return 0
+	}
+	s.mu.Lock()
+	conns := []net.Conn{s.conn0, s.conn1}
+	s.mu.Unlock()
+
+	var doomed []net.Conn
+	s.writeMu.Lock()
+	for _, conn := range conns {
+		if conn == nil {
+			continue
+		}
+		if ac, ok := conn.(*authConn); ok && ac.writeAuthed() {
+			continue
+		}
+		doomed = append(doomed, conn)
+	}
+	s.writeMu.Unlock()
+	closed := 0
+	for _, conn := range doomed {
+		// A simultaneous local key commit ends the unkeyed expired posture.
+		if !s.unkeyedAuthorityExpired() {
+			break
+		}
+		s.noteUnkeyedAuthorityRefusal(conn, "established connection eviction")
+		s.stats.Errors.Add(1)
+		s.disconnectConnNow(conn, unkeyedAuthorityExpiredReason, nil)
+		closed++
+	}
+	return closed
 }
 
 // UnauthenticatedSessionConns returns the remote address of every installed
@@ -357,6 +393,7 @@ func (s *SessionSync) strictSessionAuthLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.enforceStrictSessionAuth()
+			s.checkUnkeyedGraceNotices()
 		}
 	}
 }

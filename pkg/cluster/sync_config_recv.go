@@ -112,7 +112,7 @@ func (s *SessionSync) handleHeartbeat(conn net.Conn, payload []byte) bool {
 		return false
 	}
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgHeartbeatAck, nil)
+	err := s.writeFrameLocked(conn, syncMsgHeartbeatAck, nil, nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Debug("cluster sync: heartbeat ack send error", "err", err)

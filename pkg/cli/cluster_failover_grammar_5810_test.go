@@ -15,12 +15,13 @@
 //
 // This proves parse parity with the shared table AND that no cluster side
 // effect is reachable for a rejected form, without needing a running cluster.
-// A separate spy test pins the peer-proxy dial as untouched for rejects.
+// Peer-proxy spies pin rejection and the force-primary local-only dispatch.
 
 package cli
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/cluster"
@@ -73,5 +74,19 @@ func TestInProcFailoverRejectsNeverProxy_5810(t *testing.T) {
 				t.Fatalf("handleRequestChassisClusterFailover(%v) = nil; want rejection", tc.Args)
 			}
 		})
+	}
+}
+
+func TestInProcForcePrimaryDispatchNeverProxies16016(t *testing.T) {
+	c := &CLI{cluster: cluster.NewManager(0, 1)}
+	c.peerSystemActionFn = func(context.Context, *pb.SystemActionRequest) (string, error) {
+		t.Fatal("local force-primary recovery was proxied to the peer")
+		return "", nil
+	}
+	err := c.handleRequestChassisClusterFailover([]string{
+		"force-primary", "redundancy-group", "1", "override", "unkeyed-recovery",
+	})
+	if err == nil || !strings.Contains(err.Error(), "recovery hold") {
+		t.Fatalf("force-primary dispatch error = %v, want Manager recovery-hold admission error", err)
 	}
 }

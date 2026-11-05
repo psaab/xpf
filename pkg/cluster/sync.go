@@ -1037,12 +1037,16 @@ type SessionSync struct {
 	// field is deliberately NOT under mu, which the connection paths already
 	// hold when they reach the call site.
 	configureConn func(net.Conn)
+	// testBeforeInstallConn opens the deterministic #16016 race seam between
+	// a completed handshake and installConn's in-lock expired-state recheck.
+	testBeforeInstallConn func()
 
-	localAddr string
-	peerAddr  string
-	sessions  dataplane.SessionStore
-	telemetry dataplane.Telemetry
-	stats     SyncStats
+	localAddr                     string
+	peerAddr                      string
+	sessions                      dataplane.SessionStore
+	telemetry                     dataplane.Telemetry
+	stats                         SyncStats
+	unkeyedAuthorityRejectLogMono atomic.Int64
 
 	// malformedRecordWarn is the #10724 detector bounding the "dropping
 	// malformed session record" warnings (v4/v6 arms in sync_conn_read.go).
@@ -3025,7 +3029,7 @@ func (s *SessionSync) QueueIPsecSA(connectionNames []string) bool {
 		seq := s.ipsecSeqCounter.Add(1)
 		payload := appendIPsecFullSetSeq(encodeIPsecSAPayload(connectionNames), s.syncEpoch, seq)
 		s.writeMu.Lock()
-		err := writeMsg(conn, syncMsgIPsecSA, payload)
+		err := s.writeFrameLocked(conn, syncMsgIPsecSA, payload, nil)
 		s.writeMu.Unlock()
 		if err != nil {
 			slog.Warn("cluster sync: IPsec SA send error", "err", err)
@@ -3069,7 +3073,7 @@ func (s *SessionSync) QueueIPsecSA(connectionNames []string) bool {
 		}
 		payload := appendFullSetSeq(encodeIPsecSAChunkPayload(body, generation, uint32(i), uint32(len(bodies)), uint32(total)), s.syncEpoch, seq)
 		s.writeMu.Lock()
-		err := writeMsg(conn, syncMsgIPsecSAChunk, payload)
+		err := s.writeFrameLocked(conn, syncMsgIPsecSAChunk, payload, nil)
 		s.writeMu.Unlock()
 		if err != nil {
 			slog.Warn("cluster sync: IPsec SA chunk send error", "err", err)
@@ -3268,7 +3272,7 @@ func (s *SessionSync) queueDHCPLeaseSnapshot(family int, snapshot dhcpserver.Lea
 	if len(base)+fullSetSeqTrailerLen <= maxSyncPayload {
 		seq := seqCounter.Add(1)
 		s.writeMu.Lock()
-		err := writeMsg(conn, msgType, appendFullSetSeq(base, s.syncEpoch, seq))
+		err := s.writeFrameLocked(conn, msgType, appendFullSetSeq(base, s.syncEpoch, seq), nil)
 		s.writeMu.Unlock()
 		if err != nil {
 			slog.Warn("cluster sync: DHCP lease send error", "family", family, "err", err)
@@ -3326,7 +3330,7 @@ func (s *SessionSync) queueDHCPLeaseSnapshot(family int, snapshot dhcpserver.Lea
 			seq = seqCounter.Add(1)
 		}
 		s.writeMu.Lock()
-		err := writeMsg(conn, chunkMsgType, appendFullSetSeq(body, s.syncEpoch, seq))
+		err := s.writeFrameLocked(conn, chunkMsgType, appendFullSetSeq(body, s.syncEpoch, seq), nil)
 		s.writeMu.Unlock()
 		if err != nil {
 			slog.Warn("cluster sync: DHCP lease chunk send error", "family", family, "err", err)

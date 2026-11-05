@@ -46,11 +46,12 @@ func TestSystemActionFailoverRejects_5810(t *testing.T) {
 }
 
 // TestSystemActionFailoverAccepts_5810 pins that every well-formed failover
-// action PASSES the grammar at the handler: it is never rejected as
-// InvalidArgument (any error it returns is a cluster-state error, not a grammar
-// rejection).
+// action PASSES the grammar at the handler and is not rejected as InvalidArgument.
 func TestSystemActionFailoverAccepts_5810(t *testing.T) {
 	for _, tc := range grammarvectors.ActionAccepts {
+		if tc.Op.Kind == clusterfailover.KindForcePrimary {
+			continue
+		}
 		t.Run(tc.Name, func(t *testing.T) {
 			s := &Server{cluster: cluster.NewManager(0, 1)}
 			s.peerSystemActionFn = func(context.Context, *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
@@ -62,6 +63,17 @@ func TestSystemActionFailoverAccepts_5810(t *testing.T) {
 					"must not be rejected by the grammar", tc.Action, err)
 			}
 		})
+	}
+}
+
+func TestSystemActionForcePrimaryRefusedLocalOnly16016(t *testing.T) {
+	s := &Server{cluster: cluster.NewManager(0, 1)}
+	_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{
+		Action: clusterfailover.ForcePrimary(4).Action(),
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("SystemAction(force-primary) code = %v (%v); want explicit local-only refusal",
+			status.Code(err), err)
 	}
 }
 

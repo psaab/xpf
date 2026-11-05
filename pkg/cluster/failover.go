@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -308,6 +309,9 @@ func (m *Manager) revalidateLocked(r *failoverReservation) (missing []int, super
 // and advertises an explicit transfer-out state so the peer can claim
 // primary without relying on weight-zero election semantics.
 func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
+	if m.UnkeyedAuthorityExpired() {
+		return FailoverApplied, fmt.Errorf("%s", unkeyedAuthorityExpiredReason)
+	}
 	return m.manualFailoverWith(rgID, nil, nil)
 }
 
@@ -491,6 +495,70 @@ func (m *Manager) ForceSecondary() error {
 	return nil
 }
 
+// ForcePrimaryRecovery is the explicit local break-glass for a keyed node
+// stranded by the #16016 recovery hold. It can promote exactly one enabled
+// redundancy group, only during expired->keyed recovery; it is not a general
+// ManualFailover mode and must never be reachable over session sync or gRPC.
+func (m *Manager) ForcePrimaryRecovery(rgID int) error {
+	if m == nil {
+		return fmt.Errorf("cluster not configured")
+	}
+	if m.UnkeyedAuthorityExpired() {
+		return fmt.Errorf("cannot force primary while unkeyed authority grace is expired; key this node first (#16016)")
+	}
+	st := &m.unkeyedGrace
+	if !st.recoveryHold.Load() {
+		return fmt.Errorf("force-primary recovery is only available while the #16016 recovery hold is active")
+	}
+
+	m.mu.Lock()
+	if m.kernelUpgradeHold {
+		m.mu.Unlock()
+		return fmt.Errorf("force-primary recovery is blocked by the kernel-upgrade promotion hold")
+	}
+	if len(m.controlAuthKey) == 0 && len(m.controlAuthKeyAlt) == 0 {
+		m.mu.Unlock()
+		return fmt.Errorf("cannot force primary while unkeyed; key this node first (#16016)")
+	}
+	if !st.recoveryHold.Load() {
+		m.mu.Unlock()
+		return fmt.Errorf("force-primary recovery hold is no longer active")
+	}
+	rg, ok := m.groups[rgID]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("redundancy group %d not found", rgID)
+	}
+	if rg.State == StateDisabled {
+		m.mu.Unlock()
+		return fmt.Errorf("redundancy group %d is disabled", rgID)
+	}
+	if rg.forcedPrimary {
+		m.mu.Unlock()
+		return nil
+	}
+	now := time.Now().UTC()
+	operator := fmt.Sprintf("uid:%d", os.Geteuid())
+	oldState := rg.State
+	rg.forcedPrimary = true
+	rg.State = StatePrimary
+	if oldState != StatePrimary {
+		rg.FailoverCount++
+		m.sendEvent(rgID, oldState, StatePrimary, "Force-primary recovery (#16016)")
+	}
+	m.noteOperatorFailoverLocked(rgID)
+	slog.Warn("cluster: local force-primary recovery override (#16016)",
+		"operator", operator, "node", m.nodeID, "time", now.Format(time.RFC3339Nano),
+		"rg", rgID, "reason", "peer has not produced a fresh authenticated heartbeat proof")
+	hook := m.unkeyedRecoveryAuditHook()
+	m.mu.Unlock()
+	if hook != nil {
+		hook("force-primary", rgID, m.nodeID, now,
+			"peer has not produced a fresh authenticated heartbeat proof")
+	}
+	return nil
+}
+
 // ResetFailover clears manual failover for one redundancy group and resumes
 // normal election for that group.
 //
@@ -523,6 +591,7 @@ func (m *Manager) ResetFailover(rgID int) error {
 	}
 	rg.ManualFailover = false
 	rg.forcedSecondary = false
+	rg.forcedPrimary = false
 	rg.transferCommitRolePinned = false
 	rg.ManualFailoverAt = time.Time{}
 	// Drop every piece of transfer-commit state for this RG (#14979, D34-04).

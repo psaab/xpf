@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"os/exec"
 	"time"
@@ -146,6 +147,30 @@ func (d *Daemon) clockSkewAlarms() []clockskew.ActiveAlarm {
 func (d *Daemon) peerClockAlarmSyslog(raised bool, offset time.Duration) {
 	severity, msg := clockskew.PeerOffsetSyslogLine(raised, offset.Seconds())
 	d.clockSkewAlarmEmitter()(severity, msg)
+}
+
+// unkeyedAuthorityGraceAlarmSyslog forwards the #16016 grace transition via
+// the same RT_SYSTEM syslog streams as clock-skew alarms.
+func (d *Daemon) unkeyedAuthorityGraceAlarmSyslog(expired bool, expiry time.Time) {
+	severity := clockskew.SeverityRaise
+	transition := "UNKEYED_AUTHORITY_GRACE_EXPIRED"
+	if !expired {
+		severity = clockskew.SeverityClear
+		transition = "UNKEYED_AUTHORITY_GRACE_CLEARED"
+	}
+	detail := "expired unkeyed control authority; key the cluster to recover"
+	if !expiry.IsZero() {
+		detail = fmt.Sprintf("%s; expires=%s", detail, expiry.UTC().Format(time.RFC3339))
+	}
+	d.clockSkewAlarmEmitter()(severity, fmt.Sprintf("RT_SYSTEM - %s detail=%q", transition, detail))
+}
+
+// unkeyedAuthorityRecoveryAuditSyslog records the local operator's explicit
+// break-glass ownership choice in the RT_SYSTEM stream.
+func (d *Daemon) unkeyedAuthorityRecoveryAuditSyslog(action string, rgID, nodeID int, at time.Time, reason string) {
+	msg := fmt.Sprintf("RT_SYSTEM - UNKEYED_AUTHORITY_RECOVERY action=%q rg=%d node=%d at=%s reason=%q",
+		action, rgID, nodeID, at.UTC().Format(time.RFC3339Nano), reason)
+	d.clockSkewAlarmEmitter()(clockskew.SeverityRaise, msg)
 }
 
 // clockSkewAlarmEmitter forwards one raise/clear transition to configured

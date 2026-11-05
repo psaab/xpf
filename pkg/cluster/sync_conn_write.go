@@ -920,7 +920,7 @@ func (s *SessionSync) SendLivenessKeepalive() {
 		return
 	}
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgHeartbeat, nil)
+	err := s.writeFrameLocked(conn, syncMsgHeartbeat, nil, nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Debug("cluster sync: liveness keepalive send error", "err", err)
@@ -934,7 +934,7 @@ func (s *SessionSync) sendClockSync(conn net.Conn) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], monotonicSeconds())
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgClockSync, buf[:])
+	err := s.writeFrameLocked(conn, syncMsgClockSync, buf[:], nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		s.disconnectConn(conn, "clock sync write failed", err)
@@ -949,7 +949,7 @@ func (s *SessionSync) sendClockSync(conn net.Conn) {
 // failed clock sync (seat U).
 func (s *SessionSync) sendInstallHeartbeat(conn net.Conn) {
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgHeartbeat, nil)
+	err := s.writeFrameLocked(conn, syncMsgHeartbeat, nil, nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		s.disconnectConn(conn, "install heartbeat write failed", err)
@@ -1046,7 +1046,7 @@ func (s *SessionSync) sendCapabilities(conn net.Conn) {
 	buf[n] = localCapabilityFlags2
 	n++
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgPeerCapabilities, buf[:n])
+	err := s.writeFrameLocked(conn, syncMsgPeerCapabilities, buf[:n], nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Warn("cluster sync: failed to advertise capabilities", "err", err)
@@ -1060,21 +1060,21 @@ func (s *SessionSync) sendCapabilities(conn net.Conn) {
 // queued bytes for a retry if this write fails.
 func (s *SessionSync) writeQueuedFrameForPeer(conn net.Conn, msg []byte) error {
 	if s.PrimaryLivenessCapable() || len(msg) < syncHeaderSize+primaryLivenessTailLen {
-		return writeFull(conn, msg)
+		return s.writeFrameLocked(conn, 0, nil, msg)
 	}
 	if msg[4] != syncMsgSessionV4 && msg[4] != syncMsgSessionV6 {
-		return writeFull(conn, msg)
+		return s.writeFrameLocked(conn, 0, nil, msg)
 	}
 	payloadLength := binary.LittleEndian.Uint32(msg[8:12])
 	if uint64(payloadLength) != uint64(len(msg)-syncHeaderSize) {
-		return writeFull(conn, msg)
+		return s.writeFrameLocked(conn, 0, nil, msg)
 	}
 	base, _, valid := stripPrimaryLivenessMarker(msg[syncHeaderSize:])
 	if !valid || len(base) == len(msg)-syncHeaderSize {
-		return writeFull(conn, msg)
+		return s.writeFrameLocked(conn, 0, nil, msg)
 	}
 	binary.LittleEndian.PutUint32(msg[8:12], uint32(len(base)))
-	err := writeFull(conn, msg[:syncHeaderSize+len(base)])
+	err := s.writeFrameLocked(conn, 0, nil, msg[:syncHeaderSize+len(base)])
 	binary.LittleEndian.PutUint32(msg[8:12], payloadLength)
 	return err
 }
@@ -1157,6 +1157,13 @@ func (s *SessionSync) sendLoop(ctx context.Context) {
 			s.bulkStartMu.Unlock()
 			if moved {
 				s.onStreamMoved(true)
+			}
+			if err == errUnkeyedAuthorityGraceEnded {
+				// Expiry intentionally refuses this queued frame without
+				// writing. Resolve it as a policy drop, not a retryable transport
+				// failure, so a bulk watermark cannot stall behind expired traffic.
+				delivered = true
+				return
 			}
 			if err != nil {
 				// #18521: this Debug line was the ONLY trace of the

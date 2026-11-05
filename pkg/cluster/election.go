@@ -95,6 +95,11 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	if m.kernelUpgradeHold {
 		return electNoChange, ""
 	}
+	// A break-glass force-primary pin is an explicit local operator decision.
+	// It survives heartbeat elections until ResetFailover clears the pin.
+	if rg.forcedPrimary {
+		return electLocalPrimary, "Force-primary recovery (#16016)"
+	}
 
 	// #16592: an aborted transfer is not authority to promote through ANY
 	// election arm. Skipping only "Peer transfer out" lets a higher-priority
@@ -812,6 +817,12 @@ func (m *Manager) NoteDuplicateNodeIDHeartbeat() {
 // runElection evaluates all RGs using current peer state and applies transitions.
 // Must be called with m.mu held.
 func (m *Manager) runElection() {
+	// #16016 holds every current role at grace expiry and the recovery
+	// boundary. Centralizing here covers config, readiness, monitor, and
+	// future election callers without demoting an existing primary.
+	if m.electionHoldActiveLocked() {
+		return
+	}
 	for _, rg := range m.groups {
 		var peerGroup *PeerGroupState
 		if pg, ok := m.peerGroups[rg.GroupID]; ok {
@@ -976,6 +987,11 @@ func (m *Manager) runElection() {
 // stay secondary and wait for the heartbeat timeout to confirm the peer
 // is truly absent before claiming primary.
 func (m *Manager) electSingleNode() {
+	// #16016 holds existing roles until the cluster is keyed and, after
+	// keying, until a fresh authenticated heartbeat installs peer posture.
+	if m.electionHoldActiveLocked() {
+		return
+	}
 	// #1930 INC-2 r2 AGY Critical: a kernel-upgrade candidate boot holds
 	// SECONDARY unconditionally — and the single-node path is exactly where an
 	// isolated candidate would otherwise auto-promote (no peer to hold it back).

@@ -2595,21 +2595,65 @@ peer liveness (`lastSeen`) or drive election.
   heartbeat admission input.
 - **Operator surface (#4484 L-9, #16016).** `FormatControlPlaneStatistics`
   (`show chassis cluster control-plane-statistics`) renders an
-  `Authentication:` line derived from `controlLinkAuthStatus()`. An operator
-  can tell whether HMAC auth is **engaged** (`engaged (local key configured;
-  unauthenticated heartbeat frames rejected)`) or running in **dual-accept**
-  mode (`dual-accept (no control-link key configured; ALARM:
-  unauthenticated control authority remains enabled)`). The unkeyed alarm
-  remains visible until an accepted key is configured; `UpdateConfig` emits
-  one error-level alarm per continuous unkeyed posture. A session-sync
-  connection established before keying is called out separately when the
-  provider reports it as still unauthenticated. The status inspects only key
-  presence, so the secret is never rendered.
+  `Authentication:` line and a separate `Unkeyed authority grace:` line.
+  The latter shows the persisted grace expiry, explicit expired/corrupt state,
+  or the local-key/recovery posture; the key secret is never rendered.
+  Session-sync connections established before keying are called out separately
+  when the provider reports them as still unauthenticated.
 - **Secret hygiene.** The key is `config.Secret`, redacted on every
   JSON/YAML/`String()` path and masked as `##SECRET-DATA##` in raw-AST
   renders (`authentication-key` is already in `ast_redact.go`'s secret
   set). It is stored as raw bytes on the `Manager`, never logged; the
   auth-reject log line carries only a reason string and the peer node id.
+
+### Bounded legacy-unkeyed authority grace (#16016)
+
+An unkeyed cluster retains today's dual-accept first-keying path for **72
+hours** after its first observed unkeyed cluster posture. The deadline is
+set-once on `CLOCK_MONOTONIC` in-process and backed by
+`/var/lib/xpf/unkeyed-authority-grace`: `v1 <earliest-wall-nanoseconds>
+<high-water-wall-nanoseconds>`. Every local config/HA-comms touch only
+ratchets the wall high-water mark; wire traffic cannot move or recreate the
+anchor. A normal restart restores the same earliest deadline and a backward
+wall-clock step cannot refund observed time. A future-dated earliest stamp is
+clamped down. A present but corrupt record is expired-at-boot, never fresh.
+If persistence fails, the current process still expires on its monotonic
+deadline and status names the restart limitation; config apply and daemon
+startup continue. Only a local key commit deletes the anchor. Clearing the key
+stamps a new grace; it does not silently preserve or restore a PSK.
+
+While the grace is active, an unauthenticated peer-pushed config may still
+provision the read-only secondary's first key. For an existing pair, key the
+running primary first, verify it is signing authenticated heartbeats, then key
+the secondary; do not start by keying only the secondary. After expiry, every
+unauthenticated heartbeat and session-sync frame is rejected, including
+config, sessions/bulk, failover, acknowledgements, liveness and auth-upgrade
+frames. New unauthenticated connections are refused before handshake/install,
+and established unauthenticated connections are evicted by the existing
+one-second auth sweep. All direct session-sync writers share the expiry guard;
+a frame already inside the serialized write may finish (bounded by the
+existing write deadline). Routine restart never re-anchors an expired node.
+Recovery after expiry is local keying or provisioning/console keying; the
+peer-pushed first-key path is no longer available after the deadline.
+
+Expiry deliberately holds each node's current RG roles and suppresses
+takeover from unverified liveness. Thus an unkeyed primary and secondary do
+not become dual-primary merely because the timer fired; if the primary later
+dies, the expired secondary remains held until keying or explicit local
+recovery. Keying after expiry arms a recovery hold until a fresh authenticated
+heartbeat has installed the peer's RG state. The local-only
+`request chassis cluster failover force-primary redundancy-group <rg> override
+unkeyed-recovery` action is the audited break-glass for one stranded RG while
+that hold is active; remote CLI and gRPC dispatch refuse the action. A fresh
+authenticated peer heartbeat or `request chassis cluster failover reset
+redundancy-group <rg>` clears the force-primary pin.
+
+The `Unkeyed authority grace:` status line includes the expiry timestamp,
+corrupt/not-persisted posture, and recovery hold. The operator notice ladder
+warns at 24 hours and one hour, then at expiry and daily while expired. This is
+bounded containment, not the eventual trust-model change: the PSK-as-node-local
+provisioning state and the matching #5078 pin inversion remain the end state
+described under "The three-way incompatibility" below.
 
 **Scope.** PR-A authenticates the heartbeat/election channel. PR-B (this
 work) extends the SAME PSK to the **fabric gRPC listener**
@@ -3544,12 +3588,15 @@ Consequences to hold on to:
   connection-setup Noise handshake rejects the still-unkeyed secondary — which
   can then never be keyed at all, because it is read-only. A self-inflicted
   permanent partition.
-- **The eventual posture** is that the PSK becomes provisioning-time
+- **The eventual posture** remains that the PSK becomes provisioning-time
   node-local state that config-sync neither carries nor overwrites (the
   per-node day-0 config drive already provisions `xpf.conf` alongside
   `node-id`, and `sync_auth.go` already recommends "keying at provisioning,
-  before either node seats as secondary"). #5078's pin is inverted as PART of
-  that change, never on its own.
+  before either node seats as secondary"). #16016 is bounded containment:
+  within its 72-hour grace, live first-key config-sync remains supported; after
+  expiry, an operator must key locally. It does not implement the node-local
+  end state or invert #5078's pin. That pin is inverted only AS PART OF the
+  eventual change, never on its own.
 - **#6630's rotation is then FORCED, not preferred.** With no in-band
   coordination channel left, accepting the previous key for a bounded overlap
   window is the only rotation that keeps heartbeat liveness.

@@ -98,6 +98,7 @@ func TestTargeted(t *testing.T) {
 		{clusterfailover.TargetedRGFailover(1, 0), true},
 		{clusterfailover.DataFailover(1), true},
 		{clusterfailover.ResetFailover(1), false},
+		{clusterfailover.ForcePrimary(1), false},
 	}
 	for _, tc := range cases {
 		if got := tc.op.Targeted(); got != tc.want {
@@ -121,9 +122,11 @@ func TestIsFailoverAction(t *testing.T) {
 	yes := []string{
 		"cluster-failover:1", "cluster-failover:1:node0",
 		"cluster-failover-data:node0", "cluster-failover-reset:1",
+		"cluster-failover-force-primary:1",
 		// Malformed members are still in the family (routed to ParseAction,
 		// which rejects them) — not misrouted to "unknown action".
 		"cluster-failover:1:node", "cluster-failover-data:bogus",
+		"cluster-failover-force-primary:bogus",
 	}
 	for _, a := range yes {
 		if !clusterfailover.IsFailoverAction(a) {

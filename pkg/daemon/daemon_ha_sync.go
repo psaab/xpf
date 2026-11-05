@@ -1486,6 +1486,12 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 		return
 	}
 	cc := cfg.Chassis.Cluster
+	// Stamp before opening any HA listeners. UpdateConfig has the same
+	// idempotent touch; this boot belt also covers an already-published
+	// manager whose config has not changed during this process.
+	if d.cluster != nil {
+		d.cluster.StampUnkeyedAuthorityAnchor()
+	}
 	// Create an independently-cancellable sub-context so cluster comms can be
 	// restarted on config change (#87) without cancelling the daemon ctx.
 	// beginClusterCommsEpoch bumps the epoch generation under clusterCommsMu so

@@ -334,7 +334,7 @@ func (s *SessionSync) sendConfigKeyExchange(conn net.Conn) {
 	payload = append(payload, syncConfigCryptoVersion)
 	payload = append(payload, c.pub...)
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgConfigKeyExchange, payload)
+	err := s.writeFrameLocked(conn, syncMsgConfigKeyExchange, payload, nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Warn("cluster sync: failed to send config-sync key exchange; config payloads "+

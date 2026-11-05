@@ -19,12 +19,14 @@
 // shared token-vector tables (pkg/clusterfailover/grammarvectors).
 //
 // The grammar is closed: unknown, missing, duplicate, signed, whitespace-laden,
-// or trailing tokens are rejected. There are exactly four forms:
+// or trailing tokens are rejected. There are exactly five forms:
 //
 //	plain RG failover     redundancy-group <rg>            cluster-failover:<rg>
 //	targeted RG failover  redundancy-group <rg> node <n>   cluster-failover:<rg>:node<n>
 //	data failover         data node <n>                    cluster-failover-data:node<n>
 //	reset                 reset redundancy-group <rg>      cluster-failover-reset:<rg>
+//	force primary         force-primary redundancy-group <rg> override unkeyed-recovery
+//	                                                     cluster-failover-force-primary:<rg>
 //
 // where <rg> is a non-negative decimal group ID and <n> is a supported chassis
 // node (0 or 1, see SupportedNode).
@@ -37,7 +39,7 @@ import (
 	"strings"
 )
 
-// Kind identifies which of the four cluster-failover operations a parsed
+// Kind identifies which of the five cluster-failover operations a parsed
 // grammar denotes.
 type Kind int
 
@@ -57,6 +59,10 @@ const (
 	// KindReset clears a forced failover: `reset redundancy-group <rg>` /
 	// `cluster-failover-reset:<rg>`.
 	KindReset
+	// KindForcePrimary is the local-only recovery override:
+	// `force-primary redundancy-group <rg> override unkeyed-recovery` /
+	// `cluster-failover-force-primary:<rg>`.
+	KindForcePrimary
 )
 
 // Op is a fully validated cluster-failover operation. It is produced only by
@@ -66,10 +72,11 @@ const (
 type Op struct {
 	Kind Kind
 	// RG is the redundancy-group ID for KindRGFailover, KindRGFailoverNode,
-	// and KindReset. It is unused (0) for KindDataFailover.
+	// KindReset, and KindForcePrimary. It is unused (0) for KindDataFailover.
 	RG int
 	// Node is the target chassis node for KindRGFailoverNode and
-	// KindDataFailover. It is unused (0) for KindRGFailover and KindReset.
+	// KindDataFailover. It is unused (0) for KindRGFailover, KindReset, and
+	// KindForcePrimary.
 	Node int
 }
 
@@ -87,10 +94,13 @@ func DataFailover(node int) Op { return Op{Kind: KindDataFailover, Node: node} }
 // ResetFailover builds a failover-reset op for a redundancy group.
 func ResetFailover(rg int) Op { return Op{Kind: KindReset, RG: rg} }
 
+// ForcePrimary builds a local-only recovery override op for a redundancy group.
+func ForcePrimary(rg int) Op { return Op{Kind: KindForcePrimary, RG: rg} }
+
 // Targeted reports whether the op names an explicit target node — the two forms
 // (targeted RG failover, data failover) a node legitimately proxies to its peer
-// over the fabric link. The plain RG failover and reset forms are local-only
-// and never proxied (the fabric allowlist denies them by policy).
+// over the fabric link. The plain RG failover, reset, and force-primary forms
+// are local-only and never proxied (the fabric allowlist denies them by policy).
 func (o Op) Targeted() bool {
 	return o.Kind == KindRGFailoverNode || o.Kind == KindDataFailover
 }
@@ -109,14 +119,17 @@ func (o Op) Action() string {
 		return "cluster-failover-data:node" + strconv.Itoa(o.Node)
 	case KindReset:
 		return "cluster-failover-reset:" + strconv.Itoa(o.RG)
+	case KindForcePrimary:
+		return "cluster-failover-force-primary:" + strconv.Itoa(o.RG)
 	default:
 		return ""
 	}
 }
 
-// CommandUsage is the operator-facing usage string for the four command forms.
+// CommandUsage is the operator-facing usage string for the five command forms.
 const CommandUsage = "usage: request chassis cluster failover " +
-	"{redundancy-group <N> [node <N>] | data node <N> | reset redundancy-group <N>}"
+	"{redundancy-group <N> [node <N>] | data node <N> | reset redundancy-group <N> | " +
+	"force-primary redundancy-group <N> override unkeyed-recovery}"
 
 // SupportedNode reports whether n is a valid chassis failover target node.
 // Cluster failover targets are limited to the two chassis nodes. This mirrors
@@ -124,13 +137,13 @@ const CommandUsage = "usage: request chassis cluster failover " +
 // together so the grammar and the runtime range cannot drift.
 func SupportedNode(n int) bool { return n == 0 || n == 1 }
 
-// Action-string prefixes. These three are disjoint: "cluster-failover:" is
-// followed by a ':' where the other two carry a '-', so prefix order does not
-// matter.
+// Action-string prefixes. These four are disjoint: "cluster-failover:" is
+// followed by a ':' where the other three carry a '-'.
 const (
-	actionRGPrefix    = "cluster-failover:"
-	actionDataPrefix  = "cluster-failover-data:"
-	actionResetPrefix = "cluster-failover-reset:"
+	actionRGPrefix           = "cluster-failover:"
+	actionDataPrefix         = "cluster-failover-data:"
+	actionResetPrefix        = "cluster-failover-reset:"
+	actionForcePrimaryPrefix = "cluster-failover-force-primary:"
 )
 
 // IsFailoverAction reports whether action belongs to the cluster-failover
@@ -142,7 +155,8 @@ const (
 func IsFailoverAction(action string) bool {
 	return strings.HasPrefix(action, actionRGPrefix) ||
 		strings.HasPrefix(action, actionDataPrefix) ||
-		strings.HasPrefix(action, actionResetPrefix)
+		strings.HasPrefix(action, actionResetPrefix) ||
+		strings.HasPrefix(action, actionForcePrimaryPrefix)
 }
 
 // ParseCommand parses the operator token vector that follows
@@ -155,6 +169,18 @@ func ParseCommand(args []string) (Op, error) {
 		return Op{}, errors.New(CommandUsage)
 	}
 	switch args[0] {
+	case "force-primary":
+		// Exactly: force-primary redundancy-group <rg> override unkeyed-recovery
+		if len(args) != 5 || args[1] != "redundancy-group" ||
+			args[3] != "override" || args[4] != "unkeyed-recovery" {
+			return Op{}, errors.New(CommandUsage)
+		}
+		rg, err := parseRG(args[2])
+		if err != nil {
+			return Op{}, err
+		}
+		return Op{Kind: KindForcePrimary, RG: rg}, nil
+
 	case "reset":
 		// Exactly: reset redundancy-group <rg>
 		if len(args) != 3 || args[1] != "redundancy-group" {
@@ -214,6 +240,13 @@ func ParseCommand(args []string) (Op, error) {
 // a duplicate/trailing segment ("cluster-failover:1:node0:node1"), a signed or
 // non-numeric RG/node, and any action outside the family.
 func ParseAction(action string) (Op, error) {
+	if rest, ok := strings.CutPrefix(action, actionForcePrimaryPrefix); ok {
+		rg, err := parseRG(rest)
+		if err != nil {
+			return Op{}, err
+		}
+		return Op{Kind: KindForcePrimary, RG: rg}, nil
+	}
 	if rest, ok := strings.CutPrefix(action, actionResetPrefix); ok {
 		rg, err := parseRG(rest)
 		if err != nil {

@@ -918,6 +918,9 @@ type heartbeatReceiver struct {
 	// memory and re-open the #5086 replay. newHeartbeatReceiver always sets
 	// it; it is never nil.
 	auth *heartbeatAuthState
+	// testBeforeProofPublish pauses the authenticated #16016 proof path
+	// after peer RG state is installed but before peerProofGen advances.
+	testBeforeProofPublish func()
 }
 
 // peerAuthenticated reports whether the peer has proved it holds the shared
@@ -1341,6 +1344,15 @@ func (r *heartbeatReceiver) admitFrame(frame []byte, pkt *HeartbeatPacket) bool 
 	// epoch as garbage, drop it below the floor, and reject the frame the gate
 	// just accepted — reintroducing the outage inside the fix for it.
 	keys := r.mgr.controlLinkAcceptedKeys()
+	if len(keys) == 0 && r.mgr.UnkeyedAuthorityExpired() {
+		r.recvErrors.Add(1)
+		if emit, suppressed := r.auth.rejectWarn.admit(); emit {
+			slog.Warn("cluster: heartbeat authority rejected",
+				"reason", unkeyedAuthorityExpiredReason, "peer_node", pkt.NodeID,
+				"suppressed_since_last", suppressed)
+		}
+		return false
+	}
 	session, counter, present := heartbeatAuthTrailer(frame)
 	var verifiedKey []byte
 	if present {
@@ -1431,6 +1443,12 @@ func (r *heartbeatReceiver) admitFrame(frame []byte, pkt *HeartbeatPacket) bool 
 	// archived frame cannot steer it (#7487's admitted-path rule).
 	r.mgr.notePeerWallClock(pkt.WallClockUnixNano, time.Now())
 	r.mgr.handlePeerHeartbeat(pkt)
+	if len(keys) > 0 {
+		if r.testBeforeProofPublish != nil {
+			r.testBeforeProofPublish()
+		}
+		r.mgr.publishFreshHeartbeatProof()
+	}
 	return true
 }
 

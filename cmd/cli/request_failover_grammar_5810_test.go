@@ -1,8 +1,9 @@
 // #5810: the remote CLI shares ONE strict cluster-failover grammar with the
 // in-process CLI and the gRPC handler (pkg/clusterfailover). Every malformed
-// command form must be rejected BEFORE the privileged SystemAction RPC; every
-// accepted form must emit the exact wire action string. These tables are the
-// SAME grammarvectors tables the in-process CLI and gRPC tests use, so the
+// command form must be rejected BEFORE the privileged SystemAction RPC; normal
+// accepted forms emit their exact wire action, while local-only force-primary
+// is refused before any SystemAction call. These tables are the SAME
+// grammarvectors tables the in-process CLI and gRPC tests use, so the grammar
 // accept/reject verdicts cannot drift apart.
 //
 // RED on revert: restoring the old per-form ad-hoc parsing (e.g. the
@@ -15,6 +16,7 @@ package main
 import (
 	"testing"
 
+	"github.com/psaab/xpf/pkg/clusterfailover"
 	"github.com/psaab/xpf/pkg/clusterfailover/grammarvectors"
 )
 
@@ -37,6 +39,9 @@ func TestRequestFailoverGrammarRejects_5810(t *testing.T) {
 
 func TestRequestFailoverGrammarAccepts_5810(t *testing.T) {
 	for _, tc := range grammarvectors.CommandAccepts {
+		if tc.Op.Kind == clusterfailover.KindForcePrimary {
+			continue
+		}
 		t.Run(tc.Name, func(t *testing.T) {
 			fake := &failoverRecorder{}
 			c := &ctl{client: fake}
@@ -48,5 +53,20 @@ func TestRequestFailoverGrammarAccepts_5810(t *testing.T) {
 					tc.Args, fake.calls, fake.actions, tc.Action)
 			}
 		})
+	}
+}
+
+func TestRequestFailoverForcePrimaryRefusedRemotely16016(t *testing.T) {
+	fake := &failoverRecorder{}
+	c := &ctl{client: fake}
+	err := c.handleRequestChassisClusterFailover([]string{
+		"force-primary", "redundancy-group", "4", "override", "unkeyed-recovery",
+	})
+	const refusal = "force-primary is a local recovery action; run it on the node itself"
+	if err == nil || err.Error() != refusal {
+		t.Fatalf("handleRequestChassisClusterFailover(force-primary) error = %v, want %q", err, refusal)
+	}
+	if fake.calls != 0 {
+		t.Fatalf("local-only force-primary issued SystemAction %d times (%v)", fake.calls, fake.actions)
 	}
 }

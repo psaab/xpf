@@ -557,7 +557,7 @@ func (s *SessionSync) sendFenceAck(conn net.Conn, seq uint64, res FenceResult) {
 	}
 	payload := encodeFenceAckPayload(seq, res)
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgFenceAck, payload)
+	err := s.writeFrameLocked(conn, syncMsgFenceAck, payload, nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		s.stats.Errors.Add(1)
@@ -744,7 +744,7 @@ func (s *SessionSync) SendFenceAwait(timeout time.Duration) (FenceAck, error) {
 	var payload [8]byte
 	binary.LittleEndian.PutUint64(payload[:], seq)
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgFence, payload[:])
+	err := s.writeFrameLocked(conn, syncMsgFence, payload[:], nil)
 	s.writeMu.Unlock()
 	if err != nil {
 		unregister()

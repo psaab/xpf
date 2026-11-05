@@ -42,6 +42,8 @@ func (d *Daemon) constructClusterManager(cfg *config.Config) bool {
 	// local reference alarm's RT_SYSTEM CLOCK_SKEW_ALARM_* shape. Wired at
 	// construction, before any heartbeat can be admitted.
 	d.cluster.SetPeerClockAlarmHook(d.peerClockAlarmSyslog)
+	d.cluster.SetUnkeyedGraceAlarmHook(d.unkeyedAuthorityGraceAlarmSyslog)
+	d.cluster.SetUnkeyedRecoveryAuditHook(d.unkeyedAuthorityRecoveryAuditSyslog)
 	// #18719: frames from a non-peer source MAC on the fabric parent are
 	// rendered in `show chassis cluster status`. The watcher itself is fed by
 	// the userspace manager's SyncFabricState.

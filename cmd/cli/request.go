@@ -202,15 +202,18 @@ func (c *ctl) handleRequestChassis(args []string) error {
 
 func (c *ctl) handleRequestChassisClusterFailover(args []string) error {
 	// One strict grammar, shared with the in-process CLI and the gRPC handler
-	// (pkg/clusterfailover). Reject a malformed selector, a missing/extra
-	// operand, or an out-of-range node BEFORE issuing the privileged
-	// SystemAction RPC — the old per-form ad-hoc parsing silently degraded a
-	// misspelled/truncated `node` selector into an untargeted RG failover
-	// (#5810, #4883-C).
+	// (pkg/clusterfailover). Reject malformed forms before the privileged RPC,
+	// and refuse local-only force-primary after parse but before SystemAction —
+	// the old per-form ad-hoc parsing silently degraded misspelled or truncated
+	// `node` selectors into an untargeted RG failover (#5810, #4883-C).
 	op, err := clusterfailover.ParseCommand(args)
 	if err != nil {
 		return err
 	}
+	if op.Kind == clusterfailover.KindForcePrimary {
+		return fmt.Errorf("force-primary is a local recovery action; run it on the node itself")
+	}
+
 	resp, err := c.client.SystemAction(c.ctx(), &pb.SystemActionRequest{
 		Action: op.Action(),
 	})
