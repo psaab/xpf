@@ -1,8 +1,14 @@
 package userspace
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -95,5 +101,143 @@ func TestImportResolvesFoldV6_7095(t *testing.T) {
 	if req.IngressIfindex != 7 || req.IngressVLANID != 80 {
 		t.Fatalf("v6 import resolved to {ifindex:%d vlan:%d}, want {7 80}",
 			req.IngressIfindex, req.IngressVLANID)
+	}
+}
+
+// #18927 child 2's request-builder consumer shares the retained fixture with
+// the cluster sender/receive consumer. The packages keep those private paths
+// separate (cluster depends on userspace, not vice versa); the fixture is their
+// stable byte-level bridge.
+func TestSessionSyncScopeCohortRequestBuilder18927(t *testing.T) {
+	reth080 := config.StableIfaceID("reth0.80")
+	unknownIngress := config.StableIfaceID("reth1.80")
+	unknownScope := config.StableIfaceID("unresolved-scope0.80")
+	if reth080 == 0 || unknownIngress == 0 || unknownScope == 0 ||
+		reth080 == unknownIngress || reth080 == unknownScope || unknownIngress == unknownScope {
+		t.Fatal("controlled cohort interface folds are zero or collided")
+	}
+	rows := []struct {
+		name        string
+		ingressFold uint32
+		scopeFold   uint32
+		fabric      bool
+	}{
+		{"scope_present_identity_bearing", reth080, reth080, false},
+		{"scopeless_identity_bearing_zero_scope_fold", reth080, 0, false},
+		{"scopeless_identity_bearing_unknown_scope_fold", reth080, unknownScope, false},
+		{"scopeless_identity_bearing_legacy_tail", reth080, 0, false},
+		{"scopeless_unresolved_ingress_fold", unknownIngress, 0, false},
+		{"scopeless_no_ingress_fold", 0, 0, false},
+		{"scopeless_fabric_ingress", 0, 0, true},
+		{"scope_present_unresolved_ingress_fold", unknownIngress, reth080, false},
+		{"scope_present_no_ingress_fold", 0, reth080, false},
+	}
+
+	raw, err := os.ReadFile("testdata/session_sync_scope_cohort_18927.jsonl")
+	if err != nil {
+		t.Fatalf("read cohort fixture: %v", err)
+	}
+	var fixtureLines [][]byte
+	sc := bufio.NewScanner(bytes.NewReader(raw))
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		fixtureLines = append(fixtureLines, append([]byte(nil), line...))
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("scan cohort fixture: %v", err)
+	}
+	if len(rows) != 9 || len(fixtureLines) != len(rows) {
+		t.Fatalf("cohort cases=%d, fixture records=%d; want exactly 9 aligned records", len(rows), len(fixtureLines))
+	}
+
+	m := &Manager{
+		bpfShim: dataplane.New(),
+		lastSnapshot: &ConfigSnapshot{Interfaces: []InterfaceSnapshot{
+			{Name: "reth0.80", Ifindex: 22, ParentIfindex: 20, VLANID: 80, RedundancyGroup: 1},
+		}},
+	}
+	m.SetIngressFoldResolver(func(fold uint32) (uint32, uint16, bool) {
+		if fold == reth080 {
+			return 20, 80, true
+		}
+		return 0, 0, false
+	})
+
+	identityBearing, scopePresent := 0, 0
+	var classCounts [2][2]int // [identity-less, identity-bearing][scope-less, scope-present]
+	for i, row := range rows {
+		key := dataplane.SessionKey{
+			SrcIP: [4]byte{10, 0, 0, byte(i + 1)}, DstIP: [4]byte{172, 16, 0, 1},
+			SrcPort: hostToNetwork16(12345), DstPort: hostToNetwork16(80), Protocol: 6,
+		}
+		val := &dataplane.SessionValue{
+			State: dataplane.SessStateEstablished,
+			Flags: dataplane.SessFlagSNAT | dataplane.WithSourceNatProvenance(0, dataplane.SourceNatProvenanceDynamic),
+			NATSrcIP: natU32("10.0.0.100"), NATSrcPort: hostToNetwork16(40000),
+			IngressZone: 1, EgressZone: 2,
+			IngressIfaceFold: row.ingressFold, NatScopeFold: row.scopeFold,
+			EgressIfaceFold: reth080, TCPHandshakeState: dataplane.TCPHandshakeStateEstablished,
+			Generation: uint64(i + 3),
+		}
+		if row.fabric {
+			val.LogFlags = dataplane.LogFlagUserspaceFabricIngress
+		}
+		req := m.buildSessionSyncRequestV4("upsert", key, val)
+		encoded, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("row %d (%s): marshal request: %v", i, row.name, err)
+		}
+		if !bytes.Equal(encoded, fixtureLines[i]) {
+			t.Fatalf("row %d (%s): request JSON differs from fixture:\n got: %s\nwant: %s",
+				i, row.name, encoded, fixtureLines[i])
+		}
+
+		identity := req.IngressIfindex != 0
+		scope := req.NatScopeIfindex != 0
+		identityClass, scopeClass := 0, 0
+		if identity {
+			identityClass = 1
+		}
+		if scope {
+			scopeClass = 1
+		}
+		classCounts[identityClass][scopeClass]++
+		if identity {
+			identityBearing++
+			if req.IngressIfindex != 20 || req.IngressVLANID != 80 {
+				t.Fatalf("row %s: ingress identity=(%d,%d), want receiver-local (20,80)",
+					row.name, req.IngressIfindex, req.IngressVLANID)
+			}
+		}
+		if scope {
+			scopePresent++
+			if req.NatScopeIfindex != 22 {
+				t.Fatalf("row %s: NAT scope ifindex=%d, want logical unit 22", row.name, req.NatScopeIfindex)
+			}
+		}
+		if identity != (row.ingressFold == reth080) {
+			t.Fatalf("row %s: identity-bearing=%t, ingress fold=%#x", row.name, identity, row.ingressFold)
+		}
+		if scope != (row.scopeFold == reth080) {
+			t.Fatalf("row %s: scope-present=%t, scope fold=%#x", row.name, scope, row.scopeFold)
+		}
+		if req.FabricIngress != row.fabric {
+			t.Fatalf("row %s: fabric_ingress=%t, want %t", row.name, req.FabricIngress, row.fabric)
+		}
+		if strings.HasPrefix(row.name, "scopeless") && scope {
+			t.Fatalf("row %s is plan-defined scope-less but emitted nat_scope_ifindex=%d", row.name, req.NatScopeIfindex)
+		}
+		if strings.HasPrefix(row.name, "scope_present") && !scope {
+			t.Fatalf("row %s is plan-defined scope-present but emitted no NAT scope", row.name)
+		}
+	}
+	wantClassCounts := [2][2]int{{3, 2}, {3, 1}}
+	if identityBearing != 4 || scopePresent != 3 || classCounts != wantClassCounts {
+		t.Fatalf("cohort identity-bearing=%d scope-present=%d class-counts=%v, want 4/3 and %v",
+			identityBearing, scopePresent, classCounts, wantClassCounts)
 	}
 }

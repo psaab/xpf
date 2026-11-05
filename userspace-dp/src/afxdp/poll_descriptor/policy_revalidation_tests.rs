@@ -2310,7 +2310,7 @@ fn snat_vlan_trunk_case_12861(
 fn source_nat_revalidation_resolves_vlan_logical_ingress_12861() {
     let (forwarding, decision, metadata, key) =
         snat_vlan_trunk_case_12861(snat_vlan_trunk_forwarding_12861(), 11, 50, false);
-    let (valid, static_nat) = source_nat_translation_still_valid(
+    let (valid, static_nat, _) = source_nat_translation_still_valid(
         &forwarding,
         &decision,
         &metadata,
@@ -2386,7 +2386,7 @@ fn source_nat_revalidation_untagged_trunk_stays_valid_12861() {
     forwarding.ingress_logical_ifindex.insert((11, 0), 13);
     let (forwarding, decision, metadata, key) =
         snat_vlan_trunk_case_12861(forwarding, 11, 0, false);
-    let (valid, _) = source_nat_translation_still_valid(
+    let (valid, _, _) = source_nat_translation_still_valid(
         &forwarding,
         &decision,
         &metadata,
@@ -2408,7 +2408,7 @@ fn source_nat_revalidation_physical_lan_stays_valid_12861() {
     forwarding.ifindex_to_zone_id.insert(11, 1);
     let (forwarding, decision, metadata, key) =
         snat_vlan_trunk_case_12861(forwarding, 11, 0, false);
-    let (valid, _) = source_nat_translation_still_valid(
+    let (valid, _, _) = source_nat_translation_still_valid(
         &forwarding,
         &decision,
         &metadata,
@@ -2430,7 +2430,7 @@ fn source_nat_revalidation_physical_lan_stays_valid_12861() {
 fn source_nat_revalidation_fabric_keeps_recorded_zones_12861() {
     let (forwarding, decision, metadata, key) =
         snat_vlan_trunk_case_12861(snat_vlan_trunk_forwarding_12861(), 0, 0, true);
-    let (valid, _) = source_nat_translation_still_valid(
+    let (valid, _, _) = source_nat_translation_still_valid(
         &forwarding,
         &decision,
         &metadata,
@@ -2456,7 +2456,7 @@ fn source_nat_revalidation_other_vlan_zone_still_revoked_12861() {
     forwarding.ifindex_to_zone_id.insert(14, 3);
     let (forwarding, decision, metadata, key) =
         snat_vlan_trunk_case_12861(forwarding, 11, 60, false);
-    let (valid, _) = source_nat_translation_still_valid(
+    let (valid, _, _) = source_nat_translation_still_valid(
         &forwarding,
         &decision,
         &metadata,
@@ -4934,7 +4934,7 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
         nptv6: true,
         ..NatDecision::default()
     });
-    let (valid, _) = source_nat_translation_still_valid(
+    let (valid, _, _) = source_nat_translation_still_valid(
         &configured,
         &out_decision,
         &metadata,
@@ -4948,7 +4948,7 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
         valid,
         "NPTv6 outbound session must validate while its prefix rule exists"
     );
-    let (valid, _) = source_nat_translation_still_valid(
+    let (valid, _, _) = source_nat_translation_still_valid(
         &withdrawn,
         &out_decision,
         &metadata,
@@ -5241,7 +5241,7 @@ fn revalidation_leaves_nat_rule_counters_unchanged_14315() {
         ..NatDecision::default()
     });
     let snat_metadata = meta_14315(1, 2);
-    let (valid, _) = source_nat_translation_still_valid(
+    let (valid, _, _) = source_nat_translation_still_valid(
         &forwarding,
         &snat_decision,
         &snat_metadata,
@@ -5803,6 +5803,792 @@ fn local_scoped_snat_survives_unchanged_15176() {
         scoped_snat_hit_15176(&scoped_snat_forwarding_15176(), decision, &metadata, &key).is_none(),
         "local scoped SNAT must survive the unchanged rule"
     );
+}
+// ---------------------------------------------------------------------------
+// #18927 child 2: an identity-less scope-less dynamic SNAT row whose live
+// dynamic source-NAT rule list is EMPTY cannot be authorized by any scope:
+// zero live dynamic rules match no ingress/RI/logical-unit reading. The
+// row must continue through owner/FIB/zone/static/destination judgment and
+// revoke StaleSourceNat instead of taking the unconditional #15176 decline.
+// ---------------------------------------------------------------------------
+
+/// #18927 RED-first mandate cell: identity-less scope-less imported SNAT
+/// with explicit dynamic provenance and an EMPTY live dynamic rule list,
+/// judged by a nonterminal owner resolution, must revoke.
+#[test]
+fn identityless_scopeless_snat_empty_live_rules_revokes_18927() {
+    let (decision, metadata, key) = scoped_snat_case_15176(false, None);
+    let mut no_rules = scoped_snat_forwarding_15176();
+    no_rules.source_nat_rules = crate::nat::parse_source_nat_rules(&[]);
+    let revocation = scoped_snat_hit_15176(&no_rules, decision, &metadata, &key)
+        .expect("empty dynamic rule list must revoke the identity-less scope-less SNAT row");
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+fn no_live_dynamic_snat_18927() -> ForwardingState {
+    let mut forwarding = scoped_snat_forwarding_15176();
+    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[]);
+    forwarding
+}
+
+fn install_unjudged_reverse_pair_18927(
+    case: &(
+        SessionKey,
+        SessionKey,
+        SessionDecision,
+        SessionMetadata,
+        SessionDecision,
+        SessionMetadata,
+        SessionOrigin,
+        Option<bool>,
+    ),
+) -> SessionTable {
+    let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
+    let mut synced = crate::server::helpers::build_synced_session_entry(
+        &imported_snat_request(1, true),
+        &zones,
+        0,
+    )
+    .expect("dynamic SNAT session imports from HA wire");
+    synced.decision = case.2;
+    synced.metadata = case.3.clone();
+    synced.source_nat_static = case.7;
+
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.upsert_synced_with_origin(synced.into_session_install(1), false));
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    sessions.set_source_nat_static(&case.0, case.7);
+    sessions.set_source_nat_static(&case.1, case.7);
+    sessions.account_packet(&case.0, 100, 0x10, 0);
+    sessions.account_packet(&case.1, 100, 0x10, 0);
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    assert_eq!(
+        sessions.source_nat_revalidated_config_generation(&case.0),
+        None,
+        "peer-imported forward row must remain unjudged"
+    );
+    sessions
+}
+
+/// The reverse hit reaches the same forward-row validator as the forward
+/// twin, and the exact empty-live-rules reason overrides only the unjudged
+/// epoch keep for an established imported pair.
+#[test]
+fn identityless_scopeless_snat_empty_live_rules_reverse_revokes_18927() {
+    let mut case = reverse_snat_case_13652();
+    case.3.nat_scope_ifindex = None;
+    case.5.nat_scope_ifindex = None;
+    let no_rules = no_live_dynamic_snat_18927();
+    let mut sessions = install_unjudged_reverse_pair_18927(&case);
+
+    let revocation = reverse_snat_hit_13652(&no_rules, &mut sessions, &case)
+        .expect("empty live dynamic rules must revoke the established reverse-hit pair");
+    assert_eq!(revocation.canonical_key.as_ref(), Some(&case.0));
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+/// A tagged ingress with no current logical-unit mapping has no truthful
+/// scope. Empty rules still revoke through the invariant candidate, but a live
+/// list is never judged against the raw parent as a fallback.
+#[test]
+fn positive_tagged_ingress_missing_logical_map_empty_rules_revokes_18927() {
+    let (decision, mut metadata, key) = scoped_snat_case_15176(false, None);
+    metadata.ingress_ifindex = 11;
+    metadata.ingress_vlan_id = 50;
+    metadata.fabric_ingress = false;
+    let mut forwarding = no_live_dynamic_snat_18927();
+    // The parent has a usable zone, but deliberately no (11, 50) logical unit.
+    forwarding.ifindex_to_zone_id.insert(11, 1);
+    forwarding.ifindex_unambiguous_zone_id.insert(12, 2);
+    let revocation = scoped_snat_hit_15176(&forwarding, decision, &metadata, &key)
+        .expect("empty rules must revoke despite the unmapped tagged ingress identity");
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+
+    // Reverse twin: the forward companion has the same unmapped tagged
+    // identity, and the reverse import has no judged epoch or forward VLAN.
+    let mut case = reverse_snat_case_13652();
+    case.3.nat_scope_ifindex = None;
+    case.3.ingress_ifindex = 11;
+    case.3.ingress_vlan_id = 50;
+    case.3.fabric_ingress = false;
+    case.5.nat_scope_ifindex = None;
+    let mut sessions = install_unjudged_reverse_pair_18927(&case);
+    let revocation = reverse_snat_hit_13652(&forwarding, &mut sessions, &case)
+        .expect("empty rules must revoke the reverse hit for an unmapped tagged ingress");
+    assert_eq!(revocation.canonical_key.as_ref(), Some(&case.0));
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+#[test]
+fn positive_tagged_ingress_missing_logical_map_nonempty_rules_kept_18927() {
+    let (decision, mut metadata, key) = scoped_snat_case_15176(false, None);
+    metadata.ingress_ifindex = 11;
+    metadata.ingress_vlan_id = 50;
+    metadata.fabric_ingress = false;
+    let mut forwarding = scoped_snat_forwarding_15176();
+    // If the old raw-parent fallback were judged, this would resolve to lan
+    // and invalidate the interface/RI-scoped rule. The unmapped tag instead
+    // remains an ambiguous scope and is kept.
+    forwarding.ifindex_to_zone_id.insert(11, 1);
+    assert!(
+        scoped_snat_hit_15176(&forwarding, decision, &metadata, &key).is_none(),
+        "an unmapped tagged ingress must not be judged against its raw parent"
+    );
+
+    let mut case = reverse_snat_case_13652();
+    case.3.nat_scope_ifindex = None;
+    case.3.ingress_ifindex = 11;
+    case.3.ingress_vlan_id = 50;
+    case.3.fabric_ingress = false;
+    case.5.nat_scope_ifindex = None;
+    let mut sessions = install_unjudged_reverse_pair_18927(&case);
+    assert!(
+        reverse_snat_hit_13652(&forwarding, &mut sessions, &case).is_none(),
+        "a non-empty rule set must keep the reverse hit with unmapped tagged ingress"
+    );
+}
+
+#[test]
+fn composed_dnat_dynamic_snat_empty_rules_revokes_18927() {
+    let (mut decision, metadata, key) = scoped_snat_case_15176(false, None);
+    decision.nat.rewrite_dst = Some("10.0.0.10".parse().expect("DNAT destination"));
+    decision.nat.rewrite_dst_port = Some(8443);
+    let mut forwarding = no_live_dynamic_snat_18927();
+    let dnat = crate::protocol::DestinationNATRuleSnapshot {
+        name: "web-forward-18927".to_string(),
+        destination_address: "198.51.100.1".to_string(),
+        destination_port: 443,
+        protocol: "tcp".to_string(),
+        pool_address: "10.0.0.10".to_string(),
+        pool_port: 8443,
+        ..Default::default()
+    };
+    forwarding.dnat_table = crate::nat::DnatTable::from_snapshots(
+        &[dnat],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let revocation = scoped_snat_hit_15176(&forwarding, decision, &metadata, &key)
+        .expect("valid composed DNAT+SNAT with empty dynamic rules must revoke");
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+#[test]
+fn composed_dnat_invalid_destination_is_ordinary_empty_snat_invalidity_18927() {
+    let (mut decision, metadata, key) = scoped_snat_case_15176(false, None);
+    decision.nat.rewrite_dst = Some("10.0.0.10".parse().expect("DNAT destination"));
+    decision.nat.rewrite_dst_port = Some(8443);
+    let forwarding = no_live_dynamic_snat_18927();
+    let (valid, static_nat, reason) = source_nat_translation_still_valid(
+        &forwarding,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+        None,
+        false,
+    );
+    assert!(!valid, "the withdrawn destination rule must invalidate the row");
+    assert_eq!(static_nat, None);
+    assert_eq!(
+        reason, None,
+        "invalid destination is ordinary invalidity, not empty-live-rules evidence"
+    );
+
+    // Reverse imported companion: invalid destination stays on the ordinary
+    // path, so the unjudged-epoch keep still applies instead of being bypassed.
+    let mut case = reverse_snat_case_13652();
+    case.3.nat_scope_ifindex = None;
+    case.5.nat_scope_ifindex = None;
+    case.2.nat.rewrite_dst = decision.nat.rewrite_dst;
+    case.2.nat.rewrite_dst_port = decision.nat.rewrite_dst_port;
+    case.4 = SessionDecision {
+        nat: case.2.nat.reverse(
+            case.0.src_ip,
+            case.0.dst_ip,
+            case.0.src_port,
+            case.0.dst_port,
+        ),
+        ..case.2
+    };
+    let mut sessions = install_unjudged_reverse_pair_18927(&case);
+    assert!(
+        reverse_snat_hit_13652(&forwarding, &mut sessions, &case).is_none(),
+        "invalid destination must not bypass the unjudged reverse epoch keep"
+    );
+    assert_eq!(
+        sessions.source_nat_revalidated_config_generation(&case.0),
+        None
+    );
+}
+
+/// Terminal and non-owner forwarding dispositions remain ahead of the
+/// no-live-dynamic-rules reason; they do not authorize a local revoke.
+#[test]
+fn empty_dynamic_rules_keep_terminal_fabric_and_hainactive_declines_18927() {
+    let forwarding = no_live_dynamic_snat_18927();
+    for (name, disposition, egress_ifindex) in [
+        ("stored terminal", ForwardingDisposition::DiscardRoute, 0),
+        ("FabricRedirect", ForwardingDisposition::FabricRedirect, 4),
+        ("HAInactive", ForwardingDisposition::HAInactive, 12),
+    ] {
+        let (mut decision, metadata, key) = scoped_snat_case_15176(false, None);
+        decision.resolution.disposition = disposition;
+        decision.resolution.egress_ifindex = egress_ifindex;
+        assert!(
+            scoped_snat_hit_15176(&forwarding, decision, &metadata, &key).is_none(),
+            "{name} decline must remain ahead of empty-rule revocation"
+        );
+    }
+}
+
+#[test]
+fn empty_dynamic_rules_keep_non_owner_gateway_fallback_18927() {
+    use crate::afxdp::tests_split_rg_failback_18531::{
+        exported_forward, rg_taking_node_forwarding, split_ha, Family,
+    };
+
+    const WAN_GATEWAY_UNIT_IFINDEX: i32 = 13;
+    let now_ns = crate::afxdp::monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = split_ha(now_secs);
+    let mut forwarding = rg_taking_node_forwarding();
+    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[]);
+    let mut imported = exported_forward(&forwarding, Family::V4);
+    imported.metadata.nat_scope_ifindex = None;
+    imported.decision.resolution.egress_ifindex = WAN_GATEWAY_UNIT_IFINDEX;
+    let key = imported.key.clone();
+    let decision = imported.decision;
+    let metadata = imported.metadata.clone();
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        1_000_000,
+        key.protocol,
+        0x10,
+    ));
+    sessions.set_source_nat_static(&key, Some(false));
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    assert!(
+        source_nat_revocation_on_session_hit_with_ingress(
+            &forwarding,
+            &mut sessions,
+            &key,
+            &metadata,
+            metadata.ingress_ifindex,
+            metadata.ingress_vlan_id,
+            decision,
+            &flow,
+            SessionOrigin::SyncImport,
+            Some(false),
+            None,
+            now_ns,
+            None,
+            false,
+            Some((&ha_state, now_secs)),
+            None,
+        )
+        .is_none(),
+        "a non-owner split-FIB fallback must decline before no-live-rule revocation"
+    );
+    assert!(sessions.entry_with_origin(&key).is_some());
+}
+
+/// The special discriminant is emitted only after the normal owner/FIB/zone,
+/// provenance, static-precedence and destination checks. Every other invalid
+/// shape remains ordinary invalidity.
+#[test]
+fn empty_dynamic_rule_reason_requires_all_normal_checks_18927() {
+    let (decision, metadata, key) = scoped_snat_case_15176(false, None);
+    let no_rules = no_live_dynamic_snat_18927();
+    let (valid, _, reason) = source_nat_translation_still_valid(
+        &no_rules,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+        None,
+        false,
+    );
+    assert!(!valid);
+    assert_eq!(
+        reason,
+        Some(SourceNatInvalidReason::InvalidNoLiveDynamicRules)
+    );
+
+    let mut missing_egress = decision;
+    missing_egress.resolution.egress_ifindex = 999;
+    let (valid, _, reason) = source_nat_translation_still_valid(
+        &no_rules,
+        &missing_egress,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+        None,
+        false,
+    );
+    assert!(!valid);
+    assert_eq!(reason, None, "FIB egress miss is ordinary invalidity");
+
+    let mut missing_zone = no_live_dynamic_snat_18927();
+    missing_zone.zone_id_to_name.remove(&1);
+    let (valid, _, reason) = source_nat_translation_still_valid(
+        &missing_zone,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+        None,
+        false,
+    );
+    assert!(!valid);
+    assert_eq!(reason, None, "missing zone evidence is ordinary invalidity");
+
+    let (valid, _, reason) = source_nat_translation_still_valid(
+        &no_rules,
+        &decision,
+        &metadata,
+        &key,
+        None,
+        1_000_000_000,
+        None,
+        false,
+    );
+    assert!(!valid);
+    assert_eq!(reason, None, "unknown provenance is not proof of dynamic SNAT");
+
+    let mut static_conflict = no_live_dynamic_snat_18927();
+    static_conflict.static_nat = imported_snat_forwarding(true).static_nat;
+    let (valid, _, reason) = source_nat_translation_still_valid(
+        &static_conflict,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+        None,
+        false,
+    );
+    assert!(!valid);
+    assert_eq!(reason, None, "static SNAT precedence conflict is ordinary invalidity");
+
+    let nonempty_mismatch = scoped_snat_forwarding_15176();
+    let (valid, _, reason) = source_nat_translation_still_valid(
+        &nonempty_mismatch,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+        None,
+        false,
+    );
+    assert!(!valid);
+    assert_eq!(reason, None, "nonempty source-rule mismatch is ordinary invalidity");
+}
+
+#[test]
+fn ordinary_invalid_reverse_hit_keeps_unjudged_epoch_with_scope_evidence_18927() {
+
+    // A recorded NAT-scope stamp alone is not a reason to bypass the
+    // unjudged-epoch keep: an egress miss remains ordinary invalidity.
+    let mut recorded_scope_case = reverse_snat_case_13652();
+    let mut missing_egress = recorded_scope_case.2;
+    missing_egress.resolution.egress_ifindex = 999;
+    recorded_scope_case.2 = missing_egress;
+    let mut sessions = install_unjudged_reverse_pair_18927(&recorded_scope_case);
+    assert!(
+        reverse_snat_hit_13652(
+            &no_live_dynamic_snat_18927(),
+            &mut sessions,
+            &recorded_scope_case
+        )
+        .is_none(),
+        "recorded scope must not bypass the reverse unjudged-epoch keep"
+    );
+    assert_eq!(
+        sessions.source_nat_revalidated_config_generation(&recorded_scope_case.0),
+        None,
+        "ordinary invalidity must not stamp an epoch"
+    );
+
+    // A currently derivable logical ingress mapping is also only scope
+    // evidence. A non-empty mismatch remains ordinary invalidity and obeys
+    // the same reverse epoch keep.
+    let mut mapped_case = reverse_snat_case_13652();
+    mapped_case.3.nat_scope_ifindex = None;
+    mapped_case.3.ingress_ifindex = 11;
+    mapped_case.3.ingress_vlan_id = 50;
+    mapped_case.3.fabric_ingress = false;
+    mapped_case.5.nat_scope_ifindex = None;
+    mapped_case.5.fabric_ingress = false;
+    let mut mapped_forwarding = scoped_snat_forwarding_15176();
+    mapped_forwarding.ingress_logical_ifindex.insert((11, 50), 22);
+    mapped_forwarding.ifindex_to_zone_id.insert(22, 1);
+    mapped_forwarding
+        .ifindex_unambiguous_zone_id
+        .insert(12, 2);
+    mapped_forwarding
+        .ifindex_to_config_name
+        .insert(22, "other.0".to_string());
+    mapped_forwarding
+        .ifindex_to_routing_instance
+        .insert(22, "other".to_string());
+    let mut sessions = install_unjudged_reverse_pair_18927(&mapped_case);
+    assert!(
+        reverse_snat_hit_13652(&mapped_forwarding, &mut sessions, &mapped_case).is_none(),
+        "derivable logical scope must not bypass the reverse unjudged-epoch keep"
+    );
+    assert_eq!(
+        sessions.source_nat_revalidated_config_generation(&mapped_case.0),
+        None,
+        "ordinary nonempty mismatch must not stamp an epoch"
+    );
+}
+
+
+const SESSION_SYNC_SCOPE_COHORT_18927: &str =
+    include_str!("../../../../pkg/dataplane/userspace/testdata/session_sync_scope_cohort_18927.jsonl");
+
+fn session_sync_scope_forwarding_18927(
+    request: &crate::protocol::SessionSyncRequest,
+    empty_dynamic_rules: bool,
+) -> ForwardingState {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_id_to_name.insert(3, "dmz".to_string());
+    forwarding.ifindex_to_zone_id.insert(20, 3);
+    forwarding
+        .ifindex_to_config_name
+        .insert(20, "reth0".to_string());
+    forwarding
+        .ifindex_to_routing_instance
+        .insert(20, "default".to_string());
+    forwarding.ingress_logical_ifindex.insert((20, 80), 22);
+    forwarding.ifindex_to_zone_id.insert(22, 1);
+    forwarding
+        .ifindex_to_config_name
+        .insert(22, "reth0.80".to_string());
+    forwarding
+        .ifindex_to_routing_instance
+        .insert(22, "cust-a".to_string());
+    assert!(request.egress_ifindex > 0, "cohort row must name a real egress");
+    forwarding
+        .ifindex_unambiguous_zone_id
+        .insert(request.egress_ifindex, 2);
+    forwarding.egress.insert(
+        request.egress_ifindex,
+        EgressInterface {
+            bind_ifindex: request.egress_ifindex,
+            vlan_id: request.tx_vlan_id,
+            mtu: 1500,
+            src_mac: [0; 6],
+            zone_id: 2,
+            redundancy_group: 0,
+            primary_v4: Some("203.0.113.254".parse().expect("egress IPv4")),
+            primary_v6: None,
+        },
+    );
+    if !empty_dynamic_rules {
+        forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
+            crate::protocol::SourceNATRuleSnapshot {
+                name: "session-sync-scope-cohort-18927".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                from_interface: "reth0.80".to_string(),
+                from_routing_instance: "cust-a".to_string(),
+                source_addresses: vec![format!("{}/32", request.src_ip)],
+                pool_addresses: vec![format!("{}/32", request.nat_src_ip)],
+                port_low: request.nat_src_port,
+                port_high: request.nat_src_port,
+                ..Default::default()
+            },
+        ]);
+    }
+    forwarding
+}
+
+/// Each imported JSONL request is the exact Go-produced request record. The
+/// matrix varies only live dynamic-rule presence and hit direction; all
+/// metadata comes from `build_synced_session_entry`, never Rust literals.
+#[test]
+fn session_sync_scope_cohort_owner_hit_matrix_18927() {
+    let zones = rustc_hash::FxHashMap::from_iter([
+        ("lan".to_string(), 1),
+        ("wan".to_string(), 2),
+    ]);
+    let rows: Vec<_> = SESSION_SYNC_SCOPE_COHORT_18927
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(rows.len(), 9, "the retained Go cohort must have nine rows");
+
+    let mut scope_less_identity_bearing_rows = 0;
+    let mut scope_less_identityless_rows = 0;
+    let mut scope_present_rows = 0;
+    let mut scope_less_identity_bearing_cases = 0;
+    let mut identityless_matching_keeps = 0;
+    let mut identityless_empty_revokes = 0;
+    let mut scope_present_cases = 0;
+    let mut matching_rule_stamps = 0;
+    let mut empty_list_revokes = 0;
+    let mut total_cases = 0;
+    let mut scope_less_identity_bearing_total = 0;
+    let mut scope_less_identity_bearing_empty_revokes = 0;
+    let mut scope_present_total = 0;
+    let mut scope_present_empty_revokes = 0;
+
+    for (row_index, line) in rows.iter().enumerate() {
+        let request: crate::protocol::SessionSyncRequest =
+            serde_json::from_str(line).expect("Go cohort row must be a SessionSyncRequest");
+        assert_eq!(
+            request.source_nat_provenance, 1,
+            "row {} must carry explicit dynamic-SNAT provenance",
+            row_index + 1
+        );
+        let identity_bearing = request.ingress_ifindex > 0;
+        let scope_present = request.nat_scope_ifindex > 0;
+        match (identity_bearing, scope_present) {
+            (true, false) => {
+                scope_less_identity_bearing_rows += 1;
+                assert_eq!(
+                    (request.ingress_ifindex, request.ingress_vlan_id),
+                    (20, 80),
+                    "identity-bearing cohort rows must exercise the controlled RETH unit"
+                );
+            }
+            (false, false) => scope_less_identityless_rows += 1,
+            (_, true) => scope_present_rows += 1,
+        }
+
+        for empty_dynamic_rules in [false, true] {
+            for reverse_hit in [false, true] {
+                total_cases += 1;
+                if identity_bearing && !scope_present {
+                    scope_less_identity_bearing_total += 1;
+                }
+                if scope_present {
+                    scope_present_total += 1;
+                }
+                let synced = crate::server::helpers::build_synced_session_entry(
+                    &request,
+                    &zones,
+                    0,
+                )
+                .expect("retained cohort request must import through the production builder");
+                assert_eq!(synced.source_nat_static, Some(false));
+                let forwarding =
+                    session_sync_scope_forwarding_18927(&request, empty_dynamic_rules);
+                let forward_key = synced.key.clone();
+                let forward_decision = synced.decision;
+                let forward_metadata = synced.metadata.clone();
+                let forward_origin = synced.origin;
+                let source_nat_static = synced.source_nat_static;
+                let reverse_key =
+                    crate::session::reverse_session_key(&forward_key, forward_decision.nat);
+                let reverse_decision = SessionDecision {
+                    nat: forward_decision.nat.reverse(
+                        forward_key.src_ip,
+                        forward_key.dst_ip,
+                        forward_key.src_port,
+                        forward_key.dst_port,
+                    ),
+                    ..forward_decision
+                };
+                let mut reverse_metadata = forward_metadata.clone();
+                reverse_metadata.is_reverse = true;
+                reverse_metadata.ingress_zone = forward_metadata.egress_zone;
+                reverse_metadata.egress_zone = forward_metadata.ingress_zone;
+                let mut sessions = SessionTable::new();
+                sessions.set_forwarding_revalidation_gen(1, 1);
+                assert!(
+                    sessions.upsert_synced_with_origin(synced.into_session_install(1), false),
+                    "row {} forward entry installs",
+                    row_index + 1
+                );
+                assert!(sessions.install_with_protocol_with_origin(
+                    reverse_key.clone(),
+                    reverse_decision,
+                    reverse_metadata.clone(),
+                    SessionOrigin::ReverseFlow,
+                    1_000_000,
+                    reverse_key.protocol,
+                    0x10,
+                ));
+                sessions.set_source_nat_static(&reverse_key, source_nat_static);
+                sessions.account_packet(&forward_key, 100, 0x10, 0);
+                sessions.account_packet(&reverse_key, 100, 0x10, 0);
+                sessions.set_forwarding_revalidation_gen(2, 2);
+
+                let hit_key = if reverse_hit {
+                    &reverse_key
+                } else {
+                    &forward_key
+                };
+                let hit_metadata = if reverse_hit {
+                    &reverse_metadata
+                } else {
+                    &forward_metadata
+                };
+                let hit_decision = if reverse_hit {
+                    reverse_decision
+                } else {
+                    forward_decision
+                };
+                let hit_origin = if reverse_hit {
+                    SessionOrigin::ReverseFlow
+                } else {
+                    forward_origin
+                };
+                let flow = if reverse_hit {
+                    SessionFlow {
+                        src_ip: reverse_key.src_ip,
+                        dst_ip: reverse_key.dst_ip,
+                        forward_key: reverse_key.clone(),
+                    }
+                } else {
+                    SessionFlow {
+                        src_ip: forward_key.src_ip,
+                        dst_ip: forward_key.dst_ip,
+                        forward_key: forward_key.clone(),
+                    }
+                };
+                let revocation = source_nat_revocation_on_session_hit_with_ingress(
+                    &forwarding,
+                    &mut sessions,
+                    hit_key,
+                    hit_metadata,
+                    if reverse_hit {
+                        12
+                    } else {
+                        hit_metadata.ingress_ifindex
+                    },
+                    if reverse_hit {
+                        200
+                    } else {
+                        hit_metadata.ingress_vlan_id
+                    },
+                    hit_decision,
+                    &flow,
+                    hit_origin,
+                    source_nat_static,
+                    None,
+                    1_000_000_000,
+                    None,
+                    false,
+                    None,
+                    None,
+                );
+                let judged_epoch =
+                    sessions.source_nat_revalidated_config_generation(&forward_key);
+                if empty_dynamic_rules {
+                    if identity_bearing && !scope_present {
+                        scope_less_identity_bearing_empty_revokes += 1;
+                    }
+                    if scope_present {
+                        scope_present_empty_revokes += 1;
+                    }
+                    empty_list_revokes += 1;
+                    if !identity_bearing && !scope_present {
+                        identityless_empty_revokes += 1;
+                    }
+                    assert!(
+                        matches!(
+                            revocation.as_ref().map(|result| result.reason),
+                            Some(PolicyRevocationReason::StaleSourceNat)
+                        ),
+                        "row {} {} hit must revoke for the empty-list invariant",
+                        row_index + 1,
+                        if reverse_hit { "reverse" } else { "forward" }
+                    );
+                    assert_eq!(judged_epoch, None, "revocation must not stamp an epoch");
+                } else if !identity_bearing && !scope_present {
+                    identityless_matching_keeps += 1;
+                    assert!(
+                        revocation.is_none(),
+                        "scope-less identity-less row {} {} hit must keep with live rules",
+                        row_index + 1,
+                        if reverse_hit { "reverse" } else { "forward" }
+                    );
+                    assert_eq!(
+                        judged_epoch, None,
+                        "ambiguous #15176 keep must not stamp an epoch"
+                    );
+                } else {
+                    matching_rule_stamps += 1;
+                    if identity_bearing && !scope_present {
+                        scope_less_identity_bearing_cases += 1;
+                    }
+                    if scope_present {
+                        scope_present_cases += 1;
+                    }
+                    assert!(
+                        revocation.is_none(),
+                        "row {} {} hit must survive the matching live rule",
+                        row_index + 1,
+                        if reverse_hit { "reverse" } else { "forward" }
+                    );
+                    assert_eq!(
+                        judged_epoch,
+                        Some(2),
+                        "a valid owner judgment must stamp the current epoch"
+                    );
+                }
+            }
+        }
+    }
+
+    assert_eq!(scope_less_identity_bearing_rows, 3);
+    assert_eq!(scope_less_identityless_rows, 3);
+    assert_eq!(scope_present_rows, 3);
+    assert_eq!(scope_less_identity_bearing_cases, 6);
+    assert_eq!(identityless_matching_keeps, 6);
+    assert_eq!(identityless_empty_revokes, 6);
+    assert_eq!(scope_present_cases, 6);
+    assert_eq!(matching_rule_stamps, 12);
+    assert_eq!(empty_list_revokes, 18);
+    assert_eq!(total_cases, 36);
+    assert_eq!(scope_less_identity_bearing_total, 12);
+    assert_eq!(scope_less_identity_bearing_empty_revokes, 6);
+    assert_eq!(scope_present_total, 12);
+    assert_eq!(scope_present_empty_revokes, 6);
 }
 
 // #15178: an established deterministic NAT64 session whose tuple is outside
@@ -6556,7 +7342,7 @@ fn selector_less_reverse_still_revokes_nptv6_nat64_15934() {
     });
     let mut fwd_new = ForwardingState::default();
     fwd_new.nat64 = mk_nat64(1024);
-    let (valid_new, _) = source_nat_translation_still_valid(
+    let (valid_new, _, _) = source_nat_translation_still_valid(
         &fwd_new,
         &decision,
         &metadata,
@@ -6572,7 +7358,7 @@ fn selector_less_reverse_still_revokes_nptv6_nat64_15934() {
     );
     let mut fwd_old = ForwardingState::default();
     fwd_old.nat64 = mk_nat64(32);
-    let (valid_old, _) = source_nat_translation_still_valid(
+    let (valid_old, _, _) = source_nat_translation_still_valid(
         &fwd_old,
         &decision,
         &metadata,

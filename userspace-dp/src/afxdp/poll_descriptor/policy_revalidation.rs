@@ -702,6 +702,11 @@ fn nptv6_source_still_valid(
         && IpAddr::V6(candidate) == translated_src
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceNatInvalidReason {
+    InvalidNoLiveDynamicRules,
+}
+
 /// Check whether a stored forward source translation remains expressible by
 /// the same live NAT branch for its original tuple. This is read-only: it
 /// never allocates a replacement address, port, or interface-NAT identity.
@@ -718,7 +723,7 @@ fn source_nat_translation_still_valid(
     now_ns: u64,
     packet_icmp: Option<(u8, u8)>,
     ignore_icmp_selector: bool,
-) -> (bool, Option<bool>) {
+) -> (bool, Option<bool>, Option<SourceNatInvalidReason>) {
     let nat = decision.nat;
     let destination_valid = destination_nat_translation_still_valid(
         forwarding,
@@ -730,7 +735,7 @@ fn source_nat_translation_still_valid(
         ignore_icmp_selector,
     );
     let Some(translated_src) = nat.rewrite_src else {
-        return (destination_valid, None);
+        return (destination_valid, None, None);
     };
     if nat.nat64 {
         // #15178/#15932: NAT64 source translations are judged against
@@ -803,7 +808,7 @@ fn source_nat_translation_still_valid(
             }
             _ => true,
         };
-        return (valid && destination_valid, None);
+        return (valid && destination_valid, None, None);
     }
     if nat.nptv6 {
         // #14315: an NPTv6 source rewrite is re-derived from live state.
@@ -814,13 +819,13 @@ fn source_nat_translation_still_valid(
         let valid =
             nptv6_source_still_valid(forwarding, metadata, decision, forward_key, translated_src)
                 && destination_valid;
-        return (valid, None);
+        return (valid, None, None);
     }
 
     let ingress_ifindex = metadata.ingress_ifindex as i32;
     let egress_ifindex = decision.resolution.egress_ifindex;
     let Some(egress) = forwarding.egress.get(&egress_ifindex) else {
-        return (false, None);
+        return (false, None, None);
     };
     let (from_zone_id, to_zone_id) = if metadata.fabric_ingress || ingress_ifindex == 0 {
         (metadata.ingress_zone, metadata.egress_zone)
@@ -839,10 +844,10 @@ fn source_nat_translation_still_valid(
         )
     };
     let Some(from_zone) = forwarding.zone_id_to_name.get(&from_zone_id) else {
-        return (false, None);
+        return (false, None, None);
     };
     let Some(to_zone) = forwarding.zone_id_to_name.get(&to_zone_id) else {
-        return (false, None);
+        return (false, None, None);
     };
     let scope = crate::afxdp::forwarding::nat_scope_ctx_for_flow(
         forwarding,
@@ -860,7 +865,7 @@ fn source_nat_translation_still_valid(
     // accepting whichever new branch happens to match could launder a dynamic
     // allocation through a same-tuple static rule installed by this commit.
     if stored_static.is_none() {
-        return (false, None);
+        return (false, None, None);
     }
     // Static source NAT has independent provenance and precedence over
     // dynamic source NAT. Never let a newly installed static mapping validate
@@ -878,10 +883,21 @@ fn source_nat_translation_still_valid(
         let valid = stored_static != Some(false)
             && static_nat.rewrite_src == Some(translated_src)
             && static_nat.rewrite_src_port == nat.rewrite_src_port;
-        return (valid && destination_valid, valid.then_some(true));
+        return (valid && destination_valid, valid.then_some(true), None);
     }
     if stored_static == Some(true) {
-        return (false, None);
+        return (false, None, None);
+    }
+
+    if destination_valid
+        && stored_static == Some(false)
+        && forwarding.source_nat_rules.is_empty()
+    {
+        return (
+            false,
+            None,
+            Some(SourceNatInvalidReason::InvalidNoLiveDynamicRules),
+        );
     }
 
     let valid = crate::nat::source_nat_translation_matches(
@@ -900,7 +916,7 @@ fn source_nat_translation_still_valid(
         egress.primary_v4,
         egress.primary_v6,
     );
-    (valid && destination_valid, valid.then_some(false))
+    (valid && destination_valid, valid.then_some(false), None)
 }
 
 /// #18691: does the JUDGED forward line name an egress that only this node's
@@ -1436,7 +1452,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         &mut forward_metadata.ingress_zone,
                         &mut forward_metadata.egress_zone,
                     );
-                    let (valid, _) = source_nat_translation_still_valid(
+                    let (valid, _, _) = source_nat_translation_still_valid(
                         forwarding,
                         &forward_decision,
                         &forward_metadata,
@@ -1520,31 +1536,38 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         }
     };
 
-    // #15176: when the judged forward row carries a translation whose
-    // validity depends on an interface/RI scope but records no scope
-    // (fabric-ingress V1/unstamped, identity-less import, legacy peer),
-    // decline to revoke on scope grounds — keep the session rather than
-    // evaluate the empty scope `stamped_ingress_identity` left behind.
-    // Scope-independent translations (no rewrite, NAT64) and rows that DO
-    // record a scope are judged normally below, so a withdrawn/rescoped
-    // rule still revokes whenever a scope was actually recorded.
-    // #15948 (H32-04): NAT64 and NPTv6 are judged by their own
-    // prefix/geometry validators below, not by interface scope, so a
-    // rewrite alone must not classify them scope-dependent — but only
-    // for fabric rows, the population manufactured with no scope.
-    // Non-fabric identity-less rows (legacy peer / HA import) keep the
-    // pre-existing exemption: their NPTv6 type bit does not survive
-    // the HA wire, so they are indistinguishable from plain SNAT and
-    // the NAT64 validator's own legacy arm handles them.
+    // #15176/#18927: scope-less rows cannot be judged against a guessed
+    // interface/RI identity. Keep an explicit marker instead of returning
+    // immediately so the one invariant candidate (explicit dynamic-SNAT
+    // provenance + source rewrite + no special NAT type + no live dynamic
+    // source-NAT rules) can continue through the ordinary owner/FIB/zone,
+    // static-precedence and destination checks below. Empty rules are not a
+    // revoke predicate on their own.
     let scope_dependent = (!forward_decision.nat.nat64 && !forward_decision.nat.nptv6
         || !forward_metadata.fabric_ingress)
         && (forward_decision.nat.rewrite_src.is_some()
             || forward_decision.nat.rewrite_dst.is_some());
-    // Only rows whose ingress identity is structurally absent (fabric
-    // (0,0) stamp or identity-less import) get the keep; locally-authored
-    // rows have a derivable scope and are judged normally.
     let identity_absent = forward_metadata.fabric_ingress || forward_metadata.ingress_ifindex == 0;
-    if scope_dependent && identity_absent && forward_metadata.nat_scope_ifindex.is_none() {
+    // For a positive tagged ingress, a missing exact `(ifindex, VLAN)`
+    // mapping is also unavailable scope: do not let the validator's raw
+    // physical-parent fallback stand in for the unknown logical unit.
+    let tagged_ingress_unmapped = !identity_absent
+        && forward_metadata.ingress_vlan_id > 0
+        && crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+            forwarding,
+            forward_metadata.ingress_ifindex as i32,
+            forward_metadata.ingress_vlan_id,
+        )
+        .is_none();
+    let scope_unavailable = scope_dependent
+        && forward_metadata.nat_scope_ifindex.is_none()
+        && (identity_absent || tagged_ingress_unmapped);
+    let empty_dynamic_candidate = stored_static == Some(false)
+        && forward_decision.nat.rewrite_src.is_some()
+        && !forward_decision.nat.nat64
+        && !forward_decision.nat.nptv6
+        && forwarding.source_nat_rules.is_empty();
+    if scope_unavailable && !empty_dynamic_candidate {
         return None;
     }
     // #16109: a peer-synced row whose STORED resolution is terminal
@@ -1732,7 +1755,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         forward_decision.nat.source_nat_icmp,
         forward_decision.nat.rewrite_dst.is_some() || forward_decision.nat.rewrite_src.is_some(),
     );
-    let (valid, static_nat) = source_nat_translation_still_valid(
+    let (valid, static_nat, invalid_reason) = source_nat_translation_still_valid(
         forwarding,
         &forward_decision,
         &forward_metadata,
@@ -1770,7 +1793,8 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // carries no forward VLAN (`forward_ingress_vlan_id` None). A
     // reverse hit WITH recorded forward VLAN provenance, and every
     // forward hit, are judged normally and never take this decline.
-    if metadata.is_reverse
+    if invalid_reason != Some(SourceNatInvalidReason::InvalidNoLiveDynamicRules)
+        && metadata.is_reverse
         && forward_metadata.forward_ingress_vlan_id.is_none()
         && sessions.forward_established_with_traffic(&forward_key)
     {
@@ -1790,7 +1814,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         if live_epoch == 0 || judged_epoch.is_none_or(|judged| judged >= live_epoch) {
             return None;
         }
-    }
+        }
     Some(PolicyRevocation {
         canonical_key,
         decision: forward_decision,
