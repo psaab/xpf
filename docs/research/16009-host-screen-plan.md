@@ -421,12 +421,24 @@ and a no-op sink in `ipv6_ext_walk.rs`:
 ```rust
 pub trait ExtWalkObserver {
     /// true = continue; false = observer write failed (fail closed).
+    fn first_non_atomic_fragment(
+        &mut self,
+        fragment_word: u16,
+        data_offset: u16,
+    ) -> bool;
     fn second_non_atomic_fragment(&mut self) -> bool;
+    fn routing_header(&mut self, routing_type: u8) -> bool;
 }
 
 pub struct NoopExtWalkObserver;
 impl ExtWalkObserver for NoopExtWalkObserver {
+    fn first_non_atomic_fragment(&mut self, _: u16, _: u16) -> bool {
+        true
+    }
     fn second_non_atomic_fragment(&mut self) -> bool {
+        true
+    }
+    fn routing_header(&mut self, _: u8) -> bool {
         true
     }
 }
@@ -441,23 +453,35 @@ pub fn walk_ipv6_ext_headers<O: ExtWalkObserver>(
     observer: &mut O,
 ) -> Option<ExtWalk>;
 ```
-Make `walk_ipv6_ext_headers` generic over `O: ExtWalkObserver` and take
-`&mut O`; use static dispatch only (no closure allocation, function
-pointer, `std`, `aya`, or map reference in the core file). Keep a separate
-local `non_atomic_seen` from `fragment_seen` so atomic headers do not count.
-On transition to the second readable non-atomic Fragment header, call the
-observer exactly once **before** the non-first-fragment break. A false
-return makes the walker return `None`; `parse_ipv6` propagates `None`
-through the existing fail-closed parse path, so no terminal kernel-PASS
-arm runs.
+The walker remains core-only: generic static dispatch, no closure allocation,
+function pointer, `std`, `aya`, or map reference. It keeps a local
+`non_atomic_seen` distinct from `fragment_seen`.
 
-`parse_ipv6` owns a BPF-only `HostScreenWalkObserver` in `lib.rs`; on the
-callback it performs a checked `USERSPACE_SCREEN_SCRATCH.get_ptr_mut(0)`
-and ORs `multiple_ipv6_non_atomic`, returning false if the map lookup
-fails. Host callers pass `NoopExtWalkObserver`; the host witness uses a
-recording observer. Migrate `tests_shim_ext_parity.rs`,
-`tests_10661_atomic_chain.rs`, and `tests_shim_gre_inner_14954.rs` to the
-new argument. Do not add any `ExtWalk` field.
+- After validating a Fragment header and computing the checked absolute
+  `data_offset` immediately after its eight bytes, call
+  `first_non_atomic_fragment(fragment_word, data_offset)` on the first
+  non-atomic sighting. This carries the validated offset/M word and
+  fragment-data start to the parser without widening `ExtWalk`.
+- On a later non-atomic sighting, call
+  `second_non_atomic_fragment()` exactly once before the existing
+  non-first-fragment break. Atomic headers do not increment this count.
+- For a validated Routing header (`protocol == 43`), read `rh[2]` after
+  the full header bounds check and call `routing_header(rh[2])`; the
+  observer sets the source-route fact only for types 0/1 (RH2 is not a
+  source route).
+
+`parse_ipv6` owns the BPF-only `HostScreenWalkObserver` in `lib.rs`, seeded
+with `l3_offset` and the IPv6 Payload Length. Its callbacks checked-write
+`USERSPACE_SCREEN_SCRATCH[0]`: the first-fragment callback computes and
+packs validated geometry, the second sets `multiple_ipv6_non_atomic`, and
+the Routing callback sets `saw_source_route` for RH0/RH1. A missing map
+slot or invalid checked extent returns false; the walker returns `None`,
+`parse_ipv6` propagates the fail-closed parse path, and no terminal
+kernel-PASS arm runs. Host callers pass `NoopExtWalkObserver`; the C21
+host witness records the first and duplicate notifications. Migrate
+`tests_shim_ext_parity.rs`, `tests_10661_atomic_chain.rs`, and
+`tests_shim_gre_inner_14954.rs` to the new argument. Do not add any
+`ExtWalk` field.
 
 Wiring follows the `userspace_land_screen` precedent exactly:
 shim map decl (after `lib.rs:519`), `pkg/dataplane/userspace/maps.go`
@@ -515,14 +539,18 @@ all-ones sentinel when `get_ptr_mut` returned no writable slot.
   divergence is explicit, not a parity claim. Capture bounds still guard
   every actual byte read.
 - **IPv6** (`parse_ipv6`, `lib.rs:2388-2523`; `walk_ipv6_ext_headers`,
-  `ipv6_ext_walk.rs:273-368`): initialize packed scratch before the walk.
-  The core walker keeps a local non-atomic-sighting flag distinct from
-  `fragment_seen` (atomic headers do not count), and calls the
-  `ExtWalkObserver` from §5.2 exactly once on the second readable
-  non-atomic Fragment header, before the non-first break. The
-  `HostScreenWalkObserver` owned by `lib.rs` performs the checked
-  per-CPU-scratch write; on failure the callback returns false, the walker
-  returns `None`, and `parse_ipv6` fails closed. Do not widen `ExtWalk`.
+  `ipv6_ext_walk.rs:273-368`): initialize the packed scratch before the
+  walk. The first-non-atomic callback supplies the validated fragment
+  word and data offset; the observer derives
+  `frag_data_off = data_offset - (l3_offset + 40)` and
+  `frag_data_len = payload_len - frag_data_off` with checked arithmetic,
+  then packs `is_fragment`, `is_first_fragment`, M, fragment offset,
+  fragment data length, and POD extent exactly once for the first
+  non-atomic Fragment header. A second non-atomic header sets the
+  independent duplicate-error bit before the non-first break. A validated
+  Routing type callback sets `saw_source_route` only for RH0/RH1. All
+  scratch writes are checked; failure returns `None` through the existing
+  fail-closed parse path. Do not widen `ExtWalk`.
 - **No IPv6 tiny-flags finalization:** current `parse_ipv6` / `parse_l4`
   rejects declared-short or captured-short TCP headers before the host
   gate (`lib.rs:2467-2482`). It returns `None` before constructing
@@ -774,7 +802,7 @@ complete-object regen is a proof:
 |---|---:|---|
 | IPv4/IPv6 scratch init and pack | +2,000–6,000 | One checked per-CPU word write per parser; locals already validated |
 | IPv4 LSRR/SSRR + malformed-TLV scan | +3,000–10,000 | Bounded ≤40-byte walk over held header bytes; no new packet-pointer math |
-| IPv6 fragment/Routing sightings + second non-atomic bit | [INFERENCE] +2,000–8,000 | Includes the generic, statically dispatched observer and checked scratch-map lookup/store on the second non-atomic header; this range is not a measured callback cost. |
+| IPv6 fragment/Routing facts + duplicate bit | [INFERENCE] +2,000–8,000 | Includes first-non-atomic geometry, RH0/RH1 and duplicate callbacks, static dispatch, and checked scratch-map operations; this is not a measured callback cost. |
 | Independent post-L4 TCP trips, including `first_fragment_l4` path | +2,000–6,000 | Scalar comparisons/bit packs at parser convergence; no profile-state fork |
 | Outlined gate, zone/mask lookups, dispositions | +1,500–4,000 | One outlined body shared by 11 terminal pass arms |
 | Eleven gate call sites and drop returns | +1,100–3,300 | BPF-to-BPF calls; transit path does not call the gate |
@@ -782,12 +810,13 @@ complete-object regen is a proof:
 | **Projected total** | **+11,600–37,300** | **~790,800–816,600; at least ~33,400 below the 850,000 ceiling** |
 
 No standalone instruction count is asserted for the observer callback.
-Its static dispatch and the checked per-CPU map operation on the second
-non-atomic path are included in the complete-object processed-insn
-measurement; no unmeasured callback estimate substitutes for K1. The
-estimate excludes no in-scope parser correction and does not substitute
-for measurement. There is no v6 tiny-flags finalization cost: the shim
-rejects that shape before the host gate (§4.3/C18).
+Its static dispatch and checked per-CPU map operations for first-non-
+atomic geometry, duplicate detection, and RH0/RH1 sightings are included
+in the complete-object processed-insn measurement; no unmeasured callback
+estimate substitutes for K1. The estimate excludes no in-scope parser
+correction and does not substitute for measurement. There is no v6 tiny-
+flags finalization cost: the shim rejects that shape before the host gate
+(§4.3/C18).
 
 ### 7.2 Measurement protocol
 
@@ -795,11 +824,12 @@ rejects that shape before the host gate (§4.3/C18).
    `pkg/dataplane/userspace_xdp_gate_verdict.json` from the source base;
    do not overwrite it as the comparison before recording its hash.
 2. Implement all in-scope BPF changes first, including B1-B5: independent
-   TCP masks/trips, IPv4 malformed-options verdict, IPv6 duplicate
-   non-atomic sighting via the generic observer and checked scratch sink,
-   the declared-length capture distinction, the outlined gate, and all 11
-   terminal sites. Then run `make generate-userspace-xdp` on the
-   **complete object**. No partial pre-B1–B5 object is a K1 result.
+   TCP masks/trips, IPv4 malformed-options verdict, IPv6 first-fragment
+   geometry, Routing sightings and duplicate detection through the generic
+   observer/checked scratch sink, the declared-length capture distinction,
+   the outlined gate, and all 11 terminal sites. Then run
+   `make generate-userspace-xdp` on the **complete object**. No partial
+   pre-B1–B5 object is a K1 result.
 3. Record processed-insn count, headroom, `override_consumed` (must be
    false), and matching source/object hashes in
    `pkg/dataplane/userspace_xdp_gate_verdict.json` and
@@ -831,10 +861,11 @@ disposition, with C18/C19 and C22 explicitly marked as divergences below.
 - C20 tests malformed IPv4 TLV both before and after a valid LSRR, with
   source-route OFF; malformed extraction error dominates either order;
 - C21's exact pair is `[M=1, off=0][M=1, off=8]`, separate from C17.
-  In `tests_shim_ext_parity.rs`, a recording observer must see exactly one
-  callback before the second header's non-first break; atomic-then-
-  non-atomic sees none. A failing observer must make the walk return
-  `None`. The BPF C21 below proves the parser-to-scratch-to-gate path.
+  In `tests_shim_ext_parity.rs`, a recording observer must see the first
+  non-atomic fact and exactly one duplicate notification before the second
+  header's non-first break. Atomic-then-non-atomic has one first-fact
+  callback but no duplicate notification. A failing observer makes the
+  walk return `None`; the BPF C21 below proves the scratch-to-gate path.
 - C22's short capture with lying-long IPv4 total length, including the
   worker no-flag-only vs syn-frag-only oracle and shim's safe suppression;
   this is a disclosed divergence, never parity coverage.
@@ -895,7 +926,7 @@ on the raw action alone.
 | C18 | IPv6 tiny first fragment, M=1, declared TCP L4 8 bytes | Existing `L3 PARSE_FAIL`; no `host_screen_drop` | Explicitly no v6 tiny host-screen/parity claim; worker extractor behavior is only the host-twin control. |
 | C19 | IPv6 Fragment, wire Payload Length=0, captured TCP ACK bytes | Existing `L3 PARSE_FAIL`; no `host_screen_drop` | Worker treats zero as unbounded for its tiny check; this does not claim the BPF packet passes or parity. |
 | C20 | IPv4 options with valid LSRR then malformed `[0x44,0x01]` (also test malformed-before-LSRR); source-route OFF, `BadNumericUnresolved` row with alarm on | `TruncatedIpv4Header` equivalent: DROP + `host_screen_drop` | Malformed extraction error drops on row presence regardless of alarm and precedes any route sighting; absent row/unresolved zone has no special parse-error drop. |
-| C21 | IPv6 Fragment sequence `[M=1, off=0][M=1, off=8]`, `BadNumericUnresolved` row with alarm on, ordinary masks off | DROP + `host_screen_drop` from the duplicate-header bit | Separate from C17. Host recording observer sees one event before the second-header break; absent row with ordinary checks off has no special parse-error drop. |
+| C21 | IPv6 Fragment sequence `[M=1, off=0][M=1, off=8]`, `BadNumericUnresolved` row with alarm on, ordinary masks off | DROP + `host_screen_drop` from the duplicate-header bit | Separate from C17. Host recording observer sees the second non-atomic notification before the second-header break; absent row with ordinary checks off has no special parse-error drop. |
 | C22 | IPv4 IHL=5, MF=1/offset=0, `total_len=60`, capture ends at L4+8 (ports present, flags absent); run separate no-flag-only and syn-frag-only masks, other trips off; row at session-miss local | Shim passes both with no `host_screen_drop`; `tcp_flags_capture_unknown=1`, no ordinary trip, `tiny_declared_unknown=0` | Worker returns `Ok` with caller-stamped flags 0: no-flag-only drops `tcp-no-flag`, syn-frag-only passes. Shim safely suppresses both; disclosed divergence, never parity coverage. |
 | C23 | Four isolated TCP shapes for each of IPv4 and IPv6 across all 16 masks | For each family/shape, DROP iff its own bit is enabled; otherwise PASS; all 128 outcomes match worker oracle | No shared TCP-family bit. Shapes: SYN\|FIN\|ACK; flags 0; FIN without ACK; URG\|ACK to port 139. Separately pin selective known SYN-first-fragment behavior and whole-SYN / first-fragment-ACK / non-first-SYN / URG\|ACK to port 443 negative controls. |
 | C24 | WG handshake/cookie UDP type 1–3 to a steered destination port, exact-local or WG-owner-admitted listener, IPv4 LSRR, and no live session row | DROP at WG terminal pass; host counter +1 | Same shape with WG admission false and global transit destination redirects, no shim host-screen count. |
@@ -1161,8 +1192,9 @@ Questions for the three plan seats:
    TCP masks, common post-L4 placement, malformed IPv4 options before/
    after LSRR, duplicate readable non-atomic IPv6 headers and the exact
    `[M=1, off=0][M=1, off=8]` observer event before early break. Is the
-   map-free generic walker callback and checked BPF scratch sink sound,
-   including fail-closed lookup failure, with `ParsedPacket`/`ExtWalk`
+   map-free generic callbacks for first-fragment geometry, RH0/RH1 and
+   duplicate detection plus the checked BPF sink sound, including
+   fail-closed lookup failure, with `ParsedPacket`/`ExtWalk`
    diffs empty? Does C22 remain a disclosed divergence and never parity
    coverage despite the worker's no-flag-only caller-stamped-zero result?
    Are C18/C19 honestly earlier parse-fail controls?
