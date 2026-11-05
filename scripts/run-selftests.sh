@@ -512,6 +512,9 @@ run_bash test/incus/cluster-env-selftest.sh
 run_bash test/incus/cos-apply-lib-selftest.sh
 run_bash test/incus/host-inbound-selftest.sh
 run_bash test/incus/iperf-throughput-selftest.sh
+# #18977: verdict emission must follow a successful ledger write; the fixture
+# .deb supplies real staged executable hashes and the cell artifacts are local.
+run_bash test/incus/compare-gate-selftest.sh
 # docs/regression-test-matrix.md F2/F6: the perf-matrix stall verdict.
 run_bash test/incus/iperf-matrix.sh --selftest
 # #12199: RG1 movement must settle in both node views; real-output

@@ -41,6 +41,7 @@ test/incus/test-mouse-latency-matrix.sh      GATE: the full 12-cell #905 mouse-l
 test/incus/test-mouse-latency.sh             GATE: one #905 mouse-latency rep. Makefile:524 names it only in a COMMENT ("Run it after touching test-mouse-latency.sh"); the target beside that comment runs the hermetic selftest.
 test/incus/test-mouse-latency-same-class.sh  GATE: same-class 1 Gbps variant of the #905 rep — the control for the cross-class default.
 test/incus/reverse-key-collision-probe.sh    GATE: #1760 W2 live-fire NAT reverse-key collision watch.
+test/incus/compare-gate.sh                    GATE: #18977 campaign throughput comparator; requires a pinned PR deb and its baseline/PR/control artifact directories, so it is invoked only by the campaign driver rather than a general Makefile recipe.
 
 # ── COMPOSED — reached for free once the caller above gets a recipe ──
 test/incus/step1-capture.sh                  COMPOSED: #816 per-cell capture driver, invoked by step1-baseline-and-matrix.sh and step2-sched-switch-capture.sh.
