@@ -203,9 +203,15 @@ func TestPrePassFakeIsNoMorePermissiveThanProduction_4960(t *testing.T) {
 	//     interface is the source of truth for what "the call surface" can grow
 	//     into. This is what keeps the scans above from going stale silently.
 	iface := reflect.TypeOf((*DataPlane)(nil)).Elem()
-	if iface.NumMethod() < 100 {
-		t.Fatalf("DataPlane exposes %d methods — the reflection enumeration is not "+
-			"seeing the real interface", iface.NumMethod())
+	// #17229 (a60e77bda3) retired six dead DNAT methods from DataPlane:
+	// the real interface now has 97 methods, not the stale 100-method floor.
+	// Keep this literal census floor so deleting even one more interface
+	// method makes this reflection positive control fail instead of accepting
+	// a smaller interface as its own source of truth.
+	const dataPlaneMethodFloor = 97
+	if iface.NumMethod() < dataPlaneMethodFloor {
+		t.Fatalf("DataPlane exposes %d methods, below the post-#17229 floor of %d — the reflection enumeration is not seeing the real interface",
+			iface.NumMethod(), dataPlaneMethodFloor)
 	}
 	shimType := reflect.TypeOf(userspaceShimCompileDataplane{})
 	for i := 0; i < iface.NumMethod(); i++ {

@@ -1990,8 +1990,11 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		got = append(got, m)
 	}
 	// 10 pre-#1861 metrics + the #1861 install-refusal trio (= 13) + the #2315
-	// gre_decap_ecn_illegal_drops_total counter (= 15) + the #2317
-	// wg_decap_ecn_illegal_drops_total counter (= 16) + the #2331
+	// gre_decap_ecn_illegal_drops_total counter (= 14) + the #2317
+	// wg_decap_ecn_illegal_drops_total counter (= 16; the historical
+	// steps from here to the #5674 marker at 30 were accrued while the
+	// since-removed DNAT publish-error series was still counted, so
+	// they sit one above the post-#17229 chain) + the #2331
 	// gre_encap_df_oversize_drops_total counter (= 17) + the #2782
 	// gre_decap_checksum_invalid_drops_total counter (= 18) + the #2472
 	// per-reason generated-error rate-limit trio (time_exceeded /
@@ -2059,9 +2062,11 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// for 110. (The base census already drifted by +2 on origin/master:
 	// want 109, got 111 there.) #15249 adds the GRE transport-egress
 	// refusal counter, for 113. #16215 adds the SNAT-revoked-sessions
-	// counter, for 114. #16593 adds the frag-quota-refusals counter, for 115.
-	// #17218 adds the ipsec-inner no-route counter and #17123 adds
-	// reinject-handler panics. #18529 adds four relay counters: 120 total.
+	// counter, for 114, and #16593 adds the frag-quota refusal series,
+	// for 115. #17229 (a60e77bda3) removes the dead dnat_table
+	// publish-error series (-1), for 114. #17218 adds the ipsec-inner
+	// no-route counter and #17123 adds reinject-handler panics (+2), for 116.
+	// #18529 adds four relay counters: 120 total.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
