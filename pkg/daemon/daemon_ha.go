@@ -1345,7 +1345,11 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 			d.scheduleIPMonGating("vrrp-master")
 		}
 		if d.cluster != nil && d.cluster.IsLocalPrimary(rgID) && s.AllVRRPMaster() {
-			d.setLocalFailoverCommitReady(rgID, true)
+			// Readiness gates a peer failover commit, so it must not
+			// be raised when the connected-route republish or rg_active
+			// apply left the state machine retry armed (#18927).
+			ready := d.dataplane() == nil || !s.NeedsApply()
+			d.setLocalFailoverCommitReady(rgID, ready)
 		}
 	}
 	if ev.State == vrrp.StateBackup {
@@ -1700,10 +1704,16 @@ func (d *Daemon) reconcileRGState() {
 						slog.Warn("reconcile: connected-route republish failed; leaving activation retry armed",
 							"rg", rgID)
 					}
+					if d.cluster != nil && clusterPri && s.AllVRRPMaster() {
+						d.setLocalFailoverCommitReady(rgID, false)
+					}
 				} else if err := reconcileDP.HA().SetRGActive(context.Background(), rgID, true); err != nil {
 					if s.ShouldLogApplyError(err.Error()) {
 						slog.Warn("reconcile: failed to update rg_active",
 							"rg", rgID, "active", true, "err", err)
+					}
+					if d.cluster != nil && clusterPri && s.AllVRRPMaster() {
+						d.setLocalFailoverCommitReady(rgID, false)
 					}
 				} else if recordRGActiveAppliedIfCurrentOrStable(s, tr, true) {
 					// #6799: the record is CONDITIONAL. This arm used to call
@@ -1715,6 +1725,14 @@ func (d *Daemon) reconcileRGState() {
 					// FAILOVER COMMIT (waitLocalFailoverCommitReady), so it must
 					// never be raised off a convergence the machine refused.
 					if noRethVRRP && clusterPri && !s.NeedsApply() {
+						d.setLocalFailoverCommitReady(rgID, true)
+					}
+					// #18927: reconcile can complete a RETH-VRRP
+					// promotion whose MASTER event left apply retry
+					// armed after a connected-route republish failure.
+					// Restore peer-commit readiness only after the
+					// accepted active record and current MASTER posture.
+					if !noRethVRRP && clusterPri && s.AllVRRPMaster() && !s.NeedsApply() {
 						d.setLocalFailoverCommitReady(rgID, true)
 					}
 					// #15165: legacy-mode RG with no RETH VRRP instance
@@ -1729,6 +1747,9 @@ func (d *Daemon) reconcileRGState() {
 						"to record it (another writer re-armed the retry, or the desired state "+
 						"moved); leaving the retry armed so the next pass re-drives",
 						"rg", rgID, "active", true)
+					if d.cluster != nil && clusterPri && s.AllVRRPMaster() {
+						d.setLocalFailoverCommitReady(rgID, false)
+					}
 				}
 			} else {
 				// Deactivation ordering: blackholes FIRST, then

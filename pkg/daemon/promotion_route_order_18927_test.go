@@ -53,8 +53,9 @@ func (h *promotionOrderHA18927) SyncFabricState(context.Context) error          
 
 type promotionOrderDP18927 struct {
 	dataplane.RuntimeDataPlane
-	log       *promotionOrderLog18927
-	ha        *promotionOrderHA18927
+	mu         sync.RWMutex
+	log        *promotionOrderLog18927
+	ha         *promotionOrderHA18927
 	publishErr error
 	bumpErr    error
 }
@@ -63,13 +64,25 @@ func (d *promotionOrderDP18927) HA() dataplane.HAController { return d.ha }
 func (d *promotionOrderDP18927) Mode() dpuserspace.DataplaneMode {
 	return dpuserspace.ModeUserspaceStrict
 }
+func (d *promotionOrderDP18927) setErrors(publishErr, bumpErr error) {
+	d.mu.Lock()
+	d.publishErr = publishErr
+	d.bumpErr = bumpErr
+	d.mu.Unlock()
+}
 func (d *promotionOrderDP18927) PublishRouteOverlaySnapshotWithLatch(*config.Config, []config.RouteOverlayEntry, map[string]bool, bool) (bool, error) {
 	d.log.add("publish")
-	return true, d.publishErr
+	d.mu.RLock()
+	err := d.publishErr
+	d.mu.RUnlock()
+	return true, err
 }
 func (d *promotionOrderDP18927) BumpFIBGeneration() (uint32, error) {
 	d.log.add("bump")
-	return 1, d.bumpErr
+	d.mu.RLock()
+	err := d.bumpErr
+	d.mu.RUnlock()
+	return 1, err
 }
 
 func newPromotionOrderDaemon18927(t *testing.T) (*Daemon, *promotionOrderLog18927, *promotionOrderDP18927) {
@@ -190,8 +203,80 @@ func TestPromotionRepublishesConnectedRGBeforeRGActive18927(t *testing.T) {
 				if !d.getOrCreateRGState(1).NeedsApply() {
 					t.Fatalf("failed republish cleared retry debt on %s; events=%v", path, events)
 				}
+				if path == "vrrp-master" {
+					s := d.getOrCreateRGState(1)
+					if !d.cluster.IsLocalPrimary(1) || !s.AllVRRPMaster() {
+						t.Fatalf("readiness control is vacuous: local-primary=%v all-master=%v",
+							d.cluster.IsLocalPrimary(1), s.AllVRRPMaster())
+					}
+					if d.localFailoverCommitIsReady(1) {
+						t.Fatalf("VRRP MASTER raised peer-commit readiness despite failed republish: events=%v", events)
+					}
+				}
 			})
 		}
+	}
+}
+
+
+// A failed VRRP MASTER republish leaves peer-commit readiness low. The
+// reconcile retry must restore readiness only after it republishes and
+// records rg_active with the authoritative VRRP posture still MASTER.
+func TestPromotionRepublishRetryRestoresVRRPCommitReadiness18927(t *testing.T) {
+	store := testStoreWithSetConfig(t, []string{
+		"set system dataplane-type userspace",
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster node 0",
+		"set chassis cluster no-private-rg-election",
+		"set chassis cluster authentication-key test-cluster-psk-18927",
+		"set chassis cluster redundancy-group 0 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		"set interfaces reth1 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/0 gigether-options redundant-parent reth1",
+	})
+	cm := cluster.NewManager(0, 1)
+	cm.UpdateConfig(store.ActiveConfig().Chassis.Cluster)
+	if !cm.IsLocalPrimary(1) {
+		t.Fatal("fixture: RG1 must be local-primary")
+	}
+	vrrpMgr := vrrp.NewManager()
+	instances := vrrp.CollectRethInstances(store.ActiveConfig(), cm.LocalPriorities())
+	if len(instances) != 1 {
+		t.Fatalf("fixture: expected one RETH VRRP instance, got %d", len(instances))
+	}
+	vrrpMgr.SeedInstanceForTesting(*instances[0], vrrp.StateMaster)
+	log := &promotionOrderLog18927{changed: make(chan struct{}, 32)}
+	dp := &promotionOrderDP18927{log: log, ha: &promotionOrderHA18927{log: log},
+		publishErr: errors.New("connected-route publish failed")}
+	d := &Daemon{
+		store:                      store,
+		cluster:                    cm,
+		vrrpMgr:                    vrrpMgr,
+		rgStates:                   make(map[int]*rgStateMachine),
+		userspaceDemotionPrepUntil: make(map[int]time.Time),
+		localFailoverCommitReady:   make(map[int]bool),
+		rethServices:               make(map[int]rethServicesEdgeStatus),
+		proxyARPNudgeCh:            make(chan struct{}, 8),
+		applySem:                   semaphore.NewWeighted(1),
+	}
+	d.setDataplane(dp)
+
+	d.reconcileRGState()
+	s := d.getOrCreateRGState(1)
+	if !s.AllVRRPMaster() {
+		t.Fatal("fixture: reconcile did not preserve the authoritative MASTER posture")
+	}
+	if !s.NeedsApply() || d.localFailoverCommitIsReady(1) {
+		t.Fatalf("failed republish must leave activation retry armed and readiness false; needsApply=%v ready=%v",
+			s.NeedsApply(), d.localFailoverCommitIsReady(1))
+	}
+
+	dp.setErrors(nil, nil)
+	d.reconcileRGState()
+	if s.NeedsApply() || !d.localFailoverCommitIsReady(1) {
+		t.Fatalf("successful reconcile retry must converge rg_active and restore readiness; needsApply=%v ready=%v",
+			s.NeedsApply(), d.localFailoverCommitIsReady(1))
 	}
 }
 
