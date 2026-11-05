@@ -409,12 +409,15 @@ func TestPackedTailEnforce18771SecretAndRollbackSurfaces(t *testing.T) {
 			}
 		}
 
-		// Post-head value-token suppression: a mixed DROP commit whose
-		// findings include the `priority 100` site must refuse (via the
-		// dad-disable site) without echoing the value token `100`.
+		// Post-head value-token suppression on a genuine value-bearing
+		// DROP site: `virtual-address 10.0.1.1` is itself the adjudicated
+		// DROP (measured census pair address/vrrp-group/virtual-address),
+		// so the refusing finding carries the value token in its raw
+		// statement. The refusal and the logs must name only the
+		// site/pair/position — never the value token.
 		tailLogs := packedTailStoreLogs18771(t)
-		tail := packedTailStageText18771(t, -1, `interfaces { ge-0/0/0 { unit 0 { family inet { address 192.0.2.1/24 vrrp-group 1 priority 100; } } } }
-interfaces { ge-0/0/1 { unit 0 { family inet6 dad-disable; } } }`)
+		tailText := `interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.1.2/24 vrrp-group 1 virtual-address 10.0.1.1; } } } }`
+		tail := packedTailStageText18771(t, -1, tailText)
 		_, tgen, err := tail.CompileCandidateGen()
 		if err != nil {
 			t.Fatal(err)
@@ -424,8 +427,30 @@ interfaces { ge-0/0/1 { unit 0 { family inet6 dad-disable; } } }`)
 			t.Fatalf("tail fixture commit = %v, want packed-tail refusal", err)
 		}
 		for surface, content := range map[string]string{"error": err.Error(), "logs": tailLogs.String()} {
-			if strings.Contains(content, "priority 100") || strings.Contains(content, "dad-disable;") {
-				t.Errorf("%s leaked the post-head tail value: %s", surface, content)
+			for _, leaked := range []string{"10.0.1.1", "virtual-address 10.0.1.1", "vrrp-group 1 virtual-address", "dad-disable;"} {
+				if strings.Contains(content, leaked) {
+					t.Errorf("%s leaked the post-head tail value %q: %s", surface, leaked, content)
+				}
+			}
+		}
+		// Mixed shape, for the record: the vrrp `priority 100` site
+		// degrades to INDETERMINATE beside a `dad-disable` DROP (probed
+		// verdicts [INDETERMINATE, DROP]); the bare token `100` appears
+		// nowhere in the error or logs.
+		mixedLogs := packedTailStoreLogs18771(t)
+		mixed := packedTailStageText18771(t, -1, `interfaces { ge-0/0/0 { unit 0 { family inet { address 192.0.2.1/24 vrrp-group 1 priority 100; } } } }
+interfaces { ge-0/0/1 { unit 0 { family inet6 dad-disable; } } }`)
+		_, mgen, err := mixed.CompileCandidateGen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, merr := mixed.CommitWithDescriptionGen("mixed fixture", mgen)
+		if merr == nil || !strings.Contains(merr.Error(), "packed-tail statement(s) would be silently dropped") {
+			t.Fatalf("mixed fixture commit = %v, want packed-tail refusal", merr)
+		}
+		for _, content := range []string{merr.Error(), mixedLogs.String()} {
+			if strings.Contains(content, "priority 100") || strings.Contains(content, "100") {
+				t.Errorf("mixed fixture leaked the post-head token: %s", content)
 			}
 		}
 	})
