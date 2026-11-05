@@ -889,10 +889,7 @@ fn source_nat_translation_still_valid(
         return (false, None, None);
     }
 
-    if destination_valid
-        && stored_static == Some(false)
-        && forwarding.source_nat_rules.is_empty()
-    {
+    if destination_valid && stored_static == Some(false) && forwarding.source_nat_rules.is_empty() {
         return (
             false,
             None,
