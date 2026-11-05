@@ -484,6 +484,8 @@ host witness records the first and duplicate notifications. Migrate
 `tests_shim_gre_inner_14954.rs` to the new argument. Do not add any
 `ExtWalk` field.
 
+Verifier-fit amendment: `docs/research/16009-verifier-fit-design.md` §4 V6-1 supersedes this map-writing callback shape pending prototype measurement; keep callbacks map-free unless a measured design reselects it.
+
 Wiring follows the `userspace_land_screen` precedent exactly:
 shim map decl (after `lib.rs:519`), `pkg/dataplane/userspace/maps.go`
 name const (after `:56`), `pkg/dataplane/loader_userspace_shim.go` pin

@@ -125,7 +125,7 @@ an override.
 |---|---|---:|
 | Pristine base | PASS; 22.0787% headroom; 70,787 slack to 850,000 | 779,213 |
 | Sink-only parser slice | PASS; 24.44% headroom; 94,380 slack to 850,000 floor boundary | 755,620 |
-| Complete candidate with the original IPv6 variable-length Routing-header read | REJECT, `invalid access to packet, off=56 size=1`; same class in no-gate diagnostic | 30,642 complete-candidate diagnostic; 30,223 no-gate diagnostic |
+| Complete candidate with the original IPv6 variable-length Routing-header read | REJECT, `invalid access to packet, off=56 size=1`; same class in no-gate diagnostic (the 30,223 result is from the earlier `6c9098dcfb` base, not `c10b3aa064`) | 30,642 complete-candidate diagnostic; 30,223 no-gate diagnostic at earlier base |
 | Isolated IPv6 observer with original Routing-header slice | REJECT, `off=56 size=1`; 2,136 total states | 30,152 |
 | IPv6 fixed three-byte-prefix variant | Access reject cleared; instruction-cap reject | 1,000,001; 63,606 states |
 | IPv6 map-accumulating / out-of-line callback variants | Instruction-cap reject | 1,000,001; 61,589 / 61,135 states |
@@ -161,25 +161,29 @@ The current `ExtWalk` output (`offset`, `protocol`,
 `non_first_fragment`, `fragment_seen`, `exhausted`) contains neither a
 Routing-header type nor a non-atomic Fragment count. It cannot, by itself,
 distinguish RH0/RH1/RH2 or one versus two non-atomic Fragment headers.
-Do not repurpose `offset`/`protocol` as packed facts: their existing values
-are consumed by parser callers and their domains have no reserved encodings.
-Those facts must be accumulated from validated bytes during the existing
-walk or discovered by a second call to that same walker; copying its advance
-logic into a parser-side walk would create a second, unguarded parity surface.
+There is no metadata-only shortcut for Routing type: unchanged `ExtWalk`
+cannot supply a fact absent from its return, while `offset`/`protocol`
+are consumed by parser callers and have no reserved encodings. Accumulate
+the facts from validated bytes during the existing walk or call that same
+walk again; copying its advance logic into a parser-side walk creates a
+second, unguarded parity surface.
 
 ### V6-1 (rank 1): stack-only accumulator inside the existing walk, map I/O after return
 
 **Shape.** Keep the current single traversal and existing `ExtWalk` return.
-Pass a small stack accumulator for the facts to the generic walker/observer.
-At the Fragment arm, derive the word and post-header offset from the already
-validated 8-byte slice; at the generic Routing arm, capture the routing type
-only through a checked read associated with the validated header span; set
-the duplicate fact before the existing non-first break. Observer methods
-only update the caller's scalar accumulator; no map pointer, map read/write,
-fallible return, or packet pointer crosses a callback. After the walk returns,
+Add a small stack accumulator to the generic walker/observer. At the
+Fragment arm, derive the word and post-header offset from the already
+validated 8-byte slice; count duplicate non-atomic Fragment headers before
+the existing non-first break. For the generic arm, use the bounded fixed
+three-byte prefix (`routing_type` is byte 2), then retain that byte as a
+scalar while the existing checked full-span revalidation runs. Only after
+that revalidation, pass the scalar type (not a slice or packet pointer) to
+the observer; set source-route only for types 0/1, never RH2. Observer
+methods only update the caller's scalar accumulator: no map pointer, map
+read/write, or fallible return crosses a callback. After the walk returns,
 `parse_ipv6` packs those facts and uses the checked scratch write from the
-sink pattern. Host callers pass a recording accumulator and assert the same
-facts. Do not add fields to `ExtWalk` or change walk advances/breaks.
+sink pattern. Host callers use the same observer and assert the facts. Do
+not add fields to `ExtWalk` or change walk advances/breaks.
 
 **Why first.** It preserves one validated walk and avoids the measured
 map-access-in-loop form while keeping BPF packet access and map I/O outside
@@ -189,25 +193,57 @@ callbacks where practical. It also lets the host witness test the same walk.
 stack-only accumulator with post-walk map I/O. A generic mutable accumulator
 may still raise verifier states. It is a candidate, not a claim of fit.
 
-### V6-2 (rank 2): reuse the existing v6-fragment laundering slot
+### V6-2R (rank 2): replace the planned screen scratch with the widened v6-fragment laundering slot
 
 **Shape.** Use V6-1's local accumulator, then store the packed fragment/
 route/duplicate facts through the existing `userspace_v6frag_scratch`
-slot and read the opaque value back after the walk. Do not create a second
-per-CPU state channel for the v6 facts. This requires changing the slot's
-value from `u8` to a word large enough for the plan's packed facts and
-reusing that one per-CPU slot for the later gate read (including the IPv4
-parser if this replaces, rather than supplements, `userspace_screen_scratch`).
-The write/read failure behavior must be fail-closed; stale values must never
-reach the gate. Preserve the existing non-first protocol-laundering decision
-at `lib.rs:2435-2462` from the same fresh value.
+slot. This variant **replaces** `userspace_screen_scratch`; it does not
+supplement it. Widen `userspace_v6frag_scratch` from `u8` to `u64` and use
+that single per-CPU slot for IPv4 writes, IPv6 writes, and the gate read.
+Bits 0–14 retain the packed screen-word layout; bit 15, reserved by
+plan §5.4, is `V6FRAG_NON_FIRST`. The IPv4 parser leaves bit 15 clear.
+The IPv6 parser ORs bit 15 only when `walk.non_first_fragment` is true.
+
+Every successful parser path must initialize/write a complete current
+screen word before it can reach the gate: IPv4 writes with bit 15 clear,
+and IPv6 writes after the walk, including the terminal first-protocol path
+that currently bypasses v6-fragment laundering. Never let that path expose
+a stale per-CPU value. For a nonterminal IPv6 path, `parse_ipv6` reads the
+fresh word and derives the sentinel with
+`word & V6FRAG_NON_FIRST != 0`; it MUST NOT use the old `word != 0` test,
+which would treat every nonzero screen fact as a non-first fragment. A
+failed required write/read returns `None` through the fail-closed parse
+path; never decode a stale slot. The selected protocol is
+`PROTO_FRAGMENT_NO_L4` iff the masked bit is set, otherwise `walk.protocol`.
+At the later gate, both IPv4 and IPv6 read this same slot and mask bit 15
+off before evaluating the screen word. There is no second
+`userspace_screen_scratch` map or alternate supplement variant.
+Resolve the value-size ABI and map-lifecycle/retirement contract before
+any prototype run.
+
+
+**Required parser/packing witnesses with no screen row.** Exercise both
+chains through the same walker/packer, with no `userspace_host_screen`
+row:
+
+- `[M=1, off=0][M=0, off=8]`: duplicate-non-atomic fact set, bit 15
+  set, `PROTO_FRAGMENT_NO_L4` selected.
+- `[M=1, off=0][M=1, off=0]`: duplicate-non-atomic fact set, bit 15
+  clear, terminal protocol retained (not the no-L4 sentinel).
+
+For both, assert the packed duplicate fact remains available, the
+no-row special-error disposition does not synthesize `host_screen_drop`,
+and the parser's sentinel choice is unchanged by row absence. Required
+Class-R C21 no-row controls must also pass each chain through the selected
+session-miss-local gate arm with no screen row; assert no
+`host_screen_drop` and the documented parse-error row-absence disposition.
+Retain the row-present C21 drop fixtures as required.
 
 **Why second.** It applies the proven opaque-state mechanism to the facts
-that otherwise leave the walk, and avoids a second map/state fork. It is
-ranked below V6-1 because it changes an existing map's value-size ABI and
-the map lifecycle/retirement contract; those compatibility constraints
-must be resolved before the prototype can be considered viable. The
-measurement cannot waive them.
+that otherwise leave the walk, avoids a second per-CPU state channel, and
+names the exact map/bit/read contract before implementation. It changes
+an existing map's value-size ABI and lifecycle; those constraints must be
+resolved before the prototype is viable, and measurement cannot waive them.
 
 ### V6-3 (rank 3): a second pass through the same walker, scalar-only observer
 
@@ -224,7 +260,8 @@ parse path.
 from fact collection and is straightforward to compare against the first
 pass's `ExtWalk`; however, it repeats a walk bounded by `MAX_EXT_HDRS=7`.
 Its instruction cost could consume K1 headroom. Use only if V6-1 fails on
-state shape and V6-2 is rejected for map ABI reasons, and measure it once.
+state shape and V6-2R is unavailable because its value-size/lifecycle
+contract cannot be met, and measure it once.
 
 **Rejected, not a fourth try:** another observer with map reads/writes in
 each callback, another variable-length `rh` slice, and outlining the generic
@@ -245,19 +282,23 @@ starting templates.
 
 ### V4-1 (rank 1): fixed-offset selector with a bounded, unrolled TLV state machine
 
-**Shape.** Retain the existing checked IHL slice. Implement the TLV state
-machine with a maximum of 40 byte positions, but no packet/slice access at
-a dynamic `pos`: each kind/length-byte access is a constant-offset arm
-selected by `pos`. If indexing the full validated IHL slice `header`, arms
-use `header[20]`, `header[21]`, …; if indexing the options-only subslice,
-they use `options[0]`, `options[1]`, …. Check the IHL-derived real option
-length before selecting an arm.
-Unroll the 40 positions or use a compiler-visible constant-dispatch helper;
-no hand-built pointer arithmetic. Maintain the worker's rules: EOOL ends
-scan, NOP advances one, other kinds require a length byte and length ≥2,
+**Shape.** In `parse_ipv4`, bind the already-existing IHL-sized checked
+read at `lib.rs:2281` instead of discarding its result:
+`let header = unsafe { read_bytes(data, data_end, l3_offset as usize, ihl) }?;`.
+Keep the earlier 20-byte `iph` slice for fixed fields; the new `header`
+binding is the full validated IHL slice used by the scanner. Run a TLV state
+machine over at most 40 byte positions, but do not access the slice at a
+dynamic `pos`: each kind/length-byte access is a constant-offset arm
+selected by `pos`. If indexing the full `header`, arms use `header[20]`,
+`header[21]`, …; if indexing the options-only subslice
+`let options = &header[20..ihl]`, arms use `options[0]`, `options[1]`, ….
+Check the IHL-derived real option length before selecting an arm. Unroll
+the 40 positions or use a compiler-visible constant-dispatch helper; no
+hand-built pointer arithmetic. Maintain the worker's rules: EOOL ends scan,
+NOP advances one, other kinds require a length byte and length ≥2,
 LSRR/SSRR require length ≥3, and any overrun/short TLV marks malformed.
-Malformed suppresses the source-route fact. The scan is pure over the
-already-held slice; output only the two verdict scalars for the packed word.
+Malformed suppresses the source-route fact. Output only the two verdict
+scalars for the packed word.
 
 **Why first.** It changes the access shape itself: the parser state may
 advance `pos`, but each byte selection is a constant-offset arm rather than
@@ -312,17 +353,47 @@ caused the maximum; do not claim a causal stack allocation without a new
 stack report. Preserve `tcp_trip_syn_frag`, independent Q1 bits, C22's
 capture-unknown suppression, and all C23 combinations.
 
+### Required capture-versus-declared discriminator (TCP-1 and TCP-2)
+
+`data` and `data_end` are absolute XDP pointers; `l3_offset` and
+`l4_offset` are packet-relative offsets. Compute
+`capture_end_rel = data_end.checked_sub(data)` before comparing capture
+availability; if the checked subtraction fails, fail the parse closed.
+Compute `declared_end_rel = l3_offset + total_len` separately.
+For an IPv4 first-fragment TCP packet, `tiny_declared_unknown` is
+`declared_end_rel < l4_offset + 14`; `tcp_flags_capture_unknown` is
+`capture_end_rel < l4_offset + 14`. Never compare either packet-relative
+end with raw `data_end`. The host helper that computes these facts must
+accept the same absolute pointer pair used by `parse_ipv4`; an existing
+length-gate test fed a relative caplen cannot witness this conversion.
+
+**Required pointer-valued-end parser witness.** Drive the exact shared
+helper with nonzero synthetic addresses. With `data=0x1000`, `l3_offset=14`,
+`l4_offset=34`, and `total_len=60`, use absolute `data_end=0x102A`
+(capture end relative to `data` is 42, only L4+8). Assert
+`tiny_declared_unknown=false` and `tcp_flags_capture_unknown=true`
+(flags-byte end is 48). Then use `total_len=27` and `data_end=0x1040`
+(capture end 64): assert `tiny_declared_unknown=true` and
+`tcp_flags_capture_unknown=false`. The two directions prove that declared
+length and available capture are not conflated. TCP-1 packs these facts;
+TCP-2 suppresses Q1 trips using both checked packed-word bits.
+
 ### TCP-1 (rank 1): compute facts, write the packed word immediately before address materialization
 
 **Shape.** Keep the parser-local computation from the landed plan, but
 shorten its live range: after L4 returns validated `protocol`, `tcp_flags`,
-ports, and fragment facts, compute the compact trip bits into the one
-existing word and perform the checked scratch write immediately, before
+ports, and fragment facts, derive the two IPv4 availability facts
+separately. Compute `tiny_declared_unknown` from the packet-relative
+declared end; compute `tcp_flags_capture_unknown` from the packet-relative
+capture end `data_end.checked_sub(data)`, never by comparing packet-relative
+offsets directly with the absolute `data_end` pointer.
+Set both scratch bits independently, suppress ordinary trip bits if either
+says flags are unavailable, and perform the checked scratch write before
 reading/copying the source and destination addresses into their 16-byte
 arrays (`parse_ipv4:2353-2362`; IPv6's corresponding post-L4 region is
-`:2468-2522`). Do not carry a second `u64`/trip struct across `ParsedPacket`
-construction. Keep tiny-declared and capture-unknown facts distinct. This
-is a placement change only; host twin must still compare all C23 outcomes.
+`:2468-2522`). Do not carry a second `u64`/trip struct across
+`ParsedPacket` construction. This is a placement change only; the host twin
+must still compare all C23 outcomes.
 
 **Why first.** It introduces no new helper, return value, or packet read;
 it tests whether the measured stack peak is sensitive to keeping the packed
@@ -337,15 +408,24 @@ fields already in `ParsedPacket` (`protocol`, `tcp_flags`, destination
 port, and `is_fragment`), before intersecting with the zone's independent
 mask. A first TCP fragment is recognizable from
 `is_fragment && protocol == PROTO_TCP`; a non-first fragment uses the
-existing no-L4 sentinel. Suppress all four Q1 trips when either checked
-scratch fact `SCRATCH_TINY_DECLARED_UNKNOWN` or
-`SCRATCH_TCP_FLAGS_CAPTURE_UNKNOWN` is set. They distinguish a declared
-IPv4 first-fragment end before the flags byte from a capture that lacks the
-byte, while preventing a zero placeholder from becoming a no-flag trip.
-The parse-error row-presence disposition still runs first. No struct field
-or packet read is added. Update the pure host twin so C23 still exercises
-all 16 masks × 4 shapes per family (128 results), and C22 remains the same
-documented divergence.
+existing no-L4 sentinel. Use the separately checked
+`SCRATCH_TINY_DECLARED_UNKNOWN` and
+`SCRATCH_TCP_FLAGS_CAPTURE_UNKNOWN` bits from the TCP-1 capture calculation
+(§6) to suppress all four Q1 trips; do not infer capture availability
+from `ParsedPacket.tcp_flags_unknown` or compare packet-relative offsets
+to raw `data_end`. The parse-error row-presence disposition still runs
+first. No struct field or packet read is added. Update the pure host twin
+so C23 still exercises all 16 masks × 4 shapes per family (128 results),
+and C22 remains the same documented divergence.
+
+For TCP-1 and TCP-2 alike, require a Class-R BPF_PROG_TEST_RUN cell on the
+selected session-miss-local PASS arm using the actual XDP pointer-valued
+`data`/`data_end` path: IPv4 first fragment, `total_len=60`, captured
+through only L4+8, tested separately with no-flag-only and syn-frag-only
+masks. Both shim outcomes must PASS with no `host_screen_drop`; the worker
+oracle's no-flag-only drop versus syn-frag-only pass remains the separately
+documented divergence. A host helper fed relative caplen alone is not this
+cell.
 
 **Why second.** It moves four comparisons out of the inlined parser chain
 and into a gate that the plan already outlines. It changes work placement,
@@ -383,7 +463,7 @@ result without changing C23/C22 semantics.
 | Rank | Combination | Reason for rank |
 |---|---|---|
 | **1** | **V6-1 + V4-1 + TCP-1** | One walk, no map access inside callbacks, fixed-offset TLV selection, shortest TCP fact lifetime. This minimizes new packet reads and extra walks/functions while preserving all facts. None of its verifier outcomes are claimed in advance. |
-| 2 | V6-2 + V4-1 + TCP-1 | Prefer if laundering is required and the existing map's value-size/lifecycle contract can be safely migrated; one per-CPU state channel rather than a second map. |
+| 2 | V6-2R + V4-1 + TCP-1 | Prefer if laundering is needed and the existing per-CPU map's value-size/lifecycle contract can be safely migrated; one channel replaces, rather than supplements, the planned screen map. |
 | 3 | V6-1 + V4-2 + TCP-2 | Stack-only v4 scan and moved Q1 computation; use only if the relevant isolated measurements pass and full semantic twins stay green. |
 | 4 | V6-3 + V4-3 + TCP-3 | Repeated IPv6 walk, repeated IPv4 scan, and outlined TCP helper make this the most expensive combination; bounded fallback only. |
 
@@ -421,6 +501,9 @@ Record source hash, object hash if generated, build digest, processed
 instructions, floor/headroom/override fields, full verifier rejection
 signature, per-function stack and combined-call stack, and which C-cell
 host twins were exercised. Never treat a partial/slice build as K1 PASS.
+For each TCP prototype, report both metrics separately and accept it as
+stack-fit only when every per-function frame and the combined call-chain
+are each ≤512 bytes; one metric does not stand in for the other.
 
 ### Exact order and cap
 
@@ -430,15 +513,17 @@ host twins were exercised. Never treat a partial/slice build as K1 PASS.
    a failed/mismatched control stops the experiment as environment drift.
 2. **IPv6: up to 3 candidate attempts, in rank order:** V6-1 first. If it
    fails because of loop-state/instruction pressure (not packet-access
-   bounds), try V6-2 if the value-size/lifecycle change is acceptable;
-   otherwise try V6-3 once. If V6-2 is usable but fails, try V6-3 only
-   when its second-pass shape addresses the recorded failure. If the
-   routing-type read still fails packet-access verification, stop this arm:
-   V6-2 and V6-3 retain the same validated routing-type read and cannot
-   be counted as access fixes. Before each verifier run, run the host
-   walk parity corpus for fragment governing/atomic/duplicate and
-   RH0/RH1/RH2. Do not repeat the measured map-access-in-loop, unvalidated
-   variable-length read, or generic-walker-outline forms.
+   bounds), try V6-2R if its explicit replace-map value-size/lifecycle
+   contract is acceptable; otherwise try V6-3 once. If V6-2R is usable
+   but fails, try V6-3 only when its second-pass shape addresses the
+   recorded failure. If the routing-type read still fails packet-access
+   verification, stop this arm: V6-2R and V6-3 retain the same validated
+   routing-type read and cannot be counted as access fixes. Before each
+   verifier run, run the host walk parity corpus, including the two exact
+   duplicate chains and no-screen-row parser/packing assertions specified
+   in V6-2R, plus fragment governing/atomic and RH0/RH1/RH2 controls. Do
+   not repeat the measured map-access-in-loop, unvalidated variable-length
+   read, or generic-walker-outline forms.
 3. **IPv4: up to 3 candidate attempts, in rank order:** V4-1; V4-2 only
    if V4-1's failure is access tracking and the held-slice/stack-only
    shape is materially distinct; V4-3 only if fixed-offset access is
@@ -446,10 +531,11 @@ host twins were exercised. Never treat a partial/slice build as K1 PASS.
    for LSRR/SSRR, malformed TLVs before and after a valid route, short
    lengths/overruns, EOOL/NOP, and malformed-option row-presence behavior
    before each verifier run.
-4. **TCP: up to 3 candidate attempts:** TCP-1; if stack remains above
-   512 bytes, TCP-2; if the outlined gate instead fails its own stack or
-   instruction budget, TCP-3. Run the full host TCP matrix (C23's 128
-   outcomes plus C22) before each verifier run.
+4. **TCP: up to 3 candidate attempts:** TCP-1; if either a per-frame
+   stack exceeds 512 bytes or the combined call-chain stack exceeds
+   512 bytes, TCP-2; if the outlined gate instead fails its own per-frame,
+   combined-stack, or instruction budget, TCP-3. Run the full host TCP
+   matrix (C23's 128 outcomes plus C22) before each verifier run.
 5. **Complete candidates: at most 3 full-object builds.** Assemble the
    highest-ranked measured-viable candidate per arm and all unchanged
    plan features (mask map, gate, all 11 call sites, reason mirrors).
@@ -499,9 +585,10 @@ partial object as K1, or continue with an unbounded fourth variant.
 
 First prototype **V6-1 + V4-1 + TCP-1**, in that order, with no production
 landing until the bounded sequence above selects a complete-object
-candidate. If V6-1 fails specifically through state growth, measure V6-2
-only after resolving its map value-size/lifecycle contract; V6-3 is the final
-v6 fallback. If V4-1 fails on packet-access verification, measure the
+candidate. If V6-1 fails specifically through state growth, measure V6-2R
+only after resolving its replacement-map value-size/lifecycle contract;
+V6-3 is the final v6 fallback.
+If V4-1 fails on packet-access verification, measure the
 materially distinct held-slice stack copy once, then stop that arm if it
 fails. If V4-1 passes access but fails on the combined state shape, V4-3
 is the one diagnostic alternative. If TCP-1 remains over the stack limit,
