@@ -239,11 +239,12 @@ session-miss-local gate arm with no screen row; assert no
 `host_screen_drop` and the documented parse-error row-absence disposition.
 Retain the row-present C21 drop fixtures as required.
 
-**Why second.** It applies the proven opaque-state mechanism to the facts
-that otherwise leave the walk, avoids a second per-CPU state channel, and
-names the exact map/bit/read contract before implementation. It changes
-an existing map's value-size ABI and lifecycle; those constraints must be
-resolved before the prototype is viable, and measurement cannot waive them.
+**Why second.** It changes only post-walk scratch transport and can
+address a measured rejection localized to map-laundering/gate state. It
+cannot cure a walk-local instruction cap or observer-state rejection:
+the accumulator and traversal are unchanged. It avoids a second per-CPU
+state channel but changes an existing map's value-size ABI/lifecycle;
+resolve those constraints before prototype use.
 
 ### V6-3 (rank 3): a second pass through the same walker, scalar-only observer
 
@@ -256,12 +257,12 @@ but never changes parse disposition, `ExtWalk`, or the first pass's
 protocol/offset. Failure of either walk remains the existing fail-closed
 parse path.
 
-**Why third.** It completely separates the established parser walk state
-from fact collection and is straightforward to compare against the first
-pass's `ExtWalk`; however, it repeats a walk bounded by `MAX_EXT_HDRS=7`.
-Its instruction cost could consume K1 headroom. Use only if V6-1 fails on
-state shape and V6-2R is unavailable because its value-size/lifecycle
-contract cannot be met, and measure it once.
+**Why third.** It separates the parser's first, no-observer walk from
+fact collection, which may help only when V6-1's measured rejection is
+attributed to coupling observer state into the parser walk. It still
+repeats a walk bounded by `MAX_EXT_HDRS=7` and may consume K1 headroom.
+Use only if an isolated trace supports that split; it is not an access
+fix, since it retains the same routing-type read.
 
 **Rejected, not a fourth try:** another observer with map reads/writes in
 each callback, another variable-length `rh` slice, and outlining the generic
@@ -511,19 +512,24 @@ are each ≤512 bytes; one metric does not stand in for the other.
    779,213/1,000,000, floor PASS, override false. If the toolchain,
    build inputs, or source base differ, run one clean baseline first;
    a failed/mismatched control stops the experiment as environment drift.
-2. **IPv6: up to 3 candidate attempts, in rank order:** V6-1 first. If it
-   fails because of loop-state/instruction pressure (not packet-access
-   bounds), try V6-2R if its explicit replace-map value-size/lifecycle
-   contract is acceptable; otherwise try V6-3 once. If V6-2R is usable
-   but fails, try V6-3 only when its second-pass shape addresses the
-   recorded failure. If the routing-type read still fails packet-access
-   verification, stop this arm: V6-2R and V6-3 retain the same validated
-   routing-type read and cannot be counted as access fixes. Before each
-   verifier run, run the host walk parity corpus, including the two exact
-   duplicate chains and no-screen-row parser/packing assertions specified
-   in V6-2R, plus fragment governing/atomic and RH0/RH1/RH2 controls. Do
-   not repeat the measured map-access-in-loop, unvalidated variable-length
-   read, or generic-walker-outline forms.
+2. **IPv6: up to 3 attempts, in rank order V6-1, V6-2R, V6-3; select
+   by the rejection signature.** Measure V6-1 first. Try V6-2R only if
+   the isolated diagnostic localizes rejection to post-walk map-laundering/
+   gate state and its replacement-map ABI/lifecycle contract is acceptable;
+   its unchanged walk and accumulator cannot cure a walk-local cap/state
+   failure. If the rejection localizes to observer state coupled to the
+   parser walk, skip V6-2R and try V6-3 only if its second-pass split
+   addresses that cause. After V6-2R, try V6-3 only if its measured
+   rejection likewise targets a state coupling that the split addresses.
+   If the cause cannot be localized, stop the arm rather than trying a
+   variant by instruction-count folklore. Any packet-access rejection on
+   the routing-type read stops the arm: V6-2R and V6-3 retain that checked
+   read and cannot be counted as access fixes. Before each verifier run,
+   run the host walk parity corpus, including the two exact duplicate
+   chains and no-screen-row parser/packing assertions specified in V6-2R,
+   plus fragment governing/atomic and RH0/RH1/RH2 controls. Do not repeat
+   the measured map-access-in-loop, unvalidated variable-length read, or
+   generic-walker-outline forms.
 3. **IPv4: up to 3 candidate attempts, in rank order:** V4-1; V4-2 only
    if V4-1's failure is access tracking and the held-slice/stack-only
    shape is materially distinct; V4-3 only if fixed-offset access is
@@ -585,9 +591,10 @@ partial object as K1, or continue with an unbounded fourth variant.
 
 First prototype **V6-1 + V4-1 + TCP-1**, in that order, with no production
 landing until the bounded sequence above selects a complete-object
-candidate. If V6-1 fails specifically through state growth, measure V6-2R
-only after resolving its replacement-map value-size/lifecycle contract;
-V6-3 is the final v6 fallback.
+candidate. Route only a measured post-walk map/gate rejection to V6-2R,
+after resolving its replacement-map value-size/lifecycle contract. Route
+only a measured observer-state coupling to V6-3 when its second-pass split
+addresses that cause; packet-access or unlocalized rejections stop the arm.
 If V4-1 fails on packet-access verification, measure the
 materially distinct held-slice stack copy once, then stop that arm if it
 fails. If V4-1 passes access but fails on the combined state shape, V4-3
