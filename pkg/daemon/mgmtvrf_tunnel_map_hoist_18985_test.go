@@ -95,10 +95,10 @@ func TestMgmtStaticRoutesForFRRBuildsTunnelNameMapOnce18985(t *testing.T) {
 	// Expected resolved names backing the verdicts above.
 	tunMap := cfg.TunnelNameMap()
 	for ref, want := range map[string]string{
-		"fxp0":       "fxp0",
-		"fxp0.0":     "fxp0",
-		"em0.7":      "em0.7",
-		"fxp0.5":     "fxp-tun0",
+		"fxp0":   "fxp0",
+		"fxp0.0": "fxp0",
+		"em0.7":  "em0.7",
+		"fxp0.5": "fxp-tun0",
 	} {
 		if got := cfg.ResolveKernelIfNameWith(ref, tunMap); got != want {
 			t.Errorf("ResolveKernelIfNameWith(%q) = %q, want %q", ref, got, want)
@@ -192,7 +192,7 @@ func TestMgmtStaticHelpersBuildTunnelNameMapOnce18985(t *testing.T) {
 	}
 
 	*builds = 0
-	if idx, ok := mgmtStaticImplicitLinkIndex(fake, cfg, mgmtSet, net.ParseIP("2001:db8:10::1"),
+	if idx, ok := mgmtStaticImplicitLinkIndex(fake, mgmtSet, net.ParseIP("2001:db8:10::1"),
 		netlink.FAMILY_V6, nil, "fxp0.5", mgmtStaticKernelIfNameResolver(cfg)); !ok || idx != 9 {
 		t.Errorf("implicit link index = %d,%v, want 9,true (tunnel device)", idx, ok)
 	}
@@ -201,8 +201,9 @@ func TestMgmtStaticHelpersBuildTunnelNameMapOnce18985(t *testing.T) {
 	}
 
 	*builds = 0
-	mgmtStaticImplicitLinkIndex(fake, cfg, mgmtSet, net.ParseIP("2001:db8:10::1"), netlink.FAMILY_V6, nil, "", mgmtStaticKernelIfNameResolver(cfg))
+	mgmtStaticImplicitLinkIndex(fake, mgmtSet, net.ParseIP("2001:db8:10::1"), netlink.FAMILY_V6, nil, "", mgmtStaticKernelIfNameResolver(cfg))
 	if got, ok := mgmtStaticConfigConnectedInterface(&config.Config{}, net.ParseIP("192.0.2.1"), mgmtSet, mgmtStaticKernelIfNameResolver(&config.Config{})); ok || got != "" {
+		t.Errorf("empty connected walk = %q,%v, want \"\",false", got, ok)
 	}
 	if *builds != 0 {
 		t.Errorf("empty helper shapes built the tunnel-name map %d times, want 0", *builds)
@@ -227,10 +228,10 @@ func TestMgmtStaticNoDirectResolveKernelIfNameCensus18985(t *testing.T) {
 		t.Fatalf("parse mgmtvrf_static_routes.go: %v — the scan is broken", err)
 	}
 	hoisted := map[string]bool{
-		"mgmtStaticRoutesDesired":           true,
-		"mgmtStaticRouteIsManagementScoped": true,
+		"mgmtStaticRoutesDesired":            true,
+		"mgmtStaticRouteIsManagementScoped":  true,
 		"mgmtStaticConfigConnectedInterface": true,
-		"mgmtStaticImplicitLinkIndex":       true,
+		"mgmtStaticImplicitLinkIndex":        true,
 	}
 	found := map[string]bool{}
 	resolverFound, resolverUsesWith := false, false

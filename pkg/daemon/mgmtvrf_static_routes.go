@@ -220,7 +220,7 @@ func mgmtStaticRoutesDesired(
 		// reconcile replaces it, so the kernel re-checks the gateway, and an
 		// unreachable one fails the apply and has its stale route deleted
 		// (#5867).
-		if linkIndex, ok := mgmtStaticImplicitLinkIndex(nlh, cfg, mgmtSet, backup.Gw, b.family,
+		if linkIndex, ok := mgmtStaticImplicitLinkIndex(nlh, mgmtSet, backup.Gw, b.family,
 			connected[mgmtStaticFamilyIndex(b.family)], inferredV6[backupV6Gateway], resolveIfName); ok {
 			backup.LinkIndex = linkIndex
 		}
@@ -281,7 +281,7 @@ func mgmtStaticRoutesDesired(
 						}
 						linkIndex = link.Attrs().Index
 					} else {
-						linkIndex, routeScoped = mgmtStaticImplicitLinkIndex(nlh, cfg, mgmtSet, gateway, family,
+						linkIndex, routeScoped = mgmtStaticImplicitLinkIndex(nlh, mgmtSet, gateway, family,
 							connected[mgmtStaticFamilyIndex(family)], inferredV6[nextHop.Address], resolveIfName)
 						if !routeScoped {
 							break
@@ -615,7 +615,6 @@ func mgmtStaticConnectedLinkIndex(gateway net.IP, routes []netlink.Route) (int, 
 // inference assigns from the configured prefixes (inferredIf).
 func mgmtStaticImplicitLinkIndex(
 	nlh mgmtRouteProgrammer,
-	cfg *config.Config,
 	mgmtSet map[string]bool,
 	gateway net.IP,
 	family int,
