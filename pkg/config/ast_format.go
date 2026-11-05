@@ -233,13 +233,18 @@ func formatNodeKeyPath(n *Node) string {
 		for run < len(n.Keys) && n.KeyBracketed(run) {
 			run++
 		}
-		omitBrackets := false
+		hasQuotedKeyword, allMembersSafe := false, true
 		for j := i; j < run; j++ {
-			if n.KeyQuoted(j) && policyTermInlineKeywords[n.Keys[j]] {
-				omitBrackets = true
-				break
+			if !policyTermInlineKeywords[n.Keys[j]] {
+				continue
+			}
+			if n.KeyQuoted(j) {
+				hasQuotedKeyword = true
+			} else {
+				allMembersSafe = false
 			}
 		}
+		omitBrackets := hasQuotedKeyword && allMembersSafe
 		if !omitBrackets {
 			parts = append(parts, "[")
 		}
