@@ -2615,18 +2615,20 @@ peer liveness (`lastSeen`) or drive election.
 
 An unkeyed cluster retains today's dual-accept first-keying path for **72
 hours** after its first observed unkeyed cluster posture — the unkeyed
-authority cutoff. The deadline is anchored on `CLOCK_MONOTONIC` in-process
-and persisted as a wall-clock high-water anchor at
-`/var/lib/xpf/unkeyed-authority-grace`: `v1 <earliest-wall-nanoseconds>
-<high-water-wall-nanoseconds>`. Every local config/HA-comms touch only
-ratchets the persisted wall high-water mark forward; wire traffic cannot
-move or recreate the anchor. A normal daemon restart restores the same
-earliest stamp and high-water mark instead of starting a fresh window, so a
-backward wall-clock step cannot refund observed time. A future-dated earliest
-stamp is clamped down. A present but corrupt anchor fails closed: it is
-expired at boot, never fresh. If persistence fails, the current process
-still expires on its monotonic deadline and status names the restart
-limitation; config apply and daemon startup continue.
+and persisted as a versioned wall-clock high-water record at
+`/var/lib/xpf/unkeyed-authority-grace`: `v2 <earliest-wall-nanoseconds>
+<high-water-wall-nanoseconds> <elapsed-floor-nanoseconds>`. Local config/
+HA-comms touches and the auth sweep ratchet the persisted high-water wall
+time and elapsed floor; the latter records the greatest elapsed observation
+from wall time or the in-process monotonic clock. Wire traffic cannot move or
+recreate the anchor. On restart, remaining grace is bounded by both the saved
+elapsed floor and the wall-clock high-water mark, rather than starting a fresh
+window; a backward wall-clock step and repeated restarts cannot refund
+observed time. A future-dated earliest stamp is clamped down. A present but
+corrupt anchor fails closed: it is expired at boot, never fresh. If
+persistence fails, the current process still expires on its monotonic deadline
+but expiry across restart is not guaranteed; status names the restart
+limitation. Config apply and daemon startup continue.
 
 Apart from the explicit re-arm below, local key-state changes are the only
 key-related events that alter grace state: a local key commit deletes the

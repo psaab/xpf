@@ -1467,11 +1467,16 @@ func TestUnkeyedGraceWithinGraceStatusRendersExpiry16016(t *testing.T) {
 
 func TestExpiredUnkeyedGraceSuppressesConfigAndReadinessElections16016(t *testing.T) {
 	m, clock, _ := setupAuthorityManager16016(t)
-	defer m.Stop()
+	defer func() {
+		m.mu.Lock()
+		if rg := m.groups[0]; rg != nil && rg.holdTimer != nil {
+			rg.holdTimer.Stop()
+			rg.holdTimer = nil
+		}
+		m.mu.Unlock()
+		m.Stop()
+	}()
 	m.UpdateConfig(groupConfig16016())
-	m.mu.Lock()
-	m.takeoverHoldTime = 10 * time.Millisecond
-	m.mu.Unlock()
 
 	clock.advance(73 * time.Hour)
 	if !m.UnkeyedAuthorityExpired() {
@@ -1486,6 +1491,9 @@ func TestExpiredUnkeyedGraceSuppressesConfigAndReadinessElections16016(t *testin
 	// Config replacement and both readiness election edges must retain the
 	// existing secondary role even when a single-node election could promote.
 	m.UpdateConfig(groupConfig16016())
+	m.mu.Lock()
+	m.takeoverHoldTime = time.Hour
+	m.mu.Unlock()
 	if m.IsLocalPrimary(0) {
 		t.Fatal("expired grace allowed UpdateConfig election to claim primary")
 	}
@@ -1493,8 +1501,20 @@ func TestExpiredUnkeyedGraceSuppressesConfigAndReadinessElections16016(t *testin
 	if m.IsLocalPrimary(0) {
 		t.Fatal("expired grace allowed readiness edge election to claim primary")
 	}
-	time.Sleep(40 * time.Millisecond)
+
+	m.mu.Lock()
+	holdTimerArmed := m.groups[0].holdTimer != nil
+	m.mu.Unlock()
+	if !holdTimerArmed {
+		t.Fatal("readiness transition did not arm the takeover hold timer")
+	}
+
+	// The timer callback re-evaluates via electSingleNode. Invoke that exact
+	// election path deterministically; timer arming is asserted separately.
+	m.mu.Lock()
+	m.electSingleNode()
+	m.mu.Unlock()
 	if m.IsLocalPrimary(0) {
-		t.Fatal("expired grace allowed readiness hold-timer election to claim primary")
+		t.Fatal("expired grace allowed the delayed readiness election to claim primary")
 	}
 }

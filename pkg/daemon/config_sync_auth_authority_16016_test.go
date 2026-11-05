@@ -234,7 +234,7 @@ func TestDaemonProvenanceFirstKeyThenAuthenticatedClearKeepsOriginalGrace16016(t
 func TestFabricOnlyCompiledConfigBootPinsGraceBeforeComms16016(t *testing.T) {
 	anchorPath := isolateAuthorityAnchors16016(t)
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "config.db"))
-	initial := `chassis { cluster { cluster-id 1; node 0; fabric-interface fab0; fabric-peer-address 192.0.2.2; } }`
+	initial := `chassis { cluster { cluster-id 1; node 0; fabric-interface fab0; } }`
 	if _, err := store.SyncApply(initial, nil); err != nil {
 		t.Fatalf("seed fabric-only compiled config: %v", err)
 	}
@@ -243,8 +243,8 @@ func TestFabricOnlyCompiledConfigBootPinsGraceBeforeComms16016(t *testing.T) {
 		t.Fatal("config store did not compile the fabric-only cluster stanza")
 	}
 	cc := active.Chassis.Cluster
-	if cc.ControlInterface != "" || cc.FabricInterface != "fab0" || cc.FabricPeerAddress != "192.0.2.2" {
-		t.Fatalf("compiled config is not fabric-only: %+v", cc)
+	if cc.ControlInterface != "" || cc.FabricInterface != "fab0" || cc.FabricPeerAddress != "" {
+		t.Fatalf("compiled config is not fabric-interface-only: %+v", cc)
 	}
 
 	manager := cluster.NewManager(0, 1)
