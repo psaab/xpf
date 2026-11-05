@@ -1537,13 +1537,12 @@ var schemaSNMP = &schemaNode{desc: "SNMP configuration", children: map[string]*s
 			children:      nil,
 		},
 		// #4289: source-IP allowlist. `clients <prefix> [restrict]` — multi so a
-		// bracketed list / repeated set lines collapse onto the leaf; the
-		// trailing optional `restrict` deny modifier rides on the same run and
-		// is paired to its prefix by parseSNMPClients.
-		// #18844: parseSNMPClients consumes the entire child key run and treats
-		// a final `restrict` as the deny modifier for its immediately preceding
-		// prefix. This leaf may therefore admit packed block children; generic
-		// untyped multi leaves remain one-value-per-child.
+		// bracketed list / repeated set lines collapse onto the leaf.
+		// #18844: a packed block child may contain one prefix and optional
+		// trailing `restrict`; a one-token `restrict` child remains the
+		// established postfix qualifier for the immediately preceding prefix.
+		// A packed child beginning `restrict <prefix>` is malformed and cannot
+		// attach backwards. Generic untyped multi leaves remain one-value-per-child.
 		"clients": {desc: "Source-IP allowlist for this community (<prefix> [restrict])", args: 1, multi: true, placeholder: "<prefix>", children: nil, snmpClientRestrictionList: true, refuseNonLeafBlockChildren: true},
 		// #9416: the NAMED spelling of the same source restriction. Junos
 		// expresses one allowlist two ways -- inline `clients`, or a reusable
@@ -1574,10 +1573,9 @@ var schemaSNMP = &schemaNode{desc: "SNMP configuration", children: map[string]*s
 	}},
 	// #9416: `snmp client-list <name> { <prefix> [restrict]; }` -- a reusable
 	// named source-IP allowlist that one or more communities reference by name.
-	// `multi: true` so the flat spelling `set snmp client-list trusted 10.0.0.0/8`
-	// collapses its prefixes onto the node's Keys, matching how `clients` is
-	// declared; the braced body lands on Children. parseSNMPClientListPrefixes
-	// reads BOTH shapes (the #2419 dual-shape class).
+	// `multi: true` so the flat spelling collapses its prefix run onto Keys;
+	// the braced body lands on Children. The shared parser handles both forms
+	// and the same per-child qualifier boundary as inline `clients`.
 	"client-list": {desc: "Named source-IP client list (<prefix> [restrict])", args: 1, multi: true, placeholder: "<client-list-name>", children: nil, snmpClientRestrictionList: true, refuseNonLeafBlockChildren: true},
 	// packedStatements (#8768): compileSNMP reads `targets` and `version` as
 	// separate statements, and the packed spelling

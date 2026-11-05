@@ -225,6 +225,7 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 	if snmp.ClientLists == nil {
 		snmp.ClientLists = make(map[string][]SNMPClient)
 	}
+	clientListMalformedStatements := make(map[string][]string)
 
 	// #9416: read the `snmp` stanza's own PACKED body, not `node.Children`.
 	//
@@ -289,7 +290,10 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 			if len(node.Keys) < 2 || node.Keys[1] != inst.name {
 				node = &Node{Keys: append([]string{"client-list", inst.name}, node.Keys[1:]...), Children: node.Children}
 			}
-			snmp.ClientLists[inst.name] = append(snmp.ClientLists[inst.name], parseSNMPClientListPrefixes(node)...)
+			parsed := parseSNMPClientListPrefixesDetailed(node)
+			snmp.ClientLists[inst.name] = append(snmp.ClientLists[inst.name], parsed.clients...)
+			clientListMalformedStatements[inst.name] = append(
+				clientListMalformedStatements[inst.name], parsed.malformedStatements...)
 		}
 	}
 	// #9416: a malformed prefix inside a NAMED list gets the SAME treatment as
@@ -300,7 +304,8 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 	// `restrict` would otherwise degrade a deny-except entry to a plain allow
 	// for every community that references the list, not just one.
 	for _, listName := range sortedClientListNames9416(snmp.ClientLists) {
-		listWarnings, listMalformed, err := validateSNMPClients(snmp.ClientLists[listName], lenient)
+		listWarnings, listMalformed, err := validateSNMPClients(
+			snmp.ClientLists[listName], clientListMalformedStatements[listName], lenient)
 		if err != nil {
 			return fmt.Errorf("snmp client-list %q: %w", listName, err)
 		}
@@ -419,6 +424,7 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 					// cannot silently drop an earlier block's source-IP allowlist.
 					var blockAuth string
 					var blockClients []SNMPClient
+					var blockMalformedStatements []string
 					// #8778: flat `set` builds a CHAIN, not siblings. The command
 					//   set snmp community public authorization read-only clients 10.0.0.0/8
 					// produces
@@ -434,7 +440,7 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 					//
 					// Descend only through keywords this switch recognises. A
 					// `clients` node's own children hold its VALUE tokens (prefixes
-					// and `restrict`), which parseSNMPClients reads and which must
+					// and `restrict`), which parseSNMPClientsDetailed reads and which must
 					// not be mistaken for statements.
 					//
 					// #9416: `client-list-name` and `routing-instance` join the
@@ -505,11 +511,14 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 							blockAuth = nodeVal(prop)
 						case "clients":
 							// #4289: Junos `clients` source-IP allowlist.
-							// parseSNMPClients handles both AST shapes and the
+							// parseSNMPClientsDetailed handles both AST shapes and the
 							// per-entry `restrict` modifier. Accumulate so a
 							// clients block split across load-merge / flat-set
 							// replays is not dropped.
-							blockClients = append(blockClients, parseSNMPClients(prop)...)
+							parsed := parseSNMPClientsDetailed(prop)
+							blockClients = append(blockClients, parsed.clients...)
+							blockMalformedStatements = append(
+								blockMalformedStatements, parsed.malformedStatements...)
 						}
 					}
 					// Flat form: the whole community body can arrive packed onto
@@ -528,10 +537,9 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 					// success. Splitting the same statements across two `set` lines
 					// enforced correctly, so the difference was a line break.
 					//
-					// The run after `clients` is handed to parseSNMPClients rather
-					// than parsed here, so the `restrict` modifier and the #5898
-					// orphan-`restrict` fail-closed path behave identically to the
-					// braced spelling instead of being reimplemented beside them.
+					// The run after `clients` uses parseSNMPClientsDetailed, so
+					// the `restrict` modifier and #5898 orphan-qualifier path behave
+					// identically to the braced spelling instead of being reimplemented.
 					//
 					// #9416: `client-list-name` and `routing-instance` are cut
 					// points here for the same reason they are descent keywords
@@ -569,7 +577,10 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 								j++
 							}
 							run := append([]string{"clients"}, child.Keys[i+1:j]...)
-							blockClients = append(blockClients, parseSNMPClients(&Node{Keys: run})...)
+							parsed := parseSNMPClientsDetailed(&Node{Keys: run})
+							blockClients = append(blockClients, parsed.clients...)
+							blockMalformedStatements = append(
+								blockMalformedStatements, parsed.malformedStatements...)
 							i = j - 1
 						}
 					}
@@ -603,7 +614,8 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 					// earlier block's entries were already validated (and, strict,
 					// would have aborted), so re-validating the accumulated list
 					// would double-report the same warning.
-					clientWarnings, blockMalformed, err := validateSNMPClients(blockClients, lenient)
+					clientWarnings, blockMalformed, err := validateSNMPClients(
+						blockClients, blockMalformedStatements, lenient)
 					if err != nil {
 						return err
 					}

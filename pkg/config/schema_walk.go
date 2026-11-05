@@ -70,12 +70,18 @@ func findNestedMultiValueContentError(nodes []*Node, parent *schemaNode, path []
 			continue
 		}
 		if childSchema.refuseNonLeafBlockChildren {
-			leafPath := append(path, keyword)
-			for _, child := range node.Children {
+			err := forEachSNMPClientRestrictionValue(node, func(instance, child *Node) error {
 				if child == nil || len(child.Keys) == 0 || (len(child.Children) == 0 && child.IsLeaf) {
-					continue
+					return nil
+				}
+				leafPath := append(append([]string(nil), path...), keyword)
+				if instance != nil {
+					leafPath = append(leafPath, instance.Keys[0])
 				}
 				return nestedListContentErrorf(leafPath, keyword, child.Keys[0])
+			})
+			if err != nil {
+				return err
 			}
 			continue
 		}
@@ -166,12 +172,18 @@ func findNestedListContentError(nodes []*Node, parent *schemaNode, path []string
 			continue
 		}
 		if childSchema.refuseNonLeafBlockChildren {
-			leafPath := append(append([]string(nil), path...), keyword)
-			for _, child := range node.Children {
+			err := forEachSNMPClientRestrictionValue(node, func(instance, child *Node) error {
 				if child == nil || len(child.Keys) == 0 || (len(child.Children) == 0 && child.IsLeaf) {
-					continue
+					return nil
+				}
+				leafPath := append(append([]string(nil), path...), keyword)
+				if instance != nil {
+					leafPath = append(leafPath, instance.Keys[0])
 				}
 				return nestedListContentErrorf(leafPath, keyword, child.Keys[0])
+			})
+			if err != nil {
+				return err
 			}
 			continue
 		}
@@ -704,35 +716,66 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// reader may consume only Keys[0] per block child, so refuse the sixth
 	// spelling `leaf { v1 v2; }` instead of blessing a trailing value the
 	// reader silently drops. The sole exception is the explicitly marked
-	// SNMP client-restriction family: parseSNMPClients consumes every child
-	// key and pairs `restrict` with its preceding prefix (#18844). This flag
-	// is intentionally not allChildKeysAreValues: the census found 178
+	// SNMP client-restriction family: packed block children are one prefix plus
+	// optional trailing `restrict`; a one-token `restrict` child remains the
+	// established postfix qualifier. A packed `restrict <prefix>` child is
+	// rejected rather than paired backward.
+	// This flag is intentionally not allChildKeysAreValues: the census found 178
 	// candidate leaves, including proxy-arp `address`, which keeps only the
 	// first key per block child.
 	// Nested block children remain refused where refuseNonLeafBlockChildren
 	// is set.
 	if childSchema.multi && childSchema.children == nil && exactMatch {
-		for _, c := range node.Children {
+		visit := func(instance, c *Node) error {
 			if c == nil || len(c.Keys) == 0 {
-				continue
+				return nil
+			}
+			leafPath := append(append([]string(nil), path...), keyword)
+			if instance != nil {
+				leafPath = append(leafPath, instance.Keys[0])
 			}
 			if childSchema.refuseNonLeafBlockChildren && (len(c.Children) > 0 || !c.IsLeaf) {
-				leafPath := append(append([]string(nil), path...), keyword)
 				err := nestedListContentErrorf(leafPath, keyword, c.Keys[0])
 				if vc.recordTypedLeaf(err) {
-					continue
+					return nil
 				}
 				return err
 			}
-			if len(c.Keys) <= 1 || childSchema.snmpClientRestrictionList {
-				continue
+			if childSchema.snmpClientRestrictionList {
+				if !snmpClientRestrictionStatementKeysAllowed(c.Keys) {
+					err := typedLeafErrorf(
+						leafPath,
+						"each statement must contain one prefix and an optional trailing \"restrict\" qualifier: %q",
+						strings.Join(c.Keys, " "))
+					if vc.recordTypedLeaf(err) {
+						return nil
+					}
+					return err
+				}
+				return nil
 			}
-			leafPath := append(append([]string(nil), path...), keyword)
-			err := typedLeafErrorf(leafPath, "only one value per statement inside a value block; write %q as separate statements (%s { %s; %s; }) or a bracket list (%s [ %s %s ])", strings.Join(c.Keys, " "), keyword, c.Keys[0], c.Keys[1], keyword, c.Keys[0], c.Keys[1])
+			if len(c.Keys) <= 1 {
+				return nil
+			}
+			err := typedLeafErrorf(
+				leafPath,
+				"only one value per statement inside a value block; write %q as separate statements (%s { %s; %s; }) or a bracket list (%s [ %s %s ])",
+				strings.Join(c.Keys, " "), keyword, c.Keys[0], c.Keys[1], keyword, c.Keys[0], c.Keys[1])
 			if vc.recordTypedLeaf(err) {
-				continue
+				return nil
 			}
 			return err
+		}
+		if childSchema.snmpClientRestrictionList {
+			if err := forEachSNMPClientRestrictionValue(node, visit); err != nil {
+				return err
+			}
+		} else {
+			for _, c := range node.Children {
+				if err := visit(nil, c); err != nil {
+					return err
+				}
+			}
 		}
 	}
 

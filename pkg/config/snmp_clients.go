@@ -3,8 +3,8 @@ package config
 import (
 	"fmt"
 	"net"
+	"strings"
 )
-
 // SNMP community `clients` source-IP restriction (#4289).
 //
 // Junos `snmp community <c> clients { <prefix> [restrict]; ... }` scopes a
@@ -12,7 +12,7 @@ import (
 // only `authorization` and served every source, so a community scoped to a
 // management subnet was queryable from anywhere — the restriction was silently
 // ignored (a security fail-open). The compiler now captures the allowlist
-// (parseSNMPClients) and the SNMP agent enforces it before serving a v2c
+// (parseSNMPClientsDetailed) and the SNMP agent enforces it before serving a v2c
 // request (AllowsSource).
 //
 // #4711: the `clients` prefixes are parsed ONCE at config-compile time into
@@ -185,47 +185,82 @@ func parseClientPrefix(s string) (net.IP, *net.IPNet, error) {
 	return ip, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, nil
 }
 
-// parseSNMPClients extracts the `clients` allowlist from a community's `clients`
-// node, across both parser AST shapes (the #2419 dual-shape class). Each entry
-// is a `<prefix> [restrict]` group: a token equal to "restrict" attaches to the
-// prefix immediately preceding it (modeled on firewallPrefixListRefs's
-// `<name> [except]` handling).
-//
-//   - hierarchical block   `clients { 10.0.0.0/24; 0.0.0.0/0 restrict; }`
-//     → one child node per entry (child.Keys=["10.0.0.0/24"] / ["0.0.0.0/0","restrict"])
-//   - flat set / bracket   `clients 10.0.0.0/24` / `clients [ a b ]`
-//     → tokens on node.Keys[1:]
-func parseSNMPClients(node *Node) []SNMPClient {
-	var out []SNMPClient
-	appendTokens := func(tokens []string) {
+type snmpClientParseResult struct {
+	clients             []SNMPClient
+	malformedStatements []string
+}
+
+// parseSNMPClientsDetailed extracts a community's `clients` allowlist across
+// both parser AST shapes. Flat/bracketed Keys are a multi-entry run. A one-token
+// `restrict` child is the established postfix form and qualifies the
+// immediately preceding prefix; a packed child beginning with `restrict` plus
+// another value is malformed and never attaches backwards.
+func parseSNMPClientsDetailed(node *Node) snmpClientParseResult {
+	var parsed snmpClientParseResult
+	if node == nil {
+		return parsed
+	}
+	appendTokens := func(tokens []string, blockStatement bool) {
+		if len(tokens) == 0 {
+			return
+		}
+		malformed := false
+		recordMalformed := func() {
+			if malformed {
+				return
+			}
+			malformed = true
+			parsed.malformedStatements = append(parsed.malformedStatements, strings.Join(tokens, " "))
+		}
+		if blockStatement && !snmpClientRestrictionStatementKeysAllowed(tokens) {
+			recordMalformed()
+		}
+		lastPrefix := -1
+		restrictAttached := false
 		for _, t := range tokens {
 			if t == "" {
 				continue
 			}
-			if t == "restrict" && len(out) > 0 {
-				out[len(out)-1].Restrict = true
+			if t == "restrict" {
+				if lastPrefix >= 0 && !restrictAttached {
+					parsed.clients[lastPrefix].Restrict = true
+					restrictAttached = true
+					continue
+				}
+				// Keep an orphan/repeated qualifier visible as an invalid
+				// entry as well as recording the malformed statement. Strict
+				// compilation rejects it; lenient compilation quarantines it.
+				parsed.clients = append(parsed.clients, SNMPClient{Prefix: t})
+				recordMalformed()
 				continue
 			}
-			// #5898: a leading/orphan `restrict` (t == "restrict" with no
-			// preceding prefix to modify — an invalid-Junos-ordering typo like
-			// `clients restrict 0.0.0.0/0`) previously fell into the branch above
-			// and was SILENTLY DROPPED, leaving the following prefix a plain
-			// ALLOW — an SNMP community answerable from every source, with nothing
-			// recorded so #5833's quarantine never engaged. Do NOT drop it: record
-			// it AS a client entry. "restrict" is not a valid IP/CIDR, so
-			// validateSNMPClients flags it MALFORMED — strict commit hard-rejects
-			// it (naming the token) and the lenient / peer-sync path QUARANTINES
-			// the community to deny-all (snmpQuarantineClientNets) — fail-closed,
-			// on both paths (the bug was identical on both). A well-formed
-			// `<prefix> restrict` (len(out) > 0) still attaches above, unchanged.
-			out = append(out, SNMPClient{Prefix: t})
+			parsed.clients = append(parsed.clients, SNMPClient{Prefix: t})
+			lastPrefix = len(parsed.clients) - 1
+			restrictAttached = false
 		}
 	}
-	appendTokens(node.Keys[1:])
+	appendTokens(node.Keys[1:], false)
 	for _, ch := range node.Children {
-		appendTokens(ch.Keys)
+		if ch == nil {
+			continue
+		}
+		// Preserve the existing qualifier-only child form (`prefix; restrict;`)
+		// without treating a packed `restrict <prefix>` child as a postfix.
+		// The latter falls through to appendTokens, which records it malformed
+		// and keeps `restrict` from modifying a prefix in another child.
+		if len(ch.Keys) == 1 && ch.Keys[0] == "restrict" {
+			last := len(parsed.clients) - 1
+			if last >= 0 && parsed.clients[last].Prefix != "restrict" && !parsed.clients[last].Restrict {
+				parsed.clients[last].Restrict = true
+				continue
+			}
+			parsed.clients = append(parsed.clients, SNMPClient{Prefix: "restrict"})
+			parsed.malformedStatements = append(parsed.malformedStatements, "restrict")
+			continue
+		}
+		appendTokens(ch.Keys, true)
 	}
-	return out
+	return parsed
 }
 
 // validateSNMPClients (#4834) rejects a `clients` allowlist entry whose
@@ -233,7 +268,7 @@ func parseSNMPClients(node *Node) []SNMPClient {
 //
 // A mistyped *prefix* is already fail-closed on its own: compileClientNets
 // silently drops the unparseable entry, which only ever shrinks the
-// allowlist. But parseSNMPClients treats ANY token that is not the exact
+// allowlist. But parseSNMPClientsDetailed treats ANY token that is not the exact
 // literal "restrict" as a new prefix entry — so a mistyped "restrict"
 // keyword (e.g. "restric") does not attach to the prefix immediately
 // before it and instead becomes its OWN unparseable entry. That silently
@@ -260,9 +295,26 @@ func parseSNMPClients(node *Node) []SNMPClient {
 // (snmpQuarantineClientNets) instead. The warning is preserved either way.
 //
 // The message never includes the community NAME (a secret, per the
-// snmpInertKnobWarnings convention) — only the offending token, which is
-// an IP/CIDR literal or a keyword typo, not a credential.
-func validateSNMPClients(clients []SNMPClient, lenient bool) (warnings []string, malformed bool, err error) {
+// snmpInertKnobWarnings convention) — only offending prefix/qualifier tokens,
+// not a credential.
+func validateSNMPClients(
+	clients []SNMPClient,
+	malformedStatements []string,
+	lenient bool,
+) (warnings []string, malformed bool, err error) {
+	for _, statement := range malformedStatements {
+		malformed = true
+		msg := fmt.Sprintf(
+			"snmp community clients statement %q must contain one prefix and an "+
+				"optional trailing \"restrict\" qualifier",
+			statement)
+		if lenient {
+			warnings = append(warnings, msg+
+				" (the affected community is quarantined to deny-all until the statement is fixed)")
+			continue
+		}
+		return nil, true, fmt.Errorf("%s", msg)
+	}
 	for _, cl := range clients {
 		if _, _, perr := parseClientPrefix(cl.Prefix); perr == nil {
 			continue
@@ -276,7 +328,8 @@ func validateSNMPClients(clients []SNMPClient, lenient bool) (warnings []string,
 				"unrestricted allow)",
 			cl.Prefix)
 		if lenient {
-			warnings = append(warnings, msg+" (the affected community is quarantined to deny-all until the typo is fixed)")
+			warnings = append(warnings, msg+
+				" (the affected community is quarantined to deny-all until the typo is fixed)")
 			continue
 		}
 		return nil, true, fmt.Errorf("%s", msg)

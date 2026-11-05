@@ -60,23 +60,56 @@ import (
 // flat/bracketed spelling and `["client-list", "<name>"]` in the braced one,
 // where the prefixes are Children. Keys[2:] is therefore the prefix run and
 // Keys[1] is the list NAME -- reading from Keys[1] would silently make the list
-// name its own first prefix, which parseClientPrefix would reject as malformed
-// and which would quarantine every referencing community.
+// name its own first prefix.
 //
-// The `<prefix> [restrict]` pairing is delegated to parseSNMPClients, NOT
-// reimplemented, so the #5898 orphan-`restrict` fail-closed behaviour and the
-// #5833 malformed-token quarantine reach the named list identically to the
-// inline one. A named list is where a `restrict` typo is MORE dangerous, not
-// less: one list backs every community that references it.
+// Each packed block child is a separate statement with one prefix and an
+// optional trailing `restrict`; a one-token `restrict` child remains the
+// established postfix qualifier for the immediately preceding prefix. A
+// packed child beginning `restrict <prefix>` is malformed and cannot attach
+// backward. Flat/bracketed runs remain multi-entry sequences.
 func parseSNMPClientListPrefixes(node *Node) []SNMPClient {
+	return parseSNMPClientListPrefixesDetailed(node).clients
+}
+
+func parseSNMPClientListPrefixesDetailed(node *Node) snmpClientParseResult {
 	if node == nil || len(node.Keys) < 2 {
-		return nil
+		return snmpClientParseResult{}
 	}
-	// parseSNMPClients reads Keys[1:] and every child's Keys, so hand it a node
-	// whose Keys[0] is a placeholder and whose Keys[1:] is the prefix run.
 	run := append([]string{"clients"}, node.Keys[2:]...)
 	synth := &Node{Keys: run, Children: node.Children}
-	return parseSNMPClients(synth)
+	return parseSNMPClientsDetailed(synth)
+}
+
+func snmpClientRestrictionStatementKeysAllowed(keys []string) bool {
+	return len(keys) <= 1 || (len(keys) == 2 && keys[1] == "restrict")
+}
+
+// forEachSNMPClientRestrictionValue visits one-level client-list values and
+// peels the named identity in `client-list { <name> { <prefix> ... } }`.
+// The instance is nil for inline values and one-level named-list values.
+func forEachSNMPClientRestrictionValue(node *Node, visit func(instance, value *Node) error) error {
+	if node == nil {
+		return nil
+	}
+	if node.Name() == "client-list" && len(node.Keys) == 1 {
+		for _, instance := range node.Children {
+			if instance == nil || len(instance.Keys) == 0 {
+				continue
+			}
+			for _, value := range instance.Children {
+				if err := visit(instance, value); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	for _, value := range node.Children {
+		if err := visit(nil, value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // snmpClientListName reads the list name a `client-list` node declares, or ""
