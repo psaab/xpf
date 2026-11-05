@@ -1114,3 +1114,35 @@ func TestBootKeyedPeerClearWithoutAnchorStaysExpired16016(t *testing.T) {
 		t.Fatalf("keyed-boot peer clear did not persist its expired cutoff: %v", err)
 	}
 }
+func TestUnkeyedGraceExpiredStatusSurfacesLocalReArm16016(t *testing.T) {
+	m, clock, path := setupAuthorityManager16016(t)
+	clock.advance(73 * time.Hour)
+	expiredStatus := m.unkeyedAuthorityGraceStatus()
+	for _, want := range []string{
+		"expired at",
+		"key the cluster",
+		"RTC was wrong",
+		"request chassis cluster unkeyed-grace restart",
+	} {
+		if !strings.Contains(expiredStatus, want) {
+			t.Errorf("expired grace status %q missing %q", expiredStatus, want)
+		}
+	}
+
+	if err := os.WriteFile(path, []byte("corrupt anchor\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clock.setMono(int64(time.Second))
+	restarted := NewManager(0, 1)
+	restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
+	corruptStatus := restarted.unkeyedAuthorityGraceStatus()
+	for _, want := range []string{
+		"corrupt",
+		"RTC was wrong",
+		"request chassis cluster unkeyed-grace restart",
+	} {
+		if !strings.Contains(corruptStatus, want) {
+			t.Errorf("corrupt grace status %q missing %q", corruptStatus, want)
+		}
+	}
+}

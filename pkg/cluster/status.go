@@ -966,15 +966,16 @@ func (m *Manager) unkeyedAuthorityGraceStatus() string {
 		suffix = "; anchor not persisted, expiry is enforced only until restart"
 	}
 	if m.UnkeyedAuthorityExpired() {
+		rearmHint := "; if the RTC was wrong, correct the clock and run the local audited request chassis cluster unkeyed-grace restart"
 		if m.UnkeyedGraceAnchorCorrupt() {
-			return "expired at boot (persisted grace anchor is corrupt; key the cluster to recover)"
+			return "expired at boot (persisted grace anchor is corrupt; key the cluster to recover" + rearmHint + ")"
 		}
 		expiry := m.UnkeyedGraceExpiry()
 		if expiry.IsZero() {
-			return "expired (unkeyed authority refused; key the cluster to recover)" + suffix
+			return "expired (unkeyed authority refused; key the cluster to recover" + rearmHint + ")" + suffix
 		}
-		return fmt.Sprintf("expired at %s (unauthenticated authority refused; key the cluster to recover%s)",
-			expiry.Format(time.RFC3339), suffix)
+		return fmt.Sprintf("expired at %s (unauthenticated authority refused; key the cluster to recover%s%s)",
+			expiry.Format(time.RFC3339), suffix, rearmHint)
 	}
 	expiry := m.UnkeyedGraceExpiry()
 	if expiry.IsZero() {
