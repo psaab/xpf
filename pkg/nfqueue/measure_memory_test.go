@@ -50,7 +50,7 @@ func TestMeasureMemory9506(t *testing.T) {
 	if err != nil {
 		t.Fatalf("M2 sender: %v", err)
 	}
-	t.Logf("M2 measured sender SO_SNDBUF effective=%d wmem_max=%d", effectiveSndBuf, readWmemMax())
+	t.Logf("M2 measured sender SO_SNDBUF effective=%d", effectiveSndBuf)
 	defer sender.Close()
 
 	before := memoryNow()

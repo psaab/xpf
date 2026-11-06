@@ -183,11 +183,10 @@ func openTestSender() (net.Conn, error) {
 	return net.Dial("udp4", fmt.Sprintf("127.0.0.1:%d", harnessUDPPort))
 }
 
-// errMeasuredSenderSndBuf marks the measured-sender failures that mean
-// "this host cannot give the M2 sender a usable SO_SNDBUF" (request
-// refused, read-back failed, or the effective buffer is below the
-// floor). TestMeasureMemory9506 turns exactly these into a Skip before
-// any traffic; other dial failures stay Fatal.
+// errMeasuredSenderSndBuf marks only a successfully requested/read-back
+// sender whose effective SO_SNDBUF is below the M2 acceptance floor.
+// TestMeasureMemory9506 turns this condition into a Skip before traffic;
+// inability to read wmem_max or configure/read the socket remains fatal.
 var errMeasuredSenderSndBuf = errors.New("nfqueue harness: insufficient SO_SNDBUF for measured sender")
 
 const (
@@ -214,17 +213,17 @@ const (
 // (212992) the M2 hold writes stall at ~212 KB before any assertion
 // runs; the production queue fd's own 1<<22 buffers (Open) are not the
 // constraint and are not touched. The buffer is requested through the
-// dialer's Control (pre-connect) and again via SetWriteBuffer, the
-// effective value is read back, and a buffer below
-// measuredMemoryMinSndBuf fails with errMeasuredSenderSndBuf so the
-// caller can Skip — naming SO_SNDBUF/wmem_max — before sending any
-// traffic, instead of stalling or silently measuring under different
-// conditions. Do not route other tests through here: M1's flow senders
-// and M3's single-held-packet sender keep default buffers on purpose.
+// dialer's Control (pre-connect) and again via SetWriteBuffer, then the
+// effective value is read back. Socket setup/read-back errors are fatal;
+// only a verified effective value below measuredMemoryMinSndBuf returns
+// errMeasuredSenderSndBuf, which lets the caller Skip before traffic rather
+// than stalling or silently measuring under different conditions. Do not
+// route other tests through here: M1's flow senders and M3's single-held
+// packet sender keep default buffers on purpose.
 func openMeasuredMemorySender() (net.Conn, int, error) {
-	wmemMax := readWmemMax()
-	if wmemMax <= 0 {
-		return nil, 0, fmt.Errorf("cannot read /proc/sys/net/core/wmem_max: %w", errMeasuredSenderSndBuf)
+	wmemMax, err := readWmemMax()
+	if err != nil {
+		return nil, 0, fmt.Errorf("read /proc/sys/net/core/wmem_max: %w", err)
 	}
 	request := measuredMemorySndBufRequest
 	if wmemMax < request {
@@ -236,10 +235,10 @@ func openMeasuredMemorySender() (net.Conn, int, error) {
 			if err := c.Control(func(fd uintptr) {
 				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, request)
 			}); err != nil {
-				return fmt.Errorf("set SO_SNDBUF within wmem_max %d: %w: %w", wmemMax, err, errMeasuredSenderSndBuf)
+				return fmt.Errorf("set SO_SNDBUF within wmem_max %d: %w", wmemMax, err)
 			}
 			if opErr != nil {
-				return fmt.Errorf("set SO_SNDBUF request %d within wmem_max %d: %w: %w", request, wmemMax, opErr, errMeasuredSenderSndBuf)
+				return fmt.Errorf("set SO_SNDBUF request %d within wmem_max %d: %w", request, wmemMax, opErr)
 			}
 			return nil
 		},
@@ -257,12 +256,12 @@ func openMeasuredMemorySender() (net.Conn, int, error) {
 	// connected socket; the read-back below is what is trusted.
 	if err := udpConn.SetWriteBuffer(request); err != nil {
 		_ = conn.Close()
-		return nil, 0, fmt.Errorf("measured sender SO_SNDBUF request %d within wmem_max %d: %w: %w", request, wmemMax, err, errMeasuredSenderSndBuf)
+		return nil, 0, fmt.Errorf("measured sender SO_SNDBUF request %d within wmem_max %d: %w", request, wmemMax, err)
 	}
 	effective, err := socketSndBuf(udpConn)
 	if err != nil {
 		_ = conn.Close()
-		return nil, 0, fmt.Errorf("measured sender SO_SNDBUF read-back (requested %d, wmem_max %d): %w: %w", request, wmemMax, err, errMeasuredSenderSndBuf)
+		return nil, 0, fmt.Errorf("measured sender SO_SNDBUF read-back (requested %d, wmem_max %d): %w", request, wmemMax, err)
 	}
 	if effective < measuredMemoryMinSndBuf {
 		_ = conn.Close()
@@ -271,17 +270,21 @@ func openMeasuredMemorySender() (net.Conn, int, error) {
 	return conn, effective, nil
 }
 
-// readWmemMax returns net.core.wmem_max, or 0 when it cannot be read.
-func readWmemMax() int {
+// readWmemMax returns net.core.wmem_max, failing if its value cannot be read
+// or parsed; a missing ceiling must not silently turn M2 into a skipped pass.
+func readWmemMax() (int, error) {
 	data, err := os.ReadFile("/proc/sys/net/core/wmem_max")
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || n <= 0 {
-		return 0
+	if err != nil {
+		return 0, fmt.Errorf("parse /proc/sys/net/core/wmem_max: %w", err)
 	}
-	return n
+	if n <= 0 {
+		return 0, fmt.Errorf("invalid /proc/sys/net/core/wmem_max value %d", n)
+	}
+	return n, nil
 }
 
 func socketSndBuf(conn *net.UDPConn) (int, error) {

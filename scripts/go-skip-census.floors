@@ -160,7 +160,14 @@
 # Merge composition (#18751 + #18728): total 607 +1 +3 = 611
 # (priv-absent 120 +1 (#18751 fabric kernel) +1 (#18728 netns) = 122;
 # other 468 +2 (#18728 tool-gated) = 470).
-total        = 611
+# #18846-G58 adds one `other` skip site in
+# pkg/nfqueue/measure_memory_test.go: after a successful SO_SNDBUF
+# request/read-back, M2 skips if the effective value is below the tested
+# 8 MiB floor. The unmodified base already measured 675 total (139
+# priv-absent, 517 other) against the existing 611/122/470 floors. This
+# update banks only G58's +1 total/+1 other; that pre-existing drift remains
+# unbanked.
+total        = 612
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
@@ -169,7 +176,7 @@ priv-absent  = 122
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 470
+other        = 471
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket
