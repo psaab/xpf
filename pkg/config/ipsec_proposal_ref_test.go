@@ -85,6 +85,7 @@ func TestIPsecPolicyResolvableProposalAccepted(t *testing.T) {
 		"set security ipsec policy ipsec-pol proposals esp-p2",
 		"set security ipsec vpn tun1 ike gateway gw1",
 		"set security ipsec vpn tun1 bind-interface st0",
+		"set security ipsec vpn tun1 pre-shared-key ascii-text fixture-secret",
 		"set security ipsec vpn tun1 ike ipsec-policy ipsec-pol",
 	})
 	cfg, err := CompileConfig(tree)
@@ -116,6 +117,7 @@ func TestIPsecPolicyNameEqualsProposalAccepted(t *testing.T) {
 		"set security ipsec policy ipsec-pol perfect-forward-secrecy keys group14",
 		"set security ipsec vpn tun1 ike gateway gw1",
 		"set security ipsec vpn tun1 bind-interface st0",
+		"set security ipsec vpn tun1 pre-shared-key ascii-text fixture-secret",
 		"set security ipsec vpn tun1 ike ipsec-policy ipsec-pol",
 	})
 	if _, err := CompileConfig(tree); err != nil {
@@ -131,6 +133,7 @@ func TestIPsecNoPolicyAccepted(t *testing.T) {
 		"set security ike gateway gw1 address 192.0.2.1",
 		"set security ipsec vpn tun1 ike gateway gw1",
 		"set security ipsec vpn tun1 bind-interface st0",
+		"set security ipsec vpn tun1 pre-shared-key ascii-text fixture-secret",
 	})
 	if _, err := CompileConfig(tree); err != nil {
 		t.Fatalf("CompileConfig rejected a VPN with no IPsec policy: %v", err)

@@ -2293,6 +2293,8 @@ func TestCompileClassOfServiceBindOnlyTunnelWarningIsNarrow11788(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			lines := []string{
 				"set security ipsec vpn vpn1 bind-interface st0.1",
+				"set security ipsec vpn vpn1 gateway 192.0.2.1",
+				"set security ipsec vpn vpn1 pre-shared-key ascii-text fixture-secret",
 				"set class-of-service interfaces st0 unit 1 shaping-rate 3g",
 				"set system dataplane-type userspace",
 			}

@@ -1911,6 +1911,7 @@ func TestIPsecTrafficSelectorSyntax(t *testing.T) {
     ipsec {
         vpn site-a {
             bind-interface st0.0;
+            gateway 203.0.113.1;
             pre-shared-key fixture-secret;
             traffic-selector corp-a {
                 local-ip 10.0.1.0/24;
@@ -1949,6 +1950,7 @@ func TestIPsecTrafficSelectorSyntax(t *testing.T) {
 
 func TestIKEGatewayLocalCertificateAndTrafficSelectorSetSyntax(t *testing.T) {
 	setCommands := []string{`set security ike gateway gw1 address 203.0.113.1`, `set security ike gateway gw1 local-certificate gw-cert.pem`, `set security ike gateway gw1 dead-peer-detection optimized`, `set security ike gateway gw1 dead-peer-detection interval 7`, `set security ike gateway gw1 dead-peer-detection threshold 3`, `set security ipsec vpn site-a bind-interface st0.0`, `set security ipsec vpn site-a traffic-selector corp-a local-ip 10.0.1.0/24`, `set security ipsec vpn site-a traffic-selector corp-a remote-ip 10.10.1.0/24`}
+	setCommands = append(setCommands, `set security ipsec vpn site-a gateway gw1`, `set security ipsec vpn site-a pre-shared-key ascii-text fixture-secret`)
 	tree := &ConfigTree{}
 	for _, cmd := range setCommands {
 		path, err := ParseSetCommand(cmd)
@@ -5836,6 +5838,7 @@ func TestIPsecDFBitSetSyntaxCompile(t *testing.T) {
 		cmds := []string{
 			"set security ipsec vpn tun bind-interface st0.0",
 			"set security ipsec vpn tun pre-shared-key fixture-secret",
+			"set security ipsec vpn tun gateway 192.0.2.1",
 			"set security ipsec vpn tun df-bit " + mode,
 		}
 		for _, cmd := range cmds {

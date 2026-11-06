@@ -74,6 +74,8 @@ func TestZoneInterfaceDynamicUnitCommits12827(t *testing.T) {
 			name: "bound st0.0 with interfaces st0 unit 9 authored",
 			cmds: []string{
 				"set security ipsec vpn myvpn bind-interface st0.0",
+				"set security ipsec vpn myvpn gateway 192.0.2.1",
+				"set security ipsec vpn myvpn pre-shared-key ascii-text fixture-secret",
 				"set interfaces st0 unit 9 family inet address 10.9.0.1/30",
 				"set security zones security-zone vpn interfaces st0.0",
 			},
@@ -82,6 +84,8 @@ func TestZoneInterfaceDynamicUnitCommits12827(t *testing.T) {
 			name: "bound st0.0 expressed as bare bind st0",
 			cmds: []string{
 				"set security ipsec vpn myvpn bind-interface st0",
+				"set security ipsec vpn myvpn gateway 192.0.2.1",
+				"set security ipsec vpn myvpn pre-shared-key ascii-text fixture-secret",
 				"set security zones security-zone vpn interfaces st0.0",
 			},
 		},
@@ -89,6 +93,8 @@ func TestZoneInterfaceDynamicUnitCommits12827(t *testing.T) {
 			name: "bound st0.1 with no interfaces st0 stanza",
 			cmds: []string{
 				"set security ipsec vpn myvpn bind-interface st0.1",
+				"set security ipsec vpn myvpn gateway 192.0.2.1",
+				"set security ipsec vpn myvpn pre-shared-key ascii-text fixture-secret",
 				"set security zones security-zone vpn interfaces st0.1",
 			},
 		},
@@ -103,6 +109,8 @@ func TestZoneInterfaceDynamicUnitCommits12827(t *testing.T) {
 			name: "canonical alias st0.00 of bound st0.0",
 			cmds: []string{
 				"set security ipsec vpn myvpn bind-interface st0.0",
+				"set security ipsec vpn myvpn gateway 192.0.2.1",
+				"set security ipsec vpn myvpn pre-shared-key ascii-text fixture-secret",
 				"set security zones security-zone vpn interfaces st0.00",
 			},
 		},
@@ -110,6 +118,8 @@ func TestZoneInterfaceDynamicUnitCommits12827(t *testing.T) {
 			name: "configured unit of bound base still accepted",
 			cmds: []string{
 				"set security ipsec vpn myvpn bind-interface st0.0",
+				"set security ipsec vpn myvpn gateway 192.0.2.1",
+				"set security ipsec vpn myvpn pre-shared-key ascii-text fixture-secret",
 				"set interfaces st0 unit 7 family inet address 10.9.0.1/30",
 				"set security zones security-zone vpn interfaces st0.7",
 			},
@@ -117,6 +127,8 @@ func TestZoneInterfaceDynamicUnitCommits12827(t *testing.T) {
 		{
 			name: "ordinary configured physical unit unchanged",
 			cmds: []string{
+				"set interfaces ge-0/0/0 vlan-tagging",
+				"set interfaces ge-0/0/0 unit 3 vlan-id 3",
 				"set interfaces ge-0/0/0 unit 3 family inet sampling input",
 				"set security zones security-zone trust interfaces ge-0/0/0.3",
 			},

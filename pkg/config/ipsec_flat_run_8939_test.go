@@ -230,6 +230,22 @@ func TestIPsecTrafficSelectorGateReadsTheRun8939(t *testing.T) {
 	const cmd = "set security ipsec vpn v1 traffic-selector ts1 " +
 		"local-ip 10.0.0.0/8 remote-ip 172.16.0.0/12"
 	const bind = "set security ipsec vpn v1 bind-interface st0"
+	const gateway = "set security ipsec vpn v1 gateway 192.0.2.1"
+	pg, err := ParseSetCommand(gateway)
+	if err != nil {
+		t.Fatalf("ParseSetCommand(%q): %v", gateway, err)
+	}
+	if err := tree.SetPath(pg); err != nil {
+		t.Fatalf("SetPath(%q): %v", gateway, err)
+	}
+	const psk = "set security ipsec vpn v1 pre-shared-key ascii-text fixture-secret"
+	pp, err := ParseSetCommand(psk)
+	if err != nil {
+		t.Fatalf("ParseSetCommand(%q): %v", psk, err)
+	}
+	if err := tree.SetPath(pp); err != nil {
+		t.Fatalf("SetPath(%q): %v", psk, err)
+	}
 	pb, err := ParseSetCommand(bind)
 	if err != nil {
 		t.Fatalf("ParseSetCommand(%q): %v", bind, err)

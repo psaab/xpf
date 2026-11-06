@@ -226,11 +226,17 @@ func TestIPsecSelectorHelperSupportedMaskPaddingIsCanonical12507(t *testing.T) {
 		"set security ipsec vpn v4 bind-interface st0",
 		"set security ipsec vpn v4 traffic-selector t1 local-ip 10.0.0.0/08",
 		"set security ipsec vpn v4 traffic-selector t1 remote-ip 192.0.2.0/24",
+		"set security ipsec vpn v4 gateway 192.0.2.1",
+		"set security ipsec vpn v4 pre-shared-key ascii-text fixture-secret",
 		"set security ipsec vpn v6 bind-interface st1",
 		"set security ipsec vpn v6 traffic-selector t1 local-ip 2001:db8::/032",
 		"set security ipsec vpn v6 traffic-selector t1 remote-ip 2001:db8:ffff::/048",
 		"set security ipsec vpn id bind-interface st2",
 		"set security ipsec vpn id local-identity 10.1.0.0/09",
+		"set security ipsec vpn v6 gateway 192.0.2.2",
+		"set security ipsec vpn v6 pre-shared-key ascii-text fixture-secret",
+		"set security ipsec vpn id gateway 192.0.2.3",
+		"set security ipsec vpn id pre-shared-key ascii-text fixture-secret",
 	})
 	if err != nil {
 		t.Fatalf("strict commit must accept helper-supported selector padding: %v", err)

@@ -394,6 +394,7 @@ func TestClosedWorldSecurity10078_DirectIPsecVPNLeaves(t *testing.T) {
         }
         policy esp-pol { proposals esp-p1; }
         vpn tun1 gateway gw1 ipsec-policy esp-pol;
+        vpn tun1 pre-shared-key ascii-text fixture-secret;
         vpn tun1 bind-interface st0;
     }
 }`).Parse()

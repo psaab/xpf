@@ -118,6 +118,7 @@ func TestIKEPolicyResolvableChainAccepted(t *testing.T) {
 		"set security ike proposal ike-aes256 dh-group group14",
 		"set security ike policy ike-pol mode main",
 		"set security ike policy ike-pol proposals ike-aes256",
+		"set security ike policy ike-pol pre-shared-key ascii-text secret123",
 		"set security ike gateway gw1 address 192.0.2.1",
 		"set security ike gateway gw1 ike-policy ike-pol",
 		"set security ipsec vpn tun1 ike gateway gw1",
@@ -142,6 +143,7 @@ func TestIKEGatewayNoPolicyAccepted(t *testing.T) {
 	tree := buildTreeFromSet(t, []string{
 		"set security ike gateway gw1 address 192.0.2.1",
 		"set security ipsec vpn tun1 ike gateway gw1",
+		"set security ipsec vpn tun1 pre-shared-key ascii-text fixture-secret",
 		"set security ipsec vpn tun1 bind-interface st0",
 	})
 	if _, err := CompileConfig(tree); err != nil {

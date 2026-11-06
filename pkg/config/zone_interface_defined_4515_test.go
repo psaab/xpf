@@ -100,6 +100,8 @@ func TestZoneInterfaceLoopbackAcceptedWithoutExplicitDef(t *testing.T) {
 func TestZoneInterfaceIPsecBindInterfaceAcceptedWithoutExplicitDef(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set security ipsec vpn myvpn bind-interface st0.0",
+		"set security ipsec vpn myvpn ike gateway 192.0.2.1",
+		"set security ipsec vpn myvpn pre-shared-key ascii-text fixture-secret",
 		"set security zones security-zone vpn interfaces st0.0",
 	})
 	if _, err := CompileConfig(tree); err != nil {

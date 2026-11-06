@@ -17,11 +17,11 @@ import (
 // already resolves ref.Base == "p.0" with declared-first precedence.
 
 func TestZoneInterfaceBareSt0UnitZeroAlias13110(t *testing.T) {
-	tree := buildTree(t, []string{"set security ipsec vpn myvpn bind-interface st0.0", "set security zones security-zone vpn interfaces st0"})
+	tree := buildTree(t, []string{"set security ipsec vpn myvpn bind-interface st0.0", "set security zones security-zone vpn interfaces st0", "set security ipsec vpn myvpn gateway 192.0.2.1", "set security ipsec vpn myvpn pre-shared-key ascii-text fixture-secret"})
 	if _, err := CompileConfig(tree); err != nil {
 		t.Fatalf("bare st0 must alias explicitly bound unit zero, got %v", err)
 	}
-	tree = buildTree(t, []string{"set security ipsec vpn myvpn bind-interface st0.5", "set security zones security-zone vpn interfaces st0"})
+	tree = buildTree(t, []string{"set security ipsec vpn myvpn bind-interface st0.5", "set security zones security-zone vpn interfaces st0", "set security ipsec vpn myvpn gateway 192.0.2.1", "set security ipsec vpn myvpn pre-shared-key ascii-text fixture-secret"})
 	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "not defined under") {
 		t.Fatalf("bare st0 must not alias nonzero dotted bind st0.5, got %v", err)
 	}
@@ -68,6 +68,8 @@ func TestZoneInterfaceDeclaredDottedAndBareBindCommit13110(t *testing.T) {
 			name: "bare st0 with bare bind-interface st0",
 			cmds: []string{
 				"set security ipsec vpn myvpn bind-interface st0",
+				"set security ipsec vpn myvpn gateway 192.0.2.1",
+				"set security ipsec vpn myvpn pre-shared-key ascii-text fixture-secret",
 				"set security zones security-zone vpn interfaces st0",
 			},
 		},
@@ -75,6 +77,8 @@ func TestZoneInterfaceDeclaredDottedAndBareBindCommit13110(t *testing.T) {
 			name: "bare st0 with interfaces st0 stanza and dotted bind",
 			cmds: []string{
 				"set security ipsec vpn myvpn bind-interface st0.0",
+				"set security ipsec vpn myvpn gateway 192.0.2.1",
+				"set security ipsec vpn myvpn pre-shared-key ascii-text fixture-secret",
 				"set interfaces st0 unit 0 family inet address 10.9.0.1/30",
 				"set security zones security-zone vpn interfaces st0",
 			},
