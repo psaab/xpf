@@ -1,13 +1,45 @@
 package cli
 
 import (
+	"net"
 	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
 )
+
+// dashNamedKernelIfaceForUnit15724 is the #18846 (G18) suffix-aware picker for
+// THIS test only. The fixture authors unit 100, so the kernel device the
+// committed config must name is "<kernel>.100" (4 supplemental bytes), and the
+// #7795 commit gate correctly rejects any derived name over the kernel
+// IFNAMSIZ limit of 15 bytes. The shared dashNamedKernelIface returns the
+// host's FIRST dash-named NIC (here bpfrx-tunnel, 12 bytes; +".100" = 16),
+// which the gate rightly refuses — production is correct, the fixture pick is
+// not. Keep walking the host enumeration for a dash-named candidate with
+// room for the suffix (bpfrx-wan / bpfrx-dmz have it on this host); if none
+// fits, skip naming the missing room. The shared helper is deliberately
+// untouched: unit-0 and +3-byte callers are valid with 12-byte names.
+func dashNamedKernelIfaceForUnit15724(t *testing.T) (junos, kernel string, ok bool) {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", "", false
+	}
+	for _, in := range ifaces {
+		if in.Name == "lo" || !strings.Contains(in.Name, "-") || strings.Contains(in.Name, "/") {
+			continue
+		}
+		j := strings.ReplaceAll(in.Name, "-", "/")
+		if config.LinuxIfName(j) != in.Name || len(in.Name)+len(".100") > 15 {
+			continue
+		}
+		return j, in.Name, true
+	}
+	return "", "", false
+}
 
 // #15724 (V48-01): local `show interfaces [<name>]` looked up DHCP leases
 // by the raw Junos physical name (dhcpLease -> LeaseFor(physName, ...)).
@@ -23,9 +55,9 @@ import (
 // (non-VLAN) key prove the lookup is neither still raw nor keyed by
 // unit number.
 func TestShowInterfacesDHCPLeaseKey15724(t *testing.T) {
-	junos, kernel, ok := dashNamedKernelIface(t)
+	junos, kernel, ok := dashNamedKernelIfaceForUnit15724(t)
 	if !ok {
-		t.Skip("no dash-named host interface available to exercise slash->kernel resolution")
+		t.Skip("no dash-named host interface with room for the .100 unit suffix within the 15-byte IFNAMSIZ limit")
 	}
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
 	if err := store.EnterConfigure(); err != nil {

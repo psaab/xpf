@@ -123,6 +123,12 @@ visible output are byte-identical:
   so the four render modes resolve reth link state / member attrs / lease
   data through one place and can no longer drift.
 
+The `TestShowInterfacesDHCPLeaseKey15724` host fixture selects a dash-named
+interface with room for the `.100` unit suffix within Linux's 15-byte
+`IFNAMSIZ` limit. If the host has no such interface, the test skips with that
+reason; the shared dash-name picker remains unchanged for tests whose suffixes
+fit longer names.
+
 ## `show services` / `show class-of-service` presenters (#4655)
 
 The service-status presenters were historically one 868-line
