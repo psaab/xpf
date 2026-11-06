@@ -285,6 +285,7 @@ func TestRatifiedGatesStillRejectOnCommit_6674(t *testing.T) {
 
 	t.Run("static NAT match list rejected", func(t *testing.T) {
 		_, err := CompileConfig(build(
+			"set security zones security-zone untrust",
 			"set security nat static rule-set rs from zone untrust",
 			"set security nat static rule-set rs rule r1 match destination-address [ 10.6.0.1/32 10.6.0.2/32 ]",
 			"set security nat static rule-set rs rule r1 then static-nat prefix 10.0.1.1/32",
@@ -296,6 +297,7 @@ func TestRatifiedGatesStillRejectOnCommit_6674(t *testing.T) {
 
 	t.Run("static NAT single prefix still commits", func(t *testing.T) {
 		cfg, err := CompileConfig(build(
+			"set security zones security-zone untrust",
 			"set security nat static rule-set rs from zone untrust",
 			"set security nat static rule-set rs rule r1 match destination-address 10.6.0.1/32",
 			"set security nat static rule-set rs rule r1 then static-nat prefix 10.0.1.1/32",

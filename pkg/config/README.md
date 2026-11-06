@@ -1500,6 +1500,15 @@ wildcards. With no zone defined as `any`, the wildcard policies above remain
 legal and unchanged. Other `any` tokens in policy matches (for example,
 `match source-address any` / `match application any`) are unaffected.
 
+**NAT rule-set zone references must be defined (#15001):** strict commit
+rejects source-NAT `from`/`to` zones, destination-NAT `from` zones, and static
+NAT `from` zones that have no corresponding `security zones security-zone`
+definition. This gate was introduced in commit `306f84dc92` to prevent a
+commit/apply split: `compileNAT` cannot resolve an undefined zone and aborts the
+apply. Define the referenced security zones in each committing configuration;
+test fixtures that exercise unrelated NAT behavior must define their zones too.
+Tolerant loads retain the #1960 warning-and-skip behavior for legacy configs.
+
 **NAT rule-set `from`/`to` `interface`/`routing-instance` scope is fully
 enforced (#3096, lifts the #3079/#3095 interim reject):** Junos NAT rule-sets
 scope matched traffic with a `from`/`to` clause taking one of `zone | interface

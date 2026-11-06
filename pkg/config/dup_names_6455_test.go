@@ -248,13 +248,13 @@ apply-groups [ G1 G2 ];`))
 	// Cartesian-expands into TWO same-named NATRuleSet objects at compile time —
 	// one AST instance, not a duplicate.
 	t.Run("bracket-list from-scope expansion (#3096)", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHierText(t, `security {
+		cfg, err := CompileConfig(parseHierText(t, injectHierNATZones15001(`security {
     nat { source { rule-set RS {
         from zone [ trust dmz ];
         to zone untrust;
         rule R1 { then { source-nat { interface; } } }
     } } }
-}`))
+}`)))
 		if err != nil {
 			t.Fatalf("a single bracket-list-scoped rule-set must commit, got: %v", err)
 		}

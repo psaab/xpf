@@ -58,6 +58,8 @@ func warningsFor8573(t *testing.T, setLines []string) []string {
 }
 
 var natBase8447 = []string{
+	`set security zones security-zone lan`,
+	`set security zones security-zone wan`,
 	`set security nat source pool p1 address 172.16.80.200/32`,
 	`set security nat source pool p1 port range 51400 to 51499`,
 	`set security nat source rule-set rs1 from zone lan`,

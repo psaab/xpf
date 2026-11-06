@@ -54,7 +54,7 @@ security { nat { destination {
 		{name: "block destination-nat pool (control)", src: dnat("then { destination-nat pool PD; }"), dest: true, wantPool: "PD"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree, errs := NewParser(tc.src).Parse()
+			tree, errs := NewParser(injectHierNATZones15001(tc.src)).Parse()
 			if len(errs) > 0 {
 				t.Fatalf("parse: %v", errs)
 			}
@@ -88,6 +88,8 @@ security { nat { destination {
 func TestFlatSetThenIsUnaffected_7014(t *testing.T) {
 	tree := &ConfigTree{}
 	for _, ln := range []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security nat source pool P address 203.0.113.5",
 		"set security nat source rule-set RS from zone trust",
 		"set security nat source rule-set RS to zone untrust",
@@ -138,7 +140,7 @@ security { nat { source {
 		{"child (the shape #7034 pins)", "then { source-nat pool P off; }"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree, errs := NewParser(src(tc.then)).Parse()
+			tree, errs := NewParser(injectHierNATZones15001(src(tc.then))).Parse()
 			if len(errs) > 0 {
 				t.Fatalf("parse: %v", errs)
 			}
