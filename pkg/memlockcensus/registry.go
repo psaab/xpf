@@ -30,6 +30,7 @@ type Site struct {
 var Registry = []Site{
 	{File: "pkg/dataplane/userspace/addr_only_commit_failclosed_4959_test.go", Test: "TestAddressOnlyCommitRejectedPublishFailsClosed4959"},
 	{File: "pkg/dataplane/userspace/addr_only_commit_failclosed_4959_test.go", Test: "TestDeferredPublishRejectedFailsClosed4959"},
+	{File: "pkg/dataplane/userspace/bpf_map_walk_18696_test.go", Test: "newPrivilegedHashMap"},
 	{File: "pkg/dataplane/userspace/clear_all_helper_error_5881_test.go", Test: "TestClearAllSessionsSurfacesHelperDeleteError5881"},
 	{File: "pkg/dataplane/userspace/clear_all_multichunk_fastfail_5380_test.go", Test: "TestClearAllSingleShotFastFailsOnHungHelper5380"},
 	{File: "pkg/dataplane/userspace/clear_bounded_5304_test.go", Test: "TestClearAllSingleShotWithoutKeyEnumeration5304"},
