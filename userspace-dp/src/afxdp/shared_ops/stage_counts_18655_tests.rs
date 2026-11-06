@@ -229,7 +229,7 @@ fn mixed_state() -> (Map, Map, Vec<(SessionKey, crate::nat::NatDecision)>) {
         }
     }
     // A completed pair whose wire alias is (re)inserted by the ct-slice
-    // alias restamp under the CALLER's NAT (census site lookup.rs, the
+    // alias restamp under the CALLER's NAT (census site restamp.rs:546, the
     // `wire_sessions.insert(wire_key, aliased)` arm).
     let restamped = key(client, 30001, server, 443, crate::ip_proto::PROTO_TCP);
     publish_shared_session(
