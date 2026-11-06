@@ -1889,19 +1889,76 @@ fn widened_peer_delete_identity_and_outcome_18531() {
     );
 }
 
-/// Review N2 (HA seat), a bounded window pinned rather than closed. When RG1
-/// returns to the LAN node with the SNAT rule withdrawn by a commit (config
-/// epoch 8), a WAN reply that arrives before any forward packet judges the
-/// forward row's STORED FabricRedirect, which declines: the reply is un-NATed
-/// and delivered. Reverse hits never substitute the reply's own resolution
-/// (it is the LAN egress). `RefreshOwnerRGS([1])` rewrites the stored line
-/// to the real egress but, like every HA identity rewrite, clears the row's
-/// source-NAT judgment, and the #16217 guard declines reverse revocation of
-/// an unjudged row with no forward VLAN provenance: the reply after the
-/// refresh is still delivered. The window closes at the first forward
-/// slow-path hit, which judges the real egress and revokes the pair.
+/// #18927 child 3a: the EMPTY-rule case of the reverse-side window is
+/// already closed by child 2's `InvalidNoLiveDynamicRules` reason: with
+/// `withdrawn_owner_forwarding()` (no live dynamic rules) the post-refresh
+/// reply REVOKES the unjudged pair instead of being delivered (the pin
+/// below was split for this reason — see docs/log/18927.md). This cell
+/// keeps the pre-refresh legs only: the reply before any refresh is still
+/// delivered, the pair is held, NO refresh runs, and the window closes at
+/// the first forward slow-path hit, which judges the real egress and
+/// revokes the pair; a later reply then has no session.
 #[test]
 fn rg_return_reply_first_window_closes_at_forward_hit_18531() {
+    let forwarding = fw1_owner_forwarding();
+    let withdrawn = withdrawn_owner_forwarding();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    for demoted in [false, true] {
+        let mut sessions = promoted_on_owner(&forwarding, now_ns);
+        let failback = lan_ack(&mut sessions, &forwarding, &split_ha(now_secs), 1);
+        assert_eq!(
+            (failback.snat_revoked, failback.tx),
+            (0, [0, 1, 0]),
+            "fixture: the failback packet redirects (demoted={demoted})"
+        );
+        if demoted {
+            demote_rg1(&mut sessions, &forwarding, now_ns);
+        }
+        let reply = |sessions: &mut SessionTable| {
+            let (frame, meta) = wan_reply_frame();
+            drive_at(
+                sessions,
+                &withdrawn,
+                &owner_ha(now_secs),
+                WAN,
+                &frame,
+                meta,
+                8,
+                1,
+            )
+        };
+        let first = reply(&mut sessions);
+        assert_eq!(
+            (first.snat_revoked, first.tx),
+            (0, [0, 0, 1]),
+            "the window: a reply before any forward packet is delivered (demoted={demoted})"
+        );
+        assert_eq!(sessions.len(), 2, "the pair is held before any refresh (demoted={demoted})");
+        let forward = lan_ack_at(&mut sessions, &withdrawn, &owner_ha(now_secs), 8, 1);
+        assert_eq!(
+            (forward.snat_revoked, forward.tx[WAN]),
+            (1, 0),
+            "the first forward slow-path hit judges the real egress and revokes \
+             (demoted={demoted})"
+        );
+        let last = reply(&mut sessions);
+        assert_eq!(
+            (last.session_hit, last.tx[LAN]),
+            (0, 0),
+            "after the revocation the reply has no session (demoted={demoted})"
+        );
+    }
+}
+
+/// #18927 child 3a (split from the #18531 pin): with the SNAT rules fully
+/// withdrawn (`withdrawn_owner_forwarding()`), the `RefreshOwnerRGS`
+/// rewrite of the stored line to the WAN unit does NOT keep the reverse
+/// window open: child 2's `InvalidNoLiveDynamicRules` reason bypasses the
+/// #16217 unjudged-epoch keep, so the post-refresh reply revokes the pair
+/// and emits exactly one Close on the forward key.
+#[test]
+fn rg_return_post_refresh_reply_revokes_empty_rules_18927() {
     let forwarding = fw1_owner_forwarding();
     let withdrawn = withdrawn_owner_forwarding();
     let now_ns = monotonic_nanos();
@@ -1968,20 +2025,27 @@ fn rg_return_reply_first_window_closes_at_forward_hit_18531() {
         let second = reply(&mut sessions);
         assert_eq!(
             (second.snat_revoked, second.tx),
-            (0, [0, 0, 1]),
-            "the refresh does not close the reverse window: the row is unjudged \
+            (1, [0, 0, 0]),
+            "child 2 closes the empty-rule case: the post-refresh reply revokes \
              (demoted={demoted})"
         );
-        let forward = lan_ack_at(&mut sessions, &withdrawn, &owner_ha(now_secs), 8, 1);
         assert_eq!(
-            (forward.snat_revoked, forward.tx[WAN]),
-            (1, 0),
-            "the first forward slow-path hit judges the real egress and revokes \
-             (demoted={demoted})"
+            sessions.len(),
+            0,
+            "the revoked pair is gone after the post-refresh reply (demoted={demoted})"
         );
-        let last = reply(&mut sessions);
         assert_eq!(
-            (last.session_hit, last.tx[LAN]),
+            second.closes, 1,
+            "exactly one Close is emitted (demoted={demoted})"
+        );
+        assert_eq!(
+            second.closed.first().map(|(key, _)| key.clone()),
+            Some(forward_key()),
+            "the Close names the forward key (demoted={demoted})"
+        );
+        let third = reply(&mut sessions);
+        assert_eq!(
+            (third.session_hit, third.tx[LAN]),
             (0, 0),
             "after the revocation the reply has no session (demoted={demoted})"
         );
