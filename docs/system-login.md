@@ -1047,6 +1047,17 @@ the vetoing deny matches only the truncated spelling and the allow that
 carries the full spelling matches only there (`^show log 100$` beside
 `^show log$`), so the documented exception still runs, piped or not.
 
+For an allowlist, a pipe-bearing allow by itself does **not** admit that
+piped command: the pipe-less core must also be allowed. For example, to
+allow both `show version` and the exact ordered chain
+`show version | no-more | count`, use the alternation
+`(^show version$)|(^show version \| no-more \| count$)`. This necessarily
+allows the pipe-less `show version` too. `allow-commands` alone cannot express
+“this exact chain and no other spelling”: admitting a piped command also
+requires affirming its pipe-less core (#14922/#18854).
+Other otherwise-valid pipes on that core are admitted on the strength of the
+core affirmation unless a deny matches them.
+
 So a deny written against a **path** (`request system reboot`) is enforced on
 both server surfaces that map the command, and a deny written against
 **argument text** (`show route table secret-vrf`, `^ping 10\.99\.`,
