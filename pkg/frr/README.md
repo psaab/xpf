@@ -116,6 +116,10 @@ keep UNRENDERABLE operands out of `frr.conf`, not to re-litigate the accepted
 grammar. `validFRRInterfaceOperand` is a token test rather than a name-charset
 test for the same reason.
 
+That render belt does not override strict compilation: #17177's `CompileConfig`
+route-destination gate refuses a bare IPv4 static host destination before it
+reaches rendering. The IPv4 host-route/QNH fixture therefore writes `/32`.
+
 **Granularity is deliberate.** A bad DESTINATION drops the route; a bad
 NEXT-HOP drops only that next-hop. A `next-hop [ a b ]` ECMP list with one
 malformed member must still install the good ones — dropping the whole route
@@ -936,9 +940,6 @@ step. Both are required — neither sees the other's case:
   memory-only, so a restart loads the metric-free config until Apply. Authored
   policy `then metric` actions remain in `frr.conf` and can override the QNH
   metric; QNH metrics are never exported as BGP MED.
-  The IPv4 host-route fixture authors an explicit `/32`: `CompileConfig`
-  refuses a bare static host destination at its strict route-destination
-  gate (#17177), before QNH metric rendering.
 - **Userspace static failover by QNH metric (#11792).** The userspace snapshot
   builder emits one row per effective-preference/metric tier, preserving the
   authored preference and ordering equal-preference rows by metric. Rust tries
@@ -1487,10 +1488,13 @@ step. Both are required — neither sees the other's case:
   renderer a typed value the AST walk never saw. Unlike an auth secret a
   **space is legitimate** here — FRR takes the community/as-path value as a
   rest-of-line token — so `sanitizeFRRValue` (which strips only the C0/DEL set
-  and leaves `0x20`) is the right tool, and no whitespace-rejecting commit gate
-  is added. (NOTE: a Junos→FRR as-path regex *syntax* translation is still
-  absent — Junos regex operates on whole AS-number terms, FRR uses POSIX ERE
-  over the space-separated AS string — tracked separately, not part of #4097.)
+  and leaves `0x20`) is the right tool for internal spaces. No gate is added for
+  internal spaces, but the central #17177 gate refuses leading/trailing
+  whitespace. Strict as-path-prepend tail regressions therefore use the bare
+  regex `^65000`; padded `^65000 ` is refused before the #12070 unknown-modifier
+  check. (NOTE: a Junos→FRR as-path regex *syntax* translation is still absent —
+  Junos regex operates on whole AS-number terms, FRR uses POSIX ERE over the
+  space-separated AS string — tracked separately, not part of #4097.)
 - **The route-map and prefix-list render guards are fail-closed where values
   have typed grammars (#4482, #10823, #12070, #12513).** #4482 extended
   `sanitizeFRRValue` to the route-map `set community` / `set community
@@ -1510,9 +1514,6 @@ step. Both are required — neither sees the other's case:
   covers the remaining sanitize-on-one-line slots and pins omission of the
   malformed next-hop/prepend injection payloads; malformed prefix-list cases
   are covered by `TestPolicyPrefixListRenderOmitsMalformedCIDRs10823`.
-  Strict as-path-prepend operand regressions use the bare regex `^65000`:
-  the formerly padded `^65000 ` is refused earlier by the central #17177
-  edge-whitespace gate, so it cannot exercise the unknown-modifier validator.
 - **Malformed routing-only prefix-list entries are omitted before FRR emission
   (#10823), and bare hosts render as host routes (#15012).** The #7273 strict CIDR gate is scoped to firewall-referenced
   lists, so a routing-only `policy-options prefix-list` can reach rendering
