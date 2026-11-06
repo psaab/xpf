@@ -72,9 +72,10 @@ fn every_session_delta_counts_a_producer_seq_acquisition_9169() {
     );
 }
 
-/// #13965: the binary SessionOpen frame must carry the PPTP call-id pair as
-/// its final 8 bytes, or the Go decoder leaves it absent and the standby
-/// import gate withholds the session.
+/// #13965: the binary SessionOpen frame must carry the PPTP call-id pair,
+/// or the Go decoder leaves it absent and the standby import gate withholds
+/// the session. Read the append-only payload layout rather than its tail:
+/// #15176 (commit c65a353e8b) appended NAT scope after this pair.
 #[test]
 fn pptp_open_frame_carries_the_call_id_pair_13965() {
     let (sender, rx) = EventStreamSender::test_sender(true, 16);
@@ -116,12 +117,62 @@ fn pptp_open_frame_carries_the_call_id_pair_13965() {
     let frames: Vec<_> = rx.try_iter().collect();
     let frame = frames.last().expect("PPTP open frame queued");
     let bytes = frame.as_bytes();
-    let actual = u64::from_le_bytes(bytes[bytes.len() - 8..].try_into().unwrap());
+    let actual = pptp_call_ids_from_frame(bytes);
     assert_eq!(
         actual,
         call.to_wire_call_ids(),
         "the emitted PPTP SessionOpen must carry both directional call IDs, or the standby import gate withholds the session"
     );
+}
+
+/// Read the #13965 pair by walking the SessionOpen payload from its 16-byte
+/// frame header. Widths follow `encode_session_record` in write order.
+fn pptp_call_ids_from_frame(bytes: &[u8]) -> u64 {
+    let mut pos = 16usize; // frame header
+    pos += 1; // AddrFamily
+    pos += 1; // Protocol
+    pos += 2; // SrcPort
+    pos += 2; // DstPort
+    pos += 2; // NATSrcPort
+    pos += 2; // NATDstPort
+    pos += 4; // OwnerRGID
+    pos += 4; // EgressIfindex
+    pos += 4; // TXIfindex
+    pos += 2; // TunnelEndpointID
+    pos += 2; // TXVLANID
+    pos += 1; // Flags
+    pos += 2; // IngressZoneID
+    pos += 2; // EgressZoneID
+    pos += 1; // Disposition
+    pos += 4; // SrcIP (IPv4)
+    pos += 4; // DstIP
+    pos += 4; // NAT rewrite_src
+    pos += 4; // NAT rewrite_dst
+    pos += 6; // NeighborMAC
+    pos += 6; // SrcMAC
+    pos += 4; // NextHop (IPv4)
+    pos += 4; // policy_id (#3301)
+    pos += 4; // policy_counter_idx
+    pos += 4; // inactivity_timeout_secs
+    pos += 4; // NAT64 snat_v4 (#4565)
+    pos += 8; // RT_FLOW session_id (#5212)
+    pos += 8; // tunnel discriminator (#7188)
+    pos += 4; // routing domain (#7239)
+    pos += 1; // TCP close class (#9412)
+    pos += 8; // install route-table identity (#9752)
+    pos += 1; // source-NAT ICMP valid (#11064)
+    pos += 1; // source-NAT ICMP type
+    pos += 1; // source-NAT ICMP code
+    pos += 4; // ingress ifindex (#11070)
+    pos += 2; // ingress VLAN id
+    let rule_id_len = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap()) as usize;
+    pos += 2; // rule id length prefix (#11070)
+    pos += rule_id_len; // variable-length rule ID
+    pos += 1; // TCP handshake state (#10888)
+    pos += 1; // SNAT provenance (#12187)
+    // Empty-rule-ID fixture: payload offset 122, or frame offset 138.
+    assert_eq!(pos, 138);
+    u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap())
 }
 
 /// THE NUMERATOR, and the cell that says the two counters are not the same
