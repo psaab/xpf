@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/netip"
-	"os"
 	"sort"
 	"strings"
 	"syscall"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/vipstamp"
 )
 
@@ -77,10 +77,8 @@ func ensurePromoteSecondaries(netdev string) error {
 		return errors.New("invalid netdev name")
 	}
 	path := "/proc/sys/net/ipv4/conf/" + netdev + "/promote_secondaries"
-	if b, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(b)) == "1" {
-		return nil
-	}
-	return os.WriteFile(path, []byte("1"), 0)
+	_, err := fsatomic.WriteKernelKnob(path, "1")
+	return err
 }
 
 // directVIPAddrOp is one configured VIP on one netdev.
