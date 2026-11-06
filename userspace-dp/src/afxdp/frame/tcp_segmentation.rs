@@ -866,6 +866,38 @@ mod mode_aware_segmentation_tests {
             primary_v6: None,
         }
     }
+    /// #18818: the peer endpoint is 203.0.113.9, and #13978
+    /// (`fda6cad264`) makes `wg_encap_frame` fail closed unless the
+    /// selected peer's outer route resolves a real neighbor MAC —
+    /// it may never borrow the session's `neighbor_mac` decoy
+    /// ([0x00,0x11,0x22,0x33,0x44,0x55] in `tunnel_resolution`).
+    /// Seed that adjacency into the hand-built state: a route to
+    /// 203.0.113.0/24 via EGRESS_IFINDEX with next hop 203.0.113.1,
+    /// plus its neighbor entry. The static route+neighbor serves
+    /// both the sizing and encap resolutions (tests pass
+    /// `dynamic_neighbors: None`).
+    const WG_PEER_NEXTHOP_MAC: [u8; 6] = [0x02, 0x39, 0x78, 0x00, 0x00, 0x01];
+
+    fn seed_wg_peer_adjacency(state: &mut ForwardingState) {
+        state.routes_v4.insert(
+            "inet.0".to_string(),
+            vec![crate::afxdp::types::RouteEntryV4::single(
+                crate::prefix::PrefixV4::from_net(
+                    "203.0.113.0/24".parse().expect("WG peer route prefix"),
+                ),
+                EGRESS_IFINDEX,
+                0,
+                Some(Ipv4Addr::new(203, 0, 113, 1)),
+                false,
+                String::new(),
+                0,
+            )],
+        );
+        state.neighbors.insert(
+            (EGRESS_IFINDEX, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+            NeighborEntry { mac: WG_PEER_NEXTHOP_MAC },
+        );
+    }
 
     /// Resolution that points the test endpoint at itself with both MACs
     /// resolved and `egress_ifindex == endpoint.logical_ifindex` (so the
@@ -973,6 +1005,7 @@ mod mode_aware_segmentation_tests {
             .insert(TUN_ID, wg_endpoint(libc::AF_INET));
         state.wg_engines.insert(TUN_ID, Arc::new(init_engine));
         state.has_wg_tunnels = true;
+        seed_wg_peer_adjacency(&mut state);
 
         let decision = SessionDecision {
             resolution: tunnel_resolution(),
@@ -1165,6 +1198,7 @@ mod mode_aware_segmentation_tests {
             .insert(TUN_ID, wg_endpoint(libc::AF_INET));
         state.wg_engines.insert(TUN_ID, Arc::new(init_engine));
         state.has_wg_tunnels = true;
+        seed_wg_peer_adjacency(&mut state);
         let decision = SessionDecision {
             resolution: tunnel_resolution(),
             nat: NatDecision::default(),
@@ -1182,6 +1216,11 @@ mod mode_aware_segmentation_tests {
         .expect("WG segmentation must produce frames");
         for seg in &segments {
             assert_eq!(&seg[12..14], &[0x08, 0x00], "WG v4 outer ethertype");
+            assert_eq!(
+                &seg[..6],
+                &WG_PEER_NEXTHOP_MAC,
+                "WG outer dst MAC must come from the selected peer adjacency"
+            );
             assert_eq!(seg[23], PROTO_UDP, "WG outer proto must be UDP(17)");
             assert_ne!(seg[23], PROTO_GRE, "WG segment must never be GRE-encapped");
             // It must decap back to a valid inner IPv4 packet (a GRE-encapped
