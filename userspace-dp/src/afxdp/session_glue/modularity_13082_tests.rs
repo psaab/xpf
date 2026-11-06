@@ -20,7 +20,7 @@ fn session_glue_is_split_into_focused_sibling_modules() {
 #[test]
 fn shared_ops_is_split_into_focused_sibling_modules() {
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp/shared_ops");
-    for name in ["mod.rs", "store.rs", "lookup.rs", "reverse_synth.rs"] {
+    for name in ["mod.rs", "store.rs", "lookup.rs", "owner_rg.rs", "restamp.rs", "reverse_synth.rs"] {
         let src = std::fs::read_to_string(base.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(src.lines().count() < 2000, "shared_ops/{name} exceeds file ceiling");
     }
