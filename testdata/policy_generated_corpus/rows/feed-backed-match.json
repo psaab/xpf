@@ -1,7 +1,4 @@
 {
-  "schema_version": 1,
-  "id": "feed-backed-match",
-  "source_case": "feed-backed-match",
   "config_set_lines": [
     "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
     "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
@@ -16,6 +13,15 @@
     "set security policies from-zone trust to-zone untrust policy block-feed match application any",
     "set security policies from-zone trust to-zone untrust policy block-feed then deny"
   ],
+  "go_verdict": {
+    "action": "deny",
+    "matched": true,
+    "default_used": false,
+    "unsupported_tuple_family": false,
+    "policy_name": "block-feed",
+    "policy_id": 0
+  },
+  "id": "feed-backed-match",
   "query": {
     "from_zone": "trust",
     "to_zone": "untrust",
@@ -34,14 +40,6 @@
       ]
     }
   },
-  "go_verdict": {
-    "action": "deny",
-    "matched": true,
-    "default_used": false,
-    "unsupported_tuple_family": false,
-    "policy_name": "block-feed",
-    "policy_id": 0
-  },
   "rust_verdict": {
     "action": "deny",
     "matched": true,
@@ -50,58 +48,37 @@
     "policy_name": "block-feed",
     "policy_id": 0
   },
+  "schema_version": 1,
   "snapshot": {
     "default_policy": "permit",
     "rules": [
       {
-        "rule_id": "trust->untrust/block-feed",
-        "policy_id": 0,
+        "rule_id": "trust-\u003euntrust/block-feed",
         "name": "block-feed",
         "from_zone": "trust",
         "to_zone": "untrust",
-        "scheduler_name": "",
-        "inactive": false,
-        "source_addresses": [],
-        "destination_addresses": [],
         "source_book_ids": [
           910758555
         ],
-        "destination_book_ids": [],
-        "source_literals": [],
         "destination_literals": [
           "any"
         ],
         "applications": [
           "any"
         ],
-        "application_terms": [],
-        "action": "deny",
-        "source_address_excluded": false,
-        "destination_address_excluded": false,
-        "log_session_init": false,
-        "log_session_close": false,
-        "match_from_zone": "",
-        "match_to_zone": "",
-        "match_from_zones": [],
-        "match_to_zones": []
+        "action": "deny"
       }
     ],
     "zones": [
       {
         "name": "trust",
-        "id": 50675,
-        "host_inbound_configured": true,
-        "host_inbound_system_services": [],
-        "host_inbound_protocols": [],
-        "tcp_rst": false
+        "id": 2868932339,
+        "host_inbound_configured": true
       },
       {
         "name": "untrust",
-        "id": 20665,
-        "host_inbound_configured": true,
-        "host_inbound_system_services": [],
-        "host_inbound_protocols": [],
-        "tcp_rst": false
+        "id": 1929257543,
+        "host_inbound_configured": true
       }
     ],
     "address_books": [
@@ -110,9 +87,9 @@
         "name": "bad-actors",
         "prefixes_v4": [
           "198.51.100.0/24"
-        ],
-        "prefixes_v6": []
+        ]
       }
     ]
-  }
+  },
+  "source_case": "feed-backed-match"
 }

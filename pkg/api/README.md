@@ -2830,6 +2830,14 @@ the drop fails loudly instead of going quietly vacuous.
   security nat source pool` renders the gRPC value directly. Pinned by
   `TestNATPoolStatsHandlerInterfaceModePerRuleSet` (REST) and
   `TestGetNATPoolStatsInterfaceModePerRuleSet` (gRPC), both fail-on-revert.
+- Zone-ID collision survival is pinned by
+  `TestNATPoolStatsQuarantineSurvivor13247`: the genuine
+  `zzq17760`/`zzq8100` pair drives the config quarantine
+  assertions, while fifteen fixed `zzx13247-*` names in the fake
+  apply result's `ZoneIDs` amplify the colliding ID. Exact-target
+  collider brute force is impossible since #16557 widened zone
+  IDs to u32 (`ec61dae88b`), so the aliases are hand-injected,
+  never config zones.
 - The gRPC `GetNATRuleStats` `nat_type` selector fails CLOSED (#5719,
   codex-review-182 C-API). Only `""` (default = source), `"source"`, and
   `"destination"` select a rule family; any other value (a typo like `"src"`

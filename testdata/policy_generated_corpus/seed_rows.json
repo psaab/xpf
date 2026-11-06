@@ -50,36 +50,20 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "scheduled-permit",
-            "policy_id": 0,
             "rule_id": "trust->untrust/scheduled-permit",
             "scheduler_name": "business-hours",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -89,19 +73,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -151,36 +129,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-allow",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -190,19 +151,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -252,36 +207,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-allow",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -291,19 +229,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -353,36 +285,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-allow",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -392,19 +307,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -450,25 +359,17 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
-        "rules": [],
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -514,25 +415,17 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
-        "rules": [],
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -588,7 +481,6 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
@@ -597,34 +489,18 @@
               {
                 "destination_port": "22",
                 "name": "app-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "app-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-deny-ssh",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-deny-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -632,31 +508,16 @@
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-allow",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -666,19 +527,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -734,7 +589,6 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
@@ -743,34 +597,18 @@
               {
                 "destination_port": "22",
                 "name": "app-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "app-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-permit-ssh",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-permit-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -778,31 +616,16 @@
           },
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-deny-rest",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-deny-rest",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -812,19 +635,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -870,25 +687,17 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
-        "rules": [],
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -944,36 +753,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "zp-allow",
-            "policy_id": 0,
             "rule_id": "trust->untrust/zp-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -981,20 +773,13 @@
           },
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "junos-global",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
             "match_from_zone": "trust",
             "match_from_zones": [
               "trust"
@@ -1006,10 +791,6 @@
             "name": "g-deny",
             "policy_id": 1,
             "rule_id": "junos-global->junos-global/g-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -1019,19 +800,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -1081,36 +856,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-allow",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -1120,19 +878,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -1182,36 +934,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-allow",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -1221,19 +956,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -1291,61 +1020,39 @@
             "name": "a-lab",
             "prefixes_v4": [
               "10.0.1.100/32"
-            ],
-            "prefixes_v6": []
+            ]
           }
         ],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-nonlab",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-nonlab",
-            "scheduler_name": "",
             "source_address_excluded": true,
-            "source_addresses": [],
             "source_book_ids": [
               3495241515
             ],
-            "source_literals": [],
             "to_zone": "untrust"
           }
         ],
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -1403,61 +1110,39 @@
             "name": "a-lab",
             "prefixes_v4": [
               "10.0.1.100/32"
-            ],
-            "prefixes_v6": []
+            ]
           }
         ],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-nonlab",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-nonlab",
-            "scheduler_name": "",
             "source_address_excluded": true,
-            "source_addresses": [],
             "source_book_ids": [
               3495241515
             ],
-            "source_literals": [],
             "to_zone": "untrust"
           }
         ],
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -1521,61 +1206,38 @@
             "name": "bad-actors",
             "prefixes_v4": [
               "198.51.100.0/24"
-            ],
-            "prefixes_v6": []
+            ]
           }
         ],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "block-feed",
-            "policy_id": 0,
             "rule_id": "trust->untrust/block-feed",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
             "source_book_ids": [
               910758555
             ],
-            "source_literals": [],
             "to_zone": "untrust"
           }
         ],
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -1639,61 +1301,38 @@
             "name": "bad-actors",
             "prefixes_v4": [
               "198.51.100.0/24"
-            ],
-            "prefixes_v6": []
+            ]
           }
         ],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "block-feed",
-            "policy_id": 0,
             "rule_id": "trust->untrust/block-feed",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
             "source_book_ids": [
               910758555
             ],
-            "source_literals": [],
             "to_zone": "untrust"
           }
         ],
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -1749,7 +1388,6 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
@@ -1758,34 +1396,18 @@
               {
                 "destination_port": "22",
                 "name": "app-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "app-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-deny-ssh",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-deny-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -1793,31 +1415,16 @@
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-allow",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -1827,19 +1434,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -1895,7 +1496,6 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
@@ -1904,34 +1504,18 @@
               {
                 "destination_port": "22",
                 "name": "app-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "app-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-deny-ssh",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-deny-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -1939,31 +1523,16 @@
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-allow",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -1973,19 +1542,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -2041,7 +1604,6 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
@@ -2050,34 +1612,18 @@
               {
                 "destination_port": "22",
                 "name": "app-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "app-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-deny-ssh",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-deny-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2085,31 +1631,16 @@
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-allow",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2119,19 +1650,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -2187,7 +1712,6 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
@@ -2196,34 +1720,18 @@
               {
                 "destination_port": "22",
                 "name": "app-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "app-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-deny-ssh",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-deny-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2231,31 +1739,16 @@
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-allow",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2265,19 +1758,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -2333,7 +1820,6 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
@@ -2342,34 +1828,18 @@
               {
                 "destination_port": "22",
                 "name": "app-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "app-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-permit-ssh",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-permit-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2377,31 +1847,16 @@
           },
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-deny-rest",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-deny-rest",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2411,19 +1866,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -2479,7 +1928,6 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
@@ -2488,34 +1936,18 @@
               {
                 "destination_port": "22",
                 "name": "app-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "app-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-permit-ssh",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-permit-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2523,31 +1955,16 @@
           },
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-deny-rest",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-deny-rest",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2557,19 +1974,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -2620,43 +2031,25 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
             "application_terms": [
               {
-                "destination_port": "",
                 "name": "app-icmp",
-                "protocol": "icmp",
-                "source_port": ""
+                "protocol": "icmp"
               }
             ],
             "applications": [
               "app-icmp"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-icmp",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-icmp",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2666,19 +2059,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -2729,43 +2116,25 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
             "application_terms": [
               {
-                "destination_port": "",
                 "name": "app-icmp",
-                "protocol": "icmp",
-                "source_port": ""
+                "protocol": "icmp"
               }
             ],
             "applications": [
               "app-icmp"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-icmp",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-icmp",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2775,19 +2144,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -2838,43 +2201,25 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
             "application_terms": [
               {
-                "destination_port": "",
                 "name": "app-icmp",
-                "protocol": "icmp",
-                "source_port": ""
+                "protocol": "icmp"
               }
             ],
             "applications": [
               "app-icmp"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-icmp",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-icmp",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2884,19 +2229,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -2951,36 +2290,21 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "inactive": true,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "scheduled-permit",
-            "policy_id": 0,
             "rule_id": "trust->untrust/scheduled-permit",
             "scheduler_name": "business-hours",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -2990,19 +2314,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -3063,8 +2381,7 @@
             "name": "trust-net",
             "prefixes_v4": [
               "10.0.0.0/8"
-            ],
-            "prefixes_v6": []
+            ]
           }
         ],
         "default_policy": "deny",
@@ -3075,66 +2392,35 @@
               {
                 "destination_port": "22",
                 "name": "junos-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "junos-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "block-host-ssh",
-            "policy_id": 0,
             "rule_id": "trust->junos-host/block-host-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
             "source_book_ids": [
               488896378
             ],
-            "source_literals": [],
             "to_zone": "junos-host"
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "permit-host-all",
             "policy_id": 1,
             "rule_id": "trust->junos-host/permit-host-all",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -3144,19 +2430,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -3217,8 +2497,7 @@
             "name": "trust-net",
             "prefixes_v4": [
               "10.0.0.0/8"
-            ],
-            "prefixes_v6": []
+            ]
           }
         ],
         "default_policy": "deny",
@@ -3229,66 +2508,35 @@
               {
                 "destination_port": "22",
                 "name": "junos-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "junos-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "block-host-ssh",
-            "policy_id": 0,
             "rule_id": "trust->junos-host/block-host-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
             "source_book_ids": [
               488896378
             ],
-            "source_literals": [],
             "to_zone": "junos-host"
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "permit-host-all",
             "policy_id": 1,
             "rule_id": "trust->junos-host/permit-host-all",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -3298,19 +2546,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -3371,8 +2613,7 @@
             "name": "trust-net",
             "prefixes_v4": [
               "10.0.0.0/8"
-            ],
-            "prefixes_v6": []
+            ]
           }
         ],
         "default_policy": "deny",
@@ -3383,66 +2624,35 @@
               {
                 "destination_port": "22",
                 "name": "junos-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "junos-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "block-host-ssh",
-            "policy_id": 0,
             "rule_id": "trust->junos-host/block-host-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
             "source_book_ids": [
               488896378
             ],
-            "source_literals": [],
             "to_zone": "junos-host"
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "permit-host-all",
             "policy_id": 1,
             "rule_id": "trust->junos-host/permit-host-all",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -3452,19 +2662,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -3525,8 +2729,7 @@
             "name": "trust-net",
             "prefixes_v4": [
               "10.0.0.0/8"
-            ],
-            "prefixes_v6": []
+            ]
           }
         ],
         "default_policy": "deny",
@@ -3537,66 +2740,35 @@
               {
                 "destination_port": "22",
                 "name": "junos-ssh",
-                "protocol": "tcp",
-                "source_port": ""
+                "protocol": "tcp"
               }
             ],
             "applications": [
               "junos-ssh"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "block-host-ssh",
-            "policy_id": 0,
             "rule_id": "trust->junos-host/block-host-ssh",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
             "source_book_ids": [
               488896378
             ],
-            "source_literals": [],
             "to_zone": "junos-host"
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "permit-host-all",
             "policy_id": 1,
             "rule_id": "trust->junos-host/permit-host-all",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -3606,19 +2778,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -3668,36 +2834,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "reject",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-reject",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-reject",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -3707,19 +2856,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -3769,36 +2912,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "reject",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-reject",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-reject",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -3808,19 +2934,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -3873,38 +2993,23 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "junos-global",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
             "match_from_zone": "trust",
             "match_from_zones": [
               "trust"
             ],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "g-deny",
-            "policy_id": 0,
             "rule_id": "junos-global->junos-global/g-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -3914,27 +3019,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -3987,38 +3083,23 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "junos-global",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
             "match_from_zone": "trust",
             "match_from_zones": [
               "trust"
             ],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "g-deny",
-            "policy_id": 0,
             "rule_id": "junos-global->junos-global/g-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -4028,27 +3109,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -4100,36 +3172,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "any-to-untrust-deny",
-            "policy_id": 0,
             "rule_id": "any->any/any-to-untrust-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -4139,27 +3194,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -4209,36 +3255,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-allow",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-allow",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -4248,19 +3277,13 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -4312,36 +3335,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "junos-global",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "g-deny-all",
-            "policy_id": 0,
             "rule_id": "junos-global->junos-global/g-deny-all",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -4351,27 +3357,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -4423,36 +3420,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "any-to-untrust-deny",
-            "policy_id": 0,
             "rule_id": "any->untrust/any-to-untrust-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -4462,27 +3442,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -4538,36 +3509,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "from-any-deny",
-            "policy_id": 0,
             "rule_id": "any->trust/from-any-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -4575,31 +3529,16 @@
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "untrust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "to-any-permit",
             "policy_id": 1,
             "rule_id": "untrust->any/to-any-permit",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -4609,27 +3548,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -4685,36 +3615,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "from-any-deny",
-            "policy_id": 0,
             "rule_id": "any->trust/from-any-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -4722,31 +3635,16 @@
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "untrust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "to-any-permit",
             "policy_id": 1,
             "rule_id": "untrust->any/to-any-permit",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -4756,27 +3654,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -4832,36 +3721,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "from-any-deny",
-            "policy_id": 0,
             "rule_id": "any->trust/from-any-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -4869,31 +3741,16 @@
           },
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "untrust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "to-any-permit",
             "policy_id": 1,
             "rule_id": "untrust->any/to-any-permit",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -4903,27 +3760,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -4979,36 +3827,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "untrust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "to-any-permit",
-            "policy_id": 0,
             "rule_id": "untrust->any/to-any-permit",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -5016,31 +3847,16 @@
           },
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "from-any-deny",
             "policy_id": 1,
             "rule_id": "any->trust/from-any-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -5050,27 +3866,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -5126,36 +3933,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "untrust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "to-any-permit",
-            "policy_id": 0,
             "rule_id": "untrust->any/to-any-permit",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -5163,31 +3953,16 @@
           },
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "from-any-deny",
             "policy_id": 1,
             "rule_id": "any->trust/from-any-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -5197,27 +3972,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -5273,36 +4039,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "untrust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "to-any-permit",
-            "policy_id": 0,
             "rule_id": "untrust->any/to-any-permit",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -5310,31 +4059,16 @@
           },
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "from-any-deny",
             "policy_id": 1,
             "rule_id": "any->trust/from-any-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -5344,27 +4078,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -5421,61 +4146,38 @@
             "name": "a-lab",
             "prefixes_v4": [
               "10.0.1.100/32"
-            ],
-            "prefixes_v6": []
+            ]
           }
         ],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-lab",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-lab",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
             "source_book_ids": [
               3495241515
             ],
-            "source_literals": [],
             "to_zone": "untrust"
           }
         ],
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -5532,61 +4234,38 @@
             "name": "a-lab",
             "prefixes_v4": [
               "10.0.1.100/32"
-            ],
-            "prefixes_v6": []
+            ]
           }
         ],
         "default_policy": "deny",
         "rules": [
           {
             "action": "permit",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "p-lab",
-            "policy_id": 0,
             "rule_id": "trust->untrust/p-lab",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
             "source_book_ids": [
               3495241515
             ],
-            "source_literals": [],
             "to_zone": "untrust"
           }
         ],
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -5638,36 +4317,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "junos-global",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "g-deny-all",
-            "policy_id": 0,
             "rule_id": "junos-global->junos-global/g-deny-all",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -5677,27 +4339,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -5749,36 +4402,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "junos-global",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "g-deny-all",
-            "policy_id": 0,
             "rule_id": "junos-global->junos-global/g-deny-all",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -5788,27 +4424,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -5860,36 +4487,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "any-to-untrust-deny",
-            "policy_id": 0,
             "rule_id": "any->untrust/any-to-untrust-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -5899,27 +4509,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -5971,36 +4572,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "any-to-untrust-deny",
-            "policy_id": 0,
             "rule_id": "any->untrust/any-to-untrust-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -6010,27 +4594,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },
@@ -6082,36 +4657,19 @@
       },
       "schema_version": 1,
       "snapshot": {
-        "address_books": [],
         "default_policy": "permit",
         "rules": [
           {
             "action": "deny",
-            "application_terms": [],
             "applications": [
               "any"
             ],
-            "destination_address_excluded": false,
-            "destination_addresses": [],
-            "destination_book_ids": [],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
-            "inactive": false,
-            "log_session_close": false,
-            "log_session_init": false,
-            "match_from_zone": "",
-            "match_from_zones": [],
-            "match_to_zone": "",
-            "match_to_zones": [],
             "name": "any-to-untrust-deny",
-            "policy_id": 0,
             "rule_id": "any->untrust/any-to-untrust-deny",
-            "scheduler_name": "",
-            "source_address_excluded": false,
-            "source_addresses": [],
-            "source_book_ids": [],
             "source_literals": [
               "any"
             ],
@@ -6121,27 +4679,18 @@
         "zones": [
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 56918,
-            "name": "dmz",
-            "tcp_rst": false
+            "id": 1053679769,
+            "name": "dmz"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 50675,
-            "name": "trust",
-            "tcp_rst": false
+            "id": 2868932339,
+            "name": "trust"
           },
           {
             "host_inbound_configured": true,
-            "host_inbound_protocols": [],
-            "host_inbound_system_services": [],
-            "id": 20665,
-            "name": "untrust",
-            "tcp_rst": false
+            "id": 1929257543,
+            "name": "untrust"
           }
         ]
       },

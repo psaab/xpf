@@ -105,6 +105,8 @@ uses fixed emitter seed `10587`, recorded in each generated row's
 The cross-language pipeline then stamps the exact production snapshot and
 recomputes the Rust verdict before comparing:
 
+Committed snapshot zone IDs are `config.StableZoneID` u32 values since #16557; regeneration is required whenever the frozen hash namespace changes.
+
 The aggregate is assembled from the sorted row files; it is not emitted by the
 Rust hook. When adding or changing a committed seed, run this from the
 repository root, then copy the resulting file into the corpus path:

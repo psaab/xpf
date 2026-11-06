@@ -1,7 +1,4 @@
 {
-  "schema_version": 1,
-  "id": "exact-pair-outranks-scoped-global-01",
-  "source_case": "exact-pair-outranks-scoped-global",
   "config_set_lines": [
     "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
     "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
@@ -19,6 +16,15 @@
     "set security policies global policy g-deny match application any",
     "set security policies global policy g-deny then deny"
   ],
+  "go_verdict": {
+    "action": "permit",
+    "matched": true,
+    "default_used": false,
+    "unsupported_tuple_family": false,
+    "policy_name": "zp-allow",
+    "policy_id": 0
+  },
+  "id": "exact-pair-outranks-scoped-global-01",
   "query": {
     "from_zone": "trust",
     "to_zone": "untrust",
@@ -32,14 +38,6 @@
     "icmp_type": null,
     "icmp_code": null
   },
-  "go_verdict": {
-    "action": "permit",
-    "matched": true,
-    "default_used": false,
-    "unsupported_tuple_family": false,
-    "policy_name": "zp-allow",
-    "policy_id": 0
-  },
   "rust_verdict": {
     "action": "permit",
     "matched": true,
@@ -48,21 +46,15 @@
     "policy_name": "zp-allow",
     "policy_id": 0
   },
+  "schema_version": 1,
   "snapshot": {
     "default_policy": "deny",
     "rules": [
       {
-        "rule_id": "trust->untrust/zp-allow",
-        "policy_id": 0,
+        "rule_id": "trust-\u003euntrust/zp-allow",
         "name": "zp-allow",
         "from_zone": "trust",
         "to_zone": "untrust",
-        "scheduler_name": "",
-        "inactive": false,
-        "source_addresses": [],
-        "destination_addresses": [],
-        "source_book_ids": [],
-        "destination_book_ids": [],
         "source_literals": [
           "any"
         ],
@@ -72,29 +64,14 @@
         "applications": [
           "any"
         ],
-        "application_terms": [],
-        "action": "permit",
-        "source_address_excluded": false,
-        "destination_address_excluded": false,
-        "log_session_init": false,
-        "log_session_close": false,
-        "match_from_zone": "",
-        "match_to_zone": "",
-        "match_from_zones": [],
-        "match_to_zones": []
+        "action": "permit"
       },
       {
-        "rule_id": "junos-global->junos-global/g-deny",
+        "rule_id": "junos-global-\u003ejunos-global/g-deny",
         "policy_id": 1,
         "name": "g-deny",
         "from_zone": "junos-global",
         "to_zone": "junos-global",
-        "scheduler_name": "",
-        "inactive": false,
-        "source_addresses": [],
-        "destination_addresses": [],
-        "source_book_ids": [],
-        "destination_book_ids": [],
         "source_literals": [
           "any"
         ],
@@ -104,12 +81,7 @@
         "applications": [
           "any"
         ],
-        "application_terms": [],
         "action": "deny",
-        "source_address_excluded": false,
-        "destination_address_excluded": false,
-        "log_session_init": false,
-        "log_session_close": false,
         "match_from_zone": "trust",
         "match_to_zone": "untrust",
         "match_from_zones": [
@@ -123,21 +95,15 @@
     "zones": [
       {
         "name": "trust",
-        "id": 50675,
-        "host_inbound_configured": true,
-        "host_inbound_system_services": [],
-        "host_inbound_protocols": [],
-        "tcp_rst": false
+        "id": 2868932339,
+        "host_inbound_configured": true
       },
       {
         "name": "untrust",
-        "id": 20665,
-        "host_inbound_configured": true,
-        "host_inbound_system_services": [],
-        "host_inbound_protocols": [],
-        "tcp_rst": false
+        "id": 1929257543,
+        "host_inbound_configured": true
       }
-    ],
-    "address_books": []
-  }
+    ]
+  },
+  "source_case": "exact-pair-outranks-scoped-global"
 }

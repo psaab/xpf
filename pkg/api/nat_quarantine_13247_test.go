@@ -25,6 +25,7 @@ func quarantine13247Store(t *testing.T) *configstore.Store {
 		t.Fatalf("EnterConfigure: %v", err)
 	}
 	if _, err := store.LoadSet(`set security zones security-zone z174
+set security zones security-zone zzq17760
 set security zones security-zone untrust
 set security nat source pool zeta address 203.0.113.20/32
 set security nat source pool alpha address 203.0.113.10/32
@@ -41,9 +42,6 @@ set security nat source rule-set rs-surv rule r1 then source-nat interface`); er
 	cfg := store.ActiveConfig()
 	cfg.Security.Zones["zzq17760"] = &config.ZoneConfig{Name: "zzq17760"}
 	cfg.Security.Zones["zzq8100"] = &config.ZoneConfig{Name: "zzq8100"}
-	for _, name := range collisionNames13247(t, config.StableZoneID("zzq17760")) {
-		cfg.Security.Zones[name] = &config.ZoneConfig{Name: name}
-	}
 	return store
 }
 
@@ -53,8 +51,18 @@ func TestNATPoolStatsQuarantineSurvivor13247(t *testing.T) {
 	}
 	collidingID := config.StableZoneID("zzq17760")
 	zoneIDs := map[string]uint32{"zzq17760": collidingID, "zzq8100": collidingID, "untrust": 8}
-	for _, name := range collisionNames13247(t, collidingID) {
+	// #16557 (ec61dae88b) widened zone IDs to u32, so exact-target
+	// brute force can no longer mint colliders; the fake apply
+	// result carries fixed alias names for the colliding ID. The
+	// genuine zzq pair above drives the config quarantine
+	// assertions; these aliases only amplify the ID in the fake.
+	aliasCount := 0
+	for _, name := range zoneIDAliases13247() {
 		zoneIDs[name] = collidingID
+		aliasCount++
+	}
+	if aliasCount+2 != 17 {
+		t.Fatalf("premise: %d entries alias the colliding ID, want 17", aliasCount+2)
 	}
 	dp := &natIfaceSNATSessionsDP{
 		Manager: dataplane.New(),
@@ -112,19 +120,14 @@ func (d *quarantine13247DP) IterateSessions(fn func(dataplane.SessionKey, datapl
 	return nil
 }
 
-func collisionNames13247(t *testing.T, id uint32) []string {
-	t.Helper()
-	const want = 15
-	names := make([]string, 0, want)
-	for candidate := range 5_000_000 {
-		name := fmt.Sprintf("zz13247-%d", candidate)
-		if config.StableZoneID(name) == id {
-			names = append(names, name)
-			if len(names) == want {
-				return names
-			}
-		}
+// zoneIDAliases13247 returns the fifteen fixed alias names the
+// fake apply result assigns the colliding zone ID. They are not
+// config zones and are never quarantine candidates; they widen
+// the ID's name set so a map-order survivor bug has names to pick.
+func zoneIDAliases13247() []string {
+	names := make([]string, 0, 15)
+	for i := range 15 {
+		names = append(names, fmt.Sprintf("zzx13247-%02d", i))
 	}
-	t.Fatalf("found only %d of %d requested zone-ID colliders for %d", len(names), want, id)
-	return nil
+	return names
 }
