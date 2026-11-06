@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -805,14 +804,8 @@ func TestCrashRetryReadyWaitTimeoutKeepsElectionDebt18869(t *testing.T) {
 	m.cfg = cfg
 	m.restartAttemptInProgress = true
 	m.mu.Unlock()
-	// The hand-off must copy the flag before this hook clears it. This forces
-	// the tracker—not the parallel atomic helper-down signal—to carry the retry
-	// debt through its failed readiness wait.
-	handOffSeen := false
-	m.testAfterExitFlagRead = func() {
-		handOffSeen = true
-		m.helperDownUnexpected.Store(false)
-	}
+	// The atomic helper-down signal also reports debt, so inspect the tracker
+	// directly to prove this timeout did not erase the inherited half.
 	m.mu.Lock()
 	err := m.ensureProcessLocked(cfg)
 	m.restartAttemptInProgress = false
@@ -820,17 +813,21 @@ func TestCrashRetryReadyWaitTimeoutKeepsElectionDebt18869(t *testing.T) {
 	if err == nil {
 		t.Fatal("ensureProcessLocked succeeded although the crash retry never published a control socket")
 	}
-	if !strings.Contains(err.Error(), "did not become ready") {
-		t.Fatalf("ensureProcessLocked error = %q, want actual readiness timeout", err)
-	}
-	if !handOffSeen {
-		t.Fatal("ensureProcessLocked did not spawn a retry and hand off its inherited verdict")
+	wantErr := "userspace dataplane helper did not become ready at " + cfg.ControlSocket
+	if err.Error() != wantErr {
+		t.Fatalf("ensureProcessLocked error = %q, want readiness timeout %q", err, wantErr)
 	}
 	if m.proc != nil {
 		t.Fatal("failed readiness wait left its child running")
 	}
 	if !m.HelperElectionNotReady() {
-		t.Fatal("ready-wait timeout retired the crash retry's inherited not-ready verdict")
+		t.Fatal("ready-wait timeout cleared the crash retry's election debt")
+	}
+	m.liveTrack.mu.Lock()
+	inherited, suspected := m.liveTrack.inherited, m.liveTrack.suspected
+	m.liveTrack.mu.Unlock()
+	if !inherited || !suspected {
+		t.Fatalf("ready-wait timeout retired the inherited tracker verdict: inherited=%v suspected=%v", inherited, suspected)
 	}
 
 	// The next retry is only a live process, not proof of recovery. It must
