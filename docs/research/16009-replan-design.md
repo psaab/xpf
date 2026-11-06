@@ -554,6 +554,8 @@ itself is edited only through the normal reviewed-docs process); and
 (iii) S7 is filed with §6.2's title and exact transferred acceptance
 in the same act. No other scope change is authorized here.
 
+### 6.1 Scope-change text (for the #16009 record)
+
 > **Conditional scope change (only after the §7 gates pass and the owner
 > selects route (b)):** #16009 no longer includes the Q1 TCP-flag family
 > — SYN+FIN, no-flag, FIN-without-ACK, and WinNuke — on the shim
@@ -584,11 +586,12 @@ in the same act. No other scope change is authorized here.
   the Go-builder Q1-mask/16-profile acceptance; and pass the Q1-only
   acceptance components explicitly transferred in §7.2: the C22
   no-flag-only leg (not its capture/declared facts or syn-frag-only
-  leg), C23's 16 masks × 4 Q1 packets × IPv4/IPv6 = 128 worker-oracle
-  outcomes (not C23's SYN-frag checks), C26's SYN+FIN drop assertion
-  on session-hit PASS, and C35's SYN+FIN alarm assertion. Restore Q1
-  bits in conservative emitted rows as part of S7. S7 owns exactly
-  these Q1 artifacts; it does not own retained capture-unknown,
+  leg); C23's 16 masks × 4 Q1 packets × IPv4/IPv6 = 128 worker-oracle
+  outcomes and URG|ACK-to-port-443 “not WinNuke” negative control (not
+  C23's SYN-frag checks); C26's SYN+FIN selected-pass drop assertion;
+  and C35's SYN+FIN alarm-on PASS plus alarm-false DROP assertions.
+  Restore Q1 bits in conservative emitted rows as part of S7. S7 owns
+  exactly these Q1 artifacts; it does not own retained capture-unknown,
   SYN-frag, core-mask, row-presence, or extractor-error coverage.
   Do not report transferred checks as completed by #16009. S7's
   complete object must independently satisfy K1 (≤850,000, floor PASS,
@@ -717,7 +720,7 @@ subassertion stays in #16009.
 | C20 | **Retained, fixtures updated:** malformed IPv4 TLV before/after valid LSRR drops on row presence. Use the zero-mask flood-only row, a core-only `BadNumericUnresolved` row, and the separate Q1-only zero-core-mask row witness below. |
 | C21 | **Retained, fixtures updated:** second readable non-atomic Fragment notification/drop and exact duplicate chain; use builder-valid zero-mask, core-only conservative, and Q1-only zero-core-mask row fixtures. |
 | C22 | **Split:** retain the actual-capture fact from `data_end.checked_sub(data)`, both-direction pointer-valued-end parser witness, and `tcp_flags_capture_unknown=1`; keep the selected session-miss-local BPF pass with an actual pointer-valued end and syn-frag-only row, plus its host/worker control. Transfer only the no-flag-only Q1 assertion to S7; that leg remains a disclosed divergence, never parity. Keep `tiny_declared_unknown=0` independent. |
-| C23 | **Split:** transfer the Q1-only 16 masks × 4 Q1 shapes × IPv4/IPv6 = 128 worker-oracle outcomes and independent-bit assertions to S7. Retain the SYN-frag selected known first-fragment assertion and its relevant whole-SYN, first-fragment-ACK, and non-first-SYN-sentinel controls in #16009. The WinNuke-specific URG\|ACK-to-139 test transfers; it is not retained as a core check. |
+| C23 | **Split:** transfer the Q1-only 16 masks × 4 Q1 shapes × IPv4/IPv6 = 128 worker-oracle outcomes and independent-bit assertions to S7. Also transfer the URG\|ACK-to-port-443 “not WinNuke” negative control. Retain the SYN-frag selected known first-fragment assertion and its relevant whole-SYN, first-fragment-ACK, and non-first-SYN-sentinel controls in #16009. The WinNuke-specific URG\|ACK-to-139 test transfers; it is not retained as a core check. |
 | C24 | **Retained:** WG selected-pass LSRR drop and WG-admission/transit control. |
 | C25 | **Retained:** early-filter multicast/broadcast selected-pass policy-extension cells and non-selected controls; not worker parity. |
 | C26 | **Replaced + split:** keep the session-hit `PASS_TO_KERNEL` arm and non-selected/transit control in #16009, but replace SYN+FIN with an in-scope LSRR or geometry trigger and assert that core drop. Transfer only the SYN+FIN selected-pass drop assertion to S7. |
@@ -729,7 +732,7 @@ subassertion stays in #16009.
 | C32 | **Retained:** GRE-inner selected pass on outer LSRR and redirect controls; inner parity remains S5. |
 | C33 | **Retained:** binding-not-ready selected local/control drop and transit-false accounting control. |
 | C34 | **Retained:** ctrl-disabled selected `PassLocalControl` drop and transit/non-adjudicated controls. |
-| C35 | **Replaced + split:** retain `BadNumericUnresolved` alarm-bit preservation and alarm-without-drop for an ordinary **core** trip (use LSRR or geometry), plus parse-error drop-on-row-presence despite alarm. Transfer only the SYN+FIN alarm assertion to S7. |
+| C35 | **Replaced + split:** retain `BadNumericUnresolved` alarm-bit preservation and both alarm dispositions for an ordinary **core** trip: alarm-on PASS/alarm increment with no drop, and alarm-false DROP. Retain parse-error drop-on-row-presence despite alarm. Transfer both original SYN+FIN dispositions—the alarm-on PASS and alarm-false DROP—to S7. |
 
 **Host corpus and Go acceptance.** Keep all host/parser corpus
 assertions for retained checks above, including the absolute-pointer
@@ -764,13 +767,14 @@ Q1 screening. It is a #16009 acceptance artifact, not S7 coverage.
 
 **S7 owns exactly the transferred Q1 artifacts:** the four independent
 predicates and bits 5–8; their Go mask/profile acceptance; the C23
-128-outcome Q1 matrix; the C22 no-flag-only assertion; C26's original
-SYN+FIN session-hit drop assertion; C35's original SYN+FIN alarm
-assertion; and Q1 bits in emitted conservative rows. S7 does **not**
-own C22 capture/declared facts, C23 SYN-frag checks/controls, SYN-frag,
-the zero-core-mask row witness, core-only conservative rows, or
-row-presence-gated extraction errors. Do not transfer entire C22/C23/
-C26/C35 or all host/Go corpus wholesale.
+128-outcome Q1 matrix and URG|ACK-to-port-443 “not WinNuke” negative
+control; the C22 no-flag-only assertion; C26's original SYN+FIN
+session-hit drop assertion; C35's original SYN+FIN alarm-on PASS and
+alarm-false DROP assertions; and Q1 bits in emitted conservative rows.
+S7 does **not** own C22 capture/declared facts, C23 SYN-frag
+checks/controls, SYN-frag, the zero-core-mask row witness, core-only
+conservative rows, or row-presence-gated extraction errors. Do not
+transfer entire C22/C23/C26/C35 or all host/Go corpus wholesale.
 
 ### 7.3 Kill criteria and rank-1 failure handling
 
