@@ -583,19 +583,35 @@ fn worker_queue_7201_did_work_consumes_the_backlog_signal() {
          it at all, so its agreement check below would pass vacuously"
     );
 
-    let seeds: Vec<&str> = code
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.starts_with("let mut did_work"))
-        .collect();
+    let lines = code.lines().map(str::trim).collect::<Vec<_>>();
+    let seed_starts = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line.starts_with("let mut did_work").then_some(index))
+        .collect::<Vec<_>>();
     assert_eq!(
-        seeds.len(),
+        seed_starts.len(),
         1,
-        "expected exactly one `did_work` seed to reason about; found {seeds:?}"
+        "expected exactly one `did_work` seed to reason about; found {seed_starts:?}"
     );
+    // rustfmt wraps the statement, so pin the complete normalized seed rather
+    // than the first physical line. #18807 re-pins the #16217 (a936a6f802)
+    // pending-neighbor timer work term alongside the existing backlog terms.
+    let seed_start = seed_starts[0];
+    let seed_end = lines[seed_start..]
+        .iter()
+        .position(|line| line.ends_with(';'))
+        .expect("the did_work seed must terminate with a semicolon")
+        + seed_start;
+    let seed = lines[seed_start..=seed_end]
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     assert_eq!(
-        seeds[0], "let mut did_work = commands_backlogged || !session_import_repairs.is_empty();",
-        "the worker loop no longer seeds `did_work` from the command backlog. A \
+        seed,
+        "let mut did_work = commands_backlogged || !session_import_repairs.is_empty() || pending_timer_fired;",
+        "the worker loop no longer seeds `did_work` from the command backlog or pending-neighbor timer work. A \
          `let mut did_work = false;` here reverts #7201 to a pure regression: the \
          budget still splits the batch, but the loop classifies the split passes \
          as IDLE and parks each remaining slice behind a 1 ms poll(2)."

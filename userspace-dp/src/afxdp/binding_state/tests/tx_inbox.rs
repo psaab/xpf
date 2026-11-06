@@ -199,9 +199,13 @@ fn enqueue_tx_owned_below_cap_does_not_touch_overflow_counter() {
 // published size/offsets are now 2624/2432/2561 in both builds.
 // #14668 adds one unconditional DNS illegal-reply counter before them.
 // #15941 adds six unconditional transit-drop counters before them;
-// offsets are now 2736/2865, size 2880 (#16242 batch histograms grow the owner profile).
+// offsets are 2736/2865, size 2880 before #16242's batch histograms.
+// #18807 re-pins after #16217 (a936a6f802): #16242's batch histograms,
+// #18566/#18656's per-arm eviction slots and #18560's matched-view counters
+// (trail at binding_state/mod.rs) leave size 3136 and offsets 2944/3073,
+// compiler-reported under rustc 1.98.1; the issue's 3072 predates #18560.
 fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304() {
-    assert_eq!(std::mem::size_of::<BindingLiveState>(), 2880,);
+    assert_eq!(std::mem::size_of::<BindingLiveState>(), 3136,);
     assert_eq!(
         std::mem::align_of::<BindingLiveState>(),
         64,
@@ -209,12 +213,12 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-        2736,
-        "#14668 must keep pinned admission-counter layout consistent"
+        2944,
+        "#18807: compiler-measured admission-counter offset"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2865,
-        "#14668 must keep pinned final-field offset consistent"
+        3073,
+        "#18807: compiler-measured final-field offset"
     );
 }

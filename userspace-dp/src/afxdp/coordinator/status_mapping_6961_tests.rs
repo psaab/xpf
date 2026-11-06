@@ -51,7 +51,7 @@ use crate::afxdp::worker_runtime::WorkerRuntimeAtomics;
 use std::sync::atomic::Ordering as AtomicOrdering;
 
 /// The scalar fields whose name is IDENTICAL on `WorkerRuntimeAtomics` and on
-/// `crate::protocol::WorkerRuntimeStatus` — all 30 of them `AtomicU64` -> `u64`,
+/// `crate::protocol::WorkerRuntimeStatus` — each is an `AtomicU64` -> `u64`,
 /// which is exactly why any one can be substituted for any other without a
 /// compiler complaint.
 ///
@@ -93,6 +93,9 @@ macro_rules! for_each_shared_scalar {
             session_gc_healed_on_promote,
             session_gc_aged_owner_rg_zero_active_node,
             session_gc_kept_alive_by_companion,
+            // #18807: #16217 (a936a6f802) carries this counter through the
+            // worker snapshot and wire binding, so it belongs in the shared list.
+            session_gc_expired,
             nat_reverse_key_collisions,
             nat_reverse_key_collisions_distinct_src,
             session_create_drops,
