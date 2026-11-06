@@ -86,12 +86,10 @@ fn snat_decision() -> SessionDecision {
 }
 
 fn reverse_metadata() -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone: TEST_WAN_ZONE_ID,
-        egress_zone: TEST_LAN_ZONE_ID,
-        is_reverse: true,
-        ..test_metadata()
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_WAN_ZONE_ID,
+    egress_zone: TEST_LAN_ZONE_ID,
+    is_reverse: true,
+    ..test_metadata() }
 }
 
 fn fresh_node() -> Node {

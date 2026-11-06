@@ -160,29 +160,27 @@ pub(super) fn imported_pair_entry(
             install_table_domain: 0,
             install_table_check: 0,
         },
-        metadata: SessionMetadata {
-            ingress_zone: forwarding.zone_name_to_id["lan"],
-            egress_zone: forwarding.zone_name_to_id["wan"],
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            // #7095: the import carries THIS node's resolved ingress identity.
-            ingress_ifindex: LAN_IFINDEX as u32,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: 1,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-            // The HA wire carries the admitting NAT scope as a cluster-stable
-            // fold that the importer resolves to its own ifindex (reth1.0).
-            nat_scope_ifindex: Some(LAN_IFINDEX),
-        },
+        metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: forwarding.zone_name_to_id["lan"],
+        egress_zone: forwarding.zone_name_to_id["wan"],
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        // #7095: the import carries THIS node's resolved ingress identity.
+        ingress_ifindex: LAN_IFINDEX as u32,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        // The HA wire carries the admitting NAT scope as a cluster-stable
+        // fold that the importer resolves to its own ifindex (reth1.0).
+        nat_scope_ifindex: Some(LAN_IFINDEX), },
         persistent_lease_hold: None,
         // Interface SNAT mints dynamic provenance; it rides the HA wire.
         source_nat_static: Some(false),
@@ -1116,14 +1114,11 @@ fn reverse_reply_case(served: bool) {
 // translated tuple) of a live flow must survive the RG-taking node's window.
 // ---------------------------------------------------------------------------
 
-/// The alias row the daemon synthesizes for a fabric-redirect delta
-/// (`userspaceForwardWireAliasV4/V6`): the same value, keyed by the
-/// translated forward tuple.
+/// The alias row synthesized for a fabric-redirect delta.
 fn alias_of(entry: &SyncedSessionEntry) -> SyncedSessionEntry {
-    let mut alias = entry.clone();
-    alias.key = crate::session::forward_wire_key(&entry.key, entry.decision.nat);
-    alias
+    super::tests_support::imported_forward_wire_alias(entry)
 }
+
 
 /// The RG-taking node holding ONLY the alias of the flow (plus its reverse)
 /// — the integ3 trace's shape for 36552 on fw0, and the diag6 shape for the
@@ -2202,12 +2197,12 @@ fn lan_node_unnatted_fabric_reply_keeps_forwarding_18531() {
         "fixture: the un-NATed reply replica installs"
     );
     assert!(
-        crate::afxdp::session_glue::reverse_un_nat_targets_itself(
+        !crate::afxdp::session_glue::reverse_un_nat_targets_itself(
             &unnatted_key,
             reverse_decision.nat,
             &replica_metadata,
         ),
-        "fixture: the replica has the self-targeting NAT shape"
+        "fixture: the unmarked replica has the self-targeting shape but no          alias origin, so it is not handed back"
     );
     let reply = || {
         let mut frame = build_txn_tcp_syn_frame_v4(
@@ -2292,6 +2287,9 @@ fn worker_alias_import_books_no_translation_18531() {
             install_table_check: 0,
         },
         metadata: crate::afxdp::testfx::test_metadata(),
+        // The alias row carries the producer marker, as on the sync wire;
+        // the canonical row below does not (same builder, key differs, so
+        // mark only the wire-keyed copy at the call site).
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -2312,7 +2310,11 @@ fn worker_alias_import_books_no_translation_18531() {
         &mut sessions,
         &forwarding,
         &ha,
-        vec![WorkerCommand::UpsertSynced(entry(alias_key.clone()))],
+        vec![WorkerCommand::UpsertSynced({
+            let mut e = entry(alias_key.clone());
+            e.metadata.forward_wire_alias_origin = true;
+            e
+        })],
     );
     assert_eq!(used(&forwarding), 0, "a peer-imported alias books no translation");
     apply_commands(
@@ -2767,11 +2769,10 @@ fn rg_return_reply_revokes_after_refresh_on_rebound_rule_18927() {
 
 // ---------------------------------------------------------------------------
 // #18927 child 4: DNAT-only and port-only forward-wire alias reverses.
-// The self-targeting arm (`reverse_un_nat_targets_itself`) covered only the
-// SNAT side (`rewrite_dst` naming the reverse's own destination). DNAT-only
-// alias reverses un-NAT on the source side, and port-only aliases rewrite only
-// a port; both need provenance from the recovered forward wire key before the
-// reply is handed to the peer that holds the canonical row.
+// The receiver hands off only a reverse synthesized from an import explicitly
+// marked by the Go producer as its extra forward-wire alias. DNAT-only alias
+// reverses un-NAT on the source side; port-only aliases rewrite only a port.
+// Both must reach the peer that holds the canonical row.
 // ---------------------------------------------------------------------------
 
 /// The captured snapshot only permits LAN -> WAN. DNAT replies exercise the
@@ -2871,6 +2872,96 @@ fn dnat_alias_reverse_is_handed_to_peer_at_synthesis_18927() {
     );
 }
 
+/// The marker is derived at the peer-import boundary and copied into the
+/// synthesized reverse. An identity-DNAT canonical row has the same
+/// key/NAT fixed-point shape but no producer marker, so it stays unmarked.
+#[test]
+fn synced_alias_origin_is_import_stamped_and_reverse_propagated_18927() {
+    let forwarding = dnat_owner_forwarding();
+    let canonical = dnat_forward_fixture(&forwarding, Family::V4, None);
+    assert!(
+        !canonical.metadata.forward_wire_alias_origin,
+        "canonical fixture must not carry the extra-row marker"
+    );
+    let alias = alias_of(&canonical);
+    let alias_reverse_key =
+        crate::session::reverse_session_key(&alias.key, alias.decision.nat);
+    let alias_coordinator = bare_coordinator(&forwarding);
+    assert_eq!(
+        alias_coordinator.upsert_synced_session(alias.clone()),
+        crate::afxdp::SyncedImportOutcome::Applied,
+        "the marked wire alias imports"
+    );
+    let alias_rows =
+        crate::afxdp::shared_ops::lock_shared_recover(&alias_coordinator.sessions.synced);
+    assert!(
+        alias_rows
+            .get(&alias.key)
+            .expect("imported forward alias")
+            .metadata
+            .forward_wire_alias_origin,
+        "the importer retains a shape-validated marker"
+    );
+    let alias_reverse = alias_rows
+        .get(&alias_reverse_key)
+        .expect("synthesized reverse alias");
+    assert!(
+        alias_reverse.metadata.forward_wire_alias_origin,
+        "the synthesized reverse inherits the forward import marker"
+    );
+    assert!(
+        crate::afxdp::session_glue::reverse_un_nat_targets_itself(
+            &alias_reverse.key,
+            alias_reverse.decision.nat,
+            &alias_reverse.metadata,
+        ),
+        "the imported alias reverse passes the origin-and-shape gate"
+    );
+    drop(alias_rows);
+
+    let (lan, _, _) = addrs(Family::V4);
+    let mut identity = dnat_forward_fixture(&forwarding, Family::V4, None);
+    identity.key.dst_ip = lan;
+    assert_eq!(
+        crate::session::forward_wire_key(&identity.key, identity.decision.nat),
+        identity.key,
+        "identity control has the alias-shaped tuple fixed point"
+    );
+    let identity_reverse_key =
+        crate::session::reverse_session_key(&identity.key, identity.decision.nat);
+    let identity_coordinator = bare_coordinator(&forwarding);
+    assert_eq!(
+        identity_coordinator.upsert_synced_session(identity.clone()),
+        crate::afxdp::SyncedImportOutcome::Applied,
+        "the unmarked identity canonical imports"
+    );
+    let identity_rows =
+        crate::afxdp::shared_ops::lock_shared_recover(&identity_coordinator.sessions.synced);
+    assert!(
+        !identity_rows
+            .get(&identity.key)
+            .expect("imported identity canonical")
+            .metadata
+            .forward_wire_alias_origin,
+        "an identity canonical remains unmarked at import"
+    );
+    let identity_reverse = identity_rows
+        .get(&identity_reverse_key)
+        .expect("synthesized identity reverse");
+    assert!(
+        !identity_reverse.metadata.forward_wire_alias_origin,
+        "an identity reverse does not inherit alias provenance"
+    );
+    assert!(
+        !crate::afxdp::session_glue::reverse_un_nat_targets_itself(
+            &identity_reverse.key,
+            identity_reverse.decision.nat,
+            &identity_reverse.metadata,
+        ),
+        "tuple/NAT equality alone cannot turn identity DNAT into an alias"
+    );
+}
+
 /// Port-only alias reverses: a DNAT that keeps the server address and moves
 /// only its port, and an SNAT PAT that keeps the address and moves only the
 /// source port. Ports are TCP/UDP identity only; the helper must not treat an
@@ -2888,6 +2979,7 @@ fn port_only_alias_reverse_is_handed_to_peer_at_synthesis_18927() {
         dnat.key.src_port = SPORT;
         dnat.key.dst_port = DPORT;
         dnat.decision.nat = NatDecision {
+            rewrite_dst: Some(lan),
             rewrite_dst_port: Some(PAT_PORT),
             ..NatDecision::default()
         };
@@ -2936,10 +3028,8 @@ fn port_only_alias_reverse_is_handed_to_peer_at_synthesis_18927() {
     );
 }
 
-/// Control: a canonical DNAT reverse is NOT handed to the peer. It retains
-/// the public destination (address-only and address+port) or the original
-/// destination port (port-only). Each shape must remain distinct from the
-/// translated alias recovered by the forward-wire provenance check.
+/// Each control keeps the public destination or original destination port.
+/// The producer marker, not this shape alone, distinguishes them from aliases.
 #[test]
 fn canonical_dnat_reverse_is_not_handed_to_peer_18927() {
     let owner_fwd = fw1_owner_forwarding();
@@ -2949,7 +3039,7 @@ fn canonical_dnat_reverse_is_not_handed_to_peer_18927() {
         for (label, dst, rewrite_dst, rewrite_dst_port) in [
             ("addr-only", snat, Some(lan), None),
             ("addr+port", snat, Some(lan), Some(PAT_PORT)),
-            ("port-only", lan, None, Some(PAT_PORT)),
+            ("port-only", lan, Some(lan), Some(PAT_PORT)),
         ] {
             let mut canonical = exported_forward(&owner_fwd, family);
             canonical.key.src_ip = wan;
@@ -2967,6 +3057,11 @@ fn canonical_dnat_reverse_is_not_handed_to_peer_18927() {
             canonical.metadata.ingress_vlan_id = 80;
             canonical.metadata.nat_scope_ifindex = None;
             canonical.source_nat_static = None;
+            let canonical = imported_forward_canonical(&canonical);
+            assert!(
+                !canonical.metadata.forward_wire_alias_origin,
+                "canonical import must not carry alias origin ({family:?} {label})"
+            );
             let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
                 &owner_fwd,
                 &owner_ha(now_secs),
@@ -2994,16 +3089,20 @@ fn canonical_dnat_reverse_is_not_handed_to_peer_18927() {
                 "a canonical DNAT reverse is never held HA-inactive ({family:?} {label})"
             );
         }
-        // Provenance adversary: address-only DNAT remains non-wire because
-        // its destination address changes, while a no-op destination-port
-        // mapping leaves the reverse's source port self-targeted. Dropping
-        // the recovered-forward/wire-key check would misclassify this
-        // canonical row as an alias.
+        // Shape adversary: address-only DNAT changes the destination address,
+        // while a no-op destination-port mapping leaves the reverse source
+        // port self-targeted. The unmarked canonical must not be handed off
+        // for either shape alone.
         let canonical = dnat_forward_fixture(&owner_fwd, family, Some(DPORT));
         assert_ne!(
             canonical.key,
             crate::session::forward_wire_key(&canonical.key, canonical.decision.nat),
             "provenance control must be canonical ({family:?})"
+        );
+        let canonical = imported_forward_canonical(&canonical);
+        assert!(
+            !canonical.metadata.forward_wire_alias_origin,
+            "canonical wire marker remains absent ({family:?})"
         );
         let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             &owner_fwd,
@@ -3034,50 +3133,202 @@ fn canonical_dnat_reverse_is_not_handed_to_peer_18927() {
     }
 }
 
-/// Control: a no-NAT reverse never matches the self-targeting arm at all.
+/// A wide-prefix identity DNAT match retains its explicit producer shape
+/// through import and reverse synthesis, while the absent alias marker keeps
+/// the canonical reverse local.
 #[test]
-fn no_nat_reverse_is_never_self_targeting_18927() {
-    let key = forward_key();
-    let mut metadata = crate::afxdp::testfx::test_metadata();
-    metadata.is_reverse = true;
+fn wide_prefix_identity_dnat_reverse_is_not_handed_to_peer_18927() {
+    let owner_fwd = dnat_owner_forwarding();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let (_, wan, dst) = addrs(Family::V4);
+    let table = crate::nat::DnatTable::from_snapshots(
+        &[crate::protocol::DestinationNATRuleSnapshot {
+            name: "identity-prefix-18927".to_string(),
+            from_zone: "wan".to_string(),
+            destination_prefix: "172.16.0.0/16".to_string(),
+            pool_address: dst.to_string(),
+            protocol: "tcp".to_string(),
+            ..crate::protocol::DestinationNATRuleSnapshot::default()
+        }],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let identity = table
+        .lookup(crate::ip_proto::PROTO_TCP, wan, dst, DPORT, "wan")
+        .expect("the wide-prefix rule matches the canonical destination");
+    assert_eq!(
+        identity,
+        NatDecision {
+            rewrite_dst: Some(dst),
+            ..NatDecision::default()
+        },
+        "identity DNAT retains its stored-session rewrite field"
+    );
+
+    let mut canonical = exported_forward(&owner_fwd, Family::V4);
+    canonical.key.src_ip = wan;
+    canonical.key.dst_ip = dst;
+    canonical.key.src_port = SPORT;
+    canonical.key.dst_port = DPORT;
+    canonical.decision.nat = identity;
+    canonical.metadata.ingress_zone = owner_fwd.zone_name_to_id["wan"];
+    canonical.metadata.egress_zone = owner_fwd.zone_name_to_id["lan"];
+    canonical.metadata.ingress_ifindex = WAN_UNIT_IFINDEX as u32;
+    canonical.metadata.ingress_vlan_id = 80;
+    canonical.metadata.nat_scope_ifindex = None;
+    canonical.source_nat_static = None;
+    let canonical = imported_forward_canonical(&canonical);
+    assert!(
+        !canonical.metadata.forward_wire_alias_origin,
+        "canonical identity import must not carry alias origin"
+    );
+    let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+        &owner_fwd,
+        &owner_ha(now_secs),
+        &Arc::new(ShardedNeighborMap::default()),
+        &canonical,
+        now_secs,
+    )
+    .expect("production reverse synthesis must produce the companion");
     assert!(
         !crate::afxdp::session_glue::reverse_un_nat_targets_itself(
-            &key,
+            &reverse.key,
+            reverse.decision.nat,
+            &reverse.metadata,
+        ),
+        "an imported identity DNAT reverse remains canonical"
+    );
+    assert_ne!(
+        reverse.decision.resolution.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "an identity DNAT reverse is not handed to the peer"
+    );
+    assert_ne!(
+        reverse.decision.resolution.disposition,
+        ForwardingDisposition::HAInactive,
+        "an identity DNAT reverse is not held HA-inactive"
+    );
+}
+
+#[test]
+fn nptv6_alias_reverse_is_handed_to_peer_at_synthesis_18927() {
+    let mut forwarding = dnat_owner_forwarding();
+    forwarding.nptv6 = crate::nptv6::Nptv6State::from_snapshots(&[
+        crate::protocol::Nptv6RuleSnapshot {
+            name: "nptv6-alias-18927".to_string(),
+            from_zone: "wan".to_string(),
+            internal_prefix: "2001:559:8585:ef00::/64".to_string(),
+            external_prefix: "2001:559:8585:81::/64".to_string(),
+        },
+    ]);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let (lan, wan, _) = addrs(Family::V6);
+    let IpAddr::V6(mut external_src) = lan else {
+        unreachable!("V6 fixture");
+    };
+    assert_eq!(
+        forwarding
+            .nptv6
+            .translate_outbound_result(&mut external_src, "wan"),
+        crate::nptv6::Nptv6Translation::Translated,
+        "fixture: the internal endpoint must match the production NPTv6 state"
+    );
+    let mut canonical = exported_forward(&forwarding, Family::V6);
+    canonical.key.src_ip = lan;
+    canonical.key.dst_ip = wan;
+    canonical.key.src_port = SPORT;
+    canonical.key.dst_port = DPORT;
+    canonical.decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V6(external_src)),
+        nptv6: true,
+        ..NatDecision::default()
+    };
+    canonical.metadata.ingress_zone = forwarding.zone_name_to_id["lan"];
+    canonical.metadata.egress_zone = forwarding.zone_name_to_id["wan"];
+    canonical.metadata.ingress_ifindex = LAN_IFINDEX as u32;
+    canonical.metadata.nat_scope_ifindex = None;
+    canonical.source_nat_static = None;
+
+    for fabric in [false, true] {
+        let mut alias = alias_of(&canonical);
+        alias.metadata.fabric_ingress = fabric;
+        let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+            &forwarding,
+            &owner_ha(now_secs),
+            &Arc::new(ShardedNeighborMap::default()),
+            &alias,
+            now_secs,
+        )
+        .expect("production reverse synthesis must produce the companion");
+        assert!(
+            crate::afxdp::session_glue::reverse_un_nat_targets_itself(
+                &reverse.key,
+                reverse.decision.nat,
+                &reverse.metadata,
+            ),
+            "the NPTv6 alias passes the import-origin and self-target shape gate (fabric={fabric})"
+        );
+        assert_eq!(
+            reverse.decision.resolution.disposition,
+            if fabric {
+                ForwardingDisposition::HAInactive
+            } else {
+                ForwardingDisposition::FabricRedirect
+            },
+            "NPTv6 alias reverse disposition (fabric={fabric})"
+        );
+    }
+}
+
+
+/// Controls use import-stamped alias metadata, then vary only the tuple and
+/// NAT decision to pin the structural exclusions.
+#[test]
+fn no_nat_reverse_is_never_self_targeting_18927() {
+    let forwarding = fw1_owner_forwarding();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let canonical = exported_forward(&forwarding, Family::V4);
+    let alias = alias_of(&canonical);
+    let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+        &forwarding,
+        &owner_ha(now_secs),
+        &Arc::new(ShardedNeighborMap::default()),
+        &alias,
+        now_secs,
+    )
+    .expect("production reverse synthesis must propagate imported alias metadata");
+    let metadata = reverse.metadata;
+
+    assert!(
+        !crate::afxdp::session_glue::reverse_un_nat_targets_itself(
+            &reverse.key,
             NatDecision::default(),
             &metadata,
         ),
         "a no-NAT reverse rewrites nothing and never matches"
     );
-    metadata.is_reverse = false;
     assert!(
         !crate::afxdp::session_glue::reverse_un_nat_targets_itself(
-            &key,
-            NatDecision::default(),
-            &metadata,
+            &alias.key,
+            alias.decision.nat,
+            &alias.metadata,
         ),
         "a forward row never matches the reverse arm"
     );
-    metadata.is_reverse = true;
     let nat64 = NatDecision {
-        rewrite_src: Some(key.src_ip),
+        rewrite_src: Some(reverse.key.src_ip),
         nat64: true,
         ..NatDecision::default()
     };
     assert!(
-        !crate::afxdp::session_glue::reverse_un_nat_targets_itself(&key, nat64, &metadata),
+        !crate::afxdp::session_glue::reverse_un_nat_targets_itself(
+            &reverse.key,
+            nat64,
+            &metadata,
+        ),
         "NAT64 reverse rows are structurally excluded"
     );
-    let nptv6 = NatDecision {
-        rewrite_src: Some(key.src_ip),
-        nptv6: true,
-        ..NatDecision::default()
-    };
-    assert!(
-        !crate::afxdp::session_glue::reverse_un_nat_targets_itself(&key, nptv6, &metadata),
-        "NPTv6 reverse rows are structurally excluded"
-    );
 
-    let mut icmp_key = key.clone();
+    let mut icmp_key = reverse.key.clone();
     icmp_key.protocol = crate::ip_proto::PROTO_ICMP;
     icmp_key.src_port = 0;
     icmp_key.dst_port = 0;
@@ -3095,26 +3346,25 @@ fn no_nat_reverse_is_never_self_targeting_18927() {
     );
 }
 
-/// Pipeline cell: a server reply hitting a DNAT alias's reverse on the
-/// alias-only owner is handed to the peer over the fabric (tx=[0,1,0]), the
+/// Pipeline cell: a server reply hitting a DNAT alias's reverse while WAN RG1
+/// is locally active is handed to the peer over the fabric (tx=[0,1,0]), the
 /// pair is held (closes=0), and after RefreshOwnerRGS the reverse keeps its
 /// FabricRedirect so the next reply takes the same leg.
 #[test]
 fn dnat_alias_reverse_reply_is_handed_to_peer_18927() {
-    let window_fwd = rg_taking_node_forwarding();
     let owner_fwd = dnat_owner_forwarding();
     let now_ns = monotonic_nanos();
     let now_secs = now_ns / 1_000_000_000;
-    let activated = split_ha(now_secs);
+    let activated = owner_ha(now_secs);
     let mut mismatches = Vec::new();
     for family in [Family::V4, Family::V6] {
         let (lan, wan, _) = addrs(family);
         for rewrite_dst_port in [None, Some(PAT_PORT)] {
-            let canonical = dnat_forward_fixture(&window_fwd, family, rewrite_dst_port);
+            let canonical = dnat_forward_fixture(&owner_fwd, family, rewrite_dst_port);
             let alias = alias_of(&canonical);
             let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
-                &window_fwd,
-                &window_ha(now_secs),
+                &owner_fwd,
+                &activated,
                 &Arc::new(ShardedNeighborMap::default()),
                 &alias,
                 now_secs,
@@ -3124,8 +3374,8 @@ fn dnat_alias_reverse_reply_is_handed_to_peer_18927() {
             sessions.set_forwarding_revalidation_gen(7, 9);
             apply_commands(
                 &mut sessions,
-                &window_fwd,
-                &window_ha(now_secs),
+                &owner_fwd,
+                &activated,
                 vec![
                     WorkerCommand::UpsertSynced(reverse),
                     WorkerCommand::UpsertSynced(alias.clone()),
@@ -3162,7 +3412,9 @@ fn dnat_alias_reverse_reply_is_handed_to_peer_18927() {
             };
             let (frame, meta) = reply();
             let first = drive(&mut sessions, &owner_fwd, &activated, LAN, &frame, meta, 2);
-            if (first.tx, first.closes, sessions.len()) != ([0, 1, 0], 0, 2) {
+            if (first.tx, first.closes, sessions.len(), first.session_hit)
+                != ([0, 1, 0], 0, 2, 1)
+            {
                 mismatches.push(format!(
                     "{family:?} port={rewrite_dst_port:?} first reply: \
                      tx={:?}, session_hit={}, snat_revoked={}, closes={}, \
@@ -3201,7 +3453,9 @@ fn dnat_alias_reverse_reply_is_handed_to_peer_18927() {
             }
             let (frame, meta) = reply();
             let second = drive(&mut sessions, &owner_fwd, &activated, LAN, &frame, meta, 3);
-            if (second.tx, second.closes, sessions.len()) != ([0, 1, 0], 0, 2) {
+            if (second.tx, second.closes, sessions.len(), second.session_hit)
+                != ([0, 1, 0], 0, 2, 1)
+            {
                 mismatches.push(format!(
                     "{family:?} port={rewrite_dst_port:?} refreshed reply: \
                      tx={:?}, session_hit={}, snat_revoked={}, closes={}, \

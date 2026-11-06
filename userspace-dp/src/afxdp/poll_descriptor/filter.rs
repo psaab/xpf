@@ -4257,29 +4257,27 @@ mod filter_log_egress_zone_tests {
                 install_table_domain: 0,
                 install_table_check: 0,
             };
-            let metadata = SessionMetadata {
-                ingress_zone: TEST_LAN_ZONE_ID,
-                // #4983: mirror the frame's own ingress binding (`meta`
-                // above), which is what the production install sites stamp.
-                // Untagged, hence vlan id 0.
-                ingress_ifindex: LAN_IFINDEX_6722 as u32,
-                ingress_vlan_id: 0,
-                forward_ingress_vlan_id: None,
-                egress_zone: 0,
-                ingress_zone_check: 0,
-                egress_zone_check: 0,
-                owner_rg_id: 0,
-                fabric_ingress: false,
-                is_reverse: false,
-                nat64_reverse: None,
-                log_session_init: false,
-                log_session_close: false,
-                policy_id: 0,
-                inactivity_timeout_ns: None,
-                policy_counter: None,
-                policy_counter_idx: 0,
-                nat_scope_ifindex: None,
-            };
+            let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_LAN_ZONE_ID,
+            // #4983: mirror the frame's own ingress binding (`meta`
+            // above), which is what the production install sites stamp.
+            // Untagged, hence vlan id 0.
+            ingress_ifindex: LAN_IFINDEX_6722 as u32,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            egress_zone: 0,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter: None,
+            policy_counter_idx: 0,
+            nat_scope_ifindex: None, };
 
             emit_cached_output_filter_log_tail(
                 &fw,

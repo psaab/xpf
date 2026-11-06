@@ -196,12 +196,19 @@ func TestBuildSessionSyncRequestCarriesLogFlags(t *testing.T) {
 	valV4 := &dataplane.SessionValue{
 		IngressZone: 1,
 		EgressZone:  2,
-		LogFlags:    dataplane.LogFlagSessionInit | dataplane.LogFlagSessionClose,
+		LogFlags: dataplane.LogFlagSessionInit | dataplane.LogFlagSessionClose | dataplane.LogFlagForwardWireAlias,
 	}
 	reqV4 := m.buildSessionSyncRequestV4("upsert", keyV4, valV4)
-	if !reqV4.LogSessionInit || !reqV4.LogSessionClose {
-		t.Fatalf("v4: expected log flags carried, got init=%t close=%t",
-			reqV4.LogSessionInit, reqV4.LogSessionClose)
+	if !reqV4.LogSessionInit || !reqV4.LogSessionClose || !reqV4.ForwardWireAliasOrigin {
+		t.Fatalf("v4: expected log and alias-origin flags carried, got init=%t close=%t alias=%t",
+			reqV4.LogSessionInit, reqV4.LogSessionClose, reqV4.ForwardWireAliasOrigin)
+	}
+	encodedV4, err := json.Marshal(reqV4)
+	if err != nil {
+		t.Fatalf("marshal v4 request: %v", err)
+	}
+	if !strings.Contains(string(encodedV4), `"forward_wire_alias_origin":true`) {
+		t.Fatalf("v4 request JSON omitted alias origin: %s", encodedV4)
 	}
 
 	// Only session-close set: init must NOT leak true.
@@ -210,28 +217,28 @@ func TestBuildSessionSyncRequestCarriesLogFlags(t *testing.T) {
 		LogFlags: dataplane.LogFlagSessionClose,
 	}
 	reqCloseOnly := m.buildSessionSyncRequestV4("upsert", keyV4, valCloseOnly)
-	if reqCloseOnly.LogSessionInit || !reqCloseOnly.LogSessionClose {
-		t.Fatalf("v4 close-only: init=%t close=%t, want false/true",
-			reqCloseOnly.LogSessionInit, reqCloseOnly.LogSessionClose)
+	if reqCloseOnly.LogSessionInit || !reqCloseOnly.LogSessionClose || reqCloseOnly.ForwardWireAliasOrigin {
+		t.Fatalf("v4 close-only: init=%t close=%t alias=%t, want false/true/false",
+			reqCloseOnly.LogSessionInit, reqCloseOnly.LogSessionClose, reqCloseOnly.ForwardWireAliasOrigin)
 	}
 
 	// Neither set: both false.
 	reqNone := m.buildSessionSyncRequestV4("upsert", keyV4,
 		&dataplane.SessionValue{IngressZone: 1, EgressZone: 2})
-	if reqNone.LogSessionInit || reqNone.LogSessionClose {
-		t.Fatalf("v4 none: expected both false, got init=%t close=%t",
-			reqNone.LogSessionInit, reqNone.LogSessionClose)
+	if reqNone.LogSessionInit || reqNone.LogSessionClose || reqNone.ForwardWireAliasOrigin {
+		t.Fatalf("v4 none: expected all false, got init=%t close=%t alias=%t",
+			reqNone.LogSessionInit, reqNone.LogSessionClose, reqNone.ForwardWireAliasOrigin)
 	}
 
 	keyV6 := dataplane.SessionKeyV6{Protocol: 6}
 	valV6 := &dataplane.SessionValueV6{
 		IngressZone: 1, EgressZone: 2,
-		LogFlags: dataplane.LogFlagSessionInit | dataplane.LogFlagSessionClose,
+		LogFlags: dataplane.LogFlagSessionInit | dataplane.LogFlagSessionClose | dataplane.LogFlagForwardWireAlias,
 	}
 	reqV6 := m.buildSessionSyncRequestV6("upsert", keyV6, valV6)
-	if !reqV6.LogSessionInit || !reqV6.LogSessionClose {
-		t.Fatalf("v6: expected log flags carried, got init=%t close=%t",
-			reqV6.LogSessionInit, reqV6.LogSessionClose)
+	if !reqV6.LogSessionInit || !reqV6.LogSessionClose || !reqV6.ForwardWireAliasOrigin {
+		t.Fatalf("v6: expected log and alias-origin flags carried, got init=%t close=%t alias=%t",
+			reqV6.LogSessionInit, reqV6.LogSessionClose, reqV6.ForwardWireAliasOrigin)
 	}
 }
 

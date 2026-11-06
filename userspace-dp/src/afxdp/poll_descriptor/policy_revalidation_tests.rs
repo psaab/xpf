@@ -54,26 +54,24 @@ fn marker_forward_10038() -> (SessionDecision, SessionMetadata, SessionOrigin) {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
-            ingress_zone: 5,
-            egress_zone: 5,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 1,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-            forward_ingress_vlan_id: None,
-            nat_scope_ifindex: None,
-        },
+        SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 5,
+        egress_zone: 5,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, },
         SessionOrigin::TunOrigin,
     )
 }
@@ -664,11 +662,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
     assert!(synced.metadata.fabric_ingress);
     let key = synced.key.clone();
     let translated_key = crate::session::forward_wire_key(&key, synced.decision.nat);
-    let alias = SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
-        key: translated_key.clone(),
-        ..synced.clone()
-};
+    let alias = crate::afxdp::tests_support::imported_forward_wire_alias(&synced);
     let flow = SessionFlow {
         src_ip: translated_key.src_ip,
         dst_ip: translated_key.dst_ip,
@@ -884,11 +878,7 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
         .expect("dynamic SNAT session imports from non-fabric HA wire");
     let key = synced.key.clone();
     let translated_key = crate::session::forward_wire_key(&key, synced.decision.nat);
-    let alias = SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
-        key: translated_key.clone(),
-        ..synced.clone()
-};
+    let alias = crate::afxdp::tests_support::imported_forward_wire_alias(&synced);
     let flow = SessionFlow {
         src_ip: translated_key.src_ip,
         dst_ip: translated_key.dst_ip,
@@ -1076,11 +1066,7 @@ fn ha_imported_transient_dynamic_snat_local_alias_keeps_shared_canonical_12187()
     assert!(!synced.metadata.fabric_ingress);
     let key = synced.key.clone();
     let translated_key = crate::session::forward_wire_key(&key, synced.decision.nat);
-    let alias = SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
-        key: translated_key.clone(),
-        ..synced.clone()
-};
+    let alias = crate::afxdp::tests_support::imported_forward_wire_alias(&synced);
     let flow = SessionFlow {
         src_ip: translated_key.src_ip,
         dst_ip: translated_key.dst_ip,
@@ -1318,26 +1304,24 @@ fn permitted_stale_hit_restamps_conntrack_app_id_12191() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let metadata = SessionMetadata {
-        ingress_zone: crate::test_zone_ids::TEST_LAN_ZONE_ID,
-        egress_zone: crate::test_zone_ids::TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 24,
-        ingress_vlan_id: 0,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None,
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: crate::test_zone_ids::TEST_LAN_ZONE_ID,
+    egress_zone: crate::test_zone_ids::TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 24,
+    ingress_vlan_id: 0,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, };
 
     let mut snapshot = crate::afxdp::test_fixtures::policy_deny_snapshot();
     snapshot.policies[0].from_zone = "lan".to_string();
@@ -1550,26 +1534,24 @@ fn reverse_stale_hit_restamps_forward_ipv6_conntrack_row_12191() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let metadata = SessionMetadata {
-        ingress_zone: crate::test_zone_ids::TEST_LAN_ZONE_ID,
-        egress_zone: crate::test_zone_ids::TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 24,
-        ingress_vlan_id: 0,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None,
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: crate::test_zone_ids::TEST_LAN_ZONE_ID,
+    egress_zone: crate::test_zone_ids::TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 24,
+    ingress_vlan_id: 0,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, };
     let mut reverse_metadata = metadata.clone();
     reverse_metadata.is_reverse = true;
     let reverse_decision = decision;
@@ -1714,26 +1696,24 @@ fn app_id_revalidation_decision(nat: NatDecision) -> SessionDecision {
 }
 
 fn app_id_revalidation_metadata(is_reverse: bool) -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone: crate::test_zone_ids::TEST_LAN_ZONE_ID,
-        egress_zone: crate::test_zone_ids::TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 24,
-        ingress_vlan_id: 0,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None,
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_zone: crate::test_zone_ids::TEST_LAN_ZONE_ID,
+    egress_zone: crate::test_zone_ids::TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 24,
+    ingress_vlan_id: 0,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, }
 }
 
 fn app_id_revalidation_hit(
@@ -2278,26 +2258,24 @@ fn snat_vlan_trunk_case_12861(
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let metadata = SessionMetadata {
-        ingress_zone: 1,
-        egress_zone: 2,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex,
-        ingress_vlan_id,
-        owner_rg_id: 1,
-        fabric_ingress,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None,
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
+    egress_zone: 2,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex,
+    ingress_vlan_id,
+    owner_rg_id: 1,
+    fabric_ingress,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, };
     (forwarding, decision, metadata, key)
 }
 
@@ -4158,37 +4136,33 @@ fn reverse_only_icmp_pat_survives_revalidation_14128() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let forward_metadata = SessionMetadata {
-        ingress_zone: 1,
-        egress_zone: 2,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 11,
-        ingress_vlan_id: 0,
-        owner_rg_id: 1,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None,
-    };
+    let forward_metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
+    egress_zone: 2,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 11,
+    ingress_vlan_id: 0,
+    owner_rg_id: 1,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, };
     // Production reverse synthesis (also exercises the `reverse()` at
     // shared_ops/reverse_synth.rs, not just the revalidation one).
     let forward_match = crate::session::ForwardSessionMatch {
         key: forward_key.clone(),
         decision: forward_decision,
-        metadata: SessionMetadata {
-            ingress_ifindex: 11,
-            ingress_vlan_id: 0,
-            nat_scope_ifindex: None,
-            ..forward_metadata.clone()
-        },
+        metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 11,
+        ingress_vlan_id: 0,
+        nat_scope_ifindex: None,
+        ..forward_metadata.clone() },
         forwarding_generation: crate::session::ForwardingGenerationStamp::default(),
         aux: crate::session::SessionLookupAux {
             session_id: 0,
@@ -4541,26 +4515,24 @@ fn source_nat_translation_matches_no_translation_to_pat_revokes_14128() {
 const NOW_14315: u64 = 1_000_000_000;
 
 fn meta_14315(ingress_zone: u32, egress_zone: u32) -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone,
-        egress_zone,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        owner_rg_id: 1,
-        fabric_ingress: true,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None,
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_zone,
+    egress_zone,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    owner_rg_id: 1,
+    fabric_ingress: true,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, }
 }
 
 fn key_14315(protocol: u8, src: &str, dst: &str, src_port: u16, dst_port: u16) -> SessionKey {
@@ -5347,26 +5319,24 @@ fn pair_14941(
 ) -> (SessionKey, SessionKey, SessionMetadata, SessionMetadata) {
     let forward = key_14941("10.0.0.1", "8.8.8.8", 12345, 443);
     let reverse = crate::session::reverse_session_key(&forward, NatDecision::default());
-    let fwd_meta = SessionMetadata {
-        ingress_zone: crate::test_zone_ids::TEST_LAN_ZONE_ID,
-        egress_zone: crate::test_zone_ids::TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 24,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    };
+    let fwd_meta = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: crate::test_zone_ids::TEST_LAN_ZONE_ID,
+    egress_zone: crate::test_zone_ids::TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 24,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, };
     let mut rev_meta = fwd_meta.clone();
     rev_meta.is_reverse = true;
     rev_meta.ingress_zone = crate::test_zone_ids::TEST_WAN_ZONE_ID;
@@ -6884,26 +6854,24 @@ fn nat64_deterministic_stale_geometry_revokes_15178() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let metadata = SessionMetadata {
-        ingress_zone: 1,
-        egress_zone: 2,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 24,
-        ingress_vlan_id: 0,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None,
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
+    egress_zone: 2,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 24,
+    ingress_vlan_id: 0,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, };
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
     metadata: metadata.clone(),
@@ -7074,26 +7042,24 @@ fn nat64_scoped_cross_generation_revalidation_15932() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let mut metadata = SessionMetadata {
-        ingress_zone: 1,
-        egress_zone: 2,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 24,
-        ingress_vlan_id: 0,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: Some(21),
-    };
+    let mut metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
+    egress_zone: 2,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 24,
+    ingress_vlan_id: 0,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: Some(21), };
     let mk_forwarding = |nat64: crate::nat64::Nat64State| {
         let mut forwarding = ForwardingState::default();
         forwarding.nat64 = nat64;
@@ -8230,26 +8196,24 @@ fn fabric_nat64_scopeless_revoked_when_geometry_withdrawn_15948() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let metadata = SessionMetadata {
-        ingress_zone: 1,
-        egress_zone: 2,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        owner_rg_id: 0,
-        fabric_ingress: true,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None,
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
+    egress_zone: 2,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    owner_rg_id: 0,
+    fabric_ingress: true,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, };
     let flow = SessionFlow { src_ip: key.src_ip, dst_ip: key.dst_ip, forward_key: key.clone() };
     let run = |nat64: crate::nat64::Nat64State| {
         let mut forwarding = ForwardingState::default();

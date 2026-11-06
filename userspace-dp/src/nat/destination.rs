@@ -66,12 +66,17 @@ impl DnatValue {
     }
 
     #[inline]
-    pub(crate) fn decision(&self, protocol: u8, dst_port: u16) -> NatDecision {
+    pub(crate) fn decision(
+        &self,
+        protocol: u8,
+        dst_port: u16,
+    ) -> NatDecision {
+        let rewrite_dst_port = self.rewritten_dst_port(protocol, dst_port);
         NatDecision {
             rewrite_src: None,
             rewrite_dst: Some(self.new_dst_ip),
             rewrite_src_port: None,
-            rewrite_dst_port: self.rewritten_dst_port(protocol, dst_port),
+            rewrite_dst_port,
             source_nat_icmp: None,
             nat64: false,
             nptv6: false,

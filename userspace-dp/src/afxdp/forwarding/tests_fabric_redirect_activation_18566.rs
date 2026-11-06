@@ -244,7 +244,7 @@ fn arm_agrees_with_slow_path_rehome_18566() {
             install_table_domain: 0,
             install_table_check: 0,
         };
-        let metadata = crate::session::SessionMetadata {
+        let metadata = crate::session::SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: state.egress_zone_id(12),
             egress_zone: state.egress_zone_id(24),
             ingress_zone_check: 0,
@@ -453,7 +453,7 @@ fn routed_arm_agrees_with_slow_path_rehome_18588() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let metadata = crate::session::SessionMetadata {
+    let metadata = crate::session::SessionMetadata { forward_wire_alias_origin: false,
         ingress_zone: state.egress_zone_id(24),
         egress_zone: state.egress_zone_id(12),
         ingress_zone_check: 0,

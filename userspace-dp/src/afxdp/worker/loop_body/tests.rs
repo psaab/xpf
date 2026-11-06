@@ -57,26 +57,24 @@ mod flow_cache_invalidation_tests {
     }
 
     fn reap_metadata() -> SessionMetadata {
-        SessionMetadata {
-            ingress_zone: 1,
-            egress_zone: 2,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: 1,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-            nat_scope_ifindex: None,
-        }
+        SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
+        egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None, }
     }
 
     fn reap_resolution() -> ForwardingResolution {
@@ -1966,26 +1964,24 @@ mod gc_reap_source_nat_release_tests_6901 {
     }
 
     fn metadata() -> SessionMetadata {
-        SessionMetadata {
-            ingress_zone: 1,
-            egress_zone: 2,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: 1,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-            nat_scope_ifindex: None,
-        }
+        SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
+        egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None, }
     }
 
     fn expired_for(src_port: u16, pool_addr: Ipv4Addr, snat_port: u16) -> ExpiredSession {
@@ -2184,7 +2180,7 @@ mod gc_reap_nat64_release_tests_7740 {
     }
 
     fn metadata() -> crate::session::SessionMetadata {
-        crate::session::SessionMetadata {
+        crate::session::SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: 1,
             egress_zone: 2,
             ingress_zone_check: 0,

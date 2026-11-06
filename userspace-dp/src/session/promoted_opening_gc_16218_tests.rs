@@ -17,22 +17,20 @@ const OPENING_SECS: u64 = 20;
 const OWNER_RG: i32 = 1;
 
 fn synced_opening() -> SessionSyncRequest {
-    let base = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 60948,
-        dst_port: 5211,
-        ingress_zone_id: TEST_TRUST_ZONE_ID,
-        egress_zone_id: TEST_UNTRUST_ZONE_ID,
-        owner_rg_id: OWNER_RG,
-        inactivity_timeout: 1800,
-        tcp_close_class: 0,
-        session_id: 4242,
-        ..SessionSyncRequest::default()
-    };
+    let base = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: crate::ip_proto::PROTO_TCP,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 60948,
+    dst_port: 5211,
+    ingress_zone_id: TEST_TRUST_ZONE_ID,
+    egress_zone_id: TEST_UNTRUST_ZONE_ID,
+    owner_rg_id: OWNER_RG,
+    inactivity_timeout: 1800,
+    tcp_close_class: 0,
+    session_id: 4242,
+    ..SessionSyncRequest::default() };
     let mut value = serde_json::to_value(base).expect("FIXTURE: serialize request");
     // TcpHandshakeState::Opening on the wire.
     value["tcp_handshake_state"] = serde_json::json!(1);

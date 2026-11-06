@@ -981,7 +981,7 @@ mod handshake_monotonic_16223_tests {
     }
 
     fn entry(key: &SessionKey, wire: u8, session_id: u64, reverse: bool) -> SyncedSessionEntry {
-        let mut metadata = crate::session::SessionMetadata {
+        let mut metadata = crate::session::SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: 1,
             egress_zone: 2,
             ingress_zone_check: 0,

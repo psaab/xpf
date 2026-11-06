@@ -466,6 +466,24 @@ func TestForwardWireAliasNeedsNoDelta9905(t *testing.T) {
 	if wireVal.NATSrcIP != val.NATSrcIP || wireVal.Flags != val.Flags {
 		t.Fatal("alias must carry the base value through")
 	}
+	if wireVal.LogFlags&dataplane.LogFlagForwardWireAlias == 0 ||
+		val.LogFlags&dataplane.LogFlagForwardWireAlias != 0 {
+		t.Fatalf("v4 alias marker = %#x (original %#x), want marker only on alias",
+			wireVal.LogFlags, val.LogFlags)
+	}
+	identity := dataplane.SessionValue{
+		Flags:      dataplane.SessFlagSNAT | dataplane.SessFlagDNAT,
+		NATSrcIP:   binary.NativeEndian.Uint32(key.SrcIP[:]),
+		NATDstIP:   binary.NativeEndian.Uint32(key.DstIP[:]),
+		NATSrcPort: key.SrcPort,
+		NATDstPort: key.DstPort,
+	}
+	if _, _, ok := userspaceForwardWireAliasV4(key, identity); ok {
+		t.Fatal("identity translation is the canonical row, not an extra alias")
+	}
+	if identity.LogFlags&dataplane.LogFlagForwardWireAlias != 0 {
+		t.Fatal("canonical identity value must not carry the alias marker")
+	}
 	if _, _, ok := userspaceForwardWireAliasV4(key, dataplane.SessionValue{}); ok {
 		t.Fatal("alias without NAT flags, want none")
 	}
@@ -482,7 +500,7 @@ func TestForwardWireAliasNeedsNoDelta9905(t *testing.T) {
 	copy(val6.NATDstIP[:], natDst)
 	val6.NATSrcPort = userspaceHostToNetwork16(54321)
 	val6.NATDstPort = userspaceHostToNetwork16(8443)
-	wireKey6, _, ok := userspaceForwardWireAliasV6(key6, val6)
+	wireKey6, wireVal6, ok := userspaceForwardWireAliasV6(key6, val6)
 	if !ok {
 		t.Fatal("NAT v6 value produced no alias, want one")
 	}
@@ -491,6 +509,11 @@ func TestForwardWireAliasNeedsNoDelta9905(t *testing.T) {
 	}
 	if wireKey6.SrcPort != userspaceHostToNetwork16(54321) || wireKey6.DstPort != userspaceHostToNetwork16(8443) {
 		t.Fatalf("v6 wire ports = %#x/%#x, want stamped NAT ports", wireKey6.SrcPort, wireKey6.DstPort)
+	}
+	if wireVal6.LogFlags&dataplane.LogFlagForwardWireAlias == 0 ||
+		val6.LogFlags&dataplane.LogFlagForwardWireAlias != 0 {
+		t.Fatalf("v6 alias marker = %#x (original %#x), want marker only on alias",
+			wireVal6.LogFlags, val6.LogFlags)
 	}
 	if _, _, ok := userspaceForwardWireAliasV6(key6, dataplane.SessionValueV6{}); ok {
 		t.Fatal("v6 alias without NAT flags, want none")

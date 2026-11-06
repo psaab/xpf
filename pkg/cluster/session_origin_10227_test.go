@@ -128,3 +128,22 @@ func TestSourceNatProvenanceFlagsCrossSessionWire12187(t *testing.T) {
 		})
 	}
 }
+func TestForwardWireAliasOriginCrossesClusterSessionWire18927(t *testing.T) {
+	v4Key := dataplane.SessionKey{Protocol: 6, SrcPort: 1000, DstPort: 80}
+	v4 := dataplane.SessionValue{
+		LogFlags: dataplane.LogFlagSessionInit | dataplane.LogFlagForwardWireAlias,
+	}
+	_, got4, ok := decodeSessionV4Payload(encodeSessionV4Payload(v4Key, v4))
+	if !ok || got4.LogFlags != v4.LogFlags {
+		t.Fatalf("v4 LogFlags round-trip: ok=%v got=%#x want=%#x", ok, got4.LogFlags, v4.LogFlags)
+	}
+
+	v6Key := dataplane.SessionKeyV6{Protocol: 6, SrcPort: 1000, DstPort: 80}
+	v6 := dataplane.SessionValueV6{
+		LogFlags: dataplane.LogFlagSessionClose | dataplane.LogFlagForwardWireAlias,
+	}
+	_, got6, ok := decodeSessionV6Payload(encodeSessionV6Payload(v6Key, v6))
+	if !ok || got6.LogFlags != v6.LogFlags {
+		t.Fatalf("v6 LogFlags round-trip: ok=%v got=%#x want=%#x", ok, got6.LogFlags, v6.LogFlags)
+	}
+}

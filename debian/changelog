@@ -24,10 +24,12 @@ xpf (0.0.0) unstable; urgency=medium
     recorded-scope TCP/UDP translation misses a non-empty rebound dynamic-rule
     set; forward-wire aliases, ICMP, derivable scope, and pre-refresh replies
     remain outside the new revocation evidence gate (#18927).
-  * userspace-dp: send DNAT-only and TCP/UDP port-only alias reverse replies
-    to their canonical peer only with recovered forward-wire provenance;
-    canonical DNAT, no-NAT, NAT64/NPTv6, and ICMP controls are unchanged
-    (#18927).
+  * userspace-dp: send DNAT-only, TCP/UDP port-only, and NPTv6 alias reverse
+    replies to their canonical peer only when the producer-stamped
+    forward-wire alias marker is present; identity translations
+    (DNAT, static, persistent, same-prefix NPTv6) stay canonical.
+    Canonical-DNAT/no-NAT/NAT64/ICMP controls stay excluded; documented
+    self-targeting identity-SNAT behavior is unchanged (#18927).
   * A cached FabricRedirect for a routed destination is re-resolved when its
     fresh local egress RG is active after RG activation, instead of continuing
     to send the flow to the peer that no longer owns the route (#18588).

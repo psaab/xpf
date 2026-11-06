@@ -1122,7 +1122,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         install_table_domain: 0,
         install_table_check: 0,
     },
-    metadata: SessionMetadata { ingress_ifindex: 0,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     fabric_ingress: false,
@@ -1303,7 +1303,7 @@ fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        metadata: SessionMetadata { ingress_ifindex: 0,
+        metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
         ingress_vlan_id: 0,
         forward_ingress_vlan_id: None,
         fabric_ingress: true,
@@ -1552,7 +1552,7 @@ fn lookup_session_across_scopes_returns_shared_entry() {
     let key = test_key();
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision: test_decision(),
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -2001,7 +2001,7 @@ fn lookup_session_across_scopes_returns_shared_forward_wire_entry() {
     };
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -2118,7 +2118,7 @@ fn lookup_session_across_scopes_prefers_shared_entry_over_fabric_wire_placeholde
     ));
     let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -2824,7 +2824,7 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
     ));
     let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -2933,7 +2933,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
     };
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -4295,7 +4295,7 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -4385,7 +4385,7 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -4508,7 +4508,7 @@ fn fabric_ingress_adopts_established_synced_wire_session_16217() {
     let established = crate::session::TcpHandshakeState::Established.to_wire();
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -4693,7 +4693,7 @@ fn fabric_gate_adopts_on_local_established_when_shared_pending_16217() {
     // shape) — the pre-existing shared gate must decline on it alone.
     let shared_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -4932,7 +4932,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
     let established = crate::session::TcpHandshakeState::Established.to_wire();
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -5205,7 +5205,7 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
     let established = crate::session::TcpHandshakeState::Established.to_wire();
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -5466,7 +5466,7 @@ fn adopted_cluster_terminal_recomputes_from_fib_16217() {
         let established = crate::session::TcpHandshakeState::Established.to_wire();
         let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
         decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
         nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -5855,7 +5855,7 @@ fn adopted_cluster_terminal_live_fib_shape_16217() {
         let established = crate::session::TcpHandshakeState::Established.to_wire();
         let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
         decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
         nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -6040,7 +6040,7 @@ fn gate_falls_back_to_stored_forward_candidate_on_standby_fib_16217() {
         let established = crate::session::TcpHandshakeState::Established.to_wire();
         let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: wire_key.clone(),
         decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
         nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -6306,7 +6306,7 @@ fn reverse_synth_stamps_forward_owner_not_reply_egress_16217() {
             install_table_check: 0,
         },
         // Forward flow's stored owner: RG1 (its LAN-member RG at seed).
-        metadata: SessionMetadata { owner_rg_id: 1, ..test_metadata() },
+        metadata: SessionMetadata { forward_wire_alias_origin: false, owner_rg_id: 1, ..test_metadata() },
         forwarding_generation: ForwardingGenerationStamp::default(),
         // Live local forward row: explicit local provenance (the flag
         // the builder uses to select the forward-owner stamp). Its aux
@@ -6364,7 +6364,7 @@ fn reverse_synth_synced_match_keeps_reply_derivation_16217() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        metadata: SessionMetadata { owner_rg_id: 1, ..test_metadata() },
+        metadata: SessionMetadata { forward_wire_alias_origin: false, owner_rg_id: 1, ..test_metadata() },
         forwarding_generation: ForwardingGenerationStamp::default(),
         aux: SessionLookupAux { session_id: 4242, ..SessionLookupAux::unknown() },
         synced_synthesis: true,
@@ -6572,7 +6572,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -6688,7 +6688,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: translated_key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
@@ -6919,7 +6919,7 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
         PROTO_TCP,
         0x10,
     ));
-    let synced_metadata = SessionMetadata { forward_ingress_vlan_id: None,
+    let synced_metadata = SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     nat_scope_ifindex: None, ..test_metadata() };
     let synced_decision = SessionDecision {
         nat: NatDecision {
@@ -7006,7 +7006,7 @@ fn apply_worker_commands_preserves_local_session_for_active_owner_rg() {
         .expect("commands lock")
         .push_back(WorkerCommand::UpsertSynced(SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
         decision: synced_decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
         nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -7477,7 +7477,7 @@ fn epoch_based_flow_cache_invalidation_for_demoted_owner_rg() {
     let rg_epochs: [AtomicU32; MAX_RG_EPOCHS] = std::array::from_fn(|_| AtomicU32::new(0));
     let mut flow_cache = FlowCache::new();
     let key = test_key();
-    let metadata = SessionMetadata { ingress_ifindex: 0,
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     owner_rg_id: 1,
@@ -7575,7 +7575,7 @@ fn epoch_based_flow_cache_unrelated_rg_not_invalidated() {
     let rg_epochs: [AtomicU32; MAX_RG_EPOCHS] = std::array::from_fn(|_| AtomicU32::new(0));
     let mut flow_cache = FlowCache::new();
     let key = test_key();
-    let metadata = SessionMetadata { ingress_ifindex: 0,
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     owner_rg_id: 1,
@@ -8274,7 +8274,7 @@ fn apply_worker_commands_exports_owner_rg_forward_sessions_without_teardown() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let metadata = SessionMetadata { ingress_ifindex: 0,
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     owner_rg_id: 1,
@@ -8343,7 +8343,7 @@ fn apply_worker_commands_does_not_export_missing_neighbor_seed_sessions() {
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let metadata = SessionMetadata { ingress_ifindex: 0,
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     owner_rg_id: 1,
@@ -8462,7 +8462,7 @@ fn demote_shared_owner_rgs_preserves_reverse_entries_and_marks_all_synced() {
     source_nat_static: None, };
     let reverse = SyncedSessionEntry { sibling_last_seen_ns: 0, key: reverse_session_key(&forward.key, forward.decision.nat),
     decision: test_decision(),
-    metadata: SessionMetadata { ingress_ifindex: 0,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     is_reverse: true,
@@ -8923,7 +8923,7 @@ fn demoted_shared_local_forward_session_enters_reverse_prewarm_index() {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let mut entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
-    metadata: SessionMetadata { ingress_ifindex: 0,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     fabric_ingress: true,
@@ -8979,7 +8979,7 @@ fn prewarm_reverse_synced_sessions_after_demotion_recomputes_split_owner_reverse
     ha_state.insert(2, active_ha_runtime(1));
     let mut entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
-    metadata: SessionMetadata { ingress_ifindex: 0,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     fabric_ingress: true,
@@ -9184,7 +9184,7 @@ fn apply_worker_commands_demote_split_reverse_owner_rg_rewrites_to_fabric_redire
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: 2,
             egress_zone: 1,
             ingress_zone_check: 0,
@@ -9274,7 +9274,7 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_rewrites_to_forward_cand
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: 2,
             egress_zone: 1,
             ingress_zone_check: 0,
@@ -9369,7 +9369,7 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_updates_stale_indexed_se
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: 2,
             egress_zone: 1,
             ingress_zone_check: 0,
@@ -9467,7 +9467,7 @@ fn apply_worker_commands_refresh_owner_rg_updates_reverse_session_owned_by_other
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: 2,
             egress_zone: 1,
             ingress_zone_check: 0,
@@ -9565,7 +9565,7 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_remote_reverse_session_on_pee
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: 2,
             egress_zone: 1,
             ingress_zone_check: 0,
@@ -9658,7 +9658,7 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_shared_promote_reverse_on_pee
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: 2,
             egress_zone: 1,
             ingress_zone_check: 0,
@@ -10592,7 +10592,7 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
                 install_table_domain: 0,
                 install_table_check: 0,
             },
-            metadata: SessionMetadata { ingress_zone: 1,
+            metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
             egress_zone: 5,
             ingress_zone_check: 0,
             egress_zone_check: 0,
@@ -10638,7 +10638,7 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_adds_reverse_companion() {
     ha_state.insert(1, active_ha_runtime(1));
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
-    metadata: SessionMetadata { ingress_ifindex: 0,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     fabric_ingress: true,
@@ -10791,7 +10791,7 @@ fn prewarm_reverse_synced_sessions_recomputes_when_reverse_owner_rg_activates() 
     ha_state.insert(2, active_ha_runtime(1));
     let mut entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
-    metadata: SessionMetadata { ingress_ifindex: 0,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     fabric_ingress: true,
@@ -10859,7 +10859,7 @@ fn reverse_prewarm_index_tracks_split_reverse_owner_rg_candidate() {
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let mut entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
-    metadata: SessionMetadata { ingress_ifindex: 0,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     fabric_ingress: true,
@@ -10934,7 +10934,7 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
                 install_table_domain: 0,
                 install_table_check: 0,
             },
-            metadata: SessionMetadata { ingress_zone: 1,
+            metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
             egress_zone: 2,
             ingress_zone_check: 0,
             egress_zone_check: 0,
@@ -10981,7 +10981,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
 
     let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, key: test_key(),
     decision: test_decision(),
-    metadata: SessionMetadata { ingress_ifindex: 0,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     owner_rg_id: 1,
@@ -12510,13 +12510,13 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
     };
     let wire_key = forward_wire_key(&key, decision.nat);
     let mut sessions = SessionTable::new();
-    let placeholder_metadata = SessionMetadata { forward_ingress_vlan_id: None,
+    let placeholder_metadata = SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     fabric_ingress: true,
     nat_scope_ifindex: None, ..test_metadata() };
     let mut incumbent_decision = test_decision();
     incumbent_decision.resolution.egress_ifindex = incumbent_egress_ifindex;
     incumbent_decision.resolution.tx_ifindex = incumbent_egress_ifindex;
-    let incumbent_metadata = SessionMetadata { forward_ingress_vlan_id: None,
+    let incumbent_metadata = SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     ingress_zone: 91,
     egress_zone: 92,
     policy_id: 777,
@@ -14913,7 +14913,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
 // single site feeding that argument on the activation path — rather than
 // reading the map byte back.
 fn synced_local_delivery_forward_metadata(owner_rg_id: i32) -> SessionMetadata {
-    SessionMetadata { ingress_ifindex: 0,
+    SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
     ingress_vlan_id: 0,
     forward_ingress_vlan_id: None,
     owner_rg_id,
@@ -16772,7 +16772,7 @@ fn handle_upsert_synced_resolves_active_zone_pair_for_snat_reserve_6211() {
     decision,
     // ingress_zone 1 = "lan", egress_zone 2 = "wan" — the ACTIVE's pair,
     // as carried by SessionSyncRequest's ingress_zone_id/egress_zone_id.
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     ingress_zone: 1,
     egress_zone: 2,
     is_reverse: false,
@@ -16888,7 +16888,7 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
     };
     let make_entry = || SyncedSessionEntry { sibling_last_seen_ns: 0, key: key.clone(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     ingress_zone: 1,
     egress_zone: 2,
     is_reverse: false,
@@ -17524,7 +17524,7 @@ fn f3_entry_6979(nat: NatDecision) -> SyncedSessionEntry {
     decision.nat = nat;
     SyncedSessionEntry { sibling_last_seen_ns: 0, key: f3_key_6979(),
     decision,
-    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    metadata: SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     ingress_zone: 1,
     egress_zone: 2,
     is_reverse: false,
@@ -20123,7 +20123,7 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
     };
     // The forward flow: lan -> wan. `egress_zone` is what the #7169 arrival-zone
     // check compares against.
-    let metadata = SessionMetadata { forward_ingress_vlan_id: None,
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, forward_ingress_vlan_id: None,
     ingress_zone: TEST_LAN_ZONE_ID,
     egress_zone: TEST_WAN_ZONE_ID,
     nat_scope_ifindex: None, ..test_metadata() };

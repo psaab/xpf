@@ -191,13 +191,47 @@ fn dnat_17210_decision_and_tier_walk_reproduces_agree_tcp_and_icmp() {
         new_dst_ip: "10.0.0.5".parse().unwrap(),
         new_dst_port: 8080,
     };
-    assert_eq!(value.decision(PROTO_ICMP, 0).rewrite_dst_port, None);
+    assert_eq!(
+        value.decision(PROTO_ICMP, 0).rewrite_dst_port,
+        None
+    );
     assert_eq!(
         value.decision(PROTO_ICMP, 0).rewrite_dst,
         Some("10.0.0.5".parse().unwrap())
     );
-    assert_eq!(value.decision(PROTO_TCP, 80).rewrite_dst_port, Some(8080));
-    assert_eq!(value.decision(PROTO_TCP, 8080).rewrite_dst_port, None);
+    assert_eq!(
+        value.decision(PROTO_TCP, 80).rewrite_dst_port,
+        Some(8080)
+    );
+    assert_eq!(
+        value.decision(PROTO_TCP, 8080).rewrite_dst_port,
+        None
+    );
+    let identity = super::destination::DnatValue {
+        new_dst_ip: dst,
+        new_dst_port: 0,
+    };
+    assert_eq!(
+        identity.decision(PROTO_TCP, 80),
+        NatDecision {
+            rewrite_dst: Some(dst),
+            ..NatDecision::default()
+        },
+        "identity address and unchanged port retain the DNAT decision shape"
+    );
+    let port_only = super::destination::DnatValue {
+        new_dst_ip: dst,
+        new_dst_port: 8080,
+    };
+    assert_eq!(
+        port_only.decision(PROTO_TCP, 80),
+        NatDecision {
+            rewrite_dst: Some(dst),
+            rewrite_dst_port: Some(8080),
+            ..NatDecision::default()
+        },
+        "an actual port-only DNAT must remain explicit"
+    );
     // Lookup vs tier-walk agreement.
     for (protocol, dst_port) in [(PROTO_TCP, 80), (PROTO_ICMP, 0)] {
         let (decision, _) = table

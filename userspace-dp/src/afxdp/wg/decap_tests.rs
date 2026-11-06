@@ -2549,7 +2549,7 @@ fn run_tun_origin_case_10038(permit_forward: bool) {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let mk_meta = |is_reverse: bool| SessionMetadata { ingress_zone: TEST_SFMIX_ZONE_ID,
+    let mk_meta = |is_reverse: bool| SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_SFMIX_ZONE_ID,
     egress_zone: TEST_SFMIX_ZONE_ID,
     ingress_zone_check: 0,
     egress_zone_check: 0,
@@ -2874,7 +2874,7 @@ fn install_solicited_pair_10038(
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let mk_meta = |is_reverse: bool, ingress: u32, policy_idx: u32| SessionMetadata { ingress_zone: TEST_SFMIX_ZONE_ID,
+    let mk_meta = |is_reverse: bool, ingress: u32, policy_idx: u32| SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_SFMIX_ZONE_ID,
     egress_zone: TEST_SFMIX_ZONE_ID,
     ingress_zone_check: 0,
     egress_zone_check: 0,
@@ -3180,7 +3180,7 @@ fn wg_host_bound_forward_still_faces_host_inbound_10038() {
                 install_table_domain: 0,
                 install_table_check: 0,
             },
-            SessionMetadata {
+            SessionMetadata { forward_wire_alias_origin: false,
                 ingress_zone: TEST_SFMIX_ZONE_ID,
                 egress_zone: TEST_SFMIX_ZONE_ID,
                 ingress_zone_check: 0,

@@ -266,28 +266,24 @@ impl Drop for SessionLoop {
 /// (`dataPlaneSessionStore.PutClusterSyncedV4` -> `SetClusterSyncedSessionV4`
 /// twice): the forward, then its reverse companion.
 fn bulk_session_requests(i: u16) -> [ControlRequest; 2] {
-    let forward = SessionSyncRequest {
-        operation: "mirror_upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.61.10".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 20000 + i,
-        dst_port: 5201,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        ..SessionSyncRequest::default()
-    };
-    let reverse = SessionSyncRequest {
-        operation: "mirror_publish_only".to_string(),
-        src_ip: forward.dst_ip.clone(),
-        dst_ip: forward.src_ip.clone(),
-        src_port: forward.dst_port,
-        dst_port: forward.src_port,
-        is_reverse: true,
-        ..forward.clone()
-    };
+    let forward = SessionSyncRequest { forward_wire_alias_origin: false, operation: "mirror_upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 6,
+    src_ip: "10.0.61.10".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 20000 + i,
+    dst_port: 5201,
+    egress_ifindex: 7,
+    neighbor_mac: "02:bf:72:01:02:03".to_string(),
+    src_mac: "02:bf:72:0a:0b:0c".to_string(),
+    ..SessionSyncRequest::default() };
+    let reverse = SessionSyncRequest { forward_wire_alias_origin: false, operation: "mirror_publish_only".to_string(),
+    src_ip: forward.dst_ip.clone(),
+    dst_ip: forward.src_ip.clone(),
+    src_port: forward.dst_port,
+    dst_port: forward.src_port,
+    is_reverse: true,
+    ..forward.clone() };
     [forward, reverse].map(|sync| ControlRequest {
         request_type: "sync_session".to_string(),
         suppress_status: true,

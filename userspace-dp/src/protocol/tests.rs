@@ -3741,11 +3741,9 @@ fn wire_invariant_default_specimens() {
     );
     s.insert(
         "session_sync_request_populated".into(),
-        dump(&SessionSyncRequest {
-            primary_liveness: true,
-            policy_matches: Some(vec![populated_policy_match.clone()]),
-            ..Default::default()
-        }),
+        dump(&SessionSyncRequest { forward_wire_alias_origin: false, primary_liveness: true,
+        policy_matches: Some(vec![populated_policy_match.clone()]),
+        ..Default::default() }),
     );
     s.insert(
         "three_color_policer_status_populated".into(),
@@ -4660,11 +4658,9 @@ fn apply_snapshot_rejects_oversize_collector_port_1977() {
 // (serde default). Wire parity with the Go SessionSyncRequest.Generation field.
 #[test]
 fn session_sync_request_generation_roundtrip_2170() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        generation: 0x1122_3344_5566_7788,
-        ..Default::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    generation: 0x1122_3344_5566_7788,
+    ..Default::default() };
     let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
     let back: SessionSyncRequest =
         serde_json::from_str(&json).expect("deserialize SessionSyncRequest");
@@ -4683,10 +4679,8 @@ fn session_sync_request_generation_roundtrip_2170() {
 
 #[test]
 fn session_sync_request_primary_liveness_roundtrip_16880() {
-    let req = SessionSyncRequest {
-        primary_liveness: true,
-        ..Default::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: false, primary_liveness: true,
+    ..Default::default() };
     let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
     assert!(
         json.contains("\"primary_liveness\":true"),
@@ -4713,6 +4707,7 @@ fn session_sync_request_primary_liveness_roundtrip_16880() {
 #[test]
 fn session_sync_request_log_flags_roundtrip_2785() {
     let req = SessionSyncRequest {
+        forward_wire_alias_origin: true,
         operation: "upsert".to_string(),
         log_session_init: true,
         log_session_close: true,
@@ -4722,14 +4717,20 @@ fn session_sync_request_log_flags_roundtrip_2785() {
     let back: SessionSyncRequest =
         serde_json::from_str(&json).expect("deserialize SessionSyncRequest");
     assert!(back.log_session_init, "log_session_init must round-trip");
+    assert!(
+        back.forward_wire_alias_origin,
+        "forward_wire_alias_origin must round-trip"
+    );
     assert!(back.log_session_close, "log_session_close must round-trip");
 
     let legacy: SessionSyncRequest =
         serde_json::from_str(r#"{"operation":"upsert","src_ip":"10.0.0.1"}"#)
             .expect("legacy SessionSyncRequest without log flags decodes");
     assert!(
-        !legacy.log_session_init && !legacy.log_session_close,
-        "missing log flags must default to false"
+        !legacy.log_session_init
+            && !legacy.log_session_close
+            && !legacy.forward_wire_alias_origin,
+        "omitted log and alias-origin fields must default to false"
     );
 }
 
@@ -4740,13 +4741,11 @@ fn session_sync_request_log_flags_roundtrip_2785() {
 // global timeout (pre-#3301 behavior, rolling-upgrade safe).
 #[test]
 fn session_sync_request_policy_fields_roundtrip_3301() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        policy_id: 42,
-        policy_counter_idx: 7,
-        inactivity_timeout: 30,
-        ..Default::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    policy_id: 42,
+    policy_counter_idx: 7,
+    inactivity_timeout: 30,
+    ..Default::default() };
     let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
     // Wire keys must match the Go SessionSyncRequest json tags exactly.
     assert!(

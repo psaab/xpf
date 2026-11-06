@@ -463,6 +463,21 @@ impl InterfaceStaticView {
     }
 }
 
+#[inline]
+fn static_dnat_decision(
+    translated_dst_ip: IpAddr,
+    dst_port: u16,
+    translated_dst_port: Option<u16>,
+) -> NatDecision {
+    let rewrite_dst_port =
+        translated_dst_port.filter(|translated_port| *translated_port != dst_port);
+    NatDecision {
+        rewrite_dst: Some(translated_dst_ip),
+        rewrite_dst_port,
+        ..NatDecision::default()
+    }
+}
+
 impl StaticNatTable {
     /// #14368: the externals view the pool/NAT64 mint backstop consults.
     /// Built from the SAME installed entries the match paths use — host
@@ -1138,12 +1153,7 @@ impl StaticNatTable {
             // `rewrite_dst_port` is structurally `None` for ICMP here — no
             // protocol gate needed.
             return Some((
-                NatDecision {
-                    rewrite_src: None,
-                    rewrite_dst: Some(entry.internal_ip),
-                    rewrite_dst_port: entry.mapped_port,
-                    ..NatDecision::default()
-                },
+                static_dnat_decision(entry.internal_ip, dst_port, entry.mapped_port),
                 entry.hit_counter.clone(),
             ));
         }
@@ -1183,11 +1193,7 @@ impl StaticNatTable {
         }
         if let Some((blk, translated)) = best {
             return Some((
-                NatDecision {
-                    rewrite_src: None,
-                    rewrite_dst: Some(translated),
-                    ..NatDecision::default()
-                },
+                static_dnat_decision(translated, dst_port, None),
                 blk.hit_counter.clone(),
             ));
         }
@@ -1233,12 +1239,7 @@ impl StaticNatTable {
                 return None;
             }
             return Some((
-                NatDecision {
-                    rewrite_src: None,
-                    rewrite_dst: Some(entry.internal_ip),
-                    rewrite_dst_port: entry.mapped_port,
-                    ..NatDecision::default()
-                },
+                static_dnat_decision(entry.internal_ip, dst_port, entry.mapped_port),
                 entry.hit_counter.clone(),
             ));
         }
@@ -1283,11 +1284,7 @@ impl StaticNatTable {
                 return None;
             }
             return Some((
-                NatDecision {
-                    rewrite_src: None,
-                    rewrite_dst: Some(translated),
-                    ..NatDecision::default()
-                },
+                static_dnat_decision(translated, dst_port, None),
                 blk.hit_counter.clone(),
             ));
         }

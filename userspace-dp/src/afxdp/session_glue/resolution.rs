@@ -1010,21 +1010,17 @@ fn rehome_or_retain_fabric_redirect_inner(
 }
 
 /// #18531/#18927: is this reverse row's un-NAT target one of its own wire
-/// addresses or (for TCP/UDP) ports? A reverse companion synthesized from a
-/// forward-wire ALIAS is keyed by the translated tuple, so it cannot reach the
-/// canonical client/service mapping; only the node holding the canonical row
-/// knows the right translation. Check both tuple sides, but do not infer alias
-/// status from reverse NAT fields alone: recover the generating forward tuple
-/// and decision, then require that the recovered key is already its own
-/// forward-wire key. That provenance check distinguishes the canonical row
-/// from its alias even when one field happens to be self-targeted. NAT64 and
-/// NPTv6 keep their family/prefix semantics and are never reclassified here.
+/// addresses or (for TCP/UDP) ports, and did its imported forward row carry
+/// the producer-stamped forward-wire-alias marker? The marker distinguishes
+/// an extra alias from an identity translation, which has the same tuple/NAT
+/// fixed-point shape. NAT64 remains structurally excluded; NPTv6 uses the same
+/// address arms.
 pub(in crate::afxdp) fn reverse_un_nat_targets_itself(
     key: &SessionKey,
     nat: NatDecision,
     metadata: &SessionMetadata,
 ) -> bool {
-    if !metadata.is_reverse || nat.nat64 || nat.nptv6 {
+    if !metadata.is_reverse || nat.nat64 || !metadata.forward_wire_alias_origin {
         return false;
     }
 
@@ -1037,24 +1033,17 @@ pub(in crate::afxdp) fn reverse_un_nat_targets_itself(
     let port_targets_itself = tcp_udp
         && (nat.rewrite_src_port == Some(key.src_port)
             || nat.rewrite_dst_port == Some(key.dst_port));
-    if !address_targets_itself && !port_targets_itself {
-        return false;
-    }
-
-    let forward_key = crate::session::reverse_session_key(key, nat);
-    let forward_nat = nat.reverse(key.src_ip, key.dst_ip, key.src_port, key.dst_port);
-    crate::session::forward_wire_key(&forward_key, forward_nat) == forward_key
+    address_targets_itself || port_targets_itself
 }
 
-/// #18531: the resolution of a reverse row that
-/// [`reverse_un_nat_targets_itself`]. Its resolution target is the SNAT
-/// address, which is a local address on the node owning the egress RG, so
-/// the target lookup answered `LocalDelivery`; the session-hit host-inbound
-/// gate then denied the reply and tore the live flow down. The reply belongs
-/// to the peer that holds the canonical row: hand it over the fabric (zone
-/// stamped with the reply's arrival zone), never to the host. A fabric
-/// arrival is never redirected back; it is dropped and the row is held
-/// (`HAInactive`) instead of being delivered locally.
+/// #18531/#18927: the resolution of a reverse row accepted by
+/// [`reverse_un_nat_targets_itself`]. When the generating forward row was a
+/// wire alias, its reply's un-NAT target can be the alias's own endpoint,
+/// leading to `LocalDelivery` and host-inbound denial rather than reaching
+/// the canonical mapping's owner. Hand it over the fabric (zone stamped with
+/// the reply's arrival zone), never to the host. A fabric arrival is never
+/// redirected back; it is dropped and held (`HAInactive`) instead of being
+/// delivered locally.
 pub(in crate::afxdp) fn alias_reverse_return_resolution(
     forwarding: &ForwardingState,
     metadata: &SessionMetadata,

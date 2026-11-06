@@ -71,36 +71,32 @@ pub(crate) fn test_key() -> SessionKey {
 /// fabric-ingress. This is the session_glue copy verbatim (its zone ids
 /// 1/2 are `TEST_LAN_ZONE_ID`/`TEST_WAN_ZONE_ID`).
 pub(crate) fn test_metadata() -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, }
 }
 
 /// HA variant of [`test_metadata`]: identical except `fabric_ingress:
 /// true`, which the ha_tests synced-session fixtures ride (callers that
 /// need a plain row clear the flag explicitly).
 pub(crate) fn test_metadata_for_ha() -> SessionMetadata {
-    SessionMetadata {
-        fabric_ingress: true,
-        ..test_metadata()
-    }
+    SessionMetadata { forward_wire_alias_origin: false, fabric_ingress: true,
+    ..test_metadata() }
 }
 
 /// Base forwarding state: connected 10.0.61.0/24 on ifindex 6, a neighbor

@@ -600,9 +600,11 @@ The rules now:
   `lan_node_unnatted_fabric_reply_keeps_forwarding_18531`. Without a redirect (a
   fabric-borne reply, or no fabric) the row resolves to `HAInactive`, so a
   reply is dropped, never bounced, delivered locally, or forwarded on a raw
-  FIB answer. The match is on NAT shape: an identity translation (the
-  original source is the SNAT address and the port is unchanged) looks the
-  same and is handed to the peer too. A pool alias's reverse (its target,
+  FIB answer. Identity SNAT remains self-targeting: its original source
+  already equals the SNAT address and its port is unchanged, so it is handed
+  to the peer. Identity DNAT differs: dynamic and static decision builders
+  normalize an unchanged destination address and port to no rewrite,
+  preserving it as a canonical row. A pool alias's reverse (its target,
   the pool address, is not local and the lookup answers the WAN neighbor
   path) is handed to the peer at import (pinned by
   `pool_alias_reverse_is_handed_to_peer_at_synthesis_18531`). The activation
@@ -610,13 +612,14 @@ The rules now:
   self-targeting reverse, even when the local
   lookup returns `MissingNeighbor` or `ForwardCandidate`; this is pinned by
   `pool_alias_reverse_stays_with_peer_after_refresh_18535`. The already-
-  un-NATed fabric reply still forwards toward its real client. DNAT address-only
-  and address+port aliases and TCP/UDP port-only alias reverses are now also
-  handed off only when their recovered forward-wire key proves they are
+  un-NATed fabric reply still forwards toward its real client. DNAT
+  address-only and address+port aliases and TCP/UDP port-only alias reverses
+  are handed off only when their recovered forward-wire key proves they are
   aliases (#18927 child 4; `dnat_alias_reverse_is_handed_to_peer_at_synthesis_18927`,
   `port_only_alias_reverse_is_handed_to_peer_at_synthesis_18927`, and
-  `dnat_alias_reverse_reply_is_handed_to_peer_18927`). Canonical DNAT, no-NAT,
-  NAT64/NPTv6, and ICMP-identifier controls remain excluded.
+  `dnat_alias_reverse_reply_is_handed_to_peer_18927`). NPTv6 aliases use the
+  same provenance check. Canonical DNAT, no-NAT, NAT64, and ICMP-identifier
+  controls remain excluded.
   A reverse that un-NATs to a genuinely local address other than its wire
   destination is still host-bound and still gated. The LAN node's own reverse
   rows un-NAT to the client and are unaffected.
@@ -662,7 +665,7 @@ sends (the Go legs were read, not run). Residuals are tracked in #18927:
 - why the RG-taking node held only the alias of some flows (fixed: the
   import race above);
 - DNAT-only and port-only alias reverses, whose un-NAT target is their own wire
-  tuple (fixed by #18927 child 4's provenance-gated handoff);
+  tuple (fixed by #18927 child 4's producer-marked alias handoff);
 - loss cluster, after this fix (0.0.26021, diag9/diag9b), still open:
   - in the split state (WAN RG on one node, LAN RG on the other) every
     stream crawls at about 0.1 Gbit/s until the LAN RG follows; it was also

@@ -1668,6 +1668,10 @@ const (
 	// meaningfully and never matched by eBPF (bit 2 is free in both
 	// namespaces: C defines 0-1).
 	LogFlagPurgeRetirementOnly = 1 << 2
+	// #18927: set only on the extra forward-wire alias entry emitted for
+	// fabric-redirect session sync. The receiver maps it to the additive
+	// SessionSyncRequest.forward_wire_alias_origin field.
+	LogFlagForwardWireAlias = 1 << 3
 )
 
 // Event type constants.

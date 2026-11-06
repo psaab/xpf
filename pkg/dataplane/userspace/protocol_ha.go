@@ -161,6 +161,9 @@ type SessionSyncRequest struct {
 	// per-policy log), bit-identical to pre-#2785 behavior.
 	LogSessionInit  bool `json:"log_session_init,omitempty"`
 	LogSessionClose bool `json:"log_session_close,omitempty"`
+	// #18927: true only for the peer-synced forward-wire alias emitted
+	// beside a fabric-redirect base session.
+	ForwardWireAliasOrigin bool `json:"forward_wire_alias_origin,omitempty"`
 	// Generation carries the #2170 HA install generation to the helper so
 	// its in-memory SyncedSessionEntry can mirror the cluster apply layer's
 	// generation guard (belt-and-suspenders for helper-originated deletes

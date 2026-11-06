@@ -1331,6 +1331,10 @@ pub(crate) struct SessionSyncRequest {
     pub fabric_ingress: bool,
     #[serde(rename = "is_reverse", default)]
     pub is_reverse: bool,
+    /// #18927: provenance bit set only on the additional forward-wire
+    /// alias row; `serde(default)` preserves old-peer behavior.
+    #[serde(rename = "forward_wire_alias_origin", default)]
+    pub forward_wire_alias_origin: bool,
     /// #15176: this node's resolved logical NAT-scope ifindex for the
     /// imported session (Go resolves the cluster-stable fold to a local
     /// logical unit before building this request). 0 = no scope recorded

@@ -16,20 +16,18 @@ const SEC: u64 = 1_000_000_000;
 const OWNER_RG: i32 = 1;
 
 fn request(protocol: u8, session_id: u64) -> SessionSyncRequest {
-    SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "8.8.8.8".to_string(),
-        src_port: 12345,
-        dst_port: 443,
-        ingress_zone_id: TEST_TRUST_ZONE_ID,
-        egress_zone_id: TEST_UNTRUST_ZONE_ID,
-        owner_rg_id: OWNER_RG,
-        session_id,
-        ..SessionSyncRequest::default()
-    }
+    SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "8.8.8.8".to_string(),
+    src_port: 12345,
+    dst_port: 443,
+    ingress_zone_id: TEST_TRUST_ZONE_ID,
+    egress_zone_id: TEST_UNTRUST_ZONE_ID,
+    owner_rg_id: OWNER_RG,
+    session_id,
+    ..SessionSyncRequest::default() }
 }
 
 fn import(table: &mut SessionTable, req: &SessionSyncRequest, now_ns: u64) -> SessionKey {

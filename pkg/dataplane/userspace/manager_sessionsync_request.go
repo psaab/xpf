@@ -373,6 +373,7 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 	// so the synced session logs the same RT_FLOW records after failover.
 	req.LogSessionInit = view.logFlags()&dataplane.LogFlagSessionInit != 0
 	req.LogSessionClose = view.logFlags()&dataplane.LogFlagSessionClose != 0
+	req.ForwardWireAliasOrigin = view.logFlags()&dataplane.LogFlagForwardWireAlias != 0
 	// The scalar tail is family-identical in names, types, and order in
 	// both BPF value structs, so it is read through the view's value arm
 	// exactly once here. Keeping it in the twins' original assignment

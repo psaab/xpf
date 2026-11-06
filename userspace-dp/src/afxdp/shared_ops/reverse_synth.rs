@@ -116,110 +116,109 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
         forward_is_fabric_redirect,
     );
     let metadata = SessionMetadata {
-        // #7169: this zone pair comes from the STORED forward session, i.e.
-        // from where the ORIGINAL flow went — not from where this packet
-        // arrived. That is safe only because the caller now revalidates the
-        // arrival zone against `metadata.egress_zone` before a match is
-        // returned (see `ReverseIngress`), so by the time this runs the two are
-        // necessarily equal. Remove that check and this line silently
-        // adjudicates a packet in a zone it never arrived in.
-        ingress_zone: forward_match.metadata.egress_zone,
-        egress_zone: forward_match.metadata.ingress_zone,
-        ingress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            forward_match.metadata.egress_zone,
-        ),
-        egress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            forward_match.metadata.ingress_zone,
-        ),
-        // #7917: DELIBERATELY 0, and not to be "fixed" by inheriting
-        // `forward_match.metadata.ingress_ifindex`.
-        //
-        // A synthesized reverse companion must not take the forward
-        // direction's ingress identity: the forward flow's ingress is a
-        // PREDICTION of where a reply will arrive, not an OBSERVATION of where
-        // it did. 0 means "unobserved", which is truthful; inheriting would
-        // make the row confidently wrong, which #6928 refused on the grounds
-        // that a wrong interface is strictly worse than none.
-        //
-        // #7169 was filed listing this zero as part of the defect. It is not.
-        // The defect was that nothing checked the ARRIVAL against the session
-        // being synthesized, which is a different repair — and the tempting one
-        // makes the record worse while leaving the hole open.
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: (forward_match.metadata.ingress_ifindex != 0)
-            .then_some(forward_match.metadata.ingress_vlan_id),
-        // #16217 (FZDiag35): stamp the FORWARD flow's owner, not the
-        // reply-egress row's RG. The old derivation
-        // (`owner_rg_for_resolution(reply resolution)`) read the RETH
-        // row's RG2 for split-RG rows (LAN owner RG1, WAN/reth RG2
-        // stays active on both nodes), so a reverse row whose LAN
-        // owner departed kept a stamp naming a surviving RG and every
-        // departed-owner supersession/conversion arm judged it
-        // locally owned forever (live fw0 stamp=2 reverse rows TX'd
-        // WAN replies out the departed member after RG1 failover).
-        // The forward match's stored owner is the seed-time owner of
-        // the client-side (LAN-member) RG — the field every
-        // failover arm must judge. The retained wording below is the
-        // stale pre-fix rationale kept for archaeology: owner used to
-        // be derived from the reply resolution so failback
-        // repointing followed the current client-side egress owner;
-        // the activation refresh (`collect_refresh_owner_rgs_items`)
-        // still re-derives that, so the seed-time stamp here is the
-        // failover-correct one.
-        // Reverse companions are owned by the RG that currently owns the
-        // client-side egress resolution, not necessarily the RG that owned the
-        // original forward session. This matters during failback when a second
-        // RG comes up later and stale reverse entries must be repointed away
-        // from prior FabricRedirect results.
-        owner_rg_id: if forward_match_is_synced_reverse_synthesis(&forward_match) {
-            owner_rg_for_resolution(forwarding, resolution)
-        } else {
-            forward_match.metadata.owner_rg_id
-        },
-        fabric_ingress: forward_match.metadata.fabric_ingress,
-        is_reverse: true,
-        // #4565: inherit the forward session's NAT64 reverse info (original v6
-        // src/dst) so a peer-PROMOTED NAT64 session's synthesized reverse
-        // companion can translate the server's v4 reply back to IPv6 after
-        // failover. `build_nat64_forwarded_frame`'s reverse (v4->v6) branch
-        // hard-requires this — without it the frame builder returns None and the
-        // reply is dropped. `None` for every non-NAT64 forward session (the
-        // forward metadata carries `None`), bit-identical to the prior behavior.
-        nat64_reverse: forward_match.metadata.nat64_reverse,
-        // #2508: inherit the forward session's per-policy log selection so
-        // the reverse companion's close delta carries a consistent gate.
-        log_session_init: forward_match.metadata.log_session_init,
-        log_session_close: forward_match.metadata.log_session_close,
-        // #3056: inherit the admitting policy ID from the forward session so a
-        // materialized reverse companion attributes the same policy in its
-        // BPF-compat conntrack row.
-        policy_id: forward_match.metadata.policy_id,
-        // #5153: inherit the forward session's per-application idle timeout so
-        // the reverse companion ages on the admitting app's window, not the
-        // global timeout. Both halves of one stateful flow share the same
-        // application, so the app's `inactivity-timeout` governs either
-        // direction. `companion_keeps_alive` (expire.rs) uses the companion's
-        // OWN `expires_after_ns` — derived from this field via
-        // `session_timeout_ns` — to decide whether to keep the idle-crossed
-        // forward half alive; hardcoding `None` here made the reverse
-        // companion's window fall back to the global timeout (e.g. 300s),
-        // extending a 30s app timeout toward the global one. `None` for every
-        // forward session with no per-app override (the forward metadata
-        // carries `None`), bit-identical to the prior behavior. Residual of
-        // #3227/#3301/#4380.
-        inactivity_timeout_ns: forward_match.metadata.inactivity_timeout_ns,
-        // #3073: inherit the admitting rule's hit-counter handle from the
-        // forward session so a materialized reverse companion's reply traffic
-        // counts against the same policy. #3322: inherit the reorder-stable
-        // bound handle too so the reply counts against the admitting rule
-        // even after a live policy reorder.
-        policy_counter_idx: forward_match.metadata.policy_counter_idx,
-        policy_counter: forward_match.metadata.policy_counter.clone(),
-        nat_scope_ifindex: forward_match.metadata.nat_scope_ifindex,
-    };
+    // from where the ORIGINAL flow went — not from where this packet
+    // arrived. That is safe only because the caller now revalidates the
+    // arrival zone against `metadata.egress_zone` before a match is
+    // returned (see `ReverseIngress`), so by the time this runs the two are
+    // necessarily equal. Remove that check and this line silently
+    // adjudicates a packet in a zone it never arrived in.
+    ingress_zone: forward_match.metadata.egress_zone,
+    egress_zone: forward_match.metadata.ingress_zone,
+    ingress_zone_check: crate::session::zone_vintage_check_for_id(
+        &forwarding.zone_id_to_name,
+        forward_match.metadata.egress_zone,
+    ),
+    egress_zone_check: crate::session::zone_vintage_check_for_id(
+        &forwarding.zone_id_to_name,
+        forward_match.metadata.ingress_zone,
+    ),
+    // #7917: DELIBERATELY 0, and not to be "fixed" by inheriting
+    // `forward_match.metadata.ingress_ifindex`.
+    //
+    // A synthesized reverse companion must not take the forward
+    // direction's ingress identity: the forward flow's ingress is a
+    // PREDICTION of where a reply will arrive, not an OBSERVATION of where
+    // it did. 0 means "unobserved", which is truthful; inheriting would
+    // make the row confidently wrong, which #6928 refused on the grounds
+    // that a wrong interface is strictly worse than none.
+    //
+    // #7169 was filed listing this zero as part of the defect. It is not.
+    // The defect was that nothing checked the ARRIVAL against the session
+    // being synthesized, which is a different repair — and the tempting one
+    // makes the record worse while leaving the hole open.
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: (forward_match.metadata.ingress_ifindex != 0)
+        .then_some(forward_match.metadata.ingress_vlan_id),
+    // #16217 (FZDiag35): stamp the FORWARD flow's owner, not the
+    // reply-egress row's RG. The old derivation
+    // (`owner_rg_for_resolution(reply resolution)`) read the RETH
+    // row's RG2 for split-RG rows (LAN owner RG1, WAN/reth RG2
+    // stays active on both nodes), so a reverse row whose LAN
+    // owner departed kept a stamp naming a surviving RG and every
+    // departed-owner supersession/conversion arm judged it
+    // locally owned forever (live fw0 stamp=2 reverse rows TX'd
+    // WAN replies out the departed member after RG1 failover).
+    // The forward match's stored owner is the seed-time owner of
+    // the client-side (LAN-member) RG — the field every
+    // failover arm must judge. The retained wording below is the
+    // stale pre-fix rationale kept for archaeology: owner used to
+    // be derived from the reply resolution so failback
+    // repointing followed the current client-side egress owner;
+    // the activation refresh (`collect_refresh_owner_rgs_items`)
+    // still re-derives that, so the seed-time stamp here is the
+    // failover-correct one.
+    // Reverse companions are owned by the RG that currently owns the
+    // client-side egress resolution, not necessarily the RG that owned the
+    // original forward session. This matters during failback when a second
+    // RG comes up later and stale reverse entries must be repointed away
+    // from prior FabricRedirect results.
+    owner_rg_id: if forward_match_is_synced_reverse_synthesis(&forward_match) {
+        owner_rg_for_resolution(forwarding, resolution)
+    } else {
+        forward_match.metadata.owner_rg_id
+    },
+    fabric_ingress: forward_match.metadata.fabric_ingress,
+    is_reverse: true,
+    forward_wire_alias_origin: forward_match.metadata.forward_wire_alias_origin,
+    // #4565: inherit the forward session's NAT64 reverse info (original v6
+    // src/dst) so a peer-PROMOTED NAT64 session's synthesized reverse
+    // companion can translate the server's v4 reply back to IPv6 after
+    // failover. `build_nat64_forwarded_frame`'s reverse (v4->v6) branch
+    // hard-requires this — without it the frame builder returns None and the
+    // reply is dropped. `None` for every non-NAT64 forward session (the
+    // forward metadata carries `None`), bit-identical to the prior behavior.
+    nat64_reverse: forward_match.metadata.nat64_reverse,
+    // #2508: inherit the forward session's per-policy log selection so
+    // the reverse companion's close delta carries a consistent gate.
+    log_session_init: forward_match.metadata.log_session_init,
+    log_session_close: forward_match.metadata.log_session_close,
+    // #3056: inherit the admitting policy ID from the forward session so a
+    // materialized reverse companion attributes the same policy in its
+    // BPF-compat conntrack row.
+    policy_id: forward_match.metadata.policy_id,
+    // #5153: inherit the forward session's per-application idle timeout so
+    // the reverse companion ages on the admitting app's window, not the
+    // global timeout. Both halves of one stateful flow share the same
+    // application, so the app's `inactivity-timeout` governs either
+    // direction. `companion_keeps_alive` (expire.rs) uses the companion's
+    // OWN `expires_after_ns` — derived from this field via
+    // `session_timeout_ns` — to decide whether to keep the idle-crossed
+    // forward half alive; hardcoding `None` here made the reverse
+    // companion's window fall back to the global timeout (e.g. 300s),
+    // extending a 30s app timeout toward the global one. `None` for every
+    // forward session with no per-app override (the forward metadata
+    // carries `None`), bit-identical to the prior behavior. Residual of
+    // #3227/#3301/#4380.
+    inactivity_timeout_ns: forward_match.metadata.inactivity_timeout_ns,
+    // #3073: inherit the admitting rule's hit-counter handle from the
+    // forward session so a materialized reverse companion's reply traffic
+    // counts against the same policy. #3322: inherit the reorder-stable
+    // bound handle too so the reply counts against the admitting rule
+    // even after a live policy reorder.
+    policy_counter_idx: forward_match.metadata.policy_counter_idx,
+    policy_counter: forward_match.metadata.policy_counter.clone(),
+    nat_scope_ifindex: forward_match.metadata.nat_scope_ifindex, };
     let decision = SessionDecision {
         resolution: redirect_session_resolution_for_metadata(forwarding, resolution, &metadata),
         nat: forward_match.decision.nat.reverse(
@@ -231,13 +230,10 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
         install_table_domain: 0,
         install_table_check: 0,
     };
-    // #18531 (third failback teardown): built from a forward-wire ALIAS, the
-    // reply target above is the SNAT address itself (the alias key's source),
-    // so on the node owning the egress RG it resolved to LocalDelivery. The
-    // reply belongs to the peer holding the canonical row.
-    // Keyed on the forward row's own wire reverse key, so only an alias
-    // forward matches: its reply target is the SNAT address, never a real
-    // client, so no target answer is kept.
+    // #18531/#18927: a wire alias's reverse un-NAT can point back at one of
+    // the alias's own addresses or ports rather than the canonical mapping.
+    // Handoff requires the imported origin marker propagated to this reverse
+    // plus the self-targeting shape; the reply belongs to the canonical peer.
     let decision = if reverse_un_nat_targets_itself(
         &reverse_session_key(&forward_match.key, forward_match.decision.nat),
         decision.nat,

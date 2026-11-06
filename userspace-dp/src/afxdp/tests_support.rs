@@ -32,6 +32,90 @@ pub(super) const TEST_VLAN70_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x70, 0x07]
 pub(super) const TEST_RETH1_PARENT_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x01, 0x00, 0x00];
 pub(super) const TEST_RETH1_SECOND_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x01, 0x00, 0x02];
 
+/// Build a forward-wire alias through the same SessionSyncRequest importer
+/// used by peer imports, so alias-origin metadata is stamped from its wire
+/// marker instead of being hand-set by a test.
+pub(super) fn imported_forward_wire_alias(entry: &SyncedSessionEntry) -> SyncedSessionEntry {
+    let alias_key = crate::session::forward_wire_key(&entry.key, entry.decision.nat);
+    assert_ne!(
+        alias_key, entry.key,
+        "canonical rows do not carry the extra-row alias marker"
+    );
+    imported_forward_session_entry(entry, alias_key, true)
+}
+
+/// Build a canonical forward row through the production session-sync importer
+/// with the alias marker absent, including identity NAT fixed points.
+pub(super) fn imported_forward_canonical(entry: &SyncedSessionEntry) -> SyncedSessionEntry {
+    imported_forward_session_entry(entry, entry.key.clone(), false)
+}
+
+fn imported_forward_session_entry(
+    entry: &SyncedSessionEntry,
+    import_key: crate::session::SessionKey,
+    alias_origin: bool,
+) -> SyncedSessionEntry {
+    assert!(!entry.metadata.is_reverse);
+    let nat = entry.decision.nat;
+    let request = crate::protocol::SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: import_key.addr_family,
+        protocol: entry.protocol,
+        src_ip: import_key.src_ip.to_string(),
+        dst_ip: import_key.dst_ip.to_string(),
+        src_port: import_key.src_port,
+        dst_port: import_key.dst_port,
+        ingress_zone_id: entry.metadata.ingress_zone,
+        egress_zone_id: entry.metadata.egress_zone,
+        ingress_ifindex: entry.metadata.ingress_ifindex as i32,
+        ingress_vlan_id: entry.metadata.ingress_vlan_id,
+        owner_rg_id: entry.metadata.owner_rg_id,
+        egress_ifindex: entry.decision.resolution.egress_ifindex,
+        tx_ifindex: entry.decision.resolution.tx_ifindex,
+        tx_vlan_id: entry.decision.resolution.tx_vlan_id,
+        nat_src_ip: nat.rewrite_src.map_or_else(String::new, |ip| ip.to_string()),
+        nat_dst_ip: nat.rewrite_dst.map_or_else(String::new, |ip| ip.to_string()),
+        nat_src_port: nat.rewrite_src_port.unwrap_or_default(),
+        nat_dst_port: nat.rewrite_dst_port.unwrap_or_default(),
+        source_nat_provenance: match entry.source_nat_static {
+            Some(false) => 1,
+            Some(true) => 2,
+            None => 0,
+        },
+        source_nat_icmp_valid: nat.source_nat_icmp.is_some(),
+        source_nat_icmp_type: nat.source_nat_icmp.map_or(0, |(typ, _)| typ),
+        source_nat_icmp_code: nat.source_nat_icmp.map_or(0, |(_, code)| code),
+        fabric_ingress: entry.metadata.fabric_ingress,
+        forward_wire_alias_origin: alias_origin,
+        nat_scope_ifindex: entry.metadata.nat_scope_ifindex.unwrap_or_default(),
+        session_id: entry.session_id,
+        generation: entry.generation,
+        fwd_packets: entry.fwd_packets,
+        rev_packets: entry.rev_packets,
+        tcp_close_class: entry.tcp_close_class,
+        tcp_handshake_state: entry.tcp_handshake_state,
+        pptp_call_ids: entry.pptp_call_ids,
+        policy_id: entry.metadata.policy_id,
+        policy_counter_idx: entry.metadata.policy_counter_idx,
+        ..crate::protocol::SessionSyncRequest::default()
+    };
+    let imported = crate::server::helpers::build_synced_session_entry(
+        &request,
+        &rustc_hash::FxHashMap::default(),
+        import_key.routing_domain,
+    )
+    .expect("the production session-sync importer must accept the fixture");
+    assert_eq!(imported.key, import_key);
+    assert_eq!(imported.metadata.forward_wire_alias_origin, alias_origin);
+    let mut row = entry.clone();
+    row.key = imported.key;
+    row.metadata = imported.metadata;
+    row
+}
+
+
+
+
 pub(super) fn build_icmp_echo_frame_v4(
     src: Ipv4Addr,
     dst: Ipv4Addr,
@@ -495,26 +579,24 @@ pub(super) fn icmp_err_resolution_v4(next_hop: Ipv4Addr) -> ForwardingResolution
 }
 
 pub(super) fn icmp_err_metadata() -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone: TEST_UNTRUST_ZONE_ID,
-        egress_zone: TEST_TRUST_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_UNTRUST_ZONE_ID,
+    egress_zone: TEST_TRUST_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, }
 }
 
 pub(super) fn build_icmpv6_te_frame(
@@ -713,26 +795,24 @@ pub(super) fn icmpv6_te_match_fixture(
             route_mtu: 0,
             transport_route_mtu: 0,
         },
-        metadata: SessionMetadata {
-            ingress_zone: TEST_UNTRUST_ZONE_ID,
-            egress_zone: TEST_TRUST_ZONE_ID,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: 0,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-            nat_scope_ifindex: None,
-        },
+        metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_UNTRUST_ZONE_ID,
+        egress_zone: TEST_TRUST_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None, },
         related_expected_zone: 0,
         outbound_snat: false,
         quoted_is_reply: false,

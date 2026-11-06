@@ -68,7 +68,7 @@ fn seed_session(
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -200,7 +200,7 @@ fn session_hit_l2_group_ttl1_generates_no_time_exceeded_13638() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -300,7 +300,7 @@ fn session_hit_martian_source_drops_before_side_effects_13638() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -411,7 +411,7 @@ fn session_hit_bindless_selector_fence_drops_before_side_effects_13638() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,

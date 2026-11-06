@@ -133,38 +133,36 @@ pub(super) fn tun_origin_session_entry(
         sibling_last_seen_ns: 0,
         key,
         decision,
-        metadata: SessionMetadata {
-            ingress_zone: zone_id,
-            egress_zone: zone_id,
-            ingress_zone_check: crate::session::zone_vintage_check_for_id(
-                &forwarding.zone_id_to_name,
-                zone_id,
-            ),
-            egress_zone_check: crate::session::zone_vintage_check_for_id(
-                &forwarding.zone_id_to_name,
-                zone_id,
-            ),
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            // Self-originated: no admitting policy/application (Junos runs no
-            // security policy on firewall-self-originated traffic, #6224), so
-            // zeroed policy fields + the global per-protocol idle timeout
-            // (`None`). `TunOrigin` below is POSITIVE provenance — stamped only
-            // by the GRE and WG builders via this helper — never a peer wire
-            // import.
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-            nat_scope_ifindex: None,
-        },
+        metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: zone_id,
+        egress_zone: zone_id,
+        ingress_zone_check: crate::session::zone_vintage_check_for_id(
+            &forwarding.zone_id_to_name,
+            zone_id,
+        ),
+        egress_zone_check: crate::session::zone_vintage_check_for_id(
+            &forwarding.zone_id_to_name,
+            zone_id,
+        ),
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        // Self-originated: no admitting policy/application (Junos runs no
+        // security policy on firewall-self-originated traffic, #6224), so
+        // zeroed policy fields + the global per-protocol idle timeout
+        // (`None`). `TunOrigin` below is POSITIVE provenance — stamped only
+        // by the GRE and WG builders via this helper — never a peer wire
+        // import.
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None, },
         leak_incarnation: 0,
         origin: SessionOrigin::TunOrigin,
         protocol,

@@ -733,7 +733,9 @@ func userspaceForwardWireAliasV4(key dataplane.SessionKey, val dataplane.Session
 	if wireKey == key {
 		return dataplane.SessionKey{}, dataplane.SessionValue{}, false
 	}
-	return wireKey, val, true
+	wireVal := val
+	wireVal.LogFlags |= dataplane.LogFlagForwardWireAlias
+	return wireKey, wireVal, true
 }
 
 func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map[string]uint32) (dataplane.SessionKeyV6, dataplane.SessionValueV6, bool) {
@@ -909,5 +911,7 @@ func userspaceForwardWireAliasV6(key dataplane.SessionKeyV6, val dataplane.Sessi
 	if wireKey == key {
 		return dataplane.SessionKeyV6{}, dataplane.SessionValueV6{}, false
 	}
-	return wireKey, val, true
+	wireVal := val
+	wireVal.LogFlags |= dataplane.LogFlagForwardWireAlias
+	return wireKey, wireVal, true
 }

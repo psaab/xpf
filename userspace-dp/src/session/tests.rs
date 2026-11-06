@@ -78,26 +78,24 @@ pub(in crate::session) fn decision() -> SessionDecision {
 }
 
 pub(in crate::session) fn metadata() -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, }
 }
 
 #[test]
@@ -1152,16 +1150,14 @@ fn nat_flow_reverse_activity_keeps_forward_half_alive() {
 /// (in nanoseconds) — mirrors the value the install path derives from a matched
 /// application term's `inactivity-timeout`.
 fn metadata_with_app_timeout(ns: u64) -> SessionMetadata {
-    SessionMetadata {
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        inactivity_timeout_ns: Some(ns),
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-        ..metadata()
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    inactivity_timeout_ns: Some(ns),
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None,
+    ..metadata() }
 }
 
 /// #3227/#10889 unit: `session_timeout_ns` uses the per-application override
@@ -3003,14 +2999,12 @@ fn half_open_session_reaps_at_opening_timeout() {
 /// `metadata()` for a specific ingress zone id — used by the #3527 per-zone
 /// half-open override tests.
 fn metadata_with_zone(zone: u32) -> SessionMetadata {
-    SessionMetadata {
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        ingress_zone: zone,
-        nat_scope_ifindex: None,
-        ..metadata()
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    ingress_zone: zone,
+    nat_scope_ifindex: None,
+    ..metadata() }
 }
 
 /// #3527 FAIL-ON-REVERT: a bare-SYN (half-open) session in a zone with a
@@ -7597,20 +7591,18 @@ fn held_same_id_reimports_keep_one_pending_recheck_16881() {
 
     let mut table = SessionTable::new();
     table.set_timeouts(SessionTimeouts::from_seconds(300, 300, 0));
-    let request = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: PROTO_UDP,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "8.8.8.8".to_string(),
-        src_port: 12_345,
-        dst_port: 443,
-        ingress_zone_id: TEST_LAN_ZONE_ID,
-        egress_zone_id: TEST_WAN_ZONE_ID,
-        owner_rg_id: 1,
-        session_id: 77,
-        ..SessionSyncRequest::default()
-    };
+    let request = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: PROTO_UDP,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "8.8.8.8".to_string(),
+    src_port: 12_345,
+    dst_port: 443,
+    ingress_zone_id: TEST_LAN_ZONE_ID,
+    egress_zone_id: TEST_WAN_ZONE_ID,
+    owner_rg_id: 1,
+    session_id: 77,
+    ..SessionSyncRequest::default() };
     let zones = rustc_hash::FxHashMap::default();
     let import = |table: &mut SessionTable, now_ns| {
         let entry =
@@ -7716,20 +7708,18 @@ fn held_same_id_timeout_shrink_rearms_before_old_horizon_16881() {
 
     let mut table = SessionTable::new();
     table.set_timeouts(SessionTimeouts::from_seconds(300, 300, 0));
-    let request = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: PROTO_UDP,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "8.8.8.8".to_string(),
-        src_port: 12_345,
-        dst_port: 443,
-        ingress_zone_id: TEST_LAN_ZONE_ID,
-        egress_zone_id: TEST_WAN_ZONE_ID,
-        owner_rg_id: 1,
-        session_id: 77,
-        ..SessionSyncRequest::default()
-    };
+    let request = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: PROTO_UDP,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "8.8.8.8".to_string(),
+    src_port: 12_345,
+    dst_port: 443,
+    ingress_zone_id: TEST_LAN_ZONE_ID,
+    egress_zone_id: TEST_WAN_ZONE_ID,
+    owner_rg_id: 1,
+    session_id: 77,
+    ..SessionSyncRequest::default() };
     let zones = rustc_hash::FxHashMap::default();
     let import = |table: &mut SessionTable, now_ns| {
         let entry =
@@ -10453,14 +10443,12 @@ fn seeded_session_table_round_trips_lookup() {
 
 /// A reverse SessionMetadata mirrors `metadata()` with `is_reverse: true`.
 fn metadata_reverse() -> SessionMetadata {
-    SessionMetadata {
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        is_reverse: true,
-        nat_scope_ifindex: None,
-        ..metadata()
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    is_reverse: true,
+    nat_scope_ifindex: None,
+    ..metadata() }
 }
 
 #[test]

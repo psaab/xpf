@@ -312,7 +312,7 @@ fn transit_martian_source_gate_drops_preexisting_session_hit_10689() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,

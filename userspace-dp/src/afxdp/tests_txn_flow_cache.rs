@@ -3192,7 +3192,7 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
     assert!(sessions.install_with_protocol_with_origin(
         forward_key.clone(),
         forward_decision,
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -6042,7 +6042,7 @@ fn cross_worker_reply_evidence_retains_victim_16019() {
     let indexes = SharedSessionOwnerRgIndexes::default();
 
     // Install-time reverse row (rev_packets 0): NOT reply proof.
-    let mut meta = crate::session::SessionMetadata {
+    let mut meta = crate::session::SessionMetadata { forward_wire_alias_origin: false,
         ingress_zone: TEST_WAN_ZONE_ID,
         egress_zone: TEST_LAN_ZONE_ID,
         ingress_zone_check: 0,

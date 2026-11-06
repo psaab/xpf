@@ -1248,42 +1248,40 @@ pub(in crate::afxdp) fn fabric_punt_seed_metadata(
     if !matches!(policy_result.action, crate::policy::PolicyAction::Permit) {
         return None;
     }
-    Some(SessionMetadata {
-        ingress_zone: from_zone_id,
-        egress_zone: to_zone_id,
-        ingress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            from_zone_id,
-        ),
-        egress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            to_zone_id,
-        ),
-        // #4983: the TRUE ingress identity of the frame that created the seed.
-        // Unlike the fabric-ingress case this one is knowable and real — the
-        // packet arrived on one of THIS node's own interfaces, which is the
-        // property the caller's non-fabric gate guarantees.
-        ingress_ifindex,
-        ingress_vlan_id,
-        forward_ingress_vlan_id: None,
-        owner_rg_id,
-        // The seed is created BY a locally ingressed packet. Recording it as
-        // fabric_ingress would both be false and pull it into the
-        // fabric-ingress exclusions in the HA export walk for the wrong reason.
-        fabric_ingress: false,
-        is_reverse: false,
-        // The punting node applies no translation at all (see the doc above).
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: policy_result.policy_id,
-        // #3227: age the seed on the admitting application's idle window, so it
-        // does not outlive the peer's authoritative session for the same flow.
-        inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(
-            policy_result.inactivity_timeout,
-        ),
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    })
+    Some(SessionMetadata { forward_wire_alias_origin: false, ingress_zone: from_zone_id,
+    egress_zone: to_zone_id,
+    ingress_zone_check: crate::session::zone_vintage_check_for_id(
+        &forwarding.zone_id_to_name,
+        from_zone_id,
+    ),
+    egress_zone_check: crate::session::zone_vintage_check_for_id(
+        &forwarding.zone_id_to_name,
+        to_zone_id,
+    ),
+    // #4983: the TRUE ingress identity of the frame that created the seed.
+    // Unlike the fabric-ingress case this one is knowable and real — the
+    // packet arrived on one of THIS node's own interfaces, which is the
+    // property the caller's non-fabric gate guarantees.
+    ingress_ifindex,
+    ingress_vlan_id,
+    forward_ingress_vlan_id: None,
+    owner_rg_id,
+    // The seed is created BY a locally ingressed packet. Recording it as
+    // fabric_ingress would both be false and pull it into the
+    // fabric-ingress exclusions in the HA export walk for the wrong reason.
+    fabric_ingress: false,
+    is_reverse: false,
+    // The punting node applies no translation at all (see the doc above).
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: policy_result.policy_id,
+    // #3227: age the seed on the admitting application's idle window, so it
+    // does not outlive the peer's authoritative session for the same flow.
+    inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(
+        policy_result.inactivity_timeout,
+    ),
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, })
 }

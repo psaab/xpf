@@ -558,6 +558,7 @@ pub(crate) fn build_synced_session_entry(
         owner_rg_id: req.owner_rg_id,
         fabric_ingress: req.fabric_ingress,
         is_reverse: req.is_reverse,
+        forward_wire_alias_origin: !req.is_reverse && req.forward_wire_alias_origin,
         // #4565: the original v6 src/dst for the reverse (v4->v6) translation
         // of a peer-PROMOTED NAT64 session (Some only when nat64_snat_v4 was
         // carried). The synthesized reverse companion inherits this via

@@ -44,6 +44,57 @@ fn static_nat_dnat_matches_external_ip_v4() {
 }
 
 #[test]
+fn static_nat_identity_dnat_retains_decision_shape() {
+    let address: IpAddr = "203.0.113.10".parse().expect("same external and internal");
+    for (match_destination_port, mapped_port) in [(0, 0), (80, 80)] {
+        let table = StaticNatTable::from_snapshots(
+            &[StaticNATRuleSnapshot {
+                name: "identity-static".to_string(),
+                from_zone: "untrust".to_string(),
+                external_ip: address.to_string(),
+                internal_ip: address.to_string(),
+                match_destination_port,
+                mapped_port,
+                ..Default::default()
+            }],
+            &crate::nat::NatCounterStore::default(),
+        );
+        let (decision, _) = table
+            .match_dnat_with_counter_scoped(address, 80, None, "untrust", "", "")
+            .expect("identity static NAT rule still matches");
+        assert_eq!(
+            decision,
+            NatDecision {
+                rewrite_dst: Some(address),
+                ..NatDecision::default()
+            },
+            "identity static NAT shape {match_destination_port}/{mapped_port} retains the DNAT decision"
+        );
+    }
+    let block = StaticNatTable::from_snapshots(
+        &[block_snapshot(
+            "198.51.100.0/24",
+            "198.51.100.0/24",
+            "untrust",
+        )],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let block_address: IpAddr = "198.51.100.7".parse().expect("block host");
+    let (decision, _) = block
+        .match_dnat_with_counter_scoped(block_address, 80, None, "untrust", "", "")
+        .expect("identity block static NAT rule still matches");
+    assert_eq!(
+        decision,
+        NatDecision {
+            rewrite_dst: Some(block_address),
+            ..NatDecision::default()
+        },
+        "an identity static NAT block retains the DNAT decision shape"
+    );
+
+}
+
+#[test]
 fn static_nat_snat_matches_internal_ip_v4() {
     let table = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {

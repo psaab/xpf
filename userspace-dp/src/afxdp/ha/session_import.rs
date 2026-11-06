@@ -1279,22 +1279,22 @@ impl crate::afxdp::ha::SessionDomain {
     ///   as one session under two keys); it books nothing, so it never
     ///   refuses the canonical row.
     ///
-    /// Gap: an identity translation (the original source already is the
-    /// translated address and port) has the alias shape, and a row carries
-    /// nothing that tells the two apart. A peer-synced canonical row of that
-    /// shape books nothing here either, so after a takeover a new local flow
-    /// could be handed the same identity (the #4388 hazard). Interface SNAT
-    /// produces it only for a client whose source already is the egress
-    /// address.
+    /// Identity translations can have the same key/NAT fixed-point shape as
+    /// aliases. The Go producer therefore marks only its additional
+    /// forward-wire row on the sync wire. At this trust boundary we retain
+    /// that marker only for a forward cluster import whose key/NAT really is
+    /// self-keyed; an absent marker (including an older peer) stays canonical.
     fn upsert_synced_session_with_policy(
         &self,
-        entry: SyncedSessionEntry,
+        mut entry: SyncedSessionEntry,
         strict_mirror: bool,
         pptp_call: Option<crate::session::pptp::PptpCall>,
     ) -> SyncedImportOutcome {
         let is_alias = !entry.metadata.is_reverse
             && entry.origin.is_cluster_synced_origin()
+            && entry.metadata.forward_wire_alias_origin
             && crate::session::is_forward_wire_alias(&entry.key, entry.decision.nat);
+        entry.metadata.forward_wire_alias_origin = is_alias;
         if is_alias
             && crate::afxdp::shared_ops::lookup_shared_forward_wire_match(
                 &self.sessions.forward_wire,
@@ -3014,26 +3014,24 @@ impl crate::afxdp::ha::SessionDomain {
             route_mtu: 0,
             transport_route_mtu: 0,
         };
-        let metadata = SessionMetadata {
-            ingress_zone: 1,
-            egress_zone: 3,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: 0,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-            nat_scope_ifindex: None,
-        };
+        let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
+        egress_zone: 3,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None, };
         let _ = self.upsert_synced_session(SyncedSessionEntry {
             sibling_last_seen_ns: 0,
             key,
@@ -3187,26 +3185,24 @@ mod rejected_mirror_reservation_10790_tests {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        metadata: SessionMetadata {
-            ingress_zone: 1,
-            egress_zone: 2,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: 1,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-            nat_scope_ifindex: None,
-        },
+        metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
+        egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None, },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -3328,26 +3324,24 @@ mod rejected_mirror_reservation_10790_tests {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        metadata: SessionMetadata {
-            ingress_zone: 1,
-            egress_zone: 2,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: 1,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-            nat_scope_ifindex: None,
-        },
+        metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 1,
+        egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None, },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,

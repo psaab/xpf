@@ -11561,7 +11561,7 @@ fn f4_seed_shared_only(
         install_table_domain: 0,
         install_table_check: 0,
     },
-    metadata: crate::session::SessionMetadata {
+    metadata: crate::session::SessionMetadata { forward_wire_alias_origin: false,
         ingress_zone: 1,
         egress_zone: 2,
         ingress_zone_check: 0,
@@ -11786,7 +11786,7 @@ fn nat64_14961_seed(coordinator: &mut Coordinator, worker_id: u32, port: u16) {
         install_table_domain: 0,
         install_table_check: 0,
     },
-    metadata: crate::session::SessionMetadata {
+    metadata: crate::session::SessionMetadata { forward_wire_alias_origin: false,
         ingress_zone: 1,
         egress_zone: 2,
         ingress_zone_check: 0,
@@ -12134,7 +12134,7 @@ fn import_entry_9718(
         install_table_domain: 0,
         install_table_check: 0,
     },
-    metadata: crate::session::SessionMetadata {
+    metadata: crate::session::SessionMetadata { forward_wire_alias_origin: false,
         ingress_zone: 1,
         egress_zone: 2,
         ingress_zone_check: 0,
@@ -14624,7 +14624,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        metadata: crate::session::SessionMetadata {
+        metadata: crate::session::SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: 1,
             egress_zone: 2,
             ingress_zone_check: 0,
@@ -14733,7 +14733,7 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
         install_table_domain: 0,
         install_table_check: 0,
     },
-    metadata: crate::session::SessionMetadata {
+    metadata: crate::session::SessionMetadata { forward_wire_alias_origin: false,
         ingress_zone: 1,
         egress_zone: 2,
         ingress_zone_check: 0,
@@ -14836,7 +14836,7 @@ fn synced_delete_mode_parity_exact_vs_tunnel_variants_17133() {
                 install_table_domain: 0,
                 install_table_check: 0,
             },
-            metadata: crate::session::SessionMetadata {
+            metadata: crate::session::SessionMetadata { forward_wire_alias_origin: false,
                 ingress_zone: 1,
                 egress_zone: 2,
                 ingress_zone_check: 0,

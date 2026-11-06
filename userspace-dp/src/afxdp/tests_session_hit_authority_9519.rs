@@ -873,26 +873,24 @@ fn established_icmp_hit(
     };
     // `icmp_hit_forwarding` puts WAN in RG 1 and LAN in RG 2.
     let live_owner_rg_id = if egress_ifindex == WAN_IFINDEX { 1 } else { 2 };
-    let metadata = SessionMetadata {
-        ingress_zone,
-        egress_zone,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: ingress_ifindex as u32,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: seeded_owner_rg_id.unwrap_or(live_owner_rg_id),
-        fabric_ingress: false,
-        is_reverse,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone,
+    egress_zone,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: ingress_ifindex as u32,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: seeded_owner_rg_id.unwrap_or(live_owner_rg_id),
+    fabric_ingress: false,
+    is_reverse,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, };
     let mut sessions = SessionTable::new();
     if let Some((config_generation, fib_generation)) = forwarding_generation {
         sessions.set_forwarding_revalidation_gen(config_generation, fib_generation);

@@ -62,40 +62,38 @@ pub(in crate::afxdp) fn forward_session_metadata(input: ForwardMetaInput<'_>) ->
     };
     let (stamped_ifindex, stamped_vlan) =
         crate::session::stamped_ingress_identity(ingress_ifindex, ingress_vlan_id, fabric_ingress);
-    SessionMetadata {
-        ingress_ifindex: stamped_ifindex,
-        ingress_vlan_id: stamped_vlan,
-        forward_ingress_vlan_id: None,
+    SessionMetadata { forward_wire_alias_origin: false, ingress_ifindex: stamped_ifindex,
+    ingress_vlan_id: stamped_vlan,
+    forward_ingress_vlan_id: None,
+    ingress_zone,
+    egress_zone,
+    ingress_zone_check: crate::session::zone_vintage_check_for_id(
+        &forwarding.zone_id_to_name,
         ingress_zone,
+    ),
+    egress_zone_check: crate::session::zone_vintage_check_for_id(
+        &forwarding.zone_id_to_name,
         egress_zone,
-        ingress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            ingress_zone,
-        ),
-        egress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            egress_zone,
-        ),
-        owner_rg_id: owner_rg_id
-            .unwrap_or_else(|| owner_rg_for_resolution(forwarding, decision.resolution)),
-        fabric_ingress,
-        is_reverse: false,
-        nat64_reverse,
-        log_session_init: policy_result.is_some_and(|r| r.log_session_init),
-        log_session_close: policy_result.is_some_and(|r| r.log_session_close),
-        policy_id: policy_result.map_or(0, |r| r.policy_id),
-        inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(
-            policy_result.and_then(|r| r.inactivity_timeout),
-        ),
-        policy_counter_idx: policy_result.map_or(0, |r| r.policy_counter_idx),
-        policy_counter: policy_result.and_then(|r| {
-            forwarding
-                .policy
-                .hit_counter_by_idx(r.policy_counter_idx)
-                .cloned()
-        }),
-        nat_scope_ifindex,
-    }
+    ),
+    owner_rg_id: owner_rg_id
+        .unwrap_or_else(|| owner_rg_for_resolution(forwarding, decision.resolution)),
+    fabric_ingress,
+    is_reverse: false,
+    nat64_reverse,
+    log_session_init: policy_result.is_some_and(|r| r.log_session_init),
+    log_session_close: policy_result.is_some_and(|r| r.log_session_close),
+    policy_id: policy_result.map_or(0, |r| r.policy_id),
+    inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(
+        policy_result.and_then(|r| r.inactivity_timeout),
+    ),
+    policy_counter_idx: policy_result.map_or(0, |r| r.policy_counter_idx),
+    policy_counter: policy_result.and_then(|r| {
+        forwarding
+            .policy
+            .hit_counter_by_idx(r.policy_counter_idx)
+            .cloned()
+    }),
+    nat_scope_ifindex, }
 }
 
 /// Outcome of composing the outbound source NAT for a forward flow.

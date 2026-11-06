@@ -115,20 +115,18 @@ fn rst_updates(table: &mut SessionTable, forward: &SessionKey, reverse: &Session
 /// Update of `class`: JSON through the Go-side record shape, then the
 /// production import builder the peer runs.
 fn peer_record(class: u8, key: &SessionKey) -> SessionSyncRequest {
-    let base = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: key.src_ip.to_string(),
-        dst_ip: key.dst_ip.to_string(),
-        src_port: key.src_port,
-        dst_port: key.dst_port,
-        ingress_zone_id: TEST_LAN_ZONE_ID,
-        egress_zone_id: TEST_WAN_ZONE_ID,
-        owner_rg_id: 1,
-        session_id: INSTALLER_ID,
-        ..SessionSyncRequest::default()
-    };
+    let base = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: crate::ip_proto::PROTO_TCP,
+    src_ip: key.src_ip.to_string(),
+    dst_ip: key.dst_ip.to_string(),
+    src_port: key.src_port,
+    dst_port: key.dst_port,
+    ingress_zone_id: TEST_LAN_ZONE_ID,
+    egress_zone_id: TEST_WAN_ZONE_ID,
+    owner_rg_id: 1,
+    session_id: INSTALLER_ID,
+    ..SessionSyncRequest::default() };
     let mut v = serde_json::to_value(&base).expect("FIXTURE: serialize");
     v["tcp_close_class"] = serde_json::json!(class);
     serde_json::from_value(v).expect("FIXTURE: deserialize")

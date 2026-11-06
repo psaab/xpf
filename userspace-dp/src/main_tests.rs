@@ -1005,23 +1005,21 @@ fn queue_planner_deduplicates_fabric_parent_already_in_interfaces() {
 
 #[test]
 fn build_synced_session_entry_preserves_fabric_ingress() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 40000,
-        dst_port: 5201,
-        ingress_zone: "lan".to_string(),
-        egress_zone: "wan".to_string(),
-        owner_rg_id: 1,
-        egress_ifindex: 5,
-        tx_ifindex: 5,
-        tx_vlan_id: 80,
-        fabric_ingress: true,
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 6,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 40000,
+    dst_port: 5201,
+    ingress_zone: "lan".to_string(),
+    egress_zone: "wan".to_string(),
+    owner_rg_id: 1,
+    egress_ifindex: 5,
+    tx_ifindex: 5,
+    tx_vlan_id: 80,
+    fabric_ingress: true,
+    ..SessionSyncRequest::default() };
 
     let entry =
         build_synced_session_entry(&req, &test_zone_name_to_id(), 0).expect("synced session entry");
@@ -1035,24 +1033,26 @@ fn build_synced_session_entry_preserves_fabric_ingress() {
 // Reverting the helpers.rs mapping hard-codes both false and this fails RED.
 #[test]
 fn build_synced_session_entry_applies_log_flags() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 40000,
-        dst_port: 5201,
-        ingress_zone: "lan".to_string(),
-        egress_zone: "wan".to_string(),
-        egress_ifindex: 5,
-        tx_ifindex: 5,
-        log_session_init: true,
-        log_session_close: true,
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: true, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 6,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 40000,
+    dst_port: 5201,
+    ingress_zone: "lan".to_string(),
+    egress_zone: "wan".to_string(),
+    egress_ifindex: 5,
+    tx_ifindex: 5,
+    log_session_init: true,
+    log_session_close: true,
+    ..SessionSyncRequest::default() };
     let entry =
         build_synced_session_entry(&req, &test_zone_name_to_id(), 0).expect("synced session entry");
+    assert!(
+        entry.metadata.forward_wire_alias_origin,
+        "the request's producer marker must become local import metadata"
+    );
     assert!(entry.metadata.log_session_init, "log_session_init applied");
     assert!(
         entry.metadata.log_session_close,
@@ -1060,26 +1060,37 @@ fn build_synced_session_entry_applies_log_flags() {
     );
 
     // Close-only: init must NOT leak true.
-    let req_close = SessionSyncRequest {
-        log_session_init: false,
-        log_session_close: true,
-        ..req.clone()
-    };
+    let req_close = SessionSyncRequest { forward_wire_alias_origin: false, log_session_init: false,
+    log_session_close: true,
+    ..req.clone() };
     let entry_close = build_synced_session_entry(&req_close, &test_zone_name_to_id(), 0)
         .expect("synced session entry");
     assert!(!entry_close.metadata.log_session_init);
     assert!(entry_close.metadata.log_session_close);
 
     // Old peer omits the fields => serde(default) false => no per-policy log.
-    let req_none = SessionSyncRequest {
-        log_session_init: false,
-        log_session_close: false,
-        ..req
-    };
+    let req_none = SessionSyncRequest { forward_wire_alias_origin: false, log_session_init: false,
+    log_session_close: false,
+    ..req.clone() };
     let entry_none = build_synced_session_entry(&req_none, &test_zone_name_to_id(), 0)
         .expect("synced session entry");
     assert!(!entry_none.metadata.log_session_init);
     assert!(!entry_none.metadata.log_session_close);
+    assert!(
+        !entry_none.metadata.forward_wire_alias_origin,
+        "an omitted/clear request marker must stay false"
+    );
+    let req_reverse = SessionSyncRequest {
+        is_reverse: true,
+        ..req.clone()
+    };
+    let entry_reverse =
+        build_synced_session_entry(&req_reverse, &test_zone_name_to_id(), 0)
+            .expect("synced reverse session entry");
+    assert!(
+        !entry_reverse.metadata.forward_wire_alias_origin,
+        "reverse imports cannot originate a forward alias marker"
+    );
 }
 
 // #3301: the admitting policy's firewall metadata (policy_id,
@@ -1090,23 +1101,21 @@ fn build_synced_session_entry_applies_log_flags() {
 // fails this RED.
 #[test]
 fn build_synced_session_entry_applies_policy_fields_3301() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 40000,
-        dst_port: 5201,
-        ingress_zone: "lan".to_string(),
-        egress_zone: "wan".to_string(),
-        egress_ifindex: 5,
-        tx_ifindex: 5,
-        policy_id: 42,
-        policy_counter_idx: 7,
-        inactivity_timeout: 30,
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 6,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 40000,
+    dst_port: 5201,
+    ingress_zone: "lan".to_string(),
+    egress_zone: "wan".to_string(),
+    egress_ifindex: 5,
+    tx_ifindex: 5,
+    policy_id: 42,
+    policy_counter_idx: 7,
+    inactivity_timeout: 30,
+    ..SessionSyncRequest::default() };
     let entry =
         build_synced_session_entry(&req, &test_zone_name_to_id(), 0).expect("synced session entry");
     assert_eq!(entry.metadata.policy_id, 42, "policy_id must be applied");
@@ -1147,19 +1156,17 @@ fn build_synced_session_entry_applies_policy_fields_3301() {
 
 #[test]
 fn build_synced_session_entry_preserves_tunnel_endpoint_id() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 1,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "10.255.192.41".to_string(),
-        ingress_zone: "lan".to_string(),
-        egress_zone: "sfmix".to_string(),
-        egress_ifindex: 586,
-        tx_ifindex: 0,
-        tunnel_endpoint_id: 3,
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 1,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "10.255.192.41".to_string(),
+    ingress_zone: "lan".to_string(),
+    egress_zone: "sfmix".to_string(),
+    egress_ifindex: 586,
+    tx_ifindex: 0,
+    tunnel_endpoint_id: 3,
+    ..SessionSyncRequest::default() };
 
     let entry =
         build_synced_session_entry(&req, &test_zone_name_to_id(), 0).expect("synced session entry");
@@ -1177,23 +1184,21 @@ fn build_synced_session_entry_preserves_tunnel_endpoint_id() {
 /// drift (e.g., a name string is misspelled or unresolved).
 #[test]
 fn build_synced_session_entry_prefers_id_over_legacy_zone_name() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 40000,
-        dst_port: 5201,
-        ingress_zone: "stale-name".to_string(),
-        egress_zone: "stale-name".to_string(),
-        ingress_zone_id: 1,
-        egress_zone_id: 2,
-        owner_rg_id: 1,
-        egress_ifindex: 5,
-        tx_ifindex: 5,
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 6,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 40000,
+    dst_port: 5201,
+    ingress_zone: "stale-name".to_string(),
+    egress_zone: "stale-name".to_string(),
+    ingress_zone_id: 1,
+    egress_zone_id: 2,
+    owner_rg_id: 1,
+    egress_ifindex: 5,
+    tx_ifindex: 5,
+    ..SessionSyncRequest::default() };
     let entry =
         build_synced_session_entry(&req, &test_zone_name_to_id(), 0).expect("synced session entry");
     assert_eq!(entry.metadata.ingress_zone, 1);
@@ -1205,21 +1210,19 @@ fn build_synced_session_entry_prefers_id_over_legacy_zone_name() {
 /// fallback; the session is still installed with the resolved ID.
 #[test]
 fn build_synced_session_entry_falls_back_to_zone_name_when_id_zero() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 40000,
-        dst_port: 5201,
-        ingress_zone: "lan".to_string(),
-        egress_zone: "wan".to_string(),
-        owner_rg_id: 1,
-        egress_ifindex: 5,
-        tx_ifindex: 5,
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 6,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 40000,
+    dst_port: 5201,
+    ingress_zone: "lan".to_string(),
+    egress_zone: "wan".to_string(),
+    owner_rg_id: 1,
+    egress_ifindex: 5,
+    tx_ifindex: 5,
+    ..SessionSyncRequest::default() };
     let entry =
         build_synced_session_entry(&req, &test_zone_name_to_id(), 0).expect("synced session entry");
     let m = test_zone_name_to_id();
@@ -1233,21 +1236,19 @@ fn build_synced_session_entry_falls_back_to_zone_name_when_id_zero() {
 /// caller observes zone-id 0 and treats it as "unknown".
 #[test]
 fn build_synced_session_entry_unknown_zone_name_does_not_drop_session() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 40000,
-        dst_port: 5201,
-        ingress_zone: "totally-unknown".to_string(),
-        egress_zone: "another-unknown".to_string(),
-        owner_rg_id: 1,
-        egress_ifindex: 5,
-        tx_ifindex: 5,
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 6,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 40000,
+    dst_port: 5201,
+    ingress_zone: "totally-unknown".to_string(),
+    egress_zone: "another-unknown".to_string(),
+    owner_rg_id: 1,
+    egress_ifindex: 5,
+    tx_ifindex: 5,
+    ..SessionSyncRequest::default() };
     let entry =
         build_synced_session_entry(&req, &test_zone_name_to_id(), 0).expect("synced session entry");
     assert_eq!(entry.metadata.ingress_zone, 0);
@@ -4393,26 +4394,24 @@ fn synced_session_rejects_unresolved_ipv6_ext_protocol_6923() {
         } else {
             (0, 0)
         };
-        SessionSyncRequest {
-            operation: "upsert".to_string(),
-            addr_family: family,
-            protocol,
-            src_ip: src.to_string(),
-            dst_ip: dst.to_string(),
-            src_port,
-            dst_port,
-            ingress_zone: "lan".to_string(),
-            egress_zone: "wan".to_string(),
-            // #7188: state the discriminator explicitly. This fixture sweeps
-            // protocol 47 in over-reach guard (a), and #7188's install gate refuses
-            // a protocol-47 record whose peer did NOT carry a discriminator — so
-            // leaving the field at its "not carried" default would make that guard
-            // pass for the wrong reason (refused by the new gate, never reaching
-            // the #6923 one it was written to test). An explicit `None` is what a
-            // modern peer sends for every protocol in this sweep.
-            tunnel_discriminator: crate::session::TunnelDiscriminator::None.to_wire(),
-            ..SessionSyncRequest::default()
-        }
+        SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+        addr_family: family,
+        protocol,
+        src_ip: src.to_string(),
+        dst_ip: dst.to_string(),
+        src_port,
+        dst_port,
+        ingress_zone: "lan".to_string(),
+        egress_zone: "wan".to_string(),
+        // #7188: state the discriminator explicitly. This fixture sweeps
+        // protocol 47 in over-reach guard (a), and #7188's install gate refuses
+        // a protocol-47 record whose peer did NOT carry a discriminator — so
+        // leaving the field at its "not carried" default would make that guard
+        // pass for the wrong reason (refused by the new gate, never reaching
+        // the #6923 one it was written to test). An explicit `None` is what a
+        // modern peer sends for every protocol in this sweep.
+        tunnel_discriminator: crate::session::TunnelDiscriminator::None.to_wire(),
+        ..SessionSyncRequest::default() }
     };
     let v6 = libc::AF_INET6 as u8;
 
@@ -6485,21 +6484,19 @@ fn carry_forward_follows_binding_identity_not_slot_7497() {
 // silently.
 #[test]
 fn a_zero_translated_port_means_no_translation_on_the_sync_wire_8640() {
-    let base = || SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 40000,
-        dst_port: 5201,
-        ingress_zone: "lan".to_string(),
-        egress_zone: "wan".to_string(),
-        owner_rg_id: 1,
-        egress_ifindex: 5,
-        nat_src_ip: "172.16.80.8".to_string(),
-        ..SessionSyncRequest::default()
-    };
+    let base = || SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 6,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 40000,
+    dst_port: 5201,
+    ingress_zone: "lan".to_string(),
+    egress_zone: "wan".to_string(),
+    owner_rg_id: 1,
+    egress_ifindex: 5,
+    nat_src_ip: "172.16.80.8".to_string(),
+    ..SessionSyncRequest::default() };
 
     // ZERO on the wire => None. This is the branch the Go floor protects.
     let mut req = base();
@@ -6531,23 +6528,21 @@ fn a_zero_translated_port_means_no_translation_on_the_sync_wire_8640() {
 
 #[test]
 fn build_synced_session_entry_carries_install_table_identity_9752() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 40000,
-        dst_port: 5201,
-        ingress_zone: "lan".to_string(),
-        egress_zone: "wan".to_string(),
-        owner_rg_id: 1,
-        egress_ifindex: 5,
-        tx_ifindex: 5,
-        install_table_domain: 525590,
-        install_table_check: 0x1234_5678,
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 6,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 40000,
+    dst_port: 5201,
+    ingress_zone: "lan".to_string(),
+    egress_zone: "wan".to_string(),
+    owner_rg_id: 1,
+    egress_ifindex: 5,
+    tx_ifindex: 5,
+    install_table_domain: 525590,
+    install_table_check: 0x1234_5678,
+    ..SessionSyncRequest::default() };
     let entry =
         build_synced_session_entry(&req, &test_zone_name_to_id(), 0).expect("synced session entry");
     assert_eq!(
@@ -6562,18 +6557,16 @@ fn build_synced_session_entry_carries_install_table_identity_9752() {
 
 #[test]
 fn build_synced_session_entry_defaults_install_table_for_legacy_peer_9752() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 40000,
-        dst_port: 5201,
-        ingress_zone: "lan".to_string(),
-        egress_zone: "wan".to_string(),
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 6,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 40000,
+    dst_port: 5201,
+    ingress_zone: "lan".to_string(),
+    egress_zone: "wan".to_string(),
+    ..SessionSyncRequest::default() };
     // A legacy payload omits both keys: serde(default) 0 = default table.
     let legacy: SessionSyncRequest =
         serde_json::from_str(r#"{"operation":"upsert","src_ip":"10.0.61.102"}"#)

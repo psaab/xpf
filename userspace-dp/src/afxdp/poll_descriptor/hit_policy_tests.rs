@@ -76,26 +76,24 @@ fn decision(egress_ifindex: i32, nat: NatDecision) -> SessionDecision {
 }
 
 fn metadata(ingress_zone: u32, egress_zone: u32, is_reverse: bool) -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone,
-        egress_zone,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: LAN_IF as u32,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_zone,
+    egress_zone,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: LAN_IF as u32,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, }
 }
 
 /// Snapshot whose only permit (dmz -> wan) never matches lan -> dmz, so
@@ -404,26 +402,24 @@ fn fabric_recorded_zone_verdict_level_17027() {
         "the typed guard must arm the owner ICMP verdict"
     );
 
-    let metadata = |ingress_zone, egress_zone, is_reverse| SessionMetadata {
-        ingress_zone,
-        egress_zone,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: LAN_IF as u32,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    };
+    let metadata = |ingress_zone, egress_zone, is_reverse| SessionMetadata { forward_wire_alias_origin: false, ingress_zone,
+    egress_zone,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: LAN_IF as u32,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, };
     let decision = |egress_ifindex, disposition| SessionDecision {
         resolution: ForwardingResolution {
             disposition,

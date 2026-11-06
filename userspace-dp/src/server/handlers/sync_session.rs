@@ -650,13 +650,11 @@ mod tests {
             }
             Err(reason) => panic!("a fresh triple must begin, got Err({reason})"),
         };
-        let request = SessionSyncRequest {
-            operation: "mirror_clear_chunk".to_string(),
-            helper_epoch: 7,
-            operation_id: "op-1".to_string(),
-            mutation_id: "mut-A".to_string(),
-            ..SessionSyncRequest::default()
-        };
+        let request = SessionSyncRequest { forward_wire_alias_origin: false, operation: "mirror_clear_chunk".to_string(),
+        helper_epoch: 7,
+        operation_id: "op-1".to_string(),
+        mutation_id: "mut-A".to_string(),
+        ..SessionSyncRequest::default() };
         let mut response = ControlResponse {
             ok: true,
             ..ControlResponse::default()

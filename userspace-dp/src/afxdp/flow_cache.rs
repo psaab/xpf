@@ -829,40 +829,38 @@ impl FlowCacheEntry {
             deny_expires_at_secs: 0,
             cluster_terminal_source_ifindex: 0,
             cluster_terminal_stamp_owner_rg: 0,
-            metadata: SessionMetadata {
-                ingress_zone: ingress_zone.unwrap_or(0),
-                egress_zone: 0,
-                ingress_zone_check: crate::session::zone_vintage_check_for_id(
-                    &forwarding.zone_id_to_name,
-                    ingress_zone.unwrap_or(0),
-                ),
-                egress_zone_check: 0,
-                ingress_ifindex: 0,
-                ingress_vlan_id: 0,
-                forward_ingress_vlan_id: None,
-                owner_rg_id,
-                fabric_ingress: false,
-                is_reverse: false,
-                nat64_reverse: None,
-                // #2508: flow-cache seed carries no per-policy `then log`.
-                log_session_init: false,
-                log_session_close: false,
-                // #3056: the flow-cache descriptor metadata is replay state for an
-                // already-installed session (the install on the slow path stamps
-                // the real policy ID); this seed value is never published itself.
-                policy_id: 0,
-                // #3227: the real per-app idle timeout is stamped by the
-                // slow-path install; the flow-cache seed uses the global one.
-                inactivity_timeout_ns: None,
-                // #3073: the flow-cache hit path re-counts every packet against
-                // the admitting policy, so the seed needs the real handle. This
-                // constructor leaves it 0; the population site
-                // (`poll_descriptor`) stamps `entry.metadata.policy_counter_idx`
-                // from the established flow's metadata after construction.
-                policy_counter_idx: 0,
-                policy_counter: None,
-                nat_scope_ifindex: None,
-            },
+            metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: ingress_zone.unwrap_or(0),
+            egress_zone: 0,
+            ingress_zone_check: crate::session::zone_vintage_check_for_id(
+                &forwarding.zone_id_to_name,
+                ingress_zone.unwrap_or(0),
+            ),
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            // #2508: flow-cache seed carries no per-policy `then log`.
+            log_session_init: false,
+            log_session_close: false,
+            // #3056: the flow-cache descriptor metadata is replay state for an
+            // already-installed session (the install on the slow path stamps
+            // the real policy ID); this seed value is never published itself.
+            policy_id: 0,
+            // #3227: the real per-app idle timeout is stamped by the
+            // slow-path install; the flow-cache seed uses the global one.
+            inactivity_timeout_ns: None,
+            // #3073: the flow-cache hit path re-counts every packet against
+            // the admitting policy, so the seed needs the real handle. This
+            // constructor leaves it 0; the population site
+            // (`poll_descriptor`) stamps `entry.metadata.policy_counter_idx`
+            // from the established flow's metadata after construction.
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None, },
             stamp: FlowCacheStamp::capture(
                 validation.config_generation,
                 validation.fib_generation,
@@ -975,32 +973,30 @@ impl FlowCacheEntry {
                 ..RewriteDescriptor::default()
             },
             decision,
-            metadata: SessionMetadata {
+            metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone,
+            egress_zone,
+            ingress_zone_check: crate::session::zone_vintage_check_for_id(
+                &forwarding.zone_id_to_name,
                 ingress_zone,
+            ),
+            egress_zone_check: crate::session::zone_vintage_check_for_id(
+                &forwarding.zone_id_to_name,
                 egress_zone,
-                ingress_zone_check: crate::session::zone_vintage_check_for_id(
-                    &forwarding.zone_id_to_name,
-                    ingress_zone,
-                ),
-                egress_zone_check: crate::session::zone_vintage_check_for_id(
-                    &forwarding.zone_id_to_name,
-                    egress_zone,
-                ),
-                ingress_ifindex: 0,
-                ingress_vlan_id: 0,
-                forward_ingress_vlan_id: None,
-                owner_rg_id,
-                fabric_ingress: false,
-                is_reverse: false,
-                nat64_reverse: None,
-                log_session_init: false,
-                log_session_close: false,
-                policy_id: policy_deny.map_or(0, |deny| deny.policy_id),
-                inactivity_timeout_ns: None,
-                policy_counter_idx,
-                policy_counter,
-                nat_scope_ifindex: None,
-            },
+            ),
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: policy_deny.map_or(0, |deny| deny.policy_id),
+            inactivity_timeout_ns: None,
+            policy_counter_idx,
+            policy_counter,
+            nat_scope_ifindex: None, },
             stamp: FlowCacheStamp::capture(
                 validation.config_generation,
                 validation.fib_generation,

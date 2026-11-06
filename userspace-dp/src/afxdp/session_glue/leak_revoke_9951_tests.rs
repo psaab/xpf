@@ -64,26 +64,24 @@ fn noroute_decision() -> SessionDecision {
 }
 
 fn leak_metadata() -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone: 0,
-        egress_zone: 0,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 12,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 0,
+    egress_zone: 0,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 12,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, }
 }
 
 fn rebuild_with_previous(snapshot: &ConfigSnapshot, previous: &ForwardingState) -> ForwardingState {

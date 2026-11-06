@@ -269,26 +269,24 @@ fn metadata(is_reverse: bool) -> SessionMetadata {
     } else {
         (TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID)
     };
-    SessionMetadata {
-        ingress_zone,
-        egress_zone,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: LAN_IFINDEX as u32,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_zone,
+    egress_zone,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: LAN_IFINDEX as u32,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, }
 }
 
 struct PollObservables {
@@ -2616,26 +2614,24 @@ fn descriptor_path_stale_dnat_hit_restamps_conntrack_app_id_12191() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let metadata = SessionMetadata {
-        ingress_zone: TEST_WAN_ZONE_ID,
-        egress_zone: TEST_LAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: WAN_INGRESS_IFINDEX as u32,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_WAN_ZONE_ID,
+    egress_zone: TEST_LAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: WAN_INGRESS_IFINDEX as u32,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, };
     let mut sessions = SessionTable::new();
     assert!(sessions.install_with_protocol_with_origin(
         key.clone(),
@@ -3074,13 +3070,11 @@ fn drive_moved_interface_9384(
     let ha_state = txn_ha_state();
 
     let mut sessions = SessionTable::new();
-    let metadata = SessionMetadata {
-        ingress_zone: entry_ingress_zone,
-        egress_zone: TEST_WAN_ZONE_ID,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None,
-        ..metadata(false)
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: entry_ingress_zone,
+    egress_zone: TEST_WAN_ZONE_ID,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None,
+    ..metadata(false) };
     assert!(
         sessions.install_with_protocol_with_origin(
             flow_key_to(DST),
@@ -3183,13 +3177,11 @@ fn a_move_into_a_still_permitted_zone_does_not_revoke_9384() {
     let ha_state = txn_ha_state();
     let mut sessions = SessionTable::new();
     // The ENTRY still says `lan` — the session predates the move.
-    let metadata = SessionMetadata {
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_WAN_ZONE_ID,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None,
-        ..metadata(false)
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_WAN_ZONE_ID,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None,
+    ..metadata(false) };
     assert!(sessions.install_with_protocol_with_origin(
         flow_key_to(DST),
         decision(WAN_IFINDEX),
@@ -3312,13 +3304,11 @@ fn an_arrival_with_no_interface_identity_still_declines_9513() {
     // have a pair to judge; only the ARRIVAL identity is missing.
     let key = flow_key_to(DST);
     let decision = decision(WAN_IFINDEX);
-    let metadata = SessionMetadata {
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_WAN_ZONE_ID,
-        forward_ingress_vlan_id: None,
-        nat_scope_ifindex: None,
-        ..metadata(false)
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_WAN_ZONE_ID,
+    forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None,
+    ..metadata(false) };
     assert!(sessions.install_with_protocol_with_origin(
         key.clone(),
         decision.clone(),
@@ -4076,26 +4066,24 @@ const DST6_9604: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0x80, 0, 0, 0, 0x200
 /// flow, and NO ingress identity of its own — the reply's ingress has not been
 /// observed at install (#4983).
 fn reverse_metadata_for_9604(fwd_ingress_zone: u32, fwd_egress_zone: u32) -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone: fwd_egress_zone,
-        egress_zone: fwd_ingress_zone,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: true,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_zone: fwd_egress_zone,
+    egress_zone: fwd_ingress_zone,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: true,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, }
 }
 
 /// Install a production-shape pair: the forward entry as given, plus its

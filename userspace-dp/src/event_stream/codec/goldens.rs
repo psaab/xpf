@@ -71,28 +71,26 @@ fn golden_decision() -> SessionDecision {
 }
 
 fn golden_metadata() -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone: 301,
-        egress_zone: 1001,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 424_242,
-        ingress_vlan_id: 2345,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 40_002,
-        fabric_ingress: true,
-        is_reverse: true,
-        nat64_reverse: None,
-        log_session_init: true,
-        log_session_close: true,
-        policy_id: 777_001,
-        inactivity_timeout_ns: Some(90_000_000_000),
-        policy_counter_idx: 888_002,
-        policy_counter: Some(Arc::new(crate::policy::PolicyRuleCounter::with_rule_id(
-            "golden-rule-17131",
-        ))),
-        nat_scope_ifindex: Some(-12_345),
-    }
+    SessionMetadata { forward_wire_alias_origin: false, ingress_zone: 301,
+    egress_zone: 1001,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 424_242,
+    ingress_vlan_id: 2345,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 40_002,
+    fabric_ingress: true,
+    is_reverse: true,
+    nat64_reverse: None,
+    log_session_init: true,
+    log_session_close: true,
+    policy_id: 777_001,
+    inactivity_timeout_ns: Some(90_000_000_000),
+    policy_counter_idx: 888_002,
+    policy_counter: Some(Arc::new(crate::policy::PolicyRuleCounter::with_rule_id(
+        "golden-rule-17131",
+    ))),
+    nat_scope_ifindex: Some(-12_345), }
 }
 
 fn golden_key_v4() -> SessionKey {

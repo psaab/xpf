@@ -6521,86 +6521,84 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                 .policy
                                 .hit_counter_by_idx(host_policy_counter_idx)
                                 .cloned();
-                            let local_metadata = SessionMetadata {
-                                ingress_zone: from_zone_id,
-                                egress_zone: to_zone_id,
-                                ingress_zone_check: crate::session::zone_vintage_check_for_id(
-                                    &worker_ctx.forwarding.zone_id_to_name,
-                                    from_zone_id,
-                                ),
-                                egress_zone_check: crate::session::zone_vintage_check_for_id(
-                                    &worker_ctx.forwarding.zone_id_to_name,
-                                    to_zone_id,
-                                ),
-                                // #4983: stamp the session's TRUE ingress identity from the frame that
-                                // created it — the binding it was actually received on plus its 802.1Q
-                                // tag. Recorded ONCE here and never re-derived from the zone, which is
-                                // the approximation `show/clear security flow session interface <name>`
-                                // is being freed from.
-                                // #15951: fabric arrivals stamp the (0,0) identity
-                                // like the transit install (#7096), instead of
-                                // claiming the local fabric NIC as the peer's
-                                // ingress interface.
-                                ingress_ifindex: crate::session::stamped_ingress_identity(
-                                    meta.ingress_ifindex,
-                                    meta.ingress_vlan_id,
-                                    packet_fabric_ingress,
-                                )
-                                .0,
-                                ingress_vlan_id: crate::session::stamped_ingress_identity(
-                                    meta.ingress_ifindex,
-                                    meta.ingress_vlan_id,
-                                    packet_fabric_ingress,
-                                )
-                                .1,
-                                forward_ingress_vlan_id: None,
-                                owner_rg_id: 0,
-                                fabric_ingress: packet_fabric_ingress,
-                                is_reverse: false,
-                                // Keep firewall-local sessions in the helper only for HA
-                                // state. Publish only the exact observed key back into the
-                                // BPF session map so subsequent established packets bypass
-                                // userspace and return directly to the kernel.
-                                nat64_reverse: None,
-                                // #2508/#3706: a matching `to-zone junos-host then
-                                // permit log` policy's per-policy RT_FLOW SYSLOG
-                                // selection (a no-match host-local session carries
-                                // none, so both stay false).
-                                log_session_init: host_log_session_init,
-                                log_session_close: host_log_session_close,
-                                // #3056/#3706: the admitting junos-host policy's ID
-                                // so the live-session BPF-compat publish and the
-                                // SESSION_CREATE/CLOSE RT_FLOW records reference the
-                                // policy that admitted the host-bound flow (0 only
-                                // for a no-match host-local session).
-                                policy_id: host_policy_id,
-                                // #12863: preserve the matched junos-host permit's
-                                // application idle timeout; no-match sessions
-                                // retain the use-global sentinel.
-                                    inactivity_timeout_ns:
-                                        crate::session::app_inactivity_timeout_ns(
-                                    host_inactivity_timeout,
-                                ),
-                                // #3073/#3706: the admitting junos-host rule's
-                                // hit-counter handle (0 / None for a no-match
-                                // host-local session).
-                                policy_counter_idx: host_policy_counter_idx,
-                                policy_counter: host_policy_counter,
-                                // #15951 rebase: stamp the validated NAT scope
-                                // like the transit install (#15176), using the
-                                // gated fabric scope or the locally resolved
-                                // logical unit. LocalDelivery DNAT sessions are
-                                // revalidated by source_nat_revocation_on_session_hit
-                                // (which runs before the #9563 LocalDelivery
-                                // zone-policy decline), so a None here would
-                                // rebuild an empty scope and falsely revoke a
-                                // fabric/scope-specific DNAT-to-local session.
-                                nat_scope_ifindex: if packet_fabric_ingress {
-                                    ingress_nat_scope_ifindex
-                                } else {
-                                    Some(ingress_logical)
-                                },
-                            };
+                            let local_metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: from_zone_id,
+                            egress_zone: to_zone_id,
+                            ingress_zone_check: crate::session::zone_vintage_check_for_id(
+                                &worker_ctx.forwarding.zone_id_to_name,
+                                from_zone_id,
+                            ),
+                            egress_zone_check: crate::session::zone_vintage_check_for_id(
+                                &worker_ctx.forwarding.zone_id_to_name,
+                                to_zone_id,
+                            ),
+                            // #4983: stamp the session's TRUE ingress identity from the frame that
+                            // created it — the binding it was actually received on plus its 802.1Q
+                            // tag. Recorded ONCE here and never re-derived from the zone, which is
+                            // the approximation `show/clear security flow session interface <name>`
+                            // is being freed from.
+                            // #15951: fabric arrivals stamp the (0,0) identity
+                            // like the transit install (#7096), instead of
+                            // claiming the local fabric NIC as the peer's
+                            // ingress interface.
+                            ingress_ifindex: crate::session::stamped_ingress_identity(
+                                meta.ingress_ifindex,
+                                meta.ingress_vlan_id,
+                                packet_fabric_ingress,
+                            )
+                            .0,
+                            ingress_vlan_id: crate::session::stamped_ingress_identity(
+                                meta.ingress_ifindex,
+                                meta.ingress_vlan_id,
+                                packet_fabric_ingress,
+                            )
+                            .1,
+                            forward_ingress_vlan_id: None,
+                            owner_rg_id: 0,
+                            fabric_ingress: packet_fabric_ingress,
+                            is_reverse: false,
+                            // Keep firewall-local sessions in the helper only for HA
+                            // state. Publish only the exact observed key back into the
+                            // BPF session map so subsequent established packets bypass
+                            // userspace and return directly to the kernel.
+                            nat64_reverse: None,
+                            // #2508/#3706: a matching `to-zone junos-host then
+                            // permit log` policy's per-policy RT_FLOW SYSLOG
+                            // selection (a no-match host-local session carries
+                            // none, so both stay false).
+                            log_session_init: host_log_session_init,
+                            log_session_close: host_log_session_close,
+                            // #3056/#3706: the admitting junos-host policy's ID
+                            // so the live-session BPF-compat publish and the
+                            // SESSION_CREATE/CLOSE RT_FLOW records reference the
+                            // policy that admitted the host-bound flow (0 only
+                            // for a no-match host-local session).
+                            policy_id: host_policy_id,
+                            // #12863: preserve the matched junos-host permit's
+                            // application idle timeout; no-match sessions
+                            // retain the use-global sentinel.
+                                inactivity_timeout_ns:
+                                    crate::session::app_inactivity_timeout_ns(
+                                host_inactivity_timeout,
+                            ),
+                            // #3073/#3706: the admitting junos-host rule's
+                            // hit-counter handle (0 / None for a no-match
+                            // host-local session).
+                            policy_counter_idx: host_policy_counter_idx,
+                            policy_counter: host_policy_counter,
+                            // #15951 rebase: stamp the validated NAT scope
+                            // like the transit install (#15176), using the
+                            // gated fabric scope or the locally resolved
+                            // logical unit. LocalDelivery DNAT sessions are
+                            // revalidated by source_nat_revocation_on_session_hit
+                            // (which runs before the #9563 LocalDelivery
+                            // zone-policy decline), so a None here would
+                            // rebuild an empty scope and falsely revoke a
+                            // fabric/scope-specific DNAT-to-local session.
+                            nat_scope_ifindex: if packet_fabric_ingress {
+                                ingress_nat_scope_ifindex
+                            } else {
+                                Some(ingress_logical)
+                            }, };
                             // #16532: LocalMiss admission parity with the
                             // transit (#10890/#16019) and MissingNeighbor
                             // sites. Previously this arm defaulted capacity
@@ -8139,63 +8137,61 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                             reverse_key.dst_ip,
                                             reverse_context.install_table.as_deref(),
                                         );
-                                    let reverse_metadata = SessionMetadata {
-                                        ingress_zone: to_zone_id,
-                                        egress_zone: from_zone_id,
-                                        ingress_zone_check:
-                                            crate::session::zone_vintage_check_for_id(
-                                                &worker_ctx.forwarding.zone_id_to_name,
-                                                to_zone_id,
-                                            ),
-                                        egress_zone_check:
-                                            crate::session::zone_vintage_check_for_id(
-                                                &worker_ctx.forwarding.zone_id_to_name,
-                                                from_zone_id,
-                                            ),
-                                        // #4983: the reverse companion has NO ingress identity of its own —
-                                        // the reply's ingress has not been OBSERVED yet, and routing may be
-                                        // asymmetric, so there is nothing truthful to stamp. Note the forward
-                                        // flow's egress IS available here (`decision.resolution.egress_ifindex`,
-                                        // resolved above); it is simply the wrong datum, being a prediction of
-                                        // where the reply will arrive rather than an observation of where it
-                                        // did. Stamping either it or the forward frame's own ingress would put
-                                        // a confident value on an unobserved binding. Left 0 = "no identity
-                                        // carried"; the Go filter falls back to the zone approximation.
-                                        ingress_ifindex: 0,
-                                        ingress_vlan_id: 0,
-                                        forward_ingress_vlan_id: (stamped_ifindex != 0)
-                                            .then_some(stamped_vlan),
-                                        owner_rg_id,
-                                        fabric_ingress,
-                                        is_reverse: true,
-                                        nat64_reverse: nat64_info,
-                                        // #2508: mirror the admitting policy's log
-                                        // selection onto the reverse entry so the
-                                        // close delta carries a consistent gate
-                                        // regardless of which entry expires it.
-                                        log_session_init: policy_result.log_session_init,
-                                        log_session_close: policy_result.log_session_close,
-                                        // #3056: mirror the admitting policy ID onto
-                                        // the reverse companion so a row keyed on the
-                                        // reverse tuple attributes the same policy.
-                                        policy_id: policy_result.policy_id,
-                                        // #3227: mirror the matched application term's
-                                        // per-application inactivity (idle) timeout onto
-                                        // the reverse entry so whichever entry the GC
-                                        // expires uses the app's idle window.
-                                        inactivity_timeout_ns:
-                                            crate::session::app_inactivity_timeout_ns(
-                                                policy_result.inactivity_timeout,
-                                            ),
-                                        // #3073: mirror the admitting rule's hit-counter
-                                        // handle onto the reverse companion so reply
-                                        // traffic of the flow counts against the same
-                                        // policy as the forward direction. #3322:
-                                        // mirror the reorder-stable bound handle too.
-                                        policy_counter_idx: policy_result.policy_counter_idx,
-                                        policy_counter: bound_policy_counter.clone(),
-                                        nat_scope_ifindex,
-                                    };
+                                    let reverse_metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: to_zone_id,
+                                    egress_zone: from_zone_id,
+                                    ingress_zone_check:
+                                        crate::session::zone_vintage_check_for_id(
+                                            &worker_ctx.forwarding.zone_id_to_name,
+                                            to_zone_id,
+                                        ),
+                                    egress_zone_check:
+                                        crate::session::zone_vintage_check_for_id(
+                                            &worker_ctx.forwarding.zone_id_to_name,
+                                            from_zone_id,
+                                        ),
+                                    // #4983: the reverse companion has NO ingress identity of its own —
+                                    // the reply's ingress has not been OBSERVED yet, and routing may be
+                                    // asymmetric, so there is nothing truthful to stamp. Note the forward
+                                    // flow's egress IS available here (`decision.resolution.egress_ifindex`,
+                                    // resolved above); it is simply the wrong datum, being a prediction of
+                                    // where the reply will arrive rather than an observation of where it
+                                    // did. Stamping either it or the forward frame's own ingress would put
+                                    // a confident value on an unobserved binding. Left 0 = "no identity
+                                    // carried"; the Go filter falls back to the zone approximation.
+                                    ingress_ifindex: 0,
+                                    ingress_vlan_id: 0,
+                                    forward_ingress_vlan_id: (stamped_ifindex != 0)
+                                        .then_some(stamped_vlan),
+                                    owner_rg_id,
+                                    fabric_ingress,
+                                    is_reverse: true,
+                                    nat64_reverse: nat64_info,
+                                    // #2508: mirror the admitting policy's log
+                                    // selection onto the reverse entry so the
+                                    // close delta carries a consistent gate
+                                    // regardless of which entry expires it.
+                                    log_session_init: policy_result.log_session_init,
+                                    log_session_close: policy_result.log_session_close,
+                                    // #3056: mirror the admitting policy ID onto
+                                    // the reverse companion so a row keyed on the
+                                    // reverse tuple attributes the same policy.
+                                    policy_id: policy_result.policy_id,
+                                    // #3227: mirror the matched application term's
+                                    // per-application inactivity (idle) timeout onto
+                                    // the reverse entry so whichever entry the GC
+                                    // expires uses the app's idle window.
+                                    inactivity_timeout_ns:
+                                        crate::session::app_inactivity_timeout_ns(
+                                            policy_result.inactivity_timeout,
+                                        ),
+                                    // #3073: mirror the admitting rule's hit-counter
+                                    // handle onto the reverse companion so reply
+                                    // traffic of the flow counts against the same
+                                    // policy as the forward direction. #3322:
+                                    // mirror the reorder-stable bound handle too.
+                                    policy_counter_idx: policy_result.policy_counter_idx,
+                                    policy_counter: bound_policy_counter.clone(),
+                                    nat_scope_ifindex, };
                                     // #1861 §5.2: the reverse install is gated on
                                     // forward_installed (was track_in_userspace —
                                     // a forward failure used to fall through and

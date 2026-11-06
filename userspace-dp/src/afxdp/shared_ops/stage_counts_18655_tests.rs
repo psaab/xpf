@@ -107,7 +107,7 @@ pub(in crate::afxdp) fn row(
     reverse: bool,
     session_id: u64,
 ) -> SyncedSessionEntry {
-    let metadata = crate::session::SessionMetadata {
+    let metadata = crate::session::SessionMetadata { forward_wire_alias_origin: false,
         ingress_zone: 1,
         egress_zone: 2,
         ingress_zone_check: 0,

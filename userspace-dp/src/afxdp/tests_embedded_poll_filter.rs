@@ -721,26 +721,24 @@ fn same_family_icmp_quote_uses_read_only_plain_probe_9990() {
     };
     let install_ns = 1_000_000;
     let mut sessions = SessionTable::new();
-    let metadata = SessionMetadata {
-        ingress_zone: TEST_WAN_ZONE_ID,
-        egress_zone: TEST_LAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: true,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_WAN_ZONE_ID,
+    egress_zone: TEST_LAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: true,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, };
     assert!(sessions.install_with_protocol(
         quote_key.clone(),
         SessionDecision {
@@ -881,26 +879,24 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
         install_table_domain: 0,
         install_table_check: 0,
     },
-    metadata: SessionMetadata {
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    },
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
     protocol: PROTO_TCP,
@@ -1061,7 +1057,7 @@ fn embedded_icmp_nat_match_translates_redirect_v4() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -1580,7 +1576,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -1632,7 +1628,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
                 install_table_domain: 0,
                 install_table_check: 0,
             },
-            SessionMetadata {
+            SessionMetadata { forward_wire_alias_origin: false,
                 ingress_zone: TEST_WAN_ZONE_ID,
                 egress_zone: TEST_LAN_ZONE_ID,
                 ingress_zone_check: 0,
@@ -2512,7 +2508,7 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -2588,7 +2584,7 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
                 install_table_domain: 0,
                 install_table_check: 0,
             },
-            SessionMetadata {
+            SessionMetadata { forward_wire_alias_origin: false,
                 ingress_zone: TEST_WAN_ZONE_ID,
                 egress_zone: TEST_LAN_ZONE_ID,
                 ingress_zone_check: 0,
@@ -2780,7 +2776,7 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -2855,7 +2851,7 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
                 install_table_domain: 0,
                 install_table_check: 0,
             },
-            SessionMetadata {
+            SessionMetadata { forward_wire_alias_origin: false,
                 ingress_zone: TEST_WAN_ZONE_ID,
                 egress_zone: TEST_LAN_ZONE_ID,
                 ingress_zone_check: 0,
@@ -3003,7 +2999,7 @@ fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, do
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -3064,7 +3060,7 @@ fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, do
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_WAN_ZONE_ID,
             egress_zone: TEST_LAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -4384,7 +4380,7 @@ fn poll_descriptor_same_family_builder_none_refunds_budget_15152() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -5210,7 +5206,7 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -5376,7 +5372,7 @@ fn n6474_install_snat_session(
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -5860,7 +5856,7 @@ fn poll_descriptor_snat_outbound_icmp_error_fabric_redirect_judges_pre_snat_src_
                 install_table_domain: 0,
                 install_table_check: 0,
             },
-            SessionMetadata {
+            SessionMetadata { forward_wire_alias_origin: false,
                 ingress_zone: TEST_WAN_ZONE_ID,
                 egress_zone: TEST_LAN_ZONE_ID,
                 ingress_zone_check: 0,
@@ -6461,7 +6457,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -6610,7 +6606,7 @@ fn n14665_install_composed_session(
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -6659,7 +6655,7 @@ fn n14665_install_composed_session(
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_WAN_ZONE_ID,
             egress_zone: TEST_LAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -8113,26 +8109,24 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let metadata = SessionMetadata {
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    };
+    let metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, };
     assert!(sessions.install_with_protocol_with_origin(
         flow_key.clone(),
         decision,
@@ -8562,26 +8556,24 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let local_metadata = SessionMetadata {
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_LAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    };
+    let local_metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_LAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, };
     assert!(sessions.install_with_protocol_with_origin(
         flow_key.clone(),
         local_decision,
@@ -8910,7 +8902,7 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -9244,7 +9236,7 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -9641,7 +9633,7 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -10073,7 +10065,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -10289,26 +10281,24 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
         install_table_domain: 0,
         install_table_check: 0,
     },
-    metadata: SessionMetadata {
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    },
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
     protocol: PROTO_GRE,
@@ -10457,26 +10447,24 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
         install_table_domain: 0,
         install_table_check: 0,
     },
-    metadata: SessionMetadata {
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    },
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
     protocol: PROTO_GRE,
@@ -10606,7 +10594,7 @@ fn the_as_is_embedded_key_carries_the_discriminator_9031() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -10716,7 +10704,7 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -10870,26 +10858,24 @@ fn publish_pptp_gre_session_9298(
         install_table_domain: 0,
         install_table_check: 0,
     },
-    metadata: SessionMetadata {
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    },
+    metadata: SessionMetadata { forward_wire_alias_origin: false, ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
     protocol: PROTO_GRE,
@@ -11219,7 +11205,7 @@ fn embedded_icmp_session_match_resolves_a_pptp_call_9298() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -11455,7 +11441,7 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -11747,7 +11733,7 @@ fn n9901_floor_fixture() -> (
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -11923,7 +11909,7 @@ fn n9901_install_snat_session(
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -12534,38 +12520,36 @@ fn poll_descriptor_untranslated_v4_error_admission_knob_impl(
             install_table_domain: 0,
             install_table_check: 0,
         };
-        let session_metadata = SessionMetadata {
-            // Reverse-half records swap the forward LAN->WAN zones; the
-            // same-zone fixture keeps both sides in LAN.
-            ingress_zone: if reverse_half && !same_zone_arrival {
-                TEST_WAN_ZONE_ID
-            } else {
-                TEST_LAN_ZONE_ID
-            },
-            egress_zone: if reverse_half || same_zone_arrival {
-                TEST_LAN_ZONE_ID
-            } else if unknown_zone_arrival {
-                0
-            } else {
-                TEST_WAN_ZONE_ID
-            },
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: 0,
-            fabric_ingress: false,
-            is_reverse: reverse_half,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-            nat_scope_ifindex: None,
-        };
+        let session_metadata = SessionMetadata { forward_wire_alias_origin: false, // Reverse-half records swap the forward LAN->WAN zones; the
+        // same-zone fixture keeps both sides in LAN.
+        ingress_zone: if reverse_half && !same_zone_arrival {
+            TEST_WAN_ZONE_ID
+        } else {
+            TEST_LAN_ZONE_ID
+        },
+        egress_zone: if reverse_half || same_zone_arrival {
+            TEST_LAN_ZONE_ID
+        } else if unknown_zone_arrival {
+            0
+        } else {
+            TEST_WAN_ZONE_ID
+        },
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: reverse_half,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None, };
         if same_zone_arrival {
             assert_eq!(session_metadata.ingress_zone, TEST_LAN_ZONE_ID);
             assert_eq!(session_metadata.egress_zone, TEST_LAN_ZONE_ID);
@@ -13047,34 +13031,32 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
     };
     // The reverse-half case stores this single record's zones
     // direction-relatively, swapped from the LAN->WAN forward tuple.
-    let session_metadata = SessionMetadata {
-        ingress_zone: if reverse_half {
-            TEST_WAN_ZONE_ID
-        } else {
-            TEST_LAN_ZONE_ID
-        },
-        egress_zone: if reverse_half {
-            TEST_LAN_ZONE_ID
-        } else {
-            TEST_WAN_ZONE_ID
-        },
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 0,
-        fabric_ingress: false,
-        is_reverse: reverse_half,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    };
+    let session_metadata = SessionMetadata { forward_wire_alias_origin: false, ingress_zone: if reverse_half {
+        TEST_WAN_ZONE_ID
+    } else {
+        TEST_LAN_ZONE_ID
+    },
+    egress_zone: if reverse_half {
+        TEST_LAN_ZONE_ID
+    } else {
+        TEST_WAN_ZONE_ID
+    },
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 0,
+    fabric_ingress: false,
+    is_reverse: reverse_half,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None, };
     let installed = if reverse_half {
         sessions.install_with_protocol_with_origin(
             session_key,
@@ -13405,7 +13387,7 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_WAN_ZONE_ID,
             egress_zone: TEST_LAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -13461,7 +13443,7 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         },
         // Reverse-half zones are direction-relative; keep them swapped from
         // the forward WAN->LAN metadata so #10671 normalizes the quoted reply.
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -13778,7 +13760,7 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_WAN_ZONE_ID,
             egress_zone: TEST_LAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -13834,7 +13816,7 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         },
         // Reverse-half zones are direction-relative; keep them swapped from
         // the forward WAN->LAN metadata so #10671 normalizes the quoted reply.
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -15741,7 +15723,7 @@ fn n14628_install_snat_session_both_halves(
                 install_table_domain: 0,
                 install_table_check: 0,
             },
-            SessionMetadata {
+            SessionMetadata { forward_wire_alias_origin: false,
                 ingress_zone: TEST_LAN_ZONE_ID,
                 egress_zone: TEST_WAN_ZONE_ID,
                 ingress_zone_check: 0,
@@ -15787,7 +15769,7 @@ fn n14628_install_snat_session_both_halves(
                 install_table_domain: 0,
                 install_table_check: 0,
             },
-            SessionMetadata {
+            SessionMetadata { forward_wire_alias_origin: false,
                 ingress_zone: TEST_WAN_ZONE_ID,
                 egress_zone: TEST_LAN_ZONE_ID,
                 ingress_zone_check: 0,
@@ -15855,7 +15837,7 @@ fn n14628_install_snat_session_both_halves(
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_WAN_ZONE_ID,
             egress_zone: TEST_LAN_ZONE_ID,
             ingress_zone_check: 0,
@@ -16337,7 +16319,7 @@ fn generic_embedded_error_output_drop_counts_transit_15941() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        SessionMetadata {
+        SessionMetadata { forward_wire_alias_origin: false,
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
             ingress_zone_check: 0,

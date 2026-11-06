@@ -288,6 +288,12 @@ pub(crate) struct SessionMetadata {
     pub(crate) owner_rg_id: i32,
     pub(crate) fabric_ingress: bool,
     pub(crate) is_reverse: bool,
+    /// #18927: the originating forward row was the extra forward-wire alias
+    /// emitted for a fabric-redirect sync. This import-provenance bit is
+    /// propagated to the synthesized reverse so alias replies can return to
+    /// the peer; locally observed rows always leave it false. It is derived
+    /// enforcement state, not flow identity, and is excluded from PartialEq.
+    pub(crate) forward_wire_alias_origin: bool,
     /// For NAT64 sessions: stores original IPv6 addresses so reverse IPv4
     /// replies can be translated back.
     pub(crate) nat64_reverse: Option<Nat64ReverseInfo>,
@@ -393,8 +399,9 @@ pub(crate) struct SessionMetadata {
 // peer-synced entry before binding vs. a locally-installed one).
 // #10620: equality likewise ignores the zone vintage checks. They are derived
 // enforcement state (a pure function of the ambient zone map at stamp time),
-// not flow identity: a stale-vintage and a current-vintage copy of one row
-// are the same flow. Every other field participates, mirroring the previous
+// not flow identity: stale-vintage and current-vintage copies of one row
+// are the same flow. The imported alias-origin marker likewise controls
+// handling without changing session identity, so it is excluded too.
 // `#[derive(PartialEq, Eq)]`.
 impl PartialEq for SessionMetadata {
     fn eq(&self, other: &Self) -> bool {
@@ -449,6 +456,7 @@ impl SessionMetadata {
             owner_rg_id: self.owner_rg_id,
             fabric_ingress: self.fabric_ingress,
             is_reverse: self.is_reverse,
+            forward_wire_alias_origin: self.forward_wire_alias_origin,
             nat64_reverse: self.nat64_reverse,
             log_session_init: self.log_session_init,
             log_session_close: self.log_session_close,
