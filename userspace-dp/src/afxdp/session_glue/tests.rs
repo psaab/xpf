@@ -20382,10 +20382,10 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
     );
     // Walk the append-only encoder layout (`encode_session_record` in
     // `event_stream/codec/session_sync.rs`) from the start of the IPv4
-    // payload instead of reading a fixed distance from the tail. The
-    // #15176 NAT-scope append (c65a353e8b), #16217 packet-counter append
-    // (a936a6f802), and #17780 final presence-byte append (aab4483e1a)
-    // moved the close class further from the end.
+    // payload instead of reading a fixed distance from the tail. The first
+    // append after the class was #13965's 8-byte PPTP pair (7c60f3d04f);
+    // #15176 NAT scope (c65a353e8b), #16217 packet counters (a936a6f802),
+    // and #17780's presence byte (aab4483e1a) moved it further from the tail.
     const U8_BYTES: usize = 1;
     const U16_BYTES: usize = 2;
     const U32_BYTES: usize = 4;
