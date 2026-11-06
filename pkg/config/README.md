@@ -218,8 +218,9 @@ distinction).
   `ike gateway <address>` on the VPN). Fixture doctrine (#18873): a
   positive IPsec fixture authors a credential at the level its subject
   exercises — the IKE-policy key when the chain is the subject, a
-  VPN-level `pre-shared-key` otherwise — while negative cases stay
-  deliberately uncredentialed.
+  VPN-level `pre-shared-key` otherwise; negative tests of the missing
+  key itself stay uncredentialed, while other negative tests still
+  satisfy unrelated admission gates.
 
 - `ValueType` — `value_type.go`. Classifies a typed leaf's value
   (`ValueRate`, `ValueByteSizeOrPercent`, `ValueDate`, `ValueString`, ...)
