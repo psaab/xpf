@@ -4578,7 +4578,14 @@ fn dnat_plus_snat_ports_in_reverse_key() {
 
 #[test]
 fn icmp_port_handling_unchanged_with_dnat_ports() {
-    // ICMP ignores port rewriting even if NatDecision has port fields set
+    // #18830: production ICMP DNAT is address-only. #17088 unified the
+    // key transform on `rewrite_src_port.or(rewrite_dst_port)`, so a
+    // hand-built `rewrite_dst_port: Some(8080)` — which no DNAT path can
+    // mint for ICMP (destination.rs gates on `has_l4_ports`; static NAT
+    // gives ICMP only the whole-address bucket) — would corrupt the
+    // Query Identifier to 8080. Rebuild the fixture to the producible
+    // shape and retain the intent: DNAT rewrites the address while the
+    // identifier 0x1234 survives unchanged.
     let forward = SessionKey {
         addr_family: 2,
         protocol: PROTO_ICMP,
@@ -4591,10 +4598,11 @@ fn icmp_port_handling_unchanged_with_dnat_ports() {
     };
     let nat = NatDecision {
         rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
-        rewrite_dst_port: Some(8080),
+        rewrite_dst_port: None,
         ..NatDecision::default()
     };
-    // ICMP reverse: ports stay the same (ICMP has no port semantics)
+    // The reverse key swaps addresses while retaining the original ICMP
+    // Query Identifier: address-only DNAT has no mapped port to apply to it.
     let expected_reply = SessionKey {
         addr_family: 2,
         protocol: PROTO_ICMP,
