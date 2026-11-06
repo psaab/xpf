@@ -5751,7 +5751,12 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                 .get(&to_zone_id)
                                 .map(|s| s.as_str())
                                 .unwrap_or("");
-                            if miss_input_policer_gate_covers(final_resolution.disposition) {
+                            // #18820: the outer gate already evaluated and
+                            // charged its policer, so the LocalDelivery miss
+                            // gate must not meter this same packet again.
+                            if !tunnel_outer_filter_accepted
+                                && miss_input_policer_gate_covers(final_resolution.disposition)
+                            {
                                 let (verdict, policers) = meter_miss_local_input_policers(
                                     worker_ctx.forwarding,
                                     packet_frame,
