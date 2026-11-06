@@ -343,8 +343,11 @@ func TestActiveSnapshotPublishCoversEverySwap9905(t *testing.T) {
 	// be a conscious, reviewed act, not a silent drift.
 	// #16606: PublishRefreshedDNS is the 9th swap — a runtime-only DNS
 	// re-publication of the same operator tree, reviewed with this count.
-	if swaps != 9 {
-		t.Errorf("found %d compiled swaps, want exactly 9 (update the count + review when adding a promotion path)", swaps)
+	// #18859: PublishRefreshedDNSForGeneration is the 10th swap — the
+	// generation-guarded DNS clone publication from #17744 (e3f5ebba9c) —
+	// reviewed with this count.
+	if swaps != 10 {
+		t.Errorf("found %d compiled swaps, want exactly 10 (update the count + review when adding a promotion path)", swaps)
 	}
 }
 
