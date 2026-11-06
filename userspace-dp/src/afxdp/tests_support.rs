@@ -1114,6 +1114,31 @@ pub(super) fn txn_ha_state() -> BTreeMap<i32, HAGroupRuntime> {
     ha
 }
 
+/// #18826 (#17069): re-stamp the legacy `txn_ha_state` leases onto the
+/// second derived from a run's `now_ns`. Only groups forwarding-active at
+/// the legacy frozen second (`123`) are carried forward; inactive or
+/// deliberately-expired fixtures keep their original stamps so the
+/// HA-expiry gate still denies them.
+pub(super) fn restamped_ha_state(
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_ns: u64,
+) -> BTreeMap<i32, HAGroupRuntime> {
+    let secs = now_ns / 1_000_000_000;
+    ha_state
+        .iter()
+        .map(|(rg, group)| {
+            let mut group = *group;
+            // Only groups forwarding-active at the legacy frozen second are
+            // carried forward; inactive/deliberately-expired fixtures stay.
+            if group.is_forwarding_active(123) {
+                group.watchdog_timestamp = secs;
+                group.lease = HAGroupRuntime::active_lease_until(secs, secs);
+            }
+            (*rg, group)
+        })
+        .collect()
+}
+
 pub(super) fn build_txn_tcp_syn_frame_v4(
     src: Ipv4Addr,
     dst: Ipv4Addr,
@@ -1834,14 +1859,11 @@ pub(super) fn txn_run_descriptor_with_shared_nat(
     )
 }
 
-/// #10591: `now_ns`-parameterized descriptor driver. `now_secs` stays frozen
-/// at the historical `123` (matching `txn_ha_state`'s watchdog/lease stamps)
-/// while `now_ns` advances across ticks; production derives
-/// `loop_now_secs = loop_now_ns / 1e9` (`worker/loop_body/mod.rs:1182`).
-/// Benign for the window cells: asserted paths are HitAuthority verdicts and
-/// ns-idle (`last_seen_ns`), never HA-active/lease-expiry, RG-epoch, or
-/// screen-secs decisions. A future HA-gated cell must derive secs from ns
-/// and re-stamp the HA lease instead of reusing this freeze.
+/// #10591: `now_ns`-parameterized descriptor driver. HA lease timestamps are
+/// re-stamped from the same nanosecond clock used by the descriptor, preserving
+/// intentionally inactive or expired HA fixtures.
+/// Production derives both clocks from one monotonic reading
+/// (`worker/loop_body/mod.rs:715`).
 pub(super) fn txn_run_descriptor_at(
     binding: &mut BindingWorker,
     sessions: &mut SessionTable,
@@ -1857,7 +1879,7 @@ pub(super) fn txn_run_descriptor_at(
         binding,
         sessions,
         forwarding,
-        ha_state,
+        &restamped_ha_state(ha_state, now_ns),
         frame,
         meta,
         &local_tunnel_deliveries,
@@ -1868,7 +1890,7 @@ pub(super) fn txn_run_descriptor_at(
         None,
         None,
         now_ns,
-        123,
+        now_ns / 1_000_000_000,
         ValidationState {
             snapshot_installed: true,
             config_generation: 7,
@@ -2303,13 +2325,15 @@ pub(super) fn txn_run_descriptor_capturing_events(
     );
     let __pptp_control_7699 =
         std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let now_ns = crate::afxdp::neighbor::monotonic_nanos();
+    let restamped_ha_state = restamped_ha_state(ha_state, now_ns);
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
         binding_lookup: &binding_lookup,
         mirror_targets: &mirror_targets,
         forwarding,
-        ha_state,
+        ha_state: &restamped_ha_state,
         forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
         dynamic_neighbors: &dynamic_neighbors,
         neighbor_resolver: None,
@@ -2349,8 +2373,8 @@ pub(super) fn txn_run_descriptor_capturing_events(
             fib_generation: 9,
             neighbor_generation: 0,
         },
-        crate::afxdp::neighbor::monotonic_nanos(),
-        123,
+        now_ns,
+        now_ns / 1_000_000_000,
         0,
         0,
         -1,
