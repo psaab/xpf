@@ -12,7 +12,12 @@ mkdir -p "$WORK/bin"
 cat >"$WORK/bin/incus" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$*" >>"${INCUS_CALLS:?}"
+separator=
+for arg in "$@"; do
+	printf '%s%q' "$separator" "$arg" >>"${INCUS_CALLS:?}"
+	separator=' '
+done
+printf '\n' >>"$INCUS_CALLS"
 case "${1:-}" in
 	list)
 		case "${INCUS_CASE:?}" in
@@ -26,12 +31,18 @@ case "${1:-}" in
 				printf '%s\n' '[{"name":"other","type":"virtual-machine"}]'
 				;;
 			empty)
+				printf '%s\n' '[]'
+				;;
+			blank-output)
 				;;
 			garbage)
 				printf '%s\n' '{not json'
 				;;
 			non-array)
 				printf '%s\n' '{"name":"target","type":"virtual-machine"}'
+				;;
+			duplicate)
+				printf '%s\n' '[{"name":"target","type":"virtual-machine"},{"name":"target","type":"container"}]'
 				;;
 			list-error)
 				exit 42
@@ -97,9 +108,11 @@ run_accept vm loss:target 'loss: target'
 run_accept vm target target
 run_refuse container loss:target "target type is 'container', not virtual-machine"
 run_refuse missing loss:target "target type is '', not virtual-machine"
-run_refuse empty loss:target "cannot decode Incus instance type for loss:target"
+run_refuse empty loss:target "target type is '', not virtual-machine"
+run_refuse blank-output loss:target "cannot decode Incus instance type for loss:target"
 run_refuse garbage loss:target "cannot decode Incus instance type for loss:target"
 run_refuse non-array loss:target "cannot decode Incus instance type for loss:target"
+run_refuse duplicate loss:target "target type is '', not virtual-machine"
 run_refuse list-error loss:target "cannot inspect target loss:target"
 
 echo "ALL ${PASS} CASES PASS"
