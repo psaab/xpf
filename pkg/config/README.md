@@ -211,6 +211,16 @@ distinction).
   and that unit's `vlan-id`; renumber to unit 0 only where the unit number
   is scaffolding, never to erase a distinct-unit premise.
 
+  **IPsec PSK gate (#14139/#15989):** `validateIPsecPSKPresenceStrict`
+  rejects a VPN whose effective authentication is pre-shared-keys with
+  no effective secret, and the responder gate requires the key to be
+  scoped to a peer (a named `security ike gateway` or an inline
+  `ike gateway <address>` on the VPN). Fixture doctrine (#18873): a
+  positive IPsec fixture authors a credential at the level its subject
+  exercises — the IKE-policy key when the chain is the subject, a
+  VPN-level `pre-shared-key` otherwise — while negative cases stay
+  deliberately uncredentialed.
+
 - `ValueType` — `value_type.go`. Classifies a typed leaf's value
   (`ValueRate`, `ValueByteSizeOrPercent`, `ValueDate`, `ValueString`, ...)
   and supplies the `?`-completion placeholder via `Placeholder()`.
