@@ -208,15 +208,31 @@ func (t *helperLivenessTracker) resetWithGrace(gen uint64, now time.Time, inheri
 // which matches F2 for an intentional stop: the transit gate then leaves the
 // arm bit exactly as it is.
 func (t *helperLivenessTracker) retire() {
+	t.retireGeneration(false)
+}
+
+// retireAfterFailedCrashRetry ends a retry generation whose readiness wait
+// failed, while retaining an inherited unexpected-exit episode that has not
+// proved forwarding-ready. The next retry needs that verdict even though the
+// failed process's generation-local evidence is retired.
+func (t *helperLivenessTracker) retireAfterFailedCrashRetry() bool {
+	return t.retireGeneration(true)
+}
+
+func (t *helperLivenessTracker) retireGeneration(keepInherited bool) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	preserveInherited := keepInherited && t.inherited && !t.forwardingReadySeen
 	t.retired = true
 	t.lastAnswer = time.Time{} // no live generation: the answer age is undefined, not growing
 	t.silentSince, t.silentTrips = time.Time{}, 0
 	t.hbOldest, t.hbOldestIdx, t.frozenStreak = 0, -1, 0
-	t.suspected, t.inherited = false, false
-	t.graceUntil = time.Time{}
+	if !preserveInherited {
+		t.suspected, t.inherited = false, false
+		t.graceUntil = time.Time{}
+	}
 	t.healthySince, t.healthyTrips = time.Time{}, 0
+	return preserveInherited
 }
 
 func (t *helperLivenessTracker) generation() uint64 {

@@ -1046,13 +1046,27 @@ func (m *Manager) stopLocked() {
 			}
 		}
 	}
+	// Capture this before the generation bump: a live child that misses the
+	// readiness deadline is retired as a planned stop, but its inherited
+	// crash-retry verdict must survive for the next retry.
+	failedCrashRetryBringUp := m.restartAttemptInProgress &&
+		m.helperCrash.LastExitWasCrash && m.bringUpGen != 0 &&
+		m.bringUpGen == m.procGen
 	if !preRetirementCrash || !m.restartAttemptInProgress {
 		m.procGen++
 	}
 	// #18704 review: the liveness tracker's generation ends here too, so
 	// silence recorded against the stopped helper cannot accrue into a wedge
 	// verdict while a planned stop-to-respawn runs.
-	m.liveTrack.retire()
+	if failedCrashRetryBringUp {
+		if m.liveTrack.retireAfterFailedCrashRetry() {
+			// The episode is still unarmed. Re-latch its lock-free half as
+			// well, so the following generation inherits the same verdict.
+			m.helperDownUnexpected.Store(true)
+		}
+	} else {
+		m.liveTrack.retire()
+	}
 	// #18794: this retires the tracker's generation-local evidence, but the
 	// unexpected-exit flag is intentionally retained until an armed status is
 	// successfully applied with ctrl.Enabled=1. A spawned child that never

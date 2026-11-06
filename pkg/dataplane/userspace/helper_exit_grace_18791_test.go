@@ -1,13 +1,16 @@
 package userspace
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #18791: an unexpected helper exit raises election debt only if the
@@ -758,5 +761,112 @@ func TestTransitGateReadsGraceDebtWhileManagerMutexHeldFold18794(t *testing.T) {
 		m.mu.Unlock()
 		<-done
 		t.Fatal("HelperSupervisorState blocked behind the replacement's readiness-held m.mu past the grace deadline")
+	}
+}
+
+// TestCrashRetryReadyWaitTimeoutKeepsElectionDebt18869 exercises the actual
+// crash-retry bring-up timeout: a child remains alive but never publishes its
+// control socket, so ensureProcessLocked stops it after the five-second
+// readiness wait. The retry inherited the unexpected-exit verdict at spawn;
+// that debt must survive cleanup and remain until a healthy armed generation
+// completes the normal recovery hysteresis.
+func TestCrashRetryReadyWaitTimeoutKeepsElectionDebt18869(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "helper-not-ready")
+	script := "#!/usr/bin/python3\nimport time\ntime.sleep(300)\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.UserspaceConfig{
+		Binary:        bin,
+		ControlSocket: filepath.Join(dir, "control.sock"),
+		StateFile:     filepath.Join(dir, "state.json"),
+		EventSocket:   filepath.Join(dir, "events.sock"),
+	}
+	m := New()
+	oldDirUID := helperDirTrustUID
+	helperDirTrustUID = func(uid uint32) uint32 {
+		if uid == 65534 {
+			return 0 // host-root ancestors map to the overflow uid in testguard's user namespace
+		}
+		return uid
+	}
+	t.Cleanup(func() { helperDirTrustUID = oldDirUID })
+	m.mode = ModeUserspaceCompat
+	m.disableCtrlMapHook = &fakeCtrlMap{stored: userspaceCtrlValue{Enabled: 1}, haveStored: true}
+	m.restartTimerFn = func(time.Duration, func()) {}
+	// An earlier crash episode is already not-ready and has no grace; this
+	// retry must therefore inherit a raised verdict.
+	m.helperDownUnexpected.Store(true)
+	exit18791(m, time.Now())
+	m.mu.Lock()
+	m.procGen = 1
+	m.helperCrash = HelperCrashRecord{LastExitWasCrash: true, restartGen: 1}
+	m.cfg = cfg
+	m.restartAttemptInProgress = true
+	m.mu.Unlock()
+	// The hand-off must copy the flag before this hook clears it. This forces
+	// the tracker—not the parallel atomic helper-down signal—to carry the retry
+	// debt through its failed readiness wait.
+	handOffSeen := false
+	m.testAfterExitFlagRead = func() {
+		handOffSeen = true
+		m.helperDownUnexpected.Store(false)
+	}
+	m.mu.Lock()
+	err := m.ensureProcessLocked(cfg)
+	m.restartAttemptInProgress = false
+	m.mu.Unlock()
+	if err == nil {
+		t.Fatal("ensureProcessLocked succeeded although the crash retry never published a control socket")
+	}
+	if !strings.Contains(err.Error(), "did not become ready") {
+		t.Fatalf("ensureProcessLocked error = %q, want actual readiness timeout", err)
+	}
+	if !handOffSeen {
+		t.Fatal("ensureProcessLocked did not spawn a retry and hand off its inherited verdict")
+	}
+	if m.proc != nil {
+		t.Fatal("failed readiness wait left its child running")
+	}
+	if !m.HelperElectionNotReady() {
+		t.Fatal("ready-wait timeout retired the crash retry's inherited not-ready verdict")
+	}
+
+	// The next retry is only a live process, not proof of recovery. It must
+	// still inherit the preserved debt.
+	cmd := exec.Command("sleep", "300")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start next crash retry: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	m.mu.Lock()
+	m.proc = cmd
+	m.startHelperSupervisorLocked(cmd)
+	gen := m.procGen
+	m.mu.Unlock()
+	t.Cleanup(func() {
+		m.mu.Lock()
+		m.stopLocked()
+		m.mu.Unlock()
+	})
+	if !m.HelperElectionNotReady() {
+		t.Fatalf("next retry generation %d cleared election debt while merely running", gen)
+	}
+
+	readyAt := time.Now()
+	armed18791(m, gen, readyAt)
+	if !m.HelperElectionNotReady() {
+		t.Fatal("an armed generation cleared inherited debt before the healthy recovery hysteresis")
+	}
+	for range helperWedgeClearTrips {
+		m.liveTrack.noteAnswered(gen, readyAt.Add(helperWedgeClearAfter+time.Nanosecond))
+	}
+	if m.HelperElectionNotReady() {
+		t.Fatal("a healthy armed generation retained election debt after the recovery hysteresis")
 	}
 }
