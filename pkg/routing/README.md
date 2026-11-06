@@ -158,7 +158,15 @@ path already draws (see the WireGuard/tunnel removal notes below and
   check and REFUSES the foreign link — no delete, ownership released
   without error (#12062). When a new manager needs this release shape, it
   calls `releaseOwnedLink` with its own `isOurs`; it does not hand-write
-  the branch.
+  the branch. **Release error wording (#17020):** a tracked
+LinkDel failure reads `delete <kind> <name>: LinkDel failed:
+<cause>` and wraps the `errLinkDelFailed` sentinel, so callers
+match it with `errors.Is` rather than the text; a transient
+tracked lookup failure instead reads `lookup <kind> <name> for
+delete: <cause>`. The orphan sweep is the deliberate
+exception: its failures read `delete orphan xfrmi <name>:
+<cause>` with no sentinel segment, which is how the two delete
+paths stay distinguishable in whole-string assertions.
 
 **Identity re-assertion on every post-create readback (#5523 C179-104 +
 #6396).** `LinkAdd` and the `LinkByName` readback that follows it are two
@@ -1377,10 +1385,3 @@ Snapshot protocol **27** refuses a v26 helper that would still restore the old
 delegation.
 
 
-**Release error wording (#17020):** a tracked release failure reads
-`delete <kind> <name>: LinkDel failed: <cause>` and wraps the
-`errLinkDelFailed` sentinel, so callers match it with `errors.Is`
-rather than the text. The orphan sweep is the deliberate exception:
-its failures read `delete orphan xfrmi <name>: <cause>` with no
-sentinel segment, which is how the two delete paths stay
-distinguishable in whole-string assertions.
