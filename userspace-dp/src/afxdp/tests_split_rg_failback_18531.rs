@@ -2148,6 +2148,57 @@ fn canonical_import_supersedes_its_alias_18531() {
     }
 }
 
+
+/// Legacy twin of the coordinator supersede rule: an unmarked alias
+/// (older peer) classifies by shape for booking and supersession, so
+/// both arrival orders behave exactly as the marked pair does and no
+/// reservation is refused (#18927 fold round 2).
+#[test]
+fn canonical_import_supersedes_its_unmarked_alias_18927() {
+    for family in [Family::V4, Family::V6] {
+        for alias_first in [true, false] {
+            let forwarding = rg_taking_node_forwarding();
+            let mut coordinator = bare_coordinator(&forwarding);
+            let _worker_commands = register_worker(&mut coordinator);
+            let canonical = exported_forward(&forwarding, family);
+            let mut alias = alias_of(&canonical);
+            alias.metadata.forward_wire_alias_origin = false;
+            let order = if alias_first {
+                [alias.clone(), canonical.clone()]
+            } else {
+                [canonical.clone(), alias.clone()]
+            };
+            let outcomes: Vec<_> = order
+                .into_iter()
+                .map(|entry| coordinator.upsert_synced_session(entry))
+                .collect();
+            let expected = if alias_first {
+                [
+                    crate::afxdp::SyncedImportOutcome::Applied,
+                    crate::afxdp::SyncedImportOutcome::Applied,
+                ]
+            } else {
+                [
+                    crate::afxdp::SyncedImportOutcome::Applied,
+                    crate::afxdp::SyncedImportOutcome::RejectedSupersededAlias,
+                ]
+            };
+            assert_eq!(
+                outcomes, expected,
+                "unmarked import outcomes ({family:?} alias_first={alias_first})"
+            );
+            assert_eq!(
+                coordinator
+                    .sessions
+                    .import_reserve_refused
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "no reservation refused for the unmarked pair ({family:?} alias_first={alias_first})"
+            );
+        }
+    }
+}
+
 /// Regression (loss diag8): in the split state (RG1 on the peer, RG2 here)
 /// the peer holds the canonical row, un-NATs each WAN reply and hands it over
 /// the fabric. This node's reverse-synthesis arm installs a reverse row keyed
