@@ -17,6 +17,8 @@ package — see the twins note under Gotchas below.
 - Per-injection setters: `SetForwardingSampler`, `SetRPMResultsFn`,
   `SetFeedsFn`, `SetFeedsAckFn`, `SetLLDPNeighborsFn`, `SetVRRPManager`,
   `SetApplyConfigFn`, `SetCommitFns`, …. All on `*CLI`.
+- Daemon/CLI-assembled static routes render an omitted Junos preference as
+  explicit FRR distance 5 before any VRF/table suffix (#17699/#9942/#12514).
 
 ## Request / diagnostic command files (#4653)
 

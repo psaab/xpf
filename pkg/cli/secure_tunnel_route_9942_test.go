@@ -35,9 +35,9 @@ func TestApplyToDataplaneSecureTunnelRoute9942(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"ip route 10.99.0.0/16 st0.0\n",
-		"ip route 10.100.0.0/16 st1\n",
-		"ip route 10.101.0.0/16 wan0\n",
+		"ip route 10.99.0.0/16 st0.0 5\n",
+		"ip route 10.100.0.0/16 st1 5\n",
+		"ip route 10.101.0.0/16 wan0 5\n",
 	} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("standalone CLI did not install %q in frr.conf:\n%s", want, data)

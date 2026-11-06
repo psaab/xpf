@@ -4924,6 +4924,8 @@ never lock an operator out of a remote box it manages.
   `handleClusterEvent` ownership edges and the `tr.Changed` arms of
   `watchVRRPEvents` — the event paths consume the rg-state edge, so
   the reconcile safety net alone would see `Changed=false` and skip it.
+  Daemon-assembled static routes render an omitted Junos preference as
+  explicit FRR distance 5 before any VRF/table suffix (#17699/#9942/#12514).
 - `daemon_route_listener.go` filters kernel route events through
   `routing.LearnedRouteTableIDs` and marks a `pkg/coalesce` loop rather than
   publishing per event; subscription gaps and errors mark it as well. Coalesced

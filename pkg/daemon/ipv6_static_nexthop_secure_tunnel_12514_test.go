@@ -53,7 +53,7 @@ func TestIPv6StaticNextHopSecureTunnelUnitRendersAuthoredNetdev12514(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "ipv6 route 2001:db8:99::/64 2001:db8:12::2 st0.0 vrf vrf-blue\n"
+	want := "ipv6 route 2001:db8:99::/64 2001:db8:12::2 st0.0 5 vrf vrf-blue\n"
 	if !strings.Contains(string(data), want) {
 		t.Fatalf("rendered FRR config missing authored-device route %q:\n%s", want, data)
 	}
