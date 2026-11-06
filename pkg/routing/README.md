@@ -1376,3 +1376,11 @@ the same sheds with address family via `LearnedRouteCapHitsByFamilyProtocol`.
 Snapshot protocol **27** refuses a v26 helper that would still restore the old
 delegation.
 
+
+**Release error wording (#17020):** a tracked release failure reads
+`delete <kind> <name>: LinkDel failed: <cause>` and wraps the
+`errLinkDelFailed` sentinel, so callers match it with `errors.Is`
+rather than the text. The orphan sweep is the deliberate exception:
+its failures read `delete orphan xfrmi <name>: <cause>` with no
+sentinel segment, which is how the two delete paths stay
+distinguishable in whole-string assertions.

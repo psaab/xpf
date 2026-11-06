@@ -935,7 +935,7 @@ func TestRetainedLiveXfrmiLeavesTheAdjudicatedSets(t *testing.T) {
 		// two LinkDel-failure rows would prove the same thing.
 		wantErr string
 	}{
-		{name: "LinkDel fails", failLinkDel: true, wantApplyErr: true, wantErr: "delete xfrmi st10: device busy"},
+		{name: "LinkDel fails", failLinkDel: true, wantApplyErr: true, wantErr: "delete xfrmi st10: LinkDel failed: device busy"},
 		{name: "untracked after daemon restart, orphan reap LinkDel fails", restart: true, failLinkDel: true, wantApplyErr: true, wantErr: "delete orphan xfrmi st10: device busy"},
 		{name: "untracked after daemon restart, orphan reap LinkList fails", restart: true, failLinkList: true, wantApplyErr: false},
 	} {
