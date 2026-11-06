@@ -41,6 +41,14 @@ deliberately not used around the deleted-file path so the manifest
 canary's code-span scanner does not treat it as an existing tracked
 file.)
 
+
+### Shared BPF Headers (deleted in #17146)
+
+The legacy helper, NAT, and trace headers were removed along with the legacy
+dataplane source in #17146. The deleted paths were bpf/headers/xpf_helpers.h,
+bpf/headers/xpf_nat.h, and bpf/headers/xpf_trace.h; these are historical
+narrative references, not retained files or manifest path entries.
+
 ### Legacy XDP Source (deleted in #1476)
 
 Nine ingress XDP programs plus their README, removed in lockstep with the
@@ -123,25 +131,22 @@ These paths are not part of the #1476 legacy source deletion:
 - `pkg/dataplane/runtime/`: runtime-facing contracts that must stay independent
   from BPF artifacts.
 
-Retain `bpf/headers/*.h` until each shared constant, struct, and helper
-dependency is either moved to a userspace-owned schema or explicitly retired:
+Retain the remaining shared headers until each shared constant, struct, and
+helper dependency is either moved to a userspace-owned schema or explicitly
+retired:
 
 - `bpf/headers/xpf_common.h`
 - `bpf/headers/xpf_conntrack.h`
-- `bpf/headers/xpf_helpers.h`
 - `bpf/headers/xpf_maps.h`
-- `bpf/headers/xpf_nat.h`
-- `bpf/headers/xpf_trace.h`
 - `bpf/headers/README.md`
 
-The headers are not all dead with the XDP/TC source. The current tree still
-uses or cites them for `MAX_INTERFACES`, Go constants, userspace shim build
-inputs, and userspace-dp struct parity tests (~~DPDK shared-memory parity~~ —
-DPDK retired #1525). A future PR may move these definitions, but that is a
-separate reviewed boundary.
-`xpf_helpers.h` and `xpf_trace.h` have weaker current non-legacy consumers than
-the struct/constant headers; keep them conservatively until the deletion PR can
-prove they are orphaned after the legacy source is removed.
+The remaining headers are not all dead with the XDP/TC source. The current tree
+still uses or cites the common, conntrack, and maps headers for `MAX_INTERFACES`,
+Go constants, userspace shim build inputs, and userspace-dp struct parity tests
+(~~DPDK shared-memory parity~~ — DPDK retired #1525). A future PR may move
+these definitions, but that is a separate reviewed boundary. The helper, NAT,
+and trace headers were deleted in #17146 and must not be reintroduced to this
+retain list.
 
 ## Proof Required Before Deletion
 
