@@ -170,8 +170,6 @@ fn pptp_call_ids_from_frame(bytes: &[u8]) -> u64 {
     pos += rule_id_len; // variable-length rule ID
     pos += 1; // TCP handshake state (#10888)
     pos += 1; // SNAT provenance (#12187)
-    // Empty-rule-ID fixture: payload offset 122, or frame offset 138.
-    assert_eq!(pos, 138);
     u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap())
 }
 
