@@ -135,24 +135,15 @@ func noteDNATOffShadowPotential(w io.Writer, reason string) {
 	fmt.Fprintf(w, "    Warning:                 POTENTIAL SHADOW — %s\n", reason)
 }
 
-// noteLenientTerminalAction annotates a rule that the TOLERANT config path
-// admitted despite the strict terminal-action cardinality gate rejecting it
-// (#7640).
+// noteLenientTerminalAction annotates a rule admitted by the tolerant config
+// path despite strict NAT-terminal validation rejecting its reason (#7640/#17253).
 //
 // It reads config.Config.LenientNATTerminalActionRules rather than re-deriving
-// the predicate, so the annotation, the xpf_nat_rules_lenient_terminal_action
-// gauge and the compile-time warning can never disagree about which rules are
-// affected.
+// the finding, so the annotation, the xpf_nat_rules_lenient_terminal_action
+// gauge and the compile-time warning agree about which rules are affected.
 //
-// This is the surface that was missing. The warning reaches an operator through
-// the commit RESPONSE and an apply-time log line — and a tolerant LOAD (boot,
-// peer-sync, rollback) has neither. Those are exactly the paths on which such a
-// rule survives, so an operator looking at the rule was the one person
-// guaranteed not to be told.
-//
-// The text names the consequence per arity rather than saying "invalid",
-// because the two arities fail differently and the difference is what an
-// operator has to act on.
+// The text names the consequence for the stored reason. Unknown reasons are
+// deliberately not interpreted as actionless: they provide no safe annotation.
 func noteLenientTerminalAction(w io.Writer, cfg *config.Config, kind, ruleSet, rule string) {
 	if cfg == nil {
 		return
@@ -162,8 +153,8 @@ func noteLenientTerminalAction(w io.Writer, cfg *config.Config, kind, ruleSet, r
 			continue
 		}
 		var consequence string
-		switch {
-		case r.Actions == 0:
+		switch r.Reason {
+		case config.LenientNATTerminalActionReasonActionless:
 			// #6823: ONE arm for both kinds, because the decision is that the
 			// CONSEQUENCE is kind-independent — an actionless rule is
 			// NON-TERMINAL either way. Source NAT reaches that by publishing
@@ -179,10 +170,16 @@ func noteLenientTerminalAction(w io.Writer, cfg *config.Config, kind, ruleSet, r
 			consequence = "it installs no translation and does NOT stop rule " +
 				"evaluation, so matching traffic falls through to any later " +
 				"broader rule"
-		default:
+		case config.LenientNATTerminalActionReasonContradictory:
 			consequence = fmt.Sprintf("it carries %d mutually-exclusive actions; "+
 				"all but one are discarded by a fixed precedence, not by "+
 				"configuration order", r.Actions)
+		case config.LenientNATTerminalActionReasonDuplicatePools:
+			consequence = fmt.Sprintf("the `then` block names %d different pools; "+
+				"the FIRST pool takes effect and the rest are silently discarded",
+				r.Actions)
+		default:
+			continue
 		}
 		fmt.Fprintf(w, "    Status:                  ADMITTED BY TOLERANT LOAD — "+
 			"a commit would REJECT this rule: %s\n", consequence)

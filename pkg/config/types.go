@@ -675,8 +675,9 @@ type Config struct {
 
 	// LenientNATTerminalActionRules records every NAT rule the TOLERANT path
 	// admitted despite validateNATTerminalActionCardinalityStrict rejecting it
-	// (#7640). It is populated ONLY on that path — the strict path returns the
-	// error instead, so a non-empty slice means exactly "this config carries a
+	// (#7640/#17253), including rules with distinct pools collapsed within one
+	// `then` block. It is populated ONLY on that path — the strict path returns
+	// the error instead, so a non-empty slice means exactly "this config carries a
 	// rule a commit would have refused".
 	//
 	// It exists because the warning alone has nowhere to go on the paths where
@@ -743,19 +744,30 @@ type Config struct {
 	UnimplementedAAALeaves []string `json:"-"`
 }
 
+// LenientNATTerminalActionReason identifies the defect that caused one NAT rule
+// to be admitted by the tolerant path despite strict validation rejecting it.
+type LenientNATTerminalActionReason string
+
+const (
+	LenientNATTerminalActionReasonActionless     LenientNATTerminalActionReason = "actionless"
+	LenientNATTerminalActionReasonContradictory  LenientNATTerminalActionReason = "contradictory"
+	LenientNATTerminalActionReasonDuplicatePools LenientNATTerminalActionReason = "duplicate-pools"
+)
+
 // LenientNATTerminalActionRule identifies one NAT rule admitted by the tolerant
-// path despite carrying the wrong number of terminal actions (#7640).
+// path despite strict NAT-terminal validation rejecting it (#7640/#17253).
 type LenientNATTerminalActionRule struct {
+	// Reason describes why strict validation rejects this rule.
+	Reason LenientNATTerminalActionReason
 	// Kind is "source" or "destination".
 	Kind string
 	// RuleSet and Rule are the authored names, so an operator can go straight
 	// to the offending stanza.
 	RuleSet string
 	Rule    string
-	// Actions is the terminal-action count the gate objected to: 0 (actionless
-	// — the rule installs no translation and, for source NAT, does not stop
-	// rule evaluation) or >= 2 (contradictory — all but one action is
-	// discarded by a fixed precedence the operator did not write).
+	// Actions is the count associated with Reason: zero for actionless rules,
+	// the contradictory terminal-action count for contradictory rules, or the
+	// number of distinct pools named in one `then` block for duplicate pools.
 	Actions int
 }
 

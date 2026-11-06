@@ -67,8 +67,9 @@ func TestLenientPathRecordsTheAdmittedRule7640(t *testing.T) {
 			cfg.LenientNATTerminalActionRules)
 	}
 	got := cfg.LenientNATTerminalActionRules[0]
-	if got.Kind != "source" || got.RuleSet != "rs1" || got.Rule != "actionless" || got.Actions != 0 {
-		t.Fatalf("recorded rule = %+v, want {source rs1 actionless 0} — the "+
+	if got.Reason != LenientNATTerminalActionReasonActionless ||
+		got.Kind != "source" || got.RuleSet != "rs1" || got.Rule != "actionless" || got.Actions != 0 {
+		t.Fatalf("recorded rule = %+v, want actionless {source rs1 actionless 0} — the "+
 			"identity must be enough to find the stanza", got)
 	}
 	if s := got.String(); !strings.Contains(s, "rs1") || !strings.Contains(s, "actionless") {
@@ -111,47 +112,85 @@ func TestHealthyConfigRecordsNothing7640(t *testing.T) {
 	}
 }
 
-// TestLenientNATOffendersMatchTheGate_7640 binds the AGREEMENT between the
-// enumerator and the gate, which is the property that actually matters.
+// TestLenientNATOffendersMatchTheGate_7640 binds the strict error, tolerant
+// record, and enumerator projection on real compiled configs. A hand-built
+// NATRule cannot carry thenAuthored, so such a fixture cannot exercise #7013's
+// duplicate-pool finding.
 //
-// They are separate functions on purpose — the gate reports the FIRST offender
-// and stops (one deterministic, actionable commit error), while the record needs
-// ALL of them. Separate walks are exactly how a count and a rejection drift
-// apart, so this asserts they cannot: for every shape, the gate rejects iff the
-// enumerator finds something.
-//
-// FAIL-ON-REVERT: change either side's predicate (e.g. make the enumerator
-// count `n == 0` only) and a row here reds.
+// FAIL-ON-REVERT: dropping duplicate-pool findings from the tolerant projection
+// leaves the strict gate red but makes the compiled duplicate-pool row vanish
+// from LenientNATTerminalActionRules.
 func TestLenientNATOffendersMatchTheGate_7640(t *testing.T) {
+	duplicatePools := `security {
+  zones { security-zone untrust; }
+  nat { destination {
+    pool PD { address 10.0.0.5; }
+    pool PD2 { address 10.0.0.6; }
+    rule-set RD { from zone untrust;
+      rule R1 {
+        match { destination-address 203.0.113.10/32; }
+        then { destination-nat { pool PD; pool PD2; } }
+      }
+    }
+  } }
+}`
 	for _, tc := range []struct {
-		name     string
-		then     NATThen
-		offender bool
+		name    string
+		text    string
+		reason  LenientNATTerminalActionReason
+		actions int
 	}{
-		{"actionless", NATThen{}, true},
-		{"interface-only", NATThen{Interface: true}, false},
-		{"off-only", NATThen{Off: true}, false},
-		{"pool-only", NATThen{PoolName: "p"}, false},
-		{"interface+pool", NATThen{Interface: true, PoolName: "p"}, true},
-		{"off+interface", NATThen{Off: true, Interface: true}, true},
-		{"all-three", NATThen{Off: true, Interface: true, PoolName: "p"}, true},
+		{"actionless", snat7033(""), LenientNATTerminalActionReasonActionless, 0},
+		{"interface-only", snat7033("then { source-nat interface; }"), "", 0},
+		{"resolved-contradiction", snat7033("then { source-nat { interface; pool P; } }"), LenientNATTerminalActionReasonContradictory, 2},
+		{"packed-contradiction", snat7033("then { source-nat pool P off; }"), LenientNATTerminalActionReasonContradictory, 2},
+		{"duplicate-pools", duplicatePools, LenientNATTerminalActionReasonDuplicatePools, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := &Config{}
-			cfg.Security.NAT.Source = []*NATRuleSet{{
-				Name:  "rs1",
-				Rules: []*NATRule{{Name: "r", Then: tc.then}},
-			}}
-			gateRejects := validateNATTerminalActionCardinalityStrict(cfg) != nil
-			found := len(natTerminalActionCardinalityOffenders(cfg)) > 0
-			if gateRejects != tc.offender {
-				t.Fatalf("gate rejects = %v, want %v", gateRejects, tc.offender)
+			tree, parseErr := NewParser(tc.text).Parse()
+			if len(parseErr) != 0 {
+				t.Fatalf("fixture did not parse: %v", parseErr)
 			}
-			if found != gateRejects {
-				t.Fatalf("the enumerator and the gate DISAGREE (enumerator found=%v, "+
-					"gate rejects=%v). They must share one predicate, or the gauge "+
-					"counts rules a commit would accept, or misses ones it would "+
-					"refuse", found, gateRejects)
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile failed: %v", err)
+			}
+
+			var cardinalityWarnings int
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "NAT terminal-action cardinality") {
+					cardinalityWarnings++
+				}
+			}
+			gateErr := validateNATTerminalActionCardinalityStrict(cfg)
+			wantOffender := tc.reason != ""
+			if (gateErr != nil) != wantOffender {
+				t.Fatalf("strict gate rejects = %v, want %v (err=%v)", gateErr != nil, wantOffender, gateErr)
+			}
+			wantWarnings := 0
+			if wantOffender {
+				wantWarnings = 1
+			}
+			if cardinalityWarnings != wantWarnings {
+				t.Fatalf("cardinality warnings = %d, want %d: %v", cardinalityWarnings, wantWarnings, cfg.Warnings)
+			}
+
+			enumerated := natTerminalActionCardinalityOffenders(cfg)
+			if len(enumerated) != wantWarnings {
+				t.Fatalf("enumerator found %d records, want %d: %v", len(enumerated), wantWarnings, enumerated)
+			}
+			if len(cfg.LenientNATTerminalActionRules) != wantWarnings {
+				t.Fatalf("compiled LenientNATTerminalActionRules = %v, want %d records",
+					cfg.LenientNATTerminalActionRules, wantWarnings)
+			}
+			if wantOffender {
+				got := cfg.LenientNATTerminalActionRules[0]
+				if got.Reason != tc.reason || got.Actions != tc.actions {
+					t.Fatalf("compiled finding = %+v, want reason %q and count %d", got, tc.reason, tc.actions)
+				}
+				if enumerated[0] != got {
+					t.Fatalf("compiled record %+v differs from enumerator projection %+v", got, enumerated[0])
+				}
 			}
 		})
 	}

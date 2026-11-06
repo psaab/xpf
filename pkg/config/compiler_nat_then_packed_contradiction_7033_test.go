@@ -346,15 +346,10 @@ func TestSingleActionsStillCommit_7033(t *testing.T) {
 	}
 }
 
-// TestLenientNATOffendersMatchThePackedGate_7033 extends #7640's agreement to
-// this class.
-//
-// #7640 binds the gate and the gauge to one predicate, but its rows build
-// `NATThen` structs directly, so the authored record is empty and no packed row
-// can reach it. Adding a rejection reason the gauge cannot see would leave an
-// operator's annotation reporting a healthy node for a config a commit refuses —
-// which is the exact failure #7640 exists to prevent, reintroduced one class
-// over.
+// TestLenientNATOffendersMatchThePackedGate_7033 binds the packed-contradiction
+// finding on a compiled lenient config. This is the class whose resolved field
+// count is one, so the gate and tolerant record must retain the same authored
+// mode finding from the shared walk.
 func TestLenientNATOffendersMatchThePackedGate_7033(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -388,8 +383,8 @@ func TestLenientNATOffendersMatchThePackedGate_7033(t *testing.T) {
 			}
 			if found != gateRejects {
 				t.Fatalf("the enumerator and the gate DISAGREE (enumerator found=%v, "+
-					"gate rejects=%v) for a PACKED contradiction. They must share one "+
-					"predicate, or the gauge reports a healthy node for a config a "+
+					"gate rejects=%v) for a PACKED contradiction. Both must project the "+
+					"same finding, or the gauge reports a healthy node for a config a "+
 					"commit refuses", found, gateRejects)
 			}
 		})

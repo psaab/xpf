@@ -83,7 +83,7 @@ func TestPoisonedDestRuleIsAnnotatedNotInstalled_9874(t *testing.T) {
 func TestPoisonedSourceRuleSubsumesTerminalActionNote_9874(t *testing.T) {
 	cfg := poisonedSourceCfg9874()
 	cfg.LenientNATTerminalActionRules = []config.LenientNATTerminalActionRule{
-		{Kind: "source", RuleSet: "rs1", Rule: "poisoned", Actions: 0},
+		{Reason: config.LenientNATTerminalActionReasonActionless, Kind: "source", RuleSet: "rs1", Rule: "poisoned", Actions: 0},
 	}
 	var b strings.Builder
 	RenderSourceRuleDetail(context.Background(), &b, cfg, nil, nil)

@@ -38,7 +38,7 @@ func actionlessDestCfg6823() *config.Config {
 		}},
 	}
 	cfg.LenientNATTerminalActionRules = []config.LenientNATTerminalActionRule{
-		{Kind: "destination", RuleSet: "rd1", Rule: "actionless", Actions: 0},
+		{Reason: config.LenientNATTerminalActionReasonActionless, Kind: "destination", RuleSet: "rd1", Rule: "actionless", Actions: 0},
 	}
 	return cfg
 }

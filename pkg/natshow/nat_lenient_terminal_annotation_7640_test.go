@@ -24,7 +24,7 @@ func actionlessSourceCfg7640() *config.Config {
 		Rules:    []*config.NATRule{{Name: "actionless"}}, // no terminal action
 	}}
 	cfg.LenientNATTerminalActionRules = []config.LenientNATTerminalActionRule{
-		{Kind: "source", RuleSet: "rs1", Rule: "actionless", Actions: 0},
+		{Reason: config.LenientNATTerminalActionReasonActionless, Kind: "source", RuleSet: "rs1", Rule: "actionless", Actions: 0},
 	}
 	return cfg
 }
@@ -125,5 +125,33 @@ func TestAnnotationIsScopedToTheNamedRule7640(t *testing.T) {
 	if !(iActionless < iNote && iNote < iHealthy) {
 		t.Fatalf("the annotation is not attached to the actionless rule "+
 			"(actionless@%d note@%d healthy@%d):\n%s", iActionless, iNote, iHealthy, got)
+	}
+}
+
+func TestDuplicatePoolRuleIsAnnotated17253(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.NAT.Source = []*config.NATRuleSet{{
+		Name:     "rs1",
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Rules:    []*config.NATRule{{Name: "duplicate-pools", Then: config.NATThen{PoolName: "P"}}},
+	}}
+	cfg.LenientNATTerminalActionRules = []config.LenientNATTerminalActionRule{
+		{
+			Reason: config.LenientNATTerminalActionReasonDuplicatePools,
+			Kind:   "source", RuleSet: "rs1", Rule: "duplicate-pools", Actions: 2,
+		},
+	}
+
+	var b strings.Builder
+	RenderSourceRuleDetail(context.Background(), &b, cfg, nil, nil)
+	got := b.String()
+	if !strings.Contains(got, "ADMITTED BY TOLERANT LOAD") ||
+		!strings.Contains(got, "2 different pools") ||
+		!strings.Contains(got, "silently discarded") {
+		t.Fatalf("duplicate-pool finding lacks its specific consequence:\n%s", got)
+	}
+	if strings.Contains(got, "mutually-exclusive actions") {
+		t.Fatalf("duplicate-pool finding was rendered as an action contradiction:\n%s", got)
 	}
 }

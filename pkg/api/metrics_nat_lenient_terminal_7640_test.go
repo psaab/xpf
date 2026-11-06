@@ -1,6 +1,9 @@
 package api
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // metrics_nat_lenient_terminal_7640_test.go — #7640.
 //
@@ -70,5 +73,15 @@ func TestNATLenientTerminalActionGaugeAbsentWhenUnwired7640(t *testing.T) {
 		t.Fatal("xpf_nat_rules_lenient_terminal_action was published with no hook " +
 			"wired — that reports a confident 'nothing admitted' from a process " +
 			"that never read the active config")
+	}
+}
+
+func TestNATLenientTerminalActionHelpNamesDuplicatePools17253(t *testing.T) {
+	c := newCollector(&Server{})
+	got := c.natRulesLenientTerminalAction.String()
+	for _, want := range []string{"DUPLICATE-POOL", "distinct pools", "all but the first"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("xpf_nat_rules_lenient_terminal_action help is missing %q: %s", want, got)
+		}
 	}
 }

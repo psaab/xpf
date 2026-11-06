@@ -38,15 +38,13 @@ import "strings"
 // applies to the n == 1 class ONLY — the configs that count cannot see.
 //
 // TWO THINGS ENFORCE THAT, AND EITHER ALONE WOULD DO IT, which is worth stating
-// because it means a mutation of one is invisible: the call site sits after the
-// count's switch, whose n == 0 and n >= 2 arms both return, AND
-// natThenPackedContradictionModes refuses any rule whose resolved count is not
-// exactly one. The redundancy is deliberate rather than accidental — the
-// predicate is also called by natTerminalActionCardinalityOffenders, which has
-// no such switch around it, so the guard has to live in the predicate for it to
-// be correct standalone. Proving the property is guarded therefore takes a
-// COMPOUND mutation (move the call AND drop the guard); a single-site mutation
-// is masked by the other site, which is what redundancy means, not a gap.
+// because it means a mutation of one is invisible: natTerminalActionFindings
+// reaches this predicate after the resolved-action count's n == 0 and n >= 2
+// cases have been classified, AND natThenPackedContradictionModes itself refuses
+// any rule whose resolved count is not exactly one. The redundancy is deliberate:
+// the shared walk's ordering and this predicate's guard independently preserve
+// the class boundary. A single-site mutation is masked by the other, which is
+// what redundancy means, not a gap.
 //
 // WHAT STAYS ACCEPTED, each pinned by a test:
 //
@@ -64,20 +62,17 @@ import "strings"
 // resolved to exactly one action — that is, precisely the contradiction the
 // resolved-field count cannot see. It returns nil in every other case.
 //
-// ONE PREDICATE, TWO CALLERS. The strict gate rejects on it and
-// natTerminalActionCardinalityOffenders enumerates on it, for the same reason
-// #7640 gave for the field count: a gauge that counted rules a commit would
-// accept, or missed ones it would refuse, is worse than no gauge.
-// TestLenientNATOffendersMatchThePackedGate_7033 binds the agreement for this
-// class rather than trusting it.
+// This predicate classifies packed contradictions inside the shared
+// natTerminalActionFindings walk. The strict gate and tolerant enumerator are
+// projections of those findings, so both observe the same predicate result.
+// TestLenientNATOffendersMatchThePackedGate_7033 binds that agreement.
 func natThenPackedContradictionModes(rule *NATRule) []string {
 	if rule == nil {
 		return nil
 	}
-	// Only the n == 1 class. n == 0 and n >= 2 belong to the resolved-field
-	// count, which reports them with its own text. This guard is what makes the
-	// predicate correct for natTerminalActionCardinalityOffenders too, which
-	// calls it without the count's switch around it.
+	// Only n == 1 reaches this predicate; n == 0 and n >= 2 are classified
+	// first, retaining their established diagnostics. The shared findings walk
+	// projects this result to both strict rejection and tolerant visibility.
 	if natThenTerminalActionCount(rule.Then) != 1 {
 		return nil
 	}
