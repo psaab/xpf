@@ -84,9 +84,9 @@ func natThenPackedContradictionModes(rule *NATRule) []string {
 }
 
 // natPackedContradictionDetail renders the operator-facing explanation for a
-// packed contradiction: which mode takes effect, which are discarded, and — when
-// `off` is among the casualties — that the published behaviour is the INVERSE of
-// what was authored.
+// packed contradiction: the first authored distinct mode takes effect, later
+// modes are discarded, and — when `off` is among the casualties — the published
+// behaviour is the INVERSE of what was authored.
 func natPackedContradictionDetail(modes []string) string {
 	survivor := modes[0]
 	dropped := modes[1:]

@@ -142,8 +142,8 @@ func TestLenientNATOffendersMatchTheGate_7640(t *testing.T) {
 	}{
 		{"actionless", snat7033(""), LenientNATTerminalActionReasonActionless, 0},
 		{"interface-only", snat7033("then { source-nat interface; }"), "", 0},
-		{"resolved-contradiction", snat7033("then { source-nat { interface; pool P; } }"), LenientNATTerminalActionReasonContradictory, 2},
-		{"packed-contradiction", snat7033("then { source-nat pool P off; }"), LenientNATTerminalActionReasonContradictory, 2},
+		{"resolved-multi-action", snat7033("then { source-nat { interface; pool P; } }"), LenientNATTerminalActionReasonMultiAction, 2},
+		{"packed-contradiction", snat7033("then { source-nat pool P off; }"), LenientNATTerminalActionReasonPackedContradiction, 2},
 		{"duplicate-pools", duplicatePools, LenientNATTerminalActionReasonDuplicatePools, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -190,6 +190,13 @@ func TestLenientNATOffendersMatchTheGate_7640(t *testing.T) {
 				}
 				if enumerated[0] != got {
 					t.Fatalf("compiled record %+v differs from enumerator projection %+v", got, enumerated[0])
+				}
+				if got.Reason == LenientNATTerminalActionReasonPackedContradiction {
+					resolvedActions := natThenTerminalActionCount(cfg.Security.NAT.Source[0].Rules[0].Then)
+					if got.Actions != 2 || resolvedActions != 1 {
+						t.Fatalf("packed record has %d authored modes but resolves to %d actions; want 2 and 1",
+							got.Actions, resolvedActions)
+					}
 				}
 			}
 		})

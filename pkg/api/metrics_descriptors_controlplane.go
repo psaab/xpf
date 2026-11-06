@@ -69,10 +69,15 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"this node is running a rule a commit would refuse: an ACTIONLESS "+
 			"rule installs no translation and (source NAT) does not stop rule "+
 			"evaluation, so matching traffic falls through to any later broader "+
-			"rule; a CONTRADICTORY rule has all but one action discarded by a "+
-			"fixed precedence the operator did not write; or a DUPLICATE-POOL "+
-			"rule names multiple distinct pools in one `then` block, where all "+
-			"but the first are silently discarded. The warning that reports "+
+			"rule; a MULTI-ACTION rule has all but one action discarded by a fixed "+
+			"precedence rather than configuration order; a PACKED CONTRADICTION "+
+			"puts mutually-exclusive modes on one node, where the first authored "+
+			"mode takes effect and the remaining modes are discarded, so order "+
+			"determines the applied action; or a DUPLICATE-POOL rule names multiple "+
+			"distinct pools in one `then` block, whose names collapse during "+
+			"lowering and whose surviving pool depends on the compiled `then` "+
+			"shape. If that compiled rule also retains `off`, no pool is translated. "+
+			"The warning that reports "+
 			"this at compile time reaches an operator only through a commit "+
 			"response, which a tolerant LOAD does not have — so before this "+
 			"gauge the surviving rules were invisible for the life of the node. "+

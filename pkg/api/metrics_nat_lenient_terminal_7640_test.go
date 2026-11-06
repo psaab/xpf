@@ -79,9 +79,24 @@ func TestNATLenientTerminalActionGaugeAbsentWhenUnwired7640(t *testing.T) {
 func TestNATLenientTerminalActionHelpNamesDuplicatePools17253(t *testing.T) {
 	c := newCollector(&Server{})
 	got := c.natRulesLenientTerminalAction.String()
-	for _, want := range []string{"DUPLICATE-POOL", "distinct pools", "all but the first"} {
+	for _, want := range []string{
+		"DUPLICATE-POOL",
+		"distinct pools",
+		"collapse during lowering",
+		"compiled `then` shape",
+		"no pool is translated",
+		"PACKED CONTRADICTION",
+		"first authored mode",
+		"order determines the applied action",
+		"MULTI-ACTION",
+		"fixed precedence",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("xpf_nat_rules_lenient_terminal_action help is missing %q: %s", want, got)
 		}
+	}
+	lower := strings.ToLower(got)
+	if strings.Contains(lower, "all but the first") || strings.Contains(lower, "first pool") {
+		t.Errorf("duplicate-pool help claims a guaranteed first pool: %s", got)
 	}
 }

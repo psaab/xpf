@@ -746,12 +746,15 @@ type Config struct {
 
 // LenientNATTerminalActionReason identifies the defect that caused one NAT rule
 // to be admitted by the tolerant path despite strict validation rejecting it.
+// Its values distinguish actionless, resolved multi-action, packed-mode, and
+// duplicate-pool findings.
 type LenientNATTerminalActionReason string
 
 const (
-	LenientNATTerminalActionReasonActionless     LenientNATTerminalActionReason = "actionless"
-	LenientNATTerminalActionReasonContradictory  LenientNATTerminalActionReason = "contradictory"
-	LenientNATTerminalActionReasonDuplicatePools LenientNATTerminalActionReason = "duplicate-pools"
+	LenientNATTerminalActionReasonActionless          LenientNATTerminalActionReason = "actionless"
+	LenientNATTerminalActionReasonMultiAction         LenientNATTerminalActionReason = "multi-action"
+	LenientNATTerminalActionReasonPackedContradiction LenientNATTerminalActionReason = "packed-contradiction"
+	LenientNATTerminalActionReasonDuplicatePools      LenientNATTerminalActionReason = "duplicate-pools"
 )
 
 // LenientNATTerminalActionRule identifies one NAT rule admitted by the tolerant
@@ -766,8 +769,8 @@ type LenientNATTerminalActionRule struct {
 	RuleSet string
 	Rule    string
 	// Actions is the count associated with Reason: zero for actionless rules,
-	// the contradictory terminal-action count for contradictory rules, or the
-	// number of distinct pools named in one `then` block for duplicate pools.
+	// resolved actions for multi-action rules, authored modes for packed
+	// contradictions, or distinct pool names for duplicate-pool rules.
 	Actions int
 }
 

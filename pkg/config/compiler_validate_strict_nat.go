@@ -4769,11 +4769,11 @@ func natTerminalActionFindings(cfg *Config, firstOnly bool) []natTerminalActionF
 						},
 						err: fmt.Errorf(
 							"%s-nat rule-set %q rule %q: one `then` block names %d different pools "+
-								"(%s), but a rule carries ONE translation action per mode — the FIRST "+
-								"is the one that takes effect and the rest are silently discarded "+
-								"before anything validates them, so the firewall translates "+
-								"differently from the configuration as written and nothing says so. "+
-								"Name one, or split them into separate rules",
+								"(%s), but a rule carries ONE translation action per mode: the "+
+								"names collapse during lowering, and which pool value survives "+
+								"depends on the compiled `then` shape. If the compiled rule also "+
+								"retains `off`, no pool is translated. Name one, or split them "+
+								"into separate rules",
 							kind, rs.Name, rule.Name, len(names), strings.Join(names, ", ")),
 					}) {
 						return true
@@ -4803,7 +4803,7 @@ func natTerminalActionFindings(cfg *Config, firstOnly bool) []natTerminalActionF
 				case n >= 2:
 					if appendFinding(natTerminalActionFinding{
 						rule: LenientNATTerminalActionRule{
-							Reason: LenientNATTerminalActionReasonContradictory,
+							Reason: LenientNATTerminalActionReasonMultiAction,
 							Kind:   kind, RuleSet: rs.Name, Rule: rule.Name, Actions: n,
 						},
 						err: fmt.Errorf(
@@ -4829,7 +4829,7 @@ func natTerminalActionFindings(cfg *Config, firstOnly bool) []natTerminalActionF
 				if modes := natThenPackedContradictionModes(rule); len(modes) > 0 {
 					if appendFinding(natTerminalActionFinding{
 						rule: LenientNATTerminalActionRule{
-							Reason: LenientNATTerminalActionReasonContradictory,
+							Reason: LenientNATTerminalActionReasonPackedContradiction,
 							Kind:   kind, RuleSet: rs.Name, Rule: rule.Name, Actions: len(modes),
 						},
 						err: fmt.Errorf(
@@ -4879,12 +4879,7 @@ func natTerminalActionCardinalityOffenders(cfg *Config) []LenientNATTerminalActi
 	}
 	out := make([]LenientNATTerminalActionRule, 0, len(findings))
 	for _, finding := range findings {
-		switch finding.rule.Reason {
-		case LenientNATTerminalActionReasonActionless,
-			LenientNATTerminalActionReasonContradictory,
-			LenientNATTerminalActionReasonDuplicatePools:
-			out = append(out, finding.rule)
-		}
+		out = append(out, finding.rule)
 	}
 	return out
 }

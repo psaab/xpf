@@ -148,11 +148,13 @@ func TestDuplicatePoolRuleIsAnnotated17253(t *testing.T) {
 	got := b.String()
 	if !strings.Contains(got, "ADMITTED BY TOLERANT LOAD") ||
 		!strings.Contains(got, "2 different pools") ||
-		!strings.Contains(got, "silently discarded") {
-		t.Fatalf("duplicate-pool finding lacks its specific consequence:\n%s", got)
+		!strings.Contains(got, "collapse during lowering") ||
+		!strings.Contains(got, "compiled `then` shape") {
+		t.Fatalf("duplicate-pool finding lacks its shape-dependent consequence:\n%s", got)
 	}
-	if strings.Contains(got, "mutually-exclusive actions") {
-		t.Fatalf("duplicate-pool finding was rendered as an action contradiction:\n%s", got)
+	if strings.Contains(got, "mutually-exclusive actions") ||
+		strings.Contains(strings.ToLower(got), "first pool") {
+		t.Fatalf("duplicate-pool finding was misclassified or claimed a guaranteed first pool:\n%s", got)
 	}
 }
 
@@ -175,6 +177,135 @@ func TestUnknownReasonDoesNotFallBackToActionless17253(t *testing.T) {
 				strings.Contains(got, "falls through") {
 				t.Fatalf("reason %q was rendered with the actionless consequence:\n%s",
 					tc.reason, got)
+			}
+		})
+	}
+}
+func TestCompiledDuplicatePoolResolutionMatches17253(t *testing.T) {
+	fixtures := []struct {
+		name     string
+		then     string
+		wantPool string
+		wantOff  bool
+	}{
+		{
+			name:     "sibling-destination-nat-nodes",
+			then:     "then { destination-nat { pool PD; } destination-nat { pool PD2; } }",
+			wantPool: "PD2",
+		},
+		{
+			name:     "duplicate-pools-with-off",
+			then:     "then { destination-nat { pool PD; pool PD2; off; } }",
+			wantPool: "PD",
+			wantOff:  true,
+		},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			text := `security {
+  zones { security-zone untrust; }
+  nat { destination {
+    pool PD { address 10.0.0.5; }
+    pool PD2 { address 10.0.0.6; }
+    rule-set RD { from zone untrust;
+      rule R1 {
+        match { destination-address 203.0.113.10/32; }
+        ` + fixture.then + `
+      }
+    }
+  } }
+}`
+			tree, parseErr := config.NewParser(text).Parse()
+			if len(parseErr) != 0 {
+				t.Fatalf("fixture did not parse: %v", parseErr)
+			}
+			cfg, err := config.CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile failed: %v", err)
+			}
+			if len(cfg.LenientNATTerminalActionRules) != 1 {
+				t.Fatalf("findings = %+v, want one duplicate-pool finding", cfg.LenientNATTerminalActionRules)
+			}
+			finding := cfg.LenientNATTerminalActionRules[0]
+			if finding.Reason != config.LenientNATTerminalActionReasonDuplicatePools || finding.Actions != 2 {
+				t.Fatalf("finding = %+v, want duplicate pools (2)", finding)
+			}
+			rule := cfg.Security.NAT.Destination.RuleSets[0].Rules[0]
+			if rule.Then.PoolName != fixture.wantPool || rule.Then.Off != fixture.wantOff {
+				t.Fatalf("resolved Then = %+v, want pool=%q off=%v",
+					rule.Then, fixture.wantPool, fixture.wantOff)
+			}
+			var rendered strings.Builder
+			RenderDestRuleDetail(context.Background(), &rendered, cfg, nil, nil)
+			got := rendered.String()
+			for _, want := range []string{
+				"ADMITTED BY TOLERANT LOAD",
+				"2 different pools",
+				"collapse during lowering",
+				"compiled `then` shape",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("duplicate-pool annotation missing %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(strings.ToLower(got), "first pool") ||
+				strings.Contains(got, "all but the first") {
+				t.Fatalf("annotation claims a guaranteed first pool:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestPackedContradictionUsesAuthoredOrderAnnotation17253(t *testing.T) {
+	fixtures := []struct {
+		name     string
+		modes    string
+		wantPool string
+		wantOff  bool
+	}{
+		{name: "off-first", modes: "off pool P", wantOff: true},
+		{name: "pool-first", modes: "pool P off", wantPool: "P"},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			text := `security { zones { security-zone trust; security-zone untrust; } nat { source {
+  pool P { address 203.0.113.5; }
+  rule-set RS { from zone trust; to zone untrust;
+    rule R1 { match { source-address 10.0.0.0/24; }
+      then { source-nat ` + fixture.modes + `; }
+    }
+  } } } }`
+			tree, parseErr := config.NewParser(text).Parse()
+			if len(parseErr) != 0 {
+				t.Fatalf("fixture did not parse: %v", parseErr)
+			}
+			cfg, err := config.CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile failed: %v", err)
+			}
+			if len(cfg.LenientNATTerminalActionRules) != 1 {
+				t.Fatalf("findings = %+v, want one packed-contradiction finding",
+					cfg.LenientNATTerminalActionRules)
+			}
+			finding := cfg.LenientNATTerminalActionRules[0]
+			if finding.Reason != config.LenientNATTerminalActionReasonPackedContradiction ||
+				finding.Actions != 2 {
+				t.Fatalf("finding = %+v, want packed contradiction with 2 authored modes", finding)
+			}
+			resolved := cfg.Security.NAT.Source[0].Rules[0].Then
+			if resolved.PoolName != fixture.wantPool || resolved.Off != fixture.wantOff {
+				t.Fatalf("resolved Then = %+v, want pool=%q off=%v",
+					resolved, fixture.wantPool, fixture.wantOff)
+			}
+			var rendered strings.Builder
+			RenderSourceRuleDetail(context.Background(), &rendered, cfg, nil, nil)
+			got := rendered.String()
+			if !strings.Contains(got, "first authored mode takes effect") ||
+				!strings.Contains(got, "order determines the applied action") {
+				t.Fatalf("packed contradiction annotation does not explain authored-order resolution:\n%s", got)
+			}
+			if strings.Contains(got, "fixed precedence") {
+				t.Fatalf("packed contradiction was rendered with multi-action precedence:\n%s", got)
 			}
 		})
 	}

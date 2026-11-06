@@ -170,14 +170,20 @@ func noteLenientTerminalAction(w io.Writer, cfg *config.Config, kind, ruleSet, r
 			consequence = "it installs no translation and does NOT stop rule " +
 				"evaluation, so matching traffic falls through to any later " +
 				"broader rule"
-		case config.LenientNATTerminalActionReasonContradictory:
+		case config.LenientNATTerminalActionReasonMultiAction:
 			consequence = fmt.Sprintf("it carries %d mutually-exclusive actions; "+
 				"all but one are discarded by a fixed precedence, not by "+
 				"configuration order", r.Actions)
+		case config.LenientNATTerminalActionReasonPackedContradiction:
+			consequence = fmt.Sprintf("it packs %d mutually-exclusive terminal modes "+
+				"onto one node; the first authored mode takes effect and all remaining "+
+				"modes are silently discarded, so their order determines the applied "+
+				"action", r.Actions)
 		case config.LenientNATTerminalActionReasonDuplicatePools:
 			consequence = fmt.Sprintf("the `then` block names %d different pools; "+
-				"the FIRST pool takes effect and the rest are silently discarded",
-				r.Actions)
+				"those names collapse during lowering, and which pool value survives "+
+				"depends on the compiled `then` shape. If the compiled rule also "+
+				"retains `off`, no pool is translated.", r.Actions)
 		default:
 			continue
 		}
