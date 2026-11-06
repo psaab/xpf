@@ -35,12 +35,12 @@ os._exit(3)
 
 func runCrashWindowCadence12159(t *testing.T, readyEverySixth bool) (bool, int, int) {
 	t.Helper()
-	// The helper binary must live under a trusted short root: the
-	// production trust chain refuses a binary whose ancestors are
-	// non-root or world-writable, and t.TempDir() under a long
-	// GOTMPDIR also pushes the control/event socket paths past the
-	// AF_UNIX sun_path limit. /tmp keeps both properties here.
-	dir, err := os.MkdirTemp("/tmp", "x12159")
+	// The helper binary must live under a trusted short root: production's
+	// path-chain check rejects writable non-sticky ancestors. `/var/worktrees`
+	// is root-owned and sticky, so its world-writable bit is safe; the short
+	// path also keeps control/event sockets below sun_path. `t.TempDir()` under
+	// a long GOTMPDIR pushes those socket paths past the limit.
+	dir, err := os.MkdirTemp("/var/worktrees", "x12159")
 	if err != nil {
 		t.Fatal(err)
 	}

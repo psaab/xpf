@@ -2615,6 +2615,7 @@ the pathname. Go 1.26 places `t.TempDir()` below
 otherwise valid socket fixture path exceed the kernel limit.
 Socket-only fixtures use the package's existing `shortSockDir9322(t)` helper;
 keep unrelated non-socket temporary files on `t.TempDir()`. The crash-window
-fixture executes its helper binary too, so its short directory uses `/tmp`'s
-root-owned sticky parent to satisfy the helper-path trust check. Do not mask
-the socket-path issue by overriding `GOTMPDIR` in test recipes.
+fixture executes its helper binary too, so its short fixture directory is a
+direct child of `/var/worktrees`. That root-owned sticky parent passes the
+helper-path trust check. Do not mask the socket-path issue by overriding
+`GOTMPDIR` in test recipes.
