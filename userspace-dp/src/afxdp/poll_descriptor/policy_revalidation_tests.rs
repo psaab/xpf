@@ -6287,6 +6287,172 @@ fn empty_dynamic_rule_reason_requires_all_normal_checks_18927() {
 }
 
 #[test]
+fn rebound_dynamic_translation_reason_requires_recorded_scope_and_tcp_udp_18927() {
+    let (decision, metadata, key) = scoped_snat_case_15176(true, Some(21));
+    let mut rebound = scoped_snat_forwarding_15176();
+    rebound.source_nat_rules = crate::nat::parse_source_nat_rules(&[
+        crate::protocol::SourceNATRuleSnapshot {
+            name: "disjoint-rebound-pool-18927".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            from_interface: "ge-0/0/0.0".to_string(),
+            from_routing_instance: "cust-a".to_string(),
+            source_addresses: vec!["10.0.0.1/32".to_string()],
+            pool_addresses: vec!["203.0.113.99/32".to_string()],
+            port_low: 45_000,
+            port_high: 45_000,
+            ..Default::default()
+        },
+    ]);
+    let check = |forwarding: &ForwardingState,
+                 decision: &SessionDecision,
+                 metadata: &SessionMetadata,
+                 key: &SessionKey,
+                 stored_static| {
+        source_nat_translation_still_valid(
+            forwarding,
+            decision,
+            metadata,
+            key,
+            stored_static,
+            1_000_000_000,
+            None,
+            false,
+        )
+    };
+
+    let (valid, static_nat, reason) = check(&rebound, &decision, &metadata, &key, Some(false));
+    assert!(!valid, "the old pool address is outside the rebound pool");
+    assert_eq!(static_nat, None);
+    assert_eq!(
+        reason,
+        Some(SourceNatInvalidReason::InvalidDynamicTranslationRebound),
+        "only a recorded-scope TCP mismatch with live dynamic rules gets the rebound reason"
+    );
+
+    let unchanged = scoped_snat_forwarding_15176();
+    let (valid, _, reason) = check(&unchanged, &decision, &metadata, &key, Some(false));
+    assert!(valid, "the matching live pool remains a valid translation");
+    assert_eq!(reason, None, "a valid-rule twin has no invalidity reason");
+
+    let (scopeless_decision, scopeless_metadata, scopeless_key) =
+        scoped_snat_case_15176(false, None);
+    let (valid, _, reason) = check(
+        &rebound,
+        &scopeless_decision,
+        &scopeless_metadata,
+        &scopeless_key,
+        Some(false),
+    );
+    assert!(!valid);
+    assert_eq!(reason, None, "scope-less mismatch is not rebound proof");
+
+    // Re-deriveable scope is still not admission provenance. The interface
+    // mapping resolves to another interface/RI, so this is an invalid
+    // non-empty mismatch but must remain ordinary invalidity.
+    let mut derivable_case = reverse_snat_case_13652();
+    derivable_case.3.nat_scope_ifindex = None;
+    derivable_case.3.ingress_ifindex = 11;
+    derivable_case.3.ingress_vlan_id = 50;
+    derivable_case.3.fabric_ingress = false;
+    let mut derivable_forwarding = rebound.clone();
+    derivable_forwarding
+        .ingress_logical_ifindex
+        .insert((11, 50), 22);
+    derivable_forwarding.ifindex_to_zone_id.insert(22, 1);
+    derivable_forwarding.ifindex_unambiguous_zone_id.insert(12, 2);
+    derivable_forwarding
+        .ifindex_to_config_name
+        .insert(22, "other.0".to_string());
+    derivable_forwarding
+        .ifindex_to_routing_instance
+        .insert(22, "other".to_string());
+    let (valid, _, reason) = check(
+        &derivable_forwarding,
+        &derivable_case.2,
+        &derivable_case.3,
+        &derivable_case.0,
+        Some(false),
+    );
+    assert!(!valid);
+    assert_eq!(reason, None, "derivable scope is not recorded provenance");
+
+    let mut icmp_decision = decision;
+    icmp_decision.nat.source_nat_icmp = None;
+    let mut icmp_key = key.clone();
+    icmp_key.protocol = libc::IPPROTO_ICMP as u8;
+    let (valid, _, reason) = check(
+        &rebound,
+        &icmp_decision,
+        &metadata,
+        &icmp_key,
+        Some(false),
+    );
+    assert!(!valid);
+    assert_eq!(
+        reason, None,
+        "ICMP without a recorded type/code selector is outside the rebound reason"
+    );
+
+    let mut missing_egress = decision;
+    missing_egress.resolution.egress_ifindex = 999;
+    let (valid, _, reason) = check(
+        &rebound,
+        &missing_egress,
+        &metadata,
+        &key,
+        Some(false),
+    );
+    assert!(!valid);
+    assert_eq!(reason, None, "egress miss remains ordinary invalidity");
+
+    let mut missing_zone = rebound.clone();
+    missing_zone.zone_id_to_name.remove(&2);
+    let (valid, _, reason) = check(&missing_zone, &decision, &metadata, &key, Some(false));
+    assert!(!valid);
+    assert_eq!(reason, None, "zone miss remains ordinary invalidity");
+
+    let mut static_conflict = rebound.clone();
+    static_conflict.static_nat = imported_snat_forwarding(true).static_nat;
+    let (valid, _, reason) = check(
+        &static_conflict,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+    );
+    assert!(!valid);
+    assert_eq!(reason, None, "static precedence remains ordinary invalidity");
+
+    let mut invalid_destination = decision;
+    invalid_destination.nat.rewrite_dst =
+        Some("10.0.0.11".parse().expect("invalid DNAT destination"));
+    invalid_destination.nat.rewrite_dst_port = Some(8443);
+    let mut invalid_destination_forwarding = rebound.clone();
+    invalid_destination_forwarding.dnat_table = crate::nat::DnatTable::from_snapshots(
+        &[crate::protocol::DestinationNATRuleSnapshot {
+            name: "destination-guard-18927".to_string(),
+            destination_address: "198.51.100.1".to_string(),
+            destination_port: 443,
+            protocol: "tcp".to_string(),
+            pool_address: "10.0.0.10".to_string(),
+            pool_port: 8443,
+            ..Default::default()
+        }],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let (valid, _, reason) = check(
+        &invalid_destination_forwarding,
+        &invalid_destination,
+        &metadata,
+        &key,
+        Some(false),
+    );
+    assert!(!valid);
+    assert_eq!(reason, None, "invalid destination translation is not rebound proof");
+}
+
+#[test]
 fn ordinary_invalid_reverse_hit_keeps_unjudged_epoch_with_scope_evidence_18927() {
 
     // A recorded NAT-scope stamp alone is not a reason to bypass the
@@ -9381,3 +9547,4 @@ fn non_owner_gateway_fallback_predicate_table_18691() {
         assert_eq!(p(&forwarding, ha.map(|h| (h, now_secs)), key, &judged), want, "{name}");
     }
 }
+

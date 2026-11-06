@@ -705,6 +705,7 @@ fn nptv6_source_still_valid(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SourceNatInvalidReason {
     InvalidNoLiveDynamicRules,
+    InvalidDynamicTranslationRebound,
 }
 
 /// Check whether a stored forward source translation remains expressible by
@@ -913,7 +914,25 @@ fn source_nat_translation_still_valid(
         egress.primary_v4,
         egress.primary_v6,
     );
-    (valid && destination_valid, valid.then_some(false), None)
+    let invalid_reason = (!valid
+        && destination_valid
+        && stored_static == Some(false)
+        && metadata.nat_scope_ifindex.is_some()
+        // A forward-wire alias carries the translated tuple, so the matcher
+        // cannot use its source as proof that the original SNAT pool rebound.
+        && !crate::session::is_forward_wire_alias(forward_key, nat)
+        && matches!(
+            forward_key.protocol,
+            protocol if protocol == libc::IPPROTO_TCP as u8
+                || protocol == libc::IPPROTO_UDP as u8
+        )
+        && !forwarding.source_nat_rules.is_empty())
+        .then_some(SourceNatInvalidReason::InvalidDynamicTranslationRebound);
+    (
+        valid && destination_valid,
+        valid.then_some(false),
+        invalid_reason,
+    )
 }
 
 /// #18691: does the JUDGED forward line name an egress that only this node's
@@ -1790,7 +1809,13 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // carries no forward VLAN (`forward_ingress_vlan_id` None). A
     // reverse hit WITH recorded forward VLAN provenance, and every
     // forward hit, are judged normally and never take this decline.
-    if invalid_reason != Some(SourceNatInvalidReason::InvalidNoLiveDynamicRules)
+    if !matches!(
+        invalid_reason,
+        Some(
+            SourceNatInvalidReason::InvalidNoLiveDynamicRules
+                | SourceNatInvalidReason::InvalidDynamicTranslationRebound
+        )
+    )
         && metadata.is_reverse
         && forward_metadata.forward_ingress_vlan_id.is_none()
         && sessions.forward_established_with_traffic(&forward_key)

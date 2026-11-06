@@ -622,20 +622,22 @@ packet: flow-cache hits are not re-judged. The terminal
 (`DiscardRoute` / `ClusterTerminalHAInactive`) decline is still gated on
 peer-synced origin.
 
-A window remains on the reverse side. Reverse hits never substitute (the
-reply's own resolution is the LAN egress). So when the egress RG returns
-with a translation withdrawn, a reply that arrives before any forward
-packet judges the forward row's stored `FabricRedirect` or `HAInactive`,
-declines, and is un-NATed and delivered. `RefreshOwnerRGS` does not close
-it: it rewrites the stored line to the real egress but, like every HA
-identity rewrite, clears the row's source-NAT judgment, and the #16217
-guard declines reverse revocation of an unjudged row with no forward VLAN
-provenance. The window closes at the first forward slow-path hit, which
-judges the real egress and revokes the pair. An inbound-only flow (for
-example UDP pushed from the server) can therefore keep reaching the
-client through the withdrawn binding until a forward packet arrives.
-Pinned by `rg_return_reply_first_window_closes_at_forward_hit_18531`;
-tracked in #18927.
+A reverse-side window remains before the returned RG's stored forward row is
+rejudged. Reverse hits never substitute (the reply's own resolution is the LAN
+egress). Before `RefreshOwnerRGS`, a reply that sees the stored
+`FabricRedirect`/`HAInactive` line is declined and delivered; that pre-refresh
+window still closes at the first forward slow-path hit.
+
+After refresh rewrites the stored line to its real egress and clears its SNAT
+judgment, reverse hits with no applicable new invalidity still take the
+unjudged-epoch decline. The post-refresh window now closes on empty dynamic
+rules (child 2) or a recorded-scope TCP/UDP translation that fails the
+non-empty live dynamic matcher (child 3). ICMP and derivable-scope rebounds
+are outside the new evidence gate; they, and a pre-refresh reply, can still
+retain the flow until a forward hit. Pinned by
+`rg_return_reply_first_window_closes_at_forward_hit_18531`,
+`rg_return_post_refresh_reply_revokes_empty_rules_18927`, and
+`rg_return_reply_revokes_after_refresh_on_rebound_rule_18927`; tracked in #18927.
 
 Pinned by `afxdp::tests_split_rg_failback_18531`, which drives the
 production poll pipeline on the captured split snapshots, and by the
@@ -651,7 +653,7 @@ sends (the Go legs were read, not run). Residuals are tracked in #18927:
   refresh (fixed here; `pool_alias_reverse_stays_with_peer_after_refresh_18535`);
 - activation before the connected-RG FIB republish (open);
 - scope-less imports not judged by the owner (open);
-- the reverse-side window above (open, pinned);
+- the reverse-side post-refresh window: fixed for empty dynamic rules and recorded-scope TCP/UDP rebound mismatches; pre-refresh reply delivery, ICMP, and derivable-scope rebounds remain outside this fix;
 - why the RG-taking node held only the alias of some flows (fixed: the
   import race above);
 - DNAT-only and port-only alias reverses, whose un-NAT also targets itself

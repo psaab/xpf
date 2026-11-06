@@ -20,6 +20,10 @@ xpf (0.0.0) unstable; urgency=medium
   * userspace-dp: keep pool-SNAT alias replies directed to their canonical
     peer row after RefreshOwnerRGS, including when the pool target resolves
     as a WAN MissingNeighbor or ForwardCandidate (#18535).
+  * userspace-dp: close the post-refresh RG-return reverse window when a
+    recorded-scope TCP/UDP translation misses a non-empty rebound dynamic-rule
+    set; forward-wire aliases, ICMP, derivable scope, and pre-refresh replies
+    remain outside the new revocation evidence gate (#18927).
   * A cached FabricRedirect for a routed destination is re-resolved when its
     fresh local egress RG is active after RG activation, instead of continuing
     to send the flow to the peer that no longer owns the route (#18588).

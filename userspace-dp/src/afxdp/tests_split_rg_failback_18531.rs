@@ -2674,3 +2674,94 @@ fn pool_alias_reverse_stays_with_peer_after_refresh_18535() {
         assert_eq!(sessions.len(), 2, "the pair is held ({family:?})");
     }
 }
+
+/// #18927 child 3b (RED before the matcher-exit reason): the old, stored
+/// dynamic translation is disjoint from the sole rebound pool. The rules are
+/// non-empty, so child 2's `InvalidNoLiveDynamicRules` proof does not apply.
+/// After RG1 returns and `RefreshOwnerRGS` rewrites the forward line to the
+/// real WAN egress while clearing its judgment, the first reverse hit must
+/// revoke the now-unexpressible translation rather than use the #16217
+/// unjudged-epoch keep.
+#[test]
+fn rg_return_reply_revokes_after_refresh_on_rebound_rule_18927() {
+    let forwarding = fw1_owner_forwarding();
+    let mut rebound = withdrawn_owner_forwarding();
+    rebound.source_nat_rules = crate::nat::parse_source_nat_rules(&[
+        crate::protocol::SourceNATRuleSnapshot {
+            name: "rebound-pool-snat-18927".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.61.0/24".to_string()],
+            pool_addresses: vec!["172.16.80.99/32".to_string()],
+            port_low: 30_000,
+            port_high: 49_999,
+            ..crate::protocol::SourceNATRuleSnapshot::default()
+        },
+    ]);
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let mut sessions = promoted_on_owner(&forwarding, now_ns);
+    let failback = lan_ack(&mut sessions, &forwarding, &split_ha(now_secs), 1);
+    assert_eq!(
+        (failback.snat_revoked, failback.tx),
+        (0, [0, 1, 0]),
+        "fixture: the failback packet redirects under split HA"
+    );
+    let reply = |sessions: &mut SessionTable| {
+        let (frame, meta) = wan_reply_frame();
+        drive_at(
+            sessions,
+            &rebound,
+            &owner_ha(now_secs),
+            WAN,
+            &frame,
+            meta,
+            8,
+            1,
+        )
+    };
+    let first = reply(&mut sessions);
+    assert_eq!(
+        (first.snat_revoked, first.tx),
+        (0, [0, 0, 1]),
+        "a reverse reply before RefreshOwnerRGS is delivered through the window"
+    );
+    crate::afxdp::session_glue::handle_refresh_owner_rgs_for_test(
+        &mut sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        &rebound,
+        &owner_ha(now_secs),
+        &Arc::new(ShardedNeighborMap::default()),
+        vec![1],
+        now_ns + 2,
+        now_secs,
+    );
+    let (stored, _, _) = sessions
+        .entry_with_origin(&forward_key())
+        .expect("forward row present after the refresh");
+    assert_eq!(
+        (stored.resolution.disposition, stored.resolution.egress_ifindex),
+        (ForwardingDisposition::ForwardCandidate, WAN_UNIT_IFINDEX),
+        "fixture: the refresh rewrites the stored line to the WAN unit"
+    );
+    let second = reply(&mut sessions);
+    assert_eq!(
+        (second.snat_revoked, second.tx),
+        (1, [0, 0, 0]),
+        "the rebound rule cannot authorize the old stored translation"
+    );
+    assert_eq!(sessions.len(), 0, "the revoked pair must be gone");
+    assert_eq!(second.closes, 1, "exactly one Close must be emitted");
+    assert_eq!(
+        second.closed.first().map(|(key, _)| key.clone()),
+        Some(forward_key()),
+        "the Close must name the canonical forward key"
+    );
+    let third = reply(&mut sessions);
+    assert_eq!(
+        (third.session_hit, third.tx[LAN]),
+        (0, 0),
+        "after revocation the next reverse packet has no session"
+    );
+}
+
