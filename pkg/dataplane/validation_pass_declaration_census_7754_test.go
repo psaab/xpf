@@ -127,12 +127,14 @@ func TestEveryDiscardingDataPlaneEmbedderDeclaresItsPass7754(t *testing.T) {
 		if class == "either" {
 			continue // parameterised by a field; the method exists, value varies
 		}
-		want := "func (" + name + ") xpfValidationPass() bool"
-		wantPtr := "func (*" + name + ") xpfValidationPass() bool"
+		method := regexp.MustCompile(
+			`func\s+\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*?\s*` +
+				regexp.QuoteMeta(name) + `\s*\)\s+xpfValidationPass\s*\(\s*\)\s*bool`,
+		)
 		var has bool
 		for _, f := range files {
 			b, _ := os.ReadFile(f)
-			if strings.Contains(string(b), want) || strings.Contains(string(b), wantPtr) {
+			if method.Match(b) {
 				has = true
 				break
 			}
