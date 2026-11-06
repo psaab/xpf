@@ -41,6 +41,7 @@ pub(super) fn apply_term_three_color_policer(
     ThreeColorPolicerAction {
         dscp_rewrite: decision.dscp_rewrite,
         drop: decision.drop,
+        metered: true,
     }
 }
 
@@ -52,6 +53,7 @@ pub(crate) fn apply_cached_three_color_policers(
     let mut action = ThreeColorPolicerAction::default();
     policers.for_each(|policer| {
         let decision = policer.meter(now_ns, packet_bytes, PacketColor::Green);
+        action.metered = true;
         // #15793: latest matched term wins, mirroring the fresh/inline walks
         // (`merge_matched_tx_modifiers` / `merge_matched_modifiers` assign
         // per matched term). The previous `.or` kept the FIRST rewrite, so

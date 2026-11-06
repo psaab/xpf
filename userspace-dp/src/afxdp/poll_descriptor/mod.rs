@@ -1247,6 +1247,7 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                 // A passing underlay gate already owns this outer packet's
                 // filter side effects. Preserve its acceptance and PBR result
                 // only if decap construction falls back to the raw outer frame.
+                let mut tunnel_outer_filter_charged = false;
                 let mut tunnel_outer_filter_accepted = false;
                 let mut tunnel_outer_pbr_route_override = None;
                 let mut gre_buffered = false;
@@ -1268,10 +1269,12 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                 ) {
                                     filter::TunnelOuterInputFilterOutcome::NotEvaluated => true,
                                     filter::TunnelOuterInputFilterOutcome::Rejected => false,
-                                    filter::TunnelOuterInputFilterOutcome::Accepted(
+                                    filter::TunnelOuterInputFilterOutcome::Accepted {
                                         route_outcome,
-                                    ) => {
+                                        policer_charged,
+                                    } => {
                                         tunnel_outer_filter_accepted = true;
+                                        tunnel_outer_filter_charged = policer_charged;
                                         if route_outcome.pbr_matched {
                                             tunnel_outer_pbr_route_override =
                                                 Some(route_outcome.route_override);
@@ -1342,10 +1345,12 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                 ) {
                                     filter::TunnelOuterInputFilterOutcome::NotEvaluated => true,
                                     filter::TunnelOuterInputFilterOutcome::Rejected => false,
-                                    filter::TunnelOuterInputFilterOutcome::Accepted(
+                                    filter::TunnelOuterInputFilterOutcome::Accepted {
                                         route_outcome,
-                                    ) => {
+                                        policer_charged,
+                                    } => {
                                         tunnel_outer_filter_accepted = true;
+                                        tunnel_outer_filter_charged = policer_charged;
                                         if route_outcome.pbr_matched {
                                             tunnel_outer_pbr_route_override =
                                                 Some(route_outcome.route_override);
@@ -1395,6 +1400,7 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                     // successful decap continues with the inner packet's own
                     // filter and route decision.
                     tunnel_outer_filter_accepted = false;
+                    tunnel_outer_filter_charged = false;
                     tunnel_outer_pbr_route_override = None;
                 }
                 let packet_frame = owned_packet_frame.as_deref().unwrap_or(raw_frame);
@@ -5751,10 +5757,10 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                 .get(&to_zone_id)
                                 .map(|s| s.as_str())
                                 .unwrap_or("");
-                            // #18820: the outer gate already evaluated and
-                            // charged its policer, so the LocalDelivery miss
-                            // gate must not meter this same packet again.
-                            if !tunnel_outer_filter_accepted
+                            // #18820: an accepted gate can defer its policer
+                            // charge when its LocalDelivery predictor misses.
+                            // Skip this meter only when the gate actually charged.
+                            if !tunnel_outer_filter_charged
                                 && miss_input_policer_gate_covers(final_resolution.disposition)
                             {
                                 let (verdict, policers) = meter_miss_local_input_policers(

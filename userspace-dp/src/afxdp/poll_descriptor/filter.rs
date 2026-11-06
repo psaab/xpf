@@ -180,12 +180,15 @@ pub(super) fn filter_log_egress_zone_id(forwarding: &ForwardingState, egress_ifi
 }
 
 /// Result of checking a tunnel's physical underlay filter. Accepted state
-/// carries the gate's PBR outcome so a construction-failure fallback can skip
-/// replaying the filter and its side effects.
+/// carries the gate's PBR outcome and whether it actually metered, so a
+/// construction-failure fallback skips only side effects it already owns.
 pub(super) enum TunnelOuterInputFilterOutcome {
     NotEvaluated,
     Rejected,
-    Accepted(crate::afxdp::forwarding::RouteTableOverrideOutcome),
+    Accepted {
+        route_outcome: crate::afxdp::forwarding::RouteTableOverrideOutcome,
+        policer_charged: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -483,8 +486,9 @@ pub(super) fn enforce_tunnel_outer_input_filter(
         )
         .is_some()
         || routing_instance_local_delivery_expected(forwarding, outer_dst);
-    if local_delivery
-        && crate::filter::evaluate_filter_ref_tx_selection_runtime_routing_bearing(
+    let mut policer_charged = false;
+    if local_delivery {
+        let local_eval = crate::filter::evaluate_filter_ref_tx_selection_runtime_routing_bearing(
             filter,
             flow.src_ip,
             flow.dst_ip,
@@ -495,10 +499,11 @@ pub(super) fn enforce_tunnel_outer_input_filter(
             extra,
             meta.pkt_len as u64,
             now_ns,
-        )
-        .policer_drop
-    {
-        return TunnelOuterInputFilterOutcome::Rejected;
+        );
+        policer_charged = local_eval.policer_metered;
+        if local_eval.policer_drop {
+            return TunnelOuterInputFilterOutcome::Rejected;
+        }
     }
     let route_outcome = crate::afxdp::forwarding::ingress_route_table_override_with_result(
         forwarding,
@@ -520,7 +525,10 @@ pub(super) fn enforce_tunnel_outer_input_filter(
     ) {
         TunnelOuterInputFilterOutcome::Rejected
     } else {
-        TunnelOuterInputFilterOutcome::Accepted(route_outcome)
+        TunnelOuterInputFilterOutcome::Accepted {
+            route_outcome,
+            policer_charged,
+        }
     }
 }
 

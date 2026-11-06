@@ -403,6 +403,7 @@ fn merge_matched_tx_modifiers<'a>(
         acc.dscp_rewrite = Some(rewrite);
     }
     acc.policer_drop |= policer_action.drop;
+    acc.policer_metered |= policer_action.metered;
     if let Some(lm) = filter_log_match(filter, term) {
         acc.log_match = Some(lm);
     }

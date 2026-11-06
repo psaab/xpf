@@ -1350,6 +1350,9 @@ pub(crate) struct TxSelectionFilterResult<'a> {
     pub(crate) forwarding_class: Option<&'a str>,
     pub(crate) dscp_rewrite: Option<u8>,
     pub(crate) policer_drop: bool,
+    // True only when this evaluation invoked a policer meter. Deferred
+    // evaluations can collect policer handles without charging them.
+    pub(crate) policer_metered: bool,
     // #15268/#16496: handles matched by the DEFERRED walk only
     // (`evaluate_filter_ref_tx_selection_deferred`). Live metered/counted
     // walks charge inline and collect nothing, so they pay no per-packet
@@ -1378,6 +1381,7 @@ pub(crate) struct CachedTxSelectionFilterResult {
 pub(crate) struct ThreeColorPolicerAction {
     pub(crate) dscp_rewrite: Option<u8>,
     pub(crate) drop: bool,
+    pub(crate) metered: bool,
 }
 
 impl Default for FilterResult {
@@ -1411,6 +1415,7 @@ impl Default for TxSelectionFilterResult<'_> {
             forwarding_class: None,
             dscp_rewrite: None,
             policer_drop: false,
+            policer_metered: false,
             three_color_policers: CachedThreeColorPolicers::default(),
             counters: CachedFilterCounters::default(),
             log_match: None,

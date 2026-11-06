@@ -1147,6 +1147,192 @@ fn poll_loop_wg_outer_ce_over_not_ect_counts_underlay_once_12289() {
     // #14656: counters are coalesced per-thread in every build; flush before asserting.
     // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
+/// #18820 follow-up: an accepted secondary WG listener in a named VRF can fall
+/// back to LocalDelivery through its PBR-selected table even when the outer
+/// gate's default-table local-delivery predictor is false. The miss policer
+/// must still charge this packet once.
+#[test]
+fn poll_loop_wg_secondary_named_vrf_local_fallback_charges_once_18820() {
+    let allowed: Vec<ipnet::IpNet> = vec!["10.124.0.0/24".parse().unwrap()];
+    let (init, resp, _ipub, rpub) = established_pair(allowed.clone(), allowed);
+    let mut snapshot = two_tunnel_snapshot();
+    for interface in &mut snapshot.interfaces {
+        if matches!(interface.ifindex, 12 | 400 | 401) {
+            interface.routing_instance = "cust".to_string();
+            interface.routing_domain = 7;
+        }
+    }
+    for endpoint in &mut snapshot.tunnel_endpoints {
+        endpoint.transport_table = "cust.inet.0".to_string();
+    }
+    snapshot.routes[0].table = "cust.inet.0".to_string();
+    snapshot.filters = vec![crate::FirewallFilterSnapshot {
+        name: "underlay-in".to_string(),
+        family: "inet".to_string(),
+        terms: vec![
+            crate::FirewallTermSnapshot {
+                name: "wg-listener".to_string(),
+                protocols: vec!["udp".to_string()],
+                destination_ports: vec![WG_PORT.to_string()],
+                count: "c-wg".to_string(),
+                routing_instance: "cust".to_string(),
+                policer: "p-wg".to_string(),
+                action: "accept".to_string(),
+                ..Default::default()
+            },
+            crate::FirewallTermSnapshot {
+                name: "default-accept".to_string(),
+                action: "accept".to_string(),
+                ..Default::default()
+            },
+        ],
+    }];
+    snapshot.three_color_policers = vec![crate::ThreeColorPolicerSnapshot {
+        name: "p-wg".to_string(),
+        mode: "single-rate".to_string(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 10_000,
+        peak_or_excess_burst_bytes: 5_000,
+        then_action: "discard".to_string(),
+        ..Default::default()
+    }];
+    snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == 12)
+        .expect("underlay ingress")
+        .filter_input_v4 = "underlay-in".to_string();
+    let mut forwarding = build_forwarding_state(&snapshot);
+    forwarding
+        .wg_engines
+        .insert(2, std::sync::Arc::new(resp));
+    let secondary: std::net::IpAddr = "172.16.80.9".parse().unwrap();
+    assert!(
+        crate::afxdp::forwarding::ingress_interface_local_resolution(
+            &forwarding, 12, 80, secondary
+        )
+        .is_none(),
+        "the secondary listener is not the ingress interface's primary address"
+    );
+    assert!(
+        crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+            &forwarding,
+            secondary,
+            PROTO_UDP,
+            None,
+        )
+        .is_none(),
+        "the secondary listener is not an interface-NAT local target"
+    );
+    assert_ne!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution(&forwarding, secondary)
+            .resolution
+            .disposition,
+        ForwardingDisposition::LocalDelivery,
+        "precondition: the gate's default-table local-delivery predictor misses"
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+            &forwarding,
+            &std::sync::Arc::new(ShardedNeighborMap::new()),
+            secondary,
+            Some("cust.inet.0"),
+        )
+        .resolution
+        .disposition,
+        ForwardingDisposition::LocalDelivery,
+        "the PBR-selected named-VRF table resolves this secondary listener locally"
+    );
+    let counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&12)
+        .expect("underlay input filter")
+        .terms[0]
+        .counter
+        .clone();
+    let inner = inner_v4([10, 124, 0, 5], [203, 0, 113, 50]);
+    assert_eq!(
+        inner[1] & 0x03,
+        0,
+        "precondition: the secondary tunnel's inner packet is Not-ECT"
+    );
+    let mut wire = vec![0u8; 2048];
+    let enc = init.try_encap(&rpub, &inner, &mut wire).unwrap();
+    let mut frame = outer_frame_to(&wire[..enc.len], [172, 16, 80, 9], WG_PORT);
+    let meta = wiring_meta(frame.len());
+    let l3 = meta.l3_offset as usize;
+    frame[l3 + 1] = (frame[l3 + 1] & 0xfc) | 0x03;
+    frame[l3 + 10] = 0;
+    frame[l3 + 11] = 0;
+    let ip_sum = crate::afxdp::frame::checksum::checksum16(&frame[l3..l3 + 20]);
+    frame[l3 + 10..l3 + 12].copy_from_slice(&ip_sum.to_be_bytes());
+    assert_eq!(
+        crate::afxdp::frame::checksum::checksum16(&frame[l3..l3 + 20]),
+        0,
+        "outer checksum must be valid"
+    );
+    let ecn_before =
+        crate::afxdp::gre::WG_DECAP_ECN_ILLEGAL_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
+        },
+    );
+    let (batch, dbg) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert!(
+        crate::afxdp::gre::WG_DECAP_ECN_ILLEGAL_DROPS.load(std::sync::atomic::Ordering::Relaxed)
+            >= ecn_before + 1,
+        "the authenticated Not-ECT inner must reach the outer-CE ECN rejection fallback"
+    );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "#18820: the accepted secondary listener outer is counted once"
+    );
+    let policer_status = forwarding
+        .filter_state
+        .three_color_policer_statuses()
+        .into_iter()
+        .find(|status| status.name == "p-wg")
+        .expect("underlay policer runtime status");
+    assert_eq!(
+        policer_status.green_packets, 1,
+        "#18820: predictor-false VRF LocalDelivery fallback still charges once"
+    );
+    assert_eq!(dbg.local, 1, "#18820: the outer fallback is LocalDelivery");
+    assert_eq!(dbg.no_route, 0, "#18820: the named-VRF local route is found");
+    assert_eq!(
+        batch.validated_packets, 1,
+        "#18820: the descriptor is processed exactly once"
+    );
+}
+
 
 /// A correctly configured listener reached through another zone is declined
 /// before AEAD even when both zones use `any-service` and the destination is

@@ -130,7 +130,7 @@ fn syn_cookie_admission_uses_effective_tuple_and_finalized_zone_pair_17920() {
         .split("let final_resolution = finalize_new_flow_ha_resolution(")
         .nth(1)
         .expect("session-miss HA finalization exists")
-        .split("if miss_input_policer_gate_covers(final_resolution.disposition)")
+        .split("if !tunnel_outer_filter_charged")
         .next()
         .expect("finalized zone pair is selected before downstream admission");
     assert!(
