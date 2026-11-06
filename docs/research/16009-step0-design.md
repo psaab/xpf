@@ -885,7 +885,14 @@ Use the pinned G1 base, generation directive, and verifier flags
 from G1: its command used `GOTMPDIR=/wtgt`; this protocol moves that
 root to `/var/worktrees/.cache/gotmp` so all four temp/cache roots stay
 under `/var/worktrees/.cache`.
-`CARGO_TARGET_DIR=/var/worktrees/.cache/cargo-16009 TMPDIR=/var/worktrees/.cache/tmpdir GOTMPDIR=/var/worktrees/.cache/gotmp GOCACHE=/var/worktrees/.cache/go-build XPF_SHIM_ALLOW_LOW_HEADROOM=0 make generate-userspace-xdp`.
+Use distinct, previously unused `CARGO_TARGET_DIR` roots for D1 and D2:
+`/var/worktrees/.cache/cargo-16009-D1` and
+`/var/worktrees/.cache/cargo-16009-D2`, respectively. Create each target
+root empty before its invocation; the D1/D2 paths must never be shared.
+D1 uses:
+`CARGO_TARGET_DIR=/var/worktrees/.cache/cargo-16009-D1 TMPDIR=/var/worktrees/.cache/tmpdir GOTMPDIR=/var/worktrees/.cache/gotmp GOCACHE=/var/worktrees/.cache/go-build XPF_SHIM_ALLOW_LOW_HEADROOM=0 make generate-userspace-xdp`.
+For D2 use the identical command with only `CARGO_TARGET_DIR` changed to
+`/var/worktrees/.cache/cargo-16009-D2`.
 Before each invocation, record the fresh detached scratch worktree path,
 G1 base, full command and environment, complete source/toolchain hashes,
 and expected artifact paths, including the candidate `.so`. Also pin
@@ -897,13 +904,15 @@ In the tree that runs it, the build script installs
 `pkg/dataplane/userspace_xdp_gate_verdict.json` only after successful
 `shimverify` gate completion, then refreshes
 `pkg/dataplane/userspace_xdp_manifest.json`
-(`pkg/dataplane/build-userspace-xdp.sh:284-320`). The candidate is
-`/var/worktrees/.cache/cargo-16009/bpfel-unknown-none/release/libxpf_userspace_xdp.so`
-(`pkg/dataplane/build-userspace-xdp.sh:27,33`). After each invocation,
-record the post-run hash and disposition of the candidate and every
-tracked output, and compare against the pre-run pin to identify which
-bytes this invocation created or changed. These products are scratch
-evidence only: never copy, commit, or promote them. If a necessary build
+(`pkg/dataplane/build-userspace-xdp.sh:284-320`). For each invocation,
+the candidate is
+`${CARGO_TARGET_DIR}/bpfel-unknown-none/release/libxpf_userspace_xdp.so`
+(`pkg/dataplane/build-userspace-xdp.sh:27,33`); the distinct empty target
+ensures D2 cannot reuse D1's candidate. After each invocation, record
+the post-run hash and disposition of the candidate and every tracked
+output, and compare against pre-run pins to identify which bytes this
+invocation created or changed. These products are scratch evidence only:
+never copy, commit, or promote them. If a necessary build
 input changed from the recorded G1 base, stop and seek a separately
 authorized changed-input baseline; do not silently substitute `master`.
 
@@ -925,14 +934,17 @@ or kernel verification is the first failing stage.
   setup failure.
   Before each D1/D2 generation invocation, require all four configured
   roots (`CARGO_TARGET_DIR`, `TMPDIR`, `GOTMPDIR`, `GOCACHE`) to exist and
-  be writable. Pin and record a justified numeric minimum free-byte
-  requirement for `/var/worktrees/.cache/gotmp` before each invocation,
-  record its observed free bytes, and require capacity to meet the pin.
-  A missing expectation, missing/unwritable root, or insufficient capacity
-  is an environment/setup failure: do not invoke the command, consume a
-  verifier run, or reject/kill the candidate; repair setup before an
-  authorized invocation. The D1 census and each invocation's preflight
-  spend zero verifier runs.
+  be writable. Use a distinct, previously unused `CARGO_TARGET_DIR` for
+  each invocation; create each root empty and confirm no candidate or
+  build outputs pre-exist.
+  Pin and record a justified numeric minimum free-byte requirement for
+  `/var/worktrees/.cache/gotmp` before each invocation, record its
+  observed free bytes, and require capacity to meet the pin. A missing
+  expectation, missing/unwritable root, shared/nonempty target, or
+  insufficient capacity is an environment/setup failure: do not invoke
+  the command, consume a verifier run, or reject/kill the candidate;
+  repair setup before an authorized invocation. The D1 census and each
+  invocation's preflight spend zero verifier runs.
 
 - **CR1 — Baseline plus one delta.** Start from the pristine G1 base
   and add only the retained-fact geometry gate. Do not reuse G1's
@@ -981,7 +993,7 @@ or kernel verification is the first failing stage.
 | Run | Shape | Gate it decides |
 |---|---|---|
 | **D1 — run 5 of 13** | Full geometry candidate from CR1/CR2, built and verified as one complete object | Diagnostic existence test. PASS only if every K1 condition in CR6 passes; compiler/link/access/cap/stack failure or any K1 threshold miss kills route (b). |
-| **D2 — run 6 of 13** *(only after D1 PASS)* | Identical-source confirmation build; all component and untracked/shared hashes must match D1 | Completes K1 confirmation. Any result other than full K1 PASS, or source mismatch, kills the candidate pair. |
+| **D2 — run 6 of 13** *(only after D1 PASS)* | Identical-source confirmation build in a new, empty `CARGO_TARGET_DIR` distinct from D1; candidate and all component/untracked/shared hashes must match D1 | Completes K1 confirmation. Any result other than full K1 PASS, hash mismatch, or source mismatch kills the candidate pair. |
 
 Runs **7–13 remain held** for a new three-seat act. This protocol
 contains no zero-cost link preflight, no TCP diagnostic, no reserve
