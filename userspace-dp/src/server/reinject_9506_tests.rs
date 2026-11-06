@@ -843,6 +843,38 @@ impl Drop for RlimitGuard15112 {
 fn count_open_fds_15112() -> usize {
     std::fs::read_dir("/proc/self/fd").unwrap().count()
 }
+/// #18835: fd exhaustion and `setrlimit` are process-global, so the two
+/// 15112 EMFILE cells must not run inside the shared libtest process:
+/// their drain makes unrelated sibling cells fail with EMFILE while they
+/// run (`FD_PRESSURE_LOCK_15112` only serialises the two pressure cells
+/// against each other; victims never take it). Each pressure wrapper
+/// therefore re-executes exactly its own test in a child process and runs
+/// its body inline only there. The wrapper asserts the child's exit
+/// status AND that the child actually ran one test, so a filter that
+/// matches nothing is red instead of silently green.
+fn run_emfile_body_in_child_18835(test_name: &str, body: fn()) {
+    if std::env::var_os("XPF_18835_EMFILE_CHILD").is_some() {
+        body();
+        return;
+    }
+    let exe = std::env::current_exe().expect("current_exe for EMFILE child delegation");
+    let output = std::process::Command::new(exe)
+        .args([test_name, "--exact", "--test-threads=1"])
+        .env("XPF_18835_EMFILE_CHILD", "1")
+        .output()
+        .expect("spawn EMFILE child test process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "EMFILE child {test_name} failed (status {:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status.code()
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "EMFILE child {test_name} did not report exactly one passed test\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
 
 fn exhaused_fds_15112() -> Vec<std::fs::File> {
     // Leave a small number of free slots so test-harness bookkeeping (result
@@ -871,7 +903,15 @@ fn exhaused_fds_15112() -> Vec<std::fs::File> {
 
 #[test]
 fn reinject_submit_accept_survives_idle_emfile_15112() {
+    run_emfile_body_in_child_18835(
+        "server::reinject_9506::tests::reinject_submit_accept_survives_idle_emfile_15112",
+        reinject_submit_accept_survives_idle_emfile_15112_body_18835,
+    );
+}
+
+fn reinject_submit_accept_survives_idle_emfile_15112_body_18835() {
     let _guard = FD_PRESSURE_LOCK_15112.lock().unwrap();
+    let _rlimit = RlimitGuard15112::lower_to((count_open_fds_15112() + 64) as u64);
     let dir = std::env::temp_dir().join(format!(
         "xpf-reinject-15112-submit-{}",
         std::process::id()
@@ -933,6 +973,13 @@ fn reinject_submit_accept_survives_idle_emfile_15112() {
 
 #[test]
 fn reinject_complete_accept_survives_idle_emfile_15112() {
+    run_emfile_body_in_child_18835(
+        "server::reinject_9506::tests::reinject_complete_accept_survives_idle_emfile_15112",
+        reinject_complete_accept_survives_idle_emfile_15112_body_18835,
+    );
+}
+
+fn reinject_complete_accept_survives_idle_emfile_15112_body_18835() {
     let _guard = FD_PRESSURE_LOCK_15112.lock().unwrap();
     let dir = std::env::temp_dir().join(format!(
         "xpf-reinject-15112-complete-{}",
