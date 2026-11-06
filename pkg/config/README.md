@@ -203,12 +203,13 @@ distinction).
   #16583: a VLAN child exists only for `vlanID > 0`. It also rejects a
   positive VLAN tag when the parent enables neither `vlan-tagging` nor
   `flexible-vlan-tagging`. Tolerant load and peer-sync warn instead
-  (#1960). Tunnel-owned units, `st<N>`, `lo<N>`, `irb`, and declared
-  dotted bases are exempt or out of scope for the unit rule; unit 0 is
-  exempt from its non-zero-unit condition.
-  Fixture doctrine (#18871): a test needing a real non-zero logical unit
-  authors both parent `vlan-tagging` and that unit's `vlan-id`; use unit
-  number is scaffolding, never to erase a distinct-unit premise.
+  (#1960). Declared dotted bases are out of scope for both arms (the gate
+  skips them before either finding). Tunnel-owned units, `st<N>`, `lo<N>`,
+  and `irb` are exempt only from the non-zero-unit condition; unit 0 is
+  likewise exempt from that condition. Fixture doctrine (#18871): a test
+  needing a real non-zero logical unit authors both parent `vlan-tagging`
+  and that unit's `vlan-id`; renumber to unit 0 only where the unit number
+  is scaffolding, never to erase a distinct-unit premise.
 
 - `ValueType` — `value_type.go`. Classifies a typed leaf's value
   (`ValueRate`, `ValueByteSizeOrPercent`, `ValueDate`, `ValueString`, ...)
