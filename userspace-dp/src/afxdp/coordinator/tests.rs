@@ -15,7 +15,7 @@ fn pmech_inventory_for(
         IpsecTrafficSelectorSnapshot,
     };
 
-    let mut main_routes = Vec::with_capacity(rows.len());
+    let mut main_routes = Vec::with_capacity(rows.len() + 1);
     let mut tunnel_rows = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
         let prefix = format!("10.0.0.{}/32", index + 1);
@@ -43,7 +43,7 @@ fn pmech_inventory_for(
             }],
             effective_prefixes: vec![prefix.clone()],
             ingress_prefixes: vec![prefix],
-            destination_prefixes: Vec::new(),
+            destination_prefixes: vec!["192.0.2.0/24".into()],
             inventory_generation: generation,
             fib_generation,
             source_kind: "xfrmi".into(),
@@ -53,6 +53,18 @@ fn pmech_inventory_for(
             inventory_reason: String::new(),
         });
     }
+    main_routes.push(IpsecMainRouteSnapshot {
+        domain: 0,
+        table: 254,
+        disposition: 1, // RTN_UNICAST
+        family: "inet".into(),
+        destination: "192.0.2.0/24".into(),
+        next_hops: vec![IpsecMainRouteNextHopSnapshot {
+            ifindex: 20,
+            weight: 1,
+        }],
+        ..Default::default()
+    });
     crate::protocol::IpsecPMechInventorySnapshot {
         policy_identity: "01".repeat(32),
         generation,
@@ -204,6 +216,36 @@ fn test_main_route() -> crate::afxdp::types::RouteEntryV4 {
         String::new(),
         1,
     )
+}
+
+fn test_local_lan_route() -> crate::afxdp::types::RouteEntryV4 {
+    crate::afxdp::types::RouteEntryV4::single(
+        crate::prefix::PrefixV4::from_net("192.0.2.0/24".parse().expect("local LAN prefix")),
+        20,
+        0,
+        Some("192.0.2.2".parse().expect("local LAN next hop")),
+        false,
+        String::new(),
+        1,
+    )
+}
+
+fn install_local_lan_route_and_policy(
+    forwarding: &mut crate::afxdp::types::ForwardingState,
+) {
+    forwarding
+        .routes_v4
+        .entry("inet.0".into())
+        .or_default()
+        .push(test_local_lan_route());
+    forwarding.ifindex_to_zone_id.insert(20, 2);
+    forwarding.ifindex_unambiguous_zone_id.insert(20, 2);
+    forwarding.zone_id_to_name.insert(1, "vpn".into());
+    forwarding.zone_id_to_name.insert(2, "lan".into());
+    let mut zones = rustc_hash::FxHashMap::default();
+    zones.insert("vpn".to_string(), 1);
+    zones.insert("lan".to_string(), 2);
+    forwarding.policy = crate::policy::parse_policy_state("permit", &[], &zones);
 }
 
 fn pmech_advisory(
@@ -457,6 +499,7 @@ fn snapshot_published_tunnel_rows_join_d11_10485() {
 
     let mut coordinator = Coordinator::new();
     install_main_route_table_authority(&mut coordinator.forwarding);
+    install_local_lan_route_and_policy(&mut coordinator.forwarding);
     coordinator.validation = ValidationState {
         snapshot_installed: true,
         config_generation: 7,
@@ -490,7 +533,7 @@ fn snapshot_published_tunnel_rows_join_d11_10485() {
         Some((9, 10))
     );
 
-    let packet = test_ipv4_packet_from([10, 0, 0, 1], [10, 0, 0, 1]);
+    let packet = test_ipv4_packet_from([10, 0, 0, 1], [192, 0, 2, 1]);
     let decision = adjudicate_ipsec_inner(
         &view,
         IpsecInnerInput {
@@ -836,6 +879,7 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
 
     let mut coordinator = Coordinator::new();
     install_main_route_table_authority(&mut coordinator.forwarding);
+    install_local_lan_route_and_policy(&mut coordinator.forwarding);
     coordinator.validation = ValidationState {
         snapshot_installed: true,
         config_generation: 7,
@@ -892,6 +936,7 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
     );
 
     let packet = test_ipv4_packet_from([10, 0, 0, 3], [10, 0, 0, 3]);
+    let control_packet = test_ipv4_packet_from([10, 0, 0, 3], [192, 0, 2, 1]);
     for (stn, ifindex, if_id) in [("st0", 10i32, 7u32), ("st1", 11i32, 7u32)] {
         let decision = adjudicate_ipsec_inner(
             &view,
@@ -928,7 +973,7 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
         &view,
         IpsecInnerInput {
             slab_id: 0,
-            inner_packet: &packet,
+            inner_packet: &control_packet,
             stn: "st2",
             inner_family: libc::AF_INET as u8,
             inner_eth_proto: 0x0800,
@@ -2175,6 +2220,22 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
         "the worker-visible validation starts at the default (old) generation",
     );
 
+    // Keep this test focused on the view-pair publication rather than a
+    // neighbor-set transition, which independently advances that generation.
+    let mut forwarding = crate::afxdp::types::ForwardingState::default();
+    forwarding.neighbors.insert(
+        (
+            10,
+            "192.0.2.2"
+                .parse()
+                .expect("coherent-view neighbor address"),
+        ),
+        crate::afxdp::types::NeighborEntry {
+            mac: [2, 0, 0, 0, 0, 0x20],
+        },
+    );
+    coordinator.set_forwarding_for_test(forwarding);
+
     let rows = vec![crate::protocol::snapshot::IpsecTunnelRowSnapshot {
         stn: "st0".to_string(),
         if_id: 9,
@@ -2183,6 +2244,7 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
     let snapshot = ConfigSnapshot {
         generation: NEW_GEN,
         fib_generation: NEW_FIB_GEN,
+        default_policy: "permit".into(),
         zones: vec![crate::protocol::snapshot::ZoneSnapshot {
             name: "zone1".to_string(),
             id: 1,
@@ -2193,6 +2255,7 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
             linux_name: "st0".to_string(),
             ifindex: 10,
             zone: "zone1".to_string(),
+            egress_zone: "zone1".into(),
             ..Default::default()
         }],
         neighbors: vec![crate::protocol::snapshot::NeighborSnapshot {
@@ -2204,13 +2267,22 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
             state: "reachable".into(),
             ..Default::default()
         }],
-        routes: vec![crate::protocol::RouteSnapshot {
-            table: "inet.0".into(),
-            family: "inet".into(),
-            destination: "10.0.0.0/24".into(),
-            next_hops: vec!["192.0.2.2@st0.0".into()],
-            ..Default::default()
-        }],
+        routes: vec![
+            crate::protocol::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.0.0.0/24".into(),
+                next_hops: vec!["192.0.2.2@st0.0".into()],
+                ..Default::default()
+            },
+            crate::protocol::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "192.0.2.0/24".into(),
+                next_hops: vec!["192.0.2.2@st0.0".into()],
+                ..Default::default()
+            },
+        ],
         ipsec_tunnel_snapshot_generation: 42,
         ipsec_tunnel_rows: rows.clone(),
         route_table_identities: main_route_table_identities(),
@@ -2235,7 +2307,7 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
             .map(|row| (row.if_id, row.logical_ifindex)),
         Some((9, 10))
     );
-    let packet = test_ipv4_packet_from([10, 0, 0, 1], [10, 0, 0, 1]);
+    let packet = test_ipv4_packet_from([10, 0, 0, 1], [192, 0, 2, 1]);
     let decision = crate::afxdp::ipsec_inner::adjudicate_ipsec_inner(
         &published,
         crate::afxdp::ipsec_inner::IpsecInnerInput {

@@ -1120,6 +1120,8 @@ mod slow_path_mtu_tests {
         // RuntimeView::new_with_ipsec_authority marks the inventory
         // unavailable, so the join denies with d22_inventory_unavailable /
         // reason 52 before any join or MTU assertion runs.
+        // The D22 half also needs the local-selector projection, a matching
+        // forwarding route, and a permit zone policy.
         let tunnel_rows = vec![IpsecTunnelRowSnapshot {
             stn: "st0".to_string(),
             if_id: 9,
@@ -1166,18 +1168,36 @@ mod slow_path_mtu_tests {
                 generation: 7,
                 fib_generation: 3,
                 complete: true,
-                main_routes: vec![crate::protocol::snapshot::IpsecMainRouteSnapshot {
-                    domain: 0,
-                    table: 254,
-                    disposition: 1, // RTN_UNICAST
-                    family: "inet".into(),
-                    destination: "10.0.0.1/32".into(),
-                    next_hops: vec![crate::protocol::snapshot::IpsecMainRouteNextHopSnapshot {
-                        ifindex: 10,
-                        weight: 1,
-                    }],
-                    ..Default::default()
-                }],
+                main_routes: vec![
+                    crate::protocol::snapshot::IpsecMainRouteSnapshot {
+                        domain: 0,
+                        table: 254,
+                        disposition: 1, // RTN_UNICAST
+                        family: "inet".into(),
+                        destination: "10.0.0.1/32".into(),
+                        next_hops: vec![
+                            crate::protocol::snapshot::IpsecMainRouteNextHopSnapshot {
+                                ifindex: 10,
+                                weight: 1,
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    crate::protocol::snapshot::IpsecMainRouteSnapshot {
+                        domain: 0,
+                        table: 254,
+                        disposition: 1, // RTN_UNICAST
+                        family: "inet".into(),
+                        destination: "192.0.2.0/24".into(),
+                        next_hops: vec![
+                            crate::protocol::snapshot::IpsecMainRouteNextHopSnapshot {
+                                ifindex: 20,
+                                weight: 1,
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ],
                 tunnel_rows: vec![crate::protocol::snapshot::IpsecPMechTunnelRowSnapshot {
                     stn: "st0".into(),
                     if_id: 9,
@@ -1192,7 +1212,7 @@ mod slow_path_mtu_tests {
                     ],
                     effective_prefixes: vec!["10.0.0.1/32".into()],
                     ingress_prefixes: vec!["10.0.0.1/32".into()],
-                    destination_prefixes: Vec::new(),
+                    destination_prefixes: vec!["192.0.2.0/24".into()],
                     inventory_generation: 7,
                     fib_generation: 3,
                     source_kind: "xfrmi".into(),
@@ -1231,6 +1251,14 @@ mod slow_path_mtu_tests {
         // EBADF no-op.
         let mut forwarding = ForwardingState::default();
         forwarding.ifindex_to_zone_id.insert(10, 1);
+        forwarding.ifindex_to_zone_id.insert(20, 2);
+        forwarding.ifindex_unambiguous_zone_id.insert(20, 2);
+        forwarding.zone_id_to_name.insert(1, "vpn".into());
+        forwarding.zone_id_to_name.insert(2, "lan".into());
+        let mut zones = rustc_hash::FxHashMap::default();
+        zones.insert("vpn".to_string(), 1);
+        zones.insert("lan".to_string(), 2);
+        forwarding.policy = crate::policy::parse_policy_state("permit", &[], &zones);
         let identity = crate::afxdp::types::RouteIdentity {
             domain: 0,
             table: 254,
@@ -1244,17 +1272,30 @@ mod slow_path_mtu_tests {
         forwarding.route_table_identity_map_complete = true;
         forwarding.routes_v4.insert(
             "inet.0".into(),
-            vec![crate::afxdp::types::RouteEntryV4::single(
-                crate::prefix::PrefixV4::from_net(
-                    "10.0.0.0/24".parse().expect("canonical route prefix"),
+            vec![
+                crate::afxdp::types::RouteEntryV4::single(
+                    crate::prefix::PrefixV4::from_net(
+                        "10.0.0.0/24".parse().expect("canonical route prefix"),
+                    ),
+                    20,
+                    0,
+                    Some("192.0.2.2".parse().expect("canonical route next hop")),
+                    false,
+                    String::new(),
+                    1,
                 ),
-                20,
-                0,
-                Some("192.0.2.2".parse().expect("canonical route next hop")),
-                false,
-                String::new(),
-                1,
-            )],
+                crate::afxdp::types::RouteEntryV4::single(
+                    crate::prefix::PrefixV4::from_net(
+                        "192.0.2.0/24".parse().expect("local LAN route prefix"),
+                    ),
+                    20,
+                    0,
+                    Some("192.0.2.2".parse().expect("local LAN next hop")),
+                    false,
+                    String::new(),
+                    1,
+                ),
+            ],
         );
         forwarding.neighbors.insert(
             (20, "192.0.2.2".parse().expect("canonical route neighbor")),
@@ -1331,7 +1372,7 @@ mod slow_path_mtu_tests {
             packet[8] = 64;
             packet[9] = 6;
             packet[12..16].copy_from_slice(&[10, 0, 0, 1]);
-            packet[16..20].copy_from_slice(&[10, 0, 0, 1]);
+            packet[16..20].copy_from_slice(&[192, 0, 2, 1]);
             packet
         };
         let decision = crate::afxdp::ipsec_inner::adjudicate_ipsec_inner(
