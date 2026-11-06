@@ -515,13 +515,17 @@ pub(crate) fn global_tuple_gate() -> Arc<TupleGate> {
 // cells install the same canonical tuple (10.0.61.102:12345 -> 8.8.8.8:443).
 // On the one process-global gate a sibling thread's live install claim made
 // this thread's new-flow install `gate_busy` (non-blocking, no wait), so the
-// install was refused: NAT rollback, 0 sessions, "install count 0" panics —
-// 6/8 parallel `tests_fabric_zone_stamp` runs red, 0/3 serial. The HA
-// `begin_clear` fence made it worse: it blocks EVERY tuple process-wide
-// while one clear cell runs. Separate test-thread gates isolate claims and
-// clear fences. Explicit Arc handles still share a gate across threads—
-// permits, leases, and fences carry that Arc—so deliberate intra-test
-// contention remains intact.
+// install was refused: NAT rollback, 0 sessions, and "install count 0"
+// panics. Evidence: pre-fix binary was red in 7/8 default-parallel runs
+// and green in 3/3 serial runs; process-global-gate mutant was red in
+// 6/8 explicit 16-thread runs.
+// HA clear fences also block EVERY tuple process-wide while active.
+// Separate test-thread gates isolate unrelated tests' claims and clear fences.
+// `thread::spawn` does not inherit TLS; a test
+// deliberately exercising cross-thread gate contention must move an explicit
+// `Arc<TupleGate>` into the worker and call the gate API through that handle
+// rather than reacquire this accessor. Permits and fences retain the Arc, so
+// explicit cross-thread gate operations keep using the same gate.
 #[cfg(test)]
 thread_local! {
     static TEST_TUPLE_GATE: Arc<TupleGate> = Arc::new(TupleGate::new());
