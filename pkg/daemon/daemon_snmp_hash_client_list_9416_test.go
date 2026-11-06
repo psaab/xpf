@@ -266,3 +266,92 @@ func TestSNMPConfigHashIncludesClientListDefinitions18986(t *testing.T) {
 		t.Fatalf("#18986: an unreferenced ClientLists definition edit did not change the hash (%d)", beforeHash)
 	}
 }
+
+// TestSNMPConfigHashFramesSameCountLenientRefs18986 closes the same-count
+// framing alias: undefined refs can impersonate the in-band quarantine marker,
+// community terminator, and following community header without changing the
+// number of communities or resolved Clients.
+func TestSNMPConfigHashFramesSameCountLenientRefs18986(t *testing.T) {
+	compile := func(communities string) *config.Config {
+		t.Helper()
+		text := `system { host-name fw; snmp {` + communities + `} }`
+		tree, parseErrs := config.NewParser(text).Parse()
+		if len(parseErrs) != 0 {
+			t.Fatalf("parse SNMP config: %v", parseErrs)
+		}
+		cfg, err := config.CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("compile lenient SNMP config: %v", err)
+		}
+		return cfg
+	}
+
+	x := compile(`
+        community a {
+            authorization read-only;
+            client-list-name source-restriction-quarantined;
+            client-list-name false;
+            client-list-name end-community;
+            client-list-name b;
+            client-list-name read-only;
+            client-list-name clients;
+            client-list-name client-list-names;
+        }
+        community b {
+            authorization read-only;
+            client-list-name z;
+        }
+    `)
+	y := compile(`
+        community a { authorization read-only; }
+        community b {
+            authorization read-only;
+            client-list-name source-restriction-quarantined;
+            client-list-name true;
+            client-list-name end-community;
+            client-list-name b;
+            client-list-name read-only;
+            client-list-name clients;
+            client-list-name client-list-names;
+            client-list-name z;
+        }
+    `)
+
+	xA, xB := x.System.SNMP.Communities["a"], x.System.SNMP.Communities["b"]
+	yA, yB := y.System.SNMP.Communities["a"], y.System.SNMP.Communities["b"]
+	if xA == nil || xB == nil || yA == nil || yB == nil {
+		t.Fatal("both lenient configs must contain communities a and b")
+	}
+	wantXARefs := []string{
+		"source-restriction-quarantined", "false", "end-community", "b",
+		"read-only", "clients", "client-list-names",
+	}
+	wantYBRefs := []string{
+		"source-restriction-quarantined", "true", "end-community", "b",
+		"read-only", "clients", "client-list-names", "z",
+	}
+	for _, got := range []struct {
+		name string
+		comm *config.SNMPCommunity
+		refs []string
+	}{
+		{name: "X.a", comm: xA, refs: wantXARefs},
+		{name: "X.b", comm: xB, refs: []string{"z"}},
+		{name: "Y.a", comm: yA, refs: nil},
+		{name: "Y.b", comm: yB, refs: wantYBRefs},
+	} {
+		if len(got.comm.Clients) != 0 {
+			t.Errorf("%s resolved Clients = %+v, want no resolved entries", got.name, got.comm.Clients)
+		}
+		if !reflect.DeepEqual(got.comm.ClientListNames, got.refs) {
+			t.Errorf("%s ClientListNames = %q, want %q", got.name, got.comm.ClientListNames, got.refs)
+		}
+	}
+	if !xA.SourceRestrictionQuarantined() || yA.SourceRestrictionQuarantined() {
+		t.Fatalf("community a quarantine states: X=%v Y=%v, want X quarantined and Y unrestricted",
+			xA.SourceRestrictionQuarantined(), yA.SourceRestrictionQuarantined())
+	}
+	if xHash, yHash := snmpConfigHash(x), snmpConfigHash(y); xHash == yHash {
+		t.Fatalf("#18986: same-count lenient reference streams alias the reconcile hash (%d)", xHash)
+	}
+}

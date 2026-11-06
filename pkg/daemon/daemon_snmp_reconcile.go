@@ -109,6 +109,7 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 			// order, so an unchanged stanza still hashes equal (no spurious
 			// reconcile).
 			write("clients")
+			writeUint(len(c.Clients))
 			for _, cl := range c.Clients {
 				write(cl.Prefix)
 				if cl.Restrict {
@@ -136,6 +137,7 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 			// conservative superset that can reconcile spuriously on a
 			// reshuffle but can never MISS an authorization change.
 			write("client-list-names")
+			writeUint(len(c.ClientListNames))
 			for _, ref := range c.ClientListNames {
 				write(ref)
 			}
@@ -173,6 +175,7 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 			write(tg.Version)
 			targets := append([]string(nil), tg.Targets...)
 			sort.Strings(targets)
+			writeUint(len(targets))
 			for _, t := range targets {
 				write(t)
 			}
@@ -187,6 +190,7 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 			write("categories")
 			cats := append([]string(nil), tg.Categories...)
 			sort.Strings(cats)
+			writeUint(len(cats))
 			for _, c := range cats {
 				write(c)
 			}
