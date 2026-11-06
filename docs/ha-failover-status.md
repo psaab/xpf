@@ -610,8 +610,13 @@ The rules now:
   self-targeting reverse, even when the local
   lookup returns `MissingNeighbor` or `ForwardCandidate`; this is pinned by
   `pool_alias_reverse_stays_with_peer_after_refresh_18535`. The already-
-  un-NATed fabric reply still forwards toward its real client. DNAT-only and
-  port-only alias reverses (pre-existing) are not covered either; see #18927.
+  un-NATed fabric reply still forwards toward its real client. DNAT address-only
+  and address+port aliases and TCP/UDP port-only alias reverses are now also
+  handed off only when their recovered forward-wire key proves they are
+  aliases (#18927 child 4; `dnat_alias_reverse_is_handed_to_peer_at_synthesis_18927`,
+  `port_only_alias_reverse_is_handed_to_peer_at_synthesis_18927`, and
+  `dnat_alias_reverse_reply_is_handed_to_peer_18927`). Canonical DNAT, no-NAT,
+  NAT64/NPTv6, and ICMP-identifier controls remain excluded.
   A reverse that un-NATs to a genuinely local address other than its wire
   destination is still host-bound and still gated. The LAN node's own reverse
   rows un-NAT to the client and are unaffected.
@@ -656,8 +661,8 @@ sends (the Go legs were read, not run). Residuals are tracked in #18927:
 - the reverse-side post-refresh window: fixed for empty dynamic rules and recorded-scope TCP/UDP rebound mismatches; pre-refresh reply delivery, ICMP, and derivable-scope rebounds remain outside this fix;
 - why the RG-taking node held only the alias of some flows (fixed: the
   import race above);
-- DNAT-only and port-only alias reverses, whose un-NAT also targets itself
-  (open, pre-existing);
+- DNAT-only and port-only alias reverses, whose un-NAT target is their own wire
+  tuple (fixed by #18927 child 4's provenance-gated handoff);
 - loss cluster, after this fix (0.0.26021, diag9/diag9b), still open:
   - in the split state (WAN RG on one node, LAN RG on the other) every
     stream crawls at about 0.1 Gbit/s until the LAN RG follows; it was also
