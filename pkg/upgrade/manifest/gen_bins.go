@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 func main() {
@@ -25,7 +27,7 @@ func main() {
 		"# scripts/image/test_seed_layout_10771.py) read this file instead of\n" +
 		"# retyping the list (#17101). TestManagedBinaryDriftCanary pins it.\n" +
 		strings.Join(names, " ") + "\n"
-	if err := os.WriteFile("bins.txt", []byte(content), 0o644); err != nil {
+	if err := fsatomic.WriteFileAtomic("bins.txt", []byte(content), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
