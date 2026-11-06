@@ -192,6 +192,7 @@ apply-groups G;`
 		t.Fatalf("group-authored error must carry #16607, got: %v", err)
 	}
 }
+
 const snatCtx17712GroupInheritedScopes = `groups { SCOPES { security { nat { source {
         rule-set A { from zone trust; to zone untrust; }
         rule-set B { from zone dmz; to zone dmz2; }

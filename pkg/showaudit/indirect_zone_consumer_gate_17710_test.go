@@ -89,11 +89,11 @@ func TestInterfaceDetailQualifierDeletionRedsCensus17710(t *testing.T) {
 	mutatedPkg.funcs[key] = &fnRec{fd: mutatedRenderer, file: rec.file}
 	_, member, annotated = surfaceEntry(mutatedPkg, key, "pkg/api", f)
 	if !member {
-		t.Fatal("mutated renderer disappeared from the census instead of being "+
+		t.Fatal("mutated renderer disappeared from the census instead of being " +
 			"reported unannotated")
 	}
 	if annotated {
-		t.Fatal("deleting ZoneQuarantineExcludedReason did not make "+
+		t.Fatal("deleting ZoneQuarantineExcludedReason did not make " +
 			"writeInterfacesDetail an unannotated security-zone census member")
 	}
 }

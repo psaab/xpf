@@ -427,7 +427,7 @@ func TestSurfaceAFingerprintPersistedNoSecretOnDisk(t *testing.T) {
 	prov := &config.DDNSProvider{
 		Name: "prov", Backend: "rfc2136",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			UpdateServer: "ns.example.net:53",
+			UpdateServer:  "ns.example.net:53",
 			TSIGKeyName:   "k",
 			TSIGAlgorithm: "hmac-sha256",
 			TSIGSecret:    config.NewSecret("SUPERSECRETKEY=="),

@@ -15,18 +15,18 @@ const (
 
 func bgpConfig11374(familyInet, familyInet6 bool) (*config.BGPConfig, *config.PolicyOptionsConfig) {
 	return &config.BGPConfig{
-			LocalAS:  65001,
-			RouterID: "1.1.1.1",
-			Neighbors: []*config.BGPNeighbor{{
-				Address: bgpPeer11374, PeerAS: 65002, FamilyInet: familyInet, FamilyInet6: familyInet6,
-				Export: []string{"OUT"}, Import: []string{"IN"},
-			}},
-		}, &config.PolicyOptionsConfig{
-			PolicyStatements: map[string]*config.PolicyStatement{
-				"OUT": {Name: "OUT", Terms: []*config.PolicyTerm{{Name: "t1", Action: "accept"}}},
-				"IN":  {Name: "IN", Terms: []*config.PolicyTerm{{Name: "t1", Action: "accept"}}},
-			},
-		}
+		LocalAS:  65001,
+		RouterID: "1.1.1.1",
+		Neighbors: []*config.BGPNeighbor{{
+			Address: bgpPeer11374, PeerAS: 65002, FamilyInet: familyInet, FamilyInet6: familyInet6,
+			Export: []string{"OUT"}, Import: []string{"IN"},
+		}},
+	}, &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"OUT": {Name: "OUT", Terms: []*config.PolicyTerm{{Name: "t1", Action: "accept"}}},
+			"IN":  {Name: "IN", Terms: []*config.PolicyTerm{{Name: "t1", Action: "accept"}}},
+		},
+	}
 }
 
 func bgpAFBlock11374(rendered, family string) string {

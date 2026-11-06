@@ -141,7 +141,6 @@ func parsePublishGenerationArgs(args []string) (publishGenerationFlags, error) {
 	}, nil
 }
 
-
 // queryInstalledPackageVersion reads the just-unpacked package's own
 // Debian version from dpkg status. It is the only candidate ordinal
 // the publish path trusts: postinst runs after unpack, so the value

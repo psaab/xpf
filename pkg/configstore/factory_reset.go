@@ -34,6 +34,7 @@ var DefaultArchiveDir = "/var/lib/xpf/archive"
 // must be erased by the coordinated zeroize path, not by the config-root
 // top-level name sweep below.
 const FeedShrinkHistoryPath = "/var/lib/xpf/feed-shrink-history.json"
+
 // EthtoolForcedRegistryPath is the xpf-owned registry of interfaces whose
 // link mode xpf has forced. It is outside configDir and must be erased by
 // the coordinated zeroize path.

@@ -56,9 +56,9 @@ func selectorCommands11380(vpn, name, local, remote string) []string {
 
 func TestSharedSt0BindRejectedRegardlessOfSelectors17779(t *testing.T) {
 	cases := []struct {
-		name                 string
-		extra                []string
-		wantSelectorOverlap  bool
+		name                string
+		extra               []string
+		wantSelectorOverlap bool
 	}{
 		{
 			name: "disjoint remote prefixes",

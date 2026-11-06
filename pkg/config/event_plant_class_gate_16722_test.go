@@ -121,8 +121,6 @@ func TestTreeMayHaveEventCommands16722(t *testing.T) {
 
 		{"elided policy-name spelling has no policy commands",
 			gate16722Hier(t, `event-options policy { events e; then { change-configuration { commands "set system host-name x"; } } }`), false},
-
-
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -238,8 +236,8 @@ func TestCompactBodyKeywordPolicyNameStillAttributed17762(t *testing.T) {
 
 func TestCompactOneKeyPolicySuperuserQuarantined17762(t *testing.T) {
 	sources := map[string]string{
-		"top-level": `event-options policy { p { events e; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } }`,
-		"group-body": `groups { g { event-options policy { p { events e; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } } } } apply-groups g;`,
+		"top-level":    `event-options policy { p { events e; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } }`,
+		"group-body":   `groups { g { event-options policy { p { events e; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } } } } apply-groups g;`,
 		"keyword-name": `event-options policy { then { events e; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } }`,
 	}
 	for name, source := range sources {

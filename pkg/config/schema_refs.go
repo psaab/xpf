@@ -190,16 +190,16 @@ func validateSchemaRefs() {
 // under any of them is caught even though no static ref can name the
 // full path.
 var argResolverPrefixes = [][]string{
-	{"security"},                                                                // gatewayLeafSchema8939 / securityNamedLeafSchema8939: + parent.Keys[0] branch, + gateway|<kind>, instance body via wildcard
-	{"class-of-service", "interfaces"},                                          // cosBindingSchema8939: + unit <instance>, + classifiers|rewrite-rules
-	{"class-of-service", "classifiers"},                                         // cosClassifiersSchema15064: + dscp|ieee-802.1|inet-precedence
-	{"class-of-service", "rewrite-rules"},                                       // cosRewriteRulesSchema15064: + inet-precedence|exp|dscp|ieee-802.1
-	{"system", "services", "dhcp-local-server", "group", "pool"},                // dhcpPoolSchema15691(false)
-	{"system", "services", "dhcpv6-local-server", "group", "pool"},              // dhcpPoolSchema15691(true)
-	{"system", "syslog"},                                                        // syslogDestinationHoistSchema9414: + host|file|user|console
-	{"security", "policies", "global", "policy"},                                // policySchema9792(true)
-	{"security", "policies", "from-zone", "policy"},                             // policySchema9792(false)
-	{"services", "ip-monitoring", "policy", "then", "preferred-route", "route"}, // preferredRouteSchema9792(false)
+	{"security"},                                                                                    // gatewayLeafSchema8939 / securityNamedLeafSchema8939: + parent.Keys[0] branch, + gateway|<kind>, instance body via wildcard
+	{"class-of-service", "interfaces"},                                                              // cosBindingSchema8939: + unit <instance>, + classifiers|rewrite-rules
+	{"class-of-service", "classifiers"},                                                             // cosClassifiersSchema15064: + dscp|ieee-802.1|inet-precedence
+	{"class-of-service", "rewrite-rules"},                                                           // cosRewriteRulesSchema15064: + inet-precedence|exp|dscp|ieee-802.1
+	{"system", "services", "dhcp-local-server", "group", "pool"},                                    // dhcpPoolSchema15691(false)
+	{"system", "services", "dhcpv6-local-server", "group", "pool"},                                  // dhcpPoolSchema15691(true)
+	{"system", "syslog"},                                                                            // syslogDestinationHoistSchema9414: + host|file|user|console
+	{"security", "policies", "global", "policy"},                                                    // policySchema9792(true)
+	{"security", "policies", "from-zone", "policy"},                                                 // policySchema9792(false)
+	{"services", "ip-monitoring", "policy", "then", "preferred-route", "route"},                     // preferredRouteSchema9792(false)
 	{"services", "ip-monitoring", "policy", "then", "preferred-route", "routing-instance", "route"}, // preferredRouteSchema9792(true)
 }
 

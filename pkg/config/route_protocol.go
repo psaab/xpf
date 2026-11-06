@@ -1,6 +1,5 @@
 package config
 
-
 // RouteProtocol is one row of the kernel route-protocol vocabulary (#17029).
 // Every projection of this vocabulary — the rtnetlink byte to internal name
 // mapping, the terse single-letter tag, the Junos display name, the

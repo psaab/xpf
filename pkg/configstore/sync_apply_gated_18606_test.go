@@ -118,11 +118,11 @@ func TestSyncApplyGatedRefusalKeepsUnsharedState16016(t *testing.T) {
 // cell fail even though the refusal still leaves the Store untouched.
 func TestSyncApplyGatedCutoffPreservesPreparedState16016(t *testing.T) {
 	for _, tc := range []struct {
-		name              string
-		incoming           func(string) string
-		wantClear          bool
-		wantDivergence     bool
-		wantHistory        bool
+		name           string
+		incoming       func(string) string
+		wantClear      bool
+		wantDivergence bool
+		wantHistory    bool
 	}{
 		{name: "matching-content", incoming: func(marked string) string { return marked }, wantClear: true},
 		{name: "changed-content", incoming: func(string) string {

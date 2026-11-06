@@ -176,7 +176,7 @@ func TestRFC2136SourceFamilyFailsClosedCrossFamily(t *testing.T) {
 	c := &config.DHCPDynamicDNSConfig{
 		Enabled: true, Domain: "example.com", // IPv6 source, IPv4-only server,
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			UpdateServer: srv.addrUDP,
+			UpdateServer:  srv.addrUDP,
 			SourceAddress: "::1",
 		},
 	}

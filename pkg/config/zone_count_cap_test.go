@@ -103,7 +103,7 @@ func TestZoneCountNormalConfigUnaffected(t *testing.T) {
 // skip.
 func TestZoneCountWithCapRejectsOverInjectedCap17928(t *testing.T) {
 	const cap = int64(3)
-	err := validateZoneCountWithCap(zonesConfig(int(cap + 1)), cap)
+	err := validateZoneCountWithCap(zonesConfig(int(cap+1)), cap)
 	if err == nil {
 		t.Fatalf("validateZoneCountWithCap accepted %d zones (cap %d)", cap+1, cap)
 	}

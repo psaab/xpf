@@ -53,11 +53,11 @@ func TestTCPSessionEveryLeafEverySpelling18762(t *testing.T) {
 					continue
 				}
 				rows = append(rows, row{
-					name:         name + " " + k,
-					braced:       `security { flow { tcp-session { ` + name + ` { ` + k + v + `; } } } }`,
-					elided:       `security { flow { tcp-session { ` + name + ` ` + k + v + `; } } }`,
-					twoLevel:     `security { flow { tcp-session ` + name + ` ` + k + v + `; } }`,
-					fullyElided:  `security flow tcp-session ` + name + ` ` + k + v + `;`,
+					name:        name + " " + k,
+					braced:      `security { flow { tcp-session { ` + name + ` { ` + k + v + `; } } } }`,
+					elided:      `security { flow { tcp-session { ` + name + ` ` + k + v + `; } } }`,
+					twoLevel:    `security { flow { tcp-session ` + name + ` ` + k + v + `; } }`,
+					fullyElided: `security flow tcp-session ` + name + ` ` + k + v + `;`,
 				})
 			}
 			continue

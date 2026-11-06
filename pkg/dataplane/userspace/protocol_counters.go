@@ -46,10 +46,10 @@ type SourceNATPoolStatus struct {
 	// from "ran hot but never blocked". Zero from an older helper that
 	// predates the counters. JSON tags MUST match the Rust serde
 	// rename(...) exactly (protocol/nat.rs).
-	FlowShardLockAcquisitionsTotal  uint64 `json:"flow_shard_lock_acquisitions_total,omitempty"`
-	FlowShardLockContendedTotal     uint64 `json:"flow_shard_lock_contended_total,omitempty"`
-	LiveWriteLockAcquisitionsTotal  uint64 `json:"live_write_lock_acquisitions_total,omitempty"`
-	LiveWriteLockContendedTotal     uint64 `json:"live_write_lock_contended_total,omitempty"`
+	FlowShardLockAcquisitionsTotal uint64 `json:"flow_shard_lock_acquisitions_total,omitempty"`
+	FlowShardLockContendedTotal    uint64 `json:"flow_shard_lock_contended_total,omitempty"`
+	LiveWriteLockAcquisitionsTotal uint64 `json:"live_write_lock_acquisitions_total,omitempty"`
+	LiveWriteLockContendedTotal    uint64 `json:"live_write_lock_contended_total,omitempty"`
 	// Legacy summed totals (flow-shard + live-write), kept for one
 	// release (#17036). Do not use for the #15956 perf-gate ratio.
 	LiveLockAcquisitionsTotal uint64 `json:"live_lock_acquisitions_total,omitempty"`

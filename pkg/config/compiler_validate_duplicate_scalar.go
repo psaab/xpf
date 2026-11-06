@@ -164,4 +164,3 @@ func lastAPIAuthExpires(node *Node) (string, bool) {
 	}
 	return raw, present
 }
-

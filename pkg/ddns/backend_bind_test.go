@@ -96,7 +96,7 @@ func TestResolveBindConfigDestInterfaceWinsOverVRF(t *testing.T) {
 	resolve := bindTestConfig().ResolveKernelIfName
 	b, err := resolveBindConfig(config.RFC2136Endpoint{
 		DestinationInterface: "ge-0/0/2",
-		RoutingInstance: "WAN",
+		RoutingInstance:      "WAN",
 	}, resolve)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -197,7 +197,7 @@ func TestNewRFC2136UpdaterValidatesBindDeviceExists(t *testing.T) {
 	ok := &config.DHCPDynamicDNSConfig{
 		Enabled: true, Domain: "example.com",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			UpdateServer: "192.0.2.53:53",
+			UpdateServer:         "192.0.2.53:53",
 			DestinationInterface: "reth1",
 		},
 	}
@@ -210,7 +210,7 @@ func TestNewRFC2136UpdaterValidatesBindDeviceExists(t *testing.T) {
 	bad := &config.DHCPDynamicDNSConfig{
 		Enabled: true, Domain: "example.com",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			UpdateServer: "192.0.2.53:53",
+			UpdateServer:         "192.0.2.53:53",
 			DestinationInterface: "ge-0/0/2",
 		},
 	}
@@ -238,7 +238,7 @@ func TestNewRFC2136UpdaterInstallsCustomDialer(t *testing.T) {
 	withBind := &config.DHCPDynamicDNSConfig{
 		Enabled: true, Domain: "example.com",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			UpdateServer: "192.0.2.53:53",
+			UpdateServer:  "192.0.2.53:53",
 			SourceAddress: "10.0.0.9",
 		},
 	}
@@ -284,7 +284,7 @@ func TestNewRFC2136UpdaterInvalidSourceAddressErrors(t *testing.T) {
 	bad := &config.DHCPDynamicDNSConfig{
 		Enabled: true, Domain: "example.com",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			UpdateServer: "192.0.2.53:53",
+			UpdateServer:  "192.0.2.53:53",
 			SourceAddress: "garbage",
 		},
 	}

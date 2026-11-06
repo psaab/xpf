@@ -613,8 +613,8 @@ type APIAuthConfig struct {
 	Users            []*APIAuthUser // basic auth users
 	APIKeys          []Secret       // legacy bearer/X-API-Key tokens
 	Keys             []*APIAuthKey  // named bearer/X-API-Key identities
-	DefaultClass     string    // used when a user/key Class is empty and for legacy APIKeys
-	DefaultExpiresAt time.Time // used when a user/key ExpiresAt is zero and for legacy APIKeys
+	DefaultClass     string         // used when a user/key Class is empty and for legacy APIKeys
+	DefaultExpiresAt time.Time      // used when a user/key ExpiresAt is zero and for legacy APIKeys
 	// MetricsRequireAuth opts loopback /metrics into api-auth credential
 	// gating (#16072): `web-management api-auth metrics-require-auth`.
 	MetricsRequireAuth bool
@@ -631,7 +631,7 @@ func (c *APIAuthConfig) APIKeyCount() int {
 // APIAuthUser defines a scoped, expiring Basic-auth user for the REST API.
 type APIAuthUser struct {
 	Username  string
-	Password  Secret // bcrypt verifier after compilation; redacted on marshal
+	Password  Secret    // bcrypt verifier after compilation; redacted on marshal
 	Class     string    // explicit override; empty inherits APIAuthConfig.DefaultClass
 	ExpiresAt time.Time // explicit override; zero inherits APIAuthConfig.DefaultExpiresAt
 }
@@ -639,7 +639,7 @@ type APIAuthUser struct {
 // APIAuthKey defines a named, scoped, expiring Bearer/X-API-Key identity.
 type APIAuthKey struct {
 	Name      string
-	Secret    Secret // bcrypt verifier after compilation; redacted on marshal
+	Secret    Secret    // bcrypt verifier after compilation; redacted on marshal
 	Class     string    // explicit override; empty inherits APIAuthConfig.DefaultClass
 	ExpiresAt time.Time // explicit override; zero inherits APIAuthConfig.DefaultExpiresAt
 }

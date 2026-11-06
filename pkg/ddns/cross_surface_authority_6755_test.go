@@ -161,7 +161,7 @@ func TestAuthorityOmitsCredentials6755(t *testing.T) {
 	a := leaseAuthorityFingerprint(&config.DHCPDynamicDNSConfig{
 		Backend: "rfc2136",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			UpdateServer: "ns1.example.net:53",
+			UpdateServer:  "ns1.example.net:53",
 			TSIGKeyName:   "k1",
 			TSIGAlgorithm: "hmac-sha256",
 			TSIGSecret:    config.NewSecret("SECRET-ONE"),
@@ -170,7 +170,7 @@ func TestAuthorityOmitsCredentials6755(t *testing.T) {
 	b := leaseAuthorityFingerprint(&config.DHCPDynamicDNSConfig{
 		Backend: "rfc2136",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			UpdateServer: "ns1.example.net:53",
+			UpdateServer:  "ns1.example.net:53",
 			TSIGKeyName:   "k2",
 			TSIGAlgorithm: "hmac-sha512",
 			TSIGSecret:    config.NewSecret("SECRET-TWO"),

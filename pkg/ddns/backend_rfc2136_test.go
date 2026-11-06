@@ -737,9 +737,9 @@ func TestRFC2136TSIGSignedAndVerified(t *testing.T) {
 		Enabled: true,
 		Domain:  "example.com",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			TSIGKeyName: keyName,
+			TSIGKeyName:   keyName,
 			TSIGAlgorithm: "hmac-sha256",
-			TSIGSecret: config.NewSecret(secret),
+			TSIGSecret:    config.NewSecret(secret),
 		},
 	}, &ptr, &conf)
 
@@ -755,9 +755,9 @@ func tsigTestUpdater(t *testing.T, srv *fakeDNSServer, keyName, secret string, p
 		Enabled: true,
 		Domain:  "example.com",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			TSIGKeyName: keyName,
+			TSIGKeyName:   keyName,
 			TSIGAlgorithm: "hmac-sha256",
-			TSIGSecret: config.NewSecret(secret),
+			TSIGSecret:    config.NewSecret(secret),
 		},
 	}, ptr, conf)
 }
@@ -1039,9 +1039,9 @@ func TestRFC2136TSIGWrongSecretRejectedNoLeak(t *testing.T) {
 		Enabled: true,
 		Domain:  "example.com",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			TSIGKeyName: keyName,
+			TSIGKeyName:   keyName,
 			TSIGAlgorithm: "hmac-sha256",
-			TSIGSecret: config.NewSecret(clientSecret),
+			TSIGSecret:    config.NewSecret(clientSecret),
 		},
 	}, &ptr, &conf)
 
@@ -1604,9 +1604,9 @@ func TestRFC2136UnsignedUpdateWarnsOncePerProvider(t *testing.T) {
 			Enabled: true,
 			Domain:  "example.com",
 			RFC2136Endpoint: config.RFC2136Endpoint{
-				TSIGKeyName: "k1",
+				TSIGKeyName:   "k1",
 				TSIGAlgorithm: "hmac-sha256",
-				TSIGSecret: config.NewSecret("c2VjcmV0"),
+				TSIGSecret:    config.NewSecret("c2VjcmV0"),
 			},
 		}, &ptr, &conf)
 		if u.tsigKeyName == "" {

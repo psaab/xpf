@@ -243,4 +243,3 @@ func TestRIPvsISISArbitrationIndependent17735(t *testing.T) {
 		t.Fatalf("IS-IS-only control must render:\n%s", gotISIS)
 	}
 }
-

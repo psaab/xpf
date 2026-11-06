@@ -179,7 +179,7 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 		// an eligible link was not activated by the renderer.
 		type transitAreaRenderState16631 struct {
 			interfacePresent bool
-			authRejected      bool
+			authRejected     bool
 		}
 		var transitAreaState16631 map[string]transitAreaRenderState16631
 		if len(virtualLinks15016) != 0 {

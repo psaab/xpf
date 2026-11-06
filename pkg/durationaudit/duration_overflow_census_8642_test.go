@@ -340,16 +340,16 @@ func TestDurationSiteVerdictCounts8642(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name       string
-		sites      []site
+		name        string
+		sites       []site
 		wantFinding string
 	}{
 		{name: "exact count", sites: makeSites(2)},
 		{name: "gained site", sites: makeSites(3), wantFinding: file + ": pinned 2, actual 3"},
 		{name: "lost site", sites: makeSites(1), wantFinding: file + ": pinned 2, actual 1"},
 		{
-			name: "non-verdicted site",
-			sites: append(makeSites(2), site{file: "pkg/fixture/new.go", line: 9, fn: "newSite"}),
+			name:        "non-verdicted site",
+			sites:       append(makeSites(2), site{file: "pkg/fixture/new.go", line: 9, fn: "newSite"}),
 			wantFinding: "pkg/fixture/new.go:9 in newSite() has no recorded verdict",
 		},
 	} {
@@ -409,7 +409,6 @@ func TestNoUnboundedConfigDurationMultiplies8642(t *testing.T) {
 			strings.Join(findings, "\n  "))
 	}
 }
-
 
 // DEGENERATE-FAILURE GUARD 2: the census must be able to SEE an unbounded site.
 // Guard 1 proves it recognises bounded ones; without this, a classifier that

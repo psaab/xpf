@@ -385,7 +385,7 @@ func TestDHCPBackendFingerprintIdentity_5814(t *testing.T) {
 	base := &config.DHCPDynamicDNSConfig{
 		Enabled: true, Backend: "rfc2136",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			UpdateServer: "ns1.example.com:53",
+			UpdateServer:  "ns1.example.com:53",
 			TSIGKeyName:   "k1",
 			TSIGAlgorithm: "hmac-sha256",
 		},
@@ -402,7 +402,7 @@ func TestDHCPBackendFingerprintIdentity_5814(t *testing.T) {
 	if got := fp(&config.DHCPDynamicDNSConfig{
 		Enabled: true, Backend: "rfc2136",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			UpdateServer: "ns1.example.com:53",
+			UpdateServer:  "ns1.example.com:53",
 			TSIGKeyName:   "k1",
 			TSIGAlgorithm: "hmac-sha256",
 		},

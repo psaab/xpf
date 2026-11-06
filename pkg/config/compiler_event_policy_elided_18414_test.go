@@ -21,9 +21,9 @@ func TestEventPolicyThenChangeConfigurationElided18414(t *testing.T) {
 			want: []string{"set system host-name deeply-elided"},
 		},
 		{
-			name:      "fully packed policy without braces",
-			text:      `event-options { policy p events ping_test_completed then change-configuration commands "set system host-name fully-packed"; }`,
-			want:      []string{"set system host-name fully-packed"},
+			name:       "fully packed policy without braces",
+			text:       `event-options { policy p events ping_test_completed then change-configuration commands "set system host-name fully-packed"; }`,
+			want:       []string{"set system host-name fully-packed"},
 			wantEvents: []string{"ping_test_completed"},
 		},
 		{

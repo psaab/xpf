@@ -180,4 +180,3 @@ func TestQuarantinedUnitZeroParentNotPublishedWithSurvivingZoneInterface17912(t 
 		t.Fatalf("zulu's surviving interface has no host-inbound view: %+v", views)
 	}
 }
-

@@ -137,7 +137,6 @@ func TestApplyPurgeWindowKeepsSuccessorPark17709(t *testing.T) {
 		t.Fatalf("parked entry semRev is stale (predecessor), want successor rev")
 	}
 
-
 	// Drain after cooldown: successor edge replays exactly once.
 	cur.set(50)
 	e.drainDeferred()

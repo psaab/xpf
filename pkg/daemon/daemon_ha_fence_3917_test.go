@@ -35,7 +35,6 @@ func (h *fenceRecorderHA) SetHAWatchdog(_ context.Context, _ int, _ uint64) erro
 	return nil
 }
 
-
 func (h *fenceRecorderHA) SyncFabricState(_ context.Context) error { return nil }
 
 func (h *fenceRecorderHA) sortedDeactivated() []int {

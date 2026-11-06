@@ -107,7 +107,7 @@ var exemptRenderers = map[string]string{
 	"pkg/grpcapi/server_show_security_text.go:showSecurityLog":           "#10530 — event-time zone names are historical; current config must not rewrite them",
 	"pkg/api/api.go:interfaceZoneMap":                                    "#16556 adjacency — internal interface->zone lookup emits no zone value; consumers annotate",
 	"pkg/api/metrics_counters.go:collectZoneCounters":                    "#16556 adjacency — per-zone counter gauge emits no interface membership",
-	"pkg/api/metrics_counters.go:collectInterfaceCounters":              "#16556 adjacency — per-interface telemetry emits counters, not zone membership or enforcement state",
+	"pkg/api/metrics_counters.go:collectInterfaceCounters":               "#16556 adjacency — per-interface telemetry emits counters, not zone membership or enforcement state",
 	"pkg/cli/cli_show_nat.go:showNATDestinationSummary":                  "#16556 adjacency — NAT summary resolves zone IDs to names, emits no interface membership",
 	"pkg/cli/cli_show_nat.go:showNATSourceSummary":                       "#16556 adjacency — NAT summary resolves zone IDs to names, emits no interface membership",
 	"pkg/cli/cli_show_security_screen.go:showScreen":                     "#16556 adjacency — screen renderer qualifies zone names, emits no interface membership",
@@ -430,7 +430,7 @@ func TestSurfaceAnnotationCensusIsExact6534(t *testing.T) {
 			// unannotated renderer, not disappear behind helper exemptions.
 			if f.Name == "security zone" &&
 				!contains(population, "pkg/api/interfaces.go:writeInterfacesDetail") {
-				t.Errorf("security-zone census omitted pkg/api/interfaces.go:writeInterfacesDetail; "+
+				t.Errorf("security-zone census omitted pkg/api/interfaces.go:writeInterfacesDetail; " +
 					"its config collection is reached through interfaceZoneMap/allInterfaceNames")
 			}
 
@@ -758,10 +758,10 @@ func rangesOverAny(fset *token.FileSet, fd *ast.FuncDecl, subs []string) bool {
 // enforcement rendering. The list is explicit: walking every call edge would
 // misclassify unrelated functions that transitively call a generic helper.
 var collectionReaderHelpers = map[string]bool{
-	"pkg/api/api.go:allInterfaceNames":                    true,
-	"pkg/api/api.go:interfaceZoneMap":                     true,
-	"pkg/grpcapi/server_helpers.go:allInterfaceNames":     true,
-	"pkg/grpcapi/server_helpers.go:interfaceZoneMap":      true,
+	"pkg/api/api.go:allInterfaceNames":                true,
+	"pkg/api/api.go:interfaceZoneMap":                 true,
+	"pkg/grpcapi/server_helpers.go:allInterfaceNames": true,
+	"pkg/grpcapi/server_helpers.go:interfaceZoneMap":  true,
 }
 
 // rangesOverAnyIncludingCollectionHelpers reports whether fd directly ranges
@@ -833,4 +833,3 @@ func contains(hay []string, needle string) bool {
 	}
 	return false
 }
-

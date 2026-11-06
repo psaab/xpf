@@ -14,6 +14,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 )
+
 const fabricStampBootstrapConfig18719 = `set chassis cluster cluster-id 1
 set chassis cluster node 0
 set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

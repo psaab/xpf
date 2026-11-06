@@ -164,4 +164,3 @@ func TestRollbackTargetRefusedOnlyForDNSMixedRefusal17703(t *testing.T) {
 		}
 	})
 }
-

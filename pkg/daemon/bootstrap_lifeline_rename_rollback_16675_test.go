@@ -333,14 +333,14 @@ func TestLifelineRenameCaptureWriteFailureDropsMemory17755(t *testing.T) {
 
 func TestStaleLifelineRenameSidecarFallsThroughToEmbedded17755(t *testing.T) {
 	tests := []struct {
-		name      string
-		data      []byte
+		name       string
+		data       []byte
 		unreadable bool
-		wantPair  bool
+		wantPair   bool
 	}{
 		{
-			name: "generation-mismatch",
-			data: []byte(`{"generation":"stale-generation","kernel_name":"enp9s0","logical_name":"ge-0-0-9"}`),
+			name:     "generation-mismatch",
+			data:     []byte(`{"generation":"stale-generation","kernel_name":"enp9s0","logical_name":"ge-0-0-9"}`),
 			wantPair: true,
 		},
 		{name: "corrupt-content", data: []byte(`{`), wantPair: true},

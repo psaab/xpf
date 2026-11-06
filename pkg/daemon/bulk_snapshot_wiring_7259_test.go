@@ -65,7 +65,7 @@ type noopHAController7350 struct{}
 
 func (noopHAController7350) SetRGActive(context.Context, int, bool) error     { return nil }
 func (noopHAController7350) SetHAWatchdog(context.Context, int, uint64) error { return nil }
-func (noopHAController7350) SyncFabricState(context.Context) error { return nil }
+func (noopHAController7350) SyncFabricState(context.Context) error            { return nil }
 
 // Sessions/Telemetry are reached by SessionSync.SetRuntime. nil is the
 // "no store wired" case the sync layer already guards for — this test is about

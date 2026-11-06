@@ -40,7 +40,6 @@ func (h *actuationHA) SetRGActive(_ context.Context, _ int, active bool) error {
 
 func (h *actuationHA) SetHAWatchdog(_ context.Context, _ int, _ uint64) error { return nil }
 
-
 func (h *actuationHA) SyncFabricState(_ context.Context) error { return nil }
 
 func (h *actuationHA) writeCount() int {

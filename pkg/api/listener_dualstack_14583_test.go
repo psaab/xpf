@@ -27,9 +27,9 @@ func TestDualStackListenerBindsBothFamilies14583(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := NewServer(Config{
-		Addrs:      []string{"127.0.0.1:0", "[::1]:0"},
-		TLS:        true,
-		HTTPSAddrs: []string{"127.0.0.1:0", "[::1]:0"},
+		Addrs:            []string{"127.0.0.1:0", "[::1]:0"},
+		TLS:              true,
+		HTTPSAddrs:       []string{"127.0.0.1:0", "[::1]:0"},
 		TLSSelfSignedDir: t.TempDir(),
 	})
 	if err := s.Start(ctx); err != nil {

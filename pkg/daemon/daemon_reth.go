@@ -826,7 +826,6 @@ func rethParentLinkLocalRepair(linuxName string, rethCfg *config.InterfaceConfig
 	}
 }
 
-
 // rethUnitHasIPv6 checks whether the RETH config has IPv6 addresses on the
 // given logical unit number. Unit 0 is the native/untagged interface. The
 // argument is a UNIT number, not a vlan-id — callers that start from a kernel

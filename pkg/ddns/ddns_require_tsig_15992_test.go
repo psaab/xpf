@@ -44,7 +44,7 @@ func TestRFC2136RequireTSIGRefusesUnsigned15992(t *testing.T) {
 	u2 := testUpdater(t, srv2, &config.DHCPDynamicDNSConfig{
 		Enabled: true, Domain: "example.com",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			RequireTSIG: true,
+			RequireTSIG:   true,
 			TSIGKeyName:   "k1",
 			TSIGAlgorithm: "hmac-sha256",
 			TSIGSecret:    config.NewSecret("c2VjcmV0"),
@@ -616,7 +616,7 @@ func TestDDNSUnsignedGaugeSeededAtRestart15992(t *testing.T) {
 	keyedDisabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
 		Enabled: false, Domain: "example.com", Backend: "rfc2136",
 		RFC2136Endpoint: config.RFC2136Endpoint{
-			UpdateServer: "192.0.2.53",
+			UpdateServer:  "192.0.2.53",
 			TSIGKeyName:   "k1",
 			TSIGAlgorithm: "hmac-sha256",
 			TSIGSecret:    config.NewSecret("c2VjcmV0"),

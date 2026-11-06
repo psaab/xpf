@@ -108,7 +108,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// child. Validate the same tail or a Junos modifier packed onto a
 		// block child (`1.1.1.1 source-address 10.0.0.2;`) would commit
 		// clean and compile the modifier's IP in as an extra resolver.
-		allChildKeysAreValues: true,
+		allChildKeysAreValues:      true,
 		refuseNonLeafBlockChildren: true,
 	},
 	"backup-router": {desc: "Backup router", args: 1, placeholder: "<address>", closedWorld: true, children: map[string]*schemaNode{
@@ -644,7 +644,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 				valueDesc:     "OpenSSH key-exchange algorithm name; QUOTE a name containing @ — the lexer rejects a bare @",
 				valueExamples: []string{"curve25519-sha256", "diffie-hellman-group-exchange-sha256"},
 				validator:     ValidateSSHAlgorithm, refuseNonLeafBlockChildren: true,
-				children:      nil,
+				children: nil,
 			},
 			// #4305 S-4: sshd hardening knobs rendered into the xpf drop-in.
 			// #4902: ciphers/macs are comma-joined into sshd Ciphers/MACs lines,
@@ -1455,7 +1455,7 @@ func dhcpLocalServerGroupSchema(fam string) *schemaNode {
 					valueDesc:     "Resolver IP address",
 					valueExamples: []string{"192.0.2.53", "2001:db8::53"},
 					validator:     ValidateIPAddress, refuseNonLeafBlockChildren: true,
-					children:      nil,
+					children: nil,
 				},
 				"lease-time": {
 					desc:          "Lease lifetime offered to clients of this pool, in seconds",
@@ -1584,12 +1584,12 @@ var schemaSNMP = &schemaNode{desc: "SNMP configuration", children: map[string]*s
 	// and braced spellings compile identically.
 	"trap-group": {desc: "Trap group", args: 1, placeholder: "<group-name>", packedStatements: true, children: map[string]*schemaNode{
 		"targets": {
-			desc:        "Trap target host (IP address or FQDN, optional :port)",
-			args:        1,
-			multi:       true,
-			placeholder: "<target>",
+			desc:                       "Trap target host (IP address or FQDN, optional :port)",
+			args:                       1,
+			multi:                      true,
+			placeholder:                "<target>",
 			refuseNonLeafBlockChildren: true,
-			children:    nil,
+			children:                   nil,
 		},
 		"version": {
 			desc:          "SNMP version for this trap group",

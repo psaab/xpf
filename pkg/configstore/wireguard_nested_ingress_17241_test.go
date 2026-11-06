@@ -140,7 +140,6 @@ func TestSyncApplyRefusesNestedValueListReader18325(t *testing.T) {
 	}
 }
 
-
 // A tolerated non-typed schema error before the WireGuard stanza must not stop
 // the collect walk from finding a later nested-list hard refusal.
 func TestSyncApplyDoesNotLetPriorSchemaErrorHideNestedRefusal17241(t *testing.T) {
