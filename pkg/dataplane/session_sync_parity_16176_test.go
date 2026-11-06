@@ -170,7 +170,7 @@ var syncWireOnlySessionFields16176 = map[string]string{
 	"PolicyRuleID":        "#11070 stable admitting-rule identity (string, tail-carried)",
 	"PrimaryLiveness":     "#16880 low-rate primary-side liveness marker; sync-only, never in either BPF ABI",
 	"Nat64SnatV4":         "#4565 v6-only NAT64 pool source; NO v4 member by design (v6-only exception)",
-	"AppTimeoutLogStated": "#17780 stated app-timeout/log presence marker (incl. stated (0,0)); length-gated HA wire byte, never in either BPF ABI",
+	"AppTimeoutLogStated": "#17780 stated app-timeout/log presence marker (incl. stated (0,0)); length-gated HA marker (8-byte magic + flag byte), never in either BPF ABI",
 }
 
 // goLocalSessionFields16176 are on the Go twins only: neither ABI nor codec.
