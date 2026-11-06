@@ -12,9 +12,9 @@ import (
 // scalars, peers accumulate); single block unchanged.
 
 const (
-	dup14450Priv  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	dup14450Peer  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	dup14450Peer2 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	dup14450Priv  = "07487d22212b9574c8408550848a62dc98f8e009498d90bb00ad94190eefc459"
+	dup14450Peer  = "f3348cf0b3a7befffadb20f473e180f0ad138d8ca7f38275ca9160f7916e9d4e"
+	dup14450Peer2 = "0f0ab3536c0f6775897b96363521a546470735930f46c8cdb356b4096c3fde6e"
 )
 
 func compileDup14450(t *testing.T, src string) (*Config, error) {

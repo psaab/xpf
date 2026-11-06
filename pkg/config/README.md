@@ -393,6 +393,13 @@ parser treats newlines as whitespace and merges multiple set lines into
 one giant node. This trap has bitten the project repeatedly — see
 CLAUDE.md.
 
+**WireGuard test fixtures (#14373, #18875):** any fixture that compiles a
+WireGuard tunnel must use valid 32-byte keys. Commit/hydrate validation rejects
+repeated-byte and small-order private keys, peer public keys, and explicit
+preshared keys. Keep deterministic test keys non-degenerate, and preserve
+intentional duplicate or case-variant relationships only where the test
+specifically exercises them.
+
 **A stanza's members can live on the STANZA's own Keys, not only in its
 children (#6525).** The dual-shape rule above has a third shape that is easy
 to miss because `set` cannot produce it: the hierarchical COMPACT LEAF.

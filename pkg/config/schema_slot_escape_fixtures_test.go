@@ -18,9 +18,9 @@ import "strings"
 // ---------------------------------------------------------------------------
 
 const (
-	slotEscWGKeyA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	slotEscWGKeyB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	slotEscWGKeyC = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	slotEscWGKeyA = "00bedd4ed26623ab2f765d16af2dcba4f6dbe17c284a66c6494b48b823f4c654"
+	slotEscWGKeyB = "04d9dab116416940a490d8bab5d0dd921094f0a278dee3db867df8fbd2db6e16"
+	slotEscWGKeyC = "15d9fd16500e6a671c69ef3dfa24e72ae7a463c3cf2a659b2969de785bb98504"
 )
 
 var slotEscIfaces = []string{

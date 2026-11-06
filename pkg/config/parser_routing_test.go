@@ -3569,8 +3569,8 @@ func TestTunnelNameMapWireguardInterfaceLevel(t *testing.T) {
 	cmds := []string{
 		"set interfaces wg0 tunnel mode wireguard",
 		"set interfaces wg0 tunnel wireguard listen-port 51820",
-		"set interfaces wg0 tunnel wireguard private-key 1111111111111111111111111111111111111111111111111111111111111111",
-		"set interfaces wg0 tunnel wireguard peer aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa allowed-ips 10.0.0.0/24",
+		"set interfaces wg0 tunnel wireguard private-key a39d0711b6f83a027999f8284a0da677bb2c08c898dca1ef15d12428f7e242bf",
+		"set interfaces wg0 tunnel wireguard peer 2d1c7eeb0cc094f26b60bb510fcbd08640d469f55684271991b4d6d349b8cdf3 allowed-ips 10.0.0.0/24",
 		"set interfaces wg0 unit 0 family inet address 10.66.0.1/24",
 		"set interfaces wg0 unit 1 family inet address 10.66.1.1/24",
 	}
@@ -3745,11 +3745,11 @@ func TestWireGuardTunnelSetSyntax(t *testing.T) {
 	cmds := []string{
 		"set interfaces wg0 tunnel mode wireguard",
 		"set interfaces wg0 tunnel wireguard listen-port 51820",
-		"set interfaces wg0 tunnel wireguard private-key a01010101010101010101010101010101010101010101010101010101010101a",
-		"set interfaces wg0 tunnel wireguard peer b02020202020202020202020202020202020202020202020202020202020202b allowed-ips 10.0.0.0/24",
-		"set interfaces wg0 tunnel wireguard peer b02020202020202020202020202020202020202020202020202020202020202b allowed-ips 10.0.1.0/24",
-		"set interfaces wg0 tunnel wireguard peer b02020202020202020202020202020202020202020202020202020202020202b endpoint 203.0.113.1:51820",
-		"set interfaces wg0 tunnel wireguard peer b02020202020202020202020202020202020202020202020202020202020202b persistent-keepalive 25",
+		"set interfaces wg0 tunnel wireguard private-key 07487d22212b9574c8408550848a62dc98f8e009498d90bb00ad94190eefc459",
+		"set interfaces wg0 tunnel wireguard peer f3348cf0b3a7befffadb20f473e180f0ad138d8ca7f38275ca9160f7916e9d4e allowed-ips 10.0.0.0/24",
+		"set interfaces wg0 tunnel wireguard peer f3348cf0b3a7befffadb20f473e180f0ad138d8ca7f38275ca9160f7916e9d4e allowed-ips 10.0.1.0/24",
+		"set interfaces wg0 tunnel wireguard peer f3348cf0b3a7befffadb20f473e180f0ad138d8ca7f38275ca9160f7916e9d4e endpoint 203.0.113.1:51820",
+		"set interfaces wg0 tunnel wireguard peer f3348cf0b3a7befffadb20f473e180f0ad138d8ca7f38275ca9160f7916e9d4e persistent-keepalive 25",
 	}
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
@@ -3776,14 +3776,14 @@ func TestWireGuardTunnelSetSyntax(t *testing.T) {
 	if tc.WgListenPort != 51820 {
 		t.Errorf("WgListenPort = %d, want 51820", tc.WgListenPort)
 	}
-	if tc.WgLocalPrivkeyHex.Reveal() != "a01010101010101010101010101010101010101010101010101010101010101a" {
+	if tc.WgLocalPrivkeyHex.Reveal() != "07487d22212b9574c8408550848a62dc98f8e009498d90bb00ad94190eefc459" {
 		t.Errorf("WgLocalPrivkeyHex not parsed: %q", tc.WgLocalPrivkeyHex)
 	}
 	if len(tc.WgPeers) != 1 {
 		t.Fatalf("WgPeers = %v, want 1 peer", tc.WgPeers)
 	}
 	peer := tc.WgPeers[0]
-	if peer.PublicKeyHex != "b02020202020202020202020202020202020202020202020202020202020202b" {
+	if peer.PublicKeyHex != "f3348cf0b3a7befffadb20f473e180f0ad138d8ca7f38275ca9160f7916e9d4e" {
 		t.Errorf("WgPeers[0].PublicKeyHex = %q", peer.PublicKeyHex)
 	}
 	if len(peer.AllowedIPs) != 2 {

@@ -61,9 +61,9 @@ func ipipWgIfaceStanza() []string {
 		"set interfaces wg0 tunnel mode wireguard",
 		"set interfaces wg0 tunnel wireguard listen-port 51820",
 		"set interfaces wg0 tunnel wireguard private-key " +
-			"1111111111111111111111111111111111111111111111111111111111111111",
+			"a39d0711b6f83a027999f8284a0da677bb2c08c898dca1ef15d12428f7e242bf",
 		"set interfaces wg0 tunnel wireguard peer " +
-			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa " +
+			"2d1c7eeb0cc094f26b60bb510fcbd08640d469f55684271991b4d6d349b8cdf3 " +
 			"allowed-ips 10.0.0.0/24",
 	}
 }
@@ -397,6 +397,8 @@ func TestIpipRemediationsNeverInstructTrafficLoss_6861(t *testing.T) {
 	// it exposes the complete ipip unit underneath.
 	t.Run("wireguard_unit_branch_refuses_the_parent_removal", func(t *testing.T) {
 		unitStanza := []string{
+			"set interfaces wg0 vlan-tagging",
+			"set interfaces wg0 unit 1 vlan-id 1",
 			"set interfaces wg0 unit 1 family inet address 10.1.1.1/30",
 			"set interfaces wg0 unit 3 tunnel mode ipip",
 			"set interfaces wg0 unit 3 tunnel source 10.0.0.1",

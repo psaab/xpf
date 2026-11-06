@@ -520,11 +520,11 @@ func TestGroupCoSShapingRateOrderedGroups9859(t *testing.T) {
 // lowercase pubkey identity at both schema locations: interface-level tunnel
 // peers and peers nested under an interface unit.
 func TestGroupCanonicalWireGuardPeerKeepsKeywordOverride9859(t *testing.T) {
-	privateKey := strings.Repeat("cd", 32)
-	basePeer := strings.Repeat("ef", 32)
-	upperPeer := strings.Repeat("ab", 32)
+	privateKey := "a39d0711b6f83a027999f8284a0da677bb2c08c898dca1ef15d12428f7e242bf"
+	basePeer := "d4e7bf6a19dbfc64818daf3136e7a077e83872a53c2f8a2ce761db52aa59f51d"
+	upperPeer := "c5c7d735f7b700e305ac331f9ecfc54e8c8b2a44ef06bb574795e4881f9e131b"
 	lowerPeer := strings.ToLower(upperPeer)
-	otherPeer := strings.Repeat("12", 32)
+	otherPeer := "56449ca5aae437c19f6c5a975d6e969c0b7d26aedfabd9a818b53d1eb8b88aac"
 
 	t.Run("interface tunnel peer", func(t *testing.T) {
 		text := `groups { G { interfaces { wg0 { tunnel { wireguard { peer ` + strings.ToUpper(upperPeer) + `; } } } } } } apply-groups G; interfaces { wg0 { tunnel { mode wireguard; wireguard { listen-port 51820; private-key ` + privateKey + `; peer ` + lowerPeer + `; } } } }`
