@@ -10,6 +10,8 @@ import (
 	"github.com/psaab/xpf/pkg/frr"
 )
 
+const protocolMembershipNET11310 = "49.0001.0100.0000.0001.00"
+
 func protocolMembershipConfig11310() *config.Config {
 	interfaces := make(map[string]*config.InterfaceConfig, 3)
 	for _, name := range []string{"ge-0/0/0", "ge-0/0/1", "ge-0/0/2"} {
@@ -136,7 +138,31 @@ func TestAssemblerFiltersProtocolInterfacesByRoutingInstance11310(t *testing.T) 
 }
 
 func TestRenderedProtocolMembership11310(t *testing.T) {
-	fc := (&Daemon{}).assembleFRRConfig(protocolMembershipConfig11310(), nil)
+	// #17735 rejects active RIP and IS-IS in the same routing scope. Keep
+	// RIP active in global+blue for its rendered membership assertions, and
+	// put IS-IS in red+green in this render-only copy. The assembler test
+	// below still uses the unmodified shared fixture for global+blue IS-IS.
+	cfg := protocolMembershipConfig11310()
+	cfg.Protocols.ISIS = nil
+	cfg.RoutingInstances[0].ISIS = nil
+	renderISIS := func(net, ref string) *config.ISISConfig {
+		return &config.ISISConfig{
+			NET:        net,
+			Interfaces: []*config.ISISInterface{{Name: ref}},
+		}
+	}
+	cfg.RoutingInstances[1].ISIS = renderISIS(protocolMembershipNET11310, "ge-0/0/2.0")
+	cfg.Interfaces.Interfaces["ge-0/0/3"] = &config.InterfaceConfig{
+		Name:  "ge-0/0/3",
+		Units: map[int]*config.InterfaceUnit{0: {Number: 0}},
+	}
+	cfg.RoutingInstances = append(cfg.RoutingInstances, &config.RoutingInstanceConfig{
+		Name:         "green",
+		InstanceType: "virtual-router",
+		Interfaces:   []string{"ge-0/0/3.0"},
+		ISIS:         renderISIS("49.0001.0100.0000.0002.00", "ge-0/0/3.0"),
+	})
+	fc := (&Daemon{}).assembleFRRConfig(cfg, nil)
 	got := renderFRRConfig11310(t, fc)
 	for _, tc := range []struct {
 		line string
