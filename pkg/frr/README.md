@@ -936,6 +936,9 @@ step. Both are required — neither sees the other's case:
   memory-only, so a restart loads the metric-free config until Apply. Authored
   policy `then metric` actions remain in `frr.conf` and can override the QNH
   metric; QNH metrics are never exported as BGP MED.
+  The IPv4 host-route fixture authors an explicit `/32`: `CompileConfig`
+  refuses a bare static host destination at its strict route-destination
+  gate (#17177), before QNH metric rendering.
 - **Userspace static failover by QNH metric (#11792).** The userspace snapshot
   builder emits one row per effective-preference/metric tier, preserving the
   authored preference and ordering equal-preference rows by metric. Rust tries
@@ -1507,6 +1510,9 @@ step. Both are required — neither sees the other's case:
   covers the remaining sanitize-on-one-line slots and pins omission of the
   malformed next-hop/prepend injection payloads; malformed prefix-list cases
   are covered by `TestPolicyPrefixListRenderOmitsMalformedCIDRs10823`.
+  Strict as-path-prepend operand regressions use the bare regex `^65000`:
+  the formerly padded `^65000 ` is refused earlier by the central #17177
+  edge-whitespace gate, so it cannot exercise the unknown-modifier validator.
 - **Malformed routing-only prefix-list entries are omitted before FRR emission
   (#10823), and bare hosts render as host routes (#15012).** The #7273 strict CIDR gate is scoped to firewall-referenced
   lists, so a routing-only `policy-options prefix-list` can reach rendering

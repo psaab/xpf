@@ -304,7 +304,7 @@ func TestQualifiedNextHopMetricMatchesGatewayNotOnlyPrefix11447(t *testing.T) {
 func TestQualifiedNextHopMetricSupportsHostAndIPv6Routes11447(t *testing.T) {
 	t.Run("IPv4 host route", func(t *testing.T) {
 		rendered := qnhMetricRender11447(t,
-			"set routing-options static route 203.0.113.7 qualified-next-hop 192.0.2.10 metric 10",
+			"set routing-options static route 203.0.113.7/32 qualified-next-hop 192.0.2.10 metric 10",
 			"set protocols ospf export static",
 		)
 		if !strings.Contains(rendered, "203.0.113.7/32") || !strings.Contains(rendered, "192.0.2.10/32") {

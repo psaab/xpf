@@ -559,7 +559,7 @@ func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
 		},
 		{
 			name:        "prepend as-path tail",
-			text:        `policy-options { as-path AP "^65000 "; policy-statement P { term t { then accept as-path-prepend 65001 as-path AP; } } }`,
+			text:        `policy-options { as-path AP "^65000"; policy-statement P { term t { then accept as-path-prepend 65001 as-path AP; } } }`,
 			leaf:        "as-path-prepend",
 			value:       "as-path",
 			wantMessage: "unknown modifier",
