@@ -3,15 +3,17 @@ package main
 // #18664: operational `show configuration | display set` was refused by the
 // remote cli as `unknown show configuration command: |`.
 //
-// `show configuration` is a keyword-only node, so the bare `|` used to be
-// judged as an unknown trailing keyword before its handler, which parses the
-// pipe itself, could run. The shared gate judges only the words before the
-// first bare `|` and admits it for the registered handler-level consumers.
+// The original #16798 gate ran cmdtree.ValidateOperationalLine over the whole
+// line. `show configuration` is a keyword-only node, so the bare `|` was
+// judged as an unknown trailing keyword before handleShow's `configuration`
+// arm, which parses the pipe itself, could run.
 //
-// Fix: ValidateOperationalGate judges only the words before the first bare
-// `|` (its first-bare-pipe scan, the handlers' own token rule). A pipe directly
-// under a keyword-only node is admitted only for a cmdtree.OperationalPipeConsumers
-// command, so #16798's refusal of help-printing / pipe-dropping handlers stays.
+// #18664 made the gate pipe-aware by validating the words before the first
+// bare `|` and using ValidateOperationalLine up to and including it to locate
+// a pipe under a keyword-only node. The shared implementation is now
+// cmdtree.ValidateOperationalGate; its registered handler-level consumers
+// remain admitted, while #16798's help-printing / pipe-dropping handlers stay
+// refused.
 //
 // Every cell drives c.dispatch, the full entry path (SplitPipe filter peel ->
 // dispatchOperational -> gate -> handler). The pre-existing #13202 cells call

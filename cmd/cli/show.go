@@ -457,14 +457,13 @@ func opShowConfigurationCompareErr(path, pipe []string) error {
 }
 
 // showPipeIndex returns the index of the first bare `|` operator token in
-// args, or -1. It is the one rule in this binary for where a command ends and
-// its pipe begins: splitShowPipe (the handlers) and the #16798 keyword-only
-// gate in dispatchOperational (#18664) both call it, so the gate cannot judge
-// a different command from the one the handler runs. Quote provenance
-// (quoted[i]) makes a quoted "|" path data; a nil mask means args came from
-// an already-tokenized caller. A `|` glued to a word (`|display`,
-// `configuration|display`) is NOT the operator. It is an ordinary word here,
-// as it is in cliterm.SplitPipe, which splits only on a space-delimited " | ".
+// args, or -1. It is the handler-side rule for where a show command ends and
+// its pipe begins: splitShowPipe calls it. The shared #18664
+// cmdtree.ValidateOperationalGate uses the same exact-token rule on its
+// already-tokenized command words, so glued tokens (`|display`,
+// `configuration|display`) remain ordinary words on both paths. Quote
+// provenance (quoted[i]) makes a quoted "|" path data for the handler; a nil
+// mask means args came from an already-tokenized caller.
 func showPipeIndex(args []string, quoted []bool) int {
 	for i, arg := range args {
 		if arg == "|" && !(i < len(quoted) && quoted[i]) {

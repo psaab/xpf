@@ -56,13 +56,13 @@ the pipe. The rules:
   `unknown show configuration command: bogus`).
 - A pipe directly under a keyword-only node is admitted only for a
   command in `cmdtree.OperationalPipeConsumers`, whose handler parses the pipe
-  itself. Today that is only `show configuration`. Every other
-  keyword-only node still refuses, exactly as before #18664 (exit 1),
-  but the message now names the modifier:
+  itself. Today that is only `show configuration`. Every other keyword-only
+  node now refuses, and the message names the modifier:
   `syntax error: "<path>" does not accept the output modifier "| ..."`
-  instead of `unknown <path> command: |`. Admitting the pipe would hand
-  it to a handler that prints help or runs the bare command and drops
-  the modifier, exiting 0 (the #16798 class). A pipe after a value slot,
+  instead of `unknown <path> command: |`. `cmd/cli` already refused these
+  shapes before #18664 (exit 1); #18664 changed its message. The local CLI
+  previously let help-printing / pipe-dropping handlers succeed for them;
+  #18668 adds the same refusal there. A pipe after a value slot,
   leaf or `AcceptsArgs` tail (`show configuration security | display
   set`, `show system rollback 1 | display json`) is still the handler's
   business, as before.

@@ -125,16 +125,18 @@ func TestLocalKeywordOnlyUnknownRefused18668(t *testing.T) {
 		})
 	}
 	// Ambiguous abbreviations under a keyword-only node refuse as ambiguous.
-	for _, line := range []string{"clear s"} {
-		t.Run(line, func(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{"clear s", "ambiguous clear command: s"},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
 			c := committedStore18668(t)
 			var err error
-			out := captureStdout(t, func() { err = c.dispatch(line) })
-			if err == nil || !strings.Contains(err.Error(), "ambiguous") {
-				t.Fatalf("dispatch(%q) = %v; want ambiguous refusal", line, err)
+			out := captureStdout(t, func() { err = c.dispatch(tc.line) })
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("dispatch(%q) = %v; want %q", tc.line, err, tc.want)
 			}
 			if strings.Contains(out, "Possible completions:") {
-				t.Fatalf("dispatch(%q) printed help instead of refusing:\n%s", line, out)
+				t.Fatalf("dispatch(%q) printed help instead of refusing:\n%s", tc.line, out)
 			}
 		})
 	}
