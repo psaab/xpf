@@ -105,8 +105,8 @@ fn walk_shapes() -> Vec<(&'static str, Vec<FirewallTermSnapshot>)> {
         (
             "fallthrough-then-discard",
             vec![
-                // #5142/#2544: a fall-through term is one with an EMPTY
-                // action. A `next_term` bit on a term that carries a real
+                // #5142/#2544/#14632: fall-through requires an EMPTY action and an
+                // authored `next_term` bit. A `next_term` bit on a term that carries a real
                 // terminating action is a contradiction the compiler resolves
                 // in favour of the action, so `action: "accept", next_term:
                 // true` would TERMINATE and the deny below would be
