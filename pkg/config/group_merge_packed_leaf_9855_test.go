@@ -171,8 +171,8 @@ func TestPackedGroupLeafVRRP9855(t *testing.T) {
 	})
 	t.Run("virtual-address unions across group and inline", func(t *testing.T) {
 		vg := vrrpGroup9855(t,
-			group(`vrrp-group 1 virtual-address 10.0.61.2/24;`)+addr(`vrrp-group 1 virtual-address 10.0.61.1/24;`))
-		if !slices.Equal(vg.VirtualAddresses, []string{"10.0.61.1/24", "10.0.61.2/24"}) {
+			group(`vrrp-group 1 virtual-address 10.0.61.4/24;`)+addr(`vrrp-group 1 virtual-address 10.0.61.1/24;`))
+		if !slices.Equal(vg.VirtualAddresses, []string{"10.0.61.1/24", "10.0.61.4/24"}) {
 			t.Fatalf("virtual-addresses = %v, want inline first, group appended", vg.VirtualAddresses)
 		}
 	})
