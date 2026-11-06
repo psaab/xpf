@@ -5,12 +5,36 @@
 
 xpf_assert_vm_target() {
 	local ref=${1:?missing Incus instance reference}
-	local info type boot_id helper_dir shim_dir tool
-	info=$(incus info "$ref" --format json) || {
-		echo "vm-target-guard: cannot inspect target $ref" >&2
-		return 1
-	}
-	type=$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("type", ""))') || {
+	local list name remote type boot_id helper_dir shim_dir tool
+	# Incus 7.0.1 accepts the remote and name as separate `list` arguments;
+	# its JSON output is an array with lowercase type values.
+	if [[ "$ref" == *:* ]]; then
+		remote=${ref%%:*}
+		name=${ref#*:}
+		list=$(incus list "$remote:" "$name" --format json) || {
+			echo "vm-target-guard: cannot inspect target $ref" >&2
+			return 1
+		}
+	else
+		name=$ref
+		list=$(incus list "$name" --format json) || {
+			echo "vm-target-guard: cannot inspect target $ref" >&2
+			return 1
+		}
+	fi
+	type=$(printf '%s' "$list" | python3 -c 'import json,sys
+try:
+    data = json.load(sys.stdin)
+    if not isinstance(data, list):
+        raise ValueError("expected an array")
+    matches = [
+        entry.get("type", "")
+        for entry in data
+        if isinstance(entry, dict) and entry.get("name") == sys.argv[1]
+    ]
+    print(matches[0] if len(matches) == 1 else "")
+except Exception:
+    sys.exit(1)' "$name") || {
 		echo "vm-target-guard: cannot decode Incus instance type for $ref" >&2
 		return 1
 	}

@@ -534,6 +534,9 @@ run_bash test/incus/target-services-selftest.sh
 # #16213: the mouse target's systemd address unit (declarative .200 alias).
 run_bash test/incus/mouse-target-setup-selftest.sh
 run_bash test/incus/with-cluster-selftest.sh
+# #18987: the VM type guard uses the 7.0.1-supported JSON list interface.
+# Fake Incus covers selection, fail-closed cases, and a stubbed accept tail.
+run_bash test/incus/vm-target-guard-selftest.sh
 # #11873: keep failover failure-journal evidence inside the test window.
 run_bash test/incus/failover-journal-selftest.sh
 # #12211: invocation-scoped VRRP journal cells, conf restoration, and RETH
