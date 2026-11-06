@@ -231,9 +231,12 @@ fn worker_loop_orders_expiry_teardown_before_poll_10419() {
         .iter()
         .position(|line| line.starts_with("retire_expired_missing_neighbor_seeds("))
         .expect("worker loop must retire published seed state");
+    // #18831: a93d83a400 (#13814) made the reap return deferred conntrack
+    // deletes, so the call is now `let deferred_conntrack_deletes =
+    // reap_expired_sessions(` and no longer starts the trimmed line.
     let reap = executable_lines
         .iter()
-        .position(|line| line.starts_with("reap_expired_sessions("))
+        .position(|line| line.contains("= reap_expired_sessions("))
         .expect("worker loop must reap expiry resources");
     let overflow = executable_lines
         .iter()
