@@ -232,8 +232,10 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
     };
     // #18531/#18927: a wire alias's reverse un-NAT can point back at one of
     // the alias's own addresses or ports rather than the canonical mapping.
-    // Handoff requires the imported origin marker propagated to this reverse
-    // plus the self-targeting shape; the reply belongs to the canonical peer.
+    // Handoff requires the self-targeting shape plus alias provenance:
+    // the imported origin marker propagated to this reverse, or the
+    // pre-child-4 destination arm for an unmarked legacy row; the reply
+    // belongs to the canonical peer.
     let decision = if reverse_un_nat_targets_itself(
         &reverse_session_key(&forward_match.key, forward_match.decision.nat),
         decision.nat,

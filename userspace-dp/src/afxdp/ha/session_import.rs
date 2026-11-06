@@ -1281,9 +1281,11 @@ impl crate::afxdp::ha::SessionDomain {
     ///
     /// Identity translations can have the same key/NAT fixed-point shape as
     /// aliases. The Go producer therefore marks only its additional
-    /// forward-wire row on the sync wire. At this trust boundary we retain
-    /// that marker only for a forward cluster import whose key/NAT really is
-    /// self-keyed; an absent marker (including an older peer) stays canonical.
+    /// forward-wire row on the sync wire. Booking and supersession below
+    /// classify by that shape alone, so an absent marker (an older peer)
+    /// still books nothing; the marker is retained only as handoff
+    /// provenance for a forward cluster import whose key/NAT really is
+    /// self-keyed.
     fn upsert_synced_session_with_policy(
         &self,
         mut entry: SyncedSessionEntry,

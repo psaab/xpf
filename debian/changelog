@@ -24,9 +24,10 @@ xpf (0.0.0) unstable; urgency=medium
     recorded-scope TCP/UDP translation misses a non-empty rebound dynamic-rule
     set; forward-wire aliases, ICMP, derivable scope, and pre-refresh replies
     remain outside the new revocation evidence gate (#18927).
-  * userspace-dp: send DNAT-only, TCP/UDP port-only, and NPTv6 alias reverse
+  * userspace-dp: send DNAT-only and TCP/UDP port-only alias reverse
     replies to their canonical peer only when the producer-stamped
-    forward-wire alias marker is present; identity translations
+    forward-wire alias marker is present; unmarked rows keep the
+    pre-existing SNAT/NPTv6 companion handoff; identity translations
     (DNAT, static, persistent, same-prefix NPTv6) stay canonical.
     Canonical-DNAT/no-NAT/NAT64/ICMP controls stay excluded; documented
     self-targeting identity-SNAT behavior is unchanged (#18927).
