@@ -1242,7 +1242,10 @@ mod tests {
 
     #[test]
     fn empty_main_routes_are_not_authority_even_when_complete_is_set() {
-        let snapshot = inventory_snapshot(Vec::new(), "10.0.0.0/24", &[], &[]);
+        let mut snapshot = inventory_snapshot(Vec::new(), "10.0.0.0/24", &[], &[]);
+        // The helper unconditionally appends its 192.0.2.0/24 local route
+        // (#14079); clear it so this premise is genuinely empty.
+        snapshot.main_routes.clear();
         let inventory = PMechInventory::from_snapshot(Some(&snapshot));
         assert!(!inventory.complete());
         assert!(!inventory.has_main_table_routes());
@@ -1286,7 +1289,8 @@ mod tests {
             let inventory = PMechInventory::from_snapshot(Some(&one_tunnel));
             let one_tunnel_elapsed = started.elapsed();
             assert!(inventory.complete(), "N={count}: route projection is complete");
-            assert_eq!(inventory.main_routes.len(), count);
+            // count authored /32 routes + 1 helper local route (192.0.2.0/24 via ifindex 20, #14079).
+            assert_eq!(inventory.main_routes.len(), count + 1);
             let tunnel = inventory
                 .exact_tunnel("st0", 9, 10)
                 .expect("N owned /32 routes project for the tunnel");
@@ -1314,7 +1318,8 @@ mod tests {
         );
         let inventory = PMechInventory::from_snapshot(Some(&snapshot));
         assert!(inventory.complete());
-        assert_eq!(inventory.main_routes.len(), 2, "raw duplicate audit rows are retained");
+        // 2 authored duplicate rows + 1 helper local route (192.0.2.0/24 via ifindex 20, #14079).
+        assert_eq!(inventory.main_routes.len(), 3, "raw duplicate audit rows are retained");
         assert!(inventory.exact_tunnel("st0", 9, 10).is_some());
     }
 
@@ -1398,7 +1403,8 @@ mod tests {
         let inventory = PMechInventory::from_snapshot(Some(&snapshot));
         assert!(inventory.complete());
         assert!(inventory.has_main_table_routes());
-        assert_eq!(inventory.main_routes.len(), 2, "discard audit row must remain attached");
+        // 2 authored rows (unicast + blackhole) + 1 helper local route (192.0.2.0/24 via ifindex 20, #14079).
+        assert_eq!(inventory.main_routes.len(), 3, "discard audit row must remain attached");
         let row = inventory.exact_tunnel("st0", 9, 10).expect("valid unshadowed projection");
         assert!(row.allows_source("10.0.1.1".parse().expect("IPv4 address")));
         assert!(!row.allows_source("10.1.1.1".parse().expect("IPv4 address")));
