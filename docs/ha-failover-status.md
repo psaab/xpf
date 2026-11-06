@@ -615,11 +615,13 @@ The rules now:
   `pool_alias_reverse_stays_with_peer_after_refresh_18535`. The already-
   un-NATed fabric reply still forwards toward its real client. DNAT
   address-only and address+port aliases and TCP/UDP port-only alias reverses
-  are handed off only when their recovered forward-wire key proves they are
-  aliases (#18927 child 4; `dnat_alias_reverse_is_handed_to_peer_at_synthesis_18927`,
+  are handed off when the producer-stamped forward-wire alias marker is
+  present, or — for unmarked rows from older peers — when the reverse
+  matches the pre-child-4 destination arm exactly (#18927 child 4;
+  `dnat_alias_reverse_is_handed_to_peer_at_synthesis_18927`,
   `port_only_alias_reverse_is_handed_to_peer_at_synthesis_18927`, and
   `dnat_alias_reverse_reply_is_handed_to_peer_18927`). NPTv6 aliases use the
-  same provenance check. Canonical DNAT, no-NAT, NAT64, and ICMP-identifier
+  same marker-or-legacy rule. Canonical DNAT, no-NAT, NAT64, and ICMP-identifier
   controls remain excluded.
   A reverse that un-NATs to a genuinely local address other than its wire
   destination is still host-bound and still gated. The LAN node's own reverse
