@@ -11172,6 +11172,12 @@ fn cached_tx_selection_records_all_fallthrough_count_terms() {
         crate::filter::record_filter_counter(counter, 1500);
     });
 
+    // #18825 (first-bad 780e97f955, #14932/#14656; same mechanism as #18821):
+    // hit counters are coalesced per thread and become visible only on flush;
+    // recording counter B switch-flushes A but leaves B pending, so flush
+    // before reading the term counters back.
+    crate::filter::flush_recorded_filter_counters();
+
     // BOTH fall-through count terms must have incremented on the cached replay.
     // Revert to last-only and terms[0] stays 0 -> this assert fails RED.
     assert_eq!(
