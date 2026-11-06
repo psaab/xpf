@@ -12009,25 +12009,26 @@ fn counters_with_replica_flag_separates_not_held_from_held_and_idle_7919() {
 
 /// #11064: `NatDecision` carries a 4-byte aligned source-NAT ICMP
 /// `(type, code)` fingerprint (44 -> 48 bytes). #11411 added selected-route
-/// and transport-route MTUs to `ForwardingResolution` (48 -> 56 bytes), so
-/// the complete `SessionDecision` is now 56 + 48 + 8 = 112 bytes. Keep it
-/// `Copy` and pin the two install-table identity offsets after that expansion.
+/// and transport-route MTUs to `ForwardingResolution` (48 -> 56 bytes).
+/// #15746 (e0583615de) added `source_ifindex` (56 -> 60 bytes), so the complete
+/// `SessionDecision` is now 60 + 48 + 8 = 116 bytes. Keep it `Copy` and pin the
+/// two install-table identity offsets after that expansion.
 #[test]
 fn session_decision_typed_snat_layout_11064() {
     fn assert_copy<T: Copy>() {}
     assert_copy::<crate::session::SessionDecision>();
     assert_eq!(
         std::mem::size_of::<crate::session::SessionDecision>(),
-        112,
-        "SessionDecision = 56 (resolution, incl. route MTUs) + 48 (nat) + 8 (table identity)"
+        116,
+        "SessionDecision = 60 (resolution, incl. route MTUs and source_ifindex) + 48 (nat) + 8 (table identity)"
     );
     assert_eq!(
         core::mem::offset_of!(crate::session::SessionDecision, install_table_domain),
-        104
+        108
     );
     assert_eq!(
         core::mem::offset_of!(crate::session::SessionDecision, install_table_check),
-        108
+        112
     );
 }
 
