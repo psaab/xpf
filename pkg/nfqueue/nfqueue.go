@@ -13,6 +13,15 @@
 // fragment head-of-line cost can be measured synthetically in-container with
 // cluster integration explicitly gated.
 //
+// For #9506 M2's 4096-datagram memory hold, unverdicted packets remain
+// charged to their sending UDP socket until verdict, so a fresh network
+// namespace's default SO_SNDBUF can block the sender before the hold
+// completes. M2 uses a dedicated sender that requests up to net.core.wmem_max
+// (4194304 on the measured host), verifies the effective SO_SNDBUF, and
+// skips before traffic only when an adequate buffer cannot be obtained.
+// Other measurement cells retain their default sender buffers; these are
+// separate from the NFQUEUE fd's own buffers.
+//
 // Honesty boundary: numbers transfer as NFQUEUE transport economics; SA/route/
 // cluster integration re-validates on the loss cluster. Nothing here claims
 // cluster validation, adjudicated re-entry, or any mark mechanism (the r4

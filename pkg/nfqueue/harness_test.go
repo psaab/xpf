@@ -8,7 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -167,8 +170,133 @@ func sendTestDatagram(deadline time.Time) error {
 	return nil
 }
 
+// openTestSender opens a plain harness sender with the netns-default
+// SO_SNDBUF. Callers must not hold many unverdicted datagrams through it:
+// packets queued in NFQUEUE stay charged to the sending socket until a
+// verdict frees them, so with the fresh-netns default (wmem_default
+// 212992) a write stalls after ~141 datagrams — long before a
+// multi-thousand-packet hold completes. The one harness test that holds
+// that much traffic uses openMeasuredMemorySender instead (#18846);
+// every other caller (M1 flow senders, M3's single held packet) keeps
+// these default-buffer conditions deliberately.
 func openTestSender() (net.Conn, error) {
 	return net.Dial("udp4", fmt.Sprintf("127.0.0.1:%d", harnessUDPPort))
+}
+
+// errMeasuredSenderSndBuf marks the measured-sender failures that mean
+// "this host cannot give the M2 sender a usable SO_SNDBUF" (request
+// refused, read-back failed, or the effective buffer is below the
+// floor). TestMeasureMemory9506 turns exactly these into a Skip before
+// any traffic; other dial failures stay Fatal.
+var errMeasuredSenderSndBuf = errors.New("nfqueue harness: insufficient SO_SNDBUF for measured sender")
+
+const (
+	// measuredMemorySndBufRequest is the SO_SNDBUF the M2 measured
+	// sender asks for: the common wmem_max ceiling. The kernel doubles
+	// the requested value for its own bookkeeping, so the effective
+	// buffer (what SO_SNDBUF reads back) is ~2x the request. The
+	// request is capped at the host's actual wmem_max, never above it:
+	// an unprivileged setsockopt past wmem_max is silently clamped,
+	// and SO_SNDBUFFORCE is deliberately not used.
+	measuredMemorySndBufRequest = 4194304
+	// measuredMemoryMinSndBuf is the smallest effective SO_SNDBUF the
+	// M2 sender accepts. The full M2 workload passed with the request
+	// at 4194304 and the kernel's 8388608 effective read-back; require
+	// that same tested budget so a host capped lower skips before
+	// traffic instead of timing out while packets remain unverdicted.
+	measuredMemoryMinSndBuf = measuredMemorySndBufRequest * 2
+)
+
+// openMeasuredMemorySender opens the sender for TestMeasureMemory9506
+// (M2) only, with a send buffer sized to hold every unverdicted
+// datagram M2 queues (#18846). Queued NFQUEUE skbs stay charged to the
+// SENDER until verdict, so under a fresh netns's default wmem_default
+// (212992) the M2 hold writes stall at ~212 KB before any assertion
+// runs; the production queue fd's own 1<<22 buffers (Open) are not the
+// constraint and are not touched. The buffer is requested through the
+// dialer's Control (pre-connect) and again via SetWriteBuffer, the
+// effective value is read back, and a buffer below
+// measuredMemoryMinSndBuf fails with errMeasuredSenderSndBuf so the
+// caller can Skip — naming SO_SNDBUF/wmem_max — before sending any
+// traffic, instead of stalling or silently measuring under different
+// conditions. Do not route other tests through here: M1's flow senders
+// and M3's single-held-packet sender keep default buffers on purpose.
+func openMeasuredMemorySender() (net.Conn, int, error) {
+	wmemMax := readWmemMax()
+	if wmemMax <= 0 {
+		return nil, 0, fmt.Errorf("cannot read /proc/sys/net/core/wmem_max: %w", errMeasuredSenderSndBuf)
+	}
+	request := measuredMemorySndBufRequest
+	if wmemMax < request {
+		request = wmemMax
+	}
+	dialer := net.Dialer{
+		Control: func(_, _ string, c syscall.RawConn) error {
+			var opErr error
+			if err := c.Control(func(fd uintptr) {
+				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, request)
+			}); err != nil {
+				return fmt.Errorf("set SO_SNDBUF within wmem_max %d: %w: %w", wmemMax, err, errMeasuredSenderSndBuf)
+			}
+			if opErr != nil {
+				return fmt.Errorf("set SO_SNDBUF request %d within wmem_max %d: %w: %w", request, wmemMax, opErr, errMeasuredSenderSndBuf)
+			}
+			return nil
+		},
+	}
+	conn, err := dialer.Dial("udp4", fmt.Sprintf("127.0.0.1:%d", harnessUDPPort))
+	if err != nil {
+		return nil, 0, fmt.Errorf("dial measured sender: %w", err)
+	}
+	udpConn, ok := conn.(*net.UDPConn)
+	if !ok {
+		_ = conn.Close()
+		return nil, 0, fmt.Errorf("dial measured sender: unexpected connection type %T", conn)
+	}
+	// SetWriteBuffer issues the same SO_SNDBUF request on the
+	// connected socket; the read-back below is what is trusted.
+	if err := udpConn.SetWriteBuffer(request); err != nil {
+		_ = conn.Close()
+		return nil, 0, fmt.Errorf("measured sender SO_SNDBUF request %d within wmem_max %d: %w: %w", request, wmemMax, err, errMeasuredSenderSndBuf)
+	}
+	effective, err := socketSndBuf(udpConn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, 0, fmt.Errorf("measured sender SO_SNDBUF read-back (requested %d, wmem_max %d): %w: %w", request, wmemMax, err, errMeasuredSenderSndBuf)
+	}
+	if effective < measuredMemoryMinSndBuf {
+		_ = conn.Close()
+		return nil, 0, fmt.Errorf("measured sender effective SO_SNDBUF %d below required %d (requested %d, wmem_max %d): %w", effective, measuredMemoryMinSndBuf, request, wmemMax, errMeasuredSenderSndBuf)
+	}
+	return conn, effective, nil
+}
+
+// readWmemMax returns net.core.wmem_max, or 0 when it cannot be read.
+func readWmemMax() int {
+	data, err := os.ReadFile("/proc/sys/net/core/wmem_max")
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+func socketSndBuf(conn *net.UDPConn) (int, error) {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var value int
+	var opErr error
+	if err := raw.Control(func(fd uintptr) {
+		value, opErr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF)
+	}); err != nil {
+		return 0, err
+	}
+	return value, opErr
 }
 
 func sendTestDatagramConn(conn net.Conn, size, index int, deadline time.Time) error {

@@ -43,10 +43,14 @@ func TestMeasureMemory9506(t *testing.T) {
 	}
 	defer closeTestReceiver()
 	defer release()
-	sender, err := openTestSender()
+	sender, effectiveSndBuf, err := openMeasuredMemorySender()
+	if errors.Is(err, errMeasuredSenderSndBuf) {
+		t.Skipf("M2 requires adequate SO_SNDBUF within net.core.wmem_max: %v", err)
+	}
 	if err != nil {
 		t.Fatalf("M2 sender: %v", err)
 	}
+	t.Logf("M2 measured sender SO_SNDBUF effective=%d wmem_max=%d", effectiveSndBuf, readWmemMax())
 	defer sender.Close()
 
 	before := memoryNow()
