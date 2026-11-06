@@ -300,10 +300,21 @@ _failover_clock_verdict() {
 # the first node whose CLI answers: _FC_NTP_STATE present (with
 # _FC_NTP_SERVERS), absent, or unknown when no node's CLI answered.
 _failover_clock_ntp_config() {
-	local n out
+	local n out rc
 	_FC_NTP_STATE=unknown _FC_NTP_SERVERS=""
 	for n in "$@"; do
-		out=$(timeout 20 incus exec "$n" -- cli -c 'show configuration system ntp' 2>&1) || continue
+		if out=$(timeout 20 incus exec "$n" -- cli -c 'show configuration system ntp' 2>&1); then
+			rc=0
+		else
+			rc=$?
+		fi
+		if ((rc != 0)); then
+			if grep -q 'configuration path not found' <<<"$out"; then
+				_FC_NTP_STATE=absent
+				return 0
+			fi
+			continue
+		fi
 		_FC_NTP_SERVERS=$(sed -nE 's/^[[:space:]]*server[[:space:]]+([^[:space:]{;]+).*/\1/p' <<<"$out" | tr '\n' ' ')
 		_FC_NTP_SERVERS="${_FC_NTP_SERVERS% }"
 		if [[ -n "$_FC_NTP_SERVERS" ]]; then

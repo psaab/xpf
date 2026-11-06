@@ -182,8 +182,14 @@ incus() {
 		[[ "$off" == down ]] && return 1
 		case "$FC_NTP_STANZA" in
 		present) printf 'ntp {\n    server 162.159.200.1 {\n        routing-instance mgmt;\n    }\n    server 91.189.91.112 {\n        routing-instance mgmt;\n    }\n}\n' ;;
-		absent) printf 'configuration path not found: system ntp\n' ;;
-		*) printf 'error: rpc error: code = Unavailable\n' ;;
+		absent)
+			printf 'error: configuration path not found: system ntp\n'
+			return 1
+			;;
+		*)
+			printf 'error: rpc error: code = Unavailable\n'
+			return 1
+			;;
 		esac
 		;;
 	"timeout 10 chronyc -n tracking")
@@ -384,6 +390,9 @@ c4_case() { # <stanza> <probe answer> -> sets rc4 and d4
 	p4=$(wc -l <"$TMP_DIR/probes")
 }
 c4_ok=1
+c4_case absent ignored
+[[ $rc4 == 2 && "$d4" == *"VOID: no time source (lab): no \`system ntp\` is configured"* && $p4 == 0 ]] ||
+	{ c4_ok=0; echo "  stanza absent with nonzero CLI status: rc=$rc4 probes=$p4 '$d4'" >&2; }
 c4_case present 162.159.200.1
 [[ $rc4 == 1 && "$d4" == *"neither node is synchronised although \`system ntp\` is configured (162.159.200.1 91.189.91.112) and its servers answer this host (162.159.200.1)"* && $p4 == 1 && ! -s "$FC_UNTIMED" ]] ||
 	{ c4_ok=0; echo "  stanza+probe answers: rc=$rc4 probes=$p4 untimed='$(cat "$FC_UNTIMED")' '$d4'" >&2; }

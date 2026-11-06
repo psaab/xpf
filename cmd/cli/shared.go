@@ -470,9 +470,9 @@ func (c *ctl) dispatchConfig(line string) error {
 		// `in"` and the server looked up a path that does not exist
 		// (fail-closed: not found), and comment words leaked into the
 		// lookup path. A quoted "|" stays data, not a pipe.
-		showArgs, showQuoted, showOK := lexConfigShowArgs16790(line)
-		if !showOK {
-			return fmt.Errorf("show: invalid path")
+		showArgs, showQuoted, err := lexConfigShowArgs16790(line)
+		if err != nil {
+			return err
 		}
 		return c.handleConfigShow(showArgs, showQuoted)
 
@@ -622,13 +622,13 @@ func rawRemainderAfterVerb(line, verb string) string {
 // as the console adjudicates. The strict config lexer rejects a bare pipe,
 // so the fallback recovers the pipe modifier and its tokens from the raw
 // remainder; the pipe operator is explicitly marked unquoted.
-func lexConfigShowArgs16790(line string) ([]string, []bool, bool) {
+func lexConfigShowArgs16790(line string) ([]string, []bool, error) {
 	tokens, quoted, ok := config.ParseConfigMutationLine(line)
 	if ok {
 		if len(tokens) == 0 || tokens[0] != "show" {
-			return nil, nil, false
+			return nil, nil, fmt.Errorf("show: invalid path")
 		}
-		return tokens[1:], quoted[1:], true
+		return tokens[1:], quoted[1:], nil
 	}
 	// The strict lexer stops at a bare pipe; re-lex just the path head
 	// before that unquoted pipe. Tokens carry their lexer quote provenance.
@@ -636,37 +636,66 @@ func lexConfigShowArgs16790(line string) ([]string, []bool, bool) {
 	var path []string
 	var pathQuoted []bool
 	sawShow := false
+	previousEnd, lineStart, currentLine := 0, 0, 1
 	for {
 		tok := lex.Next()
+		for currentLine < tok.Line {
+			for lineStart < len(line) && line[lineStart] != '\n' {
+				lineStart++
+			}
+			if lineStart < len(line) {
+				lineStart++
+			}
+			currentLine++
+		}
+		tokenStart := lineStart + tok.Column - 1
+		if tokenStart > len(line) {
+			tokenStart = len(line)
+		}
 		switch tok.Type {
 		case config.TokenIdentifier, config.TokenString:
 			if !sawShow {
 				if tok.Type == config.TokenString || tok.Value != "show" {
-					return nil, nil, false
+					return nil, nil, fmt.Errorf("show: invalid path")
 				}
 				sawShow = true
+				previousEnd = lex.Position()
 				continue
 			}
 			path = append(path, tok.Value)
 			pathQuoted = append(pathQuoted, tok.Type == config.TokenString)
+			previousEnd = lex.Position()
 		case config.TokenPipe:
 			if !sawShow {
-				return nil, nil, false
+				return nil, nil, fmt.Errorf("show: invalid path")
+			}
+			pipeEnd := lex.Position()
+			rightGlued := false
+			if pipeEnd < len(line) {
+				next := line[pipeEnd]
+				rightGlued = next != ' ' && next != '\t' && next != '\n' && next != '\r' &&
+					next != '#' && !strings.HasPrefix(line[pipeEnd:], "/*") &&
+					!strings.HasPrefix(line[pipeEnd:], "//")
+			}
+			if previousEnd == tokenStart || rightGlued {
+				suggestion := line[:tokenStart] + " | " + line[pipeEnd:]
+				suggestion = strings.Join(strings.Fields(suggestion), " ")
+				return nil, nil, fmt.Errorf("show: invalid path (separate the pipe with spaces: %q)", suggestion)
 			}
 			args := append(append([]string{}, path...), "|")
 			argQuoted := append(append([]bool{}, pathQuoted...), false)
-			rest := strings.TrimSpace(line[lex.Position():])
+			rest := strings.TrimSpace(line[pipeEnd:])
 			if rest == "" {
 				// Trailing pipe: let handleConfigShow report the
 				// missing modifier.
-				return args, argQuoted, true
+				return args, argQuoted, nil
 			}
 			modifiers := strings.Fields(rest)
 			args = append(args, modifiers...)
 			argQuoted = append(argQuoted, make([]bool, len(modifiers))...)
-			return args, argQuoted, true
+			return args, argQuoted, nil
 		default:
-			return nil, nil, false
+			return nil, nil, fmt.Errorf("show: invalid path")
 		}
 	}
 }

@@ -95,10 +95,9 @@ func (c *ctl) handleShow(args []string) error {
 			return fmt.Errorf("%v", err)
 		}
 		if resp.Output == "" && len(path) > 0 {
-			fmt.Printf("configuration path not found: %s\n", strings.Join(path, " "))
-		} else {
-			fmt.Print(resp.Output)
+			return fmt.Errorf("configuration path not found: %s", strings.Join(path, " "))
 		}
+		fmt.Print(resp.Output)
 		return nil
 
 	case "class-of-service":
@@ -422,6 +421,9 @@ func (c *ctl) handleConfigShow(args []string, quoted []bool) error {
 	})
 	if err != nil {
 		return fmt.Errorf("%v", err)
+	}
+	if len(path) > 0 && resp.Output == "" {
+		return fmt.Errorf("configuration path not found: %s", strings.Join(path, " "))
 	}
 	fmt.Print(resp.Output)
 	return nil

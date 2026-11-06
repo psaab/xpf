@@ -105,10 +105,9 @@ func (c *ctl) handleShowSystem(args []string) error {
 				return fmt.Errorf("%v", err)
 			}
 			if len(path) > 0 && resp.Output == "" {
-				fmt.Printf("configuration path not found: %s\n", strings.Join(path, " "))
-			} else {
-				fmt.Print(resp.Output)
+				return fmt.Errorf("configuration path not found: %s", strings.Join(path, " "))
 			}
+			fmt.Print(resp.Output)
 			return nil
 		}
 
