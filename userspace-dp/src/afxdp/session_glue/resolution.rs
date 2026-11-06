@@ -1009,24 +1009,41 @@ fn rehome_or_retain_fabric_redirect_inner(
     }
 }
 
-/// #18531 (third failback teardown): is this a reverse row whose un-NAT
-/// names its own wire destination? A reverse companion synthesized from a
-/// forward-wire ALIAS (the forward row keyed by the already-translated tuple)
-/// takes the alias key's source as the original client, which is the SNAT
-/// address itself. Its "un-NAT" therefore rewrites nothing, and the row
-/// cannot reach the real client: only the node holding the canonical
-/// (original-tuple) row knows it. A canonical reverse un-NATs to the client,
-/// which differs from its wire destination; a reverse with no NAT has no
-/// `rewrite_dst`; a NAT64 reverse un-NATs across families. None of them
-/// match.
+/// #18531/#18927: is this reverse row's un-NAT target one of its own wire
+/// addresses or (for TCP/UDP) ports? A reverse companion synthesized from a
+/// forward-wire ALIAS is keyed by the translated tuple, so it cannot reach the
+/// canonical client/service mapping; only the node holding the canonical row
+/// knows the right translation. Check both tuple sides, but do not infer alias
+/// status from reverse NAT fields alone: recover the generating forward tuple
+/// and decision, then require that the recovered key is already its own
+/// forward-wire key. That provenance check distinguishes the canonical row
+/// from its alias even when one field happens to be self-targeted. NAT64 and
+/// NPTv6 keep their family/prefix semantics and are never reclassified here.
 pub(in crate::afxdp) fn reverse_un_nat_targets_itself(
     key: &SessionKey,
     nat: NatDecision,
     metadata: &SessionMetadata,
 ) -> bool {
-    metadata.is_reverse
-        && nat.rewrite_dst == Some(key.dst_ip)
-        && nat.rewrite_dst_port.is_none_or(|port| port == key.dst_port)
+    if !metadata.is_reverse || nat.nat64 || nat.nptv6 {
+        return false;
+    }
+
+    let address_targets_itself =
+        nat.rewrite_src == Some(key.src_ip) || nat.rewrite_dst == Some(key.dst_ip);
+    let tcp_udp = matches!(
+        key.protocol,
+        crate::ip_proto::PROTO_TCP | crate::ip_proto::PROTO_UDP
+    );
+    let port_targets_itself = tcp_udp
+        && (nat.rewrite_src_port == Some(key.src_port)
+            || nat.rewrite_dst_port == Some(key.dst_port));
+    if !address_targets_itself && !port_targets_itself {
+        return false;
+    }
+
+    let forward_key = crate::session::reverse_session_key(key, nat);
+    let forward_nat = nat.reverse(key.src_ip, key.dst_ip, key.src_port, key.dst_port);
+    crate::session::forward_wire_key(&forward_key, forward_nat) == forward_key
 }
 
 /// #18531: the resolution of a reverse row that
