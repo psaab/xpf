@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/pkg/linuxsock"
 )
 
 // maxFramesPerSecond caps how many accepted frames the reader handles per
@@ -123,7 +125,7 @@ func openTap(link Link) (int, error) {
 // protocol 0 nothing is queued until bindTap names both the protocol and the
 // interface.
 func newFilteredTap(link Link) (int, error) {
-	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW|unix.SOCK_CLOEXEC, 0)
+	fd, err := linuxsock.Socket(unix.AF_PACKET, unix.SOCK_RAW, 0)
 	if err != nil {
 		return -1, err
 	}
