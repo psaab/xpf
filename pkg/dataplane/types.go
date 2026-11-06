@@ -239,12 +239,6 @@ type SessionValue struct {
 	// Also part of the on-map C conntrack ABI.
 	IngressVlanID uint16
 
-	// NatScopeIfindex is the #15176 node-local logical NAT-scope ingress
-	// ifindex recorded at admission (helper SessionMetadata), carried on
-	// the helper delta so Go can fold it cluster-stably for the peer.
-	// 0 = no scope recorded. Sync-only; not part of the BPF ABI.
-	NatScopeIfindex int32
-
 	// RoutingDomain is the #7239 (#7160/#2387) session-key ROUTING DOMAIN.
 	//
 	// #9546: it is ALSO part of the on-map C conntrack ABI
@@ -274,6 +268,12 @@ type SessionValue struct {
 	// non-zero marker, so absence and default-instance stay distinguishable
 	// across every hop. Only the helper encodes and decodes it.
 	RoutingDomain uint32
+
+	// NatScopeIfindex is the #15176 node-local logical NAT-scope ingress
+	// ifindex recorded at admission (helper SessionMetadata), carried on
+	// the helper delta so Go can fold it cluster-stably for the peer.
+	// 0 = no scope recorded. Sync-only; not part of the BPF ABI.
+	NatScopeIfindex int32
 
 	// Generation is a per-(sender,key) monotonic install generation used
 	// by the HA session-sync deferred-delete guard (#2170). It is
@@ -726,9 +726,6 @@ type SessionValueV6 struct {
 	// Also part of the on-map C conntrack ABI.
 	IngressVlanID uint16
 
-	// NatScopeIfindex is the #15176 v6 twin. See SessionValue.
-	NatScopeIfindex int32
-
 	// RoutingDomain is the #7239 (#7160/#2387) session-key ROUTING DOMAIN.
 	//
 	// #9546: it is ALSO part of the on-map C conntrack ABI
@@ -758,6 +755,9 @@ type SessionValueV6 struct {
 	// non-zero marker, so absence and default-instance stay distinguishable
 	// across every hop. Only the helper encodes and decodes it.
 	RoutingDomain uint32
+
+	// NatScopeIfindex is the #15176 v6 twin. See SessionValue.
+	NatScopeIfindex int32
 
 	// Generation: see SessionValue.Generation. Userspace-sync-only HA
 	// deferred-delete guard metadata (#2170), not in the BPF C struct.
