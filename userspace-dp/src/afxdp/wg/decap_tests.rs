@@ -1156,6 +1156,8 @@ fn poll_loop_wg_secondary_named_vrf_local_fallback_charges_once_18820() {
     let allowed: Vec<ipnet::IpNet> = vec!["10.124.0.0/24".parse().unwrap()];
     let (init, resp, _ipub, rpub) = established_pair(allowed.clone(), allowed);
     let mut snapshot = two_tunnel_snapshot();
+    // Keep the unused first listener distinct from the exercised WG_PORT.
+    snapshot.tunnel_endpoints[0].wg_listen_port = WG_PORT + 1;
     for interface in &mut snapshot.interfaces {
         if matches!(interface.ifindex, 12 | 400 | 401) {
             interface.routing_instance = "cust".to_string();
