@@ -3334,8 +3334,11 @@ fn gre_tun_origin_pair_needs_no_permit_10038() {
     let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
     let (init, resp, _init_pub, rpub) = established_pair(allowed.clone(), allowed);
     // One forwarding for both halves: the WG row (reply decap vehicle) plus
-    // a GRE-mode clone (the builder's tunnel row) and the outer next-hop
-    // neighbor the GRE builder needs for a ForwardCandidate outer.
+    // a GRE row and the outer next-hop neighbor the GRE builder needs for a
+    // ForwardCandidate outer. #13980: the GRE outer-RG map is derived at
+    // snapshot-build time, so the GRE row must exist before
+    // `build_forwarding_state`; appending keeps ifindex 400's first claimant
+    // (the WG row) in the by-ifindex index.
     let mut snap = wg_outer_mtu_snapshot();
     snap.neighbors.push(crate::NeighborSnapshot {
         interface: "reth0.80".to_string(),
@@ -3347,26 +3350,28 @@ fn gre_tun_origin_pair_needs_no_permit_10038() {
         router: true,
         ..Default::default()
     });
+    snap.tunnel_endpoints
+        .push(crate::protocol::snapshot::TunnelEndpointSnapshot {
+            id: GRE_TUN_ID,
+            interface: "wg0.0".to_string(),
+            linux_name: "wg0".to_string(),
+            ifindex: TUNNEL_LOGICAL_IFINDEX,
+            zone: "sfmix".to_string(),
+            redundancy_group: 1,
+            mtu: 1420,
+            mode: "gre".to_string(),
+            outer_family: "inet".to_string(),
+            source: "172.16.80.8".to_string(),
+            destination: "203.0.113.7".to_string(),
+            ttl: 64,
+            transport_table: "inet.0".to_string(),
+            ..Default::default()
+        });
     let mut forwarding = build_forwarding_state(&snap);
     let wg_id = *forwarding.wg_engines.keys().next().expect("wg tunnel");
     forwarding
         .wg_engines
         .insert(wg_id, std::sync::Arc::new(resp));
-    let mut gre_row = forwarding
-        .tunnel_endpoints
-        .get(&wg_id)
-        .expect("wg row")
-        .clone();
-    gre_row.id = GRE_TUN_ID;
-    gre_row.mode = "gre".to_string();
-    gre_row.kind = TunnelKind::Gre;
-    // A WG row hydrates with an UNSPECIFIED outer pair (multi-peer: no single
-    // destination — `forwarding_build/tunnels.rs`); a genuine GRE row carries
-    // concrete outers, so stamp them (this is also why the WG builder resolves
-    // per selected peer endpoint instead of reading the row).
-    gre_row.source = "172.16.80.8".parse().unwrap();
-    gre_row.destination = "203.0.113.7".parse().unwrap();
-    forwarding.tunnel_endpoints.insert(GRE_TUN_ID, gre_row);
     // The pair from the REAL GRE builder (not hand-built).
     let request = icmp_echo_inner_v4(8, FW, PEER, IDENT, 1);
     let reply = icmp_echo_inner_v4(0, PEER, FW, IDENT, 1);
@@ -3482,22 +3487,28 @@ fn gre_tun_origin_vrf_reverse_resolves_local_10038() {
         router: true,
         ..Default::default()
     });
+    snap.tunnel_endpoints
+        .push(crate::protocol::snapshot::TunnelEndpointSnapshot {
+            id: GRE_TUN_ID,
+            interface: "wg0.0".to_string(),
+            linux_name: "wg0".to_string(),
+            ifindex: TUNNEL_LOGICAL_IFINDEX,
+            zone: "sfmix".to_string(),
+            redundancy_group: 1,
+            mtu: 1420,
+            mode: "gre".to_string(),
+            outer_family: "inet".to_string(),
+            source: "172.16.80.8".to_string(),
+            destination: "203.0.113.7".to_string(),
+            ttl: 64,
+            transport_table: "inet.0".to_string(),
+            ..Default::default()
+        });
     let mut forwarding = build_forwarding_state(&snap);
     let wg_id = *forwarding.wg_engines.keys().next().expect("wg tunnel");
     forwarding
         .wg_engines
         .insert(wg_id, std::sync::Arc::new(resp));
-    let mut gre_row = forwarding
-        .tunnel_endpoints
-        .get(&wg_id)
-        .expect("wg row")
-        .clone();
-    gre_row.id = GRE_TUN_ID;
-    gre_row.mode = "gre".to_string();
-    gre_row.kind = TunnelKind::Gre;
-    gre_row.source = "172.16.80.8".parse().unwrap();
-    gre_row.destination = "203.0.113.7".parse().unwrap();
-    forwarding.tunnel_endpoints.insert(GRE_TUN_ID, gre_row);
     let request = icmp_echo_inner_v4(8, FW, PEER, IDENT, 1);
     let reply = icmp_echo_inner_v4(0, PEER, FW, IDENT, 1);
     let neighbors = Arc::new(ShardedNeighborMap::new());
