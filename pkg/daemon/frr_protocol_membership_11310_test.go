@@ -140,18 +140,24 @@ func TestAssemblerFiltersProtocolInterfacesByRoutingInstance11310(t *testing.T) 
 func TestRenderedProtocolMembership11310(t *testing.T) {
 	// #17735 rejects active RIP and IS-IS in the same routing scope. Keep
 	// RIP active in global+blue for its rendered membership assertions, and
-	// put IS-IS in red+green in this render-only copy. The assembler test
-	// below still uses the unmodified shared fixture for global+blue IS-IS.
+	// put IS-IS in red+green in this render-only copy. Each IS-IS scope carries
+	// all interface refs, so these counts also guard foreign-ref filtering.
+	// The assembler test below still uses the unmodified shared fixture for
+	// global+blue IS-IS.
 	cfg := protocolMembershipConfig11310()
 	cfg.Protocols.ISIS = nil
 	cfg.RoutingInstances[0].ISIS = nil
-	renderISIS := func(net, ref string) *config.ISISConfig {
-		return &config.ISISConfig{
-			NET:        net,
-			Interfaces: []*config.ISISInterface{{Name: ref}},
+	renderISIS := func(net string, refs ...string) *config.ISISConfig {
+		isisCfg := &config.ISISConfig{NET: net}
+		for _, ref := range refs {
+			isisCfg.Interfaces = append(isisCfg.Interfaces, &config.ISISInterface{Name: ref})
 		}
+		return isisCfg
 	}
-	cfg.RoutingInstances[1].ISIS = renderISIS(protocolMembershipNET11310, "ge-0/0/2.0")
+	cfg.RoutingInstances[1].ISIS = renderISIS(
+		protocolMembershipNET11310,
+		"ge-0/0/0.0", "ge-0/0/1.0", "ge-0/0/2.0", "ge-0/0/3.0",
+	)
 	cfg.Interfaces.Interfaces["ge-0/0/3"] = &config.InterfaceConfig{
 		Name:  "ge-0/0/3",
 		Units: map[int]*config.InterfaceUnit{0: {Number: 0}},
@@ -160,7 +166,10 @@ func TestRenderedProtocolMembership11310(t *testing.T) {
 		Name:         "green",
 		InstanceType: "virtual-router",
 		Interfaces:   []string{"ge-0/0/3.0"},
-		ISIS:         renderISIS("49.0001.0100.0000.0002.00", "ge-0/0/3.0"),
+		ISIS: renderISIS(
+			"49.0001.0100.0000.0002.00",
+			"ge-0/0/0.0", "ge-0/0/1.0", "ge-0/0/2.0", "ge-0/0/3.0",
+		),
 	})
 	fc := (&Daemon{}).assembleFRRConfig(cfg, nil)
 	got := renderFRRConfig11310(t, fc)
