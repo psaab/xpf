@@ -145,7 +145,7 @@ func TestEveryDiscardingDataPlaneEmbedderDeclaresItsPass7754(t *testing.T) {
 			}
 			receiverName, ok := receiver.(*ast.Ident)
 			if !ok || len(fn.Type.Params.List) != 0 ||
-				fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
+				fn.Type.Results == nil || fn.Type.Results.NumFields() != 1 {
 				continue
 			}
 			result, ok := fn.Type.Results.List[0].Type.(*ast.Ident)
