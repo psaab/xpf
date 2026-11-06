@@ -18,6 +18,8 @@
 // tested their COMPOSITION, which is where the defect lived.
 
 use super::host_inbound::is_icmp_host_inbound_global_accept_for_test as accepts;
+use super::host_inbound::zone_host_inbound_from_tokens_except;
+use super::{host_inbound_admits, ForwardingState};
 
 #[test]
 fn crossed_family_pairs_are_not_globally_admitted_7520() {
@@ -46,9 +48,10 @@ fn crossed_family_pairs_are_not_globally_admitted_7520() {
 fn matched_family_pairs_are_still_admitted_7520() {
     // THE OVER-REJECTION CONTROL, and it is the assertion that matters most:
     // #3171's whole point is that PMTUD, unreachable and traceroute-to-self
-    // work on a zone that omits `ping`, and #3240's that v6 ND works on a zone
-    // that scopes router-discovery. Narrowing this predicate too far breaks
-    // path-MTU discovery on every configured zone — silently, as a black hole.
+    // work on a zone that omits `ping`, and #15671's that v6 ND stays
+    // admitted per-zone by default while router-discovery is scoped.
+    // Narrowing this admission too far breaks path-MTU discovery on every
+    // configured zone — silently, as a black hole.
     for t in [3u8, 11, 12] {
         assert!(
             accepts(1, false, t),
@@ -56,11 +59,43 @@ fn matched_family_pairs_are_still_admitted_7520() {
              unreachable / traceroute-to-self break on a zone that omits `ping` (#3171)"
         );
     }
-    for t in [1u8, 2, 3, 4, 133, 134, 135, 136] {
+    for t in [1u8, 2, 3, 4] {
         assert!(
             accepts(58, true, t),
-            "ICMPv6 type {t} on IPv6 is no longer globally admitted; v6 PMTUD and \
-             the ND set break on a configured zone (#3171/#3240)"
+            "ICMPv6 type {t} on IPv6 is no longer globally admitted; v6 PMTUD \
+             breaks on a configured zone (#3171)"
+        );
+    }
+    // #15671: ND 133-136 is no longer an unconditional global accept — it is
+    // a per-zone default admission, withdrawn by `protocols ndp except`.
+    for t in [133u8, 134, 135, 136] {
+        assert!(
+            !accepts(58, true, t),
+            "ICMPv6 ND type {t} must not ride the global accept (#15671)"
+        );
+    }
+    // The per-zone default: a configured zone with no `ndp except` admits
+    // ND, and the `ndp`-except view withdraws it. A bare default state
+    // would only exercise the unknown-view fallback, so insert real views.
+    let mut state = ForwardingState::default();
+    state.zone_host_inbound.insert(
+        7,
+        zone_host_inbound_from_tokens_except(&[], &[], &[]),
+    );
+    for t in [133u8, 134, 135, 136] {
+        assert!(
+            host_inbound_admits(&state, 7, 58, 0, true, t),
+            "ICMPv6 ND type {t} must be admitted by the per-zone default (#15671)"
+        );
+    }
+    state.zone_host_inbound.insert(
+        7,
+        zone_host_inbound_from_tokens_except(&[], &[], &["ndp".to_string()]),
+    );
+    for t in [133u8, 134, 135, 136] {
+        assert!(
+            !host_inbound_admits(&state, 7, 58, 0, true, t),
+            "ICMPv6 ND type {t} must be denied when `ndp` is excepted (#15671)"
         );
     }
 }
