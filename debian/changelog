@@ -1,4 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
+  * CLI: share the operational keyword-only and output-pipe gate between the
+    local console and remote `cli` (#18668). Previously only the remote CLI
+    refused keyword-only pipes; the local handlers could print help and exit
+    successfully after dropping `| display`. Both now use the cmdtree gate
+    after local permission/config-read checks, retaining RBAC precedence.
   * Config: strict local operator commits now refuse a packed hierarchical
     tail only when the gate proves it is silently dropped; `xpfd check-config`
     and `commit check` report the site for bracing remediation. Bootstrap and

@@ -3,17 +3,15 @@ package main
 // #18664: operational `show configuration | display set` was refused by the
 // remote cli as `unknown show configuration command: |`.
 //
-// The #16798 keyword-only gate ran cmdtree.ValidateOperationalLine over the
-// WHOLE line. `show configuration` is a keyword-only node, so the bare `|` was
-// judged as an unknown trailing keyword under it and refused before
-// handleShow's `configuration` arm, which parses the pipe itself, could run.
-// Output filters were unaffected because dispatch peels them with
-// cliterm.SplitPipe first; the handler-level `| display <fmt>` pipe was not.
+// `show configuration` is a keyword-only node, so the bare `|` used to be
+// judged as an unknown trailing keyword before its handler, which parses the
+// pipe itself, could run. The shared gate judges only the words before the
+// first bare `|` and admits it for the registered handler-level consumers.
 //
-// Fix: validateOperationalLine judges only the words before the first bare
-// `|` (showPipeIndex, the handlers' own token rule). A pipe directly under a
-// keyword-only node is admitted only for an operationalPipeConsumers command,
-// so #16798's refusal of help-printing / pipe-dropping handlers stays.
+// Fix: ValidateOperationalGate judges only the words before the first bare
+// `|` (its first-bare-pipe scan, the handlers' own token rule). A pipe directly
+// under a keyword-only node is admitted only for a cmdtree.OperationalPipeConsumers
+// command, so #16798's refusal of help-printing / pipe-dropping handlers stays.
 //
 // Every cell drives c.dispatch, the full entry path (SplitPipe filter peel ->
 // dispatchOperational -> gate -> handler). The pre-existing #13202 cells call
@@ -28,6 +26,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/psaab/xpf/pkg/cmdtree"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
@@ -304,14 +303,14 @@ func TestOpGluedPipeRefusedWithHint18664(t *testing.T) {
 	}
 }
 
-// Every operationalPipeConsumers entry must really reach an RPC with the
-// display format applied. A stale entry would admit a pipe whose handler
+// Every cmdtree.OperationalPipeConsumers entry must really reach an RPC with
+// the display format applied. A stale entry would admit a pipe whose handler
 // drops it.
 func TestOperationalPipeConsumers18664(t *testing.T) {
-	if len(operationalPipeConsumers) == 0 {
-		t.Fatal("operationalPipeConsumers is empty; `show configuration` must be listed")
+	if len(cmdtree.OperationalPipeConsumers) == 0 {
+		t.Fatal("OperationalPipeConsumers is empty; `show configuration` must be listed")
 	}
-	for path := range operationalPipeConsumers {
+	for path := range cmdtree.OperationalPipeConsumers {
 		line := path + " | display set"
 		f, _, err := dispatch18664(t, line, false)
 		if err != nil {

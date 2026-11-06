@@ -3189,12 +3189,16 @@ configuration mode, `run show configuration | display set` does the same.
 - An invalid modifier is named: `| display yaml` ->
   `unknown display format "yaml"`, `| frobnicate` ->
   `syntax error: unknown pipe command "frobnicate"`.
-- On the remote `cli`, `| display` belongs to `show configuration` and
-  `show system rollback <N>`. After a keyword-only command that does not
-  parse it, the pipe is refused (exit 1, as before #18664) rather than
-  silently dropped; the message names the modifier:
-  `show chassis cluster | display json` ->
-  `syntax error: "show chassis cluster" does not accept the output modifier "| display json"`.
+- On both the local console and remote `cli`, `| display` belongs to
+  `show configuration` and `show system rollback <N>`. After a
+  keyword-only command that does not parse it, the pipe is refused rather
+  than silently dropped; the message names the modifier:
+  `clear security | display set` ->
+  `syntax error: "clear security" does not accept the output modifier "| display set"`;
+  `request chassis cluster | display set` ->
+  `syntax error: "request chassis cluster" does not accept the output modifier "| display set"`;
+  `show chassis | display set` ->
+  `syntax error: "show chassis" does not accept the output modifier "| display set"`.
 - Operational `show configuration [<path>] | compare [rollback <N>]` is a
   Junos command that xpf does not support. The remote `cli` refuses it and
   names the command to use instead:

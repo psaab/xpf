@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/psaab/xpf/pkg/cliterm"
+	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -411,6 +412,9 @@ func (c *CLI) dispatchOperational(line string) error {
 		}
 	}
 
+	if err := cmdtree.ValidateOperationalGate(parts); err != nil {
+		return err
+	}
 	switch parts[0] {
 	case "configure":
 		if c.cluster != nil && !c.cluster.IsLocalPrimary(0) {

@@ -20,6 +20,23 @@ package — see the twins note under Gotchas below.
 - Daemon/CLI-assembled static routes render an omitted Junos preference as
   explicit FRR distance 5 before any VRF/table suffix (#17699/#9942/#12514).
 
+## Operational keyword-only gate (#18668)
+
+The local CLI calls the shared `cmdtree.ValidateOperationalGate` in
+`dispatchOperational`, after permission, command-regex, and configuration-read
+adjudication and immediately before handler dispatch. This preserves local
+RBAC error precedence while refusing unknown or ambiguous tokens beneath
+keyword-only nodes before help-printing handlers can return success. Bare
+`?`/`help` remain local help commands; configuration-mode `run` re-enters the
+same operational dispatch and is gated there.
+
+The gate and its `OperationalPipeConsumers` list live in `pkg/cmdtree` and are
+shared with `cmd/cli`; both surfaces use the same unknown-command, glued-pipe,
+and output-modifier errors. It examines only words before the first bare `|`
+and refuses a pipe directly under a keyword-only node unless its handler parses
+that display pipe (currently `show configuration`). Pipes after value slots,
+leaves, and `AcceptsArgs` tails remain with their existing handlers.
+
 ## Request / diagnostic command files (#4653)
 
 The operational request and diagnostic handlers were historically one

@@ -30,33 +30,32 @@ cap would otherwise truncate a large config with `ResourceExhausted`
 
 ## Unknown subcommands under keyword-only nodes refuse (#16798)
 
-`dispatchOperational` consults `cmdtree.ValidateOperationalLine` (the
-operational SSOT) before routing. A line whose first unrecognised
-token sits under a keyword-only node — a node with keyword children
-and no value slot — is refused as `unknown <path> command: <token>`
-(ambiguous abbreviations as `ambiguous <path> command: <token>`),
-so `-c` exits 1 instead of printing help and exiting 0 for work that
-never happened (`clear security ike security-associations`,
-`request system software add`, a misspelt `failover`). Bare keyword
-nodes keep their help listing; failures involving a value slot or a
-leaf fall through to the existing strict handlers (usage /
+Both `cmd/cli` and the local `pkg/cli` `dispatchOperational` call the shared
+`cmdtree.ValidateOperationalGate` (the operational SSOT) before routing. A
+line whose first unrecognised token sits under a keyword-only node — a node
+with keyword children and no value slot — is refused as
+`unknown <path> command: <token>` (ambiguous abbreviations as
+`ambiguous <path> command: <token>`), so scripted commands refuse instead of
+printing help and exiting 0 for work that never happened (`clear security
+ike security-associations`, `request system software add`, a misspelt
+`failover`). Bare keyword nodes keep their help listing; failures involving a
+value slot or a leaf fall through to the existing strict handlers (usage /
 unknown-filter / exact-arity errors).
 
-**The output pipe is not tree grammar (#18664, the #9628 rule).** The
-gate (`validateOperationalLine`, `operational_gate.go`) validates only
-the words before the first bare `|` token. It finds that token with
-`showPipeIndex`, the same rule `splitShowPipe` uses in the handlers, so
-the gate and the handler agree on where the command ends. Before this,
-the bare `|` was judged as an unknown keyword under the keyword-only
-`show configuration` node, and operational `show configuration |
-display set` failed with `unknown show configuration command: |`. The
-rules:
+**The output pipe is not tree grammar (#18664, the #9628 rule).** The shared
+gate validates only the words before the first bare `|` token. Its internal
+first-bare-pipe scan uses the same exact-token rule as `showPipeIndex` in
+handlers: glued tokens such as `|display` and `configuration|display` remain
+ordinary words. Before this, the bare `|` was judged as an unknown keyword
+under the keyword-only `show configuration` node, and
+`show configuration | display set` was refused before its handler could parse
+the pipe. The rules:
 
 - An unknown word BEFORE the pipe refuses exactly as without the pipe
   (`show configuration bogus | display set` ->
   `unknown show configuration command: bogus`).
 - A pipe directly under a keyword-only node is admitted only for a
-  command in `operationalPipeConsumers`, whose handler parses the pipe
+  command in `cmdtree.OperationalPipeConsumers`, whose handler parses the pipe
   itself. Today that is only `show configuration`. Every other
   keyword-only node still refuses, exactly as before #18664 (exit 1),
   but the message now names the modifier:
@@ -68,8 +67,8 @@ rules:
   set`, `show system rollback 1 | display json`) is still the handler's
   business, as before.
 - Output filters (`| match`, `| count`, ...) never reach the gate. They
-  are peeled first by `cliterm.SplitPipe` in `dispatch`, so a chained
-  `show configuration | display set | match x` reaches the gate as
+  are peeled first by `cliterm.SplitPipe` in each surface's `dispatch`, so a
+  chained `show configuration | display set | match x` reaches the gate as
   `show configuration | display set`.
 - An invalid modifier after `show configuration` is refused by the
   handler and named: `syntax error: unknown pipe command "frobnicate"`,
@@ -90,10 +89,10 @@ rules:
     no subtree selector here. Configuration mode compares the CANDIDATE,
     and the message says so.
 - A `|` glued to a word (`|display`, `configuration|display`) is not
-  the pipe operator on any operational surface. `showPipeIndex`,
-  `cliterm.SplitPipe` and `pkg/cli` `splitAtPipe` all need a bare `|`
-  word. The glued token is refused as an unknown word, with a hint
-  showing the spaced form.
+  the pipe operator on any operational surface. The shared gate's scan,
+  `cliterm.SplitPipe` and the handlers all recognize only a bare `|` token.
+  The glued token is refused as an unknown word, with a hint showing the
+  spaced form.
 
 ## Local-only verbs run without a live daemon (#4909)
 

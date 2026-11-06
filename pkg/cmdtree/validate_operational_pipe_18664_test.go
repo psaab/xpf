@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// #18664: the remote cli's #16798 gate (cmd/cli validateOperationalLine)
-// validates only the words before the first bare `|`, then asks
-// ValidateOperationalLine about the words up to and including that `|` to
-// learn where the pipe sits. It relies on two properties pinned here:
+// #18664: the shared ValidateOperationalGate validates only the words
+// before the first bare `|`, then asks ValidateOperationalLine about the
+// words up to and including that `|` to learn where the pipe sits. It
+// relies on two properties pinned here:
 //
 //   - a `|` directly under a keyword-only node is reported as the trailing
 //     bad token, with the node's canonical path as the prefix (the gate
