@@ -1655,12 +1655,12 @@ fn unsolicited_gratuitous_arp_reply_preserves_solicited_binding_10704() {
 
 /// #2370 multi-VLAN no-collision. Two VLAN sub-interfaces (VID 80 and
 /// VID 50) share ONE physical parent (ifindex 11) but own distinct
-/// logical ifindexes (12 and 13) in different subnets. The SAME
-/// neighbor IP learned on each VLAN must land under DISTINCT keys
-/// (12, ip) and (13, ip) — proving the logical-ifindex key keeps
-/// them apart. Keying by the shared physical ifindex would collapse
-/// both into (11, ip) and the second learn would overwrite the
-/// first, corrupting one VLAN's neighbor entry.
+/// logical ifindexes (12 and 13). Both have a connected 172.16.99.0/24,
+/// so the SAME on-link neighbor IP can be learned on each VLAN under
+/// DISTINCT keys (12, ip) and (13, ip) — proving the logical-ifindex key
+/// keeps them apart. Keying by the shared physical ifindex would collapse
+/// both into (11, ip) and the second learn would overwrite the first,
+/// corrupting one VLAN's neighbor entry.
 #[test]
 fn arp_two_vlans_same_ip_distinct_logical_keys_2370() {
     let forwarding: &'static ForwardingState =
@@ -1678,7 +1678,8 @@ fn arp_two_vlans_same_ip_distinct_logical_keys_2370() {
         "parent 11 / VLAN 50 -> logical 13"
     );
 
-    let ip = Ipv4Addr::new(172, 16, 0, 99);
+    // #15247 (50e1a767fd): on-link on both VLAN logicals, same collision premise.
+    let ip = Ipv4Addr::new(172, 16, 99, 99);
     let mac_v80 = [0x02, 0x00, 0x00, 0x00, 0x00, 0x80];
     let mac_v50 = [0x02, 0x00, 0x00, 0x00, 0x00, 0x50];
 
@@ -1789,9 +1790,22 @@ fn outlined_arp_ndp_handlers_still_learn_and_program_6261() {
 
 /// A `nat_snapshot`-shaped config with TWO VLAN sub-interfaces on the
 /// same physical parent (ifindex 11): `reth0.80` (logical 12, VID 80)
-/// and `reth0.50` (logical 13, VID 50), in different subnets.
+/// and `reth0.50` (logical 13, VID 50). Both share a connected /24.
 fn two_vlan_snapshot() -> crate::ConfigSnapshot {
     let mut snap = super::super::test_fixtures::nat_snapshot();
+    // #15247 (50e1a767fd): give both logical units the same connected /24,
+    // allowing the identical sender IP to exercise each ingress on-link gate.
+    let reth0_80 = snap
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.name == "reth0.80")
+        .expect("reth0.80 snapshot interface");
+    reth0_80.addresses.push(crate::InterfaceAddressSnapshot {
+        family: "inet".to_string(),
+        address: "172.16.99.8/24".to_string(),
+        scope: 0,
+        ..Default::default()
+    });
     // Existing reth0.80 already has ifindex 12, parent 11, VID 80.
     snap.interfaces.push(crate::InterfaceSnapshot {
         name: "reth0.50".to_string(),
@@ -1802,12 +1816,20 @@ fn two_vlan_snapshot() -> crate::ConfigSnapshot {
         redundancy_group: 1,
         vlan_id: 50,
         hardware_addr: "02:bf:72:00:50:08".to_string(),
-        addresses: vec![crate::InterfaceAddressSnapshot {
-            family: "inet".to_string(),
-            address: "172.16.50.8/24".to_string(),
-            scope: 0,
-        ..Default::default()
-    }],
+        addresses: vec![
+            crate::InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "172.16.50.8/24".to_string(),
+                scope: 0,
+                ..Default::default()
+            },
+            crate::InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "172.16.99.50/24".to_string(),
+                scope: 0,
+                ..Default::default()
+            },
+        ],
         ..Default::default()
     });
     snap

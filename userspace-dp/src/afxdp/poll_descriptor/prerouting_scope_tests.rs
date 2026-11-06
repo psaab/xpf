@@ -552,7 +552,8 @@ fn unknown_vid_and_vid_zero_on_tagged_trunk_are_recycled_before_arp_learning_112
         "unknown VID must not reach the logical-unit ARP learn either"
     );
 
-    let known_ip = Ipv4Addr::new(192, 0, 2, 50);
+    // #15247 (50e1a767fd): sender must be on-link on unit 13 (10.0.50.1/24) or the on-link learn gate rejects it.
+    let known_ip = Ipv4Addr::new(10, 0, 50, 50);
     let known_meta = UserspaceDpMeta {
         ingress_vlan_id: 50,
         ingress_vlan_present: 1,
@@ -730,7 +731,8 @@ fn unknown_vid_on_unitless_port_is_recycled_before_arp_learning_10656() {
         "unknown VID must recycle before the physical-port ARP learn"
     );
 
-    let untagged_ip = Ipv4Addr::new(192, 0, 2, 1);
+    // #15247 (50e1a767fd): on-link on ifindex 31 (10.0.60.1/24); .1 itself is the interface's own address.
+    let untagged_ip = Ipv4Addr::new(10, 0, 60, 10);
     let untagged_meta = UserspaceDpMeta {
         ingress_vlan_id: 0,
         ingress_vlan_present: 0,
