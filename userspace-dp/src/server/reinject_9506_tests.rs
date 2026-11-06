@@ -797,7 +797,9 @@ fn submit_disconnect_purges_owned_inflight_entries_13195() {
 // duplicates while the sockets have no pending connection, then releasing
 // the duplicates and proving a fresh connection is still accepted and served
 // (submit: ANNOUNCE applies; complete: a queued completion is delivered).
-// Fd exhaustion is process-wide, so both cells share one lock.
+// RLIMIT_NOFILE is process-wide. #18835 runs each pressure body in its own
+// child so unrelated parallel libtest cells cannot see the lowered limit;
+// this mutex only serializes inline pressure bodies within one process.
 use std::sync::Mutex as StdMutex;
 static FD_PRESSURE_LOCK_15112: StdMutex<()> = StdMutex::new(());
 
@@ -806,8 +808,8 @@ static FD_PRESSURE_LOCK_15112: StdMutex<()> = StdMutex::new(());
 /// (524288 here), far above what a freshly spawned thread stack of open
 /// /dev/null duplicates needs to be practical; lowering the soft limit is
 /// the deterministic, unprivileged way to make accept() return EMFILE.
-/// Callers must already hold FD_PRESSURE_LOCK_15112 so no sibling cell sees
-/// the lowered limit.
+/// Callers must already hold FD_PRESSURE_LOCK_15112 to serialize pressure
+/// bodies if they run inline in the same process.
 struct RlimitGuard15112 {
     saved: libc::rlimit,
 }
