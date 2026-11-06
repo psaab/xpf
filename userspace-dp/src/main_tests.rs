@@ -3257,13 +3257,15 @@ fn shim_raw_rx_queue_exposes_no_arithmetic() {
 ///    be rerouted through an alias, and `record_trace`'s own signature, because
 ///    renaming its interface parameter was itself worth two free mentions.
 ///
-///    What is left, stated as inventory rather than as a defence — and stated
-///    COMPLETELY this time, because the shipped version of this paragraph named
-///    three of the six in the round that rewrote it specifically to be
-///    complete. `lib.rs` names `ingress_ifindex` 22 times. Sixteen are pinned:
-///    two by `INGRESS_STATEMENT` (the read writes the name twice), one by
-///    `LOOKUP_STATEMENT`, twelve by `TRACE_ARGUMENT_PREFIX` and one by
-///    `TRACE_SIGNATURE`. The other SIX are free:
+///    Historical inventory snapshot from the earlier `lib.rs` source: it named
+///    `ingress_ifindex` 22 times, with sixteen mentions pinned (two by
+///    `INGRESS_STATEMENT`, one by `LOOKUP_STATEMENT`, twelve by
+///    `TRACE_ARGUMENT_PREFIX`, and one by `TRACE_SIGNATURE`) and six free.
+///    This is not the inventory for the current tree. The #16303 thread-through
+///    and later source changes altered that census; the current-tree total is
+///    pinned at 44 by `MENTIONS_PER_FILE` below, but this historical breakdown
+///    does not classify the current mentions.
+///    The earlier six-free inventory was:
 ///
 ///      - `:127` and `:246` — the two `#[repr(C)]` struct field DECLARATIONS.
 ///        The wire contract with userspace-dp is by offset, so this test says
@@ -3273,13 +3275,11 @@ fn shim_raw_rx_queue_exposes_no_arithmetic() {
 ///      - `:1124` — the `UserspaceTraceValue` initializer.
 ///      - `:1140` — the trace-key mix. Dropping the coordinate from it compiles
 ///        and degrades trace-key distribution rather than the index path.
-///
-///    Buying a shadow of the interface coordinate therefore still costs only
-///    edits that compile and red nothing, and this test does not prevent it.
-///    Driving it to zero would mean pinning most of a trace function that has
-///    nothing to do with the index path; the bound above is the bound that
-///    ships. (Line numbers drift; the count does not — it is pinned by
-///    `MENTIONS_PER_FILE`, so a seventh free mention is a RED whatever it is.)
+///    At that earlier snapshot, buying a shadow of the interface coordinate
+///    therefore still cost only edits that compiled and red nothing. The
+///    accompanying conclusion about the bound and a "seventh free mention"
+///    was specific to that old census; the current 44-mention total below
+///    does not classify the current free mentions.
 ///  - **The ifindex half is a bare `u32`.** `binding_slot`'s queue argument is a
 ///    newtype; its ifindex argument is not, and it cannot be one without a
 ///    second wrapper whose constructor would take a bare `u32` for the same
