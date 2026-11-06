@@ -348,7 +348,7 @@ func TestBuildPolicySnapshotsFailClosedLatchKeepsDenyingActionsEligible(t *testi
 }
 
 func TestUpdatePolicyScheduleStateWithLatchPublishesActionAwareSnapshot(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock := filepath.Join(dir, "control.sock")
 	ln, err := net.Listen("unix", controlSock)
 	if err != nil {
@@ -478,7 +478,7 @@ func TestUpdatePolicyScheduleStateWithLatchPublishesActionAwareSnapshot(t *testi
 }
 
 func TestUpdatePolicyScheduleStateRefusesOldHelperForScheduledPolicies(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock := filepath.Join(dir, "control.sock")
 	ln, err := net.Listen("unix", controlSock)
 	if err != nil {

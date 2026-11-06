@@ -35,7 +35,27 @@ os._exit(3)
 
 func runCrashWindowCadence12159(t *testing.T, readyEverySixth bool) (bool, int, int) {
 	t.Helper()
-	dir := t.TempDir()
+	// The helper binary must live under a trusted short root: the
+	// production trust chain refuses a binary whose ancestors are
+	// non-root or world-writable, and t.TempDir() under a long
+	// GOTMPDIR also pushes the control/event socket paths past the
+	// AF_UNIX sun_path limit. /tmp keeps both properties here.
+	dir, err := os.MkdirTemp("/tmp", "x12159")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	// Inside testguard's user namespace host ancestors present as the
+	// overflow uid; map that presentation back to root for the trust
+	// chain, matching helper_exit_grace_18791_test.go.
+	oldDirUID := helperDirTrustUID
+	helperDirTrustUID = func(uid uint32) uint32 {
+		if uid == 65534 {
+			return 0
+		}
+		return uid
+	}
+	t.Cleanup(func() { helperDirTrustUID = oldDirUID })
 	binary := filepath.Join(dir, "helper")
 	script := crashWindowHelper12159
 	if !readyEverySixth {
@@ -78,7 +98,7 @@ os._exit(7)
 		time.AfterFunc(10*time.Millisecond, retry)
 	}
 	m.mu.Lock()
-	err := m.ensureProcessLocked(cfg)
+	err = m.ensureProcessLocked(cfg)
 	m.mu.Unlock()
 	if err != nil {
 		t.Fatalf("initial helper bring-up failed: %v", err)

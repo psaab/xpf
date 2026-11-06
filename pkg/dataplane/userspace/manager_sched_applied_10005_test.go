@@ -554,7 +554,7 @@ func TestApplyCompiledSnapshot10005_DeferredCommitWaitsForPublish(t *testing.T) 
 // it must advance the applied/show cache even if the later status sync reports
 // the fixture's absent BPF maps.
 func TestRetryDeferredWorkerArm10005_CommitsAppliedSchedulerState(t *testing.T) {
-	controlSock := filepath.Join(t.TempDir(), "control.sock")
+	controlSock := filepath.Join(shortSockDir9322(t), "control.sock")
 	cfg := &config.Config{}
 	m := New()
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}

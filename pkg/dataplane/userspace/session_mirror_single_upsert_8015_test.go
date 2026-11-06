@@ -47,7 +47,7 @@ import (
 // must turn this green cell red, and it does.
 func captureSessionSync(t *testing.T, emit func(m *Manager)) []SessionSyncRequest {
 	t.Helper()
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	ln, err := net.Listen("unix", filepath.Join(dir, "userspace-dp-sessions.sock"))
 	if err != nil {
 		t.Fatalf("listen session socket: %v", err)

@@ -986,7 +986,7 @@ func TestEventStreamAcceptAndRead(t *testing.T) {
 }
 
 func TestEventStreamSessionEventBeforeCallbackQueuesUntilCallback(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -1191,7 +1191,7 @@ func TestEventStreamDataplaneEventAckAndCallback(t *testing.T) {
 }
 
 func TestEventStreamDataplaneEventRawCallbackPreferred(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -1314,7 +1314,7 @@ func waitFrameApplied(t *testing.T, es *EventStream, seq uint64) {
 // (the type-14 case) and the frame is treated as unknown and dropped, so the
 // raw callback never fires.
 func TestEventStreamSessionCloseRTFlowRoutesToRawCallback(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -1487,7 +1487,7 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 	reader := logging.NewEventReader(nil, logging.NewEventBuffer(8))
 	reader.SetSyslogClients([]*logging.SyslogClient{client})
 
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 	es := NewEventStream(sockPath)
 	rawProcessed := make(chan bool, 4)
@@ -1686,7 +1686,7 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 }
 
 func TestEventStreamDataplaneEventBeforeCallbackQueuesUntilCallback(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -1758,7 +1758,7 @@ func TestEventStreamDataplaneEventBeforeCallbackQueuesUntilCallback(t *testing.T
 }
 
 func TestEventStreamMalformedDataplaneEventDropsAndAcks(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -1955,7 +1955,7 @@ func TestEventStreamFullResyncCallback(t *testing.T) {
 }
 
 func TestEventStreamFullResyncBeforeCallbackQueuesUntilCallback(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -2424,7 +2424,7 @@ func TestEventStreamSequenceGapDetection(t *testing.T) {
 // markFrameApplied advances lastAppliedSeq to the gapped seq (ACKing past the
 // hole) and onFullResync is never called, so both assertions go red.
 func TestEventStreamSessionGapTriggersResyncWithholdsAck(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)

@@ -108,7 +108,7 @@ func fastStatusLoop(t *testing.T, d time.Duration) {
 // runs is visible whether or not applyHelperStatusLocked can reach a ctrl map.
 func newLeaseTestManager(t *testing.T) (*Manager, *leaseControlServer) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "control.sock")
+	sock := filepath.Join(shortSockDir9322(t), "control.sock")
 	m := newLinkCycleProcessOnlyManager(t, sock)
 	srv := startLeaseControlServer(t, sock, ProcessStatus{
 		PID:      4242,
@@ -528,7 +528,7 @@ func TestUpdateRGActiveCannotReEnableCtrlDuringLinkCycle_6871(t *testing.T) {
 			name = "activation"
 		}
 		t.Run(name, func(t *testing.T) {
-			sock := filepath.Join(t.TempDir(), "control.sock")
+			sock := filepath.Join(shortSockDir9322(t), "control.sock")
 			m, ctrlMap, _ := newLinkCycleTestManager(t, sock)
 			seedUserspaceCtrl(t, ctrlMap, userspaceCtrlValue{
 				Enabled:            0,
@@ -607,7 +607,7 @@ func TestUpdateRGActiveCannotReEnableCtrlDuringLinkCycle_6871(t *testing.T) {
 // NotifyLinkCycle instead of the top of its critical section.
 func TestNotifyLinkCycleReleasesLeaseBeforeItsOwnCtrlApply_6871(t *testing.T) {
 	skipLinkCycleRebindSleep(t)
-	sock := filepath.Join(t.TempDir(), "control.sock")
+	sock := filepath.Join(shortSockDir9322(t), "control.sock")
 	m, ctrlMap, _ := newLinkCycleTestManager(t, sock)
 	seedUserspaceCtrl(t, ctrlMap, userspaceCtrlValue{
 		Enabled:            1,
@@ -672,7 +672,7 @@ func TestPrepareLinkCycleTakesNoLeaseWithoutAHelper_6871(t *testing.T) {
 // repopulates the rows that were just cleared. The daemon's rollback
 // (NotifyLinkCycle) is what ends it.
 func TestPrepareLinkCycleHoldsTheLeaseWhenTheJoinFails_6871(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "control.sock")
+	sock := filepath.Join(shortSockDir9322(t), "control.sock")
 	m := newLinkCycleProcessOnlyManager(t, sock)
 	// No listener on the control socket: the stop_workers dial fails.
 	err := m.PrepareLinkCycle()

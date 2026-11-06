@@ -28,7 +28,7 @@ func wait9630(t *testing.T, timeout time.Duration, ready func() bool, message st
 
 func startEventStream9630(t *testing.T, callback func() bool) (*EventStream, net.Conn) {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "events.sock")
+	sockPath := filepath.Join(shortSockDir9322(t), "events.sock")
 	es := NewEventStream(sockPath)
 	es.SetOnFullResync(callback)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -91,7 +91,7 @@ func TestEventStreamFullResyncReaderProgressWhileExportBlocked9630(t *testing.T)
 }
 
 func TestEventStreamFullResyncDuringInFlightExportRunsAnotherExport9630(t *testing.T) {
-	es := NewEventStream(filepath.Join(t.TempDir(), "events.sock"))
+	es := NewEventStream(filepath.Join(shortSockDir9322(t), "events.sock"))
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
@@ -134,7 +134,7 @@ func TestEventStreamFullResyncDuringInFlightExportRunsAnotherExport9630(t *testi
 }
 
 func TestEventStreamFullResyncBarriersQueuedBeforeCallbackEachExport9630(t *testing.T) {
-	es := NewEventStream(filepath.Join(t.TempDir(), "events.sock"))
+	es := NewEventStream(filepath.Join(shortSockDir9322(t), "events.sock"))
 	first := es.dispatchOrQueueFullResyncFrame(7)
 	second := es.dispatchOrQueueFullResyncFrame(8)
 	if !first || !second {
@@ -159,7 +159,7 @@ func TestEventStreamFullResyncBarriersQueuedBeforeCallbackEachExport9630(t *test
 }
 
 func TestEventStreamFullResyncCloseRestartDoesNotRetryOldWorker9630(t *testing.T) {
-	es := NewEventStream(filepath.Join(t.TempDir(), "events.sock"))
+	es := NewEventStream(filepath.Join(shortSockDir9322(t), "events.sock"))
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }

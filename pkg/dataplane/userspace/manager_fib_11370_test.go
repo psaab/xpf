@@ -12,7 +12,7 @@ import (
 )
 
 func TestDumpFIBRequestsAndDecodesHelperSnapshot11370(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "control.sock")
+	socket := filepath.Join(shortSockDir9322(t), "control.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen control socket: %v", err)
@@ -95,7 +95,7 @@ func TestDumpFIBRequestsAndDecodesHelperSnapshot11370(t *testing.T) {
 }
 
 func TestDumpFIBHelperBudgetRefusalReturnsErrorWithoutRows11767(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "control.sock")
+	socket := filepath.Join(shortSockDir9322(t), "control.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen control socket: %v", err)
@@ -141,7 +141,7 @@ func TestDumpFIBRejectsTruncatedResponseInsteadOfEmptySuccess11767(t *testing.T)
 	controlResponseCapBytes = 32
 	t.Cleanup(func() { controlResponseCapBytes = oldCap })
 
-	socket := filepath.Join(t.TempDir(), "control.sock")
+	socket := filepath.Join(shortSockDir9322(t), "control.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen control socket: %v", err)
@@ -181,7 +181,7 @@ func TestDumpFIBRejectsTruncatedResponseInsteadOfEmptySuccess11767(t *testing.T)
 }
 
 func TestDumpFIBRejectsValidJSONWithoutNewline11767(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "control.sock")
+	socket := filepath.Join(shortSockDir9322(t), "control.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen control socket: %v", err)

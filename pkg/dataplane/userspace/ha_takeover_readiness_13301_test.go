@@ -88,7 +88,7 @@ func TestSessionSocketRPCCounters13301(t *testing.T) {
 }
 func TestSessionSocketRPCCountersTimeout13301(t *testing.T) {
 	m := New()
-	m.cfg.ControlSocket = filepath.Join(t.TempDir(), "control.sock")
+	m.cfg.ControlSocket = filepath.Join(shortSockDir9322(t), "control.sock")
 	originalDial, originalRoundTrip := sessionSyncDialTimeout, sessionSyncRoundtripDeadline
 	sessionSyncDialTimeout = time.Second
 	sessionSyncRoundtripDeadline = 20 * time.Millisecond

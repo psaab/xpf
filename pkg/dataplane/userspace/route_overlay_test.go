@@ -191,7 +191,7 @@ func overlayControlServer(t *testing.T, dir string) (string, chan ControlRequest
 // bump and overlay routes, duplicate-publish skip, and full-apply
 // overlay preservation through the cached overlay.
 func TestPublishRouteOverlaySnapshot(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock, reqCh := overlayControlServer(t, dir)
 
 	cfg := overlayTestConfig()
@@ -292,7 +292,7 @@ func TestPublishRouteOverlaySnapshot(t *testing.T) {
 }
 
 func TestRepublishCurrentCaptureAuthorityRefreshesRows10485(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock, reqCh := overlayControlServer(t, dir)
 	cfg := overlayTestConfig()
 	m := New()
@@ -381,7 +381,7 @@ func TestPublishRouteOverlaySnapshotWithoutHelper(t *testing.T) {
 // returns published=true with a nil error, m.appliedSnapshot.Config advances to
 // the unpublished cfgB, and the hybrid apply_snapshot is shipped to the helper.
 func TestPublishRouteOverlaySnapshotRefusesPolicyHybrid(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock, reqCh := overlayControlServer(t, dir)
 
 	// cfgA is the config the dataplane actually compiled and enforces: a LOOSER
@@ -455,7 +455,7 @@ func TestPublishRouteOverlaySnapshotRefusesPolicyHybrid(t *testing.T) {
 // is a legitimate route-only publish and must still succeed. Only a genuine
 // policy divergence is refused.
 func TestPublishRouteOverlaySnapshotAcceptsEqualConfigDistinctPointer(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock, reqCh := overlayControlServer(t, dir)
 
 	applied := overlayTestConfig()
@@ -621,7 +621,7 @@ func overlayControlServerToggle(t *testing.T, dir string) (string, chan ControlR
 // RED-on-revert: reverting the mutate-after-success fix makes the cache
 // advance to the failed overlay B, so assertions (a)/(b) below fail.
 func TestPublishRouteOverlaySnapshotFailureKeepsBaseline(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock, reqCh, setFail := overlayControlServerToggle(t, dir)
 
 	cfg := overlayTestConfig()
@@ -727,7 +727,7 @@ func TestRouteOverlayRepublishRefreshesTunnelLiveness11423(t *testing.T) {
 		}}, nil
 	}
 
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock, reqCh := overlayControlServer(t, dir)
 	cfg := &config.Config{}
 	m := New()
@@ -808,7 +808,7 @@ func TestRouteOverlayRepublishRefreshesInterfaceLiveness12064(t *testing.T) {
 		}}, nil
 	}
 
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock, reqCh := overlayControlServer(t, dir)
 	cfg := &config.Config{}
 	m := New()

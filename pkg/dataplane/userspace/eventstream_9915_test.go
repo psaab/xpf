@@ -18,7 +18,7 @@ import (
 // session-sync resync path (rate-limited) instead of being silently skipped —
 // while the stream stays alive (telemetry remains lossy, no reconnect).
 func TestEventStreamTelemetryGapForcesRateLimitedResync_9915(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -122,7 +122,7 @@ func TestEventStreamTelemetryGapForcesRateLimitedResync_9915(t *testing.T) {
 // frame advances prevSeq; otherwise the following valid frame is contiguous
 // and the missing session delta is never backstopped.
 func TestEventStreamMalformedTelemetryGapForcesResync_9915(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -203,7 +203,7 @@ func TestEventStreamMalformedTelemetryGapForcesResync_9915(t *testing.T) {
 // F-046 control: contiguous telemetry (no gap) must NOT trigger any resync —
 // the gap is the trigger, not the telemetry itself. Passes on base and post-fix.
 func TestEventStreamContiguousTelemetryTriggersNoResync_9915(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -276,7 +276,7 @@ func TestEventStreamContiguousTelemetryTriggersNoResync_9915(t *testing.T) {
 // seq. Only a strictly contiguous seq (seq == prevSeq+1) keeps the #6160
 // loop-break; anything else is payload bytes misread as a header.
 func TestOversizedDesyncSeqDoesNotAdvanceWatermark_9915(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -345,7 +345,7 @@ func TestOversizedDesyncSeqDoesNotAdvanceWatermark_9915(t *testing.T) {
 // would cumulatively ACK across unknown frames; only seq==prevSeq+1 may move
 // the watermark. Fails on base AND under any permissive bound.
 func TestOversizedPlusTwoSeqDoesNotAdvanceWatermark_9915(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -412,7 +412,7 @@ func TestOversizedPlusTwoSeqDoesNotAdvanceWatermark_9915(t *testing.T) {
 // loop-break — the watermark advances past it so the drop trims it instead of
 // replay-looping. Passes on base and post-fix.
 func TestOversizedNearContiguousSeqStillAdvancesWatermark_9915(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
@@ -483,7 +483,7 @@ func TestEventStreamPauseAndAckBatchObservableInStatus_9915(t *testing.T) {
 			"pause/backpressure state is written and never read (F-125)", hasPaused, hasBatch)
 	}
 
-	es := NewEventStream(filepath.Join(t.TempDir(), "x.sock"))
+	es := NewEventStream(filepath.Join(shortSockDir9322(t), "x.sock"))
 	if err := es.SendPause(); err == nil {
 		t.Fatal("SendPause without a connection must error")
 	}
@@ -492,7 +492,7 @@ func TestEventStreamPauseAndAckBatchObservableInStatus_9915(t *testing.T) {
 	}
 
 	// Success half (connected helper): pause/resume round-trips truthfully.
-	sdir := t.TempDir()
+	sdir := shortSockDir9322(t)
 	ssock := filepath.Join(sdir, "test-events.sock")
 	ces := NewEventStream(ssock)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -521,7 +521,7 @@ func TestEventStreamPauseAndAckBatchObservableInStatus_9915(t *testing.T) {
 
 	// EventsSinceAck behavior: applied frames advance it (unit-level,
 	// deterministic on an unstarted stream with no ackLoop ticker).
-	quiet := NewEventStream(filepath.Join(t.TempDir(), "q.sock"))
+	quiet := NewEventStream(filepath.Join(shortSockDir9322(t), "q.sock"))
 	quiet.markFrameApplied(11)
 	quiet.markFrameApplied(12)
 	if got := reflect.ValueOf(quiet.Status()).FieldByName("EventsSinceAck").Uint(); got != 2 {

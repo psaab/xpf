@@ -21,7 +21,7 @@ type linkCycleControlEvent struct {
 }
 
 func TestPrepareLinkCycleDisablesCtrlBeforeStopWorkers(t *testing.T) {
-	controlSock := filepath.Join(t.TempDir(), "control.sock")
+	controlSock := filepath.Join(shortSockDir9322(t), "control.sock")
 	m, ctrlMap, _ := newLinkCycleTestManager(t, controlSock)
 	seedUserspaceCtrl(t, ctrlMap, userspaceCtrlValue{
 		Enabled:            1,
@@ -66,7 +66,7 @@ func TestPrepareLinkCycleDisablesCtrlBeforeStopWorkers(t *testing.T) {
 func TestNotifyLinkCycleRebindsAndAppliesHelperStatusCompat(t *testing.T) {
 	skipLinkCycleRebindSleep(t)
 
-	controlSock := filepath.Join(t.TempDir(), "control.sock")
+	controlSock := filepath.Join(shortSockDir9322(t), "control.sock")
 	m, ctrlMap, bindingsMap := newLinkCycleTestManager(t, controlSock)
 	seedUserspaceCtrl(t, ctrlMap, userspaceCtrlValue{
 		Enabled:            1,
@@ -159,7 +159,7 @@ func TestNotifyLinkCycleRebindsAndAppliesHelperStatusCompat(t *testing.T) {
 func TestNotifyLinkCycleStrictModePublishesFailClosedCtrlFlags(t *testing.T) {
 	skipLinkCycleRebindSleep(t)
 
-	controlSock := filepath.Join(t.TempDir(), "control.sock")
+	controlSock := filepath.Join(shortSockDir9322(t), "control.sock")
 	m, ctrlMap, _ := newLinkCycleTestManager(t, controlSock)
 	seedUserspaceCtrl(t, ctrlMap, userspaceCtrlValue{
 		Enabled:            1,
@@ -245,7 +245,7 @@ func TestNotifyLinkCycleStrictModePublishesFailClosedCtrlFlags(t *testing.T) {
 func TestLegacyDataPlaneAdapterLinkForwardsLinkCycleToUserspaceManager(t *testing.T) {
 	skipLinkCycleRebindSleep(t)
 
-	controlSock := filepath.Join(t.TempDir(), "control.sock")
+	controlSock := filepath.Join(shortSockDir9322(t), "control.sock")
 	m := newLinkCycleProcessOnlyManager(t, controlSock)
 
 	events := startLinkCycleControlServer(t, controlSock, nil, []ProcessStatus{

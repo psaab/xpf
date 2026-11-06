@@ -35,7 +35,7 @@ const cutShortBound = 3 * time.Second
 // This models the hung helper the deadline exists for.
 func stalledControlSocket(t *testing.T) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "control.sock")
+	sock := filepath.Join(shortSockDir9322(t), "control.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen control socket: %v", err)

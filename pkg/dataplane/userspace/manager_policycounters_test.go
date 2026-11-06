@@ -196,7 +196,7 @@ func TestClearPolicyCountersZerosCachedHelperCountersWithoutHelper(t *testing.T)
 }
 
 func TestClearPolicyCountersUsesHelperIPCAndRecordsStatus(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock := filepath.Join(dir, "control.sock")
 	ln, err := net.Listen("unix", controlSock)
 	if err != nil {
@@ -272,7 +272,7 @@ func TestClearPolicyCountersUsesHelperIPCAndRecordsStatus(t *testing.T) {
 }
 
 func TestReadPolicyCountersUsesStatusIPCPolicyRuleCounters(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock := filepath.Join(dir, "control.sock")
 	ln, err := net.Listen("unix", controlSock)
 	if err != nil {

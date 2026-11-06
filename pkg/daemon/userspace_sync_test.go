@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1154,7 +1153,7 @@ func TestPrimaryOwnerRGIDsFollowsConfigAndOwnership(t *testing.T) {
 }
 
 func TestWireUserspaceEventStreamCallbacksStandaloneWiresSessionAndFullResync(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "e")
+	socketPath := shortTmpSocket(t, "e")
 	es := dpuserspace.NewEventStream(socketPath)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

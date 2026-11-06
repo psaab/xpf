@@ -81,7 +81,7 @@ import (
 // Go-owned HA map write is stubbed.
 func newWatchdogTestManager(t *testing.T) (*Manager, *leaseControlServer) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "control.sock")
+	sock := filepath.Join(shortSockDir9322(t), "control.sock")
 	m := newLinkCycleProcessOnlyManager(t, sock)
 	srv := startLeaseControlServer(t, sock, ProcessStatus{
 		PID:          7777,

@@ -5335,3 +5335,13 @@ the hold event can resolve, the pre-#18715 reject in the wiring, no
 link-local check, no RA-sender check, and no re-assert after an overtaking
 write. The prior-hold rule (drain pin, Manual, chained accepts) and the
 predicate have their cells in `pkg/cluster/transfer_retry_18715_test.go`.
+
+## Test fixture Unix-socket paths
+
+AF_UNIX `sun_path` is 108 bytes including its terminator, leaving 107 bytes for
+the pathname. Go 1.26 places `t.TempDir()` below
+`GOTMPDIR`, so a long inherited `GOTMPDIR` and test name can overflow that
+limit in socket fixtures. Tests that bind or dial Unix sockets use
+`shortTmpSocket(t, name)` to allocate a short socket path; keep unrelated
+non-socket temporary files on `t.TempDir()`. Do not work around the limit by
+overriding `GOTMPDIR` in test recipes.

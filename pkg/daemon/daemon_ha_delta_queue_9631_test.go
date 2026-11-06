@@ -8,7 +8,6 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"net"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -441,7 +440,7 @@ func TestPeerDownRepaySerializesWithReopenedStreamClose9631(t *testing.T) {
 	receiver := cluster.NewSessionSync("127.0.0.1:0", "127.0.0.1:1", nil)
 	receiver.SetRuntimeDomains(receiverStore, nil)
 
-	socketPath := filepath.Join(t.TempDir(), "events.sock")
+	socketPath := shortTmpSocket(t, "events.sock")
 	es := dpuserspace.NewEventStream(socketPath)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

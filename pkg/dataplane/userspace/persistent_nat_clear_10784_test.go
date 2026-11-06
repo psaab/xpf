@@ -64,7 +64,7 @@ func TestClearPersistentNATLeaseRoutesToHelperAndClearsMirror10784(t *testing.T)
 	m := New()
 	m.proc = &exec.Cmd{}
 	m.persistentNatLeaseGenerationPath = filepath.Join(t.TempDir(), "nat-generation.json")
-	socket := filepath.Join(t.TempDir(), "control.sock")
+	socket := filepath.Join(shortSockDir9322(t), "control.sock")
 	m.cfg.ControlSocket = socket
 	helper := startPersistentNATClearHelper10784(t, socket, ControlResponse{
 		OK:                      true,
@@ -93,7 +93,7 @@ func TestClearPersistentNATLeaseKeepsMirrorOnHelperFailure10784(t *testing.T) {
 	m := New()
 	m.proc = &exec.Cmd{}
 	m.persistentNatLeaseGenerationPath = filepath.Join(t.TempDir(), "nat-generation.json")
-	socket := filepath.Join(t.TempDir(), "control.sock")
+	socket := filepath.Join(shortSockDir9322(t), "control.sock")
 	m.cfg.ControlSocket = socket
 	helper := startPersistentNATClearHelper10784(t, socket, ControlResponse{
 		OK:    false,

@@ -54,7 +54,7 @@ func persistentNatGenerationManager11486(t *testing.T, path string) (*Manager, *
 	t.Helper()
 	m := New()
 	m.proc = &exec.Cmd{}
-	m.cfg.ControlSocket = filepath.Join(t.TempDir(), "control.sock")
+	m.cfg.ControlSocket = filepath.Join(shortSockDir9322(t), "control.sock")
 	m.persistentNatLeaseGenerationPath = path
 	m.helperStatusObserved = true
 	m.lastStatus.ConfigSnapshotProtocolVersion = ProtocolVersion

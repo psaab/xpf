@@ -293,7 +293,7 @@ func (r *replaceableStreamDP) EventStream() *dpuserspace.EventStream { return r.
 // and returns it with that socket path (EventStream exposes no getter).
 func startEventStreamForRewireTest(t *testing.T, ctx context.Context, name string) (*dpuserspace.EventStream, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
+	path := shortTmpSocket(t, name)
 	es := dpuserspace.NewEventStream(path)
 	// Start binds the listener synchronously, so a nil error means the
 	// socket is connectable (#6038).

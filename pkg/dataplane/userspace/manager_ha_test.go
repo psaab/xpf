@@ -1238,7 +1238,7 @@ func drainUpdateHAStateCount(ch <-chan string) int {
 // un-seamed bpfShim.UpdateHAWatchdog errors on the missing map, short-circuiting
 // the whole call.)
 func TestUpdateHAWatchdogThrottlesIPCButWritesMapEveryTick(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock, reqTypes := startFakeHAControlHelper(t, dir)
 
 	proc, err := os.FindProcess(os.Getpid())
@@ -1285,7 +1285,7 @@ func TestUpdateHAWatchdogThrottlesIPCButWritesMapEveryTick(t *testing.T) {
 // backstop throttle. If the throttle ever swallowed a transition, failover timing
 // would regress.
 func TestUpdateHAWatchdogActiveChangeForcesImmediateIPC(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock, reqTypes := startFakeHAControlHelper(t, dir)
 
 	proc, err := os.FindProcess(os.Getpid())

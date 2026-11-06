@@ -2606,3 +2606,15 @@ surfaces one `INFO` each — a fully-covered box stays at the single line, and
 the two levels are deliberate: `WARN` is the would-gate set, while a skip's
 dominant member is a clean `disable`, so logging it at `WARN` would train
 operators to ignore both.
+
+## Test fixture Unix-socket paths
+
+AF_UNIX `sun_path` is 108 bytes including its terminator, leaving 107 bytes for
+the pathname. Go 1.26 places `t.TempDir()` below
+`GOTMPDIR`, so an inherited long `GOTMPDIR` and a long test name can make an
+otherwise valid socket fixture path exceed the kernel limit.
+Socket-only fixtures use the package's existing `shortSockDir9322(t)` helper;
+keep unrelated non-socket temporary files on `t.TempDir()`. The crash-window
+fixture executes its helper binary too, so its short directory uses `/tmp`'s
+root-owned sticky parent to satisfy the helper-path trust check. Do not mask
+the socket-path issue by overriding `GOTMPDIR` in test recipes.
