@@ -205,9 +205,11 @@ func TestHelperRefusedRoutePublishedPastRuntimeFilters12507(t *testing.T) {
 			if family != syscall.AF_INET {
 				return nil, nil
 			}
+			// Since #17684 the live next-table lookup rules use the shared
+			// priority window; derive fixture priorities from the same helper.
 			return []netlink.Rule{
-				{Dst: mustCIDR9955(t, "10.0.0.0/8"), Table: 501, Priority: 32001},
-				{Dst: mustCIDR9955(t, "10.9.0.0/16"), Table: 501, Priority: 32002},
+				{Dst: mustCIDR9955(t, "10.0.0.0/8"), Table: 501, Priority: config.RouteLeakNextTableLookupPriority(8, 32)},
+				{Dst: mustCIDR9955(t, "10.9.0.0/16"), Table: 501, Priority: config.RouteLeakNextTableLookupPriority(16, 32)},
 			}, nil
 		}
 		cfg := defaultIngressConfig9955(1)
@@ -223,7 +225,7 @@ func TestHelperRefusedRoutePublishedPastRuntimeFilters12507(t *testing.T) {
 		for _, route := range routes {
 			if route.Destination == "10.9.0.0/16" {
 				control++
-				if route.RulePriority != 32002 {
+				if route.RulePriority != uint32(config.RouteLeakNextTableLookupPriority(16, 32)) {
 					t.Fatalf("control: live rule should replace the config leak row: %+v", route)
 				}
 			}
