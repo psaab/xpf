@@ -88,6 +88,7 @@ func TestRethUnitNumberVsVlanIDStrictReject14573(t *testing.T) {
 func TestRethSingleVlanUnitAndDottedAliasStillCompile14573(t *testing.T) {
 	if err := compileSet7795(t,
 		"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		"set interfaces reth1 vlan-tagging",
 		"set interfaces reth1 unit 100 vlan-id 100 family inet address 10.0.61.1/24",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",

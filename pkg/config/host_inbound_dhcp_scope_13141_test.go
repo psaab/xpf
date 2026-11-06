@@ -84,6 +84,7 @@ func TestDHCPv6ServerDoesNotWithholdIPv4DHCP13141(t *testing.T) {
 func TestBareDHCPServerRefMatchesOnlyUnitZero13141(t *testing.T) {
 	// A bare dhcp-local-server ref means unit 0, not every sibling unit.
 	cfg, err := CompileConfig(buildTree(t, []string{
+		"set interfaces ge-0/0/2 vlan-tagging",
 		"set interfaces ge-0/0/2 unit 0 family inet address 10.0.2.1/24",
 		"set interfaces ge-0/0/2 unit 50 vlan-id 50",
 		"set interfaces ge-0/0/2 unit 50 family inet address 10.0.52.1/24",

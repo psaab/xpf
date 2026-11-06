@@ -2084,6 +2084,7 @@ func TestCompileClassOfServiceInterfaceLevelBinding4021(t *testing.T) {
 		"set class-of-service classifiers dscp wan-classifier forwarding-class best-effort loss-priority low code-points be",
 		"set class-of-service rewrite-rules dscp wan-rewrite forwarding-class best-effort loss-priority low code-point ef",
 		// Physical interface carries logical units 0 and 80.
+		"set interfaces ge-0/0/2 vlan-tagging",
 		"set interfaces ge-0/0/2 unit 0 family inet address 10.0.0.1/24",
 		"set interfaces ge-0/0/2 unit 80 vlan-id 80",
 		// Interface-level (no unit) CoS binding.

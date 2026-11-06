@@ -27,6 +27,7 @@ chassis {
 }
 interfaces {
     ge-0/0/0 {
+        vlan-tagging;
         unit 0 {
             family inet {
                 address 10.255.1.1/24;

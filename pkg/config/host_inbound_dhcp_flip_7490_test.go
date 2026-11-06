@@ -451,6 +451,7 @@ func compileConfFile7490(t *testing.T, path string) *Config {
 // keeps it gone.
 func TestSiblingUnitIsNotWithheldFromByItsPhysical7490(t *testing.T) {
 	cfg := flip7490Cfg(t,
+		"set interfaces ge-0/0/7 vlan-tagging",
 		"set interfaces ge-0/0/7 unit 0 family inet address 10.0.7.1/24",
 		"set interfaces ge-0/0/7 unit 50 vlan-id 50",
 		"set interfaces ge-0/0/7 unit 50 family inet address 10.0.57.1/24",

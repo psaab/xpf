@@ -316,6 +316,7 @@ func TestUnitAliasSingleCanonicalUnitClean_5878(t *testing.T) {
 // peer-only group adds a DISTINCT further unit (unit 2, not an alias).
 func TestUnitAliasVLANSplitDistinctUnitsClean_5878(t *testing.T) {
 	tree := buildTreeFromSet(t, append(canonParityBase(),
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 unit 0 vlan-id 10 family inet address 10.0.0.1/24",
 		"set interfaces ge-0/0/0 unit 1 vlan-id 20 family inet address 10.0.1.1/24",
 		"set groups node0 interfaces ge-0/0/0 unit 2 vlan-id 30 family inet address 10.0.2.1/24",

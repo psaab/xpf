@@ -206,11 +206,13 @@ func TestIPMonitoringValidation(t *testing.T) {
 // vlan-id bridging case), and unit 2 static (no dhcp).
 func dhcpUplinkLines() []string {
 	return []string{
+		"set interfaces ge-0/0/3 vlan-tagging",
 		"set interfaces ge-0/0/3 unit 0 family inet dhcp",
 		"set interfaces ge-0/0/3 unit 50 vlan-id 50",
 		"set interfaces ge-0/0/3 unit 50 family inet dhcp",
 		"set interfaces ge-0/0/3 unit 1 vlan-id 80",
 		"set interfaces ge-0/0/3 unit 1 family inet dhcp",
+		"set interfaces ge-0/0/3 unit 2 vlan-id 2",
 		"set interfaces ge-0/0/3 unit 2 family inet address 192.0.2.1/24",
 	}
 }
