@@ -159,6 +159,15 @@ func TestRESTRollbackMissingSlotSlotErrorPrecedence17967(t *testing.T) {
 		t.Fatalf("second Commit: %v", err)
 	}
 	store.ExitConfigure()
+	// #18861 (follow-on to #17215): compare?rollback=N diffs the rollback
+	// slot against the candidate; without one, the allowed-path control
+	// correctly reports "not in configuration mode" instead of 200.
+	// Re-enter configure after making rollback slot 1 so compare controls
+	// exercise the intended slot-error/authz precedence.
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure compare candidate: %v", err)
+	}
+	defer store.ExitConfigure()
 
 	_, base := authzServer(t, Config{
 		Addr:         "127.0.0.1:8080",
