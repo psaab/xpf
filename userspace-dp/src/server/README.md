@@ -852,6 +852,9 @@ worker bound to multiple queues.
   four sockets are served by the single accept loop in `server/accept_loop.rs`
   (`run_accept_loop`), which decides through `accept_step`; `accept_step` also
   returns the journal line to write, so log volume is tested rather than assumed.
+  The same shared loop is also the #9003 peer gate: before dispatch, it checks
+  each accepted stream using the `peer_label` supplied by the control/session
+  listener's `AcceptLoopSpec` in `lifecycle.rs`.
   The control and session loops are wired from `lifecycle.rs`, and the #9506
   reinject submit/complete loops from `reinject_9506.rs` (#15112 — these two used
   to `break` on any non-`WouldBlock` error, dropping the listener permanently

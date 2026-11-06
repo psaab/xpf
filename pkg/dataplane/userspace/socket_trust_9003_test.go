@@ -632,6 +632,14 @@ func TestHelperDefaultPathsAreInLockstepWithRust9003(t *testing.T) {
 
 // TestHelperSocketsAreOwnerOnlyInRust9003 pins the helper-side half of the mode
 // and peer contract, which no Go test can observe.
+//
+// #17123 (PR #18170, first-bad 66f52e2e89) collapsed the four hand-written
+// accept loops into the single run_accept_loop in accept_loop.rs, replacing the
+// two inline reject_unprivileged_peer("control/session socket", &stream) calls
+// in lifecycle.rs with one shared call on spec.peer_label. The per-socket
+// labels now arrive via AcceptLoopSpec at the lifecycle.rs call sites, so this
+// pin follows that shape: one production peer check in the shared loop,
+// ordered before dispatch, fed the correct label by each listener's spec.
 func TestHelperSocketsAreOwnerOnlyInRust9003(t *testing.T) {
 	src, err := os.ReadFile("../../../userspace-dp/src/server/lifecycle.rs")
 	if err != nil {
@@ -641,8 +649,6 @@ func TestHelperSocketsAreOwnerOnlyInRust9003(t *testing.T) {
 	for _, want := range []string{
 		"restrict_socket_mode(&args.control_socket)?;",
 		"restrict_socket_mode(&session_socket)?;",
-		`reject_unprivileged_peer("control socket", &stream)`,
-		`reject_unprivileged_peer("session socket", &stream)`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("lifecycle.rs is missing %q — the helper side of the #9003 contract is not wired", want)
@@ -650,5 +656,64 @@ func TestHelperSocketsAreOwnerOnlyInRust9003(t *testing.T) {
 	}
 	if strings.Contains(body, "fs::create_dir_all(parent).map_err(|e| format!(\"create control dir") {
 		t.Error("lifecycle.rs creates the control directory with a mode-less create_dir_all")
+	}
+
+	// The peer check lives once, in the shared accept loop. Truncate before
+	// the first #[cfg(test)] so Rust test code cannot satisfy or inflate
+	// the production count, and do not count the checker repo-wide:
+	// event_stream/connection.rs is a different leg, and the Rust-test call
+	// in lifecycle.rs would be a near-miss false pass.
+	loopSrc, err := os.ReadFile("../../../userspace-dp/src/server/accept_loop.rs")
+	if err != nil {
+		t.Fatalf("read accept_loop.rs: %v", err)
+	}
+	prod := string(loopSrc)
+	if i := strings.Index(prod, "#[cfg(test)]"); i >= 0 {
+		prod = prod[:i]
+	}
+	if !strings.Contains(prod, "pub(crate) fn run_accept_loop") {
+		t.Error("accept_loop.rs has no pub(crate) fn run_accept_loop — the shared #17123 accept loop is not wired")
+	}
+	const peerCheck = "reject_unprivileged_peer(spec.peer_label, &stream)"
+	if n := strings.Count(prod, peerCheck); n != 1 {
+		t.Errorf("accept_loop.rs production code contains %d occurrences of %q, want exactly 1 — the shared loop is the single #9003 peer gate", n, peerCheck)
+	}
+	serveIdx := strings.Index(prod, "AcceptStep::Serve((stream, _))")
+	checkIdx := strings.Index(prod, peerCheck)
+	panicIdx := strings.Index(prod, "match &on_panic")
+	if serveIdx < 0 || checkIdx < 0 || panicIdx < 0 {
+		t.Errorf("accept_loop.rs ordering anchors missing (Serve=%d, peer check=%d, on_panic=%d) — cannot pin the peer check before dispatch", serveIdx, checkIdx, panicIdx)
+	} else if !(serveIdx < checkIdx && checkIdx < panicIdx) {
+		t.Errorf("accept_loop.rs peer check is not positioned after AcceptStep::Serve and before match &on_panic (Serve=%d, peer check=%d, on_panic=%d) — the peer must be checked before dispatch", serveIdx, checkIdx, panicIdx)
+	}
+
+	// Each lifecycle.rs call site must feed the shared loop its own socket's
+	// label. Anchor the window on the listener argument and end it at the
+	// panic policy, so only that call's spec is examined; do not pin the
+	// whole spec block verbatim.
+	for _, tc := range []struct {
+		anchor string
+		label  string
+	}{
+		{"&session_listener,", `"session socket"`},
+		{"&listener,", `"control socket"`},
+	} {
+		start := strings.Index(body, tc.anchor)
+		if start < 0 {
+			t.Errorf("lifecycle.rs has no run_accept_loop call anchored at %q — the %s spec cannot be pinned", tc.anchor, tc.label)
+			continue
+		}
+		rest := body[start:]
+		end := strings.Index(rest, "PanicPolicy")
+		if end < 0 {
+			t.Errorf("lifecycle.rs call at %q has no following PanicPolicy — the %s spec window cannot be bounded", tc.anchor, tc.label)
+			continue
+		}
+		window := rest[:end]
+		for _, field := range []string{"name: " + tc.label, "peer_label: " + tc.label} {
+			if !strings.Contains(window, field) {
+				t.Errorf("lifecycle.rs spec for %q is missing %q before PanicPolicy — the shared loop would peer-check %s under the wrong label", tc.anchor, field, tc.label)
+			}
+		}
 	}
 }
