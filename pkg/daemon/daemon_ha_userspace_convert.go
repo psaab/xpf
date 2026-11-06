@@ -666,6 +666,9 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	if delta.FabricIngress {
 		val.LogFlags |= dataplane.LogFlagUserspaceFabricIngress
 	}
+	if delta.ForwardWireAliasOrigin {
+		val.LogFlags |= dataplane.LogFlagForwardWireAlias
+	}
 	// #2785: stamp the admitting policy's per-policy `then log` selection
 	// onto the synced session so it emits the same RT_FLOW
 	// SESSION_CREATE/CLOSE records after failover. These bits ride the
@@ -838,6 +841,9 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	}
 	if delta.FabricIngress {
 		val.LogFlags |= dataplane.LogFlagUserspaceFabricIngress
+	}
+	if delta.ForwardWireAliasOrigin {
+		val.LogFlags |= dataplane.LogFlagForwardWireAlias
 	}
 	// #2785: stamp the per-policy `then log` selection (see V4).
 	if delta.LogSessionInit {

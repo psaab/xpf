@@ -2197,12 +2197,12 @@ fn lan_node_unnatted_fabric_reply_keeps_forwarding_18531() {
         "fixture: the un-NATed reply replica installs"
     );
     assert!(
-        !crate::afxdp::session_glue::reverse_un_nat_targets_itself(
+        crate::afxdp::session_glue::reverse_un_nat_targets_itself(
             &unnatted_key,
             reverse_decision.nat,
             &replica_metadata,
         ),
-        "fixture: the unmarked replica has the self-targeting shape but no          alias origin, so it is not handed back"
+        "fixture: the replica has the self-targeting NAT shape (legacy          SNAT companion arm); the fabric-arrival gate below is what          keeps it forwarding"
     );
     let reply = || {
         let mut frame = build_txn_tcp_syn_frame_v4(
@@ -2991,7 +2991,11 @@ fn port_only_alias_reverse_is_handed_to_peer_at_synthesis_18927() {
         dnat.source_nat_static = None;
 
         let mut pat = exported_forward(&owner_fwd, family);
+        // Production PAT shape: the source address rewrite is present
+        // (here the address itself is unchanged) beside the port
+        // rewrite, as nat/source/match_rules.rs emits.
         pat.decision.nat = NatDecision {
+            rewrite_src: Some(pat.key.src_ip),
             rewrite_src_port: Some(PAT_PORT),
             ..NatDecision::default()
         };

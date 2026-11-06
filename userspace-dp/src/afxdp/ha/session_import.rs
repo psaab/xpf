@@ -1290,11 +1290,16 @@ impl crate::afxdp::ha::SessionDomain {
         strict_mirror: bool,
         pptp_call: Option<crate::session::pptp::PptpCall>,
     ) -> SyncedImportOutcome {
+        // Booking and supersession key on the alias SHAPE alone, as at
+        // base: an unmarked alias from an older peer must not reserve
+        // the translation or refuse its canonical sibling. The
+        // producer marker is retained separately, only as handoff
+        // provenance for the reverse predicate.
         let is_alias = !entry.metadata.is_reverse
             && entry.origin.is_cluster_synced_origin()
-            && entry.metadata.forward_wire_alias_origin
             && crate::session::is_forward_wire_alias(&entry.key, entry.decision.nat);
-        entry.metadata.forward_wire_alias_origin = is_alias;
+        entry.metadata.forward_wire_alias_origin = entry.metadata.forward_wire_alias_origin
+            && is_alias;
         if is_alias
             && crate::afxdp::shared_ops::lookup_shared_forward_wire_match(
                 &self.sessions.forward_wire,

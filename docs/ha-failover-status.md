@@ -600,11 +600,12 @@ The rules now:
   `lan_node_unnatted_fabric_reply_keeps_forwarding_18531`. Without a redirect (a
   fabric-borne reply, or no fabric) the row resolves to `HAInactive`, so a
   reply is dropped, never bounced, delivered locally, or forwarded on a raw
-  FIB answer. Identity SNAT remains self-targeting: its original source
-  already equals the SNAT address and its port is unchanged, so it is handed
-  to the peer. Identity DNAT differs: dynamic and static decision builders
-  normalize an unchanged destination address and port to no rewrite,
-  preserving it as a canonical row. A pool alias's reverse (its target,
+  FIB answer. Identity translations (SNAT, DNAT, static, persistent,
+  same-prefix NPTv6) keep their producer decision shape; they are
+  canonical because the sync producer never marks them as the extra
+  forward-wire alias row. A marked alias reverse is handed to the
+  peer; an unmarked self-targeting reverse keeps the pre-#18927
+  SNAT/NPTv6 companion behaviour. A pool alias's reverse (its target,
   the pool address, is not local and the lookup answers the WAN neighbor
   path) is handed to the peer at import (pinned by
   `pool_alias_reverse_is_handed_to_peer_at_synthesis_18531`). The activation

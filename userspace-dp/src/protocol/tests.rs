@@ -2942,7 +2942,7 @@ fn wire_invariant_default_specimens() {
     // value so no two fields can be transposed undetected.
     s.insert(
         "session_delta_info_populated".into(),
-        dump(&SessionDeltaInfo {
+        dump(&SessionDeltaInfo { forward_wire_alias_origin: true,
             timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 0)
                 .expect("sentinel timestamp"),
             slot: 17142001,

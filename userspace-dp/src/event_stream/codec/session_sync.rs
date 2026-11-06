@@ -268,6 +268,9 @@ impl EventFrame {
         if nat64 {
             flags |= FLAG_NAT64;
         }
+        if metadata.forward_wire_alias_origin {
+            flags |= FLAG_FORWARD_WIRE_ALIAS;
+        }
         buf[pos] = flags;
         pos += 1;
 

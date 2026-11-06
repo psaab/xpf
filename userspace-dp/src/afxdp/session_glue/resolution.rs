@@ -1020,7 +1020,7 @@ pub(in crate::afxdp) fn reverse_un_nat_targets_itself(
     nat: NatDecision,
     metadata: &SessionMetadata,
 ) -> bool {
-    if !metadata.is_reverse || nat.nat64 || !metadata.forward_wire_alias_origin {
+    if !metadata.is_reverse || nat.nat64 {
         return false;
     }
 
@@ -1033,7 +1033,17 @@ pub(in crate::afxdp) fn reverse_un_nat_targets_itself(
     let port_targets_itself = tcp_udp
         && (nat.rewrite_src_port == Some(key.src_port)
             || nat.rewrite_dst_port == Some(key.dst_port));
-    address_targets_itself || port_targets_itself
+    if !address_targets_itself && !port_targets_itself {
+        return false;
+    }
+    // Marked rows (new producer) hand off on the broad shape above.
+    // Unmarked rows keep exactly the pre-child-4 predicate: only a
+    // reverse whose un-NAT destination is its own destination (the
+    // SNAT/NPTv6 companion shape) hands off, so a legacy peer loses
+    // nothing it had and gains nothing it lacked.
+    metadata.forward_wire_alias_origin
+        || (nat.rewrite_dst == Some(key.dst_ip)
+            && nat.rewrite_dst_port.is_none_or(|port| port == key.dst_port))
 }
 
 /// #18531/#18927: the resolution of a reverse row accepted by

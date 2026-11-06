@@ -392,6 +392,9 @@ type SessionDeltaInfo struct {
 	SourceNatProvenance uint8 `json:"source_nat_provenance,omitempty"`
 	FabricRedirect      bool  `json:"fabric_redirect,omitempty"`
 	FabricIngress       bool  `json:"fabric_ingress,omitempty"`
+	// #18927: the originating forward row is the producer-marked
+	// forward-wire alias; mirrored on both delta transports.
+	ForwardWireAliasOrigin bool `json:"forward_wire_alias_origin,omitempty"`
 	// #2785: the admitting policy's per-policy `then log` selection. Decoded
 	// from the binary open-frame flags byte (bits 1<<3/1<<4) AND mirrored on
 	// the JSON RPC-fallback delta; stamped onto the synced session's

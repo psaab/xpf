@@ -66,6 +66,7 @@ fn static_nat_identity_dnat_retains_decision_shape() {
             decision,
             NatDecision {
                 rewrite_dst: Some(address),
+                rewrite_dst_port: (mapped_port != 0).then_some(mapped_port),
                 ..NatDecision::default()
             },
             "identity static NAT shape {match_destination_port}/{mapped_port} retains the DNAT decision"

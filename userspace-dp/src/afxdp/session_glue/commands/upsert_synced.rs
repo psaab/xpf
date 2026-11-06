@@ -373,7 +373,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // reserving `WorkerLocalImport` keeps that booking (#15966r). A
         // `WorkerLocalImport` replica reserves whatever its key: it IS this
         // node's allocation.
-        let alias_books_nothing = metadata.forward_wire_alias_origin
+        let alias_books_nothing = crate::session::is_forward_wire_alias(&key, entry_decision.nat)
             && (entry_origin.is_cluster_synced_origin()
                 || entry_origin == SessionOrigin::SharedPromote);
         if reserving_origin && !metadata.is_reverse && !alias_books_nothing {

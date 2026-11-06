@@ -437,6 +437,7 @@ pub(in crate::afxdp) fn session_delta_info(
         fabric_redirect: delta.fabric_redirect_sync
             || delta.decision.resolution.disposition == ForwardingDisposition::FabricRedirect,
         fabric_ingress: delta.metadata.fabric_ingress,
+        forward_wire_alias_origin: delta.metadata.forward_wire_alias_origin,
         // #2785: carry the per-policy log selection on the JSON fallback
         // delta so the synced session logs identically after failover.
         log_session_init: delta.metadata.log_session_init,

@@ -466,11 +466,12 @@ impl InterfaceStaticView {
 #[inline]
 fn static_dnat_decision(
     translated_dst_ip: IpAddr,
-    dst_port: u16,
     translated_dst_port: Option<u16>,
 ) -> NatDecision {
-    let rewrite_dst_port =
-        translated_dst_port.filter(|translated_port| *translated_port != dst_port);
+    // Port mapping is carried verbatim, including an unchanged port:
+    // identity translations are canonical by provenance (the alias
+    // marker), not by decision normalization (#18927 fold).
+    let rewrite_dst_port = translated_dst_port;
     NatDecision {
         rewrite_dst: Some(translated_dst_ip),
         rewrite_dst_port,
@@ -1153,7 +1154,7 @@ impl StaticNatTable {
             // `rewrite_dst_port` is structurally `None` for ICMP here — no
             // protocol gate needed.
             return Some((
-                static_dnat_decision(entry.internal_ip, dst_port, entry.mapped_port),
+                static_dnat_decision(entry.internal_ip, entry.mapped_port),
                 entry.hit_counter.clone(),
             ));
         }
@@ -1193,7 +1194,7 @@ impl StaticNatTable {
         }
         if let Some((blk, translated)) = best {
             return Some((
-                static_dnat_decision(translated, dst_port, None),
+                static_dnat_decision(translated, None),
                 blk.hit_counter.clone(),
             ));
         }
@@ -1239,7 +1240,7 @@ impl StaticNatTable {
                 return None;
             }
             return Some((
-                static_dnat_decision(entry.internal_ip, dst_port, entry.mapped_port),
+                static_dnat_decision(entry.internal_ip, entry.mapped_port),
                 entry.hit_counter.clone(),
             ));
         }
@@ -1284,7 +1285,7 @@ impl StaticNatTable {
                 return None;
             }
             return Some((
-                static_dnat_decision(translated, dst_port, None),
+                static_dnat_decision(translated, None),
                 blk.hit_counter.clone(),
             ));
         }

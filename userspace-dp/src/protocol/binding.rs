@@ -1557,6 +1557,11 @@ pub(crate) struct SessionDeltaInfo {
     pub fabric_redirect: bool,
     #[serde(rename = "fabric_ingress", default)]
     pub fabric_ingress: bool,
+    /// #18927: the originating forward row is the producer-marked
+    /// forward-wire alias. Additive: an old helper omits it and an
+    /// old daemon ignores it; absence keeps pre-#18927 behaviour.
+    #[serde(rename = "forward_wire_alias_origin", default)]
+    pub forward_wire_alias_origin: bool,
     /// #2785: the admitting policy's per-policy `then log` selection,
     /// mirrored from `SessionMetadata` onto the JSON RPC-fallback delta so
     /// the Go control plane can stamp the synced session's log flags. The

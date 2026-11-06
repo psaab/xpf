@@ -84,4 +84,8 @@ const (
 	// PROMOTED session rebuilds its reverse (v4->v6) BIB after failover. Must
 	// match FLAG_NAT64 in event_stream/codec/wire.rs.
 	SessionEventFlagNat64 uint8 = 1 << 5
+	// #18927: producer-marked forward-wire alias row, so an
+	// authoritative re-export preserves its origin. Must match
+	// FLAG_FORWARD_WIRE_ALIAS in event_stream/codec/wire.rs.
+	SessionEventFlagForwardWireAlias uint8 = 1 << 6
 )

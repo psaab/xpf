@@ -171,6 +171,10 @@ pub(crate) const FLAG_LOG_SESSION_CLOSE: u8 = 1 << 4;
 // Additive bit: an old peer leaves it clear (0) -> decodes to "not NAT64",
 // bit-identical to pre-#4565 (rolling-upgrade safe).
 pub(crate) const FLAG_NAT64: u8 = 1 << 5;
+// #18927: mark the producer-marked forward-wire alias row so an
+// authoritative re-export preserves its origin. Additive bit: an
+// old peer leaves it clear, keeping pre-#18927 behaviour.
+pub(crate) const FLAG_FORWARD_WIRE_ALIAS: u8 = 1 << 6;
 
 // ---------------------------------------------------------------------------
 // Header / address write helpers

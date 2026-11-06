@@ -1783,6 +1783,8 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 		// #4565: NAT64 cross-family marker; drives the reverse-BIB rebuild on
 		// the peer-promoted session (see the trailing snat_v4 decode below).
 		Nat64: flags&SessionEventFlagNat64 != 0,
+		// #18927: producer-marked forward-wire alias origin.
+		ForwardWireAliasOrigin: flags&SessionEventFlagForwardWireAlias != 0,
 	}
 
 	// Disposition mapping: 0=Accept, 1=LocalDelivery. #3075: moved [29]->[31].
