@@ -6,10 +6,14 @@ import (
 )
 
 // OperationalPipeConsumers lists the keyword-only operational commands whose
-// handler parses a handler-level pipe (`| display <format>`) itself, with
-// splitShowPipe. It is keyed by canonical command path. (Operational
-// `show configuration | compare` is NOT supported; the handler refuses it and
-// points at configuration mode.)
+// handler parses a handler-level pipe (`| display <format>`) itself. It is
+// keyed by canonical command path. The handlers differ per surface: the
+// remote handler splits with splitShowPipe, the local one with
+// splitDisplayPipe. (On the remote surface, operational
+// `show configuration | compare` is NOT supported; its handler refuses it
+// and points at configuration mode. The local handler reports an
+// unsupported pipe and returns nil; compare parity is #18669, not this
+// gate.)
 //
 // Only keyword-only nodes need an entry. A pipe after a value slot, a leaf or
 // an AcceptsArgs tail is outside the #16798 gate (ValidateOperationalLine
@@ -22,7 +26,7 @@ import (
 // A missing entry fails CLOSED with a pipe-specific syntax error, never as a
 // silent success, so a new handler that starts parsing a pipe under a
 // keyword-only node must be added here; TestOperationalPipeConsumers18664
-// pins that every entry really reaches its RPC.
+// pins that every entry really reaches its handler.
 var OperationalPipeConsumers = map[string]bool{
 	"show configuration": true,
 }
@@ -40,8 +44,10 @@ var OperationalPipeConsumers = map[string]bool{
 //
 // Removing the pipe from the judged words must not reopen #16798 for piped
 // lines. A pipe placed directly under a keyword-only node is a shape #16798
-// already refused: on master `show chassis | display set` exits 1 with
-// `unknown show chassis command: |`. #18664 keeps that refusal and changes
+// already refused: on the remote console `show chassis | display set`
+// exited 1 with `unknown show chassis command: |` before #18664. (The
+// local console returned nil for the same line until #18668 shared this
+// gate.) #18664 keeps that refusal and changes
 // only its message, which now names the modifier. Admitting the pipe instead
 // would hand it to a handler that prints help or runs the bare command and
 // drops the modifier, exiting 0 (`clear security | display set`,
@@ -64,8 +70,9 @@ func ValidateOperationalGate(words []string) error {
 		case strings.Contains(bad, "|"):
 			// A `|` glued to a word is not the pipe operator on any
 			// surface (the first-bare-pipe scan, cliterm.SplitPipe,
-			// and the handlers' splitShowPipe all split on a bare `|`
-			// word), so the token really is an unknown command word.
+			// pkg/cli's splitAtPipe, and the handlers' pipe splits
+			// all split on a bare `|` word), so the token really is
+			// an unknown command word.
 			// Say how to write what was meant.
 			return fmt.Errorf("unknown %s command: %s (separate the pipe with spaces: %q)",
 				path, bad, strings.Join(strings.Fields(strings.ReplaceAll(bad, "|", " | ")), " "))

@@ -15,8 +15,8 @@ const (
 	CanonicalAmbiguous
 )
 
-// ValidateOperationalLine is the keyword-only gate for the remote CLI
-// dispatcher (#16798). It reports a line that Canonicalize could not
+// ValidateOperationalLine is the keyword-only gate shared by both CLI
+// dispatchers (#16798, shared since #18668). It reports a line that Canonicalize could not
 // fully resolve but that ends exactly at a keyword node (a node with
 // keyword children and no value slot of its own: no dynamic provider,
 // no typed leaf, no placeholder child, no AcceptsArgs free-form tail,
