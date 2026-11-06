@@ -2046,9 +2046,19 @@ fn live_flow_cache_callsite_selected_admitted_clone_reaches_target_6304() {
         clone.egress_ifindex, MIRROR_OUT_LOGICAL_IFINDEX,
         "the clone egresses the mirror output interface"
     );
+    // #15114 (c9b67eb743e14ac626666eeae2c31e947f39c2ee): the clone is
+    // emitted on the mirror OUTPUT unit's VLAN. This fixture's output unit
+    // is VID 0 (`vlan_id: 0`), so mirror_output_frame strips the VLAN-80
+    // ingress tag from the clone's wire bytes: ethertype+payload start at
+    // frame[16..]. The mirrored_bytes counter above keeps frame.len() — it
+    // intentionally accounts for the sampled INGRESS frame.
+    let mut expected_clone = frame[..12].to_vec();
+    expected_clone.extend_from_slice(&frame[16..]);
     assert_eq!(
-        clone.bytes, frame,
-        "the clone carries the full L2 frame verbatim, tag included, captured \
+        clone.bytes.as_slice(),
+        expected_clone.as_slice(),
+        "#15114: the clone carries the pre-rewrite frame with the ingress \
+         tag stripped for the untagged (VID 0) mirror output, captured \
          BEFORE the in-place rewrite mutated the UMEM"
     );
     assert!(
