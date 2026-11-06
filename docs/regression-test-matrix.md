@@ -65,6 +65,9 @@ integ9 and integ10, 2 repetitions each.
 | loss | master after the 2026-10-30 wave (integ8/9/10) | 4.6–5.5 / 4.8–4.9 | 14.1–19.1 / 16.7–21.1 | 18.2–21.7 / 15.7–20.8 | 13.7–22.8 / 17.4–19.7 | 0.3–5.9 |
 | tcp | master after the 2026-10-30 wave (integ8/9/10) | 14.1–19.6 / 12.4–17.6 | 38.5–39.7 / 40.0–41.5 | 37.5–38.9 / 37.9–39.7 | 37.0–39.5 / 39.3–41.2 | 0.4–5.6 |
 | loss | historical: master `09a2b664be`, 2026-10-29 (before #18520), push only | ~2.4 | 11.6–14.4 | — | — | — |
+| loss | master `b1c33ae266`, 2026-11-05 wave (single control cell, adapter summary; LAN-host load rose 2.0→7.4 during the cell) | 5.0 / 4.6 | 11.6–20.8 / 12.9–19.7 | — | 11.6–20.0 / 17.6–17.7 | 0.7–1.0 |
+| tcp | master `71ee6d3e39`, 2026-11-05 wave (one control cell + -P12 rerun pair; LAN-host load 2.7→7.8) | 15.7–19.8 / 17.1–17.9 | 38.3–38.8 / 38.3–40.6 | 37.1–37.5 / 37.9–38.4 | 38.1–38.7 / 37.6–41.1 | 0.6–1.1 |
+
 
 Loss `-P8` push spreads widely (v4 14.1–19.1, v6 13.7–22.8) because of how 8
 flows hash onto 6 workers (per-stream placement is an open item). The lower
