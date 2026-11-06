@@ -872,7 +872,11 @@ D1 is run 5 of 13; D2 is run 6 of 13 and occurs only if D1 fully passes.
 Runs 7–13 remain unspent. A three-seat act must authorize the pair
 before execution; this text authorizes no code, run, or scope change.
 The exact G1 base is `7e4b3d2e3b32cde9a9cba617f58d7e40ac14bbb1`.
-Use the pinned G1 command and environment (`g1-results.md:30-35`):
+Use the pinned G1 base, generation directive, and verifier flags
+(`g1-results.md:30-35`). The temp-root values intentionally deviate
+from G1: its command used `GOTMPDIR=/wtgt`; this protocol moves that
+root to `/var/worktrees/.cache/gotmp` so all four temp/cache roots stay
+under `/var/worktrees/.cache`.
 `CARGO_TARGET_DIR=/var/worktrees/.cache/cargo-16009 TMPDIR=/var/worktrees/.cache/tmpdir GOTMPDIR=/var/worktrees/.cache/gotmp GOCACHE=/var/worktrees/.cache/go-build XPF_SHIM_ALLOW_LOW_HEADROOM=0 make generate-userspace-xdp`.
 Before each invocation, record the fresh detached scratch worktree path,
 G1 base, full command and environment, complete source/toolchain hashes,
@@ -974,7 +978,7 @@ smoke remain required as specified in fit design §8 step 6.
 3. **Hard budget stop.** The protocol ends after D2 or earlier on
    failure. It spends at most 2 of 9 remaining runs; runs 7–13 stay
    held and cannot be consumed by this design.
-4. **Deviation stop.** Any departure from CR1–CR6 voids the affected
+4. **Deviation stop.** Any departure from CR0–CR6 voids the affected
    evidence; the invoked generation run remains charged. Generated
    products remain in the scratch tree and are not copied, committed,
    or promoted.
