@@ -225,6 +225,9 @@ func TestHelperRefusedRoutePublishedPastRuntimeFilters12507(t *testing.T) {
 		for _, route := range routes {
 			if route.Destination == "10.9.0.0/16" {
 				control++
+				if route.NextTable != "red.inet.0" {
+					t.Fatalf("control: live mirror should publish the /16 row to canonical target red.inet.0: %+v", route)
+				}
 				if route.RulePriority != uint32(config.RouteLeakNextTableLookupPriority(16, 32)) {
 					t.Fatalf("control: live rule should replace the config leak row: %+v", route)
 				}
