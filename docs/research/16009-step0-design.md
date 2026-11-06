@@ -959,10 +959,11 @@ or kernel verification is the first failing stage.
   on first fragment, atomic/non-first IPv6 fragment, governing-header,
   and clean-packet cases are non-trigger controls for this retained gate.
   Model the same logical CPU scratch slot: an IPv4 retained-trip packet
-  sets the host model's scratch trip, then the per-packet reset to zero
-  before a clean IPv6 packet leaves it untripped. This is a host-only
-  oracle; it makes no BPF map, kernel counter, or generated-object-load
-  observation or claim. Any actual generated-object BPF/Class-R scratch
+  sets the host model's scratch trip; after the required per-packet reset
+  to zero, the following clean IPv6 must produce no trip or modeled
+  drop/reason-21 action. This host-only oracle makes no BPF map, kernel
+  counter, or generated-object-load observation or claim. Any actual
+  generated-object BPF/Class-R scratch
   or counter observation requires a separately authorized leg and is
   not authorized by this plan. The corpus supports only the stated
   retained IPv4 host-model coverage.
