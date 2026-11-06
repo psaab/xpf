@@ -1044,6 +1044,7 @@ mod tests {
         assert_eq!(assignment(42), assignment(42));
         assert_ne!(assignment(42), assignment(43));
         assert_eq!(row_shard_idx_with(42, &row(1)), 51, "pinned row shard");
-        assert_eq!(key_shard_idx_with(42, &key(1, 1000)), 33, "pinned key shard");
+        // #18808: re-pin after #15739 (439a10a241) changed SessionKey's hash image.
+        assert_eq!(key_shard_idx_with(42, &key(1, 1000)), 59, "pinned key shard");
     }
 }
