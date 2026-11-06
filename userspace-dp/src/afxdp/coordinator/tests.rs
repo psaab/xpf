@@ -2234,6 +2234,17 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
             mac: [2, 0, 0, 0, 0, 0x20],
         },
     );
+    forwarding.neighbors.insert(
+        (
+            20,
+            "192.0.2.2"
+                .parse()
+                .expect("local-LAN pre-refresh neighbor address"),
+        ),
+        crate::afxdp::types::NeighborEntry {
+            mac: [2, 0, 0, 0, 0, 0x21],
+        },
+    );
     coordinator.set_forwarding_for_test(forwarding);
 
     let rows = vec![crate::protocol::snapshot::IpsecTunnelRowSnapshot {
@@ -2245,28 +2256,56 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
         generation: NEW_GEN,
         fib_generation: NEW_FIB_GEN,
         default_policy: "permit".into(),
-        zones: vec![crate::protocol::snapshot::ZoneSnapshot {
-            name: "zone1".to_string(),
-            id: 1,
-            ..Default::default()
-        }],
-        interfaces: vec![crate::protocol::snapshot::InterfaceSnapshot {
-            name: "st0.0".to_string(),
-            linux_name: "st0".to_string(),
-            ifindex: 10,
-            zone: "zone1".to_string(),
-            egress_zone: "zone1".into(),
-            ..Default::default()
-        }],
-        neighbors: vec![crate::protocol::snapshot::NeighborSnapshot {
-            interface: "st0.0".into(),
-            ifindex: 10,
-            family: "inet".into(),
-            ip: "192.0.2.2".into(),
-            mac: "02:00:00:00:00:20".into(),
-            state: "reachable".into(),
-            ..Default::default()
-        }],
+        zones: vec![
+            crate::protocol::snapshot::ZoneSnapshot {
+                name: "zone1".to_string(),
+                id: 1,
+                ..Default::default()
+            },
+            crate::protocol::snapshot::ZoneSnapshot {
+                name: "zone2".to_string(),
+                id: 2,
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            crate::protocol::snapshot::InterfaceSnapshot {
+                name: "st0.0".to_string(),
+                linux_name: "st0".to_string(),
+                ifindex: 10,
+                zone: "zone1".to_string(),
+                egress_zone: "zone1".into(),
+                ..Default::default()
+            },
+            crate::protocol::snapshot::InterfaceSnapshot {
+                name: "ge-0/0/20.0".to_string(),
+                linux_name: "ge-0-0-20".to_string(),
+                ifindex: 20,
+                zone: "zone2".to_string(),
+                egress_zone: "zone2".into(),
+                ..Default::default()
+            },
+        ],
+        neighbors: vec![
+            crate::protocol::snapshot::NeighborSnapshot {
+                interface: "st0.0".into(),
+                ifindex: 10,
+                family: "inet".into(),
+                ip: "192.0.2.2".into(),
+                mac: "02:00:00:00:00:20".into(),
+                state: "reachable".into(),
+                ..Default::default()
+            },
+            crate::protocol::snapshot::NeighborSnapshot {
+                interface: "ge-0/0/20.0".into(),
+                ifindex: 20,
+                family: "inet".into(),
+                ip: "192.0.2.2".into(),
+                mac: "02:00:00:00:00:21".into(),
+                state: "reachable".into(),
+                ..Default::default()
+            },
+        ],
         routes: vec![
             crate::protocol::RouteSnapshot {
                 table: "inet.0".into(),
@@ -2279,7 +2318,7 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
                 table: "inet.0".into(),
                 family: "inet".into(),
                 destination: "192.0.2.0/24".into(),
-                next_hops: vec!["192.0.2.2@st0.0".into()],
+                next_hops: vec!["192.0.2.2@ge-0/0/20.0".into()],
                 ..Default::default()
             },
         ],
@@ -2306,6 +2345,15 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
             .exact("st0")
             .map(|row| (row.if_id, row.logical_ifindex)),
         Some((9, 10))
+    );
+    let local_route = crate::afxdp::forwarding::lookup_forwarding_resolution(
+        published.forwarding().as_ref(),
+        "192.0.2.1".parse().expect("local-LAN destination"),
+    )
+    .resolution;
+    assert_eq!(
+        local_route.egress_ifindex, 20,
+        "local destination must resolve through non-tunnel ifindex 20"
     );
     let packet = test_ipv4_packet_from([10, 0, 0, 1], [192, 0, 2, 1]);
     let decision = crate::afxdp::ipsec_inner::adjudicate_ipsec_inner(
