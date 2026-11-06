@@ -20380,10 +20380,53 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
         1,
         "#9412: the Update must be queued to the peer exactly once as MSG_SESSION_UPDATE"
     );
+    // Walk the append-only encoder layout (`encode_session_record` in
+    // `event_stream/codec/session_sync.rs`) from the start of the IPv4
+    // payload instead of reading a fixed distance from the tail. The
+    // #15176 NAT-scope append (c65a353e8b), #16217 packet-counter append
+    // (a936a6f802), and #17780 final presence-byte append (aab4483e1a)
+    // moved the close class further from the end.
+    const U8_BYTES: usize = 1;
+    const U16_BYTES: usize = 2;
+    const U32_BYTES: usize = 4;
+    const U64_BYTES: usize = 8;
+    const IPV4_BYTES: usize = 4;
+    const MAC_BYTES: usize = 6;
+    let mut payload_offset = 0usize;
+    payload_offset += U8_BYTES; // address family
+    payload_offset += U8_BYTES; // protocol
+    payload_offset += U16_BYTES; // source port
+    payload_offset += U16_BYTES; // destination port
+    payload_offset += U16_BYTES; // NAT source port
+    payload_offset += U16_BYTES; // NAT destination port
+    payload_offset += U32_BYTES; // owner RG ID
+    payload_offset += U32_BYTES; // egress ifindex
+    payload_offset += U32_BYTES; // TX ifindex
+    payload_offset += U16_BYTES; // tunnel endpoint ID
+    payload_offset += U16_BYTES; // TX VLAN ID
+    payload_offset += U8_BYTES; // flags
+    payload_offset += U16_BYTES; // ingress zone
+    payload_offset += U16_BYTES; // egress zone
+    payload_offset += U8_BYTES; // disposition
+    payload_offset += IPV4_BYTES; // source address
+    payload_offset += IPV4_BYTES; // destination address
+    payload_offset += IPV4_BYTES; // NAT source address
+    payload_offset += IPV4_BYTES; // NAT destination address
+    payload_offset += MAC_BYTES; // neighbor MAC
+    payload_offset += MAC_BYTES; // source MAC
+    payload_offset += IPV4_BYTES; // next hop
+    payload_offset += U32_BYTES; // #3301 policy ID
+    payload_offset += U32_BYTES; // #3301 policy counter index
+    payload_offset += U32_BYTES; // #3301 inactivity timeout
+    payload_offset += IPV4_BYTES; // #4565 NAT64 pool source
+    payload_offset += U64_BYTES; // #5212 session ID
+    payload_offset += U64_BYTES; // #7188 tunnel discriminator
+    payload_offset += U32_BYTES; // #7239 routing domain
+    let close_class_offset = 16 + payload_offset; // 16-byte frame header
     assert_eq!(
-        sync[0].as_bytes()[sync[0].as_bytes().len() - 22],
+        sync[0].as_bytes()[close_class_offset],
         2,
-        "#9412/#11070/#10888/#12187: the queued Update carries its close class before the 21-byte session-sync trailer"
+        "#9412: the queued Update must carry its close class at the walked session-sync offset"
     );
 }
 
