@@ -142,7 +142,7 @@ func TestRenderedProtocolMembership11310(t *testing.T) {
 	// RIP active in global+blue for its rendered membership assertions, and
 	// put IS-IS in red+green in this render-only copy. Each IS-IS scope carries
 	// all interface refs, so these counts also guard foreign-ref filtering.
-	// The assembler test below still uses the unmodified shared fixture for
+	// The assembler test above still uses the unmodified shared fixture for
 	// global+blue IS-IS.
 	cfg := protocolMembershipConfig11310()
 	cfg.Protocols.ISIS = nil
