@@ -176,6 +176,14 @@ distinction).
   the term CLOSED (#3367) — a deny sentinel, never a match-all widening;
   the out-of-range code-point entry is dropped (the pre-#2447 fail-safe).
 
+  **IKE proposal fixture contract (#18874/#14588):** successful-compile
+  fixtures whose rendered VPN references an IKE proposal must configure
+  `dh-group group<N>`. The strict gate
+  (`validateIPsecIkeDHGroupsPresentStrict`) also covers the legacy direct
+  proposal fallback. Orphan IKE proposals are outside this rendered-reference
+  check. ESP proposals may omit `dh-group` for no-PFS unless used as the
+  legacy direct-proposal fallback, where they are rendered as IKE.
+
   **CoS scheduler priority fails closed at the Go boundary (#11798/#11799):**
   the schema accepts only the five Junos tokens; the compiled-config gate also
   permits the empty/unset value that Rust interprets as `low`. Strict commits

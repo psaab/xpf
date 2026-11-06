@@ -1670,6 +1670,8 @@ func TestIPsecGatewaySetSyntax(t *testing.T) {
 	// below only exercise the parser's gateway-field storage.
 	setCommands := []string{`set security ike proposal ike-prop authentication-method pre-shared-keys`, `set security ike proposal ike-prop encryption-algorithm aes-256-cbc`, `set security ike policy ike-strong proposals ike-prop`, `set security ipsec gateway remote-gw address 203.0.113.1`, `set security ipsec gateway remote-gw local-address 198.51.100.1`, `set security ipsec gateway remote-gw ike-policy ike-strong`, `set security ipsec gateway remote-gw external-interface untrust0`, `set security ipsec vpn site-a gateway remote-gw`, `set security ipsec vpn site-a bind-interface st0.0`}
 	setCommands = append(setCommands, `set security ike proposal ike-prop authentication-algorithm sha-256`)
+	setCommands = append(setCommands, `set security ike proposal ike-prop dh-group group14`)
+	setCommands = append(setCommands, `set security ike policy ike-strong pre-shared-key ascii-text fixture-secret`)
 	tree := &ConfigTree{}
 	for _, cmd := range setCommands {
 		path, err := ParseSetCommand(cmd)
