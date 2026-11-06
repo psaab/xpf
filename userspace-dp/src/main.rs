@@ -45,6 +45,7 @@ mod slowpath;
 mod slowpath_reinject_9506;
 mod sync_util;
 #[cfg(test)]
+#[path = "sync_util_scan_tests.rs"]
 mod sync_util_scan_tests;
 #[cfg(test)]
 mod test_zone_ids;
