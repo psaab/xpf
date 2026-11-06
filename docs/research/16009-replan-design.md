@@ -146,6 +146,18 @@ headroom fraction of baseline = (1,000,000 − 779,213)/1,000,000 =
 22.0787% (matches the recorded figure); sink-only slack to ceiling =
 850,000 − 755,620 = **94,380**.
 
+The per-arm comparisons to the 850,000 ceiling are diagnostic only:
+each 1,000,001 IPv6 cap-trigger run is at least 150,001 processed
+instructions above the ceiling, so any shape that passes K1 must
+reduce the observed count by at least that much; this is a censored
+lower bound, not an estimate of the actual reduction needed. The TCP
+slice stopped on stack at 775,418 processed instructions, a raw
+74,582 below the ceiling, but that is not verified instruction
+headroom or an instruction-budget pass. Its combined stack was
+528 bytes, 16 above the 512-byte limit. IPv4's access-reject counts
+(99,774–101,488) do not establish a usable instruction cost or
+remaining budget for a legal access shape.
+
 ### 3.2 What the arithmetic does and does not prove
 
 The honest reading requires three distinctions that hostile reviewers
@@ -181,17 +193,17 @@ rests on such a sum is resting on a model this repository's measurements
 do not support. The only number that decides K1 is a complete-object
 measurement.
 
-**States, not just instructions, constrain the candidate.** The
+**States, instructions, and stack are separate constraints.** The
 fixed-prefix IPv6 variant reached the instruction cap with 63,606 total
-states. The TCP slice alone explored 47,384 total states while *passing*
-on instructions (775,418) and failing only on stack. The binding
-constraints observed are therefore three distinct resources —
-packet-access legality, explored-state/instruction budget, and per-chain
-stack (512-byte combined ceiling, measured at 528 across three calls) —
-and a shape can be feasible on two and infeasible on the third. The TCP
-slice is the clean example: it is the only failing slice whose
-instruction count (775,418) is *below* baseline, yet it is dead because
-528 > 512.
+states. The TCP slice stopped on its 528-byte combined stack failure
+after processing 775,418 instructions; its raw difference from the
+850,000 ceiling is 74,582, but the failed run does not establish a
+K1 instruction pass or available headroom. Its combined stack exceeds
+the 512-byte limit by 16 bytes. Packet-access legality, explored-state/
+instruction budget, and per-chain stack are therefore distinct
+constraints: a shape can satisfy two and fail the third. Packet-access
+rejects also report partial processed counts, so their lower counts
+cannot be compared as instruction passes.
 
 ### 3.3 Per-arm reading
 
@@ -218,17 +230,20 @@ instruction count (775,418) is *below* baseline, yet it is dead because
   route choice: access rejects are shape properties, not budget
   properties. Making the object smaller elsewhere does not, by any
   measured mechanism, legalize a rejected access.
-- **TCP (tiny-declared + post-L4 trips): dead as shaped, nearest to
-  life.** It is the only arm that passes instructions (775,418 <
-  779,213 baseline) and dies solely on 528/512 bytes across three
-  calls — a 16-byte (3.125%) overage. Named remedies exist (TCP-1
-  shorten live range; TCP-2 move Q1 derivation into the outlined
-  gate; TCP-3 outlined scalar helper, verifier-fit §6), but none is
-  measured, and the lane log explicitly does not localize which frame
-  causes the peak. “Only 16 bytes over” is a fact; “therefore one
-  attribute tweak fixes it” is folklore the amendment forbids
-  (§8: “no attempt is repeated unless it is the predeclared final
-  confirmation”; “no cosmetic retries”).
+- **TCP (tiny-declared + post-L4 trips): dead as shaped, with a
+  distinct failure signature.** The slice stopped on combined stack
+  (528 bytes across three calls, 16 above the 512-byte limit) after
+  processing 775,418 instructions. That partial count is 74,582 below
+  the 850,000 ceiling as arithmetic only; it is not a completed
+  instruction-budget pass or usable headroom, and it is not comparable
+  to the still lower partial counts from packet-access rejects. Named
+  remedies exist (TCP-1 shorten live range; TCP-2 move Q1 derivation
+  into the outlined gate; TCP-3 outlined scalar helper, verifier-fit §6),
+  but none is measured, and the lane log explicitly does not localize
+  which frame causes the peak. “Only 16 bytes over” is a fact;
+  “therefore one attribute tweak fixes it” is folklore the amendment
+  forbids (§8: “no attempt is repeated unless it is the predeclared
+  final confirmation”; “no cosmetic retries”).
 
 ### 3.4 What the surviving core would need (bounded, not estimated)
 
