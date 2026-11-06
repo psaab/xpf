@@ -1044,10 +1044,10 @@ prior underlay-only liveness behavior.
   mechanism as the tested `pkg/cluster/monitor.go` precedent. The
   global path opens the socket via `golang.org/x/net/icmp`
   `ListenPacket`; a transport-scoped probe builds the same datagram
-  socket directly (`unix.Socket` + `SO_BINDTODEVICE` +
-  `net.FilePacketConn` in `listenBoundICMP`), because x/net/icmp
-  exposes no socket-control hook for the device bind. x/net/icmp still
-  marshals/parses the echo. Requires `net.ipv4.ping_group_range`
+  socket through `linuxsock.Socket` with `SO_BINDTODEVICE` and
+  `net.FilePacketConn` in `listenBoundICMP`. The shared socket helper
+  forces `SOCK_CLOEXEC`; x/net/icmp exposes no socket-control hook for
+  the device bind, while x/net/icmp still marshals/parses the echo. Requires
   to admit the daemon gid (or `CAP_NET_RAW`); when it does not, the probe
   is **ProbeUnsupported** and the link is HELD (never torn down — see
   hold-on-unknown).

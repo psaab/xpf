@@ -13,6 +13,8 @@ import (
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/pkg/linuxsock"
 )
 
 // ProbeResult is the typed outcome of a single tunnel keepalive probe
@@ -135,7 +137,7 @@ func listenBoundICMP(network, source, bindDevice string) (probeConn, error) {
 		return nil, net.InvalidAddrError("unsupported ICMP network: " + network)
 	}
 
-	fd, err := unix.Socket(family, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, protocol)
+	fd, err := linuxsock.Socket(family, unix.SOCK_DGRAM, protocol)
 	if err != nil {
 		return nil, os.NewSyscallError("socket", err)
 	}
