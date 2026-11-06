@@ -163,7 +163,9 @@ LinkDel failure reads `delete <kind> <name>: LinkDel failed:
 <cause>` and wraps the `errLinkDelFailed` sentinel, so callers
 match it with `errors.Is` rather than the text; a transient
 tracked lookup failure instead reads `lookup <kind> <name> for
-delete: <cause>`. The orphan sweep is the deliberate
+delete: <cause>`, and a foreign occupant reads `<kind> <name>:
+<errForeignOccupant>: existing link is <type>`. The orphan
+sweep is the deliberate
 exception: its failures read `delete orphan xfrmi <name>:
 <cause>` with no sentinel segment, which is how the two delete
 paths stay distinguishable in whole-string assertions.
@@ -1383,5 +1385,3 @@ group sheds per protocol, and
 the same sheds with address family via `LearnedRouteCapHitsByFamilyProtocol`.
 Snapshot protocol **27** refuses a v26 helper that would still restore the old
 delegation.
-
-
