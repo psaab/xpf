@@ -5448,8 +5448,10 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
     );
 
     // A filter class that has no materialized scheduler queue is pinned to the
-    // interface default. That fallback remains fixed while the selected
-    // default queue's LP rewrite is refreshed from each ingress code point.
+    // interface default. That fallback remains fixed, and #16506
+    // (e533191ef7) keys the DSCP rewrite ONLY on the final (filter) class:
+    // that class is absent from the rewrite rule, so there is no rewrite —
+    // the clamped default queue's best-effort entry must not supply one.
     let mut fallback_snapshot = snapshot.clone();
     fallback_snapshot.filters[0].terms[0].forwarding_class = "unmaterialized".into();
     let fallback_cos = fallback_snapshot
@@ -5476,7 +5478,7 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
     ]);
     let fallback_built = crate::afxdp::forwarding_build::build_forwarding_state(&fallback_snapshot);
     let fallback_fixture = cos_cache_fixture(&fallback_built);
-    for (seed_dscp, hit_dscp, expected_dscp) in [(46_u8, 10_u8, 17_u8), (10, 46, 42)] {
+    for (seed_dscp, hit_dscp) in [(46_u8, 10_u8), (10, 46)] {
         let mut seed_frame = vlan_tagged_tcp_v4_frame(0);
         seed_frame[19] = seed_dscp << 2;
         let mut seed_meta = test_meta(&seed_frame);
@@ -5494,6 +5496,10 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
         );
         assert!(selection.filter_forwarding_class_fallback_pinned);
         assert!(selection.cos_lp_reclassify);
+        assert_eq!(
+            selection.dscp_rewrite, None,
+            "#16506: unmaterialized final class absent from rule is not rewritten"
+        );
         let mut entry = cached_entry();
         entry.descriptor.tx_selection = selection;
         let mut hit_frame = vlan_tagged_tcp_v4_frame(0);
@@ -5515,7 +5521,7 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
             .pending_tx_prepared
             .front()
             .expect("fallback cache hit stages TX");
-        assert_eq!(prepared.dscp_rewrite, Some(expected_dscp));
+        assert_eq!(prepared.dscp_rewrite, None);
         assert!(run.tx_frame.is_some());
     }
 
