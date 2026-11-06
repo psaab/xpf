@@ -3534,14 +3534,13 @@ fn a_fabric_punted_packet_keeps_the_entrys_ingress_zone_9384() {
 /// same-tuple ACK stamped `dmz` models a peer-side session-MISS punt in the
 /// split-RG sync-lag window.
 ///
-/// This fixture keeps the WAN owner RG locally active so #6458 validates both
-/// stamps and the session path honors the LAN stamp. The HA cache-validity
-/// gate intentionally sends stamped fabric packets through session lookup;
-/// this test pins the authority decision, not a cache hit. The foreign ACK
-/// must be dropped under `dmz -> wan` default-deny without revoking the
-/// owner's session, and a later LAN ACK must still forward. Reverting the
-/// stamped-zone authority judgment makes the foreign ACK forward and reds the
-/// drop assertions.
+/// #18827 re-scope (#16222 via a936a6f802 / #16215 squash, inner fd69d178b6
+/// #16220): owner-active invalidation now covers only fabric-ingress
+/// FabricRedirects, so this fabric-ingress ForwardCandidate is cache-served
+/// once seeded. Prove a same-zone cache serve before the foreign leg; then the
+/// #10670 zone preflight must still send the foreign stamp to session
+/// authority for dmz -> wan default-deny without revoking the owner's session
+/// or touching/evicting the matching-zone descriptor.
 #[test]
 fn stamped_fabric_punt_miss_is_judged_after_adjudicated_hit_10670() {
     let forwarding = build_forwarding_state(&frag_stamp_snapshot());
@@ -3588,6 +3587,28 @@ fn stamped_fabric_punt_miss_is_judged_after_adjudicated_hit_10670() {
         2,
         "the owner session pair remains installed"
     );
+    let hits_before_repeat = binding.flow.flow_cache.hits;
+    let (_batch, repeat_owner) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &owner_ack,
+        txn_meta_v4(21, TCP_FLAG_ACK, owner_ack.len() as u16),
+        true,
+    );
+    assert_eq!(
+        (repeat_owner.session_hit, repeat_owner.tx),
+        (0, 1),
+        "#18827 (#16222/#16220): the same-zone repeat must be cache-served"
+    );
+    assert_eq!(
+        binding.flow.flow_cache.hits,
+        hits_before_repeat + 1,
+        "the owner repeat must be proven a cache serve by exactly one hit delta"
+    );
+    let cache_entries_before_foreign = txn_flow_cache_entries(&binding);
+    let evictions_before_foreign = binding.flow.flow_cache.evictions;
 
     let punted_miss = stamped_fabric_frame(TEST_DMZ_ZONE_ID, TCP_FLAG_ACK);
     let (_batch, foreign) = txn_run_descriptor_checked(
@@ -3616,10 +3637,20 @@ fn stamped_fabric_punt_miss_is_judged_after_adjudicated_hit_10670() {
         foreign.policy_revoked_sessions, 0,
         "a foreign punt is dropped as a packet and cannot revoke the lan session"
     );
+    assert_eq!(sessions.len(), 2, "the unadjudicated punt cannot revoke the owner session pair");
     assert_eq!(
-        sessions.len(),
-        2,
-        "the unadjudicated punt cannot revoke the owner session pair"
+        txn_flow_cache_entries(&binding),
+        cache_entries_before_foreign,
+        "the foreign stamp must not evict the matching-zone descriptor"
+    );
+    assert_eq!(
+        binding.flow.flow_cache.evictions, evictions_before_foreign,
+        "the foreign stamp must fall through before the HA cache gate can evict"
+    );
+    assert_eq!(
+        binding.flow.flow_cache.hits,
+        hits_before_repeat + 1,
+        "the foreign stamp must not be accounted as an extra served cache hit"
     );
     let owner_ack_after_foreign = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_ACK);
     let (_batch, owner_after_foreign) = txn_run_descriptor_checked(
@@ -3632,12 +3663,14 @@ fn stamped_fabric_punt_miss_is_judged_after_adjudicated_hit_10670() {
         true,
     );
     assert_eq!(
-        owner_after_foreign.session_hit, 1,
-        "the same-zone adjudicated-hit packet still reaches its owner session"
+        (owner_after_foreign.session_hit, owner_after_foreign.tx),
+        (0, 1),
+        "the same-zone owner packet remains cache-served after the denied punt"
     );
     assert_eq!(
-        owner_after_foreign.tx, 1,
-        "a denied foreign punt leaves the admitted owner flow usable"
+        binding.flow.flow_cache.hits,
+        hits_before_repeat + 2,
+        "the post-punt same-zone packet is still served from the cache"
     );
 }
 #[test]
@@ -3779,17 +3812,24 @@ fn stamped_fabric_owner_icmp_hit_is_type_checked_without_stamp_11064() {
 /// egress RG (LAN, RG 1 here). Reverse synthesis stamps
 /// `owner_rg_for_resolution`, the Go sync sender reports the same FIB egress
 /// RG, and #11373 re-homes to it on a generation-stale hit. That RG is
-/// locally active, so `cached_flow_decision_valid` deliberately invalidates
-/// the descriptor for every stamped fabric packet on this flow: a same-zone
-/// cache hit is unreachable here, the posture
-/// `stamped_fabric_punt_miss_is_judged_after_adjudicated_hit_10670` already
-/// pins. This cell therefore pins the authority decision and the cache
-/// preflight's side effects, not a cache hit. A foreign zone stamp on the
-/// same tuple must be judged under dmz -> lan default-deny without revoking
-/// the import, and must fall through the preflight without evicting the
-/// owner's descriptor. Reverting the stamped-zone session authority loses
-/// the dmz -> lan judgment; reverting the preflight lets the HA gate evict
-/// the owner's descriptor.
+/// locally active.
+///
+/// #18827 re-scope (#16222 via a936a6f802 / #16215 squash, inner fd69d178b6
+/// #16220): the owner-active cache arm was narrowed from
+/// `(FabricRedirect || fabric_ingress)` to `fabric_ingress &&
+/// FabricRedirect`, so a fabric-ingress ForwardCandidate under a locally
+/// active owner is now cache-served instead of re-adjudicated. The first
+/// same-zone repeat is therefore a cache serve (`session_hit == 0`,
+/// `tx == 1`, exactly one `flow_cache.hits` delta), which makes the
+/// foreign-stamp refusal non-vacuous: the cache *can* serve this tuple.
+/// The #10670 arrival-zone preflight
+/// (`stage_flow_cache_hit`, flow_cache_hit.rs:187-201) must still turn the
+/// foreign stamp away before it can be accounted a hit or evict the
+/// owner's descriptor, and the packet must be judged under dmz -> lan
+/// default-deny without revoking the import. Reverting the stamped-zone
+/// session authority loses the dmz -> lan judgment; removing the
+/// preflight's foreign fall-through lets the foreign packet be
+/// cache-served (tx == 1, extra hit) and reds the foreign assertions.
 #[test]
 fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
     let mut snapshot = frag_stamp_snapshot();
@@ -3934,8 +3974,11 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
         "the hit seeds its descriptor"
     );
 
-    // The owner RG is locally active, so the HA cache gate re-adjudicates the
-    // same-zone repeat through the reverse session and reseeds its slot.
+    // #18827: the owner RG is locally active, but #16220 narrowed the
+    // owner-active arm to FabricRedirect only, so the fabric-ingress
+    // ForwardCandidate repeat is served from the cache. That serve is the
+    // precondition that makes the foreign-stamp proof below non-vacuous.
+    let hits_before_repeat = binding.flow.flow_cache.hits;
     let (_batch, repeat_owner) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -3947,18 +3990,19 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
     );
     assert_eq!(
         (repeat_owner.session_hit, repeat_owner.tx),
-        (1, 1),
-        "the same-zone repeat must be re-adjudicated by the reverse session and forward"
+        (0, 1),
+        "#18827 (#16222/#16220): the same-zone repeat must be cache-served \
+         (no session re-adjudication) and forward"
     );
     assert_eq!(
-        binding.flow.flow_cache.hits, 0,
-        "FIXTURE: a served stamped reverse hit means the foreign-stamp cache-serve case \
-         is reachable again and needs its own non-vacuous proof"
+        binding.flow.flow_cache.hits,
+        hits_before_repeat + 1,
+        "#18827: the repeat must be proven a cache serve by exactly one hit delta"
     );
     assert_eq!(
         txn_flow_cache_entries(&binding),
         1,
-        "the re-adjudicated repeat reseeds the owner's descriptor"
+        "the cache-served repeat leaves the owner's descriptor in place"
     );
     let evictions_before_foreign = binding.flow.flow_cache.evictions;
 
@@ -4013,8 +4057,9 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
          the owner's descriptor"
     );
     assert_eq!(
-        binding.flow.flow_cache.hits, 0,
-        "the foreign stamp must not be accounted as a served cache hit"
+        binding.flow.flow_cache.hits,
+        hits_before_repeat + 1,
+        "#18827: the foreign stamp must not be accounted as an extra served cache hit"
     );
 
     let (_batch, owner_after_foreign) = txn_run_descriptor_checked(
@@ -4028,8 +4073,13 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
     );
     assert_eq!(
         (owner_after_foreign.session_hit, owner_after_foreign.tx),
-        (1, 1),
-        "the owner's reverse flow still forwards after the denied punt"
+        (0, 1),
+        "the owner's reverse flow remains cache-served after the denied punt"
+    );
+    assert_eq!(
+        binding.flow.flow_cache.hits,
+        hits_before_repeat + 2,
+        "the post-punt owner packet is served from the preserved descriptor"
     );
 }
 
