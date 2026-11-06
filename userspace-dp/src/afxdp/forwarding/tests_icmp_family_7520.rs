@@ -23,8 +23,9 @@ use super::{host_inbound_admits, ForwardingState};
 
 #[test]
 fn crossed_family_pairs_are_not_globally_admitted_7520() {
-    // IPv4 carrying the ICMPv6 protocol number, for every type the ICMPv6 arm
-    // admits. Each one was a global admit before #7520.
+    // IPv4 carrying the ICMPv6 protocol number, including error types in the
+    // current global set and ND types that #15671 moved to per-zone default.
+    // Every one previously bypassed family-checking before #7520.
     for t in [1u8, 2, 3, 4, 133, 134, 135, 136] {
         assert!(
             !accepts(58, false, t),
@@ -133,8 +134,8 @@ fn non_error_icmp_types_stay_gated_7520() {
         assert!(
             !accepts(proto, is_v6, t),
             "proto {proto} is_v6={is_v6} type {t} is globally admitted; only the \
-             ERROR/PMTUD and ND sets are exempt — echo and v4 router-discovery stay \
-             gated on their zone tokens"
+             ERROR/PMTUD set is globally exempt; ND has a per-zone default \
+             (#15671), while echo and v4 router-discovery stay gated on their zone tokens"
         );
     }
 }
