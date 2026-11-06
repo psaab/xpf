@@ -2479,7 +2479,7 @@ own view's flow-cache entry:
     `poll_descriptor/flow_cache_hit.rs`.
     `restamp_shared_forward_wire_established` among them can INSERT a
     forward-wire alias row when none exists. That row is cloned from the
-    CURRENT shared canonical row (`shared_ops/lookup.rs`), as an ordinary
+    CURRENT shared canonical row (`shared_ops/restamp.rs`), as an ordinary
     pass would do, never from the held view's tables.
   - The hit path judges the entry against the LIVE state: the RG epochs, the
     HA lease in the batch's live HA snapshot, and the session's presence in

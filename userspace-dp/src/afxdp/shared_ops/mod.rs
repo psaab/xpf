@@ -13,6 +13,8 @@ use std::sync::{MutexGuard, TryLockError};
 /// mutexes are where new flows queue up.
 mod counters;
 mod lookup;
+mod owner_rg;
+mod restamp;
 mod reverse_synth;
 mod store;
 #[cfg(test)]
@@ -21,6 +23,8 @@ pub(crate) mod stage_counts_18655_tests;
 pub(crate) mod wire_lock_order_18658_tests;
 pub(super) use counters::*;
 pub(super) use lookup::*;
+pub(super) use owner_rg::*;
+pub(super) use restamp::*;
 pub(super) use reverse_synth::*;
 pub(super) use store::*;
 #[cfg(test)]

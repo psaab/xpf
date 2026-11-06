@@ -397,7 +397,7 @@ fn one_pass_visits_each_shared_row_once_per_batch_18655() {
     let mut out = vec![(0, 0, 0); 1];
     let mut wanted = FastMap::default();
     wanted.insert(queries[0].0.clone(), vec![(0usize, false)]);
-    assert_eq!(super::lookup::stage_and_counts_pass(&holders, &wires, &wanted, &mut out) as u64, rows);
+    assert_eq!(super::restamp::stage_and_counts_pass(&holders, &wires, &wanted, &mut out) as u64, rows);
 }
 
 #[test]
