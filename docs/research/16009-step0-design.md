@@ -69,8 +69,12 @@ of #16009.**
    measured complete-gate fit; §3.4 gives the exact limit.
 3. Keep one outlined gate at all 11 selected terminal arms, the
    checked per-CPU packed-word sink, raw-ingress zone-mask map, and
-   aggregate reasons 21/22. Measure this no-new-extraction shape under
-   §8 before any implementation or scope act.
+   aggregate reasons 21/22. A retained IPv4 POD/teardrop trigger that
+   is unreachable on a given arm does not justify omitting the gate
+   call on that arm: the gate stays at every terminal arm, and the
+   arm's coverage claim is limited by §5.2's eligibility matrix.
+   Measure this no-new-extraction shape under §8 before any
+   implementation or scope act.
 
 **This route does not satisfy the issue's current decisive acceptance**
 (overlapping-fragment / LSRR / ICMP-fragment local-address traffic must
@@ -89,11 +93,11 @@ two-way contract conflict: dropping preserves screening but breaks
 `pass_local_control`; passing preserves that contract but restores the
 bypass. The binding-not-ready arm has no ready worker/binding; the
 ctrl-disabled arm is deliberately configured not to use the worker.
-Neither redirects. Route (b) has no worker-availability dependency
-and keeps the `pass_local_control` path for non-tripped packets; it
-intentionally drops configured retained matches before terminal pass,
-check. The issue's LSRR/overlap/ICMP-fragment acceptance remains open
-either way.
+Neither redirects. Route (b) has no worker-availability dependency and
+keeps `pass_local_control` for non-tripped packets; configured retained
+matches intentionally drop before terminal pass, while unaffected
+local/control behavior still requires Class-R acceptance. The issue's
+LSRR/overlap/ICMP-fragment acceptance remains open either way.
 
 **Why recommend (b) over (c) plan-kill:** the checked sink-only slice
 passed at 755,620, and none of the G1 failures measured that sink or
@@ -261,12 +265,15 @@ Three facts in this table do real work:
    conclusion, not a cost estimate — but it is strong enough to kill
    shapes whose only change is where the walk's output is stored
    (V6-2R, V6-3), per §2.3.
-3. **Early-exit counts price nothing.** TCP-1's 30,275 and the pre-G1
-   `off=34/35/56` counts (99,774–101,488) are the processed-insn values
-   at which the verifier refused one access and stopped. They cannot
-   be read as "this arm costs ~100k" or "70k of headroom remains."
-   The fixed-prefix IPv6 variant proves the point: clearing the
-   access reject moved the result to the 1,000,001 cap (fit §3).
+3. **Early-exit counts price nothing.** The pre-G1 IPv4-only access
+   failures (`off=34/35`; 99,774–101,488 processed insns) are the
+   values at which the verifier refused an access and stopped. The
+   IPv6 Routing-header `off=56` failures stopped at 30,152–30,642.
+   TCP-1's separate `off=56` result stopped at 30,275. None is an
+   instruction cost, a count of a complete program, or evidence that
+   "70k of headroom remains." The fixed-prefix IPv6 variant proves the
+   point: clearing an access reject moved the result to the 1,000,001
+   cap (fit §3).
 
 ### 3.2 The stack equation, stated precisely
 
@@ -317,9 +324,16 @@ fit — only baseline and sink-only passed in the available record.
 measured beyond the sink):**
 - The route-(b) candidate selects only IPv4 geometry:
   `frag_field`, `total_len`, and IHL-derived data length are already
-  bound in `parse_ipv4` (`lib.rs:2292-2355`). POD
-  (`offset + extent > 65535`) and teardrop
-  (`data_len == 0 || (more && data_len % 8 != 0)`) use these locals.
+  bound in `parse_ipv4` (`lib.rs:2292-2355`). The worker evaluates its
+  retained POD/teardrop checks only when
+  `frag_view_v4(frag_field, total_len, ihl)` returns `Some`
+  (`packet.rs:60-73`): POD tests `offset_bytes + pod_extent > 65535`
+  (`stateless.rs:131-143`), and teardrop tests zero data length or
+  non-multiple-of-eight data when MF is set (`stateless.rs:222-243`).
+  `None` means not a fragment, so neither check trips. The shim must
+  preserve that fragment eligibility before applying the same geometry
+  predicates; parsing an IPv4 packet alone does not create a geometry
+  trip.
 - IPv4 ICMP-fragment and known-flags SYN-frag can use existing wire
   protocol, fragment classification, and parsed flags. They are not
   geometry and are excluded from the single-family route-(b) shape;
@@ -343,7 +357,9 @@ measured beyond the sink):**
 - IPv4 options facts (LSRR/SSRR sighting, malformed verdict): all
   tested access shapes failed — dynamic scan (`off=34`), static-
   dispatch checked-byte reader (pointer-from-scalar), stack copies
-  (`off=35`), fixed-offset selector (link, V4-1).
+  (`off=35`), fixed-offset selector (link, V4-1). The outlined
+  generic-walker link failure is a separate precedent
+  (`16009-verifier-fit-design.md:482-484`).
 - TCP tiny/capture-unknown + trips: the pre-G1 528 B stack failure
   is adjudicated for the combined tiny + post-L4 slice; TCP-1's own
   placement variant remains unadjudicated because its substrate
@@ -385,7 +401,7 @@ qualified worker path or keep the fact in a successor.
 |---|---|---|---|---|---|---|---|
 | Measured PASS exists | ✅ 779,213 | ✅ 755,620 | ❌ unmeasured | ❌ V6-1 cap; earlier cap variants | ❌ 3 access + 1 link | ❌ 528 B pre-G1 slice; rank-1 unadjudicated | ❌ unmeasured for these arms |
 | Needs new packet read | — | no | no | carry or reread (unmeasured) | yes (all measured forms failed) | no new read; stack shape failed | classifier uses existing fields; unmeasured |
-| Needs new walk output | — | no | no (reuses existing outputs only) | yes (V6-1 cap signature) | no | no | no (worker parses) |
+| Needs new walk output | — | no | no (IPv4 `parse_ipv4` locals only) | yes (V6-1 cap signature) | no | no | no (worker parses) |
 | Availability price | none | none | none | none | none | none | **yes — §4.3** |
 | Decidable by | — | done | §8 protocol (2 runs) | successor protocol, clean-room | successor protocol, clean-room | successor protocol, clean-room | §4.5 acceptance + complete-object run |
 
@@ -544,9 +560,35 @@ geometry only, using locals already bound by `parse_ipv4`.
 
 | Retained predicate | Inputs | Evidence of availability |
 |---|---|---|
-| Ping-of-death geometry (`offset + extent > 65535`) | IPv4 `frag_field`, `total_len` | Existing `parse_ipv4` locals (`lib.rs:2292-2355`) |
-| Teardrop geometry only (`data_len == 0 \|\| (more && data_len % 8 != 0)`) | IPv4 fragment word and IHL-derived data length | Existing `parse_ipv4` locals; never claims overlap |
+| Ping-of-death geometry (`offset_bytes + pod_extent > 65535`) | IPv4 `frag_field`, `total_len` | Only when `frag_view_v4(frag_field, total_len, ihl)` is `Some`; `None` means no fragment/no trip (`packet.rs:60-73`, `stateless.rs:131-143`) |
+| Teardrop geometry (`data_len == 0 \|\| (more && data_len % 8 != 0)`) | IPv4 fragment word and IHL-derived data length | Only when `frag_view_v4(frag_field, total_len, ihl)` is `Some`; `None` means no fragment/no trip (`packet.rs:60-73`, `stateless.rs:222-243`) |
 | Candidate integration | Checked packed-word sink plus outlined gate at all 11 terminal arms, raw-ingress `u16` map, aggregate reasons 21/22 | Full integration unmeasured; sink-only scratch slice PASS at 755,620 proves only the checked per-CPU scratch mechanism, not this gate/map/counter shape |
+
+**Pre-run terminal-arm eligibility matrix.** Every one of the 11
+selected terminal arms keeps its outlined `host_screen_gate` call,
+including arms where the retained IPv4 trigger cannot be reached.
+Reachability is assessed at the selected arm, not inferred from the
+presence of the call; `not-proven` is not evidence of unreachability.
+
+| Arm | Landed-plan anchor | Gate call-site present | Selecting predicates / families | Retained IPv4 POD/teardrop trigger reachable | Allowed coverage claim |
+|---|---|---|---|---|---|
+| WG steer | `host-screen-plan.md` §1, `lib.rs:944-951` | Yes | WG-steer predicate succeeds; parsed IPv4 or IPv6 packet | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
+| Early-filter IPv4 limited-broadcast/multicast and IPv6 multicast | §1, `lib.rs:952-965`; `early_filter.rs:85-109` | Yes | Early-filter multicast / limited-broadcast predicate; IPv4 or IPv6 | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
+| Session-hit `PASS_TO_KERNEL` | §1, `lib.rs:1002-1028` | Yes | Session hit selects `PASS_TO_KERNEL`; IPv4 or IPv6 | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
+| Session-miss NAT-external NDP | §1, `lib.rs:1035-1044`; `degraded_ndp.rs:13-55` | Yes | ICMPv6 type 133–137, `hop_limit == 255`, matching NAT-external destination | proven-unreachable: NDP selection is IPv6-only; `parse_ipv4` sets `hop_limit: 0` (`lib.rs:2381`) | Gate present only; no IPv4 geometry coverage |
+| Session-miss proxy-NDP | §1, `lib.rs:1050-1059`; `degraded_ndp.rs:13-55` | Yes | ICMPv6 type 133–137, `hop_limit == 255`, matching proxy-NDP destination | proven-unreachable: NDP selection is IPv6-only; `parse_ipv4` sets `hop_limit: 0` (`lib.rs:2381`) | Gate present only; no IPv4 geometry coverage |
+| Session-miss ICMP-to-interface-NAT local | §1, `lib.rs:1060-1073` | Yes | ICMP-to-interface-NAT local predicate succeeds | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
+| Session-miss local destination | §1, `lib.rs:1101-1121` | Yes | Local-destination predicate succeeds; IPv4 or IPv6 | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
+| Interface-NAT tunnel kernel pass | §1, `lib.rs:1125-1139` | Yes | `interface_nat_tunnel_passes_to_kernel` selects kernel pass | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
+| GRE-inner `PASS_TO_KERNEL` | §1, `lib.rs:1155-1175` | Yes | Typed GRE-inner session predicate selects kernel pass | proven-unreachable for a fragmented native-GRE outer: it stays on helper path before these arms (`lib.rs:795-804`); inner geometry is not parsed by this gate | Gate on outer packet only; fragment geometry is not screened there |
+| Binding-not-ready degraded local/control | §1, `lib.rs:854,891-894` | Yes | Binding not ready and `is_degraded_local_or_control` is true | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
+| Ctrl-disabled local/control | §1, `lib.rs:1671,1726-1728` | Yes | `degraded_ctrl_disabled_action` selects `PassLocalControl` | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
+
+The eight `not-proven` rows require source proof before any stronger
+coverage claim; gate presence alone is not proof that a retained trigger
+can select that arm. The GRE finding is specifically about fragmented
+native-GRE outer packets; it does not establish geometry screening for
+inner packets (`lib.rs:1456-1493` rejects inner fragments).
 
 **Deferred to successors** (no exception without new evidence and a
 new scope act):
@@ -571,17 +613,33 @@ requires its own measured shape and explicit scope act.
 
 ### 5.3 What the split changes in the landed plan's artifacts
 
-- **Packed word:** emit only IPv4 POD and teardrop decision bits.
-  No IPv6 geometry, ICMP-fragment, SYN-fragment, source-route, Q1,
-  malformed, duplicate, or tiny/capture facts are carried.
-- **Zone-mask `u16`:** only the retained POD/teardrop bits plus the
-  existing alarm-without-drop bit are meaningful. The Go builder and
-  `ScreenProfile::conservative_default` rows zero every deferred bit.
-  [INFERENCE] This narrows the landed plan's §6.2 builder deltas but
-  does not change their shape; `AlarmWithoutDrop` for inert and
-  `BadNumericUnresolved` references (fold F-C) applies to retained
-  bits. Extractor-error row-presence drops for C20/C21 are not
-  retained predicates and transfer with those facts.
+- **Packed word:** `userspace_screen_scratch` carries only IPv4 POD and
+  teardrop decision bits. Initialize its per-CPU word to zero for each
+  packet before optional sightings; check every map operation. A failed
+  parser write or finalization returns `None` through parse-fail, a
+  gate-read failure is fail-closed, and stale contents are never reused.
+  Use existing parsed IPv4 fragment state
+  (`ParsedPacket.is_fragment`, true for MF or nonzero offset;
+  `lib.rs:2370`) as the shim-side equivalent of `Some`: when false,
+  emit no retained trip bit. This matches the worker's
+  `frag_view_v4`/`pkt.frag?` eligibility (`packet.rs:60-73`,
+  `stateless.rs:131-143,222-243`): `None` means no fragment and no
+  retained geometry trip. Do not invent a shim `frag_view_v4` helper.
+  Route (b) drops only on retained IPv4 POD/teardrop bits.
+- **Profile map:** `userspace_host_screen` carries the zone mask. Only
+  retained POD/teardrop bits plus the existing alarm-without-drop bit
+  are meaningful; the Go builder and `ScreenProfile::conservative_default`
+  rows zero every deferred bit. [INFERENCE] This narrows the landed
+  plan's §6.2 builder deltas but does not change their shape;
+  `AlarmWithoutDrop` for inert and `BadNumericUnresolved` references
+  (fold F-C) applies to retained bits. Extractor-error row-presence
+  drops for C20/C21 are not retained predicates and transfer with those
+  facts.
+- **Counters:** append-only reason 21 is `host_screen_drop` and reason
+  22 is `host_screen_alarm`; together they cover only retained geometry
+  dispositions. Deferred-predicate drops, when a successor lands them,
+  use the worker's existing counters (worker-side) or new append-only
+  reasons (shim-side); reasons 21/22 are not reused retroactively.
 - **Cells:** the scope-act artifact must give an exact C1–C35
   disposition. C1/C4 IPv4 geometry are candidates for retained
   coverage; C3 ICMP-fragment, C5 SYN-fragment, Q1 legs, IPv4 option
@@ -591,18 +649,13 @@ requires its own measured shape and explicit scope act.
   scope act must identify which arm/control cases still exercise the
   retained geometry gate and transfer the rest using re-plan §7.2's
   cell-by-cell method.
-- **Counters:** reasons 21/22 (`host_screen_drop` /
-  `host_screen_alarm`) cover only retained geometry dispositions.
-  Deferred-predicate drops, when a successor lands them, use the
-  worker's existing counters (worker-side) or new append-only reasons
-  (shim-side); 21/22 are not reused retroactively.
 
 ### 5.4 Why this subset can be believed cheap — and what would prove otherwise
 
 The arithmetic is bounded, not predictive. If the candidate preserves
 the 779,213-fit baseline, only 70,787 fits remain to K1's 850,000
 ceiling; the sink's separate 755,620 result is not a substitute base
-for that calculation (§3.2). The candidate uses only IPv4 locals
+for that calculation (§3.1). The candidate uses only IPv4 locals
 already bound by `parse_ipv4`; sink-only proves the checked per-CPU
 scratch transport can fit, not the gate at all 11 arms, raw-ingress
 zone-mask map, or reasons 21/22 integration. The complete-object cost
@@ -724,18 +777,22 @@ design does not auto-select it on budget exhaustion.
 
 ### 7.2 Sequence required for route (b)
 
-1. Three-seat review records whether this design is PLAN-READY and
-   authorizes only the exact D1/D2 diagnostic pair in §8 (at most two
-   of the nine remaining runs). The act does not authorize code or
-   narrow #16009.
+1. This document authorizes nothing. A recorded three-seat PLAN-READY
+   act authorizes **only** scratch-only CR1/CR2 candidate construction,
+   the CR0 census, the CR4 corpus, the two §8.2 generation invocations,
+   and D1/D2 result recording (D2 only if D1 passes CR5). It does not
+   authorize production code, landing, scope adoption, successor filing,
+   result-as-closure posting, artifact promotion, or runs 7–13.
 2. Run D1; only a complete K1 pass permits the identical-source D2
    confirmation. Failure kills route (b); no scope act or implementation
    follows.
-3. After D1/D2 pass, ensure S1–S6 from landed plan §10 have recorded
-   owners/issues or explicit dispositions, and file the proposed
-   S7–S11 successors in §7.3 before any scope act. The owner records
-   route (b) as partial and keeps original acceptance open until every
-   required leg is met, unless it explicitly revises acceptance; the
+3. D1/D2 PASS is verifier-fit evidence only; it closes no decisive
+   acceptance leg. It authorizes no successor filing or scope act.
+   Before any separately authorized scope act, ensure S1–S6 from
+   landed plan §10 have recorded owners/issues or explicit dispositions,
+   and confirm the proposed S7–S11 successors in §7.3. Any owner act
+   must keep route (b) partial and original acceptance open until every
+   required leg is met, unless acceptance is explicitly revised; this
    geometry-only candidate does not pass the current decisive check.
 4. Any scope act must publish the exact retained/deferred facts, the
    full cell disposition for C1–C35, successor ownership, and that
@@ -755,7 +812,27 @@ record explicit dispositions before a scope act. Each new successor
 must carry G1/pre-G1 evidence, independent K1-equivalent acceptance
 for its enforcement layer, and a prohibition on claiming #16009 parity.
 
-- **S7:** `shim: enforce deferred TCP flag screens on host-bound kernel-PASS paths` — owner: userspace-xdp shim + Go mask/ABI maintainers. If known-flags SYN-frag or Q1 transfers by explicit scope act, acceptance requires separately pinned clean-room shapes (no TCP-1 `off=56` substrate) and complete-object K1 for the selected fact(s), plus C5 known-SYN-frag and the re-plan §6.2/§7.2 Q1 artifacts (C23's 128 outcomes and URG|ACK-to-443 control; C22's no-flag leg; C26/C35 Q1 legs; conservative-row Q1 bits). Any fact not transferred remains in #16009; §6.1 is not adopted.
+For #16009 follow-on filing, this document's §7.3 S7 sketch governs.
+The landed-plan §10 and re-plan references to “S7” are aliases for
+that same successor, not separate successor issues or work items.
+
+- **S7:** `shim: enforce deferred TCP flag screens on host-bound kernel-PASS paths` — owner: userspace-xdp shim + Go mask/ABI maintainers.
+  Known-flags SYN-frag transfers only by explicit scope act. Its
+  acceptance includes C5's IPv4 first-fragment SYN drop and whole-SYN
+  control; an IPv6 counterpart is required only if explicitly assigned.
+  The clean-room shape excludes TCP-1's `off=56` substrate and requires
+  complete-object K1.
+  Q1 transfers only by explicit scope act. Its separate clean-room
+  shape must also exclude TCP-1's substrate, independently pass
+  complete-object K1, and restore the four independent Q1 predicates,
+  mask bits 5–8, Go-builder Q1-mask/16-profile acceptance, and exactly
+  the re-plan §6.2/§7.2 Q1 artifacts: C22's no-flag-only leg (not
+  capture/declared or SYN-frag legs); C23's 128 Q1 worker-oracle
+  outcomes plus URG|ACK-to-port-443 negative control (not C23 SYN-frag);
+  C26/C35 Q1 legs; and conservative-row Q1 bits. If both families
+  transfer, their integrated selected shape also needs K1 under its
+  own authorization. Anything not transferred remains in #16009;
+  §6.1 is not adopted.
 - **S8:** `shim: IPv4 source-route and malformed-options facts for
   host-bound kernel-PASS traffic after V4-1 link failure` — owner:
   userspace-xdp parser maintainers. Acceptance: legal IPv4 options
@@ -796,13 +873,22 @@ Runs 7–13 remain unspent. A three-seat act must authorize the pair
 before execution; this text authorizes no code, run, or scope change.
 The exact G1 base is `7e4b3d2e3b32cde9a9cba617f58d7e40ac14bbb1`.
 Use the pinned G1 command and environment (`g1-results.md:30-35`):
-`CARGO_TARGET_DIR=/var/worktrees/.cache/cargo-16009 TMPDIR=/var/worktrees/.cache/tmpdir GOTMPDIR=/wtgt GOCACHE=/var/worktrees/.cache/go-build XPF_SHIM_ALLOW_LOW_HEADROOM=0 make generate-userspace-xdp`.
-Each run uses a fresh detached scratch worktree at that base and a
-complete source pin: tracked diff plus every untracked/shared file's
-hash, along with toolchain and command inputs (`6675582825`). Never
-install the generated object. If a necessary build input has changed
-from the recorded G1 base, stop and seek a separately authorized
-changed-input baseline; do not silently substitute `master`.
+`CARGO_TARGET_DIR=/var/worktrees/.cache/cargo-16009 TMPDIR=/var/worktrees/.cache/tmpdir GOTMPDIR=/var/worktrees/.cache/gotmp GOCACHE=/var/worktrees/.cache/go-build XPF_SHIM_ALLOW_LOW_HEADROOM=0 make generate-userspace-xdp`.
+Before each invocation, record the fresh detached scratch worktree path,
+G1 base, full command and environment, complete source/toolchain hashes,
+and expected artifact paths, including the candidate `.so`. The
+generation command installs tracked
+`pkg/dataplane/userspace_xdp_bpfel.o`,
+`pkg/dataplane/userspace_xdp_gate_verdict.json`, and
+`pkg/dataplane/userspace_xdp_manifest.json` in the tree that runs it;
+the candidate is
+`/var/worktrees/.cache/cargo-16009/bpfel-unknown-none/release/libxpf_userspace_xdp.so`
+(`pkg/dataplane/build-userspace-xdp.sh:27,33,301-320`). After each
+invocation, record the hash and disposition of every expected artifact.
+These products are scratch evidence only: never copy, commit, or promote
+them. If a necessary build input changed from the recorded G1 base, stop
+and seek a separately authorized changed-input baseline; do not silently
+substitute `master`.
 
 ### 8.1 Clean-room construction rules (the GLM residual, made binding)
 
@@ -810,6 +896,16 @@ Each rule below is mandatory. A host-corpus failure before a generation
 command spends no verifier run; once the pinned generation command is
 invoked, the run is charged regardless of whether compilation, linking,
 or kernel verification is the first failing stage.
+
+- **CR0 — Source census before D1 (zero runs).** After scratch-only
+  candidate construction and before D1, require exactly one
+  `host_screen_gate` definition and exactly 11 call sites, matching the
+  §5.2 matrix. Confirm there is no transit or pre-parse call site;
+  `userspace_screen_scratch`, `userspace_host_screen`, and append-only
+  reasons 21/22 are declared; and the forbidden substrate is absent:
+  no V6-1 walk-state accumulator, V4-1 TLV selector, or TCP-1 `off=56`
+  packet read. Any census mismatch blocks D1; the census spends zero
+  verifier runs.
 
 - **CR1 — Baseline plus one delta.** Start from the pristine G1 base
   and add only the retained-fact geometry gate. Do not reuse G1's
@@ -834,8 +930,12 @@ or kernel verification is the first failing stage.
   zero/short/MF nonmultiple/legal-last. IPv4/IPv6 ICMP-fragment,
   known-flags SYN on first fragment, atomic/non-first IPv6 fragment,
   governing-header, and clean-packet cases are non-trigger controls:
-  the candidate emits no decision for those facts. The corpus tests
-  only the retained IPv4 geometry; it does not assert other coverage.
+  the candidate emits no decision for those facts. On the same CPU,
+  retained-IPv4-trip packet that drops and increments reason 21,
+  immediately followed by a clean IPv6 packet that must not drop or
+  increment reason 21. The geometry corpus claims only retained IPv4
+  coverage; the clean-IPv6 sequence is a stale-state control, not a
+  parity claim.
 - **CR5 — Strict sequence.** Run D1, record its complete disposition,
   then and only if it passes authorize D2. No parallel dispatch or
   retries.
@@ -875,8 +975,9 @@ smoke remain required as specified in fit design §8 step 6.
    failure. It spends at most 2 of 9 remaining runs; runs 7–13 stay
    held and cannot be consumed by this design.
 4. **Deviation stop.** Any departure from CR1–CR6 voids the affected
-   evidence; the invoked generation run remains charged. No generated
-   object is installed.
+   evidence; the invoked generation run remains charged. Generated
+   products remain in the scratch tree and are not copied, committed,
+   or promoted.
 
 ---
 ## 9. Kill criteria (pre-registered)
@@ -903,9 +1004,12 @@ evidence — if any of the following holds:
 5. **Honesty kill:** any artifact claims source-route, duplicate-
    fragment, malformed-options, ICMP-fragment, known-SYN-fragment,
    IPv6-geometry, tiny/capture, Q1, overlap, scan/sweep, cookie, or
-   claimed-zone parity before its assigned successor passes; cites 632 B
-   or 640 B chain sums as stack adjudications; or treats a partial
-   count (30,275; 99,774–101,488; 1,000,001) as a cost or a pass.
+   claimed-zone parity before its assigned successor passes; cites the
+   632 B or 640 B combined-chain sums as stack adjudications; or treats
+   an early-exit count as a cost or a pass, including the IPv4-only
+   `off=34/35` failures (99,774–101,488), IPv6 `off=56` failures
+   (30,152–30,642), TCP-1's separate `off=56` result (30,275), or the
+   capped 1,000,001 result.
 6. **Budget kill:** this protocol spends more than runs 5 and 6, retries
    an unchanged shape, or runs a §2.3-dead shape. Any extra run or
    changed-input baseline requires a new three-seat act.
@@ -984,7 +1088,7 @@ measured.
 | TCP-1 = gate failure by access, mechanism/stack unjudged; no auto-selection of TCP-2 from the 632 B sum | `issuecomment-6675614112` (Kimi, accepted), `6675500896` (Sol), final record `6675710585` |
 | G2 unbuildable a priori (V4-1 in the exact set); component-hash pinning guardrail | `issuecomment-6675582825` (GLM), parent ruling `6675609580` |
 | K1 definition (≤850,000, floor PASS, override false, complete-object only); 13-run budget; failure-signature routing; stop rule | Fit design §§1, 8; landed plan §9-K1 |
-| Sink-only 755,620 PASS; pre-G1 deaths (`off=34/35/56`, 528 B stack, cap variants with state counts) | Fit design §3; re-plan §3.1 |
+| Sink-only 755,620 PASS; pre-G1 IPv4-only access failures (`off=34/35`, 99,774–101,488), IPv6 `off=56` failures (30,152–30,642), 528 B stack, cap variants with state counts | Fit design §3; re-plan §3.1 |
 | +298,128 measured laundering precedent; second-walk-value state-merging mechanism | Landed plan §5.1 (`lib.rs:588-602`); fit design §2 item 1 |
 | 11 arms, insertion anchors, transit exclusion, two pre-parse CPUMAP exclusions | Landed plan §1 (`lib.rs:612-618,2138-2146` and arm table) |
 | `pass_local_control` intentional on degraded/ctrl-disabled arms; redirect contract breakage | Landed plan §2.1 (`lib.rs:1812-1816`); `userspace-xdp/src/lib.rs:891-894,1671,1726-1728,1812-1816` on master |
