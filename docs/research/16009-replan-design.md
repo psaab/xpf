@@ -1,79 +1,122 @@
-# #16009 — architecture step-0 re-plan after the K1 stop rule fired
+# #16009 — architecture step-0 re-plan (revised: rank-1 shapes measured before any scope adoption)
 
-- **Status:** design/research only. This document recommends one route for
-  hostile three-seat review. It authorizes no code, no verifier run, no
-  scope change, and no artifact generation. It does not amend the landed
-  plan by itself: §6 is the exact scope-change wording a reviewer/owner
-  must adopt to make the recommended route effective, and §7 names how
-  that adoption is filed and worded so it cannot be mistaken for silent
-  narrowing.
+- **Status:** design/research only. This revision recommends one route
+  for hostile three-seat review. It authorizes no code, no verifier run,
+  no scope change, and no artifact generation. It does not amend the
+  landed plan by itself: §6 is the exact scope-change wording a
+  reviewer/owner must adopt to make the recommended route effective,
+  and §7 names how that adoption is filed and worded so it cannot be
+  mistaken for silent narrowing. The rank-1 measurements in §7 are a
+  LATER authorized step under the verifier-fit budget; this revision
+  runs none of them.
 - **Inputs (all read for this document; no new measurement taken):**
   - `docs/research/16009-host-screen-plan.md` on master, especially §1
-    (verified mechanism and the 11 arms), §2.1, §2.2, §4.4, §5.5, §9-K1,
-    and §10 (S1–S6 and the conditional S7).
-  - `docs/research/16009-verifier-fit-design.md`, especially §3
-    (measured failure matrix), §7 (composite ranking), and §8 (bounded
-    prototype, exact order/cap, and the stop rule).
+    (verified mechanism and the 11 arms), §2 item 2, §2.1, §2.2, §4.4,
+    §5.5, §8, §9-K1, and §10 (S1–S6 and the conditional S7).
+  - `docs/research/16009-verifier-fit-design.md`, especially §2 item 2,
+    §3 (measured failure matrix), §7 (composite ranking), §8 (bounded
+    prototype, exact order/cap, and the stop rule), and §9 (prescribed
+    first order: V6-1 + V4-1 + TCP-1).
   - `docs/log/16009.md` in the dirty implementation worktree
     `wt-16009impl` (read-only here), especially the section
     “Rebased K1 isolation — 2026-11-06”, base
-    `c10b3aa06445ca4e51e989d20fd90c95c84533c7`.
-- **Trigger.** The verifier-fit §8 stop rule fired: the IPv6, IPv4, and
-  TCP fact arms each failed independently in isolation (§3 below), so
-  there is no complete-object candidate to assemble. The landed plan
-  says the next step is then architecture step 0, and it names the
-  alternatives a re-plan may consider: redirect-to-worker, the reviewed
-  S7 route if Q1 is explicitly removed, per-check reconsideration, or
-  plan-kill with successors. This document evaluates exactly those four
-  routes and recommends one.
+    `c10b3aa06445ca4e51e989d20fd90c95c84533c7`, and its Risk directive
+    at :87-90.
+  - The three PLAN-NEEDS-MAJOR reviews of the prior revision of this
+    document (Sol `Sol16009Replan`, Kimi `Kimi16009Replan`, GLM
+    `Glm16009Replan`, on #16009) and the parent correction accepting
+    GLM's trigger finding (`issuecomment-6673271416`).
+- **Trigger (corrected; this corrects the prior revision).** The
+  verifier-fit §8 bounded sequence was **never executed**. Its
+  predeclared shapes — V6-1/V6-2R/V6-3, V4-1..3, TCP-1..3, 9 isolated
+  attempts plus up to 3 complete-object compositions plus 1
+  confirmation, 13 runs in all — are **unmeasured** (0 of 9 isolated
+  attempts, 0 of 3 compositions; the fit fold `f27d1173ad` already
+  recorded “all candidate shapes remain unmeasured”). What failed
+  pre-prototype were the diagnostic slices the fit document used as
+  INPUT (§3.1): original-form observer/TLV/tiny+post-L4 shapes and
+  their held variants. Those diagnostics motivated the fit design; they
+  are not executions of it. Therefore §8's arm-stop readings apply only
+  to the shapes actually measured, and **the only §8 stop clause that
+  can honestly fire today is clause (iv)** — “the team proposes
+  removing Q1/C23 coverage to make the count fit” — because that
+  proposal is this document's own route (b). No other clause has fired:
+  no predeclared shape has failed, the composition limit is unspent,
+  and no override was consumed. Seats must not read this re-plan as
+  “fitting is exhausted”; it is not.
+
+  Two consequences follow, and this revision is built on both.
+  **First, the gates are re-ordered (§7):** the rank-1 predeclared
+  shapes V6-1 + V4-1 + TCP-1 — exactly the first order prescribed by
+  fit §9 and fit §8 steps 2–4 — run under the ORIGINAL scope, spending
+  at most 3 of the 13 authorized runs, BEFORE any G0 scope adoption.
+  §6.1's Q1 removal is considered only after a rank-1 failure; it is
+  adopted only if the pre-adoption G2 complete-object diagnostic meets
+  the first-build K1 thresholds and the owner chooses route (b). A
+  passing rank-1 shape is not a reason to reduce scope. This ordering
+  is the parent preference recorded on #16009: these measurements are
+  “cheap, pre-authorized, and decisive for both the stop question and
+  route (b)'s premise.”
+  **Second, the lane-log directive is addressed, not silently inverted:**
+  `wt-16009impl/docs/log/16009.md:87-90` directs
+  “Stop expansion; do not narrow or delete TCP coverage… rework and
+  remeasure”. This revision honors that directive in its ordering —
+  rework-and-remeasure (rank-1) comes first; narrowing (G0/§6.1) is
+  reachable only after those measurements fail, and then only as the
+  plan §9-K1 pre-negotiated, recorded, S7-backed act — never as the
+  silent deletion the directive forbids. §8 item 2 states the evidence
+  that would make the directive's sequence unnecessary.
 
 ---
 
 ## 1. Recommendation (one route)
 
-**Recommend route (b): an explicit, reviewed scope change that removes
-Q1 — the four extra TCP-flag checks (SYN+FIN, no-flag, FIN-without-ACK,
-WinNuke) — from #16009, filed together with the conditional successor
-S7 in the exact form the landed plan already specifies (§6/§7), and a
-K1 re-gate of the remaining core before any production landing.**
+**Recommend a staged decision, not immediate scope adoption.** First run
+the three rank-1 predeclared shapes — V6-1, V4-1, TCP-1 — under the
+ORIGINAL #16009 scope, in fit §9's order and within the existing 13-run
+budget. If all three clear their isolated semantic/access/stack gates,
+continue the original-scope bounded protocol; do not adopt §6.1 or file
+S7 on the basis of this re-plan. If one or more fail, run the single
+pre-adoption no-Q1 complete-object diagnostic in §7.1. Adopt route (b)
+and §6.1 only if that first complete-object build meets the per-build
+K1 thresholds (≤850,000, floor PASS, no override); otherwise do not spend
+the scope reduction and return to architecture step 0 to compare
+routes (a), (c), and (d) with the evidence in hand. No result here
+licenses an unrecorded further narrowing.
 
-Nothing else in the landed plan changes. The scope change is removal
-of spelled-out requirement text, not a weakened restatement of it:
-#16009 would claim only the surviving core in §5 until S7 passes, and
-the four Q1 predicates, their mask bits, and their 128-outcome matrix
-move to S7 by transfer, not by deletion. If the remaining core still
-fails K1, the landed plan's own escalation applies unchanged: return
-to step 0 (where redirect-to-worker is reconsidered), and do not claim
-completion by narrowing again.
+This order repairs the previous recommendation's central defect. The
+diagnostic slices in §3 are inputs to the verifier-fit design, not
+executions of its bounded protocol; the predeclared shapes remain
+unmeasured. The rank-1 attempts are cheap, pre-authorized, and decisive
+for the stop question and route (b)'s premise. They are performed with
+Q1 enabled, honoring the lane-log instruction to “Stop expansion; do
+not narrow or delete TCP coverage… rework and remeasure.” The
+pre-adoption no-Q1 object is a single, explicitly diagnostic experiment
+within the existing complete-object budget, not an adopted scope,
+acceptance run, or production candidate. It cannot authorize the reduced
+scope by itself: the owner must still adopt §6.1 and file S7 at G0 before
+any further reduced-scope work or landing.
 
-Why this route, in one paragraph. It is the only route that is
-(a) executable with the evidence already paid for, (b) honest about
-what it gives up, and (c) survivable if it is wrong. Redirect-to-worker
-(a) changes the terminal-arm contract for every local/control packet —
-including the deliberate worker-independent `pass_local_control` paths
-— while its instruction and availability costs are not priced by the
-measured slices (§4.2). The per-check split (c) was argued against in
-the landed plan §2.2 on one-mechanism and partial-parity grounds, and
-the measured evidence weakens its premise rather than strengthening it:
-the three failure signatures are three different mechanisms (access,
-state cap, stack), not one shared verifier tax that splitting
-amortizes (§4.3). Plan-kill (d) discards a verified, still-open bypass
-(§2) whose pre-negotiated reduction the plan already specifies; killing
-the approach now would re-open that negotiation from zero while the
-bypass remains (§4.4). Route (b) is pre-authorized in form — the plan
-§9-K1 and §10 already fix its wording, its successor, and its
-acceptance — and is a bounded, predeclared experiment: measure the
-reduced complete object after the scope change is recorded; that
-pass/fail decides the next step without an unrecorded further contract
-change.
+The alternatives remain real decisions rather than straw men.
+Redirect-to-worker (a), including bounded selective redirect, changes
+the terminal-arm contract and requires a worker-health default plus
+per-arm worker-path qualification; its feasibility is not measured
+(§4.2). A geometry-first split (c) could isolate a strictly described
+subset and might fit even though the measured first extraction shapes
+did not; it would require an explicit scope change and successor
+acceptance for every deferred predicate, not the plan's Q1-only S7
+(§4.1). Plan-kill (d) is an available outcome if the evidence rejects
+shim screening, not a claim that the defect itself is fixed (§4.3).
+The pre-adoption diagnostic distinguishes route (b) from those
+alternatives; no prior measurement priced them.
 
-This recommendation is conditional in exactly one place, stated here so
-no seat has to infer it: route (b) is recommendable only if the
-reviewing owner adopts §6 verbatim (or edits it in the open) and files
-S7 concurrently. If either act is refused, route (b) is not available
-and the fallback ordering in §8 applies — it is not permissible to
-implement “(b) minus the scope-change act”, because that is the silent
-narrowing the plan and the amendment both forbid.
+If route (b) is supported by the ordered evidence and selected, its
+scope act is exact and explicit: remove only Q1 from #16009, transfer
+only the Q1 artifacts enumerated in §7.2, and file S7 concurrently
+before any further reduced-scope work. #16009 then claims only the
+retained core in §5. If the diagnostic does not support route (b), the
+fallback is §7.4; it is not permissible to implement “(b) minus the
+scope-change act,” because that would be silent narrowing.
 
 ---
 
@@ -101,7 +144,7 @@ narrowing the plan and the amendment both forbid.
    `ExtWalk` gain zero fields, `MAX_EXT_HDRS` (=7) and walk
    advance/break rules are unchanged, and any route that requires
    widening either struct is reviving a shape already measured at the
-   1,000,001 cap (plan §3; verifier-fit §2.2).
+   1,000,001 cap (plan §3; verifier-fit §2 item 2).
 5. The budget rule is not the dispute: complete object ≤850,000
    processed instructions, floor PASS, `override_consumed: false`, no
    `XPF_SHIM_ALLOW_LOW_HEADROOM` waiver. Only a complete-object
@@ -127,8 +170,8 @@ differs from the lane log, the lane log governs.
 |---|---|---:|
 | Pristine baseline (base `c10b3aa064`) | PASS; 22.0787% headroom | 779,213 |
 | Sink-only parser slice | PASS; 24.44% headroom | 755,620 |
-| Complete gated candidate (original variable-length Routing read) | REJECT `invalid access to packet, off=56 size=1`, `R1(id=0,off=56,r=56)`; 30,642 processed (a diagnostic count, *not* a K1 count); 2,223 total states | 30,642 |
-| No-gate diagnostic (same delta, all 11 call sites removed) | REJECT, same `off=56` class; earlier base `6c9098dcfb` | 30,223 |
+| Full-delta diagnostic with gate (original variable-length Routing read; **not** a verifier-fit §8 composition) | REJECT `invalid access to packet, off=56 size=1`, `R1(id=0,off=56,r=56)`; 30,642 processed (diagnostic count, *not* a K1 count); 2,223 total states | 30,642 |
+| No-gate full-delta diagnostic (same delta, all 11 call sites removed; **not** a verifier-fit §8 composition) | REJECT, same `off=56` class; earlier base `6c9098dcfb` | 30,223 |
 | IPv6 observer slice (original Routing read) | REJECT `off=56 size=1`; 2,136 total states | 30,152 |
 | IPv6 fixed three-byte-prefix variant | Access reject cleared; then REJECT at cap; 63,606 total states | 1,000,001 |
 | IPv6 map-accumulating variant | REJECT at cap; 61,589 total states | 1,000,001 |
@@ -211,39 +254,34 @@ cannot be compared as instruction passes.
   component. A checked per-CPU packed-word write/read is not by itself
   the blocker (verifier-fit §3 F1 conclusion). Every route below may
   assume the sink exists; none may assume more than that.
-- **IPv6 observer arm: dead in every measured form.** Four distinct
-  shapes failed — dynamic read (access), fixed prefix (cap), map
-  accumulation (cap), out-of-line callback (cap) — plus a link failure
-  for the outlined walker. Verifier-fit §8 adds the decisive structural
-  point: V6-2R and V6-3 retain the checked routing-type read, so they
-  “cannot be counted as access fixes”; and §4 establishes there is no
-  metadata-only shortcut, because `ExtWalk` carries neither routing
-  type nor fragment count and has no reserved encodings. The remaining
-  unmeasured shapes (V6-1's stack accumulator inside the walk) are
-  unproven, not promising: the burden of §8's stop rule is that an arm
-  whose failure cause cannot be localized stops rather than guessing.
-- **IPv4 TLV/options arm: dead in every measured form.** Dynamic scan
-  (`off=34`), static-dispatch checked reader (pointer-from-scalar),
-  and two stack copies (`off=35`) all reject *at small counts* (99,774–
-  101,488) — i.e., this arm fails on access legality long before the
-  instruction budget is even relevant. That signature matters for
-  route choice: access rejects are shape properties, not budget
-  properties. Making the object smaller elsewhere does not, by any
-  measured mechanism, legalize a rejected access.
-- **TCP (tiny-declared + post-L4 trips): dead as shaped, with a
-  distinct failure signature.** The slice stopped on combined stack
-  (528 bytes across three calls, 16 above the 512-byte limit) after
-  processing 775,418 instructions. That partial count is 74,582 below
-  the 850,000 ceiling as arithmetic only; it is not a completed
-  instruction-budget pass or usable headroom, and it is not comparable
-  to the still lower partial counts from packet-access rejects. Named
-  remedies exist (TCP-1 shorten live range; TCP-2 move Q1 derivation
-  into the outlined gate; TCP-3 outlined scalar helper, verifier-fit §6),
-  but none is measured, and the lane log explicitly does not localize
-  which frame causes the peak. “Only 16 bytes over” is a fact;
-  “therefore one attribute tweak fixes it” is folklore the amendment
-  forbids (§8: “no attempt is repeated unless it is the predeclared
-  final confirmation”; “no cosmetic retries”).
+- **IPv6 observer arm: the measured diagnostics failed, but the
+  predeclared candidates are not exhausted.** Four diagnostic forms
+  failed — dynamic read (access), fixed prefix (cap), map accumulation
+  (cap), out-of-line callback (cap) — plus a link failure for the
+  outlined walker. These are not the verifier-fit §8 rank-1 V6-1
+  attempt. V6-2R and V6-3 retain the checked routing-type read, so they
+  cannot be counted as access fixes for that rejection; §4 establishes
+  no metadata-only shortcut because `ExtWalk` carries neither routing
+  type nor fragment count and has no reserved encodings. V6-1 remains
+  explicitly unmeasured. Do not call the IPv6 arm exhausted or claim
+  the §8 stop rule fired from these diagnostics.
+- **IPv4 TLV/options arm: measured diagnostics failed; V4-1 remains
+  unmeasured.** The dynamic scan (`off=34`), static-dispatch checked
+  reader (pointer-from-scalar), and two stack copies (`off=35`) reject
+  at small counts (99,774–101,488). Those signatures do not establish
+  that the distinct predeclared rank-1 V4-1 shape fails, nor do they
+  establish that all three fit candidates were measured. No complete
+  object with this fact is yet K1 evidence.
+- **TCP (tiny-declared + post-L4 trips): the diagnostic slice failed
+  stack, but TCP-1 remains unmeasured.** The measured diagnostic stopped
+  on a combined 528-byte stack across three calls, 16 above the 512-byte
+  limit, after 775,418 processed instructions. That partial count is
+  not a completed instruction-budget pass or usable headroom. The lane
+  log does not localize which frame caused the peak. TCP-1 (shortened
+  live range) is the first predeclared attempt, not an already-failed
+  variant; TCP-2/3 remain conditional candidates under fit §8. Do not
+  infer a fix from “only 16 bytes over,” and do not infer fit exhaustion
+  from this diagnostic.
 
 ### 3.4 What the surviving core would need (bounded, not estimated)
 
@@ -286,35 +324,37 @@ the measurement protocol in §7, not a forecast in this document.
 
 ### 4.1 Route (c) first, because the evidence re-examines it (plan §2.2)
 
-The landed plan rejected splitting #16009 into per-check issues
-because it would “fragment one mechanism (one gate, one map, one ABI
-append) into five landings that each re-pay the verifier measurement
-and the map-wiring cost, and would let partial parity ship silently”.
-The measured evidence changes the premises of that argument in one
-respect and confirms it in the decisive respect.
+The landed plan rejected splitting #16009 into per-check issues because
+it would “fragment one mechanism (one gate, one map, one ABI append)
+into five landings that each re-pay the verifier measurement and the
+map-wiring cost, and would let partial parity ship silently.” The
+diagnostic record does not prove a geometry-first subset infeasible:
+the isolated packet-access rejects and stack report concern measured
+shapes, while the predeclared candidates and alternative compositions
+remain unmeasured.
 
-*What changed:* the original anti-split argument assumed a shared cost
-(one mechanism) that splitting would wastefully re-pay. The slices show
-the three arms do not share a failure: they fail on three different
-resources (§3.3). So “each split re-pays the same tax” is no longer
-the right picture; the arms are more independent than the plan assumed.
+**Per-check issue splitting** still risks paying shared gate/map/ABI
+costs repeatedly and shipping partial parity, but those are costs, not
+proof that every split fails. **Geometry-first split** is a distinct,
+bounded candidate: preserve only the independently specified POD
+predicate, teardrop geometry, ICMP-fragment wire-protocol check, and
+SYN-frag first-fragment check where their required fields are already
+available. Explicitly defer IPv4 options, IPv6 route facts, parser-error
+coverage, and any other non-included check to named successors. This
+could avoid the currently unmeasured legal-access requirements for IPv4
+TLVs and IPv6 Routing headers; its verifier cost, semantic boundary,
+worker-oracle cells, and successor ownership have not been measured or
+negotiated. A clean split would need an explicit scope amendment, exact
+per-cell transfer/retention, successor issues filed before the parent
+issue closes, and its own complete-object K1 gate. This is not
+authorized or rejected by the current evidence.
 
-*What did not change, and decides it:* independence of failure does not
-create feasibility of parts. Each per-check successor would still have
-to clear the *same* three gates on its own slice — a legal packet
-access, a fitting state count, ≤512-byte chains — and zero of the three
-arms currently clears its own gate in isolation. Splitting therefore
-does not convert one infeasible object into several feasible ones; it
-converts one infeasible object into several infeasible, separately
-reviewed ones, each still owing the one gate/map/ABI mechanism the plan
-refused to fragment, and each able to ship partial parity (the plan's
-example: POD without ICMP-fragment) under its own issue number. The
-evidence thus strengthens §2.2's conclusion by a new route: even
-granting arm independence, there is no arm to land first. Route (c) is
-rejected. Its one useful insight — that arms can be *decided*
-independently — is preserved inside route (b), which removes exactly
-one independently-decidable family (Q1, with independent mask bits by
-design, plan §4.4) without fragmenting the mechanism.
+The rank-1 original-scope measurements and the no-Q1 diagnostic do not
+directly price that geometry-first design. If the diagnostic cannot
+support route (b), step 0 must compare this candidate on equal evidence
+with bounded selective redirect and plan-kill; do not infer its failure
+from the first extraction shapes, and do not infer its feasibility from
+their lower partial counts.
 
 ### 4.2 Route (a): redirect-to-worker for host-bound packets
 
@@ -322,15 +362,22 @@ design, plan §4.4) without fragmenting the mechanism.
 can be evaluated, because the word hides three different contracts:
 
 - **R1 — redirect only traffic that would trip a screen.** Impossible
-  as stated: tripping is what the shim cannot yet compute (that is the
-  whole problem). Any shim-side pre-filter cheap enough to fit is a
-  coarser screen (e.g., “has IPv4 options”, “is a fragment”, “TCP”),
-  which redirects a superset including clean traffic. The contract is
-  then really R2 for that superset.
+  as stated: tripping is what the shim cannot yet compute. A **bounded
+  selective redirect** is a different candidate, not R1: for example,
+  a cheap, explicitly tested classifier could redirect a superset such
+  as packets with IPv4 options or IPv6 extension headers at selected
+  terminal arms, leaving other traffic on the shim. That may avoid a
+  particular illegal variable-length read, but it still requires
+  proving the classifier is safe, defining false-positive traffic and
+  worker-health behavior, preserving row/zone semantics, and evaluating
+  each selected arm. Its packet-read legality, verifier cost, worker
+  availability contract, and coverage boundary are unmeasured. It must
+  be assessed as its own architecture, not dismissed as “impossible”
+  because exact-trip prefiltering is unavailable.
 - **R2 — redirect all parsed-IP traffic at the 11 terminal arms to the
   worker (AF_XDP/XSK or CPUMAP-to-worker), kernel-pass only what the
-  worker (or a timeout/default) returns.** This is the honest form of
-  the proposal and the one evaluated below.
+  worker (or a timeout/default) returns.** This is the broad proposal
+  evaluated below.
 - **R3 — redirect only on worker-healthy signal, kernel-pass when the
   worker is unhealthy.** This makes screening availability-dependent by
   design: precisely when the worker is down, malformed host-bound
@@ -383,190 +430,182 @@ which worker path the packet lands on and why its verdict equals the
 screening intent — a new qualification boundary between transit and
 local that does not exist today.
 
-**Verifier arithmetic for (a).** Redirect is sometimes sold as “free”
-because it deletes shim logic. The measured table does not support
-“free”: the sink alone moved the total by −23,593 (§3.2), so deleting
-the gate while adding redirect plumbing, health gating, and per-arm
-re-qualification has an unpredictable sign. More importantly, (a) does
-not retire the verifier problem, it relocates it: redirect decisions at
-11 arms plus fail-safe behavior still live in the same ≤850,000 object,
-now with availability-critical code paths that must be verified in both
-worker-healthy and worker-absent configurations. No measured slice
-prices this. Route (a) is therefore rejected *for now* — not as
-unsound in principle, but as the largest contract change proposed to
-solve a budget problem it does not measurably solve. §8 keeps it as
-the named escalation if route (b)'s core also fails, which is where
-the landed plan puts it.
+**Verifier and architecture comparison for (a).** The measured table
+does not price redirect, whether broad or selective. A selective design
+could reduce the number of shim-side packet reads and redirect only a
+classifier-defined superset, but its classifier still must be verifier
+legal and its false-positive traffic inherits the worker availability
+contract. Before ranking it against route (b), specify the selected
+arms, exact prefilter inputs, worker path, health/overload default,
+transit-vs-local behavior, and BPF/worker acceptance; then measure the
+complete object. Broad redirect adds every terminal arm and the same
+availability obligation. No measured slice establishes either design
+as “free,” infeasible, or cheaper. Neither is the current recommendation,
+but both remain viable step-0 candidates if the ordered evidence does
+not support (b).
 
 ### 4.3 Route (d): PLAN-KILL the shim-screen approach, with successors
 
 Plan-kill is the honest route if the approach — “replicate worker
-stateless predicates at terminal kernel-PASS arms” — is itself wrong.
-The evidence does not show that. It shows three *fact-extraction*
-shapes failing inside an approach whose plumbing (sink, gate placement,
-zone resolution, counter ABI append) is unrefuted and whose bypass is
-verified (§2.1). Two of the three arms fail on access legality, which
-is a property of the extraction idiom, not of the decision to screen at
-the shim; the third fails by 16 bytes of stack. Killing the approach
-on this evidence would be killing it for the sins of its first
-extraction shapes — while leaving the verified bypass open and forcing
-successors to re-litigate the scope negotiation (which predicates,
-which arms, which counters) that the landed plan already settled and
-three seats already reviewed.
+stateless predicates at terminal kernel-PASS arms” — is itself shown
+wrong or not worth its measured constraints. The current diagnostics do
+not establish that: they reject particular extraction shapes, while
+the verifier-fit rank-1 candidates were not run. Nor does “PLAN-KILL”
+close the user-visible defect. It rejects this proposed design and
+requires named successor ownership for the still-open bypass and
+acceptance; it cannot be recorded as a fix or used to close #16009.
 
-Plan-kill also has a bookkeeping cost its proponents must state: S1–S6
-are written against the shim-screen scope and would need re-homing,
-and the “successors carrying the security requirement” would, on the
-evidence available, be routes (a), (b), or (c) renamed — since this
-document's analysis is the successor analysis either way. Route (d) is
-therefore rejected *as premature*, with an explicit kill criterion in
-§7.4 that converts this re-plan to (d) if the surviving core also
-fails: at that point two successive scope levels of the same approach
-will have failed measurement, and “the approach is wrong for this
-object” becomes the evidenced claim rather than a conjecture.
+If the rank-1 attempts and no-Q1 diagnostic fail to support the
+recommended route, route (d) remains a genuine choice alongside
+selective redirect and geometry-first split. A plan-kill decision must
+state which security requirement is reassigned to which successor,
+who owns it, and which tests establish eventual disposition. It is not
+evidenced merely by the three diagnostic signatures, nor can the
+preserved review negotiation be treated as a substitute for successor
+filing.
 
 ### 4.4 Why (b) survives the same scrutiny
 
-Route (b) is not “the least bad option”; it has positive evidence the
-others lack:
+Route (b) remains a conditional candidate, not the conclusion of the
+measurements already in hand:
 
-1. **It removes a semantically separable family.** Q1's four checks
-   are independent mask bits by design (plan §4.4: bits 5–8, “No shared
-   TCP-family bit is permitted”), with a self-contained acceptance
-   artifact (C23: 16 masks × 4 packets × 2 families = 128 outcomes
-   against the worker oracle). Removing them does not entangle the
-   geometry/source-route/parse-error core, and restoring them is a
-   mask-and-trip-bit addition, not a redesign.
-2. **It is the only route the governing documents pre-negotiated.**
-   Plan §9-K1 prescribes it verbatim if Q1 is removed (“file conditional
-   successor S7 … transfer C23's … matrix … #16009 cannot claim those
-   checks until S7 passes”), and §10 fixes S7's exact title, owner, and
-   acceptance. The verifier-fit §8 stop rule repeats it (“the plan's
-   reviewed S7 route if Q1 is explicitly removed”). A three-seat review
-   of this document is therefore reviewing execution of an agreed
-   contingency, not a novel scope invention.
-3. **Its next measurement is interpretable.** A complete object without
-   Q1 either passes K1 (the core is real and S7 becomes a bounded
-   addition problem) or fails (the escalation in §7.4 fires with a
-   clean conscience — no second silent narrowing is available, because
-   §6 removes everything removable in one act).
-4. **It does not touch the terminal-arm contract.** All 11 arms, zone
-   resolution, degraded/ctrl-disabled behavior, and the worker's role
-   are unchanged. If (b) is wrong, it is wrong as a verifier number,
-   recoverable by S7 or by escalation — not as a production
-   availability incident.
+1. **It removes a semantically separable family.** Q1's four checks are
+   independent mask bits by design (plan §4.4: bits 5–8, “No shared
+   TCP-family bit is permitted”), and their C23 oracle matrix is
+   separable from the geometry/source-route/parse-error facts. This
+   supports a clean transfer boundary, not a claim that Q1 removal
+   improves the verifier result.
+2. **It is the only reduction already pre-negotiated.** Plan §9-K1 and
+   §10 specify S7 and the transfer of C23's Q1 matrix. That makes this
+   reduction easier to record honestly than inventing a new scope
+   amendment; it does not prove that a no-Q1 object passes or that other
+   candidates are worse.
+3. **Its premise is falsifiable before adoption.** Rank-1 shapes run
+   under original scope; a failure makes the diagnostic gate reachable.
+   The no-Q1 complete-object diagnostic asks whether a full retained-core
+   object can meet the per-build K1 thresholds; it does not estimate an
+   instruction saving or establish final K1. A diagnostic rejection
+   means route (b) has no demonstrated viable object and cannot be
+   adopted. A pass is evidence for the route, but not K1 acceptance or
+   permission to land: G0, the identical-source confirmation, and
+   Class-R remain required.
+4. **It preserves terminal-arm behavior.** If selected, all 11 arms,
+   zone resolution, degraded/ctrl-disabled behavior, and the worker's
+   role remain unchanged. The cost is explicit: until S7 passes,
+   host-bound kernel-PASS traffic is not screened for SYN+FIN, no-flag,
+   FIN-without-ACK, or WinNuke at the shim. Those Q1 checks are never
+   counted as #16009 parity during that interval.
 
-The cost of (b) must be stated as plainly as its virtues: until S7
-lands, host-bound kernel-PASS traffic is **not** screened for SYN+FIN,
-no-flag, FIN-without-ACK, or WinNuke at the shim, even though the
-worker would screen the same packet on the flow path. That is a real,
-named security-coverage reduction relative to the landed plan's
-ambition — accepted temporarily, owned by S7, and never describable as
-parity. §6's wording exists to make that sentence unavoidable wherever
-#16009's scope is stated.
+Route (b) wins only if the ordered evidence and the owner's explicit
+scope decision support it. If the diagnostic does not demonstrate a
+Q1-related improvement, the document does not recommend spending the
+single pre-negotiated reduction; step 0 compares the alternatives.
 
 ---
 
-## 5. Surviving core under route (b) (what #16009 would still claim)
+## 5. Retained core if route (b) is explicitly adopted
 
-Unchanged from the landed plan §2 except Q1's removal:
+This is the exact claim boundary only after the §7 pre-adoption gates
+support route (b), the owner records §6.1, and S7 is filed. Until then,
+the original scope remains governing; rank-1 work runs with Q1 intact.
 
-1. Ping-of-death geometry; teardrop *geometry* only (with the plan's
-   C1 honesty constraint: C1 proves geometry, never overlap; overlap
-   remains S1).
-2. ICMP-fragment (wire protocol); SYN on a first fragment (SYN-frag);
-   the worker's screen-state-gated IPv4 tiny-first-fragment
-   flags-unknown error — noting the tiny/capture-unknown distinction
-   (plan §5.3) is *not* Q1 and does not leave with it.
-3. Source-route: IPv4 LSRR/SSRR and IPv6 Routing type 0/1 — subject to
-   §3.4 conditions 2–3: these facts currently have no measured legal
-   extraction shape, so claiming them remains gated on finding one
-   (this document does not pretend Q1 removal fixes `off=34/off=56`).
+Retained in #16009:
+
+1. Ping-of-death geometry; teardrop *geometry* only (C1 proves geometry,
+   never overlap; overlap remains S1).
+2. ICMP-fragment (wire protocol); SYN on a first fragment
+   (SYN-frag); the worker's screen-state-gated IPv4 tiny-first-fragment
+   flags-unknown error. Tiny-declared and capture-unknown are separate
+   facts; the capture-unknown fact and its pointer-valued-end witness
+   remain in #16009.
+3. Source-route: IPv4 LSRR/SSRR and IPv6 Routing type 0/1, subject to
+   finding a legal extraction shape. The Q1 cut does not fix the
+   `off=34/off=56` access rejects.
 4. Screen-state-gated fail-closed extraction errors: malformed IPv4
-   options; second readable non-atomic IPv6 Fragment header.
-5. The mechanism: one outlined gate at the 11 terminal arms only,
+   options and a second readable non-atomic IPv6 Fragment header.
+5. The mechanism: one outlined gate at all 11 terminal arms only,
    scratch-laundered packed word, raw-ingress `u16` zone-mask map,
    append-only aggregate `host_screen_drop`/`host_screen_alarm`
-   (reasons 21/22), zero widening of `ParsedPacket`/`ExtWalk`.
+   (reasons 21/22), and zero widening of `ParsedPacket`/`ExtWalk`.
 
-Explicitly still not claimed (unchanged residue): true fragment
-overlap (S1), port-scan/IP-sweep (S2), SYN-cookie semantics (S3),
-zone/reason event and counter fidelity (S4), GRE-inner screening (S5),
-claimed-zone terminal-pass parity (S6), plus — new under route (b) —
-the Q1 family (S7). Flood rate meters remain nft's, not the shim's.
+Explicitly not claimed: true fragment overlap (S1), port-scan/IP-sweep
+(S2), SYN-cookie semantics (S3), zone/reason event and counter fidelity
+(S4), GRE-inner screening (S5), claimed-zone terminal-pass parity (S6),
+and — only if route (b) is adopted — the Q1 family transferred to S7.
+Flood rate meters remain nft's, not the shim's.
 
-**A necessary warning against over-reading (b).** Removing Q1 does not
-make the surviving core fit. The IPv4 and IPv6 arms fail on access and
-cap for reasons independent of TCP (§3.3), and the TCP slice's stack
-failure includes the tiny-declared computation that stays. Route (b)
-is therefore a *scope honesty* act plus a *surface reduction*, sequenced
-before further bounded fitting work — not a prediction that the core
-passes K1. If the core then fails, §7.4 fires. Any seat asked to
-approve (b) as “the fix that makes K1 pass” should reject that framing
-and approve or reject (b) as what it is.
+Removing Q1 does not make the retained core fit. The IPv4 and IPv6
+facts still need legal access shapes; the TCP stack report includes
+tiny-declared work that remains. The rank-1 and no-Q1 diagnostic gates,
+not a point estimate or the route label, decide whether this scope is
+worth adopting.
 
 ---
 
 ## 6. Exact scope-change wording for route (b)
 
-The following text is proposed verbatim. “Adopting route (b)” means:
-(i) the #16009 issue body (or its governing scope comment) is amended
-by inserting §6.1; (ii) the landed plan's §2 item 6, §4.4 decision, and
-§9-K1 are annotated as superseded *to the extent stated in §6.1* (the
-plan file itself is edited only through the normal reviewed-docs
-process — this re-plan does not edit it); and (iii) S7 is filed with
-§6.2's title and acceptance in the same act. No other wording change
-is authorized by this re-plan.
+This wording is proposed only if the §7 rank-1 and pre-adoption
+diagnostic gates support route (b), and the owner selects it after
+three-seat review. “Adopting route (b)” means: (i) the #16009 issue
+body (or its governing scope comment) is amended by inserting §6.1;
+(ii) the landed plan's §2 item 6, §4.4 decision, and §9-K1 are
+annotated as superseded to the extent stated in §6.1 (the plan file
+itself is edited only through the normal reviewed-docs process); and
+(iii) S7 is filed with §6.2's title and exact transferred acceptance
+in the same act. No other scope change is authorized here.
 
-### 6.1 Scope-change text (for the #16009 record)
-
-> **Scope change (adopted by the #16009 owner after three-seat review of
-> `docs/research/16009-replan-design.md`):** #16009 no longer includes
-> the Q1 TCP-flag family — SYN+FIN, no-flag, FIN-without-ACK, and
-> WinNuke — on the shim kernel-PASS path. These four checks, their
-> independent mask bits (profile-mask bits 5–8), and their acceptance
-> matrix (C23: 16 masks × 4 packet shapes × IPv4/IPv6 = 128 outcomes
-> against the worker oracle) are transferred to successor S7,
+> **Conditional scope change (only after the §7 gates pass and the owner
+> selects route (b)):** #16009 no longer includes the Q1 TCP-flag family
+> — SYN+FIN, no-flag, FIN-without-ACK, and WinNuke — on the shim
+> kernel-PASS path. The four predicates, their independent profile-mask
+> bits (bits 5–8), and only their acceptance artifacts listed as
+> “transferred” in §7.2 are transferred to successor S7,
 > `shim: retain independent TCP-flag screen family if #16009 verifier
-> ceiling rejects Q1`. Until S7 passes, #16009 MUST NOT be described
-> as providing, and its tests MUST NOT claim, host-bound TCP-flag
-> screen parity. The IPv4 tiny-declared / capture-unknown facts and
-> SYN-frag are not part of Q1 and remain in #16009's scope. All other
-> #16009 scope (geometry, ICMP-fragment, source-route, gated
-> extraction errors, the 11-arm gate, reasons 21/22) is unchanged.
-> This change was made because the K1 stop rule fired (verifier-fit
-> §8); it is a coverage reduction, recorded here, not a reinterpretation
-> of the original requirement.
+> ceiling rejects Q1`. Until S7 passes, #16009 MUST NOT be described as
+> providing, and its tests MUST NOT claim, host-bound Q1 screen parity.
+> The IPv4 tiny-declared and capture-unknown facts, SYN-frag, and all
+> non-Q1 portions of C22/C23 remain in #16009. The Q1-only profile's
+> zero-core-mask row-presence witness and row-presence-gated extractor
+> error drops also remain in #16009; they are not Q1 screen coverage.
+> All other #16009 scope (geometry, ICMP-fragment, source-route, gated
+> extraction errors, all 11 terminal arms, reasons 21/22) is unchanged.
+> This is a recorded coverage reduction, not a claim that the original
+> verifier-fit §8 sequence ran or exhausted its candidates. It is
+> considered only after the original-scope rank-1 attempts and the
+> pre-adoption no-Q1 complete-object diagnostic specified in §7.
 
 ### 6.2 S7 filing (title and acceptance, transferred not paraphrased)
 
 - **Title (exact, from landed plan §10):** `shim: retain independent TCP-flag screen family if #16009 verifier ceiling rejects Q1`
 - **Owner (from plan §10):** userspace-xdp shim plus Go mask/ABI
   maintainers.
-- **Acceptance (from plan §§9–10, binding):** restore the four
-  independent Q1 bits and C23's 16-mask × 4-packet Q1 matrix for IPv4
-  and IPv6 (128 outcomes), including mask bits and the worker oracle;
-  do not report those checks as completed by #16009. This re-plan adds
-  one acceptance clause the plan implies but does not state: S7's
+- **Acceptance (transferred artifacts only):** restore the four
+  independent Q1 trip predicates and profile-mask bits 5–8; reinstate
+  the Go-builder Q1-mask/16-profile acceptance; and pass the Q1-only
+  acceptance components explicitly transferred in §7.2: the C22
+  no-flag-only leg (not its capture/declared facts or syn-frag-only
+  leg), C23's 16 masks × 4 Q1 packets × IPv4/IPv6 = 128 worker-oracle
+  outcomes (not C23's SYN-frag checks), C26's SYN+FIN drop assertion
+  on session-hit PASS, and C35's SYN+FIN alarm assertion. Restore Q1
+  bits in conservative emitted rows as part of S7. S7 owns exactly
+  these Q1 artifacts; it does not own retained capture-unknown,
+  SYN-frag, core-mask, row-presence, or extractor-error coverage.
+  Do not report transferred checks as completed by #16009. S7's
   complete object must independently satisfy K1 (≤850,000, floor PASS,
-  override false, identical-source confirmation), because S7 re-adds
-  exactly the surface whose removal §6.1 records.
+  override false, identical-source confirmation).
 
 ### 6.3 What §6 deliberately does not do
 
-It does not remove source-route, malformed-options, duplicate-Fragment,
-tiny-declared, or SYN-frag coverage, even though §3 shows the IPv4/IPv6
-extraction shapes are currently dead. Those predicates stay in scope
-with their fitting problem *named as open* (§3.4), because (i) there is
-no pre-negotiated successor text for them equivalent to S7, and
-inventing one inside this re-plan would exceed its mandate; and
-(ii) removing them would cross the line from “defer one separable
-family” to “abandon the screen”, which is route (d) and must be chosen
-as route (d), in the open, if it is chosen. If the three seats conclude
-the IPv6 routing/duplicate facts or the IPv4 options facts must also
-leave #16009, the correct act is to reject route (b) and select (d)
-with successors drafted for that purpose — not to extend §6.1 by
-analogy.
+This scope-change proposal does not transfer source-route,
+malformed-options, duplicate-Fragment, tiny-declared, capture-unknown,
+SYN-frag, or the zero-core-mask row-presence witness, even though some
+extraction shapes have not yet cleared verifier access. Those retained
+predicates stay in scope with their fitting problem named as open
+(§3.4). Route (b) is exactly a Q1-only reduction. If the owners or
+reviewers conclude that other facts must leave #16009, reject route (b)
+and compare geometry-first split, selective redirect, or plan-kill
+openly; do not extend §6.1 by analogy or silently assign new artifacts
+to S7.
 
 ---
 
@@ -578,83 +617,214 @@ has a definite object. “Verifier run” everywhere means the exact pinned
 command of verifier-fit §8 with `XPF_SHIM_ALLOW_LOW_HEADROOM=0`, in
 detached scratch worktrees, never installing a generated object.
 
-### 7.1 Gates (in order; each gate stops the sequence on failure)
+### 7.1 Gates (in execution order)
 
-- **G0 — scope gate.** §6.1 adopted and S7 filed (§6.2) *before* any
-  code or verifier work under the reduced scope. Hostile-review of this
-  document converges (three seats) on route (b) or the sequence does
-  not start. Evidence: the amended issue record and the S7 issue.
-- **G1 — legality gate (per arm, isolated, at most the predeclared
-  shapes).** For IPv4 and IPv6 respectively, an isolated slice must
-  first *not reject on packet access*. An access reject stops that arm;
-  analogy-driven fourth variants are prohibited (verifier-fit §8's cap
-  discipline carries over: bounded attempts, no cosmetic retries).
-  TCP's gate at this stage is a stack report (every frame and every
-  combined chain ≤512 bytes) with Q1 trip computation absent and
-  tiny/capture-unknown semantics intact, including the pointer-valued-
-  end witness the amendment requires (fit §6: absolute `data`/`data_end`,
-  both divergence directions asserted).
-- **G2 — semantic gate.** Host twins / worker-oracle cells for the
-  surviving core pass with C-cell meanings unchanged (C22 still a
-  disclosed divergence, C18/C19 still earlier parse-fail controls, C1
-  still geometry-only). No cell is weakened to fit; a semantic failure
-  stops the arm (fit §8).
-- **G3 — K1 gate (the only number that counts).** Complete object:
-  sink + gate + surviving arms at all 11 call sites, mask map, reason
-  mirrors. Pass requires ≤850,000, floor PASS,
-  `override_consumed: false`, and an identical-source confirmation
-  build also passing (fit §8 step 6). A result in 830,000–850,000
-  additionally requires the plan's written headroom-recovery follow-up
-  (plan §9-K1). Slice or partial-object numbers are not K1 evidence
-  and must not be reported as such.
-- **G4 — Class-R gate.** Only after G3: C1–C35 `BPF_PROG_TEST_RUN`
-  cells (minus the Q1/C23 cells transferred to S7, which must be
-  *absent-by-transfer* in #16009's record, not failing) and the
-  dual-stack smoke in the Class-R VM lane (`make vm-test-root`), which
-  the lane log records as NOT-EXAMINED on the workstation.
+No run is authorized by this research revision itself. After hostile review
+authorizes the sequence, use the pinned command in verifier-fit §8 with
+`XPF_SHIM_ALLOW_LOW_HEADROOM=0`, detached scratch worktrees, and no
+installation. Diagnostic builds remain diagnostics and never establish
+production or acceptance results.
 
-### 7.2 Kill criteria for route (b) (any one kills the route)
+1. **G1 — original-scope rank-1 attempts (first, before any G0).** Run
+   the first three predeclared isolated shapes, under the ORIGINAL
+   #16009 scope with all Q1 checks intact, in fit §9 / §8 order:
+   V6-1, then V4-1, then TCP-1. This is at most 3 of the existing 13
+   authorized runs; run each only once, with the fit §8 host corpus
+   before its verifier attempt. Record each exact rejection layer,
+   signature, instruction/state count, link result, and for TCP both
+   per-function and combined-chain stack. TCP-1 passes its stack gate
+   only when every frame and the combined chain are each ≤512 bytes.
+   Any packet-access rejection, 1,000,001 cap rejection, link failure,
+   or per-frame/combined stack value >512 is a measured failure for
+   that shape, not a pass and not by itself proof that the whole arm's
+   remaining predeclared shapes were exhausted. If all three rank-1
+   shapes pass their gates, do not adopt §6.1 or file S7; continue the
+   original-scope verifier-fit §8 protocol with Q1 intact.
+2. **G2 — pre-adoption no-Q1 complete-object diagnostic.** This gate is
+   reachable before G0 only if at least one of the three G1 rank-1
+   attempts fails and the owner is considering route (b). If all three
+   pass, continue the original-scope verifier-fit protocol; a later
+   full-scope failure without a G1 rank-1 failure is a return-to-step-0
+   decision, not permission to adopt §6.1 under this re-plan. Build one
+   diagnostic complete object with only Q1 computation/mask coverage
+   removed; retain all other required facts, gate, map, mirrors, and all
+   11 terminal arms. Use the exact rank-1 shape set from G1; do not
+   invent or silently substitute a shape. Record the complete verifier
+   outcome and rejection layer, using at most one of fit §8's three
+   complete-object compositions (not a 14th run). This pre-adoption
+   object is the narrow exception to the no-reduced-scope-work rule: it
+   is a scratch diagnostic only, not a scope act, acceptance run,
+   Class-R result, or landing candidate. Route (b) is supported only
+   if this complete no-Q1 object meets the first-build K1 thresholds
+   (≤850,000, floor PASS, `override_consumed: false`). If it rejects
+   at any layer, including packet access, cap, link, or stack, **do not
+   adopt §6.1**: route (b) has not demonstrated a viable complete object
+   and §7.4 applies.
+   This makes the no-Q1 premise falsifiable before scope adoption.
+3. **G0 — scope adoption (only after G2 passes and the owner chooses
+   route (b)).** After three-seat convergence, amend the issue/scope
+   record with §6.1 and file S7 with §6.2's exact transferred
+   acceptance in the same act. Do this before any further reduced-scope
+   work, confirmation build, Class-R cell, or production landing. If
+   G1's three attempts all passed, G2 is not a reason to narrow; the
+   original-scope protocol continues and G0 does not occur.
+4. **G3 — identical-source K1 confirmation.** The passing G2 object is
+   only the first complete-object measurement. After G0, rebuild the
+   identical source hashes once; it must again report ≤850,000, floor
+   PASS, and `override_consumed: false`. Any source change invalidates
+   the pair and must stay within fit §8's existing composition and
+   confirmation caps. A result in 830,000–850,000 also requires the
+   plan's written headroom-recovery follow-up. Slice or partial-object
+   numbers are never K1 evidence.
+5. **G4 — Class-R and semantic acceptance.** Only after both complete
+   K1 measurements pass, run the retained host/parser corpus and Go
+   builder cells described after the matrix, all retained/replaced
+   `BPF_PROG_TEST_RUN` cells in the matrix, and the dual-stack smoke in
+   the Class-R VM lane (`make vm-test-root`). The lane log says these
+   cells were NOT-EXAMINED on the workstation. Transferred Q1 assertions
+   must be absent from #16009 acceptance because they belong to S7, not
+   reported as passing or failing there.
 
-1. **Scope kill:** the owner will not adopt §6.1 verbatim-or-edited-in-
-   the-open, or will not file S7 concurrently. (Route (b) without its
-   honesty act is silent narrowing and is prohibited, not merely
-   discouraged.)
-2. **Core kill:** the surviving core fails G3 (reject, >850,000, or any
-   consumed override), after G1/G2 have passed for the arms it
-   contains. Consequence is §7.4, not a second scope reduction.
-3. **Arm kill:** IPv4 or IPv6 cannot produce a non-access-rejecting
-   isolated shape within the bounded attempt discipline. The route
-   then cannot claim its §5 core; see §7.4.
-4. **Contract kill:** fitting the core is shown to require widening
+### 7.2 Cell-by-cell acceptance disposition
+
+“Retained” means #16009 still requires the assertion as written in
+substance. “Replaced” means preserve the branch/arm or core acceptance
+but change a Q1-specific trigger to an in-scope trigger. “Transferred”
+means only the stated Q1 assertion moves to S7; any other listed
+subassertion stays in #16009.
+
+| Cell | #16009 disposition after route (b) |
+|---|---|
+| C1 | **Retained:** teardrop geometry and its transit control; geometry only, never overlap. |
+| C2 | **Retained:** LSRR enabled drop and disabled pass. |
+| C3 | **Retained:** wire-protocol ICMP-fragment behavior and UDP control. |
+| C4 | **Retained:** POD extent strictly greater than 65,535 drops; equality passes. |
+| C5 | **Retained:** SYN-frag first-fragment drop and whole-SYN control. |
+| C6 | **Retained, fixture updated:** tiny-declared/error row-presence behavior, using builder-valid zero-mask and core-only conservative rows; Q1 bits are absent from the conservative row. |
+| C7 | **Retained:** IPv6 RH0 drop and RH2 pass. |
+| C8 | **Retained:** legal short last-fragment pass guard. |
+| C9 | **Retained, trigger unchanged:** a core geometry trip under alarm-only disposition passes, increments alarm, and does not increment drop. |
+| C10 | **Retained:** unresolved raw-zone geometry uses the explicit fail-closed policy; no tiny/error-only drop is claimed for unresolved zone. |
+| C11 | **Retained:** LAND owns the LAND drop, not host-screen counters. |
+| C12 | **Retained:** clean local TCP ACK has no screen counter. |
+| C13 | **Retained:** selected binding-not-ready local/control arm screens C1; false/transit branch remains unchanged. |
+| C14 | **Retained:** selected ctrl-disabled `PassLocalControl` arm screens C1; non-adjudicated input remains its existing drop. |
+| C15 | **Retained:** session `PASS_TO_KERNEL` with C1 has exactly one shim drop; no worker result is asserted. |
+| C16 | **Retained:** one atomic IPv6 Fragment header passes. |
+| C17 | **Retained:** `[atomic][non-atomic offset>0]` governing-header selection; no duplicate-header claim. |
+| C18 | **Retained:** v6 tiny first-fragment remains an earlier `L3 PARSE_FAIL` control, not host-screen parity. |
+| C19 | **Retained:** zero-payload-length remains an earlier `L3 PARSE_FAIL` control, not host-screen parity. |
+| C20 | **Retained, fixtures updated:** malformed IPv4 TLV before/after valid LSRR drops on row presence. Use the zero-mask flood-only row, a core-only `BadNumericUnresolved` row, and the separate Q1-only zero-core-mask row witness below. |
+| C21 | **Retained, fixtures updated:** second readable non-atomic Fragment notification/drop and exact duplicate chain; use builder-valid zero-mask, core-only conservative, and Q1-only zero-core-mask row fixtures. |
+| C22 | **Split:** retain the actual-capture fact from `data_end.checked_sub(data)`, both-direction pointer-valued-end parser witness, and `tcp_flags_capture_unknown=1`; keep the selected session-miss-local BPF pass with an actual pointer-valued end and syn-frag-only row, plus its host/worker control. Transfer only the no-flag-only Q1 assertion to S7; that leg remains a disclosed divergence, never parity. Keep `tiny_declared_unknown=0` independent. |
+| C23 | **Split:** transfer the Q1-only 16 masks × 4 Q1 shapes × IPv4/IPv6 = 128 worker-oracle outcomes and independent-bit assertions to S7. Retain the SYN-frag selected known first-fragment assertion and its relevant whole-SYN, first-fragment-ACK, and non-first-SYN-sentinel controls in #16009. The WinNuke-specific URG\|ACK-to-139 test transfers; it is not retained as a core check. |
+| C24 | **Retained:** WG selected-pass LSRR drop and WG-admission/transit control. |
+| C25 | **Retained:** early-filter multicast/broadcast selected-pass policy-extension cells and non-selected controls; not worker parity. |
+| C26 | **Replaced + split:** keep the session-hit `PASS_TO_KERNEL` arm and non-selected/transit control in #16009, but replace SYN+FIN with an in-scope LSRR or geometry trigger and assert that core drop. Transfer only the SYN+FIN selected-pass drop assertion to S7. |
+| C27 | **Retained:** NAT-external NDP selected pass, complete-fragment predicates, and hop-limit control. |
+| C28 | **Retained:** proxy-NDP selected pass and disjoint-map/hop-limit control. |
+| C29 | **Retained:** ICMP-to-interface-NAT selected local pass with LSRR and transit control. |
+| C30 | **Retained:** session-miss local selected pass with C1/LSRR and link-local exact-local/non-owned controls. |
+| C31 | **Retained:** interface-NAT tunnel selected pass with whole ESP+LSRR and transit control. |
+| C32 | **Retained:** GRE-inner selected pass on outer LSRR and redirect controls; inner parity remains S5. |
+| C33 | **Retained:** binding-not-ready selected local/control drop and transit-false accounting control. |
+| C34 | **Retained:** ctrl-disabled selected `PassLocalControl` drop and transit/non-adjudicated controls. |
+| C35 | **Replaced + split:** retain `BadNumericUnresolved` alarm-bit preservation and alarm-without-drop for an ordinary **core** trip (use LSRR or geometry), plus parse-error drop-on-row-presence despite alarm. Transfer only the SYN+FIN alarm assertion to S7. |
+
+**Host corpus and Go acceptance.** Keep all host/parser corpus
+assertions for retained checks above, including the absolute-pointer
+C22 helper witness, independent capture-vs-declared facts, SYN-frag
+tests, C20/C21 malformed/error rows, and the C23 SYN-frag controls.
+Retain the plan's separate worker-stage assertion for an actually
+worker-bound malformed twin: assert `batch.screen_drops` and the
+per-reason counter where exposed; assert events only when the harness
+observes the stream. It is not a worker result inferred from any BPF
+test and is not transferred to S7. Transfer only Q1 predicate/oracle
+cases, Q1 trip bits, and the C22/C23/C26/C35 Q1 subassertions explicitly
+identified above. In Go, #16009 keeps builder coverage for all retained
+core bits, map capacity, row presence, collision/nil cases, and
+`AlarmWithoutDrop` for both defined-but-unresolved missing and inert
+references; remove the 16-Q1-mask/boolean acceptance from #16009 and
+assign exactly that Q1 mask acceptance to S7. `BadNumericUnresolved`
+conservative rows in #16009 carry all in-scope core defaults but zero
+Q1 bits. `AlarmWithoutDrop` still allows ordinary core trips to
+alarm/pass; extractor errors still drop whenever a screen row exists,
+regardless of alarm or ordinary mask.
+
+**Required Q1-only profile row-presence witness (retained).** Add a
+builder/BPF witness for a valid profile whose only configured checks
+were Q1: after the route-(b) cut the Go builder MUST still emit a
+present row with a zero core mask (and its correct alarm value), rather
+than treating the row as absent. With that row present, C20 malformed
+IPv4-options and C21 duplicate non-atomic-header extractor errors MUST
+drop by row presence even though the ordinary core mask is zero; with
+the row absent, neither error gets a special screen-state drop. This
+proves preservation of the worker's row-presence gate without claiming
+Q1 screening. It is a #16009 acceptance artifact, not S7 coverage.
+
+**S7 owns exactly the transferred Q1 artifacts:** the four independent
+predicates and bits 5–8; their Go mask/profile acceptance; the C23
+128-outcome Q1 matrix; the C22 no-flag-only assertion; C26's original
+SYN+FIN session-hit drop assertion; C35's original SYN+FIN alarm
+assertion; and Q1 bits in emitted conservative rows. S7 does **not**
+own C22 capture/declared facts, C23 SYN-frag checks/controls, SYN-frag,
+the zero-core-mask row witness, core-only conservative rows, or
+row-presence-gated extraction errors. Do not transfer entire C22/C23/
+C26/C35 or all host/Go corpus wholesale.
+
+### 7.3 Kill criteria and rank-1 failure handling
+
+Criteria 1–3 and 5–6 below kill route (b). A G1 rank-1 failure is
+instead an explicit input to G2; it is not itself proof of exhaustion
+or a route-kill.
+
+1. **Scope kill:** the owner will not adopt §6.1 after G2 passes, or
+   will not file S7 concurrently. Route (b) without the explicit act is
+   silent narrowing and is prohibited.
+2. **Diagnostic kill:** the pre-adoption no-Q1 complete object rejects,
+   fails the floor, exceeds 850,000, consumes an override, or cannot be
+   built from the exact rank-1 shapes. Do not adopt §6.1; return to §7.4.
+3. **Core/confirmation kill:** after G0, the identical-source G3 build
+   fails any K1 condition. Consequence is §7.4, not a second scope
+   reduction.
+4. **Rank-1 arm-failure gate (not by itself a route-kill):** a G1 shape
+   fails on any packet-access rejection, instruction-cap rejection
+   (including 1,000,001), link failure, or stack failure. For TCP-1,
+   either a per-function frame or the combined call-chain above 512
+   bytes fails the gate; there is no TCP pass by checking only one
+   stack metric. Record each failure layer and route it to G2. This
+   does not claim that unattempted predeclared variants were measured;
+   route (b) remains eligible only if the G2 complete-object diagnostic
+   passes. If it fails, §7.4 applies.
+5. **Contract kill:** fitting the retained core requires widening
    `ParsedPacket`/`ExtWalk`, changing `MAX_EXT_HDRS`/walk rules, gating
-   transit, moving a LAND call site, or omitting a terminal arm. Those
-   are the plan's invariants; breaking one is a new plan, not route (b).
-5. **Honesty kill:** any artifact (issue text, test name, log, release
-   note) describes #16009 as providing Q1 parity before S7 passes.
-   This kills the *landing*, and the text must be corrected before the
-   sequence resumes.
+   transit, moving a LAND call site, or omitting any of 11 terminal
+   arms. That is a new plan.
+6. **Honesty kill:** any artifact describes #16009 as providing Q1
+   parity before S7 passes, or attributes current diagnostics to an
+   executed/exhausted verifier-fit §8 sequence. Correct the record
+   before work resumes.
 
-### 7.3 Bounded-work discipline carried forward
+### 7.4 Bounded-work discipline and escalation
 
-The verifier-fit §8 budget (bounded isolated attempts per arm, bounded
-complete-object compositions, one identical-source confirmation) is
-adopted as the ceiling for work under route (b), reduced by the shapes
-already measured: shapes recorded as rejected in §3.1 must not be
-rerun unchanged. This re-plan spends no verifier budget itself and
-authorizes none; it asks the seats to re-authorize a bounded envelope
-for the reduced scope, with the stop rule intact.
+G1 uses at most three of verifier-fit §8's 13 runs. G2 is at most one
+of its three complete-object compositions; G3 is the single final
+identical-source confirmation. No rank-1 shape is retried unchanged,
+no run is added beyond the 13-run cap (14 only for a changed-input
+baseline as fit §8 permits), and no cosmetic or unregistered variants
+are allowed. Any later full original-scope work follows fit §8 exactly,
+including its rejection-specific variant rules. This research revision
+itself spends no verifier budget and authorizes no run.
 
-### 7.4 Escalation if route (b) dies
-
-Exactly the landed plan's escalation, made explicit: return to
-architecture step 0 with routes (a) and (d) re-opened on equal footing,
-carrying (i) the G1–G3 evidence, (ii) §4.2's contract table as the
-starting specification for any redirect design (including the
-worker-absent default, which must be decided before any redirect code),
-and (iii) §4.3's successor drafting if (d) is chosen. Narrowing again
-(second scope removal) is prohibited by plan §9-K1 and by this
-document: after (b), the remaining choices are architectural, not
-editorial.
+If G2 cannot be built or does not meet the first-build K1 thresholds,
+do not adopt §6.1; return to architecture step 0. Compare bounded or
+selective redirect (a), geometry-first split (c), and plan-kill (d)
+using the measured evidence and requirements, not unmeasured cost
+assumptions. If route (b) was formally adopted and its confirmation
+later fails, return to step 0 with routes (a), (c), and (d) reopened;
+carry §4.2's worker-health/per-arm table, exact successor ownership,
+and the matrix in §7.2. After an adopted Q1-only reduction, no second
+scope reduction is permitted by plan §9-K1.
 
 ---
 
@@ -669,32 +839,32 @@ holding such evidence can overturn §1 by producing it.
    whose failure cause was localized). → Route (b) is unnecessary;
    land the landed plan. This is the strongest possible falsifier and
    the one the authors would most welcome.
-2. **A measured G1 pass for all three arms *with* Q1 included, plus a
-   stack report ≤512 for the TCP chain**, even without a complete
-   object. → Weakens (b)'s premise (“Q1 removal is the available
-   reduction”); the correct act becomes continuing bounded fitting
-   under the original scope rather than adopting §6.
-3. **Evidence that Q1 removal saves nothing** — e.g., a complete-object
-   diagnostic (not a slice sum) showing the no-Q1 object still rejects
-   on the same access/cap signatures. → (b) buys honesty but no
-   feasibility; if that is shown *before* adoption, prefer going
-   directly to the §7.4 escalation and weighing (a) vs (d), rather than
-   spending the one permitted scope reduction for no headroom.
-4. **A redirect design that answers §4.2's table in writing** —
-   including a worker-absent default that neither re-opens the bypass
-   nor drops local/control traffic, per-arm qualification of worker
-   flow/flowless verdicts, and a measured complete-object count.
-   → (a) becomes competitive and should be re-scored against (b) on
-   contract risk, not dismissed categorically.
+2. **All three G1 attempts pass under the original scope** without a
+   complete-object result. → Do not adopt §6.1; continue the bounded
+   original-scope fit protocol. A per-arm pass is not a complete K1
+   pass, but it removes the asserted reason for adopting Q1 reduction.
+3. **The pre-adoption no-Q1 complete-object diagnostic rejects** (for
+   example at the same access/cap layer as the original-scope diagnostic
+   inputs). → Route (b) has not demonstrated a viable complete object;
+   do not adopt §6.1. Return to §7.4 and compare selective redirect,
+   geometry-first split, and plan-kill rather than spending the
+   pre-negotiated scope reduction.
+4. **A bounded selective-redirect design** answers §4.2's worker-health,
+   per-arm and false-positive questions in writing, specifies its
+   classifier and coverage boundary, and has measured BPF/worker
+   acceptance plus a complete-object result. → Re-score route (a)
+   against route (b) and geometry-first split on the evidence, not on
+   unpriced broad-redirect costs.
 5. **Evidence the bypass is unreachable or already mitigated** on the
    11 arms (e.g., a proof that terminal-pass traffic is screened
-   elsewhere, contradicting §2.1). → (d) becomes correct: close the
-   approach, carry the (now hypothetical) requirement in successors.
+   elsewhere, contradicting §2.1). → Plan-kill (d) may be correct only
+   for the design; the defect stays open unless its acceptance is
+   assigned to named, owned successors.
 6. **A kernel/toolchain change** (verifier, bpf-linker, or pinned
-   toolchain) that legalizes a measured-dead access shape or raises
-   the effective state/stack envelope, demonstrated on the recorded
-   failing slices. → Re-run the falsifier in item 1 under the original
-   scope before adopting any scope change.
+   toolchain) legalizes a measured diagnostic shape or raises the
+   effective state/stack envelope, demonstrated on the recorded failing
+   slices. → Reassess the original-scope bounded protocol before any
+   scope adoption.
 
 Absence of these items is the current state of the record; the
 recommendation in §1 is made on the record as it stands, and §3's
@@ -708,22 +878,24 @@ against it.
 - **Coverage-window risk.** Between #16009 landing under (b) and S7
   landing, the four Q1 predicates are unscreened on host-bound
   kernel-PASS traffic. Mitigation is procedural only: §6.1's wording,
-  S7 filed concurrently (not “later”), and §7.2 kill criterion 5.
+  S7 filed concurrently (not “later”), and §7.3 kill criterion 6.
   A seat that judges the window unacceptable should reject (b) for
   that reason explicitly, rather than approve (b) and hope S7 is fast.
-- **False-progress risk.** A passing no-Q1 K1 could be misread as “the
-  verifier problem is solved”, pressuring S7 to re-add Q1 by folklore
-  tweaks. §6.2's added K1 clause and §7.3's no-rerun discipline are
-  the countermeasures; S7 inherits the stop rule, not just the matrix.
+- **False-progress risk.** A passing pre-adoption no-Q1 diagnostic is
+  only the first complete-object measurement, not a completed K1 gate
+  or proof that Q1 can later be re-added. G3's identical-source build,
+  the plan's written headroom follow-up if required, and S7's own K1
+  gate remain mandatory. S7 inherits a bounded stop discipline, not
+  just the matrix.
 - **Scope-creep-by-analogy risk.** §6.3 addresses it: further removals
-  require choosing (d) openly. Reviewers should treat any follow-on
-  “small additional trim” proposal as a route change requiring this
-  same three-seat process.
-- **Residual-core risk.** The surviving core contains the two arms
-  (IPv4 options, IPv6 observer) with the worst measured signatures.
-  Route (b) may therefore still fail at G1/G3, having spent its one
-  honest reduction. §7.4 pre-commits the escalation so that outcome is
-  a decision point, not a drift into unplanned narrowing.
+  require choosing a new route openly. Reviewers should treat any
+  follow-on “small additional trim” proposal as a route change
+  requiring the same three-seat process.
+- **Residual-core risk.** The retained core still requires IPv4 options
+  and IPv6 observer facts whose measured diagnostic signatures were
+  adverse. The rank-1 candidates are unmeasured, and even a passing
+  G2 diagnostic needs G3 confirmation. §7.4 pre-commits escalation so
+  failure is a decision point, not drift into unplanned narrowing.
 
 ---
 
@@ -736,7 +908,7 @@ against it.
 | Redirect changes terminal-arm contract; `pass_local_control` intentional (`lib.rs:1812-1816`) | Landed plan §2.1 |
 | Anti-split argument (one gate/map/ABI; partial-parity risk) | Landed plan §2.2 |
 | Q1 included, four independent bits 5–8, C23 128 outcomes | Landed plan §4.4 |
-| Zero-widening invariant; scratch laundering precedent (+298,128 / cap contrast) | Landed plan §5.1–§5.2, verifier-fit §2 |
+| Zero-widening invariant; scratch-laundering precedent (+298,128 / cap contrast) | Landed plan §5.1–§5.2; verifier-fit §2 items 1–2 |
 | Gate placement (terminal arms only; transit excluded) | Landed plan §5.5, §9-K4 |
 | K1 ceiling ≤850,000, floor PASS, no override; S7-on-Q1-removal prescription; “do not claim completion by narrowing again” | Landed plan §9-K1 |
 | S1–S6 exact titles/owners; conditional S7 title/owner/acceptance | Landed plan §10 |
