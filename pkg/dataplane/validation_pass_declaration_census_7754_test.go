@@ -129,12 +129,20 @@ func TestEveryDiscardingDataPlaneEmbedderDeclaresItsPass7754(t *testing.T) {
 		}
 		method := regexp.MustCompile(
 			`func\s+\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*?\s*` +
-				regexp.QuoteMeta(name) + `\s*\)\s+xpfValidationPass\s*\(\s*\)\s*bool`,
+				regexp.QuoteMeta(name) + `\s*\)\s+xpfValidationPass\s*\(\s*\)\s*bool\b`,
 		)
 		var has bool
 		for _, f := range files {
 			b, _ := os.ReadFile(f)
-			if method.Match(b) {
+			var sb strings.Builder
+			for _, line := range strings.Split(string(b), "\n") {
+				if i := strings.Index(line, "//"); i >= 0 {
+					line = line[:i]
+				}
+				sb.WriteString(line)
+				sb.WriteByte('\n')
+			}
+			if method.MatchString(sb.String()) {
 				has = true
 				break
 			}
