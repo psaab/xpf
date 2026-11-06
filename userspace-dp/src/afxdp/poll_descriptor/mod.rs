@@ -4438,14 +4438,22 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                             }
                         // TTL/hop-limit check on session-hit path: generate
                         // ICMP Time Exceeded for packets that would expire
-                        // after decrement. The session-miss path handles this
-                        // in build_local_time_exceeded_request(); the session-
-                        // hit path previously silently dropped these packets
-                        // (the rewrite functions return None for TTL<=1).
+                        // after decrement. #14642 suppresses errors for
+                        // tunnel-decapped inners; distinguish that result
+                        // from a non-expiring packet so it is dropped rather
+                        // than falling through to the forward path.
                         if matches!(
                             resolved.decision.resolution.disposition,
                             ForwardingDisposition::ForwardCandidate
                         ) {
+                            // #14642/#14643: the builder returns None both
+                            // when the packet does not expire and when its
+                            // Time Exceeded is suppressed. Keep the expiry
+                            // result so only a non-expiring hit may continue.
+                            let ttl_would_expire = matches!(
+                                packet_ttl_would_expire(packet_frame, meta),
+                                Some(true)
+                            );
                             // #5140: read the INNER packet via `packet_frame`
                             // (decapped frame post native-GRE, else `raw_frame`).
                             // The TTL/hop-limit test + the embedded original in
@@ -4471,6 +4479,12 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                 // Don't recycle: the TE response references
                                 // the original frame via desc.addr on the request.
                                 // The continue skips recycle_now handling.
+                                continue;
+                            } else if ttl_would_expire {
+                                // #14642: a suppressed TE for an expiring
+                                // tunnel-decapped inner must not fall through
+                                // to the session-hit forward path.
+                                binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
                         }

@@ -2693,10 +2693,9 @@ fn gre_frame_inner_udp_v4(dst: Ipv4Addr, inner_ttl: u8, sport: u16, dport: u16) 
 }
 
 /// #5615 helper: count the prebuilt ICMP Time Exceeded replies queued in the
-/// binding's `scratch_forwards`. The TTL-expiry path pushes a
-/// `PendingForwardFrame::Prebuilt` and consumes the trigger; a non-expiring
-/// forward never touches `scratch_forwards`, so this is 1 when the inner TTL
-/// read fired and 0 when it did not.
+/// binding's `scratch_forwards`. Under the #14642 contract this must be 0
+/// for a GRE-decapsulated inner (see the three cells below); a non-zero
+/// count means a TE was reflected on the synthetic zero-MAC header.
 fn prebuilt_te_count(binding: &BindingWorker) -> usize {
     binding
         .scratch
@@ -2712,20 +2711,19 @@ fn gre_to_self_outer_meta_wan(frame_len: usize) -> UserspaceDpMeta {
     gre_to_self_outer_meta(80, frame_len)
 }
 
-/// #5615 fail-on-revert (session-MISS TTL, `poll_descriptor/mod.rs` ~3240).
-/// A GRE-tunnelled inner ICMP echo to a TRANSIT destination (8.8.8.8) whose
-/// INNER TTL is 1 must generate an ICMP Time Exceeded on the session-MISS
-/// forward path — the TTL byte read from the decapped inner `packet_frame`
-/// (synthetic[22] = 1), NOT the outer `raw_frame` (frame[26] = outer TTL 64).
-///
-/// - FIXED (`packet_frame`): `packet_ttl_would_expire` sees inner TTL 1 →
-///   `build_local_time_exceeded_request` builds a prebuilt TE and CONSUMES the
-///   trigger before session install → one prebuilt TE queued, no session cached.
-/// - REVERTED (`raw_frame`): the read sees outer TTL 64 → not expiring → the
-///   echo is forwarded and a transit session is installed → zero prebuilt TEs.
-///
-/// The generated-error token bucket is pinned FULL under the global test lock so
-/// the buildable reply is deterministic (the bucket is a shared static).
+/// #5615 inner-TTL premise under the #14642 suppressed-TE contract
+/// (b48ca3993d, PR #14821). A GRE-tunnelled inner ICMP echo to a TRANSIT
+/// destination (8.8.8.8) whose INNER TTL is 1 reaches the session-MISS TTL
+/// path with the inner TTL read via `packet_frame` (synthetic[22] = 1),
+/// NOT the outer `raw_frame` (frame[26] = outer TTL 64; premise kept
+/// below). GRE decap marks the inner with `TUNNEL_DECAP_INGRESS_FLAG`
+/// (`gre.rs`), so `can_generate_icmp_error_reply` and
+/// `build_local_icmp_error_v4` (#14642, `icmp.rs`) suppress the Time
+/// Exceeded: no TE is queued and the packet is not forwarded. On the
+/// session-miss leg the #14643 companion arm drops it without installing
+/// a session.
+/// The generated-error token bucket is pinned and reset under the global test
+/// lock; this keeps the deliberate #14642 guard mutant deterministic.
 #[test]
 fn gre_decap_session_miss_ttl_expiry_reads_inner_ttl_5615() {
     use crate::afxdp::icmp_ratelimit::{
@@ -2776,29 +2774,38 @@ fn gre_decap_session_miss_ttl_expiry_reads_inner_ttl_5615() {
 
     assert_eq!(
         prebuilt_te_count(&binding),
-        1,
-        "#5615: the session-MISS TTL check must read the INNER TTL (1) from \
-         packet_frame and generate one ICMP Time Exceeded; the buggy raw_frame \
-         read sees the outer TTL (64), forwards the echo, and queues no TE"
+        0,
+        "#18816/#14642 (b48ca3993d): the session-MISS TTL check reads the \
+         INNER TTL (1) from packet_frame, but the Time Exceeded for a \
+         tunnel-decapsulated inner is suppressed, so no prebuilt TE may \
+         be queued"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "#18816/#14642: the suppressed-TE session-MISS inner must not be \
+         forwarded; the total forward queue must be empty (not only the \
+         Prebuilt count)"
     );
     assert_eq!(
         sessions.len(),
         0,
-        "a TTL-expired session-MISS echo is consumed as a Time Exceeded before \
-         session install; the raw_frame revert would forward it and cache a session"
+        "a TTL-expired session-MISS echo is suppressed/dropped under #14642 \
+         and #14643 before session install"
     );
 }
 
-/// #5615 fail-on-revert (session-HIT TTL, `poll_descriptor/mod.rs` ~1803).
-/// Two passes on one (binding, sessions) pair. Pass 1 (inner TTL 64) forwards
-/// the inner ICMP echo to a TRANSIT destination and installs a transit session.
-/// Pass 2 (inner TTL 1) is a session-HIT (ICMP is never flow-cache eligible, so
-/// it takes the session slow path): the session-HIT TTL check must read the
-/// INNER TTL from `packet_frame`.
-///
-/// - FIXED (`packet_frame`): pass 2 sees inner TTL 1 → one prebuilt TE queued,
-///   the trigger consumed.
-/// - REVERTED (`raw_frame`): pass 2 sees outer TTL 64 → forwarded, no TE.
+/// #5615 inner-TTL premise under the #14642 suppressed-TE contract
+/// (b48ca3993d, PR #14821), session-HIT leg. Two passes on one (binding,
+/// sessions) pair. Pass 1 (inner TTL 64) forwards the inner ICMP echo to
+/// a TRANSIT destination and installs a transit session. Pass 2 (inner
+/// TTL 1) is a session-HIT (ICMP is never flow-cache eligible, so it
+/// takes the session slow path): the decapped inner carries
+/// `TUNNEL_DECAP_INGRESS_FLAG`, so the Time Exceeded is suppressed
+/// (#14642). The session-hit expiry check drops the TTL-1 packet without
+/// queueing a TE or forwarding the inner. The empty-queue assertion
+/// observes the inner-TTL expiry check; suppression means the TE builder's
+/// own TTL read cannot be observed independently. Keep the
+/// `*_reads_inner_ttl_5615` name because #18816 references it.
 #[test]
 fn gre_decap_session_hit_ttl_expiry_reads_inner_ttl_5615() {
     use crate::afxdp::icmp_ratelimit::{
@@ -2858,29 +2865,34 @@ fn gre_decap_session_hit_ttl_expiry_reads_inner_ttl_5615() {
 
     assert_eq!(
         prebuilt_te_count(&binding),
-        1,
-        "#5615: the session-HIT TTL check must read the INNER TTL (1) from \
-         packet_frame and generate one ICMP Time Exceeded; the buggy raw_frame \
-         read sees the outer TTL (64) and forwards the echo with no TE"
+        0,
+        "#18816/#14642 (b48ca3993d): the session-HIT TTL check reads the \
+         INNER TTL (1) from packet_frame, but the Time Exceeded for a \
+         tunnel-decapsulated inner is suppressed, so no prebuilt TE may \
+         be queued"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "#18816/#14642: after the TTL-1 hit pass the suppressed-TE inner \
+         must not be forwarded; the total forward queue must be empty \
+         (the hit pass starts from a cleared queue, so this is \
+         self-contained)"
     );
 }
 
-/// #5615 fail-on-revert (flow-cache-HIT TTL, `poll_descriptor/flow_cache_hit.rs`
-/// ~158 `packet_ttl_would_expire` + ~167 `build_local_time_exceeded_request`).
-/// A GRE-tunnelled inner UDP flow (flow-cache eligible) seeds the flow cache on
-/// pass 1 (inner TTL 64); pass 2 (inner TTL 1) HITS the flow cache, where the
+/// #5615 inner-TTL premise under the #14642 suppressed-TE contract
+/// (b48ca3993d, PR #14821), flow-cache-HIT leg. A GRE-tunnelled inner UDP
+/// flow (flow-cache eligible) seeds the flow cache on pass 1 (inner TTL
+/// 64); pass 2 (inner TTL 1) HITS the flow cache, where the
 /// `packet_frame` TTL (1), not the byte at that inner-relative offset in
-/// `raw_frame` (the tagged outer IPv4 ID high byte, set above 1 below).
-///
-/// - FIXED (`packet_frame`): pass 2 sees inner TTL 1 → one prebuilt TE queued.
-/// - REVERTED at the `packet_ttl_would_expire` arg (`raw_frame`): the
-///   inner-relative TTL offset lands on the tagged outer IPv4 ID high byte
-///   (frame[22] = 2), which is above the expiry threshold, so no TE is queued.
-/// - REVERTED at the builder arg (`raw_frame`): the expiry check enters on the
-///   inner TTL, but the builder reads outer ID high byte 2 and returns None.
-///
-/// Either revert drops the prebuilt-TE count to 0, so this single test binds to
-/// both flow-cache-hit inner reads.
+/// `raw_frame` (the tagged outer IPv4 ID high byte, set above 1 below),
+/// is the inner TTL. The decapped inner carries
+/// `TUNNEL_DECAP_INGRESS_FLAG`, so the Time Exceeded is suppressed
+/// (#14642; the flow-cache arm drops as `Consumed`): no prebuilt TE or
+/// live forward is queued. The empty-queue assertion observes the expiry
+/// check; suppression means the TE builder's own TTL read cannot be
+/// observed independently. Keep the `*_reads_inner_ttl_5615` name
+/// because #18816 references it.
 #[test]
 fn gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615() {
     use crate::afxdp::icmp_ratelimit::{
@@ -2955,10 +2967,18 @@ fn gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615() {
 
     assert_eq!(
         prebuilt_te_count(&binding),
-        1,
-        "#5615: the flow-cache-HIT TTL check + Time Exceeded build must read the \
-         INNER TTL (1) from packet_frame and generate one prebuilt TE; either \
-         raw_frame revert (would-expire arg or builder arg) drops this to 0"
+        0,
+        "#18816/#14642 (b48ca3993d): the flow-cache-HIT TTL check reads \
+         the INNER TTL (1) from packet_frame, but the Time Exceeded for a \
+         tunnel-decapsulated inner is suppressed, so no prebuilt TE may \
+         be queued"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "#18816/#14642: after the TTL-1 hit pass the suppressed-TE inner \
+         must not be forwarded; the total forward queue must be empty \
+         (the hit pass starts from a cleared queue, so this is \
+         self-contained)"
     );
 }
 
