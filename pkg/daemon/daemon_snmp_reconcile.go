@@ -68,6 +68,11 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 		_, _ = h.Write(l[:])
 		_, _ = h.Write([]byte(str))
 	}
+	writeUint := func(n int) {
+		var raw [8]byte
+		binary.LittleEndian.PutUint64(raw[:], uint64(n))
+		_, _ = h.Write(raw[:])
+	}
 	write("vrf-device")
 	write(snmpVRFDeviceForConfig(cfg))
 
@@ -81,6 +86,7 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 	}
 	sort.Strings(commNames)
 	write("communities")
+	writeUint(len(commNames))
 	for _, name := range commNames {
 		c := s.Communities[name]
 		write(name)
@@ -150,6 +156,7 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 				write("false")
 			}
 		}
+		write("end-community")
 	}
 
 	tgNames := make([]string, 0, len(s.TrapGroups))
@@ -158,6 +165,7 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 	}
 	sort.Strings(tgNames)
 	write("trap-groups")
+	writeUint(len(tgNames))
 	for _, name := range tgNames {
 		tg := s.TrapGroups[name]
 		write(name)
@@ -183,6 +191,7 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 				write(c)
 			}
 		}
+		write("end-trap-group")
 	}
 
 	userNames := make([]string, 0, len(s.V3Users))
@@ -191,6 +200,7 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 	}
 	sort.Strings(userNames)
 	write("v3-users")
+	writeUint(len(userNames))
 	for _, name := range userNames {
 		u := s.V3Users[name]
 		write(name)
@@ -200,6 +210,28 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 			write(u.PrivProtocol)
 			write(u.PrivPassword.Reveal())
 		}
+		write("end-v3-user")
+	}
+	clientListNames := make([]string, 0, len(s.ClientLists))
+	for name := range s.ClientLists {
+		clientListNames = append(clientListNames, name)
+	}
+	sort.Strings(clientListNames)
+	write("client-lists")
+	writeUint(len(clientListNames))
+	for _, name := range clientListNames {
+		clients := s.ClientLists[name]
+		write(name)
+		writeUint(len(clients))
+		for _, cl := range clients {
+			write(cl.Prefix)
+			if cl.Restrict {
+				write("restrict")
+			} else {
+				write("allow")
+			}
+		}
+		write("end-client-list")
 	}
 	return h.Sum64()
 }

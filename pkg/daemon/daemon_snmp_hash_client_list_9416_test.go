@@ -172,3 +172,97 @@ func TestSNMPConfigHashIncludesCrossRootQuarantine18844(t *testing.T) {
 			markerReferenceHash)
 	}
 }
+
+// TestSNMPConfigHashFramesCommunities18986 reproduces the ambiguous legacy
+// stream from compiled configuration text. The six references on the single
+// community begin with the old quarantine marker/value, then spell a second
+// community's name, authorization, and empty list fields. With no count or
+// boundary token, that stream aliases the two-community form exactly.
+func TestSNMPConfigHashFramesCommunities18986(t *testing.T) {
+	const listDefinitions = `
+        client-list source-restriction-quarantined { 10.0.0.1/32; }
+        client-list false { 10.0.0.2/32; }
+        client-list b { 10.0.0.3/32; }
+        client-list read-only { 10.0.0.4/32; }
+        client-list clients { 10.0.0.5/32; }
+        client-list client-list-names { 10.0.0.6/32; }
+`
+	compile := func(text string) *config.Config {
+		t.Helper()
+		tree, parseErrs := config.NewParser(text).Parse()
+		if len(parseErrs) != 0 {
+			t.Fatalf("parse SNMP config: %v", parseErrs)
+		}
+		cfg, err := config.CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("compile SNMP config: %v", err)
+		}
+		return cfg
+	}
+	oneCommunity := compile(`system { host-name fw; snmp {` + listDefinitions + `
+        community a {
+            authorization read-only;
+            client-list-name source-restriction-quarantined;
+            client-list-name false;
+            client-list-name b;
+            client-list-name read-only;
+            client-list-name clients;
+            client-list-name client-list-names;
+        }
+    } }`)
+	twoCommunities := compile(`system { host-name fw; snmp {` + listDefinitions + `
+        community a {
+            authorization read-only;
+            clients 10.0.0.1/32;
+            clients 10.0.0.2/32;
+            clients 10.0.0.3/32;
+            clients 10.0.0.4/32;
+            clients 10.0.0.5/32;
+            clients 10.0.0.6/32;
+        }
+        community b { authorization read-only; }
+    } }`)
+	oneA := oneCommunity.System.SNMP.Communities["a"]
+	twoA := twoCommunities.System.SNMP.Communities["a"]
+	if !reflect.DeepEqual(oneA.Clients, twoA.Clients) {
+		t.Fatalf("crafted alias changed resolved Clients: one=%+v two=%+v", oneA.Clients, twoA.Clients)
+	}
+	if len(twoCommunities.System.SNMP.Communities) != 2 || len(oneCommunity.System.SNMP.Communities) != 1 {
+		t.Fatalf("compiled community counts: one=%d two=%d",
+			len(oneCommunity.System.SNMP.Communities), len(twoCommunities.System.SNMP.Communities))
+	}
+	if oneHash, twoHash := snmpConfigHash(oneCommunity), snmpConfigHash(twoCommunities); oneHash == twoHash {
+		t.Fatalf("#18986: one crafted community and two communities alias the reconcile hash (%d)", oneHash)
+	}
+}
+
+// TestSNMPConfigHashIncludesClientListDefinitions18986 hashes definitions even
+// when unreferenced. This is a conservative superset of live enforcement: an
+// unreferenced edit may cause a safe extra reconcile, but cannot leave the
+// retained definition surface out of the fingerprint.
+func TestSNMPConfigHashIncludesClientListDefinitions18986(t *testing.T) {
+	compile := func(prefix string) *config.Config {
+		t.Helper()
+		text := `system { host-name fw; snmp {
+            client-list unused { ` + prefix + `; }
+            community public { authorization read-only; }
+        } }`
+		tree, parseErrs := config.NewParser(text).Parse()
+		if len(parseErrs) != 0 {
+			t.Fatalf("parse SNMP config: %v", parseErrs)
+		}
+		cfg, err := config.CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("compile SNMP config: %v", err)
+		}
+		return cfg
+	}
+	before := compile("10.0.0.0/8")
+	after := compile("192.168.0.0/16")
+	if !reflect.DeepEqual(before.System.SNMP.Communities, after.System.SNMP.Communities) {
+		t.Fatal("editing an unreferenced list changed compiled communities")
+	}
+	if beforeHash, afterHash := snmpConfigHash(before), snmpConfigHash(after); beforeHash == afterHash {
+		t.Fatalf("#18986: an unreferenced ClientLists definition edit did not change the hash (%d)", beforeHash)
+	}
+}
