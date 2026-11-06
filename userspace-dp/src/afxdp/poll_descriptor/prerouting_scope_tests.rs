@@ -386,8 +386,10 @@ fn vid_zero_is_unknown_on_unanimous_and_contested_tagged_trunks_11297() {
         "untagged frames must not inherit the unanimous sibling zone"
     );
     assert!(
-        crate::afxdp::forwarding::unknown_ingress_vlan(&unanimous, 13, 0),
-        "VID 0 must also be rejected if XDP reports the tagged VLAN child directly"
+        !crate::afxdp::forwarding::unknown_ingress_vlan(&unanimous, 13, 0),
+        "#13928 (cf1ac3f9bf): VID 0 reported on the tagged VLAN child is the \
+         child's configured VLAN (Linux strips the tag before generic XDP), \
+         so only the bind parent is tagged-only and the child is not unknown"
     );
 
     let mut contested_snapshot =
@@ -432,8 +434,10 @@ fn explicit_untagged_unit0_keeps_vid_zero_fallback_11297() {
         "an explicit untagged unit 0 owns the parent's VID-0 fallback"
     );
     assert!(
-        crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 13, 0),
-        "the tagged VLAN child itself has no untagged unit-0 identity"
+        !crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 13, 0),
+        "#13928 (cf1ac3f9bf): VID 0 reported on the tagged VLAN child is the \
+         child's configured VLAN (Linux strips the tag before generic XDP), \
+         so only the bind parent is tagged-only and the child is not unknown"
     );
 }
 
