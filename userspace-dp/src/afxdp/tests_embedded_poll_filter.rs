@@ -15457,6 +15457,7 @@ fn stage11_local_ike_passthrough_honors_ingress_input_filter_13637() {
         .filters
         .get("inet:block-ike-source")
         .expect("the ingress filter compiled");
+    crate::filter::flush_recorded_filter_counters();
     assert_eq!(
         pbr_filter.terms[0]
             .counter
