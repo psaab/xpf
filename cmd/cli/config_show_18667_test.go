@@ -77,7 +77,22 @@ func TestConfigShowGluedPipeRefused18667(t *testing.T) {
 		{"glued both sides of pipe", `show interfaces| display set`},
 		{"glued compare", `show interfaces|compare`},
 		{"glued to quoted path", `show "lan in"|display set`},
+		{"comment-glued pipe", `show interfaces /*x*/|display set`},
+		{"comment-glued pipe with spaced modifier", `show interfaces /*x*/| display set`},
 	}
+	t.Run("hint preserves quoted whitespace", func(t *testing.T) {
+		fake := &configShow18667Client{}
+		err := configModeCtl(fake).dispatchConfig(`show "lan  in"|display set`)
+		if err == nil || !strings.Contains(err.Error(), "separate the pipe with spaces") {
+			t.Fatalf("dispatchConfig returned err = %v; want glued-pipe hint (#18667)", err)
+		}
+		if !strings.Contains(err.Error(), "lan  in") || strings.Contains(err.Error(), "lan in") {
+			t.Fatalf("hint lost quoted whitespace: %v", err)
+		}
+		if fake.totalCalls() != 0 {
+			t.Fatalf("glued pipe issued %d RPC calls; want 0 (#18667)", fake.totalCalls())
+		}
+	})
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &configShow18667Client{}

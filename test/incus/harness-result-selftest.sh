@@ -98,6 +98,70 @@ else
 	bad "DHCP selftest guard changed: guards=$dhcp_guard_count env_refs=$dhcp_selftest_refs probe='$dhcp_source_probe'"
 fi
 
+# #18667: an absent dhcp-local-server subtree is a successful empty snapshot
+# so provisioning can create it; an unrelated CLI failure remains fatal.
+dhcp_snapshot_absent="$(
+	BPFRX_CLUSTER_ENV='' bash -c '
+		source "$1"
+		FW0=fw0; FW1=fw1
+		ssh_fw() {
+			case "$2" in
+			*"show configuration chassis cluster | display set"*)
+				printf "set chassis cluster cluster-id 1\n"
+				;;
+			*"show configuration system services dhcp-local-server | display set"*)
+				printf "error: configuration path not found: system services dhcp-local-server\n"
+				return 1
+				;;
+			*"show configuration chassis cluster"*)
+				printf "set chassis cluster cluster-id 1\n"
+				;;
+			*) return 90 ;;
+			esac
+		}
+		PROVISION_CALLED=0
+		provision_dhcp() { PROVISION_CALLED=1; }
+		record_dhcp_config_state
+		preflight
+		[[ "$CONFIG_STATE_RECORDED" == 1 && -z "${ORIGINAL_DHCP_LOCAL[0]}" &&
+			-z "${ORIGINAL_DHCP_LOCAL[1]}" && "$PROVISION_CALLED" == 1 ]] || exit 1
+		printf "ABSENT_PROVISION_CALLED=%s\n" "$PROVISION_CALLED"
+	' _ "$dhcp_gate" 2>&1
+)"
+if [[ "$dhcp_snapshot_absent" == *"ABSENT_PROVISION_CALLED=1"* ]]; then
+	ok "#18667: absent DHCP stanza snapshots as empty and reaches provisioning"
+else
+	bad "#18667: absent DHCP stanza stopped preflight: $dhcp_snapshot_absent"
+fi
+
+dhcp_snapshot_unreadable_rc=0
+dhcp_snapshot_unreadable="$(
+	BPFRX_CLUSTER_ENV='' bash -c '
+		source "$1"
+		FW0=fw0; FW1=fw1
+		ssh_fw() {
+			case "$2" in
+			*"show configuration chassis cluster | display set"*)
+				printf "set chassis cluster cluster-id 1\n"
+				;;
+			*"show configuration system services dhcp-local-server | display set"*)
+				printf "error: rpc error: code = Unavailable\n"
+				return 1
+				;;
+			*) return 90 ;;
+			esac
+		}
+		record_dhcp_config_state
+		exit 1
+	' _ "$dhcp_gate" 2>&1
+)" || dhcp_snapshot_unreadable_rc=$?
+if [[ "$dhcp_snapshot_unreadable_rc" == 2 &&
+	"$dhcp_snapshot_unreadable" == *"cannot snapshot dhcp-local-server configuration"* ]]; then
+	ok "#18667: unreadable DHCP stanza snapshot remains fatal"
+else
+	bad "#18667: unreadable DHCP stanza was not refused (rc=$dhcp_snapshot_unreadable_rc): $dhcp_snapshot_unreadable"
+fi
+
 # #16477: create the pinned parent on clean runners; fail loudly on mktemp failure.
 if [[ -z "${TMPDIR:-}" ]]; then mkdir -p /var/worktrees/.cache/tmpdir; fi
 WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-harness-result-selftest.XXXXXX") \

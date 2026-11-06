@@ -161,6 +161,23 @@ die()  { note_abort_cause "gate: $*"; echo "FATAL: owner=test-dhcp-lease-failove
 
 ssh_fw() { incus exec "$1" -- bash -lc "$2"; }
 
+# dhcp_local_config_snapshot <node> prints the flat-set DHCP stanza, treating
+# the scoped path-not-found error as an empty stanza. Any other CLI failure is
+# unreadable and remains nonzero.
+dhcp_local_config_snapshot() {
+	local node="$1" out rc
+	if out=$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration system services dhcp-local-server | display set" 2>&1'); then
+		printf '%s' "$out"
+		return 0
+	else
+		rc=$?
+	fi
+	if grep -Fq 'configuration path not found: system services dhcp-local-server' <<<"$out"; then
+		return 0
+	fi
+	return "$rc"
+}
+
 # rg0_primary_node <query-node> prints the node holding RG0 primary as seen from
 # <query-node>, or nothing when the RG0 row cannot be read (#9729).
 rg0_primary_node() {
@@ -233,7 +250,7 @@ record_dhcp_config_state() {
 		if ! ORIGINAL_DHCP_CHASSIS[i]="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration chassis cluster | display set" 2>/dev/null')"; then
 			die "cannot snapshot chassis configuration on $node before the destructive run"
 		fi
-		if ! ORIGINAL_DHCP_LOCAL[i]="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration system services dhcp-local-server | display set" 2>/dev/null')"; then
+		if ! ORIGINAL_DHCP_LOCAL[i]="$(dhcp_local_config_snapshot "$node")"; then
 			die "cannot snapshot dhcp-local-server configuration on $node before the destructive run"
 		fi
 	done
@@ -251,7 +268,9 @@ verify_dhcp_config() {
 		for i in 0 1; do
 			if [[ "$i" == "0" ]]; then node="$FW0"; else node="$FW1"; fi
 			chassis="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration chassis cluster | display set" 2>/dev/null' || true)"
-			local_config="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration system services dhcp-local-server | display set" 2>/dev/null' || true)"
+			if ! local_config="$(dhcp_local_config_snapshot "$node")"; then
+				mismatch=1
+			fi
 			last_chassis[i]="$chassis"
 			last_local[i]="$local_config"
 			if [[ "$chassis" != "${ORIGINAL_DHCP_CHASSIS[$i]}" ||
@@ -456,7 +475,8 @@ provision_dhcp() {
 	node="$(rg0_primary_node "$FW0")"
 	[ -n "$node" ] || node="$(rg0_primary_node "$FW1")"
 	[ -n "$node" ] || die "cannot read the RG0 primary to commit the DHCP fixture on"
-	existing="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration system services dhcp-local-server | display set" 2>/dev/null' || true)"
+	existing="$(dhcp_local_config_snapshot "$node")" ||
+		die "cannot read dhcp-local-server configuration on $node before provisioning"
 	if ! grep -q "dhcp-local-server group .* pool .* subnet" <<<"$existing"; then
 		with_group=1
 	fi

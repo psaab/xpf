@@ -636,22 +636,8 @@ func lexConfigShowArgs16790(line string) ([]string, []bool, error) {
 	var path []string
 	var pathQuoted []bool
 	sawShow := false
-	previousEnd, lineStart, currentLine := 0, 0, 1
 	for {
 		tok := lex.Next()
-		for currentLine < tok.Line {
-			for lineStart < len(line) && line[lineStart] != '\n' {
-				lineStart++
-			}
-			if lineStart < len(line) {
-				lineStart++
-			}
-			currentLine++
-		}
-		tokenStart := lineStart + tok.Column - 1
-		if tokenStart > len(line) {
-			tokenStart = len(line)
-		}
 		switch tok.Type {
 		case config.TokenIdentifier, config.TokenString:
 			if !sawShow {
@@ -659,27 +645,24 @@ func lexConfigShowArgs16790(line string) ([]string, []bool, error) {
 					return nil, nil, fmt.Errorf("show: invalid path")
 				}
 				sawShow = true
-				previousEnd = lex.Position()
 				continue
 			}
 			path = append(path, tok.Value)
 			pathQuoted = append(pathQuoted, tok.Type == config.TokenString)
-			previousEnd = lex.Position()
 		case config.TokenPipe:
 			if !sawShow {
 				return nil, nil, fmt.Errorf("show: invalid path")
 			}
 			pipeEnd := lex.Position()
-			rightGlued := false
-			if pipeEnd < len(line) {
-				next := line[pipeEnd]
-				rightGlued = next != ' ' && next != '\t' && next != '\n' && next != '\r' &&
-					next != '#' && !strings.HasPrefix(line[pipeEnd:], "/*") &&
-					!strings.HasPrefix(line[pipeEnd:], "//")
-			}
-			if previousEnd == tokenStart || rightGlued {
-				suggestion := line[:tokenStart] + " | " + line[pipeEnd:]
-				suggestion = strings.Join(strings.Fields(suggestion), " ")
+			pipeStart := pipeEnd - len(tok.Value)
+			leftGlued := pipeStart > 0 &&
+				len(strings.TrimRight(line[:pipeStart], " \t\n\r")) == pipeStart
+			rightGlued := pipeEnd < len(line) &&
+				len(strings.TrimLeft(line[pipeEnd:], " \t\n\r")) == len(line)-pipeEnd
+			if leftGlued || rightGlued {
+				left := strings.TrimRight(line[:pipeStart], " \t\n\r")
+				right := strings.TrimLeft(line[pipeEnd:], " \t\n\r")
+				suggestion := left + " | " + right
 				return nil, nil, fmt.Errorf("show: invalid path (separate the pipe with spaces: %q)", suggestion)
 			}
 			args := append(append([]string{}, path...), "|")
