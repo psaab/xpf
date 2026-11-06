@@ -265,15 +265,16 @@ Three facts in this table do real work:
    conclusion, not a cost estimate — but it is strong enough to kill
    shapes whose only change is where the walk's output is stored
    (V6-2R, V6-3), per §2.3.
-3. **Early-exit counts price nothing.** The pre-G1 IPv4-only access
-   failures (`off=34/35`; 99,774–101,488 processed insns) are the
-   values at which the verifier refused an access and stopped. The
-   IPv6 Routing-header `off=56` failures stopped at 30,152–30,642.
-   TCP-1's separate `off=56` result stopped at 30,275. None is an
-   instruction cost, a count of a complete program, or evidence that
-   "70k of headroom remains." The fixed-prefix IPv6 variant proves the
-   point: clearing an access reject moved the result to the 1,000,001
-   cap (fit §3).
+3. **Early-exit counts price nothing.** The pre-G1 IPv4-only failures
+   were early verifier stops, not costs: `off=34` stopped at 101,057;
+   `off=35` variants stopped at 99,774 and 101,366; the separate
+   pointer-from-scalar failure stopped at 101,488
+   (`16009-replan-design.md:180-182`). The IPv6 Routing-header
+   `off=56` failures stopped at 30,152–30,642; TCP-1's separate
+   `off=56` result stopped at 30,275. None is a complete-program cost
+   or evidence that "70k of headroom remains." The fixed-prefix IPv6
+   variant proves the point: clearing an access reject moved the result
+   to the 1,000,001 cap (fit §3).
 
 ### 3.2 The stack equation, stated precisely
 
@@ -570,7 +571,7 @@ including arms where the retained IPv4 trigger cannot be reached.
 Reachability is assessed at the selected arm, not inferred from the
 presence of the call; `not-proven` is not evidence of unreachability.
 
-| Arm | Landed-plan anchor | Gate call-site present | Selecting predicates / families | Retained IPv4 POD/teardrop trigger reachable | Allowed coverage claim |
+| Arm | Landed-plan anchor | Required in scratch candidate | Selecting predicates / families | Retained IPv4 POD/teardrop trigger reachable | Allowed coverage claim |
 |---|---|---|---|---|---|
 | WG steer | `host-screen-plan.md` §1, `lib.rs:944-951` | Yes | WG-steer predicate succeeds; parsed IPv4 or IPv6 packet | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
 | Early-filter IPv4 limited-broadcast/multicast and IPv6 multicast | §1, `lib.rs:952-965`; `early_filter.rs:85-109` | Yes | Early-filter multicast / limited-broadcast predicate; IPv4 or IPv6 | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
@@ -583,6 +584,11 @@ presence of the call; `not-proven` is not evidence of unreachability.
 | GRE-inner `PASS_TO_KERNEL` | §1, `lib.rs:1155-1175` | Yes | Typed GRE-inner session predicate selects kernel pass | proven-unreachable for a fragmented native-GRE outer: it stays on helper path before these arms (`lib.rs:795-804`); inner geometry is not parsed by this gate | Gate on outer packet only; fragment geometry is not screened there |
 | Binding-not-ready degraded local/control | §1, `lib.rs:854,891-894` | Yes | Binding not ready and `is_degraded_local_or_control` is true | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
 | Ctrl-disabled local/control | §1, `lib.rs:1671,1726-1728` | Yes | `degraded_ctrl_disabled_action` selects `PassLocalControl` | not-proven | Gate call present; no per-arm IPv4 geometry coverage claim until reachability is proved |
+
+Declared-short IPv4 packets (`total_len < IHL`) return `None` from
+`parse_ipv4` before creating a `ParsedPacket` for this gate
+(`lib.rs:2292-2295`); they are earlier parse failures, not reason-21
+POD/teardrop geometry coverage.
 
 The eight `not-proven` rows require source proof before any stronger
 coverage claim; gate presence alone is not proof that a retained trigger
@@ -779,13 +785,15 @@ design does not auto-select it on budget exhaustion.
 
 1. This document authorizes nothing. A recorded three-seat PLAN-READY
    act authorizes **only** scratch-only CR1/CR2 candidate construction,
-   the CR0 census, the CR4 corpus, the two §8.2 generation invocations,
-   and D1/D2 result recording (D2 only if D1 passes CR5). It does not
-   authorize production code, landing, scope adoption, successor filing,
-   result-as-closure posting, artifact promotion, or runs 7–13.
-2. Run D1; only a complete K1 pass permits the identical-source D2
-   confirmation. Failure kills route (b); no scope act or implementation
-   follows.
+   the CR0 source census/temp-root preflight, the CR4 HOST-ONLY corpus,
+   the two §8.2 generation invocations, and D1/D2 result recording.
+   The CR6 ceiling record is subsumed in D1 preflight, not a separate
+   run. The generated-object BPF/Class-R scratch/counter leg is not
+   authorized here and requires a separate recorded act. No production
+   code, landing, scope adoption, successor filing, result-as-closure
+   posting, artifact promotion, or runs 7–13 are authorized.
+2. Run D1; only a complete K1 pass under CR6 permits D2, sequenced by
+   CR5. Failure kills route (b); no scope act or implementation follows.
 3. D1/D2 PASS is verifier-fit evidence only; it closes no decisive
    acceptance leg. It authorizes no successor filing or scope act.
    Before any separately authorized scope act, ensure S1–S6 from
@@ -880,19 +888,24 @@ under `/var/worktrees/.cache`.
 `CARGO_TARGET_DIR=/var/worktrees/.cache/cargo-16009 TMPDIR=/var/worktrees/.cache/tmpdir GOTMPDIR=/var/worktrees/.cache/gotmp GOCACHE=/var/worktrees/.cache/go-build XPF_SHIM_ALLOW_LOW_HEADROOM=0 make generate-userspace-xdp`.
 Before each invocation, record the fresh detached scratch worktree path,
 G1 base, full command and environment, complete source/toolchain hashes,
-and expected artifact paths, including the candidate `.so`. The
-generation command installs tracked
-`pkg/dataplane/userspace_xdp_bpfel.o`,
-`pkg/dataplane/userspace_xdp_gate_verdict.json`, and
-`pkg/dataplane/userspace_xdp_manifest.json` in the tree that runs it;
-the candidate is
+and expected artifact paths, including the candidate `.so`. Also pin
+the pre-run hash of the candidate and each tracked output below, or record
+that the path is absent, so the invocation's products are distinguishable
+from pre-existing bytes.
+In the tree that runs it, the build script installs
+`pkg/dataplane/userspace_xdp_bpfel.o` and
+`pkg/dataplane/userspace_xdp_gate_verdict.json` only after successful
+`shimverify` gate completion, then refreshes
+`pkg/dataplane/userspace_xdp_manifest.json`
+(`pkg/dataplane/build-userspace-xdp.sh:284-320`). The candidate is
 `/var/worktrees/.cache/cargo-16009/bpfel-unknown-none/release/libxpf_userspace_xdp.so`
-(`pkg/dataplane/build-userspace-xdp.sh:27,33,301-320`). After each
-invocation, record the hash and disposition of every expected artifact.
-These products are scratch evidence only: never copy, commit, or promote
-them. If a necessary build input changed from the recorded G1 base, stop
-and seek a separately authorized changed-input baseline; do not silently
-substitute `master`.
+(`pkg/dataplane/build-userspace-xdp.sh:27,33`). After each invocation,
+record the post-run hash and disposition of the candidate and every
+tracked output, and compare against the pre-run pin to identify which
+bytes this invocation created or changed. These products are scratch
+evidence only: never copy, commit, or promote them. If a necessary build
+input changed from the recorded G1 base, stop and seek a separately
+authorized changed-input baseline; do not silently substitute `master`.
 
 ### 8.1 Clean-room construction rules (the GLM residual, made binding)
 
@@ -901,15 +914,25 @@ command spends no verifier run; once the pinned generation command is
 invoked, the run is charged regardless of whether compilation, linking,
 or kernel verification is the first failing stage.
 
-- **CR0 — Source census before D1 (zero runs).** After scratch-only
-  candidate construction and before D1, require exactly one
+- **CR0 — Source census and temp-root preflight (zero runs).** After
+  scratch-only candidate construction and before D1, require exactly one
   `host_screen_gate` definition and exactly 11 call sites, matching the
   §5.2 matrix. Confirm there is no transit or pre-parse call site;
   `userspace_screen_scratch`, `userspace_host_screen`, and append-only
   reasons 21/22 are declared; and the forbidden substrate is absent:
   no V6-1 walk-state accumulator, V4-1 TLV selector, or TCP-1 `off=56`
-  packet read. Any census mismatch blocks D1; the census spends zero
-  verifier runs.
+  packet read. Any census mismatch blocks D1 and is not an environment
+  setup failure.
+  Before each D1/D2 generation invocation, require all four configured
+  roots (`CARGO_TARGET_DIR`, `TMPDIR`, `GOTMPDIR`, `GOCACHE`) to exist and
+  be writable. Pin and record a justified numeric minimum free-byte
+  requirement for `/var/worktrees/.cache/gotmp` before each invocation,
+  record its observed free bytes, and require capacity to meet the pin.
+  A missing expectation, missing/unwritable root, or insufficient capacity
+  is an environment/setup failure: do not invoke the command, consume a
+  verifier run, or reject/kill the candidate; repair setup before an
+  authorized invocation. The D1 census and each invocation's preflight
+  spend zero verifier runs.
 
 - **CR1 — Baseline plus one delta.** Start from the pristine G1 base
   and add only the retained-fact geometry gate. Do not reuse G1's
@@ -929,17 +952,20 @@ or kernel verification is the first failing stage.
   verdict, but the generation invocation is still charged. V4-1
   establishes that link precedes kernel verification; it does not
   establish that a link failure is free budget.
-- **CR4 — Host corpus before each invocation**, on the exact pinned
-  source: positive IPv4 POD `>` 65535 and `=` 65535 controls; teardrop
-  zero/short/MF nonmultiple/legal-last. IPv4/IPv6 ICMP-fragment,
-  known-flags SYN on first fragment, atomic/non-first IPv6 fragment,
-  governing-header, and clean-packet cases are non-trigger controls:
-  the candidate emits no decision for those facts. On the same CPU,
-  retained-IPv4-trip packet that drops and increments reason 21,
-  immediately followed by a clean IPv6 packet that must not drop or
-  increment reason 21. The geometry corpus claims only retained IPv4
-  coverage; the clean-IPv6 sequence is a stale-state control, not a
-  parity claim.
+- **CR4 — HOST-ONLY oracle before each invocation**, on the exact pinned
+  source. Exercise the retained IPv4 host model with positive POD
+  `>` 65535 and `=` 65535 boundary control, plus teardrop zero/short/MF
+  nonmultiple/legal-last cases. IPv4/IPv6 ICMP-fragment, known-flags SYN
+  on first fragment, atomic/non-first IPv6 fragment, governing-header,
+  and clean-packet cases are non-trigger controls for this retained gate.
+  Model the same logical CPU scratch slot: an IPv4 retained-trip packet
+  sets the host model's scratch trip, then the per-packet reset to zero
+  before a clean IPv6 packet leaves it untripped. This is a host-only
+  oracle; it makes no BPF map, kernel counter, or generated-object-load
+  observation or claim. Any actual generated-object BPF/Class-R scratch
+  or counter observation requires a separately authorized leg and is
+  not authorized by this plan. The corpus supports only the stated
+  retained IPv4 host-model coverage.
 - **CR5 — Strict sequence.** Run D1, record its complete disposition,
   then and only if it passes authorize D2. No parallel dispatch or
   retries.
@@ -1010,10 +1036,11 @@ evidence — if any of the following holds:
    IPv6-geometry, tiny/capture, Q1, overlap, scan/sweep, cookie, or
    claimed-zone parity before its assigned successor passes; cites the
    632 B or 640 B combined-chain sums as stack adjudications; or treats
-   an early-exit count as a cost or a pass, including the IPv4-only
-   `off=34/35` failures (99,774–101,488), IPv6 `off=56` failures
-   (30,152–30,642), TCP-1's separate `off=56` result (30,275), or the
-   capped 1,000,001 result.
+   an early-exit count as a cost or a pass, including IPv4 `off=34`
+   (101,057), `off=35` (99,774 and 101,366), the separate
+   pointer-from-scalar result (101,488), IPv6 `off=56` failures
+   (30,152–30,642), TCP-1's `off=56` result (30,275), or the capped
+   1,000,001 result.
 6. **Budget kill:** this protocol spends more than runs 5 and 6, retries
    an unchanged shape, or runs a §2.3-dead shape. Any extra run or
    changed-input baseline requires a new three-seat act.
@@ -1092,7 +1119,7 @@ measured.
 | TCP-1 = gate failure by access, mechanism/stack unjudged; no auto-selection of TCP-2 from the 632 B sum | `issuecomment-6675614112` (Kimi, accepted), `6675500896` (Sol), final record `6675710585` |
 | G2 unbuildable a priori (V4-1 in the exact set); component-hash pinning guardrail | `issuecomment-6675582825` (GLM), parent ruling `6675609580` |
 | K1 definition (≤850,000, floor PASS, override false, complete-object only); 13-run budget; failure-signature routing; stop rule | Fit design §§1, 8; landed plan §9-K1 |
-| Sink-only 755,620 PASS; pre-G1 IPv4-only access failures (`off=34/35`, 99,774–101,488), IPv6 `off=56` failures (30,152–30,642), 528 B stack, cap variants with state counts | Fit design §3; re-plan §3.1 |
+| Sink-only 755,620 PASS; pre-G1 IPv4 access failures: `off=34` (101,057), `off=35` (99,774/101,366), pointer-from-scalar (101,488); IPv6 `off=56` (30,152–30,642); 528 B stack; cap variants with state counts | Fit design §3; re-plan §3.1 |
 | +298,128 measured laundering precedent; second-walk-value state-merging mechanism | Landed plan §5.1 (`lib.rs:588-602`); fit design §2 item 1 |
 | 11 arms, insertion anchors, transit exclusion, two pre-parse CPUMAP exclusions | Landed plan §1 (`lib.rs:612-618,2138-2146` and arm table) |
 | `pass_local_control` intentional on degraded/ctrl-disabled arms; redirect contract breakage | Landed plan §2.1 (`lib.rs:1812-1816`); `userspace-xdp/src/lib.rs:891-894,1671,1726-1728,1812-1816` on master |
