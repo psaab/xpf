@@ -51,6 +51,7 @@ fn counted_term(name: &str, action: &str, counter: &str) -> FirewallTermSnapshot
 
 /// Every counter on `filter`, in term order, as `(packets, bytes)`.
 fn counters(state: &FilterState, key: &str) -> Vec<(u64, u64)> {
+    crate::filter::flush_recorded_filter_counters();
     state.filters[key]
         .terms
         .iter()
@@ -111,7 +112,7 @@ fn walk_shapes() -> Vec<(&'static str, Vec<FirewallTermSnapshot>)> {
                 // true` would TERMINATE and the deny below would be
                 // unreachable — the fixture would then prove nothing about the
                 // replay arm.
-                counted_term("mark", "", "c-mark"),
+                FirewallTermSnapshot { next_term: true, ..counted_term("mark", "", "c-mark") },
                 counted_term("deny", "discard", "c-deny2"),
             ],
         ),
@@ -275,7 +276,7 @@ fn static_verdict_does_not_replay_counters_on_the_terminal_deny_exit_7212() {
     let state = shape_state(
         "fallthrough-then-discard",
         vec![
-            counted_term("mark", "", "c-mark"),
+            FirewallTermSnapshot { next_term: true, ..counted_term("mark", "", "c-mark") },
             counted_term("deny", "discard", "c-deny2"),
         ],
     );
@@ -310,7 +311,7 @@ fn only_terminal_non_accept_still_replays_after_the_never_split_7212() {
     let state = shape_state(
         "fallthrough-then-discard",
         vec![
-            counted_term("mark", "", "c-mark"),
+            FirewallTermSnapshot { next_term: true, ..counted_term("mark", "", "c-mark") },
             counted_term("deny", "discard", "c-deny2"),
         ],
     );
@@ -348,7 +349,7 @@ fn static_verdict_charges_no_counter_on_the_v6_leaf_7212() {
             name: "edge-in6".into(),
             family: "inet6".into(),
             terms: vec![
-                counted_term("mark", "", "c-mark6"),
+                FirewallTermSnapshot { next_term: true, ..counted_term("mark", "", "c-mark6") },
                 counted_term("deny", "discard", "c-deny6"),
             ],
         }],
