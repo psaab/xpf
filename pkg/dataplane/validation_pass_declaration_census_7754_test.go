@@ -1,6 +1,9 @@
 package dataplane
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -121,33 +124,42 @@ func TestEveryDiscardingDataPlaneEmbedderDeclaresItsPass7754(t *testing.T) {
 		t.Errorf("declared but no longer present: %v — delete the entries", stale)
 	}
 
-	// Every declared embedder must actually carry its own override, not just an
-	// entry in the map above. Without this the map is a comment.
+	// Parse declarations so comments, strings, and non-Go fragments cannot
+	// masquerade as a method override.
+	overrides := map[string]bool{}
+	fset := token.NewFileSet()
+	for _, f := range files {
+		parsed, err := parser.ParseFile(fset, f, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", f, err)
+		}
+		for _, decl := range parsed.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != "xpfValidationPass" ||
+				fn.Recv == nil || len(fn.Recv.List) != 1 {
+				continue
+			}
+			receiver := fn.Recv.List[0].Type
+			if ptr, ok := receiver.(*ast.StarExpr); ok {
+				receiver = ptr.X
+			}
+			receiverName, ok := receiver.(*ast.Ident)
+			if !ok || len(fn.Type.Params.List) != 0 ||
+				fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
+				continue
+			}
+			result, ok := fn.Type.Results.List[0].Type.(*ast.Ident)
+			if !ok || result.Name != "bool" {
+				continue
+			}
+			overrides[receiverName.Name] = true
+		}
+	}
 	for name, class := range declared {
 		if class == "either" {
 			continue // parameterised by a field; the method exists, value varies
 		}
-		method := regexp.MustCompile(
-			`func\s+\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*?\s*` +
-				regexp.QuoteMeta(name) + `\s*\)\s+xpfValidationPass\s*\(\s*\)\s*bool\b`,
-		)
-		var has bool
-		for _, f := range files {
-			b, _ := os.ReadFile(f)
-			var sb strings.Builder
-			for _, line := range strings.Split(string(b), "\n") {
-				if i := strings.Index(line, "//"); i >= 0 {
-					line = line[:i]
-				}
-				sb.WriteString(line)
-				sb.WriteByte('\n')
-			}
-			if method.MatchString(sb.String()) {
-				has = true
-				break
-			}
-		}
-		if !has {
+		if !overrides[name] {
 			t.Errorf("%s is declared %q but has no explicit xpfValidationPass "+
 				"method — it is inheriting the shim's `true`, which is the "+
 				"defect this census exists to prevent", name, class)
