@@ -282,36 +282,86 @@ fn publish_shared_session_fuses_nat_ambiguity_updates_under_one_lock() {
 /// call count is the publish-side new-flow rate; the acquisition count is the
 /// denominator that makes the contention count below interpretable.
 ///
-/// A forward (non-reverse) entry takes all three shared maps, so publishing
-/// one entry must add at least three acquisitions — that "at least 3, not
-/// exactly 1" shape is what pins the counter to the per-map acquisition
-/// rather than to the call.
+/// A forward (non-reverse) publish always takes the `shared_sessions` and
+/// `shared_nat_sessions` maps. Since 48b24754cc (#14746, #14383) it takes
+/// the `shared_forward_wire_sessions` map only when NAT rewrites the key
+/// (`forward_wire_key(entry) != entry.key`); before that change the wire
+/// lock was unconditional, so one publish always added three acquisitions.
+/// The two contract legs are therefore pinned separately and exactly:
+///
+///   * no NAT (`forward_wire_key == key`): exactly 2 counted acquisitions;
+///   * NAT-ful (`forward_wire_key != key`): exactly 3 counted acquisitions.
+///
+/// Collapsing this to a single `>= 2` would silently retire the NAT-ful
+/// leg's third-lock pin; collapsing it to `>= 3` is the stale expectation
+/// the no-NAT leg now correctly fails.
 ///
 /// RED on revert: restoring `lock_shared_recover` at the three
 /// `publish_shared_session` sites and dropping the `SHARED_SESSION_PUBLISHES`
-/// bump leaves both deltas at 0 and both assertions fail on their messages.
+/// bump leaves both call deltas at 0 and both publish assertions fail.
+/// Hoisting `lock_shared_publish(shared_forward_wire_sessions)` out of its
+/// `wire_key != entry.key` condition restores the pre-#14746 unconditional
+/// lock and the no-NAT leg fails (3 acquisitions, expected 2).
 #[test]
 fn publish_shared_session_counts_calls_and_lock_acquisitions() {
     // #4800: exclude every mover of the process-global counters for the
     // length of this test (#6819 flake class).
     let _g = counter_reader_guard();
     let maps = SharedMaps::new();
-    let before = publish_counters();
-    maps.publish(&entry(40000));
-    let after = publish_counters();
 
-    assert!(
-        after.publishes >= before.publishes + 1,
-        "publish_shared_session must count its call: {} -> {}",
-        before.publishes,
-        after.publishes
+    // Leg 1 — no NAT: the forward-wire lock is conditional, so the publish
+    // counts its call and exactly the two unconditional map acquisitions.
+    let plain = entry(40000);
+    assert_eq!(
+        crate::session::forward_wire_key(&plain.key, plain.decision.nat),
+        plain.key,
+        "fixture: a no-NAT entry must not produce a forward-wire alias"
     );
-    assert!(
-        after.acquisitions >= before.acquisitions + 3,
-        "a forward publish takes the sessions, nat_sessions and \
-         forward_wire_sessions maps — expected >= 3 counted acquisitions, \
-         saw {}",
-        after.acquisitions - before.acquisitions
+    let before_plain = publish_counters();
+    maps.publish(&plain);
+    let after_plain = publish_counters();
+    assert_eq!(
+        after_plain.publishes,
+        before_plain.publishes + 1,
+        "publish_shared_session must count its call: {} -> {}",
+        before_plain.publishes,
+        after_plain.publishes
+    );
+    assert_eq!(
+        after_plain.acquisitions,
+        before_plain.acquisitions + 2,
+        "a no-NAT forward publish takes only the sessions and nat_sessions \
+         maps; the forward-wire lock is conditional on NAT rewriting the \
+         key (48b24754cc, #14746) — expected exactly 2 counted \
+         acquisitions, saw {}",
+        after_plain.acquisitions - before_plain.acquisitions
+    );
+
+    // Leg 2 — NAT-ful: NAT rewrites the source, so the conditional
+    // forward-wire leg is entered and the publish takes all three maps.
+    let translated = nat_entry(0, Ipv4Addr::new(203, 0, 113, 7));
+    assert_ne!(
+        crate::session::forward_wire_key(&translated.key, translated.decision.nat),
+        translated.key,
+        "fixture: a NAT entry must produce a distinct forward-wire alias"
+    );
+    let before_nat = after_plain;
+    maps.publish(&translated);
+    let after_nat = publish_counters();
+    assert_eq!(
+        after_nat.publishes,
+        before_nat.publishes + 1,
+        "publish_shared_session must count its call: {} -> {}",
+        before_nat.publishes,
+        after_nat.publishes
+    );
+    assert_eq!(
+        after_nat.acquisitions,
+        before_nat.acquisitions + 3,
+        "a NAT-ful forward publish takes the sessions, nat_sessions and \
+         forward_wire_sessions maps — expected exactly 3 counted \
+         acquisitions, saw {}",
+        after_nat.acquisitions - before_nat.acquisitions
     );
 }
 
