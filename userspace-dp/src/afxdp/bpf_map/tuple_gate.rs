@@ -2,7 +2,9 @@ use crate::session::SessionKey;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+#[cfg(not(test))]
+use std::sync::LazyLock;
 
 use crate::sync_util::{lock_tolerant_counted, wait_timeout_tolerant_counted};
 use std::thread;
@@ -500,10 +502,34 @@ impl Drop for ClearFence {
     }
 }
 
+#[cfg(not(test))]
 static GLOBAL_TUPLE_GATE: LazyLock<Arc<TupleGate>> = LazyLock::new(|| Arc::new(TupleGate::new()));
 
+#[cfg(not(test))]
 pub(crate) fn global_tuple_gate() -> Arc<TupleGate> {
     Arc::clone(&GLOBAL_TUPLE_GATE)
+}
+
+// #18834: under `cfg(test)` every TEST THREAD owns its gate. cargo runs the
+// whole unit-test suite in ONE process across a thread pool, and ~55 fabric
+// cells install the same canonical tuple (10.0.61.102:12345 -> 8.8.8.8:443).
+// On the one process-global gate a sibling thread's live install claim made
+// this thread's new-flow install `gate_busy` (non-blocking, no wait), so the
+// install was refused: NAT rollback, 0 sessions, "install count 0" panics —
+// 6/8 parallel `tests_fabric_zone_stamp` runs red, 0/3 serial. The HA
+// `begin_clear` fence made it worse: it blocks EVERY tuple process-wide
+// while one clear cell runs. Separate test-thread gates isolate claims and
+// clear fences. Explicit Arc handles still share a gate across threads—
+// permits, leases, and fences carry that Arc—so deliberate intra-test
+// contention remains intact.
+#[cfg(test)]
+thread_local! {
+    static TEST_TUPLE_GATE: Arc<TupleGate> = Arc::new(TupleGate::new());
+}
+
+#[cfg(test)]
+pub(crate) fn global_tuple_gate() -> Arc<TupleGate> {
+    TEST_TUPLE_GATE.with(Arc::clone)
 }
 
 /// #17201: read the process-global TupleGate poison-recovery counter.
