@@ -190,9 +190,8 @@ fn seeded_worker(coord: &mut Coordinator, worker_id: u32) -> Arc<WorkerRuntimeAt
 /// distinct value, driven through the REAL `worker_runtime_snapshots`.
 ///
 /// Fail-on-swap: substitute any field in the `status.rs` literal for a
-/// same-typed sibling — the 30 fields below are ALL `u64`, so the compiler
-/// permits every one of the 870 ordered substitutions — and this reds naming
-/// the field.
+/// same-typed sibling. The compiler cannot distinguish these `u64` sources;
+/// distinct seeds make this test red and name the affected field.
 #[test]
 fn worker_runtime_status_binds_every_shared_scalar_to_its_own_source_6961() {
     let mut coord = Coordinator::new();
