@@ -4176,7 +4176,18 @@ fn shim_index_path_has_one_construction_and_one_lookup() {
         // mentions, all on the binding index path itself, none a
         // rebinding (both single-`let` bounds above are unmoved and
         // the queue still travels as the RawRxQueue wrapper).
-        ("lib.rs",               41,              5,               20),
+        // #18813: d1ea69f9aa (#16303, carried under PR #15946)
+        // added four mentions by threading the pinned construction's
+        // value through the degraded WG-steer path: the parameter on
+        // `is_degraded_local_or_control`, its two call sites
+        // (`try_xdp_userspace`, `degraded_ctrl_disabled_action`), and
+        // the `wg_steer_to_kernel` argument inside that function.
+        // Those are uses of the `userspace_ingress_metadata` value,
+        // not a second construction, arithmetic, or forged index.
+        // That commit's census was 41 -> 45. dc989cd4c7 (#17251)
+        // later removed one explanatory prose mention from lib.rs, so
+        // this current-tree pin is 44, not 45.
+        ("lib.rs",               44,              5,               20),
     ];
 
     // ---- …and `ctx` may not be rebound AT ALL. ---------------------------
