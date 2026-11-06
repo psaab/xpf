@@ -139,6 +139,7 @@ pub(in crate::afxdp) const XDP_BRANCH_ARM_NAMES: &[&str] = &[
     "meta_bounds_fail",                 // 24
     "ctrl_disabled_drop",               // 25
     "ctrl_disabled_local",              // 26
+    "session_miss_proxy_ndp",           // 27
 ];
 
 #[cfg(feature = "debug-log")]
