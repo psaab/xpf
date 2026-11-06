@@ -87,9 +87,10 @@ func TestProducerDeltaConvertsToSyncedValue9752(t *testing.T) {
 		t.Fatalf("converted value lost session identity: %+v", val)
 	}
 	// Hand off to the cluster link: the converted (key, value) pair as
-	// JSON. The round-trip is asserted so the file is proven lossless —
-	// production passes the structs in memory; the file is only the
-	// cycle-free carrier.
+	// JSON. The round-trip is asserted over JSON-carried fields; the sync-only
+	// AppTimeoutLogStated marker is intentionally omitted by SessionValue's
+	// json:"-" tag. Production passes structs in memory, and this file is only
+	// the cycle-free JSON carrier.
 	// Normalize clock readings for golden stability (the chain pins
 	// identity + stamp, not instants).
 	val.Created, val.LastSeen = 0, 0
@@ -97,6 +98,8 @@ func TestProducerDeltaConvertsToSyncedValue9752(t *testing.T) {
 		Key dataplane.SessionKey
 		Val dataplane.SessionValue
 	}{key, val}
+	roundTripWant := pair
+	roundTripWant.Val.AppTimeoutLogStated = false
 	wire, err := json.Marshal(pair)
 	if err != nil {
 		t.Fatalf("marshal converted pair: %v", err)
@@ -105,7 +108,7 @@ func TestProducerDeltaConvertsToSyncedValue9752(t *testing.T) {
 		Key dataplane.SessionKey
 		Val dataplane.SessionValue
 	}
-	if err := json.Unmarshal(wire, &rt); err != nil || rt != pair {
+	if err := json.Unmarshal(wire, &rt); err != nil || rt != roundTripWant {
 		t.Fatalf("value golden would not round-trip: %v", err)
 	}
 	const path = "../dataplane/userspace/testdata/synced_val_9752.json"
