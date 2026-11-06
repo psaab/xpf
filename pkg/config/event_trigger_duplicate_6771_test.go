@@ -64,7 +64,7 @@ func within6771(t *testing.T, cfg *Config) *EventWithin {
 // TestDuplicateTriggerOnTakesTheLastValue6771 is the defect proper.
 func TestDuplicateTriggerOnTakesTheLastValue6771(t *testing.T) {
 	cfg := eventTree6771(t,
-		"set event-options policy P events ev1",
+		"set event-options policy P events ping_probe_failed",
 		"set event-options policy P within 60 trigger on 3",
 		"set event-options policy P within 60 trigger on 9",
 	)
@@ -81,7 +81,7 @@ func TestDuplicateTriggerOnTakesTheLastValue6771(t *testing.T) {
 // would leave it open while this file still looked covered.
 func TestDuplicateTriggerUntilTakesTheLastValue6771(t *testing.T) {
 	cfg := eventTree6771(t,
-		"set event-options policy P events ev1",
+		"set event-options policy P events ping_probe_failed",
 		"set event-options policy P within 60 trigger until 4",
 		"set event-options policy P within 60 trigger until 11",
 	)
@@ -111,7 +111,7 @@ func TestDuplicateTriggerUntilTakesTheLastValue6771(t *testing.T) {
 // while corrupting the common config.
 func TestSingleTriggerIsUnchanged6771(t *testing.T) {
 	cfg := eventTree6771(t,
-		"set event-options policy P events ev1",
+		"set event-options policy P events ping_probe_failed",
 		"set event-options policy P within 60 trigger on 3",
 	)
 	w := within6771(t, cfg)
@@ -128,7 +128,7 @@ func TestSingleTriggerIsUnchanged6771(t *testing.T) {
 func TestContradictoryTriggerStillRejected6771(t *testing.T) {
 	tree := &ConfigTree{}
 	for _, c := range []string{
-		"set event-options policy P events ev1",
+		"set event-options policy P events ping_probe_failed",
 		"set event-options policy P within 60 trigger on 3",
 		"set event-options policy P within 60 trigger until 5",
 	} {
@@ -151,7 +151,7 @@ func TestContradictoryTriggerStillRejected6771(t *testing.T) {
 // holding so the trigger fix cannot collapse them.
 func TestMultipleWithinClausesUnaffected6771(t *testing.T) {
 	cfg := eventTree6771(t,
-		"set event-options policy P events ev1",
+		"set event-options policy P events ping_probe_failed",
 		"set event-options policy P within 60 trigger on 3",
 		"set event-options policy P within 120 trigger on 7",
 	)

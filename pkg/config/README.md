@@ -230,6 +230,13 @@ distinction).
   key itself stay uncredentialed, while other negative tests still
   satisfy unrelated admission gates.
 
+  **Event-options fireability gate (#14660):** strict commit rejects an
+  `event-options` event that xpf cannot fire; the known set is the
+  `KnownEventNames` SSOT, consistency-pinned against the RPM producers.
+  Fixture doctrine (#18876): event fixtures name a fireable event
+  (e.g. `ping_probe_failed`), never a synthetic name, so the compile
+  reaches the behaviour under test instead of the inert-event refusal.
+
 - `ValueType` — `value_type.go`. Classifies a typed leaf's value
   (`ValueRate`, `ValueByteSizeOrPercent`, `ValueDate`, `ValueString`, ...)
   and supplies the `?`-completion placeholder via `Placeholder()`.
