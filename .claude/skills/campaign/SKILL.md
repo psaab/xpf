@@ -167,8 +167,16 @@ driveable work remains.
   parallelism AND PR parallelism separately and alerts the parent
   with the `agents=` line; the PARENT alone reaps and refills
   lanes (single dispatch authority — keeper never dispatches).
-- **Internal task runners only**: agents via the internal `task` tool only.
-  NEVER external CLI model tools (codex/agy/claude CLIs) to run other models.
+- **Internal agent surfaces only, by reference**: dispatch every lane via
+  the harness's internal agent surfaces — the internal `task` tool (fresh
+  subagent threads), or `agent()` / `completion()` in eval for stateless
+  model calls. NEVER shell out to an external AI/LLM CLI or agent binary
+  (`claude`, `codex`, `agy`, `gemini`, `omp`, or any other) to run another
+  model, spawn a reviewer, or delegate work; they duplicate the harness and
+  lose its auth, model catalog, and tool policy. Reference skills by
+  `skill://` name or path — never inline or copy a skill's procedure into a
+  dispatch or another file. Record which internal surface and which resolved
+  model produced each result.
 - **Full engineer + triple hostile reviews**: every PR that changes
   shipped code or behaviour gets **three independent hostile
   domain-expert reviews at the FINAL head** (or covered by Step 4 item 0's delta rule) (findings folded, re-review

@@ -1,3 +1,35 @@
+## Workflow Sources — canonical, referenced, never copied
+
+Modelled on the mark-core layout (`../mark-core/README.md`): one canonical
+source per workflow rule, consumers reference it, and the durable home is
+classified before anything is added.
+
+- **Canonical sources.** Workflow methodology lives in exactly one file each:
+  the campaign orchestration in `.claude/skills/campaign/SKILL.md`, the
+  backlog plan in `docs/close-all-issues-plan.md` (which supersedes the skill
+  only where it says so), and each skill's own `SKILL.md`. Everything else
+  references these by path/skill name — never restates the methodology.
+  `engineer` is the reference pattern: a thin forwarder into
+  `triple-review`, holding no copy.
+- **Reference, don't vendor.** Reference a skill by its `skill://` name or
+  file path so there is one version to fix. When invoking it, forward the
+  arguments verbatim; don't import, inline, or paraphrase its procedure into
+  another file. A fix lands once, in the canonical file.
+- **Classify before adding.** Decide which kind of memory a new workflow note
+  is before writing it: reusable behaviour and standing orders go in the
+  owning skill; project knowledge goes in `AGENTS.md` or the owning doc;
+  session/board state goes in the campaign board/record files, not in a
+  skill. When in doubt, ask which file a reader of only that file would need.
+- **Skill format.** `.claude/skills/<name>/SKILL.md` with frontmatter
+  `name` (= directory name) and `description` written as trigger conditions,
+  not a summary. The description is what dispatch matches on.
+- **Ownership.** One writer lane per file/worktree; the orchestrator (parent)
+  is the single dispatch and landing authority. Reviewers read the canonical
+  source at a pinned head; they never copy it into their report. Durable
+  lessons discovered during work are written back to the owning skill as part
+  of finishing the task — that is how every consumer gets them. Never edit a
+  generated/copied consumer file and expect it to reach the source.
+
 ## Agent Roles
 
 Use these roles whenever work is split across multiple Codex agents.
@@ -90,7 +122,7 @@ Use these roles whenever work is split across multiple Codex agents.
 - The orchestrator (parent) is the single dispatch and landing authority. Monitors/keepers alert only; implementors and reviewers never land (no PRs, no merges — parent cherry-picks cleared branch commits onto master), and no agent reviews its own branch.
 - Keep lanes full: never let engineer or reviewer lanes idle while driveable work exists. Reserve capacity for landing branches and for researching new findings. Liveness is branch/PR commit-time plus live build/test procs, never output-mtime. Salvage a dead lane's uncommitted work in place; never re-dispatch over it or discard it. Before dispatching, check for in-flight work (open PRs, branches, existing worktrees) so finished or in-progress work is never redone.
 - Verify ground truth via `gh`/`git`. Agent completion notifications can be cross-wired or stale; never trust the notification body.
-- Dispatch agents only via internal task runners. Never use external CLI model tools to run other models.
+- Dispatch agents only via the harness's internal agent surfaces, by reference — the internal `task` tool (fresh subagent threads), or `agent()` / `completion()` in eval for stateless model calls. NEVER shell out to an external AI/LLM CLI or agent binary (`claude`, `codex`, `agy`, `gemini`, `omp`, or any other) to run another model, spawn a reviewer, or delegate work: those duplicate the harness, lose its auth, model catalog, and tool policy. NEVER use an external CLI model tool to run other models. Record which internal surface and which resolved model produced each result.
 - After creating a worktree, confirm the agent can report `pwd`, current commit, and assigned write scope before implementation begins.
 - Use these commands from the main checkout:
   - list worktrees: `git worktree list`

@@ -148,11 +148,12 @@ control flow.
 
 ## Step 2: Dispatch two declared-pool reviewers in parallel
 
-Dispatch two background reviewers via the internal `task` tool,
-each requesting a DISTINCT model from the declared pool (Muse
-Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro) other
-than the in-conversation Claude model. NEVER external CLI model
-tools (codex/agy/claude CLIs). Reviewers are READ-ONLY,
+Dispatch two background reviewers via the harness's internal agent
+surfaces (the internal `task` tool, fresh subagent threads), each
+requesting a DISTINCT model from the declared pool (Muse Wonder,
+Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro), referenced by
+agent/model name. NEVER shell out to an external AI/LLM CLI or agent
+binary. Reviewers are READ-ONLY,
 worktree-scoped at the PR head, and end with exactly one verdict
 line: MERGE-READY / MERGE-NEEDS-MINOR / MERGE-NEEDS-MAJOR.
 
@@ -556,8 +557,14 @@ a wrong verdict.
 
 ## Quick reference — internal dispatch only
 
-Reviewers run ONLY via the internal `task` tool with declared-pool
-models. NEVER external CLI model tools (codex/agy/claude CLIs).
+Reviewers run ONLY via the harness's internal agent surfaces — the
+internal `task` tool (fresh subagent threads), or `agent()` /
+`completion()` in eval for stateless votes — with declared-pool models,
+referenced by agent/model name, never copied into the prompt as a pasted
+procedure. NEVER shell out to an external AI/LLM CLI or agent binary
+(`claude`, `codex`, `agy`, `gemini`, `omp`, or any other) to run another
+model or spawn a reviewer. Record which internal surface and which
+resolved model produced each verdict.
 
 ```bash
 # PR data

@@ -174,10 +174,15 @@ git push -u origin refactor/${ISSUE}-${SCOPE_SLUG}
 
 ## Step 3: Dispatch two declared-pool plan reviewers in parallel
 
-Dispatch two background reviewers via the internal `task` tool,
-each requesting a DISTINCT model from the declared pool (Muse
-Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro). NEVER
-external CLI model tools. Both run in the background.
+Dispatch two background reviewers via the harness's internal agent
+surfaces — the internal `task` tool (fresh subagent threads), or
+`agent()` / `completion()` in eval for stateless votes — each requesting
+a DISTINCT model from the declared pool (Muse Wonder, Opus 5.5, Codex-6
+Astra, GLM-5.3, Kimi K3.1 Pro), referenced by agent/model name. NEVER
+shell out to an external AI/LLM CLI or agent binary (`claude`, `codex`,
+`agy`, `gemini`, `omp`, or any other) to run another model. Both run in
+the background. Record which internal surface and which resolved model
+produced each verdict.
 
 ### Plan-reviewer prompt template
 

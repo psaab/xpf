@@ -21,6 +21,15 @@ pool rotation, docs/test-only gate exemption, or scratch rule's
 `/var/worktrees/.cache/go-tmp` value where they contradict the
 corresponding plan section. All other skill rules remain in force.
 
+**Workflow structure (mark-core pattern).** This plan and
+`.claude/skills/campaign/SKILL.md` are the two canonical workflow
+sources; every other workflow file references them by path or
+`skill://` name and never copies their procedure. Agents are dispatched
+only via the harness's internal agent surfaces (the internal `task`
+tool, or `agent()` / `completion()` in eval), referenced by agent/model
+name — never via an external AI/LLM CLI or agent binary. See the
+"Workflow Sources" section of `AGENTS.md`.
+
 Goal updates incorporated:
 
 1. **Triple hostile review with named models on every PR** —
