@@ -2588,6 +2588,11 @@ names. Both rules apply only to `security-zone` statements directly under
   #9838 exclusion is kept: a bare top-level `interfaces <name>;` /
   `routing-instances <name>;` leaf still compiles no instance and still
   refuses, group or not.
+- Since #16865, fixtures whose subject is other IS-IS behavior need a valid
+  `family iso address <NET>` source in the protocol's scope (prefer lo0 for
+  global IS-IS; use a routing-instance member for instance IS-IS), rather than
+  weakening the strict missing-NET gate. Keep NET-less cases only when testing
+  that gate itself (#18878).
 - A brace-elided interface instance (`ge-0/0/0 unit 0 family inet
   address A;`, a packed leaf under `interfaces`) is promoted to its
   braced shape before group merge (#15032,

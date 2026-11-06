@@ -291,11 +291,13 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			diagnosticParent:  "protocols",
 			diagnosticKeyword: "isis",
 			warningFragment:   "`isis` containers under `protocols`",
-			dup: `protocols {
+			dup: `interfaces { lo0 { unit 0 { family iso address 49.0001.0100.0000.0001.00; } } }
+			protocols {
 				isis { interface ge-0/0/1.0; }
 				isis { interface ge-0/0/2.0; }
 			}`,
-			merged: `protocols { isis {
+			merged: `interfaces { lo0 { unit 0 { family iso address 49.0001.0100.0000.0001.00; } } }
+			protocols { isis {
 				interface ge-0/0/1.0;
 				interface ge-0/0/2.0;
 			} }`,
@@ -350,11 +352,13 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			diagnosticParent:  "protocols",
 			diagnosticKeyword: "isis",
 			warningFragment:   "`isis` containers under `protocols`",
-			dup: `protocols {
+			dup: `interfaces { lo0 { unit 0 { family iso address 49.0001.0100.0000.0001.00; } } }
+			protocols {
 				isis { interface ge-0/0/1.0; }
 				isis { authentication-key "k123"; authentication-type md5; }
 			}`,
-			merged: `protocols { isis {
+			merged: `interfaces { lo0 { unit 0 { family iso address 49.0001.0100.0000.0001.00; } } }
+			protocols { isis {
 				interface ge-0/0/1.0;
 				authentication-key "k123";
 				authentication-type md5;

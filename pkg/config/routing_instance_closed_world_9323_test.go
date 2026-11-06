@@ -242,6 +242,10 @@ func TestClosingTheInstanceDoesNotCloseWhatItContains9323(t *testing.T) {
 			"set routing-instances VRF-A protocols bgp group g1 peer-as 65001",
 			"set routing-instances VRF-A protocols bgp group g1 neighbor 10.0.0.1"}},
 		{"isis-interface", []string{
+			// #16865 scopes the NET per instance: ge-0/0/1 must belong to
+			// VRF-A for its `family iso address` to serve as VRF-A's NET.
+			"set routing-instances VRF-A interface ge-0/0/1.0",
+			"set interfaces ge-0/0/1 unit 0 family iso address 49.0001.0100.0000.0001.00",
 			"set routing-instances VRF-A protocols isis interface ge-0/0/1.0"}},
 		{"rib-static-route", []string{
 			"set routing-instances VRF-A routing-options rib VRF-A.inet.0 static route 10.0.0.0/8 next-hop 10.0.0.1"}},

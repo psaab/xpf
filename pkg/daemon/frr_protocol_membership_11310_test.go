@@ -33,7 +33,8 @@ func protocolMembershipConfig11310() *config.Config {
 		return &config.OSPFv3Config{Areas: []*config.OSPFv3Area{areaCfg}}
 	}
 	isis := func(refs ...string) *config.ISISConfig {
-		isisCfg := &config.ISISConfig{}
+		// #16865: the typed render fixture needs a NET for active IS-IS.
+		isisCfg := &config.ISISConfig{NET: "49.0001.0100.0000.0001.00"}
 		for _, ref := range refs {
 			isisCfg.Interfaces = append(isisCfg.Interfaces, &config.ISISInterface{Name: ref})
 		}

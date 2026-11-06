@@ -32,10 +32,15 @@ func TestJunos9RoutingKeysDecodedAtCompile15051(t *testing.T) {
 		"set protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
 		"set protocols bgp group g1 neighbor 10.0.0.1 authentication-key \"" + junos9Blob15051 + "\"",
 		"set protocols ospf area 0.0.0.0 interface ge-0/0/0.0 authentication md5 1 key \"" + junos9Blob15051 + "\"",
+		"set interfaces lo0 unit 0 family iso address 49.0001.0100.0000.0001.00",
 		"set protocols isis authentication-type md5",
 		"set protocols isis authentication-key \"" + junos9Blob15051 + "\"",
 		"set protocols isis interface ge-0/0/2.0 authentication-type md5",
 		"set protocols isis interface ge-0/0/2.0 authentication-key \"" + junos9Blob15051 + "\"",
+		// IS-IS is active in this fixture to exercise NET derivation; keep
+		// RIP's key live for the decode assertion without running the
+		// overlapping protocols rejected by #17735.
+		"set protocols rip disable",
 		"set protocols rip authentication-type md5",
 		"set protocols rip authentication-key \"" + junos9Blob15051 + "\"",
 		"set protocols rip neighbor ge-0/0/3",

@@ -126,8 +126,9 @@ func TestWildcardBareInstancesTakeGroup16543(t *testing.T) {
 		t.Errorf("OSPFv3 bare leaf: got %+v, want Cost=10 (#16543)", cfg.Protocols.OSPFv3)
 	}
 
-	// IS-IS interface: bare leaf must take the wildcard's metric.
-	isisText := `groups { AUTH { protocols { isis { interface <*> { metric 10; } } } } } apply-groups AUTH; protocols { isis { interface ge-0/0/0.0; } }`
+	// IS-IS interface: bare leaf must take the wildcard's metric. The lo0
+	// `family iso address` supplies the NET #16865 requires.
+	isisText := `groups { AUTH { protocols { isis { interface <*> { metric 10; } } } } } apply-groups AUTH; interfaces { lo0 { unit 0 { family iso address 49.0001.0100.0000.0001.00; } } } protocols { isis { interface ge-0/0/0.0; } }`
 	tree, perrs = NewParser(isisText).Parse()
 	if len(perrs) > 0 {
 		t.Fatalf("parse: %v", perrs)
