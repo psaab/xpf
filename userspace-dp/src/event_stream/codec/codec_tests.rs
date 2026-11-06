@@ -2172,3 +2172,39 @@ fn session_close_frame_carries_the_purge_retirement_marker_v6_10068() {
         assert_eq!(payload[payload.len() - 7], want);
     }
 }
+
+// #18927: a forward row carrying the producer alias marker sets
+// FLAG_FORWARD_WIRE_ALIAS on the open frame so an authoritative
+// re-export preserves its origin.
+#[test]
+fn test_encode_session_open_carries_forward_wire_alias_flag() {
+    let zones = test_zone_map();
+    let mut md = test_metadata();
+    md.forward_wire_alias_origin = true;
+    let decision = test_decision();
+    let key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "10.0.61.102".parse().unwrap(),
+        dst_ip: "172.16.80.202".parse().unwrap(),
+        src_port: 5001,
+        dst_port: 5211,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let frame = EventFrame::encode_session_open(1, &key, &decision, &md, &zones, false, 0, 0);
+    let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+    assert_eq!(
+        payload[26] & FLAG_FORWARD_WIRE_ALIAS,
+        FLAG_FORWARD_WIRE_ALIAS,
+        "marked forward row must set flags bit 1<<6"
+    );
+    md.forward_wire_alias_origin = false;
+    let frame = EventFrame::encode_session_open(1, &key, &decision, &md, &zones, false, 0, 0);
+    let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+    assert_eq!(
+        payload[26] & FLAG_FORWARD_WIRE_ALIAS,
+        0,
+        "unmarked forward row must leave flags bit 1<<6 clear"
+    );
+}

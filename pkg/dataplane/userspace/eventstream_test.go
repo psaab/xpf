@@ -2849,3 +2849,25 @@ func TestDecodeSessionEventAppTimeoutLogStated17780(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeSessionEventForwardWireAlias18927(t *testing.T) {
+	payload := make([]byte, 140)
+	payload[0] = 6
+	payload[1] = 6
+	payload[26] = SessionEventFlagForwardWireAlias
+	d, ok := decodeSessionEvent(payload)
+	if !ok {
+		t.Fatal("decodeSessionEvent returned false")
+	}
+	if !d.ForwardWireAliasOrigin {
+		t.Fatal("d.ForwardWireAliasOrigin = false, want true for a marked frame")
+	}
+	payload[26] = 0
+	d, ok = decodeSessionEvent(payload)
+	if !ok {
+		t.Fatal("decodeSessionEvent returned false")
+	}
+	if d.ForwardWireAliasOrigin {
+		t.Fatal("d.ForwardWireAliasOrigin = true, want false for an unmarked frame")
+	}
+}

@@ -1010,11 +1010,13 @@ fn rehome_or_retain_fabric_redirect_inner(
 }
 
 /// #18531/#18927: is this reverse row's un-NAT target one of its own wire
-/// addresses or (for TCP/UDP) ports, and did its imported forward row carry
-/// the producer-stamped forward-wire-alias marker? The marker distinguishes
-/// an extra alias from an identity translation, which has the same tuple/NAT
-/// fixed-point shape. NAT64 remains structurally excluded; NPTv6 uses the same
-/// address arms.
+/// addresses or (for TCP/UDP) ports, and is it alias-proven: either its
+/// imported forward row carried the producer-stamped forward-wire-alias
+/// marker, or it matches the pre-child-4 destination arm exactly (the
+/// legacy SNAT/NPTv6 companion shape, kept for unmarked rows from older
+/// peers). The marker distinguishes an extra alias from an identity
+/// translation, which has the same tuple/NAT fixed-point shape. NAT64
+/// remains structurally excluded; NPTv6 uses the same address arms.
 pub(in crate::afxdp) fn reverse_un_nat_targets_itself(
     key: &SessionKey,
     nat: NatDecision,

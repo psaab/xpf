@@ -2333,6 +2333,101 @@ fn worker_alias_import_books_no_translation_18531() {
     );
 }
 
+/// Legacy (unmarked) alias twin of the booking rule: an alias row from
+/// an older peer carries no producer marker, and booking keys on the
+/// alias shape alone, so it still books nothing and never refuses the
+/// canonical row in either import order (#18927 fold round 2).
+#[test]
+fn unmarked_alias_import_books_no_translation_18927() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+        name: "pool-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "p".to_string(),
+        pool_addresses: vec!["203.0.113.1/32".to_string()],
+        port_low: 1024,
+        port_high: 65535,
+        ..crate::SourceNATRuleSnapshot::default()
+    }]);
+    let used = |forwarding: &ForwardingState| {
+        crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports
+    };
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(40000),
+        ..NatDecision::default()
+    };
+    let canonical_key = crate::afxdp::testfx::test_key();
+    let alias_key = crate::session::forward_wire_key(&canonical_key, nat);
+    let entry = |key: crate::session::SessionKey| SyncedSessionEntry {
+        sibling_last_seen_ns: 0,
+        key,
+        decision: SessionDecision {
+            resolution: crate::afxdp::testfx::test_resolution(),
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: crate::afxdp::testfx::test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_ACK,
+        generation: 0,
+        session_id: 4243,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+        persistent_lease_hold: None,
+    };
+    assert!(
+        !entry(alias_key.clone()).metadata.forward_wire_alias_origin,
+        "fixture: the legacy alias is unmarked"
+    );
+    // Alias first, canonical second.
+    let mut sessions = SessionTable::new();
+    let ha = BTreeMap::new();
+    apply_commands(
+        &mut sessions,
+        &forwarding,
+        &ha,
+        vec![WorkerCommand::UpsertSynced(entry(alias_key.clone()))],
+    );
+    assert_eq!(used(&forwarding), 0, "an unmarked alias books no translation");
+    apply_commands(
+        &mut sessions,
+        &forwarding,
+        &ha,
+        vec![WorkerCommand::UpsertSynced(entry(canonical_key.clone()))],
+    );
+    assert_eq!(
+        used(&forwarding),
+        1,
+        "the canonical row books after the unmarked alias"
+    );
+    // Canonical first, alias second: the alias must not displace it.
+    let mut sessions = SessionTable::new();
+    apply_commands(
+        &mut sessions,
+        &forwarding,
+        &ha,
+        vec![
+            WorkerCommand::UpsertSynced(entry(canonical_key.clone())),
+            WorkerCommand::UpsertSynced(entry(alias_key.clone())),
+        ],
+    );
+    assert_eq!(
+        used(&forwarding),
+        1,
+        "the canonical booking survives the unmarked alias"
+    );
+}
+
 /// HA state of the node that took RG1 (WAN) while the peer keeps RG2 (LAN):
 /// where a fabric hit promotes a peer-synced alias.
 fn wan_taken_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {

@@ -196,7 +196,7 @@ func TestBuildSessionSyncRequestCarriesLogFlags(t *testing.T) {
 	valV4 := &dataplane.SessionValue{
 		IngressZone: 1,
 		EgressZone:  2,
-		LogFlags: dataplane.LogFlagSessionInit | dataplane.LogFlagSessionClose | dataplane.LogFlagForwardWireAlias,
+		LogFlags:    dataplane.LogFlagSessionInit | dataplane.LogFlagSessionClose | dataplane.LogFlagForwardWireAlias,
 	}
 	reqV4 := m.buildSessionSyncRequestV4("upsert", keyV4, valV4)
 	if !reqV4.LogSessionInit || !reqV4.LogSessionClose || !reqV4.ForwardWireAliasOrigin {

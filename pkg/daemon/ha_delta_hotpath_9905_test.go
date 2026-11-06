@@ -764,3 +764,24 @@ func TestHandleDeltaWithholdsWithoutConfig9905(t *testing.T) {
 		t.Fatal("warm entry clobbered by nil snapshot (want pointer stability)")
 	}
 }
+
+func TestDeltaConversionRestoresForwardWireAliasMarker18927(t *testing.T) {
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
+	delta := installTableDelta9752(t, "open")
+	delta.ForwardWireAliasOrigin = true
+	_, val, ok := userspaceSessionFromDeltaV4(delta, zoneIDs)
+	if !ok {
+		t.Fatal("marked delta must convert")
+	}
+	if val.LogFlags&dataplane.LogFlagForwardWireAlias == 0 {
+		t.Fatal("conversion must restore the alias marker onto the value")
+	}
+	delta.ForwardWireAliasOrigin = false
+	_, val, ok = userspaceSessionFromDeltaV4(delta, zoneIDs)
+	if !ok {
+		t.Fatal("unmarked delta must convert")
+	}
+	if val.LogFlags&dataplane.LogFlagForwardWireAlias != 0 {
+		t.Fatal("unmarked delta must not gain the alias marker")
+	}
+}
