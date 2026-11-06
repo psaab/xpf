@@ -461,15 +461,15 @@ fn worker_runtime_status_rows_are_not_transposed_across_workers_6961() {
 /// `cold_path_wrapper_ns_baseline`, `cold_path_wrapper_underflow_count` and
 /// `cold_path_snapshot_failed` are five `u64` fields written next to each other
 /// in the literal, so any pair of them can be transposed exactly as freely as
-/// the thirty above. They are bound separately because they do NOT share a name
-/// with their source — the literal strips a `cold_path_` prefix
+/// any pair of the shared scalars above. They are bound separately because
+/// their source names differ: the literal strips a `cold_path_` prefix
 /// (`cold_path_sample_phase: cold.sample_phase`) — so the name-once macro
 /// cannot express them, and because the fifth comes from a DIFFERENT call
 /// (`snapshot_failed_count()`) than the other four (`snapshot()`).
 ///
-/// Each gets a distinct value, and the values are distinct from the thirty
-/// above as well: a cross-group transposition is no less possible than an
-/// in-group one.
+/// Each gets a distinct value, and all differ from the shared-scalar seeds
+/// above. A cross-group transposition is no less possible than an in-group
+/// one.
 #[test]
 fn worker_runtime_status_binds_the_cold_path_scalars_6961() {
     use crate::afxdp::cold_path_hist::{ClockSource, WorkerColdPathAtomics};

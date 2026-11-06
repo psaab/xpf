@@ -136,7 +136,7 @@ Differences that matter (#1881):
   (#6961).** `status.rs::worker_runtime_snapshots` maps
   `WorkerRuntimeAtomics` -> `WorkerRuntimeCounters` -> the wire
   `WorkerRuntimeStatus` through two long field-by-field literals, and
-  **thirty of the fields are `u64` with the same name on both ends** —
+  **48 of the fields are `u64` with the same name on both ends** —
   so substituting any one for a same-typed sibling
   (`new_flow_installs: s.session_create_drops`, two
   `cos_queue_lease_undergrant_*` transposed) compiled and reddened
