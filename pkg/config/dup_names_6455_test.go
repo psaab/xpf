@@ -111,8 +111,8 @@ func TestDup6455GroupFragmentCoalescingAccepted(t *testing.T) {
 	// ge-0/0/0 carrying both units.
 	t.Run("interface fragments across two group roots", func(t *testing.T) {
 		cfg, err := CompileConfig(parseHierText(t, `groups { G {
-    interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
-    interfaces { ge-0/0/0 { unit 1 { family inet { address 10.0.1.1/24; } } } }
+    interfaces { ge-0/0/0 { vlan-tagging; unit 0 { family inet { address 10.0.0.1/24; } } } }
+    interfaces { ge-0/0/0 { unit 1 { vlan-id 1; family inet { address 10.0.1.1/24; } } } }
 } }
 apply-groups G;`))
 		if err != nil {

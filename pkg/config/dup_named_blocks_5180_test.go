@@ -70,7 +70,9 @@ func TestDuplicateNamedBlockRejected(t *testing.T) {
 
 	t.Run("flat-set repeated interface merges (dual-AST equivalence)", func(t *testing.T) {
 		tree := setTree5180(t, []string{
+			"set interfaces eth0 vlan-tagging",
 			"set interfaces eth0 unit 0 family inet address 10.0.1.1/24",
+			"set interfaces eth0 unit 1 vlan-id 1",
 			"set interfaces eth0 unit 1 family inet address 10.0.2.1/24",
 		})
 		cfg, err := CompileConfig(tree)

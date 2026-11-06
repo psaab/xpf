@@ -262,7 +262,9 @@ func TestUnitAliasCompileParityHarness_5878(t *testing.T) {
 		{
 			name: "clean-distinct-units",
 			cmds: append(canonParityBase(),
+				"set interfaces ge-0/0/0 vlan-tagging",
 				"set interfaces ge-0/0/0 unit 0 family inet filter input good",
+				"set interfaces ge-0/0/0 unit 1 vlan-id 1",
 				"set interfaces ge-0/0/0 unit 1 family inet filter input evil",
 			),
 			wantReject: false,

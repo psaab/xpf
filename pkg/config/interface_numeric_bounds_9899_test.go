@@ -455,7 +455,8 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 		{
 			name: "outer 4095 flat", leaf: "vlan-id", raw: "4095",
 			flat: []string{
-				"set interfaces ge-0/0/2 unit 50 vlan-id 4095",
+				"set interfaces ge-0/0/2 vlan-tagging",
+				"set interfaces ge-0/0/2 unit 0 vlan-id 4095",
 				"set interfaces ge-0/0/2 unit 51 vlan-id 10",
 			},
 		},
@@ -463,7 +464,8 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 			name: "outer negative hier", leaf: "vlan-id", raw: "-1",
 			hier: `interfaces {
   ge-0/0/2 {
-    unit 50 {
+    vlan-tagging;
+    unit 0 {
       vlan-id -1;
     }
     unit 51 {
@@ -477,7 +479,8 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 			// failure reads as a collision, not a canonical-form failure.
 			name: "outer plus sign flat", leaf: "vlan-id", raw: "+11",
 			flat: []string{
-				"set interfaces ge-0/0/2 unit 50 vlan-id +11",
+				"set interfaces ge-0/0/2 vlan-tagging",
+				"set interfaces ge-0/0/2 unit 0 vlan-id +11",
 				"set interfaces ge-0/0/2 unit 51 vlan-id 10",
 			},
 		},
@@ -485,7 +488,8 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 			name: "outer trailing space hier", leaf: "vlan-id", raw: "10 ",
 			hier: `interfaces {
   ge-0/0/2 {
-    unit 50 {
+    vlan-tagging;
+    unit 0 {
       vlan-id "10 ";
     }
     unit 51 {
@@ -497,13 +501,15 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 		{
 			name: "outer garbage flat", leaf: "vlan-id", raw: "abc",
 			flat: []string{
-				"set interfaces ge-0/0/2 unit 50 vlan-id abc",
+				"set interfaces ge-0/0/2 vlan-tagging",
+				"set interfaces ge-0/0/2 unit 0 vlan-id abc",
 				"set interfaces ge-0/0/2 unit 51 vlan-id 10",
 			},
 		},
 		{
 			name: "inner 4095 flat", leaf: "inner-vlan-id", raw: "4095", isInner: true,
 			flat: []string{
+				"set interfaces ge-0/0/2 vlan-tagging",
 				"set interfaces ge-0/0/2 unit 50 vlan-id 10",
 				"set interfaces ge-0/0/2 unit 50 inner-vlan-id 4095",
 				"set interfaces ge-0/0/2 unit 51 vlan-id 10",
@@ -513,6 +519,7 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 			name: "inner plus sign hier", leaf: "inner-vlan-id", raw: "+100", isInner: true,
 			hier: `interfaces {
   ge-0/0/2 {
+    vlan-tagging;
     unit 50 {
       vlan-id 10;
       inner-vlan-id +100;
@@ -555,8 +562,8 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 			if ifc == nil {
 				t.Fatalf("parent must survive a unit quarantine; got nil")
 			}
-			if got := ifc.Units[50]; got != nil {
-				t.Errorf("lenient must SKIP unit 50 (%s); got VlanID=%d — tagged->untagged fallback", what, got.VlanID)
+			if got := ifc.Units[0]; got != nil {
+				t.Errorf("lenient must SKIP unit 0 (%s); got VlanID=%d — tagged->untagged fallback", what, got.VlanID)
 			}
 			if sib := ifc.Units[51]; sib == nil || sib.VlanID != 10 {
 				t.Errorf("sibling unit 51 (vlan 10) must survive; got %+v", sib)
@@ -565,11 +572,11 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 	}
 
 	t.Run("valid vlan zero untagged flat", func(t *testing.T) {
-		cfg, err := CompileConfig(ifaceNumFlatTree9899(t, "set interfaces ge-0/0/2 unit 50 vlan-id 0"))
+		cfg, err := CompileConfig(ifaceNumFlatTree9899(t, "set interfaces ge-0/0/2 unit 0 vlan-id 0"))
 		if err != nil {
 			t.Fatalf("VLAN 0 must compile: %v", err)
 		}
-		if u := cfg.Interfaces.Interfaces["ge-0/0/2"].Units[50]; u == nil || u.VlanID != 0 {
+		if u := cfg.Interfaces.Interfaces["ge-0/0/2"].Units[0]; u == nil || u.VlanID != 0 {
 			t.Fatalf("VLAN 0 must compile as 0; got %+v", u)
 		}
 	})
@@ -577,6 +584,7 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 	t.Run("valid vlan boundaries hier", func(t *testing.T) {
 		cfg, err := CompileConfig(parseHierText(t, `interfaces {
   ge-0/0/2 {
+    vlan-tagging;
     unit 50 {
       vlan-id 1;
     }
@@ -599,18 +607,19 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 
 	t.Run("valid omitted vlan flat", func(t *testing.T) {
 		cfg, err := CompileConfig(ifaceNumFlatTree9899(t,
-			"set interfaces ge-0/0/2 unit 50 family inet address 10.0.50.1/24",
+			"set interfaces ge-0/0/2 unit 0 family inet address 10.0.50.1/24",
 		))
 		if err != nil {
 			t.Fatalf("omitted vlan-id must compile: %v", err)
 		}
-		if u := cfg.Interfaces.Interfaces["ge-0/0/2"].Units[50]; u == nil || u.VlanID != 0 {
+		if u := cfg.Interfaces.Interfaces["ge-0/0/2"].Units[0]; u == nil || u.VlanID != 0 {
 			t.Fatalf("omitted vlan-id is VlanID 0; got %+v", u)
 		}
 	})
 
 	t.Run("qinq inner zero strict refuses lenient survives", func(t *testing.T) {
 		cmds := []string{
+			"set interfaces ge-0/0/2 vlan-tagging",
 			"set interfaces ge-0/0/2 unit 50 vlan-id 10",
 			"set interfaces ge-0/0/2 unit 50 inner-vlan-id 0",
 		}

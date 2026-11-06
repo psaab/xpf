@@ -278,7 +278,7 @@ func TestCompactFilterHeadsRejectAndWarn12090(t *testing.T) {
 		name string
 		text string
 	}{
-		{"unit-filter", "interfaces { ge-0/0/0 { unit 1 filter input protect; } }"},
+		{"unit-filter", "interfaces { ge-0/0/0 { unit 0 filter input protect; } }"},
 		{"unit-simple-filter", "interfaces { ge-0/0/0 { unit 0 simple-filter output protect; } }"},
 		{"forwarding-root-filter", "forwarding-options filter input protect;"},
 		{"forwarding-root-simple-filter", "forwarding-options simple-filter input protect;"},

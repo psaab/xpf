@@ -19,6 +19,9 @@ delete interfaces reth1 unit 0 family inet filter output
 delete firewall family inet6 filter bandwidth-output-reverse
 delete interfaces reth1 unit 0 family inet6 filter output
 
+set interfaces reth0 vlan-tagging
+set interfaces reth0 unit 80 vlan-id 80
+
 set class-of-service forwarding-classes queue 0 best-effort
 set class-of-service forwarding-classes queue 1 iperf-100m
 set class-of-service forwarding-classes queue 2 iperf-1g

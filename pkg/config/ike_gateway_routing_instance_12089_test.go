@@ -71,6 +71,8 @@ func TestIKEGatewayRoutingInstanceRefused12089(t *testing.T) {
 		{
 			name: "bare external-interface selects nonzero addressed unit",
 			lines: []string{
+				"set interfaces ge-0/0/1 vlan-tagging",
+				"set interfaces ge-0/0/1 unit 1 vlan-id 1",
 				"set interfaces ge-0/0/1 unit 1 family inet address 192.0.2.1/24",
 				"set security ike gateway gw address 203.0.113.1",
 				"set security ike gateway gw external-interface ge-0/0/1",
@@ -83,7 +85,9 @@ func TestIKEGatewayRoutingInstanceRefused12089(t *testing.T) {
 		{
 			name: "bare external-interface selects first matching family unit",
 			lines: []string{
+				"set interfaces ge-0/0/1 vlan-tagging",
 				"set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8::1/64",
+				"set interfaces ge-0/0/1 unit 1 vlan-id 1",
 				"set interfaces ge-0/0/1 unit 1 family inet address 192.0.2.1/24",
 				"set security ike gateway gw address 203.0.113.1",
 				"set security ike gateway gw external-interface ge-0/0/1",
@@ -241,7 +245,9 @@ func TestIKEGatewayRoutingInstanceAccepted12089(t *testing.T) {
 		{
 			name: "bare external-interface ignores later scoped unit",
 			lines: []string{
+				"set interfaces ge-0/0/1 vlan-tagging",
 				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/1 unit 1 vlan-id 1",
 				"set interfaces ge-0/0/1 unit 1 family inet address 198.51.100.1/24",
 				"set security ike gateway gw address 203.0.113.1",
 				"set security ike gateway gw external-interface ge-0/0/1",
@@ -252,7 +258,9 @@ func TestIKEGatewayRoutingInstanceAccepted12089(t *testing.T) {
 		{
 			name: "unit-specific external-interface ignores sibling unit",
 			lines: []string{
+				"set interfaces ge-0/0/1 vlan-tagging",
 				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/1 unit 1 vlan-id 1",
 				"set interfaces ge-0/0/1 unit 1 family inet address 198.51.100.1/24",
 				"set security ike gateway gw address 203.0.113.1",
 				"set security ike gateway gw external-interface ge-0/0/1.0",

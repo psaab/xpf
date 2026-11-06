@@ -65,9 +65,11 @@ func TestVRRPCrossGroupDifferentInterfacesCommits(t *testing.T) {
 	}
 	// Different unit of the same interface is also a different kernel device.
 	tree2 := buildTree(t, []string{
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.2/24 vrrp-group 1 virtual-address 10.0.0.100/24",
+		"set interfaces ge-0/0/0 unit 1 vlan-id 1",
 		"set interfaces ge-0/0/0 unit 1 family inet address 10.0.1.2/24 vrrp-group 1 virtual-address 10.0.0.100/24",
-		"set interfaces ge-0/0/0 unit 1 family inet address 10.0.0.3/24 vrrp-group 1 virtual-address 10.0.0.100/24",
+		"set interfaces ge-0/0/0 unit 1 family inet address 10.0.0.3/24",
 	})
 	if _, err := CompileConfig(tree2); err != nil {
 		t.Fatalf("same VIP on different units must commit: %v", err)

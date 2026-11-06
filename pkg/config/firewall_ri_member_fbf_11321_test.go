@@ -90,6 +90,8 @@ func TestFBFOnBareRoutingInstanceMemberFansOutForGate11321(t *testing.T) {
 		"set routing-instances steer-ri instance-type forwarding",
 		"set firewall family inet filter member-fbf term steer from source-address 192.0.2.0/24",
 		"set firewall family inet filter member-fbf term steer then routing-instance steer-ri",
+		"set interfaces ge-0/0/1 vlan-tagging",
+		"set interfaces ge-0/0/1 unit 1 vlan-id 1",
 		"set interfaces ge-0/0/1 unit 1 family inet filter input member-fbf",
 	)
 	if _, err := CompileConfig(tree); err == nil ||

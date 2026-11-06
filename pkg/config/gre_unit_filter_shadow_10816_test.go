@@ -91,8 +91,10 @@ func TestGreUnitFilterShadowAdvisory10816(t *testing.T) {
 
 	// (e) non-tunnel cross-filter units → silent (no decap fan-out).
 	cfgE := compile(t, append(append([]string{}, filters...),
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.1/24",
 		"set interfaces ge-0/0/0 unit 0 family inet filter input F2",
+		"set interfaces ge-0/0/0 unit 1 vlan-id 1",
 		"set interfaces ge-0/0/0 unit 1 family inet address 192.0.2.2/24",
 		"set interfaces ge-0/0/0 unit 1 family inet filter input F1",
 	))

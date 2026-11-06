@@ -60,7 +60,11 @@ func TestUnit5829_MalformedRejectedAtCommit(t *testing.T) {
 		},
 		{
 			name: "out-of-range unit (> MaxLogicalUnit)",
-			cmds: []string{"set interfaces ge-0-0-0 unit 16386 family inet address 10.0.1.1/24"},
+			cmds: []string{
+				"set interfaces ge-0-0-0 vlan-tagging",
+				"set interfaces ge-0-0-0 unit 16386 vlan-id 1",
+				"set interfaces ge-0-0-0 unit 16386 family inet address 10.0.1.1/24",
+			},
 			want: `"16386"`,
 		},
 	}
@@ -105,7 +109,15 @@ func TestUnit5829_ValidUnitCompilesFilterReachesMap(t *testing.T) {
 	}{
 		{[]string{def, "set interfaces ge-0-0-0 unit 0 family inet filter input FOO"}, 0},
 		// Max-boundary unit remains accepted.
-		{[]string{def, "set interfaces ge-0-0-0 unit 16385 family inet filter input FOO"}, 16385},
+		{
+			[]string{
+				def,
+				"set interfaces ge-0-0-0 vlan-tagging",
+				"set interfaces ge-0-0-0 unit 16385 vlan-id 1",
+				"set interfaces ge-0-0-0 unit 16385 family inet filter input FOO",
+			},
+			16385,
+		},
 	}
 	for _, tc := range cases {
 		tree := flatTreeFromSets(t, tc.cmds...)

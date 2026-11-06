@@ -31,7 +31,10 @@ func TestZoneInterfaceMultiZoneFailsCommit(t *testing.T) {
 
 func TestZoneInterfaceConflictDiagnosticDeterministic(t *testing.T) {
 	lines := []string{
+		"set interfaces ge-0/0/0 vlan-tagging",
+		"set interfaces ge-0/0/0 unit 2 vlan-id 2",
 		"set interfaces ge-0/0/0 unit 2 family inet address 10.0.0.2/24",
+		"set interfaces ge-0/0/0 unit 10 vlan-id 10",
 		"set interfaces ge-0/0/0 unit 10 family inet address 10.0.0.10/24",
 		"set security zones security-zone aaa interfaces ge-0/0/0.2",
 		"set security zones security-zone bbb interfaces ge-0/0/0.10",
@@ -149,7 +152,9 @@ func TestZoneInterfaceSameZoneRepeatNotFlagged(t *testing.T) {
 // lookups is a first-writer-wins artifact, not a second operator assignment.
 func TestZoneInterfaceDistinctUnitsAcrossZonesNotFlagged(t *testing.T) {
 	tree := buildTree(t, []string{
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
+		"set interfaces ge-0/0/0 unit 1 vlan-id 1",
 		"set interfaces ge-0/0/0 unit 1 family inet address 10.0.1.1/24",
 		"set security zones security-zone trust interfaces ge-0/0/0.0",
 		"set security zones security-zone untrust interfaces ge-0/0/0.1",

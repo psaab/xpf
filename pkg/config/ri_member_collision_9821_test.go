@@ -201,6 +201,8 @@ func TestRIMemberDeclaredCollisionPaddedSpellingCompiles9821(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := compile9821(t,
+				"set interfaces p vlan-tagging",
+				"set interfaces p unit 1 vlan-id 1",
 				"set interfaces p unit 1 family inet address 10.9.0.1/24",
 				"set interfaces p unit 0 family inet address 10.9.0.2/24",
 				"set interfaces "+tc.iface+" unit 0 family inet address 10.9.1.1/24",

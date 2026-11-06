@@ -31,7 +31,7 @@ func TestUnitDisable14575(t *testing.T) {
 		return cfg
 	}
 
-	cfg := hier(t, `interfaces { ge-0/0/1 { unit 0 { disable; family inet { address 10.0.1.1/24; } } unit 1 { family inet { address 10.0.2.1/24; } } } }`)
+	cfg := hier(t, `interfaces { ge-0/0/1 { vlan-tagging; unit 0 { disable; family inet { address 10.0.1.1/24; } } unit 1 { vlan-id 1; family inet { address 10.0.2.1/24; } } } }`)
 	ifc := cfg.Interfaces.Interfaces["ge-0/0/1"]
 	if ifc == nil {
 		t.Fatal("hier: ge-0/0/1 missing")
@@ -52,8 +52,10 @@ func TestUnitDisable14575(t *testing.T) {
 
 	// Flat-set spelling.
 	flat := setTree(t,
+		"set interfaces ge-0/0/1 vlan-tagging",
 		"set interfaces ge-0/0/1 unit 0 disable",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/1 unit 1 vlan-id 1",
 		"set interfaces ge-0/0/1 unit 1 family inet address 10.0.2.1/24",
 	)
 	if err := SchemaValidate(flat); err != nil {

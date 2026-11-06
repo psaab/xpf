@@ -356,6 +356,8 @@ func TestHB166_T5_FilterForwardingClassUnmaterialized_Warns(t *testing.T) {
 				filterBinding = "set interfaces reth1 unit 0 family " + tc.family + " filter " + tc.direction + " f"
 			}
 			cmds := []string{
+				"set interfaces reth0 vlan-tagging",
+				"set interfaces reth0 unit 80 vlan-id 80",
 				"set interfaces reth0 unit 80 family inet address 198.51.100.80/24",
 				"set interfaces reth0 unit 80 family inet6 address 2001:db8:80::1/64",
 				"set interfaces reth1 unit 0 family inet address 198.51.100.1/24",
@@ -386,6 +388,8 @@ func TestHB166_T5_FilterForwardingClassUnmaterialized_Warns(t *testing.T) {
 
 func TestHB166_T5_FilterForwardingClassSyntheticBestEffort_NoWarn(t *testing.T) {
 	cfg := hb166Compile(t,
+		"set interfaces reth0 vlan-tagging",
+		"set interfaces reth0 unit 80 vlan-id 80",
 		"set class-of-service forwarding-classes queue 0 best-effort",
 		"set class-of-service forwarding-classes queue 5 voice",
 		"set class-of-service schedulers sched-voice priority strict-high",
@@ -403,6 +407,8 @@ func TestHB166_T5_FilterForwardingClassSyntheticBestEffort_NoWarn(t *testing.T) 
 
 func TestHB166_T5_FilterForwardingClassNoRuntime_NoWarn(t *testing.T) {
 	cfg := hb166Compile(t,
+		"set interfaces reth0 vlan-tagging",
+		"set interfaces reth0 unit 80 vlan-id 80",
 		"set class-of-service forwarding-classes queue 5 voice",
 		"set class-of-service interfaces reth0 unit 80 priority-low-min-share 100k",
 		"set firewall family inet filter f term mark then forwarding-class voice",
@@ -417,6 +423,8 @@ func TestHB166_T5_FilterForwardingClassNoRuntime_NoWarn(t *testing.T) {
 
 func TestHB166_T5_FilterForwardingClassMaterializedByName_Warns(t *testing.T) {
 	cfg := hb166Compile(t,
+		"set interfaces reth0 vlan-tagging",
+		"set interfaces reth0 unit 80 vlan-id 80",
 		"set class-of-service forwarding-classes queue 0 best-effort",
 		"set class-of-service forwarding-classes queue 5 voice",
 		"set class-of-service schedulers sched-be priority low",
@@ -443,6 +451,8 @@ func TestHB166_T5_FilterForwardingClassMaterializedByName_Warns(t *testing.T) {
 
 func TestHB166_T5_FilterForwardingClassClassifierAdmission_Warns(t *testing.T) {
 	cfg := hb166Compile(t,
+		"set interfaces reth0 vlan-tagging",
+		"set interfaces reth0 unit 80 vlan-id 80",
 		"set class-of-service forwarding-classes queue 0 best-effort",
 		"set class-of-service forwarding-classes queue 5 voice",
 		"set class-of-service classifiers dscp cls forwarding-class best-effort loss-priority low code-points 0",
@@ -459,6 +469,8 @@ func TestHB166_T5_FilterForwardingClassClassifierAdmission_Warns(t *testing.T) {
 
 func TestHB166_T5_FilterForwardingClassRewriteAdmission_Warns(t *testing.T) {
 	cfg := hb166Compile(t,
+		"set interfaces reth0 vlan-tagging",
+		"set interfaces reth0 unit 80 vlan-id 80",
 		"set class-of-service forwarding-classes queue 0 best-effort",
 		"set class-of-service forwarding-classes queue 5 voice",
 		"set class-of-service rewrite-rules dscp rw forwarding-class best-effort loss-priority low code-point 0",
