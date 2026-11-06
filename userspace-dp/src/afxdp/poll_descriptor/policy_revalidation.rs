@@ -1798,12 +1798,13 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // absence; it is structural, not staleness evidence). Decline:
     // keep session and serve this packet by the session (the caller
     // proceeds past revalidation; only a PolicyRevocation drops).
-    // The escape is an actual NAT-binding
-    // change: the judged row was revalidated under an OLDER config
-    // generation and the live config epoch has advanced past it
+    // The decline's escape requires either a validator reason
+    // (`InvalidNoLiveDynamicRules` or `InvalidDynamicTranslationRebound`), or
+    // an actual NAT-binding change: the judged row was revalidated under an
+    // OLDER config generation and the live config epoch has advanced past it
     // (`source_nat_revalidated.config_generation` lags the live
-    // `forwarding_revalidation_gen.config_generation`) — a withdrawn
-    // or re-bound translation under the new epoch still revokes here.
+    // `forwarding_revalidation_gen.config_generation`) — a withdrawn or
+    // re-bound translation under the new epoch still revokes here.
     // Scope note (GLM Final5, no overclaim): this decline is only
     // reachable on a REVERSE hit whose judged forward metadata
     // carries no forward VLAN (`forward_ingress_vlan_id` None). A

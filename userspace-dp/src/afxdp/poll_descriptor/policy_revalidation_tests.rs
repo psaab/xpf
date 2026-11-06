@@ -9547,4 +9547,3 @@ fn non_owner_gateway_fallback_predicate_table_18691() {
         assert_eq!(p(&forwarding, ha.map(|h| (h, now_secs)), key, &judged), want, "{name}");
     }
 }
-

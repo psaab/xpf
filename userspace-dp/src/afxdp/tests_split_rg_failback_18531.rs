@@ -2764,4 +2764,3 @@ fn rg_return_reply_revokes_after_refresh_on_rebound_rule_18927() {
         "after revocation the next reverse packet has no session"
     );
 }
-
