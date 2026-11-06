@@ -155,3 +155,27 @@ func TestDuplicatePoolRuleIsAnnotated17253(t *testing.T) {
 		t.Fatalf("duplicate-pool finding was rendered as an action contradiction:\n%s", got)
 	}
 }
+
+func TestUnknownReasonDoesNotFallBackToActionless17253(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reason config.LenientNATTerminalActionReason
+	}{
+		{name: "empty", reason: ""},
+		{name: "unknown", reason: "future-reason"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := actionlessSourceCfg7640()
+			cfg.LenientNATTerminalActionRules[0].Reason = tc.reason
+
+			var b strings.Builder
+			RenderSourceRuleDetail(context.Background(), &b, cfg, nil, nil)
+			got := b.String()
+			if strings.Contains(got, "ADMITTED BY TOLERANT LOAD") ||
+				strings.Contains(got, "falls through") {
+				t.Fatalf("reason %q was rendered with the actionless consequence:\n%s",
+					tc.reason, got)
+			}
+		})
+	}
+}
