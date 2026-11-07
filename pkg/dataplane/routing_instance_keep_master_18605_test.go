@@ -324,3 +324,20 @@ func assertRenderedKeepMaster18605(t *testing.T, result *CompileResult, name str
 		t.Fatalf("%s rendered KeepMaster = %v, want %v; file:\n%s", name, got, want, content)
 	}
 }
+
+// #18607 combined shape (Kimi residual): a DISABLED routing-instance
+// member row is compiled by the dataplane (Disable reaches the row via
+// the interface config) and must render KeepMaster=yes through
+// networkd.Apply — the daemon binds RI members without a disable check.
+func TestDisabledRoutingInstanceMemberKeepsMaster18607(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Disable: true, Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{
+		Name: "blue", Interfaces: []string{"ge-0/0/0"},
+	}}
+	result := compileNetworkdRows18605(t, cfg, "ge-0-0-0")
+	assertVRFName18605(t, result, "ge-0-0-0", "vrf-blue")
+	assertRenderedKeepMaster18605(t, result, "ge-0-0-0", true)
+}
