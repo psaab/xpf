@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -414,6 +415,17 @@ func collectURLValues(tree *ConfigTree) []string {
 // command, is still found because matching is on the final rendered
 // bytes, not on which formatter produced them.
 func scrubSecretValuesText(values []string, text string) string {
+	// Longest first (Kimi fold at b141027483): sequential ReplaceAll
+	// lets a shorter needle that is a substring of a longer one fire
+	// first and corrupt the longer match — "@" (collected from an
+	// archive-sites token) rewriting ":p@" to ":p<redacted>" leaves the
+	// inline password standing. collectURLValues returns traversal
+	// order, so sort a copy here where every consumer is safe.
+	ordered := append([]string(nil), values...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return len(ordered[i]) > len(ordered[j])
+	})
+	values = ordered
 	for _, v := range values {
 		if v == "" {
 			continue

@@ -101,6 +101,28 @@ func TestSchemaExitScrubNeverEchoesURLValue18997(t *testing.T) {
 	}
 }
 
+// #18997 overlapping-needle arm (Kimi delta at b141027483): "@" and
+// ":p@" are both RedactURL-transformed URL tokens; if the shorter "@"
+// needle fires first, ":p@" is rewritten to ":p<redacted>" and the
+// inline password stands. collectURLValues returns traversal order, so
+// scrubSecretValuesText must apply needles longest-first (as
+// collectSecretValues itself already sorts). Tree order below puts
+// the short needle first on purpose.
+func TestSchemaExitScrubOverlappingURLNeedles18997(t *testing.T) {
+	tree := buildRedactTree(t, []string{
+		`set system archival configuration archive-sites "@" password "s3cr3t"`,
+		`set system archival configuration archive-sites ":p@" password "s3cr3t"`,
+	})
+	foreign := fmt.Errorf("archive fetch failed for :p@")
+	got := scrubSchemaErrorSecrets(tree, foreign)
+	if strings.Contains(got.Error(), ":p@") || strings.Contains(got.Error(), ":p<") {
+		t.Errorf("shorter URL needle corrupted the longer credential needle (#18997): %v", got)
+	}
+	if !strings.Contains(got.Error(), SecretRedacted) {
+		t.Errorf("overlapping URL credential was not scrubbed at all: %v", got)
+	}
+}
+
 // #18997 short-URL arm (Kimi seat): a credential-bearing URL token can be
 // shorter than beltSecretValues' 4-byte floor ("a@b" is 3 bytes, ":p@"
 // carries an inline password) yet is still transformed by RedactURL.
