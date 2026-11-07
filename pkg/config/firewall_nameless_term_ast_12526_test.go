@@ -363,3 +363,66 @@ func TestCompileConfigLenientTwoPackedEmptyKeepAuthoredNames17257(t *testing.T) 
 		t.Errorf("second placeholder = %q, want nameless-term-17257-1", got)
 	}
 }
+
+func TestCompileConfigLenientPackedAfterMultiThenKeepsOrder17257(t *testing.T) {
+	// Kimi delta: two leaf statements in one container merge onto ONE
+	// compiled typed marker; the packed site follows it.
+	src := `firewall { family inet { filter F { term { then next term; then accept; } term { } } } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["F"]
+	if filter == nil || len(filter.Terms) != 3 {
+		t.Fatalf("filter = %+v, want [marker, placeholder, marker]", filter)
+	}
+	// Compiler order: one marker before the site, one after (the second
+	// leaf's marker composes with the following term's shape); the packed
+	// discard must sit between the two typed markers, never before both.
+	if term := filter.Terms[1]; term == nil || !term.nameless || term.Action != FilterActionDiscard {
+		t.Fatalf("middle term = %+v, want the packed discard", term)
+	}
+}
+
+func TestCompileConfigLenientPackedAfterShapeMatrix17257(t *testing.T) {
+	// Authored-order matrix: for each container shape, a following packed
+	// empty site must land AFTER everything the container compiled to.
+	for _, tc := range []struct{ name, container string }{
+		{"named-only", `term { allow-tcp { from { protocol tcp; } then accept; } allow-udp { from { protocol udp; } then accept; } }`},
+		{"named+leaf", `term { allow-tcp { from { protocol tcp; } then accept; } then discard; }`},
+		{"leaf-only", `term { then accept; }`},
+		{"multi-leaf", `term { then next term; then accept; }`},
+		{"from-leaf", `term { from { protocol tcp; } then accept; }`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `firewall { family inet { filter F { ` + tc.container + ` term { } } } }`
+			cfg, err := CompileConfigLenient(hierTree(t, src))
+			if err != nil {
+				t.Fatalf("tolerant compile: %v", err)
+			}
+			filter := cfg.Firewall.FiltersInet["F"]
+			if filter == nil || len(filter.Terms) == 0 {
+				t.Fatalf("filter = %+v, want terms", filter)
+			}
+			// The packed discard must come after every AUTHORED compiled
+			// term. A trailing typed marker named "then" with empty action
+			// may follow it only when the compiler itself orders the
+			// container marker last (multi-leaf, parent-probed) — the
+			// discard still precedes the authored accept inside it.
+			foundDiscard := -1
+			for i, tm := range filter.Terms {
+				if tm != nil && tm.Action == FilterActionDiscard && tm.nameless {
+					foundDiscard = i
+				}
+			}
+			if foundDiscard < 0 {
+				t.Fatalf("no packed discard in terms=%v", filter.Terms)
+			}
+			for i, tm := range filter.Terms[:foundDiscard] {
+				if tm == nil {
+					t.Fatalf("nil term[%d] before the discard", i)
+				}
+			}
+		})
+	}
+}

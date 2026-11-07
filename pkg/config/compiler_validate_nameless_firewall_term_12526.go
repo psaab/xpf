@@ -138,16 +138,31 @@ func compiledFirewallTermEmissions17257(term *Node, pre map[*Node]struct{}) int 
 	if term == nil {
 		return 0
 	}
-	nameless := firewallNamelessTermNodes([]*Node{term})
-	instances := namedInstances([]*Node{term})
+	// Compiler emission (parent-probed over the shape matrix):
+	// - >=2-key term: exactly 1.
+	// - one-key container: named-block children 1 each; leaf / multi-key
+	//   nameless children merge onto ONE typed marker (all leaves of a
+	//   container compress to the single first-token marker); a container
+	//   with ONLY block children emits no marker.
+	if len(term.Keys) >= 2 {
+		return 1
+	}
+	if len(term.Keys) != 1 || len(term.Children) == 0 {
+		return 0
+	}
 	count := 0
-	for _, inst := range instances {
-		if _, dropped := nameless[inst.node]; dropped {
+	marker := false
+	for _, child := range term.Children {
+		if child == nil {
 			continue
 		}
-		count++
+		if !child.IsLeaf && len(child.Keys) == 1 {
+			count++ // named child block
+			continue
+		}
+		marker = true // leaf or multi-key nameless child
 	}
-	if _, malformed := firewallNamelessTermBody12526(term); malformed && len(term.Children) > 0 {
+	if marker {
 		if _, visible := pre[term]; visible {
 			count++
 		}
