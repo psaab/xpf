@@ -1215,12 +1215,10 @@ func (d *Daemon) warnFab1LocalAddressMismatch(cfg *config.Config) {
 	if transport != "fabric" || cc.Fabric1Interface == "" || cc.Fabric1PeerAddress == "" {
 		return
 	}
-	currentHost := normalizeFab1Host(resolveClusterInterfaceAddr(
-		cfg, cc.Fabric1Interface, cc.Fabric1PeerAddress, ""))
-	if currentHost == "" {
-		return
-	}
 
+	// Only resolve while this generation has a published dual SessionSync and
+	// the local address captured for it. In particular, a fab1-debt epoch has
+	// no secondary listener; its existing readiness gate owns that resolution.
 	d.clusterCommsMu.Lock()
 	ss := d.sessionSync
 	gen := d.clusterCommsGen
@@ -1228,10 +1226,33 @@ func (d *Daemon) warnFab1LocalAddressMismatch(cfg *config.Config) {
 		d.clusterCommsMu.Unlock()
 		return
 	}
-	d.fabricMu.Lock()
+	d.fabricMu.RLock()
 	epochHost := d.fab1LocalHost
-	if d.fab1LocalGen != gen || epochHost == "" ||
-		normalizeFab1Host(epochHost) == currentHost || d.fab1LocalWarnedGen == gen {
+	eligible := d.fab1LocalGen == gen && epochHost != "" && d.fab1LocalWarnedGen != gen
+	d.fabricMu.RUnlock()
+	d.clusterCommsMu.Unlock()
+	if !eligible {
+		return
+	}
+	epochHost = normalizeFab1Host(epochHost)
+
+	currentHost := normalizeFab1Host(resolveClusterInterfaceAddr(
+		cfg, cc.Fabric1Interface, cc.Fabric1PeerAddress, ""))
+
+	// The resolver ran without either lock. A stop/restart may have replaced
+	// the epoch meanwhile, so do not report its result against a successor.
+	d.clusterCommsMu.Lock()
+	if d.clusterCommsGen != gen || d.sessionSync != ss {
+		d.clusterCommsMu.Unlock()
+		return
+	}
+	d.fabricMu.Lock()
+	if d.fab1LocalGen != gen || d.fab1LocalHost != epochHost || d.fab1LocalWarnedGen == gen {
+		d.fabricMu.Unlock()
+		d.clusterCommsMu.Unlock()
+		return
+	}
+	if currentHost == "" || currentHost == epochHost {
 		d.fabricMu.Unlock()
 		d.clusterCommsMu.Unlock()
 		return

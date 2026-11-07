@@ -196,6 +196,81 @@ func TestFab1LocalAddressMismatchWarnsOncePerEpoch18613(t *testing.T) {
 	}
 }
 
+func TestFab1MismatchSkipsResolveWithoutDualEpochHost18613(t *testing.T) {
+	cfg := &config.Config{Chassis: config.ChassisConfig{Cluster: &config.ClusterConfig{
+		FabricInterface: "fab0", FabricPeerAddress: "10.99.0.2",
+		Fabric1Interface: "fab1", Fabric1PeerAddress: "10.99.1.2",
+	}}}
+	previousAddrs := clusterInterfaceAddrsByName
+	resolutions := 0
+	missing := true
+	clusterInterfaceAddrsByName = func(*config.Config, string) ([]net.Addr, error) {
+		resolutions++
+		if missing {
+			return nil, errors.New("injected missing fab1")
+		}
+		return []net.Addr{&net.IPNet{
+			IP: net.ParseIP("10.99.1.3"), Mask: net.CIDRMask(24, 32),
+		}}, nil
+	}
+	t.Cleanup(func() { clusterInterfaceAddrsByName = previousAddrs })
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	d := &Daemon{}
+	d.warnFab1LocalAddressMismatch(cfg) // no SessionSync
+	if resolutions != 0 {
+		t.Fatalf("resolver ran %d times without a published SessionSync, want zero", resolutions)
+	}
+
+	d.clusterCommsMu.Lock()
+	d.clusterCommsGen = 7
+	d.sessionSync = cluster.NewSessionSync("10.99.0.1:4785", "10.99.0.2:4785", nil)
+	d.clusterCommsMu.Unlock()
+	d.warnFab1LocalAddressMismatch(cfg) // single-fabric epoch
+	if resolutions != 0 {
+		t.Fatalf("resolver ran %d times for a single-fabric epoch, want zero", resolutions)
+	}
+
+	d.clusterCommsMu.Lock()
+	d.sessionSync = cluster.NewDualSessionSync(
+		"10.99.0.1:4785", "10.99.0.2:4785",
+		"10.99.1.1:4785", "10.99.1.2:4785", nil)
+	d.clusterCommsMu.Unlock()
+	d.warnFab1LocalAddressMismatch(cfg) // dual session, but no recorded epoch host
+	if resolutions != 0 {
+		t.Fatalf("resolver ran %d times without a recorded epoch host, want zero", resolutions)
+	}
+
+	d.fabricMu.Lock()
+	d.fab1LocalHost, d.fab1LocalGen = "10.99.1.1", 7
+	d.fabricMu.Unlock()
+	d.warnFab1LocalAddressMismatch(cfg) // empty resolution is not an address mismatch
+	if resolutions != 1 {
+		t.Fatalf("resolver ran %d times with a current dual epoch host, want one", resolutions)
+	}
+	if strings.Contains(logs.String(), "cluster: fab1 local address differs") {
+		t.Fatalf("empty resolution emitted a fab1 address-mismatch warning: %s", logs.String())
+	}
+	d.fabricMu.RLock()
+	warnedGen := d.fab1LocalWarnedGen
+	d.fabricMu.RUnlock()
+	if warnedGen == 7 {
+		t.Fatal("empty resolution consumed the epoch's mismatch-warning allowance")
+	}
+
+	missing = false
+	d.warnFab1LocalAddressMismatch(cfg) // recovery to a different address is still checked
+	if resolutions != 2 {
+		t.Fatalf("resolver ran %d times after fab1 became addressable, want two total", resolutions)
+	}
+	if got := strings.Count(logs.String(), "cluster: fab1 local address differs"); got != 1 {
+		t.Fatalf("resolved mismatch warnings = %d, want one: %s", got, logs.String())
+	}
+}
+
 func TestMgmtVRFReassertLatchesRouteRefreshDebt11448(t *testing.T) {
 	d, _ := newMgmtVRFReassertDaemon11448(t, map[string]int{"em0": 0, "fxp0": 77})
 	routeErr := errors.New("injected management route refresh failure")
