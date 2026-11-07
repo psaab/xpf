@@ -1343,6 +1343,36 @@ class Orchestration(unittest.TestCase):
         self.assertEqual([cmd.rsplit(" ", 1)[-1] for _, cmd in c.commands], ["0"])
 
 
+    def test_known_change_survives_unknown_retry_for_another_rg_18631(self):
+        class MultiRGReadSequence(FakeCluster):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.status_reads = {0: 0, 1: 0}
+
+            def status(self, node):
+                self.status_reads[node] += 1
+                read = self.status_reads[node]
+                if read == 3:
+                    self.owner[2] = 1
+                    return status_text({2: 1}, node)
+                if read == 4:
+                    return status_text({1: 0}, node)
+                return super().status(node)
+
+        clock = FakeClock()
+        c = MultiRGReadSequence(
+            clock, {1: 0, 2: 0}, stale_iperf_ports={5211: 88}, iperf_reset_fail=True)
+        rc, result, logs = run_fake(c, clock, moves=2, rgs="1,2")
+        self.assertEqual(rc, 2)
+        self.assertIn("iperf socket preflight", result["void"])
+        self.assertEqual(result["moves"], [])
+        self.assertEqual(c.owner, {1: 0, 2: 0})
+        self.assertIn("retrying before restore decision", "\n".join(logs))
+        self.assertIn("restored", result["preflight"]["restore"])
+        self.assertEqual(len(c.commands), 1)
+        self.assertIn("failover redundancy-group 2 node 0", c.commands[0][1])
+
+
     def test_preflight_timeout_voids_without_moving_rg_18631(self):
         clock = FakeClock()
         c = FakeCluster(clock, {2: 1}, stale_iperf_ports={5211: 88}, iperf_reset_timeout=True)

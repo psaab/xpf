@@ -1320,17 +1320,25 @@ class Soak:
                         return {rg: None for rg in rgs}
 
                 current_owners = read_current_owners()
+                owner_changed = any(
+                    current_owners.get(rg) is not None
+                    and current_owners[rg] != initial_owners.get(rg)
+                    for rg in rgs)
                 unknown_rgs = [rg for rg in rgs if current_owners.get(rg) is None]
                 if unknown_rgs:
                     self.log(f"WARNING: current owner unreadable for RG(s) {unknown_rgs}; retrying before restore decision")
                     self.sleep(0.2)
                     current_owners = read_current_owners()
+                    # Merge evidence: an unknown retry must not erase a known
+                    # owner change observed in the first read.
+                    owner_changed = owner_changed or any(
+                        current_owners.get(rg) is not None
+                        and current_owners[rg] != initial_owners.get(rg)
+                        for rg in rgs)
                     unknown_rgs = [rg for rg in rgs if current_owners.get(rg) is None]
                     if unknown_rgs:
                         self.log(f"WARNING: current owner remains unreadable for RG(s) {unknown_rgs}; "
                                  "unknown is not treated as an ownership change")
-                owner_changed = any(current_owners.get(rg) is not None
-                                    and current_owners[rg] != initial_owners.get(rg) for rg in rgs)
                 if self.move_commands_issued or owner_changed:
                     info["restore"] = self.restore_node0(rgs)
                     self.log(f"restore: {info['restore']}")
