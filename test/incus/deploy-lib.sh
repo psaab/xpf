@@ -785,7 +785,7 @@ deploy_manifest_sha_from_deb() {
 	local deb="$1" bin="$2" sha=""
 	[[ -f "$deb" ]] || return 1
 	if ! sha=$(set -o pipefail
-		dpkg-deb --fsys-tarfile "$deb" 2>/dev/null |
+		"$(deploy_host_dpkg_deb)" --fsys-tarfile "$deb" 2>/dev/null |
 			tar -xO "./usr/local/share/xpf/staged/$bin" 2>/dev/null |
 			sha256sum 2>/dev/null | awk '{print $1}'); then
 		return 1
@@ -1844,16 +1844,71 @@ deploy_running_deb_version() {
 	esac
 }
 
+# deploy_dpkg_compare <a> <op> <b>: host-side dpkg comparison for the
+# deploy preflight. with-cluster.sh:38 prepends test/support/host-bin-shims
+# to PATH (the #18038 testguard shims, which exit 125 on the workstation);
+# a shimmed `dpkg` would make every comparison below fail. Resolve the real
+# binary once, shim-dir-free: XPF_DEPLOY_HOST_DPKG (tests), then
+# $XPF_HOST_DPKG captured before the shim prepend, then a PATH search that
+# skips directories holding a refuse-host-tool marker. Results: 0 = true,
+# 1 = false, 2 = comparison could not be performed (tool missing/error) —
+# never collapse 2 into false, which would read as "not newer" (#19014).
+deploy_host_dpkg() {
+	local override="${XPF_DEPLOY_HOST_DPKG:-${XPF_HOST_DPKG:-}}" cand dir
+	if [[ -n "$override" ]]; then
+		[[ -x "$override" ]] && { printf '%s\n' "$override"; return 0; }
+		return 1
+	fi
+	if [[ -n "${_XPF_DEPLOY_HOST_DPKG_RESOLVED:-}" ]]; then
+		printf '%s\n' "$_XPF_DEPLOY_HOST_DPKG_RESOLVED"; return 0
+	fi
+	local IFS=:
+	for dir in $PATH; do
+		[[ -n "$dir" ]] || dir=.
+		[[ -e "$dir/refuse-host-tool" ]] && continue
+		cand="$dir/dpkg"
+		if [[ -x "$cand" && ! -L "$cand" ]]; then
+			_XPF_DEPLOY_HOST_DPKG_RESOLVED="$cand"
+			printf '%s\n' "$cand"; return 0
+		fi
+	done
+	return 1
+}
+
+deploy_host_dpkg_deb() {
+	# The sibling of the resolved host dpkg (never the shim dir: a directory
+	# holding refuse-host-tool is a testguard shim dir, #19014).
+	local bin dir
+	bin=$(deploy_host_dpkg) || return 1
+	dir=$(dirname "$bin")
+	[[ -x "$dir/dpkg-deb" ]] && { printf '%s\n' "$dir/dpkg-deb"; return 0; }
+	return 1
+}
+
+deploy_dpkg_compare() {
+	local bin rc
+	bin=$(deploy_host_dpkg) || return 2
+	"$bin" --compare-versions "$1" "$2" "$3" 2>/dev/null
+	rc=$?
+	case "$rc" in 0|1) return "$rc" ;; *) return 2 ;; esac
+}
+
 # deploy_deb_plan <deb_version> <running_version>: upgrade | same | downgrade
-# | fresh (nothing running). Pure, so the ordering is a table cell.
+# | fresh (nothing running) | error (a comparison could not be performed —
+# the host dpkg tool failed, e.g. it resolved to the #18038 testguard shim;
+# never report that as downgrade, #19014). Table cell in the self-test.
 deploy_deb_plan() {
 	local deb_ver="$1" run_ver="$2"
 	if [[ -z "$run_ver" ]]; then
 		printf 'fresh\n'
-	elif dpkg --compare-versions "$deb_ver" gt "$run_ver"; then
+	elif deploy_dpkg_compare "$deb_ver" gt "$run_ver"; then
 		printf 'upgrade\n'
-	elif dpkg --compare-versions "$deb_ver" eq "$run_ver"; then
+	elif (( $? == 2 )); then
+		printf 'error\n'
+	elif deploy_dpkg_compare "$deb_ver" eq "$run_ver"; then
 		printf 'same\n'
+	elif (( $? == 2 )); then
+		printf 'error\n'
 	else
 		printf 'downgrade\n'
 	fi
@@ -1941,6 +1996,11 @@ deploy_deb_node_action() {
 				"$deb_ver" "$run_ver" "$rinst" "$deb_ver" >&2
 			return 1
 		fi
+		;;
+	error)
+		printf 'refusing: could not compare xpf %s with the running %s on %s: the host dpkg comparison could not be performed (it resolved to the #18038 testguard shim or is missing); refusing to guess upgrade/downgrade (#19014) -- run the deploy outside the shimmed PATH or set XPF_DEPLOY_HOST_DPKG to the real dpkg\n' \
+			"$deb_ver" "$run_ver" "$rinst" >&2
+		return 1
 		;;
 	esac
 }
@@ -2049,15 +2109,20 @@ deploy_deb_filename_version() {
 deploy_deb_version() {
 	local filename_ver metadata_package metadata_arch metadata_ver
 	filename_ver=$(deploy_deb_filename_version "$1") || return 1
-	metadata_package=$(dpkg-deb -f "$1" Package 2>/dev/null) || {
+	local dpkg_deb_bin
+	dpkg_deb_bin=$(deploy_host_dpkg_deb) || {
+		printf 'refusing: cannot resolve the host dpkg-deb (it resolved to the #18038 testguard shim or is missing) for %s (#19014)\n' "$1" >&2
+		return 1
+	}
+	metadata_package=$("$dpkg_deb_bin" -f "$1" Package 2>/dev/null) || {
 		printf 'refusing: cannot read Package metadata from %s\n' "$1" >&2
 		return 1
 	}
-	metadata_arch=$(dpkg-deb -f "$1" Architecture 2>/dev/null) || {
+	metadata_arch=$("$dpkg_deb_bin" -f "$1" Architecture 2>/dev/null) || {
 		printf 'refusing: cannot read Architecture metadata from %s\n' "$1" >&2
 		return 1
 	}
-	metadata_ver=$(dpkg-deb -f "$1" Version 2>/dev/null) || {
+	metadata_ver=$("$dpkg_deb_bin" -f "$1" Version 2>/dev/null) || {
 		printf 'refusing: cannot read Version metadata from %s\n' "$1" >&2
 		return 1
 	}
@@ -2088,8 +2153,11 @@ deploy_deb_newest() {
 		if [[ -z "$best" ]]; then
 			best="$deb"; best_ver="$ver"; continue
 		fi
-		if dpkg --compare-versions "$ver" gt "$best_ver" 2>/dev/null; then
+		if deploy_dpkg_compare "$ver" gt "$best_ver"; then
 			best="$deb"; best_ver="$ver"
+		elif (( $? == 2 )); then
+			printf 'deploy_deb_newest: could not compare %s with %s: the host dpkg comparison could not be performed (#19014)\n' "$ver" "$best_ver" >&2
+			return 1
 		elif [[ "$ver" == "$best_ver" && "$deb" -nt "$best" ]]; then
 			best="$deb"
 		fi

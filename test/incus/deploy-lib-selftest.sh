@@ -730,6 +730,52 @@ test_deb_plan_orders_versions() {
 	fi
 }
 
+# #19014: with-cluster.sh prepends the testguard shim dir to PATH; a shimmed
+# host dpkg used to make every comparison fail and read as "downgrade".
+test_deb_plan_host_dpkg_shim_19014() {
+	local shim="$SCRIPT_DIR/../support/host-bin-shims" got err rc out
+	if [[ ! -e "$shim/refuse-host-tool" ]]; then
+		bad "deb plan 19014: shim fixture missing ($shim/refuse-host-tool)"
+		return
+	fi
+	got=$(PATH="$shim:/usr/bin:/bin" deploy_deb_plan 0.0.30381+g7bceb10c0ffb 0.0.30379+g732ee94c1099)
+	[[ "$got" == upgrade ]] && ok "deb plan 19014: shimmed PATH still plans upgrade via the resolved host dpkg" || bad "deb plan 19014: shimmed PATH planned '$got', want upgrade"
+	got=$(XPF_DEPLOY_HOST_DPKG=/nonexistent/dpkg deploy_deb_plan 0.0.30381+g7bceb10c0ffb 0.0.30379+g732ee94c1099)
+	[[ "$got" == error ]] && ok "deb plan 19014: unusable host dpkg plans error, never downgrade" || bad "deb plan 19014: unusable host dpkg planned '$got', want error"
+	out=$(_plan_action_with_broken_compare 0.0.29579+g218c32023079)
+	rc="${out%%|*}"; err="${out##*|}"
+	if [[ "$rc" != 0 && "$err" == *"could not compare"* ]]; then
+		ok "deb plan 19014: node action refuses loudly when the comparison cannot be performed"
+	else
+		bad "deb plan 19014: node action rc=$rc err='$err', want a loud could-not-compare refusal"
+	fi
+}
+
+# _plan_action_with_broken_compare <running-version>: like _plan_action but
+# the host comparison tool cannot run. Prints "<rc>|<stdout>|<stderr>".
+_plan_action_with_broken_compare() {
+	_plan_action_env "$1" 0 "" /nonexistent/dpkg
+}
+
+# _plan_action_env <run> <same> [allow] [host-dpkg]: _plan_action with an
+# explicit XPF_DEPLOY_HOST_DPKG (empty = unset).
+_plan_action_env() {
+	local run="$1" same_bytes="$2" allow="${3:-}" host_dpkg="${4:-}" out err rc d
+	d=$(mktemp -d)
+	: >"$d/xpf_0.0.29580+gaaaaaaaaaaaa_amd64.deb"
+	(
+		deploy_deb_version() { deploy_deb_filename_version "$1"; }
+		deploy_running_deb_version() { printf '%s\n' "$run"; }
+		deploy_node_runs_deb() { [[ "$same_bytes" == 1 ]]; }
+		if [[ -n "$allow" ]]; then export XPF_DEPLOY_ALLOW_DOWNGRADE="$allow"; else unset XPF_DEPLOY_ALLOW_DOWNGRADE; fi
+		if [[ -n "$host_dpkg" ]]; then export XPF_DEPLOY_HOST_DPKG="$host_dpkg"; else unset XPF_DEPLOY_HOST_DPKG; fi
+		deploy_deb_node_action inst:vm "$d/xpf_0.0.29580+gaaaaaaaaaaaa_amd64.deb" >"$d/out" 2>"$d/err"
+	)
+	rc=$?
+	printf '%s|%s|%s' "$rc" "$(<"$d/out")" "$(<"$d/err")"
+	rm -rf "$d"
+}
+
 # _plan_action <running-version> <runs-deb 0|1> [allow]: deploy_deb_node_action
 # for a deb of version 0.0.29580 against a mocked node. Prints
 # "<rc>|<stdout>|<stderr>".
@@ -4756,6 +4802,7 @@ test_standalone_helper_raw_deploy_uses_root_ownership
 test_deb_repush_uses_distinct_remote_slots
 test_deb_repush_wiring
 test_deb_plan_orders_versions
+test_deb_plan_host_dpkg_shim_19014
 test_deb_node_action_upgrade_installs
 test_deb_node_action_downgrade_refused_without_optin
 test_deb_node_action_downgrade_optin
