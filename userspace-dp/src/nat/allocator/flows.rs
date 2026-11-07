@@ -42,13 +42,16 @@
 
 use super::LiveAllocation;
 use crate::nat::SourceNatFlowKey;
-use crate::sharded::{ShardedMap, shard_index_with_seed};
+use crate::sharded::ShardedMap;
+#[cfg(test)]
+use crate::sharded::shard_index_with_seed;
 use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 pub(in crate::nat::allocator) const LIVE_SHARDS: usize = 16;
 
+#[cfg(test)]
 pub(in crate::nat::allocator) fn live_shard_index(flow: &SourceNatFlowKey) -> usize {
     shard_index_with_seed::<SourceNatFlowKey, LIVE_SHARDS>(
         flow,
@@ -68,13 +71,15 @@ pub(in crate::nat) struct LiveFlowShard {
 #[derive(Debug)]
 pub(in crate::nat::allocator) struct LiveFlowMap {
     pub(in crate::nat::allocator) shards: ShardedMap<SourceNatFlowKey, Mutex<LiveFlowShard>, LIVE_SHARDS>,
-    pub(in crate::nat::allocator) count: AtomicUsize,
+    // Kimi #17269: the cross-worker node-wide counters get the same
+    // 128-byte isolation as the shards (issue requires padding them too).
+    pub(in crate::nat::allocator) count: crate::sharded::PaddedShard<AtomicUsize>,
     /// Fold 2: shared atomic admission counter (see module doc).
     /// Incremented ONLY by `admit_one`, decremented ONLY by a
     /// successful record removal (`remove_in_shard`) or an
     /// `unadmit_one` rollback of an admission whose insert
     /// never landed.
-    admission: AtomicUsize,
+    admission: crate::sharded::PaddedShard<AtomicUsize>,
 }
 
 impl Default for LiveFlowMap {
@@ -87,15 +92,15 @@ impl LiveFlowMap {
     pub(in crate::nat::allocator) fn new() -> Self {
         Self {
             shards: ShardedMap::new(),
-            count: AtomicUsize::new(0),
-            admission: AtomicUsize::new(0),
+            count: crate::sharded::PaddedShard::new(AtomicUsize::new(0)),
+            admission: crate::sharded::PaddedShard::new(AtomicUsize::new(0)),
         }
     }
 
     /// Current admission-counter value (test seam: proves the
     /// counter settles back to the tracked count, never leaks).
     pub(in crate::nat::allocator) fn admission_count(&self) -> usize {
-        self.admission.load(Ordering::Relaxed)
+        self.admission.get().load(Ordering::Relaxed)
     }
 
 
@@ -107,8 +112,8 @@ impl LiveFlowMap {
     /// discipline as its caller) — removal of the admitted
     /// record is the release (see `remove_in_shard`).
     pub(in crate::nat::allocator) fn admit_one(&self, max_tracked: usize) -> bool {
-        if self.admission.fetch_add(1, Ordering::Relaxed) >= max_tracked {
-            self.admission.fetch_sub(1, Ordering::Relaxed);
+        if self.admission.get().fetch_add(1, Ordering::Relaxed) >= max_tracked {
+            self.admission.get().fetch_sub(1, Ordering::Relaxed);
             return false;
         }
         true
@@ -119,7 +124,7 @@ impl LiveFlowMap {
     /// one rollback per admit; never call after the record was
     /// inserted (its removal releases instead).
     pub(in crate::nat::allocator) fn unadmit_one(&self) {
-        self.admission.fetch_sub(1, Ordering::Relaxed);
+        self.admission.get().fetch_sub(1, Ordering::Relaxed);
     }
 
     pub(in crate::nat::allocator) fn shard_guard<'a>(
@@ -144,7 +149,7 @@ impl LiveFlowMap {
     }
 
     pub(in crate::nat::allocator) fn len(&self) -> usize {
-        self.count.load(Ordering::Relaxed)
+        self.count.get().load(Ordering::Relaxed)
     }
 
     /// Exact-cap admission under a HELD shard guard (fold 2):
@@ -187,7 +192,7 @@ impl LiveFlowMap {
         let prev = shard.map.insert(flow, alloc);
         debug_assert!(prev.is_none(), "admitted insert must be a new key");
         if prev.is_none() {
-            self.count.fetch_add(1, Ordering::Relaxed);
+            self.count.get().fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -221,7 +226,7 @@ impl LiveFlowMap {
     ) -> Option<LiveAllocation> {
         let prev = shard.map.insert(flow, alloc);
         if prev.is_none() {
-            self.count.fetch_add(1, Ordering::Relaxed);
+            self.count.get().fetch_add(1, Ordering::Relaxed);
         }
         prev
     }
@@ -236,8 +241,8 @@ impl LiveFlowMap {
     ) -> Option<LiveAllocation> {
         let prev = shard.map.remove(flow);
         if prev.is_some() {
-            self.count.fetch_sub(1, Ordering::Relaxed);
-            self.admission.fetch_sub(1, Ordering::Relaxed);
+            self.count.get().fetch_sub(1, Ordering::Relaxed);
+            self.admission.get().fetch_sub(1, Ordering::Relaxed);
         }
         prev
     }
@@ -299,20 +304,3 @@ impl LiveFlowMap {
 
 }
 
-#[cfg(test)]
-mod sharded_map_footprint_probe {
-    use super::*;
-
-    #[test]
-    fn measure_snat_shard_storage() {
-        let old_bytes = std::mem::size_of::<Vec<Mutex<LiveFlowShard>>>()
-            + LIVE_SHARDS * std::mem::size_of::<Mutex<LiveFlowShard>>();
-        let new_bytes = std::mem::size_of::<
-            ShardedMap<SourceNatFlowKey, Mutex<LiveFlowShard>, LIVE_SHARDS>,
-        >();
-        println!(
-            "SNAT shard storage: old={old_bytes} bytes, new={new_bytes} bytes, delta={}",
-            new_bytes as isize - old_bytes as isize
-        );
-    }
-}

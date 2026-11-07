@@ -652,14 +652,31 @@ mod tests {
 
     #[test]
     fn paired_install_failure_releases_prior_claim() {
+        // Kimi #17269: placement is process-seeded, so shard order of
+        // the two candidate keys is not fixed. Pick (in seed order) the
+        // FREE key that sorts FIRST and the held key second, so the
+        // first claim really lands before the blocked one — otherwise
+        // the rollback path is exercised only for lucky seeds.
         let gate = Arc::new(TupleGate::new());
-        let held = gate.acquire_lease([key(1001, 1)]).unwrap();
+        let held_key = key(1001, 1);
+        // The blocked second claim canonicalizes to held_key (domain 2
+        // erases to the held tuple).
+        let held = gate.acquire_lease([held_key.clone()]).unwrap();
+        let free = (2000..3000u16)
+            .map(|port| key(port, 1))
+            .find(|candidate| {
+                TupleGate::shard_index(candidate) < TupleGate::shard_index(&held_key)
+                    || (TupleGate::shard_index(candidate) == TupleGate::shard_index(&held_key)
+                        && format!("{candidate:?}") < format!("{:?}", TupleGate::canonical(&held_key)))
+            })
+            .expect("a free key sorting before the held key must exist");
         assert!(matches!(
-            gate.try_acquire_installs([key(1000, 1), key(1001, 2)]),
+            gate.try_acquire_installs([free.clone(), key(1001, 2)]),
             Err("gate_busy")
         ));
         drop(held);
-        assert!(gate.try_acquire_install(&key(1000, 1)).is_ok());
+        // Rollback proof: the first (successful) claim was released.
+        assert!(gate.try_acquire_install(&free).is_ok());
     }
 
     #[test]

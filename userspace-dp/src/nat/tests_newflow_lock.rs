@@ -997,16 +997,17 @@ fn restore_and_fast_insert_race_at_cap_minus_one_admits_exactly_one_15956() {
     assert_eq!(alloc.debug_admission_count(), 9);
 
     // Racer A: fast-path allocate a NEW flow (distinct shard
-    // from the restore flow — assert the premise).
-    let fast_flow = pool_flow(43000);
-    {
+    // from the restore flow — assert the premise). Sol #17269: placement
+    // is process-seeded now, so SEARCH for a distinct-shard port like the
+    // sibling fixtures do instead of hardcoding one.
+    let fast_flow = {
         use super::allocator::live_shard_index_for_test;
-        assert_ne!(
-            live_shard_index_for_test(&fast_flow),
-            live_shard_index_for_test(&flow),
-            "fixture: racers must be on different shards or the race is not cross-shard"
-        );
-    }
+        let base = live_shard_index_for_test(&flow);
+        (43000..44000u16)
+            .map(pool_flow)
+            .find(|candidate| live_shard_index_for_test(candidate) != base)
+            .expect("fixture: racers must be on different shards or the race is not cross-shard")
+    };
     let barrier = Arc::new(Barrier::new(2));
     let racer_a = {
         let alloc = Arc::clone(&alloc);
