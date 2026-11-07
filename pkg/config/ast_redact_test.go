@@ -508,3 +508,53 @@ func TestRedactionCompareFingerprintEquality17270(t *testing.T) {
 		}
 	}
 }
+
+func TestRedactionCompareEmbeddedURLFingerprintEquality17270(t *testing.T) {
+	// Kimi delta: the EMBEDDED URL fingerprint suffix (ast_redact.go
+	// payload processor) must also distinguish changed credentials in
+	// whole AND scoped compare, for each payload shape.
+	mk := func(shape, canary string) *ConfigTree {
+		command := "set system services dynamic-dns provider dy url https://user:" + canary + "@dyn.example.com/upd"
+		switch shape {
+		case "quoted":
+			return embeddedIngest15209FlatTree(t,
+				`set event-options policy p1 events ping_test_failed`,
+				`set event-options policy p1 then change-configuration commands `+strconv.Quote(command))
+		case "block":
+			return parseHierText(t, `event-options {
+    policy p1 {
+        events ping_test_failed;
+        then {
+            change-configuration {
+                commands { `+strconv.Quote(command)+`; }
+            }
+        }
+    }
+}`)
+		}
+		return nil
+	}
+	for _, shape := range []string{"quoted", "block"} {
+		a := mk(shape, "EMB-URL-A-17270")
+		b := mk(shape, "EMB-URL-B-17270")
+		if a == nil || b == nil {
+			t.Fatalf("shape %s fixture missing", shape)
+		}
+		same := FormatCompareRedacted(a, a)
+		changed := FormatCompareRedacted(a, b)
+		if same == changed {
+			t.Errorf("%s: changed embedded URL compares equal (whole)", shape)
+		}
+		path := []string{"event-options", "policy", "p1"}
+		sameScoped := FormatCompareRedactedAtPath(a, a, path)
+		changedScoped := FormatCompareRedactedAtPath(a, b, path)
+		if sameScoped == changedScoped {
+			t.Errorf("%s: changed embedded URL compares equal (scoped)", shape)
+		}
+		for _, out := range []string{changed, changedScoped} {
+			if strings.Contains(out, "EMB-URL-A-17270") || strings.Contains(out, "EMB-URL-B-17270") {
+				t.Errorf("%s: compare leaked embedded credential:\n%s", shape, out)
+			}
+		}
+	}
+}
