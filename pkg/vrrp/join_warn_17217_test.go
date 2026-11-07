@@ -133,14 +133,25 @@ func TestJoinFailuresWarn17217(t *testing.T) {
 		if err != nil {
 			t.Skipf("cannot open stand-in fd: %v", err)
 		}
-		defer unix.Close(fd)
+		fdOwnedByTest := true
+		defer func() {
+			if fdOwnedByTest {
+				_ = unix.Close(fd)
+			}
+		}()
 		called := false
 		afPacketSocket = func(_, _, _ int) (int, error) { return fd, nil }
 		afPacketBind = func(int, unix.Sockaddr) error { return nil }
 		afPacketSetsockoptInt = func(_, _, _, _ int) error { return nil }
 		packetAddAllmultiMembership = func(int, *unix.PacketMreq) error { called = true; return unix.ENOBUFS }
-		if _, err := openAfPacketReceiver(1); err != nil && !strings.Contains(err.Error(), "attach bpf filter") {
-			t.Fatalf("openAfPacketReceiver failed before the filter stage: %v", err)
+		receiverFD, err := openAfPacketReceiver(1)
+		if err != nil {
+			fdOwnedByTest = false // the receiver closes its descriptor on setup errors
+			if !strings.Contains(err.Error(), "attach bpf filter") {
+				t.Fatalf("openAfPacketReceiver failed before the filter stage: %v", err)
+			}
+		} else {
+			fd = receiverFD
 		}
 		if !called {
 			t.Fatal("openAfPacketReceiver did not reach the ALLMULTI membership seam")

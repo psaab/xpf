@@ -168,16 +168,17 @@
 # 18 priv-present, 517 other, 1 unparsed). The first assigned-worktree recount
 # measured 676 (139/18/518/1); its extra pkg/grpcapi ActiveConfig skip was an
 # invalid test-fixture guard and now fails loudly instead of hiding the test.
-# After removing that, the unreachable-receiver skip, and 16 invalid direct-mode
-# fixture skips, the final tree measures 658 (139/18/500/1). Against these
-# 612/122/18/471/1 floors, bank only the 46-net increase: +17 priv-absent and
-# +29 other. docs/log/18611.md attributes each of the 47 remaining newly
-# counted sites; one new IFNAMSIZ-constrained CLI interface gate replaces its
-# previous dash-interface message, so that replacement is net zero.
+# After fixing that guard, the unreachable-receiver skip, 16 direct-mode
+# precondition skips, the fail-closed FRR skip, and the inverted DDNS skip, the
+# final tree measures 656 (139/18/498/1). Against these 612/122/18/471/1
+# floors, bank only the 44-net increase: +17 priv-absent and +27 other.
+# docs/log/18611.md attributes each of the 45 remaining newly counted sites;
+# one new IFNAMSIZ-constrained CLI interface gate replaces its previous
+# dash-interface message, so that replacement is net zero.
 # These floors already include the separately attributed #18751 fabric
 # netns site, #18728's three lo0 kernel/tool sites, and #18846-G58's one
 # SO_SNDBUF site; they are not counted again in this update.
-total        = 658
+total        = 656
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
@@ -186,7 +187,7 @@ priv-absent  = 139
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 500
+other        = 498
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket

@@ -238,6 +238,9 @@ func TestHARenderSkippedDuringReset18561(t *testing.T) {
 // the render cannot re-add the managed section the clear removed. The clear
 // is a write, so it moves the FRR manager's write generation.
 func TestFailClosedBootClearSupersedesHARender18561(t *testing.T) {
+	// Force the clear path: pins exist, but forwarding is not armed.
+	withFailClosedBootPinnedXDPProbe(t, func() (bool, error) { return true, nil })
+	withFailClosedBootArmedProbe(t, func() (bool, error) { return false, nil })
 	rec := &frr.RecordingExecutor{}
 	d := frrHADaemon18561(t)
 	d.frr = frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), rec)
@@ -247,7 +250,7 @@ func TestFailClosedBootClearSupersedesHARender18561(t *testing.T) {
 	seq := d.frrApplySeq.Add(1)
 	d.clearFRRForFailClosedBoot(true)
 	if rec.ReloadCalls == 0 {
-		t.Skip("premise: the fail-closed clear did not run on this host (pinned XDP links present)")
+		t.Fatalf("fail-closed clear did not run with pinned XDP links and forwarding not armed")
 	}
 	cleared := rec.ReloadCalls
 	if err := d.applyFRRConfigIfCurrent(fc, seq, wg); err != nil {

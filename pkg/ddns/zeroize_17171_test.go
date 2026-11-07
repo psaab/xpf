@@ -104,7 +104,7 @@ func TestEraseStateIfEmptyHistoricWording17171(t *testing.T) {
 		}
 		path := filepath.Join(blocker, "dhcp-ddns-state.json")
 		if err := os.WriteFile(path, []byte(`{"version":1,"records":[]}`), 0o600); err == nil {
-			t.Skip("cannot plant a state file under a regular-file parent on this fs")
+			t.Fatal("unexpectedly planted a state file beneath a regular-file parent; want the fixture write to fail")
 		}
 		// EraseStateIfEmpty gates on CheckStateEmpty first; exercise
 		// the sweep directly for the list-failure wording.
