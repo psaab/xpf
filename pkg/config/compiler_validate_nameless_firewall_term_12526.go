@@ -138,13 +138,11 @@ func compiledFirewallTermEmissions17257(term *Node, pre map[*Node]struct{}) int 
 	if term == nil {
 		return 0
 	}
-	// Compiler emits len(namedInstances([term])) for a container;
-	// firewallNamelessTermNodes members are authored-body statements
-	// that instead merge onto the container's ONE typed marker (the
-	// marker itself is not a separate instance). Packed-invisible
-	// malformed terms emit nothing (parent-probed over the shape
-	// matrix: named blocks, multi-key statements and bare leaves each
-	// emit; leaf and block from/then statements merge).
+	// Compiler emits exactly len(namedInstances([term])) terms for any
+	// term node it can see (containers expand per child; from/then
+	// statements and blocks alike become instances). Packed-invisible
+	// malformed terms emit nothing. This is the compiler's own loop
+	// count, not a shape table (fold-cap escalation, Kimi delta-6).
 	if len(term.Keys) >= 2 {
 		if _, malformed := firewallNamelessTermBody12526(term); malformed {
 			if _, visible := pre[term]; !visible {
@@ -153,7 +151,7 @@ func compiledFirewallTermEmissions17257(term *Node, pre map[*Node]struct{}) int 
 		}
 		return 1
 	}
-	if len(term.Keys) != 1 || len(term.Children) == 0 {
+	if len(term.Keys) != 1 {
 		return 0
 	}
 	if _, malformed := firewallNamelessTermBody12526(term); malformed {
@@ -161,28 +159,7 @@ func compiledFirewallTermEmissions17257(term *Node, pre map[*Node]struct{}) int 
 			return 0
 		}
 	}
-	instances := namedInstances([]*Node{term})
-	count := len(instances)
-	// subtract merged body statements: children in the nameless set
-	// whose name is from/then AND (leaf or non-leaf block) — they do
-	// not emit; the +1 marker below replaces them collectively.
-	merged := 0
-	for _, child := range term.Children {
-		if child == nil {
-			continue
-		}
-		if child.Name() == "from" || child.Name() == "then" {
-			merged++
-		}
-	}
-	count -= merged
-	if merged > 0 {
-		count++ // the container's single typed marker
-	}
-	if count < 0 {
-		count = 0
-	}
-	return count
+	return len(namedInstances([]*Node{term}))
 }
 
 // scanFirewallNamelessTerms12526 clones and unpacks the tree, then returns

@@ -365,8 +365,9 @@ func TestCompileConfigLenientTwoPackedEmptyKeepAuthoredNames17257(t *testing.T) 
 }
 
 func TestCompileConfigLenientPackedAfterMultiThenKeepsOrder17257(t *testing.T) {
-	// Kimi delta: two leaf statements in one container merge onto ONE
-	// compiled typed marker; the packed site follows it.
+	// Kimi delta-6 (fold-cap escalation): two leaf statements in one
+	// container compile to two typed terms (probe16); the packed site
+	// follows BOTH. Count = len(namedInstances), the compiler's own loop.
 	src := `firewall { family inet { filter F { term { then next term; then accept; } term { } } } }`
 	cfg, err := CompileConfigLenient(hierTree(t, src))
 	if err != nil {
@@ -374,13 +375,10 @@ func TestCompileConfigLenientPackedAfterMultiThenKeepsOrder17257(t *testing.T) {
 	}
 	filter := cfg.Firewall.FiltersInet["F"]
 	if filter == nil || len(filter.Terms) != 3 {
-		t.Fatalf("filter = %+v, want [marker, placeholder, marker]", filter)
+		t.Fatalf("filter = %+v, want [then, then, discard]", filter)
 	}
-	// Compiler order: one marker before the site, one after (the second
-	// leaf's marker composes with the following term's shape); the packed
-	// discard must sit between the two typed markers, never before both.
-	if term := filter.Terms[1]; term == nil || !term.nameless || term.Action != FilterActionDiscard {
-		t.Fatalf("middle term = %+v, want the packed discard", term)
+	if term := filter.Terms[2]; term == nil || !term.nameless || term.Action != FilterActionDiscard {
+		t.Fatalf("last term = %+v, want the packed discard after both typed terms", term)
 	}
 }
 
@@ -459,8 +457,8 @@ func TestCompileConfigLenientPackedAfterThenBlocks17257(t *testing.T) {
 	if filter == nil || len(filter.Terms) != 3 {
 		t.Fatalf("filter = %+v, want [then, discard, then] per compiler order", filter)
 	}
-	mid := filter.Terms[1]
-	if mid == nil || !mid.nameless || mid.Action != FilterActionDiscard {
-		t.Fatalf("middle term = %+v, want the packed discard between the two typed markers (compiler order)", mid)
+	last := filter.Terms[2]
+	if last == nil || !last.nameless || last.Action != FilterActionDiscard {
+		t.Fatalf("last term = %+v, want the packed discard AFTER both typed terms (authored order)", last)
 	}
 }
