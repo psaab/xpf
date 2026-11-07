@@ -146,15 +146,17 @@ to be red, until their issue closes; any other red cell is a new failure.
   address". Ping to a live destination
   (`1.1.1.1`, `2001:4860:4860::8888`) works in both families while every
   hop past the firewall is `???`. They are row F7.
-  <!-- Expires-when: #18174 closed -->
-- **Fabric/control host pings: #18212.** Pings fw0↔fw1 on 10.99.x fail on
-  loss, tcp and udp. Host ICMP to the WAN gateway (`172.16.50.1`) failed
-  on tcp (integ9, integ10) and on udp, and passed on loss (integ8–10). That
-  WAN-gateway leg was #18558, not #18212: tcp's and udp's WAN addresses were
-  duplicates on the lab segment, and loss's `.8` is not. Since the live
+- **Fabric/control host pings: #18212 (closed; latest loss sample did not
+  reproduce).** Earlier fw0↔fw1 pings on 10.99.x were reported failing on
+  loss, tcp, and udp. In #18795's wave-gate 2 record, loss F1 passed 30/0/1
+  and the tracked fabric pair did not reproduce. That is the latest observed
+  status, not proof that every cluster/path is universally fixed; retain prior
+  FAILs as historical evidence.
+  The separate WAN-gateway host-ICMP leg (`172.16.50.1`) failed on tcp/udp and
+  passed on loss; it was #18558, not #18212. tcp/udp WAN addresses were
+  duplicates on the lab segment and loss's `.8` was not; after the live
   renumber of 2026-10-31 it is expected green on all three clusters (see the
-  environment row below). The 10.99.x fabric/control pings remain #18212.
-  <!-- Expires-when: #18212 closed -->
+  environment row below).
 
 ## Known environment rows (re-verify before excusing)
 
