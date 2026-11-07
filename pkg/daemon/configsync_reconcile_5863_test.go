@@ -192,6 +192,113 @@ func TestConfigSyncReconcileAlreadyPushedDoesNotReserveGeneration18644(t *testin
 	}
 }
 
+// FAIL-ON-REVERT: a same-text operator push alone must fence a reconcile paused
+// after reservation. This keeps the direct G1/G2 race independent of the NACK
+// ABA case below.
+func TestConfigSyncReconcilePreservesNewerSameTextPush18644(t *testing.T) {
+	d, _ := newReconcileDaemon(t, true /*primary*/, 60*time.Second)
+	d.configSyncPushForTest = nil
+	ss := cluster.NewSessionSync(":0", "10.99.0.2:4785", nil)
+	ss.SetConnectedForTesting(true)
+	d.clusterCommsMu.Lock()
+	d.sessionSync = ss
+	d.clusterCommsMu.Unlock()
+	d.configPeerStateForTest = func() (bool, bool) { return true, true }
+
+	type queuedConfig struct {
+		text string
+		gen  uint64
+	}
+	var queueMu sync.Mutex
+	var queued []queuedConfig
+	d.configSyncQueueForTest = func(text string, gen uint64) bool {
+		queueMu.Lock()
+		queued = append(queued, queuedConfig{text: text, gen: gen})
+		queueMu.Unlock()
+		return true
+	}
+
+	reserved := make(chan uint64, 1)
+	releaseG1 := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseG1) })
+	d.configSyncAfterReserveForTest = func(gen uint64) {
+		reserved <- gen
+		<-releaseG1
+	}
+
+	g1Done := make(chan struct{})
+	go func() {
+		defer close(g1Done)
+		d.reconcileConfigSyncToPeer("same-text-before-operator-push")
+	}()
+	var g1 uint64
+	select {
+	case g1 = <-reserved:
+	case <-time.After(5 * time.Second):
+		t.Fatal("G1 reconcile did not pause after reserving")
+	}
+	d.configSyncMu.Lock()
+	g1Token := d.configSyncPushedClaimToken
+	d.configSyncMu.Unlock()
+	if g1Token == 0 {
+		t.Fatal("G1 reconcile has no claim token")
+	}
+
+	if err := d.syncConfigToPeerWithAuthorization(nil); err != nil {
+		t.Fatalf("same-text operator push G2: %v", err)
+	}
+	queueMu.Lock()
+	if len(queued) != 1 {
+		got := len(queued)
+		queueMu.Unlock()
+		t.Fatalf("operator push wrote %d generations before G1 resumed, want exactly G2", got)
+	}
+	g2 := queued[0].gen
+	text := queued[0].text
+	queueMu.Unlock()
+	d.configSyncMu.Lock()
+	g2Token := d.configSyncPushedClaimToken
+	g2MarkerGen := d.configSyncPushedMarkerGen
+	g2PushedWireGen := d.configSyncPushedWireGen
+	g2PushedText := d.configSyncPushedDigest
+	d.configSyncMu.Unlock()
+	if g2 <= g1 || g2Token == 0 || g2Token <= g1Token ||
+		g2MarkerGen != g2 || g2PushedWireGen != g2 || g2PushedText != text {
+		t.Fatalf("G2 generation/token/published state = %d/%d marker=%d wire=%d textMatches=%v; want newer G2 over G1=%d/%d",
+			g2, g2Token, g2MarkerGen, g2PushedWireGen, g2PushedText == text, g1, g1Token)
+	}
+	_, activeText, _ := d.activeConfigSnapshotForPeer()
+	if text != activeText {
+		t.Fatalf("operator push text differs from active config: pushed=%q active=%q", text, activeText)
+	}
+
+	releaseOnce.Do(func() { close(releaseG1) })
+	select {
+	case <-g1Done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("G1 reconcile did not finish")
+	}
+	queueMu.Lock()
+	finalQueued := append([]queuedConfig(nil), queued...)
+	queueMu.Unlock()
+	if len(finalQueued) != 1 || finalQueued[0].gen != g2 || finalQueued[0].text != text {
+		t.Fatalf("stale G1 wrote after G2: queued=%+v, want only G2=%d", finalQueued, g2)
+	}
+	d.configSyncMu.Lock()
+	hasG2 := d.configSyncHasPushed &&
+		d.configSyncPushedEpoch == d.syncPeerConnEpoch.Load() &&
+		d.configSyncPushedGen == configGenerationHash(text) &&
+		d.configSyncPushedClaimToken == g2Token &&
+		d.configSyncPushedMarkerGen == g2 &&
+		d.configSyncPushedWireGen == g2 &&
+		d.configSyncPushedDigest == text
+	d.configSyncMu.Unlock()
+	if !hasG2 {
+		t.Fatal("stale G1 replaced or cleared the G2 marker/debt")
+	}
+}
+
 // FAIL-ON-REVERT: invalidating G2 between a paused G1 and its G3 retry must
 // not let the reused pre-reservation tuple alias either claim. The old G1 must
 // neither steal G3's marker nor clear it on its failed late check.
