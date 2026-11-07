@@ -6,6 +6,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/cmdtree"
@@ -35,8 +36,8 @@ const (
 // no trailing tokens) is a display pipe; a single recognised output filter
 // may follow it (`| display set | match x`, which dispatch splits off
 // before dispatchOperational — see the chained-pipe cell in the #14715
-// regression). Any other pipe shape is returned as an unknown pipe so the
-// caller can name it in a syntax error instead of guessing a format.
+// regression). Any other pipe shape is returned as format=none plus its tokens;
+// a handler may parse a command-specific pipe or report it as unknown.
 //
 // Returns path (tokens before `|`), the format, the remaining pipe tokens
 // when the pipe is not exactly a display pipe, and whether a pipe was present.
@@ -127,6 +128,39 @@ func (c *CLI) handleShow(args []string) error {
 		cfgPath, format, pipeRest, piped, pipeErr := splitDisplayPipe(args[1:])
 		if pipeErr != nil {
 			fmt.Println(pipeErr.Error())
+			return nil
+		}
+		if piped && format == displayPipeNone && len(pipeRest) > 0 && pipeRest[0] == "compare" {
+			if len(pipeRest) == 1 {
+				return fmt.Errorf("syntax error: | compare on operational show configuration requires rollback <N>")
+			}
+			if len(pipeRest) != 3 || pipeRest[1] != "rollback" {
+				return fmt.Errorf("usage: show configuration [<path>] | compare rollback <N>")
+			}
+			n, err := strconv.Atoi(pipeRest[2])
+			if err != nil || n < 0 {
+				return fmt.Errorf("usage: show configuration [<path>] | compare rollback <N>")
+			}
+			var diff string
+			if c.snapshotsCaptured15995() {
+				if slotErr := c.renderSlotErr(); slotErr != nil {
+					return slotErr
+				}
+				slot, active := c.renderSnapshot15995("slot"), c.renderSnapshot15995("other")
+				if c.showConfigRedacted() {
+					diff = configstore.RenderCompareRedacted(slot, active, cfgPath, active != nil)
+				} else {
+					diff = configstore.RenderCompareCleartext(slot, active, cfgPath, active != nil)
+				}
+			} else if c.showConfigRedacted() {
+				diff, err = c.store.ShowCompareRollbackActiveRedactedAtPath(n, cfgPath)
+			} else {
+				diff, err = c.store.ShowCompareRollbackActiveAtPath(n, cfgPath)
+			}
+			if err != nil {
+				return err
+			}
+			fmt.Print(diff)
 			return nil
 		}
 		if piped && format == displayPipeNone {

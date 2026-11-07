@@ -395,7 +395,8 @@ func displayFormatName(f displayPipeFormat) string {
 // `show configuration [path…]` against the *-configuration pair only
 // (the operational pair was already charged by checkCommandRegex on
 // the full canonical line, pipe included). args are the words after
-// "configuration"; a `| display …` pipe is format, not path.
+// "configuration"; display pipes select a format, while compare rollback
+// captures and prices its rollback/ACTIVE diff arms.
 func (c *CLI) checkShowConfigurationRead(args []string) error {
 	if c.UserClass() == "" {
 		return nil
@@ -406,14 +407,47 @@ func (c *CLI) checkShowConfigurationRead(args []string) error {
 	}
 	path := args
 	display := ""
+	var comparePipe []string
 	for i, a := range args {
 		if a == "|" {
 			if i+2 < len(args) && args[i+1] == "display" {
 				display = "display " + args[i+2]
 			}
+			if i+1 < len(args) && args[i+1] == "compare" {
+				comparePipe = args[i+1:]
+			}
 			path = args[:i]
 			break
 		}
+	}
+	if len(comparePipe) > 0 {
+		// Operational compare uses the rollback slot and ACTIVE arms. Price
+		// both rendered trees from the same capture that the handler renders;
+		// the staged candidate is neither read nor authorized as a baseline.
+		if len(comparePipe) != 3 || comparePipe[1] != "rollback" {
+			return nil // malformed compare renders nothing; handler returns usage.
+		}
+		n, err := strconv.Atoi(comparePipe[2])
+		if err != nil || n < 0 {
+			return nil // malformed compare renders nothing; handler returns usage.
+		}
+		var trees []*config.ConfigTree
+		priceCfg := cfg
+		if c.store != nil {
+			cap := c.store.CaptureRollback(n, true)
+			if cap.Cfg != nil {
+				priceCfg = cap.Cfg
+			}
+			trees = []*config.ConfigTree{cap.Slot, cap.Other}
+			c.setRenderSnapshots16613(cap)
+			if cap.Err != nil {
+				return cap.Err
+			}
+		}
+		if len(path) == 0 {
+			return c.priceRollbackWholeCompareCaptured15994(priceCfg, cfg)
+		}
+		return config.AuthorizeConfigShowRollbackAtPathRendered(priceCfg, c.UserClass(), path, "", trees)
 	}
 	if len(path) == 0 {
 		var trees []*config.ConfigTree
