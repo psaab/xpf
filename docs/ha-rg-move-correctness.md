@@ -336,9 +336,16 @@ The NTP state of each cluster on 2026-10-31:
   sources (3 unreachable sources)`). With the stanza configured, a crash gate
   in such a window FAILs, unless the servers fail the orchestrator's SNTP
   probe too, in which case it is a lab NTP outage (VOID).
-- Outside a crash gate nothing checks this yet: `test-connectivity` has no
-  NTP cell, so a cluster that loses chrony (or reaches NTP from one node only)
-  shows up only when a crash smoke runs. #18629 tracks the cell.
+- Outside a crash gate, `test-connectivity` runs #18629's one-shot NTP health
+  cell: it reads each node's stanza independently and measures both Leap
+  statuses once. Both stanzas are required; a stanza missing on either node,
+  unreadable configuration, or unreadable/noisy measurement is VOID. Both
+  synchronised and within `XPF_FAILOVER_CLOCK_SKEW_BOUND_S` (default 5 s)
+  PASS; one unsynchronised node FAILs. If both are unsynchronised, any
+  configured server answering the off-path probe (or an unavailable probe)
+  FAILs, while a completed probe with no answers is a lab-outage VOID. The
+  cell never waits for convergence or resyncs clocks. This surfaces chrony
+  loss or node-specific NTP reachability before a crash smoke runs.
 
 `make test-failover-clock-lib` (also in `make selftest`) covers this
 hermetically, with mocked `incus`, `timeout`, `date` and `sleep` over a

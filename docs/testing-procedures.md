@@ -95,10 +95,11 @@ Tests:
 
 - Cluster NTP health (#18629): reads `show configuration system ntp` on each
   firewall independently, then takes one min-RTT clock measurement and reads
-  both chrony Leap statuses. Both synchronised and within the 5 s skew bound
-  PASS; one unsynchronised node FAILs; both unsynchronised FAIL if any
-  configured server answers off-path or the probe is unavailable; a completed
-  probe with no answers is a lab outage and VOID. Missing/unreadable stanza or
+  both chrony Leap statuses. Both synchronised and within
+  `XPF_FAILOVER_CLOCK_SKEW_BOUND_S` (default 5 s) PASS; one unsynchronised
+  node FAILs. If both are unsynchronised, an answering off-path server or an
+  unavailable probe FAILs; a completed probe with no answers is a lab outage
+  and VOID. A stanza missing on either node, unreadable config, or
   noisy/unreadable clock measurement is VOID. This cell never waits for
   convergence or sets a clock.
 

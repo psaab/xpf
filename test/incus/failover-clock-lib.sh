@@ -315,7 +315,68 @@ _failover_clock_ntp_config_one() {
 		fi
 		return 0
 	fi
-	_FC_NODE_NTP_SERVERS=$(sed -nE 's/^[[:space:]]*server[[:space:]]+([^[:space:]{;]+).*/\1/p' <<<"$out" | tr '\n' ' ')
+	_FC_NODE_NTP_SERVERS=$(awk '
+		function add_server(value) {
+			if (value != "")
+				out = out (out == "" ? "" : " ") value
+		}
+		{
+			line = $0
+			gsub(/\[/, " [ ", line)
+			gsub(/\]/, " ] ", line)
+			gsub(/\{/, " { ", line)
+			gsub(/\}/, " } ", line)
+			gsub(/;/, " ; ", line)
+			count = split(line, token, /[[:space:]]+/)
+			for (i = 1; i <= count; i++) {
+				if (token[i] == "")
+					continue
+				if (skip_depth > 0) {
+					if (token[i] == "{")
+						skip_depth++
+					else if (token[i] == "}")
+						skip_depth--
+					continue
+				}
+				if (bracket_list) {
+					if (token[i] == "]")
+						bracket_list = 0
+					else if (token[i] != ";" && token[i] != "{" && token[i] != "}")
+						add_server(token[i])
+					continue
+				}
+				if (brace_values) {
+					if (token[i] == "}")
+						brace_values = 0
+					else if (token[i] != ";" && token[i] != "{" && token[i] != "[")
+						add_server(token[i])
+					continue
+				}
+				if (token[i] != "server" || i == count)
+					continue
+				j = i + 1
+				while (j <= count && token[j] == "")
+					j++
+				if (j > count)
+					continue
+				if (token[j] == "[") {
+					bracket_list = 1
+					i = j
+				} else if (token[j] == "{") {
+					brace_values = 1
+					i = j
+				} else if (token[j] != ";" && token[j] != "}" && token[j] != "]") {
+					add_server(token[j])
+					i = j
+					if (j < count && token[j + 1] == "{") {
+						skip_depth = 1
+						i = j + 1
+					}
+				}
+			}
+		}
+		END { print out }
+	' <<<"$out")
 	_FC_NODE_NTP_SERVERS="${_FC_NODE_NTP_SERVERS% }"
 	if [[ -n "$_FC_NODE_NTP_SERVERS" ]]; then
 		_FC_NODE_NTP_STATE=present
@@ -391,11 +452,13 @@ _failover_clock_offpath() {
 
 # failover_clock_ntp_cell <label> <node0> <node1>
 #   One instantaneous operator-health check: read each node's own NTP stanza,
-#   measure both clocks/Leap statuses once, and never wait or resync. Different
-#   server sets are valid; the union is used only for the off-path control
-#   when neither node is synchronised. Returns 0 PASS, 1 FAIL, or 2 VOID.
+#   measure both clocks/Leap statuses once, and never wait or resync. The
+#   shared skew-bound knob defaults to 5 s; a missing stanza on either node
+#   is VOID. Different server sets are valid; their union is used only for
+#   the off-path control when neither node is synchronised. Returns 0 PASS,
+#   1 FAIL, or 2 VOID.
 failover_clock_ntp_cell() {
-	local label="${1:-}" n0="${2:-}" n1="${3:-}" bound=5 verdict=VOID why=""
+	local label="${1:-}" n0="${2:-}" n1="${3:-}" bound="${XPF_FAILOVER_CLOCK_SKEW_BOUND_S:-5}" verdict=VOID why=""
 	local synced0=0 synced1=0 servers="" unreadable="" server
 	local -a server_list=() node_servers=()
 	local -A seen_servers=()
@@ -412,8 +475,13 @@ failover_clock_ntp_cell() {
 			[[ "$state0" == unknown ]] && unreadable="$n0"
 			[[ "$state1" == unknown ]] && unreadable="${unreadable:+${unreadable} and }${n1}"
 			why="system ntp configuration unreadable on ${unreadable}"
-		elif [[ "$state0" == absent && "$state1" == absent ]]; then
-			why="no \`system ntp\` configured on either node"
+		elif [[ "$state0" == absent || "$state1" == absent ]]; then
+			if [[ "$state0" == absent && "$state1" == absent ]]; then
+				why="no \`system ntp\` configured on either node"
+			else
+				[[ "$state0" == absent ]] && why="system ntp stanza absent on ${n0}"
+				[[ "$state1" == absent ]] && why="${why:+${why}; }system ntp stanza absent on ${n1}"
+			fi
 		else
 			if [[ "$state0" == present ]]; then
 				read -r -a node_servers <<<"$servers0"
