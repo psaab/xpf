@@ -38,7 +38,7 @@ func rekeyBracketProvenance(n *Node, changed bool) {
 	if n == nil || !n.IsLeaf || !changed {
 		return
 	}
-	n.setKeysBracketed(nil)
+	n.setKeysBracketed(nil, false)
 }
 
 // CopyPath copies a subtree from src to dst, replacing the source node's keys

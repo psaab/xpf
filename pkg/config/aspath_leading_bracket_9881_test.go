@@ -384,6 +384,29 @@ func TestCopyRenameClearsBracketProvenance_9881(t *testing.T) {
 			[]string{"policy-options", "as-path", "AP2", "65000"}); err != nil {
 			t.Fatalf("rename: %v", err)
 		}
+		var renamed *Node
+		var find func([]*Node)
+		find = func(nodes []*Node) {
+			for _, n := range nodes {
+				if n == nil {
+					continue
+				}
+				for _, key := range n.Keys {
+					if key == "AP2" {
+						renamed = n
+						return
+					}
+				}
+				find(n.Children)
+			}
+		}
+		find(tree.Children)
+		if renamed == nil {
+			t.Fatal("renamed as-path node is missing")
+		}
+		if renamed.BracketedClosed {
+			t.Fatal("renamed leaf kept stale BracketedClosed after its bracket mask was cleared")
+		}
 		if _, err := CompileConfig(tree); err != nil {
 			t.Fatalf("a renamed node carried a stale bracket bit and was refused: %v", err)
 		}
