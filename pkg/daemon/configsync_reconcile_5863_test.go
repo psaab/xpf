@@ -178,6 +178,7 @@ func TestConfigSyncReconcileAlreadyPushedDoesNotReserveGeneration18644(t *testin
 	d.configSyncHasPushed = true
 	d.configSyncPushedEpoch = epoch
 	d.configSyncPushedGen = configGenerationHash(configText)
+	d.configSyncPushedClaimToken = d.nextConfigSyncClaimTokenLocked()
 	d.configSyncMu.Unlock()
 
 	before := ss.ConfigGenCounterForTesting()
@@ -191,11 +192,10 @@ func TestConfigSyncReconcileAlreadyPushedDoesNotReserveGeneration18644(t *testin
 	}
 }
 
-// FAIL-ON-REVERT: a same-text operator push at a newer wire generation
-// supersedes a reconcile reservation paused before its final marker check.
-// The old hash-only guard let that stale reconcile write G1 after G2 and
-// replace the generation the overdue-ACK path must resend.
-func TestConfigSyncReconcilePreservesNewerSameTextPush18644(t *testing.T) {
+// FAIL-ON-REVERT: invalidating G2 between a paused G1 and its G3 retry must
+// not let the reused pre-reservation tuple alias either claim. The old G1 must
+// neither steal G3's marker nor clear it on its failed late check.
+func TestConfigSyncReconcileClaimTokenPreventsNACKABA18644(t *testing.T) {
 	d, _ := newReconcileDaemon(t, true /*primary*/, 60*time.Second)
 	d.configSyncPushForTest = nil
 	ss := cluster.NewSessionSync(":0", "10.99.0.2:4785", nil)
@@ -218,52 +218,155 @@ func TestConfigSyncReconcilePreservesNewerSameTextPush18644(t *testing.T) {
 		return true
 	}
 
-	reserved := make(chan uint64, 1)
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseReconcile := func() { releaseOnce.Do(func() { close(release) }) }
-	defer releaseReconcile()
-	var paused atomic.Bool
+	reserved := make(chan uint64, 2)
+	releaseG1 := make(chan struct{})
+	releaseG3 := make(chan struct{})
+	var releaseG1Once, releaseG3Once sync.Once
+	unblock := func() {
+		releaseG1Once.Do(func() { close(releaseG1) })
+		releaseG3Once.Do(func() { close(releaseG3) })
+	}
+	defer unblock()
+	var reserveAttempt atomic.Int32
 	d.configSyncAfterReserveForTest = func(gen uint64) {
-		if paused.CompareAndSwap(false, true) {
+		switch reserveAttempt.Add(1) {
+		case 1:
 			reserved <- gen
-			<-release
+			<-releaseG1
+		case 2:
+			reserved <- gen
+			<-releaseG3
+		default:
+			t.Errorf("unexpected reconcile reservation #%d", reserveAttempt.Load())
 		}
 	}
 
-	reconcileDone := make(chan struct{})
-	go func() {
-		d.reconcileConfigSyncToPeer("same-text-commit-race")
-		close(reconcileDone)
-	}()
-	var g1 uint64
-	select {
-	case g1 = <-reserved:
-	case <-time.After(5 * time.Second):
-		t.Fatal("reconcile did not pause after reserving G1")
+	startReconcile := func(reason string) <-chan struct{} {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			d.reconcileConfigSyncToPeer(reason)
+		}()
+		return done
+	}
+	waitReserved := func(name string) uint64 {
+		t.Helper()
+		select {
+		case gen := <-reserved:
+			return gen
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not pause after reserving", name)
+			return 0
+		}
+	}
+	waitDone := func(name string, done <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not finish", name)
+		}
+	}
+
+	g1Done := startReconcile("same-text-before-nack")
+	g1 := waitReserved("G1 reconcile")
+	d.configSyncMu.Lock()
+	g1Token := d.configSyncPushedClaimToken
+	d.configSyncMu.Unlock()
+	if g1Token == 0 {
+		t.Fatal("G1 reconcile has no claim token")
 	}
 
 	if err := d.syncConfigToPeerWithAuthorization(nil); err != nil {
-		t.Fatalf("same-text operator push: %v", err)
+		t.Fatalf("same-text operator push G2: %v", err)
 	}
 	queueMu.Lock()
 	if len(queued) != 1 {
 		got := len(queued)
 		queueMu.Unlock()
-		t.Fatalf("operator push wrote %d generations before G1 resumed, want exactly G2", got)
+		t.Fatalf("operator push wrote %d generations before invalidation, want exactly G2", got)
 	}
 	g2 := queued[0].gen
 	text := queued[0].text
 	queueMu.Unlock()
-	if g2 <= g1 {
-		t.Fatalf("operator generation G2=%d is not newer than paused reconcile G1=%d", g2, g1)
+	d.configSyncMu.Lock()
+	g2Token := d.configSyncPushedClaimToken
+	d.configSyncMu.Unlock()
+	if g2 <= g1 || g2Token == 0 || g2Token <= g1Token {
+		t.Fatalf("G2 generation/token = %d/%d, want newer than G1 generation/token %d/%d",
+			g2, g2Token, g1, g1Token)
 	}
 	_, activeText, _ := d.activeConfigSnapshotForPeer()
 	if text != activeText {
 		t.Fatalf("operator push text differs from active config: pushed=%q active=%q", text, activeText)
 	}
 
-	ss.SetOverdueConfigApplyDebtForTesting(g2, 2*time.Minute)
+	// Model the production NACK invalidation, then let a retry claim the same
+	// (epoch, hash, zero-wire-generation) tuple while G1 remains paused.
+	d.invalidateConfigSyncPushed()
+	g3Done := startReconcile("same-text-after-nack")
+	g3 := waitReserved("G3 reconcile")
+	d.configSyncMu.Lock()
+	g3Token := d.configSyncPushedClaimToken
+	g3ClaimStillOwned := d.configSyncHasPushed &&
+		d.configSyncPushedEpoch == d.syncPeerConnEpoch.Load() &&
+		d.configSyncPushedGen == configGenerationHash(text) &&
+		d.configSyncPushedMarkerGen == 0
+	d.configSyncMu.Unlock()
+	if g3 <= g2 || g3Token == 0 || g3Token <= g2Token || g3Token == g1Token || !g3ClaimStillOwned {
+		t.Fatalf("G3 claim generation/token = %d/%d, want unique newer claim; marker still owned=%v",
+			g3, g3Token, g3ClaimStillOwned)
+	}
+
+	// G1's failed post-reservation check must also fail its exact-token clear:
+	// otherwise it erases G3's identical pre-reservation tuple.
+	releaseG1Once.Do(func() { close(releaseG1) })
+	waitDone("G1 reconcile", g1Done)
+	queueMu.Lock()
+	afterG1 := append([]queuedConfig(nil), queued...)
+	queueMu.Unlock()
+	if len(afterG1) != 1 || afterG1[0].gen != g2 {
+		t.Fatalf("stale G1 wrote after G2/NACK while G3 owned the claim: queued=%+v", afterG1)
+	}
+	d.configSyncMu.Lock()
+	hasG3Claim := d.configSyncHasPushed &&
+		d.configSyncPushedEpoch == d.syncPeerConnEpoch.Load() &&
+		d.configSyncPushedGen == configGenerationHash(text) &&
+		d.configSyncPushedMarkerGen == 0 &&
+		d.configSyncPushedClaimToken == g3Token
+	d.configSyncMu.Unlock()
+	if !hasG3Claim {
+		t.Fatal("stale G1's late clear erased or replaced the G3 claim")
+	}
+
+	releaseG3Once.Do(func() { close(releaseG3) })
+	waitDone("G3 reconcile", g3Done)
+	queueMu.Lock()
+	finalQueued := append([]queuedConfig(nil), queued...)
+	queueMu.Unlock()
+	if len(finalQueued) != 2 || finalQueued[0].gen != g2 ||
+		finalQueued[1].gen != g3 || finalQueued[1].text != text {
+		t.Fatalf("queued generations after G3 = %+v, want only G2=%d then G3=%d", finalQueued, g2, g3)
+	}
+
+	d.configSyncMu.Lock()
+	markerHash := d.configSyncPushedGen
+	markerEpoch := d.configSyncPushedEpoch
+	markerWireGen := d.configSyncPushedMarkerGen
+	markerToken := d.configSyncPushedClaimToken
+	pushedWireGen := d.configSyncPushedWireGen
+	pushedText := d.configSyncPushedDigest
+	hasPushed := d.configSyncHasPushed
+	d.configSyncMu.Unlock()
+	if !hasPushed || markerEpoch != d.syncPeerConnEpoch.Load() ||
+		markerHash != configGenerationHash(text) || markerToken != g3Token ||
+		markerWireGen != g3 || pushedWireGen != g3 || pushedText != text {
+		t.Fatalf("final G3 marker/debt mismatch: has=%v epoch=%d hash=%d token=%d marker-wire=%d pushed-wire=%d textMatches=%v; want G3=%d token=%d",
+			hasPushed, markerEpoch, markerHash, markerToken, markerWireGen, pushedWireGen, pushedText == text,
+			g3, g3Token)
+	}
+
+	ss.SetOverdueConfigApplyDebtForTesting(g3, 2*time.Minute)
 	type resend struct {
 		text string
 		gen  uint64
@@ -272,32 +375,11 @@ func TestConfigSyncReconcilePreservesNewerSameTextPush18644(t *testing.T) {
 	d.configResendForTest = func(text string, gen uint64) {
 		resends = append(resends, resend{text: text, gen: gen})
 	}
-	releaseReconcile()
-	select {
-	case <-reconcileDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("reconcile did not finish after the newer push completed")
+	if !d.repushIfConfigAckOverdue("same-text-nack-aba") {
+		t.Fatal("newest G3 overdue ACK debt was not re-sent")
 	}
-
-	queueMu.Lock()
-	finalQueued := append([]queuedConfig(nil), queued...)
-	queueMu.Unlock()
-	if len(finalQueued) != 1 || finalQueued[0].gen != g2 {
-		t.Fatalf("stale reconcile wrote after G2: queued=%+v, want only G2=%d", finalQueued, g2)
-	}
-	d.configSyncMu.Lock()
-	pushedGen, pushedWireGen, pushedText := d.configSyncPushedMarkerGen, d.configSyncPushedWireGen, d.configSyncPushedDigest
-	d.configSyncMu.Unlock()
-	if pushedGen != g2 || pushedWireGen != g2 || pushedText != text {
-		t.Fatalf("G1 replaced the G2 pushed marker: marker=%d wire=%d textMatches=%v, want marker/wire=%d",
-			pushedGen, pushedWireGen, pushedText == text, g2)
-	}
-
-	if !d.repushIfConfigAckOverdue("same-text-push-race") {
-		t.Fatal("newest G2 overdue ACK debt was not re-sent")
-	}
-	if len(resends) != 1 || resends[0].gen != g2 || resends[0].text != text {
-		t.Fatalf("overdue resend = %+v, want the same G2 text at generation %d", resends, g2)
+	if len(resends) != 1 || resends[0].gen != g3 || resends[0].text != text {
+		t.Fatalf("overdue resend = %+v, want same G3 text at generation %d", resends, g3)
 	}
 }
 

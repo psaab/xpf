@@ -131,7 +131,7 @@ func TestAuthorityThresholdIsScopedToPeerIncarnation18636(t *testing.T) {
 	const sentGen = uint64(7000)
 	authority, _ := newAuthority18636(t, sentGen-1)
 	authority.recordLastSentConfigGen(authority.ReserveConfigGen()) // sentGen, to incarnation A
-	authority.ReserveConfigGen() // synthetic pre-#18644 no-op reservation
+	authority.ReserveConfigGen()                                    // synthetic pre-#18644 no-op reservation
 	if got := authority.authorityConfigEpochThreshold(); got != sentGen {
 		t.Fatalf("threshold = %d, want the generation written to incarnation A (%d)", got, sentGen)
 	}

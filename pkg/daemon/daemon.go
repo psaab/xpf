@@ -928,17 +928,22 @@ type Daemon struct {
 	// the stability threshold re-evaluates the invariant and pushes exactly
 	// once, instead of leaving the peer indefinitely divergent (the connect
 	// edge could have skipped the only push) OR re-pushing on every tick.
-	syncPeerConnEpoch     atomic.Uint64
+	syncPeerConnEpoch atomic.Uint64
 	// configSyncPushMu serializes config wire writes with publication of their
 	// pushed markers. Never acquire it while holding configSyncMu.
-	configSyncPushMu      sync.Mutex
-	configSyncMu          sync.Mutex
-	configSyncHasPushed   bool
-	configSyncPushedEpoch uint64
-	configSyncPushedGen   uint64
-	// configSyncPushedMarkerGen fences an in-flight reconciliation claim from a
-	// later push of the same config text. Zero is the pre-reservation claim;
-	// after reserving, the exact wire generation owns the marker.
+	configSyncPushMu sync.Mutex
+	configSyncMu     sync.Mutex
+	// configSyncClaimSequence is protected by configSyncMu. Zero is reserved
+	// and the sequence never wraps, so a claim token is never reused.
+	configSyncClaimSequence uint64
+	configSyncHasPushed     bool
+	configSyncPushedEpoch   uint64
+	configSyncPushedGen     uint64
+	// configSyncPushedClaimToken uniquely identifies the current marker owner
+	// even when an invalidated claim's epoch/hash/wire generation repeat.
+	configSyncPushedClaimToken uint64
+	// configSyncPushedMarkerGen is zero before reservation and records the
+	// claimed wire generation afterward; token identity is tracked separately.
 	configSyncPushedMarkerGen uint64
 	// configAckRepushAtMono rate-limits the #18521 overdue-ACK re-push
 	// (cluster.MonotonicNanos of the last one; 0 = never).

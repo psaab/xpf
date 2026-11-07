@@ -63,6 +63,7 @@ func (d *Daemon) onSessionSyncPeerConnected() {
 	d.configSyncPushedEpoch = 0
 	d.configSyncPushedGen = 0
 	d.configSyncPushedMarkerGen = 0
+	d.configSyncPushedClaimToken = 0
 	d.configSyncMu.Unlock()
 	// #17056: the suppression cap stamp now lives in pkg/cluster under
 	// Manager.mu. Publishing this connection's sync object via
@@ -148,7 +149,8 @@ func (d *Daemon) onSessionSyncPeerDisconnected() {
 	d.configSyncPushedDigest = ""
 	d.configSyncPushedWireGen = 0
 	d.configSyncPushedMarkerGen = 0
-d.configSyncMu.Unlock()
+	d.configSyncPushedClaimToken = 0
+	d.configSyncMu.Unlock()
 	gen := d.syncPrimeRetryGen.Add(1)
 
 	// On disconnect after a completed bulk exchange, preserve primed state
@@ -635,6 +637,17 @@ func (d *Daemon) markConfigSyncPushedAtEpoch(configText string, epoch uint64) bo
 	return d.markConfigSyncPushedAtEpochGen(configText, epoch, 0)
 }
 
+// nextConfigSyncClaimTokenLocked returns a never-reused marker identity. Zero
+// is reserved for "no claim"; reaching MaxUint64 fails closed rather than
+// wrapping and allowing an ancient in-flight claim to alias a new one.
+func (d *Daemon) nextConfigSyncClaimTokenLocked() uint64 {
+	if d.configSyncClaimSequence == ^uint64(0) {
+		return 0
+	}
+	d.configSyncClaimSequence++
+	return d.configSyncClaimSequence
+}
+
 func (d *Daemon) markConfigSyncPushedAtEpochGen(configText string, epoch, wireGen uint64) bool {
 	gen := configGenerationHash(configText)
 	d.configSyncMu.Lock()
@@ -643,20 +656,27 @@ func (d *Daemon) markConfigSyncPushedAtEpochGen(configText string, epoch, wireGe
 		(wireGen != 0 && d.configSyncPushedEpoch == epoch && d.configSyncPushedMarkerGen > wireGen) {
 		return false
 	}
+	claimToken := d.nextConfigSyncClaimTokenLocked()
+	if claimToken == 0 {
+		return false
+	}
 	d.configSyncHasPushed = true
 	d.configSyncPushedEpoch = epoch
 	d.configSyncPushedGen = gen
+	d.configSyncPushedClaimToken = claimToken
 	d.configSyncPushedMarkerGen = wireGen
 	return true
 }
 
-func (d *Daemon) clearConfigSyncPushedAtEpoch(epoch, gen, markerGen uint64) {
+func (d *Daemon) clearConfigSyncPushedAtEpoch(epoch, gen, markerGen, claimToken uint64) {
 	d.configSyncMu.Lock()
-	if d.configSyncPushedEpoch == epoch && d.configSyncPushedGen == gen &&
-		d.configSyncPushedMarkerGen == markerGen {
+	if claimToken != 0 && d.configSyncPushedEpoch == epoch &&
+		d.configSyncPushedGen == gen && d.configSyncPushedMarkerGen == markerGen &&
+		d.configSyncPushedClaimToken == claimToken {
 		d.configSyncHasPushed = false
 		d.configSyncPushedEpoch = 0
 		d.configSyncPushedGen = 0
+		d.configSyncPushedClaimToken = 0
 		d.configSyncPushedMarkerGen = 0
 	}
 	d.configSyncMu.Unlock()
@@ -685,6 +705,7 @@ func (d *Daemon) invalidateConfigSyncPushed() {
 	d.configSyncPushedEpoch = 0
 	d.configSyncPushedGen = 0
 	d.configSyncPushedMarkerGen = 0
+	d.configSyncPushedClaimToken = 0
 	d.configSyncMu.Unlock()
 }
 
@@ -759,8 +780,8 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 	}
 
 	// #18644: atomically check and claim the (epoch x generation) marker before
-	// reserving a wire generation. Claiming first also makes concurrent
-	// reconciles share one reservation rather than each burning one.
+	// reserving a wire generation. Each claim gets a never-reused token, so an
+	// invalidated (epoch, hash, zero-wire-gen) claim cannot alias its retry.
 	d.configSyncMu.Lock()
 	if d.syncPeerConnEpoch.Load() != epoch || !d.syncPeerConnected.Load() {
 		d.configSyncMu.Unlock()
@@ -776,9 +797,16 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 			"reason", reason, "epoch", epoch, "generation", gen)
 		return
 	}
+	claimedToken := d.nextConfigSyncClaimTokenLocked()
+	if claimedToken == 0 {
+		d.configSyncMu.Unlock()
+		slog.Error("cluster: config-sync reconcile claim-token sequence exhausted", "reason", reason, "epoch", epoch)
+		return
+	}
 	d.configSyncHasPushed = true
 	d.configSyncPushedEpoch = epoch
 	d.configSyncPushedGen = gen
+	d.configSyncPushedClaimToken = claimedToken
 	d.configSyncPushedMarkerGen = 0
 	d.configSyncMu.Unlock()
 	claimedGen := gen
@@ -789,7 +817,7 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		latestCfg, latestText, latestAncestry, latestReservedGen :=
 			d.activeConfigSnapshotAndReserveForPeer(ss, gen)
 		if latestCfg == nil {
-			d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen)
+			d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen, claimedToken)
 			return
 		}
 		cfg, configText, ancestry, reservedGen =
@@ -800,7 +828,7 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		gen = configGenerationHash(configText)
 		auth, err = d.peerSnapshotProtocolAuthorizationForConfig(cfg)
 		if err != nil {
-			d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen)
+			d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen, claimedToken)
 			reportEpoch, reportState := d.currentPeerSnapshotObservation()
 			if auth != nil {
 				reportEpoch, reportState = auth.peerConnEpoch, auth.state
@@ -810,26 +838,27 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		}
 		if auth != nil {
 			if auth.peerConnEpoch != epoch {
-				d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen)
+				d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen, claimedToken)
 				return
 			}
 			allowed, authErr := d.revalidatePeerSnapshotAuthorization(auth, configText)
 			if authErr != nil || !allowed {
-				d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen)
+				d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen, claimedToken)
 				return
 			}
 			attemptState = auth.state
 		}
 	}
 
-	// The hash alone cannot distinguish this reservation from a later operator
-	// push of the same text. Serialize the final check and write with every
-	// other config sender, then bind the marker to this exact reserved generation.
+	// The epoch/hash/generation tuple alone cannot distinguish a later claim
+	// for the same config text after invalidation. Serialize the final check and
+	// write with other senders, and require this exact claim token to still own it.
 	d.configSyncPushMu.Lock()
 	d.configSyncMu.Lock()
 	stillClaimed := d.syncPeerConnEpoch.Load() == epoch && d.syncPeerConnected.Load() &&
 		d.configSyncHasPushed && d.configSyncPushedEpoch == epoch &&
 		d.configSyncPushedGen == claimedGen &&
+		d.configSyncPushedClaimToken == claimedToken &&
 		d.configSyncPushedMarkerGen == claimedWireGen
 	if stillClaimed && reservedGen != 0 {
 		d.configSyncPushedMarkerGen = reservedGen
@@ -837,7 +866,7 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 	}
 	d.configSyncMu.Unlock()
 	if !stillClaimed {
-		d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen)
+		d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen, claimedToken)
 		d.configSyncPushMu.Unlock()
 		if auth != nil {
 			d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, attemptState,
@@ -862,7 +891,7 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 			queued = ss.QueueConfigWithAncestryAtGeneration(configText, ancestry, reservedGen)
 		}
 		if !queued {
-			d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen)
+			d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen, claimedToken)
 			d.configSyncPushMu.Unlock()
 			if auth != nil {
 				_, authErr := d.revalidatePeerSnapshotAuthorization(auth, configText)
@@ -876,13 +905,13 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 	if auth != nil {
 		allowed, authErr := d.revalidatePeerSnapshotAuthorization(auth, configText)
 		if authErr != nil || !allowed {
-			d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen)
+			d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen, claimedToken)
 			d.configSyncPushMu.Unlock()
 			return
 		}
 	}
 	if !d.noteConfigSharedWithPeerAtEpochGen(configText, epoch, reservedGen) {
-		d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen)
+		d.clearConfigSyncPushedAtEpoch(epoch, claimedGen, claimedWireGen, claimedToken)
 		d.configSyncPushMu.Unlock()
 		if auth != nil {
 			d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, attemptState,
@@ -897,7 +926,6 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 	d.clearPeerSnapshotConfigSyncDeferred(configText, epoch, successState)
 	d.configSyncPushMu.Unlock()
 }
-
 
 // configSyncReconcileLoop is the low-frequency level-triggered safety net for
 // config sync (#5863). It wakes at the stability threshold (so a node that was
