@@ -115,7 +115,7 @@
 use crate::hot_hash_seed::frag_assoc_shard_seed;
 use crate::nat64::{Nat64ReverseInfo, ipv6_fragment_header};
 use crate::session::{SessionDecision, SessionKey};
-use crate::sharded::{ShardedLock, shard_index_from_hash};
+use crate::sharded::{ShardedMap, shard_index_from_hash};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -495,7 +495,7 @@ struct FragEntry {
 /// on any other worker.
 #[derive(Clone)]
 pub(crate) struct FragAssoc {
-    shards: Arc<ShardedLock<Mutex<Vec<FragEntry>>, FRAG_SHARDS>>,
+    shards: Arc<ShardedMap<FragKey, Mutex<Vec<FragEntry>>, FRAG_SHARDS>>,
 }
 
 impl std::fmt::Debug for FragAssoc {
@@ -569,7 +569,7 @@ fn frag_entry_live(e: &FragEntry, now_ns: u64) -> bool {
 impl FragAssoc {
     pub(crate) fn new() -> Self {
         Self {
-            shards: Arc::new(ShardedLock::with_seed_and(
+            shards: Arc::new(ShardedMap::with_seed_and(
                 frag_assoc_shard_seed(),
                 || Mutex::new(Vec::with_capacity(FRAG_CAP_PER_SHARD)),
             )),

@@ -18,7 +18,7 @@
 
 use super::SessionKey;
 use crate::hot_hash_seed::HotPathSeededState;
-use crate::sharded::ShardedLock;
+use crate::sharded::ShardedMap;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::{
@@ -33,7 +33,7 @@ pub(crate) const PMECH_MAX_HELD_WAITERS_TOTAL: usize = 512;
 /// Per-token cap on held reverse waiters (V4 E).
 pub(crate) const PMECH_MAX_WAITERS_PER_TOKEN: usize = 4;
 
-/// Fixed power-of-two shard count, enforced by `ShardedLock`.
+/// Fixed power-of-two shard count, enforced by `ShardedMap`.
 const NUM_SHARDS: usize = 32;
 
 /// Packet direction a claim was reserved for. Preserved so callers can apply
@@ -291,7 +291,7 @@ type ShardMap = HashMap<SessionKey, ClaimRecord, HotPathSeededState>;
 /// All methods take `&self`; interior mutability (shard `RwLock`s, token
 /// `Mutex`, atomics) makes the `global()` singleton shareable across workers.
 pub(crate) struct PMechSessionDirectory {
-    shards: ShardedLock<RwLock<ShardMap>, NUM_SHARDS>,
+    shards: ShardedMap<SessionKey, RwLock<ShardMap>, NUM_SHARDS>,
     tokens: Mutex<HashMap<u64, TokenRecord>>,
     active_claim_count: AtomicUsize,
     held_waiters: AtomicUsize,
@@ -307,7 +307,7 @@ impl PMechSessionDirectory {
     fn with_seed(seed: u64) -> Self {
         let state = HotPathSeededState::new(seed);
         Self {
-            shards: ShardedLock::with_seed_and(seed, || {
+            shards: ShardedMap::with_seed_and(seed, || {
                 RwLock::new(HashMap::with_hasher(state))
             }),
             tokens: Mutex::new(HashMap::new()),

@@ -146,7 +146,7 @@ use std::sync::{
 };
 
 use crate::hot_hash_seed::frag_overlap_shard_seed;
-use crate::sharded::{ShardedLock, shard_index_from_hash};
+use crate::sharded::{ShardedMap, shard_index_from_hash};
 use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6};
 use crate::nat::NatDecision;
 
@@ -280,7 +280,7 @@ pub(crate) enum OverlapParse {
 /// Cross-worker overlap tracker. Cheap to `Clone` (Arc-backed shards).
 #[derive(Clone)]
 pub(crate) struct OverlapTracker {
-    shards: Arc<ShardedLock<Mutex<Vec<OverlapEntry>>, OVERLAP_SHARDS>>,
+    shards: Arc<ShardedMap<OverlapKey, Mutex<Vec<OverlapEntry>>, OVERLAP_SHARDS>>,
     next_revision: Arc<AtomicU64>,
     seed: u64,
 }
@@ -673,7 +673,7 @@ impl OverlapTracker {
 
     fn with_seed(seed: u64) -> Self {
         Self {
-            shards: Arc::new(ShardedLock::with_seed_and(
+            shards: Arc::new(ShardedMap::with_seed_and(
                 seed,
                 || Mutex::new(Vec::with_capacity(OVERLAP_CAP_PER_SHARD)),
             )),

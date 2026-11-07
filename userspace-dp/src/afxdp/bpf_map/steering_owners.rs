@@ -67,7 +67,7 @@ use smallvec::SmallVec;
 
 use crate::afxdp::types::FastMap;
 use crate::session::SessionKey;
-use crate::sharded::{PaddedShard, ShardedLock, shard_index_with_seed};
+use crate::sharded::{PaddedShard, ShardedMap, shard_index_with_seed};
 
 /// The steering-map row a key occupies: the 40 bytes the shim looks up.
 pub(crate) type SteeringRow = [u8; 40];
@@ -194,15 +194,15 @@ pub(crate) enum OwnerRemoval {
 
 
 pub(crate) struct SteeringRowOwners {
-    rows: ShardedLock<Mutex<FastMap<SteeringRow, Owners>>, NUM_SHARDS>,
-    holdings: ShardedLock<Mutex<FastMap<SessionKey, Held>>, NUM_SHARDS>,
+    rows: ShardedMap<SteeringRow, Mutex<FastMap<SteeringRow, Owners>>, NUM_SHARDS>,
+    holdings: ShardedMap<SessionKey, Mutex<FastMap<SessionKey, Held>>, NUM_SHARDS>,
 }
 
 impl Default for SteeringRowOwners {
     fn default() -> Self {
         Self {
-            rows: ShardedLock::with_seed_and(*SHARD_SEED, || Mutex::new(FastMap::default())),
-            holdings: ShardedLock::with_seed_and(*SHARD_SEED, || Mutex::new(FastMap::default())),
+            rows: ShardedMap::with_seed_and(*SHARD_SEED, || Mutex::new(FastMap::default())),
+            holdings: ShardedMap::with_seed_and(*SHARD_SEED, || Mutex::new(FastMap::default())),
         }
     }
 }

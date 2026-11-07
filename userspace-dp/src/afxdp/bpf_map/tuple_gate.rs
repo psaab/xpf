@@ -1,5 +1,5 @@
 use crate::session::SessionKey;
-use crate::sharded::{ShardedLock, shard_index_with_seed};
+use crate::sharded::{ShardedMap, shard_index_with_seed};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -76,14 +76,14 @@ struct Admission {
 /// different shard locks and proceed independently. The admission state fences
 /// only the map-wide clear.
 pub(crate) struct TupleGate {
-    shards: ShardedLock<Shard, SHARD_COUNT>,
+    shards: ShardedMap<SessionKey, Shard, SHARD_COUNT>,
     admission: Mutex<Admission>,
     admission_changed: Condvar,
 }
 
 impl TupleGate {
     pub(crate) fn new() -> Self {
-        let shards = ShardedLock::with_seed_and(
+        let shards = ShardedMap::with_seed_and(
             crate::hot_hash_seed::hot_path_hash_seed(),
             || Shard {
                 entries: Mutex::new(HashMap::new()),

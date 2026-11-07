@@ -10,7 +10,7 @@
 //! - 64 shards (`NUM_SHARDS = 64`). Standard choice; matches `dashmap`.
 //! - Shard selection uses the per-process keyed hash state shared by the
 //!   hot-path placement code, then masks to one of 64 shards (#12794).
-//! - The shared `ShardedLock` pads each shard to 64 bytes, preventing
+//! - The shared `ShardedMap` pads each shard to 128 bytes, preventing
 //!   adjacent shards from sharing cache lines.
 //! - Bulk operations via `BulkShardGuard`: locks all 64 shards in
 //!   shard-index order. Deadlock-free as long as every other caller
@@ -25,7 +25,7 @@
 //!   so the safer choice is to recover-from-poison and keep forwarding.
 
 use super::types::{FastMap, FastSet, NeighborEntry};
-use crate::sharded::{ShardedLock, shard_index_with_seed};
+use crate::sharded::{ShardedMap, shard_index_with_seed};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(test)]
@@ -180,7 +180,7 @@ impl NeighborRecord {
 
 /// 64-shard mutex map for the dynamic neighbor cache.
 pub(crate) struct ShardedNeighborMap {
-    shards: ShardedLock<Mutex<FastMap<(i32, IpAddr), NeighborRecord>>, NUM_SHARDS>,
+    shards: ShardedMap<(i32, IpAddr), Mutex<FastMap<(i32, IpAddr), NeighborRecord>>, NUM_SHARDS>,
     /// #7156: monotonic count of neighbour INSERTS across all shards.
     ///
     /// Read by each worker's `pending_neigh` sweep to answer one question in a
@@ -237,7 +237,7 @@ pub(crate) struct ShardedNeighborMap {
     /// #10704: bounded evidence that this router recently probed an ARP key.
     /// Entries are keyed/sharded exactly like `shards`; no allocation or
     /// extra work occurs for non-ARP packets.
-    arp_solicited_at: ShardedLock<Mutex<FastMap<(i32, IpAddr), ProbedNeighbor>>, NUM_SHARDS>,
+    arp_solicited_at: ShardedMap<(i32, IpAddr), Mutex<FastMap<(i32, IpAddr), ProbedNeighbor>>, NUM_SHARDS>,
     /// #10704: cumulative count of unsolicited ARP/neighbor updates refused
     /// because they tried to replace a live differing MAC.
     arp_overwrite_refusals: AtomicU64,
@@ -273,8 +273,8 @@ fn shard_idx(key: &(i32, IpAddr)) -> usize {
 impl ShardedNeighborMap {
     pub(crate) fn new() -> Self {
         Self {
-            shards: ShardedLock::new(),
-            arp_solicited_at: ShardedLock::new(),
+            shards: ShardedMap::new(),
+            arp_solicited_at: ShardedMap::new(),
             shard_mac_epochs: std::array::from_fn(|_| AtomicU32::new(0)),
             learn_cap_drops: AtomicU64::new(0),
             insert_generation: AtomicU64::new(0),
