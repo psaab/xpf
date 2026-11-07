@@ -69,7 +69,7 @@ into the eBPF forwarding pipeline.
 ### Outbound: Client -> Server (split-RG: fw0=LAN, fw1=WAN)
 
 ```
-Client 10.0.61.102:43446 -> 172.16.80.200:5201
+Client 10.0.61.102:43446 -> $IPERF_TARGET4:5201
 
 1. Arrives on ge-0-0-1 (fw0, LAN)
 2. XDP shim -> XSK redirect -> Rust worker
@@ -87,7 +87,7 @@ Client 10.0.61.102:43446 -> 172.16.80.200:5201
 ### Return: Server -> Client
 
 ```
-Server 172.16.80.200:5201 -> 172.16.80.8:43446
+Server $IPERF_TARGET4:5201 -> 172.16.80.8:43446
 
 1. Arrives on ge-7-0-2 (fw1, WAN)
 2. XDP shim -> XSK redirect -> Rust worker

@@ -280,6 +280,7 @@ failure.
     env. The dedicated loss WireGuard profile retains `WG_IPERF_TARGET4=.202`;
     the flooder accepts `IPERF_TARGET4` and falls back to `.202`. Remaining
     `.200` literals are history, test fixtures, or the external gRPC endpoint.
+  <!-- Expires-when: #18576 closed -->
   - **Dual-holder cleanup (`.200`).** The v4 smoke target is `.202`;
     `.200` is the external v6 target box's address and is not a test target.
     Removing the unit pin does not remove an address already assigned on the

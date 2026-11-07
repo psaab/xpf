@@ -296,11 +296,11 @@ committed `pool-snat` rule in `lan-to-wan` matches `10.0.61.240/28`, while the
 LAN host's normal `10.0.61.102` address is outside that prefix. After the
 operator temporarily assigns (for example) `10.0.61.241/28` to the LAN host,
 pass `--src-bind 10.0.61.241` (or use `SRC_BIND` as the environment fallback).
-The harness never changes host addresses. The target is
-`loss:xpf-mouse-target` at `172.16.80.202`; pass `--target-ip
-172.16.80.202` (or use `TARGET_IP` as the environment fallback). Start the
+The harness never changes host addresses. Source
+`test/incus/cluster-env.sh` first; the target is `loss:xpf-mouse-target` at
+`$IPERF_TARGET4` (loss `172.16.80.202`). Pass `--target-ip
+"$IPERF_TARGET4"` (or use `TARGET_IP` as the environment fallback). Start the
 sink on that instance for all 64 destination ports, `5300-5363`, and require
-its startup report to show `bound_ports:64` before launching traffic.
 
 ### What this harness can and cannot attribute
 
@@ -376,8 +376,9 @@ is reentrant inside that cell. Never kill another holder; never `rm` the lock.
 cargo test --release --manifest-path test/incus/newflow-gen/Cargo.toml
 cargo build --release --manifest-path test/incus/newflow-gen/Cargo.toml
 (cd test/incus && python3 -m unittest newflow_ceiling_analyze_test)
+source test/incus/cluster-env.sh
 ./test/incus/newflow-ceiling-harness.sh --pool <pool> --rule <rule> \
-    --src-bind 10.0.61.241 --target-ip 172.16.80.202 --dry-run
+    --src-bind 10.0.61.241 --target-ip "$IPERF_TARGET4" --dry-run
 
 # One outer cell owns every shared-cluster operation. Stage the prebuilt
 # artifacts and do any authorized temporary setup in this same cell.
@@ -397,8 +398,8 @@ sink_log="/tmp/newflow-gen-sink-$run_id.json"
 # test-connectivity gate from inside this lock cell.
 target_addr="$(incus exec "$sink_target" -- ip -o -4 addr show)"
 printf '%s\n' "$target_addr" > "$run_dir/target-address-preflight.txt"
-if ! grep -qE '(^|[[:space:]])inet 172\.16\.80\.202/' <<<"$target_addr"; then
-    echo "newflow-ceiling: $sink_target does not own 172.16.80.202" >&2
+if ! grep -Fq -- "inet $IPERF_TARGET4/" <<<"$target_addr"; then
+    echo "newflow-ceiling: $sink_target does not own $IPERF_TARGET4" >&2
     exit 2
 fi
 
@@ -427,8 +428,8 @@ cleanup_sink() {
 }
 trap cleanup_sink EXIT
 sink_pid="$(incus exec "$sink_target" -- sh -c \
-    'nohup /usr/local/bin/newflow-gen --mode sink --bind 172.16.80.202 --ports 5300-5363 > "$1" 2>&1 < /dev/null & echo $!' \
-    sh "$sink_log")"
+    'nohup /usr/local/bin/newflow-gen --mode sink --bind "$2" --ports 5300-5363 > "$1" 2>&1 < /dev/null & echo $!' \
+    sh "$sink_log" "$IPERF_TARGET4")"
 if [[ ! "$sink_pid" =~ ^[0-9]+$ ]]; then
     echo "newflow-ceiling: could not obtain the started sink PID" >&2
     exit 2
@@ -461,7 +462,7 @@ printf 'target=%s\npid=%s\nstart_epoch=%s\nlog_mtime=%s\n' \
     > "$run_dir/sink-preflight.txt"
 
 ./test/incus/newflow-ceiling-harness.sh --pool <pool> --rule <rule> \
-    --src-bind 10.0.61.241 --target-ip 172.16.80.202 \
+    --src-bind 10.0.61.241 --target-ip "$IPERF_TARGET4" \
     --artifacts "$run_dir" \
     --rates 5000,10000,20000,40000,80000 --duration 30 --threads 32
 CELL
@@ -469,14 +470,14 @@ CELL
 ```
 
 The run records `target-address-preflight.txt` proving that
-`loss:xpf-mouse-target` owned `172.16.80.202` in the same lock-held run before
+`loss:xpf-mouse-target` owned `$IPERF_TARGET4` (loss `172.16.80.202`) in the same lock-held run before
 traffic. It then calls `ha_target_claim_check` directly (not the separate
 `test-connectivity.sh` gate, which requires an idle lock), recording the
 checker status and reason in `target-claim-preflight.txt`. Only status `0`
 passes: the evidence includes the `PASS` line for exactly one holder and a
 stable firewall-neighbor identity. Every nonzero status—including an excused
 duplicate-holder result or an unavailable probe—aborts before traffic. The run
-starts the sink with `newflow-gen --mode sink --bind 172.16.80.202 --ports
+starts the sink with `newflow-gen --mode sink --bind "$IPERF_TARGET4" --ports
 5300-5363`, checks the launched PID is alive, verifies a fresh run-specific log
 by mtime and exact `bound_ports:64` JSON, and records that startup evidence.
 The trap stops the sink and removes its remote log. The harness refuses a

@@ -34,10 +34,11 @@ the same procedure.
 - `loss:cluster-userspace-host` is up with address `10.0.61.102/24`
   and default route `10.0.61.1` (the RG1 VIP on xpf-userspace-fw).
 - iperf3 server listens on the env-selected `IPERF_TARGET4` (`source
-  test/incus/cluster-env.sh`; loss today `172.16.80.202`, #18576 — never
-  the dual-held 172.16.80.200) on ports 5200..5211. The
-  canonical 1 Gbps exact class is port 5202 (`iperf-1g`, queue 2);
-  ports 5200 and 5211 are non-exact/root-shaped.
+  test/incus/cluster-env.sh`; loss today `172.16.80.202`, #18576) on ports
+  5200..5211. The canonical 1 Gbps exact class is port 5202
+  (`iperf-1g`, queue 2); ports 5200 and 5211 are non-exact/root-shaped.
+<!-- Expires-when: #18576 closed -->
+- The dual-held `172.16.80.200` must not be used as the IPv4 target.
 - TCP echo listeners for mouse-latency tests listen on ports 6200..6211
   and use the same CoS classes as the corresponding 5200..5211 ports.
 - CoS config from `test/incus/cos-iperf-config.set` must be committed

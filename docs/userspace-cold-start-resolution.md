@@ -257,7 +257,7 @@ SYN-ACK's reverse lookup finds it via `install_reverse_session_from_forward_matc
 ```
 1. SYN arrives on ge-0-0-1 → XDP shim → XSK → helper RX
 2. Session miss → policy permit → SNAT → FIB lookup
-3. FIB: next-hop 172.16.80.200 on ge-0-0-2.80
+3. FIB: next-hop $IPERF_TARGET4 on ge-0-0-2.80
 4. Neighbor lookup: not in dynamic_neighbors → MissingNeighbor
 
 5. CREATE SESSION (NAT decision stored for reverse SYN-ACK lookup)
@@ -269,7 +269,7 @@ SYN-ACK's reverse lookup finds it via `install_reverse_session_from_forward_matc
 8. Netlink monitor thread: recv() → RTM_NEWNEIGH → update dynamic_neighbors
 9. Worker poll (1ms): rx.available() == 0 → retry_pending_neigh()
    → neighbor found in dynamic_neighbors → rewrite frame → XSK TX
-10. SYN reaches 172.16.80.200 → SYN-ACK comes back
+10. SYN reaches $IPERF_TARGET4 → SYN-ACK comes back
 11. SYN-ACK: session hit (forward NAT match) → reverse session created
     → forwarded to cluster-host via XSK TX
 12. ACK: session hit → TCP established → data flows at line rate
@@ -375,7 +375,7 @@ resolved-neighbor-wins escape can never fire and the cache is never allowed
 to arm for it (`ForwardingState.lladdrless_egress`). It also produced a
 stuck state for a
 directly-connected, **outbound-only** target (e.g. the smoke iperf3 dst
-`172.16.80.200` on `ge-0-0-2.80`):
+`$IPERF_TARGET4` on `ge-0-0-2.80`):
 
 - `dynamic_neighbors` lost the entry — a transient kernel
   FAILED/INCOMPLETE/DELNEIGH during revalidation removes it

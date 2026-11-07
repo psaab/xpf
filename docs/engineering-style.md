@@ -2153,12 +2153,14 @@ they repeatedly bite:
 - **Always `source ~/.sshrc` before `git push`.** The user's SSH agent
   config lives there.
 - **172.16.80.202 is the loss v4 iperf3 test endpoint** (`IPERF_TARGET4`;
-  v6 is `2001:559:8585:80::200`). Not 172.16.50.x, and no longer
-  172.16.80.200: that address is also answered by the external v6 box
-  (`f6:f0:06:10:77:d5`), so a firewall node can resolve it to the wrong
-  host. In a 2026-10-31 rg-move soak, every v4 stream died that way while
-  ping kept answering (#18576). Read the target from the env file, and
-  never hard-code it in a new harness.
+  v6 is `2001:559:8585:80::200`). Not 172.16.50.x. Read the target from
+  the env file, and never hard-code it in a new harness.
+
+<!-- Expires-when: #18576 closed -->
+The old `172.16.80.200` address was also answered by the external v6 box
+(`f6:f0:06:10:77:d5`), so a firewall node could resolve it to the wrong
+host. In a 2026-10-31 rg-move soak, every v4 stream died that way while
+ping kept answering (#18576).
 - **Use `cli`, not `xpfctl`.** The remote CLI binary is `cli`.
 - **Primary is fw0 on RG0 in the loss userspace cluster.** Apply config
   changes to the primary; sync takes care of the secondary.

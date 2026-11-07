@@ -80,7 +80,7 @@ explicitly in the PR review notes.
   flush with #1636 mitigation (was a mis-documented "~2ms" against a
   real ~3.371s baseline — 3.3× improvement). ≤200ms for warmed routed
   next-hops; ~1.02s for an un-warmed / on-link neighbor (the smoke
-  target 172.16.80.200 is on-link, so it exercises the worst case).
+  target `$IPERF_TARGET4` is on-link, so it exercises the worst case).
 - Cold iperf3 IPv4: 20.1 Gbps (8 streams, 5s)
 - Cold iperf3 IPv6: 20.0 Gbps (8 streams, 5s)
 - Warm iperf3: 23+ Gbps (8 streams, 10s)
@@ -124,7 +124,7 @@ When a session is created, the JIT compiles a small function that encodes
 the complete forwarding decision for that flow:
 
 ```
-// Generated for flow: 10.0.1.102:55068 -> 172.16.80.200:443 TCP
+// Generated for flow: 10.0.1.102:55068 -> $IPERF_TARGET4:443 TCP
 // Zone: trust -> wan, SNAT to 172.16.80.8, egress ge-0-0-2.80
 fn flow_0x7a3b(frame: &mut [u8]) -> TxTarget {
     // Ethernet: fixed MACs + VLAN 80 (12 bytes, no branch)

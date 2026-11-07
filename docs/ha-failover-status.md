@@ -381,6 +381,7 @@ later):
    **no steady-state HA delta**: all emission is transition-triggered,
    so counters are only as fresh as the last transition — any future
    gate must not assume a periodic sync vehicle exists.
+<!-- Expires-when: #18576 closed -->
 6. **Neighbor / seed completion (Wire13).** Once fw1's rows finally
    read `Timeout: 1800` pre-failover and fabric packets adopted,
    resolution landed on `MissingNeighbor`: fw1 never served the
@@ -393,6 +394,7 @@ later):
    RG activation (`on_rg_promote_active`). Proven closed live:
    `172.16.80.200 … REACHABLE` on fw1 from d28 through post, fw1
    `Neighbor misses = 0`, in both runs.
+<!-- Expires-when: #18576 closed -->
 7. **HA-inactive on the receiving worker (OPEN residual).** The
    current head (`b9741b5bd7`) still fails twice-on-loss (26 and 25
    SUM zero intervals, all from failover+1 s, no pre-failover

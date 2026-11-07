@@ -253,10 +253,12 @@ parses and compiles on the production flat-set path.
 
 Remember the standing gotchas: **deploy wipes CoS** (re-apply after
 every deploy), and the iperf3 target is the env-selected
-`IPERF_TARGET4` (**172.16.80.202** on `loss` today, #18576 — never
-172.16.100.x and never the dual-held 172.16.80.200; `source
-test/incus/cluster-env.sh` first). Run on the RG0 primary
-(`loss:xpf-userspace-fw0`).
+`IPERF_TARGET4` (**172.16.80.202** on `loss` today, #18576; not
+172.16.100.x). Source `test/incus/cluster-env.sh` first. Run on the RG0
+primary (`loss:xpf-userspace-fw0`).
+
+<!-- Expires-when: #18576 closed -->
+The dual-held `172.16.80.200` must not be used as the IPv4 target.
 
 ```bash
 # 1. Apply the fixture atomically (same pattern as apply-cos-config.sh:

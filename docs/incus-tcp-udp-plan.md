@@ -244,6 +244,7 @@ note that the generator "only needs ping, mtr, iperf3".
   network at least at L3 via their own upstream — whether traffic from a
   *new fw's SR-IOV VF* will reach the same gateway depends on switchport /
   VF-VLAN plumbing (§6-R1, Q3).
+<!-- Expires-when: #18576 closed -->
 - `172.16.80.200`/`…80::200` (elephant target): **external lab hardware**, no
   SSH, no Incus handle (`target-services.sh:35-43`). On `loss` today that
   address is *also* aliased onto `xpf-mouse-target` (`ip -br a` shows
@@ -1482,6 +1483,7 @@ address — same expectation.
   place where "copy what loss does" is ambiguous. This plan resolves each
   explicitly (§1.3.1, §1.6, S2); the approver should confirm those
   resolutions rather than re-derive them at build time.
+<!-- Expires-when: #18576 closed -->
 - **R5 — The `.200` target ambiguity.** `xpf-mouse-target` on loss holds v4
   `.200` (pinned by `mouse-addr.service`). It does not hold `::200`. That
   address is configured on the container but `dadfailed tentative`, checked
