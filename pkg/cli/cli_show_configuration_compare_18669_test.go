@@ -326,3 +326,15 @@ func TestCLIShowConfigurationForeignCompareRoutingKeepsLockGuards18669(t *testin
 		t.Fatalf("plain config-mode show system = (%q, %v); want candidate rendering through existing branch", out, err)
 	}
 }
+
+func TestCLIShowConfigurationGluedBareCompareRefused18669(t *testing.T) {
+	c := &CLI{store: foreignShowCompareStore18669(t)}
+	if got, want := c.promptForCurrentMode(), c.operationalPrompt(); got != want {
+		t.Fatalf("promptForCurrentMode() = %q, want operational prompt %q", got, want)
+	}
+	var err error
+	out := captureStdout(t, func() { err = c.dispatch("show configuration |compare") })
+	if err == nil {
+		t.Fatalf("dispatch(glued bare compare) returned nil, output %q", out)
+	}
+}

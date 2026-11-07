@@ -118,18 +118,19 @@ func (c *CLI) dispatch(line string) error {
 			foreign = true
 		}
 		if !c.configModeEntryAllowed() || foreign {
+			// Operational show compares are read-only handler pipes. Route them
+			// before checkConfigModePerm so accepted command prefixes like `sh`
+			// are resolved and priced by dispatchOperational.
+			if operationalShowConfigurationCompare(line) {
+				return c.dispatchOperational(line)
+			}
 			if err := c.checkConfigModePerm(line); err != nil {
 				return err
 			}
 			if foreign {
 				if f := strings.Fields(line); len(f) > 0 {
 					switch f[0] {
-					case "show":
-						if operationalShowConfigurationCompare(line) {
-							return c.dispatchOperational(line)
-						}
-						return c.dispatchConfig(line)
-					case "?", "help":
+					case "show", "?", "help":
 						return c.dispatchConfig(line)
 					}
 				}
@@ -138,9 +139,6 @@ func (c *CLI) dispatch(line string) error {
 			// Non-foreign, not owned: a PermConfig class may use config
 			// verbs; a view class may still use config-mode `show`.
 			if f := strings.Fields(line); len(f) > 0 && (f[0] == "show" || f[0] == "?" || f[0] == "help") {
-				if f[0] == "show" && operationalShowConfigurationCompare(line) {
-					return c.dispatchOperational(line)
-				}
 				return c.dispatchConfig(line)
 			}
 			// Own-class PermConfig holder whose entry predates the
