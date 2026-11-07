@@ -215,7 +215,8 @@ func vrrpGroupStatements(inst *Node) []*Node {
 		var cur *Node
 		pending := 0
 		multi := false
-		for _, tok := range inst.Keys[skip:] {
+		for i := skip; i < len(inst.Keys); i++ {
+			tok := inst.Keys[i]
 			// A packed `track interface <if>` whose next token is NOT
 			// `priority-cost` is complete: let that token open the next
 			// statement instead of absorbing it as a would-be cost slot.
@@ -260,10 +261,10 @@ func vrrpGroupStatements(inst *Node) []*Node {
 					}
 					continue
 				}
-				cur.Keys = append(cur.Keys, tok)
+				cur.appendKey(tok, inst.KeyQuoted(i), inst.KeyBracketed(i))
 			case pending > 0:
 				pending--
-				cur.Keys = append(cur.Keys, tok)
+				cur.appendKey(tok, inst.KeyQuoted(i), inst.KeyBracketed(i))
 				if cur.Keys[0] == "track" {
 					pending = vrrpTrackPending(cur.Keys)
 				} else if cur.Keys[0] == "preempt" {
@@ -279,7 +280,7 @@ func vrrpGroupStatements(inst *Node) []*Node {
 					pending = 1
 				}
 			default:
-				cur.Keys = append(cur.Keys, tok)
+				cur.appendKey(tok, inst.KeyQuoted(i), inst.KeyBracketed(i))
 			}
 		}
 	}
@@ -2442,10 +2443,14 @@ func pruneUnsafeDeviceMapBlockEntries9886(dmNode *Node, lenient bool) ([]string,
 		case len(c.Keys) >= 3 && len(c.Children) > 0:
 			// Bracket fan-out: every Keys[1:] token is an instance.
 			var names []string
+			var nameIndexes []int
+			quoted := keyMask(c.KeysQuoted, len(c.Keys))
+			bracketed := keyMask(c.KeysBracketed, len(c.Keys))
 			dropped := false
-			for _, nm := range c.Keys[1:] {
+			for i, nm := range c.Keys[1:] {
 				if rendersafe.SafeInterfaceName(nm) {
 					names = append(names, nm)
+					nameIndexes = append(nameIndexes, i+1)
 					continue
 				}
 				if !lenient {
@@ -2460,7 +2465,21 @@ func pruneUnsafeDeviceMapBlockEntries9886(dmNode *Node, lenient bool) ([]string,
 				continue // all instances dropped: remove the node
 			}
 			if dropped {
-				c.Keys = append([]string{c.Keys[0]}, names...)
+				keys := append([]string{c.Keys[0]}, names...)
+				var quotedMask, bracketedMask []bool
+				if quoted != nil {
+					quotedMask = append(quotedMask, quoted[0])
+					for _, i := range nameIndexes {
+						quotedMask = append(quotedMask, quoted[i])
+					}
+				}
+				if bracketed != nil {
+					bracketedMask = append(bracketedMask, bracketed[0])
+					for _, i := range nameIndexes {
+						bracketedMask = append(bracketedMask, bracketed[i])
+					}
+				}
+				c.replaceKeys(keys, quotedMask, bracketedMask, c.BracketedClosed)
 				pruned = true
 			}
 			kept = append(kept, c)
@@ -2571,19 +2590,35 @@ func filterUnsafeFabricMemberKeys9886(n *Node, top bool) []string {
 		start = 1
 	}
 	if len(n.Keys) > start {
+		quoted := keyMask(n.KeysQuoted, len(n.Keys))
+		bracketed := keyMask(n.KeysBracketed, len(n.Keys))
 		kept := make([]string, 0, len(n.Keys))
 		kept = append(kept, n.Keys[:start]...)
+		var quotedMask, bracketedMask []bool
+		if quoted != nil {
+			quotedMask = append(quotedMask, quoted[:start]...)
+		}
+		if bracketed != nil {
+			bracketedMask = append(bracketedMask, bracketed[:start]...)
+		}
 		changed := false
-		for _, k := range n.Keys[start:] {
+		for i, k := range n.Keys[start:] {
+			index := start + i
 			if k != "" && !rendersafe.SafeInterfaceName(k) {
 				stripped = append(stripped, k)
 				changed = true
 				continue
 			}
 			kept = append(kept, k)
+			if quoted != nil {
+				quotedMask = append(quotedMask, quoted[index])
+			}
+			if bracketed != nil {
+				bracketedMask = append(bracketedMask, bracketed[index])
+			}
 		}
 		if changed {
-			n.Keys = kept
+			n.replaceKeys(kept, quotedMask, bracketedMask, n.BracketedClosed)
 		}
 	}
 	for _, c := range n.Children {

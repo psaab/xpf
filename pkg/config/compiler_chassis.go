@@ -827,10 +827,11 @@ func packedStatementPropsArity(
 	if len(cfgNode.Keys) > skip {
 		var cur *Node
 		pending := 0 // value tokens the open statement must still absorb
-		for _, tok := range cfgNode.Keys[skip:] {
+		for i := skip; i < len(cfgNode.Keys); i++ {
+			tok := cfgNode.Keys[i]
 			if pending > 0 {
 				pending--
-				cur.Keys = append(cur.Keys, tok)
+				cur.appendKey(tok, cfgNode.KeyQuoted(i), cfgNode.KeyBracketed(i))
 				continue
 			}
 			if cur == nil || isProp(tok) {
@@ -841,7 +842,7 @@ func packedStatementPropsArity(
 				}
 				continue
 			}
-			cur.Keys = append(cur.Keys, tok)
+			cur.appendKey(tok, cfgNode.KeyQuoted(i), cfgNode.KeyBracketed(i))
 		}
 	}
 	return append(props, cfgNode.Children...)

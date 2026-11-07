@@ -169,12 +169,12 @@ func normalizeCompactNodesWithPackedTailGate18771(nodes []*Node, schema *schemaN
 				fold18771 = inScope(ckw, head)
 				if targetID != 0 && node.packedTailSite18771 == targetID {
 					if removeTarget {
-						quoted := keyMask8921(node.KeysQuoted, len(node.Keys))
-						bracketed := keyMask8921(node.KeysBracketed, len(node.Keys))
+						quoted := keyMask(node.KeysQuoted, len(node.Keys))
+						bracketed := keyMask(node.KeysBracketed, len(node.Keys))
 						closed := node.BracketedClosed
-						node.Keys = append([]string(nil), node.Keys[:identity]...)
-						node.setKeysQuoted(maskSlice8921(quoted, 0, identity))
-						node.setKeysBracketed(maskSlice8921(bracketed, 0, identity), closed)
+						node.replaceKeys(node.Keys[:identity],
+							maskSlice(quoted, 0, identity),
+							maskSlice(bracketed, 0, identity), closed)
 						node.IsLeaf = false
 						removed18771 = true
 						n++
@@ -229,17 +229,14 @@ func normalizeCompactNodesWithPackedTailGate18771(nodes []*Node, schema *schemaN
 				// and `group g1 export A "export";` was REFUSED at commit while
 				// `group g1 { export A "export"; }` committed -- two spellings of
 				// one statement, split by the pass whose job is to make them one.
-				quoted := keyMask8921(node.KeysQuoted, len(node.Keys))
-				bracketed := keyMask8921(node.KeysBracketed, len(node.Keys))
+				quoted := keyMask(node.KeysQuoted, len(node.Keys))
+				bracketed := keyMask(node.KeysBracketed, len(node.Keys))
 				bracketedClosed := node.BracketedClosed
-				// #9635: built BEFORE the truncation below, and sliced to the
-				// same span as `tail`. Reading len(node.Keys) after the
-				// truncation would measure the container's identity instead of
-				// the authored run and hand the splitter an empty mask.
-				tailValues := maskSlice8921(
-					authoredValueMask9635(quoted, bracketed, len(node.Keys)),
-					identity, len(node.Keys))
-				node.Keys = append([]string(nil), node.Keys[:identity]...)
+				// #9635: built before the key-span rebuild below and sliced over
+				// the same span as tail, so the splitter sees the exact authored
+				// run instead of a container identity measured after truncation.
+				// Truncating node.Keys first would hand it an empty mask.
+				tailValues := maskSlice(authoredValueMask9635(quoted, bracketed, len(node.Keys)), identity, len(node.Keys))
 				node.Children = nil
 				node.IsLeaf = false
 				stmts := splitPackedStatements8768(tail, childSub, tailValues)
@@ -276,19 +273,19 @@ func normalizeCompactNodesWithPackedTailGate18771(nodes []*Node, schema *schemaN
 					}
 				}
 				if (len(body) > 0 && len(stmts) > 1) || declineLeafBody14343 {
-					node.Keys = append(node.Keys, tail...)
 					node.Children = body
 				} else {
-					node.setKeysQuoted(maskSlice8921(quoted, 0, identity))
-					node.setKeysBracketed(maskSlice8921(bracketed, 0, identity), bracketedClosed)
+					node.replaceKeys(node.Keys[:identity],
+						maskSlice(quoted, 0, identity),
+						maskSlice(bracketed, 0, identity), bracketedClosed)
 					// splitPackedStatements8768 returns consecutive slices of
 					// tail, so each statement's mask starts where the previous
 					// statement's keys ended.
 					off := identity
 					for i, stmt := range stmts {
 						child := &Node{Keys: stmt, IsLeaf: true}
-						child.setKeysQuoted(maskSlice8921(quoted, off, off+len(stmt)))
-						child.setKeysBracketed(maskSlice8921(bracketed, off, off+len(stmt)), bracketedClosed)
+						child.setKeysQuoted(maskSlice(quoted, off, off+len(stmt)))
+						child.setKeysBracketed(maskSlice(bracketed, off, off+len(stmt)), bracketedClosed)
 						off += len(stmt)
 						// The braced body belongs to the LAST packed statement --
 						// the deepest node the run names. Attaching it to the
@@ -553,8 +550,8 @@ func splitBracedPackedChildren8886(node *Node, container *schemaNode) int {
 		// built from a slice of ch.Keys, which otherwise loses the authored
 		// quote/bracket bit of each token. (The split DECISION does not read
 		// them yet; that, together with the #8437 fusion gate, is issue 9635.)
-		quoted := keyMask8921(ch.KeysQuoted, len(ch.Keys))
-		bracketed := keyMask8921(ch.KeysBracketed, len(ch.Keys))
+		quoted := keyMask(ch.KeysQuoted, len(ch.Keys))
+		bracketed := keyMask(ch.KeysBracketed, len(ch.Keys))
 		stmts := splitPackedStatements8768(ch.Keys, container,
 			authoredValueMask9635(quoted, bracketed, len(ch.Keys)))
 		if len(stmts) < 2 {
@@ -563,9 +560,7 @@ func splitBracedPackedChildren8886(node *Node, container *schemaNode) int {
 		}
 		off := 0
 		for _, st := range stmts {
-			stmt := &Node{Keys: append([]string(nil), st...), IsLeaf: true}
-			stmt.setKeysQuoted(maskSlice8921(quoted, off, off+len(st)))
-			stmt.setKeysBracketed(maskSlice8921(bracketed, off, off+len(st)), ch.BracketedClosed)
+			stmt := ch.keySpan(off, off+len(st))
 			off += len(st)
 			out = append(out, stmt)
 		}
@@ -575,25 +570,6 @@ func splitBracedPackedChildren8886(node *Node, container *schemaNode) int {
 		node.Children = out
 	}
 	return changed
-}
-
-// keyMask8921 returns m when it is a per-key mask over n keys, and nil
-// otherwise. A mask of any other length is not provenance (see ast.go), so it
-// must not be sliced as if it were.
-func keyMask8921(m []bool, n int) []bool {
-	if len(m) != n {
-		return nil
-	}
-	return m
-}
-
-// maskSlice8921 is m[from:to], or nil when m carries no provenance. The
-// setKeysQuoted / setKeysBracketed setters copy and normalize the result.
-func maskSlice8921(m []bool, from, to int) []bool {
-	if m == nil || from < 0 || from > to || to > len(m) {
-		return nil
-	}
-	return m[from:to]
 }
 
 // NormalizeCompactForScan folds admitted compact stanzas and canonicalizes

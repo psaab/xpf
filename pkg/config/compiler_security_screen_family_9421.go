@@ -149,7 +149,12 @@ func screenBodyNode(node *Node, schema *schemaNode) *Node {
 	}
 	children := screenBodyView(node, schema).Children()
 	clone := *node
-	clone.Keys = append([]string(nil), node.Keys[:consumed]...)
+	clone.replaceKeys(
+		node.Keys[:consumed],
+		maskSlice(keyMask(node.KeysQuoted, len(node.Keys)), 0, consumed),
+		maskSlice(keyMask(node.KeysBracketed, len(node.Keys)), 0, consumed),
+		node.BracketedClosed,
+	)
 	clone.Children = children
 	clone.IsLeaf = false
 	return &clone
@@ -232,7 +237,12 @@ func screenFamilyBody(node *Node, schema *schemaNode) *Node {
 			last.IsLeaf = false
 		}
 		clone := *node
-		clone.Keys = append([]string(nil), node.Keys[:consumed]...)
+		clone.replaceKeys(
+			node.Keys[:consumed],
+			maskSlice(keyMask(node.KeysQuoted, len(node.Keys)), 0, consumed),
+			maskSlice(keyMask(node.KeysBracketed, len(node.Keys)), 0, consumed),
+			node.BracketedClosed,
+		)
 		clone.Children = []*Node{head}
 		clone.IsLeaf = false
 		return &clone
@@ -327,7 +337,12 @@ func screenFamilyBody(node *Node, schema *schemaNode) *Node {
 	}
 
 	clone := *node
-	clone.Keys = append([]string(nil), node.Keys[:consumed]...)
+	clone.replaceKeys(
+		node.Keys[:consumed],
+		maskSlice(keyMask(node.KeysQuoted, len(node.Keys)), 0, consumed),
+		maskSlice(keyMask(node.KeysBracketed, len(node.Keys)), 0, consumed),
+		node.BracketedClosed,
+	)
 	clone.Children = roots
 	clone.IsLeaf = false
 	return &clone

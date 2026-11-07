@@ -256,7 +256,7 @@ func nestedRefusalPackedScanChildren(node *Node, nodeSchema, descendSchema *sche
 				for i := run.valueStart; i < run.valueEnd; i++ {
 					bracketed[i] = true
 				}
-				packed.KeysBracketed = bracketed
+				packed.setKeysBracketed(bracketed)
 			}
 		}
 		if run.trailingNonSibling {
@@ -264,13 +264,10 @@ func nestedRefusalPackedScanChildren(node *Node, nodeSchema, descendSchema *sche
 			// in this schema context. Exclude them from this scan-only
 			// projection so the marked leaf's complete value run can be
 			// materialized.
-			packed.Keys = packed.Keys[:run.valueEnd]
-			if len(packed.KeysQuoted) == len(node.Keys) {
-				packed.KeysQuoted = packed.KeysQuoted[:run.valueEnd]
-			}
-			if len(packed.KeysBracketed) == len(node.Keys) {
-				packed.KeysBracketed = packed.KeysBracketed[:run.valueEnd]
-			}
+			packed.replaceKeys(packed.Keys[:run.valueEnd],
+				maskSlice(keyMask(packed.KeysQuoted, len(packed.Keys)), 0, run.valueEnd),
+				maskSlice(keyMask(packed.KeysBracketed, len(packed.Keys)), 0, run.valueEnd),
+				packed.BracketedClosed)
 		}
 		expanded = packedBodyChildren(&packed, nodeSchema)
 	}

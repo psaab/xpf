@@ -69,8 +69,8 @@ func normalizeElidedInterface15062(node *Node) int {
 	if node.IsLeaf && len(node.Children) == 0 && len(node.Keys) == 2 {
 		return 0
 	}
-	quoted := keyMask8921(node.KeysQuoted, len(node.Keys))
-	bracketed := keyMask8921(node.KeysBracketed, len(node.Keys))
+	quoted := keyMask(node.KeysQuoted, len(node.Keys))
+	bracketed := keyMask(node.KeysBracketed, len(node.Keys))
 	bracketedClosed := node.BracketedClosed
 
 	name := &Node{
@@ -78,8 +78,8 @@ func normalizeElidedInterface15062(node *Node) int {
 		Line:   node.Line,
 		Column: node.Column,
 	}
-	name.setKeysQuoted(maskSlice8921(quoted, 1, 2))
-	name.setKeysBracketed(maskSlice8921(bracketed, 1, 2), bracketedClosed)
+	name.setKeysQuoted(maskSlice(quoted, 1, 2))
+	name.setKeysBracketed(maskSlice(bracketed, 1, 2), bracketedClosed)
 
 	if len(node.Keys) > 2 {
 		// Packed tail past the name, e.g.
@@ -90,10 +90,9 @@ func normalizeElidedInterface15062(node *Node) int {
 		// (packedBody / expandResolvingRun9792, #14442), and the scoped
 		// fold recursing into the rewritten body handles the rest, so
 		// this spelling compiles exactly as the braced one does.
-		name.Keys = append(name.Keys, node.Keys[2:]...)
-		name.setKeysQuoted(maskSlice8921(quoted, 1, len(node.Keys)))
-		// Recompute bracketed mask over the full new key span.
-		name.setKeysBracketed(maskSlice8921(bracketed, 1, len(node.Keys)), bracketedClosed)
+		name.replaceKeys(append(name.Keys, node.Keys[2:]...),
+			maskSlice(quoted, 1, len(node.Keys)),
+			maskSlice(bracketed, 1, len(node.Keys)), bracketedClosed)
 	}
 	if len(node.Children) > 0 {
 		name.Children = node.Children
@@ -104,9 +103,9 @@ func normalizeElidedInterface15062(node *Node) int {
 		name.IsLeaf = true
 	}
 
-	node.Keys = node.Keys[:1:1]
-	node.setKeysQuoted(maskSlice8921(quoted, 0, 1))
-	node.setKeysBracketed(maskSlice8921(bracketed, 0, 1), bracketedClosed)
+	node.replaceKeys(node.Keys[:1],
+		maskSlice(quoted, 0, 1),
+		maskSlice(bracketed, 0, 1), bracketedClosed)
 	node.Children = []*Node{name}
 	node.IsLeaf = false
 	return 1

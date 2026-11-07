@@ -46,8 +46,8 @@ func leafOwnsMoreValues9635(s *schemaNode) bool {
 // the text-only behaviour that shipped before this change. That is the safe
 // direction: no provenance recovers exactly master's split.
 func authoredValueMask9635(quoted, bracketed []bool, n int) []bool {
-	q := keyMask8921(quoted, n)
-	b := keyMask8921(bracketed, n)
+	q := keyMask(quoted, n)
+	b := keyMask(bracketed, n)
 	if q == nil && b == nil {
 		return nil
 	}

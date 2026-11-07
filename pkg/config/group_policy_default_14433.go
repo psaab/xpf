@@ -94,7 +94,11 @@ func adoptPolicyStatementThenArm14433(peer, src *Node) bool {
 	peerArms := thenDefaultArms14433(peer)
 	// Normalize peer to container-with-leaf-arms.
 	peer.IsLeaf = false
-	peer.Keys = []string{"then"}
+	keys := peer.Keys
+	peer.replaceKeys([]string{"then"},
+		maskSlice(keyMask(peer.KeysQuoted, len(keys)), 0, 1),
+		maskSlice(keyMask(peer.KeysBracketed, len(keys)), 0, 1),
+		peer.BracketedClosed)
 	peer.Children = nil
 	for _, a := range append(peerArms, srcArms...) {
 		exists := false

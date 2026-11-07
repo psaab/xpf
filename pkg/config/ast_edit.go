@@ -38,7 +38,7 @@ func rekeyBracketProvenance(n *Node, changed bool) {
 	if n == nil || !n.IsLeaf || !changed {
 		return
 	}
-	n.KeysBracketed = nil
+	n.setKeysBracketed(nil)
 }
 
 // CopyPath copies a subtree from src to dst, replacing the source node's keys
@@ -226,11 +226,7 @@ func (t *ConfigTree) CopyPath(src, dst []string) error {
 	// All checks passed — now (and only now) mutate: clone the source subtree,
 	// stamp the destination keys, and append under the resolved parent.
 	cloned := cloneNodes([]*Node{srcNode})[0]
-	cloned.Keys = newKeys
-	// The copy takes a NEW identity from the destination path, so the source's
-	// per-key quote provenance no longer describes it (#6673). Dropping it is
-	// the honest state — "unknown", never a false "these were bare".
-	cloned.KeysQuoted = nil
+	cloned.replaceKeys(newKeys, nil, keyMask(cloned.KeysBracketed, len(cloned.Keys)), cloned.BracketedClosed)
 	// Brackets re-key by role: containers keep the structural grouping the
 	// clone shares, leaves drop authorship they were never written with.
 	rekeyBracketProvenance(cloned, true)
@@ -287,8 +283,8 @@ func (t *ConfigTree) RenamePath(src, dst []string) error {
 		// Compare BEFORE stamping: a same-name rename is a no-op and keeps
 		// the mask rather than laundering it.
 		changed := !keysEqual(srcNode.Keys, newKeys)
-		srcNode.Keys = newKeys
-		srcNode.KeysQuoted = nil // new identity — see CopyPath (#6673)
+		srcNode.replaceKeys(newKeys, nil,
+			keyMask(srcNode.KeysBracketed, len(srcNode.Keys)), srcNode.BracketedClosed)
 		rekeyBracketProvenance(srcNode, changed)
 		return nil
 	}
@@ -301,8 +297,8 @@ func (t *ConfigTree) RenamePath(src, dst []string) error {
 		}
 	}
 	changed := !keysEqual(srcNode.Keys, newKeys)
-	srcNode.Keys = newKeys
-	srcNode.KeysQuoted = nil // new identity — see CopyPath (#6673)
+	srcNode.replaceKeys(newKeys, nil,
+		keyMask(srcNode.KeysBracketed, len(srcNode.Keys)), srcNode.BracketedClosed)
 	rekeyBracketProvenance(srcNode, changed)
 	*dstParent = append(*dstParent, srcNode)
 	return nil
@@ -1921,9 +1917,11 @@ func braceCompactStatement12508(n *Node, nodeKeys []string, schema *schemaNode, 
 	}
 	children := packedBodyChildren(packed, schema)
 	markPackedBodyLeaves(children, schema)
-	n.Keys = append([]string(nil), nodeKeys...)
-	n.setKeysQuoted(quoted)
-	n.setKeysBracketed(bracketed, closed...)
+	closedState := n.BracketedClosed
+	if len(closed) > 0 {
+		closedState = closed[0]
+	}
+	n.replaceKeys(nodeKeys, quoted, bracketed, closedState)
 	n.IsLeaf = false
 	n.Children = children
 }
@@ -1977,10 +1975,7 @@ func restoreBracedElided15714(n *Node, saved *Node) {
 	if n == nil || saved == nil {
 		return
 	}
-	n.Keys = append([]string(nil), saved.Keys...)
-	n.KeysQuoted = append([]bool(nil), saved.KeysQuoted...)
-	n.KeysBracketed = append([]bool(nil), saved.KeysBracketed...)
-	n.BracketedClosed = saved.BracketedClosed
+	n.replaceKeys(saved.Keys, saved.KeysQuoted, saved.KeysBracketed, saved.BracketedClosed)
 	n.IsLeaf = saved.IsLeaf
 	n.Children = saved.Children
 }
@@ -2328,9 +2323,7 @@ func removeMultiLeafMembers(nodes *[]*Node, keyword string, members []string, mo
 			if len(newKeys) == 1 {
 				continue
 			}
-			n.Keys = newKeys
-			n.setKeysQuoted(newQuoted)
-			n.setKeysBracketed(newBracketed)
+			n.replaceKeys(newKeys, newQuoted, newBracketed, n.BracketedClosed)
 			out = append(out, n)
 			continue
 		}
@@ -2347,9 +2340,7 @@ func removeMultiLeafMembers(nodes *[]*Node, keyword string, members []string, mo
 		if len(newKeys) == 1 && len(newChildren) == 0 {
 			continue
 		}
-		n.Keys = newKeys
-		n.setKeysQuoted(newQuoted)
-		n.setKeysBracketed(newBracketed)
+		n.replaceKeys(newKeys, newQuoted, newBracketed, n.BracketedClosed)
 		n.Children = newChildren
 		out = append(out, n)
 	}

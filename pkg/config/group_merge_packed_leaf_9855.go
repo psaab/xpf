@@ -202,13 +202,10 @@ func promoteLeafPeerForPackedGroup9855(ancestorPath [][]string, peer, s *Node) (
 		}
 	}
 	oldKeys := peer.Keys
-	peer.Keys = append([]string(nil), oldKeys[:span]...)
-	if len(peer.KeysQuoted) == len(oldKeys) {
-		peer.KeysQuoted = append([]bool(nil), peer.KeysQuoted[:span]...)
-	}
-	if len(peer.KeysBracketed) == len(oldKeys) {
-		peer.KeysBracketed = append([]bool(nil), peer.KeysBracketed[:span]...)
-	}
+	peer.replaceKeys(oldKeys[:span],
+		maskSlice(keyMask(peer.KeysQuoted, len(oldKeys)), 0, span),
+		maskSlice(keyMask(peer.KeysBracketed, len(oldKeys)), 0, span),
+		peer.BracketedClosed)
 	peer.Children = peerBody
 	peer.IsLeaf = false
 	markSynthTerminals9855(peerBody)

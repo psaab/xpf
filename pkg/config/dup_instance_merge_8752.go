@@ -432,10 +432,7 @@ func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) 
 		// Fold into the FIRST occurrence, which keeps its position in `kept`.
 		if !peeledPolicy {
 			if tail := child.Keys[2:]; len(tail) > 0 {
-				prev.Children = append(prev.Children, &Node{
-					Keys:   append([]string(nil), tail...),
-					IsLeaf: true,
-				})
+				prev.Children = append(prev.Children, child.keySpan(2, len(child.Keys)))
 			}
 		}
 		prev.Children = append(prev.Children, child.Children...)

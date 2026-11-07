@@ -710,16 +710,20 @@ func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
 		// through the same declared HIB path as the two-level form below.
 		if packed != nil {
 			hostInbound := *packed
-			hostInbound.Keys = packed.Keys[1:]
-			hostInbound.setKeysQuoted(maskSlice8921(packed.KeysQuoted, 1, len(packed.Keys)))
-			hostInbound.setKeysBracketed(
-				maskSlice8921(packed.KeysBracketed, 1, len(packed.Keys)), packed.BracketedClosed)
+			hostInbound.replaceKeys(
+				packed.Keys[1:],
+				maskSlice(keyMask(packed.KeysQuoted, len(packed.Keys)), 1, len(packed.Keys)),
+				maskSlice(keyMask(packed.KeysBracketed, len(packed.Keys)), 1, len(packed.Keys)),
+				packed.BracketedClosed,
+			)
 			if children := packedBodyChildren(&hostInbound, hostInboundSchema); len(children) > 0 {
 				mgmt := *packed
-				mgmt.Keys = packed.Keys[:1]
-				mgmt.setKeysQuoted(maskSlice8921(packed.KeysQuoted, 0, 1))
-				mgmt.setKeysBracketed(
-					maskSlice8921(packed.KeysBracketed, 0, 1), packed.BracketedClosed)
+				mgmt.replaceKeys(
+					packed.Keys[:1],
+					maskSlice(keyMask(packed.KeysQuoted, len(packed.Keys)), 0, 1),
+					maskSlice(keyMask(packed.KeysBracketed, len(packed.Keys)), 0, 1),
+					packed.BracketedClosed,
+				)
 				mgmt.Children = []*Node{
 					functionalZoneHostInboundBody15668(&hostInbound, children),
 				}
@@ -729,12 +733,19 @@ func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
 			}
 			// #18788: unexpanded declared HIB tail - surface it (see the
 			// two-level arm below) instead of swallowing the tokens.
-			hostInbound.Keys = packed.Keys[1:]
+			hostInbound.replaceKeys(
+				packed.Keys[1:],
+				maskSlice(keyMask(packed.KeysQuoted, len(packed.Keys)), 1, len(packed.Keys)),
+				maskSlice(keyMask(packed.KeysBracketed, len(packed.Keys)), 1, len(packed.Keys)),
+				packed.BracketedClosed,
+			)
 			mgmt := *packed
-			mgmt.Keys = packed.Keys[:1]
-			mgmt.setKeysQuoted(maskSlice8921(packed.KeysQuoted, 0, 1))
-			mgmt.setKeysBracketed(
-				maskSlice8921(packed.KeysBracketed, 0, 1), packed.BracketedClosed)
+			mgmt.replaceKeys(
+				packed.Keys[:1],
+				maskSlice(keyMask(packed.KeysQuoted, len(packed.Keys)), 0, 1),
+				maskSlice(keyMask(packed.KeysBracketed, len(packed.Keys)), 0, 1),
+				packed.BracketedClosed,
+			)
 			mgmt.Children = []*Node{
 				functionalZoneHostInboundBody15668(&hostInbound, nil),
 			}
@@ -750,17 +761,21 @@ func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
 			// The two-level packed form stores HIB and its values on the
 			// functional-zone node's Keys. Rebuild only this declared path.
 			hostInbound := *fz
-			hostInbound.Keys = fz.Keys[2:]
-			hostInbound.setKeysQuoted(maskSlice8921(fz.KeysQuoted, 2, len(fz.Keys)))
-			hostInbound.setKeysBracketed(
-				maskSlice8921(fz.KeysBracketed, 2, len(fz.Keys)), fz.BracketedClosed)
+			hostInbound.replaceKeys(
+				fz.Keys[2:],
+				maskSlice(keyMask(fz.KeysQuoted, len(fz.Keys)), 2, len(fz.Keys)),
+				maskSlice(keyMask(fz.KeysBracketed, len(fz.Keys)), 2, len(fz.Keys)),
+				fz.BracketedClosed,
+			)
 			children := packedBodyChildren(&hostInbound, hostInboundSchema)
 			if len(children) > 0 {
 				mgmt := *fz
-				mgmt.Keys = fz.Keys[1:2]
-				mgmt.setKeysQuoted(maskSlice8921(fz.KeysQuoted, 1, 2))
-				mgmt.setKeysBracketed(
-					maskSlice8921(fz.KeysBracketed, 1, 2), fz.BracketedClosed)
+				mgmt.replaceKeys(
+					fz.Keys[1:2],
+					maskSlice(keyMask(fz.KeysQuoted, len(fz.Keys)), 1, 2),
+					maskSlice(keyMask(fz.KeysBracketed, len(fz.Keys)), 1, 2),
+					fz.BracketedClosed,
+				)
 				mgmt.Children = []*Node{
 					functionalZoneHostInboundBody15668(&hostInbound, children),
 				}
@@ -774,12 +789,19 @@ func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
 			// surface the tail as the management body's HIB child (keeping
 			// its packed Keys) so parseHostInboundNode records the unknown
 			// keyword and the strict gate rejects it like the ordinary path.
-			hostInbound.Keys = fz.Keys[2:]
+			hostInbound.replaceKeys(
+				fz.Keys[2:],
+				maskSlice(keyMask(fz.KeysQuoted, len(fz.Keys)), 2, len(fz.Keys)),
+				maskSlice(keyMask(fz.KeysBracketed, len(fz.Keys)), 2, len(fz.Keys)),
+				fz.BracketedClosed,
+			)
 			mgmt := *fz
-			mgmt.Keys = fz.Keys[1:2]
-			mgmt.setKeysQuoted(maskSlice8921(fz.KeysQuoted, 1, 2))
-			mgmt.setKeysBracketed(
-				maskSlice8921(fz.KeysBracketed, 1, 2), fz.BracketedClosed)
+			mgmt.replaceKeys(
+				fz.Keys[1:2],
+				maskSlice(keyMask(fz.KeysQuoted, len(fz.Keys)), 1, 2),
+				maskSlice(keyMask(fz.KeysBracketed, len(fz.Keys)), 1, 2),
+				fz.BracketedClosed,
+			)
 			mgmt.Children = []*Node{
 				functionalZoneHostInboundBody15668(&hostInbound, nil),
 			}
@@ -817,16 +839,20 @@ func functionalZoneManagementBody15668(mgmt *Node) *Node {
 			return mgmt
 		}
 		hostInbound := *mgmt
-		hostInbound.Keys = mgmt.Keys[1:]
-		hostInbound.setKeysQuoted(maskSlice8921(mgmt.KeysQuoted, 1, len(mgmt.Keys)))
-		hostInbound.setKeysBracketed(
-			maskSlice8921(mgmt.KeysBracketed, 1, len(mgmt.Keys)), mgmt.BracketedClosed)
+		hostInbound.replaceKeys(
+			mgmt.Keys[1:],
+			maskSlice(keyMask(mgmt.KeysQuoted, len(mgmt.Keys)), 1, len(mgmt.Keys)),
+			maskSlice(keyMask(mgmt.KeysBracketed, len(mgmt.Keys)), 1, len(mgmt.Keys)),
+			mgmt.BracketedClosed,
+		)
 		children := packedBodyChildren(&hostInbound, hibSchema)
 		out := *mgmt
-		out.Keys = mgmt.Keys[:1]
-		out.setKeysQuoted(maskSlice8921(mgmt.KeysQuoted, 0, 1))
-		out.setKeysBracketed(
-			maskSlice8921(mgmt.KeysBracketed, 0, 1), mgmt.BracketedClosed)
+		out.replaceKeys(
+			mgmt.Keys[:1],
+			maskSlice(keyMask(mgmt.KeysQuoted, len(mgmt.Keys)), 0, 1),
+			maskSlice(keyMask(mgmt.KeysBracketed, len(mgmt.Keys)), 0, 1),
+			mgmt.BracketedClosed,
+		)
 		out.Children = []*Node{
 			functionalZoneHostInboundBody15668(&hostInbound, children),
 		}
@@ -884,9 +910,12 @@ func functionalZoneHostInboundBody15668(node *Node, children []*Node) *Node {
 	// children; an unexpanded tail must keep Keys[1:] so
 	// parseHostInboundNode records the unknown keyword (#18788).
 	if len(children) > 0 && len(node.Keys) > 1 {
-		copy.Keys = node.Keys[:1]
-		copy.setKeysQuoted(maskSlice8921(node.KeysQuoted, 0, 1))
-		copy.setKeysBracketed(maskSlice8921(node.KeysBracketed, 0, 1), node.BracketedClosed)
+		copy.replaceKeys(
+			node.Keys[:1],
+			maskSlice(keyMask(node.KeysQuoted, len(node.Keys)), 0, 1),
+			maskSlice(keyMask(node.KeysBracketed, len(node.Keys)), 0, 1),
+			node.BracketedClosed,
+		)
 	}
 	copy.Children = children
 	copy.IsLeaf = false

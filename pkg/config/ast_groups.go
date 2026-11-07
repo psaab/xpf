@@ -1727,17 +1727,7 @@ func groupPackedLeafUnmodelledTail(ancestorPath [][]string, s *Node) []*Node {
 	if consumed <= 0 || consumed >= len(s.Keys) {
 		return nil
 	}
-	tail := &Node{
-		Keys:          append([]string(nil), s.Keys[consumed:]...),
-		IsLeaf:        true,
-		InheritedFrom: s.InheritedFrom,
-	}
-	if len(s.KeysQuoted) == len(s.Keys) {
-		tail.setKeysQuoted(append([]bool(nil), s.KeysQuoted[consumed:]...))
-	}
-	if len(s.KeysBracketed) == len(s.Keys) {
-		tail.setKeysBracketed(append([]bool(nil), s.KeysBracketed[consumed:]...), s.BracketedClosed)
-	}
+	tail := s.keySpan(consumed, len(s.Keys))
 	return []*Node{tail}
 }
 
@@ -1854,10 +1844,16 @@ func mergeLeafListIntoSiblings16541(peers []*Node, src *Node) {
 			idx += n
 		}
 	}
+	dstHadBracketed := hasBracketedKey(last)
 	for _, m := range srcMembers {
 		if m.value == self && !m.quoted {
-			last.Keys = append(last.Keys, m.value)
-			appendKeyQuoted9627(last, false)
+			last.appendKey(m.value, m.quoted, m.bracketed)
+			if m.bracketed {
+				if src.BracketedClosed && !dstHadBracketed {
+					last.BracketedClosed = true
+				}
+				dstHadBracketed = true
+			}
 			if trackMembers {
 				perPeer[last] = append(perPeer[last], m)
 			}
@@ -1887,8 +1883,13 @@ func mergeLeafListIntoSiblings16541(peers []*Node, src *Node) {
 		}
 		seen[m.value] = true
 		if last.IsLeaf {
-			last.Keys = append(last.Keys, m.value)
-			appendKeyQuoted9627(last, m.quoted)
+			last.appendKey(m.value, m.quoted, m.bracketed)
+			if m.bracketed {
+				if src.BracketedClosed && !dstHadBracketed {
+					last.BracketedClosed = true
+				}
+				dstHadBracketed = true
+			}
 		} else {
 			child := &Node{
 				Keys:          []string{m.value},
@@ -1896,9 +1897,8 @@ func mergeLeafListIntoSiblings16541(peers []*Node, src *Node) {
 				InheritedFrom: src.InheritedFrom,
 				fromGroups:    append([]string(nil), m.groups...),
 			}
-			if m.quoted {
-				child.KeysQuoted = []bool{true}
-			}
+			child.setKeysQuoted([]bool{m.quoted})
+			child.setKeysBracketed([]bool{m.bracketed}, src.BracketedClosed)
 			last.Children = append(last.Children, child)
 		}
 		ownerOf[m.value] = last
@@ -1954,10 +1954,16 @@ func mergeLeafListInto(dst, src *Node) {
 			seen[m.value] = true
 		}
 	}
+	dstHadBracketed := hasBracketedKey(dst)
 	for _, m := range srcMembers {
 		if m.value == self && !m.quoted {
-			dst.Keys = append(dst.Keys, m.value)
-			appendKeyQuoted9627(dst, false)
+			dst.appendKey(m.value, m.quoted, m.bracketed)
+			if m.bracketed {
+				if src.BracketedClosed && !dstHadBracketed {
+					dst.BracketedClosed = true
+				}
+				dstHadBracketed = true
+			}
 			if trackMembers {
 				dstMembers = append(dstMembers, m)
 			}
@@ -1986,8 +1992,13 @@ func mergeLeafListInto(dst, src *Node) {
 		}
 		seen[m.value] = true
 		if dst.IsLeaf {
-			dst.Keys = append(dst.Keys, m.value)
-			appendKeyQuoted9627(dst, m.quoted)
+			dst.appendKey(m.value, m.quoted, m.bracketed)
+			if m.bracketed {
+				if src.BracketedClosed && !dstHadBracketed {
+					dst.BracketedClosed = true
+				}
+				dstHadBracketed = true
+			}
 		} else {
 			child := &Node{
 				Keys:          []string{m.value},
@@ -1995,9 +2006,8 @@ func mergeLeafListInto(dst, src *Node) {
 				InheritedFrom: src.InheritedFrom,
 				fromGroups:    append([]string(nil), m.groups...),
 			}
-			if m.quoted {
-				child.KeysQuoted = []bool{true}
-			}
+			child.setKeysQuoted([]bool{m.quoted})
+			child.setKeysBracketed([]bool{m.bracketed}, src.BracketedClosed)
 			dst.Children = append(dst.Children, child)
 		}
 		if trackMembers {
@@ -2009,11 +2019,12 @@ func mergeLeafListInto(dst, src *Node) {
 	}
 }
 
-// leafListMember9627 is one member of a leaf-list node, with the quote its own
-// authoring gave it.
+// leafListMember9627 is one member of a leaf-list node, with its quote and
+// bracket provenance.
 type leafListMember9627 struct {
-	value  string
-	quoted bool
+	value     string
+	quoted    bool
+	bracketed bool
 }
 
 // leafListMembers9627 reads a leaf-list node's members across both AST shapes.
@@ -2023,31 +2034,17 @@ func leafListMembers9627(n *Node) []leafListMember9627 {
 	var out []leafListMember9627
 	for i := 1; i < len(n.Keys); i++ {
 		if n.Keys[i] != "" {
-			out = append(out, leafListMember9627{value: n.Keys[i], quoted: n.KeyQuoted(i)})
+			out = append(out, leafListMember9627{value: n.Keys[i], quoted: n.KeyQuoted(i), bracketed: n.KeyBracketed(i)})
 		}
 	}
 	for _, vn := range n.Children {
 		for i, k := range vn.Keys {
 			if k != "" {
-				out = append(out, leafListMember9627{value: k, quoted: vn.KeyQuoted(i)})
+				out = append(out, leafListMember9627{value: k, quoted: vn.KeyQuoted(i), bracketed: vn.KeyBracketed(i)})
 			}
 		}
 	}
 	return out
-}
-
-// appendKeyQuoted9627 records the quote of the member just appended to n.Keys,
-// keeping the mask invariant (nil, or one bit per key). A group member keeps the
-// quote its own authoring gave it: that is its provenance, and #6673's rule is
-// only that the union never MINTS a quote a value did not have.
-func appendKeyQuoted9627(n *Node, quoted bool) {
-	switch {
-	case len(n.KeysQuoted) == len(n.Keys)-1:
-		n.KeysQuoted = append(n.KeysQuoted, quoted)
-	case quoted && len(n.KeysQuoted) == 0:
-		n.KeysQuoted = make([]bool, len(n.Keys))
-		n.KeysQuoted[len(n.Keys)-1] = true
-	}
 }
 
 // isLeafListSchema reports whether the leaf keyword key, resolved under the

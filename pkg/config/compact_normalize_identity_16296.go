@@ -22,11 +22,14 @@ func normalizeElidedSecurityIdentity16296(nodes []*Node) int {
 		if len(node.Keys) == 2 && len(node.Children) == 0 {
 			continue // bare leaf, nothing to fold
 		}
+		quoted := keyMask(node.KeysQuoted, len(node.Keys))
+		bracketed := keyMask(node.KeysBracketed, len(node.Keys))
+		closed := node.BracketedClosed
 		child := &Node{Keys: []string{node.Keys[1]}, Line: node.Line, Column: node.Column, Children: node.Children, IsLeaf: node.IsLeaf && len(node.Children) == 0}
-		if len(node.Keys) > 2 {
-			child.Keys = append(child.Keys, node.Keys[2:]...)
-		}
-		node.Keys = node.Keys[:1]
+		child.replaceKeys(node.Keys[1:], maskSlice(quoted, 1, len(node.Keys)),
+			maskSlice(bracketed, 1, len(node.Keys)), closed)
+		node.replaceKeys(node.Keys[:1], maskSlice(quoted, 0, 1),
+			maskSlice(bracketed, 0, 1), closed)
 		node.Children = []*Node{child}
 		node.IsLeaf = false
 		n++

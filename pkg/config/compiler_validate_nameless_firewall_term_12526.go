@@ -43,52 +43,39 @@ func unpackFirewallScanNode12526(node *Node, ancestors []string) {
 	if splitEnd <= 0 || splitEnd >= len(node.Keys) {
 		return
 	}
-	keys, quoted, bracketed := node.Keys, node.KeysQuoted, node.KeysBracketed
+	keys := node.Keys
+	quoted := keyMask(node.KeysQuoted, len(keys))
+	bracketed := keyMask(node.KeysBracketed, len(keys))
 	children, isLeaf := node.Children, node.IsLeaf
 	var next *Node
 	segment := *node
-	segment.Keys = keys[splitEnd:]
+	segment.replaceKeys(
+		keys[splitEnd:],
+		maskSlice(quoted, splitEnd, len(keys)),
+		maskSlice(bracketed, splitEnd, len(keys)),
+		node.BracketedClosed,
+	)
 	segment.Children = children
 	segment.IsLeaf = isLeaf
-	if len(quoted) == len(keys) {
-		segment.KeysQuoted = quoted[splitEnd:]
-	} else {
-		segment.KeysQuoted = nil
-	}
-	if len(bracketed) == len(keys) {
-		segment.KeysBracketed = bracketed[splitEnd:]
-	} else {
-		segment.KeysBracketed = nil
-	}
 	next = &segment
 	for i := splitEnd - 1; i >= 1; i-- {
 		middle := *node
-		middle.Keys = keys[i : i+1]
+		middle.replaceKeys(
+			keys[i:i+1],
+			maskSlice(quoted, i, i+1),
+			maskSlice(bracketed, i, i+1),
+			node.BracketedClosed,
+		)
 		middle.Children = []*Node{next}
 		middle.IsLeaf = false
-		if len(quoted) == len(keys) {
-			middle.KeysQuoted = quoted[i : i+1]
-		} else {
-			middle.KeysQuoted = nil
-		}
-		if len(bracketed) == len(keys) {
-			middle.KeysBracketed = bracketed[i : i+1]
-		} else {
-			middle.KeysBracketed = nil
-		}
 		next = &middle
 	}
-	node.Keys = keys[:1]
-	if len(quoted) == len(keys) {
-		node.KeysQuoted = quoted[:1]
-	} else {
-		node.KeysQuoted = nil
-	}
-	if len(bracketed) == len(keys) {
-		node.KeysBracketed = bracketed[:1]
-	} else {
-		node.KeysBracketed = nil
-	}
+	node.replaceKeys(
+		keys[:1],
+		maskSlice(quoted, 0, 1),
+		maskSlice(bracketed, 0, 1),
+		node.BracketedClosed,
+	)
 	node.Children = []*Node{next}
 	node.IsLeaf = false
 }

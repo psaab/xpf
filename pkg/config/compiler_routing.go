@@ -2170,14 +2170,13 @@ func policyTermFromChildren11779(term *PolicyTerm, fromNode *Node, fromSchema *s
 		return children
 	}
 	tail := *fromNode
-	tail.Keys = append([]string(nil), fromNode.Keys[1:]...)
+	tail.replaceKeys(
+		fromNode.Keys[1:],
+		maskSlice(keyMask(fromNode.KeysQuoted, len(fromNode.Keys)), 1, len(fromNode.Keys)),
+		maskSlice(keyMask(fromNode.KeysBracketed, len(fromNode.Keys)), 1, len(fromNode.Keys)),
+		fromNode.BracketedClosed,
+	)
 	tail.Children = nil
-	if len(fromNode.KeysQuoted) == len(fromNode.Keys) {
-		tail.setKeysQuoted(fromNode.KeysQuoted[1:])
-	}
-	if len(fromNode.KeysBracketed) == len(fromNode.Keys) {
-		tail.setKeysBracketed(fromNode.KeysBracketed[1:])
-	}
 	parts := splitPolicyTermFromRun11779(term, &tail, fromSchema, true)
 	return append(parts, children...)
 }
@@ -2192,6 +2191,8 @@ func splitPolicyTermFromRun11779(
 		return []*Node{run}
 	}
 	keys := run.Keys
+	quoted := keyMask(run.KeysQuoted, len(keys))
+	bracketed := keyMask(run.KeysBracketed, len(keys))
 	var nodes []*Node
 	appendSpan := func(start, end int) {
 		if start == 0 && end == len(keys) {
@@ -2199,19 +2200,14 @@ func splitPolicyTermFromRun11779(
 			return
 		}
 		part := *run
-		part.Keys = append([]string(nil), keys[start:end]...)
+		part.replaceKeys(
+			keys[start:end],
+			maskSlice(quoted, start, end),
+			maskSlice(bracketed, start, end),
+			run.BracketedClosed,
+		)
 		part.Children = nil
 		part.IsLeaf = true
-		if len(run.KeysQuoted) == len(keys) {
-			part.setKeysQuoted(run.KeysQuoted[start:end])
-		} else {
-			part.setKeysQuoted(nil)
-		}
-		if len(run.KeysBracketed) == len(keys) {
-			part.setKeysBracketed(run.KeysBracketed[start:end])
-		} else {
-			part.setKeysBracketed(nil)
-		}
 		nodes = append(nodes, &part)
 	}
 

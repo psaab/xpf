@@ -562,10 +562,7 @@ func mergeDuplicateNamedChildren9023(parent *Node, path []string) []string {
 			continue
 		}
 		if tail := child.Keys[1:]; len(tail) > 0 {
-			prev.Children = append(prev.Children, &Node{
-				Keys:   append([]string(nil), tail...),
-				IsLeaf: true,
-			})
+			prev.Children = append(prev.Children, child.keySpan(1, len(child.Keys)))
 		}
 		prev.Children = append(prev.Children, child.Children...)
 		prev.IsLeaf = false
@@ -619,10 +616,7 @@ func mergeDuplicateUnnamedRoutingChildrenRecursion9023(children []*Node, keyword
 			kept = append(kept, children[:i]...)
 		}
 		if tail := child.Keys[1:]; len(tail) > 0 {
-			first.Children = append(first.Children, &Node{
-				Keys:   append([]string(nil), tail...),
-				IsLeaf: true,
-			})
+			first.Children = append(first.Children, child.keySpan(1, len(child.Keys)))
 		}
 		first.Children = append(first.Children, child.Children...)
 		first.IsLeaf = false

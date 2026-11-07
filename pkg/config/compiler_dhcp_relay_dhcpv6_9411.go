@@ -158,7 +158,7 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 				}
 				n := &Node{Keys: []string{"active-server-group"}, IsLeaf: true}
 				if v != "" {
-					n.Keys = []string{"active-server-group", v}
+					n.appendKey(v, false, false)
 				}
 				if err := checkScalar(n); err != nil {
 					return err
@@ -172,7 +172,7 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 				hasVal := i+1 < len(tail) && !dhcpRelayV6GroupKeyword9553(tail[i+1])
 				n := &Node{Keys: []string{"relay-agent-interface-id"}, IsLeaf: true}
 				if hasVal {
-					n.Keys = []string{"relay-agent-interface-id", tail[i+1]}
+					n.appendKey(tail[i+1], false, false)
 				}
 				if err := checkInterfaceID(n); err != nil {
 					return err

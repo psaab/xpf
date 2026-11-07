@@ -294,18 +294,11 @@ func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNo
 		return nil
 	}
 	tail := *node
-	tail.Keys = node.Keys[1:]
+	tail.replaceKeys(node.Keys[1:],
+		maskSlice(keyMask(node.KeysQuoted, len(node.Keys)), 1, len(node.Keys)),
+		maskSlice(keyMask(node.KeysBracketed, len(node.Keys)), 1, len(node.Keys)),
+		node.BracketedClosed)
 	tail.Children = nil
-	if len(node.KeysQuoted) == len(node.Keys) {
-		tail.KeysQuoted = node.KeysQuoted[1:]
-	} else {
-		tail.KeysQuoted = nil
-	}
-	if len(node.KeysBracketed) == len(node.Keys) {
-		tail.KeysBracketed = node.KeysBracketed[1:]
-	} else {
-		tail.KeysBracketed = nil
-	}
 	// Segment exactly as the policy compiler does. In particular, a
 	// prefix-list/community/as-path value named "route-filter" belongs to
 	// that preceding leaf by its schema arity, not to a new route-filter.

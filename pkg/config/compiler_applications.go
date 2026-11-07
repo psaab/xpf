@@ -311,7 +311,7 @@ func applicationDirectLeaves(appNode *Node) (leaves []*Node, unknown []string, u
 				} else {
 					syn := &Node{Keys: []string{kw}}
 					if len(vals) > 0 {
-						syn.Keys = append(syn.Keys, vals[0])
+						syn.appendKey(vals[0], n.KeyQuoted(valStart), n.KeyBracketed(valStart))
 					}
 					leaves = append(leaves, syn)
 				}

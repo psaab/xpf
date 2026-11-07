@@ -58,9 +58,7 @@ func flattenChainedChildren(children []*Node, container *schemaNode) []*Node {
 			Line:       n.Line,
 			Column:     n.Column,
 		}
-		if n.KeysQuoted != nil {
-			head.KeysQuoted = append([]bool(nil), n.KeysQuoted...)
-		}
+		head.copyKeyProvenance(n)
 		out = append(out, head)
 		for _, c := range n.Children {
 			visit(c)

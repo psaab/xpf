@@ -181,14 +181,16 @@ func unionNodeContrib9862(n *Node, contrib []string) {
 	}
 }
 
-// leafListMemberGroups9862 records one leaf-list member and the groups whose
-// bodies contributed it. The slice is aligned with leafListMembers9627 on the
-// owning node; a nil groups slice means authored-inline or uncertain
-// ownership, which is intentionally kept by exclusion filtering.
+// leafListMemberGroups9862 records one leaf-list member's quote/bracket
+// provenance and the groups whose bodies contributed it. The slice is aligned
+// with leafListMembers9627 on the owning node; a nil groups slice means
+// authored-inline or uncertain ownership, which is intentionally kept by
+// exclusion filtering.
 type leafListMemberGroups9862 struct {
-	value  string
-	quoted bool
-	groups []string
+	value     string
+	quoted    bool
+	bracketed bool
+	groups    []string
 }
 
 func cloneLeafMemberGroups9862(in []leafListMemberGroups9862) []leafListMemberGroups9862 {
@@ -198,9 +200,10 @@ func cloneLeafMemberGroups9862(in []leafListMemberGroups9862) []leafListMemberGr
 	out := make([]leafListMemberGroups9862, len(in))
 	for i, m := range in {
 		out[i] = leafListMemberGroups9862{
-			value:  m.value,
-			quoted: m.quoted,
-			groups: append([]string(nil), m.groups...),
+			value:     m.value,
+			quoted:    m.quoted,
+			bracketed: m.bracketed,
+			groups:    append([]string(nil), m.groups...),
 		}
 	}
 	return out
@@ -222,9 +225,10 @@ func leafListMemberGroupsForNode9862(n *Node) []leafListMemberGroups9862 {
 		out := make([]leafListMemberGroups9862, len(n.leafMemberGroups9862))
 		for i, m := range n.leafMemberGroups9862 {
 			out[i] = leafListMemberGroups9862{
-				value:  m.value,
-				quoted: m.quoted,
-				groups: append([]string(nil), m.groups...),
+				value:     m.value,
+				quoted:    m.quoted,
+				bracketed: m.bracketed,
+				groups:    append([]string(nil), m.groups...),
 			}
 		}
 		return out
@@ -232,9 +236,10 @@ func leafListMemberGroupsForNode9862(n *Node) []leafListMemberGroups9862 {
 	out := make([]leafListMemberGroups9862, len(members))
 	for i, m := range members {
 		out[i] = leafListMemberGroups9862{
-			value:  m.value,
-			quoted: m.quoted,
-			groups: append([]string(nil), n.fromGroups...),
+			value:     m.value,
+			quoted:    m.quoted,
+			bracketed: m.bracketed,
+			groups:    append([]string(nil), n.fromGroups...),
 		}
 	}
 	return out
@@ -314,9 +319,7 @@ func filterLeafListMembers9862(n *Node, excluded map[string]bool) bool {
 				bracketed = append(bracketed, n.KeysBracketed[index+1])
 			}
 		}
-		n.Keys = keys
-		n.setKeysQuoted(quoted)
-		n.setKeysBracketed(bracketed)
+		n.replaceKeys(keys, quoted, bracketed, n.BracketedClosed)
 	} else {
 		// A leaf-list block has one value-bearing child per member in the
 		// ordinary AST. Keep the general multi-key walk for synthesized trees.
@@ -352,9 +355,7 @@ func filterLeafListMembers9862(n *Node, excluded map[string]bool) bool {
 			if len(keys) == 0 {
 				continue
 			}
-			child.Keys = keys
-			child.setKeysQuoted(quoted)
-			child.setKeysBracketed(bracketed)
+			child.replaceKeys(keys, quoted, bracketed, child.BracketedClosed)
 			children = append(children, child)
 		}
 		n.Children = children

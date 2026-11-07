@@ -253,7 +253,16 @@ func rewriteRetiredPackedTail(system *config.Node, caller retireRewriteCaller) i
 	}
 	rewrites := 0
 	keys := system.Keys
-	out := append([]string(nil), keys[:1]...)
+	out := keys[:1]
+	quotedAligned := len(system.KeysQuoted) == len(keys)
+	bracketedAligned := len(system.KeysBracketed) == len(keys)
+	var quoted, bracketed []bool
+	if quotedAligned {
+		quoted = system.KeysQuoted[:1]
+	}
+	if bracketedAligned {
+		bracketed = system.KeysBracketed[:1]
+	}
 	for i := 1; i < len(keys); i++ {
 		if keys[i] == "dataplane-type" && i+1 < len(keys) {
 			if rationale, ok := retiredDataplaneTypes[keys[i+1]]; ok {
@@ -270,9 +279,15 @@ func rewriteRetiredPackedTail(system *config.Node, caller retireRewriteCaller) i
 			}
 		}
 		out = append(out, keys[i])
+		if quotedAligned {
+			quoted = append(quoted, system.KeysQuoted[i])
+		}
+		if bracketedAligned {
+			bracketed = append(bracketed, system.KeysBracketed[i])
+		}
 	}
 	if rewrites > 0 {
-		system.Keys = out
+		system.ReplaceKeys(out, quoted, bracketed, system.BracketedClosed)
 	}
 	return rewrites
 }

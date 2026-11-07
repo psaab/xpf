@@ -14,6 +14,9 @@ xpf (0.0.0) unstable; urgency=medium
     tolerant HA sync remain warn-only. See the #18771 upgrade note in
     `docs/config-schema.md` for mixed-version, failover, rollback, skip, and
     compile-cost effects.
+  * Config AST: centralize Node key and provenance writes, enforce aligned
+    quote/bracket masks, fail closed on skewed accessors, and preserve
+    bracketed membership through group leaf-list unions (#17263).
   * Build: capture the shimverify attestation directory before the sudo hop
     and pass it to mktemp explicitly, so `make generate-userspace-xdp` no
     longer writes its gate attestation into a possibly-full /tmp (#18966).

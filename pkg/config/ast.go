@@ -57,11 +57,12 @@ type Node struct {
 	// it so group expansion cannot collapse distinct source occurrences.
 	packedTailSite18771 uint64
 
-	// leafMemberGroups9862 carries per-member contributor provenance for a
-	// cross-group leaf-list union. It is aligned with leafListMembers9627's
-	// flattened member order (Keys[1:] followed by child keys). A nil entry
-	// means the member is authored inline or its ownership is unknown, so the
-	// #9862 filter keeps it. This is compile-internal and never persisted.
+	// leafMemberGroups9862 carries per-member quote/bracket and contributor
+	// provenance for a cross-group leaf-list union. It is aligned with
+	// leafListMembers9627's flattened member order (Keys[1:] followed by child
+	// keys). A nil groups slice means authored-inline or uncertain ownership,
+	// so the #9862 filter keeps that member. This is compile-internal and never
+	// persisted.
 	leafMemberGroups9862 []leafListMemberGroups9862
 
 	// Inactive marks a node deactivated via the Junos `inactive:` statement
@@ -158,15 +159,14 @@ type Node struct {
 }
 
 // KeyQuoted reports whether key i was AUTHORED as a quoted string. It answers
-// false for every index when the node carries no provenance (nil KeysQuoted:
-// a synthesized node, or one deserialized from a config DB written before
-// #6673) and for an out-of-range index, so a caller never has to length-check.
+// false for an absent or misaligned provenance mask (including synthesized
+// nodes and older persisted configs) and for an out-of-range index.
 //
 // A false here therefore means "not known to be quoted", not "known to be
 // bare". Callers whose behaviour must not change for a provenance-less tree
 // use KeysHaveQuoteProvenance to tell the two apart.
 func (n *Node) KeyQuoted(i int) bool {
-	if n == nil || i < 0 || i >= len(n.KeysQuoted) {
+	if n == nil || len(n.KeysQuoted) != len(n.Keys) || i < 0 || i >= len(n.Keys) {
 		return false
 	}
 	return n.KeysQuoted[i]
@@ -180,64 +180,14 @@ func (n *Node) KeysHaveQuoteProvenance() bool {
 }
 
 // KeyBracketed reports whether key i was AUTHORED inside a `[ ... ]` list
-// (#6668). It answers false for every index when the node carries no
-// provenance, and for an out-of-range index, so a caller never has to
-// length-check. A false means "not known to be bracketed", not "known to be
-// bare".
+// (#6668). It answers false for absent or misaligned provenance and for an
+// out-of-range index. A false means "not known to be bracketed", not "known
+// to be bare".
 func (n *Node) KeyBracketed(i int) bool {
-	if n == nil || i < 0 || i >= len(n.KeysBracketed) {
+	if n == nil || len(n.KeysBracketed) != len(n.Keys) || i < 0 || i >= len(n.Keys) {
 		return false
 	}
 	return n.KeysBracketed[i]
-}
-
-// setKeysBracketed stores bracket provenance alongside keys, normalizing to
-// the same invariant setKeysQuoted uses: nil unless the lengths agree AND at
-// least one key is bracketed. Every Node construction path that has the
-// provenance available funnels through here so the "nil means all-false or
-// unknown" collapse is made in exactly one place.
-func (n *Node) setKeysBracketed(bracketed []bool, closed ...bool) {
-	if len(closed) > 0 {
-		n.BracketedClosed = false
-		if closed[0] {
-			for _, b := range bracketed {
-				if b {
-					n.BracketedClosed = true
-					break
-				}
-			}
-		}
-	}
-	if len(bracketed) != len(n.Keys) {
-		n.KeysBracketed = nil
-		return
-	}
-	for _, b := range bracketed {
-		if b {
-			n.KeysBracketed = append([]bool(nil), bracketed...)
-			return
-		}
-	}
-	n.KeysBracketed = nil
-}
-
-// setKeysQuoted stores quote provenance alongside keys, normalizing to the
-// invariant: nil unless the lengths agree AND at least one key is quoted.
-// Every Node construction path that has provenance available funnels through
-// here so the "nil means all-false or unknown" collapse is made in exactly one
-// place.
-func (n *Node) setKeysQuoted(quoted []bool) {
-	if len(quoted) != len(n.Keys) {
-		n.KeysQuoted = nil
-		return
-	}
-	for _, q := range quoted {
-		if q {
-			n.KeysQuoted = append([]bool(nil), quoted...)
-			return
-		}
-	}
-	n.KeysQuoted = nil
 }
 
 // Name returns the first key of the node.
@@ -750,18 +700,11 @@ func cloneNodes(nodes []*Node) []*Node {
 	result := make([]*Node, len(nodes))
 	for i, n := range nodes {
 		result[i] = &Node{
-			Keys:            append([]string(nil), n.Keys...),
-			KeysQuoted:      append([]bool(nil), n.KeysQuoted...),
-			KeysBracketed:   append([]bool(nil), n.KeysBracketed...),
-			BracketedClosed: n.BracketedClosed,
-			Children:        cloneNodes(n.Children),
-			IsLeaf:          n.IsLeaf,
-			Annotation:      n.Annotation,
-			InheritedFrom:   n.InheritedFrom,
-			// #9862: leaf provenance flows through every clone, including the
-			// #4474 memo store/handout. Deep-copied: clones must never share the
-			// backing array (tag union-adds append). Nil-preserving, so untagged
-			// nodes allocate nothing.
+			Keys:                           append([]string(nil), n.Keys...),
+			Children:                       cloneNodes(n.Children),
+			IsLeaf:                         n.IsLeaf,
+			Annotation:                     n.Annotation,
+			InheritedFrom:                  n.InheritedFrom,
 			fromGroups:                     append([]string(nil), n.fromGroups...),
 			duplicateBlockMergeMarkers9023: append([]string(nil), n.duplicateBlockMergeMarkers9023...),
 			packedTailSite18771:            n.packedTailSite18771,
@@ -770,6 +713,7 @@ func cloneNodes(nodes []*Node) []*Node {
 			Line:                           n.Line,
 			Column:                         n.Column,
 		}
+		result[i].copyKeyProvenance(n)
 	}
 	return result
 }

@@ -150,8 +150,8 @@ func expandFlatRun(children []*Node, container *schemaNode) []*Node {
 				Line:       n.Line,
 				Column:     n.Column,
 			}
-			if n.KeysQuoted != nil && end <= len(n.KeysQuoted) {
-				seg.KeysQuoted = append([]bool(nil), n.KeysQuoted[start:end]...)
+			if len(n.KeysQuoted) == len(n.Keys) {
+				seg.setKeysQuoted(n.KeysQuoted[start:end])
 			}
 			// #12517: bracket provenance is a per-key mask too (#8921), so it
 			// moves with its keys. Without it a `[ ... ]` list cut out of a

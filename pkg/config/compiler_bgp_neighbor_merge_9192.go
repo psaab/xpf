@@ -303,16 +303,17 @@ func splitFusedMultiLeaves14409(body []*Node, schema *schemaNode) []*Node {
 // asking packedBodyChildren to walk them.
 func packedBodyTail14409(rest *Node, schema *schemaNode) []*Node {
 	wrapper := &Node{Keys: []string{"neighbor", "0.0.0.0"}, InheritedFrom: rest.InheritedFrom}
-	wrapper.Keys = append(wrapper.Keys, rest.Keys...)
-	if len(rest.KeysQuoted) == len(rest.Keys) {
-		q := []bool{false, false}
-		q = append(q, rest.KeysQuoted...)
-		wrapper.setKeysQuoted(q)
-	}
-	if len(rest.KeysBracketed) == len(rest.Keys) {
-		b := []bool{false, false}
-		b = append(b, rest.KeysBracketed...)
-		wrapper.setKeysBracketed(b)
+	quoted := keyMask(rest.KeysQuoted, len(rest.Keys))
+	bracketed := keyMask(rest.KeysBracketed, len(rest.Keys))
+	for i, key := range rest.Keys {
+		isQuoted, isBracketed := false, false
+		if quoted != nil {
+			isQuoted = quoted[i]
+		}
+		if bracketed != nil {
+			isBracketed = bracketed[i]
+		}
+		wrapper.appendKey(key, isQuoted, isBracketed)
 	}
 	body := packedBodyChildren(wrapper, schema)
 	if len(body) == 0 {

@@ -255,9 +255,11 @@ func clearAddressProvenance9859(n *Node) {
 }
 func appendAddressMember9859(dst, src *Node, member addressMember9859) {
 	if dst.IsLeaf {
-		dst.Keys = append(dst.Keys, member.value)
-		appendKeyQuoted9627(dst, member.quoted)
-		appendKeyBracketed9859(dst, member.bracketed)
+		dstHadBracketed := hasBracketedKey(dst)
+		dst.appendKey(member.value, member.quoted, member.bracketed)
+		if member.bracketed && src.BracketedClosed && !dstHadBracketed {
+			dst.BracketedClosed = true
+		}
 		return
 	}
 	child := &Node{
@@ -266,31 +268,8 @@ func appendAddressMember9859(dst, src *Node, member addressMember9859) {
 		InheritedFrom: src.InheritedFrom,
 	}
 	child.setKeysQuoted([]bool{member.quoted})
-	if member.bracketed {
-		child.setKeysBracketed([]bool{true})
-	}
+	child.setKeysBracketed([]bool{member.bracketed}, src.BracketedClosed)
 	dst.Children = append(dst.Children, child)
-}
-
-func appendKeyBracketed9859(n *Node, bracketed bool) {
-	if n == nil {
-		return
-	}
-	oldLen := len(n.Keys) - 1
-	if len(n.KeysBracketed) == oldLen {
-		n.KeysBracketed = append(n.KeysBracketed, bracketed)
-		return
-	}
-	if !bracketed {
-		n.KeysBracketed = nil
-		return
-	}
-	mask := make([]bool, len(n.Keys))
-	if len(n.KeysBracketed) > 0 && len(n.KeysBracketed) <= oldLen {
-		copy(mask, n.KeysBracketed)
-	}
-	mask[oldLen] = true
-	n.KeysBracketed = mask
 }
 
 // legacyScalar9859 lists children-bearing schema nodes whose first argument is

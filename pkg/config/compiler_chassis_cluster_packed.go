@@ -148,7 +148,7 @@ func clusterStatementArity(tok string) int { return clusterStatements[tok] }
 // instead of being stolen — the #6665 reservation, applied across the nesting
 // boundary.
 func clusterBodyStatements(cfgNode *Node, skip int) []*Node {
-	stmts := splitClusterKeys(cfgNode.Keys, skip, cfgNode.Line, cfgNode.Column)
+	stmts := splitClusterKeys(cfgNode, skip)
 	// A CHILD can be packed too: `cluster { node 1 reth-count 2; }` is one child
 	// carrying two statements, the shape #6588 undoes at the redundancy-group
 	// level. Split each child's KEYS with the same table, and hand the child's
@@ -168,7 +168,7 @@ func clusterBodyStatements(cfgNode *Node, skip int) []*Node {
 // Annotation and key provenance are preserved — when its keys are already one
 // statement, and otherwise the statements packed onto them.
 func splitPackedClusterChild(c *Node) []*Node {
-	parts := splitClusterKeys(c.Keys, 0, c.Line, c.Column)
+	parts := splitClusterKeys(c, 0)
 	if len(parts) <= 1 {
 		// THE FLAT-SET CHAIN. `set chassis cluster authentication-key A
 		// additional-authentication-key B` is ONE command, and SetPath builds
@@ -203,40 +203,70 @@ func splitPackedClusterChild(c *Node) []*Node {
 	return parts
 }
 
-func splitClusterKeys(keys []string, skip, line, column int) []*Node {
+func splitClusterKeys(src *Node, skip int) []*Node {
+	if src == nil {
+		return nil
+	}
+	keys := src.Keys
+	quoted := keyMask(src.KeysQuoted, len(keys))
+	bracketed := keyMask(src.KeysBracketed, len(keys))
+	closedAt := -1
+	if src.BracketedClosed && bracketed != nil {
+		for i, marked := range bracketed {
+			if marked {
+				closedAt = i
+			}
+		}
+	}
 	var stmts []*Node
 	if len(keys) > skip {
 		var cur *Node
+		appendCurrent := func(index int) {
+			isQuoted, isBracketed := false, false
+			if quoted != nil {
+				isQuoted = quoted[index]
+			}
+			if bracketed != nil {
+				isBracketed = bracketed[index]
+			}
+			cur.appendKey(keys[index], isQuoted, isBracketed)
+			if index == closedAt {
+				cur.setKeysBracketed(cur.KeysBracketed, true)
+			}
+		}
 		pending := 0   // value tokens the open CLUSTER statement must absorb
 		inRG := false  // the open statement is a redundancy-group tail
 		rgPending := 0 // value tokens the open RG statement must absorb
-		for _, tok := range keys[skip:] {
+		for i := skip; i < len(keys); i++ {
+			tok := keys[i]
 			if pending > 0 {
 				pending--
-				cur.Keys = append(cur.Keys, tok)
+				appendCurrent(i)
 				continue
 			}
 			if inRG && tok != redundancyGroupKeyword {
 				if rgPending > 0 {
 					rgPending--
-					cur.Keys = append(cur.Keys, tok)
+					appendCurrent(i)
 					continue
 				}
 				if isRedundancyGroupStatement(tok) {
 					rgPending = redundancyGroupStatementArity(tok)
-					cur.Keys = append(cur.Keys, tok)
+					appendCurrent(i)
 					continue
 				}
 			}
 			if cur == nil || isClusterStatement(tok) {
-				cur = &Node{Keys: []string{tok}, Line: line, Column: column}
+				cur = &Node{Keys: []string{tok}, Line: src.Line, Column: src.Column}
+				cur.setKeysQuoted(maskSlice(quoted, i, i+1))
+				cur.setKeysBracketed(maskSlice(bracketed, i, i+1), i == closedAt)
 				stmts = append(stmts, cur)
 				pending = clusterStatementArity(tok)
 				inRG = tok == redundancyGroupKeyword
 				rgPending = 0
 				continue
 			}
-			cur.Keys = append(cur.Keys, tok)
+			appendCurrent(i)
 		}
 	}
 	return stmts
@@ -336,7 +366,7 @@ func clusterBodyNeedsSplit(cn *Node, skip int) bool {
 		if c == nil {
 			continue
 		}
-		if len(splitClusterKeys(c.Keys, 0, c.Line, c.Column)) > 1 {
+		if len(splitClusterKeys(c, 0)) > 1 {
 			return true
 		}
 		// The flat-set CHAIN needs splitting too, and it is invisible to the
@@ -443,12 +473,8 @@ func promoteChainedClusterLeaf8939(c *Node) []*Node {
 		Line:       c.Line,
 		Column:     c.Column,
 	}
-	if c.KeysQuoted != nil {
-		head.KeysQuoted = append([]bool(nil), c.KeysQuoted...)
-	}
-	if c.KeysBracketed != nil {
-		head.KeysBracketed = append([]bool(nil), c.KeysBracketed...)
-	}
+	head.setKeysQuoted(keyMask(c.KeysQuoted, len(c.Keys)))
+	head.setKeysBracketed(keyMask(c.KeysBracketed, len(c.Keys)), c.BracketedClosed)
 	out := []*Node{head}
 	for _, gc := range c.Children {
 		if gc == nil {

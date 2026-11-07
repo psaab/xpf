@@ -124,7 +124,7 @@ func dhcpRelayV6Nodes9553(fo *Node) []*Node {
 	}
 	var out []*Node
 	if len(fo.Keys) >= 3 && fo.Keys[1] == "dhcp-relay" && fo.Keys[2] == "dhcpv6" {
-		out = append(out, dhcpRelayV6PackedNode9553(fo.Keys[3:]))
+		out = append(out, dhcpRelayV6PackedNode9553(fo, 3))
 	}
 	for _, relay := range fo.FindChildren("dhcp-relay") {
 		if relay == nil {
@@ -133,7 +133,7 @@ func dhcpRelayV6Nodes9553(fo *Node) []*Node {
 		if len(relay.Keys) >= 2 && relay.Keys[1] == "dhcpv6" {
 			family := &Node{Keys: []string{"dhcpv6"}, Children: relay.Children}
 			if len(relay.Keys) > 2 {
-				family = dhcpRelayV6PackedNode9553(relay.Keys[2:])
+				family = dhcpRelayV6PackedNode9553(relay, 2)
 				family.Children = append(family.Children, relay.Children...)
 			}
 			out = append(out, family)
@@ -143,7 +143,7 @@ func dhcpRelayV6Nodes9553(fo *Node) []*Node {
 			if child != nil && child.Name() == "dhcpv6" {
 				family := child
 				if len(child.Keys) > 1 {
-					family = dhcpRelayV6PackedNode9553(child.Keys[1:])
+					family = dhcpRelayV6PackedNode9553(child, 1)
 					family.Children = append(family.Children, child.Children...)
 				}
 				out = append(out, family)
@@ -157,7 +157,8 @@ func dhcpRelayV6Nodes9553(fo *Node) []*Node {
 // Node shape used by the hierarchical compiler. Normal schema-walked input does
 // not need this path, but retaining it prevents old persisted ASTs from being
 // silently ignored after the schema gained the dhcpv6 family node.
-func dhcpRelayV6PackedNode9553(keys []string) *Node {
+func dhcpRelayV6PackedNode9553(src *Node, start int) *Node {
+	keys := src.Keys[start:]
 	family := &Node{Keys: []string{"dhcpv6"}}
 	for i := 0; i < len(keys); {
 		tok := keys[i]
@@ -197,7 +198,8 @@ func dhcpRelayV6PackedNode9553(keys []string) *Node {
 					n.Children = append(n.Children, &Node{Keys: []string{"interface"}, IsLeaf: true})
 					i++
 					if i < len(keys) && !dhcpRelayV6GroupKeyword9553(keys[i]) {
-						n.Children[len(n.Children)-1].Keys = append(n.Children[len(n.Children)-1].Keys, keys[i])
+						n.Children[len(n.Children)-1].appendKey(
+							keys[i], src.KeyQuoted(start+i), src.KeyBracketed(start+i))
 						i++
 					}
 				default:

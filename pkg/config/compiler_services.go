@@ -2072,7 +2072,7 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 		// keeps the whole relay on the forwarding-options Keys when
 		// no admission folds it (defensive, mirrors the v6 packed
 		// path for persisted trees). Synthesize the braced shape.
-		relayNode = dhcpRelayV4PackedNode16580(node.Keys[2:])
+		relayNode = dhcpRelayV4PackedNode16580(node, 2)
 	}
 	if relayNode != nil {
 		if err := compileDHCPRelay(relayNode, fo); err != nil {
@@ -2835,7 +2835,7 @@ func dhcpRelayExpandPacked16580(node *Node) *Node {
 		return node
 	}
 	if len(node.Keys) > 2 {
-		if expanded := dhcpRelayV4PackedNode16580(node.Keys[1:]); len(expanded.Children) > 1 ||
+		if expanded := dhcpRelayV4PackedNode16580(node, 1); len(expanded.Children) > 1 ||
 			(len(expanded.Children) == 1 && len(node.Children) > 0) {
 			out := &Node{Keys: []string{"dhcp-relay"}}
 			out.Children = append(out.Children, expanded.Children...)
@@ -2860,7 +2860,7 @@ func dhcpRelayExpandPacked16580(node *Node) *Node {
 		if ch != nil && len(ch.Children) == 0 && len(ch.Keys) > 2 {
 			switch ch.Keys[0] {
 			case "active-server-group", "server-group", "group":
-				out.Children = append(out.Children, dhcpRelayV4PackedNode16580(ch.Keys).Children...)
+				out.Children = append(out.Children, dhcpRelayV4PackedNode16580(ch, 0).Children...)
 				continue
 			}
 		}
@@ -2877,7 +2877,8 @@ func dhcpRelayExpandPacked16580(node *Node) *Node {
 // existing inline-keys reader handles them), and unknown tokens
 // stay visible as children so no remainder is silently dropped
 // beyond what the packed braced spelling itself would lose.
-func dhcpRelayV4PackedNode16580(keys []string) *Node {
+func dhcpRelayV4PackedNode16580(src *Node, offset int) *Node {
+	keys := src.Keys[offset:]
 	relay := &Node{Keys: []string{"dhcp-relay"}}
 	for i := 0; i < len(keys); {
 		tok := keys[i]
@@ -2903,11 +2904,13 @@ func dhcpRelayV4PackedNode16580(keys []string) *Node {
 			}
 			n := &Node{Keys: []string{"group", keys[i+1]}}
 			i += 2
-			start := i
+			valuesStart := i
 			for i < len(keys) && keys[i] != "server-group" && keys[i] != "group" {
 				i++
 			}
-			n.Keys = append(n.Keys, keys[start:i]...)
+			for j := valuesStart; j < i; j++ {
+				n.appendKey(keys[j], src.KeyQuoted(offset+j), src.KeyBracketed(offset+j))
+			}
 			relay.Children = append(relay.Children, n)
 		case "active-server-group":
 			if i+1 < len(keys) {

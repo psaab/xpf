@@ -105,38 +105,19 @@ func stripInactiveNodes(nodes []*Node) []*Node {
 			continue
 		}
 		clone := &Node{
-			Keys: append([]string(nil), n.Keys...),
-			// #6673: WithoutInactive runs on the cloned tree BEFORE compile, so
-			// this is the copy the compiler reads. Dropping the per-key quote
-			// provenance here would blind every reader downstream of it.
-			KeysQuoted: append([]bool(nil), n.KeysQuoted...),
-			// #6668: same reasoning for the bracket provenance — this clone is
-			// what SchemaValidate walks and what a re-render of the stripped
-			// tree would flatten, so dropping it here loses the one bit that
-			// says where a container's key group ends.
-			KeysBracketed: append([]bool(nil), n.KeysBracketed...),
-			// #15761: BracketedClosed is the close-proven counterpart of
-			// KeysBracketed above. cloneNodes copies it; dropping it here made
-			// closed routing-policy `from protocol [ ... ]` lists read as
-			// unclosed after any unrelated inactive strip.
-			BracketedClosed: n.BracketedClosed,
-			Children:        stripInactiveNodes(n.Children),
-			IsLeaf:          n.IsLeaf,
-			Annotation:      n.Annotation,
-			InheritedFrom:   n.InheritedFrom,
-			// #9862: the strip runs before expansion today, so this is latent — but
-			// dropping it here would repeat the #6673 provenance-drop class the
-			// moment any flow expands first and strips second.
-			fromGroups: append([]string(nil), n.fromGroups...),
-			// #15761: keep this clone field-for-field in sync with cloneNodes
-			// (ast.go) so per-member and duplicate-block provenance survive a
-			// strip that runs after expansion in any future flow.
+			Keys:                           append([]string(nil), n.Keys...),
+			Children:                       stripInactiveNodes(n.Children),
+			IsLeaf:                         n.IsLeaf,
+			Annotation:                     n.Annotation,
+			InheritedFrom:                  n.InheritedFrom,
+			fromGroups:                     append([]string(nil), n.fromGroups...),
 			duplicateBlockMergeMarkers9023: append([]string(nil), n.duplicateBlockMergeMarkers9023...),
 			leafMemberGroups9862:           cloneLeafMemberGroups9862(n.leafMemberGroups9862),
 			Inactive:                       false,
 			Line:                           n.Line,
 			Column:                         n.Column,
 		}
+		clone.copyKeyProvenance(n)
 		result = append(result, clone)
 	}
 	return result

@@ -807,23 +807,13 @@ func redactJoinedTail14413(n *Node, tailStart int) {
 		// Whole-payload masks begin with `#`, so the config lexer treats the
 		// placeholder itself as a comment. Preserve it as one AST key rather
 		// than dropping the replacement with the empty token list.
-		n.Keys = append(n.Keys[:tailStart], redacted)
-		n.KeysQuoted = nil
-		n.KeysBracketed = nil
+		n.replaceKeys(append(n.Keys[:tailStart], redacted), nil, nil, false)
 		return
 	}
 	keys := make([]string, 0, tailStart+len(tokens))
 	keys = append(keys, n.Keys[:tailStart]...)
 	keys = append(keys, tokens...)
-	n.Keys = keys
-	if len(n.KeysQuoted) == len(n.Keys) {
-		// Stale provenance no longer describes the rewritten keys; drop it
-		// rather than claim quotes that were never authored.
-		n.KeysQuoted = nil
-	}
-	if len(n.KeysBracketed) == len(n.Keys) {
-		n.KeysBracketed = nil
-	}
+	n.replaceKeys(keys, nil, nil, false)
 }
 
 // applyRedactedJoin14413 rewrites a block child's Keys to the redacted
@@ -831,14 +821,10 @@ func redactJoinedTail14413(n *Node, tailStart int) {
 func applyRedactedJoin14413(child *Node, redacted string) {
 	tokens, _ := lexConfigMutationLine9938(redacted)
 	if len(tokens) == 0 {
-		child.Keys = []string{redacted}
-		child.KeysQuoted = nil
-		child.KeysBracketed = nil
+		child.replaceKeys([]string{redacted}, nil, nil, false)
 		return
 	}
-	child.Keys = tokens
-	child.KeysQuoted = nil
-	child.KeysBracketed = nil
+	child.replaceKeys(tokens, nil, nil, false)
 }
 
 // fingerprintEmbeddedCommands14413 is redactEmbeddedCommands14413 with
@@ -889,17 +875,13 @@ func fingerprintEmbeddedCommands14413(n *Node, full, base []string) {
 		if len(tokens) == 0 {
 			// See redactJoinedTail14413: whole-payload masks lex as comments,
 			// but still need to replace the stored joined tail.
-			n.Keys = append(n.Keys[:tailStart], redacted)
-			n.KeysQuoted = nil
-			n.KeysBracketed = nil
+			n.replaceKeys(append(n.Keys[:tailStart], redacted), nil, nil, false)
 			return
 		}
 		keys := make([]string, 0, tailStart+len(tokens))
 		keys = append(keys, n.Keys[:tailStart]...)
 		keys = append(keys, tokens...)
-		n.Keys = keys
-		n.KeysQuoted = nil
-		n.KeysBracketed = nil
+		n.replaceKeys(keys, nil, nil, false)
 	}
 }
 

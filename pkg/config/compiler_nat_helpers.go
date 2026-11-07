@@ -370,7 +370,7 @@ func natRuleSetChildren(rsNode *Node, natKind string) []*Node {
 		}
 		if len(tail) == 2 {
 			base := len(rsNode.Keys) - len(tail)
-			if base+1 < len(rsNode.Keys) && base+1 < len(rsNode.KeysBracketed) && rsNode.KeysBracketed[base+1] {
+			if base+1 < len(rsNode.Keys) && rsNode.KeyBracketed(base+1) {
 				out = append(out, &Node{Keys: []string{clause, tail[1], ""}, InheritedFrom: rsNode.InheritedFrom})
 				tail = nil
 				continue

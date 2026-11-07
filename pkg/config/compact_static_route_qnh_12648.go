@@ -71,12 +71,14 @@ func splitPackedRouteQualifiedNextHop(route *Node) int {
 			if qnh < 2 || qnh+1 >= len(child.Keys) {
 				continue
 			}
-			nextHop.Keys = append(nextHop.Keys, child.Keys[qnh:]...)
-			nextHop.setKeysQuoted(append(nextHop.KeysQuoted, maskSlice8921(child.KeysQuoted, qnh, len(child.Keys))...))
-			nextHop.setKeysBracketed(append(nextHop.KeysBracketed, maskSlice8921(child.KeysBracketed, qnh, len(child.Keys))...), child.BracketedClosed)
-			child.Keys = append([]string(nil), child.Keys[:qnh]...)
-			child.setKeysQuoted(maskSlice8921(child.KeysQuoted, 0, qnh))
-			child.setKeysBracketed(maskSlice8921(child.KeysBracketed, 0, qnh), child.BracketedClosed)
+			for j := qnh; j < len(child.Keys); j++ {
+				nextHop.appendKey(child.Keys[j], child.KeyQuoted(j), child.KeyBracketed(j))
+			}
+			nextHop.setKeysBracketed(nextHop.KeysBracketed, child.BracketedClosed)
+			child.replaceKeys(child.Keys[:qnh],
+				maskSlice(keyMask(child.KeysQuoted, len(child.Keys)), 0, qnh),
+				maskSlice(keyMask(child.KeysBracketed, len(child.Keys)), 0, qnh),
+				child.BracketedClosed)
 			child.IsLeaf = len(child.Children) == 0
 		}
 		qnh := -1
@@ -96,13 +98,9 @@ func splitPackedRouteQualifiedNextHop(route *Node) int {
 			continue
 		}
 
-		qualified := &Node{
-			Keys:   append([]string(nil), nextHop.Keys[qnh:qnh+2]...),
-			IsLeaf: true,
-			Line:   nextHop.Line,
-			Column: nextHop.Column,
-		}
-		copyPackedRouteKeyMasks(nextHop, qnh, qnh+2, qualified)
+		qualified := nextHop.keySpan(qnh, qnh+2)
+		qualified.Line = nextHop.Line
+		qualified.Column = nextHop.Column
 		var modifiers []*Node
 		valid := true
 		for j := qnh + 2; j < len(nextHop.Keys); {
@@ -113,13 +111,9 @@ func splitPackedRouteQualifiedNextHop(route *Node) int {
 			}
 			switch keyword {
 			case "interface", "preference", "metric":
-				modifier := &Node{
-					Keys:   append([]string(nil), nextHop.Keys[j:j+2]...),
-					IsLeaf: true,
-					Line:   nextHop.Line,
-					Column: nextHop.Column,
-				}
-				copyPackedRouteKeyMasks(nextHop, j, j+2, modifier)
+				modifier := nextHop.keySpan(j, j+2)
+				modifier.Line = nextHop.Line
+				modifier.Column = nextHop.Column
 				modifiers = append(modifiers, modifier)
 				j += 2
 			default:
@@ -135,9 +129,10 @@ func splitPackedRouteQualifiedNextHop(route *Node) int {
 		qualified.Children = modifiers
 		qualified.IsLeaf = len(modifiers) == 0
 
-		nextHop.Keys = append([]string(nil), nextHop.Keys[:qnh]...)
-		nextHop.setKeysQuoted(maskSlice8921(nextHop.KeysQuoted, 0, qnh))
-		nextHop.setKeysBracketed(maskSlice8921(nextHop.KeysBracketed, 0, qnh), nextHop.BracketedClosed)
+		nextHop.replaceKeys(nextHop.Keys[:qnh],
+			maskSlice(keyMask(nextHop.KeysQuoted, len(nextHop.Keys)), 0, qnh),
+			maskSlice(keyMask(nextHop.KeysBracketed, len(nextHop.Keys)), 0, qnh),
+			nextHop.BracketedClosed)
 		nextHop.IsLeaf = len(nextHop.Children) == 0
 
 		children := make([]*Node, 0, len(route.Children)+1)
@@ -149,9 +144,4 @@ func splitPackedRouteQualifiedNextHop(route *Node) int {
 		i++
 	}
 	return changed
-}
-
-func copyPackedRouteKeyMasks(source *Node, start, end int, dest *Node) {
-	dest.setKeysQuoted(maskSlice8921(source.KeysQuoted, start, end))
-	dest.setKeysBracketed(maskSlice8921(source.KeysBracketed, start, end), source.BracketedClosed)
 }

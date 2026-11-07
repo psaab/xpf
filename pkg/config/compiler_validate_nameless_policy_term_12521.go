@@ -144,39 +144,29 @@ func unpackPolicyScanNode12521(node *Node, ancestors []string) {
 	}
 	children := node.Children
 	isLeaf := node.IsLeaf
-	quoted := node.KeysQuoted
-	bracketed := node.KeysBracketed
+	quoted := keyMask(node.KeysQuoted, len(keys))
+	bracketed := keyMask(node.KeysBracketed, len(keys))
 	var next *Node
 	if splitEnd < len(keys) {
 		segment := *node
-		segment.Keys = keys[splitEnd:]
-		if len(quoted) == len(keys) {
-			segment.KeysQuoted = quoted[splitEnd:]
-		} else {
-			segment.KeysQuoted = nil
-		}
-		if len(bracketed) == len(keys) {
-			segment.KeysBracketed = bracketed[splitEnd:]
-		} else {
-			segment.KeysBracketed = nil
-		}
+		segment.replaceKeys(
+			keys[splitEnd:],
+			maskSlice(quoted, splitEnd, len(keys)),
+			maskSlice(bracketed, splitEnd, len(keys)),
+			node.BracketedClosed,
+		)
 		segment.Children = children
 		segment.IsLeaf = isLeaf
 		next = &segment
 	}
 	for i := splitEnd - 1; i >= 1; i-- {
 		segment := *node
-		segment.Keys = keys[i : i+1]
-		if len(quoted) == len(keys) {
-			segment.KeysQuoted = quoted[i : i+1]
-		} else {
-			segment.KeysQuoted = nil
-		}
-		if len(bracketed) == len(keys) {
-			segment.KeysBracketed = bracketed[i : i+1]
-		} else {
-			segment.KeysBracketed = nil
-		}
+		segment.replaceKeys(
+			keys[i:i+1],
+			maskSlice(quoted, i, i+1),
+			maskSlice(bracketed, i, i+1),
+			node.BracketedClosed,
+		)
 		if next == nil {
 			segment.Children = children
 			segment.IsLeaf = isLeaf
@@ -186,17 +176,12 @@ func unpackPolicyScanNode12521(node *Node, ancestors []string) {
 		}
 		next = &segment
 	}
-	node.Keys = keys[:1]
-	if len(quoted) == len(keys) {
-		node.KeysQuoted = quoted[:1]
-	} else {
-		node.KeysQuoted = nil
-	}
-	if len(bracketed) == len(keys) {
-		node.KeysBracketed = bracketed[:1]
-	} else {
-		node.KeysBracketed = nil
-	}
+	node.replaceKeys(
+		keys[:1],
+		maskSlice(quoted, 0, 1),
+		maskSlice(bracketed, 0, 1),
+		node.BracketedClosed,
+	)
 	node.Children = []*Node{next}
 	node.IsLeaf = false
 }

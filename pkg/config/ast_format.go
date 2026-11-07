@@ -544,15 +544,8 @@ func (w *formatSetLineWalker) walk(nodes []*Node) {
 				if len(child.Keys) == 0 {
 					continue
 				}
-				firstChildKey := *child
-				firstChildKey.Keys = firstChildKey.Keys[:1]
-				if len(firstChildKey.KeysQuoted) > 0 {
-					firstChildKey.KeysQuoted = firstChildKey.KeysQuoted[:1]
-				}
-				if len(firstChildKey.KeysBracketed) > 0 {
-					firstChildKey.KeysBracketed = firstChildKey.KeysBracketed[:1]
-				}
-				w.appendNodeKeys(&firstChildKey)
+				firstChildKey := child.keySpan(0, 1)
+				w.appendNodeKeys(firstChildKey)
 				w.emit("deactivate", w.path, w.pathQuote, w.pathGroup, "", -1)
 				w.path = w.path[:baseLen+len(n.Keys)]
 				w.pathQuote = w.pathQuote[:baseLen+len(n.Keys)]

@@ -285,30 +285,18 @@ func mergeAddressBookGroupInto14424(dst *[]*Node, s *Node, ancestorPath [][]stri
 		}
 		var body []*Node
 		if len(s.Keys) >= 3 && s.Keys[2] == "description" {
-			desc := &Node{Keys: append([]string(nil), s.Keys[2:]...), IsLeaf: true, InheritedFrom: s.InheritedFrom}
-			if len(s.KeysQuoted) == len(s.Keys) {
-				desc.KeysQuoted = append([]bool(nil), s.KeysQuoted[2:]...)
-			}
-			if len(s.KeysBracketed) == len(s.Keys) {
-				desc.KeysBracketed = append([]bool(nil), s.KeysBracketed[2:]...)
-			}
+			desc := s.keySpan(2, len(s.Keys))
 			body = []*Node{desc}
 		} else if len(s.Keys) >= 3 {
-			val := &Node{Keys: []string{s.Keys[2]}, IsLeaf: true, InheritedFrom: s.InheritedFrom}
-			if len(s.KeysQuoted) == len(s.Keys) {
-				val.KeysQuoted = []bool{s.KeysQuoted[2]}
-			}
+			val := s.keySpan(2, 3)
 			body = []*Node{val}
 			// Preserve any trailing tokens as inert trailing content on
 			// the value child so strict trailing-token gates still see
 			// them (mergeAddressNode reads leaf prefix children only,
 			// so extra keys on a 1-key child are ignored there — keep
 			// them on the child Keys for gate visibility).
-			if len(s.Keys) > 3 {
-				val.Keys = append(val.Keys, s.Keys[3:]...)
-				if len(s.KeysQuoted) == len(s.Keys) {
-					val.KeysQuoted = append(val.KeysQuoted, s.KeysQuoted[3:]...)
-				}
+			for i := 3; i < len(s.Keys); i++ {
+				val.appendKey(s.Keys[i], s.KeyQuoted(i), s.KeyBracketed(i))
 			}
 		}
 		if len(body) > 0 {
@@ -332,13 +320,7 @@ func mergeAddressBookGroupInto14424(dst *[]*Node, s *Node, ancestorPath [][]stri
 		if len(peer.Keys) >= 3 && peer.Keys[2] == "description" {
 			return true, nil // both descriptions: inline wins
 		}
-		peer.Keys = append(peer.Keys, s.Keys[2:]...)
-		if len(s.KeysQuoted) == len(s.Keys) {
-			for len(peer.KeysQuoted) < len(peer.Keys) {
-				peer.KeysQuoted = append(peer.KeysQuoted, false)
-			}
-			copy(peer.KeysQuoted[len(peer.KeysQuoted)-(len(s.Keys)-2):], s.KeysQuoted[2:])
-		}
+		appendAddressBookKeyTail14424(peer, s, 2)
 		return true, nil
 	}
 	// Group prefix (or unsupported form) beside inline leaf.
@@ -347,26 +329,26 @@ func mergeAddressBookGroupInto14424(dst *[]*Node, s *Node, ancestorPath [][]stri
 			// Inline description-only leaf: adopt group prefix after the
 			// description text — mergeAddressNode's packed-description
 			// arm reads Keys[4] as the prefix.
-			peer.Keys = append(peer.Keys, s.Keys[2:]...)
-			if len(s.KeysQuoted) == len(s.Keys) {
-				for len(peer.KeysQuoted) < len(peer.Keys) {
-					peer.KeysQuoted = append(peer.KeysQuoted, false)
-				}
-				copy(peer.KeysQuoted[len(peer.KeysQuoted)-(len(s.Keys)-2):], s.KeysQuoted[2:])
-			}
+			appendAddressBookKeyTail14424(peer, s, 2)
 		}
 		// else inline already carries a value: inline wins.
 		return true, nil
 	}
 	// Inline bare `address A;` (no value): adopt the group tail.
-	peer.Keys = append(peer.Keys, s.Keys[2:]...)
-	if len(s.KeysQuoted) == len(s.Keys) {
-		for len(peer.KeysQuoted) < len(peer.Keys) {
-			peer.KeysQuoted = append(peer.KeysQuoted, false)
-		}
-		copy(peer.KeysQuoted[len(peer.KeysQuoted)-(len(s.Keys)-2):], s.KeysQuoted[2:])
-	}
+	appendAddressBookKeyTail14424(peer, s, 2)
 	return true, nil
+}
+
+func appendAddressBookKeyTail14424(dst, src *Node, start int) {
+	hadBracketed := hasBracketedKey(dst)
+	for i := start; i < len(src.Keys); i++ {
+		bracketed := src.KeyBracketed(i)
+		dst.appendKey(src.Keys[i], src.KeyQuoted(i), bracketed)
+		if bracketed && src.BracketedClosed && !hadBracketed {
+			dst.setKeysBracketed(dst.KeysBracketed, true)
+		}
+		hadBracketed = hadBracketed || bracketed
+	}
 }
 
 func isBarePrefixLeaf14424(n *Node) bool {
@@ -396,33 +378,17 @@ func promoteAddressLeaf14424(peer *Node) {
 	var children []*Node
 	if len(old) >= 3 {
 		if old[2] == "description" {
-			desc := &Node{Keys: append([]string(nil), old[2:]...), IsLeaf: true, InheritedFrom: peer.InheritedFrom}
-			if len(peer.KeysQuoted) == len(old) {
-				desc.KeysQuoted = append([]bool(nil), peer.KeysQuoted[2:]...)
-			}
+			desc := peer.keySpan(2, len(old))
 			children = append(children, desc)
 		} else {
-			val := &Node{Keys: append([]string(nil), old[2:]...), IsLeaf: true, InheritedFrom: peer.InheritedFrom}
-			if len(peer.KeysQuoted) == len(old) {
-				val.KeysQuoted = append([]bool(nil), peer.KeysQuoted[2:]...)
-			}
-			if len(peer.KeysBracketed) == len(old) {
-				val.KeysBracketed = append([]bool(nil), peer.KeysBracketed[2:]...)
-			}
+			val := peer.keySpan(2, len(old))
 			children = append(children, val)
 		}
 	}
-	peer.Keys = append([]string(nil), old[:2]...)
-	if len(peer.KeysQuoted) == len(old) {
-		peer.KeysQuoted = append([]bool(nil), peer.KeysQuoted[:2]...)
-	} else {
-		peer.KeysQuoted = nil
-	}
-	if len(peer.KeysBracketed) == len(old) {
-		peer.KeysBracketed = append([]bool(nil), peer.KeysBracketed[:2]...)
-	} else {
-		peer.KeysBracketed = nil
-	}
+	peer.replaceKeys(old[:2],
+		maskSlice(keyMask(peer.KeysQuoted, len(old)), 0, 2),
+		maskSlice(keyMask(peer.KeysBracketed, len(old)), 0, 2),
+		peer.BracketedClosed)
 	peer.Children = children
 	peer.IsLeaf = false
 }

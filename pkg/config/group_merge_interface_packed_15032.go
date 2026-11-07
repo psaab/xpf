@@ -51,16 +51,11 @@ func promoteInterfacePackedLeaf15032(d *Node) bool {
 	if len(body) == 0 || sameNodes9855(body, d.Children) {
 		return false
 	}
-	name := d.Keys[0]
-	quoted := d.KeysQuoted
-	bracketed := d.KeysBracketed
-	d.Keys = []string{name}
-	if len(quoted) > 0 {
-		d.setKeysQuoted(quoted[:1])
-	}
-	if len(bracketed) > 0 {
-		d.setKeysBracketed(bracketed[:1], d.BracketedClosed)
-	}
+	keys := d.Keys
+	d.replaceKeys(keys[:1],
+		maskSlice(keyMask(d.KeysQuoted, len(keys)), 0, 1),
+		maskSlice(keyMask(d.KeysBracketed, len(keys)), 0, 1),
+		d.BracketedClosed)
 	d.Children = body
 	d.IsLeaf = false
 	return true

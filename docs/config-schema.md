@@ -5079,6 +5079,7 @@ carried STRUCTURALLY instead:
 | Layer | Carries the bit |
 |---|---|
 | `Node.KeysQuoted []bool` (`ast.go`) | per-key provenance; `nil` when nothing is quoted, so the persisted JSON is byte-identical for the majority of nodes |
+| `Node.KeysBracketed []bool` / `BracketedClosed` (`ast.go`) | per-key list membership plus whether the source key span closed; nil when no key is bracketed, retaining legacy JSON shape |
 | `Parser.parseKeys` → `parseStatement` (`parser.go`) | hierarchical spelling; `parseKeys` already returned the token KINDS for the `inactive:` marker (#4348) |
 | `ParseSetVerbGrouped` → `ConfigTree.SetPathQuotedGrouped` (`parser.go`, `ast_edit.go`) | flat-set spelling; `Store.SetFromInputAs` / `applyEditLine` call these (unified on the grouped pair on #9881; the quote half rides along unchanged), so CLI, gRPC and REST all carry it |
 | `keyNeedsAuthoredQuote` (`ast.go`) | re-emits the authored quote on a NON-TERMINAL key so a serialize/re-parse cycle (HA config sync, `display set` replay, load merge, archive) does not launder it away |
@@ -5092,6 +5093,10 @@ the fail-OPEN direction and assuming all-quoted would split
 an upgrade. The fallback is not a second guess: for a group that genuinely has no
 quoted token the two rules AGREE, since a bare word can be neither empty nor
 space-bearing.
+
+Both per-key accessors fail closed when a provenance mask is misaligned with
+`len(Keys)`: `KeyQuoted(i)` and `KeyBracketed(i)` return `false` rather than
+answering from a stale prefix.
 
 Serialization is deliberately NOT "preserve every authored quote", which would
 render `description foo` as `description "foo"` in every `show configuration`.

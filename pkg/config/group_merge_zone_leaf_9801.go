@@ -73,17 +73,10 @@ func promoteZoneMacroLeaf13112(d *Node) {
 	if !zoneLeafHasApplyMacroTail13112(d) {
 		return
 	}
-	d.Keys = d.Keys[:2]
-	if len(d.KeysQuoted) == 4 {
-		d.setKeysQuoted(d.KeysQuoted[:2])
-	} else {
-		d.setKeysQuoted(nil)
-	}
-	if len(d.KeysBracketed) == 4 {
-		d.setKeysBracketed(d.KeysBracketed[:2])
-	} else {
-		d.setKeysBracketed(nil)
-	}
+	d.replaceKeys(d.Keys[:2],
+		maskSlice(keyMask(d.KeysQuoted, len(d.Keys)), 0, 2),
+		maskSlice(keyMask(d.KeysBracketed, len(d.Keys)), 0, 2),
+		d.BracketedClosed)
 }
 
 // zoneLeafTakesWildcard9801 reports whether a wildcard group source may merge

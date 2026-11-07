@@ -172,9 +172,7 @@ func mergeApplicationTermNodes14434(dst, src *Node) bool {
 		return false
 	}
 	child := dst.Children[0]
-	child.Keys = append([]string(nil), synthDst.Keys[2:]...)
-	child.setKeysQuoted(nil)
-	child.setKeysBracketed(nil)
+	child.replaceKeys(synthDst.Keys[2:], nil, nil, child.BracketedClosed)
 	return true
 }
 
@@ -330,12 +328,13 @@ func mergeApplicationTermLeaves14434(dst, src *Node) bool {
 		}
 		srcIdx += width
 	}
-	dst.Keys = merged
+	var quoted, bracketed []bool
 	if hasQ {
-		dst.setKeysQuoted(mergedQuoted)
+		quoted = mergedQuoted
 	}
 	if hasB {
-		dst.setKeysBracketed(mergedBracketed)
+		bracketed = mergedBracketed
 	}
+	dst.replaceKeys(merged, quoted, bracketed, dst.BracketedClosed)
 	return true
 }

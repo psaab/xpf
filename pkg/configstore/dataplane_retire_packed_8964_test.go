@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -91,6 +92,30 @@ func TestRetiredRewriteRemovesRatherThanBlanks8964(t *testing.T) {
 	if !strings.Contains(renderTree8964(tree), "host-name") {
 		t.Errorf("the rewrite removed a sibling statement as well: %s (#8964)",
 			renderTree8964(tree))
+	}
+}
+func TestRetiredPackedTailPreservesAlignedKeyProvenance17263(t *testing.T) {
+	system := &config.Node{
+		Keys:            []string{"system", "dataplane-type", "ebpf", "host-name", "fw1"},
+		KeysQuoted:      []bool{false, false, false, false, true},
+		KeysBracketed:   []bool{false, true, true, true, true},
+		BracketedClosed: true,
+		IsLeaf:          true,
+	}
+	if got := rewriteRetiredPackedTail(system, LoadCaller); got != 1 {
+		t.Fatalf("rewrites = %d, want 1", got)
+	}
+	if want := []string{"system", "host-name", "fw1"}; !reflect.DeepEqual(system.Keys, want) {
+		t.Fatalf("rewritten keys = %v, want %v", system.Keys, want)
+	}
+	if want := []bool{false, false, true}; !reflect.DeepEqual(system.KeysQuoted, want) {
+		t.Fatalf("rewritten KeysQuoted = %v, want %v", system.KeysQuoted, want)
+	}
+	if want := []bool{false, true, true}; !reflect.DeepEqual(system.KeysBracketed, want) {
+		t.Fatalf("rewritten KeysBracketed = %v, want %v", system.KeysBracketed, want)
+	}
+	if !system.BracketedClosed {
+		t.Fatal("rewritten packed node lost BracketedClosed")
 	}
 }
 

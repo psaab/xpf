@@ -67,8 +67,8 @@ func normalizeElidedRoutingInstance9620(node *Node, instance *schemaNode) int {
 	if n < 2 || instance == nil || isApplyStatementNode(node) {
 		return 0
 	}
-	quoted := keyMask8921(node.KeysQuoted, n)
-	bracketed := keyMask8921(node.KeysBracketed, n)
+	quoted := keyMask(node.KeysQuoted, n)
+	bracketed := keyMask(node.KeysBracketed, n)
 	bracketedClosed := node.BracketedClosed
 	boundary := func(tok string) bool {
 		return instance.children[tok] != nil || routingInstanceApplyMetaKeyword9323(tok)
@@ -105,14 +105,9 @@ func normalizeElidedRoutingInstance9620(node *Node, instance *schemaNode) int {
 	body := node.Children
 	children := make([]*Node, 0, len(spans)+len(body))
 	for k, s := range spans {
-		c := &Node{
-			Keys:   append([]string(nil), node.Keys[s.from:s.to]...),
-			IsLeaf: true,
-			Line:   node.Line,
-			Column: node.Column,
-		}
-		c.setKeysQuoted(maskSlice8921(quoted, s.from, s.to))
-		c.setKeysBracketed(maskSlice8921(bracketed, s.from, s.to), bracketedClosed)
+		c := node.keySpan(s.from, s.to)
+		c.Line = node.Line
+		c.Column = node.Column
 		if k == len(spans)-1 && ownsBody && len(body) > 0 {
 			c.Children = body
 			c.IsLeaf = false
@@ -122,9 +117,8 @@ func normalizeElidedRoutingInstance9620(node *Node, instance *schemaNode) int {
 	if !ownsBody {
 		children = append(children, body...)
 	}
-	node.Keys = node.Keys[:1:1]
-	node.setKeysQuoted(maskSlice8921(quoted, 0, 1))
-	node.setKeysBracketed(maskSlice8921(bracketed, 0, 1), bracketedClosed)
+	node.replaceKeys(node.Keys[:1], maskSlice(quoted, 0, 1),
+		maskSlice(bracketed, 0, 1), bracketedClosed)
 	node.Children = children
 	node.IsLeaf = false
 	return 1

@@ -211,7 +211,7 @@ func trafficSelectorFromRunSegment16759(seg *Node) (string, *Node) {
 			// otherwise drop it (no leaf owns it).
 			if n := len(body.Children); n > 0 {
 				last := body.Children[n-1]
-				last.Keys = append(last.Keys, kw)
+				last.appendKey(kw, seg.KeyQuoted(i+2), seg.KeyBracketed(i+2))
 				last.IsLeaf = len(last.Children) == 0
 			}
 			i++
@@ -220,7 +220,7 @@ func trafficSelectorFromRunSegment16759(seg *Node) (string, *Node) {
 		leaf := &Node{Keys: []string{kw}, IsLeaf: true}
 		i++
 		if i < len(rest) {
-			leaf.Keys = append(leaf.Keys, rest[i])
+			leaf.appendKey(rest[i], seg.KeyQuoted(i+2), seg.KeyBracketed(i+2))
 			i++
 		}
 		body.Children = append(body.Children, leaf)

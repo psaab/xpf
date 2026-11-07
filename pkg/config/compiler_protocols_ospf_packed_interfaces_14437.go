@@ -96,31 +96,11 @@ func splitOnePackedInterfaceRun14437(n *Node) []*Node {
 		return nil
 	}
 	head := packedInterfaceFragment14437(n, 0, len(n.Keys))
-	head.Keys = append(head.Keys, child.Keys[:heads[0]]...)
-	if len(child.KeysQuoted) == len(child.Keys) {
-		// Rebuild the combined mask: parent span then child's head segment.
-		quoted := make([]bool, 0, len(head.Keys))
-		if len(n.KeysQuoted) == len(n.Keys) {
-			quoted = append(quoted, n.KeysQuoted...)
-		} else {
-			quoted = append(quoted, make([]bool, len(n.Keys))...)
-		}
-		quoted = append(quoted, child.KeysQuoted[:heads[0]]...)
-		if len(quoted) == len(head.Keys) {
-			head.setKeysQuoted(quoted)
-		}
+	for i, key := range child.Keys[:heads[0]] {
+		head.appendKey(key, child.KeyQuoted(i), child.KeyBracketed(i))
 	}
 	if len(child.KeysBracketed) == len(child.Keys) {
-		bracketed := make([]bool, 0, len(head.Keys))
-		if len(n.KeysBracketed) == len(n.Keys) {
-			bracketed = append(bracketed, n.KeysBracketed...)
-		} else {
-			bracketed = append(bracketed, make([]bool, len(n.Keys))...)
-		}
-		bracketed = append(bracketed, child.KeysBracketed[:heads[0]]...)
-		if len(bracketed) == len(head.Keys) {
-			head.setKeysBracketed(bracketed, n.BracketedClosed || child.BracketedClosed)
-		}
+		head.setKeysBracketed(head.KeysBracketed, n.BracketedClosed || child.BracketedClosed)
 	}
 	head.Children = nil
 	frags := []*Node{head}

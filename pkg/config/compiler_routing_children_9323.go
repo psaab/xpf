@@ -281,8 +281,8 @@ func routingInstancePropertyNodes9323(inst *Node) []*Node {
 	if len(inst.Keys) >= 2 {
 		return []*Node{{
 			Keys:          append([]string(nil), inst.Keys[1:]...),
-			KeysQuoted:    maskSlice8921(inst.KeysQuoted, 1, len(inst.Keys)),
-			KeysBracketed: maskSlice8921(inst.KeysBracketed, 1, len(inst.Keys)),
+			KeysQuoted:    maskSlice(inst.KeysQuoted, 1, len(inst.Keys)),
+			KeysBracketed: maskSlice(inst.KeysBracketed, 1, len(inst.Keys)),
 			Children:      inst.Children,
 			IsLeaf:        inst.IsLeaf,
 		}}

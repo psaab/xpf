@@ -84,17 +84,10 @@ func promotePackedLeafPeer14418(leafSchema *schemaNode, peer *Node) bool {
 		return false
 	}
 	oldKeys := peer.Keys
-	peer.Keys = append([]string(nil), oldKeys[:span]...)
-	if len(peer.KeysQuoted) == len(oldKeys) {
-		peer.KeysQuoted = append([]bool(nil), peer.KeysQuoted[:span]...)
-	} else if len(peer.KeysQuoted) != 0 {
-		peer.KeysQuoted = nil
-	}
-	if len(peer.KeysBracketed) == len(oldKeys) {
-		peer.KeysBracketed = append([]bool(nil), peer.KeysBracketed[:span]...)
-	} else if len(peer.KeysBracketed) != 0 {
-		peer.KeysBracketed = nil
-	}
+	peer.replaceKeys(oldKeys[:span],
+		maskSlice(keyMask(peer.KeysQuoted, len(oldKeys)), 0, span),
+		maskSlice(keyMask(peer.KeysBracketed, len(oldKeys)), 0, span),
+		peer.BracketedClosed)
 	peer.Children = body
 	peer.IsLeaf = false
 	markSynthTerminals9855(peer.Children)
@@ -219,8 +212,6 @@ func dropConflictingTerminalThen14418(peer *Node, children []*Node) []*Node {
 			}
 			clone := *c
 			clone.Children = kept
-			clone.KeysQuoted = nil
-			clone.KeysBracketed = nil
 			out = append(out, &clone)
 			changed = true
 			continue

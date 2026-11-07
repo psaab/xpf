@@ -75,7 +75,7 @@ func policyTermBody12537(leafSchema *schemaNode, term *Node, inline bool) []*Nod
 		if keys[i] == "from" {
 			var parts []*Node
 			if end < len(keys) {
-				parts = splitPolicyTermFromRun11779(nil, keySpan12537(term, end, len(keys)), fromSchema, true)
+				parts = splitPolicyTermFromRun11779(nil, term.keySpan(end, len(keys)), fromSchema, true)
 			}
 			for _, part := range parts {
 				cut := policyTermClauseCut12537(part, fromSchema)
@@ -83,7 +83,7 @@ func policyTermBody12537(leafSchema *schemaNode, term *Node, inline bool) []*Nod
 					break
 				}
 				if cut > 0 {
-					part = keySpan12537(part, 0, cut)
+					part = part.keySpan(0, cut)
 				}
 				if from == nil {
 					from = &Node{Keys: []string{"from"}, InheritedFrom: term.InheritedFrom}
@@ -110,7 +110,7 @@ func policyTermBody12537(leafSchema *schemaNode, term *Node, inline bool) []*Nod
 				body = append(body, to)
 			}
 			if end > i+1 {
-				span := keySpan12537(term, i+1, end)
+				span := term.keySpan(i+1, end)
 				// First key is the predicate leaf name; keep leaf shape.
 				to.Children = append(to.Children, span)
 			} else {
@@ -137,7 +137,7 @@ func policyTermBody12537(leafSchema *schemaNode, term *Node, inline bool) []*Nod
 				then = &Node{Keys: []string{"then"}}
 				body = append(body, then)
 			}
-			then.Children = append(then.Children, keySpan12537(term, action, end))
+			then.Children = append(then.Children, term.keySpan(action, end))
 		}
 		i = end
 	}
@@ -160,22 +160,4 @@ func policyTermClauseCut12537(part *Node, fromSchema *schemaNode) int {
 		}
 	}
 	return -1
-}
-
-// keySpan12537 returns a fresh leaf holding n.Keys[from:to] with their quote
-// and bracket provenance, plus the list-closed bit for a bracketed span, as
-// packedBodyChildren and expandFlatRun carry them onto synthesized nodes.
-func keySpan12537(n *Node, from, to int) *Node {
-	span := &Node{
-		Keys:          append([]string(nil), n.Keys[from:to]...),
-		IsLeaf:        true,
-		InheritedFrom: n.InheritedFrom,
-	}
-	if len(n.KeysQuoted) == len(n.Keys) {
-		span.setKeysQuoted(n.KeysQuoted[from:to])
-	}
-	if len(n.KeysBracketed) == len(n.Keys) {
-		span.setKeysBracketed(n.KeysBracketed[from:to], n.BracketedClosed)
-	}
-	return span
 }
