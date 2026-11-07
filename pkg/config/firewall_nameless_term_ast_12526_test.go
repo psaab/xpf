@@ -462,3 +462,30 @@ func TestCompileConfigLenientPackedAfterThenBlocks17257(t *testing.T) {
 		t.Fatalf("last term = %+v, want the packed discard AFTER both typed terms (authored order)", last)
 	}
 }
+
+func TestCompileConfigLenientFamilyAnyPlaceholderBothPools17257(t *testing.T) {
+	// Kimi delta-7: a family-any site inserts into BOTH pools at the same
+	// authored slot; the inet insertion must not shift the inet6 slot.
+	src := `firewall { family any { filter F { term { } term allow { then accept; } } } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	for _, pool := range []struct {
+		name   string
+		filter *FirewallFilter
+	}{
+		{"inet", cfg.Firewall.FiltersInet["F"]},
+		{"inet6", cfg.Firewall.FiltersInet6["F"]},
+	} {
+		if pool.filter == nil || len(pool.filter.Terms) != 2 {
+			t.Fatalf("%s filter = %+v, want [discard, allow]", pool.name, pool.filter)
+		}
+		if term := pool.filter.Terms[0]; term == nil || !term.nameless || term.Action != FilterActionDiscard {
+			t.Fatalf("%s first term = %+v, want the discard at slot 0", pool.name, term)
+		}
+		if term := pool.filter.Terms[1]; term == nil || term.Name != "allow" {
+			t.Fatalf("%s second term = %+v, want allow", pool.name, term)
+		}
+	}
+}

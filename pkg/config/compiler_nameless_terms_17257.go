@@ -77,7 +77,9 @@ func neutralizePackedNamelessTerms17257(cfg *Config, firewallSites []firewallNam
 			if filter == nil {
 				continue
 			}
-			index := site.expanded + insertedFW[fwKey{site.family, site.filter}]
+			// Per-POOL offset: a family-any site inserts into both pools;
+			// the inet insertion must not shift the inet6 slot (Kimi MAJOR).
+			index := site.expanded + insertedFW[fwKey{pool.family, site.filter}]
 			placeholder := &FirewallFilterTerm{
 				Name:     firewallNamelessPlaceholderName17257(site.first, site.ordinal, filter.Terms),
 				Action:   FilterActionDiscard,
@@ -89,7 +91,7 @@ func neutralizePackedNamelessTerms17257(cfg *Config, firewallSites []firewallNam
 			filter.Terms = append(filter.Terms, nil)
 			copy(filter.Terms[index+1:], filter.Terms[index:])
 			filter.Terms[index] = placeholder
-			insertedFW[fwKey{site.family, site.filter}]++
+			insertedFW[fwKey{pool.family, site.filter}]++
 		}
 	}
 
