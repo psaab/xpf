@@ -328,18 +328,19 @@ func TestRESTReadWatcherStopJoinsTick18994(t *testing.T) {
 				stop()
 				close(stopped)
 			}()
-			select {
-			case <-stopped:
-				t.Error("REST stop returned while its authorization tick was still blocked")
-			case <-time.After(25 * time.Millisecond):
-			}
-			// Sol MINOR: prove stop ENTRY (it cancels the request ctx
-			// before joining) before releasing the tick, so a stop
-			// goroutine that never ran cannot false-GREEN the revert.
+			// Sol MINOR: prove stop ENTRY first (it cancels the request
+			// ctx before joining), THEN assert it has not returned while
+			// the tick is parked — a late-scheduled stop goroutine cannot
+			// false-GREEN the full-revert gate.
 			select {
 			case <-watchedReq.Context().Done():
 			case <-time.After(3 * time.Second):
 				t.Fatal("stop did not cancel the request context (stop entry not observed)")
+			}
+			select {
+			case <-stopped:
+				t.Error("REST stop returned while its authorization tick was still blocked")
+			case <-time.After(25 * time.Millisecond):
 			}
 			releaseStart := time.Now()
 			release()
