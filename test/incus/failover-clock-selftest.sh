@@ -229,6 +229,10 @@ incus() {
 				done
 				printf '    }\n'
 				;;
+			comment-inactive)
+				printf '    /* server 198.51.100.9 */\n'
+				printf '    inactive: server 203.0.113.9;\n'
+				;;
 			repeat)
 				for server in $servers; do
 					printf '    server %s;\n' "$server"
@@ -1190,6 +1194,10 @@ ntp_mixed_fw1_result=$FC_NTP_CELL_RESULT
 ntp_mixed_fw1_detail=$FC_NTP_CELL_DETAIL
 ntp_mixed_fw1_commands=$(wc -l <"$FC_CALLS")
 fc_ntp_cell_case unreadable error 162.159.200.1 0.000 Normal present 91.189.91.112 0.000 Normal ""
+fc_ntp_cell_case comment-inactive present "" 0.000 "Not synchronised" present 91.189.91.112 0.000 "Not synchronised" "" normal comment-inactive repeat
+ntp_comment_inactive_rc=$FC_NTP_CELL_RC
+ntp_comment_inactive_result=$FC_NTP_CELL_RESULT
+ntp_comment_inactive_hosts=$(cat "$FC_PROBE_ARGS")
 ntp_unreadable_rc=$FC_NTP_CELL_RC
 ntp_unreadable_result=$FC_NTP_CELL_RESULT
 ntp_unreadable_detail=$FC_NTP_CELL_DETAIL
@@ -1201,7 +1209,8 @@ if ((ntp_synced_rc == 0 && ntp_bound_default_rc == 1 && ntp_bound_configured_rc 
     ntp_one_rc == 1 && ntp_answer_rc == 1 && ntp_bracket_rc == 1 && ntp_nested_rc == 1 &&
     ntp_outage_rc == 2 && ntp_probe_unavailable_rc == 1 && ntp_absent_rc == 2 && ntp_mixed_rc == 2 && ntp_mixed_fw1_rc == 2 &&
     ntp_unreadable_rc == 2 && ntp_noisy_rc == 2)) &&
-    [[ "$ntp_synced_result" == PASS && "$ntp_synced_detail" == *"both nodes synchronised"* && "$ntp_synced_detail" == *"skew +0.150"* &&
+    [[ "$ntp_comment_inactive_result" == VOID && -z "$ntp_comment_inactive_hosts" &&
+        "$ntp_synced_result" == PASS && "$ntp_synced_detail" == *"both nodes synchronised"* && "$ntp_synced_detail" == *"skew +0.150"* &&
         "$ntp_bound_default_result" == FAIL && "$ntp_bound_default_detail" == *"exceeds 5 s"* &&
         "$ntp_bound_configured_result" == PASS && "$ntp_bound_configured_detail" == *"<= 10 s"* &&
         "$ntp_invalid_bound_result" == VOID && "$ntp_invalid_bound_detail" == *"XPF_FAILOVER_CLOCK_SKEW_BOUND_S must be a positive number"* &&

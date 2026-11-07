@@ -322,6 +322,13 @@ _failover_clock_ntp_config_one() {
 		}
 		{
 			line = $0
+			# Rendered comments and inactive: statements are not active
+			# configuration (pkg/config Strip prunes inactive subtrees
+			# before compilation); never tokenize their servers (#18629).
+			if (line ~ /\/\*/)
+				next
+			if (line ~ /inactive:/)
+				next
 			gsub(/\[/, " [ ", line)
 			gsub(/\]/, " ] ", line)
 			gsub(/\{/, " { ", line)
