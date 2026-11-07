@@ -2588,3 +2588,67 @@ fn established_icmp_drops_after_egress_zone_move_13924() {
         "foreign cell: the owner session is unchanged"
     );
 }
+
+#[test]
+fn established_transit_rst_hit_has_no_allocations_17272() {
+    let mut fw = forwarding(WAN_ONLY);
+    fw.tcp_rst_invalidate_session = true;
+    let mut sessions = admitted(&fw);
+    let mut binding = binding(WAN_IFINDEX);
+    binding.tx_pipeline.pending_tx_prepared.reserve(64);
+    assert!(
+        binding.scratch.scratch_rst_teardowns.capacity() >= 16,
+        "the #16504 RST scratch is pre-sized before the measured poll"
+    );
+    let mut harness = TxnHarness::new(&binding);
+    let ha_state = txn_ha_state();
+    let (frame, meta) = tcp(
+        CLIENT,
+        VIP,
+        CLIENT_PORT,
+        VIP_PORT,
+        TCP_RST,
+        WAN_IFINDEX,
+    );
+
+    let ((warm_batch, warm_dbg), _) = harness.run(
+        &mut binding,
+        &mut sessions,
+        &fw,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(warm_batch.validated_packets, 1);
+    assert_eq!(warm_dbg.session_hit, 1, "warmup must reach the established session");
+    assert_eq!(warm_dbg.tx, 1, "warmup must transmit the admitted transit packet");
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "RST-invalidate packet must not be diverted into the flow-cache arm"
+    );
+    binding.scratch.scratch_rst_teardowns.clear();
+    binding.tx_pipeline.pending_tx_prepared.clear();
+
+    let ((batch, dbg), allocations) = harness.run(
+        &mut binding,
+        &mut sessions,
+        &fw,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(dbg.session_hit, 1, "measured call must reach the established session");
+    assert_eq!(dbg.tx, 1, "measured call must transmit the admitted transit packet");
+    assert_eq!(
+        binding.scratch.scratch_rst_teardowns.len(),
+        1,
+        "the owner RST must queue one teardown with invalidation enabled"
+    );
+    assert_eq!(
+        allocations, 0,
+        "#17272: warmed transit RST session hit with invalidation must not allocate"
+    );
+}
+

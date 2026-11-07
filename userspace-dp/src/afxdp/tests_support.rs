@@ -2334,6 +2334,145 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
     assert_descriptor_arrived_10646(&batch, &dbg);
     (batch, dbg)
 }
+/// Reuses poll-descriptor context scaffolding across packet calls so allocation
+/// cells can measure the dataplane rather than per-invocation test setup.
+pub(super) struct TxnHarness {
+    ident: BindingIdentity,
+    binding_lookup: WorkerBindingLookup,
+    mirror_targets: MirrorTargetMap,
+    dynamic_neighbors: Arc<ShardedNeighborMap>,
+    shared_sessions: Arc<Mutex<FastMap<crate::session::SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: Arc<Mutex<FastMap<crate::session::SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions:
+        Arc<Mutex<FastMap<crate::session::SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: SharedSessionOwnerRgIndexes,
+    ike_exchanges: crate::afxdp::forwarding::SharedIkeExchangeTable,
+    local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    recent_exceptions: Arc<Mutex<ExceptionEventRing>>,
+    last_resolution: Arc<Mutex<Option<ResolutionEvent>>>,
+    rg_epochs: [AtomicU32; MAX_RG_EPOCHS],
+    pptp_control: Arc<crate::session::pptp_control::PptpControlInbox>,
+    screen: ScreenState,
+}
+
+impl TxnHarness {
+    pub(super) fn new(binding: &BindingWorker) -> Self {
+        Self {
+            ident: binding.identity(),
+            binding_lookup: WorkerBindingLookup::from_bindings(std::slice::from_ref(binding)),
+            mirror_targets: MirrorTargetMap::default(),
+            dynamic_neighbors: Arc::new(ShardedNeighborMap::default()),
+            shared_sessions: Arc::new(Mutex::new(FastMap::default())),
+            shared_nat_sessions: Arc::new(Mutex::new(FastMap::default())),
+            shared_forward_wire_sessions: Arc::new(Mutex::new(FastMap::default())),
+            shared_owner_rg_indexes: SharedSessionOwnerRgIndexes::default(),
+            ike_exchanges: Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new()),
+            local_tunnel_deliveries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
+            recent_exceptions: Arc::new(Mutex::new(ExceptionEventRing::new())),
+            last_resolution: Arc::new(Mutex::new(None)),
+            rg_epochs: std::array::from_fn(|_| AtomicU32::new(0)),
+            pptp_control: Arc::new(crate::session::pptp_control::PptpControlInbox::default()),
+            screen: ScreenState::new(),
+        }
+    }
+
+    pub(super) fn run(
+        &mut self,
+        binding: &mut BindingWorker,
+        sessions: &mut SessionTable,
+        forwarding: &ForwardingState,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
+        frame: &[u8],
+        meta: UserspaceDpMeta,
+    ) -> ((BatchCounters, DebugPollCounters), u64) {
+        let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+        let frame_offset = 128;
+        let meta_offset = frame_offset - meta_len;
+        let meta_bytes = unsafe {
+            std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+        };
+        unsafe {
+            binding
+                .umem
+                .area()
+                .slice_mut_unchecked(meta_offset, meta_len)
+                .expect("meta slice")
+                .copy_from_slice(meta_bytes);
+            binding
+                .umem
+                .area()
+                .slice_mut_unchecked(frame_offset, frame.len())
+                .expect("frame slice")
+                .copy_from_slice(frame);
+        }
+        binding.xsk.rx.push_for_test(XdpDesc {
+            addr: frame_offset as u64,
+            len: frame.len() as u32,
+            options: 0,
+        });
+
+        let peer_worker_commands = Vec::new();
+        let worker_ctx = WorkerContext {
+            pptp_control: &self.pptp_control,
+            ident: &self.ident,
+            binding_lookup: &self.binding_lookup,
+            mirror_targets: &self.mirror_targets,
+            forwarding,
+            ha_state,
+            forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
+            dynamic_neighbors: &self.dynamic_neighbors,
+            neighbor_resolver: None,
+            shared_sessions: &self.shared_sessions,
+            shared_nat_sessions: &self.shared_nat_sessions,
+            shared_forward_wire_sessions: &self.shared_forward_wire_sessions,
+            shared_owner_rg_indexes: &self.shared_owner_rg_indexes,
+            ike_exchanges: &self.ike_exchanges,
+            slow_path: None,
+            event_stream: None,
+            local_tunnel_deliveries: &self.local_tunnel_deliveries,
+            recent_exceptions: &self.recent_exceptions,
+            last_resolution: &self.last_resolution,
+            peer_worker_commands: &peer_worker_commands,
+            worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+            rg_epochs: &self.rg_epochs,
+            cold_path_sample_mask: 0xff,
+        };
+        let mut batch = BatchCounters::default();
+        let mut dbg = DebugPollCounters::default();
+        let mut telemetry = TelemetryContext {
+            dbg: &mut dbg,
+            counters: &mut batch,
+        };
+        let area_handle = UmemAreaHandle::from_umem(&binding.umem);
+        let (_, allocations) = crate::test_alloc::count_allocs(|| {
+            poll_binding_process_descriptor(
+                binding,
+                0,
+                &area_handle,
+                1,
+                sessions,
+                &mut self.screen,
+                ValidationState {
+                    snapshot_installed: true,
+                    config_generation: 7,
+                    fib_generation: 9,
+                    neighbor_generation: 0,
+                },
+                123_000_000_000,
+                123,
+                0,
+                0,
+                -1,
+                -1,
+                &worker_ctx,
+                &mut telemetry,
+            )
+        });
+        assert_descriptor_arrived_10646(&batch, &dbg);
+        ((batch, dbg), allocations)
+    }
+}
+
 
 /// `txn_run_descriptor` with an event stream wired so a cold-path emit (deny /
 /// filter-log / host-inbound deny) can be observed on the returned receiver.

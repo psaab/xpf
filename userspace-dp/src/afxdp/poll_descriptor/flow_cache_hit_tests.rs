@@ -532,7 +532,7 @@ fn transit_entry() -> FlowCacheEntry {
 fn tx_pipeline() -> WorkerTxPipeline {
     WorkerTxPipeline {
         free_tx_frames: (0..8u64).collect(),
-        pending_tx_prepared: VecDeque::new(),
+        pending_tx_prepared: VecDeque::with_capacity(64),
         pending_tx_local: VecDeque::new(),
         backup_retry_scratch: std::collections::VecDeque::new(),
         max_pending_tx: 64,
@@ -912,6 +912,7 @@ impl LiveCallSiteFixture {
 /// on lifted out of the UMEM's lifetime.
 struct StageRun {
     outcome: FlowCacheOutcome,
+    stage_allocs: u64,
     /// #8262: `SessionTable::lookup_miss_counts()` after the call —
     /// `(no_handle, stale_handle, key_mismatch)`. The harness computed none of
     /// this before, so the one counter that distinguishes "the key the stage
@@ -1119,6 +1120,9 @@ struct StageSeed {
     /// #18560: run the stage as a held pass does, with the flow cache in
     /// compare-only mode (`FlowCache::held_compare_only`).
     held_compare_only: bool,
+    /// Run one identical cache hit before measurement so the entry's memo,
+    /// reusable pipeline capacity, and warm-only state are not counted.
+    warm_before_measure: bool,
 }
 
 impl Default for StageSeed {
@@ -1139,6 +1143,7 @@ impl Default for StageSeed {
             install_handshake_pending: false,
             expected_ack: None,
             held_compare_only: false,
+            warm_before_measure: false,
         }
     }
 }
@@ -1182,10 +1187,6 @@ fn run_stage_seeded(
     // from it (the same aliasing the production handle guarantees),
     // so no raw pointer is needed to stage the fixture.
     let area = UmemAreaHandle::from_mmap_area_for_test(area);
-    let raw_frame = area
-        .area()
-        .slice(frame_offset as usize, frame.len())
-        .expect("raw frame must ALIAS the UMEM, as it does in production");
 
     let entry_for_session = entry.clone();
     let mut flow_state = WorkerFlowCacheState {
@@ -1329,12 +1330,6 @@ fn run_stage_seeded(
     let mut mirror_sample_counter = initial_sample_counter;
 
     let mut last_learned_neighbor = LearnedNeighborDedup::default();
-    // #6304: measure only THIS call. The fixture's own setup pushes (the AtCap
-    // precondition, the interleaving-producer probes) go through the same
-    // admission primitive, so the reset has to sit immediately before the call
-    // and the read immediately after it.
-    crate::afxdp::binding_state::pending_tx_admission_attempts_reset();
-    let hashes_before = crate::session::SESSION_KEY_HASHES_FOR_TEST.with(|count| count.get());
     let mut inline_tx = InlineTxBindings {
         ingress: InlineTxTarget {
             tx_pipeline: &mut tx_pipeline_state,
@@ -1349,33 +1344,63 @@ fn run_stage_seeded(
             &mut []
         },
     };
-    let outcome = stage_flow_cache_hit(
-        &mut flow_state,
-        &mut inline_tx,
-        &mut scratch_state,
-        &mut mirror_sample_counter,
-        &fixture.ingress_live,
-        0,
-        BINDING_INDEX,
-        &ingress_umem,
-        desc,
-        &area,
-        raw_frame,
-        &mut owned_packet_frame,
-        meta,
-        &flow,
-        seed.packet_fabric_ingress,
-        seed.fabric_arrival_zone,
-        seed.fabric_link_ingress,
-        false,
-        ValidationState::default(),
-        &mut sessions,
-        seed.now_ns,
-        1,
-        &fixture.worker_ctx(),
-        &mut last_learned_neighbor,
-        &mut telemetry,
-    );
+    let mut first_call = true;
+    let mut run_stage = || {
+        if seed.warm_before_measure && !first_call {
+            // SAFETY: the previous invocation's local `raw_frame` borrow ended
+            // when it returned; this worker owns the test UMEM exclusively.
+            unsafe {
+                area.area()
+                    .slice_mut_unchecked(frame_offset as usize, frame.len())
+                    .expect("warm fixture UMEM slice")
+                    .copy_from_slice(frame);
+            }
+        }
+        let raw_frame = area
+            .area()
+            .slice(frame_offset as usize, frame.len())
+            .expect("raw frame must ALIAS the UMEM, as it does in production");
+        let outcome = stage_flow_cache_hit(
+            &mut flow_state,
+            &mut inline_tx,
+            &mut scratch_state,
+            &mut mirror_sample_counter,
+            &fixture.ingress_live,
+            0,
+            BINDING_INDEX,
+            &ingress_umem,
+            desc,
+            &area,
+            raw_frame,
+            &mut owned_packet_frame,
+            meta,
+            &flow,
+            seed.packet_fabric_ingress,
+            seed.fabric_arrival_zone,
+            seed.fabric_link_ingress,
+            false,
+            ValidationState::default(),
+            &mut sessions,
+            seed.now_ns,
+            1,
+            &fixture.worker_ctx(),
+            &mut last_learned_neighbor,
+            &mut telemetry,
+        );
+        if seed.warm_before_measure && first_call {
+            inline_tx.ingress.tx_pipeline.pending_tx_prepared.clear();
+            first_call = false;
+        }
+        outcome
+    };
+    if seed.warm_before_measure {
+        let _ = run_stage();
+    }
+    // #6304: reset side-effect probes only after the optional warmup.
+    crate::afxdp::binding_state::pending_tx_admission_attempts_reset();
+    let hashes_before = crate::session::SESSION_KEY_HASHES_FOR_TEST.with(|count| count.get());
+    let (outcome, stage_allocs) = crate::test_alloc::count_allocs(|| run_stage());
+    drop(run_stage);
     let session_key_hashes =
         crate::session::SESSION_KEY_HASHES_FOR_TEST.with(|count| count.get()) - hashes_before;
     let admission_attempts = crate::afxdp::binding_state::pending_tx_admission_attempts();
@@ -1426,6 +1451,7 @@ fn run_stage_seeded(
 
     StageRun {
         outcome,
+        stage_allocs,
         session_lookup_miss_counts: sessions.lookup_miss_counts(),
         flow_cache_tallies,
         flow_cache_evictions_by_arm,
@@ -8953,7 +8979,8 @@ fn idle_crossed_hit_counts_idle_crossed_arm_18656() {
 fn established_reverse_cache_hit_skips_tcp_seq_ack_frame_parse_17268() {
     // Kimi #17268 (real reverse shape): server->client tuple in key,
     // frame, meta AND flow, reverse entry, Consumed premise asserted.
-    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    fixture.forwarding.mirror_configs.clear();
     let mut entry = cached_entry();
     entry.key = crate::session::SessionKey {
         addr_family: libc::AF_INET as u8,
@@ -8965,6 +8992,21 @@ fn established_reverse_cache_hit_skips_tcp_seq_ack_frame_parse_17268() {
         discriminator: Default::default(),
         routing_domain: 0,
     };
+    let reverse_nat = NatDecision {
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 100))),
+        ..NatDecision::default()
+    };
+    entry.decision.nat = reverse_nat;
+    entry.descriptor.rewrite_dst_ip = reverse_nat.rewrite_dst;
+    let reverse_flow = SessionFlow {
+        src_ip: entry.key.src_ip,
+        dst_ip: entry.key.dst_ip,
+        forward_key: entry.key.clone(),
+    };
+    entry.descriptor.ip_csum_delta =
+        crate::afxdp::frame::compute_ip_csum_delta(&reverse_flow, &reverse_nat);
+    entry.descriptor.l4_csum_delta =
+        crate::afxdp::frame::compute_l4_csum_delta(&reverse_flow, &reverse_nat);
     entry.metadata.is_reverse = true;
     let mut frame = tcp_v4_ack_frame();
     frame[30..34].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 200).octets());
@@ -8992,16 +9034,31 @@ fn established_reverse_cache_hit_skips_tcp_seq_ack_frame_parse_17268() {
         &frame,
         meta,
         entry,
-        0,
-        StageSeed { flow: Some(flow), ..StageSeed::default() },
+        1,
+        StageSeed {
+            flow: Some(flow),
+            warm_before_measure: true,
+            ..StageSeed::default()
+        },
     );
     let derivations = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test() - before;
     assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: served REVERSE hit for {key:?}");
+    let tx_frame = run.tx_frame.as_ref().expect("reverse SNAT hit stages TX bytes");
+    assert_eq!(
+        &tx_frame[34..38],
+        &Ipv4Addr::new(10, 0, 1, 100).octets(),
+        "premise: reverse SNAT rewrites the translated destination back to the client"
+    );
     assert_eq!(
         derivations, 0,
         "steady-state REVERSE established hit must not re-derive the TCP ACK"
     );
+    assert_eq!(
+        run.stage_allocs, 0,
+        "#17272: established reverse SNAT cache hit must not allocate"
+    );
 }
+
 
 #[test]
 fn crossed_resurrection_derives_tcp_seq_ack_once_17268() {
@@ -9033,3 +9090,5 @@ fn crossed_resurrection_derives_tcp_seq_ack_once_17268() {
     assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: crossed hit resurrected and served");
     assert_eq!(derivations, 1, "two progress-arm resolves share one ACK derivation");
 }
+#[path = "../alloc_free_spine_tests.rs"]
+mod alloc_free_spine_tests;

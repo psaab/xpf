@@ -14155,4 +14155,30 @@ fn live_tx_selection_walks_do_not_clone_handles_16496() {
             "#16496: deferred replay must charge counter {i} exactly once"
         );
     }
+
+    crate::filter::flush_recorded_filter_counters();
+    let (walk, allocations) = crate::test_alloc::count_allocs(|| {
+        evaluate_filter_ref_tx_selection_runtime_counted(
+            &filter,
+            src,
+            dst,
+            PROTO_TCP,
+            12345,
+            443,
+            0,
+            TermMatchExtra::default(),
+            100,
+            0,
+        )
+    });
+    assert!(
+        walk.counters.is_empty() && walk.three_color_policers.is_empty(),
+        "#17272: a live counted/policed walk collects no handles"
+    );
+    assert_eq!(
+        allocations, 0,
+        "#17272: warmed counted/policed live filter walk must not allocate"
+    );
+    drop(walk);
+    crate::filter::flush_recorded_filter_counters();
 }
