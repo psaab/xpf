@@ -5,15 +5,11 @@ import (
 	"strings"
 )
 
-// OperationalPipeConsumers lists the keyword-only operational commands whose
-// handler parses a handler-level pipe (`| display <format>`) itself. It is
-// keyed by canonical command path. The handlers differ per surface: the
-// remote handler splits with splitShowPipe, the local one with
-// splitDisplayPipe. (On the remote surface, operational
-// `show configuration | compare` is NOT supported; its handler refuses it
-// and points at configuration mode. The local handler reports an
-// unsupported pipe and returns nil; compare parity is #18669, not this
-// gate.)
+// OperationalPipeConsumers lists keyword-only operational commands whose
+// handlers parse handler-level pipes themselves, such as `| display <format>`
+// or `show configuration [<path>] | compare rollback <N>`. It is keyed by
+// canonical command path. The handlers differ per surface: the remote handler
+// splits with splitShowPipe, the local one with splitDisplayPipe.
 //
 // Only keyword-only nodes need an entry. A pipe after a value slot, a leaf or
 // an AcceptsArgs tail is outside the #16798 gate (ValidateOperationalLine

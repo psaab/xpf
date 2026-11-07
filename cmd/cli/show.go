@@ -80,7 +80,31 @@ func (c *ctl) handleShow(args []string) error {
 			return err
 		}
 		if len(pipe) > 0 && pipe[0] == "compare" {
-			return opShowConfigurationCompareErr(path, pipe)
+			const usage = "usage: show configuration [<path>] | compare rollback <N>"
+			if len(pipe) == 1 {
+				return fmt.Errorf("syntax error: | compare on operational show configuration requires rollback <N>")
+			}
+			if len(pipe) != 3 || pipe[1] != "rollback" {
+				return fmt.Errorf("%s", usage)
+			}
+			n, err := parseRollbackSelector(pipe[2], usage, 0)
+			if err != nil {
+				return err
+			}
+			resp, err := c.client.ShowCompare(c.ctx(), &pb.ShowCompareRequest{
+				RollbackN:      n,
+				ActiveBaseline: true,
+				Path:           path,
+			})
+			if err != nil {
+				return fmt.Errorf("%v", err)
+			}
+			if resp.Output == "" {
+				fmt.Println("No differences found")
+			} else {
+				fmt.Print(resp.Output)
+			}
+			return nil
 		}
 		format, err := parseShowDisplay(pipe, true, true, true)
 		if err != nil {
@@ -427,35 +451,6 @@ func (c *ctl) handleConfigShow(args []string, quoted []bool) error {
 	}
 	fmt.Print(resp.Output)
 	return nil
-}
-
-// opShowConfigurationCompareErr refuses operational `show configuration
-// [<path>] | compare [rollback <N>]`, which Junos supports and this surface
-// does not (#18664, #18669). The refusal points at the command that answers
-// the operator's question, so the message depends on the shape.
-//
-//   - Unscoped `| compare rollback <N>` asks Junos's question: what changed
-//     between rollback N and the ACTIVE configuration. `show system rollback
-//     <N> | compare` answers exactly that operationally (ShowCompare with
-//     ActiveBaseline), with no configuration mode and so no PermConfig
-//     dead-end for a view-only class. The typed N is echoed into the pointer.
-//   - Bare `| compare` and any scoped path: the rollback compare has no
-//     subtree selector on this surface, so the pointer is configuration-mode
-//     `show [<path>] | compare [rollback <N>]`. Configuration mode diffs the
-//     CANDIDATE, and the message says so.
-func opShowConfigurationCompareErr(path, pipe []string) error {
-	if len(path) == 0 && len(pipe) >= 2 && pipe[1] == "rollback" {
-		n := "<N>"
-		if len(pipe) == 3 {
-			n = pipe[2]
-		}
-		return fmt.Errorf("syntax error: `| compare rollback %s` is not supported on "+
-			"operational `show configuration`; use `show system rollback %s | compare`, "+
-			"which diffs rollback %s against the active configuration", n, n, n)
-	}
-	return fmt.Errorf("syntax error: `| compare` is not supported on operational " +
-		"`show configuration`; use configuration mode (`configure`, then " +
-		"`show [<path>] | compare [rollback <N>]`), which compares the candidate configuration")
 }
 
 // showPipeIndex returns the index of the first bare `|` operator token in

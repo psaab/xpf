@@ -320,7 +320,7 @@ func TestOpShowConfigurationCompareRollback18669(t *testing.T) {
 		n    int32
 		path []string
 	}{
-		{"show configuration | compare rollback 2", 2, nil},
+		{"show configuration | compare rollback 2", 2, []string{}},
 		{"show configuration system | compare rollback 3", 3, []string{"system"}},
 	} {
 		t.Run(tc.line, func(t *testing.T) {
@@ -348,7 +348,7 @@ func TestOpShowConfigurationCompareRefusals18669(t *testing.T) {
 		{"show configuration | compare rollback", "usage: show configuration [<path>] | compare rollback <N>"},
 		{"show configuration | compare rollback nope", "usage: show configuration [<path>] | compare rollback <N>"},
 		{"show configuration | compare rollback -1", "usage: show configuration [<path>] | compare rollback <N>"},
-		{"show configuration | compare rollback 2147483648", "usage: show configuration [<path>] | compare rollback <N>"},
+		{"show configuration | compare rollback 2147483648", `rollback number "2147483648" out of range; usage: show configuration [<path>] | compare rollback <N>`},
 		{"show configuration | compare rollback 1 extra", "usage: show configuration [<path>] | compare rollback <N>"},
 		{"show configuration | compare extra", "usage: show configuration [<path>] | compare rollback <N>"},
 	} {
