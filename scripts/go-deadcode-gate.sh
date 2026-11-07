@@ -89,6 +89,7 @@ set -u
 
 # shellcheck disable=SC1007  # `CDPATH= cd` clears CDPATH for this command only
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck disable=SC1007  # `CDPATH= cd` clears CDPATH for this command only
 ROOT=${GO_DEADCODE_ROOT:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}
 cd "$ROOT" || { echo "go-deadcode-gate: FATAL: cannot cd to $ROOT" >&2; exit 2; }
 

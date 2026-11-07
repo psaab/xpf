@@ -71,6 +71,7 @@ cat > "$FAKE_GO" <<'EOF'
 case "${1:-}" in
 	version) echo 'go version go1.26.9 linux/amd64' ;;
 	run)
+		[ -n "${FAKE_DEADCODE_ARGS:-}" ] && printf '%s\n' "$*" > "$FAKE_DEADCODE_ARGS"
 		case "${FAKE_DEADCODE_MODE:-crash}" in
 			crash) echo 'panic: fixture analyser crash' >&2; exit 42 ;;
 			findings) echo 'pkg/nftables/deadcode_fixture.go:1:6: unreachable func: deadFixture' ;;
@@ -117,6 +118,12 @@ out=$(DEADCODE_GO_CANDIDATES="$FAKE_GO" FAKE_DEADCODE_MODE=findings make -s -C "
 [ "$rc" = "2" ] && echo "$out" | grep -q "unreachable code found" && echo "$out" | grep -q "Error 1" &&
 	ok "scoped target reports filtered findings as recipe exit 1" ||
 	bad "filtered finding was not recipe exit 1 (rc=$rc): $out"
+
+PINGO=$(sed -n 's/^DEADCODE_VERSION=//p' "$ROOT/scripts/go-deadcode-gate.sh" | head -n 1)
+out=$(DEADCODE_GO_CANDIDATES="$FAKE_GO" FAKE_DEADCODE_MODE=clean FAKE_DEADCODE_ARGS="$WORK/run.args" make -s -C "$ROOT" check-nft-deadcode GO="$FAKE_GO" 2>&1); rc=$?
+[ "$rc" = "0" ] && grep -q "golang.org/x/tools/cmd/deadcode@$PINGO" "$WORK/run.args" &&
+	ok "scoped target invokes the gate's pinned analyser version ($PINGO)" ||
+	bad "scoped target did not invoke pinned analyser $PINGO (rc=$rc): $out / $(cat "$WORK/run.args" 2>/dev/null)"
 
 
 # ── 1. Exact match is green, and the census states its reach ────────

@@ -466,9 +466,10 @@ test-go: test-race-dp
 # builder. The x/tools version in go.mod's tool directive may drift separately.
 .PHONY: check-nft-deadcode
 check-nft-deadcode:
-	@if GO_BIN=$$(GO="$(GO)" sh scripts/resolve-deadcode-go.sh); then \
-		out=$$("$$GO_BIN" run golang.org/x/tools/cmd/deadcode@v0.38.0 -test -filter 'pkg/(daemon|nftables)' ./cmd/xpfd ./pkg/daemon ./pkg/nftables 2>&1); status=$$?; \
-		if [ $$status -ne 0 ]; then printf '%s\n' "$$out"; echo "check-nft-deadcode: FAIL: analyser crashed (deadcode v0.38.0 exited $$status)" >&2; exit 2; fi; \
+	@DEADCODE_VERSION=$$(sed -n 's/^DEADCODE_VERSION=//p' scripts/go-deadcode-gate.sh | head -n 1); \
+	if GO_BIN=$$(GO="$(GO)" sh scripts/resolve-deadcode-go.sh); then \
+		out=$$("$$GO_BIN" run "golang.org/x/tools/cmd/deadcode@$$DEADCODE_VERSION" -test -filter 'pkg/(daemon|nftables)' ./cmd/xpfd ./pkg/daemon ./pkg/nftables 2>&1); status=$$?; \
+		if [ $$status -ne 0 ]; then printf '%s\n' "$$out"; echo "check-nft-deadcode: FAIL: analyser crashed (deadcode $$DEADCODE_VERSION exited $$status)" >&2; exit 2; fi; \
 		findings=$$(printf '%s\n' "$$out" | grep -E '^pkg/nftables/|^pkg/daemon/daemon_nft[^/]*\.go:' || true); \
 		if [ -n "$$findings" ]; then printf '%s\n' "$$findings"; echo "check-nft-deadcode: unreachable code found" >&2; exit 1; fi; \
 	else \
