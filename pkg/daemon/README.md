@@ -1295,32 +1295,39 @@ Detected by the presence of `/etc/xpf/node-id` (contents `0` or `1`).
 Absent → standalone. Cluster mode triggers the bondless-RETH naming
 convention (`fxp0`, `em0`, `ge-{0,7}-0-X`).
 
-### Live control-link changes are refused at commit (#8965, #8987, #9121, #18606)
+### Live control-link changes are refused at commit (#8965, #8987, #9121, #18606, #18623)
 
 The cluster-endpoint commit preflights in `cluster_topology_preflight.go`
 and `cluster_control_local_addr_preflight_18606.go` run at all three apply
 paths (`commitAndApply`, `syncAndApply`, `commitConfirmedAndApply`): the peer
 address (#8965), the control interface (#8987), the config-sync endpoint
-(#9121) and, since #18606, this node's OWN control-link address (refused when
-the commit removes the address the running heartbeat is bound to; the address
-set compared is the one networkd renders, so adding `dhcp` / `dhcpv6` to the
-control unit while keeping the bound static address is a renumber too). Local
-commit paths preflight before promotion; on the synced path all four checks run
-inside `Store.SyncApplyGated` against the compiled peer config, before
-promotion. A refusal leaves the active config unchanged, so re-pushes remain
-refused and background appliers keep applying the old active config. The
-refused text's authorization changes are not active policy either: management
-continues honouring the active config until a later accepted push promotes
-those changes. The #5840/#6192 backstops remain after promotion and still
-reconcile management under their existing #6720 contract. Each refusal names
-the procedure: set the change on BOTH nodes and restart xpfd on both, offline.
-The design, per-path safety arguments and abstain cases are in
-`docs/ha-no-hitless-restart.md`. Cells:
-`cluster_control_local_addr_preflight_18606_test.go` (decision table, the
-running-bind read, each apply path refusing a renumber, synced re-push / later
-push / later local commit / background apply after refusal, steady-state text,
-and wiring census), `peer_sync_pre_promotion_refusal_18622_test.go` (all three
-synced refusal retries and background-apply cells), and
+(#9121) and, since #18606, this node's OWN control-link address. The #18606
+gate refuses when the candidate removes the address the running heartbeat is
+bound to; #18623 also refuses when a changed `primary`/`preferred` or rendered
+address state moves the effective fresh-bind selection to a different address
+(or to no static address after a prior pick or peer-family change). It compares
+effective running and candidate selections, not raw address order: a reorder is
+refused when it changes the selected bind, while input changes preserving the
+prior pick pass. The address set is the one networkd renders, so adding `dhcp` /
+`dhcpv6` to the control unit while keeping the bound static address is a
+renumber too. Local commit paths preflight before promotion. On the synced path
+all four checks run inside `Store.SyncApplyGated` against the compiled peer
+config, before promotion. A refusal leaves the active config unchanged, so
+re-pushes remain refused and background appliers keep applying the old active
+config. The refused text's authorization changes are not active policy either:
+management continues honouring the active config until a later accepted push
+promotes those changes. The #5840/#6192 backstops remain after promotion and
+still reconcile management under their existing #6720 contract. Each refusal
+names the procedure: set the change on BOTH nodes and restart xpfd on both,
+offline. The design, per-path safety arguments, and boot-window abstention
+warning are in `docs/ha-no-hitless-restart.md`. Cells:
+`cluster_control_local_addr_preflight_18606_test.go` (decision table including
+primary/preferred changes and unchanged controls, the running-bind read, each
+apply path refusing a renumber, the synced re-push / later push / later local
+commit / background apply after a refusal, a steady-state synced text passing,
+and the wiring census against the #8965 sibling),
+`peer_sync_pre_promotion_refusal_18622_test.go` (all three synced refusal
+retries and background-apply cells), and `cluster_peer_control_addr_preflight_18630_test.go` (peer fresh-pick, renumber, DHCP and foreign-binding cells), and
 `pkg/configstore/sync_apply_gated_18606_test.go`.
 
 ### Cluster-comms epoch lifecycle (`startClusterComms` / `stopClusterComms`, #4958)

@@ -25,35 +25,54 @@ import (
 func TestControlLocalAddressDecision18606(t *testing.T) {
 	running := []string{"10.99.14.1/30"}
 	for _, tc := range []struct {
-		name       string
-		have       string
-		runningCfg []string
-		candidate  []string
-		refuse     bool
+		name               string
+		have               string
+		runningCfg         []string
+		candidate          []string
+		runningPrimary     string
+		candidatePrimary   string
+		runningPreferred   string
+		candidatePreferred string
+		refuse             bool
 	}{
-		{"renumber is refused", "10.99.14.1", running, []string{"10.99.14.5/30"}, true},
-		{"unchanged passes", "10.99.14.1", running, []string{"10.99.14.1/30"}, false},
-		{"a mask change alone passes", "10.99.14.1", running, []string{"10.99.14.1/29"}, false},
-		{"still configured beside a new address passes", "10.99.14.1", running, []string{"192.0.2.9/24", "10.99.14.1/30"}, false},
-		{"removing the bound address but keeping another is refused", "10.99.14.1", []string{"10.99.14.1/30", "192.0.2.9/24"}, []string{"192.0.2.9/24"}, true},
-		{"static -> DHCP strands the bound address and is refused", "10.99.14.1", running, nil, true},
-		{"no running heartbeat abstains (boot, first commit)", "", running, []string{"10.99.14.5/30"}, false},
-		{"a DHCP-only control link abstains", "10.99.14.77", nil, nil, false},
+		{"renumber is refused", "10.99.14.1", running, []string{"10.99.14.5/30"}, "", "", "", "", true},
+		{"unchanged passes", "10.99.14.1", running, []string{"10.99.14.1/30"}, "", "", "", "", false},
+		{"a mask change alone passes", "10.99.14.1", running, []string{"10.99.14.1/29"}, "", "", "", "", false},
+		{"still configured beside a new address passes", "10.99.14.1", running, []string{"192.0.2.9/24", "10.99.14.1/30"}, "", "", "", "", false},
+		{"primary change switches fresh bind and is refused", "10.99.14.1",
+			[]string{"10.99.14.1/24", "10.99.14.3/24"}, []string{"10.99.14.1/24", "10.99.14.3/24"},
+			"10.99.14.1/24", "10.99.14.3/24", "", "", true},
+		{"unchanged primary keeps fresh bind and passes", "10.99.14.1",
+			[]string{"10.99.14.1/24", "10.99.14.3/24"}, []string{"10.99.14.1/24", "10.99.14.3/24"},
+			"10.99.14.1/24", "10.99.14.1/24", "", "", false},
+		{"preferred change switches fresh bind and is refused", "10.99.14.1",
+			[]string{"10.99.14.1/24", "10.99.14.3/24"}, []string{"10.99.14.1/24", "10.99.14.3/24"},
+			"", "", "10.99.14.1/24", "10.99.14.3/24", true},
+		{"removing the bound address but keeping another is refused", "10.99.14.1", []string{"10.99.14.1/30", "192.0.2.9/24"}, []string{"192.0.2.9/24"}, "", "", "", "", true},
+		{"static -> DHCP strands the bound address and is refused", "10.99.14.1", running, nil, "", "", "", "", true},
+		{"no running heartbeat abstains (boot, first commit)", "", running, []string{"10.99.14.5/30"}, "", "", "", "", false},
+		{"a DHCP-only control link abstains", "10.99.14.77", nil, nil, "", "", "", "", false},
 		// Review seats AG/AH: a unit with dhcp AND a static address binds the
 		// lease (networkd renders no static IPv4 for a DHCPv4 row), and a
 		// foreign address listed first can win the bind. Neither bind is a
 		// configured address, so no commit is removing it; comparing against the
 		// candidate alone refused every commit on such a node.
-		{"bound to a DHCP lease beside a static address abstains", "10.99.14.77", running, []string{"10.99.14.1/30"}, false},
-		{"bound to a foreign address abstains", "192.0.2.50", running, []string{"10.99.14.5/30"}, false},
-		{"IPv6 renumber is refused", "2001:db8:14::1", []string{"2001:db8:14::1/64"}, []string{"2001:db8:14::5/64"}, true},
-		{"IPv6 unchanged passes", "2001:db8:14::1", []string{"2001:db8:14::1/64"}, []string{"2001:db8:14::1/64"}, false},
+		{"bound to a DHCP lease beside a static address abstains", "10.99.14.77", running, []string{"10.99.14.1/30"}, "", "", "", "", false},
+		{"bound to a foreign address abstains", "192.0.2.50", running, []string{"10.99.14.5/30"}, "", "", "", "", false},
+		{"IPv6 renumber is refused", "2001:db8:14::1", []string{"2001:db8:14::1/64"}, []string{"2001:db8:14::5/64"}, "", "", "", "", true},
+		{"IPv6 unchanged passes", "2001:db8:14::1", []string{"2001:db8:14::1/64"}, []string{"2001:db8:14::1/64"}, "", "", "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := controlLocalAddressDecision18606(tc.have, tc.runningCfg, tc.candidate, "10.99.14.2")
+			runningCfg := controlLinkAddrs18606{
+				addrs: tc.runningCfg, primary: tc.runningPrimary, preferred: tc.runningPreferred,
+			}
+			candidate := controlLinkAddrs18606{
+				addrs: tc.candidate, primary: tc.candidatePrimary, preferred: tc.candidatePreferred,
+			}
+			err := controlLocalAddressDecision18606(tc.have, runningCfg, candidate, "10.99.14.2")
 			if tc.refuse && err == nil {
-				t.Errorf("have=%q running=%v candidate=%v must be REFUSED: the commit removes the address "+
-					"the running heartbeat is bound to", tc.have, tc.runningCfg, tc.candidate)
+				t.Errorf("have=%q running=%v candidate=%v must be REFUSED: the commit removes or changes the selected control address",
+					tc.have, tc.runningCfg, tc.candidate)
 			}
 			if !tc.refuse && err != nil {
 				t.Errorf("have=%q running=%v candidate=%v is not a live renumber and must pass: %v",
@@ -64,7 +83,10 @@ func TestControlLocalAddressDecision18606(t *testing.T) {
 }
 
 func TestControlLocalAddressRefusalNamesTheProcedure18606(t *testing.T) {
-	err := controlLocalAddressDecision18606("10.99.14.1", []string{"10.99.14.1/30"}, []string{"10.99.14.5/30"}, "10.99.14.2")
+	err := controlLocalAddressDecision18606("10.99.14.1",
+		controlLinkAddrs18606{addrs: []string{"10.99.14.1/30"}},
+		controlLinkAddrs18606{addrs: []string{"10.99.14.5/30"}},
+		"10.99.14.2")
 	if err == nil {
 		t.Fatal("a live control-address renumber must be refused")
 	}
@@ -125,6 +147,26 @@ func TestControlLocalAddressPreflightReadsTheRunningBind18606(t *testing.T) {
 	if err := clusterControlLocalAddressCommitPreflight(nil, unchanged, renumbered); err != nil {
 		t.Fatalf("no running cluster manager must abstain: %v", err)
 	}
+	primaryCfg := func(primary string) *config.Config {
+		lines := append(localAddrCfgLines18606("10.99.14.1/24"),
+			"interfaces em0 unit 0 family inet address 10.99.14.3/24",
+			"interfaces em0 unit 0 family inet address "+primary+" primary")
+		return compiledCfg18606(t, lines)
+	}
+	primaryRunning := primaryCfg("10.99.14.1/24")
+	primarySwapped := primaryCfg("10.99.14.3/24")
+	if got := controlLinkState18606(primaryRunning, "em0").primary; got != "10.99.14.1/24" {
+		t.Fatalf("running primary = %q, want 10.99.14.1/24", got)
+	}
+	if got := controlLinkState18606(primarySwapped, "em0").primary; got != "10.99.14.3/24" {
+		t.Fatalf("candidate primary = %q, want 10.99.14.3/24", got)
+	}
+	if err := clusterControlLocalAddressCommitPreflight(running, primaryRunning, primaryRunning); err != nil {
+		t.Fatalf("an unchanged primary selection must pass: %v", err)
+	}
+	if err := clusterControlLocalAddressCommitPreflight(running, primaryRunning, primarySwapped); err == nil {
+		t.Fatal("swapping primary to 10.99.14.3 while the heartbeat remains bound to configured 10.99.14.1 must be refused")
+	}
 }
 
 // committedLocalAddrStore18606 commits node 0 with em0 at 10.99.14.1/30 and
@@ -153,7 +195,7 @@ func committedLocalAddrStore18606(t *testing.T) *configstore.Store {
 }
 
 func activeEm0Addrs18606(store *configstore.Store) []string {
-	return controlLinkStaticAddrs18606(store.ActiveConfig(), "em0")
+	return controlLinkState18606(store.ActiveConfig(), "em0").addrs
 }
 
 func runningLocalAddrDaemon18606(store *configstore.Store) *Daemon {
@@ -273,7 +315,7 @@ func TestBackgroundApplyAfterRefusedPushSeesUnchangedConfig18606(t *testing.T) {
 	if applied == nil {
 		t.Fatal("precondition: the #9811 retry did not reach applyConfigLocked")
 	}
-	if got := controlLinkStaticAddrs18606(applied, "em0"); len(got) != 1 || got[0] != "10.99.14.1/30" {
+	if got := controlLinkState18606(applied, "em0").addrs; len(got) != 1 || got[0] != "10.99.14.1/30" {
 		t.Fatalf("after the refused push, the #9811 background retry applied em0 = %v, want the unchanged "+
 			"[10.99.14.1/30]: the refused renumber reached the dataplane with no preflight", got)
 	}
@@ -302,7 +344,7 @@ func TestPeerSyncedSameAddressDoesNotTrip18606(t *testing.T) {
 		"chassis cluster control-interface em0",
 		"chassis cluster peer-address 10.99.14.2",
 	})
-	if got := controlLinkStaticAddrs18606(synced, "em0"); len(got) != 1 || got[0] != "10.99.14.1/30" {
+	if got := controlLinkState18606(synced, "em0").addrs; len(got) != 1 || got[0] != "10.99.14.1/30" {
 		t.Fatalf("precondition: the per-node group compiled em0 to %v, want [10.99.14.1/30] for node 0", got)
 	}
 	if err := clusterControlLocalAddressCommitPreflight(running, synced, synced); err != nil {
@@ -364,7 +406,7 @@ func TestAddingDHCPToTheControlUnitIsARenumber18606(t *testing.T) {
 	running.SetHeartbeatEndpointForTesting("10.99.14.1", "10.99.14.2", "em0")
 	static := compiledCfg18606(t, localAddrCfgLines18606("10.99.14.1/30"))
 	withDHCP := compiledCfg18606(t, append(localAddrCfgLines18606("10.99.14.1/30"), "interfaces em0 unit 0 family inet dhcp"))
-	if got := controlLinkStaticAddrs18606(withDHCP, "em0"); len(got) != 0 {
+	if got := controlLinkState18606(withDHCP, "em0").addrs; len(got) != 0 {
 		t.Fatalf("precondition: a dhcp unit rendered static IPv4 %v, want none (networkd suppresses them)", got)
 	}
 	if err := clusterControlLocalAddressCommitPreflight(running, static, withDHCP); err == nil {
@@ -396,7 +438,7 @@ func TestAddingDHCPv6ToTheControlUnitIsARenumber18606(t *testing.T) {
 	}
 	static := compiledCfg18606(t, lines)
 	withDHCPv6 := compiledCfg18606(t, append(append([]string{}, lines...), "interfaces em0 unit 0 family inet6 dhcpv6"))
-	if got := controlLinkStaticAddrs18606(withDHCPv6, "em0"); len(got) != 1 || got[0] != "10.99.14.1/30" {
+	if got := controlLinkState18606(withDHCPv6, "em0").addrs; len(got) != 1 || got[0] != "10.99.14.1/30" {
 		t.Fatalf("a dhcpv6 unit rendered %v, want only its IPv4 static (the suppression is per family)", got)
 	}
 	if err := clusterControlLocalAddressCommitPreflight(running, static, withDHCPv6); err == nil {

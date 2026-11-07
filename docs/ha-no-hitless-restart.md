@@ -251,18 +251,31 @@ ends of a point-to-point control link atomically from one end of it.**
   The predicate is "this commit removes the address the running heartbeat
   is bound to": the bound address (`Manager.HeartbeatLocalAddr()`) is a
   configured static address of the RUNNING config's control-link unit and
-  the candidate's unit no longer carries it. Membership, not equality with
-  one selected address (a unit with two addresses can resolve them in a
-  different order). The running-config half matters: a unit with `dhcp` and
-  a static address binds the lease (networkd renders no static IPv4 for a
-  DHCPv4 row), and a foreign address listed first can win the bind; neither
-  is removed by any commit, and a gate that compared the candidate alone
-  would refuse every commit on such a node. A static -> DHCP change, which
-  strands the bound address, is refused. It abstains when no heartbeat is
-  running (boot applies run before comms start, a first cluster commit has
+  the candidate's unit no longer carries it. It also refuses when a changed
+  `primary`/`preferred` selection changes the address a fresh bind would pick
+  (networkd ordering followed by `selectClusterBindAddr`) while the bound
+  address remains configured. It compares the running and candidate selections,
+  so unchanged selections and mere address-list/kernel-order differences do
+  not refuse unrelated commits. The running-config half matters: a unit with
+  `dhcp` and a static address binds the lease (networkd renders no static IPv4
+  for a DHCPv4 row), and a foreign address listed first can win the bind;
+  neither is removed by any commit, and a gate that compared the candidate
+  alone would refuse every commit on such a node. A static -> DHCP change,
+  which strands the bound address, is refused. It abstains when no heartbeat
+  is running (boot applies run before comms start, a first cluster commit has
   none, a fabric-transport epoch never starts one, and node-id changes are
   #6192's and land through the boot path) and when the candidate has no
   control link.
+
+  **Boot-window operator risk:** until the heartbeat starts, both local- and
+  peer-address gates abstain. A one-sided control-address or peer-address
+  commit during that window can therefore leave one node configured to bind
+  an address its peer does not target. For any intended change, use the
+  paired offline procedure below, not an in-service commit. If the change
+  must be made during boot, configure the matching node-local addresses and
+  `peer-address` values in both nodes' boot configurations before starting
+  either `xpfd`. Do not rely on a one-sided first commit or make compensating
+  per-node live commits.
   On the peer-synced path it is safe for #8965's reason — every shipped
   cluster config keeps the control address inside `groups node0`/`node1`,
   so a synced text compiles to this node's own address — and a synced text
