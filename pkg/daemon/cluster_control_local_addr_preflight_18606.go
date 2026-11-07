@@ -266,8 +266,8 @@ func cidrListHasIP18606(list []string, ip net.IP) bool {
 // controlLinkState18606 returns the rendered address/selection state of the
 // control-link netdev. It follows ResolveKernelIfName's exact-declared-
 // interface precedence (#8994) before splitting a genuine unit ref (#9821).
-// An exact declared interface uses the renderer's bare-netdev fold; undeclared
-// unit refs resolve to one child unit.
+// A unit-0 suffix that resolves to the bare device uses its aggregate; secure
+// tunnel units remain separate netdevs.
 func controlLinkState18606(cfg *config.Config, ref string) controlLinkAddrs18606 {
 	if cfg == nil {
 		return controlLinkAddrs18606{}
@@ -292,13 +292,18 @@ func controlLinkState18606(cfg *config.Config, ref string) controlLinkAddrs18606
 	if ifc == nil {
 		return controlLinkAddrs18606{}
 	}
-	return controlLinkUnitState18606(ifc.Units[unit])
+	if split.HasUnit && (unit != 0 || config.IsSecureTunnelIfName(split.Base)) {
+		return controlLinkUnitState18606(ifc.Units[unit])
+	}
+	return controlLinkInterfaceState18606(ifc)
 }
 
-// controlLinkInterfaceState18606 mirrors compiler_iface's bare-netdev fold:
-// enabled untagged, non-tunnel units contribute addresses; the first
-// primary/preferred value per family wins in unit order and DHCP is ORed
-// across contributors. Tagged child netdevs and per-unit tunnels are excluded.
+// controlLinkInterfaceState18606 mirrors the bare-device address fold: enabled
+// untagged units contribute when they have no tunnel or their tunnel shares the
+// bare device. Numeric order determines the first selector per family; tagged
+// children and tunnels assigned to a different netdev are excluded. VLAN-parent
+// family filtering depends on the renderer's address plan, so statics are kept
+// there because this preflight has no plan view.
 func controlLinkInterfaceState18606(ifc *config.InterfaceConfig) controlLinkAddrs18606 {
 	if ifc == nil {
 		return controlLinkAddrs18606{}
@@ -311,9 +316,11 @@ func controlLinkInterfaceState18606(ifc *config.InterfaceConfig) controlLinkAddr
 
 	var out controlLinkAddrs18606
 	dhcpv4, dhcpv6 := false, false
+	bareDevice := config.LinuxIfName(ifc.Name)
 	for _, n := range unitNumbers {
 		unit := ifc.Units[n]
-		if unit == nil || unit.Disable || unit.VlanID > 0 || unit.Tunnel != nil {
+		if unit == nil || unit.Disable || unit.VlanID > 0 ||
+			(unit.Tunnel != nil && unit.Tunnel.Name != bareDevice) {
 			continue
 		}
 		for _, addr := range unit.Addresses {
@@ -339,7 +346,7 @@ func controlLinkInterfaceState18606(ifc *config.InterfaceConfig) controlLinkAddr
 			}
 		}
 	}
-	if dhcpv4 || dhcpv6 {
+	if (dhcpv4 || dhcpv6) && !ifc.TaggingEnabled() {
 		kept := out.addrs[:0]
 		for _, addr := range out.addrs {
 			ip, _, err := net.ParseCIDR(addr)

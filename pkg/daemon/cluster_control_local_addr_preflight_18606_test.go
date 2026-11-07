@@ -243,6 +243,30 @@ func TestControlLocalAddressPreflightReadsTheRunningBind18606(t *testing.T) {
 	if err := clusterControlLocalAddressCommitPreflight(running, dottedUnit7Running, dottedUnit7Swapped); err == nil {
 		t.Fatal("unit 7 primary swap on declared dotted control-interface hb.1 must be refused")
 	}
+
+	unitZeroAliasConfig := func(primary string) *config.Config {
+		unit7A := "interfaces hb.1 unit 7 family inet address 10.99.14.1/24"
+		unit7B := "interfaces hb.1 unit 7 family inet address 10.99.14.3/24"
+		if primary == "10.99.14.1/24" {
+			unit7A += " primary"
+		} else {
+			unit7B += " primary"
+		}
+		return configWithControl("hb.1.0", "10.99.14.2",
+			"interfaces hb.1 unit 0 family inet address 192.0.2.9/24",
+			unit7A, unit7B)
+	}
+	unitZeroAliasRunning := unitZeroAliasConfig("10.99.14.1/24")
+	unitZeroAliasSwapped := unitZeroAliasConfig("10.99.14.3/24")
+	unitZeroAliasState := controlLinkState18606(unitZeroAliasRunning, "hb.1.0")
+	if unitZeroAliasState.primary != "10.99.14.1/24" {
+		t.Fatalf("unit-0 suffix alias selected only unit 0's state: primary=%q addresses=%v",
+			unitZeroAliasState.primary, unitZeroAliasState.addrs)
+	}
+	if err := clusterControlLocalAddressCommitPreflight(running, unitZeroAliasRunning, unitZeroAliasSwapped); err == nil {
+		t.Fatal("control-interface hb.1.0 must aggregate its parent netdev and refuse the unit-7 primary swap")
+	}
+
 	dottedFirstSelection := configWithControl("hb.1", "10.99.14.2",
 		"interfaces hb.1 unit 0 family inet address 192.0.2.9/24 primary",
 		"interfaces hb.1 unit 7 family inet address 10.99.14.1/24 primary",
@@ -252,6 +276,121 @@ func TestControlLocalAddressPreflightReadsTheRunningBind18606(t *testing.T) {
 	if firstState.primary != "192.0.2.9/24" || firstState.preferredV6 != "2001:db8:14::9/64" {
 		t.Fatalf("bare-netdev first per-family selectors = primary %q, preferredV6 %q; want unit-0 values",
 			firstState.primary, firstState.preferredV6)
+	}
+
+	// The same lowest-unit selector must drive both the renderer model and
+	// this preflight even when unit 7 also claims a primary.
+	twoPrimaryConfig := func(unit0Primary, unit7Primary string) *config.Config {
+		unit0A := "interfaces hb.1 unit 0 family inet address 10.99.14.1/24"
+		unit0B := "interfaces hb.1 unit 0 family inet address 10.99.14.3/24"
+		unit7A := "interfaces hb.1 unit 7 family inet address 10.99.14.5/24"
+		unit7B := "interfaces hb.1 unit 7 family inet address 10.99.14.7/24"
+		if unit0Primary == "10.99.14.1/24" {
+			unit0A += " primary"
+		} else {
+			unit0B += " primary"
+		}
+		if unit7Primary == "10.99.14.5/24" {
+			unit7A += " primary"
+		} else {
+			unit7B += " primary"
+		}
+		return configWithControl("hb.1", "10.99.14.2", unit0A, unit0B, unit7A, unit7B)
+	}
+	twoPrimaryRunning := twoPrimaryConfig("10.99.14.1/24", "10.99.14.5/24")
+	twoPrimaryUnit7Changed := twoPrimaryConfig("10.99.14.1/24", "10.99.14.7/24")
+	twoPrimaryUnit0Changed := twoPrimaryConfig("10.99.14.3/24", "10.99.14.5/24")
+	if got := controlLinkState18606(twoPrimaryRunning, "hb.1").primary; got != "10.99.14.1/24" {
+		t.Fatalf("two-primary aggregate selected %q; numeric unit 0 must win", got)
+	}
+	if err := clusterControlLocalAddressCommitPreflight(running, twoPrimaryRunning, twoPrimaryUnit7Changed); err != nil {
+		t.Fatalf("changing unit 7's primary while unit 0 still wins must pass: %v", err)
+	}
+	if err := clusterControlLocalAddressCommitPreflight(running, twoPrimaryRunning, twoPrimaryUnit0Changed); err == nil {
+		t.Fatal("changing unit 0's winning primary while the bound address remains configured must refuse")
+	}
+
+	taggedParent := configWithControl("em0", "10.99.14.2",
+		"interfaces em0 vlan-tagging",
+		"interfaces em0 unit 0 family inet address 10.99.14.1/24",
+		"interfaces em0 unit 7 vlan-id 7",
+		"interfaces em0 unit 7 family inet address 10.99.14.7/24")
+	taggedParentState := controlLinkState18606(taggedParent, "em0")
+	if len(taggedParentState.addrs) != 1 || taggedParentState.addrs[0] != "10.99.14.1/24" {
+		t.Fatalf("tagged child address leaked into em0 parent aggregate: %v", taggedParentState.addrs)
+	}
+
+	// With no zone plan, the VLAN-parent renderer keeps unit-0 statics even
+	// when a different untagged unit requests DHCP.
+	taggedParentDHCP := configWithControl("hb.1", "10.99.14.2",
+		"interfaces hb.1 vlan-tagging",
+		"interfaces hb.1 unit 0 family inet address 10.99.14.1/24",
+		"interfaces hb.1 unit 7 family inet dhcp")
+	taggedParentWithoutStatic := configWithControl("hb.1", "10.99.14.2",
+		"interfaces hb.1 vlan-tagging",
+		"interfaces hb.1 unit 7 family inet dhcp")
+	if state := controlLinkState18606(taggedParentDHCP, "hb.1"); len(state.addrs) != 1 || state.addrs[0] != "10.99.14.1/24" {
+		t.Fatalf("untagged parent static was hidden by another unit's DHCP: %v", state.addrs)
+	}
+	taggedParentManager := cluster.NewManager(0, 1)
+	taggedParentManager.SetHeartbeatEndpointForTesting("10.99.14.1", "10.99.14.2", "hb.1")
+	if err := clusterControlLocalAddressCommitPreflight(taggedParentManager, taggedParentDHCP, taggedParentWithoutStatic); err == nil {
+		t.Fatal("unplanned VLAN-parent unit-0 static removal must refuse despite DHCP on unit 7")
+	}
+
+	secureTunnel := configWithControl("st0", "10.99.14.2",
+		"interfaces st0 unit 0 family inet address 10.99.14.1/24",
+		"interfaces st0 unit 1 family inet address 10.99.14.3/24")
+	secureTunnelState := controlLinkState18606(secureTunnel, "st0")
+	if len(secureTunnelState.addrs) != 1 || secureTunnelState.addrs[0] != "10.99.14.1/24" {
+		t.Fatalf("declared secure-tunnel st0 must use its unit-0 netdev, got addresses %v", secureTunnelState.addrs)
+	}
+	secureTunnelUnitZero := controlLinkState18606(secureTunnel, "st0.0")
+	if len(secureTunnelUnitZero.addrs) != 1 || secureTunnelUnitZero.addrs[0] != "10.99.14.1/24" {
+		t.Fatalf("secure-tunnel unit-0 suffix must remain one per-unit netdev, got addresses %v", secureTunnelUnitZero.addrs)
+	}
+
+	unit0TunnelConfig := func(primary string) *config.Config {
+		unit0A := "interfaces gr-0/0/0 unit 0 family inet address 10.99.14.1/24"
+		unit0B := "interfaces gr-0/0/0 unit 0 family inet address 10.99.14.3/24"
+		if primary == "10.99.14.1/24" {
+			unit0A += " primary"
+		} else {
+			unit0B += " primary"
+		}
+		return configWithControl("gr-0/0/0", "10.99.14.2",
+			"interfaces gr-0/0/0 unit 0 tunnel source 192.0.2.1",
+			"interfaces gr-0/0/0 unit 0 tunnel destination 198.51.100.2",
+			unit0A, unit0B)
+	}
+	unit0TunnelRunning := unit0TunnelConfig("10.99.14.1/24")
+	unit0TunnelSwapped := unit0TunnelConfig("10.99.14.3/24")
+	unit0TunnelIface := unit0TunnelRunning.Interfaces.Interfaces["gr-0/0/0"]
+	if unit0TunnelIface == nil {
+		t.Fatal("compiled unit-0 tunnel interface gr-0/0/0 is missing")
+	}
+	unit0 := unit0TunnelIface.Units[0]
+	if unit0 == nil || unit0.Tunnel == nil || unit0.Tunnel.Name != "gr-0-0-0" {
+		t.Fatalf("unit-0 tunnel device = %+v, want gr-0-0-0 (the bare netdev)", unit0)
+	}
+	unit0TunnelState := controlLinkState18606(unit0TunnelRunning, "gr-0/0/0")
+	if unit0TunnelState.primary != "10.99.14.1/24" || len(unit0TunnelState.addrs) != 2 {
+		t.Fatalf("unit-0 tunnel addresses/primary = %v/%q; want two addresses and primary 10.99.14.1/24",
+			unit0TunnelState.addrs, unit0TunnelState.primary)
+	}
+	tunnelManager := cluster.NewManager(0, 1)
+	tunnelManager.SetHeartbeatEndpointForTesting("10.99.14.1", "10.99.14.2", "gr-0/0/0")
+	if err := clusterControlLocalAddressCommitPreflight(tunnelManager, unit0TunnelRunning, unit0TunnelSwapped); err == nil {
+		t.Fatal("unit-0 tunnel primary swap on gr-0/0/0 must refuse while the heartbeat remains bound to configured 10.99.14.1")
+	}
+
+	// Explicitly disabling the interface remains an operator-directed shutdown,
+	// not a live address-renumber decision owned by this gate.
+	disabledControl := configWithControl("em0", "10.99.14.2",
+		"interfaces em0 disable",
+		"interfaces em0 unit 0 family inet address 10.99.14.1/24")
+	if err := clusterControlLocalAddressCommitPreflight(running, unchanged, disabledControl); err != nil {
+		t.Fatalf("an explicit interface disable is outside the live-renumber gate: %v", err)
 	}
 	dottedDHCP := configWithControl("hb.1", "10.99.14.2",
 		"interfaces hb.1 unit 0 family inet dhcp",

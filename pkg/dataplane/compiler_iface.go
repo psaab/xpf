@@ -2083,7 +2083,15 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 				var primaryAddr, preferredAddr, primaryAddrV6, preferredAddrV6 string
 				unitMTU := 0
 				allUnitsDisabled := len(effectiveCfg.Units) > 0
-				for _, unit := range effectiveCfg.Units {
+				// This row folds units onto one netdev. Stable numeric order
+				// makes address order and first-per-family selectors repeatable.
+				unitNumbers := make([]int, 0, len(effectiveCfg.Units))
+				for unitNumber := range effectiveCfg.Units {
+					unitNumbers = append(unitNumbers, unitNumber)
+				}
+				sort.Ints(unitNumbers)
+				for _, unitNumber := range unitNumbers {
+					unit := effectiveCfg.Units[unitNumber]
 					if unit == nil {
 						allUnitsDisabled = false
 						continue
