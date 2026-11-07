@@ -301,6 +301,7 @@ The harness never changes host addresses. Source
 `$IPERF_TARGET4` (loss `172.16.80.202`). Pass `--target-ip
 "$IPERF_TARGET4"` (or use `TARGET_IP` as the environment fallback). Start the
 sink on that instance for all 64 destination ports, `5300-5363`, and require
+its startup report to show `bound_ports:64` before launching traffic.
 
 ### What this harness can and cannot attribute
 
