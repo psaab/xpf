@@ -120,6 +120,9 @@ out=$(DEADCODE_GO_CANDIDATES="$FAKE_GO" FAKE_DEADCODE_MODE=findings make -s -C "
 	bad "filtered finding was not recipe exit 1 (rc=$rc): $out"
 
 PINGO=$(sed -n 's/^DEADCODE_VERSION=//p' "$ROOT/scripts/go-deadcode-gate.sh" | head -n 1)
+[ -n "$PINGO" ] &&
+	ok "gate DEADCODE_VERSION extraction is non-empty ($PINGO)" ||
+	bad "gate DEADCODE_VERSION extraction returned empty"
 out=$(DEADCODE_GO_CANDIDATES="$FAKE_GO" FAKE_DEADCODE_MODE=clean FAKE_DEADCODE_ARGS="$WORK/run.args" make -s -C "$ROOT" check-nft-deadcode GO="$FAKE_GO" 2>&1); rc=$?
 [ "$rc" = "0" ] && grep -q "golang.org/x/tools/cmd/deadcode@$PINGO" "$WORK/run.args" &&
 	ok "scoped target invokes the gate's pinned analyser version ($PINGO)" ||
