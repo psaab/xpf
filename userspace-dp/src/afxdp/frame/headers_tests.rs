@@ -593,3 +593,17 @@ fn eth_header_legacy_vid_path_still_emits_8021q_tag() {
     assert_eq!(&buf[14..16], &[0x00, 0x64], "PCP 0, VID 100");
     assert_eq!(&buf[16..18], &[0x08, 0x00]);
 }
+
+#[test]
+fn datagram_identification_skips_raw_zero_at_wrap_17266() {
+    // Sol delta-3: seed just below the u32 wrap; issued values must be
+    // MAX-1, MAX, 1 — never 0 — so adjacent mapped IDs stay distinct.
+    let counter = DatagramIdentification { next: std::sync::atomic::AtomicU32::new(u32::MAX - 1) };
+    let a = counter.next();
+    let b = counter.next();
+    let c = counter.next();
+    assert_eq!((a, b, c), (u32::MAX - 1, u32::MAX, 1));
+    let ids = [map_ipv4_identification(a), map_ipv4_identification(b), map_ipv4_identification(c)];
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[1], ids[2]);
+}

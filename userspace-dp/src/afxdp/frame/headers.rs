@@ -58,7 +58,17 @@ impl DatagramIdentification {
     }
     #[inline]
     pub(crate) fn next(&self) -> u32 {
-        self.next.fetch_add(1, Ordering::Relaxed)
+        // Sol delta-3: never issue raw 0 — at the u32 wrap, raw MAX and
+        // raw 0 are ADJACENT ticks that map_ipv4_identification sends
+        // both to ID 1, so consecutive datagrams would share an ID.
+        // Skipping 0 keeps adjacent IDs distinct (period-65535 repeats
+        // 65535 ticks apart are inherent to a 16-bit ID space).
+        loop {
+            let raw = self.next.fetch_add(1, Ordering::Relaxed);
+            if raw != 0 {
+                return raw;
+            }
+        }
     }
     /// Test-only counter read (GLM #17266 M1): pins that the DF-set path
     /// performs NO fetch at all (fetch-and-discard must RED). Tests use
@@ -81,7 +91,8 @@ pub(crate) fn next_datagram_identification() -> u32 {
 }
 
 /// Map a raw sequence value into the non-zero IPv4 Identification space.
-/// At the `u32` source wrap, raw `u32::MAX` and 0 both map to 1.
+/// Raw 0 is never issued (skipped at wrap), so adjacent values never
+/// collide; values 65535 apart share an ID by 16-bit necessity.
 #[inline]
 pub(crate) fn map_ipv4_identification(raw: u32) -> u16 {
     (raw % 65535) as u16 + 1
