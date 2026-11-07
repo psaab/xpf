@@ -1472,11 +1472,19 @@ func openPerInterfaceSocket(ifName string, iface *net.Interface, isVLAN bool) (*
 // flags (notably SOCK_CLOEXEC) without needing CAP_NET_RAW.
 var afPacketSocket = unix.Socket
 
+// afPacketBind is the bind(2) entry point used by openAfPacketReceiver. It
+// lets receiver tests exercise setup past bind without requiring a raw socket.
+var afPacketBind = unix.Bind
+
 // afPacketSetsockoptInt is the setsockopt(2) entry point used by
 // openAfPacketReceiver for PACKET_IGNORE_OUTGOING. Package var for the same
 // reason as afPacketSocket: it lets a test assert the EXACT (level, option,
 // value) the call site uses, deterministically and without CAP_NET_RAW.
 var afPacketSetsockoptInt = unix.SetsockoptInt
+
+// afPacketSetsockoptSockFprog is the SO_ATTACH_FILTER entry point used by
+// openAfPacketReceiver. A test can reach later setup without kernel privileges.
+var afPacketSetsockoptSockFprog = unix.SetsockoptSockFprog
 
 // VRRP advertisement multicast destination MACs. IPv4 VRRP adverts go to
 // 224.0.0.18 which maps to the Ethernet multicast MAC 01:00:5e:00:00:12; IPv6
@@ -1630,7 +1638,7 @@ func openAfPacketReceiver(ifIndex int) (int, error) {
 	}
 
 	// Bind to specific interface.
-	if err := unix.Bind(fd, &unix.SockaddrLinklayer{
+	if err := afPacketBind(fd, &unix.SockaddrLinklayer{
 		Protocol: proto,
 		Ifindex:  ifIndex,
 	}); err != nil {
@@ -1693,7 +1701,7 @@ func openAfPacketReceiver(ifIndex int) (int, error) {
 	// variants (#5088). Built by vrrpCBPFFilter so the exact instruction array
 	// the kernel runs can be exercised against synthetic frames in a bpf.VM.
 	filter := vrrpCBPFFilter()
-	if err := unix.SetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{
+	if err := afPacketSetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{
 		Len:    uint16(len(filter)),
 		Filter: &filter[0],
 	}); err != nil {

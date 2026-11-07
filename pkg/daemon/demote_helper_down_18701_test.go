@@ -113,7 +113,7 @@ func TestUnresponsiveHelperDemotionReleasesVIPsFirst18701(t *testing.T) {
 	t.Cleanup(func() { helperDownDemotionBound = old })
 	d, log := newDemotion18701(t, true, 5*time.Second)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	primeRG1Primary(t, d)
 	start := time.Now()
@@ -135,7 +135,7 @@ func TestUnresponsiveHelperDemotionReleasesVIPsFirst18701(t *testing.T) {
 func TestHealthyDemotionKeepsTheOrder18701(t *testing.T) {
 	d, log := newDemotion18701(t, false, 300*time.Millisecond)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	primeRG1Primary(t, d)
 	start := time.Now()
@@ -181,7 +181,7 @@ func runTwoRGDemotion18701(t *testing.T, demote []int) []string {
 	dp.notReady.Store(true)
 	d.setDataplane(dp)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	d.directRemoveVIPsFn = func(rg int) int { log.add(fmt.Sprintf("vips-removed:%d", rg)); return 1 }
 	d.directAddVIPsFn = func(int) int { return 0 }
@@ -261,7 +261,7 @@ func TestReconcileLoopReleasesVIPsFirstWithUnresponsiveHelper18701(t *testing.T)
 	t.Cleanup(func() { helperDownDemotionBound = old })
 	d, log := newDemotion18701(t, true, 5*time.Second)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	primeRG1Primary(t, d)
 	// The election demoted RG1, but its event was never handled: the
@@ -353,7 +353,7 @@ func TestRemoteFailoverOfAWedgedNodeCompletes18715(t *testing.T) {
 	t.Cleanup(func() { helperDownDemotionBound = old })
 	d, log := newDemotion18701(t, true, 5*time.Second)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	primeRG1Primary(t, d)
 	d.armFailoverActuation(1, actuationReqID)
@@ -382,7 +382,7 @@ func TestDemotionPrepRunsWhenControlStillAnswers18715(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d, log := newDemotion18701(t, true, 300*time.Millisecond)
 			if !d.isNoRethVRRP() {
-				t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+				t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 			}
 			d.dataplane().(*readinessDP18701).controlAnswers.Store(tc.answers)
 			d.tryPrepareDemotionFn = func(int) { log.add("prep") }
@@ -414,7 +414,7 @@ func TestSlowButAnsweringHelperFenceAckedAfterTheWrite18715(t *testing.T) {
 	const hold = 1500 * time.Millisecond
 	d, _ := newDemotion18701(t, true, hold)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	d.dataplane().(*readinessDP18701).controlAnswers.Store(true)
 	d.tryPrepareDemotionFn = func(int) {}
@@ -452,7 +452,7 @@ func TestHelperAnsweringMidWriteUsesTheRealResult18715(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d, log := newDemotion18701(t, true, 600*time.Millisecond)
 			if !d.isNoRethVRRP() {
-				t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+				t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 			}
 			dp := d.dataplane().(*readinessDP18701)
 			dp.ha.err = tc.err
@@ -489,7 +489,7 @@ func TestAnsweringAtEntryIsNeverBounded18715(t *testing.T) {
 	t.Cleanup(func() { helperDownDemotionBound = old })
 	d, _ := newDemotion18701(t, true, 600*time.Millisecond)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	dp := d.dataplane().(*readinessDP18701)
 	dp.controlAnswers.Store(true)
@@ -520,7 +520,7 @@ func TestPrepKeepsTheEntrySampleAcrossTheVIPRelease18715(t *testing.T) {
 	t.Cleanup(func() { helperDownDemotionBound = old })
 	d, log := newDemotion18701(t, true, 50*time.Millisecond)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	dp := d.dataplane().(*readinessDP18701)
 	dp.controlAnswers.Store(false)
@@ -551,7 +551,7 @@ func TestSilentAckNeedsEveryVIPConfirmedGone18715(t *testing.T) {
 	t.Cleanup(func() { helperDownDemotionBound = old })
 	d, _ := newDemotion18701(t, true, 5*time.Second)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	d.directVIPsConfirmAbsentFn = func(int) error { return errors.New("VIP 10.0.61.1/24 is still on ge-0-0-1") }
 	primeRG1Primary(t, d)
@@ -580,7 +580,7 @@ func (d *noSurfaceDP18715) HelperElectionNotReady() bool { return true }
 func TestNoControlSurfaceSplitsTheFallback18715(t *testing.T) {
 	d, log := newDemotion18701(t, true, 0)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	ha := &slowHA18701{log: log, err: errors.New("no helper")}
 	d.setDataplane(&noSurfaceDP18715{ha: ha})
@@ -733,7 +733,7 @@ func TestReconcileLoopPrepRunsWhenControlStillAnswers18715(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d, log := newDemotion18701(t, true, 300*time.Millisecond)
 			if !d.isNoRethVRRP() {
-				t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+				t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 			}
 			d.dataplane().(*readinessDP18701).controlAnswers.Store(tc.answers)
 			d.tryPrepareDemotionFn = func(int) { log.add("prep") }
@@ -767,7 +767,7 @@ func TestReconcileLoopPrepRunsWhenControlStillAnswers18715(t *testing.T) {
 func TestAnsweringHelperRefusalIsNotAcked18715(t *testing.T) {
 	d, _ := newDemotion18701(t, true, 0)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	dp := d.dataplane().(*readinessDP18701)
 	dp.controlAnswers.Store(true)

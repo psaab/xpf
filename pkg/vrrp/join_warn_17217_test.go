@@ -121,13 +121,13 @@ func TestJoinFailuresWarn17217(t *testing.T) {
 	})
 
 	// Wiring: openAfPacketReceiver must route through the membership seam.
-	// Bind on an AF_UNIX stand-in fails before membership without privileges,
-	// so this subtest only asserts when the seam was actually reached.
+	// Fake bind/filter setup so the AF_UNIX stand-in reaches that call without
+	// needing CAP_NET_RAW; skipping before membership would hide a broken path.
 	t.Run("allmulti_via_receiver", func(t *testing.T) {
 		rec := installWarnRecorder17217(t)
-		origSock, origOpt, origMreq := afPacketSocket, afPacketSetsockoptInt, packetAddAllmultiMembership
+		origSock, origBind, origOpt, origFilter, origMreq := afPacketSocket, afPacketBind, afPacketSetsockoptInt, afPacketSetsockoptSockFprog, packetAddAllmultiMembership
 		t.Cleanup(func() {
-			afPacketSocket, afPacketSetsockoptInt, packetAddAllmultiMembership = origSock, origOpt, origMreq
+			afPacketSocket, afPacketBind, afPacketSetsockoptInt, afPacketSetsockoptSockFprog, packetAddAllmultiMembership = origSock, origBind, origOpt, origFilter, origMreq
 		})
 		fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 		if err != nil {
@@ -136,11 +136,15 @@ func TestJoinFailuresWarn17217(t *testing.T) {
 		defer unix.Close(fd)
 		called := false
 		afPacketSocket = func(_, _, _ int) (int, error) { return fd, nil }
+		afPacketBind = func(int, unix.Sockaddr) error { return nil }
+		afPacketSetsockoptSockFprog = func(int, int, int, *unix.SockFprog) error { return nil }
 		afPacketSetsockoptInt = func(_, _, _, _ int) error { return nil }
 		packetAddAllmultiMembership = func(int, *unix.PacketMreq) error { called = true; return unix.ENOBUFS }
-		_, _ = openAfPacketReceiver(1)
+		if _, err := openAfPacketReceiver(1); err != nil {
+			t.Fatalf("openAfPacketReceiver: %v", err)
+		}
 		if !called {
-			t.Skip("stand-in fd bailed before ALLMULTI membership")
+			t.Fatal("openAfPacketReceiver did not reach the ALLMULTI membership seam")
 		}
 		if n, lvl := rec.count("failed to set allmulti"); n != 1 || lvl != slog.LevelWarn {
 			t.Fatalf("allmulti via receiver: warns=%d level=%v, want 1 Warn", n, lvl)

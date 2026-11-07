@@ -40,12 +40,15 @@ jobs:
       - name: Prepare temporary directory
         run: mkdir -p "$TMPDIR"
       - name: Census runnable-harness reachability
+        if: ${{ !cancelled() }}
         run: sh scripts/harness-census.sh
       - name: Self-test the census
+        if: ${{ !cancelled() }}
         run: bash ./test/incus/harness-census-selftest.sh
       # #16465: rust-source reachability -- a deleted test `mod` line
       # orphans a file `cargo check --all-targets` cannot see.
       - name: Rust source census
+        if: ${{ !cancelled() }}
         run: |
           python3 scripts/rust-source-census-13961.py --self-test
           python3 scripts/rust-source-census-13961.py userspace-dp/src
@@ -55,12 +58,16 @@ jobs:
       # pure file scan (no network, no toolchain beyond python3/sh):
       # a new undeclared t.Skip or #[ignore] reds this job.
       - name: Go skip census
+        if: ${{ !cancelled() }}
         run: bash scripts/go-skip-census.sh
       - name: Ignored-cell census
+        if: ${{ !cancelled() }}
         run: sh scripts/ignored-cell-census.sh
       - name: Self-test the Go skip census
+        if: ${{ !cancelled() }}
         run: bash ./test/incus/go-skip-census-selftest.sh
       - name: Self-test the ignored-cell census
+        if: ${{ !cancelled() }}
         run: bash ./test/incus/ignored-cell-census-selftest.sh
       # #18645: expiry markers and mirrored doc blocks. Hermetic file scans.
       # The instruction census runs in PR mode: marker syntax everywhere, an

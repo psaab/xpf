@@ -39,7 +39,7 @@ func TestPeerRequestDuringTheGraceTakesTheVIPFirstPath18791(t *testing.T) {
 	t.Cleanup(func() { helperDownDemotionBound = old })
 	d, log := newDemotion18701(t, false, 5*time.Second)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	base := d.dataplane().(*readinessDP18701)
 	dp := &exitedDP18791{readinessDP18701: base}
@@ -99,7 +99,7 @@ func TestGraceKeepsTheElectionWeight18791(t *testing.T) {
 func TestSpawnedUnarmedResponsiveHelperUsesVIPFirstButNormalControlPathFold18794(t *testing.T) {
 	d, _ := newDemotion18701(t, false, 0)
 	if !d.isNoRethVRRP() {
-		t.Skip("fixture config is not direct (no-RETH-VRRP) mode")
+		t.Fatalf("setup: fixed test fixture must use direct (no-RETH-VRRP) mode")
 	}
 	base := d.dataplane().(*readinessDP18701)
 	base.controlAnswers.Store(true)

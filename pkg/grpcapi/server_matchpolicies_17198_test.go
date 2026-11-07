@@ -21,7 +21,7 @@ import (
 func TestMatchPoliciesGRPCNilConfigGrammar17198(t *testing.T) {
 	s := &Server{store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
 	if s.store.ActiveConfig() != nil {
-		t.Skip("active config is not nil")
+		t.Fatalf("fresh test store active config = %+v, want nil", s.store.ActiveConfig())
 	}
 	badPort := int32(70000)
 	cases := []*pb.MatchPoliciesRequest{

@@ -524,10 +524,10 @@ CI_WORKFLOW="${REPO_ROOT}/.github/workflows/test.yml"
 # Slice the census job block through the next top-level job so checks are
 # scoped to the gated job, not other workflow jobs.
 CENSUS_JOB="$(awk 'BEGIN{in_job=0} /^  census:/{in_job=1; print; next} /^  [A-Za-z0-9_.-]+:/{if (in_job) exit} in_job{print}' "$CI_WORKFLOW")"
-# Allowlist: the census job must equal this literal byte for byte. The only
-# `if:` it admits is the exact `${{ !cancelled() }}` on the #18645 steps, which
-# runs MORE (a step after a red one), never less. A
-# deny-list cannot enumerate every fail-open edit (if:, continue-on-error,
+# Allowlist: the census job must equal this literal byte for byte. Its only
+# `if:` values are the exact `${{ !cancelled() }}` on census and self-test
+# steps: #18611 makes later checks run after a prior failure, never less.
+# A deny-list cannot enumerate every fail-open edit (if:, continue-on-error,
 # shell:, needs:, env:, ref:, || true, || :, heredoc decoys), so any
 # deviation -- including a renamed job or moved run line -- fails closed.
 # The C# WorkflowParser accepted both quoted-scalar and non-LF-break probes;
@@ -553,12 +553,15 @@ EXPECTED_CENSUS_JOB="$(cat <<'EXPECTED_CENSUS_JOB_EOF'
       - name: Prepare temporary directory
         run: mkdir -p "$TMPDIR"
       - name: Census runnable-harness reachability
+        if: ${{ !cancelled() }}
         run: sh scripts/harness-census.sh
       - name: Self-test the census
+        if: ${{ !cancelled() }}
         run: bash ./test/incus/harness-census-selftest.sh
       # #16465: rust-source reachability -- a deleted test `mod` line
       # orphans a file `cargo check --all-targets` cannot see.
       - name: Rust source census
+        if: ${{ !cancelled() }}
         run: |
           python3 scripts/rust-source-census-13961.py --self-test
           python3 scripts/rust-source-census-13961.py userspace-dp/src
@@ -568,12 +571,16 @@ EXPECTED_CENSUS_JOB="$(cat <<'EXPECTED_CENSUS_JOB_EOF'
       # pure file scan (no network, no toolchain beyond python3/sh):
       # a new undeclared t.Skip or #[ignore] reds this job.
       - name: Go skip census
+        if: ${{ !cancelled() }}
         run: bash scripts/go-skip-census.sh
       - name: Ignored-cell census
+        if: ${{ !cancelled() }}
         run: sh scripts/ignored-cell-census.sh
       - name: Self-test the Go skip census
+        if: ${{ !cancelled() }}
         run: bash ./test/incus/go-skip-census-selftest.sh
       - name: Self-test the ignored-cell census
+        if: ${{ !cancelled() }}
         run: bash ./test/incus/ignored-cell-census-selftest.sh
       # #18645: expiry markers and mirrored doc blocks. Hermetic file scans.
       # The instruction census runs in PR mode: marker syntax everywhere, an

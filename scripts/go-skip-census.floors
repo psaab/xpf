@@ -163,20 +163,30 @@
 # #18846-G58 adds one `other` skip site in
 # pkg/nfqueue/measure_memory_test.go: after a successful SO_SNDBUF
 # request/read-back, M2 skips if the effective value is below the tested
-# 8 MiB floor. The unmodified base already measured 675 total (139
-# priv-absent, 517 other) against the existing 611/122/470 floors. This
-# update banks only G58's +1 total/+1 other; that pre-existing drift remains
-# unbanked.
-total        = 612
+# 8 MiB floor.
+# The STEP-0 map reports an unmodified base of 675 total (139 priv-absent,
+# 18 priv-present, 517 other, 1 unparsed). The first assigned-worktree recount
+# measured 676 (139/18/518/1); its extra pkg/grpcapi ActiveConfig skip was an
+# invalid test-fixture guard and now fails loudly instead of hiding the test.
+# After removing that, the unreachable-receiver skip, and 16 invalid direct-mode
+# fixture skips, the final tree measures 658 (139/18/500/1). Against these
+# 612/122/18/471/1 floors, bank only the 46-net increase: +17 priv-absent and
+# +29 other. docs/log/18611.md attributes each of the 47 remaining newly
+# counted sites; one new IFNAMSIZ-constrained CLI interface gate replaces its
+# previous dash-interface message, so that replacement is net zero.
+# These floors already include the separately attributed #18751 fabric
+# netns site, #18728's three lo0 kernel/tool sites, and #18846-G58's one
+# SO_SNDBUF site; they are not counted again in this update.
+total        = 658
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 122
+priv-absent  = 139
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 471
+other        = 500
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket
