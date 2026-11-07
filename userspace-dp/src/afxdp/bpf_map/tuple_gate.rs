@@ -668,24 +668,22 @@ mod tests {
         // shard is 0, none of which need hash to shard 0, so an
         // .expect on the search can still panic per seed. Determinism
         // therefore comes from choosing BOTH keys by the canonical
-        // comparator: scan ports until one key's canonical shard is
-        // strictly above another's. With 256 shards over ~65k ports a
-        // strict (free < held) canonical pair exists for every seed —
-        // the hash is keyed, so no seed can place all keys on one
-        // shard; if one ever did, this search panics ONCE, loudly,
-        // instead of passing vacuously on lucky seeds.
+        // comparator, tracked as MINIMUM and MAXIMUM below: derived
+        // Debug includes the varying src_port, so even if every key
+        // landed on one shard the Debug tie-break still yields a
+        // strict span — the pair fails to exist only if all 65,535
+        // scanned keys compare equal, which the port variation
+        // prevents by construction. Taking the extremes is
+        // scan-order independent (an order-dependent first-pair
+        // search misses the pair whenever the scanned prefix is the
+        // minimum run — measured 11/2800 fresh-process panics before
+        // this form). Cost is bounded and test-only (~65k
+        // hash+compare iterations).
         let sorts_before = |a: &SessionKey, b: &SessionKey| {
             TupleGate::shard_index(a) < TupleGate::shard_index(b)
                 || (TupleGate::shard_index(a) == TupleGate::shard_index(b)
                     && format!("{a:?}") < format!("{b:?}"))
         };
-        // Track the canonical MAXIMUM and MINIMUM over the scanned
-        // ports: their strict span exists unless every scanned key
-        // canonicalizes identically, and taking the pair from the two
-        // extremes does not depend on scan order (an order-dependent
-        // first-pair search misses the pair whenever the first keys
-        // happen to be the global minimum). A full 1..MAX span repeats
-        // only 256 ports per shard class, so the scan is microseconds.
         let mut min_key: Option<SessionKey> = None;
         let mut max_key: Option<SessionKey> = None;
         for port in 1..=u16::MAX {
