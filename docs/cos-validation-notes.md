@@ -398,14 +398,16 @@ before/after), use the skill's helper:
 .codex/skills/iperf-grpc-tcpdump/scripts/capture_iperf.sh --family 4 --parallel 16 --duration 30
 ```
 
-This capture path is how #728 was diagnosed: server-side tcpdump
-confirmed ECT(0) bits were present on ingress frames **before** the
-firewall's marker ran, which ruled out "the endpoint doesn't negotiate
-ECN" and pointed directly at the marker's L3 offset. Without the gRPC
+<!-- Expires-when: #18576 closed -->
+This family-6 gRPC capture path is how #728 was diagnosed: server-side
+`tcpdump` confirmed ECT(0) bits were present on ingress frames **before**
+the firewall's marker ran, ruling out "the endpoint doesn't negotiate
+ECN" and pointing to the marker's L3 offset. Without this family-6
 capture we would have spent another round chasing phantom endpoint
-problems. Use it whenever a local tcpdump shows `tos 0x0` on a VLAN
-subinterface before concluding "ECN isn't negotiating" — the real packet
-on the wire may say otherwise.
+problems. For future diagnosis, compare the family-specific wire capture
+before concluding "ECN isn't negotiating": use the family-6 gRPC capture
+or family-4 `tcpdump` inside the IPv4 target container (or the helper
+above). A local capture may not show what is on the wire.
 
 ## Choosing a fix path
 
