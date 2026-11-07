@@ -463,3 +463,28 @@ func TestRedactionSiteConsumersPinned17270(t *testing.T) {
 		})
 	}
 }
+
+func TestRedactionOverlapSecretBeatsURL17270(t *testing.T) {
+	// GLM #17270: one index that is BOTH a URL site and a gated secret
+	// (dynamic-dns server URL then gated password): the secret mask must
+	// win; a precedence flip leaks the value verbatim.
+	tree := parseHierText(t, `
+system {
+    services {
+        dynamic-dns {
+            provider p1 {
+                server https://upd.example.com/update;
+                password OVERLAP-PROBE-17270;
+            }
+        }
+    }
+}
+`)
+	out := tree.RedactedClone().FormatSet()
+	if strings.Contains(out, "OVERLAP-PROBE-17270") {
+		t.Fatalf("overlapping secret leaked under URL transform:\n%s", out)
+	}
+	if !strings.Contains(out, "##SECRET-DATA##") && !strings.Contains(out, "#<redacted>") {
+		t.Fatalf("overlapping site not masked at all:\n%s", out)
+	}
+}
