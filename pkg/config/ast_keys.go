@@ -99,6 +99,23 @@ func hasBracketedKey(n *Node) bool {
 	return false
 }
 
+// bracketedClosedForKeySpan carries the node-level close bit into the key
+// span containing the final bracketed token. The bit has no per-list offset;
+// using the final aligned bracketed token keeps a split from assigning the
+// same closing delimiter to both output segments.
+func bracketedClosedForKeySpan(n *Node, from, to int) bool {
+	if n == nil || !n.BracketedClosed || from < 0 || from > to ||
+		to > len(n.Keys) || len(n.KeysBracketed) != len(n.Keys) {
+		return false
+	}
+	for i := len(n.KeysBracketed) - 1; i >= 0; i-- {
+		if n.KeysBracketed[i] {
+			return from <= i && i < to
+		}
+	}
+	return false
+}
+
 // replaceKeys replaces a node's key span and all of its provenance. Keys and
 // masks are copied; setters normalize absent, skewed, and all-false masks to
 // nil so persisted JSON remains byte-identical for provenance-free nodes.

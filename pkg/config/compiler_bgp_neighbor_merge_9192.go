@@ -273,8 +273,10 @@ func splitFusedMultiLeaves14409(body []*Node, schema *schemaNode) []*Node {
 		if cut < 0 {
 			continue
 		}
-		first := &Node{Keys: append([]string(nil), prop.Keys[:cut]...), InheritedFrom: prop.InheritedFrom}
-		rest := &Node{Keys: append([]string(nil), prop.Keys[cut:]...), InheritedFrom: prop.InheritedFrom}
+		first := &Node{Keys: append([]string(nil), prop.Keys[:cut]...), InheritedFrom: prop.InheritedFrom,
+			BracketedClosed: bracketedClosedForKeySpan(prop, 0, cut)}
+		rest := &Node{Keys: append([]string(nil), prop.Keys[cut:]...), InheritedFrom: prop.InheritedFrom,
+			BracketedClosed: bracketedClosedForKeySpan(prop, cut, len(prop.Keys))}
 		if len(prop.KeysQuoted) == len(prop.Keys) {
 			first.setKeysQuoted(append([]bool(nil), prop.KeysQuoted[:cut]...))
 			rest.setKeysQuoted(append([]bool(nil), prop.KeysQuoted[cut:]...))
@@ -302,7 +304,8 @@ func splitFusedMultiLeaves14409(body []*Node, schema *schemaNode) []*Node {
 // heads, by re-homing its keys under a synthetic neighbor identity and
 // asking packedBodyChildren to walk them.
 func packedBodyTail14409(rest *Node, schema *schemaNode) []*Node {
-	wrapper := &Node{Keys: []string{"neighbor", "0.0.0.0"}, InheritedFrom: rest.InheritedFrom}
+	wrapper := &Node{Keys: []string{"neighbor", "0.0.0.0"}, InheritedFrom: rest.InheritedFrom,
+		BracketedClosed: rest.BracketedClosed}
 	quoted := keyMask(rest.KeysQuoted, len(rest.Keys))
 	bracketed := keyMask(rest.KeysBracketed, len(rest.Keys))
 	for i, key := range rest.Keys {

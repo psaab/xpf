@@ -1273,6 +1273,7 @@ func walkInstanceChildren(node *Node, containerSchema *schemaNode, remaining, ba
 				Children:      node.Children,
 				InheritedFrom: node.InheritedFrom,
 			}
+			wrapper.copyKeyProvenance(node)
 			if expanded := packedBodyChildren(wrapper, &shallow); len(expanded) != len(node.Children) || len(expanded) == 0 || (len(expanded) > 0 && len(node.Children) > 0 && &expanded[0] != &node.Children[0]) {
 				walkChildren = expanded
 			}

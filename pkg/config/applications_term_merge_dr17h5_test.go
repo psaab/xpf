@@ -254,3 +254,81 @@ applications {
 		assertAppTerms14434(t, cfg, "myapp-t2")
 	})
 }
+
+// TestGroupApplicationTermMergePreservesBracketProvenance17263 pins a
+// bracketed source term merged into a maskless inline destination. The
+// inherited renderer and expanded AST must both retain the list boundary.
+func TestGroupApplicationTermMergePreservesBracketProvenance17263(t *testing.T) {
+	tree, perrs := config.NewParser(`
+groups {
+  G {
+    applications {
+      application myapp {
+        term t1 protocol [ tcp udp ];
+      }
+    }
+  }
+}
+applications {
+  application myapp {
+    term t1 destination-port 22;
+    apply-groups G;
+  }
+}
+`).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("parse: %v", perrs)
+	}
+
+	rendered, err := tree.FormatInheritanceForNode(-1)
+	if err != nil {
+		t.Fatalf("FormatInheritanceForNode: %v", err)
+	}
+	if !strings.Contains(rendered, "protocol [ tcp udp ]") {
+		t.Fatalf("inherited format lost the source bracket run:\n%s", rendered)
+	}
+	if err := tree.ExpandGroups(); err != nil {
+		t.Fatalf("ExpandGroups: %v", err)
+	}
+	applications := tree.FindChild("applications")
+	if applications == nil {
+		t.Fatal("applications node missing after expansion")
+	}
+	var app *config.Node
+	for _, candidate := range applications.FindChildren("application") {
+		if len(candidate.Keys) > 1 && candidate.Keys[1] == "myapp" {
+			app = candidate
+			break
+		}
+	}
+	if app == nil {
+		t.Fatal("application myapp missing after expansion")
+	}
+	var term *config.Node
+	for _, candidate := range app.FindChildren("term") {
+		if len(candidate.Keys) > 1 && candidate.Keys[1] == "t1" {
+			term = candidate
+			break
+		}
+	}
+	if term == nil {
+		t.Fatal("merged term t1 missing after expansion")
+	}
+	if len(term.KeysBracketed) != len(term.Keys) {
+		t.Fatalf("merged term bracket mask is not aligned: keys=%q mask=%v", term.Keys, term.KeysBracketed)
+	}
+	var sawTCP, sawUDP bool
+	for i, key := range term.Keys {
+		if key != "tcp" && key != "udp" {
+			continue
+		}
+		if !term.KeyBracketed(i) {
+			t.Fatalf("merged protocol token %q lost bracket provenance: keys=%q mask=%v", key, term.Keys, term.KeysBracketed)
+		}
+		sawTCP = sawTCP || key == "tcp"
+		sawUDP = sawUDP || key == "udp"
+	}
+	if !sawTCP || !sawUDP || !term.BracketedClosed {
+		t.Fatalf("merged term provenance incomplete: keys=%q bracketed=%v closed=%v", term.Keys, term.KeysBracketed, term.BracketedClosed)
+	}
+}

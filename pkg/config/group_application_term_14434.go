@@ -240,11 +240,25 @@ func mergeApplicationTermLeaves14434(dst, src *Node) bool {
 	}
 
 	merged := append([]string(nil), dst.Keys...)
-	mergedQuoted := append([]bool(nil), dst.KeysQuoted...)
-	mergedBracketed := append([]bool(nil), dst.KeysBracketed...)
-	hasQ := len(dst.KeysQuoted) == len(dst.Keys)
-	hasB := len(dst.KeysBracketed) == len(dst.Keys)
-
+	dstQ := len(dst.KeysQuoted) == len(dst.Keys)
+	dstB := len(dst.KeysBracketed) == len(dst.Keys)
+	srcQ := len(src.KeysQuoted) == len(src.Keys)
+	srcB := len(src.KeysBracketed) == len(src.Keys)
+	hasQ := dstQ || srcQ
+	hasB := dstB || srcB
+	var mergedQuoted, mergedBracketed []bool
+	if dstQ {
+		mergedQuoted = append([]bool(nil), dst.KeysQuoted...)
+	} else if srcQ {
+		mergedQuoted = make([]bool, len(dst.Keys))
+	}
+	if dstB {
+		mergedBracketed = append([]bool(nil), dst.KeysBracketed...)
+	} else if srcB {
+		mergedBracketed = make([]bool, len(dst.Keys))
+	}
+	dstHadBracketed := dstB && hasBracketedKey(dst)
+	var appendedBracketed bool
 	appendTok := func(tok string, quoted, bracketed bool) {
 		merged = append(merged, tok)
 		if hasQ {
@@ -253,9 +267,8 @@ func mergeApplicationTermLeaves14434(dst, src *Node) bool {
 		if hasB {
 			mergedBracketed = append(mergedBracketed, bracketed)
 		}
+		appendedBracketed = appendedBracketed || bracketed
 	}
-	srcQ := len(src.KeysQuoted) == len(src.Keys)
-	srcB := len(src.KeysBracketed) == len(src.Keys)
 	// src token index: Keys[0]=term, Keys[1]=name, body starts at 2.
 	srcIdx := 2
 	for _, p := range srcPairs {
@@ -335,6 +348,10 @@ func mergeApplicationTermLeaves14434(dst, src *Node) bool {
 	if hasB {
 		bracketed = mergedBracketed
 	}
-	dst.replaceKeys(merged, quoted, bracketed, dst.BracketedClosed)
+	closed := dst.BracketedClosed
+	if !dstHadBracketed && src.BracketedClosed && appendedBracketed {
+		closed = true
+	}
+	dst.replaceKeys(merged, quoted, bracketed, closed)
 	return true
 }
