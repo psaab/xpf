@@ -381,13 +381,16 @@ never sends to it, but the report on failure is always the full grid.
 **Why this went unnoticed for so long.** `make test-failover` uses the DEFAULT
 iperf3 port, not the per-class grid, so the standing smoke stays green at
 18+ Gb/s while every harness here is unrunnable. The green everyone watches
-does not cover the dependency everything else needs. On the standing loss
-cluster the v4 target (172.16.80.202 since #18576; it was .200, which the
-external v6 box also answers ARP for) is a declarative alias of the
-incus-managed `xpf-mouse-target` host (#16213: pinned by
-`mouse-addr.service`, previously a hand `ip addr add` a reboot dropped),
-so `target-services.sh up` delegates to `mouse-target-setup.sh` and every
-listener is systemd-pinned; only the v6 ::200 remains external hardware.
+does not cover the dependency everything else needs. The standing loss
+cluster's v4 target is `$IPERF_TARGET4` (`172.16.80.202` since #18576), a
+declarative alias of the incus-managed `xpf-mouse-target` host (#16213:
+pinned by `mouse-addr.service`, previously a hand `ip addr add` a reboot
+dropped). `target-services.sh up` delegates to `mouse-target-setup.sh`, so
+every listener is systemd-pinned; only the v6 `::200` remains external
+hardware.
+<!-- Expires-when: #18576 closed -->
+Before #18576, the loss v4 target was `.200`, which the external v6 box also
+answers ARP for.
 For a target no instance holds, `up` prints exactly what must be started
 and where — the tooling cannot invent a management path that does not
 exist, but no harness should ever rediscover the fact again.
@@ -465,31 +468,35 @@ A measurement run **PASSES** iff ALL of:
    The reducer rejects gate comparisons whose idle and loaded cells were
    captured with different probe modes or minimum-interval pacing.
 
-   **The gate emits `VOID-NOT-ATTRIBUTABLE` when the mice and the elephants
-   terminate on the SAME host (#8259), instead of PASS or FAIL.** The two
-   cells being ratioed then differ by the elephants' entire offered load on
-   the very machine whose service time is inside every mouse sample — ~8.6
-   Gbit/s on the standing loss cluster — and the ratio attributes all of it to
-   firewall queueing. `PASS` is the dangerous half rather than `FAIL`: a FAIL
-   invites investigation, while a PASS gets cited as a control, and one was —
-   #7159's cross-class PASS was the comparison point for #8259's FAIL and
-   carries the same defect. The verdict is deliberately not a warning field
-   beside a PASS/FAIL, because a warning is discarded by every consumer that
-   reads `verdict`, which is how the confound survived to be cited. It exits
-   2 (undetermined), never 0.
+   **Host identity is the attribution boundary (#8259), not address equality.**
+   When mice and elephants terminate on the same host, the elephants' entire
+   offered load changes service time inside each mouse sample — ~8.6 Gbit/s
+   on the standing loss cluster — so the loaded/idle ratio can wrongly
+   attribute target-service time to firewall queueing. The reducer emits
+   `VOID-NOT-ATTRIBUTABLE` when declared target strings are equal, but it does
+   not detect different IP addresses on the same host. `PASS` is the
+   dangerous half: #7159's cross-class PASS was the comparison point for
+   #8259's FAIL and carries the same defect. The verdict is deliberately not
+   a warning field beside a PASS/FAIL, because every consumer discards a
+   warning once it reads `verdict`; when the guard triggers, it exits 2
+   (undetermined), never 0.
 
-   **The second target now exists, so that void is clearable.** #8259's
-   blocker was not the check but the lab: at the time there was nowhere
-   to move a flow to (the standing target was then believed external;
-   #16213 found the v4 .200 on the incus-managed host itself — only the
-   v6 ::200 is external). `test/incus/mouse-target-setup.sh`
+   **Loss has two IPv4 target addresses on one host, not two target hosts.**
+   #8259's blocker was not the check but the lab: at the time there was
+   nowhere to move a flow to (the standing target was then believed external).
+   <!-- Expires-when: #18576 closed -->
+   #16213 later found the legacy v4 alias `.200` on the incus-managed host;
+   only v6 `::200` is external. `test/incus/mouse-target-setup.sh`
    provisions `xpf-mouse-target` at `172.16.80.201`, an incus container with
    an SR-IOV VF tagged into VLAN 80, running the same service grid
    (`target-services.sh`'s contract: iperf3 5200-5211, echo 6200-6211, plus
-   port 7). `loss-userspace-cluster.env` defaults `MOUSE_TARGET_V4` to it, so
-   the void check passes on the standing cluster with no per-run flag — and a
-   run that deliberately wants both flows on one host, to reproduce an older
-   measurement, overrides it.
+   port 7). The loss env names `.201` as `MOUSE_TARGET_V4` and `.202` as
+   `IPERF_TARGET4`; both addresses are on that same instance. These different
+   single-holder addresses still feed the same host. The equality-only guard
+   can therefore miss the same-host load confound: even a non-VOID result
+   from this pair is not host-attributable. A genuinely separate target host
+   remains required; intentional same-host reproductions remain
+   non-attributable.
 
    **What that does NOT do is make the earlier numbers attributable.** Every
    verdict taken before this — #7100's FAIL, #7159's PASS, and the 2x2 that
@@ -523,14 +530,18 @@ A measurement run **PASSES** iff ALL of:
    gap rather than a dead lab.
 
    `MOUSE_TARGET_V4` and `ELEPHANT_TARGET_V4` are separate knobs that default
-   to the same address, so the check passes the moment a second host exists:
-   point `ELEPHANT_TARGET_V4` at it and the gate resumes producing
-   attributable numbers with no further change. The second host exists
-   (#8259); on loss the .200 primary is a declarative alias of that same
-   host (#16213), so the knobs must be pointed at different addresses
-   (.200 vs .201) for the verdict to attribute. Artifacts predating
-   the split declare no targets and are never voided on their absence: the
-   void fires on positive evidence that the two are equal.
+   to the same address. The loss env's candidate pair is mouse
+   `172.16.80.201` and elephant `$IPERF_TARGET4` (`172.16.80.202`), both on
+   `xpf-mouse-target` (§1.3.1); distinct strings satisfy only the reducer's
+   equality check, not target-host isolation. Do not describe that pair as
+   restoring attribution or treat a non-VOID result as host-attributable. A
+   separate host for one role is still required.
+   <!-- Expires-when: #18576 closed -->
+   Before #18576, the loss v4 primary was `.200`, a legacy alias on the
+   incus-managed `xpf-mouse-target` host (#16213).
+   Artifacts predating the two-target model declare no targets and are never
+   voided on their absence: the void fires on positive evidence that the two
+   are equal.
 
 A run that satisfies any single gate while failing another **does
 not pass**. There is no "OR flagged" escape clause; if a gate

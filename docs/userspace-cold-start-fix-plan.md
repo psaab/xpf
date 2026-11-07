@@ -164,7 +164,7 @@ There are two different cold-start cases:
    - any mandatory next-hop required for normal forwarding
 
 2. arbitrary first-hit destinations
-   - e.g. a new on-link server like `.200`
+   - e.g. a newly provisioned on-link server at its assigned address
 
 These must not be solved the same way.
 

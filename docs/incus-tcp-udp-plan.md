@@ -129,7 +129,7 @@ NET_MGMT="incusbr0"  NET_HEARTBEAT="bpu-hb0"  NET_FABRIC="bpu-fab0"  NET_CLAN=""
 CLUSTER_CONF="docs/ha-cluster-userspace.conf"
 LAN_ADDR="10.0.61.102/24"  LAN_GW/LAN_VIP4="10.0.61.1"  LAN_VIP6="2001:559:8585:ef00::1"
 WAN_GW4="172.16.50.1"  WAN_VIP4="172.16.50.8"   # fixed #16468: was .6, stale vs conf (.8)
-IPERF_TARGET4="172.16.80.202"  IPERF_TARGET6="2001:559:8585:80::200"   # v4 was .200 until #18576 (dual-held)
+IPERF_TARGET4="172.16.80.202"  IPERF_TARGET6="2001:559:8585:80::200"   # current loss targets; former v4 alias documented in §6-R5
 MOUSE_TARGET_V4="172.16.80.201"  MOUSE_TARGET_V6="2001:559:8585:80::201"
 DMZ_ADDR="172.16.50.201"  DMZ_TARGET_V6="2001:559:8585:50::201"   # #18576: pinned, no longer iperf octet + 1
 ```
@@ -148,7 +148,7 @@ Commands run (all read-only): `incus remote list`, `incus list loss:`,
 | `xpf-userspace-fw0` | VM | RUNNING | `bpfrx-cluster-userspace` ⚠ | 6 CPU / 8 GiB / 8×1 GiB hugepages (instance-level, §1.3.3) |
 | `xpf-userspace-fw1` | VM | RUNNING | `bpfrx-cluster-userspace` ⚠ | same |
 | `cluster-userspace-host` | container | RUNNING | `default` | LAN generator; `eth0` = SR-IOV `mlx1` VF, VLAN 3667 |
-| `xpf-mouse-target` | container | RUNNING | `default` | WAN target #2, SR-IOV `mlx0` VF VLAN 80, `172.16.80.201` + `…80::201` **and also holds `.200`/`::200`** (see §1.5) |
+| `xpf-mouse-target` | container | RUNNING | `default` | WAN target #2, SR-IOV `mlx0` VF VLAN 80; mouse address `172.16.80.201` + `…80::201`, current v4 iperf target `172.16.80.202` (see §1.2) |
 | `cluster-lan-host` | container | RUNNING | `default` | legacy cluster LAN host (`10.0.89.102`) |
 | `bpfrx-fw0`, `bpfrx-fw1` | VM | STOPPED | `bpfrx-cluster-loss` | legacy eBPF cluster — still defined; **do not resurrect under new names** (§6-R3) |
 | `xpf-zone-matrix-dmz`, `ts-cc`, `u2604-eno2` | container | RUNNING | `default` | unrelated tenants sharing `incusbr0`/host — proof the host is shared, not dedicated |
@@ -644,7 +644,7 @@ ipv6 route 2001:559:8585:ba00::/56 2001:559:8585:50::b    # UDP, via VLAN50 RETH
   `target-services.sh` grid iperf3 5200-5211 + echo 6200-6211). 
   **Recommendation: (b)**, named `xpf-tcp-target` / `xpf-udp-target`, at
   fresh addresses (§3: `…80::210` tcp / `…80::211` udp + v4 `172.16.80.210/211`
-  — free per grep; in-use `.200/.201`, `.7/.8` RETH, `.1` gw). This keeps the
+  — free per grep; loss targets `.201/.202`, `.7/.8` RETH, `.1` gw). This keeps the
   "separate stacks" promise end-to-end and removes contention with loss runs.
 - Client runs from the generator: TCP `iperf3 -c <target> -P 6 -t … -J`
   (defaults cloned from `userspace-ha-validation.sh`: `PARALLEL=6`,
@@ -1008,7 +1008,7 @@ below is a VF on the named PF; no row is a PF passthrough.
 | (upstream, existing) | lab router | `172.16.50.1`, `172.16.80.1` | `2001:559:8585:50::1`, `…80::1` | needs `aa00::/56 via …50::a` route added (Q3) |
 
 † Target gateway: mouse-target today sits *on-link* on VLAN80 with (observed)
-both `.200/.201`; its default route was not inspected. If the target must be
+both current loss target addresses `.201/.202` (see §1.2); its default route was not inspected. If the target must be
 reached *through* the fw from the LAN (the test path is LAN→fw→WAN target
 on-link), the target needs **no** default via the fw — it replies on-link to
 the RETH / SNAT address. Only target-initiated traffic needs `…80::1`. Keep
@@ -1041,7 +1041,7 @@ VLAN and the FAB-VLAN change (U-LAN / 3991 for T-LAN / 3990).
 | Block | Owner today | New clusters must |
 |---|---|---|
 | `2001:559:8585:50::/64`, `172.16.50.0/24` | loss legacy RETH `.7/::7`, userspace `.8/::8`, gw `.1/::1`, standalone VM `xpf-fw` iface `.5/::5` + NAT64 pool `.46` + SNAT pool `.47` (both proxy-ARPed); legacy local cluster RETH `.6/::6` + NAT64 pool `.44` + SNAT pool `.45` (both proxy-ARPed) | tcp/udp RETH `.42/::a`, `.43/::b` (moved from foreign-held `.10/.11`, #18558); before allocating any other address, use a same-day RFC 5227 sweep and request lab-owner DHCP/IPAM reservation. Keep pools distinct from interface addresses and each other. |
-| `2001:559:8585:80::/64`, `172.16.80.0/24` | RETH `.7/.8`, targets `.200/.201` (+`::200/::201`), pool-SNAT `172.16.80.7` (userspace proxy-arp; also legacy-loss RETH `.7` — the documented, accepted overlap: the loss pair's RETH and its own SNAT pool are the same stack, and no second stack claims `.7` on VLAN 80) | add `.210/::210`, `.211/::211`; ⚠ do **not** reuse `172.16.80.7` pool — if pool-SNAT exercise is copied, allocate per stack (candidates `.12` tcp / `.13` udp — Q7) |
+| `2001:559:8585:80::/64`, `172.16.80.0/24` | RETH `.7/.8`, v4 targets `.201/.202` (+v6 targets `::200/::201`), pool-SNAT `172.16.80.7` (userspace proxy-arp; also legacy-loss RETH `.7` — the documented, accepted overlap: the loss pair's RETH and its own SNAT pool are the same stack, and no second stack claims `.7` on VLAN 80) | add `.210/::210`, `.211/::211`; ⚠ do **not** reuse `172.16.80.7` pool — if pool-SNAT exercise is copied, allocate per stack (candidates `.12` tcp / `.13` udp — Q7) |
 | `2001:559:8585:ef00::/64` + `10.0.61.0/24` | loss userspace LAN | untouched |
 | `2001:559:8585:df01::/64` + `10.0.89.0/24` | loss legacy LAN | untouched |
 | `10.99.12/13.0/30`, cluster-id 22 | loss userspace HA | new: `10.99.14-17`, ids 23/24 |
@@ -1600,9 +1600,11 @@ address — same expectation.
   routed v6 with v4-only SNAT so the `/56` is exercised (*recommended*)?
   And: v4 delegated block needed, or v4 stays NAT-only (*assumed NAT-only*)?
   If pool-SNAT exercise is wanted per stack, confirm `.12/.13` pool addresses.
+<!-- Expires-when: #18576 closed -->
 - **Q8 (targets)** — Dedicated per-stack target containers `.210/.211`
-  (*recommended*), or reuse external `.200` (and accept R5)? For UDP: is
-  `iperf3 -u` sufficient evidence, or is a pps-class generator in scope (R6)?
+  (*recommended*); ~~reuse external `.200`~~ (**rejected by R5**: `.200`
+  must not be measured). For UDP: is `iperf3 -u` sufficient evidence, or is
+  a pps-class generator in scope (R6)?
 - **Q9 (hosts)** — Are `tcp`/`udp` hosts bare-metal under our control (root,
   rebootable, SR-IOV VF passthrough to QEMU VMs permitted, hugepage sysctl
   changeable)? *Assumed yes from Incus/SSH evidence; R7 makes this the

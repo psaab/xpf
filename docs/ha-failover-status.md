@@ -1766,7 +1766,7 @@ removed or bypassed:
 # Keep the run long enough to expose late collapses, move RG1 quickly in both
 # directions, and keep all eight stream lines visible during the run.
 # The iperf target self-selects from the sourced cluster env
-# (IPERF_TARGET4, loss 172.16.80.202 since #18576); do not pin .200.
+# (IPERF_TARGET4, loss 172.16.80.202 since #18576); do not hard-code a target address.
 BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
 TOTAL_CYCLES=12 CYCLE_INTERVAL=5 \
 scripts/userspace-ha-failover-validation.sh --duration 600 --parallel 8
