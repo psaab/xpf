@@ -16,11 +16,10 @@ import (
 // to no permissions (fail-closed), making this a silent lockout, not a
 // privilege gain — Junos rejects the shape at commit.
 //
-// The fix is validateLoginUserClassReferencesStrict, wired dead-last in
-// runUniformGates with the lenientLoginUserClassRef tolerant downgrade,
-// plus sibling-aware (`FindChildren`) definition collection in
-// collectSchemaRefs so a class defined in a second sibling `system` /
-// `class-of-service` block of an applied group is actually seen.
+// validateLoginUserClassReferencesStrict checks class references on the
+// effective post-expansion config. The tests below pin strict rejection of
+// undefined classes, tolerant warnings with user-stanza retention, and
+// acceptance of valid classes; they do not pin cross-gate diagnostic order.
 
 const loginClassGateSrcA15717 = `groups {
     staged-rbac {

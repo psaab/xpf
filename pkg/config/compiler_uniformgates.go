@@ -18,11 +18,11 @@ import "fmt"
 // inactive-pruned *ConfigTree; it is read-only there.)
 //
 // Gate order is an execution detail, not a validation-priority API.
-// Cross-gate first-error identity and tolerant-warning order are unpinned artefacts of execution order, not priority contracts.
+// Cross-gate first-error identity and tolerant-warning order are unpinned
+// artefacts of execution order, not priority contracts, except where explicitly
+// pinned by NAT registry #16145 and RI-collision precedence tests #9821.
 // Current execution order of the newer gates is:
 // #11794 -> #14397 -> #16628/#17680 -> #15935 -> #11823 -> #12089 -> #15001 -> #15278 -> #15717 -> #12217 -> #16770.
-// This list records implementation sequence only; it does not promise which
-// cross-gate diagnostic or warning appears first.
 func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesCoSPlatform(tree, cfg, opts); err != nil {
 		return err

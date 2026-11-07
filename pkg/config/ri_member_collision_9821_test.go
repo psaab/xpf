@@ -76,9 +76,9 @@ func TestRIMemberDeclaredCollisionAliasFolds9821(t *testing.T) {
 	}
 }
 
-// The non-tunnel triple (declared `p.0` unit 1 + declared `p.0.1`) trips the
-// #7795 kernel-device gate BEFORE #9821's dead-last gate runs — pinning the
-// wiring order: the operator sees 7795's error, not the ambiguity error.
+// The non-tunnel triple (declared `p.0` unit 1 + declared `p.0.1`) trips both
+// gates; for this input, #7795's kernel-device diagnostic precedes #9821's
+// ambiguity diagnostic.
 func TestRIMemberDeclaredCollisionYieldsTo7795Order9821(t *testing.T) {
 	_, err := compile9821(t,
 		"set interfaces p.0 unit 1 family inet address 10.9.3.1/24",
@@ -89,10 +89,10 @@ func TestRIMemberDeclaredCollisionYieldsTo7795Order9821(t *testing.T) {
 		t.Fatal("triple-collision corpus compiled; want a hard-reject (either gate)")
 	}
 	if !strings.Contains(err.Error(), "both resolve to the same Linux device name") {
-		t.Errorf("error %q is not #7795's — the dead-last #9821 gate must not steal the first-error slot", err)
+		t.Errorf("error %q does not contain the #7795 kernel-device diagnostic", err)
 	}
 	if strings.Contains(err.Error(), "ambiguous") {
-		t.Errorf("error %q carries the #9821 marker — #7795 must win the first-error slot", err)
+		t.Errorf("error %q contains the #9821 marker despite #7795's precedence for this input", err)
 	}
 }
 
@@ -114,9 +114,8 @@ func TestRIMemberDeclaredCollisionUndeclaredKeyCompiles9821(t *testing.T) {
 	}
 }
 
-// A config tripping BOTH the #5933 malformed-suffix gate and #9821 yields
-// #5933's error — pinning that the dead-last gate runs after the mid-phase
-// reference gates, not just after #7795.
+// This config trips both #5933's malformed-suffix check and #9821. It pins
+// the #5933 invalid-unit diagnostic ahead of the #9821 ambiguity diagnostic.
 func TestRIMemberDeclaredCollisionYieldsToUnitrefOrder9821(t *testing.T) {
 	lines := append(append([]string{}, tunnelCollisionCorpus9821...),
 		"set routing-instances RA interface gr-0/0/0.0",
@@ -126,8 +125,11 @@ func TestRIMemberDeclaredCollisionYieldsToUnitrefOrder9821(t *testing.T) {
 	if err == nil {
 		t.Fatal("dual-violation corpus compiled; want a hard-reject (either gate)")
 	}
+	if !strings.Contains(err.Error(), `has invalid logical unit "99x"`) {
+		t.Errorf("error %q does not identify #5933's malformed unit reference", err)
+	}
 	if strings.Contains(err.Error(), "ambiguous") {
-		t.Errorf("error %q carries the #9821 marker — the #5933 gate must win the first-error slot", err)
+		t.Errorf("error %q carries the #9821 marker despite #5933's precedence for this corpus", err)
 	}
 }
 

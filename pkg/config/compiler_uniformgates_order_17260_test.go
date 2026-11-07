@@ -9,17 +9,20 @@ import (
 
 // TestUniformGatesPriorityDoctrine17260 pins the #17260 gate-order
 // doctrine: cross-gate first-error identity and tolerant-warning order
-// are unpinned artefacts of execution order, not priority contracts.
+// are unpinned artefacts of execution order, not priority contracts,
+// except where explicitly pinned by NAT registry #16145 and RI-collision
+// precedence tests #9821.
 // The touched gate files must keep that sentence in the
 // runUniformGates header (exactly once) and must not reintroduce
 // steal / dead-last positional-priority doctrine. True relative-order
-// facts (functional dependencies and precedences pinned by behaviour
-// tests) are unaffected: they are phrased as "runs after X" /
-// "surfaces first", never as steal/dead-last doctrine.
+// facts (functional dependencies and explicitly pinned precedences) are
+// preserved.
 func TestUniformGatesPriorityDoctrine17260(t *testing.T) {
 	dir := goldenPkgDir(t)
 
-	const unpinnedSentence = "first-error identity and tolerant-warning order are unpinned artefacts of execution order, not priority contracts"
+	const unpinnedSentence = "Cross-gate first-error identity and tolerant-warning order are unpinned " +
+		"artefacts of execution order, not priority contracts, except where explicitly " +
+		"pinned by NAT registry #16145 and RI-collision precedence tests #9821."
 	const executionOrder = "#11794 -> #14397 -> #16628/#17680 -> #15935 -> #11823 -> #12089 -> #15001 -> #15278 -> #15717 -> #12217 -> #16770"
 
 	files := []string{
@@ -27,6 +30,8 @@ func TestUniformGatesPriorityDoctrine17260(t *testing.T) {
 		"compiler_uniformgates_interface_addr.go",
 		"compiler_validate_strict_ri_member_collision.go",
 		"compiler_validate_strict_routing_instance_type_9814.go",
+		"ri_member_collision_9821_test.go",
+		"login_class_gate_15717_test.go",
 	}
 
 	// False positional claims are forbidden; the pinned relative-order
@@ -52,14 +57,19 @@ func TestUniformGatesPriorityDoctrine17260(t *testing.T) {
 		lower := strings.ToLower(src)
 		for _, phrase := range banned {
 			if strings.Contains(lower, phrase) {
-				t.Errorf("%s: doctrine phrase %q reintroduced (#17260: gate order is an unpinned artefact, not a priority contract)", name, phrase)
+				t.Errorf("%s: doctrine phrase %q reintroduced (#17260: cross-gate order is unpinned except for explicitly pinned NAT and RI precedences)", name, phrase)
 			}
 		}
 		if name == "compiler_uniformgates.go" {
-			if n := strings.Count(src, unpinnedSentence); n != 1 {
+			header, _, ok := strings.Cut(src, "func runUniformGates(")
+			if !ok {
+				t.Fatal("compiler_uniformgates.go: runUniformGates declaration missing")
+			}
+			normalizedHeader := strings.Join(strings.Fields(strings.ReplaceAll(header, "//", "")), " ")
+			if n := strings.Count(normalizedHeader, unpinnedSentence); n != 1 {
 				t.Errorf("compiler_uniformgates.go: unpinned-contract sentence occurs %d times, want exactly 1 in the runUniformGates header", n)
 			}
-			if !strings.Contains(src, executionOrder) {
+			if !strings.Contains(normalizedHeader, executionOrder) {
 				t.Errorf("compiler_uniformgates.go: execution-order chain %q missing from header", executionOrder)
 			}
 		}
