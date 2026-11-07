@@ -317,8 +317,16 @@ mod flow_cache_invalidation_tests {
             map
         }));
         let wires = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let shared_nat_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
+            Arc::new(Mutex::new(FastMap::default()));
+        let reverse_alias_index = std::cell::OnceCell::new();
         let node_served = |k: &SessionKey| {
-            crate::afxdp::shared_ops::shared_node_served_evidence(&shared, k)
+            crate::afxdp::shared_ops::shared_node_served_evidence(
+                &shared,
+                &shared_nat_sessions,
+                &reverse_alias_index,
+                k,
+            )
         };
         let forwards = |_: i32| true;
         let epoch = |_: i32| 0u32;
@@ -499,6 +507,9 @@ mod flow_cache_invalidation_tests {
             map
         }));
         let wires = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let shared_nat_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
+            Arc::new(Mutex::new(FastMap::default()));
+        let reverse_alias_index = std::cell::OnceCell::new();
         crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
             &shared,
             &wires,
@@ -524,12 +535,22 @@ mod flow_cache_invalidation_tests {
             )],
         );
         assert!(
-            crate::afxdp::shared_ops::shared_node_served_evidence(&shared, &key)
+            crate::afxdp::shared_ops::shared_node_served_evidence(
+                &shared,
+                &shared_nat_sessions,
+                &reverse_alias_index,
+                &key,
+            )
                 .shared_served
                 .is_some_and(|count| count > 0),
             "premise: B's serving counters are visible in shared evidence"
         );
-        let served = crate::afxdp::shared_ops::shared_node_served_evidence(&shared, &key);
+        let served = crate::afxdp::shared_ops::shared_node_served_evidence(
+            &shared,
+            &shared_nat_sessions,
+            &reverse_alias_index,
+            &key,
+        );
         assert_eq!(
             served.shared_incarnation,
             Some((session_id, 0)),
@@ -554,7 +575,12 @@ mod flow_cache_invalidation_tests {
         );
 
         let node_served = |k: &SessionKey| {
-            let mut evidence = crate::afxdp::shared_ops::shared_node_served_evidence(&shared, k);
+            let mut evidence = crate::afxdp::shared_ops::shared_node_served_evidence(
+                &shared,
+                &shared_nat_sessions,
+                &reverse_alias_index,
+                k,
+            );
             evidence.shared_evidence_max_cadence_ns = Some(30 * SEC);
             evidence
         };

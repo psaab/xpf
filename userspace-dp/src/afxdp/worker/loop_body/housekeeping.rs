@@ -102,9 +102,17 @@ pub(super) fn run_session_housekeeping(
         crate::session::NODE_SERVED_EVIDENCE_DEFAULT_CADENCE_NS.max(
             super::slice_pacing::shared_evidence_max_cadence_ns(sessions.ct_refresh_slab_len()),
         );
+    // #18663: lazily build the reverse-row NAT alias index once if this
+    // expiry pass reaches an unmatched shared-evidence candidate.
+    let reverse_alias_index = std::cell::OnceCell::new();
     let node_served = |key: &crate::session::SessionKey| {
         let mut evidence =
-            crate::afxdp::shared_ops::shared_node_served_evidence(shared_sessions, key);
+            crate::afxdp::shared_ops::shared_node_served_evidence(
+                shared_sessions,
+                shared_nat_sessions,
+                &reverse_alias_index,
+                key,
+            );
         evidence.shared_evidence_max_cadence_ns = Some(shared_evidence_max_cadence_ns);
         evidence
     };
