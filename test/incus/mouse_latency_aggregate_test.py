@@ -411,6 +411,9 @@ class VoidNotAttributableTests(unittest.TestCase):
         Stand up a second host on VLAN 80, point ELEPHANT_TARGET_V4 at it, and
         the gate produces attributable numbers with no further change. A gate
         that voided unconditionally would pass every other cell here.
+
+        These fixtures exercise the guard's address-STRING comparison only;
+        the .201/.200 strings here do not establish that two hosts exist.
         """
         v = self._decide(
             self._cell("172.16.80.201", "172.16.80.200", 52039),
@@ -549,7 +552,7 @@ class MixedTargetPairTests(unittest.TestCase):
     def test_mixed_target_pairs_cannot_return_pass(self):
         """The exact false-PASS shape from the finding.
 
-        The idle cell is attributable (split targets) and the ratio is a
+        The idle cell is split at the address-string level and the ratio is a
         comfortable 1.5 <= 2.0, but 9 of 10 loaded reps — including the
         median rep — terminated on the shared host. The gate must refuse
         the verdict, not emit a citable PASS with the targets dropped.

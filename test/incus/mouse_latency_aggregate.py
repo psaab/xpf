@@ -331,6 +331,9 @@ def decide(
             ),
         }
     # #8259: REFUSE to emit a verdict this measurement cannot attribute.
+    # (Address-string level: this guard sees only the two target strings;
+    # differing strings on the SAME host still pass it — host placement is
+    # the operator's to verify, per the target-services contract.)
     #
     # When the mice and the elephants terminate on the SAME host, the loaded
     # cell adds the elephants' full offered load to the very machine whose
