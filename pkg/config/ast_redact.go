@@ -1584,7 +1584,7 @@ func checkRedactionPlaceholder(t *ConfigTree) error {
 	if t == nil {
 		return nil
 	}
-	// Fold 5 (#16090): "(at %q)" names the stanza/leaf path as rendered by
+	// Fold 5 (#16090): "(at %s)" names the stanza/leaf path as rendered by
 	// redactedLocName — names plus safely-masked URL context (RedactURL),
 	// never a raw flattened path carrying operator-supplied values.
 	var secretLoc, urlLoc string
