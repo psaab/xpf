@@ -262,3 +262,37 @@ func TestEmbeddedPlaceholderDirectToken15209(t *testing.T) {
 		t.Fatalf("guard over-reached onto a glued (non-placeholder) token: %v", err)
 	}
 }
+
+func TestRedactionGuardMixedEmbeddedSecretPriority17270(t *testing.T) {
+	// Sol #17270: a payload whose FIRST command carries a redacted URL
+	// and whose LATER command carries a secret placeholder must yield
+	// the SECRET category (global secret-over-URL priority), not the
+	// old first-hit URL category. Both reject; the category decides
+	// hard-refusal in configstore, so the change is deliberate.
+	tree := parseHierText(t, `
+event-options {
+    policy p1 {
+        events ping_test_failed;
+        then {
+            change-configuration {
+                commands [ "set system services dynamic-dns provider dy url https://user:<redacted>@host" "set security ike policy p1 pre-shared-key ascii-text \"##SECRET-DATA##\"" ];
+            }
+        }
+    }
+}
+`)
+	err := checkRedactionPlaceholder(tree)
+	if err == nil {
+		t.Fatal("guard accepted a mixed redacted payload")
+	}
+	if !errors.Is(err, errRedactionPlaceholderIngest) {
+		t.Fatalf("err = %v, want errRedactionPlaceholderIngest (secret priority)", err)
+	}
+	if errors.Is(err, errRedactedURLIngest) && !errors.Is(err, errRedactionPlaceholderIngest) {
+		t.Fatalf("err = %v, URL category must not win over secret", err)
+	}
+	// The location must not echo either command's value.
+	if strings.Contains(err.Error(), "user:") || strings.Contains(err.Error(), "##SECRET-DATA##\"") {
+		t.Fatalf("guard error echoes payload content: %v", err)
+	}
+}
