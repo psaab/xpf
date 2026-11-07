@@ -180,22 +180,20 @@ jobs:
       # select every listed package, and a base-green package may not regress.
       - name: Self-test affected Go selection and base-green guard
         run: bash scripts/ci_affected_go_tests_selftest.sh
-      # #18753: setup-go selects the exact analyser toolchain for this one
-      # step; restore the go.mod toolchain immediately after it.
-      - name: Setup Go 1.26.9 side toolchain for deadcode
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.9"
-          cache: false
+      # #18753: keep go.mod's Go 1.24.9 on PATH. Build the go1.26.9 wrapper in
+      # RUNNER_TEMP and install its toolchain without changing PATH; only the
+      # scoped deadcode command receives DEADCODE_GO.
+      - name: Install Go 1.26.9 side toolchain for deadcode
+        run: |
+          mkdir -p "$RUNNER_TEMP/go1.26.9/bin"
+          GOBIN="$RUNNER_TEMP/go1.26.9/bin" go install golang.org/dl/go1.26.9@latest
+          "$RUNNER_TEMP/go1.26.9/bin/go1.26.9" download
+          "$RUNNER_TEMP/go1.26.9/bin/go1.26.9" version
       - name: Check scoped nftables and daemon netlink deadcode
         run: make check-nft-deadcode
         env:
+          DEADCODE_GO: ${{ runner.temp }}/go1.26.9/bin/go1.26.9
           XPF_DEADCODE_REQUIRE: "1"
-      - name: Restore main Go toolchain
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: false
       - name: Test affected Go packages
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

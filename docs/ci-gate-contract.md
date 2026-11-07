@@ -25,13 +25,14 @@ are recorded.
 | Rust workspace compile check | `cargo check --manifest-path userspace-dp/Cargo.toml --workspace --all-targets`, then `make clippy-rust` (#17200: leg 1 is the full `--all-targets` clippy with `-D unfulfilled_lint_expectations`, so a stale `#[expect(clippy::…)]` reds it — that lint is warn-level, so the targeted deny, not `-D warnings`, makes it gating — plus leg 2 denying `clippy::correctness`/`clippy::suspicious` with `clippy::duplicate_mod` allowed for the intentional shim-parity multi-load) | `test.yml` job `rust`, steps `Check Rust workspace and all targets` and `Clippy Rust workspace and all targets (#17200)` |
 | Proto header and regen check | `make proto-check`, then `make proto-regen-check` (pinned protoc regen-diff; #16195) | `test.yml` job `proto` |
 Scoped deadcode is the exception to the Go job's main toolchain: that
-job still uses `go-version-file: go.mod` (go1.24.9), provisions go1.26.9
-only for `make check-nft-deadcode`, sets `XPF_DEADCODE_REQUIRE=1` for
-that step, and restores the main toolchain before affected Go tests.
-The target shares `scripts/resolve-deadcode-go.sh` with the module-wide
-gate and pins `deadcode@v0.38.0`; missing go1.26 is NOT-EXAMINED (recipe
-exit 77 unless required), analyser failure is labelled and exits 2, and
-filtered findings exit 1.
+job still uses `go-version-file: go.mod` (go1.24.9). The workflow installs
+the `golang.org/dl/go1.26.9` wrapper under `$RUNNER_TEMP`, downloads its
+SDK, and sets `DEADCODE_GO` only on `make check-nft-deadcode`; setup-go's
+Go 1.24.9 PATH remains unchanged for every other step. The target shares
+`scripts/resolve-deadcode-go.sh` with the module-wide gate and pins
+`deadcode@v0.38.0`; missing go1.26 is NOT-EXAMINED (recipe exit 77 unless
+required), analyser failure is labelled and exits 2, and filtered findings
+exit 1.
 
 ### Advisory tooling leg (#16197) — not a merge gate
 
