@@ -43,21 +43,47 @@ use super::super::ethernet::ETHERTYPE_VLAN;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-// Shared process-wide Identification sequence for generated fragmentable
-// datagrams. Atomic IPv4 datagrams (DF=1, MF=0, FragOffset=0) use ID=0 and do
-// not advance this counter.
-static DATAGRAM_IDENTIFICATION: AtomicU32 = AtomicU32::new(1);
-
-/// Get the next raw value from the shared generated-datagram Identification
-/// sequence. Callers narrow or map it to their wire field as needed.
-#[inline]
-pub(crate) fn next_datagram_identification() -> u32 {
-    DATAGRAM_IDENTIFICATION.fetch_add(1, Ordering::Relaxed)
+// Per-domain Identification sequences for generated fragmentable
+// datagrams. Domains stay SEPARATE (Sol #17266 MAJOR): one merged
+// sequence lets unrelated traffic exhaust a quiet tuple's ID space
+// within a reassembly lifetime. Atomic IPv4 datagrams (DF=1, MF=0,
+// FragOffset=0) use ID=0 and advance no counter.
+pub(crate) struct DatagramIdentification {
+    next: AtomicU32,
 }
 
-/// Map a raw shared sequence value into the non-zero IPv4 Identification
-/// space. Every generated IPv4 datagram uses this same mapping so different
-/// output paths cannot collide by mapping adjacent raw values differently.
+impl DatagramIdentification {
+    pub(crate) const fn new() -> Self {
+        Self { next: AtomicU32::new(1) }
+    }
+    #[inline]
+    pub(crate) fn next(&self) -> u32 {
+        self.next.fetch_add(1, Ordering::Relaxed)
+    }
+    /// Test-only counter read (GLM #17266 M1): pins that the DF-set path
+    /// performs NO fetch at all (fetch-and-discard must RED).
+    #[cfg(test)]
+    pub(crate) fn current_for_test(&self) -> u32 {
+        self.next.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn tunnel_identification_current_for_test() -> u32 {
+    TUNNEL_IDENTIFICATION.current_for_test()
+}
+
+static TUNNEL_IDENTIFICATION: DatagramIdentification = DatagramIdentification::new();
+pub(crate) static NAT64_IPV4_IDENTIFICATION: DatagramIdentification = DatagramIdentification::new();
+pub(crate) static NAT64_IPV6_IDENTIFICATION: DatagramIdentification = DatagramIdentification::new();
+
+/// Next raw tunnel-domain Identification value.
+#[inline]
+pub(crate) fn next_datagram_identification() -> u32 {
+    TUNNEL_IDENTIFICATION.next()
+}
+
+/// Map a raw sequence value into the non-zero IPv4 Identification space.
 /// At the `u32` source wrap, raw `u32::MAX` and 0 both map to 1.
 #[inline]
 pub(crate) fn map_ipv4_identification(raw: u32) -> u16 {

@@ -189,6 +189,43 @@ fn ipv4_tunnel_header_df_set_id_is_constant_and_df_clear_ids_are_unique_17266() 
 }
 
 #[test]
+fn ipv4_tunnel_header_df_set_performs_no_fetch_17266() {
+    // GLM M1: a fetch-and-discard mutant passes the wire assertions above
+    // but must RED here — the DF path must not advance the domain counter.
+    let before = tunnel_identification_current_for_test();
+    let mut buf = [0xffu8; 20];
+    write_ipv4_tunnel_header(
+        &mut buf,
+        Ipv4Addr::new(10, 0, 0, 1),
+        Ipv4Addr::new(10, 0, 0, 2),
+        47,
+        0,
+        64,
+        120,
+        true,
+    )
+    .expect("write_ipv4_tunnel_header");
+    assert_eq!(
+        tunnel_identification_current_for_test(),
+        before,
+        "DF-set write advanced the tunnel Identification counter"
+    );
+}
+
+#[test]
+fn datagram_identification_domains_are_independent_17266() {
+    // Sol/Kimi MAJOR: unrelated tunnel mints must not advance the NAT64
+    // domains (merged-sequence reuse across reassembly tuples).
+    let nat64_before = NAT64_IPV4_IDENTIFICATION.current_for_test();
+    let nat64v6_before = NAT64_IPV6_IDENTIFICATION.current_for_test();
+    for _ in 0..1024 {
+        let _ = next_datagram_identification();
+    }
+    assert_eq!(NAT64_IPV4_IDENTIFICATION.current_for_test(), nat64_before);
+    assert_eq!(NAT64_IPV6_IDENTIFICATION.current_for_test(), nat64v6_before);
+}
+
+#[test]
 fn shared_ipv4_identification_mapping_prevents_cross_site_wrap_collision_17266() {
     // NAT64 maps the last raw value before wrap to 65535. Exercise the actual
     // tunnel-header writer with controlled boundary inputs: the next raw ID

@@ -695,7 +695,7 @@ pub(super) fn write_v6_to_v4_translate(
         }
         None if no_v6_frag_header || ipv4_total_len <= 1260 => {
             (0x0000, crate::afxdp::frame::map_ipv4_identification(
-                crate::afxdp::frame::next_datagram_identification(),
+                crate::afxdp::frame::NAT64_IPV4_IDENTIFICATION.next(),
             ))
         }
         None => (0x4000, 0),
