@@ -4510,12 +4510,14 @@ impl SessionTable {
             self.push_to_wheel(key, now_ns);
         }
     }
-    /// #14945: fused flow-cache-hit session probe. One `record_by_key_mut`
-    /// borrow performs the liveness check, the throttled keepalive
-    /// (including #14939 handshake completion and the #14935/#10885 closing
-    /// gates), and the packet accounting that the cache-hit path used to
-    /// pay three separate key probes for (`session_is_live_at` +
-    /// `touch_if_stale_with_payload` + `account_packet`).
+    /// #14945: `probe_hit_inner` fuses the cache-hit liveness check,
+    /// throttled keepalive (including #14939 completion and the
+    /// #14935/#10885 closing gates), and accounting; the pre-fusion path
+    /// used separate `session_is_live_at`, `touch_if_stale_with_payload`,
+    /// and `account_packet` probes. The current deferring caller also has
+    /// transition-only ACK/undo/admission work: steady established hits
+    /// skip expected-ACK and completion-undo resolution, and the packet's
+    /// L3/L4 ACK parse is lazy (#17268).
     ///
     /// Returns `false` when the key is absent or idle-crossed — the caller
     /// must fall through exactly as it did on a failed liveness or
@@ -4529,14 +4531,15 @@ impl SessionTable {
     /// keepalive but not its counters, so probe-before-replay moves only
     /// the accounting earlier by those side-effect-free replay steps.
     ///
-    /// Reverse-direction packets still pay the companion hop inside the
-    /// accounting leg (`reverse_session_key` + forward-entry probe),
-    /// exactly as `account_packet` did — only the forward-key probe is
-    /// shared. Handshake completion likewise keeps its companion
-    /// propagation. The canonical-key clone matches the pre-existing
-    /// `touch_if_stale_with_payload` / `account_packet` clones on the
-    /// paths that need the key after the borrow ends; the forward
-    /// accounting leg itself clones nothing.
+    /// Reverse packets still resolve the forward companion for folded
+    /// accounting and update the #16223 node-served stamp. Thus the current
+    /// established cost is one `SessionKey` hash forward and three reverse
+    /// (matched row, forward companion, stamp); the optional ACK/undo/emit
+    /// lookups are confined to the arms that need them.
+    /// Handshake completion retains companion propagation. The canonical-key
+    /// clone matches the pre-existing `touch_if_stale_with_payload` /
+    /// `account_packet` clones on paths needing the key after the borrow;
+    /// the forward accounting leg itself clones nothing.
     #[inline]
     pub fn probe_hit(
         &mut self,
@@ -4547,8 +4550,23 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, None, false, &mut None)
-            .is_live()
+        let mut ack_provider = || None;
+        let mut ack_cache = None;
+        let mut wire_canonical = None;
+        self.probe_hit_inner(
+            key,
+            now_ns,
+            len,
+            tcp_flags,
+            payload_len,
+            dscp,
+            true,
+            &mut ack_provider,
+            &mut ack_cache,
+            false,
+            &mut wire_canonical,
+        )
+        .is_live()
     }
 
     /// #16042: [`Self::probe_hit`] carrying the parsed segment ack.
@@ -4562,8 +4580,23 @@ impl SessionTable {
         dscp: u8,
         ack: Option<u32>,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, ack, false, &mut None)
-            .is_live()
+        let mut ack_provider = || ack;
+        let mut ack_cache = None;
+        let mut wire_canonical = None;
+        self.probe_hit_inner(
+            key,
+            now_ns,
+            len,
+            tcp_flags,
+            payload_len,
+            dscp,
+            true,
+            &mut ack_provider,
+            &mut ack_cache,
+            false,
+            &mut wire_canonical,
+        )
+        .is_live()
     }
 
     /// Probe a flow-cache hit while deferring the HA completion delta.
@@ -4584,8 +4617,23 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false, None, true, &mut None)
-            .is_live()
+        let mut ack_provider = || None;
+        let mut ack_cache = None;
+        let mut wire_canonical = None;
+        self.probe_hit_inner(
+            key,
+            now_ns,
+            len,
+            tcp_flags,
+            payload_len,
+            dscp,
+            false,
+            &mut ack_provider,
+            &mut ack_cache,
+            true,
+            &mut wire_canonical,
+        )
+        .is_live()
     }
 
     /// #16042: deferring probe carrying the parsed segment ack. Always
@@ -4670,6 +4718,38 @@ impl SessionTable {
         rollback_possible: bool,
         wire_canonical: &mut Option<SessionKey>,
     ) -> ProbeHitVerdict {
+        self.probe_hit_deferring_state_update_with_ack_rollback_verdict_lazy(
+            key,
+            now_ns,
+            len,
+            tcp_flags,
+            payload_len,
+            dscp,
+            || ack,
+            rollback_possible,
+            wire_canonical,
+        )
+    }
+    /// #17268: production cache-hit probe with a lazy parsed TCP ACK. The
+    /// closure is invoked only by the handshake-candidate/progress arms that
+    /// validate it, and its result is memoized across those arms for this hit.
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    pub fn probe_hit_deferring_state_update_with_ack_rollback_verdict_lazy<F>(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        len: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        dscp: u8,
+        mut ack_provider: F,
+        rollback_possible: bool,
+        wire_canonical: &mut Option<SessionKey>,
+    ) -> ProbeHitVerdict
+    where
+        F: FnMut() -> Option<u32>,
+    {
+        let mut ack_cache = None;
         self.probe_hit_inner(
             key,
             now_ns,
@@ -4678,11 +4758,13 @@ impl SessionTable {
             payload_len,
             dscp,
             false,
-            ack,
+            &mut ack_provider,
+            &mut ack_cache,
             rollback_possible,
             wire_canonical,
         )
     }
+
 
     /// Emit the HA Update withheld by
     /// [`Self::probe_hit_deferring_state_update`] after TX admission.
@@ -4892,7 +4974,22 @@ impl SessionTable {
         Some((forward_key, forward_nat))
     }
 
-    fn probe_hit_inner(
+    fn resolve_probe_ack<F>(
+        ack_provider: &mut F,
+        ack_cache: &mut Option<Option<u32>>,
+    ) -> Option<u32>
+    where
+        F: FnMut() -> Option<u32>,
+    {
+        if let Some(ack) = *ack_cache {
+            return ack;
+        }
+        let ack = ack_provider();
+        *ack_cache = Some(ack);
+        ack
+    }
+
+    fn probe_hit_inner<F>(
         &mut self,
         key: &SessionKey,
         now_ns: u64,
@@ -4901,10 +4998,14 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
         emit_state_update: bool,
-        ack: Option<u32>,
+        ack_provider: &mut F,
+        ack_cache: &mut Option<Option<u32>>,
         record_undo: bool,
         wire_canonical: &mut Option<SessionKey>,
-    ) -> ProbeHitVerdict {
+    ) -> ProbeHitVerdict
+    where
+        F: FnMut() -> Option<u32>,
+    {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
         // #18533: the classic completion shape seen under the record borrow
         // below — every conjunct except the #16042 ack check — with the
@@ -4922,6 +5023,9 @@ impl SessionTable {
         let mut companion_progress = false;
         // #16223: companion half already idle-crossed at probe time.
         let mut companion_crossed = false;
+        // #17268: the parsed ACK is consumed only by ACK-bearing TCP
+        // handshake/progress candidates; the companion-crossed arm can also
+        // see a steady established row whose progress helper immediately refuses.
         // #15947 (H29-04): wire state BEFORE the completion below, so the
         // HA Update emission can tell whether the handshake actually
         // transitioned (emit_session_state_update is transition-only).
@@ -4935,10 +5039,15 @@ impl SessionTable {
         // added just before its first write (see `ProbeUndo`). The probed
         // record's direction and NAT are kept for the completion capture.
         let mut probe_undo: Option<ProbeUndo> = None;
-        let (probed_is_reverse, probed_nat) = match self.record_by_key_mut(key) {
+        let ((probed_is_reverse, probed_nat), ack_validation_candidate) =
+            match self.record_by_key_mut(key) {
             Some(record) => {
                 let entry = &mut record.entry;
                 let probed = (entry.metadata.is_reverse, entry.decision.nat);
+                let ack_validation_candidate = !entry.closing
+                    && matches!(key.protocol, PROTO_TCP)
+                    && (!entry.established || entry.handshake_pending)
+                    && crate::tcp_flags::has_ack(tcp_flags);
                 if !emit_state_update && record_undo {
                     probe_undo = Some(ProbeUndo {
                         canonical_key: record.key.clone(),
@@ -5034,7 +5143,7 @@ impl SessionTable {
                     reverse_fold = Some((record.key.clone(), entry.decision.nat));
                 }
                 }
-                probed
+                (probed, ack_validation_candidate)
             }
             None => {
                 // #18656: no direct/alias record. A post-NAT forward tuple
@@ -5068,7 +5177,8 @@ impl SessionTable {
                     payload_len,
                     dscp,
                     emit_state_update,
-                    ack,
+                    ack_provider,
+                    ack_cache,
                     record_undo,
                     wire_canonical,
                 );
@@ -5081,9 +5191,9 @@ impl SessionTable {
                 .fetch_add(1, AtomicOrdering::Relaxed);
         }
         if let Some((candidate_key, candidate_nat, state_before, class_before)) = classic_candidate {
-            // #16042: the classic arm completes only on the expected ack (or
-            // an unknown expectation / unparsed ack, which fails open).
-            if Self::handshake_ack_valid(self.handshake_expected_ack(key), ack) {
+            let expected_ack = self.handshake_expected_ack(key);
+            let ack = Self::resolve_probe_ack(ack_provider, ack_cache);
+            if Self::handshake_ack_valid(expected_ack, ack) {
                 handshake_state_before = state_before;
                 close_class_before = class_before;
                 completing = Some((candidate_key, candidate_nat));
@@ -5100,6 +5210,11 @@ impl SessionTable {
         // with no progressed companion stays refused, exactly as
         // before (the caller falls through to the slow path / GC).
         if companion_crossed {
+            let ack = if ack_validation_candidate {
+                Self::resolve_probe_ack(ack_provider, ack_cache)
+            } else {
+                None
+            };
             if self.cache_hit_handshake_progress(key, tcp_flags, ack).is_none() {
                 return ProbeHitVerdict::IdleCrossed;
             }
@@ -5113,8 +5228,14 @@ impl SessionTable {
         // `cache_hit_handshake_progress`). Runs before the refresh arm
         // so the completing hit re-stamps `last_seen` itself.
         if completing.is_none() && companion_progress {
+            let ack = if ack_validation_candidate {
+                Self::resolve_probe_ack(ack_provider, ack_cache)
+            } else {
+                None
+            };
             if let Some((matched_key, nat)) =
-                self.cache_hit_handshake_progress(key, tcp_flags, ack) {
+                self.cache_hit_handshake_progress(key, tcp_flags, ack)
+            {
                 if let Some(entry) = self.entry_by_key(&matched_key) {
                     handshake_state_before =
                         entry.tcp_handshake_state_wire(matched_key.protocol);

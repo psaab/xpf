@@ -1,16 +1,19 @@
-//! #14945: `probe_hit` must be a semantic fusion of the three probes it
-//! replaces on the flow-cache hit path — `session_is_live_at` (liveness),
-//! `touch_if_stale_with_payload` (throttled keepalive, #14939 handshake
-//! completion, #14935/#10885 closing gates) and `account_packet`
-//! (#2501/#2749 counters + observed fields) — performed under ONE
-//! `record_by_key_mut` borrow.
+//! #14945: the production rollback-capable deferring probe must remain
+//! semantically equivalent to the pre-fusion sequence for parser-free,
+//! ACK-unknown inputs: liveness (`session_is_live_at`), keepalive
+//! (`touch_if_stale_with_payload`, including #14939 handshake completion and
+//! #14935/#10885 closing gates), then accounting (`account_packet`). These
+//! parity cases deliberately supply `None` for the ACK; they preserve the
+//! legacy fail-open semantics but do not pin known-ACK validation or parser
+//! cost. #16042 cells pin exact known-ACK behavior, and #17268 stage cells pin
+//! lazy L3/L4 derivation.
 //!
-//! Each cell drives the fused probe and the unfused sequence over two
-//! identically-seeded tables and asserts the observable session state is
-//! identical: return value, per-direction counters, observed ToS / TCP
-//! flags, `last_seen_ns`, handshake/closing state, and the established
-//! window. A fusion that dropped the closing gate, the completion arm,
-//! the throttle, or the reverse fold would diverge on at least one cell.
+//! Each cell drives the production deferring probe plus its admission emit
+//! and the unfused sequence over two identically-seeded tables, then asserts
+//! observable session state: return value, per-direction counters, observed
+//! ToS / TCP flags, `last_seen_ns`, handshake/closing state, and established
+//! window. A fusion that dropped the closing gate, completion arm, throttle,
+//! or reverse fold would diverge on at least one cell.
 //!
 //! Loaded as a sibling submodule via `#[path]` from session/mod.rs.
 
@@ -113,7 +116,18 @@ fn assert_equivalent(
     dscp: u8,
     probe_key: &SessionKey,
 ) {
-    let fused_ok = fused.probe_hit(probe_key, now_ns, len, tcp_flags, payload_len, dscp);
+    let fused_ok = fused.probe_hit_deferring_state_update_with_ack_rollback(
+        probe_key,
+        now_ns,
+        len,
+        tcp_flags,
+        payload_len,
+        dscp,
+        None,
+        false,
+    );
+    fused.emit_probe_hit_state_update(probe_key);
+    let _ = fused.take_probe_stage_transition_forward(probe_key);
     let oracle_ok = unfused_hit(oracle, probe_key, now_ns, len, tcp_flags, payload_len, dscp);
     assert_eq!(fused_ok, oracle_ok, "{label}: probe_hit return diverged");
     for key in keys {

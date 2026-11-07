@@ -24,6 +24,17 @@
 //! references it.
 
 use super::*;
+#[cfg(test)]
+std::thread_local! {
+    static TCP_SEQ_ACK_WINDOW_DERIVATIONS_FOR_TEST: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(in crate::afxdp) fn tcp_seq_ack_window_derivations_for_test() -> u64 {
+    TCP_SEQ_ACK_WINDOW_DERIVATIONS_FOR_TEST.with(std::cell::Cell::get)
+}
+
 
 const SYN_COOKIE_REPLY_TTL: u8 = 64;
 const SYN_COOKIE_REPLY_HOP_LIMIT: u8 = 64;
@@ -183,6 +194,8 @@ pub(in crate::afxdp) fn extract_tcp_flags_and_window(frame: &[u8]) -> Option<(u8
 /// #15753: extract (seq, ack, window); None if not TCP/truncated.
 #[inline]
 pub(in crate::afxdp) fn extract_tcp_seq_ack_window(frame: &[u8]) -> Option<(u32, u32, u16)> {
+    #[cfg(test)]
+    TCP_SEQ_ACK_WINDOW_DERIVATIONS_FOR_TEST.with(|count| count.set(count.get() + 1));
     let l3 = frame_l3_offset(frame)?;
     let ip = frame.get(l3..)?;
     let addr_family = match ip.first()? >> 4 { 4 => libc::AF_INET as u8, 6 => libc::AF_INET6 as u8, _ => return None };

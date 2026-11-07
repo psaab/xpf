@@ -708,22 +708,20 @@ pub(super) fn stage_flow_cache_hit(
             }
         } else {
             // HA completion is published only after output-filter/policer
-            // admission below; probe_hit itself would emit it immediately.
-            // #16042: carry the parsed ack so a wrong-ack cached segment
-            // cannot complete the handshake.
-            let ack = crate::afxdp::frame::extract_tcp_seq_ack_window(packet_frame).map(|(_, ack, _)| ack);
-            // #18533 round 2: the probe records its rollback undo only when
-            // the replay below can still drop this packet — the same two
-            // inputs the drop test reads (`tx_selection.drop`, and a policer,
-            // without which `policer_action.drop` is never set).
-            sessions.probe_hit_deferring_state_update_with_ack_rollback_verdict(
+            // admission below; probe state update is deferred until then.
+            // #16042: re-derive the packet ACK only if a handshake candidate
+            // or progress arm needs it; established hits never walk L3/L4.
+            sessions.probe_hit_deferring_state_update_with_ack_rollback_verdict_lazy(
                 &flow.forward_key,
                 now_ns,
                 meta.pkt_len as u64,
                 meta.tcp_flags,
                 super::tcp_payload_len(packet_frame, meta),
                 meta.dscp,
-                ack,
+                || {
+                    crate::afxdp::frame::extract_tcp_seq_ack_window(packet_frame)
+                        .map(|(_, ack, _)| ack)
+                },
                 cached_descriptor.tx_selection.drop
                     || !cached_descriptor.tx_selection.three_color_policers.is_empty(),
                 &mut probe_wire_canonical,

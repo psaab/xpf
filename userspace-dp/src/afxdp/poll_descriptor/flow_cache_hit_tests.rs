@@ -2556,6 +2556,49 @@ fn live_established_cache_hit_hashes_the_flow_key_twice_18533() {
 }
 
 #[test]
+fn established_cache_hit_skips_tcp_seq_ack_frame_parse_17268() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let before = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test();
+    let run = run_stage(&fixture, &tcp_v4_ack_frame(), 0);
+    let derivations = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test() - before;
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: served hit");
+    assert_eq!(
+        derivations, 0,
+        "steady-state established hit must not re-derive the TCP ACK from L3/L4"
+    );
+}
+
+#[test]
+fn completing_cache_hit_derives_tcp_seq_ack_once_17268() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let before = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test();
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        cached_entry(),
+        0,
+        StageSeed {
+            install_handshake_pending: true,
+            ..StageSeed::default()
+        },
+    );
+    let derivations = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test() - before;
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: served completion candidate");
+    assert_eq!(
+        run.sessions.handshake_state_wire_for(&test_key()),
+        crate::session::TcpHandshakeState::Established.to_wire(),
+        "the pending completion candidate still advances the session"
+    );
+    assert_eq!(
+        derivations, 1,
+        "a handshake completion candidate derives the ACK exactly once"
+    );
+
+}
+
+#[test]
 fn live_flow_cache_callsite_accounts_debug_forward_and_tx_6304() {
     let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
     let in_place = run_stage(&fixture, &tcp_v4_ack_frame(), 0);

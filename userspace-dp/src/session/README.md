@@ -328,7 +328,10 @@ completion lands on whichever hit path consumes the segment. The
 deferred-Owner replay already completed through the real lookup arm;
 the synced-replica shape completes here too because a materialized
 HandshakePending import is a local entry whose hits are cache hits.
-Steady state costs one `handshake_pending` bool check per cache hit.
+The state-machine guards inspect `handshake_pending` on cache hits, but an
+established steady-state hit does not parse the TCP seq/ack fields: the
+frame's L3/L4 walk is deferred to the classic completion and companion-progress
+arms that need ACK validation.
 
 **Classic handshake segments must ack the peer SYN end (#16042).** The
 lookup SYN-ACK/completion gates, cached-hit classic arm, and update/promote
@@ -791,28 +794,31 @@ reject idle-crossed entries but leave physical removal to the wheel.
 The flow-cache fast path (`afxdp/poll_descriptor/flow_cache_hit.rs`) is
 the ONLY code path that refreshes a forwarded flow's `last_seen_ns` — a
 flow served entirely from the per-worker flow cache never re-runs the
-slow path that would otherwise touch the session. Every cached candidate is
-first admitted by the read-only `session_is_live_at` deadline check. Missing
-or idle-crossed backing sessions fall through before filters, policers, logs,
-accounting, or TX side effects. A cached `PolicyDenied` or `DiscardRoute` hit
-also uses the alias-aware `has_session_hit_at` probe to detect a newly
-installed live session before replaying the terminal verdict; it invalidates
-the stale deny slot and falls through, preventing an earlier unsolicited
-packet's cached reject from blackholing or RST-killing a subsequently
-established reverse flow. After the TTL check, `touch_if_stale` is the
-keepalive it calls on every admitted cache hit: it re-stamps the matched
-session ONLY once that session has gone idle for at least
-`expires_after_ns / SESSION_KEEPALIVE_DIVISOR` (a quarter of its OWN
+slow path that would otherwise touch the session. For an ordinary hit,
+the deferring fused probe validates backing-session liveness, performs
+the throttled keepalive and packet accounting in one record borrow, then
+the cache path replays filters, policers, logs and TX. Missing or
+idle-crossed backing sessions fall through before those side effects.
+A TTL-expiring hit instead takes the read-only `session_is_live_at`
+check and never refreshes, completes or accounts the packet. A cached
+`PolicyDenied` or `DiscardRoute` hit also uses alias-aware
+`has_session_hit_at` to detect a newly installed live session before
+replaying the terminal verdict; it invalidates the stale deny slot and
+falls through, preventing an earlier unsolicited packet's cached reject
+from blackholing or RST-killing a subsequently established reverse flow.
+The probe re-stamps the matched session ONLY once it has gone idle for at
+least `expires_after_ns / SESSION_KEEPALIVE_DIVISOR` (a quarter of its OWN
 timeout). An actively-forwarding cached flow is thus re-stamped whenever
 its idle time crosses `expires_after_ns / N`, keeping its age ~`T/N` in
 steady state regardless of co-resident flow rates, so it can never be
-GC'd mid-flow (reaped only if a real inter-packet gap exceeds `T`). The
-admission check, keepalive and accounting described here have been one
-fused `probe_hit` borrow since #14945; an established forward hit costs one
-session-index lookup in total (see "Established cache-hit cost (#18533)"
-below — the "two warm probes" this paragraph used to state is
-pre-#14945). The `last_seen_ns` write + throttled `push_to_wheel` run only
-when actually stale. Allocation-free.
+GC'd mid-flow (reaped only if a real inter-packet gap exceeds `T`).
+The liveness check, keepalive and accounting have shared the cache-hit
+record borrow since #14945; today it is the rollback-capable deferring
+probe. An established forward hit costs one session-index lookup in total
+(see "Established cache-hit cost (#18533)" below). TCP ACK extraction is
+lazy: only a classic completion candidate or handshake-progress arm
+walks the frame's L3/L4 headers. The `last_seen_ns` write + throttled
+`push_to_wheel` run only when actually stale. Allocation-free.
 
 For closing TCP, #10885 keeps the timer directional on bare ACKs: reset
 entries and FIN-owning halves do not slide on ACK-only hits, while the
@@ -1078,10 +1084,12 @@ Established retention ceiling) and `session/hash_cost_18520_tests.rs`.
 
 Per admitted cache-served packet the flow-cache stage
 (`afxdp/poll_descriptor/flow_cache_hit.rs`) makes three session-table calls:
-`probe_hit_deferring_state_update_with_ack` (liveness, keepalive, accounting,
-handshake completion), `emit_probe_hit_state_update` after TX admission, and
-`take_probe_stage_transition_forward`. For a steady-state established,
-non-pending, non-closing pair they cost:
+`probe_hit_deferring_state_update_with_ack_rollback_verdict_lazy` (liveness,
+keepalive, accounting, handshake completion), `emit_probe_hit_state_update`
+after TX admission, and `take_probe_stage_transition_forward`. The lazy ACK
+provider walks L3/L4 only for classic completion or companion-progress
+candidates, and memoizes the extraction if both arms consult it. For a
+steady-state established, non-pending, non-closing pair these calls cost:
 
 | Hit | `SessionKey` index lookups |
 |---|---|
@@ -1112,7 +1120,7 @@ forward packet, each needed by some transition but paid on every packet:
   only when the cached replay drops the packet: a `then discard`/`then
   reject` selection or a three-color policer. The hit passes
   `rollback_possible = tx_selection.drop || !three_color_policers.is_empty()`
-  to `probe_hit_deferring_state_update_with_ack_rollback`; without either,
+  to `probe_hit_deferring_state_update_with_ack_rollback_verdict_lazy`; without either,
   the probe builds no `ProbeUndo` (a few hundred bytes built and pushed per
   packet, the 1.2% `memmove` under the probe in the round-1 loss profile).
   The deferred HA Update and stage marker are unchanged; their admission key
@@ -1211,7 +1219,7 @@ per-session numbers, not a loss ceiling.
   #16223).
 - **Canonical key out-param.** The probe recorded its undo, deferred HA
   Update and stage marker under the canonical key. The `wire_canonical`
-  out-param of `probe_hit_deferring_state_update_with_ack_rollback_verdict`
+  out-param of `probe_hit_deferring_state_update_with_ack_rollback_verdict_lazy`
   names that key, and the hit path keys `rollback_dropped_probe_hit`,
   `emit_probe_hit_state_update` and `take_probe_stage_transition_forward`
   on it. Without it, a dropped wire-keyed packet would not be rolled back.

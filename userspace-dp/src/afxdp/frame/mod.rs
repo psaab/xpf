@@ -158,6 +158,8 @@ pub(in crate::afxdp) use tcp::{
     tcp_payload_offset, tcp_payload_offset_from_l3,
 };
 pub(super) use tcp::{extract_tcp_flags_and_window, tcp_flags_str};
+#[cfg(test)]
+pub(in crate::afxdp) use tcp::tcp_seq_ack_window_derivations_for_test;
 // #15119: segmentation builders and the dispatch admission gate decline
 // TCP-MD5/TCP-AO datagrams via this shared option walk.
 pub(in crate::afxdp) use tcp::tcp_header_has_auth_option;
