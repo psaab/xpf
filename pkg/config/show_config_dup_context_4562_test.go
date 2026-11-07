@@ -61,11 +61,11 @@ func buildDupPolicyContext(t *testing.T) *ConfigTree {
 	return tree
 }
 
-// TestShowConfigDupContextMultiKeyDescent covers the multi-key intermediate
+// TestShowConfigDupContextMultiKeyDescent17267 covers the multi-key intermediate
 // descent: a display path that descends PAST the duplicated 4-key
 // `from-zone untrust to-zone trust` context must see policies from BOTH
 // duplicate blocks.
-func TestShowConfigDupContextMultiKeyDescent(t *testing.T) {
+func TestShowConfigDupContextMultiKeyDescent17267(t *testing.T) {
 	tree := buildDupPolicyContext(t)
 	ctx := []string{"security", "policies", "from-zone", "untrust", "to-zone", "trust"}
 
@@ -105,13 +105,13 @@ func TestShowConfigDupContextMultiKeyDescent(t *testing.T) {
 	}
 }
 
-// TestShowConfigDupContextSingleKeyDescent covers the shared navigateWalk
+// TestShowConfigDupContextSingleKeyDescent17267 covers the shared navigateWalk
 // single-key intermediate-descent branch: two identical single-key
 // `interfaces { ge-0-0-0 { ... } }` blocks holding distinct leaves. The
 // display path descends through the duplicated single-key `interfaces`
 // and `ge-0-0-0` levels before terminating — so both branch descents are
 // exercised.
-func TestShowConfigDupContextSingleKeyDescent(t *testing.T) {
+func TestShowConfigDupContextSingleKeyDescent17267(t *testing.T) {
 	src := `interfaces {
     ge-0-0-0 {
         mtu 1500;
@@ -148,10 +148,10 @@ interfaces {
 	}
 }
 
-// TestShowConfigSingleContextDescentUnchanged is the over-broadening guard:
+// TestShowConfigSingleContextDescentUnchanged17267 is the over-broadening guard:
 // a config with a SINGLE (non-duplicated) context renders a scoped descent
 // identically — exactly one policy, no leak from the fix.
-func TestShowConfigSingleContextDescentUnchanged(t *testing.T) {
+func TestShowConfigSingleContextDescentUnchanged17267(t *testing.T) {
 	src := `security {
     policies {
         from-zone untrust to-zone trust {

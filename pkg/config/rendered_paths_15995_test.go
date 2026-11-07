@@ -409,6 +409,22 @@ func TestNavigateWalkerParity17267(t *testing.T) {
 			wantWidth: 1,
 		},
 		{
+			name: "failed-multi-key-continuation",
+			text: `root { pair v extra x; pair v other y; }`,
+			path: []string{"root", "pair", "v", "extra", "y"},
+			wantWidth: 0,
+			wantPaths: nil,
+		},
+		{
+			name: "duplicate-bracket-groups-descent",
+			text: `security { zones { security-zone [ zga zgb ] { tcp-rst; } security-zone [ zgb zgc ] { admin; } } }`,
+			path: []string{"security", "zones", "security-zone", "zgb", "admin"},
+			wantPaths: [][]string{
+				{"security", "zones", "security-zone", "zgb", "zgc", "admin"},
+			},
+			wantWidth: 1,
+		},
+		{
 			name: "wildcard-instance-descent",
 			text: `interfaces { ge-0/0/0 { unit 0 { family inet { address 192.0.2.1/24; } } } }`,
 			path: []string{"interfaces", "ge-0/0/0", "unit", "0", "family", "inet", "address", "192.0.2.1/24"},

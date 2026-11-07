@@ -1886,7 +1886,8 @@ keyword rather than returning only the first. The intermediate-descent fix
 also ensures a selector that continues past a matched level sees the UNION of
 all matching siblings' children. `navigateWalk` is the shared implementation
 behind the display-width wrapper `navigatePathWidth` and the authz pricing
-wrapper `navigateRenderedMatches`; its intermediate branches handle multi-key
+wrapper `navigateRenderedMatches`; `AnnotatePath` also resolves its target
+through the same display selection. Its intermediate branches handle multi-key
 pairs and single-key keywords. Display mode uses `unionChildren`, while authz
 mode carries the rendered path trails through the same union.
 
