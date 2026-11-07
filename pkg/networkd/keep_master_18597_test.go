@@ -43,6 +43,12 @@ func TestManagementVRFRowRendersKeepMaster18597(t *testing.T) {
 		{"fabric bond", InterfaceConfig{Name: "fab0", IsBond: true, Addresses: []string{"10.99.1.1/30"}, VRFName: "vrf-mgmt"}, true, ""},
 		{"vlan parent", InterfaceConfig{Name: "fxp0", IsVLANParent: true, VRFName: "vrf-mgmt"}, true, ""},
 		{"dhcp mgmt", InterfaceConfig{Name: "fxp0", DHCPv4: true, VRFName: "vrf-mgmt"}, true, ""},
+		{"disabled management", InterfaceConfig{Name: "em0", VRFName: "vrf-mgmt", Disable: true}, true, ""},
+		{"unmanaged management", InterfaceConfig{Name: "fxp0", VRFName: "vrf-mgmt", Unmanaged: true}, true, ""},
+		{"disabled without VRF", InterfaceConfig{Name: "em1", Disable: true}, false, ""},
+		{"unmanaged without VRF", InterfaceConfig{Name: "em2", Unmanaged: true}, false, ""},
+		{"disabled bond member", InterfaceConfig{Name: "em3", BondMaster: "fab0", VRFName: "vrf-mgmt", Disable: true}, false, ""},
+		{"unmanaged bridge member", InterfaceConfig{Name: "em4", BridgeMaster: "br-bd0", VRFName: "vrf-mgmt", Unmanaged: true}, false, ""},
 		// KeepMaster makes networkd ignore Bond=/Bridge=, so a row whose
 		// master is a networkd-owned bond or bridge keeps that directive.
 		{"bond member", InterfaceConfig{Name: "em1", BondMaster: "fab0", VRFName: "vrf-mgmt"}, false, "Bond=fab0\n"},

@@ -129,15 +129,15 @@ Triggers `networkctl reload` only when files actually changed.
   file plus `networkctl reload` added the new address without a cycle. A row
   with a non-empty `VRFName` renders `KeepMaster=yes` unless it also names a
   networkd-owned `Bond=` or `Bridge=` master, which `KeepMaster` would make
-  networkd ignore. The daemon's `BindInterfaceToVRF` owns the binding. Cells:
+  networkd ignore. This includes disabled and unmanaged rows: the always-down
+  branch still renders `KeepMaster=yes` when `VRFName` is non-empty (#18607).
+  The daemon's `BindInterfaceToVRF` owns the binding. Cells:
   `keep_master_18597_test.go` plus the #18605 dataplane model cells. The
   compiler excludes dual-claimed and retained quarantined devices while
   preserving same-RI list plus stanza claims and giving unit tunnel stanzas
   precedence over interface stanzas on the same device. Conflicting
   different-RI unit-stanza claims remain unmarked. Removing the last applicable
   bind drops `KeepMaster=yes` on the next compile.
-  Residual: a DISABLED management-class row takes the always-down early return
-  without `KeepMaster=yes` (#18607).
 - **The activation tail reconfigures only interfaces whose files changed
   (#18597).** `Apply` records which interfaces had a `.link`, `.netdev` or
   `.network` file rewritten in this call (`changedIfaces`) and reconfigures

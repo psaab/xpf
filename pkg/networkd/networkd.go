@@ -1967,6 +1967,12 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 		b.WriteString("ActivationPolicy=always-down\n")
 		b.WriteString("RequiredForOnline=no\n")
 		b.WriteString("\n[Network]\n")
+		// The daemon binds management-class rows regardless of disable, so
+		// disabled and unmanaged VRF members still need KeepMaster (#18607).
+		// Keep the Bond=/Bridge= exclusion from the normal path below.
+		if ifc.VRFName != "" && ifc.BondMaster == "" && ifc.BridgeMaster == "" {
+			b.WriteString("KeepMaster=yes\n")
+		}
 		b.WriteString("DHCP=no\n")
 		b.WriteString("IPv6AcceptRA=no\n")
 		b.WriteString("LinkLocalAddressing=no\n")
