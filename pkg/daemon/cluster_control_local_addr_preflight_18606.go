@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
@@ -160,9 +159,11 @@ func freshBindSelection18606(candidate controlLinkAddrs18606, peer string) strin
 	} else {
 		ordered = orderAddresses18606(ordered, candidate.primary)
 	}
-	// Networkd filters the family whose DHCP client is on before address
-	// ordering; controlLinkState18606 already applies that filter, so only
-	// the preferred-address ordering remains to mirror here.
+	// Networkd orders primary first (overall for IPv4-only selection, per
+	// subnet when IPv6 selectors exist), then filters DHCP-owned families,
+	// then orders preferred first within each subnet. State extraction filters
+	// first; this commutes with primary promotion, and subnet ordering cannot
+	// cross families, so the resulting order is equivalent.
 	ordered = orderPreferredFirstPerSubnet18606(ordered, candidate.preferred)
 	if candidate.preferredV6 != "" {
 		ordered = orderPreferredFirstPerSubnet18606(ordered, candidate.preferredV6)
@@ -263,24 +264,33 @@ func cidrListHasIP18606(list []string, ip net.IP) bool {
 
 // controlLinkState18606 returns the control-link unit's rendered static
 // addresses and the per-family primary/preferred selections networkd uses
-// on a fresh bind. It resolves the control-interface ref the same way as
-// the cluster monitor and #16425 gate: the last dot followed by a number
-// names the unit, anything else is unit 0. It applies networkd's per-family
-// DHCP rule (pkg/networkd generateNetwork, #2986), so a family whose DHCP
-// client is on renders none of its static addresses. Selections are read
-// through family-checked accessors so IPv6 values do not leak into IPv4
-// slots (#15944).
+// on a fresh bind. It follows ResolveKernelIfName's exact-declared-interface
+// precedence (#8994) before splitting a genuine unit ref (#9821): an exact
+// interface key, even one containing a dot, selects unit 0; otherwise the
+// declared-aware split resolves the base interface and unit. It applies
+// networkd's per-family DHCP rule (pkg/networkd generateNetwork, #2986), so a
+// family whose DHCP client is on renders none of its static addresses.
+// Selections are read through family-checked accessors so IPv6 values do not
+// leak into IPv4 slots (#15944).
 func controlLinkState18606(cfg *config.Config, ref string) controlLinkAddrs18606 {
 	if cfg == nil {
 		return controlLinkAddrs18606{}
 	}
-	base, unit := ref, 0
-	if i := strings.LastIndex(ref, "."); i >= 0 {
-		if n, err := strconv.Atoi(ref[i+1:]); err == nil {
-			base, unit = ref[:i], n
+	var ifc *config.InterfaceConfig
+	unit := 0
+	if declared, ok := cfg.Interfaces.Interfaces[ref]; ok && declared != nil {
+		ifc = declared
+	} else {
+		split := cfg.SplitInterfaceUnitRef(ref)
+		if split.HasUnit {
+			n, err := strconv.Atoi(split.UnitTok)
+			if err != nil {
+				return controlLinkAddrs18606{}
+			}
+			unit = n
 		}
+		ifc = cfg.Interfaces.Interfaces[split.Base]
 	}
-	ifc := cfg.Interfaces.Interfaces[base]
 	if ifc == nil {
 		return controlLinkAddrs18606{}
 	}

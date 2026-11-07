@@ -48,6 +48,12 @@ func TestControlLocalAddressDecision18606(t *testing.T) {
 		{"preferred change switches fresh bind and is refused", "10.99.14.1",
 			[]string{"10.99.14.1/24", "10.99.14.3/24"}, []string{"10.99.14.1/24", "10.99.14.3/24"},
 			"", "", "10.99.14.1/24", "10.99.14.3/24", true},
+		{"promoting the bound address to primary passes", "10.99.14.1",
+			[]string{"10.99.14.1/24", "10.99.14.3/24"}, []string{"10.99.14.1/24", "10.99.14.3/24"},
+			"10.99.14.3/24", "10.99.14.1/24", "", "", false},
+		{"adding a primary from no selection switches fresh bind and is refused", "10.99.14.1",
+			[]string{"10.99.14.1/24"}, []string{"10.99.14.1/24", "10.99.14.3/24"},
+			"", "10.99.14.3/24", "", "", true},
 		{"removing the bound address but keeping another is refused", "10.99.14.1", []string{"10.99.14.1/30", "192.0.2.9/24"}, []string{"192.0.2.9/24"}, "", "", "", "", true},
 		{"static -> DHCP strands the bound address and is refused", "10.99.14.1", running, nil, "", "", "", "", true},
 		{"no running heartbeat abstains (boot, first commit)", "", running, []string{"10.99.14.5/30"}, "", "", "", "", false},
@@ -166,6 +172,79 @@ func TestControlLocalAddressPreflightReadsTheRunningBind18606(t *testing.T) {
 	}
 	if err := clusterControlLocalAddressCommitPreflight(running, primaryRunning, primarySwapped); err == nil {
 		t.Fatal("swapping primary to 10.99.14.3 while the heartbeat remains bound to configured 10.99.14.1 must be refused")
+	}
+	configWithControl := func(controlInterface, peer string, addresses ...string) *config.Config {
+		lines := []string{
+			"chassis cluster cluster-id 1",
+			"chassis cluster node 0",
+			"chassis cluster authentication-key test-cluster-psk-18606",
+			"chassis cluster control-interface " + controlInterface,
+			"chassis cluster peer-address " + peer,
+		}
+		return compiledCfg18606(t, append(lines, addresses...))
+	}
+	primaryConfig := func(controlInterface, interfaceName, unit, primary string) *config.Config {
+		address := func(value, marker string) string {
+			line := "interfaces " + interfaceName + " unit " + unit + " family inet address " + value
+			if marker != "" {
+				line += " " + marker
+			}
+			return line
+		}
+		addresses := []string{}
+		if unit != "0" {
+			addresses = append(addresses,
+				"interfaces "+interfaceName+" vlan-tagging",
+				"interfaces "+interfaceName+" unit "+unit+" vlan-id "+unit)
+		}
+		addresses = append(addresses,
+			address("10.99.14.1/24", ""),
+			address("10.99.14.3/24", ""),
+			address(primary, "primary"))
+		return configWithControl(controlInterface, "10.99.14.2", addresses...)
+	}
+	dottedRunning := primaryConfig("hb.1", "hb.1", "0", "10.99.14.1/24")
+	dottedSwapped := primaryConfig("hb.1", "hb.1", "0", "10.99.14.3/24")
+	if got := controlLinkState18606(dottedRunning, "hb.1").primary; got != "10.99.14.1/24" {
+		t.Fatalf("declared dotted interface primary = %q, want 10.99.14.1/24", got)
+	}
+	if got := controlLinkState18606(dottedSwapped, "hb.1").primary; got != "10.99.14.3/24" {
+		t.Fatalf("candidate declared dotted interface primary = %q, want 10.99.14.3/24", got)
+	}
+	if err := clusterControlLocalAddressCommitPreflight(running, dottedRunning, dottedSwapped); err == nil {
+		t.Fatal("a primary swap on declared dotted control-interface hb.1 must be refused")
+	}
+	// An undeclared suffix is a real unit ref: unit 7 of em0, not a declared
+	// interface named em0.7. The split path must continue to resolve it.
+	unitRunning := primaryConfig("em0.7", "em0", "7", "10.99.14.1/24")
+	unitSwapped := primaryConfig("em0.7", "em0", "7", "10.99.14.3/24")
+	if got := controlLinkState18606(unitRunning, "em0.7").primary; got != "10.99.14.1/24" {
+		t.Fatalf("unit ref em0.7 primary = %q, want 10.99.14.1/24", got)
+	}
+	if got := controlLinkState18606(unitSwapped, "em0.7").primary; got != "10.99.14.3/24" {
+		t.Fatalf("candidate unit-ref primary = %q, want 10.99.14.3/24", got)
+	}
+	if err := clusterControlLocalAddressCommitPreflight(running, unitRunning, unitSwapped); err == nil {
+		t.Fatal("a primary swap on unit-ref control-interface em0.7 must be refused")
+	}
+	ipv6Preferred := func(preferred string) *config.Config {
+		return configWithControl("em0", "2001:db8:14::2",
+			"interfaces em0 unit 0 family inet6 address 2001:db8:14::1/64",
+			"interfaces em0 unit 0 family inet6 address 2001:db8:14::3/64",
+			"interfaces em0 unit 0 family inet6 address "+preferred+" preferred")
+	}
+	ipv6Running := ipv6Preferred("2001:db8:14::1/64")
+	ipv6Swapped := ipv6Preferred("2001:db8:14::3/64")
+	if got := controlLinkState18606(ipv6Running, "em0").preferredV6; got != "2001:db8:14::1/64" {
+		t.Fatalf("running IPv6 preferred = %q, want 2001:db8:14::1/64", got)
+	}
+	if got := controlLinkState18606(ipv6Swapped, "em0").preferredV6; got != "2001:db8:14::3/64" {
+		t.Fatalf("candidate IPv6 preferred = %q, want 2001:db8:14::3/64", got)
+	}
+	ipv6Manager := cluster.NewManager(0, 1)
+	ipv6Manager.SetHeartbeatEndpointForTesting("2001:db8:14::1", "2001:db8:14::2", "em0")
+	if err := clusterControlLocalAddressCommitPreflight(ipv6Manager, ipv6Running, ipv6Swapped); err == nil {
+		t.Fatal("swapping IPv6 preferred to 2001:db8:14::3 while heartbeat is bound to configured 2001:db8:14::1 must be refused")
 	}
 }
 

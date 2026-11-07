@@ -276,6 +276,7 @@ ends of a point-to-point control link atomically from one end of it.**
   `peer-address` values in both nodes' boot configurations before starting
   either `xpfd`. Do not rely on a one-sided first commit or make compensating
   per-node live commits.
+
   On the peer-synced path it is safe for #8965's reason — every shipped
   cluster config keeps the control address inside `groups node0`/`node1`,
   so a synced text compiles to this node's own address — and a synced text
