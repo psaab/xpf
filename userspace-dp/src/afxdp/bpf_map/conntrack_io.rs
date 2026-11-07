@@ -791,4 +791,3 @@ fn update_test_row(key: &SessionKey, value: ConntrackValueRef<'_>, flags: u64) -
 pub(crate) fn count_conntrack_test_lookup() {
     CONNTRACK_TEST_APP_ID_RESTAMP_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
 }
-

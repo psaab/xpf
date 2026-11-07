@@ -1328,6 +1328,10 @@ fn conntrack_key_encoding_has_no_hand_rolled_copies() {
             "bpf_map/publish_conntrack.rs",
             include_str!("bpf_map/publish_conntrack.rs"),
         ),
+        (
+            "bpf_map/conntrack_io.rs",
+            include_str!("bpf_map/conntrack_io.rs"),
+        ),
     ];
     for (name, src) in sources {
         // Strip line comments so this test's own prose (and the builder doc
@@ -2453,6 +2457,15 @@ fn conntrack_test_rows_use_only_the_selected_family_fd_17271() {
         ));
         crate::afxdp::bpf_map::update_session_cluster_synced_origin(
             good_v4, good_v6, key, false,
+        );
+        // Sol #17271: origin must be asserted HERE — refresh clears the
+        // ForwardFlow bit itself, so asserting only after refresh
+        // cannot distinguish a working origin update from a no-op.
+        let origin_row =
+            crate::afxdp::bpf_map::conntrack_row_for_test(key).expect("row remains");
+        assert!(
+            !origin_row.cluster_synced,
+            "selected-family origin update must clear cluster_synced before refresh"
         );
         let _ = crate::afxdp::bpf_map::refresh_bpf_conntrack_last_seen(
             good_v4, good_v6, &table, &policy, 2_000_000_000, 0, 4096,
