@@ -160,6 +160,28 @@ func TestSchemaExitScrubPartiallyOverlappingURLNeedles18997(t *testing.T) {
 // with a newline renders under %q with escapes; raw-only spanning (the
 // first sentinel fix) cannot match it. The pivot substitution covers
 // raw, Quote, and interior forms, so the %q text is scrubbed too.
+// #18997 pivot-cross-overlap arm (Sol fold at f33328217a): an ordinary
+// credential partially overlapping a sentinel-containing one must
+// merge with its span — a text pre-pass that replaces the sentinel
+// value BEFORE spanning destroys the ordinary needle's match in the
+// original text and leaves its non-overlapped half standing. Both
+// needles below are whole archive-sites values; the foreign error
+// carries their concatenation, quoted.
+func TestSchemaExitScrubPivotCrossOverlap18997(t *testing.T) {
+	tree := buildRedactTree(t, []string{
+		`set system archival configuration archive-sites "user:pw@host" password "s3cr3t"`,
+		`set system archival configuration archive-sites "@host<redacted>" password "s3cr3t"`,
+	})
+	foreign := fmt.Errorf("archive fetch failed for %q", "user:pw@host<redacted>")
+	got := scrubSchemaErrorSecrets(tree, foreign).Error()
+	if strings.Contains(got, "user:pw") || strings.Contains(got, "@host") {
+		t.Errorf("ordinary needle destroyed by sentinel pivot pre-pass (#18997): %v", got)
+	}
+	if strings.Contains(got, "xpf-redacted-pivot") {
+		t.Errorf("pivot marker leaked into diagnostic: %v", got)
+	}
+}
+
 func TestSchemaExitScrubSentinelContainingEscapedCredential18997(t *testing.T) {
 	secret := "only<redacted>credential\nTAIL"
 	tree := buildRedactTree(t, []string{

@@ -423,26 +423,34 @@ func scrubSecretValuesText(values []string, text string) string {
 	// overlapping spans merge into one sentinel.
 	//
 	// Sentinel-containing values ("only<redacted>credential" is a real
-	// password SchemaValidate accepts) are rewritten through a
-	// sentinel-free PIVOT first: their value, replaced literally below,
-	// contains the very spelling inserted for other redacted spans, so
-	// spanning them directly would corrupt rendered sentinels (needle
-	// "redacted" matching inside "<redacted>"), while spanning only
-	// the raw form leaks their %q renderings. The pivot is a NUL-wrapped
-	// marker: NUL cannot appear in a rendered diagnostic from config
-	// text (lexer rejects control bytes), so it never collides.
-	// After the pivot substitution the main span pass runs, and the
-	// pivot becomes SecretRedacted only in the final output — at no
-	// point does a needle match inside an inserted sentinel.
+	// password SchemaValidate accepts) join the SAME span pass, but
+	// their inserted replacement cannot be SecretRedacted itself: a
+	// later needle ("redacted") would match inside it. Their spans are
+	// instead emitted as a NUL-wrapped PIVOT (NUL never appears in a
+	// rendered diagnostic; lexer rejects control bytes), rewritten to
+	// SecretRedacted once, after all spanning. Because the pivot
+	// substitution happens in the span pass itself (not as a text
+	// pre-pass), an ordinary needle partially overlapping a
+	// sentinel-containing value still merges with its span instead of
+	// being destroyed before matching (Sol fold at f33328217a). The
+	// quoted pivot's final rewrite covers both raw and Quote forms.
+	// Collision residual (accepted): a diagnostic literally containing
+	// the pivot string itself would be rewritten — config text cannot
+	// practically carry it (it would have to be planted as an exact
+	// NUL-wrapped token in a quoted value, which the lexer tolerates
+	// but no producer emits), and the rewrite fails toward redaction,
+	// never toward disclosure.
 	const pivot = "\x00xpf-redacted-pivot\x00"
-	text = spanReplaceSentinelValues(values, text, pivot)
 	ordered := append([]string(nil), values...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return len(ordered[i]) > len(ordered[j])
 	})
-	type span struct{ lo, hi int }
+	type span struct {
+		lo, hi int
+		pivot  bool
+	}
 	var spans []span
-	addSpans := func(needle string) {
+	addSpans := func(needle string, pivot bool) {
 		if needle == "" {
 			return
 		}
@@ -451,24 +459,25 @@ func scrubSecretValuesText(values []string, text string) string {
 			if i < 0 {
 				break
 			}
-			spans = append(spans, span{at + i, at + i + len(needle)})
+			spans = append(spans, span{at + i, at + i + len(needle), pivot})
 			at += i + 1
 		}
 	}
 	for _, v := range ordered {
-		if v == "" || strings.Contains(v, SecretRedacted) {
-			continue // sentinel-containing: pivot-substituted above
+		if v == "" {
+			continue
 		}
-		addSpans(v)
+		pivotValue := strings.Contains(v, SecretRedacted)
+		addSpans(v, pivotValue)
 		if q := strconv.Quote(v); q != v {
-			addSpans(q)
+			addSpans(q, pivotValue)
 		}
 		if in := quotedInterior(v); in != v && len(in) >= 2 {
-			addSpans(in)
+			addSpans(in, pivotValue)
 		}
 	}
 	if len(spans) == 0 {
-		return strings.ReplaceAll(text, pivot, SecretRedacted)
+		return text
 	}
 	sort.Slice(spans, func(i, j int) bool {
 		if spans[i].lo != spans[j].lo {
@@ -478,8 +487,13 @@ func scrubSecretValuesText(values []string, text string) string {
 	})
 	var b strings.Builder
 	pos, end := 0, -1
-	writeSpan := func() {
-		b.WriteString(SecretRedacted)
+	pivotSpan := false
+	flush := func() {
+		if pivotSpan {
+			b.WriteString(pivot)
+		} else {
+			b.WriteString(SecretRedacted)
+		}
 		pos = end
 	}
 	for _, sp := range spans {
@@ -487,44 +501,20 @@ func scrubSecretValuesText(values []string, text string) string {
 			if sp.hi > end {
 				end = sp.hi
 			}
+			pivotSpan = pivotSpan || sp.pivot
 			continue
 		}
 		if end >= 0 {
-			writeSpan()
+			flush()
 		}
 		b.WriteString(text[pos:sp.lo])
-		pos, end = sp.lo, sp.hi
+		pos, end, pivotSpan = sp.lo, sp.hi, sp.pivot
 	}
-	writeSpan()
+	flush()
 	b.WriteString(text[end:])
-	return strings.ReplaceAll(b.String(), pivot, SecretRedacted)
-}
-
-// spanReplaceSentinelValues substitutes every raw/quoted/interior
-// occurrence of a sentinel-containing value with the pivot marker.
-// Such values are rare (a credential containing "<redacted>") and the
-// substitution is single-pass sequential per value — overlapping
-// sentinel-containing values could still cross-destroy, an accepted
-// residual stated in docs/log/18997.md (two distinct credentials
-// sharing a long substring, one containing the sentinel).
-func spanReplaceSentinelValues(values []string, text, pivot string) string {
-	ordered := append([]string(nil), values...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return len(ordered[i]) > len(ordered[j])
-	})
-	for _, v := range ordered {
-		if v == "" || !strings.Contains(v, SecretRedacted) {
-			continue
-		}
-		text = strings.ReplaceAll(text, v, pivot)
-		if q := strconv.Quote(v); q != v {
-			text = strings.ReplaceAll(text, q, strconv.Quote(pivot))
-		}
-		if in := quotedInterior(v); in != v && len(in) >= 2 {
-			text = strings.ReplaceAll(text, in, pivot)
-		}
-	}
-	return text
+	out := b.String()
+	out = strings.ReplaceAll(out, strconv.Quote(pivot), strconv.Quote(SecretRedacted))
+	return strings.ReplaceAll(out, pivot, SecretRedacted)
 }
 func typedLeafInvalidErrorf(path []string, tok string, err error) error {
 	joined := strings.Join(redactSecretPath(path), " ")
