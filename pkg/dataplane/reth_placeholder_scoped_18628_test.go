@@ -55,6 +55,12 @@ func TestRethPlaceholderScopedByCluster_18628(t *testing.T) {
 	// Cluster-id 0 means clustering is disabled, and no-cluster configurations
 	// have no scope identity either. The helper renders octet 0 literally but
 	// makes no uniqueness claim; it cannot distinguish separate such configs.
+	// rg term pin (GLM seat): rg*2+node+1 must be injective across
+	// (rg, node); the plausible mutant rg+node+2 agrees at rg=1 but
+	// collides reth0/node1 with reth1/node0. rg=2 pins it.
+	if got, want := config.RethPlaceholderAddress(22, 2, 0), "169.254.22.5/32"; got != want {
+		t.Errorf("cluster 22 rg2 node0 placeholder = %q, want %q", got, want)
+	}
 	if got, want := config.RethPlaceholderAddress(0, 1, 0), "169.254.0.3/32"; got != want {
 		t.Errorf("cluster-id-0 placeholder = %q, want %q (not unique)", got, want)
 	}

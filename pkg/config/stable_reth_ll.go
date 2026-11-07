@@ -46,7 +46,10 @@ func StableRethLinkLocal(clusterID, rgID int) net.IP {
 // rg*2+node+1 spans 3..32 and fits the last octet.
 //
 // This helper only formats; it does not validate or clamp. Tolerant/direct
-// models may carry invalid RG or node values and exceed the IPv4 octet. Existing
+// models may carry invalid RG or node values and exceed the IPv4 octet: on the
+// tolerant/peer-sync path an rg in 127..255 renders a malformed address
+// (e.g. 169.254.<c>.401/32) that networkd drops, losing the placeholder —
+// in native VRRP mode that is the no-IPv4-advert-source shape. Existing
 // token gates are unchanged: strict compilation rejects and tolerant compilation
 // warns when rgID > MaxRethRedundancyGroupOctet, the one-byte chassis-cluster
 // heartbeat group-id ceiling.
