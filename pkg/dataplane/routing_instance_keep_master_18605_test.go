@@ -92,12 +92,19 @@ func TestRoutingInstanceKeepMasterExclusions18605(t *testing.T) {
 			"ge-0/0/3": {Name: "ge-0/0/3", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
 		}
 		cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue"}}
+		primary := config.RoutingInstanceMemberPrimaryClaim{
+			Instance: "blue", InterfaceKey: "ge-0/0/3", LinuxName: "ge-0-0-3",
+		}
+		cfg.QuarantinedRIMemberPrimaryClaims = []config.RoutingInstanceMemberPrimaryClaim{primary}
 		cfg.QuarantinedRIMemberDeviceConflicts = []config.RoutingInstanceMemberDeviceConflict{{
 			LinuxName: "ge-0-0-3",
 			Claims:    []config.RoutingInstanceMemberClaim{{Instance: "blue", Member: "ge-0/0/3"}},
 		}}
 		result := compileNetworkdRows18605(t, cfg, "ge-0-0-3")
 		assertVRFName18605(t, result, "ge-0-0-3", "")
+		cfg.QuarantinedRIMemberDeviceConflicts = nil
+		withoutConflict := compileNetworkdRows18605(t, cfg, "ge-0-0-3")
+		assertVRFName18605(t, withoutConflict, "ge-0-0-3", "vrf-blue")
 	})
 
 	t.Run("tunnel stanza owner", func(t *testing.T) {
