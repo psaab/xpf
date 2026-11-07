@@ -270,10 +270,23 @@ ends of a point-to-point control link atomically from one end of it.**
   inside `Store.SyncApplyGated` on the compiled peer text, so the standby
   keeps its config, nacks, and the primary's re-push is refused the same
   way (the standby reads config-sync stale until the operator fixes the
-  primary). Refusing after promotion — where the #8965/#8987/#9121 synced
-  checks still sit — leaves the refused text active, and every background
-  applier (DHCP callback, feeds, config poll, apply-debt retry) applies the
-  active config with no preflight.
+  primary).
+
+**#18622 — all three synced-path transport refusals are pre-promotion.**
+The #8965 peer-address, #8987 control-interface and #9121 config-sync
+endpoint checks also run inside `Store.SyncApplyGated`, before active
+promotion. A refusal leaves the prior active config intact: an identical
+re-push and a later push carrying the refused change are refused again, and
+every background applier (DHCP callback, feeds, config poll, apply-debt
+retry) sees only that unchanged active config. The #6720 authorization
+contract changes deliberately for these checks: a refused text's auth
+changes are not active policy, so management continues honouring the
+still-active config until a later accepted push or local commit promotes
+the change and the normal apply reconciles it. Reconciling the refused
+text's auth would split authorization from the config the node refused and
+the peer nacked. The #5840 topology and #6192 identity backstops remain
+promote-then-reconcile paths; their promoted authorization still follows
+the existing #6720 contract.
 
   **To renumber the control link**, do it offline: stop `xpfd` on both
   nodes, put the new address in each node's boot configuration (the daemon

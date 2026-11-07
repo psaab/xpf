@@ -23,15 +23,21 @@ import (
 // prescribes setting the new control-link peer address on BOTH nodes and
 // restarting xpfd on both, or taking the cluster down / configuring a
 // fabric fallback first.
-//
+
+// The #18622 move puts this refusal before SyncApplyGated promotes anything,
+// so the branch log still names the exact cause/remedy but it deliberately no
+// longer reconciles the management listener from the refused config. That
+// config's authorization is not active policy; the listener stays on the
+// still-active config until a later accepted promotion.
+
 // These cells drive the real peer-sync path (promoteReconcileEnv +
-// syncAndApply) so the branch's observable log text and reason are pinned,
-// not a copy of the strings. Class U: hermetic — the management listener is
-// a fake registry listener, the cluster manager is constructed in-memory
-// with SetHeartbeatEndpointForTesting (no sockets), and all config stores
-// live in t.TempDir(). No netlink, nftables, daemon, or exec reach.
-//
-// FAIL-ON-REVERT: restore the identity text/reason in the #8965 branch of
+// syncAndApply) so the branch's observable log text is pinned, not a copy of
+// the strings. Class U: hermetic — the management listener is a fake registry
+// listener, the cluster manager is constructed in-memory with
+// SetHeartbeatEndpointForTesting (no sockets), and all config stores live in
+// t.TempDir(). No netlink, nftables, daemon, or exec reach.
+
+// FAIL-ON-REVERT: restore the identity text in the #8965 branch of
 // syncAndApplyWithAncestry and the move cell below reds (the log names
 // "node-id/cluster-id", "re-key the HA manager", and neither peer address);
 // the identity control cell stays GREEN, proving the two branches are
@@ -129,15 +135,18 @@ func TestPeerSyncControlEndpointRefusalNamesControlLink17030(t *testing.T) {
 		}
 	}
 
-	// #6720 is preserved: SyncApply promoted the peer config before the
-	// backstop returned, so its credential revocation is live policy and
-	// the management reconcile must still have run.
-	if e.liveSecretMatches(t, oldSecret) {
-		t.Fatalf("the listener still authenticates %q after the control-endpoint backstop refused "+
-			"the apply; the promoted config's revocation is live policy (#6720)", oldSecret)
+	// #18622: the refusal happened before SyncApply promotion. Its
+	// authorization change is therefore not active policy, so the live
+	// listener continues honouring the still-active credential.
+	if !e.liveSecretMatches(t, oldSecret) {
+		t.Fatalf("the listener stopped authenticating %q after a pre-promotion refusal; "+
+			"the refused text did not become active and must not change authorization", oldSecret)
 	}
-	if !e.liveSecretMatches(t, newSecret) {
-		t.Fatal("the listener must honour the promoted config's credential")
+	if e.liveSecretMatches(t, newSecret) {
+		t.Fatal("the listener must not honour the new credential from the refused config")
+	}
+	if got := e.store.ActiveConfig().Chassis.Cluster.PeerAddress; got != running {
+		t.Fatalf("the refused endpoint was promoted: active peer address %q, want %q", got, running)
 	}
 }
 
@@ -202,28 +211,21 @@ func TestPeerSyncIdentityRefusalKeepsIdentityText17030(t *testing.T) {
 }
 
 // TestPeerSyncRefusalReasonsAreDistinctLiterals17030 (fold of
-// Rev18077Opus F1, narrowed): the reviewer proved the distinct
-// `why` reason is observable ONLY inside
-// reconcileManagementAfterPromotion's failure log, and that no
-// hermetic harness input makes reconcileWebManagement fail (its
-// desired state derives from the daemon's own committed store
-// and bind outcomes are retained, not errored). The reason
-// literals are therefore pinned at their five call sites: each
-// refusal branch in syncAndApplyWithAncestry must pass its OWN
-// literal to reconcileManagementAfterPromotion. Reverting any
-// literal to a sibling's reds this census; branch REACH (the
-// refusals fire) is pinned by the two cells above.
+// Rev18077Opus F1, narrowed): the reviewer proved the distinct `why` reason
+// is observable ONLY inside reconcileManagementAfterPromotion's failure log.
+// Under the #18622 pre-promotion contract, only the #5840 topology and #6192
+// identity backstops still reconcile an already-promoted config; the #8965,
+// #8987 and #9121 preflight refusals do not. Each remaining promoted refusal
+// must retain its own reason literal and branch reach is pinned by the cells
+// above.
 func TestPeerSyncRefusalReasonsAreDistinctLiterals17030(t *testing.T) {
 	src, err := os.ReadFile("daemon_apply_commit.go")
 	if err != nil {
 		t.Fatalf("read daemon_apply_commit.go: %v", err)
 	}
 	want := map[string]int{
-		"peer-synced topology transition refused":    0,
-		"peer-synced identity change refused":        0,
-		"peer-synced control-endpoint move refused":  0,
-		"peer-synced control-interface move refused": 0,
-		"peer-synced sync-endpoint move refused":     0,
+		"peer-synced topology transition refused": 0,
+		"peer-synced identity change refused":     0,
 	}
 	for lit := range want {
 		want[lit] = strings.Count(string(src), "reconcileManagementAfterPromotion(compiled, \""+lit+"\")")

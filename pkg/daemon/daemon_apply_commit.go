@@ -657,10 +657,10 @@ func (d *Daemon) pushCommittedConfigToPeer(
 // commitAndApply. This is the production entry (called by
 // handleConfigSync in daemon_ha_sync.go); tests reach it via
 // syncAndApplyForTest, which passes a nil ancestry. Holds applySem
-// across configstore.SyncApply (peer-driven active promotion) +
-// applyConfigLocked, so a peer-sync can't interleave between a local
-// committer's Commit and applyConfig (which would briefly leave
-// store=peer-config but kernel=local-config).
+// across configstore.SyncApplyGated (peer-driven active promotion, guarded
+// by pre-promotion checks) + applyConfigLocked, so a peer-sync can't
+// interleave between a local committer's Commit and applyConfig (which
+// would briefly leave store=peer-config but kernel=local-config).
 func (d *Daemon) syncAndApplyWithAncestry(
 	ctx context.Context,
 	configText string,
@@ -716,21 +716,80 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		return nil, err
 	}
 	var syncErr error
-	// #18606: the local control-address gate runs INSIDE SyncApply, on the
+	// #18606: the local control-address gate runs INSIDE SyncApplyGated, on the
 	// compiled peer text and BEFORE anything is promoted. Refusing after
-	// promotion (where the #8965-family synced checks below still sit) leaves
-	// the refused text active: the identical re-push after the nack, any later
-	// push, a later local commit (whose running-config arm then abstains) and
-	// every background applier (DHCP callback, feeds, config poll, apply-debt
-	// retry) would apply it with no preflight, and the partition arrives
-	// silently within one reconcile cadence. Refused here, the standby keeps
-	// its config, nacks, and every re-push is refused the same way.
+	// promotion leaves the refused text active: the identical re-push after
+	// the nack, any later push, a later local commit (whose running-config
+	// arm then abstains) and every background applier (DHCP callback, feeds,
+	// config poll, apply-debt retry) would apply it with no preflight, and
+	// the partition arrives silently within one reconcile cadence. Refused
+	// here, the standby keeps its config, nacks, and every re-push is refused
+	// the same way.
+	//
+	// #18622: the #8965 (peer address), #8987 (control interface) and #9121
+	// (config-sync endpoint) checks now run here too, in this order, BEFORE
+	// anything is promoted. They used to run after SyncApply had promoted the
+	// refused text; a refusal now promotes NOTHING.
+	//
+	// #6720 CONTRACT CHANGE, reviewed for #18622: the three moved checks no
+	// longer call reconcileManagementAfterPromotion. That call existed only
+	// because promotion had already happened — the refused text was active,
+	// so its authorization was live policy and the listener had to honour
+	// it. Pre-promotion the refused text never becomes active, so an
+	// authorization change it carries (e.g. a web-management credential
+	// revocation) is NOT live policy: the listener keeps honouring the
+	// still-active config's credential until a later ACCEPTED push (or
+	// local commit) promotes a config carrying that change, at which point
+	// the ordinary apply reconciles it. That is correct because the refused
+	// text is precisely the one this node refused to converge on — treating
+	// its auth as live while refusing its topology would split authorization
+	// from the config it rides in, and the peer (which nacks on this
+	// refusal) does not consider the pair converged on it either. The
+	// #5840/#6192 backstops below KEEP their reconciles: they still run
+	// after promotion by design.
 	var localAddrRefused error
+	var endpointRefused error
+	var interfaceRefused error
+	var syncEndpointRefused error
+	activeTransport := d.activeTransport()
 	compiled, syncErr = d.store.SyncApplyGated(ctx, configText, chassisPreserve,
 		func(gateCtx context.Context, c *config.Config) error {
 			localAddrRefused = clusterControlLocalAddressCommitPreflight(d.cluster, oldActive, c)
 			if localAddrRefused != nil {
 				return localAddrRefused
+			}
+			// #8965: refuse a LIVE control-endpoint move, which would
+			// restart comms on the new address before the peer can be
+			// told about it.
+			endpointRefused = clusterControlEndpointCommitPreflight(d.cluster, c)
+			if endpointRefused != nil {
+				return endpointRefused
+			}
+			// #8987: the INTERFACE half of the same tuple. Safe on the
+			// synced path for a MEASURED reason, not an inherited one:
+			// #8965 is safe because PeerAddress is per-node, so a synced
+			// text compiles to this node's own value and the gate
+			// no-ops. control-interface is not per-node at all — in the
+			// shipped cluster config peer-address sits inside
+			// groups node0/node1 while control-interface sits outside
+			// them, one shared value — so a synced text carries the
+			// identical string and the comparison is trivially equal.
+			interfaceRefused = clusterControlInterfaceCommitPreflight(d.cluster, c)
+			if interfaceRefused != nil {
+				return interfaceRefused
+			}
+			// #9121: the CONFIG-SYNC endpoint half. Safe for measured
+			// reasons, as its siblings: the fabric arm is safe for
+			// #8965's reason (fabric-peer-address sits inside
+			// groups node0/node1 beside the per-node peer-address, so a
+			// synced text compiles to this node's own value and the
+			// comparison is equal); the interface arm is safe for
+			// #8987's reason (fabric-interface is auto-derived from the
+			// LOCAL fabric member, so both nodes carry the identical
+			// name).
+			syncEndpointRefused = clusterSyncEndpointCommitPreflight(activeTransport, c)
+			if syncEndpointRefused != nil {
+				return syncEndpointRefused
 			}
 			if d.testBeforeConfigSyncPromotion != nil {
 				d.testBeforeConfigSyncPromotion()
@@ -746,6 +805,32 @@ func (d *Daemon) syncAndApplyWithAncestry(
 			"err", localAddrRefused)
 		return nil, localAddrRefused
 	}
+	if endpointRefused != nil {
+		slog.Error("cluster: refusing to apply a peer-synced control-endpoint "+
+			"move live; nothing was promoted and this node keeps its running config. "+
+			"Applying it would restart cluster comms on the control-link "+
+			"peer address before the config can be pushed to the peer — configure "+
+			"the new control-link peer address on BOTH nodes and restart xpfd on "+
+			"both, or take the cluster down before the move",
+			"err", endpointRefused)
+		return nil, endpointRefused
+	}
+	if interfaceRefused != nil {
+		slog.Error("cluster: refusing to apply a peer-synced control-INTERFACE "+
+			"move live; nothing was promoted and this node keeps its running config. "+
+			"Applying it would restart cluster comms on an interface "+
+			"the peer is not reachable over and durably partition the pair",
+			"err", interfaceRefused)
+		return nil, interfaceRefused
+	}
+	if syncEndpointRefused != nil {
+		slog.Error("cluster: refusing to apply a peer-synced config-sync endpoint "+
+			"move live; nothing was promoted and this node keeps its running config. "+
+			"Applying it would restart cluster comms on an endpoint the "+
+			"peer is not reachable over and durably partition the pair",
+			"err", syncEndpointRefused)
+		return nil, syncEndpointRefused
+	}
 	if syncErr != nil {
 		return nil, syncErr
 	}
@@ -754,10 +839,6 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		// there is no active-config session state to invalidate.
 		return compiled, nil
 	}
-
-	// #5840: fail closed on a peer-synced standalone<->cluster topology
-	// transition. SyncApply above has already promoted the peer config to
-	// active (the store converges with the peer — no divergence, matching the
 	// device-map passive-admission philosophy below), but the boot-only cluster
 	// runtime cannot be constructed/torn down live (see
 	// clusterTopologyCommitPreflight). Arming the dataplane under the
@@ -806,59 +887,6 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		d.reconcileManagementAfterPromotion(compiled, "peer-synced identity change refused")
 		return nil, ierr
 	}
-	// #8965: and refuse a LIVE control-endpoint move, which would restart
-	// comms on the new address before the peer can be told about it.
-	if eerr := clusterControlEndpointCommitPreflight(d.cluster, compiled); eerr != nil {
-		slog.Error("cluster: refusing to apply a peer-synced control-endpoint "+
-			"move live; applying it would restart cluster comms on the control-link "+
-			"peer address before the config can be pushed to the peer — configure "+
-			"the new control-link peer address on BOTH nodes and restart xpfd on "+
-			"both, or take the cluster down before the move",
-			"err", eerr)
-		// #6720: same reasoning as the topology backstop above — the promoted
-		// config's authorization is live policy regardless of the control-endpoint
-		// constraint that stops the apply.
-		d.reconcileManagementAfterPromotion(compiled, "peer-synced control-endpoint move refused")
-		return nil, eerr
-	}
-
-	// #8987: the INTERFACE half of the same tuple, on the peer-sync path.
-	//
-	// Safe here for a MEASURED reason, not an inherited one. The sibling above
-	// is safe because PeerAddress is per-node, so a synced text compiles to this
-	// node's own value and the gate no-ops. control-interface is not per-node at
-	// all — in the shipped cluster config `peer-address` sits inside
-	// `groups node0`/`node1` while `control-interface` sits outside them, one
-	// shared value — so a synced text carries the identical string and the
-	// comparison is trivially equal. Refusing a legitimate sync was the specific
-	// risk #8987 named for this path, and this is why it does not materialise.
-	if ferr := clusterControlInterfaceCommitPreflight(d.cluster, compiled); ferr != nil {
-		slog.Error("cluster: refusing to apply a peer-synced control-INTERFACE "+
-			"move live; applying it would restart cluster comms on an interface "+
-			"the peer is not reachable over and durably partition the pair",
-			"err", ferr)
-		d.reconcileManagementAfterPromotion(compiled, "peer-synced control-interface move refused")
-		return nil, ferr
-	}
-
-	// #9121: the CONFIG-SYNC endpoint half, on the peer-sync path.
-	//
-	// Safe here for a MEASURED reason, as its siblings' comments are. The
-	// fabric arm is safe for #8965's reason: `fabric-peer-address` sits inside
-	// `groups node0`/`node1` in the shipped cluster config, directly beside the
-	// per-node `peer-address`, so a synced text compiles to this node's own
-	// value and the comparison is equal. The interface arm is safe for #8987's
-	// reason instead: `fabric-interface` is auto-derived from the LOCAL fabric
-	// member, so both nodes carry the identical name.
-	if serr := clusterSyncEndpointCommitPreflight(d.activeTransport(), compiled); serr != nil {
-		slog.Error("cluster: refusing to apply a peer-synced config-sync endpoint "+
-			"move live; applying it would restart cluster comms on an endpoint the "+
-			"peer is not reachable over and durably partition the pair",
-			"err", serr)
-		d.reconcileManagementAfterPromotion(compiled, "peer-synced sync-endpoint move refused")
-		return nil, serr
-	}
-
 	// #5564: SyncApply (above) has ALREADY promoted the peer config to active,
 	// and once applyConfigLocked arms the dataplane snapshot this node is
 	// forwarding under it. The three session invalidators
