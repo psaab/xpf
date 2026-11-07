@@ -14,8 +14,8 @@ import (
 // negative one is stored verbatim. Every downstream consumer decides "is this a
 // RETH?" with `redundancy-group > 0` (pkg/dataplane compiler_iface.go sets both
 // isReth and isVRRPReth that way), so a non-positive group makes the interface
-// read as ORDINARY: the 169.254.RG.NODE/32 link-local substitution does not
-// fire and the reth's real service address is written onto the physical device.
+// read as ORDINARY: the RETH placeholder substitution does not fire and the
+// reth's real service address is written onto the physical device.
 // Both nodes share the synced config, so both configure it.
 //
 // These bind the gate AND the tolerant-path behaviour, in both directions.
@@ -77,7 +77,7 @@ func TestRethRedundancyGroupTokenRejectedAtCommit6782(t *testing.T) {
 		{"non-numeric", "abc", "is not an integer"},
 		{"fractional", "1.5", "is not an integer"},
 		{"int64-overflow", "99999999999999999999", "is not an integer"},
-		{"above-octet-ceiling", "256", "not a valid IPv4 address"},
+		{"above-octet-ceiling", "256", "maximum supported one-byte"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := rethRGTree(t, rethRGSet(tc.tok))

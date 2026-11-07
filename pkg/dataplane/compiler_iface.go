@@ -1709,12 +1709,16 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 	// created. Physical member interfaces (with RedundantParent) inherit the
 	// reth's addresses, VLANs, and redundancy group settings.
 	//
-	// For VRRP-backed RETH, VIP addresses are managed by native VRRP. The
-	// networkd .network file gets a link-local base address (169.254.RG.NODE/32)
-	// instead — VRRP requires at least one IPv4 for advertisements.
+	// The existing isVRRPReth condition uses a positive redundancy group plus a
+	// configured cluster node; it does not classify election mode. Preserve
+	// that gate and render the cluster-scoped placeholder
+	// (169.254.<cluster-id>.<rg*2+node+1>/32) on the same devices as before.
+	// In native VRRP mode this provides the non-VIP IPv4 advert source.
 	clusterNodeID := -1
+	clusterID := 0
 	if cfg.Chassis.Cluster != nil {
 		clusterNodeID = cfg.Chassis.Cluster.NodeID
+		clusterID = cfg.Chassis.Cluster.ClusterID
 	}
 	rethToPhys := cfg.RethToPhysical()
 	rethMACIndexes := cfg.RethMACIndexes()
@@ -1834,8 +1838,8 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 			// `redundant-ether-options redundancy-group` on an interface that is
 			// neither a member nor an owner.
 			//
-			// Treating it as a VRRP-backed reth REPLACED the operator's
-			// configured address with a 169.254.<rg>.<node>/32 link-local below
+			// Treating it as a VRRP-backed RETH REPLACED the operator's
+			// configured address with a cluster-scoped RETH placeholder below
 			// and handed the real address to VRRP as a VIP. In VRRP mode that
 			// demoted a plain L3 interface's address to one that exists only
 			// while MASTER; under `no-reth-vrrp` the direct collector skipped
@@ -1973,11 +1977,12 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 		if effectiveCfg.TaggingEnabled() {
 			// VLAN parent: none of its tagged units' addresses, just rename. The
 			// exceptions are the addresses the parent carries itself:
-			// the VRRP advert source of a VRRP-backed RETH (#9721,
+			// the cluster-scoped placeholder selected by the existing isVRRPReth
+			// predicate (in native VRRP mode, its advert source; #9721,
 			// vlanParentVRRPSource) and, on a non-RETH parent, the real
-			// addresses of untagged units (#16795, untaggedUnitAddresses),
-			// which planPhysDesired installs on this device.
-			parentAddrs := vlanParentVRRPSource(effectiveCfg, isVRRPReth, clusterNodeID)
+			// addresses of untagged units (#16795, untaggedUnitAddresses), which
+			// planPhysDesired installs on this device.
+			parentAddrs := vlanParentVRRPSource(effectiveCfg, isVRRPReth, clusterID, clusterNodeID)
 			if own := untaggedUnitAddressesFor(cfg, effectiveIfName, linuxName, effectiveCfg, isVRRPReth, physPlans, zonedUntaggedUnits(cfg, effectiveIfName, effectiveCfg)); len(own) > 0 {
 				parentAddrs = append(parentAddrs, own...)
 			}
@@ -2040,7 +2045,7 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 							dhcpv4, dhcpv6, iaTypes = false, false, nil
 						}
 						if isVRRPReth && !unitDisabled {
-							addrs = []string{fmt.Sprintf("169.254.%d.%d/32", effectiveCfg.RedundancyGroup, clusterNodeID+1)}
+							addrs = []string{config.RethPlaceholderAddress(clusterID, effectiveCfg.RedundancyGroup, clusterNodeID)}
 							primaryAddr, primaryAddrV6, preferredAddr, preferredAddrV6 = "", "", "", ""
 						}
 						result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
@@ -2142,10 +2147,11 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 				if unitMTU > 0 && (mtu == 0 || unitMTU < mtu) {
 					mtu = unitMTU
 				}
-				// VRRP-backed RETH: replace VIP addresses with a
-				// link-local base; native VRRP manages the actual VIPs.
+				// Existing isVRRPReth path: replace configured addresses with the
+				// cluster-scoped placeholder without changing its election-mode-
+				// agnostic predicate. In native VRRP mode, VRRP manages the VIPs.
 				if isVRRPReth && !allUnitsDisabled {
-					addrs = []string{fmt.Sprintf("169.254.%d.%d/32", effectiveCfg.RedundancyGroup, clusterNodeID+1)}
+					addrs = []string{config.RethPlaceholderAddress(clusterID, effectiveCfg.RedundancyGroup, clusterNodeID)}
 					primaryAddr, primaryAddrV6, preferredAddr, preferredAddrV6 = "", "", "", ""
 				}
 				result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{

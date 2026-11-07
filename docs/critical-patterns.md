@@ -170,11 +170,10 @@ non-trivial code. This page is the quick-reference gotcha list.
 - **`.network` files** configure addresses, DHCP avoidance, RA disable,
   VLAN parent flags. `KeepConfiguration=static` on RETH interfaces
   preserves VRRP VIPs across `networkctl reload`. A VLAN parent carries
-  none of its units' addresses. The one exception is the
-  `169.254.<rg>.<node+1>/32` VRRP advert source of a VRRP-backed RETH with an
-  addressed unit that has no `vlan-id`: that unit's VRRP instance is bound to
-  the parent, which is otherwise left with no IPv4 source
-  (`VLANParentAddresses`, #9721).
+  `169.254.<cluster-id>.<rg*2+node+1>/32` cluster-scoped VRRP advert source
+  of a VRRP-backed RETH with an addressed unit that has no `vlan-id`: that
+  unit's VRRP instance is bound to the parent, which is otherwise left with no
+  IPv4 source (`VLANParentAddresses`, #9721).
   DHCP interfaces: the daemon's DHCP client manages the address; address
   reconciliation is skipped. DHCP-learned default routes get admin distance
   200 in FRR. A learned classless prefix is suppressed (with a visible warning)

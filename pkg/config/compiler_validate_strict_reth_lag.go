@@ -15,9 +15,9 @@ import (
 // implements no reth LAG. RethToPhysical keeps ONE member per reth
 // (best slot score, then the lexically-first name), and the dataplane
 // gives every member with a RedundantParent the reth's effective
-// config plus a 169.254.<rg>.<node+1>/32 link-local
+// config plus a cluster-scoped RETH placeholder
 // (pkg/dataplane/compiler_iface.go). Before this gate the extra
-// children therefore came up managed UP with a duplicate 169.254
+// children therefore came up managed UP with a duplicate placeholder
 // source, no security zone and their physical MAC, while the VIP,
 // virtual MAC and zone landed only on the lexically-first child —
 // the configured intra-node redundancy and bandwidth were silently

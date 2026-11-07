@@ -16,7 +16,7 @@ import (
 // is neither a reth member nor a reth owner.
 //
 // When it fired it REPLACED the operator's configured address with a
-// 169.254.<rg>.<node>/32 link-local and set KeepConfiguration=static, handing
+// cluster-scoped RETH placeholder and set KeepConfiguration=static, handing
 // the real address to VRRP as a virtual address. Under `no-reth-vrrp` the
 // direct owner skipped the interface too, so the address was stripped here and
 // installed by NOBODY, on both nodes.

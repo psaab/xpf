@@ -176,8 +176,8 @@ func TestUntaggedUnitOnTaggedParentControls16795(t *testing.T) {
 	if !ok {
 		t.Fatalf("no model for ge-0-0-5 (RETH control would be vacuous)")
 	}
-	if len(m5.VLANParentAddresses) != 1 || m5.VLANParentAddresses[0] != "169.254.1.1/32" {
-		t.Errorf("ge-0-0-5 VLANParentAddresses=%v, want only the advert source [169.254.1.1/32]: "+
+	if len(m5.VLANParentAddresses) != 1 || m5.VLANParentAddresses[0] != "169.254.1.3/32" {
+		t.Errorf("ge-0-0-5 VLANParentAddresses=%v, want only the advert source [169.254.1.3/32]: "+
 			"the untagged RETH unit's address is a VIP VRRP owns", m5.VLANParentAddresses)
 	}
 	if !m5.KeepAddresses {

@@ -120,7 +120,7 @@ func TestManagementVRFNetworkdPreservesLinkControls12297(t *testing.T) {
 	if member.Description != "wan" {
 		t.Errorf("VRRP RETH member description = %q, want %q", member.Description, "wan")
 	}
-	if len(member.Addresses) != 1 || member.Addresses[0] != "169.254.1.1/32" {
-		t.Errorf("VRRP RETH member addresses = %v, want VRRP link-local base address", member.Addresses)
+	if len(member.Addresses) != 1 || member.Addresses[0] != "169.254.0.3/32" {
+		t.Errorf("VRRP RETH member addresses = %v, want cluster-id-0 placeholder (not unique)", member.Addresses)
 	}
 }

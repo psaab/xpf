@@ -23,6 +23,55 @@ func StableRethLinkLocal(clusterID, rgID int) net.IP {
 		0, 0, 0xbf, 0x72, 0, byte(clusterID), 0, byte(rgID)}
 }
 
+// RethPlaceholderAddress formats the IPv4 placeholder emitted by networkd's
+// existing `isVRRPReth` path (#18628). That predicate means a positive RETH
+// redundancy group plus a configured cluster node; it does NOT classify the
+// election mode, and this formatter deliberately does not change that gate.
+// In native VRRP mode, the placeholder is the non-VIP IPv4 advert source.
+// This change scopes its address by cluster and does not alter ARP/ACD behavior.
+//
+// Format: 169.254.<cluster-id>.<rg*2+node+1>/32.
+//
+// The pre-#18628 form was 169.254.<rg>.<node+1>/32, which encodes no cluster
+// identity at all: two xpf clusters on one L2 segment (the lab loss/tcp/udp
+// clusters 22/23/24 share WAN VLANs) rendered the SAME address for the same
+// (rg, node), so one cluster answered ARP for an address the other believed
+// was its own and the loser of the RFC 5227 ACD race never got its placeholder.
+// Putting the cluster id in the third address octet scopes the address per
+// cluster; packing rg*2+node+1 into the last octet keeps the two nodes of one
+// (cluster, rg) distinct within one octet.
+//
+// Bounds for strict-valid inputs: clusterID is schema-bounded to 0..255;
+// emitted RETHs have rgID 1..MaxRedundancyGroups-1 (=15) and nodeID 0/1, so
+// rg*2+node+1 spans 3..32 and fits the last octet.
+//
+// This helper only formats; it does not validate or clamp. Tolerant/direct
+// models may carry invalid RG or node values and exceed the IPv4 octet. Existing
+// token gates are unchanged: strict compilation rejects and tolerant compilation
+// warns when rgID > MaxRethRedundancyGroupOctet, the one-byte chassis-cluster
+// heartbeat group-id ceiling.
+//
+// ClusterID == 0 / no-cluster behavior is explicitly NOT unique:
+// Junos treats cluster-id 0 as "clustering disabled" (schema_chassis.go:
+// "0 = disabled"); a config with no cluster stanza has no identity to scope
+// by. If such a config is passed to this helper as clusterID 0, it formats
+// 169.254.0.<rg*2+node+1>/32 and makes no uniqueness claim. Two such
+// configurations with the same (rgID, nodeID) still collide on one segment.
+// That is accepted because a disabled/absent cluster has no identity that
+// COULD disambiguate it; operators who run multiple xpf instances on one
+// segment must configure distinct non-zero cluster ids.
+// The caller emits this address for the existing isVRRPReth predicate:
+// positive RETH redundancy group plus configured cluster node. It does not
+// inspect election mode. With no cluster stanza that predicate is false, so
+// the no-cluster formatter behavior above is defensive, not emitted today.
+//
+// The sole definition lives here in the leaf package beside
+// StableRethLinkLocal: pkg/dataplane imports pkg/config, while userspace
+// cannot import pkg/cluster (#17049).
+func RethPlaceholderAddress(clusterID, rgID, nodeID int) string {
+	return fmt.Sprintf("169.254.%d.%d/32", clusterID, rgID*2+nodeID+1)
+}
+
 // IsStableRethLinkLocal returns true if the address matches the stable RETH
 // link-local pattern (fe80::bf72:...).
 func IsStableRethLinkLocal(ip net.IP) bool {

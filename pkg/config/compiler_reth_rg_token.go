@@ -14,23 +14,24 @@ import (
 // as "not RG-scoped" (see validateRethRedundancyGroupTokensAST).
 const MinRethRedundancyGroupID = 1
 
-// MaxRethRedundancyGroupOctet is the largest redundancy-group id that still
-// yields a well-formed RETH link-local base address. pkg/dataplane
-// compiler_iface.go substitutes the VIP addresses of a VRRP-backed RETH with
-// `169.254.<redundancy-group>.<node+1>/32`, so the id occupies the THIRD OCTET
-// of an IPv4 address and cannot exceed 255. It is also the ceiling the chassis
-// redundancy-group id gate already enforces on the group declarations
-// themselves (MaxHeartbeatRedundancyGroupID), so no id above it can ever name
-// a declared group.
+// MaxRethRedundancyGroupOctet is the largest redundancy-group id accepted
+// by the one-byte chassis-cluster heartbeat group-id field.
+// pkg/dataplane/compiler_iface.go replaces configured RETH addresses in the
+// existing isVRRPReth path with a cluster-scoped placeholder
+// `169.254.<cluster-id>.<rg*2+node+1>/32` (#18628); the redundancy-group id
+// is no longer copied directly into an IPv4 octet. The independent 0..255
+// group-id bound remains necessary because the heartbeat's GroupID field is
+// one byte; the chassis declaration gate must not admit a value the wire
+// representation truncates.
 //
 // This is a DIFFERENT and looser bound than MaxRethRedundancyGroupID (155),
 // which exists for the RFC 5798 VRID range and is enforced by
 // validateRethVRRPGroupIDStrict ONLY when a reth-derived VRRP instance is
 // actually synthesized. That gate deliberately returns early under
 // `no-reth-vrrp` / `private-rg-election` (the DEFAULT), where no VRID is
-// derived — but the link-local substitution above is NOT mode-gated, so the
-// octet ceiling has to be enforced independently of the VRRP mode. The two
-// compose: in a VRRP mode the stricter 155 applies, otherwise this 255 does.
+// derived — but the placeholder substitution above is NOT mode-gated. The
+// heartbeat-id ceiling is independently enforced regardless of VRRP mode; in
+// VRRP mode the stricter 155 VRID bound also applies.
 const MaxRethRedundancyGroupOctet = MaxHeartbeatRedundancyGroupID
 
 // validateRethRedundancyGroupTokensAST rejects, at commit / commit-check, an
@@ -44,8 +45,8 @@ const MaxRethRedundancyGroupOctet = MaxHeartbeatRedundancyGroupID
 // stored verbatim. Every downstream consumer decides "is this a RETH?" with
 // `RedundancyGroup > 0` — pkg/dataplane compiler_iface.go sets both `isReth`
 // and `isVRRPReth` that way. With a non-positive group the interface is
-// therefore treated as an ORDINARY interface: the `169.254.RG.NODE/32`
-// link-local substitution does not fire, and the reth's real service address is
+// therefore treated as an ORDINARY interface: the RETH placeholder
+// substitution does not fire, and the reth's real service address is
 // written onto the physical device with `KeepAddresses:false`. Both nodes run
 // the same synced config, so BOTH nodes configure that address — a
 // duplicate-address / split-brain condition on the data path, from a config
@@ -180,8 +181,8 @@ func rethRGTokenProblem(tok string) (string, bool) {
 		return "is negative", true
 	}
 	if n > MaxRethRedundancyGroupOctet {
-		return fmt.Sprintf("exceeds %d, so the derived RETH link-local base "+
-			"address 169.254.<group>.<node+1>/32 is not a valid IPv4 address",
+		return fmt.Sprintf("exceeds %d, the maximum supported one-byte chassis "+
+			"cluster redundancy-group id",
 			MaxRethRedundancyGroupOctet), true
 	}
 	return "", false

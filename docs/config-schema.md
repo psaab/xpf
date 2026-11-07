@@ -2139,8 +2139,8 @@ successfully and is stored verbatim.
 The consequence is not cosmetic. Every downstream consumer decides "is this a
 RETH?" with `redundancy-group > 0`: `pkg/dataplane/compiler_iface.go` sets
 `isReth` and `isVRRPReth` that way. With a non-positive group the interface is
-treated as ORDINARY — the `169.254.<group>.<node+1>/32` link-local substitution
-does not fire, and the reth's real service address is written onto the physical
+treated as ORDINARY — the cluster-scoped RETH placeholder substitution does not fire,
+and the reth's real service address is written onto the physical
 device with `KeepAddresses:false`. **Both nodes run the same synced
 configuration, so BOTH configure that address** — a duplicate-address /
 split-brain condition on the data path, from a config that commits silently.
@@ -2153,27 +2153,29 @@ commit-check, warn on the tolerant load / peer-sync path
 `InterfaceConfig` exists, a malformed token has already collapsed to `0` and is
 indistinguishable from a reth with no `redundant-ether-options` stanza at all.
 
-Accepted range is `1..255`:
+Accepted raw interface-token range is `1..255`:
 
 - The floor is 1 because **group 0 is the chassis-cluster CONTROL-PLANE group**,
   not a data-plane one — `cluster.Manager.DataGroupIDs` already documents and
   enforces exactly that ("RG0 is reserved for control-plane ownership and is
   omitted"). A reth in group 0 is a contradiction by the codebase's own
   definition.
-- The ceiling is 255 because the group id is the THIRD OCTET of the derived
-  link-local address, and it is also the ceiling
-  `MaxHeartbeatRedundancyGroupID` already places on the group declarations, so
-  no id above it can name a declared group.
+- The raw-token ceiling is 255 because `MaxHeartbeatRedundancyGroupID` is the
+  one-byte heartbeat `GroupID` limit. It is no longer an IP-octet bound: the
+  RETH placeholder uses cluster ID as its third octet and `rg*2+node+1` as its
+  last octet. Strict-valid RETH groups 1..15 and nodes 0/1 yield last octets
+  3..32.
 
-This is a DIFFERENT, looser bound than `MaxRethRedundancyGroupID` (155), which
+This raw-token ceiling differs from `MaxRethRedundancyGroupID` (155), which
 exists for the RFC 5798 VRID range and is enforced by
 `validateRethVRRPGroupIDStrict` ONLY when a reth-derived VRRP instance is
 actually synthesized — that gate returns early under `no-reth-vrrp` /
 `private-rg-election`, and **private-rg-election is the compiler DEFAULT**
 (`compiler_system.go`), so on a default cluster config it never runs. The
-link-local substitution is not mode-gated, so the octet ceiling has to be
-enforced independently. The two compose: in a VRRP mode the stricter 155
-applies, otherwise this 255 does.
+strict data-plane RG-slot bound is tighter still: `MaxRedundancyGroups-1` (=15)
+is enforced on declared chassis RGs in all modes, and a strict-valid RETH must
+reference one of them. The placeholder's last-octet range therefore remains
+valid without changing or gating its existing emission path.
 
 **The tolerant path suppresses, it does not merely warn.** Warning and then
 installing the address anyway would make the lenient path the bug, so

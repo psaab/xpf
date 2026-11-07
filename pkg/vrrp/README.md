@@ -1000,8 +1000,8 @@ and before #6781 they answered it differently, each with its own reading:
   `redundant-parent`. VRRP-backed synthesized an instance on it whose "VIPs"
   were the interface's OWN configured addresses — so they existed only while
   MASTER and were deleted on BACKUP. networkd generation
-  (`pkg/dataplane/compiler_iface.go`) independently replaced that address with a
-  `169.254.<rg>.<node>/32` link-local. Under `no-reth-vrrp` the direct collector
+  (`pkg/dataplane/compiler_iface.go`) independently replaced that address with
+  a cluster-scoped RETH placeholder. Under `no-reth-vrrp` the direct collector
   skipped the interface, so the address was stripped and installed by **nobody,
   on both nodes**.
 - `bond0` with `ge-0/0/1 gigether-options redundant-parent bond0` — a
@@ -1493,9 +1493,9 @@ dataplane reuses this Go walker, and do NOT try to consolidate them.
   instance per addressed unit of a `vlan-tagging` RETH. It goes on
   `<member>.<vlan-id>`, or on the member itself when the unit has no
   `vlan-id`. The advert source is `resolveLocalIPv4`, the lowest non-VIP IPv4
-  on that device. The networkd render gives every RETH device the
-  `169.254.<rg>.<node+1>/32` source, and gives it to a VLAN parent only when
-  such an untagged unit exists (`VLANParentAddresses`, built by
+  on that device. The networkd render gives every RETH device the cluster-scoped
+  `169.254.<cluster-id>.<rg*2+node+1>/32` source, and gives it to a VLAN parent
+  only when such an untagged unit exists (`VLANParentAddresses`, built by
   `vlanParentVRRPSource` in `pkg/dataplane/compiler_iface_vlan_parent.go`).
   Before #9721 the parent never got it:
   that instance had no source, sent no IPv4 advertisement, and both nodes could

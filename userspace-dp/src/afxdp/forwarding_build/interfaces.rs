@@ -2697,9 +2697,9 @@ fn pick_interface_generic<A: Copy>(
 /// #18174: the shared-ifindex merge of two UNDESIGNATED per-row picks
 /// must keep the per-row rule `pick_interface_generic` applies — first
 /// non-link-local, else first. Plain first-row-wins broke it on a RETH:
-/// Go emits the base row (`reth1`, carrying only the per-node
-/// `169.254.<rg>.<node+1>/32` RETH address, compiler_iface.go) BEFORE
-/// the unit row (`reth1.0`, carrying 10.0.61.1/24) on the SAME ifindex,
+/// Go emits the base row (`reth1`, carrying only the cluster-scoped per-node
+/// RETH placeholder, compiler_iface.go) BEFORE the unit row (`reth1.0`,
+/// carrying 10.0.61.1/24) on the SAME ifindex,
 /// so the base row's link-local FALLBACK pick won and every
 /// locally-generated ICMP error on the LAN (traceroute hop 1 Time
 /// Exceeded, reject unreachable, PTB) was sourced from 169.254.2.1

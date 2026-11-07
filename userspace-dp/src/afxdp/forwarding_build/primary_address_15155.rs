@@ -299,8 +299,8 @@ fn shared_ifindex_tunnel_designations_still_accepted_16513() {
 }
 
 /// #18174: the live loss-cluster RETH shape. Go emits the base row
-/// (`reth1`, kernel-observed, carrying only the per-node
-/// `169.254.<rg>.<node+1>/32` RETH address — scope link) BEFORE the unit
+/// (`reth1`, kernel-observed, carrying only the cluster-scoped per-node RETH
+/// placeholder — scope link) BEFORE the unit
 /// row (`reth1.0`, carrying the LAN address) on the SAME ifindex. The
 /// base row's per-row pick is its link-local FALLBACK; first-row-wins let
 /// it shadow the unit row's real address, so every locally generated ICMP

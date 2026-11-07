@@ -103,7 +103,7 @@ Triggers `networkctl reload` only when files actually changed.
   exception, and it renders only on a VLAN parent. Its producers are
   `pkg/dataplane`'s `buildInterfaceNetworkdModels`: a VRRP-backed RETH whose
   untagged unit (no `vlan-id`) binds its VRRP instance to the parent gets the
-  `169.254.<rg>.<node+1>/32` advert source there, with `KeepAddresses`
+  cluster-scoped `169.254.<cluster-id>.<rg*2+node+1>/32` advert source there,
   (#9721), and a non-RETH parent gets the real addresses of its untagged
   units there, also with `KeepAddresses`, because `planPhysDesired`
   installs those addresses on the parent device itself (#16795).

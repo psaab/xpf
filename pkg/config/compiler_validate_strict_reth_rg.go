@@ -21,7 +21,7 @@ import (
 //
 //   - networkd generation (pkg/dataplane compiler_iface.go) treated the
 //     interface as a VRRP-backed reth member and REPLACED the operator's
-//     configured address with a 169.254.<rg>.<node>/32 link-local.
+//     configured address with a cluster-scoped RETH placeholder.
 //   - The VRRP-backed owner (CollectRethInstances) synthesized a VRRP instance
 //     on it whose "VIPs" were that same configured address — so it existed only
 //     while the node was MASTER, and was deleted on BACKUP.
@@ -125,14 +125,13 @@ func validateRethRedundancyGroupStrict(cfg *Config) error {
 				"ports on the two chassis; with no members there is nothing to "+
 				"fail over between and no kernel device to bind (a reth name is "+
 				"not itself a netdev). The configured address on %q would be "+
-				"replaced with a 169.254.%d.<node>/32 link-local in the generated "+
+				"replaced with a cluster-scoped RETH placeholder in the generated "+
 				"networkd config and handed to VRRP as a virtual address — and "+
 				"under `no-reth-vrrp` nothing would install it back, so %q would "+
 				"silently lose its address on both nodes. Add "+
 				"`gigether-options redundant-parent %s` to the member ports, or "+
 				"remove the redundancy-group from %q",
-			name, ifc.RedundancyGroup, name, name, ifc.RedundancyGroup, name,
-			name, name)
+			name, ifc.RedundancyGroup, name, name, name, name, name)
 	}
 	return nil
 }

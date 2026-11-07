@@ -1255,7 +1255,7 @@ fn cross_worker_punt_seed_never_matches_off_fabric_18562() {
 /// Defect 3 also moves interface source NAT: the SNAT matcher
 /// (`forwarding/nat.rs`) translates an interface-mode rule to
 /// `egress.primary_v4/v6` of the egress unit. On the RETH shape (base row with
-/// only the per-node `169.254.<rg>.<node+1>/32` and fe80, unit row with the LAN
+/// only the cluster-scoped per-node placeholder and fe80, unit row with the LAN
 /// address) an interface SNAT toward that unit handed out the per-node
 /// link-local — unroutable, and different on each node. Driven through the
 /// matcher itself (the same `match_source_nat_for_flow` the #9956 scope cells

@@ -9,12 +9,12 @@ import (
 
 // #13549: on a VRRP-backed RETH with vlan-tagging, the VLAN branch in
 // buildInterfaceNetworkdModels replaces a tagged unit's VIP addresses with
-// the 169.254.<rg>.<node+1>/32 link-local advert source (as the non-VLAN
-// branch does) but forwarded unit.PrimaryAddress / unit.PreferredAddress
-// uncleared. The non-VLAN branch zeroes both on replacement; the VLAN
-// branch leaked the stale VIP metadata, so networkd's orderAddresses /
-// PreferredLifetime rendering was told the primary/preferred address is
-// 192.0.2.1/24 while Addresses contains only 169.254.1.1/32.
+// the cluster-scoped 169.254.<cluster-id>.<rg*2+node+1>/32 advert source
+// (as the non-VLAN branch does) but forwarded unit.PrimaryAddress /
+// unit.PreferredAddress uncleared. The non-VLAN branch zeroes both on
+// replacement; the VLAN branch leaked the stale VIP metadata, so networkd's
+// orderAddresses / PreferredLifetime rendering was told the primary/preferred
+// address is 192.0.2.1/24 while Addresses contains only the placeholder.
 //
 // Cells:
 //   - ge-0-0-2.80 (VRRP RETH, tagged, primary+preferred VIP): Addresses
@@ -26,7 +26,7 @@ import (
 // VLAN branch makes the first cell fail with the stale 192.0.2.1/24.
 
 const staleProbe13549 = "192.0.2.1/24"
-const llSource13549 = "169.254.1.1/32" // redundancy-group 1, node 0 -> .1
+const llSource13549 = "169.254.1.3/32" // cluster 1, RG 1, node 0 -> .3
 
 func rethVLANStalePrimaryCfg13549(t *testing.T) *config.Config {
 	t.Helper()

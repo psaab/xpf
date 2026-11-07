@@ -12,8 +12,8 @@ import (
 // #9721: on a VRRP-backed RETH with vlan-tagging, a unit with no vlan-id has no
 // sub-interface, so vrrp.CollectRethInstances binds that unit's instance to the
 // member's VLAN PARENT device. buildInterfaceNetworkdModels gave every other
-// device of the RETH the 169.254.<rg>.<node+1>/32 advert source and gave the
-// parent nothing. The instance found no IPv4 source (resolveLocalIPv4 returns
+// device of the RETH its cluster-scoped advert source and gave the parent
+// nothing. The instance found no IPv4 source (resolveLocalIPv4 returns
 // nil), sent no IPv4 advertisement, and both nodes could claim the unit's VIPs.
 //
 // The binding half is pinned in pkg/vrrp (reth_untagged_unit_binding_9721_test.go)
@@ -25,7 +25,7 @@ import (
 // FAIL-ON-REVERT: remove the parentAddrs block from the VLAN arm and the first
 // cell goes red, because the parent model carries no address.
 
-const src9721 = "169.254.1.1/32" // redundancy-group 1, node 0 -> .1
+const src9721 = "169.254.1.3/32" // cluster 1, RG 1, node 0 -> .3
 
 func rethVLANUntaggedCfg9721(t *testing.T) *config.Config {
 	t.Helper()

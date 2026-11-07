@@ -162,19 +162,18 @@ sync.
         builder above sources the reply from `forwarding.egress[unit]
         .primary_v4/v6`. For an untagged RETH unit Go emits TWO rows on one
         ifindex: the base row (`reth1`, kernel-observed, carrying only the
-        per-node `169.254.<rg>.<node+1>/32` RETH address and the kernel
-        fe80 address) BEFORE the unit row (`reth1.0`, carrying the LAN
-        address). Each row picks first non-link-local, else first, but the
-        shared-ifindex merge in `forwarding_build/interfaces.rs` was
-        first-row-wins, so the base row's link-local FALLBACK shadowed the
-        unit's address and the firewall's own Time Exceeded answered as
-        169.254.2.1 (traceroute/mtr hop 1). `merge_undesignated_primary` now
+        cluster-scoped per-node RETH placeholder and kernel fe80 address)
+        BEFORE the unit row (`reth1.0`, carrying the LAN address). Each row
+        picks first non-link-local, else first, but the merge in
+        `forwarding_build/interfaces.rs` was first-row-wins, so the base row's
+        link-local FALLBACK shadowed the unit's address and the firewall's own
+        Time Exceeded answered as 169.254.2.1 (traceroute/mtr hop 1).
         lets a non-link-local pick replace a link-local incumbent; between
         two non-link-local (or two link-local) undesignated picks the first
         row still wins, and a designated primary (#16513) still beats both.
         `primary_v4/v6` is not only the generated-error source: on an
-        untagged RETH unit every consumer below flips from the per-node
-        `169.254.<rg>.<node+1>` / fe80 address to the unit address — interface
+        untagged RETH unit every consumer below flips from the cluster-scoped
+        per-node placeholder / fe80 address to the unit address — interface
         source NAT toward that unit (`forwarding/nat.rs`), the WireGuard outer
         source (`frame/wg.rs`), ingress-interface local delivery
         (`forwarding/local_delivery.rs`), the fabric owner-RG gate for local
