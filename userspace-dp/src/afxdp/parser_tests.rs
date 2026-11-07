@@ -524,8 +524,10 @@ fn l2_qinq_shape_contract_9888() {
     // parser's CONTRACT on the unreachable shape, not a shared L3
     // offset: the offset parsers return the single-unwrap answer
     // (l3=18, inner TPID as ethertype) while the CoS classifier refuses
-    // to guess (None). A future edit that changes any parser reds here
-    // instead of silently reinterpreting the inner tag as an IP header.
+    // to guess (None). Scope (Kimi #17258): this pins the learning,
+    // forwarding and CoS readers named below; NAT64 carries its own
+    // QinQ assertion (nat64_tests.rs) and ICMP/mirror have no QinQ
+    // expectation — a nested-tag change there does not red here.
     // A steering change that delivered this shape to userspace would NOT
     // red here (this test never executes the shim); that regression
     // belongs to the Go cells.

@@ -29,11 +29,84 @@ pub(crate) const TPID_READER_REGISTRY_17258: [&str; 6] = [
 /// protocol fields that happen to use payload bytes 12/13 (or the same offsets
 /// in an address/checksum word).
 pub(crate) fn count_tpid_reads_17258(src: &str) -> usize {
-    count_tpid_reads_impl_17258(src, None)
+    let compact: String = blank_comments_and_strings(src)
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect();
+    count_tpid_reads_impl_17258(src, None) + count_tpid_range_reads_17258(&compact, None)
 }
 
 fn count_tpid_reads_for_function_17258(src: &str, function: &str) -> usize {
+    let compact: String = blank_comments_and_strings(src)
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect();
     count_tpid_reads_impl_17258(src, Some(function))
+        + count_tpid_range_reads_17258(&compact, Some(function))
+}
+
+// Second arm: u16::from_be_bytes(x[12..14]...) range reads (Sol MAJOR).
+fn count_tpid_range_reads_17258(compact: &str, expected_function: Option<&str>) -> usize {
+    let marker = "u16::from_be_bytes(";
+    let mut cursor = 0;
+    let mut count = 0;
+    while let Some(relative) = compact[cursor..].find(marker) {
+        let marker_start = cursor + relative;
+        let start = marker_start + marker.len();
+        // range arm only: next chars contain [12..14] before any '[' array form
+        let window_end = (start + 48).min(compact.len());
+        let window = &compact[start..window_end];
+        cursor = start;
+        if !window.contains("[12..14]") {
+            continue;
+        }
+        let Some(function_start) = compact[..marker_start].rfind("fn") else {
+            continue;
+        };
+        let function_name_start = function_start + "fn".len();
+        let Some(function_name_end) = compact[function_name_start..]
+            .find(|ch| matches!(ch, '(' | '<'))
+        else {
+            continue;
+        };
+        let function_name =
+            &compact[function_name_start..function_name_start + function_name_end];
+        if expected_function.is_some_and(|expected| expected != function_name) {
+            continue;
+        }
+        let Some(open_rel) = compact[function_start..].find('{') else {
+            continue;
+        };
+        let open = function_start + open_rel;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (offset, byte) in compact.as_bytes()[open..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(close) = close {
+            let body = compact[open + 1..close].to_ascii_lowercase();
+            if body.contains("0x8100")
+                || body.contains("0x88a8")
+                || body.contains("33024")
+                || body.contains("34984")
+                || body.contains("ethertype_vlan")
+                || body.contains("tpid_8021")
+            {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 fn count_tpid_reads_impl_17258(src: &str, expected_function: Option<&str>) -> usize {
@@ -90,8 +163,12 @@ fn count_tpid_reads_impl_17258(src: &str, expected_function: Option<&str>) -> us
         }
         if let Some(close) = close {
             let body = compact[open + 1..close].to_ascii_lowercase();
+            // Sol MAJOR: decimal TPID spellings (33024/34984) must count
+            // too, or a seventh reader in decimal evades the census.
             if body.contains("0x8100")
                 || body.contains("0x88a8")
+                || body.contains("33024")
+                || body.contains("34984")
                 || body.contains("ethertype_vlan")
                 || body.contains("tpid_8021")
             {
@@ -1095,4 +1172,12 @@ fn tpid_reader_census_detects_unregistered_site_17258() {
         count_tpid_reads_for_function_17258(displaced, "replacement_reader"),
         1
     );
+
+    // Sol MAJOR: decimal TPID spellings and range-read spellings count too.
+    let decimal = "fn decimal_reader(frame: &[u8]) {         let outer = u16::from_be_bytes([frame[12], frame[13]]);         if matches!(outer, 33024 | 34984) {} }";
+    assert_eq!(count_tpid_reads_17258(decimal), 1);
+    // Range form: u16::from_be_bytes(frame[12..14]...) — counted by the
+    // second arm (see the ranged pass in the counter docs).
+    let ranged = "fn ranged_reader(frame: &[u8]) {         let outer = u16::from_be_bytes(frame[12..14].try_into().unwrap());         if outer == 0x8100 {} }";
+    assert_eq!(count_tpid_reads_17258(ranged), 1);
 }
