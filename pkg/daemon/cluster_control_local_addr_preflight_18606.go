@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 
 	"github.com/psaab/xpf/pkg/cluster"
@@ -262,58 +263,113 @@ func cidrListHasIP18606(list []string, ip net.IP) bool {
 	return false
 }
 
-// controlLinkState18606 returns the control-link unit's rendered static
-// addresses and the per-family primary/preferred selections networkd uses
-// on a fresh bind. It follows ResolveKernelIfName's exact-declared-interface
-// precedence (#8994) before splitting a genuine unit ref (#9821): an exact
-// interface key, even one containing a dot, selects unit 0; otherwise the
-// declared-aware split resolves the base interface and unit. It applies
-// networkd's per-family DHCP rule (pkg/networkd generateNetwork, #2986), so a
-// family whose DHCP client is on renders none of its static addresses.
-// Selections are read through family-checked accessors so IPv6 values do not
-// leak into IPv4 slots (#15944).
+// controlLinkState18606 returns the rendered address/selection state of the
+// control-link netdev. It follows ResolveKernelIfName's exact-declared-
+// interface precedence (#8994) before splitting a genuine unit ref (#9821).
+// An exact declared interface uses the renderer's bare-netdev fold; undeclared
+// unit refs resolve to one child unit.
 func controlLinkState18606(cfg *config.Config, ref string) controlLinkAddrs18606 {
 	if cfg == nil {
 		return controlLinkAddrs18606{}
 	}
-	var ifc *config.InterfaceConfig
-	unit := 0
 	if declared, ok := cfg.Interfaces.Interfaces[ref]; ok && declared != nil {
-		ifc = declared
-	} else {
-		split := cfg.SplitInterfaceUnitRef(ref)
-		if split.HasUnit {
-			n, err := strconv.Atoi(split.UnitTok)
-			if err != nil {
-				return controlLinkAddrs18606{}
-			}
-			unit = n
+		if config.IsSecureTunnelIfName(ref) {
+			// Secure-tunnel interface units have per-unit netdevs.
+			return controlLinkUnitState18606(declared.Units[0])
 		}
-		ifc = cfg.Interfaces.Interfaces[split.Base]
+		return controlLinkInterfaceState18606(declared)
 	}
+	split := cfg.SplitInterfaceUnitRef(ref)
+	unit := 0
+	if split.HasUnit {
+		n, err := strconv.Atoi(split.UnitTok)
+		if err != nil {
+			return controlLinkAddrs18606{}
+		}
+		unit = n
+	}
+	ifc := cfg.Interfaces.Interfaces[split.Base]
 	if ifc == nil {
 		return controlLinkAddrs18606{}
 	}
-	u := ifc.Units[unit]
-	if u == nil {
+	return controlLinkUnitState18606(ifc.Units[unit])
+}
+
+// controlLinkInterfaceState18606 mirrors compiler_iface's bare-netdev fold:
+// enabled untagged, non-tunnel units contribute addresses; the first
+// primary/preferred value per family wins in unit order and DHCP is ORed
+// across contributors. Tagged child netdevs and per-unit tunnels are excluded.
+func controlLinkInterfaceState18606(ifc *config.InterfaceConfig) controlLinkAddrs18606 {
+	if ifc == nil {
 		return controlLinkAddrs18606{}
 	}
-	dhcpv6 := u.DHCPv6 || u.DHCPv6Client != nil
-	out := controlLinkAddrs18606{
-		primary:     u.PrimaryAddressForFamily(false),
-		primaryV6:   u.PrimaryAddressForFamily(true),
-		preferred:   u.PreferredAddressForFamily(false),
-		preferredV6: u.PreferredAddressForFamily(true),
+	unitNumbers := make([]int, 0, len(ifc.Units))
+	for n := range ifc.Units {
+		unitNumbers = append(unitNumbers, n)
 	}
-	for _, a := range u.Addresses {
-		ip, _, err := net.ParseCIDR(a)
-		if err != nil {
+	sort.Ints(unitNumbers)
+
+	var out controlLinkAddrs18606
+	dhcpv4, dhcpv6 := false, false
+	for _, n := range unitNumbers {
+		unit := ifc.Units[n]
+		if unit == nil || unit.Disable || unit.VlanID > 0 || unit.Tunnel != nil {
 			continue
 		}
-		if ip.To4() != nil && u.DHCP || ip.To4() == nil && dhcpv6 {
+		for _, addr := range unit.Addresses {
+			if _, _, err := net.ParseCIDR(addr); err == nil {
+				out.addrs = append(out.addrs, addr)
+			}
+		}
+		dhcpv4 = dhcpv4 || unit.DHCP
+		dhcpv6 = dhcpv6 || unit.DHCPv6 || unit.DHCPv6Client != nil
+		// networkd's VLAN-parent row has no primary/preferred selectors.
+		if !ifc.TaggingEnabled() {
+			if v := unit.PrimaryAddressForFamily(false); out.primary == "" && v != "" {
+				out.primary = v
+			}
+			if v := unit.PrimaryAddressForFamily(true); out.primaryV6 == "" && v != "" {
+				out.primaryV6 = v
+			}
+			if v := unit.PreferredAddressForFamily(false); out.preferred == "" && v != "" {
+				out.preferred = v
+			}
+			if v := unit.PreferredAddressForFamily(true); out.preferredV6 == "" && v != "" {
+				out.preferredV6 = v
+			}
+		}
+	}
+	if dhcpv4 || dhcpv6 {
+		kept := out.addrs[:0]
+		for _, addr := range out.addrs {
+			ip, _, err := net.ParseCIDR(addr)
+			if err != nil || ip.To4() != nil && dhcpv4 || ip.To4() == nil && dhcpv6 {
+				continue
+			}
+			kept = append(kept, addr)
+		}
+		out.addrs = kept
+	}
+	return out
+}
+
+func controlLinkUnitState18606(unit *config.InterfaceUnit) controlLinkAddrs18606 {
+	if unit == nil || unit.Disable {
+		return controlLinkAddrs18606{}
+	}
+	dhcpv6 := unit.DHCPv6 || unit.DHCPv6Client != nil
+	out := controlLinkAddrs18606{
+		primary:     unit.PrimaryAddressForFamily(false),
+		primaryV6:   unit.PrimaryAddressForFamily(true),
+		preferred:   unit.PreferredAddressForFamily(false),
+		preferredV6: unit.PreferredAddressForFamily(true),
+	}
+	for _, addr := range unit.Addresses {
+		ip, _, err := net.ParseCIDR(addr)
+		if err != nil || ip.To4() != nil && unit.DHCP || ip.To4() == nil && dhcpv6 {
 			continue
 		}
-		out.addrs = append(out.addrs, a)
+		out.addrs = append(out.addrs, addr)
 	}
 	return out
 }

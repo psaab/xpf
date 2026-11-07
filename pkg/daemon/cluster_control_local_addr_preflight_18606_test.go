@@ -214,6 +214,51 @@ func TestControlLocalAddressPreflightReadsTheRunningBind18606(t *testing.T) {
 	if err := clusterControlLocalAddressCommitPreflight(running, dottedRunning, dottedSwapped); err == nil {
 		t.Fatal("a primary swap on declared dotted control-interface hb.1 must be refused")
 	}
+	dottedUnit7Config := func(primary string) *config.Config {
+		return configWithControl("hb.1", "10.99.14.2",
+			"interfaces hb.1 unit 0 family inet address 192.0.2.9/24",
+			"interfaces hb.1 unit 7 family inet address 10.99.14.1/24",
+			"interfaces hb.1 unit 7 family inet address 10.99.14.3/24",
+			"interfaces hb.1 unit 7 family inet address "+primary+" primary")
+	}
+	dottedUnit7Running := dottedUnit7Config("10.99.14.1/24")
+	dottedUnit7Swapped := dottedUnit7Config("10.99.14.3/24")
+	dottedUnit7State := controlLinkState18606(dottedUnit7Running, "hb.1")
+	if got := dottedUnit7State.primary; got != "10.99.14.1/24" {
+		t.Fatalf("declared dotted unit-7 primary = %q, want 10.99.14.1/24", got)
+	}
+	if got := controlLinkState18606(dottedUnit7Swapped, "hb.1").primary; got != "10.99.14.3/24" {
+		t.Fatalf("candidate declared dotted unit-7 primary = %q, want 10.99.14.3/24", got)
+	}
+	foundUnitZeroAddress := false
+	for _, addr := range dottedUnit7State.addrs {
+		if addr == "192.0.2.9/24" {
+			foundUnitZeroAddress = true
+			break
+		}
+	}
+	if !foundUnitZeroAddress {
+		t.Fatalf("declared dotted interface did not union unit-0 address into the bare netdev state: %v", dottedUnit7State.addrs)
+	}
+	if err := clusterControlLocalAddressCommitPreflight(running, dottedUnit7Running, dottedUnit7Swapped); err == nil {
+		t.Fatal("unit 7 primary swap on declared dotted control-interface hb.1 must be refused")
+	}
+	dottedFirstSelection := configWithControl("hb.1", "10.99.14.2",
+		"interfaces hb.1 unit 0 family inet address 192.0.2.9/24 primary",
+		"interfaces hb.1 unit 7 family inet address 10.99.14.1/24 primary",
+		"interfaces hb.1 unit 0 family inet6 address 2001:db8:14::9/64 preferred",
+		"interfaces hb.1 unit 7 family inet6 address 2001:db8:14::1/64 preferred")
+	firstState := controlLinkState18606(dottedFirstSelection, "hb.1")
+	if firstState.primary != "192.0.2.9/24" || firstState.preferredV6 != "2001:db8:14::9/64" {
+		t.Fatalf("bare-netdev first per-family selectors = primary %q, preferredV6 %q; want unit-0 values",
+			firstState.primary, firstState.preferredV6)
+	}
+	dottedDHCP := configWithControl("hb.1", "10.99.14.2",
+		"interfaces hb.1 unit 0 family inet dhcp",
+		"interfaces hb.1 unit 7 family inet address 10.99.14.1/24")
+	if state := controlLinkState18606(dottedDHCP, "hb.1"); len(state.addrs) != 0 {
+		t.Fatalf("IPv4 DHCP on unit 0 did not suppress unit-7 static addresses: %v", state.addrs)
+	}
 	// An undeclared suffix is a real unit ref: unit 7 of em0, not a declared
 	// interface named em0.7. The split path must continue to resolve it.
 	unitRunning := primaryConfig("em0.7", "em0", "7", "10.99.14.1/24")
