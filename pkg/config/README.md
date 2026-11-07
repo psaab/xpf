@@ -1880,35 +1880,34 @@ on `set ...`/`load set`, even though the compiler reads all of them via
 them keyed-list + read via `firewallMatchValues`), not a renderer change, and
 is tracked separately.
 
-**Path-scoped `show`/`display set` descends into ALL same-prefix siblings,
-not just the first (#4562 — the intermediate-descent twin of the #3980
-terminal fix):** #3980 fixed the case where a display path *ends* on a
-repeated keyword. `navigatePath` also has two INTERMEDIATE-descent branches
-that walk *past* a matched level to resolve the rest of the path: the
-multi-key branch (`current = matched[0].Children`) and the single-key branch
-(`current = n.Children` for the first matching node). Both previously
-descended into only the FIRST matching sibling's subtree. When a
-hand-authored HIERARCHICAL config carries a DUPLICATE context block — two
-identical 4-key `from-zone untrust to-zone trust { ... }` policy contexts, or
-two identical single-key `interfaces { ... }` blocks — AND the display path
-continues deeper (`... from-zone untrust to-zone trust policy B`), the second
-duplicate-context block's statements were dropped from the path-scoped
-`show` and its `| display set`, so a scoped display-set backup silently lost
-them on restore. The fix descends into the UNION of every same-prefix (or
-same-keyword) sibling's children via `unionChildren` before continuing —
-mirroring the #3980 terminal read-all-siblings behavior onto the descent
-(same #3842 / #2419 read-all-siblings class). Single-match is unchanged
-(`unionChildren` returns the one node's children directly), so a normal
-non-duplicate path and a single-context config render byte-identical.
-`navigatePath` is DISPLAY-ONLY (all callers are `FormatPath*` in
-`ast_format.go`; the compiler reads the full AST directly), so the hidden
-statement was still ENFORCED — the impact was a display / scoped-backup gap,
-not a forwarding or security bypass. Preconditions are narrow: flat-set
-`SetPath` MERGES same-key containers, so only a hand-authored duplicate-
-context config plus a path-SCOPED display command triggers it (an unscoped
-`show configuration` renders the whole tree fine). Regression coverage:
-`pkg/config/show_config_dup_context_4562_test.go` (multi-key + single-key
-duplicate-context descent, single-context no-regression control).
+**Path-scoped `show`/`display set` sees all same-prefix siblings (#3980,
+#4562):** the terminal bare-keyword case gathers every sibling sharing that
+keyword rather than returning only the first. The intermediate-descent fix
+also ensures a selector that continues past a matched level sees the UNION of
+all matching siblings' children. `navigateWalk` is the shared implementation
+behind the display-width wrapper `navigatePathWidth` and the authz pricing
+wrapper `navigateRenderedMatches`; its intermediate branches handle multi-key
+pairs and single-key keywords. Display mode uses `unionChildren`, while authz
+mode carries the rendered path trails through the same union.
+
+The #4562 failure required a hand-authored HIERARCHICAL duplicate context —
+two identical 4-key `from-zone untrust to-zone trust { ... }` policy contexts,
+or two identical single-key `interfaces { ... }` blocks — and a path selector
+that continued deeper (`... from-zone untrust to-zone trust policy B`). The
+former first-match descent dropped statements from the second block in scoped
+`show` / `| display set` output, so a scoped display-set backup silently lost
+them on restore. Single-match behavior is unchanged: the lone node's children
+are used directly, so normal paths render byte-identically.
+
+The compiler still reads the full AST directly. The original #4562 symptom was
+a path-scoped display / scoped-backup gap, not a forwarding bypass; shared
+matcher logic additionally makes the authz rendered-descendant price follow
+the same selection. Flat-set `SetPath` merges same-key containers, so the
+display symptom requires the duplicate hierarchical shape plus a path-scoped
+command (unscoped `show configuration` renders the whole tree). Regression
+coverage: `pkg/config/show_config_dup_context_4562_test.go` (multi-key and
+single-key descent, plus a single-context control) and
+`pkg/config/rendered_paths_15995_test.go` (branch parity and authz union guard).
 
 **Empty security IDENTITIES are rejected at commit (#7525):** a zone name, a
 zone-pair's `from-zone`/`to-zone`, and a policy name are all NAMES, and an empty

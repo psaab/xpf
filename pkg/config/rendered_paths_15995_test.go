@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -306,6 +307,187 @@ func TestPricedEqualsRenderedPathSet15995(t *testing.T) {
 				t.Errorf("rendered paths left unpriced for %v: %v", tc.path, missing)
 			}
 		})
+	}
+}
+
+// TestNavigateWalkerParity17267 makes the display-width and authorization
+// rendered-path wrappers share a branch-complete contract. The expected
+// rendered paths are independent fixture truths; node-pointer comparison then
+// proves both wrappers selected exactly the same terminal nodes.
+func TestNavigateWalkerParity17267(t *testing.T) {
+	tests := []struct {
+		name       string
+		text       string
+		path       []string
+		wantWidth  int
+		wantPaths  [][]string
+	}{
+		{
+			name:      "empty-path",
+			text:      `system { host-name fw; }`,
+			path:      nil,
+			wantWidth: 0,
+		},
+		{
+			name:      "multi-key-leaf",
+			text:      `system { host-name fw; }`,
+			path:      []string{"system", "host-name", "fw"},
+			wantWidth: 2,
+			wantPaths: [][]string{{"system", "host-name", "fw"}},
+		},
+		{
+			name: "multi-key-prefix-terminal",
+			text: `security { policies { from-zone trust to-zone untrust {
+				policy p1 { then { permit; } }
+			} } }`,
+			path:      []string{"security", "policies", "from-zone", "trust"},
+			wantWidth: 2,
+			wantPaths: [][]string{{"security", "policies", "from-zone", "trust", "to-zone", "untrust"}},
+		},
+		{
+			name: "multi-key-pair-continuation",
+			text: `security { policies { from-zone trust to-zone untrust {
+				policy p1 { then { permit; } }
+			} } }`,
+			path:      []string{"security", "policies", "from-zone", "trust", "to-zone", "untrust"},
+			wantWidth: 4,
+			wantPaths: [][]string{{"security", "policies", "from-zone", "trust", "to-zone", "untrust"}},
+		},
+		{
+			name: "union-descent-multikey-4562",
+			text: `security { policies {
+				from-zone trust to-zone untrust { policy p1 { then { permit; } } }
+				from-zone trust to-zone untrust { policy p2 { then { deny; } } }
+			} }`,
+			path: []string{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy"},
+			wantPaths: [][]string{
+				{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy", "p1"},
+				{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy", "p2"},
+			},
+			wantWidth: 1,
+		},
+		{
+			name: "union-descent-single-key-4562",
+			text: `interfaces { ge-0-0-0 { mtu 1500; } }
+				interfaces { ge-0-0-0 { mtu 9000; } }`,
+			path: []string{"interfaces", "ge-0-0-0", "mtu"},
+			wantPaths: [][]string{
+				{"interfaces", "ge-0-0-0", "mtu", "1500"},
+				{"interfaces", "ge-0-0-0", "mtu", "9000"},
+			},
+			wantWidth: 1,
+		},
+		{
+			name: "terminal-bare-keyword-fanout",
+			text: `firewall {
+				filter f1 { term t1 { then accept; } }
+				filter f2 { term t1 { then accept; } }
+			}`,
+			path: []string{"firewall", "filter"},
+			wantPaths: [][]string{
+				{"firewall", "filter", "f1"},
+				{"firewall", "filter", "f2"},
+			},
+			wantWidth: 1,
+		},
+		{
+			name: "bracketed-later-member-terminal",
+			text: `security { zones { security-zone [ zga zgb ] { tcp-rst; } } }`,
+			path: []string{"security", "zones", "security-zone", "zgb"},
+			wantPaths: [][]string{
+				{"security", "zones", "security-zone", "zga", "zgb"},
+			},
+			wantWidth: 2,
+		},
+		{
+			name: "bracketed-later-member-descent",
+			text: `security { zones { security-zone [ zga zgb ] { tcp-rst; } } }`,
+			path: []string{"security", "zones", "security-zone", "zgb", "tcp-rst"},
+			wantPaths: [][]string{
+				{"security", "zones", "security-zone", "zga", "zgb", "tcp-rst"},
+			},
+			wantWidth: 1,
+		},
+		{
+			name: "wildcard-instance-descent",
+			text: `interfaces { ge-0/0/0 { unit 0 { family inet { address 192.0.2.1/24; } } } }`,
+			path: []string{"interfaces", "ge-0/0/0", "unit", "0", "family", "inet", "address", "192.0.2.1/24"},
+			wantPaths: [][]string{
+				{"interfaces", "ge-0/0/0", "unit", "0", "family", "inet", "address", "192.0.2.1/24"},
+			},
+			wantWidth: 2,
+		},
+		{
+			name:      "missing-first-path",
+			text:      `system { host-name fw; }`,
+			path:      []string{"missing"},
+			wantWidth: 0,
+		},
+		{
+			name:      "missing-descendant",
+			text:      `system { host-name fw; }`,
+			path:      []string{"system", "missing", "leaf"},
+			wantWidth: 0,
+		},
+		{
+			name: "deep-path-no-walker-depth-cap",
+			text: `a b { c d { e f { g h { i j { k l { m n; } } } } } }`,
+			path: []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n"},
+			wantPaths: [][]string{
+				{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n"},
+			},
+			wantWidth: 2,
+		},
+		{
+			name:      "deep-path-past-tree",
+			text:      `a b { c d { e f; } }`,
+			path:      []string{"a", "b", "c", "d", "e", "f", "g", "h"},
+			wantWidth: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tree, errs := NewParser(tc.text).Parse()
+			if len(errs) != 0 {
+				t.Fatalf("fixture parse: %v", errs)
+			}
+			display, width := navigatePathWidth(tree.Children, tc.path)
+			priced := navigateRenderedMatches(tree.Children, tc.path)
+			if width != tc.wantWidth {
+				t.Errorf("navigatePathWidth consumed %d tokens, want %d", width, tc.wantWidth)
+			}
+			if len(display) != len(priced) {
+				t.Fatalf("display matched %d nodes, pricing matched %d", len(display), len(priced))
+			}
+			var paths [][]string
+			for i, n := range display {
+				if n != priced[i].node {
+					t.Errorf("terminal match %d differs: display=%p pricing=%p", i, n, priced[i].node)
+				}
+			}
+			for _, match := range priced {
+				paths = append(paths, match.path)
+			}
+			if !reflect.DeepEqual(paths, tc.wantPaths) {
+				t.Errorf("pricing paths = %q, want %q", paths, tc.wantPaths)
+			}
+		})
+	}
+}
+
+// TestConfigShowAuthzUnionDescent17267 is the authz-side #4562 witness. A
+// selector omits the final pair of two duplicate context keys and names a
+// child held only by the second block. Pricing must traverse the union and
+// charge the full context path that the renderer actually reaches.
+func TestConfigShowAuthzUnionDescent17267(t *testing.T) {
+	cfg := cfg15995(t, "", `^security policies from-zone untrust to-zone trust$`)
+	tree := buildDupPolicyContext(t)
+	path := []string{"security", "policies", "from-zone", "untrust", "policy", "B"}
+	if out := tree.FormatPathRedacted(path); !strings.Contains(out, "policy B") {
+		t.Fatalf("premise failed: path selector did not render second duplicate's policy B:\n%s", out)
+	}
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", []*ConfigTree{tree}); err == nil {
+		t.Fatal("selector for policy B was ALLOWED though it renders denied duplicate context (#17267)")
 	}
 }
 

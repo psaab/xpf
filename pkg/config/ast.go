@@ -741,154 +741,13 @@ func navigatePath(nodes []*Node, path []string) []*Node {
 // dropped an ancestor `term` (#5717 codex-182 A3-b00-C001 fold). Returning the
 // true consumed width removes the inference.
 func navigatePathWidth(nodes []*Node, path []string) ([]*Node, int) {
-	current := nodes
-	i := 0
-	for i < len(path) {
-		keyword := path[i]
-		// Try multi-key match (keyword + argument pairs).
-		if i+1 < len(path) {
-			var matched []*Node
-			for _, n := range current {
-				if len(n.Keys) >= 2 && n.Keys[0] == keyword && n.Keys[1] == path[i+1] {
-					matched = append(matched, n)
-				}
-			}
-			if len(matched) == 0 {
-				// #9799: a LATER member of a bracketed group resolves to the
-				// group node, as its first member always did. See
-				// bracketedLaterMember9799 for why provenance, not key count.
-				var groups []*Node
-				for _, n := range current {
-					if bracketedLaterMember9799(n, keyword, path[i+1]) {
-						groups = append(groups, n)
-					}
-				}
-				if len(groups) > 0 {
-					i += 2
-					if i >= len(path) {
-						return groups, 2
-					}
-					current = unionChildren(groups)
-					continue
-				}
-			}
-			if len(matched) > 0 {
-				consumed := 2
-				// Continue consuming additional key-value pairs from the path
-				// that match the node's remaining keys. E.g., path
-				// ["from-zone","untrust","to-zone","trust"] consumes all 4 keys
-				// of node Keys=["from-zone","untrust","to-zone","trust"].
-				for consumed < len(matched[0].Keys) && i+consumed+1 < len(path) {
-					nextKey := path[i+consumed]
-					nextVal := path[i+consumed+1]
-					var filtered []*Node
-					for _, n := range matched {
-						if len(n.Keys) > consumed+1 && n.Keys[consumed] == nextKey && n.Keys[consumed+1] == nextVal {
-							filtered = append(filtered, n)
-						}
-					}
-					if len(filtered) == 0 {
-						break
-					}
-					matched = filtered
-					consumed += 2
-				}
-				i += consumed
-				if i >= len(path) {
-					return matched, consumed
-				}
-				// Intermediate descent: continue against the UNION of
-				// every same-prefix sibling's children, not just
-				// matched[0]'s. When more than one sibling shares the
-				// full multi-key prefix AND the display path continues
-				// deeper (e.g. two identical
-				// `from-zone untrust to-zone trust { ... }` policy
-				// contexts, then `... policy B`), descending into only
-				// the first block's children dropped statements held
-				// under the second duplicate-context sibling from a
-				// path-scoped `show` / `| display set` (#4562). This is
-				// the intermediate-descent twin of the #3980 terminal
-				// read-all-siblings fix (same #3842 / #2419 class).
-				// Single-match is unchanged: one sibling → its children.
-				current = unionChildren(matched)
-				continue
-			}
-		}
-		// Single-key match.
-		if i+1 >= len(path) {
-			// Terminal path element on a bare keyword: return EVERY
-			// sibling sharing this leading keyword (#3980), not just the
-			// first. A hierarchy level may hold multiple DISTINCT
-			// statements with the same leading keyword — e.g.
-			// `ntp server 1.1.1.1` / `ntp server 2.2.2.2`, several
-			// `from-zone` policy contexts, repeated `archive-sites`.
-			// Returning only the first hid the rest from a path-scoped
-			// `show configuration <path>` and, worse, from its
-			// `| display set`, so a scoped display-set backup silently
-			// dropped the hidden statements on restore. FindChildren-not-
-			// FindChild, the display-side sibling of the #3842 / #2419
-			// read-all-siblings class.
-			var all []*Node
-			for _, sib := range current {
-				if len(sib.Keys) > 0 && sib.Keys[0] == keyword {
-					all = append(all, sib)
-				}
-			}
-			if len(all) == 0 {
-				return nil, 0
-			}
-			return all, 1
-		}
-		// Intermediate single-key descent: continue against the UNION of
-		// every same-keyword sibling's children, not just the first, so a
-		// deeper path resolves across all duplicate same-keyword blocks
-		// (#4562) — the descent-side twin of the terminal #3980 read-all-
-		// siblings fix. Single-match is unchanged: one sibling → its
-		// children.
-		var sibs []*Node
-		for _, n := range current {
-			if len(n.Keys) > 0 && n.Keys[0] == keyword {
-				sibs = append(sibs, n)
-			}
-		}
-		if len(sibs) == 0 {
-			return nil, 0
-		}
-		i++
-		current = unionChildren(sibs)
-	}
-	return nil, 0
+	matches, _, width := navigateWalk(nodes, path, false)
+	return matches, width
 }
 
-// navigateRenderedMatches resolves path exactly as navigatePathWidth
-// does, but also returns, per match, the complete rendered path of the
-// matched node AND of every ancestor node on its descent trail:
-// ancestors holds each intermediate node's complete path in descent
-// order (root first), and path is the terminal node's complete path
-// (ancestors' last element repeated as path's prefix chain — path ==
-// ancestors[last] extended, i.e. path is the terminal complete path).
-// navigatePathWidth reports only the terminal consumed width, which
-// loses keys an INTERMEDIATE multi-key node carries past the pairs
-// the request spelled (`from-zone trust` descending into the node
-// keyed `from-zone trust to-zone untrust`): authorization that
-// rebuilds the path from the request + terminal Keys alone prices a
-// truncated string the renderer never prints (#15995 fold 3).
-//
-// The priced-path invariant (fold 4): the set of complete paths the
-// authorization walk prices must EQUAL the set of complete paths the
-// renderer can print for this selector — every node on the trail
-// from the tree root to the terminal match, plus every descendant of
-// the terminal match. ancestors+path give exactly the trail half of
-// that set (the descendant half is the recursive walk below the
-// terminal node). Deriving prices from this same trail is what keeps
-// the two sets equal by construction rather than by a parallel
-// matcher re-deriving them.
-//
-// The descent below mirrors navigatePathWidth branch for branch
-// (multi-key pairs, bracketed later members, terminal bare-keyword
-// fan-out, unioned intermediate descent) while tracking each
-// sibling's rendered prefix, so a deeper selector resolves against
-// exactly the nodes (and the complete paths) the renderer navigates.
+// renderedMatch pairs a terminal node with its complete rendered path and
+// complete paths of its ancestors in descent order. Authorization prices this
+// actual trail, including keys omitted by a prefix selector (#15995).
 type renderedMatch struct {
 	node      *Node
 	path      []string
@@ -907,131 +766,174 @@ func copyTrail(t [][]string) [][]string {
 	return out
 }
 
+type navigateTrail struct {
+	prefix    []string
+	ancestors [][]string
+}
+
+// navigateRenderedMatches resolves the same selection as navigatePathWidth,
+// returning rendered paths and ancestry for each terminal match.
 func navigateRenderedMatches(nodes []*Node, path []string) []renderedMatch {
-	type frame struct {
-		node   *Node
-		prefix []string
-		trail  [][]string
+	_, matches, _ := navigateWalk(nodes, path, true)
+	return matches
+}
+
+// navigateWalk is the one path-selection implementation shared by display
+// (which needs the matched nodes and true consumed width) and authorization
+// (which additionally needs each match's rendered ancestry). With capture
+// disabled, it retains the display walk's node-slice representation and does
+// not allocate rendered-path state.
+func navigateWalk(nodes []*Node, path []string, captureRendered bool) ([]*Node, []renderedMatch, int) {
+	current := nodes
+	var currentTrail []navigateTrail
+	if captureRendered {
+		currentTrail = make([]navigateTrail, len(current))
 	}
-	current := make([]frame, 0, len(nodes))
-	for _, n := range nodes {
-		current = append(current, frame{node: n})
-	}
-	i := 0
-	for i < len(path) {
+
+	for i := 0; i < len(path); {
 		keyword := path[i]
 		if i+1 < len(path) {
-			var matched []frame
-			for _, f := range current {
-				n := f.node
+			var matched []*Node
+			var matchedTrail []navigateTrail
+			for idx, n := range current {
 				if len(n.Keys) >= 2 && n.Keys[0] == keyword && n.Keys[1] == path[i+1] {
-					matched = append(matched, f)
+					matched = append(matched, n)
+					if captureRendered {
+						matchedTrail = append(matchedTrail, currentTrail[idx])
+					}
 				}
 			}
 			if len(matched) == 0 {
-				var groups []frame
-				for _, f := range current {
-					if bracketedLaterMember9799(f.node, keyword, path[i+1]) {
-						groups = append(groups, f)
+				var groups []*Node
+				var groupTrail []navigateTrail
+				for idx, n := range current {
+					if bracketedLaterMember9799(n, keyword, path[i+1]) {
+						groups = append(groups, n)
+						if captureRendered {
+							groupTrail = append(groupTrail, currentTrail[idx])
+						}
 					}
 				}
 				if len(groups) > 0 {
 					i += 2
 					if i >= len(path) {
-						out := make([]renderedMatch, 0, len(groups))
-						for _, f := range groups {
-							cp := append(append([]string(nil), f.prefix...), f.node.Keys...)
-							out = append(out, renderedMatch{node: f.node, path: cp, ancestors: append(copyTrail(f.trail), cp)})
-						}
-						return out
+						return finishNavigateWalk(groups, groupTrail, 2, captureRendered)
 					}
-					var next []frame
-					for _, f := range groups {
-						p := append(append([]string(nil), f.prefix...), f.node.Keys...)
-						tr := append(copyTrail(f.trail), p)
-						for _, ch := range f.node.Children {
-							next = append(next, frame{node: ch, prefix: p, trail: tr})
-						}
-					}
-					current = next
+					current, currentTrail = descendNavigateWalk(groups, groupTrail, captureRendered)
 					continue
 				}
 			}
 			if len(matched) > 0 {
 				consumed := 2
-				for consumed < len(matched[0].node.Keys) && i+consumed+1 < len(path) {
+				for consumed < len(matched[0].Keys) && i+consumed+1 < len(path) {
 					nextKey := path[i+consumed]
 					nextVal := path[i+consumed+1]
-					var filtered []frame
-					for _, f := range matched {
-						if len(f.node.Keys) > consumed+1 && f.node.Keys[consumed] == nextKey && f.node.Keys[consumed+1] == nextVal {
-							filtered = append(filtered, f)
+					var filtered []*Node
+					var filteredTrail []navigateTrail
+					for idx, n := range matched {
+						if len(n.Keys) > consumed+1 && n.Keys[consumed] == nextKey && n.Keys[consumed+1] == nextVal {
+							filtered = append(filtered, n)
+							if captureRendered {
+								filteredTrail = append(filteredTrail, matchedTrail[idx])
+							}
 						}
 					}
 					if len(filtered) == 0 {
 						break
 					}
 					matched = filtered
+					if captureRendered {
+						matchedTrail = filteredTrail
+					}
 					consumed += 2
 				}
 				i += consumed
 				if i >= len(path) {
-					out := make([]renderedMatch, 0, len(matched))
-					for _, f := range matched {
-						cp := append(append([]string(nil), f.prefix...), f.node.Keys...)
-						out = append(out, renderedMatch{node: f.node, path: cp, ancestors: append(copyTrail(f.trail), cp)})
-					}
-					return out
+					return finishNavigateWalk(matched, matchedTrail, consumed, captureRendered)
 				}
-				var next []frame
-				for _, f := range matched {
-					p := append(append([]string(nil), f.prefix...), f.node.Keys...)
-					tr := append(copyTrail(f.trail), p)
-					for _, ch := range f.node.Children {
-						next = append(next, frame{node: ch, prefix: p, trail: tr})
-					}
-				}
-				current = next
+				// #4562: continue through every same-prefix sibling's
+				// children, not only the first match's children.
+				current, currentTrail = descendNavigateWalk(matched, matchedTrail, captureRendered)
 				continue
 			}
 		}
+
 		// Single-key match.
 		if i+1 >= len(path) {
-			var out []renderedMatch
-			for _, f := range current {
-				if len(f.node.Keys) > 0 && f.node.Keys[0] == keyword {
-					cp := append(append([]string(nil), f.prefix...), f.node.Keys...)
-					out = append(out, renderedMatch{node: f.node, path: cp, ancestors: append(copyTrail(f.trail), cp)})
+			var all []*Node
+			var allTrail []navigateTrail
+			for idx, sib := range current {
+				if len(sib.Keys) > 0 && sib.Keys[0] == keyword {
+					all = append(all, sib)
+					if captureRendered {
+						allTrail = append(allTrail, currentTrail[idx])
+					}
 				}
 			}
-			return out
+			if len(all) == 0 {
+				return nil, nil, 0
+			}
+			return finishNavigateWalk(all, allTrail, 1, captureRendered)
 		}
-		var next []frame
-		for _, f := range current {
-			if len(f.node.Keys) > 0 && f.node.Keys[0] == keyword {
-				p := append(append([]string(nil), f.prefix...), f.node.Keys...)
-				tr := append(copyTrail(f.trail), p)
-				for _, ch := range f.node.Children {
-					next = append(next, frame{node: ch, prefix: p, trail: tr})
+
+		var siblings []*Node
+		var siblingTrail []navigateTrail
+		for idx, n := range current {
+			if len(n.Keys) > 0 && n.Keys[0] == keyword {
+				siblings = append(siblings, n)
+				if captureRendered {
+					siblingTrail = append(siblingTrail, currentTrail[idx])
 				}
 			}
 		}
-		if len(next) == 0 {
-			return nil
+		if len(siblings) == 0 {
+			return nil, nil, 0
 		}
 		i++
-		current = next
+		current, currentTrail = descendNavigateWalk(siblings, siblingTrail, captureRendered)
 	}
-	return nil
+	return nil, nil, 0
+}
+
+func descendNavigateWalk(parents []*Node, trails []navigateTrail, captureRendered bool) ([]*Node, []navigateTrail) {
+	if !captureRendered {
+		return unionChildren(parents), nil
+	}
+	var children []*Node
+	var childTrails []navigateTrail
+	for idx, parent := range parents {
+		prefix := append(append([]string(nil), trails[idx].prefix...), parent.Keys...)
+		ancestors := append(copyTrail(trails[idx].ancestors), prefix)
+		trail := navigateTrail{prefix: prefix, ancestors: ancestors}
+		for _, child := range parent.Children {
+			children = append(children, child)
+			childTrails = append(childTrails, trail)
+		}
+	}
+	return children, childTrails
+}
+
+func finishNavigateWalk(nodes []*Node, trails []navigateTrail, consumed int, captureRendered bool) ([]*Node, []renderedMatch, int) {
+	if !captureRendered {
+		return nodes, nil, consumed
+	}
+	var matches []renderedMatch
+	if len(nodes) > 0 {
+		matches = make([]renderedMatch, 0, len(nodes))
+	}
+	for idx, node := range nodes {
+		path := append(append([]string(nil), trails[idx].prefix...), node.Keys...)
+		ancestors := append(copyTrail(trails[idx].ancestors), path)
+		matches = append(matches, renderedMatch{node: node, path: path, ancestors: ancestors})
+	}
+	return nil, matches, consumed
 }
 
 // unionChildren concatenates the children of every node in sibling order.
-// It backs navigatePath's intermediate-descent read-all-siblings behavior
-// (#4562): when a display path descends past a level that holds multiple
-// identical same-prefix (or same-keyword) siblings, the deeper lookup must
-// resolve against the union of all those siblings' children, not just the
-// first's. For a single node it returns that node's children unchanged (a
-// shallow copy), so the common single-match path renders identically.
+// navigateWalk uses it for display-mode intermediate descent (#4562): when a
+// path passes a level with duplicate same-prefix (or same-keyword) siblings,
+// the deeper lookup must see every sibling's children. A single node returns
+// its existing Children slice without copying.
 func unionChildren(nodes []*Node) []*Node {
 	if len(nodes) == 1 {
 		return nodes[0].Children

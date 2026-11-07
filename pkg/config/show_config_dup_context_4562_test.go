@@ -5,31 +5,25 @@ import (
 	"testing"
 )
 
-// #4562: navigatePath's INTERMEDIATE descent (past a level that holds
-// multiple identical same-prefix / same-keyword siblings) previously walked
-// only the FIRST sibling's subtree — `current = matched[0].Children` in the
-// multi-key branch, `current = n.Children` for the first matching node in
-// the single-key branch. When a hand-authored HIERARCHICAL config carries a
-// duplicate context block (two identical 4-key
-// `from-zone untrust to-zone trust { ... }` nodes, or two identical
-// single-key `interfaces { ... }` nodes) AND the display path continues
-// deeper, the second duplicate-context block's statements were dropped from
-// a path-scoped `show configuration <path>` and, worse, from its
-// `| display set` — so a scoped display-set backup silently lost them on
-// restore. This is the intermediate-descent twin of the #3980 terminal
-// read-all-siblings fix (same #3842 / #2419 class). navigatePath is
-// DISPLAY-ONLY (all callers are in ast_format.go; the compiler reads the
-// full AST directly), so the hidden statement was still ENFORCED — the
-// impact is a display / scoped-backup gap, not a forwarding bypass.
+// #4562: the shared path walker previously descended into only the FIRST
+// same-prefix / same-keyword sibling's children. When a hand-authored
+// HIERARCHICAL config carries duplicate context blocks and a path selector
+// continues deeper, the second block's statements disappeared from a
+// path-scoped `show configuration <path>` and its `| display set` — a scoped
+// display-set backup could silently lose them on restore. This is the
+// intermediate-descent twin of the #3980 terminal read-all-siblings fix
+// (same #3842 / #2419 class). `navigatePathWidth` drives display, while
+// `navigateRenderedMatches` drives authz pricing; both now share
+// `navigateWalk`. The compiler still reads the full AST directly, so the
+// original symptom was a display / scoped-backup gap, not a forwarding bypass.
 //
 // These are fail-on-revert guards: reverting the intermediate descent to
 // `matched[0].Children` / first-`n.Children` drops the second block and
 // fails the both-blocks assertions below.
 
 // buildDupPolicyContext builds two identical 4-key
-// `from-zone untrust to-zone trust` sibling nodes (the load-override /
-// hierarchical shape) holding DISTINCT policies A and B — exercising the
-// MULTI-KEY intermediate descent branch (ast.go ~:211).
+// `from-zone untrust to-zone trust` sibling nodes holding distinct policies A
+// and B, exercising the shared navigateWalk multi-key intermediate descent.
 func buildDupPolicyContext(t *testing.T) *ConfigTree {
 	t.Helper()
 	src := `security {
@@ -90,9 +84,9 @@ func TestShowConfigDupContextMultiKeyDescent(t *testing.T) {
 		t.Errorf("FormatPath([...trust policy]) rendered %d policies, want 2; got:\n%s", n, hier)
 	}
 
-	// Naming the SECOND block's policy directly (`... policy B`) must
-	// resolve to it. RED on revert: navigatePath descends into block A's
-	// children, never finds B → empty output.
+	// Naming the SECOND block's policy directly (`... policy B`) must resolve
+	// to it. RED on revert: navigateWalk descends into block A's children,
+	// never finds B → empty output.
 	setB := tree.FormatPathSet(append(append([]string{}, ctx...), "policy", "B"))
 	if !strings.Contains(setB, "policy B") || !strings.Contains(setB, "then deny") {
 		t.Errorf("FormatPathSet([...trust policy B]) did not resolve policy B; got:\n%s", setB)
@@ -111,12 +105,12 @@ func TestShowConfigDupContextMultiKeyDescent(t *testing.T) {
 	}
 }
 
-// TestShowConfigDupContextSingleKeyDescent covers the single-key
-// intermediate descent branch (ast.go ~:242): two identical single-key
+// TestShowConfigDupContextSingleKeyDescent covers the shared navigateWalk
+// single-key intermediate-descent branch: two identical single-key
 // `interfaces { ge-0-0-0 { ... } }` blocks holding distinct leaves. The
 // display path descends through the duplicated single-key `interfaces`
-// level (and the duplicated single-key `ge-0-0-0` level) before terminating
-// — so both branches are pure single-key.
+// and `ge-0-0-0` levels before terminating — so both branch descents are
+// exercised.
 func TestShowConfigDupContextSingleKeyDescent(t *testing.T) {
 	src := `interfaces {
     ge-0-0-0 {
