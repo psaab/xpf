@@ -168,7 +168,7 @@ sync.
         `forwarding_build/interfaces.rs` was first-row-wins, so the base row's
         link-local FALLBACK shadowed the unit's address and the firewall's own
         Time Exceeded answered as 169.254.2.1 (traceroute/mtr hop 1).
-        lets a non-link-local pick replace a link-local incumbent; between
+        `merge_undesignated_primary` now lets a non-link-local pick replace a link-local incumbent; between
         two non-link-local (or two link-local) undesignated picks the first
         row still wins, and a designated primary (#16513) still beats both.
         `primary_v4/v6` is not only the generated-error source: on an
