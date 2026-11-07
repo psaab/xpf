@@ -246,11 +246,15 @@ func TestFab1MismatchStaleResolveDoesNotWarnAgainstSuccessor18613(t *testing.T) 
 	if strings.Contains(logs.String(), "cluster: fab1 local address differs") {
 		t.Fatalf("stale resolve warned against the successor epoch: %s", logs.String())
 	}
+	// No allowance spent on the SUCCESSOR epoch either: publish reset
+	// its latch to 0, and the stale path must leave it there (gen1 is
+	// superseded; a direct gen compare would be racy to assert).
 	d.fabricMu.RLock()
 	warned := d.fab1LocalWarnedGen
+	latchedEpoch := d.fab1LocalGen
 	d.fabricMu.RUnlock()
-	if warned == gen1+1 || warned == gen1 {
-		t.Fatalf("stale resolve spent a warning allowance (warnedGen=%d)", warned)
+	if warned != 0 {
+		t.Fatalf("stale resolve spent the successor epoch's allowance (warnedGen=%d, epoch=%d)", warned, latchedEpoch)
 	}
 	_ = gen1
 }
