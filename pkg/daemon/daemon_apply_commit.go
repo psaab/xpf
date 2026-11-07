@@ -100,6 +100,12 @@ func (d *Daemon) bootstrapFromFile() error {
 // the REST/gRPC caller can retry the whole commit.
 const maxCommitPreflightRetries = 3
 
+// errCommitPreflightGenerationConflict marks a stale sample from a preflight
+// that can be re-examined on a fresh candidate. Other preflight conflicts (for
+// example, a DNS refresh fence) are fail-fast because retrying cannot refresh
+// the resource they depend on.
+var errCommitPreflightGenerationConflict = errors.New("commit preflight sampled a stale candidate generation")
+
 // commitWithGenBinding runs the #5848 generation-bound commit transaction so
 // the candidate examined by the external #1956 device-map hardware pre-flight is
 // EXACTLY the candidate the store promotes — never a different one substituted
@@ -111,10 +117,11 @@ const maxCommitPreflightRetries = 3
 // compiled snapshot OUTSIDE the store lock (s.mu is NOT held across netlink /
 // hardware probing). The preflight receives the same generation token so any
 // companion tree sample can prove it examined this candidate. Then commit bound
-// to the snapshot generation. A candidate edit detected by either the preflight
-// or generation-checked commit returns ErrCandidateGenerationConflict and retries
-// the entire preflight/commit against the fresh generation (bounded). commitFn
-// performs the generation-checked promotion (CommitWithDescriptionGen /
+// to the snapshot generation. Only a preflight that marks its stale generation
+// sample with errCommitPreflightGenerationConflict is retried; unrelated
+// preflight conflicts (for example, the DNS refresh fence) fail immediately.
+// A generation-checked commit conflict retries the entire transaction.
+// commitFn performs the generation-checked promotion (CommitWithDescriptionGen /
 // CommitConfirmedGen).
 //
 // A snapshot that fails to compile (not in configuration mode / commit-check
@@ -159,7 +166,7 @@ func (d *Daemon) commitWithGenBinding(
 			// Run the hardware pre-flight on the exact compiled snapshot,
 			// OUTSIDE the store lock (CompileCandidateGen already released it).
 			if perr := preflight(gen, cand); perr != nil {
-				if errors.Is(perr, configstore.ErrCandidateGenerationConflict) && attempt < maxCommitPreflightRetries {
+				if errors.Is(perr, errCommitPreflightGenerationConflict) && attempt < maxCommitPreflightRetries {
 					slog.Warn("commit: candidate configuration changed during pre-flight; re-validating on the new generation",
 						"attempt", attempt+1)
 					continue

@@ -101,9 +101,9 @@ func TestCommitWithGenBindingSurfacesPersistentConflict(t *testing.T) {
 	}
 }
 
-// A generation conflict returned by a preflight is retried against a fresh
-// compile/sample, not surfaced as a final commit rejection.
-func TestCommitWithGenBindingRetriesPreflightGenerationConflict(t *testing.T) {
+// A stale sample-generation conflict explicitly marked retryable by a preflight
+// is retried against a fresh compile/sample, not surfaced as a final rejection.
+func TestCommitWithGenBindingRetriesPreflightGenerationConflict18630(t *testing.T) {
 	s := newCommitReadyStore(t, "system host-name base", "system host-name staged1")
 	d := &Daemon{store: s}
 
@@ -118,7 +118,7 @@ func TestCommitWithGenBindingRetriesPreflightGenerationConflict(t *testing.T) {
 				if err := s.SetFromInput("system host-name staged2"); err != nil {
 					t.Fatalf("concurrent edit: %v", err)
 				}
-				return fmt.Errorf("peer preflight sample became stale: %w", configstore.ErrCandidateGenerationConflict)
+				return fmt.Errorf("peer preflight sample became stale: %w", errCommitPreflightGenerationConflict)
 			}
 			return nil
 		},
@@ -132,6 +132,31 @@ func TestCommitWithGenBindingRetriesPreflightGenerationConflict(t *testing.T) {
 	}
 	if compiled == nil || compiled.System.HostName != "staged2" {
 		t.Fatalf("promoted config = %+v, want retry candidate staged2", compiled)
+	}
+}
+
+// A different preflight conflict (the DNS-refresh fence, for example) cannot be
+// repaired by repeating the callback, so it must remain fail-fast.
+func TestCommitWithGenBindingDoesNotRetryUnrelatedGenerationConflict18630(t *testing.T) {
+	s := newCommitReadyStore(t, "system host-name base", "system host-name staged1")
+	d := &Daemon{store: s}
+	preflights := 0
+	_, _, err := d.commitWithGenBinding(
+		0,
+		func(_ uint64, _ *config.Config) error {
+			preflights++
+			return fmt.Errorf("DNS refresh is stale: %w", configstore.ErrCandidateGenerationConflict)
+		},
+		func(uint64) (*config.Config, error) {
+			t.Fatal("commit ran after a non-retryable preflight conflict")
+			return nil, nil
+		},
+	)
+	if !errors.Is(err, configstore.ErrCandidateGenerationConflict) {
+		t.Fatalf("commit error = %v, want candidate-generation conflict", err)
+	}
+	if preflights != 1 {
+		t.Fatalf("preflight ran %d times, want one fail-fast attempt", preflights)
 	}
 }
 

@@ -589,7 +589,7 @@ func clusterPeerControlAddressCommitPreflight(store *configstore.Store, running 
 	tree, generation, _ := store.CandidateGateSample()
 	if generation != expectedGen {
 		return fmt.Errorf("candidate changed while sampling peer control-address preflight: %w",
-			configstore.ErrCandidateGenerationConflict)
+			errCommitPreflightGenerationConflict)
 	}
 	if tree == nil {
 		return nil
